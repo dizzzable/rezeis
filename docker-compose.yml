@@ -1,0 +1,259 @@
+version: '3.8'
+
+# ============================================================
+# Rezeis Panel - Production Docker Compose Configuration
+# ============================================================
+# Resource-optimized for 664MB+ project size
+# All services with health checks and resource limits
+# ============================================================
+
+services:
+  # ============================================================
+  # PostgreSQL Database
+  # ============================================================
+  postgres:
+    image: postgres:17-alpine
+    container_name: rezeis-panel-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DATABASE_USER:-rezeis}
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:-rezeis_dev}
+      POSTGRES_DB: ${DATABASE_NAME:-rezeis_panel}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Mount init scripts if needed
+      - ./backend/src/database/migrations:/docker-entrypoint-initdb.d:ro
+    networks:
+      - remnawave-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DATABASE_USER:-rezeis} -d ${DATABASE_NAME:-rezeis_panel}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+    # Performance tuning for PostgreSQL
+    command: >
+      postgres
+      -c shared_buffers=128MB
+      -c effective_cache_size=384MB
+      -c maintenance_work_mem=32MB
+      -c max_connections=100
+
+  # ============================================================
+  # Valkey Cache (Redis-compatible)
+  # ============================================================
+  valkey:
+    image: valkey/valkey:8-alpine
+    container_name: rezeis-valkey
+    restart: unless-stopped
+    command: >
+      valkey-server
+      --appendonly yes
+      --maxmemory 128mb
+      --maxmemory-policy allkeys-lru
+    volumes:
+      - valkey_data:/data
+    networks:
+      - remnawave-network
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 128M
+        reservations:
+          cpus: '0.25'
+          memory: 64M
+
+  # ============================================================
+  # Backend API Server
+  # ============================================================
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+      target: production
+    container_name: rezeis-backend
+    restart: unless-stopped
+    environment:
+      # Application
+      NODE_ENV: ${NODE_ENV:-production}
+      APP_DOMAIN: ${APP_DOMAIN:-localhost}
+      
+      # Ports
+      APP_BACKEND_PORT: ${APP_BACKEND_PORT:-4000}
+      APP_WEBSOCKET_PORT: ${APP_WEBSOCKET_PORT:-4003}
+      
+      # Database
+      DATABASE_HOST: postgres
+      DATABASE_PORT: 5432
+      DATABASE_NAME: ${DATABASE_NAME:-rezeis_panel}
+      DATABASE_USER: ${DATABASE_USER:-rezeis}
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD:-rezeis_dev}
+      DATABASE_URL: postgresql://${DATABASE_USER:-rezeis}:${DATABASE_PASSWORD:-rezeis_dev}@postgres:5432/${DATABASE_NAME:-rezeis_panel}
+      
+      # Valkey (Redis-compatible)
+      VALKEY_HOST: valkey
+      VALKEY_PORT: 6379
+      VALKEY_DB: ${VALKEY_DB:-0}
+      VALKEY_PASSWORD: ${VALKEY_PASSWORD:-}
+      VALKEY_URL: valkey://valkey:6379/${VALKEY_DB:-0}
+      VALKEY_MAX_CONNECTIONS: ${VALKEY_MAX_CONNECTIONS:-10}
+      # Redis environment variables (backward compatibility)
+      REDIS_HOST: valkey
+      REDIS_PORT: 6379
+      REDIS_NAME: ${VALKEY_DB:-0}
+      REDIS_PASSWORD: ${VALKEY_PASSWORD:-}
+      REDIS_URL: redis://valkey:6379/${VALKEY_DB:-0}
+      
+      # JWT
+      JWT_SECRET: ${JWT_SECRET:-change-this-to-a-secure-secret}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-7d}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-change-this-to-a-secure-refresh-secret}
+      JWT_REFRESH_EXPIRES_IN: ${JWT_REFRESH_EXPIRES_IN:-30d}
+      
+      # Remnawave VPN Panel Integration
+      REMNAWAVE_HOST: ${REMNAWAVE_HOST:-remnawave}
+      REMNAWAVE_PORT: ${REMNAWAVE_PORT:-3000}
+      REMNAWAVE_TOKEN: ${REMNAWAVE_TOKEN}
+      REMNAWAVE_WEBHOOK_SECRET: ${REMNAWAVE_WEBHOOK_SECRET}
+      REMNAWAVE_CADDY_TOKEN: ${REMNAWAVE_CADDY_TOKEN:-}
+      REMNAWAVE_COOKIE: ${REMNAWAVE_COOKIE:-}
+      REMNAWAVE_SYNC_INTERVAL_MINUTES: ${REMNAWAVE_SYNC_INTERVAL_MINUTES:-5}
+      REMNAWAVE_SYNC_ENABLED: ${REMNAWAVE_SYNC_ENABLED:-true}
+      
+      # Telegram
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_WEBHOOK_SECRET: ${TELEGRAM_WEBHOOK_SECRET:-}
+      TELEGRAM_MINI_APP_URL: ${TELEGRAM_MINI_APP_URL:-}
+      
+      # Super Admin
+      SUPER_ADMIN_TELEGRAM_ID: ${SUPER_ADMIN_TELEGRAM_ID}
+      
+      # Rate Limiting
+      RATE_LIMIT_MAX: ${RATE_LIMIT_MAX:-1000}
+      RATE_LIMIT_WINDOW_MS: ${RATE_LIMIT_WINDOW_MS:-60000}
+      CORS_ORIGINS: ${CORS_ORIGINS:-https://localhost}
+      
+      # Logging
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+      
+      # Feature Flags
+      FEATURE_PAYMENTS_ENABLED: ${FEATURE_PAYMENTS_ENABLED:-true}
+      FEATURE_REFERRAL_ENABLED: ${FEATURE_REFERRAL_ENABLED:-true}
+      FEATURE_PARTNER_ENABLED: ${FEATURE_PARTNER_ENABLED:-true}
+      FEATURE_WEBSOCKET_ENABLED: ${FEATURE_WEBSOCKET_ENABLED:-true}
+    expose:
+      - "4000"
+      - "4003"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+    networks:
+      - remnawave-network
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+
+  # ============================================================
+  # Frontend Web App
+  # ============================================================
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+      target: production
+    container_name: rezeis-frontend
+    restart: unless-stopped
+    environment:
+      VITE_API_URL: /api
+      VITE_WS_URL: wss://${APP_DOMAIN:-localhost}/ws
+    expose:
+      - "4001"
+    depends_on:
+      - backend
+    networks:
+      - remnawave-network
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 128M
+        reservations:
+          cpus: '0.25'
+          memory: 64M
+
+  # ============================================================
+  # Telegram Mini App
+  # ============================================================
+  miniapp:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+      target: production
+      args:
+        - VITE_APP_MODE=miniapp
+    container_name: rezeis-miniapp
+    restart: unless-stopped
+    environment:
+      VITE_API_URL: /api
+      VITE_WS_URL: wss://${APP_DOMAIN:-localhost}/ws
+      VITE_MINI_APP_MODE: "true"
+    expose:
+      - "4002"
+    depends_on:
+      - backend
+    networks:
+      - remnawave-network
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 128M
+        reservations:
+          cpus: '0.25'
+          memory: 64M
+
+# ============================================================
+# Volumes
+# ============================================================
+volumes:
+  postgres_data:
+    driver: local
+  valkey_data:
+    driver: local
+
+# ============================================================
+# Networks
+# ============================================================
+networks:
+  # External network to connect with Remnawave panel
+  remnawave-network:
+    external: false
+    name: remnawave-network

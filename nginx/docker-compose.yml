@@ -1,0 +1,30 @@
+# ============================================================
+# Rezeis Panel - Nginx Reverse Proxy with ACME.sh SSL
+# ============================================================
+# Single entry point on port 443 with SSL certificates
+# managed by acme.sh (Let's Encrypt)
+#
+# IMPORTANT: Only port 443 is exposed externally!
+# Port 80 is NOT exposed - SSL is mandatory
+# ============================================================
+
+services:
+  rezeis-nginx:
+    image: nginx:1.28-alpine
+    container_name: rezeis-nginx
+    hostname: rezeis-nginx
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      # SSL certificates from acme.sh (outside container)
+      - /root/.acme.sh/your-domain.com_ecc:/etc/nginx/ssl:ro
+    restart: always
+    ports:
+      # ONLY port 443 exposed externally (SSL mandatory)
+      - '0.0.0.0:443:443'
+    networks:
+      - remnawave-network
+
+networks:
+  remnawave-network:
+    name: remnawave-network
+    external: true

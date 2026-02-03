@@ -1,0 +1,26 @@
+[Unit]
+Description=Rezeis Panel Backend API
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+
+# Working directory
+WorkingDirectory=/opt/rezeis
+
+# Docker compose command
+ExecStart=/usr/bin/docker-compose -f docker-compose.yml up -d
+ExecStop=/usr/bin/docker-compose -f docker-compose.yml down
+ExecReload=/usr/bin/docker-compose -f docker-compose.yml up -d --force-recreate
+
+# Restart policy
+Restart=on-failure
+RestartSec=10
+
+# Environment
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target

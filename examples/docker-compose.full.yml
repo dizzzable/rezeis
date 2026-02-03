@@ -1,0 +1,139 @@
+# Rezeis Panel - Full Docker Compose Configuration
+# Production-ready setup with monitoring and logging
+
+version: '3.8'
+
+services:
+  # ============================================================
+  # PostgreSQL Database
+  # ============================================================
+  postgres:
+    image: postgres:17-alpine
+    container_name: rezeis-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DATABASE_USER:-rezeis}
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:-rezeis_dev}
+      POSTGRES_DB: ${DATABASE_NAME:-rezeis_panel}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - rezeis-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DATABASE_USER:-rezeis}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+
+  # ============================================================
+  # Valkey Cache
+  # ============================================================
+  valkey:
+    image: valkey/valkey:8-alpine
+    container_name: rezeis-valkey
+    restart: unless-stopped
+    command: valkey-server --appendonly yes --maxmemory 128mb
+    volumes:
+      - valkey_data:/data
+    networks:
+      - rezeis-network
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ============================================================
+  # Backend API
+  # ============================================================
+  backend:
+    build:
+      context: ..
+      dockerfile: Dockerfile.backend
+      target: production
+    container_name: rezeis-backend
+    restart: unless-stopped
+    ports:
+      - "4000:4000"
+    environment:
+      NODE_ENV: production
+      DATABASE_HOST: postgres
+      DATABASE_PORT: 5432
+      DATABASE_NAME: rezeis_panel
+      DATABASE_USER: rezeis
+      DATABASE_PASSWORD: rezeis_dev
+      VALKEY_HOST: valkey
+      VALKEY_PORT: 6379
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      SUPER_ADMIN_TELEGRAM_ID: ${SUPER_ADMIN_TELEGRAM_ID}
+      REMNAWAVE_HOST: ${REMNAWAVE_HOST:-remnawave}
+      REMNAWAVE_PORT: ${REMNAWAVE_PORT:-3000}
+      REMNAWAVE_TOKEN: ${REMNAWAVE_TOKEN}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+    networks:
+      - rezeis-network
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+
+  # ============================================================
+  # Frontend
+  # ============================================================
+  frontend:
+    build:
+      context: ..
+      dockerfile: Dockerfile.frontend
+      target: production
+    container_name: rezeis-frontend
+    restart: unless-stopped
+    ports:
+      - "4001:4001"
+    environment:
+      VITE_API_URL: /api
+    depends_on:
+      - backend
+    networks:
+      - rezeis-network
+
+  # ============================================================
+  # Mini App
+  # ============================================================
+  miniapp:
+    build:
+      context: ..
+      dockerfile: Dockerfile.frontend
+      target: production
+      args:
+        - VITE_APP_MODE=miniapp
+    container_name: rezeis-miniapp
+    restart: unless-stopped
+    ports:
+      - "4002:4002"
+    environment:
+      VITE_API_URL: /api
+      VITE_MINI_APP_MODE: "true"
+    depends_on:
+      - backend
+    networks:
+      - rezeis-network
+
+volumes:
+  postgres_data:
+  valkey_data:
+
+networks:
+  rezeis-network:
+    driver: bridge

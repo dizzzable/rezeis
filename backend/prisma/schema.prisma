@@ -1,0 +1,736 @@
+// Prisma schema for Altshop Panel
+// Based on database migrations 001-026
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// Enums
+// ============================================
+
+/// Promocode reward types for VPN MiniApp
+enum PromocodeRewardType {
+  DURATION           @map("duration")
+  TRAFFIC            @map("traffic")
+  DEVICES            @map("devices")
+  SUBSCRIPTION       @map("subscription")
+  PERSONAL_DISCOUNT  @map("personal_discount")
+  PURCHASE_DISCOUNT  @map("purchase_discount")
+}
+
+/// Promocode availability restrictions
+enum PromocodeAvailability {
+  ALL        @map("all")
+  NEW        @map("new")
+  EXISTING   @map("existing")
+  INVITED    @map("invited")
+  ALLOWED    @map("allowed")
+}
+
+/// Device types for VPN MiniApp
+enum DeviceType {
+  ANDROID    @map("android")
+  IPHONE     @map("iphone")
+  WINDOWS    @map("windows")
+  MAC        @map("mac")
+}
+
+/// Subscription types for VPN MiniApp
+enum SubscriptionType {
+  REGULAR    @map("regular")
+  TRIAL      @map("trial")
+  GIFT       @map("gift")
+  REFERRAL   @map("referral")
+}
+
+/// User role types
+enum UserRole {
+  ADMIN      @map("admin")
+  USER       @map("user")
+}
+
+/// Subscription status
+enum SubscriptionStatus {
+  ACTIVE     @map("active")
+  EXPIRED    @map("expired")
+  CANCELLED  @map("cancelled")
+  PENDING    @map("pending")
+}
+
+/// Promocode discount types (legacy)
+enum PromocodeDiscountType {
+  PERCENTAGE @map("percentage")
+  FIXED_AMOUNT @map("fixed_amount")
+}
+
+/// Sync log status for Remnawave operations
+enum SyncLogStatus {
+  PENDING    @map("pending")
+  RUNNING    @map("running")
+  COMPLETED  @map("completed")
+  FAILED     @map("failed")
+}
+
+// ============================================
+// Models
+// ============================================
+
+/// User model for authentication and tracking
+model User {
+  id                  String   @id @default(uuid())
+  username            String   @unique
+  password_hash       String?
+  telegram_id         String?  @unique
+  first_name          String?
+  last_name           String?
+  photo_url           String?
+  role                UserRole @default(USER)
+  is_active           Boolean  @default(true)
+  last_login_at       DateTime?
+
+  // Discount fields
+  personal_discount_percent    Int      @default(0)
+  purchase_discount_percent    Int      @default(0)
+  purchase_discount_expires_at DateTime?
+
+  created_at          DateTime @default(now())
+  updated_at          DateTime @default(now())
+
+  // Relations
+  subscriptions       Subscription[]
+  promocodes          Promocode[]      @relation("CreatedPromocodes")
+  activations         PromocodeActivation[]
+  trial_tracking      TrialTracking?
+  personal_discounts  UserPersonalDiscount[]
+  remnawave_links     RemnawaveUserLink[]
+  vpn_keys            UserVpnKey[]
+
+  @@map("users")
+  @@index([username])
+  @@index([telegram_id])
+  @@index([role])
+  @@index([is_active])
+  @@index([created_at])
+  @@index([personal_discount_percent])
+  @@index([purchase_discount_percent])
+}
+
+/// Plan model for subscription plans
+model Plan {
+  id                  String   @id @default(uuid())
+  name                String
+  description         String?
+  price               Decimal  @db.Decimal(10, 2)
+  duration_days       Int
+  traffic_limit_gb    Int?
+  device_limit        Int      @default(1)
+  is_active           Boolean  @default(true)
+  created_at          DateTime @default(now())
+  updated_at          DateTime @default(now())
+
+  // Relations
+  prices              PlanPrice[]
+  durations           PlanDuration[]
+  subscriptions       Subscription[]
+
+  @@map("plans")
+  @@index([is_active])
+}
+
+/// Plan price model for multi-currency support
+model PlanPrice {
+  id                  String   @id @default(uuid())
+  plan_id             String
+  currency            String   @default("USD")
+  price               Decimal  @db.Decimal(10, 2)
+  gateway_id          String?
+  gateway_name        String?
+  is_active           Boolean  @default(true)
+  created_at          DateTime @default(now())
+
+  // Relations
+  plan                Plan     @relation(fields: [plan_id], references: [id], onDelete: Cascade)
+
+  @@map("plan_prices")
+  @@unique([plan_id, currency, gateway_id])
+}
+
+/// Plan duration model for flexible subscription lengths
+model PlanDuration {
+  id                  String   @id @default(uuid())
+  plan_id             String
+  duration_days       Int
+  discount_percent    Int      @default(0)
+  is_active           Boolean  @default(true)
+  created_at          DateTime @default(now())
+
+  // Relations
+  plan                Plan     @relation(fields: [plan_id], references: [id], onDelete: Cascade)
+
+  @@map("plan_durations")
+  @@unique([plan_id, duration_days])
+}
+
+/// Subscription model for VPN subscriptions
+model Subscription {
+  id                  String   @id @default(uuid())
+  user_id             String
+  plan_id             String
+
+  // Status
+  status              SubscriptionStatus @default(PENDING)
+  start_date          DateTime
+  end_date            DateTime
+
+  // VPN reference
+  remnawave_uuid      String?
+
+  // Subscription type and device info
+  subscription_type   SubscriptionType @default(REGULAR)
+  device_type         DeviceType?
+  device_count        Int      @default(1)
+  is_trial            Boolean  @default(false)
+  trial_ends_at       DateTime?
+  trial_parent_id     String?
+  subscription_index  Int      @default(1)
+
+  // Plan snapshot
+  snapshot            Json?
+  traffic_limit_gb    Int?
+  traffic_used_gb     Decimal  @default(0) @db.Decimal(10, 2)
+
+  // Renewal tracking
+  renewed_from_id     String?
+  renewed_to_id       String?
+
+  // Promocode tracking
+  purchased_with_promocode_id String?
+  promo_discount_percent      Int      @default(0)
+  promo_discount_amount       Decimal  @default(0) @db.Decimal(10, 2)
+
+  created_at          DateTime @default(now())
+  updated_at          DateTime @default(now())
+
+  // Relations
+  user                User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  plan                Plan     @relation(fields: [plan_id], references: [id], onDelete: Restrict)
+  activations         PromocodeActivation[]
+  vpn_keys            UserVpnKey[]
+
+  @@map("subscriptions")
+  @@index([user_id])
+  @@index([plan_id])
+  @@index([status])
+  @@index([end_date])
+  @@index([remnawave_uuid])
+  @@index([user_id, status])
+  @@index([subscription_type])
+  @@index([device_type])
+  @@index([is_trial])
+  @@index([user_id, subscription_index])
+  @@index([trial_parent_id])
+  @@index([renewed_from_id])
+  @@index([purchased_with_promocode_id])
+}
+
+/// Promocode model for promotional codes
+model Promocode {
+  id                  String   @id @default(uuid())
+  code                String   @unique
+  description         String?
+
+  // Reward configuration
+  reward_type         PromocodeRewardType   @default(PURCHASE_DISCOUNT)
+  reward_value        Int?  // Meaning depends on reward_type:
+                            // DURATION: days to add
+                            // TRAFFIC: GB to add
+                            // DEVICES: number of devices
+                            // SUBSCRIPTION: not used
+                            // PERSONAL_DISCOUNT: discount percentage
+                            // PURCHASE_DISCOUNT: discount percentage
+  reward_plan_id      String?  // For SUBSCRIPTION type - plan to subscribe
+  plan_snapshot       Json?    // Store plan snapshot for SUBSCRIPTION type
+
+  // Availability settings
+  availability        PromocodeAvailability @default(ALL)
+  allowed_user_ids    String[]  // For ALLOWED availability type
+
+  // Usage limits
+  max_uses            Int      @default(-1)  // -1 = unlimited
+  used_count          Int      @default(0)
+  max_uses_per_user   Int      @default(1)
+
+  // Time limits
+  starts_at           DateTime?
+  expires_at          DateTime?
+
+  // Status
+  is_active           Boolean  @default(true)
+
+  // Metadata
+  created_by          String?
+  created_at          DateTime @default(now())
+  updated_at          DateTime @default(now())
+
+  // Relations
+  created_by_user     User?    @relation("CreatedPromocodes", fields: [created_by], references: [id])
+  activations         PromocodeActivation[]
+
+  @@map("promocodes")
+  @@index([code])
+  @@index([reward_type])
+  @@index([availability])
+  @@index([is_active])
+  @@index([expires_at])
+  @@index([created_at])
+}
+
+/// Promocode activation model - tracks who used which promocode
+model PromocodeActivation {
+  id                  String   @id @default(uuid())
+  promocode_id        String
+  user_id             String
+
+  // Activation context
+  subscription_id     String?
+  purchase_amount     Decimal? @db.Decimal(10, 2)
+  discount_applied    Decimal? @db.Decimal(10, 2)
+
+  // Reward details stored as JSON for flexibility
+  reward_applied      Json?
+
+  // Metadata
+  activated_at        DateTime @default(now())
+  ip_address          String?
+  user_agent          String?
+
+  // Relations
+  promocode           Promocode    @relation(fields: [promocode_id], references: [id], onDelete: Cascade)
+  user                User         @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  subscription        Subscription? @relation(fields: [subscription_id], references: [id], onDelete: SetNull)
+
+  @@map("promocode_activations")
+  @@index([promocode_id])
+  @@index([user_id])
+  @@index([activated_at])
+  @@index([subscription_id])
+}
+
+/// Trial tracking model - prevents trial abuse
+model TrialTracking {
+  id                  String   @id @default(uuid())
+  user_id             String   @unique
+
+  // Trial usage
+  has_used_trial      Boolean  @default(false)
+  trial_subscription_id String?
+  trial_activated_at  DateTime?
+  trial_duration_days Int      @default(3)
+
+  // Device info at trial (fingerprinting for abuse prevention)
+  device_fingerprint  String?
+  phone_number        String?
+  ip_address          String?
+  telegram_id         String?
+
+  // Metadata
+  created_at          DateTime @default(now())
+  updated_at          DateTime @default(now())
+
+  // Relations
+  user                User         @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@map("trial_tracking")
+  @@index([user_id])
+  @@index([device_fingerprint])
+  @@index([phone_number])
+  @@index([has_used_trial])
+  @@index([telegram_id])
+}
+
+/// User personal discount model - advanced discount tracking
+model UserPersonalDiscount {
+  id                  String   @id @default(uuid())
+  user_id             String
+
+  // Discount details
+  discount_percent    Int
+  discount_amount     Decimal? @db.Decimal(10, 2)
+
+  // Source
+  source_type         String?  // 'promocode', 'referral', 'manual', 'loyalty'
+  source_id           String?
+
+  // Validity
+  is_active           Boolean  @default(true)
+  expires_at          DateTime?
+
+  // Usage
+  max_uses            Int      @default(-1)  // -1 = unlimited
+  used_count          Int      @default(0)
+
+  // Metadata
+  created_at          DateTime @default(now())
+  updated_at          DateTime @default(now())
+
+  // Relations
+  user                User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@map("user_personal_discounts")
+  @@unique([user_id])
+  @@index([user_id])
+  @@index([expires_at])
+  @@index([source_type, source_id])
+}
+
+/// Transaction model for payment tracking
+model Transaction {
+  id                  String   @id @default(uuid())
+  user_id             String
+  subscription_id     String?
+  amount              Decimal  @db.Decimal(10, 2)
+  currency            String   @default("USD")
+  gateway             String
+  gateway_transaction_id String?
+  status              String   @default("pending")
+  description         String?
+  metadata            Json?
+  created_at          DateTime @default(now())
+  updated_at          DateTime @default(now())
+
+  @@map("transactions")
+  @@index([user_id])
+  @@index([subscription_id])
+  @@index([gateway])
+  @@index([status])
+  @@index([created_at])
+}
+
+/// Gateway model for payment gateways
+model Gateway {
+  id                  String   @id @default(uuid())
+  name                String
+  is_active           Boolean  @default(true)
+  config              Json?
+  created_at          DateTime @default(now())
+  updated_at          DateTime @default(now())
+
+  @@map("gateways")
+  @@index([is_active])
+}
+
+/// Banner model for promotional banners
+model Banner {
+  id                  String   @id @default(uuid())
+  name                String
+  image_url           String
+  link_url            String?
+  position            String   @default("home")
+  is_active           Boolean  @default(true)
+  starts_at           DateTime?
+  expires_at          DateTime?
+  sort_order          Int      @default(0)
+  created_at          DateTime @default(now())
+  updated_at          DateTime @default(now())
+
+  @@map("banners")
+  @@index([is_active])
+  @@index([position])
+}
+
+/// Partner model for referral partners
+model Partner {
+  id                  String   @id @default(uuid())
+  name                String
+  commission_percent  Decimal  @default(10) @db.Decimal(5, 2)
+  is_active           Boolean  @default(true)
+  telegram_id         String?
+  created_at          DateTime @default(now())
+  updated_at          DateTime @default(now())
+
+  @@map("partners")
+  @@index([is_active])
+}
+
+/// Referral model for user referrals
+model Referral {
+  id                  String   @id @default(uuid())
+  referrer_id         String
+  referred_id         String   @unique
+  bonus_granted       Boolean  @default(false)
+  bonus_amount        Decimal? @db.Decimal(10, 2)
+  created_at          DateTime @default(now())
+
+  @@map("referrals")
+  @@index([referrer_id])
+  @@index([referred_id])
+}
+
+/// MultiSubscription model for multi-subscription tracking
+model MultiSubscription {
+  id                  String   @id @default(uuid())
+  user_id             String
+  subscription_id     String
+  is_active           Boolean  @default(true)
+  created_at          DateTime @default(now())
+
+  @@map("multisubscriptions")
+  @@index([user_id])
+  @@index([subscription_id])
+}
+
+/// Notification model for user notifications
+model Notification {
+  id                  String   @id @default(uuid())
+  user_id             String
+  type                String
+  title               String
+  message             String
+  is_read             Boolean  @default(false)
+  metadata            Json?
+  created_at          DateTime @default(now())
+
+  @@map("notifications")
+  @@index([user_id])
+  @@index([is_read])
+  @@index([created_at])
+}
+
+/// Referral rule model for referral bonus configuration
+model ReferralRule {
+  id                  String   @id @default(uuid())
+  referrer_bonus_days Int      @default(3)
+  referred_bonus_days Int      @default(1)
+  is_active           Boolean  @default(true)
+  created_at          DateTime @default(now())
+  updated_at          DateTime @default(now())
+
+  @@map("referral_rules")
+}
+
+/// Partner level model for partner tier configuration
+model PartnerLevel {
+  id                  String   @id @default(uuid())
+  name                String
+  min_referrals       Int      @default(0)
+  commission_percent  Decimal  @db.Decimal(5, 2)
+  is_active           Boolean  @default(true)
+  created_at          DateTime @default(now())
+
+  @@map("partner_levels")
+}
+
+/// Pending notification model for scheduled notifications
+model PendingNotification {
+  id                  String   @id @default(uuid())
+  user_id             String
+  scheduled_at        DateTime
+  type                String
+  title               String
+  message             String
+  metadata            Json?
+  sent                Boolean  @default(false)
+  sent_at             DateTime?
+  created_at          DateTime @default(now())
+
+  @@map("pending_notifications")
+  @@index([user_id])
+  @@index([scheduled_at])
+  @@index([sent])
+}
+
+/// Payment webhook model for gateway webhooks
+model PaymentWebhook {
+  id                  String   @id @default(uuid())
+  gateway             String
+  event_type          String
+  payload             Json
+  processed           Boolean  @default(false)
+  processed_at        DateTime?
+  error               String?
+  created_at          DateTime @default(now())
+
+  @@map("payment_webhooks")
+  @@index([gateway])
+  @@index([event_type])
+  @@index([processed])
+  @@index([created_at])
+}
+
+/// Daily statistics model for analytics
+model DailyStatistics {
+  id                  String   @id @default(uuid())
+  date                DateTime @db.Date
+  total_users         Int      @default(0)
+  active_subscriptions Int     @default(0)
+  new_subscriptions   Int      @default(0)
+  expired_subscriptions Int    @default(0)
+  total_revenue       Decimal  @default(0) @db.Decimal(10, 2)
+  total_discounts     Decimal  @default(0) @db.Decimal(10, 2)
+  created_at          DateTime @default(now())
+
+  @@map("daily_statistics")
+  @@unique([date])
+}
+
+/// Admin model for backend administration
+model Admin {
+  id                  String   @id @default(uuid())
+  username            String   @unique
+  password_hash       String
+  email               String?
+  is_active           Boolean  @default(true)
+  last_login_at       DateTime?
+  created_at          DateTime @default(now())
+  updated_at          DateTime @default(now())
+
+  @@map("admins")
+  @@index([username])
+  @@index([is_active])
+}
+
+/// Backup model for backup records
+model Backup {
+  id                  String   @id @default(uuid())
+  name                String
+  type                String
+  status              String   @default("pending")
+  file_path           String?
+  file_size           Int?
+  error               String?
+  created_at          DateTime @default(now())
+  completed_at        DateTime?
+
+  @@map("backups")
+  @@index([status])
+  @@index([type])
+  @@index([created_at])
+}
+
+/// Remnawave configuration model
+model RemnawaveConfig {
+  id                  String   @id @default(uuid())
+  api_url             String
+  api_token           String
+  is_active           Boolean  @default(true)
+  sync_interval_minutes Int    @default(60)
+  last_sync_at        DateTime?
+  created_at          DateTime @default(now())
+  updated_at          DateTime @default(now())
+
+  @@map("remnawave_config")
+  @@index([is_active])
+}
+
+/// Remnawave server model - stores server information from Remnawave panel
+model RemnawaveServer {
+  id                  String   @id @default(uuid())
+  remnawave_id        String   @unique
+  name                String
+  address             String
+  port                Int      @default(443)
+  protocol            String   @default("vless")
+  is_active           Boolean  @default(true)
+  traffic_limit       Int      @default(0)
+  traffic_used        Int      @default(0)
+  last_synced_at      DateTime?
+  created_at          DateTime @default(now())
+  updated_at          DateTime @default(now())
+
+  // Relations
+  vpn_keys            UserVpnKey[]
+
+  @@map("remnawave_servers")
+  @@index([is_active])
+  @@index([remnawave_id])
+}
+
+/// User VPN key model - stores VPN keys for users
+model UserVpnKey {
+  id                  String   @id @default(uuid())
+  user_id             String
+  subscription_id     String?
+  server_id           String
+  remnawave_uuid      String   @unique
+  key_data            String
+  is_active           Boolean  @default(true)
+  traffic_used        Int      @default(0)
+  traffic_limit       Int      @default(0)
+  expires_at          DateTime?
+  created_at          DateTime @default(now())
+  updated_at          DateTime @default(now())
+
+  // Relations
+  user                User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  subscription        Subscription? @relation(fields: [subscription_id], references: [id], onDelete: SetNull)
+  server              RemnawaveServer @relation(fields: [server_id], references: [id], onDelete: Cascade)
+
+  @@map("user_vpn_keys")
+  @@index([user_id])
+  @@index([subscription_id])
+  @@index([server_id])
+  @@index([remnawave_uuid])
+  @@index([is_active])
+  @@index([expires_at])
+}
+
+/// Remnawave sync log model - tracks synchronization operations
+model RemnawaveSyncLog {
+  id                  String   @id @default(uuid())
+  sync_type           String
+  status              SyncLogStatus @default(PENDING)
+  details             Json?    @default("{}")
+  error_message       String?
+  started_at          DateTime @default(now())
+  completed_at        DateTime?
+  created_at          DateTime @default(now())
+
+  @@map("remnawave_sync_logs")
+  @@index([sync_type])
+  @@index([status])
+  @@index([started_at])
+}
+
+/// Broadcast model for message broadcasts
+model Broadcast {
+  id                  String   @id @default(uuid())
+  message             String
+  sent_count          Int      @default(0)
+  failed_count        Int      @default(0)
+  status              String   @default("draft")
+  scheduled_at        DateTime?
+  sent_at             DateTime?
+  created_by          String?
+  created_at          DateTime @default(now())
+
+  @@map("broadcasts")
+  @@index([status])
+  @@index([scheduled_at])
+}
+
+/// RemnawaveUserLink model for linking Telegram users to multiple Remnawave profiles
+model RemnawaveUserLink {
+  id                  String   @id @default(uuid())
+  user_id             String
+  remnawave_uuid      String
+  remnawave_username  String?
+  telegram_id         String
+  is_primary          Boolean  @default(false)
+  created_at          DateTime @default(now())
+  updated_at          DateTime @default(now())
+
+  // Relations
+  user                User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@map("remnawave_user_links")
+  @@index([telegram_id])
+  @@index([remnawave_uuid])
+  @@index([user_id])
+  @@unique([telegram_id, remnawave_uuid])
+}

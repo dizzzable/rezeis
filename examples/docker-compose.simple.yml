@@ -1,0 +1,101 @@
+# Rezeis - Simple Docker Compose Configuration
+# Minimal setup for small deployments (up to 100 users)
+
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:17-alpine
+    container_name: rezeis-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: rezeis
+      POSTGRES_PASSWORD: rezeis_dev
+      POSTGRES_DB: rezeis_panel
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - rezeis-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rezeis -d rezeis_panel"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Valkey Cache (Redis-compatible)
+  valkey:
+    image: valkey/valkey:8-alpine
+    container_name: rezeis-valkey
+    restart: unless-stopped
+    command: valkey-server --appendonly yes --maxmemory 128mb
+    volumes:
+      - valkey_data:/data
+    networks:
+      - rezeis-network
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Backend API
+  backend:
+    image: rezeis/backend:latest
+    container_name: rezeis-backend
+    restart: unless-stopped
+    ports:
+      - "4000:4000"
+    environment:
+      NODE_ENV: production
+      APP_BACKEND_PORT: 4000
+      
+      DATABASE_HOST: postgres
+      DATABASE_PORT: 5432
+      DATABASE_NAME: rezeis_panel
+      DATABASE_USER: rezeis
+      DATABASE_PASSWORD: rezeis_dev
+      
+      VALKEY_HOST: valkey
+      VALKEY_PORT: 6379
+      
+      JWT_SECRET: your-super-secret-jwt-key-minimum-32-chars
+      JWT_REFRESH_SECRET: your-refresh-secret-minimum-32-chars
+      
+      TELEGRAM_BOT_TOKEN: your_telegram_bot_token
+      SUPER_ADMIN_TELEGRAM_ID: your_telegram_id
+      
+      REMNAWAVE_HOST: remnawave
+      REMNAWAVE_PORT: 3000
+      REMNAWAVE_TOKEN: your_remnawave_token
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+    networks:
+      - rezeis-network
+
+  # Frontend
+  frontend:
+    image: rezeis/frontend:latest
+    container_name: rezeis-frontend
+    restart: unless-stopped
+    ports:
+      - "4001:4001"
+    environment:
+      VITE_API_URL: http://localhost:4000/api
+    depends_on:
+      - backend
+    networks:
+      - rezeis-network
+
+# Volumes
+volumes:
+  postgres_data:
+  valkey_data:
+
+# Networks
+networks:
+  rezeis-network:
+    driver: bridge

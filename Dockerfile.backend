@@ -1,0 +1,78 @@
+# ============================================================
+# Rezeis Backend - Production Dockerfile
+# Optimized multi-stage build for minimal image size
+# ============================================================
+
+# Stage 1: Dependencies
+FROM node:20-alpine AS deps
+WORKDIR /app
+
+# Install dependencies for native modules (bcrypt, pg)
+RUN apk add --no-cache libc6-compat python3 make g++
+
+# Copy package files first for better caching
+COPY backend/package*.json ./
+
+# Install only production dependencies
+RUN npm ci --omit=dev && npm cache clean --force
+
+# Stage 2: Builder
+FROM node:20-alpine AS builder
+WORKDIR /app
+
+# Install build dependencies
+RUN apk add --no-cache libc6-compat python3 make g++
+
+# Copy package files
+COPY backend/package*.json ./
+
+# Install all dependencies (including dev for build)
+RUN npm ci
+
+# Copy source code
+COPY backend/ ./
+
+# Generate Prisma Client
+RUN npx prisma generate
+
+# Build TypeScript
+RUN npm run build
+
+# Stage 3: Production
+FROM node:20-alpine AS production
+WORKDIR /app
+
+# Create non-root user
+RUN addgroup --system --gid 1001 nodejs && \
+    adduser --system --uid 1001 backend --ingroup nodejs
+
+# Install runtime dependencies only
+RUN apk add --no-cache dumb-init ca-certificates
+
+# Copy production dependencies
+COPY --from=deps --chown=backend:nodejs /app/node_modules ./node_modules
+COPY --from=deps --chown=backend:nodejs /app/package*.json ./
+
+# Copy built application
+COPY --from=builder --chown=backend:nodejs /app/dist ./dist
+COPY --from=builder --chown=backend:nodejs /app/node_modules/.prisma ./node_modules/.prisma
+COPY --from=builder --chown=backend:nodejs /app/node_modules/@prisma ./node_modules/@prisma
+
+# Copy SQL migrations for runtime
+COPY --from=builder --chown=backend:nodejs /app/src/database/migrations ./migrations
+
+# Switch to non-root user
+USER backend
+
+# Expose port
+EXPOSE 4000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD node -e "require('http').get('http://localhost:4000/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})" || exit 1
+
+# Use dumb-init to handle signals properly
+ENTRYPOINT ["dumb-init", "--"]
+
+# Start application
+CMD ["node", "dist/index.js"]
