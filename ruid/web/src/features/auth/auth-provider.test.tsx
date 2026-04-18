@@ -154,7 +154,10 @@ describe('AuthProvider', () => {
     })
 
     expect(bootstrapSpy).toHaveBeenCalledTimes(1)
-    expect(bootstrapSpy).toHaveBeenCalledWith({ initData: 'telegram-init-data' })
+    expect(bootstrapSpy).toHaveBeenCalledWith(
+      { initData: 'telegram-init-data' },
+      expect.anything(),
+    )
     expect(observedStatuses).toContain('loading')
     expect(observedStatuses.at(-1)).toBe('authenticated')
   })

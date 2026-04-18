@@ -169,9 +169,11 @@ function renderWebAccountPageWithAuthProvider({
   queryClient.setQueryData(['session', 'web-account-email-verification-challenge'], initialChallenge)
   return render(
     <QueryClientProvider client={queryClient}>
-      <AuthProvider>
-        <WebAccountPage />
-      </AuthProvider>
+      <MemoryRouter>
+        <AuthProvider>
+          <WebAccountPage />
+        </AuthProvider>
+      </MemoryRouter>
     </QueryClientProvider>,
   )
 }

@@ -1,6 +1,6 @@
 import { QueryClientProvider } from '@tanstack/react-query'
 import { act, fireEvent, render, waitFor, type RenderResult } from '@testing-library/react'
-import { RouterProvider, createMemoryRouter } from 'react-router-dom'
+import { MemoryRouter, RouterProvider, createMemoryRouter } from 'react-router-dom'
 import { AxiosError } from 'axios'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { appRoutes } from '@/app/router'
@@ -203,9 +203,11 @@ function renderDashboardWithAuthProvider({
   queryClient.setQueryData(['session', 'web-account-email-verification-challenge'], initialChallenge)
   return render(
     <QueryClientProvider client={queryClient}>
-      <AuthProvider>
-        <DashboardPage />
-      </AuthProvider>
+      <MemoryRouter>
+        <AuthProvider>
+          <DashboardPage />
+        </AuthProvider>
+      </MemoryRouter>
     </QueryClientProvider>,
   )
 }

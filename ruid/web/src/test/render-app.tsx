@@ -13,11 +13,17 @@ export function renderWithProviders(ui: ReactElement | ReactNode, options: Rende
   const queryClient = createQueryClient({ isTest: true })
   const route: string = options.route ?? '/'
   if (options.withRouter === false) {
-    return render(<QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>)
+    return render(ui, {
+      wrapper: ({ children }: { readonly children: ReactNode }) => (
+        <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+      ),
+    })
   }
-  return render(
-    <QueryClientProvider client={queryClient}>
-      <MemoryRouter initialEntries={[route]}>{ui}</MemoryRouter>
-    </QueryClientProvider>,
-  )
+  return render(ui, {
+    wrapper: ({ children }: { readonly children: ReactNode }) => (
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={[route]}>{children}</MemoryRouter>
+      </QueryClientProvider>
+    ),
+  })
 }
