@@ -1,0 +1,140 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: rezeis-postgres
+    env_file:
+      - .env.external.admin.example
+    environment:
+      POSTGRES_DB: ${DB_NAME:-rezeis}
+      POSTGRES_USER: ${DB_USER:-rezeis}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-rezeis_secret}
+    volumes:
+      - postgres_external_admin_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - rezeis-admin-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: rezeis-redis
+    env_file:
+      - .env.external.admin.example
+    command:
+      - sh
+      - -c
+      - |
+        if [ -n "$${REDIS_PASSWORD}" ]; then
+          exec redis-server --appendonly yes --requirepass "$${REDIS_PASSWORD}"
+        fi
+        exec redis-server --appendonly yes
+    volumes:
+      - redis_external_admin_data:/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - |
+          if [ -n "$${REDIS_PASSWORD}" ]; then
+            redis-cli -a "$${REDIS_PASSWORD}" ping
+          else
+            redis-cli ping
+          fi
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - rezeis-admin-network
+
+  rezeis-admin-api:
+    build:
+      context: ./rezeis-admin
+      dockerfile: Dockerfile
+    container_name: rezeis-admin-api
+    env_file:
+      - .env.external.admin.example
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - '127.0.0.1:${REZEIS_ADMIN_API_PORT:-3100}:3000'
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -q -O /dev/null http://127.0.0.1:3000/api/health
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+    networks:
+      - rezeis-admin-network
+
+  rezeis-admin-worker:
+    build:
+      context: ./rezeis-admin
+      dockerfile: Dockerfile
+    container_name: rezeis-admin-worker
+    command: ['node', 'dist/worker.js']
+    env_file:
+      - .env.external.admin.example
+    environment:
+      NODE_ENV: production
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - const fs=require('node:fs');const cmd=fs.readFileSync('/proc/1/cmdline','utf8');process.exit(cmd.includes('dist/worker.js')?0:1)
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+    networks:
+      - rezeis-admin-network
+
+  rezeis-web:
+    build:
+      context: ./rezeis-admin/web
+      dockerfile: Dockerfile
+    container_name: rezeis-web
+    ports:
+      - '127.0.0.1:3000:80'
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -q -O /dev/null http://127.0.0.1/
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - rezeis-admin-network
+
+volumes:
+  postgres_external_admin_data:
+  redis_external_admin_data:
+
+networks:
+  rezeis-admin-network:
+    driver: bridge

@@ -1,0 +1,965 @@
+// Rezeis Admin - Database Schema
+// Based on altshop-1.5.0 structure, adapted for Rezeis platform
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// ENUMS
+// ============================================
+
+enum UserRole {
+  DEV
+  ADMIN
+  USER
+}
+
+enum Locale {
+  EN
+  RU
+  // Extended locales can be added
+}
+
+enum Currency {
+  USD
+  RUB
+  USDT
+  TON
+  BTC
+  ETH
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  DISABLED
+  LIMITED
+  EXPIRED
+  DELETED
+}
+
+enum DeviceType {
+  ANDROID
+  IPHONE
+  WINDOWS
+  MAC
+  LINUX
+  OTHER
+}
+
+enum PlanType {
+  TRAFFIC
+  DEVICES
+  BOTH
+  UNLIMITED
+}
+
+enum PlanAvailability {
+  ALL
+  NEW
+  EXISTING
+  INVITED
+  ALLOWED
+  TRIAL
+}
+
+enum TransactionStatus {
+  PENDING
+  COMPLETED
+  CANCELED
+  REFUNDED
+  FAILED
+}
+
+enum PurchaseType {
+  NEW
+  RENEW
+  UPGRADE
+  ADDITIONAL
+}
+
+enum PurchaseChannel {
+  WEB
+  TELEGRAM
+  MINI_APP
+}
+
+enum PaymentGatewayType {
+  YOOKASSA
+  TELEGRAM_STARS
+  PLATEGA
+  HELEKET
+  CRYPTOMUS
+  MULENPAY
+}
+
+enum PromoCodeRewardType {
+  DURATION
+  TRAFFIC
+  DEVICES
+  SUBSCRIPTION
+  PERSONAL_DISCOUNT
+  PURCHASE_DISCOUNT
+}
+
+enum PromoCodeAvailability {
+  ALL
+  NEW
+  EXISTING
+  INVITED
+  ALLOWED
+}
+
+enum ReferralLevel {
+  FIRST
+  SECOND
+  THIRD
+}
+
+enum PartnerLevel {
+  LEVEL_1
+  LEVEL_2
+  LEVEL_3
+}
+
+enum WithdrawalStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  REJECTED
+  CANCELED
+}
+
+enum SyncAction {
+  CREATE
+  UPDATE
+  DELETE
+}
+
+enum SyncJobStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum AccessMode {
+  PUBLIC
+  INVITED
+  PURCHASE_BLOCKED
+  REG_BLOCKED
+  RESTRICTED
+}
+
+// ============================================
+// CORE ENTITIES
+// ============================================
+
+// Users - Telegram + Web users
+model User {
+  id                    String          @id @default(uuid())
+  telegramId            BigInt?         @unique
+  username              String?
+  name                  String?
+
+  // Web account
+  email                 String?         @unique
+  passwordHash          String?
+
+  // Referral system
+  referralCode          String          @unique @default(uuid())
+
+  // Settings
+  role                  UserRole        @default(USER)
+  language              Locale          @default(EN)
+  personalDiscount      Int             @default(0) // in percent
+  purchaseDiscount      Int             @default(0) // in percent
+
+  // Points & Balance
+  points                Int             @default(0)
+
+  // Limits
+  maxSubscriptions      Int             @default(1)
+
+  // Status
+  isBlocked             Boolean         @default(false)
+  isBotBlocked          Boolean         @default(false)
+  isRulesAccepted       Boolean         @default(false)
+
+  // Partner relation
+  partner               Partner?
+
+  // Timestamps
+  createdAt             DateTime        @default(now())
+  updatedAt             DateTime        @updatedAt
+
+  // Relations
+  subscriptions         Subscription[]
+  transactions          Transaction[]
+  promoCodeActivations  PromoCodeActivation[]
+  referralsGiven        Referral[]      @relation("Referrer")
+  referralsReceived     Referral[]      @relation("Referred")
+  referralInvites       ReferralInvite[]
+  referralRewards       ReferralReward[]
+  webAccount            WebAccount?
+  notificationEvents    UserNotificationEvent[]
+  analyticsEvents       WebAnalyticsEvent[]
+
+  @@index([telegramId])
+  @@index([email])
+}
+
+// Admin Users (for Rezeis Admin Panel)
+model AdminUser {
+  id                String          @id @default(uuid())
+  // Existing rows can be backfilled from the legacy email identifier during migration.
+  login             String
+  loginNormalized   String          @unique
+  email             String?         @unique
+  passwordHash      String
+  name              String?
+  role              UserRole        @default(ADMIN)
+  isActive          Boolean         @default(true)
+  tokenVersion      Int             @default(0)
+  passwordChangedAt DateTime?
+  lastLoginAt       DateTime?
+  lastLoginIp       String?
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  auditLogs         AdminAuditLog[]
+}
+
+model AdminAuditLog {
+  id          String     @id @default(uuid())
+  adminUserId String?
+  action      String
+  ipAddress   String?
+  userAgent   String?
+  metadata    Json?
+  createdAt   DateTime   @default(now())
+
+  adminUser   AdminUser? @relation(fields: [adminUserId], references: [id], onDelete: SetNull)
+
+  @@index([adminUserId])
+  @@index([action])
+  @@index([createdAt])
+}
+
+// Subscriptions
+model Subscription {
+  id              String              @id @default(uuid())
+
+  // User relation
+  userId          String
+  user            User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Remnawave integration
+  remnawaveId     String?             // ID in Remnawave system
+  remnawaveData   Json?               // Cached profile data from Remnawave
+
+  // Status
+  status          SubscriptionStatus  @default(DISABLED)
+  isTrial         Boolean             @default(false)
+
+  // Plan snapshot (stored at purchase time)
+  planSnapshot    Json                // Snapshot of Plan model
+
+  // Limits
+  trafficLimit    Int?                // in bytes, null = unlimited
+  deviceLimit     Int                 @default(1)
+
+  // Squads
+  internalSquads  String[]
+  externalSquad   String?
+
+  // Config URL
+  configUrl       String?
+
+  // Device tracking
+  deviceType      DeviceType?
+
+  // Timestamps
+  startedAt       DateTime?
+  expiresAt       DateTime?
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  // Relations
+  transactions    Transaction[]
+  promoCodeActivations PromoCodeActivation[]
+
+  @@index([userId])
+  @@index([remnawaveId])
+  @@index([status])
+}
+
+// Plans
+model Plan {
+  id              String            @id @default(uuid())
+
+  // Display
+  orderIndex      Int               @default(0)
+  name            String            @unique
+  description     String?
+  tag             String?
+
+  // Status
+  isActive        Boolean           @default(true)
+  isArchived      Boolean           @default(false)
+
+  // Type
+  type            PlanType          @default(TRAFFIC)
+
+  // Availability
+  availability    PlanAvailability  @default(ALL)
+
+  // Limits
+  trafficLimit    Int?              // in bytes, null = unlimited
+  deviceLimit     Int               @default(1)
+
+  // Squads
+  internalSquads  String[]
+  externalSquad   String[]
+
+  // Upgrade rules
+  upgradeToPlanIds Int[]
+
+  // Restriction
+  allowedUserIds  BigInt[]
+
+  // Timestamps
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  // Relations
+  durations       PlanDuration[]
+
+  @@index([isActive])
+  @@index([availability])
+}
+
+// Plan Durations
+model PlanDuration {
+  id        String    @id @default(uuid())
+  planId    String
+  plan      Plan      @relation(fields: [planId], references: [id], onDelete: Cascade)
+  days      Int       // Duration in days
+
+  prices    PlanPrice[]
+
+  @@unique([planId, days])
+}
+
+// Plan Prices
+model PlanPrice {
+  id              String    @id @default(uuid())
+  planDurationId  String
+  planDuration    PlanDuration @relation(fields: [planDurationId], references: [id], onDelete: Cascade)
+  currency        Currency
+  price           Decimal   @db.Decimal(10, 2)
+
+  @@unique([planDurationId, currency])
+}
+
+// Transactions (Payments/Orders)
+model Transaction {
+  id              String            @id @default(uuid())
+  paymentId       String            @unique @default(uuid())
+
+  // User
+  userId          String
+  user            User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Subscription (if any)
+  subscriptionId  String?
+  subscription    Subscription?     @relation(fields: [subscriptionId], references: [id])
+
+  // Status
+  status          TransactionStatus @default(PENDING)
+  isTest          Boolean           @default(false)
+
+  // Purchase details
+  purchaseType    PurchaseType      @default(NEW)
+  channel         PurchaseChannel   @default(WEB)
+
+  // Payment
+  gatewayType     PaymentGatewayType
+  currency        Currency
+  amount          Decimal           @db.Decimal(10, 2)
+  paymentAsset    String?           // Crypto asset if applicable
+
+  // Plan snapshot
+  planSnapshot    Json?
+
+  // Gateway response
+  gatewayId       String?           // External payment ID
+  gatewayData     Json?
+
+  // Device info
+  deviceTypes     DeviceType[]
+
+  // Timestamps
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  @@index([userId])
+  @@index([status])
+  @@index([gatewayType])
+}
+
+// PromoCodes
+model PromoCode {
+  id              String                @id @default(uuid())
+  code            String                @unique
+
+  // Status
+  isActive        Boolean               @default(true)
+  availability    PromoCodeAvailability @default(ALL)
+
+  // Reward
+  rewardType      PromoCodeRewardType
+  rewardValue     Int                   // Duration in days, traffic in bytes, discount in percent
+  planSnapshot    Json?                 // Full plan if SUBSCRIPTION type
+
+  // Limits
+  lifetime        Int?                  // Days, null = unlimited
+  maxActivations  Int?                  // Total uses, null = unlimited
+  remainingUses   Int?                  // Remaining activations
+  allowedUserIds  BigInt[]
+  allowedPlanIds  Int[]
+
+  // Timestamps
+  expiresAt       DateTime?
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
+
+  // Relations
+  activations     PromoCodeActivation[]
+
+  @@index([isActive])
+}
+
+// PromoCode Activations
+model PromoCodeActivation {
+  id              String              @id @default(uuid())
+
+  // PromoCode
+  promoCodeId     String
+  promoCode       PromoCode          @relation(fields: [promoCodeId], references: [id], onDelete: Cascade)
+  code            String              // Denormalized for easy lookup
+
+  // User
+  userId          String
+  user            User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Reward details
+  rewardType      PromoCodeRewardType
+  rewardValue     Int
+
+  // Target subscription
+  targetSubscriptionId String?
+  targetSubscription   Subscription? @relation(fields: [targetSubscriptionId], references: [id])
+
+  // Timestamps
+  activatedAt     DateTime            @default(now())
+
+  @@index([userId])
+  @@index([promoCodeId])
+}
+
+// ============================================
+// REFERRAL SYSTEM
+// ============================================
+
+model Referral {
+  id                      String          @id @default(uuid())
+
+  // Users
+  referrerId              String
+  referrer                User            @relation("Referrer", fields: [referrerId], references: [id], onDelete: Cascade)
+  referredId              String
+  referred                User            @relation("Referred", fields: [referredId], references: [id], onDelete: Cascade)
+
+  // Level
+  level                   ReferralLevel
+
+  // Qualification
+  qualifiedAt             DateTime?
+  qualifiedPurchaseChannel PurchaseChannel?
+  qualifiedTransactionId  String?
+
+  // Timestamps
+  createdAt               DateTime        @default(now())
+
+  // Relations
+  rewards                 ReferralReward[]
+
+  @@unique([referrerId, referredId])
+  @@index([referrerId])
+  @@index([referredId])
+}
+
+model ReferralInvite {
+  id              String    @id @default(uuid())
+
+  inviterId       String
+  inviter         User      @relation(fields: [inviterId], references: [id], onDelete: Cascade)
+
+  token           String    @unique
+  expiresAt       DateTime
+  revokedAt       DateTime?
+
+  createdAt       DateTime  @default(now())
+
+  @@index([inviterId])
+}
+
+model ReferralReward {
+  id              String              @id @default(uuid())
+
+  // Referral
+  referralId      String
+  referral        Referral            @relation(fields: [referralId], references: [id], onDelete: Cascade)
+
+  // User (recipient)
+  userId          String
+  user            User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  type            String              // POINTS, EXTRA_DAYS
+  amount          Int
+  isIssued        Boolean             @default(false)
+
+  createdAt       DateTime            @default(now())
+
+  @@index([userId])
+}
+
+// ============================================
+// PARTNER SYSTEM
+// ============================================
+
+model Partner {
+  id              String    @id @default(uuid())
+
+  // User relation
+  userId          String    @unique
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Balance (in cents)
+  balance         Int       @default(0)
+  totalEarned     Int       @default(0)
+  totalWithdrawn  Int       @default(0)
+
+  // Stats
+  referralsCount      Int @default(0)
+  level2ReferralsCount Int @default(0)
+  level3ReferralsCount Int @default(0)
+
+  // Settings
+  isActive            Boolean @default(true)
+  individualSettings  Json?
+
+  // Timestamps
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  // Relations
+  transactions    PartnerTransaction[]
+  withdrawals     PartnerWithdrawal[]
+  partnerReferrals PartnerReferral[]
+}
+
+model PartnerTransaction {
+  id              String      @id @default(uuid())
+
+  // Partner
+  partnerId       String
+  partner         Partner     @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+
+  // Referral
+  referralTelegramId BigInt
+  level           PartnerLevel
+
+  // Amount
+  paymentAmount   Int         // in cents
+  percent         Decimal     @db.Decimal(5, 2)
+  earnedAmount    Int         // in cents
+
+  // Source
+  sourceTransactionId String?
+  description     String?
+
+  createdAt       DateTime    @default(now())
+
+  @@index([partnerId])
+}
+
+model PartnerWithdrawal {
+  id              String          @id @default(uuid())
+
+  // Partner
+  partnerId       String
+  partner         Partner         @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+
+  // Amount
+  amount          Int             // in cents
+  requestedAmount Decimal         @db.Decimal(24, 8)
+  requestedCurrency Currency
+
+  // Exchange
+  quoteRate       Decimal         @db.Decimal(24, 8)
+  quoteSource     String?
+
+  // Status
+  status          WithdrawalStatus @default(PENDING)
+  method          String?
+  requisites      String?
+
+  // Admin
+  adminComment    String?
+  processedBy     String?
+
+  // Timestamps
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  @@index([partnerId])
+  @@index([status])
+}
+
+model PartnerReferral {
+  id              String      @id @default(uuid())
+
+  partnerId       String
+  partner         Partner     @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+
+  referralTelegramId BigInt
+  level           PartnerLevel
+  parentPartnerId String?
+
+  createdAt       DateTime    @default(now())
+
+  @@unique([partnerId, referralTelegramId])
+}
+
+// ============================================
+// PAYMENT GATEWAYS
+// ============================================
+
+model PaymentGateway {
+  id          String              @id @default(uuid())
+  type        PaymentGatewayType  @unique
+  orderIndex  Int                 @default(0)
+  currency    Currency
+  isActive    Boolean             @default(true)
+  settings    Json                // Gateway-specific settings (API keys, etc.)
+
+  updatedAt   DateTime            @updatedAt
+}
+
+model PaymentWebhookEvent {
+  id          String    @id @default(uuid())
+
+  gatewayType String
+  paymentId   String
+  status      String?
+
+  payloadHash String?
+  attempts    Int       @default(0)
+  lastError   String?
+
+  receivedAt  DateTime  @default(now())
+  processedAt DateTime?
+
+  @@unique([gatewayType, paymentId])
+  @@index([gatewayType])
+}
+
+// ============================================
+// SETTINGS
+// ============================================
+
+model Settings {
+  id                  String      @id @default(uuid())
+
+  // Access
+  rulesRequired       Boolean     @default(true)
+  rulesLink           String?
+  channelRequired     Boolean     @default(false)
+  channelId           BigInt?
+  channelLink         String?
+  accessMode          AccessMode  @default(PUBLIC)
+  inviteModeStartedAt DateTime?
+
+  // Currency
+  defaultCurrency     Currency    @default(USD)
+
+  // Notifications
+  userNotifications   Json        @default("{}")
+  systemNotifications Json        @default("{}")
+
+  // Referral
+  referralSettings    Json        @default("{}")
+
+  // Partner
+  partnerSettings     Json        @default("{}")
+
+  // Multi-subscription
+  multiSubscriptionSettings Json @default("{}")
+
+  // Branding
+  branding            Json        @default("{}")
+
+  // Bot menu
+  botMenu             Json        @default("{}")
+
+  updatedAt           DateTime    @updatedAt
+}
+
+// ============================================
+// REMNAWAVE INTEGRATION
+// ============================================
+
+// Queue for syncing profiles with Remnawave
+model ProfileSyncJob {
+  id              String        @id @default(uuid())
+
+  // Subscription
+  subscriptionId  String
+
+  // Action
+  action          SyncAction
+  status          SyncJobStatus @default(PENDING)
+
+  // Data
+  payload         Json?         // Data to send to Remnawave
+  response        Json?         // Response from Remnawave
+
+  // Retry logic
+  attempts        Int           @default(0)
+  maxAttempts     Int           @default(3)
+  lastError       String?
+  nextRetryAt     DateTime?
+
+  // Timestamps
+  createdAt       DateTime      @default(now())
+  processedAt     DateTime?
+
+  @@index([status])
+  @@index([subscriptionId])
+}
+
+// Remnawave profile cache
+model RemnawaveProfileCache {
+  id              String    @id @default(uuid())
+
+  // Remote ID
+  remnawaveId     String    @unique
+
+  // Subscription
+  subscriptionId  String    @unique
+
+  // Cached data
+  profileData     Json
+
+  // URLs
+  configUrl       String?
+
+  // Sync
+  lastSyncedAt    DateTime  @default(now())
+  isStale         Boolean   @default(false)
+
+  updatedAt       DateTime  @updatedAt
+
+  @@index([subscriptionId])
+}
+
+// ============================================
+// BROADCASTS & NOTIFICATIONS
+// ============================================
+
+model Broadcast {
+  id          String    @id @default(uuid())
+  taskId      String    @unique @default(uuid())
+
+  audience    String    // ALL, PLAN, SUBSCRIBED, etc.
+  totalCount  Int       @default(0)
+  successCount Int      @default(0)
+  failedCount Int       @default(0)
+
+  payload     Json      // Message content
+
+  createdAt   DateTime  @default(now())
+
+  messages    BroadcastMessage[]
+}
+
+model BroadcastMessage {
+  id              String    @id @default(uuid())
+  broadcastId     String
+  broadcast       Broadcast @relation(fields: [broadcastId], references: [id], onDelete: Cascade)
+
+  userTelegramId  BigInt
+  messageId       BigInt?
+  status          String    @default("PENDING")
+
+  createdAt       DateTime  @default(now())
+
+  @@index([broadcastId])
+}
+
+model UserNotificationEvent {
+  id              String    @id @default(uuid())
+
+  userId          String
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  type            String
+  i18nKey         String?
+  i18nKwargs      Json?
+  renderedText    String?
+
+  isRead          Boolean   @default(false)
+  readAt          DateTime?
+  readSource      String?
+
+  botChatId       BigInt?
+  botMessageId    BigInt?
+
+  createdAt       DateTime  @default(now())
+
+  @@index([userId])
+  @@index([isRead])
+}
+
+// ============================================
+// ANALYTICS
+// ============================================
+
+model WebAnalyticsEvent {
+  id              String    @id @default(uuid())
+
+  createdAt       DateTime  @default(now())
+  eventName       String
+
+  sourcePath      String?
+  sessionId       String?
+
+  userTelegramId  BigInt?
+  user            User?     @relation(fields: [userTelegramId], references: [telegramId], onDelete: SetNull)
+
+  deviceMode      String?
+  isInTelegram    Boolean   @default(false)
+  hasInitData     Boolean   @default(false)
+  startParam      String?
+
+  chatType        String?
+
+  meta            Json?
+
+  @@index([eventName])
+  @@index([userTelegramId])
+}
+
+// ============================================
+// BACKUPS
+// ============================================
+
+model BackupRecord {
+  id              String    @id @default(uuid())
+
+  filename        String
+  backupTimestamp DateTime
+
+  createdBy       String?
+
+  backupScope     String    // DB, ASSETS, FULL
+  includesDatabase Boolean   @default(true)
+  includesAssets  Boolean   @default(false)
+
+  fileSizeBytes   BigInt?
+  compressed      Boolean   @default(true)
+
+  tablesCount     Int?
+  totalRecords    Int?
+
+  version         String?
+
+  localPath       String?
+
+  telegramChatId  BigInt?
+  telegramMessageId BigInt?
+
+  createdAt       DateTime  @default(now())
+}
+
+// ============================================
+// WEB AUTH
+// ============================================
+
+model WebAccount {
+  id              String    @id @default(uuid())
+
+  userId          String    @unique
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Auth
+  // Linked accounts gain login-first credentials during handoff; legacy rows may remain null until then.
+  login           String?
+  loginNormalized String?   @unique
+  email           String?   @unique
+  emailNormalized String?   @unique
+  emailVerifiedAt DateTime?
+
+  // Password
+  passwordHash    String?
+  requiresPasswordChange Boolean @default(false)
+  temporaryPasswordExpiresAt DateTime?
+
+  // Token versioning for logout
+  tokenVersion    Int       @default(0)
+
+  // Link prompt
+  linkPromptSnoozeUntil DateTime?
+
+  // Bootstrap
+  credentialsBootstrappedAt DateTime?
+
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  challenges      AuthChallenge[]
+}
+
+model AuthChallenge {
+  id              String    @id @default(uuid())
+
+  webAccountId    String
+  webAccount      WebAccount @relation(fields: [webAccountId], references: [id], onDelete: Cascade)
+
+  purpose         String    // email_verify, password_reset, etc.
+  channel         String    // email, telegram
+  destination     String    // email address or telegram
+
+  codeHash        String?
+  tokenHash       String?
+
+  expiresAt       DateTime
+  consumedAt      DateTime?
+
+  attemptsLeft    Int       @default(5)
+
+  meta            Json?
+
+  createdAt       DateTime  @default(now())
+
+  @@index([webAccountId])
+  @@index([purpose])
+  @@index([destination])
+}

@@ -1,0 +1,9 @@
+fastapi==0.135.3
+uvicorn[standard]==0.44.0
+pydantic==2.13.0
+pydantic-settings==2.13.1
+redis==7.4.0
+httpx==0.27.2
+taskiq==0.12.1
+taskiq-redis==1.2.2
+orjson==3.11.4

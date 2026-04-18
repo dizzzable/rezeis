@@ -1,0 +1,94 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  --background: 138 40% 98%;
+  --foreground: 142 71% 10%;
+  --card: 0 0% 100%;
+  --card-foreground: 142 71% 10%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 142 71% 10%;
+  --primary: 142 72% 29%;
+  --primary-foreground: 138 76% 97%;
+  --secondary: 141 30% 94%;
+  --secondary-foreground: 142 71% 10%;
+  --muted: 141 30% 94%;
+  --muted-foreground: 142 16% 36%;
+  --accent: 142 33% 90%;
+  --accent-foreground: 142 71% 10%;
+  --destructive: 0 72% 51%;
+  --destructive-foreground: 138 76% 97%;
+  --border: 141 22% 86%;
+  --input: 141 22% 86%;
+  --ring: 142 72% 29%;
+  --radius: 0.85rem;
+}
+
+.dark {
+  --background: 142 71% 7%;
+  --foreground: 138 76% 97%;
+  --card: 142 60% 10%;
+  --card-foreground: 138 76% 97%;
+  --popover: 142 60% 10%;
+  --popover-foreground: 138 76% 97%;
+  --primary: 138 76% 97%;
+  --primary-foreground: 142 71% 10%;
+  --secondary: 142 32% 18%;
+  --secondary-foreground: 138 76% 97%;
+  --muted: 142 32% 18%;
+  --muted-foreground: 140 18% 70%;
+  --accent: 142 32% 18%;
+  --accent-foreground: 138 76% 97%;
+  --destructive: 0 63% 31%;
+  --destructive-foreground: 138 76% 97%;
+  --border: 142 32% 18%;
+  --input: 142 32% 18%;
+  --ring: 141 35% 80%;
+}
+
+@theme inline {
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+  --color-card: hsl(var(--card));
+  --color-card-foreground: hsl(var(--card-foreground));
+  --color-popover: hsl(var(--popover));
+  --color-popover-foreground: hsl(var(--popover-foreground));
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+  --color-secondary: hsl(var(--secondary));
+  --color-secondary-foreground: hsl(var(--secondary-foreground));
+  --color-muted: hsl(var(--muted));
+  --color-muted-foreground: hsl(var(--muted-foreground));
+  --color-accent: hsl(var(--accent));
+  --color-accent-foreground: hsl(var(--accent-foreground));
+  --color-destructive: hsl(var(--destructive));
+  --color-destructive-foreground: hsl(var(--destructive-foreground));
+  --color-border: hsl(var(--border));
+  --color-input: hsl(var(--input));
+  --color-ring: hsl(var(--ring));
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+* {
+  border-color: hsl(var(--border));
+}
+
+html {
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+}
+
+#root {
+  min-height: 100vh;
+}

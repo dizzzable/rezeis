@@ -1,0 +1,214 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: rezeis-postgres
+    env_file:
+      - .env
+    environment:
+      POSTGRES_DB: ${DB_NAME:-rezeis}
+      POSTGRES_USER: ${DB_USER:-rezeis}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-rezeis_secret}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - rezeis-internal
+
+  redis:
+    image: redis:7-alpine
+    container_name: rezeis-redis
+    env_file:
+      - .env
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test:
+        - CMD
+        - redis-cli
+        - ping
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - rezeis-internal
+
+  rezeis-admin-api:
+    build:
+      context: ./rezeis-admin
+      dockerfile: Dockerfile
+    container_name: rezeis-admin-api
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: postgresql://${DB_USER:-rezeis}:${DB_PASSWORD:-rezeis_secret}@postgres:${DB_PORT:-5432}/${DB_NAME:-rezeis}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      REZEIS_ADMIN_JWT_SECRET: ${REZEIS_ADMIN_JWT_SECRET}
+      REZEIS_ADMIN_INTERNAL_API_KEY: ${REZEIS_ADMIN_INTERNAL_API_KEY}
+      REMNAWAVE_HOST: ${REMNAWAVE_HOST}
+      REMNAWAVE_PORT: ${REMNAWAVE_PORT}
+      REMNAWAVE_TOKEN: ${REMNAWAVE_TOKEN}
+      REMNAWAVE_WEBHOOK_SECRET: ${REMNAWAVE_WEBHOOK_SECRET}
+      REMNAWAVE_CADDY_TOKEN: ${REMNAWAVE_CADDY_TOKEN}
+      REMNAWAVE_COOKIE: ${REMNAWAVE_COOKIE}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - '3100:3000'
+    restart: unless-stopped
+    networks:
+      - rezeis-internal
+
+  rezeis-admin-worker:
+    build:
+      context: ./rezeis-admin
+      dockerfile: Dockerfile
+    container_name: rezeis-admin-worker
+    command: ['node', 'dist/worker.js']
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${DB_USER:-rezeis}:${DB_PASSWORD:-rezeis_secret}@postgres:${DB_PORT:-5432}/${DB_NAME:-rezeis}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      REZEIS_ADMIN_JWT_SECRET: ${REZEIS_ADMIN_JWT_SECRET}
+      REZEIS_ADMIN_INTERNAL_API_KEY: ${REZEIS_ADMIN_INTERNAL_API_KEY}
+      REMNAWAVE_HOST: ${REMNAWAVE_HOST}
+      REMNAWAVE_PORT: ${REMNAWAVE_PORT}
+      REMNAWAVE_TOKEN: ${REMNAWAVE_TOKEN}
+      REMNAWAVE_WEBHOOK_SECRET: ${REMNAWAVE_WEBHOOK_SECRET}
+      REMNAWAVE_CADDY_TOKEN: ${REMNAWAVE_CADDY_TOKEN}
+      REMNAWAVE_COOKIE: ${REMNAWAVE_COOKIE}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - rezeis-internal
+
+  ruid-api:
+    build:
+      context: ./ruid
+      dockerfile: Dockerfile
+    container_name: ruid-api
+    env_file:
+      - .env
+    environment:
+      PORT: 8000
+      DATABASE_URL: postgresql+asyncpg://${DB_USER:-rezeis}:${DB_PASSWORD:-rezeis_secret}@postgres:${DB_PORT:-5432}/${DB_NAME:-rezeis}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      REMNAWAVE_HOST: ${REMNAWAVE_HOST}
+      REMNAWAVE_PORT: ${REMNAWAVE_PORT}
+      REMNAWAVE_TOKEN: ${REMNAWAVE_TOKEN}
+      REMNAWAVE_WEBHOOK_SECRET: ${REMNAWAVE_WEBHOOK_SECRET}
+      REMNAWAVE_CADDY_TOKEN: ${REMNAWAVE_CADDY_TOKEN}
+      REMNAWAVE_COOKIE: ${REMNAWAVE_COOKIE}
+      BOT_TOKEN: ${BOT_TOKEN}
+      BOT_SECRET_TOKEN: ${BOT_SECRET_TOKEN}
+      BOT_DEV_ID: ${BOT_DEV_ID}
+      BOT_SUPPORT_USERNAME: ${BOT_SUPPORT_USERNAME}
+      BOT_MINI_APP: ${BOT_MINI_APP}
+      BOT_RESET_WEBHOOK: ${BOT_RESET_WEBHOOK}
+      BOT_DROP_PENDING_UPDATES: ${BOT_DROP_PENDING_UPDATES}
+      BOT_SETUP_COMMANDS: ${BOT_SETUP_COMMANDS}
+      BOT_USE_BANNERS: ${BOT_USE_BANNERS}
+      BOT_SETUP_WEBHOOK: ${BOT_SETUP_WEBHOOK}
+      TELEGRAM_ADMIN_CHAT_ID: ${TELEGRAM_ADMIN_CHAT_ID}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - '8100:8000'
+    restart: unless-stopped
+    networks:
+      - rezeis-internal
+
+  ruid-worker:
+    build:
+      context: ./ruid
+      dockerfile: Dockerfile
+    container_name: ruid-worker
+    command: ['python', '-m', 'app.workers.main']
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${DB_USER:-rezeis}:${DB_PASSWORD:-rezeis_secret}@postgres:${DB_PORT:-5432}/${DB_NAME:-rezeis}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      REMNAWAVE_HOST: ${REMNAWAVE_HOST}
+      REMNAWAVE_PORT: ${REMNAWAVE_PORT}
+      REMNAWAVE_TOKEN: ${REMNAWAVE_TOKEN}
+      REMNAWAVE_WEBHOOK_SECRET: ${REMNAWAVE_WEBHOOK_SECRET}
+      REMNAWAVE_CADDY_TOKEN: ${REMNAWAVE_CADDY_TOKEN}
+      REMNAWAVE_COOKIE: ${REMNAWAVE_COOKIE}
+      BOT_TOKEN: ${BOT_TOKEN}
+      BOT_SECRET_TOKEN: ${BOT_SECRET_TOKEN}
+      BOT_DEV_ID: ${BOT_DEV_ID}
+      BOT_SUPPORT_USERNAME: ${BOT_SUPPORT_USERNAME}
+      BOT_MINI_APP: ${BOT_MINI_APP}
+      BOT_RESET_WEBHOOK: ${BOT_RESET_WEBHOOK}
+      BOT_DROP_PENDING_UPDATES: ${BOT_DROP_PENDING_UPDATES}
+      BOT_SETUP_COMMANDS: ${BOT_SETUP_COMMANDS}
+      BOT_USE_BANNERS: ${BOT_USE_BANNERS}
+      BOT_SETUP_WEBHOOK: ${BOT_SETUP_WEBHOOK}
+      TELEGRAM_ADMIN_CHAT_ID: ${TELEGRAM_ADMIN_CHAT_ID}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - rezeis-internal
+
+  rezeis-web:
+    build:
+      context: ./rezeis-admin/web
+      dockerfile: Dockerfile
+    container_name: rezeis-web
+    ports:
+      - '3000:80'
+    restart: unless-stopped
+    networks:
+      - rezeis-internal
+
+  ruid-web:
+    build:
+      context: ./ruid/web
+      dockerfile: Dockerfile
+    container_name: ruid-web
+    environment:
+      RUID_API_UPSTREAM: http://ruid-api:8000
+    ports:
+      - '3001:80'
+    depends_on:
+      ruid-api:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      - rezeis-internal
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  rezeis-internal:
+    driver: bridge

@@ -1,0 +1,42 @@
+{
+  "name": "rezeis-web",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@hookform/resolvers": "5.2.2",
+    "@tanstack/react-query": "5.99.0",
+    "axios": "1.15.0",
+    "class-variance-authority": "0.7.1",
+    "clsx": "2.1.1",
+    "i18next": "25.6.0",
+    "lucide-react": "1.8.0",
+    "radix-ui": "^1.4.3",
+    "react": "19.2.5",
+    "react-dom": "19.2.5",
+    "react-hook-form": "7.72.1",
+    "react-i18next": "16.2.4",
+    "react-router-dom": "7.14.1",
+    "sonner": "2.0.7",
+    "tailwind-merge": "3.3.1",
+    "zod": "4.3.6",
+    "zustand": "5.0.12"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "4.2.2",
+    "@types/node": "24.12.2",
+    "@types/react": "19.2.2",
+    "@types/react-dom": "19.2.2",
+    "@vitejs/plugin-react": "5.1.0",
+    "eslint": "9.39.4",
+    "shadcn": "^4.2.0",
+    "tailwindcss": "4.2.2",
+    "typescript": "5.9.3",
+    "vite": "7.1.12"
+  }
+}

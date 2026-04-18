@@ -1,0 +1,218 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: rezeis-dev-postgres
+    env_file:
+      - .env.dev.example
+    environment:
+      POSTGRES_DB: ${DB_NAME:-rezeis}
+      POSTGRES_USER: ${DB_USER:-rezeis}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-rezeis_secret}
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres_dev_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - rezeis-dev
+
+  redis:
+    image: redis:7-alpine
+    container_name: rezeis-dev-redis
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis_dev_data:/data
+    healthcheck:
+      test:
+        - CMD
+        - redis-cli
+        - ping
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks:
+      - rezeis-dev
+
+  rezeis-admin-api:
+    image: node:22-alpine
+    container_name: rezeis-dev-admin-api
+    working_dir: /app
+    env_file:
+      - .env.dev.example
+    environment:
+      NODE_ENV: development
+      PORT: 3000
+      DATABASE_URL: postgresql://${DB_USER:-rezeis}:${DB_PASSWORD:-rezeis_secret}@postgres:${DB_PORT:-5432}/${DB_NAME:-rezeis}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+    command:
+      - sh
+      - -c
+      - >-
+        if [ ! -d node_modules ] || [ -z "$(ls -A node_modules 2>/dev/null)" ]; then npm install; fi
+        && npm run prisma:generate
+        && npm run start:dev
+    volumes:
+      - ./rezeis-admin:/app
+      - rezeis_admin_node_modules:/app/node_modules
+    ports:
+      - '3100:3000'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - rezeis-dev
+
+  rezeis-admin-worker:
+    image: node:22-alpine
+    container_name: rezeis-dev-admin-worker
+    working_dir: /app
+    env_file:
+      - .env.dev.example
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgresql://${DB_USER:-rezeis}:${DB_PASSWORD:-rezeis_secret}@postgres:${DB_PORT:-5432}/${DB_NAME:-rezeis}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+    command:
+      - sh
+      - -c
+      - >-
+        if [ ! -d node_modules ] || [ -z "$(ls -A node_modules 2>/dev/null)" ]; then npm install; fi
+        && npm run prisma:generate
+        && npx ts-node src/worker.ts
+    volumes:
+      - ./rezeis-admin:/app
+      - rezeis_admin_node_modules:/app/node_modules
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - rezeis-dev
+
+  ruid-api:
+    image: python:3.12-slim
+    container_name: rezeis-dev-ruid-api
+    working_dir: /app
+    env_file:
+      - .env.dev.example
+    environment:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONUNBUFFERED: '1'
+      PORT: 8000
+      DATABASE_URL: postgresql+asyncpg://${DB_USER:-rezeis}:${DB_PASSWORD:-rezeis_secret}@postgres:${DB_PORT:-5432}/${DB_NAME:-rezeis}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+    command:
+      - sh
+      - -c
+      - >-
+        pip install --no-cache-dir -r requirements.txt
+        && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    volumes:
+      - ./ruid:/app
+    ports:
+      - '8100:8000'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - rezeis-dev
+
+  ruid-worker:
+    image: python:3.12-slim
+    container_name: rezeis-dev-ruid-worker
+    working_dir: /app
+    env_file:
+      - .env.dev.example
+    environment:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONUNBUFFERED: '1'
+      DATABASE_URL: postgresql+asyncpg://${DB_USER:-rezeis}:${DB_PASSWORD:-rezeis_secret}@postgres:${DB_PORT:-5432}/${DB_NAME:-rezeis}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+    command:
+      - sh
+      - -c
+      - >-
+        pip install --no-cache-dir -r requirements.txt
+        && python -m app.workers.main
+    volumes:
+      - ./ruid:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - rezeis-dev
+
+  rezeis-web:
+    image: node:22-alpine
+    container_name: rezeis-dev-web
+    working_dir: /app
+    env_file:
+      - .env.dev.example
+    environment:
+      NODE_ENV: development
+    command:
+      - sh
+      - -c
+      - >-
+        if [ ! -d node_modules ] || [ -z "$(ls -A node_modules 2>/dev/null)" ]; then npm install; fi
+        && npm run dev -- --host 0.0.0.0 --port 3000
+    volumes:
+      - ./rezeis-admin/web:/app
+      - rezeis_web_node_modules:/app/node_modules
+    ports:
+      - '3000:3000'
+    networks:
+      - rezeis-dev
+
+  ruid-web:
+    image: node:22-alpine
+    container_name: rezeis-dev-ruid-web
+    working_dir: /app
+    env_file:
+      - .env.dev.example
+    environment:
+      NODE_ENV: development
+      VITE_DEV_API_PROXY_TARGET: http://ruid-api:8000
+    command:
+      - sh
+      - -c
+      - >-
+        if [ ! -d node_modules ] || [ -z "$(ls -A node_modules 2>/dev/null)" ]; then npm install; fi
+        && npm run dev -- --host 0.0.0.0 --port 3001
+    volumes:
+      - ./ruid/web:/app
+      - ruid_web_node_modules:/app/node_modules
+    ports:
+      - '3001:3001'
+    depends_on:
+      ruid-api:
+        condition: service_started
+    networks:
+      - rezeis-dev
+
+volumes:
+  postgres_dev_data:
+  redis_dev_data:
+  rezeis_admin_node_modules:
+  rezeis_web_node_modules:
+  ruid_web_node_modules:
+
+networks:
+  rezeis-dev:
+    driver: bridge
