@@ -4,4 +4,5 @@ dist
 npm-debug.log
 test
 docs
-web
+web/node_modules
+web/dist
