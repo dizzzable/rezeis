@@ -31,6 +31,7 @@ import { BackupModule } from './modules/backup/backup.module';
 import { BlockedIpsModule } from './modules/blocked-ips/blocked-ips.module';
 import { BlockedIpGuard } from './modules/blocked-ips/guards/blocked-ip.guard';
 import { BotConfigModule } from './modules/bot-config/bot-config.module';
+import { BotFlowModule } from './modules/bot-flow/bot-flow.module';
 import { BroadcastModule } from './modules/broadcast/broadcast.module';
 import { BusinessAnalyticsModule } from './modules/business-analytics/business-analytics.module';
 import { ClientErrorsModule } from './modules/client-errors/client-errors.module';
@@ -97,6 +98,7 @@ import { WebhooksModule } from './modules/webhooks/webhooks.module';
     BackupModule,
     BlockedIpsModule,
     BotConfigModule,
+    BotFlowModule,
     BusinessAnalyticsModule,
     BroadcastModule,
     ClientErrorsModule,

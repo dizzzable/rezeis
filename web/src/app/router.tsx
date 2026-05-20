@@ -25,6 +25,7 @@ const ApiTokensPage = lazy(() => import('@/features/settings/api-tokens-page').t
 const PanelSettingsHub = lazy(() => import('@/features/settings/panel-settings-hub'))
 const AnalyticsPage = lazy(() => import('@/features/analytics/analytics-page'))
 const BotConfigPage = lazy(() => import('@/features/bot-config/bot-config-page'))
+const BotFlowPage = lazy(() => import('@/features/bot-flow/bot-flow-page'))
 const NotificationsPage = lazy(() => import('@/features/notifications/notifications-page'))
 const GatewaySettingsPage = lazy(() => import('@/features/payments/gateway-settings-page'))
 const ReferralSettingsPage = lazy(() => import('@/features/settings/referral-settings-page'))
@@ -93,6 +94,7 @@ export const router = createBrowserRouter([
           { path: 'settings/api-tokens', element: withSuspense(<ApiTokensPage />) },
           { path: 'settings/panel', element: withSuspense(<PanelSettingsHub />) },
           { path: 'bot-config', element: withSuspense(<BotConfigPage />) },
+          { path: 'bot-flow', element: withSuspense(<BotFlowPage />) },
           { path: 'analytics', element: withSuspense(<AnalyticsPage />) },
           { path: 'admins', element: withSuspense(<AdminsPage />) },
           { path: 'admins/roles', element: <Navigate to="/admins#roles" replace /> },

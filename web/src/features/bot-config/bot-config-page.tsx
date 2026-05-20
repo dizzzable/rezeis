@@ -1,8 +1,8 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- TODO: type API responses */
-import { useState } from 'react'
+import { lazy, Suspense, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
-import { GripVertical, Sparkles, Plus, Trash2, Bot } from 'lucide-react'
+import { GripVertical, Sparkles, Plus, Trash2, Bot, Workflow } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
@@ -17,6 +17,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Skeleton } from '@/components/ui/skeleton'
 import { Separator } from '@/components/ui/separator'
 
+const BotFlowPage = lazy(() => import('@/features/bot-flow/bot-flow-page'))
+
 export default function BotConfigPage() {
   const { t } = useTranslation()
   return (
@@ -29,13 +31,22 @@ export default function BotConfigPage() {
         <p className="text-muted-foreground">{t('botConfigPage.subtitle')}</p>
       </div>
 
-      <Tabs defaultValue="buttons">
-        <TabsList className="grid w-full grid-cols-3">
+      <Tabs defaultValue="flow">
+        <TabsList className="grid w-full grid-cols-4">
+          <TabsTrigger value="flow" className="gap-1.5">
+            <Workflow className="h-3.5 w-3.5" />
+            {t('botConfigPage.tabs.flow')}
+          </TabsTrigger>
           <TabsTrigger value="buttons">{t('botConfigPage.tabs.buttons')}</TabsTrigger>
           <TabsTrigger value="emojis">{t('botConfigPage.tabs.emojis')}</TabsTrigger>
           <TabsTrigger value="texts">{t('botConfigPage.tabs.texts')}</TabsTrigger>
         </TabsList>
 
+        <TabsContent value="flow" className="mt-0 -mx-6 -mb-6">
+          <Suspense fallback={<Skeleton className="h-[calc(100vh-12rem)] w-full" />}>
+            <BotFlowPage />
+          </Suspense>
+        </TabsContent>
         <TabsContent value="buttons"><ButtonsTab /></TabsContent>
         <TabsContent value="emojis"><EmojisTab /></TabsContent>
         <TabsContent value="texts"><TextsTab /></TabsContent>

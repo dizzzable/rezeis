@@ -1891,3 +1891,150 @@ model BotText {
   @@index([visible])
   @@map("bot_texts")
 }
+
+// =============================================================================
+//  BOT FLOW EDITOR — Visual navigation graph for Telegram inline keyboards
+// =============================================================================
+
+/// Status of a bot flow version.
+enum BotFlowStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+/// Action type for a flow button.
+enum BotFlowButtonAction {
+  NAVIGATE     // Go to another screen in the flow
+  URL          // Open external URL
+  WEBAPP       // Open Telegram Mini App
+  CALLBACK     // Trigger a built-in action (e.g. "show_subscription")
+  BACK         // Navigate back in history
+  START_OVER   // Return to root screen
+}
+
+/// Style for a flow button (maps to Telegram Bot API `style` field).
+enum BotFlowButtonStyle {
+  PRIMARY
+  SUCCESS
+  DANGER
+  DEFAULT
+}
+
+/// Parse mode for screen message text.
+enum BotFlowParseMode {
+  HTML
+  MARKDOWN
+  PLAIN
+}
+
+/// Media type attached to a screen.
+enum BotFlowMediaType {
+  PHOTO
+  VIDEO
+  DOCUMENT
+  ANIMATION
+}
+
+/// A versioned bot navigation flow. Operators design flows in the visual
+/// editor; the bot runtime reads the latest PUBLISHED version.
+model BotFlow {
+  id          String        @id @default(cuid()) @map("id")
+  /// Human-readable name for the flow (e.g. "Main Menu", "Onboarding").
+  name        String        @default("Main Flow") @map("name")
+  /// Auto-incrementing version number within this flow lineage.
+  version     Int           @default(1) @map("version")
+  /// Draft → Published → Archived lifecycle.
+  status      BotFlowStatus @default(DRAFT) @map("status")
+  /// React Flow viewport + global layout metadata (JSON).
+  layoutData  Json?         @map("layout_data")
+  /// When this version was published (null for drafts).
+  publishedAt DateTime?     @map("published_at") @db.Timestamptz(3)
+  createdAt   DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime      @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  screens     BotFlowScreen[]
+
+  @@unique([name, version])
+  @@index([status])
+  @@map("bot_flows")
+}
+
+/// A single screen (node) in the flow graph. Represents one Telegram message
+/// with optional media and an inline keyboard.
+model BotFlowScreen {
+  id          String             @id @default(cuid()) @map("id")
+  /// Short ID used in callback_data (8 chars, fits in 64-byte limit).
+  shortId     String             @map("short_id")
+  flowId      String             @map("flow_id")
+  flow        BotFlow            @relation(fields: [flowId], references: [id], onDelete: Cascade)
+
+  /// Internal label for the editor (not shown to users).
+  name        String             @default("New Screen") @map("name")
+  /// Message text sent to the user — Russian.
+  textRu      String             @default("") @map("text_ru") @db.Text
+  /// Message text sent to the user — English.
+  textEn      String             @default("") @map("text_en") @db.Text
+  /// Parse mode for the message text.
+  parseMode   BotFlowParseMode   @default(HTML) @map("parse_mode")
+  /// Optional media attachment.
+  mediaType   BotFlowMediaType?  @map("media_type")
+  /// Telegram file_id for the media (used when sending).
+  mediaFileId String?            @map("media_file_id")
+  /// Preview URL for the editor (WebP thumbnail or direct URL).
+  mediaUrl    String?            @map("media_url")
+
+  /// Position on the React Flow canvas.
+  positionX   Float              @default(0) @map("position_x")
+  positionY   Float              @default(0) @map("position_y")
+  /// Whether this is the entry point of the flow.
+  isRoot      Boolean            @default(false) @map("is_root")
+
+  createdAt   DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime           @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  buttons     BotFlowButton[]
+
+  @@unique([flowId, shortId])
+  @@index([flowId])
+  @@map("bot_flow_screens")
+}
+
+/// A button in a flow screen's inline keyboard. Buttons with action=NAVIGATE
+/// define edges in the graph (targetScreenId points to another screen).
+model BotFlowButton {
+  id                String              @id @default(cuid()) @map("id")
+  screenId          String              @map("screen_id")
+  screen            BotFlowScreen       @relation(fields: [screenId], references: [id], onDelete: Cascade)
+
+  /// Button label text shown to the user — Russian.
+  labelRu           String              @default("Кнопка") @map("label_ru")
+  /// Button label text shown to the user — English.
+  labelEn           String              @default("Button") @map("label_en")
+  /// Row index (0-based) for inline keyboard layout.
+  row               Int                 @default(0) @map("row")
+  /// Column index within the row.
+  col               Int                 @default(0) @map("col")
+
+  /// What happens when the user presses this button.
+  actionType        BotFlowButtonAction @map("action_type")
+  /// For NAVIGATE: shortId of the target screen.
+  targetScreenId    String?             @map("target_screen_id")
+  /// For URL: external URL to open.
+  url               String?             @map("url")
+  /// For WEBAPP: Telegram Mini App URL.
+  webAppUrl         String?             @map("web_app_url")
+  /// For CALLBACK: built-in action identifier (e.g. "show_subscription").
+  callbackAction    String?             @map("callback_action")
+
+  /// Visual style (maps to Telegram Bot API `style` field).
+  style             BotFlowButtonStyle  @default(DEFAULT) @map("style")
+  /// Optional Telegram Premium custom emoji ID shown before the label.
+  iconCustomEmojiId String?             @map("icon_custom_emoji_id")
+
+  createdAt         DateTime            @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime            @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@index([screenId])
+  @@map("bot_flow_buttons")
+}
