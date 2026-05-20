@@ -156,7 +156,7 @@ Rezeis as a whole has two halves:
 ├── prisma/
 │   ├── schema.prisma          single-file schema
 │   └── migrations/            timestamped, append-only
-├── web/                       React/Vite admin SPA
+├── web/                       React/Vite admin SPA (built into unified image)
 │   ├── src/
 │   │   ├── app/               router, providers, protected routes
 │   │   ├── components/        layout + shared shadcn/ui wrappers
@@ -164,10 +164,10 @@ Rezeis as a whole has two halves:
 │   │   ├── i18n/              ru.ts, en.ts
 │   │   ├── lib/               api.ts (axios + auth interceptor), motion, utils
 │   │   └── stores/            Zustand stores (auth, locale, ...)
-│   └── Dockerfile             nginx-served SPA
+│   └── nginx.conf             (optional, for standalone nginx deploy)
 ├── test/                      backend unit + property-based tests
-├── Dockerfile                 multi-stage API + worker image
-└── docker-compose.yml         full local stack (Postgres + Redis + admin + web)
+├── Dockerfile                 unified multi-stage image (API + SPA + worker)
+└── docker-compose.yml         production stack (remnawave-network)
 ```
 
 ---
@@ -213,37 +213,59 @@ Default admin login is created on first boot from `ADMIN_*` environment variable
 ### Local Docker
 
 ```bash
-# API + worker (same image)
-docker build -t rezeis-api .
-
-# Frontend (nginx-served SPA)
-docker build -t rezeis-web ./web
-
-# Full stack
+docker build -t rezeis .
 docker compose up -d
 ```
 
 ### Container images (GHCR)
 
-Pushed automatically on every push to `main` and on every `v*` tag:
+A single unified image is pushed automatically on every push to `main` and on every `v*` tag:
 
 ```
-ghcr.io/dizzzable/rezeis-api:0.1.0
-ghcr.io/dizzzable/rezeis-api:latest
-ghcr.io/dizzzable/rezeis-api:sha-<short>
-
-ghcr.io/dizzzable/rezeis-web:0.1.0
-ghcr.io/dizzzable/rezeis-web:latest
-ghcr.io/dizzzable/rezeis-web:sha-<short>
+ghcr.io/dizzzable/rezeis:0.1.0
+ghcr.io/dizzzable/rezeis:latest
+ghcr.io/dizzzable/rezeis:sha-<short>
 ```
 
-The API image runs `node dist/main.js` by default. To run the worker from the same image:
+The image runs `node dist/main.js` by default (API + SPA on port 8000). To run the worker from the same image:
 
 ```bash
 docker run --rm \
   --env-file .env \
-  ghcr.io/dizzzable/rezeis-api:0.1.0 \
+  ghcr.io/dizzzable/rezeis:0.1.0 \
   node dist/worker.js
+```
+
+### Deployment with reverse proxy
+
+Rezeis runs in `remnawave-network` alongside Remnawave Panel. If you already have Traefik/Caddy configured for Remnawave, just add another router pointing to `http://rezeis:8000`.
+
+**Traefik example** (`/opt/remnawave/traefik/config/rezeis.yml`):
+
+```yaml
+http:
+  routers:
+    rezeis:
+      rule: "Host(`admin.yourdomain.com`)"
+      entrypoints:
+        - https
+      tls:
+        certResolver: letsencrypt
+      service: rezeis
+
+  services:
+    rezeis:
+      loadBalancer:
+        servers:
+          - url: "http://rezeis:8000"
+```
+
+**Caddy example** (add to Caddyfile):
+
+```
+admin.yourdomain.com {
+    reverse_proxy rezeis:8000
+}
 ```
 
 ---

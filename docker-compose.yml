@@ -1,98 +1,97 @@
+# ══════════════════════════════════════════════════════════════════════════════
+#  rezeis — docker-compose (production)
+#
+#  Runs in remnawave-network so rezeis can reach remnawave:3000 directly
+#  and the same reverse proxy (Traefik/Caddy) can route to rezeis:8000.
+#
+#  Usage:
+#    docker compose up -d
+#
+#  Reverse proxy config (Traefik example):
+#    service url: http://rezeis:8000
+# ══════════════════════════════════════════════════════════════════════════════
+
 services:
-  rezeis-db:
-    image: postgres:17
-    container_name: rezeis-db
-    hostname: rezeis-db
+  rezeis:
+    image: ghcr.io/dizzzable/rezeis:0.1.0
+    container_name: rezeis
+    hostname: rezeis
     restart: unless-stopped
     env_file:
       - .env
-    environment:
-      POSTGRES_DB: ${DATABASE_NAME}
-      POSTGRES_USER: ${DATABASE_USER}
-      POSTGRES_PASSWORD: ${DATABASE_PASSWORD}
-      TZ: UTC
-    volumes:
-      - rezeis-db-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
-      interval: 3s
-      timeout: 10s
-      retries: 3
-    networks:
-      - remnawave-network
-
-  rezeis-redis:
-    image: valkey/valkey:9-alpine
-    container_name: rezeis-redis
-    hostname: rezeis-redis
-    restart: unless-stopped
-    command: ["--requirepass", "${REDIS_PASSWORD}", "--bind", "0.0.0.0"]
-    volumes:
-      - rezeis-redis-data:/data
-    healthcheck:
-      test: ["CMD", "valkey-cli", "-a", "${REDIS_PASSWORD}", "ping"]
-      interval: 3s
-      timeout: 10s
-      retries: 3
-    networks:
-      - remnawave-network
-
-  rezeis-admin:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: rezeis-admin
-    container_name: rezeis-admin
-    hostname: rezeis-admin
-    restart: unless-stopped
-    env_file:
-      - .env
-    environment:
-      RUID_PROCESS_ROLE: api
     ports:
-      - "127.0.0.1:${REZEIS_PORT:-8000}:${REZEIS_PORT:-8000}"
+      - '127.0.0.1:8000:8000'
+    volumes:
+      - rezeis-data:/app/data
     depends_on:
       rezeis-db:
         condition: service_healthy
       rezeis-redis:
-        condition: service_healthy
-    volumes:
-      - rezeis-backups:/app/data/backups
+        condition: service_started
     networks:
       - remnawave-network
 
   rezeis-worker:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: rezeis-admin
+    image: ghcr.io/dizzzable/rezeis:0.1.0
     container_name: rezeis-worker
     hostname: rezeis-worker
     restart: unless-stopped
-    command: ["node", "dist/worker.js"]
     env_file:
       - .env
     environment:
-      RUID_PROCESS_ROLE: worker
+      - RUID_PROCESS_ROLE=worker
+    command: ["node", "dist/worker.js"]
+    volumes:
+      - rezeis-data:/app/data
     depends_on:
       rezeis-db:
         condition: service_healthy
       rezeis-redis:
-        condition: service_healthy
-    volumes:
-      - rezeis-backups:/app/data/backups
+        condition: service_started
     networks:
       - remnawave-network
+
+  rezeis-db:
+    image: postgres:16-alpine
+    container_name: rezeis-db
+    hostname: rezeis-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-rezeis}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rezeis}
+      POSTGRES_DB: ${POSTGRES_DB:-rezeis}
+    volumes:
+      - rezeis-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-rezeis}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - remnawave-network
+
+  rezeis-redis:
+    image: redis:7-alpine
+    container_name: rezeis-redis
+    hostname: rezeis-redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD:-rezeis}
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+    volumes:
+      - rezeis-redis-data:/data
+    networks:
+      - remnawave-network
+
+volumes:
+  rezeis-data:
+  rezeis-db-data:
+  rezeis-redis-data:
 
 networks:
   remnawave-network:
     name: remnawave-network
+    driver: bridge
     external: true
-
-volumes:
-  rezeis-db-data:
-    name: rezeis-db-data
-  rezeis-redis-data:
-    name: rezeis-redis-data
-  rezeis-backups:
-    name: rezeis-backups

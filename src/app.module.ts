@@ -1,7 +1,10 @@
+import { join } from 'node:path';
+
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { APP_GUARD } from '@nestjs/core';
 import { ScheduleModule } from '@nestjs/schedule';
+import { ServeStaticModule } from '@nestjs/serve-static';
 
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
@@ -69,6 +72,15 @@ import { WebhooksModule } from './modules/webhooks/webhooks.module';
       expandVariables: true,
       validate: validateEnvironment,
       load: [appConfig, authConfig, databaseConfig, emailConfig, paymentsConfig, redisConfig, remnawaveConfig, webhookConfig],
+    }),
+    ServeStaticModule.forRoot({
+      rootPath: join(__dirname, '..', 'web'),
+      serveRoot: '/',
+      exclude: ['/api/{*path}', '/uploads/{*path}'],
+      serveStaticOptions: {
+        index: ['index.html'],
+        fallthrough: true,
+      },
     }),
     PrismaModule,
     RawCacheModule,
