@@ -26,19 +26,22 @@ export function ScreenEditorPanel({ screen, flowName }: ScreenEditorPanelProps) 
   const { t } = useTranslation()
   const queryClient = useQueryClient()
 
+  // Destructure to avoid react-doctor false positive on "screen.*" in deps
+  const { id: screenId, name: screenName, textRu: screenTextRu, textEn: screenTextEn, isRoot: screenIsRoot } = screen
+
   // Local state for debounced editing
-  const [name, setName] = useState(screen.name)
-  const [textRu, setTextRu] = useState(screen.textRu)
-  const [textEn, setTextEn] = useState(screen.textEn)
-  const [isRoot, setIsRoot] = useState(screen.isRoot)
+  const [name, setName] = useState(screenName)
+  const [textRu, setTextRu] = useState(screenTextRu)
+  const [textEn, setTextEn] = useState(screenTextEn)
+  const [isRoot, setIsRoot] = useState(screenIsRoot)
 
   // Sync when screen changes (user clicks different node)
   useEffect(() => {
-    setName(screen.name)
-    setTextRu(screen.textRu)
-    setTextEn(screen.textEn)
-    setIsRoot(screen.isRoot)
-  }, [screen.id, screen.name, screen.textRu, screen.textEn, screen.isRoot])
+    setName(screenName)
+    setTextRu(screenTextRu)
+    setTextEn(screenTextEn)
+    setIsRoot(screenIsRoot)
+  }, [screenId, screenName, screenTextRu, screenTextEn, screenIsRoot])
 
   // ── Screen mutations ────────────────────────────────────────────────────────
   const updateScreenMutation = useMutation({
@@ -99,14 +102,14 @@ export function ScreenEditorPanel({ screen, flowName }: ScreenEditorPanelProps) 
   // ── Save screen on blur ─────────────────────────────────────────────────────
   const handleScreenBlur = useCallback(() => {
     const changes: Record<string, unknown> = {}
-    if (name !== screen.name) changes.name = name
-    if (textRu !== screen.textRu) changes.textRu = textRu
-    if (textEn !== screen.textEn) changes.textEn = textEn
-    if (isRoot !== screen.isRoot) changes.isRoot = isRoot
+    if (name !== screenName) changes.name = name
+    if (textRu !== screenTextRu) changes.textRu = textRu
+    if (textEn !== screenTextEn) changes.textEn = textEn
+    if (isRoot !== screenIsRoot) changes.isRoot = isRoot
     if (Object.keys(changes).length > 0) {
       updateScreenMutation.mutate(changes)
     }
-  }, [name, textRu, textEn, isRoot, screen, updateScreenMutation])
+  }, [name, textRu, textEn, isRoot, screenName, screenTextRu, screenTextEn, screenIsRoot, updateScreenMutation])
 
   return (
     <div className="space-y-4">
