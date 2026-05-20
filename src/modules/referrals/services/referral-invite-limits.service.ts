@@ -1,0 +1,244 @@
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+
+import { PrismaService } from '../../../common/prisma/prisma.service';
+
+/**
+ * Invite limits configuration from `Settings.referralSettings` JSON.
+ *
+ * Donor: `ReferralInviteLimitsDto` in altshop.
+ */
+export interface InviteLimitsConfig {
+  /** Whether link TTL enforcement is active. */
+  linkTtlEnabled: boolean;
+  /** TTL in seconds for each invite link. Null = no expiry. */
+  linkTtlSeconds: number | null;
+  /** Whether slot-based capacity is active. */
+  slotsEnabled: boolean;
+  /** Initial number of invite slots a user gets. Null = unlimited. */
+  initialSlots: number | null;
+  /** Number of qualified referrals needed to trigger a slot refill. */
+  refillThresholdQualified: number | null;
+  /** How many slots are added on each refill. */
+  refillAmount: number | null;
+}
+
+export interface InviteCapacitySnapshot {
+  /** Total slots ever allocated to this user. */
+  totalSlots: number | null;
+  /** Slots currently consumed (active + consumed invites). */
+  usedSlots: number;
+  /** Remaining available slots. Null = unlimited. */
+  remainingSlots: number | null;
+  /** Whether the user can create a new invite right now. */
+  canCreateInvite: boolean;
+}
+
+const DEFAULT_LIMITS: InviteLimitsConfig = {
+  linkTtlEnabled: false,
+  linkTtlSeconds: null,
+  slotsEnabled: false,
+  initialSlots: null,
+  refillThresholdQualified: null,
+  refillAmount: null,
+};
+
+/**
+ * Manages invite slot capacity and TTL enforcement.
+ *
+ * Donor: `referral_invites.get_effective_invite_limits` +
+ *        `referral_invites.get_invite_capacity_snapshot`.
+ *
+ * Slot refill logic:
+ *   Every time a referral qualifies (via `ReferralQualificationService`),
+ *   we check if the referrer has reached the `refillThresholdQualified`
+ *   count. If so, we grant `refillAmount` additional slots by creating
+ *   placeholder invite records (or by tracking a counter — we use the
+ *   simpler approach of counting existing invites vs qualified referrals).
+ */
+@Injectable()
+export class ReferralInviteLimitsService {
+  private readonly logger = new Logger(ReferralInviteLimitsService.name);
+
+  public constructor(private readonly prismaService: PrismaService) {}
+
+  /**
+   * Returns the effective invite limits from settings.
+   */
+  public async getEffectiveLimits(): Promise<InviteLimitsConfig> {
+    const settings = await this.prismaService.settings.findFirst({
+      select: { referralSettings: true },
+    });
+    if (!settings) return DEFAULT_LIMITS;
+    const json = settings.referralSettings as Record<string, unknown>;
+    const inviteLimits = (json?.invite_limits ?? {}) as Record<string, unknown>;
+    return {
+      linkTtlEnabled: inviteLimits.link_ttl_enabled === true,
+      linkTtlSeconds: typeof inviteLimits.link_ttl_seconds === 'number' ? inviteLimits.link_ttl_seconds : null,
+      slotsEnabled: inviteLimits.slots_enabled === true,
+      initialSlots: typeof inviteLimits.initial_slots === 'number' ? inviteLimits.initial_slots : null,
+      refillThresholdQualified: typeof inviteLimits.refill_threshold_qualified === 'number' ? inviteLimits.refill_threshold_qualified : null,
+      refillAmount: typeof inviteLimits.refill_amount === 'number' ? inviteLimits.refill_amount : null,
+    };
+  }
+
+  /**
+   * Returns the effective invite limits **for a specific user**, layering
+   * the per-user override on top of the global configuration.
+   *
+   * Per-user override is stored on `User.referralInviteSettings` as a
+   * shallow JSON object whose keys mirror the global keys (snake_case in
+   * DB, camelCase exposed by `parseUserOverride`). Any field present and
+   * non-null in the override replaces the corresponding global value.
+   *
+   * Donor parity: altshop's `ReferralInviteIndividualSettingsDto` +
+   * `_resolve_user_invite_limits` helper.
+   */
+  public async getEffectiveLimitsForUser(userId: string): Promise<InviteLimitsConfig> {
+    const [global, user] = await Promise.all([
+      this.getEffectiveLimits(),
+      this.prismaService.user.findUnique({
+        where: { id: userId },
+        select: { referralInviteSettings: true },
+      }),
+    ]);
+    return mergeUserInviteOverride(global, user?.referralInviteSettings ?? null);
+  }
+
+  /**
+   * Returns the current invite capacity for a user.
+   */
+  public async getCapacity(userId: string): Promise<InviteCapacitySnapshot> {
+    const limits = await this.getEffectiveLimits();
+
+    if (!limits.slotsEnabled || limits.initialSlots === null) {
+      return { totalSlots: null, usedSlots: 0, remainingSlots: null, canCreateInvite: true };
+    }
+
+    const [inviteCount, qualifiedCount] = await Promise.all([
+      this.prismaService.referralInvite.count({
+        where: { inviterId: userId },
+      }),
+      this.prismaService.referral.count({
+        where: { referrerId: userId, qualifiedAt: { not: null } },
+      }),
+    ]);
+
+    // Calculate total slots: initial + refills earned
+    let totalSlots = limits.initialSlots;
+    if (limits.refillThresholdQualified !== null && limits.refillThresholdQualified > 0 && limits.refillAmount !== null) {
+      const refillsEarned = Math.floor(qualifiedCount / limits.refillThresholdQualified);
+      totalSlots += refillsEarned * limits.refillAmount;
+    }
+
+    const usedSlots = inviteCount;
+    const remainingSlots = Math.max(0, totalSlots - usedSlots);
+
+    return {
+      totalSlots,
+      usedSlots,
+      remainingSlots,
+      canCreateInvite: remainingSlots > 0,
+    };
+  }
+
+  /**
+   * Validates that the user can create a new invite (slot check + TTL).
+   * Throws BadRequestException if not allowed.
+   */
+  public async validateCanCreateInvite(userId: string): Promise<void> {
+    const capacity = await this.getCapacity(userId);
+    if (!capacity.canCreateInvite) {
+      throw new BadRequestException(
+        'INVITE_SLOT_LIMIT_REACHED: No remaining invite slots. Earn more by qualifying referrals.',
+      );
+    }
+  }
+
+  /**
+   * Resolves the expiry date for a new invite based on TTL settings.
+   * Returns null if TTL is disabled.
+   */
+  public async resolveInviteExpiry(explicitExpiresAt?: Date | null): Promise<Date | null> {
+    if (explicitExpiresAt !== undefined && explicitExpiresAt !== null) {
+      return explicitExpiresAt;
+    }
+    const limits = await this.getEffectiveLimits();
+    if (!limits.linkTtlEnabled || limits.linkTtlSeconds === null) {
+      return null;
+    }
+    const expiresAt = new Date();
+    expiresAt.setSeconds(expiresAt.getSeconds() + limits.linkTtlSeconds);
+    return expiresAt;
+  }
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Per-user override merge
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Per-user override JSON shape, accepted on `User.referralInviteSettings`.
+ *
+ * Any field that is `undefined` is treated as "use the global value".
+ * Boolean `*Enabled` flags follow the same rule — if absent, the global
+ * value wins. `useGlobalSettings: true` short-circuits the whole merge
+ * and returns the global config untouched.
+ */
+export interface UserInviteOverride {
+  readonly useGlobalSettings?: boolean;
+  readonly linkTtlEnabled?: boolean;
+  readonly linkTtlSeconds?: number | null;
+  readonly slotsEnabled?: boolean;
+  readonly initialSlots?: number | null;
+  readonly refillThresholdQualified?: number | null;
+  readonly refillAmount?: number | null;
+}
+
+export function mergeUserInviteOverride(
+  global: InviteLimitsConfig,
+  override: unknown,
+): InviteLimitsConfig {
+  const parsed = parseUserOverride(override);
+  if (parsed === null || parsed.useGlobalSettings === true) {
+    return global;
+  }
+  return {
+    linkTtlEnabled:
+      typeof parsed.linkTtlEnabled === 'boolean' ? parsed.linkTtlEnabled : global.linkTtlEnabled,
+    linkTtlSeconds:
+      parsed.linkTtlSeconds !== undefined ? parsed.linkTtlSeconds : global.linkTtlSeconds,
+    slotsEnabled:
+      typeof parsed.slotsEnabled === 'boolean' ? parsed.slotsEnabled : global.slotsEnabled,
+    initialSlots:
+      parsed.initialSlots !== undefined ? parsed.initialSlots : global.initialSlots,
+    refillThresholdQualified:
+      parsed.refillThresholdQualified !== undefined
+        ? parsed.refillThresholdQualified
+        : global.refillThresholdQualified,
+    refillAmount:
+      parsed.refillAmount !== undefined ? parsed.refillAmount : global.refillAmount,
+  };
+}
+
+function parseUserOverride(value: unknown): UserInviteOverride | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== 'object') return null;
+  const v = value as Record<string, unknown>;
+  return {
+    useGlobalSettings: typeof v.useGlobalSettings === 'boolean' ? v.useGlobalSettings : undefined,
+    linkTtlEnabled: typeof v.linkTtlEnabled === 'boolean' ? v.linkTtlEnabled : undefined,
+    linkTtlSeconds: parseNullableInt(v.linkTtlSeconds),
+    slotsEnabled: typeof v.slotsEnabled === 'boolean' ? v.slotsEnabled : undefined,
+    initialSlots: parseNullableInt(v.initialSlots),
+    refillThresholdQualified: parseNullableInt(v.refillThresholdQualified),
+    refillAmount: parseNullableInt(v.refillAmount),
+  };
+}
+
+function parseNullableInt(value: unknown): number | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value === 'number' && Number.isFinite(value)) return Math.trunc(value);
+  return undefined;
+}

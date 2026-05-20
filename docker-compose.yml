@@ -1,0 +1,98 @@
+services:
+  rezeis-db:
+    image: postgres:17
+    container_name: rezeis-db
+    hostname: rezeis-db
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      POSTGRES_DB: ${DATABASE_NAME}
+      POSTGRES_USER: ${DATABASE_USER}
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD}
+      TZ: UTC
+    volumes:
+      - rezeis-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 3s
+      timeout: 10s
+      retries: 3
+    networks:
+      - remnawave-network
+
+  rezeis-redis:
+    image: valkey/valkey:9-alpine
+    container_name: rezeis-redis
+    hostname: rezeis-redis
+    restart: unless-stopped
+    command: ["--requirepass", "${REDIS_PASSWORD}", "--bind", "0.0.0.0"]
+    volumes:
+      - rezeis-redis-data:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 3s
+      timeout: 10s
+      retries: 3
+    networks:
+      - remnawave-network
+
+  rezeis-admin:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: rezeis-admin
+    container_name: rezeis-admin
+    hostname: rezeis-admin
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      RUID_PROCESS_ROLE: api
+    ports:
+      - "127.0.0.1:${REZEIS_PORT:-8000}:${REZEIS_PORT:-8000}"
+    depends_on:
+      rezeis-db:
+        condition: service_healthy
+      rezeis-redis:
+        condition: service_healthy
+    volumes:
+      - rezeis-backups:/app/data/backups
+    networks:
+      - remnawave-network
+
+  rezeis-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: rezeis-admin
+    container_name: rezeis-worker
+    hostname: rezeis-worker
+    restart: unless-stopped
+    command: ["node", "dist/worker.js"]
+    env_file:
+      - .env
+    environment:
+      RUID_PROCESS_ROLE: worker
+    depends_on:
+      rezeis-db:
+        condition: service_healthy
+      rezeis-redis:
+        condition: service_healthy
+    volumes:
+      - rezeis-backups:/app/data/backups
+    networks:
+      - remnawave-network
+
+networks:
+  remnawave-network:
+    name: remnawave-network
+    external: true
+
+volumes:
+  rezeis-db-data:
+    name: rezeis-db-data
+  rezeis-redis-data:
+    name: rezeis-redis-data
+  rezeis-backups:
+    name: rezeis-backups

@@ -1,0 +1,1893 @@
+// =============================================================================
+//  rezeis-admin — Prisma Schema (rebuilt to match application code)
+//
+//  Conventions:
+//    - All primary keys are CUIDs (string).
+//    - Field names are camelCase, mapped to snake_case columns.
+//    - Snapshots, settings, and ad-hoc payloads live in JSON columns.
+//
+//  Database: PostgreSQL  |  ORM: Prisma Client JS
+// =============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../node_modules/.prisma/client"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// =============================================================================
+//  ENUMS
+// =============================================================================
+
+/// Universal role used both for end-users (USER) and admin staff (DEV/ADMIN).
+enum UserRole {
+  DEV
+  ADMIN
+  USER
+}
+
+enum Locale {
+  AR
+  AZ
+  BE
+  CS
+  DE
+  EN
+  ES
+  FA
+  FR
+  HE
+  HI
+  ID
+  IT
+  JA
+  KK
+  KO
+  MS
+  NL
+  PL
+  PT
+  RO
+  RU
+  SR
+  TR
+  UK
+  UZ
+  VI
+}
+
+/// Currencies supported by pricing rules.
+/// Keep the set minimal — pricing service has explicit per-currency policy
+/// for each value here.
+enum Currency {
+  USD
+  RUB
+  USDT
+  XTR
+  TON
+  BTC
+  ETH
+}
+
+/// Payment gateway catalog. Pricing/runtime supports every value here.
+enum PaymentGatewayType {
+  YOOKASSA
+  TELEGRAM_STARS
+  PLATEGA
+  HELEKET
+  CRYPTOMUS
+  MULENPAY
+  ANTILOPAY
+  OVERPAY
+  PAYPALYCH
+  RIOPAY
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  DISABLED
+  LIMITED
+  EXPIRED
+  DELETED
+}
+
+enum TransactionStatus {
+  PENDING
+  COMPLETED
+  CANCELED
+  FAILED
+}
+
+enum PurchaseType {
+  NEW
+  RENEW
+  UPGRADE
+  ADDITIONAL
+}
+
+enum PurchaseChannel {
+  WEB
+  TELEGRAM
+}
+
+enum PlanType {
+  TRAFFIC
+  DEVICES
+  BOTH
+  UNLIMITED
+}
+
+enum PlanAvailability {
+  ALL
+  NEW
+  EXISTING
+  INVITED
+  ALLOWED
+  TRIAL
+}
+
+enum ArchivedPlanRenewMode {
+  SELF_RENEW
+  REPLACE_ON_RENEW
+}
+
+/// Traffic reset strategy. `YEAR` is intentionally omitted — pricing logic
+/// in the application currently does not handle it.
+enum TrafficLimitStrategy {
+  NO_RESET
+  DAY
+  WEEK
+  MONTH
+}
+
+enum AccessMode {
+  PUBLIC
+  INVITED
+  PURCHASE_BLOCKED
+  REG_BLOCKED
+  RESTRICTED
+}
+
+enum DeviceType {
+  ANDROID
+  IPHONE
+  WINDOWS
+  MAC
+  OTHER
+}
+
+enum PaymentWebhookLifecycleStatus {
+  RECEIVED
+  ENQUEUED
+  PROCESSING
+  PROCESSED
+  FAILED
+}
+
+enum SyncAction {
+  CREATE
+  UPDATE
+  DELETE
+  TRAFFIC_RESET
+}
+
+enum SyncJobStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+enum BroadcastStatus {
+  DRAFT
+  PROCESSING
+  COMPLETED
+  CANCELED
+  FAILED
+}
+
+enum BroadcastAudience {
+  ALL
+  ACTIVE_SUBSCRIBERS
+  EXPIRED
+  TRIAL
+  UNSUBSCRIBED
+}
+
+enum BroadcastMessageStatus {
+  PENDING
+  SENT
+  FAILED
+  CANCELED
+}
+
+enum WithdrawalStatus {
+  PENDING
+  COMPLETED
+  REJECTED
+  CANCELED
+}
+
+/// Reward type emitted by an activated promocode (donor: altshop `PromocodeRewardType`).
+enum PromocodeRewardType {
+  /// Adds days to a target subscription.
+  DURATION
+  /// Adds GB of traffic to a target subscription.
+  TRAFFIC
+  /// Adds device slots to a target subscription.
+  DEVICES
+  /// Issues a brand-new subscription (or extends a target one) with the
+  /// plan stored in `Promocode.plan`.
+  SUBSCRIPTION
+  /// Sets the user's personal discount (0-100 %).
+  PERSONAL_DISCOUNT
+  /// Sets the user's per-purchase discount (0-100 %).
+  PURCHASE_DISCOUNT
+}
+
+/// Availability filter applied during validation (donor: altshop `PromocodeAvailability`).
+enum PromocodeAvailability {
+  ALL
+  NEW
+  EXISTING
+  INVITED
+  ALLOWED
+}
+
+/// Outcome of `PromocodeService.activate(...)`. A `next_step` of
+/// `SELECT_SUBSCRIPTION` or `CREATE_NEW` lets the calling portal branch the
+/// flow without re-running validation.
+enum PromocodeActivationOutcome {
+  ACTIVATED
+  SELECT_SUBSCRIPTION
+  CREATE_NEW
+  REJECTED
+}
+
+/// Source recorded when a referral edge is created.
+enum ReferralInviteSource {
+  BOT
+  WEB
+  UNKNOWN
+}
+
+/// Reward model emitted when a referral qualifies (donor: altshop `ReferralRewardType`).
+enum ReferralRewardType {
+  POINTS
+  EXTRA_DAYS
+}
+
+/// Partner accrual level — donor stores 1/2/3 in plain int columns; we mirror
+/// the named enum for type safety.
+enum PartnerLevel {
+  LEVEL_1
+  LEVEL_2
+  LEVEL_3
+}
+
+/// When the partner reward is credited.
+///
+/// Donor: altshop `PartnerAccrualStrategy`.
+enum PartnerAccrualStrategy {
+  /// Reward is added to the partner's balance on every qualified payment.
+  ON_EACH_PAYMENT
+  /// Reward is added once per unique referral, on their first qualified payment.
+  ONCE_PER_USER
+}
+
+/// Shape of the partner reward.
+///
+/// Donor: altshop `PartnerRewardType`.
+enum PartnerRewardType {
+  /// Percent of the qualified payment amount.
+  PERCENT
+  /// Fixed amount in minor units (kopecks/cents) per qualified event.
+  FIXED
+}
+
+/// Imports module lifecycle status.
+enum ImportStatus {
+  DRAFT
+  DRY_RUN
+  COMMITTED
+  ROLLED_BACK
+  FAILED
+}
+
+/// Backup record delivery channel.
+enum BackupScope {
+  DB
+  ASSETS
+  FULL
+}
+
+/// Support ticket lifecycle.
+enum SupportTicketStatus {
+  OPEN
+  WAITING_REPLY
+  CLOSED
+}
+
+/// Author kind for a support ticket message.
+enum SupportTicketAuthorType {
+  USER
+  ADMIN
+}
+
+// =============================================================================
+//  ADMIN USERS & AUDIT
+// =============================================================================
+
+/// Authenticated admin operator. The first DEV admin is bootstrapped via
+/// `/api/internal/auth/bootstrap-first-admin` when the table is empty.
+model AdminUser {
+  id                 String    @id @default(cuid()) @map("id")
+  login              String    @map("login")
+  loginNormalized    String    @unique @map("login_normalized")
+  email              String?   @unique @map("email")
+  passwordHash       String    @map("password_hash")
+  name               String?   @map("name")
+  role               UserRole  @default(ADMIN) @map("role")
+  isActive           Boolean   @default(true) @map("is_active")
+  /// Incremented on password change / session revoke — invalidates old JWTs.
+  tokenVersion       Int       @default(0) @map("token_version")
+  lastLoginAt        DateTime? @map("last_login_at") @db.Timestamptz(3)
+  lastLoginIp        String?   @map("last_login_ip")
+  passwordChangedAt  DateTime? @map("password_changed_at") @db.Timestamptz(3)
+  /// Forces the admin to change their password on next sign-in. Set when an
+  /// operator resets a password or imports a new admin with a temporary one.
+  mustChangePassword Boolean   @default(false) @map("must_change_password")
+  /// Optional pointer to a custom RBAC role. When `null` the admin still
+  /// gets the implicit permissions tied to their `role` enum (DEV --> all,
+  /// ADMIN --> safe-write defaults). When set the role's permission matrix
+  /// fully replaces the legacy `role`-derived defaults.
+  rbacRoleId         String?   @map("rbac_role_id")
+  ///
+  /// ── 2FA (TOTP) — Phase 5 ──────────────────────────────────────────
+  ///
+  /// `true` once the admin has finished the TOTP enrollment flow. Until
+  /// then `totpSecretEncrypted` is empty and login skips the second-factor
+  /// step. Operators with `totpEnabled = true` MUST present a valid 6-digit
+  /// code on every login and on every privileged action that re-prompts.
+  totpEnabled        Boolean   @default(false) @map("totp_enabled")
+  /// AES-256-GCM-encrypted Base32 TOTP secret. Encryption key is derived
+  /// from REZEIS_CRYPT_KEY so the database alone does not expose secrets.
+  /// Format: `iv:ciphertext:tag`, all hex-encoded.
+  totpSecretEncrypted String?  @map("totp_secret_encrypted")
+  /// SHA-256 hashes of single-use TOTP recovery codes. Stored as a string
+  /// array; each value is consumed (removed) on use. We store hashes only;
+  /// the plaintext codes are shown to the operator exactly once during
+  /// enrollment.
+  totpRecoveryCodes  String[]  @default([]) @map("totp_recovery_codes")
+  totpEnrolledAt     DateTime? @map("totp_enrolled_at") @db.Timestamptz(3)
+  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt          DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  auditLogs     AdminAuditLog[]    @relation("AdminAuditLogActor")
+  rbacRole      AdminRole?         @relation("AdminUserRbacRole", fields: [rbacRoleId], references: [id], onDelete: SetNull)
+  scopePolicies AdminScopePolicy[] @relation("AdminUserScopePolicy")
+  themePresets  AdminThemePreset[] @relation("AdminThemePresetOwner")
+
+  @@index([role])
+  @@index([isActive])
+  @@index([rbacRoleId])
+  @@map("admin_users")
+}
+
+/// AdminThemePreset
+/// ────────────────
+/// Saved appearance preset (preset id, custom CSS, per-token overrides,
+/// radius). Owned by an admin; can optionally be shared with the rest of
+/// the team via `isShared = true`.
+model AdminThemePreset {
+  id          String   @id @default(cuid()) @map("id")
+  ownerId     String   @map("owner_id")
+  name        String   @map("name")
+  description String?  @map("description")
+  isShared    Boolean  @default(false) @map("is_shared")
+  /// Snapshot of the appearance state — `presetId`, `customCss`,
+  /// `overridesLight`, `overridesDark`, `radius`. Validated and shaped
+  /// in `theme-preset.dto.ts`.
+  themeData   Json     @map("theme_data")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  owner AdminUser @relation("AdminThemePresetOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+
+  @@index([ownerId])
+  @@index([isShared])
+  @@map("admin_theme_presets")
+}
+
+/// Append-only audit trail of admin actions.
+model AdminAuditLog {
+  id          String   @id @default(cuid()) @map("id")
+  /// Free-form action identifier, e.g. "admin.login.succeeded", "plans.created".
+  action      String   @map("action")
+  adminUserId String?  @map("admin_user_id")
+  ipAddress   String?  @map("ip_address")
+  userAgent   String?  @map("user_agent")
+  metadata    Json     @default("{}") @map("metadata")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  adminUser AdminUser? @relation("AdminAuditLogActor", fields: [adminUserId], references: [id], onDelete: SetNull)
+
+  @@index([action])
+  @@index([adminUserId])
+  @@index([createdAt])
+  @@map("admin_audit_log")
+}
+
+// =============================================================================
+//  PHASE 5 — Login Guard + Admin IP Allowlist
+// =============================================================================
+
+/// Single login attempt against `/admin/auth/login`. Inserted on every
+/// success and failure so the LoginGuard service can detect brute-force
+/// patterns by counting recent failures per (login, ip) tuple.
+///
+/// Retention: cleaned up by the Phase 5 daily cron — see
+/// `LoginGuardService.cleanupOldAttempts()`.
+model AdminLoginAttempt {
+  id           String   @id @default(cuid()) @map("id")
+  /// Normalised login as supplied by the client. Empty string means the
+  /// guard rejected the request before we read the body.
+  loginNormalized String   @default("") @map("login_normalized")
+  ipAddress    String   @map("ip_address")
+  /// `true` for successful authentications. We keep both successes and
+  /// failures so the audit UI can render "last successful login from this
+  /// IP" in addition to failure spikes.
+  success      Boolean  @default(false) @map("success")
+  /// Short reason code: `invalid_password`, `admin_not_found`, `ip_blocked`,
+  /// `rate_limited`, `totp_required`, `totp_invalid`, etc.
+  reason       String?  @map("reason")
+  userAgent    String?  @map("user_agent")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  @@index([loginNormalized, createdAt])
+  @@index([ipAddress, createdAt])
+  @@index([success, createdAt])
+  @@map("admin_login_attempts")
+}
+
+/// Admin panel IP allowlist. When the table contains at least one row,
+/// the panel switches into "allowlist mode": only requests originating
+/// from a listed address (or CIDR range) may reach `/api/admin/*`.
+///
+/// Admins can still be added/removed by the local CLI as a recovery
+/// mechanism (see scripts/admin-cli.ts in Phase 9). The active flag lets
+/// operators temporarily disable an entry without deleting it.
+model AdminIpAllowlist {
+  id          String    @id @default(cuid()) @map("id")
+  /// Single IPv4/IPv6 address or CIDR range (`1.2.3.0/24`, `2001:db8::/32`).
+  address     String    @unique @map("address")
+  /// Free-form label visible in the admin UI (e.g. `Office VPN`,
+  /// `Operator-Anna-home`). No PII expected.
+  label       String    @default("") @map("label")
+  /// `true` to enforce the entry; `false` lets operators stage-add an
+  /// address without enabling it yet.
+  isActive    Boolean   @default(true) @map("is_active")
+  /// Pointer to the admin who created the entry.
+  createdById String?   @map("created_by_id")
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@index([isActive])
+  @@index([createdAt])
+  @@map("admin_ip_allowlist")
+}
+
+/// IP-based access blocklist. Used by the admin panel to deny requests from
+/// abusive sources (manual `/blocking` entries) and by automated rules
+/// (Phase 2: anti-fraud action `block_ip`).
+///
+/// Address can be a single IPv4/IPv6 address or a CIDR range. We store it
+/// as a free-form string so tooling can normalise into the format that best
+/// fits the consumer (rate-limit middleware, fail2ban-style filters, etc.).
+model BlockedIp {
+  id          String    @id @default(cuid()) @map("id")
+  /// Single address (`1.2.3.4`) or CIDR (`1.2.3.0/24`).
+  address     String    @unique @map("address")
+  /// Operator-supplied or rule-supplied reason. Free-form, no PII expected.
+  reason      String?   @map("reason")
+  /// `manual` for human entries, `automation` for rule-emitted entries.
+  source      String    @default("manual") @map("source")
+  /// Optional pointer to the admin who created the entry.
+  createdById String?   @map("created_by_id")
+  /// When the block expires. `null` means permanent.
+  expiresAt   DateTime? @map("expires_at") @db.Timestamptz(3)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@index([source])
+  @@index([expiresAt])
+  @@index([createdAt])
+  @@map("blocked_ips")
+}
+
+// =============================================================================
+//  PHASE 6 — Webhook Subscriptions + Delivery History
+// =============================================================================
+
+/// Lifecycle status of a webhook delivery attempt.
+enum WebhookDeliveryStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+  RETRYING
+}
+
+/// Outgoing webhook subscription — lets external services receive HMAC-
+/// signed POST requests when SystemEvents fire (`payment.completed`,
+/// `subscription.created`, `user.blocked`, …).
+///
+/// Identity & secrets
+///   Each subscription owns its own random secret (`secret`). The secret
+///   is stored as a 64-char hex string and used to compute an HMAC-SHA256
+///   of the body. The wire signature header follows Stripe's format:
+///
+///     X-Rezeis-Signature: t=<unix-ts>,v1=<hex-hmac>
+///
+///   Receivers verify both the timestamp (replay protection) and the
+///   HMAC. The leading `t=` element is part of the signed payload:
+///     `<timestamp>.<body>`
+///
+/// Filtering
+///   `eventTypes` is a list of either exact event types
+///   (`payment.completed`) or simple wildcards (`payment.*`, `*`).
+///   Empty list means "every event".
+///
+/// Auto-disable
+///   `consecutiveFailures` is incremented on every failed delivery and
+///   reset to 0 on success. When it crosses
+///   `WebhookDispatcherService.AUTO_DISABLE_THRESHOLD`, the row's
+///   `isActive` flips to `false` and the operator gets a notification.
+model WebhookSubscription {
+  id                  String    @id @default(cuid()) @map("id")
+  /// Operator-supplied label visible in the UI.
+  name                String    @map("name")
+  url                 String    @map("url")
+  /// Hex-encoded random secret used to sign payloads. Generated server
+  /// side on create — operators may rotate it (regenerate endpoint).
+  secret              String    @map("secret")
+  /// Filter — empty array OR `[*]` matches every event.
+  eventTypes          String[]  @default([]) @map("event_types")
+  /// Optional human-readable description.
+  description         String?   @map("description")
+  isActive            Boolean   @default(true) @map("is_active")
+  /// Pointer to the admin who created the entry.
+  createdById         String?   @map("created_by_id")
+  /// Last successful delivery — used by the dashboard to flag stale endpoints.
+  lastDeliveredAt     DateTime? @map("last_delivered_at") @db.Timestamptz(3)
+  /// Counter that drives auto-disable.
+  consecutiveFailures Int       @default(0) @map("consecutive_failures")
+  /// Total deliveries attempted (success + fail), maintained on every
+  /// dispatch so list views don't need a JOIN/COUNT on the deliveries table.
+  totalDeliveries     Int       @default(0) @map("total_deliveries")
+  totalFailures       Int       @default(0) @map("total_failures")
+  /// Operator-disabled bit — set when the dispatcher hits the
+  /// auto-disable threshold. Distinct from `isActive` (which the operator
+  /// toggles manually) so we can show "auto-disabled, requires attention".
+  autoDisabledAt      DateTime? @map("auto_disabled_at") @db.Timestamptz(3)
+  createdAt           DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt           DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  deliveries WebhookDelivery[] @relation("WebhookSubscriptionDeliveries")
+
+  @@index([isActive])
+  @@index([createdAt])
+  @@map("webhook_subscriptions")
+}
+
+/// One delivery attempt against a webhook endpoint. Inserted once per
+/// (subscription, event) tuple as `PENDING` and updated to
+/// `SUCCEEDED` / `FAILED` / `RETRYING` by the BullMQ processor.
+///
+/// Retention: the daily cleanup cron (in `WebhookDispatcherService`) drops
+/// rows older than 30 days so the table stays bounded.
+model WebhookDelivery {
+  id              String                @id @default(cuid()) @map("id")
+  subscriptionId  String                @map("subscription_id")
+  /// SystemEvents event type ("payment.completed" etc.).
+  eventType       String                @map("event_type")
+  /// JSON payload that was POSTed (or will be). Kept for "Replay" feature
+  /// from the UI.
+  payload         Json                  @map("payload")
+  status          WebhookDeliveryStatus @default(PENDING) @map("status")
+  attempt         Int                   @default(0) @map("attempt")
+  /// HTTP status from the last attempt. `null` while pending.
+  httpStatus      Int?                  @map("http_status")
+  /// First few chars of the response body for diagnostics. Always
+  /// truncated to `MAX_RESPONSE_BODY_PREVIEW` chars to keep storage
+  /// predictable.
+  responseBody    String?               @map("response_body")
+  /// Last error message (transport-level — DNS, timeout, TLS, …).
+  errorMessage    String?               @map("error_message")
+  /// Round-trip time in ms, populated on completion.
+  durationMs      Int?                  @map("duration_ms")
+  /// When the next retry is scheduled. `null` once the delivery is
+  /// terminal (SUCCEEDED or FAILED with no more retries).
+  nextRetryAt     DateTime?             @map("next_retry_at") @db.Timestamptz(3)
+  startedAt       DateTime?             @map("started_at") @db.Timestamptz(3)
+  finishedAt      DateTime?             @map("finished_at") @db.Timestamptz(3)
+  createdAt       DateTime              @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  subscription WebhookSubscription @relation("WebhookSubscriptionDeliveries", fields: [subscriptionId], references: [id], onDelete: Cascade)
+
+  @@index([subscriptionId, createdAt])
+  @@index([status, createdAt])
+  @@index([eventType])
+  @@map("webhook_deliveries")
+}
+
+/// IP-based access blocklist. Used by the admin panel to deny requests from
+/// abusive sources (manual `/blocking` entries) and by automated rules
+/// (Phase 2: anti-fraud action `block_ip`).
+///
+/// (Re-stated header — body lives above on `model BlockedIp`.)
+
+// =============================================================================
+//  RBAC — Custom roles, permissions, scope policies
+// =============================================================================
+
+/// Custom RBAC role. Optional supplement to the legacy `UserRole` enum on
+/// `AdminUser`: when a role is attached, the role's permission matrix
+/// fully drives access checks; the `role` enum is kept only for backwards
+/// compatibility (DEV admins always see everything regardless of RBAC).
+///
+/// `isSystem` marks role rows that the application provisions on startup
+/// (e.g. "Operator", "Support") and refuses to delete from the UI.
+model AdminRole {
+  id          String   @id @default(cuid()) @map("id")
+  name        String   @unique @map("name")
+  displayName String   @map("display_name")
+  description String?  @map("description")
+  isSystem    Boolean  @default(false) @map("is_system")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  permissions AdminPermission[] @relation("AdminRolePermissions")
+  admins      AdminUser[]       @relation("AdminUserRbacRole")
+
+  @@map("admin_roles")
+}
+
+/// One row per (role × resource × action). The set of (resource, action)
+/// pairs is derived at runtime from `RBAC_RESOURCES` in
+/// `web/backend/api/v2/roles.py`-equivalent — for rezeis-admin it lives in
+/// `src/modules/rbac/rbac.resources.ts` and is the only authoritative
+/// source. The DB does not enforce the values; that is the job of the
+/// RBAC service which validates writes.
+model AdminPermission {
+  id        String   @id @default(cuid()) @map("id")
+  roleId    String   @map("role_id")
+  resource  String   @map("resource")
+  action    String   @map("action")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  role AdminRole @relation("AdminRolePermissions", fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@unique([roleId, resource, action])
+  @@index([roleId])
+  @@map("admin_permissions")
+}
+
+/// Scope policy attaches a whitelist of resource UUIDs / tags to either a
+/// role or a single admin. Used by the access-policy resolver to filter
+/// admin lists (only see plans X/Y, only see gateway YOOKASSA, …).
+///
+/// At least one of `roleId` / `adminUserId` must be set; the resolver
+/// merges policies from both sources.
+model AdminScopePolicy {
+  id           String   @id @default(cuid()) @map("id")
+  /// Optional role — when set, the policy applies to every admin with
+  /// that role.
+  roleId       String?  @map("role_id")
+  /// Optional single-admin override.
+  adminUserId  String?  @map("admin_user_id")
+  /// Logical resource type the policy targets (e.g. `plan`, `gateway`,
+  /// `partner`). The reader is tolerant of unknown values and treats them
+  /// as a no-op.
+  resourceType String   @map("resource_type")
+  /// Either an explicit UUID (`scopeType=uuid`) or a tag/label
+  /// (`scopeType=tag`) the resource belongs to.
+  scopeType    String   @map("scope_type")
+  scopeValue   String   @map("scope_value")
+  /// Comma-joined list of allowed actions (`view`, `edit`, `delete`).
+  /// `view` is implied by every other action so we keep the list short.
+  actions      String   @map("actions")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  adminUser AdminUser? @relation("AdminUserScopePolicy", fields: [adminUserId], references: [id], onDelete: Cascade)
+
+  @@index([roleId])
+  @@index([adminUserId])
+  @@index([resourceType])
+  @@map("admin_scope_policies")
+}
+
+// =============================================================================
+//  FRAUD SIGNALS — Persistent anti-fraud findings
+// =============================================================================
+
+/// Severity of a fraud signal. Drives badge colour and default action.
+enum FraudSignalSeverity {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+/// Lifecycle status of a fraud signal. Created in `OPEN`; an operator
+/// transitions it to `ACKNOWLEDGED`, `RESOLVED`, or `DISMISSED`. Automated
+/// actions (notify, block_user, freeze_subscription) annotate the row but
+/// never change its status — that remains an explicit operator decision.
+enum FraudSignalStatus {
+  OPEN
+  ACKNOWLEDGED
+  RESOLVED
+  DISMISSED
+}
+
+/// Persistent anti-fraud finding emitted by the AntiFraudService detectors
+/// or by automation rules. Replaces the previous stateless "report" so the
+/// admin UI can show history, track resolution, and avoid duplicate alerts.
+///
+/// Identity / dedup
+///   `code` is the detector identifier (e.g. `EXCESSIVE_FAILED_PAYMENTS`).
+///   The `(code, fingerprint)` composite is unique while the signal is
+///   open — this prevents the scheduler from re-creating the same alert
+///   on every tick. `fingerprint` is detector-defined (typically a hash
+///   of the affected user ids + time bucket).
+///
+/// Scoring
+///   `score` is a normalised 0-100 risk metric. `confidence` (0-100)
+///   measures how certain the detector is. The frontend can sort by
+///   `score * confidence / 100` for a composite priority.
+model FraudSignal {
+  id              String              @id @default(cuid()) @map("id")
+  code            String              @map("code")
+  /// Detector-defined deduplication fingerprint. Empty string means
+  /// "always create a new row".
+  fingerprint     String              @default("") @map("fingerprint")
+  severity        FraudSignalSeverity @map("severity")
+  status          FraudSignalStatus   @default(OPEN) @map("status")
+  title           String              @map("title")
+  description     String              @map("description")
+  /// Risk score (0-100). Detectors may use any reasonable mapping.
+  score           Int                 @default(0) @map("score")
+  /// Confidence (0-100) — how certain the detector is.
+  confidence      Int                 @default(100) @map("confidence")
+  /// Affected user ids (CUIDs from `users`). Lookup-by-user-id index lives
+  /// on the JSON column — admin UI only filters by status/code/severity.
+  affectedUserIds String[]            @default([]) @map("affected_user_ids")
+  /// Free-form metadata the detector wants to surface in the UI
+  /// (counts, thresholds, time window, …). No PII.
+  metadata        Json                @default("{}") @map("metadata")
+  /// Last automated action taken: 'notify' | 'block_user' |
+  /// 'freeze_subscription' | 'none'.
+  lastAction      String              @default("none") @map("last_action")
+  detectedAt      DateTime            @default(now()) @map("detected_at") @db.Timestamptz(3)
+  resolvedAt      DateTime?           @map("resolved_at") @db.Timestamptz(3)
+  resolvedBy      String?             @map("resolved_by")
+  resolutionNote  String?             @map("resolution_note")
+  createdAt       DateTime            @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt       DateTime            @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@unique([code, fingerprint])
+  @@index([status])
+  @@index([severity])
+  @@index([code])
+  @@index([detectedAt])
+  @@map("fraud_signals")
+}
+
+// =============================================================================
+//  AUTOMATIONS — IFTTT-style rule engine
+// =============================================================================
+
+/// Trigger phase of a rule. `realtime` → fires on a SystemEvents event;
+/// `cron` → fires on a wall-clock schedule defined by `triggerSchedule`.
+/// `manual` → only when an operator clicks "Run now".
+enum AutomationTriggerKind {
+  REALTIME
+  CRON
+  MANUAL
+}
+
+/// Lifecycle status of a single execution.
+enum AutomationExecutionStatus {
+  PENDING
+  RUNNING
+  SUCCEEDED
+  FAILED
+  SKIPPED
+}
+
+/// A single automation rule.
+///
+/// Composition
+///   - `trigger` → `kind` + (cron expression OR event name pattern).
+///   - `conditions` → JSON expression evaluated against the trigger payload.
+///     The evaluator supports a tiny subset of JSON-logic:
+///       { "and": [ {"==": ["$severity", "HIGH"]}, {">": ["$score", 70]} ] }
+///   - `actions` → ordered JSON array of action objects:
+///       [ { "type": "notify_telegram", "params": {...} } ]
+///
+/// The rule engine is intentionally minimal — it ships with five built-in
+/// action types (`notify_telegram`, `webhook_post`, `block_ip`,
+/// `system_event`, `block_user`) and a hand-written JSON-logic evaluator
+/// in `automation/utils/expression-evaluator.ts`. Adding a new action is a
+/// backend-only change.
+model AutomationRule {
+  id             String                     @id @default(cuid()) @map("id")
+  name           String                     @map("name")
+  description    String?                    @map("description")
+  isEnabled      Boolean                    @default(true) @map("is_enabled")
+  triggerKind    AutomationTriggerKind      @map("trigger_kind")
+  /// REALTIME --> event-type pattern (e.g. payment.failed, fraud.*).
+  /// CRON     --> cron expression (e.g. zero-zero star slash six star).
+  /// MANUAL   --> empty string.
+  triggerSpec    String                     @default("") @map("trigger_spec")
+  /// Condition tree (JSON-logic-ish). null means "always match".
+  conditions     Json?                      @map("conditions")
+  /// Ordered list of actions executed when the rule fires.
+  actions        Json                       @default("[]") @map("actions")
+  /// Pointer to the admin who created the rule. Used for audit.
+  createdById    String?                    @map("created_by_id")
+  /// Last execution outcome cache - kept here so list views do not need
+  /// to join automation_executions for every row.
+  lastRunAt      DateTime?                  @map("last_run_at") @db.Timestamptz(3)
+  lastRunStatus  AutomationExecutionStatus? @map("last_run_status")
+  lastRunMessage String?                    @map("last_run_message")
+  /// Total number of times the rule has fired (incl. failures). Useful
+  /// for the operator dashboard.
+  runCount       Int                        @default(0) @map("run_count")
+  createdAt      DateTime                   @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime                   @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  executions AutomationExecution[] @relation("AutomationExecutionRule")
+
+  @@index([isEnabled])
+  @@index([triggerKind])
+  @@map("automation_rules")
+}
+
+/// One execution of an automation rule. Stores enough context to debug
+/// after the fact: trigger payload, action results, error messages.
+model AutomationExecution {
+  id             String                    @id @default(cuid()) @map("id")
+  ruleId         String                    @map("rule_id")
+  status         AutomationExecutionStatus @default(PENDING) @map("status")
+  /// Why the execution started (`event:payment.failed`, `cron`, `manual:<adminId>`).
+  trigger        String                    @map("trigger")
+  /// Trigger payload (event metadata, cron tick info, …) for debugging.
+  triggerPayload Json                      @default("{}") @map("trigger_payload")
+  /// Per-action results recorded as `{ index, type, status, message? }`.
+  actionResults  Json                      @default("[]") @map("action_results")
+  errorMessage   String?                   @map("error_message")
+  startedAt      DateTime?                 @map("started_at") @db.Timestamptz(3)
+  finishedAt     DateTime?                 @map("finished_at") @db.Timestamptz(3)
+  durationMs     Int?                      @map("duration_ms")
+  createdAt      DateTime                  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  rule AutomationRule @relation("AutomationExecutionRule", fields: [ruleId], references: [id], onDelete: Cascade)
+
+  @@index([ruleId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("automation_executions")
+}
+
+// =============================================================================
+//  END-USERS
+// =============================================================================
+
+model User {
+  id                             String    @id @default(cuid()) @map("id")
+  telegramId                     BigInt?   @unique @map("telegram_id") @db.BigInt
+  username                       String?   @map("username")
+  email                          String?   @unique @map("email")
+  referralCode                   String    @unique @default(cuid()) @map("referral_code")
+  name                           String    @default("") @map("name")
+  role                           UserRole  @default(USER) @map("role")
+  language                       Locale    @default(EN) @map("language")
+  personalDiscount               Int       @default(0) @map("personal_discount")
+  purchaseDiscount               Int       @default(0) @map("purchase_discount")
+  points                         Int       @default(0) @map("points")
+  isBlocked                      Boolean   @default(false) @map("is_blocked")
+  isBotBlocked                   Boolean   @default(false) @map("is_bot_blocked")
+  isRulesAccepted                Boolean   @default(true) @map("is_rules_accepted")
+  partnerBalanceCurrencyOverride Currency? @map("partner_balance_currency_override")
+  /// Per-user override for referral invite limits. NULL means "use the
+  /// global settings as-is". Otherwise, fields named after the global
+  /// `Settings.referralSettings.invite_limits` keys override their
+  /// respective values one-by-one (mirrors altshop's
+  /// `ReferralInviteIndividualSettingsDto`).
+  referralInviteSettings         Json?     @map("referral_invite_settings")
+  /// Maximum number of concurrent active subscriptions per user.
+  maxSubscriptions               Int       @default(1) @map("max_subscriptions")
+  /// Optional pointer to the user's currently selected subscription.
+  currentSubscriptionId          String?   @unique @map("current_subscription_id")
+  createdAt                      DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt                      DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  // Relations
+  subscriptions        Subscription[]          @relation("UserSubscriptions")
+  currentSubscription  Subscription?           @relation("UserCurrentSubscription", fields: [currentSubscriptionId], references: [id], onDelete: SetNull)
+  webAccount           WebAccount?             @relation("UserWebAccount")
+  transactions         Transaction[]           @relation("UserTransactions")
+  notificationEvents   UserNotificationEvent[] @relation("UserNotificationEvents")
+  trialGrant           TrialGrant?             @relation("UserTrialGrant")
+  referredBy           Referral?               @relation("ReferredUser")
+  referralsGiven       Referral[]              @relation("ReferrerUser")
+  partner              Partner?                @relation("UserPartner")
+  referralInvites      ReferralInvite[]        @relation("InviterUser")
+  promocodeActivations PromocodeActivation[]   @relation("UserPromocodeActivations")
+  referralRewards      ReferralReward[]        @relation("ReferralRewardUser")
+  partnerTransactions  PartnerTransaction[]    @relation("PartnerTransactionReferral")
+  partnerReferrals     PartnerReferral[]       @relation("PartnerReferralUser")
+  supportTickets       SupportTicket[]         @relation("SupportTicketUser")
+
+  @@index([telegramId])
+  @@index([role])
+  @@index([isBlocked])
+  @@index([createdAt])
+  @@map("users")
+}
+
+/// Single trial allocation per user — used as a hard guard so quote service
+/// can answer `hasUsedTrial` without scanning subscription history.
+model TrialGrant {
+  id        String   @id @default(cuid()) @map("id")
+  userId    String   @unique @map("user_id")
+  planId    String?  @map("plan_id")
+  grantedAt DateTime @default(now()) @map("granted_at") @db.Timestamptz(3)
+
+  user User @relation("UserTrialGrant", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("trial_grants")
+}
+
+// =============================================================================
+//  WEB ACCOUNTS & AUTH CHALLENGES
+// =============================================================================
+
+/// Linked web/credentials account that mirrors a Telegram user. Used by
+/// `internal-user` flows when a user signs in by login + password.
+model WebAccount {
+  id                         String    @id @default(cuid()) @map("id")
+  userId                     String    @unique @map("user_id")
+  login                      String?   @unique @map("login")
+  loginNormalized            String?   @unique @map("login_normalized")
+  email                      String?   @unique @map("email")
+  emailNormalized            String?   @unique @map("email_normalized")
+  emailVerifiedAt            DateTime? @map("email_verified_at") @db.Timestamptz(3)
+  passwordHash               String?   @map("password_hash")
+  requiresPasswordChange     Boolean   @default(false) @map("requires_password_change")
+  temporaryPasswordExpiresAt DateTime? @map("temporary_password_expires_at") @db.Timestamptz(3)
+  /// Set when the user first enrolls credentials. Acts as an idempotency
+  /// guard for `setWebAccountPassword`.
+  credentialsBootstrappedAt  DateTime? @map("credentials_bootstrapped_at") @db.Timestamptz(3)
+  /// When the user dismisses the link prompt.
+  linkPromptSnoozeUntil      DateTime? @map("link_prompt_snooze_until") @db.Timestamptz(3)
+  createdAt                  DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt                  DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  user       User            @relation("UserWebAccount", fields: [userId], references: [id], onDelete: Cascade)
+  challenges AuthChallenge[] @relation("WebAccountChallenges")
+
+  @@map("web_accounts")
+}
+
+/// Time-limited verification challenges (email codes, magic links, etc.).
+model AuthChallenge {
+  id           String    @id @default(cuid()) @map("id")
+  webAccountId String    @map("web_account_id")
+  /// Logical purpose of the challenge: "email_verify", "password_reset", ...
+  purpose      String    @map("purpose")
+  /// Delivery channel: "email", "telegram", ...
+  channel      String    @map("channel")
+  /// Destination address for the challenge (email, telegram chat id, ...).
+  destination  String    @map("destination")
+  codeHash     String?   @map("code_hash")
+  tokenHash    String?   @map("token_hash")
+  attemptsLeft Int       @default(5) @map("attempts_left")
+  expiresAt    DateTime  @map("expires_at") @db.Timestamptz(3)
+  consumedAt   DateTime? @map("consumed_at") @db.Timestamptz(3)
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  webAccount WebAccount @relation("WebAccountChallenges", fields: [webAccountId], references: [id], onDelete: Cascade)
+
+  @@index([webAccountId, purpose])
+  @@index([destination, purpose])
+  @@map("auth_challenges")
+}
+
+// =============================================================================
+//  SUBSCRIPTIONS
+// =============================================================================
+
+model Subscription {
+  id             String             @id @default(cuid()) @map("id")
+  userId         String             @map("user_id")
+  status         SubscriptionStatus @default(ACTIVE) @map("status")
+  isTrial        Boolean            @default(false) @map("is_trial")
+  /// Snapshot of the plan at purchase time (id, name, type, limits, ...).
+  planSnapshot   Json               @default("{}") @map("plan_snapshot")
+  trafficLimit   Int?               @map("traffic_limit")
+  deviceLimit    Int                @default(0) @map("device_limit")
+  internalSquads String[]           @default([]) @map("internal_squads")
+  externalSquad  String?            @map("external_squad")
+  /// Remnawave subscription user UUID. `null` until the profile sync job
+  /// successfully creates the upstream record.
+  remnawaveId    String?            @map("remnawave_id")
+  /// User-facing connect URL.
+  configUrl      String?            @map("config_url")
+  startedAt      DateTime?          @map("started_at") @db.Timestamptz(3)
+  expiresAt      DateTime?          @map("expires_at") @db.Timestamptz(3)
+  deviceType     DeviceType?        @map("device_type")
+  createdAt      DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime           @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  user                  User                  @relation("UserSubscriptions", fields: [userId], references: [id], onDelete: Cascade)
+  currentSubscriptionOf User?                 @relation("UserCurrentSubscription")
+  transactions          Transaction[]         @relation("SubscriptionTransactions")
+  syncJobs              ProfileSyncJob[]      @relation("SubscriptionSyncJobs")
+  promocodeActivations  PromocodeActivation[] @relation("SubscriptionPromocodeActivations")
+
+  @@index([userId])
+  @@index([status])
+  @@index([expiresAt])
+  @@index([isTrial])
+  @@index([createdAt])
+  @@map("subscriptions")
+}
+
+/// Background job describing the next Remnawave profile mutation for a
+/// subscription. Materialized in the database so workers can resume after
+/// restart.
+model ProfileSyncJob {
+  id             String        @id @default(cuid()) @map("id")
+  subscriptionId String        @map("subscription_id")
+  action         SyncAction    @map("action")
+  status         SyncJobStatus @default(PENDING) @map("status")
+  attempts       Int           @default(0) @map("attempts")
+  lastError      String?       @map("last_error")
+  payload        Json          @default("{}") @map("payload")
+  scheduledAt    DateTime?     @map("scheduled_at") @db.Timestamptz(3)
+  startedAt      DateTime?     @map("started_at") @db.Timestamptz(3)
+  completedAt    DateTime?     @map("completed_at") @db.Timestamptz(3)
+  createdAt      DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime      @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  subscription Subscription @relation("SubscriptionSyncJobs", fields: [subscriptionId], references: [id], onDelete: Cascade)
+
+  @@index([subscriptionId])
+  @@index([status])
+  @@index([action])
+  @@map("profile_sync_jobs")
+}
+
+// =============================================================================
+//  PLANS & PRICING
+// =============================================================================
+
+model Plan {
+  id                   String                @id @default(cuid()) @map("id")
+  orderIndex           Int                   @default(0) @map("order_index")
+  isActive             Boolean               @default(true) @map("is_active")
+  isArchived           Boolean               @default(false) @map("is_archived")
+  type                 PlanType              @default(BOTH) @map("type")
+  availability         PlanAvailability      @default(ALL) @map("availability")
+  archivedRenewMode    ArchivedPlanRenewMode @default(SELF_RENEW) @map("archived_renew_mode")
+  name                 String                @unique @map("name")
+  description          String?               @map("description")
+  tag                  String?               @map("tag")
+  trafficLimit         Int?                  @map("traffic_limit")
+  deviceLimit          Int                   @default(0) @map("device_limit")
+  trafficLimitStrategy TrafficLimitStrategy  @default(NO_RESET) @map("traffic_limit_strategy")
+  /// Plans available as upgrade targets from this plan.
+  upgradeToPlanIds     String[]              @default([]) @map("upgrade_to_plan_ids")
+  /// Plans that may replace this archived plan during renewal.
+  replacementPlanIds   String[]              @default([]) @map("replacement_plan_ids")
+  /// Explicit allowlist of users for `availability = ALLOWED`.
+  allowedUserIds       String[]              @default([]) @map("allowed_user_ids")
+  internalSquads       String[]              @default([]) @map("internal_squads")
+  externalSquad        String?               @map("external_squad")
+  createdAt            DateTime              @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt            DateTime              @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  durations PlanDuration[]
+
+  @@index([isActive])
+  @@index([isArchived])
+  @@index([availability])
+  @@index([orderIndex])
+  @@map("plans")
+}
+
+model PlanDuration {
+  id       String  @id @default(cuid()) @map("id")
+  planId   String  @map("plan_id")
+  days     Int     @map("days")
+  isActive Boolean @default(true) @map("is_active")
+
+  plan   Plan        @relation(fields: [planId], references: [id], onDelete: Cascade)
+  prices PlanPrice[]
+
+  @@index([planId])
+  @@map("plan_durations")
+}
+
+model PlanPrice {
+  id             String   @id @default(cuid()) @map("id")
+  planDurationId String   @map("plan_duration_id")
+  currency       Currency @map("currency")
+  price          Decimal  @map("price") @db.Decimal(20, 8)
+
+  planDuration PlanDuration @relation(fields: [planDurationId], references: [id], onDelete: Cascade)
+
+  @@unique([planDurationId, currency])
+  @@index([planDurationId])
+  @@index([currency])
+  @@map("plan_prices")
+}
+
+// =============================================================================
+//  PAYMENTS
+// =============================================================================
+
+model PaymentGateway {
+  id         String             @id @default(cuid()) @map("id")
+  type       PaymentGatewayType @unique @map("type")
+  orderIndex Int                @default(0) @map("order_index")
+  currency   Currency           @map("currency")
+  isActive   Boolean            @default(false) @map("is_active")
+  settings   Json               @default("{}") @map("settings")
+  createdAt  DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt  DateTime           @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@index([isActive])
+  @@index([orderIndex])
+  @@map("payment_gateways")
+}
+
+model Transaction {
+  id             String             @id @default(cuid()) @map("id")
+  /// Stable provider-facing payment identifier (UUID).
+  paymentId      String             @unique @default(cuid()) @map("payment_id")
+  userId         String             @map("user_id")
+  subscriptionId String?            @map("subscription_id")
+  status         TransactionStatus  @default(PENDING) @map("status")
+  purchaseType   PurchaseType       @map("purchase_type")
+  channel        PurchaseChannel    @default(WEB) @map("channel")
+  gatewayType    PaymentGatewayType @map("gateway_type")
+  /// Provider-side payment reference (e.g., YooKassa payment id).
+  gatewayId      String?            @map("gateway_id")
+  /// Optional raw provider payload kept for ops.
+  gatewayData    Json?              @map("gateway_data")
+  currency       Currency           @map("currency")
+  paymentAsset   String?            @map("payment_asset")
+  amount         Decimal            @map("amount") @db.Decimal(20, 8)
+  /// Snapshot of the plan/duration at draft time.
+  planSnapshot   Json               @default("{}") @map("plan_snapshot")
+  deviceTypes    String[]           @default([]) @map("device_types")
+  createdAt      DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime           @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  user         User          @relation("UserTransactions", fields: [userId], references: [id], onDelete: Restrict)
+  subscription Subscription? @relation("SubscriptionTransactions", fields: [subscriptionId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([subscriptionId])
+  @@index([status])
+  @@index([gatewayType])
+  @@index([purchaseType])
+  @@index([createdAt])
+  @@map("transactions")
+}
+
+/// Webhook ingress + reconciliation inbox. The lifecycle status is tracked
+/// separately from the provider-supplied event status.
+model PaymentWebhookEvent {
+  id                     String                        @id @default(cuid()) @map("id")
+  gatewayType            PaymentGatewayType            @map("gateway_type")
+  /// Logical payment identifier (matches `Transaction.paymentId`).
+  paymentId              String                        @map("payment_id")
+  /// Provider-supplied event identifier (used for dedup).
+  providerEventId        String                        @map("provider_event_id")
+  /// Raw provider event status string, before normalization.
+  eventStatus            String?                       @map("event_status")
+  /// Internal lifecycle status used by the inbox/replay machinery.
+  status                 PaymentWebhookLifecycleStatus @default(RECEIVED) @map("status")
+  attempts               Int                           @default(1) @map("attempts")
+  reconciliationAttempts Int                           @default(0) @map("reconciliation_attempts")
+  replayCount            Int                           @default(0) @map("replay_count")
+  lastError              String?                       @map("last_error")
+  payloadHash            String?                       @map("payload_hash")
+  rawPayload             Json                          @map("raw_payload")
+  normalizedPayload      Json?                         @map("normalized_payload")
+  receivedAt             DateTime                      @default(now()) @map("received_at") @db.Timestamptz(3)
+  processedAt            DateTime?                     @map("processed_at") @db.Timestamptz(3)
+  lastTransitionAt       DateTime                      @default(now()) @map("last_transition_at") @db.Timestamptz(3)
+  lastReplayedAt         DateTime?                     @map("last_replayed_at") @db.Timestamptz(3)
+  createdAt              DateTime                      @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt              DateTime                      @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@unique([gatewayType, providerEventId])
+  @@index([gatewayType])
+  @@index([status])
+  @@index([paymentId])
+  @@index([providerEventId])
+  @@index([payloadHash])
+  @@index([receivedAt])
+  @@map("payment_webhook_events")
+}
+
+// =============================================================================
+//  REFERRALS (minimal — used by plan catalog)
+// =============================================================================
+
+model Referral {
+  id                       String               @id @default(cuid()) @map("id")
+  referrerId               String               @map("referrer_id")
+  referredId               String               @unique @map("referred_id")
+  /// Referral graph level (1 = direct, 2/3 = ancestors). Donor compatibility.
+  level                    Int                  @default(1) @map("level")
+  inviteSource             ReferralInviteSource @default(UNKNOWN) @map("invite_source")
+  /// Set when the referred user completes a qualifying purchase.
+  qualifiedAt              DateTime?            @map("qualified_at") @db.Timestamptz(3)
+  qualifiedTransactionId   String?              @unique @map("qualified_transaction_id")
+  qualifiedPurchaseChannel PurchaseChannel?     @map("qualified_purchase_channel")
+  createdAt                DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt                DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  referrer User             @relation("ReferrerUser", fields: [referrerId], references: [id], onDelete: Cascade)
+  referred User             @relation("ReferredUser", fields: [referredId], references: [id], onDelete: Cascade)
+  rewards  ReferralReward[] @relation("ReferralRewardEdge")
+
+  @@index([referrerId])
+  @@index([referredId])
+  @@index([level])
+  @@index([qualifiedAt])
+  @@map("referrals")
+}
+
+/// Invite token issued by a user. Consumed once by a new user during sign-up.
+model ReferralInvite {
+  id         String    @id @default(cuid()) @map("id")
+  inviterId  String    @map("inviter_id")
+  token      String    @unique @map("token")
+  note       String?   @map("note")
+  expiresAt  DateTime? @map("expires_at") @db.Timestamptz(3)
+  revokedAt  DateTime? @map("revoked_at") @db.Timestamptz(3)
+  consumedAt DateTime? @map("consumed_at") @db.Timestamptz(3)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt  DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  inviter User @relation("InviterUser", fields: [inviterId], references: [id], onDelete: Cascade)
+
+  @@index([inviterId])
+  @@index([token])
+  @@index([expiresAt])
+  @@map("referral_invites")
+}
+
+// =============================================================================
+//  PARTNERS
+// =============================================================================
+
+/// Partner balance ledger. One record per user.
+model Partner {
+  id             String   @id @default(cuid()) @map("id")
+  userId         String   @unique @map("user_id")
+  /// Balance stored in minor units (cents/kopecks) for integer precision.
+  balance        Int      @default(0) @map("balance")
+  totalEarned    Int      @default(0) @map("total_earned")
+  totalWithdrawn Int      @default(0) @map("total_withdrawn")
+  isActive       Boolean  @default(true) @map("is_active")
+
+  /// Whether this partner uses the global partner settings (`Settings.partnerSettings`)
+  /// or its own per-user override defined by the columns below.
+  /// Donor: altshop `partner.individual_settings.use_global_settings`.
+  useGlobalSettings Boolean              @default(true) @map("use_global_settings")
+  accrualStrategy   PartnerAccrualStrategy @default(ON_EACH_PAYMENT) @map("accrual_strategy")
+  rewardType        PartnerRewardType      @default(PERCENT) @map("reward_type")
+
+  /// Per-level percentages used when `rewardType = PERCENT` and
+  /// `useGlobalSettings = false`. NULL falls back to the global value.
+  /// Stored as numeric(5,2) to match `partner_transactions.percent`.
+  level1Percent     Decimal? @map("level1_percent") @db.Decimal(5, 2)
+  level2Percent     Decimal? @map("level2_percent") @db.Decimal(5, 2)
+  level3Percent     Decimal? @map("level3_percent") @db.Decimal(5, 2)
+
+  /// Per-level fixed amounts (in minor units) used when
+  /// `rewardType = FIXED` and `useGlobalSettings = false`.
+  level1FixedAmount Int?     @map("level1_fixed_amount")
+  level2FixedAmount Int?     @map("level2_fixed_amount")
+  level3FixedAmount Int?     @map("level3_fixed_amount")
+
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  user         User                 @relation("UserPartner", fields: [userId], references: [id], onDelete: Cascade)
+  withdrawals  PartnerWithdrawal[]  @relation("PartnerWithdrawals")
+  transactions PartnerTransaction[] @relation("PartnerLedgerTransactions")
+  referrals    PartnerReferral[]    @relation("PartnerReferralPartner")
+
+  @@index([userId])
+  @@index([isActive])
+  @@map("partners")
+}
+
+/// Partner withdrawal request lifecycle.
+model PartnerWithdrawal {
+  id           String           @id @default(cuid()) @map("id")
+  partnerId    String           @map("partner_id")
+  /// Amount in minor units (matches `Partner.balance`).
+  amount       Int              @map("amount")
+  status       WithdrawalStatus @default(PENDING) @map("status")
+  /// Free-form payout method label, e.g. `card`, `tron-usdt`, ...
+  method       String           @map("method")
+  requisites   String           @map("requisites")
+  adminComment String?          @map("admin_comment")
+  /// Admin user id (cuid) that processed this withdrawal.
+  processedBy  String?          @map("processed_by")
+  processedAt  DateTime?        @map("processed_at") @db.Timestamptz(3)
+  createdAt    DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime         @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  partner Partner @relation("PartnerWithdrawals", fields: [partnerId], references: [id], onDelete: Restrict)
+
+  @@index([partnerId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("partner_withdrawals")
+}
+
+// =============================================================================
+//  BROADCASTS
+// =============================================================================
+
+model Broadcast {
+  id             String            @id @default(cuid()) @map("id")
+  status         BroadcastStatus   @default(DRAFT) @map("status")
+  audience       BroadcastAudience @default(ALL) @map("audience")
+  /// Optional plan id used by audience filters that need a plan reference.
+  audiencePlanId String?           @map("audience_plan_id")
+  /// JSON: { text, mediaType, mediaFileId, parseMode, ... }
+  payload        Json              @default("{}") @map("payload")
+  totalCount     Int               @default(0) @map("total_count")
+  successCount   Int               @default(0) @map("success_count")
+  failedCount    Int               @default(0) @map("failed_count")
+  /// Admin user id (cuid) who created the draft.
+  createdBy      String?           @map("created_by")
+  startedAt      DateTime?         @map("started_at") @db.Timestamptz(3)
+  completedAt    DateTime?         @map("completed_at") @db.Timestamptz(3)
+  createdAt      DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime          @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  messages BroadcastMessage[]
+
+  @@index([status])
+  @@index([audience])
+  @@index([createdAt])
+  @@map("broadcasts")
+}
+
+model BroadcastMessage {
+  id                String                 @id @default(cuid()) @map("id")
+  broadcastId       String                 @map("broadcast_id")
+  userId            String                 @map("user_id")
+  /// Telegram message_id once sent (nullable until delivery is attempted).
+  telegramMessageId BigInt?                @map("telegram_message_id") @db.BigInt
+  status            BroadcastMessageStatus @default(PENDING) @map("status")
+  errorMessage      String?                @map("error_message")
+  sentAt            DateTime?              @map("sent_at") @db.Timestamptz(3)
+  createdAt         DateTime               @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime               @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  broadcast Broadcast @relation(fields: [broadcastId], references: [id], onDelete: Cascade)
+
+  @@index([broadcastId])
+  @@index([userId])
+  @@index([status])
+  @@map("broadcast_messages")
+}
+
+// =============================================================================
+//  NOTIFICATIONS & SETTINGS
+// =============================================================================
+
+model UserNotificationEvent {
+  id        String    @id @default(cuid()) @map("id")
+  userId    String    @map("user_id")
+  type      String    @map("type")
+  payload   Json      @default("{}") @map("payload")
+  readAt    DateTime? @map("read_at") @db.Timestamptz(3)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User @relation("UserNotificationEvents", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([type])
+  @@index([readAt])
+  @@index([createdAt])
+  @@map("user_notification_events")
+}
+
+/// Singleton row (id = 1).
+model Settings {
+  id                        Int        @id @default(1) @map("id")
+  rulesRequired             Boolean    @default(false) @map("rules_required")
+  channelRequired           Boolean    @default(false) @map("channel_required")
+  rulesLink                 String     @default("") @map("rules_link")
+  channelId                 BigInt?    @map("channel_id") @db.BigInt
+  channelLink               String     @default("") @map("channel_link")
+  accessMode                AccessMode @default(PUBLIC) @map("access_mode")
+  inviteModeStartedAt       DateTime?  @map("invite_mode_started_at") @db.Timestamptz(3)
+  defaultCurrency           Currency   @default(RUB) @map("default_currency")
+  paymentOpsAlerts          Json       @default("{}") @map("payment_ops_alerts")
+  systemNotifications       Json       @default("{}") @map("system_notifications")
+  platformPolicy            Json       @default("{}") @map("platform_policy")
+  /// User-facing notification preferences (donor: settings.user_notifications JSON).
+  userNotifications         Json       @default("{}") @map("user_notifications")
+  /// Referral program tunables (donor: settings.referral_settings JSON).
+  referralSettings          Json       @default("{}") @map("referral_settings")
+  /// Partner program tunables (donor: settings.partner_settings JSON).
+  partnerSettings           Json       @default("{}") @map("partner_settings")
+  /// Multi-subscription policy (donor: settings.multi_subscription_settings JSON).
+  multiSubscriptionSettings Json       @default("{}") @map("multi_subscription_settings")
+  /// Branding settings (donor: settings.branding_settings JSON).
+  brandingSettings          Json       @default("{}") @map("branding_settings")
+  /// Bot menu visual settings (donor: settings.bot_menu_settings JSON).
+  botMenuSettings           Json       @default("{}") @map("bot_menu_settings")
+  updatedAt                 DateTime   @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@map("settings")
+}
+
+// =============================================================================
+//  API TOKENS
+// =============================================================================
+
+/// Named API tokens for external service integration (reiwa, bots, etc.).
+/// Each token is a signed JWT that can be verified without DB lookup on hot
+/// path, but the row must exist for the token to remain valid (revocation =
+/// delete the row).
+model ApiToken {
+  id         String    @id @default(cuid()) @map("id")
+  /// Human-readable label, e.g. "RezeisBot", "Reiwa", "Subpage".
+  name       String    @map("name")
+  /// The signed JWT string. Stored so the admin can copy it from the UI.
+  token      String    @unique @map("token")
+  /// Short prefix shown in listings (first 8 chars of token for identification).
+  prefix     String    @map("prefix")
+  /// Admin who created this token.
+  createdBy  String?   @map("created_by")
+  lastUsedAt DateTime? @map("last_used_at") @db.Timestamptz(3)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt  DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@index([name])
+  @@index([createdAt])
+  @@map("api_tokens")
+}
+
+// =============================================================================
+//  PROMOCODES
+// =============================================================================
+
+/// Promotional code reference (donor: altshop `Promocode`).
+///
+/// `plan` is a JSON snapshot used by the SUBSCRIPTION reward type — it stores
+/// the plan id, name, type, traffic/device limits and `duration` (days) at
+/// the moment the promo was created. We keep the snapshot inside the row to
+/// preserve historical activations even if the plan catalog is later
+/// reshaped.
+model Promocode {
+  id                 String                @id @default(cuid()) @map("id")
+  code               String                @unique @map("code")
+  isActive           Boolean               @default(true) @map("is_active")
+  availability       PromocodeAvailability @default(ALL) @map("availability")
+  rewardType         PromocodeRewardType   @map("reward_type")
+  /// Reward magnitude. The semantics depend on `rewardType`:
+  ///  - DURATION → days
+  ///  - TRAFFIC  → GB
+  ///  - DEVICES  → device slots
+  ///  - PERSONAL_DISCOUNT / PURCHASE_DISCOUNT → percent (0-100)
+  ///  - SUBSCRIPTION → optional fallback duration (also stored in `plan`)
+  reward             Int?                  @map("reward")
+  /// JSON: { id, name, type, trafficLimit, deviceLimit, duration, ... }.
+  /// Required when `rewardType = SUBSCRIPTION`.
+  plan               Json?                 @map("plan")
+  /// Days until the code expires. `-1` (or null) = unlimited.
+  lifetime           Int?                  @map("lifetime")
+  /// Maximum number of total activations. `-1` (or null) = unlimited.
+  maxActivations     Int?                  @map("max_activations")
+  /// Optional allow-list of telegram_ids (donor compatibility — keep as text
+  /// to avoid coupling to a specific id type).
+  allowedTelegramIds BigInt[]              @default([]) @map("allowed_telegram_ids")
+  /// Optional allow-list of plan ids — promo only applies if the target
+  /// subscription is on one of these plans.
+  allowedPlanIds     String[]              @default([]) @map("allowed_plan_ids")
+  createdAt          DateTime              @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt          DateTime              @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  activations PromocodeActivation[]
+
+  @@index([isActive])
+  @@index([availability])
+  @@index([rewardType])
+  @@index([createdAt])
+  @@map("promocodes")
+}
+
+/// One activation record per (promocode, user). The `(promocodeId, userId)`
+/// pair is unique — promos are single-use per user.
+model PromocodeActivation {
+  id                   String              @id @default(cuid()) @map("id")
+  promocodeId          String              @map("promocode_id")
+  userId               String              @map("user_id")
+  /// Snapshot of `Promocode.code` at activation time (donor parity).
+  promocodeCode        String              @map("promocode_code")
+  /// Snapshot of `Promocode.rewardType` at activation time.
+  rewardType           PromocodeRewardType @map("reward_type")
+  /// Resolved reward magnitude actually applied (may differ from
+  /// `Promocode.reward` for SUBSCRIPTION fallbacks that read `plan.duration`).
+  rewardValue          Int                 @default(0) @map("reward_value")
+  targetSubscriptionId String?             @map("target_subscription_id")
+  activatedAt          DateTime            @default(now()) @map("activated_at") @db.Timestamptz(3)
+
+  promocode          Promocode     @relation(fields: [promocodeId], references: [id], onDelete: Restrict)
+  user               User          @relation("UserPromocodeActivations", fields: [userId], references: [id], onDelete: Restrict)
+  targetSubscription Subscription? @relation("SubscriptionPromocodeActivations", fields: [targetSubscriptionId], references: [id], onDelete: SetNull)
+
+  @@unique([promocodeId, userId])
+  @@index([promocodeId])
+  @@index([userId])
+  @@index([rewardType])
+  @@index([activatedAt])
+  @@map("promocode_activations")
+}
+
+// =============================================================================
+//  REFERRAL REWARDS, PARTNER LEDGER
+// =============================================================================
+
+/// Reward emitted when a `Referral` qualifies. Multiple rewards can attach to
+/// a single referral edge — donor distinguishes points and extra-day rewards.
+model ReferralReward {
+  id         String             @id @default(cuid()) @map("id")
+  referralId String             @map("referral_id")
+  userId     String             @map("user_id")
+  type       ReferralRewardType @map("type")
+  amount     Int                @map("amount")
+  isIssued   Boolean            @default(false) @map("is_issued")
+  issuedAt   DateTime?          @map("issued_at") @db.Timestamptz(3)
+  createdAt  DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt  DateTime           @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  referral Referral @relation("ReferralRewardEdge", fields: [referralId], references: [id], onDelete: Cascade)
+  user     User     @relation("ReferralRewardUser", fields: [userId], references: [id], onDelete: Restrict)
+
+  @@index([referralId])
+  @@index([userId])
+  @@index([isIssued])
+  @@map("referral_rewards")
+}
+
+/// Partner ledger entry — accrual or correction. Amounts are in minor units
+/// matching `Partner.balance`. The donor stores both per-payment accruals
+/// and admin-side adjustments here; we keep the `description` free-form so
+/// the same table can absorb future ledger kinds without a new enum.
+model PartnerTransaction {
+  id                  String   @id @default(cuid()) @map("id")
+  partnerId           String   @map("partner_id")
+  /// User the accrual is attributed to (donor field name preserved).
+  referralUserId      String   @map("referral_user_id")
+  level               Int      @map("level")
+  paymentAmount       Int      @map("payment_amount")
+  /// Accrual percent (0-100, 2 decimals) — donor compatibility.
+  percent             Decimal  @map("percent") @db.Decimal(5, 2)
+  earnedAmount        Int      @map("earned_amount")
+  sourceTransactionId String?  @map("source_transaction_id")
+  description         String?  @map("description")
+  createdAt           DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt           DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  partner  Partner @relation("PartnerLedgerTransactions", fields: [partnerId], references: [id], onDelete: Cascade)
+  referral User    @relation("PartnerTransactionReferral", fields: [referralUserId], references: [id], onDelete: Cascade)
+
+  @@index([partnerId])
+  @@index([referralUserId])
+  @@index([level])
+  @@index([createdAt])
+  @@map("partner_transactions")
+}
+
+/// Partner referral graph — one edge per (partner, referral). The donor
+/// duplicates this edge from the regular `Referral` table because the
+/// partner program runs its own ledger and accounting. Keep them separate.
+model PartnerReferral {
+  id              String   @id @default(cuid()) @map("id")
+  partnerId       String   @map("partner_id")
+  referralUserId  String   @map("referral_user_id")
+  level           Int      @map("level")
+  parentPartnerId String?  @map("parent_partner_id")
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  partner  Partner @relation("PartnerReferralPartner", fields: [partnerId], references: [id], onDelete: Cascade)
+  referral User    @relation("PartnerReferralUser", fields: [referralUserId], references: [id], onDelete: Cascade)
+
+  @@unique([partnerId, referralUserId])
+  @@index([partnerId])
+  @@index([referralUserId])
+  @@index([parentPartnerId])
+  @@index([level])
+  @@map("partner_referrals")
+}
+
+// =============================================================================
+//  OPERATIONS — backups, imports, support
+// =============================================================================
+
+model BackupRecord {
+  id                String      @id @default(cuid()) @map("id")
+  filename          String      @map("filename")
+  scope             BackupScope @map("scope")
+  /// Size in bytes.
+  sizeBytes         BigInt      @map("size_bytes") @db.BigInt
+  checksum          String?     @map("checksum")
+  /// Delivery channel: "local" | "telegram" | "s3" | ...
+  deliveryChannel   String      @map("delivery_channel")
+  deliveryRecipient String?     @map("delivery_recipient")
+  deliveredAt       DateTime?   @map("delivered_at") @db.Timestamptz(3)
+  errorMessage      String?     @map("error_message")
+  createdAt         DateTime    @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  @@index([scope])
+  @@index([deliveryChannel])
+  @@index([createdAt])
+  @@map("backup_records")
+}
+
+model ImportRecord {
+  id            String       @id @default(cuid()) @map("id")
+  filename      String       @map("filename")
+  /// Source format identifier: "3xui" | "remnawave" | "marzban" | ...
+  sourceType    String       @map("source_type")
+  status        ImportStatus @default(DRAFT) @map("status")
+  recordsTotal  Int          @default(0) @map("records_total")
+  recordsOk     Int          @default(0) @map("records_ok")
+  recordsFailed Int          @default(0) @map("records_failed")
+  /// JSON: dry-run diff / committed entity ids / rollback plan.
+  result        Json?        @map("result")
+  errorMessage  String?      @map("error_message")
+  /// Admin user id (cuid) who initiated the import.
+  createdBy     String?      @map("created_by")
+  committedAt   DateTime?    @map("committed_at") @db.Timestamptz(3)
+  rolledBackAt  DateTime?    @map("rolled_back_at") @db.Timestamptz(3)
+  createdAt     DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt     DateTime     @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@index([sourceType])
+  @@index([status])
+  @@index([createdAt])
+  @@map("import_records")
+}
+
+/// Editable templates per notification event type. Used by the worker that
+/// actually renders and dispatches notifications.
+model NotificationTemplate {
+  id        String   @id @default(cuid()) @map("id")
+  type      String   @unique @map("type")
+  /// Title template (Handlebars-style placeholders).
+  title     String   @map("title")
+  /// Body template.
+  body      String   @map("body")
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@index([isActive])
+  @@map("notification_templates")
+}
+
+model SupportTicket {
+  id        String              @id @default(cuid()) @map("id")
+  userId    String              @map("user_id")
+  subject   String              @map("subject")
+  status    SupportTicketStatus @default(OPEN) @map("status")
+  closedAt  DateTime?           @map("closed_at") @db.Timestamptz(3)
+  closedBy  String?             @map("closed_by")
+  createdAt DateTime            @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime            @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  user     User                   @relation("SupportTicketUser", fields: [userId], references: [id], onDelete: Cascade)
+  messages SupportTicketMessage[]
+
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("support_tickets")
+}
+
+model SupportTicketMessage {
+  id         String                  @id @default(cuid()) @map("id")
+  ticketId   String                  @map("ticket_id")
+  authorType SupportTicketAuthorType @map("author_type")
+  /// Admin user id (when authorType = ADMIN) or end-user id (when USER).
+  authorId   String?                 @map("author_id")
+  content    String                  @map("content")
+  createdAt  DateTime                @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  ticket SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  @@index([ticketId])
+  @@index([createdAt])
+  @@map("support_ticket_messages")
+}
+
+// =============================================================================
+//  FAQ
+// =============================================================================
+
+/// FAQ item managed by admins, displayed to users in the Help section.
+model FaqItem {
+  id         String   @id @default(cuid()) @map("id")
+  question   String   @map("question")
+  answer     String   @map("answer")
+  /// Optional ordered list of media URLs (image/video) attached to the
+  /// answer. URLs are relative to the admin host
+  /// (`/uploads/faq/<filename>`) when the file was uploaded through the
+  /// admin panel; absolute URLs are also accepted for externally hosted
+  /// assets.
+  mediaUrls  String[] @default([]) @map("media_urls")
+  /// Display order (lower = higher in the list).
+  orderIndex Int      @default(0) @map("order_index")
+  isActive   Boolean  @default(true) @map("is_active")
+  /// Locale code (e.g. "ru", "en"). Null = shown for all locales.
+  locale     String?  @map("locale")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@index([isActive, orderIndex])
+  @@index([locale])
+  @@map("faq_items")
+}
+
+// =============================================================================
+//  ADD-ONS (extra services: traffic, devices)
+// =============================================================================
+
+enum AddOnType {
+  EXTRA_TRAFFIC
+  EXTRA_DEVICES
+}
+
+/// Purchasable add-on that extends an active subscription's limits.
+/// Add-ons are created by the admin and optionally restricted to specific plans.
+///
+/// Example: "+50 GB Traffic" (EXTRA_TRAFFIC, value=50, price per currency).
+/// When no `applicablePlanIds` are set, the add-on is available for ALL plans.
+model AddOn {
+  id                String    @id @default(cuid()) @map("id")
+  name              String    @map("name")
+  description       String?   @map("description")
+  type              AddOnType @map("type")
+  /// Magnitude of the add-on:
+  ///   - EXTRA_TRAFFIC → GB to add
+  ///   - EXTRA_DEVICES → device slots to add
+  value             Int       @map("value")
+  isActive          Boolean   @default(true) @map("is_active")
+  orderIndex        Int       @default(0) @map("order_index")
+  /// Plan IDs this add-on applies to. Empty = available for all plans.
+  applicablePlanIds String[]  @default([]) @map("applicable_plan_ids")
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  prices AddOnPrice[]
+
+  @@index([isActive, orderIndex])
+  @@index([type])
+  @@map("add_ons")
+}
+
+/// Per-currency pricing for an add-on.
+model AddOnPrice {
+  id       String   @id @default(cuid()) @map("id")
+  addOnId  String   @map("add_on_id")
+  currency Currency @map("currency")
+  price    Decimal  @map("price") @db.Decimal(20, 8)
+
+  addOn AddOn @relation(fields: [addOnId], references: [id], onDelete: Cascade)
+
+  @@unique([addOnId, currency])
+  @@map("add_on_prices")
+}
+
+// =============================================================================
+//  BOT CONFIG (rezeis bot menu, premium emoji, copy)
+// =============================================================================
+
+/// Visual style applied to a bot menu button. Drives icon colour and the
+/// hint text shown under the button on Telegram clients that support
+/// inline reply-keyboard styling.
+enum BotButtonStyle {
+  PRIMARY
+  SUCCESS
+  DANGER
+  DEFAULT
+}
+
+/// One row per button rendered in the bot's main reply keyboard. Operators
+/// reorder, hide, restyle, or attach a Telegram Premium emoji directly
+/// from the admin panel; the bot service reads the latest snapshot and
+/// rebuilds keyboards accordingly.
+model BotButton {
+  id                 String         @id @default(cuid()) @map("id")
+  /// Stable button identifier the bot service uses when wiring up
+  /// callbacks, e.g. `subscriptions`, `support`, `referrals`. Slug is
+  /// case-insensitive and must be unique.
+  buttonId           String         @unique @map("button_id")
+  label              String         @map("label")
+  /// Display style — see `BotButtonStyle`.
+  style              BotButtonStyle @default(PRIMARY) @map("style")
+  /// Optional Telegram Premium custom emoji id (string). Non-premium
+  /// users see a fallback emoji rendered by the bot side.
+  iconCustomEmojiId  String?        @map("icon_custom_emoji_id")
+  /// Soft-delete-style visibility flag. Hidden buttons are not rendered
+  /// but remain in the catalog so settings can be restored.
+  visible            Boolean        @default(true) @map("visible")
+  /// When `true`, the button claims the entire row regardless of its
+  /// natural width. Otherwise it shares a row with the next half-width
+  /// neighbour.
+  onePerRow          Boolean        @default(false) @map("one_per_row")
+  /// Render order — lower values come first inside the keyboard.
+  orderIndex         Int            @default(0) @map("order_index")
+  createdAt          DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt          DateTime       @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@index([visible, orderIndex])
+  @@map("bot_buttons")
+}
+
+/// Editable emoji catalog. Each row is a single key (`STAR`, `CHECK`, …)
+/// with a Unicode fallback and an optional Telegram Premium custom emoji.
+model BotEmoji {
+  id         String   @id @default(cuid()) @map("id")
+  /// Upper-case slug used by the bot when rendering text:
+  /// `{{emoji.STAR}}`. Unique per row.
+  key        String   @unique @map("key")
+  /// Default Unicode codepoint shown to non-Premium users.
+  unicode    String   @map("unicode")
+  /// Telegram Premium animated/custom emoji id (string).
+  tgEmojiId  String?  @map("tg_emoji_id")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@map("bot_emojis")
+}
+
+/// Editable copy snippets used by the bot. Operators tweak welcome
+/// messages, callbacks, error strings without redeploying the bot.
+model BotText {
+  id        String   @id @default(cuid()) @map("id")
+  /// Lookup key (`welcome.greeting`, `support.intro`, …). Unique per row.
+  key       String   @unique @map("key")
+  value     String   @map("value")
+  /// Hidden snippets are not served by the bot; useful when staging a
+  /// rewrite before activation.
+  visible   Boolean  @default(true) @map("visible")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@index([visible])
+  @@map("bot_texts")
+}

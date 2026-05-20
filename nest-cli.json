@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json.schemastore.org/nest-cli",
+  "collection": "@nestjs/schematics",
+  "sourceRoot": "src",
+  "compilerOptions": {
+    "deleteOutDir": false,
+    "tsConfigPath": "tsconfig.build.json",
+    "webpack": false
+  },
+  "projects": {
+    "app": {
+      "type": "application",
+      "root": ".",
+      "entryFile": "main",
+      "sourceRoot": "src",
+      "compilerOptions": {
+        "tsConfigPath": "tsconfig.build.json"
+      }
+    },
+    "worker": {
+      "type": "application",
+      "root": ".",
+      "entryFile": "worker",
+      "sourceRoot": "src",
+      "compilerOptions": {
+        "tsConfigPath": "tsconfig.build.json"
+      }
+    }
+  }
+}

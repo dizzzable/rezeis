@@ -1,0 +1,2157 @@
+/**
+ * UserDetailPanel — right-side panel in the two-panel Users layout.
+ *
+ * Shows full user profile + ALL available admin actions:
+ *   • Profile editing (role, discounts, points, max subs)
+ *   • Block / Unblock / Delete
+ *   • Send notification
+ *   • Subscriptions management (give, trial, extend, traffic, devices, sync)
+ *   • Partner lifecycle (create, toggle, balance, delete)
+ *   • Referral attach
+ */
+/* eslint-disable @typescript-eslint/no-explicit-any -- TODO: type API responses */
+
+import { useState } from 'react'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useTranslation } from 'react-i18next'
+import {
+  AtSign,
+  Calendar,
+  ChevronDown,
+  Copy,
+  Globe,
+  Hash,
+  HardDrive,
+  Link2,
+  Loader2,
+  Monitor,
+  Plus,
+  Power,
+  PowerOff,
+  RefreshCw,
+  Save,
+  Send,
+  Smartphone,
+  Tag,
+  Trash2,
+  UserCheck,
+  UserX,
+  Wallet,
+  Wifi,
+} from 'lucide-react'
+import { toast } from 'sonner'
+
+import { api } from '@/lib/api'
+import { useAuthMe } from '@/features/auth/use-auth-me'
+import { DatePicker } from '@/components/ui/date-picker'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from '@/components/ui/collapsible'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
+import { Separator } from '@/components/ui/separator'
+import { Skeleton } from '@/components/ui/skeleton'
+import { Switch } from '@/components/ui/switch'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from '@/components/ui/alert-dialog'
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+
+interface UserDetailPanelProps {
+  readonly telegramId: string
+}
+
+export default function UserDetailPanel({ telegramId }: UserDetailPanelProps) {
+  const { t } = useTranslation()
+  const queryKey = ['admin', 'users', telegramId]
+  const { data: authUser } = useAuthMe()
+  const isDev = authUser?.role === 'DEV'
+
+  const { data: user, isLoading } = useQuery({
+    queryKey,
+    queryFn: async () => (await api.get(`/admin/users/${telegramId}`)).data,
+    enabled: !!telegramId,
+  })
+
+  if (isLoading) {
+    return (
+      <div className="space-y-4 p-6">
+        <Skeleton className="h-8 w-64" />
+        <Skeleton className="h-48 w-full" />
+      </div>
+    )
+  }
+
+  if (!user) {
+    return (
+      <div className="flex h-full items-center justify-center text-muted-foreground">
+        {t('userDetailPanel.notFound')}
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-4 p-4">
+      {/* ── Header ─────────────────────────────────────────────── */}
+      <UserHeader user={user} telegramId={telegramId} queryKey={queryKey} />
+
+      {/* ── Tabs ───────────────────────────────────────────────── */}
+      <Tabs defaultValue="profile" className="space-y-3">
+        <TabsList className="flex-wrap">
+          <TabsTrigger value="profile">{t('userDetailPanel.tabs.profile')}</TabsTrigger>
+          <TabsTrigger value="subscriptions">
+            {t('userDetailPanel.tabs.subscriptions')} ({user.subscriptions?.length ?? 0})
+          </TabsTrigger>
+          {user.partner && (
+            <TabsTrigger value="partner">{t('userDetailPanel.tabs.partner')}</TabsTrigger>
+          )}
+          {!user.isPartner && (
+            <TabsTrigger value="referrals">{t('userDetailPanel.tabs.referrals')}</TabsTrigger>
+          )}
+          <TabsTrigger value="invites">{t('userDetailPanel.tabs.invites')}</TabsTrigger>
+          <TabsTrigger value="transactions">
+            {t('userDetailPanel.tabs.transactions')} ({user.transactions?.length ?? 0})
+          </TabsTrigger>
+          {isDev && user.webAccount && (
+            <TabsTrigger value="web">{t('userDetailPanel.tabs.web')}</TabsTrigger>
+          )}
+        </TabsList>
+
+        <TabsContent value="profile">
+          <ProfileTab user={user} telegramId={telegramId} queryKey={queryKey} />
+        </TabsContent>
+        <TabsContent value="subscriptions">
+          <SubscriptionsTab user={user} telegramId={telegramId} queryKey={queryKey} />
+        </TabsContent>
+        {user.partner && (
+          <TabsContent value="partner">
+            <PartnerTab user={user} telegramId={telegramId} queryKey={queryKey} />
+          </TabsContent>
+        )}
+        {!user.isPartner && (
+          <TabsContent value="referrals">
+            <ReferralsTab user={user} telegramId={telegramId} queryKey={queryKey} />
+          </TabsContent>
+        )}
+        <TabsContent value="invites">
+          <InviteSettingsTab user={user} telegramId={telegramId} queryKey={queryKey} />
+        </TabsContent>
+        <TabsContent value="transactions">
+          <TransactionsTab user={user} />
+        </TabsContent>
+        {isDev && user.webAccount && (
+          <TabsContent value="web">
+            <WebCabinetTab user={user} telegramId={telegramId} queryKey={queryKey} />
+          </TabsContent>
+        )}
+      </Tabs>
+    </div>
+  )
+}
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Profile Tab — two-column layout: info (left) + actions (right)
+// ══════════════════════════════════════════════════════════════════════════════
+
+function ProfileTab({
+  user,
+  telegramId,
+  queryKey,
+}: {
+  user: any
+  telegramId: string
+  queryKey: string[]
+}) {
+  const { t, i18n } = useTranslation()
+  const queryClient = useQueryClient()
+  const [role, setRole] = useState(user.role)
+  const [personalDiscount, setPersonalDiscount] = useState(
+    String(user.personalDiscount ?? 0),
+  )
+  const [purchaseDiscount, setPurchaseDiscount] = useState(
+    String(user.purchaseDiscount ?? 0),
+  )
+  const [maxSubs, setMaxSubs] = useState(
+    user.maxSubscriptions != null ? String(user.maxSubscriptions) : '__default__',
+  )
+  const [currencyOverride, setCurrencyOverride] = useState<string>(
+    user.partnerBalanceCurrencyOverride ?? '__none__',
+  )
+  const [pointsDelta, setPointsDelta] = useState('')
+  const [dirty, setDirty] = useState(false)
+
+  const saveMutation = useMutation({
+    mutationFn: (data: Record<string, unknown>) =>
+      api.patch(`/admin/users/${telegramId}/profile`, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey })
+      toast.success(t('userDetailPanel.toasts.profileSaved'))
+      setDirty(false)
+    },
+    onError: () => toast.error(t('userDetailPanel.toasts.profileFailed')),
+  })
+
+  const pointsMutation = useMutation({
+    mutationFn: (delta: number) =>
+      api.post(`/admin/users/${telegramId}/points`, { delta }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey })
+      toast.success(t('userDetailPanel.toasts.pointsUpdated'))
+    },
+    onError: (err: any) => toast.error(err.response?.data?.message ?? t('userDetailPanel.toasts.profileFailed')),
+  })
+
+  const createPartnerMutation = useMutation({
+    mutationFn: () => api.post(`/admin/users/${telegramId}/create-partner`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey })
+      toast.success(t('userDetailPanel.toasts.partnerCreated'))
+    },
+    onError: (err: any) => toast.error(err.response?.data?.message ?? t('userDetailPanel.toasts.profileFailed')),
+  })
+
+  const togglePartnerMutation = useMutation({
+    mutationFn: () => api.post(`/admin/users/${telegramId}/partner/toggle`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey })
+      toast.success(t('userDetailPanel.toasts.statusChanged'))
+    },
+    onError: (err: any) => toast.error(err.response?.data?.message ?? t('userDetailPanel.toasts.profileFailed')),
+  })
+
+  const handleSave = (): void => {
+    saveMutation.mutate({
+      role,
+      personalDiscount: parseInt(personalDiscount, 10),
+      purchaseDiscount: parseInt(purchaseDiscount, 10),
+      maxSubscriptions:
+        maxSubs === '__default__' ? null : parseInt(maxSubs, 10),
+      partnerBalanceCurrencyOverride:
+        currencyOverride === '__none__' ? null : currencyOverride,
+    })
+  }
+
+  const locale = i18n.language === 'ru' ? 'ru-RU' : 'en-US'
+  const identityLabel = t(`userDetailPanel.header.identityKind.${user.identityKind ?? 'LOCAL_ONLY'}`)
+  const currentSub = user.subscriptions?.find((s: any) => s.status === 'ACTIVE')
+
+  return (
+    <div className="grid gap-3 lg:grid-cols-2">
+      {/* ── LEFT: User Information ─────────────────────────────── */}
+      <Card>
+        <CardHeader className="px-4 pt-3 pb-2">
+          <CardTitle className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+            {t('userDetailPanel.profile.infoTitle')}
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3 px-4 pb-3 text-xs">
+          {/* Profile section */}
+          <div className="space-y-1">
+            <p className="text-[10px] font-semibold text-muted-foreground/70 uppercase tracking-wider">
+              {t('userDetailPanel.profile.sectionProfile')}
+            </p>
+            <div className="grid gap-0.5">
+              <InfoRow icon={<Hash className="h-3 w-3" />} label="Reiwa ID" value={user.id} mono />
+              <InfoRow icon={<Globe className="h-3 w-3" />} label={t('userDetailPanel.profile.identityType')} value={identityLabel} />
+              {user.telegramId && (
+                <InfoRow icon={<Smartphone className="h-3 w-3" />} label="Telegram ID" value={user.telegramId} mono />
+              )}
+              {user.webAccount?.login && (
+                <InfoRow icon={<Globe className="h-3 w-3" />} label="Web-логин" value={user.webAccount.login} mono />
+              )}
+              {user.username && (
+                <InfoRow icon={<AtSign className="h-3 w-3" />} label={t('userDetailPanel.profile.publicUsername')} value={`@${user.username}`} />
+              )}
+              <InfoRow icon={<UserCheck className="h-3 w-3" />} label={t('userDetailPanel.profile.nameLabel')} value={user.name || '—'} />
+              <InfoRow icon={<Hash className="h-3 w-3" />} label={t('userDetailPanel.profile.role')} value={user.role} />
+              <InfoRow icon={<Globe className="h-3 w-3" />} label={t('userDetailPanel.profile.language')} value={user.language} />
+              <InfoRow icon={<Wallet className="h-3 w-3" />} label={t('userDetailPanel.profile.points')} value={String(user.points ?? 0)} mono />
+            </div>
+          </div>
+
+          {/* Discounts section */}
+          <div className="space-y-1">
+            <p className="text-[10px] font-semibold text-muted-foreground/70 uppercase tracking-wider">
+              {t('userDetailPanel.profile.sectionDiscounts')}
+            </p>
+            <div className="grid gap-0.5">
+              <InfoRow icon={<Tag className="h-3 w-3" />} label={t('userDetailPanel.profile.personalDiscount')} value={`${user.personalDiscount ?? 0}%`} />
+              <InfoRow icon={<Tag className="h-3 w-3" />} label={t('userDetailPanel.profile.purchaseDiscount')} value={`${user.purchaseDiscount ?? 0}%`} />
+            </div>
+          </div>
+
+          {/* Subscription section */}
+          <div className="space-y-1">
+            <p className="text-[10px] font-semibold text-muted-foreground/70 uppercase tracking-wider">
+              {t('userDetailPanel.profile.sectionSubscription')}
+            </p>
+            {currentSub ? (
+              <div className="grid gap-0.5">
+                <InfoRow icon={<Wifi className="h-3 w-3" />} label={t('userDetailPanel.profile.currentPlan')} value={currentSub.plan?.name ?? '—'} />
+                <InfoRow
+                  icon={<Calendar className="h-3 w-3" />}
+                  label={t('userDetailPanel.profile.expiresAt')}
+                  value={currentSub.expireAt ? new Date(currentSub.expireAt).toLocaleDateString(locale) : '—'}
+                />
+                <InfoRow icon={<Hash className="h-3 w-3" />} label={t('userDetailPanel.profile.subsCount')} value={String(user.subscriptions?.length ?? 0)} />
+              </div>
+            ) : (
+              <p className="text-[11px] text-muted-foreground italic">
+                {t('userDetailPanel.profile.noActiveSub')}
+              </p>
+            )}
+          </div>
+
+          {/* Meta section */}
+          <div className="space-y-1">
+            <p className="text-[10px] font-semibold text-muted-foreground/70 uppercase tracking-wider">
+              {t('userDetailPanel.profile.sectionMeta')}
+            </p>
+            <div className="grid gap-0.5">
+              <InfoRow icon={<Link2 className="h-3 w-3" />} label="Referral Code" value={user.referralCode} mono />
+              <InfoRow icon={<AtSign className="h-3 w-3" />} label="Email" value={user.email ?? user.webAccount?.email ?? '—'} />
+              <InfoRow
+                icon={<Calendar className="h-3 w-3" />}
+                label={t('userDetailPanel.profile.registered')}
+                value={new Date(user.createdAt).toLocaleString(locale)}
+              />
+              <InfoRow
+                icon={<Monitor className="h-3 w-3" />}
+                label={t('userDetailPanel.profile.maxSubs')}
+                value={user.maxSubscriptions === null ? t('userDetailPanel.profile.maxSubsDefault') : user.maxSubscriptions === -1 ? '∞' : String(user.maxSubscriptions)}
+              />
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* ── RIGHT: Actions (label left, control right) ─────── */}
+      <Card>
+        <CardHeader className="px-4 pt-3 pb-2">
+          <CardTitle className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+            {t('userDetailPanel.profile.actionsTitle')}
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-2 px-4 pb-3">
+          {/* Role */}
+          <div className="flex items-center justify-between gap-3">
+            <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+              <Hash className="h-3 w-3 text-muted-foreground/60" />
+              {t('userDetailPanel.profile.role')}
+            </span>
+            <Select value={role} onValueChange={(v) => { setRole(v); setDirty(true) }}>
+              <SelectTrigger className="h-7 w-40 text-xs"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="USER">USER</SelectItem>
+                <SelectItem value="ADMIN">ADMIN</SelectItem>
+                <SelectItem value="DEV">DEV</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          {/* Max subscriptions */}
+          <div className="flex items-center justify-between gap-3">
+            <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+              <Monitor className="h-3 w-3 text-muted-foreground/60" />
+              {t('userDetailPanel.profile.maxSubs')}
+            </span>
+            <Select value={maxSubs} onValueChange={(v) => { setMaxSubs(v); setDirty(true) }}>
+              <SelectTrigger className="h-7 w-40 text-xs"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__default__">{t('userDetailPanel.profile.maxSubsDefault')}</SelectItem>
+                <SelectItem value="-1">∞</SelectItem>
+                <SelectItem value="1">1</SelectItem>
+                <SelectItem value="2">2</SelectItem>
+                <SelectItem value="3">3</SelectItem>
+                <SelectItem value="5">5</SelectItem>
+                <SelectItem value="10">10</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          {/* Personal discount */}
+          <div className="flex items-center justify-between gap-3">
+            <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+              <Tag className="h-3 w-3 text-muted-foreground/60" />
+              {t('userDetailPanel.profile.personalDiscount')}
+            </span>
+            <Input type="number" className="h-7 w-40 text-xs text-right px-2" min="0" max="100" value={personalDiscount} onChange={(e) => { setPersonalDiscount(e.target.value); setDirty(true) }} />
+          </div>
+
+          {/* Purchase discount */}
+          <div className="flex items-center justify-between gap-3">
+            <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+              <Tag className="h-3 w-3 text-muted-foreground/60" />
+              {t('userDetailPanel.profile.purchaseDiscount')}
+            </span>
+            <Input type="number" className="h-7 w-40 text-xs text-right px-2" min="0" max="100" value={purchaseDiscount} onChange={(e) => { setPurchaseDiscount(e.target.value); setDirty(true) }} />
+          </div>
+
+          {/* Partner currency */}
+          <div className="flex items-center justify-between gap-3">
+            <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+              <Wallet className="h-3 w-3 text-muted-foreground/60" />
+              {t('userDetailPanel.profile.partnerCurrencyOverride')}
+            </span>
+            <Select value={currencyOverride} onValueChange={(v) => { setCurrencyOverride(v); setDirty(true) }}>
+              <SelectTrigger className="h-7 w-40 text-xs"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__none__">{t('userDetailPanel.profile.partnerCurrencyDefault')}</SelectItem>
+                <SelectItem value="RUB">RUB</SelectItem>
+                <SelectItem value="USD">USD</SelectItem>
+                <SelectItem value="EUR">EUR</SelectItem>
+                <SelectItem value="USDT">USDT</SelectItem>
+                <SelectItem value="TON">TON</SelectItem>
+                <SelectItem value="XTR">XTR</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          {/* Points */}
+          <div className="flex items-center justify-between gap-3">
+            <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+              <Wallet className="h-3 w-3 text-muted-foreground/60" />
+              {t('userDetailPanel.profile.points')} ({user.points ?? 0})
+            </span>
+            <Input
+              type="number"
+              className="h-7 w-40 text-xs text-right px-2"
+              placeholder="±"
+              value={pointsDelta}
+              onChange={(e) => setPointsDelta(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  const delta = parseInt(pointsDelta, 10)
+                  if (Number.isFinite(delta) && delta !== 0) {
+                    pointsMutation.mutate(delta)
+                    setPointsDelta('')
+                  }
+                }
+              }}
+            />
+          </div>
+
+          {/* Partner toggle */}
+          <div className="flex items-center justify-between gap-3">
+            <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+              <UserCheck className="h-3 w-3 text-muted-foreground/60" />
+              {t('userDetailPanel.profile.activatePartner')}
+            </span>
+            {user.partner ? (
+              <Button
+                size="sm"
+                variant="outline"
+                className={`h-7 w-40 text-xs ${user.partner.isActive ? 'border-emerald-500/50 text-emerald-500' : 'border-destructive/50 text-destructive'}`}
+                onClick={() => togglePartnerMutation.mutate()}
+                disabled={togglePartnerMutation.isPending}
+              >
+                {user.partner.isActive ? t('userDetailPanel.profile.partnerActive') : t('userDetailPanel.profile.partnerDisabled')}
+              </Button>
+            ) : (
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 w-40 text-xs"
+                onClick={() => createPartnerMutation.mutate()}
+                disabled={createPartnerMutation.isPending}
+              >
+                {t('userDetailPanel.profile.activatePartnerBtn')}
+              </Button>
+            )}
+          </div>
+
+          {/* Save */}
+          {dirty && (
+            <Button size="sm" onClick={handleSave} disabled={saveMutation.isPending} className="w-full h-7 text-xs">
+              {saveMutation.isPending ? <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> : <Save className="mr-2 h-3.5 w-3.5" />}
+              {t('userDetailPanel.profile.saveChanges')}
+            </Button>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+
+function InfoRow({ label, value, mono, icon }: { label: string; value: string; mono?: boolean; icon?: React.ReactNode }) {
+  return (
+    <div className="flex items-center justify-between gap-2 py-0.5">
+      <span className="flex shrink-0 items-center gap-1.5 text-muted-foreground">
+        {icon && <span className="text-muted-foreground/60">{icon}</span>}
+        {label}
+      </span>
+      <span className={`truncate text-right ${mono ? 'font-mono text-[11px]' : ''}`}>{value}</span>
+    </div>
+  )
+}
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Header — identity, contacts, primary actions
+// ══════════════════════════════════════════════════════════════════════════════
+
+const IDENTITY_KIND_VARIANTS: Record<string, 'default' | 'secondary' | 'outline'> = {
+  TELEGRAM_LINKED: 'default',
+  TELEGRAM_PROVISIONAL: 'secondary',
+  TELEGRAM_ONLY: 'secondary',
+  WEB_ONLY: 'secondary',
+  LOCAL_ONLY: 'outline',
+}
+
+function UserHeader({
+  user,
+  telegramId,
+  queryKey,
+}: {
+  user: any
+  telegramId: string
+  queryKey: string[]
+}) {
+  const { t, i18n } = useTranslation()
+
+  const identityKey = (user.identityKind ?? 'LOCAL_ONLY') as keyof typeof IDENTITY_KIND_VARIANTS
+  const identityVariant = IDENTITY_KIND_VARIANTS[identityKey] ?? 'outline'
+  const identityLabel = t(`userDetailPanel.header.identityKind.${identityKey}`)
+
+  const copyToClipboard = (value: string, label: string) => {
+    navigator.clipboard.writeText(value)
+    toast.success(label)
+  }
+
+  const partnerBalance =
+    user.partner !== null && user.partner !== undefined
+      ? (Number(user.partner.balance ?? 0) / 100).toLocaleString(
+          i18n.language === 'ru' ? 'ru-RU' : 'en-US',
+          { style: 'currency', currency: 'RUB', maximumFractionDigits: 2 },
+        )
+      : null
+
+  const tempPasswordExpiresAt: string | null = user.webAccount?.temporaryPasswordExpiresAt ?? null
+
+  return (
+    <div className="space-y-3">
+      {/* Title row + primary actions */}
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0 flex-1 space-y-2">
+          <div className="flex items-center gap-2">
+            <h2 className="truncate text-xl font-bold">{user.name || '—'}</h2>
+            {user.username && (
+              <span className="truncate text-sm text-muted-foreground">@{user.username}</span>
+            )}
+          </div>
+
+          {/* Status indicators — minimal text style */}
+          <div className="flex flex-wrap items-center gap-3 text-[11px]">
+            <UserStatusDot user={user} />
+            <span className="text-muted-foreground">{identityLabel}</span>
+            <span className="text-muted-foreground">{user.role}</span>
+            <span className="text-muted-foreground">{user.language}</span>
+            {user.isBotBlocked && (
+              <span className="text-amber-500">{t('userDetailPanel.header.botBlocked')}</span>
+            )}
+            {user.isRulesAccepted === false && (
+              <span className="text-amber-500">{t('userDetailPanel.header.rulesNotAccepted')}</span>
+            )}
+            {user.partner && (
+              <span className={`${user.partner.isActive ? 'text-emerald-500' : 'text-destructive'}`}>
+                {user.partner.isActive
+                  ? t('userDetailPanel.header.partnerActive')
+                  : t('userDetailPanel.header.partnerInactive')}
+              </span>
+            )}
+          </div>
+        </div>
+
+        <div className="flex shrink-0 gap-2">
+          <NotifyButton telegramId={telegramId} />
+          <BlockButton telegramId={telegramId} isBlocked={user.isBlocked} queryKey={queryKey} />
+          <DeleteButton telegramId={telegramId} />
+        </div>
+      </div>
+
+      {/* Inline alerts */}
+      {(user.webAccount?.requiresPasswordChange || tempPasswordExpiresAt) && (
+        <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+          {tempPasswordExpiresAt
+            ? t('userDetailPanel.header.webPasswordTemporary', {
+                expiresAt: new Date(tempPasswordExpiresAt).toLocaleString(
+                  i18n.language === 'ru' ? 'ru-RU' : 'en-US',
+                ),
+              })
+            : t('userDetailPanel.header.webRequiresPasswordChange')}
+        </div>
+      )}
+      {user.attachReferrerReason && (
+        <div className="rounded-md border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+          {t(`userDetailPanel.header.attachReason.${user.attachReferrerReason}`)}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function IdentifierChip({
+  icon,
+  label,
+  value,
+  copyLabel,
+  onCopy,
+  mono = true,
+}: {
+  icon: React.ReactNode
+  label: string
+  value: string
+  copyLabel?: string
+  onCopy?: (value: string, label: string) => void
+  mono?: boolean
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <span className="text-muted-foreground">{icon}</span>
+      <span className="text-muted-foreground">{label}:</span>
+      <span className={mono ? 'truncate font-mono' : 'truncate'}>{value}</span>
+      {onCopy && copyLabel && (
+        <Button
+          variant="ghost"
+          size="icon"
+          className="ml-auto h-5 w-5 shrink-0"
+          onClick={() => onCopy(value, copyLabel)}
+          aria-label={copyLabel}
+        >
+          <Copy className="h-3 w-3" />
+        </Button>
+      )}
+    </div>
+  )
+}
+
+/**
+ * User status dot with pulse animation.
+ * - Online (updatedAt < 5min): green + pulse
+ * - AFK (updatedAt < 30min): amber
+ * - Blocked: red
+ * - Inactive: transparent with border
+ */
+function UserStatusDot({ user }: { user: any }) {
+  const now = Date.now()
+  const updatedAt = user.updatedAt ? new Date(user.updatedAt).getTime() : 0
+  const diffMin = (now - updatedAt) / 60000
+
+  let dotClass: string
+
+  if (user.isBlocked) {
+    dotClass = 'bg-destructive text-destructive'
+  } else if (diffMin < 5) {
+    dotClass = 'bg-emerald-500 text-emerald-500 status-dot-pulse'
+  } else if (diffMin < 30) {
+    dotClass = 'bg-amber-500 text-amber-500'
+  } else {
+    dotClass = 'bg-transparent border border-muted-foreground/50'
+  }
+
+  return <span className={`inline-block h-2.5 w-2.5 rounded-full ${dotClass}`} />
+}
+
+function getUserStatusDotClass(user: { isBlocked: boolean; updatedAt?: string }): string {
+  if (user.isBlocked) return 'bg-destructive'
+  const now = Date.now()
+  const updatedAt = user.updatedAt ? new Date(user.updatedAt).getTime() : 0
+  const diffMin = (now - updatedAt) / 60000
+  if (diffMin < 5) return 'bg-emerald-500 animate-pulse'
+  if (diffMin < 30) return 'bg-amber-500'
+  return 'bg-transparent border border-muted-foreground/50'
+}
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Subscriptions Tab
+// ══════════════════════════════════════════════════════════════════════════════
+
+function SubscriptionsTab({ user, telegramId, queryKey }: { user: any; telegramId: string; queryKey: string[] }) {
+  const { t, i18n } = useTranslation()
+  const queryClient = useQueryClient()
+  const [showGiveSub, setShowGiveSub] = useState(false)
+  const [openSubId, setOpenSubId] = useState<string | null>(null)
+
+  const grantTrialMutation = useMutation({
+    mutationFn: () => api.post(`/admin/users/${telegramId}/grant-trial`),
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey }); toast.success(t('userDetailPanel.toasts.trialGranted')) },
+    onError: (err: any) => toast.error(err.response?.data?.message ?? t('userDetailPage.subscriptionUpdateFailed')),
+  })
+
+  const updateSubMutation = useMutation({
+    mutationFn: ({ id, data }: { id: string; data: Record<string, unknown> }) =>
+      api.patch(`/admin/users/subscriptions/${id}`, data),
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey }); toast.success(t('userDetailPanel.toasts.subUpdated')) },
+    onError: (err: any) => toast.error(err.response?.data?.message ?? t('userDetailPage.subscriptionUpdateFailed')),
+  })
+
+  const syncMutation = useMutation({
+    mutationFn: (id: string) => api.post(`/admin/users/subscriptions/${id}/sync`),
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey }); toast.success(t('userDetailPanel.toasts.synced')) },
+    onError: () => toast.error(t('userDetailPanel.toasts.syncFailed')),
+  })
+
+  const resetTrafficMutation = useMutation({
+    mutationFn: (id: string) => api.post(`/admin/users/subscriptions/${id}/reset-traffic`),
+    onSuccess: () => toast.success(t('userDetailPanel.toasts.trafficReset')),
+    onError: () => toast.error(t('userDetailPanel.toasts.trafficResetFailed')),
+  })
+
+  const deleteSubMutation = useMutation({
+    mutationFn: (id: string) => api.delete(`/admin/users/subscriptions/${id}`),
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey }); toast.success(t('userDetailPanel.toasts.subDeleted')) },
+  })
+
+  const syncAllMutation = useMutation({
+    mutationFn: () => api.post(`/admin/users/${telegramId}/sync`),
+    onSuccess: (res) => {
+      queryClient.invalidateQueries({ queryKey })
+      const enqueued = res.data?.enqueued ?? 0
+      toast.success(t('userDetailPanel.subscriptions.syncAllEnqueued', { count: enqueued }))
+    },
+    onError: () => toast.error(t('userDetailPanel.toasts.syncFailed')),
+  })
+
+  const assignPlanMutation = useMutation({
+    mutationFn: ({ id, planId }: { id: string; planId: string }) =>
+      api.patch(`/admin/users/subscriptions/${id}`, { planId }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey })
+      toast.success(t('userDetailPanel.subscriptions.planAssigned'))
+    },
+    onError: (err: any) => toast.error(err.response?.data?.message ?? t('userDetailPanel.toasts.subUpdated')),
+  })
+
+  const { data: plans } = useQuery({
+    queryKey: ['admin', 'plans'],
+    queryFn: async () => (await api.get('/admin/plans')).data as any[],
+  })
+  const assignablePlans = (plans ?? []).filter((p: any) => !p.isArchived && p.isActive !== false)
+
+  const subs = user.subscriptions ?? []
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap gap-2">
+        <Button size="sm" onClick={() => setShowGiveSub(true)}>
+          <Plus className="mr-1 h-3.5 w-3.5" /> {t('userDetailPanel.subscriptions.giveSub')}
+        </Button>
+        <Button size="sm" variant="outline" onClick={() => grantTrialMutation.mutate()} disabled={grantTrialMutation.isPending}>
+          <RefreshCw className="mr-1 h-3.5 w-3.5" /> {t('userDetailPanel.subscriptions.giveTrial')}
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => syncAllMutation.mutate()}
+          disabled={syncAllMutation.isPending || subs.length === 0}
+        >
+          {syncAllMutation.isPending ? (
+            <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <RefreshCw className="mr-1 h-3.5 w-3.5" />
+          )}
+          {t('userDetailPanel.subscriptions.syncAll')}
+        </Button>
+      </div>
+
+      {subs.length === 0 ? (
+        <Card><CardContent className="py-8 text-center text-sm text-muted-foreground">{t('userDetailPanel.subscriptions.noSubs')}</CardContent></Card>
+      ) : (
+        <div className="grid items-start gap-3 sm:grid-cols-2">
+          {subs.map((sub: any) => (
+            <SubscriptionCard
+              key={sub.id}
+              sub={sub}
+              isOpen={openSubId === sub.id}
+              onToggleOpen={() => setOpenSubId(openSubId === sub.id ? null : sub.id)}
+              assignablePlans={assignablePlans}
+              onUpdate={(data) => updateSubMutation.mutate({ id: sub.id, data })}
+              onSync={() => syncMutation.mutate(sub.id)}
+              onResetTraffic={() => resetTrafficMutation.mutate(sub.id)}
+              onDelete={() => deleteSubMutation.mutate(sub.id)}
+              onAssignPlan={(planId) => assignPlanMutation.mutate({ id: sub.id, planId })}
+            />
+          ))}
+        </div>
+      )}
+
+      {/* ── Plan Access toggles ─────────────────────────────────── */}
+      <PlanAccessSection telegramId={telegramId} queryKey={queryKey} plans={assignablePlans} />
+
+      <Dialog open={showGiveSub} onOpenChange={setShowGiveSub}>
+        <DialogContent className="max-w-md">
+          <DialogHeader><DialogTitle>{t('userDetailPanel.subscriptions.giveSubDialog')}</DialogTitle></DialogHeader>
+          <GiveSubForm telegramId={telegramId} queryKey={queryKey} onClose={() => setShowGiveSub(false)} />
+        </DialogContent>
+      </Dialog>
+    </div>
+  )
+}
+
+function SubscriptionCard({
+  sub,
+  isOpen,
+  onToggleOpen,
+  assignablePlans,
+  onUpdate,
+  onSync,
+  onResetTraffic,
+  onDelete,
+  onAssignPlan,
+}: {
+  sub: any
+  isOpen: boolean
+  onToggleOpen: () => void
+  assignablePlans: any[]
+  onUpdate: (data: Record<string, unknown>) => void
+  onSync: () => void
+  onResetTraffic: () => void
+  onDelete: () => void
+  onAssignPlan: (planId: string) => void
+}) {
+  const { t, i18n } = useTranslation()
+  const locale = i18n.language === 'ru' ? 'ru-RU' : 'en-US'
+
+  const statusKey = String(sub.status ?? 'UNKNOWN')
+  const statusDot =
+    statusKey === 'ACTIVE'
+      ? 'bg-emerald-500'
+      : statusKey === 'EXPIRED' || statusKey === 'DELETED'
+        ? 'bg-destructive'
+        : statusKey === 'DISABLED'
+          ? 'bg-amber-500'
+          : 'bg-muted-foreground/40'
+
+  const statusColor =
+    statusKey === 'ACTIVE'
+      ? 'text-emerald-500'
+      : statusKey === 'DISABLED' || statusKey === 'EXPIRED' || statusKey === 'DELETED'
+        ? 'text-destructive'
+        : 'text-muted-foreground'
+
+  const statusLabel = t(`userDetailPanel.subscriptions.status.${statusKey}`, statusKey)
+
+  const [trafficLimit, setTrafficLimit] = useState(String(sub.trafficLimit ?? ''))
+  const [deviceLimit, setDeviceLimit] = useState(String(sub.deviceLimit ?? ''))
+  const [expiresAt, setExpiresAt] = useState<Date | undefined>(
+    sub.expireAt ? new Date(sub.expireAt) : undefined,
+  )
+  const [dirty, setDirty] = useState(false)
+
+  const handleSave = () => {
+    const data: Record<string, unknown> = {}
+    const newTraffic = parseInt(trafficLimit, 10)
+    const newDevices = parseInt(deviceLimit, 10)
+    if (Number.isFinite(newTraffic) && newTraffic !== sub.trafficLimit) data.trafficLimit = newTraffic
+    if (Number.isFinite(newDevices) && newDevices !== sub.deviceLimit) data.deviceLimit = newDevices
+    if (expiresAt) {
+      const originalDate = sub.expireAt ? new Date(sub.expireAt).toISOString().slice(0, 10) : ''
+      const newDate = expiresAt.toISOString().slice(0, 10)
+      if (newDate !== originalDate) {
+        data.expiresAt = expiresAt.toISOString()
+      }
+    }
+    if (Object.keys(data).length > 0) {
+      onUpdate(data)
+      setDirty(false)
+    }
+  }
+
+  return (
+    <Card className="flex flex-col">
+      {/* Header */}
+      <div className="flex items-center justify-between gap-2 px-3 pt-2.5 pb-1.5">
+        <div className="flex min-w-0 items-center gap-1.5">
+          <span className={`inline-block h-2 w-2 shrink-0 rounded-full ${statusDot}`} />
+          <span className="truncate text-xs font-medium">{sub.plan?.name ?? `#${sub.id.slice(0, 8)}`}</span>
+          <span className={`text-[10px] font-medium ${statusColor}`}>{statusLabel}</span>
+          {sub.isTrial && <span className="rounded border border-pink-500/50 px-1 py-px text-[9px] uppercase text-pink-400">Trial</span>}
+        </div>
+        <div className="flex shrink-0 items-center gap-0">
+          <Button size="icon" variant="ghost" className="h-6 w-6 text-muted-foreground hover:text-foreground" onClick={onSync} aria-label={t('userDetailPanel.subscriptions.syncTitle')}>
+            <RefreshCw className="h-3 w-3" />
+          </Button>
+          <Button size="icon" variant="ghost" className="h-6 w-6 text-muted-foreground hover:text-destructive" onClick={onDelete} aria-label={t('userDetailPanel.subscriptions.deleteTitle')}>
+            <Trash2 className="h-3 w-3" />
+          </Button>
+        </div>
+      </div>
+
+      {/* Info rows */}
+      <div className="grid gap-0 px-3 pb-1.5 text-[11px]">
+        <InfoRow icon={<Tag className="h-3 w-3" />} label={t('userDetailPanel.subscriptions.planLabel')} value={sub.plan?.name ?? '—'} />
+        <InfoRow icon={<Hash className="h-3 w-3" />} label={t('userDetailPanel.subscriptions.planType')} value={String(t(`userDetailPanel.subscriptions.planTypes.${sub.plan?.type ?? 'BOTH'}`, sub.plan?.type ?? '—'))} />
+        <InfoRow icon={<Wifi className="h-3 w-3" />} label={t('userDetailPanel.subscriptions.traffic')} value={sub.trafficLimit ? `${sub.trafficLimit} GB` : '∞'} />
+        <InfoRow icon={<Monitor className="h-3 w-3" />} label={t('userDetailPanel.subscriptions.devices')} value={String(sub.deviceLimit || '∞')} />
+        <InfoRow icon={<Calendar className="h-3 w-3" />} label={t('userDetailPanel.subscriptions.expires')} value={sub.expireAt ? new Date(sub.expireAt).toLocaleDateString(locale) : '—'} />
+      </div>
+
+      {/* Quick actions — accordion (only one open at a time) */}
+      <div className="border-t px-3 pb-2.5">
+        <Collapsible open={isOpen} onOpenChange={(open) => { if (open) onToggleOpen(); else if (isOpen) onToggleOpen(); }}>
+          <CollapsibleTrigger asChild>
+            <button
+              type="button"
+              className="flex w-full items-center justify-between py-1.5 text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+            >
+              <span>{t('userDetailPanel.subscriptions.quickEdits')}</span>
+              <ChevronDown className={`h-3 w-3 transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`} />
+            </button>
+          </CollapsibleTrigger>
+          <CollapsibleContent className="collapsible-animate overflow-hidden">
+            <div className="space-y-1.5 pt-1 pb-0.5">
+              <div className="flex items-center justify-between gap-2">
+                <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                  <Wifi className="h-3 w-3 text-muted-foreground/60" />
+                  {t('userDetailPanel.subscriptions.trafficLabel')}
+                </span>
+                <Input type="number" min="0" className="h-7 w-40 text-xs text-right px-1.5" value={trafficLimit} onChange={(e) => { setTrafficLimit(e.target.value); setDirty(true) }} />
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                  <Monitor className="h-3 w-3 text-muted-foreground/60" />
+                  {t('userDetailPanel.subscriptions.devicesLabel')}
+                </span>
+                <Input type="number" min="0" className="h-7 w-40 text-xs text-right px-1.5" value={deviceLimit} onChange={(e) => { setDeviceLimit(e.target.value); setDirty(true) }} />
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                  <RefreshCw className="h-3 w-3 text-muted-foreground/60" />
+                  {t('userDetailPanel.subscriptions.resetTraffic')}
+                </span>
+                <Button size="sm" variant="outline" className="h-6 px-2 text-[10px]" onClick={onResetTraffic}>{t('userDetailPanel.subscriptions.resetBtn')}</Button>
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                  <Calendar className="h-3 w-3 text-muted-foreground/60" />
+                  {t('userDetailPanel.subscriptions.expires')}
+                </span>
+                <DatePicker
+                  value={expiresAt}
+                  onChange={(date) => { setExpiresAt(date); setDirty(true) }}
+                  className="h-6 w-32 text-[11px]"
+                />
+              </div>
+              {assignablePlans.length > 0 && (
+                <div className="flex items-center justify-between gap-2">
+                  <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                    <Tag className="h-3 w-3 text-muted-foreground/60" />
+                    {t('userDetailPanel.subscriptions.assignPlanLabel')}
+                  </span>
+                  <Select value={sub.plan?.id ?? ''} onValueChange={(planId) => { if (planId && planId !== sub.plan?.id) onAssignPlan(planId) }}>
+                    <SelectTrigger className="h-7 w-40 text-xs"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {assignablePlans.map((p: any) => (
+                        <SelectItem key={p.id} value={String(p.id)}>{p.name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
+              {/* Footer */}
+              <div className="flex items-center justify-between gap-2 pt-1.5">
+                <div className="flex gap-1">
+                  <Button size="sm" variant="outline" className="h-6 px-2 text-[10px]" onClick={() => onUpdate({ status: statusKey === 'ACTIVE' ? 'DISABLED' : 'ACTIVE' })}>
+                    {statusKey === 'ACTIVE' ? t('userDetailPanel.subscriptions.disableTitle') : t('userDetailPanel.subscriptions.enableTitle')}
+                  </Button>
+                  <Button size="sm" variant="outline" className="h-6 px-2 text-[10px] text-destructive" onClick={onDelete}>
+                    {t('userDetailPanel.subscriptions.deleteTitle')}
+                  </Button>
+                </div>
+                <div className="flex gap-1">
+                  {sub.configUrl && (
+                    <Button size="sm" variant="ghost" className="h-6 px-1.5 text-muted-foreground" onClick={() => { navigator.clipboard.writeText(sub.configUrl); toast.success(t('userDetailPanel.subscriptions.linkCopied')) }} aria-label={t('userDetailPanel.subscriptions.copyLink')}>
+                      <Link2 className="h-3 w-3" />
+                    </Button>
+                  )}
+                  <Button size="sm" className="h-6 px-2 text-[10px]" disabled={!dirty} onClick={handleSave}>
+                    {t('userDetailPanel.subscriptions.saveBtn')}
+                  </Button>
+                </div>
+              </div>
+            </div>
+          </CollapsibleContent>
+        </Collapsible>
+      </div>
+    </Card>
+  )
+}
+
+
+function PlanAccessSection({
+  telegramId,
+  queryKey,
+  plans,
+}: {
+  telegramId: string
+  queryKey: string[]
+  plans: any[]
+}) {
+  const { t } = useTranslation()
+  const queryClient = useQueryClient()
+
+  const grantMutation = useMutation({
+    mutationFn: (planId: string) =>
+      api.post(`/admin/users/${telegramId}/plan-access/${planId}`),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey }),
+  })
+
+  const revokeMutation = useMutation({
+    mutationFn: (planId: string) =>
+      api.delete(`/admin/users/${telegramId}/plan-access/${planId}`),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey }),
+  })
+
+  // Plans with availability=ALLOWED are the ones that use allowedUserIds
+  const allowedPlans = plans.filter((p: any) => p.availability === 'ALLOWED')
+  if (allowedPlans.length === 0) return null
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-sm">{t('userDetailPanel.subscriptions.planAccessTitle')}</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-2">
+        <p className="text-xs text-muted-foreground">
+          {t('userDetailPanel.subscriptions.planAccessHint')}
+        </p>
+        {allowedPlans.map((plan: any) => {
+          const hasAccess = (plan.allowedUserIds ?? []).includes(telegramId)
+          return (
+            <div key={plan.id} className="flex items-center justify-between rounded-md border px-3 py-2">
+              <span className="text-sm">{plan.name}</span>
+              <Switch
+                checked={hasAccess}
+                onCheckedChange={(checked) => {
+                  if (checked) grantMutation.mutate(plan.id)
+                  else revokeMutation.mutate(plan.id)
+                }}
+                aria-label={`${t('userDetailPanel.subscriptions.planAccessToggle')} ${plan.name}`}
+              />
+            </div>
+          )
+        })}
+      </CardContent>
+    </Card>
+  )
+}
+
+function GiveSubForm({ telegramId, queryKey, onClose }: { telegramId: string; queryKey: string[]; onClose: () => void }) {
+  const { t } = useTranslation()
+  const queryClient = useQueryClient()
+  const [planId, setPlanId] = useState('')
+  const [days, setDays] = useState('30')
+  const [isTrial, setIsTrial] = useState(false)
+
+  const { data: plans } = useQuery({
+    queryKey: ['admin', 'plans'],
+    queryFn: async () => (await api.get('/admin/plans')).data as any[],
+  })
+
+  const mutation = useMutation({
+    mutationFn: () => api.post(`/admin/users/${telegramId}/give-subscription`, { planId, durationDays: parseInt(days), isTrial }),
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey }); toast.success(t('userDetailPanel.toasts.subGranted')); onClose() },
+    onError: (err: any) => toast.error(err.response?.data?.message ?? t('userDetailPage.subscriptionUpdateFailed')),
+  })
+
+  return (
+    <div className="space-y-4">
+      <div className="space-y-1.5">
+        <Label>{t('userDetailPanel.subscriptions.plan')}</Label>
+        <Select value={planId} onValueChange={setPlanId}>
+          <SelectTrigger><SelectValue placeholder={t('userDetailPanel.subscriptions.planPlaceholder')} /></SelectTrigger>
+          <SelectContent>
+            {(plans ?? []).filter((p: any) => !p.isArchived).map((p: any) => (
+              <SelectItem key={p.id} value={String(p.id)}>{p.name}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+      <div className="space-y-1.5">
+        <Label>{t('userDetailPanel.subscriptions.duration')}</Label>
+        <Input type="number" min="1" value={days} onChange={(e) => setDays(e.target.value)} />
+      </div>
+      <div className="flex items-center gap-2">
+        <Switch checked={isTrial} onCheckedChange={setIsTrial} id="trial-toggle" />
+        <Label htmlFor="trial-toggle">{t('userDetailPanel.subscriptions.markTrial')}</Label>
+      </div>
+      <div className="flex justify-end gap-2">
+        <Button variant="outline" onClick={onClose}>{t('userDetailPanel.subscriptions.cancel')}</Button>
+        <Button onClick={() => mutation.mutate()} disabled={!planId || mutation.isPending}>
+          {mutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Plus className="mr-2 h-4 w-4" />}
+          {t('userDetailPanel.subscriptions.give')}
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Partner Tab — two-column: profile (left) + referral stats (right)
+// ══════════════════════════════════════════════════════════════════════════════
+
+function PartnerTab({ user, telegramId, queryKey }: { user: any; telegramId: string; queryKey: string[] }) {
+  const { t, i18n } = useTranslation()
+  const queryClient = useQueryClient()
+  const [adjustAmount, setAdjustAmount] = useState('')
+  const [adjustReason, setAdjustReason] = useState('')
+  const locale = i18n.language === 'ru' ? 'ru-RU' : 'en-US'
+
+  const createMutation = useMutation({
+    mutationFn: () => api.post(`/admin/users/${telegramId}/create-partner`),
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey }); toast.success(t('userDetailPanel.toasts.partnerCreated')) },
+    onError: (err: any) => toast.error(err.response?.data?.message ?? t('userDetailPanel.toasts.profileFailed')),
+  })
+
+  const toggleMutation = useMutation({
+    mutationFn: () => api.post(`/admin/users/${telegramId}/partner/toggle`),
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey }); toast.success(t('userDetailPanel.toasts.statusChanged')) },
+  })
+
+  const adjustMutation = useMutation({
+    mutationFn: () => api.post(`/admin/users/${telegramId}/partner/adjust-balance`, {
+      amount: Math.round(parseFloat(adjustAmount) * 100),
+      reason: adjustReason || undefined,
+    }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey })
+      toast.success(t('userDetailPanel.toasts.balanceAdjusted'))
+      setAdjustAmount('')
+      setAdjustReason('')
+    },
+    onError: (err: any) => toast.error(err.response?.data?.message ?? t('userDetailPanel.toasts.profileFailed')),
+  })
+
+  if (!user.partner) {
+    return (
+      <Card>
+        <CardContent className="flex flex-col items-center gap-3 py-12">
+          <p className="text-sm text-muted-foreground">{t('userDetailPanel.partner.notPartner')}</p>
+          <Button onClick={() => createMutation.mutate()} disabled={createMutation.isPending}>
+            <Plus className="mr-2 h-4 w-4" /> {t('userDetailPanel.partner.createPartner')}
+          </Button>
+        </CardContent>
+      </Card>
+    )
+  }
+
+  const p = user.partner
+  const referrals: any[] = p.referrals ?? []
+  const transactions: any[] = p.transactions ?? []
+  const fmtMoney = (v: number) => (v / 100).toLocaleString(locale, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' ₽'
+
+  return (
+    <div className="grid items-start gap-3 lg:grid-cols-2">
+      {/* ── LEFT: Partner profile ── */}
+      <Card>
+        <CardHeader className="px-4 pt-3 pb-2">
+          <div className="flex items-center justify-between">
+            <CardTitle className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              {t('userDetailPanel.partner.profileTitle')}
+            </CardTitle>
+            <div className="flex items-center gap-1.5">
+              <Badge variant={p.isActive ? 'success' : 'secondary'} className="text-[10px]">
+                {p.isActive ? t('userDetailPanel.partner.active') : t('userDetailPanel.partner.inactive')}
+              </Badge>
+              <Button size="sm" variant="outline" className="h-6 px-2 text-[10px]" onClick={() => toggleMutation.mutate()}>
+                {p.isActive ? t('userDetailPanel.subscriptions.disableTitle') : t('userDetailPanel.subscriptions.enableTitle')}
+              </Button>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-3 px-4 pb-3 text-xs">
+          {/* Stats */}
+          <div className="grid gap-0.5">
+            <InfoRow icon={<Wallet className="h-3 w-3" />} label={t('userDetailPanel.partner.balance')} value={fmtMoney(p.balance)} />
+            <InfoRow icon={<Wallet className="h-3 w-3" />} label={t('userDetailPanel.partner.totalEarned')} value={fmtMoney(p.totalEarned)} />
+            <InfoRow icon={<Wallet className="h-3 w-3" />} label={t('userDetailPanel.partner.totalWithdrawn')} value={fmtMoney(p.totalWithdrawn)} />
+          </div>
+
+          <Separator />
+
+          {/* Balance adjustment */}
+          <div className="space-y-1.5">
+            <span className="text-[10px] font-semibold text-muted-foreground/70 uppercase tracking-wider">
+              {t('userDetailPanel.partner.adjustTitle')}
+            </span>
+            <div className="flex gap-1.5">
+              <Input type="number" step="0.01" placeholder={t('userDetailPanel.partner.amountPlaceholder')} value={adjustAmount} onChange={(e) => setAdjustAmount(e.target.value)} className="h-7 text-xs" />
+              <Input placeholder={t('userDetailPanel.partner.reasonPlaceholder')} value={adjustReason} onChange={(e) => setAdjustReason(e.target.value)} className="h-7 text-xs" />
+              <Button size="sm" className="h-7 shrink-0 px-2 text-[10px]" onClick={() => adjustMutation.mutate()} disabled={!adjustAmount || adjustMutation.isPending}>
+                {t('userDetailPanel.partner.applyBtn')}
+              </Button>
+            </div>
+          </div>
+
+          <Separator />
+
+          {/* Individual settings */}
+          <PartnerSettings telegramId={telegramId} partner={p} queryKey={queryKey} />
+        </CardContent>
+      </Card>
+
+      {/* ── RIGHT: Referral statistics ── */}
+      <Card>
+        <CardHeader className="px-4 pt-3 pb-2">
+          <CardTitle className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+            {t('userDetailPanel.partner.statsTitle')}
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3 px-4 pb-3 text-xs">
+          {/* Referral counts */}
+          <div className="grid gap-0.5">
+            <InfoRow icon={<UserCheck className="h-3 w-3" />} label={t('userDetailPanel.partner.referralsL1')} value={String(referrals.filter((r: any) => r.level === 1).length)} />
+            <InfoRow icon={<UserCheck className="h-3 w-3" />} label={t('userDetailPanel.partner.referralsL2')} value={String(referrals.filter((r: any) => r.level === 2).length)} />
+            <InfoRow icon={<UserCheck className="h-3 w-3" />} label={t('userDetailPanel.partner.referralsL3')} value={String(referrals.filter((r: any) => r.level === 3).length)} />
+          </div>
+
+          <Separator />
+
+          {/* Recent transactions (earnings) */}
+          <div className="space-y-1.5">
+            <span className="text-[10px] font-semibold text-muted-foreground/70 uppercase tracking-wider">
+              {t('userDetailPanel.partner.recentEarnings')}
+            </span>
+            {transactions.length === 0 ? (
+              <p className="text-[11px] text-muted-foreground italic">{t('userDetailPanel.partner.noEarnings')}</p>
+            ) : (
+              <div className="max-h-48 space-y-1 overflow-auto scrollbar-none">
+                {transactions.slice(0, 20).map((tx: any) => (
+                  <div key={tx.id} className="flex items-center justify-between gap-2 rounded-md border px-2 py-1">
+                    <div className="min-w-0">
+                      <span className="text-[10px] text-muted-foreground">L{tx.level ?? '?'}</span>
+                      {tx.description && <span className="ml-1.5 truncate text-[10px]">{tx.description}</span>}
+                    </div>
+                    <span className="shrink-0 font-mono text-[11px] text-emerald-500">
+                      +{fmtMoney(tx.earnedAmount ?? 0)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <Separator />
+
+          {/* Recent referrals */}
+          <div className="space-y-1.5">
+            <span className="text-[10px] font-semibold text-muted-foreground/70 uppercase tracking-wider">
+              {t('userDetailPanel.partner.recentReferrals')}
+            </span>
+            {referrals.length === 0 ? (
+              <p className="text-[11px] text-muted-foreground italic">{t('userDetailPanel.partner.noReferrals')}</p>
+            ) : (
+              <div className="max-h-48 space-y-1 overflow-auto scrollbar-none">
+                {referrals.slice(0, 20).map((ref: any) => (
+                  <div key={ref.id} className="flex items-center justify-between gap-2 rounded-md border px-2 py-1">
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <UserCheck className="h-3 w-3 shrink-0 text-muted-foreground/60" />
+                      <span className="truncate text-[11px]">{ref.referral?.name || ref.referral?.username || ref.referralUserId?.slice(0, 8)}</span>
+                    </div>
+                    <span className="shrink-0 text-[10px] text-muted-foreground">L{ref.level}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Attach referral form */}
+          <Separator />
+          <div className="space-y-1.5">
+            <span className="text-[10px] font-semibold text-muted-foreground/70 uppercase tracking-wider">
+              {t('userDetailPanel.partner.attachReferralTitle')}
+            </span>
+            <p className="text-[11px] text-muted-foreground">
+              {t('userDetailPanel.partner.attachReferralHint')}
+            </p>
+            <AttachPartnerReferralForm telegramId={telegramId} queryKey={queryKey} />
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+
+function AttachPartnerReferralForm({ telegramId, queryKey }: { telegramId: string; queryKey: string[] }) {
+  const { t } = useTranslation()
+  const queryClient = useQueryClient()
+  const [identifier, setIdentifier] = useState('')
+
+  const mutation = useMutation({
+    mutationFn: () => api.post(`/admin/users/${telegramId}/partner/attach-referral`, { referralIdentifier: identifier }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey })
+      toast.success(t('userDetailPanel.partner.attachSuccess'))
+      setIdentifier('')
+    },
+    onError: (err: any) => toast.error(err.response?.data?.message ?? t('userDetailPanel.partner.attachFailed')),
+  })
+
+  return (
+    <div className="flex gap-1.5">
+      <Input
+        placeholder={t('userDetailPanel.partner.attachPlaceholder')}
+        value={identifier}
+        onChange={(e) => setIdentifier(e.target.value)}
+        className="h-7 text-xs"
+      />
+      <Button
+        size="sm"
+        className="h-7 shrink-0 px-2 text-[10px]"
+        onClick={() => mutation.mutate()}
+        disabled={!identifier.trim() || mutation.isPending}
+      >
+        {mutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : t('userDetailPanel.partner.attachBtn')}
+      </Button>
+    </div>
+  )
+}
+
+function PartnerSettings({ telegramId, partner, queryKey }: { telegramId: string; partner: any; queryKey: string[] }) {
+  const { t } = useTranslation()
+  const queryClient = useQueryClient()
+
+  const [useGlobal, setUseGlobal] = useState<boolean>(partner.useGlobalSettings ?? true)
+  const [accrualStrategy, setAccrualStrategy] = useState<string>(
+    partner.accrualStrategy ?? 'ON_EACH_PAYMENT',
+  )
+  const [rewardType, setRewardType] = useState<string>(partner.rewardType ?? 'PERCENT')
+  const [level1, setLevel1] = useState(partner.level1Percent != null ? String(partner.level1Percent) : '')
+  const [level2, setLevel2] = useState(partner.level2Percent != null ? String(partner.level2Percent) : '')
+  const [level3, setLevel3] = useState(partner.level3Percent != null ? String(partner.level3Percent) : '')
+  const [fixed1, setFixed1] = useState(
+    partner.level1FixedAmount != null ? String(Number(partner.level1FixedAmount) / 100) : '',
+  )
+  const [fixed2, setFixed2] = useState(
+    partner.level2FixedAmount != null ? String(Number(partner.level2FixedAmount) / 100) : '',
+  )
+  const [fixed3, setFixed3] = useState(
+    partner.level3FixedAmount != null ? String(Number(partner.level3FixedAmount) / 100) : '',
+  )
+  const [dirty, setDirty] = useState(false)
+
+  const parseNullableFloat = (v: string): number | null => {
+    if (v.trim() === '') return null
+    const n = parseFloat(v)
+    return Number.isFinite(n) ? n : null
+  }
+  const toMinorUnits = (v: string): number | null => {
+    const n = parseNullableFloat(v)
+    return n === null ? null : Math.round(n * 100)
+  }
+
+  const saveMutation = useMutation({
+    mutationFn: () => api.patch(`/admin/users/${telegramId}/partner/settings`, {
+      useGlobalSettings: useGlobal,
+      accrualStrategy,
+      rewardType,
+      level1Percent: rewardType === 'PERCENT' ? parseNullableFloat(level1) : null,
+      level2Percent: rewardType === 'PERCENT' ? parseNullableFloat(level2) : null,
+      level3Percent: rewardType === 'PERCENT' ? parseNullableFloat(level3) : null,
+      level1FixedAmount: rewardType === 'FIXED' ? toMinorUnits(fixed1) : null,
+      level2FixedAmount: rewardType === 'FIXED' ? toMinorUnits(fixed2) : null,
+      level3FixedAmount: rewardType === 'FIXED' ? toMinorUnits(fixed3) : null,
+    }),
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey }); toast.success(t('partnersDetail.toasts.settingsSaved')); setDirty(false) },
+    onError: () => toast.error(t('partnersDetail.toasts.settingsFailed')),
+  })
+
+  return (
+    <div className="space-y-2">
+      {/* Global toggle */}
+      <div className="flex items-center justify-between gap-3">
+        <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+          <Globe className="h-3 w-3 text-muted-foreground/60" />
+          {t('userDetailPanel.partner.individualSettings')}
+        </span>
+        <Switch checked={!useGlobal} onCheckedChange={(v) => { setUseGlobal(!v); setDirty(true) }} />
+      </div>
+
+      {!useGlobal && (
+        <>
+          {/* Accrual strategy */}
+          <div className="flex items-center justify-between gap-3">
+            <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+              <RefreshCw className="h-3 w-3 text-muted-foreground/60" />
+              {t('userDetailPanel.partnerExt.accrualStrategy')}
+            </span>
+            <Select value={accrualStrategy} onValueChange={(v) => { setAccrualStrategy(v); setDirty(true) }}>
+              <SelectTrigger className="h-7 w-40 text-xs"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="ON_EACH_PAYMENT">{t('userDetailPanel.partnerExt.accrual.onEachPayment')}</SelectItem>
+                <SelectItem value="ONCE_PER_USER">{t('userDetailPanel.partnerExt.accrual.oncePerUser')}</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          {/* Reward type */}
+          <div className="flex items-center justify-between gap-3">
+            <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+              <Wallet className="h-3 w-3 text-muted-foreground/60" />
+              {t('userDetailPanel.partnerExt.rewardType')}
+            </span>
+            <Select value={rewardType} onValueChange={(v) => { setRewardType(v); setDirty(true) }}>
+              <SelectTrigger className="h-7 w-40 text-xs"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="PERCENT">{t('userDetailPanel.partnerExt.reward.percent')}</SelectItem>
+                <SelectItem value="FIXED">{t('userDetailPanel.partnerExt.reward.fixed')}</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          {rewardType === 'PERCENT' ? (
+            <>
+              <div className="flex items-center justify-between gap-3">
+                <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                  <Tag className="h-3 w-3 text-muted-foreground/60" />
+                  {t('userDetailPanel.partner.referralsL1')} %
+                </span>
+                <Input type="number" min="0" max="100" step="0.1" className="h-7 w-40 text-xs text-right px-2" value={level1} onChange={(e) => { setLevel1(e.target.value); setDirty(true) }} />
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                  <Tag className="h-3 w-3 text-muted-foreground/60" />
+                  {t('userDetailPanel.partner.referralsL2')} %
+                </span>
+                <Input type="number" min="0" max="100" step="0.1" className="h-7 w-40 text-xs text-right px-2" value={level2} onChange={(e) => { setLevel2(e.target.value); setDirty(true) }} />
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                  <Tag className="h-3 w-3 text-muted-foreground/60" />
+                  {t('userDetailPanel.partner.referralsL3')} %
+                </span>
+                <Input type="number" min="0" max="100" step="0.1" className="h-7 w-40 text-xs text-right px-2" value={level3} onChange={(e) => { setLevel3(e.target.value); setDirty(true) }} />
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="flex items-center justify-between gap-3">
+                <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                  <Wallet className="h-3 w-3 text-muted-foreground/60" />
+                  {t('userDetailPanel.partnerExt.fixed.level1')}
+                </span>
+                <Input type="number" min="0" step="0.01" className="h-7 w-40 text-xs text-right px-2" value={fixed1} onChange={(e) => { setFixed1(e.target.value); setDirty(true) }} />
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                  <Wallet className="h-3 w-3 text-muted-foreground/60" />
+                  {t('userDetailPanel.partnerExt.fixed.level2')}
+                </span>
+                <Input type="number" min="0" step="0.01" className="h-7 w-40 text-xs text-right px-2" value={fixed2} onChange={(e) => { setFixed2(e.target.value); setDirty(true) }} />
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                  <Wallet className="h-3 w-3 text-muted-foreground/60" />
+                  {t('userDetailPanel.partnerExt.fixed.level3')}
+                </span>
+                <Input type="number" min="0" step="0.01" className="h-7 w-40 text-xs text-right px-2" value={fixed3} onChange={(e) => { setFixed3(e.target.value); setDirty(true) }} />
+              </div>
+            </>
+          )}
+        </>
+      )}
+
+      {dirty && (
+        <Button size="sm" className="w-full h-7 text-xs" onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending}>
+          {saveMutation.isPending ? <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> : <Save className="mr-2 h-3.5 w-3.5" />}
+          {t('partnersDetail.settings.saveSettings')}
+        </Button>
+      )}
+    </div>
+  )
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Referrals Tab — view + attach
+// ══════════════════════════════════════════════════════════════════════════════
+
+function ReferralsTab({ user, telegramId, queryKey }: { user: any; telegramId: string; queryKey: string[] }) {
+  const { t } = useTranslation()
+  const queryClient = useQueryClient()
+  const [referrerId, setReferrerId] = useState('')
+
+  const attachMutation = useMutation({
+    mutationFn: () => api.post(`/admin/users/${telegramId}/referral/attach`, { referrerTelegramId: referrerId }),
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey }); toast.success(t('referralsActions.attach.success')); setReferrerId('') },
+    onError: (err: any) => toast.error(err.response?.data?.message ?? t('referralsActions.attach.failed')),
+  })
+
+  return (
+    <div className="space-y-4">
+      <Card>
+        <CardHeader><CardTitle className="text-base">{t('userDetailPage.referrals.referredByTitle')}</CardTitle></CardHeader>
+        <CardContent>
+          {user.referral ? (
+            <p className="text-sm">
+              <span className="text-muted-foreground">{t('userDetailPage.referrals.referrerLabel')} </span>
+              <span className="font-medium">{user.referral.referrer?.name ?? user.referral.referrer?.username ?? '—'}</span>
+              <span className="ml-2 text-muted-foreground">{t('userDetailPage.referrals.levelLabel')} {user.referral.level}</span>
+            </p>
+          ) : user.isPartner ? (
+            <p className="text-sm text-muted-foreground">{t('userDetailPanel.referrals.partnerHint')}</p>
+          ) : (
+            <div className="space-y-3">
+              <p className="text-sm text-muted-foreground">{t('userDetailPage.referrals.noReferrer')}</p>
+              <div className="flex gap-2">
+                <Input placeholder={t('userDetailPanel.referrals.referrerIdPlaceholder')} value={referrerId} onChange={(e) => setReferrerId(e.target.value)} className="h-9 max-w-48" />
+                <Button size="sm" onClick={() => attachMutation.mutate()} disabled={!referrerId || attachMutation.isPending}>
+                  {t('userDetailPanel.referrals.attachBtn')}
+                </Button>
+              </div>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader><CardTitle className="text-base">{t('userDetailPage.referrals.referralsGivenTitle', { count: user.referralsGiven?.length ?? 0 })}</CardTitle></CardHeader>
+        <CardContent>
+          {user.referralsGiven?.length ? (
+            <div className="space-y-1 text-sm">
+              {user.referralsGiven.slice(0, 20).map((r: any) => (
+                <div key={r.id} className="flex items-center justify-between rounded px-2 py-1 hover:bg-muted/50">
+                  <span>{r.referred?.name ?? r.referred?.telegramId ?? '—'}</span>
+                  <span className="text-xs text-muted-foreground">L{r.level} · {r.qualifiedAt ? t('userDetailPage.referrals.qualifiedYes') : t('userDetailPage.referrals.qualifiedNo')}</span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-sm text-muted-foreground">{t('userDetailPage.referrals.empty')}</p>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Invite Settings Tab — per-user override on referral invite limits
+// ══════════════════════════════════════════════════════════════════════════════
+
+interface InviteEffective {
+  linkTtlEnabled: boolean
+  linkTtlSeconds: number | null
+  slotsEnabled: boolean
+  initialSlots: number | null
+  refillThresholdQualified: number | null
+  refillAmount: number | null
+}
+
+interface InviteOverride {
+  useGlobalSettings?: boolean
+  linkTtlEnabled?: boolean
+  linkTtlSeconds?: number | null
+  slotsEnabled?: boolean
+  initialSlots?: number | null
+  refillThresholdQualified?: number | null
+  refillAmount?: number | null
+}
+
+function readOverride(raw: unknown): InviteOverride {
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    return raw as InviteOverride
+  }
+  return {}
+}
+
+function InviteSettingsTab({
+  user,
+  telegramId,
+  queryKey,
+}: {
+  user: any
+  telegramId: string
+  queryKey: string[]
+}) {
+  const { t } = useTranslation()
+  const queryClient = useQueryClient()
+
+  const effective: InviteEffective = user.effectiveInviteSettings ?? {
+    linkTtlEnabled: false,
+    linkTtlSeconds: null,
+    slotsEnabled: false,
+    initialSlots: null,
+    refillThresholdQualified: null,
+    refillAmount: null,
+  }
+  const initialOverride = readOverride(user.userInviteSettingsOverride)
+  const initialUseGlobal =
+    initialOverride.useGlobalSettings === undefined
+      ? user.userInviteSettingsOverride === null || user.userInviteSettingsOverride === undefined
+      : initialOverride.useGlobalSettings === true
+
+  const [useGlobal, setUseGlobal] = useState(initialUseGlobal)
+  const [linkTtlEnabled, setLinkTtlEnabled] = useState(
+    initialOverride.linkTtlEnabled ?? effective.linkTtlEnabled,
+  )
+  const [linkTtlSeconds, setLinkTtlSeconds] = useState(
+    initialOverride.linkTtlSeconds !== undefined && initialOverride.linkTtlSeconds !== null
+      ? String(initialOverride.linkTtlSeconds)
+      : effective.linkTtlSeconds !== null
+        ? String(effective.linkTtlSeconds)
+        : '',
+  )
+  const [slotsEnabled, setSlotsEnabled] = useState(
+    initialOverride.slotsEnabled ?? effective.slotsEnabled,
+  )
+  const [initialSlots, setInitialSlots] = useState(
+    initialOverride.initialSlots !== undefined && initialOverride.initialSlots !== null
+      ? String(initialOverride.initialSlots)
+      : effective.initialSlots !== null
+        ? String(effective.initialSlots)
+        : '',
+  )
+  const [refillThreshold, setRefillThreshold] = useState(
+    initialOverride.refillThresholdQualified !== undefined && initialOverride.refillThresholdQualified !== null
+      ? String(initialOverride.refillThresholdQualified)
+      : effective.refillThresholdQualified !== null
+        ? String(effective.refillThresholdQualified)
+        : '',
+  )
+  const [refillAmount, setRefillAmount] = useState(
+    initialOverride.refillAmount !== undefined && initialOverride.refillAmount !== null
+      ? String(initialOverride.refillAmount)
+      : effective.refillAmount !== null
+        ? String(effective.refillAmount)
+        : '',
+  )
+  const [dirty, setDirty] = useState(false)
+
+  const parseNullableInt = (raw: string): number | null => {
+    if (raw.trim() === '') return null
+    const n = parseInt(raw, 10)
+    return Number.isFinite(n) ? Math.max(0, n) : null
+  }
+
+  const saveMutation = useMutation({
+    mutationFn: () => {
+      if (useGlobal) {
+        return api.patch(`/admin/users/${telegramId}/invite-settings`, {
+          useGlobalSettings: true,
+        })
+      }
+      return api.patch(`/admin/users/${telegramId}/invite-settings`, {
+        useGlobalSettings: false,
+        linkTtlEnabled,
+        linkTtlSeconds: linkTtlEnabled ? parseNullableInt(linkTtlSeconds) : null,
+        slotsEnabled,
+        initialSlots: slotsEnabled ? parseNullableInt(initialSlots) : null,
+        refillThresholdQualified: slotsEnabled ? parseNullableInt(refillThreshold) : null,
+        refillAmount: slotsEnabled ? parseNullableInt(refillAmount) : null,
+      })
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey })
+      toast.success(t('userDetailPanel.invites.saved'))
+      setDirty(false)
+    },
+    onError: (err: any) =>
+      toast.error(err.response?.data?.message ?? t('userDetailPanel.invites.saveFailed')),
+  })
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">{t('userDetailPanel.invites.title')}</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <Label className="text-sm">{t('userDetailPanel.invites.useGlobal')}</Label>
+            <p className="text-xs text-muted-foreground">
+              {t('userDetailPanel.invites.useGlobalHint')}
+            </p>
+          </div>
+          <Switch
+            checked={useGlobal}
+            onCheckedChange={(v) => {
+              setUseGlobal(v)
+              setDirty(true)
+            }}
+          />
+        </div>
+
+        <Separator />
+
+        <fieldset disabled={useGlobal} className="space-y-4">
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <Label className="text-sm">{t('userDetailPanel.invites.linkTtlEnabled')}</Label>
+              <Switch
+                checked={linkTtlEnabled}
+                onCheckedChange={(v) => {
+                  setLinkTtlEnabled(v)
+                  setDirty(true)
+                }}
+              />
+            </div>
+            {linkTtlEnabled && (
+              <div className="space-y-1.5">
+                <Label className="text-xs">{t('userDetailPanel.invites.linkTtlSeconds')}</Label>
+                <Input
+                  type="number"
+                  min="0"
+                  className="h-9"
+                  value={linkTtlSeconds}
+                  onChange={(e) => {
+                    setLinkTtlSeconds(e.target.value)
+                    setDirty(true)
+                  }}
+                />
+              </div>
+            )}
+          </div>
+
+          <Separator />
+
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <Label className="text-sm">{t('userDetailPanel.invites.slotsEnabled')}</Label>
+              <Switch
+                checked={slotsEnabled}
+                onCheckedChange={(v) => {
+                  setSlotsEnabled(v)
+                  setDirty(true)
+                }}
+              />
+            </div>
+            {slotsEnabled && (
+              <div className="grid gap-3 sm:grid-cols-3">
+                <div className="space-y-1.5">
+                  <Label className="text-xs">{t('userDetailPanel.invites.initialSlots')}</Label>
+                  <Input
+                    type="number"
+                    min="0"
+                    className="h-9"
+                    value={initialSlots}
+                    onChange={(e) => {
+                      setInitialSlots(e.target.value)
+                      setDirty(true)
+                    }}
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label className="text-xs">{t('userDetailPanel.invites.refillThreshold')}</Label>
+                  <Input
+                    type="number"
+                    min="0"
+                    className="h-9"
+                    value={refillThreshold}
+                    onChange={(e) => {
+                      setRefillThreshold(e.target.value)
+                      setDirty(true)
+                    }}
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label className="text-xs">{t('userDetailPanel.invites.refillAmount')}</Label>
+                  <Input
+                    type="number"
+                    min="0"
+                    className="h-9"
+                    value={refillAmount}
+                    onChange={(e) => {
+                      setRefillAmount(e.target.value)
+                      setDirty(true)
+                    }}
+                  />
+                </div>
+              </div>
+            )}
+          </div>
+        </fieldset>
+
+        <Separator />
+
+        <div className="space-y-1 text-xs text-muted-foreground">
+          <p className="font-medium text-foreground">
+            {t('userDetailPanel.invites.effectiveTitle')}
+          </p>
+          <p>
+            TTL: {effective.linkTtlEnabled
+              ? effective.linkTtlSeconds !== null
+                ? `${effective.linkTtlSeconds}s`
+                : t('userDetailPanel.invites.unlimited')
+              : t('userDetailPanel.invites.disabled')}
+          </p>
+          <p>
+            Slots: {effective.slotsEnabled
+              ? `${effective.initialSlots ?? '—'} + ${effective.refillAmount ?? 0}/${effective.refillThresholdQualified ?? '—'}`
+              : t('userDetailPanel.invites.disabled')}
+          </p>
+        </div>
+
+        {dirty && (
+          <Button
+            onClick={() => saveMutation.mutate()}
+            disabled={saveMutation.isPending}
+            className="w-full"
+          >
+            {saveMutation.isPending ? (
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            ) : (
+              <Save className="mr-2 h-4 w-4" />
+            )}
+            {t('userDetailPanel.invites.save')}
+          </Button>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Transactions Tab
+// ══════════════════════════════════════════════════════════════════════════════
+
+function TransactionsTab({ user }: { user: any }) {
+  const { t } = useTranslation()
+  const txs = user.transactions ?? []
+  if (!txs.length) return <Card><CardContent className="py-8 text-center text-sm text-muted-foreground">{t('userDetailPage.transactions.empty')}</CardContent></Card>
+
+  return (
+    <Card>
+      <CardContent className="p-0">
+        <div className="overflow-auto">
+          <table className="w-full text-sm">
+            <thead className="border-b bg-muted/30 text-xs text-muted-foreground">
+              <tr>
+                <th className="px-3 py-2 text-left">{t('userDetailPage.transactions.columns.paymentId')}</th>
+                <th className="px-3 py-2 text-left">{t('userDetailPage.transactions.columns.status')}</th>
+                <th className="px-3 py-2 text-left">{t('userDetailPage.transactions.columns.amount')}</th>
+                <th className="px-3 py-2 text-left">{t('userDetailPage.transactions.columns.gateway')}</th>
+                <th className="px-3 py-2 text-left">{t('userDetailPage.transactions.columns.date')}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {txs.map((tx: any) => (
+                <tr key={tx.id} className="border-b last:border-0">
+                  <td className="px-3 py-2 font-mono text-xs">{tx.paymentId?.slice(0, 10)}…</td>
+                  <td className="px-3 py-2"><Badge variant={tx.status === 'COMPLETED' ? 'success' : 'secondary'} className="text-[10px]">{tx.status}</Badge></td>
+                  <td className="px-3 py-2 font-mono">{tx.amount} {tx.currency}</td>
+                  <td className="px-3 py-2 text-xs uppercase">{tx.gatewayType}</td>
+                  <td className="px-3 py-2 text-xs text-muted-foreground">{new Date(tx.createdAt).toLocaleDateString('ru-RU')}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Web Cabinet Tab — DEV-only operations on the linked WebAccount
+// ══════════════════════════════════════════════════════════════════════════════
+
+function WebCabinetTab({
+  user,
+  telegramId,
+  queryKey,
+}: {
+  user: any
+  telegramId: string
+  queryKey: string[]
+}) {
+  const { t, i18n } = useTranslation()
+  const queryClient = useQueryClient()
+  const [tempCredentials, setTempCredentials] = useState<{
+    login: string | null
+    temporaryPassword: string
+    expiresAt: string
+  } | null>(null)
+  const [newLogin, setNewLogin] = useState(user.webAccount?.login ?? '')
+
+  const resetMutation = useMutation({
+    mutationFn: () => api.post(`/admin/users/${telegramId}/web/reset-password`),
+    onSuccess: (res) => {
+      queryClient.invalidateQueries({ queryKey })
+      setTempCredentials({
+        login: res.data.login,
+        temporaryPassword: res.data.temporaryPassword,
+        expiresAt: res.data.expiresAt,
+      })
+      toast.success(t('userDetailPanel.web.passwordReset'))
+    },
+    onError: (err: any) =>
+      toast.error(err.response?.data?.message ?? t('userDetailPanel.web.passwordResetFailed')),
+  })
+
+  const renameMutation = useMutation({
+    mutationFn: () =>
+      api.patch(`/admin/users/${telegramId}/web/login`, { login: newLogin }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey })
+      toast.success(t('userDetailPanel.web.renamed'))
+    },
+    onError: (err: any) =>
+      toast.error(err.response?.data?.message ?? t('userDetailPanel.web.renameFailed')),
+  })
+
+  return (
+    <div className="space-y-3">
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">{t('userDetailPanel.web.title')}</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3 text-sm">
+          <InfoRow
+            label={t('userDetailPanel.web.currentLogin')}
+            value={user.webAccount.login ?? '—'}
+            mono
+          />
+          {user.webAccount.email && (
+            <InfoRow label="Email" value={user.webAccount.email} mono />
+          )}
+          {user.webAccount.requiresPasswordChange && (
+            <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+              {t('userDetailPanel.web.requiresChangeNotice')}
+            </div>
+          )}
+          {user.webAccount.temporaryPasswordExpiresAt && (
+            <InfoRow
+              label={t('userDetailPanel.web.tempUntil')}
+              value={new Date(user.webAccount.temporaryPasswordExpiresAt).toLocaleString(
+                i18n.language === 'ru' ? 'ru-RU' : 'en-US',
+              )}
+            />
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">
+            {t('userDetailPanel.web.resetPasswordTitle')}
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <p className="text-xs text-muted-foreground">
+            {t('userDetailPanel.web.resetPasswordHint')}
+          </p>
+          <Button
+            onClick={() => resetMutation.mutate()}
+            disabled={resetMutation.isPending}
+            variant="destructive"
+          >
+            {resetMutation.isPending ? (
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            ) : (
+              <RefreshCw className="mr-2 h-4 w-4" />
+            )}
+            {t('userDetailPanel.web.resetPasswordButton')}
+          </Button>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">
+            {t('userDetailPanel.web.renameLoginTitle')}
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <p className="text-xs text-muted-foreground">
+            {t('userDetailPanel.web.renameLoginHint')}
+          </p>
+          <div className="flex gap-2">
+            <Input
+              value={newLogin}
+              onChange={(e) => setNewLogin(e.target.value)}
+              placeholder={t('userDetailPanel.web.newLoginPlaceholder')}
+              className="h-9"
+            />
+            <Button
+              onClick={() => renameMutation.mutate()}
+              disabled={
+                renameMutation.isPending
+                || newLogin.trim() === ''
+                || newLogin === user.webAccount.login
+              }
+            >
+              {renameMutation.isPending ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                <Save className="mr-2 h-4 w-4" />
+              )}
+              {t('userDetailPanel.web.renameButton')}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Temp password modal */}
+      <Dialog
+        open={tempCredentials !== null}
+        onOpenChange={(open) => {
+          if (!open) setTempCredentials(null)
+        }}
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>{t('userDetailPanel.web.tempIssuedTitle')}</DialogTitle>
+          </DialogHeader>
+          {tempCredentials && (
+            <div className="space-y-3 text-sm">
+              <p className="text-xs text-muted-foreground">
+                {t('userDetailPanel.web.tempIssuedHint')}
+              </p>
+              <div className="space-y-1">
+                <Label className="text-xs">{t('userDetailPanel.web.currentLogin')}</Label>
+                <div className="rounded-md border bg-muted/30 px-3 py-2 font-mono text-sm">
+                  {tempCredentials.login ?? '—'}
+                </div>
+              </div>
+              <div className="space-y-1">
+                <Label className="text-xs">{t('userDetailPanel.web.tempPasswordLabel')}</Label>
+                <div className="flex gap-2">
+                  <code className="flex-1 rounded-md border bg-muted/30 px-3 py-2 font-mono text-sm">
+                    {tempCredentials.temporaryPassword}
+                  </code>
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    onClick={() => {
+                      navigator.clipboard.writeText(tempCredentials.temporaryPassword)
+                      toast.success(t('userDetailPanel.web.tempCopied'))
+                    }}
+                    aria-label={t('userDetailPanel.web.tempCopied')}
+                  >
+                    <Copy className="h-4 w-4" />
+                  </Button>
+                </div>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                {t('userDetailPanel.web.tempExpires', {
+                  expiresAt: new Date(tempCredentials.expiresAt).toLocaleString(
+                    i18n.language === 'ru' ? 'ru-RU' : 'en-US',
+                  ),
+                })}
+              </p>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+    </div>
+  )
+}
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Action buttons (header)
+// ══════════════════════════════════════════════════════════════════════════════
+
+function BlockButton({ telegramId, isBlocked, queryKey }: { telegramId: string; isBlocked: boolean; queryKey: string[] }) {
+  const { t } = useTranslation()
+  const queryClient = useQueryClient()
+  const mutation = useMutation({
+    mutationFn: () => api.post(`/admin/users/${telegramId}/${isBlocked ? 'unblock' : 'block'}`),
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey }); toast.success(isBlocked ? t('userDetailPanel.toasts.unblocked') : t('userDetailPanel.toasts.userBlocked')) },
+  })
+
+  if (isBlocked) {
+    return <Button size="sm" variant="outline" onClick={() => mutation.mutate()}><UserCheck className="mr-1 h-3.5 w-3.5" /> {t('userDetailPanel.actions.unblock')}</Button>
+  }
+
+  return (
+    <AlertDialog>
+      <AlertDialogTrigger asChild>
+        <Button size="sm" variant="destructive"><UserX className="mr-1 h-3.5 w-3.5" /> {t('userDetailPanel.actions.block')}</Button>
+      </AlertDialogTrigger>
+      <AlertDialogContent>
+        <AlertDialogHeader><AlertDialogTitle>{t('userDetailPanel.actions.blockTitle')}</AlertDialogTitle><AlertDialogDescription>{t('userDetailPanel.actions.blockDescription')}</AlertDialogDescription></AlertDialogHeader>
+        <AlertDialogFooter><AlertDialogCancel>{t('userDetailPanel.actions.cancel')}</AlertDialogCancel><AlertDialogAction onClick={() => mutation.mutate()}>{t('userDetailPanel.actions.block')}</AlertDialogAction></AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  )
+}
+
+function DeleteButton({ telegramId }: { telegramId: string }) {
+  const { t } = useTranslation()
+  const mutation = useMutation({
+    mutationFn: () => api.delete(`/admin/users/${telegramId}`),
+    onSuccess: () => toast.success(t('userDetailPanel.toasts.userDeleted')),
+    onError: () => toast.error(t('userDetailPanel.toasts.deleteFailed')),
+  })
+
+  return (
+    <AlertDialog>
+      <AlertDialogTrigger asChild>
+        <Button size="sm" variant="ghost" className="text-destructive"><Trash2 className="h-3.5 w-3.5" /></Button>
+      </AlertDialogTrigger>
+      <AlertDialogContent>
+        <AlertDialogHeader><AlertDialogTitle>{t('userDetailPanel.actions.deleteTitle')}</AlertDialogTitle><AlertDialogDescription>{t('userDetailPanel.actions.deleteDescription')}</AlertDialogDescription></AlertDialogHeader>
+        <AlertDialogFooter><AlertDialogCancel>{t('userDetailPanel.actions.cancel')}</AlertDialogCancel><AlertDialogAction onClick={() => mutation.mutate()} className="bg-destructive text-destructive-foreground">{t('userDetailPanel.actions.deleteForever')}</AlertDialogAction></AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  )
+}
+
+function NotifyButton({ telegramId }: { telegramId: string }) {
+  const { t } = useTranslation()
+  const [open, setOpen] = useState(false)
+  const [message, setMessage] = useState('')
+
+  const mutation = useMutation({
+    mutationFn: () => api.post(`/admin/users/${telegramId}/notify`, { message }),
+    onSuccess: () => { toast.success(t('userDetailPanel.toasts.notifySent')); setOpen(false); setMessage('') },
+    onError: () => toast.error(t('userDetailPanel.toasts.notifyFailed')),
+  })
+
+  return (
+    <>
+      <Button size="sm" variant="outline" onClick={() => setOpen(true)}>
+        <Send className="mr-1 h-3.5 w-3.5" /> {t('userDetailPanel.actions.notify')}
+      </Button>
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>{t('userDetailPanel.actions.sendNotification')}</DialogTitle></DialogHeader>
+          <textarea
+            className="w-full rounded-md border p-3 text-sm"
+            rows={4}
+            placeholder={t('userDetailPanel.actions.messagePlaceholder')}
+            value={message}
+            onChange={(e) => setMessage(e.target.value)}
+          />
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setOpen(false)}>{t('userDetailPanel.actions.cancel')}</Button>
+            <Button onClick={() => mutation.mutate()} disabled={!message.trim() || mutation.isPending}>
+              {t('userDetailPanel.actions.send')}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </>
+  )
+}
