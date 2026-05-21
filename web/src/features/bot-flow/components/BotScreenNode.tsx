@@ -7,11 +7,11 @@ import type { BotScreenNodeData, BotFlowButton } from '../types'
 function BotScreenNodeComponent({ data, id, selected }: NodeProps) {
   const nodeData = data as unknown as BotScreenNodeData
 
-  const STYLE_COLORS: Record<string, string> = {
-    PRIMARY: 'bg-blue-500/90 text-white',
-    SUCCESS: 'bg-emerald-500/90 text-white',
-    DANGER: 'bg-red-500/90 text-white',
-    DEFAULT: 'bg-muted text-foreground',
+  const STYLE_COLORS: Record<string, { bg: string; text: string }> = {
+    PRIMARY: { bg: '#3b82f6', text: '#ffffff' },
+    SUCCESS: { bg: '#10b981', text: '#ffffff' },
+    DANGER: { bg: '#ef4444', text: '#ffffff' },
+    DEFAULT: { bg: 'var(--color-muted)', text: 'var(--color-foreground)' },
   }
 
   return (
@@ -64,10 +64,11 @@ function BotScreenNodeComponent({ data, id, selected }: NodeProps) {
               {row.map((btn: BotFlowButton) => (
                 <div key={btn.id} className="relative flex-1 min-w-0">
                   <div
-                    className={cn(
-                      'rounded-md px-2 py-1 text-[10px] font-medium text-center truncate',
-                      STYLE_COLORS[btn.style] ?? STYLE_COLORS.DEFAULT,
-                    )}
+                    className="rounded-md px-2 py-1 text-[10px] font-medium text-center truncate"
+                    style={{
+                      backgroundColor: (STYLE_COLORS[btn.style] ?? STYLE_COLORS.DEFAULT).bg,
+                      color: (STYLE_COLORS[btn.style] ?? STYLE_COLORS.DEFAULT).text,
+                    }}
                   >
                     {btn.iconCustomEmojiId && (
                       <img

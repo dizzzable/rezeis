@@ -377,7 +377,7 @@ export default function AdminShell() {
           </header>
 
           {/* Page content */}
-          <main className="flex-1 overflow-auto bg-muted/20">
+          <main className="flex-1 overflow-auto bg-muted/20 relative">
             <OfflineIndicator />
             <UpdateBanner />
             <div className="p-4 md:p-6">

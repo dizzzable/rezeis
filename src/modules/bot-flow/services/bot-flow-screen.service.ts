@@ -224,6 +224,42 @@ export class BotFlowScreenService {
     await this.prisma.botFlowButton.delete({ where: { id: buttonId } });
   }
 
+  // ── Media ────────────────────────────────────────────────────────────────────
+
+  /** Upload media file for a screen and update its mediaUrl/mediaType. */
+  public async uploadMedia(screenId: string, file: Express.Multer.File): Promise<BotFlowScreen & { buttons: BotFlowButton[] }> {
+    const screen = await this.prisma.botFlowScreen.findUnique({
+      where: { id: screenId },
+      select: { flowId: true },
+    });
+    if (!screen) throw new NotFoundException('Screen not found');
+    await this.assertFlowIsDraft(screen.flowId);
+
+    // Determine media type
+    const mediaType = file.mimetype.startsWith('video/') ? 'VIDEO'
+      : file.mimetype === 'image/gif' ? 'ANIMATION'
+      : 'PHOTO';
+
+    // Save file to disk
+    const fs = await import('node:fs/promises');
+    const path = await import('node:path');
+    const uploadDir = path.resolve(process.cwd(), 'data', 'uploads', 'bot-flow');
+    await fs.mkdir(uploadDir, { recursive: true });
+
+    const ext = path.extname(file.originalname) || (mediaType === 'VIDEO' ? '.mp4' : '.webp');
+    const filename = `${screenId}-${Date.now()}${ext}`;
+    const filePath = path.join(uploadDir, filename);
+    await fs.writeFile(filePath, file.buffer);
+
+    const mediaUrl = `/uploads/bot-flow/${filename}`;
+
+    return this.prisma.botFlowScreen.update({
+      where: { id: screenId },
+      data: { mediaType: mediaType as BotFlowMediaType, mediaUrl },
+      include: { buttons: true },
+    });
+  }
+
   // ── Helpers ─────────────────────────────────────────────────────────────────
 
   private async assertFlowIsDraft(flowId: string): Promise<void> {

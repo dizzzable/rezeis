@@ -5048,6 +5048,8 @@ export const en = {
       url: 'URL',
       webAppUrl: 'Mini App URL',
       callbackAction: 'Callback action',
+      row: 'Row',
+      col: 'Pos',
     },
     actions: {
       NAVIGATE: 'Navigate to screen',
@@ -5066,6 +5068,7 @@ export const en = {
     deleteScreen: 'Delete screen',
     screenDeleted: 'Screen deleted',
     connectionError: 'Failed to save connection',
+    deleteEdgeConfirm: 'Delete this connection?',
   },
   auditPage: {
     title: 'Audit log',

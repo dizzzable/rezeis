@@ -167,7 +167,48 @@ export function ScreenEditorPanel({ screen, flowName }: ScreenEditorPanelProps) 
 
       <Separator />
 
-      {/* Buttons section */}
+      {/* Media upload */}
+      <div className="space-y-1.5">
+        <Label className="text-xs">{t('botFlow.fields.media')}</Label>
+        {screen.mediaUrl ? (
+          <div className="relative rounded-md overflow-hidden border">
+            <img src={screen.mediaUrl} alt="" className="w-full h-24 object-cover" />
+            <Button
+              variant="destructive"
+              size="sm"
+              className="absolute top-1 right-1 h-6 w-6 p-0"
+              onClick={() => updateScreenMutation.mutate({ mediaType: null, mediaUrl: null, mediaFileId: null })}
+            >
+              <Trash2 className="h-3 w-3" />
+            </Button>
+          </div>
+        ) : (
+          <label className="flex items-center justify-center h-16 rounded-md border border-dashed cursor-pointer hover:border-primary hover:bg-primary/5 transition-colors">
+            <input
+              type="file"
+              accept="image/*,video/*"
+              className="hidden"
+              onChange={async (e) => {
+                const file = e.target.files?.[0]
+                if (!file) return
+                const formData = new FormData()
+                formData.append('file', file)
+                try {
+                  await api.post(`/admin/bot-flows/screens/${screen.id}/media`, formData, {
+                    headers: { 'Content-Type': 'multipart/form-data' },
+                  })
+                  queryClient.invalidateQueries({ queryKey: ['bot-flow', 'draft', flowName] })
+                } catch {
+                  toast.error(t('botFlow.mediaUploadError', 'Upload failed'))
+                }
+              }}
+            />
+            <span className="text-xs text-muted-foreground">{t('botFlow.fields.mediaHint', 'Click to upload image or video')}</span>
+          </label>
+        )}
+      </div>
+
+      <Separator />
       <div className="space-y-2">
         <div className="flex items-center justify-between">
           <Label className="text-xs font-medium">{t('botFlow.button.add')}</Label>
@@ -255,6 +296,30 @@ function ButtonEditor({ button, onUpdate, onDelete }: ButtonEditorProps) {
           placeholder="EN"
           className="h-7 text-[11px]"
         />
+      </div>
+
+      {/* Row / Col — same row = same line in Telegram keyboard */}
+      <div className="grid grid-cols-2 gap-1.5">
+        <div className="flex items-center gap-1">
+          <span className="text-[10px] text-muted-foreground shrink-0">{t('botFlow.button.row', 'Ряд')}</span>
+          <Input
+            type="number"
+            min={0}
+            value={button.row}
+            onChange={(e) => onUpdate({ row: parseInt(e.target.value) || 0 })}
+            className="h-7 text-[11px] w-14"
+          />
+        </div>
+        <div className="flex items-center gap-1">
+          <span className="text-[10px] text-muted-foreground shrink-0">{t('botFlow.button.col', 'Поз')}</span>
+          <Input
+            type="number"
+            min={0}
+            value={button.col}
+            onChange={(e) => onUpdate({ col: parseInt(e.target.value) || 0 })}
+            className="h-7 text-[11px] w-14"
+          />
+        </div>
       </div>
 
       {/* Action type */}

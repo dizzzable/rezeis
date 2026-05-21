@@ -5099,6 +5099,8 @@
       url: 'URL',
       webAppUrl: 'Mini App URL',
       callbackAction: 'Callback действие',
+      row: 'Ряд',
+      col: 'Поз',
     },
     actions: {
       NAVIGATE: 'Перейти к экрану',
@@ -5117,6 +5119,7 @@
     deleteScreen: 'Удалить экран',
     screenDeleted: 'Экран удалён',
     connectionError: 'Не удалось сохранить связь',
+    deleteEdgeConfirm: 'Удалить эту связь?',
   },
   auditPage: {
     title: 'Журнал аудита',

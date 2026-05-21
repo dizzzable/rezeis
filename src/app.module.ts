@@ -76,12 +76,7 @@ import { WebhooksModule } from './modules/webhooks/webhooks.module';
     }),
     ServeStaticModule.forRoot({
       rootPath: join(__dirname, '..', 'web'),
-      serveRoot: '/',
-      exclude: ['/api/{*path}', '/uploads/{*path}'],
-      serveStaticOptions: {
-        index: ['index.html'],
-        fallthrough: true,
-      },
+      renderPath: /^(?!\/api\/)(?!\/uploads\/).*/,
     }),
     PrismaModule,
     RawCacheModule,

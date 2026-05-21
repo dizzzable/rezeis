@@ -71,6 +71,9 @@ interface RemnawaveImportSummary {
   created: number
   updated: number
   skipped: number
+  subscriptionsCreated: number
+  subscriptionsUpdated: number
+  descriptionWritebacks: number
   errors: readonly string[]
 }
 

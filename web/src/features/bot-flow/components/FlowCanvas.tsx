@@ -25,6 +25,7 @@ interface FlowCanvasProps {
   onEdgesChange: OnEdgesChange
   onConnect: OnConnect
   onNodeClick: (nodeId: string) => void
+  onEdgeClick: (edgeId: string) => void
   onDrop: (position: { x: number; y: number }) => void
 }
 
@@ -35,6 +36,7 @@ export function FlowCanvas({
   onEdgesChange,
   onConnect,
   onNodeClick,
+  onEdgeClick,
   onDrop,
 }: FlowCanvasProps) {
   const reactFlowRef = useRef<ReactFlowInstance | null>(null)
@@ -66,6 +68,13 @@ export function FlowCanvas({
     [onNodeClick],
   )
 
+  const handleEdgeClick = useCallback(
+    (_event: React.MouseEvent, edge: Edge) => {
+      onEdgeClick(edge.id)
+    },
+    [onEdgeClick],
+  )
+
   return (
     <div className="h-full w-full">
       <ReactFlow
@@ -75,25 +84,27 @@ export function FlowCanvas({
         onEdgesChange={onEdgesChange}
         onConnect={onConnect}
         onNodeClick={handleNodeClick}
+        onEdgeClick={handleEdgeClick}
         onInit={(instance) => { reactFlowRef.current = instance }}
         onDragOver={handleDragOver}
         onDrop={handleDrop}
         nodeTypes={nodeTypes}
-        fitView
+        fitView={false}
         snapToGrid
         snapGrid={[16, 16]}
         deleteKeyCode={['Backspace', 'Delete']}
         className="bg-background"
       >
-        <Background gap={16} size={1} className="!bg-muted/20" />
-        <Controls className="!bg-card !border-border !shadow-md" />
+        <Background gap={16} size={1} />
+        <Controls className="!bg-card !border !border-border !rounded-lg !shadow-lg [&>button]:!bg-card [&>button]:!border-border [&>button]:!text-foreground [&>button:hover]:!bg-accent" />
         <MiniMap
           nodeColor={(node) => {
             const nd = node.data as unknown as BotScreenNodeData
             return nd.isRoot ? '#22c55e' : '#64748b'
           }}
-          maskColor="rgba(0,0,0,0.08)"
-          className="!bg-card !border-border !shadow-md"
+          maskColor="rgba(0,0,0,0.2)"
+          className="!bg-card !border !border-border !rounded-lg"
+          style={{ width: 120, height: 80 }}
         />
       </ReactFlow>
     </div>
