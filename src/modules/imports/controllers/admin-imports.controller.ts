@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  Body,
   Controller,
   Get,
   HttpCode,
@@ -17,6 +18,7 @@ import { AdminJwtAuthGuard } from '../../auth/guards/admin-jwt-auth.guard';
 import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.interface';
 import { ImportSummary } from '../interfaces/import-summary.interface';
 import { AltshopImporterService } from '../services/altshop-importer.service';
+import { BulkPlanAssignmentService, BulkPlanAssignmentResult } from '../services/bulk-plan-assignment.service';
 import { ImportsService } from '../services/imports.service';
 import {
   RemnawaveImporterService,
@@ -64,6 +66,7 @@ export class AdminImportsController {
     private readonly threexuiImporterService: ThreeXuiImporterService,
     private readonly remnashopImporterService: RemnashopImporterService,
     private readonly altshopImporterService: AltshopImporterService,
+    private readonly bulkPlanAssignmentService: BulkPlanAssignmentService,
   ) {}
 
   @Get()
@@ -178,6 +181,29 @@ export class AdminImportsController {
       users,
       subscriptions,
       transactions,
+    });
+  }
+
+  // ── Bulk Plan Assignment ────────────────────────────────────────────────
+
+  @Post('assign-plan')
+  @HttpCode(HttpStatus.OK)
+  public async assignPlanToImported(
+    @CurrentAdmin() admin: CurrentAdminInterface,
+    @Body() body: { planId: string; importRecordId?: string; userIds?: string[] },
+  ): Promise<BulkPlanAssignmentResult> {
+    if (!body.planId) {
+      throw new BadRequestException('planId is required');
+    }
+    if (!body.importRecordId && (!body.userIds || body.userIds.length === 0)) {
+      throw new BadRequestException('Either importRecordId or userIds must be provided');
+    }
+
+    return this.bulkPlanAssignmentService.assignPlan({
+      planId: body.planId,
+      importRecordId: body.importRecordId,
+      userIds: body.userIds,
+      createdBy: admin.id,
     });
   }
 }

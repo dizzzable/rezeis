@@ -4,6 +4,7 @@ import { AuthModule } from '../auth/auth.module';
 import { RemnawaveModule } from '../remnawave/remnawave.module';
 import { AdminImportsController } from './controllers/admin-imports.controller';
 import { AltshopImporterService } from './services/altshop-importer.service';
+import { BulkPlanAssignmentService } from './services/bulk-plan-assignment.service';
 import { ImportsService } from './services/imports.service';
 import { RemnashopImporterService } from './services/remnashop-importer.service';
 import { RemnawaveImporterService } from './services/remnawave-importer.service';
@@ -18,6 +19,7 @@ import { ThreeXuiImporterService } from './services/threexui-importer.service';
     ThreeXuiImporterService,
     RemnashopImporterService,
     AltshopImporterService,
+    BulkPlanAssignmentService,
   ],
   exports: [ImportsService],
 })

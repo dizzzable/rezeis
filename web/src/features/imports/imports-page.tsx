@@ -16,6 +16,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   AlertCircle,
   CheckCircle2,
+  ClipboardList,
   Database,
   Download,
   FileUp,
@@ -56,6 +57,13 @@ import {
   TabsList,
   TabsTrigger,
 } from '@/components/ui/tabs'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import { FadeIn, HoverLift } from '@/lib/motion'
 
 // ── Types ─────────────────────────────────────────────────────────────────
@@ -86,6 +94,23 @@ interface ImportSummary {
 
 interface RemnawaveImportSummary extends ImportSummary {
   descriptionWritebacks: number
+}
+
+interface PlanOption {
+  id: string
+  name: string
+  trafficLimit: number | null
+  deviceLimit: number
+  isActive: boolean
+}
+
+interface BulkAssignResult {
+  updated: number
+  skippedDeleted: number
+  skippedAlreadyAssigned: number
+  skippedNoSubscription: number
+  errors: number
+  syncJobsCreated: number
 }
 
 function statusVariant(
@@ -256,6 +281,10 @@ function RemnawaveTab() {
           isSync={importMutation.variables === 'sync'}
         />
       )}
+
+      {importMutation.isSuccess && importMutation.data && importMutation.variables !== 'sync' && (
+        <BulkPlanAssignment importRecordId={importMutation.data.importRecordId} />
+      )}
     </div>
   )
 }
@@ -350,6 +379,10 @@ function ThreeXuiTab() {
 
       {importMutation.isSuccess && importMutation.data && (
         <ImportResultAlert data={importMutation.data} isSync={false} />
+      )}
+
+      {importMutation.isSuccess && importMutation.data && (
+        <BulkPlanAssignment importRecordId={importMutation.data.importRecordId} />
       )}
     </div>
   )
@@ -446,6 +479,10 @@ function RemnashopTab() {
       {importMutation.isSuccess && importMutation.data && (
         <ImportResultAlert data={importMutation.data} isSync={false} />
       )}
+
+      {importMutation.isSuccess && importMutation.data && (
+        <BulkPlanAssignment importRecordId={importMutation.data.importRecordId} />
+      )}
     </div>
   )
 }
@@ -541,6 +578,10 @@ function AltshopTab() {
       {importMutation.isSuccess && importMutation.data && (
         <ImportResultAlert data={importMutation.data} isSync={false} />
       )}
+
+      {importMutation.isSuccess && importMutation.data && (
+        <BulkPlanAssignment importRecordId={importMutation.data.importRecordId} />
+      )}
     </div>
   )
 }
@@ -574,6 +615,89 @@ function ImportResultAlert({ data, isSync }: { data: ImportSummary; isSync: bool
         )}
       </AlertDescription>
     </Alert>
+  )
+}
+
+function BulkPlanAssignment({ importRecordId }: { importRecordId?: string }) {
+  const { t } = useTranslation()
+  const queryClient = useQueryClient()
+  const [selectedPlanId, setSelectedPlanId] = useState<string>('')
+
+  const { data: plans } = useQuery({
+    queryKey: ['admin', 'plans'],
+    queryFn: async (): Promise<PlanOption[]> => {
+      const response = await api.get('/admin/plans')
+      const allPlans = response.data as PlanOption[]
+      return allPlans.filter((p) => p.isActive)
+    },
+  })
+
+  const assignMutation = useMutation({
+    mutationFn: async (planId: string): Promise<BulkAssignResult> => {
+      const response = await api.post<BulkAssignResult>('/admin/imports/assign-plan', {
+        planId,
+        importRecordId,
+      })
+      return response.data
+    },
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ['admin', 'imports'] })
+      toast.success(t('importsPage.assignPlan.success', {
+        updated: result.updated,
+        skipped: result.skippedAlreadyAssigned,
+        synced: result.syncJobsCreated,
+      }))
+    },
+    onError: (err: unknown) => {
+      const message = (err as { response?: { data?: { message?: string } } })
+        ?.response?.data?.message
+      toast.error(message ?? t('importsPage.errorGeneric'))
+    },
+  })
+
+  if (!plans || plans.length === 0) return null
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-lg">
+          <ClipboardList className="h-5 w-5 text-primary" />
+          {t('importsPage.assignPlan.title')}
+        </CardTitle>
+        <CardDescription>
+          {t('importsPage.assignPlan.description')}
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <Select value={selectedPlanId} onValueChange={setSelectedPlanId}>
+          <SelectTrigger aria-label={t('importsPage.assignPlan.selectPlan')}>
+            <SelectValue placeholder={t('importsPage.assignPlan.selectPlan')} />
+          </SelectTrigger>
+          <SelectContent>
+            {plans.map((plan) => (
+              <SelectItem key={plan.id} value={plan.id}>
+                {plan.name}
+                {plan.trafficLimit !== null && ` (${plan.trafficLimit} GB)`}
+                {plan.deviceLimit > 0 && ` · ${plan.deviceLimit} dev`}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Button
+          onClick={() => assignMutation.mutate(selectedPlanId)}
+          disabled={!selectedPlanId || assignMutation.isPending}
+          className="w-full"
+          aria-label={t('importsPage.assignPlan.action')}
+        >
+          {assignMutation.isPending ? (
+            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+          ) : (
+            <ClipboardList className="mr-2 h-4 w-4" />
+          )}
+          {t('importsPage.assignPlan.action')}
+        </Button>
+      </CardContent>
+    </Card>
   )
 }
 

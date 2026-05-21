@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
-import { ImportStatus, Prisma, SubscriptionStatus } from '@prisma/client';
+import { ImportStatus, Prisma, SyncAction, SubscriptionStatus } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { ImportSummary } from '../interfaces/import-summary.interface';
@@ -273,6 +273,21 @@ export class ThreeXuiImporterService {
         planSnapshot,
       },
     });
+
+    // Create ProfileSyncJob to provision a Remnawave profile for this subscription
+    if (status === SubscriptionStatus.ACTIVE) {
+      await this.prismaService.profileSyncJob.create({
+        data: {
+          subscriptionId: sub.id,
+          action: SyncAction.CREATE,
+          payload: {
+            importedFrom: '3xui',
+            originalEmail: client.email,
+            originalSubId: client.subId,
+          } satisfies Prisma.InputJsonValue,
+        },
+      });
+    }
 
     // Set as current subscription if user doesn't have one
     const user = await this.prismaService.user.findUnique({

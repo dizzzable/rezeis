@@ -697,6 +697,15 @@ export const en = {
     summary:
       'Fetched: {{fetched}} · created: {{created}} · updated: {{updated}} · skipped: {{skipped}}',
     errorsCount: '{{count}} errors',
+    assignPlan: {
+      title: 'Assign plan to imported users',
+      description:
+        'Select a plan to assign to all imported subscriptions that do not have a plan yet.',
+      selectPlan: 'Select a plan',
+      action: 'Assign plan',
+      success:
+        'Plan assigned: {{updated}} updated · {{skipped}} already assigned · {{synced}} sync jobs created',
+    },
     history: {
       title: 'Import history',
       count: '{{count}} total records',

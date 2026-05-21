@@ -8,6 +8,7 @@ import {
   PurchaseChannel,
   PurchaseType,
   SubscriptionStatus,
+  SyncAction,
   TransactionStatus,
 } from '@prisma/client';
 
@@ -382,6 +383,21 @@ export class AltshopImporterService {
           },
         },
       });
+
+      // Create a ProfileSyncJob so the worker syncs with Remnawave.
+      // Altshop subscriptions already have remnawaveId → UPDATE to ensure consistency.
+      if (status === SubscriptionStatus.ACTIVE || status === SubscriptionStatus.LIMITED) {
+        await this.prismaService.profileSyncJob.create({
+          data: {
+            subscriptionId: newSub.id,
+            action: sub.user_remna_id ? SyncAction.UPDATE : SyncAction.CREATE,
+            payload: {
+              importedFrom: 'altshop',
+              originalId: sub.id,
+            } satisfies Prisma.InputJsonValue,
+          },
+        });
+      }
 
       // Set as current subscription if user doesn't have one
       const user = await this.prismaService.user.findUnique({

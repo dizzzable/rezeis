@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
-import { ImportStatus, Locale, Prisma, SubscriptionStatus } from '@prisma/client';
+import { ImportStatus, Locale, Prisma, SyncAction, SubscriptionStatus } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { ImportSummary } from '../interfaces/import-summary.interface';
@@ -324,6 +324,22 @@ export class RemnashopImporterService {
           },
         },
       });
+
+      // Create a ProfileSyncJob so the worker syncs with Remnawave.
+      // If remnawaveId exists, UPDATE to ensure consistency.
+      // If not, CREATE to provision a new profile.
+      if (status === SubscriptionStatus.ACTIVE || status === SubscriptionStatus.LIMITED) {
+        await this.prismaService.profileSyncJob.create({
+          data: {
+            subscriptionId: newSub.id,
+            action: sub.user_remna_id ? SyncAction.UPDATE : SyncAction.CREATE,
+            payload: {
+              importedFrom: 'remnashop',
+              originalId: sub.id,
+            } satisfies Prisma.InputJsonValue,
+          },
+        });
+      }
 
       // Set as current subscription if user doesn't have one
       const user = await this.prismaService.user.findUnique({
