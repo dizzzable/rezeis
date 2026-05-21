@@ -1,287 +1,491 @@
-import type { ComponentType, JSX } from 'react'
-import { useMemo, useState } from 'react'
-import { CreditCard, LayoutDashboard, LogOut, Menu, Megaphone, Package, ReceiptText, ScanSearch, Settings2, Shield, TicketPercent, UserRoundSearch, Users, Waypoints, Waves, Workflow } from 'lucide-react'
-import { useTranslation } from 'react-i18next'
-import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
-import { Button } from '@/components/ui/button'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { Separator } from '@/components/ui/separator'
-import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger } from '@/components/ui/sheet'
-import { z } from 'zod'
-import { queryClient } from '@/lib/query-client'
-import { authUserSchema } from '@/features/auth/auth-user'
-import { cn } from '@/lib/utils'
-import { useAuthStore } from '@/stores/auth-store'
-import { useLocaleStore } from '@/stores/locale-store'
+import { useState, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
+import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
+import {
+  LayoutDashboard,
+  Users,
+  Package,
+  CreditCard,
+  DollarSign,
+  Tag,
+  Zap,
+  Share2,
+  Handshake,
+  Megaphone,
+  Server,
+  Settings,
+  Shield,
+  ShieldAlert,
+  Bot,
+  ChevronLeft,
+  ChevronRight,
+  LogOut,
+  Languages,
+  Menu,
+  Palette,
+  Moon,
+  Sun,
+  Monitor,
+  BarChart3,
+  Bell,
+  Search,
+  Upload,
+  ClipboardList,
+  Puzzle,
+  HelpCircle,
+} from 'lucide-react';
+import { QuickSearchOverlay } from '@/components/quick-search/quick-search-overlay';
+import { OfflineIndicator } from '@/components/layout/offline-indicator';
+import { UpdateBanner } from '@/features/update-checker/update-banner';
+import { cn } from '@/lib/utils';
+import { Button } from '@/components/ui/button';
+import { Avatar, AvatarFallback } from '@/components/ui/avatar';
+import { ScrollArea } from '@/components/ui/scroll-area';
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+import { useAuth } from '@/features/auth/auth-provider';
+import { motion, AnimatePresence } from '@/lib/motion';
+import { useRealtimeUpdates } from '@/lib/realtime/use-realtime-updates';
+import { useThemeStore } from '@/lib/theme/theme-store';
+import type { ColorMode } from '@/lib/theme/theme-store';
+import { useLocaleStore } from '@/stores/locale-store';
 
-type AuthUser = z.infer<typeof authUserSchema>
-
-interface NavigationChildItem {
-  readonly to: string
-  readonly label: string
+interface NavItem {
+  /** i18n key under `adminNav.items.*` */
+  key: string;
+  path: string;
+  icon: React.ElementType;
 }
 
-interface NavigationItem {
-  readonly key: string
-  readonly to: string
-  readonly label: string
-  readonly icon: ComponentType<{ className?: string }>
-  readonly children?: readonly NavigationChildItem[]
+interface NavGroup {
+  /** i18n key under `adminNav.groups.*` */
+  key: string;
+  items: NavItem[];
 }
 
-function readUserLabel(user: AuthUser | null, fallbackLabel: string): string {
-  if (!user) {
-    return fallbackLabel
-  }
-  const name: unknown = user.login ?? user.name ?? user.email
-  return typeof name === 'string' && name.trim() ? name : fallbackLabel
-}
-
-function readSectionLabel(pathname: string, items: readonly NavigationItem[]): string {
-  const matchedItem: NavigationItem | undefined = items.find((item) => pathname.startsWith(item.to))
-  return matchedItem?.label ?? items[0].label
-}
-
-interface SidebarContentProps {
-  readonly items: readonly NavigationItem[]
-  readonly navigationLabel: string
-  readonly settingsGroupLabel: string
-  readonly generalGroupLabel: string
-  readonly handleNavigate: () => void
-}
-
-function SidebarContent({ items, navigationLabel, settingsGroupLabel, generalGroupLabel, handleNavigate }: SidebarContentProps): JSX.Element {
-  const generalItems: NavigationItem[] = items.filter((item) => item.key !== 'settings')
-  const settingsItem: NavigationItem | undefined = items.find((item) => item.key === 'settings')
-  return (
-    <div className="flex h-full flex-col">
-      <p className="px-2 text-xs font-semibold uppercase tracking-[0.22em] text-muted-foreground">{navigationLabel}</p>
-      <div className="mt-4 space-y-5 overflow-y-auto pr-1">
-        <div className="space-y-2">
-          <p className="px-2 text-xs font-medium uppercase tracking-[0.16em] text-muted-foreground">{generalGroupLabel}</p>
-          <nav className="flex flex-col gap-1">
-            {generalItems.map((item: NavigationItem) => (
-              <SidebarNavItem key={item.to} item={item} onNavigate={handleNavigate} />
-            ))}
-          </nav>
-        </div>
-        {settingsItem ? (
-          <div className="space-y-2">
-            <p className="px-2 text-xs font-medium uppercase tracking-[0.16em] text-muted-foreground">{settingsGroupLabel}</p>
-            <nav className="flex flex-col gap-1">
-              <SidebarNavItem item={settingsItem} onNavigate={handleNavigate} />
-            </nav>
-          </div>
-        ) : null}
-      </div>
-    </div>
-  )
-}
-
-interface SidebarNavItemProps {
-  readonly item: NavigationItem
-  readonly onNavigate: () => void
-}
-
-function SidebarNavItem({ item, onNavigate }: SidebarNavItemProps): JSX.Element {
-  return (
-    <div className="space-y-1">
-      <NavLink
-        to={item.to}
-        className={({ isActive }): string =>
-          cn(
-            'flex items-center gap-3 rounded-2xl px-3 py-3 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground',
-            isActive && 'bg-accent text-accent-foreground',
-          )
-        }
-        onClick={onNavigate}
-      >
-        <item.icon className="size-4" />
-        <span>{item.label}</span>
-      </NavLink>
-      {item.children ? (
-        <div className="ml-4 flex flex-col gap-1 border-l border-border/70 pl-4">
-          {item.children.map((child: NavigationChildItem) => (
-            <NavLink
-              key={child.to}
-              to={child.to}
-              className={({ isActive }): string =>
-                cn(
-                  'rounded-xl px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground',
-                  isActive && 'bg-accent text-accent-foreground',
-                )
-              }
-              onClick={onNavigate}
-            >
-              {child.label}
-            </NavLink>
-          ))}
-        </div>
-      ) : null}
-    </div>
-  )
-}
-
-export function AdminShell(): JSX.Element {
-  const { t } = useTranslation()
-  const location = useLocation()
-  const navigate = useNavigate()
-  const [isMobileOpen, setIsMobileOpen] = useState<boolean>(false)
-  const clearSession = useAuthStore((state) => state.clearSession)
-  const user: AuthUser | null = useAuthStore((state) => state.user)
-  const locale: string = useLocaleStore((state) => state.locale)
-  const setLocale = useLocaleStore((state) => state.setLocale)
-  const navigationItems: readonly NavigationItem[] = useMemo(
-    () => [
-      { key: 'dashboard', to: '/dashboard', label: t('nav.dashboard'), icon: LayoutDashboard },
-      {
-        key: 'catalog',
-        to: '/catalog/plans',
-        label: t('nav.catalog'),
-        icon: Package,
-        children: [{ to: '/catalog/plans', label: t('nav.catalogPlans') }],
-      },
-      {
-        key: 'subscriptions',
-        to: '/subscriptions/quote',
-        label: t('nav.subscriptions'),
-        icon: ReceiptText,
-        children: [{ to: '/subscriptions/quote', label: t('nav.subscriptionQuote') }],
-      },
-      {
-        key: 'payments',
-        to: '/payments/gateways',
-        label: t('nav.payments'),
-        icon: CreditCard,
-        children: [
-          { to: '/payments/gateways', label: t('nav.paymentGateways') },
-          { to: '/payments/transactions', label: t('nav.paymentTransactions') },
-          { to: '/payments/webhooks', label: t('nav.paymentWebhooks') },
-          { to: '/payments/reconciliation', label: t('nav.paymentReconciliation') },
-          { to: '/payments/alerts', label: t('nav.paymentAlerts') },
-        ],
-      },
-      {
-        key: 'users',
-        to: '/users/search',
-        label: t('nav.users'),
-        icon: Users,
-        children: [
-          { to: '/users/search', label: t('nav.userSearch') },
-          { to: '/users/recent-registered', label: t('nav.usersRecentRegistered') },
-          { to: '/users/recent-active', label: t('nav.usersRecentActive') },
-          { to: '/users/blacklist', label: t('nav.usersBlacklist') },
-          { to: '/users/invited', label: t('nav.usersInvited') },
-        ],
-      },
-      { key: 'broadcast', to: '/broadcast', label: t('nav.broadcast'), icon: Megaphone },
-      { key: 'promocodes', to: '/promocodes', label: t('nav.promocodes'), icon: TicketPercent },
-      { key: 'access-mode', to: '/access-mode', label: t('nav.accessMode'), icon: Workflow },
-      { key: 'remnawave', to: '/remnawave', label: t('nav.remnawave'), icon: Waves },
-      { key: 'ruid', to: '/ruid', label: t('nav.ruid'), icon: ScanSearch },
-      { key: 'imports', to: '/imports', label: t('nav.imports'), icon: Waypoints },
-      {
-        key: 'settings',
-        to: '/settings/panel',
-        label: t('nav.settings'),
-        icon: Settings2,
-        children: [
-          { to: '/settings/panel', label: t('nav.settingsPanel') },
-          { to: '/settings/platform', label: t('nav.settingsPlatform') },
-          { to: '/settings/api-tokens', label: t('nav.settingsApiTokens') },
-        ],
-      },
+const navGroups: NavGroup[] = [
+  {
+    key: 'operations',
+    items: [
+      { key: 'dashboard', path: '/', icon: LayoutDashboard },
+      { key: 'users', path: '/users', icon: Users },
+      { key: 'subscriptions', path: '/subscriptions', icon: CreditCard },
+      { key: 'payments', path: '/payments', icon: DollarSign },
+      { key: 'supportTickets', path: '/support-tickets', icon: Bell },
+      { key: 'fraudSignals', path: '/fraud', icon: ShieldAlert },
+      { key: 'automations', path: '/automations', icon: Zap },
+      { key: 'analytics', path: '/analytics', icon: BarChart3 },
     ],
-    [t],
-  )
-  const sectionTitle: string = readSectionLabel(location.pathname, navigationItems)
-  const userLabel: string = readUserLabel(user, t('common.authenticatedAdmin'))
-  function handleLogout(): void {
-    clearSession()
-    queryClient.removeQueries({ queryKey: ['auth'] })
-    navigate('/login', { replace: true })
-  }
-  function handleLocaleChange(nextValue: string): void {
-    const nextLocale: string = nextValue === 'ru' ? 'ru' : 'en'
-    setLocale(nextLocale)
-  }
-  function handleCloseMobileNavigation(): void {
-    setIsMobileOpen(false)
-  }
+  },
+  {
+    key: 'catalog',
+    items: [
+      { key: 'plans', path: '/plans', icon: Package },
+      { key: 'addOns', path: '/add-ons', icon: Puzzle },
+      { key: 'promocodes', path: '/promocodes', icon: Tag },
+      { key: 'broadcast', path: '/broadcast', icon: Megaphone },
+    ],
+  },
+  {
+    key: 'growth',
+    items: [
+      // Referral Settings + Partner Settings live as tabs inside the
+      // referrals/partners pages — no separate sidebar entries.
+      // Withdrawals are also embedded as a tab inside /partners.
+      { key: 'referrals', path: '/referrals', icon: Share2 },
+      { key: 'partners', path: '/partners', icon: Handshake },
+    ],
+  },
+  {
+    key: 'configuration',
+    items: [
+      { key: 'platform', path: '/settings', icon: Settings },
+      { key: 'gateways', path: '/payments/gateways', icon: CreditCard },
+      { key: 'panelSettings', path: '/settings/panel', icon: Settings },
+      { key: 'botConfig', path: '/bot-config', icon: Bot },
+      { key: 'remnawave', path: '/remnawave', icon: Server },
+      { key: 'notifications', path: '/notifications', icon: Bell },
+      { key: 'faq', path: '/faq', icon: HelpCircle },
+    ],
+  },
+  {
+    key: 'system',
+    items: [
+      { key: 'admins', path: '/admins', icon: Shield },
+      // Roles, IP allowlist, Webhooks, Blocked IPs are embedded as tabs in /admins.
+      { key: 'imports', path: '/imports', icon: Upload },
+      { key: 'audit', path: '/audit', icon: ClipboardList },
+      // Config portability → /settings/panel#config
+      // System logs → /audit (tab)
+    ],
+  },
+];
+
+function NavItems({
+  collapsed = false,
+  onNavigate,
+}: {
+  collapsed?: boolean;
+  onNavigate?: () => void;
+}) {
+  const { t } = useTranslation();
+  const { pathname } = useLocation();
+
+  // ── Most-specific-match resolution ──────────────────────────────────
+  // The nav contains both `/payments` (Payments) and `/payments/gateways`
+  // (Gateways). Without help, NavLink would highlight *both* when the
+  // pathname is `/payments/gateways` because the default matching is
+  // prefix-based. We compute the longest matching item path here so only
+  // that single item lights up.
+  const allPaths = navGroups.flatMap((g) => g.items.map((i) => i.path));
+  const bestMatch = allPaths
+    .filter((p) =>
+      p === '/'
+        ? pathname === '/'
+        : pathname === p || pathname.startsWith(p + '/'),
+    )
+    .reduce((best, candidate) =>
+      candidate.length > best.length ? candidate : best, '');
+
   return (
-    <div className="min-h-screen px-4 py-4 sm:px-6 sm:py-6 lg:px-8">
-      <div className="mx-auto flex min-h-[calc(100vh-2rem)] max-w-7xl flex-col gap-4 lg:min-h-[calc(100vh-3rem)]">
-        <header className="flex flex-col gap-4 rounded-[28px] border border-border/80 bg-card/95 px-5 py-4 shadow-sm backdrop-blur sm:px-6">
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-            <div className="flex items-start gap-3">
-              <div className="flex size-11 items-center justify-center rounded-2xl bg-primary text-primary-foreground shadow-sm">
-                <Shield className="size-5" />
-              </div>
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.24em] text-muted-foreground">{t('common.appName')}</p>
-                <h1 className="mt-1 text-xl font-semibold tracking-tight">{sectionTitle}</h1>
-                <p className="mt-1 text-sm text-muted-foreground">{userLabel}</p>
-              </div>
-            </div>
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-              <div className="relative sm:min-w-[180px]">
-                <UserRoundSearch className="pointer-events-none absolute top-1/2 left-3 z-10 size-4 -translate-y-1/2 text-muted-foreground" />
-                <Select value={locale} onValueChange={handleLocaleChange}>
-                  <SelectTrigger aria-label={t('common.language')} className="w-full pl-9">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent align="end">
-                    <SelectItem value="en">{t('common.localeNames.en')}</SelectItem>
-                    <SelectItem value="ru">{t('common.localeNames.ru')}</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <Button type="button" variant="outline" className="w-full sm:w-auto" onClick={handleLogout}>
-                <LogOut className="size-4" />
-                {t('common.logout')}
-              </Button>
-              <Sheet open={isMobileOpen} onOpenChange={setIsMobileOpen}>
-                <SheetTrigger asChild>
-                  <Button type="button" variant="outline" className="lg:hidden">
-                    <Menu className="size-4" />
-                    {t('common.navigation')}
-                  </Button>
-                </SheetTrigger>
-                <SheetContent side="left" className="w-full max-w-[320px] gap-0 p-0">
-                  <SheetHeader className="border-b px-5 py-4 text-left">
-                    <SheetTitle className="text-base font-semibold">{t('shell.mobileNavigationTitle')}</SheetTitle>
-                    <SheetDescription>{t('shell.subtitle')}</SheetDescription>
-                  </SheetHeader>
-                  <div className="flex flex-1 flex-col px-5 py-4">
-                    <Separator className="mb-4" />
-                    <SidebarContent
-                      items={navigationItems}
-                      navigationLabel={t('common.navigation')}
-                      generalGroupLabel={t('shell.groups.general')}
-                      settingsGroupLabel={t('shell.groups.settings')}
-                      handleNavigate={handleCloseMobileNavigation}
-                    />
-                  </div>
-                </SheetContent>
-              </Sheet>
-            </div>
+    <nav className="flex flex-col gap-1 px-2">
+      {navGroups.map((group, groupIndex) => (
+        <div key={group.key}>
+          {groupIndex > 0 && <div className="my-1 h-px bg-sidebar-border/50 mx-1" />}
+          {!collapsed && (
+            <p className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-widest text-sidebar-foreground/40">
+              {t(`adminNav.groups.${group.key}`)}
+            </p>
+          )}
+          {group.items.map((item, index) => {
+            const globalIndex = navGroups
+              .slice(0, groupIndex)
+              .reduce((acc, g) => acc + g.items.length, 0) + index;
+            const isCurrent = item.path === bestMatch;
+            const label = t(`adminNav.items.${item.key}`);
+            return (
+              <Tooltip key={item.path}>
+                <TooltipTrigger asChild>
+                  <NavLink
+                    to={item.path}
+                    end
+                    onClick={onNavigate}
+                    className={cn(
+                      'group relative flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors',
+                      isCurrent
+                        ? 'text-sidebar-primary-foreground'
+                        : 'text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground',
+                      collapsed && 'justify-center px-2',
+                    )}
+                  >
+                    <>
+                      {isCurrent && (
+                        <motion.span
+                          layoutId="sidebar-active-indicator"
+                          className="absolute inset-0 rounded-md bg-sidebar-primary"
+                          transition={{ type: 'spring', stiffness: 400, damping: 32 }}
+                        />
+                      )}
+                      <motion.span
+                        initial={{ opacity: 0, x: -6 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        transition={{ duration: 0.22, delay: globalIndex * 0.015, ease: [0.16, 1, 0.3, 1] }}
+                        className="relative z-10 flex items-center gap-3"
+                      >
+                        <item.icon className="h-4 w-4 shrink-0" />
+                        {!collapsed && <span>{label}</span>}
+                      </motion.span>
+                    </>
+                  </NavLink>
+                </TooltipTrigger>
+                {collapsed && <TooltipContent side="right">{label}</TooltipContent>}
+              </Tooltip>
+            );
+          })}
+        </div>
+      ))}
+    </nav>
+  );
+}
+
+export default function AdminShell() {
+  const { t } = useTranslation();
+  const [collapsed, setCollapsed] = useState(false);
+  const [mobileOpen, setMobileOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const { logout, admin } = useAuth();
+  const navigate = useNavigate();
+
+  // Subscribe to admin realtime updates as soon as the shell is rendered
+  // (i.e. the admin is authenticated). Toasts are limited to WARNING/ERROR
+  // events inside the hook itself.
+  useRealtimeUpdates();
+
+  // Cmd+K / Ctrl+K shortcut
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+        e.preventDefault();
+        setSearchOpen((v) => !v);
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, []);
+
+  function handleLogout() {
+    logout();
+    navigate('/sign-in');
+  }
+
+  const adminInitials = admin?.login ? admin.login.slice(0, 2).toUpperCase() : 'AD';
+
+  return (
+    <TooltipProvider delayDuration={0}>
+      <div className="flex h-screen overflow-hidden">
+        {/* Quick Search Overlay */}
+        <QuickSearchOverlay open={searchOpen} onClose={() => setSearchOpen(false)} />
+        {/* Mobile Sheet sidebar */}
+        <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
+          <SheetContent side="left" className="w-64 bg-sidebar p-0 text-sidebar-foreground">
+            <SheetHeader className="flex h-14 flex-row items-center px-4">
+              <SheetTitle className="text-lg font-bold text-sidebar-foreground">
+                Rezeis Admin
+              </SheetTitle>
+            </SheetHeader>
+            <ScrollArea className="flex-1 py-2">
+              <NavItems onNavigate={() => setMobileOpen(false)} />
+            </ScrollArea>
+          </SheetContent>
+        </Sheet>
+
+        {/* Desktop sidebar */}
+        <aside
+          className={cn(
+            'relative hidden md:flex flex-col bg-sidebar text-sidebar-foreground transition-all duration-300',
+            collapsed ? 'w-16' : 'w-64',
+          )}
+        >
+          {/* Logo */}
+          <div className="flex h-14 items-center px-4">
+            {!collapsed && (
+              <span className="text-lg font-bold text-sidebar-foreground">Rezeis Admin</span>
+            )}
+            {collapsed && <Shield className="h-6 w-6 text-sidebar-foreground" />}
           </div>
-        </header>
-        <div className="grid flex-1 gap-4 lg:grid-cols-[290px_minmax(0,1fr)]">
-          <aside className="hidden rounded-[28px] border border-border/80 bg-card/90 p-4 shadow-sm backdrop-blur lg:block">
-            <SidebarContent
-              items={navigationItems}
-              navigationLabel={t('common.navigation')}
-              generalGroupLabel={t('shell.groups.general')}
-              settingsGroupLabel={t('shell.groups.settings')}
-              handleNavigate={handleCloseMobileNavigation}
-            />
-          </aside>
-          <main className="min-w-0">
-            <Outlet />
+
+          {/* Nav */}
+          <ScrollArea className="flex-1 py-2">
+            <NavItems collapsed={collapsed} />
+          </ScrollArea>
+
+          {/* Collapse toggle */}
+          <div className="p-2">
+            <Button
+              variant="ghost"
+              size="icon"
+              className="w-full text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+              onClick={() => setCollapsed(!collapsed)}
+            >
+              {collapsed ? (
+                <ChevronRight className="h-4 w-4" />
+              ) : (
+                <ChevronLeft className="h-4 w-4" />
+              )}
+            </Button>
+          </div>
+        </aside>
+
+        {/* Main content */}
+        <div className="flex flex-1 flex-col overflow-hidden">
+          {/* Top bar */}
+          <header className="flex h-14 items-center justify-between bg-background px-4 md:px-6">
+            <div className="flex items-center gap-2">
+              {/* Mobile hamburger */}
+              <Button
+                variant="ghost"
+                size="icon"
+                className="md:hidden"
+                onClick={() => setMobileOpen(true)}
+              >
+                <Menu className="h-5 w-5" />
+                <span className="sr-only">{t('adminShell.openMenu')}</span>
+              </Button>
+              <h2 className="hidden text-sm font-medium text-muted-foreground md:block">
+                {t('adminShell.headerSubtitle')}
+              </h2>
+            </div>
+
+            <div className="flex items-center gap-2">
+              {/* Quick search button */}
+              <Button
+                variant="outline"
+                size="sm"
+                className="hidden md:flex items-center gap-2 text-muted-foreground w-48 justify-start"
+                onClick={() => setSearchOpen(true)}
+              >
+                <Search className="h-3.5 w-3.5" />
+                <span className="text-xs">{t('adminShell.search')}</span>
+                <kbd className="ml-auto font-mono text-[10px] bg-muted px-1.5 py-0.5 rounded">⌘K</kbd>
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="md:hidden"
+                onClick={() => setSearchOpen(true)}
+                aria-label={t('adminShell.search')}
+              >
+                <Search className="h-4 w-4" />
+              </Button>
+              <LanguageToggle />
+              <ThemeToggle />
+
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="ghost" className="relative h-8 w-8 rounded-full">
+                    <Avatar className="h-8 w-8">
+                      <AvatarFallback className="bg-primary text-primary-foreground text-xs">
+                        {adminInitials}
+                      </AvatarFallback>
+                    </Avatar>
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent className="w-48" align="end">
+                  <DropdownMenuItem disabled>
+                    <span className="text-sm font-medium">{admin?.login ?? t('adminShell.administrator')}</span>
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onClick={() => navigate('/settings/panel')}>
+                    <Palette className="mr-2 h-4 w-4" />
+                    {t('panelSettings.title')}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={handleLogout}>
+                    <LogOut className="mr-2 h-4 w-4" />
+                    {t('adminShell.signOut')}
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
+          </header>
+
+          {/* Page content */}
+          <main className="flex-1 overflow-auto bg-muted/20 relative">
+            <OfflineIndicator />
+            <UpdateBanner />
+            <div className="p-4 md:p-6">
+              <AnimatedOutlet />
+            </div>
           </main>
         </div>
       </div>
-    </div>
-  )
+    </TooltipProvider>
+  );
+}
+
+// ── Theme toggle (light/dark/system picker in top bar) ─────────────────────
+function ThemeToggle() {
+  const { t } = useTranslation();
+  const mode = useThemeStore((s) => s.mode);
+  const setMode = useThemeStore((s) => s.setMode);
+
+  const currentIcon =
+    mode === 'dark' ? <Moon className="h-4 w-4" /> : mode === 'light' ? <Sun className="h-4 w-4" /> : <Monitor className="h-4 w-4" />;
+
+  const options: Array<{ id: ColorMode; labelKey: string; icon: React.ElementType }> = [
+    { id: 'light', labelKey: 'adminShell.theme.light', icon: Sun },
+    { id: 'dark', labelKey: 'adminShell.theme.dark', icon: Moon },
+    { id: 'system', labelKey: 'adminShell.theme.system', icon: Monitor },
+  ];
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="ghost" size="icon" aria-label={t('adminShell.theme.toggleAria')}>
+          <AnimatePresence mode="wait" initial={false}>
+            <motion.span
+              key={mode}
+              initial={{ y: -6, opacity: 0, rotate: -30 }}
+              animate={{ y: 0, opacity: 1, rotate: 0 }}
+              exit={{ y: 6, opacity: 0, rotate: 30 }}
+              transition={{ duration: 0.18 }}
+              className="inline-flex"
+            >
+              {currentIcon}
+            </motion.span>
+          </AnimatePresence>
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-40">
+        <DropdownMenuLabel>{t('adminShell.theme.label')}</DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        {options.map((opt) => (
+          <DropdownMenuItem key={opt.id} onClick={() => setMode(opt.id)}>
+            <opt.icon className="mr-2 h-4 w-4" />
+            {t(opt.labelKey)}
+            {mode === opt.id && <span className="ml-auto text-xs text-muted-foreground">✓</span>}
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+// ── Language toggle (RU / EN) ──────────────────────────────────────────────
+const SUPPORTED_LOCALES: ReadonlyArray<{ id: string; key: string }> = [
+  { id: 'ru', key: 'adminShell.language.ru' },
+  { id: 'en', key: 'adminShell.language.en' },
+];
+
+function LanguageToggle() {
+  const { t, i18n } = useTranslation();
+  const locale = useLocaleStore((s) => s.locale);
+  const setLocale = useLocaleStore((s) => s.setLocale);
+
+  const handlePick = (id: string): void => {
+    setLocale(id);
+    void i18n.changeLanguage(id);
+  };
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="ghost" size="icon" aria-label={t('adminShell.language.label')}>
+          <Languages className="h-4 w-4" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-40">
+        <DropdownMenuLabel>{t('adminShell.language.label')}</DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        {SUPPORTED_LOCALES.map((opt) => (
+          <DropdownMenuItem key={opt.id} onClick={() => handlePick(opt.id)}>
+            <span className="font-mono text-xs uppercase mr-2">{opt.id}</span>
+            {t(opt.key)}
+            {locale === opt.id && <span className="ml-auto text-xs text-muted-foreground">✓</span>}
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+// ── Animated outlet wrapper (page transitions) ─────────────────────────────
+function AnimatedOutlet() {
+  // Key the animation on the pathname so every route change triggers a new fade
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.26, ease: [0.16, 1, 0.3, 1] }}
+    >
+      <Outlet />
+    </motion.div>
+  );
 }

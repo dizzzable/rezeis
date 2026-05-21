@@ -1,48 +1,23 @@
-import { useEffect } from 'react'
-import { type UseQueryResult, useQuery } from '@tanstack/react-query'
-import { z } from 'zod'
-import { authApi } from '@/features/auth/auth-api'
-import { authUserSchema } from '@/features/auth/auth-user'
-import { ApiError } from '@/lib/api'
-import { queryClient } from '@/lib/query-client'
+import { useQuery, type UseQueryResult } from '@tanstack/react-query'
+
+import { api } from '@/lib/api'
 import { useAuthStore } from '@/stores/auth-store'
+import { authUserSchema, type AuthUser } from './auth-user'
 
-type AuthUser = z.infer<typeof authUserSchema>
-
-function createAuthMeQueryKey(sessionRevision: number): readonly ['auth', 'me', number] {
-  return ['auth', 'me', sessionRevision] as const
-}
-
-function isAuthInvalidatingError(error: Error): boolean {
-  if (!(error instanceof ApiError)) {
-    return false
-  }
-  return error.status === 401 || error.status === 403
-}
-
+/**
+ * React Query hook that exposes the currently authenticated admin profile.
+ * Fetches `/api/admin/auth/me` only when an access token is present.
+ */
 export function useAuthMe(): UseQueryResult<AuthUser, Error> {
-  const token: string = useAuthStore((state) => state.token)
-  const sessionRevision: number = useAuthStore((state) => state.sessionRevision)
-  const setUser = useAuthStore((state) => state.setUser)
-  const markSessionVerified = useAuthStore((state) => state.markSessionVerified)
-  const clearSession = useAuthStore((state) => state.clearSession)
-  const authMeQuery = useQuery<AuthUser, Error>({
-    queryKey: createAuthMeQueryKey(sessionRevision),
-    queryFn: authApi.getMe,
-    enabled: Boolean(token),
+  const token = useAuthStore((state) => state.token)
+
+  return useQuery({
+    queryKey: ['auth', 'me'] as const,
+    enabled: token.length > 0,
+    staleTime: 30_000,
+    queryFn: async (): Promise<AuthUser> => {
+      const response = await api.get('/admin/auth/me')
+      return authUserSchema.parse(response.data)
+    },
   })
-  useEffect((): void => {
-    if (authMeQuery.data) {
-      setUser(authMeQuery.data)
-      markSessionVerified(sessionRevision)
-    }
-  }, [authMeQuery.data, markSessionVerified, sessionRevision, setUser])
-  useEffect((): void => {
-    if (!authMeQuery.error || !isAuthInvalidatingError(authMeQuery.error)) {
-      return
-    }
-    clearSession()
-    queryClient.removeQueries({ queryKey: ['auth'] })
-  }, [authMeQuery.error, clearSession])
-  return authMeQuery
 }

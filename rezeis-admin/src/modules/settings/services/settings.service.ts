@@ -15,18 +15,48 @@ import {
 } from '../../../common/utils/payment-ops-alert-settings.util';
 import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.interface';
 import { RequestMetadataInterface } from '../../auth/interfaces/request-metadata.interface';
+import { UpdateBrandingSettingsDto } from '../dto/update-branding-settings.dto';
 import {
   SendPaymentOpsAlertTestDto,
   UpdatePaymentOpsAlertSettingsDto,
 } from '../dto/update-payment-ops-alert-settings.dto';
 import { UpdatePlatformSettingsDto } from '../dto/update-platform-settings.dto';
+import {
+  BrandingSettingsInterface,
+} from '../interfaces/branding-settings.interface';
 import { InternalPlatformPolicyInterface } from '../interfaces/internal-platform-policy.interface';
 import { PlatformSettingsInterface } from '../interfaces/platform-settings.interface';
+import {
+  mergeBrandingSettings,
+  readBrandingSettings,
+} from '../utils/branding-settings.util';
 
 interface UpdatePlatformSettingsInput {
   readonly currentAdmin: CurrentAdminInterface;
   readonly requestMetadata: RequestMetadataInterface;
   readonly updatePlatformSettingsDto: UpdatePlatformSettingsDto;
+}
+
+interface UpdateNotificationsTogglesInput {
+  readonly currentAdmin: CurrentAdminInterface;
+  readonly requestMetadata: RequestMetadataInterface;
+  readonly userNotifications?: Record<string, unknown>;
+  readonly systemNotifications?: Record<string, unknown>;
+}
+
+interface UpdateTelegramDeliveryInput {
+  readonly currentAdmin: CurrentAdminInterface;
+  readonly requestMetadata: RequestMetadataInterface;
+  readonly enabled?: boolean;
+  readonly chatId?: string | null;
+  readonly topicId?: number | null;
+  readonly topics?: Record<string, number | null>;
+}
+
+interface SendTelegramDeliveryTestInput {
+  readonly currentAdmin: CurrentAdminInterface;
+  readonly requestMetadata: RequestMetadataInterface;
+  readonly note?: string | null;
 }
 
 interface UpdatePaymentOpsAlertSettingsInput {
@@ -39,6 +69,12 @@ interface SendPaymentOpsAlertTestInput {
   readonly currentAdmin: CurrentAdminInterface;
   readonly requestMetadata: RequestMetadataInterface;
   readonly sendPaymentOpsAlertTestDto: SendPaymentOpsAlertTestDto;
+}
+
+interface UpdateBrandingSettingsInput {
+  readonly currentAdmin: CurrentAdminInterface;
+  readonly requestMetadata: RequestMetadataInterface;
+  readonly updateBrandingSettingsDto: UpdateBrandingSettingsDto;
 }
 
 interface UpdatePlatformSettingsChanges {
@@ -184,6 +220,58 @@ export class SettingsService {
   }
 
   /**
+   * Returns the current branding payload, falling back to safe defaults when
+   * no settings record exists yet (very first install).
+   */
+  public async getBrandingSettings(): Promise<BrandingSettingsInterface> {
+    const settings = await this.getSettingsRecord(this.prismaService);
+    return readBrandingSettings(settings?.brandingSettings ?? null);
+  }
+
+  /**
+   * Applies a partial branding update. Records an audit log entry tracking
+   * which branding fields were modified.
+   */
+  public async updateBrandingSettings(
+    input: UpdateBrandingSettingsInput,
+  ): Promise<BrandingSettingsInterface> {
+    const updatedFields = extractUpdatedBrandingFields(input.updateBrandingSettingsDto);
+    if (updatedFields.length === 0) {
+      return this.getBrandingSettings();
+    }
+
+    const settings = await this.prismaService.$transaction(
+      async (transactionClient: Prisma.TransactionClient): Promise<Settings> => {
+        const existing = await this.getOrCreateSettingsRecord(transactionClient);
+        const merged = mergeBrandingSettings({
+          existing: existing.brandingSettings,
+          patch: input.updateBrandingSettingsDto,
+        });
+        const updated = await transactionClient.settings.update({
+          where: { id: existing.id },
+          data: {
+            brandingSettings: merged as Prisma.InputJsonValue,
+          },
+        });
+        await transactionClient.adminAuditLog.create({
+          data: {
+            action: 'settings.branding.updated',
+            ipAddress: input.requestMetadata.remoteAddress,
+            userAgent: input.requestMetadata.userAgent,
+            metadata: buildAuditMetadata({
+              requestId: input.requestMetadata.requestId,
+              updatedFields,
+            }),
+            adminUser: { connect: { id: input.currentAdmin.id } },
+          },
+        });
+        return updated;
+      },
+    );
+    return readBrandingSettings(settings.brandingSettings);
+  }
+
+  /**
    * Applies a partial platform settings update and records an audit log entry.
    */
   public async updatePlatformSettings(
@@ -219,6 +307,213 @@ export class SettingsService {
       },
     );
     return mapPlatformSettings(settings);
+  }
+
+  /**
+   * Returns a flattened "everything" snapshot used by the React notifications
+   * page. It folds the singleton `settings` row into a single JSON object so
+   * the frontend can hydrate every panel from one request without making the
+   * UI aware of the DB shape.
+   */
+  public async getOverview(): Promise<{
+    readonly userNotifications: Record<string, unknown>;
+    readonly systemNotifications: Record<string, unknown>;
+    readonly platform: PlatformSettingsInterface;
+    readonly branding: BrandingSettingsInterface;
+    readonly paymentOpsAlerts: PaymentOpsAlertSettingsInterface;
+  }> {
+    const settings = await this.getOrCreateSettingsRecord(this.prismaService);
+    return {
+      userNotifications: readJsonObject(settings.userNotifications),
+      systemNotifications: readJsonObject(settings.systemNotifications),
+      platform: mapPlatformSettings(settings),
+      branding: readBrandingSettings(settings.brandingSettings),
+      paymentOpsAlerts: readPaymentOpsAlertSettings(settings.systemNotifications),
+    };
+  }
+
+  /**
+   * Merge-updates the boolean toggles for end-user and/or operator
+   * notifications. Either branch may be partially supplied — keys absent
+   * from the patch keep their previous values.
+   */
+  public async updateNotificationToggles(
+    input: UpdateNotificationsTogglesInput,
+  ): Promise<{
+    readonly userNotifications: Record<string, unknown>;
+    readonly systemNotifications: Record<string, unknown>;
+  }> {
+    if (input.userNotifications === undefined && input.systemNotifications === undefined) {
+      const current = await this.getOrCreateSettingsRecord(this.prismaService);
+      return {
+        userNotifications: readJsonObject(current.userNotifications),
+        systemNotifications: readJsonObject(current.systemNotifications),
+      };
+    }
+    const settings = await this.prismaService.$transaction(
+      async (transactionClient: Prisma.TransactionClient): Promise<Settings> => {
+        const existing = await this.getOrCreateSettingsRecord(transactionClient);
+        const data: Prisma.SettingsUpdateInput = {};
+        const updatedFields: string[] = [];
+        if (input.userNotifications !== undefined) {
+          const merged = mergeJsonObject(existing.userNotifications, input.userNotifications);
+          data.userNotifications = merged as Prisma.InputJsonValue;
+          updatedFields.push('userNotifications');
+        }
+        if (input.systemNotifications !== undefined) {
+          const merged = mergeJsonObject(existing.systemNotifications, input.systemNotifications);
+          data.systemNotifications = merged as Prisma.InputJsonValue;
+          updatedFields.push('systemNotifications');
+        }
+        const updated = await transactionClient.settings.update({
+          where: { id: existing.id },
+          data,
+        });
+        await transactionClient.adminAuditLog.create({
+          data: {
+            action: 'settings.notifications.updated',
+            ipAddress: input.requestMetadata.remoteAddress,
+            userAgent: input.requestMetadata.userAgent,
+            metadata: buildAuditMetadata({
+              requestId: input.requestMetadata.requestId,
+              updatedFields,
+            }),
+            adminUser: { connect: { id: input.currentAdmin.id } },
+          },
+        });
+        return updated;
+      },
+    );
+    return {
+      userNotifications: readJsonObject(settings.userNotifications),
+      systemNotifications: readJsonObject(settings.systemNotifications),
+    };
+  }
+
+  /**
+   * Updates the Telegram delivery configuration nested under the
+   * `systemNotifications.telegram` key. Per-category routing is merge-only —
+   * categories not present in the patch retain their existing topic id.
+   */
+  public async updateTelegramDelivery(
+    input: UpdateTelegramDeliveryInput,
+  ): Promise<TelegramDeliveryConfig> {
+    const settings = await this.prismaService.$transaction(
+      async (transactionClient: Prisma.TransactionClient): Promise<Settings> => {
+        const existing = await this.getOrCreateSettingsRecord(transactionClient);
+        const systemNotifications = readJsonObject(existing.systemNotifications);
+        const previousTelegram = readJsonObject(systemNotifications.telegram);
+        const previousTopics = readJsonObject(previousTelegram.topics);
+
+        const nextTelegram: Record<string, unknown> = { ...previousTelegram };
+        const updatedFields: string[] = [];
+
+        if (input.enabled !== undefined) {
+          nextTelegram.enabled = input.enabled;
+          updatedFields.push('enabled');
+        }
+        if (input.chatId !== undefined) {
+          nextTelegram.chatId = input.chatId === null || input.chatId === '' ? null : input.chatId;
+          updatedFields.push('chatId');
+        }
+        if (input.topicId !== undefined) {
+          nextTelegram.topicId = input.topicId;
+          updatedFields.push('topicId');
+        }
+        if (input.topics !== undefined) {
+          const mergedTopics: Record<string, number | null> = {};
+          for (const [key, value] of Object.entries(previousTopics)) {
+            if (typeof value === 'number') {
+              mergedTopics[key] = value;
+            }
+          }
+          for (const [key, value] of Object.entries(input.topics)) {
+            mergedTopics[key.toUpperCase()] = value;
+          }
+          nextTelegram.topics = mergedTopics;
+          updatedFields.push('topics');
+        }
+
+        if (nextTelegram.enabled === true && (nextTelegram.chatId === null || nextTelegram.chatId === undefined)) {
+          throw new BadRequestException('TELEGRAM_DELIVERY_CHAT_REQUIRED');
+        }
+
+        const updated = await transactionClient.settings.update({
+          where: { id: existing.id },
+          data: {
+            systemNotifications: {
+              ...systemNotifications,
+              telegram: nextTelegram,
+            } as Prisma.InputJsonValue,
+          },
+        });
+        await transactionClient.adminAuditLog.create({
+          data: {
+            action: 'settings.telegramDelivery.updated',
+            ipAddress: input.requestMetadata.remoteAddress,
+            userAgent: input.requestMetadata.userAgent,
+            metadata: buildAuditMetadata({
+              requestId: input.requestMetadata.requestId,
+              updatedFields,
+            }),
+            adminUser: { connect: { id: input.currentAdmin.id } },
+          },
+        });
+        return updated;
+      },
+    );
+    return readTelegramDeliveryConfig(settings.systemNotifications);
+  }
+
+  public async sendTelegramDeliveryTest(input: SendTelegramDeliveryTestInput): Promise<void> {
+    const config = readTelegramDeliveryConfig(
+      (await this.getOrCreateSettingsRecord(this.prismaService)).systemNotifications,
+    );
+    if (!config.enabled || config.chatId === null) {
+      throw new BadRequestException('TELEGRAM_DELIVERY_NOT_CONFIGURED');
+    }
+    const botToken = this.paymentConfiguration?.botToken ?? null;
+    if (botToken === null) {
+      throw new ServiceUnavailableException('BOT_TOKEN is not configured');
+    }
+    if (this.httpService === undefined) {
+      throw new ServiceUnavailableException('HTTP client is not configured');
+    }
+    const note = input.note?.trim() ?? '';
+    const lines = [
+      'Rezeis admin · test alert',
+      `admin_id: ${input.currentAdmin.id}`,
+      `chat_id: ${config.chatId}`,
+      config.topicId === null ? null : `default_topic: ${config.topicId}`,
+      note.length > 0 ? `note: ${note.slice(0, 200)}` : null,
+    ].filter((line): line is string => line !== null);
+    const payload: Record<string, unknown> = {
+      chat_id: config.chatId,
+      text: lines.join('\n'),
+      disable_web_page_preview: true,
+    };
+    if (config.topicId !== null) {
+      payload.message_thread_id = config.topicId;
+    }
+    await firstValueFrom(
+      this.httpService.post(
+        `https://api.telegram.org/bot${botToken}/sendMessage`,
+        payload,
+      ),
+    );
+    await this.prismaService.adminAuditLog.create({
+      data: {
+        action: 'settings.telegramDelivery.test.sent',
+        ipAddress: input.requestMetadata.remoteAddress,
+        userAgent: input.requestMetadata.userAgent,
+        metadata: {
+          requestId: input.requestMetadata.requestId,
+          chatId: config.chatId,
+          topicId: config.topicId,
+        },
+        adminUser: { connect: { id: input.currentAdmin.id } },
+      } as never,
+    });
   }
 
   private async getOrCreateSettingsRecord(settingsClient: SettingsClient): Promise<Settings> {
@@ -364,6 +659,25 @@ function extractUpdatedPaymentOpsFields(
   return fields;
 }
 
+function extractUpdatedBrandingFields(
+  dto: UpdateBrandingSettingsDto,
+): readonly string[] {
+  const fields: Array<keyof UpdateBrandingSettingsDto> = [
+    'brandName',
+    'logoUrl',
+    'primary',
+    'primaryFg',
+    'bgPrimary',
+    'bgSecondary',
+    'cardGradient',
+    'cardPattern',
+    'bgEffect',
+    'borderRadius',
+    'fontFamily',
+  ];
+  return fields.filter((field) => hasOwnField(dto, field)).map((f) => String(f));
+}
+
 function buildPaymentOpsAlertTestMessage(input: {
   readonly settings: PaymentOpsAlertSettingsInterface;
   readonly note: string | null;
@@ -381,4 +695,46 @@ function buildPaymentOpsAlertTestMessage(input: {
     note && note.length > 0 ? `note:${note.replace(/\s+/g, ' ').slice(0, 200)}` : null,
   ].filter((line): line is string => line !== null);
   return lines.join('\n');
+}
+
+
+// ── Helpers exposed for the notifications routes ────────────────────────────
+
+export interface TelegramDeliveryConfig {
+  readonly enabled: boolean;
+  readonly chatId: string | null;
+  readonly topicId: number | null;
+  readonly topics: Record<string, number | null>;
+}
+
+function readJsonObject(value: unknown): Record<string, unknown> {
+  if (value === null || value === undefined) return {};
+  if (typeof value !== 'object') return {};
+  if (Array.isArray(value)) return {};
+  return value as Record<string, unknown>;
+}
+
+function mergeJsonObject(
+  existing: unknown,
+  patch: Record<string, unknown>,
+): Record<string, unknown> {
+  const base = readJsonObject(existing);
+  return { ...base, ...patch };
+}
+
+function readTelegramDeliveryConfig(systemNotifications: unknown): TelegramDeliveryConfig {
+  const obj = readJsonObject(systemNotifications);
+  const tg = readJsonObject(obj.telegram);
+  const topics = readJsonObject(tg.topics);
+  const normalisedTopics: Record<string, number | null> = {};
+  for (const [key, value] of Object.entries(topics)) {
+    normalisedTopics[key.toUpperCase()] =
+      typeof value === 'number' ? value : value === null ? null : null;
+  }
+  return {
+    enabled: tg.enabled === true,
+    chatId: typeof tg.chatId === 'string' && tg.chatId.length > 0 ? tg.chatId : null,
+    topicId: typeof tg.topicId === 'number' ? tg.topicId : null,
+    topics: normalisedTopics,
+  };
 }

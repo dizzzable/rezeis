@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Patch, Post, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Req, UseGuards } from '@nestjs/common';
 import { Request } from 'express';
 
 import { CurrentAdmin } from '../../auth/decorators/current-admin.decorator';
@@ -34,7 +34,7 @@ export class AdminPlansController {
 
   @Get(':planId')
   public async getPlan(
-    @Param('planId', new ParseUUIDPipe({ version: '4' })) planId: string,
+    @Param('planId') planId: string,
   ): Promise<AdminPlanInterface> {
     return this.plansAdminService.getPlan(planId);
   }
@@ -53,7 +53,7 @@ export class AdminPlansController {
 
   @Patch(':planId')
   public async updatePlan(
-    @Param('planId', new ParseUUIDPipe({ version: '4' })) planId: string,
+    @Param('planId') planId: string,
     @Body() input: UpdatePlanDto,
     @CurrentAdmin() currentAdmin: CurrentAdminInterface,
     @Req() request: Request,
@@ -66,7 +66,7 @@ export class AdminPlansController {
 
   @Patch(':planId/move')
   public async movePlan(
-    @Param('planId', new ParseUUIDPipe({ version: '4' })) planId: string,
+    @Param('planId') planId: string,
     @Body() input: MovePlanDto,
     @CurrentAdmin() currentAdmin: CurrentAdminInterface,
     @Req() request: Request,
@@ -77,9 +77,33 @@ export class AdminPlansController {
     });
   }
 
+  @Post(':planId/archive')
+  public async archivePlan(
+    @Param('planId') planId: string,
+    @CurrentAdmin() currentAdmin: CurrentAdminInterface,
+    @Req() request: Request,
+  ): Promise<AdminPlanInterface> {
+    return this.plansAdminService.updatePlan(planId, { isArchived: true } as UpdatePlanDto, {
+      currentAdmin,
+      requestMetadata: extractRequestMetadata(request),
+    });
+  }
+
+  @Post(':planId/unarchive')
+  public async unarchivePlan(
+    @Param('planId') planId: string,
+    @CurrentAdmin() currentAdmin: CurrentAdminInterface,
+    @Req() request: Request,
+  ): Promise<AdminPlanInterface> {
+    return this.plansAdminService.updatePlan(planId, { isArchived: false } as UpdatePlanDto, {
+      currentAdmin,
+      requestMetadata: extractRequestMetadata(request),
+    });
+  }
+
   @Delete(':planId')
   public async deletePlan(
-    @Param('planId', new ParseUUIDPipe({ version: '4' })) planId: string,
+    @Param('planId') planId: string,
     @CurrentAdmin() currentAdmin: CurrentAdminInterface,
     @Req() request: Request,
   ): Promise<{ readonly deleted: true }> {

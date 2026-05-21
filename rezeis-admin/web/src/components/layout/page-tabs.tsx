@@ -26,12 +26,12 @@ interface PageTabsProps {
 }
 
 export function PageTabs({ items }: PageTabsProps): JSX.Element {
-  const location = useLocation()
+  const { pathname: locationPathname, search: locationSearch } = useLocation()
   const navigate = useNavigate()
-  const currentLocation: string = `${location.pathname}${location.search}`
+  const currentLocation: string = `${locationPathname}${locationSearch}`
   const activeItem: PageTabItem = useMemo((): PageTabItem => {
-    return items.find((item: PageTabItem) => isItemActive(currentLocation, location.pathname, item)) ?? items[0]
-  }, [currentLocation, items, location.pathname])
+    return items.find((item: PageTabItem) => isItemActive(currentLocation, locationPathname, item)) ?? items[0]
+  }, [currentLocation, items, locationPathname])
 
   function handleValueChange(nextValue: string): void {
     if (!nextValue || nextValue === activeItem?.to) {
@@ -43,7 +43,7 @@ export function PageTabs({ items }: PageTabsProps): JSX.Element {
 
   return (
     <Tabs value={activeItem?.to} onValueChange={handleValueChange} className="overflow-x-auto rounded-[24px] border border-border/80 bg-card/90 p-2 shadow-sm backdrop-blur">
-      <TabsList variant="line" className="flex min-w-max gap-2 bg-transparent p-0">
+      <TabsList className="flex min-w-max gap-2 bg-transparent p-0">
         {items.map((item: PageTabItem) => {
           return (
             <TabsTrigger

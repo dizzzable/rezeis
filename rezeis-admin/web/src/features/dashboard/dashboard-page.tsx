@@ -1,157 +1,353 @@
-import type { JSX } from 'react'
-import { Activity, BadgeDollarSign, CreditCard, Users } from 'lucide-react'
+import { useMemo, useState, type JSX } from 'react'
 import { useTranslation } from 'react-i18next'
-import { useSearchParams } from 'react-router-dom'
-import { PageTabs } from '@/components/layout/page-tabs'
+import { useQuery } from '@tanstack/react-query'
+import { AlertTriangle, Loader2 } from 'lucide-react'
+
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { Button } from '@/components/ui/button'
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from '@/components/ui/card'
+import { Skeleton } from '@/components/ui/skeleton'
+import { CountUp } from '@/components/CountUp'
+import {
+  dashboardApi,
+  type DashboardOperationsTimelineSource,
+  type DashboardSummaryInterface,
+  type DashboardTimelineEntryInterface,
+  type DashboardTimelineStatus,
+} from './dashboard-api'
 
-interface DashboardPanelContent {
-  readonly badge: string
-  readonly title: string
-  readonly description: string
-  readonly highlightOneTitle: string
-  readonly highlightOneDescription: string
-  readonly highlightTwoTitle: string
-  readonly highlightTwoDescription: string
-  readonly tableDescription: string
-}
+const OPERATIONS_FILTER_OPTIONS: ReadonlyArray<DashboardOperationsTimelineSource> = [
+  'BROADCAST',
+  'IMPORT',
+  'AUDIT',
+  'OPS',
+]
 
-const DASHBOARD_TAB_KEYS = ['userStatistics', 'transactionStatistics', 'subscriptionStatistics', 'planStatistics'] as const
+const FINANCE_FILTER_OPTIONS: ReadonlyArray<DashboardTimelineStatus> = [
+  'INFO',
+  'WARNING',
+  'SUCCESS',
+  'PENDING',
+  'ERROR',
+]
 
-type DashboardTabKey = (typeof DASHBOARD_TAB_KEYS)[number]
+const SEVERITY_BADGE_VARIANT = {
+  INFO: 'secondary',
+  WARNING: 'default',
+  CRITICAL: 'destructive',
+} as const
 
-function isDashboardTabKey(value: string): value is DashboardTabKey {
-  return DASHBOARD_TAB_KEYS.includes(value as DashboardTabKey)
-}
-
-export function DashboardPage(): JSX.Element {
+export default function DashboardPage(): JSX.Element {
   const { t } = useTranslation()
-  const [searchParams, setSearchParams] = useSearchParams()
-  const tabValue: string = searchParams.get('tab') ?? 'userStatistics'
-  const activeTab: DashboardTabKey = isDashboardTabKey(tabValue) ? tabValue : 'userStatistics'
-  const activePanel: DashboardPanelContent = t(`dashboard.tabPanels.${activeTab}`, { returnObjects: true }) as DashboardPanelContent
-  const tabItems = DASHBOARD_TAB_KEYS.map((tabKey: DashboardTabKey) => ({
-    to: `/dashboard?tab=${tabKey}`,
-    label: t(`pageTabs.dashboard.${tabKey}`),
-  }))
-  const statCards = [
-    { icon: Users, key: 'totalUsers' },
-    { icon: Activity, key: 'activeSessions' },
-    { icon: BadgeDollarSign, key: 'grossVolume' },
-    { icon: CreditCard, key: 'conversion' },
-  ] as const
-  const operationCards = ['access', 'moderation', 'growth'] as const
-  function handleTabChange(nextTab: DashboardTabKey): void {
-    setSearchParams({ tab: nextTab })
+  const summaryQuery = useQuery({
+    queryKey: ['admin', 'dashboard', 'summary'],
+    queryFn: () => dashboardApi.getSummary(),
+  })
+
+  if (summaryQuery.isLoading) {
+    return <DashboardLoadingState />
   }
 
-  function handleDashboardTabValueChange(nextValue: string): void {
-    if (!isDashboardTabKey(nextValue)) {
-      return
+  if (summaryQuery.isError || !summaryQuery.data) {
+    return (
+      <Alert variant="destructive" className="max-w-3xl">
+        <AlertTriangle className="h-4 w-4" />
+        <AlertTitle>{t('dashboardPage.errorTitle')}</AlertTitle>
+        <AlertDescription>{t('dashboardPage.errorDescription')}</AlertDescription>
+      </Alert>
+    )
+  }
+
+  return <DashboardContent summary={summaryQuery.data} />
+}
+
+function DashboardContent({ summary }: { readonly summary: DashboardSummaryInterface }): JSX.Element {
+  return (
+    <div className="space-y-8">
+      <DashboardHeader summary={summary} />
+      <DashboardKpiGrid summary={summary} />
+      <DashboardAttentionSection summary={summary} />
+      <DashboardTimelinesSection summary={summary} />
+    </div>
+  )
+}
+
+function DashboardHeader({ summary }: { readonly summary: DashboardSummaryInterface }): JSX.Element {
+  const { t } = useTranslation()
+  return (
+    <div className="flex flex-col gap-1">
+      <h1 className="text-2xl font-bold tracking-tight">{t('dashboardPage.title')}</h1>
+      <p className="text-sm text-muted-foreground">
+        {t('dashboardPage.snapshotAt', { time: new Date(summary.checkedAt).toLocaleString() })}
+      </p>
+    </div>
+  )
+}
+
+function DashboardKpiGrid({ summary }: { readonly summary: DashboardSummaryInterface }): JSX.Element {
+  const { t } = useTranslation()
+  return (
+    <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+      <KpiCard
+        title={t('dashboardPage.kpis.totalUsers')}
+        value={summary.users.total}
+        description={t('dashboardPage.kpis.totalUsersDescription', { count: summary.users.recentRegistered7d })}
+      />
+      <KpiCard
+        title={t('dashboardPage.kpis.activeSubscriptions')}
+        value={summary.subscriptions.active}
+        description={t('dashboardPage.kpis.activeSubscriptionsDescription', { count: summary.subscriptions.limited })}
+      />
+      <KpiCard
+        title={t('dashboardPage.kpis.grossVolume')}
+        value={summary.transactions.grossVolume}
+        description={t('dashboardPage.kpis.grossVolumeDescription', { count: summary.transactions.completed })}
+      />
+      <KpiCard
+        title={t('dashboardPage.kpis.broadcastDrafts')}
+        value={summary.operations.broadcastDrafts}
+        description={t('dashboardPage.kpis.broadcastDraftsDescription')}
+      />
+      <KpiCard
+        title={t('dashboardPage.kpis.expiring7d')}
+        value={summary.subscriptions.expiring7d}
+      />
+      <KpiCard
+        title={t('dashboardPage.kpis.pendingPayments')}
+        value={summary.transactions.pending}
+      />
+      <KpiCard title={t('dashboardPage.kpis.failedPayments')} value={summary.transactions.failed} />
+      <KpiCard
+        title={t('dashboardPage.kpis.financeCorrections')}
+        value={`${summary.financeOps.correctionRequests} / ${summary.financeOps.disputeRecords}`}
+        description={t('dashboardPage.kpis.financeCorrectionsDescription', {
+          disputes: summary.financeOps.disputeRecords,
+          exceptions: summary.financeOps.reconciliationExceptions,
+        })}
+      />
+    </div>
+  )
+}
+
+function KpiCard({
+  title,
+  value,
+  description,
+}: {
+  readonly title: string
+  readonly value: number | string
+  readonly description?: string
+}): JSX.Element {
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm font-medium">{title}</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="text-2xl font-bold">
+          {typeof value === 'number' ? <CountUp value={value} /> : value}
+        </div>
+        {description !== undefined ? (
+          <p className="text-xs text-muted-foreground mt-1">{description}</p>
+        ) : null}
+      </CardContent>
+    </Card>
+  )
+}
+
+function DashboardAttentionSection({
+  summary,
+}: {
+  readonly summary: DashboardSummaryInterface
+}): JSX.Element {
+  const { t } = useTranslation()
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>{t('dashboardPage.attention.title')}</CardTitle>
+        <CardDescription>{t('dashboardPage.attention.description')}</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {summary.attentionItems.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            {t('dashboardPage.attention.empty')}
+          </p>
+        ) : (
+          summary.attentionItems.map((item) => (
+            <div
+              key={item.safeKey}
+              className="flex flex-col gap-1 rounded-md border p-3"
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-medium">{item.title}</span>
+                <Badge variant={SEVERITY_BADGE_VARIANT[item.severity]}>
+                  {String(t(`dashboardPage.severities.${item.severity}`, item.severity))}
+                </Badge>
+              </div>
+              <p className="text-sm text-muted-foreground">{item.description}</p>
+              <p className="text-xs text-muted-foreground">
+                {new Date(item.occurredAt).toLocaleString()}
+              </p>
+            </div>
+          ))
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+function DashboardTimelinesSection({
+  summary,
+}: {
+  readonly summary: DashboardSummaryInterface
+}): JSX.Element {
+  return (
+    <div className="grid gap-4 lg:grid-cols-2">
+      <OperationsTimeline entries={summary.operationsTimeline} />
+      <FinanceOpsTimeline entries={summary.financeOpsTimeline} />
+    </div>
+  )
+}
+
+function OperationsTimeline({
+  entries,
+}: {
+  readonly entries: readonly DashboardTimelineEntryInterface[]
+}): JSX.Element {
+  const { t } = useTranslation()
+  const [activeSource, setActiveSource] =
+    useState<DashboardOperationsTimelineSource | null>(null)
+
+  const visibleEntries = useMemo(() => {
+    if (activeSource === null) {
+      return entries
     }
-
-    handleTabChange(nextValue)
-  }
+    return entries.filter((entry) => entry.source === activeSource)
+  }, [activeSource, entries])
 
   return (
-    <div className="space-y-4">
-      <Card className="overflow-hidden bg-[linear-gradient(140deg,oklch(0.995_0.004_84.6)_0%,oklch(0.938_0.03_206.87/0.68)_50%,oklch(0.56_0.147_248.72/0.08)_100%)]">
-        <CardHeader className="gap-5 lg:flex-row lg:items-end lg:justify-between">
-          <div className="max-w-3xl">
-            <Badge className="w-fit">{t('dashboard.badge')}</Badge>
-            <CardTitle className="mt-4 text-3xl">{t('dashboard.hero.title')}</CardTitle>
-            <CardDescription className="mt-3 max-w-2xl text-base">{t('dashboard.hero.description')}</CardDescription>
+    <Card>
+      <CardHeader className="space-y-3">
+        <CardTitle>{t('dashboardPage.timelines.operationsTitle')}</CardTitle>
+        <div className="flex flex-wrap gap-2">
+          {OPERATIONS_FILTER_OPTIONS.map((source) => (
+            <Button
+              key={source}
+              size="sm"
+              variant={activeSource === source ? 'default' : 'outline'}
+              onClick={() =>
+                setActiveSource((current) => (current === source ? null : source))
+              }
+            >
+              {String(t(`dashboardPage.timelines.operationsSources.${source}`, source))}
+            </Button>
+          ))}
+        </div>
+      </CardHeader>
+      <CardContent>
+        {visibleEntries.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            {t('dashboardPage.timelines.operationsEmpty')}
+          </p>
+        ) : (
+          <TimelineEntries entries={visibleEntries} />
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+function FinanceOpsTimeline({
+  entries,
+}: {
+  readonly entries: readonly DashboardTimelineEntryInterface[]
+}): JSX.Element {
+  const { t } = useTranslation()
+  const [activeStatus, setActiveStatus] = useState<DashboardTimelineStatus | null>(null)
+
+  const visibleEntries = useMemo(() => {
+    if (activeStatus === null) {
+      return entries
+    }
+    return entries.filter((entry) => entry.status === activeStatus)
+  }, [activeStatus, entries])
+
+  return (
+    <Card>
+      <CardHeader className="space-y-3">
+        <CardTitle>{t('dashboardPage.timelines.financeTitle')}</CardTitle>
+        <div className="flex flex-wrap gap-2">
+          {FINANCE_FILTER_OPTIONS.map((status) => (
+            <Button
+              key={status}
+              size="sm"
+              variant={activeStatus === status ? 'default' : 'outline'}
+              onClick={() =>
+                setActiveStatus((current) => (current === status ? null : status))
+              }
+            >
+              {String(t(`dashboardPage.timelines.financeStatuses.${status}`, status))}
+            </Button>
+          ))}
+        </div>
+      </CardHeader>
+      <CardContent>
+        {visibleEntries.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            {t('dashboardPage.timelines.financeEmpty')}
+          </p>
+        ) : (
+          <TimelineEntries entries={visibleEntries} />
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+function TimelineEntries({
+  entries,
+}: {
+  readonly entries: readonly DashboardTimelineEntryInterface[]
+}): JSX.Element {
+  const { t } = useTranslation()
+  return (
+    <ul className="space-y-3">
+      {entries.map((entry) => (
+        <li key={entry.id} className="rounded-md border p-3">
+          <div className="flex items-center justify-between">
+            <span className="text-sm font-medium">{entry.title}</span>
+            <Badge variant="outline">{String(t(`dashboardPage.timelines.financeStatuses.${entry.status}`, entry.status))}</Badge>
           </div>
-          <div className="grid gap-3 sm:grid-cols-2 lg:min-w-[360px]">
-            <div className="rounded-3xl border border-border/70 bg-background/70 p-4">
-              <p className="text-sm text-muted-foreground">{t('dashboard.hero.primaryMetricLabel')}</p>
-              <p className="mt-2 text-2xl font-semibold">{t('dashboard.hero.primaryMetricValue')}</p>
-            </div>
-            <div className="rounded-3xl border border-border/70 bg-background/70 p-4">
-              <p className="text-sm text-muted-foreground">{t('dashboard.hero.secondaryMetricLabel')}</p>
-              <p className="mt-2 text-2xl font-semibold">{t('dashboard.hero.secondaryMetricValue')}</p>
-            </div>
-          </div>
-        </CardHeader>
-      </Card>
-      <PageTabs items={tabItems.map((item) => ({ ...item, to: item.to }))} />
-      <div className="grid gap-4 xl:grid-cols-4">
-        {statCards.map(({ icon: Icon, key }) => (
-          <Card key={key} className="bg-card/95">
-            <CardHeader className="pb-3">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <CardDescription>{t(`dashboard.stats.${key}.label`)}</CardDescription>
-                  <CardTitle className="mt-2 text-2xl">{t(`dashboard.stats.${key}.value`)}</CardTitle>
-                </div>
-                <div className="flex size-11 items-center justify-center rounded-2xl bg-accent text-primary">
-                  <Icon className="size-5" />
-                </div>
-              </div>
-            </CardHeader>
-            <CardContent>
-              <p className="text-sm text-muted-foreground">{t(`dashboard.stats.${key}.change`)}</p>
-            </CardContent>
-          </Card>
+          <p className="text-sm text-muted-foreground">{entry.description}</p>
+          <p className="text-xs text-muted-foreground">
+            {new Date(entry.createdAt).toLocaleString()}
+          </p>
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+function DashboardLoadingState(): JSX.Element {
+  const { t } = useTranslation()
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center gap-2 text-sm text-muted-foreground">
+        <Loader2 className="h-4 w-4 animate-spin" />
+        <span>{t('dashboardPage.loading')}</span>
+      </div>
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+        {Array.from({ length: 8 }).map((_, index) => (
+          <Skeleton key={index} className="h-24 w-full" />
         ))}
       </div>
-      <div className="grid gap-4 xl:grid-cols-3">
-        {operationCards.map((key) => (
-          <Card key={key}>
-            <CardHeader>
-              <CardTitle>{t(`dashboard.operations.${key}.title`)}</CardTitle>
-              <CardDescription>{t(`dashboard.operations.${key}.description`)}</CardDescription>
-            </CardHeader>
-          </Card>
-        ))}
-      </div>
-      <Card>
-        <CardHeader className="gap-4 lg:flex-row lg:items-start lg:justify-between">
-          <div>
-            <Badge className="w-fit" variant="secondary">
-              {activePanel.badge}
-            </Badge>
-            <CardTitle className="mt-4 text-2xl">{activePanel.title}</CardTitle>
-            <CardDescription className="mt-2 max-w-3xl">{activePanel.description}</CardDescription>
-          </div>
-          <div className="hidden rounded-2xl border border-border/70 bg-background/70 px-4 py-3 text-sm text-muted-foreground xl:block">
-            {t('dashboard.description')}
-          </div>
-        </CardHeader>
-        <CardContent className="grid gap-4 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-1">
-            <div className="rounded-3xl border border-border/70 bg-background/70 p-5">
-              <p className="text-base font-semibold">{activePanel.highlightOneTitle}</p>
-              <p className="mt-2 text-sm leading-6 text-muted-foreground">{activePanel.highlightOneDescription}</p>
-            </div>
-            <div className="rounded-3xl border border-border/70 bg-background/70 p-5">
-              <p className="text-base font-semibold">{activePanel.highlightTwoTitle}</p>
-              <p className="mt-2 text-sm leading-6 text-muted-foreground">{activePanel.highlightTwoDescription}</p>
-            </div>
-          </div>
-          <div className="rounded-3xl border border-dashed border-border/80 bg-background/70 p-5">
-            <Tabs value={activeTab} onValueChange={handleDashboardTabValueChange} className="gap-5">
-              <TabsList variant="line" className="flex h-auto flex-wrap justify-start gap-2 bg-transparent p-0">
-                {DASHBOARD_TAB_KEYS.map((tabKey: DashboardTabKey) => (
-                  <TabsTrigger
-                    key={tabKey}
-                    value={tabKey}
-                    className="rounded-full border border-border px-3 py-1.5 text-sm text-muted-foreground after:hidden data-[state=active]:border-transparent data-[state=active]:bg-accent data-[state=active]:text-accent-foreground dark:data-[state=active]:border-transparent dark:data-[state=active]:bg-accent"
-                  >
-                    {t(`pageTabs.dashboard.${tabKey}`)}
-                  </TabsTrigger>
-                ))}
-              </TabsList>
-            </Tabs>
-            <div className="mt-5 rounded-3xl border border-border/70 bg-card px-5 py-10 text-center">
-              <p className="text-base font-semibold">{activePanel.title}</p>
-              <p className="mt-2 text-sm leading-6 text-muted-foreground">{activePanel.tableDescription}</p>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
     </div>
   )
 }

@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, UseGuards } from '@nestjs/common';
 
 import { AdminJwtAuthGuard } from '../../auth/guards/admin-jwt-auth.guard';
 import { MovePaymentGatewayDto } from '../dto/move-payment-gateway.dto';
@@ -20,14 +20,14 @@ export class AdminPaymentGatewaysController {
 
   @Get(':gatewayId')
   public async getGateway(
-    @Param('gatewayId', new ParseUUIDPipe({ version: '4' })) gatewayId: string,
+    @Param('gatewayId') gatewayId: string,
   ): Promise<AdminPaymentGatewayInterface> {
     return this.paymentGatewayRegistryService.getGateway(gatewayId);
   }
 
   @Patch(':gatewayId')
   public async updateGateway(
-    @Param('gatewayId', new ParseUUIDPipe({ version: '4' })) gatewayId: string,
+    @Param('gatewayId') gatewayId: string,
     @Body() input: UpdatePaymentGatewayDto,
   ): Promise<AdminPaymentGatewayInterface> {
     return this.paymentGatewayRegistryService.updateGateway(gatewayId, input);
@@ -35,7 +35,7 @@ export class AdminPaymentGatewaysController {
 
   @Patch(':gatewayId/move')
   public async moveGateway(
-    @Param('gatewayId', new ParseUUIDPipe({ version: '4' })) gatewayId: string,
+    @Param('gatewayId') gatewayId: string,
     @Body() input: MovePaymentGatewayDto,
   ): Promise<AdminPaymentGatewayInterface> {
     return this.paymentGatewayRegistryService.moveGateway(gatewayId, input.direction);

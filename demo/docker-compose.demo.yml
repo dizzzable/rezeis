@@ -1,0 +1,229 @@
+# ═══════════════════════════════════════════════════════════════════════════
+#  rezeis-admin DEMO stack
+#
+#  Self-contained, no real secrets, no real Telegram bot, no Remnawave.
+#  Designed for hands-on click-around exploration of the admin panel.
+#
+#  Browser entry-points
+#    Admin UI       http://localhost:3500
+#    Admin API      http://localhost:3100/api
+#    API Swagger    http://localhost:3100/api/docs
+#    Reiwa BFF      http://localhost:3200/api/v1/health
+#
+#  Bootstrap admin login (created on first hit of the UI)
+#    username: demoadmin
+#    password: demoadmin-pass-2026
+#
+#  Tear down with:
+#    docker compose -p rezeis-demo -f rezeis/demo/docker-compose.demo.yml down -v
+# ═══════════════════════════════════════════════════════════════════════════
+
+services:
+  rezeis-demo-db:
+    image: postgres:17-alpine
+    container_name: rezeis-demo-db
+    environment:
+      POSTGRES_DB: rezeis
+      POSTGRES_USER: rezeis
+      POSTGRES_PASSWORD: rezeis_demo_secret
+      TZ: UTC
+    ports:
+      - "127.0.0.1:35432:5432"
+    volumes:
+      - rezeis-demo-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rezeis -d rezeis"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+    networks:
+      - rezeis-demo
+
+  rezeis-demo-redis:
+    image: valkey/valkey:9-alpine
+    container_name: rezeis-demo-redis
+    command: ["--bind", "0.0.0.0"]
+    volumes:
+      - rezeis-demo-redis:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+    networks:
+      - rezeis-demo
+
+  rezeis-demo-admin:
+    image: rezeis-admin:demo
+    build:
+      context: ../rezeis-admin
+      dockerfile: Dockerfile
+    container_name: rezeis-demo-admin
+    environment:
+      NODE_ENV: production
+      # ── Process role ──
+      # API container — handles HTTP only. The sibling rezeis-demo-worker
+      # container runs `@Cron` jobs and BullMQ processors.
+      RUID_PROCESS_ROLE: api
+      REZEIS_DOMAIN: localhost
+      REZEIS_HOST: 0.0.0.0
+      REZEIS_PORT: 8000
+      REZEIS_LOCALES: ru,en
+      REZEIS_DEFAULT_LOCALE: ru
+      # 256-bit demo master key (NOT for production).
+      REZEIS_CRYPT_KEY: 9ac168da2c0179ac8defc0a39e84bd4d6c7feb518cde13940b13f5ac61544bb9
+      WEBHOOK_ENABLED: "false"
+      DATABASE_HOST: rezeis-demo-db
+      DATABASE_PORT: 5432
+      DATABASE_NAME: rezeis
+      DATABASE_USER: rezeis
+      DATABASE_PASSWORD: rezeis_demo_secret
+      DATABASE_URL: postgresql://rezeis:rezeis_demo_secret@rezeis-demo-db:5432/rezeis
+      REDIS_HOST: rezeis-demo-redis
+      REDIS_PORT: 6379
+      REDIS_NAME: 0
+      REDIS_URL: redis://rezeis-demo-redis:6379
+      REMNAWAVE_HOST: localhost
+      REMNAWAVE_PORT: 3001
+      REMNAWAVE_TOKEN: demo-placeholder
+    ports:
+      - "127.0.0.1:3100:8000"
+      - "127.0.0.1:3500:8000"
+    depends_on:
+      rezeis-demo-db:
+        condition: service_healthy
+      rezeis-demo-redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8000/api/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    networks:
+      - rezeis-demo
+
+  rezeis-demo-worker:
+    image: rezeis-admin:demo
+    container_name: rezeis-demo-worker
+    # The worker entrypoint does NOT call `app.listen()` — it loads the
+    # full AppModule so cron + BullMQ processors run, but never opens an
+    # HTTP port. Coupled with `RUID_PROCESS_ROLE=worker` below, this
+    # guarantees scheduled jobs fire here exactly once.
+    command: ["node", "dist/worker.js"]
+    environment:
+      NODE_ENV: production
+      RUID_PROCESS_ROLE: worker
+      REZEIS_DOMAIN: localhost
+      REZEIS_HOST: 0.0.0.0
+      REZEIS_PORT: 8001
+      REZEIS_LOCALES: ru,en
+      REZEIS_DEFAULT_LOCALE: ru
+      REZEIS_CRYPT_KEY: 9ac168da2c0179ac8defc0a39e84bd4d6c7feb518cde13940b13f5ac61544bb9
+      WEBHOOK_ENABLED: "false"
+      DATABASE_HOST: rezeis-demo-db
+      DATABASE_PORT: 5432
+      DATABASE_NAME: rezeis
+      DATABASE_USER: rezeis
+      DATABASE_PASSWORD: rezeis_demo_secret
+      DATABASE_URL: postgresql://rezeis:rezeis_demo_secret@rezeis-demo-db:5432/rezeis
+      REDIS_HOST: rezeis-demo-redis
+      REDIS_PORT: 6379
+      REDIS_NAME: 0
+      REDIS_URL: redis://rezeis-demo-redis:6379
+      REMNAWAVE_HOST: localhost
+      REMNAWAVE_PORT: 3001
+      REMNAWAVE_TOKEN: demo-placeholder
+    depends_on:
+      rezeis-demo-admin:
+        condition: service_healthy
+    networks:
+      - rezeis-demo
+
+  rezeis-demo-web:
+    image: rezeis-admin-web:demo
+    build:
+      context: ../rezeis-admin/web
+      dockerfile: Dockerfile
+      args:
+        # The browser hits the nginx-fronted admin API — see
+        # `nginx-demo.conf` which proxies `/api/*` to the admin
+        # container over the docker network. We pass an empty value
+        # to fall back to `/api`, which is also the hardcoded default
+        # in `web/src/lib/api.ts`.
+        VITE_ADMIN_API_URL: /api
+    container_name: rezeis-demo-web
+    ports:
+      - "127.0.0.1:3500:80"
+    volumes:
+      # Mount the demo nginx config that proxies /api/* to the admin
+      # container. This avoids re-building the web image whenever we
+      # tweak proxy rules and keeps demo-specific concerns out of the
+      # production Dockerfile.
+      - ./nginx-demo.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      rezeis-demo-admin:
+        condition: service_healthy
+    networks:
+      - rezeis-demo
+
+  reiwa-demo-redis:
+    image: valkey/valkey:9-alpine
+    container_name: reiwa-demo-redis
+    command: ["--bind", "0.0.0.0"]
+    volumes:
+      - reiwa-demo-redis:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+    networks:
+      - rezeis-demo
+
+  reiwa-demo-api:
+    image: reiwa:demo
+    build:
+      context: ../reiwa
+      dockerfile: Dockerfile
+    container_name: reiwa-demo-api
+    environment:
+      NODE_ENV: production
+      PORT: 5000
+      REZEIS_HOST: rezeis-demo-admin
+      REZEIS_PORT: 8000
+      # Token gets injected at runtime by run-demo.ps1 after the admin
+      # is bootstrapped. We start with a placeholder so the schema check
+      # passes; the script restarts this container with the real value.
+      REZEIS_TOKEN: demo-placeholder
+      REDIS_URL: redis://reiwa-demo-redis:6379
+      REIWA_COOKIE_SECRET: demo-cookie-secret-please-change-me
+      REIWA_PUBLIC_WEB_URL: http://localhost:3500
+    ports:
+      - "127.0.0.1:3200:5000"
+    depends_on:
+      reiwa-demo-redis:
+        condition: service_healthy
+      rezeis-demo-admin:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:5000/api/v1/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    networks:
+      - rezeis-demo
+
+networks:
+  rezeis-demo:
+    name: rezeis-demo
+    driver: bridge
+
+volumes:
+  rezeis-demo-db:
+    name: rezeis-demo-db
+  rezeis-demo-redis:
+    name: rezeis-demo-redis
+  reiwa-demo-redis:
+    name: reiwa-demo-redis

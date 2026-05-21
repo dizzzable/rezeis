@@ -47,6 +47,23 @@ describe('PaymentWebhookInboxService', () => {
     assert.equal(result.status, PAYMENT_WEBHOOK_STATUS_ENQUEUED);
     assert.equal(state.events[0]?.status, PAYMENT_WEBHOOK_STATUS_ENQUEUED);
   });
+
+  it('normalizes failed webhook diagnostics before storing lastError', async () => {
+    const { service, state } = createService([
+      createStoredEvent({ providerEventId: 'event-1', attempts: 1, status: PAYMENT_WEBHOOK_STATUS_RECEIVED }),
+    ]);
+    const rawDiagnostic = 'provider failed at https://gateway.example/payments/payment-provider-raw-id with token=provider-secret-fragment and profile uuid 0194f4b6-7cc7-7ecb-9f62-123456789abc';
+
+    const result = await service.markFailed('event-row-1', rawDiagnostic);
+    const serialized = JSON.stringify(result);
+
+    assert.equal(result.lastError, 'FAILED');
+    assert.equal(state.events[0]?.lastError, 'FAILED');
+    assert.doesNotMatch(serialized, /gateway\.example/);
+    assert.doesNotMatch(serialized, /provider-secret-fragment/);
+    assert.doesNotMatch(serialized, /0194f4b6-7cc7-7ecb-9f62-123456789abc/);
+    assert.doesNotMatch(serialized, /payment-provider-raw-id/);
+  });
 });
 
 function createService(initialEvents: readonly StoredEvent[] = []): {

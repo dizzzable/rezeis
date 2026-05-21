@@ -2,6 +2,139 @@
 
 ## Established Decisions
 
+### 2026-04-23: `rezeis/ruid` is the canonical Pyright and basedpyright analysis root
+
+- `rezeis/ruid` is now the authoritative analysis root for Pyright and basedpyright because it is already a self-contained Python project with its own `pyproject.toml`.
+- Workspace-root diagnostics are only treated as authoritative when the checker is invoked with `--project rezeis/ruid`; workspace-root runs without an explicit project selector are not accepted as evidence for this package.
+Files:
+- `rezeis/ruid/pyproject.toml`
+- `docs/progress/decision-log.md`
+
+### 2026-04-22: AltShop subscription devices / HWID Phase 1 is the next bounded donor slice
+
+- Recovery work is treated as closed for planning purposes, so the next donor slice returns to subscription behavior instead of more recovery expansion.
+- The current repo already exposes a narrow read seam: `rezeis-admin` remains the source of truth through `InternalUserService.getSubscription()` and `GET /api/internal/user/subscription`, which currently return only the passive snapshot fields `id`, `status`, `isTrial`, `plan`, `trafficLimit`, `deviceLimit`, `configUrl`, `startedAt`, `expiresAt`, `createdAt`, and `updatedAt`.
+- `ruid` mirrors that seam at `GET /api/v1/subscription` through `SubscriptionService` and authenticated cookie-session lookup, while `ruid/web` treats subscription as read-only and consumes it through `useSubscriptionQuery()` with shared query key `['subscription']`.
+- Phase 1 scope is intentionally strict: current subscription device list, revoke or remove of a recorded device, device count and device limit visibility, and blocked or max-devices messaging.
+- Explicit exclusions stay in force: no assignment changes, no regenerated subscription or config links, no broad subscription lifecycle rewrite, no quote or payment coupling, and no speculative Remnawave or browser-side contract usage.
+- `@remnawave/backend-contract` stays a typed schema and route-metadata dependency inside `rezeis-admin`; server-side HTTP orchestration still runs through the admin facade and must not be described as a contract-package HTTP client.
+Files:
+- `docs/architecture/altshop-business-logic-transfer.md`
+- `docs/architecture/service-boundaries.md`
+- `docs/architecture/altshop-subscription-devices-phase-1.md`
+- `docs/progress/current-status.md`
+- `docs/progress/next-milestone.md`
+
+### 2026-04-22: reset-by-link and reset-by-telegram-code completion paths are aligned
+
+- `resetWebAccountPasswordByLink` now distinguishes consumed vs never-issued/expired tokens via a consumed-state fallback check using a new `getLatestPasswordResetTokenChallenge` helper, which mirrors the pattern already present in `resetWebAccountPasswordByTelegramCode`.
+- This provides aligned developer diagnostics and consistent error semantics: consumed tokens now return `PASSWORD_RESET_LINK_ALREADY_USED_MESSAGE` while never-issued or expired tokens still return `INVALID_OR_EXPIRED_PASSWORD_RESET_LINK_MESSAGE`.
+- Anti-enumeration behavior stays unchanged: users receive stable error responses in both cases, just with a slightly more precise message for the consumed state.
+Files:
+- `rezeis-admin/src/modules/internal-user/services/internal-user.service.ts`
+- `rezeis-admin/test/internal-user-password-recovery.service.spec.ts`
+- `docs/progress/current-status.md`
+- `docs/progress/next-milestone.md`
+
+### 2026-04-22: Telegram-assisted password recovery phase 3 is shipped as admin-owned code completion
+
+- `rezeis-admin` now also owns `POST /api/internal/user/web-account/password-reset-by-telegram-code`, keeping password mutation and Telegram code validation inside the same admin-owned password-reset truth already used by phase 1 and phase 2.
+- Telegram-issued password-reset challenges now carry `codeHash` and `tokenHash`, so Telegram delivery and Telegram code completion stay on one admin-owned challenge model instead of creating a second recovery state.
+- `ruid` mirrors that completion at `POST /api/v1/auth/web-account/password-reset-by-telegram-code`, and `ruid/web` now ships `/reset-password-telegram` as the minimal completion page linked from `/forgot-password` for users who already received a Telegram code.
+- The full Telegram recovery trilogy stays intentionally bounded: all Telegram phases still reuse the same admin-owned password-reset truth, still preserve anti-enumeration behavior, and still remain limited to already linked users whose bot chat already exists because they already started the bot.
+Files:
+- `rezeis-admin/src/modules/internal-user/`
+- `ruid/app/api/endpoints/auth.py`
+- `ruid/app/services/internal_admin_client.py`
+- `ruid/web/src/features/auth/`
+- `docs/progress/current-status.md`
+- `docs/progress/next-milestone.md`
+- `docs/architecture/service-boundaries.md`
+- `ruid/SPEC.md`
+
+### 2026-04-21: Telegram-assisted password recovery phase 2 is shipped as the narrow continuation of phase 1
+
+- `rezeis-admin` now also owns `POST /api/internal/user/web-account/password-recovery/telegram`, which reuses the same admin-owned password-reset truth as phase 1 instead of creating a second recovery state.
+- Telegram delivery stays intentionally narrow: the continuation only works for linked users whose bot chat already exists because they already started the bot, and anti-enumeration behavior stays unchanged.
+- `ruid` mirrors that continuation at `POST /api/v1/auth/web-account/password-recovery/telegram`, and `ruid/web` exposes it only as a secondary `/forgot-password` action with explicit copy about the existing bot-chat precondition.
+Files:
+- `rezeis-admin/src/modules/internal-user/`
+- `ruid/app/api/endpoints/auth.py`
+- `ruid/app/services/internal_admin_client.py`
+- `ruid/web/src/features/auth/`
+- `docs/progress/current-status.md`
+- `docs/progress/next-milestone.md`
+- `docs/architecture/service-boundaries.md`
+- `ruid/SPEC.md`
+
+### 2026-04-21: standalone password recovery phase 1 is shipped as the base for the later Telegram continuation
+
+- `rezeis-admin` now owns `POST /api/internal/user/web-account/password-recovery` and `POST /api/internal/user/web-account/password-reset-by-link`, including anti-enumeration-safe recovery initiation, `AuthChallenge` token validation, password update, and reset-link email delivery.
+- `ruid` mirrors that flow at `POST /api/v1/auth/web-account/password-recovery` and `POST /api/v1/auth/web-account/password-reset-by-link`, and `ruid/web` now ships `/forgot-password` plus `/reset-password` linked from `/sign-in`.
+- This supersedes the prior "standalone password recovery is next" framing and became the base the later same-day Telegram continuation reused.
+Files:
+- `rezeis-admin/src/modules/internal-user/`
+- `ruid/app/api/endpoints/auth.py`
+- `ruid/app/services/internal_admin_client.py`
+- `ruid/web/src/features/auth/`
+- `docs/progress/current-status.md`
+- `docs/progress/next-milestone.md`
+
+### 2026-04-21: activity slice is shipped; next auth milestone is standalone password recovery
+
+- The activity vertical is now treated as shipped across `rezeis-admin`, `ruid`, and `ruid/web`, including notification acknowledgement and payment-driven notification event writes.
+- This supersedes prior transitional status framing and moves the next user-auth milestone to standalone password recovery (outside reopening via Telegram launch context).
+- Public activity notification acknowledgements intentionally accept only narrow read sources (`MANUAL` and `BULK`) at the `ruid` edge.
+Files:
+- `rezeis-admin/src/modules/user-activity/`
+- `ruid/app/api/endpoints/user_activity.py`
+- `ruid/app/schemas/user_activity.py`
+- `docs/progress/current-status.md`
+- `docs/progress/next-milestone.md`
+
+### 2026-04-20: promocode business truth stays admin-owned and `ruid` remains a thin promo edge
+
+- `rezeis-admin` owns promo CRUD, code normalization, activation validation, activation history, reward execution decisions, audit trail, structured metrics events, and write permission gates.
+- `ruid` mirrors only the user-authenticated promo activation / history / branching-support contract and must not become the source of truth for promo state.
+- Promo activation supports branching outcomes (`NONE`, `SELECT_SUBSCRIPTION`, `CREATE_NEW`) and preserves admin-owned error-code semantics through the public edge.
+Files:
+- `rezeis-admin/src/modules/promocodes/`
+- `rezeis-admin/web/src/features/promocodes/`
+- `ruid/app/api/endpoints/promocode.py`
+- `ruid/app/services/promocode_service.py`
+- `ruid/app/schemas/promocode.py`
+- `ruid/web/src/features/promo/`
+- `docs/architecture/service-boundaries.md`
+
+### 2026-04-20: referral points and partner balance remain separate ledgers
+
+- Referral rewards and referral exchange are user-growth incentives and must not be treated as cash-like partner balance.
+- Partner balance remains a ledger-like money state with its own accrual, withdrawal, and settlement rules.
+- Any future referral gift-promocode flow must consume referral-domain inputs explicitly and must not reuse partner-balance semantics or storage.
+Files:
+- `docs/architecture/altshop-business-logic-transfer.md`
+- `docs/progress/current-status.md`
+
+### 2026-04-20: promo activation remains separate from purchase quote until business explicitly merges them
+
+- Current Rezeis transfer keeps promo activation as a dedicated flow (`/promocode`) instead of injecting promo input into quote/payment creation.
+- Any future `G2` work must be treated as an explicit business-scope expansion, not as an automatic follow-on from the shipped promo slice.
+Files:
+- `docs/architecture/altshop-business-logic-transfer.md`
+- `docs/progress/current-status.md`
+
+### 2026-04-20: referral foundation first slice is now admin-owned, but exchange stays deferred
+
+- `rezeis-admin` now ships a first referral foundation slice for summary reads and invite create/revoke operations.
+- This does not yet include exchange settlement or gift-promocode issuance.
+- Future referral exchange work must build on this bounded context rather than bypassing it.
+Files:
+- `rezeis-admin/src/modules/referrals/`
+- `rezeis-admin/test/referrals.controllers.spec.ts`
+- `rezeis-admin/test/referral-services.spec.ts`
+- `docs/progress/current-status.md`
+- `docs/progress/promocodes-blockers.md`
+
 ### 2026-04-19: Payment Ops Center owns webhook diagnostics, safe replay, reconciliation health, and Telegram alert sink
 
 - `rezeis-admin` now exposes admin-only payment ops endpoints for webhook event listing/detail, audited raw payload reveal, manual safe replay, and reconciliation health.

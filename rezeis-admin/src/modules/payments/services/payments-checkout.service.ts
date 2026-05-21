@@ -5,7 +5,6 @@ import {
   PurchaseChannel,
   PurchaseType,
   Transaction,
-  TransactionStatus,
 } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
@@ -14,7 +13,7 @@ import {
   InternalPaymentCheckoutInterface,
   InternalPaymentStatusInterface,
 } from '../interfaces/internal-payment-checkout.interface';
-import { isGatewayConfigured, readGatewaySettings } from '../utils/payment-gateway-settings.util';
+import { isGatewayConfigured } from '../utils/payment-gateway-settings.util';
 import { PaymentProviderExecutionService } from './payment-provider-execution.service';
 import { PaymentsTransactionsService } from './payments-transactions.service';
 
@@ -74,6 +73,8 @@ export class PaymentsCheckoutService {
         purchaseType: input.purchaseType,
         planSnapshot,
       }),
+      successUrl: input.successUrl ?? null,
+      failUrl: input.failUrl ?? null,
     });
 
     const updatedTransaction = await this.prismaService.transaction.update({

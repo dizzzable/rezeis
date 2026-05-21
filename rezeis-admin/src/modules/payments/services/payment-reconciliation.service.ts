@@ -102,7 +102,7 @@ function mapProviderStatusToTransactionStatus(providerStatus: string | null): Tr
     normalizedStatus === 'REFUNDED_PAYMENT' ||
     normalizedStatus === 'REFUNDED'
   ) {
-    return TransactionStatus.REFUNDED;
+    return TransactionStatus.CANCELED;
   }
   if (
     normalizedStatus === 'CANCELED' ||
@@ -121,7 +121,6 @@ function isTerminalTransaction(transaction: Transaction): boolean {
   return (
     transaction.status === TransactionStatus.COMPLETED ||
     transaction.status === TransactionStatus.CANCELED ||
-    transaction.status === TransactionStatus.REFUNDED ||
     transaction.status === TransactionStatus.FAILED
   );
 }

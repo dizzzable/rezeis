@@ -13,12 +13,14 @@ import { AcceptInternalUserRulesDto } from '../src/modules/internal-user/dto/acc
 import { CompleteWebAccountEmailVerificationDto } from '../src/modules/internal-user/dto/complete-web-account-email-verification.dto';
 import { IssueWebAccountEmailVerificationChallengeDto } from '../src/modules/internal-user/dto/issue-web-account-email-verification-challenge.dto';
 import { InternalUserSessionQueryDto } from '../src/modules/internal-user/dto/internal-user-session-query.dto';
+import { RevokeInternalUserSubscriptionDeviceDto } from '../src/modules/internal-user/dto/revoke-internal-user-subscription-device.dto';
 import { SetWebAccountPasswordDto } from '../src/modules/internal-user/dto/set-web-account-password.dto';
 import { SnoozeWebAccountLinkPromptDto } from '../src/modules/internal-user/dto/snooze-web-account-link-prompt.dto';
 import { InternalUserController } from '../src/modules/internal-user/controllers/internal-user.controller';
 import { InternalWebAccountEmailVerificationChallengeInterface } from '../src/modules/internal-user/interfaces/internal-web-account-email-verification-challenge.interface';
 import { InternalUserPlanInterface } from '../src/modules/internal-user/interfaces/internal-user-plan.interface';
 import { InternalUserSessionInterface } from '../src/modules/internal-user/interfaces/internal-user-session.interface';
+import { InternalUserSubscriptionDevicesInterface } from '../src/modules/internal-user/interfaces/internal-user-subscription-devices.interface';
 import { InternalUserSubscriptionInterface } from '../src/modules/internal-user/interfaces/internal-user-subscription.interface';
 import { InternalUserService } from '../src/modules/internal-user/services/internal-user.service';
 
@@ -135,6 +137,36 @@ describe('InternalUserController', () => {
       METHOD_METADATA,
       InternalUserController.prototype.getSubscription,
     ) as RequestMethod | undefined;
+    const actualSubscriptionDevicesPath = Reflect.getMetadata(
+      PATH_METADATA,
+      InternalUserController.prototype.getSubscriptionDevices,
+    ) as string | undefined;
+    const actualSubscriptionDevicesMethod = Reflect.getMetadata(
+      METHOD_METADATA,
+      InternalUserController.prototype.getSubscriptionDevices,
+    ) as RequestMethod | undefined;
+    const actualRevokeSubscriptionDevicePath = Reflect.getMetadata(
+      PATH_METADATA,
+      InternalUserController.prototype.revokeSubscriptionDevice,
+    ) as string | undefined;
+    const actualRevokeSubscriptionDeviceMethod = Reflect.getMetadata(
+      METHOD_METADATA,
+      InternalUserController.prototype.revokeSubscriptionDevice,
+    ) as RequestMethod | undefined;
+    const actualRevokeSubscriptionDeviceParameterTypes = Reflect.getMetadata(
+      'design:paramtypes',
+      InternalUserController.prototype,
+      'revokeSubscriptionDevice',
+    ) as readonly unknown[] | undefined;
+    const actualRevokeSubscriptionDeviceRouteArgs = (Reflect.getMetadata(
+      ROUTE_ARGS_METADATA,
+      InternalUserController,
+      'revokeSubscriptionDevice',
+    ) as Record<string, { readonly index: number; readonly data: unknown; readonly pipes: readonly unknown[] }> | undefined) ?? {};
+    const actualRevokeSubscriptionDeviceQueryArg =
+      actualRevokeSubscriptionDeviceRouteArgs[`${RouteParamtypes.QUERY}:0`];
+    const actualRevokeSubscriptionDeviceParamArg =
+      actualRevokeSubscriptionDeviceRouteArgs[`${RouteParamtypes.PARAM}:1`];
     const actualControllerGuards = Reflect.getMetadata(GUARDS_METADATA, InternalUserController) as
       | readonly unknown[]
       | undefined;
@@ -175,6 +207,24 @@ describe('InternalUserController', () => {
     assert.equal(actualPlansMethod, RequestMethod.GET);
     assert.equal(actualSubscriptionPath, 'subscription');
     assert.equal(actualSubscriptionMethod, RequestMethod.GET);
+    assert.equal(actualSubscriptionDevicesPath, 'subscription/devices');
+    assert.equal(actualSubscriptionDevicesMethod, RequestMethod.GET);
+    assert.equal(actualRevokeSubscriptionDevicePath, 'subscription/devices/:hwid');
+    assert.equal(actualRevokeSubscriptionDeviceMethod, RequestMethod.DELETE);
+    assert.deepStrictEqual(actualRevokeSubscriptionDeviceParameterTypes, [
+      InternalUserSessionQueryDto,
+      RevokeInternalUserSubscriptionDeviceDto,
+    ]);
+    assert.deepStrictEqual(actualRevokeSubscriptionDeviceQueryArg, {
+      index: 0,
+      data: undefined,
+      pipes: [],
+    });
+    assert.deepStrictEqual(actualRevokeSubscriptionDeviceParamArg, {
+      index: 1,
+      data: undefined,
+      pipes: [],
+    });
     assert.deepStrictEqual(actualControllerGuards, [InternalAdminAuthGuard]);
   });
 
@@ -497,5 +547,69 @@ describe('InternalUserController', () => {
     const actualSubscription = await controller.getSubscription(query);
     assert.deepStrictEqual(getSubscriptionCalls, [query]);
     assert.deepStrictEqual(actualSubscription, expectedSubscription);
+  });
+
+  it('delegates current-subscription device lookup and returns payload unchanged', async () => {
+    const getSubscriptionDevicesCalls: InternalUserSessionQueryDto[] = [];
+    const query = { telegramId: '123456789' } as InternalUserSessionQueryDto;
+    const expectedResponse: InternalUserSubscriptionDevicesInterface = {
+      devices: [
+        {
+          hwid: 'hwid-1',
+          deviceName: 'iPhone 15 Pro',
+          platform: 'ios',
+          osVersion: '17.4',
+          appVersion: null,
+          userAgent: 'Rezeis/1.0',
+          ipAddress: '203.0.113.10',
+          lastSeenAt: '2026-04-20T11:30:00.000Z',
+          createdAt: '2026-04-19T10:00:00.000Z',
+        },
+      ],
+      deviceCount: 1,
+      deviceLimit: 2,
+      isLimitReached: false,
+      blockedMessage: null,
+      maxDevicesMessage: null,
+    };
+    const internalUserService = {
+      getSubscriptionDevices: async (
+        input: InternalUserSessionQueryDto,
+      ): Promise<InternalUserSubscriptionDevicesInterface> => {
+        getSubscriptionDevicesCalls.push(input);
+        return expectedResponse;
+      },
+    } as InternalUserService;
+    const controller = new InternalUserController(internalUserService);
+    const actualResponse = await controller.getSubscriptionDevices(query);
+    assert.deepStrictEqual(getSubscriptionDevicesCalls, [query]);
+    assert.deepStrictEqual(actualResponse, expectedResponse);
+  });
+
+  it('delegates one-device revoke by hwid and returns updated payload unchanged', async () => {
+    const revokeCalls: Array<{ readonly query: InternalUserSessionQueryDto; readonly hwid: string }> = [];
+    const query = { telegramId: '123456789' } as InternalUserSessionQueryDto;
+    const params = { hwid: 'hwid-1' } as RevokeInternalUserSubscriptionDeviceDto;
+    const expectedResponse: InternalUserSubscriptionDevicesInterface = {
+      devices: [],
+      deviceCount: 0,
+      deviceLimit: 2,
+      isLimitReached: false,
+      blockedMessage: null,
+      maxDevicesMessage: null,
+    };
+    const internalUserService = {
+      revokeSubscriptionDevice: async (input: {
+        readonly query: InternalUserSessionQueryDto;
+        readonly hwid: string;
+      }): Promise<InternalUserSubscriptionDevicesInterface> => {
+        revokeCalls.push(input);
+        return expectedResponse;
+      },
+    } as InternalUserService;
+    const controller = new InternalUserController(internalUserService);
+    const actualResponse = await controller.revokeSubscriptionDevice(query, params);
+    assert.deepStrictEqual(revokeCalls, [{ query, hwid: 'hwid-1' }]);
+    assert.deepStrictEqual(actualResponse, expectedResponse);
   });
 });

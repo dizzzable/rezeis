@@ -16,7 +16,7 @@ export class AdminPaymentTransactionsController {
   @Get()
   public async listTransactions(
     @Query() query: ListTransactionsQueryDto,
-  ): Promise<readonly AdminPaymentTransactionInterface[]> {
+  ): Promise<{ readonly items: readonly AdminPaymentTransactionInterface[]; readonly total: number }> {
     return this.paymentsTransactionsService.listTransactions(query);
   }
 

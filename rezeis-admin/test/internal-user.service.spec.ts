@@ -772,7 +772,7 @@ describe('InternalUserService', () => {
             },
           };
         },
-        findFirst: async (...args: readonly unknown[]): Promise<unknown> => {
+        findFirst: async (..._args: readonly unknown[]): Promise<unknown> => {
           return null;
         },
         findMany: async (...args: readonly unknown[]): Promise<readonly unknown[]> => {
@@ -871,7 +871,7 @@ describe('InternalUserService', () => {
             },
           };
         },
-        findFirst: async (...args: readonly unknown[]): Promise<unknown> => {
+        findFirst: async (..._args: readonly unknown[]): Promise<unknown> => {
           return null;
         },
         findMany: async (...args: readonly unknown[]): Promise<readonly unknown[]> => {
@@ -2709,7 +2709,7 @@ describe('InternalUserService', () => {
         },
         {
           name: 'EmailDeliveryException',
-          message: 'failed to deliver linked-account verification email',
+          message: 'failed to deliver transactional email',
         },
       );
       assert.equal(authChallengeCreateCallsCount, 1);
@@ -2729,9 +2729,11 @@ describe('InternalUserService', () => {
     }
   });
 
-  it('keeps the delivery failure primary when the compensating revoke also fails', async () => {
+  it('keeps the delivery failure primary and hides revoke diagnostics when the compensating revoke also fails', async () => {
     const deliveryError = new EmailDeliveryException('definitely-not-delivered');
-    const revokeError = new Error('failed to revoke issued challenge');
+    const revokeError = new Error(
+      'failed to revoke issued challenge postgres://admin:secret-password@db.internal/auth token=raw-revoke-token',
+    );
     const originalDateNow = Date.now;
     Date.now = (): number => new Date('2026-04-17T05:03:00.000Z').getTime();
     const transactionClient: MockTransactionClient = {
@@ -2812,12 +2814,16 @@ describe('InternalUserService', () => {
       assert.equal(actualError, deliveryError);
       assert.equal(
         (actualError as Error & { revokeError?: unknown }).revokeError,
-        revokeError,
+        'ISSUED_CHALLENGE_REVOKE_FAILED',
       );
       assert.deepStrictEqual(
         (actualError as Error & { suppressedErrors?: readonly unknown[] }).suppressedErrors,
-        [revokeError],
+        ['ISSUED_CHALLENGE_REVOKE_FAILED'],
       );
+      const serializedError = JSON.stringify(actualError);
+      assert.doesNotMatch(serializedError, /secret-password/);
+      assert.doesNotMatch(serializedError, /postgres:\/\//);
+      assert.doesNotMatch(serializedError, /raw-revoke-token/);
     } finally {
       Date.now = originalDateNow;
     }
@@ -2899,7 +2905,7 @@ describe('InternalUserService', () => {
       },
       {
         name: 'EmailDeliveryException',
-        message: 'failed to deliver linked-account verification email',
+        message: 'failed to deliver transactional email',
       },
     );
     assert.equal(authChallengeCompensationCallsCount, 0);
@@ -3011,7 +3017,7 @@ describe('InternalUserService', () => {
         },
         {
           name: 'InvalidRecipientEmailDeliveryException',
-          message: 'failed to deliver linked-account verification email',
+          message: 'failed to deliver transactional email',
         },
       );
       assert.equal(authChallengeCreateCallsCount, 1);

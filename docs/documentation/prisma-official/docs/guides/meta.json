@@ -1,0 +1,19 @@
+{
+  "title": "Guides",
+  "root": true,
+  "icon": "NotebookTabs",
+  "pages": [
+    "index",
+    "frameworks",
+    "runtimes",
+    "deployment",
+    "authentication",
+    "integrations",
+    "postgres",
+    "database",
+    "switch-to-prisma-orm",
+    "switch-to-prisma-postgres",
+    "upgrade-prisma-orm",
+    "making-guides"
+  ]
+}

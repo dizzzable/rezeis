@@ -1,34 +1,21 @@
 import { z } from 'zod'
 
-const authUserIdSchema = z.string().min(1, 'errors.unexpectedResponsePayload')
-const authDateTimeSchema = z.string().datetime()
+/**
+ * Shape of the authenticated admin profile returned by `/api/admin/auth/me`
+ * and persisted into the auth store. Keep this schema strict — any drift
+ * from the backend contract should surface as a parse error rather than a
+ * silent shape mismatch in the UI.
+ */
+export const authUserSchema = z.object({
+  id: z.string(),
+  login: z.string(),
+  email: z.string().nullable(),
+  name: z.string().nullable(),
+  role: z.enum(['DEV', 'ADMIN', 'USER']),
+  isActive: z.boolean(),
+  createdAt: z.string(),
+  lastLoginAt: z.string().nullable(),
+  lastLoginIp: z.string().nullable(),
+})
 
-export const authUserSchema = z
-  .object({
-    id: authUserIdSchema,
-    login: z.string().trim().min(1, 'errors.unexpectedResponsePayload'),
-    email: z.string().nullable(),
-    name: z.string().nullable(),
-    role: z.string().min(1, 'errors.unexpectedResponsePayload'),
-    isActive: z.boolean(),
-    tokenVersion: z.number().int(),
-    createdAt: authDateTimeSchema,
-    lastLoginAt: authDateTimeSchema.nullable(),
-    lastLoginIp: z.string().nullable(),
-  })
-  .strict()
-
-export const authLoginResponseSchema = z
-  .object({
-    accessToken: z.string().trim().min(1, 'errors.accessTokenMissing'),
-    tokenType: z.literal('Bearer'),
-    expiresIn: z.string().trim().min(1, 'errors.unexpectedResponsePayload'),
-    admin: authUserSchema,
-  })
-  .strict()
-
-export const authMeResponseSchema = z
-  .object({
-    admin: authUserSchema,
-  })
-  .strict()
+export type AuthUser = z.infer<typeof authUserSchema>

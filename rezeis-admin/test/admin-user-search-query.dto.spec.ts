@@ -22,8 +22,8 @@ describe('AdminUserSearchQueryDto', () => {
     const actualErrors = await validate(dto);
     assert.equal(actualErrors.length, 1);
     assert.equal(
-      actualErrors[0]?.constraints?.ExactlyOneUserIdentifier,
-      'Exactly one identifier must be provided: userId, telegramId, email, or login',
+      actualErrors[0]?.constraints?.ExactlyOneAdminUserIdentifier,
+      'Exactly one identifier must be provided: userId, telegramId, email, login, or referralCode',
     );
   });
 
@@ -35,9 +35,18 @@ describe('AdminUserSearchQueryDto', () => {
     const actualErrors = await validate(dto);
     assert.equal(actualErrors.length, 1);
     assert.equal(
-      actualErrors[0]?.constraints?.ExactlyOneUserIdentifier,
-      'Exactly one identifier must be provided: userId, telegramId, email, or login',
+      actualErrors[0]?.constraints?.ExactlyOneAdminUserIdentifier,
+      'Exactly one identifier must be provided: userId, telegramId, email, login, or referralCode',
     );
+  });
+
+  it('accepts trimmed referral code lookups', async () => {
+    const dto = plainToInstance(AdminUserSearchQueryDto, {
+      referralCode: '  ref-code-123  ',
+    });
+    const actualErrors = await validate(dto);
+    assert.deepStrictEqual(actualErrors, []);
+    assert.equal(dto.referralCode, 'ref-code-123');
   });
 
   it('trims whitespace around email lookups', async () => {

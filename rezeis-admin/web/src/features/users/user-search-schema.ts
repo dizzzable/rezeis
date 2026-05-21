@@ -4,6 +4,7 @@ const EMAIL_LOOKUP_PATTERN: RegExp = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const LOGIN_LOOKUP_PATTERN: RegExp = /^[A-Za-z0-9._-]+$/
 const TELEGRAM_ID_PATTERN: RegExp = /^\d+$/
 const UUID_PATTERN: RegExp = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+const REFERRAL_CODE_LOOKUP_PATTERN: RegExp = /^\S+$/
 const LOGIN_MIN_LENGTH: number = 3
 const LOGIN_MAX_LENGTH: number = 64
 
@@ -32,6 +33,10 @@ function isValidLogin(value: string): boolean {
   return normalizedValue.length >= LOGIN_MIN_LENGTH && normalizedValue.length <= LOGIN_MAX_LENGTH && LOGIN_LOOKUP_PATTERN.test(normalizedValue)
 }
 
+function isValidReferralCode(value: string): boolean {
+  return REFERRAL_CODE_LOOKUP_PATTERN.test(trimValue(value))
+}
+
 export function createUserSearchSchema() {
   return z
     .object({
@@ -48,9 +53,12 @@ export function createUserSearchSchema() {
       login: z
         .string()
         .refine((value: string): boolean => isEmptyValue(value) || isValidLogin(value), 'users.searchPage.form.errors.loginInvalid'),
+      referralCode: z
+        .string()
+        .refine((value: string): boolean => isEmptyValue(value) || isValidReferralCode(value), 'users.searchPage.form.errors.referralCodeInvalid'),
     })
     .superRefine((values, ctx): void => {
-      const identifierCount: number = [values.userId, values.telegramId, values.email, values.login].filter((value: string): boolean => !isEmptyValue(value)).length
+      const identifierCount: number = [values.userId, values.telegramId, values.email, values.login, values.referralCode].filter((value: string): boolean => !isEmptyValue(value)).length
       if (identifierCount === 1) {
         return
       }
@@ -72,6 +80,11 @@ export function createUserSearchSchema() {
       ctx.addIssue({
         code: 'custom',
         path: ['login'],
+        message: 'users.searchPage.form.errors.exactlyOneIdentifier',
+      })
+      ctx.addIssue({
+        code: 'custom',
+        path: ['referralCode'],
         message: 'users.searchPage.form.errors.exactlyOneIdentifier',
       })
     })

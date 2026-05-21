@@ -2,7 +2,6 @@ import { Transform } from 'class-transformer';
 import {
   IsOptional,
   IsString,
-  IsUUID,
   Matches,
   MaxLength,
   MinLength,
@@ -19,7 +18,9 @@ const EMAIL_LOOKUP_PATTERN: RegExp = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
  */
 export class InternalUserSessionQueryDto {
   @IsOptional()
-  @IsUUID()
+  @IsString()
+  @MinLength(1)
+  @MaxLength(64)
   public readonly userId?: string;
 
   @IsOptional()

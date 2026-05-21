@@ -1,6 +1,5 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import {
-  PaymentGatewayType,
   Plan,
   ProfileSyncJob,
   Prisma,
@@ -13,39 +12,63 @@ import {
 } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { SystemEventsService, EVENT_TYPES } from '../../../common/services/system-events.service';
 
 @Injectable()
 export class PaymentSubscriptionMutationService {
-  public constructor(private readonly prismaService: PrismaService) {}
+  public constructor(
+    private readonly prismaService: PrismaService,
+    private readonly events: SystemEventsService,
+  ) {}
 
   public async applyCompletedTransaction(
     transaction: Transaction,
   ): Promise<{ readonly subscription: Subscription; readonly syncJob: ProfileSyncJob }> {
     const purchasedPlan = await this.getRequiredPlan(transaction);
     const selectedDurationDays = readSelectedDurationDays(transaction);
+
+    let result: { readonly subscription: Subscription; readonly syncJob: ProfileSyncJob };
+
     switch (transaction.purchaseType) {
       case PurchaseType.NEW:
       case PurchaseType.ADDITIONAL:
-        return this.createSubscriptionFromPayment({
+        result = await this.createSubscriptionFromPayment({
           transaction,
           purchasedPlan,
           selectedDurationDays,
         });
+        break;
       case PurchaseType.RENEW:
-        return this.renewSubscriptionFromPayment({
+        result = await this.renewSubscriptionFromPayment({
           transaction,
           purchasedPlan,
           selectedDurationDays,
         });
+        break;
       case PurchaseType.UPGRADE:
-        return this.upgradeSubscriptionFromPayment({
+        result = await this.upgradeSubscriptionFromPayment({
           transaction,
           purchasedPlan,
           selectedDurationDays,
         });
+        break;
       default:
         throw new NotFoundException('Unsupported purchase type');
     }
+
+    // Emit payment completed event
+    this.events.info(EVENT_TYPES.PAYMENT_COMPLETED, 'PAYMENT', `Payment completed: ${transaction.purchaseType}`, {
+      userId: transaction.userId,
+      paymentId: transaction.paymentId,
+      purchaseType: transaction.purchaseType,
+      planName: purchasedPlan.name,
+      amount: transaction.amount.toString(),
+      currency: transaction.currency,
+      gatewayType: transaction.gatewayType,
+      subscriptionId: result.subscription.id,
+    });
+
+    return result;
   }
 
   private async createSubscriptionFromPayment(input: {
@@ -53,7 +76,7 @@ export class PaymentSubscriptionMutationService {
     readonly purchasedPlan: Plan;
     readonly selectedDurationDays: number;
   }): Promise<{ readonly subscription: Subscription; readonly syncJob: ProfileSyncJob }> {
-    return this.prismaService.$transaction(async (transactionClient) => {
+    const result = await this.prismaService.$transaction(async (transactionClient) => {
       const now = new Date();
       const createdSubscription = await transactionClient.subscription.create({
         data: {
@@ -95,6 +118,8 @@ export class PaymentSubscriptionMutationService {
         syncJob,
       };
     });
+
+    return result;
   }
 
   private async renewSubscriptionFromPayment(input: {

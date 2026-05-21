@@ -4,9 +4,11 @@ import {
   ForbiddenException,
   Inject,
   Injectable,
+  Optional,
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigType } from '@nestjs/config';
+import { ModuleRef } from '@nestjs/core';
 import { JwtService } from '@nestjs/jwt';
 import { Prisma, UserRole } from '@prisma/client';
 
@@ -30,6 +32,8 @@ const adminUserProfileSelect = Prisma.validator<Prisma.AdminUserSelect>()({
   createdAt: true,
   lastLoginAt: true,
   lastLoginIp: true,
+  rbacRoleId: true,
+  mustChangePassword: true,
 });
 
 const adminUserAuthSelect = Prisma.validator<Prisma.AdminUserSelect>()({
@@ -45,6 +49,8 @@ const adminUserAuthSelect = Prisma.validator<Prisma.AdminUserSelect>()({
   createdAt: true,
   lastLoginAt: true,
   lastLoginIp: true,
+  rbacRoleId: true,
+  mustChangePassword: true,
 });
 
 type AdminUserProfileRecord = Prisma.AdminUserGetPayload<{
@@ -66,10 +72,42 @@ interface BootstrapFirstAdminInput {
 interface LoginAdminInput {
   readonly login: string;
   readonly password: string;
+  /**
+   * Optional 6-digit TOTP code (or 10-char recovery code) supplied with
+   * the login form when the admin has 2FA enabled. When 2FA is required
+   * but this field is empty, `loginAdmin()` rejects the request with a
+   * structured `totp_required` payload so the UI can show the prompt.
+   */
+  readonly totpCode?: string | null;
   readonly requestMetadata: RequestMetadataInterface;
 }
 
 interface LoginAdminResult {
+  readonly accessToken: string;
+  readonly tokenType: 'Bearer';
+  readonly expiresIn: string;
+  readonly admin: CurrentAdminInterface;
+}
+
+/**
+ * Soft failure indicating 2FA is required for this account. Thrown as
+ * `UnauthorizedException` by `loginAdmin()`; the controller maps it to a
+ * `401` with `code: 'totp_required'` so the UI shows the TOTP screen.
+ */
+export class TotpRequiredError extends Error {
+  public constructor() {
+    super('totp_required');
+  }
+}
+
+interface ChangeAdminPasswordInput {
+  readonly adminId: string;
+  readonly currentPassword: string;
+  readonly newPassword: string;
+  readonly requestMetadata: RequestMetadataInterface;
+}
+
+interface ChangeAdminPasswordResult {
   readonly accessToken: string;
   readonly tokenType: 'Bearer';
   readonly expiresIn: string;
@@ -91,13 +129,56 @@ interface CreateAuditLogInput {
  */
 @Injectable()
 export class AdminAuthService {
+  /**
+   * Lazily-resolved 2FA + login-guard handles. We deliberately keep them
+   * out of the constructor signature: `TwoFactorModule` imports
+   * `AuthModule` for its guards, so a direct dependency would close the
+   * graph (AuthModule --> TwoFactorService --> AuthModule). The
+   * `ModuleRef.get(..., { strict: false })` lookup is the same trick
+   * used by `SystemEventsService` for the realtime gateway.
+   */
+  private twoFactorServiceCache: import('../../two-factor/services/two-factor.service').TwoFactorService | null = null;
+  private loginGuardServiceCache: import('../../two-factor/services/login-guard.service').LoginGuardService | null = null;
+  private securityServicesResolved = false;
+
   public constructor(
     @Inject(authConfig.KEY)
     private readonly authConfiguration: ConfigType<typeof authConfig>,
     private readonly jwtService: JwtService,
     private readonly passwordHashService: PasswordHashService,
     private readonly prismaService: PrismaService,
+    @Optional()
+    private readonly moduleRef?: ModuleRef,
   ) {}
+
+  private resolveSecurityServices(): {
+    readonly twoFactor: import('../../two-factor/services/two-factor.service').TwoFactorService | null;
+    readonly loginGuard: import('../../two-factor/services/login-guard.service').LoginGuardService | null;
+  } {
+    if (this.securityServicesResolved) {
+      return { twoFactor: this.twoFactorServiceCache, loginGuard: this.loginGuardServiceCache };
+    }
+    this.securityServicesResolved = true;
+    if (!this.moduleRef) {
+      return { twoFactor: null, loginGuard: null };
+    }
+    try {
+      // Dynamic require to avoid bundler picking it up at module load time
+      // and creating a circular import. Phase 5: TwoFactorModule imports
+      // AuthModule for guards, so we cannot import its providers here
+      // statically.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { TwoFactorService } = require('../../two-factor/services/two-factor.service');
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { LoginGuardService } = require('../../two-factor/services/login-guard.service');
+      this.twoFactorServiceCache = this.moduleRef.get(TwoFactorService, { strict: false });
+      this.loginGuardServiceCache = this.moduleRef.get(LoginGuardService, { strict: false });
+    } catch {
+      this.twoFactorServiceCache = null;
+      this.loginGuardServiceCache = null;
+    }
+    return { twoFactor: this.twoFactorServiceCache, loginGuard: this.loginGuardServiceCache };
+  }
 
   /**
    * Creates the first DEV admin account when the table is still empty.
@@ -153,6 +234,28 @@ export class AdminAuthService {
       throw new UnauthorizedException('Invalid login or password');
     }
     const normalizedLogin: string = loginPolicy.normalizeLogin(input.login);
+
+    // Phase 5: rate-limit by (login, ip) before consulting the password
+    // store. Returning 401 with `rate_limited` reason masks whether the
+    // login exists.
+    const security = this.resolveSecurityServices();
+    if (security.loginGuard) {
+      const rateLimited = await security.loginGuard.isRateLimited(
+        input.requestMetadata.remoteAddress ?? '',
+        normalizedLogin,
+      );
+      if (rateLimited) {
+        await this.recordAuditLog({
+          adminUserId: null,
+          action: 'admin.login.failed',
+          login: normalizedLogin,
+          reason: 'rate_limited',
+          requestMetadata: input.requestMetadata,
+        });
+        throw new UnauthorizedException('Too many login attempts. Try again later.');
+      }
+    }
+
     const adminUser: AdminUserAuthRecord | null = await this.prismaService.adminUser.findUnique({
       where: { loginNormalized: normalizedLogin },
       select: adminUserAuthSelect,
@@ -165,6 +268,15 @@ export class AdminAuthService {
         reason: 'admin_not_found',
         requestMetadata: input.requestMetadata,
       });
+      if (security.loginGuard) {
+        await security.loginGuard.recordAttempt({
+          loginNormalized: normalizedLogin,
+          ipAddress: input.requestMetadata.remoteAddress ?? '',
+          success: false,
+          reason: 'admin_not_found',
+          userAgent: input.requestMetadata.userAgent,
+        });
+      }
       throw new UnauthorizedException('Invalid login or password');
     }
     if (!adminUser.isActive) {
@@ -191,8 +303,60 @@ export class AdminAuthService {
         reason: 'invalid_password',
         requestMetadata: input.requestMetadata,
       });
+      if (security.loginGuard) {
+        await security.loginGuard.recordAttempt({
+          loginNormalized: adminUser.loginNormalized,
+          ipAddress: input.requestMetadata.remoteAddress ?? '',
+          success: false,
+          reason: 'invalid_password',
+          userAgent: input.requestMetadata.userAgent,
+        });
+      }
       throw new UnauthorizedException('Invalid login or password');
     }
+
+    // Phase 5: 2FA gate. We re-fetch the totp flag here to keep the
+    // primary auth select small. The check is cheap (single column
+    // already loaded by the verify-secret path).
+    if (security.twoFactor && (await security.twoFactor.isEnabled(adminUser.id))) {
+      const code = (input.totpCode ?? '').trim();
+      if (code.length === 0) {
+        if (security.loginGuard) {
+          await security.loginGuard.recordAttempt({
+            loginNormalized: adminUser.loginNormalized,
+            ipAddress: input.requestMetadata.remoteAddress ?? '',
+            success: false,
+            reason: 'totp_required',
+            userAgent: input.requestMetadata.userAgent,
+          });
+        }
+        // Surface a structured signal: the controller maps this
+        // exception's message to a 401 + `code: 'totp_required'`.
+        throw new UnauthorizedException('totp_required');
+      }
+      const totpOk = await security.twoFactor.verifyForLogin(adminUser.id, code);
+      if (!totpOk) {
+        await this.recordAuditLog({
+          adminUserId: adminUser.id,
+          action: 'admin.login.failed',
+          login: adminUser.loginNormalized,
+          email: adminUser.email,
+          reason: 'totp_invalid',
+          requestMetadata: input.requestMetadata,
+        });
+        if (security.loginGuard) {
+          await security.loginGuard.recordAttempt({
+            loginNormalized: adminUser.loginNormalized,
+            ipAddress: input.requestMetadata.remoteAddress ?? '',
+            success: false,
+            reason: 'totp_invalid',
+            userAgent: input.requestMetadata.userAgent,
+          });
+        }
+        throw new UnauthorizedException('Invalid verification code');
+      }
+    }
+
     const loggedInAdmin: AdminUserProfileRecord = await this.prismaService.$transaction(
       async (transactionClient): Promise<AdminUserProfileRecord> => {
         const updatedAdmin: AdminUserProfileRecord = await transactionClient.adminUser.update({
@@ -215,6 +379,15 @@ export class AdminAuthService {
         return updatedAdmin;
       },
     );
+    if (security.loginGuard) {
+      await security.loginGuard.recordAttempt({
+        loginNormalized: loggedInAdmin.loginNormalized,
+        ipAddress: input.requestMetadata.remoteAddress ?? '',
+        success: true,
+        reason: null,
+        userAgent: input.requestMetadata.userAgent,
+      });
+    }
     const accessToken: string = await this.jwtService.signAsync(
       buildAdminJwtPayload(loggedInAdmin),
     );
@@ -233,6 +406,81 @@ export class AdminAuthService {
     return currentAdmin;
   }
 
+  /**
+   * Rotates the admin password. Bumps `tokenVersion` so any outstanding
+   * JWT (other browser tabs, leaked tokens) is invalidated, then issues
+   * a fresh token tied to the new version.
+   *
+   * Used by both the regular "change password" UI and the force-password
+   * -change screen shown after a temporary password reset.
+   */
+  public async changePassword(input: ChangeAdminPasswordInput): Promise<ChangeAdminPasswordResult> {
+    const adminUser: AdminUserAuthRecord | null = await this.prismaService.adminUser.findUnique({
+      where: { id: input.adminId },
+      select: adminUserAuthSelect,
+    });
+    if (!adminUser) {
+      throw new UnauthorizedException('Admin not found');
+    }
+    if (!adminUser.isActive) {
+      throw new ForbiddenException('Admin user is inactive');
+    }
+    const isCurrentValid: boolean = await this.passwordHashService.verifyPassword({
+      plainTextPassword: input.currentPassword,
+      passwordHash: adminUser.passwordHash,
+    });
+    if (!isCurrentValid) {
+      await this.recordAuditLog({
+        adminUserId: adminUser.id,
+        action: 'admin.password.change_rejected',
+        login: adminUser.loginNormalized,
+        email: adminUser.email,
+        reason: 'invalid_current_password',
+        requestMetadata: input.requestMetadata,
+      });
+      throw new UnauthorizedException('Current password is incorrect');
+    }
+    if (input.currentPassword === input.newPassword) {
+      throw new BadRequestException('New password must differ from the current one');
+    }
+    const newPasswordHash: string = await this.passwordHashService.hashPassword({
+      plainTextPassword: input.newPassword,
+    });
+    const updated: AdminUserProfileRecord = await this.prismaService.$transaction(
+      async (transactionClient): Promise<AdminUserProfileRecord> => {
+        const updatedAdmin = await transactionClient.adminUser.update({
+          where: { id: adminUser.id },
+          data: {
+            passwordHash: newPasswordHash,
+            tokenVersion: { increment: 1 },
+            mustChangePassword: false,
+            passwordChangedAt: new Date(),
+          },
+          select: adminUserProfileSelect,
+        });
+        await transactionClient.adminAuditLog.create({
+          data: buildAuditLogData({
+            adminUserId: updatedAdmin.id,
+            action: 'admin.password.changed',
+            login: updatedAdmin.loginNormalized,
+            email: updatedAdmin.email,
+            requestMetadata: input.requestMetadata,
+          }),
+        });
+        return updatedAdmin;
+      },
+    );
+    const accessToken: string = await this.jwtService.signAsync(
+      buildAdminJwtPayload(updated),
+    );
+    return {
+      accessToken,
+      tokenType: 'Bearer',
+      expiresIn: this.authConfiguration.jwtExpiresIn,
+      admin: mapCurrentAdmin(updated),
+    };
+  }
+
   private async recordAuditLog(input: CreateAuditLogInput): Promise<void> {
     await this.prismaService.adminAuditLog.create({
       data: buildAuditLogData(input),
@@ -246,6 +494,7 @@ function buildAdminJwtPayload(adminUser: AdminUserProfileRecord): AdminJwtPayloa
     login: adminUser.login,
     role: adminUser.role,
     tokenVersion: adminUser.tokenVersion,
+    rbacRoleId: adminUser.rbacRoleId,
   };
 }
 
@@ -290,6 +539,8 @@ function mapCurrentAdmin(adminUser: AdminUserProfileRecord): CurrentAdminInterfa
     createdAt: adminUser.createdAt,
     lastLoginAt: adminUser.lastLoginAt,
     lastLoginIp: adminUser.lastLoginIp,
+    rbacRoleId: adminUser.rbacRoleId,
+    mustChangePassword: adminUser.mustChangePassword,
   };
 }
 

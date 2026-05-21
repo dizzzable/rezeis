@@ -1,0 +1,17 @@
+{
+  "name": "rezeis-reiwa-e2e",
+  "version": "1.0.0",
+  "private": true,
+  "description": "End-to-end smoke test for the rezeis-admin <-> reiwa pair",
+  "scripts": {
+    "test": "tsx e2e-runner.ts"
+  },
+  "dependencies": {
+    "axios": "^1.7.9",
+    "tsx": "^4.19.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.2"
+  }
+}

@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { PlaceholderPage } from '@/components/layout/placeholder-page'
 
 interface SectionPlaceholderPageProps {
-  readonly sectionKey: 'broadcast' | 'promocodes' | 'accessMode' | 'remnawave' | 'ruid' | 'imports'
+  readonly sectionKey: 'broadcast' | 'promocodes' | 'accessMode' | 'remnawave' | 'imports'
 }
 
 export function SectionPlaceholderPage({ sectionKey }: SectionPlaceholderPageProps): JSX.Element {

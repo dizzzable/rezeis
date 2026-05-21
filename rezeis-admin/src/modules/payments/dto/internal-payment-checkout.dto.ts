@@ -1,5 +1,15 @@
 import { PaymentGatewayType, PurchaseChannel, PurchaseType } from '@prisma/client';
-import { IsEnum, IsIn, IsInt, IsOptional, IsUUID, Min } from 'class-validator';
+import {
+  IsEnum,
+  IsIn,
+  IsInt,
+  IsOptional,
+  IsString,
+  IsUrl,
+  IsUUID,
+  MaxLength,
+  Min,
+} from 'class-validator';
 
 const LIVE_PAYMENT_PURCHASE_TYPES: readonly PurchaseType[] = [
   PurchaseType.NEW,
@@ -33,4 +43,25 @@ export class InternalPaymentCheckoutDto {
   @IsOptional()
   @IsEnum(PurchaseChannel)
   public channel?: PurchaseChannel;
+
+  /**
+   * URL the payment provider redirects the customer to on a successful payment.
+   * Reiwa supplies a context-aware URL (web origin for browser, Telegram deep link for Mini App).
+   * Falls back to `${REZEIS_DOMAIN}/payments/result?paymentId=...` when not provided.
+   */
+  @IsOptional()
+  @IsString()
+  @IsUrl({ require_protocol: true, protocols: ['http', 'https', 'tg', 'tgapp'] })
+  @MaxLength(2048)
+  public successUrl?: string;
+
+  /**
+   * URL the payment provider redirects the customer to on a failed/cancelled payment.
+   * Defaults to `successUrl` when omitted, mirroring most providers' behaviour.
+   */
+  @IsOptional()
+  @IsString()
+  @IsUrl({ require_protocol: true, protocols: ['http', 'https', 'tg', 'tgapp'] })
+  @MaxLength(2048)
+  public failUrl?: string;
 }

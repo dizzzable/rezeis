@@ -22,18 +22,77 @@ export class PaymentsTransactionsService {
 
   public async listTransactions(
     query: ListTransactionsQueryDto,
-  ): Promise<readonly AdminPaymentTransactionInterface[]> {
-    const transactions = await this.prismaService.transaction.findMany({
-      where: {
-        userId: query.userId,
-        status: query.status,
-        gatewayType: query.gatewayType,
-        purchaseType: query.purchaseType,
-      },
-      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-      take: query.limit ?? 50,
-    });
-    return transactions.map(mapAdminPaymentTransaction);
+  ): Promise<{ readonly items: readonly AdminPaymentTransactionInterface[]; readonly total: number }> {
+    const where: Prisma.TransactionWhereInput = {};
+
+    if (query.userId) {
+      where.userId = query.userId;
+    }
+    if (query.status) {
+      where.status = query.status;
+    }
+    if (query.gatewayType) {
+      where.gatewayType = query.gatewayType;
+    }
+    if (query.purchaseType) {
+      where.purchaseType = query.purchaseType;
+    }
+    if (query.dateFrom || query.dateTo) {
+      where.createdAt = {};
+      if (query.dateFrom) {
+        where.createdAt.gte = new Date(query.dateFrom);
+      }
+      if (query.dateTo) {
+        where.createdAt.lte = new Date(query.dateTo);
+      }
+    }
+    // Universal user search: Telegram ID, email, username, or internal CUID
+    if (query.userSearch) {
+      const search = query.userSearch.trim();
+      if (search.length > 0) {
+        const isNumeric = /^\d+$/.test(search);
+        const matchingUsers = await this.prismaService.user.findMany({
+          where: isNumeric
+            ? { telegramId: BigInt(search) }
+            : {
+                OR: [
+                  { id: search },
+                  { email: { equals: search, mode: 'insensitive' } },
+                  { username: { equals: search, mode: 'insensitive' } },
+                ],
+              },
+          select: { id: true },
+          take: 50,
+        });
+        if (matchingUsers.length > 0) {
+          where.userId = { in: matchingUsers.map((u) => u.id) };
+        } else {
+          // No matching users — return empty result immediately
+          return { items: [], total: 0 };
+        }
+      }
+    }
+
+    const limit = query.limit ?? 50;
+    const offset = query.offset ?? 0;
+
+    const [transactions, total] = await Promise.all([
+      this.prismaService.transaction.findMany({
+        where,
+        include: {
+          user: { select: { id: true, telegramId: true, username: true, name: true, email: true } },
+        },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        take: limit,
+        skip: offset,
+      }),
+      this.prismaService.transaction.count({ where }),
+    ]);
+
+    return {
+      items: transactions.map((tx) => mapAdminPaymentTransaction(tx, tx.user)),
+      total,
+    };
   }
 
   public async createDraft(
@@ -136,11 +195,18 @@ export class PaymentsTransactionsService {
   }
 }
 
-function mapAdminPaymentTransaction(transaction: Transaction): AdminPaymentTransactionInterface {
+function mapAdminPaymentTransaction(
+  transaction: Transaction,
+  user?: { id: string; telegramId: bigint | null; username: string | null; name: string; email: string | null } | null,
+): AdminPaymentTransactionInterface {
   return {
     id: transaction.id,
     paymentId: transaction.paymentId,
     userId: transaction.userId,
+    userTelegramId: user?.telegramId?.toString() ?? null,
+    userUsername: user?.username ?? null,
+    userName: user?.name ?? null,
+    userEmail: user?.email ?? null,
     subscriptionId: transaction.subscriptionId,
     status: transaction.status,
     purchaseType: transaction.purchaseType,

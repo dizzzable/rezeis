@@ -12,6 +12,7 @@ export function SettingsLayout(): JSX.Element {
     { to: '/settings/panel', label: t('nav.settingsPanel') },
     { to: '/settings/platform', label: t('nav.settingsPlatform') },
     { to: '/settings/api-tokens', label: t('nav.settingsApiTokens') },
+    { to: '/settings/notifications', label: t('nav.settingsNotifications') },
   ]
   if (location.pathname === '/settings') {
     return <Navigate replace to="/settings/panel" />

@@ -115,7 +115,7 @@ export class PaymentOpsAlertService {
   }
 
   private buildEventLink(eventId: string): string | null {
-    const adminPublicBaseUrl = this.configuration.adminPublicBaseUrl;
+    const adminPublicBaseUrl = this.configuration.domain;
     if (adminPublicBaseUrl === null) {
       return null;
     }

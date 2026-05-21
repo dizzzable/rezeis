@@ -12,27 +12,23 @@ interface RemnawaveConfiguration {
 export const remnawaveConfig = registerAs(
   'remnawave',
   (): RemnawaveConfiguration => ({
-    host: normalizeOptionalString(process.env.REMNAWAVE_HOST),
+    host: normalizeOptional(process.env.REMNAWAVE_HOST),
     port: normalizeOptionalNumber(process.env.REMNAWAVE_PORT),
-    token: normalizeOptionalString(process.env.REMNAWAVE_TOKEN),
-    webhookSecret: normalizeOptionalString(process.env.REMNAWAVE_WEBHOOK_SECRET),
-    caddyToken: normalizeOptionalString(process.env.REMNAWAVE_CADDY_TOKEN),
-    cookie: normalizeOptionalString(process.env.REMNAWAVE_COOKIE),
+    token: normalizeOptional(process.env.REMNAWAVE_TOKEN),
+    webhookSecret: normalizeOptional(process.env.REMNAWAVE_WEBHOOK_SECRET),
+    caddyToken: normalizeOptional(process.env.REMNAWAVE_CADDY_TOKEN),
+    cookie: normalizeOptional(process.env.REMNAWAVE_COOKIE),
   }),
 );
 
-function normalizeOptionalString(value: string | undefined): string | null {
-  if (value === undefined) {
-    return null;
-  }
-  const normalizedValue = value.trim();
-  return normalizedValue.length > 0 ? normalizedValue : null;
+function normalizeOptional(value: string | undefined): string | null {
+  if (value === undefined) return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 function normalizeOptionalNumber(value: string | undefined): number | null {
-  if (value === undefined) {
-    return null;
-  }
-  const parsedValue = Number.parseInt(value, 10);
-  return Number.isFinite(parsedValue) ? parsedValue : null;
+  if (value === undefined) return null;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : null;
 }

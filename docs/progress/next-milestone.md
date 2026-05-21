@@ -2,40 +2,35 @@
 
 ## Milestone
 
-Production rollout and provider validation for the live payment flow: verify credentials, webhook setup, and transaction-to-subscription completion against real provider cabinets.
+AltShop subscription devices / HWID Phase 1, built on the existing admin-owned current-subscription seam.
 
 ## Why This Is Next
 
-- The end-to-end application flow now exists in code: quote -> checkout -> provider -> webhook/result polling -> reconciliation -> subscription mutation.
-- The remaining risk is operational correctness with real provider environments, not missing repo architecture.
-- The user already confirmed live access is strongest for `YOOKASSA`, `TELEGRAM_STARS`, `PLATEGA`, and `HELEKET`, so those should be validated first before trusting the remaining gateways.
+- Recovery work is treated as closed for planning purposes, so the old hardening milestone is stale.
+- The current repo already has a narrow, live subscription seam: `rezeis-admin` owns the passive snapshot at `GET /api/internal/user/subscription`, `ruid` mirrors it at `GET /api/v1/subscription` through `SubscriptionService`, and `ruid/web` consumes it through `useSubscriptionQuery()` with the shared query key `['subscription']`.
+- That makes device or HWID Phase 1 the smallest safe AltShop donor slice that advances subscription behavior without reopening quotes, payments, or the full lifecycle state machine.
 
 ## Concrete Tasks
 
-0. Run the canonical local quality gate before any provider rollout step.
-- Use `docs/progress/local-quality-gate.md`.
-- Do not start provider validation while any service in that sequence is red.
-- Use Payment Ops Center during validation: webhook inbox, reconciliation health, safe replay, and Telegram alert test should be checked before the first live payment.
+1. Extend the admin-owned current-subscription seam for device visibility.
+- Add admin-owned reads for the current subscription's recorded devices plus device count or limit state, starting from the same truth that powers `GET /api/internal/user/subscription`.
+- Keep `rezeis-admin` as the only place that decides recorded-device truth, device-limit evaluation, and blocked or max-devices state.
 
-1. Verify live provider credentials and callbacks.
-- Configure real settings in admin for each gateway.
-- Point provider dashboards to the correct `REZEIS_ADMIN_PUBLIC_BASE_URL/api/v1/payments/webhooks/{gatewayType}`.
-- Validate return flow to `RUID_PUBLIC_WEB_URL/payments/result`.
+2. Add narrow admin-owned revoke or remove execution.
+- Support revoking or removing one recorded device for the current subscription.
+- Keep assignment changes, regenerated subscription or config links, and broader lifecycle mutations out of this slice.
 
-2. Run staged transaction validation.
-- `YOOKASSA`, `TELEGRAM_STARS`, `PLATEGA`, `HELEKET` first.
-- Only then validate `CRYPTOMUS` and `MULENPAY`.
+3. Mirror the slice through `ruid` as a session-only public edge.
+- Reuse the authenticated cookie session to resolve `userId`.
+- Do not accept client-supplied identity for device actions.
+- Keep `ruid` focused on forwarding and shaping admin-owned results.
 
-3. Add operator visibility and replay tooling.
-- Surface failed reconciliation and webhook inbox diagnostics in admin UI.
-- Add safe replay for webhook events that failed processing.
-
-4. Tighten provider-specific edge cases.
-- Confirm `TELEGRAM_STARS` pre-checkout/update behavior in production.
-- Confirm provider status mapping, refund/cancel semantics, and idempotent replays.
+4. Update `ruid/web` subscription UX without widening ownership.
+- Build device list visibility, device count or limit visibility, revoke action wiring, and blocked or max-devices messaging on the existing subscription surface.
+- Keep `ruid/web` away from direct Remnawave access and away from browser-side contract usage.
 
 ## Open Risks To Carry Forward
 
-- Real provider payloads can still diverge from sandbox/assumed formats.
-- Dashboard-level webhook setup remains an operational dependency outside the repo.
-- Subscription mutation is now live-capable, so bad provider config has higher blast radius than before.
+- The current subscription seam is passive snapshot only, so Phase 1 must not turn into a broad lifecycle rewrite.
+- `@remnawave/backend-contract` remains a typed schema and route-metadata dependency inside `rezeis-admin`; server-side HTTP orchestration must stay in the admin facade.
+- Quote or payment behavior, assignment changes, and config-link regeneration stay out of scope until a later, separately approved slice.

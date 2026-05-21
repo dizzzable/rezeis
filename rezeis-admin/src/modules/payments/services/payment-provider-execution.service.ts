@@ -1,5 +1,5 @@
 import { Buffer } from 'node:buffer';
-import { Inject, Injectable, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigType } from '@nestjs/config';
 import { Currency, PaymentGateway, PaymentGatewayType, Transaction } from '@prisma/client';
 import { firstValueFrom } from 'rxjs';
@@ -7,6 +7,17 @@ import { HttpService } from '@nestjs/axios';
 
 import { paymentsConfig } from '../../../common/config/payments.config';
 import { readGatewaySettings } from '../utils/payment-gateway-settings.util';
+import {
+  buildResultUrl,
+  buildWebhookUrl,
+  md5,
+  readOptionalString,
+  readRecord,
+  requireSetting,
+  resolveFailUrl,
+  resolveSuccessUrl,
+  truncate,
+} from './payment-provider-execution.helpers';
 
 interface ProviderCheckoutResult {
   readonly gatewayId: string | null;
@@ -28,6 +39,8 @@ export class PaymentProviderExecutionService {
     readonly gateway: PaymentGateway;
     readonly transaction: Transaction;
     readonly description: string;
+    readonly successUrl?: string | null;
+    readonly failUrl?: string | null;
   }): Promise<ProviderCheckoutResult> {
     switch (input.gateway.type) {
       case PaymentGatewayType.YOOKASSA:
@@ -42,6 +55,14 @@ export class PaymentProviderExecutionService {
         return this.createMulenpayCheckout(input);
       case PaymentGatewayType.TELEGRAM_STARS:
         return this.createTelegramStarsCheckout(input);
+      case PaymentGatewayType.ANTILOPAY:
+        return this.createAntilopayCheckout(input);
+      case PaymentGatewayType.OVERPAY:
+        return this.createOverpayCheckout(input);
+      case PaymentGatewayType.PAYPALYCH:
+        return this.createPaypalychCheckout(input);
+      case PaymentGatewayType.RIOPAY:
+        return this.createRiopayCheckout(input);
       default:
         throw new NotFoundException('Payment gateway not supported');
     }
@@ -51,11 +72,13 @@ export class PaymentProviderExecutionService {
     readonly gateway: PaymentGateway;
     readonly transaction: Transaction;
     readonly description: string;
+    readonly successUrl?: string | null;
+    readonly failUrl?: string | null;
   }): Promise<ProviderCheckoutResult> {
     const settings = readGatewaySettings(input.gateway.settings);
     const shopId = requireSetting(settings, 'shopId');
     const apiKey = requireSetting(settings, 'apiKey');
-    const resultUrl = this.buildResultUrl(input.transaction.paymentId);
+    const resultUrl = this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
     const payload = {
       amount: {
         value: input.transaction.amount.toString(),
@@ -103,12 +126,15 @@ export class PaymentProviderExecutionService {
     readonly gateway: PaymentGateway;
     readonly transaction: Transaction;
     readonly description: string;
+    readonly successUrl?: string | null;
+    readonly failUrl?: string | null;
   }): Promise<ProviderCheckoutResult> {
     const settings = readGatewaySettings(input.gateway.settings);
     const merchantId = requireSetting(settings, 'merchantId');
     const secret = requireSetting(settings, 'secret');
     const paymentMethod = typeof settings.paymentMethod === 'number' ? settings.paymentMethod : 2;
-    const resultUrl = this.buildResultUrl(input.transaction.paymentId);
+    const successResultUrl = this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
+    const failResultUrl = this.resolveFailUrl(input.transaction.paymentId, input.failUrl, input.successUrl);
     const payload = {
       paymentMethod,
       paymentDetails: {
@@ -117,8 +143,8 @@ export class PaymentProviderExecutionService {
       },
       description: input.description.slice(0, 64),
       payload: input.transaction.paymentId,
-      return: resultUrl,
-      failedUrl: resultUrl,
+      return: successResultUrl,
+      failedUrl: failResultUrl,
     };
     const response = await firstValueFrom(
       this.httpService.post('https://app.platega.io/transaction/process', payload, {
@@ -149,11 +175,13 @@ export class PaymentProviderExecutionService {
     readonly gateway: PaymentGateway;
     readonly transaction: Transaction;
     readonly description: string;
+    readonly successUrl?: string | null;
+    readonly failUrl?: string | null;
   }): Promise<ProviderCheckoutResult> {
     const settings = readGatewaySettings(input.gateway.settings);
     const merchantId = requireSetting(settings, 'merchantId');
     const apiKey = requireSetting(settings, 'apiKey');
-    const resultUrl = this.buildResultUrl(input.transaction.paymentId);
+    const resultUrl = this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
     const payload = {
       amount: input.transaction.amount.toString(),
       currency: input.transaction.currency === Currency.XTR ? Currency.USD : input.transaction.currency,
@@ -194,11 +222,13 @@ export class PaymentProviderExecutionService {
     readonly gateway: PaymentGateway;
     readonly transaction: Transaction;
     readonly description: string;
+    readonly successUrl?: string | null;
+    readonly failUrl?: string | null;
   }): Promise<ProviderCheckoutResult> {
     const settings = readGatewaySettings(input.gateway.settings);
     const merchantId = requireSetting(settings, 'merchantId');
     const apiKey = requireSetting(settings, 'apiKey');
-    const resultUrl = this.buildResultUrl(input.transaction.paymentId);
+    const resultUrl = this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
     const webhookUrl = this.buildWebhookUrl(input.gateway.type);
     const payload = {
       amount: input.transaction.amount.toString(),
@@ -244,17 +274,20 @@ export class PaymentProviderExecutionService {
     readonly gateway: PaymentGateway;
     readonly transaction: Transaction;
     readonly description: string;
+    readonly successUrl?: string | null;
+    readonly failUrl?: string | null;
   }): Promise<ProviderCheckoutResult> {
     const settings = readGatewaySettings(input.gateway.settings);
     const apiKey = requireSetting(settings, 'apiKey');
-    const resultUrl = this.buildResultUrl(input.transaction.paymentId);
+    const successResultUrl = this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
+    const failResultUrl = this.resolveFailUrl(input.transaction.paymentId, input.failUrl, input.successUrl);
     const webhookUrl = this.buildWebhookUrl(input.gateway.type);
     const payload = {
       amount: input.transaction.amount.toString(),
       currency: input.transaction.currency,
       description: input.description.slice(0, 255),
-      successUrl: resultUrl,
-      failUrl: resultUrl,
+      successUrl: successResultUrl,
+      failUrl: failResultUrl,
       callbackUrl: webhookUrl,
       orderId: input.transaction.paymentId,
     };
@@ -286,6 +319,8 @@ export class PaymentProviderExecutionService {
     readonly gateway: PaymentGateway;
     readonly transaction: Transaction;
     readonly description: string;
+    readonly successUrl?: string | null;
+    readonly failUrl?: string | null;
   }): Promise<ProviderCheckoutResult> {
     const botToken = this.configuration.botToken;
     if (botToken === null) {
@@ -330,62 +365,250 @@ export class PaymentProviderExecutionService {
     };
   }
 
-  private buildResultUrl(paymentId: string): string {
-    const webUrl = this.configuration.ruidPublicWebUrl;
-    if (webUrl === null) {
-      throw new ServiceUnavailableException('RUID public web URL is not configured');
+  // ═══════════════════════════════════════════════════════════════════════════
+  //  ANTILOPAY — https://lk.antilopay.com/api/v1/payment/create
+  //  Auth: SHA256WithRSA signature in X-Apay-Sign header
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  private async createAntilopayCheckout(input: {
+    readonly gateway: PaymentGateway;
+    readonly transaction: Transaction;
+    readonly description: string;
+    readonly successUrl?: string | null;
+    readonly failUrl?: string | null;
+  }): Promise<ProviderCheckoutResult> {
+    const crypto = await import('crypto');
+    const settings = readGatewaySettings(input.gateway.settings);
+    const projectIdentificator = requireSetting(settings, 'projectIdentificator');
+    const secretId = requireSetting(settings, 'secretId');
+    const privateKeyBase64 = requireSetting(settings, 'privateKey');
+
+    const successUrl = this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
+    const failUrl = this.resolveFailUrl(input.transaction.paymentId, input.failUrl, input.successUrl);
+
+    const payload = {
+      project_identificator: projectIdentificator,
+      amount: Number(input.transaction.amount),
+      order_id: input.transaction.paymentId,
+      currency: 'rub',
+      product_name: input.description.slice(0, 128),
+      product_type: 'services',
+      description: input.description.slice(0, 255),
+      success_url: successUrl,
+      fail_url: failUrl,
+      customer: { email: 'customer@rezeis.local' },
+    };
+
+    const bodyString = JSON.stringify(payload);
+    const privateKeyPem = `-----BEGIN RSA PRIVATE KEY-----\n${privateKeyBase64}\n-----END RSA PRIVATE KEY-----`;
+    const sign = crypto.createSign('RSA-SHA256');
+    sign.update(bodyString);
+    const signature = sign.sign(privateKeyPem, 'base64');
+
+    const response = await firstValueFrom(
+      this.httpService.post('https://lk.antilopay.com/api/v1/payment/create', bodyString, {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Apay-Secret-Id': secretId,
+          'X-Apay-Sign': signature,
+          'X-Apay-Sign-Version': '1',
+        },
+      }),
+    );
+
+    const data = response.data as Record<string, unknown>;
+    if (data.code !== 0) {
+      throw new BadRequestException(`Antilopay error ${data.code}: ${data.error ?? 'unknown'}`);
     }
-    const normalizedBaseUrl = webUrl.replace(/\/$/, '');
-    return `${normalizedBaseUrl}/payments/result?paymentId=${encodeURIComponent(paymentId)}`;
+
+    return {
+      gatewayId: readOptionalString(data, ['payment_id']),
+      checkoutUrl: readOptionalString(data, ['payment_url']),
+      providerMode: 'REDIRECT',
+      providerStatus: 'PENDING',
+      gatewayData: { provider: 'ANTILOPAY', providerResponse: data, checkoutUrl: readOptionalString(data, ['payment_url']) },
+    };
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  //  OVERPAY (beGateway) — https://checkout.begateway.com/ctp/api/checkouts
+  //  Auth: Basic (shopId:secretKey)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  private async createOverpayCheckout(input: {
+    readonly gateway: PaymentGateway;
+    readonly transaction: Transaction;
+    readonly description: string;
+    readonly successUrl?: string | null;
+    readonly failUrl?: string | null;
+  }): Promise<ProviderCheckoutResult> {
+    const settings = readGatewaySettings(input.gateway.settings);
+    const shopId = requireSetting(settings, 'shopId');
+    const secretKey = requireSetting(settings, 'secretKey');
+
+    const successUrl = this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
+    const failUrl = this.resolveFailUrl(input.transaction.paymentId, input.failUrl, input.successUrl);
+    const webhookUrl = this.buildWebhookUrl(PaymentGatewayType.OVERPAY);
+
+    const payload = {
+      checkout: {
+        test: false,
+        transaction_type: 'payment',
+        order: {
+          amount: Math.round(Number(input.transaction.amount) * 100),
+          currency: 'RUB',
+          description: input.description.slice(0, 255),
+          tracking_id: input.transaction.paymentId,
+        },
+        settings: {
+          success_url: successUrl,
+          decline_url: failUrl,
+          fail_url: failUrl,
+          notification_url: webhookUrl,
+          language: 'ru',
+          auto_return: 3,
+        },
+      },
+    };
+
+    const response = await firstValueFrom(
+      this.httpService.post('https://checkout.begateway.com/ctp/api/checkouts', payload, {
+        auth: { username: shopId, password: secretKey },
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+
+    const data = response.data as Record<string, unknown>;
+    const checkout = readRecord(data.checkout);
+
+    return {
+      gatewayId: readOptionalString(checkout, ['token']),
+      checkoutUrl: readOptionalString(checkout, ['redirect_url']),
+      providerMode: 'REDIRECT',
+      providerStatus: 'PENDING',
+      gatewayData: { provider: 'OVERPAY', providerResponse: data, checkoutUrl: readOptionalString(checkout, ['redirect_url']) },
+    };
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  //  PAYPALYCH — https://paypalych.com/api/v1/bill/create
+  //  Auth: Bearer token
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  private async createPaypalychCheckout(input: {
+    readonly gateway: PaymentGateway;
+    readonly transaction: Transaction;
+    readonly description: string;
+    readonly successUrl?: string | null;
+    readonly failUrl?: string | null;
+  }): Promise<ProviderCheckoutResult> {
+    const settings = readGatewaySettings(input.gateway.settings);
+    const shopId = requireSetting(settings, 'shopId');
+    const apiKey = requireSetting(settings, 'apiKey');
+
+    const successUrl = this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
+    const failUrl = this.resolveFailUrl(input.transaction.paymentId, input.failUrl, input.successUrl);
+    const webhookUrl = this.buildWebhookUrl(PaymentGatewayType.PAYPALYCH);
+
+    const payload = {
+      amount: Number(input.transaction.amount),
+      order_id: input.transaction.paymentId,
+      description: input.description.slice(0, 255),
+      type: 'normal',
+      shop_id: shopId,
+      currency_in: 'RUB',
+      success_url: successUrl,
+      fail_url: failUrl,
+      webhook_url: webhookUrl,
+    };
+
+    const response = await firstValueFrom(
+      this.httpService.post('https://paypalych.com/api/v1/bill/create', payload, {
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      }),
+    );
+
+    const data = response.data as Record<string, unknown>;
+    return {
+      gatewayId: readOptionalString(data, ['bill_id', 'id']),
+      checkoutUrl: readOptionalString(data, ['link_url', 'link_page_url', 'pay_url']),
+      providerMode: 'REDIRECT',
+      providerStatus: 'PENDING',
+      gatewayData: { provider: 'PAYPALYCH', providerResponse: data, checkoutUrl: readOptionalString(data, ['link_url', 'link_page_url', 'pay_url']) },
+    };
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  //  RIOPAY — https://api.riopay.online/v1/orders
+  //  Auth: X-Api-Token header
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  private async createRiopayCheckout(input: {
+    readonly gateway: PaymentGateway;
+    readonly transaction: Transaction;
+    readonly description: string;
+    readonly successUrl?: string | null;
+    readonly failUrl?: string | null;
+  }): Promise<ProviderCheckoutResult> {
+    const settings = readGatewaySettings(input.gateway.settings);
+    const apiToken = requireSetting(settings, 'apiToken');
+
+    const successUrl = this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
+    const failUrl = this.resolveFailUrl(input.transaction.paymentId, input.failUrl, input.successUrl);
+    const webhookUrl = this.buildWebhookUrl(PaymentGatewayType.RIOPAY);
+
+    const payload = {
+      amount: input.transaction.amount.toString(),
+      externalId: input.transaction.paymentId,
+      purpose: input.description.slice(0, 255),
+      successUrl,
+      failUrl,
+      callbackUrl: webhookUrl,
+    };
+
+    const response = await firstValueFrom(
+      this.httpService.post('https://api.riopay.online/v1/orders', payload, {
+        headers: { 'Content-Type': 'application/json', 'X-Api-Token': apiToken },
+      }),
+    );
+
+    const data = response.data as Record<string, unknown>;
+    return {
+      gatewayId: readOptionalString(data, ['id']),
+      checkoutUrl: readOptionalString(data, ['paymentLink']),
+      providerMode: 'REDIRECT',
+      providerStatus: readOptionalString(data, ['status']) ?? 'PENDING',
+      gatewayData: { provider: 'RIOPAY', providerResponse: data, checkoutUrl: readOptionalString(data, ['paymentLink']) },
+    };
+  }
+
+  // ── URL-resolution thin wrappers ────────────────────────────────────────
+  // These delegate to the helpers in `payment-provider-execution.helpers.ts`
+  // while keeping the call sites inside the per-gateway methods readable
+  // (`this.resolveSuccessUrl(...)`).
+
+  private resolveSuccessUrl(paymentId: string, override?: string | null): string {
+    return resolveSuccessUrl(this.configuration.domain, paymentId, override);
+  }
+
+  private resolveFailUrl(
+    paymentId: string,
+    failOverride?: string | null,
+    successOverride?: string | null,
+  ): string {
+    return resolveFailUrl(
+      this.configuration.domain,
+      paymentId,
+      failOverride,
+      successOverride,
+    );
+  }
+
+  private buildResultUrl(paymentId: string): string {
+    return buildResultUrl(this.configuration.domain, paymentId);
   }
 
   private buildWebhookUrl(gatewayType: PaymentGatewayType): string {
-    const adminBaseUrl = this.configuration.adminPublicBaseUrl;
-    if (adminBaseUrl === null) {
-      throw new ServiceUnavailableException('Admin public base URL is not configured');
-    }
-    const normalizedBaseUrl = adminBaseUrl.replace(/\/$/, '');
-    return `${normalizedBaseUrl}/api/v1/payments/webhooks/${gatewayType}`;
+    return buildWebhookUrl(this.configuration.domain, gatewayType);
   }
-}
-
-function readRecord(value: unknown): Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {};
-}
-
-function readOptionalString(
-  value: Record<string, unknown>,
-  keys: readonly string[],
-): string | null {
-  for (const key of keys) {
-    const candidate = value[key];
-    if (typeof candidate === 'string' && candidate.trim().length > 0) {
-      return candidate.trim();
-    }
-    if (typeof candidate === 'number' && Number.isFinite(candidate)) {
-      return String(candidate);
-    }
-  }
-  return null;
-}
-
-function requireSetting(
-  settings: Record<string, unknown>,
-  key: string,
-): string {
-  const value = readOptionalString(settings, [key]);
-  if (value === null) {
-    throw new ServiceUnavailableException(`Payment gateway setting ${key} is missing`);
-  }
-  return value;
-}
-
-function truncate(value: string, maxLength: number): string {
-  return value.length <= maxLength ? value : value.slice(0, maxLength);
-}
-
-function md5(value: string): string {
-  return require('node:crypto').createHash('md5').update(value).digest('hex');
 }

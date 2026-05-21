@@ -20,6 +20,8 @@ const strategyAdminSelect = Prisma.validator<Prisma.AdminUserSelect>()({
   createdAt: true,
   lastLoginAt: true,
   lastLoginIp: true,
+  rbacRoleId: true,
+  mustChangePassword: true,
 });
 
 type StrategyAdminRecord = Prisma.AdminUserGetPayload<{
@@ -73,6 +75,8 @@ export class AdminJwtStrategy extends PassportStrategy(Strategy, 'jwt') {
       createdAt: adminUser.createdAt,
       lastLoginAt: adminUser.lastLoginAt,
       lastLoginIp: adminUser.lastLoginIp,
+      rbacRoleId: adminUser.rbacRoleId,
+      mustChangePassword: adminUser.mustChangePassword,
     };
   }
 }

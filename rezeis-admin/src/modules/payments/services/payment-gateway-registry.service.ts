@@ -20,10 +20,14 @@ interface PaymentGatewayDefaultInput {
 const PAYMENT_GATEWAY_DEFAULTS: readonly PaymentGatewayDefaultInput[] = [
   { type: PaymentGatewayType.TELEGRAM_STARS, currency: Currency.USD, isActive: true, orderIndex: 1 },
   { type: PaymentGatewayType.YOOKASSA, currency: Currency.USD, isActive: true, orderIndex: 2 },
-  { type: PaymentGatewayType.PLATEGA, currency: Currency.USD, isActive: false, orderIndex: 3 },
-  { type: PaymentGatewayType.HELEKET, currency: Currency.USDT, isActive: false, orderIndex: 4 },
-  { type: PaymentGatewayType.CRYPTOMUS, currency: Currency.USDT, isActive: false, orderIndex: 5 },
-  { type: PaymentGatewayType.MULENPAY, currency: Currency.USD, isActive: false, orderIndex: 6 },
+  { type: PaymentGatewayType.ANTILOPAY, currency: Currency.RUB, isActive: false, orderIndex: 3 },
+  { type: PaymentGatewayType.PLATEGA, currency: Currency.USD, isActive: false, orderIndex: 4 },
+  { type: PaymentGatewayType.OVERPAY, currency: Currency.RUB, isActive: false, orderIndex: 5 },
+  { type: PaymentGatewayType.PAYPALYCH, currency: Currency.RUB, isActive: false, orderIndex: 6 },
+  { type: PaymentGatewayType.RIOPAY, currency: Currency.RUB, isActive: false, orderIndex: 7 },
+  { type: PaymentGatewayType.HELEKET, currency: Currency.USDT, isActive: false, orderIndex: 8 },
+  { type: PaymentGatewayType.CRYPTOMUS, currency: Currency.USDT, isActive: false, orderIndex: 9 },
+  { type: PaymentGatewayType.MULENPAY, currency: Currency.USD, isActive: false, orderIndex: 10 },
 ];
 
 @Injectable()

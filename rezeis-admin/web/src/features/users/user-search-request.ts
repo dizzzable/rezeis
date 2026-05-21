@@ -14,5 +14,6 @@ export function buildUserSearchParams(values: UserSearchFormValues): Record<stri
     telegramId: normalizeValue(values.telegramId),
     email: normalizeValue(values.email),
     login: normalizeValue(values.login),
+    referralCode: normalizeValue(values.referralCode),
   }
 }

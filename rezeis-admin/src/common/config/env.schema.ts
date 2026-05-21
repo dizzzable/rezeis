@@ -1,114 +1,104 @@
 import { z } from 'zod';
 
-import { DEFAULT_SMTP_TIMEOUT_MS } from './email.constants';
-
-const SMTP_IDENTITY_DOMAIN_PATTERN =
-  /^(?=.{1,253}$)(?!-)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.(?!-)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*$/i;
-const CONTROL_CHARACTER_PATTERN = /[\x00-\x1F\x7F]/;
-
 const normalizeOptionalString = (value: unknown): unknown => {
-  if (typeof value !== 'string') {
-    return value;
-  }
-  const normalizedValue = value.trim();
-  return normalizedValue === '' ? undefined : normalizedValue;
+  if (typeof value !== 'string') return value;
+  const v = value.trim();
+  return v === '' ? undefined : v;
 };
 
-const normalizeRequiredString = (value: unknown): unknown => {
-  if (typeof value !== 'string') {
-    return value;
-  }
-  return value.trim();
-};
-
-const smtpIdentityDomainSchema = z
-  .string()
-  .min(1)
-  .regex(SMTP_IDENTITY_DOMAIN_PATTERN, 'REZEIS_ADMIN_SMTP_IDENTITY_DOMAIN must be a valid hostname');
-
-const smtpFromNameSchema = z
-  .string()
-  .min(1)
-  .refine(
-    (value): boolean => !CONTROL_CHARACTER_PATTERN.test(value),
-    'REZEIS_ADMIN_SMTP_FROM_NAME must not contain control characters',
-  );
+const webhookSecretPattern = /^[a-zA-Z0-9]{64}$/;
 
 const environmentSchema = z.object({
-  NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
-  PORT: z.coerce.number().int().min(1).max(65535).default(3000),
-  DATABASE_URL: z.string().min(1),
-  REDIS_URL: z.string().min(1),
-  REZEIS_ADMIN_CORS_ORIGIN: z.string().url().default('http://localhost:3000'),
-  REZEIS_ADMIN_JWT_SECRET: z.string().min(1),
-  REZEIS_ADMIN_JWT_EXPIRES_IN: z.string().min(1).default('12h'),
-  REZEIS_ADMIN_INTERNAL_API_KEY: z.string().min(1),
-  REZEIS_ADMIN_PUBLIC_BASE_URL: z.preprocess(
+  // ── Application ──────────────────────────────────────────────────────────
+  REZEIS_DOMAIN: z.string().min(1).default('localhost'),
+  REZEIS_HOST: z.string().min(1).default('0.0.0.0'),
+  REZEIS_PORT: z.coerce.number().int().min(1).max(65535).default(8000),
+  REZEIS_LOCALES: z.string().min(1).default('ru,en'),
+  REZEIS_DEFAULT_LOCALE: z.string().min(1).default('ru'),
+  REZEIS_CRYPT_KEY: z.string().min(1),
+
+  // ── Webhook ──────────────────────────────────────────────────────────────
+  WEBHOOK_ENABLED: z.preprocess((v) => v === 'true' || v === true, z.boolean().default(false)),
+  WEBHOOK_URL: z.preprocess(normalizeOptionalString, z.string().url().optional()),
+  WEBHOOK_SECRET_HEADER: z.preprocess(
     normalizeOptionalString,
-    z.string().url().optional(),
+    z.string().regex(webhookSecretPattern, 'WEBHOOK_SECRET_HEADER must be exactly 64 alphanumeric characters').optional(),
   ),
-  REZEIS_ADMIN_SMTP_HOST: z.preprocess(normalizeRequiredString, z.string().min(1)),
-  REZEIS_ADMIN_SMTP_PORT: z.coerce.number().int().min(1).max(65535),
-  REZEIS_ADMIN_SMTP_SECURE: z.preprocess(
-    normalizeRequiredString,
-    z.enum(['true', 'false']).transform((value): boolean => value === 'true'),
-  ),
-  REZEIS_ADMIN_SMTP_USER: z.preprocess(normalizeOptionalString, z.string().min(1).optional()),
-  REZEIS_ADMIN_SMTP_PASSWORD: z.preprocess(
-    normalizeOptionalString,
-    z.string().min(1).optional(),
-  ),
-  REZEIS_ADMIN_SMTP_FROM_ADDRESS: z.preprocess(normalizeRequiredString, z.string().email()),
-  REZEIS_ADMIN_SMTP_FROM_NAME: z.preprocess(normalizeRequiredString, smtpFromNameSchema),
-  REZEIS_ADMIN_SMTP_REPLY_TO: z.preprocess(
-    normalizeOptionalString,
-    z.string().email().optional(),
-  ),
-  REZEIS_ADMIN_SMTP_IDENTITY_DOMAIN: z.preprocess(
-    normalizeOptionalString,
-    smtpIdentityDomainSchema.optional(),
-  ),
-  REZEIS_ADMIN_SMTP_TIMEOUT_MS: z.coerce.number().int().min(1).default(DEFAULT_SMTP_TIMEOUT_MS),
+
+  // ── Remnawave ────────────────────────────────────────────────────────────
   REMNAWAVE_HOST: z.preprocess(normalizeOptionalString, z.string().min(1).optional()),
-  REMNAWAVE_PORT: z.preprocess(
-    normalizeOptionalString,
-    z.coerce.number().int().min(1).max(65535).optional(),
-  ),
+  REMNAWAVE_PORT: z.preprocess(normalizeOptionalString, z.coerce.number().int().min(1).max(65535).optional()),
   REMNAWAVE_TOKEN: z.preprocess(normalizeOptionalString, z.string().min(1).optional()),
   REMNAWAVE_WEBHOOK_SECRET: z.preprocess(normalizeOptionalString, z.string().min(1).optional()),
   REMNAWAVE_CADDY_TOKEN: z.preprocess(normalizeOptionalString, z.string().min(1).optional()),
   REMNAWAVE_COOKIE: z.preprocess(normalizeOptionalString, z.string().min(1).optional()),
-  RUID_PUBLIC_WEB_URL: z.preprocess(normalizeOptionalString, z.string().url().optional()),
-  BOT_TOKEN: z.preprocess(normalizeOptionalString, z.string().min(1).optional()),
-}).superRefine((environmentVariables, refinementContext): void => {
-  const hasUser = environmentVariables.REZEIS_ADMIN_SMTP_USER !== undefined;
-  const hasPassword = environmentVariables.REZEIS_ADMIN_SMTP_PASSWORD !== undefined;
-  if (hasUser !== hasPassword) {
-    refinementContext.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: 'REZEIS_ADMIN_SMTP_USER and REZEIS_ADMIN_SMTP_PASSWORD must be provided together',
-      path: ['REZEIS_ADMIN_SMTP_USER'],
-    });
-  }
-  const hasRemnawaveHost = environmentVariables.REMNAWAVE_HOST !== undefined;
-  const hasRemnawavePort = environmentVariables.REMNAWAVE_PORT !== undefined;
-  const hasRemnawaveToken = environmentVariables.REMNAWAVE_TOKEN !== undefined;
-  if (hasRemnawaveHost || hasRemnawavePort || hasRemnawaveToken) {
-    if (!(hasRemnawaveHost && hasRemnawavePort && hasRemnawaveToken)) {
-      refinementContext.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'REMNAWAVE_HOST, REMNAWAVE_PORT, and REMNAWAVE_TOKEN must be provided together',
-        path: ['REMNAWAVE_HOST'],
-      });
-    }
-  }
+
+  // ── Database ─────────────────────────────────────────────────────────────
+  DATABASE_HOST: z.string().min(1).default('localhost'),
+  DATABASE_PORT: z.coerce.number().int().min(1).max(65535).default(5432),
+  DATABASE_NAME: z.string().min(1).default('rezeis'),
+  DATABASE_USER: z.string().min(1).default('rezeis'),
+  DATABASE_PASSWORD: z.string().min(1),
+  DATABASE_ECHO: z.preprocess((v) => v === 'true' || v === true, z.boolean().default(false)),
+  DATABASE_ECHO_POOL: z.preprocess((v) => v === 'true' || v === true, z.boolean().default(false)),
+  DATABASE_POOL_SIZE: z.coerce.number().int().min(1).default(25),
+  DATABASE_MAX_OVERFLOW: z.coerce.number().int().min(0).default(25),
+  DATABASE_POOL_TIMEOUT: z.coerce.number().int().min(1).default(10),
+  DATABASE_POOL_RECYCLE: z.coerce.number().int().min(1).default(3600),
+
+  // ── Redis ────────────────────────────────────────────────────────────────
+  REDIS_HOST: z.string().min(1).default('localhost'),
+  REDIS_PORT: z.coerce.number().int().min(1).max(65535).default(6379),
+  REDIS_NAME: z.coerce.number().int().min(0).default(0),
+  REDIS_PASSWORD: z.preprocess(normalizeOptionalString, z.string().min(1).optional()),
+
+  // ── Backup ───────────────────────────────────────────────────────────────
+  BACKUP_AUTO_ENABLED: z.preprocess((v) => v === 'true' || v === true, z.boolean().default(true)),
+  BACKUP_INTERVAL_HOURS: z.coerce.number().int().min(1).default(24),
+  BACKUP_TIME: z.string().default('00:00'),
+  BACKUP_MAX_KEEP: z.coerce.number().int().min(1).default(7),
+  BACKUP_COMPRESSION: z.preprocess((v) => v === 'true' || v === true, z.boolean().default(true)),
+  BACKUP_INCLUDE_LOGS: z.preprocess((v) => v === 'true' || v === true, z.boolean().default(false)),
+  BACKUP_LOCATION: z.string().default('/app/data/backups'),
+  BACKUP_SEND_ENABLED: z.preprocess((v) => v === 'true' || v === true, z.boolean().default(false)),
+  BACKUP_SEND_CHAT_ID: z.preprocess(normalizeOptionalString, z.string().optional()),
+  BACKUP_SEND_TOPIC_ID: z.preprocess(normalizeOptionalString, z.string().optional()),
+
+  // ── Email (SMTP) ─────────────────────────────────────────────────────────
+  EMAIL_ENABLED: z.preprocess((v) => v === 'true' || v === true, z.boolean().default(false)),
+  EMAIL_HOST: z.preprocess(normalizeOptionalString, z.string().optional()),
+  EMAIL_PORT: z.coerce.number().int().min(1).max(65535).default(587),
+  EMAIL_USERNAME: z.preprocess(normalizeOptionalString, z.string().optional()),
+  EMAIL_PASSWORD: z.preprocess(normalizeOptionalString, z.string().optional()),
+  EMAIL_FROM_ADDRESS: z.string().default('no-reply@rezeis.local'),
+  EMAIL_FROM_NAME: z.string().default('Rezeis'),
+  EMAIL_USE_TLS: z.preprocess((v) => v === 'true' || v === true, z.boolean().default(true)),
+  EMAIL_USE_SSL: z.preprocess((v) => v === 'true' || v === true, z.boolean().default(false)),
 });
+
+export type AppEnvironment = z.infer<typeof environmentSchema>;
 
 /**
  * Validates and normalizes process environment variables.
  */
 export function validateEnvironment(
   environmentVariables: Record<string, unknown>,
-): Record<string, unknown> {
+): AppEnvironment {
   return environmentSchema.parse(environmentVariables);
+}
+
+/**
+ * Builds a PostgreSQL connection URL from individual DATABASE_* variables.
+ */
+export function buildDatabaseUrl(env: AppEnvironment): string {
+  const password = encodeURIComponent(env.DATABASE_PASSWORD);
+  return `postgresql://${env.DATABASE_USER}:${password}@${env.DATABASE_HOST}:${env.DATABASE_PORT}/${env.DATABASE_NAME}`;
+}
+
+/**
+ * Builds a Redis connection URL from individual REDIS_* variables.
+ */
+export function buildRedisUrl(env: AppEnvironment): string {
+  const auth = env.REDIS_PASSWORD ? `:${encodeURIComponent(env.REDIS_PASSWORD)}@` : '';
+  return `redis://${auth}${env.REDIS_HOST}:${env.REDIS_PORT}/${env.REDIS_NAME}`;
 }

@@ -148,8 +148,12 @@ Rezeis placement:
 
 Transfer target:
 
-- Implement subscription service as a state machine, not scattered controller logic.
-- Use background jobs for Remnawave writes and runtime refresh.
+- The next donor slice is intentionally smaller than the full AltShop lifecycle: `subscription devices / HWID Phase 1`.
+- Start from the current passive subscription read seam. `rezeis-admin` already exposes `GET /api/internal/user/subscription`, `ruid` already mirrors `GET /api/v1/subscription`, and `ruid/web` already consumes that read-only snapshot. See `docs/architecture/altshop-subscription-devices-phase-1.md`.
+- Phase 1 scope is limited to the current subscription device list, recorded-device revoke or remove, device count and device limit visibility, and blocked or max-devices messaging.
+- Leave assignment changes, regenerated subscription or config links, quote or payment coupling, and broader lifecycle rewrites out of this slice.
+- After Phase 1, keep the longer-term goal: implement subscription service as a state machine, not scattered controller logic.
+- Use background jobs for Remnawave writes and runtime refresh once broader lifecycle work begins.
 - Keep Remnawave profile/cache failures from corrupting local business truth.
 
 ### 5. Purchase And Payment Flow
@@ -223,6 +227,7 @@ Transfer target:
 
 - Implement promo validation before UI.
 - Preserve branching result contracts so Mini App can guide users through selection.
+- Keep pre-purchase promo-code input out of the quote/payment path until there is an explicit business decision to merge promo activation with purchase quoting. Current Rezeis transfer keeps promo activation as its own flow.
 
 ### 7. Referrals
 
@@ -246,6 +251,12 @@ Transfer target:
 
 - Implement referral identity and invite system before exchange.
 - Keep reward issuance tied to successful purchase completion, not payment creation.
+- Current repo note (2026-04-20): Prisma already contains `Referral`, `ReferralInvite`, and `ReferralReward` models, but there is no shipped `rezeis-admin` referral module/service/controller slice yet. This means AltShop gift-promocode exchange behavior cannot be ported as a thin wiring step; Rezeis still needs a first referral bounded-context implementation before `G1` can be completed safely.
+- Minimum bounded-context required before `G1` implementation is safe:
+  - a referral service that can resolve the caller's exchangeable referral balance/points,
+  - a referral exchange service that debits points atomically and persists an exchange outcome,
+  - at least one admin/internal endpoint contract for executing the exchange,
+  - reward issuance rules that remain separate from partner-balance accounting.
 
 ### 8. Partner Program
 
@@ -293,6 +304,8 @@ Transfer target:
 - Implement an adapter module around Remnawave first.
 - Separate raw client, SDK client, sync orchestration, and webhook handling.
 - Store local sync state and tolerate Remnawave outages.
+- `@remnawave/backend-contract` is useful for typed command schemas and route metadata, but `rezeis-admin` must keep server-side HTTP orchestration in its own admin facade. The contract package is not the HTTP client.
+- Do not move Remnawave contract usage into `ruid` or `ruid/web`.
 
 ### 10. Notifications, Broadcasts, And Ops
 
@@ -336,13 +349,17 @@ Already present in Rezeis:
   - gateway-aware catalog pricing composed at read time from active payment gateways
   - `/catalog/plans` operator UI in `rezeis-admin/web`
   - session-aware public `/api/v1/plans` read in `ruid`
+- The current subscription read seam, which is still passive snapshot only:
+  - `rezeis-admin` `InternalUserService.getSubscription()` plus `GET /api/internal/user/subscription`
+  - payload fields: `id`, `status`, `isTrial`, `plan`, `trafficLimit`, `deviceLimit`, `configUrl`, `startedAt`, `expiresAt`, `createdAt`, `updatedAt`
+  - `ruid` mirror at `GET /api/v1/subscription` through `SubscriptionService`
+  - `ruid/web` read-only usage through `useSubscriptionQuery()` and shared React Query key `['subscription']`
 - Deployment modes for one VPS and split admin/user VPS.
 
 Missing or incomplete:
 
-- Standalone user web sign-in follow-up beyond the shipped linked-account route.
-- Password reset and Telegram account linking.
-- Subscription lifecycle and purchase state machine.
+- Linked-account self-service follow-up beyond the shipped standalone sign-in and recovery routes, plus Telegram account linking.
+- Subscription device or HWID write surface and the broader lifecycle or purchase state machine.
 - Payment gateway registry, gateway config UI, payment creation, webhook inbox handling.
 - Promocode validation/execution.
 - Referral invites/rewards/exchange.
@@ -369,11 +386,12 @@ Missing or incomplete:
    - User/profile lookup.
    - Sync job model and webhook validation.
 
-4. Build subscription lifecycle.
+4. Build subscription lifecycle in bounded slices.
    - Current subscription state.
+   - Subscription devices / HWID Phase 1.
    - Trial.
    - New/renew/upgrade/additional flows.
-   - Runtime refresh and device operations.
+   - Runtime refresh and broader device operations.
 
 5. Build payment infrastructure.
    - Gateway registry.

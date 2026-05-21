@@ -2,9 +2,10 @@ import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigType } from '@nestjs/config';
 import { JwtModule, JwtModuleOptions } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
+import type { StringValue } from 'ms';
 
 import { authConfig } from '../../common/config/auth.config';
-import { AuthController } from './auth.controller';
+import { AdminAuthController } from './controllers/admin-auth.controller';
 import { InternalAdminController } from './controllers/internal-admin.controller';
 import { AdminJwtAuthGuard } from './guards/admin-jwt-auth.guard';
 import { InternalAdminAuthGuard } from './guards/internal-admin-auth.guard';
@@ -28,12 +29,12 @@ import { PasswordHashService } from './services/password-hash.service';
       ): JwtModuleOptions => ({
         secret: authConfiguration.jwtSecret,
         signOptions: {
-          expiresIn: authConfiguration.jwtExpiresIn,
+          expiresIn: authConfiguration.jwtExpiresIn as StringValue | number,
         },
       }),
     }),
   ],
-  controllers: [AuthController, InternalAdminController],
+  controllers: [AdminAuthController, InternalAdminController],
   providers: [
     AdminAuthService,
     AdminJwtAuthGuard,
@@ -42,6 +43,15 @@ import { PasswordHashService } from './services/password-hash.service';
     InternalAdminService,
     PasswordHashService,
   ],
-  exports: [AdminJwtAuthGuard, InternalAdminAuthGuard, PasswordHashService],
+  exports: [
+    AdminJwtAuthGuard,
+    InternalAdminAuthGuard,
+    PasswordHashService,
+    AdminAuthService,
+    // Re-export JwtModule so consumer modules that use
+    // `InternalAdminAuthGuard` (which depends on JwtService) get the
+    // dependency without re-registering JWT signing config.
+    JwtModule,
+  ],
 })
 export class AuthModule {}

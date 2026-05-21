@@ -1,11 +1,15 @@
 import { PaymentGatewayType, PurchaseType, TransactionStatus } from '@prisma/client';
 import { Type } from 'class-transformer';
-import { IsEnum, IsInt, IsOptional, IsUUID, Max, Min } from 'class-validator';
+import { IsDateString, IsEnum, IsInt, IsOptional, IsString, IsUUID, Max, Min } from 'class-validator';
 
 export class ListTransactionsQueryDto {
   @IsOptional()
   @IsUUID('4')
   public userId?: string;
+
+  @IsOptional()
+  @IsString()
+  public userSearch?: string;
 
   @IsOptional()
   @IsEnum(TransactionStatus)
@@ -20,9 +24,23 @@ export class ListTransactionsQueryDto {
   public purchaseType?: PurchaseType;
 
   @IsOptional()
+  @IsDateString()
+  public dateFrom?: string;
+
+  @IsOptional()
+  @IsDateString()
+  public dateTo?: string;
+
+  @IsOptional()
   @Type((): NumberConstructor => Number)
   @IsInt()
   @Min(1)
   @Max(200)
   public limit?: number;
+
+  @IsOptional()
+  @Type((): NumberConstructor => Number)
+  @IsInt()
+  @Min(0)
+  public offset?: number;
 }

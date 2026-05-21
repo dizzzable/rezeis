@@ -1,4 +1,4 @@
-import { PaymentGatewayType, PurchaseChannel, PurchaseType } from '@prisma/client';
+import { PaymentGatewayType, PurchaseChannel } from '@prisma/client';
 import { IsEnum, IsIn, IsOptional, IsUUID, IsInt, Min } from 'class-validator';
 
 export const SUBSCRIPTION_QUOTE_ACTIONS = ['NEW', 'ADDITIONAL', 'RENEW', 'UPGRADE', 'TRIAL'] as const;

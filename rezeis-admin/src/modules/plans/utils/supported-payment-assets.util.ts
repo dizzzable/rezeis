@@ -7,6 +7,10 @@ const SUPPORTED_PAYMENT_ASSETS: Readonly<Record<PaymentGatewayType, readonly str
   [PaymentGatewayType.HELEKET]: ['USDT', 'TON', 'BTC', 'ETH'],
   [PaymentGatewayType.CRYPTOMUS]: ['USDT', 'TON', 'BTC', 'ETH'],
   [PaymentGatewayType.MULENPAY]: [],
+  [PaymentGatewayType.ANTILOPAY]: [],
+  [PaymentGatewayType.OVERPAY]: [],
+  [PaymentGatewayType.PAYPALYCH]: [],
+  [PaymentGatewayType.RIOPAY]: [],
 };
 
 export function getSupportedPaymentAssets(

@@ -1,9 +1,12 @@
 import { registerAs } from '@nestjs/config';
 
 interface AppConfiguration {
-  readonly corsOrigin: string;
-  readonly nodeEnv: 'development' | 'test' | 'production';
+  readonly domain: string;
+  readonly host: string;
   readonly port: number;
+  readonly locales: readonly string[];
+  readonly defaultLocale: string;
+  readonly cryptKey: string;
   readonly serviceName: string;
 }
 
@@ -13,9 +16,12 @@ interface AppConfiguration {
 export const appConfig = registerAs(
   'app',
   (): AppConfiguration => ({
-    corsOrigin: process.env.REZEIS_ADMIN_CORS_ORIGIN ?? 'http://localhost:3000',
-    nodeEnv: (process.env.NODE_ENV as AppConfiguration['nodeEnv'] | undefined) ?? 'development',
-    port: Number.parseInt(process.env.PORT ?? '3000', 10),
+    domain: process.env.REZEIS_DOMAIN ?? 'localhost',
+    host: process.env.REZEIS_HOST ?? '0.0.0.0',
+    port: Number.parseInt(process.env.REZEIS_PORT ?? '8000', 10),
+    locales: (process.env.REZEIS_LOCALES ?? 'ru,en').split(',').map((l) => l.trim()),
+    defaultLocale: process.env.REZEIS_DEFAULT_LOCALE ?? 'ru',
+    cryptKey: process.env.REZEIS_CRYPT_KEY ?? '',
     serviceName: 'rezeis-admin',
   }),
 );

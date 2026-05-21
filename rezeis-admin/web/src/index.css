@@ -1,7 +1,22 @@
 @import "tailwindcss";
-@import "shadcn/tailwind.css";
 
 @custom-variant dark (&:is(.dark *));
+
+/*
+ * shadcn/ui — 2024 OKLCH theme variables.
+ *
+ * Compatible with themes from:
+ *   • https://ui.shadcn.com/themes
+ *   • https://ui.shadcn.com/create
+ *   • https://shadcnthemer.com
+ *   • https://tweakcn.com
+ *
+ * Operators can paste a theme block from any of those sites into the
+ * Appearance page; the AppearanceProvider wires the `:root { … }` and
+ * `.dark { … }` blocks straight into the document. We use the canonical
+ * variable names (no `hsl()` wrapper, plain colour values), so the
+ * stock theme strings work without translation.
+ */
 
 @theme inline {
   --color-background: var(--background);
@@ -19,6 +34,7 @@
   --color-accent: var(--accent);
   --color-accent-foreground: var(--accent-foreground);
   --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
@@ -35,124 +51,255 @@
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
-  --radius-sm: calc(var(--radius) * 0.6);
-  --radius-md: calc(var(--radius) * 0.8);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) * 1.4);
-  --radius-2xl: calc(var(--radius) * 1.8);
-  --radius-3xl: calc(var(--radius) * 2.2);
-  --radius-4xl: calc(var(--radius) * 2.6);
+  --radius-xl: calc(var(--radius) + 4px);
 }
 
+/*
+ * Default theme — shadcn neutral. Operators may override these via the
+ * Appearance page (custom-theme.css block) without touching the file.
+ */
+
 :root {
-  --radius: 0.875rem;
-  --background: oklch(0.981 0.012 84.6);
-  --foreground: oklch(0.265 0.028 255.4);
-  --card: oklch(0.995 0.004 84.6);
-  --card-foreground: oklch(0.265 0.028 255.4);
-  --popover: oklch(0.995 0.004 84.6);
-  --popover-foreground: oklch(0.265 0.028 255.4);
-  --primary: oklch(0.56 0.147 248.72);
-  --primary-foreground: oklch(0.985 0.006 255.4);
-  --secondary: oklch(0.946 0.01 84.6);
-  --secondary-foreground: oklch(0.265 0.028 255.4);
-  --muted: oklch(0.956 0.008 84.6);
-  --muted-foreground: oklch(0.54 0.02 255.4);
-  --accent: oklch(0.938 0.03 206.87);
-  --accent-foreground: oklch(0.265 0.028 255.4);
-  --destructive: oklch(0.61 0.22 25.7);
-  --border: oklch(0.89 0.013 84.6);
-  --input: oklch(0.89 0.013 84.6);
-  --ring: oklch(0.68 0.1 248.72);
-  --chart-1: oklch(0.56 0.147 248.72);
-  --chart-2: oklch(0.67 0.11 196.81);
-  --chart-3: oklch(0.62 0.16 145.12);
-  --chart-4: oklch(0.73 0.17 72.35);
-  --chart-5: oklch(0.68 0.2 22.04);
-  --sidebar: oklch(0.99 0.004 84.6);
-  --sidebar-foreground: oklch(0.265 0.028 255.4);
-  --sidebar-primary: oklch(0.56 0.147 248.72);
-  --sidebar-primary-foreground: oklch(0.985 0.006 255.4);
-  --sidebar-accent: oklch(0.952 0.02 206.87);
-  --sidebar-accent-foreground: oklch(0.265 0.028 255.4);
-  --sidebar-border: oklch(0.89 0.013 84.6);
-  --sidebar-ring: oklch(0.68 0.1 248.72);
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --destructive-foreground: oklch(0.985 0 0);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+  --chart-1: oklch(0.646 0.222 41.116);
+  --chart-2: oklch(0.6 0.118 184.704);
+  --chart-3: oklch(0.398 0.07 227.392);
+  --chart-4: oklch(0.828 0.189 84.429);
+  --chart-5: oklch(0.769 0.188 70.08);
+  --radius: 0.625rem;
+  --sidebar: oklch(0.985 0 0);
+  --sidebar-foreground: oklch(0.145 0 0);
+  --sidebar-primary: oklch(0.205 0 0);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.97 0 0);
+  --sidebar-accent-foreground: oklch(0.205 0 0);
+  --sidebar-border: oklch(0.922 0 0);
+  --sidebar-ring: oklch(0.708 0 0);
 }
 
 .dark {
-  --background: oklch(0.2 0.024 257.8);
-  --foreground: oklch(0.97 0.006 84.6);
-  --card: oklch(0.24 0.026 257.8);
-  --card-foreground: oklch(0.97 0.006 84.6);
-  --popover: oklch(0.24 0.026 257.8);
-  --popover-foreground: oklch(0.97 0.006 84.6);
-  --primary: oklch(0.78 0.087 240.12);
-  --primary-foreground: oklch(0.2 0.024 257.8);
-  --secondary: oklch(0.3 0.02 257.8);
-  --secondary-foreground: oklch(0.97 0.006 84.6);
-  --muted: oklch(0.3 0.02 257.8);
-  --muted-foreground: oklch(0.76 0.012 84.6);
-  --accent: oklch(0.34 0.04 211.52);
-  --accent-foreground: oklch(0.97 0.006 84.6);
-  --destructive: oklch(0.7 0.19 22.22);
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --destructive-foreground: oklch(0.985 0 0);
   --border: oklch(1 0 0 / 10%);
   --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.62 0.06 240.12);
-  --chart-1: oklch(0.72 0.11 240.12);
-  --chart-2: oklch(0.73 0.09 196.81);
-  --chart-3: oklch(0.75 0.13 145.12);
-  --chart-4: oklch(0.8 0.14 72.35);
-  --chart-5: oklch(0.74 0.17 22.04);
-  --sidebar: oklch(0.24 0.026 257.8);
-  --sidebar-foreground: oklch(0.97 0.006 84.6);
-  --sidebar-primary: oklch(0.78 0.087 240.12);
-  --sidebar-primary-foreground: oklch(0.2 0.024 257.8);
-  --sidebar-accent: oklch(0.34 0.04 211.52);
-  --sidebar-accent-foreground: oklch(0.97 0.006 84.6);
+  --ring: oklch(0.556 0 0);
+  --chart-1: oklch(0.488 0.243 264.376);
+  --chart-2: oklch(0.696 0.17 162.48);
+  --chart-3: oklch(0.769 0.188 70.08);
+  --chart-4: oklch(0.627 0.265 303.9);
+  --chart-5: oklch(0.645 0.246 16.439);
+  --sidebar: oklch(0.205 0 0);
+  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar-primary: oklch(0.488 0.243 264.376);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.269 0 0);
+  --sidebar-accent-foreground: oklch(0.985 0 0);
   --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.62 0.06 240.12);
+  --sidebar-ring: oklch(0.556 0 0);
 }
+
+/*
+ * Operator-supplied theme override slot. The AppearanceProvider injects
+ * a `<style id="rezeis-custom-theme">` element here at runtime when the
+ * user pastes a theme from shadcnthemer / ui.shadcn.com — the rules in
+ * that element take precedence over the defaults above thanks to source
+ * order.
+ */
 
 @layer base {
   * {
-    @apply border-border outline-ring/50;
+    @apply border-border;
   }
-
-  html {
-    font-family: 'Manrope', 'Segoe UI', ui-sans-serif, system-ui, sans-serif;
-  }
-
   body {
     @apply bg-background text-foreground;
-    margin: 0;
-    min-width: 320px;
-    min-height: 100vh;
-  }
-
-  button:not(:disabled),
-  [role='button']:not(:disabled) {
-    cursor: pointer;
   }
 }
 
-body {
-  background:
-    radial-gradient(circle at top left, oklch(0.938 0.03 206.87 / 0.62), transparent 30%),
-    radial-gradient(circle at top right, oklch(0.56 0.147 248.72 / 0.12), transparent 26%),
-    linear-gradient(180deg, var(--background), oklch(0.965 0.014 84.6));
+/* ── Appearance — density / font size / animations ────────────────────── */
+:root {
+  --rezeis-density-spacing: 1;
+  --rezeis-font-scale: 1;
 }
 
-.dark body {
-  background:
-    radial-gradient(circle at top left, oklch(0.34 0.04 211.52 / 0.34), transparent 32%),
-    radial-gradient(circle at top right, oklch(0.78 0.087 240.12 / 0.08), transparent 24%),
-    linear-gradient(180deg, var(--background), oklch(0.18 0.024 257.8));
+:root[data-density="compact"] {
+  --rezeis-density-spacing: 0.85;
+}
+:root[data-density="spacious"] {
+  --rezeis-density-spacing: 1.2;
 }
 
-#root {
-  min-height: 100vh;
+:root[data-font-size="small"] {
+  --rezeis-font-scale: 0.92;
+  font-size: 14px;
+}
+:root[data-font-size="large"] {
+  --rezeis-font-scale: 1.1;
+  font-size: 17px;
 }
 
-body::selection {
-  background: oklch(0.56 0.147 248.72 / 0.18);
+/* When density is non-default, scale paddings on the building blocks
+ * shadcn produces. We keep the rule minimal so component-specific
+ * spacing (header heights, sidebar widths) is untouched. */
+:root[data-density="compact"] .p-3 { padding: calc(0.75rem * var(--rezeis-density-spacing)); }
+:root[data-density="compact"] .p-4 { padding: calc(1rem * var(--rezeis-density-spacing)); }
+:root[data-density="compact"] .p-6 { padding: calc(1.5rem * var(--rezeis-density-spacing)); }
+:root[data-density="compact"] .py-2 { padding-block: calc(0.5rem * var(--rezeis-density-spacing)); }
+:root[data-density="compact"] .py-3 { padding-block: calc(0.75rem * var(--rezeis-density-spacing)); }
+
+:root[data-density="spacious"] .p-3 { padding: calc(0.75rem * var(--rezeis-density-spacing)); }
+:root[data-density="spacious"] .p-4 { padding: calc(1rem * var(--rezeis-density-spacing)); }
+:root[data-density="spacious"] .p-6 { padding: calc(1.5rem * var(--rezeis-density-spacing)); }
+:root[data-density="spacious"] .py-2 { padding-block: calc(0.5rem * var(--rezeis-density-spacing)); }
+:root[data-density="spacious"] .py-3 { padding-block: calc(0.75rem * var(--rezeis-density-spacing)); }
+
+/* Disable animations app-wide when the user opts out. The
+ * `prefers-reduced-motion` media query handles the OS-level case
+ * automatically; this is the in-app override. */
+:root[data-animations="off"] *,
+:root[data-animations="off"] *::before,
+:root[data-animations="off"] *::after {
+  animation-duration: 0.001ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.001ms !important;
+  scroll-behavior: auto !important;
+}
+
+/* ── Sleek thin scrollbar ────────────────────────────────────────────────
+ * Modern, minimal scrollbar styling that matches the OKLCH theme. The
+ * track is fully transparent; the thumb is a soft, semi-transparent
+ * accent that fades in on hover.
+ *
+ * Firefox uses the standard `scrollbar-*` properties; WebKit / Blink
+ * uses the `::-webkit-scrollbar` pseudo-elements. Both are tuned to
+ * roughly the same width (6px) and rounded corners.
+ */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in oklch, var(--muted-foreground) 35%, transparent) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background-color: color-mix(in oklch, var(--muted-foreground) 35%, transparent);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+  transition: background-color 150ms ease;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background-color: color-mix(in oklch, var(--muted-foreground) 60%, transparent);
+}
+
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Utility class to fully hide a scrollbar without losing scrollability. */
+.scrollbar-none {
+  scrollbar-width: none;
+}
+.scrollbar-none::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+/* ── Collapsible slide animation ─────────────────────────────────────────
+ * Radix Collapsible exposes `--radix-collapsible-content-height` when
+ * open. We animate from 0 → auto height using this CSS variable.
+ */
+@keyframes collapsible-slide-down {
+  from { height: 0; opacity: 0; }
+  to { height: var(--radix-collapsible-content-height); opacity: 1; }
+}
+@keyframes collapsible-slide-up {
+  from { height: var(--radix-collapsible-content-height); opacity: 1; }
+  to { height: 0; opacity: 0; }
+}
+
+[data-state="open"] > .collapsible-animate {
+  animation: collapsible-slide-down 200ms ease-out;
+}
+[data-state="closed"] > .collapsible-animate {
+  animation: collapsible-slide-up 150ms ease-in;
+}
+
+/* ── Status dot pulse glow ────────────────────────────────────────────────
+ * A subtle glow animation for the online status indicator. The standard
+ * Tailwind `animate-pulse` only fades opacity which is invisible on a
+ * 2×2px dot. This keyframe pulses a box-shadow instead.
+ */
+@keyframes status-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 currentColor; }
+  50% { box-shadow: 0 0 4px 2px currentColor; }
+}
+
+.status-dot-pulse {
+  animation: status-pulse 2s ease-in-out infinite;
+}
+
+/* ── Number input spinners ──────────────────────────────────────────────
+ * Chromium renders the native step buttons of `<input type="number">`
+ * with the OS' light-grey chrome, which clashes with the OKLCH dark
+ * theme (a small white square appeared on the right edge of every
+ * number field). We hide the native spinner everywhere so number
+ * inputs match the rest of the form controls. Operators who need
+ * step controls can use explicit +/- buttons next to the input.
+ *
+ * Firefox is handled via `appearance: textfield`. WebKit / Blink
+ * additionally needs the pseudo-elements zeroed out.
+ */
+input[type="number"] {
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  appearance: none;
+  margin: 0;
 }

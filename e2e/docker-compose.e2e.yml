@@ -1,0 +1,177 @@
+# ═══════════════════════════════════════════════════════════════════════════
+#  E2E test stack: rezeis-admin (NestJS + worker) ↔ reiwa (BFF + bot)
+#
+#  Architecture mirrors production with one exception: reiwa-bot is started
+#  WITHOUT a real BOT_TOKEN, so grammy stays in degraded mode and doesn't
+#  attempt to talk to api.telegram.org. That keeps the test offline-safe.
+#
+#  Containers
+#    - rezeis-e2e-db        Postgres 17  (admin source of truth)
+#    - rezeis-e2e-redis     Valkey 9     (admin BullMQ + cache)
+#    - rezeis-e2e-admin     rezeis-admin NestJS HTTP server
+#    - rezeis-e2e-worker    rezeis-admin background worker (same image)
+#    - reiwa-e2e-redis      Valkey 9     (reiwa session store)
+#    - reiwa-e2e-api        reiwa BFF API
+#
+#  Shared docker network `rezeis-e2e` is created automatically by compose.
+#  All containers expose only their healthchecks; only the admin (8000)
+#  and reiwa (5000) ports are bound to 127.0.0.1 for the test runner.
+# ═══════════════════════════════════════════════════════════════════════════
+
+services:
+  rezeis-e2e-db:
+    image: postgres:17-alpine
+    container_name: rezeis-e2e-db
+    environment:
+      POSTGRES_DB: rezeis
+      POSTGRES_USER: rezeis
+      POSTGRES_PASSWORD: rezeis_secret
+      TZ: UTC
+    ports:
+      - "127.0.0.1:15432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rezeis -d rezeis"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+    networks:
+      - rezeis-e2e
+
+  rezeis-e2e-redis:
+    image: valkey/valkey:9-alpine
+    container_name: rezeis-e2e-redis
+    command: ["--bind", "0.0.0.0"]
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+    networks:
+      - rezeis-e2e
+
+  rezeis-e2e-admin:
+    build:
+      context: ../rezeis-admin
+      dockerfile: Dockerfile
+    image: rezeis-admin:e2e
+    container_name: rezeis-e2e-admin
+    environment:
+      NODE_ENV: production
+      REZEIS_DOMAIN: localhost
+      REZEIS_HOST: 0.0.0.0
+      REZEIS_PORT: 8000
+      REZEIS_LOCALES: ru,en
+      REZEIS_DEFAULT_LOCALE: ru
+      REZEIS_CRYPT_KEY: 9ac168da2c0179ac8defc0a39e84bd4d6c7feb518cde13940b13f5ac61544bb9
+      WEBHOOK_ENABLED: "false"
+      DATABASE_HOST: rezeis-e2e-db
+      DATABASE_PORT: 5432
+      DATABASE_NAME: rezeis
+      DATABASE_USER: rezeis
+      DATABASE_PASSWORD: rezeis_secret
+      DATABASE_URL: postgresql://rezeis:rezeis_secret@rezeis-e2e-db:5432/rezeis
+      REDIS_HOST: rezeis-e2e-redis
+      REDIS_PORT: 6379
+      REDIS_NAME: 0
+      REDIS_URL: redis://rezeis-e2e-redis:6379
+      REMNAWAVE_HOST: localhost
+      REMNAWAVE_PORT: 3001
+      REMNAWAVE_TOKEN: e2e-placeholder
+    ports:
+      - "127.0.0.1:18000:8000"
+    depends_on:
+      rezeis-e2e-db:
+        condition: service_healthy
+      rezeis-e2e-redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8000/api/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    networks:
+      - rezeis-e2e
+
+  rezeis-e2e-worker:
+    image: rezeis-admin:e2e
+    container_name: rezeis-e2e-worker
+    command: ["node", "dist/main.js"]
+    environment:
+      NODE_ENV: production
+      REZEIS_DOMAIN: localhost
+      REZEIS_HOST: 0.0.0.0
+      REZEIS_PORT: 8001
+      REZEIS_LOCALES: ru,en
+      REZEIS_DEFAULT_LOCALE: ru
+      REZEIS_CRYPT_KEY: 9ac168da2c0179ac8defc0a39e84bd4d6c7feb518cde13940b13f5ac61544bb9
+      WEBHOOK_ENABLED: "false"
+      DATABASE_HOST: rezeis-e2e-db
+      DATABASE_PORT: 5432
+      DATABASE_NAME: rezeis
+      DATABASE_USER: rezeis
+      DATABASE_PASSWORD: rezeis_secret
+      DATABASE_URL: postgresql://rezeis:rezeis_secret@rezeis-e2e-db:5432/rezeis
+      REDIS_HOST: rezeis-e2e-redis
+      REDIS_PORT: 6379
+      REDIS_NAME: 0
+      REDIS_URL: redis://rezeis-e2e-redis:6379
+      REMNAWAVE_HOST: localhost
+      REMNAWAVE_PORT: 3001
+      REMNAWAVE_TOKEN: e2e-placeholder
+    depends_on:
+      rezeis-e2e-admin:
+        condition: service_healthy
+    networks:
+      - rezeis-e2e
+
+  reiwa-e2e-redis:
+    image: valkey/valkey:9-alpine
+    container_name: reiwa-e2e-redis
+    command: ["--bind", "0.0.0.0"]
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+    networks:
+      - rezeis-e2e
+
+  reiwa-e2e-api:
+    build:
+      context: ../reiwa
+      dockerfile: Dockerfile
+    image: reiwa:e2e
+    container_name: reiwa-e2e-api
+    environment:
+      NODE_ENV: production
+      PORT: 5000
+      REZEIS_HOST: rezeis-e2e-admin
+      REZEIS_PORT: 8000
+      # Token is filled in at runtime by `run-e2e.ps1` after the admin
+      # bootstraps and creates an api_token. A placeholder keeps the
+      # zod schema happy until then.
+      REZEIS_TOKEN: e2e-placeholder
+      REDIS_URL: redis://reiwa-e2e-redis:6379
+      REIWA_COOKIE_SECRET: e2e-cookie-secret-please-change-me
+      REIWA_PUBLIC_WEB_URL: http://localhost:5500
+    ports:
+      - "127.0.0.1:15000:5000"
+    depends_on:
+      reiwa-e2e-redis:
+        condition: service_healthy
+      rezeis-e2e-admin:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:5000/api/v1/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    networks:
+      - rezeis-e2e
+
+networks:
+  rezeis-e2e:
+    name: rezeis-e2e
+    driver: bridge

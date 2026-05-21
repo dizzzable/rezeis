@@ -9,6 +9,7 @@ import { LinkedWebAccountSignInDto } from '../dto/linked-web-account-sign-in.dto
 import { SetWebAccountPasswordDto } from '../dto/set-web-account-password.dto';
 import { SnoozeWebAccountLinkPromptDto } from '../dto/snooze-web-account-link-prompt.dto';
 import { InternalWebAccountEmailVerificationChallengeInterface } from '../interfaces/internal-web-account-email-verification-challenge.interface';
+import { InternalPartnerStatusInterface } from '../interfaces/internal-partner-status.interface';
 import { InternalUserPlanInterface } from '../interfaces/internal-user-plan.interface';
 import { InternalUserSessionInterface } from '../interfaces/internal-user-session.interface';
 import { InternalUserSubscriptionInterface } from '../interfaces/internal-user-subscription.interface';
@@ -108,5 +109,26 @@ export class InternalUserController {
     @Query() query: InternalUserSessionQueryDto,
   ): Promise<InternalUserSubscriptionInterface | null> {
     return this.internalUserService.getSubscription(query);
+  }
+
+  /**
+   * Returns ALL subscriptions for the resolved user (for carousel display).
+   */
+  @Get('subscriptions')
+  public async getAllSubscriptions(
+    @Query() query: InternalUserSessionQueryDto,
+  ): Promise<{ subscriptions: InternalUserSubscriptionInterface[] }> {
+    return this.internalUserService.getAllSubscriptions(query);
+  }
+
+  /**
+   * Returns the lightweight partner-status flag for the resolved user.
+   * Used by reiwa to decide between the Referral / Partner bottom-nav tab.
+   */
+  @Get('partner-status')
+  public async getPartnerStatus(
+    @Query() query: InternalUserSessionQueryDto,
+  ): Promise<InternalPartnerStatusInterface> {
+    return this.internalUserService.getPartnerStatus(query);
   }
 }

@@ -10,6 +10,10 @@ export interface AdminPaymentTransactionInterface {
   readonly id: string;
   readonly paymentId: string;
   readonly userId: string;
+  readonly userTelegramId: string | null;
+  readonly userUsername: string | null;
+  readonly userName: string | null;
+  readonly userEmail: string | null;
   readonly subscriptionId: string | null;
   readonly status: TransactionStatus;
   readonly purchaseType: PurchaseType;

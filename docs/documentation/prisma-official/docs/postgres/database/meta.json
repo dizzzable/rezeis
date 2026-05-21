@@ -1,0 +1,12 @@
+{
+  "title": "Database",
+  "pages": [
+    "connecting-to-your-database",
+    "connection-pooling",
+    "query-insights",
+    "backups",
+    "postgres-extensions",
+    "serverless-driver",
+    "local-development"
+  ]
+}

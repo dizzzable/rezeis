@@ -1,5 +1,3 @@
-import { createHash, randomBytes, randomInt } from 'node:crypto';
-
 import {
   BadRequestException,
   Injectable,
@@ -8,23 +6,15 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import {
-  AuthChallenge,
   PlanAvailability,
-  PlanType,
-  Prisma,
   PurchaseChannel,
-  Subscription,
   SubscriptionStatus,
-  User,
-  WebAccount,
 } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { PasswordHashService } from '../../auth/services/password-hash.service';
 import { loginPolicy } from '../../auth/utils/login-policy.util';
-import { EmailDeliveryException } from '../../email/errors/email-delivery.exception';
 import { EmailService } from '../../email/services/email.service';
-import { PlanCatalogPriceInterface } from '../../plans/interfaces/plan-catalog.interface';
 import { PlanCatalogService } from '../../plans/services/plan-catalog.service';
 import { AcceptInternalUserRulesDto } from '../dto/accept-internal-user-rules.dto';
 import { CompleteWebAccountEmailVerificationDto } from '../dto/complete-web-account-email-verification.dto';
@@ -34,32 +24,62 @@ import { LinkedWebAccountSignInDto } from '../dto/linked-web-account-sign-in.dto
 import { SetWebAccountPasswordDto } from '../dto/set-web-account-password.dto';
 import { SnoozeWebAccountLinkPromptDto } from '../dto/snooze-web-account-link-prompt.dto';
 import { InternalWebAccountEmailVerificationChallengeInterface } from '../interfaces/internal-web-account-email-verification-challenge.interface';
+import { InternalPartnerStatusInterface } from '../interfaces/internal-partner-status.interface';
 import { InternalUserPlanInterface } from '../interfaces/internal-user-plan.interface';
 import { InternalUserSearchResultInterface } from '../interfaces/internal-user-search-result.interface';
 import { InternalUserSessionInterface } from '../interfaces/internal-user-session.interface';
 import { InternalUserSubscriptionInterface } from '../interfaces/internal-user-subscription.interface';
 
-interface InternalUserIdentifier {
-  readonly type: 'userId' | 'telegramId' | 'email' | 'login';
-  readonly value: string;
+import {
+  attachRevokeFailureContext,
+  createChallengeHash,
+  createEmailVerificationChallenge,
+  createEmailVerificationChallengeExpiry,
+  createEmailVerificationChallengeSecret,
+  createWebAccountLinkPromptSnoozeDate,
+  decrementEmailVerificationChallengeAttempts,
+  getLatestActiveEmailVerificationCodeChallenge,
+  getRequiredActionableWebAccount,
+  getRequiredEmailVerificationWebAccount,
+  getRequiredWebAccountEmail,
+  hasSnoozedLinkPromptUntilOrBeyond,
+  isWebAccountLoginConflictError,
+  InternalUserTransactionClient,
+  lockWebAccountRow,
+  revokeIssuedEmailVerificationChallenge,
+  revokePendingEmailVerificationChallenges,
+  shouldRevokeIssuedChallengeAfterDeliveryFailure,
+} from './internal-user.email-verification';
+import {
+  buildUserWhereUniqueInput,
+  InternalUserIdentifier,
+  normalizeLookupEmail,
+  resolveInternalUserIdentifier,
+} from './internal-user.identifiers';
+import {
+  collapseLegacyCatalogPrices,
+  INTERNAL_USER_INCLUDE,
+  InternalUserRecord,
+  mapDateValue,
+  mapInternalEmailVerificationChallenge,
+  mapInternalUserSession,
+  mapSubscriptionPlanSnapshot,
+  selectCurrentSubscription,
+} from './internal-user.mappers';
+
+interface IssuedEmailVerificationChallenge {
+  readonly challengeId: string;
+  readonly challenge: InternalWebAccountEmailVerificationChallengeInterface;
+  readonly code: string;
+  readonly email: string;
+  readonly expiresAt: Date;
 }
 
-type InternalUserRecord = User & { readonly webAccount: WebAccount | null };
-
-const INTERNAL_USER_INCLUDE = {
-  webAccount: true,
-} as const;
-
-const WEB_ACCOUNT_LINK_PROMPT_SNOOZE_DAYS: number = 7;
-const EMAIL_VERIFY_CHALLENGE_PURPOSE = 'email_verify';
-const EMAIL_VERIFY_CHALLENGE_CHANNEL = 'email';
-const EMAIL_VERIFY_CHALLENGE_TTL_MINUTES: number = 15;
-const EMAIL_VERIFY_CHALLENGE_ATTEMPTS: number = 5;
-const EMAIL_VERIFY_CODE_LENGTH: number = 6;
-const EMAIL_VERIFY_TOKEN_BYTES: number = 32;
-
 /**
- * Handles internal user session reads and narrow writes for internal admin clients.
+ * Handles internal user session reads and narrow writes for internal admin
+ * clients. Helpers (mappers, identifier resolution, email-verification
+ * challenge plumbing) live in sibling files so the surface of this class
+ * stays focused on orchestration.
  */
 @Injectable()
 export class InternalUserService {
@@ -312,9 +332,7 @@ export class InternalUserService {
     const issuedChallenge = await this.prismaService.$transaction(
       async (transactionClient): Promise<IssuedEmailVerificationChallenge> => {
         const user = await transactionClient.user.findUnique({
-          where: {
-            id: userId,
-          },
+          where: { id: userId },
           include: INTERNAL_USER_INCLUDE,
         });
         if (!user) {
@@ -323,9 +341,7 @@ export class InternalUserService {
         const userWebAccount = getRequiredEmailVerificationWebAccount(user);
         await lockWebAccountRow(transactionClient as InternalUserTransactionClient, userWebAccount.id);
         const lockedWebAccount = await transactionClient.webAccount.findUnique({
-          where: {
-            id: userWebAccount.id,
-          },
+          where: { id: userWebAccount.id },
         });
         if (lockedWebAccount === null) {
           throw new BadRequestException('webAccount must exist');
@@ -397,9 +413,7 @@ export class InternalUserService {
     return this.prismaService.$transaction(
       async (transactionClient): Promise<InternalUserSessionInterface> => {
         const user = await transactionClient.user.findUnique({
-          where: {
-            id: userId,
-          },
+          where: { id: userId },
           include: INTERNAL_USER_INCLUDE,
         });
         if (!user) {
@@ -409,9 +423,7 @@ export class InternalUserService {
         const transactionUserClient = transactionClient as InternalUserTransactionClient;
         await lockWebAccountRow(transactionUserClient, userWebAccount.id);
         const lockedWebAccount = await transactionClient.webAccount.findUnique({
-          where: {
-            id: userWebAccount.id,
-          },
+          where: { id: userWebAccount.id },
         });
         if (lockedWebAccount === null) {
           throw new BadRequestException('webAccount must exist');
@@ -440,25 +452,15 @@ export class InternalUserService {
           throw new BadRequestException('invalid email verification code');
         }
         await transactionUserClient.authChallenge.update({
-          where: {
-            id: challenge.id,
-          },
-          data: {
-            consumedAt: now,
-          },
+          where: { id: challenge.id },
+          data: { consumedAt: now },
         });
         await transactionUserClient.webAccount.update({
-          where: {
-            id: lockedWebAccount.id,
-          },
-          data: {
-            emailVerifiedAt: now,
-          },
+          where: { id: lockedWebAccount.id },
+          data: { emailVerifiedAt: now },
         });
         const refreshedUser = await transactionClient.user.findUnique({
-          where: {
-            id: userId,
-          },
+          where: { id: userId },
           include: INTERNAL_USER_INCLUDE,
         });
         if (!refreshedUser) {
@@ -479,15 +481,62 @@ export class InternalUserService {
     return this.getCurrentSubscription(user.id);
   }
 
+  /**
+   * Returns ALL non-deleted subscriptions for the resolved user.
+   */
+  public async getAllSubscriptions(
+    query: InternalUserSessionQueryDto,
+  ): Promise<{ subscriptions: InternalUserSubscriptionInterface[] }> {
+    const user = await this.getRequiredUser(query);
+    const subscriptions = await this.prismaService.subscription.findMany({
+      where: {
+        userId: user.id,
+        status: { not: SubscriptionStatus.DELETED },
+      },
+      orderBy: [{ createdAt: 'desc' }],
+    });
+    return {
+      subscriptions: subscriptions.map((sub) => ({
+        id: sub.id,
+        status: sub.status,
+        isTrial: sub.isTrial,
+        plan: mapSubscriptionPlanSnapshot(sub.planSnapshot),
+        trafficLimit: sub.trafficLimit,
+        deviceLimit: sub.deviceLimit,
+        userRemnaId: sub.remnawaveId,
+        url: sub.configUrl,
+        configUrl: sub.configUrl,
+        startedAt: mapDateValue(sub.startedAt),
+        expiresAt: mapDateValue(sub.expiresAt),
+        createdAt: sub.createdAt.toISOString(),
+        updatedAt: sub.updatedAt.toISOString(),
+      })),
+    };
+  }
+
+  /**
+   * Returns the resolved user's lightweight partner status (active flag).
+   */
+  public async getPartnerStatus(
+    query: InternalUserSessionQueryDto,
+  ): Promise<InternalPartnerStatusInterface> {
+    const user = await this.getRequiredUser(query);
+    const partner = await this.prismaService.partner.findUnique({
+      where: { userId: user.id },
+      select: { isActive: true },
+    });
+    return { isActive: partner?.isActive === true };
+  }
+
+  // ── Internal helpers ─────────────────────────────────────────────────────
+
   private async getCurrentSubscription(
     userId: string,
   ): Promise<InternalUserSubscriptionInterface | null> {
     const subscriptions = await this.prismaService.subscription.findMany({
       where: {
         userId,
-        status: {
-          not: SubscriptionStatus.DELETED,
-        },
+        status: { not: SubscriptionStatus.DELETED },
       },
       orderBy: [{ createdAt: 'desc' }],
     });
@@ -502,6 +551,8 @@ export class InternalUserService {
       plan: mapSubscriptionPlanSnapshot(subscription.planSnapshot),
       trafficLimit: subscription.trafficLimit,
       deviceLimit: subscription.deviceLimit,
+      userRemnaId: subscription.remnawaveId,
+      url: subscription.configUrl,
       configUrl: subscription.configUrl,
       startedAt: mapDateValue(subscription.startedAt),
       expiresAt: mapDateValue(subscription.expiresAt),
@@ -523,9 +574,7 @@ export class InternalUserService {
 
   private async getRequiredUserById(userId: string | undefined): Promise<InternalUserRecord> {
     const user = await this.prismaService.user.findUnique({
-      where: {
-        id: this.getRequiredUserId(userId),
-      },
+      where: { id: this.getRequiredUserId(userId) },
       include: INTERNAL_USER_INCLUDE,
     });
     if (!user) {
@@ -559,9 +608,7 @@ export class InternalUserService {
   private async findUserByEmail(email: string): Promise<InternalUserRecord | null> {
     const normalizedEmail = normalizeLookupEmail(email);
     const exactCaseUser = await this.prismaService.user.findUnique({
-      where: {
-        email: normalizedEmail,
-      },
+      where: { email: normalizedEmail },
       include: INTERNAL_USER_INCLUDE,
     });
     if (exactCaseUser !== null) {
@@ -584,17 +631,13 @@ export class InternalUserService {
       return caseInsensitiveUser;
     }
     const webAccount = await this.prismaService.webAccount.findUnique({
-      where: {
-        emailNormalized: normalizedEmail,
-      },
+      where: { emailNormalized: normalizedEmail },
     });
     if (webAccount === null) {
       return null;
     }
     return this.prismaService.user.findUnique({
-      where: {
-        id: webAccount.userId,
-      },
+      where: { id: webAccount.userId },
       include: INTERNAL_USER_INCLUDE,
     });
   }
@@ -602,478 +645,14 @@ export class InternalUserService {
   private async findUserByLogin(login: string): Promise<InternalUserRecord | null> {
     const normalizedLogin: string = loginPolicy.normalizeLogin(login);
     const webAccount = await this.prismaService.webAccount.findUnique({
-      where: {
-        loginNormalized: normalizedLogin,
-      },
+      where: { loginNormalized: normalizedLogin },
     });
     if (webAccount === null) {
       return null;
     }
     return this.prismaService.user.findUnique({
-      where: {
-        id: webAccount.userId,
-      },
+      where: { id: webAccount.userId },
       include: INTERNAL_USER_INCLUDE,
     });
   }
-}
-
-interface EmailVerificationChallengeSecret {
-  readonly code: string;
-  readonly codeHash: string;
-  readonly tokenHash: string;
-}
-
-function collapseLegacyCatalogPrices(
-  prices: readonly PlanCatalogPriceInterface[],
-): InternalUserPlanInterface['durations'][number]['prices'] {
-  const priceByCurrency = new Map<
-    InternalUserPlanInterface['durations'][number]['prices'][number]['currency'],
-    InternalUserPlanInterface['durations'][number]['prices'][number]
-  >();
-  for (const price of prices) {
-    if (!priceByCurrency.has(price.currency)) {
-      priceByCurrency.set(price.currency, {
-        currency: price.currency,
-        price: price.price,
-      });
-    }
-  }
-  return [...priceByCurrency.values()];
-}
-
-interface IssuedEmailVerificationChallenge {
-  readonly challengeId: string;
-  readonly challenge: InternalWebAccountEmailVerificationChallengeInterface;
-  readonly code: string;
-  readonly email: string;
-  readonly expiresAt: Date;
-}
-
-interface MapInternalEmailVerificationChallengeInput {
-  readonly webAccount: WebAccount;
-  readonly challenge: AuthChallenge;
-  readonly email: string;
-}
-
-interface InternalUserTransactionClient {
-  readonly authChallenge: {
-    findFirst: (...args: readonly unknown[]) => Promise<AuthChallenge | null>;
-    create: (...args: readonly unknown[]) => Promise<AuthChallenge>;
-    update: (...args: readonly unknown[]) => Promise<AuthChallenge>;
-    updateMany: (...args: readonly unknown[]) => Promise<{ readonly count: number }>;
-  };
-  readonly user: PrismaService['user'];
-  readonly webAccount: PrismaService['webAccount'];
-  readonly $queryRaw: (...args: readonly unknown[]) => Promise<unknown>;
-}
-
-function resolveInternalUserIdentifier(
-  query: InternalUserSessionQueryDto,
-): InternalUserIdentifier {
-  const identifiers: InternalUserIdentifier[] = [];
-  if (query.userId) {
-    identifiers.push({ type: 'userId', value: query.userId });
-  }
-  if (query.telegramId) {
-    identifiers.push({ type: 'telegramId', value: query.telegramId });
-  }
-  if (query.email) {
-    identifiers.push({ type: 'email', value: query.email });
-  }
-  if (query.login) {
-    identifiers.push({ type: 'login', value: query.login });
-  }
-  if (identifiers.length !== 1) {
-    throw new BadRequestException(
-      'Exactly one identifier must be provided: userId, telegramId, email, or login',
-    );
-  }
-  return identifiers[0];
-}
-
-function buildUserWhereUniqueInput(identifier: InternalUserIdentifier): Prisma.UserWhereUniqueInput {
-  if (identifier.type === 'userId') {
-    return { id: identifier.value };
-  }
-  if (identifier.type === 'telegramId') {
-    return { telegramId: BigInt(identifier.value) };
-  }
-  return { email: identifier.value };
-}
-
-function normalizeLookupEmail(email: string): string {
-  return email.trim().toLowerCase();
-}
-
-function createWebAccountLinkPromptSnoozeDate(now: Date = new Date(Date.now())): Date {
-  const snoozeUntil = new Date(now);
-  snoozeUntil.setUTCDate(snoozeUntil.getUTCDate() + WEB_ACCOUNT_LINK_PROMPT_SNOOZE_DAYS);
-  return snoozeUntil;
-}
-
-function getRequiredActionableWebAccount(user: InternalUserRecord): WebAccount {
-  if (user.webAccount === null) {
-    throw new BadRequestException('webAccount must exist');
-  }
-  if (!isWebAccountLinkPromptActionable(user.webAccount)) {
-    throw new BadRequestException('webAccount link prompt is not actionable');
-  }
-  return user.webAccount;
-}
-
-function getRequiredEmailVerificationWebAccount(user: InternalUserRecord): WebAccount {
-  if (user.webAccount === null) {
-    throw new BadRequestException('webAccount must exist');
-  }
-  if (user.webAccount.emailVerifiedAt !== null) {
-    throw new BadRequestException('webAccount email is already verified');
-  }
-  return user.webAccount;
-}
-
-function getRequiredWebAccountEmail(webAccount: WebAccount): string {
-  const email = webAccount.email ?? webAccount.emailNormalized;
-  if (email === null) {
-    throw new BadRequestException('webAccount email must exist');
-  }
-  return email;
-}
-
-function isWebAccountLinkPromptActionable(webAccount: WebAccount): boolean {
-  return (
-    webAccount.requiresPasswordChange ||
-    webAccount.credentialsBootstrappedAt === null ||
-    webAccount.loginNormalized === null
-  );
-}
-
-function hasSnoozedLinkPromptUntilOrBeyond(webAccount: WebAccount, snoozeUntil: Date): boolean {
-  if (webAccount.linkPromptSnoozeUntil === null) {
-    return false;
-  }
-  return webAccount.linkPromptSnoozeUntil.getTime() >= snoozeUntil.getTime();
-}
-
-function createEmailVerificationChallengeExpiry(now: Date): Date {
-  const expiresAt = new Date(now);
-  expiresAt.setUTCMinutes(expiresAt.getUTCMinutes() + EMAIL_VERIFY_CHALLENGE_TTL_MINUTES);
-  return expiresAt;
-}
-
-function createEmailVerificationChallengeSecret(): EmailVerificationChallengeSecret {
-  const code = createNumericChallengeCode();
-  const token = randomBytes(EMAIL_VERIFY_TOKEN_BYTES).toString('base64url');
-  return {
-    code,
-    codeHash: createChallengeHash(code),
-    tokenHash: createChallengeHash(token),
-  };
-}
-
-function createNumericChallengeCode(): string {
-  const minimumValue = 10 ** (EMAIL_VERIFY_CODE_LENGTH - 1);
-  const maximumValue = 10 ** EMAIL_VERIFY_CODE_LENGTH;
-  const value = randomInt(minimumValue, maximumValue);
-  return value.toString();
-}
-
-function createChallengeHash(value: string): string {
-  return createHash('sha256').update(value).digest('hex');
-}
-
-async function lockWebAccountRow(
-  transactionClient: InternalUserTransactionClient,
-  webAccountId: string,
-): Promise<void> {
-  await transactionClient.$queryRaw(
-    Prisma.sql`SELECT id FROM "WebAccount" WHERE id = ${webAccountId} FOR UPDATE`,
-  );
-}
-
-async function revokePendingEmailVerificationChallenges(input: {
-  readonly transactionClient: InternalUserTransactionClient;
-  readonly webAccountId: string;
-  readonly now: Date;
-}): Promise<void> {
-  await input.transactionClient.authChallenge.updateMany({
-    where: {
-      webAccountId: input.webAccountId,
-      purpose: EMAIL_VERIFY_CHALLENGE_PURPOSE,
-      channel: EMAIL_VERIFY_CHALLENGE_CHANNEL,
-      consumedAt: null,
-      expiresAt: {
-        gt: input.now,
-      },
-    },
-    data: {
-      consumedAt: input.now,
-    },
-  });
-}
-
-async function createEmailVerificationChallenge(input: {
-  readonly transactionClient: InternalUserTransactionClient;
-  readonly webAccountId: string;
-  readonly email: string;
-  readonly expiresAt: Date;
-  readonly challengeSecret: EmailVerificationChallengeSecret;
-}): Promise<AuthChallenge> {
-  return input.transactionClient.authChallenge.create({
-    data: {
-      webAccountId: input.webAccountId,
-      purpose: EMAIL_VERIFY_CHALLENGE_PURPOSE,
-      channel: EMAIL_VERIFY_CHALLENGE_CHANNEL,
-      destination: input.email,
-      codeHash: input.challengeSecret.codeHash,
-      tokenHash: input.challengeSecret.tokenHash,
-      expiresAt: input.expiresAt,
-      attemptsLeft: EMAIL_VERIFY_CHALLENGE_ATTEMPTS,
-    },
-  });
-}
-
-async function getLatestActiveEmailVerificationCodeChallenge(input: {
-  readonly transactionClient: InternalUserTransactionClient;
-  readonly webAccountId: string;
-  readonly destination: string;
-  readonly now: Date;
-}): Promise<AuthChallenge | null> {
-  return input.transactionClient.authChallenge.findFirst({
-    where: {
-      webAccountId: input.webAccountId,
-      destination: input.destination,
-      purpose: EMAIL_VERIFY_CHALLENGE_PURPOSE,
-      channel: EMAIL_VERIFY_CHALLENGE_CHANNEL,
-      consumedAt: null,
-      expiresAt: {
-        gt: input.now,
-      },
-      attemptsLeft: {
-        gt: 0,
-      },
-      codeHash: {
-        not: null,
-      },
-    },
-    orderBy: [{ createdAt: 'desc' }],
-  });
-}
-
-async function decrementEmailVerificationChallengeAttempts(input: {
-  readonly transactionClient: InternalUserTransactionClient;
-  readonly challenge: AuthChallenge;
-  readonly now: Date;
-}): Promise<void> {
-  const attemptsLeft = Math.max(input.challenge.attemptsLeft - 1, 0);
-  await input.transactionClient.authChallenge.update({
-    where: {
-      id: input.challenge.id,
-    },
-    data: {
-      attemptsLeft,
-      consumedAt: attemptsLeft === 0 ? input.now : null,
-    },
-  });
-}
-
-async function revokeIssuedEmailVerificationChallenge(input: {
-  readonly prismaService: PrismaService;
-  readonly challengeId: string;
-  readonly revokedAt: Date;
-}): Promise<void> {
-  await input.prismaService.authChallenge.updateMany({
-    where: {
-      id: input.challengeId,
-      consumedAt: null,
-    },
-    data: {
-      consumedAt: input.revokedAt,
-    },
-  });
-}
-
-function attachRevokeFailureContext(primaryError: unknown, revokeError: unknown): unknown {
-  if (primaryError instanceof Error) {
-    const errorWithContext = primaryError as Error & {
-      revokeError?: unknown;
-      suppressedErrors?: readonly unknown[];
-    };
-    errorWithContext.revokeError = revokeError;
-    errorWithContext.suppressedErrors = [...(errorWithContext.suppressedErrors ?? []), revokeError];
-    return errorWithContext;
-  }
-  return primaryError;
-}
-
-function shouldRevokeIssuedChallengeAfterDeliveryFailure(error: unknown): boolean {
-  return error instanceof EmailDeliveryException && error.deliveryState === 'definitely-not-delivered';
-}
-
-function isWebAccountLoginConflictError(error: unknown): boolean {
-  if (!(error instanceof Prisma.PrismaClientKnownRequestError)) {
-    return false;
-  }
-  if (error.code !== 'P2002') {
-    return false;
-  }
-  const target = error.meta?.target;
-  return Array.isArray(target) && target.includes('loginNormalized');
-}
-
-function mapInternalUserSession(
-  user: InternalUserRecord,
-): InternalUserSessionInterface {
-  return {
-    id: user.id,
-    telegramId: user.telegramId?.toString() ?? null,
-    username: user.username,
-    name: user.name,
-    email: user.email,
-    role: user.role,
-    language: user.language,
-    personalDiscount: user.personalDiscount,
-    purchaseDiscount: user.purchaseDiscount,
-    points: user.points,
-    maxSubscriptions: user.maxSubscriptions,
-    isBlocked: user.isBlocked,
-    isBotBlocked: user.isBotBlocked,
-    isRulesAccepted: user.isRulesAccepted,
-    createdAt: user.createdAt.toISOString(),
-    updatedAt: user.updatedAt.toISOString(),
-    webAccount: user.webAccount === null ? null : {
-      id: user.webAccount.id,
-      login: user.webAccount.login,
-      loginNormalized: user.webAccount.loginNormalized,
-      email: user.webAccount.email,
-      emailNormalized: user.webAccount.emailNormalized,
-      emailVerifiedAt: mapDateValue(user.webAccount.emailVerifiedAt),
-      requiresPasswordChange: user.webAccount.requiresPasswordChange,
-      linkPromptSnoozeUntil: mapDateValue(user.webAccount.linkPromptSnoozeUntil),
-      credentialsBootstrappedAt: mapDateValue(user.webAccount.credentialsBootstrappedAt),
-      createdAt: user.webAccount.createdAt.toISOString(),
-      updatedAt: user.webAccount.updatedAt.toISOString(),
-    },
-  };
-}
-
-function mapInternalEmailVerificationChallenge(
-  input: MapInternalEmailVerificationChallengeInput,
-): InternalWebAccountEmailVerificationChallengeInterface {
-  return {
-    webAccountId: input.webAccount.id,
-    email: input.email,
-    challengeExpiresAt: input.challenge.expiresAt.toISOString(),
-  };
-}
-
-function mapDateValue(value: Date | null): string | null {
-  return value === null ? null : value.toISOString();
-}
-
-function selectCurrentSubscription(
-  subscriptions: readonly Subscription[],
-): Subscription | null {
-  if (subscriptions.length === 0) {
-    return null;
-  }
-  const now = new Date();
-  const rankedSubscriptions = subscriptions
-    .map((subscription) => ({
-      subscription,
-      rank: getSubscriptionRank(subscription, now),
-    }))
-    .sort((left, right) => {
-      if (left.rank !== right.rank) {
-        return left.rank - right.rank;
-      }
-      return right.subscription.createdAt.getTime() - left.subscription.createdAt.getTime();
-    });
-  return rankedSubscriptions[0]?.subscription ?? null;
-}
-
-function getSubscriptionRank(subscription: Subscription, now: Date): number {
-  if (isCurrentSubscription(subscription, now)) {
-    return 0;
-  }
-  if (isUpcomingSubscription(subscription, now)) {
-    return 1;
-  }
-  if (hasFutureExpiry(subscription, now)) {
-    return 2;
-  }
-  return 3;
-}
-
-function isCurrentSubscription(subscription: Subscription, now: Date): boolean {
-  const isEnabledStatus =
-    subscription.status === SubscriptionStatus.ACTIVE ||
-    subscription.status === SubscriptionStatus.LIMITED;
-  if (!isEnabledStatus) {
-    return false;
-  }
-  if (subscription.startedAt !== null && subscription.startedAt.getTime() > now.getTime()) {
-    return false;
-  }
-  return !isExpiredSubscription(subscription, now);
-}
-
-function isUpcomingSubscription(subscription: Subscription, now: Date): boolean {
-  if (subscription.startedAt === null) {
-    return false;
-  }
-  return subscription.startedAt.getTime() > now.getTime() && !isExpiredSubscription(subscription, now);
-}
-
-function hasFutureExpiry(subscription: Subscription, now: Date): boolean {
-  if (subscription.expiresAt === null) {
-    return false;
-  }
-  return subscription.expiresAt.getTime() > now.getTime();
-}
-
-function isExpiredSubscription(subscription: Subscription, now: Date): boolean {
-  if (subscription.expiresAt === null) {
-    return false;
-  }
-  return subscription.expiresAt.getTime() <= now.getTime();
-}
-
-function mapSubscriptionPlanSnapshot(
-  planSnapshot: Prisma.JsonValue,
-): { readonly name: string | null; readonly type: PlanType | null } | null {
-  if (!isJsonObject(planSnapshot)) {
-    return null;
-  }
-  return {
-    name: readOptionalString(planSnapshot, 'name'),
-    type: readOptionalPlanType(planSnapshot, 'type'),
-  };
-}
-
-function isJsonObject(value: Prisma.JsonValue): value is Prisma.JsonObject {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function readOptionalString(
-  value: Prisma.JsonObject,
-  propertyName: string,
-): string | null {
-  const propertyValue = value[propertyName];
-  return typeof propertyValue === 'string' ? propertyValue : null;
-}
-
-function readOptionalPlanType(
-  value: Prisma.JsonObject,
-  propertyName: string,
-): PlanType | null {
-  const propertyValue = value[propertyName];
-  if (typeof propertyValue !== 'string') {
-    return null;
-  }
-  return isPlanType(propertyValue) ? propertyValue : null;
-}
-
-function isPlanType(value: string): value is PlanType {
-  return Object.values(PlanType).includes(value as PlanType);
 }

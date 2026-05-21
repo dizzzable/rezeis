@@ -28,9 +28,9 @@ export class PlanSnapshotSyncService {
   ): Promise<number> {
     const subscriptions = await prismaClient.$queryRaw<readonly SubscriptionSnapshotRow[]>(
       Prisma.sql`
-        SELECT "id", "planSnapshot"
-        FROM "Subscription"
-        WHERE "planSnapshot"->>'id' = ${plan.id}
+        SELECT "id", "plan_snapshot" AS "planSnapshot"
+        FROM "subscriptions"
+        WHERE "plan_snapshot"->>'id' = ${plan.id}
       `,
     );
 

@@ -1,21 +1,19 @@
 import { registerAs } from '@nestjs/config';
 
 interface PaymentsConfiguration {
-  readonly adminPublicBaseUrl: string | null;
-  readonly ruidPublicWebUrl: string | null;
+  readonly domain: string | null;
   readonly botToken: string | null;
 }
 
-function normalizeOptionalString(value: string | undefined): string | null {
-  const normalizedValue = value?.trim() ?? '';
-  return normalizedValue === '' ? null : normalizedValue;
+function normalizeOptional(value: string | undefined): string | null {
+  const v = value?.trim() ?? '';
+  return v === '' ? null : v;
 }
 
 export const paymentsConfig = registerAs(
   'payments',
   (): PaymentsConfiguration => ({
-    adminPublicBaseUrl: normalizeOptionalString(process.env.REZEIS_ADMIN_PUBLIC_BASE_URL),
-    ruidPublicWebUrl: normalizeOptionalString(process.env.RUID_PUBLIC_WEB_URL),
-    botToken: normalizeOptionalString(process.env.BOT_TOKEN),
+    domain: normalizeOptional(process.env.REZEIS_DOMAIN),
+    botToken: normalizeOptional(process.env.BOT_TOKEN),
   }),
 );

@@ -1,10 +1,8 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import {
   ArchivedPlanRenewMode,
   Currency,
-  PaymentGateway,
   PaymentGatewayType,
-  Plan,
   Prisma,
   PurchaseChannel,
   PurchaseType,

@@ -46,6 +46,37 @@ const plategaSettingsSchema = z
   })
   .strict();
 
+const antilopaySettingsSchema = z
+  .object({
+    projectIdentificator: z.string().min(1).optional(),
+    secretId: z.string().min(1).optional(),
+    privateKey: z.string().min(1).optional(),
+    publicKey: z.string().min(1).optional(),
+  })
+  .strict();
+
+const overpaySettingsSchema = z
+  .object({
+    shopId: z.string().min(1).optional(),
+    secretKey: z.string().min(1).optional(),
+    publicKey: z.string().min(1).optional(),
+  })
+  .strict();
+
+const paypalychSettingsSchema = z
+  .object({
+    shopId: z.string().min(1).optional(),
+    apiKey: z.string().min(1).optional(),
+    secretKey: z.string().min(1).optional(),
+  })
+  .strict();
+
+const riopaySettingsSchema = z
+  .object({
+    apiToken: z.string().min(1).optional(),
+  })
+  .strict();
+
 type GatewaySettingsRecord = Record<string, unknown>;
 
 function stripUndefinedEntries(value: GatewaySettingsRecord): Prisma.InputJsonObject {
@@ -97,6 +128,14 @@ export function normalizeGatewaySettingsForStorage(
           paymentMethod: normalizePlategaPaymentMethod(parsedSettings.paymentMethod),
         });
       }
+      case PaymentGatewayType.ANTILOPAY:
+        return stripUndefinedEntries(antilopaySettingsSchema.parse(rawSettings));
+      case PaymentGatewayType.OVERPAY:
+        return stripUndefinedEntries(overpaySettingsSchema.parse(rawSettings));
+      case PaymentGatewayType.PAYPALYCH:
+        return stripUndefinedEntries(paypalychSettingsSchema.parse(rawSettings));
+      case PaymentGatewayType.RIOPAY:
+        return stripUndefinedEntries(riopaySettingsSchema.parse(rawSettings));
       default:
         return stripUndefinedEntries(rawSettings);
     }
@@ -132,6 +171,14 @@ export function isGatewayConfigured(
       return hasRequiredStrings(settings, ['apiKey']);
     case PaymentGatewayType.CRYPTOMUS:
       return hasRequiredStrings(settings, ['merchantId', 'apiKey']);
+    case PaymentGatewayType.ANTILOPAY:
+      return hasRequiredStrings(settings, ['projectIdentificator', 'secretId', 'privateKey']);
+    case PaymentGatewayType.OVERPAY:
+      return hasRequiredStrings(settings, ['shopId', 'secretKey']);
+    case PaymentGatewayType.PAYPALYCH:
+      return hasRequiredStrings(settings, ['shopId', 'apiKey']);
+    case PaymentGatewayType.RIOPAY:
+      return hasRequiredStrings(settings, ['apiToken']);
     default:
       return false;
   }

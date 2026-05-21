@@ -148,7 +148,7 @@ export class PaymentWebhookOpsService {
     const groupedStatus = await this.prismaService.paymentWebhookEvent.groupBy({
       by: ['status'],
       _count: { _all: true },
-    } as never);
+    });
 
     const eventsByStatus: Record<PaymentWebhookLifecycleStatus, number> = {
       [PaymentWebhookLifecycleStatus.RECEIVED]: 0,

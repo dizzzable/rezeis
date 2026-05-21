@@ -9,5 +9,5 @@ function normalizeApiUrl(value: string | undefined): string {
 }
 
 export const env: EnvConfig = {
-  adminApiUrl: normalizeApiUrl(import.meta.env.VITE_ADMIN_API_URL),
+  adminApiUrl: normalizeApiUrl((import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env?.VITE_ADMIN_API_URL),
 }

@@ -1,0 +1,37 @@
+name: React Doctor
+
+on:
+  pull_request:
+    paths:
+      - 'web/**'
+  push:
+    branches: [main]
+    paths:
+      - 'web/**'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  react-doctor:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Run react-doctor
+        run: npx react-doctor@latest --fail-on error --annotations
