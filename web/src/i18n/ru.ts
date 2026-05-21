@@ -654,18 +654,47 @@
   importsPage: {
     title: 'Импорт пользователей',
     subtitle:
-      'Перенос и синхронизация пользователей напрямую из Remnawave-панели одной кнопкой.',
-    import: {
-      title: 'Импорт из Remnawave',
-      description:
-        'Подтянет всех пользователей панели и создаст недостающие локальные записи (привязка по Telegram ID).',
-      action: 'Импортировать',
+      'Импорт и синхронизация пользователей из нескольких источников: Remnawave, 3x-ui, Remnashop, Altshop.',
+    remnawave: {
+      import: {
+        title: 'Импорт из Remnawave',
+        description:
+          'Подтянет всех пользователей панели и создаст недостающие локальные записи (привязка по Telegram ID).',
+        action: 'Импортировать',
+      },
+      sync: {
+        title: 'Синхронизация',
+        description:
+          'Только обновит уже существующих локальных пользователей данными из панели. Новые не создаются.',
+        action: 'Запустить синхронизацию',
+      },
     },
-    sync: {
-      title: 'Синхронизация',
+    threexui: {
+      title: 'Импорт из 3x-ui',
       description:
-        'Только обновит уже существующих локальных пользователей данными из панели. Новые не создаются.',
-      action: 'Запустить синхронизацию',
+        'Загрузите файл базы данных 3x-ui (.db) или JSON-экспорт клиентов. Привязка по Telegram ID или email.',
+      action: 'Выбрать файл',
+      selectFile: 'Выбрать файл базы данных или JSON 3x-ui',
+      importing: 'Импорт {{filename}}…',
+      hint: 'Принимаемые форматы: x-ui.db (SQLite база) или JSON-экспорт клиентов.',
+    },
+    remnashop: {
+      title: 'Импорт из Remnashop',
+      description:
+        'Загрузите бэкап Remnashop (.tar.gz) или JSON-экспорт. Привязка пользователей по Telegram ID.',
+      action: 'Выбрать файл',
+      selectFile: 'Выбрать файл бэкапа Remnashop',
+      importing: 'Импорт {{filename}}…',
+      hint: 'Принимаемые форматы: .tar.gz бэкап (с database.json внутри) или .json экспорт.',
+    },
+    altshop: {
+      title: 'Импорт из Altshop',
+      description:
+        'Загрузите бэкап Altshop (.tar.gz), созданный из админ-панели. Включает пользователей, подписки и транзакции.',
+      action: 'Выбрать файл',
+      selectFile: 'Выбрать файл бэкапа Altshop',
+      importing: 'Импорт {{filename}}…',
+      hint: 'Принимаемые форматы: backup_full_*.tar.gz или database.json.',
     },
     importDone: 'Импорт завершён · {{summary}}',
     syncDone: 'Синхронизация завершена · {{summary}}',
@@ -675,6 +704,7 @@
     errorUnavailable:
       'Remnawave не доступен — проверьте REMNAWAVE_HOST/PORT/TOKEN и доступность панели.',
     errorGeneric: 'Импорт не удался',
+    errorInvalidJson: 'Некорректный JSON-файл — не удалось разобрать содержимое.',
     lastRunImport: 'Последний импорт',
     lastRunSync: 'Последняя синхронизация',
     summary:

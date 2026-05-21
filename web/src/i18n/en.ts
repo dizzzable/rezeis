@@ -640,18 +640,47 @@ export const en = {
   importsPage: {
     title: 'Imports',
     subtitle:
-      'One-click import and sync of users straight from the Remnawave panel.',
-    import: {
-      title: 'Import from Remnawave',
-      description:
-        'Pulls every panel user and creates missing local rows (matched by Telegram ID).',
-      action: 'Import',
+      'Import and sync users from multiple sources: Remnawave, 3x-ui, Remnashop, Altshop.',
+    remnawave: {
+      import: {
+        title: 'Import from Remnawave',
+        description:
+          'Pulls every panel user and creates missing local rows (matched by Telegram ID).',
+        action: 'Import',
+      },
+      sync: {
+        title: 'Sync',
+        description:
+          'Updates existing local users from the panel. Does not create new ones.',
+        action: 'Run sync',
+      },
     },
-    sync: {
-      title: 'Sync',
+    threexui: {
+      title: 'Import from 3x-ui',
       description:
-        'Updates existing local users from the panel. Does not create new ones.',
-      action: 'Run sync',
+        'Upload the 3x-ui database file (.db) or a JSON export of clients. Matches by Telegram ID or email.',
+      action: 'Select file',
+      selectFile: 'Select 3x-ui database or JSON file',
+      importing: 'Importing {{filename}}…',
+      hint: 'Accepted formats: x-ui.db (SQLite database) or clients JSON export.',
+    },
+    remnashop: {
+      title: 'Import from Remnashop',
+      description:
+        'Upload a Remnashop backup (.tar.gz) or JSON export. Matches users by Telegram ID.',
+      action: 'Select file',
+      selectFile: 'Select Remnashop backup file',
+      importing: 'Importing {{filename}}…',
+      hint: 'Accepted formats: .tar.gz backup (with database.json inside) or .json export.',
+    },
+    altshop: {
+      title: 'Import from Altshop',
+      description:
+        'Upload an Altshop backup (.tar.gz) created from the admin panel. Includes users, subscriptions, and transactions.',
+      action: 'Select file',
+      selectFile: 'Select Altshop backup file',
+      importing: 'Importing {{filename}}…',
+      hint: 'Accepted formats: backup_full_*.tar.gz or database.json.',
     },
     importDone: 'Import done · {{summary}}',
     syncDone: 'Sync done · {{summary}}',
@@ -662,6 +691,7 @@ export const en = {
     errorUnavailable:
       'Remnawave is unavailable — check REMNAWAVE_HOST/PORT/TOKEN and panel reachability.',
     errorGeneric: 'Import failed',
+    errorInvalidJson: 'Invalid JSON file — could not parse the contents.',
     lastRunImport: 'Last import',
     lastRunSync: 'Last sync',
     summary:

@@ -1,21 +1,32 @@
 import {
+  BadRequestException,
   Controller,
   Get,
   HttpCode,
   HttpStatus,
   Post,
   Query,
+  UploadedFile,
   UseGuards,
+  UseInterceptors,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 
 import { CurrentAdmin } from '../../auth/decorators/current-admin.decorator';
 import { AdminJwtAuthGuard } from '../../auth/guards/admin-jwt-auth.guard';
 import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.interface';
+import { ImportSummary } from '../interfaces/import-summary.interface';
+import { AltshopImporterService } from '../services/altshop-importer.service';
 import { ImportsService } from '../services/imports.service';
 import {
   RemnawaveImporterService,
   type RemnawaveImportSummary,
 } from '../services/remnawave-importer.service';
+import { RemnashopImporterService } from '../services/remnashop-importer.service';
+import { ThreeXuiImporterService } from '../services/threexui-importer.service';
+import { parseAltshopBackup } from '../utils/altshop-backup-parser';
+import { parseRemnashopBackup } from '../utils/remnashop-backup-parser';
+import { parseThreeXuiBackup } from '../utils/threexui-backup-parser';
 
 interface ImportRecordPayload {
   readonly id: string;
@@ -38,10 +49,11 @@ interface ListImportsResponse {
 }
 
 /**
- * Admin imports surface — wraps the simple altshop-style flow:
- *   • One button to import everything from Remnawave.
- *   • One button to refresh existing local users from Remnawave.
- *   • A history table for the operator to see prior runs.
+ * Admin imports surface — supports multiple import sources:
+ *   • Remnawave — live API pull (one-button)
+ *   • 3x-ui — file upload (.db SQLite or .json)
+ *   • Remnashop — file upload (.tar.gz or .json)
+ *   • Altshop — file upload (.tar.gz or .json)
  */
 @Controller('admin/imports')
 @UseGuards(AdminJwtAuthGuard)
@@ -49,6 +61,9 @@ export class AdminImportsController {
   public constructor(
     private readonly importsService: ImportsService,
     private readonly remnawaveImporterService: RemnawaveImporterService,
+    private readonly threexuiImporterService: ThreeXuiImporterService,
+    private readonly remnashopImporterService: RemnashopImporterService,
+    private readonly altshopImporterService: AltshopImporterService,
   ) {}
 
   @Get()
@@ -79,6 +94,8 @@ export class AdminImportsController {
     return { items, total: items.length };
   }
 
+  // ── Remnawave (live API) ────────────────────────────────────────────────
+
   @Post('remnawave')
   @HttpCode(HttpStatus.OK)
   public async importFromRemnawave(
@@ -93,5 +110,74 @@ export class AdminImportsController {
     @CurrentAdmin() admin: CurrentAdminInterface,
   ): Promise<RemnawaveImportSummary> {
     return this.remnawaveImporterService.run({ mode: 'sync', createdBy: admin.id });
+  }
+
+  // ── 3x-ui (file upload: .db or .json) ──────────────────────────────────
+
+  @Post('3xui')
+  @HttpCode(HttpStatus.OK)
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 100 * 1024 * 1024 } }))
+  public async importFrom3xui(
+    @CurrentAdmin() admin: CurrentAdminInterface,
+    @UploadedFile() file?: Express.Multer.File,
+  ): Promise<ImportSummary> {
+    if (!file) {
+      throw new BadRequestException('File is required. Upload a .db (SQLite) or .json file.');
+    }
+
+    const clients = parseThreeXuiBackup(file.buffer);
+
+    return this.threexuiImporterService.run({
+      mode: 'import',
+      createdBy: admin.id,
+      clients,
+    });
+  }
+
+  // ── Remnashop (file upload: .tar.gz or .json) ───────────────────────────
+
+  @Post('remnashop')
+  @HttpCode(HttpStatus.OK)
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 100 * 1024 * 1024 } }))
+  public async importFromRemnashop(
+    @CurrentAdmin() admin: CurrentAdminInterface,
+    @UploadedFile() file?: Express.Multer.File,
+  ): Promise<ImportSummary> {
+    if (!file) {
+      throw new BadRequestException('File is required. Upload a .tar.gz backup or .json export.');
+    }
+
+    const { users, subscriptions } = await parseRemnashopBackup(file.buffer);
+
+    return this.remnashopImporterService.run({
+      mode: 'import',
+      createdBy: admin.id,
+      users,
+      subscriptions,
+    });
+  }
+
+  // ── Altshop (file upload: .tar.gz or .json) ─────────────────────────────
+
+  @Post('altshop')
+  @HttpCode(HttpStatus.OK)
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 100 * 1024 * 1024 } }))
+  public async importFromAltshop(
+    @CurrentAdmin() admin: CurrentAdminInterface,
+    @UploadedFile() file?: Express.Multer.File,
+  ): Promise<ImportSummary> {
+    if (!file) {
+      throw new BadRequestException('File is required. Upload a .tar.gz backup or database.json.');
+    }
+
+    const { users, subscriptions, transactions } = await parseAltshopBackup(file.buffer);
+
+    return this.altshopImporterService.run({
+      mode: 'import',
+      createdBy: admin.id,
+      users,
+      subscriptions,
+      transactions,
+    });
   }
 }
