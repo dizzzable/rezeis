@@ -322,37 +322,38 @@ export class BusinessAnalyticsService {
   }
 
   private async getDailyRevenue7d(now: Date): Promise<readonly TimeSeriesPointInterface[]> {
+    const windowStart = new Date(startOfDay(now).getTime() - 6 * ANALYTICS_ONE_DAY_MS);
+    const rows = await this.prismaService.$queryRawUnsafe<Array<{ day: string; total: bigint | null }>>(
+      `SELECT date_trunc('day', updated_at)::date::text AS day, SUM(amount) AS total
+       FROM transactions
+       WHERE status = 'COMPLETED' AND updated_at >= $1
+       GROUP BY day ORDER BY day`,
+      windowStart,
+    );
+    // Fill gaps for days with no revenue
+    const revenueMap = new Map(rows.map((r) => [r.day, Number(r.total ?? 0)]));
     const points: TimeSeriesPointInterface[] = [];
-    for (let i = 6; i >= 0; i--) {
-      const dayStart = new Date(startOfDay(now).getTime() - i * ANALYTICS_ONE_DAY_MS);
-      const dayEnd = new Date(dayStart.getTime() + ANALYTICS_ONE_DAY_MS);
-      const aggregate = await this.prismaService.transaction.aggregate({
-        where: {
-          status: TransactionStatus.COMPLETED,
-          updatedAt: { gte: dayStart, lt: dayEnd },
-        },
-        _sum: { amount: true },
-      });
-      points.push({
-        date: dayStart.toISOString().slice(0, 10),
-        value: Number(aggregate._sum.amount ?? 0),
-      });
+    for (let i = 0; i < 7; i++) {
+      const date = new Date(startOfDay(now).getTime() - (6 - i) * ANALYTICS_ONE_DAY_MS).toISOString().slice(0, 10);
+      points.push({ date, value: revenueMap.get(date) ?? 0 });
     }
     return points;
   }
 
   private async getDailyNewUsers7d(now: Date): Promise<readonly TimeSeriesPointInterface[]> {
+    const windowStart = new Date(startOfDay(now).getTime() - 6 * ANALYTICS_ONE_DAY_MS);
+    const rows = await this.prismaService.$queryRawUnsafe<Array<{ day: string; cnt: bigint }>>(
+      `SELECT date_trunc('day', created_at)::date::text AS day, COUNT(*)::bigint AS cnt
+       FROM users
+       WHERE created_at >= $1
+       GROUP BY day ORDER BY day`,
+      windowStart,
+    );
+    const countMap = new Map(rows.map((r) => [r.day, Number(r.cnt)]));
     const points: TimeSeriesPointInterface[] = [];
-    for (let i = 6; i >= 0; i--) {
-      const dayStart = new Date(startOfDay(now).getTime() - i * ANALYTICS_ONE_DAY_MS);
-      const dayEnd = new Date(dayStart.getTime() + ANALYTICS_ONE_DAY_MS);
-      const count = await this.prismaService.user.count({
-        where: { createdAt: { gte: dayStart, lt: dayEnd } },
-      });
-      points.push({
-        date: dayStart.toISOString().slice(0, 10),
-        value: count,
-      });
+    for (let i = 0; i < 7; i++) {
+      const date = new Date(startOfDay(now).getTime() - (6 - i) * ANALYTICS_ONE_DAY_MS).toISOString().slice(0, 10);
+      points.push({ date, value: countMap.get(date) ?? 0 });
     }
     return points;
   }
@@ -577,31 +578,44 @@ export class BusinessAnalyticsService {
     windowStart: Date,
     days: number,
   ): Promise<readonly DailyMetricInterface[]> {
-    const points: DailyMetricInterface[] = [];
+    // Single raw SQL query replaces the previous N+1 loop (was: 3 queries × days iterations)
+    const [revenueRows, userRows, subRows] = await Promise.all([
+      this.prismaService.$queryRawUnsafe<Array<{ day: string; total: bigint | null }>>(
+        `SELECT date_trunc('day', updated_at)::date::text AS day, SUM(amount) AS total
+         FROM transactions
+         WHERE status = 'COMPLETED' AND updated_at >= $1
+         GROUP BY day ORDER BY day`,
+        windowStart,
+      ),
+      this.prismaService.$queryRawUnsafe<Array<{ day: string; cnt: bigint }>>(
+        `SELECT date_trunc('day', created_at)::date::text AS day, COUNT(*)::bigint AS cnt
+         FROM users
+         WHERE created_at >= $1
+         GROUP BY day ORDER BY day`,
+        windowStart,
+      ),
+      this.prismaService.$queryRawUnsafe<Array<{ day: string; cnt: bigint }>>(
+        `SELECT date_trunc('day', created_at)::date::text AS day, COUNT(*)::bigint AS cnt
+         FROM subscriptions
+         WHERE created_at >= $1
+         GROUP BY day ORDER BY day`,
+        windowStart,
+      ),
+    ]);
+
+    const revenueMap = new Map(revenueRows.map((r) => [r.day, Number(r.total ?? 0)]));
+    const userMap = new Map(userRows.map((r) => [r.day, Number(r.cnt)]));
+    const subMap = new Map(subRows.map((r) => [r.day, Number(r.cnt)]));
+
     const startOfStart = startOfDay(windowStart);
+    const points: DailyMetricInterface[] = [];
     for (let i = 0; i < days; i++) {
-      const dayStart = new Date(startOfStart.getTime() + i * ANALYTICS_ONE_DAY_MS);
-      const dayEnd = new Date(dayStart.getTime() + ANALYTICS_ONE_DAY_MS);
-      const [revenueAgg, newUsers, newSubs] = await Promise.all([
-        this.prismaService.transaction.aggregate({
-          where: {
-            status: TransactionStatus.COMPLETED,
-            updatedAt: { gte: dayStart, lt: dayEnd },
-          },
-          _sum: { amount: true },
-        }),
-        this.prismaService.user.count({
-          where: { createdAt: { gte: dayStart, lt: dayEnd } },
-        }),
-        this.prismaService.subscription.count({
-          where: { createdAt: { gte: dayStart, lt: dayEnd } },
-        }),
-      ]);
+      const date = new Date(startOfStart.getTime() + i * ANALYTICS_ONE_DAY_MS).toISOString().slice(0, 10);
       points.push({
-        date: dayStart.toISOString().slice(0, 10),
-        revenue: Number(revenueAgg._sum.amount ?? 0),
-        newUsers,
-        newSubscriptions: newSubs,
+        date,
+        revenue: revenueMap.get(date) ?? 0,
+        newUsers: userMap.get(date) ?? 0,
+        newSubscriptions: subMap.get(date) ?? 0,
       });
     }
     return points;

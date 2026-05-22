@@ -3773,6 +3773,11 @@
     trialBadge: 'Триал',
     trafficGb: '{{value}} ГБ',
   },
+  errorBoundary: {
+    title: 'Произошла ошибка',
+    description: 'Что-то пошло не так при загрузке этой страницы. Попробуйте обновить.',
+    retry: 'Попробовать снова',
+  },
   dashboardPage: {
     title: 'Дашборд',
     snapshotAt: 'Снимок сделан в {{time}}',

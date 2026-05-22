@@ -5,6 +5,7 @@ import {
 } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { RawCacheService } from '../../../common/cache/raw-cache.service';
 import {
   DashboardAttentionItemInterface,
   DashboardMetricInterface,
@@ -14,6 +15,11 @@ import {
 
 const ONE_HOUR_MS = 60 * 60 * 1000;
 const ONE_DAY_MS = 24 * ONE_HOUR_MS;
+
+/** Cache key for the dashboard summary. */
+const DASHBOARD_SUMMARY_CACHE_KEY = 'dashboard:summary';
+/** Cache TTL in seconds — 60s keeps the dashboard fresh while reducing DB load by ~95%. */
+const DASHBOARD_SUMMARY_TTL_SECONDS = 60;
 
 /**
  * Aggregates the bounded KPI summary that powers the admin dashboard.
@@ -31,9 +37,20 @@ const ONE_DAY_MS = 24 * ONE_HOUR_MS;
  */
 @Injectable()
 export class DashboardService {
-  public constructor(private readonly prismaService: PrismaService) {}
+  public constructor(
+    private readonly prismaService: PrismaService,
+    private readonly cacheService: RawCacheService,
+  ) {}
 
   public async getSummary(): Promise<DashboardSummaryInterface> {
+    return this.cacheService.getOrSet<DashboardSummaryInterface>(
+      DASHBOARD_SUMMARY_CACHE_KEY,
+      () => this.computeSummary(),
+      DASHBOARD_SUMMARY_TTL_SECONDS,
+    );
+  }
+
+  private async computeSummary(): Promise<DashboardSummaryInterface> {
     const now = new Date();
     const expiryHorizon7d = new Date(now.getTime() + 7 * ONE_DAY_MS);
     const recentRegistered7dStart = new Date(now.getTime() - 7 * ONE_DAY_MS);

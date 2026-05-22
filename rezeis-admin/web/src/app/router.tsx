@@ -4,6 +4,7 @@ import { lazy, Suspense } from 'react'
 import ProtectedRoute from './protected-route'
 import AdminShell from '@/components/layout/admin-shell'
 import { Skeleton } from '@/components/ui/skeleton'
+import { ErrorBoundary } from '@/components/ErrorBoundary'
 
 // Lazy-load pages
 const SignInPage = lazy(() => import('@/features/auth/sign-in-page'))
@@ -60,7 +61,11 @@ function PageFallback() {
 }
 
 function withSuspense(element: React.ReactNode) {
-  return <Suspense fallback={<PageFallback />}>{element}</Suspense>
+  return (
+    <ErrorBoundary>
+      <Suspense fallback={<PageFallback />}>{element}</Suspense>
+    </ErrorBoundary>
+  )
 }
 
 export const router = createBrowserRouter([

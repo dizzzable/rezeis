@@ -3745,6 +3745,11 @@ export const en = {
     trialBadge: 'Trial',
     trafficGb: '{{value}} GB',
   },
+  errorBoundary: {
+    title: 'Something went wrong',
+    description: 'An error occurred while loading this page. Try refreshing.',
+    retry: 'Try again',
+  },
   dashboardPage: {
     title: 'Dashboard',
     snapshotAt: 'Snapshot taken at {{time}}',

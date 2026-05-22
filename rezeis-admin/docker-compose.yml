@@ -26,6 +26,7 @@ services:
       - REDIS_PASSWORD=rezeis
       - NODE_ENV=production
       - BACKUP_LOCATION=/app/data/backups
+      - REZEIS_UPDATE_REPO=dizzzable/rezeis
     ports:
       - '127.0.0.1:8000:8000'
     volumes:
@@ -34,7 +35,20 @@ services:
       rezeis-db:
         condition: service_healthy
       rezeis-redis:
-        condition: service_started
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8000/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 1024M
+          cpus: '2.0'
+        reservations:
+          memory: 256M
     networks:
       - remnawave-network
 
@@ -60,12 +74,25 @@ services:
       rezeis-db:
         condition: service_healthy
       rezeis-redis:
-        condition: service_started
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "node -e 'process.exit(0)'"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+          cpus: '1.5'
+        reservations:
+          memory: 128M
     networks:
       - remnawave-network
 
   rezeis-db:
-    image: postgres:16-alpine
+    image: postgres:17-alpine
     container_name: rezeis-db
     hostname: rezeis-db
     restart: unless-stopped
@@ -80,6 +107,13 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '1.0'
+        reservations:
+          memory: 128M
     networks:
       - remnawave-network
 
@@ -98,6 +132,18 @@ services:
       --appendfsync everysec
     volumes:
       - rezeis-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "rezeis", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 576M
+          cpus: '0.5'
+        reservations:
+          memory: 64M
     networks:
       - remnawave-network
 
