@@ -76,4 +76,25 @@ export class AdminAnalyticsController {
   public getBaseline() {
     return this.analyticsService.getReport();
   }
+
+  @Get('admin/analytics/trial-conversion')
+  @RequirePermission('analytics', 'view')
+  @ApiOperation({ summary: 'Trial-to-paid conversion metrics' })
+  public getTrialConversion(@Query() query: AnalyticsWindowQueryDto) {
+    return this.analyticsService.getTrialConversion(query.days ?? 30);
+  }
+
+  @Get('admin/analytics/revenue-by-currency')
+  @RequirePermission('analytics', 'view')
+  @ApiOperation({ summary: 'Revenue breakdown by currency' })
+  public getRevenueByCurrency(@Query() query: AnalyticsWindowQueryDto) {
+    return this.analyticsService.getRevenueByCurrency(query.days ?? 30);
+  }
+
+  @Get('admin/analytics/subscriptions-by-plan')
+  @RequirePermission('analytics', 'view')
+  @ApiOperation({ summary: 'Active subscription distribution by plan' })
+  public getSubscriptionsByPlan() {
+    return this.analyticsService.getSubscriptionsByPlan();
+  }
 }

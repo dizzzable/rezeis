@@ -105,3 +105,45 @@ export async function getLtvDistribution(): Promise<readonly LtvBucket[]> {
   )
   return response.data.buckets
 }
+
+// ── Phase 8 — New endpoints ──────────────────────────────────────────────────
+
+export interface TrialConversionReport {
+  windowDays: number
+  totalTrialUsers: number
+  convertedUsers: number
+  conversionRate: number
+  avgDaysToConvert: number
+  revenueFromConverted: number
+  topConvertedPlans: readonly { plan: string; count: number; percentage: number }[]
+}
+
+export interface RevenueByCurrency {
+  currency: string
+  revenue: number
+  transactions: number
+  percentage: number
+}
+
+export interface SubscriptionByPlan {
+  plan: string
+  active: number
+  limited: number
+  total: number
+  percentage: number
+}
+
+export async function getTrialConversion(days: number): Promise<TrialConversionReport> {
+  const response = await api.get<TrialConversionReport>(`/admin/analytics/trial-conversion?days=${days}`)
+  return response.data
+}
+
+export async function getRevenueByCurrency(days: number): Promise<readonly RevenueByCurrency[]> {
+  const response = await api.get<readonly RevenueByCurrency[]>(`/admin/analytics/revenue-by-currency?days=${days}`)
+  return response.data
+}
+
+export async function getSubscriptionsByPlan(): Promise<readonly SubscriptionByPlan[]> {
+  const response = await api.get<readonly SubscriptionByPlan[]>('/admin/analytics/subscriptions-by-plan')
+  return response.data
+}

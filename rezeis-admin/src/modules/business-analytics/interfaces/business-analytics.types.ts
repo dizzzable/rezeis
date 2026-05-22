@@ -130,3 +130,36 @@ export interface AdvancedAnalyticsReportInterface {
   readonly windowDays: number;
   readonly generatedAt: string;
 }
+
+// ── Phase 8 — Trial Conversion & Revenue Breakdown ───────────────────────────
+
+export interface TrialConversionReport {
+  readonly windowDays: number;
+  readonly totalTrialUsers: number;
+  readonly convertedUsers: number;
+  readonly conversionRate: number;
+  readonly avgDaysToConvert: number;
+  readonly revenueFromConverted: number;
+  readonly topConvertedPlans: readonly ConvertedPlanItem[];
+}
+
+export interface ConvertedPlanItem {
+  readonly plan: string;
+  readonly count: number;
+  readonly percentage: number;
+}
+
+export interface RevenueByCurrencyItem {
+  readonly currency: string;
+  readonly revenue: number;
+  readonly transactions: number;
+  readonly percentage: number;
+}
+
+export interface SubscriptionByPlanItem {
+  readonly plan: string;
+  readonly active: number;
+  readonly limited: number;
+  readonly total: number;
+  readonly percentage: number;
+}

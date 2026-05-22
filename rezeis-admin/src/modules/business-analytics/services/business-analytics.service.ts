@@ -17,9 +17,12 @@ import {
   LtvBucketInterface,
   ProviderHealthInterface,
   RevenueByGatewayInterface,
+  RevenueByCurrencyItem,
+  SubscriptionByPlanItem,
   SubscriptionFunnelInterface,
   TimeSeriesPointInterface,
   TopPayerInterface,
+  TrialConversionReport,
   UserGrowthInterface,
 } from '../interfaces/business-analytics.types';
 import {
@@ -116,6 +119,164 @@ export class BusinessAnalyticsService {
       windowDays: days,
       generatedAt: now.toISOString(),
     };
+  }
+
+  // ── Trial Conversion Analytics ───────────────────────────────────────────
+
+  /**
+   * Computes trial-to-paid conversion metrics.
+   *
+   * - conversionRate: % of trial users who purchased a paid subscription
+   * - avgDaysToConvert: average days from trial grant to first payment
+   * - totalTrialUsers: users who received a trial in the window
+   * - convertedUsers: users who converted to paid
+   * - revenueFromConverted: total revenue from converted trial users
+   * - topConvertedPlans: which plans converted users chose
+   */
+  public async getTrialConversion(daysRaw: number): Promise<TrialConversionReport> {
+    const days = clampWindow(daysRaw);
+    const now = new Date();
+    const windowStart = new Date(startOfDay(now).getTime() - (days - 1) * ANALYTICS_ONE_DAY_MS);
+
+    // All trial grants in the window
+    const trialGrants = await this.prismaService.trialGrant.findMany({
+      where: { grantedAt: { gte: windowStart } },
+      select: { userId: true, grantedAt: true },
+    });
+
+    const totalTrialUsers = trialGrants.length;
+    if (totalTrialUsers === 0) {
+      return {
+        windowDays: days,
+        totalTrialUsers: 0,
+        convertedUsers: 0,
+        conversionRate: 0,
+        avgDaysToConvert: 0,
+        revenueFromConverted: 0,
+        topConvertedPlans: [],
+      };
+    }
+
+    const trialUserIds = trialGrants.map((g) => g.userId);
+    const trialUserMap = new Map(trialGrants.map((g) => [g.userId, g.grantedAt]));
+
+    // Find first paid transaction for each trial user
+    const paidTransactions = await this.prismaService.transaction.findMany({
+      where: {
+        userId: { in: trialUserIds },
+        status: TransactionStatus.COMPLETED,
+      },
+      select: { userId: true, amount: true, updatedAt: true, planSnapshot: true },
+      orderBy: { updatedAt: 'asc' },
+    });
+
+    // Group by user — take first transaction per user
+    const firstPaidByUser = new Map<string, { amount: number; updatedAt: Date; planSnapshot: unknown }>();
+    for (const tx of paidTransactions) {
+      if (tx.userId && !firstPaidByUser.has(tx.userId)) {
+        firstPaidByUser.set(tx.userId, {
+          amount: Number(tx.amount),
+          updatedAt: tx.updatedAt,
+          planSnapshot: tx.planSnapshot,
+        });
+      }
+    }
+
+    const convertedUsers = firstPaidByUser.size;
+    const conversionRate = totalTrialUsers > 0 ? convertedUsers / totalTrialUsers : 0;
+
+    // Calculate average days to convert
+    let totalDaysToConvert = 0;
+    let revenueFromConverted = 0;
+    const planCounts = new Map<string, number>();
+
+    for (const [userId, tx] of firstPaidByUser.entries()) {
+      const trialDate = trialUserMap.get(userId);
+      if (trialDate) {
+        const daysToConvert = (tx.updatedAt.getTime() - trialDate.getTime()) / ANALYTICS_ONE_DAY_MS;
+        totalDaysToConvert += Math.max(0, daysToConvert);
+      }
+      revenueFromConverted += tx.amount;
+
+      // Extract plan name from snapshot
+      const snapshot = tx.planSnapshot as Record<string, unknown> | null;
+      const planName = typeof snapshot?.name === 'string' ? snapshot.name : 'Unknown';
+      planCounts.set(planName, (planCounts.get(planName) ?? 0) + 1);
+    }
+
+    const avgDaysToConvert = convertedUsers > 0 ? totalDaysToConvert / convertedUsers : 0;
+
+    const topConvertedPlans = [...planCounts.entries()]
+      .map(([plan, count]) => ({ plan, count, percentage: convertedUsers > 0 ? count / convertedUsers : 0 }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 10);
+
+    return {
+      windowDays: days,
+      totalTrialUsers,
+      convertedUsers,
+      conversionRate,
+      avgDaysToConvert: Math.round(avgDaysToConvert * 10) / 10,
+      revenueFromConverted,
+      topConvertedPlans,
+    };
+  }
+
+  /**
+   * Revenue breakdown by currency for pie/donut charts.
+   */
+  public async getRevenueByCurrency(daysRaw: number): Promise<readonly RevenueByCurrencyItem[]> {
+    const days = clampWindow(daysRaw);
+    const windowStart = new Date(startOfDay(new Date()).getTime() - (days - 1) * ANALYTICS_ONE_DAY_MS);
+
+    const grouped = await this.prismaService.transaction.groupBy({
+      by: ['currency'],
+      where: { status: TransactionStatus.COMPLETED, updatedAt: { gte: windowStart } },
+      _sum: { amount: true },
+      _count: { _all: true },
+    });
+
+    const total = grouped.reduce((sum, row) => sum + Number(row._sum.amount ?? 0), 0);
+
+    return grouped
+      .map((row) => ({
+        currency: row.currency,
+        revenue: Number(row._sum.amount ?? 0),
+        transactions: row._count._all,
+        percentage: total > 0 ? Number(row._sum.amount ?? 0) / total : 0,
+      }))
+      .sort((a, b) => b.revenue - a.revenue);
+  }
+
+  /**
+   * Subscription distribution by plan name.
+   */
+  public async getSubscriptionsByPlan(): Promise<readonly SubscriptionByPlanItem[]> {
+    const allSubs = await this.prismaService.subscription.findMany({
+      where: { status: { in: [SubscriptionStatus.ACTIVE, SubscriptionStatus.LIMITED] } },
+      select: { planSnapshot: true, status: true },
+    });
+
+    const planCounts = new Map<string, { active: number; limited: number }>();
+    for (const sub of allSubs) {
+      const snapshot = sub.planSnapshot as Record<string, unknown> | null;
+      const planName = typeof snapshot?.name === 'string' ? snapshot.name : 'Unknown';
+      const existing = planCounts.get(planName) ?? { active: 0, limited: 0 };
+      if (sub.status === SubscriptionStatus.ACTIVE) existing.active += 1;
+      else existing.limited += 1;
+      planCounts.set(planName, existing);
+    }
+
+    const total = allSubs.length;
+    return [...planCounts.entries()]
+      .map(([plan, counts]) => ({
+        plan,
+        active: counts.active,
+        limited: counts.limited,
+        total: counts.active + counts.limited,
+        percentage: total > 0 ? (counts.active + counts.limited) / total : 0,
+      }))
+      .sort((a, b) => b.total - a.total);
   }
 
   // ── Cohort retention ───────────────────────────────────────────────────

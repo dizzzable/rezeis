@@ -3076,6 +3076,13 @@ export const en = {
   analyticsPage: {
     title: 'Business analytics',
     subtitle: 'KPIs, churn, conversion funnel, cohorts and lifetime value.',
+    tabs: {
+      overview: 'Overview',
+      revenue: 'Revenue',
+      conversion: 'Conversion',
+      retention: 'Retention',
+      leaderboard: 'Leaderboard',
+    },
     kpi: {
       revenue: 'Revenue',
       revenueSubtitle: '{{count}} transactions',
@@ -3092,15 +3099,35 @@ export const en = {
     },
     funnel: {
       title: 'Conversion funnel',
-      description: 'User journey across the selected window. Step-to-step ratio in brackets.',
+      description: 'User journey across the selected window.',
       empty: 'No data in this window.',
       prev: 'prev',
     },
     providers: {
       title: 'Payment providers',
-      description: 'Success rate and revenue by gateway in the window.',
+      description: 'Success rate and revenue by gateway.',
       empty: 'No payments yet.',
       successCount: '{{completed}}/{{total}} successful · {{failed}} failed',
+    },
+    revenue: {
+      byCurrencyTitle: 'Revenue by currency',
+      byCurrencyDescription: 'Breakdown of completed transactions by currency.',
+      byPlanTitle: 'Subscriptions by plan',
+      byPlanDescription: 'Active subscription distribution across plans.',
+      empty: 'No revenue data yet.',
+      noPlans: 'No active subscriptions.',
+    },
+    conversion: {
+      rate: 'Conversion rate',
+      rateSubtitle: '{{converted}}/{{total}} converted',
+      trialUsers: 'Trial users',
+      trialUsersSubtitle: 'Received trial in last {{days}}d',
+      revenueFromConverted: 'Revenue (converted)',
+      revenueSubtitle: 'From users who converted from trial',
+      avgDays: 'Avg days to convert',
+      avgDaysSubtitle: 'From trial grant to first payment',
+      topPlansTitle: 'Plans chosen after trial',
+      topPlansDescription: 'Which plans converted trial users purchased.',
     },
     cohorts: {
       title: 'Cohort retention',
@@ -3114,11 +3141,11 @@ export const en = {
     ltv: {
       title: 'Lifetime value distribution',
       description: '{{count}} paying users grouped by lifetime spend.',
-      empty: 'Not enough completed transactions to render a distribution yet.',
+      empty: 'Not enough data yet.',
     },
     topPayers: {
       title: 'Top payers',
-      description: '20 highest lifetime spenders across all time.',
+      description: '20 highest lifetime spenders.',
       empty: 'No paying users yet.',
       userColumn: 'User',
       telegramColumn: 'Telegram',
