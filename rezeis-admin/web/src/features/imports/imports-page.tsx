@@ -590,10 +590,11 @@ function AltshopTab() {
 
 function ImportResultAlert({ data, isSync }: { data: ImportSummary; isSync: boolean }) {
   const { t } = useTranslation()
+  const errors = data.errors ?? []
 
   return (
     <Alert>
-      {data.errors.length === 0 ? (
+      {errors.length === 0 ? (
         <CheckCircle2 className="h-4 w-4" />
       ) : (
         <AlertCircle className="h-4 w-4" />
@@ -608,9 +609,9 @@ function ImportResultAlert({ data, isSync }: { data: ImportSummary; isSync: bool
           updated: data.updated,
           skipped: data.skipped,
         })}
-        {data.errors.length > 0 && (
+        {errors.length > 0 && (
           <span className="ml-2 text-destructive">
-            ({t('importsPage.errorsCount', { count: data.errors.length })})
+            ({t('importsPage.errorsCount', { count: errors.length })})
           </span>
         )}
       </AlertDescription>
