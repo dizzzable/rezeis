@@ -20,14 +20,24 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const queryClient = useQueryClient()
 
   const [token, setToken] = useState<string | null>(() => {
-    // Check for OAuth callback token in URL (GitHub redirect)
+    // Check for OAuth callback token in URL hash fragment (GitHub redirect)
+    if (window.location.hash) {
+      const hashParams = new URLSearchParams(window.location.hash.slice(1))
+      const oauthToken = hashParams.get('oauth_token')
+      if (oauthToken) {
+        localStorage.setItem(TOKEN_KEY, oauthToken)
+        // Clean URL hash
+        window.history.replaceState({}, '', window.location.pathname)
+        return oauthToken
+      }
+    }
+    // Legacy: also check query params for backwards compat
     const params = new URLSearchParams(window.location.search)
-    const oauthToken = params.get('oauth_token')
-    if (oauthToken) {
-      localStorage.setItem(TOKEN_KEY, oauthToken)
-      // Clean URL
+    const oauthTokenQuery = params.get('oauth_token')
+    if (oauthTokenQuery) {
+      localStorage.setItem(TOKEN_KEY, oauthTokenQuery)
       window.history.replaceState({}, '', window.location.pathname)
-      return oauthToken
+      return oauthTokenQuery
     }
     return localStorage.getItem(TOKEN_KEY)
   })

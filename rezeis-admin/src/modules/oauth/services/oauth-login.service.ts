@@ -69,8 +69,14 @@ export class OAuthLoginService {
       });
 
       if (admin && admin.isActive) {
-        // Check whitelist
-        await this.validateWhitelist(profile);
+        // Validate whitelist — if whitelist is empty, auto-link is DENIED
+        // (admins must manually link their accounts or populate the whitelist)
+        const isWhitelisted = await this.isWhitelisted(profile);
+        if (!isWhitelisted) {
+          throw new UnauthorizedException(
+            'Auto-linking is not allowed. Ask an administrator to link your account manually or add your email/ID to the provider whitelist.',
+          );
+        }
 
         // Create the link
         await this.prismaService.adminOAuthLink.create({
@@ -92,9 +98,14 @@ export class OAuthLoginService {
       }
     }
 
-    // 3. For Telegram — try to match by telegram ID in the admin's linked data
+    // 3. For Telegram — validate whitelist
     if (profile.providerType === AuthProviderType.TELEGRAM) {
-      await this.validateWhitelist(profile);
+      const isWhitelisted = await this.isWhitelisted(profile);
+      if (!isWhitelisted) {
+        throw new UnauthorizedException(
+          'Telegram ID is not in the allowed list. Ask an administrator to add your ID.',
+        );
+      }
     }
 
     throw new UnauthorizedException(
@@ -214,37 +225,25 @@ export class OAuthLoginService {
     };
   }
 
-  private async validateWhitelist(profile: OAuthUserProfile): Promise<void> {
+  private async isWhitelisted(profile: OAuthUserProfile): Promise<boolean> {
     const config = await this.prismaService.authProviderConfig.findUnique({
       where: { type: profile.providerType },
       select: { allowedEmails: true, allowedTelegramIds: true },
     });
 
-    if (!config) {
-      throw new UnauthorizedException('Provider is not configured');
-    }
+    if (!config) return false;
 
-    // Check email whitelist (if non-empty)
-    if (config.allowedEmails.length > 0 && profile.email) {
-      const emailLower = profile.email.toLowerCase();
-      const allowed = config.allowedEmails.some(
-        (e) => e.toLowerCase() === emailLower,
-      );
-      if (!allowed) {
-        throw new ForbiddenException('Email is not in the allowed list');
-      }
-    }
-
-    // Check Telegram ID whitelist (if non-empty and provider is Telegram)
-    if (
-      profile.providerType === AuthProviderType.TELEGRAM &&
-      config.allowedTelegramIds.length > 0
-    ) {
+    // For Telegram: check Telegram ID whitelist
+    if (profile.providerType === AuthProviderType.TELEGRAM) {
+      if (config.allowedTelegramIds.length === 0) return false; // Empty = deny
       const tgId = BigInt(profile.providerId);
-      const allowed = config.allowedTelegramIds.some((id) => id === tgId);
-      if (!allowed) {
-        throw new ForbiddenException('Telegram ID is not in the allowed list');
-      }
+      return config.allowedTelegramIds.some((id) => id === tgId);
     }
+
+    // For other providers: check email whitelist
+    if (config.allowedEmails.length === 0) return false; // Empty = deny auto-link
+    if (!profile.email) return false;
+    const emailLower = profile.email.toLowerCase();
+    return config.allowedEmails.some((e) => e.toLowerCase() === emailLower);
   }
 }

@@ -1,5 +1,5 @@
 import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
-import { createHash, createHmac } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { AuthProviderType } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
@@ -102,9 +102,11 @@ export class TelegramAuthService {
     // Compute HMAC
     const computedHash = createHmac('sha256', secretKey)
       .update(checkString)
-      .digest('hex');
+      .digest();
 
-    if (computedHash !== hash) {
+    // Timing-safe comparison to prevent side-channel attacks
+    const providedHash = Buffer.from(hash, 'hex');
+    if (computedHash.length !== providedHash.length || !timingSafeEqual(computedHash, providedHash)) {
       this.logger.warn('Telegram login hash verification failed');
       throw new UnauthorizedException('Telegram login verification failed');
     }

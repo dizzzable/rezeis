@@ -64,7 +64,17 @@ export class OAuthPublicController {
   public async githubAuthorize(
     @Res() res: Response,
   ): Promise<void> {
-    const state = Math.random().toString(36).slice(2);
+    // Generate cryptographically random state for CSRF protection
+    const { randomBytes } = await import('node:crypto');
+    const state = randomBytes(16).toString('hex');
+    // Store state in a short-lived cookie for validation in callback
+    res.cookie('oauth_state', state, {
+      httpOnly: true,
+      secure: true,
+      sameSite: 'lax',
+      maxAge: 300_000, // 5 minutes
+      path: '/api/admin/oauth/github',
+    });
     const url = await this.githubAuth.getAuthorizationUrl(state);
     res.redirect(url);
   }
@@ -75,12 +85,23 @@ export class OAuthPublicController {
   @Get('github/callback')
   public async githubCallback(
     @Query('code') code: string,
+    @Query('state') state: string,
+    @Req() req: Request,
     @Res() res: Response,
   ): Promise<void> {
+    // Validate CSRF state
+    const storedState = req.cookies?.['oauth_state'];
+    if (!state || !storedState || state !== storedState) {
+      res.clearCookie('oauth_state', { path: '/api/admin/oauth/github' });
+      res.status(403).send('Invalid OAuth state — possible CSRF attack');
+      return;
+    }
+    res.clearCookie('oauth_state', { path: '/api/admin/oauth/github' });
+
     const profile = await this.githubAuth.handleCallback(code);
     const result = await this.loginService.processOAuthLogin(profile);
-    // Redirect to frontend with token in URL fragment (secure — not sent to server)
-    res.redirect(`/?oauth_token=${result.accessToken}`);
+    // Use hash fragment — NOT query param — so token is never sent to server/logged
+    res.redirect(`/#oauth_token=${result.accessToken}`);
   }
 }
 
