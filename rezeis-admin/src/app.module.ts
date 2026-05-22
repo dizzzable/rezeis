@@ -45,6 +45,7 @@ import { HealthModule } from './modules/health/health.module';
 import { ImportsModule } from './modules/imports/imports.module';
 import { InternalUserModule } from './modules/internal-user/internal-user.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
+import { OAuthModule } from './modules/oauth/oauth.module';
 import { EmailDeliveryModule } from './modules/email/email.module';
 import { PartnersModule } from './modules/partners/partners.module';
 import { PaymentsModule } from './modules/payments/payments.module';
@@ -108,6 +109,7 @@ import { WebhooksModule } from './modules/webhooks/webhooks.module';
     FaqModule,
     ImportsModule,
     NotificationsModule,
+    OAuthModule,
     EmailDeliveryModule,
     PartnersModule,
     ProfileSyncModule,

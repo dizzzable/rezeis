@@ -2090,3 +2090,106 @@ model RemnawaveWebhookEvent {
   @@index([createdAt])
   @@map("remnawave_webhook_events")
 }
+
+// =============================================================================
+//  OAUTH2 PROVIDERS & PASSKEYS
+// =============================================================================
+
+/// Supported OAuth2/SSO provider types.
+enum AuthProviderType {
+  TELEGRAM
+  GITHUB
+  YANDEX
+  KEYCLOAK
+  POCKETID
+  GENERIC_OAUTH2
+}
+
+/// Configuration for an OAuth2/SSO authentication provider.
+/// Each row represents one configured provider (e.g. GitHub, Telegram).
+/// Secrets are stored AES-256-GCM encrypted (same key as TOTP secrets).
+model AuthProviderConfig {
+  id              String           @id @default(cuid()) @map("id")
+  type            AuthProviderType @unique @map("type")
+  /// Whether this provider is currently enabled for login.
+  isEnabled       Boolean          @default(false) @map("is_enabled")
+  /// Display name shown on the login page button.
+  displayName     String           @map("display_name")
+  /// OAuth2 Client ID from the provider.
+  clientId        String?          @map("client_id")
+  /// OAuth2 Client Secret (AES-256-GCM encrypted).
+  clientSecretEnc String?          @map("client_secret_enc")
+  /// Frontend domain (without protocol) for redirect URIs.
+  frontendDomain  String?          @map("frontend_domain")
+  /// Backend domain (full URL) for callback endpoints.
+  backendDomain   String?          @map("backend_domain")
+  /// Provider-specific: Authorization URL (Generic OAuth2).
+  authorizationUrl String?         @map("authorization_url")
+  /// Provider-specific: Token URL (Generic OAuth2).
+  tokenUrl        String?          @map("token_url")
+  /// Provider-specific: Keycloak realm name.
+  realm           String?          @map("realm")
+  /// Provider-specific: Keycloak/PocketID domain.
+  providerDomain  String?          @map("provider_domain")
+  /// Whether to use PKCE (Generic OAuth2).
+  usePkce         Boolean          @default(false) @map("use_pkce")
+  /// Whitelist of allowed email addresses (empty = allow all).
+  allowedEmails   String[]         @default([]) @map("allowed_emails")
+  /// Whitelist of allowed Telegram IDs (Telegram provider only).
+  allowedTelegramIds BigInt[]      @default([]) @map("allowed_telegram_ids")
+  createdAt       DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt       DateTime         @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@index([isEnabled])
+  @@map("auth_provider_configs")
+}
+
+/// Linked OAuth2 identity for an admin user. One admin can have multiple
+/// linked providers (e.g. GitHub + Telegram). Used to match OAuth callbacks
+/// to existing admin accounts.
+model AdminOAuthLink {
+  id            String           @id @default(cuid()) @map("id")
+  adminUserId   String           @map("admin_user_id")
+  providerType  AuthProviderType @map("provider_type")
+  /// Provider-specific user identifier (GitHub user ID, Telegram ID, etc.).
+  providerUserId String          @map("provider_user_id")
+  /// Provider-supplied email (if available).
+  providerEmail String?          @map("provider_email")
+  /// Provider-supplied display name.
+  providerName  String?          @map("provider_name")
+  /// Raw profile data from the provider (sanitized).
+  profileData   Json             @default("{}") @map("profile_data")
+  linkedAt      DateTime         @default(now()) @map("linked_at") @db.Timestamptz(3)
+  lastUsedAt    DateTime?        @map("last_used_at") @db.Timestamptz(3)
+
+  @@unique([providerType, providerUserId])
+  @@index([adminUserId])
+  @@index([providerType])
+  @@map("admin_oauth_links")
+}
+
+/// WebAuthn/Passkey credential stored for an admin user.
+/// Each admin can register multiple passkeys (e.g. laptop + phone + YubiKey).
+model AdminPasskey {
+  id              String   @id @default(cuid()) @map("id")
+  adminUserId     String   @map("admin_user_id")
+  /// Human-readable name for the credential (e.g. "MacBook Pro", "YubiKey 5").
+  name            String   @map("name")
+  /// Base64url-encoded credential ID from the authenticator.
+  credentialId    String   @unique @map("credential_id")
+  /// Base64url-encoded public key (COSE format).
+  publicKey       String   @map("public_key")
+  /// Signature counter — incremented on each use, detects cloned keys.
+  counter         BigInt   @default(0) @map("counter")
+  /// Authenticator type: "platform" (built-in) or "cross-platform" (USB key).
+  transports      String[] @default([]) @map("transports")
+  /// Whether this credential is backed up (synced across devices).
+  backedUp        Boolean  @default(false) @map("backed_up")
+  /// AAGUID of the authenticator (identifies the make/model).
+  aaguid          String?  @map("aaguid")
+  registeredAt    DateTime @default(now()) @map("registered_at") @db.Timestamptz(3)
+  lastUsedAt      DateTime? @map("last_used_at") @db.Timestamptz(3)
+
+  @@index([adminUserId])
+  @@map("admin_passkeys")
+}
