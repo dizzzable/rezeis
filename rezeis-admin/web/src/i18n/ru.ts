@@ -905,6 +905,11 @@
       verify: 'Подтвердить',
       invalidCode: 'Неверный код',
     },
+    oauth: {
+      or: 'или войти через',
+      continueWith: 'Войти через {{provider}}',
+      passkey: 'Войти с Passkey',
+    },
   },
   forcePasswordChangePage: {
     title: 'Установите новый пароль',

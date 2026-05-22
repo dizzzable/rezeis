@@ -16,6 +16,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 
 import { useAuth } from './auth-provider'
 import { getAuthStatus, loginApi, registerApi } from './auth-api'
+import { OAuthButtons } from './oauth-buttons'
 
 // ── Schemas (returned from a hook so error messages can be localized) ──────
 
@@ -239,6 +240,8 @@ function LoginForm() {
             {t('signInPage.login.submit')}
           </Button>
         </form>
+
+        <OAuthButtons />
       </CardContent>
     </Card>
   )

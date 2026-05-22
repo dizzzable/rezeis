@@ -19,9 +19,18 @@ const AuthContext = createContext<AuthContextValue | null>(null)
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const queryClient = useQueryClient()
 
-  const [token, setToken] = useState<string | null>(() =>
-    localStorage.getItem(TOKEN_KEY),
-  )
+  const [token, setToken] = useState<string | null>(() => {
+    // Check for OAuth callback token in URL (GitHub redirect)
+    const params = new URLSearchParams(window.location.search)
+    const oauthToken = params.get('oauth_token')
+    if (oauthToken) {
+      localStorage.setItem(TOKEN_KEY, oauthToken)
+      // Clean URL
+      window.history.replaceState({}, '', window.location.pathname)
+      return oauthToken
+    }
+    return localStorage.getItem(TOKEN_KEY)
+  })
 
   const { data: admin, isLoading: isQueryLoading } = useQuery<AdminProfile>({
     queryKey: ['auth-me'],

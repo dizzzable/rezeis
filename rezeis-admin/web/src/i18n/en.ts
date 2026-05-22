@@ -892,6 +892,11 @@ export const en = {
       verify: 'Verify',
       invalidCode: 'Invalid verification code',
     },
+    oauth: {
+      or: 'or continue with',
+      continueWith: 'Continue with {{provider}}',
+      passkey: 'Sign in with Passkey',
+    },
   },
   forcePasswordChangePage: {
     title: 'Set a new password',
