@@ -2038,3 +2038,55 @@ model BotFlowButton {
   @@index([screenId])
   @@map("bot_flow_buttons")
 }
+
+// =============================================================================
+//  REMNAWAVE METRICS & WEBHOOKS
+// =============================================================================
+
+/// Time-series samples collected from the Remnawave panel every 5 minutes.
+/// Powers the online trends chart and per-node traffic history on the dashboard.
+model RemnawaveMetricSample {
+  id              String   @id @default(cuid()) @map("id")
+  /// Total users online at sample time.
+  onlineNow       Int      @map("online_now")
+  /// Total registered users on the panel.
+  totalUsers      Int      @map("total_users")
+  /// Number of nodes currently online.
+  nodesOnline     Int      @map("nodes_online")
+  /// Total bandwidth consumed (bytes) across all nodes at sample time.
+  totalBytesLifetime BigInt @map("total_bytes_lifetime")
+  /// Per-node snapshot: JSON array of { uuid, name, usersOnline, trafficUsedBytes, isConnected }.
+  nodesSnapshot   Json     @default("[]") @map("nodes_snapshot")
+  /// Panel CPU cores count.
+  cpuCores        Int      @default(0) @map("cpu_cores")
+  /// Panel memory used (bytes).
+  memoryUsed      BigInt   @default(0) @map("memory_used")
+  /// Panel memory total (bytes).
+  memoryTotal     BigInt   @default(0) @map("memory_total")
+  /// Panel uptime in seconds.
+  uptime          Int      @default(0) @map("uptime")
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  @@index([createdAt])
+  @@map("remnawave_metric_samples")
+}
+
+/// Webhook events received from the Remnawave panel.
+/// Stored for the Activity Feed and audit trail.
+model RemnawaveWebhookEvent {
+  id          String   @id @default(cuid()) @map("id")
+  /// Event type from the panel (e.g. "user.created", "user.updated", "node.offline").
+  eventType   String   @map("event_type")
+  /// Raw payload from the webhook (sanitized — no secrets).
+  payload     Json     @default("{}") @map("payload")
+  /// Whether this event has been processed/displayed.
+  isProcessed Boolean  @default(false) @map("is_processed")
+  /// Source IP of the webhook request.
+  sourceIp    String?  @map("source_ip")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  @@index([eventType])
+  @@index([isProcessed])
+  @@index([createdAt])
+  @@map("remnawave_webhook_events")
+}

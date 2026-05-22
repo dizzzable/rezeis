@@ -7,6 +7,15 @@ import { firstValueFrom } from 'rxjs';
 import { remnawaveConfig } from '../../../common/config/remnawave.config';
 import { RemnawaveSquadOptionInterface } from '../interfaces/remnawave-squad-option.interface';
 import { RemnawaveStatusInterface } from '../interfaces/remnawave-status.interface';
+import {
+  RemnawaveBandwidthStatsInterface,
+  RemnawaveSystemRecapInterface,
+  RemnawaveSystemStatsInterface,
+} from '../interfaces/remnawave-system-stats.interface';
+import { RemnawaveNodeInterface } from '../interfaces/remnawave-node.interface';
+import { RemnawaveHostInterface } from '../interfaces/remnawave-host.interface';
+import { RemnawaveHwidStatsInterface } from '../interfaces/remnawave-hwid-stats.interface';
+import { RemnawaveConfigProfileInterface } from '../interfaces/remnawave-config-profile.interface';
 
 /**
  * Remnawave panel user — shape returned by the panel API.
@@ -263,6 +272,143 @@ export class RemnawaveApiService {
     }
 
     return collected
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  //  SYSTEM STATS, NODES, HOSTS (panel proxy)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Returns system-wide statistics from the Remnawave panel.
+   */
+  public async getSystemStats(): Promise<RemnawaveSystemStatsInterface | null> {
+    try {
+      const response = await this.requestJson<{ response: RemnawaveSystemStatsInterface }>({
+        method: 'get',
+        url: '/api/system/stats',
+      });
+      return response.response ?? (response as unknown as RemnawaveSystemStatsInterface);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Returns system recap (version, totals, this month).
+   */
+  public async getSystemRecap(): Promise<RemnawaveSystemRecapInterface | null> {
+    try {
+      const response = await this.requestJson<{ response: RemnawaveSystemRecapInterface }>({
+        method: 'get',
+        url: '/api/system/recap',
+      });
+      return response.response ?? (response as unknown as RemnawaveSystemRecapInterface);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Returns bandwidth comparison stats.
+   */
+  public async getBandwidthStats(): Promise<RemnawaveBandwidthStatsInterface | null> {
+    try {
+      const response = await this.requestJson<{ response: RemnawaveBandwidthStatsInterface }>({
+        method: 'get',
+        url: '/api/system/bandwidth',
+      });
+      return response.response ?? (response as unknown as RemnawaveBandwidthStatsInterface);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Returns all nodes from the panel.
+   */
+  public async getAllNodes(): Promise<RemnawaveNodeInterface[]> {
+    try {
+      const response = await this.requestJson<{ response: RemnawaveNodeInterface[] }>({
+        method: 'get',
+        url: '/api/nodes',
+      });
+      return response.response ?? [];
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Enables a node by UUID.
+   */
+  public async enableNode(uuid: string): Promise<void> {
+    await this.requestJsonWithBody('post', `/api/nodes/enable`, { uuid });
+  }
+
+  /**
+   * Disables a node by UUID.
+   */
+  public async disableNode(uuid: string): Promise<void> {
+    await this.requestJsonWithBody('post', `/api/nodes/disable`, { uuid });
+  }
+
+  /**
+   * Restarts a node's xray core by UUID.
+   */
+  public async restartNode(uuid: string): Promise<void> {
+    await this.requestJsonWithBody('post', `/api/nodes/restart`, { uuid });
+  }
+
+  /**
+   * Resets traffic counter for a node.
+   */
+  public async resetNodeTraffic(uuid: string): Promise<void> {
+    await this.requestJsonWithBody('post', `/api/nodes/reset-traffic`, { uuid });
+  }
+
+  /**
+   * Returns all hosts from the panel.
+   */
+  public async getAllHosts(): Promise<RemnawaveHostInterface[]> {
+    try {
+      const response = await this.requestJson<{ response: RemnawaveHostInterface[] }>({
+        method: 'get',
+        url: '/api/hosts',
+      });
+      return response.response ?? [];
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Returns HWID statistics.
+   */
+  public async getHwidStats(): Promise<RemnawaveHwidStatsInterface | null> {
+    try {
+      const response = await this.requestJson<{ response: RemnawaveHwidStatsInterface }>({
+        method: 'get',
+        url: '/api/hwid/stats',
+      });
+      return response.response ?? (response as unknown as RemnawaveHwidStatsInterface);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Returns config profiles from the panel.
+   */
+  public async getConfigProfiles(): Promise<RemnawaveConfigProfileInterface[]> {
+    try {
+      const response = await this.requestJson<{ response: RemnawaveConfigProfileInterface[] }>({
+        method: 'get',
+        url: '/api/config-profiles',
+      });
+      return response.response ?? [];
+    } catch {
+      return [];
+    }
   }
 
   // ═══════════════════════════════════════════════════════════════════════════

@@ -5,6 +5,7 @@ import { AdminDashboardController } from './controllers/admin-dashboard.controll
 import { AdminQuickSearchController } from './controllers/admin-quick-search.controller';
 import { DashboardService } from './services/dashboard.service';
 import { QuickSearchService } from './services/quick-search.service';
+import { SystemHealthService } from './services/system-health.service';
 
 /**
  * Read-only dashboard analytics surface.
@@ -15,7 +16,7 @@ import { QuickSearchService } from './services/quick-search.service';
 @Module({
   imports: [AuthModule],
   controllers: [AdminDashboardController, AdminQuickSearchController],
-  providers: [DashboardService, QuickSearchService],
-  exports: [DashboardService, QuickSearchService],
+  providers: [DashboardService, QuickSearchService, SystemHealthService],
+  exports: [DashboardService, QuickSearchService, SystemHealthService],
 })
 export class DashboardModule {}

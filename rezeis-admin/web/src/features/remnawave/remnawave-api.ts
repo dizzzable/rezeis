@@ -280,6 +280,18 @@ async function getHwidStats(): Promise<RemnawaveHwidStats> {
   return res.data;
 }
 
+export interface RemnawaveGeoDistribution {
+  country: string
+  usersOnline: number
+  nodesCount: number
+  percentage: number
+}
+
+async function getGeoDistribution(): Promise<RemnawaveGeoDistribution[]> {
+  const res = await api.get<RemnawaveGeoDistribution[]>("/admin/remnawave/metrics/geo-distribution");
+  return res.data;
+}
+
 export const remnawaveApi = {
   getStatus,
   getSystemStats,
@@ -297,4 +309,5 @@ export const remnawaveApi = {
   getSubscriptionSettings,
   getSubscriptionTemplates,
   getHwidStats,
+  getGeoDistribution,
 };
