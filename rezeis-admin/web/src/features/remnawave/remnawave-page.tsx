@@ -99,12 +99,13 @@ export default function RemnaWavePage() {
       </div>
 
       <Tabs value={activeTab} onValueChange={setActiveTab}>
-        <TabsList className="grid w-full grid-cols-6">
+        <TabsList className="grid w-full grid-cols-7">
           <TabsTrigger value="overview">{t('remnaWavePage.tabs.overview')}</TabsTrigger>
           <TabsTrigger value="nodes">{t('remnaWavePage.tabs.nodes')}</TabsTrigger>
           <TabsTrigger value="hosts">{t('remnaWavePage.tabs.hosts')}</TabsTrigger>
           <TabsTrigger value="squads">{t('remnaWavePage.tabs.squads')}</TabsTrigger>
           <TabsTrigger value="profiles">{t('remnaWavePage.tabs.profiles')}</TabsTrigger>
+          <TabsTrigger value="geo">{t('remnaWavePage.tabs.geo')}</TabsTrigger>
           <TabsTrigger value="hwid">{t('remnaWavePage.tabs.hwid')}</TabsTrigger>
         </TabsList>
 
@@ -113,6 +114,7 @@ export default function RemnaWavePage() {
         <TabsContent value="hosts"><HostsTab /></TabsContent>
         <TabsContent value="squads"><SquadsTab /></TabsContent>
         <TabsContent value="profiles"><ProfilesTab /></TabsContent>
+        <TabsContent value="geo"><GeoTab /></TabsContent>
         <TabsContent value="hwid"><HwidTab /></TabsContent>
       </Tabs>
     </div>
@@ -626,6 +628,65 @@ function HwidTab() {
           </CardContent>
         </Card>
       )}
+    </div>
+  )
+}
+
+// ── Geo Tab ──────────────────────────────────────────────────────────────────
+
+function GeoTab() {
+  const { t } = useTranslation()
+  const { data: geo, isLoading } = useQuery({
+    queryKey: ['remnawave', 'geo-distribution'],
+    queryFn: remnawaveApi.getGeoDistribution,
+  })
+
+  if (isLoading) return <TableSkeleton rows={5} />
+
+  if (!geo || geo.length === 0) {
+    return <EmptyState icon={Globe} message={t('remnaWavePage.geo.empty')} />
+  }
+
+  const totalOnline = geo.reduce((sum, g) => sum + g.usersOnline, 0)
+
+  return (
+    <div className="space-y-6 mt-4">
+      <div className="grid gap-4 md:grid-cols-3">
+        <StatCard icon={Globe} title={t('remnaWavePage.geo.countries')} value={geo.length} />
+        <StatCard icon={Users} title={t('remnaWavePage.geo.totalOnline')} value={totalOnline} />
+        <StatCard icon={Server} title={t('remnaWavePage.geo.totalNodes')} value={geo.reduce((sum, g) => sum + g.nodesCount, 0)} />
+      </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">{t('remnaWavePage.geo.distributionTitle')}</CardTitle>
+          <CardDescription>{t('remnaWavePage.geo.distributionDescription')}</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="space-y-3">
+            {geo.map((item) => {
+              const pct = totalOnline > 0 ? (item.usersOnline / totalOnline) * 100 : 0
+              return (
+                <div key={item.country} className="space-y-1">
+                  <div className="flex items-center justify-between text-sm">
+                    <div className="flex items-center gap-2">
+                      <span>{getCountryEmoji(item.country)}</span>
+                      <span className="font-medium">{item.country}</span>
+                      <Badge variant="outline" className="text-[10px]">
+                        {item.nodesCount} {item.nodesCount === 1 ? 'node' : 'nodes'}
+                      </Badge>
+                    </div>
+                    <span className="tabular-nums text-muted-foreground">
+                      {item.usersOnline} ({pct.toFixed(1)}%)
+                    </span>
+                  </div>
+                  <Progress value={pct} className="h-2" />
+                </div>
+              )
+            })}
+          </div>
+        </CardContent>
+      </Card>
     </div>
   )
 }

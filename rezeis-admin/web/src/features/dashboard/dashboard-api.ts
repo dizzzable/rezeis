@@ -101,16 +101,90 @@ export interface DashboardSummaryInterface {
   readonly attentionItems: readonly DashboardAttentionItemInterface[]
 }
 
+// ── System Health Types ──────────────────────────────────────────────────────
+
+export interface CpuCoreInfo {
+  readonly core: number
+  readonly usagePercent: number
+}
+
+export interface NetworkInterfaceSnapshot {
+  readonly name: string
+  readonly rxBytes: number
+  readonly txBytes: number
+}
+
+export interface VpsHealthSnapshot {
+  readonly cpuUsagePercent: number
+  readonly cpuCores: readonly CpuCoreInfo[]
+  readonly cpuCoreCount: number
+  readonly cpuModel: string
+  readonly ramUsedBytes: number
+  readonly ramTotalBytes: number
+  readonly ramUsagePercent: number
+  readonly diskUsedBytes: number
+  readonly diskTotalBytes: number
+  readonly diskUsagePercent: number
+  readonly uptimeSeconds: number
+  readonly loadAverage: readonly [number, number, number]
+  readonly network: readonly NetworkInterfaceSnapshot[]
+}
+
+export interface ProcessHealthSnapshot {
+  readonly cpuUsagePercent: number
+  readonly rssBytes: number
+  readonly heapUsedBytes: number
+  readonly heapTotalBytes: number
+  readonly externalBytes: number
+  readonly uptimeSeconds: number
+  readonly nodeVersion: string
+  readonly pid: number
+  readonly eventLoopLagMs: number
+}
+
+export interface SystemHealthResponse {
+  readonly timestamp: string
+  readonly vps: VpsHealthSnapshot
+  readonly process: ProcessHealthSnapshot
+}
+
 // ── API surface ──────────────────────────────────────────────────────────────
 
-/**
- * Bounded dashboard summary client. The backend response is intentionally
- * narrow: counters, safe text, and stable enum codes. The client never asks
- * for raw user identifiers, payment ids, or provider payloads.
- */
 export const dashboardApi = {
   async getSummary(): Promise<DashboardSummaryInterface> {
     const response = await api.get<DashboardSummaryInterface>('/admin/dashboard/summary')
     return response.data
   },
+
+  async getSystemHealth(): Promise<SystemHealthResponse> {
+    const response = await api.get<SystemHealthResponse>('/admin/dashboard/system-health')
+    return response.data
+  },
+
+  async getOnlineTrend(hours = 24): Promise<OnlineTrendPoint[]> {
+    const response = await api.get<OnlineTrendPoint[]>(`/admin/remnawave/metrics/online-trend?hours=${hours}`)
+    return response.data
+  },
+
+  async getActivityFeed(limit = 30): Promise<ActivityFeedItem[]> {
+    const response = await api.get<ActivityFeedItem[]>(`/admin/remnawave/metrics/activity-feed?limit=${limit}`)
+    return response.data
+  },
+}
+
+// ── Online Trend Types ───────────────────────────────────────────────────────
+
+export interface OnlineTrendPoint {
+  readonly time: string
+  readonly onlineNow: number
+  readonly totalUsers: number
+  readonly nodesOnline: number
+}
+
+export interface ActivityFeedItem {
+  readonly id: string
+  readonly eventType: string
+  readonly payload: Record<string, unknown>
+  readonly createdAt: string
+  readonly isProcessed: boolean
 }

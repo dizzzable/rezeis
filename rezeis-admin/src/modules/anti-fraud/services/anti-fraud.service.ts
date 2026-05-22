@@ -19,6 +19,7 @@ import {
   SystemEventsService,
 } from '../../../common/services/system-events.service';
 import { FraudDetectors } from '../detectors/fraud-detectors';
+import { RemnawaveDetectors } from '../detectors/remnawave-detectors';
 import {
   FraudSignalAction,
   FraudSignalCandidate,
@@ -56,6 +57,7 @@ export class AntiFraudService {
   public constructor(
     private readonly prismaService: PrismaService,
     private readonly fraudDetectors: FraudDetectors,
+    private readonly remnawaveDetectors: RemnawaveDetectors,
     private readonly systemEventsService: SystemEventsService,
   ) {}
 
@@ -188,6 +190,10 @@ export class AntiFraudService {
       this.fraudDetectors.detectRapidReferralVelocity(now),
       this.fraudDetectors.detectPromoAbuse(now),
       this.fraudDetectors.detectRapidChurn(now),
+      this.remnawaveDetectors.detectHwidAnomalies(now),
+      this.remnawaveDetectors.detectNodeTrafficAbuse(now),
+      this.remnawaveDetectors.detectGeoAnomalies(now),
+      this.remnawaveDetectors.detectOfflineNodes(now),
     ]);
     const candidates = candidateBatches.flat();
     const results: UpsertSignalResult[] = [];

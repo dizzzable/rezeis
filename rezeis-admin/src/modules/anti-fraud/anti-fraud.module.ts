@@ -1,8 +1,10 @@
 import { Module } from '@nestjs/common';
 
 import { AuthModule } from '../auth/auth.module';
+import { RemnawaveModule } from '../remnawave/remnawave.module';
 import { AdminFraudController } from './controllers/admin-fraud.controller';
 import { FraudDetectors } from './detectors/fraud-detectors';
+import { RemnawaveDetectors } from './detectors/remnawave-detectors';
 import { AntiFraudService } from './services/anti-fraud.service';
 
 /**
@@ -14,15 +16,19 @@ import { AntiFraudService } from './services/anti-fraud.service';
  * keyed by `(code, fingerprint)` and triggers the configured action
  * policy (notify / block_user / freeze_subscription).
  *
+ * Remnawave detectors (Phase 4+) add HWID anomaly detection, node traffic
+ * abuse, geo concentration risk, and offline node alerts by querying the
+ * Remnawave panel API.
+ *
  * Scheduling
  *   `AntiFraudService.runDetectorsScheduled` runs every 5 minutes via
  *   `@nestjs/schedule`. The same logic is exposed under
  *   `POST /admin/fraud/detectors/run` for manual triggering.
  */
 @Module({
-  imports: [AuthModule],
+  imports: [AuthModule, RemnawaveModule],
   controllers: [AdminFraudController],
-  providers: [AntiFraudService, FraudDetectors],
+  providers: [AntiFraudService, FraudDetectors, RemnawaveDetectors],
   exports: [AntiFraudService],
 })
 export class AntiFraudModule {}
