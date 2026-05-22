@@ -9,10 +9,15 @@ import {
   OAuthLinksController,
   OAuthPublicController,
 } from './controllers/admin-oauth.controller';
+import {
+  PasskeyProtectedController,
+  PasskeyPublicController,
+} from './controllers/passkey.controller';
 import { CryptoService } from './services/crypto.service';
 import { GitHubAuthService } from './services/github-auth.service';
 import { OAuthConfigService } from './services/oauth-config.service';
 import { OAuthLoginService } from './services/oauth-login.service';
+import { PasskeyService } from './services/passkey.service';
 import { TelegramAuthService } from './services/telegram-auth.service';
 
 /**
@@ -39,14 +44,15 @@ import { TelegramAuthService } from './services/telegram-auth.service';
       inject: [authConfig.KEY],
     }),
   ],
-  controllers: [OAuthPublicController, OAuthConfigController, OAuthLinksController],
+  controllers: [OAuthPublicController, OAuthConfigController, OAuthLinksController, PasskeyPublicController, PasskeyProtectedController],
   providers: [
     CryptoService,
     OAuthConfigService,
     OAuthLoginService,
     TelegramAuthService,
     GitHubAuthService,
+    PasskeyService,
   ],
-  exports: [OAuthConfigService, OAuthLoginService, CryptoService],
+  exports: [OAuthConfigService, OAuthLoginService, CryptoService, PasskeyService],
 })
 export class OAuthModule {}

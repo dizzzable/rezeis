@@ -41,6 +41,7 @@
     "@prisma/adapter-pg": "^7.8.0",
     "@prisma/client": "^7.8.0",
     "@remnawave/backend-contract": "2.7.3",
+    "@simplewebauthn/server": "^13.3.0",
     "axios": "^1.16.1",
     "better-sqlite3": "11.9.1",
     "bullmq": "^5.76.10",
