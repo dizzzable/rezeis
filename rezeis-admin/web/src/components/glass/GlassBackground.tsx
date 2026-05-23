@@ -8,8 +8,9 @@
  * - Props come directly from store (per-background registry defaults)
  * - CSS gradient fallback on error
  */
-import { Component, lazy, Suspense, useState, useEffect, useRef, type ReactNode } from 'react'
+import { Component, Suspense, useState, useEffect, useRef, useMemo, type ReactNode, type CSSProperties } from 'react'
 import { useGlassStore, type BackgroundId } from '@/lib/theme/glass-store'
+import { BG_COMPONENTS } from './backgrounds'
 
 // ── Error Boundary ───────────────────────────────────────────────────────────
 
@@ -30,40 +31,10 @@ class GlassErrorBoundary extends Component<{ children: ReactNode; resetKey: stri
 
   render() {
     if (this.state.hasError) {
-      return (
-        <div style={{
-          width: '100%', height: '100%',
-          background: 'radial-gradient(ellipse at center, oklch(0.25 0.04 260) 0%, oklch(0.08 0.02 260) 100%)',
-        }} />
-      )
+      return <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_center,oklch(0.25_0.04_260)_0%,oklch(0.08_0.02_260)_100%)]" />
     }
     return this.props.children
   }
-}
-
-// ── Lazy backgrounds ─────────────────────────────────────────────────────────
-
-const backgrounds: Record<BackgroundId, React.LazyExoticComponent<React.ComponentType<Record<string, unknown>>> | null> = {
-  none: null,
-  silk: lazy(() => import('@/components/reactbits/Silk')),
-  aurora: lazy(() => import('@/components/reactbits/Aurora')),
-  threads: lazy(() => import('@/components/reactbits/Threads')),
-  waves: lazy(() => import('@/components/reactbits/Waves')),
-  iridescence: lazy(() => import('@/components/reactbits/Iridescence')),
-  galaxy: lazy(() => import('@/components/reactbits/Galaxy')),
-  particles: lazy(() => import('@/components/reactbits/Particles')),
-  dotGrid: lazy(() => import('@/components/reactbits/DotGrid')),
-  liquidChrome: lazy(() => import('@/components/reactbits/LiquidChrome')),
-  balatro: lazy(() => import('@/components/reactbits/Balatro')),
-  beams: lazy(() => import('@/components/reactbits/Beams')),
-  plasma: lazy(() => import('@/components/reactbits/Plasma')),
-  grainient: lazy(() => import('@/components/reactbits/Grainient')),
-  softAurora: lazy(() => import('@/components/reactbits/SoftAurora')),
-  dither: lazy(() => import('@/components/reactbits/Dither')),
-  lineWaves: lazy(() => import('@/components/reactbits/LineWaves')),
-  rippleGrid: lazy(() => import('@/components/reactbits/RippleGrid')),
-  lightning: lazy(() => import('@/components/reactbits/Lightning')),
-  radar: lazy(() => import('@/components/reactbits/Radar')),
 }
 
 // ── Main Component ───────────────────────────────────────────────────────────
@@ -75,71 +46,86 @@ interface BgState {
   props: Record<string, unknown>
 }
 
+const SUBSCRIBE_DEBOUNCE_MS = 300
+
+function snapshotState(): BgState {
+  const s = useGlassStore.getState()
+  return {
+    enabled: s.glassEnabled,
+    id: s.background.id,
+    opacity: s.background.opacity,
+    props: s.background.props,
+  }
+}
+
 export function GlassBackground() {
-  // Debounced state from store to avoid rapid WebGL remounts
-  const [bgState, setBgState] = useState<BgState>(() => {
-    const s = useGlassStore.getState()
-    return { enabled: s.glassEnabled, id: s.background.id, opacity: s.background.opacity, props: s.background.props }
-  })
+  const [bgState, setBgState] = useState<BgState>(snapshotState)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
-    // Initial hydration read (after persist loads from localStorage)
-    const timer = setTimeout(() => {
-      const s = useGlassStore.getState()
-      setBgState({ enabled: s.glassEnabled, id: s.background.id, opacity: s.background.opacity, props: s.background.props })
-    }, 150)
+    // Wait for zustand persist hydration before reading the final state.
+    const handleHydration = () => {
+      setBgState(snapshotState())
+    }
 
-    // Subscribe to changes with debounce
-    const unsub = useGlassStore.subscribe((s) => {
+    // If persist already hydrated (synchronously), use current state.
+    if (useGlassStore.persist.hasHydrated()) {
+      handleHydration()
+    }
+    const unsubHydration = useGlassStore.persist.onFinishHydration(handleHydration)
+
+    // Subscribe to changes with debounce — only the background-related slice.
+    const unsubStore = useGlassStore.subscribe((s, prev) => {
+      const changed =
+        s.glassEnabled !== prev.glassEnabled ||
+        s.background.id !== prev.background.id ||
+        s.background.opacity !== prev.background.opacity ||
+        s.background.props !== prev.background.props
+      if (!changed) return
+
       if (debounceRef.current) clearTimeout(debounceRef.current)
       debounceRef.current = setTimeout(() => {
-        setBgState({ enabled: s.glassEnabled, id: s.background.id, opacity: s.background.opacity, props: s.background.props })
-      }, 300) // 300ms debounce prevents rapid WebGL context churn
+        setBgState(snapshotState())
+      }, SUBSCRIBE_DEBOUNCE_MS)
     })
 
     return () => {
-      clearTimeout(timer)
+      unsubHydration()
+      unsubStore()
       if (debounceRef.current) clearTimeout(debounceRef.current)
-      unsub()
     }
   }, [])
 
-  if (!bgState.enabled || bgState.id === 'none') return null
-
-  const BgComponent = backgrounds[bgState.id]
-  if (!BgComponent) return null
-
+  // Clamp opacity once per state change
   const opacity = Math.max(0.05, Math.min(1, bgState.opacity ?? 0.3))
 
+  const wrapperStyle = useMemo<CSSProperties>(
+    () => ({
+      position: 'fixed',
+      top: 0,
+      left: 0,
+      width: '100vw',
+      height: '100vh',
+      zIndex: 0,
+      overflow: 'hidden',
+      opacity,
+      pointerEvents: 'none',
+    }),
+    [opacity],
+  )
+
+  if (!bgState.enabled || bgState.id === 'none') return null
+
+  const BgComponent = BG_COMPONENTS[bgState.id]
+  if (!BgComponent) return null
+
   return (
-    <div
-      id="glass-background"
-      style={{
-        position: 'fixed',
-        top: 0,
-        left: 0,
-        width: '100vw',
-        height: '100vh',
-        zIndex: 0,
-        overflow: 'hidden',
-        opacity,
-      }}
-      aria-hidden="true"
-    >
-      {/* Pointer-events blocker on top so bg doesn't steal clicks */}
-      <div style={{ position: 'absolute', inset: 0, zIndex: 1, pointerEvents: 'none' }} />
-      {/* Background renders below the blocker */}
-      <div style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }}>
-        <GlassErrorBoundary resetKey={bgState.id}>
-          <Suspense fallback={null}>
-            <BgComponent
-              key={bgState.id}
-              {...bgState.props}
-            />
-          </Suspense>
-        </GlassErrorBoundary>
-      </div>
+    <div id="glass-background" style={wrapperStyle} aria-hidden="true">
+      <GlassErrorBoundary resetKey={bgState.id}>
+        <Suspense fallback={null}>
+          <BgComponent key={bgState.id} {...bgState.props} />
+        </Suspense>
+      </GlassErrorBoundary>
     </div>
   )
 }

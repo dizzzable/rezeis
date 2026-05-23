@@ -168,6 +168,23 @@ const DEFAULTS = {
   effectsEnabled: true,
 }
 
+const STORE_VERSION = 1
+
+// Validation sets so unknown ids snap back to defaults during migration.
+const VALID_TEXT = new Set(TEXT_ANIMATIONS.map((a) => a.id as string))
+const VALID_CURSOR = new Set(CURSOR_EFFECTS.map((a) => a.id as string))
+const VALID_CLICK = new Set(CLICK_EFFECTS.map((a) => a.id as string))
+const VALID_HOVER = new Set(HOVER_EFFECTS.map((a) => a.id as string))
+const VALID_CONTENT = new Set(CONTENT_ANIMATIONS.map((a) => a.id as string))
+
+interface PersistedEffects {
+  textAnimation?: unknown
+  cursorEffect?: unknown
+  clickEffect?: unknown
+  hoverEffect?: unknown
+  contentAnimation?: unknown
+}
+
 export const useEffectsStore = create<EffectsState>()(
   persist(
     (set) => ({
@@ -183,7 +200,29 @@ export const useEffectsStore = create<EffectsState>()(
     }),
     {
       name: 'rezeis-admin-effects',
+      version: STORE_VERSION,
       storage: createJSONStorage(() => localStorage),
+      // Snap unknown ids back to the default if the union shrank.
+      migrate: (persistedState, _version) => {
+        const state = persistedState as PersistedEffects | null
+        if (!state) return persistedState as EffectsState
+        if (typeof state.textAnimation !== 'string' || !VALID_TEXT.has(state.textAnimation)) {
+          state.textAnimation = DEFAULTS.textAnimation
+        }
+        if (typeof state.cursorEffect !== 'string' || !VALID_CURSOR.has(state.cursorEffect)) {
+          state.cursorEffect = DEFAULTS.cursorEffect
+        }
+        if (typeof state.clickEffect !== 'string' || !VALID_CLICK.has(state.clickEffect)) {
+          state.clickEffect = DEFAULTS.clickEffect
+        }
+        if (typeof state.hoverEffect !== 'string' || !VALID_HOVER.has(state.hoverEffect)) {
+          state.hoverEffect = DEFAULTS.hoverEffect
+        }
+        if (typeof state.contentAnimation !== 'string' || !VALID_CONTENT.has(state.contentAnimation)) {
+          state.contentAnimation = DEFAULTS.contentAnimation
+        }
+        return persistedState as EffectsState
+      },
     },
   ),
 )

@@ -95,11 +95,6 @@ interface GlassState {
 
 // ── Defaults ─────────────────────────────────────────────────────────────────
 
-const DEFAULT_ELEMENT: GlassElementSettings = {
-  enabled: true,
-  blur: 0.15,
-}
-
 const DEFAULT_BACKGROUND: BackgroundConfig = {
   id: 'none',
   opacity: 0.3,
@@ -134,6 +129,21 @@ const DEFAULTS = {
 
 // ── Store ────────────────────────────────────────────────────────────────────
 
+const STORE_VERSION = 1
+
+/** All BackgroundIds we know about. New ids must be added to BOTH the union
+ *  and to BG_COMPONENTS in components/glass/backgrounds.ts. */
+const VALID_BACKGROUND_IDS: ReadonlySet<BackgroundId> = new Set<BackgroundId>([
+  'none', 'silk', 'aurora', 'threads', 'waves', 'iridescence', 'galaxy',
+  'particles', 'dotGrid', 'liquidChrome', 'balatro', 'beams', 'plasma',
+  'grainient', 'softAurora', 'dither', 'lineWaves', 'rippleGrid',
+  'lightning', 'radar',
+])
+
+interface PersistedShape {
+  background?: { id?: unknown }
+}
+
 export const useGlassStore = create<GlassState>()(
   persist(
     (set) => ({
@@ -153,7 +163,7 @@ export const useGlassStore = create<GlassState>()(
         set(() => ({
           background: {
             id,
-            opacity: 0.3,
+            opacity: DEFAULT_BACKGROUND.opacity,
             props: getDefaultProps(id),
           },
         })),
@@ -183,16 +193,21 @@ export const useGlassStore = create<GlassState>()(
     }),
     {
       name: 'rezeis-admin-glass',
+      version: STORE_VERSION,
       storage: createJSONStorage(() => localStorage),
+      // Snap unknown background ids back to 'none' so a removed bg
+      // doesn't render as undefined.
+      migrate: (persistedState, _version) => {
+        const state = persistedState as PersistedShape | null
+        if (state?.background) {
+          const bgId = state.background.id
+          if (typeof bgId !== 'string' || !VALID_BACKGROUND_IDS.has(bgId as BackgroundId)) {
+            state.background = { ...DEFAULT_BACKGROUND }
+          }
+        }
+        return persistedState as GlassState
+      },
     },
   ),
 )
 
-// ── Selectors ────────────────────────────────────────────────────────────────
-
-/** Check if glass is active for a specific element */
-export function useIsGlassActive(element: GlassElement): boolean {
-  const glassEnabled = useGlassStore((s) => s.glassEnabled)
-  const elementEnabled = useGlassStore((s) => s[element].enabled)
-  return glassEnabled && elementEnabled
-}

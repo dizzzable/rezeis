@@ -4,7 +4,8 @@
  * Left column:  Liquid Glass toggle + Per-element frost + Glass properties
  * Right column: Background Studio — dropdown, dynamic controls, live preview, apply
  */
-import { lazy, Suspense, useState, useCallback } from 'react'
+import { useMemo, useState, useCallback } from 'react'
+import { Suspense } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import {
@@ -31,37 +32,13 @@ import {
   useGlassStore,
   type BackgroundId,
 } from '@/lib/theme/glass-store'
+import { BG_COMPONENTS } from '@/components/glass/backgrounds'
 import {
   BACKGROUND_REGISTRY,
   getBackgroundDef,
   getDefaultProps,
   type ControlDef,
 } from '@/features/appearance/background-controls'
-
-// ── Lazy backgrounds for live preview ────────────────────────────────────────
-
-const previewBackgrounds: Record<string, React.LazyExoticComponent<React.ComponentType<Record<string, unknown>>> | null> = {
-  none: null,
-  silk: lazy(() => import('@/components/reactbits/Silk')),
-  aurora: lazy(() => import('@/components/reactbits/Aurora')),
-  threads: lazy(() => import('@/components/reactbits/Threads')),
-  waves: lazy(() => import('@/components/reactbits/Waves')),
-  iridescence: lazy(() => import('@/components/reactbits/Iridescence')),
-  galaxy: lazy(() => import('@/components/reactbits/Galaxy')),
-  particles: lazy(() => import('@/components/reactbits/Particles')),
-  dotGrid: lazy(() => import('@/components/reactbits/DotGrid')),
-  liquidChrome: lazy(() => import('@/components/reactbits/LiquidChrome')),
-  balatro: lazy(() => import('@/components/reactbits/Balatro')),
-  beams: lazy(() => import('@/components/reactbits/Beams')),
-  plasma: lazy(() => import('@/components/reactbits/Plasma')),
-  grainient: lazy(() => import('@/components/reactbits/Grainient')),
-  softAurora: lazy(() => import('@/components/reactbits/SoftAurora')),
-  dither: lazy(() => import('@/components/reactbits/Dither')),
-  lineWaves: lazy(() => import('@/components/reactbits/LineWaves')),
-  rippleGrid: lazy(() => import('@/components/reactbits/RippleGrid')),
-  lightning: lazy(() => import('@/components/reactbits/Lightning')),
-  radar: lazy(() => import('@/components/reactbits/Radar')),
-}
 
 // ── Main component ───────────────────────────────────────────────────────────
 
@@ -296,50 +273,31 @@ function BackgroundStudioCard() {
 
   // Apply draft to store
   const handleApply = () => {
-    setBackgroundId(draftId)
-    setBackgroundOpacity(draftOpacity)
-    // After setBackgroundId resets props to defaults, override with draft
-    // Use setTimeout to ensure the store has updated
-    setTimeout(() => {
-      const store = useGlassStore.getState()
-      // Only set props if they differ from defaults
-      const defaults = getDefaultProps(draftId)
-      const changed: Record<string, unknown> = {}
-      for (const [k, v] of Object.entries(draftProps)) {
-        if (JSON.stringify(v) !== JSON.stringify(defaults[k])) {
-          changed[k] = v
-        }
-      }
-      if (Object.keys(changed).length > 0) {
-        useGlassStore.getState().setBackgroundProps(changed)
-      }
-      // Also set opacity if different
-      if (draftOpacity !== store.background.opacity) {
-        useGlassStore.getState().setBackgroundOpacity(draftOpacity)
-      }
-    }, 0)
-  }
-
-  // Quick-apply: directly update store (for real-time mode)
-  const handleQuickApply = () => {
-    // Set id first (resets props to defaults)
+    // Zustand `set` is synchronous — do all writes inline, no setTimeout.
     if (draftId !== background.id) {
       setBackgroundId(draftId)
     }
-    // Then override with draft props
+    // Override props (setBackgroundProps merges; we want full replacement
+    // of the per-bg keys, so set them directly).
     for (const [k, v] of Object.entries(draftProps)) {
       setBackgroundProp(k, v)
     }
     setBackgroundOpacity(draftOpacity)
   }
 
+  // Quick-apply: same as apply (simplified now that handleApply is synchronous).
+  const handleQuickApply = handleApply
+
   // Get controls for current draft background
   const bgDef = getBackgroundDef(draftId)
 
-  // Check if draft differs from store
-  const isDirty = draftId !== background.id ||
-    draftOpacity !== background.opacity ||
-    JSON.stringify(draftProps) !== JSON.stringify(background.props)
+  // Check if draft differs from store (memoized to avoid JSON.stringify
+  // on every render).
+  const isDirty = useMemo(() => {
+    if (draftId !== background.id) return true
+    if (draftOpacity !== background.opacity) return true
+    return JSON.stringify(draftProps) !== JSON.stringify(background.props)
+  }, [draftId, draftOpacity, draftProps, background.id, background.opacity, background.props])
 
   return (
     <Card className="flex h-full flex-col">
@@ -599,7 +557,6 @@ function ColorArrayControl({ control, value, onChange }: { control: ControlDef; 
 }
 
 function SelectControl({ control, value, onChange }: { control: ControlDef; value: string; onChange: (v: unknown) => void }) {
-  const { t } = useTranslation()
   const strValue = typeof value === 'string' ? value : (control.default as string)
   const options = control.options ?? []
 
@@ -631,7 +588,7 @@ interface LivePreviewProps {
 function LivePreview({ id, props, opacity }: LivePreviewProps) {
   if (id === 'none') return null
 
-  const BgComponent = previewBackgrounds[id]
+  const BgComponent = BG_COMPONENTS[id]
   if (!BgComponent) return null
 
   return (
