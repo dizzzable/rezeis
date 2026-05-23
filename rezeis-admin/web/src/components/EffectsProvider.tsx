@@ -1,11 +1,16 @@
 /**
  * EffectsProvider — renders global cursor and click effects based on
- * the effects-store selection. Wraps the app and provides the chosen
- * cursor/click effect as a fixed overlay.
+ * the effects-store selection. Effects are rendered as fixed-position
+ * sibling overlays so they never affect the children's layout.
  */
 import { lazy, Suspense, type ReactNode } from 'react'
-import { useEffectsStore } from '@/lib/theme/effects-store'
+import {
+  useEffectsStore,
+  type CursorEffectId,
+  type ClickEffectId,
+} from '@/lib/theme/effects-store'
 import { useAppearanceStore } from '@/lib/theme/appearance-store'
+import { ClickSparkOverlay } from './effects/ClickSparkOverlay'
 
 // ── Lazy-loaded cursor effects ───────────────────────────────────────────────
 
@@ -15,10 +20,6 @@ const GhostCursor = lazy(() => import('@/components/reactbits/GhostCursor'))
 const Crosshair = lazy(() => import('@/components/reactbits/Crosshair'))
 const MagnetLines = lazy(() => import('@/components/reactbits/MagnetLines'))
 const PixelTrail = lazy(() => import('@/components/reactbits/PixelTrail'))
-
-// ── Lazy-loaded click effects ────────────────────────────────────────────────
-
-const ClickSpark = lazy(() => import('@/components/reactbits/ClickSpark'))
 
 // ── Provider ─────────────────────────────────────────────────────────────────
 
@@ -30,55 +31,81 @@ export function EffectsProvider({ children }: { children: ReactNode }) {
 
   const isActive = visualEffects && effectsEnabled
 
-  // ClickSpark wraps children to capture click events
-  const content = isActive && clickEffect === 'spark'
-    ? <ClickSparkWrapper>{children}</ClickSparkWrapper>
-    : <>{children}</>
-
   return (
     <>
-      {content}
+      {children}
       {isActive && (
         <Suspense fallback={null}>
           <CursorEffectRenderer effect={cursorEffect} />
         </Suspense>
       )}
+      {isActive && <ClickEffectRenderer effect={clickEffect} />}
     </>
-  )
-}
-
-// ── Click Spark Wrapper ──────────────────────────────────────────────────────
-
-function ClickSparkWrapper({ children }: { children: ReactNode }) {
-  return (
-    <Suspense fallback={<>{children}</>}>
-      <ClickSpark sparkColor="#aa1d8b" sparkCount={10} sparkRadius={25} duration={500}>
-        {children}
-      </ClickSpark>
-    </Suspense>
   )
 }
 
 // ── Cursor Effect Renderer ───────────────────────────────────────────────────
 
-function CursorEffectRenderer({ effect }: { effect: string }) {
+function CursorEffectRenderer({ effect }: { effect: CursorEffectId }) {
   switch (effect) {
+    case 'none':
+      return null
     case 'splash':
-      return <SplashCursor TRANSPARENT={true} RAINBOW_MODE={true} />
+      return (
+        <div aria-hidden="true">
+          <SplashCursor TRANSPARENT={true} RAINBOW_MODE={true} />
+        </div>
+      )
     case 'blob':
       return (
-        <div className="fixed inset-0 z-[9999] pointer-events-none">
+        <div
+          aria-hidden="true"
+          className="pointer-events-none fixed inset-0 z-[9999]"
+        >
           <BlobCursor fillColor="#aa1d8b" trailCount={3} zIndex={9999} />
         </div>
       )
     case 'ghost':
-      return <GhostCursor />
+      return (
+        <div aria-hidden="true">
+          <GhostCursor />
+        </div>
+      )
     case 'crosshair':
-      return <Crosshair />
+      return (
+        <div aria-hidden="true">
+          <Crosshair />
+        </div>
+      )
     case 'magnetLines':
-      return <MagnetLines />
+      return (
+        <div aria-hidden="true">
+          <MagnetLines />
+        </div>
+      )
     case 'pixelTrail':
-      return <PixelTrail />
+      return (
+        <div aria-hidden="true">
+          <PixelTrail />
+        </div>
+      )
+    default:
+      return null
+  }
+}
+
+// ── Click Effect Renderer ────────────────────────────────────────────────────
+
+function ClickEffectRenderer({ effect }: { effect: ClickEffectId }) {
+  switch (effect) {
+    case 'none':
+      return null
+    case 'spark':
+      return <ClickSparkOverlay color="#aa1d8b" count={10} radius={25} duration={500} />
+    case 'starBorder':
+      // Star Border requires per-element integration, not a global overlay.
+      // Reserved for future implementation.
+      return null
     default:
       return null
   }

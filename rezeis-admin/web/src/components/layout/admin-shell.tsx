@@ -592,10 +592,12 @@ export default function AdminShell() {
   const { logout, admin } = useAuth();
   const navigate = useNavigate();
 
-  // Glass settings
+  // Glass settings — used to compute classes; backdrop-filter handled in index.css
   const glassEnabled = useGlassStore((s) => s.glassEnabled);
-  const sidebarGlass = useGlassStore((s) => s.sidebar);
-  const headerGlass = useGlassStore((s) => s.header);
+  const sidebarGlassEnabled = useGlassStore((s) => s.sidebar.enabled);
+  const headerGlassEnabled = useGlassStore((s) => s.header.enabled);
+  const sidebarGlassActive = glassEnabled && sidebarGlassEnabled;
+  const headerGlassActive = glassEnabled && headerGlassEnabled;
 
   // Subscribe to admin realtime updates as soon as the shell is rendered
   // (i.e. the admin is authenticated). Toasts are limited to WARNING/ERROR
@@ -645,18 +647,10 @@ export default function AdminShell() {
           className={cn(
             'relative hidden md:flex flex-col text-sidebar-foreground transition-all duration-300',
             collapsed ? 'w-16' : 'w-64',
-            glassEnabled && sidebarGlass.enabled
+            sidebarGlassActive
               ? 'bg-sidebar/50 border-r border-sidebar-border/30'
               : 'bg-sidebar',
           )}
-          style={
-            glassEnabled && sidebarGlass.enabled
-              ? {
-                  backdropFilter: `blur(${Math.round(sidebarGlass.blur * 80)}px) saturate(1.4)`,
-                  WebkitBackdropFilter: `blur(${Math.round(sidebarGlass.blur * 80)}px) saturate(1.4)`,
-                }
-              : undefined
-          }
         >
           {/* Logo */}
           <div className="flex h-14 items-center px-4">
@@ -696,18 +690,10 @@ export default function AdminShell() {
               'flex h-14 items-center justify-between px-4 md:px-6',
               !glassEnabled
                 ? 'bg-background border-b border-border'
-                : headerGlass.enabled
+                : headerGlassActive
                   ? 'bg-background/50 border-b border-border/30'
                   : 'bg-transparent',
             )}
-            style={
-              glassEnabled && headerGlass.enabled
-                ? {
-                    backdropFilter: `blur(${Math.round(headerGlass.blur * 80)}px) saturate(1.4)`,
-                    WebkitBackdropFilter: `blur(${Math.round(headerGlass.blur * 80)}px) saturate(1.4)`,
-                  }
-                : undefined
-            }
           >
             <div className="flex items-center gap-2">
               {/* Mobile hamburger */}
