@@ -2,10 +2,10 @@
  * GlareHover — adds a glare/shine effect on hover that follows the cursor.
  * Inspired by React Bits GlareHover component.
  *
- * Uses refs + direct DOM manipulation for the gradient position to avoid
- * re-renders on every mousemove.
+ * Uses refs + rAF-throttled DOM writes to avoid layout thrash with many
+ * cards on screen. Mouse handlers are skipped when visualEffects is off.
  */
-import { useRef, useCallback, type ReactNode, type MouseEvent } from 'react'
+import { useEffect, useRef, useCallback, type ReactNode, type MouseEvent } from 'react'
 import { useAppearanceStore } from '@/lib/theme/appearance-store'
 import { cn } from '@/lib/utils'
 
@@ -23,17 +23,41 @@ export function GlareHover({
 }: GlareHoverProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const glareRef = useRef<HTMLDivElement>(null)
+  const rafRef = useRef<number | null>(null)
+  const pendingPosRef = useRef<{ x: number; y: number } | null>(null)
   const visualEffects = useAppearanceStore((s) => s.visualEffects)
+
+  useEffect(() => {
+    return () => {
+      if (rafRef.current !== null) {
+        cancelAnimationFrame(rafRef.current)
+        rafRef.current = null
+      }
+    }
+  }, [])
+
+  const flushPending = useCallback(() => {
+    rafRef.current = null
+    const glare = glareRef.current
+    const pos = pendingPosRef.current
+    if (!glare || !pos) return
+    glare.style.background = `radial-gradient(circle at ${pos.x}% ${pos.y}%, ${glareColor}, transparent 60%)`
+  }, [glareColor])
 
   const handleMouseMove = useCallback(
     (e: MouseEvent<HTMLDivElement>) => {
-      if (!containerRef.current || !glareRef.current || !visualEffects) return
-      const rect = containerRef.current.getBoundingClientRect()
-      const x = ((e.clientX - rect.left) / rect.width) * 100
-      const y = ((e.clientY - rect.top) / rect.height) * 100
-      glareRef.current.style.background = `radial-gradient(circle at ${x}% ${y}%, ${glareColor}, transparent 60%)`
+      const container = containerRef.current
+      if (!container) return
+      const rect = container.getBoundingClientRect()
+      pendingPosRef.current = {
+        x: ((e.clientX - rect.left) / rect.width) * 100,
+        y: ((e.clientY - rect.top) / rect.height) * 100,
+      }
+      if (rafRef.current === null) {
+        rafRef.current = requestAnimationFrame(flushPending)
+      }
     },
-    [visualEffects, glareColor],
+    [flushPending],
   )
 
   const handleMouseEnter = useCallback(() => {
@@ -48,9 +72,9 @@ export function GlareHover({
     <div
       ref={containerRef}
       className={cn('glare-hover-effect relative overflow-hidden', className)}
-      onMouseMove={handleMouseMove}
-      onMouseEnter={handleMouseEnter}
-      onMouseLeave={handleMouseLeave}
+      onMouseMove={visualEffects ? handleMouseMove : undefined}
+      onMouseEnter={visualEffects ? handleMouseEnter : undefined}
+      onMouseLeave={visualEffects ? handleMouseLeave : undefined}
     >
       {children}
       {visualEffects && (

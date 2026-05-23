@@ -2,10 +2,14 @@
  * SpotlightCard — a card wrapper that renders a radial gradient spotlight
  * following the user's cursor. Inspired by React Bits SpotlightCard.
  *
- * Uses CSS custom properties + useRef to avoid re-renders on every
- * mousemove event — the gradient position is updated via DOM directly.
+ * Performance notes:
+ * - Uses refs + direct DOM manipulation (no re-renders on mousemove)
+ * - rAF-throttled gradient updates so we never write more than once per frame,
+ *   even with many cards on screen.
+ * - Mouse handlers are skipped when visualEffects is disabled to avoid
+ *   running rect math for nothing.
  */
-import { useRef, useCallback, type ReactNode, type MouseEvent } from 'react'
+import { useEffect, useRef, useCallback, type ReactNode, type MouseEvent } from 'react'
 import { useAppearanceStore } from '@/lib/theme/appearance-store'
 import { cn } from '@/lib/utils'
 
@@ -26,17 +30,42 @@ export function SpotlightCard({
 }: SpotlightCardProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const overlayRef = useRef<HTMLDivElement>(null)
+  const rafRef = useRef<number | null>(null)
+  const pendingPosRef = useRef<{ x: number; y: number } | null>(null)
   const visualEffects = useAppearanceStore((s) => s.visualEffects)
+
+  // Cancel any pending rAF on unmount.
+  useEffect(() => {
+    return () => {
+      if (rafRef.current !== null) {
+        cancelAnimationFrame(rafRef.current)
+        rafRef.current = null
+      }
+    }
+  }, [])
+
+  const flushPending = useCallback(() => {
+    rafRef.current = null
+    const overlay = overlayRef.current
+    const pos = pendingPosRef.current
+    if (!overlay || !pos) return
+    overlay.style.background = `radial-gradient(${radius}px circle at ${pos.x}px ${pos.y}px, ${spotlightColor}, transparent 80%)`
+  }, [radius, spotlightColor])
 
   const handleMouseMove = useCallback(
     (e: MouseEvent<HTMLDivElement>) => {
-      if (!containerRef.current || !overlayRef.current || !visualEffects) return
-      const rect = containerRef.current.getBoundingClientRect()
-      const x = e.clientX - rect.left
-      const y = e.clientY - rect.top
-      overlayRef.current.style.background = `radial-gradient(${radius}px circle at ${x}px ${y}px, ${spotlightColor}, transparent 80%)`
+      const container = containerRef.current
+      if (!container) return
+      const rect = container.getBoundingClientRect()
+      pendingPosRef.current = {
+        x: e.clientX - rect.left,
+        y: e.clientY - rect.top,
+      }
+      if (rafRef.current === null) {
+        rafRef.current = requestAnimationFrame(flushPending)
+      }
     },
-    [visualEffects, radius, spotlightColor],
+    [flushPending],
   )
 
   const handleMouseEnter = useCallback(() => {
@@ -51,9 +80,9 @@ export function SpotlightCard({
     <div
       ref={containerRef}
       className={cn('spotlight-effect relative overflow-hidden', className)}
-      onMouseMove={handleMouseMove}
-      onMouseEnter={handleMouseEnter}
-      onMouseLeave={handleMouseLeave}
+      onMouseMove={visualEffects ? handleMouseMove : undefined}
+      onMouseEnter={visualEffects ? handleMouseEnter : undefined}
+      onMouseLeave={visualEffects ? handleMouseLeave : undefined}
     >
       {visualEffects && (
         <div

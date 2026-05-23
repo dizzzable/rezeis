@@ -3,6 +3,14 @@
  * Reads the selected text animation from effects-store and renders
  * the appropriate React Bits component.
  *
+ * Children resolution:
+ *   - If a `text` prop is provided, that is used as the source string.
+ *   - Otherwise, if `children` is a string, it's used directly.
+ *   - For React node children that aren't strings, animations that need
+ *     a string ("decrypted", "blur", "glitch", "scrambled", "rotating",
+ *     "trueFocus", "fuzzy") fall back to rendering the children plainly,
+ *     because they cannot animate arbitrary JSX.
+ *
  * Usage:
  *   <TitleEffect>{t('dashboardPage.title')}</TitleEffect>
  *   <TitleEffect text="Static text" />
@@ -10,7 +18,10 @@
 import { lazy, Suspense, type ReactNode } from 'react'
 import { motion } from 'motion/react'
 import { useAppearanceStore } from '@/lib/theme/appearance-store'
-import { useEffectsStore } from '@/lib/theme/effects-store'
+import {
+  useEffectsStore,
+  type TextAnimationId,
+} from '@/lib/theme/effects-store'
 import { cn } from '@/lib/utils'
 
 // ── Lazy-loaded text animation components ────────────────────────────────────
@@ -36,6 +47,11 @@ interface TitleEffectProps {
   disabled?: boolean
 }
 
+/** Animations that need a plain string and cannot animate JSX. */
+const STRING_ONLY_ANIMATIONS: ReadonlySet<TextAnimationId> = new Set<TextAnimationId>([
+  'decrypted', 'blur', 'glitch', 'scrambled', 'rotating', 'trueFocus', 'fuzzy',
+])
+
 // ── Component ────────────────────────────────────────────────────────────────
 
 export function TitleEffect({
@@ -49,10 +65,19 @@ export function TitleEffect({
   const textAnimation = useEffectsStore((s) => s.textAnimation)
 
   const isActive = visualEffects && effectsEnabled && !disabled
-  const displayText = text ?? (typeof children === 'string' ? children : '')
+  const childIsString = typeof children === 'string'
+  const displayText = text ?? (childIsString ? children : '')
+  const hasUsableString = displayText.length > 0
 
   // Fallback: render plain text
   if (!isActive || textAnimation === 'none') {
+    return <span className={className}>{children ?? text}</span>
+  }
+
+  // String-only animations cannot animate arbitrary JSX. If we don't have
+  // a usable string (children is a non-string ReactNode and no `text`
+  // prop was supplied), render plainly to avoid silently dropping content.
+  if (STRING_ONLY_ANIMATIONS.has(textAnimation) && !hasUsableString) {
     return <span className={className}>{children ?? text}</span>
   }
 
@@ -72,7 +97,7 @@ export function TitleEffect({
 // ── Renderer ─────────────────────────────────────────────────────────────────
 
 interface RendererProps {
-  animation: string
+  animation: TextAnimationId
   text: string
   className?: string
   children?: ReactNode
@@ -97,7 +122,7 @@ function TextAnimationRenderer({ animation, text, className, children }: Rendere
     case 'glitch':
       return (
         <GlitchText
-          className={cn('!text-[inherit] !font-[inherit] !text-[length:inherit]', className)}
+          className={cn('text-inherit! font-[inherit]! text-[length:inherit]!', className)}
           speed={0.7}
           enableShadows={false}
         >
@@ -152,6 +177,7 @@ function TextAnimationRenderer({ animation, text, className, children }: Rendere
         </span>
       )
 
+    case 'none':
     default:
       return <span className={className}>{children ?? text}</span>
   }
