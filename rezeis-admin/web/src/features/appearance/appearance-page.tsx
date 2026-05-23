@@ -58,6 +58,8 @@ import { useAppearanceStore } from '@/lib/theme/appearance-store'
 import { THEME_PRESETS } from '@/lib/theme/presets'
 
 import { SavedThemesCard } from './saved-themes-card'
+import { GlassSettingsCard } from './glass-settings-card'
+import { EffectsSettingsCard } from './effects-settings-card'
 
 // ──────────────────────────────────────────────────────────────────────────────
 // AppearancePage
@@ -94,6 +96,7 @@ export default function AppearancePage() {
           <TabsTrigger value="saved">{t('appearancePage.tabs.saved')}</TabsTrigger>
           <TabsTrigger value="paste">{t('appearancePage.tabs.paste')}</TabsTrigger>
           <TabsTrigger value="layout">{t('appearancePage.tabs.layout')}</TabsTrigger>
+          <TabsTrigger value="effects">{t('appearancePage.tabs.effects')}</TabsTrigger>
           <TabsTrigger value="preview">{t('appearancePage.tabs.preview')}</TabsTrigger>
         </TabsList>
 
@@ -119,6 +122,11 @@ export default function AppearancePage() {
 
         <TabsContent value="layout" className="space-y-4">
           <LayoutTabContent />
+        </TabsContent>
+
+        <TabsContent value="effects" className="space-y-4">
+          <GlassSettingsCard />
+          <EffectsSettingsCard />
         </TabsContent>
 
         <TabsContent value="preview" className="space-y-4">
@@ -611,19 +619,11 @@ function LayoutTabContent() {
   const density = useAppearanceStore((s) => s.density)
   const fontSize = useAppearanceStore((s) => s.fontSize)
   const animationsEnabled = useAppearanceStore((s) => s.animationsEnabled)
-  const visualEffects = useAppearanceStore((s) => s.visualEffects)
-  const glassBlur = useAppearanceStore((s) => s.glassBlur)
-  const blurIntensity = useAppearanceStore((s) => s.blurIntensity)
-  const glassOpacity = useAppearanceStore((s) => s.glassOpacity)
   const setDensity = useAppearanceStore((s) => s.setDensity)
   const setFontSize = useAppearanceStore((s) => s.setFontSize)
   const setAnimationsEnabled = useAppearanceStore(
     (s) => s.setAnimationsEnabled,
   )
-  const setVisualEffects = useAppearanceStore((s) => s.setVisualEffects)
-  const setGlassBlur = useAppearanceStore((s) => s.setGlassBlur)
-  const setBlurIntensity = useAppearanceStore((s) => s.setBlurIntensity)
-  const setGlassOpacity = useAppearanceStore((s) => s.setGlassOpacity)
 
   const densityOptions: ReadonlyArray<{ id: 'compact' | 'comfortable' | 'spacious'; key: string }> = [
     { id: 'compact', key: 'appearancePage.layout.density.compact' },
@@ -723,64 +723,6 @@ function LayoutTabContent() {
             checked={animationsEnabled}
             onCheckedChange={setAnimationsEnabled}
           />
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>{t('appearancePage.layout.effects.title')}</CardTitle>
-          <CardDescription>{t('appearancePage.layout.effects.description')}</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-5">
-          <div className="flex items-center justify-between gap-4">
-            <Label htmlFor="visual-effects-toggle" className="cursor-pointer">
-              {t('appearancePage.layout.effects.visualEffectsLabel')}
-            </Label>
-            <Switch
-              id="visual-effects-toggle"
-              checked={visualEffects}
-              onCheckedChange={setVisualEffects}
-            />
-          </div>
-          <Separator />
-          <div className="flex items-center justify-between gap-4">
-            <Label htmlFor="glass-blur-toggle" className="cursor-pointer">
-              {t('appearancePage.layout.effects.glassBlurLabel')}
-            </Label>
-            <Switch
-              id="glass-blur-toggle"
-              checked={glassBlur}
-              onCheckedChange={setGlassBlur}
-            />
-          </div>
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <Label>{t('appearancePage.layout.effects.blurIntensityLabel')}</Label>
-              <span className="font-mono text-sm text-muted-foreground">{blurIntensity}px</span>
-            </div>
-            <Slider
-              value={[blurIntensity]}
-              min={4}
-              max={20}
-              step={1}
-              disabled={!glassBlur}
-              onValueChange={(v: number[]): void => setBlurIntensity(v[0] ?? 12)}
-            />
-          </div>
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <Label>{t('appearancePage.layout.effects.glassOpacityLabel')}</Label>
-              <span className="font-mono text-sm text-muted-foreground">{glassOpacity}%</span>
-            </div>
-            <Slider
-              value={[glassOpacity]}
-              min={30}
-              max={80}
-              step={5}
-              disabled={!glassBlur}
-              onValueChange={(v: number[]): void => setGlassOpacity(v[0] ?? 60)}
-            />
-          </div>
         </CardContent>
       </Card>
     </div>

@@ -86,6 +86,7 @@ import { useThemeStore } from '@/lib/theme/theme-store';
 import type { ColorMode } from '@/lib/theme/theme-store';
 import { useLocaleStore } from '@/stores/locale-store';
 import { useSidebarStore, type SidebarGroupOrder } from '@/stores/sidebar-store';
+import { useGlassStore } from '@/lib/theme/glass-store';
 
 interface NavItem {
   /** i18n key under `adminNav.items.*` */
@@ -591,6 +592,11 @@ export default function AdminShell() {
   const { logout, admin } = useAuth();
   const navigate = useNavigate();
 
+  // Glass settings
+  const glassEnabled = useGlassStore((s) => s.glassEnabled);
+  const sidebarGlass = useGlassStore((s) => s.sidebar);
+  const headerGlass = useGlassStore((s) => s.header);
+
   // Subscribe to admin realtime updates as soon as the shell is rendered
   // (i.e. the admin is authenticated). Toasts are limited to WARNING/ERROR
   // events inside the hook itself.
@@ -617,7 +623,7 @@ export default function AdminShell() {
 
   return (
     <TooltipProvider delayDuration={0}>
-      <div className="flex h-screen overflow-hidden">
+      <div className="flex h-screen overflow-hidden relative z-10">
         {/* Quick Search Overlay */}
         <QuickSearchOverlay open={searchOpen} onClose={() => setSearchOpen(false)} />
         {/* Mobile Sheet sidebar */}
@@ -637,9 +643,20 @@ export default function AdminShell() {
         {/* Desktop sidebar */}
         <aside
           className={cn(
-            'relative hidden md:flex flex-col bg-sidebar text-sidebar-foreground transition-all duration-300',
+            'relative hidden md:flex flex-col text-sidebar-foreground transition-all duration-300',
             collapsed ? 'w-16' : 'w-64',
+            glassEnabled && sidebarGlass.enabled
+              ? 'bg-sidebar/50 border-r border-sidebar-border/30'
+              : 'bg-sidebar',
           )}
+          style={
+            glassEnabled && sidebarGlass.enabled
+              ? {
+                  backdropFilter: `blur(${Math.round(sidebarGlass.blur * 80)}px) saturate(1.4)`,
+                  WebkitBackdropFilter: `blur(${Math.round(sidebarGlass.blur * 80)}px) saturate(1.4)`,
+                }
+              : undefined
+          }
         >
           {/* Logo */}
           <div className="flex h-14 items-center px-4">
@@ -674,7 +691,24 @@ export default function AdminShell() {
         {/* Main content */}
         <div className="flex flex-1 flex-col overflow-hidden">
           {/* Top bar */}
-          <header className="flex h-14 items-center justify-between bg-background px-4 md:px-6">
+          <header
+            className={cn(
+              'flex h-14 items-center justify-between px-4 md:px-6',
+              !glassEnabled
+                ? 'bg-background border-b border-border'
+                : headerGlass.enabled
+                  ? 'bg-background/50 border-b border-border/30'
+                  : 'bg-transparent',
+            )}
+            style={
+              glassEnabled && headerGlass.enabled
+                ? {
+                    backdropFilter: `blur(${Math.round(headerGlass.blur * 80)}px) saturate(1.4)`,
+                    WebkitBackdropFilter: `blur(${Math.round(headerGlass.blur * 80)}px) saturate(1.4)`,
+                  }
+                : undefined
+            }
+          >
             <div className="flex items-center gap-2">
               {/* Mobile hamburger */}
               <Button
@@ -760,7 +794,10 @@ export default function AdminShell() {
           </header>
 
           {/* Page content */}
-          <main className="flex-1 overflow-auto bg-muted/20 relative">
+          <main className={cn(
+            'flex-1 overflow-auto relative',
+            glassEnabled ? 'bg-transparent' : 'bg-muted/20',
+          )}>
             <OfflineIndicator />
             <UpdateBanner />
             <div className="p-4 md:p-6">

@@ -98,11 +98,11 @@ const INITIAL: Pick<
   'presetId' | 'mode' | 'radius' | 'customCss' | 'overridesLight' | 'overridesDark'
 > = {
   presetId: 'default',
-  mode: 'system',
+  mode: 'dark',
   radius: 0.625,
   customCss: '',
   overridesLight: {},
-  overridesDark: {},
+  overridesDark: { 'sidebar-primary': '#aa1d8b' },
 }
 
 export const useThemeStore = create<ThemeState>()(

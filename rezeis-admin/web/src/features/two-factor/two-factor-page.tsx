@@ -99,7 +99,7 @@ export default function TwoFactorPage() {
   }
 
   const renderEnrollmentPending = (enrollment: TwoFactorEnrollment) => (
-    <Card className="max-w-2xl">
+    <Card>
       <CardHeader>
         <CardTitle>{t('twoFactorPage.confirm.title')}</CardTitle>
         <CardDescription>{t('twoFactorPage.confirm.description')}</CardDescription>
@@ -169,7 +169,7 @@ export default function TwoFactorPage() {
       )}
 
       {pending ? renderEnrollmentPending(pending) : (
-        <Card className="max-w-2xl">
+        <Card>
           <CardHeader>
             <div className="flex items-center gap-3">
               {status.enabled ? (

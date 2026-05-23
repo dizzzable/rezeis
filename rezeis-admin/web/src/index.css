@@ -378,3 +378,167 @@ input[type="number"]::-webkit-inner-spin-button {
   appearance: none;
   margin: 0;
 }
+
+/* ── Liquid Glass — per-element glass effects ──────────────────────────────
+ * When the Liquid Glass feature is enabled (from glass-store), these rules
+ * make UI elements semi-transparent with backdrop-filter blur.
+ * Each element type has its own data-attribute toggle and CSS variable for blur.
+ * AppearanceProvider sets these from the glass store values.
+ */
+:root {
+  --liquid-glass-cards-blur: 12px;
+  --liquid-glass-header-blur: 8px;
+  --liquid-glass-modals-blur: 16px;
+  --liquid-glass-sidebar-blur: 10px;
+  --liquid-glass-tabs-blur: 8px;
+  --liquid-glass-buttons-blur: 6px;
+  --liquid-glass-popover-blur: 12px;
+}
+
+/* Cards */
+:root[data-liquid-glass-cards="on"] .bg-card {
+  background-color: color-mix(in oklch, var(--card) 40%, transparent) !important;
+  backdrop-filter: blur(var(--liquid-glass-cards-blur)) saturate(1.4);
+  -webkit-backdrop-filter: blur(var(--liquid-glass-cards-blur)) saturate(1.4);
+  border-color: color-mix(in oklch, var(--border) 50%, transparent);
+  box-shadow:
+    0 0 0 1px oklch(1 0 0 / 8%) inset,
+    0 2px 16px oklch(0 0 0 / 6%);
+}
+
+/* Header — transparent by default when liquid glass is on, glass effect when enabled */
+:root[data-liquid-glass="on"][data-liquid-glass-header="off"] header {
+  background-color: transparent !important;
+  border-bottom-color: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+:root[data-liquid-glass-header="on"] header {
+  background-color: color-mix(in oklch, var(--background) 35%, transparent) !important;
+  backdrop-filter: blur(var(--liquid-glass-header-blur)) saturate(1.4);
+  -webkit-backdrop-filter: blur(var(--liquid-glass-header-blur)) saturate(1.4);
+  border-bottom-color: color-mix(in oklch, var(--border) 40%, transparent);
+}
+
+/* Modals / Dialogs */
+:root[data-liquid-glass-modals="on"] [role="dialog"] > div,
+:root[data-liquid-glass-modals="on"] [data-state="open"].bg-card {
+  background-color: color-mix(in oklch, var(--card) 45%, transparent) !important;
+  backdrop-filter: blur(var(--liquid-glass-modals-blur)) saturate(1.4);
+  -webkit-backdrop-filter: blur(var(--liquid-glass-modals-blur)) saturate(1.4);
+  border-color: color-mix(in oklch, var(--border) 50%, transparent);
+}
+
+/* Sidebar */
+:root[data-liquid-glass-sidebar="on"] aside {
+  background-color: color-mix(in oklch, var(--sidebar) 40%, transparent) !important;
+  backdrop-filter: blur(var(--liquid-glass-sidebar-blur)) saturate(1.4);
+  -webkit-backdrop-filter: blur(var(--liquid-glass-sidebar-blur)) saturate(1.4);
+}
+
+/* Tabs */
+:root[data-liquid-glass-tabs="on"] [role="tablist"] {
+  background-color: color-mix(in oklch, var(--muted) 40%, transparent) !important;
+  backdrop-filter: blur(var(--liquid-glass-tabs-blur)) saturate(1.3);
+  -webkit-backdrop-filter: blur(var(--liquid-glass-tabs-blur)) saturate(1.3);
+}
+
+:root[data-liquid-glass-tabs="on"] [role="tab"][data-state="active"] {
+  background-color: color-mix(in oklch, var(--background) 50%, transparent) !important;
+  backdrop-filter: blur(var(--liquid-glass-tabs-blur)) saturate(1.2);
+  -webkit-backdrop-filter: blur(var(--liquid-glass-tabs-blur)) saturate(1.2);
+}
+
+/* Buttons */
+:root[data-liquid-glass-buttons="on"] .bg-primary {
+  background-color: color-mix(in oklch, var(--primary) 75%, transparent) !important;
+  backdrop-filter: blur(var(--liquid-glass-buttons-blur)) saturate(1.2);
+  -webkit-backdrop-filter: blur(var(--liquid-glass-buttons-blur)) saturate(1.2);
+}
+
+:root[data-liquid-glass-buttons="on"] .bg-secondary {
+  background-color: color-mix(in oklch, var(--secondary) 50%, transparent) !important;
+  backdrop-filter: blur(var(--liquid-glass-buttons-blur)) saturate(1.2);
+  -webkit-backdrop-filter: blur(var(--liquid-glass-buttons-blur)) saturate(1.2);
+}
+
+:root[data-liquid-glass-buttons="on"] button.bg-background,
+:root[data-liquid-glass-buttons="on"] a.bg-background {
+  background-color: color-mix(in oklch, var(--background) 45%, transparent) !important;
+  backdrop-filter: blur(var(--liquid-glass-buttons-blur)) saturate(1.3);
+  -webkit-backdrop-filter: blur(var(--liquid-glass-buttons-blur)) saturate(1.3);
+}
+
+:root[data-liquid-glass-buttons="on"] .bg-muted:not([role="tablist"]) {
+  background-color: color-mix(in oklch, var(--muted) 40%, transparent) !important;
+  backdrop-filter: blur(var(--liquid-glass-buttons-blur)) saturate(1.2);
+  -webkit-backdrop-filter: blur(var(--liquid-glass-buttons-blur)) saturate(1.2);
+}
+
+/* Popover / Select dropdowns */
+:root[data-liquid-glass-popover="on"] [role="combobox"],
+:root[data-liquid-glass-popover="on"] .bg-popover,
+:root[data-liquid-glass-popover="on"] [data-radix-popper-content-wrapper] > div {
+  background-color: color-mix(in oklch, var(--popover) 50%, transparent) !important;
+  backdrop-filter: blur(var(--liquid-glass-popover-blur)) saturate(1.4);
+  -webkit-backdrop-filter: blur(var(--liquid-glass-popover-blur)) saturate(1.4);
+}
+
+/* Global surface transparency — all muted/accent backgrounds become translucent */
+:root[data-liquid-glass="on"] .bg-muted\/20,
+:root[data-liquid-glass="on"] .bg-muted\/30,
+:root[data-liquid-glass="on"] .bg-muted\/40,
+:root[data-liquid-glass="on"] .bg-muted\/50 {
+  background-color: transparent !important;
+}
+
+:root[data-liquid-glass="on"] main .bg-muted:not([role="tablist"]):not(button):not(a) {
+  background-color: color-mix(in oklch, var(--muted) 30%, transparent) !important;
+  backdrop-filter: blur(6px) saturate(1.2);
+  -webkit-backdrop-filter: blur(6px) saturate(1.2);
+}
+
+:root[data-liquid-glass="on"] main .bg-accent {
+  background-color: color-mix(in oklch, var(--accent) 35%, transparent) !important;
+  backdrop-filter: blur(6px) saturate(1.2);
+  -webkit-backdrop-filter: blur(6px) saturate(1.2);
+}
+
+/* Input fields — slightly translucent */
+:root[data-liquid-glass="on"] input,
+:root[data-liquid-glass="on"] textarea,
+:root[data-liquid-glass="on"] select {
+  background-color: color-mix(in oklch, var(--background) 50%, transparent) !important;
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
+/* Main content area — fully transparent when glass is on */
+:root[data-liquid-glass="on"] main {
+  background-color: transparent !important;
+}
+
+/* All bg-background surfaces inside main content */
+:root[data-liquid-glass="on"] main .bg-background {
+  background-color: color-mix(in oklch, var(--background) 30%, transparent) !important;
+  backdrop-filter: blur(6px) saturate(1.2);
+  -webkit-backdrop-filter: blur(6px) saturate(1.2);
+}
+
+/* Bordered containers (panels, sections) — common pattern: rounded-lg border */
+:root[data-liquid-glass-cards="on"] .rounded-lg.border {
+  background-color: color-mix(in oklch, var(--card) 40%, transparent) !important;
+  backdrop-filter: blur(var(--liquid-glass-cards-blur)) saturate(1.4);
+  -webkit-backdrop-filter: blur(var(--liquid-glass-cards-blur)) saturate(1.4);
+  border-color: color-mix(in oklch, var(--border) 50%, transparent);
+}
+
+/* Ensure border-r / border-t panels inside glass containers are also transparent */
+:root[data-liquid-glass="on"] .border-r.bg-card,
+:root[data-liquid-glass="on"] .border-l.bg-card {
+  background-color: color-mix(in oklch, var(--card) 35%, transparent) !important;
+  backdrop-filter: blur(var(--liquid-glass-cards-blur)) saturate(1.4);
+  -webkit-backdrop-filter: blur(var(--liquid-glass-cards-blur)) saturate(1.4);
+}
+

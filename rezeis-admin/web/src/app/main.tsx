@@ -12,6 +12,7 @@ import { MotionRoot } from '@/lib/motion'
 import { I18nProvider } from '@/i18n/provider'
 import { LocaleBootstrapper } from '@/i18n/locale-bootstrapper'
 import { installClientLogger } from '@/lib/client-logger'
+import { GlassBackground } from '@/components/glass/GlassBackground'
 import { router } from './router'
 import '../index.css'
 
@@ -36,6 +37,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
               <LocaleBootstrapper>
                 <TooltipProvider delayDuration={300}>
                   <AuthProvider>
+                    <GlassBackground />
                     <RouterProvider router={router} />
                     <Toaster richColors position="top-right" />
                     <ReactQueryDevtools initialIsOpen={false} />
