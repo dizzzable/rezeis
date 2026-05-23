@@ -77,6 +77,43 @@ const riopaySettingsSchema = z
   })
   .strict();
 
+const wataSettingsSchema = z
+  .object({
+    apiKey: z.string().min(1).optional(),
+    webhookSecret: z.string().min(1).optional(),
+  })
+  .strict();
+
+const aurapaySettingsSchema = z
+  .object({
+    apiKey: z.string().min(1).optional(),
+    shopId: z.string().min(1).optional(),
+    secretKey: z.string().min(1).optional(),
+  })
+  .strict();
+
+const rollypaySettingsSchema = z
+  .object({
+    apiKey: z.string().min(1).optional(),
+    signingSecret: z.string().min(1).optional(),
+  })
+  .strict();
+
+const severpaySettingsSchema = z
+  .object({
+    mid: z.string().min(1).optional(),
+    secretToken: z.string().min(1).optional(),
+  })
+  .strict();
+
+const lavaSettingsSchema = z
+  .object({
+    apiKey: z.string().min(1).optional(),
+    offerId: z.string().min(1).optional(),
+    webhookApiKey: z.string().min(1).optional(),
+  })
+  .strict();
+
 type GatewaySettingsRecord = Record<string, unknown>;
 
 function stripUndefinedEntries(value: GatewaySettingsRecord): Prisma.InputJsonObject {
@@ -136,6 +173,16 @@ export function normalizeGatewaySettingsForStorage(
         return stripUndefinedEntries(paypalychSettingsSchema.parse(rawSettings));
       case PaymentGatewayType.RIOPAY:
         return stripUndefinedEntries(riopaySettingsSchema.parse(rawSettings));
+      case PaymentGatewayType.WATA:
+        return stripUndefinedEntries(wataSettingsSchema.parse(rawSettings));
+      case PaymentGatewayType.AURAPAY:
+        return stripUndefinedEntries(aurapaySettingsSchema.parse(rawSettings));
+      case PaymentGatewayType.ROLLYPAY:
+        return stripUndefinedEntries(rollypaySettingsSchema.parse(rawSettings));
+      case PaymentGatewayType.SEVERPAY:
+        return stripUndefinedEntries(severpaySettingsSchema.parse(rawSettings));
+      case PaymentGatewayType.LAVA:
+        return stripUndefinedEntries(lavaSettingsSchema.parse(rawSettings));
       default:
         return stripUndefinedEntries(rawSettings);
     }
@@ -179,6 +226,16 @@ export function isGatewayConfigured(
       return hasRequiredStrings(settings, ['shopId', 'apiKey']);
     case PaymentGatewayType.RIOPAY:
       return hasRequiredStrings(settings, ['apiToken']);
+    case PaymentGatewayType.WATA:
+      return hasRequiredStrings(settings, ['apiKey']);
+    case PaymentGatewayType.AURAPAY:
+      return hasRequiredStrings(settings, ['apiKey', 'shopId']);
+    case PaymentGatewayType.ROLLYPAY:
+      return hasRequiredStrings(settings, ['apiKey']);
+    case PaymentGatewayType.SEVERPAY:
+      return hasRequiredStrings(settings, ['mid', 'secretToken']);
+    case PaymentGatewayType.LAVA:
+      return hasRequiredStrings(settings, ['apiKey', 'offerId']);
     default:
       return false;
   }

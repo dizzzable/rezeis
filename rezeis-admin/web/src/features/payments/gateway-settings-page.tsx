@@ -14,7 +14,7 @@
  * “Test” button to verify the integration is healthy.
  */
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type JSX } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
@@ -59,6 +59,8 @@ import {
 } from '@/components/ui/dialog'
 import { cn } from '@/lib/utils'
 import { FadeIn, StaggerItem, StaggerList } from '@/lib/motion'
+
+import { getPaymentGatewayIcon } from './payment-gateway-icons'
 
 // ── Gateway metadata ────────────────────────────────────────────────────────
 //
@@ -297,6 +299,122 @@ const GATEWAY_META: ReadonlyArray<GatewayMeta> = [
       },
     ],
   },
+  {
+    type: 'WATA',
+    displayName: 'WATA',
+    icon: CreditCard,
+    iconColor: 'text-cyan-500',
+    fields: [
+      {
+        key: 'apiKey',
+        labelKey: 'paymentGateways.fields.apiKey',
+        placeholder: 'JWT API key',
+        secret: true,
+        hintKey: 'paymentGateways.hints.wataApiKey',
+      },
+      {
+        key: 'webhookSecret',
+        labelKey: 'paymentGateways.fields.webhookSecret',
+        placeholder: 'webhook-secret',
+        secret: true,
+      },
+    ],
+  },
+  {
+    type: 'AURAPAY',
+    displayName: 'AuraPay',
+    icon: CreditCard,
+    iconColor: 'text-violet-500',
+    fields: [
+      {
+        key: 'apiKey',
+        labelKey: 'paymentGateways.fields.apiKey',
+        placeholder: 'X-ApiKey',
+        secret: true,
+      },
+      {
+        key: 'shopId',
+        labelKey: 'paymentGateways.fields.shopId',
+        placeholder: 'shop-uuid',
+      },
+      {
+        key: 'secretKey',
+        labelKey: 'paymentGateways.fields.secret',
+        placeholder: 'secret-key-2 (для проверки X-SIGNATURE)',
+        secret: true,
+        hintKey: 'paymentGateways.hints.aurapaySecret',
+      },
+    ],
+  },
+  {
+    type: 'ROLLYPAY',
+    displayName: 'RollyPay',
+    icon: CreditCard,
+    iconColor: 'text-pink-500',
+    fields: [
+      {
+        key: 'apiKey',
+        labelKey: 'paymentGateways.fields.apiKey',
+        placeholder: 'rpk_live_…',
+        secret: true,
+      },
+      {
+        key: 'signingSecret',
+        labelKey: 'paymentGateways.fields.signingSecret',
+        placeholder: 'signing_secret',
+        secret: true,
+        hintKey: 'paymentGateways.hints.rollypaySigningSecret',
+      },
+    ],
+  },
+  {
+    type: 'SEVERPAY',
+    displayName: 'SeverPay',
+    icon: CreditCard,
+    iconColor: 'text-slate-500',
+    fields: [
+      {
+        key: 'mid',
+        labelKey: 'paymentGateways.fields.merchantId',
+        placeholder: '1',
+      },
+      {
+        key: 'secretToken',
+        labelKey: 'paymentGateways.fields.webhookSecret',
+        placeholder: '041131a0906b08a5bebc1d4fdcc6d9',
+        secret: true,
+        hintKey: 'paymentGateways.hints.severpayToken',
+      },
+    ],
+  },
+  {
+    type: 'LAVA',
+    displayName: 'Lava.top',
+    icon: CreditCard,
+    iconColor: 'text-rose-500',
+    fields: [
+      {
+        key: 'apiKey',
+        labelKey: 'paymentGateways.fields.apiKey',
+        placeholder: 'lava_api_key',
+        secret: true,
+        hintKey: 'paymentGateways.hints.lavaApiKey',
+      },
+      {
+        key: 'offerId',
+        labelKey: 'paymentGateways.fields.lavaOfferId',
+        placeholder: '836b9fc5-7ae9-4a27-9642-592bc44072b7',
+        hintKey: 'paymentGateways.hints.lavaOfferId',
+      },
+      {
+        key: 'webhookApiKey',
+        labelKey: 'paymentGateways.fields.webhookSecret',
+        placeholder: 'webhook X-Api-Key',
+        secret: true,
+        hintKey: 'paymentGateways.hints.lavaWebhookKey',
+      },
+    ],
+  },
 ] as const
 
 const META_BY_TYPE: Record<string, GatewayMeta> = Object.fromEntries(
@@ -514,7 +632,8 @@ function GatewayRow({
   })
 
   if (!meta) return null
-  const Icon = meta.icon
+  const BrandIcon = getPaymentGatewayIcon(gateway.type)
+  const FallbackIcon = meta.icon
 
   // Status semantics:
   //   • inactive          → muted dot
@@ -540,8 +659,12 @@ function GatewayRow({
         aria-hidden
       />
 
-      <div className={cn('flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-muted/40')}>
-        <Icon className={cn('h-5 w-5', meta.iconColor)} />
+      <div className={cn('flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-muted/40 overflow-hidden')}>
+        {BrandIcon ? (
+          <BrandIcon className="h-6 w-6 object-contain" />
+        ) : (
+          <FallbackIcon className={cn('h-5 w-5', meta.iconColor)} />
+        )}
       </div>
 
       <div className="min-w-0 flex-1">
@@ -676,13 +799,18 @@ function GatewaySettingsForm({ gateway, onClose }: GatewaySettingsFormProps) {
   })
 
   if (!meta) return null
-  const Icon = meta.icon
+  const BrandIcon = getPaymentGatewayIcon(gateway.type)
+  const FallbackIcon = meta.icon
 
   return (
     <>
       <DialogHeader>
         <DialogTitle className="flex items-center gap-2">
-          <Icon className={cn('h-5 w-5', meta.iconColor)} />
+          {BrandIcon ? (
+            <BrandIcon className="h-5 w-5 object-contain" />
+          ) : (
+            <FallbackIcon className={cn('h-5 w-5', meta.iconColor)} />
+          )}
           {meta.displayName}
         </DialogTitle>
         <DialogDescription>

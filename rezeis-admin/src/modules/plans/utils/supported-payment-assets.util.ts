@@ -11,6 +11,11 @@ const SUPPORTED_PAYMENT_ASSETS: Readonly<Record<PaymentGatewayType, readonly str
   [PaymentGatewayType.OVERPAY]: [],
   [PaymentGatewayType.PAYPALYCH]: [],
   [PaymentGatewayType.RIOPAY]: [],
+  [PaymentGatewayType.WATA]: [],
+  [PaymentGatewayType.AURAPAY]: [],
+  [PaymentGatewayType.ROLLYPAY]: [],
+  [PaymentGatewayType.SEVERPAY]: [],
+  [PaymentGatewayType.LAVA]: [],
 };
 
 export function getSupportedPaymentAssets(

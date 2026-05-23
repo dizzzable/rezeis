@@ -84,6 +84,11 @@ enum PaymentGatewayType {
   OVERPAY
   PAYPALYCH
   RIOPAY
+  WATA
+  AURAPAY
+  ROLLYPAY
+  SEVERPAY
+  LAVA
 }
 
 enum SubscriptionStatus {

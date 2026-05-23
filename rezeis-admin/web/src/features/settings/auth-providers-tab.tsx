@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { KeyRound, Send, Shield, Loader2, Eye, EyeOff } from 'lucide-react'
+import { KeyRound, Shield, Loader2, Eye, EyeOff } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { Button } from '@/components/ui/button'
@@ -24,6 +24,11 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Badge } from '@/components/ui/badge'
 import { api } from '@/lib/api'
 
+import {
+  type AuthProviderIconType,
+  getAuthProviderIcon,
+} from './auth-provider-icons'
+
 interface ProviderConfig {
   id: string
   type: string
@@ -41,16 +46,24 @@ interface ProviderConfig {
   allowedTelegramIds: bigint[]
 }
 
-const PROVIDER_META: Record<string, { icon: React.ElementType; color: string; description: string }> = {
-  TELEGRAM: { icon: Send, color: 'text-blue-500', description: 'Telegram Login Widget (HMAC-SHA256)' },
-  GITHUB: { icon: KeyRound, color: 'text-gray-400', description: 'GitHub OAuth2 (user:email scope)' },
-  YANDEX: { icon: KeyRound, color: 'text-red-500', description: 'Yandex OAuth2' },
-  KEYCLOAK: { icon: Shield, color: 'text-purple-500', description: 'Keycloak OpenID Connect' },
-  POCKETID: { icon: KeyRound, color: 'text-orange-500', description: 'PocketID self-hosted identity' },
-  GENERIC_OAUTH2: { icon: KeyRound, color: 'text-emerald-500', description: 'Custom OAuth2 provider' },
+const PROVIDER_META: Record<AuthProviderIconType, { color: string; description: string }> = {
+  TELEGRAM: { color: 'text-sky-500', description: 'Telegram Login Widget (HMAC-SHA256)' },
+  GITHUB: { color: 'text-foreground', description: 'GitHub OAuth2 (user:email scope)' },
+  YANDEX: { color: 'text-red-500', description: 'Yandex OAuth2' },
+  KEYCLOAK: { color: 'text-purple-500', description: 'Keycloak OpenID Connect' },
+  POCKETID: { color: 'text-orange-500', description: 'PocketID self-hosted identity' },
+  GENERIC_OAUTH2: { color: 'text-emerald-500', description: 'Custom OAuth2 provider' },
 }
 
-export default function AuthProvidersTab() {
+interface AuthProvidersTabProps {
+  /**
+   * When true, renders without the page-level header (used when embedded
+   * inside the Security tab, where the parent already shows a heading).
+   */
+  readonly embedded?: boolean
+}
+
+export default function AuthProvidersTab({ embedded = false }: AuthProvidersTabProps = {}) {
   const { t } = useTranslation()
   const { data: providers, isLoading } = useQuery({
     queryKey: ['oauth', 'config'],
@@ -62,21 +75,23 @@ export default function AuthProvidersTab() {
 
   if (isLoading) {
     return (
-      <div className="space-y-4 pt-4">
+      <div className={embedded ? 'space-y-3' : 'space-y-4 pt-4'}>
         {Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-20 w-full" />)}
       </div>
     )
   }
 
   return (
-    <div className="space-y-4 pt-4">
-      <div>
-        <h2 className="text-lg font-semibold flex items-center gap-2">
-          <Shield className="h-5 w-5" />
-          {t('authProviders.title')}
-        </h2>
-        <p className="text-sm text-muted-foreground">{t('authProviders.subtitle')}</p>
-      </div>
+    <div className={embedded ? 'space-y-3' : 'space-y-4 pt-4'}>
+      {!embedded && (
+        <div>
+          <h2 className="text-lg font-semibold flex items-center gap-2">
+            <Shield className="h-5 w-5" />
+            {t('authProviders.title')}
+          </h2>
+          <p className="text-sm text-muted-foreground">{t('authProviders.subtitle')}</p>
+        </div>
+      )}
 
       {/* Password (always enabled, not configurable) */}
       <Card>
@@ -121,8 +136,9 @@ function ProviderCard({ provider }: { provider: ProviderConfig }) {
     allowedTelegramIds: provider.allowedTelegramIds.map(String).join(', '),
   })
 
-  const meta = PROVIDER_META[provider.type] ?? PROVIDER_META['GENERIC_OAUTH2']
-  const Icon = meta.icon
+  const providerType = provider.type as AuthProviderIconType
+  const meta = PROVIDER_META[providerType] ?? PROVIDER_META.GENERIC_OAUTH2
+  const Icon = getAuthProviderIcon(providerType)
 
   const toggleMutation = useMutation({
     mutationFn: async (enabled: boolean) => {

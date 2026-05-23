@@ -1,11 +1,16 @@
 import { useTranslation } from 'react-i18next'
 import { useQuery, useMutation } from '@tanstack/react-query'
-import { Loader2, KeyRound, Send } from 'lucide-react'
+import { Loader2, KeyRound } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 
 import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/separator'
 import { api } from '@/lib/api'
+
+import {
+  type AuthProviderIconType,
+  getAuthProviderIcon,
+} from '@/features/settings/auth-provider-icons'
 
 import { useAuth } from './auth-provider'
 
@@ -13,15 +18,6 @@ interface PublicProvider {
   type: string
   displayName: string
   isEnabled: boolean
-}
-
-const PROVIDER_ICONS: Record<string, React.ElementType> = {
-  TELEGRAM: Send,
-  GITHUB: KeyRound,
-  YANDEX: () => <span className="text-sm font-bold">Я</span>,
-  KEYCLOAK: KeyRound,
-  POCKETID: KeyRound,
-  GENERIC_OAUTH2: KeyRound,
 }
 
 /**
@@ -112,7 +108,7 @@ export function OAuthButtons() {
 
       <div className="space-y-2">
         {providers.map((provider) => {
-          const Icon = PROVIDER_ICONS[provider.type] ?? KeyRound
+          const Icon = getAuthProviderIcon(provider.type as AuthProviderIconType)
 
           if (provider.type === 'GITHUB') {
             return (

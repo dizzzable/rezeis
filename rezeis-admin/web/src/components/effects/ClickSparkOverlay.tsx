@@ -53,6 +53,12 @@ export function ClickSparkOverlay({
       canvas.height = window.innerHeight * dpr
       canvas.style.width = `${window.innerWidth}px`
       canvas.style.height = `${window.innerHeight}px`
+      // Reset any previously applied transform before re-applying the
+      // device-pixel-ratio scale; without this, repeated resize/remounts
+      // stack scale(dpr, dpr) on top of each other, which both inflates
+      // sparks and makes clearRect miss most of the canvas (leaving
+      // ghost trails of the previous frames).
+      ctx.setTransform(1, 0, 0, 1, 0, 0)
       ctx.scale(dpr, dpr)
     }
 
@@ -74,7 +80,11 @@ export function ClickSparkOverlay({
     document.addEventListener('click', handleClick)
 
     const draw = () => {
-      ctx.clearRect(0, 0, canvas.width, canvas.height)
+      // Use the CSS dimensions (logical pixels) for clearRect because
+      // the context is already scaled by devicePixelRatio. Using
+      // canvas.width / canvas.height here would only clear a
+      // 1/dpr fraction of the visible area on hi-DPI displays.
+      ctx.clearRect(0, 0, window.innerWidth, window.innerHeight)
       const now = performance.now()
 
       sparksRef.current = sparksRef.current.filter((s) => now - s.startTime < duration)
@@ -116,7 +126,7 @@ export function ClickSparkOverlay({
     <canvas
       ref={canvasRef}
       aria-hidden="true"
-      className="pointer-events-none fixed inset-0 z-[9998]"
+      className="pointer-events-none fixed inset-0 z-9998"
     />
   )
 }

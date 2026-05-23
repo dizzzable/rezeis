@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- TODO: type API responses */
-import { useState } from 'react'
+import { lazy, Suspense, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '@/lib/api'
@@ -12,6 +12,8 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { DatePicker } from '@/components/ui/date-picker'
+
+const PaymentsAnalyticsTab = lazy(() => import('./payments-analytics-tab'))
 
 export default function PaymentsPage() {
   const { t } = useTranslation()
@@ -26,10 +28,16 @@ export default function PaymentsPage() {
         <TabsList>
           <TabsTrigger value="transactions">{t('paymentsPage.tabs.transactions')}</TabsTrigger>
           <TabsTrigger value="webhooks">{t('paymentsPage.tabs.webhooks')}</TabsTrigger>
+          <TabsTrigger value="analytics">{t('paymentsPage.tabs.analytics')}</TabsTrigger>
         </TabsList>
 
         <TabsContent value="transactions"><TransactionsTab /></TabsContent>
         <TabsContent value="webhooks"><WebhooksTab /></TabsContent>
+        <TabsContent value="analytics">
+          <Suspense fallback={<Skeleton className="h-96 w-full mt-4" />}>
+            <PaymentsAnalyticsTab />
+          </Suspense>
+        </TabsContent>
       </Tabs>
     </div>
   )

@@ -63,6 +63,16 @@ export class PaymentProviderExecutionService {
         return this.createPaypalychCheckout(input);
       case PaymentGatewayType.RIOPAY:
         return this.createRiopayCheckout(input);
+      case PaymentGatewayType.WATA:
+        return this.createWataCheckout(input);
+      case PaymentGatewayType.AURAPAY:
+        return this.createAurapayCheckout(input);
+      case PaymentGatewayType.ROLLYPAY:
+        return this.createRollypayCheckout(input);
+      case PaymentGatewayType.SEVERPAY:
+        return this.createSeverpayCheckout(input);
+      case PaymentGatewayType.LAVA:
+        return this.createLavaCheckout(input);
       default:
         throw new NotFoundException('Payment gateway not supported');
     }
@@ -579,6 +589,254 @@ export class PaymentProviderExecutionService {
       providerMode: 'REDIRECT',
       providerStatus: readOptionalString(data, ['status']) ?? 'PENDING',
       gatewayData: { provider: 'RIOPAY', providerResponse: data, checkoutUrl: readOptionalString(data, ['paymentLink']) },
+    };
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  //  WATA — https://api.wata.pro/api/v1/links
+  //  Auth: Bearer JWT API key
+  //  Docs: https://wata.pro/api
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  private async createWataCheckout(input: {
+    readonly gateway: PaymentGateway;
+    readonly transaction: Transaction;
+    readonly description: string;
+    readonly successUrl?: string | null;
+    readonly failUrl?: string | null;
+  }): Promise<ProviderCheckoutResult> {
+    const settings = readGatewaySettings(input.gateway.settings);
+    const apiKey = requireSetting(settings, 'apiKey');
+
+    const successUrl = this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
+    const failUrl = this.resolveFailUrl(input.transaction.paymentId, input.failUrl, input.successUrl);
+
+    const payload = {
+      amount: Number(input.transaction.amount),
+      currency: input.transaction.currency === Currency.RUB ? 'RUB' : 'USD',
+      orderId: input.transaction.paymentId,
+      description: input.description.slice(0, 255),
+      successRedirectUrl: successUrl,
+      failRedirectUrl: failUrl,
+    };
+
+    const response = await firstValueFrom(
+      this.httpService.post('https://api.wata.pro/api/v1/links', payload, {
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      }),
+    );
+
+    const data = response.data as Record<string, unknown>;
+    return {
+      gatewayId: readOptionalString(data, ['id']),
+      checkoutUrl: readOptionalString(data, ['url', 'paymentUrl']),
+      providerMode: 'REDIRECT',
+      providerStatus: readOptionalString(data, ['status']) ?? 'PENDING',
+      gatewayData: { provider: 'WATA', providerResponse: data, checkoutUrl: readOptionalString(data, ['url', 'paymentUrl']) },
+    };
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  //  AURAPAY — https://app.aurapay.tech/invoice/create
+  //  Auth: X-ApiKey + X-ShopId headers
+  //  Docs: https://docs.aurapay.tech/
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  private async createAurapayCheckout(input: {
+    readonly gateway: PaymentGateway;
+    readonly transaction: Transaction;
+    readonly description: string;
+    readonly successUrl?: string | null;
+    readonly failUrl?: string | null;
+  }): Promise<ProviderCheckoutResult> {
+    const settings = readGatewaySettings(input.gateway.settings);
+    const apiKey = requireSetting(settings, 'apiKey');
+    const shopId = requireSetting(settings, 'shopId');
+
+    const successUrl = this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
+    const failUrl = this.resolveFailUrl(input.transaction.paymentId, input.failUrl, input.successUrl);
+    const callbackUrl = this.buildWebhookUrl(PaymentGatewayType.AURAPAY);
+
+    const payload = {
+      amount: Number(input.transaction.amount),
+      order_id: input.transaction.paymentId,
+      success_url: successUrl,
+      fail_url: failUrl,
+      callback_url: callbackUrl,
+      comment: input.description.slice(0, 255),
+      lifetime: 60,
+    };
+
+    const response = await firstValueFrom(
+      this.httpService.post('https://app.aurapay.tech/invoice/create', payload, {
+        headers: { 'Content-Type': 'application/json', 'X-ApiKey': apiKey, 'X-ShopId': shopId },
+      }),
+    );
+
+    const data = response.data as Record<string, unknown>;
+    const paymentData = readRecord(data.payment_data);
+    const checkoutUrl = readOptionalString(paymentData, ['url']);
+    return {
+      gatewayId: readOptionalString(data, ['id']),
+      checkoutUrl,
+      providerMode: 'REDIRECT',
+      providerStatus: readOptionalString(data, ['status']) ?? 'PENDING',
+      gatewayData: { provider: 'AURAPAY', providerResponse: data, checkoutUrl },
+    };
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  //  ROLLYPAY — https://rollypay.io/api/v1/payments
+  //  Auth: X-API-Key + X-Nonce per request
+  //  Docs: https://docs.rollypay.io/api/payments
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  private async createRollypayCheckout(input: {
+    readonly gateway: PaymentGateway;
+    readonly transaction: Transaction;
+    readonly description: string;
+    readonly successUrl?: string | null;
+    readonly failUrl?: string | null;
+  }): Promise<ProviderCheckoutResult> {
+    const crypto = await import('crypto');
+    const settings = readGatewaySettings(input.gateway.settings);
+    const apiKey = requireSetting(settings, 'apiKey');
+
+    const successUrl = this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
+    const failUrl = this.resolveFailUrl(input.transaction.paymentId, input.failUrl, input.successUrl);
+
+    const payload = {
+      amount: input.transaction.amount.toString(),
+      payment_currency: 'RUB',
+      order_id: input.transaction.paymentId,
+      description: input.description.slice(0, 255),
+      success_redirect_url: successUrl,
+      fail_redirect_url: failUrl,
+    };
+
+    const response = await firstValueFrom(
+      this.httpService.post('https://rollypay.io/api/v1/payments', payload, {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-API-Key': apiKey,
+          'X-Nonce': crypto.randomUUID(),
+        },
+      }),
+    );
+
+    const data = response.data as Record<string, unknown>;
+    return {
+      gatewayId: readOptionalString(data, ['payment_id']),
+      checkoutUrl: readOptionalString(data, ['pay_url']),
+      providerMode: 'REDIRECT',
+      providerStatus: readOptionalString(data, ['status']) ?? 'PENDING',
+      gatewayData: { provider: 'ROLLYPAY', providerResponse: data, checkoutUrl: readOptionalString(data, ['pay_url']) },
+    };
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  //  SEVERPAY — https://severpay.io/api/merchant/payin/create
+  //  Auth: HMAC-SHA256 sign in body (mid + salt + payload, sorted keys)
+  //  Docs: https://docs.severpay.io/en/payin/create
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  private async createSeverpayCheckout(input: {
+    readonly gateway: PaymentGateway;
+    readonly transaction: Transaction;
+    readonly description: string;
+    readonly successUrl?: string | null;
+    readonly failUrl?: string | null;
+  }): Promise<ProviderCheckoutResult> {
+    const crypto = await import('crypto');
+    const settings = readGatewaySettings(input.gateway.settings);
+    const mid = requireSetting(settings, 'mid');
+    const secretToken = requireSetting(settings, 'secretToken');
+
+    const successUrl = this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
+    const customerEmail = `${input.transaction.userId ?? 'customer'}@rezeis.local`;
+    const salt = crypto.randomBytes(8).toString('hex');
+
+    const baseBody: Record<string, unknown> = {
+      mid: Number(mid),
+      salt,
+      order_id: input.transaction.paymentId,
+      amount: Number(input.transaction.amount),
+      currency: input.transaction.currency === Currency.RUB ? 'RUB' : 'USD',
+      client_email: customerEmail,
+      client_id: input.transaction.userId ?? input.transaction.paymentId,
+      url_return: successUrl,
+      lifetime: 1440,
+    };
+
+    // SeverPay требует ksort + HMAC-SHA256(JSON, secretToken)
+    const sorted: Record<string, unknown> = Object.fromEntries(
+      Object.entries(baseBody).sort(([a], [b]) => a.localeCompare(b)),
+    );
+    const sign = crypto
+      .createHmac('sha256', secretToken)
+      .update(JSON.stringify(sorted))
+      .digest('hex');
+    const signedBody = { ...sorted, sign };
+
+    const response = await firstValueFrom(
+      this.httpService.post('https://severpay.io/api/merchant/payin/create', signedBody, {
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+
+    const data = response.data as Record<string, unknown>;
+    const dataObj = readRecord(data.data);
+    const checkoutUrl = readOptionalString(dataObj, ['url']);
+
+    return {
+      gatewayId: readOptionalString(dataObj, ['uid', 'id']),
+      checkoutUrl,
+      providerMode: 'REDIRECT',
+      providerStatus: data.status === true ? 'PENDING' : 'FAILED',
+      gatewayData: { provider: 'SEVERPAY', providerResponse: data, checkoutUrl },
+    };
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  //  LAVA.TOP — https://gate.lava.top/api/v2/invoice
+  //  Auth: X-Api-Key
+  //  Docs: https://gate.lava.top/docs
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  private async createLavaCheckout(input: {
+    readonly gateway: PaymentGateway;
+    readonly transaction: Transaction;
+    readonly description: string;
+    readonly successUrl?: string | null;
+    readonly failUrl?: string | null;
+  }): Promise<ProviderCheckoutResult> {
+    const settings = readGatewaySettings(input.gateway.settings);
+    const apiKey = requireSetting(settings, 'apiKey');
+    const offerId = requireSetting(settings, 'offerId');
+
+    const customerEmail = `${input.transaction.userId ?? 'customer'}@rezeis.local`;
+
+    const payload = {
+      email: customerEmail,
+      offerId,
+      currency: input.transaction.currency === Currency.RUB ? 'RUB' : 'USD',
+      periodicity: 'ONE_TIME',
+    };
+
+    const response = await firstValueFrom(
+      this.httpService.post('https://gate.lava.top/api/v2/invoice', payload, {
+        headers: { 'Content-Type': 'application/json', 'X-Api-Key': apiKey },
+      }),
+    );
+
+    const data = response.data as Record<string, unknown>;
+    const checkoutUrl = readOptionalString(data, ['paymentUrl']);
+    return {
+      gatewayId: readOptionalString(data, ['id']),
+      checkoutUrl,
+      providerMode: 'REDIRECT',
+      providerStatus: readOptionalString(data, ['status']) ?? 'PENDING',
+      gatewayData: { provider: 'LAVA', providerResponse: data, checkoutUrl },
     };
   }
 

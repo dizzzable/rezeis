@@ -123,9 +123,9 @@ function DashboardLoadingState(): JSX.Element {
         <Loader2 className="h-4 w-4 animate-spin" />
         <span>{t('dashboardPage.loading')}</span>
       </div>
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         {Array.from({ length: 8 }).map((_, index) => (
-          <Skeleton key={index} className="h-28 w-full rounded-xl" />
+          <Skeleton key={index} className="h-[78px] w-full rounded-lg" />
         ))}
       </div>
       <div className="grid gap-4 lg:grid-cols-2">

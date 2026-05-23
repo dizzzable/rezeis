@@ -11,12 +11,7 @@ import {
   Wallet,
 } from 'lucide-react'
 
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from '@/components/ui/card'
+import { Card } from '@/components/ui/card'
 import { CountUp } from '@/components/CountUp'
 import { SpotlightCard } from '@/components/effects/SpotlightCard'
 import { Noise } from '@/components/effects/Noise'
@@ -86,7 +81,7 @@ export function DashboardKpiGrid({ summary }: { readonly summary: DashboardSumma
   ]
 
   return (
-    <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
       {kpis.map((kpi) => (
         <KpiCard key={kpi.title} {...kpi} />
       ))}
@@ -104,25 +99,25 @@ interface KpiItem {
 
 function KpiCard({ title, value, description, icon: Icon, trend }: KpiItem): JSX.Element {
   return (
-    <SpotlightCard className="rounded-lg">
-      <Card className="relative overflow-hidden">
+    <SpotlightCard className="h-full rounded-lg">
+      <Card className="relative flex h-full flex-col overflow-hidden p-3">
         <Noise opacity={0.03} />
-        <CardHeader className="flex flex-row items-center justify-between pb-2">
-          <CardTitle className="text-sm font-medium text-muted-foreground">{title}</CardTitle>
-          <Icon className="h-4 w-4 text-muted-foreground" />
-        </CardHeader>
-        <CardContent>
-          <div className="flex items-center gap-2">
-            <span className="text-2xl font-bold">
-              {typeof value === 'number' ? <CountUp value={value} /> : value}
-            </span>
-            {trend === 'up' && <TrendingUp className="h-4 w-4 text-emerald-500" />}
-            {trend === 'down' && <TrendingDown className="h-4 w-4 text-red-500" />}
-          </div>
-          {description !== undefined ? (
-            <p className="text-xs text-muted-foreground mt-1">{description}</p>
-          ) : null}
-        </CardContent>
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground line-clamp-1">
+            {title}
+          </span>
+          <Icon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+        </div>
+        <div className="mt-1.5 flex items-center gap-1.5">
+          <span className="text-xl font-bold leading-none">
+            {typeof value === 'number' ? <CountUp value={value} /> : value}
+          </span>
+          {trend === 'up' && <TrendingUp className="h-3.5 w-3.5 text-emerald-500" />}
+          {trend === 'down' && <TrendingDown className="h-3.5 w-3.5 text-red-500" />}
+        </div>
+        <p className="mt-auto pt-1 text-[10px] leading-tight text-muted-foreground line-clamp-1">
+          {description ?? '\u00A0'}
+        </p>
       </Card>
     </SpotlightCard>
   )

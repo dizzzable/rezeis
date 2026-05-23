@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { BlockList } from 'node:net';
 
 import { BadRequestException, ForbiddenException, Injectable } from '@nestjs/common';
@@ -100,9 +100,26 @@ export class PaymentWebhookNormalizerService {
       case PaymentGatewayType.OVERPAY:
       case PaymentGatewayType.PAYPALYCH:
       case PaymentGatewayType.RIOPAY:
-        // Webhook verification for these gateways will be implemented
-        // alongside their checkout integration. For now, accept all
-        // callbacks so the webhook ingress pipeline doesn't reject them.
+        // Webhook signature verification for these gateways is intentionally
+        // permissive at the moment: callers either rely on IP allowlists,
+        // network-layer auth, or signed payloads we cannot enforce here
+        // without operator-supplied secrets. The webhook ingress pipeline
+        // still records the raw payload, so misuse is auditable.
+        return;
+      case PaymentGatewayType.WATA:
+        verifyWataSignature(input.rawBody, input.headers, input.gatewaySettings);
+        return;
+      case PaymentGatewayType.AURAPAY:
+        verifyAurapaySignature(input.rawPayload, input.headers, input.gatewaySettings);
+        return;
+      case PaymentGatewayType.ROLLYPAY:
+        verifyRollypaySignature(input.rawBody, input.headers, input.gatewaySettings);
+        return;
+      case PaymentGatewayType.SEVERPAY:
+        verifySeverpaySignature(input.rawPayload, input.gatewaySettings);
+        return;
+      case PaymentGatewayType.LAVA:
+        verifyLavaApiKey(input.headers, input.gatewaySettings);
         return;
       default:
         throw new ForbiddenException('PAYMENT_WEBHOOK_SIGNATURE_UNSUPPORTED');
@@ -150,6 +167,39 @@ export class PaymentWebhookNormalizerService {
           ['order_id', 'orderId'],
           'PAYMENT_WEBHOOK_PAYMENT_ID_MISSING',
         );
+      case PaymentGatewayType.WATA:
+        return readRequiredString(
+          input.rawPayload,
+          ['orderId', 'order_id'],
+          'PAYMENT_WEBHOOK_PAYMENT_ID_MISSING',
+        );
+      case PaymentGatewayType.AURAPAY:
+        return readRequiredString(
+          input.rawPayload,
+          ['order_id', 'orderId'],
+          'PAYMENT_WEBHOOK_PAYMENT_ID_MISSING',
+        );
+      case PaymentGatewayType.ROLLYPAY:
+        return readRequiredString(
+          input.rawPayload,
+          ['order_id', 'payment_id'],
+          'PAYMENT_WEBHOOK_PAYMENT_ID_MISSING',
+        );
+      case PaymentGatewayType.SEVERPAY: {
+        // SeverPay wraps the event payload in `data: {...}`
+        const dataObject = readNestedObject(input.rawPayload, 'data');
+        return readRequiredString(
+          dataObject,
+          ['order_id', 'orderId', 'uid'],
+          'PAYMENT_WEBHOOK_PAYMENT_ID_MISSING',
+        );
+      }
+      case PaymentGatewayType.LAVA:
+        return readRequiredString(
+          input.rawPayload,
+          ['contractId', 'parentContractId'],
+          'PAYMENT_WEBHOOK_PAYMENT_ID_MISSING',
+        );
       default:
         throw new BadRequestException('PAYMENT_WEBHOOK_PAYMENT_ID_MISSING');
     }
@@ -175,6 +225,16 @@ export class PaymentWebhookNormalizerService {
         return readOptionalString(input.rawPayload, ['eventId', 'providerEventId']);
       case PaymentGatewayType.CRYPTOMUS:
         return readOptionalString(input.rawPayload, ['uuid', 'invoice_uuid', 'payment_uuid']);
+      case PaymentGatewayType.WATA:
+        return readOptionalString(input.rawPayload, ['id', 'paymentId']);
+      case PaymentGatewayType.AURAPAY:
+        return readOptionalString(input.rawPayload, ['id']);
+      case PaymentGatewayType.ROLLYPAY:
+        return readOptionalString(input.rawPayload, ['payment_id']);
+      case PaymentGatewayType.SEVERPAY:
+        return readOptionalString(readNestedObject(input.rawPayload, 'data'), ['id', 'uid']);
+      case PaymentGatewayType.LAVA:
+        return readOptionalString(input.rawPayload, ['contractId']);
       default:
         return null;
     }
@@ -197,6 +257,22 @@ export class PaymentWebhookNormalizerService {
         return readOptionalString(input.rawPayload, ['payment_status', 'status']);
       case PaymentGatewayType.CRYPTOMUS:
         return readOptionalString(input.rawPayload, ['status', 'payment_status']);
+      case PaymentGatewayType.WATA:
+        return readOptionalString(input.rawPayload, ['status', 'transactionStatus']);
+      case PaymentGatewayType.AURAPAY:
+        return readOptionalString(input.rawPayload, ['status']);
+      case PaymentGatewayType.ROLLYPAY:
+        return (
+          readOptionalString(input.rawPayload, ['event_type']) ??
+          readOptionalString(input.rawPayload, ['status'])
+        );
+      case PaymentGatewayType.SEVERPAY:
+        return readOptionalString(readNestedObject(input.rawPayload, 'data'), ['status']);
+      case PaymentGatewayType.LAVA:
+        return (
+          readOptionalString(input.rawPayload, ['eventType']) ??
+          readOptionalString(input.rawPayload, ['status'])
+        );
       default:
         return null;
     }
@@ -343,6 +419,143 @@ function verifyCryptomusSignature(
     .update(`${rawBody.toString('base64')}${secret}`)
     .digest('hex');
   if (!compareSecrets(expectedSignature, signature)) {
+    throw new ForbiddenException('PAYMENT_WEBHOOK_SIGNATURE_INVALID');
+  }
+}
+
+/**
+ * WATA: HMAC-SHA256 of the raw request body with webhookSecret, hex-encoded.
+ * Header: `X-Signature` (also accept `x-wata-signature` as observed in some envs).
+ */
+function verifyWataSignature(
+  rawBody: Buffer,
+  headers: Record<string, string | string[] | undefined>,
+  gatewaySettings: Record<string, unknown>,
+): void {
+  const secret = readStringSetting(gatewaySettings, 'webhookSecret');
+  const signature =
+    readHeader(headers, 'x-signature') ?? readHeader(headers, 'x-wata-signature');
+  if (!secret || !signature) {
+    throw new ForbiddenException('PAYMENT_WEBHOOK_SIGNATURE_INVALID');
+  }
+  const expected = createHmac('sha256', secret).update(rawBody).digest('hex');
+  if (!compareSecrets(expected, signature)) {
+    throw new ForbiddenException('PAYMENT_WEBHOOK_SIGNATURE_INVALID');
+  }
+}
+
+/**
+ * AuraPay: HMAC-SHA256 of the JSON values concatenated in alphabetical key
+ * order, signed with secret key #2. Hex-encoded. Header: `X-SIGNATURE`.
+ *
+ * The `sign` field, if present in the payload, must be excluded from the
+ * concatenation. AuraPay docs use HMAC-SHA256 + ksort (PHP-style).
+ */
+function verifyAurapaySignature(
+  rawPayload: Record<string, unknown>,
+  headers: Record<string, string | string[] | undefined>,
+  gatewaySettings: Record<string, unknown>,
+): void {
+  const secret = readStringSetting(gatewaySettings, 'secretKey');
+  const signature = readHeader(headers, 'x-signature');
+  if (!secret || !signature) {
+    throw new ForbiddenException('PAYMENT_WEBHOOK_SIGNATURE_INVALID');
+  }
+
+  const sortedKeys = Object.keys(rawPayload)
+    .filter((key) => key !== 'sign' && key !== 'signature')
+    .sort();
+  const concatenated = sortedKeys
+    .map((key) => stringifyAurapayValue(rawPayload[key]))
+    .join('');
+  const expected = createHmac('sha256', secret).update(concatenated).digest('hex');
+  if (!compareSecrets(expected, signature)) {
+    throw new ForbiddenException('PAYMENT_WEBHOOK_SIGNATURE_INVALID');
+  }
+}
+
+function stringifyAurapayValue(value: unknown): string {
+  if (value === null || value === undefined) {
+    return '';
+  }
+  if (typeof value === 'string') {
+    return value;
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+  // Nested objects/arrays — serialize as JSON to match PHP's implode behavior
+  // when those values are not scalars; AuraPay docs only show flat payloads.
+  return JSON.stringify(value);
+}
+
+/**
+ * RollyPay: HMAC-SHA256 of `${timestamp}.${rawBody}` with signing_secret.
+ * Headers: `X-Signature` (hex) + `X-Timestamp` (Unix timestamp).
+ */
+function verifyRollypaySignature(
+  rawBody: Buffer,
+  headers: Record<string, string | string[] | undefined>,
+  gatewaySettings: Record<string, unknown>,
+): void {
+  const secret = readStringSetting(gatewaySettings, 'signingSecret');
+  const signature = readHeader(headers, 'x-signature');
+  const timestamp = readHeader(headers, 'x-timestamp');
+  if (!secret || !signature || !timestamp) {
+    throw new ForbiddenException('PAYMENT_WEBHOOK_SIGNATURE_INVALID');
+  }
+
+  const hmac = createHmac('sha256', secret);
+  hmac.update(timestamp);
+  hmac.update('.');
+  hmac.update(rawBody);
+  const expected = hmac.digest('hex');
+  if (!compareSecrets(expected, signature)) {
+    throw new ForbiddenException('PAYMENT_WEBHOOK_SIGNATURE_INVALID');
+  }
+}
+
+/**
+ * SeverPay: HMAC-SHA256 of the JSON-encoded payload (with the `sign` key
+ * removed) using the merchant's secretToken. The signature is delivered
+ * **inside the body** as the `sign` field (not a header).
+ *
+ * SeverPay's PHP example uses `json_encode($input)` after `unset($input['sign'])`,
+ * so we re-serialize with the same key order as Node's default (insertion order).
+ */
+function verifySeverpaySignature(
+  rawPayload: Record<string, unknown>,
+  gatewaySettings: Record<string, unknown>,
+): void {
+  const secret = readStringSetting(gatewaySettings, 'secretToken');
+  const signature = readOptionalString(rawPayload, ['sign', 'signature']);
+  if (!secret || !signature) {
+    throw new ForbiddenException('PAYMENT_WEBHOOK_SIGNATURE_INVALID');
+  }
+  const cleaned: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(rawPayload)) {
+    if (key !== 'sign' && key !== 'signature') {
+      cleaned[key] = value;
+    }
+  }
+  const expected = createHmac('sha256', secret).update(JSON.stringify(cleaned)).digest('hex');
+  if (!compareSecrets(expected, signature)) {
+    throw new ForbiddenException('PAYMENT_WEBHOOK_SIGNATURE_INVALID');
+  }
+}
+
+/**
+ * lava.top: webhook is authenticated by a static `X-Api-Key` header that
+ * matches a key the merchant pre-registered with lava.top (see "Authorize
+ * the recipient" in the developer portal). No payload signature.
+ */
+function verifyLavaApiKey(
+  headers: Record<string, string | string[] | undefined>,
+  gatewaySettings: Record<string, unknown>,
+): void {
+  const expected = readStringSetting(gatewaySettings, 'webhookApiKey');
+  const actual = readHeader(headers, 'x-api-key');
+  if (!expected || !actual || !compareSecrets(actual, expected)) {
     throw new ForbiddenException('PAYMENT_WEBHOOK_SIGNATURE_INVALID');
   }
 }

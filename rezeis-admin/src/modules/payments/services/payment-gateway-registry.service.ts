@@ -28,6 +28,11 @@ const PAYMENT_GATEWAY_DEFAULTS: readonly PaymentGatewayDefaultInput[] = [
   { type: PaymentGatewayType.HELEKET, currency: Currency.USDT, isActive: false, orderIndex: 8 },
   { type: PaymentGatewayType.CRYPTOMUS, currency: Currency.USDT, isActive: false, orderIndex: 9 },
   { type: PaymentGatewayType.MULENPAY, currency: Currency.USD, isActive: false, orderIndex: 10 },
+  { type: PaymentGatewayType.WATA, currency: Currency.RUB, isActive: false, orderIndex: 11 },
+  { type: PaymentGatewayType.AURAPAY, currency: Currency.RUB, isActive: false, orderIndex: 12 },
+  { type: PaymentGatewayType.ROLLYPAY, currency: Currency.RUB, isActive: false, orderIndex: 13 },
+  { type: PaymentGatewayType.SEVERPAY, currency: Currency.USD, isActive: false, orderIndex: 14 },
+  { type: PaymentGatewayType.LAVA, currency: Currency.RUB, isActive: false, orderIndex: 15 },
 ];
 
 @Injectable()

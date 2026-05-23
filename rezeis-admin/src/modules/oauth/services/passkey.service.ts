@@ -310,24 +310,28 @@ export class PasskeyService {
 
   // ── Private helpers ──────────────────────────────────────────────────────
 
+  /**
+   * Decodes the challenge from the response's clientDataJSON, looks it up in
+   * Redis (where the matching auth-options call placed it), and returns it
+   * for verification. Single-use — the entry is deleted on lookup.
+   */
   private async findChallengeForResponse(
-    _response: AuthenticationResponseJSON,
+    response: AuthenticationResponseJSON,
   ): Promise<string | null> {
-    // In a production system, we'd decode clientDataJSON to extract the challenge.
-    // For now, we use a simplified approach: scan recent challenges from cache.
-    // The proper implementation decodes the clientDataJSON base64url to get the challenge.
     try {
-      const clientDataBuffer = Buffer.from(_response.response.clientDataJSON, 'base64url');
+      const clientDataBuffer = Buffer.from(response.response.clientDataJSON, 'base64url');
       const clientData = JSON.parse(clientDataBuffer.toString('utf8')) as { challenge?: string };
       if (clientData.challenge) {
-        const stored = await this.cacheService.get<{ challenge: string }>(`passkey:auth:${clientData.challenge}`);
+        const stored = await this.cacheService.get<{ challenge: string }>(
+          `passkey:auth:${clientData.challenge}`,
+        );
         if (stored) {
           await this.cacheService.del(`passkey:auth:${clientData.challenge}`);
           return stored.challenge;
         }
       }
     } catch {
-      // Fall through
+      // clientDataJSON unparseable or cache miss — fall through to null
     }
     return null;
   }

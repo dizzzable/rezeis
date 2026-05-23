@@ -52,14 +52,17 @@ RUN apk add --no-cache postgresql16-client
 
 COPY package.json ./
 COPY prisma.config.ts ./
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY --from=dependencies /app/node_modules ./node_modules
 COPY --from=build-backend /app/dist ./dist
 COPY --from=build-backend /app/prisma ./prisma
 COPY --from=build-backend /app/node_modules/.prisma ./node_modules/.prisma
 COPY --from=build-frontend /app/dist ./web
 
-RUN mkdir -p /app/data/backups /app/data/uploads
+RUN mkdir -p /app/data/backups /app/data/uploads \
+ && chmod +x /usr/local/bin/docker-entrypoint.sh
 
 EXPOSE 8000
 
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["node", "dist/main.js"]
