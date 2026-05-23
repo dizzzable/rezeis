@@ -382,8 +382,13 @@ input[type="number"]::-webkit-inner-spin-button {
 /* ── Liquid Glass — per-element glass effects ──────────────────────────────
  * When the Liquid Glass feature is enabled (from glass-store), these rules
  * make UI elements semi-transparent with backdrop-filter blur.
- * Each element type has its own data-attribute toggle and CSS variable for blur.
- * AppearanceProvider sets these from the glass store values.
+ *
+ * Each element type has its own data-attribute toggle and CSS variable
+ * for blur. AppearanceProvider sets these from the glass store values.
+ *
+ * `!important` is required ONLY where we override a Tailwind utility
+ * class (e.g. `.bg-card`, `.bg-muted`) that ships with utility-layer
+ * specificity. For element/role selectors we drop `!important`.
  */
 :root {
   --liquid-glass-cards-blur: 12px;
@@ -395,7 +400,7 @@ input[type="number"]::-webkit-inner-spin-button {
   --liquid-glass-popover-blur: 12px;
 }
 
-/* Cards */
+/* Cards — overrides Tailwind .bg-card */
 :root[data-liquid-glass-cards="on"] .bg-card {
   background-color: color-mix(in oklch, var(--card) 40%, transparent) !important;
   backdrop-filter: blur(var(--liquid-glass-cards-blur)) saturate(1.4);
@@ -406,51 +411,50 @@ input[type="number"]::-webkit-inner-spin-button {
     0 2px 16px oklch(0 0 0 / 6%);
 }
 
-/* Header — transparent by default when liquid glass is on, glass effect when enabled */
+/* Header — element selector, no !important needed */
 :root[data-liquid-glass="on"][data-liquid-glass-header="off"] header {
-  background-color: transparent !important;
+  background-color: transparent;
   border-bottom-color: transparent;
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
 }
 
 :root[data-liquid-glass-header="on"] header {
-  background-color: color-mix(in oklch, var(--background) 35%, transparent) !important;
+  background-color: color-mix(in oklch, var(--background) 35%, transparent);
   backdrop-filter: blur(var(--liquid-glass-header-blur)) saturate(1.4);
   -webkit-backdrop-filter: blur(var(--liquid-glass-header-blur)) saturate(1.4);
   border-bottom-color: color-mix(in oklch, var(--border) 40%, transparent);
 }
 
-/* Modals / Dialogs */
-:root[data-liquid-glass-modals="on"] [role="dialog"] > div,
-:root[data-liquid-glass-modals="on"] [data-state="open"].bg-card {
-  background-color: color-mix(in oklch, var(--card) 45%, transparent) !important;
+/* Modals / Dialogs — Radix dialog / popover content. */
+:root[data-liquid-glass-modals="on"] [role="dialog"] > div {
+  background-color: color-mix(in oklch, var(--card) 45%, transparent);
   backdrop-filter: blur(var(--liquid-glass-modals-blur)) saturate(1.4);
   -webkit-backdrop-filter: blur(var(--liquid-glass-modals-blur)) saturate(1.4);
   border-color: color-mix(in oklch, var(--border) 50%, transparent);
 }
 
-/* Sidebar */
+/* Sidebar — element selector */
 :root[data-liquid-glass-sidebar="on"] aside {
-  background-color: color-mix(in oklch, var(--sidebar) 40%, transparent) !important;
+  background-color: color-mix(in oklch, var(--sidebar) 40%, transparent);
   backdrop-filter: blur(var(--liquid-glass-sidebar-blur)) saturate(1.4);
   -webkit-backdrop-filter: blur(var(--liquid-glass-sidebar-blur)) saturate(1.4);
 }
 
-/* Tabs */
+/* Tabs — Radix tab list/triggers. role-based, no Tailwind override */
 :root[data-liquid-glass-tabs="on"] [role="tablist"] {
-  background-color: color-mix(in oklch, var(--muted) 40%, transparent) !important;
+  background-color: color-mix(in oklch, var(--muted) 40%, transparent);
   backdrop-filter: blur(var(--liquid-glass-tabs-blur)) saturate(1.3);
   -webkit-backdrop-filter: blur(var(--liquid-glass-tabs-blur)) saturate(1.3);
 }
 
 :root[data-liquid-glass-tabs="on"] [role="tab"][data-state="active"] {
-  background-color: color-mix(in oklch, var(--background) 50%, transparent) !important;
+  background-color: color-mix(in oklch, var(--background) 50%, transparent);
   backdrop-filter: blur(var(--liquid-glass-tabs-blur)) saturate(1.2);
   -webkit-backdrop-filter: blur(var(--liquid-glass-tabs-blur)) saturate(1.2);
 }
 
-/* Buttons */
+/* Buttons — overrides Tailwind .bg-primary / .bg-secondary */
 :root[data-liquid-glass-buttons="on"] .bg-primary {
   background-color: color-mix(in oklch, var(--primary) 75%, transparent) !important;
   backdrop-filter: blur(var(--liquid-glass-buttons-blur)) saturate(1.2);
@@ -463,6 +467,7 @@ input[type="number"]::-webkit-inner-spin-button {
   -webkit-backdrop-filter: blur(var(--liquid-glass-buttons-blur)) saturate(1.2);
 }
 
+/* Outline-style buttons & links use .bg-background */
 :root[data-liquid-glass-buttons="on"] button.bg-background,
 :root[data-liquid-glass-buttons="on"] a.bg-background {
   background-color: color-mix(in oklch, var(--background) 45%, transparent) !important;
@@ -470,22 +475,31 @@ input[type="number"]::-webkit-inner-spin-button {
   -webkit-backdrop-filter: blur(var(--liquid-glass-buttons-blur)) saturate(1.3);
 }
 
+/* .bg-muted on interactive controls (excluding tab lists which have their
+ * own blur configured above). */
 :root[data-liquid-glass-buttons="on"] .bg-muted:not([role="tablist"]) {
   background-color: color-mix(in oklch, var(--muted) 40%, transparent) !important;
   backdrop-filter: blur(var(--liquid-glass-buttons-blur)) saturate(1.2);
   -webkit-backdrop-filter: blur(var(--liquid-glass-buttons-blur)) saturate(1.2);
 }
 
-/* Popover / Select dropdowns */
+/* Popover / Select dropdowns — Radix popover content. */
 :root[data-liquid-glass-popover="on"] [role="combobox"],
-:root[data-liquid-glass-popover="on"] .bg-popover,
 :root[data-liquid-glass-popover="on"] [data-radix-popper-content-wrapper] > div {
+  background-color: color-mix(in oklch, var(--popover) 50%, transparent);
+  backdrop-filter: blur(var(--liquid-glass-popover-blur)) saturate(1.4);
+  -webkit-backdrop-filter: blur(var(--liquid-glass-popover-blur)) saturate(1.4);
+}
+
+/* .bg-popover Tailwind override */
+:root[data-liquid-glass-popover="on"] .bg-popover {
   background-color: color-mix(in oklch, var(--popover) 50%, transparent) !important;
   backdrop-filter: blur(var(--liquid-glass-popover-blur)) saturate(1.4);
   -webkit-backdrop-filter: blur(var(--liquid-glass-popover-blur)) saturate(1.4);
 }
 
-/* Global surface transparency — all muted/accent backgrounds become translucent */
+/* Global surface transparency — partial-opacity Tailwind utilities collapse
+ * to fully transparent so the bg can show through. */
 :root[data-liquid-glass="on"] .bg-muted\/20,
 :root[data-liquid-glass="on"] .bg-muted\/30,
 :root[data-liquid-glass="on"] .bg-muted\/40,
@@ -493,48 +507,56 @@ input[type="number"]::-webkit-inner-spin-button {
   background-color: transparent !important;
 }
 
+/* Inside main: .bg-muted on info panels (not tab lists or interactive
+ * controls). Overrides Tailwind .bg-muted utility. */
 :root[data-liquid-glass="on"] main .bg-muted:not([role="tablist"]):not(button):not(a) {
   background-color: color-mix(in oklch, var(--muted) 30%, transparent) !important;
   backdrop-filter: blur(6px) saturate(1.2);
   -webkit-backdrop-filter: blur(6px) saturate(1.2);
 }
 
+/* Inside main: .bg-accent panels */
 :root[data-liquid-glass="on"] main .bg-accent {
   background-color: color-mix(in oklch, var(--accent) 35%, transparent) !important;
   backdrop-filter: blur(6px) saturate(1.2);
   -webkit-backdrop-filter: blur(6px) saturate(1.2);
 }
 
-/* Input fields — slightly translucent */
-:root[data-liquid-glass="on"] input,
+/* Form fields — translucent so the bg shows through. Element selectors,
+ * no !important needed unless a stricter Tailwind utility is on the same
+ * input (rare). */
+:root[data-liquid-glass="on"] input:not([type="color"]):not([type="range"]):not([type="checkbox"]):not([type="radio"]),
 :root[data-liquid-glass="on"] textarea,
 :root[data-liquid-glass="on"] select {
-  background-color: color-mix(in oklch, var(--background) 50%, transparent) !important;
+  background-color: color-mix(in oklch, var(--background) 50%, transparent);
   backdrop-filter: blur(4px);
   -webkit-backdrop-filter: blur(4px);
 }
 
-/* Main content area — fully transparent when glass is on */
+/* Main content area — fully transparent so the page bg shows. */
 :root[data-liquid-glass="on"] main {
-  background-color: transparent !important;
+  background-color: transparent;
 }
 
-/* All bg-background surfaces inside main content */
+/* Inside main: .bg-background surfaces (right detail panels) */
 :root[data-liquid-glass="on"] main .bg-background {
   background-color: color-mix(in oklch, var(--background) 30%, transparent) !important;
   backdrop-filter: blur(6px) saturate(1.2);
   -webkit-backdrop-filter: blur(6px) saturate(1.2);
 }
 
-/* Bordered containers (panels, sections) — common pattern: rounded-lg border */
-:root[data-liquid-glass-cards="on"] .rounded-lg.border {
-  background-color: color-mix(in oklch, var(--card) 40%, transparent) !important;
+/* Opt-in glass containers — components mark themselves with
+ * `data-glass-card` to receive the cards glass treatment. This replaces
+ * the brittle `.rounded-lg.border` selector that swept up unrelated
+ * third-party components. */
+:root[data-liquid-glass-cards="on"] [data-glass-card] {
+  background-color: color-mix(in oklch, var(--card) 40%, transparent);
   backdrop-filter: blur(var(--liquid-glass-cards-blur)) saturate(1.4);
   -webkit-backdrop-filter: blur(var(--liquid-glass-cards-blur)) saturate(1.4);
   border-color: color-mix(in oklch, var(--border) 50%, transparent);
 }
 
-/* Ensure border-r / border-t panels inside glass containers are also transparent */
+/* User detail / list two-pane layout — left pane with `border-r.bg-card` */
 :root[data-liquid-glass="on"] .border-r.bg-card,
 :root[data-liquid-glass="on"] .border-l.bg-card {
   background-color: color-mix(in oklch, var(--card) 35%, transparent) !important;

@@ -9,12 +9,20 @@
  * - select: dropdown with options
  * - colorArray: array of hex colors (rendered as multiple pickers)
  * - rgbColor: [r,g,b] normalized (0-1), shown as hex picker but stored as array
+ *
+ * `id` is typed as `Exclude<BackgroundId, 'none'>` so adding a new
+ * BackgroundId in `glass-store.ts` produces a compile-time error here
+ * until a registry entry is added.
  */
+import type { BackgroundId } from '@/lib/theme/glass-store'
+
+export type RegistrableBackgroundId = Exclude<BackgroundId, 'none'>
 
 export type ControlType = 'slider' | 'color' | 'toggle' | 'select' | 'colorArray' | 'rgbColor'
 
 export interface ControlDef {
   prop: string
+  /** Default English label — also used as i18n fallback. */
   label: string
   type: ControlType
   min?: number
@@ -26,7 +34,8 @@ export interface ControlDef {
 }
 
 export interface BackgroundDef {
-  id: string
+  id: RegistrableBackgroundId
+  /** Default English name — also used as i18n fallback. */
   name: string
   controls: ControlDef[]
 }
@@ -239,3 +248,13 @@ export function getDefaultProps(id: string): Record<string, unknown> {
   }
   return props
 }
+
+// ── Compile-time coverage check ───────────────────────────────────────────────
+// Forces every BackgroundId (except 'none') to have a registry entry.
+// If the BackgroundId union grows but the registry doesn't, the type
+// `RegisteredId` will not equal `RegistrableBackgroundId` and TS will error.
+type RegisteredId = (typeof BACKGROUND_REGISTRY)[number]['id']
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+type _CoverageCheck = Exclude<RegistrableBackgroundId, RegisteredId> extends never
+  ? true
+  : `Missing background-controls registry entry for: ${Exclude<RegistrableBackgroundId, RegisteredId>}`

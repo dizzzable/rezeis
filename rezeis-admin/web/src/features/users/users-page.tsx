@@ -208,7 +208,7 @@ function UsersListTab() {
   }
 
   return (
-    <div className="flex h-[calc(100vh-13rem)] gap-0 overflow-hidden rounded-lg border">
+    <div data-glass-card className="flex h-[calc(100vh-13rem)] gap-0 overflow-hidden rounded-lg border">
       {/* ── Left panel: search + user list ─────────────────────────── */}
       <div className="flex w-80 shrink-0 flex-col border-r bg-card">
         {/* Search header */}

@@ -2,7 +2,7 @@
  * Effects Settings Card — UI for configuring visual effects with live previews.
  * Each category shows a mini preview demonstrating where the effect applies.
  */
-import { lazy, Suspense, useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { motion } from 'motion/react'
 
@@ -299,6 +299,7 @@ function HoverEffectCard() {
 }
 
 function HoverPreview({ effect }: { effect: HoverEffectId }) {
+  const { t } = useTranslation()
   const containerRef = useRef<HTMLDivElement>(null)
   const glowRef = useRef<HTMLDivElement>(null)
 
@@ -402,6 +403,9 @@ function CursorPreview({ effect }: { effect: CursorEffectId }) {
     const ctx = canvas.getContext('2d')
     if (!ctx) return
 
+    // Reset trail when effect changes so old points don't linger.
+    trailRef.current = []
+
     let animId: number
 
     const draw = () => {
@@ -425,7 +429,10 @@ function CursorPreview({ effect }: { effect: CursorEffectId }) {
     }
 
     animId = requestAnimationFrame(draw)
-    return () => cancelAnimationFrame(animId)
+    return () => {
+      cancelAnimationFrame(animId)
+      trailRef.current = []
+    }
   }, [effect])
 
   const handleMouseMove = (e: React.MouseEvent) => {
@@ -513,6 +520,9 @@ function ClickPreview({ effect }: { effect: ClickEffectId }) {
     const ctx = canvas.getContext('2d')
     if (!ctx) return
 
+    // Reset sparks when effect changes.
+    sparksRef.current = []
+
     let animId: number
 
     const draw = () => {
@@ -541,7 +551,10 @@ function ClickPreview({ effect }: { effect: ClickEffectId }) {
     }
 
     animId = requestAnimationFrame(draw)
-    return () => cancelAnimationFrame(animId)
+    return () => {
+      cancelAnimationFrame(animId)
+      sparksRef.current = []
+    }
   }, [effect])
 
   const handleClick = (e: React.MouseEvent) => {
