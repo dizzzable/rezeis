@@ -3989,7 +3989,6 @@ export const en = {
         blob: 'Blob Cursor',
         ghost: 'Ghost Cursor',
         crosshair: 'Crosshair',
-        magnetLines: 'Magnet Lines',
         pixelTrail: 'Pixel Trail',
       },
       clickEffect: {

@@ -4017,7 +4017,6 @@
         blob: 'Blob курсор',
         ghost: 'Призрачный курсор',
         crosshair: 'Прицел',
-        magnetLines: 'Магнитные линии',
         pixelTrail: 'Пиксельный след',
       },
       clickEffect: {

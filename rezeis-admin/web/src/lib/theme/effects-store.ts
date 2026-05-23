@@ -54,7 +54,6 @@ export type CursorEffectId =
   | 'blob'
   | 'ghost'
   | 'crosshair'
-  | 'magnetLines'
   | 'pixelTrail'
 
 export interface CursorEffectDef {
@@ -69,7 +68,6 @@ export const CURSOR_EFFECTS: CursorEffectDef[] = [
   { id: 'blob', name: 'Blob Cursor', nameRu: 'Blob курсор' },
   { id: 'ghost', name: 'Ghost Cursor', nameRu: 'Призрачный курсор' },
   { id: 'crosshair', name: 'Crosshair', nameRu: 'Прицел' },
-  { id: 'magnetLines', name: 'Magnet Lines', nameRu: 'Магнитные линии' },
   { id: 'pixelTrail', name: 'Pixel Trail', nameRu: 'Пиксельный след' },
 ]
 
@@ -168,7 +166,7 @@ const DEFAULTS = {
   effectsEnabled: true,
 }
 
-const STORE_VERSION = 1
+const STORE_VERSION = 2
 
 // Validation sets so unknown ids snap back to defaults during migration.
 const VALID_TEXT = new Set(TEXT_ANIMATIONS.map((a) => a.id as string))
