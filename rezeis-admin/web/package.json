@@ -76,7 +76,7 @@
     "sonner": "^2.0.7",
     "tailwind-merge": "^3.6.0",
     "tailwindcss": "^4.3.0",
-    "three": "^0.172.0",
+    "three": "^0.184.0",
     "vaul": "^1.1.2",
     "zod": "^4.4.3",
     "zundo": "^2.3.0",
@@ -84,6 +84,7 @@
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
+    "@testing-library/dom": "^10.4.1",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",
@@ -98,7 +99,7 @@
     "jsdom": "^29.1.1",
     "react-doctor": "^0.2.1",
     "typescript": "^6.0.3",
-    "typescript-eslint": "8.59.3",
+    "typescript-eslint": "^8.59.4",
     "vite": "^8.0.11",
     "vitest": "^4.1.5"
   }

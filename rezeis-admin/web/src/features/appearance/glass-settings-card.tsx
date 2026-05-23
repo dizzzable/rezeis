@@ -441,11 +441,13 @@ function DynamicControl({ control, value, onChange }: DynamicControlProps) {
 }
 
 function SliderControl({ control, value, onChange }: { control: ControlDef; value: number; onChange: (v: unknown) => void }) {
+  const { t } = useTranslation()
   const numValue = typeof value === 'number' ? value : (control.default as number)
+  const label = t(`glassSettings.controls.${control.prop}`, { defaultValue: control.label })
   return (
     <div className="space-y-1.5">
       <div className="flex items-center justify-between">
-        <Label className="text-xs">{control.label}</Label>
+        <Label className="text-xs">{label}</Label>
         <span className="font-mono text-[10px] text-muted-foreground">
           {numValue.toFixed(control.step && control.step < 1 ? 2 : 0)}
         </span>
@@ -462,10 +464,12 @@ function SliderControl({ control, value, onChange }: { control: ControlDef; valu
 }
 
 function ColorControl({ control, value, onChange }: { control: ControlDef; value: string; onChange: (v: unknown) => void }) {
+  const { t } = useTranslation()
   const hexValue = typeof value === 'string' && /^#[0-9a-fA-F]{6}$/.test(value) ? value : (control.default as string)
+  const label = t(`glassSettings.controls.${control.prop}`, { defaultValue: control.label })
   return (
     <div className="flex items-center justify-between">
-      <Label className="text-xs">{control.label}</Label>
+      <Label className="text-xs">{label}</Label>
       <input
         type="color"
         value={hexValue}
@@ -475,15 +479,17 @@ function ColorControl({ control, value, onChange }: { control: ControlDef; value
           }
         }}
         className="h-7 w-10 cursor-pointer rounded border"
-        aria-label={control.label}
+        aria-label={label}
       />
     </div>
   )
 }
 
 function RgbColorControl({ control, value, onChange }: { control: ControlDef; value: number[]; onChange: (v: unknown) => void }) {
+  const { t } = useTranslation()
   // Convert [r,g,b] (0-1) to hex for the picker, and back
   const rgb = Array.isArray(value) && value.length === 3 ? value : (control.default as number[])
+  const label = t(`glassSettings.controls.${control.prop}`, { defaultValue: control.label })
   const toHex = (c: number[]) =>
     '#' + c.map((v) => Math.round(Math.max(0, Math.min(1, v)) * 255).toString(16).padStart(2, '0')).join('')
   const fromHex = (hex: string): number[] => {
@@ -497,7 +503,7 @@ function RgbColorControl({ control, value, onChange }: { control: ControlDef; va
 
   return (
     <div className="flex items-center justify-between">
-      <Label className="text-xs">{control.label}</Label>
+      <Label className="text-xs">{label}</Label>
       <input
         type="color"
         value={toHex(rgb)}
@@ -507,33 +513,37 @@ function RgbColorControl({ control, value, onChange }: { control: ControlDef; va
           }
         }}
         className="h-7 w-10 cursor-pointer rounded border"
-        aria-label={control.label}
+        aria-label={label}
       />
     </div>
   )
 }
 
 function ToggleControl({ control, value, onChange }: { control: ControlDef; value: boolean; onChange: (v: unknown) => void }) {
+  const { t } = useTranslation()
   const boolValue = typeof value === 'boolean' ? value : (control.default as boolean)
+  const label = t(`glassSettings.controls.${control.prop}`, { defaultValue: control.label })
   return (
     <div className="flex items-center justify-between">
-      <Label className="text-xs">{control.label}</Label>
+      <Label className="text-xs">{label}</Label>
       <Switch
         checked={boolValue}
         onCheckedChange={(v) => onChange(v)}
-        aria-label={control.label}
+        aria-label={label}
       />
     </div>
   )
 }
 
 function ColorArrayControl({ control, value, onChange }: { control: ControlDef; value: string[]; onChange: (v: unknown) => void }) {
+  const { t } = useTranslation()
   const colors = Array.isArray(value) ? value : (control.default as string[])
   const count = control.count ?? colors.length
+  const label = t(`glassSettings.controls.${control.prop}`, { defaultValue: control.label })
 
   return (
     <div className="space-y-1.5">
-      <Label className="text-xs">{control.label}</Label>
+      <Label className="text-xs">{label}</Label>
       <div className="flex gap-2">
         {Array.from({ length: count }).map((_, i) => (
           <input
@@ -548,7 +558,7 @@ function ColorArrayControl({ control, value, onChange }: { control: ControlDef; 
               }
             }}
             className="h-7 w-10 cursor-pointer rounded border"
-            aria-label={`${control.label} ${i + 1}`}
+            aria-label={`${label} ${i + 1}`}
           />
         ))}
       </div>
@@ -557,14 +567,16 @@ function ColorArrayControl({ control, value, onChange }: { control: ControlDef; 
 }
 
 function SelectControl({ control, value, onChange }: { control: ControlDef; value: string; onChange: (v: unknown) => void }) {
+  const { t } = useTranslation()
   const strValue = typeof value === 'string' ? value : (control.default as string)
   const options = control.options ?? []
+  const label = t(`glassSettings.controls.${control.prop}`, { defaultValue: control.label })
 
   return (
     <div className="flex items-center justify-between">
-      <Label className="text-xs">{control.label}</Label>
+      <Label className="text-xs">{label}</Label>
       <Select value={strValue} onValueChange={(v) => onChange(v)}>
-        <SelectTrigger className="h-8 w-32" aria-label={control.label}>
+        <SelectTrigger className="h-8 w-32" aria-label={label}>
           <SelectValue />
         </SelectTrigger>
         <SelectContent>

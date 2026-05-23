@@ -100,10 +100,9 @@ export function EffectsSettingsCard() {
 // ── Text Animation Card ──────────────────────────────────────────────────────
 
 function TextAnimationCard() {
-  const { t, i18n } = useTranslation()
+  const { t } = useTranslation()
   const textAnimation = useEffectsStore((s) => s.textAnimation)
   const setTextAnimation = useEffectsStore((s) => s.setTextAnimation)
-  const isRu = i18n.language === 'ru'
 
   return (
     <Card>
@@ -121,7 +120,7 @@ function TextAnimationCard() {
             <SelectContent>
               {TEXT_ANIMATIONS.map((anim) => (
                 <SelectItem key={anim.id} value={anim.id}>
-                  {isRu ? anim.nameRu : anim.name}
+                  {t(`effectsSettings.options.textAnimation.${anim.id}`, { defaultValue: anim.name })}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -156,10 +155,9 @@ function TextAnimationCard() {
 // ── Content Animation Card ───────────────────────────────────────────────────
 
 function ContentAnimationCard() {
-  const { t, i18n } = useTranslation()
+  const { t } = useTranslation()
   const contentAnimation = useEffectsStore((s) => s.contentAnimation)
   const setContentAnimation = useEffectsStore((s) => s.setContentAnimation)
-  const isRu = i18n.language === 'ru'
   const [replayKey, setReplayKey] = useState(0)
 
   return (
@@ -178,7 +176,7 @@ function ContentAnimationCard() {
             <SelectContent>
               {CONTENT_ANIMATIONS.map((anim) => (
                 <SelectItem key={anim.id} value={anim.id}>
-                  {isRu ? anim.nameRu : anim.name}
+                  {t(`effectsSettings.options.contentAnimation.${anim.id}`, { defaultValue: anim.name })}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -250,10 +248,9 @@ function ContentPreview({ animation }: { animation: ContentAnimationId }) {
 // ── Hover Effect Card ────────────────────────────────────────────────────────
 
 function HoverEffectCard() {
-  const { t, i18n } = useTranslation()
+  const { t } = useTranslation()
   const hoverEffect = useEffectsStore((s) => s.hoverEffect)
   const setHoverEffect = useEffectsStore((s) => s.setHoverEffect)
-  const isRu = i18n.language === 'ru'
 
   return (
     <Card>
@@ -271,7 +268,7 @@ function HoverEffectCard() {
             <SelectContent>
               {HOVER_EFFECTS.map((eff) => (
                 <SelectItem key={eff.id} value={eff.id}>
-                  {isRu ? eff.nameRu : eff.name}
+                  {t(`effectsSettings.options.hoverEffect.${eff.id}`, { defaultValue: eff.name })}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -350,10 +347,9 @@ function HoverPreview({ effect }: { effect: HoverEffectId }) {
 // ── Cursor Effect Card ───────────────────────────────────────────────────────
 
 function CursorEffectCard() {
-  const { t, i18n } = useTranslation()
+  const { t } = useTranslation()
   const cursorEffect = useEffectsStore((s) => s.cursorEffect)
   const setCursorEffect = useEffectsStore((s) => s.setCursorEffect)
-  const isRu = i18n.language === 'ru'
 
   return (
     <Card>
@@ -371,7 +367,7 @@ function CursorEffectCard() {
             <SelectContent>
               {CURSOR_EFFECTS.map((eff) => (
                 <SelectItem key={eff.id} value={eff.id}>
-                  {isRu ? eff.nameRu : eff.name}
+                  {t(`effectsSettings.options.cursorEffect.${eff.id}`, { defaultValue: eff.name })}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -467,10 +463,9 @@ function CursorPreview({ effect }: { effect: CursorEffectId }) {
 // ── Click Effect Card ────────────────────────────────────────────────────────
 
 function ClickEffectCard() {
-  const { t, i18n } = useTranslation()
+  const { t } = useTranslation()
   const clickEffect = useEffectsStore((s) => s.clickEffect)
   const setClickEffect = useEffectsStore((s) => s.setClickEffect)
-  const isRu = i18n.language === 'ru'
 
   return (
     <Card>
@@ -488,7 +483,7 @@ function ClickEffectCard() {
             <SelectContent>
               {CLICK_EFFECTS.map((eff) => (
                 <SelectItem key={eff.id} value={eff.id}>
-                  {isRu ? eff.nameRu : eff.name}
+                  {t(`effectsSettings.options.clickEffect.${eff.id}`, { defaultValue: eff.name })}
                 </SelectItem>
               ))}
             </SelectContent>
