@@ -4,6 +4,8 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AppearanceProvider } from "@/components/AppearanceProvider";
+import { EffectsProvider } from "@/components/EffectsProvider";
+import { GlassBackground } from "@/components/glass/GlassBackground";
 import { I18nProvider } from "@/i18n/provider";
 import { queryClient } from "@/lib/query-client";
 import { ThemeProvider } from "@/lib/theme/theme-provider";
@@ -25,7 +27,11 @@ export function Providers({ children }: ProvidersProps): JSX.Element {
           <I18nProvider>
             <QueryClientProvider client={queryClient}>
               <TooltipProvider delayDuration={300}>
-                {children}
+                <GlassBackground />
+                <EffectsProvider>
+                  <div id="glass-debug-marker" style={{ display: 'none' }} />
+                  {children}
+                </EffectsProvider>
                 <Toaster richColors position="top-right" closeButton />
               </TooltipProvider>
             </QueryClientProvider>
