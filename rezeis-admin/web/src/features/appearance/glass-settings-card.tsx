@@ -317,7 +317,7 @@ function BackgroundStudioCard() {
               <SelectItem value="none">{t('glassSettings.backgrounds.none')}</SelectItem>
               {BACKGROUND_REGISTRY.map((bg) => (
                 <SelectItem key={bg.id} value={bg.id}>
-                  {bg.name}
+                  {t(`glassSettings.backgrounds.${bg.id}`, { defaultValue: bg.name })}
                 </SelectItem>
               ))}
             </SelectContent>

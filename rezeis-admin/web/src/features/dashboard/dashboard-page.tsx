@@ -5,7 +5,7 @@ import { AlertTriangle, Loader2, LayoutDashboard } from 'lucide-react'
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Skeleton } from '@/components/ui/skeleton'
-import { ShinyText } from '@/components/effects/ShinyText'
+import { TitleEffect } from '@/components/effects/TitleEffect'
 import { AnimatedContent } from '@/components/effects/AnimatedContent'
 
 import {
@@ -106,7 +106,7 @@ function DashboardHeader({ summary }: { readonly summary: DashboardSummaryInterf
     <div className="flex flex-col gap-1">
       <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
         <LayoutDashboard className="h-6 w-6" />
-        <ShinyText>{t('dashboardPage.title')}</ShinyText>
+        <TitleEffect>{t('dashboardPage.title')}</TitleEffect>
       </h1>
       <p className="text-sm text-muted-foreground">
         {t('dashboardPage.snapshotAt', { time: new Date(summary.checkedAt).toLocaleString() })}

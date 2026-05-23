@@ -3899,6 +3899,12 @@ export const en = {
     resetAll: 'Reset all',
     preview: 'Preview',
     replay: 'Replay',
+    sample: {
+      pageTitle: 'Page Title',
+      pageSubtitle: 'Subtitle with description',
+      cardTitle: 'Card Title',
+      cardHint: 'Hover me to see the effect',
+    },
     textAnimation: {
       title: 'Text Animation',
       description: 'Animation effect applied to page titles and headings.',

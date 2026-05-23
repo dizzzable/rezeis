@@ -39,7 +39,6 @@ import {
   type ContentAnimationId,
 } from '@/lib/theme/effects-store'
 import { TitleEffect } from '@/components/effects/TitleEffect'
-import { cn } from '@/lib/utils'
 
 // ── Main component ───────────────────────────────────────────────────────────
 
@@ -141,10 +140,10 @@ function TextAnimationCard() {
                 {t('effectsSettings.textAnimation.previewHint')}
               </div>
               <div className="text-xl font-bold">
-                <TitleEffect text={isRu ? 'Заголовок страницы' : 'Page Title'} />
+                <TitleEffect text={t('effectsSettings.sample.pageTitle')} />
               </div>
               <div className="mt-1 text-xs text-muted-foreground">
-                {isRu ? 'Подзаголовок с описанием' : 'Subtitle with description'}
+                {t('effectsSettings.sample.pageSubtitle')}
               </div>
             </div>
           </div>
@@ -336,8 +335,8 @@ function HoverPreview({ effect }: { effect: HoverEffectId }) {
           KPI
         </div>
         <div className="flex-1">
-          <div className="text-xs font-medium">Card Title</div>
-          <div className="text-[10px] text-muted-foreground">Hover me to see the effect</div>
+          <div className="text-xs font-medium">{t('effectsSettings.sample.cardTitle')}</div>
+          <div className="text-[10px] text-muted-foreground">{t('effectsSettings.sample.cardHint')}</div>
         </div>
         <Badge variant="secondary" className="text-[9px]">
           {effect}
