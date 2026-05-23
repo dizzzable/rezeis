@@ -20,6 +20,7 @@ export default tseslint.config(
       'node_modules/**',
       'coverage/**',
       '**/*.tsbuildinfo',
+      'src/components/reactbits/**',
     ],
   },
   js.configs.recommended,

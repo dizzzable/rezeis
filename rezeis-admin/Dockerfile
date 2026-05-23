@@ -36,7 +36,7 @@ RUN npx prisma generate && npm run build
 FROM node:24-alpine AS build-frontend
 
 WORKDIR /app
-COPY web/package.json web/package-lock.json ./
+COPY web/package.json web/package-lock.json web/.npmrc ./
 RUN npm ci
 COPY web/ .
 RUN npm run build

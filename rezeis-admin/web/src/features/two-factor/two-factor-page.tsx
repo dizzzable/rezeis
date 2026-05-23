@@ -206,7 +206,7 @@ export default function TwoFactorPage() {
       )}
 
       {/* Change Password + Passkey + Auth Providers */}
-      <div className="grid gap-6 lg:grid-cols-2">
+      <div className="grid gap-6 lg:grid-cols-2 items-start">
         <div className="space-y-6">
           <ChangePasswordSection />
         </div>
@@ -255,7 +255,7 @@ function ChangePasswordSection() {
     !mutation.isPending
 
   return (
-    <Card className="max-w-2xl">
+    <Card>
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
           <Shield className="h-5 w-5" />
