@@ -1,3 +1,80 @@
+# Rezeis Admin v0.2.12
+
+## Hotfix release — QuickSearchOverlay infinite render-loop (root cause of React #301)
+
+Хирургический фикс корневой причины `Minified React error #301` на всех страницах админки. Все предыдущие хотфиксы 0.2.9–0.2.11 устраняли реальные, но побочные проблемы (healthcheck, throttle, cache, ws path) — настоящий виновник был в одном глобальном компоненте.
+
+### Симптомы
+
+При заходе на любую страницу под `demoadmin` или другим аккаунтом:
+
+```
+Error: Minified React error #301; visit https://react.dev/errors/301 for the full message
+or use the non-minified dev environment for full errors and additional helpful warnings.
+[ErrorBoundary] Caught error: ...
+```
+
+Sourcemap указывал на `app/providers.tsx:22` — это `<ErrorBoundary>`, ловящий ошибку из дочернего поддерева. Дочерним было одно: `<QuickSearchOverlay>`, отрендеренный глобально в `<AdminShell>`. Стек сопровождался шумом от Recharts (`width(-1) and height(-1) of chart should be greater than 0`), 404/500 от data-эндпоинтов — это уже последствия порушенного дерева, а не причина.
+
+### Корневая причина
+
+В `quick-search-overlay.tsx` стоял такой паттерн:
+
+```ts
+const { data: results = [], isFetching } = useQuery({
+  queryKey: ['quick-search', query],
+  queryFn: () => fetchSearch(query),
+  enabled: query.length >= 2,
+  staleTime: 10_000,
+});
+
+const [prevResults, setPrevResults] = useState<SearchResult[]>(results);
+if (results !== prevResults) {
+  setPrevResults(results);
+  setSelectedIndex(0);
+}
+```
+
+`{ data: results = [] }` — destructure-default. На каждом рендере, пока `useQuery` возвращает `undefined` (overlay закрыт, `enabled: query.length >= 2` ещё `false`, или query in-flight), JS создаёт **новый** `[]` literal. У этого нового массива другая ссылка, поэтому `results !== prevResults` всегда `true` → `setPrevResults` + `setSelectedIndex` в render-фазе → React планирует ре-рендер → создаётся новый `[]` → identity check снова `true` → бесконечный цикл.
+
+React 18 ловит это после ~25 итераций, кидает Error #301 и сваливает его в ближайший `<ErrorBoundary>`. Поскольку `<QuickSearchOverlay>` живёт в `<AdminShell>`, ошибка ловится на каждом маршруте админки.
+
+### Фикс
+
+Стабилизирован identity «пустого» массива:
+
+```ts
+// Module-level constant — идентичность стабильна между рендерами.
+const EMPTY_RESULTS: SearchResult[] = [];
+
+export function QuickSearchOverlay({ open, onClose }: Props) {
+  const { data, isFetching } = useQuery({ ... });
+  const results: SearchResult[] = data ?? EMPTY_RESULTS;
+  // ...
+}
+```
+
+Теперь `results` ссылается либо на массив из cache TanStack Query (стабильный пока ключ не сменился), либо на shared `EMPTY_RESULTS`. Identity check `results !== prevResults` теперь срабатывает только при реальной смене данных.
+
+Это рекомендованный React паттерн ["Adjusting some state when a prop changes"](https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes): сравниваемое значение должно иметь стабильную идентичность, иначе условие в render-фазе крутится бесконечно.
+
+### Файлы
+
+- `rezeis-admin/web/src/components/quick-search/quick-search-overlay.tsx` — `EMPTY_RESULTS` константа модуля + изменённый destructure.
+- `rezeis-admin/Dockerfile` — `ARG APP_VERSION=0.2.12`.
+
+### Migrating from 0.2.11
+
+Без breaking changes. Стандартный pull-up:
+
+```bash
+docker compose pull && docker compose up -d
+```
+
+`Cache-Control` headers, добавленные в v0.2.11, гарантируют, что пользователи получат свежий `index.html` и новый bundle при следующем визите — hard reload не нужен.
+
+---
+
 # Rezeis Admin v0.2.11
 
 ## Hotfix release — stale browser cache root-cause + WebSocket path
