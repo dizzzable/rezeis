@@ -15,15 +15,18 @@
  */
 import { api } from './api';
 
+type ClientLogSource = 'window.error' | 'unhandledrejection' | 'react.errorBoundary';
+
 interface ClientLogPayload {
   readonly message: string;
   readonly stack?: string;
-  readonly source: 'window.error' | 'unhandledrejection';
+  readonly source: ClientLogSource;
   readonly url: string;
   readonly userAgent: string;
   readonly filename?: string;
   readonly lineno?: number;
   readonly colno?: number;
+  readonly componentStack?: string;
   readonly capturedAt: string;
 }
 
@@ -53,6 +56,28 @@ async function send(payload: ClientLogPayload): Promise<void> {
   } catch {
     /* swallow — crash reporter must not amplify the failure */
   }
+}
+
+/**
+ * Report a React render error caught by an ErrorBoundary.
+ * Best-effort: never throws, never blocks the caller.
+ */
+export function reportReactError(error: Error, componentStack: string | null | undefined): void {
+  if (typeof window === 'undefined') return;
+  // Fingerprint by error message + first frame of the component stack so
+  // the same boundary doesn't spam the backend on every retry.
+  const firstFrame = componentStack?.split('\n').find((line) => line.trim().length > 0)?.trim() ?? '';
+  const fingerprint = `react|${error.message}|${firstFrame}`;
+  if (!shouldReport(fingerprint)) return;
+  void send({
+    message: error.message,
+    stack: error.stack,
+    source: 'react.errorBoundary',
+    url: window.location.href,
+    userAgent: navigator.userAgent,
+    componentStack: componentStack ?? undefined,
+    capturedAt: new Date().toISOString(),
+  });
 }
 
 /** Install the global error / rejection handlers. Idempotent. */

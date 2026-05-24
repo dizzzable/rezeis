@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { KeyRound, Shield, Loader2, Eye, EyeOff } from 'lucide-react'
+import { KeyRound, Shield, Loader2, Eye, EyeOff, ChevronDown } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { Button } from '@/components/ui/button'
@@ -23,6 +23,7 @@ import { Switch } from '@/components/ui/switch'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Badge } from '@/components/ui/badge'
 import { api } from '@/lib/api'
+import { cn } from '@/lib/utils'
 
 import {
   type AuthProviderIconType,
@@ -190,9 +191,16 @@ function ProviderCard({ provider }: { provider: ProviderConfig }) {
 
   return (
     <Collapsible open={isOpen} onOpenChange={setIsOpen}>
-      <Card>
+      <Card className={cn('transition-colors duration-200', isOpen && 'border-primary/40')}>
         <CardHeader className="flex flex-row items-center justify-between py-4">
-          <CollapsibleTrigger className="flex items-center gap-3 cursor-pointer hover:opacity-80">
+          <CollapsibleTrigger className="group flex items-center gap-3 cursor-pointer hover:opacity-80">
+            <ChevronDown
+              className={cn(
+                'h-4 w-4 shrink-0 text-muted-foreground transition-transform duration-200 ease-out',
+                isOpen ? 'rotate-0' : '-rotate-90',
+              )}
+              aria-hidden
+            />
             <div className={`flex h-8 w-8 items-center justify-center rounded-lg bg-muted`}>
               <Icon className={`h-4 w-4 ${meta.color}`} />
             </div>
@@ -214,7 +222,7 @@ function ProviderCard({ provider }: { provider: ProviderConfig }) {
           </div>
         </CardHeader>
 
-        <CollapsibleContent>
+        <CollapsibleContent className="collapsible-animate overflow-hidden">
           <CardContent className="space-y-4 border-t pt-4">
             {/* Client ID */}
             <div className="space-y-1.5">

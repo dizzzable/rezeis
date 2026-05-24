@@ -1,6 +1,10 @@
 import React, { createContext, useContext, useState, useCallback, useEffect } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useTranslation } from 'react-i18next'
+import { toast } from 'sonner'
+
 import { TOKEN_KEY } from '@/lib/api'
+import { safeGetItem, safeSetItem, safeRemoveItem } from '@/lib/safe-storage'
 import { usePermissionStore } from '@/features/rbac'
 import { getMeApi, type AdminProfile } from './auth-api'
 
@@ -18,6 +22,7 @@ const AuthContext = createContext<AuthContextValue | null>(null)
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const queryClient = useQueryClient()
+  const { t } = useTranslation()
 
   const [token, setToken] = useState<string | null>(() => {
     // Check for OAuth callback token in URL hash fragment (GitHub redirect)
@@ -25,7 +30,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const hashParams = new URLSearchParams(window.location.hash.slice(1))
       const oauthToken = hashParams.get('oauth_token')
       if (oauthToken) {
-        localStorage.setItem(TOKEN_KEY, oauthToken)
+        safeSetItem(TOKEN_KEY, oauthToken)
         // Clean URL hash
         window.history.replaceState({}, '', window.location.pathname)
         return oauthToken
@@ -35,11 +40,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const params = new URLSearchParams(window.location.search)
     const oauthTokenQuery = params.get('oauth_token')
     if (oauthTokenQuery) {
-      localStorage.setItem(TOKEN_KEY, oauthTokenQuery)
+      safeSetItem(TOKEN_KEY, oauthTokenQuery)
       window.history.replaceState({}, '', window.location.pathname)
       return oauthTokenQuery
     }
-    return localStorage.getItem(TOKEN_KEY)
+    return safeGetItem(TOKEN_KEY)
   })
 
   const { data: admin, isLoading: isQueryLoading } = useQuery<AdminProfile>({
@@ -60,12 +65,27 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (admin && !permissionsLoaded) {
-      loadPermissions().catch(() => undefined)
+      loadPermissions().catch((err: unknown) => {
+        // Surface the failure: without permissions, the UI hides actions
+        // the operator might actually be allowed to perform. We log to
+        // the console for debugging and offer a one-click retry.
+        // eslint-disable-next-line no-console -- intentional dev feedback
+        console.error('[auth-provider] loadPermissions failed:', err)
+        toast.error(t('authProvider.permissions.loadFailed'), {
+          duration: 8_000,
+          action: {
+            label: t('authProvider.permissions.retry'),
+            onClick: () => {
+              void loadPermissions()
+            },
+          },
+        })
+      })
     }
-  }, [admin, permissionsLoaded, loadPermissions])
+  }, [admin, permissionsLoaded, loadPermissions, t])
 
   const login = useCallback((newToken: string) => {
-    localStorage.setItem(TOKEN_KEY, newToken)
+    safeSetItem(TOKEN_KEY, newToken)
     setToken(newToken)
     // Reset and reload everything: a fresh login should clear stale
     // state from the previous session before any UI mounts.
@@ -74,7 +94,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [queryClient, resetPermissions])
 
   const logout = useCallback(() => {
-    localStorage.removeItem(TOKEN_KEY)
+    safeRemoveItem(TOKEN_KEY)
     setToken(null)
     resetPermissions()
     queryClient.removeQueries({ queryKey: ['auth-me'] })

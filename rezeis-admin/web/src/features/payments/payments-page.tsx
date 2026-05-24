@@ -1,7 +1,6 @@
-/* eslint-disable @typescript-eslint/no-explicit-any -- TODO: type API responses */
 import { lazy, Suspense, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { useQuery } from '@tanstack/react-query'
+import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import { Card, CardContent } from '@/components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -14,6 +13,37 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { DatePicker } from '@/components/ui/date-picker'
 
 const PaymentsAnalyticsTab = lazy(() => import('./payments-analytics-tab'))
+
+interface TransactionRow {
+  readonly id: string
+  readonly paymentId: string | null
+  readonly userTelegramId?: string | number | bigint | null
+  readonly userId?: string | null
+  readonly status: string
+  readonly gatewayType: string
+  readonly amount: number | string | null
+  readonly currency: string
+  readonly planSnapshot?: { readonly name?: string | null } | null
+  readonly purchaseType: string
+  readonly createdAt: string
+}
+
+interface TransactionsList {
+  readonly items: ReadonlyArray<TransactionRow>
+  readonly total: number
+}
+
+interface WebhookEventRow {
+  readonly id: string
+  readonly gatewayType: string
+  readonly providerEventId: string | null
+  readonly status: string
+  readonly createdAt: string
+}
+
+interface WebhookEventsList {
+  readonly items: ReadonlyArray<WebhookEventRow>
+}
 
 export default function PaymentsPage() {
   const { t } = useTranslation()
@@ -64,12 +94,16 @@ function TransactionsTab() {
   if (dateFrom) params.set('dateFrom', dateFrom.toISOString())
   if (dateTo) params.set('dateTo', new Date(dateTo.getTime() + 86400000 - 1).toISOString())
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading } = useQuery<TransactionsList>({
     queryKey: ['admin', 'payments', 'transactions', params.toString()],
-    queryFn: async () => (await api.get(`/admin/payments/transactions?${params.toString()}`)).data,
+    queryFn: async ({ signal }) =>
+      (await api.get<TransactionsList>(`/admin/payments/transactions?${params.toString()}`, { signal })).data,
+    placeholderData: keepPreviousData,
   })
 
-  const statusColor = (s: string) => {
+  const statusColor = (
+    s: string,
+  ): 'success' | 'warning' | 'destructive' | 'secondary' | 'outline' => {
     switch (s) { case 'COMPLETED': return 'success'; case 'PENDING': return 'warning'; case 'FAILED': return 'destructive'; case 'CANCELED': return 'secondary'; default: return 'outline' }
   }
 
@@ -193,17 +227,17 @@ function TransactionsTab() {
                       {t('paymentsPage.transactions.empty')}
                     </TableCell>
                   </TableRow>
-                ) : items.map((tx: any) => (
+                ) : items.map((tx) => (
                   <TableRow key={tx.id}>
                     <TableCell className="font-mono text-xs">{tx.paymentId?.slice(0, 8)}…</TableCell>
                     <TableCell className="text-xs">
                       <div>{tx.userUsername ? `@${tx.userUsername}` : tx.userName ?? '—'}</div>
                       <div className="text-muted-foreground">{tx.userTelegramId ?? tx.userId?.slice(0, 8)}</div>
                     </TableCell>
-                    <TableCell><Badge variant={statusColor(tx.status) as any}>{String(t(`paymentsPage.statuses.${tx.status}`, tx.status))}</Badge></TableCell>
+                    <TableCell><Badge variant={statusColor(tx.status)}>{String(t(`paymentsPage.statuses.${tx.status}`, tx.status))}</Badge></TableCell>
                     <TableCell className="text-xs uppercase">{tx.gatewayType}</TableCell>
                     <TableCell className="font-mono text-sm">{tx.amount ?? '—'} {tx.currency}</TableCell>
-                    <TableCell className="text-xs">{(tx.planSnapshot as any)?.name ?? '—'}</TableCell>
+                    <TableCell className="text-xs">{tx.planSnapshot?.name ?? '—'}</TableCell>
                     <TableCell><Badge variant="outline" className="text-xs">{tx.purchaseType}</Badge></TableCell>
                     <TableCell className="text-xs text-muted-foreground">{new Date(tx.createdAt).toLocaleString()}</TableCell>
                   </TableRow>
@@ -243,9 +277,10 @@ function TransactionsTab() {
 
 function WebhooksTab() {
   const { t } = useTranslation()
-  const { data, isLoading } = useQuery({
+  const { data, isLoading } = useQuery<WebhookEventsList>({
     queryKey: ['admin', 'payments', 'webhooks'],
-    queryFn: async () => (await api.get('/admin/payments/webhooks?limit=30')).data,
+    queryFn: async ({ signal }) =>
+      (await api.get<WebhookEventsList>('/admin/payments/webhooks?limit=30', { signal })).data,
   })
 
   if (isLoading) return <Skeleton className="h-48 w-full mt-4" />
@@ -263,7 +298,7 @@ function WebhooksTab() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {data?.items?.map((ev: any) => (
+            {data?.items?.map((ev) => (
               <TableRow key={ev.id}>
                 <TableCell className="text-xs uppercase">{ev.gatewayType}</TableCell>
                 <TableCell className="font-mono text-xs">{ev.providerEventId?.slice(0, 16)}…</TableCell>

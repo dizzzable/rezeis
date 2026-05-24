@@ -5,6 +5,7 @@ import { Plus, Megaphone, Users, Send, XCircle, Trash2, Loader2, RefreshCw, Uplo
 import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
+import { getErrorMessage } from '@/lib/http-errors'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -33,15 +34,31 @@ const STATUS_VARIANT: Record<string, 'default' | 'secondary' | 'destructive' | '
   DELETED: 'outline',
 }
 
+interface BroadcastRow {
+  readonly id: number
+  readonly audience: string
+  readonly status: string
+  readonly successCount: number
+  readonly totalCount: number
+  readonly failedCount: number
+  readonly createdAt: string
+}
+
+interface BroadcastListResponse {
+  readonly items: ReadonlyArray<BroadcastRow>
+}
+
 export default function BroadcastPage() {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const [showCreate, setShowCreate] = useState(false)
 
-  const { data, isLoading, refetch } = useQuery({
+  const { data, isLoading, refetch } = useQuery<BroadcastListResponse>({
     queryKey: ['admin', 'broadcast'],
-    queryFn: async () => (await api.get('/admin/broadcast?limit=50')).data,
+    queryFn: async ({ signal }) =>
+      (await api.get<BroadcastListResponse>('/admin/broadcast?limit=50', { signal })).data,
     refetchInterval: 10_000,
+    refetchIntervalInBackground: false,
   })
 
   const cancelMutation = useMutation({
@@ -50,8 +67,8 @@ export default function BroadcastPage() {
       queryClient.invalidateQueries({ queryKey: ['admin', 'broadcast'] })
       toast.success(t('broadcastPage.toast.canceled'))
     },
-    onError: (err: { response?: { data?: { message?: string } } }) =>
-      toast.error(err.response?.data?.message ?? t('broadcastPage.toast.cancelFailed')),
+    onError: (err) =>
+      toast.error(getErrorMessage(err, t('broadcastPage.toast.cancelFailed'))),
   })
 
   const deleteMutation = useMutation({
@@ -62,13 +79,15 @@ export default function BroadcastPage() {
     },
   })
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const stats = data?.items?.reduce((acc: { total: number; completed: number; processing: number }, b: any) => {
-    acc.total++
-    if (b.status === 'COMPLETED') acc.completed++
-    if (b.status === 'PROCESSING') acc.processing++
-    return acc
-  }, { total: 0, completed: 0, processing: 0 }) ?? { total: 0, completed: 0, processing: 0 }
+  const stats = data?.items?.reduce(
+    (acc: { total: number; completed: number; processing: number }, b) => {
+      acc.total++
+      if (b.status === 'COMPLETED') acc.completed++
+      if (b.status === 'PROCESSING') acc.processing++
+      return acc
+    },
+    { total: 0, completed: 0, processing: 0 },
+  ) ?? { total: 0, completed: 0, processing: 0 }
 
   return (
     <div className="space-y-6">
@@ -131,8 +150,7 @@ export default function BroadcastPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
-                {data.items.map((b: any) => (
+                {data.items.map((b) => (
                   <TableRow key={b.id}>
                     <TableCell className="font-mono text-xs">{b.id}</TableCell>
                     <TableCell><Badge variant="outline">{String(t(`broadcastPage.audiences.${b.audience}`, b.audience))}</Badge></TableCell>

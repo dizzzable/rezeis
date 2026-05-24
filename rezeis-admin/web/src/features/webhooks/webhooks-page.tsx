@@ -1,7 +1,6 @@
-/* eslint-disable @typescript-eslint/no-explicit-any -- TODO: type API responses */
 import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { keepPreviousData, useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Loader2,
   Plus,
@@ -23,6 +22,8 @@ import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
+import { toast } from 'sonner'
+import { getErrorMessage } from '@/lib/http-errors'
 
 import {
   createWebhookSubscription,
@@ -68,6 +69,8 @@ export default function WebhooksPage({ embedded = false }: { readonly embedded?:
       }),
     staleTime: 5_000,
     refetchInterval: 10_000,
+    refetchIntervalInBackground: false,
+    placeholderData: keepPreviousData,
   })
 
   const invalidateAll = () => {
@@ -168,8 +171,8 @@ function CreateSubscriptionCard({
       setError(null)
       onCreated()
     },
-    onError: (err: any) =>
-      setError(err.response?.data?.message ?? t('webhooksPage.subscriptions.createFailed')),
+    onError: (err) =>
+      setError(getErrorMessage(err, t('webhooksPage.subscriptions.createFailed'))),
   })
 
   const eventTypes = useMemo(
@@ -326,6 +329,7 @@ function SubscriptionCard({
     mutationFn: (isActive: boolean) =>
       updateWebhookSubscription(subscription.id, { isActive }),
     onSuccess: onChanged,
+    onError: (err) => toast.error(getErrorMessage(err, t('webhooksPage.toasts.toggleFailed'))),
   })
 
   const regenerateMutation = useMutation({
@@ -334,16 +338,19 @@ function SubscriptionCard({
       setRevealedSecret(sub.secret ?? '')
       onChanged()
     },
+    onError: (err) => toast.error(getErrorMessage(err, t('webhooksPage.toasts.regenerateFailed'))),
   })
 
   const testMutation = useMutation({
     mutationFn: () => testWebhookSubscription(subscription.id),
     onSuccess: onChanged,
+    onError: (err) => toast.error(getErrorMessage(err, t('webhooksPage.toasts.testFailed'))),
   })
 
   const deleteMutation = useMutation({
     mutationFn: () => deleteWebhookSubscription(subscription.id),
     onSuccess: onChanged,
+    onError: (err) => toast.error(getErrorMessage(err, t('webhooksPage.toasts.deleteFailed'))),
   })
 
   const failureRate =
@@ -533,6 +540,7 @@ function DeliveryRow({
   const replayMutation = useMutation({
     mutationFn: () => replayWebhookDelivery(delivery.id),
     onSuccess: onReplayed,
+    onError: (err) => toast.error(getErrorMessage(err, t('webhooksPage.toasts.replayFailed'))),
   })
   const icon = statusIcon(delivery.status)
   return (

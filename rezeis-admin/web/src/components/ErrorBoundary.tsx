@@ -4,6 +4,7 @@ import { AlertTriangle, RotateCcw } from 'lucide-react'
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
+import { reportReactError } from '@/lib/client-logger'
 
 interface ErrorBoundaryProps {
   readonly children: ReactNode
@@ -30,8 +31,11 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
   }
 
   public componentDidCatch(error: Error, errorInfo: ErrorInfo): void {
-    // Log to console for debugging — in production this could go to a service
+    // Local console for debugging
+    // eslint-disable-next-line no-console -- intentional dev feedback
     console.error('[ErrorBoundary] Caught error:', error, errorInfo)
+    // Best-effort report to backend audit (rate-limited internally).
+    reportReactError(error, errorInfo.componentStack)
   }
 
   public render(): ReactNode {

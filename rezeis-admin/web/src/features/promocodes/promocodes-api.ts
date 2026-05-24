@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { api } from '@/lib/api'
+import { unwrapPayloadOrArray } from '@/lib/api-utils'
 
 export const promoCodeAvailabilitySchema = z.enum(['ALL', 'NEW', 'EXISTING', 'INVITED', 'ALLOWED'])
 export type PromoCodeAvailability = z.infer<typeof promoCodeAvailabilitySchema>
@@ -76,17 +77,7 @@ export const activatePromocodeResponseSchema = z.object({
 })
 export type ActivatePromocodeResponse = z.infer<typeof activatePromocodeResponseSchema>
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-function unwrapPayload(value: unknown): Record<string, unknown> | unknown[] {
-  if (Array.isArray(value)) return value
-  if (!isRecord(value)) throw new Error('errors.unexpectedResponsePayload')
-  const nested = value.data
-  if (Array.isArray(nested) || isRecord(nested)) return nested
-  return value
-}
+const unwrapPayload = unwrapPayloadOrArray
 
 export const promocodesApi = {
   async listPromocodes(params?: {

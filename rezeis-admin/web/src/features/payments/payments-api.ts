@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { api } from '@/lib/api'
+import { unwrapPayloadOrArray } from '@/lib/api-utils'
 
 const currencySchema = z.enum(['USD', 'RUB', 'USDT', 'XTR', 'TON', 'BTC', 'ETH'])
 const paymentGatewayTypeSchema = z.enum(['TELEGRAM_STARS', 'YOOKASSA', 'PLATEGA', 'HELEKET', 'CRYPTOMUS', 'MULENPAY'])
@@ -316,23 +317,7 @@ const paymentRefundGatewayCapabilitiesSchema = z.object({
   })),
 })
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-function unwrapPayload(value: unknown): Record<string, unknown> | unknown[] {
-  if (Array.isArray(value)) {
-    return value
-  }
-  if (!isRecord(value)) {
-    throw new Error('errors.unexpectedResponsePayload')
-  }
-  const nestedValue: unknown = value.data
-  if (Array.isArray(nestedValue) || isRecord(nestedValue)) {
-    return nestedValue
-  }
-  return value
-}
+const unwrapPayload = unwrapPayloadOrArray
 
 export type PaymentGateway = z.infer<typeof paymentGatewaySchema>
 export type PaymentTransaction = z.infer<typeof paymentTransactionSchema>

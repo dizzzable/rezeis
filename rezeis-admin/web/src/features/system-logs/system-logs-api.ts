@@ -24,7 +24,10 @@ export interface SystemLogsQuery {
   search?: string
 }
 
-export async function listSystemLogs(query: SystemLogsQuery = {}): Promise<SystemLogsListResponse> {
+export async function listSystemLogs(
+  query: SystemLogsQuery = {},
+  signal?: AbortSignal,
+): Promise<SystemLogsListResponse> {
   const params = new URLSearchParams()
   if (query.limit) params.set('limit', String(query.limit))
   if (query.afterId !== undefined) params.set('afterId', String(query.afterId))
@@ -34,12 +37,13 @@ export async function listSystemLogs(query: SystemLogsQuery = {}): Promise<Syste
   const qs = params.toString()
   const response = await api.get<SystemLogsListResponse>(
     `/admin/system-logs${qs ? `?${qs}` : ''}`,
+    { signal },
   )
   return response.data
 }
 
-export async function getSystemLogLevel(): Promise<{ level: LogLevel }> {
-  const response = await api.get<{ level: LogLevel }>('/admin/system-logs/level')
+export async function getSystemLogLevel(signal?: AbortSignal): Promise<{ level: LogLevel }> {
+  const response = await api.get<{ level: LogLevel }>('/admin/system-logs/level', { signal })
   return response.data
 }
 

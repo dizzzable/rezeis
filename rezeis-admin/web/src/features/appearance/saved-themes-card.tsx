@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any -- TODO: type API responses */
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
@@ -6,6 +5,7 @@ import { Bookmark, Check, Loader2, Plus, Save, Share2, Trash2, User } from 'luci
 import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
+import { getErrorMessage } from '@/lib/http-errors'
 import {
   Card,
   CardContent,
@@ -26,7 +26,15 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 
-import { useThemeStore } from '@/lib/theme/theme-store'
+import { useThemeStore, type ThemeToken, type TokenOverrides } from '@/lib/theme/theme-store'
+
+interface SavedThemeData {
+  presetId: string
+  customCss: string
+  overridesLight: TokenOverrides
+  overridesDark: TokenOverrides
+  radius: number
+}
 
 interface SavedThemePreset {
   id: string
@@ -36,13 +44,7 @@ interface SavedThemePreset {
   description: string | null
   isShared: boolean
   isOwn: boolean
-  themeData: {
-    presetId: string
-    customCss: string
-    overridesLight: Record<string, string>
-    overridesDark: Record<string, string>
-    radius: number
-  }
+  themeData: SavedThemeData
   createdAt: string
   updatedAt: string
 }
@@ -66,9 +68,9 @@ export function SavedThemesCard() {
       setDeleteTarget(null)
       toast.success(t('appearancePage.savedThemes.deleted'))
     },
-    onError: (err: any) =>
+    onError: (err) =>
       toast.error(
-        err.response?.data?.message ?? t('appearancePage.savedThemes.deleteFailed'),
+        getErrorMessage(err, t('appearancePage.savedThemes.deleteFailed')),
       ),
   })
 
@@ -87,10 +89,10 @@ export function SavedThemesCard() {
     store.clearOverrides('light')
     store.clearOverrides('dark')
     Object.entries(preset.themeData.overridesLight ?? {}).forEach(([token, value]) => {
-      store.setOverride('light', token as any, value)
+      store.setOverride('light', token as ThemeToken, value)
     })
     Object.entries(preset.themeData.overridesDark ?? {}).forEach(([token, value]) => {
-      store.setOverride('dark', token as any, value)
+      store.setOverride('dark', token as ThemeToken, value)
     })
     toast.success(t('appearancePage.savedThemes.applied', { name: preset.name }))
   }
@@ -260,7 +262,7 @@ function SaveThemeDialog({
       name: string
       description?: string
       isShared: boolean
-      themeData: any
+      themeData: SavedThemeData
     }) => api.post('/admin/theme-presets', input),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['admin', 'theme-presets'] })
@@ -270,8 +272,8 @@ function SaveThemeDialog({
       setIsShared(false)
       onOpenChange()
     },
-    onError: (err: any) =>
-      toast.error(err.response?.data?.message ?? t('appearancePage.savedThemes.createFailed')),
+    onError: (err) =>
+      toast.error(getErrorMessage(err, t('appearancePage.savedThemes.createFailed'))),
   })
 
   function handleSubmit() {

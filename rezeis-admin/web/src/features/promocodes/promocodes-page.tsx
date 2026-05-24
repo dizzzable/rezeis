@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any -- TODO: type API responses */
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
@@ -6,6 +5,7 @@ import { Plus, Trash2, Tag, UserPlus, Loader2, BarChart3, List } from 'lucide-re
 import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
+import { getErrorMessage } from '@/lib/http-errors'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -57,8 +57,8 @@ export default function PromocodesPage() {
       setShowCreate(false)
       toast.success(t('promocodesIndex.created'))
     },
-    onError: (err: any) =>
-      toast.error(err.response?.data?.message ?? t('promocodesIndex.createFailed')),
+    onError: (err) =>
+      toast.error(getErrorMessage(err, t('promocodesIndex.createFailed'))),
   })
 
   const deleteMutation = useMutation({
@@ -329,15 +329,15 @@ function ApplyToUserForm({ code, onClose }: { code: string; onClose: () => void 
 
   const mutation = useMutation({
     mutationFn: () =>
-      api.post('/admin/promocodes/apply-by-code', { code, telegramId }),
-    onSuccess: (res: any) => {
+      api.post<{ rewardType?: string }>('/admin/promocodes/apply-by-code', { code, telegramId }),
+    onSuccess: (res) => {
       toast.success(
         t('promocodesIndex.applied', { reward: res.data?.rewardType ?? '' }),
       )
       onClose()
     },
-    onError: (err: any) =>
-      toast.error(err.response?.data?.message ?? t('promocodesIndex.applyFailed')),
+    onError: (err) =>
+      toast.error(getErrorMessage(err, t('promocodesIndex.applyFailed'))),
   })
 
   return (

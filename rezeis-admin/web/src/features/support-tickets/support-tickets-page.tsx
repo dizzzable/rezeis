@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { keepPreviousData, useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { MessageSquare, Send, X, RotateCcw, Loader2, LifeBuoy } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api';
@@ -52,6 +52,7 @@ export default function SupportTicketsPage() {
       if (statusFilter !== 'all') params.status = statusFilter;
       return (await api.get<{ items: Ticket[]; total: number }>('/admin/support-tickets', { params })).data;
     },
+    placeholderData: keepPreviousData,
   });
 
   const { data: ticketDetail, isLoading: detailLoading } = useQuery({
@@ -59,6 +60,7 @@ export default function SupportTicketsPage() {
     queryFn: async () => (await api.get<Ticket>(`/admin/support-tickets/${selectedTicket}`)).data,
     enabled: !!selectedTicket,
     refetchInterval: 5000,
+    refetchIntervalInBackground: false,
   });
 
   const replyMutation = useMutation({

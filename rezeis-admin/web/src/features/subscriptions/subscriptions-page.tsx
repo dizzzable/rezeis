@@ -1,7 +1,6 @@
-/* eslint-disable @typescript-eslint/no-explicit-any -- TODO: type API responses */
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { useQuery } from '@tanstack/react-query'
+import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import { CreditCard, RefreshCw, Filter, ExternalLink } from 'lucide-react'
 
@@ -26,6 +25,23 @@ const STATUS_VARIANT: Record<string, 'default' | 'secondary' | 'destructive' | '
   DELETED: 'destructive',
 }
 
+interface SubscriptionRow {
+  readonly id: string | number
+  readonly user?: { readonly name?: string | null } | null
+  readonly userTelegramId?: string | number | bigint | null
+  readonly status: string
+  readonly isTrial?: boolean
+  readonly plan?: { readonly name?: string | null } | null
+  readonly trafficLimit: number | null
+  readonly deviceLimit: number | null
+  readonly expireAt: string
+}
+
+interface SubscriptionsList {
+  readonly items: ReadonlyArray<SubscriptionRow>
+  readonly total: number
+}
+
 export default function SubscriptionsPage() {
   const { t } = useTranslation()
   const navigate = useNavigate()
@@ -36,9 +52,11 @@ export default function SubscriptionsPage() {
   if (statusFilter && statusFilter !== '__all__') queryParams.set('status', statusFilter)
   if (trialOnly) queryParams.set('isTrial', 'true')
 
-  const { data, isLoading, refetch } = useQuery({
+  const { data, isLoading, refetch } = useQuery<SubscriptionsList>({
     queryKey: ['admin', 'subscriptions', statusFilter, trialOnly],
-    queryFn: async () => (await api.get(`/admin/subscriptions?${queryParams}`)).data,
+    queryFn: async ({ signal }) =>
+      (await api.get<SubscriptionsList>(`/admin/subscriptions?${queryParams}`, { signal })).data,
+    placeholderData: keepPreviousData,
   })
 
   const { data: stats } = useQuery({
@@ -132,7 +150,7 @@ export default function SubscriptionsPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {data.items.map((sub: any) => (
+                {data.items.map((sub) => (
                   <TableRow key={sub.id} className="cursor-pointer hover:bg-muted/30"
                     onClick={() => navigate(`/users/${sub.userTelegramId?.toString()}`)}>
                     <TableCell className="font-mono text-xs">{sub.id}</TableCell>
@@ -148,7 +166,7 @@ export default function SubscriptionsPage() {
                         {sub.isTrial && <Badge variant="outline" className="text-xs">{t('subscriptionsPage.trialBadge')}</Badge>}
                       </div>
                     </TableCell>
-                    <TableCell className="text-sm">{(sub.plan as any)?.name ?? '—'}</TableCell>
+                    <TableCell className="text-sm">{sub.plan?.name ?? '—'}</TableCell>
                     <TableCell className="text-xs">{sub.trafficLimit ? t('subscriptionsPage.trafficGb', { value: sub.trafficLimit }) : '∞'}</TableCell>
                     <TableCell className="text-xs">{sub.deviceLimit || '∞'}</TableCell>
                     <TableCell className="text-xs text-muted-foreground">

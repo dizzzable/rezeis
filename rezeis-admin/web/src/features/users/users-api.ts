@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { api } from '@/lib/api'
+import { unwrapPayloadOrArray } from '@/lib/api-utils'
 import { createUserSearchSchema } from '@/features/users/user-search-schema'
 import { buildUserSearchParams } from '@/features/users/user-search-request'
 
@@ -606,23 +607,7 @@ const subscriptionRenewalReadinessSchema = z.object({
 
 type UserSearchFormValues = z.infer<ReturnType<typeof createUserSearchSchema>>
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-function unwrapPayload(value: unknown): Record<string, unknown> | unknown[] {
-  if (Array.isArray(value)) {
-    return value
-  }
-  if (!isRecord(value)) {
-    throw new Error('errors.unexpectedUsersPayload')
-  }
-  const nestedValue: unknown = value.data
-  if (Array.isArray(nestedValue) || isRecord(nestedValue)) {
-    return nestedValue
-  }
-  return value
-}
+const unwrapPayload = unwrapPayloadOrArray
 
 async function searchUser(values: UserSearchFormValues): Promise<z.infer<typeof userSearchResultSchema>> {
   const response = await api.get('/admin/users/search', {

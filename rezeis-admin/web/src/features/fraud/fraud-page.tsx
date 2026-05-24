@@ -18,7 +18,6 @@ import {
   AlertCircle,
   CheckCircle2,
   ChevronDown,
-  ChevronRight,
   Filter,
   Loader2,
   PlayCircle,
@@ -70,7 +69,7 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { Textarea } from '@/components/ui/textarea';
-import { formatDateTime } from '@/lib/utils';
+import { formatDateTime, cn } from '@/lib/utils';
 import {
   type FraudSignal,
   type FraudStatus,
@@ -384,18 +383,20 @@ function SignalRow({
           <Collapsible open={open} onOpenChange={setOpen}>
             <CollapsibleTrigger asChild>
               <button className="text-left flex items-start gap-1.5 group">
-                {open ? (
-                  <ChevronDown className="h-3.5 w-3.5 mt-1 text-muted-foreground" />
-                ) : (
-                  <ChevronRight className="h-3.5 w-3.5 mt-1 text-muted-foreground" />
-                )}
+                <ChevronDown
+                  className={cn(
+                    'h-3.5 w-3.5 mt-1 text-muted-foreground transition-transform duration-200 ease-out',
+                    open ? 'rotate-0' : '-rotate-90',
+                  )}
+                  aria-hidden
+                />
                 <div>
                   <div className="font-medium text-sm">{signal.title}</div>
                   <code className="text-[10px] text-muted-foreground">{signal.code}</code>
                 </div>
               </button>
             </CollapsibleTrigger>
-            <CollapsibleContent className="mt-2 ml-5 space-y-2">
+            <CollapsibleContent className="collapsible-animate overflow-hidden mt-2 ml-5 space-y-2">
               <p className="text-sm text-muted-foreground">{signal.description}</p>
               {Object.keys(signal.metadata).length > 0 && (
                 <pre className="text-[10px] bg-muted rounded p-2 max-w-xl overflow-auto max-h-40 whitespace-pre-wrap">

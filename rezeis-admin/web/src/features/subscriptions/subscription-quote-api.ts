@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { api } from '@/lib/api'
+import { unwrapPayload } from '@/lib/api-utils'
 
 const warningSchema = z.object({
   code: z.string(),
@@ -65,21 +66,6 @@ export type SubscriptionQuoteAction = z.infer<typeof quoteSchema>['purchaseType'
 export type SubscriptionQuoteChannel = z.infer<typeof quoteSchema>['channel']
 export type SubscriptionActionPolicy = z.infer<typeof actionPolicySchema>
 export type SubscriptionQuote = z.infer<typeof quoteSchema>
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-function unwrapPayload(value: unknown): Record<string, unknown> {
-  if (!isRecord(value)) {
-    throw new Error('errors.unexpectedResponsePayload')
-  }
-  const nestedValue: unknown = value.data
-  if (isRecord(nestedValue)) {
-    return nestedValue
-  }
-  return value
-}
 
 export const subscriptionQuoteApi = {
   async getActionPolicy(payload: {

@@ -1,0 +1,105 @@
+/**
+ * Lightweight typed surface for the user detail object returned by
+ * `GET /admin/users/:telegramId`.
+ *
+ * This is intentionally a permissive interface (most fields are
+ * optional) — the backend ships a wide bag of nested relations that we
+ * surface in the right-hand panel. We do not zod-validate here yet, but
+ * this beats the previous file-wide `eslint-disable @typescript-eslint/no-explicit-any`
+ * because it forces us to declare which fields the UI consumes.
+ *
+ * If you need a new field in the panel, add it here; the compiler will
+ * point you at every consumer.
+ */
+
+export interface UserSubscription {
+  readonly id: string
+  readonly status: string
+  readonly isTrial?: boolean
+  readonly trafficLimit?: number | null
+  readonly deviceLimit?: number | null
+  readonly expireAt?: string
+  readonly createdAt?: string
+  readonly planSnapshot?: {
+    readonly planId?: string | null
+    readonly name?: string | null
+  } | null
+  readonly devices?: ReadonlyArray<{ readonly hwid: string; readonly title?: string | null; readonly seenAt?: string | null }>
+}
+
+export interface UserTransaction {
+  readonly id: string
+  readonly paymentId?: string | null
+  readonly status: string
+  readonly amount: number | string
+  readonly currency: string
+  readonly gatewayType?: string | null
+  readonly purchaseType?: string | null
+  readonly createdAt: string
+}
+
+export interface UserReferralEntry {
+  readonly id: string
+  readonly level: number
+  readonly qualifiedAt?: string | null
+  readonly referred?: { readonly name?: string | null; readonly telegramId?: string | number | bigint | null } | null
+  readonly referrer?: { readonly name?: string | null; readonly username?: string | null } | null
+}
+
+export interface UserPartnerTransaction {
+  readonly id: string
+  readonly amount: number
+  readonly note?: string | null
+  readonly createdAt: string
+}
+
+export interface UserPartner {
+  readonly id?: number
+  readonly isActive?: boolean
+  readonly balance?: number
+  readonly totalEarned?: number
+  readonly referrals?: ReadonlyArray<UserReferralEntry>
+  readonly transactions?: ReadonlyArray<UserPartnerTransaction>
+  readonly individualSettings?: {
+    readonly level1Percent?: number | string | null
+    readonly level2Percent?: number | string | null
+    readonly level3Percent?: number | string | null
+  } | null
+}
+
+export interface UserWebAccount {
+  readonly login?: string | null
+  readonly username?: string | null
+  readonly email?: string | null
+}
+
+export interface UserReferralBackref {
+  readonly level: number
+  readonly referrer?: { readonly name?: string | null; readonly username?: string | null } | null
+}
+
+export interface UserDetail {
+  readonly id: string
+  readonly telegramId: string | number | bigint
+  readonly username?: string | null
+  readonly name?: string | null
+  readonly email?: string | null
+  readonly language?: string | null
+  readonly role?: string | null
+  readonly isBlocked: boolean
+  readonly isPartner?: boolean
+  readonly identityKind?: string
+  readonly points?: number | string | null
+  readonly maxSubscriptions?: number | null
+  readonly trafficLimit?: number | null
+  readonly deviceLimit?: number | null
+  readonly referralCode?: string | null
+  readonly createdAt: string
+  readonly updatedAt?: string
+  readonly subscriptions?: ReadonlyArray<UserSubscription>
+  readonly transactions?: ReadonlyArray<UserTransaction>
+  readonly referral?: UserReferralBackref | null
+  readonly referralsGiven?: ReadonlyArray<UserReferralEntry>
+  readonly partner?: UserPartner | null
+  readonly webAccount?: UserWebAccount | null
+}

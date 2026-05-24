@@ -33,6 +33,7 @@ export function DashboardActivityFeed(): JSX.Element {
     queryKey: ['admin', 'remnawave', 'activity-feed'],
     queryFn: () => dashboardApi.getActivityFeed(20),
     refetchInterval: 30_000,
+    refetchIntervalInBackground: false,
   })
 
   if (isLoading) {

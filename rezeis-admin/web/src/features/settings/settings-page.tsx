@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any -- TODO: type API responses */
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
@@ -19,11 +18,44 @@ import { Separator } from '@/components/ui/separator'
 const ACCESS_MODES = ['PUBLIC', 'INVITED', 'PURCHASE_BLOCKED', 'REG_BLOCKED', 'RESTRICTED'] as const
 const CURRENCIES = ['RUB', 'USD', 'EUR', 'XTR', 'USDT', 'TON'] as const
 
+interface BrandingVerificationSettings {
+  readonly telegramTemplate?: { readonly ru?: string; readonly en?: string }
+  readonly passwordResetTelegramTemplate?: { readonly ru?: string; readonly en?: string }
+}
+
+interface BrandingSettings {
+  readonly projectName?: string
+  readonly webTitle?: string
+  readonly supportLink?: string
+  readonly channelUsername?: string
+  readonly botMenuButtonText?: string
+  readonly verification?: BrandingVerificationSettings
+}
+
+interface MultiSubscriptionSettings {
+  readonly enabled?: boolean
+  readonly defaultMaxSubscriptions?: number
+}
+
+interface AdminSettings {
+  readonly accessMode?: string
+  readonly defaultCurrency?: string
+  readonly rulesRequired?: boolean
+  readonly channelRequired?: boolean
+  readonly rulesLink?: string
+  readonly channelLink?: string
+  readonly channelId?: string | number | bigint | null
+  readonly userNotifications?: Record<string, unknown>
+  readonly systemNotifications?: Record<string, unknown>
+  readonly brandingSettings?: BrandingSettings
+  readonly multiSubscriptionSettings?: MultiSubscriptionSettings
+}
+
 export default function SettingsPage() {
   const { t } = useTranslation()
-  const { data: settings, isLoading } = useQuery({
+  const { data: settings, isLoading } = useQuery<AdminSettings>({
     queryKey: ['admin', 'settings'],
-    queryFn: async () => (await api.get('/admin/settings')).data,
+    queryFn: async () => (await api.get<AdminSettings>('/admin/settings')).data,
   })
 
   if (isLoading) return <div className="space-y-4"><Skeleton className="h-8 w-48" /><Skeleton className="h-64 w-full" /></div>
@@ -52,7 +84,7 @@ export default function SettingsPage() {
   )
 }
 
-function PlatformTab({ settings }: { settings: any }) {
+function PlatformTab({ settings }: { settings: AdminSettings | undefined }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const [accessMode, setAccessMode] = useState(settings?.accessMode ?? 'PUBLIC')
@@ -64,7 +96,15 @@ function PlatformTab({ settings }: { settings: any }) {
   const [channelId, setChannelId] = useState(settings?.channelId?.toString() ?? '')
 
   const mutation = useMutation({
-    mutationFn: (data: any) => api.patch('/admin/settings/platform', data),
+    mutationFn: (data: {
+      readonly accessMode: string
+      readonly defaultCurrency: string
+      readonly rulesRequired: boolean
+      readonly channelRequired: boolean
+      readonly rulesLink: string
+      readonly channelLink: string
+      readonly channelId: bigint | null
+    }) => api.patch('/admin/settings/platform', data),
     onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['admin', 'settings'] }); toast.success(t('settingsPage.platform.saved')) },
     onError: () => toast.error(t('settingsPage.platform.saveFailed')),
   })
@@ -163,14 +203,15 @@ function PlatformTab({ settings }: { settings: any }) {
   )
 }
 
-function NotificationsTab({ settings }: { settings: any }) {
+function NotificationsTab({ settings }: { settings: AdminSettings | undefined }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const [userNotifications, setUserNotifications] = useState(JSON.stringify(settings?.userNotifications ?? {}, null, 2))
   const [systemNotifications, setSystemNotifications] = useState(JSON.stringify(settings?.systemNotifications ?? {}, null, 2))
 
   const mutation = useMutation({
-    mutationFn: (data: any) => api.patch('/admin/settings/notifications', data),
+    mutationFn: (data: { userNotifications: unknown; systemNotifications: unknown }) =>
+      api.patch('/admin/settings/notifications', data),
     onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['admin', 'settings'] }); toast.success(t('settingsPage.notifications.saved')) },
     onError: () => toast.error(t('settingsPage.notifications.saveFailed')),
   })
@@ -208,14 +249,13 @@ function NotificationsTab({ settings }: { settings: any }) {
   )
 }
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-function JsonSettingsTab({ title, description, endpoint, data }: { title: string; description: string; endpoint: string; data: any }) {
+function JsonSettingsTab({ title, description, endpoint, data }: { title: string; description: string; endpoint: string; data: unknown }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const [json, setJson] = useState(JSON.stringify(data ?? {}, null, 2))
 
   const mutation = useMutation({
-    mutationFn: (parsed: any) => api.patch(`/admin/settings/${endpoint}`, parsed),
+    mutationFn: (parsed: unknown) => api.patch(`/admin/settings/${endpoint}`, parsed),
     onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['admin', 'settings'] }); toast.success(t('settingsPage.json.saved', { title })) },
     onError: () => toast.error(t('settingsPage.json.saveFailed')),
   })
@@ -246,10 +286,10 @@ function JsonSettingsTab({ title, description, endpoint, data }: { title: string
 
 // ── Branding Tab ──────────────────────────────────────────────────────────────
 
-function BrandingTab({ settings }: { settings: any }) {
+function BrandingTab({ settings }: { settings: AdminSettings | undefined }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
-  const branding = (settings?.brandingSettings ?? {}) as Record<string, any>
+  const branding = settings?.brandingSettings ?? {}
 
   const [projectName, setProjectName] = useState(branding.projectName ?? '')
   const [webTitle, setWebTitle] = useState(branding.webTitle ?? '')
@@ -258,14 +298,14 @@ function BrandingTab({ settings }: { settings: any }) {
   const [botMenuButtonText, setBotMenuButtonText] = useState(branding.botMenuButtonText ?? 'Shop')
 
   // Verification templates
-  const verification = (branding.verification ?? {}) as Record<string, any>
+  const verification = branding.verification ?? {}
   const [verifyTelegramRu, setVerifyTelegramRu] = useState(verification.telegramTemplate?.ru ?? '')
   const [verifyTelegramEn, setVerifyTelegramEn] = useState(verification.telegramTemplate?.en ?? '')
   const [passwordResetRu, setPasswordResetRu] = useState(verification.passwordResetTelegramTemplate?.ru ?? '')
   const [passwordResetEn, setPasswordResetEn] = useState(verification.passwordResetTelegramTemplate?.en ?? '')
 
   const mutation = useMutation({
-    mutationFn: (data: any) => api.patch('/admin/settings/platform', { brandingSettings: data }),
+    mutationFn: (data: BrandingSettings) => api.patch('/admin/settings/platform', { brandingSettings: data }),
     onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['admin', 'settings'] }); toast.success(t('settingsPage.branding.saved')) },
     onError: () => toast.error(t('settingsPage.branding.saveFailed')),
   })
@@ -374,16 +414,16 @@ function BrandingTab({ settings }: { settings: any }) {
 
 // ── Multi-Subscription Tab ────────────────────────────────────────────────────
 
-function MultiSubTab({ settings }: { settings: any }) {
+function MultiSubTab({ settings }: { settings: AdminSettings | undefined }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
-  const multiSub = (settings?.multiSubscriptionSettings ?? {}) as Record<string, any>
+  const multiSub = settings?.multiSubscriptionSettings ?? {}
 
   const [enabled, setEnabled] = useState(multiSub.enabled ?? false)
   const [defaultMax, setDefaultMax] = useState(String(multiSub.defaultMaxSubscriptions ?? '1'))
 
   const mutation = useMutation({
-    mutationFn: (data: any) => api.patch('/admin/settings/platform', { multiSubscriptionSettings: data }),
+    mutationFn: (data: MultiSubscriptionSettings) => api.patch('/admin/settings/platform', { multiSubscriptionSettings: data }),
     onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['admin', 'settings'] }); toast.success(t('settingsPage.multiSub.saved')) },
     onError: () => toast.error(t('settingsPage.multiSub.saveFailed')),
   })

@@ -1,26 +1,15 @@
-const ACCESS_TOKEN_KEY: string = 'rezeis.admin.access-token'
+import { safeGetItem, safeSetItem, safeRemoveItem } from './safe-storage'
 
-function canUseStorage(): boolean {
-  return typeof window !== 'undefined' && typeof window.localStorage !== 'undefined'
-}
+const ACCESS_TOKEN_KEY: string = 'rezeis.admin.access-token'
 
 export const authStorage = {
   getToken(): string {
-    if (!canUseStorage()) {
-      return ''
-    }
-    return window.localStorage.getItem(ACCESS_TOKEN_KEY) ?? ''
+    return safeGetItem(ACCESS_TOKEN_KEY) ?? ''
   },
   setToken(token: string): void {
-    if (!canUseStorage()) {
-      return
-    }
-    window.localStorage.setItem(ACCESS_TOKEN_KEY, token)
+    safeSetItem(ACCESS_TOKEN_KEY, token)
   },
   clearToken(): void {
-    if (!canUseStorage()) {
-      return
-    }
-    window.localStorage.removeItem(ACCESS_TOKEN_KEY)
+    safeRemoveItem(ACCESS_TOKEN_KEY)
   },
 }

@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any -- TODO: type API responses */
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
@@ -6,6 +5,7 @@ import { Plus, Pencil, Trash2, Puzzle, Loader2, BarChart3, List } from 'lucide-r
 import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
+import { getErrorMessage } from '@/lib/http-errors'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -24,6 +24,7 @@ import { Switch } from '@/components/ui/switch'
 import { Separator } from '@/components/ui/separator'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { FadeIn } from '@/lib/motion'
+import { usePlans } from '@/features/plans/plans-api'
 import { AddOnsStatsTab } from './add-ons-stats-tab'
 
 const CURRENCIES = ['RUB', 'USD', 'USDT', 'TON', 'XTR', 'EUR'] as const
@@ -45,11 +46,6 @@ interface AddOn {
   orderIndex: number
   applicablePlanIds: string[]
   prices: AddOnPrice[]
-}
-
-interface PlanListItem {
-  id: string
-  name: string
 }
 
 interface AddOnFormData {
@@ -81,8 +77,8 @@ export default function AddOnsPage() {
       toast.success(t('addOnsPage.deleted'))
       setDeleteConfirmId(null)
     },
-    onError: (err: any) =>
-      toast.error(err.response?.data?.message ?? t('addOnsPage.deleteFailed')),
+    onError: (err) =>
+      toast.error(getErrorMessage(err, t('addOnsPage.deleteFailed'))),
   })
 
   const toggleActiveMutation = useMutation({
@@ -380,10 +376,7 @@ function AddOnDialog({
     }
   }, [open, addOn])
 
-  const { data: plans } = useQuery({
-    queryKey: ['admin', 'plans'],
-    queryFn: async () => (await api.get<PlanListItem[]>('/admin/plans')).data,
-  })
+  const { data: plans } = usePlans()
 
   const createMutation = useMutation({
     mutationFn: (input: AddOnFormData) => api.post('/admin/add-ons', input),
@@ -392,8 +385,8 @@ function AddOnDialog({
       toast.success(t('addOnsPage.created'))
       onOpenChange()
     },
-    onError: (err: any) =>
-      toast.error(err.response?.data?.message ?? t('addOnsPage.createFailed')),
+    onError: (err) =>
+      toast.error(getErrorMessage(err, t('addOnsPage.createFailed'))),
   })
 
   const updateMutation = useMutation({
@@ -404,8 +397,8 @@ function AddOnDialog({
       toast.success(t('addOnsPage.updated'))
       onOpenChange()
     },
-    onError: (err: any) =>
-      toast.error(err.response?.data?.message ?? t('addOnsPage.updateFailed')),
+    onError: (err) =>
+      toast.error(getErrorMessage(err, t('addOnsPage.updateFailed'))),
   })
 
   const isPending = createMutation.isPending || updateMutation.isPending

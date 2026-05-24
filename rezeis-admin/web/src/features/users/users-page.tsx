@@ -15,12 +15,13 @@
  * rendered inline (no separate route needed).
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any -- TODO: type API responses */
-
-import { lazy, Suspense, useEffect, useState } from 'react'
+import { lazy, memo, Suspense, useCallback, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { useLocation, useNavigate, useSearchParams } from 'react-router-dom'
+import { useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useForm } from 'react-hook-form'
+import { zodResolver } from '@hookform/resolvers/zod'
+import { z } from 'zod'
 import { Search, Users as UsersIcon, Plus, Loader2, ListChecks } from 'lucide-react'
 
 import { api } from '@/lib/api'
@@ -28,14 +29,28 @@ import { toast } from 'sonner'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
-import { Label } from '@/components/ui/label'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import {
+  Form,
+  FormControl,
+  FormDescription,
+  FormField,
+  FormItem,
+  FormLabel,
+  FormMessage,
+} from '@/components/ui/form'
 import { cn } from '@/lib/utils'
+import { getErrorMessage } from '@/lib/http-errors'
 import { FadeIn } from '@/lib/motion'
-import UserDetailPanel from './user-detail-panel'
+import { useTabSync } from '@/lib/use-tab-sync'
+import { withFeatureBundle } from '@/i18n/i18n'
+
+const UserDetailPanel = lazy(
+  withFeatureBundle('userDetail', () => import('./user-detail-panel')),
+)
 
 const BulkUsersTab = lazy(() => import('@/features/users/bulk-users-page'))
 
@@ -79,30 +94,7 @@ interface UserListResponse {
 
 export default function UsersPage() {
   const { t } = useTranslation()
-  const { hash: locationHash, pathname: locationPathname } = useLocation()
-  const navigate = useNavigate()
-
-  const initialTab: UsersTab = (() => {
-    const hash = locationHash.replace('#', '')
-    return (ALLOWED_TABS as readonly string[]).includes(hash) ? (hash as UsersTab) : 'list'
-  })()
-
-  const [activeTab, setActiveTab] = useState<UsersTab>(initialTab)
-
-  useEffect(() => {
-    const hash = locationHash.replace('#', '')
-    if ((ALLOWED_TABS as readonly string[]).includes(hash) && hash !== activeTab) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- TODO: refactor to derive state
-      setActiveTab(hash as UsersTab)
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [locationHash])
-
-  function handleTabChange(value: string): void {
-    if (!(ALLOWED_TABS as readonly string[]).includes(value)) return
-    setActiveTab(value as UsersTab)
-    navigate(`${locationPathname}#${value}`, { replace: true })
-  }
+  const { activeTab, setTab: handleTabChange } = useTabSync<UsersTab>(ALLOWED_TABS, 'list')
 
   return (
     <div className="space-y-4">
@@ -149,6 +141,39 @@ export default function UsersPage() {
   )
 }
 
+interface UserListRowProps {
+  readonly user: UserListItem
+  readonly isSelected: boolean
+  readonly onSelect: (id: string) => void
+}
+
+const UserListRow = memo(function UserListRow({ user, isSelected, onSelect }: UserListRowProps) {
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect(user.id)}
+      className={cn(
+        'flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-left transition-colors',
+        isSelected ? 'bg-primary/10 text-primary' : 'hover:bg-muted',
+      )}
+    >
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-sm font-medium">{user.name || '—'}</p>
+        <p className="truncate text-xs text-muted-foreground">
+          {user.username ? `@${user.username} · ` : ''}
+          {user.telegramId ?? user.email ?? user.id}
+        </p>
+      </div>
+      <div className="flex shrink-0 flex-col items-end gap-1">
+        <span className={`inline-block h-2.5 w-2.5 rounded-full ${getUserStatusClass(user)}`} />
+        {user.role !== 'USER' && (
+          <span className="text-[10px] text-muted-foreground">{user.role}</span>
+        )}
+      </div>
+    </button>
+  )
+})
+
 function UsersListTab() {
   const { t } = useTranslation()
   const [searchParams, setSearchParams] = useSearchParams()
@@ -167,27 +192,31 @@ function UsersListTab() {
     isError,
   } = useQuery({
     queryKey: ['admin', 'users', 'list', searchQuery],
-    queryFn: async (): Promise<UserListResponse> => {
+    queryFn: async ({ signal }): Promise<UserListResponse> => {
       const params: Record<string, string | number> = { limit: LIST_LIMIT }
       const trimmed = searchQuery.trim()
       if (trimmed) {
         params.search = trimmed
       }
-      const res = await api.get('/admin/users', { params })
+      const res = await api.get('/admin/users', { params, signal })
       return res.data as UserListResponse
     },
     placeholderData: (prev) => prev,
   })
 
-  const displayedUsers: UserListItem[] = (listData?.items ?? []).map((u) => ({
-    id: u.id,
-    telegramId: u.telegramId,
-    username: u.username,
-    email: u.email,
-    name: u.name,
-    role: u.role,
-    isBlocked: u.isBlocked,
-  }))
+  const displayedUsers: UserListItem[] = useMemo(
+    () =>
+      (listData?.items ?? []).map((u) => ({
+        id: u.id,
+        telegramId: u.telegramId,
+        username: u.username,
+        email: u.email,
+        name: u.name,
+        role: u.role,
+        isBlocked: u.isBlocked,
+      })),
+    [listData?.items],
+  )
 
   const total = listData?.total ?? 0
   const hasMore = total > displayedUsers.length
@@ -203,9 +232,9 @@ function UsersListTab() {
     }
   }
 
-  const handleSelectUser = (userId: string): void => {
+  const handleSelectUser = useCallback((userId: string): void => {
     setSelectedUserId(userId)
-  }
+  }, [])
 
   return (
     <div data-glass-card className="flex h-[calc(100vh-13rem)] gap-0 overflow-hidden rounded-lg border">
@@ -259,31 +288,12 @@ function UsersListTab() {
           ) : (
             <div className="space-y-0.5 p-2">
               {displayedUsers.map((user) => (
-                <button
+                <UserListRow
                   key={user.id}
-                  type="button"
-                  onClick={() => handleSelectUser(user.id)}
-                  className={cn(
-                    'flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-left transition-colors',
-                    selectedUserId === user.id
-                      ? 'bg-primary/10 text-primary'
-                      : 'hover:bg-muted',
-                  )}
-                >
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm font-medium">{user.name || '—'}</p>
-                    <p className="truncate text-xs text-muted-foreground">
-                      {user.username ? `@${user.username} · ` : ''}
-                      {user.telegramId ?? user.email ?? user.id}
-                    </p>
-                  </div>
-                  <div className="flex shrink-0 flex-col items-end gap-1">
-                    <span className={`inline-block h-2.5 w-2.5 rounded-full ${getUserStatusClass(user)}`} />
-                    {user.role !== 'USER' && (
-                      <span className="text-[10px] text-muted-foreground">{user.role}</span>
-                    )}
-                  </div>
-                </button>
+                  user={user}
+                  isSelected={selectedUserId === user.id}
+                  onSelect={handleSelectUser}
+                />
               ))}
             </div>
           )}
@@ -306,7 +316,9 @@ function UsersListTab() {
       <div className="flex-1 overflow-auto bg-background scrollbar-none">
         {selectedUserId ? (
           <FadeIn key={selectedUserId}>
-            <UserDetailPanel telegramId={selectedUserId} />
+            <Suspense fallback={<div className="p-6 space-y-3"><Skeleton className="h-8 w-48" /><Skeleton className="h-64 w-full" /></div>}>
+              <UserDetailPanel telegramId={selectedUserId} />
+            </Suspense>
           </FadeIn>
         ) : (
           <div className="flex h-full flex-col items-center justify-center gap-3 text-muted-foreground">
@@ -341,32 +353,57 @@ function CreateUserDialog({
 }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
-  const [telegramId, setTelegramId] = useState('')
-  const [username, setUsername] = useState('')
-  const [name, setName] = useState('')
-  const [email, setEmail] = useState('')
+
+  const schema = z
+    .object({
+      telegramId: z
+        .string()
+        .trim()
+        .refine((v) => v === '' || /^\d+$/.test(v), {
+          message: t('usersPage.create.validation.telegramIdInvalid'),
+        }),
+      username: z.string().trim(),
+      name: z.string().trim(),
+      email: z
+        .string()
+        .trim()
+        .refine((v) => v === '' || z.string().email().safeParse(v).success, {
+          message: t('usersPage.create.validation.emailInvalid'),
+        }),
+    })
+    .refine(
+      (data) => Boolean(data.telegramId) || Boolean(data.username) || Boolean(data.name),
+      {
+        message: t('usersPage.create.validation.atLeastOne'),
+        path: ['telegramId'],
+      },
+    )
+
+  type FormValues = z.infer<typeof schema>
+
+  const form = useForm<FormValues>({
+    resolver: zodResolver(schema),
+    defaultValues: { telegramId: '', username: '', name: '', email: '' },
+  })
 
   const mutation = useMutation({
-    mutationFn: () =>
-      api.post('/admin/users', {
-        telegramId,
-        username: username || undefined,
-        name: name || undefined,
-        email: email || undefined,
+    mutationFn: (values: FormValues) =>
+      api.post<{ id?: string; telegramId?: string }>('/admin/users', {
+        telegramId: values.telegramId || undefined,
+        username: values.username || undefined,
+        name: values.name || undefined,
+        email: values.email || undefined,
       }),
-    onSuccess: (res) => {
+    onSuccess: (res, values) => {
       queryClient.invalidateQueries({ queryKey: ['admin', 'users'] })
       toast.success(t('usersPage.create.success'))
-      const createdId = res.data?.id || res.data?.telegramId || telegramId
+      const createdId = res.data?.id ?? res.data?.telegramId ?? values.telegramId
       onCreated(createdId)
       onOpenChange(false)
-      setTelegramId('')
-      setUsername('')
-      setName('')
-      setEmail('')
+      form.reset()
     },
-    onError: (err: any) =>
-      toast.error(err.response?.data?.message ?? t('usersPage.create.error')),
+    onError: (err) =>
+      toast.error(getErrorMessage(err, t('usersPage.create.error'))),
   })
 
   return (
@@ -375,59 +412,90 @@ function CreateUserDialog({
         <DialogHeader>
           <DialogTitle>{t('usersPage.createUser')}</DialogTitle>
         </DialogHeader>
-        <div className="space-y-3">
-          <div className="space-y-1.5">
-            <Label>{t('usersPage.create.telegramId')} <span className="text-xs text-muted-foreground">({t('usersPage.create.optional')})</span></Label>
-            <Input
-              placeholder="123456789"
-              value={telegramId}
-              onChange={(e) => setTelegramId(e.target.value)}
-            />
-            <p className="text-[11px] text-muted-foreground">
-              {t('usersPage.create.telegramHint')}
-            </p>
-          </div>
-          <div className="space-y-1.5">
-            <Label>{t('usersPage.create.username')}</Label>
-            <Input
-              placeholder={t('usersPage.create.usernamePlaceholder')}
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label>{t('usersPage.create.name')}</Label>
-            <Input
-              placeholder={t('usersPage.create.namePlaceholder')}
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label>{t('usersPage.create.email')}</Label>
-            <Input
-              placeholder={t('usersPage.create.emailPlaceholder')}
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-            />
-          </div>
-          <div className="flex justify-end gap-2 pt-2">
-            <Button variant="outline" onClick={() => onOpenChange(false)}>
-              {t('common.cancel')}
-            </Button>
-            <Button
-              onClick={() => mutation.mutate()}
-              disabled={(!telegramId.trim() && !name.trim() && !username.trim()) || mutation.isPending}
-            >
-              {mutation.isPending ? (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              ) : (
-                <Plus className="mr-2 h-4 w-4" />
+        <Form {...form}>
+          <form
+            onSubmit={form.handleSubmit((values) => mutation.mutate(values))}
+            className="space-y-3"
+          >
+            <FormField
+              control={form.control}
+              name="telegramId"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>
+                    {t('usersPage.create.telegramId')}{' '}
+                    <span className="text-xs text-muted-foreground">
+                      ({t('usersPage.create.optional')})
+                    </span>
+                  </FormLabel>
+                  <FormControl>
+                    <Input placeholder="123456789" inputMode="numeric" {...field} />
+                  </FormControl>
+                  <FormDescription className="text-[11px]">
+                    {t('usersPage.create.telegramHint')}
+                  </FormDescription>
+                  <FormMessage />
+                </FormItem>
               )}
-              {t('usersPage.create.submit')}
-            </Button>
-          </div>
-        </div>
+            />
+            <FormField
+              control={form.control}
+              name="username"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>{t('usersPage.create.username')}</FormLabel>
+                  <FormControl>
+                    <Input placeholder={t('usersPage.create.usernamePlaceholder')} {...field} />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name="name"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>{t('usersPage.create.name')}</FormLabel>
+                  <FormControl>
+                    <Input placeholder={t('usersPage.create.namePlaceholder')} {...field} />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name="email"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>{t('usersPage.create.email')}</FormLabel>
+                  <FormControl>
+                    <Input
+                      type="email"
+                      placeholder={t('usersPage.create.emailPlaceholder')}
+                      {...field}
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <div className="flex justify-end gap-2 pt-2">
+              <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+                {t('common.cancel')}
+              </Button>
+              <Button type="submit" disabled={mutation.isPending}>
+                {mutation.isPending ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                ) : (
+                  <Plus className="mr-2 h-4 w-4" />
+                )}
+                {t('usersPage.create.submit')}
+              </Button>
+            </div>
+          </form>
+        </Form>
       </DialogContent>
     </Dialog>
   )

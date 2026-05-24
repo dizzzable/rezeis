@@ -5,37 +5,60 @@ import ProtectedRoute from './protected-route'
 import AdminShell from '@/components/layout/admin-shell'
 import { Skeleton } from '@/components/ui/skeleton'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
+import { withFeatureBundle } from '@/i18n/i18n'
 
 // Lazy-load pages
 const SignInPage = lazy(() => import('@/features/auth/sign-in-page'))
 const ForcePasswordChangePage = lazy(() => import('@/features/auth/force-password-change-page'))
-const DashboardPage = lazy(() => import('@/features/dashboard/dashboard-page'))
-const RemnaWavePage = lazy(() => import('@/features/remnawave/remnawave-page'))
+const DashboardPage = lazy(
+  withFeatureBundle('dashboard', () => import('@/features/dashboard/dashboard-page')),
+)
+const RemnaWavePage = lazy(
+  withFeatureBundle('remnawave', () => import('@/features/remnawave/remnawave-page')),
+)
 const AdminsPage = lazy(() => import('@/features/admins/admins-page'))
 const UsersPage = lazy(() => import('@/features/users/users-page'))
-const UserDetailPage = lazy(() => import('@/features/users/user-detail-page'))
+const UserDetailPage = lazy(
+  withFeatureBundle('userDetail', () => import('@/features/users/user-detail-page')),
+)
 const PlansPage = lazy(() => import('@/features/plans/plans-page'))
 const SubscriptionsPage = lazy(() => import('@/features/subscriptions/subscriptions-page'))
-const PaymentsPage = lazy(() => import('@/features/payments/payments-page'))
+const PaymentsPage = lazy(
+  withFeatureBundle('payments', () => import('@/features/payments/payments-page')),
+)
 const PromocodesPage = lazy(() => import('@/features/promocodes/promocodes-page'))
 const ReferralsPage = lazy(() => import('@/features/referrals/referrals-page'))
 const PartnersPage = lazy(() => import('@/features/partners/partners-page'))
-const BroadcastPage = lazy(() => import('@/features/broadcast/broadcast-page'))
-const SettingsPage = lazy(() => import('@/features/settings/settings-page'))
+const BroadcastPage = lazy(
+  withFeatureBundle('broadcast', () => import('@/features/broadcast/broadcast-page')),
+)
+const SettingsPage = lazy(
+  withFeatureBundle('platformSettings', () => import('@/features/settings/settings-page')),
+)
 const ApiTokensPage = lazy(() => import('@/features/settings/api-tokens-page').then(m => ({ default: m.ApiTokensPage })))
 const PanelSettingsHub = lazy(() => import('@/features/settings/panel-settings-hub'))
-const AnalyticsPage = lazy(() => import('@/features/analytics/analytics-page'))
+const AnalyticsPage = lazy(
+  withFeatureBundle('analytics', () => import('@/features/analytics/analytics-page')),
+)
 const BotConfigPage = lazy(() => import('@/features/bot-config/bot-config-page'))
 const BotFlowPage = lazy(() => import('@/features/bot-flow/bot-flow-page'))
-const NotificationsPage = lazy(() => import('@/features/notifications/notifications-page'))
-const GatewaySettingsPage = lazy(() => import('@/features/payments/gateway-settings-page'))
+const NotificationsPage = lazy(
+  withFeatureBundle('notifications', () => import('@/features/notifications/notifications-page')),
+)
+const GatewaySettingsPage = lazy(
+  withFeatureBundle('payments', () => import('@/features/payments/gateway-settings-page')),
+)
 const ReferralSettingsPage = lazy(() => import('@/features/settings/referral-settings-page'))
 const PartnerSettingsPage = lazy(() => import('@/features/settings/partner-settings-page'))
 // Backup UI is now embedded as a tab in /settings/panel; old route redirects.
-const ImportsPage = lazy(() => import('@/features/imports/imports-page'))
+const ImportsPage = lazy(
+  withFeatureBundle('imports', () => import('@/features/imports/imports-page')),
+)
 const AuditPage = lazy(() => import('@/features/audit/audit-page'))
 const FraudSignalsPage = lazy(() => import('@/features/fraud/fraud-page'))
-const AutomationsPage = lazy(() => import('@/features/automations/automations-page'))
+const AutomationsPage = lazy(
+  withFeatureBundle('automations', () => import('@/features/automations/automations-page')),
+)
 // Blocked IPs page is now embedded as a tab in /admins; old route redirects.
 // Roles UI is now embedded as a tab in /admins; old route redirects.
 // Note: Withdrawals UI is now embedded as a tab in /partners. The standalone
@@ -81,7 +104,11 @@ export const router = createBrowserRouter([
     element: <ProtectedRoute />,
     children: [
       {
-        element: <AdminShell />,
+        element: (
+          <ErrorBoundary>
+            <AdminShell />
+          </ErrorBoundary>
+        ),
         children: [
           { index: true, element: withSuspense(<DashboardPage />) },
           { path: 'users', element: withSuspense(<UsersPage />) },
