@@ -1,3 +1,92 @@
+# Rezeis Admin v0.2.13
+
+## Hotfix release — backend endpoint gaps (referrals 500 + subscriptions 404)
+
+После v0.2.12 React #301 ушёл и в console остались видны секундарные network errors. Этот релиз закрывает три:
+
+- `GET /api/admin/referrals` 500 → корректно отдаёт список
+- `GET /api/admin/subscriptions?limit=50` 404 → новый list-endpoint
+- `GET /api/admin/subscriptions/stats` 404 → новый stats-endpoint
+
+### Что чинили
+
+#### 1. Referrals 500 — Prisma select несуществующего поля
+
+`ReferralsService.listReferrals` бросал:
+
+```
+PrismaClientValidationError:
+  Unknown field `login` for select statement on model `User`.
+  Available options: ... username, name, telegramId ...
+```
+
+В `REFERRAL_USER_SUMMARY_SELECT` стояло `login: true`, но у модели `User` в Prisma-схеме нет поля `login` — есть `username`. Откуда взялось `login` — историческое наследие от ранних итераций admin web-account. Поле заменено на `username`, интерфейс `ReferralUserSummaryInterface` синхронизирован, маппер пробрасывает реальное значение вместо `null`.
+
+#### 2 + 3. Subscriptions endpoint gaps
+
+`AdminSubscriptionsController` обслуживал только `POST /action-policy` и `POST /quote` — read-эндпоинтов для админ-страницы подписок не было вообще. Frontend (`subscriptions-page.tsx`) ожидал:
+
+```
+GET /admin/subscriptions?limit=50&status=ACTIVE&isTrial=true
+  → { items: SubscriptionRow[], total: number }
+GET /admin/subscriptions/stats
+  → { total, byStatus, trialCount, expiringIn7d }
+```
+
+Добавлен новый сервис `AdminSubscriptionsListService` (отделён от `SubscriptionQuoteService`, чтобы read-операции не цепляли тяжёлый граф зависимостей quote-сервиса). Контроллер расширен двумя GET-методами.
+
+Фильтры:
+- `status` — enum `SubscriptionStatus`
+- `isTrial` — boolean string
+- `limit` 1..500, `offset` 0..100k
+
+Stats:
+- `total` — всего подписок
+- `byStatus` — `groupBy` по статусам, словарь string→count
+- `trialCount` — `isTrial: true`
+- `expiringIn7d` — ACTIVE-подписки с `expiresAt` в окне next 7 days
+- `generatedAt` — ISO-time снимка
+
+Один `Promise.all` для всех четырёх запросов.
+
+Список отдаёт `expireAt` и `expiresAt` одновременно — frontend в SPA пока ждёт `expireAt`, остальное код-base может пользоваться канонически верным `expiresAt`.
+
+### Tests
+
+- `test/admin-subscriptions.controller.spec.ts` — обновлён под новый конструктор и новые routes (`GET /`, `GET /stats`).
+- `test/referrals.controllers.spec.ts` — переписан полностью. Тест ссылался на удалённые ранее методы (`getSummary`, `listRewards`, `qualifyReferral`, `exchangeGiftPromocode`) — это был pre-existing breakage до 0.2.13. Новый spec соответствует реальным контроллерам.
+
+### Verification
+
+- `npx tsc --noEmit` (backend) — clean
+- `npx tsc --noEmit` (frontend) — clean
+- `npx eslint . --quiet` (оба) — 0 errors / 0 warnings
+- Targeted suites `admin-subscriptions.controller.spec.ts` + `referrals.controllers.spec.ts` — 5/5 passed
+- Suite целиком — pre-existing breakage в web-auth и worker-module spec'ах (не моя зона), от моих правок baseline не вырос.
+
+### Файлы
+
+- `rezeis-admin/src/modules/referrals/services/referrals.service.ts` — `login` → `username`.
+- `rezeis-admin/src/modules/referrals/interfaces/referral.interface.ts` — поле интерфейса синхронизировано.
+- `rezeis-admin/src/modules/subscriptions/controllers/admin-subscriptions.controller.ts` — `GET /` и `GET /stats`.
+- `rezeis-admin/src/modules/subscriptions/services/admin-subscriptions-list.service.ts` — новый сервис.
+- `rezeis-admin/src/modules/subscriptions/dto/list-subscriptions-query.dto.ts` — DTO для query.
+- `rezeis-admin/src/modules/subscriptions/interfaces/admin-subscriptions-list.interface.ts` — interface'ы для list/stats.
+- `rezeis-admin/src/modules/subscriptions/subscriptions.module.ts` — регистрация `AdminSubscriptionsListService`.
+- `rezeis-admin/Dockerfile` — `ARG APP_VERSION=0.2.13`.
+- `rezeis-admin/test/admin-subscriptions.controller.spec.ts` — расширен.
+- `rezeis-admin/test/referrals.controllers.spec.ts` — переписан под актуальное API.
+
+### Migrating from 0.2.12
+
+Без breaking changes. Стандартный pull-up:
+
+```bash
+docker compose pull && docker compose up -d
+```
+
+---
+
 # Rezeis Admin v0.2.12
 
 ## Hotfix release — QuickSearchOverlay infinite render-loop (root cause of React #301)

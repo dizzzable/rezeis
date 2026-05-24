@@ -2,7 +2,7 @@ import { PurchaseChannel } from '@prisma/client';
 
 export interface ReferralUserSummaryInterface {
   readonly id: string;
-  readonly login: string | null;
+  readonly username: string | null;
   readonly name: string | null;
   readonly telegramId: string | null;
   readonly createdAt: string;
