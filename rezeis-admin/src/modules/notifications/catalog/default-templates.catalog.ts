@@ -110,6 +110,27 @@ const PARTNER_TEMPLATES: ReadonlyArray<DefaultNotificationTemplate> = [
     title: '❌ Выплата отклонена',
     body: 'Заявка отклонена. Причина: {{reason}}.',
   },
+  // Dot-notation aliases that match SystemEvents type strings
+  // (partner.earning, partner.withdrawal_approved, ...). Pre-seeded
+  // disabled so the Email bridge skips them by default; operators
+  // toggle each on per channel via the admin UI.
+  {
+    type: 'partner.earning',
+    title: '💰 Поступление на партнёрский баланс',
+    body: 'На баланс зачислено <b>{{amountMinor}}</b>. Уровень: L{{level}}.',
+  },
+  {
+    type: 'partner.withdrawal_approved',
+    title: '✅ Выплата выполнена',
+    body: 'Заявка <b>{{withdrawalId}}</b> на сумму {{amountMinor}} зачислена.',
+  },
+  {
+    type: 'partner.withdrawal_rejected',
+    title: '❌ Выплата отклонена',
+    body:
+      'Заявка <b>{{withdrawalId}}</b> на сумму {{amountMinor}} отклонена.\n' +
+      'Причина: {{reason}}.',
+  },
 ];
 
 const SYSTEM_TEMPLATES: ReadonlyArray<DefaultNotificationTemplate> = [

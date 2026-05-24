@@ -3,6 +3,8 @@ import { BullModule } from '@nestjs/bullmq';
 import { Module } from '@nestjs/common';
 
 import { AuthModule } from '../auth/auth.module';
+import { PartnersModule } from '../partners/partners.module';
+import { ReferralsModule } from '../referrals/referrals.module';
 import { RemnawaveModule } from '../remnawave/remnawave.module';
 import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
 import { PAYMENT_RECONCILIATION_QUEUE } from './constants/payment-reconciliation.constant';
@@ -35,6 +37,8 @@ import { TelegramStarsWebhookService } from './services/telegram-stars-webhook.s
     HttpModule,
     RemnawaveModule,
     SubscriptionsModule,
+    PartnersModule,
+    ReferralsModule,
     BullModule.registerQueue({
       name: PAYMENT_RECONCILIATION_QUEUE,
     }),
