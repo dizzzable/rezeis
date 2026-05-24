@@ -72,7 +72,7 @@ export class HealthService {
     return {
       status: critical ? 'error' : degraded ? 'degraded' : 'ok',
       service: this.appConfiguration.serviceName,
-      version: process.env.npm_package_version ?? '0.1.3',
+      version: process.env.npm_package_version ?? 'unknown',
       timestamp: new Date().toISOString(),
       uptime: Math.floor((Date.now() - this.startTime) / 1000),
       components: { database, redis, queues, disk },

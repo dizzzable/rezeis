@@ -1,3 +1,26 @@
+# Rezeis Admin v0.2.9
+
+## Hotfix release
+
+Маленький релиз поверх 0.2.8 — два фикса в Docker-стеке для корректной работы healthcheck и точной версии в `/api/health`.
+
+### Фиксы
+
+- **`docker-compose.yml` healthcheck**: `wget -qO- http://localhost:8000/api/health` → `wget -qO- http://127.0.0.1:8000/api/health`. На Alpine-based образе `localhost` не всегда резолвится — Nest слушает `0.0.0.0`, а wget не мог подключиться по hostname. Контейнер показывался `unhealthy` несмотря на работающий API. Теперь healthcheck проходит, Docker Desktop / docker ps корректно показывают `healthy`.
+- **Версия в `/api/health` endpoint**: образ теперь устанавливает `npm_package_version` через Dockerfile `ARG APP_VERSION` + `ENV`. До этого `/api/health` всегда возвращал хардкод `0.1.3` (npm runtime отсутствует в production-образе, потому `process.env.npm_package_version` был undefined). Теперь endpoint возвращает реальную версию релиза.
+
+### Файлы
+
+- `rezeis-admin/Dockerfile` — добавлен `ARG APP_VERSION=0.2.9` + `ENV npm_package_version=${APP_VERSION}`
+- `rezeis-admin/docker-compose.yml` — `localhost` → `127.0.0.1` в healthcheck
+- `rezeis-admin/src/modules/health/health.service.ts` — fallback `'0.1.3'` → `'unknown'`
+
+### Migrating from 0.2.8
+
+Без breaking changes. Стандартный `docker compose pull && docker compose up -d` достаточен. Никаких миграций.
+
+---
+
 # Rezeis Admin v0.2.8
 
 ## Performance pass — first-paint stripped to the bone
