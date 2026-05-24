@@ -82,6 +82,23 @@ import { WebhooksModule } from './modules/webhooks/webhooks.module';
     ServeStaticModule.forRoot({
       rootPath: join(__dirname, '..', 'web'),
       renderPath: /^(?!\/api\/)(?!\/uploads\/).*/,
+      serveStaticOptions: {
+        // Vite hashes asset filenames (e.g. `index-Hxt7IezJ.js`), so
+        // any cached asset is safe to keep for a year. The `index.html`
+        // shell that points at the latest hashed asset must NEVER be
+        // cached or operators get stuck on a stale SPA after a deploy
+        // and see runtime errors when the cached index references
+        // assets that no longer exist.
+        setHeaders: (res, path) => {
+          if (/\.(?:html?)$/i.test(path)) {
+            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+            res.setHeader('Pragma', 'no-cache');
+            res.setHeader('Expires', '0');
+          } else if (/\/assets\//.test(path)) {
+            res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+          }
+        },
+      },
     }),
     PrismaModule,
     RawCacheModule,

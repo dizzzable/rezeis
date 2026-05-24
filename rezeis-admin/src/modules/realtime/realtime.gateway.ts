@@ -73,6 +73,13 @@ interface AuthenticatedSocket extends Socket {
 @Injectable()
 @WebSocketGateway({
   namespace: REALTIME_NAMESPACE,
+  // The frontend connects to `/api/socket.io` because the rest of the
+  // SPA hits `/api/*` for everything (Nest's `setGlobalPrefix('api')`
+  // applies to HTTP routes but NOT to Socket.IO's transport path).
+  // Aligning the path here lets the same reverse proxy (and the
+  // built-in dev server) route both REST and WebSocket traffic through
+  // a single `/api` prefix.
+  path: '/api/socket.io',
   cors: { origin: true, credentials: true },
 })
 export class RealtimeGateway

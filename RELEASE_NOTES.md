@@ -1,3 +1,47 @@
+# Rezeis Admin v0.2.11
+
+## Hotfix release — stale browser cache root-cause + WebSocket path
+
+Поверх v0.2.10 — хирургический фикс реальной причины React Error #301 у пользователей и побочный фикс WS handshake.
+
+### Что исправлено
+
+#### 1. Cache-Control headers для статики
+
+`@nestjs/serve-static` не выставлял Cache-Control headers по умолчанию. Браузер кешировал `index.html` часами и при заходе после релиза получал старый shell, который ссылался на старые asset-хеши. Часть assets отдавала 404, React пытался re-render с broken state → infinite loop → React Error #301.
+
+Теперь:
+- `index.html` (и любой `*.html`): `no-cache, no-store, must-revalidate` — браузер всегда тянет свежий shell с новыми asset-хешами
+- `/assets/*.{js,css,...}`: `public, max-age=31536000, immutable` — Vite hash'ит имена файлов, потому assets можно кешировать на год
+
+Это стандартный pattern для Vite/Rolldown сборок: hashed assets навечно, shell без кеша. Рекомендован [Vite docs](https://vite.dev/guide/static-deploy) и [react.dev](https://react.dev/learn/render-and-commit).
+
+#### 2. WebSocket path: `/api/socket.io`
+
+Frontend всегда подключался к `ws://host/api/socket.io/...`, но `@WebSocketGateway({ namespace: '/realtime' })` в backend не указывал кастомный `path`. Socket.IO по умолчанию слушает `/socket.io/...`, и `setGlobalPrefix('api')` к WebSocket не применяется (это HTTP-only setting).
+
+В результате `realtime` namespace был доступен только на `/socket.io/realtime`, а frontend стучался в `/api/socket.io/realtime` → handshake failure → WebSocket connection error в console каждые 1-15 секунд (reconnection storm).
+
+Path align'ен в gateway-декораторе:
+```ts
+@WebSocketGateway({
+  namespace: '/realtime',
+  path: '/api/socket.io', // ← было дефолтное /socket.io
+  cors: { origin: true, credentials: true },
+})
+```
+
+### Файлы
+
+- `rezeis-admin/src/app.module.ts` — `serveStaticOptions.setHeaders` callback с правильными Cache-Control
+- `rezeis-admin/src/modules/realtime/realtime.gateway.ts` — `path: '/api/socket.io'` в декораторе
+
+### Migrating from 0.2.10
+
+Без breaking changes. Стандартный `docker compose pull && docker compose up -d`. После деплоя пользователи получат свежий index.html при следующем визите (без необходимости hard reload).
+
+---
+
 # Rezeis Admin v0.2.10
 
 ## Hotfix release — throttle limit and ErrorBoundary contract
