@@ -1,0 +1,9 @@
+# Force LF for shell scripts even on Windows clones — they end up inside
+# Linux containers where CRLF causes "no such file or directory" from
+# `exec` (a notorious Docker pitfall).
+*.sh        text eol=lf
+Dockerfile  text eol=lf
+
+# Treat SVG and JSON deterministically so diffs stay tidy.
+*.svg       text eol=lf
+*.json      text eol=lf

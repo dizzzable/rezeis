@@ -66,19 +66,33 @@ export class PricingService {
       USD: 0.01,
       RUB: 1,
       USDT: 0.01,
+      USDC: 0.01,
       XTR: 1,
       TON: 0.000001,
       BTC: 0.00000001,
       ETH: 0.000001,
+      LTC: 0.00001,
+      BNB: 0.0001,
+      DASH: 0.0001,
+      SOL: 0.00001,
+      XMR: 0.000001,
+      TRX: 0.000001,
     };
     const precisionByCurrency: Readonly<Record<Currency, number>> = {
       USD: 2,
       RUB: 0,
       USDT: 2,
+      USDC: 2,
       XTR: 0,
       TON: 6,
       BTC: 8,
       ETH: 6,
+      LTC: 5,
+      BNB: 4,
+      DASH: 4,
+      SOL: 5,
+      XMR: 6,
+      TRX: 6,
     };
     const precision = precisionByCurrency[currency];
     const roundedAmount =

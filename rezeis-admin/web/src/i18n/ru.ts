@@ -858,6 +858,7 @@
       apiToken: 'API Token',
       signingSecret: 'Signing Secret',
       lavaOfferId: 'Offer ID',
+      defaultCurrency: 'Валюта по умолчанию',
     },
     hints: {
       paymentNotPayout:
@@ -884,6 +885,8 @@
         'UUID offer’а в lava.top, который будет привязан к чекауту. Берётся из карточки продукта.',
       lavaWebhookKey:
         'X-Api-Key, который lava.top подставит в заголовок при отправке webhook на наш callback.',
+      defaultCurrency:
+        'Валюта, в которой клиент видит сумму при оплате через этот шлюз. В списке только те валюты, которые шлюз действительно поддерживает.',
     },
     empty: {
       title: 'Шлюзы ещё не настроены',

@@ -845,6 +845,7 @@ export const en = {
       apiToken: 'API Token',
       signingSecret: 'Signing Secret',
       lavaOfferId: 'Offer ID',
+      defaultCurrency: 'Default currency',
     },
     hints: {
       paymentNotPayout:
@@ -871,6 +872,8 @@ export const en = {
         'UUID of the lava.top offer to attach to checkout. Copied from the product card.',
       lavaWebhookKey:
         'X-Api-Key that lava.top will inject into the header when calling our webhook.',
+      defaultCurrency:
+        'The currency the customer sees when paying through this gateway. The list is restricted to currencies the gateway actually supports.',
     },
     empty: {
       title: 'No gateways configured yet',

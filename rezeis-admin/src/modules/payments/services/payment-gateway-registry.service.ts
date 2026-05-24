@@ -6,6 +6,10 @@ import { MovePaymentGatewayDto, PaymentGatewayMoveDirection } from '../dto/move-
 import { UpdatePaymentGatewayDto } from '../dto/update-payment-gateway.dto';
 import { AdminPaymentGatewayInterface } from '../interfaces/admin-payment-gateway.interface';
 import {
+  GATEWAY_SUPPORTED_CURRENCIES,
+  isCurrencySupportedByGateway,
+} from '../utils/gateway-supported-currencies.util';
+import {
   normalizeGatewaySettingsForStorage,
   readGatewaySettings,
 } from '../utils/payment-gateway-settings.util';
@@ -169,7 +173,24 @@ export class PaymentGatewayRegistryService {
       updateData.type = input.input.type;
     }
     if (input.input.currency !== undefined) {
+      // Reject combinations the gateway doesn't actually support so we
+      // don't end up issuing checkouts in a currency the provider rejects.
+      // The effective gateway type is whatever the request is moving us
+      // to; falls back to the current row when the type isn't being changed.
+      const effectiveType = input.input.type ?? input.currentGatewayType;
+      if (!isCurrencySupportedByGateway(effectiveType, input.input.currency)) {
+        throw new BadRequestException('PAYMENT_GATEWAY_CURRENCY_UNSUPPORTED');
+      }
       updateData.currency = input.input.currency;
+    } else if (input.input.type !== undefined && input.input.type !== input.currentGatewayType) {
+      // Caller is changing the gateway type without touching currency —
+      // make sure the current currency still fits the new type. If not,
+      // snap to the new gateway's first supported currency.
+      const supported = GATEWAY_SUPPORTED_CURRENCIES[input.input.type];
+      const fallback = supported?.[0];
+      if (fallback) {
+        updateData.currency = fallback;
+      }
     }
     if (input.input.isActive !== undefined) {
       updateData.isActive = input.input.isActive;

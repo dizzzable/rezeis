@@ -57,9 +57,17 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import { cn } from '@/lib/utils'
 import { FadeIn, StaggerItem, StaggerList } from '@/lib/motion'
 
+import { CURRENCY_DISPLAY_NAMES, getCurrencyIcon } from './currency-icons'
 import { getPaymentGatewayIcon } from './payment-gateway-icons'
 
 // ── Gateway metadata ────────────────────────────────────────────────────────
@@ -682,9 +690,12 @@ function GatewayRow({
             </Badge>
           )}
         </div>
-        <p className="truncate text-xs text-muted-foreground">
-          {gateway.currency} · /api/payments/webhook/{gateway.type}
-        </p>
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
+          <span className="inline-flex items-center gap-1.5">
+            <RowCurrencyBadge code={gateway.currency} />
+          </span>
+          <span className="truncate">· /api/payments/webhook/{gateway.type}</span>
+        </div>
       </div>
 
       <div className="flex items-center gap-1.5">
@@ -770,19 +781,36 @@ function GatewaySettingsForm({ gateway, onClose }: GatewaySettingsFormProps) {
 
   const [values, setValues] = useState<Record<string, string>>(initialValues)
   const [showSecrets, setShowSecrets] = useState<Record<string, boolean>>({})
+  const [currency, setCurrency] = useState<string>(gateway.currency)
+
+  // Static map fetched once per page-mount; cached by react-query so the
+  // settings dialog reads it without an extra round-trip.
+  const { data: supportedMap } = useQuery({
+    queryKey: ['admin', 'payments', 'gateways', 'supported-currencies'],
+    queryFn: async (): Promise<Record<string, readonly string[]>> => {
+      const res = await api.get('/admin/payments/gateways/supported-currencies')
+      return res.data as Record<string, readonly string[]>
+    },
+    staleTime: 5 * 60_000,
+  })
 
   // Reset local state when the gateway prop changes.
   useEffect((): void => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- TODO: refactor to derive state
     setValues(initialValues)
     setShowSecrets({})
+    setCurrency(gateway.currency)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gateway.id])
+
+  const supportedCurrencies = supportedMap?.[gateway.type] ?? [gateway.currency]
+  const currencyChanged = currency !== gateway.currency
 
   const saveMutation = useMutation({
     mutationFn: () =>
       api.patch(`/admin/payments/gateways/${gateway.id}`, {
         settings: values,
+        ...(currencyChanged ? { currency } : {}),
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['admin', 'payments', 'gateways'] })
@@ -821,6 +849,34 @@ function GatewaySettingsForm({ gateway, onClose }: GatewaySettingsFormProps) {
       </DialogHeader>
 
       <div className="space-y-4">
+        {/* Default currency selector — drives both the catalog row's display
+            currency and the currency the user is charged in when initiating
+            a checkout from the reiwa client. The list is intersected with
+            what the gateway can actually accept. */}
+        <div className="space-y-1.5">
+          <Label className="flex items-center gap-1.5">
+            <Coins className="h-3.5 w-3.5 text-muted-foreground" />
+            {t('paymentGateways.fields.defaultCurrency')}
+          </Label>
+          <Select value={currency} onValueChange={setCurrency}>
+            <SelectTrigger className="h-10">
+              <SelectValue>
+                <CurrencyOption code={currency} />
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              {supportedCurrencies.map((code) => (
+                <SelectItem key={code} value={code}>
+                  <CurrencyOption code={code} />
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <p className="text-xs text-muted-foreground">
+            {t('paymentGateways.hints.defaultCurrency')}
+          </p>
+        </div>
+
         {meta.fields.map((field) => {
           const value = values[field.key] ?? ''
           const isSecret = field.secret === true
@@ -863,7 +919,14 @@ function GatewaySettingsForm({ gateway, onClose }: GatewaySettingsFormProps) {
       </div>
 
       <div className="flex flex-wrap items-center justify-end gap-2 pt-2">
-        <Button variant="ghost" size="sm" onClick={(): void => setValues(initialValues)}>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={(): void => {
+            setValues(initialValues)
+            setCurrency(gateway.currency)
+          }}
+        >
           <RotateCcw className="mr-2 h-4 w-4" /> {t('paymentGateways.revert')}
         </Button>
         <Button variant="outline" size="sm" onClick={onClose}>
@@ -883,5 +946,55 @@ function GatewaySettingsForm({ gateway, onClose }: GatewaySettingsFormProps) {
         </Button>
       </div>
     </>
+  )
+}
+
+
+/**
+ * Renders a currency code with its brand SVG (or a fiat glyph fallback)
+ * and the human-readable name. Used both in the Select trigger (current
+ * value) and the dropdown items, which is why it lives next to the form.
+ */
+function CurrencyOption({ code }: { readonly code: string }): JSX.Element {
+  const Icon = getCurrencyIcon(code)
+  const displayName = CURRENCY_DISPLAY_NAMES[code as keyof typeof CURRENCY_DISPLAY_NAMES]
+  return (
+    <span className="flex items-center gap-2">
+      <span className="flex h-5 w-5 shrink-0 items-center justify-center overflow-hidden rounded-full bg-muted/40">
+        {Icon ? (
+          <Icon className="h-4 w-4 object-contain" />
+        ) : (
+          <span className="text-[11px] font-semibold tabular-nums text-foreground">
+            {code === 'USD' ? '$' : code === 'EUR' ? '€' : code.charAt(0)}
+          </span>
+        )}
+      </span>
+      <span className="text-sm font-medium">{code}</span>
+      {displayName && <span className="text-xs text-muted-foreground">· {displayName}</span>}
+    </span>
+  )
+}
+
+
+/**
+ * Tight currency chip used in the gateway list row. Smaller than the
+ * full `CurrencyOption` (no display name), keeps the row compact while
+ * still showing the brand glyph at a glance.
+ */
+function RowCurrencyBadge({ code }: { readonly code: string }): JSX.Element {
+  const Icon = getCurrencyIcon(code)
+  return (
+    <span className="inline-flex items-center gap-1">
+      <span className="flex h-3.5 w-3.5 items-center justify-center overflow-hidden rounded-full bg-muted/40">
+        {Icon ? (
+          <Icon className="h-3 w-3 object-contain" />
+        ) : (
+          <span className="text-[8px] font-semibold tabular-nums">
+            {code === 'USD' ? '$' : code === 'EUR' ? '€' : code.charAt(0)}
+          </span>
+        )}
+      </span>
+      <span className="text-foreground/80">{code}</span>
+    </span>
   )
 }

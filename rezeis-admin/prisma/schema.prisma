@@ -70,6 +70,13 @@ enum Currency {
   TON
   BTC
   ETH
+  LTC
+  BNB
+  DASH
+  SOL
+  XMR
+  USDC
+  TRX
 }
 
 /// Payment gateway catalog. Pricing/runtime supports every value here.
