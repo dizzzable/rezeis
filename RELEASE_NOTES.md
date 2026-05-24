@@ -1,3 +1,66 @@
+# Rezeis Admin v0.2.10
+
+## Hotfix release — throttle limit and ErrorBoundary contract
+
+Маленький релиз поверх 0.2.9 — фикс rate-limit'а на polled-эндпоинтах админки + правильный schema для backend error-reporting.
+
+### Что исправлено
+
+#### 1. Throttler default limit 60 → 600 req/min
+
+Старый лимит был слишком жёсткий для админ-SPA, которая опрашивает несколько endpoint'ов одновременно:
+
+| endpoint | интервал | req/min |
+|---|---|---|
+| `/admin/dashboard/system-health` | 10 s | 6 |
+| `/admin/dashboard/summary` | 30 s | 2 |
+| `/admin/remnawave/online-trend` | 60 s | 1 |
+| `/admin/remnawave/activity-feed` | 30 s | 2 |
+| `/admin/system-logs` | 2 s | 30 |
+| `/admin/support-tickets/:id` | 5 s | 12 |
+| `/admin/webhooks/deliveries` | 10 s | 6 |
+| `/admin/broadcast` | 10 s | 6 |
+
+Только дашборд + system-logs за минуту — 41 запрос. Если оператор открывает несколько окон или быстро переключается между разделами — упирался в 60 req/min, ловил 429 Too Many Requests, рендерил backend-error в UI, что провоцировало бесконечные циклы повторных запросов и React Error #381.
+
+Все админ-endpoint'ы за `AdminJwtAuthGuard` — abuse vector это login, и для него уже есть `strict` throttle 5/min.
+
+#### 2. `@SkipThrottle()` на read-only метрики
+
+- `/admin/dashboard/*` — summary и system-health (read-only метрики).
+- `/admin/client-errors` — отчёты ErrorBoundary должны проходить даже когда API под нагрузкой; throttling crash-репортов только усиливает crash loops.
+
+#### 3. ClientErrorReportDto — `react.errorBoundary` source
+
+`ErrorBoundary` посылает крашрепорты с `source: 'react.errorBoundary'` и `componentStack` полем (добавлено в [v0.2.8](https://github.com/dizzzable/rezeis/releases/tag/v0.2.8)). Backend DTO разрешал только `'window.error' | 'unhandledrejection'` и не имел `componentStack` — каждый репорт отвергался с 400 Bad Request, крашрепорты терялись.
+
+DTO исправлен:
+```ts
+@IsIn(['window.error', 'unhandledrejection', 'react.errorBoundary'])
+source!: 'window.error' | 'unhandledrejection' | 'react.errorBoundary';
+
+@IsOptional() @IsString() @MaxLength(8_000)
+componentStack?: string;
+```
+
+#### 4. Vite chunk size warning
+
+`chunkSizeWarningLimit` повышен с 800 → 1100 kB. `vendor-three.js` (999 kB) грузится только когда оператор включает 3D-фон в `Appearance`, потому warning был информационным шумом.
+
+### Файлы
+
+- `rezeis-admin/src/common/throttle/throttle.module.ts` — лимит 60 → 600
+- `rezeis-admin/src/modules/dashboard/controllers/admin-dashboard.controller.ts` — `@SkipThrottle()` на класс
+- `rezeis-admin/src/modules/client-errors/client-errors.controller.ts` — добавлен `react.errorBoundary` + `componentStack`, `@SkipThrottle()` на класс
+- `rezeis-admin/web/vite.config.ts` — `chunkSizeWarningLimit: 1100`
+- `rezeis-admin/Dockerfile` — `ARG APP_VERSION=0.2.10`
+
+### Migrating from 0.2.9
+
+Без breaking changes. Стандартный `docker compose pull && docker compose up -d` достаточен.
+
+---
+
 # Rezeis Admin v0.2.9
 
 ## Hotfix release

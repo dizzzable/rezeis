@@ -1,5 +1,6 @@
 import { Body, Controller, HttpCode, HttpStatus, Post, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { SkipThrottle } from '@nestjs/throttler';
 import { IsIn, IsInt, IsISO8601, IsOptional, IsString, MaxLength } from 'class-validator';
 
 import { CurrentAdmin } from '../auth/decorators/current-admin.decorator';
@@ -17,8 +18,8 @@ class ClientErrorReportDto {
   @MaxLength(8_000)
   stack?: string;
 
-  @IsIn(['window.error', 'unhandledrejection'])
-  source!: 'window.error' | 'unhandledrejection';
+  @IsIn(['window.error', 'unhandledrejection', 'react.errorBoundary'])
+  source!: 'window.error' | 'unhandledrejection' | 'react.errorBoundary';
 
   @IsString()
   @MaxLength(2_000)
@@ -41,6 +42,11 @@ class ClientErrorReportDto {
   @IsInt()
   colno?: number;
 
+  @IsOptional()
+  @IsString()
+  @MaxLength(8_000)
+  componentStack?: string;
+
   @IsISO8601()
   capturedAt!: string;
 }
@@ -48,6 +54,7 @@ class ClientErrorReportDto {
 @ApiTags('admin/client-errors')
 @ApiBearerAuth('JWT')
 @UseGuards(AdminJwtAuthGuard)
+@SkipThrottle()
 @Controller('admin/client-errors')
 export class ClientErrorsController {
   public constructor(private readonly systemEventsService: SystemEventsService) {}
@@ -74,6 +81,7 @@ export class ClientErrorsController {
         lineno: dto.lineno,
         colno: dto.colno,
         stack: dto.stack ? truncate(dto.stack, 4_000) : undefined,
+        componentStack: dto.componentStack ? truncate(dto.componentStack, 4_000) : undefined,
         capturedAt: dto.capturedAt,
         adminId: admin.id,
         adminLogin: admin.login,
