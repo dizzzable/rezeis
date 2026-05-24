@@ -33,6 +33,9 @@ async function fetchSearch(q: string): Promise<SearchResult[]> {
   return res.data;
 }
 
+/** Module-level constant so its identity is stable across renders. */
+const EMPTY_RESULTS: SearchResult[] = [];
+
 interface QuickSearchOverlayProps {
   open: boolean;
   onClose: () => void;
@@ -45,12 +48,18 @@ export function QuickSearchOverlay({ open, onClose }: QuickSearchOverlayProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const navigate = useNavigate();
 
-  const { data: results = [], isFetching } = useQuery({
+  const { data, isFetching } = useQuery({
     queryKey: ['quick-search', query],
     queryFn: () => fetchSearch(query),
     enabled: query.length >= 2,
     staleTime: 10_000,
   });
+  // Stable empty-array reference: TanStack returns `undefined` while
+  // the query is idle/loading, but if we use `data: results = []` the
+  // destructure default produces a NEW array literal on every render
+  // and breaks the `prevResults` identity check below — that drove an
+  // infinite render loop and the React error #301 we were chasing.
+  const results: SearchResult[] = data ?? EMPTY_RESULTS;
 
   // Reset state when the overlay (re)opens. Uses the
   // "store-prev-prop in render" pattern.
@@ -71,7 +80,7 @@ export function QuickSearchOverlay({ open, onClose }: QuickSearchOverlayProps) {
   }, [open]);
 
   // Reset selection when the results array identity changes.
-  const [prevResults, setPrevResults] = useState(results);
+  const [prevResults, setPrevResults] = useState<SearchResult[]>(results);
   if (results !== prevResults) {
     setPrevResults(results);
     setSelectedIndex(0);
