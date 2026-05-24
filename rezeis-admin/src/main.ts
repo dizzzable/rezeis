@@ -30,7 +30,19 @@ async function bootstrap(): Promise<void> {
   const port: number = appConfiguration.port;
   const host: string = appConfiguration.host;
 
-  app.use(helmet());
+  // helmet — keep most defaults but disable CSP entirely. The admin panel
+  // is JWT-protected and ships hashed Vite chunks, but several vendored
+  // chunks (`@tanstack/react-query`, `zod`, etc.) use `new Function`,
+  // which the default helmet CSP blocks via `script-src`. Browser console
+  // floods with "Content Security Policy of your site blocks the use of
+  // 'eval' in JavaScript". X-Frame, HSTS, X-Content-Type-Options stay on.
+  app.use(
+    helmet({
+      contentSecurityPolicy: false,
+      crossOriginEmbedderPolicy: false,
+      crossOriginResourcePolicy: { policy: 'cross-origin' },
+    }),
+  );
   // Request timeout middleware — 30s default, 120s for uploads/downloads
   const timeoutMiddleware = new RequestTimeoutMiddleware();
   app.use((req: unknown, res: unknown, next: unknown) =>

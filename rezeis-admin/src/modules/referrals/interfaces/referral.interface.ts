@@ -28,11 +28,21 @@ export interface ReferralInviteInterface {
 }
 
 export interface ReferralStatsInterface {
+  /** Backwards-compatible total referrals count. */
   readonly totalReferrals: number;
   readonly qualifiedReferrals: number;
   readonly activeInvites: number;
   readonly consumedInvites: number;
   readonly generatedAt: string;
+  // ── Frontend-aligned aliases ────────────────────────────────────────────
+  /** Alias of `totalReferrals`, named after the SPA stats card. */
+  readonly referrals: number;
+  /** Total invites ever issued (active + consumed + revoked + expired). */
+  readonly invites: number;
+  /** Total reward rows. */
+  readonly rewards: number;
+  /** Reward rows with `isIssued = true`. */
+  readonly issuedRewards: number;
 }
 
 export interface CreateReferralInviteResultInterface {

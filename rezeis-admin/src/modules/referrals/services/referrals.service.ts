@@ -147,29 +147,44 @@ export class ReferralsService {
 
   public async getStats(): Promise<ReferralStatsInterface> {
     const now = new Date();
-    const [totalReferrals, qualifiedReferrals, activeInvites, consumedInvites] =
-      await Promise.all([
-        this.prismaService.referral.count(),
-        this.prismaService.referral.count({
-          where: { qualifiedAt: { not: null } },
-        }),
-        this.prismaService.referralInvite.count({
-          where: {
-            revokedAt: null,
-            consumedAt: null,
-            OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
-          },
-        }),
-        this.prismaService.referralInvite.count({
-          where: { consumedAt: { not: null } },
-        }),
-      ]);
+    const [
+      totalReferrals,
+      qualifiedReferrals,
+      activeInvites,
+      consumedInvites,
+      totalInvites,
+      totalRewards,
+      issuedRewards,
+    ] = await Promise.all([
+      this.prismaService.referral.count(),
+      this.prismaService.referral.count({
+        where: { qualifiedAt: { not: null } },
+      }),
+      this.prismaService.referralInvite.count({
+        where: {
+          revokedAt: null,
+          consumedAt: null,
+          OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
+        },
+      }),
+      this.prismaService.referralInvite.count({
+        where: { consumedAt: { not: null } },
+      }),
+      this.prismaService.referralInvite.count(),
+      this.prismaService.referralReward.count(),
+      this.prismaService.referralReward.count({ where: { isIssued: true } }),
+    ]);
     return {
       totalReferrals,
       qualifiedReferrals,
       activeInvites,
       consumedInvites,
       generatedAt: now.toISOString(),
+      // SPA-aligned aliases
+      referrals: totalReferrals,
+      invites: totalInvites,
+      rewards: totalRewards,
+      issuedRewards,
     };
   }
 }

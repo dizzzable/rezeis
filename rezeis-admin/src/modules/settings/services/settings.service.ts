@@ -77,6 +77,17 @@ interface UpdateBrandingSettingsInput {
   readonly updateBrandingSettingsDto: UpdateBrandingSettingsDto;
 }
 
+interface UpdateReferralSettingsInput {
+  readonly currentAdmin: CurrentAdminInterface;
+  readonly requestMetadata: RequestMetadataInterface;
+  /**
+   * Partial update — any subset of the `referralSettings` JSON. Top-level
+   * keys are merged shallow-deep (`pointsExchange`, `inviteLimits` are
+   * spread, other keys are replaced wholesale).
+   */
+  readonly patch: Record<string, unknown>;
+}
+
 interface UpdatePlatformSettingsChanges {
   readonly updatedFields: readonly string[];
   readonly data: Prisma.SettingsUpdateInput;
@@ -526,6 +537,46 @@ export class SettingsService {
     });
   }
 
+  /**
+   * Partial-update the `referralSettings` JSON column. Backs the SPA
+   * "Settings" tab on the Referrals page. The patch is merged
+   * shallow-deep over the existing JSON: top-level keys are replaced,
+   * `pointsExchange` and `inviteLimits` are spread one level deeper so
+   * a partial sub-object does not blow away unrelated knobs.
+   */
+  public async updateReferralSettings(
+    input: UpdateReferralSettingsInput,
+  ): Promise<Record<string, unknown>> {
+    return this.prismaService.$transaction(async (tx) => {
+      const settings = await this.getOrCreateSettingsRecord(tx);
+      const previous = readJsonObject(settings.referralSettings);
+      const next = mergeReferralSettings(previous, input.patch);
+      await tx.settings.update({
+        where: { id: settings.id },
+        data: { referralSettings: next as unknown as Prisma.InputJsonValue },
+      });
+      await tx.adminAuditLog.create({
+        data: {
+          action: 'settings.referralSettings.update',
+          ipAddress: input.requestMetadata.remoteAddress,
+          userAgent: input.requestMetadata.userAgent,
+          metadata: {
+            requestId: input.requestMetadata.requestId,
+            patchKeys: Object.keys(input.patch),
+          },
+          adminUser: { connect: { id: input.currentAdmin.id } },
+        } as never,
+      });
+      return next;
+    });
+  }
+
+  public async getReferralSettings(): Promise<Record<string, unknown>> {
+    const settings = await this.getSettingsRecord(this.prismaService);
+    if (!settings) return {};
+    return readJsonObject(settings.referralSettings);
+  }
+
   private async getSettingsRecord(settingsClient: SettingsClient): Promise<Settings | null> {
     return settingsClient.settings.findFirst({
       orderBy: { updatedAt: 'asc' },
@@ -737,4 +788,29 @@ function readTelegramDeliveryConfig(systemNotifications: unknown): TelegramDeliv
     topicId: typeof tg.topicId === 'number' ? tg.topicId : null,
     topics: normalisedTopics,
   };
+}
+
+/**
+ * Shallow-deep merge of a `referralSettings` patch over the existing JSON.
+ * Top-level keys are replaced; the two known nested objects
+ * (`pointsExchange` and `inviteLimits`) are spread one level deeper so
+ * the SPA can submit a partial sub-section without erasing unrelated knobs.
+ */
+function mergeReferralSettings(
+  previous: Record<string, unknown>,
+  patch: Record<string, unknown>,
+): Record<string, unknown> {
+  const next = { ...previous };
+  for (const [key, value] of Object.entries(patch)) {
+    if ((key === 'pointsExchange' || key === 'inviteLimits') && isPlainObject(value)) {
+      next[key] = { ...readJsonObject(previous[key]), ...value };
+    } else {
+      next[key] = value;
+    }
+  }
+  return next;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

@@ -165,6 +165,34 @@ export class SettingsController {
   }
 
   /**
+   * Returns the raw `referralSettings` JSON. The admin SPA reads this via
+   * `GET /admin/settings` (overview) but a focused endpoint avoids the
+   * full overview round-trip when the user only opened the Referrals tab.
+   */
+  @Get('referral')
+  public async getReferralSettings(): Promise<Record<string, unknown>> {
+    return this.settingsService.getReferralSettings();
+  }
+
+  /**
+   * Partial-update of `referralSettings`. Top-level keys are replaced;
+   * `pointsExchange` and `inviteLimits` are merged one level deeper so a
+   * subsection patch does not blow away unrelated knobs.
+   */
+  @Patch('referral')
+  public async updateReferralSettings(
+    @Body() body: Record<string, unknown>,
+    @CurrentAdmin() currentAdmin: CurrentAdminInterface,
+    @Req() request: Request,
+  ): Promise<Record<string, unknown>> {
+    return this.settingsService.updateReferralSettings({
+      currentAdmin,
+      requestMetadata: extractRequestMetadata(request),
+      patch: body,
+    });
+  }
+
+  /**
    * Applies a partial branding update. Only the supplied fields are touched;
    * the rest stay at their previous values.
    */
