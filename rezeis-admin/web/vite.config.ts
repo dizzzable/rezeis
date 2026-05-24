@@ -19,7 +19,7 @@ export default defineConfig({
     // pulled in when an operator opts into a heavy 3D background. We
     // raise the warning threshold past it so the rest of the build
     // output stays signal-noise free.
-    chunkSizeWarningLimit: 800,
+    chunkSizeWarningLimit: 1100,
     rollupOptions: {
       output: {
         manualChunks(id: string) {
@@ -107,6 +107,16 @@ export default defineConfig({
       '/api': {
         target: 'http://localhost:3000',
         changeOrigin: true,
+      },
+    },
+  },
+  preview: {
+    port: 5174,
+    proxy: {
+      '/api': {
+        target: 'http://127.0.0.1:8000',
+        changeOrigin: true,
+        ws: true,
       },
     },
   },
