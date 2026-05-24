@@ -19,7 +19,7 @@ import {
 
 const REFERRAL_USER_SUMMARY_SELECT = {
   id: true,
-  login: true,
+  username: true,
   name: true,
   telegramId: true,
   createdAt: true,
@@ -220,7 +220,7 @@ function mapReferralInvite(record: ReferralInviteRecord): ReferralInviteInterfac
 function mapUserSummary(record: UserSummaryRecord): ReferralUserSummaryInterface {
   return {
     id: record.id,
-    login: null,
+    username: record.username,
     name: record.name === '' ? null : record.name,
     telegramId: record.telegramId?.toString() ?? null,
     createdAt: record.createdAt.toISOString(),
