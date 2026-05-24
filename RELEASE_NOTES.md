@@ -1,3 +1,157 @@
+# Rezeis Admin v0.3.0
+
+## Major release — Partner Program 2.0: end-to-end payment hooks, advanced analytics, and operator-grade UX
+
+`v0.3.0` — крупнейший релиз партнёрской программы со времён её появления. Закрыты три критические дыры (post-payment hooks, индивидуальные настройки, ретро-цепочка при активации), полностью переписан UI (4 таба, drawer с 6 табами, аналитика с cohort retention), добавлены KPIs из индустрии affiliate-маркетинга (AOV / EPAP / Activation rate / Repeat-purchase share), streaming CSV-экспорты с Excel-formula injection guard, optimistic updates, animated counters, sparklines, и автоуведомления партнёров через существующий email/Telegram bridge.
+
+### 🔥 Закрытые критические баги
+
+1. **Post-payment hooks не вызывались.** В `PaymentReconciliationService` после `applyCompletedTransaction` ни `processPartnerEarning`, ни `qualifyReferralAfterPurchase` не дёргались. То есть весь партнёрский леджер был мёртвым — ни одного начисления автоматически не делалось. Теперь оба сервиса подключены под отдельными try/catch (упавший accrual не ломает обновление подписки), идемпотентны по `(partnerId, sourceTransactionId)`, и корректно конвертируют `Decimal(20,8)` сумму в минорные единицы (FLOOR).
+
+2. **Индивидуальные настройки партнёра не читались.** Колонки `useGlobalSettings`, `accrualStrategy` (`ON_EACH_PAYMENT` / `ONCE_PER_USER`), `rewardType` (`PERCENT` / `FIXED`), `level1..3Percent`, `level1..3FixedAmount` существовали в schema, но `processPartnerEarning` передавал `individualSettings: null` с TODO. Теперь все колонки читаются через `partner` SELECT и применяются в `calculateEarning`. Per-partner FIXED amount и `ONCE_PER_USER` стратегия работают.
+
+3. **Мёртвая зона активации.** Если партнёра активировали ПОСЛЕ того, как у него уже были рефералы — `PartnerReferral` цепочка пуста, и начисления не идут. `togglePartnerStatus` теперь при переходе `false → true` дёргает новый `backfillPartnerReferralChainForUser`, который обходит существующий `Referral` граф и восстанавливает всё пропущенное. Пишет `PARTNER_ACTIVATED` событие с count привязанных рёбер.
+
+### 🤝 Переключатель Referral ↔ Partner
+
+Документировано и зафиксировано тестами: когда у пользователя `Partner.isActive = true`, обычная реферальная награда (POINTS / EXTRA_DAYS) НЕ создаётся — вместо неё в `PartnerTransaction` начисляется деньги на баланс по совсем другим правилам. `Referral.qualifiedAt` всё равно проставляется (для аналитики и funnel), но `ReferralReward` строка не записывается. Это закрывает классический баг "почему реферал партнёра получает и баллы, и комиссию".
+
+### 📊 Расширенная аналитика
+
+Новый таб «Аналитика» с date-range picker (4 пресета + custom from/to + day/week granularity):
+
+**KPI hero (4 карточки на основе исследования индустрии affiliate-marketing 2026):**
+- **AOV** (Average Order Value) — средняя сумма qualifying-платежа в окне
+- **EPAP** (Earnings per Active Partner) — доход на одного активного партнёра, ловит «100 партнёров, 3 зарабатывают»
+- **Activation Rate** — доля новых партнёров с хоть одним начислением в первые 14 дней
+- **Repeat-purchase share** — доля начислений из повторных платежей рефералов (occurrence > 1)
+
+Считается одним SQL-запросом с двумя CTE: первый собирает earnings/partners_active/repeat_earnings через `row_number() OVER (PARTITION BY partner_id, referral_user_id)`, второй CTE считает 14-day activation для cohort.
+
+**6 виджетов под KPIs:**
+- **Воронка** (новые → активные → с начислениями → с выплатами) с конверсиями
+- **Time-series** (AreaChart) с тремя слоями: earnings (₽), approved withdrawals, new partners
+- **Распределение по уровням** L1/L2/L3 (BarChart)
+- **Распределение по шлюзам** (PieChart с 10-цветной палитрой)
+- **Top-10 партнёров** за период с CSV-экспортом
+- **Withdrawal throughput** с медианой и p95 времени принятия решения
+
+**Cohort retention heatmap.** Новый эндпоинт `GET /admin/partners/analytics/cohorts?from=&to=&horizonWeeks=`. Реализация на двух CTE с `date_trunc('week', created_at)` для cohort и `EXTRACT(WEEK FROM age(...))` для week_index. Cells where the cohort has not been alive long enough — `null`, на UI рисуются серыми. Отрисовано как HTML/CSS table с фоном `hsl(160 80% (80 - intensity*40)%)` для retention intensity.
+
+### 🎨 Полностью переписанный UI
+
+**Главная страница `/partners`:**
+- 6 hero stat-карточек с **animated counters** (framer-motion `useSpring`, honors `prefers-reduced-motion`)
+- 2 inline **sparklines** на карточках earnings 30d / withdrawals approved (свой SVG, без Recharts)
+- 4 таба: Partners / Withdrawals / Analytics / Settings (sync с URL hash через `useTabSync`)
+- Кнопки CSV-экспорта в заголовке
+
+**Таб «Партнёры»:**
+- Поиск по имени / username / Telegram ID
+- Фильтр по `isActive`, dropdown сортировок (totalEarned/balance/withdrawn/createdAt/updatedAt) + кнопка-направление
+- Бейджи Global / Individual видны прямо в таблице
+- Switch активности на каждом ряду
+- Кнопка Manage открывает Sheet drawer
+- **Quick-action menu** (3-точки): открыть в Users / скопировать Partner ID / User ID / Telegram ID
+- Пагинация по 25 строк
+
+**Sheet drawer (Partner Detail):**
+
+| Таб | Содержимое |
+|---|---|
+| Overview | 4 metric-card с animated counters, 3 mini-метрики (7d/30d/transactions), L1/L2/L3 referral pills, источник настроек |
+| Earnings | Таблица `PartnerTransaction` + кнопка CSV-экспорта |
+| Referrals | Граф `PartnerReferral` (L1/L2/L3) с пагинацией |
+| Withdrawals | Заявки именно этого партнёра |
+| Settings | Корректировка баланса (zod-валидация) + индивидуальные настройки (Switch global, Select strategy, Select reward type, 3 поля под уровни — переключаются между % и ₽) |
+| Audit | Отфильтрованные строки `AdminAuditLog` по `metadata.partnerId`, expandable JSON, load-more |
+
+**Таб «Выплаты»:**
+- 4 stat-карточки сверху (pending / completed / rejected / total paid)
+- Поиск + фильтр по статусу
+- Чекбоксы с indeterminate-состоянием на pending-строках
+- Кнопка «Bulk approve (N)» с диалогом — каждая заявка обрабатывается независимо
+- Reject с диалогом причины
+- **Optimistic updates** через `onMutate`/`onError`/`onSettled` контракт React Query — статус меняется мгновенно, rollback при ошибке
+
+### 🔔 Автоуведомления партнёров
+
+Новый `PartnerNotificationsService` создаёт `UserNotificationEvent` при:
+- `partner.earning` — после успешного начисления
+- `partner.withdrawal_approved` — после одобрения выплаты
+- `partner.withdrawal_rejected` — после отклонения с причиной
+
+Существующий `EmailEventBridgeService` подхватывает строки автоматически (если шаблон включён через UI). Telegram delivery через бот Reiwa работает по той же схеме. К событиям `PARTNER_*` добавлен `userId` в metadata, чтобы bridge мог найти получателя. Шаблоны (`partner.earning`, `partner.withdrawal_approved`, `partner.withdrawal_rejected`) добавлены в default catalog seed.
+
+### 📦 CSV-экспорты с streaming
+
+`StreamableFile` + `Readable.from(async function* iterate())` через cursor-пагинацию Prisma. Память остаётся ограниченной даже на десятках тысяч строк, ответ начинает течь до завершения чтения.
+
+- `GET /admin/partners/export/partners.csv` — каталог партнёров (streaming)
+- `GET /admin/partners/export/top-partners.csv?from=&to=` — leaderboard
+- `GET /admin/partners/export/withdrawals.csv?from=&to=` — заявки за период (streaming)
+- `GET /admin/partners/:partnerId/export/earnings.csv` — леджер партнёра (streaming)
+
+**Excel-formula injection guard:** `renderCsv` экранирует поля начинающиеся на `=`, `+`, `-`, `@` префиксом одиночной кавычки. Классическая уязвимость Excel CSV — теперь покрыта тестами и не сможет случайно сломаться. Plus UTF-8 BOM для корректной кириллицы.
+
+### 🌐 Realtime
+
+`TYPE_TO_QUERY_KEYS` в `useRealtimeUpdates` теперь покрывает все 8 partner-событий (created/activated/deactivated/balance_adjusted/earning/withdrawal_*) с инвалидацией `['admin', 'partners']`. Реальный сценарий: ты в одной вкладке одобрил withdrawal — в соседней вкладке (или у другого админа) hero-cards, list, withdrawals tab, drawer, analytics — всё обновляется без F5.
+
+Page-level toasts на странице `/partners`: пока оператор смотрит на dashboard, при `partner.earning` выскакивает зелёный toast `+1234.56 ₽ начислено партнёру`, при `partner.withdrawal_requested` — info toast.
+
+### 💰 Bulk approve withdrawals
+
+`POST /admin/partners/withdrawals/bulk-approve` — массовое одобрение до 200 заявок за раз. Каждая обрабатывается в отдельной транзакции, ошибки коллекционируются per-id. UI показывает чекбоксы с `select all pending`, диалог подтверждения с опциональным admin comment, и toast с реальным результатом (`approved/failed`).
+
+### 🧪 Quality gates
+
+- **`tsc --noEmit`** — 0 errors
+- **`eslint . --quiet`** — 0 warnings (strict 0-tolerance policy на partners + payments + notifications)
+- **20 partner-related тестов** проходят: 12 example-based (`partner-earnings.service.spec.ts`, `partners.service.spec.ts`) + 4 property-based (`partner-earnings.property.spec.ts` через `fast-check`) + 4 на CSV invariants (`partner-csv-export.spec.ts`)
+- Property invariants на `calculateEarning`: целочисленность результата, неотрицательность, `earned ≤ payment`, нулевой процент даёт ноль, individual fixed возвращается как-есть, **монотонность по комиссии шлюза**
+
+### 📁 Новые файлы
+
+**Backend (`rezeis-admin/src/modules/partners/`):**
+- `services/admin-partner-analytics.service.ts` — funnel/timeseries/level/gateway/top/throughput/kpis/cohorts
+- `services/partner-detail.service.ts` — overview/earnings/referrals/withdrawals/audit
+- `services/partner-csv-export.service.ts` — streaming + материализованный CSV
+- `services/partner-notifications.service.ts` — UserNotificationEvent создание
+- `dto/analytics-range-query.dto.ts`, `analytics-cohort-query.dto.ts`, `bulk-approve-withdrawals.dto.ts`, `partner-detail-paging.dto.ts`
+- `interfaces/partner-analytics.interface.ts`, `partner-detail.interface.ts`
+
+**Frontend (`rezeis-admin/web/src/features/partners/`):**
+- `partner-detail-sheet.tsx` (6 табов)
+- `partners-list-tab.tsx`, `partners-withdrawals-tab.tsx`, `partners-analytics-tab.tsx`
+- `partners-queries.ts`, `partners-api.ts` (zod schemas)
+- `analytics-range-picker.tsx` (custom date range)
+- `cohort-heatmap.tsx`, `animated-counter.tsx`, `sparkline.tsx`
+- `csv-download.ts`, `partner-formatters.ts`
+
+**Tests (`rezeis-admin/test/`):**
+- `partner-earnings.service.spec.ts`
+- `partner-earnings.property.spec.ts`
+- `partner-csv-export.spec.ts`
+- `partners.service.spec.ts`
+
+### Migrating from 0.2.14
+
+Без breaking changes. Все необходимые колонки на `partners` уже были в schema из миграции `20260519130000_partner_individual_settings`.
+
+```bash
+docker compose pull && docker compose up -d
+```
+
+После рестарта оператор увидит:
+- На странице `/partners` — 4 таба с новой аналитикой и hero KPIs
+- В Settings → Notifications → Templates — новые шаблоны `partner.earning`, `partner.withdrawal_approved`, `partner.withdrawal_rejected` (по умолчанию неактивны, чтобы не спамить — оператор включает по нужным каналам)
+- В Realtime hub — partner.* события автоматически инвалидируют партнёрские queries
+
+Если до релиза у вас были партнёры с привязанными рефералами но `isActive = false` — их leaderboard может выглядеть пустым. Активация (toggle через UI) ретро-заполнит цепочку через `backfillPartnerReferralChainForUser` и накопленные платежи в новых платежах будут начислять earnings.
+
+---
+
 # Rezeis Admin v0.2.14
 
 ## Major release — referrals overhaul: analytics tab, audit-trail, bulk operations, contract sync

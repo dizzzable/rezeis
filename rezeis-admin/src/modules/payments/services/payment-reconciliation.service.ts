@@ -1,7 +1,9 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { Prisma, Transaction, TransactionStatus } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { PartnerEarningsService } from '../../partners/services/partner-earnings.service';
+import { ReferralQualificationService } from '../../referrals/services/referral-qualification.service';
 import {
   PAYMENT_WEBHOOK_STATUS_FAILED,
   PaymentWebhookInboxService,
@@ -11,11 +13,15 @@ import { PaymentSubscriptionMutationService } from './payment-subscription-mutat
 
 @Injectable()
 export class PaymentReconciliationService {
+  private readonly logger = new Logger(PaymentReconciliationService.name);
+
   public constructor(
     private readonly prismaService: PrismaService,
     private readonly paymentWebhookInboxService: PaymentWebhookInboxService,
     private readonly paymentSubscriptionMutationService: PaymentSubscriptionMutationService,
     private readonly paymentOpsAlertService: PaymentOpsAlertService,
+    private readonly partnerEarningsService: PartnerEarningsService,
+    private readonly referralQualificationService: ReferralQualificationService,
   ) {}
 
   public async reconcileWebhookEvent(eventId: string): Promise<void> {
@@ -56,6 +62,7 @@ export class PaymentReconciliationService {
         if (refreshedTransaction.subscriptionId === null) {
           await this.paymentSubscriptionMutationService.applyCompletedTransaction(refreshedTransaction);
         }
+        await this.runReferralAndPartnerHooks(refreshedTransaction);
       }
 
       await this.paymentWebhookInboxService.markProcessed(event.id);
@@ -83,6 +90,42 @@ export class PaymentReconciliationService {
       throw new NotFoundException('Payment transaction not found');
     }
     return transaction;
+  }
+
+  /**
+   * Runs the referral qualification + partner earnings hooks after a
+   * transaction is marked COMPLETED. Errors here are logged but do not
+   * propagate — a failed accrual must not roll back a successful payment
+   * application. Both downstream services are idempotent on
+   * `(partnerId, sourceTransactionId)` and on `referral.qualifiedAt`, so
+   * a retried webhook event is safe.
+   */
+  private async runReferralAndPartnerHooks(transaction: Transaction): Promise<void> {
+    try {
+      await this.referralQualificationService.qualifyReferralAfterPurchase(transaction.id);
+    } catch (error: unknown) {
+      this.logger.error(
+        `Referral qualification hook failed for transaction ${transaction.id}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+
+    try {
+      const minorUnits = decimalToMinorUnits(transaction.amount);
+      await this.partnerEarningsService.processPartnerEarning({
+        payerUserId: transaction.userId,
+        paymentAmountMinorUnits: minorUnits,
+        gatewayType: transaction.gatewayType,
+        sourceTransactionId: transaction.id,
+      });
+    } catch (error: unknown) {
+      this.logger.error(
+        `Partner earnings hook failed for transaction ${transaction.id}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
   }
 }
 
@@ -138,4 +181,16 @@ function mergeGatewayData(
     ...currentRecord,
     ...nextValue,
   };
+}
+
+/**
+ * Convert a `Decimal(20, 8)` major-unit transaction amount into the
+ * minor-unit integer (kopecks/cents) accepted by `PartnerEarningsService`.
+ * The product preserves up to two decimal places and floors anything
+ * smaller — partner accruals must never round in the user's favour above
+ * the integer ledger granularity.
+ */
+function decimalToMinorUnits(amount: Prisma.Decimal): number {
+  const minor = amount.mul(100).toFixed(0, Prisma.Decimal.ROUND_FLOOR);
+  return Number(minor);
 }

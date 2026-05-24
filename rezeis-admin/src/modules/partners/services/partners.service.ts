@@ -16,20 +16,48 @@ import {
   PartnerUserSummaryInterface,
   PartnerWithdrawalInterface,
 } from '../interfaces/partner.interface';
+import { PartnerEarningsService } from './partner-earnings.service';
+import { PartnerNotificationsService } from './partner-notifications.service';
 
 const PARTNER_USER_SELECT = {
   id: true,
   name: true,
+  username: true,
   telegramId: true,
   createdAt: true,
 } as const;
 
 const PARTNER_INCLUDE = {
   user: { select: PARTNER_USER_SELECT },
+  _count: {
+    select: {
+      referrals: true,
+    },
+  },
 } as const;
 
 type PartnerRecord = Prisma.PartnerGetPayload<{ include: typeof PARTNER_INCLUDE }>;
-type PartnerWithdrawalRecord = Prisma.PartnerWithdrawalGetPayload<true>;
+
+const WITHDRAWAL_PARTNER_INCLUDE = {
+  partner: {
+    select: {
+      id: true,
+      isActive: true,
+      user: {
+        select: {
+          id: true,
+          name: true,
+          username: true,
+          telegramId: true,
+        },
+      },
+    },
+  },
+} as const;
+
+type PartnerWithdrawalRecord = Prisma.PartnerWithdrawalGetPayload<{
+  include: typeof WITHDRAWAL_PARTNER_INCLUDE;
+}>;
 
 interface ProcessPartnerWithdrawalInput {
   readonly withdrawalId: string;
@@ -44,6 +72,8 @@ export class PartnersService {
   public constructor(
     private readonly prismaService: PrismaService,
     private readonly events: SystemEventsService,
+    private readonly partnerEarningsService: PartnerEarningsService,
+    private readonly partnerNotificationsService: PartnerNotificationsService,
   ) {}
 
   public async listPartners(
@@ -55,10 +85,37 @@ export class PartnersService {
     } else if (query.isActive === 'false') {
       where.isActive = false;
     }
+    if (query.search !== undefined && query.search.trim().length > 0) {
+      const trimmed = query.search.trim();
+      const userFilter: Prisma.UserWhereInput = {
+        OR: [
+          { name: { contains: trimmed, mode: 'insensitive' } },
+          { username: { contains: trimmed, mode: 'insensitive' } },
+        ],
+      };
+      const numericTelegramId = trimmed.match(/^\d{3,}$/);
+      if (numericTelegramId) {
+        try {
+          (userFilter.OR as Prisma.UserWhereInput[]).push({
+            telegramId: BigInt(trimmed),
+          });
+        } catch {
+          // ignore non-bigint inputs
+        }
+      }
+      where.user = userFilter;
+    }
+    const orderBy: Prisma.PartnerOrderByWithRelationInput[] = [];
+    const sort = query.sort ?? 'totalEarned';
+    const order = query.order ?? 'desc';
+    orderBy.push({ [sort]: order } as Prisma.PartnerOrderByWithRelationInput);
+    if (sort !== 'createdAt') {
+      orderBy.push({ createdAt: 'desc' });
+    }
     const partners = await this.prismaService.partner.findMany({
       where,
       include: PARTNER_INCLUDE,
-      orderBy: [{ totalEarned: 'desc' }, { createdAt: 'desc' }],
+      orderBy,
       take: query.limit ?? 100,
       skip: query.offset ?? 0,
     });
@@ -68,11 +125,33 @@ export class PartnersService {
   public async listWithdrawals(
     query: ListPartnerWithdrawalsQueryDto,
   ): Promise<readonly PartnerWithdrawalInterface[]> {
+    const where: Prisma.PartnerWithdrawalWhereInput = {
+      partnerId: query.partnerId,
+      status: query.status,
+    };
+    if (query.search !== undefined && query.search.trim().length > 0) {
+      const trimmed = query.search.trim();
+      const userFilter: Prisma.UserWhereInput = {
+        OR: [
+          { name: { contains: trimmed, mode: 'insensitive' } },
+          { username: { contains: trimmed, mode: 'insensitive' } },
+        ],
+      };
+      const numericTelegramId = trimmed.match(/^\d{3,}$/);
+      if (numericTelegramId) {
+        try {
+          (userFilter.OR as Prisma.UserWhereInput[]).push({
+            telegramId: BigInt(trimmed),
+          });
+        } catch {
+          // ignore
+        }
+      }
+      where.partner = { user: userFilter };
+    }
     const withdrawals = await this.prismaService.partnerWithdrawal.findMany({
-      where: {
-        partnerId: query.partnerId,
-        status: query.status,
-      },
+      where,
+      include: WITHDRAWAL_PARTNER_INCLUDE,
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: query.limit ?? 100,
       skip: query.offset ?? 0,
@@ -80,14 +159,55 @@ export class PartnersService {
     return withdrawals.map(mapPartnerWithdrawal);
   }
 
+  /**
+   * Bulk approve a list of pending withdrawals. Each withdrawal is processed
+   * inside its own transaction, mirroring `approveWithdrawal` semantics.
+   * Errors per-id are collected; the operation never aborts mid-batch so
+   * the operator can see exactly what passed and what failed.
+   */
+  public async bulkApproveWithdrawals(input: {
+    readonly withdrawalIds: readonly string[];
+    readonly adminComment: string | null;
+    readonly currentAdmin: CurrentAdminInterface;
+    readonly requestMetadata: RequestMetadataInterface;
+  }): Promise<{
+    readonly approved: number;
+    readonly failed: number;
+    readonly errors: ReadonlyArray<{ id: string; error: string }>;
+  }> {
+    const errors: Array<{ id: string; error: string }> = [];
+    let approved = 0;
+    for (const withdrawalId of input.withdrawalIds) {
+      try {
+        await this.approveWithdrawal({
+          withdrawalId,
+          dto: { adminComment: input.adminComment ?? undefined },
+          currentAdmin: input.currentAdmin,
+          requestMetadata: input.requestMetadata,
+        });
+        approved += 1;
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : 'unknown';
+        errors.push({ id: withdrawalId, error: message });
+      }
+    }
+    return { approved, failed: errors.length, errors };
+  }
+
   public async getStats(): Promise<PartnerStatsInterface> {
     const now = new Date();
+    const window7d = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    const window30d = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
     const [
       totalPartners,
       activePartners,
       pendingWithdrawals,
       completedWithdrawals,
-      balanceAggregate,
+      rejectedWithdrawals,
+      partnerAggregate,
+      earnings30d,
+      earnings7d,
+      completed30d,
     ] = await Promise.all([
       this.prismaService.partner.count(),
       this.prismaService.partner.count({ where: { isActive: true } }),
@@ -97,8 +217,25 @@ export class PartnersService {
       this.prismaService.partnerWithdrawal.count({
         where: { status: WithdrawalStatus.COMPLETED },
       }),
+      this.prismaService.partnerWithdrawal.count({
+        where: { status: WithdrawalStatus.REJECTED },
+      }),
       this.prismaService.partner.aggregate({
-        _sum: { balance: true },
+        _sum: { balance: true, totalEarned: true, totalWithdrawn: true },
+      }),
+      this.prismaService.partnerTransaction.aggregate({
+        where: { createdAt: { gte: window30d } },
+        _sum: { earnedAmount: true },
+      }),
+      this.prismaService.partnerTransaction.aggregate({
+        where: { createdAt: { gte: window7d } },
+        _sum: { earnedAmount: true },
+      }),
+      this.prismaService.partnerWithdrawal.count({
+        where: {
+          status: WithdrawalStatus.COMPLETED,
+          processedAt: { gte: window30d },
+        },
       }),
     ]);
     return {
@@ -106,7 +243,13 @@ export class PartnersService {
       activePartners,
       pendingWithdrawals,
       completedWithdrawals,
-      totalBalance: balanceAggregate._sum.balance ?? 0,
+      rejectedWithdrawals,
+      totalBalance: partnerAggregate._sum.balance ?? 0,
+      totalEarned: partnerAggregate._sum.totalEarned ?? 0,
+      totalWithdrawn: partnerAggregate._sum.totalWithdrawn ?? 0,
+      earningsLast30d: earnings30d._sum.earnedAmount ?? 0,
+      earningsLast7d: earnings7d._sum.earnedAmount ?? 0,
+      completedLast30d: completed30d,
       generatedAt: now.toISOString(),
     };
   }
@@ -153,7 +296,7 @@ export class PartnersService {
     if (input.amount <= 0) {
       throw new BadRequestException('Withdrawal amount must be positive');
     }
-    return this.prismaService.$transaction(async (tx) => {
+    const result = await this.prismaService.$transaction(async (tx) => {
       const partner = await tx.partner.findUnique({
         where: { id: input.partnerId },
       });
@@ -179,13 +322,31 @@ export class PartnersService {
           method: input.method,
           requisites: input.requisites,
         },
+        include: WITHDRAWAL_PARTNER_INCLUDE,
       });
       return mapPartnerWithdrawal(withdrawal);
     });
+    this.events.info(
+      EVENT_TYPES.PARTNER_WITHDRAWAL_REQUESTED,
+      'PARTNER',
+      `Partner requested ${input.amount} withdrawal`,
+      {
+        withdrawalId: result.id,
+        partnerId: input.partnerId,
+        amount: input.amount,
+        method: input.method,
+      },
+    );
+    return result;
   }
 
   /**
    * Toggles a partner's active status. Donor: `partner_core.toggle_partner_status`.
+   *
+   * Side-effect on `false → true`: retroactively builds the
+   * `PartnerReferral` chain from the partner's existing `Referral` graph,
+   * so users who were registered before activation also flow earnings
+   * back through this partner.
    */
   public async togglePartnerStatus(partnerId: string): Promise<PartnerInterface> {
     const partner = await this.prismaService.partner.findUnique({
@@ -195,11 +356,51 @@ export class PartnersService {
     if (partner === null) {
       throw new NotFoundException('Partner not found');
     }
+    const nextActive = !partner.isActive;
     const updated = await this.prismaService.partner.update({
       where: { id: partnerId },
-      data: { isActive: !partner.isActive },
+      data: { isActive: nextActive },
       include: PARTNER_INCLUDE,
     });
+
+    if (nextActive && !partner.isActive) {
+      try {
+        const result = await this.partnerEarningsService.backfillPartnerReferralChainForUser(
+          updated.userId,
+        );
+        this.events.info(
+          EVENT_TYPES.PARTNER_ACTIVATED,
+          'PARTNER',
+          result.attached > 0
+            ? `Partner activated; backfilled ${result.attached} referral edge(s) (considered ${result.considered})`
+            : 'Partner activated',
+          {
+            partnerId: updated.id,
+            userId: updated.userId,
+            attached: result.attached,
+            considered: result.considered,
+          },
+        );
+      } catch (error: unknown) {
+        // Swallow — toggle itself succeeded, backfill is opportunistic.
+        this.events.warn(
+          EVENT_TYPES.PARTNER_ACTIVATED,
+          'PARTNER',
+          `Partner activated; referral backfill failed`,
+          {
+            partnerId: updated.id,
+            userId: updated.userId,
+            error: error instanceof Error ? error.message : String(error),
+          },
+        );
+      }
+    } else if (!nextActive && partner.isActive) {
+      this.events.info(EVENT_TYPES.PARTNER_DEACTIVATED, 'PARTNER', 'Partner deactivated', {
+        partnerId: updated.id,
+        userId: updated.userId,
+      });
+    }
+
     return mapPartner(updated);
   }
 
@@ -215,7 +416,7 @@ export class PartnersService {
     readonly currentAdmin: CurrentAdminInterface;
     readonly requestMetadata: RequestMetadataInterface;
   }): Promise<PartnerInterface> {
-    return this.prismaService.$transaction(async (tx) => {
+    const result = await this.prismaService.$transaction(async (tx) => {
       const partner = await tx.partner.findUnique({
         where: { id: input.partnerId },
         include: PARTNER_INCLUDE,
@@ -250,8 +451,22 @@ export class PartnersService {
           adminUser: { connect: { id: input.currentAdmin.id } },
         },
       });
-      return mapPartner(updated);
+      return { partnerSummary: mapPartner(updated), previousBalance: partner.balance, newBalance };
     });
+    this.events.info(
+      EVENT_TYPES.PARTNER_BALANCE_ADJUSTED,
+      'PARTNER',
+      `Partner balance adjusted by ${input.amount}`,
+      {
+        partnerId: input.partnerId,
+        adjustment: input.amount,
+        previousBalance: result.previousBalance,
+        newBalance: result.newBalance,
+        adminId: input.currentAdmin.id,
+        reason: input.reason,
+      },
+    );
+    return result.partnerSummary;
   }
 
   private async processWithdrawalWithBalanceMutation(
@@ -302,6 +517,7 @@ export class PartnersService {
           processedBy: input.currentAdmin.id,
           processedAt: new Date(),
         },
+        include: WITHDRAWAL_PARTNER_INCLUDE,
       });
       await transactionClient.adminAuditLog.create({
         data: {
@@ -327,16 +543,37 @@ export class PartnersService {
     this.events.info(eventType, 'PARTNER', `Withdrawal ${input.nextStatus.toLowerCase()}`, {
       withdrawalId: result.id,
       partnerId: result.partnerId,
+      userId: result.partner?.user?.id ?? null,
       amount: result.amount,
       status: result.status,
       adminId: input.currentAdmin.id,
     });
+
+    // Notify the partner via UserNotificationEvent so the email/Telegram
+    // bridge picks it up automatically.
+    if (result.partner?.user?.id) {
+      if (input.nextStatus === WithdrawalStatus.COMPLETED) {
+        await this.partnerNotificationsService.notifyWithdrawalApproved({
+          partnerUserId: result.partner.user.id,
+          withdrawalId: result.id,
+          amount: result.amount,
+        });
+      } else if (input.nextStatus === WithdrawalStatus.REJECTED) {
+        await this.partnerNotificationsService.notifyWithdrawalRejected({
+          partnerUserId: result.partner.user.id,
+          withdrawalId: result.id,
+          amount: result.amount,
+          reason: input.dto.adminComment ?? null,
+        });
+      }
+    }
 
     return result;
   }
 }
 
 function mapPartner(record: PartnerRecord): PartnerInterface {
+  const totalReferrals = record._count?.referrals ?? 0;
   return {
     id: record.id,
     user: mapPartnerUser(record.user),
@@ -344,9 +581,23 @@ function mapPartner(record: PartnerRecord): PartnerInterface {
     totalEarned: record.totalEarned,
     totalWithdrawn: record.totalWithdrawn,
     isActive: record.isActive,
+    referralsCount: totalReferrals,
+    useGlobalSettings: record.useGlobalSettings,
+    accrualStrategy: record.accrualStrategy,
+    rewardType: record.rewardType,
+    level1Percent: decimalToString(record.level1Percent),
+    level2Percent: decimalToString(record.level2Percent),
+    level3Percent: decimalToString(record.level3Percent),
+    level1FixedAmount: record.level1FixedAmount,
+    level2FixedAmount: record.level2FixedAmount,
+    level3FixedAmount: record.level3FixedAmount,
     createdAt: record.createdAt.toISOString(),
     updatedAt: record.updatedAt.toISOString(),
   };
+}
+
+function decimalToString(value: { toString(): string } | null): string | null {
+  return value === null || value === undefined ? null : value.toString();
 }
 
 function mapPartnerUser(
@@ -355,6 +606,7 @@ function mapPartnerUser(
   return {
     id: record.id,
     login: null,
+    username: record.username,
     name: record.name === '' ? null : record.name,
     telegramId: record.telegramId?.toString() ?? null,
     createdAt: record.createdAt.toISOString(),
@@ -374,5 +626,21 @@ function mapPartnerWithdrawal(record: PartnerWithdrawalRecord): PartnerWithdrawa
     processedAt: record.processedAt?.toISOString() ?? null,
     createdAt: record.createdAt.toISOString(),
     updatedAt: record.updatedAt.toISOString(),
+    partner:
+      record.partner !== undefined
+        ? {
+            id: record.partner.id,
+            isActive: record.partner.isActive,
+            user:
+              record.partner.user !== null
+                ? {
+                    id: record.partner.user.id,
+                    name: record.partner.user.name === '' ? null : record.partner.user.name,
+                    username: record.partner.user.username,
+                    telegramId: record.partner.user.telegramId?.toString() ?? null,
+                  }
+                : null,
+          }
+        : null,
   };
 }

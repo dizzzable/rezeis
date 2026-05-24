@@ -1,95 +1,231 @@
-import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { useForm } from 'react-hook-form'
-import { zodResolver } from '@hookform/resolvers/zod'
-import { z } from 'zod'
-import { Handshake, DollarSign, Settings2, TrendingUp, Loader2, Settings } from 'lucide-react'
+import { useMemo } from 'react'
+import {
+  Activity,
+  BarChart3,
+  CircleDollarSign,
+  Clock,
+  Download,
+  Handshake,
+  Settings,
+  TrendingUp,
+} from 'lucide-react'
 import { toast } from 'sonner'
 
-import { api } from '@/lib/api'
-import { getErrorMessage } from '@/lib/http-errors'
-import { useTabSync } from '@/lib/use-tab-sync'
-import { Card, CardContent } from '@/components/ui/card'
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
-import { Skeleton } from '@/components/ui/skeleton'
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
-import { Switch } from '@/components/ui/switch'
-import { Separator } from '@/components/ui/separator'
-import {
-  Form,
-  FormControl,
-  FormField,
-  FormItem,
-  FormLabel,
-  FormMessage,
-} from '@/components/ui/form'
-import { FadeIn } from '@/lib/motion'
 import PartnerSettingsPage from '@/features/settings/partner-settings-page'
-import WithdrawalsPage from '@/features/partners/withdrawals-page'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent } from '@/components/ui/card'
+import { Skeleton } from '@/components/ui/skeleton'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { FadeIn, StaggerList } from '@/lib/motion'
+import { useTabSync } from '@/lib/use-tab-sync'
+import { useRealtimeUpdates } from '@/lib/realtime/use-realtime-updates'
 
-const ALLOWED_TABS = ['partners', 'withdrawals', 'settings'] as const
+import {
+  formatKopecks,
+  formatKopecksCompact,
+  formatNumber,
+} from './partner-formatters'
+import { AnimatedCounter } from './animated-counter'
+import { Sparkline } from './sparkline'
+import PartnersAnalyticsTab from './partners-analytics-tab'
+import PartnersListTab from './partners-list-tab'
+import PartnersWithdrawalsTab from './partners-withdrawals-tab'
+import { downloadCsv } from './csv-download'
+import { usePartnerStats, useTimeseries } from './partners-queries'
+
+const ALLOWED_TABS = ['partners', 'withdrawals', 'analytics', 'settings'] as const
 type PartnersTab = (typeof ALLOWED_TABS)[number]
 
 export default function PartnersPage() {
   const { t } = useTranslation()
-  const { activeTab, setTab: handleTabChange } = useTabSync<PartnersTab>(ALLOWED_TABS, 'partners')
+  const { activeTab, setTab } = useTabSync<PartnersTab>(ALLOWED_TABS, 'partners')
+  const { data: stats, isLoading: statsLoading } = usePartnerStats()
+  const range30d = useMemo(() => {
+    const to = new Date()
+    const from = new Date(to.getTime() - 30 * 24 * 60 * 60 * 1000)
+    return { from: from.toISOString(), to: to.toISOString(), granularity: 'day' as const }
+  }, [])
+  const { data: timeseries } = useTimeseries(range30d)
+  const sparkValues = useMemo(
+    () => (timeseries?.points ?? []).map((p) => p.earnings),
+    [timeseries],
+  )
+  const sparkApprovedValues = useMemo(
+    () => (timeseries?.points ?? []).map((p) => p.withdrawalsApproved),
+    [timeseries],
+  )
 
-  const { data: stats } = useQuery({
-    queryKey: ['admin', 'partners', 'stats'],
-    queryFn: async () => (await api.get('/admin/partners/stats')).data as { total?: number; totalPartners?: number; active?: number; activePartners?: number; pendingWithdrawals: number },
+  // Live partner.earning toasts while the operator has the partners
+  // page open. The global hook (mounted in `<AdminShell>`) only surfaces
+  // WARNING/ERROR; we hook a page-local handler for partner-program
+  // INFO events that operators care about.
+  useRealtimeUpdates({
+    showToasts: false,
+    topics: ['PARTNER'],
+    onEvent: (event) => {
+      if (event.type === 'partner.earning') {
+        const earning =
+          typeof event.metadata?.earning === 'number' ? event.metadata.earning : null
+        if (earning !== null) {
+          toast.success(
+            t('partnersPage.realtime.earning', {
+              amount: formatKopecksCompact(earning),
+            }),
+            { description: event.message },
+          )
+        }
+      } else if (event.type === 'partner.withdrawal_requested') {
+        toast.info(t('partnersPage.realtime.withdrawalRequested'), {
+          description: event.message,
+        })
+      }
+    },
   })
 
-  const totalPartners = stats?.total ?? stats?.totalPartners ?? 0
-  const activePartners = stats?.active ?? stats?.activePartners ?? 0
-  const pendingWithdrawals = stats?.pendingWithdrawals ?? 0
+  async function handleExportPartners() {
+    try {
+      await downloadCsv({
+        path: '/admin/partners/export/partners.csv',
+        filename: `partners-${new Date().toISOString().slice(0, 10)}.csv`,
+      })
+      toast.success(t('partnersAnalytics.export.success'))
+    } catch {
+      toast.error(t('partnersAnalytics.export.failed'))
+    }
+  }
+
+  async function handleExportWithdrawals() {
+    try {
+      await downloadCsv({
+        path: '/admin/partners/export/withdrawals.csv',
+        filename: `partner-withdrawals-${new Date().toISOString().slice(0, 10)}.csv`,
+      })
+      toast.success(t('partnersAnalytics.export.success'))
+    } catch {
+      toast.error(t('partnersAnalytics.export.failed'))
+    }
+  }
 
   return (
     <div className="space-y-6">
       <FadeIn>
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
-            <Handshake className="h-6 w-6" /> {t('partnersPage.title')}
-          </h1>
-          <p className="text-muted-foreground">{t('partnersPage.subtitle')}</p>
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
+              <Handshake className="h-6 w-6" />
+              {t('partnersPage.title')}
+            </h1>
+            <p className="text-muted-foreground">{t('partnersPage.subtitle')}</p>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button variant="outline" size="sm" onClick={handleExportPartners}>
+              <Download className="h-3.5 w-3.5 mr-1.5" />
+              {t('partnersPage.export.partners')}
+            </Button>
+            <Button variant="outline" size="sm" onClick={handleExportWithdrawals}>
+              <Download className="h-3.5 w-3.5 mr-1.5" />
+              {t('partnersPage.export.withdrawals')}
+            </Button>
+          </div>
         </div>
       </FadeIn>
 
-      {/* Stats */}
-      <div className="grid grid-cols-3 gap-4">
-        {[
-          { label: t('partnersPage.stats.total'), value: totalPartners, icon: Handshake },
-          { label: t('partnersPage.stats.active'), value: activePartners, icon: TrendingUp },
-          { label: t('partnersPage.stats.pendingWithdrawals'), value: pendingWithdrawals, icon: DollarSign },
-        ].map((s) => (
-          <Card key={s.label}>
-            <CardContent className="pt-6">
-              <div className="flex items-center gap-3">
-                <s.icon className="h-5 w-5 text-muted-foreground" />
-                <div>
-                  <p className="text-2xl font-bold tabular-nums">{s.value}</p>
-                  <p className="text-xs text-muted-foreground">{s.label}</p>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        ))}
-      </div>
+      {/* Stats hero */}
+      <StaggerList className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+        <StatCard
+          icon={<Handshake className="h-4 w-4 text-muted-foreground" />}
+          label={t('partnersPage.stats.total')}
+          numericValue={statsLoading ? null : stats?.totalPartners ?? 0}
+          formatter={formatNumber}
+        />
+        <StatCard
+          icon={<TrendingUp className="h-4 w-4 text-emerald-500" />}
+          label={t('partnersPage.stats.active')}
+          numericValue={statsLoading ? null : stats?.activePartners ?? 0}
+          formatter={formatNumber}
+        />
+        <StatCard
+          icon={<CircleDollarSign className="h-4 w-4 text-blue-500" />}
+          label={t('partnersPage.stats.totalBalance')}
+          numericValue={statsLoading ? null : (stats?.totalBalance ?? 0) / 100}
+          formatter={(v) => formatKopecksCompact(v * 100)}
+        />
+        <StatCard
+          icon={<Activity className="h-4 w-4 text-emerald-500" />}
+          label={t('partnersPage.stats.earnings30d')}
+          numericValue={statsLoading ? null : (stats?.earningsLast30d ?? 0) / 100}
+          formatter={(v) => formatKopecksCompact(v * 100)}
+          accent="emerald"
+          sparkline={sparkValues}
+        />
+        <StatCard
+          icon={<Activity className="h-4 w-4 text-blue-500" />}
+          label={t('partnersPage.stats.earnings7d')}
+          numericValue={statsLoading ? null : (stats?.earningsLast7d ?? 0) / 100}
+          formatter={(v) => formatKopecksCompact(v * 100)}
+          sparkline={sparkApprovedValues}
+        />
+        <StatCard
+          icon={<Clock className="h-4 w-4 text-yellow-500" />}
+          label={t('partnersPage.stats.pendingWithdrawals')}
+          numericValue={statsLoading ? null : stats?.pendingWithdrawals ?? 0}
+          formatter={formatNumber}
+          accent={stats && stats.pendingWithdrawals > 0 ? 'warning' : undefined}
+        />
+      </StaggerList>
 
-      <Tabs value={activeTab} onValueChange={handleTabChange}>
+      {stats && stats.totalEarned > 0 && (
+        <Card>
+          <CardContent className="pt-4 grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+            <ProgramSummaryRow
+              label={t('partnersPage.summary.totalEarned')}
+              value={formatKopecks(stats.totalEarned)}
+            />
+            <ProgramSummaryRow
+              label={t('partnersPage.summary.totalWithdrawn')}
+              value={formatKopecks(stats.totalWithdrawn)}
+            />
+            <ProgramSummaryRow
+              label={t('partnersPage.summary.completed30d')}
+              value={formatNumber(stats.completedLast30d)}
+            />
+            <ProgramSummaryRow
+              label={t('partnersPage.summary.rejectedTotal')}
+              value={formatNumber(stats.rejectedWithdrawals)}
+            />
+          </CardContent>
+        </Card>
+      )}
+
+      <Tabs value={activeTab} onValueChange={setTab}>
         <TabsList>
-          <TabsTrigger value="partners">{t('partnersPage.tabs.partners')}</TabsTrigger>
-          <TabsTrigger value="withdrawals">{t('partnersPage.tabs.withdrawals')}</TabsTrigger>
+          <TabsTrigger value="partners">
+            <Handshake className="h-3.5 w-3.5 mr-1.5" />
+            {t('partnersPage.tabs.partners')}
+          </TabsTrigger>
+          <TabsTrigger value="withdrawals">
+            <CircleDollarSign className="h-3.5 w-3.5 mr-1.5" />
+            {t('partnersPage.tabs.withdrawals')}
+          </TabsTrigger>
+          <TabsTrigger value="analytics">
+            <BarChart3 className="h-3.5 w-3.5 mr-1.5" />
+            {t('partnersPage.tabs.analytics')}
+          </TabsTrigger>
           <TabsTrigger value="settings">
             <Settings className="h-3.5 w-3.5 mr-1.5" />
             {t('partnersPage.tabs.settings')}
           </TabsTrigger>
         </TabsList>
-        <TabsContent value="partners"><PartnersTab /></TabsContent>
-        <TabsContent value="withdrawals" className="pt-4"><WithdrawalsPage embedded /></TabsContent>
+        <TabsContent value="partners">
+          <PartnersListTab />
+        </TabsContent>
+        <TabsContent value="withdrawals">
+          <PartnersWithdrawalsTab />
+        </TabsContent>
+        <TabsContent value="analytics">
+          <PartnersAnalyticsTab />
+        </TabsContent>
         <TabsContent value="settings" className="pt-4">
           <PartnerSettingsPage />
         </TabsContent>
@@ -98,305 +234,64 @@ export default function PartnersPage() {
   )
 }
 
-// ── Partners Tab ──────────────────────────────────────────────────────────────
-
-interface PartnerUserSummary {
-  readonly name?: string | null
-  readonly username?: string | null
-  readonly telegramId?: string | number | bigint | null
-}
-
-interface PartnerIndividualSettings {
-  readonly level1Percent?: number | string | null
-  readonly level2Percent?: number | string | null
-  readonly level3Percent?: number | string | null
-}
-
-interface PartnerRow {
-  readonly id: number
-  readonly user?: PartnerUserSummary | null
-  readonly balance: number
-  readonly totalEarned: number
-  readonly referralsCount: number
-  readonly level2ReferralsCount: number
-  readonly level3ReferralsCount: number
-  readonly isActive: boolean
-  readonly individualSettings?: PartnerIndividualSettings | null
-}
-
-function PartnersTab() {
-  const { t } = useTranslation()
-  const queryClient = useQueryClient()
-  const [selectedPartner, setSelectedPartner] = useState<PartnerRow | null>(null)
-  const [showSettings, setShowSettings] = useState(false)
-
-  const { data, isLoading } = useQuery<ReadonlyArray<PartnerRow>>({
-    queryKey: ['admin', 'partners'],
-    queryFn: async () => {
-      const raw = (await api.get('/admin/partners?limit=50')).data as
-        | ReadonlyArray<PartnerRow>
-        | { items?: ReadonlyArray<PartnerRow> }
-      return Array.isArray(raw) ? raw : (raw?.items ?? [])
-    },
-  })
-
-  const toggleMutation = useMutation({
-    mutationFn: (id: number) => api.post(`/admin/partners/${id}/toggle-active`),
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['admin', 'partners'] }); toast.success(t('partnersDetail.toasts.statusUpdated')) },
-  })
-
-  if (isLoading) return <div className="space-y-3 mt-4">{Array.from({ length: 5 }).map((_, i) => <Skeleton key={i} className="h-12 w-full" />)}</div>
-
+function StatCard({
+  icon,
+  label,
+  numericValue,
+  formatter,
+  accent,
+  sparkline,
+}: {
+  readonly icon: React.ReactNode
+  readonly label: string
+  readonly numericValue: number | null
+  readonly formatter: (value: number) => string
+  readonly accent?: 'emerald' | 'warning'
+  readonly sparkline?: ReadonlyArray<number>
+}) {
+  const accentClass =
+    accent === 'emerald'
+      ? 'text-emerald-500'
+      : accent === 'warning'
+        ? 'text-yellow-500'
+        : ''
   return (
-    <div className="mt-4">
-      <Card>
-        <CardContent className="p-0">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>{t('partnersDetail.columns.partner')}</TableHead>
-                <TableHead>{t('partnersDetail.columns.balance')}</TableHead>
-                <TableHead>{t('partnersDetail.columns.earned')}</TableHead>
-                <TableHead>{t('partnersDetail.columns.referrals')}</TableHead>
-                <TableHead>{t('partnersDetail.columns.status')}</TableHead>
-                <TableHead className="w-24" />
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {data?.map((p) => (
-                <TableRow key={p.id}>
-                  <TableCell>
-                    <div>
-                      <p className="font-medium text-sm">{p.user?.name ?? '—'}</p>
-                      <p className="text-xs text-muted-foreground">@{p.user?.username ?? p.user?.telegramId}</p>
-                    </div>
-                  </TableCell>
-                  <TableCell className="tabular-nums font-mono text-sm">
-                    {(p.balance / 100).toFixed(2)} ₽
-                  </TableCell>
-                  <TableCell className="tabular-nums font-mono text-sm text-emerald-600">
-                    {(p.totalEarned / 100).toFixed(2)} ₽
-                  </TableCell>
-                  <TableCell className="tabular-nums text-sm">
-                    {p.referralsCount} / {p.level2ReferralsCount} / {p.level3ReferralsCount}
-                  </TableCell>
-                  <TableCell>
-                    <Switch checked={p.isActive} onCheckedChange={() => toggleMutation.mutate(p.id)} />
-                  </TableCell>
-                  <TableCell>
-                    <Button size="sm" variant="outline" className="h-7 text-xs"
-                      onClick={() => { setSelectedPartner(p); setShowSettings(true) }}>
-                      <Settings2 className="h-3.5 w-3.5 mr-1" /> {t('partnersDetail.manage')}
-                    </Button>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </CardContent>
-      </Card>
-
-      {/* Partner settings dialog */}
-      <Dialog open={showSettings} onOpenChange={setShowSettings}>
-        <DialogContent className="max-w-lg">
-          <DialogHeader><DialogTitle>{t('partnersDetail.dialogTitle', { name: selectedPartner?.user?.name ?? '' })}</DialogTitle></DialogHeader>
-          {selectedPartner && <PartnerSettingsForm partner={selectedPartner} onClose={() => setShowSettings(false)} />}
-        </DialogContent>
-      </Dialog>
-    </div>
-  )
-}
-
-// ── Partner Settings Form ─────────────────────────────────────────────────────
-
-function PartnerSettingsForm({ partner, onClose: _onClose }: { partner: PartnerRow; onClose: () => void }) {
-  const { t } = useTranslation()
-  const queryClient = useQueryClient()
-
-  // ── Balance adjustment subform ──────────────────────────────────────
-  const adjustSchema = z.object({
-    amount: z
-      .string()
-      .trim()
-      .min(1, t('partnersDetail.settings.validation.amountRequired'))
-      .refine((v) => Number.isFinite(Number(v)), {
-        message: t('partnersDetail.settings.validation.amountInvalid'),
-      }),
-    reason: z.string().trim(),
-  })
-  type AdjustValues = z.infer<typeof adjustSchema>
-  const adjustForm = useForm<AdjustValues>({
-    resolver: zodResolver(adjustSchema),
-    defaultValues: { amount: '', reason: '' },
-  })
-
-  const adjustMutation = useMutation({
-    mutationFn: (values: AdjustValues) =>
-      api.post(`/admin/partners/${partner.id}/balance-adjust`, {
-        amount: Math.round(Number(values.amount) * 100), // to kopecks
-        reason: values.reason || undefined,
-      }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['admin', 'partners'] })
-      toast.success(t('partnersDetail.toasts.balanceAdjusted'))
-      adjustForm.reset({ amount: '', reason: '' })
-    },
-    onError: (err) => toast.error(getErrorMessage(err, t('partnersDetail.toasts.balanceFailed'))),
-  })
-
-  // ── Individual rates subform ────────────────────────────────────────
-  const percentField = z
-    .string()
-    .trim()
-    .refine(
-      (v) => {
-        if (v === '') return true
-        const n = Number(v)
-        return Number.isFinite(n) && n >= 0 && n <= 100
-      },
-      { message: t('partnersDetail.settings.validation.percentRange') },
-    )
-
-  const ratesSchema = z.object({
-    level1Percent: percentField,
-    level2Percent: percentField,
-    level3Percent: percentField,
-  })
-  type RatesValues = z.infer<typeof ratesSchema>
-  const ratesForm = useForm<RatesValues>({
-    resolver: zodResolver(ratesSchema),
-    defaultValues: {
-      level1Percent: String(partner.individualSettings?.level1Percent ?? ''),
-      level2Percent: String(partner.individualSettings?.level2Percent ?? ''),
-      level3Percent: String(partner.individualSettings?.level3Percent ?? ''),
-    },
-  })
-
-  const settingsMutation = useMutation({
-    mutationFn: (values: RatesValues) =>
-      api.patch(`/admin/partners/${partner.id}/individual-settings`, {
-        level1Percent: values.level1Percent ? Number(values.level1Percent) : undefined,
-        level2Percent: values.level2Percent ? Number(values.level2Percent) : undefined,
-        level3Percent: values.level3Percent ? Number(values.level3Percent) : undefined,
-      }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['admin', 'partners'] })
-      toast.success(t('partnersDetail.toasts.settingsSaved'))
-    },
-    onError: (err) => toast.error(getErrorMessage(err, t('partnersDetail.toasts.settingsFailed'))),
-  })
-
-  return (
-    <div className="space-y-5">
-      <div className="grid grid-cols-2 gap-3 text-sm">
-        <div className="bg-muted/40 rounded-lg p-3">
-          <p className="text-muted-foreground text-xs">{t('partnersDetail.settings.currentBalance')}</p>
-          <p className="text-xl font-bold tabular-nums">{(partner.balance / 100).toFixed(2)} ₽</p>
+    <Card>
+      <CardContent className="pt-4">
+        <div className="flex items-center gap-2 text-muted-foreground">
+          {icon}
+          <p className="text-[10px] uppercase tracking-wide">{label}</p>
         </div>
-        <div className="bg-muted/40 rounded-lg p-3">
-          <p className="text-muted-foreground text-xs">{t('partnersDetail.settings.totalEarned')}</p>
-          <p className="text-xl font-bold tabular-nums text-emerald-600">{(partner.totalEarned / 100).toFixed(2)} ₽</p>
-        </div>
-      </div>
-
-      <Form {...adjustForm}>
-        <form
-          onSubmit={adjustForm.handleSubmit((values) => adjustMutation.mutate(values))}
-          className="space-y-3"
-        >
-          <p className="text-sm font-semibold">{t('partnersDetail.settings.adjustment')}</p>
-          <div className="flex gap-2">
-            <FormField
-              control={adjustForm.control}
-              name="amount"
-              render={({ field }) => (
-                <FormItem className="flex-1">
-                  <FormControl>
-                    <Input
-                      type="number"
-                      step="0.01"
-                      placeholder={t('partnersDetail.settings.amountPlaceholder')}
-                      className="h-9"
-                      {...field}
-                    />
-                  </FormControl>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-            <FormField
-              control={adjustForm.control}
-              name="reason"
-              render={({ field }) => (
-                <FormItem className="flex-1">
-                  <FormControl>
-                    <Input
-                      placeholder={t('partnersDetail.settings.reasonPlaceholder')}
-                      className="h-9"
-                      {...field}
-                    />
-                  </FormControl>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-          </div>
-          <Button type="submit" size="sm" disabled={adjustMutation.isPending}>
-            {adjustMutation.isPending ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <DollarSign className="h-4 w-4 mr-2" />}
-            {t('partnersDetail.settings.apply')}
-          </Button>
-        </form>
-      </Form>
-
-      <Separator />
-
-      <Form {...ratesForm}>
-        <form
-          onSubmit={ratesForm.handleSubmit((values) => settingsMutation.mutate(values))}
-          className="space-y-3"
-        >
-          <p className="text-sm font-semibold">{t('partnersDetail.settings.individualRates')}</p>
-          <p className="text-xs text-muted-foreground">{t('partnersDetail.settings.ratesHint')}</p>
-          <div className="grid grid-cols-3 gap-3">
-            {(['level1Percent', 'level2Percent', 'level3Percent'] as const).map((name, idx) => (
-              <FormField
-                key={name}
-                control={ratesForm.control}
-                name={name}
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel className="text-xs">
-                      {t(`partnersDetail.settings.level${idx + 1}` as 'partnersDetail.settings.level1')}
-                    </FormLabel>
-                    <FormControl>
-                      <Input
-                        type="number"
-                        min="0"
-                        max="100"
-                        step="0.1"
-                        placeholder={t('partnersDetail.settings.globalPlaceholder')}
-                        className="h-9"
-                        {...field}
-                      />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
+        {numericValue === null ? (
+          <Skeleton className="h-8 w-24 mt-2" />
+        ) : (
+          <div className="flex items-end justify-between gap-2">
+            <p className={`text-2xl font-bold tabular-nums mt-1 ${accentClass}`}>
+              <AnimatedCounter value={numericValue} format={formatter} />
+            </p>
+            {sparkline && sparkline.length > 1 && (
+              <Sparkline
+                values={sparkline}
+                stroke={accent === 'warning' ? '#facc15' : 'hsl(var(--primary))'}
+                fill={
+                  accent === 'warning'
+                    ? 'hsl(48 95% 60% / 0.15)'
+                    : 'hsl(var(--primary) / 0.15)'
+                }
               />
-            ))}
+            )}
           </div>
-          <Button type="submit" size="sm" disabled={settingsMutation.isPending}>
-            {settingsMutation.isPending ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Settings2 className="h-4 w-4 mr-2" />}
-            {t('partnersDetail.settings.saveSettings')}
-          </Button>
-        </form>
-      </Form>
-    </div>
+        )}
+      </CardContent>
+    </Card>
   )
 }
 
-// ── Withdrawals Tab ───────────────────────────────────────────────────────────
-// Renders the full `WithdrawalsPage` in embedded mode — same backend, same
-// stats / filter / requisites / reject-with-reason flow. The standalone
-// `/withdrawals` route is kept as a redirect to `/partners#withdrawals` for
-// deep-link compatibility.
+function ProgramSummaryRow({ label, value }: { readonly label: string; readonly value: string }) {
+  return (
+    <div>
+      <p className="text-[11px] text-muted-foreground uppercase">{label}</p>
+      <p className="text-base font-semibold tabular-nums mt-1">{value}</p>
+    </div>
+  )
+}
