@@ -1574,15 +1574,27 @@ model PromocodeActivation {
 /// Reward emitted when a `Referral` qualifies. Multiple rewards can attach to
 /// a single referral edge — donor distinguishes points and extra-day rewards.
 model ReferralReward {
-  id         String             @id @default(cuid()) @map("id")
-  referralId String             @map("referral_id")
-  userId     String             @map("user_id")
-  type       ReferralRewardType @map("type")
-  amount     Int                @map("amount")
-  isIssued   Boolean            @default(false) @map("is_issued")
-  issuedAt   DateTime?          @map("issued_at") @db.Timestamptz(3)
-  createdAt  DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt  DateTime           @updatedAt @map("updated_at") @db.Timestamptz(3)
+  id           String             @id @default(cuid()) @map("id")
+  referralId   String             @map("referral_id")
+  userId       String             @map("user_id")
+  type         ReferralRewardType @map("type")
+  amount       Int                @map("amount")
+  isIssued     Boolean            @default(false) @map("is_issued")
+  issuedAt     DateTime?          @map("issued_at") @db.Timestamptz(3)
+  /// Admin user id (cuid) that triggered the issue. NULL for legacy
+  /// rows or rewards issued by the auto-issue cron.
+  issuedBy     String?            @map("issued_by")
+  /// Admin user id (cuid) that manually granted this reward via the
+  /// "Issue reward" dialog. NULL for rewards created automatically by
+  /// `ReferralQualificationService` after a qualifying purchase.
+  grantedBy    String?            @map("granted_by")
+  /// Set when an admin (or the refund handler) revokes a pending or
+  /// issued reward. We keep the row for audit but stop counting it
+  /// in stats.
+  revokedAt    DateTime?          @map("revoked_at") @db.Timestamptz(3)
+  revokeReason String?            @map("revoke_reason")
+  createdAt    DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime           @updatedAt @map("updated_at") @db.Timestamptz(3)
 
   referral Referral @relation("ReferralRewardEdge", fields: [referralId], references: [id], onDelete: Cascade)
   user     User     @relation("ReferralRewardUser", fields: [userId], references: [id], onDelete: Restrict)
@@ -1590,6 +1602,9 @@ model ReferralReward {
   @@index([referralId])
   @@index([userId])
   @@index([isIssued])
+  @@index([issuedBy])
+  @@index([grantedBy])
+  @@index([revokedAt])
   @@map("referral_rewards")
 }
 

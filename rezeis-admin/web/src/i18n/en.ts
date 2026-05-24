@@ -97,6 +97,7 @@ export const en = {
       referrals: 'Referrals',
       invites: 'Invites',
       rewards: 'Rewards',
+      analytics: 'Analytics',
       settings: 'Settings',
     },
   },
@@ -2099,6 +2100,14 @@ export const en = {
     },
     referralsTab: {
       empty: 'No referrals yet',
+      searchPlaceholder: 'Search by name or Telegram ID',
+      filters: {
+        level: 'Level',
+        allLevels: 'All levels',
+        allStatuses: 'All statuses',
+        qualified: 'Qualified',
+        pending: 'Pending',
+      },
       columns: {
         referrer: 'Referrer',
         referred: 'Referred',
@@ -2110,6 +2119,10 @@ export const en = {
     },
     invitesTab: {
       empty: 'No invites yet',
+      searchPlaceholder: 'Search by inviter or token',
+      filters: {
+        all: 'All statuses',
+      },
       columns: {
         inviter: 'Inviter',
         token: 'Token',
@@ -2120,12 +2133,22 @@ export const en = {
         revoked: 'Revoked',
         expired: 'Expired',
         active: 'Active',
+        consumed: 'Consumed',
       },
+      copied: 'Token copied',
+      copyFailed: 'Failed to copy token',
+      copyTitle: 'Copy token',
+      revokeTitle: 'Revoke invite',
       revokeSuccess: 'Invite revoked',
       revokeFailed: 'Failed to revoke',
     },
     rewardsTab: {
       empty: 'No rewards yet',
+      searchPlaceholder: 'Search by user or referral ID',
+      filters: {
+        allTypes: 'All types',
+        allStatuses: 'All statuses',
+      },
       columns: {
         user: 'User',
         type: 'Type',
@@ -2135,8 +2158,14 @@ export const en = {
       },
       issued: 'Issued',
       pending: 'Pending',
+      issueTitle: 'Issue reward',
       issueSuccess: 'Reward marked as issued',
       issueFailed: 'Failed to issue',
+      bulkSelectAria: 'Select all rewards for issuing',
+      bulkRowAria: 'Select reward',
+      bulkIssueButton: 'Issue ({{count}})',
+      bulkIssueSuccess: 'Issued: {{issued}}, skipped: {{skipped}}, failed: {{failed}}',
+      bulkIssueFailed: 'Bulk issue failed',
     },
     attach: {
       referredLabel: 'Referred User (Telegram ID)',
@@ -2150,6 +2179,7 @@ export const en = {
     },
     create: {
       referralIdLabel: 'Referral ID',
+      referralIdHint: 'CUID of an existing edge in the referrals table',
       userTelegramIdLabel: 'User Telegram ID',
       typeLabel: 'Reward Type',
       typePoints: 'Points',
@@ -2159,6 +2189,53 @@ export const en = {
       submit: 'Create Reward',
       success: 'Reward created',
       failed: 'Failed to create reward',
+    },
+  },
+  referralsAnalytics: {
+    title: 'Referral program analytics',
+    subtitle: 'Conversion funnel, time-series, and reward distribution',
+    ranges: {
+      '7d': '7 days',
+      '30d': '30 days',
+      '90d': '90 days',
+    },
+    funnel: {
+      title: 'Conversion funnel',
+      description: 'Where invites convert into issued rewards',
+      steps: {
+        invitesCreated: 'Invites created',
+        invitesConsumed: 'Consumed',
+        referralsQualified: 'Qualified',
+        rewardsIssued: 'Rewards issued',
+      },
+    },
+    timeseries: {
+      title: 'Daily activity',
+      description: 'Invites, referrals, and rewards over time',
+      legend: {
+        invitesCreated: 'Invites',
+        referralsCreated: 'Referrals',
+        referralsQualified: 'Qualifications',
+        rewardsIssued: 'Rewards',
+      },
+    },
+    topReferrers: {
+      title: 'Top referrers',
+      description: 'Leaders by qualified referrals in the selected range',
+      empty: 'No data for the selected range',
+    },
+    distribution: {
+      title: 'Reward distribution',
+      description: 'By type × issued / pending / revoked',
+      issued: 'issued',
+      pending: 'pending',
+      revoked: 'revoked',
+      empty: 'No rewards yet',
+    },
+    sources: {
+      title: 'Invite sources',
+      description: 'Where qualified referrals come from',
+      empty: 'No data yet',
     },
   },
   remnaActions: {

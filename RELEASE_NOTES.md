@@ -1,3 +1,85 @@
+# Rezeis Admin v0.2.14
+
+## Major release — referrals overhaul: analytics tab, audit-trail, bulk operations, contract sync
+
+После v0.2.13 страница рефералов всё ещё была наполовину рабочей: половина фронтовых эндпоинтов не имела пары на бэке (KPI пустые, табы Награды и часть Приглашений сыпались), CSP блокировал vendored chunks, и почти не было средств для аналитики реферальной программы. Этот релиз закрывает разом несколько направлений.
+
+### Новый таб «Аналитика»
+
+Полноценная dashboard-страница с переключателем 7d/30d/90d:
+
+1. **Воронка конверсии** — invites_created → consumed → qualified → rewards_issued, с процентом конверсии на каждом шаге.
+2. **Динамика по дням** — AreaChart с 4 рядами (приглашения / рефералы / квалификации / награды). Гранулярность автоматически day или week.
+3. **Топ-10 рефереров** — лидерборд за период, с conversion rate и заработанными points.
+4. **Распределение наград** — Pie chart по типу × issued/pending/revoked.
+5. **Источники приглашений** — bar chart по `inviteSource`.
+
+Backend: 5 новых эндпоинтов под `/admin/referrals/analytics/*`, time-series через `date_trunc` + `generate_series` на стороне Postgres (без подгрузки сырых строк).
+
+### Audit-trail для наград
+
+Миграция `20260524201400_referral_rewards_audit`:
+
+```sql
+ALTER TABLE referral_rewards
+  ADD COLUMN issued_by TEXT,        -- кто выдал
+  ADD COLUMN granted_by TEXT,       -- кто создал вручную
+  ADD COLUMN revoked_at TIMESTAMPTZ(3),
+  ADD COLUMN revoke_reason TEXT;
+```
+
+Все новые операторские действия записывают актора. Легаси-строки получают `null`. Два индекса (`issued_by`, `granted_by`) для отчётов.
+
+### Bulk operations
+
+В табе «Награды» — чекбоксы и кнопка «Выдать (N)». `POST /admin/referrals/rewards/bulk-issue` обрабатывает до 500 ID, возвращает `{issued, skipped, failed, errors}`.
+
+### Иконки и UX
+
+- `Crown`/`Star` для уровней L1/L2/L3 (gold/silver/bronze).
+- `MessageCircle`/`Globe`/`UserPlus`/`Link` для источников.
+- `Coins`/`CalendarPlus` для типов наград.
+- Поиск + фильтры по каждой таблице (level, status, type, дата).
+- Copy-to-clipboard на токенах invite.
+- KPI-карточки получили иконки в углу.
+
+### Контракт синхронизирован
+
+Эндпоинты, которых раньше не было, теперь есть. Frontend работает целиком:
+
+- `GET /admin/referrals/stats` — отдаёт SPA-shape `{invites, referrals, qualifiedReferrals, rewards, issuedRewards}` (плюс старые поля).
+- `GET /admin/referrals/rewards` — список с фильтрами (`type`, `issued`, `userId`, `referralId`, `limit`, `offset`).
+- `POST /admin/referrals/rewards` — manual grant.
+- `POST /admin/referrals/rewards/:id/issue` — apply effect (POINTS → User.points, EXTRA_DAYS → продлить подписку).
+- `POST /admin/referrals/rewards/bulk-issue` — пакетный issue.
+- `POST /admin/referrals/rewards/:id/revoke` — отзыв pending.
+- `POST /admin/referrals/attach` — telegram-id-friendly (резолв → cuid).
+- `POST /admin/referrals/invites/:id/revoke` — alias к `DELETE`.
+- `GET/PATCH /admin/settings/referral` — settings формы (раньше PATCH 404'ил).
+
+### CSP fix
+
+`helmet()` без параметров блокировал `unsafe-eval` и спамил console сообщением `Content Security Policy of your site blocks the use of 'eval'`. Эту блокировку триггерили vendored chunks (`@tanstack/react-query`, `zod`). Снято: CSP отключён, остальные защиты helmet (HSTS, X-Frame-Options, X-Content-Type-Options) сохранены.
+
+### Real-time
+
+`useRealtimeUpdates` уже маппит `referral.qualified` и `referral.reward_issued` на `['admin', 'referrals']`. Все queries на странице используют этот префикс — обновления приходят без явной подписки.
+
+### Tests
+
+- 9/9 frontend test files passed (55 tests).
+- Backend tsc + eslint — 0 errors / 0 warnings.
+
+### Migrating from 0.2.13
+
+Без breaking changes для пользователей. Бэкенд применит миграцию `20260524201400_referral_rewards_audit` на старте (4 nullable колонки + 3 индекса, безопасно).
+
+```bash
+docker compose pull && docker compose up -d
+```
+
+---
+
 # Rezeis Admin v0.2.13
 
 ## Hotfix release — backend endpoint gaps (referrals 500 + subscriptions 404)

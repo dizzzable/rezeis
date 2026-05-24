@@ -97,6 +97,7 @@
       referrals: 'Рефералы',
       invites: 'Приглашения',
       rewards: 'Награды',
+      analytics: 'Аналитика',
       settings: 'Настройки',
     },
   },
@@ -2128,6 +2129,14 @@
     },
     referralsTab: {
       empty: 'Рефералов пока нет',
+      searchPlaceholder: 'Поиск по имени или Telegram ID',
+      filters: {
+        level: 'Уровень',
+        allLevels: 'Все уровни',
+        allStatuses: 'Все статусы',
+        qualified: 'Квалифицированы',
+        pending: 'В ожидании',
+      },
       columns: {
         referrer: 'Реферер',
         referred: 'Приглашённый',
@@ -2139,6 +2148,10 @@
     },
     invitesTab: {
       empty: 'Приглашений пока нет',
+      searchPlaceholder: 'Поиск по приглашающему или токену',
+      filters: {
+        all: 'Все статусы',
+      },
       columns: {
         inviter: 'Пригласивший',
         token: 'Токен',
@@ -2149,12 +2162,22 @@
         revoked: 'Отозван',
         expired: 'Истёк',
         active: 'Активен',
+        consumed: 'Использован',
       },
+      copied: 'Токен скопирован',
+      copyFailed: 'Не удалось скопировать токен',
+      copyTitle: 'Скопировать токен',
+      revokeTitle: 'Отозвать приглашение',
       revokeSuccess: 'Приглашение отозвано',
       revokeFailed: 'Не удалось отозвать',
     },
     rewardsTab: {
       empty: 'Наград пока нет',
+      searchPlaceholder: 'Поиск по пользователю или ID реферала',
+      filters: {
+        allTypes: 'Все типы',
+        allStatuses: 'Все статусы',
+      },
       columns: {
         user: 'Пользователь',
         type: 'Тип',
@@ -2164,8 +2187,14 @@
       },
       issued: 'Выдана',
       pending: 'В ожидании',
+      issueTitle: 'Выдать награду',
       issueSuccess: 'Награда отмечена как выданная',
       issueFailed: 'Не удалось выдать',
+      bulkSelectAria: 'Выбрать все награды для выдачи',
+      bulkRowAria: 'Выбрать награду',
+      bulkIssueButton: 'Выдать ({{count}})',
+      bulkIssueSuccess: 'Выдано: {{issued}}, пропущено: {{skipped}}, ошибок: {{failed}}',
+      bulkIssueFailed: 'Не удалось выполнить пакетную выдачу',
     },
     attach: {
       referredLabel: 'Приглашённый (Telegram ID)',
@@ -2179,6 +2208,7 @@
     },
     create: {
       referralIdLabel: 'ID реферала',
+      referralIdHint: 'CUID существующего ребра в таблице рефералов',
       userTelegramIdLabel: 'Telegram ID пользователя',
       typeLabel: 'Тип награды',
       typePoints: 'Баллы',
@@ -2188,6 +2218,53 @@
       submit: 'Создать награду',
       success: 'Награда создана',
       failed: 'Не удалось создать награду',
+    },
+  },
+  referralsAnalytics: {
+    title: 'Аналитика реферальной программы',
+    subtitle: 'Воронка конверсии, динамика и распределение наград',
+    ranges: {
+      '7d': '7 дней',
+      '30d': '30 дней',
+      '90d': '90 дней',
+    },
+    funnel: {
+      title: 'Воронка конверсии',
+      description: 'Сколько приглашений превращается в выданные награды',
+      steps: {
+        invitesCreated: 'Создано приглашений',
+        invitesConsumed: 'Использовано',
+        referralsQualified: 'Квалифицировано',
+        rewardsIssued: 'Награды выданы',
+      },
+    },
+    timeseries: {
+      title: 'Динамика по дням',
+      description: 'Активность приглашений, рефералов и наград во времени',
+      legend: {
+        invitesCreated: 'Приглашения',
+        referralsCreated: 'Рефералы',
+        referralsQualified: 'Квалификации',
+        rewardsIssued: 'Награды',
+      },
+    },
+    topReferrers: {
+      title: 'Топ рефереров',
+      description: 'Лидеры по количеству квалифицированных рефералов',
+      empty: 'За выбранный период данных нет',
+    },
+    distribution: {
+      title: 'Распределение наград',
+      description: 'По типу × выдано/в ожидании/отозвано',
+      issued: 'выдано',
+      pending: 'ожидает',
+      revoked: 'отозвано',
+      empty: 'Наград пока нет',
+    },
+    sources: {
+      title: 'Источники приглашений',
+      description: 'Откуда приходят квалифицированные рефералы',
+      empty: 'Данных пока нет',
     },
   },
   remnaActions: {
