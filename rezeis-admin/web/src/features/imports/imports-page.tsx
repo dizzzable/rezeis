@@ -28,6 +28,7 @@ import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
 import { formatDateTime } from '@/lib/utils'
+import { usePlans } from '@/features/plans/plans-api'
 import {
   Card,
   CardContent,
@@ -94,14 +95,6 @@ interface ImportSummary {
 
 interface RemnawaveImportSummary extends ImportSummary {
   descriptionWritebacks: number
-}
-
-interface PlanOption {
-  id: string
-  name: string
-  trafficLimit: number | null
-  deviceLimit: number
-  isActive: boolean
 }
 
 interface BulkAssignResult {
@@ -624,14 +617,7 @@ function BulkPlanAssignment({ importRecordId }: { importRecordId?: string }) {
   const queryClient = useQueryClient()
   const [selectedPlanId, setSelectedPlanId] = useState<string>('')
 
-  const { data: plans } = useQuery({
-    queryKey: ['admin', 'plans'],
-    queryFn: async (): Promise<PlanOption[]> => {
-      const response = await api.get('/admin/plans')
-      const allPlans = response.data as PlanOption[]
-      return allPlans.filter((p) => p.isActive)
-    },
-  })
+  const { data: plans } = usePlans({ active: true })
 
   const assignMutation = useMutation({
     mutationFn: async (planId: string): Promise<BulkAssignResult> => {

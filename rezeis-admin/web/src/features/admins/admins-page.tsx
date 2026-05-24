@@ -1,6 +1,5 @@
-import { lazy, Suspense, useEffect, useState } from 'react'
+import { lazy, Suspense, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useLocation, useNavigate } from 'react-router-dom'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { AlertCircle, Network, Pencil, Plus, Shield, ShieldBan, ShieldCheck, Trash2, Webhook } from 'lucide-react'
 import { useForm } from 'react-hook-form'
@@ -10,6 +9,7 @@ import { z } from 'zod'
 
 import { api } from '@/lib/api'
 import { formatDateTime } from '@/lib/utils'
+import { useTabSync } from '@/lib/use-tab-sync'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Badge } from '@/components/ui/badge'
@@ -482,30 +482,7 @@ function EditAdminDialog({
 
 export default function AdminsPage() {
   const { t } = useTranslation()
-  const { hash: locationHash, pathname: locationPathname } = useLocation()
-  const navigate = useNavigate()
-
-  const initialTab: AdminsTab = (() => {
-    const hash = locationHash.replace('#', '')
-    return (ALLOWED_TABS as readonly string[]).includes(hash) ? (hash as AdminsTab) : 'admins'
-  })()
-
-  const [activeTab, setActiveTab] = useState<AdminsTab>(initialTab)
-
-  useEffect(() => {
-    const hash = locationHash.replace('#', '')
-    if ((ALLOWED_TABS as readonly string[]).includes(hash) && hash !== activeTab) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- TODO: refactor to derive state
-      setActiveTab(hash as AdminsTab)
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [locationHash])
-
-  function handleTabChange(value: string): void {
-    if (!(ALLOWED_TABS as readonly string[]).includes(value)) return
-    setActiveTab(value as AdminsTab)
-    navigate(`${locationPathname}#${value}`, { replace: true })
-  }
+  const { activeTab, setTab: handleTabChange } = useTabSync<AdminsTab>(ALLOWED_TABS, 'admins')
 
   return (
     <div className="space-y-6">

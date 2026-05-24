@@ -1,8 +1,6 @@
 import { useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
 
-import { api } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -15,6 +13,7 @@ import {
 } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { Separator } from '@/components/ui/separator'
+import { usePlans } from '@/features/plans/plans-api'
 
 const REWARD_TYPES = [
   'DURATION',
@@ -35,13 +34,20 @@ export interface PromocodeFormData {
   lifetime?: number
   maxActivations?: number
   allowedPlanIds?: number[]
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  plan?: any
+}
+
+interface ExistingPromocode {
+  readonly code?: string
+  readonly rewardType?: string
+  readonly reward?: number | string
+  readonly availability?: string
+  readonly isActive?: boolean
+  readonly lifetime?: number | string
+  readonly maxActivations?: number | string
 }
 
 interface Props {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  promo?: any
+  promo?: ExistingPromocode
   onSubmit: (data: PromocodeFormData) => void
   isLoading: boolean
 }
@@ -57,11 +63,7 @@ export function PromocodeForm({ promo, onSubmit, isLoading }: Props) {
   const [maxActivations, setMaxActivations] = useState(promo?.maxActivations?.toString() ?? '-1')
 
   // Load plans for SUBSCRIPTION reward type
-  useQuery({
-    queryKey: ['admin', 'plans'],
-    queryFn: async () => (await api.get('/admin/plans')).data,
-    enabled: rewardType === 'SUBSCRIPTION',
-  })
+  usePlans(undefined, { enabled: rewardType === 'SUBSCRIPTION' })
 
   const generateCode = () => {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'

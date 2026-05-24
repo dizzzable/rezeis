@@ -1,11 +1,21 @@
-import { useEffect, useState, type JSX } from 'react'
+import { type JSX } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
+import { useForm } from 'react-hook-form'
+import { zodResolver } from '@hookform/resolvers/zod'
+import { z } from 'zod'
+
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
+import {
+  Form,
+  FormControl,
+  FormField,
+  FormItem,
+  FormLabel,
+} from '@/components/ui/form'
 import { settingsApi } from '@/features/settings/settings-api'
 import { PlatformSettingsForm } from '@/features/settings/platform-settings-form'
 
@@ -14,44 +24,21 @@ function parseCsvValues(value: string): string[] {
 }
 
 function parseCsvNumbers(value: string): number[] {
-  return parseCsvValues(value).map((item) => Number(item)).filter((item) => Number.isFinite(item) && item > 0)
+  return parseCsvValues(value)
+    .map((item) => Number(item))
+    .filter((item) => Number.isFinite(item) && item > 0)
 }
 
 export function PlatformSettingsPage(): JSX.Element {
   const { t } = useTranslation()
-  const queryClient = useQueryClient()
-  const referralExchangePolicyQuery = useQuery({ queryKey: ['settings', 'referral-exchange-policy'], queryFn: settingsApi.getReferralExchangePolicy })
-  const partnerWithdrawalPolicyQuery = useQuery({ queryKey: ['settings', 'partner-withdrawal-policy'], queryFn: settingsApi.getPartnerWithdrawalPolicy })
-  const [allowedPlanIds, setAllowedPlanIds] = useState('')
-  const [allowedDurationDays, setAllowedDurationDays] = useState('')
-  const [codePrefix, setCodePrefix] = useState('')
-  const [costPerDay, setCostPerDay] = useState('')
-  const [partnerMinimumAmount, setPartnerMinimumAmount] = useState('')
-  const [partnerSupportedMethods, setPartnerSupportedMethods] = useState('')
-  const referralExchangePolicyMutation = useMutation({
-    mutationFn: settingsApi.updateReferralExchangePolicy,
-    onSuccess: async () => queryClient.invalidateQueries({ queryKey: ['settings', 'referral-exchange-policy'] }),
+  const referralExchangePolicyQuery = useQuery({
+    queryKey: ['settings', 'referral-exchange-policy'],
+    queryFn: settingsApi.getReferralExchangePolicy,
   })
-  const partnerWithdrawalPolicyMutation = useMutation({
-    mutationFn: settingsApi.updatePartnerWithdrawalPolicy,
-    onSuccess: async () => queryClient.invalidateQueries({ queryKey: ['settings', 'partner-withdrawal-policy'] }),
+  const partnerWithdrawalPolicyQuery = useQuery({
+    queryKey: ['settings', 'partner-withdrawal-policy'],
+    queryFn: settingsApi.getPartnerWithdrawalPolicy,
   })
-
-  useEffect(() => {
-    if (!referralExchangePolicyQuery.data) return
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- TODO: refactor to derive state
-    setAllowedPlanIds(referralExchangePolicyQuery.data.allowedPlanIds.join(', '))
-    setAllowedDurationDays(referralExchangePolicyQuery.data.allowedDurationDays.join(', '))
-    setCodePrefix(referralExchangePolicyQuery.data.codePrefix)
-    setCostPerDay(String(referralExchangePolicyQuery.data.costPerDay))
-  }, [referralExchangePolicyQuery.data])
-
-  useEffect(() => {
-    if (!partnerWithdrawalPolicyQuery.data) return
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- TODO: refactor to derive state
-    setPartnerMinimumAmount(String(partnerWithdrawalPolicyQuery.data.minimumAmount))
-    setPartnerSupportedMethods(partnerWithdrawalPolicyQuery.data.supportedMethods.join(', '))
-  }, [partnerWithdrawalPolicyQuery.data])
 
   return (
     <div className="space-y-4">
@@ -68,38 +55,10 @@ export function PlatformSettingsPage(): JSX.Element {
               <p className="text-muted-foreground">{t('settings.businessPolicy.referral.description')}</p>
             </div>
             {referralExchangePolicyQuery.data ? (
-              <>
-                <label className="flex items-center justify-between gap-3 rounded-xl border border-border/60 p-3">
-                  <span>{t('settings.businessPolicy.referral.exchangeEnabled')}</span>
-                  <Switch checked={referralExchangePolicyQuery.data.exchangeEnabled} onCheckedChange={(checked) => referralExchangePolicyMutation.mutate({ exchangeEnabled: checked })} />
-                </label>
-                <label className="flex items-center justify-between gap-3 rounded-xl border border-border/60 p-3">
-                  <span>{t('settings.businessPolicy.referral.giftPromocodeEnabled')}</span>
-                  <Switch checked={referralExchangePolicyQuery.data.giftPromocodeEnabled} onCheckedChange={(checked) => referralExchangePolicyMutation.mutate({ giftPromocodeEnabled: checked })} />
-                </label>
-                <div className="grid gap-3 md:grid-cols-2">
-                  <div className="space-y-2">
-                    <Label htmlFor="referralAllowedPlanIds">{t('settings.businessPolicy.referral.allowedPlanIds')}</Label>
-                    <Input id="referralAllowedPlanIds" value={allowedPlanIds} onChange={(event) => setAllowedPlanIds(event.target.value)} placeholder={t('settings.businessPolicy.referral.allowedPlanIdsPlaceholder')} />
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="referralAllowedDurationDays">{t('settings.businessPolicy.referral.allowedDurationDays')}</Label>
-                    <Input id="referralAllowedDurationDays" value={allowedDurationDays} onChange={(event) => setAllowedDurationDays(event.target.value)} placeholder={t('settings.businessPolicy.referral.allowedDurationDaysPlaceholder')} />
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="referralCodePrefix">{t('settings.businessPolicy.referral.codePrefix')}</Label>
-                    <Input id="referralCodePrefix" value={codePrefix} onChange={(event) => setCodePrefix(event.target.value)} placeholder={t('settings.businessPolicy.referral.codePrefixPlaceholder')} />
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="referralCostPerDay">{t('settings.businessPolicy.referral.costPerDay')}</Label>
-                    <Input id="referralCostPerDay" inputMode="numeric" value={costPerDay} onChange={(event) => setCostPerDay(event.target.value)} placeholder={t('settings.businessPolicy.referral.costPerDayPlaceholder')} />
-                  </div>
-                </div>
-                <Button size="sm" variant="outline" disabled={referralExchangePolicyMutation.isPending} onClick={() => referralExchangePolicyMutation.mutate({ allowedPlanIds: parseCsvValues(allowedPlanIds), allowedDurationDays: parseCsvNumbers(allowedDurationDays), codePrefix: codePrefix.trim(), costPerDay: Number(costPerDay) })}>
-                  {t('settings.businessPolicy.referral.save')}
-                </Button>
-              </>
-            ) : <p className="text-muted-foreground">{t('settings.businessPolicy.referral.loading')}</p>}
+              <ReferralExchangeSection data={referralExchangePolicyQuery.data} />
+            ) : (
+              <p className="text-muted-foreground">{t('settings.businessPolicy.referral.loading')}</p>
+            )}
           </section>
 
           <section className="space-y-3 rounded-2xl border border-border/70 bg-background/70 p-4">
@@ -108,30 +67,277 @@ export function PlatformSettingsPage(): JSX.Element {
               <p className="text-muted-foreground">{t('settings.businessPolicy.partner.description')}</p>
             </div>
             {partnerWithdrawalPolicyQuery.data ? (
-              <>
-                <label className="flex items-center justify-between gap-3 rounded-xl border border-border/60 p-3">
-                  <span>{t('settings.businessPolicy.partner.withdrawalsEnabled')}</span>
-                  <Switch checked={partnerWithdrawalPolicyQuery.data.enabled} onCheckedChange={(checked) => partnerWithdrawalPolicyMutation.mutate({ enabled: checked })} />
-                </label>
-                <div className="grid gap-3 md:grid-cols-2">
-                  <div className="space-y-2">
-                    <Label htmlFor="partnerMinimumAmount">{t('settings.businessPolicy.partner.minimumAmount')}</Label>
-                    <Input id="partnerMinimumAmount" inputMode="decimal" value={partnerMinimumAmount} onChange={(event) => setPartnerMinimumAmount(event.target.value)} placeholder={t('settings.businessPolicy.partner.minimumAmountPlaceholder')} />
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="partnerSupportedMethods">{t('settings.businessPolicy.partner.supportedMethods')}</Label>
-                    <Input id="partnerSupportedMethods" value={partnerSupportedMethods} onChange={(event) => setPartnerSupportedMethods(event.target.value)} placeholder={t('settings.businessPolicy.partner.supportedMethodsPlaceholder')} />
-                  </div>
-                </div>
-                <p className="text-xs text-muted-foreground">{t('settings.businessPolicy.partner.updatedAt', { value: partnerWithdrawalPolicyQuery.data.updatedAt })}</p>
-                <Button size="sm" variant="outline" disabled={partnerWithdrawalPolicyMutation.isPending} onClick={() => partnerWithdrawalPolicyMutation.mutate({ minimumAmount: Number(partnerMinimumAmount), supportedMethods: parseCsvValues(partnerSupportedMethods) })}>
-                  {t('settings.businessPolicy.partner.save')}
-                </Button>
-              </>
-            ) : <p className="text-muted-foreground">{t('settings.businessPolicy.partner.loading')}</p>}
+              <PartnerWithdrawalSection data={partnerWithdrawalPolicyQuery.data} />
+            ) : (
+              <p className="text-muted-foreground">{t('settings.businessPolicy.partner.loading')}</p>
+            )}
           </section>
         </CardContent>
       </Card>
     </div>
+  )
+}
+
+interface ReferralExchangePolicyData {
+  exchangeEnabled: boolean
+  giftPromocodeEnabled: boolean
+  allowedPlanIds: string[]
+  allowedDurationDays: number[]
+  codePrefix: string
+  costPerDay: number
+}
+
+interface ReferralExchangeSectionProps {
+  readonly data: ReferralExchangePolicyData
+}
+
+function ReferralExchangeSection({ data }: ReferralExchangeSectionProps) {
+  const { t } = useTranslation()
+  const queryClient = useQueryClient()
+
+  const schema = z.object({
+    allowedPlanIds: z.string(),
+    allowedDurationDays: z.string(),
+    codePrefix: z.string(),
+    costPerDay: z.string(),
+  })
+  type FormValues = z.infer<typeof schema>
+
+  const form = useForm<FormValues>({
+    resolver: zodResolver(schema),
+    defaultValues: {
+      allowedPlanIds: data.allowedPlanIds.join(', '),
+      allowedDurationDays: data.allowedDurationDays.join(', '),
+      codePrefix: data.codePrefix,
+      costPerDay: String(data.costPerDay),
+    },
+  })
+
+  const referralExchangePolicyMutation = useMutation({
+    mutationFn: settingsApi.updateReferralExchangePolicy,
+    onSuccess: async () =>
+      queryClient.invalidateQueries({ queryKey: ['settings', 'referral-exchange-policy'] }),
+  })
+
+  return (
+    <Form {...form}>
+      <form
+        className="space-y-3"
+        onSubmit={form.handleSubmit((values) =>
+          referralExchangePolicyMutation.mutate({
+            allowedPlanIds: parseCsvValues(values.allowedPlanIds),
+            allowedDurationDays: parseCsvNumbers(values.allowedDurationDays),
+            codePrefix: values.codePrefix.trim(),
+            costPerDay: Number(values.costPerDay),
+          }),
+        )}
+      >
+        <label className="flex items-center justify-between gap-3 rounded-xl border border-border/60 p-3">
+          <span>{t('settings.businessPolicy.referral.exchangeEnabled')}</span>
+          <Switch
+            checked={data.exchangeEnabled}
+            onCheckedChange={(checked) => referralExchangePolicyMutation.mutate({ exchangeEnabled: checked })}
+          />
+        </label>
+        <label className="flex items-center justify-between gap-3 rounded-xl border border-border/60 p-3">
+          <span>{t('settings.businessPolicy.referral.giftPromocodeEnabled')}</span>
+          <Switch
+            checked={data.giftPromocodeEnabled}
+            onCheckedChange={(checked) => referralExchangePolicyMutation.mutate({ giftPromocodeEnabled: checked })}
+          />
+        </label>
+        <div className="grid gap-3 md:grid-cols-2">
+          <FormField
+            control={form.control}
+            name="allowedPlanIds"
+            render={({ field }) => (
+              <FormItem className="space-y-2">
+                <FormLabel htmlFor="referralAllowedPlanIds">
+                  {t('settings.businessPolicy.referral.allowedPlanIds')}
+                </FormLabel>
+                <FormControl>
+                  <Input
+                    id="referralAllowedPlanIds"
+                    {...field}
+                    placeholder={t('settings.businessPolicy.referral.allowedPlanIdsPlaceholder')}
+                  />
+                </FormControl>
+              </FormItem>
+            )}
+          />
+          <FormField
+            control={form.control}
+            name="allowedDurationDays"
+            render={({ field }) => (
+              <FormItem className="space-y-2">
+                <FormLabel htmlFor="referralAllowedDurationDays">
+                  {t('settings.businessPolicy.referral.allowedDurationDays')}
+                </FormLabel>
+                <FormControl>
+                  <Input
+                    id="referralAllowedDurationDays"
+                    {...field}
+                    placeholder={t('settings.businessPolicy.referral.allowedDurationDaysPlaceholder')}
+                  />
+                </FormControl>
+              </FormItem>
+            )}
+          />
+          <FormField
+            control={form.control}
+            name="codePrefix"
+            render={({ field }) => (
+              <FormItem className="space-y-2">
+                <FormLabel htmlFor="referralCodePrefix">
+                  {t('settings.businessPolicy.referral.codePrefix')}
+                </FormLabel>
+                <FormControl>
+                  <Input
+                    id="referralCodePrefix"
+                    {...field}
+                    placeholder={t('settings.businessPolicy.referral.codePrefixPlaceholder')}
+                  />
+                </FormControl>
+              </FormItem>
+            )}
+          />
+          <FormField
+            control={form.control}
+            name="costPerDay"
+            render={({ field }) => (
+              <FormItem className="space-y-2">
+                <FormLabel htmlFor="referralCostPerDay">
+                  {t('settings.businessPolicy.referral.costPerDay')}
+                </FormLabel>
+                <FormControl>
+                  <Input
+                    id="referralCostPerDay"
+                    inputMode="numeric"
+                    {...field}
+                    placeholder={t('settings.businessPolicy.referral.costPerDayPlaceholder')}
+                  />
+                </FormControl>
+              </FormItem>
+            )}
+          />
+        </div>
+        <Button
+          type="submit"
+          size="sm"
+          variant="outline"
+          disabled={referralExchangePolicyMutation.isPending}
+        >
+          {t('settings.businessPolicy.referral.save')}
+        </Button>
+      </form>
+    </Form>
+  )
+}
+
+interface PartnerWithdrawalPolicyData {
+  enabled: boolean
+  minimumAmount: number
+  supportedMethods: string[]
+  updatedAt: string
+}
+
+interface PartnerWithdrawalSectionProps {
+  readonly data: PartnerWithdrawalPolicyData
+}
+
+function PartnerWithdrawalSection({ data }: PartnerWithdrawalSectionProps) {
+  const { t } = useTranslation()
+  const queryClient = useQueryClient()
+
+  const schema = z.object({
+    minimumAmount: z.string(),
+    supportedMethods: z.string(),
+  })
+  type FormValues = z.infer<typeof schema>
+
+  const form = useForm<FormValues>({
+    resolver: zodResolver(schema),
+    defaultValues: {
+      minimumAmount: String(data.minimumAmount),
+      supportedMethods: data.supportedMethods.join(', '),
+    },
+  })
+
+  const partnerWithdrawalPolicyMutation = useMutation({
+    mutationFn: settingsApi.updatePartnerWithdrawalPolicy,
+    onSuccess: async () =>
+      queryClient.invalidateQueries({ queryKey: ['settings', 'partner-withdrawal-policy'] }),
+  })
+
+  return (
+    <Form {...form}>
+      <form
+        className="space-y-3"
+        onSubmit={form.handleSubmit((values) =>
+          partnerWithdrawalPolicyMutation.mutate({
+            minimumAmount: Number(values.minimumAmount),
+            supportedMethods: parseCsvValues(values.supportedMethods),
+          }),
+        )}
+      >
+        <label className="flex items-center justify-between gap-3 rounded-xl border border-border/60 p-3">
+          <span>{t('settings.businessPolicy.partner.withdrawalsEnabled')}</span>
+          <Switch
+            checked={data.enabled}
+            onCheckedChange={(checked) => partnerWithdrawalPolicyMutation.mutate({ enabled: checked })}
+          />
+        </label>
+        <div className="grid gap-3 md:grid-cols-2">
+          <FormField
+            control={form.control}
+            name="minimumAmount"
+            render={({ field }) => (
+              <FormItem className="space-y-2">
+                <FormLabel htmlFor="partnerMinimumAmount">
+                  {t('settings.businessPolicy.partner.minimumAmount')}
+                </FormLabel>
+                <FormControl>
+                  <Input
+                    id="partnerMinimumAmount"
+                    inputMode="decimal"
+                    {...field}
+                    placeholder={t('settings.businessPolicy.partner.minimumAmountPlaceholder')}
+                  />
+                </FormControl>
+              </FormItem>
+            )}
+          />
+          <FormField
+            control={form.control}
+            name="supportedMethods"
+            render={({ field }) => (
+              <FormItem className="space-y-2">
+                <FormLabel htmlFor="partnerSupportedMethods">
+                  {t('settings.businessPolicy.partner.supportedMethods')}
+                </FormLabel>
+                <FormControl>
+                  <Input
+                    id="partnerSupportedMethods"
+                    {...field}
+                    placeholder={t('settings.businessPolicy.partner.supportedMethodsPlaceholder')}
+                  />
+                </FormControl>
+              </FormItem>
+            )}
+          />
+        </div>
+        <p className="text-xs text-muted-foreground">
+          {t('settings.businessPolicy.partner.updatedAt', { value: data.updatedAt })}
+        </p>
+        <Button
+          type="submit"
+          size="sm"
+          variant="outline"
+          disabled={partnerWithdrawalPolicyMutation.isPending}
+        >
+          {t('settings.businessPolicy.partner.save')}
+        </Button>
+      </form>
+    </Form>
   )
 }

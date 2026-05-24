@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any -- API response types defined inline */
 /**
  * Payments → Analytics tab.
  *
@@ -16,7 +15,7 @@
 
 import { useState, type JSX } from 'react'
 import { useTranslation } from 'react-i18next'
-import { useQuery } from '@tanstack/react-query'
+import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import {
   Activity,
   AlertTriangle,
@@ -24,7 +23,6 @@ import {
   ArrowUpRight,
   CheckCircle2,
   ChevronDown,
-  ChevronRight,
   CircleDollarSign,
   Clock,
   Loader2,
@@ -60,6 +58,7 @@ import {
   CollapsibleTrigger,
 } from '@/components/ui/collapsible'
 import { cn } from '@/lib/utils'
+import { FadeIn, StaggerItem, StaggerList } from '@/lib/motion'
 
 import {
   type PaymentGatewayIconType,
@@ -153,28 +152,30 @@ export default function PaymentsAnalyticsTab(): JSX.Element {
 
   return (
     <div className="space-y-6 mt-4">
-      <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <h2 className="flex items-center gap-2 text-lg font-semibold">
-            <Activity className="h-5 w-5" />
-            {t('paymentsAnalytics.title')}
-          </h2>
-          <p className="text-sm text-muted-foreground">{t('paymentsAnalytics.subtitle')}</p>
+      <FadeIn>
+        <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h2 className="flex items-center gap-2 text-lg font-semibold">
+              <Activity className="h-5 w-5" />
+              {t('paymentsAnalytics.title')}
+            </h2>
+            <p className="text-sm text-muted-foreground">{t('paymentsAnalytics.subtitle')}</p>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-muted-foreground">{t('paymentsAnalytics.windowLabel')}</span>
+            <Select value={String(days)} onValueChange={(v) => setDays(Number(v))}>
+              <SelectTrigger className="h-9 w-32"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {WINDOW_OPTIONS.map((option) => (
+                  <SelectItem key={option} value={String(option)}>
+                    {t('paymentsAnalytics.windowDays', { count: option })}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
         </div>
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-muted-foreground">{t('paymentsAnalytics.windowLabel')}</span>
-          <Select value={String(days)} onValueChange={(v) => setDays(Number(v))}>
-            <SelectTrigger className="h-9 w-32"><SelectValue /></SelectTrigger>
-            <SelectContent>
-              {WINDOW_OPTIONS.map((option) => (
-                <SelectItem key={option} value={String(option)}>
-                  {t('paymentsAnalytics.windowDays', { count: option })}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-      </div>
+      </FadeIn>
 
       <ProvidersSection days={days} />
       <WebhookHealthSection days={days} />
@@ -186,16 +187,17 @@ export default function PaymentsAnalyticsTab(): JSX.Element {
 
 function ProvidersSection({ days }: { readonly days: number }): JSX.Element {
   const { t } = useTranslation()
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, isFetching } = useQuery({
     queryKey: ['admin', 'analytics', 'payments', 'providers', days],
     queryFn: async () => {
       const res = await api.get<ProvidersReport>(`/admin/analytics/payments/providers?days=${days}`)
       return res.data
     },
     staleTime: 60_000,
+    placeholderData: keepPreviousData,
   })
 
-  if (isLoading || !data) {
+  if (isLoading) {
     return (
       <div className="space-y-3">
         <Skeleton className="h-24 w-full" />
@@ -205,39 +207,61 @@ function ProvidersSection({ days }: { readonly days: number }): JSX.Element {
     )
   }
 
+  if (isError || !data) {
+    return (
+      <Card>
+        <CardContent className="flex items-center gap-2 py-6 text-sm text-rose-500">
+          <AlertTriangle className="h-4 w-4" />
+          {t('paymentsAnalytics.loadError')}
+        </CardContent>
+      </Card>
+    )
+  }
+
   return (
-    <div className="space-y-4">
+    <FadeIn
+      key={`providers-${days}`}
+      className={cn('space-y-4 transition-opacity', isFetching && 'opacity-70')}
+    >
       {/* Aggregate summary cards */}
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <SummaryCard
-          icon={<CircleDollarSign className="h-4 w-4 text-emerald-500" />}
-          title={t('paymentsAnalytics.summary.gmv')}
-          value={formatMoney(data.totalGrossRevenue)}
-          subtitle={t('paymentsAnalytics.summary.windowDays', { count: data.windowDays })}
-        />
-        <SummaryCard
-          icon={<Activity className="h-4 w-4 text-sky-500" />}
-          title={t('paymentsAnalytics.summary.transactions')}
-          value={data.totalTransactions.toLocaleString()}
-          subtitle={t('paymentsAnalytics.summary.completed', { count: data.totalCompleted })}
-        />
-        <SummaryCard
-          icon={<PercentCircle className="h-4 w-4 text-violet-500" />}
-          title={t('paymentsAnalytics.summary.successRate')}
-          value={
-            data.totalTransactions > 0
-              ? `${((data.totalCompleted / data.totalTransactions) * 100).toFixed(1)}%`
-              : '—'
-          }
-          subtitle={t('paymentsAnalytics.summary.checkoutToPaid')}
-        />
-        <SummaryCard
-          icon={<Clock className="h-4 w-4 text-amber-500" />}
-          title={t('paymentsAnalytics.summary.activeProviders')}
-          value={String(data.providers.filter((p) => p.transactions > 0).length)}
-          subtitle={t('paymentsAnalytics.summary.totalProviders', { count: data.providers.length })}
-        />
-      </div>
+      <StaggerList className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <StaggerItem>
+          <SummaryCard
+            icon={<CircleDollarSign className="h-4 w-4 text-emerald-500" />}
+            title={t('paymentsAnalytics.summary.gmv')}
+            value={formatMoney(data.totalGrossRevenue)}
+            subtitle={t('paymentsAnalytics.summary.windowDays', { count: data.windowDays })}
+          />
+        </StaggerItem>
+        <StaggerItem>
+          <SummaryCard
+            icon={<Activity className="h-4 w-4 text-sky-500" />}
+            title={t('paymentsAnalytics.summary.transactions')}
+            value={data.totalTransactions.toLocaleString()}
+            subtitle={t('paymentsAnalytics.summary.completed', { count: data.totalCompleted })}
+          />
+        </StaggerItem>
+        <StaggerItem>
+          <SummaryCard
+            icon={<PercentCircle className="h-4 w-4 text-violet-500" />}
+            title={t('paymentsAnalytics.summary.successRate')}
+            value={
+              data.totalTransactions > 0
+                ? `${((data.totalCompleted / data.totalTransactions) * 100).toFixed(1)}%`
+                : '—'
+            }
+            subtitle={t('paymentsAnalytics.summary.checkoutToPaid')}
+          />
+        </StaggerItem>
+        <StaggerItem>
+          <SummaryCard
+            icon={<Clock className="h-4 w-4 text-amber-500" />}
+            title={t('paymentsAnalytics.summary.activeProviders')}
+            value={String(data.providers.filter((p) => p.transactions > 0).length)}
+            subtitle={t('paymentsAnalytics.summary.totalProviders', { count: data.providers.length })}
+          />
+        </StaggerItem>
+      </StaggerList>
 
       {/* Per-provider rows */}
       <Card>
@@ -251,13 +275,17 @@ function ProvidersSection({ days }: { readonly days: number }): JSX.Element {
               {t('paymentsAnalytics.providers.empty')}
             </p>
           ) : (
-            data.providers.map((provider) => (
-              <ProviderRow key={provider.gatewayType} provider={provider} />
-            ))
+            <StaggerList className="space-y-2">
+              {data.providers.map((provider) => (
+                <StaggerItem key={provider.gatewayType}>
+                  <ProviderRow provider={provider} />
+                </StaggerItem>
+              ))}
+            </StaggerList>
           )}
         </CardContent>
       </Card>
-    </div>
+    </FadeIn>
   )
 }
 
@@ -272,7 +300,7 @@ function ProviderRow({ provider }: { readonly provider: ProviderDetail }): JSX.E
     <Collapsible open={open} onOpenChange={setOpen}>
       <div
         className={cn(
-          'rounded-lg border bg-background/40 transition-colors',
+          'rounded-lg border bg-background/40 transition-colors duration-200',
           open ? 'border-primary/40' : 'hover:border-primary/20',
         )}
       >
@@ -282,11 +310,13 @@ function ProviderRow({ provider }: { readonly provider: ProviderDetail }): JSX.E
             className="flex w-full items-center gap-4 px-4 py-3 text-left"
             aria-expanded={open}
           >
-            {open ? (
-              <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
-            ) : (
-              <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
-            )}
+            <ChevronDown
+              className={cn(
+                'h-4 w-4 shrink-0 text-muted-foreground transition-transform duration-200 ease-out',
+                open ? 'rotate-0' : '-rotate-90',
+              )}
+              aria-hidden
+            />
             <div className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-md bg-muted/40">
               {Icon ? <Icon className="h-5 w-5 object-contain" /> : (
                 <CircleDollarSign className="h-4 w-4 text-muted-foreground" />
@@ -328,8 +358,8 @@ function ProviderRow({ provider }: { readonly provider: ProviderDetail }): JSX.E
               <DeltaBadge value={provider.delta.revenuePct} />
             </div>
 
-            {showsTrend && (
-              <div className="hidden h-12 w-32 lg:block">
+            <div className="hidden h-12 w-32 shrink-0 lg:block" aria-hidden={!showsTrend}>
+              {showsTrend && (
                 <ResponsiveContainer width="100%" height="100%">
                   <AreaChart data={[...provider.daily]}>
                     <defs>
@@ -348,12 +378,12 @@ function ProviderRow({ provider }: { readonly provider: ProviderDetail }): JSX.E
                     />
                   </AreaChart>
                 </ResponsiveContainer>
-              </div>
-            )}
+              )}
+            </div>
           </button>
         </CollapsibleTrigger>
 
-        <CollapsibleContent>
+        <CollapsibleContent className="collapsible-animate overflow-hidden">
           <div className="border-t px-4 py-3">
             <ProviderDetailPanel provider={provider} />
           </div>
@@ -515,7 +545,7 @@ function ProviderDetailPanel({ provider }: { readonly provider: ProviderDetail }
               <Tooltip
                 contentStyle={{ background: 'hsl(var(--popover))', border: '1px solid hsl(var(--border))', borderRadius: 8, fontSize: 12 }}
                 labelStyle={{ color: 'hsl(var(--muted-foreground))' }}
-                formatter={(value: any, key: string) => [formatMoney(Number(value)), key]}
+                formatter={(value: number | string, key: string) => [formatMoney(Number(value)), key]}
               />
               <Area
                 type="monotone"
@@ -537,72 +567,99 @@ function ProviderDetailPanel({ provider }: { readonly provider: ProviderDetail }
 
 function WebhookHealthSection({ days }: { readonly days: number }): JSX.Element {
   const { t } = useTranslation()
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, isFetching } = useQuery({
     queryKey: ['admin', 'analytics', 'payments', 'webhooks', days],
     queryFn: async () => {
       const res = await api.get<WebhookHealthReport>(`/admin/analytics/payments/webhooks?days=${days}`)
       return res.data
     },
     staleTime: 60_000,
+    placeholderData: keepPreviousData,
   })
 
-  if (isLoading || !data) {
+  if (isLoading) {
     return <Skeleton className="h-48 w-full" />
+  }
+
+  if (isError || !data) {
+    return (
+      <Card>
+        <CardContent className="flex items-center gap-2 py-6 text-sm text-rose-500">
+          <AlertTriangle className="h-4 w-4" />
+          {t('paymentsAnalytics.loadError')}
+        </CardContent>
+      </Card>
+    )
   }
 
   const overallRate =
     data.totalReceived === 0 ? 0 : data.totalProcessed / data.totalReceived
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2 text-base">
-          <Webhook className="h-5 w-5" />
-          {t('paymentsAnalytics.webhooks.title')}
-        </CardTitle>
-        <CardDescription>{t('paymentsAnalytics.webhooks.description')}</CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <SummaryCard
-            icon={<Webhook className="h-4 w-4 text-sky-500" />}
-            title={t('paymentsAnalytics.webhooks.received')}
-            value={data.totalReceived.toLocaleString()}
-            subtitle={t('paymentsAnalytics.webhooks.processed', { count: data.totalProcessed })}
-          />
-          <SummaryCard
-            icon={<CheckCircle2 className="h-4 w-4 text-emerald-500" />}
-            title={t('paymentsAnalytics.webhooks.deliveryRate')}
-            value={`${(overallRate * 100).toFixed(1)}%`}
-            subtitle={t('paymentsAnalytics.webhooks.failedSubtitle', { count: data.totalFailed })}
-          />
-          <SummaryCard
-            icon={<AlertTriangle className="h-4 w-4 text-amber-500" />}
-            title={t('paymentsAnalytics.webhooks.txMissingWebhook')}
-            value={data.reconciliation.transactionsMissingWebhook.toLocaleString()}
-            subtitle={t('paymentsAnalytics.webhooks.txMissingWebhookHint')}
-          />
-          <SummaryCard
-            icon={<RefreshCw className="h-4 w-4 text-rose-500" />}
-            title={t('paymentsAnalytics.webhooks.webhookMissingTx')}
-            value={data.reconciliation.webhooksMissingTransaction.toLocaleString()}
-            subtitle={t('paymentsAnalytics.webhooks.webhookMissingTxHint')}
-          />
-        </div>
+    <FadeIn
+      key={`webhooks-${days}`}
+      className={cn('transition-opacity', isFetching && 'opacity-70')}
+    >
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-base">
+            <Webhook className="h-5 w-5" />
+            {t('paymentsAnalytics.webhooks.title')}
+          </CardTitle>
+          <CardDescription>{t('paymentsAnalytics.webhooks.description')}</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <StaggerList className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <StaggerItem>
+              <SummaryCard
+                icon={<Webhook className="h-4 w-4 text-sky-500" />}
+                title={t('paymentsAnalytics.webhooks.received')}
+                value={data.totalReceived.toLocaleString()}
+                subtitle={t('paymentsAnalytics.webhooks.processed', { count: data.totalProcessed })}
+              />
+            </StaggerItem>
+            <StaggerItem>
+              <SummaryCard
+                icon={<CheckCircle2 className="h-4 w-4 text-emerald-500" />}
+                title={t('paymentsAnalytics.webhooks.deliveryRate')}
+                value={`${(overallRate * 100).toFixed(1)}%`}
+                subtitle={t('paymentsAnalytics.webhooks.failedSubtitle', { count: data.totalFailed })}
+              />
+            </StaggerItem>
+            <StaggerItem>
+              <SummaryCard
+                icon={<AlertTriangle className="h-4 w-4 text-amber-500" />}
+                title={t('paymentsAnalytics.webhooks.txMissingWebhook')}
+                value={data.reconciliation.transactionsMissingWebhook.toLocaleString()}
+                subtitle={t('paymentsAnalytics.webhooks.txMissingWebhookHint')}
+              />
+            </StaggerItem>
+            <StaggerItem>
+              <SummaryCard
+                icon={<RefreshCw className="h-4 w-4 text-rose-500" />}
+                title={t('paymentsAnalytics.webhooks.webhookMissingTx')}
+                value={data.reconciliation.webhooksMissingTransaction.toLocaleString()}
+                subtitle={t('paymentsAnalytics.webhooks.webhookMissingTxHint')}
+              />
+            </StaggerItem>
+          </StaggerList>
 
-        {data.perGateway.length === 0 ? (
-          <p className="py-8 text-center text-sm text-muted-foreground">
-            {t('paymentsAnalytics.webhooks.empty')}
-          </p>
-        ) : (
-          <div className="space-y-2">
-            {data.perGateway.map((gateway) => (
-              <WebhookGatewayRow key={gateway.gatewayType} gateway={gateway} />
-            ))}
-          </div>
-        )}
-      </CardContent>
-    </Card>
+          {data.perGateway.length === 0 ? (
+            <p className="py-8 text-center text-sm text-muted-foreground">
+              {t('paymentsAnalytics.webhooks.empty')}
+            </p>
+          ) : (
+            <StaggerList className="space-y-2">
+              {data.perGateway.map((gateway) => (
+                <StaggerItem key={gateway.gatewayType}>
+                  <WebhookGatewayRow gateway={gateway} />
+                </StaggerItem>
+              ))}
+            </StaggerList>
+          )}
+        </CardContent>
+      </Card>
+    </FadeIn>
   )
 }
 

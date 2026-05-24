@@ -9,7 +9,6 @@
  *   • Partner lifecycle (create, toggle, balance, delete)
  *   • Referral attach
  */
-/* eslint-disable @typescript-eslint/no-explicit-any -- TODO: type API responses */
 
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
@@ -44,6 +43,16 @@ import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
 import { useAuthMe } from '@/features/auth/use-auth-me'
+import { usePlans } from '@/features/plans/plans-api'
+import { getErrorMessage } from '@/lib/http-errors'
+import type {
+  UserDetail,
+  UserPartner,
+  UserSubscription,
+  UserTransaction,
+  UserReferralEntry,
+  UserPartnerTransaction,
+} from './user-detail-shape'
 import { DatePicker } from '@/components/ui/date-picker'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -94,9 +103,9 @@ export default function UserDetailPanel({ telegramId }: UserDetailPanelProps) {
   const { data: authUser } = useAuthMe()
   const isDev = authUser?.role === 'DEV'
 
-  const { data: user, isLoading } = useQuery({
+  const { data: user, isLoading } = useQuery<UserDetail>({
     queryKey,
-    queryFn: async () => (await api.get(`/admin/users/${telegramId}`)).data,
+    queryFn: async () => (await api.get<UserDetail>(`/admin/users/${telegramId}`)).data,
     enabled: !!telegramId,
   })
 
@@ -186,7 +195,7 @@ function ProfileTab({
   telegramId,
   queryKey,
 }: {
-  user: any
+  user: UserDetail
   telegramId: string
   queryKey: string[]
 }) {
@@ -226,7 +235,7 @@ function ProfileTab({
       queryClient.invalidateQueries({ queryKey })
       toast.success(t('userDetailPanel.toasts.pointsUpdated'))
     },
-    onError: (err: any) => toast.error(err.response?.data?.message ?? t('userDetailPanel.toasts.profileFailed')),
+    onError: (err) => toast.error(getErrorMessage(err, t('userDetailPanel.toasts.profileFailed'))),
   })
 
   const createPartnerMutation = useMutation({
@@ -235,7 +244,7 @@ function ProfileTab({
       queryClient.invalidateQueries({ queryKey })
       toast.success(t('userDetailPanel.toasts.partnerCreated'))
     },
-    onError: (err: any) => toast.error(err.response?.data?.message ?? t('userDetailPanel.toasts.profileFailed')),
+    onError: (err) => toast.error(getErrorMessage(err, t('userDetailPanel.toasts.profileFailed'))),
   })
 
   const togglePartnerMutation = useMutation({
@@ -244,7 +253,7 @@ function ProfileTab({
       queryClient.invalidateQueries({ queryKey })
       toast.success(t('userDetailPanel.toasts.statusChanged'))
     },
-    onError: (err: any) => toast.error(err.response?.data?.message ?? t('userDetailPanel.toasts.profileFailed')),
+    onError: (err) => toast.error(getErrorMessage(err, t('userDetailPanel.toasts.profileFailed'))),
   })
 
   const handleSave = (): void => {
@@ -261,7 +270,7 @@ function ProfileTab({
 
   const locale = i18n.language === 'ru' ? 'ru-RU' : 'en-US'
   const identityLabel = t(`userDetailPanel.header.identityKind.${user.identityKind ?? 'LOCAL_ONLY'}`)
-  const currentSub = user.subscriptions?.find((s: any) => s.status === 'ACTIVE')
+  const currentSub = user.subscriptions?.find((s) => s.status === 'ACTIVE')
 
   return (
     <div className="grid gap-3 lg:grid-cols-2">
@@ -531,7 +540,7 @@ function UserHeader({
   telegramId,
   queryKey,
 }: {
-  user: any
+  user: UserDetail
   telegramId: string
   queryKey: string[]
 }) {
@@ -660,7 +669,7 @@ function IdentifierChip({
  * - Blocked: red
  * - Inactive: transparent with border
  */
-function UserStatusDot({ user }: { user: any }) {
+function UserStatusDot({ user }: { user: UserDetail }) {
   const now = Date.now()
   const updatedAt = user.updatedAt ? new Date(user.updatedAt).getTime() : 0
   const diffMin = (now - updatedAt) / 60000
@@ -695,7 +704,7 @@ function getUserStatusDotClass(user: { isBlocked: boolean; updatedAt?: string })
 // Subscriptions Tab
 // ══════════════════════════════════════════════════════════════════════════════
 
-function SubscriptionsTab({ user, telegramId, queryKey }: { user: any; telegramId: string; queryKey: string[] }) {
+function SubscriptionsTab({ user, telegramId, queryKey }: { user: UserDetail; telegramId: string; queryKey: string[] }) {
   const { t, i18n } = useTranslation()
   const queryClient = useQueryClient()
   const [showGiveSub, setShowGiveSub] = useState(false)
@@ -706,14 +715,14 @@ function SubscriptionsTab({ user, telegramId, queryKey }: { user: any; telegramI
   const grantTrialMutation = useMutation({
     mutationFn: () => api.post(`/admin/users/${telegramId}/grant-trial`),
     onSuccess: () => { queryClient.invalidateQueries({ queryKey }); toast.success(t('userDetailPanel.toasts.trialGranted')) },
-    onError: (err: any) => toast.error(err.response?.data?.message ?? t('userDetailPage.subscriptionUpdateFailed')),
+    onError: (err) => toast.error(getErrorMessage(err, t('userDetailPage.subscriptionUpdateFailed'))),
   })
 
   const updateSubMutation = useMutation({
     mutationFn: ({ id, data }: { id: string; data: Record<string, unknown> }) =>
       api.patch(`/admin/users/subscriptions/${id}`, data),
     onSuccess: () => { queryClient.invalidateQueries({ queryKey }); toast.success(t('userDetailPanel.toasts.subUpdated')) },
-    onError: (err: any) => toast.error(err.response?.data?.message ?? t('userDetailPage.subscriptionUpdateFailed')),
+    onError: (err) => toast.error(getErrorMessage(err, t('userDetailPage.subscriptionUpdateFailed'))),
   })
 
   const syncMutation = useMutation({
@@ -750,14 +759,11 @@ function SubscriptionsTab({ user, telegramId, queryKey }: { user: any; telegramI
       queryClient.invalidateQueries({ queryKey })
       toast.success(t('userDetailPanel.subscriptions.planAssigned'))
     },
-    onError: (err: any) => toast.error(err.response?.data?.message ?? t('userDetailPanel.toasts.subUpdated')),
+    onError: (err) => toast.error(getErrorMessage(err, t('userDetailPanel.toasts.subUpdated'))),
   })
 
-  const { data: plans } = useQuery({
-    queryKey: ['admin', 'plans'],
-    queryFn: async () => (await api.get('/admin/plans')).data as any[],
-  })
-  const assignablePlans = (plans ?? []).filter((p: any) => !p.isArchived && p.isActive !== false)
+  const { data: plans } = usePlans()
+  const assignablePlans = (plans ?? []).filter((p) => !p.isArchived && p.isActive !== false)
 
   const subs = user.subscriptions ?? []
 
@@ -800,7 +806,7 @@ function SubscriptionsTab({ user, telegramId, queryKey }: { user: any; telegramI
               <SelectValue placeholder={t('userDetailPanel.subscriptions.selectPlan', 'Выберите план')} />
             </SelectTrigger>
             <SelectContent>
-              {assignablePlans.map((plan: any) => (
+              {assignablePlans.map((plan) => (
                 <SelectItem key={plan.id} value={String(plan.id)} className="text-xs">
                   {plan.name} {plan.trafficLimit ? `(${plan.trafficLimit} GB)` : ''}
                 </SelectItem>
@@ -812,7 +818,7 @@ function SubscriptionsTab({ user, telegramId, queryKey }: { user: any; telegramI
             className="h-8"
             onClick={() => {
               // Assign to all subs that don't have a plan
-              const unassigned = subs.filter((s: any) => !s.planSnapshot?.planId && s.status !== 'DELETED')
+              const unassigned = subs.filter((s) => !s.planSnapshot?.planId && s.status !== 'DELETED')
               if (unassigned.length > 0) {
                 api.post('/admin/imports/assign-plan', { planId: assignPlanId, userIds: [user.id] })
                   .then(() => { queryClient.invalidateQueries({ queryKey }); toast.success(t('userDetailPanel.subscriptions.planAssigned', 'Plan assigned')); setShowAssignPlan(false); setAssignPlanId('') })
@@ -830,7 +836,7 @@ function SubscriptionsTab({ user, telegramId, queryKey }: { user: any; telegramI
         <Card><CardContent className="py-8 text-center text-sm text-muted-foreground">{t('userDetailPanel.subscriptions.noSubs')}</CardContent></Card>
       ) : (
         <div className="grid items-start gap-3 sm:grid-cols-2">
-          {subs.map((sub: any) => (
+          {subs.map((sub) => (
             <SubscriptionCard
               key={sub.id}
               sub={sub}
@@ -871,10 +877,10 @@ function SubscriptionCard({
   onDelete,
   onAssignPlan,
 }: {
-  sub: any
+  sub: UserSubscription
   isOpen: boolean
   onToggleOpen: () => void
-  assignablePlans: any[]
+  assignablePlans: ReadonlyArray<import('@/features/plans/plans-api').Plan>
   onUpdate: (data: Record<string, unknown>) => void
   onSync: () => void
   onResetTraffic: () => void
@@ -1013,7 +1019,7 @@ function SubscriptionCard({
                   <Select value={sub.plan?.id ?? ''} onValueChange={(planId) => { if (planId && planId !== sub.plan?.id) onAssignPlan(planId) }}>
                     <SelectTrigger className="h-7 w-40 text-xs"><SelectValue /></SelectTrigger>
                     <SelectContent>
-                      {assignablePlans.map((p: any) => (
+                      {assignablePlans.map((p) => (
                         <SelectItem key={p.id} value={String(p.id)}>{p.name}</SelectItem>
                       ))}
                     </SelectContent>
@@ -1057,7 +1063,7 @@ function PlanAccessSection({
 }: {
   telegramId: string
   queryKey: string[]
-  plans: any[]
+  plans: ReadonlyArray<import('@/features/plans/plans-api').Plan>
 }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
@@ -1075,7 +1081,7 @@ function PlanAccessSection({
   })
 
   // Plans with availability=ALLOWED are the ones that use allowedUserIds
-  const allowedPlans = plans.filter((p: any) => p.availability === 'ALLOWED')
+  const allowedPlans = plans.filter((p) => p.availability === 'ALLOWED')
   if (allowedPlans.length === 0) return null
 
   return (
@@ -1087,7 +1093,7 @@ function PlanAccessSection({
         <p className="text-xs text-muted-foreground">
           {t('userDetailPanel.subscriptions.planAccessHint')}
         </p>
-        {allowedPlans.map((plan: any) => {
+        {allowedPlans.map((plan) => {
           const hasAccess = (plan.allowedUserIds ?? []).includes(telegramId)
           return (
             <div key={plan.id} className="flex items-center justify-between rounded-md border px-3 py-2">
@@ -1115,15 +1121,12 @@ function GiveSubForm({ telegramId, queryKey, onClose }: { telegramId: string; qu
   const [days, setDays] = useState('30')
   const [isTrial, setIsTrial] = useState(false)
 
-  const { data: plans } = useQuery({
-    queryKey: ['admin', 'plans'],
-    queryFn: async () => (await api.get('/admin/plans')).data as any[],
-  })
+  const { data: plans } = usePlans()
 
   const mutation = useMutation({
     mutationFn: () => api.post(`/admin/users/${telegramId}/give-subscription`, { planId, durationDays: parseInt(days), isTrial }),
     onSuccess: () => { queryClient.invalidateQueries({ queryKey }); toast.success(t('userDetailPanel.toasts.subGranted')); onClose() },
-    onError: (err: any) => toast.error(err.response?.data?.message ?? t('userDetailPage.subscriptionUpdateFailed')),
+    onError: (err) => toast.error(getErrorMessage(err, t('userDetailPage.subscriptionUpdateFailed'))),
   })
 
   return (
@@ -1133,7 +1136,7 @@ function GiveSubForm({ telegramId, queryKey, onClose }: { telegramId: string; qu
         <Select value={planId} onValueChange={setPlanId}>
           <SelectTrigger><SelectValue placeholder={t('userDetailPanel.subscriptions.planPlaceholder')} /></SelectTrigger>
           <SelectContent>
-            {(plans ?? []).filter((p: any) => !p.isArchived).map((p: any) => (
+            {(plans ?? []).filter((p) => !p.isArchived).map((p) => (
               <SelectItem key={p.id} value={String(p.id)}>{p.name}</SelectItem>
             ))}
           </SelectContent>
@@ -1163,7 +1166,7 @@ function GiveSubForm({ telegramId, queryKey, onClose }: { telegramId: string; qu
 // Partner Tab — two-column: profile (left) + referral stats (right)
 // ══════════════════════════════════════════════════════════════════════════════
 
-function PartnerTab({ user, telegramId, queryKey }: { user: any; telegramId: string; queryKey: string[] }) {
+function PartnerTab({ user, telegramId, queryKey }: { user: UserDetail; telegramId: string; queryKey: string[] }) {
   const { t, i18n } = useTranslation()
   const queryClient = useQueryClient()
   const [adjustAmount, setAdjustAmount] = useState('')
@@ -1173,7 +1176,7 @@ function PartnerTab({ user, telegramId, queryKey }: { user: any; telegramId: str
   const createMutation = useMutation({
     mutationFn: () => api.post(`/admin/users/${telegramId}/create-partner`),
     onSuccess: () => { queryClient.invalidateQueries({ queryKey }); toast.success(t('userDetailPanel.toasts.partnerCreated')) },
-    onError: (err: any) => toast.error(err.response?.data?.message ?? t('userDetailPanel.toasts.profileFailed')),
+    onError: (err) => toast.error(getErrorMessage(err, t('userDetailPanel.toasts.profileFailed'))),
   })
 
   const toggleMutation = useMutation({
@@ -1192,7 +1195,7 @@ function PartnerTab({ user, telegramId, queryKey }: { user: any; telegramId: str
       setAdjustAmount('')
       setAdjustReason('')
     },
-    onError: (err: any) => toast.error(err.response?.data?.message ?? t('userDetailPanel.toasts.profileFailed')),
+    onError: (err) => toast.error(getErrorMessage(err, t('userDetailPanel.toasts.profileFailed'))),
   })
 
   if (!user.partner) {
@@ -1209,8 +1212,9 @@ function PartnerTab({ user, telegramId, queryKey }: { user: any; telegramId: str
   }
 
   const p = user.partner
-  const referrals: any[] = p.referrals ?? []
-  const transactions: any[] = p.transactions ?? []
+  if (!p) return null
+  const referrals: ReadonlyArray<UserReferralEntry> = p.referrals ?? []
+  const transactions: ReadonlyArray<UserPartnerTransaction> = p.transactions ?? []
   const fmtMoney = (v: number) => (v / 100).toLocaleString(locale, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' ₽'
 
   return (
@@ -1273,9 +1277,9 @@ function PartnerTab({ user, telegramId, queryKey }: { user: any; telegramId: str
         <CardContent className="space-y-3 px-4 pb-3 text-xs">
           {/* Referral counts */}
           <div className="grid gap-0.5">
-            <InfoRow icon={<UserCheck className="h-3 w-3" />} label={t('userDetailPanel.partner.referralsL1')} value={String(referrals.filter((r: any) => r.level === 1).length)} />
-            <InfoRow icon={<UserCheck className="h-3 w-3" />} label={t('userDetailPanel.partner.referralsL2')} value={String(referrals.filter((r: any) => r.level === 2).length)} />
-            <InfoRow icon={<UserCheck className="h-3 w-3" />} label={t('userDetailPanel.partner.referralsL3')} value={String(referrals.filter((r: any) => r.level === 3).length)} />
+            <InfoRow icon={<UserCheck className="h-3 w-3" />} label={t('userDetailPanel.partner.referralsL1')} value={String(referrals.filter((r) => r.level === 1).length)} />
+            <InfoRow icon={<UserCheck className="h-3 w-3" />} label={t('userDetailPanel.partner.referralsL2')} value={String(referrals.filter((r) => r.level === 2).length)} />
+            <InfoRow icon={<UserCheck className="h-3 w-3" />} label={t('userDetailPanel.partner.referralsL3')} value={String(referrals.filter((r) => r.level === 3).length)} />
           </div>
 
           <Separator />
@@ -1289,7 +1293,7 @@ function PartnerTab({ user, telegramId, queryKey }: { user: any; telegramId: str
               <p className="text-[11px] text-muted-foreground italic">{t('userDetailPanel.partner.noEarnings')}</p>
             ) : (
               <div className="max-h-48 space-y-1 overflow-auto scrollbar-none">
-                {transactions.slice(0, 20).map((tx: any) => (
+                {transactions.slice(0, 20).map((tx) => (
                   <div key={tx.id} className="flex items-center justify-between gap-2 rounded-md border px-2 py-1">
                     <div className="min-w-0">
                       <span className="text-[10px] text-muted-foreground">L{tx.level ?? '?'}</span>
@@ -1315,7 +1319,7 @@ function PartnerTab({ user, telegramId, queryKey }: { user: any; telegramId: str
               <p className="text-[11px] text-muted-foreground italic">{t('userDetailPanel.partner.noReferrals')}</p>
             ) : (
               <div className="max-h-48 space-y-1 overflow-auto scrollbar-none">
-                {referrals.slice(0, 20).map((ref: any) => (
+                {referrals.slice(0, 20).map((ref) => (
                   <div key={ref.id} className="flex items-center justify-between gap-2 rounded-md border px-2 py-1">
                     <div className="flex items-center gap-1.5 min-w-0">
                       <UserCheck className="h-3 w-3 shrink-0 text-muted-foreground/60" />
@@ -1357,7 +1361,7 @@ function AttachPartnerReferralForm({ telegramId, queryKey }: { telegramId: strin
       toast.success(t('userDetailPanel.partner.attachSuccess'))
       setIdentifier('')
     },
-    onError: (err: any) => toast.error(err.response?.data?.message ?? t('userDetailPanel.partner.attachFailed')),
+    onError: (err) => toast.error(getErrorMessage(err, t('userDetailPanel.partner.attachFailed'))),
   })
 
   return (
@@ -1380,7 +1384,7 @@ function AttachPartnerReferralForm({ telegramId, queryKey }: { telegramId: strin
   )
 }
 
-function PartnerSettings({ telegramId, partner, queryKey }: { telegramId: string; partner: any; queryKey: string[] }) {
+function PartnerSettings({ telegramId, partner, queryKey }: { telegramId: string; partner: UserPartner; queryKey: string[] }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
 
@@ -1538,7 +1542,7 @@ function PartnerSettings({ telegramId, partner, queryKey }: { telegramId: string
 // Referrals Tab — view + attach
 // ══════════════════════════════════════════════════════════════════════════════
 
-function ReferralsTab({ user, telegramId, queryKey }: { user: any; telegramId: string; queryKey: string[] }) {
+function ReferralsTab({ user, telegramId, queryKey }: { user: UserDetail; telegramId: string; queryKey: string[] }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const [referrerId, setReferrerId] = useState('')
@@ -1546,7 +1550,7 @@ function ReferralsTab({ user, telegramId, queryKey }: { user: any; telegramId: s
   const attachMutation = useMutation({
     mutationFn: () => api.post(`/admin/users/${telegramId}/referral/attach`, { referrerTelegramId: referrerId }),
     onSuccess: () => { queryClient.invalidateQueries({ queryKey }); toast.success(t('referralsActions.attach.success')); setReferrerId('') },
-    onError: (err: any) => toast.error(err.response?.data?.message ?? t('referralsActions.attach.failed')),
+    onError: (err) => toast.error(getErrorMessage(err, t('referralsActions.attach.failed'))),
   })
 
   return (
@@ -1581,7 +1585,7 @@ function ReferralsTab({ user, telegramId, queryKey }: { user: any; telegramId: s
         <CardContent>
           {user.referralsGiven?.length ? (
             <div className="space-y-1 text-sm">
-              {user.referralsGiven.slice(0, 20).map((r: any) => (
+              {user.referralsGiven.slice(0, 20).map((r) => (
                 <div key={r.id} className="flex items-center justify-between rounded px-2 py-1 hover:bg-muted/50">
                   <span>{r.referred?.name ?? r.referred?.telegramId ?? '—'}</span>
                   <span className="text-xs text-muted-foreground">L{r.level} · {r.qualifiedAt ? t('userDetailPage.referrals.qualifiedYes') : t('userDetailPage.referrals.qualifiedNo')}</span>
@@ -1632,7 +1636,7 @@ function InviteSettingsTab({
   telegramId,
   queryKey,
 }: {
-  user: any
+  user: UserDetail
   telegramId: string
   queryKey: string[]
 }) {
@@ -1718,8 +1722,8 @@ function InviteSettingsTab({
       toast.success(t('userDetailPanel.invites.saved'))
       setDirty(false)
     },
-    onError: (err: any) =>
-      toast.error(err.response?.data?.message ?? t('userDetailPanel.invites.saveFailed')),
+    onError: (err) =>
+      toast.error(getErrorMessage(err, t('userDetailPanel.invites.saveFailed'))),
   })
 
   return (
@@ -1878,7 +1882,7 @@ function InviteSettingsTab({
 // Transactions Tab
 // ══════════════════════════════════════════════════════════════════════════════
 
-function TransactionsTab({ user }: { user: any }) {
+function TransactionsTab({ user }: { user: UserDetail }) {
   const { t } = useTranslation()
   const txs = user.transactions ?? []
   if (!txs.length) return <Card><CardContent className="py-8 text-center text-sm text-muted-foreground">{t('userDetailPage.transactions.empty')}</CardContent></Card>
@@ -1898,7 +1902,7 @@ function TransactionsTab({ user }: { user: any }) {
               </tr>
             </thead>
             <tbody>
-              {txs.map((tx: any) => (
+              {txs.map((tx) => (
                 <tr key={tx.id} className="border-b last:border-0">
                   <td className="px-3 py-2 font-mono text-xs">{tx.paymentId?.slice(0, 10)}…</td>
                   <td className="px-3 py-2"><Badge variant={tx.status === 'COMPLETED' ? 'success' : 'secondary'} className="text-[10px]">{tx.status}</Badge></td>
@@ -1924,7 +1928,7 @@ function WebCabinetTab({
   telegramId,
   queryKey,
 }: {
-  user: any
+  user: UserDetail
   telegramId: string
   queryKey: string[]
 }) {
@@ -1948,8 +1952,8 @@ function WebCabinetTab({
       })
       toast.success(t('userDetailPanel.web.passwordReset'))
     },
-    onError: (err: any) =>
-      toast.error(err.response?.data?.message ?? t('userDetailPanel.web.passwordResetFailed')),
+    onError: (err) =>
+      toast.error(getErrorMessage(err, t('userDetailPanel.web.passwordResetFailed'))),
   })
 
   const renameMutation = useMutation({
@@ -1959,8 +1963,8 @@ function WebCabinetTab({
       queryClient.invalidateQueries({ queryKey })
       toast.success(t('userDetailPanel.web.renamed'))
     },
-    onError: (err: any) =>
-      toast.error(err.response?.data?.message ?? t('userDetailPanel.web.renameFailed')),
+    onError: (err) =>
+      toast.error(getErrorMessage(err, t('userDetailPanel.web.renameFailed'))),
   })
 
   return (

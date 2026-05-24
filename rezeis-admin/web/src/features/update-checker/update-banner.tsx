@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useQuery } from '@tanstack/react-query'
 import { ArrowUpRight, X } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
+import { safeGetItem, safeSetItem } from '@/lib/safe-storage'
 
 import { getUpdateStatus } from './update-checker-api'
 
@@ -33,15 +34,9 @@ export function UpdateBanner() {
     retry: false,
   })
 
-  const [dismissedVersion, setDismissedVersion] = useState<string | null>(null)
-  useEffect(() => {
-    try {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- TODO: refactor to derive state
-      setDismissedVersion(localStorage.getItem(DISMISS_KEY))
-    } catch {
-      /* private mode etc. — fine, just don't persist */
-    }
-  }, [])
+  const [dismissedVersion, setDismissedVersion] = useState<string | null>(() =>
+    safeGetItem(DISMISS_KEY),
+  )
 
   if (!status.data) return null
   if (status.data.source === 'unknown') return null
@@ -49,12 +44,10 @@ export function UpdateBanner() {
   if (dismissedVersion === status.data.latest) return null
 
   const dismiss = () => {
-    try {
-      localStorage.setItem(DISMISS_KEY, status.data!.latest!)
-    } catch {
-      /* ignore */
-    }
-    setDismissedVersion(status.data!.latest)
+    const latest = status.data?.latest
+    if (!latest) return
+    safeSetItem(DISMISS_KEY, latest)
+    setDismissedVersion(latest)
   }
 
   const url = status.data.htmlUrl ?? null

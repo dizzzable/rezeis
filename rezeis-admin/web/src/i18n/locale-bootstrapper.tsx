@@ -3,6 +3,7 @@ import { useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 
 import { getAuthStatus, type AuthStatusResponse } from '@/features/auth/auth-api'
+import { safeGetItem } from '@/lib/safe-storage'
 import { useLocaleStore } from '@/stores/locale-store'
 
 const STORAGE_KEY = 'rezeis.admin.locale'
@@ -19,12 +20,7 @@ function isSupportedLocale(value: string | undefined): value is SupportedLocale 
 }
 
 function readUserLocaleSelection(): string | null {
-  if (typeof window === 'undefined') return null
-  try {
-    return window.localStorage.getItem(STORAGE_KEY)
-  } catch {
-    return null
-  }
+  return safeGetItem(STORAGE_KEY)
 }
 
 /**

@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { Plus, Download, Trash2, AlertCircle, Archive, RefreshCw, Settings, Send, RotateCcw } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api';
+import { safeGetItem } from '@/lib/safe-storage';
 import { formatDateTime } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -135,7 +136,7 @@ export default function BackupPage() {
 
   async function downloadBackup(filename: string): Promise<void> {
     try {
-      const token = localStorage.getItem('rezeis_admin_token') ?? '';
+      const token = safeGetItem('rezeis_admin_token') ?? '';
       const response = await fetch(`/api/admin/backup/download/${encodeURIComponent(filename)}`, {
         headers: { Authorization: `Bearer ${token}` },
       });

@@ -333,13 +333,15 @@ function ColorEditorCard() {
   const clearOverrides = useThemeStore((s) => s.clearOverrides)
 
   const [editorMode, setEditorMode] = useState<'light' | 'dark'>(resolvedMode)
-
-  // Keep the edited mode in sync with the active mode the first time the
-  // user lands on this tab so the picker always shows what they see.
-  useEffect((): void => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- TODO: refactor to derive state
+  // Keep the edited mode in sync with the active mode whenever it changes
+  // externally (e.g. user toggled the global theme switch). This is the
+  // canonical "reset state when prop changes" pattern — see
+  // https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes
+  const [prevResolvedMode, setPrevResolvedMode] = useState(resolvedMode)
+  if (resolvedMode !== prevResolvedMode) {
+    setPrevResolvedMode(resolvedMode)
     setEditorMode(resolvedMode)
-  }, [resolvedMode])
+  }
 
   const overrides =
     editorMode === 'dark' ? overridesDark : overridesLight

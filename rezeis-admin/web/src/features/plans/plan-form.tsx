@@ -12,6 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Separator } from '@/components/ui/separator'
 import { Switch } from '@/components/ui/switch'
 import { remnawaveApi } from '@/features/remnawave/remnawave-api'
+import { usePlans, type Plan } from './plans-api'
 
 const PLAN_TYPES = ['TRAFFIC', 'DEVICES', 'BOTH', 'UNLIMITED'] as const
 const AVAILABILITIES = ['ALL', 'NEW', 'EXISTING', 'INVITED', 'ALLOWED', 'TRIAL'] as const
@@ -37,9 +38,17 @@ export interface PlanFormData {
   durations: { days: number; prices: { currency: string; price: string }[] }[]
 }
 
+interface PlanInput extends Partial<Plan> {
+  /**
+   * Backend-only field for archived plans, not present in the public
+   * catalog. Tells the renew engine how to migrate active subscriptions
+   * (`SELF_RENEW`, `UPGRADE`, `REPLACE`).
+   */
+  archivedRenewMode?: string
+}
+
 interface Props {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  plan?: any
+  plan?: PlanInput
   onSubmit: (data: PlanFormData) => void
   isLoading: boolean
 }
@@ -80,11 +89,9 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
   const [durations, setDurations] = useState<
     { days: string; prices: { currency: string; price: string }[] }[]
   >(
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    plan?.durations?.map((d: any) => ({
+    plan?.durations?.map((d) => ({
       days: d.days.toString(),
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      prices: d.prices.map((p: any) => ({ currency: p.currency, price: p.price.toString() })),
+      prices: d.prices.map((p) => ({ currency: p.currency, price: p.price.toString() })),
     })) ?? [{ days: '30', prices: [{ currency: 'RUB', price: '299' }] }],
   )
 
@@ -100,10 +107,7 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
   })
 
   // All plans for upgrade/replacement picker (exclude current plan)
-  const { data: allPlans } = useQuery({
-    queryKey: ['admin', 'plans'],
-    queryFn: async () => (await api.get<{ id: string; name: string; isActive: boolean; isArchived: boolean }[]>('/admin/plans')).data,
-  })
+  const { data: allPlans } = usePlans()
   const otherPlans = (allPlans ?? []).filter((p) => p.id !== plan?.id && p.isActive && !p.isArchived)
 
   const addDuration = () => {

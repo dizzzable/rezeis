@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any -- TODO: type API responses */
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
@@ -8,6 +7,7 @@ import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { Shield, Loader2 } from 'lucide-react'
 
+import { getErrorMessage } from '@/lib/http-errors'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -121,8 +121,8 @@ function LoginForm() {
       login(data.accessToken)
       navigate('/', { replace: true })
     },
-    onError: (err: any) => {
-      const responseData = err.response?.data
+    onError: (err: unknown) => {
+      const responseData = (err as { response?: { data?: { code?: string; message?: string } } }).response?.data
       if (responseData?.code === 'totp_required') {
         setTotpRequired(true)
         setError(null)
@@ -274,8 +274,8 @@ function RegisterForm() {
       login(data.accessToken)
       navigate('/', { replace: true })
     },
-    onError: (err: any) => {
-      setError(err.response?.data?.message ?? t('signInPage.register.genericError'))
+    onError: (err) => {
+      setError(getErrorMessage(err, t('signInPage.register.genericError')))
     },
   })
 

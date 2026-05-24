@@ -1,10 +1,18 @@
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, vi, beforeAll } from 'vitest'
 import { fireEvent, screen } from '@testing-library/react'
 import DashboardPage from '@/features/dashboard/dashboard-page'
 import { dashboardApi } from '@/features/dashboard/dashboard-api'
 import { renderWithProviders } from '@/test/test-utils'
+import { loadFeatureBundle } from '@/i18n/i18n'
 
 describe('DashboardPage', () => {
+  beforeAll(async () => {
+    // The dashboard i18n bundle is lazy-loaded by the router via
+    // `withFeatureBundle('dashboard', ...)`. Tests bypass the router so
+    // we need to load it manually.
+    await loadFeatureBundle('dashboard')
+  })
+
   it('uses generic bounded copy for dashboard summary load errors', async () => {
     const rawError = 'raw dashboard backend error with provider identifiers and payment ids'
     vi.spyOn(dashboardApi, 'getSummary').mockRejectedValue(new Error(rawError))

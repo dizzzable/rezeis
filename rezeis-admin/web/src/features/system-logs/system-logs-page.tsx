@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Loader2, Trash2, RefreshCw, Pause, Play } from 'lucide-react'
@@ -41,7 +41,7 @@ export default function SystemLogsPage({ embedded = false }: { readonly embedded
 
   const levelQuery = useQuery({
     queryKey: ['system-logs', 'level'],
-    queryFn: getSystemLogLevel,
+    queryFn: ({ signal }) => getSystemLogLevel(signal),
     staleTime: 30_000,
   })
 
@@ -53,13 +53,13 @@ export default function SystemLogsPage({ embedded = false }: { readonly embedded
 
   const logsQuery = useQuery({
     queryKey: ['system-logs', filterLevel, search],
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       const result = await listSystemLogs({
         afterId: cursor.current,
         level: filterLevel === 'ALL' ? undefined : filterLevel,
         search: search.trim() || undefined,
         limit: 500,
-      })
+      }, signal)
       return result
     },
     refetchInterval: paused ? false : 2_000,
@@ -67,22 +67,29 @@ export default function SystemLogsPage({ embedded = false }: { readonly embedded
   })
 
   // Whenever filter/search changes, reset the buffer and cursor.
+  // Uses the "store-prev-prop in render" pattern.
+  // https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes
   const filterKey = `${filterLevel}|${search}`
-  const lastFilterKey = useRef(filterKey)
-  useEffect(() => {
-    if (lastFilterKey.current !== filterKey) {
-      setEntries([])
-      cursor.current = 0
-      lastFilterKey.current = filterKey
-    }
-  }, [filterKey])
+  const [prevFilterKey, setPrevFilterKey] = useState(filterKey)
+  if (filterKey !== prevFilterKey) {
+    setPrevFilterKey(filterKey)
+    setEntries([])
+    cursor.current = 0
+  }
 
-  // Append new entries returned by the latest poll.
-  useEffect(() => {
-    if (!logsQuery.data) return
+  // Append new entries returned by the latest poll. We track the polled
+  // batch's `latestId` so we only append once per poll (not on every
+  // re-render that happens to read the same query data).
+  const polledLatestId = logsQuery.data?.latestId ?? null
+  const [lastAppliedPollId, setLastAppliedPollId] = useState<number | null>(null)
+  if (
+    polledLatestId !== null &&
+    polledLatestId !== lastAppliedPollId &&
+    logsQuery.data &&
+    logsQuery.data.entries.length > 0
+  ) {
+    setLastAppliedPollId(polledLatestId)
     const fresh = logsQuery.data.entries
-    if (fresh.length === 0) return
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- TODO: refactor to derive state
     setEntries((prev) => {
       // The API returns newest first; reverse so we display oldest at top.
       const merged = [...prev, ...[...fresh].reverse()]
@@ -90,8 +97,8 @@ export default function SystemLogsPage({ embedded = false }: { readonly embedded
       if (merged.length > 5_000) merged.splice(0, merged.length - 5_000)
       return merged
     })
-    cursor.current = Math.max(cursor.current, logsQuery.data.latestId)
-  }, [logsQuery.data])
+    cursor.current = Math.max(cursor.current, polledLatestId)
+  }
 
   const setLevelMutation = useMutation({
     mutationFn: setSystemLogLevel,

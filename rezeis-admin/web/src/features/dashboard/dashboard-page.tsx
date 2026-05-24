@@ -29,12 +29,14 @@ export default function DashboardPage(): JSX.Element {
     queryKey: ['admin', 'dashboard', 'summary'],
     queryFn: () => dashboardApi.getSummary(),
     refetchInterval: 30_000,
+    refetchIntervalInBackground: false,
   })
 
   const healthQuery = useQuery({
     queryKey: ['admin', 'dashboard', 'system-health'],
     queryFn: () => dashboardApi.getSystemHealth(),
     refetchInterval: 10_000,
+    refetchIntervalInBackground: false,
   })
 
   if (summaryQuery.isLoading) {

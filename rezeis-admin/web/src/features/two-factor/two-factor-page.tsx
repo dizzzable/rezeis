@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any -- TODO: type API responses */
 import { useState, type JSX } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
@@ -31,6 +30,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { api } from '@/lib/api'
+import { getErrorMessage } from '@/lib/http-errors'
 
 import AuthProvidersTab from '@/features/settings/auth-providers-tab'
 
@@ -78,7 +78,7 @@ export default function TwoFactorPage(): JSX.Element {
       setError(null)
       setInfo(t('twoFactorPage.info.scanQr'))
     },
-    onError: (err: any) => setError(err.response?.data?.message ?? t('twoFactorPage.errors.enrollFailed')),
+    onError: (err) => setError(getErrorMessage(err, t('twoFactorPage.errors.enrollFailed'))),
   })
 
   const confirmMutation = useMutation({
@@ -90,7 +90,7 @@ export default function TwoFactorPage(): JSX.Element {
       setInfo(t('twoFactorPage.info.enabled'))
       queryClient.invalidateQueries({ queryKey: ['admin-2fa-status'] })
     },
-    onError: (err: any) => setError(err.response?.data?.message ?? t('twoFactorPage.errors.invalidCode')),
+    onError: (err) => setError(getErrorMessage(err, t('twoFactorPage.errors.invalidCode'))),
   })
 
   const disableMutation = useMutation({
@@ -100,7 +100,7 @@ export default function TwoFactorPage(): JSX.Element {
       setInfo(t('twoFactorPage.info.disabled'))
       queryClient.invalidateQueries({ queryKey: ['admin-2fa-status'] })
     },
-    onError: (err: any) => setError(err.response?.data?.message ?? t('twoFactorPage.errors.invalidCode')),
+    onError: (err) => setError(getErrorMessage(err, t('twoFactorPage.errors.invalidCode'))),
   })
 
   const regenerateMutation = useMutation({
@@ -115,7 +115,7 @@ export default function TwoFactorPage(): JSX.Element {
       setInfo(t('twoFactorPage.info.newCodes'))
       queryClient.invalidateQueries({ queryKey: ['admin-2fa-status'] })
     },
-    onError: (err: any) => setError(err.response?.data?.message ?? t('twoFactorPage.errors.invalidCode')),
+    onError: (err) => setError(getErrorMessage(err, t('twoFactorPage.errors.invalidCode'))),
   })
 
   if (isLoading || !status) {
@@ -317,8 +317,8 @@ function ChangePasswordSection(): JSX.Element {
       setConfirmPassword('')
       toast.success(t('twoFactorPage.password.success'))
     },
-    onError: (err: any) => {
-      toast.error(err.response?.data?.message ?? t('twoFactorPage.password.failed'))
+    onError: (err) => {
+      toast.error(getErrorMessage(err, t('twoFactorPage.password.failed')))
     },
   })
 
@@ -566,10 +566,11 @@ function PasskeySection(): JSX.Element {
       setPendingName('')
       toast.success(t('twoFactorPage.passkey.toasts.registered'))
     },
-    onError: (err: any) => {
-      const msg = err?.message?.includes('cancelled')
+    onError: (err: unknown) => {
+      const e = err as { message?: string; response?: { data?: { message?: string } } }
+      const msg = e?.message?.includes('cancelled')
         ? t('twoFactorPage.passkey.toasts.cancelled')
-        : err?.response?.data?.message ?? t('twoFactorPage.passkey.toasts.registerFailed')
+        : (e?.response?.data?.message ?? t('twoFactorPage.passkey.toasts.registerFailed'))
       toast.error(msg)
     },
   })

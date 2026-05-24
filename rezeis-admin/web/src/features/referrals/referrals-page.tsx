@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any -- TODO: type API responses */
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
@@ -6,6 +5,7 @@ import { Share2, UserPlus, CheckCircle2, Loader2, Link2Off, Settings } from 'luc
 import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
+import { getErrorMessage } from '@/lib/http-errors'
 import { Card, CardContent } from '@/components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Badge } from '@/components/ui/badge'
@@ -113,14 +113,50 @@ export default function ReferralsPage() {
 
 // ── Referrals Tab ─────────────────────────────────────────────────────────────
 
+interface ReferralUserSummary {
+  readonly name?: string | null
+  readonly username?: string | null
+}
+
+interface ReferralRow {
+  readonly id: number
+  readonly referrer?: ReferralUserSummary | null
+  readonly referrerTelegramId?: string | number | bigint | null
+  readonly referred?: ReferralUserSummary | null
+  readonly referredTelegramId?: string | number | bigint | null
+  readonly level: number
+  readonly source?: string | null
+  readonly qualifiedAt?: string | null
+  readonly createdAt: string
+}
+
+interface InviteRow {
+  readonly id: number
+  readonly inviter?: ReferralUserSummary | null
+  readonly inviterTelegramId?: string | number | bigint | null
+  readonly token: string
+  readonly expiresAt?: string | null
+  readonly revokedAt?: string | null
+}
+
+interface RewardRow {
+  readonly id: number
+  readonly user?: ReferralUserSummary | null
+  readonly userTelegramId?: string | number | bigint | null
+  readonly type: string
+  readonly amount: number | string
+  readonly isIssued: boolean
+  readonly createdAt: string
+}
+
 function ReferralsTab() {
   const { t } = useTranslation()
   const { data, isLoading } = useQuery({
     queryKey: ['admin', 'referrals', 'list'],
     queryFn: async () => {
       const raw = (await api.get('/admin/referrals?limit=100')).data as
-        | unknown[]
-        | { items?: unknown[] }
+        | ReadonlyArray<ReferralRow>
+        | { items?: ReadonlyArray<ReferralRow> }
       const items = Array.isArray(raw) ? raw : (raw?.items ?? [])
       return { items }
     },
@@ -146,7 +182,7 @@ function ReferralsTab() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {data.items.map((r: any) => (
+              {data.items.map((r) => (
                 <TableRow key={r.id}>
                   <TableCell>
                     <div>
@@ -194,8 +230,8 @@ function InvitesTab() {
     queryKey: ['admin', 'referrals', 'invites'],
     queryFn: async () => {
       const raw = (await api.get('/admin/referrals/invites?limit=100')).data as
-        | unknown[]
-        | { items?: unknown[] }
+        | ReadonlyArray<InviteRow>
+        | { items?: ReadonlyArray<InviteRow> }
       const items = Array.isArray(raw) ? raw : (raw?.items ?? [])
       return { items }
     },
@@ -204,7 +240,7 @@ function InvitesTab() {
   const revokeMutation = useMutation({
     mutationFn: (id: number) => api.post(`/admin/referrals/invites/${id}/revoke`),
     onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['admin', 'referrals', 'invites'] }); toast.success(t('referralsActions.invitesTab.revokeSuccess')) },
-    onError: (err: any) => toast.error(err.response?.data?.message ?? t('referralsActions.invitesTab.revokeFailed')),
+    onError: (err) => toast.error(getErrorMessage(err, t('referralsActions.invitesTab.revokeFailed'))),
   })
 
   if (isLoading) return <Skeleton className="h-48 w-full mt-4" />
@@ -226,7 +262,7 @@ function InvitesTab() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {data.items.map((inv: any) => (
+              {data.items.map((inv) => (
                 <TableRow key={inv.id}>
                   <TableCell>
                     <div>
@@ -274,8 +310,8 @@ function RewardsTab() {
     queryKey: ['admin', 'referrals', 'rewards'],
     queryFn: async () => {
       const raw = (await api.get('/admin/referrals/rewards?limit=100')).data as
-        | unknown[]
-        | { items?: unknown[] }
+        | ReadonlyArray<RewardRow>
+        | { items?: ReadonlyArray<RewardRow> }
       const items = Array.isArray(raw) ? raw : (raw?.items ?? [])
       return { items }
     },
@@ -284,7 +320,7 @@ function RewardsTab() {
   const issueMutation = useMutation({
     mutationFn: (id: number) => api.post(`/admin/referrals/rewards/${id}/issue`),
     onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['admin', 'referrals', 'rewards'] }); toast.success(t('referralsActions.rewardsTab.issueSuccess')) },
-    onError: (err: any) => toast.error(err.response?.data?.message ?? t('referralsActions.rewardsTab.issueFailed')),
+    onError: (err) => toast.error(getErrorMessage(err, t('referralsActions.rewardsTab.issueFailed'))),
   })
 
   if (isLoading) return <Skeleton className="h-48 w-full mt-4" />
@@ -307,7 +343,7 @@ function RewardsTab() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {data.items.map((rw: any) => (
+              {data.items.map((rw) => (
                 <TableRow key={rw.id}>
                   <TableCell>
                     <div>
@@ -365,7 +401,7 @@ function AttachReferrerForm({ onClose }: { onClose: () => void }) {
       toast.success(t('referralsActions.attach.success'))
       onClose()
     },
-    onError: (err: any) => toast.error(err.response?.data?.message ?? t('referralsActions.attach.failed')),
+    onError: (err) => toast.error(getErrorMessage(err, t('referralsActions.attach.failed'))),
   })
 
   return (
@@ -413,7 +449,7 @@ function CreateRewardForm({ onClose }: { onClose: () => void }) {
       toast.success(t('referralsActions.create.success'))
       onClose()
     },
-    onError: (err: any) => toast.error(err.response?.data?.message ?? t('referralsActions.create.failed')),
+    onError: (err) => toast.error(getErrorMessage(err, t('referralsActions.create.failed'))),
   })
 
   return (

@@ -10,7 +10,7 @@
  * realtime hook turns into an `['admin', 'automations']` invalidation
  * (we add the key here so the list refreshes when something fires).
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
@@ -51,6 +51,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
 import { cn } from '@/lib/utils';
 import { formatDateTime } from '@/lib/utils';
+import { getErrorMessage } from '@/lib/http-errors';
 import {
   type AutomationActionDef,
   type AutomationActionType,
@@ -93,12 +94,14 @@ export default function AutomationsPage() {
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (selectedId === null && rulesQuery.data && rulesQuery.data.length > 0) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- TODO: refactor to derive state
-      setSelectedId(rulesQuery.data[0]?.id ?? null);
-    }
-  }, [rulesQuery.data, selectedId]);
+  // Auto-select the first rule once data is loaded. Uses the
+  // "store-prev-prop in render" pattern to avoid an effect.
+  // https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes
+  const [selectInitialized, setSelectInitialized] = useState(false);
+  if (!selectInitialized && rulesQuery.data && rulesQuery.data.length > 0) {
+    setSelectInitialized(true);
+    if (selectedId === null) setSelectedId(rulesQuery.data[0]?.id ?? null);
+  }
 
   return (
     <div className="space-y-6">
@@ -156,9 +159,15 @@ export default function AutomationsPage() {
           selectedId={selectedId}
           onSelect={setSelectedId}
           onToggle={(id, enabled) => {
-            void toggleRule(id, enabled).then(() => {
-              queryClient.invalidateQueries({ queryKey: RULES_KEY });
-            });
+            void toggleRule(id, enabled)
+              .then(() => {
+                queryClient.invalidateQueries({ queryKey: RULES_KEY });
+              })
+              .catch((err) => {
+                toast.error(getErrorMessage(err, t('automationsPage.toast.toggleFailed')));
+                // Refetch to revert any optimistic Switch UI back to source of truth.
+                queryClient.invalidateQueries({ queryKey: RULES_KEY });
+              });
           }}
         />
         {selectedId === null ? (
@@ -227,12 +236,17 @@ function RuleList({
               <div
                 key={rule.id}
                 className={cn(
-                  'rounded-md px-3 py-2 transition-colors flex items-center justify-between gap-3 cursor-pointer',
+                  'rounded-md transition-colors flex items-stretch gap-1',
                   active ? 'bg-primary text-primary-foreground' : 'hover:bg-accent',
                 )}
-                onClick={() => onSelect(rule.id)}
               >
-                <div className="min-w-0 flex-1">
+                <button
+                  type="button"
+                  onClick={() => onSelect(rule.id)}
+                  aria-current={active ? 'true' : undefined}
+                  aria-label={t('automationsPage.list.selectAria', { name: rule.name })}
+                  className="min-w-0 flex-1 text-left px-3 py-2 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
                   <div className="flex items-center gap-2">
                     <span className="font-medium text-sm truncate">{rule.name}</span>
                     <Badge variant={active ? 'secondary' : 'outline'} className="text-[10px]">
@@ -243,13 +257,14 @@ function RuleList({
                     {t('automationsPage.list.runCount', { count: rule.runCount })}
                     {rule.lastRunStatus ? t('automationsPage.list.lastRun', { status: rule.lastRunStatus.toLowerCase() }) : ''}
                   </p>
+                </button>
+                <div className="flex items-center pr-3">
+                  <Switch
+                    checked={rule.isEnabled}
+                    onCheckedChange={(v) => onToggle(rule.id, v)}
+                    aria-label={t('automationsPage.list.toggleAria', { name: rule.name })}
+                  />
                 </div>
-                <Switch
-                  checked={rule.isEnabled}
-                  onCheckedChange={(v) => onToggle(rule.id, v)}
-                  onClick={(e) => e.stopPropagation()}
-                  aria-label={t('automationsPage.list.toggleAria', { name: rule.name })}
-                />
               </div>
             );
           })
@@ -282,23 +297,29 @@ function RuleEditor({
 
   const [draft, setDraft] = useState<UpsertRulePayload | null>(null);
 
-  // Reset draft state whenever a different rule is loaded.
-  useEffect(() => {
+  // Reset draft state whenever a different rule is loaded — using the
+  // "store previous prop in state and adjust during render" pattern.
+  // https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes
+  const [ruleSnapshotKey, setRuleSnapshotKey] = useState<string | null>(null);
+  const nextRuleKey = ruleQuery.data
+    ? `${ruleQuery.data.id}|${ruleQuery.data.updatedAt}`
+    : null;
+  if (nextRuleKey !== ruleSnapshotKey) {
+    setRuleSnapshotKey(nextRuleKey);
     if (!ruleQuery.data) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- TODO: refactor to derive state
       setDraft(null);
-      return;
+    } else {
+      setDraft({
+        name: ruleQuery.data.name,
+        description: ruleQuery.data.description ?? '',
+        isEnabled: ruleQuery.data.isEnabled,
+        triggerKind: ruleQuery.data.triggerKind,
+        triggerSpec: ruleQuery.data.triggerSpec,
+        conditions: ruleQuery.data.conditions,
+        actions: ruleQuery.data.actions,
+      });
     }
-    setDraft({
-      name: ruleQuery.data.name,
-      description: ruleQuery.data.description ?? '',
-      isEnabled: ruleQuery.data.isEnabled,
-      triggerKind: ruleQuery.data.triggerKind,
-      triggerSpec: ruleQuery.data.triggerSpec,
-      conditions: ruleQuery.data.conditions,
-      actions: ruleQuery.data.actions,
-    });
-  }, [ruleQuery.data?.id, ruleQuery.data?.updatedAt, ruleQuery.data]);
+  }
 
   const saveMutation = useMutation({
     mutationFn: () => {

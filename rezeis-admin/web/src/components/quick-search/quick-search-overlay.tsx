@@ -52,21 +52,30 @@ export function QuickSearchOverlay({ open, onClose }: QuickSearchOverlayProps) {
     staleTime: 10_000,
   });
 
-  // Reset on open
+  // Reset state when the overlay (re)opens. Uses the
+  // "store-prev-prop in render" pattern.
+  // https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes
+  const [prevOpen, setPrevOpen] = useState(open);
+  if (open !== prevOpen) {
+    setPrevOpen(open);
+    if (open) {
+      setQuery('');
+      setSelectedIndex(0);
+    }
+  }
+  // Focus input shortly after the overlay opens (DOM must be mounted first).
   useEffect(() => {
     if (!open) return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- TODO: refactor to derive state
-    setQuery('');
-    setSelectedIndex(0);
     const focusTimer = setTimeout(() => inputRef.current?.focus(), 50);
     return () => clearTimeout(focusTimer);
   }, [open]);
 
-  // Reset selection when results change
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- TODO: refactor to derive state
+  // Reset selection when the results array identity changes.
+  const [prevResults, setPrevResults] = useState(results);
+  if (results !== prevResults) {
+    setPrevResults(results);
     setSelectedIndex(0);
-  }, [results]);
+  }
 
   const handleSelect = useCallback(
     (result: SearchResult) => {

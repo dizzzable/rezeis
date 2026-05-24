@@ -11,7 +11,7 @@
  * mutations route through React Query with optimistic invalidation so
  * the list refreshes after a save without a manual refetch.
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import {
@@ -97,13 +97,14 @@ export default function RolesPage({ embedded = false }: RolesPageProps = {}) {
 
   const [selectedRoleId, setSelectedRoleId] = useState<string | null>(null);
 
-  // Auto-select the first role once data is loaded.
-  useEffect(() => {
-    if (selectedRoleId === null && rolesQuery.data && rolesQuery.data.length > 0) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- TODO: refactor to derive state
-      setSelectedRoleId(rolesQuery.data[0]?.id ?? null);
-    }
-  }, [rolesQuery.data, selectedRoleId]);
+  // Auto-select the first role once data is loaded. Uses the
+  // "derive in render" pattern to avoid an effect.
+  // https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes
+  const [selectInitialized, setSelectInitialized] = useState(false);
+  if (!selectInitialized && rolesQuery.data && rolesQuery.data.length > 0) {
+    setSelectInitialized(true);
+    if (selectedRoleId === null) setSelectedRoleId(rolesQuery.data[0]?.id ?? null);
+  }
 
   const selectedRoleQuery = useQuery({
     queryKey: ['admin', 'rbac', 'role', selectedRoleId],
@@ -297,14 +298,19 @@ function RoleEditor({
   const [description, setDescription] = useState('');
   const [permissions, setPermissions] = useState<Set<string>>(new Set());
 
-  // Reset local edit state whenever the loaded role changes.
-  useEffect(() => {
-    if (!role) return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- TODO: refactor to derive state
-    setDisplayName(role.displayName);
-    setDescription(role.description ?? '');
-    setPermissions(new Set(role.permissions.map((p) => `${p.resource}:${p.action}`)));
-  }, [role?.id, role?.updatedAt, role]);
+  // Reset local edit state whenever the loaded role changes — using the
+  // "store previous prop in state and adjust during render" pattern.
+  // https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes
+  const [roleSnapshotKey, setRoleSnapshotKey] = useState<string | null>(null);
+  if (role) {
+    const nextKey = `${role.id}|${role.updatedAt}`;
+    if (nextKey !== roleSnapshotKey) {
+      setRoleSnapshotKey(nextKey);
+      setDisplayName(role.displayName);
+      setDescription(role.description ?? '');
+      setPermissions(new Set(role.permissions.map((p) => `${p.resource}:${p.action}`)));
+    }
+  }
 
   const saveMutation = useMutation({
     mutationFn: () => {

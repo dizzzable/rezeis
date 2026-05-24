@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any -- TODO: type API responses */
 import { useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery } from '@tanstack/react-query'
@@ -15,6 +14,7 @@ import {
 import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
+import { getErrorMessage } from '@/lib/http-errors'
 
 import {
   type ConfigExportPayload,
@@ -66,7 +66,7 @@ export default function ConfigPortabilityPage({ embedded = false }: { readonly e
       downloadJson(`rezeis-admin-config-${new Date().toISOString().slice(0, 10)}.json`, data)
       setError(null)
     },
-    onError: (err: any) => setError(err.response?.data?.message ?? t('configPortabilityPage.export.failed')),
+    onError: (err) => setError(getErrorMessage(err, t('configPortabilityPage.export.failed'))),
   })
 
   const importMutation = useMutation({
@@ -85,7 +85,7 @@ export default function ConfigPortabilityPage({ embedded = false }: { readonly e
       setImportResult(result)
       setError(null)
     },
-    onError: (err: any) => setError(err.response?.data?.message ?? err.message ?? t('configPortabilityPage.import.failed')),
+    onError: (err) => setError(getErrorMessage(err, t('configPortabilityPage.import.failed'))),
   })
 
   const onFilePicked = async (file: File) => {

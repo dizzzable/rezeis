@@ -1,6 +1,9 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
+import { useForm } from 'react-hook-form'
+import { zodResolver } from '@hookform/resolvers/zod'
+import { z } from 'zod'
 import {
   Bell,
   Edit2,
@@ -30,6 +33,15 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import {
+  Form,
+  FormControl,
+  FormDescription,
+  FormField,
+  FormItem,
+  FormLabel,
+  FormMessage,
+} from '@/components/ui/form'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Separator } from '@/components/ui/separator'
@@ -362,46 +374,99 @@ function SystemNotificationsTab() {
 
 function DeliverySettingsTab() {
   const { t } = useTranslation()
-  const queryClient = useQueryClient()
 
   const { data: settings, isLoading } = useQuery({
     queryKey: ['admin', 'settings'],
     queryFn: async () => (await api.get('/admin/settings')).data,
   })
 
-  const tgConfig = ((settings?.systemNotifications as Record<string, unknown>)?.telegram ?? {}) as Record<string, unknown>
+  if (isLoading) return <Skeleton className="h-64 w-full" />
 
-  const [enabled, setEnabled] = useState(false)
-  const [chatId, setChatId] = useState('')
-  const [defaultTopicId, setDefaultTopicId] = useState('')
-  const [topics, setTopics] = useState<Record<string, string>>({})
-  const [hydrated, setHydrated] = useState(false)
+  return (
+    <div className="space-y-6">
+      <TelegramDeliveryForm settings={settings} />
+      <EmailDeliverySettings />
+    </div>
+  )
+}
 
-  // Hydrate from settings
-  if (settings && !hydrated) {
-    setEnabled(tgConfig.enabled === true)
-    setChatId(typeof tgConfig.chatId === 'string' ? tgConfig.chatId : '')
-    setDefaultTopicId(typeof tgConfig.topicId === 'number' ? String(tgConfig.topicId) : '')
-    const rawTopics = (tgConfig.topics ?? {}) as Record<string, unknown>
-    const parsed: Record<string, string> = {}
-    for (const [k, v] of Object.entries(rawTopics)) {
-      parsed[k.toUpperCase()] = typeof v === 'number' ? String(v) : ''
-    }
-    setTopics(parsed)
-    setHydrated(true)
+interface TelegramDeliveryFormProps {
+  readonly settings: unknown
+}
+
+/**
+ * Telegram delivery form. The parent waits for the `useQuery` to resolve
+ * before mounting this child, so we can safely derive default values from
+ * `settings` synchronously — no set-state-during-render hack is needed.
+ */
+function TelegramDeliveryForm({ settings }: TelegramDeliveryFormProps) {
+  const { t } = useTranslation()
+  const queryClient = useQueryClient()
+
+  const tgConfig = (((settings as Record<string, unknown> | undefined)?.systemNotifications as Record<string, unknown> | undefined)?.telegram ?? {}) as Record<string, unknown>
+
+  const initialTopics: Record<string, string> = {}
+  const rawTopics = (tgConfig.topics ?? {}) as Record<string, unknown>
+  for (const cat of EVENT_CATEGORIES) {
+    const upper = cat.toUpperCase()
+    const v = rawTopics[upper] ?? rawTopics[cat]
+    initialTopics[cat] = typeof v === 'number' ? String(v) : ''
   }
 
+  const topicIdRule = z
+    .string()
+    .trim()
+    .refine((v) => v === '' || /^\d+$/.test(v), {
+      message: t('notificationsPage.delivery.validation.topicInvalid'),
+    })
+
+  const schema = z
+    .object({
+      enabled: z.boolean(),
+      chatId: z
+        .string()
+        .trim()
+        .refine((v) => v === '' || /^-?\d+$/.test(v), {
+          message: t('notificationsPage.delivery.validation.chatIdInvalid'),
+        }),
+      topicId: topicIdRule,
+      topics: z.record(z.string(), topicIdRule),
+    })
+    .superRefine((data, ctx) => {
+      if (data.enabled && !data.chatId) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['chatId'],
+          message: t('notificationsPage.delivery.validation.chatIdRequired'),
+        })
+      }
+    })
+
+  type FormValues = z.infer<typeof schema>
+
+  const form = useForm<FormValues>({
+    resolver: zodResolver(schema),
+    defaultValues: {
+      enabled: tgConfig.enabled === true,
+      chatId: typeof tgConfig.chatId === 'string' ? tgConfig.chatId : '',
+      topicId: typeof tgConfig.topicId === 'number' ? String(tgConfig.topicId) : '',
+      topics: initialTopics,
+    },
+  })
+
   const saveMutation = useMutation({
-    mutationFn: () => {
+    mutationFn: (values: FormValues) => {
       const topicsPayload: Record<string, number | null> = {}
       for (const cat of EVENT_CATEGORIES) {
-        const val = topics[cat]?.trim()
+        const val = values.topics[cat]?.trim() ?? ''
         topicsPayload[cat] = val && /^\d+$/.test(val) ? parseInt(val, 10) : null
       }
       return api.patch('/admin/settings/system-notifications/telegram', {
-        enabled,
-        chatId: chatId.trim() || null,
-        topicId: defaultTopicId.trim() && /^\d+$/.test(defaultTopicId.trim()) ? parseInt(defaultTopicId.trim(), 10) : null,
+        enabled: values.enabled,
+        chatId: values.chatId.trim() || null,
+        topicId: values.topicId.trim() && /^\d+$/.test(values.topicId.trim())
+          ? parseInt(values.topicId.trim(), 10)
+          : null,
         topics: topicsPayload,
       })
     },
@@ -418,113 +483,158 @@ function DeliverySettingsTab() {
     onError: () => toast.error(t('notificationsPage.toasts.testFailed')),
   })
 
-  if (isLoading) return <Skeleton className="h-64 w-full" />
+  const enabled = form.watch('enabled')
+  const chatId = form.watch('chatId')
 
   return (
-    <div className="space-y-6">
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Send className="h-4 w-4" />
-            {t('notificationsPage.delivery.title')}
-          </CardTitle>
-          <CardDescription>
-            {t('notificationsPage.delivery.description')}
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-5">
-          {/* Master toggle */}
-          <div className="flex items-center justify-between rounded-lg border px-4 py-3">
-            <div className="flex items-center gap-2">
-              <Power className="h-4 w-4 text-muted-foreground" />
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <Send className="h-4 w-4" />
+          {t('notificationsPage.delivery.title')}
+        </CardTitle>
+        <CardDescription>
+          {t('notificationsPage.delivery.description')}
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <Form {...form}>
+          <form
+            onSubmit={form.handleSubmit((values) => saveMutation.mutate(values))}
+            className="space-y-5"
+          >
+            {/* Master toggle */}
+            <FormField
+              control={form.control}
+              name="enabled"
+              render={({ field }) => (
+                <FormItem className="flex items-center justify-between rounded-lg border px-4 py-3 space-y-0">
+                  <div className="flex items-center gap-2">
+                    <Power className="h-4 w-4 text-muted-foreground" />
+                    <div>
+                      <FormLabel className="font-medium">
+                        {t('notificationsPage.delivery.enableLabel')}
+                      </FormLabel>
+                      <FormDescription className="text-xs">
+                        {t('notificationsPage.delivery.enableDescription')}
+                      </FormDescription>
+                    </div>
+                  </div>
+                  <FormControl>
+                    <Switch checked={field.value} onCheckedChange={field.onChange} />
+                  </FormControl>
+                </FormItem>
+              )}
+            />
+
+            {/* Chat ID + default topic */}
+            <div className="grid gap-4 sm:grid-cols-2">
+              <FormField
+                control={form.control}
+                name="chatId"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel className="flex items-center gap-1.5">
+                      <Smartphone className="h-3.5 w-3.5 text-muted-foreground" />
+                      {t('notificationsPage.delivery.chatIdLabel')}
+                    </FormLabel>
+                    <FormControl>
+                      <Input
+                        {...field}
+                        placeholder={t('notificationsPage.delivery.chatIdPlaceholder')}
+                      />
+                    </FormControl>
+                    <FormDescription className="text-[11px]">
+                      {t('notificationsPage.delivery.chatIdHint')}
+                    </FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
+                name="topicId"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel className="flex items-center gap-1.5">
+                      <Hash className="h-3.5 w-3.5 text-muted-foreground" />
+                      {t('notificationsPage.delivery.topicLabel')}
+                    </FormLabel>
+                    <FormControl>
+                      <Input
+                        {...field}
+                        placeholder={t('notificationsPage.delivery.topicPlaceholder')}
+                      />
+                    </FormControl>
+                    <FormDescription className="text-[11px]">
+                      {t('notificationsPage.delivery.topicHint')}
+                    </FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+            </div>
+
+            <Separator />
+
+            {/* Per-category routing */}
+            <div className="space-y-3">
               <div>
-                <Label className="font-medium">{t('notificationsPage.delivery.enableLabel')}</Label>
+                <Label className="flex items-center gap-1.5 text-sm font-semibold">
+                  <Settings2 className="h-3.5 w-3.5 text-muted-foreground" />
+                  {t('notificationsPage.delivery.routingTitle')}
+                </Label>
                 <p className="text-xs text-muted-foreground">
-                  {t('notificationsPage.delivery.enableDescription')}
+                  {t('notificationsPage.delivery.routingDescription')}
                 </p>
               </div>
-            </div>
-            <Switch checked={enabled} onCheckedChange={setEnabled} />
-          </div>
-
-          {/* Chat ID */}
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div className="space-y-1.5">
-              <Label className="flex items-center gap-1.5">
-                <Smartphone className="h-3.5 w-3.5 text-muted-foreground" />
-                {t('notificationsPage.delivery.chatIdLabel')}
-              </Label>
-              <Input
-                value={chatId}
-                onChange={(e) => setChatId(e.target.value)}
-                placeholder={t('notificationsPage.delivery.chatIdPlaceholder')}
-              />
-              <p className="text-[11px] text-muted-foreground">
-                {t('notificationsPage.delivery.chatIdHint')}
-              </p>
-            </div>
-            <div className="space-y-1.5">
-              <Label className="flex items-center gap-1.5">
-                <Hash className="h-3.5 w-3.5 text-muted-foreground" />
-                {t('notificationsPage.delivery.topicLabel')}
-              </Label>
-              <Input
-                value={defaultTopicId}
-                onChange={(e) => setDefaultTopicId(e.target.value)}
-                placeholder={t('notificationsPage.delivery.topicPlaceholder')}
-              />
-              <p className="text-[11px] text-muted-foreground">
-                {t('notificationsPage.delivery.topicHint')}
-              </p>
-            </div>
-          </div>
-
-          <Separator />
-
-          {/* Per-category topic routing */}
-          <div className="space-y-3">
-            <div>
-              <Label className="flex items-center gap-1.5 text-sm font-semibold">
-                <Settings2 className="h-3.5 w-3.5 text-muted-foreground" />
-                {t('notificationsPage.delivery.routingTitle')}
-              </Label>
-              <p className="text-xs text-muted-foreground">
-                {t('notificationsPage.delivery.routingDescription')}
-              </p>
-            </div>
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-              {EVENT_CATEGORIES.map((cat) => (
-                <div key={cat} className="space-y-1">
-                  <Label className="text-xs">{t(String(`notificationsPage.categoryLabels.${cat}`))}</Label>
-                  <Input
-                    value={topics[cat] ?? ''}
-                    onChange={(e) => setTopics((prev) => ({ ...prev, [cat]: e.target.value }))}
-                    placeholder="topic_id"
-                    className="h-8 text-xs"
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                {EVENT_CATEGORIES.map((cat) => (
+                  <FormField
+                    key={cat}
+                    control={form.control}
+                    name={`topics.${cat}` as const}
+                    render={({ field }) => (
+                      <FormItem className="space-y-1">
+                        <FormLabel className="text-xs">
+                          {t(String(`notificationsPage.categoryLabels.${cat}`))}
+                        </FormLabel>
+                        <FormControl>
+                          <Input
+                            {...field}
+                            placeholder="topic_id"
+                            className="h-8 text-xs"
+                          />
+                        </FormControl>
+                        <FormMessage className="text-[10px]" />
+                      </FormItem>
+                    )}
                   />
-                </div>
-              ))}
+                ))}
+              </div>
             </div>
-          </div>
 
-          <Separator />
+            <Separator />
 
-          <div className="flex gap-3">
-            <Button onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending}>
-              {saveMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
-              {t('notificationsPage.delivery.save')}
-            </Button>
-            <Button variant="outline" onClick={() => testMutation.mutate()} disabled={testMutation.isPending || !enabled || !chatId.trim()}>
-              {testMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Send className="mr-2 h-4 w-4" />}
-              {t('notificationsPage.delivery.testMessage')}
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Email SMTP Settings */}
-      <EmailDeliverySettings />
-    </div>
+            <div className="flex gap-3">
+              <Button type="submit" disabled={saveMutation.isPending}>
+                {saveMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
+                {t('notificationsPage.delivery.save')}
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => testMutation.mutate()}
+                disabled={testMutation.isPending || !enabled || !chatId.trim()}
+              >
+                {testMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Send className="mr-2 h-4 w-4" />}
+                {t('notificationsPage.delivery.testMessage')}
+              </Button>
+            </div>
+          </form>
+        </Form>
+      </CardContent>
+    </Card>
   )
 }
 
@@ -545,47 +655,87 @@ interface SmtpSettings {
 }
 
 function EmailDeliverySettings() {
-  const { t } = useTranslation()
-
   const { data, isLoading } = useQuery<SmtpSettings>({
     queryKey: ['admin', 'email', 'settings'],
     queryFn: async () => (await api.get('/admin/email/settings')).data,
   })
 
-  const [form, setForm] = useState<SmtpSettings>({
-    enabled: false,
-    host: '',
-    port: 587,
-    username: '',
-    password: '',
-    fromAddress: '',
-    fromName: '',
-    useTls: true,
-    useSsl: false,
-  })
-  const [hydrated, setHydrated] = useState(false)
-  const [testEmail, setTestEmail] = useState('')
+  if (isLoading || !data) return <Skeleton className="h-64 w-full" />
+  return <EmailDeliveryForm initial={data} />
+}
 
-  if (data && !hydrated) {
-    setForm({
-      enabled: data.enabled,
-      host: data.host ?? '',
-      port: data.port,
-      username: data.username ?? '',
-      password: '', // never pre-fill password
-      fromAddress: data.fromAddress,
-      fromName: data.fromName,
-      useTls: data.useTls,
-      useSsl: data.useSsl,
+interface EmailDeliveryFormProps {
+  readonly initial: SmtpSettings
+}
+
+function EmailDeliveryForm({ initial }: EmailDeliveryFormProps) {
+  const { t } = useTranslation()
+
+  const schema = z
+    .object({
+      enabled: z.boolean(),
+      host: z.string().trim(),
+      port: z.coerce
+        .number({ invalid_type_error: t('notificationsPage.email.validation.portInvalid') })
+        .int(t('notificationsPage.email.validation.portInvalid'))
+        .min(1, t('notificationsPage.email.validation.portInvalid'))
+        .max(65535, t('notificationsPage.email.validation.portInvalid')),
+      username: z.string().trim(),
+      password: z.string(),
+      fromAddress: z
+        .string()
+        .trim()
+        .min(1, t('notificationsPage.email.validation.fromAddressRequired'))
+        .email(t('notificationsPage.email.validation.fromAddressInvalid')),
+      fromName: z
+        .string()
+        .trim()
+        .min(1, t('notificationsPage.email.validation.fromNameRequired')),
+      useTls: z.boolean(),
+      useSsl: z.boolean(),
     })
-    setHydrated(true)
-  }
+    .superRefine((data, ctx) => {
+      if (data.enabled && !data.host) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['host'],
+          message: t('notificationsPage.email.validation.hostRequired'),
+        })
+      }
+    })
+
+  type FormValues = z.infer<typeof schema>
+
+  const form = useForm<FormValues>({
+    resolver: zodResolver(schema),
+    defaultValues: {
+      enabled: initial.enabled,
+      host: initial.host ?? '',
+      port: initial.port,
+      username: initial.username ?? '',
+      password: '', // never pre-fill password
+      fromAddress: initial.fromAddress,
+      fromName: initial.fromName,
+      useTls: initial.useTls,
+      useSsl: initial.useSsl,
+    },
+  })
+
+  const testEmailSchema = z
+    .string()
+    .trim()
+    .email(t('notificationsPage.email.validation.testEmailInvalid'))
+
+  const testEmailForm = useForm<{ to: string }>({
+    resolver: zodResolver(z.object({ to: testEmailSchema })),
+    defaultValues: { to: '' },
+  })
 
   const saveMutation = useMutation({
-    mutationFn: () => {
-      const payload: Record<string, unknown> = { ...form }
+    mutationFn: (values: FormValues) => {
+      const payload: Record<string, unknown> = { ...values }
       // Don't send empty password (keeps existing)
-      if (!payload.password) delete payload.password
+      if (!values.password) delete payload.password
       return api.post('/admin/email/settings', payload)
     },
     onSuccess: () => toast.success(t('notificationsPage.email.toasts.saved')),
@@ -602,7 +752,8 @@ function EmailDeliverySettings() {
   })
 
   const testMutation = useMutation({
-    mutationFn: async () => (await api.post('/admin/email/test', { to: testEmail })).data as { success: boolean; error?: string },
+    mutationFn: async (values: { to: string }) =>
+      (await api.post('/admin/email/test', { to: values.to })).data as { success: boolean; error?: string },
     onSuccess: (res) => {
       if (res.success) toast.success(t('notificationsPage.email.toasts.testSent'))
       else toast.error(res.error ?? t('notificationsPage.email.toasts.testFailed'))
@@ -610,7 +761,8 @@ function EmailDeliverySettings() {
     onError: () => toast.error(t('notificationsPage.email.toasts.testFailed')),
   })
 
-  if (isLoading) return <Skeleton className="h-64 w-full" />
+  const enabled = form.watch('enabled')
+  const host = form.watch('host')
 
   return (
     <Card>
@@ -623,137 +775,239 @@ function EmailDeliverySettings() {
           {t('notificationsPage.email.description')}
         </CardDescription>
       </CardHeader>
-      <CardContent className="space-y-5">
-        {/* Master toggle */}
-        <div className="flex items-center justify-between rounded-lg border px-4 py-3">
-          <div className="flex items-center gap-2">
-            <Power className="h-4 w-4 text-muted-foreground" />
-            <div>
-              <Label className="font-medium">{t('notificationsPage.email.enableLabel')}</Label>
-              <p className="text-xs text-muted-foreground">
-                {t('notificationsPage.email.enableDescription')}
-              </p>
-            </div>
-          </div>
-          <Switch checked={form.enabled} onCheckedChange={(v) => setForm((f) => ({ ...f, enabled: v }))} />
-        </div>
-
-        {/* SMTP Config */}
-        <div className="grid gap-4 sm:grid-cols-2">
-          <div className="space-y-1.5">
-            <Label className="text-xs">{t('notificationsPage.email.host')}</Label>
-            <Input
-              value={form.host ?? ''}
-              onChange={(e) => setForm((f) => ({ ...f, host: e.target.value }))}
-              placeholder="smtp.example.com"
-              className="h-8 text-xs font-mono"
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label className="text-xs">{t('notificationsPage.email.port')}</Label>
-            <Input
-              type="number"
-              value={form.port}
-              onChange={(e) => setForm((f) => ({ ...f, port: Number(e.target.value) }))}
-              className="h-8 text-xs font-mono"
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label className="text-xs">{t('notificationsPage.email.username')}</Label>
-            <Input
-              value={form.username ?? ''}
-              onChange={(e) => setForm((f) => ({ ...f, username: e.target.value }))}
-              placeholder="user@example.com"
-              className="h-8 text-xs font-mono"
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label className="text-xs">{t('notificationsPage.email.password')}</Label>
-            <Input
-              type="password"
-              value={form.password ?? ''}
-              onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))}
-              placeholder={data?.passwordSet ? '••••••••' : ''}
-              className="h-8 text-xs font-mono"
-            />
-          </div>
-        </div>
-
-        <Separator />
-
-        {/* From address */}
-        <div className="grid gap-4 sm:grid-cols-2">
-          <div className="space-y-1.5">
-            <Label className="text-xs">{t('notificationsPage.email.fromAddress')}</Label>
-            <Input
-              value={form.fromAddress}
-              onChange={(e) => setForm((f) => ({ ...f, fromAddress: e.target.value }))}
-              placeholder="no-reply@yourdomain.com"
-              className="h-8 text-xs font-mono"
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label className="text-xs">{t('notificationsPage.email.fromName')}</Label>
-            <Input
-              value={form.fromName}
-              onChange={(e) => setForm((f) => ({ ...f, fromName: e.target.value }))}
-              placeholder="Rezeis VPN"
-              className="h-8 text-xs"
-            />
-          </div>
-        </div>
-
-        {/* TLS/SSL */}
-        <div className="flex items-center gap-6">
-          <div className="flex items-center gap-2">
-            <Switch checked={form.useTls} onCheckedChange={(v) => setForm((f) => ({ ...f, useTls: v }))} />
-            <Label className="text-xs">
-              <Shield className="inline h-3 w-3 mr-1" />
-              STARTTLS
-            </Label>
-          </div>
-          <div className="flex items-center gap-2">
-            <Switch checked={form.useSsl} onCheckedChange={(v) => setForm((f) => ({ ...f, useSsl: v }))} />
-            <Label className="text-xs">
-              <Shield className="inline h-3 w-3 mr-1" />
-              SSL/TLS
-            </Label>
-          </div>
-        </div>
-
-        <Separator />
-
-        {/* Actions */}
-        <div className="flex flex-wrap gap-3">
-          <Button onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending}>
-            {saveMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
-            {t('notificationsPage.email.save')}
-          </Button>
-          <Button variant="outline" onClick={() => verifyMutation.mutate()} disabled={verifyMutation.isPending || !form.host}>
-            {verifyMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Shield className="mr-2 h-4 w-4" />}
-            {t('notificationsPage.email.verify')}
-          </Button>
-        </div>
-
-        {/* Test email */}
-        <div className="flex items-center gap-2 pt-2 border-t">
-          <Input
-            type="email"
-            value={testEmail}
-            onChange={(e) => setTestEmail(e.target.value)}
-            placeholder={t('notificationsPage.email.testPlaceholder')}
-            className="h-8 text-xs max-w-64"
-          />
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => testMutation.mutate()}
-            disabled={testMutation.isPending || !form.enabled || !testEmail.trim()}
+      <CardContent>
+        <Form {...form}>
+          <form
+            onSubmit={form.handleSubmit((values) => saveMutation.mutate(values))}
+            className="space-y-5"
           >
-            {testMutation.isPending ? <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> : <Send className="mr-2 h-3.5 w-3.5" />}
-            {t('notificationsPage.email.sendTest')}
-          </Button>
-        </div>
+            {/* Master toggle */}
+            <FormField
+              control={form.control}
+              name="enabled"
+              render={({ field }) => (
+                <FormItem className="flex items-center justify-between rounded-lg border px-4 py-3 space-y-0">
+                  <div className="flex items-center gap-2">
+                    <Power className="h-4 w-4 text-muted-foreground" />
+                    <div>
+                      <FormLabel className="font-medium">
+                        {t('notificationsPage.email.enableLabel')}
+                      </FormLabel>
+                      <FormDescription className="text-xs">
+                        {t('notificationsPage.email.enableDescription')}
+                      </FormDescription>
+                    </div>
+                  </div>
+                  <FormControl>
+                    <Switch checked={field.value} onCheckedChange={field.onChange} />
+                  </FormControl>
+                </FormItem>
+              )}
+            />
+
+            {/* SMTP config */}
+            <div className="grid gap-4 sm:grid-cols-2">
+              <FormField
+                control={form.control}
+                name="host"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel className="text-xs">{t('notificationsPage.email.host')}</FormLabel>
+                    <FormControl>
+                      <Input
+                        {...field}
+                        placeholder="smtp.example.com"
+                        className="h-8 text-xs font-mono"
+                      />
+                    </FormControl>
+                    <FormMessage className="text-[10px]" />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
+                name="port"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel className="text-xs">{t('notificationsPage.email.port')}</FormLabel>
+                    <FormControl>
+                      <Input
+                        type="number"
+                        {...field}
+                        onChange={(e) => field.onChange(e.target.value === '' ? '' : Number(e.target.value))}
+                        className="h-8 text-xs font-mono"
+                      />
+                    </FormControl>
+                    <FormMessage className="text-[10px]" />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
+                name="username"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel className="text-xs">{t('notificationsPage.email.username')}</FormLabel>
+                    <FormControl>
+                      <Input
+                        {...field}
+                        placeholder="user@example.com"
+                        className="h-8 text-xs font-mono"
+                      />
+                    </FormControl>
+                    <FormMessage className="text-[10px]" />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
+                name="password"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel className="text-xs">{t('notificationsPage.email.password')}</FormLabel>
+                    <FormControl>
+                      <Input
+                        type="password"
+                        {...field}
+                        placeholder={initial.passwordSet ? '••••••••' : ''}
+                        className="h-8 text-xs font-mono"
+                      />
+                    </FormControl>
+                    <FormMessage className="text-[10px]" />
+                  </FormItem>
+                )}
+              />
+            </div>
+
+            <Separator />
+
+            {/* From address */}
+            <div className="grid gap-4 sm:grid-cols-2">
+              <FormField
+                control={form.control}
+                name="fromAddress"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel className="text-xs">{t('notificationsPage.email.fromAddress')}</FormLabel>
+                    <FormControl>
+                      <Input
+                        {...field}
+                        placeholder="no-reply@yourdomain.com"
+                        className="h-8 text-xs font-mono"
+                      />
+                    </FormControl>
+                    <FormMessage className="text-[10px]" />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
+                name="fromName"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel className="text-xs">{t('notificationsPage.email.fromName')}</FormLabel>
+                    <FormControl>
+                      <Input
+                        {...field}
+                        placeholder="Rezeis VPN"
+                        className="h-8 text-xs"
+                      />
+                    </FormControl>
+                    <FormMessage className="text-[10px]" />
+                  </FormItem>
+                )}
+              />
+            </div>
+
+            {/* TLS/SSL */}
+            <div className="flex items-center gap-6">
+              <FormField
+                control={form.control}
+                name="useTls"
+                render={({ field }) => (
+                  <FormItem className="flex items-center gap-2 space-y-0">
+                    <FormControl>
+                      <Switch checked={field.value} onCheckedChange={field.onChange} />
+                    </FormControl>
+                    <FormLabel className="text-xs">
+                      <Shield className="inline h-3 w-3 mr-1" />
+                      STARTTLS
+                    </FormLabel>
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
+                name="useSsl"
+                render={({ field }) => (
+                  <FormItem className="flex items-center gap-2 space-y-0">
+                    <FormControl>
+                      <Switch checked={field.value} onCheckedChange={field.onChange} />
+                    </FormControl>
+                    <FormLabel className="text-xs">
+                      <Shield className="inline h-3 w-3 mr-1" />
+                      SSL/TLS
+                    </FormLabel>
+                  </FormItem>
+                )}
+              />
+            </div>
+
+            <Separator />
+
+            {/* Actions */}
+            <div className="flex flex-wrap gap-3">
+              <Button type="submit" disabled={saveMutation.isPending}>
+                {saveMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
+                {t('notificationsPage.email.save')}
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => verifyMutation.mutate()}
+                disabled={verifyMutation.isPending || !host}
+              >
+                {verifyMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Shield className="mr-2 h-4 w-4" />}
+                {t('notificationsPage.email.verify')}
+              </Button>
+            </div>
+          </form>
+        </Form>
+
+        {/* Test email — separate sub-form so save validation does not block test */}
+        <Form {...testEmailForm}>
+          <form
+            onSubmit={testEmailForm.handleSubmit((values) => testMutation.mutate(values))}
+            className="flex items-start gap-2 pt-4 mt-4 border-t"
+          >
+            <FormField
+              control={testEmailForm.control}
+              name="to"
+              render={({ field }) => (
+                <FormItem className="flex-1 max-w-64 space-y-1">
+                  <FormControl>
+                    <Input
+                      type="email"
+                      {...field}
+                      placeholder={t('notificationsPage.email.testPlaceholder')}
+                      className="h-8 text-xs"
+                    />
+                  </FormControl>
+                  <FormMessage className="text-[10px]" />
+                </FormItem>
+              )}
+            />
+            <Button
+              type="submit"
+              variant="outline"
+              size="sm"
+              disabled={testMutation.isPending || !enabled}
+            >
+              {testMutation.isPending ? <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> : <Send className="mr-2 h-3.5 w-3.5" />}
+              {t('notificationsPage.email.sendTest')}
+            </Button>
+          </form>
+        </Form>
       </CardContent>
     </Card>
   )

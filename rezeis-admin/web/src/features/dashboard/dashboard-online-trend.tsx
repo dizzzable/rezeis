@@ -22,6 +22,7 @@ export function DashboardOnlineTrend(): JSX.Element {
     queryKey: ['admin', 'remnawave', 'online-trend'],
     queryFn: () => dashboardApi.getOnlineTrend(24),
     refetchInterval: 60_000,
+    refetchIntervalInBackground: false,
   })
 
   if (isLoading) {

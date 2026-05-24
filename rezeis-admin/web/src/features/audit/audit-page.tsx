@@ -1,9 +1,9 @@
 import { lazy, Suspense, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useQuery } from '@tanstack/react-query';
-import { ClipboardList, AlertCircle, ChevronDown, ChevronRight, Filter, ScrollText, X } from 'lucide-react';
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
+import { ClipboardList, AlertCircle, ChevronDown, Filter, ScrollText, X } from 'lucide-react';
 import { api } from '@/lib/api';
-import { formatDateTime } from '@/lib/utils';
+import { formatDateTime, cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -56,13 +56,13 @@ interface Facets {
   targetTypes: string[];
 }
 
-async function fetchAuditEvents(params: Record<string, string>): Promise<AuditResponse> {
-  const res = await api.get<AuditResponse>('/admin/audit', { params });
+async function fetchAuditEvents(params: Record<string, string>, signal?: AbortSignal): Promise<AuditResponse> {
+  const res = await api.get<AuditResponse>('/admin/audit', { params, signal });
   return res.data;
 }
 
-async function fetchFacets(): Promise<Facets> {
-  const res = await api.get<Facets>('/admin/audit/facets');
+async function fetchFacets(signal?: AbortSignal): Promise<Facets> {
+  const res = await api.get<Facets>('/admin/audit/facets', { signal });
   return res.data;
 }
 
@@ -82,11 +82,17 @@ function PayloadViewer({ payload }: { payload: Record<string, unknown> | null })
     <Collapsible open={open} onOpenChange={setOpen}>
       <CollapsibleTrigger asChild>
         <Button variant="ghost" size="sm" className="h-6 px-2 text-xs gap-1">
-          {open ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+          <ChevronDown
+            className={cn(
+              'h-3 w-3 transition-transform duration-200 ease-out',
+              open ? 'rotate-0' : '-rotate-90',
+            )}
+            aria-hidden
+          />
           {open ? t('auditPage.events.payload.hide') : t('auditPage.events.payload.show')}
         </Button>
       </CollapsibleTrigger>
-      <CollapsibleContent>
+      <CollapsibleContent className="collapsible-animate overflow-hidden">
         <pre className="mt-1 text-[10px] bg-muted rounded p-2 max-w-xs overflow-auto max-h-32 whitespace-pre-wrap">
           {JSON.stringify(payload, null, 2)}
         </pre>
@@ -155,12 +161,13 @@ function AuditLogTab() {
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['audit', params],
-    queryFn: () => fetchAuditEvents(params),
+    queryFn: ({ signal }) => fetchAuditEvents(params, signal),
+    placeholderData: keepPreviousData,
   });
 
   const { data: facets } = useQuery({
     queryKey: ['audit-facets'],
-    queryFn: fetchFacets,
+    queryFn: ({ signal }) => fetchFacets(signal),
     staleTime: 60_000,
   });
 

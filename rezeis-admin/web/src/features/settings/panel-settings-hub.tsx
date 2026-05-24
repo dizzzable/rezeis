@@ -20,14 +20,19 @@ import { Archive, FileCog, Key, Paintbrush, Palette, Settings, Shield } from 'lu
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Skeleton } from '@/components/ui/skeleton'
 import { FadeIn } from '@/lib/motion'
+import { withFeatureBundle } from '@/i18n/i18n'
 
 const ApiTokensTab = lazy(() =>
   import('@/features/settings/api-tokens-page').then((m) => ({
     default: m.ApiTokensPage,
   })),
 )
-const AppearanceTab = lazy(() => import('@/features/appearance/appearance-page'))
-const SecurityTab = lazy(() => import('@/features/two-factor/two-factor-page'))
+const AppearanceTab = lazy(
+  withFeatureBundle('appearance', () => import('@/features/appearance/appearance-page')),
+)
+const SecurityTab = lazy(
+  withFeatureBundle('twoFactor', () => import('@/features/two-factor/two-factor-page')),
+)
 const BrandingTab = lazy(() => import('./panel-branding-tab'))
 const BackupTab = lazy(() => import('@/features/backup/backup-page'))
 const ConfigPortabilityTab = lazy(() => import('@/features/config-portability/config-portability-page'))

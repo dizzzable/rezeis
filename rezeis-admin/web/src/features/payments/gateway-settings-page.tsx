@@ -14,7 +14,7 @@
  * “Test” button to verify the integration is healthy.
  */
 
-import { useEffect, useState, type JSX } from 'react'
+import { useState, type JSX } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
@@ -794,14 +794,16 @@ function GatewaySettingsForm({ gateway, onClose }: GatewaySettingsFormProps) {
     staleTime: 5 * 60_000,
   })
 
-  // Reset local state when the gateway prop changes.
-  useEffect((): void => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- TODO: refactor to derive state
+  // Reset local state when the gateway prop changes — using the
+  // "store-prev-prop in render" pattern.
+  // https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes
+  const [prevGatewayId, setPrevGatewayId] = useState<string>(gateway.id)
+  if (gateway.id !== prevGatewayId) {
+    setPrevGatewayId(gateway.id)
     setValues(initialValues)
     setShowSecrets({})
     setCurrency(gateway.currency)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [gateway.id])
+  }
 
   const supportedCurrencies = supportedMap?.[gateway.type] ?? [gateway.currency]
   const currencyChanged = currency !== gateway.currency

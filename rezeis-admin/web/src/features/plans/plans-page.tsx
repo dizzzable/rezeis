@@ -1,11 +1,11 @@
-/* eslint-disable @typescript-eslint/no-explicit-any -- TODO: type API responses */
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Plus, Pencil, Archive, ArchiveRestore, Package, BarChart3, List } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
+import { getErrorMessage } from '@/lib/http-errors'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -15,18 +15,12 @@ import { Switch } from '@/components/ui/switch'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { FadeIn } from '@/lib/motion'
 import { PlanForm, type PlanFormData } from './plan-form'
+import { plansQueryKeys, usePlans, type Plan } from './plans-api'
 import { PlansStatsTab } from './plans-stats-tab'
 
 interface PlanDuration {
   id: string; days: number; isActive: boolean
   prices: { id: string; currency: string; price: number }[]
-}
-interface Plan {
-  id: string; name: string; description: string | null; tag: string | null
-  type: string; availability: string; trafficLimit: number; deviceLimit: number
-  trafficLimitStrategy: string; isActive: boolean; isArchived: boolean; orderIndex: number
-  internalSquads: string[]; externalSquad: string | null; durations: PlanDuration[]
-  replacementPlanIds: string[]; upgradeToPlanIds: string[]
 }
 
 export default function PlansPage() {
@@ -35,54 +29,52 @@ export default function PlansPage() {
   const [showCreate, setShowCreate] = useState(false)
   const [editingPlan, setEditingPlan] = useState<Plan | null>(null)
 
-  const { data: plans, isLoading } = useQuery({
-    queryKey: ['admin', 'plans'],
-    queryFn: async () => (await api.get<Plan[]>('/admin/plans')).data,
-  })
+  const { data: plans, isLoading } = usePlans()
 
   const createMutation = useMutation({
     mutationFn: (data: PlanFormData) => api.post('/admin/plans', data),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['admin', 'plans'] })
+      queryClient.invalidateQueries({ queryKey: plansQueryKeys.all })
       setShowCreate(false)
       toast.success(t('plansPage.created'))
     },
-    onError: (err: any) =>
-      toast.error(err.response?.data?.message ?? t('plansPage.createFailed')),
+    onError: (err) => toast.error(getErrorMessage(err, t('plansPage.createFailed'))),
   })
 
   const updateMutation = useMutation({
-    mutationFn: ({ id, data }: { id: string; data: any }) =>
+    mutationFn: ({ id, data }: { id: string; data: PlanFormData }) =>
       api.patch(`/admin/plans/${id}`, data),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['admin', 'plans'] })
+      queryClient.invalidateQueries({ queryKey: plansQueryKeys.all })
       setEditingPlan(null)
       toast.success(t('plansPage.updated'))
     },
-    onError: (err: any) =>
-      toast.error(err.response?.data?.message ?? t('plansPage.updateFailed')),
+    onError: (err) => toast.error(getErrorMessage(err, t('plansPage.updateFailed'))),
   })
 
   const archiveMutation = useMutation({
     mutationFn: (id: string) => api.post(`/admin/plans/${id}/archive`),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['admin', 'plans'] })
+      queryClient.invalidateQueries({ queryKey: plansQueryKeys.all })
       toast.success(t('plansPage.archived'))
     },
+    onError: (err) => toast.error(getErrorMessage(err, t('plansPage.archiveFailed'))),
   })
 
   const unarchiveMutation = useMutation({
     mutationFn: (id: string) => api.post(`/admin/plans/${id}/unarchive`),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['admin', 'plans'] })
+      queryClient.invalidateQueries({ queryKey: plansQueryKeys.all })
       toast.success(t('plansPage.unarchived'))
     },
+    onError: (err) => toast.error(getErrorMessage(err, t('plansPage.unarchiveFailed'))),
   })
 
   const toggleActiveMutation = useMutation({
     mutationFn: ({ id, isActive }: { id: string; isActive: boolean }) =>
       api.patch(`/admin/plans/${id}`, { isActive }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['admin', 'plans'] }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: plansQueryKeys.all }),
+    onError: (err) => toast.error(getErrorMessage(err, t('plansPage.toggleActiveFailed'))),
   })
 
   const formatTraffic = (gb: number) =>
