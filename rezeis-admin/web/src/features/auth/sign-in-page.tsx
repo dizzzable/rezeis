@@ -158,7 +158,7 @@ function LoginForm() {
 
   if (totpRequired) {
     return (
-      <Card>
+      <Card data-glass-card>
         <CardHeader className="text-center">
           <CardTitle>{t('signInPage.totp.title')}</CardTitle>
           <CardDescription>{t('signInPage.totp.subtitle')}</CardDescription>
@@ -193,6 +193,7 @@ function LoginForm() {
                 type="submit"
                 className="flex-1"
                 disabled={mutation.isPending || totpCode.trim().length === 0}
+                data-glass-press
               >
                 {mutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
                 {t('signInPage.totp.verify')}
@@ -205,7 +206,7 @@ function LoginForm() {
   }
 
   return (
-    <Card>
+    <Card data-glass-card>
       <CardHeader className="text-center">
         <CardTitle>{t('signInPage.login.title')}</CardTitle>
         <CardDescription>{t('signInPage.login.subtitle')}</CardDescription>
@@ -242,7 +243,7 @@ function LoginForm() {
             <p className="text-sm text-destructive text-center">{error}</p>
           )}
 
-          <Button type="submit" className="w-full" disabled={mutation.isPending}>
+          <Button type="submit" className="w-full" disabled={mutation.isPending} data-glass-press>
             {mutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
             {t('signInPage.login.submit')}
           </Button>
@@ -285,7 +286,7 @@ function RegisterForm() {
   }
 
   return (
-    <Card>
+    <Card data-glass-card>
       <CardHeader className="text-center">
         <CardTitle>{t('signInPage.register.title')}</CardTitle>
         <CardDescription>{t('signInPage.register.subtitle')}</CardDescription>
@@ -337,7 +338,7 @@ function RegisterForm() {
             <p className="text-sm text-destructive text-center">{error}</p>
           )}
 
-          <Button type="submit" className="w-full" disabled={mutation.isPending}>
+          <Button type="submit" className="w-full" disabled={mutation.isPending} data-glass-press>
             {mutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
             {t('signInPage.register.submit')}
           </Button>

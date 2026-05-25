@@ -84,6 +84,9 @@ export function GlassSettingsCard() {
             </div>
           </div>
 
+          {/* Accessibility row spans full width */}
+          <AccessibilityCard />
+
           {/* Reset */}
           <div className="flex justify-end">
             <Button variant="outline" size="sm" onClick={reset}>
@@ -93,6 +96,58 @@ export function GlassSettingsCard() {
         </>
       )}
     </div>
+  )
+}
+
+// ── Accessibility ────────────────────────────────────────────────────────────
+
+function AccessibilityCard() {
+  const { t } = useTranslation()
+  const respectReducedTransparency = useGlassStore((s) => s.respectReducedTransparency)
+  const respectReducedMotion = useGlassStore((s) => s.respectReducedMotion)
+  const setRespectReducedTransparency = useGlassStore((s) => s.setRespectReducedTransparency)
+  const setRespectReducedMotion = useGlassStore((s) => s.setRespectReducedMotion)
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">{t('glassSettings.accessibility.title')}</CardTitle>
+        <CardDescription>{t('glassSettings.accessibility.description')}</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="flex items-center justify-between gap-4">
+          <div className="space-y-0.5">
+            <Label className="font-medium">
+              {t('glassSettings.accessibility.reducedTransparencyLabel')}
+            </Label>
+            <p className="text-xs text-muted-foreground">
+              {t('glassSettings.accessibility.reducedTransparencyHint')}
+            </p>
+          </div>
+          <Switch
+            checked={respectReducedTransparency}
+            onCheckedChange={setRespectReducedTransparency}
+            aria-label={t('glassSettings.accessibility.reducedTransparencyLabel')}
+          />
+        </div>
+        <Separator />
+        <div className="flex items-center justify-between gap-4">
+          <div className="space-y-0.5">
+            <Label className="font-medium">
+              {t('glassSettings.accessibility.reducedMotionLabel')}
+            </Label>
+            <p className="text-xs text-muted-foreground">
+              {t('glassSettings.accessibility.reducedMotionHint')}
+            </p>
+          </div>
+          <Switch
+            checked={respectReducedMotion}
+            onCheckedChange={setRespectReducedMotion}
+            aria-label={t('glassSettings.accessibility.reducedMotionLabel')}
+          />
+        </div>
+      </CardContent>
+    </Card>
   )
 }
 
@@ -139,22 +194,91 @@ function ElementFrostCard() {
                 />
               </div>
               {el.settings.enabled && (
-                <div className="space-y-2 pl-1">
-                  <div className="flex items-center justify-between">
-                    <Label className="text-xs text-muted-foreground">
-                      {t('glassSettings.frost.blurLabel')}
-                    </Label>
-                    <span className="font-mono text-xs text-muted-foreground">
-                      {(el.settings.blur * 100).toFixed(0)}%
-                    </span>
+                <div className="space-y-3 pl-1">
+                  {/* Frost / blur */}
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <Label className="text-xs text-muted-foreground">
+                        {t('glassSettings.frost.blurLabel')}
+                      </Label>
+                      <span className="font-mono text-xs text-muted-foreground">
+                        {(el.settings.blur * 100).toFixed(0)}%
+                      </span>
+                    </div>
+                    <Slider
+                      value={[el.settings.blur]}
+                      min={0}
+                      max={0.5}
+                      step={0.01}
+                      onValueChange={(v: number[]) => setElementGlass(el.key, { blur: v[0] ?? 0.15 })}
+                      aria-label={`${el.label} – ${t('glassSettings.frost.blurLabel')}`}
+                    />
                   </div>
-                  <Slider
-                    value={[el.settings.blur]}
-                    min={0}
-                    max={0.5}
-                    step={0.01}
-                    onValueChange={(v: number[]) => setElementGlass(el.key, { blur: v[0] ?? 0.15 })}
-                  />
+
+                  {/* Surface opacity */}
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <Label className="text-xs text-muted-foreground">
+                        {t('glassSettings.frost.opacityLabel')}
+                      </Label>
+                      <span className="font-mono text-xs text-muted-foreground">
+                        {(el.settings.opacity * 100).toFixed(0)}%
+                      </span>
+                    </div>
+                    <Slider
+                      value={[el.settings.opacity]}
+                      min={0.05}
+                      max={1}
+                      step={0.01}
+                      onValueChange={(v: number[]) => setElementGlass(el.key, { opacity: v[0] ?? 0.4 })}
+                      aria-label={`${el.label} – ${t('glassSettings.frost.opacityLabel')}`}
+                    />
+                  </div>
+
+                  {/* Local saturation boost */}
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <Label className="text-xs text-muted-foreground">
+                        {t('glassSettings.frost.saturationLabel')}
+                      </Label>
+                      <span className="font-mono text-xs text-muted-foreground">
+                        {(el.settings.saturation * 100).toFixed(0)}%
+                      </span>
+                    </div>
+                    <Slider
+                      value={[el.settings.saturation]}
+                      min={1}
+                      max={2}
+                      step={0.05}
+                      onValueChange={(v: number[]) => setElementGlass(el.key, { saturation: v[0] ?? 1.4 })}
+                      aria-label={`${el.label} – ${t('glassSettings.frost.saturationLabel')}`}
+                    />
+                  </div>
+
+                  {/* Per-element refraction preset */}
+                  <div className="flex items-center justify-between gap-2">
+                    <Label className="text-xs text-muted-foreground">
+                      {t('glassSettings.frost.refractionLabel')}
+                    </Label>
+                    <Select
+                      value={el.settings.refraction}
+                      onValueChange={(v) =>
+                        setElementGlass(el.key, { refraction: v as 'off' | 'soft' | 'prominent' })
+                      }
+                    >
+                      <SelectTrigger
+                        className="h-7 w-32"
+                        aria-label={`${el.label} – ${t('glassSettings.frost.refractionLabel')}`}
+                      >
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="off">{t('glassSettings.frost.refractionOptions.off')}</SelectItem>
+                        <SelectItem value="soft">{t('glassSettings.frost.refractionOptions.soft')}</SelectItem>
+                        <SelectItem value="prominent">{t('glassSettings.frost.refractionOptions.prominent')}</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
                 </div>
               )}
             </div>
@@ -173,10 +297,12 @@ function GlassPropertiesCard() {
   const aberrationIntensity = useGlassStore((s) => s.aberrationIntensity)
   const elasticity = useGlassStore((s) => s.elasticity)
   const saturation = useGlassStore((s) => s.saturation)
+  const shimmerStrength = useGlassStore((s) => s.shimmerStrength)
   const setDisplacementScale = useGlassStore((s) => s.setDisplacementScale)
   const setAberrationIntensity = useGlassStore((s) => s.setAberrationIntensity)
   const setElasticity = useGlassStore((s) => s.setElasticity)
   const setSaturation = useGlassStore((s) => s.setSaturation)
+  const setShimmerStrength = useGlassStore((s) => s.setShimmerStrength)
 
   const sliders = [
     {
@@ -206,6 +332,13 @@ function GlassPropertiesCard() {
       setter: setSaturation,
       min: 100, max: 200, step: 5,
       display: `${saturation}%`,
+    },
+    {
+      label: t('glassSettings.properties.shimmer'),
+      value: shimmerStrength,
+      setter: setShimmerStrength,
+      min: 0, max: 0.5, step: 0.01,
+      display: `${(shimmerStrength * 100).toFixed(0)}%`,
     },
   ]
 
