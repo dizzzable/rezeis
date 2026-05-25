@@ -592,6 +592,8 @@ function SettingsPanel({ partner }: { readonly partner: Partner }) {
     },
   })
 
+  // react-hook-form's `form.watch()` integration is not yet recognised by react-doctor.
+  // eslint-disable-next-line react-hooks/incompatible-library
   const useGlobal = ratesForm.watch('useGlobalSettings')
   const rewardType = ratesForm.watch('rewardType')
 

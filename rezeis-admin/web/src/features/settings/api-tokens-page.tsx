@@ -246,7 +246,7 @@ export function ApiTokensPage(): JSX.Element {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>{t('settings.apiTokens.confirmation.title')}</DialogTitle>
-            <DialogDescription>{t('settings.apiTokens.revokeConfirm')}</DialogDescription>
+            <DialogDescription>{t('settings.apiTokens.confirmation.revokeDescription')}</DialogDescription>
           </DialogHeader>
           <div className="rounded-2xl border border-border/70 bg-background/70 p-3 text-sm">
             <p className="font-medium">{tokenToRevoke?.name}</p>

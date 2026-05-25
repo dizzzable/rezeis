@@ -20,9 +20,15 @@ export interface UserSubscription {
   readonly deviceLimit?: number | null
   readonly expireAt?: string
   readonly createdAt?: string
+  readonly configUrl?: string | null
   readonly planSnapshot?: {
     readonly planId?: string | null
     readonly name?: string | null
+  } | null
+  readonly plan?: {
+    readonly id?: string
+    readonly name?: string | null
+    readonly type?: string | null
   } | null
   readonly devices?: ReadonlyArray<{ readonly hwid: string; readonly title?: string | null; readonly seenAt?: string | null }>
 }
@@ -44,6 +50,8 @@ export interface UserReferralEntry {
   readonly qualifiedAt?: string | null
   readonly referred?: { readonly name?: string | null; readonly telegramId?: string | number | bigint | null } | null
   readonly referrer?: { readonly name?: string | null; readonly username?: string | null } | null
+  readonly referral?: { readonly name?: string | null; readonly username?: string | null } | null
+  readonly referralUserId?: string | null
 }
 
 export interface UserPartnerTransaction {
@@ -51,6 +59,9 @@ export interface UserPartnerTransaction {
   readonly amount: number
   readonly note?: string | null
   readonly createdAt: string
+  readonly level?: number | null
+  readonly description?: string | null
+  readonly earnedAmount?: number | null
 }
 
 export interface UserPartner {
@@ -58,6 +69,16 @@ export interface UserPartner {
   readonly isActive?: boolean
   readonly balance?: number
   readonly totalEarned?: number
+  readonly totalWithdrawn?: number
+  readonly useGlobalSettings?: boolean
+  readonly accrualStrategy?: string | null
+  readonly rewardType?: string | null
+  readonly level1Percent?: number | string | null
+  readonly level2Percent?: number | string | null
+  readonly level3Percent?: number | string | null
+  readonly level1FixedAmount?: number | string | null
+  readonly level2FixedAmount?: number | string | null
+  readonly level3FixedAmount?: number | string | null
   readonly referrals?: ReadonlyArray<UserReferralEntry>
   readonly transactions?: ReadonlyArray<UserPartnerTransaction>
   readonly individualSettings?: {
@@ -71,11 +92,32 @@ export interface UserWebAccount {
   readonly login?: string | null
   readonly username?: string | null
   readonly email?: string | null
+  readonly requiresPasswordChange?: boolean
+  readonly temporaryPasswordExpiresAt?: string | null
 }
 
 export interface UserReferralBackref {
   readonly level: number
   readonly referrer?: { readonly name?: string | null; readonly username?: string | null } | null
+}
+
+export interface InviteEffective {
+  readonly linkTtlEnabled?: boolean
+  readonly linkTtlSeconds?: number | null
+  readonly slotsEnabled?: boolean
+  readonly initialSlots?: number | null
+  readonly refillThresholdQualified?: number | null
+  readonly refillAmount?: number | null
+}
+
+export interface InviteOverride {
+  readonly useGlobalSettings?: boolean
+  readonly linkTtlEnabled?: boolean | null
+  readonly linkTtlSeconds?: number | null
+  readonly slotsEnabled?: boolean | null
+  readonly initialSlots?: number | null
+  readonly refillThresholdQualified?: number | null
+  readonly refillAmount?: number | null
 }
 
 export interface UserDetail {
@@ -87,12 +129,18 @@ export interface UserDetail {
   readonly language?: string | null
   readonly role?: string | null
   readonly isBlocked: boolean
+  readonly isBotBlocked?: boolean
+  readonly isRulesAccepted?: boolean
   readonly isPartner?: boolean
   readonly identityKind?: string
   readonly points?: number | string | null
   readonly maxSubscriptions?: number | null
   readonly trafficLimit?: number | null
   readonly deviceLimit?: number | null
+  readonly personalDiscount?: number | string | null
+  readonly purchaseDiscount?: number | string | null
+  readonly partnerBalanceCurrencyOverride?: string | null
+  readonly attachReferrerReason?: string | null
   readonly referralCode?: string | null
   readonly createdAt: string
   readonly updatedAt?: string
@@ -102,4 +150,6 @@ export interface UserDetail {
   readonly referralsGiven?: ReadonlyArray<UserReferralEntry>
   readonly partner?: UserPartner | null
   readonly webAccount?: UserWebAccount | null
+  readonly effectiveInviteSettings?: InviteEffective | null
+  readonly userInviteSettingsOverride?: InviteOverride | null
 }

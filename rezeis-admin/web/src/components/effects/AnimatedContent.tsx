@@ -4,7 +4,7 @@
  * Falls back to plain div when effects are disabled.
  */
 import { useMemo, type ReactNode } from 'react'
-import { motion, type Variants } from 'motion/react'
+import { motion, type Variants, type Easing } from 'motion/react'
 import { useAppearanceStore } from '@/lib/theme/appearance-store'
 import {
   useEffectsStore,
@@ -30,7 +30,7 @@ const DIRECTION_OFFSETS: Record<NonNullable<AnimatedContentProps['direction']>, 
   right: { x: -1, y: 0 },
 }
 
-function buildVariants(animation: ContentAnimationId, distance: number, direction: NonNullable<AnimatedContentProps['direction']>): { variants: Variants; duration: number; ease: string | number[] } {
+function buildVariants(animation: ContentAnimationId, distance: number, direction: NonNullable<AnimatedContentProps['direction']>): { variants: Variants; duration: number; ease: Easing } {
   switch (animation) {
     case 'gradualBlur':
       return {

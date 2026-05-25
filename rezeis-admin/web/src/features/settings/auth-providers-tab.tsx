@@ -202,6 +202,7 @@ function ProviderCard({ provider }: { provider: ProviderConfig }) {
               aria-hidden
             />
             <div className={`flex h-8 w-8 items-center justify-center rounded-lg bg-muted`}>
+              {/* eslint-disable-next-line react-hooks/static-components */}
               <Icon className={`h-4 w-4 ${meta.color}`} />
             </div>
             <div className="text-left">

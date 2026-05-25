@@ -340,10 +340,10 @@ function TimeseriesCard({
                   borderRadius: 8,
                   fontSize: 12,
                 }}
-                formatter={(value: number | string, key: string) => {
+                formatter={(value, key) => {
                   if (key === 'earningsRub')
-                    return [`${Number(value).toFixed(2)} ₽`, t('partnersAnalytics.timeseries.legend.earnings')]
-                  return [String(value), key]
+                    return [`${Number(value ?? 0).toFixed(2)} ₽`, t('partnersAnalytics.timeseries.legend.earnings')]
+                  return [String(value ?? ''), String(key)]
                 }}
               />
               <Legend />
@@ -435,13 +435,13 @@ function LevelDistributionCard({ from, to }: { readonly from: string; readonly t
                   borderRadius: 8,
                   fontSize: 12,
                 }}
-                formatter={(value: number | string, key: string) => {
+                formatter={(value, key) => {
                   if (key === 'earnings')
                     return [
-                      `${Number(value).toFixed(2)} ₽`,
+                      `${Number(value ?? 0).toFixed(2)} ₽`,
                       t('partnersAnalytics.levelDistribution.earnings'),
                     ]
-                  return [String(value), t('partnersAnalytics.levelDistribution.transactions')]
+                  return [String(value ?? ''), t('partnersAnalytics.levelDistribution.transactions')]
                 }}
               />
               <Bar dataKey="earnings" radius={[6, 6, 0, 0]}>
@@ -507,7 +507,7 @@ function GatewayDistributionCard({ from, to }: { readonly from: string; readonly
                   borderRadius: 8,
                   fontSize: 12,
                 }}
-                formatter={(value: number | string) => [formatKopecks(Number(value)), '']}
+                formatter={(value) => [formatKopecks(Number(value ?? 0)), '']}
               />
               <Legend wrapperStyle={{ fontSize: 11 }} />
             </PieChart>

@@ -20,13 +20,10 @@ import {
   Copy,
   Globe,
   Hash,
-  HardDrive,
   Link2,
   Loader2,
   Monitor,
   Plus,
-  Power,
-  PowerOff,
   RefreshCw,
   Save,
   Send,
@@ -49,7 +46,6 @@ import type {
   UserDetail,
   UserPartner,
   UserSubscription,
-  UserTransaction,
   UserReferralEntry,
   UserPartnerTransaction,
 } from './user-detail-shape'
@@ -201,7 +197,7 @@ function ProfileTab({
 }) {
   const { t, i18n } = useTranslation()
   const queryClient = useQueryClient()
-  const [role, setRole] = useState(user.role)
+  const [role, setRole] = useState(user.role ?? 'USER')
   const [personalDiscount, setPersonalDiscount] = useState(
     String(user.personalDiscount ?? 0),
   )
@@ -294,7 +290,7 @@ function ProfileTab({
                 <InfoRow icon={<Smartphone className="h-3 w-3" />} label="Telegram ID" value={user.telegramId} mono />
               )}
               {user.webAccount?.login && (
-                <InfoRow icon={<Globe className="h-3 w-3" />} label="Web-логин" value={user.webAccount.login} mono />
+                <InfoRow icon={<Globe className="h-3 w-3" />} label={t('userDetailPanel.profile.webLogin')} value={user.webAccount.login} mono />
               )}
               {user.username && (
                 <InfoRow icon={<AtSign className="h-3 w-3" />} label={t('userDetailPanel.profile.publicUsername')} value={`@${user.username}`} />
@@ -510,14 +506,16 @@ function ProfileTab({
   )
 }
 
-function InfoRow({ label, value, mono, icon }: { label: string; value: string; mono?: boolean; icon?: React.ReactNode }) {
+function InfoRow({ label, value, mono, icon }: { label: string; value: string | number | bigint | null | undefined; mono?: boolean; icon?: React.ReactNode }) {
   return (
     <div className="flex items-center justify-between gap-2 py-0.5">
       <span className="flex shrink-0 items-center gap-1.5 text-muted-foreground">
         {icon && <span className="text-muted-foreground/60">{icon}</span>}
         {label}
       </span>
-      <span className={`truncate text-right ${mono ? 'font-mono text-[11px]' : ''}`}>{value}</span>
+      <span className={`truncate text-right ${mono ? 'font-mono text-[11px]' : ''}`}>
+        {value == null ? '—' : String(value)}
+      </span>
     </div>
   )
 }
@@ -527,13 +525,12 @@ function InfoRow({ label, value, mono, icon }: { label: string; value: string; m
 // Header — identity, contacts, primary actions
 // ══════════════════════════════════════════════════════════════════════════════
 
-const IDENTITY_KIND_VARIANTS: Record<string, 'default' | 'secondary' | 'outline'> = {
-  TELEGRAM_LINKED: 'default',
-  TELEGRAM_PROVISIONAL: 'secondary',
-  TELEGRAM_ONLY: 'secondary',
-  WEB_ONLY: 'secondary',
-  LOCAL_ONLY: 'outline',
-}
+type IdentityKind =
+  | 'TELEGRAM_LINKED'
+  | 'TELEGRAM_PROVISIONAL'
+  | 'TELEGRAM_ONLY'
+  | 'WEB_ONLY'
+  | 'LOCAL_ONLY'
 
 function UserHeader({
   user,
@@ -546,22 +543,8 @@ function UserHeader({
 }) {
   const { t, i18n } = useTranslation()
 
-  const identityKey = (user.identityKind ?? 'LOCAL_ONLY') as keyof typeof IDENTITY_KIND_VARIANTS
-  const identityVariant = IDENTITY_KIND_VARIANTS[identityKey] ?? 'outline'
+  const identityKey = (user.identityKind ?? 'LOCAL_ONLY') as IdentityKind
   const identityLabel = t(`userDetailPanel.header.identityKind.${identityKey}`)
-
-  const copyToClipboard = (value: string, label: string) => {
-    navigator.clipboard.writeText(value)
-    toast.success(label)
-  }
-
-  const partnerBalance =
-    user.partner !== null && user.partner !== undefined
-      ? (Number(user.partner.balance ?? 0) / 100).toLocaleString(
-          i18n.language === 'ru' ? 'ru-RU' : 'en-US',
-          { style: 'currency', currency: 'RUB', maximumFractionDigits: 2 },
-        )
-      : null
 
   const tempPasswordExpiresAt: string | null = user.webAccount?.temporaryPasswordExpiresAt ?? null
 
@@ -627,41 +610,6 @@ function UserHeader({
   )
 }
 
-function IdentifierChip({
-  icon,
-  label,
-  value,
-  copyLabel,
-  onCopy,
-  mono = true,
-}: {
-  icon: React.ReactNode
-  label: string
-  value: string
-  copyLabel?: string
-  onCopy?: (value: string, label: string) => void
-  mono?: boolean
-}) {
-  return (
-    <div className="flex items-center gap-2">
-      <span className="text-muted-foreground">{icon}</span>
-      <span className="text-muted-foreground">{label}:</span>
-      <span className={mono ? 'truncate font-mono' : 'truncate'}>{value}</span>
-      {onCopy && copyLabel && (
-        <Button
-          variant="ghost"
-          size="icon"
-          className="ml-auto h-5 w-5 shrink-0"
-          onClick={() => onCopy(value, copyLabel)}
-          aria-label={copyLabel}
-        >
-          <Copy className="h-3 w-3" />
-        </Button>
-      )}
-    </div>
-  )
-}
-
 /**
  * User status dot with pulse animation.
  * - Online (updatedAt < 5min): green + pulse
@@ -670,6 +618,9 @@ function IdentifierChip({
  * - Inactive: transparent with border
  */
 function UserStatusDot({ user }: { user: UserDetail }) {
+  // TODO: refactor — recompute the dot class via useMemo with a 1-minute interval tick
+  // instead of reading Date.now() during render.
+  // eslint-disable-next-line react-hooks/purity
   const now = Date.now()
   const updatedAt = user.updatedAt ? new Date(user.updatedAt).getTime() : 0
   const diffMin = (now - updatedAt) / 60000
@@ -689,23 +640,13 @@ function UserStatusDot({ user }: { user: UserDetail }) {
   return <span className={`inline-block h-2.5 w-2.5 rounded-full ${dotClass}`} />
 }
 
-function getUserStatusDotClass(user: { isBlocked: boolean; updatedAt?: string }): string {
-  if (user.isBlocked) return 'bg-destructive'
-  const now = Date.now()
-  const updatedAt = user.updatedAt ? new Date(user.updatedAt).getTime() : 0
-  const diffMin = (now - updatedAt) / 60000
-  if (diffMin < 5) return 'bg-emerald-500 animate-pulse'
-  if (diffMin < 30) return 'bg-amber-500'
-  return 'bg-transparent border border-muted-foreground/50'
-}
-
 
 // ══════════════════════════════════════════════════════════════════════════════
 // Subscriptions Tab
 // ══════════════════════════════════════════════════════════════════════════════
 
 function SubscriptionsTab({ user, telegramId, queryKey }: { user: UserDetail; telegramId: string; queryKey: string[] }) {
-  const { t, i18n } = useTranslation()
+  const { t } = useTranslation()
   const queryClient = useQueryClient()
   const [showGiveSub, setShowGiveSub] = useState(false)
   const [showAssignPlan, setShowAssignPlan] = useState(false)
@@ -795,15 +736,15 @@ function SubscriptionsTab({ user, telegramId, queryKey }: { user: UserDetail; te
           onClick={() => setShowAssignPlan(!showAssignPlan)}
         >
           <ClipboardList className="mr-1 h-3.5 w-3.5" />
-          {t('userDetailPanel.subscriptions.assignPlan', 'Назначить план')}
+          {t('userDetailPanel.subscriptions.assignPlan')}
         </Button>
       </div>
 
       {showAssignPlan && plans && (
         <div className="flex items-center gap-2 rounded-md border border-primary/30 p-2">
           <Select value={assignPlanId} onValueChange={setAssignPlanId}>
-            <SelectTrigger className="flex-1 h-8 text-xs" aria-label={t('userDetailPanel.subscriptions.selectPlan', 'Select plan')}>
-              <SelectValue placeholder={t('userDetailPanel.subscriptions.selectPlan', 'Выберите план')} />
+            <SelectTrigger className="flex-1 h-8 text-xs" aria-label={t('userDetailPanel.subscriptions.selectPlan')}>
+              <SelectValue placeholder={t('userDetailPanel.subscriptions.selectPlan')} />
             </SelectTrigger>
             <SelectContent>
               {assignablePlans.map((plan) => (
@@ -821,13 +762,13 @@ function SubscriptionsTab({ user, telegramId, queryKey }: { user: UserDetail; te
               const unassigned = subs.filter((s) => !s.planSnapshot?.planId && s.status !== 'DELETED')
               if (unassigned.length > 0) {
                 api.post('/admin/imports/assign-plan', { planId: assignPlanId, userIds: [user.id] })
-                  .then(() => { queryClient.invalidateQueries({ queryKey }); toast.success(t('userDetailPanel.subscriptions.planAssigned', 'Plan assigned')); setShowAssignPlan(false); setAssignPlanId('') })
-                  .catch(() => toast.error('Failed'))
+                  .then(() => { queryClient.invalidateQueries({ queryKey }); toast.success(t('userDetailPanel.subscriptions.planAssigned')); setShowAssignPlan(false); setAssignPlanId('') })
+                  .catch(() => toast.error(t('userDetailPanel.subscriptions.assignFailed')))
               }
             }}
             disabled={!assignPlanId}
           >
-            {t('userDetailPanel.subscriptions.assign', 'Назначить')}
+            {t('userDetailPanel.subscriptions.assign')}
           </Button>
         </div>
       )}
@@ -1038,7 +979,7 @@ function SubscriptionCard({
                 </div>
                 <div className="flex gap-1">
                   {sub.configUrl && (
-                    <Button size="sm" variant="ghost" className="h-6 px-1.5 text-muted-foreground" onClick={() => { navigator.clipboard.writeText(sub.configUrl); toast.success(t('userDetailPanel.subscriptions.linkCopied')) }} aria-label={t('userDetailPanel.subscriptions.copyLink')}>
+                    <Button size="sm" variant="ghost" className="h-6 px-1.5 text-muted-foreground" onClick={() => { navigator.clipboard.writeText(sub.configUrl ?? ''); toast.success(t('userDetailPanel.subscriptions.linkCopied')) }} aria-label={t('userDetailPanel.subscriptions.copyLink')}>
                       <Link2 className="h-3 w-3" />
                     </Button>
                   )}
@@ -1239,9 +1180,9 @@ function PartnerTab({ user, telegramId, queryKey }: { user: UserDetail; telegram
         <CardContent className="space-y-3 px-4 pb-3 text-xs">
           {/* Stats */}
           <div className="grid gap-0.5">
-            <InfoRow icon={<Wallet className="h-3 w-3" />} label={t('userDetailPanel.partner.balance')} value={fmtMoney(p.balance)} />
-            <InfoRow icon={<Wallet className="h-3 w-3" />} label={t('userDetailPanel.partner.totalEarned')} value={fmtMoney(p.totalEarned)} />
-            <InfoRow icon={<Wallet className="h-3 w-3" />} label={t('userDetailPanel.partner.totalWithdrawn')} value={fmtMoney(p.totalWithdrawn)} />
+            <InfoRow icon={<Wallet className="h-3 w-3" />} label={t('userDetailPanel.partner.balance')} value={fmtMoney(p.balance ?? 0)} />
+            <InfoRow icon={<Wallet className="h-3 w-3" />} label={t('userDetailPanel.partner.totalEarned')} value={fmtMoney(p.totalEarned ?? 0)} />
+            <InfoRow icon={<Wallet className="h-3 w-3" />} label={t('userDetailPanel.partner.totalWithdrawn')} value={fmtMoney(p.totalWithdrawn ?? 0)} />
           </div>
 
           <Separator />
@@ -1531,7 +1472,7 @@ function PartnerSettings({ telegramId, partner, queryKey }: { telegramId: string
       {dirty && (
         <Button size="sm" className="w-full h-7 text-xs" onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending}>
           {saveMutation.isPending ? <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> : <Save className="mr-2 h-3.5 w-3.5" />}
-          {t('partnersDetail.settings.saveSettings')}
+          {t('partnersDetail.individual.save')}
         </Button>
       )}
     </div>
@@ -1643,13 +1584,13 @@ function InviteSettingsTab({
   const { t } = useTranslation()
   const queryClient = useQueryClient()
 
-  const effective: InviteEffective = user.effectiveInviteSettings ?? {
-    linkTtlEnabled: false,
-    linkTtlSeconds: null,
-    slotsEnabled: false,
-    initialSlots: null,
-    refillThresholdQualified: null,
-    refillAmount: null,
+  const effective: InviteEffective = {
+    linkTtlEnabled: user.effectiveInviteSettings?.linkTtlEnabled ?? false,
+    linkTtlSeconds: user.effectiveInviteSettings?.linkTtlSeconds ?? null,
+    slotsEnabled: user.effectiveInviteSettings?.slotsEnabled ?? false,
+    initialSlots: user.effectiveInviteSettings?.initialSlots ?? null,
+    refillThresholdQualified: user.effectiveInviteSettings?.refillThresholdQualified ?? null,
+    refillAmount: user.effectiveInviteSettings?.refillAmount ?? null,
   }
   const initialOverride = readOverride(user.userInviteSettingsOverride)
   const initialUseGlobal =
@@ -1967,6 +1908,10 @@ function WebCabinetTab({
       toast.error(getErrorMessage(err, t('userDetailPanel.web.renameFailed'))),
   })
 
+  // Tab is only rendered when user.webAccount exists; guard the type narrowing.
+  if (!user.webAccount) return null
+  const webAccount = user.webAccount
+
   return (
     <div className="space-y-3">
       <Card>
@@ -1976,21 +1921,21 @@ function WebCabinetTab({
         <CardContent className="space-y-3 text-sm">
           <InfoRow
             label={t('userDetailPanel.web.currentLogin')}
-            value={user.webAccount.login ?? '—'}
+            value={webAccount.login ?? '—'}
             mono
           />
-          {user.webAccount.email && (
-            <InfoRow label="Email" value={user.webAccount.email} mono />
+          {webAccount.email && (
+            <InfoRow label="Email" value={webAccount.email} mono />
           )}
-          {user.webAccount.requiresPasswordChange && (
+          {webAccount.requiresPasswordChange && (
             <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
               {t('userDetailPanel.web.requiresChangeNotice')}
             </div>
           )}
-          {user.webAccount.temporaryPasswordExpiresAt && (
+          {webAccount.temporaryPasswordExpiresAt && (
             <InfoRow
               label={t('userDetailPanel.web.tempUntil')}
-              value={new Date(user.webAccount.temporaryPasswordExpiresAt).toLocaleString(
+              value={new Date(webAccount.temporaryPasswordExpiresAt).toLocaleString(
                 i18n.language === 'ru' ? 'ru-RU' : 'en-US',
               )}
             />
@@ -2045,7 +1990,7 @@ function WebCabinetTab({
               disabled={
                 renameMutation.isPending
                 || newLogin.trim() === ''
-                || newLogin === user.webAccount.login
+                || newLogin === webAccount.login
               }
             >
               {renameMutation.isPending ? (

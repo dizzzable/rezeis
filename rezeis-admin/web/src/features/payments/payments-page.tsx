@@ -19,6 +19,8 @@ interface TransactionRow {
   readonly paymentId: string | null
   readonly userTelegramId?: string | number | bigint | null
   readonly userId?: string | null
+  readonly userUsername?: string | null
+  readonly userName?: string | null
   readonly status: string
   readonly gatewayType: string
   readonly amount: number | string | null

@@ -254,7 +254,6 @@ export function getDefaultProps(id: string): Record<string, unknown> {
 // If the BackgroundId union grows but the registry doesn't, the type
 // `RegisteredId` will not equal `RegistrableBackgroundId` and TS will error.
 type RegisteredId = (typeof BACKGROUND_REGISTRY)[number]['id']
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
 type _CoverageCheck = Exclude<RegistrableBackgroundId, RegisteredId> extends never
   ? true
   : `Missing background-controls registry entry for: ${Exclude<RegistrableBackgroundId, RegisteredId>}`

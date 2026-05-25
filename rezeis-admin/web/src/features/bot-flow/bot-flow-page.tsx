@@ -39,6 +39,8 @@ export default function BotFlowPage() {
   })
 
   // Sync React Flow state when flow data loads — preserve local positions
+  // TODO: refactor — move this merge into a derived selector instead of an effect.
+  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     if (!flow) return
     const { nodes: newNodes, edges: e } = flowToReactFlow(flow)
@@ -58,6 +60,7 @@ export default function BotFlowPage() {
     })
     setEdges(e)
   }, [flow])
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // ── Mutations ───────────────────────────────────────────────────────────────
   const createScreenMutation = useMutation({
@@ -124,7 +127,7 @@ export default function BotFlowPage() {
       }).then(() => {
         queryClient.invalidateQueries({ queryKey: ['bot-flow', 'draft', FLOW_NAME] })
       }).catch(() => {
-        toast.error(t('botFlow.connectionError', 'Failed to save connection'))
+        toast.error(t('botFlow.connectionError'))
         // Remove the optimistic edge
         setEdges((eds) => eds.filter((e) => e.source !== connection.source || e.sourceHandle !== connection.sourceHandle))
       })
@@ -139,11 +142,11 @@ export default function BotFlowPage() {
       }).then(() => {
         queryClient.invalidateQueries({ queryKey: ['bot-flow', 'draft', FLOW_NAME] })
       }).catch(() => {
-        toast.error(t('botFlow.connectionError', 'Failed to save connection'))
+        toast.error(t('botFlow.connectionError'))
         setEdges((eds) => eds.filter((e) => e.source !== connection.source || e.target !== connection.target))
       })
     }
-  }, [flow, queryClient])
+  }, [flow, queryClient, t])
 
   const handleNodeClick = useCallback((nodeId: string) => {
     setSelectedNodeId(nodeId)
@@ -161,7 +164,7 @@ export default function BotFlowPage() {
       targetScreenId: null,
     }).then(() => {
       queryClient.invalidateQueries({ queryKey: ['bot-flow', 'draft', FLOW_NAME] })
-      toast.success(t('botFlow.edgeDeleted', 'Connection removed'))
+      toast.success(t('botFlow.edgeDeleted'))
     }).catch(() => {
       toast.error(t('botFlow.connectionError'))
       // Re-fetch to restore edge

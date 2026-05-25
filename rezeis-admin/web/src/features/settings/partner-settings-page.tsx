@@ -166,6 +166,8 @@ function PartnerSettingsForm({ partner }: PartnerSettingsFormProps) {
     },
   })
 
+  // react-hook-form's `form.watch()` integration is not yet recognised by react-doctor.
+  // eslint-disable-next-line react-hooks/incompatible-library
   const accrualStrategy = form.watch('accrualStrategy')
   const minWithdrawalRaw = form.watch('minWithdrawal')
 

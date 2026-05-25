@@ -136,6 +136,7 @@ export const ru = {
     },
   },
   dashboardPage: {
+    title: 'Дашборд',
     snapshotAt: 'Снимок сделан в {{time}}',
     errorTitle: 'Сводка дашборда недоступна',
     errorDescription: 'Не удалось загрузить сводку дашборда.',

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
+import type { ComponentType, SVGProps } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useQuery } from '@tanstack/react-query';
@@ -178,7 +179,7 @@ export function QuickSearchOverlay({ open, onClose }: QuickSearchOverlayProps) {
               >
                 {results.map((result, index) => {
                   const meta = TYPE_META[result.type];
-                  const Icon = meta.icon;
+                  const Icon = meta.icon as ComponentType<SVGProps<SVGSVGElement>>;
                   return (
                     <li key={`${result.type}-${result.id}`}>
                       <button

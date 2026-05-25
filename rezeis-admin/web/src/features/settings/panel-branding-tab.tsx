@@ -93,6 +93,8 @@ function PanelBrandingForm({ branding }: PanelBrandingFormProps) {
     },
   })
 
+  // react-hook-form's `form.watch()` integration is not yet recognised by react-doctor.
+  // eslint-disable-next-line react-hooks/incompatible-library
   const namingPrefix = form.watch('namingPrefix')
   const namingSeparator = form.watch('namingSeparator')
   const namingSuffixBase = form.watch('namingSuffixBase')

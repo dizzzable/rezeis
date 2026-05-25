@@ -7,6 +7,8 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { AppearanceProvider } from "@/components/AppearanceProvider";
 import { EffectsProvider } from "@/components/EffectsProvider";
 import { GlassBackground } from "@/components/glass/GlassBackground";
+import { LiquidGlassFilters } from "@/components/glass/LiquidGlassFilters";
+import { LiquidGlassMotion } from "@/components/glass/LiquidGlassMotion";
 import { I18nProvider } from "@/i18n/provider";
 import { LocaleBootstrapper } from "@/i18n/locale-bootstrapper";
 import { AuthProvider } from "@/features/auth/auth-provider";
@@ -33,6 +35,8 @@ export function Providers({ children }: ProvidersProps): JSX.Element {
                 <TooltipProvider delayDuration={300}>
                   <AuthProvider>
                     <GlassBackground />
+                    <LiquidGlassFilters />
+                    <LiquidGlassMotion />
                     <EffectsProvider>
                       {children}
                     </EffectsProvider>

@@ -32,7 +32,6 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
 
   public componentDidCatch(error: Error, errorInfo: ErrorInfo): void {
     // Local console for debugging
-    // eslint-disable-next-line no-console -- intentional dev feedback
     console.error('[ErrorBoundary] Caught error:', error, errorInfo)
     // Best-effort report to backend audit (rate-limited internally).
     reportReactError(error, errorInfo.componentStack)

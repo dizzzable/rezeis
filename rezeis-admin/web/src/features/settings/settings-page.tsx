@@ -165,7 +165,7 @@ function PlatformTab({ settings }: { settings: AdminSettings | undefined }) {
           {rulesRequired && (
             <div className="space-y-2 pl-4 border-l-2">
               <Label>{t('settingsPage.platform.rulesLink')}</Label>
-              <Input value={rulesLink} onChange={(e) => setRulesLink(e.target.value)} placeholder="https://example.com/rules" />
+              <Input value={rulesLink} onChange={(e) => setRulesLink(e.target.value)} placeholder={t('settingsPage.platform.rulesLinkPlaceholder')} />
             </div>
           )}
         </div>
@@ -182,7 +182,7 @@ function PlatformTab({ settings }: { settings: AdminSettings | undefined }) {
             <div className="space-y-3 pl-4 border-l-2">
               <div className="space-y-2">
                 <Label>{t('settingsPage.platform.channelLink')}</Label>
-                <Input value={channelLink} onChange={(e) => setChannelLink(e.target.value)} placeholder="https://t.me/yourchannel" />
+                <Input value={channelLink} onChange={(e) => setChannelLink(e.target.value)} placeholder={t('settingsPage.platform.channelLinkPlaceholder')} />
               </div>
               <div className="space-y-2">
                 <Label>{t('settingsPage.platform.channelId')}</Label>
@@ -249,40 +249,6 @@ function NotificationsTab({ settings }: { settings: AdminSettings | undefined })
   )
 }
 
-function JsonSettingsTab({ title, description, endpoint, data }: { title: string; description: string; endpoint: string; data: unknown }) {
-  const { t } = useTranslation()
-  const queryClient = useQueryClient()
-  const [json, setJson] = useState(JSON.stringify(data ?? {}, null, 2))
-
-  const mutation = useMutation({
-    mutationFn: (parsed: unknown) => api.patch(`/admin/settings/${endpoint}`, parsed),
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['admin', 'settings'] }); toast.success(t('settingsPage.json.saved', { title })) },
-    onError: () => toast.error(t('settingsPage.json.saveFailed')),
-  })
-
-  const handleSave = () => {
-    try {
-      const parsed = JSON.parse(json)
-      mutation.mutate(parsed)
-    } catch { toast.error(t('settingsPage.json.invalidJson')) }
-  }
-
-  return (
-    <Card className="mt-4">
-      <CardHeader>
-        <CardTitle>{title}</CardTitle>
-        <CardDescription>{description}</CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        <textarea className="w-full h-64 font-mono text-xs border rounded-md p-3 bg-muted/30" value={json} onChange={(e) => setJson(e.target.value)} />
-        <Button onClick={handleSave} disabled={mutation.isPending}>
-          {mutation.isPending ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Save className="h-4 w-4 mr-2" />}
-          {t('common.save')}
-        </Button>
-      </CardContent>
-    </Card>
-  )
-}
 
 // ── Branding Tab ──────────────────────────────────────────────────────────────
 
@@ -334,25 +300,25 @@ function BrandingTab({ settings }: { settings: AdminSettings | undefined }) {
         <div className="grid gap-4 md:grid-cols-2">
           <div className="space-y-2">
             <Label>{t('settingsPage.branding.projectName')}</Label>
-            <Input value={projectName} onChange={(e) => setProjectName(e.target.value)} placeholder="Rezeis VPN" />
+            <Input value={projectName} onChange={(e) => setProjectName(e.target.value)} placeholder={t('settingsPage.branding.projectNamePlaceholder')} />
             <p className="text-xs text-muted-foreground">{t('settingsPage.branding.projectNameHint')}</p>
           </div>
           <div className="space-y-2">
             <Label>{t('settingsPage.branding.webTitle')}</Label>
-            <Input value={webTitle} onChange={(e) => setWebTitle(e.target.value)} placeholder="Rezeis — Fast VPN" />
+            <Input value={webTitle} onChange={(e) => setWebTitle(e.target.value)} placeholder={t('settingsPage.branding.webTitlePlaceholder')} />
             <p className="text-xs text-muted-foreground">{t('settingsPage.branding.webTitleHint')}</p>
           </div>
           <div className="space-y-2">
             <Label>{t('settingsPage.branding.supportLink')}</Label>
-            <Input value={supportLink} onChange={(e) => setSupportLink(e.target.value)} placeholder="https://t.me/support" />
+            <Input value={supportLink} onChange={(e) => setSupportLink(e.target.value)} placeholder={t('settingsPage.branding.supportLinkPlaceholder')} />
           </div>
           <div className="space-y-2">
             <Label>{t('settingsPage.branding.channelUsername')}</Label>
-            <Input value={channelUsername} onChange={(e) => setChannelUsername(e.target.value)} placeholder="@yourchannel" />
+            <Input value={channelUsername} onChange={(e) => setChannelUsername(e.target.value)} placeholder={t('settingsPage.branding.channelUsernamePlaceholder')} />
           </div>
           <div className="space-y-2">
             <Label>{t('settingsPage.branding.botMenuButtonText')}</Label>
-            <Input value={botMenuButtonText} onChange={(e) => setBotMenuButtonText(e.target.value)} placeholder="Shop" />
+            <Input value={botMenuButtonText} onChange={(e) => setBotMenuButtonText(e.target.value)} placeholder={t('settingsPage.branding.botMenuButtonTextPlaceholder')} />
             <p className="text-xs text-muted-foreground">{t('settingsPage.branding.botMenuButtonTextHint')}</p>
           </div>
         </div>
@@ -370,7 +336,7 @@ function BrandingTab({ settings }: { settings: AdminSettings | undefined }) {
                 className="w-full h-20 font-mono text-xs border rounded-md p-2 bg-muted/30 resize-y"
                 value={verifyTelegramRu}
                 onChange={(e) => setVerifyTelegramRu(e.target.value)}
-                placeholder="{project_name} код верификации&#10;Код: {code}"
+                placeholder={t('settingsPage.branding.verifyTelegramRuPlaceholder')}
               />
             </div>
             <div className="space-y-2">
@@ -379,7 +345,7 @@ function BrandingTab({ settings }: { settings: AdminSettings | undefined }) {
                 className="w-full h-20 font-mono text-xs border rounded-md p-2 bg-muted/30 resize-y"
                 value={verifyTelegramEn}
                 onChange={(e) => setVerifyTelegramEn(e.target.value)}
-                placeholder="{project_name} verification code&#10;Code: {code}"
+                placeholder={t('settingsPage.branding.verifyTelegramEnPlaceholder')}
               />
             </div>
             <div className="space-y-2">
@@ -388,7 +354,7 @@ function BrandingTab({ settings }: { settings: AdminSettings | undefined }) {
                 className="w-full h-20 font-mono text-xs border rounded-md p-2 bg-muted/30 resize-y"
                 value={passwordResetRu}
                 onChange={(e) => setPasswordResetRu(e.target.value)}
-                placeholder="Код сброса пароля {project_name}&#10;Код: {code}"
+                placeholder={t('settingsPage.branding.passwordResetRuPlaceholder')}
               />
             </div>
             <div className="space-y-2">
@@ -397,7 +363,7 @@ function BrandingTab({ settings }: { settings: AdminSettings | undefined }) {
                 className="w-full h-20 font-mono text-xs border rounded-md p-2 bg-muted/30 resize-y"
                 value={passwordResetEn}
                 onChange={(e) => setPasswordResetEn(e.target.value)}
-                placeholder="Your {project_name} password reset code:&#10;{code}"
+                placeholder={t('settingsPage.branding.passwordResetEnPlaceholder')}
               />
             </div>
           </div>

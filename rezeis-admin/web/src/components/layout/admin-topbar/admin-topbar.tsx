@@ -96,7 +96,7 @@ export function AdminTopbar({ onOpenMobileSidebar, onOpenSearch }: AdminTopbarPr
         <UpdateIndicator />
 
         {/* Telegram link */}
-        <Button variant="ghost" size="icon" asChild aria-label="Telegram">
+        <Button variant="ghost" size="icon" asChild aria-label={t('adminShell.telegramAria')}>
           <a href="https://t.me/rezies_reiwa" target="_blank" rel="noreferrer">
             <TelegramIcon className="h-4 w-4 text-[#2AABEE]" />
           </a>

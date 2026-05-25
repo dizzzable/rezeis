@@ -384,28 +384,59 @@ input[type="number"]::-webkit-inner-spin-button {
  * When the Liquid Glass feature is enabled (from glass-store), these rules
  * make UI elements semi-transparent with backdrop-filter blur.
  *
- * Each element type has its own data-attribute toggle and CSS variable
- * for blur. AppearanceProvider sets these from the glass store values.
+ * Each element type has its own data-attribute toggle and three CSS
+ * custom properties: blur (px), opacity (% for color-mix), and
+ * saturation (multiplier for backdrop-filter). AppearanceProvider sets
+ * them from the glass store values.
  *
  * `!important` is required ONLY where we override a Tailwind utility
  * class (e.g. `.bg-card`, `.bg-muted`) that ships with utility-layer
  * specificity. For element/role selectors we drop `!important`.
+ *
+ * Per-element CSS variables — namespaced under `--lg-<elem>-<prop>`.
+ * The legacy `--liquid-glass-<elem>-blur` aliases are still written by
+ * AppearanceProvider for any third-party code that may reference them.
  */
 :root {
-  --liquid-glass-cards-blur: 12px;
-  --liquid-glass-header-blur: 8px;
-  --liquid-glass-modals-blur: 16px;
-  --liquid-glass-sidebar-blur: 10px;
-  --liquid-glass-tabs-blur: 8px;
-  --liquid-glass-buttons-blur: 6px;
-  --liquid-glass-popover-blur: 12px;
+  /* blur */
+  --lg-cards-blur: 12px;
+  --lg-header-blur: 8px;
+  --lg-modals-blur: 16px;
+  --lg-sidebar-blur: 10px;
+  --lg-tabs-blur: 8px;
+  --lg-buttons-blur: 6px;
+  --lg-popover-blur: 12px;
+  /* opacity (% for color-mix) */
+  --lg-cards-opacity: 40%;
+  --lg-header-opacity: 35%;
+  --lg-modals-opacity: 45%;
+  --lg-sidebar-opacity: 40%;
+  --lg-tabs-opacity: 40%;
+  --lg-buttons-opacity: 60%;
+  --lg-popover-opacity: 50%;
+  /* saturation multiplier */
+  --lg-cards-saturation: 1.4;
+  --lg-header-saturation: 1.4;
+  --lg-modals-saturation: 1.4;
+  --lg-sidebar-saturation: 1.4;
+  --lg-tabs-saturation: 1.3;
+  --lg-buttons-saturation: 1.2;
+  --lg-popover-saturation: 1.4;
+  /* legacy aliases (kept for any external CSS still on the old names) */
+  --liquid-glass-cards-blur: var(--lg-cards-blur);
+  --liquid-glass-header-blur: var(--lg-header-blur);
+  --liquid-glass-modals-blur: var(--lg-modals-blur);
+  --liquid-glass-sidebar-blur: var(--lg-sidebar-blur);
+  --liquid-glass-tabs-blur: var(--lg-tabs-blur);
+  --liquid-glass-buttons-blur: var(--lg-buttons-blur);
+  --liquid-glass-popover-blur: var(--lg-popover-blur);
 }
 
 /* Cards — overrides Tailwind .bg-card */
 :root[data-liquid-glass-cards="on"] .bg-card {
-  background-color: color-mix(in oklch, var(--card) 40%, transparent) !important;
-  backdrop-filter: blur(var(--liquid-glass-cards-blur)) saturate(1.4);
-  -webkit-backdrop-filter: blur(var(--liquid-glass-cards-blur)) saturate(1.4);
+  background-color: color-mix(in oklch, var(--card) var(--lg-cards-opacity), transparent) !important;
+  backdrop-filter: blur(var(--lg-cards-blur)) saturate(var(--lg-cards-saturation));
+  -webkit-backdrop-filter: blur(var(--lg-cards-blur)) saturate(var(--lg-cards-saturation));
   border-color: color-mix(in oklch, var(--border) 50%, transparent);
   box-shadow:
     0 0 0 1px oklch(1 0 0 / 8%) inset,
@@ -421,82 +452,82 @@ input[type="number"]::-webkit-inner-spin-button {
 }
 
 :root[data-liquid-glass-header="on"] header {
-  background-color: color-mix(in oklch, var(--background) 35%, transparent);
-  backdrop-filter: blur(var(--liquid-glass-header-blur)) saturate(1.4);
-  -webkit-backdrop-filter: blur(var(--liquid-glass-header-blur)) saturate(1.4);
+  background-color: color-mix(in oklch, var(--background) var(--lg-header-opacity), transparent);
+  backdrop-filter: blur(var(--lg-header-blur)) saturate(var(--lg-header-saturation));
+  -webkit-backdrop-filter: blur(var(--lg-header-blur)) saturate(var(--lg-header-saturation));
   border-bottom-color: color-mix(in oklch, var(--border) 40%, transparent);
 }
 
 /* Modals / Dialogs — Radix dialog / popover content. */
 :root[data-liquid-glass-modals="on"] [role="dialog"] > div {
-  background-color: color-mix(in oklch, var(--card) 45%, transparent);
-  backdrop-filter: blur(var(--liquid-glass-modals-blur)) saturate(1.4);
-  -webkit-backdrop-filter: blur(var(--liquid-glass-modals-blur)) saturate(1.4);
+  background-color: color-mix(in oklch, var(--card) var(--lg-modals-opacity), transparent);
+  backdrop-filter: blur(var(--lg-modals-blur)) saturate(var(--lg-modals-saturation));
+  -webkit-backdrop-filter: blur(var(--lg-modals-blur)) saturate(var(--lg-modals-saturation));
   border-color: color-mix(in oklch, var(--border) 50%, transparent);
 }
 
 /* Sidebar — element selector */
 :root[data-liquid-glass-sidebar="on"] aside {
-  background-color: color-mix(in oklch, var(--sidebar) 40%, transparent);
-  backdrop-filter: blur(var(--liquid-glass-sidebar-blur)) saturate(1.4);
-  -webkit-backdrop-filter: blur(var(--liquid-glass-sidebar-blur)) saturate(1.4);
+  background-color: color-mix(in oklch, var(--sidebar) var(--lg-sidebar-opacity), transparent);
+  backdrop-filter: blur(var(--lg-sidebar-blur)) saturate(var(--lg-sidebar-saturation));
+  -webkit-backdrop-filter: blur(var(--lg-sidebar-blur)) saturate(var(--lg-sidebar-saturation));
 }
 
 /* Tabs — Radix tab list/triggers. role-based, no Tailwind override */
 :root[data-liquid-glass-tabs="on"] [role="tablist"] {
-  background-color: color-mix(in oklch, var(--muted) 40%, transparent);
-  backdrop-filter: blur(var(--liquid-glass-tabs-blur)) saturate(1.3);
-  -webkit-backdrop-filter: blur(var(--liquid-glass-tabs-blur)) saturate(1.3);
+  background-color: color-mix(in oklch, var(--muted) var(--lg-tabs-opacity), transparent);
+  backdrop-filter: blur(var(--lg-tabs-blur)) saturate(var(--lg-tabs-saturation));
+  -webkit-backdrop-filter: blur(var(--lg-tabs-blur)) saturate(var(--lg-tabs-saturation));
 }
 
 :root[data-liquid-glass-tabs="on"] [role="tab"][data-state="active"] {
   background-color: color-mix(in oklch, var(--background) 50%, transparent);
-  backdrop-filter: blur(var(--liquid-glass-tabs-blur)) saturate(1.2);
-  -webkit-backdrop-filter: blur(var(--liquid-glass-tabs-blur)) saturate(1.2);
+  backdrop-filter: blur(var(--lg-tabs-blur)) saturate(calc(var(--lg-tabs-saturation) - 0.1));
+  -webkit-backdrop-filter: blur(var(--lg-tabs-blur)) saturate(calc(var(--lg-tabs-saturation) - 0.1));
 }
 
 /* Buttons — overrides Tailwind .bg-primary / .bg-secondary */
 :root[data-liquid-glass-buttons="on"] .bg-primary {
-  background-color: color-mix(in oklch, var(--primary) 75%, transparent) !important;
-  backdrop-filter: blur(var(--liquid-glass-buttons-blur)) saturate(1.2);
-  -webkit-backdrop-filter: blur(var(--liquid-glass-buttons-blur)) saturate(1.2);
+  background-color: color-mix(in oklch, var(--primary) calc(var(--lg-buttons-opacity) + 15%), transparent) !important;
+  backdrop-filter: blur(var(--lg-buttons-blur)) saturate(var(--lg-buttons-saturation));
+  -webkit-backdrop-filter: blur(var(--lg-buttons-blur)) saturate(var(--lg-buttons-saturation));
 }
 
 :root[data-liquid-glass-buttons="on"] .bg-secondary {
-  background-color: color-mix(in oklch, var(--secondary) 50%, transparent) !important;
-  backdrop-filter: blur(var(--liquid-glass-buttons-blur)) saturate(1.2);
-  -webkit-backdrop-filter: blur(var(--liquid-glass-buttons-blur)) saturate(1.2);
+  background-color: color-mix(in oklch, var(--secondary) var(--lg-buttons-opacity), transparent) !important;
+  backdrop-filter: blur(var(--lg-buttons-blur)) saturate(var(--lg-buttons-saturation));
+  -webkit-backdrop-filter: blur(var(--lg-buttons-blur)) saturate(var(--lg-buttons-saturation));
 }
 
 /* Outline-style buttons & links use .bg-background */
 :root[data-liquid-glass-buttons="on"] button.bg-background,
 :root[data-liquid-glass-buttons="on"] a.bg-background {
-  background-color: color-mix(in oklch, var(--background) 45%, transparent) !important;
-  backdrop-filter: blur(var(--liquid-glass-buttons-blur)) saturate(1.3);
-  -webkit-backdrop-filter: blur(var(--liquid-glass-buttons-blur)) saturate(1.3);
+  background-color: color-mix(in oklch, var(--background) calc(var(--lg-buttons-opacity) - 15%), transparent) !important;
+  backdrop-filter: blur(var(--lg-buttons-blur)) saturate(calc(var(--lg-buttons-saturation) + 0.1));
+  -webkit-backdrop-filter: blur(var(--lg-buttons-blur)) saturate(calc(var(--lg-buttons-saturation) + 0.1));
 }
 
 /* .bg-muted on interactive controls (excluding tab lists which have their
  * own blur configured above). */
 :root[data-liquid-glass-buttons="on"] .bg-muted:not([role="tablist"]) {
-  background-color: color-mix(in oklch, var(--muted) 40%, transparent) !important;
-  backdrop-filter: blur(var(--liquid-glass-buttons-blur)) saturate(1.2);
-  -webkit-backdrop-filter: blur(var(--liquid-glass-buttons-blur)) saturate(1.2);
+  background-color: color-mix(in oklch, var(--muted) var(--lg-buttons-opacity), transparent) !important;
+  backdrop-filter: blur(var(--lg-buttons-blur)) saturate(var(--lg-buttons-saturation));
+  -webkit-backdrop-filter: blur(var(--lg-buttons-blur)) saturate(var(--lg-buttons-saturation));
 }
 
 /* Popover / Select dropdowns — Radix popover content. */
 :root[data-liquid-glass-popover="on"] [role="combobox"],
 :root[data-liquid-glass-popover="on"] [data-radix-popper-content-wrapper] > div {
-  background-color: color-mix(in oklch, var(--popover) 50%, transparent);
-  backdrop-filter: blur(var(--liquid-glass-popover-blur)) saturate(1.4);
-  -webkit-backdrop-filter: blur(var(--liquid-glass-popover-blur)) saturate(1.4);
+  background-color: color-mix(in oklch, var(--popover) var(--lg-popover-opacity), transparent);
+  backdrop-filter: blur(var(--lg-popover-blur)) saturate(var(--lg-popover-saturation));
+  -webkit-backdrop-filter: blur(var(--lg-popover-blur)) saturate(var(--lg-popover-saturation));
 }
 
 /* .bg-popover Tailwind override */
 :root[data-liquid-glass-popover="on"] .bg-popover {
-  background-color: color-mix(in oklch, var(--popover) 50%, transparent) !important;
-  backdrop-filter: blur(var(--liquid-glass-popover-blur)) saturate(1.4);
-  -webkit-backdrop-filter: blur(var(--liquid-glass-popover-blur)) saturate(1.4);
+  background-color: color-mix(in oklch, var(--popover) var(--lg-popover-opacity), transparent) !important;
+  backdrop-filter: blur(var(--lg-popover-blur)) saturate(var(--lg-popover-saturation));
+  -webkit-backdrop-filter: blur(var(--lg-popover-blur)) saturate(var(--lg-popover-saturation));
 }
 
 /* Global surface transparency — partial-opacity Tailwind utilities collapse
@@ -551,17 +582,332 @@ input[type="number"]::-webkit-inner-spin-button {
  * the brittle `.rounded-lg.border` selector that swept up unrelated
  * third-party components. */
 :root[data-liquid-glass-cards="on"] [data-glass-card] {
-  background-color: color-mix(in oklch, var(--card) 40%, transparent);
-  backdrop-filter: blur(var(--liquid-glass-cards-blur)) saturate(1.4);
-  -webkit-backdrop-filter: blur(var(--liquid-glass-cards-blur)) saturate(1.4);
+  background-color: color-mix(in oklch, var(--card) var(--lg-cards-opacity), transparent);
+  backdrop-filter: blur(var(--lg-cards-blur)) saturate(var(--lg-cards-saturation));
+  -webkit-backdrop-filter: blur(var(--lg-cards-blur)) saturate(var(--lg-cards-saturation));
   border-color: color-mix(in oklch, var(--border) 50%, transparent);
 }
 
 /* User detail / list two-pane layout — left pane with `border-r.bg-card` */
 :root[data-liquid-glass="on"] .border-r.bg-card,
 :root[data-liquid-glass="on"] .border-l.bg-card {
-  background-color: color-mix(in oklch, var(--card) 35%, transparent) !important;
-  backdrop-filter: blur(var(--liquid-glass-cards-blur)) saturate(1.4);
-  -webkit-backdrop-filter: blur(var(--liquid-glass-cards-blur)) saturate(1.4);
+  background-color: color-mix(in oklch, var(--card) calc(var(--lg-cards-opacity) - 5%), transparent) !important;
+  backdrop-filter: blur(var(--lg-cards-blur)) saturate(var(--lg-cards-saturation));
+  -webkit-backdrop-filter: blur(var(--lg-cards-blur)) saturate(var(--lg-cards-saturation));
+}
+
+/* ── Liquid refraction layer ──────────────────────────────────────────────
+ * Adds an SVG-based displacement filter on top of the `backdrop-filter`
+ * blur defined above. The filters live in `<LiquidGlassFilters />` and are
+ * referenced by id (`#lg-soft`, `#lg-prominent`).
+ *
+ * Only attached when:
+ *   1. `data-glass-refraction="on"` on <html> — set by AppearanceProvider
+ *      to false on Safari/Firefox (where `feDisplacementMap` in
+ *      `backdrop-filter: url(...)` doesn't render but still costs CPU).
+ *   2. `data-lg-<elem>-refraction` on <html> picks the preset.
+ *
+ * Convention: refraction goes on small interactive surfaces (buttons,
+ * popovers, tabs). Static panels (sidebar, header, cards, modals) opt in
+ * explicitly through the Appearance UI; their default is "off" because
+ * `feDisplacementMap` on large regions tanks scroll FPS on mid-tier
+ * devices.
+ */
+
+/* Buttons */
+:root[data-glass-refraction="on"][data-lg-buttons-refraction="soft"] .bg-primary,
+:root[data-glass-refraction="on"][data-lg-buttons-refraction="soft"] .bg-secondary,
+:root[data-glass-refraction="on"][data-lg-buttons-refraction="soft"] button.bg-background,
+:root[data-glass-refraction="on"][data-lg-buttons-refraction="soft"] a.bg-background {
+  backdrop-filter: blur(var(--lg-buttons-blur)) saturate(var(--lg-buttons-saturation)) url(#lg-soft);
+  -webkit-backdrop-filter: blur(var(--lg-buttons-blur)) saturate(var(--lg-buttons-saturation));
+}
+:root[data-glass-refraction="on"][data-lg-buttons-refraction="prominent"] .bg-primary,
+:root[data-glass-refraction="on"][data-lg-buttons-refraction="prominent"] .bg-secondary,
+:root[data-glass-refraction="on"][data-lg-buttons-refraction="prominent"] button.bg-background,
+:root[data-glass-refraction="on"][data-lg-buttons-refraction="prominent"] a.bg-background {
+  backdrop-filter: blur(var(--lg-buttons-blur)) saturate(var(--lg-buttons-saturation)) url(#lg-prominent);
+  -webkit-backdrop-filter: blur(var(--lg-buttons-blur)) saturate(var(--lg-buttons-saturation));
+}
+
+/* Press flourish for any glass button while held down. The selector
+ * targets only buttons that already have refraction, so non-glass
+ * buttons keep their default click feedback. */
+:root[data-glass-refraction="on"][data-lg-buttons-refraction="soft"] .bg-primary:active,
+:root[data-glass-refraction="on"][data-lg-buttons-refraction="soft"] .bg-secondary:active,
+:root[data-glass-refraction="on"][data-lg-buttons-refraction="prominent"] .bg-primary:active,
+:root[data-glass-refraction="on"][data-lg-buttons-refraction="prominent"] .bg-secondary:active {
+  backdrop-filter: blur(var(--lg-buttons-blur)) saturate(var(--lg-buttons-saturation)) url(#lg-press);
+  -webkit-backdrop-filter: blur(var(--lg-buttons-blur)) saturate(var(--lg-buttons-saturation));
+}
+
+/* Popover / Select dropdowns */
+:root[data-glass-refraction="on"][data-lg-popover-refraction="soft"] [role="combobox"],
+:root[data-glass-refraction="on"][data-lg-popover-refraction="soft"] [data-radix-popper-content-wrapper] > div,
+:root[data-glass-refraction="on"][data-lg-popover-refraction="soft"] .bg-popover {
+  backdrop-filter: blur(var(--lg-popover-blur)) saturate(var(--lg-popover-saturation)) url(#lg-soft);
+  -webkit-backdrop-filter: blur(var(--lg-popover-blur)) saturate(var(--lg-popover-saturation));
+}
+:root[data-glass-refraction="on"][data-lg-popover-refraction="prominent"] [role="combobox"],
+:root[data-glass-refraction="on"][data-lg-popover-refraction="prominent"] [data-radix-popper-content-wrapper] > div,
+:root[data-glass-refraction="on"][data-lg-popover-refraction="prominent"] .bg-popover {
+  backdrop-filter: blur(var(--lg-popover-blur)) saturate(var(--lg-popover-saturation)) url(#lg-prominent);
+  -webkit-backdrop-filter: blur(var(--lg-popover-blur)) saturate(var(--lg-popover-saturation));
+}
+
+/* Tabs (refraction here is opt-in; default is off). */
+:root[data-glass-refraction="on"][data-lg-tabs-refraction="soft"] [role="tablist"] {
+  backdrop-filter: blur(var(--lg-tabs-blur)) saturate(var(--lg-tabs-saturation)) url(#lg-soft);
+  -webkit-backdrop-filter: blur(var(--lg-tabs-blur)) saturate(var(--lg-tabs-saturation));
+}
+:root[data-glass-refraction="on"][data-lg-tabs-refraction="prominent"] [role="tablist"] {
+  backdrop-filter: blur(var(--lg-tabs-blur)) saturate(var(--lg-tabs-saturation)) url(#lg-prominent);
+  -webkit-backdrop-filter: blur(var(--lg-tabs-blur)) saturate(var(--lg-tabs-saturation));
+}
+
+/* Cards / modals / sidebar / header — opt-in. Each only takes effect
+ * when its own `data-lg-<elem>-refraction` is set, so flipping the
+ * master toggle in the UI is a per-element decision. */
+:root[data-glass-refraction="on"][data-lg-cards-refraction="soft"] .bg-card,
+:root[data-glass-refraction="on"][data-lg-cards-refraction="soft"] [data-glass-card] {
+  backdrop-filter: blur(var(--lg-cards-blur)) saturate(var(--lg-cards-saturation)) url(#lg-soft);
+  -webkit-backdrop-filter: blur(var(--lg-cards-blur)) saturate(var(--lg-cards-saturation));
+}
+:root[data-glass-refraction="on"][data-lg-cards-refraction="prominent"] .bg-card,
+:root[data-glass-refraction="on"][data-lg-cards-refraction="prominent"] [data-glass-card] {
+  backdrop-filter: blur(var(--lg-cards-blur)) saturate(var(--lg-cards-saturation)) url(#lg-prominent);
+  -webkit-backdrop-filter: blur(var(--lg-cards-blur)) saturate(var(--lg-cards-saturation));
+}
+
+:root[data-glass-refraction="on"][data-lg-modals-refraction="soft"] [role="dialog"] > div {
+  backdrop-filter: blur(var(--lg-modals-blur)) saturate(var(--lg-modals-saturation)) url(#lg-soft);
+  -webkit-backdrop-filter: blur(var(--lg-modals-blur)) saturate(var(--lg-modals-saturation));
+}
+:root[data-glass-refraction="on"][data-lg-modals-refraction="prominent"] [role="dialog"] > div {
+  backdrop-filter: blur(var(--lg-modals-blur)) saturate(var(--lg-modals-saturation)) url(#lg-prominent);
+  -webkit-backdrop-filter: blur(var(--lg-modals-blur)) saturate(var(--lg-modals-saturation));
+}
+
+:root[data-glass-refraction="on"][data-lg-header-refraction="soft"] header {
+  backdrop-filter: blur(var(--lg-header-blur)) saturate(var(--lg-header-saturation)) url(#lg-soft);
+  -webkit-backdrop-filter: blur(var(--lg-header-blur)) saturate(var(--lg-header-saturation));
+}
+:root[data-glass-refraction="on"][data-lg-header-refraction="prominent"] header {
+  backdrop-filter: blur(var(--lg-header-blur)) saturate(var(--lg-header-saturation)) url(#lg-prominent);
+  -webkit-backdrop-filter: blur(var(--lg-header-blur)) saturate(var(--lg-header-saturation));
+}
+
+:root[data-glass-refraction="on"][data-lg-sidebar-refraction="soft"] aside {
+  backdrop-filter: blur(var(--lg-sidebar-blur)) saturate(var(--lg-sidebar-saturation)) url(#lg-soft);
+  -webkit-backdrop-filter: blur(var(--lg-sidebar-blur)) saturate(var(--lg-sidebar-saturation));
+}
+:root[data-glass-refraction="on"][data-lg-sidebar-refraction="prominent"] aside {
+  backdrop-filter: blur(var(--lg-sidebar-blur)) saturate(var(--lg-sidebar-saturation)) url(#lg-prominent);
+  -webkit-backdrop-filter: blur(var(--lg-sidebar-blur)) saturate(var(--lg-sidebar-saturation));
+}
+
+/* ── Pointer-driven specular highlight ───────────────────────────────────
+ * `<LiquidGlassMotion />` writes `--lg-light-x` / `--lg-light-y` on
+ * <html> as viewport-%-coordinates of the cursor. The radial-gradient
+ * below positions a soft white spotlight that follows the cursor across
+ * any glass surface — purely cosmetic, GPU-cheap, no extra DOM nodes.
+ *
+ * Convention: opt-in via `data-lg-shimmer` on the host element. Buttons
+ * with refraction enabled get the shimmer for free below.
+ *
+ * The motion attribute `data-glass-motion` is set to "off" by
+ * AppearanceProvider when the OS asks for reduced motion; the CSS
+ * collapses the highlight to a static, dim default in that case.
+ */
+:root {
+  --lg-light-x: 20%;
+  --lg-light-y: 20%;
+  --lg-shimmer-strength: 0.18;
+}
+
+/* Auto-shimmer: any glass button or popover with refraction on. The
+ * pseudo-element renders inside the host; it inherits its border-radius
+ * via `inherit`, so it doesn't bleed beyond pill / rounded shapes. */
+:root[data-glass-refraction="on"][data-lg-buttons-refraction="soft"] .bg-primary,
+:root[data-glass-refraction="on"][data-lg-buttons-refraction="prominent"] .bg-primary,
+:root[data-glass-refraction="on"][data-lg-buttons-refraction="soft"] .bg-secondary,
+:root[data-glass-refraction="on"][data-lg-buttons-refraction="prominent"] .bg-secondary,
+:root[data-glass-refraction="on"][data-lg-popover-refraction="soft"] [data-radix-popper-content-wrapper] > div,
+:root[data-glass-refraction="on"][data-lg-popover-refraction="prominent"] [data-radix-popper-content-wrapper] > div {
+  position: relative;
+  isolation: isolate;
+}
+
+:root[data-glass-refraction="on"][data-lg-buttons-refraction="soft"] .bg-primary::before,
+:root[data-glass-refraction="on"][data-lg-buttons-refraction="prominent"] .bg-primary::before,
+:root[data-glass-refraction="on"][data-lg-buttons-refraction="soft"] .bg-secondary::before,
+:root[data-glass-refraction="on"][data-lg-buttons-refraction="prominent"] .bg-secondary::before,
+:root[data-glass-refraction="on"][data-lg-popover-refraction="soft"] [data-radix-popper-content-wrapper] > div::before,
+:root[data-glass-refraction="on"][data-lg-popover-refraction="prominent"] [data-radix-popper-content-wrapper] > div::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  z-index: 0;
+  /* Position the highlight from cursor coordinates the JS provider sets
+   * on <html>. Falls back to a top-left static spot when JS hasn't
+   * written yet or motion is suppressed. */
+  background:
+    radial-gradient(
+      circle at var(--lg-light-x, 20%) var(--lg-light-y, 20%),
+      oklch(1 0 0 / var(--lg-shimmer-strength, 0.18)) 0%,
+      transparent 35%
+    );
+  mix-blend-mode: screen;
+  transition: opacity 200ms ease-out;
+}
+
+/* When OS asks for reduced motion (and the user opted in to respect it),
+ * the JS provider writes static coordinates. We additionally damp the
+ * highlight strength so it doesn't feel "frozen mid-motion". */
+:root[data-glass-motion="off"] {
+  --lg-shimmer-strength: 0.05;
+}
+
+/* Make sure the host's text/icon content sits above the highlight. */
+:root[data-glass-refraction="on"][data-lg-buttons-refraction="soft"] .bg-primary > *,
+:root[data-glass-refraction="on"][data-lg-buttons-refraction="prominent"] .bg-primary > *,
+:root[data-glass-refraction="on"][data-lg-buttons-refraction="soft"] .bg-secondary > *,
+:root[data-glass-refraction="on"][data-lg-buttons-refraction="prominent"] .bg-secondary > * {
+  position: relative;
+  z-index: 1;
+}
+
+/* ── Scroll perf guard ────────────────────────────────────────────────
+ * `<LiquidGlassMotion />` flips `data-glass-scrolling` to "yes" while
+ * the page is being scrolled (debounced 200 ms after the last event).
+ * SVG-based `feDisplacementMap` is the most expensive part of the
+ * stack on long pages; dropping it during the scroll burst keeps the
+ * scroll smooth without any visible glitch — the blur stays, only the
+ * dispersion goes away. The damped shimmer is also paused so the
+ * highlight stops chasing the cursor mid-scroll.
+ *
+ * Naming convention: only target the element selectors that actually
+ * gained `filter: url(...)` above. We must NOT use a broad
+ * `[class*="bg-"]` selector because that would touch unrelated
+ * surfaces.
+ */
+:root[data-glass-scrolling="yes"][data-glass-refraction="on"] .bg-primary,
+:root[data-glass-scrolling="yes"][data-glass-refraction="on"] .bg-secondary,
+:root[data-glass-scrolling="yes"][data-glass-refraction="on"] button.bg-background,
+:root[data-glass-scrolling="yes"][data-glass-refraction="on"] a.bg-background,
+:root[data-glass-scrolling="yes"][data-glass-refraction="on"] .bg-card,
+:root[data-glass-scrolling="yes"][data-glass-refraction="on"] [data-glass-card],
+:root[data-glass-scrolling="yes"][data-glass-refraction="on"] [role="dialog"] > div,
+:root[data-glass-scrolling="yes"][data-glass-refraction="on"] [role="tablist"],
+:root[data-glass-scrolling="yes"][data-glass-refraction="on"] [role="combobox"],
+:root[data-glass-scrolling="yes"][data-glass-refraction="on"] [data-radix-popper-content-wrapper] > div,
+:root[data-glass-scrolling="yes"][data-glass-refraction="on"] .bg-popover,
+:root[data-glass-scrolling="yes"][data-glass-refraction="on"] header,
+:root[data-glass-scrolling="yes"][data-glass-refraction="on"] aside {
+  /* Drop only the displacement filter, keep blur+saturate so surfaces
+   * stay translucent. Re-declaring the property without `url(...)`
+   * suffices because backdrop-filter is a single declaration list. */
+  backdrop-filter: blur(var(--lg-cards-blur)) saturate(var(--lg-cards-saturation)) !important;
+  -webkit-backdrop-filter: blur(var(--lg-cards-blur)) saturate(var(--lg-cards-saturation)) !important;
+}
+
+/* Pause the specular highlight while scrolling — fading both the
+ * radial-gradient and the shimmer breath keeps the surface readable
+ * during high-motion frames. */
+:root[data-glass-scrolling="yes"][data-glass-refraction="on"] .bg-primary::before,
+:root[data-glass-scrolling="yes"][data-glass-refraction="on"] .bg-secondary::before,
+:root[data-glass-scrolling="yes"][data-glass-refraction="on"] [data-radix-popper-content-wrapper] > div::before {
+  opacity: 0;
+}
+
+/* ── Press elasticity ─────────────────────────────────────────────────
+ * Apple Liquid Glass squishes the surface inward when held down and
+ * snaps back via a spring on release. We approximate that with a
+ * pure-CSS easing curve — no framer-motion per element, the whole
+ * effect costs one transform on `:active`.
+ *
+ * `--lg-elasticity` (0..0.5) drives:
+ *   - press depth        : how far the surface scales down
+ *   - rebound duration   : longer elasticity = bouncier release
+ *
+ * Only attached to glass-flagged buttons via `data-glass-press` so
+ * non-glass controls keep their existing click feedback unchanged.
+ *
+ * The `cubic-bezier` is the canonical Apple-style spring approximation:
+ * fast initial pull, slight overshoot on the way back. Safe at any
+ * elasticity setting.
+ */
+:root[data-liquid-glass="on"] [data-glass-press],
+:root[data-liquid-glass="on"][data-lg-buttons-refraction="soft"] .bg-primary,
+:root[data-liquid-glass="on"][data-lg-buttons-refraction="soft"] .bg-secondary,
+:root[data-liquid-glass="on"][data-lg-buttons-refraction="prominent"] .bg-primary,
+:root[data-liquid-glass="on"][data-lg-buttons-refraction="prominent"] .bg-secondary {
+  transition:
+    transform 220ms cubic-bezier(0.34, 1.56, 0.64, 1),
+    backdrop-filter 220ms ease-out,
+    background-color 220ms ease-out;
+}
+
+:root[data-liquid-glass="on"] [data-glass-press]:active,
+:root[data-liquid-glass="on"][data-lg-buttons-refraction="soft"] .bg-primary:active,
+:root[data-liquid-glass="on"][data-lg-buttons-refraction="soft"] .bg-secondary:active,
+:root[data-liquid-glass="on"][data-lg-buttons-refraction="prominent"] .bg-primary:active,
+:root[data-liquid-glass="on"][data-lg-buttons-refraction="prominent"] .bg-secondary:active {
+  /* Press depth derived from elasticity: 0 → 0.97, 0.5 → 0.92.
+   * The transition is replaced with a very short ease-out so the press
+   * feels snappy on the way down; the rebound on release picks the
+   * spring curve declared above. */
+  transform: scale(calc(0.97 - var(--lg-elasticity, 0.15) * 0.1));
+  transition: transform 80ms ease-out;
+}
+
+/* Reduced-motion: skip the spring entirely — instant transform, no
+ * cubic-bezier rebound. */
+:root[data-glass-motion="off"] [data-glass-press],
+:root[data-glass-motion="off"][data-lg-buttons-refraction="soft"] .bg-primary,
+:root[data-glass-motion="off"][data-lg-buttons-refraction="soft"] .bg-secondary,
+:root[data-glass-motion="off"][data-lg-buttons-refraction="prominent"] .bg-primary,
+:root[data-glass-motion="off"][data-lg-buttons-refraction="prominent"] .bg-secondary {
+  transition: none;
+  transform: none;
+}
+
+/* ── Accessibility fallbacks ──────────────────────────────────────────────
+ * The user-facing toggles `respectReducedTransparency` and `respectReducedMotion`
+ * in glass-store gate these. AppearanceProvider sets `data-prefers-reduced-*`
+ * data-attrs and falls back to fully solid surfaces by flipping
+ * `data-liquid-glass*` to "off" when the OS asks for reduced transparency.
+ * The CSS rules below act as a hard-stop for any glass / animation that
+ * may have leaked through, regardless of the JS guards.
+ */
+@media (prefers-reduced-transparency: reduce) {
+  :root[data-liquid-glass="on"] .bg-card,
+  :root[data-liquid-glass="on"] .bg-primary,
+  :root[data-liquid-glass="on"] .bg-secondary,
+  :root[data-liquid-glass="on"] .bg-popover,
+  :root[data-liquid-glass="on"] .bg-muted,
+  :root[data-liquid-glass="on"] .bg-background,
+  :root[data-liquid-glass="on"] .bg-accent,
+  :root[data-liquid-glass="on"] header,
+  :root[data-liquid-glass="on"] aside,
+  :root[data-liquid-glass="on"] [role="dialog"] > div,
+  :root[data-liquid-glass="on"] [role="tablist"],
+  :root[data-liquid-glass="on"] [role="tab"][data-state="active"],
+  :root[data-liquid-glass="on"] [data-glass-card],
+  :root[data-liquid-glass="on"] [data-radix-popper-content-wrapper] > div {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root[data-glass-motion="off"] [data-lg-shimmer],
+  :root[data-glass-motion="off"] [data-lg-parallax] {
+    animation: none !important;
+    transition: none !important;
+    transform: none !important;
+  }
 }
 

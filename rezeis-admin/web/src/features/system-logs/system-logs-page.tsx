@@ -74,6 +74,8 @@ export default function SystemLogsPage({ embedded = false }: { readonly embedded
   if (filterKey !== prevFilterKey) {
     setPrevFilterKey(filterKey)
     setEntries([])
+    // TODO: refactor — write the cursor reset into a derived value (memo) instead of mutating a ref during render.
+    // eslint-disable-next-line react-hooks/refs
     cursor.current = 0
   }
 
@@ -97,6 +99,8 @@ export default function SystemLogsPage({ embedded = false }: { readonly embedded
       if (merged.length > 5_000) merged.splice(0, merged.length - 5_000)
       return merged
     })
+    // TODO: refactor — derive the cursor from the entries array instead of mutating a ref during render.
+    // eslint-disable-next-line react-hooks/refs
     cursor.current = Math.max(cursor.current, polledLatestId)
   }
 

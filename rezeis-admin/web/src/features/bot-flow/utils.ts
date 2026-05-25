@@ -1,5 +1,5 @@
 import type { Node, Edge } from '@xyflow/react'
-import type { BotFlow, BotFlowButton, BotFlowScreen, BotScreenNodeData } from './types'
+import type { BotFlow, BotFlowButton, BotScreenNodeData } from './types'
 
 /** Group buttons by row index. */
 export function groupButtonsByRow(buttons: BotFlowButton[]): BotFlowButton[][] {
