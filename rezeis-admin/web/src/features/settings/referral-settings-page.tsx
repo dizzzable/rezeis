@@ -3,14 +3,22 @@ import { useTranslation } from 'react-i18next'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
-import { Save, Share2, Loader2 } from 'lucide-react'
+import {
+  Save,
+  Share2,
+  Loader2,
+  CalendarDays,
+  Coins,
+  Gift,
+  Percent,
+  Wifi,
+} from 'lucide-react'
 import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -22,7 +30,6 @@ import {
   FormField,
   FormItem,
   FormLabel,
-  FormMessage,
 } from '@/components/ui/form'
 import { FadeIn } from '@/lib/motion'
 
@@ -224,427 +231,472 @@ function ReferralSettingsForm({ referral }: ReferralSettingsFormProps) {
               <p className="text-muted-foreground">{t('referralSettingsPage.subtitle')}</p>
             </div>
             <Button type="submit" disabled={saveMutation.isPending}>
-              {saveMutation.isPending ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Save className="h-4 w-4 mr-2" />}
+              {saveMutation.isPending ? (
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+              ) : (
+                <Save className="h-4 w-4 mr-2" />
+              )}
               {t('referralSettingsPage.save')}
             </Button>
           </div>
         </FadeIn>
 
-        {/* General */}
-        <Card>
-          <CardHeader><CardTitle>{t('referralSettingsPage.general.title')}</CardTitle></CardHeader>
-          <CardContent className="space-y-4">
-            <FormField
-              control={form.control}
-              name="enabled"
-              render={({ field }) => (
-                <FormItem className="flex items-center justify-between space-y-0">
-                  <div>
-                    <FormLabel>{t('referralSettingsPage.general.enable')}</FormLabel>
-                    <FormDescription className="text-xs">
-                      {t('referralSettingsPage.general.enableHint')}
-                    </FormDescription>
-                  </div>
-                  <FormControl>
-                    <Switch checked={field.value} onCheckedChange={field.onChange} />
-                  </FormControl>
-                </FormItem>
-              )}
-            />
-            <FormField
-              control={form.control}
-              name="qualifyOnPurchase"
-              render={({ field }) => (
-                <FormItem className="flex items-center justify-between space-y-0">
-                  <div>
-                    <FormLabel>{t('referralSettingsPage.general.qualifyOnPurchase')}</FormLabel>
-                    <FormDescription className="text-xs">
-                      {t('referralSettingsPage.general.qualifyOnPurchaseHint')}
-                    </FormDescription>
-                  </div>
-                  <FormControl>
-                    <Switch checked={field.value} onCheckedChange={field.onChange} />
-                  </FormControl>
-                </FormItem>
-              )}
-            />
-            <FormField
-              control={form.control}
-              name="accrualStrategy"
-              render={({ field }) => (
-                <FormItem className="space-y-1.5 max-w-xs">
-                  <FormLabel>{t('referralSettingsPage.general.accrualStrategy')}</FormLabel>
-                  <Select value={field.value} onValueChange={field.onChange}>
+        {/* Three-column hero: General / Rewards / Invite Limits */}
+        <div className="grid gap-4 lg:grid-cols-3">
+          {/* General */}
+          <Card className="lg:col-span-1">
+            <CardHeader>
+              <CardTitle>{t('referralSettingsPage.general.title')}</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <FormField
+                control={form.control}
+                name="enabled"
+                render={({ field }) => (
+                  <FormItem className="flex items-center justify-between space-y-0">
+                    <div>
+                      <FormLabel>{t('referralSettingsPage.general.enable')}</FormLabel>
+                      <FormDescription className="text-xs">
+                        {t('referralSettingsPage.general.enableHint')}
+                      </FormDescription>
+                    </div>
                     <FormControl>
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
+                      <Switch checked={field.value} onCheckedChange={field.onChange} />
                     </FormControl>
-                    <SelectContent>
-                      <SelectItem value="ON_FIRST_PAYMENT">
-                        {t('referralSettingsPage.general.onFirstPayment')}
-                      </SelectItem>
-                      <SelectItem value="ON_EACH_PAYMENT">
-                        {t('referralSettingsPage.general.onEachPayment')}
-                      </SelectItem>
-                    </SelectContent>
-                  </Select>
-                </FormItem>
-              )}
-            />
-          </CardContent>
-        </Card>
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
+                name="qualifyOnPurchase"
+                render={({ field }) => (
+                  <FormItem className="flex items-center justify-between space-y-0">
+                    <div>
+                      <FormLabel>{t('referralSettingsPage.general.qualifyOnPurchase')}</FormLabel>
+                      <FormDescription className="text-xs">
+                        {t('referralSettingsPage.general.qualifyOnPurchaseHint')}
+                      </FormDescription>
+                    </div>
+                    <FormControl>
+                      <Switch checked={field.value} onCheckedChange={field.onChange} />
+                    </FormControl>
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
+                name="accrualStrategy"
+                render={({ field }) => (
+                  <FormItem className="space-y-1.5">
+                    <FormLabel>{t('referralSettingsPage.general.accrualStrategy')}</FormLabel>
+                    <Select value={field.value} onValueChange={field.onChange}>
+                      <FormControl>
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                      </FormControl>
+                      <SelectContent>
+                        <SelectItem value="ON_FIRST_PAYMENT">
+                          {t('referralSettingsPage.general.onFirstPayment')}
+                        </SelectItem>
+                        <SelectItem value="ON_EACH_PAYMENT">
+                          {t('referralSettingsPage.general.onEachPayment')}
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </FormItem>
+                )}
+              />
+            </CardContent>
+          </Card>
 
-        {/* Rewards */}
-        <Card>
-          <CardHeader>
-            <CardTitle>{t('referralSettingsPage.rewards.title')}</CardTitle>
-            <CardDescription>{t('referralSettingsPage.rewards.description')}</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <FormField
-              control={form.control}
-              name="rewardType"
-              render={({ field }) => (
-                <FormItem className="space-y-1.5 max-w-xs">
-                  <FormLabel>{t('referralSettingsPage.rewards.rewardType')}</FormLabel>
-                  <Select value={field.value} onValueChange={field.onChange}>
+          {/* Rewards */}
+          <Card className="lg:col-span-1">
+            <CardHeader>
+              <CardTitle>{t('referralSettingsPage.rewards.title')}</CardTitle>
+              <CardDescription>{t('referralSettingsPage.rewards.description')}</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <FormField
+                control={form.control}
+                name="rewardType"
+                render={({ field }) => (
+                  <FormItem className="space-y-1.5">
+                    <FormLabel>{t('referralSettingsPage.rewards.rewardType')}</FormLabel>
+                    <Select value={field.value} onValueChange={field.onChange}>
+                      <FormControl>
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                      </FormControl>
+                      <SelectContent>
+                        <SelectItem value="EXTRA_DAYS">
+                          {t('referralSettingsPage.rewards.extraDays')}
+                        </SelectItem>
+                        <SelectItem value="POINTS">
+                          {t('referralSettingsPage.rewards.points')}
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </FormItem>
+                )}
+              />
+              <div className="grid gap-3 grid-cols-3">
+                {(['level1Reward', 'level2Reward', 'level3Reward'] as const).map((name, idx) => (
+                  <FormField
+                    key={name}
+                    control={form.control}
+                    name={name}
+                    render={({ field }) => (
+                      <FormItem className="space-y-1.5">
+                        <FormLabel className="text-xs">
+                          {idx === 0
+                            ? t('referralSettingsPage.rewards.level1')
+                            : idx === 1
+                              ? t('referralSettingsPage.rewards.level2')
+                              : t('referralSettingsPage.rewards.level3')}
+                        </FormLabel>
+                        <FormControl>
+                          <Input
+                            type="number"
+                            min="0"
+                            placeholder="0"
+                            className="h-8 text-sm"
+                            {...field}
+                          />
+                        </FormControl>
+                        <FormDescription className="text-[10px]">
+                          {rewardType === 'EXTRA_DAYS'
+                            ? t('referralSettingsPage.rewards.unitDays')
+                            : t('referralSettingsPage.rewards.unitPoints')}
+                        </FormDescription>
+                      </FormItem>
+                    )}
+                  />
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Invite Limits */}
+          <Card className="lg:col-span-1">
+            <CardHeader>
+              <CardTitle>{t('referralSettingsPage.inviteLimits.title')}</CardTitle>
+              <CardDescription>
+                {t('referralSettingsPage.inviteLimits.description')}
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <FormField
+                control={form.control}
+                name="linkTtlEnabled"
+                render={({ field }) => (
+                  <FormItem className="flex items-center justify-between space-y-0">
+                    <div>
+                      <FormLabel>{t('referralSettingsPage.inviteLimits.enableLinkTtl')}</FormLabel>
+                      <FormDescription className="text-xs">
+                        {t('referralSettingsPage.inviteLimits.enableLinkTtlHint')}
+                      </FormDescription>
+                    </div>
                     <FormControl>
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
+                      <Switch checked={field.value} onCheckedChange={field.onChange} />
                     </FormControl>
-                    <SelectContent>
-                      <SelectItem value="EXTRA_DAYS">
-                        {t('referralSettingsPage.rewards.extraDays')}
-                      </SelectItem>
-                      <SelectItem value="POINTS">
-                        {t('referralSettingsPage.rewards.points')}
-                      </SelectItem>
-                    </SelectContent>
-                  </Select>
-                </FormItem>
-              )}
-            />
-            <div className="grid gap-4 sm:grid-cols-3">
-              {(['level1Reward', 'level2Reward', 'level3Reward'] as const).map((name, idx) => (
+                  </FormItem>
+                )}
+              />
+              {linkTtlEnabled && (
                 <FormField
-                  key={name}
                   control={form.control}
-                  name={name}
+                  name="inviteLinkTtlDays"
                   render={({ field }) => (
                     <FormItem className="space-y-1.5">
-                      <FormLabel>
-                        {idx === 0
-                          ? t('referralSettingsPage.rewards.level1')
-                          : idx === 1
-                            ? t('referralSettingsPage.rewards.level2')
-                            : t('referralSettingsPage.rewards.level3')}
+                      <FormLabel className="text-xs">
+                        {t('referralSettingsPage.inviteLimits.linkTtlDays')}
                       </FormLabel>
                       <FormControl>
-                        <Input type="number" min="0" placeholder="0" {...field} />
+                        <Input type="number" min="1" className="h-8 text-sm" {...field} />
                       </FormControl>
-                      <FormDescription className="text-[10px]">
-                        {rewardType === 'EXTRA_DAYS'
-                          ? t('referralSettingsPage.rewards.unitDays')
-                          : t('referralSettingsPage.rewards.unitPoints')}
-                      </FormDescription>
                     </FormItem>
                   )}
                 />
-              ))}
+              )}
+              <Separator />
+              <FormField
+                control={form.control}
+                name="inviteSlotsEnabled"
+                render={({ field }) => (
+                  <FormItem className="flex items-center justify-between space-y-0">
+                    <div>
+                      <FormLabel>{t('referralSettingsPage.inviteLimits.enableSlots')}</FormLabel>
+                      <FormDescription className="text-xs">
+                        {t('referralSettingsPage.inviteLimits.enableSlotsHint')}
+                      </FormDescription>
+                    </div>
+                    <FormControl>
+                      <Switch checked={field.value} onCheckedChange={field.onChange} />
+                    </FormControl>
+                  </FormItem>
+                )}
+              />
+              {inviteSlotsEnabled && (
+                <FormField
+                  control={form.control}
+                  name="inviteSlots"
+                  render={({ field }) => (
+                    <FormItem className="space-y-1.5">
+                      <FormLabel className="text-xs">
+                        {t('referralSettingsPage.inviteLimits.initialSlots')}
+                      </FormLabel>
+                      <FormControl>
+                        <Input type="number" min="1" className="h-8 text-sm" {...field} />
+                      </FormControl>
+                    </FormItem>
+                  )}
+                />
+              )}
+            </CardContent>
+          </Card>
+        </div>
+
+        {/* Points Exchange — full-width with 4 sub-cards in 2x2 grid */}
+        <Card>
+          <CardHeader>
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <CardTitle className="flex items-center gap-2">
+                  <Coins className="h-5 w-5 text-muted-foreground" />
+                  {t('referralSettingsPage.pointsExchange.title')}
+                </CardTitle>
+                <CardDescription>
+                  {t('referralSettingsPage.pointsExchange.description')}
+                </CardDescription>
+              </div>
+              <FormField
+                control={form.control}
+                name="exchangeEnabled"
+                render={({ field }) => (
+                  <FormItem className="flex items-center gap-3 space-y-0">
+                    <FormLabel className="text-xs text-muted-foreground">
+                      {t('referralSettingsPage.pointsExchange.enable')}
+                    </FormLabel>
+                    <FormControl>
+                      <Switch checked={field.value} onCheckedChange={field.onChange} />
+                    </FormControl>
+                  </FormItem>
+                )}
+              />
             </div>
-          </CardContent>
-        </Card>
-
-        {/* Invite Limits */}
-        <Card>
-          <CardHeader>
-            <CardTitle>{t('referralSettingsPage.inviteLimits.title')}</CardTitle>
-            <CardDescription>{t('referralSettingsPage.inviteLimits.description')}</CardDescription>
           </CardHeader>
-          <CardContent className="space-y-4">
-            <FormField
-              control={form.control}
-              name="linkTtlEnabled"
-              render={({ field }) => (
-                <FormItem className="flex items-center justify-between space-y-0">
-                  <div>
-                    <FormLabel>{t('referralSettingsPage.inviteLimits.enableLinkTtl')}</FormLabel>
-                    <FormDescription className="text-xs">
-                      {t('referralSettingsPage.inviteLimits.enableLinkTtlHint')}
-                    </FormDescription>
-                  </div>
-                  <FormControl>
-                    <Switch checked={field.value} onCheckedChange={field.onChange} />
-                  </FormControl>
-                </FormItem>
-              )}
-            />
-            {linkTtlEnabled && (
-              <FormField
-                control={form.control}
-                name="inviteLinkTtlDays"
-                render={({ field }) => (
-                  <FormItem className="space-y-1.5 w-40">
-                    <FormLabel>{t('referralSettingsPage.inviteLimits.linkTtlDays')}</FormLabel>
-                    <FormControl>
-                      <Input type="number" min="1" {...field} />
-                    </FormControl>
-                  </FormItem>
-                )}
-              />
-            )}
-            <Separator />
-            <FormField
-              control={form.control}
-              name="inviteSlotsEnabled"
-              render={({ field }) => (
-                <FormItem className="flex items-center justify-between space-y-0">
-                  <div>
-                    <FormLabel>{t('referralSettingsPage.inviteLimits.enableSlots')}</FormLabel>
-                    <FormDescription className="text-xs">
-                      {t('referralSettingsPage.inviteLimits.enableSlotsHint')}
-                    </FormDescription>
-                  </div>
-                  <FormControl>
-                    <Switch checked={field.value} onCheckedChange={field.onChange} />
-                  </FormControl>
-                </FormItem>
-              )}
-            />
-            {inviteSlotsEnabled && (
-              <FormField
-                control={form.control}
-                name="inviteSlots"
-                render={({ field }) => (
-                  <FormItem className="space-y-1.5 w-40">
-                    <FormLabel>{t('referralSettingsPage.inviteLimits.initialSlots')}</FormLabel>
-                    <FormControl>
-                      <Input type="number" min="1" {...field} />
-                    </FormControl>
-                  </FormItem>
-                )}
-              />
-            )}
-          </CardContent>
-        </Card>
-
-        {/* Points Exchange */}
-        <Card>
-          <CardHeader>
-            <CardTitle>{t('referralSettingsPage.pointsExchange.title')}</CardTitle>
-            <CardDescription>{t('referralSettingsPage.pointsExchange.description')}</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <FormField
-              control={form.control}
-              name="exchangeEnabled"
-              render={({ field }) => (
-                <FormItem className="flex items-center justify-between space-y-0">
-                  <div>
-                    <FormLabel>{t('referralSettingsPage.pointsExchange.enable')}</FormLabel>
-                    <FormDescription className="text-xs">
-                      {t('referralSettingsPage.pointsExchange.enableHint')}
-                    </FormDescription>
-                  </div>
-                  <FormControl>
-                    <Switch checked={field.value} onCheckedChange={field.onChange} />
-                  </FormControl>
-                </FormItem>
-              )}
-            />
-
-            {exchangeEnabled && (
-              <div className="space-y-4 pt-2">
+          <CardContent>
+            {!exchangeEnabled ? (
+              <p className="text-sm text-muted-foreground py-4 text-center">
+                {t('referralSettingsPage.pointsExchange.enableHint')}
+              </p>
+            ) : (
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                 {/* Subscription Days */}
-                <div className="rounded-md border p-4 space-y-3">
+                <ExchangeOptionCard
+                  icon={<CalendarDays className="h-4 w-4 text-blue-500" />}
+                  title={t('referralSettingsPage.pointsExchange.subscriptionDays')}
+                  enabledFieldName="daysEnabled"
+                  enabled={daysEnabled}
+                  control={form.control}
+                >
                   <FormField
                     control={form.control}
-                    name="daysEnabled"
+                    name="daysPointsCost"
                     render={({ field }) => (
-                      <FormItem className="flex items-center justify-between space-y-0">
-                        <Label className="font-medium">
-                          {t('referralSettingsPage.pointsExchange.subscriptionDays')}
-                        </Label>
+                      <FormItem className="space-y-1">
+                        <FormLabel className="text-[10px] text-muted-foreground uppercase tracking-wide">
+                          {t('referralSettingsPage.pointsExchange.pointsPerDay')}
+                        </FormLabel>
                         <FormControl>
-                          <Switch checked={field.value} onCheckedChange={field.onChange} />
+                          <Input type="number" min="1" className="h-8 text-sm" {...field} />
                         </FormControl>
                       </FormItem>
                     )}
                   />
-                  {daysEnabled && (
+                </ExchangeOptionCard>
+
+                {/* Gift Subscription */}
+                <ExchangeOptionCard
+                  icon={<Gift className="h-4 w-4 text-purple-500" />}
+                  title={t('referralSettingsPage.pointsExchange.giftSubscription')}
+                  enabledFieldName="giftEnabled"
+                  enabled={giftEnabled}
+                  control={form.control}
+                >
+                  <div className="grid gap-2 grid-cols-2">
                     <FormField
                       control={form.control}
-                      name="daysPointsCost"
+                      name="giftPointsCost"
                       render={({ field }) => (
-                        <FormItem className="space-y-1.5 w-48">
-                          <FormLabel className="text-xs">
-                            {t('referralSettingsPage.pointsExchange.pointsPerDay')}
+                        <FormItem className="space-y-1">
+                          <FormLabel className="text-[10px] text-muted-foreground uppercase tracking-wide">
+                            {t('referralSettingsPage.pointsExchange.pointsCost')}
                           </FormLabel>
                           <FormControl>
-                            <Input type="number" min="1" {...field} />
+                            <Input type="number" min="1" className="h-8 text-sm" {...field} />
                           </FormControl>
                         </FormItem>
                       )}
                     />
-                  )}
-                </div>
+                    <FormField
+                      control={form.control}
+                      name="giftDurationDays"
+                      render={({ field }) => (
+                        <FormItem className="space-y-1">
+                          <FormLabel className="text-[10px] text-muted-foreground uppercase tracking-wide">
+                            {t('referralSettingsPage.pointsExchange.giftDuration')}
+                          </FormLabel>
+                          <FormControl>
+                            <Input type="number" min="1" className="h-8 text-sm" {...field} />
+                          </FormControl>
+                        </FormItem>
+                      )}
+                    />
+                  </div>
+                </ExchangeOptionCard>
 
-                {/* Gift Subscription */}
-                <div className="rounded-md border p-4 space-y-3">
-                  <FormField
-                    control={form.control}
-                    name="giftEnabled"
-                    render={({ field }) => (
-                      <FormItem className="flex items-center justify-between space-y-0">
-                        <Label className="font-medium">
-                          {t('referralSettingsPage.pointsExchange.giftSubscription')}
-                        </Label>
-                        <FormControl>
-                          <Switch checked={field.value} onCheckedChange={field.onChange} />
-                        </FormControl>
-                      </FormItem>
-                    )}
-                  />
-                  {giftEnabled && (
-                    <div className="grid gap-3 sm:grid-cols-2">
-                      <FormField
-                        control={form.control}
-                        name="giftPointsCost"
-                        render={({ field }) => (
-                          <FormItem className="space-y-1.5">
-                            <FormLabel className="text-xs">
-                              {t('referralSettingsPage.pointsExchange.pointsCost')}
-                            </FormLabel>
-                            <FormControl>
-                              <Input type="number" min="1" {...field} />
-                            </FormControl>
-                          </FormItem>
-                        )}
-                      />
-                      <FormField
-                        control={form.control}
-                        name="giftDurationDays"
-                        render={({ field }) => (
-                          <FormItem className="space-y-1.5">
-                            <FormLabel className="text-xs">
-                              {t('referralSettingsPage.pointsExchange.giftDuration')}
-                            </FormLabel>
-                            <FormControl>
-                              <Input type="number" min="1" {...field} />
-                            </FormControl>
-                          </FormItem>
-                        )}
-                      />
-                    </div>
-                  )}
-                </div>
+                {/* Personal Discount */}
+                <ExchangeOptionCard
+                  icon={<Percent className="h-4 w-4 text-emerald-500" />}
+                  title={t('referralSettingsPage.pointsExchange.personalDiscount')}
+                  enabledFieldName="discountEnabled"
+                  enabled={discountEnabled}
+                  control={form.control}
+                >
+                  <div className="grid gap-2 grid-cols-2">
+                    <FormField
+                      control={form.control}
+                      name="discountPointsCost"
+                      render={({ field }) => (
+                        <FormItem className="space-y-1">
+                          <FormLabel className="text-[10px] text-muted-foreground uppercase tracking-wide">
+                            {t('referralSettingsPage.pointsExchange.pointsPerPercent')}
+                          </FormLabel>
+                          <FormControl>
+                            <Input type="number" min="1" className="h-8 text-sm" {...field} />
+                          </FormControl>
+                        </FormItem>
+                      )}
+                    />
+                    <FormField
+                      control={form.control}
+                      name="discountMaxPercent"
+                      render={({ field }) => (
+                        <FormItem className="space-y-1">
+                          <FormLabel className="text-[10px] text-muted-foreground uppercase tracking-wide">
+                            {t('referralSettingsPage.pointsExchange.maxDiscount')}
+                          </FormLabel>
+                          <FormControl>
+                            <Input
+                              type="number"
+                              min="1"
+                              max="100"
+                              className="h-8 text-sm"
+                              {...field}
+                            />
+                          </FormControl>
+                        </FormItem>
+                      )}
+                    />
+                  </div>
+                </ExchangeOptionCard>
 
-                {/* Discount */}
-                <div className="rounded-md border p-4 space-y-3">
-                  <FormField
-                    control={form.control}
-                    name="discountEnabled"
-                    render={({ field }) => (
-                      <FormItem className="flex items-center justify-between space-y-0">
-                        <Label className="font-medium">
-                          {t('referralSettingsPage.pointsExchange.personalDiscount')}
-                        </Label>
-                        <FormControl>
-                          <Switch checked={field.value} onCheckedChange={field.onChange} />
-                        </FormControl>
-                      </FormItem>
-                    )}
-                  />
-                  {discountEnabled && (
-                    <div className="grid gap-3 sm:grid-cols-2">
-                      <FormField
-                        control={form.control}
-                        name="discountPointsCost"
-                        render={({ field }) => (
-                          <FormItem className="space-y-1.5">
-                            <FormLabel className="text-xs">
-                              {t('referralSettingsPage.pointsExchange.pointsPerPercent')}
-                            </FormLabel>
-                            <FormControl>
-                              <Input type="number" min="1" {...field} />
-                            </FormControl>
-                          </FormItem>
-                        )}
-                      />
-                      <FormField
-                        control={form.control}
-                        name="discountMaxPercent"
-                        render={({ field }) => (
-                          <FormItem className="space-y-1.5">
-                            <FormLabel className="text-xs">
-                              {t('referralSettingsPage.pointsExchange.maxDiscount')}
-                            </FormLabel>
-                            <FormControl>
-                              <Input type="number" min="1" max="100" {...field} />
-                            </FormControl>
-                          </FormItem>
-                        )}
-                      />
-                    </div>
-                  )}
-                </div>
-
-                {/* Traffic */}
-                <div className="rounded-md border p-4 space-y-3">
-                  <FormField
-                    control={form.control}
-                    name="trafficEnabled"
-                    render={({ field }) => (
-                      <FormItem className="flex items-center justify-between space-y-0">
-                        <Label className="font-medium">
-                          {t('referralSettingsPage.pointsExchange.extraTraffic')}
-                        </Label>
-                        <FormControl>
-                          <Switch checked={field.value} onCheckedChange={field.onChange} />
-                        </FormControl>
-                      </FormItem>
-                    )}
-                  />
-                  {trafficEnabled && (
-                    <div className="grid gap-3 sm:grid-cols-2">
-                      <FormField
-                        control={form.control}
-                        name="trafficPointsCost"
-                        render={({ field }) => (
-                          <FormItem className="space-y-1.5">
-                            <FormLabel className="text-xs">
-                              {t('referralSettingsPage.pointsExchange.pointsPerGb')}
-                            </FormLabel>
-                            <FormControl>
-                              <Input type="number" min="1" {...field} />
-                            </FormControl>
-                          </FormItem>
-                        )}
-                      />
-                      <FormField
-                        control={form.control}
-                        name="trafficMaxGb"
-                        render={({ field }) => (
-                          <FormItem className="space-y-1.5">
-                            <FormLabel className="text-xs">
-                              {t('referralSettingsPage.pointsExchange.maxTraffic')}
-                            </FormLabel>
-                            <FormControl>
-                              <Input type="number" min="1" {...field} />
-                            </FormControl>
-                          </FormItem>
-                        )}
-                      />
-                    </div>
-                  )}
-                </div>
+                {/* Extra Traffic */}
+                <ExchangeOptionCard
+                  icon={<Wifi className="h-4 w-4 text-amber-500" />}
+                  title={t('referralSettingsPage.pointsExchange.extraTraffic')}
+                  enabledFieldName="trafficEnabled"
+                  enabled={trafficEnabled}
+                  control={form.control}
+                >
+                  <div className="grid gap-2 grid-cols-2">
+                    <FormField
+                      control={form.control}
+                      name="trafficPointsCost"
+                      render={({ field }) => (
+                        <FormItem className="space-y-1">
+                          <FormLabel className="text-[10px] text-muted-foreground uppercase tracking-wide">
+                            {t('referralSettingsPage.pointsExchange.pointsPerGb')}
+                          </FormLabel>
+                          <FormControl>
+                            <Input type="number" min="1" className="h-8 text-sm" {...field} />
+                          </FormControl>
+                        </FormItem>
+                      )}
+                    />
+                    <FormField
+                      control={form.control}
+                      name="trafficMaxGb"
+                      render={({ field }) => (
+                        <FormItem className="space-y-1">
+                          <FormLabel className="text-[10px] text-muted-foreground uppercase tracking-wide">
+                            {t('referralSettingsPage.pointsExchange.maxTraffic')}
+                          </FormLabel>
+                          <FormControl>
+                            <Input type="number" min="1" className="h-8 text-sm" {...field} />
+                          </FormControl>
+                        </FormItem>
+                      )}
+                    />
+                  </div>
+                </ExchangeOptionCard>
               </div>
             )}
           </CardContent>
         </Card>
       </form>
     </Form>
+  )
+}
+
+/**
+ * Compact tile for one points-exchange option. The header carries the
+ * icon + title + per-option enable Switch; the body is rendered only
+ * when the option itself is on, so disabled tiles stay quiet.
+ */
+function ExchangeOptionCard({
+  icon,
+  title,
+  enabledFieldName,
+  enabled,
+  control,
+  children,
+}: {
+  readonly icon: React.ReactNode
+  readonly title: string
+  readonly enabledFieldName:
+    | 'daysEnabled'
+    | 'giftEnabled'
+    | 'discountEnabled'
+    | 'trafficEnabled'
+  readonly enabled: boolean
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- generic form control passthrough
+  readonly control: any
+  readonly children: React.ReactNode
+}) {
+  return (
+    <div
+      className={`rounded-md border p-3 space-y-3 transition-opacity ${enabled ? 'bg-card' : 'bg-muted/30 opacity-70'}`}
+    >
+      <FormField
+        control={control}
+        name={enabledFieldName}
+        render={({ field }) => (
+          <FormItem className="flex items-center justify-between gap-2 space-y-0">
+            <div className="flex items-center gap-2 text-sm font-medium">
+              {icon}
+              <span>{title}</span>
+            </div>
+            <FormControl>
+              <Switch checked={field.value} onCheckedChange={field.onChange} />
+            </FormControl>
+          </FormItem>
+        )}
+      />
+      {enabled && children}
+    </div>
   )
 }
