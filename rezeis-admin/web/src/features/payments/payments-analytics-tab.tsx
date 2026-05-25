@@ -361,7 +361,7 @@ function ProviderRow({ provider }: { readonly provider: ProviderDetail }): JSX.E
 
             <div className="hidden h-12 w-32 shrink-0 lg:block" aria-hidden={!showsTrend}>
               {showsTrend && (
-                <ResponsiveContainer width="100%" height="100%">
+                <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
                   <AreaChart data={[...provider.daily]}>
                     <defs>
                       <linearGradient id={`grad-${provider.gatewayType}`} x1="0" y1="0" x2="0" y2="1">
@@ -532,7 +532,7 @@ function ProviderDetailPanel({ provider }: { readonly provider: ProviderDetail }
           {t('paymentsAnalytics.providers.trend')}
         </h4>
         <div className="h-40 w-full">
-          <ResponsiveContainer width="100%" height="100%">
+          <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
             <AreaChart data={[...provider.daily]} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
               <defs>
                 <linearGradient id={`gradFull-${provider.gatewayType}`} x1="0" y1="0" x2="0" y2="1">

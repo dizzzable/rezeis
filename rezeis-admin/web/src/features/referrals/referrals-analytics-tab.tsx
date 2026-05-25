@@ -258,7 +258,7 @@ function TimeseriesCard({
         {isLoading || !data ? (
           <Skeleton className="h-64 w-full" />
         ) : (
-          <ResponsiveContainer width="100%" height={260}>
+          <ResponsiveContainer width="100%" height={260} minWidth={0}>
             <AreaChart data={formatted}>
               <CartesianGrid strokeDasharray="3 3" stroke="#27272a" opacity={0.3} />
               <XAxis dataKey="bucketLabel" stroke="#a1a1aa" fontSize={11} />
@@ -356,7 +356,7 @@ function RewardDistributionCard() {
             {t('referralsAnalytics.distribution.empty')}
           </div>
         ) : (
-          <ResponsiveContainer width="100%" height={260}>
+          <ResponsiveContainer width="100%" height={260} minWidth={0}>
             <PieChart>
               <Pie
                 data={pieData}
@@ -484,7 +484,7 @@ function SourceBreakdownCard() {
             {t('referralsAnalytics.sources.empty')}
           </div>
         ) : (
-          <ResponsiveContainer width="100%" height={260}>
+          <ResponsiveContainer width="100%" height={260} minWidth={0}>
             <LineChart data={chartData} layout="vertical">
               <CartesianGrid strokeDasharray="3 3" stroke="#27272a" opacity={0.3} />
               <XAxis type="number" stroke="#a1a1aa" fontSize={11} />

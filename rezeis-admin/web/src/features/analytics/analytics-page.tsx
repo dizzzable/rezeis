@@ -198,7 +198,7 @@ function RevenueTab({ days }: { days: number }) {
           ) : (
             <div className="flex items-center gap-6">
               <div className="h-52 w-52 shrink-0">
-                <ResponsiveContainer width="100%" height="100%">
+                <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
                   <PieChart>
                     <Pie data={[...currencies]} cx="50%" cy="50%" innerRadius={45} outerRadius={75} paddingAngle={2} dataKey="revenue">
                       {currencies.map((_, i) => <Cell key={i} fill={DONUT_COLORS[i % DONUT_COLORS.length]} />)}
@@ -237,7 +237,7 @@ function RevenueTab({ days }: { days: number }) {
           ) : (
             <div className="flex items-center gap-6">
               <div className="h-52 w-52 shrink-0">
-                <ResponsiveContainer width="100%" height="100%">
+                <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
                   <PieChart>
                     <Pie data={[...plans]} cx="50%" cy="50%" innerRadius={45} outerRadius={75} paddingAngle={2} dataKey="total">
                       {plans.map((_, i) => <Cell key={i} fill={DONUT_COLORS[i % DONUT_COLORS.length]} />)}
@@ -400,7 +400,7 @@ function RetentionTab() {
           {ltv.isLoading ? <Skeleton className="h-48 w-full" /> : totalLtvUsers === 0 ? (
             <p className="py-6 text-center text-sm text-muted-foreground">{t('analyticsPage.ltv.empty')}</p>
           ) : (
-            <ResponsiveContainer width="100%" height={220}>
+            <ResponsiveContainer width="100%" height={220} minWidth={0}>
               <AreaChart data={ltvData}>
                 <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
                 <XAxis dataKey="bound" className="text-xs" />
@@ -493,7 +493,7 @@ function DailyChart({ daily }: { daily: readonly { date: string; revenue: number
         <CardDescription>{t('analyticsPage.daily.description', { count: daily.length })}</CardDescription>
       </CardHeader>
       <CardContent>
-        <ResponsiveContainer width="100%" height={280}>
+        <ResponsiveContainer width="100%" height={280} minWidth={0}>
           <ComposedChart data={formatted}>
             <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
             <XAxis dataKey="label" className="text-xs" />

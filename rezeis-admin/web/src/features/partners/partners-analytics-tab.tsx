@@ -312,7 +312,7 @@ function TimeseriesCard({
         {isLoading || !data ? (
           <Skeleton className="h-64 w-full" />
         ) : (
-          <ResponsiveContainer width="100%" height={260}>
+          <ResponsiveContainer width="100%" height={260} minWidth={0}>
             <AreaChart data={formatted}>
               <defs>
                 <linearGradient id="earningsGradient" x1="0" y1="0" x2="0" y2="1">
@@ -417,7 +417,7 @@ function LevelDistributionCard({ from, to }: { readonly from: string; readonly t
             {t('partnersAnalytics.empty')}
           </div>
         ) : (
-          <ResponsiveContainer width="100%" height={260}>
+          <ResponsiveContainer width="100%" height={260} minWidth={0}>
             <BarChart data={chartData}>
               <CartesianGrid strokeDasharray="3 3" stroke="#27272a" opacity={0.3} />
               <XAxis dataKey="level" stroke="#a1a1aa" fontSize={11} />
@@ -493,7 +493,7 @@ function GatewayDistributionCard({ from, to }: { readonly from: string; readonly
             {t('partnersAnalytics.empty')}
           </div>
         ) : (
-          <ResponsiveContainer width="100%" height={260}>
+          <ResponsiveContainer width="100%" height={260} minWidth={0}>
             <PieChart>
               <Pie data={pieData} dataKey="value" nameKey="name" innerRadius={48} outerRadius={88}>
                 {pieData.map((entry, index) => (
