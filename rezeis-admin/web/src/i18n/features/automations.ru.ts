@@ -21,6 +21,7 @@ export const ru = {
       runCount: '{{count}} запусков',
       lastRun: ' · последний: {{status}}',
       toggleAria: 'Переключить {{name}}',
+      selectAria: 'Открыть правило {{name}}',
     },
     editor: {
       newTitle: 'Новое правило',
@@ -85,6 +86,7 @@ export const ru = {
       deleteFailed: 'Не удалось удалить: {{message}}',
       runFinished: 'Запуск завершён: {{status}}',
       runFailed: 'Запуск не удался: {{message}}',
+      toggleFailed: 'Не удалось переключить правило: {{message}}',
     },
   },
 } as const

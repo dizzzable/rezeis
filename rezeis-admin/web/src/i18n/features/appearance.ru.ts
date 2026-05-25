@@ -236,6 +236,15 @@ export const ru = {
       title: 'Матовость элементов',
       description: 'Настройте уровень матовости для каждого элемента интерфейса отдельно.',
       blurLabel: 'Матовость',
+      opacityLabel: 'Прозрачность',
+      saturationLabel: 'Насыщенность',
+      refractionLabel: 'Рефракция',
+      refractionOptions: {
+        off: 'Выкл',
+        soft: 'Мягкая',
+        prominent: 'Заметная',
+      },
+      refractionHint: 'Рефракция работает только в браузерах на Chromium. На больших поверхностях даёт просадку FPS — лучше держать на маленьких интерактивных элементах.',
     },
     elements: {
       sidebar: 'Sidebar',
@@ -253,6 +262,15 @@ export const ru = {
       aberration: 'Хроматическая аберрация',
       elasticity: 'Упругость',
       saturation: 'Насыщенность',
+      shimmer: 'Блик',
+    },
+    accessibility: {
+      title: 'Доступность',
+      description: 'Учитывать системные настройки «Уменьшить прозрачность» и «Уменьшить движение».',
+      reducedTransparencyLabel: 'Учитывать «Уменьшить прозрачность»',
+      reducedTransparencyHint: 'Когда система просит снизить прозрачность, стеклянные поверхности становятся непрозрачными. Требование WCAG.',
+      reducedMotionLabel: 'Учитывать «Уменьшить движение»',
+      reducedMotionHint: 'Отключает мерцание, parallax-эффект и пружинистые переходы при системной настройке снижения движения.',
     },
     studio: {
       title: 'Background Studio',

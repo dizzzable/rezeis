@@ -236,6 +236,15 @@ export const en = {
       title: 'Element Frost',
       description: 'Set the frost/blur level for each UI element independently.',
       blurLabel: 'Frost level',
+      opacityLabel: 'Opacity',
+      saturationLabel: 'Saturation',
+      refractionLabel: 'Refraction',
+      refractionOptions: {
+        off: 'Off',
+        soft: 'Soft',
+        prominent: 'Prominent',
+      },
+      refractionHint: 'Liquid refraction works on Chromium-based browsers only. Heavy on large surfaces — keep it on small interactive elements.',
     },
     elements: {
       sidebar: 'Sidebar',
@@ -253,6 +262,15 @@ export const en = {
       aberration: 'Chromatic Aberration',
       elasticity: 'Elasticity',
       saturation: 'Saturation',
+      shimmer: 'Shimmer',
+    },
+    accessibility: {
+      title: 'Accessibility',
+      description: 'Honour OS-level reduced transparency and reduced motion preferences.',
+      reducedTransparencyLabel: 'Respect "Reduce Transparency"',
+      reducedTransparencyHint: 'When the OS asks for reduced transparency, glass surfaces become solid. Required for WCAG compliance.',
+      reducedMotionLabel: 'Respect "Reduce Motion"',
+      reducedMotionHint: 'Disables idle shimmer, pointer parallax and elastic transitions when the OS prefers reduced motion.',
     },
     studio: {
       title: 'Background Studio',

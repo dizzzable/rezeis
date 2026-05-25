@@ -29,10 +29,6 @@ void i18n.use(initReactI18next).init({
   interpolation: {
     escapeValue: false,
   },
-  // We always have at least one bundle hydrated synchronously (see
-  // bottom of this file), so initImmediate=false avoids a one-frame
-  // flicker of empty translation keys.
-  initImmediate: false,
 })
 
 // Pre-load the initial language synchronously so the first render has

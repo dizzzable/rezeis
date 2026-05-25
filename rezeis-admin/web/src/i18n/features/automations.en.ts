@@ -21,6 +21,7 @@ export const en = {
       runCount: '{{count}} runs',
       lastRun: ' · last: {{status}}',
       toggleAria: 'Toggle {{name}}',
+      selectAria: 'Open rule {{name}}',
     },
     editor: {
       newTitle: 'New rule',
@@ -85,6 +86,7 @@ export const en = {
       deleteFailed: 'Delete failed: {{message}}',
       runFinished: 'Run finished: {{status}}',
       runFailed: 'Run failed: {{message}}',
+      toggleFailed: 'Failed to toggle rule: {{message}}',
     },
   },
 } as const
