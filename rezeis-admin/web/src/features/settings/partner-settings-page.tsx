@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
-import { Save, Handshake, Loader2 } from 'lucide-react'
+import { Save, Handshake, Loader2, CreditCard } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
@@ -23,26 +23,44 @@ import {
   FormMessage,
 } from '@/components/ui/form'
 import { FadeIn } from '@/lib/motion'
+import {
+  type PaymentGatewayIconType,
+  getPaymentGatewayIcon,
+} from '@/features/payments/payment-gateway-icons'
 
-const GATEWAY_COMMISSIONS = [
-  { key: 'yookassaCommission', label: 'YooKassa', default: '3.5' },
-  { key: 'yoomoneyCommission', label: 'YooMoney', default: '3.5' },
-  { key: 'tbankCommission', label: 'T-Bank', default: '2.8' },
-  { key: 'robokassaCommission', label: 'Robokassa', default: '3.5' },
-  { key: 'stripeCommission', label: 'Stripe', default: '3.5' },
-  { key: 'mulenpayCommission', label: 'MulenPay', default: '3.5' },
-  { key: 'cloudpaymentsCommission', label: 'CloudPayments', default: '3.5' },
-  { key: 'telegramStarsCommission', label: 'Telegram Stars', default: '30' },
-  { key: 'cryptopayCommission', label: 'CryptoPay', default: '1.0' },
-  { key: 'cryptomusCommission', label: 'Cryptomus', default: '1.0' },
-  { key: 'heleketCommission', label: 'Heleket', default: '1.0' },
-  { key: 'pal24Commission', label: 'Pal24', default: '5.0' },
-  { key: 'wataCommission', label: 'WATA', default: '3.0' },
-  { key: 'plategaCommission', label: 'Platega', default: '3.5' },
-  { key: 'antilopayCommission', label: 'Antilopay', default: '3.5' },
-  { key: 'paypalychCommission', label: 'PayPalych', default: '3.5' },
-  { key: 'overpayCommission', label: 'OverPay', default: '3.5' },
-  { key: 'riopayCommission', label: 'RioPay', default: '3.5' },
+/**
+ * Catalog of every gateway the rezeis-admin platform supports. The order
+ * mirrors `PaymentGatewayType` in `prisma/schema.prisma`. Default
+ * commission percents are based on each provider's published rate cards
+ * and can be overridden by the operator at runtime.
+ *
+ * `key` is the JSON field name persisted under `Settings.partnerSettings`.
+ * Backend resolves the gateway commission through either a structured
+ * `gatewayCommissions[GATEWAY]` map (preferred) or a flat
+ * `${gatewayType.toLowerCase()}Commission` field (legacy parity); we
+ * write both shapes from this form.
+ */
+const GATEWAY_COMMISSIONS: ReadonlyArray<{
+  readonly type: PaymentGatewayIconType
+  readonly key: string
+  readonly label: string
+  readonly default: string
+}> = [
+  { type: 'YOOKASSA', key: 'yookassaCommission', label: 'YooKassa', default: '3.5' },
+  { type: 'TELEGRAM_STARS', key: 'telegram_starsCommission', label: 'Telegram Stars', default: '30' },
+  { type: 'PLATEGA', key: 'plategaCommission', label: 'Platega', default: '3.5' },
+  { type: 'HELEKET', key: 'heleketCommission', label: 'Heleket', default: '1.0' },
+  { type: 'CRYPTOMUS', key: 'cryptomusCommission', label: 'Cryptomus', default: '1.0' },
+  { type: 'MULENPAY', key: 'mulenpayCommission', label: 'MulenPay', default: '3.5' },
+  { type: 'ANTILOPAY', key: 'antilopayCommission', label: 'Antilopay', default: '3.5' },
+  { type: 'OVERPAY', key: 'overpayCommission', label: 'OverPay', default: '3.5' },
+  { type: 'PAYPALYCH', key: 'paypalychCommission', label: 'PayPalych', default: '3.5' },
+  { type: 'RIOPAY', key: 'riopayCommission', label: 'RioPay', default: '3.5' },
+  { type: 'WATA', key: 'wataCommission', label: 'WATA', default: '3.0' },
+  { type: 'AURAPAY', key: 'aurapayCommission', label: 'AuraPay', default: '3.5' },
+  { type: 'ROLLYPAY', key: 'rollypayCommission', label: 'RollyPay', default: '3.5' },
+  { type: 'SEVERPAY', key: 'severpayCommission', label: 'SeverPay', default: '3.5' },
+  { type: 'LAVA', key: 'lavaCommission', label: 'Lava.top', default: '5.0' },
 ] as const
 
 type AccrualStrategy = 'ON_EACH_PAYMENT' | 'ON_FIRST_PAYMENT'
@@ -56,12 +74,11 @@ interface PartnerSettings {
   autoCalculateCommission?: boolean
   taxPercent?: number | string
   accrualStrategy?: AccrualStrategy
+  gatewayCommissions?: Record<string, number>
   [k: string]: unknown
 }
 
 export default function PartnerSettingsPage() {
-  const { t } = useTranslation()
-
   const { data: settings, isLoading } = useQuery({
     queryKey: ['admin', 'settings'],
     queryFn: async () => (await api.get('/admin/settings')).data,
@@ -128,7 +145,10 @@ function PartnerSettingsForm({ partner }: PartnerSettingsFormProps) {
 
   const initialCommissions: Record<string, string> = {}
   for (const gc of GATEWAY_COMMISSIONS) {
-    initialCommissions[gc.key] = String(partner[gc.key] ?? gc.default)
+    const fromMap = partner.gatewayCommissions?.[gc.type]
+    const fromFlat = partner[gc.key]
+    const value = fromMap ?? fromFlat
+    initialCommissions[gc.key] = value !== undefined && value !== null ? String(value) : gc.default
   }
 
   const form = useForm<FormValues>({
@@ -151,6 +171,7 @@ function PartnerSettingsForm({ partner }: PartnerSettingsFormProps) {
 
   const saveMutation = useMutation({
     mutationFn: (values: FormValues) => {
+      const gatewayCommissionsMap: Record<string, number> = {}
       const payload: Record<string, unknown> = {
         enabled: values.enabled,
         level1Percent: values.level1Percent ? parseFloat(values.level1Percent) : undefined,
@@ -163,8 +184,15 @@ function PartnerSettingsForm({ partner }: PartnerSettingsFormProps) {
       }
       for (const gc of GATEWAY_COMMISSIONS) {
         const v = values.commissions[gc.key]
-        if (v) payload[gc.key] = parseFloat(v)
+        if (!v) continue
+        const parsed = parseFloat(v)
+        if (Number.isFinite(parsed)) {
+          // Persist both shapes so backend resolves the value through either lookup path.
+          payload[gc.key] = parsed
+          gatewayCommissionsMap[gc.type] = parsed
+        }
       }
+      payload.gatewayCommissions = gatewayCommissionsMap
       return api.patch('/admin/settings/partner', payload)
     },
     onSuccess: () => {
@@ -189,131 +217,144 @@ function PartnerSettingsForm({ partner }: PartnerSettingsFormProps) {
               <p className="text-muted-foreground">{t('partnerSettingsPage.subtitle')}</p>
             </div>
             <Button type="submit" disabled={saveMutation.isPending}>
-              {saveMutation.isPending ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Save className="h-4 w-4 mr-2" />}
+              {saveMutation.isPending ? (
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+              ) : (
+                <Save className="h-4 w-4 mr-2" />
+              )}
               {t('partnerSettingsPage.save')}
             </Button>
           </div>
         </FadeIn>
 
-        <Card>
-          <CardHeader><CardTitle>{t('partnerSettingsPage.general.title')}</CardTitle></CardHeader>
-          <CardContent className="space-y-4">
-            <FormField
-              control={form.control}
-              name="enabled"
-              render={({ field }) => (
-                <FormItem className="flex items-center justify-between space-y-0">
-                  <div>
-                    <FormLabel>{t('partnerSettingsPage.general.enable')}</FormLabel>
-                    <FormDescription className="text-xs">
-                      {t('partnerSettingsPage.general.enableHint')}
-                    </FormDescription>
-                  </div>
-                  <FormControl>
-                    <Switch checked={field.value} onCheckedChange={field.onChange} />
-                  </FormControl>
-                </FormItem>
-              )}
-            />
-            <FormField
-              control={form.control}
-              name="autoCalculate"
-              render={({ field }) => (
-                <FormItem className="flex items-center justify-between space-y-0">
-                  <div>
-                    <FormLabel>{t('partnerSettingsPage.general.autoCalculate')}</FormLabel>
-                    <FormDescription className="text-xs">
-                      {t('partnerSettingsPage.general.autoCalculateHint')}
-                    </FormDescription>
-                  </div>
-                  <FormControl>
-                    <Switch checked={field.value} onCheckedChange={field.onChange} />
-                  </FormControl>
-                </FormItem>
-              )}
-            />
-            <FormField
-              control={form.control}
-              name="accrualStrategy"
-              render={({ field }) => (
-                <FormItem className="space-y-1.5 max-w-xs">
-                  <FormLabel>{t('partnerSettingsPage.general.accrualStrategy')}</FormLabel>
-                  <Select value={field.value} onValueChange={field.onChange}>
+        {/* Three-column hero: General / Commission rates / Withdrawal rules */}
+        <div className="grid gap-4 lg:grid-cols-3">
+          <Card className="lg:col-span-1">
+            <CardHeader>
+              <CardTitle>{t('partnerSettingsPage.general.title')}</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <FormField
+                control={form.control}
+                name="enabled"
+                render={({ field }) => (
+                  <FormItem className="flex items-center justify-between space-y-0">
+                    <div>
+                      <FormLabel>{t('partnerSettingsPage.general.enable')}</FormLabel>
+                      <FormDescription className="text-xs">
+                        {t('partnerSettingsPage.general.enableHint')}
+                      </FormDescription>
+                    </div>
                     <FormControl>
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
+                      <Switch checked={field.value} onCheckedChange={field.onChange} />
                     </FormControl>
-                    <SelectContent>
-                      <SelectItem value="ON_EACH_PAYMENT">
-                        {t('partnerSettingsPage.general.onEachPayment')}
-                      </SelectItem>
-                      <SelectItem value="ON_FIRST_PAYMENT">
-                        {t('partnerSettingsPage.general.onFirstPayment')}
-                      </SelectItem>
-                    </SelectContent>
-                  </Select>
-                  <FormDescription className="text-[11px]">
-                    {accrualStrategy === 'ON_FIRST_PAYMENT'
-                      ? t('partnerSettingsPage.general.onFirstPaymentHint')
-                      : t('partnerSettingsPage.general.onEachPaymentHint')}
-                  </FormDescription>
-                </FormItem>
-              )}
-            />
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>{t('partnerSettingsPage.commissionRates.title')}</CardTitle>
-            <CardDescription>{t('partnerSettingsPage.commissionRates.description')}</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="grid gap-4 sm:grid-cols-3">
-              {(['level1Percent', 'level2Percent', 'level3Percent'] as const).map((name, idx) => (
-                <FormField
-                  key={name}
-                  control={form.control}
-                  name={name}
-                  render={({ field }) => (
-                    <FormItem className="space-y-1.5">
-                      <FormLabel>
-                        {idx === 0
-                          ? t('partnerSettingsPage.commissionRates.level1')
-                          : idx === 1
-                            ? t('partnerSettingsPage.commissionRates.level2')
-                            : t('partnerSettingsPage.commissionRates.level3')}
-                      </FormLabel>
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
+                name="autoCalculate"
+                render={({ field }) => (
+                  <FormItem className="flex items-center justify-between space-y-0">
+                    <div>
+                      <FormLabel>{t('partnerSettingsPage.general.autoCalculate')}</FormLabel>
+                      <FormDescription className="text-xs">
+                        {t('partnerSettingsPage.general.autoCalculateHint')}
+                      </FormDescription>
+                    </div>
+                    <FormControl>
+                      <Switch checked={field.value} onCheckedChange={field.onChange} />
+                    </FormControl>
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
+                name="accrualStrategy"
+                render={({ field }) => (
+                  <FormItem className="space-y-1.5">
+                    <FormLabel>{t('partnerSettingsPage.general.accrualStrategy')}</FormLabel>
+                    <Select value={field.value} onValueChange={field.onChange}>
                       <FormControl>
-                        <div className="relative">
-                          <Input
-                            type="number"
-                            min="0"
-                            max="100"
-                            step="0.1"
-                            placeholder="0"
-                            {...field}
-                            className="pr-8"
-                          />
-                          <span className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground text-sm">%</span>
-                        </div>
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
                       </FormControl>
-                      <FormMessage className="text-[10px]" />
-                    </FormItem>
-                  )}
-                />
-              ))}
-            </div>
-            <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                      <SelectContent>
+                        <SelectItem value="ON_EACH_PAYMENT">
+                          {t('partnerSettingsPage.general.onEachPayment')}
+                        </SelectItem>
+                        <SelectItem value="ON_FIRST_PAYMENT">
+                          {t('partnerSettingsPage.general.onFirstPayment')}
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <FormDescription className="text-[11px]">
+                      {accrualStrategy === 'ON_FIRST_PAYMENT'
+                        ? t('partnerSettingsPage.general.onFirstPaymentHint')
+                        : t('partnerSettingsPage.general.onEachPaymentHint')}
+                    </FormDescription>
+                  </FormItem>
+                )}
+              />
+            </CardContent>
+          </Card>
+
+          <Card className="lg:col-span-1">
+            <CardHeader>
+              <CardTitle>{t('partnerSettingsPage.commissionRates.title')}</CardTitle>
+              <CardDescription>
+                {t('partnerSettingsPage.commissionRates.description')}
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid gap-3 grid-cols-3">
+                {(['level1Percent', 'level2Percent', 'level3Percent'] as const).map((name, idx) => (
+                  <FormField
+                    key={name}
+                    control={form.control}
+                    name={name}
+                    render={({ field }) => (
+                      <FormItem className="space-y-1.5">
+                        <FormLabel className="text-xs">
+                          {idx === 0
+                            ? t('partnerSettingsPage.commissionRates.level1')
+                            : idx === 1
+                              ? t('partnerSettingsPage.commissionRates.level2')
+                              : t('partnerSettingsPage.commissionRates.level3')}
+                        </FormLabel>
+                        <FormControl>
+                          <div className="relative">
+                            <Input
+                              type="number"
+                              min="0"
+                              max="100"
+                              step="0.1"
+                              placeholder="0"
+                              {...field}
+                              className="pr-8 h-8 text-sm"
+                            />
+                            <span className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground text-xs">
+                              %
+                            </span>
+                          </div>
+                        </FormControl>
+                        <FormMessage className="text-[10px]" />
+                      </FormItem>
+                    )}
+                  />
+                ))}
+              </div>
               <FormField
                 control={form.control}
                 name="taxPercent"
                 render={({ field }) => (
                   <FormItem className="space-y-1.5">
-                    <FormLabel>{t('partnerSettingsPage.commissionRates.taxPercent')}</FormLabel>
+                    <FormLabel className="text-xs">
+                      {t('partnerSettingsPage.commissionRates.taxPercent')}
+                    </FormLabel>
                     <FormControl>
-                      <div className="relative w-40">
+                      <div className="relative">
                         <Input
                           type="number"
                           min="0"
@@ -321,89 +362,103 @@ function PartnerSettingsForm({ partner }: PartnerSettingsFormProps) {
                           step="0.1"
                           placeholder="6"
                           {...field}
-                          className="pr-8"
+                          className="pr-8 h-8 text-sm"
                         />
-                        <span className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground text-sm">%</span>
+                        <span className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground text-xs">
+                          %
+                        </span>
                       </div>
                     </FormControl>
-                    <FormDescription className="text-[11px]">
+                    <FormDescription className="text-[10px]">
                       {t('partnerSettingsPage.commissionRates.taxPercentHint')}
                     </FormDescription>
                     <FormMessage className="text-[10px]" />
                   </FormItem>
                 )}
               />
+            </CardContent>
+          </Card>
+
+          <Card className="lg:col-span-1">
+            <CardHeader>
+              <CardTitle>{t('partnerSettingsPage.withdrawal.title')}</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <FormField
+                control={form.control}
+                name="minWithdrawal"
+                render={({ field }) => (
+                  <FormItem className="space-y-1.5">
+                    <FormLabel>{t('partnerSettingsPage.withdrawal.minAmount')}</FormLabel>
+                    <FormControl>
+                      <Input type="number" min="0" step="1" placeholder="50000" {...field} />
+                    </FormControl>
+                    <FormDescription className="text-[11px]">
+                      {minWithdrawalRaw && /^\d+$/.test(minWithdrawalRaw)
+                        ? `= ${(parseInt(minWithdrawalRaw, 10) / 100).toFixed(2)} ₽`
+                        : t('partnerSettingsPage.withdrawal.defaultHint')}
+                    </FormDescription>
+                    <FormMessage className="text-[10px]" />
+                  </FormItem>
+                )}
+              />
+            </CardContent>
+          </Card>
+        </div>
+
+        {/* Gateway commissions — full-width with brand icons */}
+        <Card>
+          <CardHeader>
+            <div className="flex items-center gap-2">
+              <CreditCard className="h-5 w-5 text-muted-foreground" />
+              <div>
+                <CardTitle>{t('partnerSettingsPage.gatewayCommissions.title')}</CardTitle>
+                <CardDescription>
+                  {t('partnerSettingsPage.gatewayCommissions.description')}
+                </CardDescription>
+              </div>
             </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>{t('partnerSettingsPage.withdrawal.title')}</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <FormField
-              control={form.control}
-              name="minWithdrawal"
-              render={({ field }) => (
-                <FormItem className="space-y-1.5 w-64">
-                  <FormLabel>{t('partnerSettingsPage.withdrawal.minAmount')}</FormLabel>
-                  <FormControl>
-                    <Input
-                      type="number"
-                      min="0"
-                      step="1"
-                      placeholder="50000"
-                      {...field}
-                    />
-                  </FormControl>
-                  <FormDescription className="text-[11px]">
-                    {minWithdrawalRaw && /^\d+$/.test(minWithdrawalRaw)
-                      ? `= ${(parseInt(minWithdrawalRaw, 10) / 100).toFixed(2)} ₽`
-                      : t('partnerSettingsPage.withdrawal.defaultHint')}
-                  </FormDescription>
-                  <FormMessage className="text-[10px]" />
-                </FormItem>
-              )}
-            />
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>{t('partnerSettingsPage.gatewayCommissions.title')}</CardTitle>
-            <CardDescription>
-              {t('partnerSettingsPage.gatewayCommissions.description')}
-            </CardDescription>
           </CardHeader>
           <CardContent>
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {GATEWAY_COMMISSIONS.map((gc) => (
-                <FormField
-                  key={gc.key}
-                  control={form.control}
-                  name={`commissions.${gc.key}` as const}
-                  render={({ field }) => (
-                    <FormItem className="space-y-1">
-                      <FormLabel className="text-xs">{gc.label}</FormLabel>
-                      <FormControl>
-                        <div className="relative">
-                          <Input
-                            type="number"
-                            min="0"
-                            max="100"
-                            step="0.1"
-                            {...field}
-                            className="pr-8 h-8 text-sm"
-                          />
-                          <span className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground text-xs">%</span>
-                        </div>
-                      </FormControl>
-                      <FormMessage className="text-[10px]" />
-                    </FormItem>
-                  )}
-                />
-              ))}
+              {GATEWAY_COMMISSIONS.map((gc) => {
+                const Icon = getPaymentGatewayIcon(gc.type)
+                return (
+                  <FormField
+                    key={gc.key}
+                    control={form.control}
+                    name={`commissions.${gc.key}` as const}
+                    render={({ field }) => (
+                      <FormItem className="space-y-1">
+                        <FormLabel className="text-xs flex items-center gap-2">
+                          {Icon ? (
+                            <Icon className="h-4 w-4" />
+                          ) : (
+                            <span className="h-4 w-4 inline-block rounded-sm bg-muted/40" />
+                          )}
+                          <span>{gc.label}</span>
+                        </FormLabel>
+                        <FormControl>
+                          <div className="relative">
+                            <Input
+                              type="number"
+                              min="0"
+                              max="100"
+                              step="0.1"
+                              {...field}
+                              className="pr-8 h-8 text-sm"
+                            />
+                            <span className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground text-xs">
+                              %
+                            </span>
+                          </div>
+                        </FormControl>
+                        <FormMessage className="text-[10px]" />
+                      </FormItem>
+                    )}
+                  />
+                )
+              })}
             </div>
           </CardContent>
         </Card>
