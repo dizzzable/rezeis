@@ -35,7 +35,11 @@ const BroadcastPage = lazy(
 const SettingsPage = lazy(
   withFeatureBundle('platformSettings', () => import('@/features/settings/settings-page')),
 )
-const ApiTokensPage = lazy(() => import('@/features/settings/api-tokens-page').then(m => ({ default: m.ApiTokensPage })))
+const ApiTokensPage = lazy(
+  withFeatureBundle('platformSettings', () =>
+    import('@/features/settings/api-tokens-page').then(m => ({ default: m.ApiTokensPage })),
+  ),
+)
 const PanelSettingsHub = lazy(() => import('@/features/settings/panel-settings-hub'))
 const AnalyticsPage = lazy(
   withFeatureBundle('analytics', () => import('@/features/analytics/analytics-page')),

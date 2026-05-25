@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, Trash2, GripVertical } from 'lucide-react'
+import { Plus, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
@@ -36,12 +36,15 @@ export function ScreenEditorPanel({ screen, flowName }: ScreenEditorPanelProps) 
   const [isRoot, setIsRoot] = useState(screenIsRoot)
 
   // Sync when screen changes (user clicks different node)
+  // TODO: refactor — derive these values inline from props/key instead of mirroring into state.
+  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     setName(screenName)
     setTextRu(screenTextRu)
     setTextEn(screenTextEn)
     setIsRoot(screenIsRoot)
   }, [screenId, screenName, screenTextRu, screenTextEn, screenIsRoot])
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // ── Screen mutations ────────────────────────────────────────────────────────
   const updateScreenMutation = useMutation({
@@ -59,7 +62,7 @@ export function ScreenEditorPanel({ screen, flowName }: ScreenEditorPanelProps) 
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['bot-flow', 'draft', flowName] })
-      toast.success(t('botFlow.screenDeleted', 'Screen deleted'))
+      toast.success(t('botFlow.screenDeleted'))
     },
   })
 
@@ -148,7 +151,7 @@ export function ScreenEditorPanel({ screen, flowName }: ScreenEditorPanelProps) 
           onBlur={handleScreenBlur}
           rows={3}
           className="w-full rounded-md border bg-background px-3 py-2 text-xs resize-y min-h-[60px] focus:outline-none focus:ring-1 focus:ring-ring"
-          placeholder="Текст сообщения на русском..."
+          placeholder={t('botFlow.fields.textRuPlaceholder')}
         />
       </div>
 
@@ -161,7 +164,7 @@ export function ScreenEditorPanel({ screen, flowName }: ScreenEditorPanelProps) 
           onBlur={handleScreenBlur}
           rows={3}
           className="w-full rounded-md border bg-background px-3 py-2 text-xs resize-y min-h-[60px] focus:outline-none focus:ring-1 focus:ring-ring"
-          placeholder="Message text in English..."
+          placeholder={t('botFlow.fields.textEnPlaceholder')}
         />
       </div>
 
@@ -199,11 +202,11 @@ export function ScreenEditorPanel({ screen, flowName }: ScreenEditorPanelProps) 
                   })
                   queryClient.invalidateQueries({ queryKey: ['bot-flow', 'draft', flowName] })
                 } catch {
-                  toast.error(t('botFlow.mediaUploadError', 'Upload failed'))
+                  toast.error(t('botFlow.mediaUploadError'))
                 }
               }}
             />
-            <span className="text-xs text-muted-foreground">{t('botFlow.fields.mediaHint', 'Click to upload image or video')}</span>
+            <span className="text-xs text-muted-foreground">{t('botFlow.fields.mediaHint')}</span>
           </label>
         )}
       </div>
@@ -247,7 +250,7 @@ export function ScreenEditorPanel({ screen, flowName }: ScreenEditorPanelProps) 
         disabled={deleteScreenMutation.isPending}
       >
         <Trash2 className="h-3.5 w-3.5 mr-1.5" />
-        {t('botFlow.deleteScreen', 'Delete screen')}
+        {t('botFlow.deleteScreen')}
       </Button>
     </div>
   )
@@ -266,10 +269,13 @@ function ButtonEditor({ button, onUpdate, onDelete }: ButtonEditorProps) {
   const [labelRu, setLabelRu] = useState(button.labelRu)
   const [labelEn, setLabelEn] = useState(button.labelEn)
 
+  // TODO: refactor — re-derive labelRu/labelEn from `button` prop directly via key/identity.
+  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     setLabelRu(button.labelRu)
     setLabelEn(button.labelEn)
   }, [button.labelRu, button.labelEn])
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   const handleLabelBlur = () => {
     const changes: Record<string, unknown> = {}
@@ -286,14 +292,14 @@ function ButtonEditor({ button, onUpdate, onDelete }: ButtonEditorProps) {
           value={labelRu}
           onChange={(e) => setLabelRu(e.target.value)}
           onBlur={handleLabelBlur}
-          placeholder="RU"
+          placeholder={t('botFlow.button.labelRuPlaceholder')}
           className="h-7 text-[11px]"
         />
         <Input
           value={labelEn}
           onChange={(e) => setLabelEn(e.target.value)}
           onBlur={handleLabelBlur}
-          placeholder="EN"
+          placeholder={t('botFlow.button.labelEnPlaceholder')}
           className="h-7 text-[11px]"
         />
       </div>
@@ -301,7 +307,7 @@ function ButtonEditor({ button, onUpdate, onDelete }: ButtonEditorProps) {
       {/* Row / Col — same row = same line in Telegram keyboard */}
       <div className="grid grid-cols-2 gap-1.5">
         <div className="flex items-center gap-1">
-          <span className="text-[10px] text-muted-foreground shrink-0">{t('botFlow.button.row', 'Ряд')}</span>
+          <span className="text-[10px] text-muted-foreground shrink-0">{t('botFlow.button.row')}</span>
           <Input
             type="number"
             min={0}
@@ -311,7 +317,7 @@ function ButtonEditor({ button, onUpdate, onDelete }: ButtonEditorProps) {
           />
         </div>
         <div className="flex items-center gap-1">
-          <span className="text-[10px] text-muted-foreground shrink-0">{t('botFlow.button.col', 'Поз')}</span>
+          <span className="text-[10px] text-muted-foreground shrink-0">{t('botFlow.button.col')}</span>
           <Input
             type="number"
             min={0}

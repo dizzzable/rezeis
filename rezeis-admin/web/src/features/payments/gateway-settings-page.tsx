@@ -348,7 +348,7 @@ const GATEWAY_META: ReadonlyArray<GatewayMeta> = [
       {
         key: 'secretKey',
         labelKey: 'paymentGateways.fields.secret',
-        placeholder: 'secret-key-2 (для проверки X-SIGNATURE)',
+        placeholder: 'secret-key-2',
         secret: true,
         hintKey: 'paymentGateways.hints.aurapaySecret',
       },
@@ -669,6 +669,7 @@ function GatewayRow({
 
       <div className={cn('flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-muted/40 overflow-hidden')}>
         {BrandIcon ? (
+          // eslint-disable-next-line react-hooks/static-components
           <BrandIcon className="h-6 w-6 object-contain" />
         ) : (
           <FallbackIcon className={cn('h-5 w-5', meta.iconColor)} />
@@ -837,6 +838,7 @@ function GatewaySettingsForm({ gateway, onClose }: GatewaySettingsFormProps) {
       <DialogHeader>
         <DialogTitle className="flex items-center gap-2">
           {BrandIcon ? (
+            // eslint-disable-next-line react-hooks/static-components
             <BrandIcon className="h-5 w-5 object-contain" />
           ) : (
             <FallbackIcon className={cn('h-5 w-5', meta.iconColor)} />
@@ -964,6 +966,7 @@ function CurrencyOption({ code }: { readonly code: string }): JSX.Element {
     <span className="flex items-center gap-2">
       <span className="flex h-5 w-5 shrink-0 items-center justify-center overflow-hidden rounded-full bg-muted/40">
         {Icon ? (
+          // eslint-disable-next-line react-hooks/static-components
           <Icon className="h-4 w-4 object-contain" />
         ) : (
           <span className="text-[11px] font-semibold tabular-nums text-foreground">
@@ -989,6 +992,7 @@ function RowCurrencyBadge({ code }: { readonly code: string }): JSX.Element {
     <span className="inline-flex items-center gap-1">
       <span className="flex h-3.5 w-3.5 items-center justify-center overflow-hidden rounded-full bg-muted/40">
         {Icon ? (
+          // eslint-disable-next-line react-hooks/static-components
           <Icon className="h-3 w-3 object-contain" />
         ) : (
           <span className="text-[8px] font-semibold tabular-nums">

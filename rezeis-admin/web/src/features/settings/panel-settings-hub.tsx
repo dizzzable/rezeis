@@ -22,10 +22,12 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { FadeIn } from '@/lib/motion'
 import { withFeatureBundle } from '@/i18n/i18n'
 
-const ApiTokensTab = lazy(() =>
-  import('@/features/settings/api-tokens-page').then((m) => ({
-    default: m.ApiTokensPage,
-  })),
+const ApiTokensTab = lazy(
+  withFeatureBundle('platformSettings', () =>
+    import('@/features/settings/api-tokens-page').then((m) => ({
+      default: m.ApiTokensPage,
+    })),
+  ),
 )
 const AppearanceTab = lazy(
   withFeatureBundle('appearance', () => import('@/features/appearance/appearance-page')),

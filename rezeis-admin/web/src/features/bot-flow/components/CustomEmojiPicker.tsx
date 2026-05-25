@@ -83,8 +83,10 @@ const CUSTOM_EMOJI_CATALOG: Array<{ id: string; fallback: string; category: stri
   { id: '5194996633682600894', fallback: '🏦', category: 'pay' },
 ]
 
-const CUSTOM_CATEGORIES = [
-  { key: 'all', label: 'Все' },
+const useCustomCategories = (
+  t: (key: string) => string,
+): readonly { key: string; label: string }[] => [
+  { key: 'all', label: t('botFlow.emojiCategories.all') },
   { key: 'ui', label: 'UI' },
   { key: 'num', label: '0-9' },
   { key: 'pay', label: '💰' },
@@ -96,6 +98,7 @@ export function CustomEmojiPicker({ value, onChange }: CustomEmojiPickerProps) {
   const [category, setCategory] = useState('all')
   const [manualId, setManualId] = useState('')
   const [unicodeTab, setUnicodeTab] = useState(0)
+  const CUSTOM_CATEGORIES = useCustomCategories(t)
 
   const filteredCatalog = CUSTOM_EMOJI_CATALOG.filter((e) => {
     if (category !== 'all' && e.category !== category) return false
@@ -179,7 +182,7 @@ export function CustomEmojiPicker({ value, onChange }: CustomEmojiPickerProps) {
             </div>
             <div className="px-2 py-1.5 border-t">
               <p className="text-[9px] text-muted-foreground leading-tight">
-                {t('botFlow.button.unicodeHint', 'Click to copy. Paste into button label. For icon_custom_emoji_id use Premium tab.')}
+                {t('botFlow.button.unicodeHint')}
               </p>
             </div>
           </TabsContent>
@@ -219,7 +222,7 @@ export function CustomEmojiPicker({ value, onChange }: CustomEmojiPickerProps) {
             </div>
             {value && (
               <Button variant="ghost" size="sm" className="w-full h-6 text-[10px]" onClick={handleClear}>
-                {t('botFlow.button.clearEmoji', 'Clear')}
+                {t('botFlow.button.clearEmoji')}
               </Button>
             )}
           </TabsContent>
@@ -227,7 +230,7 @@ export function CustomEmojiPicker({ value, onChange }: CustomEmojiPickerProps) {
           {/* Manual ID */}
           <TabsContent value="id" className="p-2.5 space-y-2 m-0">
             <p className="text-[10px] text-muted-foreground">
-              {t('botFlow.button.manualEmojiHint', 'Send emoji to @RawDataBot to get ID')}
+              {t('botFlow.button.manualEmojiHint')}
             </p>
             <div className="flex gap-1.5">
               <Input
