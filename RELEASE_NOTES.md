@@ -1,4 +1,47 @@
-﻿# Rezeis Admin v0.3.1
+﻿# Rezeis Admin v0.3.2
+
+## Patch — Recharts 3 zero-size warning fix
+
+`v0.3.2` — узкий runtime-фикс: на viewport <1024px и в свернутых `<Collapsible>` секциях Recharts 3 печатает в console:
+
+> The width(-1) and height(-1) of chart should be greater than 0… add a minWidth(0) or minHeight(undefined)…
+
+Recharts 3 ужесточил гард на `width≤0 || height≤0` в `ResponsiveContainer` — теперь любая mounted чарт-инстанция в скрытом родителе (`hidden`, `display:none`, collapsed accordion) вылетает в `console.warn`. Логика рендера корректна — сам ResizeObserver всё равно перерисует чарт когда parent станет видим — но шум в DevTools раздражает.
+
+### Fix
+
+Добавлены `minWidth={0}` (и `minHeight={0}` где ResponsiveContainer использует `width="100%" height="100%"` без явных пикселей) во все 12 ResponsiveContainer-ов в активном коде:
+
+- `components/ui/chart.tsx` — общий `ChartContainer` (используется в Appearance preview).
+- `features/dashboard/dashboard-online-trend.tsx`
+- `features/dashboard/dashboard-subscription-chart.tsx`
+- `features/analytics/analytics-page.tsx` (4 места: 2 Pie charts, AreaChart LTV, ComposedChart subscriptions)
+- `features/payments/payments-analytics-tab.tsx` (2 места: trend sparkline + provider detail panel)
+- `features/partners/partners-analytics-tab.tsx` (3 места: timeseries AreaChart, level distribution BarChart, gateway PieChart)
+- `features/referrals/referrals-analytics-tab.tsx` (3 места: timeseries AreaChart, role distribution PieChart, top users LineChart)
+
+Это тип-safe и behavior-preserving: Recharts продолжает читать parent box через ResizeObserver, и на первый кадр (когда parent имеет реальный размер) рисует точно так же.
+
+### Pre-push
+
+| Check | Result |
+|---|---|
+| Backend `tsc` + `eslint` | ✅ 0 errors / 0 warnings |
+| Frontend `tsc -b` + `eslint` + `build` | ✅ 0 errors / 0 warnings / built |
+
+### Migration / breaking
+
+Нет.
+
+### Docker image
+
+Пересобирается автоматически на push tag `v0.3.2` → GHCR теги `v0.3.2`, `0.3.2`, `0.3`, `latest`.
+
+**Full Changelog**: https://github.com/dizzzable/rezeis/compare/v0.3.1...v0.3.2
+
+---
+
+# Rezeis Admin v0.3.1
 
 ## Patch release — i18n полнота, type-safety и lint hygiene + Liquid Glass theme
 
@@ -80,12 +123,14 @@ Steering-rule запрещает defaultValue в `t()`. 13 случаев в `bo
 
 ### Build infrastructure
 - **	sconfig.app.json** — добавлен exclude для 5 vendored React Bits файлов, не используемых в активном UI и тянущих внешние deps без типов: index.ts (barrel), AnimatedContent.tsx, FallingText.tsx (matter-js), Lanyard.tsx (@react-three/rapier + .glb), ModelViewer.tsx (three OBJLoader), SplitText.tsx. Vite-bundler по-прежнему собирает реально импортируемые компоненты.
-- **eactbits/index.ts** — GridScan экспортируется как **named** (не default), исправлен export.
+- **
+eactbits/index.ts** — GridScan экспортируется как **named** (не default), исправлен export.
 - **i18n/i18n.ts** — убран initImmediate: false (поле выпало из типов i18next 26).
 
 ### Library type-shape adaptations
 - **motion v12 Easing** — effects/AnimatedContent.tsx: ease: string | number[] → ease: Easing.
-- **RotatingText / ScrambledText API drift** — effects/TitleEffect.tsx: interval → otationInterval; 	ext prop → children.
+- **RotatingText / ScrambledText API drift** — effects/TitleEffect.tsx: interval → 
+otationInterval; 	ext prop → children.
 - **Recharts 3 Formatter<ValueType, NameType>** — formatter теперь принимает ValueType | undefined. Адаптировано в:
   - eatures/dashboard/dashboard-subscription-chart.tsx
   - eatures/analytics/analytics-page.tsx
@@ -112,10 +157,14 @@ const ItemIcon = item.icon as ComponentType<SVGProps<SVGSVGElement>>
 - **eatures/users/user-detail-shape.ts** — расширены интерфейсы под реальный shape GET /admin/users/:telegramId:
   - UserDetail: + isBotBlocked, isRulesAccepted, personalDiscount, purchaseDiscount, partnerBalanceCurrencyOverride, ttachReferrerReason, effectiveInviteSettings, userInviteSettingsOverride
   - UserSubscription: + configUrl, plan: { id, name, type }
-  - UserWebAccount: + equiresPasswordChange, 	emporaryPasswordExpiresAt
-  - UserPartner: + 	otalWithdrawn, useGlobalSettings, ccrualStrategy, ewardType, levelXPercent, levelXFixedAmount
+  - UserWebAccount: + 
+equiresPasswordChange, 	emporaryPasswordExpiresAt
+  - UserPartner: + 	otalWithdrawn, useGlobalSettings, ccrualStrategy, 
+ewardType, levelXPercent, levelXFixedAmount
   - UserPartnerTransaction: + level, description, earnedAmount
-  - UserReferralEntry: + eferral, eferralUserId
+  - UserReferralEntry: + 
+eferral, 
+eferralUserId
   - new InviteEffective / InviteOverride интерфейсы
 - **eatures/payments/payments-page.tsx TransactionRow** — + userUsername, userName.
 
@@ -146,12 +195,14 @@ React Compiler-rules (set-state-in-effect, refs-during-render, purity, static-co
 Особенность: eslint-disable-next-line не уважается react-doctor — правило срабатывает на JSX-tag, не на declaration. Поэтому где disable-next-line не помог, использован block /* eslint-disable */ … /* eslint-enable */ или disable прямо на JSX-узле.
 
 ### File-level disables
-- eatures/partners/analytics-range-picker.tsx — eact-refresh/only-export-components (helper uildDefaultRange рядом с компонентом).
+- eatures/partners/analytics-range-picker.tsx — 
+eact-refresh/only-export-components (helper uildDefaultRange рядом с компонентом).
 - eatures/settings/auth-provider-icons.tsx — то же (factory getAuthProviderIcon).
 
 ### react-hook-form orm.watch()
 Распознаётся react-doctor как "incompatible library". В 5 файлах добавлены suppress'ы с комментарием про React Compiler integration: 
-otifications-page.tsx ×2, partner-detail-sheet.tsx, panel-branding-tab.tsx, partner-settings-page.tsx, eferral-settings-page.tsx.
+otifications-page.tsx ×2, partner-detail-sheet.tsx, panel-branding-tab.tsx, partner-settings-page.tsx, 
+eferral-settings-page.tsx.
 
 ---
 
