@@ -37,6 +37,9 @@ export function StatsPeriodFilter({ value, onChange }: Props) {
 
   function applyPreset(days: number) {
     const to = endOfDay(new Date())
+    // Date.now() is called only when the user clicks a preset; the rule still flags it
+    // because the helper is declared in the component body. Safe to suppress.
+    // eslint-disable-next-line react-hooks/purity
     const from = startOfDay(new Date(Date.now() - days * 24 * 60 * 60 * 1000))
     onChange({ from, to })
   }

@@ -348,6 +348,8 @@ function AddOnDialog({
   ])
 
   // Reset/populate form when dialog opens
+  // TODO: refactor — initialize state from `addOn` via key prop instead of mirroring in an effect.
+  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     if (!open) return
     if (addOn) {
@@ -375,6 +377,7 @@ function AddOnDialog({
       setPrices([{ currency: 'RUB', price: '' }])
     }
   }, [open, addOn])
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   const { data: plans } = usePlans()
 

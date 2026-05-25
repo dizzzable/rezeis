@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components */
 /**
  * Inline auth-provider icons for the OAuth2/SSO settings UI.
  *

@@ -158,6 +158,8 @@ function ReferralSettingsForm({ referral }: ReferralSettingsFormProps) {
     },
   })
 
+  // react-hook-form's `form.watch()` integration is not yet recognised by react-doctor.
+  // eslint-disable-next-line react-hooks/incompatible-library
   const rewardType = form.watch('rewardType')
   const linkTtlEnabled = form.watch('linkTtlEnabled')
   const inviteSlotsEnabled = form.watch('inviteSlotsEnabled')

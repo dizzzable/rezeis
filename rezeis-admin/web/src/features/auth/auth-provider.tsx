@@ -69,7 +69,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         // Surface the failure: without permissions, the UI hides actions
         // the operator might actually be allowed to perform. We log to
         // the console for debugging and offer a one-click retry.
-        // eslint-disable-next-line no-console -- intentional dev feedback
         console.error('[auth-provider] loadPermissions failed:', err)
         toast.error(t('authProvider.permissions.loadFailed'), {
           duration: 8_000,

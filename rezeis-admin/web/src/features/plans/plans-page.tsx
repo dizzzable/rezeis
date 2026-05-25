@@ -18,11 +18,6 @@ import { PlanForm, type PlanFormData } from './plan-form'
 import { plansQueryKeys, usePlans, type Plan } from './plans-api'
 import { PlansStatsTab } from './plans-stats-tab'
 
-interface PlanDuration {
-  id: string; days: number; isActive: boolean
-  prices: { id: string; currency: string; price: number }[]
-}
-
 export default function PlansPage() {
   const { t } = useTranslation()
   const queryClient = useQueryClient()

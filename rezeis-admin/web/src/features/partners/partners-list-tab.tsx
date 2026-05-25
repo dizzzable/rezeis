@@ -30,7 +30,6 @@ import { FadeIn } from '@/lib/motion'
 import { AnimatedCounter } from './animated-counter'
 import PartnerDetailSheet from './partner-detail-sheet'
 import {
-  formatKopecks,
   formatKopecksCompact,
   formatNumber,
 } from './partner-formatters'
