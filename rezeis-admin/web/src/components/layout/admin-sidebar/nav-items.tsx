@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from 'react'
+import type { ComponentType, SVGProps } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useLocation } from 'react-router-dom'
 import {
@@ -253,10 +254,11 @@ export function NavItems({ collapsed = false, onNavigate }: NavItemsProps) {
             navItemMap.get(activeId) &&
             (() => {
               const item = navItemMap.get(activeId)!
+              const ItemIcon = item.icon as ComponentType<SVGProps<SVGSVGElement>>
               return (
                 <div className="flex items-center gap-3 rounded-md bg-sidebar-accent px-3 py-2 text-sm font-medium text-sidebar-foreground shadow-lg">
                   <GripVertical className="h-3.5 w-3.5 shrink-0 text-sidebar-foreground/40" />
-                  <item.icon className="h-4 w-4 shrink-0" />
+                  <ItemIcon className="h-4 w-4 shrink-0" />
                   <span>{t(`adminNav.items.${item.key}`)}</span>
                 </div>
               )

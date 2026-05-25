@@ -78,7 +78,7 @@ export function DashboardSubscriptionChart({
                   ))}
                 </Pie>
                 <Tooltip
-                  formatter={(value: number) => [value, '']}
+                  formatter={(value) => [Number(value ?? 0), '']}
                   contentStyle={{
                     borderRadius: '8px',
                     border: '1px solid hsl(var(--border))',

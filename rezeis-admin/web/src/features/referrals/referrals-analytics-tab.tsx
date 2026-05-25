@@ -366,7 +366,10 @@ function RewardDistributionCard() {
                 outerRadius={90}
                 paddingAngle={3}
                 dataKey="value"
-                label={(entry: { name: string; value: number }) => `${entry.name}: ${entry.value}`}
+                label={(entry) => {
+                  const e = entry as { name?: string; value?: number }
+                  return `${e.name ?? ''}: ${e.value ?? 0}`
+                }}
               >
                 {pieData.map((_, idx) => (
                   <Cell key={idx} fill={PIE_COLORS[idx % PIE_COLORS.length]} />

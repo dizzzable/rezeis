@@ -318,6 +318,7 @@ function ProviderRow({ provider }: { readonly provider: ProviderDetail }): JSX.E
               aria-hidden
             />
             <div className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-md bg-muted/40">
+              {/* eslint-disable-next-line react-hooks/static-components */}
               {Icon ? <Icon className="h-5 w-5 object-contain" /> : (
                 <CircleDollarSign className="h-4 w-4 text-muted-foreground" />
               )}
@@ -545,7 +546,7 @@ function ProviderDetailPanel({ provider }: { readonly provider: ProviderDetail }
               <Tooltip
                 contentStyle={{ background: 'hsl(var(--popover))', border: '1px solid hsl(var(--border))', borderRadius: 8, fontSize: 12 }}
                 labelStyle={{ color: 'hsl(var(--muted-foreground))' }}
-                formatter={(value: number | string, key: string) => [formatMoney(Number(value)), key]}
+                formatter={(value, key) => [formatMoney(Number(value ?? 0)), String(key)]}
               />
               <Area
                 type="monotone"
@@ -670,6 +671,7 @@ function WebhookGatewayRow({ gateway }: { readonly gateway: WebhookGatewayHealth
   return (
     <div className="flex flex-col gap-2 rounded-md border bg-background/40 px-3 py-2 sm:flex-row sm:items-center sm:gap-4">
       <div className="flex h-7 w-7 shrink-0 items-center justify-center overflow-hidden rounded bg-muted/40">
+        {/* eslint-disable-next-line react-hooks/static-components */}
         {Icon ? <Icon className="h-4 w-4 object-contain" /> : (
           <Webhook className="h-3.5 w-3.5 text-muted-foreground" />
         )}

@@ -3,6 +3,7 @@ import { NavLink } from 'react-router-dom'
 import { useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { GripVertical } from 'lucide-react'
+import type { ComponentType, SVGProps } from 'react'
 
 import { motion } from '@/lib/motion'
 import { cn } from '@/lib/utils'
@@ -33,6 +34,7 @@ export function SortableNavItem({
   globalIndex,
 }: SortableNavItemProps) {
   const { t } = useTranslation()
+  const ItemIcon = item.icon as ComponentType<SVGProps<SVGSVGElement>>
   const {
     attributes,
     listeners,
@@ -87,7 +89,7 @@ export function SortableNavItem({
                 {editMode && !collapsed && (
                   <GripVertical className="h-3.5 w-3.5 shrink-0 text-sidebar-foreground/40" />
                 )}
-                <item.icon className="h-4 w-4 shrink-0" />
+                <ItemIcon className="h-4 w-4 shrink-0" />
                 {!collapsed && <span>{label}</span>}
               </motion.span>
             </>

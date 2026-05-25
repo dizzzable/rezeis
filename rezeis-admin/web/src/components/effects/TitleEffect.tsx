@@ -150,7 +150,7 @@ function TextAnimationRenderer({ animation, text, className, children }: Rendere
     case 'scrambled':
       return (
         <span className={className}>
-          <ScrambledText text={text} />
+          <ScrambledText>{text}</ScrambledText>
         </span>
       )
 
@@ -166,7 +166,7 @@ function TextAnimationRenderer({ animation, text, className, children }: Rendere
     case 'rotating':
       return (
         <span className={className}>
-          <RotatingText texts={[text]} interval={4000} />
+          <RotatingText texts={[text]} rotationInterval={4000} />
         </span>
       )
 

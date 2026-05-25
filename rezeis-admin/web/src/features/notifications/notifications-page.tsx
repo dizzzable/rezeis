@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
-import { useForm } from 'react-hook-form'
+import { useForm, type Resolver } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import {
@@ -373,8 +373,6 @@ function SystemNotificationsTab() {
 // ── Delivery Settings Tab ────────────────────────────────────────────────────
 
 function DeliverySettingsTab() {
-  const { t } = useTranslation()
-
   const { data: settings, isLoading } = useQuery({
     queryKey: ['admin', 'settings'],
     queryFn: async () => (await api.get('/admin/settings')).data,
@@ -483,6 +481,10 @@ function TelegramDeliveryForm({ settings }: TelegramDeliveryFormProps) {
     onError: () => toast.error(t('notificationsPage.toasts.testFailed')),
   })
 
+  // react-hook-form's `form.watch()` is currently flagged by react-doctor as an
+  // "incompatible library". This is the documented pattern for subscribing to a
+  // single field's value; the React Compiler integration will improve later.
+  // eslint-disable-next-line react-hooks/incompatible-library
   const enabled = form.watch('enabled')
   const chatId = form.watch('chatId')
 
@@ -676,7 +678,7 @@ function EmailDeliveryForm({ initial }: EmailDeliveryFormProps) {
       enabled: z.boolean(),
       host: z.string().trim(),
       port: z.coerce
-        .number({ invalid_type_error: t('notificationsPage.email.validation.portInvalid') })
+        .number({ error: t('notificationsPage.email.validation.portInvalid') })
         .int(t('notificationsPage.email.validation.portInvalid'))
         .min(1, t('notificationsPage.email.validation.portInvalid'))
         .max(65535, t('notificationsPage.email.validation.portInvalid')),
@@ -706,8 +708,8 @@ function EmailDeliveryForm({ initial }: EmailDeliveryFormProps) {
 
   type FormValues = z.infer<typeof schema>
 
-  const form = useForm<FormValues>({
-    resolver: zodResolver(schema),
+  const form = useForm<FormValues, unknown, FormValues>({
+    resolver: zodResolver(schema) as Resolver<FormValues, unknown, FormValues>,
     defaultValues: {
       enabled: initial.enabled,
       host: initial.host ?? '',
@@ -761,6 +763,8 @@ function EmailDeliveryForm({ initial }: EmailDeliveryFormProps) {
     onError: () => toast.error(t('notificationsPage.email.toasts.testFailed')),
   })
 
+  // See note above on `form.watch()` and the React Compiler integration.
+  // eslint-disable-next-line react-hooks/incompatible-library
   const enabled = form.watch('enabled')
   const host = form.watch('host')
 

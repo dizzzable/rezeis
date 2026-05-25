@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components */
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { CalendarIcon } from 'lucide-react'
@@ -112,7 +113,7 @@ export function AnalyticsRangePicker({ value, onChange }: Props) {
                 mode="single"
                 selected={draftFrom}
                 onSelect={setDraftFrom}
-                initialFocus
+                autoFocus
               />
             </div>
             <div>

@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import type { ComponentType, SVGProps } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
 import {
@@ -222,7 +223,7 @@ function OverviewTab() {
   )
 }
 
-function StatCard({ icon: Icon, title, value, subtitle }: { icon: React.ElementType; title: string; value: number | string; subtitle?: string }) {
+function StatCard({ icon: Icon, title, value, subtitle }: { icon: ComponentType<SVGProps<SVGSVGElement>>; title: string; value: number | string; subtitle?: string }) {
   return (
     <Card>
       <CardHeader className="flex flex-row items-center justify-between pb-2">
@@ -701,7 +702,7 @@ function TableSkeleton({ rows }: { rows: number }) {
   )
 }
 
-function EmptyState({ icon: Icon, message }: { icon: React.ElementType; message: string }) {
+function EmptyState({ icon: Icon, message }: { icon: ComponentType<SVGProps<SVGSVGElement>>; message: string }) {
   return (
     <div className="flex flex-col items-center gap-3 py-16 text-muted-foreground mt-4">
       <Icon className="h-12 w-12 opacity-30" />

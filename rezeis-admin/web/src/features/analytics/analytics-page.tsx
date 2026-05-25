@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import type { ComponentType, SVGProps } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useQuery } from '@tanstack/react-query'
 import {
@@ -202,7 +203,7 @@ function RevenueTab({ days }: { days: number }) {
                     <Pie data={[...currencies]} cx="50%" cy="50%" innerRadius={45} outerRadius={75} paddingAngle={2} dataKey="revenue">
                       {currencies.map((_, i) => <Cell key={i} fill={DONUT_COLORS[i % DONUT_COLORS.length]} />)}
                     </Pie>
-                    <Tooltip formatter={(v: number) => [formatCurrency(v), '']} />
+                    <Tooltip formatter={(v) => [formatCurrency(Number(v ?? 0)), '']} />
                   </PieChart>
                 </ResponsiveContainer>
               </div>
@@ -466,7 +467,7 @@ function LeaderboardTab() {
 
 // ── Shared Components ────────────────────────────────────────────────────────
 
-function KpiCard({ icon: Icon, title, value, subtitle, negative }: { icon: React.ElementType; title: string; value: string | number; subtitle: string; negative?: boolean }) {
+function KpiCard({ icon: Icon, title, value, subtitle, negative }: { icon: ComponentType<SVGProps<SVGSVGElement>>; title: string; value: string | number; subtitle: string; negative?: boolean }) {
   return (
     <Card>
       <CardHeader className="flex flex-row items-center justify-between pb-2">

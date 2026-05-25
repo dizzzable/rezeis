@@ -3,7 +3,6 @@ import { useQuery } from '@tanstack/react-query'
 import { Plus, Trash2, Archive, ArrowUpRight, Users } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
-import { api } from '@/lib/api'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -66,7 +65,7 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
   const [deviceLimit, setDeviceLimit] = useState(plan?.deviceLimit?.toString() ?? '1')
   const [trafficStrategy, setTrafficStrategy] = useState(plan?.trafficLimitStrategy ?? 'MONTH')
   const [selectedInternalSquads, setSelectedInternalSquads] = useState<string[]>(
-    plan?.internalSquads ?? [],
+    plan?.internalSquads ? [...plan.internalSquads] : [],
   )
   const [externalSquad, setExternalSquad] = useState(plan?.externalSquad ?? '__none__')
 
@@ -76,13 +75,13 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
     plan?.archivedRenewMode ?? 'SELF_RENEW',
   )
   const [upgradeToPlanIds, setUpgradeToPlanIds] = useState<string[]>(
-    plan?.upgradeToPlanIds ?? [],
+    plan?.upgradeToPlanIds ? [...plan.upgradeToPlanIds] : [],
   )
   const [replacementPlanIds, setReplacementPlanIds] = useState<string[]>(
-    plan?.replacementPlanIds ?? [],
+    plan?.replacementPlanIds ? [...plan.replacementPlanIds] : [],
   )
   const [allowedUserIds, setAllowedUserIds] = useState<string[]>(
-    plan?.allowedUserIds ?? [],
+    plan?.allowedUserIds ? [...plan.allowedUserIds] : [],
   )
   const [newAllowedUserId, setNewAllowedUserId] = useState('')
 

@@ -21,5 +21,13 @@
       "@/*": ["./src/*"]
     }
   },
-  "include": ["src"]
+  "include": ["src"],
+  "exclude": [
+    "src/components/reactbits/index.ts",
+    "src/components/reactbits/AnimatedContent.tsx",
+    "src/components/reactbits/FallingText.tsx",
+    "src/components/reactbits/Lanyard.tsx",
+    "src/components/reactbits/ModelViewer.tsx",
+    "src/components/reactbits/SplitText.tsx"
+  ]
 }

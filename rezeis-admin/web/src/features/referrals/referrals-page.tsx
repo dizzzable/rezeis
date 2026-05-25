@@ -199,7 +199,8 @@ interface RewardRow {
 
 function unwrap<T>(raw: ReadonlyArray<T> | { items?: ReadonlyArray<T> } | undefined): readonly T[] {
   if (Array.isArray(raw)) return raw
-  return raw?.items ?? []
+  if (raw && typeof raw === 'object' && 'items' in raw) return raw.items ?? []
+  return []
 }
 
 function deriveInviteStatus(inv: InviteRow): InviteStatus {
