@@ -1,20 +1,25 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import type { ComponentType, SVGProps } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useQuery } from '@tanstack/react-query';
-import { Search, User, CreditCard, Tag, Handshake, Loader2, X } from 'lucide-react';
+import { Search, User, CreditCard, Tag, Handshake, Compass, Loader2, X } from 'lucide-react';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { Dialog, DialogContent } from '@/components/ui/dialog';
 import { Badge } from '@/components/ui/badge';
 import { motion, AnimatePresence } from '@/lib/motion';
+import { navGroups, type NavItem } from '@/components/layout/admin-nav-config';
 
 interface SearchResult {
-  type: 'user' | 'subscription' | 'transaction' | 'promocode' | 'partner';
+  type: 'user' | 'subscription' | 'transaction' | 'promocode' | 'partner' | 'navigation';
   id: string;
   label: string;
   subtitle?: string;
+  /** For `type: 'navigation'` only — overrides `TYPE_META.route(id)`. */
+  to?: string;
+  /** For `type: 'navigation'` only — replaces the default Compass icon. */
+  icon?: React.ElementType;
 }
 
 const TYPE_META: Record<
@@ -26,6 +31,9 @@ const TYPE_META: Record<
   transaction: { icon: CreditCard, color: 'text-yellow-500', route: (_id) => `/payments` },
   promocode: { icon: Tag, color: 'text-purple-500', route: (_id) => `/promocodes` },
   partner: { icon: Handshake, color: 'text-orange-500', route: (_id) => `/partners` },
+  // `navigation` rows always carry their own `to`; the route() is a safe
+  // fallback so the lookup table stays exhaustive.
+  navigation: { icon: Compass, color: 'text-cyan-500', route: (id) => id },
 };
 
 async function fetchSearch(q: string): Promise<SearchResult[]> {
@@ -36,6 +44,22 @@ async function fetchSearch(q: string): Promise<SearchResult[]> {
 
 /** Module-level constant so its identity is stable across renders. */
 const EMPTY_RESULTS: SearchResult[] = [];
+
+/**
+ * Flat navigation index used by the overlay to surface page jumps
+ * alongside data hits. Group key is included as a hint shown in the
+ * row subtitle so two pages with the same English label (rare) are
+ * still distinguishable.
+ */
+interface NavIndexEntry {
+  readonly item: NavItem;
+  readonly groupKey: string;
+}
+const NAV_INDEX: ReadonlyArray<NavIndexEntry> = navGroups.flatMap((group) =>
+  group.items.map((item) => ({ item, groupKey: group.key })),
+);
+/** Hard cap on navigation hits so they never crowd out data results. */
+const NAV_HITS_CAP = 6;
 
 interface QuickSearchOverlayProps {
   open: boolean;
@@ -60,7 +84,40 @@ export function QuickSearchOverlay({ open, onClose }: QuickSearchOverlayProps) {
   // destructure default produces a NEW array literal on every render
   // and breaks the `prevResults` identity check below — that drove an
   // infinite render loop and the React error #301 we were chasing.
-  const results: SearchResult[] = data ?? EMPTY_RESULTS;
+  const dataResults: SearchResult[] = data ?? EMPTY_RESULTS;
+
+  // Page-jump hits are computed locally — no roundtrip needed. We match
+  // against the localised label (`adminNav.items.<key>`), the path, and
+  // the raw key. Resolved labels go through `t()` so RU and EN both work.
+  const navResults = useMemo<SearchResult[]>(() => {
+    const trimmed = query.trim().toLowerCase();
+    if (trimmed.length < 2) return EMPTY_RESULTS;
+    const hits: SearchResult[] = [];
+    for (const { item, groupKey } of NAV_INDEX) {
+      const itemLabel = t(`adminNav.items.${item.key}`);
+      const groupLabel = t(`adminNav.groups.${groupKey}`);
+      const haystacks = [item.key.toLowerCase(), item.path.toLowerCase(), itemLabel.toLowerCase()];
+      const matches = haystacks.some((h) => h.includes(trimmed));
+      if (!matches) continue;
+      hits.push({
+        type: 'navigation',
+        id: item.path,
+        to: item.path,
+        icon: item.icon,
+        label: itemLabel,
+        subtitle: `${groupLabel} · ${item.path}`,
+      });
+      if (hits.length >= NAV_HITS_CAP) break;
+    }
+    return hits;
+  }, [query, t]);
+
+  // Navigation always wins the top of the list — Cmd+K should feel like
+  // Linear/Spotlight: type the page name, hit Enter, and you're there.
+  const results = useMemo<SearchResult[]>(() => {
+    if (navResults.length === 0) return dataResults;
+    return [...navResults, ...dataResults];
+  }, [navResults, dataResults]);
 
   // Reset state when the overlay (re)opens. Uses the
   // "store-prev-prop in render" pattern.
@@ -89,8 +146,8 @@ export function QuickSearchOverlay({ open, onClose }: QuickSearchOverlayProps) {
 
   const handleSelect = useCallback(
     (result: SearchResult) => {
-      const meta = TYPE_META[result.type];
-      navigate(meta.route(result.id));
+      const target = result.to ?? TYPE_META[result.type].route(result.id);
+      navigate(target);
       onClose();
     },
     [navigate, onClose],
@@ -179,7 +236,7 @@ export function QuickSearchOverlay({ open, onClose }: QuickSearchOverlayProps) {
               >
                 {results.map((result, index) => {
                   const meta = TYPE_META[result.type];
-                  const Icon = meta.icon as ComponentType<SVGProps<SVGSVGElement>>;
+                  const IconComponent = (result.icon ?? meta.icon) as ComponentType<SVGProps<SVGSVGElement>>;
                   return (
                     <li key={`${result.type}-${result.id}`}>
                       <button
@@ -192,7 +249,7 @@ export function QuickSearchOverlay({ open, onClose }: QuickSearchOverlayProps) {
                         onMouseEnter={() => setSelectedIndex(index)}
                         onClick={() => handleSelect(result)}
                       >
-                        <Icon className={cn('h-4 w-4 shrink-0', meta.color)} />
+                        <IconComponent className={cn('h-4 w-4 shrink-0', meta.color)} />
                         <div className="flex-1 min-w-0">
                           <p className="text-sm font-medium truncate">{result.label}</p>
                           {result.subtitle && (
@@ -200,7 +257,9 @@ export function QuickSearchOverlay({ open, onClose }: QuickSearchOverlayProps) {
                           )}
                         </div>
                         <Badge variant="outline" className="text-[10px] shrink-0">
-                          {result.type}
+                          {result.type === 'navigation'
+                            ? t('quickSearchOverlay.types.navigation')
+                            : result.type}
                         </Badge>
                       </button>
                     </li>

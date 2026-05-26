@@ -1,4 +1,45 @@
-﻿# Rezeis Admin v0.3.3
+﻿# Rezeis Admin v0.3.4
+
+## Patch — Cmd+K quick-search now jumps to pages
+
+`v0.3.4` — узкий UX-фикс. Раньше Cmd+K (или иконка лупы в топбаре) искал только по данным: пользователи, подписки, транзакции, промокоды, партнёры. Если оператор печатал название раздела (`remnawave`, `партнёры`, `платежи`), оверлей честно отвечал «Нет результатов», хотя в сайдбаре эти разделы есть.
+
+### Fix
+
+В `QuickSearchOverlay` добавлен **навигационный индекс**: на каждый ввод (≥2 символа) клиент локально матчит query против списка разделов из `admin-nav-config.ts` — сравнивая с key, путём (`/users`) и локализованным label (`adminNav.items.<key>`). Совпадения попадают в **топ списка** (раньше ru/en data-результатов), помечены бейджем «страница» / «page», и при выборе делают `navigate(item.path)`.
+
+Это закрывает классический Linear/Spotlight-паттерн:
+
+- `remnawave` → раздел Remnawave (`/remnawave`)
+- `партн` → Партнёры + Withdrawals
+- `/users` → Пользователи (по path тоже матчится)
+- `analytics` → Аналитика
+
+Backend `/admin/quick-search` не тронут — нав-индекс полностью клиентский, без сетевого вызова.
+
+### Pre-push
+
+| Check | Result |
+|---|---|
+| Backend `tsc --noEmit -p tsconfig.json` | ✅ 0 errors |
+| Backend `eslint . --quiet` | ✅ 0 warnings |
+| Frontend `tsc -b` | ✅ 0 errors |
+| Frontend `eslint . --quiet` | ✅ 0 warnings |
+| Frontend `vite build` | ✅ built |
+
+### Migration / breaking
+
+Нет.
+
+### Docker image
+
+Пересобирается автоматически на push tag `v0.3.4` → GHCR теги `v0.3.4`, `0.3.4`, `0.3`, `latest`.
+
+**Full Changelog**: https://github.com/dizzzable/rezeis/compare/v0.3.3...v0.3.4
+
+---
+
+# Rezeis Admin v0.3.3
 
 ## Minor release — Remnawave page rebuild + reverse-proxy presets + Postgres 17 client
 

@@ -888,6 +888,9 @@ export const en = {
     placeholder: 'Search users, transactions, promo codes…',
     typeMore: 'Type at least 2 characters to search',
     noResults: 'No results for "{{query}}"',
+    types: {
+      navigation: 'page',
+    },
     footer: {
       navigate: 'navigate',
       open: 'open',
