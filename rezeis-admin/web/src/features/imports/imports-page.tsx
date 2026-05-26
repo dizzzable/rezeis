@@ -1,22 +1,26 @@
 /**
- * Imports page — tabbed interface for importing users from multiple sources:
+ * Imports page — tabbed interface for importing users from multiple sources.
  *
- *   • Remnawave — live API pull (one-button import/sync)
- *   • 3x-ui — JSON file upload (clients export from 3x-ui panel)
- *   • Remnashop — JSON file upload (users + subscriptions from remnashop DB)
- *   • Altshop — JSON file upload (users + subscriptions + transactions from altshop DB)
+ *   • Remnawave — live API pull (one-button import / sync)
+ *   • 3x-ui    — file upload (.db SQLite or .json)
+ *   • Remnashop — file upload (.tar.gz or .json)
+ *   • Altshop   — file upload (.tar.gz or .json)
  *
- * Each tab has its own import/sync buttons. The history table at the bottom
- * shows all import records across all sources.
+ * Architecture (v0.3.8+):
+ *   The four tabs all share `useImportFlow()` which:
+ *     1. Calls the backend enqueue endpoint and gets back { importRecordId }.
+ *     2. Opens <ImportProgressDialog> immediately so the operator sees
+ *        a stage animation + spinner.
+ *     3. The dialog polls GET /admin/imports/:id every second, switches
+ *        to a stats screen on terminal status, and offers "Assign plan
+ *        to all" → <BulkAssignPlanDialog> for `mode === 'import'`.
+ *   The history table at the bottom shows all import records across
+ *   sources, refreshed when the dialog closes.
  */
-
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useRef, useState, type JSX } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  AlertCircle,
-  CheckCircle2,
-  ClipboardList,
   Database,
   Download,
   FileUp,
@@ -28,7 +32,6 @@ import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
 import { formatDateTime } from '@/lib/utils'
-import { usePlans } from '@/features/plans/plans-api'
 import {
   Card,
   CardContent,
@@ -39,11 +42,6 @@ import {
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
-import {
-  Alert,
-  AlertDescription,
-  AlertTitle,
-} from '@/components/ui/alert'
 import {
   Table,
   TableBody,
@@ -58,15 +56,15 @@ import {
   TabsList,
   TabsTrigger,
 } from '@/components/ui/tabs'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import { FadeIn, HoverLift } from '@/lib/motion'
 import { RemnawaveIcon } from '@/features/remnawave/remnawave-icon'
+
+import {
+  ImportProgressDialog,
+  type ImportSource,
+  type ImportMode,
+} from './import-progress-dialog'
+import { BulkAssignPlanDialog } from './bulk-assign-plan-dialog'
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -83,28 +81,10 @@ interface ImportRecord {
   committedAt: string | null
 }
 
-interface ImportSummary {
+interface ImportEnqueuedResponse {
   importRecordId: string
-  fetched: number
-  created: number
-  updated: number
-  skipped: number
-  subscriptionsCreated: number
-  subscriptionsUpdated: number
-  errors: readonly string[]
-}
-
-interface RemnawaveImportSummary extends ImportSummary {
-  descriptionWritebacks: number
-}
-
-interface BulkAssignResult {
-  updated: number
-  skippedDeleted: number
-  skippedAlreadyAssigned: number
-  skippedNoSubscription: number
-  errors: number
-  syncJobsCreated: number
+  jobId: string
+  message: string
 }
 
 function statusVariant(
@@ -117,10 +97,56 @@ function statusVariant(
   return 'default'
 }
 
+// ── Page-level orchestration ──────────────────────────────────────────────
+
+interface ProgressState {
+  readonly source: ImportSource
+  readonly mode: ImportMode
+  readonly importRecordId: string | null
+}
+
+/**
+ * Single source of truth for the modal stack on the page. The four tabs
+ * call `start()` on click, the progress dialog opens with whatever
+ * `importRecordId` came back from the enqueue request, and on the
+ * "assign plan" CTA we hand the id off to <BulkAssignPlanDialog>.
+ */
+function useImportFlow() {
+  const [progress, setProgress] = useState<ProgressState | null>(null)
+  const [assignFor, setAssignFor] = useState<string | null>(null)
+
+  const start = useCallback((source: ImportSource, mode: ImportMode) => {
+    setProgress({ source, mode, importRecordId: null })
+  }, [])
+
+  const setRecordId = useCallback((id: string) => {
+    setProgress((prev) => (prev ? { ...prev, importRecordId: id } : prev))
+  }, [])
+
+  const closeProgress = useCallback(() => setProgress(null), [])
+
+  const openAssign = useCallback((importRecordId: string) => {
+    setAssignFor(importRecordId)
+  }, [])
+
+  const closeAssign = useCallback(() => setAssignFor(null), [])
+
+  return {
+    progress,
+    assignFor,
+    start,
+    setRecordId,
+    closeProgress,
+    openAssign,
+    closeAssign,
+  }
+}
+
 // ── Main Page ─────────────────────────────────────────────────────────────
 
-export default function ImportsPage() {
+export default function ImportsPage(): JSX.Element {
   const { t } = useTranslation()
+  const flow = useImportFlow()
 
   return (
     <div className="space-y-6">
@@ -145,55 +171,67 @@ export default function ImportsPage() {
         </TabsList>
 
         <TabsContent value="remnawave">
-          <RemnawaveTab />
+          <RemnawaveTab onStart={flow.start} onRecordId={flow.setRecordId} />
         </TabsContent>
-
         <TabsContent value="3xui">
-          <ThreeXuiTab />
+          <FileUploadTab source="3xui" onStart={flow.start} onRecordId={flow.setRecordId} />
         </TabsContent>
-
         <TabsContent value="remnashop">
-          <RemnashopTab />
+          <FileUploadTab source="remnashop" onStart={flow.start} onRecordId={flow.setRecordId} />
         </TabsContent>
-
         <TabsContent value="altshop">
-          <AltshopTab />
+          <FileUploadTab source="altshop" onStart={flow.start} onRecordId={flow.setRecordId} />
         </TabsContent>
       </Tabs>
 
       <ImportHistory />
+
+      {flow.progress ? (
+        <ImportProgressDialog
+          open
+          onClose={flow.closeProgress}
+          importRecordId={flow.progress.importRecordId}
+          source={flow.progress.source}
+          mode={flow.progress.mode}
+          onAssignPlan={flow.openAssign}
+        />
+      ) : null}
+
+      {flow.assignFor !== null ? (
+        <BulkAssignPlanDialog
+          open
+          onClose={flow.closeAssign}
+          importRecordId={flow.assignFor}
+        />
+      ) : null}
     </div>
   )
 }
 
 // ── Remnawave Tab ─────────────────────────────────────────────────────────
 
-function RemnawaveTab() {
+interface TabProps {
+  readonly onStart: (source: ImportSource, mode: ImportMode) => void
+  readonly onRecordId: (id: string) => void
+}
+
+function RemnawaveTab({ onStart, onRecordId }: TabProps): JSX.Element {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
 
   const importMutation = useMutation({
-    mutationFn: async (mode: 'import' | 'sync'): Promise<RemnawaveImportSummary> => {
+    mutationFn: async (mode: 'import' | 'sync'): Promise<ImportEnqueuedResponse> => {
       const path =
-        mode === 'sync'
-          ? '/admin/imports/remnawave/sync'
-          : '/admin/imports/remnawave'
-      const response = await api.post<RemnawaveImportSummary>(path)
+        mode === 'sync' ? '/admin/imports/remnawave/sync' : '/admin/imports/remnawave'
+      const response = await api.post<ImportEnqueuedResponse>(path)
       return response.data
     },
-    onSuccess: (result, mode) => {
+    onMutate: (mode) => {
+      onStart('remnawave', mode)
+    },
+    onSuccess: (result) => {
+      onRecordId(result.importRecordId)
       queryClient.invalidateQueries({ queryKey: ['admin', 'imports'] })
-      const summary = t('importsPage.success', {
-        fetched: result.fetched,
-        created: result.created,
-        updated: result.updated,
-        skipped: result.skipped,
-      })
-      if (mode === 'sync') {
-        toast.success(t('importsPage.syncDone', { summary }))
-      } else {
-        toast.success(t('importsPage.importDone', { summary }))
-      }
     },
     onError: (err: unknown) => {
       const message = (err as { response?: { data?: { message?: string } } })
@@ -206,113 +244,105 @@ function RemnawaveTab() {
     },
   })
 
-  const isImporting = importMutation.isPending && importMutation.variables === 'import'
-  const isSyncing = importMutation.isPending && importMutation.variables === 'sync'
+  const isImporting =
+    importMutation.isPending && importMutation.variables === 'import'
+  const isSyncing =
+    importMutation.isPending && importMutation.variables === 'sync'
 
   return (
-    <div className="space-y-4">
-      <div className="grid gap-4 md:grid-cols-2">
-        <HoverLift>
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2 text-lg">
-                <Download className="h-5 w-5 text-primary" />
-                {t('importsPage.remnawave.import.title')}
-              </CardTitle>
-              <CardDescription>
-                {t('importsPage.remnawave.import.description')}
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <Button
-                onClick={() => importMutation.mutate('import')}
-                disabled={importMutation.isPending}
-                className="w-full"
-                aria-label={t('importsPage.remnawave.import.action')}
-              >
-                {isImporting ? (
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                ) : (
-                  <Download className="mr-2 h-4 w-4" />
-                )}
-                {t('importsPage.remnawave.import.action')}
-              </Button>
-            </CardContent>
-          </Card>
-        </HoverLift>
+    <div className="grid gap-4 md:grid-cols-2">
+      <HoverLift>
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-lg">
+              <Download className="h-5 w-5 text-primary" />
+              {t('importsPage.remnawave.import.title')}
+            </CardTitle>
+            <CardDescription>
+              {t('importsPage.remnawave.import.description')}
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Button
+              onClick={() => importMutation.mutate('import')}
+              disabled={importMutation.isPending}
+              className="w-full"
+              aria-label={t('importsPage.remnawave.import.action')}
+            >
+              {isImporting ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                <Download className="mr-2 h-4 w-4" />
+              )}
+              {t('importsPage.remnawave.import.action')}
+            </Button>
+          </CardContent>
+        </Card>
+      </HoverLift>
 
-        <HoverLift>
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2 text-lg">
-                <RefreshCw className="h-5 w-5 text-primary" />
-                {t('importsPage.remnawave.sync.title')}
-              </CardTitle>
-              <CardDescription>
-                {t('importsPage.remnawave.sync.description')}
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <Button
-                variant="outline"
-                onClick={() => importMutation.mutate('sync')}
-                disabled={importMutation.isPending}
-                className="w-full"
-                aria-label={t('importsPage.remnawave.sync.action')}
-              >
-                {isSyncing ? (
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                ) : (
-                  <RefreshCw className="mr-2 h-4 w-4" />
-                )}
-                {t('importsPage.remnawave.sync.action')}
-              </Button>
-            </CardContent>
-          </Card>
-        </HoverLift>
-      </div>
-
-      {importMutation.isSuccess && importMutation.data && (
-        <ImportResultAlert
-          data={importMutation.data}
-          isSync={importMutation.variables === 'sync'}
-        />
-      )}
-
-      {importMutation.isSuccess && importMutation.data && importMutation.variables !== 'sync' && (
-        <BulkPlanAssignment importRecordId={importMutation.data.importRecordId} />
-      )}
+      <HoverLift>
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-lg">
+              <RefreshCw className="h-5 w-5 text-primary" />
+              {t('importsPage.remnawave.sync.title')}
+            </CardTitle>
+            <CardDescription>
+              {t('importsPage.remnawave.sync.description')}
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Button
+              variant="outline"
+              onClick={() => importMutation.mutate('sync')}
+              disabled={importMutation.isPending}
+              className="w-full"
+              aria-label={t('importsPage.remnawave.sync.action')}
+            >
+              {isSyncing ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                <RefreshCw className="mr-2 h-4 w-4" />
+              )}
+              {t('importsPage.remnawave.sync.action')}
+            </Button>
+          </CardContent>
+        </Card>
+      </HoverLift>
     </div>
   )
 }
 
-// ── 3x-ui Tab ─────────────────────────────────────────────────────────────
+// ── File-upload tabs (3x-ui, Remnashop, Altshop) ──────────────────────────
 
-function ThreeXuiTab() {
+interface FileUploadTabProps extends TabProps {
+  readonly source: 'remnashop' | 'altshop' | '3xui'
+}
+
+function FileUploadTab({ source, onStart, onRecordId }: FileUploadTabProps): JSX.Element {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [fileName, setFileName] = useState<string | null>(null)
 
+  const path = `/admin/imports/${source}`
+  const i18nKey = source === '3xui' ? 'threexui' : source
+
   const importMutation = useMutation({
-    mutationFn: async (file: File): Promise<ImportSummary> => {
+    mutationFn: async (file: File): Promise<ImportEnqueuedResponse> => {
       const formData = new FormData()
       formData.append('file', file)
-      const response = await api.post<ImportSummary>('/admin/imports/3xui', formData, {
+      const response = await api.post<ImportEnqueuedResponse>(path, formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
       })
       return response.data
     },
+    onMutate: () => {
+      onStart(source, 'import')
+    },
     onSuccess: (result) => {
+      onRecordId(result.importRecordId)
       queryClient.invalidateQueries({ queryKey: ['admin', 'imports'] })
-      toast.success(t('importsPage.importDone', {
-        summary: t('importsPage.success', {
-          fetched: result.fetched,
-          created: result.created,
-          updated: result.updated,
-          skipped: result.skipped,
-        }),
-      }))
       setFileName(null)
     },
     onError: (err: unknown) => {
@@ -322,377 +352,67 @@ function ThreeXuiTab() {
     },
   })
 
-  const handleFileSelect = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0]
-    if (!file) return
-    setFileName(file.name)
-    importMutation.mutate(file)
-    event.target.value = ''
-  }, [importMutation])
+  const handleFileSelect = useCallback(
+    (event: React.ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0]
+      if (!file) return
+      setFileName(file.name)
+      importMutation.mutate(file)
+      event.target.value = ''
+    },
+    [importMutation],
+  )
+
+  const accept = source === '3xui' ? '.json,.db' : '.json,.tar.gz,.gz'
 
   return (
-    <div className="space-y-4">
-      <HoverLift>
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-lg">
-              <FileUp className="h-5 w-5 text-primary" />
-              {t('importsPage.threexui.title')}
-            </CardTitle>
-            <CardDescription>
-              {t('importsPage.threexui.description')}
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".json,.db"
-              onChange={handleFileSelect}
-              className="hidden"
-              aria-label={t('importsPage.threexui.selectFile')}
-            />
-            <Button
-              onClick={() => fileInputRef.current?.click()}
-              disabled={importMutation.isPending}
-              className="w-full"
-              aria-label={t('importsPage.threexui.action')}
-            >
-              {importMutation.isPending ? (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              ) : (
-                <FileUp className="mr-2 h-4 w-4" />
-              )}
-              {fileName
-                ? t('importsPage.threexui.importing', { filename: fileName })
-                : t('importsPage.threexui.action')}
-            </Button>
-            <p className="text-xs text-muted-foreground">
-              {t('importsPage.threexui.hint')}
-            </p>
-          </CardContent>
-        </Card>
-      </HoverLift>
-
-      {importMutation.isSuccess && importMutation.data && (
-        <ImportResultAlert data={importMutation.data} isSync={false} />
-      )}
-
-      {importMutation.isSuccess && importMutation.data && (
-        <BulkPlanAssignment importRecordId={importMutation.data.importRecordId} />
-      )}
-    </div>
+    <HoverLift>
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-lg">
+            <FileUp className="h-5 w-5 text-primary" />
+            {t(`importsPage.${i18nKey}.title`)}
+          </CardTitle>
+          <CardDescription>
+            {t(`importsPage.${i18nKey}.description`)}
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept={accept}
+            onChange={handleFileSelect}
+            className="hidden"
+            aria-label={t(`importsPage.${i18nKey}.selectFile`)}
+          />
+          <Button
+            onClick={() => fileInputRef.current?.click()}
+            disabled={importMutation.isPending}
+            className="w-full"
+            aria-label={t(`importsPage.${i18nKey}.action`)}
+          >
+            {importMutation.isPending ? (
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            ) : (
+              <FileUp className="mr-2 h-4 w-4" />
+            )}
+            {fileName
+              ? t(`importsPage.${i18nKey}.importing`, { filename: fileName })
+              : t(`importsPage.${i18nKey}.action`)}
+          </Button>
+          <p className="text-xs text-muted-foreground">
+            {t(`importsPage.${i18nKey}.hint`)}
+          </p>
+        </CardContent>
+      </Card>
+    </HoverLift>
   )
 }
 
-// ── Remnashop Tab ─────────────────────────────────────────────────────────
+// ── History ───────────────────────────────────────────────────────────────
 
-function RemnashopTab() {
-  const { t } = useTranslation()
-  const queryClient = useQueryClient()
-  const fileInputRef = useRef<HTMLInputElement>(null)
-  const [fileName, setFileName] = useState<string | null>(null)
-
-  const importMutation = useMutation({
-    mutationFn: async (file: File): Promise<ImportSummary> => {
-      const formData = new FormData()
-      formData.append('file', file)
-      const response = await api.post<ImportSummary>('/admin/imports/remnashop', formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-      })
-      return response.data
-    },
-    onSuccess: (result) => {
-      queryClient.invalidateQueries({ queryKey: ['admin', 'imports'] })
-      toast.success(t('importsPage.importDone', {
-        summary: t('importsPage.success', {
-          fetched: result.fetched,
-          created: result.created,
-          updated: result.updated,
-          skipped: result.skipped,
-        }),
-      }))
-      setFileName(null)
-    },
-    onError: (err: unknown) => {
-      const message = (err as { response?: { data?: { message?: string } } })
-        ?.response?.data?.message
-      toast.error(message ?? t('importsPage.errorGeneric'))
-    },
-  })
-
-  const handleFileSelect = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0]
-    if (!file) return
-    setFileName(file.name)
-    importMutation.mutate(file)
-    event.target.value = ''
-  }, [importMutation])
-
-  return (
-    <div className="space-y-4">
-      <HoverLift>
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-lg">
-              <FileUp className="h-5 w-5 text-primary" />
-              {t('importsPage.remnashop.title')}
-            </CardTitle>
-            <CardDescription>
-              {t('importsPage.remnashop.description')}
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".json,.tar.gz,.gz"
-              onChange={handleFileSelect}
-              className="hidden"
-              aria-label={t('importsPage.remnashop.selectFile')}
-            />
-            <Button
-              onClick={() => fileInputRef.current?.click()}
-              disabled={importMutation.isPending}
-              className="w-full"
-              aria-label={t('importsPage.remnashop.action')}
-            >
-              {importMutation.isPending ? (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              ) : (
-                <FileUp className="mr-2 h-4 w-4" />
-              )}
-              {fileName
-                ? t('importsPage.remnashop.importing', { filename: fileName })
-                : t('importsPage.remnashop.action')}
-            </Button>
-            <p className="text-xs text-muted-foreground">
-              {t('importsPage.remnashop.hint')}
-            </p>
-          </CardContent>
-        </Card>
-      </HoverLift>
-
-      {importMutation.isSuccess && importMutation.data && (
-        <ImportResultAlert data={importMutation.data} isSync={false} />
-      )}
-
-      {importMutation.isSuccess && importMutation.data && (
-        <BulkPlanAssignment importRecordId={importMutation.data.importRecordId} />
-      )}
-    </div>
-  )
-}
-
-// ── Altshop Tab ───────────────────────────────────────────────────────────
-
-function AltshopTab() {
-  const { t } = useTranslation()
-  const queryClient = useQueryClient()
-  const fileInputRef = useRef<HTMLInputElement>(null)
-  const [fileName, setFileName] = useState<string | null>(null)
-
-  const importMutation = useMutation({
-    mutationFn: async (file: File): Promise<ImportSummary> => {
-      const formData = new FormData()
-      formData.append('file', file)
-      const response = await api.post<ImportSummary>('/admin/imports/altshop', formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-      })
-      return response.data
-    },
-    onSuccess: (result) => {
-      queryClient.invalidateQueries({ queryKey: ['admin', 'imports'] })
-      toast.success(t('importsPage.importDone', {
-        summary: t('importsPage.success', {
-          fetched: result.fetched,
-          created: result.created,
-          updated: result.updated,
-          skipped: result.skipped,
-        }),
-      }))
-      setFileName(null)
-    },
-    onError: (err: unknown) => {
-      const message = (err as { response?: { data?: { message?: string } } })
-        ?.response?.data?.message
-      toast.error(message ?? t('importsPage.errorGeneric'))
-    },
-  })
-
-  const handleFileSelect = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0]
-    if (!file) return
-    setFileName(file.name)
-    importMutation.mutate(file)
-    event.target.value = ''
-  }, [importMutation])
-
-  return (
-    <div className="space-y-4">
-      <HoverLift>
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-lg">
-              <FileUp className="h-5 w-5 text-primary" />
-              {t('importsPage.altshop.title')}
-            </CardTitle>
-            <CardDescription>
-              {t('importsPage.altshop.description')}
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".json,.tar.gz,.gz"
-              onChange={handleFileSelect}
-              className="hidden"
-              aria-label={t('importsPage.altshop.selectFile')}
-            />
-            <Button
-              onClick={() => fileInputRef.current?.click()}
-              disabled={importMutation.isPending}
-              className="w-full"
-              aria-label={t('importsPage.altshop.action')}
-            >
-              {importMutation.isPending ? (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              ) : (
-                <FileUp className="mr-2 h-4 w-4" />
-              )}
-              {fileName
-                ? t('importsPage.altshop.importing', { filename: fileName })
-                : t('importsPage.altshop.action')}
-            </Button>
-            <p className="text-xs text-muted-foreground">
-              {t('importsPage.altshop.hint')}
-            </p>
-          </CardContent>
-        </Card>
-      </HoverLift>
-
-      {importMutation.isSuccess && importMutation.data && (
-        <ImportResultAlert data={importMutation.data} isSync={false} />
-      )}
-
-      {importMutation.isSuccess && importMutation.data && (
-        <BulkPlanAssignment importRecordId={importMutation.data.importRecordId} />
-      )}
-    </div>
-  )
-}
-
-// ── Shared Components ─────────────────────────────────────────────────────
-
-function ImportResultAlert({ data, isSync }: { data: ImportSummary; isSync: boolean }) {
-  const { t } = useTranslation()
-  const errors = data.errors ?? []
-
-  return (
-    <Alert>
-      {errors.length === 0 ? (
-        <CheckCircle2 className="h-4 w-4" />
-      ) : (
-        <AlertCircle className="h-4 w-4" />
-      )}
-      <AlertTitle>
-        {isSync ? t('importsPage.lastRunSync') : t('importsPage.lastRunImport')}
-      </AlertTitle>
-      <AlertDescription>
-        {t('importsPage.summary', {
-          fetched: data.fetched,
-          created: data.created,
-          updated: data.updated,
-          skipped: data.skipped,
-        })}
-        {errors.length > 0 && (
-          <span className="ml-2 text-destructive">
-            ({t('importsPage.errorsCount', { count: errors.length })})
-          </span>
-        )}
-      </AlertDescription>
-    </Alert>
-  )
-}
-
-function BulkPlanAssignment({ importRecordId }: { importRecordId?: string }) {
-  const { t } = useTranslation()
-  const queryClient = useQueryClient()
-  const [selectedPlanId, setSelectedPlanId] = useState<string>('')
-
-  const { data: plans } = usePlans({ active: true })
-
-  const assignMutation = useMutation({
-    mutationFn: async (planId: string): Promise<BulkAssignResult> => {
-      const response = await api.post<BulkAssignResult>('/admin/imports/assign-plan', {
-        planId,
-        importRecordId,
-      })
-      return response.data
-    },
-    onSuccess: (result) => {
-      queryClient.invalidateQueries({ queryKey: ['admin', 'imports'] })
-      toast.success(t('importsPage.assignPlan.success', {
-        updated: result.updated,
-        skipped: result.skippedAlreadyAssigned,
-        synced: result.syncJobsCreated,
-      }))
-    },
-    onError: (err: unknown) => {
-      const message = (err as { response?: { data?: { message?: string } } })
-        ?.response?.data?.message
-      toast.error(message ?? t('importsPage.errorGeneric'))
-    },
-  })
-
-  if (!plans || plans.length === 0) return null
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2 text-lg">
-          <ClipboardList className="h-5 w-5 text-primary" />
-          {t('importsPage.assignPlan.title')}
-        </CardTitle>
-        <CardDescription>
-          {t('importsPage.assignPlan.description')}
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        <Select value={selectedPlanId} onValueChange={setSelectedPlanId}>
-          <SelectTrigger aria-label={t('importsPage.assignPlan.selectPlan')}>
-            <SelectValue placeholder={t('importsPage.assignPlan.selectPlan')} />
-          </SelectTrigger>
-          <SelectContent>
-            {plans.map((plan) => (
-              <SelectItem key={plan.id} value={plan.id}>
-                {plan.name}
-                {plan.trafficLimit !== null && ` (${plan.trafficLimit} GB)`}
-                {plan.deviceLimit > 0 && ` · ${plan.deviceLimit} dev`}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <Button
-          onClick={() => assignMutation.mutate(selectedPlanId)}
-          disabled={!selectedPlanId || assignMutation.isPending}
-          className="w-full"
-          aria-label={t('importsPage.assignPlan.action')}
-        >
-          {assignMutation.isPending ? (
-            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-          ) : (
-            <ClipboardList className="mr-2 h-4 w-4" />
-          )}
-          {t('importsPage.assignPlan.action')}
-        </Button>
-      </CardContent>
-    </Card>
-  )
-}
-
-function ImportHistory() {
+function ImportHistory(): JSX.Element {
   const { t } = useTranslation()
 
   const { data, isLoading } = useQuery({
@@ -703,6 +423,10 @@ function ImportHistory() {
         | { items?: ImportRecord[] }
       return Array.isArray(raw) ? raw : (raw?.items ?? [])
     },
+    // Auto-refresh every 5 s while on the page so finished imports
+    // appear in the table without needing a manual refresh.
+    refetchInterval: 5_000,
+    refetchIntervalInBackground: false,
   })
 
   return (

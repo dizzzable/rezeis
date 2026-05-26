@@ -1,15 +1,26 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Plus, Trash2, Archive, ArrowUpRight, Users } from 'lucide-react'
+import { Plus, Trash2, Archive, ArrowUpRight, Users, Check, ChevronDown } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
+import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from '@/components/ui/command'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Separator } from '@/components/ui/separator'
 import { Switch } from '@/components/ui/switch'
+import { cn } from '@/lib/utils'
 import { remnawaveApi } from '@/features/remnawave/remnawave-api'
 import { usePlans, type Plan } from './plans-api'
 
@@ -17,6 +28,15 @@ const PLAN_TYPES = ['TRAFFIC', 'DEVICES', 'BOTH', 'UNLIMITED'] as const
 const AVAILABILITIES = ['ALL', 'NEW', 'EXISTING', 'INVITED', 'ALLOWED', 'TRIAL'] as const
 const TRAFFIC_STRATEGIES = ['MONTH', 'YEAR', 'NO_RESET', 'DAY', 'WEEK'] as const
 const CURRENCIES = ['RUB', 'USD', 'XTR', 'USDT', 'TON', 'EUR'] as const
+
+/**
+ * Mirrors the Remnawave 2.7 contract's `tag` zod rule:
+ *   /^[A-Z0-9_]+$/, max 16 characters.
+ * We enforce uppercase + the allowed alphabet client-side so the value
+ * the operator types matches what the panel will accept on PATCH.
+ */
+const TAG_PATTERN = /^[A-Z0-9_]{0,16}$/
+const TAG_SANITIZE = /[^A-Z0-9_]/g
 
 export interface PlanFormData {
   name: string
@@ -185,9 +205,19 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
             <Label>{t('planForm.tag')}</Label>
             <Input
               value={tag}
-              onChange={(e) => setTag(e.target.value)}
+              onChange={(e) => {
+                // Force uppercase + strip disallowed characters so the value
+                // we hold always satisfies the Remnawave tag contract.
+                const next = e.target.value.toUpperCase().replace(TAG_SANITIZE, '').slice(0, 16)
+                setTag(next)
+              }}
               placeholder={t('planForm.tagPlaceholder')}
+              maxLength={16}
+              autoCapitalize="characters"
+              spellCheck={false}
+              aria-invalid={tag.length > 0 && !TAG_PATTERN.test(tag)}
             />
+            <p className="text-xs text-muted-foreground">{t('planForm.tagHint')}</p>
           </div>
         </div>
         <div className="space-y-2">
@@ -286,27 +316,11 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
         <div className="grid gap-4 md:grid-cols-2">
           <div className="space-y-2">
             <Label className="text-sm">{t('planForm.internalSquads')}</Label>
-            <div className="flex flex-wrap gap-2">
-              {internalSquads?.map((squad) => (
-                <Badge
-                  key={squad.uuid}
-                  variant={selectedInternalSquads.includes(squad.uuid) ? 'default' : 'outline'}
-                  className="cursor-pointer"
-                  onClick={() => {
-                    setSelectedInternalSquads((prev) =>
-                      prev.includes(squad.uuid)
-                        ? prev.filter((s) => s !== squad.uuid)
-                        : [...prev, squad.uuid],
-                    )
-                  }}
-                >
-                  {squad.name}
-                </Badge>
-              ))}
-              {!internalSquads?.length && (
-                <p className="text-xs text-muted-foreground">{t('planForm.noSquads')}</p>
-              )}
-            </div>
+            <InternalSquadsPicker
+              squads={internalSquads ?? []}
+              value={selectedInternalSquads}
+              onChange={setSelectedInternalSquads}
+            />
           </div>
           <div className="space-y-2">
             <Label className="text-sm">{t('planForm.externalSquad')}</Label>
@@ -572,5 +586,118 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
         {plan ? t('planForm.update') : t('planForm.create')}
       </Button>
     </form>
+  )
+}
+
+
+interface InternalSquadOption {
+  readonly uuid: string
+  readonly name: string
+}
+
+/**
+ * Internal squads multi-select picker.
+ *
+ * Mirrors the visual + interaction model of the External squad
+ * `<Select>` next to it (a single `<button>` trigger that opens a
+ * dropdown), but hosts a multi-select Command list inside so the
+ * operator can tick several squads in one go. Selected count goes
+ * into the trigger label so the form stays scannable when the
+ * dropdown is closed.
+ */
+function InternalSquadsPicker({
+  squads,
+  value,
+  onChange,
+}: {
+  readonly squads: ReadonlyArray<InternalSquadOption>
+  readonly value: ReadonlyArray<string>
+  readonly onChange: (next: string[]) => void
+}) {
+  const { t } = useTranslation()
+  const [open, setOpen] = useState(false)
+
+  // Map for quick lookup (rendering "selected" badge labels).
+  const byUuid = useMemo(
+    () => new Map(squads.map((s) => [s.uuid, s.name])),
+    [squads],
+  )
+
+  const triggerLabel =
+    value.length === 0
+      ? t('planForm.internalSquadsPlaceholder')
+      : t('planForm.internalSquadsCount', { count: value.length })
+
+  const toggle = (uuid: string) => {
+    onChange(
+      value.includes(uuid)
+        ? value.filter((id) => id !== uuid)
+        : [...value, uuid],
+    )
+  }
+
+  return (
+    <div className="space-y-2">
+      <Popover open={open} onOpenChange={setOpen}>
+        <PopoverTrigger asChild>
+          <Button
+            type="button"
+            variant="outline"
+            role="combobox"
+            aria-expanded={open}
+            className="w-full justify-between font-normal"
+            disabled={squads.length === 0}
+          >
+            <span className={cn('truncate', value.length === 0 && 'text-muted-foreground')}>
+              {squads.length === 0 ? t('planForm.noSquads') : triggerLabel}
+            </span>
+            <ChevronDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
+          <Command>
+            <CommandInput placeholder={t('planForm.internalSquadsPlaceholder')} />
+            <CommandList>
+              <CommandEmpty>{t('planForm.noSquads')}</CommandEmpty>
+              <CommandGroup>
+                {squads.map((squad) => {
+                  const selected = value.includes(squad.uuid)
+                  return (
+                    <CommandItem
+                      key={squad.uuid}
+                      value={`${squad.name} ${squad.uuid}`}
+                      onSelect={() => toggle(squad.uuid)}
+                      className="cursor-pointer"
+                    >
+                      <Checkbox
+                        checked={selected}
+                        className="mr-2 h-4 w-4"
+                        // Visual-only — the row click handles state.
+                        onCheckedChange={() => toggle(squad.uuid)}
+                        onClick={(e) => e.stopPropagation()}
+                      />
+                      <span className="flex-1 truncate">{squad.name}</span>
+                      {selected ? <Check className="ml-2 h-4 w-4 opacity-70" /> : null}
+                    </CommandItem>
+                  )
+                })}
+              </CommandGroup>
+            </CommandList>
+          </Command>
+        </PopoverContent>
+      </Popover>
+
+      {/* Selected chip preview (read-only echo so the operator can see
+          which squads are picked without opening the dropdown). */}
+      {value.length > 0 ? (
+        <div className="flex flex-wrap gap-1.5">
+          {value.map((uuid) => (
+            <Badge key={uuid} variant="secondary" className="font-normal">
+              {byUuid.get(uuid) ?? uuid.slice(0, 8)}
+            </Badge>
+          ))}
+        </div>
+      ) : null}
+    </div>
   )
 }

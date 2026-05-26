@@ -1,4 +1,69 @@
-﻿# Rezeis Admin v0.3.7
+﻿# Rezeis Admin v0.3.8
+
+## Imports UX overhaul + plan form polish + bulk-assign safety
+
+`v0.3.8` — крупный UX-апдейт страницы импорта, изоляция формы плана от Remnawave-контракт-дрейфа, и **критичная** safety-net для массового назначения тарифов.
+
+### 1. Имportы — полноценный progress + post-import flow
+
+Раньше клик «Импорт из Remnawave» открывал toast «Импорт выполнен: 0/0/0/0», потому что endpoint async (202 Accepted), а UI ждал synchronous-ответ со статистикой. Финальная карточка `<ImportResultAlert>` всегда показывала нули, баг был незаметен потому что toast вылетал быстро и лажа маскировалась.
+
+Теперь:
+
+- Клик по кнопке **сразу** открывает модалку с **косметической стейдж-анимацией** (`Подключаемся → Получаем профили → Сопоставляем пользователей → Записываем reiwa_id → Финализируем`). Анимация чисто визуальная — параллельно идёт реальный polling.
+- **Polling** `GET /admin/imports/:id` раз в секунду, останавливается на терминальных статусах `COMMITTED / FAILED / ROLLED_BACK`.
+- **90-секундный safety timeout**: если impорт не завершился, модалка показывает мягкий warning «следим в фоне, можно закрыть» — но polling продолжается, BullMQ-job не отменяется.
+- **Финальный экран** для `mode=import`: stat-grid (fetched / created / updated / skipped / writebacks / errors / subsCreated / subsUpdated), первые 5 ошибок если есть, две кнопки `[Назначить план всем]` / `[Не назначать]`.
+- **Финальный экран** для `mode=sync`: тот же stat-grid + одна кнопка `[Готово]`. Sync никогда не создаёт новых подписок, поэтому plan-assignment там не предлагается.
+- **`<BulkAssignPlanDialog>`** как вторая модалка: Select активных планов + чекбокс **«Применить лимиты сразу»** (выключен по умолчанию). При кнопке "Назначить" улетает `POST /admin/imports/assign-plan` с `applyImmediately: false/true`.
+- Backend `ImportRecord.result` теперь сериализуется в response payload — раньше там было пусто, потому фронт не мог показать структурную статистику.
+
+Backend без миграций. Контроллер `admin-imports.controller.ts` теперь возвращает `result` в `ImportRecordPayload`, фронт его читает напрямую.
+
+### 2. Bulk-assign-plan — `applyImmediately` чекбокс по умолчанию **off**
+
+Это критичный safety fix. Сценарий: оператор импортировал 100 пользователей с разными лимитами (500GB / 100GB / 50GB кто как купил), затем массово назначает им «Тест 50GB». Старый код **сразу же** создавал `ProfileSyncJob` для каждой подписки — клиенты с 500GB резко лишались 450GB. Это автоматическое поведение никак не было видно в UI и не подразумевалось.
+
+Теперь:
+
+- `BulkPlanAssignmentService.assignPlan` принимает новый параметр `applyImmediately: boolean = false`.
+- Когда **off** (default): обновляется только `Subscription.planSnapshot`, `planId`, кэшированные лимиты в **нашей БД**. Remnawave-панель не трогается. Новые лимиты применятся при следующем upgrade/продлении через customer flow.
+- Когда **on**: создаются `ProfileSyncJob`, как раньше — но теперь оператор **явно** соглашается на этот эффект через чекбокс.
+- DTO `ImportAssignPlanJobData` расширен полем `applyImmediately`. Контроллер прокидывает его из request body.
+- В UI чекбокс с подсказкой объясняющей последствия каждого варианта.
+
+### 3. Plan form — uppercase tag + multi-select для Internal squads
+
+- **Tag input**: при вводе/paste auto-uppercase + strip всё что не `[A-Z0-9_]`, max 16 символов. Плюс описание `tagHint`. Это соответствует zod-схеме Remnawave 2.7 контракта (`/^[A-Z0-9_]+$/`, max 16) — раньше оператор мог ввести «популярный», и оно дошло бы до panel API в lowercase где Remnawave его отвергнет.
+- **Internal squads**: чип-облако (8 чипов в ряд) → multi-select Combobox dropdown с теми же визуалами что у External squad слева. Использует `<Popover>` + `<Command>` + `<Checkbox>` из существующего ui-kit. В trigger выводится "Выбрано N групп", под ним read-only chip-preview для скана без открытия dropdown.
+- Без backend изменений — внутренняя структура `internalSquads: string[]` остаётся та же.
+
+### Pre-push checklist
+
+| Check | Result |
+|---|---|
+| Backend `tsc --noEmit -p tsconfig.json` | ✅ 0 errors |
+| Backend `eslint . --quiet` | ✅ 0 warnings |
+| Frontend `tsc -b` | ✅ 0 errors |
+| Frontend `eslint . --quiet` | ✅ 0 warnings |
+| Frontend `vite build` | ✅ built (13.73s) |
+| Local stack rebuild + redeploy | ✅ healthy, `version: "0.3.8"` |
+
+### Migration / breaking
+
+Нет.
+
+`applyImmediately` defaults to `false` — старые автоматизации, которые гоняли `POST /admin/imports/assign-plan` без поля, теперь будут вести себя **безопасно** (только запись в нашу БД, без push в Remnawave). Если вы целенаправленно хотите старое поведение — добавьте `"applyImmediately": true` в body запроса.
+
+### Docker image
+
+Пересобирается автоматически на push tag `v0.3.8` → GHCR теги `v0.3.8`, `0.3.8`, `0.3`, `latest`.
+
+**Full Changelog**: https://github.com/dizzzable/rezeis/compare/v0.3.7...v0.3.8
+
+---
+
+# Rezeis Admin v0.3.7
 
 ## Hotfix — импортер больше не плодит дубликаты для web-only пользователей + актуальный логотип в админке
 

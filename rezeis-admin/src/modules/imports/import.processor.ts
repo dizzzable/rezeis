@@ -147,8 +147,8 @@ export class ImportProcessor extends WorkerHost {
   }
 
   private async handleAssignPlan(job: Job<ImportAssignPlanJobData>): Promise<unknown> {
-    const { importRecordId, planId, createdBy, userIds } = job.data;
-    this.logger.log(`Processing bulk plan assignment: plan=${planId} import=${importRecordId}`);
+    const { importRecordId, planId, createdBy, userIds, applyImmediately } = job.data;
+    this.logger.log(`Processing bulk plan assignment: plan=${planId} import=${importRecordId} applyImmediately=${applyImmediately === true}`);
 
     await job.updateProgress({ stage: 'assigning', percent: 10 });
 
@@ -157,6 +157,7 @@ export class ImportProcessor extends WorkerHost {
       importRecordId,
       userIds,
       createdBy,
+      applyImmediately: applyImmediately === true,
     });
 
     await job.updateProgress({ stage: 'completed', percent: 100 });

@@ -12,6 +12,16 @@ export interface BulkPlanAssignmentInput {
   readonly userIds?: readonly string[];
   /** Admin who initiated the assignment */
   readonly createdBy: string;
+  /**
+   * Whether to push the new plan limits (traffic, devices, squads) to the
+   * Remnawave panel right away. Defaults to **false** so a bulk re-plan
+   * does not silently shrink customer limits — the new plan applies on
+   * their next renewal/upgrade through the customer-facing flow.
+   *
+   * Set to `true` only for migrations where you explicitly want the
+   * panel to be reshaped immediately.
+   */
+  readonly applyImmediately?: boolean;
 }
 
 export interface BulkPlanAssignmentResult {
@@ -78,7 +88,7 @@ export class BulkPlanAssignmentService {
 
     for (const userId of userIds) {
       try {
-        const result = await this.assignPlanForUser(userId, plan);
+        const result = await this.assignPlanForUser(userId, plan, input.applyImmediately === true);
         updated += result.updated;
         skippedDeleted += result.skippedDeleted;
         skippedAlreadyAssigned += result.skippedAlreadyAssigned;
@@ -153,6 +163,7 @@ export class BulkPlanAssignmentService {
       externalSquad: string | null;
       durations: Array<{ days: number }>;
     },
+    applyImmediately: boolean,
   ): Promise<{ updated: number; skippedDeleted: number; skippedAlreadyAssigned: number; syncJobsCreated: number }> {
     const subscriptions = await this.prismaService.subscription.findMany({
       where: { userId },
@@ -192,7 +203,16 @@ export class BulkPlanAssignmentService {
         externalSquad: plan.externalSquad,
       };
 
-      // Update subscription with new plan data
+      // Update subscription with new plan data.
+      //
+      // Note: we only persist the plan link (planSnapshot + cached limits)
+      // here. The actual Remnawave-side reshape (traffic / device cap /
+      // squad membership) is gated by `applyImmediately` below — we do
+      // not silently shrink a customer's panel limits as a side-effect of
+      // an admin re-plan. The new plan applies the next time the customer
+      // renews or upgrades through the user-facing flow (which is
+      // expected to compare panel state vs plan and emit the proper
+      // ProfileSyncJob then).
       await this.prismaService.subscription.update({
         where: { id: subscription.id },
         data: {
@@ -206,17 +226,19 @@ export class BulkPlanAssignmentService {
 
       updated += 1;
 
-      // Create a ProfileSyncJob to push the updated limits to Remnawave
+      // Push the new limits to Remnawave only if the operator explicitly
+      // requested an immediate reshape. Default behaviour is to defer.
       if (
-        subscription.status === SubscriptionStatus.ACTIVE ||
-        subscription.status === SubscriptionStatus.LIMITED
+        applyImmediately &&
+        (subscription.status === SubscriptionStatus.ACTIVE ||
+          subscription.status === SubscriptionStatus.LIMITED)
       ) {
         const action = subscription.remnawaveId ? SyncAction.UPDATE : SyncAction.CREATE;
         await this.prismaService.profileSyncJob.create({
           data: {
             subscriptionId: subscription.id,
             action,
-            payload: { bulkPlanAssignment: true, planId: plan.id } satisfies Prisma.InputJsonValue,
+            payload: { bulkPlanAssignment: true, planId: plan.id, applyImmediately: true } satisfies Prisma.InputJsonValue,
           },
         });
         syncJobsCreated += 1;

@@ -33,6 +33,15 @@ interface ImportRecordPayload {
   readonly committedAt: string | null;
   readonly rolledBackAt: string | null;
   readonly createdAt: string;
+  /**
+   * Per-source structured payload — set by the importer at the very end
+   * of the run. For Remnawave imports this is `RemnawaveImportSummary`
+   * shape: { mode, fetched, created, updated, skipped, subscriptionsCreated,
+   * subscriptionsUpdated, descriptionWritebacks, errors[] }.
+   * Optional because the row exists in DRY_RUN status before the run
+   * finishes — clients should treat absence as "still processing".
+   */
+  readonly result?: Record<string, unknown> | null;
 }
 
 interface ListImportsResponse {
@@ -96,6 +105,7 @@ export class AdminImportsController {
       committedAt: record.committedAt?.toISOString() ?? null,
       rolledBackAt: record.rolledBackAt?.toISOString() ?? null,
       createdAt: record.createdAt.toISOString(),
+      result: serializeImportResult(record.result),
     }));
     return { items, total: items.length };
   }
@@ -118,6 +128,7 @@ export class AdminImportsController {
       committedAt: record.committedAt?.toISOString() ?? null,
       rolledBackAt: record.rolledBackAt?.toISOString() ?? null,
       createdAt: record.createdAt.toISOString(),
+      result: serializeImportResult(record.result),
     };
   }
 
@@ -219,7 +230,7 @@ export class AdminImportsController {
   @HttpCode(HttpStatus.ACCEPTED)
   public async assignPlanToImported(
     @CurrentAdmin() admin: CurrentAdminInterface,
-    @Body() body: { planId: string; importRecordId?: string; userIds?: string[] },
+    @Body() body: { planId: string; importRecordId?: string; userIds?: string[]; applyImmediately?: boolean },
   ): Promise<{ jobId: string; message: string }> {
     if (!body.planId) {
       throw new BadRequestException('planId is required');
@@ -232,6 +243,7 @@ export class AdminImportsController {
       planId: body.planId,
       createdBy: admin.id,
       userIds: body.userIds,
+      applyImmediately: body.applyImmediately === true,
     });
     return { jobId, message: 'Plan assignment enqueued' };
   }
@@ -249,4 +261,18 @@ export class AdminImportsController {
       message: canceled ? 'Import canceled' : 'Import not found in queue (may already be processing)',
     };
   }
+}
+
+
+/**
+ * Coerce the Prisma JSON column for `ImportRecord.result` into a plain
+ * `Record<string, unknown> | null` for the API response. The column can
+ * be `null` (DRY_RUN before completion), `undefined` (very fresh row)
+ * or an arbitrary JSON value the importer wrote — we only forward
+ * object shapes; arrays / scalars / `null` collapse to `null`.
+ */
+function serializeImportResult(value: unknown): Record<string, unknown> | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== 'object' || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
 }

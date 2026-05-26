@@ -48,7 +48,7 @@ WORKDIR /app
 ENV NODE_ENV=production
 # App version baked into the image so health endpoint reports it.
 # Updated automatically via package.json bump → Docker build.
-ARG APP_VERSION=0.3.7
+ARG APP_VERSION=0.3.8
 ENV npm_package_version=${APP_VERSION}
 
 # Install PostgreSQL client tools (pg_dump, psql) for backup/restore.

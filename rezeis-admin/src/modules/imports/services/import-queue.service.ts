@@ -31,6 +31,12 @@ export interface ImportAssignPlanJobData {
   readonly planId: string;
   readonly createdBy: string;
   readonly userIds?: string[];
+  /**
+   * Forwarded to BulkPlanAssignmentService. When false (default) the new
+   * plan limits land in our DB but are NOT pushed to Remnawave — they
+   * apply on the next renewal/upgrade through the customer flow.
+   */
+  readonly applyImmediately?: boolean;
 }
 
 // ── Service ─────────────────────────────────────────────────────────────────
