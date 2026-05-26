@@ -29,11 +29,16 @@ const REIWA_ID_REGEX = /reiwa_id:\s*([a-z0-9]+)/i;
 /**
  * Two-way Remnawave importer/synchronizer.
  *
- * Matching priority:
- *   1. description contains "reiwa_id: {cuid}" → exact match
+ * Matching priority (first hit wins):
+ *   1. description contains "reiwa_id: {cuid}" → exact match by PK
  *   2. telegramId → unique match
  *   3. email → unique match
- *   4. No match → create new User (import mode only)
+ *   4. existing Subscription.remnawaveId → recovers web-only users that
+ *      have no Telegram/email but were previously linked through import.
+ *      Without this step every re-import would create a fresh duplicate
+ *      User row for them since their only handle is `WebAccount.login`,
+ *      which Remnawave knows nothing about.
+ *   5. No match → create new User (import mode only; sync skips)
  *
  * After matching/creating a User:
  *   - Creates or updates a Subscription with remnawaveId = panelUser.uuid
@@ -185,7 +190,23 @@ export class RemnawaveImporterService {
       }
     }
 
-    // Priority 4: No match — create (import mode only)
+    // Priority 4: existing Subscription that already points to this
+    // Remnawave UUID. This catches the realistic case where a user
+    // signed up through the web cabinet (no Telegram, no email — only
+    // a WebAccount.login) and was previously linked through `import`.
+    // Without this priority, every subsequent `import` would create a
+    // brand-new User dupe because there's no other way to identify a
+    // web-only customer from the panel side.
+    const existingSub = await this.prismaService.subscription.findFirst({
+      where: { remnawaveId: panelUser.uuid },
+      select: { userId: true },
+    });
+    if (existingSub) {
+      await this.updateUserFields(existingSub.userId, panelUser);
+      return existingSub.userId;
+    }
+
+    // Priority 5: No match — create (import mode only)
     if (mode === 'sync') {
       return null;
     }

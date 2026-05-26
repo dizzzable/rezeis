@@ -1,4 +1,76 @@
-﻿# Rezeis Admin v0.3.6
+﻿# Rezeis Admin v0.3.7
+
+## Hotfix — импортер больше не плодит дубликаты для web-only пользователей + актуальный логотип в админке
+
+`v0.3.7` дофиксивает то, что не вошло в v0.3.6: матчинг Remnawave-профиля с локальным `User`'ом обходил один важный сценарий — пользователей, которые подписались **через web-кабинет** (без Telegram, без email — только `WebAccount.login`). Они шли мимо первых трёх приоритетов матча и при `import` каждый раз создавался новый `User`-дубликат.
+
+### Симптом
+
+После релиза v0.3.6 sync рапортовал `fetched: 77, updated: 70, skipped: 7, writebacks: 69`. 7 пропущенных — это 6 web-only профилей (Nina, Granit, Batyz, Twix, Babushka, Mamamoya), которые в Remnawave имели только username, и один синтетический `rs_-34_sub` с `telegramId: -34` (артефакт миграции из Remnashop). Аудит локальной `users` показал что у 6 имён по 2 `User`-копии — каждое запуск `import` плодил новую копию, потому что нечем было сматчить.
+
+### Root cause
+
+`RemnawaveImporterService.matchOrCreateUser` имел только три приоритета для поиска:
+
+1. `reiwa_id` в description профиля Remnawave
+2. `telegramId` (unique)
+3. `email` (unique)
+
+Web-only клиенты не попадают ни в один из этих кранчей: их единственный handle — `WebAccount.login`, которого Remnawave не знает. Каждый `import` для такого профиля проходил все три проверки впустую и сваливался в "create new User", не проверив есть ли уже `Subscription.remnawaveId === panelUser.uuid` где-то в БД.
+
+### Fix
+
+В `src/modules/imports/services/remnawave-importer.service.ts`:
+
+- Добавлен **Priority 4: existing Subscription that already points to this Remnawave UUID**. Перед тем как создавать нового User'а, импортер проверяет нет ли в БД `Subscription` с этим `remnawaveId`. Если есть — берёт `userId` оттуда и обновляет всё что нужно. Это closes the loop для всех web-only клиентов: их `Subscription.remnawaveId` единственный надёжный handle обратно к локальному `User`.
+- Docstring переписан, чтобы новый порядок приоритетов был задокументирован.
+
+### Cleanup ранее накопившихся дубликатов
+
+Локальная БД содержала 6 пар `User`-дубликатов от прошлых неудачных импортов. Транзакционный `DELETE` с шестью `NOT EXISTS` safety-checks (`subscriptions`, `transactions`, `web_accounts`, `partners`, `referrals`, `user_notification_events`) удалил **только** ранние нулевые копии — те у которых нет ни одной FK-связи нигде. Поздние копии с привязанной `Subscription` сохранены.
+
+После DELETE и нового sync на тот же commit:
+
+```
+fetched:    77
+updated:    76   (+6 against pre-v0.3.7 sync — Priority 4 picked up the web-only six)
+skipped:     1   (only rs_-34_sub remains — synthetic telegramId: -34, no local User, no Subscription)
+writebacks:  8   (6 web-only + 2 stragglers got reiwa_id written to Remnawave description)
+errors:      0
+```
+
+Подтверждено в живую: `Babushka` (UUID `11557fe8-b1fc-...`) в Remnawave-панели имеет `description: "reiwa_id: cmpmc3yfz004m01jg8dclslfh"` — связка двухсторонняя.
+
+### Logo refresh
+
+`docs/logo.svg` и `rezeis-admin/web/public/rezeis-logo.svg` приведены к одному каноническому brand mark из `icon/Logo/Rezeis.svg`. README на GitHub и `RezeisLogo` в шапке админки теперь рендерят один и тот же логотип.
+
+### Pre-push checklist
+
+| Check | Result |
+|---|---|
+| Backend `tsc --noEmit -p tsconfig.json` | ✅ 0 errors |
+| Backend `eslint . --quiet` | ✅ 0 warnings |
+| Local stack rebuild + redeploy | ✅ healthy, `version: "0.3.7"` |
+| DELETE 6 dup users (transactional + NOT EXISTS) | ✅ DELETE 6, COMMIT |
+| Live sync against `2get.pro` panel | ✅ writebacks: 8, errors: 0, skipped reduced 7 → 1 |
+| End-to-end Sync All button (already verified in v0.3.6) | ✅ ProfileSyncProcessor jobs COMPLETED, Remnawave applied all fields |
+
+### Migration / breaking
+
+Нет. Изменение в `matchOrCreateUser` — чисто аддитивное (новый Priority 4 проверяется **после** трёх уже существующих, поведение для всех ранее матчившихся профилей не изменилось).
+
+Никаких изменений в Remnawave-панели кроме той же `description` write-back, что и в v0.3.6. Реальные подписки/трафик/устройства не трогаются.
+
+### Docker image
+
+Пересобирается автоматически на push tag `v0.3.7` → GHCR теги `v0.3.7`, `0.3.7`, `0.3`, `latest`.
+
+**Full Changelog**: https://github.com/dizzzable/rezeis/compare/v0.3.6...v0.3.7
+
+---
+
+# Rezeis Admin v0.3.6
 
 ## Hotfix — Remnawave write-back: `reiwa_id` теперь реально пишется в description
 
