@@ -1,0 +1,23 @@
+# config/rezeis.yml — динамическая конфигурация Traefik
+#
+# 1. Замените REPLACE_WITH_YOUR_DOMAIN на реальный домен.
+# 2. Сохраните файл как `rezeis.yml` (без .example).
+# 3. Traefik подхватит изменения автоматически (watch: true).
+
+http:
+  routers:
+    rezeis:
+      rule: "Host(`REPLACE_WITH_YOUR_DOMAIN`)"
+      entrypoints:
+        - https
+      service: rezeis
+      tls:
+        certResolver: letsencrypt
+
+  services:
+    rezeis:
+      loadBalancer:
+        servers:
+          - url: 'http://rezeis:8000'
+        # Обязательно для SSE: чтобы Traefik не буферизировал поток
+        passHostHeader: true

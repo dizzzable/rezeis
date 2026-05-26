@@ -28,3 +28,7 @@ __pycache__/
 Thumbs.db
 .idea/
 .vscode/
+
+# Local diff review scratchpads (not part of the release artifact)
+diff-review.txt
+docs/README.md

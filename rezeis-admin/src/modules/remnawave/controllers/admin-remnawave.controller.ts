@@ -3,9 +3,26 @@ import { Request } from 'express';
 
 import { AdminJwtAuthGuard } from '../../auth/guards/admin-jwt-auth.guard';
 import { RemnawaveConfigProfileInterface } from '../interfaces/remnawave-config-profile.interface';
+import {
+  RemnawaveHealthInterface,
+  RemnawaveHwidTopUserInterface,
+  RemnawaveInfraProviderInterface,
+  RemnawaveNodePluginInterface,
+  RemnawaveSnippetInterface,
+  RemnawaveSubpageConfigInterface,
+  RemnawaveSubscriptionRequestEntryInterface,
+  RemnawaveSubscriptionRequestStatsInterface,
+  RemnawaveSubscriptionSettingsInterface,
+  RemnawaveSubscriptionTemplateInterface,
+  RemnawaveUserSummaryInterface,
+} from '../interfaces/remnawave-extended.interface';
 import { RemnawaveHostInterface } from '../interfaces/remnawave-host.interface';
 import { RemnawaveHwidStatsInterface } from '../interfaces/remnawave-hwid-stats.interface';
 import { RemnawaveNodeInterface } from '../interfaces/remnawave-node.interface';
+import {
+  RemnawaveExternalSquadDetailInterface,
+  RemnawaveInternalSquadDetailInterface,
+} from '../interfaces/remnawave-squad-detail.interface';
 import { RemnawaveSquadOptionInterface } from '../interfaces/remnawave-squad-option.interface';
 import { RemnawaveStatusInterface } from '../interfaces/remnawave-status.interface';
 import {
@@ -115,14 +132,29 @@ export class AdminRemnawaveController {
   }
 
   // ── Squads ─────────────────────────────────────────────────────────────────
+  //
+  // The admin "Remnawave → Squads" page consumes the *detail* shape (with
+  // `membersCount` / `inboundsCount` counters that mirror Remnawave's own
+  // UI). The plan-builder selects use the simpler `{uuid, name}` option
+  // shape — it lives at `options/*` and is unchanged.
 
   @Get('internal-squads')
-  public async getInternalSquads(): Promise<readonly RemnawaveSquadOptionInterface[]> {
-    return this.remnawaveApiService.getInternalSquadOptions();
+  public async getInternalSquads(): Promise<readonly RemnawaveInternalSquadDetailInterface[]> {
+    return this.remnawaveApiService.getInternalSquadDetails();
   }
 
   @Get('external-squads')
-  public async getExternalSquads(): Promise<readonly RemnawaveSquadOptionInterface[]> {
+  public async getExternalSquads(): Promise<readonly RemnawaveExternalSquadDetailInterface[]> {
+    return this.remnawaveApiService.getExternalSquadDetails();
+  }
+
+  @Get('options/internal-squads')
+  public async getInternalSquadOptions(): Promise<readonly RemnawaveSquadOptionInterface[]> {
+    return this.remnawaveApiService.getInternalSquadOptions();
+  }
+
+  @Get('options/external-squads')
+  public async getExternalSquadOptions(): Promise<readonly RemnawaveSquadOptionInterface[]> {
     return this.remnawaveApiService.getExternalSquadOptions();
   }
 
@@ -138,6 +170,98 @@ export class AdminRemnawaveController {
   @Get('hwid/stats')
   public async getHwidStats(): Promise<RemnawaveHwidStatsInterface | null> {
     return this.remnawaveApiService.getHwidStats();
+  }
+
+  @Get('hwid/top-users')
+  public async getHwidTopUsers(): Promise<readonly RemnawaveHwidTopUserInterface[]> {
+    return this.remnawaveApiService.getHwidTopUsers();
+  }
+
+  // ── Health ─────────────────────────────────────────────────────────────────
+
+  @Get('system/health')
+  public async getRemnawaveHealth(): Promise<RemnawaveHealthInterface | null> {
+    return this.remnawaveApiService.getRemnawaveHealth();
+  }
+
+  // ── Subscription request history ───────────────────────────────────────────
+
+  @Get('subscription-request-history/stats')
+  public async getSubscriptionRequestHistoryStats(): Promise<RemnawaveSubscriptionRequestStatsInterface | null> {
+    return this.remnawaveApiService.getSubscriptionRequestHistoryStats();
+  }
+
+  @Get('subscription-request-history')
+  public async getSubscriptionRequestHistory(
+    @Query('userUuid') userUuid?: string,
+    @Query('limit') limit?: string,
+  ): Promise<readonly RemnawaveSubscriptionRequestEntryInterface[]> {
+    const parsedLimit = typeof limit === 'string' ? Math.min(parseInt(limit, 10) || 100, 500) : undefined;
+    return this.remnawaveApiService.getSubscriptionRequestHistory({
+      userUuid,
+      limit: parsedLimit,
+    });
+  }
+
+  // ── Catalog ────────────────────────────────────────────────────────────────
+
+  @Get('snippets')
+  public async getSnippets(): Promise<readonly RemnawaveSnippetInterface[]> {
+    return this.remnawaveApiService.getSnippets();
+  }
+
+  @Get('subscription-page-configs')
+  public async getSubscriptionPageConfigs(): Promise<readonly RemnawaveSubpageConfigInterface[]> {
+    return this.remnawaveApiService.getSubscriptionPageConfigs();
+  }
+
+  @Get('subscription-templates')
+  public async getSubscriptionTemplates(): Promise<readonly RemnawaveSubscriptionTemplateInterface[]> {
+    return this.remnawaveApiService.getSubscriptionTemplates();
+  }
+
+  @Get('subscription-settings')
+  public async getSubscriptionSettings(): Promise<RemnawaveSubscriptionSettingsInterface | null> {
+    return this.remnawaveApiService.getSubscriptionSettings();
+  }
+
+  // ── Costs ──────────────────────────────────────────────────────────────────
+
+  @Get('infra/providers')
+  public async getInfraProviders(): Promise<readonly RemnawaveInfraProviderInterface[]> {
+    return this.remnawaveApiService.getInfraProviders();
+  }
+
+  // ── Settings (read-only) ───────────────────────────────────────────────────
+
+  @Get('node-plugins')
+  public async getNodePlugins(): Promise<readonly RemnawaveNodePluginInterface[]> {
+    return this.remnawaveApiService.getNodePlugins();
+  }
+
+  // ── User search ────────────────────────────────────────────────────────────
+
+  @Get('users/resolve')
+  public async resolveRemnawaveUser(
+    @Query('telegramId') telegramId?: string,
+    @Query('username') username?: string,
+    @Query('email') email?: string,
+    @Query('subscriptionUuid') subscriptionUuid?: string,
+  ): Promise<RemnawaveUserSummaryInterface | null> {
+    return this.remnawaveApiService.resolveRemnawaveUser({
+      telegramId,
+      username,
+      email,
+      subscriptionUuid,
+    });
+  }
+
+  // ── Hosts (mutations beyond CRUD) ─────────────────────────────────────────
+
+  @Post('hosts/reorder')
+  public async reorderHosts(@Body() body: { readonly uuids: readonly string[] }): Promise<{ ok: true }> {
+    await this.remnawaveApiService.reorderHosts(body?.uuids ?? []);
+    return { ok: true };
   }
 }
 

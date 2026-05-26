@@ -6,3 +6,8 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+
+
+# Country flag SVGs are vendored at build time from `country-flag-icons`
+# via `scripts/sync-flags.mjs`. Don't commit the snapshot.
+src/flags/*.svg

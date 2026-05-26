@@ -66,6 +66,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { FadeIn, HoverLift } from '@/lib/motion'
+import { RemnawaveIcon } from '@/features/remnawave/remnawave-icon'
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -134,7 +135,10 @@ export default function ImportsPage() {
 
       <Tabs defaultValue="remnawave" className="space-y-4">
         <TabsList className="grid w-full grid-cols-4">
-          <TabsTrigger value="remnawave">Remnawave</TabsTrigger>
+          <TabsTrigger value="remnawave" className="gap-1.5">
+            <RemnawaveIcon className="h-3.5 w-3.5" />
+            Remnawave
+          </TabsTrigger>
           <TabsTrigger value="3xui">3x-ui</TabsTrigger>
           <TabsTrigger value="remnashop">Remnashop</TabsTrigger>
           <TabsTrigger value="altshop">Altshop</TabsTrigger>

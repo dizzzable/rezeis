@@ -5,9 +5,10 @@ import { useQuery, useMutation } from '@tanstack/react-query'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
-import { Shield, Loader2 } from 'lucide-react'
+import { Loader2 } from 'lucide-react'
 
 import { getErrorMessage } from '@/lib/http-errors'
+import { RezeisLogo } from '@/components/branding/rezeis-logo'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -84,8 +85,8 @@ function PageShell({ children }: { children: React.ReactNode }) {
       <div className="relative z-10 flex min-h-screen items-center justify-center p-4">
         <div className="w-full max-w-md space-y-6">
           <div className="flex flex-col items-center gap-2">
-            <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-primary">
-              <Shield className="h-6 w-6 text-primary-foreground" />
+            <div className="flex h-14 w-14 items-center justify-center">
+              <RezeisLogo className="h-12 w-12" alt={t('signInPage.appName')} />
             </div>
             <h1 className="text-xl font-bold">
               <SplitText text={t('signInPage.appName')} />

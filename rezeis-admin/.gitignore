@@ -19,3 +19,6 @@ Thumbs.db
 # Editor
 .idea/
 .vscode/
+
+# Local-only docker compose override (loopback ports for direct dev access)
+docker-compose.override.yml

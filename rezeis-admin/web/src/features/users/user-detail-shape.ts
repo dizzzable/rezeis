@@ -21,6 +21,12 @@ export interface UserSubscription {
   readonly expireAt?: string
   readonly createdAt?: string
   readonly configUrl?: string | null
+  /** Remnawave panel user UUID — present once the subscription has been provisioned. */
+  readonly remnawaveId?: string | null
+  /** Live username from the Remnawave panel (`rz_<user>_sub_N` or operator-renamed). */
+  readonly remnawaveProfileName?: string | null
+  /** Raw description shown on the Remnawave profile (multi-line, includes our `reiwa_id:` marker). */
+  readonly remnawaveProfileDescription?: string | null
   readonly planSnapshot?: {
     readonly planId?: string | null
     readonly name?: string | null

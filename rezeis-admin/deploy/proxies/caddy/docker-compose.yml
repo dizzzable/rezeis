@@ -1,0 +1,55 @@
+# ════════════════════════════════════════════════════════════════════════════
+#  Caddy reverse proxy (TLS via acme.sh DNS-01, Cloudflare)
+#
+#  Сертификаты выпускаются *на хосте* через acme.sh с помощью Cloudflare DNS API
+#  и пробрасываются в контейнер read-only из /etc/acme/<домен>/. Caddy
+#  TLS не выпускает сам — только обслуживает HTTPS на 443.
+#
+#  Снаружи открыт только 443. 80 и 8443 не нужны.
+#
+#  Порядок:
+#    1. Выпустить сертификат на хосте (см. README.md в этой папке).
+#    2. cp Caddyfile.example Caddyfile && подставить домен.
+#    3. docker compose up -d
+#    4. docker compose -f ../../../docker-compose.yml up -d   (поднять саму панель)
+# ════════════════════════════════════════════════════════════════════════════
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: caddy
+    hostname: caddy
+    restart: unless-stopped
+    ports:
+      - '0.0.0.0:443:443'
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Сертификаты от acme.sh, лежат на хосте
+      - /etc/acme:/etc/acme:ro
+      # Внутренний keystore Caddy (на всякий случай — очень маленький)
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - remnawave-network
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:2019/config/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
+
+volumes:
+  caddy-data:
+    name: caddy-data
+  caddy-config:
+    name: caddy-config
+
+networks:
+  remnawave-network:
+    name: remnawave-network
+    external: true

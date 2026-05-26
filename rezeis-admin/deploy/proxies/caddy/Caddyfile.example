@@ -1,0 +1,48 @@
+# Caddyfile — Caddy + сертификаты от acme.sh (DNS-01 Cloudflare)
+#
+# 1. Замените REPLACE_WITH_YOUR_DOMAIN на реальный домен.
+# 2. Сохраните файл как `Caddyfile` (без .example).
+# 3. Перезагрузите Caddy:  docker exec caddy caddy reload --config /etc/caddy/Caddyfile
+
+REPLACE_WITH_YOUR_DOMAIN {
+    # Используем сертификаты, выпущенные acme.sh на хосте.
+    # Caddy НЕ пытается выпустить свой — пути указаны явно.
+    tls /etc/acme/REPLACE_WITH_YOUR_DOMAIN/fullchain.pem /etc/acme/REPLACE_WITH_YOUR_DOMAIN/privkey.key
+
+    # Сжатие
+    encode zstd gzip
+
+    # SSE для realtime-обновлений в админке.
+    # flush_interval -1 отключает буферизацию ответа, иначе события
+    # «копятся» и доходят до браузера пачкой раз в несколько минут.
+    @sse {
+        path /api/admin/events/* /api/internal/user/*/realtime/*
+    }
+    handle @sse {
+        reverse_proxy rezeis:8000 {
+            flush_interval -1
+            transport http {
+                read_timeout 24h
+            }
+        }
+    }
+
+    # Всё остальное — обычный reverse proxy.
+    reverse_proxy rezeis:8000
+
+    # Безопасные заголовки, как у Remnawave-гайдов.
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options    "nosniff"
+        X-Frame-Options           "SAMEORIGIN"
+        Referrer-Policy           "strict-origin-when-cross-origin"
+        # Caddy сам подменяет Server: header, но на всякий случай скрываем версию
+        -Server
+    }
+}
+
+# Закрываем `:443` для чужих хостов (TLS-handshake reject вместо ответа).
+:443 {
+    tls internal
+    respond 444
+}

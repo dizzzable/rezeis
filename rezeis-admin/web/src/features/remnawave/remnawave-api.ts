@@ -119,7 +119,8 @@ export interface RemnawaveInternalSquad {
   uuid: string;
   name: string;
   viewPosition: number;
-  info: { membersCount: number; inboundsCount: number };
+  membersCount: number;
+  inboundsCount: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -128,7 +129,7 @@ export interface RemnawaveExternalSquad {
   uuid: string;
   name: string;
   viewPosition: number;
-  info: { membersCount: number };
+  membersCount: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -153,15 +154,19 @@ export interface RemnawaveConfigProfile {
 export interface RemnawaveSubscriptionSettings {
   uuid: string;
   profileTitle: string;
-  supportLink: string;
+  supportLink: string | null;
   profileUpdateInterval: number;
   isProfileWebpageUrlEnabled: boolean;
   serveJsonAtBaseSubscription: boolean;
   isShowCustomRemarks: boolean;
   randomizeHosts: boolean;
-  happAnnounce: string | null;
-  happRouting: string | null;
-  updatedAt: string;
+  // Booleans summarising whether the panel exposes the corresponding payload.
+  // Raw config blobs are intentionally hidden — the admin SPA shouldn't see
+  // private subscription-rule internals.
+  hasHappAnnounce: boolean;
+  hasHappRouting: boolean;
+  hasResponseRules: boolean;
+  hasCustomRemarks: boolean;
 }
 
 export interface RemnawaveSubscriptionTemplate {
@@ -169,8 +174,7 @@ export interface RemnawaveSubscriptionTemplate {
   name: string;
   viewPosition: number;
   templateType: string;
-  templateJson: unknown | null;
-  encodedTemplateYaml: string | null;
+  hasYaml: boolean;
 }
 
 export interface RemnawaveHwidStats {
@@ -266,18 +270,164 @@ async function getSubscriptionSettings(): Promise<RemnawaveSubscriptionSettings 
   return res.data;
 }
 
-async function getSubscriptionTemplates(): Promise<
-  RemnawaveSubscriptionTemplate[]
-> {
-  const res = await api.get<RemnawaveSubscriptionTemplate[]>(
-    "/admin/remnawave/subscription-templates",
-  );
+async function getSubscriptionTemplates(): Promise<RemnawaveSubscriptionTemplate[]> {
+  const res = await api.get<RemnawaveSubscriptionTemplate[]>("/admin/remnawave/subscription-templates");
   return res.data;
 }
 
-async function getHwidStats(): Promise<RemnawaveHwidStats> {
-  const res = await api.get<RemnawaveHwidStats>("/admin/remnawave/hwid/stats");
+async function getHwidStats(): Promise<RemnawaveHwidStats | null> {
+  const res = await api.get<RemnawaveHwidStats | null>("/admin/remnawave/hwid/stats");
   return res.data;
+}
+
+export interface RemnawaveHwidTopUser {
+  userUuid: string
+  username: string
+  telegramId: string | null
+  devicesCount: number
+  lastSeenAt: string | null
+}
+
+async function getHwidTopUsers(): Promise<RemnawaveHwidTopUser[]> {
+  const res = await api.get<RemnawaveHwidTopUser[]>("/admin/remnawave/hwid/top-users");
+  return res.data;
+}
+
+export interface RemnawaveHealth {
+  status?: string
+  message?: string | null
+  uptime?: number
+  db?: { status?: string }
+  redis?: { status?: string }
+  version?: string
+}
+
+async function getHealth(): Promise<RemnawaveHealth | null> {
+  const res = await api.get<RemnawaveHealth | null>("/admin/remnawave/system/health");
+  return res.data;
+}
+
+export interface RemnawaveSubRequestStats {
+  totalRequests: number
+  uniqueUsers: number
+  perClient: { clientType: string; count: number }[]
+  perDay: { date: string; count: number }[]
+}
+
+async function getSubscriptionRequestStats(): Promise<RemnawaveSubRequestStats | null> {
+  const res = await api.get<RemnawaveSubRequestStats | null>("/admin/remnawave/subscription-request-history/stats");
+  return res.data;
+}
+
+export interface RemnawaveSubRequestEntry {
+  id: string
+  userUuid: string | null
+  username: string | null
+  clientType: string | null
+  userAgent: string | null
+  ipAddress: string | null
+  requestedAt: string
+}
+
+async function getSubscriptionRequestHistory(params?: { userUuid?: string; limit?: number }): Promise<RemnawaveSubRequestEntry[]> {
+  const search = new URLSearchParams()
+  if (params?.userUuid) search.set('userUuid', params.userUuid)
+  if (params?.limit !== undefined) search.set('limit', String(params.limit))
+  const qs = search.toString()
+  const res = await api.get<RemnawaveSubRequestEntry[]>(`/admin/remnawave/subscription-request-history${qs.length > 0 ? `?${qs}` : ''}`)
+  return res.data
+}
+
+export interface RemnawaveInfraProvider {
+  uuid: string
+  name: string
+  type: string | null
+  currency: string | null
+  nodesCount: number
+  monthlyCost: number | null
+  createdAt: string
+}
+
+async function getInfraProviders(): Promise<RemnawaveInfraProvider[]> {
+  const res = await api.get<RemnawaveInfraProvider[]>("/admin/remnawave/infra/providers");
+  return res.data;
+}
+
+export interface RemnawaveSnippet {
+  uuid: string
+  name: string
+  description: string | null
+  type: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+async function getSnippets(): Promise<RemnawaveSnippet[]> {
+  const res = await api.get<RemnawaveSnippet[]>("/admin/remnawave/snippets");
+  return res.data;
+}
+
+export interface RemnawaveSubpageConfig {
+  uuid: string
+  name: string
+  title: string | null
+  description: string | null
+  logoUrl: string | null
+  faviconUrl: string | null
+  customCss: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+async function getSubscriptionPageConfigs(): Promise<RemnawaveSubpageConfig[]> {
+  const res = await api.get<RemnawaveSubpageConfig[]>("/admin/remnawave/subscription-page-configs");
+  return res.data;
+}
+
+export interface RemnawaveNodePlugin {
+  uuid: string
+  name: string
+  version: string | null
+  nodeUuid: string | null
+  enabled: boolean
+  createdAt: string
+  updatedAt: string
+}
+
+async function getNodePlugins(): Promise<RemnawaveNodePlugin[]> {
+  const res = await api.get<RemnawaveNodePlugin[]>("/admin/remnawave/node-plugins");
+  return res.data;
+}
+
+export interface RemnawaveUserSummary {
+  uuid: string
+  shortUuid: string | null
+  username: string
+  status: string | null
+  trafficLimitBytes: number | null
+  trafficUsedBytes: number | null
+  hwidDeviceLimit: number | null
+  expireAt: string | null
+  telegramId: string | null
+  email: string | null
+  tag: string | null
+  createdAt: string | null
+  updatedAt: string | null
+  subscriptionUrl: string | null
+}
+
+async function resolveUser(query: { telegramId?: string; username?: string; email?: string; subscriptionUuid?: string }): Promise<RemnawaveUserSummary | null> {
+  const search = new URLSearchParams()
+  if (query.telegramId) search.set('telegramId', query.telegramId)
+  if (query.username) search.set('username', query.username)
+  if (query.email) search.set('email', query.email)
+  if (query.subscriptionUuid) search.set('subscriptionUuid', query.subscriptionUuid)
+  const res = await api.get<RemnawaveUserSummary | null>(`/admin/remnawave/users/resolve?${search.toString()}`)
+  return res.data
+}
+
+async function reorderHosts(uuids: string[]): Promise<void> {
+  await api.post("/admin/remnawave/hosts/reorder", { uuids });
 }
 
 export interface RemnawaveGeoDistribution {
@@ -297,17 +447,27 @@ export const remnawaveApi = {
   getSystemStats,
   getSystemRecap,
   getBandwidthStats,
+  getHealth,
   getAllNodes,
   enableNode,
   disableNode,
   restartNode,
   resetNodeTraffic,
   getAllHosts,
+  reorderHosts,
   getInternalSquads,
   getExternalSquads,
   getConfigProfiles,
   getSubscriptionSettings,
   getSubscriptionTemplates,
+  getSubscriptionPageConfigs,
+  getSnippets,
   getHwidStats,
+  getHwidTopUsers,
+  getSubscriptionRequestStats,
+  getSubscriptionRequestHistory,
+  getInfraProviders,
+  getNodePlugins,
+  resolveUser,
   getGeoDistribution,
 };

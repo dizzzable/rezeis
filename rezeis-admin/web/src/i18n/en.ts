@@ -2515,6 +2515,12 @@ export const en = {
     restart: 'Restart',
     resetTraffic: 'Reset Traffic',
     unknown: 'Unknown',
+    refresh: {
+      now: 'Refresh now',
+      off: 'Auto-refresh: off',
+      fiveSec: 'Every 5s',
+      thirtySec: 'Every 30s',
+    },
   },
   backupBadges: {
     failed: 'Failed',

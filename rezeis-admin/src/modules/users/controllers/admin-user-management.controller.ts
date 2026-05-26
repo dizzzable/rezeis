@@ -160,11 +160,13 @@ export class AdminUserManagementController {
       ...user,
       telegramId: user.telegramId?.toString() ?? null,
       identityKind,
-      subscriptions: subscriptions.map((s) => ({
-        ...s,
-        expireAt: s.expiresAt?.toISOString(),
-        plan: s.planSnapshot,
-      })),
+      subscriptions: await this.enrichSubscriptionsWithRemnawave(subscriptions).then((enriched) =>
+        enriched.map((s) => ({
+          ...s,
+          expireAt: s.expiresAt?.toISOString(),
+          plan: s.planSnapshot,
+        })),
+      ),
       transactions: transactions.map((t) => ({
         ...t,
         amount: t.amount.toString(),
@@ -511,6 +513,51 @@ export class AdminUserManagementController {
   }
 
   // ── Helpers ─────────────────────────────────────────────────────────────────
+
+  /**
+   * Augments a list of local subscription rows with the matching Remnawave
+   * panel-user `username` and `description` so the admin "User → Subscription"
+   * card can display the live profile name instead of the bare UUID.
+   *
+   * - Skips subscriptions that have no `remnawaveId` yet (e.g. provisioning).
+   * - Tolerates upstream errors per-row: a single missing/404 panel user
+   *   never breaks the whole user-detail response.
+   * - Done in parallel via `Promise.allSettled` to keep the user-detail
+   *   endpoint snappy even when the panel is slow.
+   */
+  private async enrichSubscriptionsWithRemnawave<T extends { readonly remnawaveId: string | null }>(
+    subscriptions: readonly T[],
+  ): Promise<Array<T & {
+    readonly remnawaveProfileName: string | null;
+    readonly remnawaveProfileDescription: string | null;
+  }>> {
+    const enriched = await Promise.allSettled(
+      subscriptions.map(async (sub) => {
+        if (!sub.remnawaveId) {
+          return {
+            ...sub,
+            remnawaveProfileName: null,
+            remnawaveProfileDescription: null,
+          };
+        }
+        const panelUser = await this.remnawaveApiService.getPanelUser(sub.remnawaveId);
+        return {
+          ...sub,
+          remnawaveProfileName: panelUser?.username ?? null,
+          remnawaveProfileDescription: panelUser?.description ?? null,
+        };
+      }),
+    );
+    return enriched.map((result, index) => {
+      if (result.status === 'fulfilled') return result.value;
+      const fallback = subscriptions[index];
+      return {
+        ...fallback,
+        remnawaveProfileName: null,
+        remnawaveProfileDescription: null,
+      };
+    });
+  }
 
   private async findUserByTelegramId(telegramId: string) {
     // The param is named "telegramId" for historical reasons but the FE

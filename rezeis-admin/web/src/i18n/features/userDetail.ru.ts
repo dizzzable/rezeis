@@ -180,6 +180,12 @@ export const ru = {
       disableTitle: 'Выключить',
       enableTitle: 'Включить',
       syncTitle: 'Синхронизировать',
+      syncing: 'Синхронизация…',
+      remnawaveProfile: {
+        label: 'Профиль Remnawave',
+        copied: 'UUID Remnawave скопирован',
+        copyAria: 'Скопировать UUID Remnawave',
+      },
       deleteTitle: 'Удалить',
     },
     partner: {

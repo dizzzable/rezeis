@@ -1,0 +1,45 @@
+# ════════════════════════════════════════════════════════════════════════════
+#  Nginx reverse proxy (TLS via acme.sh TLS-ALPN-01 on 8443)
+#
+#  Сертификаты выпускаются через acme.sh с challenge TLS-ALPN-01.
+#  Снаружи: 443 (постоянно) + 8443 (только в момент renew, ~30 секунд раз в 60
+#  дней). 80 не нужен.
+#
+#  Эта схема повторяет официальный Nginx-гайд Remnawave один к одному:
+#  https://docs.rw/docs/install/reverse-proxies/nginx/
+#
+#  Важно: при включённом Cloudflare proxy (orange cloud) TLS-ALPN-01 не
+#  пройдёт — Cloudflare не пропускает трафик на 8443. Используйте grey cloud
+#  (DNS only) или вариант caddy/ с DNS-01.
+# ════════════════════════════════════════════════════════════════════════════
+
+services:
+  nginx:
+    image: nginx:1.28
+    container_name: rezeis-nginx
+    hostname: rezeis-nginx
+    restart: unless-stopped
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./fullchain.pem:/etc/nginx/ssl/fullchain.pem:ro
+      - ./privkey.key:/etc/nginx/ssl/privkey.key:ro
+    ports:
+      - '0.0.0.0:443:443'
+    networks:
+      - remnawave-network
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/nginx-health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
+
+networks:
+  remnawave-network:
+    name: remnawave-network
+    external: true

@@ -1,0 +1,49 @@
+# ════════════════════════════════════════════════════════════════════════════
+#  Caddy reverse proxy (TLS issued by Caddy itself, HTTP-01)
+#
+#  Caddy сам выпускает и обновляет сертификат через ACME HTTP-01.
+#  Открыты 80 и 443: 80 — только для challenge + редирект на 443.
+#
+#  Самый простой стек "из коробки", не требует настройки DNS API.
+#
+#  Порядок:
+#    1. cp Caddyfile.example Caddyfile && подставить домен.
+#    2. docker compose up -d
+#    3. cd ../../../ && docker compose up -d   (поднять саму панель)
+# ════════════════════════════════════════════════════════════════════════════
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: caddy
+    hostname: caddy
+    restart: unless-stopped
+    ports:
+      - '0.0.0.0:80:80'
+      - '0.0.0.0:443:443'
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Здесь Caddy хранит выпущенные сертификаты — обязательно volume,
+      # иначе при пересоздании контейнера будет повторно ходить в Let's Encrypt
+      # и упрётся в rate-limit.
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - remnawave-network
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:2019/config/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  caddy-data:
+    name: caddy-data
+  caddy-config:
+    name: caddy-config
+
+networks:
+  remnawave-network:
+    name: remnawave-network
+    external: true

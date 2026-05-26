@@ -2,13 +2,16 @@
 #  rezeis — docker-compose (production)
 #
 #  Runs in remnawave-network so rezeis can reach remnawave:3000 directly
-#  and the same reverse proxy (Traefik/Caddy) can route to rezeis:8000.
+#  and the same reverse proxy (Traefik/Caddy/Nginx) can route to rezeis:8000.
+#
+#  Сначала поднимается reverse-proxy-стек из deploy/proxies/<выбранный>/, затем
+#  эта compose-запись. Подробности — в deploy/proxies/README.md.
 #
 #  Usage:
 #    docker compose up -d
 #
-#  Reverse proxy config (Traefik example):
-#    service url: http://rezeis:8000
+#  Reverse proxy config (Caddy example):
+#    reverse_proxy rezeis:8000
 # ══════════════════════════════════════════════════════════════════════════════
 
 services:
@@ -27,8 +30,16 @@ services:
       - NODE_ENV=production
       - BACKUP_LOCATION=/app/data/backups
       - REZEIS_UPDATE_REPO=dizzzable/rezeis
-    ports:
-      - '127.0.0.1:8000:8000'
+    # Наружу 8000 не публикуем — reverse proxy ходит на rezeis:8000 по
+    # docker-сети. Если нужен доступ с самого VPS для дебага, временно
+    # верни строку: `ports: ['127.0.0.1:8000:8000']` (только loopback).
+    expose:
+      - '8000'
+    # Раскомментируй блок ниже, если хочешь зайти в панель напрямую с
+    # хоста (без reverse proxy) — порт публикуется только на loopback,
+    # снаружи VPS не виден.
+    # ports:
+    #   - '127.0.0.1:8000:8000'
     volumes:
       - rezeis-data:/app/data
     depends_on:
@@ -92,6 +103,10 @@ services:
       - remnawave-network
 
   rezeis-db:
+    # ВАЖНО: при апгрейде сюда (например `postgres:18-alpine`) обязательно
+    # синхронно обновить `postgresql<major>-client` в Dockerfile rezeis-admin —
+    # иначе `pg_dump` упадёт с "aborting because of server version mismatch"
+    # при создании бэкапа.
     image: postgres:17-alpine
     container_name: rezeis-db
     hostname: rezeis-db

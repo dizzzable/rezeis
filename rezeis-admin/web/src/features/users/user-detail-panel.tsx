@@ -39,9 +39,11 @@ import {
 import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
+import { cn } from '@/lib/utils'
 import { useAuthMe } from '@/features/auth/use-auth-me'
 import { usePlans } from '@/features/plans/plans-api'
 import { getErrorMessage } from '@/lib/http-errors'
+import { RemnawaveIcon } from '@/features/remnawave/remnawave-icon'
 import type {
   UserDetail,
   UserPartner,
@@ -520,6 +522,69 @@ function InfoRow({ label, value, mono, icon }: { label: string; value: string | 
   )
 }
 
+/**
+ * One-row Remnawave profile reveal for the subscription card. Shows:
+ *   • the live `username` from Remnawave (e.g. `rz_user_sub`),
+ *   • a Copy button that yanks the panel UUID to the clipboard,
+ *   • a tiny tooltip-like underline with the truncated UUID below.
+ *
+ * If we don't yet know the profile (no remnawaveId or upstream errored),
+ * we render an "—" placeholder rather than hiding the row, because the
+ * row's vertical rhythm is what makes the card legible.
+ *
+ * Painted in pink to read as a Remnawave-link affordance distinct from
+ * the rest of the plain InfoRow stack.
+ */
+function RemnawaveProfileRow({ sub }: { sub: UserSubscription }) {
+  const { t } = useTranslation()
+  const profileName = sub.remnawaveProfileName?.trim()
+  const remnawaveId = sub.remnawaveId
+
+  function handleCopy(): void {
+    if (!remnawaveId) return
+    void navigator.clipboard.writeText(remnawaveId)
+    toast.success(t('userDetailPanel.subscriptions.remnawaveProfile.copied'))
+  }
+
+  return (
+    <div className="flex items-center justify-between gap-2 py-0.5">
+      <span className="flex shrink-0 items-center gap-1.5 text-pink-500 dark:text-pink-400">
+        <RemnawaveIcon className="h-3 w-3" alt="" />
+        {t('userDetailPanel.subscriptions.remnawaveProfile.label')}
+      </span>
+      <span className="flex min-w-0 items-center gap-1.5 text-right">
+        {profileName ? (
+          <span
+            className="truncate font-mono text-[11px] font-medium text-pink-500 dark:text-pink-400"
+            title={remnawaveId ?? undefined}
+          >
+            {profileName}
+          </span>
+        ) : remnawaveId ? (
+          <span
+            className="truncate font-mono text-[11px] text-pink-500/70 dark:text-pink-400/70"
+            title={remnawaveId}
+          >
+            {remnawaveId.slice(0, 8)}…
+          </span>
+        ) : (
+          <span className="text-muted-foreground/70">—</span>
+        )}
+        {remnawaveId ? (
+          <button
+            type="button"
+            onClick={handleCopy}
+            className="text-pink-500/60 transition hover:text-pink-500 dark:text-pink-400/60 dark:hover:text-pink-400"
+            aria-label={t('userDetailPanel.subscriptions.remnawaveProfile.copyAria')}
+          >
+            <Copy className="h-3 w-3" />
+          </button>
+        ) : null}
+      </span>
+    </div>
+  )
+}
+
 
 // ══════════════════════════════════════════════════════════════════════════════
 // Header — identity, contacts, primary actions
@@ -786,6 +851,7 @@ function SubscriptionsTab({ user, telegramId, queryKey }: { user: UserDetail; te
               assignablePlans={assignablePlans}
               onUpdate={(data) => updateSubMutation.mutate({ id: sub.id, data })}
               onSync={() => syncMutation.mutate(sub.id)}
+              isSyncing={syncMutation.isPending && syncMutation.variables === sub.id}
               onResetTraffic={() => resetTrafficMutation.mutate(sub.id)}
               onDelete={() => deleteSubMutation.mutate(sub.id)}
               onAssignPlan={(planId) => assignPlanMutation.mutate({ id: sub.id, planId })}
@@ -814,6 +880,7 @@ function SubscriptionCard({
   assignablePlans,
   onUpdate,
   onSync,
+  isSyncing,
   onResetTraffic,
   onDelete,
   onAssignPlan,
@@ -824,6 +891,7 @@ function SubscriptionCard({
   assignablePlans: ReadonlyArray<import('@/features/plans/plans-api').Plan>
   onUpdate: (data: Record<string, unknown>) => void
   onSync: () => void
+  isSyncing: boolean
   onResetTraffic: () => void
   onDelete: () => void
   onAssignPlan: (planId: string) => void
@@ -877,7 +945,7 @@ function SubscriptionCard({
   }
 
   return (
-    <Card className="flex flex-col">
+    <Card className={cn('flex flex-col transition-shadow', isSyncing && 'shadow-md ring-1 ring-primary/30')}>
       {/* Header */}
       <div className="flex items-center justify-between gap-2 px-3 pt-2.5 pb-1.5">
         <div className="flex min-w-0 items-center gap-1.5">
@@ -885,10 +953,23 @@ function SubscriptionCard({
           <span className="truncate text-xs font-medium">{sub.plan?.name ?? `#${sub.id.slice(0, 8)}`}</span>
           <span className={`text-[10px] font-medium ${statusColor}`}>{statusLabel}</span>
           {sub.isTrial && <span className="rounded border border-pink-500/50 px-1 py-px text-[9px] uppercase text-pink-400">Trial</span>}
+          {isSyncing ? (
+            <span className="inline-flex items-center gap-1 rounded border border-primary/40 bg-primary/10 px-1 py-px text-[9px] font-medium uppercase text-primary">
+              <Loader2 className="h-2.5 w-2.5 animate-spin" />
+              {t('userDetailPanel.subscriptions.syncing')}
+            </span>
+          ) : null}
         </div>
         <div className="flex shrink-0 items-center gap-0">
-          <Button size="icon" variant="ghost" className="h-6 w-6 text-muted-foreground hover:text-foreground" onClick={onSync} aria-label={t('userDetailPanel.subscriptions.syncTitle')}>
-            <RefreshCw className="h-3 w-3" />
+          <Button
+            size="icon"
+            variant="ghost"
+            className="h-6 w-6 text-muted-foreground hover:text-foreground"
+            onClick={onSync}
+            disabled={isSyncing}
+            aria-label={t('userDetailPanel.subscriptions.syncTitle')}
+          >
+            {isSyncing ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
           </Button>
           <Button size="icon" variant="ghost" className="h-6 w-6 text-muted-foreground hover:text-destructive" onClick={onDelete} aria-label={t('userDetailPanel.subscriptions.deleteTitle')}>
             <Trash2 className="h-3 w-3" />
@@ -903,6 +984,7 @@ function SubscriptionCard({
         <InfoRow icon={<Wifi className="h-3 w-3" />} label={t('userDetailPanel.subscriptions.traffic')} value={sub.trafficLimit ? `${sub.trafficLimit} GB` : '∞'} />
         <InfoRow icon={<Monitor className="h-3 w-3" />} label={t('userDetailPanel.subscriptions.devices')} value={String(sub.deviceLimit || '∞')} />
         <InfoRow icon={<Calendar className="h-3 w-3" />} label={t('userDetailPanel.subscriptions.expires')} value={sub.expireAt ? new Date(sub.expireAt).toLocaleDateString(locale) : '—'} />
+        <RemnawaveProfileRow sub={sub} />
       </div>
 
       {/* Quick actions — accordion (only one open at a time) */}

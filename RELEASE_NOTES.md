@@ -1,4 +1,182 @@
-﻿# Rezeis Admin v0.3.2
+﻿# Rezeis Admin v0.3.3
+
+## Minor release — Remnawave page rebuild + reverse-proxy presets + Postgres 17 client
+
+`v0.3.3` — большой косметический и инфраструктурный апдейт. Полностью переписана страница `/remnawave` (старый монолит из ~1.4k строк разнесён на 7 feature-папок), добавлен набор готовых reverse-proxy конфигов (Caddy / Caddy-auto / Nginx / Traefik) под `deploy/proxies/`, починен `pg_dump` под Postgres 17 в Docker, и наведён порядок в auth-слое для `/api/internal/*` (статический `REZEIS_ADMIN_INTERNAL_API_KEY` guard полностью выпилен — остаётся только JWT через `InternalAdminAuthGuard` + `api_tokens`).
+
+Релиз не меняет схему БД и публичные API внешних интеграций.
+
+---
+
+## 🛰 Remnawave page — полная переработка
+
+Старая страница `/remnawave` (один `remnawave-page.tsx` на ~1450 строк, всё в одном табе) разнесена по семи доменам — каждый со своим набором query-keys, API-биндингов и подкомпонентов:
+
+```
+web/src/features/remnawave/
+├── dashboard/    # Health card, system recap, bandwidth chart
+├── infra/        # Nodes / Hosts / Squads (с DnD-reorder)
+├── catalog/      # Config profiles, snippets, subpage configs, subscription templates
+├── users/        # Поиск по telegramId/username/email/sub-UUID, HWID top-abusers
+├── costs/        # Infra providers, billing per node
+├── settings/     # RO-зеркало настроек Remnawave + node plugins + public key
+├── shared/       # Общие presentational компоненты, форматтеры
+├── remnawave-flags.tsx       # Country flags из country-flag-icons (vendored на build)
+├── remnawave-icon.tsx        # Brand icon
+├── remnawave-query-keys.ts   # Единая фабрика query-keys
+└── remnawave-page.tsx        # Тонкая обёртка-роутер (~150 строк вместо 1450)
+```
+
+### Backend — расширенный API surface
+
+`AdminRemnawaveController` получил 12 новых endpoint'ов под новые табы; все они проксируют запросы в Remnawave-панель и graceful-degraded (ловят 404/501 и возвращают `null`/пустой массив, чтобы UI не падал на 2.7.x панелях):
+
+- **HWID:** `GET /admin/remnawave/hwid/top-users` — топ устройств по логинам.
+- **Health:** `GET /admin/remnawave/system/health` — uptime/db/redis/version самой Remnawave-панели.
+- **Subscription request history:** `GET .../subscription-request-history` (+`stats`) — лог запросов клиентов на сабскрипшн (полезно для дебага активаций).
+- **Catalog:** `GET .../snippets`, `.../subscription-page-configs`, `.../subscription-templates`, `.../subscription-settings`.
+- **Costs:** `GET .../infra/providers`.
+- **Settings:** `GET .../node-plugins`.
+- **Search:** `GET .../users/resolve?telegramId=&username=&email=&subscriptionUuid=`.
+- **Hosts mutation beyond CRUD:** `POST .../hosts/reorder` (DnD reorder в UI).
+
+Параллельно `getInternalSquads` / `getExternalSquads` теперь возвращают **detail-shape** (с `membersCount`/`inboundsCount`, как сама панель Remnawave показывает в своём UI), а старый облегчённый shape переехал в `options/internal-squads` и `options/external-squads` — ими пользуется plan-builder.
+
+### Новые мапперы и интерфейсы
+
+- `remnawave-extended.interface.ts` — все новые shape'ы: health, hwid top, subscription-request entries, snippet, subpage config, subscription template/settings, infra provider, node plugin, user summary.
+- `remnawave-squad-detail.interface.ts` + `remnawave-squad-mappers.ts` — internal/external squad detail.
+- `remnawave-node-mapper.ts`, `remnawave-system-stats.normalizer.ts`, `remnawave-extended-mappers.ts` — все парсеры shape-tolerant: принимают и legacy 2.7.x, и forward-compatible 2.8.x формы, валидируют типы в run-time.
+
+### Фронтенд — что увидит оператор
+
+- На странице `/remnawave` теперь 7 табов (Dashboard / Live / Infra / Catalog / Users / Costs / Settings) вместо одного Overview.
+- Health-карточка показывает uptime, db/redis, версию панели.
+- Bandwidth и system recap — graceful-degraded: на 2.7.x вместо краша рисуется "метрика недоступна, требуется Remnawave 2.8+".
+- Country flags под нодами/хостами теперь из `country-flag-icons` (SVG), вендорятся в `web/src/flags/*.svg` через `scripts/sync-flags.mjs` на этапах `predev` и `prebuild`. SVG-снапшоты в gitignore — каждый билд тянет свежий набор.
+- На карточке пользователя в `/users` подгружается `username`/`description` из реальной Remnawave-подписки (через `Promise.allSettled` — одна 404 не валит весь user-detail).
+
+### Тесты
+
+4 новых suite'а (`node --test`, чисто unit, без БД):
+
+- `test/remnawave-api-base-url.spec.ts` — резолвинг `REMNAWAVE_HOST` без точки → docker http, с точкой → public https.
+- `test/remnawave-node-mapper.spec.ts` — все edge-кейсы node shape.
+- `test/remnawave-squad-mappers.spec.ts` — internal/external squad detail mapping.
+- `test/remnawave-system-stats-normalizer.spec.ts` — современная и legacy формы `system/stats`.
+
+**17/17 passing.**
+
+---
+
+## 🌐 Reverse-proxy пресеты — `deploy/proxies/`
+
+Раньше в `docker-compose.yml` rezeis торчал на `127.0.0.1:8000`, и каждый, кто разворачивал у себя, вручную писал Caddy/Nginx/Traefik конфиг. Теперь:
+
+```
+deploy/proxies/
+├── caddy/        # Production Caddy (явный TLS, ваш домен)
+├── caddy-auto/   # Caddy с автоматическим Let's Encrypt
+├── nginx/        # Nginx + certbot
+├── traefik/      # Traefik с labels-based routing
+└── README.md     # Сценарий "сначала proxy-стек, потом rezeis-stack"
+```
+
+В `docker-compose.yml` сервис `rezeis` больше **не публикует** `127.0.0.1:8000` наружу — только `expose: 8000` в docker-сети. Reverse proxy ходит к нему по `rezeis:8000`. Если нужен прямой доступ с хоста (для дебага), есть закомментированный `ports: ['127.0.0.1:8000:8000']` блок с пояснением.
+
+Это закрывает классическую дыру "панель доступна на :8000 без TLS, если кто-то проколол firewall".
+
+---
+
+## 🐘 Postgres 17 — fix `pg_dump` aborting
+
+`docker-compose.yml` использует `postgres:17-alpine`, но Dockerfile rezeis-admin тянул `postgresql16-client`. Это давало:
+
+```
+pg_dump: error: aborting because of server version mismatch
+pg_dump: server version: 17.x; pg_dump version: 16.x
+```
+
+на каждой попытке создать бэкап через UI. Бамп → `postgresql17-client`. К `docker-compose.yml` добавлен явный комментарий-предупреждение: при апгрейде Postgres major версии **обязательно** синхронно поднимать `postgresql<major>-client` в Dockerfile.
+
+---
+
+## 🔐 Auth surface — статический guard выпилен
+
+`/api/internal/*` маршруты раньше принимали два guard'а параллельно: новый `InternalAdminAuthGuard` (JWT из `api_tokens` таблицы) и старый `InternalApiGuard` (статический `REZEIS_ADMIN_INTERNAL_API_KEY` из ENV). Это давало две точки входа с разными правами и аудитом.
+
+Удалено:
+
+- `src/common/guards/internal-api.guard.ts` — больше не используется нигде в проекте.
+- ENV `REZEIS_ADMIN_INTERNAL_API_KEY` — выпилен.
+
+Теперь единственный путь авторизации для reiwa/бота/внешних интеграций — JWT-токены, выпускаемые через UI ("Settings → API Tokens"), хранящиеся в `api_tokens` и отзываемые удалением строки. Такой же контракт, как в самой Remnawave-панели.
+
+---
+
+## 📚 Doc updates
+
+- `README.md` — добавлен раздел "Remnawave compatibility" с матрицей: live panel `2.7.x` → contract `~2.7.3` (текущий пин), `2.8.x` → `~2.8.x`. Объяснено как и когда бампить `@remnawave/backend-contract`.
+- `.env.example` — задокументирован resolve-механизм `REMNAWAVE_HOST`: значения без точки тянутся как `http://${host}:${port}`, с точкой — как `https://${host}` (port игнорируется). Три примера: docker-compose сосед, public HTTPS, SSH-туннель.
+- `docker-compose.yml` — комментарии про deploy/proxies workflow, deprecated `ports` блок, постгрес-major синхронизацию.
+- `docs/remnawave-redesign-plan.md` — implementation plan и reachability matrix для Remnawave 2.7.4 (источник истины для дальнейших итераций redesign).
+
+---
+
+## 🔧 Misc
+
+- `@remnawave/backend-contract`: `^2.8.1` → `~2.7.3`. Текущая live-панель — 2.7.x, и пин на 2.8.1 ронял запросы к `/api/internal-squads`, `/api/external-squads`, `/api/users/resolve` (контракт ушёл вперёд раньше панели).
+- 12 smoke-скриптов под `scripts/smoke-*.sh` — bash-проверки реальных Remnawave endpoint'ов, которыми мы выясняли что доступно на 2.7.4 и что только на 2.8.x. Используются в CI вручную.
+- `web/scripts/sync-flags.mjs` — копирует SVG из `country-flag-icons` в `web/src/flags/` на predev/prebuild. Снапшот в gitignore.
+
+---
+
+## 📦 Pre-push checklist
+
+| Check | Result |
+|---|---|
+| Backend `tsc --noEmit -p tsconfig.json` | ✅ 0 errors |
+| Backend `eslint . --quiet` | ✅ 0 warnings |
+| Frontend `tsc -b` + `vite build` | ✅ built (12.76s) |
+| Frontend `eslint . --quiet` | ✅ 0 warnings |
+| New remnawave tests (4 suites) | ✅ 17/17 passing |
+
+---
+
+## 🚧 Migration / breaking
+
+Есть одна точка внимания — внешние интеграции, которые ходили по `REZEIS_ADMIN_INTERNAL_API_KEY`:
+
+1. Откройте панель → **Settings → API Tokens** → создайте новый токен с нужным scope.
+2. Замените `Authorization: Bearer ${REZEIS_ADMIN_INTERNAL_API_KEY}` на `Authorization: Bearer ${api_token_jwt}` в реквестах.
+3. Удалите `REZEIS_ADMIN_INTERNAL_API_KEY` из вашего `.env`.
+
+Новый guard логирует каждое использование токена (audit trail), статический ключ — не логировал. Это явное улучшение security posture.
+
+Если ваша Remnawave-панель уже на 2.8.x и вы хотите включить bandwidth/recap/hwid surface — после деплоя бампните `@remnawave/backend-contract` до `~2.8.x` и пересоберите. На 2.7.x это не нужно — graceful degradation сама нарисует "метрика недоступна" плашки.
+
+---
+
+## 🐳 Docker image
+
+Пересобирается автоматически на push tag `v0.3.3` → GHCR теги:
+
+- `ghcr.io/dizzzable/rezeis:v0.3.3`
+- `ghcr.io/dizzzable/rezeis:0.3.3`
+- `ghcr.io/dizzzable/rezeis:0.3`
+- `ghcr.io/dizzzable/rezeis:latest`
+
+Деплой:
+
+```bash
+docker compose pull && docker compose up -d
+```
+
+**Full Changelog**: https://github.com/dizzzable/rezeis/compare/v0.3.2...v0.3.3
+
+---
+
+# Rezeis Admin v0.3.2
 
 ## Patch — Recharts 3 zero-size warning fix
 

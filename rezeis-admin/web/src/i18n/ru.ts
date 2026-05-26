@@ -2544,6 +2544,12 @@
     restart: 'Перезапустить',
     resetTraffic: 'Сбросить трафик',
     unknown: 'Неизвестно',
+    refresh: {
+      now: 'Обновить сейчас',
+      off: 'Авто-обновление: выкл',
+      fiveSec: 'Каждые 5с',
+      thirtySec: 'Каждые 30с',
+    },
   },
   backupBadges: {
     failed: 'Ошибка',

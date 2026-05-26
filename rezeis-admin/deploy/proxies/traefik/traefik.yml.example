@@ -1,0 +1,42 @@
+# traefik.yml — статическая конфигурация Traefik
+#
+# 1. Замените REPLACE_WITH_YOUR_EMAIL на ваш email.
+# 2. Сохраните файл как `traefik.yml` (без .example).
+
+api:
+  dashboard: true
+  debug: false
+
+entryPoints:
+  http:
+    address: ':80'
+    http:
+      redirections:
+        entryPoint:
+          to: https
+          scheme: https
+  https:
+    address: ':443'
+
+serversTransport:
+  insecureSkipVerify: false
+
+providers:
+  file:
+    directory: /config
+    watch: true
+
+certificatesResolvers:
+  letsencrypt:
+    acme:
+      email: REPLACE_WITH_YOUR_EMAIL
+      storage: /letsencrypt/acme.json
+      httpChallenge:
+        entryPoint: http
+
+log:
+  level: INFO
+  filePath: /var/log/traefik/traefik.log
+
+accessLog:
+  filePath: /var/log/traefik/access.log

@@ -19,6 +19,7 @@
  */
 import { useEffect, useState } from 'react'
 
+import { RezeisLogo } from '@/components/branding/rezeis-logo'
 import { OfflineIndicator } from '@/components/layout/offline-indicator'
 import { QuickSearchOverlay } from '@/components/quick-search/quick-search-overlay'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -68,7 +69,8 @@ export default function AdminShell() {
         <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
           <SheetContent side="left" className="w-64 bg-sidebar p-0 text-sidebar-foreground">
             <SheetHeader className="flex h-14 flex-row items-center px-4">
-              <SheetTitle className="text-lg font-bold text-sidebar-foreground">
+              <SheetTitle className="flex items-center gap-2 text-lg font-bold text-sidebar-foreground">
+                <RezeisLogo className="h-7 w-7" />
                 Rezeis Admin
               </SheetTitle>
             </SheetHeader>

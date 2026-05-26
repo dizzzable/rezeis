@@ -16,6 +16,17 @@ Rezeis Admin — NestJS backend + React/Vite frontend for the admin panel.
 └── docker-compose.yml  full local stack
 ```
 
+## Remnawave compatibility
+
+`rezeis-admin` talks to a Remnawave panel through the `@remnawave/backend-contract` package. **The contract version must track the live panel.**
+
+| Live panel       | `@remnawave/backend-contract` | Notes                                                              |
+|------------------|-------------------------------|--------------------------------------------------------------------|
+| `2.7.x`          | `~2.7.3` (current pin)        | No `/api/system/recap`, `/api/system/bandwidth`, `/api/hwid/stats` |
+| `2.8.x`          | `~2.8.x`                      | Adds the recap/bandwidth/hwid surface                              |
+
+If you upgrade the live panel, bump the contract dep accordingly and run `npm install`. The Remnawave page in the admin SPA degrades gracefully when an endpoint is missing (shows a "metric is unavailable" notice instead of crashing).
+
 ## Quick start
 
 ```bash

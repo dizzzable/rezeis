@@ -24,6 +24,11 @@ export default defineConfig({
       output: {
         manualChunks(id: string) {
           if (id.includes('node_modules')) {
+            // Country-flag assets are emitted as URL strings via
+            // `import.meta.glob`, so they don't show up here. The page-level
+            // dictionary that maps "DE" → "/assets/DE-…svg" is small and
+            // can stay co-located with the Remnawave page chunk.
+
             // ── 3D / GPU-effects libraries — only loaded when the
             // operator turns on a React-Bits background. Keep them
             // out of the core bundle entirely.

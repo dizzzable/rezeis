@@ -149,6 +149,16 @@
   body {
     @apply bg-background text-foreground;
   }
+
+  /* Inlined country flags from `country-flag-icons` — make the SVG fill
+     its wrapper without imposing extra padding on the icon itself. */
+  [data-rezeis-flag] svg,
+  .rezeis-flag svg {
+    width: 100%;
+    height: 100%;
+    display: block;
+    object-fit: cover;
+  }
 }
 
 /* ── Appearance — density / font size / animations ────────────────────── */

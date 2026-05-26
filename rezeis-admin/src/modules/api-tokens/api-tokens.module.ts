@@ -11,9 +11,12 @@ import { ApiTokensService } from './services/api-tokens.service';
  * API Tokens module — named bearer tokens for external service integration.
  *
  * Mirrors Remnawave panel's "API токены" feature. Each token is a JWT
- * signed with the same secret, stored in the `api_tokens` table. Revoking
- * a token = deleting the row. The internal API guard can optionally accept
- * these tokens alongside the static `REZEIS_INTERNAL_API_KEY`.
+ * signed with the same secret as admin sessions and stored in the
+ * `api_tokens` table. Revoking a token = deleting the row. Verification
+ * happens in `InternalAdminAuthGuard`, which is the sole guard protecting
+ * `/api/internal/...` routes — the previous static-key based guard
+ * (`InternalApiGuard` reading `REZEIS_ADMIN_INTERNAL_API_KEY`) has been
+ * fully retired.
  */
 @Module({
   imports: [

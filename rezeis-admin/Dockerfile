@@ -48,11 +48,12 @@ WORKDIR /app
 ENV NODE_ENV=production
 # App version baked into the image so health endpoint reports it.
 # Updated automatically via package.json bump → Docker build.
-ARG APP_VERSION=0.3.2
+ARG APP_VERSION=0.3.3
 ENV npm_package_version=${APP_VERSION}
 
-# Install PostgreSQL client tools (pg_dump, psql) for backup/restore
-RUN apk add --no-cache postgresql16-client
+# Install PostgreSQL client tools (pg_dump, psql) for backup/restore.
+# MUST match the major version of the postgres server (see docker-compose.yml).
+RUN apk add --no-cache postgresql17-client
 
 COPY package.json ./
 COPY prisma.config.ts ./

@@ -174,6 +174,12 @@ export const en = {
       disableTitle: 'Disable',
       enableTitle: 'Enable',
       syncTitle: 'Sync',
+      syncing: 'Syncing…',
+      remnawaveProfile: {
+        label: 'Remnawave profile',
+        copied: 'Remnawave UUID copied',
+        copyAria: 'Copy Remnawave UUID to clipboard',
+      },
       deleteTitle: 'Delete',
     },
     partner: {

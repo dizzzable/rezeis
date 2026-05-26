@@ -1,0 +1,37 @@
+# Caddyfile — Caddy сам выпускает сертификат (ACME HTTP-01)
+#
+# 1. Замените REPLACE_WITH_YOUR_DOMAIN на реальный домен.
+# 2. Замените REPLACE_WITH_YOUR_EMAIL на ваш email (Let's Encrypt).
+# 3. Сохраните файл как `Caddyfile` (без .example).
+# 4. Перезагрузите Caddy:  docker exec caddy caddy reload --config /etc/caddy/Caddyfile
+
+{
+    email REPLACE_WITH_YOUR_EMAIL
+}
+
+REPLACE_WITH_YOUR_DOMAIN {
+    encode zstd gzip
+
+    # SSE для realtime-обновлений в админке.
+    @sse {
+        path /api/admin/events/* /api/internal/user/*/realtime/*
+    }
+    handle @sse {
+        reverse_proxy rezeis:8000 {
+            flush_interval -1
+            transport http {
+                read_timeout 24h
+            }
+        }
+    }
+
+    reverse_proxy rezeis:8000
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options    "nosniff"
+        X-Frame-Options           "SAMEORIGIN"
+        Referrer-Policy           "strict-origin-when-cross-origin"
+        -Server
+    }
+}

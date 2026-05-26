@@ -16,7 +16,6 @@ import {
   Share2,
   Handshake,
   Megaphone,
-  Server,
   Settings,
   Shield,
   Bot,
@@ -30,6 +29,7 @@ import {
 } from 'lucide-react'
 
 import type { SidebarGroupOrder } from '@/stores/sidebar-store'
+import { RemnawaveIcon } from '@/features/remnawave/remnawave-icon'
 
 export interface NavItem {
   /** i18n key under `adminNav.items.*` */
@@ -80,7 +80,7 @@ export const navGroups: ReadonlyArray<NavGroup> = [
       { key: 'platform', path: '/settings', icon: Settings },
       { key: 'gateways', path: '/payments/gateways', icon: CreditCard },
       { key: 'botConfig', path: '/bot-config', icon: Bot },
-      { key: 'remnawave', path: '/remnawave', icon: Server },
+      { key: 'remnawave', path: '/remnawave', icon: RemnawaveIcon },
       { key: 'notifications', path: '/notifications', icon: Bell },
       { key: 'faq', path: '/faq', icon: HelpCircle },
     ],

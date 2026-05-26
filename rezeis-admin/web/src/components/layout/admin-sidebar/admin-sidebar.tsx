@@ -1,5 +1,6 @@
-import { ChevronLeft, Shield } from 'lucide-react'
+import { ChevronLeft } from 'lucide-react'
 
+import { RezeisLogo } from '@/components/branding/rezeis-logo'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { cn } from '@/lib/utils'
@@ -32,11 +33,16 @@ export function AdminSidebar({ collapsed, onToggleCollapsed }: AdminSidebarProps
       )}
     >
       {/* Logo */}
-      <div className="flex h-14 items-center px-4">
+      <div
+        className={cn(
+          'flex h-14 items-center gap-2 px-4',
+          collapsed && 'justify-center px-0',
+        )}
+      >
+        <RezeisLogo className="h-7 w-7 shrink-0" />
         {!collapsed && (
           <span className="text-lg font-bold text-sidebar-foreground">Rezeis Admin</span>
         )}
-        {collapsed && <Shield className="h-6 w-6 text-sidebar-foreground" />}
       </div>
 
       {/* Nav */}
