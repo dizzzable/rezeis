@@ -7,6 +7,7 @@ import { ImportProcessor } from './import.processor';
 import { IMPORT_QUEUE } from './imports.constants';
 import { AdminImportsController } from './controllers/admin-imports.controller';
 import { AltshopImporterService } from './services/altshop-importer.service';
+import { BackupPlanClonerService } from './services/backup-plan-cloner.service';
 import { BulkPlanAssignmentService } from './services/bulk-plan-assignment.service';
 import { ImportQueueService } from './services/import-queue.service';
 import { ImportsService } from './services/imports.service';
@@ -29,8 +30,9 @@ import { ThreeXuiImporterService } from './services/threexui-importer.service';
     ThreeXuiImporterService,
     RemnashopImporterService,
     AltshopImporterService,
+    BackupPlanClonerService,
     BulkPlanAssignmentService,
   ],
-  exports: [ImportsService, ImportQueueService],
+  exports: [ImportsService, ImportQueueService, BackupPlanClonerService],
 })
 export class ImportsModule {}

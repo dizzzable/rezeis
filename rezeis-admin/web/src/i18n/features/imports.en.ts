@@ -117,6 +117,7 @@ export const en = {
       close: 'Done',
       assignPlan: 'Assign plan to all',
       skipAssign: 'Skip for now',
+      clonePlans: 'Clone source plans',
       timeoutWarning:
         'Import is taking longer than usual — still tracking in background. You can close this dialog, progress will appear in the history below.',
     },
@@ -133,6 +134,41 @@ export const en = {
       submit: 'Assign',
       submitting: 'Assigning…',
       noPlans: 'No active plans — create at least one first.',
+    },
+    clonePlans: {
+      title: 'Clone plans from backup',
+      description:
+        'Recreate the source plan catalog locally. Imported subscriptions will be linked to the cloned plans so users can renew and upgrade through reiwa.',
+      previewError:
+        'Could not load the plan catalog from this import. The backup may not include plan data.',
+      emptyCatalog:
+        'This import does not include a plan catalog — nothing to clone.',
+      linkSubscriptions: 'Link imported subscriptions to cloned plans',
+      linkSubscriptionsHint:
+        'When on, every imported subscription whose source plan was cloned gets its plan set automatically. Already-linked subscriptions are never overwritten.',
+      cancel: 'Cancel',
+      submit_one: 'Clone {{count}} plan',
+      submit_other: 'Clone {{count}} plans',
+      cloning: 'Cloning…',
+      success:
+        'Plans cloned: {{created}} created · {{reused}} reused · {{linked}} subscriptions linked',
+      partialErrors: 'Completed with {{count}} errors — check the audit log',
+      row: {
+        traffic: '{{gb}} GB',
+        unlimited: 'Unlimited traffic',
+        devices_one: '{{count}} device',
+        devices_other: '{{count}} devices',
+        unlimitedDevices: 'Unlimited devices',
+        subscriptions_one: '{{count}} subscription',
+        subscriptions_other: '{{count}} subscriptions',
+        willBeNamed: 'will be created as "{{name}}"',
+        willReuse: 'reuse existing',
+        archived: 'Archived',
+        inactive: 'Inactive',
+        active: 'Active',
+        placeholderHint:
+          'Synthetic placeholder used by altshop for already-imported subscriptions — usually safe to skip.',
+      },
     },
   },
 } as const

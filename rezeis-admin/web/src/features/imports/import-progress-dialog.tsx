@@ -77,6 +77,13 @@ export interface ImportProgressDialogProps {
    * caller can pipe it into the bulk-assign request.
    */
   readonly onAssignPlan?: (importRecordId: string) => void
+  /**
+   * Handler for the "Clone source plans" button. Only shown for
+   * `source ∈ {altshop, remnashop}` AND `mode === 'import'` AND the
+   * import returned a non-empty `result.catalog.plans` payload. The
+   * caller is expected to open `<ClonePlansDialog>` with this id.
+   */
+  readonly onClonePlans?: (importRecordId: string) => void
 }
 
 // ── Wire types (mirrors backend ImportRecordPayload) ──────────────────────
@@ -122,6 +129,7 @@ export function ImportProgressDialog({
   source,
   mode,
   onAssignPlan,
+  onClonePlans,
 }: ImportProgressDialogProps): JSX.Element {
   const { t } = useTranslation()
 
@@ -221,11 +229,20 @@ export function ImportProgressDialog({
               record={record!}
               summary={summary}
               mode={mode}
+              source={source}
               onClose={onClose}
               onAssignPlan={
                 onAssignPlan
                   ? () => {
                       onAssignPlan(record!.id)
+                      onClose()
+                    }
+                  : undefined
+              }
+              onClonePlans={
+                onClonePlans
+                  ? () => {
+                      onClonePlans(record!.id)
                       onClose()
                     }
                   : undefined
@@ -409,16 +426,33 @@ function DoneFooter({
   record,
   summary,
   mode,
+  source,
   onClose,
   onAssignPlan,
+  onClonePlans,
 }: {
   readonly record: ImportRecordPayload
   readonly summary: FlattenedSummary | null
   readonly mode: ImportMode
+  readonly source: ImportSource
   readonly onClose: () => void
   readonly onAssignPlan?: () => void
+  readonly onClonePlans?: () => void
 }): JSX.Element {
   const { t } = useTranslation()
+
+  // Clone-plans is only meaningful for backup-driven sources (altshop /
+  // remnashop) and only when the catalog payload carries plans. The
+  // backend will surface an empty array if the file lacked them.
+  const result = (record.result ?? {}) as Record<string, unknown>
+  const catalog = (result.catalog ?? {}) as Record<string, unknown>
+  const hasCatalogPlans = Array.isArray(catalog.plans) && (catalog.plans as unknown[]).length > 0
+  const offerClone =
+    mode === 'import' &&
+    record.status === 'COMMITTED' &&
+    onClonePlans !== undefined &&
+    (source === 'altshop' || source === 'remnashop') &&
+    hasCatalogPlans
 
   // Plan assignment is offered only after a successful import (sync never
   // creates new rows, FAILED runs are nothing to assign to, and zero-row
@@ -430,7 +464,7 @@ function DoneFooter({
     summary !== null &&
     summary.created + summary.updated > 0
 
-  if (!offerPlanAssignment) {
+  if (!offerPlanAssignment && !offerClone) {
     return (
       <Button onClick={onClose} className="w-full sm:w-auto">
         {t('importsPage.progressDialog.close')}
@@ -443,9 +477,16 @@ function DoneFooter({
       <Button variant="outline" onClick={onClose}>
         {t('importsPage.progressDialog.skipAssign')}
       </Button>
-      <Button onClick={onAssignPlan}>
-        {t('importsPage.progressDialog.assignPlan')}
-      </Button>
+      {offerClone ? (
+        <Button variant="secondary" onClick={onClonePlans}>
+          {t('importsPage.progressDialog.clonePlans')}
+        </Button>
+      ) : null}
+      {offerPlanAssignment ? (
+        <Button onClick={onAssignPlan}>
+          {t('importsPage.progressDialog.assignPlan')}
+        </Button>
+      ) : null}
     </div>
   )
 }

@@ -17,6 +17,11 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import { CurrentAdmin } from '../../auth/decorators/current-admin.decorator';
 import { AdminJwtAuthGuard } from '../../auth/guards/admin-jwt-auth.guard';
 import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.interface';
+import {
+  BackupPlanClonerService,
+  ClonePlansFromBackupResult,
+  PlanCatalogPreview,
+} from '../services/backup-plan-cloner.service';
 import { ImportQueueService } from '../services/import-queue.service';
 import { ImportsService } from '../services/imports.service';
 
@@ -77,6 +82,7 @@ export class AdminImportsController {
   public constructor(
     private readonly importsService: ImportsService,
     private readonly importQueueService: ImportQueueService,
+    private readonly backupPlanClonerService: BackupPlanClonerService,
   ) {}
 
   // ── List & Detail ───────────────────────────────────────────────────────
@@ -260,6 +266,30 @@ export class AdminImportsController {
       canceled,
       message: canceled ? 'Import canceled' : 'Import not found in queue (may already be processing)',
     };
+  }
+
+  // ── Plan Catalog Cloning (altshop / remnashop) ─────────────────────────
+
+  @Get(':importId/plan-preview')
+  public async previewPlanClone(
+    @Param('importId') importId: string,
+  ): Promise<PlanCatalogPreview> {
+    return this.backupPlanClonerService.preview(importId);
+  }
+
+  @Post(':importId/clone-plans')
+  @HttpCode(HttpStatus.OK)
+  public async clonePlans(
+    @CurrentAdmin() admin: CurrentAdminInterface,
+    @Param('importId') importId: string,
+    @Body() body: { selectedSourcePlanIds?: number[]; linkSubscriptions?: boolean },
+  ): Promise<ClonePlansFromBackupResult> {
+    return this.backupPlanClonerService.clone({
+      importRecordId: importId,
+      selectedSourcePlanIds: body.selectedSourcePlanIds ?? [],
+      linkSubscriptions: body.linkSubscriptions !== false,
+      createdBy: admin.id,
+    });
   }
 }
 

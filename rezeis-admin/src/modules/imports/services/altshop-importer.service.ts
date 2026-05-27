@@ -14,6 +14,11 @@ import {
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { ImportSummary } from '../interfaces/import-summary.interface';
+import {
+  AltshopPlan,
+  AltshopPlanDuration,
+  AltshopPlanPrice,
+} from '../utils/altshop-backup-parser';
 
 /**
  * Shape of an altshop user record as exported from the altshop PostgreSQL DB.
@@ -128,6 +133,10 @@ interface RunInput {
   readonly users: readonly AltshopUser[];
   readonly subscriptions: readonly AltshopSubscription[];
   readonly transactions?: readonly AltshopTransaction[];
+  /** See altshop-backup-parser.ts for shape. */
+  readonly plans?: readonly AltshopPlan[];
+  readonly planDurations?: readonly AltshopPlanDuration[];
+  readonly planPrices?: readonly AltshopPlanPrice[];
 }
 
 /**
@@ -151,7 +160,7 @@ export class AltshopImporterService {
   public constructor(private readonly prismaService: PrismaService) {}
 
   public async run(input: RunInput): Promise<ImportSummary> {
-    const { users, subscriptions, transactions, mode, createdBy, importRecordId } = input;
+    const { users, subscriptions, transactions, mode, createdBy, importRecordId, plans, planDurations, planPrices } = input;
 
     if (!users || users.length === 0) {
       throw new BadRequestException('No user records provided');
@@ -217,7 +226,7 @@ export class AltshopImporterService {
     }
 
     const finalStatus = errors.length === 0 ? ImportStatus.COMMITTED : ImportStatus.FAILED;
-    const resultPayload = {
+    const resultPayload: Prisma.InputJsonValue = {
       mode,
       fetched: users.length,
       created,
@@ -227,6 +236,17 @@ export class AltshopImporterService {
       subscriptionsUpdated,
       transactionsProcessed: (transactions ?? []).length,
       errors,
+      // Catalog snapshot — drives the optional "Clone plans" post-import
+      // step. Stored as-is; the cloner reads it back and adapts shapes
+      // there. Total payload is small (a few KB even on real boxes).
+      // Cast through JSON.parse(JSON.stringify(...)) to coerce
+      // `Record<string, unknown>[]` rows into Prisma.InputJsonValue
+      // without copy-pasting the typed altshop interfaces here.
+      catalog: JSON.parse(JSON.stringify({
+        plans: plans ?? [],
+        planDurations: planDurations ?? [],
+        planPrices: planPrices ?? [],
+      })),
     };
     const errorMessage = errors.length === 0 ? null : errors.slice(0, 5).join('; ');
 

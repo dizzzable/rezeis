@@ -3,6 +3,11 @@ import { ImportStatus, Locale, Prisma, SyncAction, SubscriptionStatus } from '@p
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { ImportSummary } from '../interfaces/import-summary.interface';
+import {
+  RemnashopPlan,
+  RemnashopPlanDuration,
+  RemnashopPlanPrice,
+} from '../utils/remnashop-backup-parser';
 
 /**
  * Shape of a remnashop user record as exported from the remnashop PostgreSQL DB.
@@ -86,6 +91,10 @@ interface RunInput {
   readonly importRecordId?: string | null;
   readonly users: readonly RemnashopUser[];
   readonly subscriptions: readonly RemnashopSubscription[];
+  /** See remnashop-backup-parser.ts for shape. */
+  readonly plans?: readonly RemnashopPlan[];
+  readonly planDurations?: readonly RemnashopPlanDuration[];
+  readonly planPrices?: readonly RemnashopPlanPrice[];
 }
 
 /**
@@ -108,7 +117,7 @@ export class RemnashopImporterService {
   public constructor(private readonly prismaService: PrismaService) {}
 
   public async run(input: RunInput): Promise<ImportSummary> {
-    const { users, subscriptions, mode, createdBy, importRecordId } = input;
+    const { users, subscriptions, mode, createdBy, importRecordId, plans, planDurations, planPrices } = input;
 
     if (!users || users.length === 0) {
       throw new BadRequestException('No user records provided');
@@ -160,7 +169,7 @@ export class RemnashopImporterService {
     }
 
     const finalStatus = errors.length === 0 ? ImportStatus.COMMITTED : ImportStatus.FAILED;
-    const resultPayload = {
+    const resultPayload: Prisma.InputJsonValue = {
       mode,
       fetched: users.length,
       created,
@@ -169,6 +178,12 @@ export class RemnashopImporterService {
       subscriptionsCreated,
       subscriptionsUpdated,
       errors,
+      // Catalog snapshot — see altshop-importer.service.ts.
+      catalog: JSON.parse(JSON.stringify({
+        plans: plans ?? [],
+        planDurations: planDurations ?? [],
+        planPrices: planPrices ?? [],
+      })),
     };
     const errorMessage = errors.length === 0 ? null : errors.slice(0, 5).join('; ');
 

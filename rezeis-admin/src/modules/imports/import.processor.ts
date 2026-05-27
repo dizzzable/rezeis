@@ -91,18 +91,38 @@ export class ImportProcessor extends WorkerHost {
         case 'remnashop': {
           if (!stagedFilePath) throw new Error('Staged file path missing for remnashop import');
           const buffer = await fsp.readFile(stagedFilePath);
-          const { users, subscriptions } = await parseRemnashopBackup(buffer);
+          const { users, subscriptions, plans, planDurations, planPrices } = await parseRemnashopBackup(buffer);
           await job.updateProgress({ stage: 'parsed', percent: 20, records: users.length });
-          result = await this.remnashopImporterService.run({ mode, createdBy, users, subscriptions, importRecordId });
+          result = await this.remnashopImporterService.run({
+            mode,
+            createdBy,
+            users,
+            subscriptions,
+            importRecordId,
+            plans,
+            planDurations,
+            planPrices,
+          });
           break;
         }
 
         case 'altshop': {
           if (!stagedFilePath) throw new Error('Staged file path missing for altshop import');
           const buffer = await fsp.readFile(stagedFilePath);
-          const { users, subscriptions, transactions } = await parseAltshopBackup(buffer);
+          const { users, subscriptions, transactions, plans, planDurations, planPrices } =
+            await parseAltshopBackup(buffer);
           await job.updateProgress({ stage: 'parsed', percent: 20, records: users.length });
-          result = await this.altshopImporterService.run({ mode, createdBy, users, subscriptions, transactions, importRecordId });
+          result = await this.altshopImporterService.run({
+            mode,
+            createdBy,
+            users,
+            subscriptions,
+            transactions,
+            importRecordId,
+            plans,
+            planDurations,
+            planPrices,
+          });
           break;
         }
 

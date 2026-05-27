@@ -1,4 +1,110 @@
-﻿# Rezeis Admin v0.3.9
+﻿# Rezeis Admin v0.4.0
+
+## Plan Catalog Cloning — восстановление тарифов из altshop / remnashop бэкапов
+
+`v0.4.0` — major фича. После того как `altshop` или `remnashop` бэкап импортирован, оператор теперь может одной кнопкой восстановить **исходный каталог тарифов** (`Plan + PlanDuration + PlanPrice`) и автоматически привязать к ним все только что импортированные подписки. До этого все импортированные подписки висели с `planSnapshot.planId = null` и не могли быть продлены через reiwa без ручного назначения плана.
+
+### Workflow
+
+1. Оператор загружает бэкап во вкладке Altshop / Remnashop на `/imports`.
+2. Importer в дополнение к users + subscriptions вытаскивает `plans / plan_durations / plan_prices` из тарбола и кладёт их в `ImportRecord.result.catalog` JSONB.
+3. По завершении модалка прогресса показывает три кнопки на финальном экране: **Назначить план всем** (старая bulk-assign), **Клонировать тарифы** (новая), **Не назначать**.
+4. Клонирование открывает превью-модалку: список тарифов с количеством подписок, статусом (Активный / Архивный), вычисленным финальным именем (с suffix-on-conflict), индикатором переиспользования. Можно отметить/снять любые. Синтетический «IMPORTED» плейсхолдер altshop'а подсвечивается жёлтой подсказкой и **снят по умолчанию**.
+5. Чекбокс **«Привязать импортированные подписки к клонам»** (включён по умолчанию) — после клона все подписки из этого `ImportRecord` чьи source-планы клонированы получат `planSnapshot.planId = <cuid_of_clone>`. Уже привязанные — нетронуты.
+
+### Backend
+
+Новый сервис `BackupPlanClonerService` в `imports/services/backup-plan-cloner.service.ts` (~480 строк, под лимит 500):
+
+- **`preview(importRecordId)`** — read-only, возвращает `PlanCatalogPreview` для UI.
+- **`clone({ importRecordId, selectedSourcePlanIds, linkSubscriptions, createdBy })`** — мутирующий, возвращает `ClonePlansFromBackupResult` со счётчиками.
+
+Особенности реализации:
+
+- **Идемпотентность** — повторный запуск с теми же входами no-op. Для существующих имён `findUnique` reuse без перезаписи. Для подписок: skip если `planSnapshot.planId` уже set.
+- **Suffix-on-conflict** — если `Plan.name` (`@unique`) уже занят оператором, тариф получает `Name2`, `Name3`, ... Дедупликация в рамках одного запуска через `claimedThisRound: Set<string>`.
+- **Сохранение статусов** — `is_active`, `is_archived`, `availability` копируются как есть из источника. Полное восстановление = тот же статус.
+- **Cross-references** — `upgrade_to_plan_ids` / `replacement_plan_ids` (числовые ссылки на source-side) транслируются через `sourceIdToTargetCuid: Map<number, string>`. Ссылки на не-выбранные планы дропаются с warning в лог.
+- **Subscription linking через JSONB** — у `Subscription` нет колонки `planId`, ссылка живёт в `planSnapshot.planId` JSONB поле. Cloner перезаписывает snapshot полностью: новый `planId` + свежие `name/tag/type/trafficLimit/deviceLimit/strategy/duration/internalSquads/externalSquad`.
+- **Audit log** — каждый запуск пишет `AdminAuditLog(action='imports.clone-plans', metadata={ importRecordId, sourceType, plansCreated, plansReused, subscriptionsLinked, errors })`.
+
+### Изменения в парсерах бэкапа
+
+- `altshop-backup-parser.ts` — extended return: `users / subscriptions / transactions` + новые `plans / planDurations / planPrices` массивы с типизированными интерфейсами `AltshopPlan`, `AltshopPlanDuration`, `AltshopPlanPrice`.
+- `remnashop-backup-parser.ts` — то же: `RemnashopPlan / RemnashopPlanDuration / RemnashopPlanPrice` (схема снята с github snoups/remnashop).
+- Оба importer'а (`altshop-importer.service.ts`, `remnashop-importer.service.ts`) теперь передают `catalog` через `RunInput`, persist в `result.catalog` через `JSON.parse(JSON.stringify(...))` cast (Prisma.InputJsonValue compat).
+
+### Контроллер
+
+Два новых endpoint'а в `admin-imports.controller.ts`:
+
+- `GET /admin/imports/:importId/plan-preview` — `PlanCatalogPreview`
+- `POST /admin/imports/:importId/clone-plans` — body `{ selectedSourcePlanIds?: number[], linkSubscriptions?: boolean }` → `ClonePlansFromBackupResult`
+
+Оба под `AdminJwtAuthGuard`.
+
+### Frontend
+
+Новый компонент `web/src/features/imports/clone-plans-dialog.tsx`:
+
+- React Query для preview + clone
+- ScrollArea со списком тарифов, чекбоксы, badges (`active/archived/inactive`, `will be created as "Name2"`, `reuse existing`, tag).
+- Подсказка для синтетического IMPORTED-плейсхолдера.
+- Кнопка submit с pluralized label `Клонировать N тариф(а/ов)`.
+- На success — toast со счётчиками + invalidate `admin.plans` queries.
+
+`import-progress-dialog.tsx` расширен пропом `onClonePlans?: (id) => void`. `<DoneFooter>` автоматически показывает кнопку **«Клонировать тарифы»** только когда `mode === 'import'`, `status === 'COMMITTED'`, `source ∈ {altshop, remnashop}` и `result.catalog.plans` непустой.
+
+`imports-page.tsx` — `useImportFlow()` хук получил `cloneFor` state + `openClone/closeClone` коллбэки. `<ClonePlansDialog>` смонтирован как sibling рядом с `<BulkAssignPlanDialog>`.
+
+### i18n
+
+Новый `clonePlans` блок в обоих `imports.en.ts` и `imports.ru.ts`:
+
+- `title`, `description`, `previewError`, `emptyCatalog`
+- `linkSubscriptions`, `linkSubscriptionsHint`
+- `cancel`, `submit_one/few/many/other` (плюрализация для русского), `cloning`
+- `success` (с placeholders `{{created}}`, `{{reused}}`, `{{linked}}`), `partialErrors`
+- `row.traffic / unlimited / devices / unlimitedDevices / subscriptions / willBeNamed / willReuse / archived / inactive / active / placeholderHint`
+
+В `progressDialog.clonePlans` — лейбл новой кнопки.
+
+### Reiwa identity model — clarification
+
+Этот релиз окончательно фиксирует в коде модель reiwa identity:
+
+- Пользователь **не обязан** иметь Telegram или email — может пользоваться только web-кабинетом через `WebAccount.login`.
+- `User.id` (CUID) **есть** канонический `reiwa_id`. Импортированные подписки связаны с реальным пользователем по этому id, не по telegram/email.
+- Подписки в статусе `IMPORTED` (в `planSnapshot`) — пользователь может только продлевать через reiwa, не перевыпускать. После выбора плана через cabinet — `planSnapshot.planId` заполняется, и дальше всё стандартно.
+- Bulk-assign + Clone — два независимых операторских инструмента. Bulk-assign назначает **уже существующий** план всем подпискам. Clone восстанавливает **исходный каталог** один в один из бэкапа.
+
+### Pre-push checklist
+
+| Check | Result |
+|---|---|
+| Backend `tsc --noEmit -p tsconfig.json` | ✅ 0 errors |
+| Backend `eslint . --quiet` | ✅ 0 warnings |
+| Frontend `npm run build` (tsc + vite) | ✅ 0 errors |
+| Frontend `eslint . --quiet` | ✅ 0 warnings |
+| Local stack rebuild + redeploy | ⏳ см. шаг ниже |
+
+### Migration / breaking
+
+Нет. Изменение полностью аддитивное:
+
+- Новые поля в `ImportRecord.result.catalog` JSONB — старые importer-выдачи без `catalog` остаются совместимы (в UI кнопка просто не появится).
+- Новые endpoint'ы под отдельным path. Старые pathы работают как раньше.
+- `Plan.name` `@unique` constraint уже был — клонер только корректно с ним работает через suffix.
+
+### Docker image
+
+Пересобирается автоматически на push tag `v0.4.0` → GHCR теги `v0.4.0`, `0.4.0`, `0.4`, `latest`.
+
+**Full Changelog**: https://github.com/dizzzable/rezeis/compare/v0.3.9...v0.4.0
+
+---
+
+# Rezeis Admin v0.3.9
 
 ## Hotfix — бесконечная анимация модалки импорта
 

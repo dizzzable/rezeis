@@ -9,10 +9,63 @@ import {
   AltshopUser,
 } from '../services/altshop-importer.service';
 
+/**
+ * Plan/duration/price rows as exported from the altshop PostgreSQL DB.
+ *
+ * altshop's plan model is a 1:1 ancestor of ours: a `plans` row owns
+ * many `plan_durations` rows (each for a different number of days) and
+ * each duration owns many `plan_prices` rows (one per currency).
+ *
+ * We keep the altshop integer ids on these so the cloner can build
+ * `altshop_plan_id → rezeis_plan_id` mapping for translating
+ * Subscription.plan_id and Plan.upgrade_to_plan_ids.
+ */
+export interface AltshopPlan {
+  readonly id: number;
+  readonly order_index: number;
+  readonly is_active: boolean;
+  readonly is_archived: boolean;
+  readonly type: string;
+  readonly availability: string;
+  readonly archived_renew_mode: string | null;
+  readonly name: string;
+  readonly description: string | null;
+  readonly tag: string | null;
+  readonly traffic_limit: number;
+  readonly device_limit: number;
+  readonly traffic_limit_strategy: string;
+  readonly replacement_plan_ids: readonly number[];
+  readonly upgrade_to_plan_ids: readonly number[];
+  readonly allowed_user_ids: readonly number[];
+  readonly internal_squads: readonly string[];
+  readonly external_squad: string | null;
+}
+
+export interface AltshopPlanDuration {
+  readonly id: number;
+  readonly plan_id: number;
+  readonly days: number;
+}
+
+export interface AltshopPlanPrice {
+  readonly id: number;
+  readonly plan_duration_id: number;
+  readonly currency: string;
+  readonly price: string; // Numeric serialised as decimal string
+}
+
 interface AltshopBackupData {
   users: AltshopUser[];
   subscriptions: AltshopSubscription[];
   transactions: AltshopTransaction[];
+  /**
+   * Optional: the catalog tables. They are present in real altshop
+   * backups (`backup_full_*.tar.gz`) but absent in stripped JSON
+   * exports — the cloner falls back to "no clone available" gracefully.
+   */
+  plans: AltshopPlan[];
+  planDurations: AltshopPlanDuration[];
+  planPrices: AltshopPlanPrice[];
 }
 
 /**
@@ -102,6 +155,9 @@ function extractDataFromJson(json: Record<string, unknown>): AltshopBackupData {
   const users = (data.users ?? []) as AltshopUser[];
   const subscriptions = (data.subscriptions ?? []) as AltshopSubscription[];
   const transactions = (data.transactions ?? []) as AltshopTransaction[];
+  const plans = (data.plans ?? []) as AltshopPlan[];
+  const planDurations = (data.plan_durations ?? []) as AltshopPlanDuration[];
+  const planPrices = (data.plan_prices ?? []) as AltshopPlanPrice[];
 
   if (!Array.isArray(users) || users.length === 0) {
     throw new BadRequestException('No user records found in the backup data');
@@ -116,5 +172,12 @@ function extractDataFromJson(json: Record<string, unknown>): AltshopBackupData {
     };
   });
 
-  return { users, subscriptions: mappedSubscriptions, transactions };
+  return {
+    users,
+    subscriptions: mappedSubscriptions,
+    transactions,
+    plans: Array.isArray(plans) ? plans : [],
+    planDurations: Array.isArray(planDurations) ? planDurations : [],
+    planPrices: Array.isArray(planPrices) ? planPrices : [],
+  };
 }

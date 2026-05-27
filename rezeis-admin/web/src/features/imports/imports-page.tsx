@@ -65,6 +65,7 @@ import {
   type ImportMode,
 } from './import-progress-dialog'
 import { BulkAssignPlanDialog } from './bulk-assign-plan-dialog'
+import { ClonePlansDialog } from './clone-plans-dialog'
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -110,10 +111,13 @@ interface ProgressState {
  * call `start()` on click, the progress dialog opens with whatever
  * `importRecordId` came back from the enqueue request, and on the
  * "assign plan" CTA we hand the id off to <BulkAssignPlanDialog>.
+ * `<ClonePlansDialog>` is a sibling slot the operator can open from the
+ * same finale (only available for altshop / remnashop sources).
  */
 function useImportFlow() {
   const [progress, setProgress] = useState<ProgressState | null>(null)
   const [assignFor, setAssignFor] = useState<string | null>(null)
+  const [cloneFor, setCloneFor] = useState<string | null>(null)
 
   const start = useCallback((source: ImportSource, mode: ImportMode) => {
     setProgress({ source, mode, importRecordId: null })
@@ -128,17 +132,24 @@ function useImportFlow() {
   const openAssign = useCallback((importRecordId: string) => {
     setAssignFor(importRecordId)
   }, [])
-
   const closeAssign = useCallback(() => setAssignFor(null), [])
+
+  const openClone = useCallback((importRecordId: string) => {
+    setCloneFor(importRecordId)
+  }, [])
+  const closeClone = useCallback(() => setCloneFor(null), [])
 
   return {
     progress,
     assignFor,
+    cloneFor,
     start,
     setRecordId,
     closeProgress,
     openAssign,
     closeAssign,
+    openClone,
+    closeClone,
   }
 }
 
@@ -194,6 +205,7 @@ export default function ImportsPage(): JSX.Element {
           source={flow.progress.source}
           mode={flow.progress.mode}
           onAssignPlan={flow.openAssign}
+          onClonePlans={flow.openClone}
         />
       ) : null}
 
@@ -202,6 +214,14 @@ export default function ImportsPage(): JSX.Element {
           open
           onClose={flow.closeAssign}
           importRecordId={flow.assignFor}
+        />
+      ) : null}
+
+      {flow.cloneFor !== null ? (
+        <ClonePlansDialog
+          open
+          onClose={flow.closeClone}
+          importRecordId={flow.cloneFor}
         />
       ) : null}
     </div>

@@ -8,9 +8,57 @@ import {
   RemnashopUser,
 } from '../services/remnashop-importer.service';
 
+/**
+ * Plan/duration/price rows as exported from remnashop's PostgreSQL DB.
+ *
+ * remnashop's plan model is similar to altshop's but slimmer: no
+ * archive/upgrade/replacement metadata, plus an explicit `is_trial`
+ * flag and a `public_code` used as the user-facing slug. We keep the
+ * remnashop integer ids so the cloner can build the
+ * `remnashop_plan_id → rezeis_plan_id` mapping.
+ *
+ * See https://github.com/snoups/remnashop/blob/main/src/infrastructure/database/models/plan.py
+ */
+export interface RemnashopPlan {
+  readonly id: number;
+  readonly public_code: string;
+  readonly name: string;
+  readonly description: string | null;
+  readonly tag: string | null;
+  readonly type: string;
+  readonly availability: string;
+  readonly traffic_limit_strategy: string;
+  readonly traffic_limit: number;
+  readonly device_limit: number;
+  readonly allowed_user_ids: readonly number[];
+  readonly internal_squads: readonly string[];
+  readonly external_squad: string | null;
+  readonly order_index: number;
+  readonly is_active: boolean;
+  readonly is_trial: boolean;
+}
+
+export interface RemnashopPlanDuration {
+  readonly id: number;
+  readonly plan_id: number;
+  readonly days: number;
+  readonly order_index: number;
+}
+
+export interface RemnashopPlanPrice {
+  readonly id: number;
+  readonly plan_duration_id: number;
+  readonly currency: string;
+  readonly price: string;
+}
+
 interface RemnashopBackupData {
   users: RemnashopUser[];
   subscriptions: RemnashopSubscription[];
+  /** Optional catalog (full backups expose it, stripped JSON exports may not). */
+  plans: RemnashopPlan[];
+  planDurations: RemnashopPlanDuration[];
+  planPrices: RemnashopPlanPrice[];
 }
 
 /**
@@ -95,10 +143,19 @@ function extractDataFromJson(json: Record<string, unknown>): RemnashopBackupData
 
   const users = (data.users ?? []) as RemnashopUser[];
   const subscriptions = (data.subscriptions ?? []) as RemnashopSubscription[];
+  const plans = (data.plans ?? []) as RemnashopPlan[];
+  const planDurations = (data.plan_durations ?? []) as RemnashopPlanDuration[];
+  const planPrices = (data.plan_prices ?? []) as RemnashopPlanPrice[];
 
   if (!Array.isArray(users) || users.length === 0) {
     throw new BadRequestException('No user records found in the backup data');
   }
 
-  return { users, subscriptions };
+  return {
+    users,
+    subscriptions,
+    plans: Array.isArray(plans) ? plans : [],
+    planDurations: Array.isArray(planDurations) ? planDurations : [],
+    planPrices: Array.isArray(planPrices) ? planPrices : [],
+  };
 }
