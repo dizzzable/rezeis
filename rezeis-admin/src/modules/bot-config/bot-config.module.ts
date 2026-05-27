@@ -2,9 +2,11 @@ import { Module } from '@nestjs/common';
 
 import { AuthModule } from '../auth/auth.module';
 import { AdminBotConfigController } from './controllers/admin-bot-config.controller';
+import { InternalBotConfigController } from './controllers/internal-bot-config.controller';
 import { BotButtonsService } from './services/bot-buttons.service';
 import { BotEmojisService } from './services/bot-emojis.service';
 import { BotTextsService } from './services/bot-texts.service';
+import { InternalBotConfigService } from './services/internal-bot-config.service';
 
 /**
  * BotConfigModule
@@ -19,8 +21,13 @@ import { BotTextsService } from './services/bot-texts.service';
  */
 @Module({
   imports: [AuthModule],
-  controllers: [AdminBotConfigController],
-  providers: [BotButtonsService, BotEmojisService, BotTextsService],
+  controllers: [AdminBotConfigController, InternalBotConfigController],
+  providers: [
+    BotButtonsService,
+    BotEmojisService,
+    BotTextsService,
+    InternalBotConfigService,
+  ],
   exports: [BotButtonsService, BotEmojisService, BotTextsService],
 })
 export class BotConfigModule {}

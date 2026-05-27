@@ -1,4 +1,49 @@
-﻿# Rezeis Admin v0.4.1
+﻿# Rezeis Admin v0.4.2
+
+## Wave 7 — pre-seed BotConfig defaults on bootstrap
+
+`v0.4.2` закрывает архитектурный roadmap reiwa-rewrite со стороны admin: `InternalBotConfigService` теперь имплементит `OnApplicationBootstrap` и сам заводит дефолтную клавиатуру + `bot.banner_url` placeholder при первом запуске. До этого оператор открывал `/admin/bot-config` на свежем деплое и видел пустые таблицы — кнопки появлялись только после первого `GET /api/internal/bot-config` от reiwa (через 5 минут после старта или после первого юзерского `/start`).
+
+### Что сделано
+
+- **`InternalBotConfigService` ⇒ `OnApplicationBootstrap`** — на старте приложения сидит четыре кнопки (`cabinet` / `invite` / `rules` / `help`), задавая стандартный layout reiwa (CTA-row → invite-row → rules+help row), и пустую `BotText` запись с ключом `bot.banner_url`. Идемпотентно: если в `BotButton` уже есть хотя бы одна строка — никаких записей. Оператор, который удалил всё и начинает с нуля, не получит сюрприз reset'ом.
+- **Гейтинг по роли процесса** — seed бежит только когда `getProcessRole()` возвращает `api` или `all`. Worker-контейнер делит ту же БД, и параллельный seed между ними мог попасть на unique-`buttonId` constraint mid-insert. Worker всё равно читает уже посеяный payload через тот же DB-путь, просто не драйвит сам seed.
+- **Failure-policy** — если seed упал, `seedAttempted` сбрасывается, чтобы следующий запрос мог повторить, а не закешировать degraded payload навсегда. Первый приоритет — никогда не вернуть юзеру пустой keyboard.
+- **`InternalBotConfigController`** — read-only endpoint `GET /api/internal/bot-config` под `InternalAdminAuthGuard` (тот же Bearer api_token, что reiwa использует для остальных internal-routes). Возвращает payload, который reiwa уже ожидает по shape (`buttons / visual / features / botEmojis / menuTextCustomEmojiIds / translations`).
+
+### Backend изменения
+
+- `bot-config/bot-config.module.ts` — зарегистрирован `InternalBotConfigController` + `InternalBotConfigService`. Существующий `AdminBotConfigController` нетронут.
+- `bot-config/services/internal-bot-config.service.ts` — новый, ~270 строк (под лимит 500). `BotButtonsService` / `BotEmojisService` / `BotTextsService` зовутся как ports.
+- `bot-config/interfaces/internal-bot-config.interface.ts` — readonly TypeScript shape, повторяет ожидания reiwa.
+
+### Pre-push checklist
+
+| Check | Result |
+|---|---|
+| Backend `tsc --noEmit -p tsconfig.json` | ✅ 0 errors |
+| Backend `eslint src/modules/bot-config --quiet` | ✅ 0 warnings |
+| Frontend без изменений | n/a |
+| Idempotency: seed на пустой БД | ✅ 4 buttons + 1 banner row |
+| Idempotency: seed на уже посеянной БД | ✅ no-op (existingCount > 0) |
+| Worker race: `RUID_PROCESS_ROLE=worker` | ✅ skip seed (read-only consumer) |
+
+### Migration / breaking
+
+Нет. Чисто аддитивное:
+
+- Новый endpoint `GET /api/internal/bot-config` — reiwa уже умеет его дёргать (Wave 2 namespace + 5-минутный refresh loop). До v0.4.2 он отвечал из существующих CRUD-сервисов; теперь с пустой БД seed просыпается сам.
+- На старых деплоях, где оператор уже руками настроил клавиатуру, ничего не меняется — `existingCount > 0` и seed не запускается.
+
+### Docker image
+
+Пересобирается на push tag `v0.4.2` → GHCR теги `v0.4.2`, `0.4.2`, `0.4`, `latest`.
+
+**Full Changelog**: https://github.com/dizzzable/rezeis/compare/v0.4.1...v0.4.2
+
+---
+
+# Rezeis Admin v0.4.1
 
 ## STEALTHNET source — новая вкладка импорта
 
