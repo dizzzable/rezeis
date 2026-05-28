@@ -8,6 +8,7 @@ import {
   Patch,
   Post,
   UseGuards,
+  UseInterceptors,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 
@@ -22,9 +23,11 @@ import {
   UpdateBotTextDto,
   parseBotButtonStyle,
 } from '../dto/bot-config.dto';
+import { ReiwaCacheInvalidateInterceptor } from '../interceptors/reiwa-cache-invalidate.interceptor';
 import { BotButtonsService } from '../services/bot-buttons.service';
 import { BotEmojisService } from '../services/bot-emojis.service';
 import { BotTextsService } from '../services/bot-texts.service';
+import { ReiwaCacheInvalidatorService } from '../services/reiwa-cache-invalidator.service';
 
 /**
  * AdminBotConfigController
@@ -47,6 +50,7 @@ export class AdminBotConfigController {
     private readonly botButtonsService: BotButtonsService,
     private readonly botEmojisService: BotEmojisService,
     private readonly botTextsService: BotTextsService,
+    private readonly cacheInvalidator: ReiwaCacheInvalidatorService,
   ) {}
 
   // ── Buttons ────────────────────────────────────────────────────────────────
@@ -58,6 +62,7 @@ export class AdminBotConfigController {
   }
 
   @Post('buttons')
+  @UseInterceptors(ReiwaCacheInvalidateInterceptor)
   @ApiOperation({ summary: 'Create a new bot menu button' })
   public createButton(@Body() body: CreateBotButtonDto) {
     return this.botButtonsService.create({
@@ -72,6 +77,7 @@ export class AdminBotConfigController {
   }
 
   @Patch('buttons/:id')
+  @UseInterceptors(ReiwaCacheInvalidateInterceptor)
   @ApiOperation({ summary: 'Update an existing bot menu button' })
   public updateButton(@Param('id') id: string, @Body() body: UpdateBotButtonDto) {
     return this.botButtonsService.update({
@@ -86,6 +92,7 @@ export class AdminBotConfigController {
   }
 
   @Post('buttons/:id/delete')
+  @UseInterceptors(ReiwaCacheInvalidateInterceptor)
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: 'Delete a bot menu button (POST form for legacy clients)' })
   public deleteButtonPost(@Param('id') id: string): Promise<void> {
@@ -93,6 +100,7 @@ export class AdminBotConfigController {
   }
 
   @Post('buttons/reorder')
+  @UseInterceptors(ReiwaCacheInvalidateInterceptor)
   @ApiOperation({ summary: 'Atomically reorder bot menu buttons by id list' })
   public reorderButtons(@Body() body: ReorderBotButtonsDto) {
     return this.botButtonsService.reorder(body.ids);
@@ -107,6 +115,7 @@ export class AdminBotConfigController {
   }
 
   @Post('emojis')
+  @UseInterceptors(ReiwaCacheInvalidateInterceptor)
   @ApiOperation({ summary: 'Create a new emoji entry' })
   public createEmoji(@Body() body: CreateBotEmojiDto) {
     return this.botEmojisService.create({
@@ -117,6 +126,7 @@ export class AdminBotConfigController {
   }
 
   @Patch('emojis/:id')
+  @UseInterceptors(ReiwaCacheInvalidateInterceptor)
   @ApiOperation({ summary: 'Update an emoji entry' })
   public updateEmoji(@Param('id') id: string, @Body() body: UpdateBotEmojiDto) {
     return this.botEmojisService.update({
@@ -128,6 +138,7 @@ export class AdminBotConfigController {
   }
 
   @Post('emojis/:id/delete')
+  @UseInterceptors(ReiwaCacheInvalidateInterceptor)
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: 'Delete an emoji entry' })
   public deleteEmojiPost(@Param('id') id: string): Promise<void> {
@@ -143,6 +154,7 @@ export class AdminBotConfigController {
   }
 
   @Post('texts')
+  @UseInterceptors(ReiwaCacheInvalidateInterceptor)
   @ApiOperation({ summary: 'Create a new bot copy entry' })
   public createText(@Body() body: CreateBotTextDto) {
     return this.botTextsService.create({
@@ -153,6 +165,7 @@ export class AdminBotConfigController {
   }
 
   @Patch('texts/:id')
+  @UseInterceptors(ReiwaCacheInvalidateInterceptor)
   @ApiOperation({ summary: 'Update a bot copy entry' })
   public updateText(@Param('id') id: string, @Body() body: UpdateBotTextDto) {
     return this.botTextsService.update({
@@ -164,9 +177,27 @@ export class AdminBotConfigController {
   }
 
   @Post('texts/:id/delete')
+  @UseInterceptors(ReiwaCacheInvalidateInterceptor)
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: 'Delete a bot copy entry' })
   public deleteTextPost(@Param('id') id: string): Promise<void> {
     return this.botTextsService.delete(id);
+  }
+
+  // ── Manual refresh ─────────────────────────────────────────────────────────
+
+  @Post('refresh-bot')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Manually push a cache-bust to reiwa-bot',
+    description:
+      'Use this when bot-config data was changed outside the admin UI ' +
+      '(SQL, scripts) or when the operator suspects the bot is serving ' +
+      'stale data. Returns `{ ok: true }` when the push succeeded, ' +
+      '`{ ok: false }` when reiwa-bot is unreachable / misconfigured.',
+  })
+  public async refreshBot(): Promise<{ readonly ok: boolean }> {
+    const ok = await this.cacheInvalidator.invalidate('admin-manual');
+    return { ok };
   }
 }

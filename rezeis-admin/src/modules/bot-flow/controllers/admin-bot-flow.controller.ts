@@ -6,6 +6,7 @@ import { Type } from 'class-transformer';
 import { BotFlowButtonAction, BotFlowButtonStyle, BotFlowMediaType, BotFlowParseMode } from '@prisma/client';
 
 import { AdminJwtAuthGuard } from '../../auth/guards/admin-jwt-auth.guard';
+import { ReiwaCacheInvalidateInterceptor } from '../../bot-config/interceptors/reiwa-cache-invalidate.interceptor';
 import { BotFlowService } from '../services/bot-flow.service';
 import { BotFlowScreenService } from '../services/bot-flow-screen.service';
 
@@ -176,6 +177,7 @@ class UpdateButtonDto {
 @ApiTags('Bot Flow Editor')
 @ApiBearerAuth('JWT')
 @UseGuards(AdminJwtAuthGuard)
+@UseInterceptors(ReiwaCacheInvalidateInterceptor)
 @Controller('admin/bot-flows')
 export class AdminBotFlowController {
   public constructor(

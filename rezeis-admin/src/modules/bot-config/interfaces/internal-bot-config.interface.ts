@@ -89,6 +89,55 @@ export type InternalBotEmojiMap = Readonly<Record<string, string>>;
  */
 export type InternalBotTextMap = Readonly<Record<string, string>>;
 
+/**
+ * A button rendered inside a dynamic screen. Mirrors the
+ * `BotFlowButton` Prisma model 1:1, with action types translated to
+ * the strings reiwa understands at runtime.
+ *
+ * `targetShortId` for `navigate` actions points at another screen's
+ * `shortId` in the same `screens` array — reiwa renders that screen
+ * when the user presses the button.
+ */
+export interface InternalBotConfigScreenButtonInterface {
+  readonly id: string;
+  readonly labelRu: string;
+  readonly labelEn: string;
+  readonly row: number;
+  readonly col: number;
+  readonly action: 'navigate' | 'url' | 'webapp' | 'callback' | 'back' | 'start_over';
+  readonly targetShortId: string | null;
+  readonly url: string | null;
+  readonly webAppUrl: string | null;
+  readonly callbackAction: string | null;
+  readonly style: 'default' | 'primary' | 'success' | 'danger';
+  readonly iconCustomEmojiId: string | null;
+}
+
+/**
+ * Operator-managed bot screen rendered as a Telegram message with
+ * an optional inline keyboard. When the user presses a reply-keyboard
+ * button or an inline button whose `targetShortId` points at this
+ * screen, reiwa renders the screen via `editMessageContent`.
+ *
+ * Sourced from the `bot_flows` (PUBLISHED) → `bot_flow_screens` table
+ * tree on the admin side. When the table is empty / no flow is
+ * published, reiwa falls back to its hardcoded sub-menu (help / rules
+ * / invite) so the bot keeps working out of the box.
+ */
+export interface InternalBotConfigScreenInterface {
+  readonly id: string;
+  readonly shortId: string;
+  readonly name: string;
+  readonly textRu: string;
+  readonly textEn: string;
+  readonly parseMode: 'html' | 'markdown' | 'plain';
+  readonly mediaType: 'photo' | 'video' | 'document' | 'animation' | null;
+  readonly mediaFileId: string | null;
+  readonly mediaUrl: string | null;
+  readonly isRoot: boolean;
+  readonly buttons: readonly InternalBotConfigScreenButtonInterface[];
+}
+
 export interface InternalBotConfigInterface {
   readonly buttons: readonly InternalBotConfigButtonInterface[];
   readonly visual: InternalBotConfigVisualInterface;
@@ -102,4 +151,17 @@ export interface InternalBotConfigInterface {
    */
   readonly menuTextCustomEmojiIds: InternalBotEmojiMap;
   readonly translations: InternalBotTextMap;
+  /**
+   * Operator-managed dynamic screens. Empty when no flow is
+   * published — reiwa then falls back to its built-in sub-menus.
+   * The first screen with `isRoot=true` (if any) is the entry point
+   * that overrides reiwa's `/start` welcome screen.
+   */
+  readonly screens: readonly InternalBotConfigScreenInterface[];
+  /**
+   * Identifier of the published flow version that produced `screens`.
+   * Used by reiwa for cache-key validation. Empty string when no flow
+   * is published (built-in fallback in effect).
+   */
+  readonly screensVersion: string;
 }

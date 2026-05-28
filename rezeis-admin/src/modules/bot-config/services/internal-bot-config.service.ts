@@ -1,12 +1,27 @@
 import { Injectable, Logger, type OnApplicationBootstrap } from '@nestjs/common';
-import { BotButton, BotButtonStyle, BotEmoji, BotText } from '@prisma/client';
+import {
+  BotButton,
+  BotButtonStyle,
+  BotEmoji,
+  BotFlow,
+  BotFlowButton,
+  BotFlowButtonAction,
+  BotFlowButtonStyle,
+  BotFlowMediaType,
+  BotFlowParseMode,
+  BotFlowScreen,
+  BotText,
+} from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { getProcessRole } from '../../../common/runtime/process-role.util';
+import { BotFlowService } from '../../bot-flow/services/bot-flow.service';
 import {
   InternalBotConfigButtonInterface,
   InternalBotConfigFeaturesInterface,
   InternalBotConfigInterface,
+  InternalBotConfigScreenButtonInterface,
+  InternalBotConfigScreenInterface,
   InternalBotConfigVisualInterface,
   InternalBotEmojiMap,
   InternalBotTextMap,
@@ -49,6 +64,7 @@ export class InternalBotConfigService implements OnApplicationBootstrap {
     private readonly botButtonsService: BotButtonsService,
     private readonly botEmojisService: BotEmojisService,
     private readonly botTextsService: BotTextsService,
+    private readonly botFlowService: BotFlowService,
   ) {}
 
   /**
@@ -73,10 +89,13 @@ export class InternalBotConfigService implements OnApplicationBootstrap {
   public async getConfig(): Promise<InternalBotConfigInterface> {
     await this.ensureDefaultsSeeded();
 
-    const [buttons, emojis, texts] = await Promise.all([
+    const [buttons, emojis, texts, publishedFlow] = await Promise.all([
       this.botButtonsService.listAll(),
       this.botEmojisService.listAll(),
       this.botTextsService.listAll(),
+      // The active flow that drives dynamic screens. `null` when no
+      // flow is published — reiwa falls back to its built-in sub-menus.
+      this.botFlowService.getPublished(DEFAULT_FLOW_NAME),
     ]);
 
     const emojiMap = mapEmojiCustomIds(emojis);
@@ -89,6 +108,8 @@ export class InternalBotConfigService implements OnApplicationBootstrap {
       botEmojis: emojiMap,
       menuTextCustomEmojiIds: emojiMap,
       translations: textMap,
+      screens: mapFlowScreens(publishedFlow),
+      screensVersion: publishedFlow ? `${publishedFlow.id}:${publishedFlow.version}` : '',
     };
   }
 
@@ -157,6 +178,16 @@ export class InternalBotConfigService implements OnApplicationBootstrap {
 }
 
 const BANNER_URL_KEY = 'bot.banner_url';
+
+/**
+ * Name of the BotFlow that owns the user-facing dynamic screens. We
+ * pin reiwa to a single named flow so operators can't accidentally
+ * publish a "Marketing campaign" flow over the live navigation.
+ *
+ * Future: expose multi-flow selection per use-case (welcome,
+ * onboarding, support tree). For now there's exactly one.
+ */
+const DEFAULT_FLOW_NAME = 'Main Flow';
 
 interface DefaultButtonSeed {
   readonly buttonId: string;
@@ -283,3 +314,122 @@ const DEFAULT_FEATURES: InternalBotConfigFeaturesInterface = {
   activityFeedEnabled: true,
   partnersEnabled: false,
 };
+
+type FlowWithScreens = BotFlow & {
+  readonly screens: readonly (BotFlowScreen & {
+    readonly buttons: readonly BotFlowButton[];
+  })[];
+};
+
+/**
+ * Project a `BotFlow` row tree into the flat shape reiwa consumes.
+ * `null` flow → empty array (built-in fallback in effect on the bot
+ * side). Buttons inside each screen are sorted by `(row, col)` so
+ * the inline-keyboard layout is deterministic.
+ */
+function mapFlowScreens(
+  flow: FlowWithScreens | null,
+): readonly InternalBotConfigScreenInterface[] {
+  if (flow === null || flow.screens.length === 0) return [];
+  return flow.screens.map((screen) => ({
+    id: screen.id,
+    shortId: screen.shortId,
+    name: screen.name,
+    textRu: screen.textRu,
+    textEn: screen.textEn,
+    parseMode: mapParseMode(screen.parseMode),
+    mediaType: mapMediaType(screen.mediaType),
+    mediaFileId: screen.mediaFileId,
+    mediaUrl: screen.mediaUrl,
+    isRoot: screen.isRoot,
+    buttons: [...screen.buttons]
+      .sort((a, b) => a.row - b.row || a.col - b.col)
+      .map(mapFlowButton),
+  }));
+}
+
+function mapFlowButton(button: BotFlowButton): InternalBotConfigScreenButtonInterface {
+  return {
+    id: button.id,
+    labelRu: button.labelRu,
+    labelEn: button.labelEn,
+    row: button.row,
+    col: button.col,
+    action: mapButtonAction(button.actionType),
+    targetShortId: button.targetScreenId,
+    url: button.url,
+    webAppUrl: button.webAppUrl,
+    callbackAction: button.callbackAction,
+    style: mapFlowButtonStyle(button.style),
+    iconCustomEmojiId: button.iconCustomEmojiId,
+  };
+}
+
+function mapButtonAction(
+  action: BotFlowButtonAction,
+): InternalBotConfigScreenButtonInterface['action'] {
+  switch (action) {
+    case BotFlowButtonAction.NAVIGATE:
+      return 'navigate';
+    case BotFlowButtonAction.URL:
+      return 'url';
+    case BotFlowButtonAction.WEBAPP:
+      return 'webapp';
+    case BotFlowButtonAction.CALLBACK:
+      return 'callback';
+    case BotFlowButtonAction.BACK:
+      return 'back';
+    case BotFlowButtonAction.START_OVER:
+      return 'start_over';
+    default:
+      return 'callback';
+  }
+}
+
+function mapFlowButtonStyle(
+  style: BotFlowButtonStyle,
+): InternalBotConfigScreenButtonInterface['style'] {
+  switch (style) {
+    case BotFlowButtonStyle.PRIMARY:
+      return 'primary';
+    case BotFlowButtonStyle.SUCCESS:
+      return 'success';
+    case BotFlowButtonStyle.DANGER:
+      return 'danger';
+    case BotFlowButtonStyle.DEFAULT:
+    default:
+      return 'default';
+  }
+}
+
+function mapParseMode(
+  mode: BotFlowParseMode,
+): InternalBotConfigScreenInterface['parseMode'] {
+  switch (mode) {
+    case BotFlowParseMode.HTML:
+      return 'html';
+    case BotFlowParseMode.MARKDOWN:
+      return 'markdown';
+    case BotFlowParseMode.PLAIN:
+    default:
+      return 'plain';
+  }
+}
+
+function mapMediaType(
+  type: BotFlowMediaType | null,
+): InternalBotConfigScreenInterface['mediaType'] {
+  if (type === null) return null;
+  switch (type) {
+    case BotFlowMediaType.PHOTO:
+      return 'photo';
+    case BotFlowMediaType.VIDEO:
+      return 'video';
+    case BotFlowMediaType.DOCUMENT:
+      return 'document';
+    case BotFlowMediaType.ANIMATION:
+      return 'animation';
+    default:
+      return null;
+  }
+}

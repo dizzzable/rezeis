@@ -2553,6 +2553,7 @@ export const en = {
     screenEditorHint: 'Select a screen on the canvas to edit its text and buttons',
     fields: {
       name: 'Name (internal)',
+      nameHint: 'Reserved names override built-in bot sub-menus: "help" → support sub-menu, "rules" → rules sub-menu, "invite" → referral program sub-menu. Any other name becomes a regular screen accessible via "Navigate to screen" buttons.',
       textRu: 'Message text (RU)',
       textEn: 'Message text (EN)',
       parseMode: 'Format',
@@ -2614,6 +2615,12 @@ export const en = {
       publishFlow: 'Publish flow',
       publishHint: 'Publishes the draft screen graph as a new version. Reply keyboard / emojis / texts are persisted automatically.',
       autoSaved: 'Auto-saved',
+      refreshBot: 'Refresh bot',
+      refreshBotHint: 'Drops the bot cache and forces it to re-fetch the live configuration from admin. Saves trigger this automatically, but the button helps when data was changed outside admin or for debugging.',
+      refreshBotAria: 'Force-refresh the bot cache',
+      refreshBotSuccess: 'Bot picked up the fresh config',
+      refreshBotUnreachable: 'Bot is unreachable — changes will land within 5 minutes (standard TTL)',
+      refreshBotError: 'Failed to send the refresh request',
     },
     palette: {
       global: 'Global',

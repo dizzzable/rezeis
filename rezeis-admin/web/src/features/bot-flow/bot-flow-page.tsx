@@ -46,7 +46,7 @@ import {
   type OnConnect,
   ReactFlowProvider,
 } from '@xyflow/react'
-import { Workflow, Plus, Check, Save, Smile, Type, Upload } from 'lucide-react'
+import { Workflow, Plus, Check, Save, Smile, Type, Upload, RefreshCw } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
@@ -220,6 +220,25 @@ export default function BotFlowPage() {
     },
   })
 
+  const refreshBotMutation = useMutation({
+    mutationFn: async (): Promise<{ ok: boolean }> => {
+      const { data } = await api.post<{ ok: boolean }>(
+        '/admin/bot-config/refresh-bot',
+      )
+      return data
+    },
+    onSuccess: (data) => {
+      if (data.ok) {
+        toast.success(t('botStudio.toolbar.refreshBotSuccess'))
+      } else {
+        toast.error(t('botStudio.toolbar.refreshBotUnreachable'))
+      }
+    },
+    onError: () => {
+      toast.error(t('botStudio.toolbar.refreshBotError'))
+    },
+  })
+
   // ── Handlers ───────────────────────────────────────────────────────────────
   const onNodesChange: OnNodesChange = useCallback((changes) => {
     setNodes((nds) => applyNodeChanges(changes, nds))
@@ -382,6 +401,22 @@ export default function BotFlowPage() {
           )}
         </div>
         <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => refreshBotMutation.mutate()}
+            disabled={refreshBotMutation.isPending}
+            title={t('botStudio.toolbar.refreshBotHint')}
+            aria-label={t('botStudio.toolbar.refreshBotAria')}
+          >
+            <RefreshCw
+              className={`mr-1.5 h-3.5 w-3.5 ${
+                refreshBotMutation.isPending ? 'animate-spin' : ''
+              }`}
+              aria-hidden
+            />
+            {t('botStudio.toolbar.refreshBot')}
+          </Button>
           <Button variant="outline" size="sm" onClick={() => setEmojisOpen(true)}>
             <Smile className="mr-1.5 h-3.5 w-3.5" aria-hidden />
             {t('botStudio.toolbar.emojis')}

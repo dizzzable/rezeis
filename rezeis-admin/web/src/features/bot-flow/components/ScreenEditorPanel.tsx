@@ -125,6 +125,9 @@ export function ScreenEditorPanel({ screen, flowName }: ScreenEditorPanelProps) 
           onBlur={handleScreenBlur}
           className="h-8 text-xs"
         />
+        <p className="text-[10px] leading-snug text-muted-foreground">
+          {t('botFlow.fields.nameHint')}
+        </p>
       </div>
 
       {/* Is root toggle */}
