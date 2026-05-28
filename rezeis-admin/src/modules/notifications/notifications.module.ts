@@ -1,24 +1,39 @@
 import { Module } from '@nestjs/common';
 
 import { AuthModule } from '../auth/auth.module';
+import { InternalPushModule } from '../push/internal-push.module';
 import { AdminNotificationTemplatesController } from './controllers/admin-notification-templates.controller';
+import { BotNotifierClient } from './services/bot-notifier.client';
 import { NotificationTemplatesService } from './services/notification-templates.service';
+import { UserNotificationsService } from './services/user-notifications.service';
 
 /**
  * NotificationsModule
  * ───────────────────
- * Owns the editable notification templates table. Other modules consume the
- * service when they want to render a stored template; the admin UI talks to
- * the controller for CRUD + a one-shot "seed defaults" action.
+ * Owns the editable notification templates + the user-notification
+ * fanout service. Other modules consume `UserNotificationsService`
+ * when they want to notify a user — the service writes the cabinet-feed
+ * row and (best-effort) pushes the rendered text to both the bot
+ * (Telegram) and the user's registered web-push subscriptions
+ * (browsers + iOS PWA).
  *
- * Delivery (Telegram, email, push) is handled by feature-specific services
- * elsewhere — this module is the source of truth for the *content*, not the
+ * Per-channel bridges (email, BotNotificationChannel broadcast) read
+ * the same `UserNotificationEvent` rows on their own schedules — this
+ * module remains the source of truth for the *content*, not the
  * transport.
  */
 @Module({
-  imports: [AuthModule],
+  imports: [AuthModule, InternalPushModule],
   controllers: [AdminNotificationTemplatesController],
-  providers: [NotificationTemplatesService],
-  exports: [NotificationTemplatesService],
+  providers: [
+    NotificationTemplatesService,
+    BotNotifierClient,
+    UserNotificationsService,
+  ],
+  exports: [
+    NotificationTemplatesService,
+    BotNotifierClient,
+    UserNotificationsService,
+  ],
 })
 export class NotificationsModule {}

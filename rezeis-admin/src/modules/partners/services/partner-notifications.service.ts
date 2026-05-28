@@ -1,13 +1,13 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
 
-import { PrismaService } from '../../../common/prisma/prisma.service';
+import { UserNotificationsService } from '../../notifications/services/user-notifications.service';
 
 /**
  * Creates `UserNotificationEvent` rows for partner-program lifecycle
- * events. The existing email/Telegram delivery bridges (see
- * `EmailEventBridgeService`, `UserNotificationDeliveryQueueService`) pick
- * those rows up automatically, render any matching template, and dispatch.
+ * events through `UserNotificationsService`. The service writes the
+ * cabinet-feed row and (best-effort) pushes the rendered text to the
+ * bot for Telegram delivery — the email/push bridges still read the
+ * persisted rows on their own schedule.
  *
  * Keeping this service thin — it does not know how the notification is
  * delivered, only that there's something to notify about. That keeps
@@ -18,7 +18,9 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 export class PartnerNotificationsService {
   private readonly logger = new Logger(PartnerNotificationsService.name);
 
-  public constructor(private readonly prismaService: PrismaService) {}
+  public constructor(
+    private readonly userNotifications: UserNotificationsService,
+  ) {}
 
   public async notifyEarning(input: {
     readonly partnerUserId: string;
@@ -75,13 +77,7 @@ export class PartnerNotificationsService {
     readonly payload: Record<string, unknown>;
   }): Promise<void> {
     try {
-      await this.prismaService.userNotificationEvent.create({
-        data: {
-          userId: input.userId,
-          type: input.type,
-          payload: input.payload as Prisma.InputJsonObject,
-        },
-      });
+      await this.userNotifications.create(input);
     } catch (error: unknown) {
       // Non-fatal — accrual must not roll back if the notification row
       // can't be persisted (e.g., user gone, FK violation).

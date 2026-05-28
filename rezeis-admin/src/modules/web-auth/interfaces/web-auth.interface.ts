@@ -43,3 +43,30 @@ export interface WebAuthRecoverResultInterface {
 export interface WebAuthChangePasswordResultInterface {
   readonly success: boolean;
 }
+
+/**
+ * Result of `POST /api/internal/web-auth/bot-signin/issue`.
+ *
+ * Plaintext token is delivered exactly once on this response and never
+ * persisted in our DB — only `sha256(token)` lives in Redis. Callers
+ * embed the token in a URL the user receives in Telegram and must not
+ * log or echo it. `null` means the user can't be resolved (corrupt
+ * state) or is blocked — caller should fall back to a tokenless
+ * cabinet URL.
+ */
+export interface WebAuthBotSigninIssueResultInterface {
+  readonly token: string;
+  readonly expiresAt: string;
+}
+
+/**
+ * Result of `POST /api/internal/web-auth/bot-signin/consume`.
+ *
+ * `userId` is the canonical reiwa_id the BFF binds to a fresh
+ * WebSession. `null` is encoded as the absence of `userId`; the BFF
+ * surfaces it as a 401 to the SPA which then redirects to `/sign-in`
+ * with an `?error=expired_link` hint.
+ */
+export interface WebAuthBotSigninConsumeResultInterface {
+  readonly userId: string | null;
+}

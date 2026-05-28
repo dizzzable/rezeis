@@ -933,6 +933,7 @@ model User {
   webAccount           WebAccount?             @relation("UserWebAccount")
   transactions         Transaction[]           @relation("UserTransactions")
   notificationEvents   UserNotificationEvent[] @relation("UserNotificationEvents")
+  webPushSubscriptions WebPushSubscription[]   @relation("UserWebPushSubscriptions")
   trialGrant           TrialGrant?             @relation("UserTrialGrant")
   referredBy           Referral?               @relation("ReferredUser")
   referralsGiven       Referral[]              @relation("ReferrerUser")
@@ -1430,6 +1431,38 @@ model UserNotificationEvent {
   @@index([readAt])
   @@index([createdAt])
   @@map("user_notification_events")
+}
+
+/// Web-push subscription for browser-based notifications. One row per
+/// (user, endpoint) tuple — a single user can register multiple
+/// subscriptions (laptop + phone PWA) and each one delivers
+/// independently.
+///
+/// Storage shape mirrors the W3C Push API spec: the `endpoint` URL
+/// identifies the push service (FCM / Mozilla / Apple); `p256dhKey`
+/// + `authKey` are the per-subscription crypto material the spec
+/// requires for end-to-end encryption.
+///
+/// `failureCount` increments on transient delivery failures; the
+/// fanout service deletes the row after 3 consecutive failures or
+/// on any 410 Gone response from the push service. `lastSeenAt` is
+/// touched on every successful delivery so operators can tell which
+/// subscriptions are stale.
+model WebPushSubscription {
+  id           String   @id @default(cuid()) @map("id")
+  userId       String   @map("user_id")
+  endpoint     String   @unique @map("endpoint")
+  p256dhKey    String   @map("p256dh_key")
+  authKey      String   @map("auth_key")
+  userAgent    String?  @map("user_agent")
+  failureCount Int      @default(0) @map("failure_count")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  lastSeenAt   DateTime @default(now()) @map("last_seen_at") @db.Timestamptz(3)
+
+  user User @relation("UserWebPushSubscriptions", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("web_push_subscriptions")
 }
 
 /// Singleton row (id = 1).

@@ -276,6 +276,22 @@ export class InternalUserEdgeService {
     return { eligible: true, reason: null };
   }
 
+  // ── Bot block flag ──────────────────────────────────────────────────────
+
+  /**
+   * Idempotently marks the user as having blocked the bot. Used by
+   * reiwa when Telegram returns 403 on a `/notify` delivery — saves
+   * future attempts and feeds the broadcast `where` filter that
+   * already excludes blocked users.
+   */
+  public async markBotBlocked(telegramId: string): Promise<void> {
+    const telegramIdBig = this.parseTelegramId(telegramId);
+    await this.prismaService.user.updateMany({
+      where: { telegramId: telegramIdBig, isBotBlocked: false },
+      data: { isBotBlocked: true },
+    });
+  }
+
   // ── Helpers ──────────────────────────────────────────────────────────────
 
   private async resolveUserId(telegramId: string): Promise<string> {

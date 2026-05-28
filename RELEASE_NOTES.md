@@ -1,4 +1,108 @@
-﻿# Rezeis Admin v0.4.5
+﻿# Rezeis Admin v0.5.0
+
+## Notification fanout pipeline + magic-link bot→browser + bot pruning
+
+`v0.5.0` — major release. Reiwa-bot становится тонким каналом доставки (вместо дублирующего кабинет UI), magic-link даёт telegram-only юзерам автологин в браузере без логина/пароля, и admin теперь ведёт фанаут любых notification событий по трём каналам параллельно (cabinet feed → Telegram → web-push).
+
+### Wave A — Bot pruning (reiwa side)
+
+Бот выкинул всё что дублировало кабинет: удалены страницы `buy`, `plans`, `subscription`, `profile`, `promo`, `activity`, `referral`. Остались только то что бот должен реально делать: `start` (приветствие + main keyboard), `menu` (back-to-menu callback), `help-callback` (fallback когда support_url не настроен), `help` (`/help` slash), `invite` (генерит share-link через admin), `rules` (admin-managed rules screen), `lang` (`/lang` picker), `dynamic-screen` (universal `screen:<shortId>` handler).
+
+Дефолтная клавиатура (5 кнопок, обновлён seed):
+1. **Открыть приложение** (WebApp, primary, blue) — Mini App, эмодзи `5276127848644503161`
+2. **Кабинет** (URL, default) — открывает SPA в браузере, эмодзи `5278589204207528856`
+3. **Пригласить** (callback, success, green) — `5298668674532538341`
+4. **Правила** (callback, default) — `5276314275994954605`
+5. **Помощь** (support_url, default) — `5276229330131772747`
+
+Custom emoji ids — Telegram Premium-эмодзи; на не-Premium ботах Telegram молча показывает label без иконки.
+
+### Wave C — Magic-link bot→browser
+
+Snoups-style magic link для telegram-only юзеров. Юзер жмёт «Кабинет» в боте, попадает в браузер уже авторизованным.
+
+- **Admin**: новый `BotSigninTokenService` (Redis-backed, sha256-hashed, single-use, 5-min TTL, 32 bytes hex). Endpoint `POST /internal/web-auth/bot-signin/issue` (ввод `telegramId`, выдача `token`) + `POST /internal/web-auth/bot-signin/consume` (single-use, возвращает `userId`).
+- **Reiwa-bot**: `start.ts` + `menu.ts` дёргают `adminClient.webAuth.issueBotSigninToken(telegramId)` при рендере keyboard, `attachSigninTokenToUrl()` вшивает `?signin=<token>` в URL для url-кнопок (cabinet). Webapp-кнопки и support_url остаются нетронутыми — у Mini App есть `initData` для авто-auth, support_url — это просто tg://deep-link. Fallback на чистый URL если admin недоступен / юзер заблокирован.
+- **Reiwa-web BFF**: новый route `POST /api/v1/auth/bot-signin?token=...` который консьюмит токен через admin → создаёт WebSession → 302 на `/dashboard`. Token rate-limited через `loginRateLimiter`, single-use — replay не работает.
+- **SPA `WebHomePage`**: при наличии `?signin=...` в URL вызывает BFF endpoint первым делом, strip'ит param через `history.replaceState`, идёт на `/dashboard`. Fallback splash меняет текст на «Входим через Telegram…».
+
+### Wave B — Notification fanout (admin → bot)
+
+Admin → bot push-канал чтобы юзер получал в Telegram уведомления мгновенно, не ожидая 5-min TTL pull-loop.
+
+- **Admin**: новый `BotNotifierClient` (HTTP клиент к reiwa-bot's `:5100/notify`), `UserNotificationsService` (single source of truth для notify-this-user). Service пишет cabinet-feed row + (best-effort) пушит на бот в Telegram + (best-effort) пушит web-push на все subscriptions юзера. Идемпотентность: каждый event несёт `eventId` (CUID `UserNotificationEvent.id`), бот хранит in-memory LRU recently-delivered ids (1024 slots, 24h horizon) и no-op'ит replays.
+- **Refactor**: 3 callsites которые писали `prisma.userNotificationEvent.create` напрямую (`partner-notifications`, `auto-renew`, `admin-user-management`) теперь через `UserNotificationsService.create()` — fanout автоматически.
+- **Templates**: уже существующий `NotificationTemplatesService` (с `{{placeholder}}` substitution) подключён — оператор редактирует тексты через `/admin/notifications/templates`, бот доставляет с актуальным текстом без code change.
+- **Bot side** (reiwa): новый `bot/listeners/internal-http-listener.ts` объединяет `/invalidate` + новые `/notify` + `/notify-broadcast` endpoints. `/notify` принимает `{ eventId, telegramId, text, parseMode?, buttons? }`, доставляет через `bot.api.sendMessage`, на 403 (юзер заблокировал бота) колбэчит `adminClient.user.markBotBlocked(telegramId)` чтобы admin прекратил пытаться. `/notify-broadcast` принимает `{ chatId, topicThreadId? }` для Telegram-каналов / forum-топиков (UI для управления каналов оставлен на следующий релиз).
+
+### Wave D — Web-push (PWA-enabled)
+
+Browser web-push для всех trex кейсов которые Telegram не покрывает: web-only юзеры, юзеры заблокировавшие бота, юзеры открывшие кабинет в браузере на десктопе.
+
+- **Prisma**: новая модель `WebPushSubscription { userId, endpoint @unique, p256dhKey, authKey, userAgent, failureCount, createdAt, lastSeenAt }`. Миграция `20260529000000_web_push_subscriptions`.
+- **Admin**: новый `WebPushService` (использует `web-push@3.6.7`, RFC 8030 + VAPID RFC 8292), `subscribe()` upsert по endpoint, `sendToUser()` фан-аут на все subscriptions, 410/404 → delete subscription (endpoint мёртв), 3 consecutive failures → evict. `InternalPushController` теперь полноценный — `GET /public-key` возвращает VAPID public key, `POST /subscribe` персистит, `POST /unsubscribe` удаляет (POST вместо DELETE т.к. некоторые прокси страйпят body на DELETE).
+- **Env**: новые опциональные `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_CONTACT_EMAIL`. Без них web-push silently disabled — SPA получает empty publicKey и скрывает UI. Генерируются один раз через `npx web-push generate-vapid-keys`.
+- **SPA**: `web/src/lib/push.ts` — `detectPushSupport()`, `subscribeToPush()`, `unsubscribeFromPush()`. `getCurrentSubscription()` для рендеринга toggle state. Новый `web/src/lib/api-client/push.ts` namespace.
+- **Service Worker**: `web/src/sw.ts` расширен `push` event handler (рендерит OS notification через `showNotification`) + `notificationclick` handler (открывает `/dashboard` или `data.url`, фокусит существующую вкладку если есть).
+- **iOS 16.4+ PWA**: `detectPushSupport()` распознаёт iOS-without-standalone и возвращает `unsupported-ios-not-installed` — UI слой может показывать инструкцию «Установите на главный экран» вместо silent fail.
+- **Fanout integration**: `UserNotificationsService.fanout()` теперь параллельно вызывает `botNotifier.notifyUser()` И `webPushService.sendToUser()`. Один `UserNotificationEvent` → три канала доставки (feed + Telegram + web-push), каждый изолирован.
+
+### Backend изменения
+
+- `src/modules/notifications/services/{bot-notifier.client,user-notifications.service}.ts` — новые
+- `src/modules/notifications/notifications.module.ts` — обновлён, импортит `InternalPushModule`, экспортит `UserNotificationsService` + `BotNotifierClient`
+- `src/modules/web-auth/services/bot-signin-token.service.ts` — magic-link tokens (Redis-backed)
+- `src/modules/web-auth/{controllers/internal-web-auth.controller,web-auth.module}.ts` — добавлены bot-signin endpoints
+- `src/modules/internal-user/{services/internal-user-edge.service,controllers/internal-user.controller}.ts` — добавлен `markBotBlocked()` + endpoint
+- `src/modules/push/services/web-push.service.ts` — реализация поверх `web-push` пакета
+- `src/modules/push/internal-push.{controller,module}.ts` — заменён stub на полноценные endpoints
+- `src/modules/{partners,auto-renew,users}/...` — refactored to use `UserNotificationsService`
+- `src/common/config/env.schema.ts` — добавлены `REIWA_BOT_URL`, `REZEIS_INTERNAL_SHARED_SECRET`
+- `prisma/schema.prisma` — модель `WebPushSubscription` + relation на `User`
+
+### Reiwa изменения
+
+- `src/bot/pages/index.ts` + `bot/main.ts` — выкинуты pruned page registrars
+- `src/bot/pages/{activity,buy,plans,profile,promo,referral,subscription}.ts` — удалены
+- `src/bot/pages/{start,menu}.ts` — добавлен fetch magic-link token и forward через keyboard
+- `src/bot/widgets/main-keyboard.ts` — `attachSigninTokenToUrl()` + `signinToken` option на `MainKeyboardOptions`
+- `src/bot/listeners/internal-http-listener.ts` — новый, объединяет `/invalidate` + `/notify` + `/notify-broadcast`
+- `src/api/routes/{auth,push}.ts` — `bot-signin` endpoint + `public-key` endpoint + flat subscribe payload accepted
+- `src/infrastructure/admin-client/namespaces/{user,push,web-auth}.ts` — расширены: `markBotBlocked`, `getPublicKey`, `issueBotSigninToken`/`consumeBotSigninToken`
+- `web/src/sw.ts` — `push` + `notificationclick` event handlers
+- `web/src/lib/{push,api-client/push}.ts` — новые SPA-side push helpers
+- `web/src/features/auth/web-home-page.tsx` — magic-link consume на `?signin=` redirect
+
+### Pre-push checklist
+
+| Check | Result |
+|---|---|
+| Backend `tsc --noEmit -p tsconfig.json` | ✅ 0 errors |
+| Backend `eslint . --quiet` | ✅ 0 warnings |
+| Frontend `npm run build` (tsc + vite) | ✅ 0 errors |
+| Frontend `eslint . --quiet` | ✅ 0 warnings |
+| Reiwa `tsc --noEmit` | ✅ 0 errors |
+| Reiwa SPA `npm run build` | ✅ 0 errors |
+| Migration applied to local DB | ✅ `web_push_subscriptions` created + registered in `_prisma_migrations` |
+
+### Migration / breaking
+
+- **Миграция `20260529000000_web_push_subscriptions`** — добавляет таблицу. Чисто аддитивная.
+- **Reiwa-bot keyboard seed** — новый layout срабатывает только на чистом БД (existingCount > 0 guard). Существующие deployments сохраняют свою клавиатуру.
+- **Web-push отключён** пока оператор не сгенерирует VAPID keys и не положит в env. БД растёт с 0 subscriptions, делать ничего не нужно.
+- **`/api/v1/push/unsubscribe` теперь POST** (раньше DELETE). Старые SPA-бандлы в SW кэше могут пытаться DELETE — admin отвечает 404, BFF разрулит как идемпотентный success.
+- **REIWA_BOT_URL** default `http://reiwa-bot:5100` — заработает в docker-compose. В bare-metal deploy переопределить через env.
+- **VAPID keys** генерируются один раз: `npx web-push generate-vapid-keys` → пишем в `rezeis-admin/.env`. Без них push silently disabled, остальное работает.
+
+### Docker image
+
+Пересобирается на push tag `v0.5.0` → GHCR теги `v0.5.0`, `0.5.0`, `0.5`, `latest`.
+
+**Full Changelog**: https://github.com/dizzzable/rezeis/compare/v0.4.5...v0.5.0
+
+---
+
+# Rezeis Admin v0.4.5
 
 ## Reiwa BFF surface — internal modules ship for the SPA / Mini App / bot
 

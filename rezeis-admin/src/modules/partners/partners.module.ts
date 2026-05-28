@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 
 import { AuthModule } from '../auth/auth.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { AdminPartnersController } from './controllers/admin-partners.controller';
 import { InternalPartnerController } from './controllers/internal-partner.controller';
 import { AdminPartnerAnalyticsService } from './services/admin-partner-analytics.service';
@@ -22,7 +23,7 @@ import { PartnersService } from './services/partners.service';
  *    module) and retroactive partner-referral chain backfill on activation
  */
 @Module({
-  imports: [AuthModule],
+  imports: [AuthModule, NotificationsModule],
   controllers: [AdminPartnersController, InternalPartnerController],
   providers: [
     PartnersService,

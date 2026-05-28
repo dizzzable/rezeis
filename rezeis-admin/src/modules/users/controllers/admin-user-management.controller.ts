@@ -39,6 +39,7 @@ import { CurrentAdmin } from '../../auth/decorators/current-admin.decorator';
 import { AdminJwtAuthGuard } from '../../auth/guards/admin-jwt-auth.guard';
 import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.interface';
 import { extractRequestMetadata } from '../../auth/utils/request-metadata.util';
+import { UserNotificationsService } from '../../notifications/services/user-notifications.service';
 import { PartnerEarningsService } from '../../partners/services/partner-earnings.service';
 import { ReferralInviteLimitsService } from '../../referrals/services/referral-invite-limits.service';
 import { ReferralManualAttachService } from '../../referrals/services/referral-manual-attach.service';
@@ -57,6 +58,7 @@ export class AdminUserManagementController {
     private readonly referralManualAttachService: ReferralManualAttachService,
     private readonly referralInviteLimitsService: ReferralInviteLimitsService,
     private readonly remnawaveApiService: RemnawaveApiService,
+    private readonly userNotifications: UserNotificationsService,
   ) {}
 
   // ── User Profile ────────────────────────────────────────────────────────────
@@ -500,14 +502,15 @@ export class AdminUserManagementController {
     @Param('telegramId') telegramId: string,
     @Body() body: { message: string },
   ) {
-    // Create a notification event for the user
+    // Create a notification event for the user — UserNotificationsService
+    // writes the cabinet-feed row and (best-effort) pushes the rendered
+    // text to the bot for Telegram delivery in one call.
     const user = await this.findUserByTelegramId(telegramId);
-    await this.prismaService.userNotificationEvent.create({
-      data: {
-        userId: user.id,
-        type: 'ADMIN_MESSAGE',
-        payload: { text: body.message } as Prisma.InputJsonValue,
-      },
+    await this.userNotifications.create({
+      userId: user.id,
+      type: 'ADMIN_MESSAGE',
+      payload: { text: body.message },
+      preRenderedText: body.message,
     });
     return { sent: true };
   }

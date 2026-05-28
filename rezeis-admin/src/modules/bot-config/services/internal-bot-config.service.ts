@@ -148,9 +148,12 @@ export class InternalBotConfigService implements OnApplicationBootstrap {
           buttonId: seed.buttonId,
           label: seed.label,
           style: seed.style,
+          iconCustomEmojiId: seed.iconCustomEmojiId,
           visible: true,
           onePerRow: seed.onePerRow,
           orderIndex: seed.orderIndex,
+          actionType: seed.actionType,
+          actionTarget: seed.actionTarget,
         });
       } catch (err: unknown) {
         this.logger.warn(
@@ -200,52 +203,92 @@ interface DefaultButtonSeed {
   readonly style: BotButtonStyle;
   readonly onePerRow: boolean;
   readonly orderIndex: number;
+  readonly iconCustomEmojiId: string | null;
+  readonly actionType: BotButtonAction;
+  readonly actionTarget: string | null;
 }
 
 /**
- * Default reiwa keyboard layout.
+ * Default reiwa keyboard layout (v0.5.0 — Wave A bot pruning).
  *
- *   ┌──────────────────────────┐
- *   │       Мой кабинет        │  ← url, primary  (one row)
- *   ├──────────────────────────┤
- *   │        Пригласить        │  ← callback,     (one row)
- *   ├─────────────┬────────────┤
- *   │   Правила   │   Помощь   │  ← callback × 2  (shared row)
- *   └─────────────┴────────────┘
+ *   ┌───────────────────────────────────────────────────────┐
+ *   │  Открыть приложение                                    │  WEBAPP, primary
+ *   ├───────────────────────────────────────────────────────┤
+ *   │  Кабинет                                               │  URL → REIWA_DOMAIN
+ *   ├───────────────────────────────────────────────────────┤
+ *   │  Пригласить                                            │  CALLBACK, success
+ *   ├──────────────────────────┬────────────────────────────┤
+ *   │  Правила                 │  Помощь                     │  CALLBACK / SUPPORT_URL
+ *   └──────────────────────────┴────────────────────────────┘
  *
- * `kind` (url / callback) is hardcoded in the reiwa bot side so the
- * admin panel only needs to manage visual properties. The button ids
- * line up with reiwa's `bot.callbackQuery(id, ...)` handlers and the
- * static URL-button table in `bot/main.ts`.
+ *  - WebApp opens the Mini App inline. `actionType=WEBAPP` makes reiwa
+ *    forward the operator-supplied target if any; with the seed leaving
+ *    `actionTarget=null`, reiwa falls back to `${reiwaWebAppUrl}` from
+ *    its env (`REIWA_DOMAIN`).
+ *  - Кабинет opens the same SPA in the in-app Telegram browser. Wave C
+ *    will swap the URL for a magic-link `?signin=<token>` so the
+ *    browser session is auto-authenticated.
+ *  - Пригласить emits the `invite` callback that fetches a referral
+ *    token from admin and shows the share screen.
+ *  - Правила emits the `rules` callback (admin-managed screen).
+ *  - Помощь is `support_url` so reiwa renders a direct
+ *    `t.me/<support>?text=…` deep-link — one tap into support DM.
+ *
+ *  Premium custom emoji ids only render when the bot owner has Telegram
+ *  Premium; for everyone else Telegram silently ignores the field and
+ *  shows the label without an icon. The ids are fixed here so deployments
+ *  with a Premium owner share the same brand iconography out of the box.
  */
 const DEFAULT_BUTTONS: readonly DefaultButtonSeed[] = [
   {
-    buttonId: 'cabinet',
-    label: 'Мой кабинет',
+    buttonId: 'webapp',
+    label: 'Открыть приложение',
     style: BotButtonStyle.PRIMARY,
     onePerRow: true,
     orderIndex: 0,
+    iconCustomEmojiId: '5276127848644503161',
+    actionType: BotButtonAction.WEBAPP,
+    actionTarget: null,
+  },
+  {
+    buttonId: 'cabinet',
+    label: 'Кабинет',
+    style: BotButtonStyle.DEFAULT,
+    onePerRow: true,
+    orderIndex: 1,
+    iconCustomEmojiId: '5278589204207528856',
+    actionType: BotButtonAction.URL,
+    actionTarget: null,
   },
   {
     buttonId: 'invite',
     label: 'Пригласить',
-    style: BotButtonStyle.DEFAULT,
+    style: BotButtonStyle.SUCCESS,
     onePerRow: true,
-    orderIndex: 1,
+    orderIndex: 2,
+    iconCustomEmojiId: '5298668674532538341',
+    actionType: BotButtonAction.CALLBACK,
+    actionTarget: null,
   },
   {
     buttonId: 'rules',
     label: 'Правила',
     style: BotButtonStyle.DEFAULT,
     onePerRow: false,
-    orderIndex: 2,
+    orderIndex: 3,
+    iconCustomEmojiId: '5276314275994954605',
+    actionType: BotButtonAction.CALLBACK,
+    actionTarget: null,
   },
   {
     buttonId: 'help',
     label: 'Помощь',
     style: BotButtonStyle.DEFAULT,
     onePerRow: false,
-    orderIndex: 3,
+    orderIndex: 4,
+    iconCustomEmojiId: '5276229330131772747',
+    actionType: BotButtonAction.SUPPORT_URL,
+    actionTarget: null,
   },
 ];
 

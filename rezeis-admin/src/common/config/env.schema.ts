@@ -74,6 +74,19 @@ const environmentSchema = z.object({
   EMAIL_FROM_NAME: z.string().default('Rezeis'),
   EMAIL_USE_TLS: z.preprocess((v) => v === 'true' || v === true, z.boolean().default(true)),
   EMAIL_USE_SSL: z.preprocess((v) => v === 'true' || v === true, z.boolean().default(false)),
+
+  // ── Reiwa internal channel ───────────────────────────────────────────────
+  /** URL of reiwa-bot's internal HTTP listener (for /invalidate, /notify).
+   * Default targets the docker DNS name; override in dev / staging when
+   * the bot lives on a different host. Skipped entirely when unset. */
+  REIWA_BOT_URL: z.preprocess(
+    normalizeOptionalString,
+    z.string().url().default('http://reiwa-bot:5100'),
+  ),
+  /** Shared bearer token used by both the outbound /invalidate and /notify
+   * calls and by reiwa's incoming guard. Must match
+   * `REZEIS_INTERNAL_SHARED_SECRET` on reiwa side. Disabled when unset. */
+  REZEIS_INTERNAL_SHARED_SECRET: z.preprocess(normalizeOptionalString, z.string().min(16).optional()),
 });
 
 export type AppEnvironment = z.infer<typeof environmentSchema>;

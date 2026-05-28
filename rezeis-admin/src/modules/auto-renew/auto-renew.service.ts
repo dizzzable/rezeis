@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { SubscriptionStatus } from '@prisma/client';
 
 import { PrismaService } from '../../common/prisma/prisma.service';
+import { UserNotificationsService } from '../notifications/services/user-notifications.service';
 
 const BATCH_SIZE = 100;
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
@@ -23,7 +24,10 @@ const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 export class AutoRenewService {
   private readonly logger = new Logger(AutoRenewService.name);
 
-  public constructor(private readonly prismaService: PrismaService) {}
+  public constructor(
+    private readonly prismaService: PrismaService,
+    private readonly userNotifications: UserNotificationsService,
+  ) {}
 
   /**
    * Marks expired subscriptions as EXPIRED. Returns the count of affected
@@ -93,16 +97,15 @@ export class AutoRenewService {
       }
 
       const planName = readPlanName(sub.planSnapshot);
-      await this.prismaService.userNotificationEvent.create({
-        data: {
-          userId: sub.userId,
-          type: input.notificationType,
-          payload: {
-            subscriptionId: sub.id,
-            expiresAt: sub.expiresAt?.toISOString() ?? null,
-            planName,
-            daysLeft: input.daysAhead,
-          },
+      await this.userNotifications.create({
+        userId: sub.userId,
+        type: input.notificationType,
+        payload: {
+          subscriptionId: sub.id,
+          expiresAt: sub.expiresAt?.toISOString() ?? null,
+          plan: planName,
+          planName,
+          daysLeft: input.daysAhead,
         },
       });
       created++;

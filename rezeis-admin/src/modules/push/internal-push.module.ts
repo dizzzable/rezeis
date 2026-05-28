@@ -2,22 +2,27 @@ import { Module } from '@nestjs/common';
 
 import { AuthModule } from '../auth/auth.module';
 import { InternalPushController } from './internal-push.controller';
+import { WebPushService } from './services/web-push.service';
 
 /**
  * InternalPushModule
  * ──────────────────
- * Stub implementation of the web-push subscription endpoints reiwa
- * already calls. Today the controller acknowledges every request and
- * persists nothing — it exists so reiwa can ship the SPA push-subscribe
- * flow without dangling 404s.
+ * Browser web-push subscription persistence + delivery.
  *
- * When push delivery becomes a real product feature the controller
- * gains a `PushSubscription` Prisma model, an `Injectable` service that
- * stores endpoint+keys per user, and an outbound delivery worker. The
- * wire-level contract is fixed so reiwa won't need a follow-up rebuild.
+ * `WebPushService` owns the `WebPushSubscription` table, talks to
+ * push services (FCM / Mozilla / Apple) via the `web-push` library,
+ * and is consumed by `UserNotificationsService` for fan-out alongside
+ * the Telegram bot path. The controller exposes the SPA-facing
+ * subscribe / unsubscribe endpoints + the VAPID public key.
+ *
+ * Disabled out-of-the-box — operator must generate VAPID keys with
+ * `npx web-push generate-vapid-keys` and set the env vars before
+ * subscriptions can deliver.
  */
 @Module({
   imports: [AuthModule],
   controllers: [InternalPushController],
+  providers: [WebPushService],
+  exports: [WebPushService],
 })
 export class InternalPushModule {}

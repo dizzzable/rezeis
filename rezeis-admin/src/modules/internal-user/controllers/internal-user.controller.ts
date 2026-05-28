@@ -236,4 +236,23 @@ export class InternalUserController {
       (input) => this.subscriptionMutationsService.grantTrial(input),
     );
   }
+
+  // ── Bot block flag ───────────────────────────────────────────────────────
+
+  /**
+   * Sets `User.isBotBlocked = true` for the user identified by Telegram
+   * id. Called by reiwa-bot when Telegram returns 403 Forbidden during
+   * a `/notify` delivery attempt — that means the user has either
+   * blocked the bot or removed it from the chat. Persisting this flag
+   * stops the notification fanout from re-attempting and lets admin
+   * filter blocked users out of broadcasts (`broadcast-delivery.service`
+   * already uses this flag).
+   */
+  @Post('bot-blocked')
+  public async markBotBlocked(
+    @Body() body: InternalByTelegramQueryDto,
+  ): Promise<{ ok: true }> {
+    await this.internalUserEdgeService.markBotBlocked(body.telegramId);
+    return { ok: true };
+  }
 }
