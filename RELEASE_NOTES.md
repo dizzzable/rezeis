@@ -1,4 +1,38 @@
-﻿# Rezeis Admin v0.5.1
+﻿# Rezeis Admin v0.5.2
+
+## Hotfix — default keyboard seed completed (5 buttons)
+
+`v0.5.2` фиксит регрессию которая вылезла на свежем deploy v0.5.1: дефолтный seed reiwa-клавиатуры (`webapp` / `cabinet` / `invite` / `rules` / `help`) ронял первые две кнопки потому что `BotButtonsService.validateAction()` требовал `actionTarget` для `URL` / `WEBAPP` action types — а seed специально оставляет target пустым, чтобы reiwa подставил `${publicWebUrl}` / `${miniAppUrl}` из env (admin-managed `REIWA_DOMAIN`).
+
+### Что сделано
+
+- `validateAction()` теперь разрешает пустой `actionTarget` для `URL` / `WEBAPP` — возвращает `null` и доверяет reiwa fallback. Когда оператор задаёт URL — валидируем https:// строго; когда оставляет пустым — admin-managed default из env.
+- SPA-side валидатор уже имел собственный layer и продолжит подсказывать пользователю заполнить target в форме.
+
+### Backend изменения
+
+- `src/modules/bot-config/services/bot-buttons.service.ts` — `validateAction()` returns null on empty target instead of throwing
+
+### Migration / breaking
+
+Нет. Behavioural fix. Существующие deployments со seed'нутыми 4 кнопками НЕ будут пере-сидиться (`existingCount > 0` guard защищает). На свежем deployment теперь правильно сидятся все 5 кнопок с правильными action types.
+
+### Pre-push checklist
+
+| Check | Result |
+|---|---|
+| Backend `tsc --noEmit -p tsconfig.json` | ✅ 0 errors |
+| Backend `eslint . --quiet` | ✅ 0 warnings |
+
+### Docker image
+
+Пересобирается на push tag `v0.5.2` → GHCR теги `v0.5.2`, `0.5.2`, `0.5`, `latest`.
+
+**Full Changelog**: https://github.com/dizzzable/rezeis/compare/v0.5.1...v0.5.2
+
+---
+
+# Rezeis Admin v0.5.1
 
 ## Wave E — Bot notification channels + browser push opt-in UI
 

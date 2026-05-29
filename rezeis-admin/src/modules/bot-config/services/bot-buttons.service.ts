@@ -45,9 +45,14 @@ function validateAction(
     case BotButtonAction.URL:
     case BotButtonAction.WEBAPP: {
       if (trimmed.length === 0) {
-        throw new BadRequestException(
-          `actionTarget is required when actionType=${actionType} (must be a full https:// URL)`,
-        );
+        // Empty target is allowed at the model level — reiwa falls
+        // back to its env-driven `publicWebUrl` / `miniAppUrl` default
+        // when actionTarget is null. Operators creating buttons in
+        // the SPA still see client-side validation that nudges them
+        // to type a URL; this branch covers programmatic seeds and
+        // the "cabinet defaults" case where the URL is admin-managed
+        // via REIWA_DOMAIN rather than per-button.
+        return null;
       }
       if (!/^https?:\/\//i.test(trimmed)) {
         throw new BadRequestException(
