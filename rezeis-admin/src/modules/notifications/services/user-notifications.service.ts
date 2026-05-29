@@ -4,6 +4,7 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { WebPushService } from '../../push/services/web-push.service';
 
+import { BotNotificationChannelsService } from './bot-notification-channels.service';
 import { BotNotifierClient, NotifyButton } from './bot-notifier.client';
 import { NotificationTemplatesService } from './notification-templates.service';
 
@@ -56,6 +57,7 @@ export class UserNotificationsService {
     private readonly templatesService: NotificationTemplatesService,
     private readonly botNotifier: BotNotifierClient,
     private readonly webPushService: WebPushService,
+    private readonly channelsService: BotNotificationChannelsService,
   ) {}
 
   /**
@@ -137,6 +139,20 @@ export class UserNotificationsService {
           // browsers don't render `<b>` etc. inside Notification surfaces.
           title: this.extractTitle(input.type),
           body: stripHtml(text),
+        });
+      }
+
+      // Operator broadcast — push the same event to every active
+      // BotNotificationChannel whose kindFilter accepts `input.type`.
+      // Independent of the per-user delivery so an event with no
+      // matched recipient (web-only user with bot blocked) still
+      // reaches the operator-watching channels.
+      if (text !== null) {
+        await this.channelsService.broadcastToChannels({
+          eventId: input.eventId,
+          type: input.type,
+          text,
+          parseMode: 'HTML',
         });
       }
     } catch (err: unknown) {

@@ -1,4 +1,64 @@
-﻿# Rezeis Admin v0.5.0
+﻿# Rezeis Admin v0.5.1
+
+## Wave E — Bot notification channels + browser push opt-in UI
+
+`v0.5.1` достраивает Wave E поверх v0.5.0 fanout pipeline: оператор теперь управляет broadcast-каналами через админ-панель, юзер включает browser-уведомления в кабинете одним переключателем.
+
+### Что сделано
+
+- **`BotNotificationChannel` Prisma model** + миграция `20260529001000_bot_notification_channels` (применена + зарегистрирована). Полный CRUD через `BotNotificationChannelsService` (admin SPA-управляемые destinations: chat / supergroup / forum-topic с `kindFilter` exact-match).
+- **`AdminNotificationChannelsController`** (`/admin/notifications/channels`) под `AdminJwtAuthGuard` — list / create / update / delete (POST `:id/delete` для legacy proxy compatibility) + DTOs.
+- **`UserNotificationsService.fanout()` теперь 4-канальный**: cabinet feed (DB row) → Telegram (`bot.api.sendMessage`) → web-push (`webPushService.sendToUser`) → broadcast (`channelsService.broadcastToChannels`). Каждый канал изолирован, идемпотентность по `${eventId}:${channelId}` для каналов чтобы один event не дедуплицировался между destinations.
+- **Admin SPA**: новая вкладка «Каналы рассылок» в `/admin/notifications` — список каналов с toggle активности + edit/delete + create-dialog (форма с zod-валидацией chatId, кратким хинтом про @userinfobot, мульти-line `kindFilter`). Optimistic update toggle, optimistic-restore on error. Локализация ru/en.
+- **Reiwa SPA**: `notifications-page.tsx` теперь содержит `BrowserPushSection` — реальный toggle над встроенным notification permission flow. Вызывает `subscribeToPush()` / `unsubscribeFromPush()` из `lib/push.ts`. Capability-aware:
+  - `unsupported-browser` → секция скрыта целиком
+  - `unsupported-ios-not-installed` → toggle disabled, amber-info card «Установите на главный экран» с инструкцией
+  - `permission-denied` → toggle disabled, rose-info card с подсказкой про настройки браузера
+  - `supported` → toggle работает, состояние сохраняется в UI
+  - i18n keys `notifications.push*` (ru + en параллельно)
+
+### Backend изменения
+
+- `prisma/schema.prisma` — модель `BotNotificationChannel` + index на `is_active`
+- `prisma/migrations/20260529001000_bot_notification_channels/migration.sql`
+- `src/modules/notifications/services/bot-notification-channels.service.ts` — CRUD + `broadcastToChannels` (filter exact-match, fire-and-forget delivery, isolated failures, eventId per-channel)
+- `src/modules/notifications/controllers/admin-notification-channels.controller.ts`
+- `src/modules/notifications/dto/notification-channel.dto.ts` — Create / Update DTOs
+- `src/modules/notifications/services/user-notifications.service.ts` — fanout инжектит `BotNotificationChannelsService`, добавлен 4й канал
+- `src/modules/notifications/notifications.module.ts` — провайдер + контроллер зарегистрированы
+
+### Frontend изменения
+
+- `rezeis-admin/web/src/features/notifications/notifications-page.tsx` — новый таб «Channels» с `NotificationChannelsTab`, `ChannelEditDialog`, `ChannelCreateDialog`, `ChannelFormBody`, `parseKindFilter`. zod-resolved react-hook-form, optimistic update for toggle, manual confirm on delete
+- `rezeis-admin/web/src/i18n/features/notifications.{en,ru}.ts` — `notificationsPage.channels.*` keys (~30 entries) с corner cases для plural форм русского
+- `reiwa/web/src/features/settings/notifications-page.tsx` — `BrowserPushSection` extracted, capability detection, Switch driving subscribe/unsubscribe, info cards для iOS / permission-denied
+- `reiwa/web/src/i18n/{ru,en}.ts` — `notifications.push*` keys
+
+### Pre-push checklist
+
+| Check | Result |
+|---|---|
+| Backend `tsc --noEmit -p tsconfig.json` | ✅ 0 errors |
+| Backend `eslint . --quiet` | ✅ 0 warnings |
+| Frontend `npm run build` (tsc + vite) | ✅ 0 errors |
+| Frontend `eslint . --quiet` | ✅ 0 warnings |
+| Reiwa SPA `npm run build` | ✅ 0 errors |
+| Migration applied to local DB | ✅ `bot_notification_channels` created + registered |
+
+### Migration / breaking
+
+- Миграция `20260529001000_bot_notification_channels` — чисто аддитивная. Существующие deployments продолжат работать без рассылок в каналы (таблица пустая → fanout no-op).
+- API расширен — новый namespace `/admin/notifications/channels` под существующим `AdminJwtAuthGuard`. Старые endpoints не тронуты.
+
+### Docker image
+
+Пересобирается на push tag `v0.5.1` → GHCR теги `v0.5.1`, `0.5.1`, `0.5`, `latest`.
+
+**Full Changelog**: https://github.com/dizzzable/rezeis/compare/v0.5.0...v0.5.1
+
+---
+
+# Rezeis Admin v0.5.0
 
 ## Notification fanout pipeline + magic-link bot→browser + bot pruning
 

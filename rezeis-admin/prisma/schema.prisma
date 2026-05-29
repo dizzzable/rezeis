@@ -1465,6 +1465,43 @@ model WebPushSubscription {
   @@map("web_push_subscriptions")
 }
 
+/// Broadcast destination for SystemEvent-driven notifications. Each
+/// row is a Telegram chat (group / channel) the admin wants the bot
+/// to forward operator-relevant events to. `topicThreadId` is set
+/// when the destination is a forum topic — Telegram's
+/// `message_thread_id` API lets us address a specific topic inside a
+/// supergroup with topics enabled. `kindFilter` restricts which event
+/// types reach this destination (empty array means "all events").
+///
+/// Multiple rows can target the same chat with different filters
+/// (e.g. one row for `subscription.*` events into the support topic,
+/// another for `partner.*` events into the partner topic).
+model BotNotificationChannel {
+  id            String   @id @default(cuid()) @map("id")
+  /// Operator-supplied label shown in the admin UI ("Admin events",
+  /// "Partners channel", etc.). Not sent to Telegram.
+  name          String   @map("name")
+  /// Telegram chat id. Numeric (-100xxxxxxxxx for channels /
+  /// supergroups, -xxx for normal groups, +xxx for users which we
+  /// don't expect operators to use here). Stored as string so we
+  /// don't have to deal with bigint serialisation on the wire.
+  chatId        String   @map("chat_id")
+  /// Forum topic thread id when the destination is a topic. `null`
+  /// for a regular chat / channel.
+  topicThreadId Int?     @map("topic_thread_id")
+  /// SystemEvent type strings this destination accepts. Empty array
+  /// means "no filter" (every event the fanout service decides to
+  /// broadcast). Concrete patterns the operator types — exact match,
+  /// no globs (yet); the fanout layer keeps that surface predictable.
+  kindFilter    String[] @default([]) @map("kind_filter")
+  isActive      Boolean  @default(true) @map("is_active")
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt     DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@index([isActive])
+  @@map("bot_notification_channels")
+}
+
 /// Singleton row (id = 1).
 model Settings {
   id                        Int        @id @default(1) @map("id")
