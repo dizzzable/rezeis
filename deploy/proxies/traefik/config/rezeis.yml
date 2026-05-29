@@ -1,0 +1,17 @@
+# Traefik dynamic configuration for the rezeis panel (443-only, BYO cert).
+# Replace REPLACE_WITH_YOUR_DOMAIN with the panel hostname.
+
+http:
+  routers:
+    rezeis:
+      rule: "Host(`REPLACE_WITH_YOUR_DOMAIN`)"
+      entrypoints:
+        - https
+      tls: {}
+      service: rezeis
+
+  services:
+    rezeis:
+      loadBalancer:
+        servers:
+          - url: "http://rezeis:8000"

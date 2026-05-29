@@ -4,8 +4,10 @@
 #  Runs in remnawave-network so rezeis can reach remnawave:3000 directly
 #  and the same reverse proxy (Traefik/Caddy/Nginx) can route to rezeis:8000.
 #
-#  Сначала поднимается reverse-proxy-стек из deploy/proxies/<выбранный>/, затем
-#  эта compose-запись. Подробности — в deploy/proxies/README.md.
+#  Сначала поднимается reverse-proxy-стек из ../deploy/proxies/<выбранный>/,
+#  затем эта compose-запись. Все прокси слушают только :443 (без порта 80),
+#  TLS на собственном сертификате (../deploy/proxies/gen-self-signed-cert.sh
+#  или свой). Подробности — в ../deploy/proxies/README.md.
 #
 #  Usage:
 #    docker compose up -d

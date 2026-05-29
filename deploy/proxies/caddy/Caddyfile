@@ -1,0 +1,26 @@
+# rezeis panel — Caddy reverse proxy (443-only, bring-your-own cert)
+#
+# Replace REPLACE_WITH_YOUR_DOMAIN with the panel hostname.
+#
+# No ACME, no port 80. TLS is served from a certificate you provide in
+# ./certs (self-signed via ../gen-self-signed-cert.sh, a Cloudflare Origin
+# cert, or one you issued yourself). The panel container listens on
+# rezeis:8000 inside remnawave-network.
+{
+	# Disable the automatic HTTP->HTTPS redirect vhost on :80 — we don't
+	# bind :80 at all.
+	auto_https disable_redirects
+}
+
+https://REPLACE_WITH_YOUR_DOMAIN {
+	tls /etc/caddy/certs/fullchain.pem /etc/caddy/certs/privkey.key
+	reverse_proxy * http://rezeis:8000
+}
+
+# Stealth default: any TLS connection that hits the IP without the right
+# SNI gets a self-signed handshake + empty 204, so the panel hostname is
+# not discoverable by scanning the server IP.
+:443 {
+	tls internal
+	respond 204
+}
