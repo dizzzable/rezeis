@@ -42,6 +42,18 @@ export class UpdateTelegramDeliveryDto {
   @IsOptional()
   @IsObject()
   public readonly topics?: Record<string, number | null>;
+
+  /**
+   * When true, user-facing notifications (subscription expiry, referral
+   * rewards, partner earnings, …) are ALSO mirrored into this same chat
+   * so the operator sees the exact pings users receive. Independent of
+   * the per-user delivery — toggling this never changes what the user
+   * gets in their DM / cabinet, only whether the operator chat gets a
+   * copy.
+   */
+  @IsOptional()
+  @IsBoolean()
+  public readonly mirrorUserNotifications?: boolean;
 }
 
 /**

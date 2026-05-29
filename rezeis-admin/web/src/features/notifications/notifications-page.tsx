@@ -126,10 +126,6 @@ export default function NotificationsPage() {
             <MessageSquare className="h-3.5 w-3.5" />
             {t('notificationsPage.tabs.system')}
           </TabsTrigger>
-          <TabsTrigger value="channels" className="gap-1.5">
-            <Hash className="h-3.5 w-3.5" />
-            {t('notificationsPage.tabs.channels')}
-          </TabsTrigger>
           <TabsTrigger value="settings" className="gap-1.5">
             <Settings2 className="h-3.5 w-3.5" />
             {t('notificationsPage.tabs.settings')}
@@ -142,10 +138,6 @@ export default function NotificationsPage() {
 
         <TabsContent value="system" className="pt-4">
           <SystemNotificationsTab />
-        </TabsContent>
-
-        <TabsContent value="channels" className="pt-4">
-          <NotificationChannelsTab />
         </TabsContent>
 
         <TabsContent value="settings" className="pt-4">
@@ -429,6 +421,7 @@ function TelegramDeliveryForm({ settings }: TelegramDeliveryFormProps) {
   const schema = z
     .object({
       enabled: z.boolean(),
+      mirrorUserNotifications: z.boolean(),
       chatId: z
         .string()
         .trim()
@@ -454,6 +447,7 @@ function TelegramDeliveryForm({ settings }: TelegramDeliveryFormProps) {
     resolver: zodResolver(schema),
     defaultValues: {
       enabled: tgConfig.enabled === true,
+      mirrorUserNotifications: tgConfig.mirrorUserNotifications === true,
       chatId: typeof tgConfig.chatId === 'string' ? tgConfig.chatId : '',
       topicId: typeof tgConfig.topicId === 'number' ? String(tgConfig.topicId) : '',
       topics: initialTopics,
@@ -469,6 +463,7 @@ function TelegramDeliveryForm({ settings }: TelegramDeliveryFormProps) {
       }
       return api.patch('/admin/settings/system-notifications/telegram', {
         enabled: values.enabled,
+        mirrorUserNotifications: values.mirrorUserNotifications,
         chatId: values.chatId.trim() || null,
         topicId: values.topicId.trim() && /^\d+$/.test(values.topicId.trim())
           ? parseInt(values.topicId.trim(), 10)
@@ -626,6 +621,32 @@ function TelegramDeliveryForm({ settings }: TelegramDeliveryFormProps) {
 
             <Separator />
 
+            {/* Mirror user notifications */}
+            <FormField
+              control={form.control}
+              name="mirrorUserNotifications"
+              render={({ field }) => (
+                <FormItem className="flex items-center justify-between rounded-lg border px-4 py-3 space-y-0">
+                  <div className="flex items-center gap-2">
+                    <Bell className="h-4 w-4 text-muted-foreground" />
+                    <div>
+                      <FormLabel className="font-medium">
+                        {t('notificationsPage.delivery.mirrorLabel')}
+                      </FormLabel>
+                      <FormDescription className="text-xs">
+                        {t('notificationsPage.delivery.mirrorDescription')}
+                      </FormDescription>
+                    </div>
+                  </div>
+                  <FormControl>
+                    <Switch checked={field.value} onCheckedChange={field.onChange} />
+                  </FormControl>
+                </FormItem>
+              )}
+            />
+
+            <Separator />
+
             <div className="flex gap-3">
               <Button type="submit" disabled={saveMutation.isPending}>
                 {saveMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
@@ -648,476 +669,6 @@ function TelegramDeliveryForm({ settings }: TelegramDeliveryFormProps) {
   )
 }
 
-
-// ── Notification Channels Tab ────────────────────────────────────────────────
-
-interface BotNotificationChannel {
-  id: string
-  name: string
-  chatId: string
-  topicThreadId: number | null
-  kindFilter: string[]
-  isActive: boolean
-  createdAt: string
-  updatedAt: string
-}
-
-const channelFormSchema = z.object({
-  name: z.string().trim().min(1).max(120),
-  chatId: z.string().trim().regex(/^-?\d{1,32}$/),
-  topicThreadId: z
-    .union([z.string().trim().regex(/^\d+$/), z.literal('')])
-    .optional()
-    .transform((v) => (v === undefined || v === '' ? null : Number(v))),
-  kindFilter: z.string().trim().optional().default(''),
-  isActive: z.boolean().default(true),
-})
-type ChannelFormValues = z.infer<typeof channelFormSchema>
-
-/**
- * Operator panel for `BotNotificationChannel` rows. Each row pins
- * a Telegram chat / topic the bot fans out events to. `kindFilter`
- * is operator-typed and supports exact event-type slugs (one per
- * line); empty filter = "every event".
- *
- * Wave E shipped read/create/edit/delete; future iteration may add
- * a "send test message" affordance once the bot exposes a dedicated
- * test-broadcast endpoint.
- */
-function NotificationChannelsTab(): JSX.Element {
-  const { t } = useTranslation()
-  const queryClient = useQueryClient()
-  const [editing, setEditing] = useState<BotNotificationChannel | null>(null)
-  const [creating, setCreating] = useState(false)
-
-  const { data: channels, isLoading } = useQuery({
-    queryKey: ['notification-channels'],
-    queryFn: async () =>
-      (await api.get<BotNotificationChannel[]>('/admin/notifications/channels')).data,
-  })
-
-  const toggleMutation = useMutation({
-    mutationFn: async ({ id, isActive }: { readonly id: string; readonly isActive: boolean }) => {
-      await api.patch(`/admin/notifications/channels/${id}`, { isActive })
-    },
-    onMutate: async ({ id, isActive }) => {
-      await queryClient.cancelQueries({ queryKey: ['notification-channels'] })
-      const previous = queryClient.getQueryData<BotNotificationChannel[]>(['notification-channels'])
-      queryClient.setQueryData<BotNotificationChannel[]>(['notification-channels'], (old) =>
-        old ? old.map((c) => (c.id === id ? { ...c, isActive } : c)) : old,
-      )
-      return { previous }
-    },
-    onError: (_err, _vars, ctx) => {
-      if (ctx?.previous) queryClient.setQueryData(['notification-channels'], ctx.previous)
-      toast.error(t('notificationsPage.channels.toasts.updateFailed'))
-    },
-    onSettled: () => {
-      void queryClient.invalidateQueries({ queryKey: ['notification-channels'] })
-    },
-  })
-
-  const deleteMutation = useMutation({
-    mutationFn: async (id: string) => {
-      await api.post(`/admin/notifications/channels/${id}/delete`)
-    },
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ['notification-channels'] })
-      toast.success(t('notificationsPage.channels.toasts.deleted'))
-    },
-    onError: () => toast.error(t('notificationsPage.channels.toasts.deleteFailed')),
-  })
-
-  return (
-    <Card>
-      <CardHeader>
-        <div className="flex items-center justify-between">
-          <div>
-            <CardTitle className="flex items-center gap-2">
-              <Hash className="h-4 w-4" /> {t('notificationsPage.channels.title')}
-            </CardTitle>
-            <CardDescription>{t('notificationsPage.channels.description')}</CardDescription>
-          </div>
-          <Button size="sm" onClick={() => setCreating(true)}>
-            <Send className="h-4 w-4 mr-1" />
-            {t('notificationsPage.channels.create')}
-          </Button>
-        </div>
-      </CardHeader>
-      <CardContent>
-        {isLoading ? (
-          <div className="space-y-2">
-            {[0, 1, 2].map((i) => (
-              <Skeleton key={i} className="h-16 w-full" />
-            ))}
-          </div>
-        ) : !channels || channels.length === 0 ? (
-          <div className="flex flex-col items-center gap-3 py-12 text-muted-foreground">
-            <Hash className="h-10 w-10 opacity-30" />
-            <p>{t('notificationsPage.channels.empty')}</p>
-          </div>
-        ) : (
-          <div className="space-y-2">
-            {channels.map((channel) => (
-              <div
-                key={channel.id}
-                className="flex items-center gap-4 rounded-md border px-4 py-3"
-              >
-                <div className="min-w-0 flex-1 space-y-1">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="font-medium">{channel.name}</span>
-                    <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">
-                      {channel.chatId}
-                    </code>
-                    {channel.topicThreadId !== null && (
-                      <Badge variant="outline" className="text-[10px]">
-                        {t('notificationsPage.channels.topic', { id: channel.topicThreadId })}
-                      </Badge>
-                    )}
-                    {!channel.isActive && (
-                      <Badge variant="secondary" className="text-[10px]">
-                        {t('notificationsPage.channels.inactive')}
-                      </Badge>
-                    )}
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    {channel.kindFilter.length === 0
-                      ? t('notificationsPage.channels.filterAll')
-                      : t('notificationsPage.channels.filterCount', {
-                          count: channel.kindFilter.length,
-                          kinds: channel.kindFilter.slice(0, 3).join(', '),
-                          more:
-                            channel.kindFilter.length > 3
-                              ? ` +${channel.kindFilter.length - 3}`
-                              : '',
-                        })}
-                  </p>
-                </div>
-                <div className="flex items-center gap-2">
-                  <Switch
-                    checked={channel.isActive}
-                    onCheckedChange={(isActive) =>
-                      toggleMutation.mutate({ id: channel.id, isActive })
-                    }
-                    aria-label={t('notificationsPage.channels.toggleActive')}
-                  />
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => setEditing(channel)}
-                  >
-                    <Edit2 className="h-3.5 w-3.5" />
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => {
-                      if (window.confirm(t('notificationsPage.channels.deleteConfirm'))) {
-                        deleteMutation.mutate(channel.id)
-                      }
-                    }}
-                  >
-                    <Power className="h-3.5 w-3.5 text-rose-500" />
-                  </Button>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </CardContent>
-
-      <ChannelEditDialog
-        channel={editing}
-        open={editing !== null}
-        onOpenChange={(open) => {
-          if (!open) setEditing(null)
-        }}
-      />
-      <ChannelCreateDialog open={creating} onOpenChange={setCreating} />
-    </Card>
-  )
-}
-
-// ── Channel dialogs ──────────────────────────────────────────────────────────
-
-interface ChannelDialogProps {
-  readonly open: boolean
-  readonly onOpenChange: (open: boolean) => void
-}
-
-interface ChannelEditDialogProps extends ChannelDialogProps {
-  readonly channel: BotNotificationChannel | null
-}
-
-function ChannelEditDialog({
-  channel,
-  open,
-  onOpenChange,
-}: ChannelEditDialogProps): JSX.Element {
-  const { t } = useTranslation()
-  const queryClient = useQueryClient()
-  const form = useForm<ChannelFormValues>({
-    resolver: zodResolver(channelFormSchema) as Resolver<ChannelFormValues>,
-    defaultValues: {
-      name: '',
-      chatId: '',
-      topicThreadId: null,
-      kindFilter: '',
-      isActive: true,
-    },
-  })
-
-  useEffect(() => {
-    if (channel !== null && open) {
-      form.reset({
-        name: channel.name,
-        chatId: channel.chatId,
-        topicThreadId: channel.topicThreadId,
-        kindFilter: channel.kindFilter.join('\n'),
-        isActive: channel.isActive,
-      })
-    }
-  }, [channel, open, form])
-
-  const updateMutation = useMutation({
-    mutationFn: async (values: ChannelFormValues) => {
-      if (channel === null) return
-      await api.patch(`/admin/notifications/channels/${channel.id}`, {
-        name: values.name,
-        chatId: values.chatId,
-        topicThreadId: values.topicThreadId,
-        kindFilter: parseKindFilter(values.kindFilter),
-        isActive: values.isActive,
-      })
-    },
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ['notification-channels'] })
-      toast.success(t('notificationsPage.channels.toasts.updated'))
-      onOpenChange(false)
-    },
-    onError: () => toast.error(t('notificationsPage.channels.toasts.updateFailed')),
-  })
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>{t('notificationsPage.channels.editTitle')}</DialogTitle>
-        </DialogHeader>
-        <ChannelFormBody form={form} />
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>
-            {t('notificationsPage.channels.cancel')}
-          </Button>
-          <Button
-            onClick={form.handleSubmit((values) => updateMutation.mutate(values))}
-            disabled={updateMutation.isPending}
-          >
-            {updateMutation.isPending ? (
-              <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-            ) : (
-              <Save className="h-4 w-4 mr-2" />
-            )}
-            {t('notificationsPage.channels.save')}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  )
-}
-
-function ChannelCreateDialog({
-  open,
-  onOpenChange,
-}: ChannelDialogProps): JSX.Element {
-  const { t } = useTranslation()
-  const queryClient = useQueryClient()
-  const form = useForm<ChannelFormValues>({
-    resolver: zodResolver(channelFormSchema) as Resolver<ChannelFormValues>,
-    defaultValues: {
-      name: '',
-      chatId: '',
-      topicThreadId: null,
-      kindFilter: '',
-      isActive: true,
-    },
-  })
-
-  useEffect(() => {
-    if (open) {
-      form.reset({
-        name: '',
-        chatId: '',
-        topicThreadId: null,
-        kindFilter: '',
-        isActive: true,
-      })
-    }
-  }, [open, form])
-
-  const createMutation = useMutation({
-    mutationFn: async (values: ChannelFormValues) => {
-      await api.post('/admin/notifications/channels', {
-        name: values.name,
-        chatId: values.chatId,
-        topicThreadId: values.topicThreadId,
-        kindFilter: parseKindFilter(values.kindFilter),
-        isActive: values.isActive,
-      })
-    },
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ['notification-channels'] })
-      toast.success(t('notificationsPage.channels.toasts.created'))
-      onOpenChange(false)
-    },
-    onError: () => toast.error(t('notificationsPage.channels.toasts.createFailed')),
-  })
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>{t('notificationsPage.channels.createTitle')}</DialogTitle>
-        </DialogHeader>
-        <ChannelFormBody form={form} />
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>
-            {t('notificationsPage.channels.cancel')}
-          </Button>
-          <Button
-            onClick={form.handleSubmit((values) => createMutation.mutate(values))}
-            disabled={createMutation.isPending}
-          >
-            {createMutation.isPending ? (
-              <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-            ) : (
-              <Send className="h-4 w-4 mr-2" />
-            )}
-            {t('notificationsPage.channels.create')}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  )
-}
-
-interface ChannelFormBodyProps {
-  readonly form: ReturnType<typeof useForm<ChannelFormValues>>
-}
-
-function ChannelFormBody({ form }: ChannelFormBodyProps): JSX.Element {
-  const { t } = useTranslation()
-  return (
-    <Form {...form}>
-      <div className="space-y-4">
-        <FormField
-          control={form.control}
-          name="name"
-          render={({ field }) => (
-            <FormItem>
-              <FormLabel>{t('notificationsPage.channels.fields.name')}</FormLabel>
-              <FormControl>
-                <Input
-                  {...field}
-                  placeholder={t('notificationsPage.channels.fields.namePlaceholder')}
-                />
-              </FormControl>
-              <FormMessage />
-            </FormItem>
-          )}
-        />
-        <FormField
-          control={form.control}
-          name="chatId"
-          render={({ field }) => (
-            <FormItem>
-              <FormLabel>{t('notificationsPage.channels.fields.chatId')}</FormLabel>
-              <FormControl>
-                <Input
-                  {...field}
-                  placeholder="-1001234567890"
-                  inputMode="numeric"
-                />
-              </FormControl>
-              <FormDescription className="text-[11px]">
-                {t('notificationsPage.channels.fields.chatIdHint')}
-              </FormDescription>
-              <FormMessage />
-            </FormItem>
-          )}
-        />
-        <FormField
-          control={form.control}
-          name="topicThreadId"
-          render={({ field }) => (
-            <FormItem>
-              <FormLabel>{t('notificationsPage.channels.fields.topicThreadId')}</FormLabel>
-              <FormControl>
-                <Input
-                  value={field.value === null ? '' : String(field.value)}
-                  onChange={(e) => field.onChange(e.target.value)}
-                  placeholder={t('notificationsPage.channels.fields.topicThreadIdPlaceholder')}
-                  inputMode="numeric"
-                />
-              </FormControl>
-              <FormDescription className="text-[11px]">
-                {t('notificationsPage.channels.fields.topicThreadIdHint')}
-              </FormDescription>
-              <FormMessage />
-            </FormItem>
-          )}
-        />
-        <FormField
-          control={form.control}
-          name="kindFilter"
-          render={({ field }) => (
-            <FormItem>
-              <FormLabel>{t('notificationsPage.channels.fields.kindFilter')}</FormLabel>
-              <FormControl>
-                <Textarea
-                  {...field}
-                  className="font-mono text-xs min-h-24"
-                  placeholder="subscription.expired&#10;partner.earning"
-                />
-              </FormControl>
-              <FormDescription className="text-[11px]">
-                {t('notificationsPage.channels.fields.kindFilterHint')}
-              </FormDescription>
-              <FormMessage />
-            </FormItem>
-          )}
-        />
-        <FormField
-          control={form.control}
-          name="isActive"
-          render={({ field }) => (
-            <FormItem className="flex items-center justify-between rounded-lg border p-3">
-              <div>
-                <FormLabel className="font-medium">
-                  {t('notificationsPage.channels.fields.isActive')}
-                </FormLabel>
-                <FormDescription className="text-xs">
-                  {t('notificationsPage.channels.fields.isActiveHint')}
-                </FormDescription>
-              </div>
-              <FormControl>
-                <Switch checked={field.value} onCheckedChange={field.onChange} />
-              </FormControl>
-            </FormItem>
-          )}
-        />
-      </div>
-    </Form>
-  )
-}
-
-function parseKindFilter(input: string): string[] {
-  const lines = input
-    .split(/[\n,]/)
-    .map((entry) => entry.trim())
-    .filter((entry) => entry.length > 0)
-  return Array.from(new Set(lines))
-}
 
 // ── Email SMTP Delivery Settings ─────────────────────────────────────────────
 

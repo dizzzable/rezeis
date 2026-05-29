@@ -1,4 +1,70 @@
-﻿# Rezeis Admin v0.5.3
+﻿# Rezeis Admin v0.5.4
+
+## Вариант A — слияние «Каналов рассылок» в «Настройки доставки»
+
+`v0.5.4` убирает дублирующую сущность. В v0.5.1 я добавил отдельную вкладку «Каналы рассылок» (`BotNotificationChannel`) — оказалось это пересекалось с уже существующими «Настройками доставки» в Telegram. У вас уже есть Broadcast для рекламных рассылок, поэтому отдельная CRUD-таблица каналов была лишней. Слил всё в один Telegram-delivery surface.
+
+### Что сделано
+
+- **Удалена сущность `BotNotificationChannel`**: модель, миграция (drop), сервис, контроллер, DTO, SPA-вкладка «Каналы рассылок», все i18n-ключи `channels.*`. Таблица `bot_notification_channels` дропнута (была добавлена в v0.5.1, на практике не заполнялась).
+- **Новый тоггл `mirrorUserNotifications`** в «Настройки доставки → Доставка в Telegram». Когда включён, копия каждого пользовательского уведомления (истечение, рефералы, партнёрские выплаты…) зеркалится в тот же операторский чат, в топик `USER` если задан в маршрутизации по категориям. Не меняет то, что получают сами пользователи.
+- **`UserNotificationsService.mirrorToOperatorChat()`** читает `systemNotifications.telegram` напрямую из Settings (без cross-module зависимости) и шлёт через bot `/notify-broadcast` с idempotency-суффиксом `:operator-mirror`.
+
+### Архитектура «после»
+
+Один `UserNotificationEvent` веером уходит в:
+1. **Лента кабинета** (DB row — всегда)
+2. **Telegram пользователю** в личку (если есть telegramId + не заблокировал + тип включён в тогглах)
+3. **Web-push** на browser/PWA-подписки
+4. **Операторский чат** (если включён `mirrorUserNotifications` в настройках доставки)
+
+Системные события (`user.registered`, `payment.completed`…) идут своим потоком через `SystemEventsService.deliverTelegram()` в тот же чат с маршрутизацией по категориям.
+
+### Где это видно
+
+- **Admin → Уведомления → Настройки доставки**: новый тоггл «Зеркалить уведомления пользователей» под маршрутизацией по категориям.
+- Вкладка «Каналы рассылок» **удалена** — её функция теперь это один тоггл.
+
+### Backend изменения
+
+- `prisma/schema.prisma` — удалена модель `BotNotificationChannel`
+- `prisma/migrations/20260529120000_drop_bot_notification_channels/migration.sql` — DROP TABLE
+- `src/modules/settings/dto/update-telegram-delivery.dto.ts` — `mirrorUserNotifications` field
+- `src/modules/settings/services/settings.service.ts` — `mirrorUserNotifications` в config + `getTelegramDeliveryConfig()` getter
+- `src/modules/settings/controllers/settings.controller.ts` — форвард флага
+- `src/modules/notifications/services/user-notifications.service.ts` — `mirrorToOperatorChat()` + `readTelegramDeliveryConfig()`, удалена зависимость от `BotNotificationChannelsService`
+- `src/modules/notifications/notifications.module.ts` — убраны channels controller/service
+- удалены: `services/bot-notification-channels.service.ts`, `controllers/admin-notification-channels.controller.ts`, `dto/notification-channel.dto.ts`
+
+### Frontend изменения
+
+- `web/src/features/notifications/notifications-page.tsx` — удалён `NotificationChannelsTab` + диалоги (~470 строк), добавлен тоггл mirror в `TelegramDeliveryForm`
+- `web/src/i18n/features/notifications.{en,ru}.ts` — `delivery.mirrorLabel/mirrorDescription`, удалён блок `channels.*` + таб-ключ
+
+### Pre-push checklist
+
+| Check | Result |
+|---|---|
+| Backend `tsc --noEmit -p tsconfig.json` | ✅ 0 errors |
+| Backend `eslint . --quiet` | ✅ 0 warnings |
+| Frontend `npm run build` | ✅ 0 errors |
+| Frontend `eslint . --quiet` | ✅ 0 warnings |
+| Drop migration applied to local DB | ✅ |
+
+### Migration / breaking
+
+- `20260529120000_drop_bot_notification_channels` дропает таблицу. Безопасно — добавлена в v0.5.1, не использовалась.
+- API `/admin/notifications/channels` удалён. Не было реальных потребителей кроме одноимённой вкладки.
+
+### Docker image
+
+Пересобирается на push tag `v0.5.4` → GHCR теги `v0.5.4`, `0.5.4`, `0.5`, `latest`.
+
+**Full Changelog**: https://github.com/dizzzable/rezeis/compare/v0.5.3...v0.5.4
+
+---
+
+# Rezeis Admin v0.5.3
 
 ## Connect notification toggles to the fanout + fix type-key mismatch
 

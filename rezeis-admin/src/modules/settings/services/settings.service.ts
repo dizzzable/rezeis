@@ -51,6 +51,7 @@ interface UpdateTelegramDeliveryInput {
   readonly chatId?: string | null;
   readonly topicId?: number | null;
   readonly topics?: Record<string, number | null>;
+  readonly mirrorUserNotifications?: boolean;
 }
 
 interface SendTelegramDeliveryTestInput {
@@ -455,6 +456,10 @@ export class SettingsService {
           nextTelegram.topics = mergedTopics;
           updatedFields.push('topics');
         }
+        if (input.mirrorUserNotifications !== undefined) {
+          nextTelegram.mirrorUserNotifications = input.mirrorUserNotifications;
+          updatedFields.push('mirrorUserNotifications');
+        }
 
         if (nextTelegram.enabled === true && (nextTelegram.chatId === null || nextTelegram.chatId === undefined)) {
           throw new BadRequestException('TELEGRAM_DELIVERY_CHAT_REQUIRED');
@@ -484,6 +489,17 @@ export class SettingsService {
         return updated;
       },
     );
+    return readTelegramDeliveryConfig(settings.systemNotifications);
+  }
+
+  /**
+   * Read-only accessor for the Telegram delivery config. Consumed by
+   * `UserNotificationsService` to decide whether to mirror user
+   * notifications into the operator chat (variant A — one Telegram
+   * delivery surface instead of a separate broadcast-channels table).
+   */
+  public async getTelegramDeliveryConfig(): Promise<TelegramDeliveryConfig> {
+    const settings = await this.getOrCreateSettingsRecord(this.prismaService);
     return readTelegramDeliveryConfig(settings.systemNotifications);
   }
 
@@ -806,6 +822,13 @@ export interface TelegramDeliveryConfig {
   readonly chatId: string | null;
   readonly topicId: number | null;
   readonly topics: Record<string, number | null>;
+  /**
+   * Mirror user-facing notifications into the operator chat. When true,
+   * `UserNotificationsService` posts a copy of every user notification
+   * to `chatId` (routed to the `USER` topic when set). Default false —
+   * the operator chat stays a system-events firehose unless opted in.
+   */
+  readonly mirrorUserNotifications: boolean;
 }
 
 function readJsonObject(value: unknown): Record<string, unknown> {
@@ -837,6 +860,7 @@ function readTelegramDeliveryConfig(systemNotifications: unknown): TelegramDeliv
     chatId: typeof tg.chatId === 'string' && tg.chatId.length > 0 ? tg.chatId : null,
     topicId: typeof tg.topicId === 'number' ? tg.topicId : null,
     topics: normalisedTopics,
+    mirrorUserNotifications: tg.mirrorUserNotifications === true,
   };
 }
 

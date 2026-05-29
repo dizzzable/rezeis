@@ -133,6 +133,7 @@ export class SettingsController {
       chatId: body.chatId,
       topicId: body.topicId,
       topics: body.topics,
+      mirrorUserNotifications: body.mirrorUserNotifications,
     });
   }
 

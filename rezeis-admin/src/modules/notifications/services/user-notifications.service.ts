@@ -4,10 +4,17 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { WebPushService } from '../../push/services/web-push.service';
 
-import { BotNotificationChannelsService } from './bot-notification-channels.service';
 import { BotNotifierClient, NotifyButton } from './bot-notifier.client';
 import { NotificationTemplatesService } from './notification-templates.service';
 import { isNotificationDeliveryEnabled, resolveToggleKey } from '../utils/notification-toggle.util';
+
+/**
+ * Categories the user notifications fall under for topic routing when
+ * mirrored into the operator chat. User notifications are inherently
+ * about the user's account state, so they route to the `USER` topic
+ * (falling back to the default topic / general chat).
+ */
+const USER_NOTIFICATION_CATEGORY = 'USER';
 
 interface CreateUserNotificationInput {
   readonly userId: string;
@@ -58,7 +65,6 @@ export class UserNotificationsService {
     private readonly templatesService: NotificationTemplatesService,
     private readonly botNotifier: BotNotifierClient,
     private readonly webPushService: WebPushService,
-    private readonly channelsService: BotNotificationChannelsService,
   ) {}
 
   /**
@@ -162,18 +168,13 @@ export class UserNotificationsService {
         });
       }
 
-      // Operator broadcast — push the same event to every active
-      // BotNotificationChannel whose kindFilter accepts `input.type`.
-      // Independent of the per-user delivery so an event with no
-      // matched recipient (web-only user with bot blocked) still
-      // reaches the operator-watching channels.
+      // Operator mirror — when the operator enabled "mirror user
+      // notifications" in Telegram delivery settings, post a copy of
+      // this notification into the operator chat (routed to the USER
+      // topic when configured). Variant A: one Telegram delivery
+      // surface instead of a separate broadcast-channels table.
       if (rendered !== null) {
-        await this.channelsService.broadcastToChannels({
-          eventId: input.eventId,
-          type: input.type,
-          text: rendered.html,
-          parseMode: 'HTML',
-        });
+        await this.mirrorToOperatorChat(input.eventId, rendered.html);
       }
     } catch (err: unknown) {
       this.logger.warn(
@@ -182,6 +183,29 @@ export class UserNotificationsService {
         }`,
       );
     }
+  }
+
+  /**
+   * Mirror a rendered user notification into the operator's Telegram
+   * delivery chat when `mirrorUserNotifications` is enabled. Reads the
+   * same `systemNotifications.telegram` config the system-events
+   * firehose uses, routing the copy to the `USER` topic (or the
+   * default topic / general chat). Fire-and-forget — never throws.
+   */
+  private async mirrorToOperatorChat(eventId: string, html: string): Promise<void> {
+    const config = await this.readTelegramDeliveryConfig();
+    if (!config.enabled || !config.mirror || config.chatId === null) return;
+    const topicThreadId =
+      config.topics[USER_NOTIFICATION_CATEGORY] ?? config.defaultTopicId ?? undefined;
+    await this.botNotifier.notifyBroadcast({
+      // Suffix so the bot's idempotency LRU treats the operator-mirror
+      // copy as distinct from the per-user delivery of the same event.
+      eventId: `${eventId}:operator-mirror`,
+      chatId: config.chatId,
+      topicThreadId: topicThreadId ?? undefined,
+      text: html,
+      parseMode: 'HTML',
+    });
   }
 
   /**
@@ -208,6 +232,62 @@ export class UserNotificationsService {
         }`,
       );
       return {};
+    }
+  }
+
+  /**
+   * Read the Telegram delivery config (`systemNotifications.telegram`)
+   * from the singleton `Settings` row. Mirrors the shape
+   * `SettingsService.getTelegramDeliveryConfig` returns but read
+   * directly via Prisma to avoid a cross-module dependency on
+   * SettingsModule (which would create an import cycle through
+   * AuthModule). Returns delivery-disabled defaults on any miss.
+   */
+  private async readTelegramDeliveryConfig(): Promise<{
+    enabled: boolean;
+    mirror: boolean;
+    chatId: string | null;
+    defaultTopicId: number | null;
+    topics: Record<string, number | null>;
+  }> {
+    try {
+      const settings = await this.prismaService.settings.findUnique({
+        where: { id: 1 },
+        select: { systemNotifications: true },
+      });
+      const sysRaw = settings?.systemNotifications;
+      const sys =
+        sysRaw !== null && typeof sysRaw === 'object' && !Array.isArray(sysRaw)
+          ? (sysRaw as Record<string, unknown>)
+          : {};
+      const tgRaw = sys.telegram;
+      const tg =
+        tgRaw !== null && typeof tgRaw === 'object' && !Array.isArray(tgRaw)
+          ? (tgRaw as Record<string, unknown>)
+          : {};
+      const topicsRaw = tg.topics;
+      const topicsObj =
+        topicsRaw !== null && typeof topicsRaw === 'object' && !Array.isArray(topicsRaw)
+          ? (topicsRaw as Record<string, unknown>)
+          : {};
+      const topics: Record<string, number | null> = {};
+      for (const [key, value] of Object.entries(topicsObj)) {
+        topics[key.toUpperCase()] = typeof value === 'number' ? value : null;
+      }
+      return {
+        enabled: tg.enabled === true,
+        mirror: tg.mirrorUserNotifications === true,
+        chatId: typeof tg.chatId === 'string' && tg.chatId.length > 0 ? tg.chatId : null,
+        defaultTopicId: typeof tg.topicId === 'number' ? tg.topicId : null,
+        topics,
+      };
+    } catch (err: unknown) {
+      this.logger.warn(
+        `Failed to read Telegram delivery config, skipping operator mirror: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return { enabled: false, mirror: false, chatId: null, defaultTopicId: null, topics: {} };
     }
   }
 
