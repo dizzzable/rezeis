@@ -131,11 +131,11 @@ export class AutoRenewService {
     const expired = await this.markExpiredSubscriptions();
     const warnings3d = await this.createExpiryWarnings({
       daysAhead: 3,
-      notificationType: 'subscription_expiring_3d',
+      notificationType: 'expires_in_3_days',
     });
     const warnings1d = await this.createExpiryWarnings({
       daysAhead: 1,
-      notificationType: 'subscription_expiring_1d',
+      notificationType: 'expires_in_1_days',
     });
     return { expired, warnings3d, warnings1d };
   }

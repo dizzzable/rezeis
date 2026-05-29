@@ -1,4 +1,54 @@
-﻿# Rezeis Admin v0.5.2
+﻿# Rezeis Admin v0.5.3
+
+## Connect notification toggles to the fanout + fix type-key mismatch
+
+`v0.5.3` устраняет разрыв который мешал админ-странице уведомлений работать по-настоящему: тогглы `userNotifications` сохранялись в `Settings`, но `UserNotificationsService` их **не читал** — выключить уведомление в панели не давало эффекта. Заодно пофикшен латентный баг с расхождением `type`-строк, из-за которого expiry-уведомления не находили шаблон и уходили без текста.
+
+### Что сделано
+
+- **Toggle gating подключён**. `UserNotificationsService.fanout()` теперь читает `Settings.userNotifications` и пропускает push-каналы (Telegram + web-push + broadcast) когда оператор выключил конкретный тип. Семантика opt-out: явный `false` глушит, всё остальное (отсутствует / null) = включено, поэтому свежая инсталляция шлёт всё. **Лента кабинета не затрагивается** — `UserNotificationEvent` row всё равно создаётся, юзер видит уведомление в in-app feed, гасится только push.
+- **Explicit-send bypass**: операторские «отправить сообщение пользователю» (`preRenderedText`) не гейтятся тогглами — это разовое действие, а не автоматический тип.
+- **Type-key alias map** (`notification-toggle.util.ts`): нормализует исторические расхождения — `subscription_expiring_3d` → `expires_in_3_days`, `partner.earning` → `partner_earning`, `referral.*` → `referral_*`. Одна каноническая строка теперь драйвит И lookup шаблона И toggle-гейт.
+- **Латентный баг исправлен**: `renderMessage()` (бывший `renderText`) теперь резолвит шаблон по канонической ключу с fallback на сырой `type`. До этого auto-renew слал `subscription_expiring_3d`, шаблон назывался `expires_in_3_days`, lookup проваливался → текст null → Telegram-доставка молча пропускалась. Теперь резолвится корректно.
+- **Web-push title исправлен**: раньше web-push banner заголовок был сырым `type` (`expires_in_3_days`), теперь это отрендеренный `template.title` («⏳ Подписка истекает через 3 дня»).
+- **Auto-renew теперь шлёт канонические ключи** (`expires_in_3_days` / `expires_in_1_days`) напрямую, чтобы лента кабинета хранила чистые type-строки.
+
+### Backend изменения
+
+- `src/modules/notifications/utils/notification-toggle.util.ts` — новый: `resolveToggleKey()` + `isNotificationDeliveryEnabled()`
+- `src/modules/notifications/services/user-notifications.service.ts` — toggle gate в начале `fanout()`, `readUserNotificationToggles()` читает Settings singleton, `renderMessage()` возвращает `{title, body, html}` с canonical-key lookup
+- `src/modules/auto-renew/auto-renew.service.ts` — runCycle шлёт `expires_in_3_days` / `expires_in_1_days`
+
+### Frontend изменения
+
+- `web/src/i18n/features/notifications.{en,ru}.ts` — уточнено описание `userNotifications` (выключение глушит push, но оставляет в ленте кабинета)
+
+### Где это видно
+
+- **Admin → Уведомления → вкладка «Пользовательские»**: тогглы теперь реально гейтят доставку. Выключи «Подписка истекает через 3 дня» → бот/push перестанут слать этот тип, но в ленте кабинета он остаётся.
+- **В Telegram**: expiry-уведомления теперь приходят с настоящим текстом шаблона (раньше молча не доходили из-за mismatch).
+
+### Pre-push checklist
+
+| Check | Result |
+|---|---|
+| Backend `tsc --noEmit -p tsconfig.json` | ✅ 0 errors |
+| Backend `eslint . --quiet` | ✅ 0 warnings |
+| Frontend `npm run build` | ✅ 0 errors |
+
+### Migration / breaking
+
+Нет. Поведенческий fix + новая util. Существующие deployments: если оператор раньше выключал тогглы (думая что они работают) — теперь они **начнут** работать как ожидалось. Стоит проверить что нужные типы включены после апдейта.
+
+### Docker image
+
+Пересобирается на push tag `v0.5.3` → GHCR теги `v0.5.3`, `0.5.3`, `0.5`, `latest`.
+
+**Full Changelog**: https://github.com/dizzzable/rezeis/compare/v0.5.2...v0.5.3
+
+---
+
+# Rezeis Admin v0.5.2
 
 ## Hotfix — default keyboard seed completed (5 buttons)
 

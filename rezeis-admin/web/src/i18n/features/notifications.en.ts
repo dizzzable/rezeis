@@ -58,7 +58,7 @@ export const en = {
     },
     userNotifications: {
       title: 'User notifications',
-      description: 'Which notifications are sent to users via the Telegram bot',
+      description: 'Which notifications reach users via the Telegram bot and browser push. Turning one off keeps it in the in-app cabinet feed but stops the push.',
     },
     systemNotifications: {
       title: 'System notifications',
