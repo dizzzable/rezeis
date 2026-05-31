@@ -14,6 +14,7 @@ export interface AddOnInterface {
   readonly name: string;
   readonly description: string | null;
   readonly type: AddOnType;
+  readonly icon: string | null;
   readonly value: number;
   readonly isActive: boolean;
   readonly orderIndex: number;
@@ -59,6 +60,7 @@ export class AddOnsService {
     name: string;
     description?: string | null;
     type: AddOnType;
+    icon?: string | null;
     value: number;
     isActive?: boolean;
     applicablePlanIds?: string[];
@@ -76,6 +78,7 @@ export class AddOnsService {
         name: input.name.trim(),
         description: input.description?.trim() ?? null,
         type: input.type,
+        icon: normalizeIcon(input.icon),
         value: input.value,
         isActive: input.isActive ?? true,
         orderIndex: (lastRecord?.orderIndex ?? 0) + 1,
@@ -99,6 +102,7 @@ export class AddOnsService {
       name: string;
       description: string | null;
       type: AddOnType;
+      icon: string | null;
       value: number;
       isActive: boolean;
       applicablePlanIds: string[];
@@ -112,6 +116,7 @@ export class AddOnsService {
     if (input.name !== undefined) updateData.name = input.name.trim();
     if (input.description !== undefined) updateData.description = input.description?.trim() ?? null;
     if (input.type !== undefined) updateData.type = input.type;
+    if (input.icon !== undefined) updateData.icon = normalizeIcon(input.icon);
     if (input.value !== undefined) {
       if (input.value <= 0) throw new BadRequestException('Add-on value must be positive');
       updateData.value = input.value;
@@ -147,6 +152,7 @@ function mapAddOn(record: AddOn & { prices?: readonly AddOnPrice[] }): AddOnInte
     name: record.name,
     description: record.description,
     type: record.type,
+    icon: record.icon,
     value: record.value,
     isActive: record.isActive,
     orderIndex: record.orderIndex,
@@ -159,4 +165,11 @@ function mapAddOn(record: AddOn & { prices?: readonly AddOnPrice[] }): AddOnInte
     createdAt: record.createdAt.toISOString(),
     updatedAt: record.updatedAt.toISOString(),
   };
+}
+
+/** Trims an icon key; empty/blank → null so it falls back to the default. */
+function normalizeIcon(icon: string | null | undefined): string | null {
+  if (typeof icon !== 'string') return null;
+  const trimmed = icon.trim();
+  return trimmed.length > 0 ? trimmed.slice(0, 64) : null;
 }

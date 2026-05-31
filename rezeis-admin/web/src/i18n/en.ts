@@ -1370,6 +1370,9 @@ export const en = {
       },
     },
   },
+  iconPicker: {
+    auto: 'Auto',
+  },
   planForm: {
     name: 'Plan name',
     namePlaceholder: 'Premium 50GB',
@@ -2162,6 +2165,9 @@ export const en = {
       valueHintTraffic: 'Amount in GB',
       valueHintDevices: 'Number of device slots',
       active: 'Active',
+      icon: 'Add-on icon',
+      iconAuto: 'Auto',
+      iconHint: 'Shown on the add-on card in the cabinet. "Auto" uses a type-derived icon.',
       plans: 'Applicable plans',
       plansHint: 'Empty = available for all plans',
       noPlans: 'No plans found',

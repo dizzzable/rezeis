@@ -22,13 +22,8 @@ import { Separator } from '@/components/ui/separator'
 import { Switch } from '@/components/ui/switch'
 import { cn } from '@/lib/utils'
 import { remnawaveApi } from '@/features/remnawave/remnawave-api'
-import { CUSTOM_ICONS_QUERY_KEY, getCustomIcons } from '@/features/settings/custom-icons-api'
-import { CustomIconView } from '@/features/settings/custom-icon-view'
+import { IconPicker } from '@/features/settings/icon-picker'
 import { usePlans, type Plan } from './plans-api'
-import { PLAN_ICON_OPTIONS } from './plan-icon-options'
-
-/** Prefix marking a `plan.icon` value as a reference to a custom uploaded icon. */
-const CUSTOM_ICON_PREFIX = 'custom:'
 
 const PLAN_TYPES = ['TRAFFIC', 'DEVICES', 'BOTH', 'UNLIMITED'] as const
 const AVAILABILITIES = ['ALL', 'NEW', 'EXISTING', 'INVITED', 'ALLOWED', 'TRIAL'] as const
@@ -131,13 +126,6 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
     queryKey: ['remnawave', 'external-squads'],
     queryFn: remnawaveApi.getExternalSquads,
     retry: 1,
-  })
-
-  // Operator's custom icon library — appended to the built-in icon picker.
-  const { data: customIcons } = useQuery({
-    queryKey: CUSTOM_ICONS_QUERY_KEY,
-    queryFn: getCustomIcons,
-    staleTime: 60_000,
   })
 
   // All plans for upgrade/replacement picker (exclude current plan)
@@ -248,58 +236,7 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
         {/* Plan icon — shown on the cabinet plan card */}
         <div className="space-y-2">
           <Label>{t('planForm.icon')}</Label>
-          <div className="flex flex-wrap gap-2">
-            <button
-              type="button"
-              onClick={() => setIcon(null)}
-              aria-label={t('planForm.iconNone')}
-              title={t('planForm.iconNone')}
-              className={cn(
-                'flex h-9 w-9 items-center justify-center rounded-lg border text-[10px] font-medium text-muted-foreground transition-all',
-                icon === null ? 'border-primary ring-2 ring-primary/40' : 'border-border hover:border-primary/40',
-              )}
-            >
-              {t('planForm.iconAuto')}
-            </button>
-            {PLAN_ICON_OPTIONS.map(({ key, Icon }) => (
-              <button
-                key={key}
-                type="button"
-                onClick={() => setIcon(key)}
-                aria-label={key}
-                title={key}
-                className={cn(
-                  'flex h-9 w-9 items-center justify-center rounded-lg border transition-all',
-                  icon === key
-                    ? 'border-primary bg-primary/10 text-primary ring-2 ring-primary/40'
-                    : 'border-border text-muted-foreground hover:border-primary/40',
-                )}
-              >
-                <Icon className="h-4 w-4" />
-              </button>
-            ))}
-            {/* Operator's custom uploaded icons */}
-            {(customIcons ?? []).map((custom) => {
-              const value = `${CUSTOM_ICON_PREFIX}${custom.id}`
-              return (
-                <button
-                  key={value}
-                  type="button"
-                  onClick={() => setIcon(value)}
-                  aria-label={custom.name}
-                  title={custom.name}
-                  className={cn(
-                    'flex h-9 w-9 items-center justify-center rounded-lg border transition-all',
-                    icon === value
-                      ? 'border-primary bg-primary/10 ring-2 ring-primary/40'
-                      : 'border-border hover:border-primary/40',
-                  )}
-                >
-                  <CustomIconView url={custom.url} color={custom.color} className="h-4 w-4" />
-                </button>
-              )
-            })}
-          </div>
+          <IconPicker value={icon} onChange={setIcon} autoLabel={t('planForm.iconNone')} />
           <p className="text-xs text-muted-foreground">{t('planForm.iconHint')}</p>
         </div>
       </div>

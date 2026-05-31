@@ -25,6 +25,7 @@ import { Separator } from '@/components/ui/separator'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { FadeIn } from '@/lib/motion'
 import { usePlans } from '@/features/plans/plans-api'
+import { IconPicker } from '@/features/settings/icon-picker'
 import { AddOnsStatsTab } from './add-ons-stats-tab'
 
 const CURRENCIES = ['RUB', 'USD', 'USDT', 'TON', 'XTR', 'EUR'] as const
@@ -41,6 +42,7 @@ interface AddOn {
   name: string
   description: string | null
   type: 'EXTRA_TRAFFIC' | 'EXTRA_DEVICES'
+  icon: string | null
   value: number
   isActive: boolean
   orderIndex: number
@@ -52,6 +54,7 @@ interface AddOnFormData {
   name: string
   description?: string
   type: 'EXTRA_TRAFFIC' | 'EXTRA_DEVICES'
+  icon?: string | null
   value: number
   isActive: boolean
   applicablePlanIds: string[]
@@ -340,6 +343,7 @@ function AddOnDialog({
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [type, setType] = useState<'EXTRA_TRAFFIC' | 'EXTRA_DEVICES'>('EXTRA_TRAFFIC')
+  const [icon, setIcon] = useState<string | null>(null)
   const [value, setValue] = useState('1')
   const [isActive, setIsActive] = useState(true)
   const [selectedPlanIds, setSelectedPlanIds] = useState<string[]>([])
@@ -356,6 +360,7 @@ function AddOnDialog({
       setName(addOn.name)
       setDescription(addOn.description ?? '')
       setType(addOn.type)
+      setIcon(addOn.icon ?? null)
       setValue(addOn.value.toString())
       setIsActive(addOn.isActive)
       setSelectedPlanIds(addOn.applicablePlanIds)
@@ -371,6 +376,7 @@ function AddOnDialog({
       setName('')
       setDescription('')
       setType('EXTRA_TRAFFIC')
+      setIcon(null)
       setValue('1')
       setIsActive(true)
       setSelectedPlanIds([])
@@ -412,6 +418,7 @@ function AddOnDialog({
       name,
       description: description || undefined,
       type,
+      icon: icon ?? null,
       value: parseInt(value, 10),
       isActive,
       applicablePlanIds: selectedPlanIds,
@@ -503,6 +510,12 @@ function AddOnDialog({
           <div className="flex items-center justify-between">
             <Label>{t('addOnsPage.form.active')}</Label>
             <Switch checked={isActive} onCheckedChange={setIsActive} />
+          </div>
+
+          <div className="space-y-2">
+            <Label>{t('addOnsPage.form.icon')}</Label>
+            <IconPicker value={icon} onChange={setIcon} autoLabel={t('addOnsPage.form.iconAuto')} />
+            <p className="text-[11px] text-muted-foreground">{t('addOnsPage.form.iconHint')}</p>
           </div>
 
           <Separator />

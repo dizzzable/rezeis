@@ -1852,6 +1852,10 @@ model AddOn {
   name              String    @map("name")
   description       String?   @map("description")
   type              AddOnType @map("type")
+  /// Optional icon shown on the add-on card in the reiwa cabinet. Either a
+  /// built-in lucide glyph key or `custom:<id>` referencing the operator's
+  /// custom icon library. `null` falls back to a type-derived default icon.
+  icon              String?   @map("icon")
   /// Magnitude of the add-on:
   ///   - EXTRA_TRAFFIC → GB to add
   ///   - EXTRA_DEVICES → device slots to add

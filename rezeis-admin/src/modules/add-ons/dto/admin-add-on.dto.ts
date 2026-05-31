@@ -9,6 +9,7 @@ import {
   IsOptional,
   IsString,
   MaxLength,
+  ValidateIf,
   ValidateNested,
 } from 'class-validator';
 import { Type } from 'class-transformer';
@@ -34,6 +35,12 @@ export class AdminAddOnCreateDto {
 
   @IsEnum(AddOnType)
   public type!: AddOnType;
+
+  @IsOptional()
+  @ValidateIf((_object: object, value: unknown): boolean => value !== null)
+  @IsString()
+  @MaxLength(64)
+  public icon?: string | null;
 
   @IsNumber()
   public value!: number;
@@ -69,6 +76,12 @@ export class AdminAddOnUpdateDto {
   @IsOptional()
   @IsEnum(AddOnType)
   public type?: AddOnType;
+
+  @IsOptional()
+  @ValidateIf((_object: object, value: unknown): boolean => value !== null)
+  @IsString()
+  @MaxLength(64)
+  public icon?: string | null;
 
   @IsOptional()
   @IsNumber()
