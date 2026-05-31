@@ -1,4 +1,6 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Patch, Post, Req, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, HttpCode, HttpStatus, Patch, Post, Put, Req, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { ApiConsumes, ApiOperation } from '@nestjs/swagger';
 import { Request } from 'express';
 
 import { CurrentAdmin } from '../../auth/decorators/current-admin.decorator';
@@ -6,6 +8,7 @@ import { AdminJwtAuthGuard } from '../../auth/guards/admin-jwt-auth.guard';
 import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.interface';
 import { extractRequestMetadata } from '../../auth/utils/request-metadata.util';
 import { UpdateBrandingSettingsDto } from '../dto/update-branding-settings.dto';
+import { UpdateCustomIconsDto } from '../dto/custom-icons.dto';
 import { UpdateNotificationsTogglesDto } from '../dto/update-notifications-toggles.dto';
 import { UpdatePlatformSettingsDto } from '../dto/update-platform-settings.dto';
 import {
@@ -17,7 +20,9 @@ import {
   UpdateTelegramDeliveryDto,
 } from '../dto/update-telegram-delivery.dto';
 import { BrandingSettingsInterface } from '../interfaces/branding-settings.interface';
+import { CustomIconInterface } from '../interfaces/custom-icon.interface';
 import { PlatformSettingsInterface } from '../interfaces/platform-settings.interface';
+import { IconUploadService, ICON_MAX_FILE_SIZE, IconUploadedInterface } from '../services/icon-upload.service';
 import { SettingsService } from '../services/settings.service';
 import { PaymentOpsAlertSettingsInterface } from '../../../common/interfaces/payment-ops-alert-settings.interface';
 
@@ -27,7 +32,10 @@ import { PaymentOpsAlertSettingsInterface } from '../../../common/interfaces/pay
 @Controller('admin/settings')
 @UseGuards(AdminJwtAuthGuard)
 export class SettingsController {
-  public constructor(private readonly settingsService: SettingsService) {}
+  public constructor(
+    private readonly settingsService: SettingsService,
+    private readonly iconUploadService: IconUploadService,
+  ) {}
 
   /**
    * Returns the singleton platform settings payload merged with the
@@ -234,6 +242,57 @@ export class SettingsController {
       currentAdmin,
       requestMetadata: extractRequestMetadata(request),
       updateBrandingSettingsDto,
+    });
+  }
+
+  // ── Custom icon library ────────────────────────────────────────────────
+
+  /**
+   * Returns the operator's custom icon library.
+   */
+  @Get('icons')
+  public async getCustomIcons(): Promise<CustomIconInterface[]> {
+    return this.settingsService.getCustomIcons();
+  }
+
+  /**
+   * Replaces the whole custom-icon library (add / rename / recolour / delete).
+   */
+  @Put('icons')
+  public async updateCustomIcons(
+    @Body() body: UpdateCustomIconsDto,
+    @CurrentAdmin() currentAdmin: CurrentAdminInterface,
+    @Req() request: Request,
+  ): Promise<CustomIconInterface[]> {
+    return this.settingsService.updateCustomIcons({
+      currentAdmin,
+      requestMetadata: extractRequestMetadata(request),
+      icons: body.icons,
+    });
+  }
+
+  /**
+   * Uploads a single icon file (svg/png/webp) and returns its public URL.
+   * The SPA then adds an entry to the library and saves via `PUT /icons`.
+   */
+  @Post('icons/upload')
+  @UseInterceptors(
+    FileInterceptor('file', {
+      limits: { fileSize: ICON_MAX_FILE_SIZE },
+    }),
+  )
+  @ApiConsumes('multipart/form-data')
+  @ApiOperation({ summary: 'Upload a custom icon and return its public URL' })
+  public async uploadCustomIcon(
+    @UploadedFile() file: Express.Multer.File | undefined,
+  ): Promise<IconUploadedInterface> {
+    if (!file) {
+      throw new BadRequestException('No file uploaded');
+    }
+    return this.iconUploadService.persist({
+      buffer: file.buffer,
+      originalName: file.originalname,
+      mimeType: file.mimetype,
     });
   }
 }

@@ -15,7 +15,7 @@
 
 import { lazy, Suspense } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Archive, FileCog, Key, Paintbrush, Palette, Settings, Shield } from 'lucide-react'
+import { Archive, FileCog, Image, Key, Paintbrush, Palette, Settings, Shield } from 'lucide-react'
 
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -36,6 +36,7 @@ const SecurityTab = lazy(
   withFeatureBundle('twoFactor', () => import('@/features/two-factor/two-factor-page')),
 )
 const BrandingTab = lazy(() => import('./panel-branding-tab'))
+const IconsTab = lazy(() => import('./panel-icons-tab'))
 const BackupTab = lazy(() => import('@/features/backup/backup-page'))
 const ConfigPortabilityTab = lazy(() => import('@/features/config-portability/config-portability-page'))
 
@@ -87,6 +88,10 @@ export default function PanelSettingsHub() {
             <Paintbrush className="h-3.5 w-3.5" />
             {t('panelSettings.tabs.branding')}
           </TabsTrigger>
+          <TabsTrigger value="icons" className="gap-1.5">
+            <Image className="h-3.5 w-3.5" />
+            {t('panelSettings.tabs.icons')}
+          </TabsTrigger>
           <TabsTrigger value="config" className="gap-1.5">
             <FileCog className="h-3.5 w-3.5" />
             {t('panelSettings.tabs.config')}
@@ -120,6 +125,12 @@ export default function PanelSettingsHub() {
         <TabsContent value="branding">
           <Suspense fallback={<TabFallback />}>
             <BrandingTab />
+          </Suspense>
+        </TabsContent>
+
+        <TabsContent value="icons">
+          <Suspense fallback={<TabFallback />}>
+            <IconsTab />
           </Suspense>
         </TabsContent>
 

@@ -1499,6 +1499,9 @@ model Settings {
   brandingSettings          Json       @default("{}") @map("branding_settings")
   /// Bot menu visual settings (donor: settings.bot_menu_settings JSON).
   botMenuSettings           Json       @default("{}") @map("bot_menu_settings")
+  /// Operator-uploaded custom icon library, reusable across the panel and the
+  /// reiwa cabinet. Array of `{ id, name, url, color }`.
+  customIcons               Json       @default("[]") @map("custom_icons")
   updatedAt                 DateTime   @updatedAt @map("updated_at") @db.Timestamptz(3)
 
   @@map("settings")

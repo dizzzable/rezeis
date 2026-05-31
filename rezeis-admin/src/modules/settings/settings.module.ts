@@ -6,6 +6,7 @@ import { InternalBrandingController } from './controllers/internal-branding.cont
 import { InternalEventsController } from './controllers/internal-events.controller';
 import { InternalPlatformPolicyController } from './controllers/internal-platform-policy.controller';
 import { SettingsController } from './controllers/settings.controller';
+import { IconUploadService } from './services/icon-upload.service';
 import { SettingsService } from './services/settings.service';
 
 /**
@@ -19,7 +20,7 @@ import { SettingsService } from './services/settings.service';
     InternalBrandingController,
     InternalEventsController,
   ],
-  providers: [SettingsService],
+  providers: [SettingsService, IconUploadService],
   exports: [SettingsService],
 })
 export class SettingsModule {}

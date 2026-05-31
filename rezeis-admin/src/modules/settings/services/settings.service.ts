@@ -16,6 +16,7 @@ import {
 import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.interface';
 import { RequestMetadataInterface } from '../../auth/interfaces/request-metadata.interface';
 import { UpdateBrandingSettingsDto } from '../dto/update-branding-settings.dto';
+import { UpdateCustomIconsDto } from '../dto/custom-icons.dto';
 import {
   SendPaymentOpsAlertTestDto,
   UpdatePaymentOpsAlertSettingsDto,
@@ -24,12 +25,15 @@ import { UpdatePlatformSettingsDto } from '../dto/update-platform-settings.dto';
 import {
   BrandingSettingsInterface,
 } from '../interfaces/branding-settings.interface';
+import { CustomIconInterface } from '../interfaces/custom-icon.interface';
 import { InternalPlatformPolicyInterface } from '../interfaces/internal-platform-policy.interface';
 import { PlatformSettingsInterface } from '../interfaces/platform-settings.interface';
 import {
   mergeBrandingSettings,
   readBrandingSettings,
 } from '../utils/branding-settings.util';
+import { readCustomIcons } from '../utils/custom-icons.util';
+import { IconUploadService } from './icon-upload.service';
 
 interface UpdatePlatformSettingsInput {
   readonly currentAdmin: CurrentAdminInterface;
@@ -100,6 +104,18 @@ interface UpdatePartnerSettingsInput {
   readonly patch: Record<string, unknown>;
 }
 
+interface UpdateCustomIconsInput {
+  readonly currentAdmin: CurrentAdminInterface;
+  readonly requestMetadata: RequestMetadataInterface;
+  /** Full replacement list of the operator's custom icon library. */
+  readonly icons: ReadonlyArray<{
+    readonly id: string;
+    readonly name: string;
+    readonly url: string;
+    readonly color?: string | null;
+  }>;
+}
+
 interface UpdatePlatformSettingsChanges {
   readonly updatedFields: readonly string[];
   readonly data: Prisma.SettingsUpdateInput;
@@ -124,6 +140,7 @@ const DEFAULT_INTERNAL_PLATFORM_POLICY: InternalPlatformPolicyInterface = {
 export class SettingsService {
   public constructor(
     private readonly prismaService: PrismaService,
+    private readonly iconUploadService: IconUploadService,
     @Optional()
     private readonly httpService?: HttpService,
     @Inject(paymentsConfig.KEY)
@@ -641,6 +658,61 @@ export class SettingsService {
     const settings = await this.getSettingsRecord(this.prismaService);
     if (!settings) return {};
     return readJsonObject(settings.partnerSettings);
+  }
+
+  // ── Custom icon library ────────────────────────────────────────────────
+
+  /**
+   * Returns the operator's custom icon library (normalized + validated).
+   */
+  public async getCustomIcons(): Promise<CustomIconInterface[]> {
+    const settings = await this.getSettingsRecord(this.prismaService);
+    return readCustomIcons(settings?.customIcons ?? null);
+  }
+
+  /**
+   * Replaces the whole custom-icon library with the supplied list. Any icon
+   * file that is no longer referenced after the save is deleted from disk so
+   * the upload dir doesn't accumulate orphans (best-effort).
+   */
+  public async updateCustomIcons(
+    input: UpdateCustomIconsInput,
+  ): Promise<CustomIconInterface[]> {
+    const next: CustomIconInterface[] = input.icons.map((icon) => ({
+      id: icon.id,
+      name: icon.name,
+      url: icon.url,
+      color: icon.color ?? null,
+    }));
+
+    const settings = await this.prismaService.$transaction(async (tx) => {
+      const existing = await this.getOrCreateSettingsRecord(tx);
+      const previous = readCustomIcons(existing.customIcons);
+      const updated = await tx.settings.update({
+        where: { id: existing.id },
+        data: { customIcons: next as unknown as Prisma.InputJsonValue },
+      });
+      await tx.adminAuditLog.create({
+        data: {
+          action: 'settings.customIcons.update',
+          ipAddress: input.requestMetadata.remoteAddress,
+          userAgent: input.requestMetadata.userAgent,
+          metadata: {
+            requestId: input.requestMetadata.requestId,
+            count: next.length,
+          },
+          adminUser: { connect: { id: input.currentAdmin.id } },
+        } as never,
+      });
+      return { updated, previous };
+    });
+
+    // Reap files for icons removed in this save (outside the txn — disk IO).
+    const keptUrls = new Set(next.map((icon) => icon.url));
+    const removed = settings.previous.filter((icon) => !keptUrls.has(icon.url));
+    await Promise.all(removed.map((icon) => this.iconUploadService.remove(icon.url)));
+
+    return readCustomIcons(settings.updated.customIcons);
   }
 
   private async getSettingsRecord(settingsClient: SettingsClient): Promise<Settings | null> {

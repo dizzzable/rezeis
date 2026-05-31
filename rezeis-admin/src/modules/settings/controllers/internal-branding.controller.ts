@@ -5,6 +5,7 @@ import { ConfigType } from '@nestjs/config';
 import { appConfig } from '../../../common/config/app.config';
 import { InternalAdminAuthGuard } from '../../auth/guards/internal-admin-auth.guard';
 import { BrandingSettingsInterface } from '../interfaces/branding-settings.interface';
+import { CustomIconInterface } from '../interfaces/custom-icon.interface';
 import { SettingsService } from '../services/settings.service';
 
 /**
@@ -20,6 +21,8 @@ export interface InternalPublicConfigInterface {
   readonly branding: BrandingSettingsInterface;
   readonly locales: readonly string[];
   readonly defaultLocale: string;
+  /** Operator's custom icon library (reusable glyphs the cabinet can render). */
+  readonly customIcons: CustomIconInterface[];
   /**
    * Operator-chosen default currency (Settings → "Валюта по умолчанию").
    * Drives display priority on the user edge: gateways that accept this
@@ -54,9 +57,10 @@ export class InternalBrandingController {
    */
   @Get('public-config')
   public async getPublicConfig(): Promise<InternalPublicConfigInterface> {
-    const [branding, policy] = await Promise.all([
+    const [branding, policy, customIcons] = await Promise.all([
       this.settingsService.getBrandingSettings(),
       this.settingsService.getInternalPlatformPolicy(),
+      this.settingsService.getCustomIcons(),
     ]);
     const locales = this.appConfiguration.locales;
     const defaultLocale = this.appConfiguration.defaultLocale;
@@ -64,6 +68,7 @@ export class InternalBrandingController {
       branding,
       locales,
       defaultLocale,
+      customIcons,
       defaultCurrency: policy.defaultCurrency,
     };
   }
