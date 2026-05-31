@@ -1,7 +1,9 @@
-import { Controller, Get, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 
 import { AdminJwtAuthGuard } from '../../auth/guards/admin-jwt-auth.guard';
+import { InternalAdminAuthGuard } from '../../auth/guards/internal-admin-auth.guard';
+import { ReportReiwaVersionDto } from '../dto/report-reiwa-version.dto';
 import { UpdateCheckerService } from '../services/update-checker.service';
 
 /**
@@ -30,5 +32,25 @@ export class AdminUpdateCheckerController {
   @ApiOperation({ summary: 'Forces a fresh check against the remote source' })
   public refresh() {
     return this.updateCheckerService.getStatus(true);
+  }
+}
+
+/**
+ * Internal version heartbeat — reiwa calls this on boot (and periodically)
+ * to report its running version so the panel's Updates widget can show the
+ * live reiwa version alongside the latest reiwa release. Guarded by the
+ * internal API-token guard, same as every other `internal/*` route.
+ */
+@ApiTags('internal/update-checker')
+@UseGuards(InternalAdminAuthGuard)
+@Controller('internal/system')
+export class InternalUpdateCheckerController {
+  public constructor(private readonly updateCheckerService: UpdateCheckerService) {}
+
+  @Post('reiwa-version')
+  @ApiOperation({ summary: 'reiwa reports its running version' })
+  public reportReiwaVersion(@Body() body: ReportReiwaVersionDto): { ok: true } {
+    this.updateCheckerService.reportReiwaVersion(body.version);
+    return { ok: true };
   }
 }

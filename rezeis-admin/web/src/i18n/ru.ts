@@ -10,6 +10,8 @@
       label: 'Обновления',
       title: 'Rezeis Admin',
       current: 'Текущая версия',
+      panelName: 'Панель',
+      reiwaName: 'Reiwa (кабинет)',
       available: 'Доступно обновление',
       releaseNotes: 'Заметки к релизу',
       upToDate: 'Установлена последняя версия',

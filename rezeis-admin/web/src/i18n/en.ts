@@ -10,6 +10,8 @@ export const en = {
       label: 'Updates',
       title: 'Rezeis Admin',
       current: 'Current version',
+      panelName: 'Panel',
+      reiwaName: 'Reiwa (cabinet)',
       available: 'Update available',
       releaseNotes: 'Release notes',
       upToDate: 'You are on the latest version',

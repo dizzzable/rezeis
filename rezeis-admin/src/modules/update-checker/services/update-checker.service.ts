@@ -13,6 +13,7 @@ import { shouldRunSchedules } from '../../../common/runtime/process-role.util';
 const PACKAGE_JSON: { readonly version?: string } = require('../../../../package.json');
 
 const DEFAULT_GITHUB_REPO = process.env.REZEIS_UPDATE_REPO ?? '';
+const REIWA_GITHUB_REPO = process.env.REZEIS_REIWA_UPDATE_REPO ?? '';
 const HTTP_TIMEOUT_MS = 8_000;
 const USER_AGENT = 'rezeis-admin-update-checker';
 
@@ -26,6 +27,21 @@ export interface UpdateCheckResultInterface {
   readonly checkedAt: string;
   readonly source: 'github' | 'unknown';
   readonly error: string | null;
+}
+
+/**
+ * Combined update status for every component the panel tracks: the admin
+ * panel itself plus the reiwa user cabinet (whose running version is
+ * reported in by reiwa over the internal channel). The legacy banner /
+ * indicator keep consuming the flat panel fields, so the panel result is
+ * spread at the top level for backwards compatibility while `components`
+ * carries the per-service breakdown.
+ */
+export interface UpdateStatusInterface extends UpdateCheckResultInterface {
+  readonly components: {
+    readonly panel: UpdateCheckResultInterface;
+    readonly reiwa: UpdateCheckResultInterface;
+  };
 }
 
 interface GithubReleaseResponse {
@@ -42,12 +58,15 @@ const RESULT_CACHE_MS = 60 * 60 * 1_000; // 1 hour
 
 /**
  * Update checker — compares the local `package.json` version against the
- * latest release on a configurable GitHub repository.
+ * latest release on a configurable GitHub repository, and does the same for
+ * the reiwa user cabinet whose running version reiwa reports over the
+ * internal channel.
  *
  * Configuration
- *   `REZEIS_UPDATE_REPO` — `<owner>/<repo>` slug (e.g. `rezeis/rezeis-admin`).
- *   When unset, the service reports `source: 'unknown'` with no error so
- *   self-hosted forks aren't bothered with phantom warnings.
+ *   `REZEIS_UPDATE_REPO`       — panel `<owner>/<repo>` slug.
+ *   `REZEIS_REIWA_UPDATE_REPO` — reiwa `<owner>/<repo>` slug.
+ *   When a slug is unset, that component reports `source: 'unknown'` with no
+ *   error so self-hosted forks aren't bothered with phantom warnings.
  *
  * Cache
  *   The latest result is cached for 1 hour. The hourly cron tops it up
@@ -61,8 +80,16 @@ const RESULT_CACHE_MS = 60 * 60 * 1_000; // 1 hour
 export class UpdateCheckerService implements OnModuleInit {
   private readonly logger = new Logger(UpdateCheckerService.name);
 
-  private cached: UpdateCheckResultInterface | null = null;
+  private cached: UpdateStatusInterface | null = null;
   private cachedAt = 0;
+
+  /**
+   * Running reiwa version, reported in by reiwa over the internal channel
+   * (`POST /api/internal/system/reiwa-version`). `null` until the first
+   * heartbeat arrives — the check then falls back to `0.0.0` so an
+   * unreported reiwa never produces a false "update available".
+   */
+  private reiwaReportedVersion: string | null = null;
 
   public constructor(
     @Optional()
@@ -76,10 +103,25 @@ export class UpdateCheckerService implements OnModuleInit {
   }
 
   /**
+   * Records the reiwa version reported by reiwa's heartbeat. Refreshes the
+   * cached reiwa check so the next UI poll reflects the live version
+   * without waiting for the hourly cron.
+   */
+  public reportReiwaVersion(version: string): void {
+    const normalized = version.trim().replace(/^v/i, '');
+    if (!normalized || normalized === this.reiwaReportedVersion) return;
+    this.reiwaReportedVersion = normalized;
+    this.logger.log(`reiwa reported version: ${normalized}`);
+    // Recompute in the background so the cached payload picks up the new
+    // current version (and recomputes hasUpdate) promptly.
+    this.safeCheck().catch(() => undefined);
+  }
+
+  /**
    * Returns the current cached result, refreshing on demand if stale.
    * Used by the admin UI banner.
    */
-  public async getStatus(forceRefresh = false): Promise<UpdateCheckResultInterface> {
+  public async getStatus(forceRefresh = false): Promise<UpdateStatusInterface> {
     if (!forceRefresh && this.cached && Date.now() - this.cachedAt < RESULT_CACHE_MS) {
       return this.cached;
     }
@@ -98,12 +140,40 @@ export class UpdateCheckerService implements OnModuleInit {
 
   // ── Private ──────────────────────────────────────────────────────────────
 
-  private async safeCheck(): Promise<UpdateCheckResultInterface> {
-    const current = (PACKAGE_JSON.version ?? '0.0.0').trim();
+  /**
+   * Re-checks every tracked component and rebuilds the cached payload. The
+   * panel result is spread at the top level so the legacy banner/indicator
+   * (which read the flat fields) keep working unchanged.
+   */
+  private async safeCheck(): Promise<UpdateStatusInterface> {
+    const panelCurrent = (PACKAGE_JSON.version ?? '0.0.0').trim();
+    const reiwaCurrent = this.reiwaReportedVersion ?? '0.0.0';
+
+    const [panel, reiwa] = await Promise.all([
+      this.checkRepo(DEFAULT_GITHUB_REPO, panelCurrent),
+      this.checkRepo(REIWA_GITHUB_REPO, reiwaCurrent),
+    ]);
+
+    const result: UpdateStatusInterface = {
+      ...panel,
+      components: { panel, reiwa },
+    };
+    this.cached = result;
+    this.cachedAt = Date.now();
+    return result;
+  }
+
+  /**
+   * Checks a single `<owner>/<repo>` against its current version. Never
+   * throws — network/parse failures resolve to a result carrying the error
+   * string so the UI can surface it. When `repo` is empty the component is
+   * reported as `source: 'unknown'` (feature disabled for that component).
+   */
+  private async checkRepo(repo: string, current: string): Promise<UpdateCheckResultInterface> {
     const checkedAt = new Date().toISOString();
 
-    if (!DEFAULT_GITHUB_REPO || !this.httpService) {
-      const result: UpdateCheckResultInterface = {
+    if (!repo || !this.httpService) {
+      return {
         current,
         latest: null,
         hasUpdate: false,
@@ -114,13 +184,10 @@ export class UpdateCheckerService implements OnModuleInit {
         source: 'unknown',
         error: null,
       };
-      this.cached = result;
-      this.cachedAt = Date.now();
-      return result;
     }
 
     try {
-      const url = `https://api.github.com/repos/${DEFAULT_GITHUB_REPO}/releases/latest`;
+      const url = `https://api.github.com/repos/${repo}/releases/latest`;
       const response = await firstValueFrom(
         this.httpService.get<GithubReleaseResponse>(url, {
           headers: {
@@ -132,7 +199,7 @@ export class UpdateCheckerService implements OnModuleInit {
         }),
       );
       if (response.status === 404) {
-        const result: UpdateCheckResultInterface = {
+        return {
           current,
           latest: null,
           hasUpdate: false,
@@ -143,18 +210,13 @@ export class UpdateCheckerService implements OnModuleInit {
           source: 'github',
           error: 'No releases published yet',
         };
-        this.cached = result;
-        this.cachedAt = Date.now();
-        return result;
       }
       if (response.status < 200 || response.status >= 300) {
         throw new Error(`GitHub responded with HTTP ${response.status}`);
       }
       const release = response.data;
       if (release.draft || release.prerelease) {
-        // Skip drafts and prereleases — operators don't want banners
-        // about unstable builds.
-        const result: UpdateCheckResultInterface = {
+        return {
           current,
           latest: null,
           hasUpdate: false,
@@ -165,9 +227,6 @@ export class UpdateCheckerService implements OnModuleInit {
           source: 'github',
           error: 'No stable release found',
         };
-        this.cached = result;
-        this.cachedAt = Date.now();
-        return result;
       }
       const latest = (release.tag_name ?? '').replace(/^v/i, '').trim();
       const result: UpdateCheckResultInterface = {
@@ -181,32 +240,23 @@ export class UpdateCheckerService implements OnModuleInit {
         source: 'github',
         error: null,
       };
-      this.cached = result;
-      this.cachedAt = Date.now();
       this.logger.log(
-        `Update check: current=${current} latest=${latest || '(unknown)'} hasUpdate=${result.hasUpdate}`,
+        `Update check ${repo}: current=${current} latest=${latest || '(unknown)'} hasUpdate=${result.hasUpdate}`,
       );
       return result;
     } catch (err) {
-      this.logger.warn(`Update check failed: ${(err as Error).message}`);
-      // Fall back to whatever we cached before, but preserve the error
-      // so the UI can show it.
-      const fallback: UpdateCheckResultInterface = this.cached
-        ? { ...this.cached, error: (err as Error).message, checkedAt }
-        : {
-            current,
-            latest: null,
-            hasUpdate: false,
-            publishedAt: null,
-            htmlUrl: null,
-            notes: null,
-            checkedAt,
-            source: 'github',
-            error: (err as Error).message,
-          };
-      this.cached = fallback;
-      this.cachedAt = Date.now();
-      return fallback;
+      this.logger.warn(`Update check ${repo} failed: ${(err as Error).message}`);
+      return {
+        current,
+        latest: null,
+        hasUpdate: false,
+        publishedAt: null,
+        htmlUrl: null,
+        notes: null,
+        checkedAt,
+        source: 'github',
+        error: (err as Error).message,
+      };
     }
   }
 }

@@ -87,6 +87,14 @@ const environmentSchema = z.object({
    * calls and by reiwa's incoming guard. Must match
    * `REZEIS_INTERNAL_SHARED_SECRET` on reiwa side. Disabled when unset. */
   REZEIS_INTERNAL_SHARED_SECRET: z.preprocess(normalizeOptionalString, z.string().min(16).optional()),
+
+  // ── Update checker ───────────────────────────────────────────────────────
+  /** Panel `<owner>/<repo>` GitHub slug whose `releases/latest` is compared
+   * against the running panel version. Unset = update checks disabled. */
+  REZEIS_UPDATE_REPO: z.preprocess(normalizeOptionalString, z.string().min(1).optional()),
+  /** reiwa `<owner>/<repo>` GitHub slug. When set, the Updates widget also
+   * surfaces the latest reiwa release vs. the version reiwa reports in. */
+  REZEIS_REIWA_UPDATE_REPO: z.preprocess(normalizeOptionalString, z.string().min(1).optional()),
 });
 
 export type AppEnvironment = z.infer<typeof environmentSchema>;
