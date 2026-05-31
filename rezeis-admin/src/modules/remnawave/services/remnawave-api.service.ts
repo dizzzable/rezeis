@@ -342,11 +342,20 @@ export class RemnawaveApiService {
    */
   public async getPanelUserDevices(uuid: string): Promise<{ devices: RemnawaveHwidDevice[]; total: number }> {
     try {
-      const result = await this.requestJson<{ devices: RemnawaveHwidDevice[]; total: number }>({
+      const result = await this.requestJson<unknown>({
         method: 'get',
         url: `/api/hwid/user/${uuid}`,
       });
-      return result;
+      // Remnawave wraps payloads in `{ response: ... }`. Unwrap it (every
+      // other call here does) — without this `devices`/`total` were read off
+      // the envelope and came back undefined, so the cabinet showed
+      // "no devices" even when the user had connected one.
+      const root = (result as { response?: unknown })?.response ?? result;
+      const record = (root ?? {}) as { devices?: RemnawaveHwidDevice[]; total?: number };
+      return {
+        devices: Array.isArray(record.devices) ? record.devices : [],
+        total: typeof record.total === 'number' ? record.total : (record.devices?.length ?? 0),
+      };
     } catch {
       return { devices: [], total: 0 };
     }

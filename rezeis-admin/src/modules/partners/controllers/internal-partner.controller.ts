@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
 
 import { InternalAdminAuthGuard } from '../../auth/guards/internal-admin-auth.guard';
 import { PrismaService } from '../../../common/prisma/prisma.service';
@@ -41,6 +41,76 @@ export class InternalPartnerController {
       totalWithdrawn: partner.totalWithdrawn,
       createdAt: partner.createdAt.toISOString(),
     };
+  }
+
+  /**
+   * Returns a paginated list of users referred under this partner, newest
+   * first. Each entry carries the referred user's display label (login →
+   * username → name → masked telegram/email) and their accrual level (L1/L2/L3).
+   * Mirrors the referral program's invited-users list shape.
+   */
+  @Get('referrals')
+  public async getReferrals(
+    @Param('telegramId') telegramId: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    const user = await this.resolveUser(telegramId);
+    if (!user) return { items: [], total: 0, page: 1, limit: 20 };
+
+    const partner = await this.prismaService.partner.findUnique({
+      where: { userId: user.id },
+      select: { id: true },
+    });
+    if (!partner) return { items: [], total: 0, page: 1, limit: 20 };
+
+    const parsedLimit = Math.min(Math.max(Number(limit) || 20, 1), 50);
+    const parsedPage = Math.max(Number(page) || 1, 1);
+    const skip = (parsedPage - 1) * parsedLimit;
+
+    const [total, referrals] = await Promise.all([
+      this.prismaService.partnerReferral.count({ where: { partnerId: partner.id } }),
+      this.prismaService.partnerReferral.findMany({
+        where: { partnerId: partner.id },
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: parsedLimit,
+        select: {
+          id: true,
+          level: true,
+          createdAt: true,
+          referral: {
+            select: {
+              id: true,
+              name: true,
+              username: true,
+              telegramId: true,
+              email: true,
+              webAccount: { select: { login: true } },
+            },
+          },
+        },
+      }),
+    ]);
+
+    const items = referrals.map((r) => {
+      const u = r.referral;
+      const label =
+        u.webAccount?.login ??
+        u.username ??
+        (u.name && u.name.length > 0 ? u.name : null) ??
+        (u.telegramId !== null ? `tg:${u.telegramId.toString()}` : null) ??
+        maskPartnerEmail(u.email) ??
+        `id:${u.id.slice(0, 8)}`;
+      return {
+        id: r.id,
+        label,
+        level: r.level,
+        invitedAt: r.createdAt.toISOString(),
+      };
+    });
+
+    return { items, total, page: parsedPage, limit: parsedLimit };
   }
 
   /**
@@ -149,4 +219,17 @@ export class InternalPartnerController {
       select: { id: true },
     });
   }
+}
+
+/**
+ * Masks an email for display in the referred-users list: keeps the first
+ * char of the local part + the domain (`a***@example.com`). Returns null
+ * when there's nothing to mask.
+ */
+function maskPartnerEmail(email: string | null): string | null {
+  if (!email || email.length === 0) return null;
+  const [local, domain] = email.split('@');
+  if (!domain) return null;
+  const head = local.slice(0, 1);
+  return `${head}***@${domain}`;
 }
