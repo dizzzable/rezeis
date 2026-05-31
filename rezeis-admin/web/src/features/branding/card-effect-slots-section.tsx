@@ -9,6 +9,7 @@
  * reusing the same picker as the global "Animated Card Background" block.
  */
 
+import { useEffect, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Plus, Trash2 } from 'lucide-react'
 
@@ -34,20 +35,36 @@ const MAX_SLOTS = 20
 export function CardEffectSlotsSection({ slots, onChange }: CardEffectSlotsSectionProps) {
   const { t } = useTranslation()
 
+  // Track the latest slots in a ref so multiple patches dispatched in the same
+  // tick compound instead of clobbering each other. The picker's effect change
+  // fires `onEffectChange` AND `onPropsChange` synchronously; without this the
+  // second call would recompute from the stale `slots` closure and revert the
+  // first, making effect selection appear to do nothing.
+  const slotsRef = useRef(slots)
+  useEffect(() => {
+    slotsRef.current = slots
+  }, [slots])
+
   const updateSlot = (index: number, patch: Partial<CardEffectSlot>) => {
-    onChange(slots.map((s, i) => (i === index ? { ...s, ...patch } : s)))
+    const next = slotsRef.current.map((s, i) => (i === index ? { ...s, ...patch } : s))
+    slotsRef.current = next
+    onChange(next)
   }
 
   const addSlot = () => {
-    if (slots.length >= MAX_SLOTS) return
-    onChange([
-      ...slots,
+    if (slotsRef.current.length >= MAX_SLOTS) return
+    const next = [
+      ...slotsRef.current,
       { cardEffect: 'aurora', cardEffectProps: getCardEffectDefaults('aurora'), cardEffectOpacity: 1 },
-    ])
+    ]
+    slotsRef.current = next
+    onChange(next)
   }
 
   const removeSlot = (index: number) => {
-    onChange(slots.filter((_, i) => i !== index))
+    const next = slotsRef.current.filter((_, i) => i !== index)
+    slotsRef.current = next
+    onChange(next)
   }
 
   return (
