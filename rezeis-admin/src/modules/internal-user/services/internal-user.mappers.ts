@@ -194,39 +194,3 @@ function readOptionalPlanType(value: Prisma.JsonObject, propertyName: string): P
 function isPlanType(value: string): value is PlanType {
   return Object.values(PlanType).includes(value as PlanType);
 }
-
-/**
- * Reads the optional per-subscription card-appearance override blob into a
- * normalized shape. Every field is independently optional; missing fields
- * stay `null` so the SPA falls back to the global branding for that field.
- */
-export function mapCardBrandingOverride(value: Prisma.JsonValue): {
-  readonly cardEffect: string | null;
-  readonly cardEffectProps: Record<string, unknown> | null;
-  readonly cardEffectOpacity: number | null;
-  readonly cardGradient: string | null;
-} {
-  const empty = {
-    cardEffect: null,
-    cardEffectProps: null,
-    cardEffectOpacity: null,
-    cardGradient: null,
-  } as const;
-  if (!isJsonObject(value)) {
-    return empty;
-  }
-  const effect = value['cardEffect'];
-  const props = value['cardEffectProps'];
-  const opacity = value['cardEffectOpacity'];
-  const gradient = value['cardGradient'];
-  return {
-    cardEffect: typeof effect === 'string' && effect.length > 0 ? effect : null,
-    cardEffectProps:
-      isJsonObject(props) ? (props as Record<string, unknown>) : null,
-    cardEffectOpacity:
-      typeof opacity === 'number' && Number.isFinite(opacity)
-        ? Math.min(Math.max(opacity, 0.05), 1)
-        : null,
-    cardGradient: typeof gradient === 'string' && gradient.length > 0 ? gradient : null,
-  };
-}

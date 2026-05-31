@@ -97,15 +97,6 @@ export class AdminUserSubscriptionsController {
     if (body.expiresAt !== undefined && body.expiresAt !== null) {
       data.expiresAt = new Date(String(body.expiresAt));
     }
-    // Per-subscription card-appearance override (animated background, gradient,
-    // opacity). Purely cosmetic — no panel push. `null` clears the override.
-    if (body.cardBranding !== undefined) {
-      const cb = body.cardBranding;
-      data.cardBranding =
-        cb === null
-          ? Prisma.JsonNull
-          : (cb as Prisma.InputJsonValue);
-    }
 
     const updated = await this.prismaService.subscription.update({
       where: { id: subscriptionId },

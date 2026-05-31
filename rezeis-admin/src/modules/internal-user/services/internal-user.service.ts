@@ -61,7 +61,6 @@ import {
   collapseLegacyCatalogPrices,
   INTERNAL_USER_INCLUDE,
   InternalUserRecord,
-  mapCardBrandingOverride,
   mapDateValue,
   mapInternalEmailVerificationChallenge,
   mapInternalUserSession,
@@ -510,7 +509,6 @@ export class InternalUserService {
     );
     return {
       subscriptions: subscriptions.map((sub, i) => {
-        const cardBranding = mapCardBrandingOverride(sub.cardBranding);
         return {
           id: sub.id,
           status: sub.status,
@@ -521,10 +519,6 @@ export class InternalUserService {
           deviceLimit: sub.deviceLimit,
           userRemnaId: sub.remnawaveId,
           profileName: usages[i].profileName,
-          cardEffect: cardBranding.cardEffect,
-          cardEffectProps: cardBranding.cardEffectProps,
-          cardEffectOpacity: cardBranding.cardEffectOpacity,
-          cardGradient: cardBranding.cardGradient,
           url: sub.configUrl,
           configUrl: sub.configUrl,
           startedAt: mapDateValue(sub.startedAt),
@@ -567,7 +561,6 @@ export class InternalUserService {
       return null;
     }
     const usage = await this.resolvePanelUsage(subscription.remnawaveId);
-    const cardBranding = mapCardBrandingOverride(subscription.cardBranding);
     return {
       id: subscription.id,
       status: subscription.status,
@@ -578,10 +571,6 @@ export class InternalUserService {
       deviceLimit: subscription.deviceLimit,
       userRemnaId: subscription.remnawaveId,
       profileName: usage.profileName,
-      cardEffect: cardBranding.cardEffect,
-      cardEffectProps: cardBranding.cardEffectProps,
-      cardEffectOpacity: cardBranding.cardEffectOpacity,
-      cardGradient: cardBranding.cardGradient,
       url: subscription.configUrl,
       configUrl: subscription.configUrl,
       startedAt: mapDateValue(subscription.startedAt),

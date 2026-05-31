@@ -40,15 +40,6 @@ export interface InternalUserSubscriptionInterface {
    * subscription has no upstream profile yet.
    */
   readonly profileName: string | null;
-  /**
-   * Optional per-subscription card-appearance override. When present, the
-   * SPA card uses these instead of the global branding — so each card of a
-   * multi-subscription user can have its own animated background.
-   */
-  readonly cardEffect: string | null;
-  readonly cardEffectProps: Record<string, unknown> | null;
-  readonly cardEffectOpacity: number | null;
-  readonly cardGradient: string | null;
   /** Subscription/config URL from Remnawave — used by "Connect" button. */
   readonly url: string | null;
   /** Legacy alias for url (backwards compatibility with older SPA builds). */
