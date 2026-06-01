@@ -56,6 +56,7 @@ export interface PlanFormData {
   upgradeToPlanIds?: string[]
   replacementPlanIds?: string[]
   allowedUserIds?: string[]
+  trialSettings?: { maxClaims: number; free: boolean; availabilityScope: 'ALL' | 'INVITED' }
   durations: { days: number; prices: { currency: string; price: string }[] }[]
 }
 
@@ -107,6 +108,11 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
     plan?.allowedUserIds ? [...plan.allowedUserIds] : [],
   )
   const [newAllowedUserId, setNewAllowedUserId] = useState('')
+
+  // Trial config (only meaningful when availability === 'TRIAL')
+  const [trialMaxClaims, setTrialMaxClaims] = useState(String(plan?.trialSettings?.maxClaims ?? 1))
+  const [trialFree, setTrialFree] = useState(plan?.trialSettings?.free ?? true)
+  const [trialScope, setTrialScope] = useState<'ALL' | 'INVITED'>(plan?.trialSettings?.availabilityScope ?? 'ALL')
 
   const [durations, setDurations] = useState<
     { days: string; prices: { currency: string; price: string }[] }[]
@@ -184,6 +190,14 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
       upgradeToPlanIds: upgradeToPlanIds.length > 0 ? upgradeToPlanIds : undefined,
       replacementPlanIds: replacementPlanIds.length > 0 ? replacementPlanIds : undefined,
       allowedUserIds: allowedUserIds.length > 0 ? allowedUserIds : undefined,
+      trialSettings:
+        availability === 'TRIAL'
+          ? {
+              maxClaims: Math.max(1, parseInt(trialMaxClaims, 10) || 1),
+              free: trialFree,
+              availabilityScope: trialScope,
+            }
+          : undefined,
       durations: durations.map((d) => ({
         days: parseInt(d.days, 10),
         prices: d.prices.map((p) => ({ currency: p.currency, price: p.price.trim() || '0' })),
@@ -276,6 +290,60 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
           </Select>
         </div>
       </div>
+
+      {/* Trial configuration — only when availability = TRIAL */}
+      {availability === 'TRIAL' && (
+        <>
+          <Separator />
+          <div className="space-y-4 rounded-lg border border-dashed p-4">
+            <Label className="text-base font-medium">{t('planForm.trial.title')}</Label>
+            <p className="text-xs text-muted-foreground">{t('planForm.trial.hint')}</p>
+            <div className="grid gap-4 md:grid-cols-3">
+              <div className="space-y-2">
+                <Label className="text-sm">{t('planForm.trial.maxClaims')}</Label>
+                <Input
+                  type="number"
+                  min="1"
+                  max="100"
+                  value={trialMaxClaims}
+                  onChange={(e) => setTrialMaxClaims(e.target.value)}
+                />
+                <p className="text-xs text-muted-foreground">{t('planForm.trial.maxClaimsHint')}</p>
+              </div>
+              <div className="space-y-2">
+                <Label className="text-sm">{t('planForm.trial.pricing')}</Label>
+                <Select value={trialFree ? 'free' : 'paid'} onValueChange={(v) => setTrialFree(v === 'free')}>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="free">{t('planForm.trial.free')}</SelectItem>
+                    <SelectItem value="paid">{t('planForm.trial.paid')}</SelectItem>
+                  </SelectContent>
+                </Select>
+                {!trialFree && (
+                  <p className="text-xs text-amber-600 dark:text-amber-400">
+                    {t('planForm.trial.paidNotice')}
+                  </p>
+                )}
+              </div>
+              <div className="space-y-2">
+                <Label className="text-sm">{t('planForm.trial.scope')}</Label>
+                <Select value={trialScope} onValueChange={(v) => setTrialScope(v as 'ALL' | 'INVITED')}>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="ALL">{t('planForm.trial.scopeAll')}</SelectItem>
+                    <SelectItem value="INVITED">{t('planForm.trial.scopeInvited')}</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">{t('planForm.trial.scopeHint')}</p>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
 
       <Separator />
 

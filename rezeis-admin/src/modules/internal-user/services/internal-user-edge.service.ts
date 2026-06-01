@@ -15,6 +15,7 @@ import {
 import { InternalUserSessionInterface } from '../interfaces/internal-user-session.interface';
 import { buildUserReferenceWhere } from '../utils/user-reference.util';
 import { mapInternalUserSession, INTERNAL_USER_INCLUDE } from './internal-user.mappers';
+import { readTrialSettings } from '../../plans/utils/trial-settings.util';
 
 /**
  * InternalUserEdgeService
@@ -249,30 +250,52 @@ export class InternalUserEdgeService {
 
   // ── Internal trial helpers ───────────────────────────────────────────
 
+  /**
+   * Trial eligibility, honouring the trial plan's `trialSettings`:
+   *   • `maxClaims`         — a user may claim the trial up to N times
+   *                           (counted by their `isTrial` subscriptions,
+   *                           including deleted ones — a consumed trial
+   *                           always counts).
+   *   • `availabilityScope` — `INVITED` restricts the trial to users who
+   *                           registered via a referral/partner link.
+   * The "no active subscription" guard remains so a user can't stack a
+   * trial on top of a running plan.
+   */
   private async computeTrialEligibility(
     userId: string,
   ): Promise<{ eligible: boolean; reason: string | null }> {
-    const [trialGrant, activeSubscriptions, trialPlan] = await Promise.all([
-      this.prismaService.trialGrant.findUnique({
-        where: { userId },
-        select: { id: true },
+    const trialPlan = await this.prismaService.plan.findFirst({
+      where: { availability: 'TRIAL', isActive: true, isArchived: false },
+      select: { id: true, trialSettings: true },
+    });
+    if (trialPlan === null) {
+      return { eligible: false, reason: 'TRIAL_NOT_CONFIGURED' };
+    }
+    const settings = readTrialSettings(trialPlan.trialSettings);
+
+    const [trialClaims, activeSubscriptions] = await Promise.all([
+      this.prismaService.subscription.count({
+        where: { userId, isTrial: true },
       }),
       this.prismaService.subscription.count({
         where: { userId, status: { in: ['ACTIVE', 'LIMITED'] } },
       }),
-      this.prismaService.plan.findFirst({
-        where: { availability: 'TRIAL', isActive: true, isArchived: false },
-        select: { id: true },
-      }),
     ]);
-    if (trialGrant !== null) {
+
+    if (trialClaims >= settings.maxClaims) {
       return { eligible: false, reason: 'TRIAL_ALREADY_USED' };
     }
     if (activeSubscriptions > 0) {
       return { eligible: false, reason: 'ALREADY_HAS_SUBSCRIPTION' };
     }
-    if (trialPlan === null) {
-      return { eligible: false, reason: 'TRIAL_NOT_CONFIGURED' };
+    if (settings.availabilityScope === 'INVITED') {
+      const invitedEdge = await this.prismaService.referral.findUnique({
+        where: { referredId: userId },
+        select: { id: true },
+      });
+      if (invitedEdge === null) {
+        return { eligible: false, reason: 'TRIAL_INVITED_ONLY' };
+      }
     }
     return { eligible: true, reason: null };
   }

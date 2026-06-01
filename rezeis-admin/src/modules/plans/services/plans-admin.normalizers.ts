@@ -6,6 +6,13 @@ import { TrafficLimitStrategyValue } from '../dto/traffic-limit-strategy.dto';
 import { UpdatePlanDto } from '../dto/update-plan.dto';
 import { ArchivedPlanRenewModeValue } from '../utils/archived-plan-renew-mode.util';
 import { PlanRecord } from '../utils/plan-record.util';
+import {
+  DEFAULT_TRIAL_SETTINGS,
+  readTrialSettings,
+  serializeTrialSettings,
+  TrialSettings,
+  TrialAvailabilityScope,
+} from '../utils/trial-settings.util';
 
 export interface NormalizedPlanWriteInput {
   readonly name: string;
@@ -25,7 +32,31 @@ export interface NormalizedPlanWriteInput {
   readonly upgradeToPlanIds: readonly string[];
   readonly replacementPlanIds: readonly string[];
   readonly allowedUserIds: readonly string[];
+  readonly trialSettings: TrialSettings;
   readonly durations: readonly AdminPlanDurationDto[];
+}
+
+/**
+ * Coerces an optional trial-settings DTO into the normalised value, falling
+ * back to the provided base (current plan or hard defaults) per-field.
+ */
+function normalizeTrialSettings(
+  patch: { maxClaims?: number; free?: boolean; availabilityScope?: 'ALL' | 'INVITED' } | undefined,
+  base: TrialSettings,
+): TrialSettings {
+  if (patch === undefined) {
+    return base;
+  }
+  const scope: TrialAvailabilityScope =
+    patch.availabilityScope === undefined ? base.availabilityScope : patch.availabilityScope;
+  return {
+    maxClaims:
+      patch.maxClaims === undefined
+        ? base.maxClaims
+        : Math.min(Math.max(Math.trunc(patch.maxClaims), 1), 100),
+    free: patch.free === undefined ? base.free : patch.free,
+    availabilityScope: scope,
+  };
 }
 
 /**
@@ -52,6 +83,7 @@ export function normalizeCreatePlanInput(input: CreatePlanDto): NormalizedPlanWr
     upgradeToPlanIds: normalizeUuidArray(input.upgradeToPlanIds ?? []),
     replacementPlanIds: normalizeUuidArray(input.replacementPlanIds ?? []),
     allowedUserIds: normalizeUuidArray(input.allowedUserIds ?? []),
+    trialSettings: normalizeTrialSettings(input.trialSettings, DEFAULT_TRIAL_SETTINGS),
     durations: input.durations,
   });
 }
@@ -99,6 +131,10 @@ export function normalizeUpdatePlanInput(
       input.allowedUserIds === undefined
         ? [...currentPlan.allowedUserIds]
         : normalizeUuidArray(input.allowedUserIds),
+    trialSettings: normalizeTrialSettings(
+      input.trialSettings,
+      readTrialSettings(currentPlan.trialSettings),
+    ),
     durations:
       input.durations ??
       currentPlan.durations.map((duration) => ({
@@ -130,6 +166,7 @@ export function buildPlanWriteData(input: NormalizedPlanWriteInput): Prisma.Plan
     upgradeToPlanIds: [...input.upgradeToPlanIds],
     replacementPlanIds: [...input.replacementPlanIds],
     allowedUserIds: [...input.allowedUserIds],
+    trialSettings: serializeTrialSettings(input.trialSettings),
   };
 }
 

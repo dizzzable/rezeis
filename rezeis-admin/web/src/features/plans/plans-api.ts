@@ -72,6 +72,14 @@ export interface Plan {
    * public catalog.
    */
   readonly allowedUserIds?: ReadonlyArray<string>
+  /**
+   * Trial-plan tunables, present only when `availability === 'TRIAL'`.
+   */
+  readonly trialSettings?: {
+    readonly maxClaims: number
+    readonly free: boolean
+    readonly availabilityScope: 'ALL' | 'INVITED'
+  }
 }
 
 export interface PlansListFilters {

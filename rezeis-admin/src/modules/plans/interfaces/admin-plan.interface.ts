@@ -2,6 +2,7 @@ import { Currency, PlanAvailability, PlanType } from '@prisma/client';
 
 import { ArchivedPlanRenewModeValue } from '../utils/archived-plan-renew-mode.util';
 import { TrafficLimitStrategyValue } from '../dto/traffic-limit-strategy.dto';
+import { TrialSettings } from '../utils/trial-settings.util';
 
 export interface AdminPlanPriceInterface {
   readonly id: string;
@@ -35,6 +36,7 @@ export interface AdminPlanInterface {
   readonly upgradeToPlanIds: readonly string[];
   readonly replacementPlanIds: readonly string[];
   readonly allowedUserIds: readonly string[];
+  readonly trialSettings: TrialSettings;
   readonly durations: readonly AdminPlanDurationInterface[];
   readonly createdAt: string;
   readonly updatedAt: string;

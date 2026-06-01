@@ -1122,6 +1122,12 @@ model Plan {
   replacementPlanIds   String[]              @default([]) @map("replacement_plan_ids")
   /// Explicit allowlist of users for `availability = ALLOWED`.
   allowedUserIds       String[]              @default([]) @map("allowed_user_ids")
+  /// Trial-plan tunables, used only when `availability = TRIAL`. JSON shape:
+  /// `{ maxClaims: number (>=1, how many times a user may claim the trial),
+  ///    free: boolean (free grant vs. paid checkout — paid is not yet wired),
+  ///    availabilityScope: 'ALL' | 'INVITED' (who may claim it) }`.
+  /// Empty `{}` = defaults (maxClaims 1, free true, scope ALL).
+  trialSettings        Json                  @default("{}") @map("trial_settings")
   internalSquads       String[]              @default([]) @map("internal_squads")
   externalSquad        String?               @map("external_squad")
   createdAt            DateTime              @default(now()) @map("created_at") @db.Timestamptz(3)

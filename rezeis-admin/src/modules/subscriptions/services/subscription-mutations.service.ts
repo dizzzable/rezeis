@@ -4,9 +4,10 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma, SubscriptionStatus } from '@prisma/client';
+import { PlanAvailability, Prisma, SubscriptionStatus } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { readTrialSettings } from '../../plans/utils/trial-settings.util';
 
 interface ToggleStatusInput {
   readonly subscriptionId: string;
@@ -117,16 +118,7 @@ export class SubscriptionMutationsService {
    * asynchronously by the sync worker.
    */
   public async grantTrial(input: GrantTrialInput): Promise<{ readonly subscriptionId: string }> {
-    // Guard: user must not already have a trial grant
-    const existingGrant = await this.prismaService.trialGrant.findUnique({
-      where: { userId: input.userId },
-      select: { id: true },
-    });
-    if (existingGrant !== null) {
-      throw new BadRequestException('User has already used a trial');
-    }
-
-    // Resolve plan for snapshot
+    // Resolve plan for snapshot (also carries the trial claim policy).
     const plan = await this.prismaService.plan.findUnique({
       where: { id: input.planId },
       select: {
@@ -139,10 +131,25 @@ export class SubscriptionMutationsService {
         internalSquads: true,
         externalSquad: true,
         tag: true,
+        availability: true,
+        trialSettings: true,
       },
     });
     if (plan === null) {
       throw new NotFoundException('Plan not found');
+    }
+
+    // Guard: enforce the trial's claim limit. A trial may be claimed up to
+    // `maxClaims` times (counted by the user's existing `isTrial`
+    // subscriptions, including deleted ones — a consumed trial always
+    // counts). Defaults to 1 for non-trial plans / legacy data.
+    const maxClaims =
+      plan.availability === PlanAvailability.TRIAL ? readTrialSettings(plan.trialSettings).maxClaims : 1;
+    const priorClaims = await this.prismaService.subscription.count({
+      where: { userId: input.userId, isTrial: true },
+    });
+    if (priorClaims >= maxClaims) {
+      throw new BadRequestException('User has reached the trial claim limit');
     }
 
     const now = new Date();
@@ -163,11 +170,13 @@ export class SubscriptionMutationsService {
           expiresAt,
         },
       });
-      await tx.trialGrant.create({
-        data: {
-          userId: input.userId,
-          planId: input.planId,
-        },
+      // `TrialGrant.userId` is unique — upsert so repeat claims (maxClaims > 1)
+      // don't collide. It now records the most recent trial grant rather than
+      // acting as a one-shot lock (the count above is the real limiter).
+      await tx.trialGrant.upsert({
+        where: { userId: input.userId },
+        create: { userId: input.userId, planId: input.planId },
+        update: { planId: input.planId, grantedAt: now },
       });
       // Enqueue profile sync job so the worker creates the Remnawave profile
       await tx.profileSyncJob.create({

@@ -16,6 +16,7 @@ import {
 } from 'class-validator';
 
 import { AdminPlanDurationDto } from './admin-plan-duration.dto';
+import { TrialSettingsDto } from './create-plan.dto';
 import { ArchivedPlanRenewModeValue } from '../utils/archived-plan-renew-mode.util';
 import { TrafficLimitStrategyValue } from './traffic-limit-strategy.dto';
 
@@ -109,6 +110,11 @@ export class UpdatePlanDto {
   @ArrayUnique()
   @IsUUID('4', { each: true })
   public allowedUserIds?: string[];
+
+  @IsOptional()
+  @ValidateNested()
+  @Type((): typeof TrialSettingsDto => TrialSettingsDto)
+  public trialSettings?: TrialSettingsDto;
 
   @IsOptional()
   @IsArray()

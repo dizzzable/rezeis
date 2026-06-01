@@ -5,10 +5,12 @@ import {
   IsArray,
   IsBoolean,
   IsEnum,
+  IsIn,
   IsInt,
   IsOptional,
   IsString,
   IsUUID,
+  Max,
   MaxLength,
   Min,
   ValidateIf,
@@ -21,6 +23,26 @@ import { TrafficLimitStrategyValue } from './traffic-limit-strategy.dto';
 
 function trimString(value: unknown): unknown {
   return typeof value === 'string' ? value.trim() : value;
+}
+
+/**
+ * Trial-plan tunables (only meaningful when `availability = TRIAL`).
+ */
+export class TrialSettingsDto {
+  @IsOptional()
+  @Type((): NumberConstructor => Number)
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  public maxClaims?: number;
+
+  @IsOptional()
+  @IsBoolean()
+  public free?: boolean;
+
+  @IsOptional()
+  @IsIn(['ALL', 'INVITED'])
+  public availabilityScope?: 'ALL' | 'INVITED';
 }
 
 export class CreatePlanDto {
@@ -114,6 +136,11 @@ export class CreatePlanDto {
   @ArrayUnique()
   @IsUUID('4', { each: true })
   public allowedUserIds?: string[];
+
+  @IsOptional()
+  @ValidateNested()
+  @Type((): typeof TrialSettingsDto => TrialSettingsDto)
+  public trialSettings?: TrialSettingsDto;
 
   @IsArray()
   @ValidateNested({ each: true })

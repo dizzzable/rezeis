@@ -1,6 +1,7 @@
 import { Prisma } from '@prisma/client';
 
 import { AdminPlanInterface } from '../interfaces/admin-plan.interface';
+import { readTrialSettings } from './trial-settings.util';
 
 export const PLAN_INCLUDE = {
   durations: {
@@ -42,6 +43,7 @@ export function mapAdminPlan(plan: PlanRecord): AdminPlanInterface {
     upgradeToPlanIds: [...plan.upgradeToPlanIds],
     replacementPlanIds: [...plan.replacementPlanIds],
     allowedUserIds: [...plan.allowedUserIds],
+    trialSettings: readTrialSettings(plan.trialSettings),
     durations: plan.durations.map((duration) => ({
       id: duration.id,
       days: duration.days,
