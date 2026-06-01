@@ -17,12 +17,16 @@ import {
 import { isGatewayAvailableForChannel } from '../utils/purchase-gateway-policy.util';
 import { PLAN_INCLUDE, PlanRecord } from '../utils/plan-record.util';
 import { getSupportedPaymentAssets } from '../utils/supported-payment-assets.util';
+import { readTrialSettings } from '../utils/trial-settings.util';
 import { PricingService } from './pricing.service';
 
 interface CatalogUserContext {
   readonly user: Pick<User, 'id' | 'purchaseDiscount' | 'personalDiscount'>;
   readonly hasAnySubscription: boolean;
   readonly isInvitedUser: boolean;
+  /** Trials the user has already claimed (free or paid), counted by their
+   *  `isTrial` subscriptions including deleted ones. */
+  readonly trialClaims: number;
 }
 
 @Injectable()
@@ -99,10 +103,24 @@ export class PlanCatalogService {
         },
       }),
     ]);
+    const [partnerReferral, trialClaims] = await Promise.all([
+      // Partner-invited users count as "invited" for trial scoping too;
+      // the partner program keeps its own edge table separate from referrals.
+      referral === null
+        ? this.prismaService.partnerReferral.findFirst({
+            where: { referralUserId: userId },
+            select: { id: true },
+          })
+        : Promise.resolve(null),
+      this.prismaService.subscription.count({
+        where: { userId, isTrial: true },
+      }),
+    ]);
     return {
       user,
       hasAnySubscription: subscription !== null,
-      isInvitedUser: referral !== null,
+      isInvitedUser: referral !== null || partnerReferral !== null,
+      trialClaims,
     };
   }
 
@@ -125,8 +143,22 @@ export class PlanCatalogService {
         return userContext.isInvitedUser;
       case PlanAvailability.ALLOWED:
         return plan.allowedUserIds.includes(userContext.user.id);
-      case PlanAvailability.TRIAL:
-        return !userContext.hasAnySubscription;
+      case PlanAvailability.TRIAL: {
+        const trial = readTrialSettings(plan.trialSettings);
+        // INVITED-scoped trials require a referral/partner invite edge.
+        if (trial.availabilityScope === 'INVITED' && !userContext.isInvitedUser) {
+          return false;
+        }
+        // The user must not have exhausted the per-plan claim limit.
+        if (userContext.trialClaims >= trial.maxClaims) {
+          return false;
+        }
+        // Free trials are a no-subscription "first taste". Paid trials are
+        // purchasable like any plan, so they remain catalog-available even
+        // for users who already hold a subscription (subject to the claim
+        // limit checked above).
+        return trial.free ? !userContext.hasAnySubscription : true;
+      }
       default:
         return false;
     }
@@ -153,6 +185,8 @@ export class PlanCatalogService {
       trafficLimitStrategy: plan.trafficLimitStrategy,
       internalSquads: [...plan.internalSquads],
       externalSquad: plan.externalSquad,
+      isTrial: plan.availability === PlanAvailability.TRIAL,
+      trialFree: readTrialSettings(plan.trialSettings).free,
       durations: plan.durations.map((duration) => ({
         id: duration.id,
         days: duration.days,

@@ -172,6 +172,14 @@ export class PlansAdminValidators {
     if (input.input.durations.length !== 1) {
       throw new BadRequestException('Trial plans must define exactly one duration');
     }
+    // A paid trial is billed through the normal payment pipeline, so it
+    // must carry at least one price. A free trial must NOT define a price
+    // (it is granted, never charged) to avoid operator confusion.
+    const trialDuration = input.input.durations[0];
+    const hasPrice = trialDuration.prices.some((price) => Number(price.price) > 0);
+    if (!input.input.trialSettings.free && !hasPrice) {
+      throw new BadRequestException('Paid trial plans must define at least one non-zero price');
+    }
   }
 
   // ── Referenced plans must exist + be public/active ──────────────────────

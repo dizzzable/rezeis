@@ -322,7 +322,7 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
                   </SelectContent>
                 </Select>
                 {!trialFree && (
-                  <p className="text-xs text-amber-600 dark:text-amber-400">
+                  <p className="text-xs text-muted-foreground">
                     {t('planForm.trial.paidNotice')}
                   </p>
                 )}

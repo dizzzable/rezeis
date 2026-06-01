@@ -3,6 +3,7 @@ import {
   AddOnType,
   DeviceType,
   Plan,
+  PlanAvailability,
   ProfileSyncJob,
   Prisma,
   PurchaseType,
@@ -170,13 +171,18 @@ export class PaymentSubscriptionMutationService {
     readonly purchasedPlan: Plan;
     readonly selectedDurationDays: number;
   }): Promise<{ readonly subscription: Subscription; readonly syncJob: ProfileSyncJob }> {
+    // A paid trial is a NEW purchase of a TRIAL-availability plan. Mark the
+    // resulting subscription as a trial so it counts against the user's
+    // claim limit and renders with the trial badge, and stamp the
+    // TrialGrant ledger exactly like the free grant does.
+    const isTrialPurchase = input.purchasedPlan.availability === PlanAvailability.TRIAL;
     const result = await this.prismaService.$transaction(async (transactionClient) => {
       const now = new Date();
       const createdSubscription = await transactionClient.subscription.create({
         data: {
           userId: input.transaction.userId,
           status: SubscriptionStatus.ACTIVE,
-          isTrial: false,
+          isTrial: isTrialPurchase,
           planSnapshot: buildPlanSnapshot({
             transaction: input.transaction,
             purchasedPlan: input.purchasedPlan,
@@ -191,6 +197,16 @@ export class PaymentSubscriptionMutationService {
           expiresAt: calculateExpiry(now, input.selectedDurationDays),
         },
       });
+      if (isTrialPurchase) {
+        // `TrialGrant.userId` is unique — upsert so a paid trial records the
+        // claim without colliding with a prior (free or paid) grant. The
+        // real per-user limiter is the `isTrial` subscription count.
+        await transactionClient.trialGrant.upsert({
+          where: { userId: input.transaction.userId },
+          create: { userId: input.transaction.userId, planId: input.purchasedPlan.id },
+          update: { planId: input.purchasedPlan.id, grantedAt: now },
+        });
+      }
       const syncJob = await transactionClient.profileSyncJob.create({
         data: {
           subscriptionId: createdSubscription.id,

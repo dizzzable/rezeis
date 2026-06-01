@@ -33,6 +33,12 @@ export interface PlanCatalogPlanInterface {
   readonly trafficLimitStrategy: TrafficLimitStrategyValue;
   readonly internalSquads: readonly string[];
   readonly externalSquad: string | null;
+  /** True when this is a trial-availability plan. Trials always create an
+   *  `isTrial` subscription. A free trial (`trialFree`) is claimed via the
+   *  dedicated trial action; a paid trial is bought through the normal flow. */
+  readonly isTrial: boolean;
+  /** For trial plans: whether the trial is free (true) or paid (false). */
+  readonly trialFree: boolean;
   readonly durations: readonly PlanCatalogDurationInterface[];
 }
 

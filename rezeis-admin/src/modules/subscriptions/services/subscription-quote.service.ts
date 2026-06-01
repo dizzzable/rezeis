@@ -16,6 +16,8 @@ import { PlanCatalogService } from '../../plans/services/plan-catalog.service';
 import { PricingService } from '../../plans/services/pricing.service';
 import { isGatewayAvailableForChannel } from '../../plans/utils/purchase-gateway-policy.util';
 import { PLAN_INCLUDE, PlanRecord } from '../../plans/utils/plan-record.util';
+import { evaluateTrialClaim, readTrialSettings } from '../../plans/utils/trial-settings.util';
+import { isInvitedUser } from '../../plans/utils/trial-invite.util';
 import { SubscriptionActionPolicyDto } from '../dto/subscription-action-policy.dto';
 import { SubscriptionQuoteAction, SubscriptionQuoteDto } from '../dto/subscription-quote.dto';
 import {
@@ -73,6 +75,10 @@ const GATEWAY_NOT_AVAILABLE: SubscriptionQuoteWarningInterface = {
   code: 'GATEWAY_NOT_AVAILABLE',
   message: 'The selected payment gateway is not available for this quote.',
 };
+const TRIAL_INVITED_ONLY: SubscriptionQuoteWarningInterface = {
+  code: 'TRIAL_INVITED_ONLY',
+  message: 'This trial is available only to users invited via a referral or partner link.',
+};
 
 @Injectable()
 export class SubscriptionQuoteService {
@@ -128,6 +134,9 @@ export class SubscriptionQuoteService {
       purchaseType: PurchaseType.UPGRADE,
     });
     const trialPlans = basePlans.filter((plan) => plan.availability === 'TRIAL');
+    // Only FREE trials are claimable via the dedicated trial action; paid
+    // trials are purchased through the NEW flow like any other plan.
+    const freeTrialPlans = trialPlans.filter((plan) => readTrialSettings(plan.trialSettings).free);
     const capacityAvailable = context.activeSubscriptionCount < context.user.maxSubscriptions;
     const hasActiveTrial = context.activeSubscriptions.some((subscription) => subscription.isTrial);
     const warnings = [
@@ -149,7 +158,7 @@ export class SubscriptionQuoteService {
           capacityAvailable &&
           !context.hasUsedTrial &&
           context.activeSubscriptionCount === 0 &&
-          trialPlans.length > 0,
+          freeTrialPlans.length > 0,
       },
       activeSubscriptionCount: context.activeSubscriptionCount,
       maxSubscriptions: context.user.maxSubscriptions,
@@ -290,24 +299,82 @@ export class SubscriptionQuoteService {
     readonly sourceSubscription: SubscriptionRecord | null;
   }): Promise<{ readonly plans: readonly PlanRecord[]; readonly warnings: readonly SubscriptionQuoteWarningInterface[] }> {
     if (input.purchaseType === PurchaseType.NEW || input.purchaseType === PurchaseType.ADDITIONAL || input.purchaseType === 'TRIAL') {
-      if (input.purchaseType === 'TRIAL' && await this.hasUsedTrial(input.userId)) {
+      const plans = await this.getCatalogOptionPlans({ userId: input.userId, channel: input.channel });
+      if (input.purchaseType === 'TRIAL') {
+        // FREE-grant trial claim flow. Paid trials are NOT offered here —
+        // they go through the NEW purchase pipeline below.
+        if (await this.hasUsedTrial(input.userId)) {
+          return { plans: [], warnings: [TRIAL_ALREADY_USED] };
+        }
         return {
-          plans: [],
-          warnings: [TRIAL_ALREADY_USED],
+          plans: plans.filter(
+            (plan) => plan.availability === 'TRIAL' && readTrialSettings(plan.trialSettings).free,
+          ),
+          warnings: [],
         };
       }
-      const plans = await this.getCatalogOptionPlans({ userId: input.userId, channel: input.channel });
+      // NEW / ADDITIONAL: regular (non-trial) plans plus any PAID trial
+      // plans the user is still allowed to claim. Free trials never enter
+      // the paid pipeline.
+      const nonTrialPlans = plans.filter((plan) => plan.availability !== 'TRIAL');
+      const paidTrialPlans = plans.filter(
+        (plan) => plan.availability === 'TRIAL' && !readTrialSettings(plan.trialSettings).free,
+      );
+      if (paidTrialPlans.length === 0) {
+        return { plans: nonTrialPlans, warnings: [] };
+      }
+      const claimable = await this.filterClaimablePaidTrials({
+        userId: input.userId,
+        plans: paidTrialPlans,
+      });
       return {
-        plans: input.purchaseType === 'TRIAL'
-          ? plans.filter((plan) => plan.availability === 'TRIAL')
-          : plans.filter((plan) => plan.availability !== 'TRIAL'),
-        warnings: [],
+        plans: [...nonTrialPlans, ...claimable.plans],
+        warnings: claimable.warnings,
       };
     }
     return this.getSourceSelection({
       sourceSubscription: input.sourceSubscription,
       purchaseType: input.purchaseType,
     });
+  }
+
+  /**
+   * Applies the per-plan trial abuse guards (`maxClaims`,
+   * `availabilityScope`) to a set of paid trial plans, returning only the
+   * ones the user may still purchase plus a warning describing why any
+   * were dropped. The claim count is the user's `isTrial` subscription
+   * count (including deleted ones — a consumed trial always counts), which
+   * the paid-completion path stamps just like the free grant.
+   */
+  private async filterClaimablePaidTrials(input: {
+    readonly userId: string;
+    readonly plans: readonly PlanRecord[];
+  }): Promise<{ readonly plans: readonly PlanRecord[]; readonly warnings: readonly SubscriptionQuoteWarningInterface[] }> {
+    const needsInviteCheck = input.plans.some(
+      (plan) => readTrialSettings(plan.trialSettings).availabilityScope === 'INVITED',
+    );
+    const [priorTrialClaims, invited] = await Promise.all([
+      this.prismaService.subscription.count({
+        where: { userId: input.userId, isTrial: true },
+      }),
+      needsInviteCheck ? isInvitedUser(this.prismaService, input.userId) : Promise.resolve(true),
+    ]);
+    const claimable: PlanRecord[] = [];
+    const warnings: SubscriptionQuoteWarningInterface[] = [];
+    for (const plan of input.plans) {
+      const claim = evaluateTrialClaim(readTrialSettings(plan.trialSettings), {
+        priorTrialClaims,
+        isInvited: invited,
+      });
+      if (claim.allowed) {
+        claimable.push(plan);
+      } else if (claim.reason === 'TRIAL_ALREADY_USED') {
+        warnings.push(TRIAL_ALREADY_USED);
+      } else if (claim.reason === 'TRIAL_INVITED_ONLY') {
+        warnings.push(TRIAL_INVITED_ONLY);
+      }
+    }
+    return { plans: claimable, warnings };
   }
 
   private async hasUsedTrial(userId: string): Promise<boolean> {

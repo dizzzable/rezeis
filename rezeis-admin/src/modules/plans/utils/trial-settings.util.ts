@@ -10,7 +10,8 @@ export type TrialAvailabilityScope = 'ALL' | 'INVITED';
 export interface TrialSettings {
   /** How many times a single user may claim this trial (>= 1). */
   readonly maxClaims: number;
-  /** Free grant (true) vs. paid checkout (false — paid path not yet wired). */
+  /** Free grant (true) vs. paid checkout (false — billed via the normal
+   *  payment pipeline as a NEW purchase of the trial plan). */
   readonly free: boolean;
   /** Audience: everyone, or only users invited via a referral/partner link. */
   readonly availabilityScope: TrialAvailabilityScope;
@@ -49,4 +50,36 @@ export function serializeTrialSettings(settings: TrialSettings): Prisma.InputJso
     free: settings.free,
     availabilityScope: settings.availabilityScope,
   };
+}
+
+/** Reason a trial claim is rejected. Mirrors the warning/reason codes used
+ *  across the free-grant and paid-checkout trial paths. */
+export type TrialClaimDenyReason = 'TRIAL_ALREADY_USED' | 'TRIAL_INVITED_ONLY';
+
+export interface TrialClaimContext {
+  /** How many trials the user has already claimed (counted by `isTrial`
+   *  subscriptions, including deleted ones — a consumed trial always counts). */
+  readonly priorTrialClaims: number;
+  /** Whether the user arrived via a referral or partner invite link. */
+  readonly isInvited: boolean;
+}
+
+/**
+ * Single source of truth for the trial abuse guards shared by the free
+ * grant and the paid checkout: a user may claim a trial at most
+ * `maxClaims` times, and `INVITED`-scoped trials require an invite edge.
+ * The "no active subscription" rule is free-grant specific and stays in
+ * the eligibility service rather than here.
+ */
+export function evaluateTrialClaim(
+  settings: TrialSettings,
+  context: TrialClaimContext,
+): { readonly allowed: boolean; readonly reason: TrialClaimDenyReason | null } {
+  if (context.priorTrialClaims >= settings.maxClaims) {
+    return { allowed: false, reason: 'TRIAL_ALREADY_USED' };
+  }
+  if (settings.availabilityScope === 'INVITED' && !context.isInvited) {
+    return { allowed: false, reason: 'TRIAL_INVITED_ONLY' };
+  }
+  return { allowed: true, reason: null };
 }

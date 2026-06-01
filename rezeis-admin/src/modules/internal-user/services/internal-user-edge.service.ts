@@ -15,7 +15,8 @@ import {
 import { InternalUserSessionInterface } from '../interfaces/internal-user-session.interface';
 import { buildUserReferenceWhere } from '../utils/user-reference.util';
 import { mapInternalUserSession, INTERNAL_USER_INCLUDE } from './internal-user.mappers';
-import { readTrialSettings } from '../../plans/utils/trial-settings.util';
+import { evaluateTrialClaim, readTrialSettings } from '../../plans/utils/trial-settings.util';
+import { isInvitedUser } from '../../plans/utils/trial-invite.util';
 
 /**
  * InternalUserEdgeService
@@ -251,15 +252,20 @@ export class InternalUserEdgeService {
   // ── Internal trial helpers ───────────────────────────────────────────
 
   /**
-   * Trial eligibility, honouring the trial plan's `trialSettings`:
+   * Trial eligibility for the FREE grant path, honouring the trial plan's
+   * `trialSettings`:
    *   • `maxClaims`         — a user may claim the trial up to N times
    *                           (counted by their `isTrial` subscriptions,
    *                           including deleted ones — a consumed trial
    *                           always counts).
    *   • `availabilityScope` — `INVITED` restricts the trial to users who
-   *                           registered via a referral/partner link.
-   * The "no active subscription" guard remains so a user can't stack a
-   * trial on top of a running plan.
+   *                           registered via a referral or partner link.
+   * The "no active subscription" guard is free-grant specific (a paid
+   * trial flows through the normal purchase pipeline and respects the
+   * multi-subscription capacity instead).
+   *
+   * Note: a trial plan with `free: false` is NOT claimable for free — it
+   * must be purchased through the payment pipeline like any NEW plan.
    */
   private async computeTrialEligibility(
     userId: string,
@@ -272,30 +278,32 @@ export class InternalUserEdgeService {
       return { eligible: false, reason: 'TRIAL_NOT_CONFIGURED' };
     }
     const settings = readTrialSettings(trialPlan.trialSettings);
+    if (!settings.free) {
+      // Paid trial — not grantable for free; the user must purchase it.
+      return { eligible: false, reason: 'TRIAL_REQUIRES_PAYMENT' };
+    }
 
-    const [trialClaims, activeSubscriptions] = await Promise.all([
+    const [trialClaims, activeSubscriptions, invited] = await Promise.all([
       this.prismaService.subscription.count({
         where: { userId, isTrial: true },
       }),
       this.prismaService.subscription.count({
         where: { userId, status: { in: ['ACTIVE', 'LIMITED'] } },
       }),
+      settings.availabilityScope === 'INVITED'
+        ? isInvitedUser(this.prismaService, userId)
+        : Promise.resolve(true),
     ]);
 
-    if (trialClaims >= settings.maxClaims) {
-      return { eligible: false, reason: 'TRIAL_ALREADY_USED' };
-    }
     if (activeSubscriptions > 0) {
       return { eligible: false, reason: 'ALREADY_HAS_SUBSCRIPTION' };
     }
-    if (settings.availabilityScope === 'INVITED') {
-      const invitedEdge = await this.prismaService.referral.findUnique({
-        where: { referredId: userId },
-        select: { id: true },
-      });
-      if (invitedEdge === null) {
-        return { eligible: false, reason: 'TRIAL_INVITED_ONLY' };
-      }
+    const claim = evaluateTrialClaim(settings, {
+      priorTrialClaims: trialClaims,
+      isInvited: invited,
+    });
+    if (!claim.allowed) {
+      return { eligible: false, reason: claim.reason };
     }
     return { eligible: true, reason: null };
   }

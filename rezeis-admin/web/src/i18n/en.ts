@@ -1461,7 +1461,7 @@ export const en = {
       pricing: 'Pricing',
       free: 'Free',
       paid: 'Paid',
-      paidNotice: 'Paid trial checkout is not wired into payments yet — feature in progress.',
+      paidNotice: 'A paid trial is billed like a normal purchase — set a price in at least one currency below.',
       scope: 'Audience',
       scopeAll: 'Everyone',
       scopeInvited: 'Invited only',

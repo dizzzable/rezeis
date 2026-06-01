@@ -82,8 +82,9 @@ describe('PlanCatalogService', () => {
           personalDiscount: 5,
         }),
       },
-      subscription: { findFirst: async () => null },
+      subscription: { findFirst: async () => null, count: async () => 0 },
       referral: { findFirst: async () => ({ id: 'ref-1' }) },
+      partnerReferral: { findFirst: async () => null },
     };
 
     const service = new PlanCatalogService(prismaService as never, new PricingService());
