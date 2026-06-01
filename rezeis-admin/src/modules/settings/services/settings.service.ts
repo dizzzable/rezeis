@@ -361,6 +361,7 @@ export class SettingsService {
     readonly platform: PlatformSettingsInterface;
     readonly branding: BrandingSettingsInterface;
     readonly paymentOpsAlerts: PaymentOpsAlertSettingsInterface;
+    readonly multiSubscriptionSettings: Record<string, unknown>;
   }> {
     const settings = await this.getOrCreateSettingsRecord(this.prismaService);
     return {
@@ -369,6 +370,7 @@ export class SettingsService {
       platform: mapPlatformSettings(settings),
       branding: readBrandingSettings(settings.brandingSettings),
       paymentOpsAlerts: readPaymentOpsAlertSettings(settings.systemNotifications),
+      multiSubscriptionSettings: readJsonObject(settings.multiSubscriptionSettings),
     };
   }
 
@@ -761,6 +763,17 @@ function buildSettingsUpdateChanges(
   if (hasOwnField(updatePlatformSettingsDto, 'defaultCurrency')) {
     data.defaultCurrency = updatePlatformSettingsDto.defaultCurrency;
     updatedFields.push('defaultCurrency');
+  }
+  if (hasOwnField(updatePlatformSettingsDto, 'multiSubscriptionSettings')) {
+    const incoming = updatePlatformSettingsDto.multiSubscriptionSettings ?? {};
+    // Persist only the known, validated keys to the JSON column.
+    const next: Record<string, unknown> = {};
+    if (incoming.enabled !== undefined) next.enabled = incoming.enabled;
+    if (incoming.defaultMaxSubscriptions !== undefined) {
+      next.defaultMaxSubscriptions = incoming.defaultMaxSubscriptions;
+    }
+    data.multiSubscriptionSettings = next as Prisma.InputJsonValue;
+    updatedFields.push('multiSubscriptionSettings');
   }
   return {
     updatedFields,

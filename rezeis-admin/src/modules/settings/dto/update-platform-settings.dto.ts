@@ -1,14 +1,34 @@
 import { AccessMode, Currency } from '@prisma/client';
+import { Type } from 'class-transformer';
 import {
   IsBoolean,
   IsEnum,
+  IsInt,
   IsOptional,
   IsString,
   IsUrl,
   Matches,
+  Max,
   MaxLength,
+  Min,
   ValidateIf,
+  ValidateNested,
 } from 'class-validator';
+
+/**
+ * Multi-subscription policy block (persisted to `Settings.multiSubscriptionSettings`).
+ */
+export class MultiSubscriptionSettingsDto {
+  @IsOptional()
+  @IsBoolean()
+  public enabled?: boolean;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(50)
+  public defaultMaxSubscriptions?: number;
+}
 
 /**
  * Validates partial updates for platform settings.
@@ -58,4 +78,9 @@ export class UpdatePlatformSettingsDto {
   @IsOptional()
   @IsEnum(Currency)
   public defaultCurrency?: Currency;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => MultiSubscriptionSettingsDto)
+  public multiSubscriptionSettings?: MultiSubscriptionSettingsDto;
 }
