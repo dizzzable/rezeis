@@ -10,6 +10,10 @@ export const ru = {
     title: 'Импорт пользователей',
     subtitle:
       'Импорт и синхронизация пользователей из нескольких источников: Remnawave, 3x-ui, Remnashop, Altshop.',
+    accessDeniedTitle: 'Доступ к импортам ограничен',
+    accessDeniedDescription: 'Для просмотра истории импортов нужно право imports:view.',
+    readOnlyTitle: 'История импортов доступна только для чтения',
+    readOnlyDescription: 'Запуск импортов, синхронизаций и последующих задач требует imports:import или imports:run.',
     remnawave: {
       import: {
         title: 'Импорт из Remnawave',

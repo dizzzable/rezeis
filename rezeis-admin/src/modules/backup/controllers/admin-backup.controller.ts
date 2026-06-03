@@ -95,7 +95,7 @@ export class AdminBackupController {
 
   @Post('restore/:filename')
   @HttpCode(HttpStatus.ACCEPTED)
-  @RequirePermission('backups', 'create')
+  @RequirePermission('backups', 'run')
   @ApiOperation({ summary: 'Restore database from a backup file (async via BullMQ)' })
   public async restore(
     @Param('filename') filename: string,

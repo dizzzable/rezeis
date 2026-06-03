@@ -159,6 +159,8 @@ export const en = {
       createDescription: 'Generate a new JWT token for integration. Copy the value immediately — it will not be shown again.',
       listTitle: 'Issued tokens',
       listDescription: 'List of active tokens. Deleting a token immediately revokes access.',
+      accessDeniedTitle: 'API token access is restricted',
+      accessDeniedDescription: 'Your admin role does not include api_tokens:view. Ask a superadmin to grant access before managing integration tokens.',
       emptyTitle: 'No API tokens yet',
       emptyDescription: 'Create the first token to enable an integration.',
       createSuccess: 'API token created',

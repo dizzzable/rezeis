@@ -1978,7 +1978,9 @@
   },
   authProviders: {
     title: 'Способы аутентификации',
-    subtitle: 'Настройка OAuth2 провайдеров и Passkey для входа в админ-панель.',
+    subtitle: 'Настройка OAuth2 провайдеров для входа в админ-панель.',
+    accessDeniedTitle: 'Доступ к провайдерам аутентификации ограничен',
+    accessDeniedDescription: 'В вашей роли администратора нет права auth_providers:view. Попросите superadmin выдать доступ перед управлением способами входа OAuth.',
     enabled: 'Включён',
     disabled: 'Выключен',
     save: 'Сохранить',
@@ -2066,6 +2068,8 @@
   backupPage: {
     title: 'Бэкапы',
     subtitle: 'Управление резервными копиями базы данных',
+    accessDeniedTitle: 'Доступ к бэкапам ограничен',
+    accessDeniedDescription: 'Для просмотра записей бэкапов нужно право backups:view.',
     error: 'Ошибка',
     errorDescription: 'Не удалось загрузить бэкапы.',
     createBackup: 'Создать бэкап',
@@ -2329,6 +2333,10 @@
     title: 'Экспорт / импорт конфигурации',
     subtitle:
       'Экспорт операторской конфигурации (роли, автоматизации, вебхуки, настройки, FAQ, IP-списки, шаблоны уведомлений) как переносимый JSON. Применить на другом deployment с выбором стратегии и dry-run.',
+    accessDeniedTitle: 'Доступ к переносу конфигурации ограничен',
+    accessDeniedDescription: 'Для просмотра доступных секций экспорта нужно право config_portability:view.',
+    readOnlyTitle: 'Перенос конфигурации доступен только для чтения',
+    readOnlyDescription: 'Экспорт и импорт требуют прав config_portability:export или config_portability:import.',
     sections: {
       title: 'Разделы',
       description: 'Пустой выбор означает «все разделы».',

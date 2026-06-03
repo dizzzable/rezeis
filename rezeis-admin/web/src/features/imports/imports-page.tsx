@@ -58,6 +58,7 @@ import {
 } from '@/components/ui/tabs'
 import { FadeIn, HoverLift } from '@/lib/motion'
 import { RemnawaveIcon } from '@/features/remnawave/remnawave-icon'
+import { useHasPermission } from '@/features/rbac'
 
 import {
   ImportProgressDialog,
@@ -158,6 +159,20 @@ function useImportFlow() {
 export default function ImportsPage(): JSX.Element {
   const { t } = useTranslation()
   const flow = useImportFlow()
+  const canViewImports = useHasPermission('imports', 'view')
+  const canImport = useHasPermission('imports', 'import')
+  const canRunImports = useHasPermission('imports', 'run')
+
+  if (!canViewImports) {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle>{t('importsPage.accessDeniedTitle')}</CardTitle>
+          <CardDescription>{t('importsPage.accessDeniedDescription')}</CardDescription>
+        </CardHeader>
+      </Card>
+    )
+  }
 
   return (
     <div className="space-y-6">
@@ -170,34 +185,56 @@ export default function ImportsPage(): JSX.Element {
         </div>
       </FadeIn>
 
-      <Tabs defaultValue="remnawave" className="space-y-4">
-        <TabsList className="grid w-full grid-cols-5">
-          <TabsTrigger value="remnawave" className="gap-1.5">
-            <RemnawaveIcon className="h-3.5 w-3.5" />
-            Remnawave
-          </TabsTrigger>
-          <TabsTrigger value="3xui">3x-ui</TabsTrigger>
-          <TabsTrigger value="remnashop">Remnashop</TabsTrigger>
-          <TabsTrigger value="altshop">Altshop</TabsTrigger>
-          <TabsTrigger value="stealthnet">STEALTHNET</TabsTrigger>
-        </TabsList>
+      {canImport || canRunImports ? (
+        <Tabs defaultValue="remnawave" className="space-y-4">
+          <TabsList className="flex flex-wrap">
+            <TabsTrigger value="remnawave" className="gap-1.5">
+              <RemnawaveIcon className="h-3.5 w-3.5" />
+              Remnawave
+            </TabsTrigger>
+            {canImport ? (
+              <>
+                <TabsTrigger value="3xui">3x-ui</TabsTrigger>
+                <TabsTrigger value="remnashop">Remnashop</TabsTrigger>
+                <TabsTrigger value="altshop">Altshop</TabsTrigger>
+                <TabsTrigger value="stealthnet">STEALTHNET</TabsTrigger>
+              </>
+            ) : null}
+          </TabsList>
 
-        <TabsContent value="remnawave">
-          <RemnawaveTab onStart={flow.start} onRecordId={flow.setRecordId} />
-        </TabsContent>
-        <TabsContent value="3xui">
-          <FileUploadTab source="3xui" onStart={flow.start} onRecordId={flow.setRecordId} />
-        </TabsContent>
-        <TabsContent value="remnashop">
-          <FileUploadTab source="remnashop" onStart={flow.start} onRecordId={flow.setRecordId} />
-        </TabsContent>
-        <TabsContent value="altshop">
-          <FileUploadTab source="altshop" onStart={flow.start} onRecordId={flow.setRecordId} />
-        </TabsContent>
-        <TabsContent value="stealthnet">
-          <FileUploadTab source="stealthnet" onStart={flow.start} onRecordId={flow.setRecordId} />
-        </TabsContent>
-      </Tabs>
+          <TabsContent value="remnawave">
+            <RemnawaveTab
+              onStart={flow.start}
+              onRecordId={flow.setRecordId}
+              canImport={canImport}
+              canRun={canRunImports}
+            />
+          </TabsContent>
+          {canImport ? (
+            <>
+              <TabsContent value="3xui">
+                <FileUploadTab source="3xui" onStart={flow.start} onRecordId={flow.setRecordId} />
+              </TabsContent>
+              <TabsContent value="remnashop">
+                <FileUploadTab source="remnashop" onStart={flow.start} onRecordId={flow.setRecordId} />
+              </TabsContent>
+              <TabsContent value="altshop">
+                <FileUploadTab source="altshop" onStart={flow.start} onRecordId={flow.setRecordId} />
+              </TabsContent>
+              <TabsContent value="stealthnet">
+                <FileUploadTab source="stealthnet" onStart={flow.start} onRecordId={flow.setRecordId} />
+              </TabsContent>
+            </>
+          ) : null}
+        </Tabs>
+      ) : (
+        <Card>
+          <CardHeader>
+            <CardTitle>{t('importsPage.readOnlyTitle')}</CardTitle>
+            <CardDescription>{t('importsPage.readOnlyDescription')}</CardDescription>
+          </CardHeader>
+        </Card>
+      )}
 
       <ImportHistory />
 
@@ -208,12 +245,12 @@ export default function ImportsPage(): JSX.Element {
           importRecordId={flow.progress.importRecordId}
           source={flow.progress.source}
           mode={flow.progress.mode}
-          onAssignPlan={flow.openAssign}
-          onClonePlans={flow.openClone}
+          onAssignPlan={canRunImports ? flow.openAssign : undefined}
+          onClonePlans={canRunImports ? flow.openClone : undefined}
         />
       ) : null}
 
-      {flow.assignFor !== null ? (
+      {canRunImports && flow.assignFor !== null ? (
         <BulkAssignPlanDialog
           open
           onClose={flow.closeAssign}
@@ -221,7 +258,7 @@ export default function ImportsPage(): JSX.Element {
         />
       ) : null}
 
-      {flow.cloneFor !== null ? (
+      {canRunImports && flow.cloneFor !== null ? (
         <ClonePlansDialog
           open
           onClose={flow.closeClone}
@@ -239,7 +276,12 @@ interface TabProps {
   readonly onRecordId: (id: string) => void
 }
 
-function RemnawaveTab({ onStart, onRecordId }: TabProps): JSX.Element {
+interface RemnawaveTabProps extends TabProps {
+  readonly canImport: boolean
+  readonly canRun: boolean
+}
+
+function RemnawaveTab({ onStart, onRecordId, canImport, canRun }: RemnawaveTabProps): JSX.Element {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
 
@@ -275,6 +317,7 @@ function RemnawaveTab({ onStart, onRecordId }: TabProps): JSX.Element {
 
   return (
     <div className="grid gap-4 md:grid-cols-2">
+      {canImport ? (
       <HoverLift>
         <Card>
           <CardHeader>
@@ -303,7 +346,9 @@ function RemnawaveTab({ onStart, onRecordId }: TabProps): JSX.Element {
           </CardContent>
         </Card>
       </HoverLift>
+      ) : null}
 
+      {canRun ? (
       <HoverLift>
         <Card>
           <CardHeader>
@@ -333,6 +378,7 @@ function RemnawaveTab({ onStart, onRecordId }: TabProps): JSX.Element {
           </CardContent>
         </Card>
       </HoverLift>
+      ) : null}
     </div>
   )
 }

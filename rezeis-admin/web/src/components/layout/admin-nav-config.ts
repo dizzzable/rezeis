@@ -31,12 +31,17 @@ import {
 
 import type { SidebarGroupOrder } from '@/stores/sidebar-store'
 import { RemnawaveIcon } from '@/features/remnawave/remnawave-icon'
+import type { RbacAction } from '@/features/rbac'
 
 export interface NavItem {
   /** i18n key under `adminNav.items.*` */
   readonly key: string
   readonly path: string
   readonly icon: ElementType
+  readonly requiredPermission?: {
+    readonly resource: string
+    readonly action: RbacAction
+  }
 }
 
 export interface NavGroup {
@@ -92,7 +97,7 @@ export const navGroups: ReadonlyArray<NavGroup> = [
     items: [
       { key: 'panelSettings', path: '/settings/panel', icon: Settings },
       { key: 'admins', path: '/admins', icon: Shield },
-      { key: 'imports', path: '/imports', icon: Upload },
+      { key: 'imports', path: '/imports', icon: Upload, requiredPermission: { resource: 'imports', action: 'view' } },
       { key: 'audit', path: '/audit', icon: ClipboardList },
     ],
   },

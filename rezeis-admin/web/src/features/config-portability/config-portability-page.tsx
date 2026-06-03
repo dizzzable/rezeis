@@ -14,6 +14,7 @@ import {
 import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
+import { useHasPermission } from '@/features/rbac'
 import { getErrorMessage } from '@/lib/http-errors'
 
 import {
@@ -37,9 +38,13 @@ import {
  */
 export default function ConfigPortabilityPage({ embedded = false }: { readonly embedded?: boolean } = {}) {
   const { t } = useTranslation()
+  const canViewConfig = useHasPermission('config_portability', 'view')
+  const canExportConfig = useHasPermission('config_portability', 'export')
+  const canImportConfig = useHasPermission('config_portability', 'import')
   const sectionsQuery = useQuery({
     queryKey: ['config-portability', 'sections'],
     queryFn: listConfigSections,
+    enabled: canViewConfig,
     staleTime: 5 * 60 * 1_000,
   })
 
@@ -118,6 +123,25 @@ export default function ConfigPortabilityPage({ embedded = false }: { readonly e
     else setSelected(new Set(sectionsQuery.data))
   }
 
+  if (!canViewConfig) {
+    return (
+      <div className="space-y-6">
+        {!embedded && (
+          <div>
+            <h1 className="text-2xl font-bold">{t('configPortabilityPage.title')}</h1>
+            <p className="text-sm text-muted-foreground">{t('configPortabilityPage.subtitle')}</p>
+          </div>
+        )}
+        <Card>
+          <CardHeader>
+            <CardTitle>{t('configPortabilityPage.accessDeniedTitle')}</CardTitle>
+            <CardDescription>{t('configPortabilityPage.accessDeniedDescription')}</CardDescription>
+          </CardHeader>
+        </Card>
+      </div>
+    )
+  }
+
   return (
     <div className="space-y-6">
       {!embedded && (
@@ -174,6 +198,7 @@ export default function ConfigPortabilityPage({ embedded = false }: { readonly e
         </Card>
 
         <div className="space-y-4">
+          {canExportConfig ? (
           <Card>
             <CardHeader>
               <CardTitle className="text-base">{t('configPortabilityPage.export.title')}</CardTitle>
@@ -193,7 +218,9 @@ export default function ConfigPortabilityPage({ embedded = false }: { readonly e
               </Button>
             </CardContent>
           </Card>
+          ) : null}
 
+          {canImportConfig ? (
           <Card>
             <CardHeader>
               <CardTitle className="text-base">{t('configPortabilityPage.import.title')}</CardTitle>
@@ -258,8 +285,18 @@ export default function ConfigPortabilityPage({ embedded = false }: { readonly e
               </Button>
             </CardContent>
           </Card>
+          ) : null}
 
-          {importResult && <ImportResultCard result={importResult} />}
+          {!canExportConfig && !canImportConfig ? (
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">{t('configPortabilityPage.readOnlyTitle')}</CardTitle>
+                <CardDescription>{t('configPortabilityPage.readOnlyDescription')}</CardDescription>
+              </CardHeader>
+            </Card>
+          ) : null}
+
+          {canImportConfig && importResult && <ImportResultCard result={importResult} />}
         </div>
       </div>
     </div>

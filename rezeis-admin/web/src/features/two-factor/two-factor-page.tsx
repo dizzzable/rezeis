@@ -32,8 +32,6 @@ import {
 import { api } from '@/lib/api'
 import { getErrorMessage } from '@/lib/http-errors'
 
-import AuthProvidersTab from '@/features/settings/auth-providers-tab'
-
 import {
   getTwoFactorStatus,
   enrollTwoFactor,
@@ -48,12 +46,10 @@ import {
  *   • TOTP 2FA (enable / confirm / disable / recovery codes)
  *   • Password change
  *   • Passkeys (WebAuthn) — list / register / rename / delete
- *   • OAuth2 / SSO providers — full configuration UI (delegated to AuthProvidersTab)
  *
  * Layout (≥lg):
  *   row 1: [ 2FA              ][ Change password ]
  *   row 2: [ Passkey                              ]
- *   row 3: [ Auth providers                       ]
  *
  * 2FA and password are intentionally placed side-by-side with equal heights.
  */
@@ -170,7 +166,6 @@ export default function TwoFactorPage(): JSX.Element {
 
       <PasskeySection />
 
-      <AuthProvidersSection />
     </div>
   )
 }
@@ -788,26 +783,6 @@ function PasskeyRow({
         </Button>
       )}
     </div>
-  )
-}
-
-// ── Auth Providers (full configuration UI delegated to AuthProvidersTab) ─────
-
-function AuthProvidersSection(): JSX.Element {
-  const { t } = useTranslation()
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2">
-          <Shield className="h-5 w-5" />
-          {t('twoFactorPage.authProviders.title')}
-        </CardTitle>
-        <CardDescription>{t('twoFactorPage.authProviders.description')}</CardDescription>
-      </CardHeader>
-      <CardContent>
-        <AuthProvidersTab embedded />
-      </CardContent>
-    </Card>
   )
 }
 

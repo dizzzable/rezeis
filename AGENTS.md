@@ -18,6 +18,8 @@ At the start of a new coding session in this repository:
 4. Do not touch untracked `.claude/` or `IMPROVEMENT_PLAN.md` unless the user explicitly asks.
 5. Do not read `.env`, `.env.*`, SQL dumps, tar backups, or real backup artifacts.
 6. Run `npm run handoff:update` after changing remediation status, or `npm run handoff:update:verify` when you intentionally want to refresh the gate snapshot by running checks.
+7. Load the relevant skill before implementation whenever a listed skill matches the slice.
+8. Use web search/fetch for current external guidance before security, deploy, framework, dependency, or browser-platform decisions unless the exact source was already freshly captured in the handoff. Prefer targeted official docs, then record any new source in the handoff.
 
 ## Continuation Trigger
 
@@ -35,8 +37,9 @@ When this trigger is used:
 2. Run `git status --short` from repository root.
 3. Run `npm run handoff:update` from repository root to refresh the handoff timestamp without re-running slower verification gates.
 4. Start with the current `Recommended First Slice` in `next-session-handoff.md` unless the user includes a more specific target in the same message.
-5. Load the relevant skill before implementation: use `nestjs-core`/`nestjs-platform` for backend test triage and security/config failures, and `typescript-config` for build/typecheck behavior.
-6. Make the smallest correct code/config change, run the narrowest relevant verification, then update `next-session-handoff.md` with the new observed result.
+5. Load the relevant skill before implementation: use `nestjs-core`/`nestjs-platform` for backend test triage and security/config failures, `react-state`/`react-effects` for frontend auth/cache/realtime behavior, `typescript-config` for build/typecheck behavior, and `accessibility` for keyboard/landmark/dialog work.
+6. Before changing security/deploy/framework behavior, use web search/fetch to check current official guidance or advisories unless the exact source is already freshly noted under `External References Already Consulted` / `Internet Research Used`.
+7. Make the smallest correct code/config change, run the narrowest relevant verification, then update `next-session-handoff.md` with the new observed result and any new external references used.
 
 Do not use this trigger to read secrets, run destructive commands, or rewrite the rezeis/reiwa service boundary.
 
@@ -73,6 +76,13 @@ Prefer this order unless the user gives a narrower task:
 - `react-effects`: effects, realtime subscriptions, socket cleanup, service worker listeners.
 - `typescript-config`: tsconfig strictness or build/typecheck behavior.
 - `accessibility`: layout landmarks, skip links, dialog/focus/keyboard fixes.
+
+## External Research Expectations
+
+- Do not rely only on memory for security, deploy, framework, browser, dependency, or audit/remediation decisions.
+- Use web search/fetch proactively to read current official documentation, advisories, or standards when the answer may depend on current behavior.
+- Prefer official vendor/framework/security docs over blog posts. If a blog is useful, use it only to find the primary source.
+- Add new sources to `docs/progress/next-session-handoff.md` under `Internet Research Used` when they influenced a code/config decision.
 
 ## External References Already Consulted
 

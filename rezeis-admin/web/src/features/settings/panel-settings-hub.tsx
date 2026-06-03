@@ -5,8 +5,9 @@
  *   1. API Tokens — create/manage tokens for external services (reiwa, etc.)
  *   2. Appearance — theme, colors, radius, layout
  *   3. Security — TOTP 2FA management
- *   4. Branding — brand name, logo URL, profile naming template
- *   5. Backups — DB backup management
+ *   4. Auth Providers — OAuth2 login-method configuration
+ *   5. Branding — brand name, logo URL, profile naming template
+ *   6. Backups — DB backup management
  *
  * Replaces the separate /appearance, /settings/api-tokens, /security/2fa,
  * and /backup routes. Accessible via sidebar:
@@ -21,6 +22,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Skeleton } from '@/components/ui/skeleton'
 import { FadeIn } from '@/lib/motion'
 import { withFeatureBundle } from '@/i18n/i18n'
+import { PermissionGate } from '@/features/rbac'
 
 const ApiTokensTab = lazy(
   withFeatureBundle('platformSettings', () =>
@@ -35,6 +37,7 @@ const AppearanceTab = lazy(
 const SecurityTab = lazy(
   withFeatureBundle('twoFactor', () => import('@/features/two-factor/two-factor-page')),
 )
+const AuthProvidersTab = lazy(() => import('./auth-providers-tab'))
 const BrandingTab = lazy(() => import('./panel-branding-tab'))
 const IconsTab = lazy(() => import('./panel-icons-tab'))
 const BackupTab = lazy(() => import('@/features/backup/backup-page'))
@@ -66,12 +69,14 @@ export default function PanelSettingsHub() {
         </div>
       </FadeIn>
 
-      <Tabs defaultValue="api-tokens" className="space-y-4">
+      <Tabs defaultValue="appearance" className="space-y-4">
         <TabsList className="flex-wrap">
-          <TabsTrigger value="api-tokens" className="gap-1.5">
-            <Key className="h-3.5 w-3.5" />
-            {t('panelSettings.tabs.apiTokens')}
-          </TabsTrigger>
+          <PermissionGate resource="api_tokens" action="view" hideWhileLoading>
+            <TabsTrigger value="api-tokens" className="gap-1.5">
+              <Key className="h-3.5 w-3.5" />
+              {t('panelSettings.tabs.apiTokens')}
+            </TabsTrigger>
+          </PermissionGate>
           <TabsTrigger value="appearance" className="gap-1.5">
             <Palette className="h-3.5 w-3.5" />
             {t('panelSettings.tabs.appearance')}
@@ -80,10 +85,18 @@ export default function PanelSettingsHub() {
             <Shield className="h-3.5 w-3.5" />
             {t('panelSettings.tabs.security')}
           </TabsTrigger>
-          <TabsTrigger value="backups" className="gap-1.5">
-            <Archive className="h-3.5 w-3.5" />
-            {t('panelSettings.tabs.backups')}
-          </TabsTrigger>
+          <PermissionGate resource="auth_providers" action="view" hideWhileLoading>
+            <TabsTrigger value="auth-providers" className="gap-1.5">
+              <Shield className="h-3.5 w-3.5" />
+              {t('panelSettings.tabs.authProviders')}
+            </TabsTrigger>
+          </PermissionGate>
+          <PermissionGate resource="backups" action="view" hideWhileLoading>
+            <TabsTrigger value="backups" className="gap-1.5">
+              <Archive className="h-3.5 w-3.5" />
+              {t('panelSettings.tabs.backups')}
+            </TabsTrigger>
+          </PermissionGate>
           <TabsTrigger value="branding" className="gap-1.5">
             <Paintbrush className="h-3.5 w-3.5" />
             {t('panelSettings.tabs.branding')}
@@ -92,17 +105,21 @@ export default function PanelSettingsHub() {
             <Image className="h-3.5 w-3.5" />
             {t('panelSettings.tabs.icons')}
           </TabsTrigger>
-          <TabsTrigger value="config" className="gap-1.5">
-            <FileCog className="h-3.5 w-3.5" />
-            {t('panelSettings.tabs.config')}
-          </TabsTrigger>
+          <PermissionGate resource="config_portability" action="view" hideWhileLoading>
+            <TabsTrigger value="config" className="gap-1.5">
+              <FileCog className="h-3.5 w-3.5" />
+              {t('panelSettings.tabs.config')}
+            </TabsTrigger>
+          </PermissionGate>
         </TabsList>
 
-        <TabsContent value="api-tokens">
-          <Suspense fallback={<TabFallback />}>
-            <ApiTokensTab />
-          </Suspense>
-        </TabsContent>
+        <PermissionGate resource="api_tokens" action="view" hideWhileLoading>
+          <TabsContent value="api-tokens">
+            <Suspense fallback={<TabFallback />}>
+              <ApiTokensTab />
+            </Suspense>
+          </TabsContent>
+        </PermissionGate>
 
         <TabsContent value="appearance">
           <Suspense fallback={<TabFallback />}>
@@ -116,11 +133,21 @@ export default function PanelSettingsHub() {
           </Suspense>
         </TabsContent>
 
-        <TabsContent value="backups">
-          <Suspense fallback={<TabFallback />}>
-            <BackupTab />
-          </Suspense>
-        </TabsContent>
+        <PermissionGate resource="auth_providers" action="view" hideWhileLoading>
+          <TabsContent value="auth-providers">
+            <Suspense fallback={<TabFallback />}>
+              <AuthProvidersTab embedded />
+            </Suspense>
+          </TabsContent>
+        </PermissionGate>
+
+        <PermissionGate resource="backups" action="view" hideWhileLoading>
+          <TabsContent value="backups">
+            <Suspense fallback={<TabFallback />}>
+              <BackupTab />
+            </Suspense>
+          </TabsContent>
+        </PermissionGate>
 
         <TabsContent value="branding">
           <Suspense fallback={<TabFallback />}>
@@ -134,11 +161,13 @@ export default function PanelSettingsHub() {
           </Suspense>
         </TabsContent>
 
-        <TabsContent value="config">
-          <Suspense fallback={<TabFallback />}>
-            <ConfigPortabilityTab embedded />
-          </Suspense>
-        </TabsContent>
+        <PermissionGate resource="config_portability" action="view" hideWhileLoading>
+          <TabsContent value="config">
+            <Suspense fallback={<TabFallback />}>
+              <ConfigPortabilityTab embedded />
+            </Suspense>
+          </TabsContent>
+        </PermissionGate>
       </Tabs>
     </div>
   )

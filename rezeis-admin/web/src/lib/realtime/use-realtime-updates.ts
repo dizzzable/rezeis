@@ -30,8 +30,7 @@ import { useEffect, useMemo, useRef } from 'react';
 import { useQueryClient, type QueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { io, type Socket } from 'socket.io-client';
-import { TOKEN_KEY } from '@/lib/api';
-import { safeGetItem } from '@/lib/safe-storage';
+import { authStorage } from '@/lib/auth-storage';
 import {
   REALTIME_CLOSE,
   REALTIME_TOPICS,
@@ -114,7 +113,7 @@ function buildSocketUrl(): { url: string; path: string } {
 }
 
 function getAccessToken(): string | null {
-  return safeGetItem(TOKEN_KEY);
+  return authStorage.getToken() || null;
 }
 
 function scheduleInvalidate(

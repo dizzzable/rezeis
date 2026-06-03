@@ -17,6 +17,8 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import { CurrentAdmin } from '../../auth/decorators/current-admin.decorator';
 import { AdminJwtAuthGuard } from '../../auth/guards/admin-jwt-auth.guard';
 import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.interface';
+import { RequirePermission } from '../../rbac/decorators/require-permission.decorator';
+import { RbacGuard } from '../../rbac/guards/rbac.guard';
 import {
   BackupPlanClonerService,
   ClonePlansFromBackupResult,
@@ -77,7 +79,7 @@ interface ImportEnqueuedResponse {
  *   • Altshop — file upload (.tar.gz or .json)
  */
 @Controller('admin/imports')
-@UseGuards(AdminJwtAuthGuard)
+@UseGuards(AdminJwtAuthGuard, RbacGuard)
 export class AdminImportsController {
   public constructor(
     private readonly importsService: ImportsService,
@@ -88,6 +90,7 @@ export class AdminImportsController {
   // ── List & Detail ───────────────────────────────────────────────────────
 
   @Get()
+  @RequirePermission('imports', 'view')
   public async listImports(
     @Query('limit') limit?: string,
     @Query('offset') offset?: string,
@@ -117,6 +120,7 @@ export class AdminImportsController {
   }
 
   @Get(':importId')
+  @RequirePermission('imports', 'view')
   public async getImport(
     @Param('importId') importId: string,
   ): Promise<ImportRecordPayload> {
@@ -142,6 +146,7 @@ export class AdminImportsController {
 
   @Post('remnawave')
   @HttpCode(HttpStatus.ACCEPTED)
+  @RequirePermission('imports', 'import')
   public async importFromRemnawave(
     @CurrentAdmin() admin: CurrentAdminInterface,
   ): Promise<ImportEnqueuedResponse> {
@@ -154,6 +159,7 @@ export class AdminImportsController {
 
   @Post('remnawave/sync')
   @HttpCode(HttpStatus.ACCEPTED)
+  @RequirePermission('imports', 'run')
   public async syncFromRemnawave(
     @CurrentAdmin() admin: CurrentAdminInterface,
   ): Promise<ImportEnqueuedResponse> {
@@ -168,6 +174,7 @@ export class AdminImportsController {
 
   @Post('3xui')
   @HttpCode(HttpStatus.ACCEPTED)
+  @RequirePermission('imports', 'import')
   @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 100 * 1024 * 1024 } }))
   public async importFrom3xui(
     @CurrentAdmin() admin: CurrentAdminInterface,
@@ -190,6 +197,7 @@ export class AdminImportsController {
 
   @Post('remnashop')
   @HttpCode(HttpStatus.ACCEPTED)
+  @RequirePermission('imports', 'import')
   @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 100 * 1024 * 1024 } }))
   public async importFromRemnashop(
     @CurrentAdmin() admin: CurrentAdminInterface,
@@ -212,6 +220,7 @@ export class AdminImportsController {
 
   @Post('altshop')
   @HttpCode(HttpStatus.ACCEPTED)
+  @RequirePermission('imports', 'import')
   @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 100 * 1024 * 1024 } }))
   public async importFromAltshop(
     @CurrentAdmin() admin: CurrentAdminInterface,
@@ -234,6 +243,7 @@ export class AdminImportsController {
 
   @Post('stealthnet')
   @HttpCode(HttpStatus.ACCEPTED)
+  @RequirePermission('imports', 'import')
   @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 100 * 1024 * 1024 } }))
   public async importFromStealthnet(
     @CurrentAdmin() admin: CurrentAdminInterface,
@@ -256,6 +266,7 @@ export class AdminImportsController {
 
   @Post('assign-plan')
   @HttpCode(HttpStatus.ACCEPTED)
+  @RequirePermission('imports', 'run')
   public async assignPlanToImported(
     @CurrentAdmin() admin: CurrentAdminInterface,
     @Body() body: { planId: string; importRecordId?: string; userIds?: string[]; applyImmediately?: boolean },
@@ -280,6 +291,7 @@ export class AdminImportsController {
 
   @Post(':importId/cancel')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('imports', 'run')
   public async cancelImport(
     @Param('importId') importId: string,
   ): Promise<{ canceled: boolean; message: string }> {
@@ -293,6 +305,7 @@ export class AdminImportsController {
   // ── Plan Catalog Cloning (altshop / remnashop) ─────────────────────────
 
   @Get(':importId/plan-preview')
+  @RequirePermission('imports', 'view')
   public async previewPlanClone(
     @Param('importId') importId: string,
   ): Promise<PlanCatalogPreview> {
@@ -301,6 +314,7 @@ export class AdminImportsController {
 
   @Post(':importId/clone-plans')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('imports', 'run')
   public async clonePlans(
     @CurrentAdmin() admin: CurrentAdminInterface,
     @Param('importId') importId: string,

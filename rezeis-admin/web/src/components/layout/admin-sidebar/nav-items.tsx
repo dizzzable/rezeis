@@ -22,6 +22,7 @@ import {
 import { GripVertical, Pencil, RotateCcw } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
+import { usePermissionStore } from '@/features/rbac'
 import { useSidebarStore } from '@/stores/sidebar-store'
 
 import { navGroups, navItemMap, resolveNavOrder } from '../admin-nav-config'
@@ -58,14 +59,26 @@ export function NavItems({ collapsed = false, onNavigate }: NavItemsProps) {
   } = useSidebarStore()
   const [activeId, setActiveId] = useState<string | null>(null)
   const [newGroupName, setNewGroupName] = useState('')
+  const permissionsLoaded = usePermissionStore((s) => s.loaded)
+  const hasPermission = usePermissionStore((s) => s.hasPermission)
 
   // Use draft in edit mode, persisted otherwise
   const effectiveGroups = editMode ? draftGroupsOrder : groupsOrder
 
   // Resolve the effective nav structure
   const resolvedGroups = useMemo(
-    () => resolveNavOrder(effectiveGroups, groupKeyOrder),
-    [effectiveGroups, groupKeyOrder],
+    () => {
+      const groups = resolveNavOrder(effectiveGroups, groupKeyOrder)
+      if (!permissionsLoaded) return groups
+      return groups.map((group) => ({
+        ...group,
+        items: group.items.filter((item) => {
+          if (!item.requiredPermission) return true
+          return hasPermission(item.requiredPermission.resource, item.requiredPermission.action)
+        }),
+      }))
+    },
+    [effectiveGroups, groupKeyOrder, hasPermission, permissionsLoaded],
   )
 
   // Initialize store with defaults if not yet set

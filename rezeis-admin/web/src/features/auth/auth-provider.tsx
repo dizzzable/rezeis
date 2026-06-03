@@ -1,11 +1,11 @@
-import React, { createContext, useContext, useState, useCallback, useEffect } from 'react'
+import React, { createContext, useContext, useCallback, useEffect } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
-import { TOKEN_KEY } from '@/lib/api'
-import { safeGetItem, safeSetItem, safeRemoveItem } from '@/lib/safe-storage'
+import { startAdminClientSession, endAdminClientSession } from '@/lib/admin-session'
 import { usePermissionStore } from '@/features/rbac'
+import { useAuthStore } from '@/stores/auth-store'
 import { getMeApi, type AdminProfile } from './auth-api'
 
 interface AuthContextValue {
@@ -20,37 +20,20 @@ interface AuthContextValue {
 
 const AuthContext = createContext<AuthContextValue | null>(null)
 
+function isUnauthorizedError(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null || !('response' in error)) return false
+  return (error as { response?: { status?: number } }).response?.status === 401
+}
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const queryClient = useQueryClient()
   const { t } = useTranslation()
+  const token = useAuthStore((state) => state.token)
 
-  const [token, setToken] = useState<string | null>(() => {
-    // Check for OAuth callback token in URL hash fragment (GitHub redirect)
-    if (window.location.hash) {
-      const hashParams = new URLSearchParams(window.location.hash.slice(1))
-      const oauthToken = hashParams.get('oauth_token')
-      if (oauthToken) {
-        safeSetItem(TOKEN_KEY, oauthToken)
-        // Clean URL hash
-        window.history.replaceState({}, '', window.location.pathname)
-        return oauthToken
-      }
-    }
-    // Legacy: also check query params for backwards compat
-    const params = new URLSearchParams(window.location.search)
-    const oauthTokenQuery = params.get('oauth_token')
-    if (oauthTokenQuery) {
-      safeSetItem(TOKEN_KEY, oauthTokenQuery)
-      window.history.replaceState({}, '', window.location.pathname)
-      return oauthTokenQuery
-    }
-    return safeGetItem(TOKEN_KEY)
-  })
-
-  const { data: admin, isLoading: isQueryLoading } = useQuery<AdminProfile>({
+  const { data: admin, isLoading: isQueryLoading, error: authError } = useQuery<AdminProfile>({
     queryKey: ['auth-me'],
     queryFn: getMeApi,
-    enabled: !!token,
+    enabled: token.length > 0,
     retry: false,
     staleTime: 5 * 60 * 1000,
   })
@@ -59,9 +42,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // with the auth lifecycle: load on auth, refresh on login, reset on
   // logout. The page-level RolesPage and PermissionGate consume the store.
   const loadPermissions = usePermissionStore((s) => s.loadPermissions)
-  const resetPermissions = usePermissionStore((s) => s.reset)
   const permissionsLoaded = usePermissionStore((s) => s.loaded)
   const mustChangePassword = usePermissionStore((s) => s.mustChangePassword)
+
+  useEffect(() => {
+    if (token && isUnauthorizedError(authError)) {
+      endAdminClientSession(queryClient)
+    }
+  }, [authError, queryClient, token])
 
   useEffect(() => {
     if (admin && !permissionsLoaded) {
@@ -84,26 +72,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [admin, permissionsLoaded, loadPermissions, t])
 
   const login = useCallback((newToken: string) => {
-    safeSetItem(TOKEN_KEY, newToken)
-    setToken(newToken)
-    // Reset and reload everything: a fresh login should clear stale
-    // state from the previous session before any UI mounts.
-    resetPermissions()
-    queryClient.invalidateQueries({ queryKey: ['auth-me'] })
-  }, [queryClient, resetPermissions])
+    startAdminClientSession(queryClient, newToken)
+  }, [queryClient])
 
   const logout = useCallback(() => {
-    safeRemoveItem(TOKEN_KEY)
-    setToken(null)
-    resetPermissions()
-    queryClient.removeQueries({ queryKey: ['auth-me'] })
-  }, [queryClient, resetPermissions])
+    endAdminClientSession(queryClient)
+  }, [queryClient])
 
   return (
     <AuthContext.Provider
       value={{
         isAuthenticated: !!admin,
-        isLoading: !!token && isQueryLoading,
+        isLoading: token.length > 0 && isQueryLoading,
         admin: admin ?? null,
         mustChangePassword,
         login,

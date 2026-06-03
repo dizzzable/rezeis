@@ -1956,7 +1956,9 @@ export const en = {
   },
   authProviders: {
     title: 'Authentication Methods',
-    subtitle: 'Configure OAuth2 providers and Passkey for admin panel login.',
+    subtitle: 'Configure OAuth2 providers for admin panel login.',
+    accessDeniedTitle: 'Authentication provider access is restricted',
+    accessDeniedDescription: 'Your admin role does not include auth_providers:view. Ask a superadmin to grant access before managing OAuth login methods.',
     enabled: 'Enabled',
     disabled: 'Disabled',
     save: 'Save',
@@ -2042,6 +2044,8 @@ export const en = {
   backupPage: {
     title: 'Backup',
     subtitle: 'Database backup management',
+    accessDeniedTitle: 'Backup access is restricted',
+    accessDeniedDescription: 'You need backups:view to inspect backup records.',
     error: 'Error',
     errorDescription: 'Could not load backups.',
     createBackup: 'Create Backup',
@@ -2299,6 +2303,10 @@ export const en = {
     title: 'Config Export / Import',
     subtitle:
       'Export operator-curated configuration (roles, automations, webhooks, settings, FAQ, IP lists, notification templates) as a portable JSON file. Import it on another deployment with a strategy + dry-run preview.',
+    accessDeniedTitle: 'Configuration portability access is restricted',
+    accessDeniedDescription: 'You need config_portability:view to inspect available export sections.',
+    readOnlyTitle: 'Configuration portability is read-only',
+    readOnlyDescription: 'Export and import actions require config_portability:export or config_portability:import.',
     sections: {
       title: 'Sections',
       description: 'Empty selection means "all sections".',

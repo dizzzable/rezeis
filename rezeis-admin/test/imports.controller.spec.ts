@@ -9,23 +9,40 @@ import { ImportStatus } from '@prisma/client';
 
 import { AdminJwtAuthGuard } from '../src/modules/auth/guards/admin-jwt-auth.guard';
 import { AdminImportsController } from '../src/modules/imports/controllers/admin-imports.controller';
+import { REQUIRE_PERMISSION_KEY } from '../src/modules/rbac/decorators/require-permission.decorator';
+import { RbacGuard } from '../src/modules/rbac/guards/rbac.guard';
+import { RBAC_RESOURCES, SYSTEM_ROLES, isValidPermission } from '../src/modules/rbac/rbac.resources';
 
 describe('AdminImportsController', () => {
   it('exposes the current guarded admin imports routes', () => {
     assert.equal(Reflect.getMetadata(PATH_METADATA, AdminImportsController), 'admin/imports');
-    assert.deepStrictEqual(Reflect.getMetadata(GUARDS_METADATA, AdminImportsController), [AdminJwtAuthGuard]);
-    assertRoute(RequestMethod.GET, '/', AdminImportsController.prototype.listImports);
-    assertRoute(RequestMethod.GET, ':importId', AdminImportsController.prototype.getImport);
-    assertRoute(RequestMethod.POST, 'remnawave', AdminImportsController.prototype.importFromRemnawave);
-    assertRoute(RequestMethod.POST, 'remnawave/sync', AdminImportsController.prototype.syncFromRemnawave);
-    assertRoute(RequestMethod.POST, '3xui', AdminImportsController.prototype.importFrom3xui);
-    assertRoute(RequestMethod.POST, 'remnashop', AdminImportsController.prototype.importFromRemnashop);
-    assertRoute(RequestMethod.POST, 'altshop', AdminImportsController.prototype.importFromAltshop);
-    assertRoute(RequestMethod.POST, 'stealthnet', AdminImportsController.prototype.importFromStealthnet);
-    assertRoute(RequestMethod.POST, 'assign-plan', AdminImportsController.prototype.assignPlanToImported);
-    assertRoute(RequestMethod.POST, ':importId/cancel', AdminImportsController.prototype.cancelImport);
-    assertRoute(RequestMethod.GET, ':importId/plan-preview', AdminImportsController.prototype.previewPlanClone);
-    assertRoute(RequestMethod.POST, ':importId/clone-plans', AdminImportsController.prototype.clonePlans);
+    assert.deepStrictEqual(Reflect.getMetadata(GUARDS_METADATA, AdminImportsController), [AdminJwtAuthGuard, RbacGuard]);
+    assertRoute(RequestMethod.GET, '/', AdminImportsController.prototype.listImports, 'view');
+    assertRoute(RequestMethod.GET, ':importId', AdminImportsController.prototype.getImport, 'view');
+    assertRoute(RequestMethod.POST, 'remnawave', AdminImportsController.prototype.importFromRemnawave, 'import');
+    assertRoute(RequestMethod.POST, 'remnawave/sync', AdminImportsController.prototype.syncFromRemnawave, 'run');
+    assertRoute(RequestMethod.POST, '3xui', AdminImportsController.prototype.importFrom3xui, 'import');
+    assertRoute(RequestMethod.POST, 'remnashop', AdminImportsController.prototype.importFromRemnashop, 'import');
+    assertRoute(RequestMethod.POST, 'altshop', AdminImportsController.prototype.importFromAltshop, 'import');
+    assertRoute(RequestMethod.POST, 'stealthnet', AdminImportsController.prototype.importFromStealthnet, 'import');
+    assertRoute(RequestMethod.POST, 'assign-plan', AdminImportsController.prototype.assignPlanToImported, 'run');
+    assertRoute(RequestMethod.POST, ':importId/cancel', AdminImportsController.prototype.cancelImport, 'run');
+    assertRoute(RequestMethod.GET, ':importId/plan-preview', AdminImportsController.prototype.previewPlanClone, 'view');
+    assertRoute(RequestMethod.POST, ':importId/clone-plans', AdminImportsController.prototype.clonePlans, 'run');
+  });
+
+  it('declares import permissions without granting default non-superadmin roles', () => {
+    assert.deepStrictEqual(RBAC_RESOURCES.imports, ['view', 'create', 'import', 'run']);
+    assert.equal(isValidPermission('imports', 'view'), true);
+    assert.equal(isValidPermission('imports', 'create'), true);
+    assert.equal(isValidPermission('imports', 'import'), true);
+    assert.equal(isValidPermission('imports', 'run'), true);
+
+    const nonSuperadminSystemGrants = SYSTEM_ROLES
+      .filter((role) => role.name !== 'superadmin')
+      .flatMap((role) => role.permissions)
+      .filter((permission) => permission.resource === 'imports');
+    assert.deepStrictEqual(nonSuperadminSystemGrants, []);
   });
 
   it('serializes list/detail import records without wrapping or leaking non-object results', async () => {
@@ -159,7 +176,10 @@ function createImportRecord(input: { readonly result: unknown }) {
   };
 }
 
-function assertRoute(requestMethod: RequestMethod, path: string | undefined, target: unknown): void {
+function assertRoute(requestMethod: RequestMethod, path: string | undefined, target: unknown, action: string): void {
   assert.equal(Reflect.getMetadata(METHOD_METADATA, target), requestMethod);
   assert.equal(Reflect.getMetadata(PATH_METADATA, target), path);
+  assert.deepStrictEqual(Reflect.getMetadata(REQUIRE_PERMISSION_KEY, target), [
+    { resource: 'imports', action },
+  ]);
 }

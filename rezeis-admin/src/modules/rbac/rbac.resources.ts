@@ -73,10 +73,14 @@ export const RBAC_RESOURCES: Readonly<Record<string, readonly RbacAction[]>> = {
   // System
   admins: ['view', 'create', 'edit', 'delete'],
   rbac_roles: ['view', 'create', 'edit', 'delete'],
+  api_tokens: ['view', 'create', 'delete'],
+  auth_providers: ['view', 'edit'],
   appearance: ['view', 'edit'],
   branding: ['view', 'edit'],
   backups: ['view', 'create', 'delete', 'run'],
-  imports: ['view', 'create', 'run'],
+  // `create` is legacy-valid for persisted/custom roles. New file/live import
+  // endpoints use the stricter `import` action below.
+  imports: ['view', 'create', 'import', 'run'],
   audit: ['view', 'export'],
   blocked_ips: ['view', 'create', 'delete'],
 

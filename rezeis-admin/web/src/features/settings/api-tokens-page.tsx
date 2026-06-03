@@ -18,6 +18,7 @@ import {
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { useHasPermission } from '@/features/rbac'
 import { settingsApi } from '@/features/settings/settings-api'
 
 interface ApiTokenFormValues {
@@ -45,10 +46,14 @@ export function ApiTokensPage(): JSX.Element {
   const [createdToken, setCreatedToken] = useState<CreatedTokenState | null>(null)
   const [tokenToRevoke, setTokenToRevoke] = useState<{ readonly id: string; readonly name: string } | null>(null)
   const queryClient = useQueryClient()
+  const canViewTokens = useHasPermission('api_tokens', 'view')
+  const canCreateTokens = useHasPermission('api_tokens', 'create')
+  const canDeleteTokens = useHasPermission('api_tokens', 'delete')
 
   const tokensQuery = useQuery({
     queryKey: ['settings', 'apiTokens'],
     queryFn: settingsApi.listApiTokens,
+    enabled: canViewTokens,
   })
 
   const form = useForm<ApiTokenFormValues>({
@@ -90,7 +95,9 @@ export function ApiTokensPage(): JSX.Element {
       toast.error(t('settings.apiTokens.errors.nameRequired'))
       return
     }
-    createMutation.mutate({ name: trimmedName })
+    if (canCreateTokens) {
+      createMutation.mutate({ name: trimmedName })
+    }
   }
 
   function handleCopyToken(): void {
@@ -119,8 +126,19 @@ export function ApiTokensPage(): JSX.Element {
         </div>
       </div>
 
-      <div className="grid gap-4 xl:grid-cols-[minmax(320px,0.8fr)_minmax(0,1.2fr)]">
+      {!canViewTokens ? (
         <Card>
+          <CardHeader>
+            <CardTitle>{t('settings.apiTokens.accessDeniedTitle')}</CardTitle>
+            <CardDescription>{t('settings.apiTokens.accessDeniedDescription')}</CardDescription>
+          </CardHeader>
+        </Card>
+      ) : null}
+
+      {canViewTokens ? (
+      <div className="grid gap-4 xl:grid-cols-[minmax(320px,0.8fr)_minmax(0,1.2fr)]">
+        {canCreateTokens ? (
+          <Card>
           <CardHeader>
             <div className="flex items-center gap-3">
               <div className="flex size-11 items-center justify-center rounded-2xl bg-accent text-primary">
@@ -173,7 +191,8 @@ export function ApiTokensPage(): JSX.Element {
               ) : null}
             </form>
           </CardContent>
-        </Card>
+          </Card>
+        ) : null}
 
         <Card>
           <CardHeader>
@@ -225,24 +244,27 @@ export function ApiTokensPage(): JSX.Element {
                     </span>
                   </div>
                 </div>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="gap-1.5 text-destructive hover:text-destructive"
-                  onClick={(): void => setTokenToRevoke({ id: token.id, name: token.name })}
-                  disabled={revokeMutation.isPending}
-                >
-                  <Trash2 className="size-3.5" />
-                  {t('settings.apiTokens.revokeAction')}
-                </Button>
+                {canDeleteTokens ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="gap-1.5 text-destructive hover:text-destructive"
+                    onClick={(): void => setTokenToRevoke({ id: token.id, name: token.name })}
+                    disabled={revokeMutation.isPending}
+                  >
+                    <Trash2 className="size-3.5" />
+                    {t('settings.apiTokens.revokeAction')}
+                  </Button>
+                ) : null}
               </div>
             ))}
           </CardContent>
         </Card>
       </div>
+      ) : null}
 
-      <Dialog open={tokenToRevoke !== null} onOpenChange={(open): void => { if (!open) setTokenToRevoke(null) }}>
+      <Dialog open={canDeleteTokens && tokenToRevoke !== null} onOpenChange={(open): void => { if (!open) setTokenToRevoke(null) }}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>{t('settings.apiTokens.confirmation.title')}</DialogTitle>

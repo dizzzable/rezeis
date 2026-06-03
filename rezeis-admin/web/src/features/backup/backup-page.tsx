@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { Plus, Download, Trash2, AlertCircle, Archive, RefreshCw, Settings, Send, RotateCcw } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api';
-import { safeGetItem } from '@/lib/safe-storage';
+import { authStorage } from '@/lib/auth-storage';
 import { formatDateTime } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -15,6 +15,7 @@ import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
+import { useHasPermission } from '@/features/rbac';
 import {
   Select,
   SelectContent,
@@ -95,10 +96,15 @@ export default function BackupPage() {
   const [scope, setScope] = useState<'DB' | 'FULL'>('DB');
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [restoreFilename, setRestoreFilename] = useState<string | null>(null);
+  const canViewBackups = useHasPermission('backups', 'view');
+  const canCreateBackups = useHasPermission('backups', 'create');
+  const canDeleteBackups = useHasPermission('backups', 'delete');
+  const canRunBackups = useHasPermission('backups', 'run');
 
   const { data, isLoading, error, refetch, isFetching } = useQuery({
     queryKey: ['backups'],
     queryFn: fetchBackups,
+    enabled: canViewBackups,
     refetchInterval: (query) => {
       const items = query.state.data?.items ?? [];
       const hasProcessing = items.some((b) => Number(b.sizeBytes) === 0 && !b.errorMessage);
@@ -107,7 +113,10 @@ export default function BackupPage() {
   });
 
   const createMutation = useMutation({
-    mutationFn: () => api.post<BackupRecord>('/admin/backup', { scope }),
+    mutationFn: () => {
+      if (!canCreateBackups) throw new Error('Missing backups:create');
+      return api.post<BackupRecord>('/admin/backup', { scope });
+    },
     onSuccess: () => {
       toast.success(t('backupPage.toasts.started'));
       queryClient.invalidateQueries({ queryKey: ['backups'] });
@@ -116,7 +125,10 @@ export default function BackupPage() {
   });
 
   const deleteMutation = useMutation({
-    mutationFn: (id: string) => api.delete(`/admin/backup/${id}`),
+    mutationFn: (id: string) => {
+      if (!canDeleteBackups) throw new Error('Missing backups:delete');
+      return api.delete(`/admin/backup/${id}`);
+    },
     onSuccess: () => {
       toast.success(t('backupPage.toasts.deleted'));
       queryClient.invalidateQueries({ queryKey: ['backups'] });
@@ -126,7 +138,10 @@ export default function BackupPage() {
   });
 
   const restoreMutation = useMutation({
-    mutationFn: (filename: string) => api.post(`/admin/backup/restore/${encodeURIComponent(filename)}`),
+    mutationFn: (filename: string) => {
+      if (!canRunBackups) throw new Error('Missing backups:run');
+      return api.post(`/admin/backup/restore/${encodeURIComponent(filename)}`);
+    },
     onSuccess: () => {
       toast.success(t('backupPage.toasts.restoreStarted'));
       setRestoreFilename(null);
@@ -136,7 +151,7 @@ export default function BackupPage() {
 
   async function downloadBackup(filename: string): Promise<void> {
     try {
-      const token = safeGetItem('rezeis_admin_token') ?? '';
+      const token = authStorage.getToken();
       const response = await fetch(`/api/admin/backup/download/${encodeURIComponent(filename)}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -157,6 +172,16 @@ export default function BackupPage() {
     }
   }
 
+  if (!canViewBackups)
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle>{t('backupPage.accessDeniedTitle')}</CardTitle>
+          <CardDescription>{t('backupPage.accessDeniedDescription')}</CardDescription>
+        </CardHeader>
+      </Card>
+    );
+
   if (error)
     return (
       <Alert variant="destructive">
@@ -174,15 +199,17 @@ export default function BackupPage() {
           <p className="text-muted-foreground">{t('backupPage.subtitle')}</p>
         </div>
         <div className="flex items-center gap-2">
-          <Select value={scope} onValueChange={(v) => setScope(v as 'DB' | 'FULL')}>
-            <SelectTrigger className="w-28">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="DB">{t('backupPage.dbOnly')}</SelectItem>
-              <SelectItem value="FULL">{t('backupPage.full')}</SelectItem>
-            </SelectContent>
-          </Select>
+          {canCreateBackups ? (
+            <Select value={scope} onValueChange={(v) => setScope(v as 'DB' | 'FULL')}>
+              <SelectTrigger className="w-28">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="DB">{t('backupPage.dbOnly')}</SelectItem>
+                <SelectItem value="FULL">{t('backupPage.full')}</SelectItem>
+              </SelectContent>
+            </Select>
+          ) : null}
           <Button
             variant="outline"
             size="icon"
@@ -192,10 +219,12 @@ export default function BackupPage() {
           >
             <RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} />
           </Button>
-          <Button onClick={() => createMutation.mutate()} disabled={createMutation.isPending}>
-            <Plus className="mr-2 h-4 w-4" />
-            {createMutation.isPending ? t('backupPage.creating') : t('backupPage.createBackup')}
-          </Button>
+          {canCreateBackups ? (
+            <Button onClick={() => createMutation.mutate()} disabled={createMutation.isPending}>
+              <Plus className="mr-2 h-4 w-4" />
+              {createMutation.isPending ? t('backupPage.creating') : t('backupPage.createBackup')}
+            </Button>
+          ) : null}
         </div>
       </div>
 
@@ -308,26 +337,30 @@ export default function BackupPage() {
                         >
                           <Download className="h-4 w-4" />
                         </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          title={t('backupPage.restore')}
-                          aria-label={t('backupPage.restore')}
-                          onClick={() => setRestoreFilename(b.filename)}
-                          disabled={Number(b.sizeBytes) === 0 || !!b.errorMessage}
-                        >
-                          <RotateCcw className="h-4 w-4" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          title={t('backupBadges.delete')}
-                          aria-label={t('backupBadges.delete')}
-                          className="text-destructive hover:text-destructive"
-                          onClick={() => setDeleteId(b.id)}
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
+                        {canRunBackups ? (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            title={t('backupPage.restore')}
+                            aria-label={t('backupPage.restore')}
+                            onClick={() => setRestoreFilename(b.filename)}
+                            disabled={Number(b.sizeBytes) === 0 || !!b.errorMessage}
+                          >
+                            <RotateCcw className="h-4 w-4" />
+                          </Button>
+                        ) : null}
+                        {canDeleteBackups ? (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            title={t('backupBadges.delete')}
+                            aria-label={t('backupBadges.delete')}
+                            className="text-destructive hover:text-destructive"
+                            onClick={() => setDeleteId(b.id)}
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        ) : null}
                       </div>
                     </TableCell>
                   </TableRow>

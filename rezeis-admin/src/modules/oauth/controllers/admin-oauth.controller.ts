@@ -15,6 +15,8 @@ import { AuthProviderType } from '@prisma/client';
 import { Request, Response } from 'express';
 
 import { AdminJwtAuthGuard } from '../../auth/guards/admin-jwt-auth.guard';
+import { RequirePermission } from '../../rbac/decorators/require-permission.decorator';
+import { RbacGuard } from '../../rbac/guards/rbac.guard';
 import {
   AuthProviderConfigInterface,
   OAuthLoginResult,
@@ -108,7 +110,7 @@ export class OAuthPublicController {
 // ── Admin-only endpoints (JWT required) ──────────────────────────────────────
 
 @Controller('admin/oauth/config')
-@UseGuards(AdminJwtAuthGuard)
+@UseGuards(AdminJwtAuthGuard, RbacGuard)
 export class OAuthConfigController {
   public constructor(
     private readonly configService: OAuthConfigService,
@@ -119,6 +121,7 @@ export class OAuthConfigController {
    * Returns all provider configurations (admin view).
    */
   @Get()
+  @RequirePermission('auth_providers', 'view')
   public async getAllConfigs(): Promise<AuthProviderConfigInterface[]> {
     return this.configService.getAllConfigs();
   }
@@ -127,6 +130,7 @@ export class OAuthConfigController {
    * Updates a provider configuration.
    */
   @Put(':type')
+  @RequirePermission('auth_providers', 'edit')
   public async updateConfig(
     @Param('type') type: AuthProviderType,
     @Body() body: UpdateProviderConfigDto,

@@ -41,7 +41,7 @@ These existed before this handoff. Do not overwrite or delete them unless explic
 
 ## Current Gate Snapshot
 
-Generated: 2026-06-03T14:15:07.330Z (checks not re-run; previous observed results preserved)
+Generated: 2026-06-03T18:34:13.410Z (checks not re-run; previous observed results preserved)
 
 Run these from `V:\REZEIS_ADMIN_RUID_USER\rezeis` or the listed subdirectory.
 
@@ -52,7 +52,7 @@ Run these from `V:\REZEIS_ADMIN_RUID_USER\rezeis` or the listed subdirectory.
 | Backend lint | `npm run lint` in `rezeis-admin` | Pass |
 | Backend tests | `npm test` in `rezeis-admin` | Pass: 513 tests |
 | Backend maintained tests | `npm run test:maintained` in `rezeis-admin` | Pass: 423 tests (336 core + 22 admin-surfaces + 65 email-linking) |
-| Backend admin surfaces tests | `npm run test:maintained:admin-surfaces` in `rezeis-admin` | Pass: 22 tests |
+| Backend admin surfaces tests | `npm run test:maintained:admin-surfaces` in `rezeis-admin` | Pass: 23 tests |
 | Backend admin auth tests | `node --require ts-node/register --test test/admin-auth.service.spec.ts test/auth.controller.spec.ts test/internal-admin.controller.spec.ts test/current-admin.decorator.spec.ts test/current-internal-request.decorator.spec.ts` in `rezeis-admin` | Pass: 22 tests (5 files) |
 | Backend config tests | `node --require ts-node/register --test test/auth.config.spec.ts test/email.config.spec.ts test/payments.config.spec.ts test/redis.config.spec.ts test/remnawave.config.spec.ts test/env.schema.spec.ts` in `rezeis-admin` | Pass: 16 tests |
 | Backend email service tests | `node --require ts-node/register --test test/email.service.spec.ts` in `rezeis-admin` | Pass: 3 tests |
@@ -81,22 +81,44 @@ Run these from `V:\REZEIS_ADMIN_RUID_USER\rezeis` or the listed subdirectory.
 | Backend email-linking tests | `node --require ts-node/register --test test/linking.service.spec.ts test/linking.controller.spec.ts test/internal-user.service.spec.ts test/internal-user-linked-web-account-sign-in.spec.ts test/complete-web-account-email-verification.dto.spec.ts` in `rezeis-admin` | Pass: 65 tests |
 | Backend audit | `npm audit` in `rezeis-admin` | Pass: found 0 vulnerabilities |
 | Web typecheck | `npx tsc -p tsconfig.app.json --noEmit --incremental false` in `rezeis-admin/web` | Pass |
-| Web tests | `npm test` in `rezeis-admin/web` | Pass: 9 files, 55 tests |
+| Web tests | `npm test` in `rezeis-admin/web` | Pass: 12 files, 65 tests |
 | Web lint | `npm run lint` in `rezeis-admin/web` | Pass, 26 warnings |
 | Web build | `npm run build` in `rezeis-admin/web` | Pass |
 | Web audit | `npm audit` in `rezeis-admin/web` | Pass: found 0 vulnerabilities |
 
 ## Recommended First Slice
 
-P0.1, P0.2, P0.3, and P0.4 are complete: web typecheck/tests/lint/build pass, backend typecheck/lint/full tests pass, root `.github/workflows/ci.yml` now runs full backend `npm test` as the blocking backend test signal, and backend/web audits pass. S1 Admin Security CORS allowlist is complete for runtime/config validation: production now fails closed without `ADMIN_CORS_ORIGINS`, configured origins are normalized and deduplicated, and wildcard/invalid/path-bearing credentialed origins are rejected. S2 CSP Rollout is complete as a production report-only Helmet CSP with explicit SPA directives and no enforcing CSP header yet. S3 Swagger Exposure is complete: `/api/docs` is not mounted in production even when `API_DOCS_ENABLED=true` is accidentally set.
+## Completion Estimate And Remaining Work
 
-Recommended first slice: continue P1 Admin Security with S4 Admin Token Storage And Cache Isolation from `docs/progress/rezeis-remediation-plan.md`: clear TanStack Query and sensitive client stores on logout/login boundaries, then consider the short-term localStorage failure behavior without starting the larger HttpOnly-cookie migration yet.
+Overall remediation is approximately 60-65% complete as of 2026-06-03. This is an operational estimate, not a story-point metric: P0 quality gates are complete, deploy safety is mostly complete, admin security is partly complete, and most frontend correctness/accessibility/strictness work is still ahead.
+
+Completed or mostly complete:
+
+- P0 Trustworthy Gates: complete. Backend typecheck/lint/full tests pass, web typecheck/tests/lint/build pass, root CI runs the real gates, and backend/web audits pass.
+- P1 Deploy Safety: mostly complete. Compose credentials/network/process-role hardening, Docker ignore hygiene, proxy hardening, and version/release metadata alignment are done. `.env.example` cleanup remains constrained by repo guardrails around `.env.*` files.
+- P1 Admin Security: CORS allowlist, report-only CSP rollout, production Swagger shutdown, short-term admin cache/session boundary, API-token RBAC, OAuth-provider RBAC, and backup/config-portability/import RBAC are complete.
+
+Remaining priority order:
+
+- Finish any residual S5 RBAC surface audit route-by-route if a clear gap is found; do not globalize `RbacGuard` yet. Next concrete target: S6 API Tokens Hardening.
+- S6 API Tokens Hardening: token scopes/audience, TTL/rotation, hash-only storage review, and `lastUsedAt` write-load behavior.
+- S7 Payment Diagnostics Sanitization: sanitize provider URLs, raw tokens, provider IDs, cookies, authorization fragments, and user-facing/internal payment error payloads.
+- P2 Frontend Correctness And UX: auth readiness, query-key factories/realtime invalidation, production devtools/client-log redaction, critical form schemas, and accessibility baseline.
+- P3 TypeScript Strictness: defer broad strictness until the higher-priority security/frontend slices are stable.
+
+P0.1, P0.2, P0.3, and P0.4 are complete: web typecheck/tests/lint/build pass, backend typecheck/lint/full tests pass, root `.github/workflows/ci.yml` now runs full backend `npm test` as the blocking backend test signal, and backend/web audits pass. S1 Admin Security CORS allowlist is complete for runtime/config validation: production now fails closed without `ADMIN_CORS_ORIGINS`, configured origins are normalized and deduplicated, and wildcard/invalid/path-bearing credentialed origins are rejected. S2 CSP Rollout is complete as a production report-only Helmet CSP with explicit SPA directives and no enforcing CSP header yet. S3 Swagger Exposure is complete: `/api/docs` is not mounted in production even when `API_DOCS_ENABLED=true` is accidentally set. S4 Admin Token Storage And Cache Isolation is complete for the short-term frontend boundary: login/logout clear TanStack Query plus sensitive Zustand stores, token access is centralized through `authStorage` with current-tab in-memory fallback when localStorage writes fail, axios/realtime/direct backup download use the same token source, and the legacy OAuth query-string token fallback is removed. S5 RBAC Completion is now in progress: admin API-token management is gated end-to-end with `api_tokens:view/create/delete`, OAuth provider configuration is gated with `auth_providers:view/edit`, and backup/config-portability/import operations are gated on backend routes plus matching frontend tabs/actions. Passkey and TOTP self-service remain JWT-protected account-level surfaces, not global auth-provider administration.
+
+Recommended first slice: start S6 API Tokens Hardening. Suggested focus: token scopes/audience and hash-only storage review before TTL/rotation behavior. Keep the same small-slice pattern: backend authority first, focused specs, then frontend/operator UX if needed. Do not globalize `RbacGuard` yet.
 
 Latest S1 verification: `node --require ts-node/register --test test/env.schema.spec.ts test/http-runtime.middleware.spec.ts` passed 23 tests; `npm run typecheck` passed; focused ESLint on changed backend files passed.
 
 Latest S2 verification: `node --require ts-node/register --test test/http-runtime.middleware.spec.ts` passed 16 tests; `npm run typecheck` passed; focused ESLint on changed backend files passed.
 
 Latest S3 verification: `node --require ts-node/register --test test/api-docs.spec.ts test/http-runtime.middleware.spec.ts` passed 18 tests; `npm run typecheck` passed; focused ESLint on changed backend files passed.
+
+Latest S4 verification: `npx vitest run src/lib/auth-storage.test.ts src/lib/admin-session.test.ts` passed 7 tests; `npx tsc -p tsconfig.app.json --noEmit --incremental false` passed; focused ESLint on changed web auth/session files passed; `npm test` in `rezeis-admin/web` passed 11 files / 62 tests.
+
+Latest S5 verification: backup/config-portability/import RBAC slice passed `node --require ts-node/register --test test/admin-backup-rbac.controller.spec.ts test/admin-config-portability-rbac.controller.spec.ts test/imports.controller.spec.ts` (11 tests), `npm run test:maintained:admin-surfaces` (23 tests), backend `npm run typecheck`, focused backend ESLint, `npx vitest run src/features/backup/backup-page.test.tsx src/features/imports/imports-page.test.tsx src/features/config-portability/config-portability-page.test.tsx` (6 tests), S5 web RBAC regression bundle across API tokens/auth providers/backup/imports/config portability (12 tests), web typecheck, and focused web ESLint. Previous OAuth provider RBAC slice passed `node --require ts-node/register --test test/admin-oauth-config.controller.spec.ts` (4 tests), `npx vitest run src/features/settings/auth-providers-tab.test.tsx` (3 tests), backend `npm run typecheck`, backend `npm run lint`, web typecheck/focused lint, and full web `npm test` (13 files / 68 tests). Previous API-token RBAC slice passed `node --require ts-node/register --test test/admin-api-tokens.controller.spec.ts` (4 tests), backend typecheck/lint, `npx vitest run src/features/settings/api-tokens-page.test.tsx` (3 tests), web typecheck/focused lint, and full web `npm test` (12 files / 65 tests).
 
 Historical P0.3 triage notes retained for context:
 
@@ -130,8 +152,9 @@ Historical P0.3 triage notes retained for context:
 - Previous stale specs were deleted only after confirming the runtime contract was removed: old metrics modules, old user-activity queue/bot/event modules, old web-registration settings, old web-auth challenge/recovery/property contracts, old internal-user password recovery/reset endpoints, old Telegram password recovery delivery service, old settings notification-delivery retry methods, old dedicated worker module graph, old profile-sync executor/admin ops surface, old job observability/metrics modules, old `EmailVerificationService` contracts, old cache-backed linking code properties, duplicate old linking email controller specs, removed governance module specs, and removed internal-device-provisioning controller specs.
 - Latest full-suite run passes: 513 tests. P0.4 audit triage is closed: backend audit passes after overriding Prisma dev-tooling `@hono/node-server` to `1.19.13`, and web audit passes after overriding transitive `node-fetch` to `2.7.0` while keeping `face-api.js` for `GridScan` webcam tracking.
 - The previous load-sensitive `payment-webhook-ops.service.spec.ts`, `payment-webhook-ingress.service.spec.ts`, and profile-sync queue timeout assertions were made deterministic by using stalled promises instead of wall-clock completion flags; maintained suite now passes under load.
-- React Query cache is not cleared on admin logout/login, creating a cross-admin data exposure risk in a shared browser session.
-- Admin JWT is stored in `localStorage`; OWASP guidance recommends not storing session identifiers or sensitive auth data there.
+- React Query cache and sensitive client stores are now cleared on admin login/logout boundaries, closing the short-term shared-browser cross-admin cache exposure. The longer-term HttpOnly-cookie/BFF session migration is still open.
+- Admin JWT is still a bearer token persisted in `localStorage` when available, with a same-tab in-memory fallback when writes fail. OWASP guidance still recommends not storing session identifiers or sensitive auth data there, so this remains a later architecture/security follow-up.
+- API token management now has explicit `api_tokens:view/create/delete` backend RBAC and matching frontend list/create/revoke gates. `api_tokens` is intentionally not granted to default operator/support/finance system roles.
 - Credentialed admin CORS no longer reflects arbitrary origins: `ADMIN_CORS_ORIGINS` is required in production and invalid/wildcard origins are rejected. Helmet CSP now emits `Content-Security-Policy-Report-Only` in production with explicit SPA directives; it is intentionally not enforcing yet. Swagger is disabled in production even when `API_DOCS_ENABLED=true`; outside production it still requires explicit `API_DOCS_ENABLED=true`.
 - `docker-compose.yml` no longer hardcodes production DB/Redis credentials; it now requires generated `DATABASE_PASSWORD` and `REDIS_PASSWORD`. `.env.example` still needs explicit approval because current repo guardrails prohibit reading/editing `.env.*`. DB/Redis now attach only to the internal `rezeis-private` network; app/worker remain on both `rezeis-private` and external `remnawave-network` for proxy/Reiwa reachability.
 - `docker-compose.yml` now sets `RUID_PROCESS_ROLE=api` on the API service and `RUID_PROCESS_ROLE=worker` on the worker service. `.env.example` may still need cleanup after explicit approval to read/edit `.env.*` files.
@@ -149,6 +172,8 @@ Historical P0.3 triage notes retained for context:
 - Nest deployment docs: health checks are production monitoring endpoints, and logs must avoid sensitive data such as passwords or tokens.
 - TanStack Query docs: `queryClient.clear()` clears all connected caches.
 
+Future sessions should proactively use web search/fetch for current official docs, advisories, and standards before security, deploy, framework, browser-platform, dependency, or audit/remediation decisions, unless the exact source is already freshly captured here. Record any newly used source in this section.
+
 ## Suggested Skills For Next Session
 
 - Load `nestjs-platform` for CORS/CSP/Swagger/config/health/deploy work.
@@ -157,6 +182,8 @@ Historical P0.3 triage notes retained for context:
 - Load `react-effects` for realtime/socket/service-worker lifecycle fixes.
 - Load `typescript-config` for tsconfig/build strictness work.
 - Load `accessibility` for skip links, landmarks, focus behavior, dialogs.
+
+Skill loading is expected, not optional, when the work matches a listed skill. For the next recommended RBAC/admin-security slice, load `nestjs-core`, `nestjs-platform`, and the relevant React skill before editing.
 
 ## Do Not Start With
 

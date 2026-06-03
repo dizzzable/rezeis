@@ -10,6 +10,10 @@ export const en = {
     title: 'Imports',
     subtitle:
       'Import and sync users from multiple sources: Remnawave, 3x-ui, Remnashop, Altshop.',
+    accessDeniedTitle: 'Import access is restricted',
+    accessDeniedDescription: 'You need imports:view to inspect import history.',
+    readOnlyTitle: 'Import history is read-only',
+    readOnlyDescription: 'Starting imports, syncs, and follow-up import jobs requires imports:import or imports:run.',
     remnawave: {
       import: {
         title: 'Import from Remnawave',

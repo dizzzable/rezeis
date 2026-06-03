@@ -24,6 +24,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Badge } from '@/components/ui/badge'
 import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
+import { useHasPermission } from '@/features/rbac'
 
 import {
   type AuthProviderIconType,
@@ -58,21 +59,37 @@ const PROVIDER_META: Record<AuthProviderIconType, { color: string; description: 
 
 interface AuthProvidersTabProps {
   /**
-   * When true, renders without the page-level header (used when embedded
-   * inside the Security tab, where the parent already shows a heading).
+   * When true, renders without the page-level header because the parent
+   * settings tab already shows a heading.
    */
   readonly embedded?: boolean
 }
 
 export default function AuthProvidersTab({ embedded = false }: AuthProvidersTabProps = {}) {
   const { t } = useTranslation()
+  const canViewAuthProviders = useHasPermission('auth_providers', 'view')
+  const canEditAuthProviders = useHasPermission('auth_providers', 'edit')
   const { data: providers, isLoading } = useQuery({
     queryKey: ['oauth', 'config'],
     queryFn: async () => {
       const res = await api.get<ProviderConfig[]>('/admin/oauth/config')
       return res.data
     },
+    enabled: canViewAuthProviders,
   })
+
+  if (!canViewAuthProviders) {
+    return (
+      <div className={embedded ? 'space-y-3' : 'space-y-4 pt-4'}>
+        <Card>
+          <CardHeader>
+            <CardTitle>{t('authProviders.accessDeniedTitle')}</CardTitle>
+            <CardDescription>{t('authProviders.accessDeniedDescription')}</CardDescription>
+          </CardHeader>
+        </Card>
+      </div>
+    )
+  }
 
   if (isLoading) {
     return (
@@ -112,13 +129,13 @@ export default function AuthProvidersTab({ embedded = false }: AuthProvidersTabP
 
       {/* Dynamic providers */}
       {providers?.map((provider) => (
-        <ProviderCard key={provider.type} provider={provider} />
+        <ProviderCard key={provider.type} provider={provider} canEdit={canEditAuthProviders} />
       ))}
     </div>
   )
 }
 
-function ProviderCard({ provider }: { provider: ProviderConfig }) {
+function ProviderCard({ provider, canEdit }: { provider: ProviderConfig; canEdit: boolean }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const [isOpen, setIsOpen] = useState(false)
@@ -214,12 +231,14 @@ function ProviderCard({ provider }: { provider: ProviderConfig }) {
             <Badge variant={provider.isEnabled ? 'success' : 'secondary'}>
               {provider.isEnabled ? t('authProviders.enabled') : t('authProviders.disabled')}
             </Badge>
-            <Switch
-              checked={provider.isEnabled}
-              onCheckedChange={(checked) => toggleMutation.mutate(checked)}
-              disabled={toggleMutation.isPending}
-              aria-label={t('authProviders.toggleAria', { name: provider.displayName })}
-            />
+            {canEdit ? (
+              <Switch
+                checked={provider.isEnabled}
+                onCheckedChange={(checked) => toggleMutation.mutate(checked)}
+                disabled={toggleMutation.isPending}
+                aria-label={t('authProviders.toggleAria', { name: provider.displayName })}
+              />
+            ) : null}
           </div>
         </CardHeader>
 
@@ -235,6 +254,7 @@ function ProviderCard({ provider }: { provider: ProviderConfig }) {
                 value={formData.clientId}
                 onChange={(e) => setFormData({ ...formData, clientId: e.target.value })}
                 placeholder={provider.type === 'TELEGRAM' ? '1234567890:ABCdef...' : t('authProviders.fields.clientIdPlaceholder')}
+                disabled={!canEdit}
               />
             </div>
 
@@ -249,17 +269,20 @@ function ProviderCard({ provider }: { provider: ProviderConfig }) {
                     value={formData.clientSecret}
                     onChange={(e) => setFormData({ ...formData, clientSecret: e.target.value })}
                     placeholder={t('authProviders.fields.clientSecretPlaceholder')}
+                    disabled={!canEdit}
                   />
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    className="absolute right-1 top-1/2 -translate-y-1/2 h-7 w-7"
-                    onClick={() => setShowSecret(!showSecret)}
-                    aria-label={showSecret ? 'Hide' : 'Show'}
-                  >
-                    {showSecret ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-                  </Button>
+                  {canEdit ? (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="absolute right-1 top-1/2 -translate-y-1/2 h-7 w-7"
+                      onClick={() => setShowSecret(!showSecret)}
+                      aria-label={showSecret ? 'Hide' : 'Show'}
+                    >
+                      {showSecret ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                    </Button>
+                  ) : null}
                 </div>
               </div>
             )}
@@ -272,6 +295,7 @@ function ProviderCard({ provider }: { provider: ProviderConfig }) {
                 value={formData.frontendDomain}
                 onChange={(e) => setFormData({ ...formData, frontendDomain: e.target.value })}
                 placeholder="example.com"
+                disabled={!canEdit}
               />
             </div>
 
@@ -284,6 +308,7 @@ function ProviderCard({ provider }: { provider: ProviderConfig }) {
                   value={formData.backendDomain}
                   onChange={(e) => setFormData({ ...formData, backendDomain: e.target.value })}
                   placeholder="https://api.example.com"
+                  disabled={!canEdit}
                 />
               </div>
             )}
@@ -297,6 +322,7 @@ function ProviderCard({ provider }: { provider: ProviderConfig }) {
                     value={formData.realm}
                     onChange={(e) => setFormData({ ...formData, realm: e.target.value })}
                     placeholder="master"
+                    disabled={!canEdit}
                   />
                 </div>
                 <div className="space-y-1.5">
@@ -305,6 +331,7 @@ function ProviderCard({ provider }: { provider: ProviderConfig }) {
                     value={formData.providerDomain}
                     onChange={(e) => setFormData({ ...formData, providerDomain: e.target.value })}
                     placeholder="keycloak.example.com"
+                    disabled={!canEdit}
                   />
                 </div>
               </>
@@ -318,6 +345,7 @@ function ProviderCard({ provider }: { provider: ProviderConfig }) {
                   value={formData.providerDomain}
                   onChange={(e) => setFormData({ ...formData, providerDomain: e.target.value })}
                   placeholder="pocket.yoursite.com"
+                  disabled={!canEdit}
                 />
               </div>
             )}
@@ -331,6 +359,7 @@ function ProviderCard({ provider }: { provider: ProviderConfig }) {
                     value={formData.authorizationUrl}
                     onChange={(e) => setFormData({ ...formData, authorizationUrl: e.target.value })}
                     placeholder="https://example.com/oauth2/authorize"
+                    disabled={!canEdit}
                   />
                 </div>
                 <div className="space-y-1.5">
@@ -339,12 +368,14 @@ function ProviderCard({ provider }: { provider: ProviderConfig }) {
                     value={formData.tokenUrl}
                     onChange={(e) => setFormData({ ...formData, tokenUrl: e.target.value })}
                     placeholder="https://example.com/oauth2/token"
+                    disabled={!canEdit}
                   />
                 </div>
                 <div className="flex items-center gap-2">
                   <Switch
                     checked={formData.usePkce}
                     onCheckedChange={(checked) => setFormData({ ...formData, usePkce: checked })}
+                    disabled={!canEdit}
                     aria-label="PKCE"
                   />
                   <Label className="text-xs">With PKCE</Label>
@@ -361,6 +392,7 @@ function ProviderCard({ provider }: { provider: ProviderConfig }) {
                   value={formData.allowedEmails}
                   onChange={(e) => setFormData({ ...formData, allowedEmails: e.target.value })}
                   placeholder="admin@example.com, dev@example.com"
+                  disabled={!canEdit}
                 />
               </div>
             )}
@@ -374,19 +406,22 @@ function ProviderCard({ provider }: { provider: ProviderConfig }) {
                   value={formData.allowedTelegramIds}
                   onChange={(e) => setFormData({ ...formData, allowedTelegramIds: e.target.value })}
                   placeholder="123456789, 987654321"
+                  disabled={!canEdit}
                 />
               </div>
             )}
 
             {/* Save button */}
-            <Button
-              onClick={() => saveMutation.mutate()}
-              disabled={saveMutation.isPending}
-              size="sm"
-            >
-              {saveMutation.isPending && <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />}
-              {t('authProviders.save')}
-            </Button>
+            {canEdit ? (
+              <Button
+                onClick={() => saveMutation.mutate()}
+                disabled={saveMutation.isPending}
+                size="sm"
+              >
+                {saveMutation.isPending && <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />}
+                {t('authProviders.save')}
+              </Button>
+            ) : null}
           </CardContent>
         </CollapsibleContent>
       </Card>

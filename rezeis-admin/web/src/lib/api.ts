@@ -1,8 +1,9 @@
 import axios, { AxiosError, AxiosRequestConfig, InternalAxiosRequestConfig } from "axios";
 
-import { safeGetItem, safeRemoveItem } from "./safe-storage";
+import { authStorage, ADMIN_ACCESS_TOKEN_KEY } from "./auth-storage";
+import { queryClient } from "./query-client";
 
-export const TOKEN_KEY = "rezeis_admin_token";
+export const TOKEN_KEY = ADMIN_ACCESS_TOKEN_KEY;
 
 /** Path the auth provider redirects to on hard auth failure. */
 const SIGN_IN_PATH = "/sign-in";
@@ -14,7 +15,7 @@ export const api = axios.create({
 
 // ── Request interceptor — inject the bearer token ──────────────────────────
 api.interceptors.request.use((config: InternalAxiosRequestConfig) => {
-  const token = safeGetItem(TOKEN_KEY);
+  const token = authStorage.getToken();
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;
   }
@@ -37,8 +38,8 @@ let isLoggingOut = false;
 function forceLogout(): void {
   if (isLoggingOut) return;
   isLoggingOut = true;
-  // safeRemoveItem swallows quota / privacy-mode failures internally.
-  safeRemoveItem(TOKEN_KEY);
+  authStorage.clearToken();
+  queryClient.clear();
   // Avoid a redirect loop on the sign-in page itself.
   if (typeof window !== "undefined" && !window.location.pathname.endsWith(SIGN_IN_PATH)) {
     window.location.href = SIGN_IN_PATH;

@@ -327,10 +327,14 @@ Acceptance:
 
 ### S4 Admin Token Storage And Cache Isolation
 
+Status: Completed 2026-06-03 for short-term cache/session-boundary hardening. `startAdminClientSession` and `endAdminClientSession` now call `queryClient.clear()` and reset sensitive client state (`usePermissionStore`, legacy `useAuthStore`) on login/logout boundaries. The admin bearer token now uses one shared `authStorage` source for axios, realtime sockets, backup download fetches, and auth bootstrap; it keeps an in-memory current-tab fallback when `localStorage` writes fail. OAuth callback handling keeps the hash-fragment token flow but removes the legacy query-string token fallback. HttpOnly cookie/BFF session migration remains a longer-term follow-up, not part of this short-term S4 slice. Verified with focused auth/session tests, web typecheck, focused ESLint, and full web `npm test`.
+
 Files:
 
 - `rezeis-admin/web/src/features/auth/auth-provider.tsx`
 - `rezeis-admin/web/src/lib/api.ts`
+- `rezeis-admin/web/src/lib/admin-session.ts`
+- `rezeis-admin/web/src/lib/auth-storage.ts`
 - `rezeis-admin/web/src/lib/query-client.ts`
 - Zustand stores with sensitive state
 
@@ -346,12 +350,21 @@ Acceptance:
 - Admin B cannot see Admin A cached data after logout/login in the same tab.
 - Auth still works when localStorage writes fail, or failure is explicit and safe.
 
+Verification:
+
+- `cd rezeis-admin/web && npx vitest run src/lib/auth-storage.test.ts src/lib/admin-session.test.ts` passed: 7 tests.
+- `cd rezeis-admin/web && npx tsc -p tsconfig.app.json --noEmit --incremental false` passed.
+- Focused ESLint on changed web auth/session files passed.
+- `cd rezeis-admin/web && npm test` passed: 11 files, 62 tests.
+
 External basis:
 
 - OWASP recommends not storing session identifiers/sensitive auth data in localStorage.
 - TanStack Query documents `queryClient.clear()` for clearing caches.
 
 ### S5 RBAC Completion
+
+Status: In progress 2026-06-03. First high-risk slice completed for admin API tokens. Backend `AdminApiTokensController` now runs `AdminJwtAuthGuard` plus `RbacGuard` and requires `api_tokens:view`, `api_tokens:create`, and `api_tokens:delete` per route. `api_tokens` was added to the RBAC resource catalog without granting it to default non-superadmin system roles, so superadmin picks it up through the full-catalog seed while operators must be granted access intentionally. The OAuth provider configuration slice is also complete: backend `OAuthConfigController` now requires `auth_providers:view` for listing provider configuration and `auth_providers:edit` for updates/secrets, while public OAuth login/callback endpoints and current-admin passkey self-service remain outside this global provider-administration permission. The backup/config-portability/import high-risk slice is complete: backup list/download/create/delete/restore routes require explicit `backups` grants, config section/export/import routes require `config_portability:view/export/import`, and import history/file/live import/sync/cancel/plan follow-up routes require `imports:view/import/run`. Frontend API-token management does not fetch token rows without `api_tokens:view`, hides create/revoke controls without `create`/`delete`, and hides the panel-settings API-token tab behind `api_tokens:view`. Frontend OAuth provider settings are split out of the self-service Security tab, hidden behind `auth_providers:view`, do not fetch `/admin/oauth/config` without that grant, and render read-only without `auth_providers:edit`. Frontend backup/config/import pages now avoid fetches without `view`, render read-only states without write grants, and hide matching panel tabs/nav entries. Remaining S5 work: continue route-by-route audit only where a clear admin surface gap remains; do not globalize `RbacGuard` yet.
 
 Files:
 
@@ -371,6 +384,25 @@ Acceptance:
 
 - Lower-privileged admins cannot navigate to or trigger unauthorized admin screens/actions.
 - Backend still enforces the final authority.
+
+Latest S5 verification:
+
+- `cd rezeis-admin && node --require ts-node/register --test test/admin-backup-rbac.controller.spec.ts test/admin-config-portability-rbac.controller.spec.ts test/imports.controller.spec.ts` passed: 11 tests.
+- `cd rezeis-admin && npm run test:maintained:admin-surfaces` passed: 23 tests.
+- `cd rezeis-admin/web && npx vitest run src/features/backup/backup-page.test.tsx src/features/imports/imports-page.test.tsx src/features/config-portability/config-portability-page.test.tsx` passed: 6 tests.
+- `cd rezeis-admin/web && npx vitest run src/features/settings/api-tokens-page.test.tsx src/features/settings/auth-providers-tab.test.tsx src/features/backup/backup-page.test.tsx src/features/imports/imports-page.test.tsx src/features/config-portability/config-portability-page.test.tsx` passed: 12 tests.
+- `cd rezeis-admin && npm run typecheck` passed.
+- `cd rezeis-admin/web && npx tsc -p tsconfig.app.json --noEmit --incremental false` passed.
+- Focused ESLint on changed backend/web RBAC files passed.
+- `cd rezeis-admin && node --require ts-node/register --test test/admin-api-tokens.controller.spec.ts` passed: 4 tests.
+- `cd rezeis-admin && node --require ts-node/register --test test/admin-oauth-config.controller.spec.ts` passed: 4 tests.
+- `cd rezeis-admin && npm run typecheck` passed.
+- `cd rezeis-admin && npm run lint` passed.
+- `cd rezeis-admin/web && npx vitest run src/features/settings/api-tokens-page.test.tsx` passed: 3 tests.
+- `cd rezeis-admin/web && npx vitest run src/features/settings/auth-providers-tab.test.tsx` passed: 3 tests.
+- `cd rezeis-admin/web && npx tsc -p tsconfig.app.json --noEmit --incremental false` passed.
+- Focused ESLint on changed backend/web RBAC, API-token, and OAuth provider files passed.
+- `cd rezeis-admin/web && npm test` passed: 13 files, 68 tests.
 
 ### S6 API Tokens Hardening
 

@@ -14,6 +14,8 @@ import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentAdmin } from '../../auth/decorators/current-admin.decorator';
 import { AdminJwtAuthGuard } from '../../auth/guards/admin-jwt-auth.guard';
 import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.interface';
+import { RequirePermission } from '../../rbac/decorators/require-permission.decorator';
+import { RbacGuard } from '../../rbac/guards/rbac.guard';
 import {
   ApiTokenCreateResultInterface,
   ApiTokenListItemInterface,
@@ -31,18 +33,20 @@ class CreateApiTokenDto {
 
 @ApiTags('admin/api-tokens')
 @ApiBearerAuth('JWT')
-@UseGuards(AdminJwtAuthGuard)
+@UseGuards(AdminJwtAuthGuard, RbacGuard)
 @Controller('admin/api-tokens')
 export class AdminApiTokensController {
   public constructor(private readonly apiTokensService: ApiTokensService) {}
 
   @Get()
+  @RequirePermission('api_tokens', 'view')
   @ApiOperation({ summary: 'List all API tokens (without full token values)' })
   public list(): Promise<readonly ApiTokenListItemInterface[]> {
     return this.apiTokensService.list();
   }
 
   @Post()
+  @RequirePermission('api_tokens', 'create')
   @ApiOperation({ summary: 'Create a new named API token' })
   public create(
     @Body() dto: CreateApiTokenDto,
@@ -56,6 +60,7 @@ export class AdminApiTokensController {
 
   @Delete(':tokenId')
   @HttpCode(HttpStatus.NO_CONTENT)
+  @RequirePermission('api_tokens', 'delete')
   @ApiOperation({ summary: 'Revoke (delete) an API token' })
   public async delete(@Param('tokenId') tokenId: string): Promise<void> {
     await this.apiTokensService.delete(tokenId);
