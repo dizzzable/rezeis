@@ -7,7 +7,7 @@ import { HttpService } from '@nestjs/axios';
 
 import { paymentsConfig } from '../../../common/config/payments.config';
 import { readGatewaySettings } from '../utils/payment-gateway-settings.util';
-import { normalizePaymentProviderError } from '../utils/payment-provider-error.util';
+import { normalizePaymentProviderError, redactPaymentDiagnosticMessage } from '../utils/payment-provider-error.util';
 import {
   buildResultUrl,
   buildWebhookUrl,
@@ -438,7 +438,8 @@ export class PaymentProviderExecutionService {
 
     const data = response.data as Record<string, unknown>;
     if (data.code !== 0) {
-      throw new BadRequestException(`Antilopay error ${data.code}: ${data.error ?? 'unknown'}`);
+      const providerError = redactPaymentDiagnosticMessage(String(data.error ?? 'unknown'), 120) ?? 'unknown';
+      throw new BadRequestException(`Antilopay error ${data.code}: ${providerError}`);
     }
 
     return {

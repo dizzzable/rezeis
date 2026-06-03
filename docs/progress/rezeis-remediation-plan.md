@@ -447,7 +447,7 @@ Latest S6 verification:
 
 ### S7 Payment Diagnostics Sanitization
 
-Status: In progress 2026-06-03. Shared diagnostic redaction now masks auth/proxy-auth headers, cookies/set-cookie values, URL assignments (`profileUrl`, `config_url`, checkout/redirect/callback variants), provider/gateway identifier assignments, existing URL/email/UUID/provider-ID patterns, token words, and long hex secrets. Provider checkout persistence now stores only a redacted `gatewayData.providerResponse` while keeping operational fields such as `gatewayId`, top-level `checkoutUrl`, and provider status available for the checkout flow. Webhook ops routes are now guarded with `RbacGuard` and explicit `payment_webhooks:view/resolve/run` permissions. Webhook event detail `includeRaw=true` now still records an audit event but returns the redacted payload instead of the stored unredacted payload. Public/internal webhook ingress responses no longer echo the normalized envelope or raw webhook payload while preserving inbox persistence and reconciliation queue payloads. Remaining S7 work: audit any remaining admin/UI payment payload surfaces, especially transaction/gateway diagnostic displays and user-facing/internal payment status payloads, before changing behavior.
+Status: In progress 2026-06-04. Shared diagnostic redaction now masks auth/proxy-auth headers, cookies/set-cookie values, URL assignments (`profileUrl`, `config_url`, checkout/redirect/callback variants), provider/gateway identifier assignments, existing URL/email/UUID/provider-ID patterns, token words, and long hex secrets. Provider checkout persistence now stores only a redacted `gatewayData.providerResponse` while keeping operational fields such as `gatewayId`, top-level `checkoutUrl`, and provider status available for the checkout flow. Antilopay provider-declared checkout errors are redacted before surfacing through the service exception path. Webhook ops routes are guarded with `RbacGuard` and explicit `payment_webhooks:view/resolve/run` permissions. Webhook event detail `includeRaw=true` records an audit event but returns the redacted payload instead of the stored unredacted payload. Public/internal webhook ingress responses no longer echo the normalized envelope or raw webhook payload while preserving inbox persistence and reconciliation queue payloads. Payment analytics top failure/error labels are now redacted before returning broadly visible `analytics:view` reports. User-facing/internal payment status payloads were audited in this slice; no raw `gatewayData.providerResponse` or diagnostic payload leak was found beyond already-normalized `failureReason` codes.
 
 Files:
 
@@ -455,6 +455,7 @@ Files:
 - `src/modules/payments/services/payment-webhook-inbox.service.ts`
 - `src/modules/payments/services/payment-ops-alert.service.ts`
 - `src/modules/payments/services/payment-provider-execution.service.ts`
+- `src/modules/payment-analytics/services/payment-analytics.service.ts`
 - `src/modules/payments/services/payment-webhook-ingress.service.ts`
 - `src/modules/payments/services/payment-webhook-ops.service.ts`
 - `src/modules/payments/interfaces/payment-webhook-envelope.interface.ts`
@@ -468,10 +469,12 @@ Work:
 - Sanitize provider URLs, raw tokens, provider IDs, profile/config links, cookies, authorization fragments before storing or returning errors.
 - Keep raw diagnostics only in a protected, redacted, bounded operator log if absolutely needed.
 - Sanitize `gatewayData.providerResponse` before transaction persistence while preserving explicit checkout-flow fields. Completed for the provider checkout path.
+- Sanitize provider-declared checkout exception messages before returning service-level payment errors. Completed for the Antilopay non-zero response path.
 - Gate admin webhook ops routes with route-level RBAC metadata. Completed for list/detail/replay.
 - Stop returning unredacted stored webhook payloads from admin detail reveal requests while preserving audit logging. Completed for the current `includeRaw=true` detail path.
 - Stop echoing normalized webhook envelopes/raw payloads from public/internal ingress responses. Completed for the current ingress response contract.
-- Continue auditing remaining admin/UI payment payload surfaces with focused specs before changing behavior.
+- Sanitize payment analytics failure/error labels built from historical `providerStatus` and webhook `last_error` values. Completed for provider and webhook analytics reports.
+- Remaining S7/S5 crossover: decide whether admin-visible `gatewayId`/`providerEventId` are acceptable operational identifiers or should be masked/gated more tightly; admin transaction endpoints should be reviewed for explicit route-level RBAC before any global guard rollout.
 
 Acceptance:
 
@@ -481,9 +484,14 @@ Acceptance:
 - Admin webhook ops routes require explicit `payment_webhooks` permissions in addition to admin JWT authentication.
 - Admin webhook detail reveal requests no longer return unredacted stored webhook payloads.
 - Public/internal webhook ingress responses no longer expose raw webhook bodies.
+- Payment analytics reports do not expose raw provider status strings or webhook errors containing URLs, tokens, emails, provider identifiers, or Redis/DB URLs.
 
 Latest S7 verification:
 
+- `cd rezeis-admin && node --require ts-node/register --test test/payment-analytics.service.spec.ts test/payment-provider-execution.service.spec.ts` passed: 8 tests.
+- `cd rezeis-admin && npm run test:maintained:core` passed: 356 tests.
+- `cd rezeis-admin && npm run typecheck` passed.
+- `cd rezeis-admin && npx eslint src/modules/payment-analytics/services/payment-analytics.service.ts src/modules/payments/services/payment-provider-execution.service.ts test/payment-analytics.service.spec.ts test/payment-provider-execution.service.spec.ts` passed.
 - `cd rezeis-admin && node --require ts-node/register --test test/payment-webhook-ingress.service.spec.ts test/public-payment-webhooks.controller.spec.ts test/internal-payment-webhooks.controller.spec.ts` passed: 12 tests.
 - `cd rezeis-admin && npm run typecheck` passed.
 - `cd rezeis-admin && npx eslint src/modules/payments/services/payment-webhook-ingress.service.ts src/modules/payments/interfaces/payment-webhook-envelope.interface.ts test/payment-webhook-ingress.service.spec.ts` passed.

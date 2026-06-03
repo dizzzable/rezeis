@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { describe, it } from 'node:test';
 
-import { ServiceUnavailableException } from '@nestjs/common';
+import { BadRequestException, ServiceUnavailableException } from '@nestjs/common';
 import {
   Currency,
   PaymentGatewayType,
@@ -241,7 +241,64 @@ describe('PaymentProviderExecutionService checkout execution', () => {
       },
     );
   });
+
+  it('redacts Antilopay provider-declared error messages before throwing', async () => {
+    const rawProviderError = [
+      'invalid signature',
+      'checkoutUrl=https://lk.antilopay.com/pay?token=raw-provider-token-secret',
+      'payment_id=pay_1234567890abcdef',
+      'payer@example.com',
+    ].join(' ');
+    const service = createService({
+      post: () => of({ data: { code: 401, error: rawProviderError } }),
+    });
+
+    await assert.rejects(
+      service.createCheckout({
+        gateway: createGateway({
+          type: PaymentGatewayType.ANTILOPAY,
+          settings: {
+            projectIdentificator: 'project-1',
+            secretId: 'secret-id-1',
+            privateKey: TEST_RSA_PRIVATE_KEY_BASE64,
+          },
+        }),
+        transaction: createTransaction({ gatewayType: PaymentGatewayType.ANTILOPAY }),
+        description: 'Plan purchase',
+      }),
+      (error: unknown) => {
+        const serialized = JSON.stringify(error);
+        assert.equal(error instanceof BadRequestException, true);
+        assert.equal(serialized.includes('Antilopay error 401'), true);
+        assert.equal(serialized.includes('[url hidden]'), true);
+        assert.equal(serialized.includes('[identifier hidden]'), true);
+        assert.equal(serialized.includes('[email hidden]'), true);
+        assert.equal(serialized.includes(rawProviderError), false);
+        assert.equal(serialized.includes('raw-provider-token-secret'), false);
+        assert.equal(serialized.includes('lk.antilopay.com'), false);
+        assert.equal(serialized.includes('pay_1234567890abcdef'), false);
+        assert.equal(serialized.includes('payer@example.com'), false);
+        return true;
+      },
+    );
+  });
 });
+
+const TEST_RSA_PRIVATE_KEY_BASE64 = [
+  'MIICXAIBAAKBgQDHZVjF3+Ynt82VfZqoJx82KbJjIxZRv1CtjpPt4C3g6smP2y4u',
+  'g2TqluJq/YGDYgubfrJ7MBIKHfWMkwK8UEsq+ML5aWraJqTmQEMRA9+2u/x9K0qz',
+  'S2eBFS7CFANWrCTz4/jb4x0yF9atGqWxZizZCSZ4CQ6E+h9obEcWYvhMYwIDAQAB',
+  'AoGAPlEiF1IVbISb94r1CMye55XoMPgZFEGu83JGaKqQcfZqkgtL2/i+Fv/BUYH/',
+  'rECihfZdLssY2Hge5+X0ElhfE7y+Mlh8GuSDCi9u8uAg40gnza0HwZhrCF9dPJ8f',
+  '7kGGKllcBWbtHa6uJ9Fu+moHcjA1fV74EHZIVppBLZesN1ECQQD8Si+lQ3MUqvfn',
+  'h8dRSxyibqVAA5JaA3IaxmOmKJoNdtkAEsNCb8Vxpm19sU+rz0j/gkvbHL6HZOvG',
+  'yDCuIzElAkEAysdUTYFnfcZPE3a7paehRiOm5Ui0omtyf6pqGKMg1oACaFMSVZO6',
+  'HqOZdFkGP5a8PRwpXJrXuK9iK83ybQ7nowJBAIR4HRqR411B7YzHHhSWvfQXUJdc',
+  'We+9NFxdGd1N75lo7CNmEYENbrFcJb8WqTAQm6YgypM5XWzNBG8od4GGSsECQExL',
+  'ZWKWjuMXenPE7+7EJlG5TeN7yHK8ClZXS2mWprR6/6FcoLlIVnBbCf4N43VGhArq',
+  'jLpAV5p/Ef370QRtbA0CQC97t6U9Ml99VbgGhUbEJFX9ISNoLHEJb/2Vgj81pyPk',
+  'NnkIkW8rKC7abUzRYo5Hf5fME+0TegQdEGvHhPTgXkI=',
+].join('');
 
 function createService(httpService: { readonly post: (...args: never[]) => unknown }): PaymentProviderExecutionService {
   return new PaymentProviderExecutionService(httpService as never, {

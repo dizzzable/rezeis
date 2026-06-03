@@ -9,6 +9,7 @@ import {
 } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { redactPaymentDiagnosticMessage } from '../../payments/utils/payment-provider-error.util';
 import {
   PaymentProvidersReportInterface,
   PaymentWebhookHealthReportInterface,
@@ -34,6 +35,14 @@ function startOfDayUtc(d: Date): Date {
 
 function isoDay(d: Date): string {
   return startOfDayUtc(d).toISOString().slice(0, 10);
+}
+
+function sanitizeAnalyticsLabel(
+  value: string | null | undefined,
+  fallback: string,
+  maxLength: number,
+): string {
+  return redactPaymentDiagnosticMessage(value ?? fallback, maxLength) ?? fallback;
 }
 
 interface DailyAggregateRow {
@@ -216,7 +225,7 @@ export class PaymentAnalyticsService {
     );
     const failureMap = new Map<PaymentGatewayType, ProviderFailureReasonInterface[]>();
     for (const row of failureRows) {
-      const reasonText = (row.reason ?? 'unknown').slice(0, 80);
+      const reasonText = sanitizeAnalyticsLabel(row.reason, 'unknown', 80);
       const list = failureMap.get(row.gateway_type) ?? [];
       list.push({ reason: reasonText, count: Number(row.count), share: 0 });
       failureMap.set(row.gateway_type, list);
@@ -582,7 +591,7 @@ export class PaymentAnalyticsService {
     );
     const errorMap = new Map<PaymentGatewayType, { error: string; count: number }[]>();
     for (const row of errorRows) {
-      const reasonText = (row.last_error ?? 'unknown').slice(0, 120);
+      const reasonText = sanitizeAnalyticsLabel(row.last_error, 'unknown', 120);
       const existing = errorMap.get(row.gateway_type) ?? [];
       existing.push({ error: reasonText, count: Number(row.count) });
       errorMap.set(row.gateway_type, existing);
