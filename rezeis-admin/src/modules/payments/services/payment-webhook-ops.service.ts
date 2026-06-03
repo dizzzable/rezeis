@@ -67,11 +67,12 @@ export class PaymentWebhookOpsService {
     if (event === null) {
       throw new NotFoundException('Payment webhook event not found');
     }
+    const redactedPayload = this.paymentWebhookPayloadRedactionService.redact(event.rawPayload);
     return {
       ...mapEventListItem(event),
       payloadHash: event.payloadHash,
-      redactedPayload: this.paymentWebhookPayloadRedactionService.redact(event.rawPayload),
-      rawPayload: input.includeRaw ? event.rawPayload : null,
+      redactedPayload,
+      rawPayload: input.includeRaw ? redactedPayload : null,
     };
   }
 

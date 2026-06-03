@@ -23,6 +23,7 @@ function createService(input?: {
   readonly markFailed?: (eventId: string, lastError: string) => Promise<unknown>;
   readonly auditCreate?: () => Promise<unknown>;
   readonly notifyWebhookReplay?: () => Promise<unknown>;
+  readonly redact?: (payload: unknown) => unknown;
 }): PaymentWebhookOpsService {
   const prisma = {
     paymentWebhookEvent: {
@@ -53,7 +54,7 @@ function createService(input?: {
   return new PaymentWebhookOpsService(
     prisma as never,
     inbox as never,
-    { redact: (payload: unknown) => payload } as never,
+    { redact: input?.redact ?? ((payload: unknown) => payload) } as never,
     alertService as never,
     queue as never,
   );
@@ -248,6 +249,35 @@ describe('PaymentWebhookOpsService webhook diagnostic responses', () => {
 
     assert.equal(listItem?.lastError, 'PAYMENT_PROVIDER_TIMEOUT');
     assert.equal(detail.lastError, 'PAYMENT_PROVIDER_TIMEOUT');
+  });
+
+  it('does not return unredacted webhook payload when raw reveal is requested', async () => {
+    const rawPayload = {
+      apiKey: 'secret-key',
+      customerEmail: 'payer@example.com',
+      status: 'paid',
+    };
+    const redactedPayload = {
+      apiKey: '***redacted***',
+      customerEmail: '[email hidden]',
+      status: 'paid',
+    };
+    const event = createWebhookEventFixture({ rawPayload });
+    const service = createService({
+      findUnique: async () => event,
+      redact: (payload: unknown) => {
+        assert.deepEqual(payload, rawPayload);
+        return redactedPayload;
+      },
+    });
+
+    const detail = await service.getEventDetail({ eventId: 'webhook-event-1', includeRaw: true });
+    const serialized = JSON.stringify(detail);
+
+    assert.deepEqual(detail.redactedPayload, redactedPayload);
+    assert.deepEqual(detail.rawPayload, redactedPayload);
+    assert.equal(serialized.includes('secret-key'), false);
+    assert.equal(serialized.includes('payer@example.com'), false);
   });
 });
 
