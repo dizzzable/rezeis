@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
 import { startAdminClientSession, endAdminClientSession } from '@/lib/admin-session'
+import { logClientDiagnostic } from '@/lib/client-logger'
 import { usePermissionStore } from '@/features/rbac'
 import { useAuthStore } from '@/stores/auth-store'
 import { getMeApi, type AdminProfile } from './auth-api'
@@ -70,14 +71,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const handlePermissionLoadFailure = useCallback((err: unknown) => {
     // Surface the failure: without permissions, the workspace stays locked
     // so a forced password-change admin cannot briefly render the shell.
-    console.error('[auth-provider] loadPermissions failed:', err)
+    logClientDiagnostic('[auth-provider] loadPermissions failed', err)
     toast.error(t('authProvider.permissions.loadFailed'), {
       duration: 8_000,
       action: {
         label: t('authProvider.permissions.retry'),
         onClick: () => {
           void loadPermissions().catch((retryErr: unknown) => {
-            console.error('[auth-provider] retry loadPermissions failed:', retryErr)
+            logClientDiagnostic('[auth-provider] retry loadPermissions failed', retryErr)
           })
         },
       },

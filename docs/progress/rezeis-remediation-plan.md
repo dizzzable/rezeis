@@ -549,6 +549,8 @@ Verification:
 
 ### F3 Production Devtools And Client Logging
 
+Status: Completed 2026-06-04. React Query Devtools are now dynamically imported only when `import.meta.env.DEV` is true, so production builds do not include the devtools module or toggle. Client crash reports and local diagnostics now pass through shared redaction for query strings, bearer/basic auth, cookies, token/password/secret assignments, emails, UUIDs, JWT-like values, and long hex secrets before POSTing to `/admin/client-errors` or printing development-only console diagnostics.
+
 Work:
 
 - Render React Query Devtools only in development.
@@ -557,6 +559,13 @@ Work:
 Acceptance:
 
 - Production screen sharing/devtools cannot trivially expose full admin query caches.
+
+Verification:
+
+- `cd rezeis-admin/web && npx vitest run src/lib/client-logger.test.ts src/features/auth/auth-provider.test.tsx` passed: 2 files, 6 tests. React Router future-flag warnings remain pre-existing test noise.
+- `cd rezeis-admin/web && npx tsc -p tsconfig.app.json --noEmit --incremental false` passed.
+- Focused web ESLint on changed provider/client-logger/auth/error-boundary files passed.
+- `cd rezeis-admin/web && npm run build` passed, and a production `dist` grep found no `react-query-devtools` / `ReactQueryDevtools` references.
 
 ### F4 Critical Form Schemas
 
