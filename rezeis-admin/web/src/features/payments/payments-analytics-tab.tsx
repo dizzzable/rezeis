@@ -41,6 +41,7 @@ import {
 } from 'recharts'
 
 import { api } from '@/lib/api'
+import { adminQueryKeys } from '@/lib/admin-query-keys'
 import {
   Card,
   CardContent,
@@ -188,7 +189,7 @@ export default function PaymentsAnalyticsTab(): JSX.Element {
 function ProvidersSection({ days }: { readonly days: number }): JSX.Element {
   const { t } = useTranslation()
   const { data, isLoading, isError, isFetching } = useQuery({
-    queryKey: ['admin', 'analytics', 'payments', 'providers', days],
+    queryKey: adminQueryKeys.payments.analytics.providers(days),
     queryFn: async () => {
       const res = await api.get<ProvidersReport>(`/admin/analytics/payments/providers?days=${days}`)
       return res.data
@@ -569,7 +570,7 @@ function ProviderDetailPanel({ provider }: { readonly provider: ProviderDetail }
 function WebhookHealthSection({ days }: { readonly days: number }): JSX.Element {
   const { t } = useTranslation()
   const { data, isLoading, isError, isFetching } = useQuery({
-    queryKey: ['admin', 'analytics', 'payments', 'webhooks', days],
+    queryKey: adminQueryKeys.payments.analytics.webhooks(days),
     queryFn: async () => {
       const res = await api.get<WebhookHealthReport>(`/admin/analytics/payments/webhooks?days=${days}`)
       return res.data

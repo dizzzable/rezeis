@@ -27,10 +27,12 @@
  * do not leak connections.
  */
 import { useEffect, useMemo, useRef } from 'react';
-import { useQueryClient, type QueryClient } from '@tanstack/react-query';
+import { useQueryClient, type QueryClient, type QueryKey } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { io, type Socket } from 'socket.io-client';
+import { forceEndAdminSession } from '@/lib/admin-session';
 import { authStorage } from '@/lib/auth-storage';
+import { getRealtimeInvalidationKeys } from './realtime-invalidation';
 import {
   REALTIME_CLOSE,
   REALTIME_TOPICS,
@@ -50,61 +52,6 @@ interface UseRealtimeUpdatesOptions {
 /** Debounce window for query invalidation (ms). */
 const INVALIDATE_DEBOUNCE_MS = 400;
 
-/** Map of `event.type` → query keys that should be invalidated. */
-const TYPE_TO_QUERY_KEYS: Record<string, readonly string[][]> = {
-  // User domain
-  'user.registered': [['admin', 'dashboard', 'summary'], ['admin', 'users']],
-  'user.web_registered': [['admin', 'dashboard', 'summary'], ['admin', 'users']],
-  'user.blocked': [['admin', 'users']],
-  'user.unblocked': [['admin', 'users']],
-  'user.deleted': [['admin', 'users'], ['admin', 'dashboard', 'summary']],
-
-  // Subscription domain
-  'subscription.created': [['admin', 'subscriptions'], ['admin', 'dashboard', 'summary']],
-  'subscription.renewed': [['admin', 'subscriptions'], ['admin', 'dashboard', 'summary']],
-  'subscription.upgraded': [['admin', 'subscriptions']],
-  'subscription.expired': [['admin', 'subscriptions'], ['admin', 'dashboard', 'summary']],
-  'subscription.deleted': [['admin', 'subscriptions'], ['admin', 'dashboard', 'summary']],
-  'subscription.synced': [['admin', 'subscriptions']],
-  'subscription.trial_granted': [['admin', 'subscriptions'], ['admin', 'dashboard', 'summary']],
-
-  // Payment domain
-  'payment.checkout_created': [['admin', 'payments'], ['admin', 'dashboard', 'summary']],
-  'payment.completed': [['admin', 'payments'], ['admin', 'dashboard', 'summary']],
-  'payment.failed': [['admin', 'payments'], ['admin', 'dashboard', 'summary']],
-  'payment.webhook_received': [['admin', 'payments', 'webhooks']],
-
-  // Referral / partner / promo domains
-  'referral.attached': [['admin', 'referrals']],
-  'referral.qualified': [['admin', 'referrals']],
-  'referral.reward_issued': [['admin', 'referrals']],
-  'partner.created': [['admin', 'partners']],
-  'partner.activated': [['admin', 'partners']],
-  'partner.deactivated': [['admin', 'partners']],
-  'partner.balance_adjusted': [['admin', 'partners']],
-  'partner.earning': [['admin', 'partners']],
-  'partner.withdrawal_requested': [['admin', 'partners']],
-  'partner.withdrawal_approved': [['admin', 'partners']],
-  'partner.withdrawal_rejected': [['admin', 'partners']],
-  'promocode.activated': [['admin', 'promocodes']],
-  'promocode.created': [['admin', 'promocodes']],
-
-  // Fraud signals
-  'fraud.signal_transitioned': [['admin', 'fraud', 'signals'], ['admin', 'fraud', 'stats']],
-  'system.error': [['admin', 'fraud', 'signals'], ['admin', 'fraud', 'stats']],
-
-  // System
-  'system.backup_completed': [['admin', 'backups']],
-  'system.broadcast_sent': [['admin', 'broadcasts']],
-};
-
-/**
- * Every event also lands in the audit log via `SystemEventsService.persistEvent`,
- * so any received event triggers an audit refresh. We surface that as a
- * dedicated invalidation rule that runs on every message.
- */
-const ALWAYS_INVALIDATE: readonly string[][] = [['audit']];
-
 function buildSocketUrl(): { url: string; path: string } {
   // dev (vite proxy) → relative; prod → same host. We always connect to the
   // current origin; `path` puts the WS endpoint under /api/socket.io.
@@ -119,14 +66,14 @@ function getAccessToken(): string | null {
 function scheduleInvalidate(
   queryClient: QueryClient,
   pending: Map<string, ReturnType<typeof setTimeout>>,
-  queryKey: readonly string[],
+  queryKey: QueryKey,
 ): void {
-  const key = queryKey.join('::');
+  const key = JSON.stringify(queryKey);
   const existing = pending.get(key);
   if (existing) clearTimeout(existing);
   const handle = setTimeout(() => {
     pending.delete(key);
-    queryClient.invalidateQueries({ queryKey: queryKey as unknown as string[] });
+    queryClient.invalidateQueries({ queryKey });
   }, INVALIDATE_DEBOUNCE_MS);
   pending.set(key, handle);
 }
@@ -181,14 +128,7 @@ export function useRealtimeUpdates(options: UseRealtimeUpdatesOptions = {}): voi
 
     socket.on('event', (event: RealtimeEvent) => {
       if (stopped) return;
-      const keys = TYPE_TO_QUERY_KEYS[event.type];
-      if (keys) {
-        for (const key of keys) {
-          scheduleInvalidate(queryClient, pending, key);
-        }
-      }
-      // Audit log + dashboard activity timeline always reflect every event.
-      for (const key of ALWAYS_INVALIDATE) {
+      for (const key of getRealtimeInvalidationKeys(event)) {
         scheduleInvalidate(queryClient, pending, key);
       }
       if (showToasts) showToastFor(event);
@@ -202,9 +142,9 @@ export function useRealtimeUpdates(options: UseRealtimeUpdatesOptions = {}): voi
         code === REALTIME_CLOSE.ADMIN_INACTIVE ||
         code === REALTIME_CLOSE.TOKEN_VERSION_MISMATCH
       ) {
-        // Stop trying to reconnect — auth provider's token probe will
-        // notice and redirect via the standard sign-in flow.
+        // Stop trying to reconnect and clear the same client state as HTTP 401.
         stopped = true;
+        forceEndAdminSession(queryClient);
         socket.disconnect();
       }
     });

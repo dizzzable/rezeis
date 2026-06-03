@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { Plus, Download, Trash2, AlertCircle, Archive, RefreshCw, Settings, Send, RotateCcw } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api';
+import { adminQueryKeys } from '@/lib/admin-query-keys';
 import { authStorage } from '@/lib/auth-storage';
 import { formatDateTime } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
@@ -102,7 +103,7 @@ export default function BackupPage() {
   const canRunBackups = useHasPermission('backups', 'run');
 
   const { data, isLoading, error, refetch, isFetching } = useQuery({
-    queryKey: ['backups'],
+    queryKey: adminQueryKeys.backups.all,
     queryFn: fetchBackups,
     enabled: canViewBackups,
     refetchInterval: (query) => {
@@ -119,7 +120,7 @@ export default function BackupPage() {
     },
     onSuccess: () => {
       toast.success(t('backupPage.toasts.started'));
-      queryClient.invalidateQueries({ queryKey: ['backups'] });
+      queryClient.invalidateQueries({ queryKey: adminQueryKeys.backups.all });
     },
     onError: () => toast.error(t('backupPage.toasts.createFailed')),
   });
@@ -131,7 +132,7 @@ export default function BackupPage() {
     },
     onSuccess: () => {
       toast.success(t('backupPage.toasts.deleted'));
-      queryClient.invalidateQueries({ queryKey: ['backups'] });
+      queryClient.invalidateQueries({ queryKey: adminQueryKeys.backups.all });
       setDeleteId(null);
     },
     onError: () => toast.error(t('backupPage.toasts.deleteFailed')),

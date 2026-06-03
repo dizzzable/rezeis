@@ -7,6 +7,7 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Skeleton } from '@/components/ui/skeleton'
 import { TitleEffect } from '@/components/effects/TitleEffect'
 import { AnimatedContent } from '@/components/effects/AnimatedContent'
+import { adminQueryKeys } from '@/lib/admin-query-keys'
 
 import {
   dashboardApi,
@@ -26,14 +27,14 @@ export default function DashboardPage(): JSX.Element {
   const { t } = useTranslation()
 
   const summaryQuery = useQuery({
-    queryKey: ['admin', 'dashboard', 'summary'],
+    queryKey: adminQueryKeys.dashboard.summary,
     queryFn: () => dashboardApi.getSummary(),
     refetchInterval: 30_000,
     refetchIntervalInBackground: false,
   })
 
   const healthQuery = useQuery({
-    queryKey: ['admin', 'dashboard', 'system-health'],
+    queryKey: adminQueryKeys.dashboard.systemHealth,
     queryFn: () => dashboardApi.getSystemHealth(),
     refetchInterval: 10_000,
     refetchIntervalInBackground: false,

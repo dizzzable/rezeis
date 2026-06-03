@@ -27,6 +27,7 @@ import { Loader2 } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
+import { adminQueryKeys } from '@/lib/admin-query-keys'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import {
@@ -91,7 +92,7 @@ export function BulkAssignPlanDialog({
       return response.data
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['admin', 'imports'] })
+      queryClient.invalidateQueries({ queryKey: adminQueryKeys.imports.all })
       toast.success(t('importsPage.assignPlan.success', {
         // Backend returns only jobId (work is async). The actual counters
         // land in import_records when the worker finishes — operator can

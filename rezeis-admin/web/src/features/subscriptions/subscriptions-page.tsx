@@ -5,6 +5,7 @@ import { useNavigate } from 'react-router-dom'
 import { CreditCard, RefreshCw, Filter, ExternalLink } from 'lucide-react'
 
 import { api } from '@/lib/api'
+import { adminQueryKeys } from '@/lib/admin-query-keys'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -53,14 +54,14 @@ export default function SubscriptionsPage() {
   if (trialOnly) queryParams.set('isTrial', 'true')
 
   const { data, isLoading, refetch } = useQuery<SubscriptionsList>({
-    queryKey: ['admin', 'subscriptions', statusFilter, trialOnly],
+    queryKey: adminQueryKeys.subscriptions.list({ statusFilter, trialOnly }),
     queryFn: async ({ signal }) =>
       (await api.get<SubscriptionsList>(`/admin/subscriptions?${queryParams}`, { signal })).data,
     placeholderData: keepPreviousData,
   })
 
   const { data: stats } = useQuery({
-    queryKey: ['admin', 'subscriptions', 'stats'],
+    queryKey: adminQueryKeys.subscriptions.stats,
     queryFn: async () => (await api.get('/admin/subscriptions/stats')).data as {
       total: number;
       byStatus: Record<string, number>;

@@ -5,6 +5,7 @@ import { Plus, Megaphone, Users, Send, XCircle, Trash2, Loader2, RefreshCw, Uplo
 import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
+import { adminQueryKeys } from '@/lib/admin-query-keys'
 import { getErrorMessage } from '@/lib/http-errors'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -54,7 +55,7 @@ export default function BroadcastPage() {
   const [showCreate, setShowCreate] = useState(false)
 
   const { data, isLoading, refetch } = useQuery<BroadcastListResponse>({
-    queryKey: ['admin', 'broadcast'],
+    queryKey: adminQueryKeys.broadcast.all,
     queryFn: async ({ signal }) =>
       (await api.get<BroadcastListResponse>('/admin/broadcast?limit=50', { signal })).data,
     refetchInterval: 10_000,
@@ -64,7 +65,7 @@ export default function BroadcastPage() {
   const cancelMutation = useMutation({
     mutationFn: (id: number) => api.post(`/admin/broadcast/${id}/cancel`),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['admin', 'broadcast'] })
+      queryClient.invalidateQueries({ queryKey: adminQueryKeys.broadcast.all })
       toast.success(t('broadcastPage.toast.canceled'))
     },
     onError: (err) =>
@@ -74,7 +75,7 @@ export default function BroadcastPage() {
   const deleteMutation = useMutation({
     mutationFn: (id: number) => api.delete(`/admin/broadcast/${id}`),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['admin', 'broadcast'] })
+      queryClient.invalidateQueries({ queryKey: adminQueryKeys.broadcast.all })
       toast.success(t('broadcastPage.toast.deleted'))
     },
   })
@@ -223,7 +224,7 @@ function CreateBroadcastForm({ onClose }: { onClose: () => void }) {
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const { data: audienceCount, refetch: refetchCount } = useQuery({
-    queryKey: ['admin', 'broadcast', 'audience-count', audience],
+    queryKey: adminQueryKeys.broadcast.audienceCount(audience),
     queryFn: async () =>
       (await api.get(`/admin/broadcast/audience-count?audience=${audience}`)).data as { count: number },
     enabled: !!audience,
@@ -292,9 +293,9 @@ function CreateBroadcastForm({ onClose }: { onClose: () => void }) {
               : { mediaType, mediaFileId: mediaValue }
             : {}),
         },
-      }),
+    }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['admin', 'broadcast'] })
+      queryClient.invalidateQueries({ queryKey: adminQueryKeys.broadcast.all })
       toast.success(t('broadcastPage.toast.created'))
       onClose()
     },

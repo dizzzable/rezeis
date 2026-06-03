@@ -2,6 +2,7 @@ import { Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/com
 import { NotificationTemplate, Prisma } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { EVENT_TYPES, SystemEventsService } from '../../../common/services/system-events.service';
 
 import {
   DEFAULT_NOTIFICATION_TEMPLATES,
@@ -27,6 +28,10 @@ interface SeedResult {
   readonly skipped: number;
 }
 
+interface SeedDefaultsOptions {
+  readonly emitEvent?: boolean;
+}
+
 /**
  * Backing store for editable notification message templates.
  *
@@ -39,7 +44,10 @@ interface SeedResult {
 export class NotificationTemplatesService implements OnModuleInit {
   private readonly logger = new Logger(NotificationTemplatesService.name);
 
-  public constructor(private readonly prismaService: PrismaService) {}
+  public constructor(
+    private readonly prismaService: PrismaService,
+    private readonly events: SystemEventsService,
+  ) {}
 
   public async onModuleInit(): Promise<void> {
     const result = await this.seedDefaults();
@@ -59,7 +67,11 @@ export class NotificationTemplatesService implements OnModuleInit {
   }
 
   public async upsert(input: UpsertTemplateInput): Promise<NotificationTemplate> {
-    return this.prismaService.notificationTemplate.upsert({
+    const existing = await this.prismaService.notificationTemplate.findUnique({
+      where: { type: input.type },
+      select: { id: true },
+    });
+    const template = await this.prismaService.notificationTemplate.upsert({
       where: { type: input.type },
       create: {
         type: input.type,
@@ -73,6 +85,15 @@ export class NotificationTemplatesService implements OnModuleInit {
         isActive: input.isActive ?? true,
       },
     });
+    this.events.info(
+      existing === null
+        ? EVENT_TYPES.NOTIFICATION_TEMPLATE_CREATED
+        : EVENT_TYPES.NOTIFICATION_TEMPLATE_UPDATED,
+      'SYSTEM',
+      existing === null ? 'Notification template created' : 'Notification template updated',
+      { templateId: template.id, type: template.type },
+    );
+    return template;
   }
 
   public async update(input: UpdateTemplateInput): Promise<NotificationTemplate> {
@@ -86,34 +107,57 @@ export class NotificationTemplatesService implements OnModuleInit {
     if (input.title !== undefined) data.title = input.title;
     if (input.body !== undefined) data.body = input.body;
     if (input.isActive !== undefined) data.isActive = input.isActive;
-    return this.prismaService.notificationTemplate.update({
+    const template = await this.prismaService.notificationTemplate.update({
       where: { id: input.id },
       data,
     });
+    this.events.info(
+      EVENT_TYPES.NOTIFICATION_TEMPLATE_UPDATED,
+      'SYSTEM',
+      'Notification template updated',
+      { templateId: template.id, type: template.type },
+    );
+    return template;
   }
 
   public async delete(id: string): Promise<void> {
-    await this.prismaService.notificationTemplate.delete({ where: { id } });
+    const template = await this.prismaService.notificationTemplate.delete({ where: { id } });
+    this.events.info(
+      EVENT_TYPES.NOTIFICATION_TEMPLATE_DELETED,
+      'SYSTEM',
+      'Notification template deleted',
+      { templateId: template.id, type: template.type },
+    );
   }
 
   /**
    * Inserts every catalog template that is not yet present. Existing rows
    * are intentionally left alone so operator edits survive a re-seed.
    */
-  public async seedDefaults(): Promise<SeedResult> {
+  public async seedDefaults(options: SeedDefaultsOptions = {}): Promise<SeedResult> {
     let created = 0;
     let skipped = 0;
     for (const template of DEFAULT_NOTIFICATION_TEMPLATES) {
-      const result = await this.prismaService.notificationTemplate.upsert({
+      const existing = await this.prismaService.notificationTemplate.findUnique({
+        where: { type: template.type },
+        select: { id: true },
+      });
+      if (existing !== null) {
+        skipped += 1;
+        continue;
+      }
+      await this.prismaService.notificationTemplate.upsert({
         where: { type: template.type },
         create: this.fromCatalog(template),
         update: {},
       });
-      if (result.createdAt.getTime() === result.updatedAt.getTime()) {
-        created += 1;
-      } else {
-        skipped += 1;
-      }
+      created += 1;
+    }
+    if (options.emitEvent === true && created > 0) {
+      this.events.info(EVENT_TYPES.NOTIFICATION_TEMPLATE_SEEDED, 'SYSTEM', 'Notification templates seeded', {
+        created,
+        skipped,
+      });
     }
     return { created, skipped };
   }

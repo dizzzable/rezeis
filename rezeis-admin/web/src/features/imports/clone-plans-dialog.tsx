@@ -19,13 +19,14 @@
  * Cloning is fully idempotent on the backend, so the operator can
  * cancel and re-open this dialog without consequences.
  */
-import { useEffect, useMemo, useState, type JSX } from 'react'
+import { useMemo, useState, type JSX } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Loader2, AlertCircle } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
+import { adminQueryKeys } from '@/lib/admin-query-keys'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -69,6 +70,14 @@ interface CloneResult {
   readonly errors: ReadonlyArray<string>
 }
 
+function buildDefaultSelection(plans: ReadonlyArray<PlanPreviewRow>): Record<number, boolean> {
+  const next: Record<number, boolean> = {}
+  for (const plan of plans) {
+    next[plan.sourcePlanId] = !plan.recommendDeselect
+  }
+  return next
+}
+
 interface ClonePlansDialogProps {
   readonly open: boolean
   readonly onClose: () => void
@@ -85,7 +94,7 @@ export function ClonePlansDialog({
   const queryClient = useQueryClient()
 
   const previewQuery = useQuery<PlanCatalogPreview>({
-    queryKey: ['admin', 'imports', importRecordId, 'plan-preview'],
+    queryKey: adminQueryKeys.imports.planPreview(importRecordId),
     queryFn: async () => {
       const res = await api.get<PlanCatalogPreview>(`/admin/imports/${importRecordId}/plan-preview`)
       return res.data
@@ -100,29 +109,29 @@ export function ClonePlansDialog({
   // override the recommendation defaults that only fire on first load.
   const [selected, setSelected] = useState<Record<number, boolean>>({})
   const [linkSubscriptions, setLinkSubscriptions] = useState(true)
+  const [prevOpen, setPrevOpen] = useState(open)
+  const [prevPreviewKey, setPrevPreviewKey] = useState<string | null>(null)
 
-  // Initialise selection when the preview arrives — auto-deselect the
-  // synthetic "IMPORTED" placeholder, tick everything else.
-  useEffect(() => {
-    if (!previewQuery.data) return
-    setSelected((prev) => {
-      // Already initialised by the operator? respect the existing map.
-      if (Object.keys(prev).length > 0) return prev
-      const next: Record<number, boolean> = {}
-      for (const plan of previewQuery.data.plans) {
-        next[plan.sourcePlanId] = !plan.recommendDeselect
-      }
-      return next
-    })
-  }, [previewQuery.data])
+  const previewKey = previewQuery.data
+    ? `${importRecordId}:${previewQuery.data.plans
+      .map((plan) => `${plan.sourcePlanId}:${plan.recommendDeselect ? 'skip' : 'select'}`)
+      .join('|')}`
+    : null
 
-  // Reset state on close so reopening starts fresh.
-  useEffect(() => {
+  // React docs recommend adjusting state during render for prop/data changes
+  // instead of using an Effect whose only job is to derive local UI state.
+  if (open !== prevOpen) {
+    setPrevOpen(open)
     if (!open) {
       setSelected({})
       setLinkSubscriptions(true)
+      setPrevPreviewKey(null)
     }
-  }, [open])
+  }
+  if (open && previewQuery.data && previewKey !== prevPreviewKey) {
+    setPrevPreviewKey(previewKey)
+    setSelected(buildDefaultSelection(previewQuery.data.plans))
+  }
 
   const cloneMutation = useMutation({
     mutationFn: async (): Promise<CloneResult> => {
@@ -137,7 +146,7 @@ export function ClonePlansDialog({
     },
     onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ['admin', 'plans'] })
-      queryClient.invalidateQueries({ queryKey: ['admin', 'imports'] })
+      queryClient.invalidateQueries({ queryKey: adminQueryKeys.imports.all })
       toast.success(t('importsPage.clonePlans.success', {
         created: result.plansCreated,
         reused: result.plansReused,

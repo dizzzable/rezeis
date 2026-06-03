@@ -31,6 +31,7 @@ import {
 import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
+import { adminQueryKeys } from '@/lib/admin-query-keys'
 import { formatDateTime } from '@/lib/utils'
 import {
   Card,
@@ -297,7 +298,7 @@ function RemnawaveTab({ onStart, onRecordId, canImport, canRun }: RemnawaveTabPr
     },
     onSuccess: (result) => {
       onRecordId(result.importRecordId)
-      queryClient.invalidateQueries({ queryKey: ['admin', 'imports'] })
+      queryClient.invalidateQueries({ queryKey: adminQueryKeys.imports.all })
     },
     onError: (err: unknown) => {
       const message = (err as { response?: { data?: { message?: string } } })
@@ -412,7 +413,7 @@ function FileUploadTab({ source, onStart, onRecordId }: FileUploadTabProps): JSX
     },
     onSuccess: (result) => {
       onRecordId(result.importRecordId)
-      queryClient.invalidateQueries({ queryKey: ['admin', 'imports'] })
+      queryClient.invalidateQueries({ queryKey: adminQueryKeys.imports.all })
       setFileName(null)
     },
     onError: (err: unknown) => {
@@ -491,7 +492,7 @@ function ImportHistory(): JSX.Element {
   const { t } = useTranslation()
 
   const { data, isLoading } = useQuery({
-    queryKey: ['admin', 'imports'],
+    queryKey: adminQueryKeys.imports.all,
     queryFn: async (): Promise<ImportRecord[]> => {
       const raw = (await api.get('/admin/imports')).data as
         | ImportRecord[]

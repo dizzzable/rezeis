@@ -126,6 +126,11 @@ export const EVENT_TYPES = {
   SYSTEM_BACKUP_COMPLETED: 'system.backup_completed',
   SYSTEM_BROADCAST_SENT: 'system.broadcast_sent',
   SYSTEM_ERROR: 'system.error',
+  SETTINGS_EMAIL_UPDATED: 'settings.email.updated',
+  NOTIFICATION_TEMPLATE_CREATED: 'notification.template.created',
+  NOTIFICATION_TEMPLATE_UPDATED: 'notification.template.updated',
+  NOTIFICATION_TEMPLATE_DELETED: 'notification.template.deleted',
+  NOTIFICATION_TEMPLATE_SEEDED: 'notification.template.seeded',
   SYSTEM_REMNAWAVE_SYNC: 'system.remnawave_sync',
 } as const;
 

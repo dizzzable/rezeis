@@ -7,6 +7,7 @@ import type { Transporter } from 'nodemailer';
 
 import { emailConfig } from '../../../common/config/email.config';
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { EVENT_TYPES, SystemEventsService } from '../../../common/services/system-events.service';
 import { EMAIL_QUEUE, EMAIL_JOBS } from '../email.constants';
 import type { SendEmailPayload, SmtpSettingsInterface } from '../interfaces/email.interface';
 import { EmailTemplateRendererService } from './email-template-renderer.service';
@@ -37,6 +38,8 @@ export class EmailDeliveryService {
     private readonly emailConfiguration: ConfigType<typeof emailConfig>,
     private readonly prismaService: PrismaService,
     private readonly templateRenderer: EmailTemplateRendererService,
+    @Optional()
+    private readonly events?: SystemEventsService,
     @Optional()
     @InjectQueue(EMAIL_QUEUE)
     private readonly emailQueue?: Queue,
@@ -181,6 +184,14 @@ export class EmailDeliveryService {
         where: { id: settings.id },
         data: { systemNotifications: updated },
       });
+      const updatedFields = Object.keys(input)
+        .map((field) => field === 'password' ? 'passwordSet' : field)
+        .sort();
+      if (updatedFields.length > 0) {
+        this.events?.info(EVENT_TYPES.SETTINGS_EMAIL_UPDATED, 'SYSTEM', 'Email settings updated', {
+          updatedFields,
+        });
+      }
     }
 
     // Invalidate cached transporter

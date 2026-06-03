@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { usePermissionStore } from '@/features/rbac'
 import { useAuthStore } from '@/stores/auth-store'
-import { endAdminClientSession, startAdminClientSession } from './admin-session'
+import { endAdminClientSession, forceEndAdminSession, startAdminClientSession } from './admin-session'
 import { authStorage } from './auth-storage'
 
 function createQueryClient(): QueryClient {
@@ -83,5 +83,18 @@ describe('admin session boundary', () => {
     expect(useAuthStore.getState().user).toBeNull()
     expect(usePermissionStore.getState().loaded).toBe(false)
     expect(usePermissionStore.getState().role).toBeNull()
+  })
+
+  it('uses the same client-state reset for hard auth failures', () => {
+    const queryClient = createQueryClient()
+    queryClient.setQueryData(['admin', 'payments', 'transactions'], [{ id: 'tx-a' }])
+    window.history.pushState({}, '', '/sign-in')
+
+    forceEndAdminSession(queryClient)
+
+    expect(queryClient.getQueryData(['admin', 'payments', 'transactions'])).toBeUndefined()
+    expect(authStorage.getToken()).toBe('')
+    expect(useAuthStore.getState().token).toBe('')
+    expect(usePermissionStore.getState().loaded).toBe(false)
   })
 })

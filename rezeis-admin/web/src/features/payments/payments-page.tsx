@@ -2,6 +2,7 @@ import { lazy, Suspense, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { api } from '@/lib/api'
+import { adminQueryKeys } from '@/lib/admin-query-keys'
 import { Card, CardContent } from '@/components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Badge } from '@/components/ui/badge'
@@ -113,7 +114,7 @@ function TransactionsTab() {
   if (dateTo) params.set('dateTo', new Date(dateTo.getTime() + 86400000 - 1).toISOString())
 
   const { data, isLoading } = useQuery<TransactionsList>({
-    queryKey: ['admin', 'payments', 'transactions', params.toString()],
+    queryKey: adminQueryKeys.payments.transactions.list(params.toString()),
     queryFn: async ({ signal }) =>
       (await api.get<TransactionsList>(`/admin/payments/transactions?${params.toString()}`, { signal })).data,
     placeholderData: keepPreviousData,
@@ -296,7 +297,7 @@ function TransactionsTab() {
 function WebhooksTab() {
   const { t } = useTranslation()
   const { data, isLoading } = useQuery<ReadonlyArray<WebhookEventRow>>({
-    queryKey: ['admin', 'payments', 'webhooks'],
+    queryKey: adminQueryKeys.payments.webhooks.all,
     queryFn: async ({ signal }) =>
       (await api.get<ReadonlyArray<WebhookEventRow>>('/admin/payments/webhooks/events?limit=30', { signal })).data,
   })

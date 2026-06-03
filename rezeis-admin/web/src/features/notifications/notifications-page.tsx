@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
 import { useForm, type Resolver } from 'react-hook-form'
@@ -23,6 +23,7 @@ import {
 import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
+import { adminQueryKeys } from '@/lib/admin-query-keys'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -158,12 +159,12 @@ function UserNotificationsTab() {
   const [editBody, setEditBody] = useState('')
 
   const { data: settings, isLoading: settingsLoading } = useQuery({
-    queryKey: ['admin', 'settings'],
+    queryKey: adminQueryKeys.settings.all,
     queryFn: async () => (await api.get('/admin/settings')).data,
   })
 
   const { data: templates } = useQuery({
-    queryKey: ['notification-templates'],
+    queryKey: adminQueryKeys.notifications.templates,
     queryFn: async () => (await api.get<NotificationTemplate[]>('/admin/notifications/templates')).data,
   })
 
@@ -173,7 +174,7 @@ function UserNotificationsTab() {
     mutationFn: (data: { userNotifications: Record<string, boolean> }) =>
       api.patch('/admin/settings/notifications', data),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['admin', 'settings'] })
+      queryClient.invalidateQueries({ queryKey: adminQueryKeys.settings.all })
       toast.success(t('notificationsPage.toasts.settingUpdated'))
     },
     onError: () => toast.error(t('notificationsPage.toasts.settingFailed')),
@@ -183,7 +184,7 @@ function UserNotificationsTab() {
     mutationFn: (data: { id: string; title: string; body: string }) =>
       api.patch(`/admin/notifications/templates/${data.id}`, { title: data.title, body: data.body }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['notification-templates'] })
+      queryClient.invalidateQueries({ queryKey: adminQueryKeys.notifications.templates })
       setEditTemplate(null)
       toast.success(t('notificationsPage.toasts.templateUpdated'))
     },
@@ -193,7 +194,7 @@ function UserNotificationsTab() {
   const seedMutation = useMutation({
     mutationFn: () => api.post('/admin/notifications/templates/seed'),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['notification-templates'] })
+      queryClient.invalidateQueries({ queryKey: adminQueryKeys.notifications.templates })
       toast.success(t('notificationsPage.toasts.seedSuccess'))
     },
     onError: () => toast.error(t('notificationsPage.toasts.seedFailed')),
@@ -320,7 +321,7 @@ function SystemNotificationsTab() {
   const queryClient = useQueryClient()
 
   const { data: settings, isLoading } = useQuery({
-    queryKey: ['admin', 'settings'],
+    queryKey: adminQueryKeys.settings.all,
     queryFn: async () => (await api.get('/admin/settings')).data,
   })
 
@@ -330,7 +331,7 @@ function SystemNotificationsTab() {
     mutationFn: (data: { systemNotifications: Record<string, boolean> }) =>
       api.patch('/admin/settings/notifications', data),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['admin', 'settings'] })
+      queryClient.invalidateQueries({ queryKey: adminQueryKeys.settings.all })
       toast.success(t('notificationsPage.toasts.settingUpdated'))
     },
     onError: () => toast.error(t('notificationsPage.toasts.settingFailed')),
@@ -374,7 +375,7 @@ function SystemNotificationsTab() {
 
 function DeliverySettingsTab() {
   const { data: settings, isLoading } = useQuery({
-    queryKey: ['admin', 'settings'],
+    queryKey: adminQueryKeys.settings.all,
     queryFn: async () => (await api.get('/admin/settings')).data,
   })
 
@@ -472,7 +473,7 @@ function TelegramDeliveryForm({ settings }: TelegramDeliveryFormProps) {
       })
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['admin', 'settings'] })
+      queryClient.invalidateQueries({ queryKey: adminQueryKeys.settings.all })
       toast.success(t('notificationsPage.toasts.deliverySaved'))
     },
     onError: () => toast.error(t('notificationsPage.toasts.deliveryFailed')),
@@ -687,7 +688,7 @@ interface SmtpSettings {
 
 function EmailDeliverySettings() {
   const { data, isLoading } = useQuery<SmtpSettings>({
-    queryKey: ['admin', 'email', 'settings'],
+    queryKey: adminQueryKeys.email.settings,
     queryFn: async () => (await api.get('/admin/email/settings')).data,
   })
 

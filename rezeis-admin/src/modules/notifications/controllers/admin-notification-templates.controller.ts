@@ -59,7 +59,7 @@ export class AdminNotificationTemplatesController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Insert any default templates that are not present yet' })
   public seed(): Promise<{ readonly created: number; readonly skipped: number }> {
-    return this.notificationTemplatesService.seedDefaults();
+    return this.notificationTemplatesService.seedDefaults({ emitEvent: true });
   }
 
   @Patch(':id')

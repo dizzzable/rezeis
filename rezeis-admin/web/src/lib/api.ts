@@ -1,12 +1,9 @@
 import axios, { AxiosError, AxiosRequestConfig, InternalAxiosRequestConfig } from "axios";
 
 import { authStorage, ADMIN_ACCESS_TOKEN_KEY } from "./auth-storage";
-import { queryClient } from "./query-client";
+import { forceEndAdminSession } from "./admin-session";
 
 export const TOKEN_KEY = ADMIN_ACCESS_TOKEN_KEY;
-
-/** Path the auth provider redirects to on hard auth failure. */
-const SIGN_IN_PATH = "/sign-in";
 
 export const api = axios.create({
   baseURL: "/api",
@@ -31,20 +28,7 @@ api.interceptors.request.use((config: InternalAxiosRequestConfig) => {
 // double-clears the token while another request is mid-flight.
 //
 // When refresh tokens land (Phase 2 RBAC work), this is the integration
-// point: replace `forceLogout` with a call into a real refresh mutex.
-
-let isLoggingOut = false;
-
-function forceLogout(): void {
-  if (isLoggingOut) return;
-  isLoggingOut = true;
-  authStorage.clearToken();
-  queryClient.clear();
-  // Avoid a redirect loop on the sign-in page itself.
-  if (typeof window !== "undefined" && !window.location.pathname.endsWith(SIGN_IN_PATH)) {
-    window.location.href = SIGN_IN_PATH;
-  }
-}
+// point: replace `forceEndAdminSession` with a call into a real refresh mutex.
 
 api.interceptors.response.use(
   (response) => response,
@@ -57,7 +41,7 @@ api.interceptors.response.use(
       // the auth provider is already going to clear the session in that case.
       const isAuthProbe = typeof original?.url === "string" && original.url.includes("/admin/auth/me");
       if (!isAuthProbe) {
-        forceLogout();
+        forceEndAdminSession();
       }
     }
     return Promise.reject(error);

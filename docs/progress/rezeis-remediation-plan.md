@@ -526,6 +526,8 @@ Verification:
 
 ### F2 Query Key Factories And Realtime
 
+Status: Completed 2026-06-04. Admin query keys for the touched F2 surfaces now live in `web/src/lib/admin-query-keys.ts`; realtime invalidation uses `getRealtimeInvalidationKeys()` instead of hand-written arrays in the socket hook; backup, broadcast, dashboard, subscriptions, payments, imports, settings, notifications, and email settings queries/mutations use the shared factories where relevant. Payment realtime events invalidate transaction list prefixes, analytics prefixes, dashboard summary, and audit; webhook events invalidate webhook list/analytics prefixes; backup/broadcast/subscription/notification/email settings events target the actual query namespaces. Realtime auth failure now calls the same hard session-clear path as HTTP 401 via `forceEndAdminSession()`. Notification template create/update/delete/manual-seed and SMTP settings save operations now emit system events so other admin tabs can receive realtime invalidation; the webhook event picker catalog includes those event types.
+
 Work:
 
 - Centralize query keys by feature.
@@ -535,6 +537,15 @@ Work:
 Acceptance:
 
 - Backup, broadcast, subscriptions, payments, dashboard, and notification invalidations hit actual query keys.
+
+Verification:
+
+- `cd rezeis-admin/web && npx vitest run src/lib/realtime/realtime-invalidation.test.ts src/lib/admin-session.test.ts src/features/payments/payments-page.test.tsx src/features/payments/gateway-settings-page.test.tsx src/features/backup/backup-page.test.tsx src/features/imports/imports-page.test.tsx` passed: 6 files, 15 tests. React Router future-flag warnings remain pre-existing test noise.
+- `cd rezeis-admin/web && npx tsc -p tsconfig.app.json --noEmit --incremental false` passed.
+- Focused web ESLint on changed query/realtime/admin-surface files passed.
+- `cd rezeis-admin && node --require ts-node/register --test test/email-delivery.service.spec.ts test/notification-templates.service.spec.ts test/settings.service.spec.ts test/settings.controller.spec.ts` passed: 16 tests.
+- `cd rezeis-admin && npm run typecheck` passed.
+- Focused backend ESLint on changed system-events/email-delivery/notification-template/webhook-catalog files passed.
 
 ### F3 Production Devtools And Client Logging
 

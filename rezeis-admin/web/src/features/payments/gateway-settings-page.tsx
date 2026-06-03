@@ -37,6 +37,7 @@ import {
 import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
+import { adminQueryKeys } from '@/lib/admin-query-keys'
 import {
   Card,
   CardContent,
@@ -450,7 +451,7 @@ export default function GatewaySettingsPage() {
   const canEditGateways = useHasPermission('payment_gateways', 'edit')
 
   const { data: gateways, isLoading } = useQuery({
-    queryKey: ['admin', 'payments', 'gateways'],
+    queryKey: adminQueryKeys.payments.gateways.all,
     queryFn: async (): Promise<AdminGateway[]> => {
       const raw = (await api.get('/admin/payments/gateways')).data as
         | AdminGateway[]
@@ -466,7 +467,7 @@ export default function GatewaySettingsPage() {
       return (await api.post('/admin/payments/gateways/defaults')).data
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['admin', 'payments', 'gateways'] })
+      queryClient.invalidateQueries({ queryKey: adminQueryKeys.payments.gateways.all })
       toast.success(t('paymentGateways.defaultsCreated'))
     },
     onError: () => toast.error(t('paymentGateways.defaultsFailed')),
@@ -654,7 +655,7 @@ function GatewayRow({
       return api.patch(`/admin/payments/gateways/${gateway.id}`, { isActive: next })
     },
     onSuccess: () =>
-      queryClient.invalidateQueries({ queryKey: ['admin', 'payments', 'gateways'] }),
+      queryClient.invalidateQueries({ queryKey: adminQueryKeys.payments.gateways.all }),
     onError: () => toast.error(t('paymentGateways.toggleFailed')),
   })
 
@@ -664,7 +665,7 @@ function GatewayRow({
       return api.patch(`/admin/payments/gateways/${gateway.id}/move`, { direction })
     },
     onSuccess: () =>
-      queryClient.invalidateQueries({ queryKey: ['admin', 'payments', 'gateways'] }),
+      queryClient.invalidateQueries({ queryKey: adminQueryKeys.payments.gateways.all }),
     onError: () => toast.error(t('paymentGateways.moveFailed')),
   })
 
@@ -824,7 +825,7 @@ function GatewaySettingsForm({ gateway, onClose }: GatewaySettingsFormProps) {
   // Static map fetched once per page-mount; cached by react-query so the
   // settings dialog reads it without an extra round-trip.
   const { data: supportedMap } = useQuery({
-    queryKey: ['admin', 'payments', 'gateways', 'supported-currencies'],
+    queryKey: adminQueryKeys.payments.gateways.supportedCurrencies,
     queryFn: async (): Promise<Record<string, readonly string[]>> => {
       const res = await api.get('/admin/payments/gateways/supported-currencies')
       return res.data as Record<string, readonly string[]>
@@ -851,9 +852,9 @@ function GatewaySettingsForm({ gateway, onClose }: GatewaySettingsFormProps) {
       api.patch(`/admin/payments/gateways/${gateway.id}`, {
         settings: values,
         ...(currencyChanged ? { currency } : {}),
-      }),
+    }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['admin', 'payments', 'gateways'] })
+      queryClient.invalidateQueries({ queryKey: adminQueryKeys.payments.gateways.all })
       toast.success(
         t('paymentGateways.saved', { name: meta?.displayName ?? gateway.type }),
       )
