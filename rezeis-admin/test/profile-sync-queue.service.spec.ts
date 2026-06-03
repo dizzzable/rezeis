@@ -1,24 +1,32 @@
 import assert from 'node:assert/strict';
-import { describe, it } from 'node:test';
+import { afterEach, describe, it } from 'node:test';
+
+import { SyncAction, SyncJobStatus } from '@prisma/client';
 
 import { runBullMqEnqueueWithTimeout } from '../src/common/queue/bullmq-enqueue-options';
 import { isBullMqJobAlreadyQueued } from '../src/common/queue/bullmq-duplicate-inspection';
-import { ProfileSyncProcessor } from '../src/modules/payments/processors/profile-sync.processor';
-import { ProfileSyncJobQueueService } from '../src/modules/payments/services/profile-sync-job-queue.service';
+import { _resetProcessRoleCacheForTests } from '../src/common/runtime/process-role.util';
+import {
+  PROFILE_SYNC_BACKOFF_MS,
+  PROFILE_SYNC_JOB,
+  PROFILE_SYNC_MAX_ATTEMPTS,
+} from '../src/modules/profile-sync/profile-sync.constants';
+import { ProfileSyncQueueService } from '../src/modules/profile-sync/profile-sync-queue.service';
 
 describe('BullMQ duplicate inspection', () => {
   it('returns false promptly when duplicate inspection stalls', async () => {
-    let resolved = false;
-    const startedAt = Date.now();
+    let inspectionStarted = false;
     const result = await isBullMqJobAlreadyQueued(
-      { getJob: () => new Promise((resolve) => { setTimeout(() => { resolved = true; resolve({ id: 'profile-sync:secret-job' }); }, 50); }) } as never,
+      { getJob: () => {
+        inspectionStarted = true;
+        return new Promise(() => undefined);
+      } } as never,
       'profile-sync:secret-job',
       5,
     );
 
     assert.equal(result, false);
-    assert.equal(resolved, false);
-    assert.ok(Date.now() - startedAt < 45);
+    assert.equal(inspectionStarted, true);
   });
 
   it('returns false for rejected duplicate inspection without surfacing raw details', async () => {
@@ -50,11 +58,13 @@ describe('BullMQ duplicate inspection', () => {
 
 describe('BullMQ enqueue timeout', () => {
   it('fails stalled enqueue operations with a sanitized bounded error', async () => {
-    let resolved = false;
-    const startedAt = Date.now();
+    let enqueueStarted = false;
 
     await assert.rejects(
-      runBullMqEnqueueWithTimeout(() => new Promise((resolve) => { setTimeout(() => { resolved = true; resolve({ id: 'profile-sync:secret-job' }); }, 50); }), 5),
+      runBullMqEnqueueWithTimeout(() => {
+        enqueueStarted = true;
+        return new Promise(() => undefined);
+      }, 5),
       (error: unknown) => {
         const serialized = JSON.stringify(error);
         assert.equal(error instanceof Error, true);
@@ -66,8 +76,7 @@ describe('BullMQ enqueue timeout', () => {
       },
     );
 
-    assert.equal(resolved, false);
-    assert.ok(Date.now() - startedAt < 45);
+    assert.equal(enqueueStarted, true);
   });
 
   it('sanitizes rejected enqueue failures', async () => {
@@ -105,92 +114,142 @@ describe('BullMQ enqueue timeout', () => {
   });
 });
 
-describe('ProfileSyncJobQueueService', () => {
-  it('enqueues profile sync jobs with deterministic queue ids', async () => {
+describe('ProfileSyncQueueService', () => {
+  const originalRole = process.env['RUID_PROCESS_ROLE'];
+
+  afterEach(() => {
+    if (originalRole === undefined) {
+      delete process.env['RUID_PROCESS_ROLE'];
+    } else {
+      process.env['RUID_PROCESS_ROLE'] = originalRole;
+    }
+    _resetProcessRoleCacheForTests();
+  });
+
+  it('enqueues profile sync jobs with the current deterministic BullMQ contract', async () => {
     const addedJobs: unknown[] = [];
-    const service = new ProfileSyncJobQueueService(
-      { profileSyncJob: { findUnique: async () => ({ id: 'sync-job-1' }) } } as never,
-      { getJob: async () => null, add: async (...args: unknown[]) => { addedJobs.push(args); } } as never,
-    );
-
-    const result = await service.enqueueJob('sync-job-1');
-
-    assert.equal(result.enqueued, true);
-    assert.equal(result.queueJobId, 'profile-sync:sync-job-1');
-    assert.deepStrictEqual(addedJobs, [[
-      'process-profile-sync-job',
-      { jobId: 'sync-job-1' },
-      { jobId: 'profile-sync:sync-job-1', removeOnComplete: 100, removeOnFail: 100 },
-    ]]);
-  });
-
-  it('does not enqueue duplicate queue jobs', async () => {
-    let addCalled = false;
-    const service = new ProfileSyncJobQueueService(
-      { profileSyncJob: { findUnique: async () => ({ id: 'sync-job-1' }) } } as never,
-      { getJob: async () => ({ id: 'profile-sync:sync-job-1' }), add: async () => { addCalled = true; } } as never,
-    );
-
-    const result = await service.enqueueJob('sync-job-1');
-
-    assert.equal(result.enqueued, false);
-    assert.equal(result.alreadyQueued, true);
-    assert.equal(addCalled, false);
-  });
-
-  it('continues enqueueing with deterministic options when duplicate inspection fails', async () => {
-    const additions: unknown[] = [];
-    const service = new ProfileSyncJobQueueService(
-      { profileSyncJob: { findUnique: async () => ({ id: 'sync-job-1' }) } } as never,
+    const removedJobs: string[] = [];
+    const service = new ProfileSyncQueueService(
+      { profileSyncJob: { findMany: async () => [] } } as never,
       {
-        getJob: async () => { throw new Error('redis://admin:secret-password@queue.internal profile-sync payload'); },
-        add: async (...args: unknown[]) => { additions.push(args); },
+        remove: async (jobId: string) => { removedJobs.push(jobId); },
+        add: async (...args: unknown[]) => { addedJobs.push(args); },
       } as never,
     );
 
-    const result = await service.enqueueJob('sync-job-1');
+    await service.enqueue('sync-job-1');
 
-    assert.equal(result.enqueued, true);
-    assert.equal(result.alreadyQueued, false);
-    assert.deepStrictEqual(additions, [[
-      'process-profile-sync-job',
-      { jobId: 'sync-job-1' },
-      { jobId: 'profile-sync:sync-job-1', removeOnComplete: 100, removeOnFail: 100 },
+    assert.deepStrictEqual(removedJobs, []);
+    assert.deepStrictEqual(addedJobs, [[
+      PROFILE_SYNC_JOB,
+      { syncJobId: 'sync-job-1' },
+      {
+        jobId: 'sync_sync-job-1',
+        attempts: PROFILE_SYNC_MAX_ATTEMPTS,
+        backoff: { type: 'exponential', delay: PROFILE_SYNC_BACKOFF_MS },
+        removeOnComplete: 200,
+        removeOnFail: 200,
+      },
     ]]);
   });
 
-  it('fails stalled profile-sync enqueue with sanitized bounded error after preserving deterministic add arguments', async () => {
-    const additions: unknown[] = [];
-    const service = new ProfileSyncJobQueueService(
-      { profileSyncJob: { findUnique: async () => ({ id: 'sync-job-1' }) } } as never,
+  it('removes retained BullMQ jobs before force re-enqueueing', async () => {
+    const addedJobs: unknown[] = [];
+    const removedJobs: string[] = [];
+    const service = new ProfileSyncQueueService(
+      { profileSyncJob: { findMany: async () => [] } } as never,
       {
-        getJob: async () => null,
-        add: async (...args: unknown[]) => {
-          additions.push(args);
-          return new Promise((resolve) => { setTimeout(() => { resolve({ id: 'profile-sync:sync-job-1' }); }, 1_100); });
+        remove: async (jobId: string) => { removedJobs.push(jobId); },
+        add: async (...args: unknown[]) => { addedJobs.push(args); },
+      } as never,
+    );
+
+    await service.enqueue('sync-job-1', true);
+
+    assert.deepStrictEqual(removedJobs, ['sync_sync-job-1']);
+    assert.equal(addedJobs.length, 1);
+  });
+
+  it('sweeps pending database rows into the queue', async () => {
+    const findManyCalls: unknown[] = [];
+    const addedJobs: unknown[] = [];
+    const service = new ProfileSyncQueueService(
+      {
+        profileSyncJob: {
+          findMany: async (input: unknown) => {
+            findManyCalls.push(input);
+            return [{ id: 'sync-job-1' }, { id: 'sync-job-2' }];
+          },
         },
       } as never,
+      {
+        remove: async () => undefined,
+        add: async (...args: unknown[]) => { addedJobs.push(args); },
+      } as never,
     );
 
-    await assert.rejects(service.enqueueJob('sync-job-1'), { name: 'BullMqEnqueueError' });
-    assert.deepStrictEqual(additions, [[
-      'process-profile-sync-job',
-      { jobId: 'sync-job-1' },
-      { jobId: 'profile-sync:sync-job-1', removeOnComplete: 100, removeOnFail: 100 },
-    ]]);
+    const swept = await service.sweepPending();
+
+    assert.equal(swept, 2);
+    assert.deepStrictEqual(findManyCalls, [{
+      where: { status: 'PENDING' },
+      select: { id: true },
+      take: 100,
+      orderBy: { createdAt: 'asc' },
+    }]);
+    assert.deepStrictEqual(
+      addedJobs.map((job) => (job as readonly unknown[])[1]),
+      [{ syncJobId: 'sync-job-1' }, { syncJobId: 'sync-job-2' }],
+    );
   });
-});
 
-describe('ProfileSyncProcessor', () => {
-  it('delegates queue payloads to processJobById', async () => {
-    const processedJobIds: string[] = [];
-    const processor = new ProfileSyncProcessor(
-      { processJobById: async (jobId: string) => { processedJobIds.push(jobId); } } as never,
-      { observe: async (_job: unknown, _descriptor: unknown, handler: () => Promise<void>) => handler(), recordSkipped: () => undefined } as never,
+  it('worker recovery resets failed CREATE rows without touching UPDATE/DELETE failures', async () => {
+    process.env['RUID_PROCESS_ROLE'] = 'worker';
+    _resetProcessRoleCacheForTests();
+
+    const findManyCalls: unknown[] = [];
+    const updates: unknown[] = [];
+    const removedJobs: string[] = [];
+    const addedJobs: unknown[] = [];
+    const service = new ProfileSyncQueueService(
+      {
+        profileSyncJob: {
+          findMany: async (input: { readonly where?: { readonly status?: SyncJobStatus } }) => {
+            findManyCalls.push(input);
+            if (input.where?.status === SyncJobStatus.PENDING) {
+              return [{ id: 'pending-job-1' }];
+            }
+            return [{ id: 'failed-create-job-1' }];
+          },
+          update: async (input: unknown) => { updates.push(input); },
+        },
+      } as never,
+      {
+        remove: async (jobId: string) => { removedJobs.push(jobId); },
+        add: async (...args: unknown[]) => { addedJobs.push(args); },
+      } as never,
     );
 
-    await processor.process({ name: 'process-profile-sync-job', data: { jobId: 'sync-job-1' } } as never);
+    await service.sweepAndRecover();
 
-    assert.deepStrictEqual(processedJobIds, ['sync-job-1']);
+    assert.deepStrictEqual(findManyCalls[1], {
+      where: {
+        status: SyncJobStatus.FAILED,
+        action: SyncAction.CREATE,
+        subscription: { remnawaveId: null },
+      },
+      select: { id: true },
+      take: 50,
+      orderBy: { createdAt: 'asc' },
+    });
+    assert.deepStrictEqual(updates, [{
+      where: { id: 'failed-create-job-1' },
+      data: { status: SyncJobStatus.PENDING, attempts: 0, lastError: null },
+    }]);
+    assert.deepStrictEqual(removedJobs, ['sync_failed-create-job-1']);
+    assert.deepStrictEqual(
+      addedJobs.map((job) => (job as readonly unknown[])[1]),
+      [{ syncJobId: 'pending-job-1' }, { syncJobId: 'failed-create-job-1' }],
+    );
   });
 });

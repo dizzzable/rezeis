@@ -1,14 +1,24 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { Currency, PaymentGatewayType, PurchaseChannel, PurchaseType, SyncJobStatus, TransactionStatus } from '@prisma/client';
+import {
+  Currency,
+  PaymentGatewayType,
+  PaymentWebhookLifecycleStatus,
+  Prisma,
+  PurchaseChannel,
+  PurchaseType,
+  TransactionStatus,
+} from '@prisma/client';
 
 import { PrismaService } from '../src/common/prisma/prisma.service';
+import { PartnerEarningsService } from '../src/modules/partners/services/partner-earnings.service';
 import { PaymentReconciliationService } from '../src/modules/payments/services/payment-reconciliation.service';
 import { PaymentOpsAlertService } from '../src/modules/payments/services/payment-ops-alert.service';
 import { PaymentSubscriptionMutationService } from '../src/modules/payments/services/payment-subscription-mutation.service';
 import { PaymentWebhookInboxService } from '../src/modules/payments/services/payment-webhook-inbox.service';
-import { UserNotificationEventsService } from '../src/modules/user-activity/services/user-notification-events.service';
+import { ProfileSyncQueueService } from '../src/modules/profile-sync/profile-sync-queue.service';
+import { ReferralQualificationService } from '../src/modules/referrals/services/referral-qualification.service';
 
 type PaymentWebhookFindUniqueArgs = { where: { id: string } };
 type TransactionFindUniqueArgs = { where: { id: string } | { paymentId: string } };
@@ -22,8 +32,24 @@ type TransactionUpdateArgs = {
 };
 type ReconciliationWebhookEventRecord = {
   id: string;
+  gatewayType: PaymentGatewayType;
   paymentId: string;
+  providerEventId: string;
   eventStatus: string;
+  status: PaymentWebhookLifecycleStatus;
+  attempts: number;
+  reconciliationAttempts: number;
+  replayCount: number;
+  lastError: string | null;
+  payloadHash: string | null;
+  rawPayload: Record<string, unknown>;
+  normalizedPayload: Record<string, unknown> | null;
+  receivedAt: Date;
+  processedAt: Date | null;
+  lastTransitionAt: Date;
+  lastReplayedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
 };
 type ReconciliationTransactionRecord = {
   id: string;
@@ -36,7 +62,7 @@ type ReconciliationTransactionRecord = {
   channel: PurchaseChannel;
   gatewayType: PaymentGatewayType;
   currency: Currency;
-  amount: { toString: () => string };
+  amount: Prisma.Decimal;
   paymentAsset: string | null;
   planSnapshot: Record<string, unknown>;
   gatewayId: string | null;
@@ -54,13 +80,6 @@ type ReconciliationPrismaDouble = {
     findFirst: (args: TransactionFindFirstArgs) => Promise<ReconciliationTransactionRecord | null>;
     update: (args: TransactionUpdateArgs) => Promise<ReconciliationTransactionRecord>;
   };
-  user: {
-    findUnique: () => Promise<{ readonly id: string; readonly purchaseDiscount: number } | null>;
-    update: (args: { readonly data: { readonly purchaseDiscount: number } }) => Promise<{ readonly id: string }>;
-  };
-  profileSyncJob: {
-    update: (args: { readonly where: { readonly id: string }; readonly data: { readonly status: SyncJobStatus; readonly lastError: string; readonly nextRetryAt: null; readonly processedAt: Date } }) => Promise<{ readonly id: string }>;
-  };
 };
 type ReconciliationInboxDouble = {
   incrementReconciliationAttempts: (eventId: string) => Promise<void>;
@@ -76,14 +95,24 @@ type NotifyWebhookFailedArgs = { event: ReconciliationWebhookEventRecord };
 type ReconciliationAlertDouble = {
   notifyWebhookFailed: (input: NotifyWebhookFailedArgs) => Promise<void>;
 };
-type WritePaymentNotificationArg = { id: string };
-type ReconciliationNotificationsDouble = {
-  writePaymentCompleted: (transaction: WritePaymentNotificationArg) => Promise<void>;
-  writePaymentFailed: (transaction: WritePaymentNotificationArg) => Promise<void>;
+type ProcessPartnerEarningArg = {
+  payerUserId: string;
+  paymentAmountMinorUnits: number;
+  gatewayType: string | null;
+  sourceTransactionId: string | null;
+};
+type ReconciliationPartnerEarningsDouble = {
+  processPartnerEarning: (input: ProcessPartnerEarningArg) => Promise<void>;
+};
+type ReconciliationReferralQualificationDouble = {
+  qualifyReferralAfterPurchase: (transactionId: string) => Promise<void>;
+};
+type ReconciliationProfileSyncQueueDouble = {
+  enqueue: (syncJobId: string) => Promise<void>;
 };
 
-describe('PaymentReconciliationService notification emission', () => {
-  it('writes a completed notification after applying the subscription mutation for successful reconciliations', async () => {
+describe('PaymentReconciliationService reconciliation side effects', () => {
+  it('applies the subscription mutation, enqueues profile sync, and runs post-payment hooks', async () => {
     const state = createState({
       eventStatus: 'succeeded',
       initialTransactionStatus: TransactionStatus.PENDING,
@@ -93,24 +122,47 @@ describe('PaymentReconciliationService notification emission', () => {
 
     await service.reconcileWebhookEvent('event-1');
 
-    assert.deepStrictEqual(state.notificationCalls, [['completed', 'tx-1']]);
     assert.deepStrictEqual(state.mutationCalls, ['tx-1']);
-    assert.deepStrictEqual(state.callOrder, ['update', 'mutation', 'enqueue:sync-1', 'referral-qualification', 'profile-sync-batch', 'notify-completed']);
-    assert.deepStrictEqual(state.referralQualificationCalls, [{ referredUserId: 'user-1', purchaseChannel: 'WEB', transactionId: 'tx-1' }]);
+    assert.deepStrictEqual(state.profileSyncEnqueueCalls, ['sync-1']);
+    assert.deepStrictEqual(state.referralQualificationCalls, ['tx-1']);
+    assert.deepStrictEqual(state.partnerEarningCalls, [
+      {
+        payerUserId: 'user-1',
+        paymentAmountMinorUnits: 800,
+        gatewayType: PaymentGatewayType.YOOKASSA,
+        sourceTransactionId: 'tx-1',
+      },
+    ]);
+    assert.deepStrictEqual(state.callOrder, ['update', 'mutation', 'enqueue:sync-1', 'referral-qualification', 'partner-earnings']);
     assert.deepStrictEqual(state.markProcessedCalls, ['event-1']);
   });
 
-  it('consumes purchase discount after completed payment side effects', async () => {
-    const state = createState({ eventStatus: 'succeeded', initialTransactionStatus: TransactionStatus.PENDING, refreshedSubscriptionId: null, purchaseDiscount: 35 });
+  it('skips duplicate subscription mutation when the refreshed transaction is already fulfilled', async () => {
+    const state = createState({
+      eventStatus: 'succeeded',
+      initialTransactionStatus: TransactionStatus.PENDING,
+      refreshedSubscriptionId: 'subscription-existing',
+    });
     const service = createService(state);
 
     await service.reconcileWebhookEvent('event-1');
 
-    assert.equal(state.userUpdateCalls[0]?.data.purchaseDiscount, 15);
-    assert.deepStrictEqual(state.callOrder, ['update', 'mutation', 'enqueue:sync-1', 'consume-purchase-discount', 'referral-qualification', 'profile-sync-batch', 'notify-completed']);
+    assert.deepStrictEqual(state.mutationCalls, []);
+    assert.deepStrictEqual(state.profileSyncEnqueueCalls, []);
+    assert.deepStrictEqual(state.referralQualificationCalls, ['tx-1']);
+    assert.deepStrictEqual(state.partnerEarningCalls, [
+      {
+        payerUserId: 'user-1',
+        paymentAmountMinorUnits: 800,
+        gatewayType: PaymentGatewayType.YOOKASSA,
+        sourceTransactionId: 'tx-1',
+      },
+    ]);
+    assert.deepStrictEqual(state.callOrder, ['update', 'referral-qualification', 'partner-earnings']);
+    assert.deepStrictEqual(state.markProcessedCalls, ['event-1']);
   });
 
-  it('does not emit a completed notification if the completion mutation throws', async () => {
+  it('does not mark the webhook processed if the completion mutation throws', async () => {
     const state = createState({
       eventStatus: 'succeeded',
       initialTransactionStatus: TransactionStatus.PENDING,
@@ -121,29 +173,13 @@ describe('PaymentReconciliationService notification emission', () => {
 
     await assert.rejects(() => service.reconcileWebhookEvent('event-1'), /forced mutation failure/);
 
-    assert.deepStrictEqual(state.notificationCalls, []);
     assert.deepStrictEqual(state.callOrder, ['update', 'mutation']);
     assert.deepStrictEqual(state.markProcessedCalls, []);
     assert.deepStrictEqual(state.markFailedCalls.length, 1);
+    assert.deepStrictEqual(state.alertCalls.length, 1);
   });
 
-  it('still applies the completion mutation when refreshed transaction already has a subscription id', async () => {
-    const state = createState({
-      eventStatus: 'succeeded',
-      initialTransactionStatus: TransactionStatus.PENDING,
-      refreshedSubscriptionId: 'subscription-existing',
-    });
-    const service = createService(state);
-
-    await service.reconcileWebhookEvent('event-1');
-
-    assert.deepStrictEqual(state.mutationCalls, ['tx-1']);
-    assert.deepStrictEqual(state.notificationCalls, [['completed', 'tx-1']]);
-    assert.deepStrictEqual(state.callOrder, ['update', 'mutation', 'enqueue:sync-1', 'referral-qualification', 'profile-sync-batch', 'notify-completed']);
-    assert.deepStrictEqual(state.markProcessedCalls, ['event-1']);
-  });
-
-  it('writes a failed notification for canceled payment outcomes', async () => {
+  it('marks canceled payment outcomes processed without completion side effects', async () => {
     const state = createState({
       eventStatus: 'failed',
       initialTransactionStatus: TransactionStatus.PENDING,
@@ -153,13 +189,15 @@ describe('PaymentReconciliationService notification emission', () => {
 
     await service.reconcileWebhookEvent('event-1');
 
-    assert.deepStrictEqual(state.notificationCalls, [['failed', 'tx-1']]);
     assert.deepStrictEqual(state.mutationCalls, []);
-    assert.deepStrictEqual(state.callOrder, ['update', 'notify-failed']);
+    assert.deepStrictEqual(state.profileSyncEnqueueCalls, []);
+    assert.deepStrictEqual(state.referralQualificationCalls, []);
+    assert.deepStrictEqual(state.partnerEarningCalls, []);
+    assert.deepStrictEqual(state.callOrder, ['update']);
     assert.deepStrictEqual(state.markProcessedCalls, ['event-1']);
   });
 
-  it('does not emit duplicate notifications for already terminal transactions', async () => {
+  it('does not re-run side effects for already terminal transactions', async () => {
     const state = createState({
       eventStatus: 'succeeded',
       initialTransactionStatus: TransactionStatus.COMPLETED,
@@ -169,7 +207,10 @@ describe('PaymentReconciliationService notification emission', () => {
 
     await service.reconcileWebhookEvent('event-1');
 
-    assert.deepStrictEqual(state.notificationCalls, []);
+    assert.deepStrictEqual(state.mutationCalls, []);
+    assert.deepStrictEqual(state.profileSyncEnqueueCalls, []);
+    assert.deepStrictEqual(state.referralQualificationCalls, []);
+    assert.deepStrictEqual(state.partnerEarningCalls, []);
     assert.deepStrictEqual(state.transactionUpdateCalls, []);
     assert.deepStrictEqual(state.markProcessedCalls, ['event-1']);
   });
@@ -187,14 +228,14 @@ describe('PaymentReconciliationService notification emission', () => {
     await assert.rejects(() => service.reconcileWebhookEvent('event-1'), /provider reconciliation failed/);
 
     assert.equal(state.markFailedCalls.length, 1);
-    assert.deepStrictEqual(state.markFailedCalls[0], ['event-1', 'PAYMENT_PROVIDER_ERROR']);
+    assert.deepStrictEqual(state.markFailedCalls[0], ['event-1', 'FAILED']);
     assert.doesNotMatch(JSON.stringify(state.markFailedCalls), /provider\.example/);
     assert.doesNotMatch(JSON.stringify(state.markFailedCalls), /provider-secret-fragment/);
     assert.doesNotMatch(JSON.stringify(state.markFailedCalls), /0194f4b6-7cc7-7ecb-9f62-123456789abc/);
     assert.doesNotMatch(JSON.stringify(state.markFailedCalls), /provider-raw-id/);
   });
 
-  it('marks profile sync jobs failed when queue enqueue fails after completion mutation', async () => {
+  it('marks the webhook failed when immediate profile sync enqueue fails', async () => {
     const rawQueueFailure = 'redis://admin:secret-password@queue.internal/0 payload subscription_id=sub_secret token=provider-token';
     const state = createState({
       eventStatus: 'succeeded',
@@ -206,46 +247,17 @@ describe('PaymentReconciliationService notification emission', () => {
 
     await assert.rejects(() => service.reconcileWebhookEvent('event-1'), /redis:\/\//);
 
-    assert.deepStrictEqual(state.callOrder, ['update', 'mutation', 'enqueue:sync-1', 'mark-profile-sync-enqueue-failed']);
-    assert.equal(state.profileSyncJobUpdateCalls.length, 1);
-    assert.equal(state.profileSyncJobUpdateCalls[0]?.where.id, 'sync-1');
-    assert.equal(state.profileSyncJobUpdateCalls[0]?.data.status, SyncJobStatus.FAILED);
-    assert.equal(state.profileSyncJobUpdateCalls[0]?.data.lastError, 'PROFILE_SYNC_ENQUEUE_FAILED');
-    assert.equal(state.profileSyncJobUpdateCalls[0]?.data.nextRetryAt, null);
-    assert.equal(state.profileSyncJobUpdateCalls[0]?.data.processedAt instanceof Date, true);
+    assert.deepStrictEqual(state.callOrder, ['update', 'mutation', 'enqueue:sync-1']);
     assert.equal(state.markFailedCalls.length, 1);
-    assert.deepStrictEqual(state.markFailedCalls[0], ['event-1', 'PAYMENT_PROVIDER_ERROR']);
+    assert.deepStrictEqual(state.markFailedCalls[0], ['event-1', 'FAILED']);
+    assert.equal(state.alertCalls.length, 1);
     assert.deepStrictEqual(state.markProcessedCalls, []);
-    assert.deepStrictEqual(state.notificationCalls, []);
-    const serializedUpdates = JSON.stringify(state.profileSyncJobUpdateCalls);
-    assert.doesNotMatch(serializedUpdates, /secret-password/);
-    assert.doesNotMatch(serializedUpdates, /redis:\/\//);
-    assert.doesNotMatch(serializedUpdates, /sub_secret/);
-    assert.doesNotMatch(serializedUpdates, /provider-token/);
-  });
-
-  it('preserves original enqueue failure when profile sync failure marker update fails', async () => {
-    const originalError = new Error('redis://admin:secret-password@queue.internal/0 payload subscription_id=sub_secret');
-    const state = createState({
-      eventStatus: 'succeeded',
-      initialTransactionStatus: TransactionStatus.PENDING,
-      refreshedSubscriptionId: null,
-      enqueueError: originalError,
-      profileSyncJobUpdateError: new Error('profile sync marker failed'),
-    });
-    const service = createService(state);
-
-    await assert.rejects(
-      () => service.reconcileWebhookEvent('event-1'),
-      (error: unknown) => error === originalError,
-    );
-
-    assert.equal(state.profileSyncJobUpdateCalls.length, 1);
-    assert.deepStrictEqual(state.callOrder, ['update', 'mutation', 'enqueue:sync-1', 'mark-profile-sync-enqueue-failed']);
-    assert.equal(state.markFailedCalls.length, 1);
-    assert.deepStrictEqual(state.markFailedCalls[0], ['event-1', 'PAYMENT_PROVIDER_ERROR']);
-    assert.deepStrictEqual(state.markProcessedCalls, []);
-    assert.deepStrictEqual(state.notificationCalls, []);
+    assert.deepStrictEqual(state.referralQualificationCalls, []);
+    assert.deepStrictEqual(state.partnerEarningCalls, []);
+    assert.doesNotMatch(JSON.stringify(state.markFailedCalls), /secret-password/);
+    assert.doesNotMatch(JSON.stringify(state.markFailedCalls), /redis:\/\//);
+    assert.doesNotMatch(JSON.stringify(state.markFailedCalls), /sub_secret/);
+    assert.doesNotMatch(JSON.stringify(state.markFailedCalls), /provider-token/);
   });
 });
 
@@ -281,24 +293,6 @@ function createService(state: ReturnType<typeof createState>): PaymentReconcilia
         });
       },
     },
-    user: {
-      findUnique: async () => ({ id: 'user-1', purchaseDiscount: state.purchaseDiscount }),
-      update: async (args: { readonly data: { readonly purchaseDiscount: number } }) => {
-        state.userUpdateCalls.push(args);
-        state.callOrder.push('consume-purchase-discount');
-        return { id: 'user-1' };
-      },
-    },
-    profileSyncJob: {
-      update: async (args) => {
-        state.profileSyncJobUpdateCalls.push(args);
-        state.callOrder.push('mark-profile-sync-enqueue-failed');
-        if (state.profileSyncJobUpdateError) {
-          throw state.profileSyncJobUpdateError;
-        }
-        return { id: args.where.id };
-      },
-    },
   };
   const paymentWebhookInboxService: ReconciliationInboxDouble = {
     incrementReconciliationAttempts: async (eventId: string) => {
@@ -331,14 +325,25 @@ function createService(state: ReturnType<typeof createState>): PaymentReconcilia
       state.alertCalls.push(input);
     },
   };
-  const userNotificationEventsService: ReconciliationNotificationsDouble = {
-    writePaymentCompleted: async (transaction: WritePaymentNotificationArg) => {
-      state.notificationCalls.push(['completed', transaction.id]);
-      state.callOrder.push('notify-completed');
+  const partnerEarningsService: ReconciliationPartnerEarningsDouble = {
+    processPartnerEarning: async (input: ProcessPartnerEarningArg) => {
+      state.partnerEarningCalls.push(input);
+      state.callOrder.push('partner-earnings');
     },
-    writePaymentFailed: async (transaction: WritePaymentNotificationArg) => {
-      state.notificationCalls.push(['failed', transaction.id]);
-      state.callOrder.push('notify-failed');
+  };
+  const referralQualificationService: ReconciliationReferralQualificationDouble = {
+    qualifyReferralAfterPurchase: async (transactionId: string) => {
+      state.referralQualificationCalls.push(transactionId);
+      state.callOrder.push('referral-qualification');
+    },
+  };
+  const profileSyncQueueService: ReconciliationProfileSyncQueueDouble = {
+    enqueue: async (syncJobId: string) => {
+      state.profileSyncEnqueueCalls.push(syncJobId);
+      state.callOrder.push(`enqueue:${syncJobId}`);
+      if (state.enqueueError) {
+        throw state.enqueueError;
+      }
     },
   };
   return new PaymentReconciliationService(
@@ -346,10 +351,9 @@ function createService(state: ReturnType<typeof createState>): PaymentReconcilia
     paymentWebhookInboxService as unknown as PaymentWebhookInboxService,
     paymentSubscriptionMutationService as unknown as PaymentSubscriptionMutationService,
     paymentOpsAlertService as unknown as PaymentOpsAlertService,
-    userNotificationEventsService as unknown as UserNotificationEventsService,
-    { processPendingBatch: async () => { state.callOrder.push('profile-sync-batch'); } } as never,
-    { enqueueJob: async (jobId: string) => { state.callOrder.push(`enqueue:${jobId}`); if (state.enqueueError) { throw state.enqueueError; } return { jobId, queueJobId: `profile-sync:${jobId}`, enqueued: true, alreadyQueued: false }; } } as never,
-    { qualifyFromCompletedPurchase: async (input: { readonly referredUserId: string; readonly purchaseChannel: string; readonly transactionId?: string }) => { state.referralQualificationCalls.push(input); state.callOrder.push('referral-qualification'); return { referredUserId: 'user-1', qualifiedReferralIds: [], rewardsIssuedCount: 0, totalRewardAmount: 0 }; } } as never,
+    partnerEarningsService as unknown as PartnerEarningsService,
+    referralQualificationService as unknown as ReferralQualificationService,
+    profileSyncQueueService as unknown as ProfileSyncQueueService,
   );
 }
 
@@ -360,14 +364,29 @@ function createState(input: {
   readonly mutationShouldThrow?: boolean;
   readonly mutationError?: Error;
   readonly enqueueError?: Error;
-  readonly profileSyncJobUpdateError?: Error;
-  readonly purchaseDiscount?: number;
 }) {
+  const now = new Date('2026-04-19T12:00:00.000Z');
   return {
     event: {
       id: 'event-1',
+      gatewayType: PaymentGatewayType.YOOKASSA,
       paymentId: 'payment-1',
+      providerEventId: 'provider-event-1',
       eventStatus: input.eventStatus,
+      status: PaymentWebhookLifecycleStatus.PROCESSING,
+      attempts: 1,
+      reconciliationAttempts: 1,
+      replayCount: 0,
+      lastError: null,
+      payloadHash: 'hash-1',
+      rawPayload: { object: { id: 'payment-1', status: input.eventStatus } },
+      normalizedPayload: null,
+      receivedAt: now,
+      processedAt: null,
+      lastTransitionAt: now,
+      lastReplayedAt: null,
+      createdAt: now,
+      updatedAt: now,
     },
     initialTransactionStatus: input.initialTransactionStatus,
     refreshedSubscriptionId: input.refreshedSubscriptionId,
@@ -377,18 +396,15 @@ function createState(input: {
     markProcessedCalls: [] as string[],
     markFailedCalls: [] as [string, string][],
     transactionUpdateCalls: [] as TransactionUpdateArgs[],
-    notificationCalls: [] as Array<['completed' | 'failed', string]>,
     mutationCalls: [] as string[],
+    profileSyncEnqueueCalls: [] as string[],
     mutationShouldThrow: input.mutationShouldThrow ?? input.mutationError !== undefined,
     mutationError: input.mutationError ?? null,
     enqueueError: input.enqueueError ?? null,
-    profileSyncJobUpdateError: input.profileSyncJobUpdateError ?? null,
     callOrder: [] as string[],
     alertCalls: [] as NotifyWebhookFailedArgs[],
-    referralQualificationCalls: [] as Array<{ readonly referredUserId: string; readonly purchaseChannel: string; readonly transactionId?: string }>,
-    purchaseDiscount: input.purchaseDiscount ?? 0,
-    userUpdateCalls: [] as Array<{ readonly data: { readonly purchaseDiscount: number } }>,
-    profileSyncJobUpdateCalls: [] as Array<{ readonly where: { readonly id: string }; readonly data: { readonly status: SyncJobStatus; readonly lastError: string; readonly nextRetryAt: null; readonly processedAt: Date } }>,
+    referralQualificationCalls: [] as string[],
+    partnerEarningCalls: [] as ProcessPartnerEarningArg[],
   };
 }
 
@@ -408,7 +424,7 @@ function createTransaction(input: {
     channel: PurchaseChannel.WEB,
     gatewayType: PaymentGatewayType.YOOKASSA,
     currency: Currency.USD,
-    amount: { toString: (): string => '8.00' },
+    amount: new Prisma.Decimal('8.00'),
     paymentAsset: null,
     planSnapshot: { id: 'plan-1', selectedDurationDays: 30, pricing: { discountSource: 'PURCHASE', discountPercent: 20 } },
     gatewayId: null,

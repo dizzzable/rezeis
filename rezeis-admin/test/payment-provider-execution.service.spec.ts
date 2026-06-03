@@ -1,179 +1,187 @@
-import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { describe, it } from 'node:test';
+
+import { ServiceUnavailableException } from '@nestjs/common';
+import {
+  Currency,
+  PaymentGatewayType,
+  PurchaseChannel,
+  PurchaseType,
+  TransactionStatus,
+} from '@prisma/client';
 import { of, throwError } from 'rxjs';
-import { Currency, PaymentGatewayType, TransactionStatus } from '@prisma/client';
 
 import { PaymentProviderExecutionService } from '../src/modules/payments/services/payment-provider-execution.service';
 
-describe('PaymentProviderExecutionService refunds', () => {
-  it('creates YooKassa refunds with idempotence key and bounded result', async () => {
+describe('PaymentProviderExecutionService checkout execution', () => {
+  it('creates YooKassa checkout requests with idempotence key and bounded result', async () => {
     const calls: unknown[] = [];
-    const service = new PaymentProviderExecutionService({
+    const service = createService({
       post: (url: string, body: unknown, options: unknown) => {
         calls.push({ url, body, options });
-        return of({ data: { id: 'refund-1', status: 'succeeded' } });
+        return of({
+          data: {
+            id: 'provider-payment-1',
+            status: 'pending',
+            confirmation: { confirmation_url: 'https://checkout.example/yookassa' },
+          },
+        });
       },
-    } as never, {} as never);
-
-    const result = await service.createRefund({
-      gateway: {
-        id: 'gateway-1',
-        type: PaymentGatewayType.YOOKASSA,
-        settings: { shopId: 'shop-1', apiKey: 'secret-1' },
-      } as never,
-      transaction: {
-        id: 'transaction-1',
-        paymentId: 'payment-1',
-        gatewayId: 'provider-payment-1',
-        gatewayType: PaymentGatewayType.YOOKASSA,
-        status: TransactionStatus.COMPLETED,
-        amount: { toString: () => '12.50' },
-        currency: Currency.RUB,
-      } as never,
-      idempotencyKey: 'refund-key-1',
     });
 
-    assert.deepStrictEqual(calls, [
-      {
-        url: 'https://api.yookassa.ru/v3/refunds',
-        body: { amount: { value: '12.50', currency: Currency.RUB }, payment_id: 'provider-payment-1' },
-        options: {
-          auth: { username: 'shop-1', password: 'secret-1' },
-          headers: { 'Idempotence-Key': 'refund-key-1' },
+    const result = await service.createCheckout({
+      gateway: createGateway({
+        type: PaymentGatewayType.YOOKASSA,
+        settings: { shopId: 'shop-1', apiKey: 'secret-1' },
+      }),
+      transaction: createTransaction({
+        paymentId: 'payment-1',
+        gatewayType: PaymentGatewayType.YOOKASSA,
+        amount: '12.50',
+        currency: Currency.RUB,
+      }),
+      description: 'Plan purchase that should be sent to provider',
+    });
+
+    assert.deepStrictEqual(calls, [{
+      url: 'https://api.yookassa.ru/v3/payments',
+      body: {
+        amount: { value: '12.50', currency: Currency.RUB },
+        capture: true,
+        confirmation: {
+          type: 'redirect',
+          return_url: 'https://user.example/payments/result?paymentId=payment-1',
         },
+        description: 'Plan purchase that should be sent to provider',
+        metadata: { paymentId: 'payment-1', transactionId: 'transaction-1' },
       },
-    ]);
+      options: {
+        auth: { username: 'shop-1', password: 'secret-1' },
+        headers: { 'Idempotence-Key': 'payment-1' },
+      },
+    }]);
     assert.deepStrictEqual(result, {
-      gatewayRefundId: 'refund-1',
-      providerStatus: 'succeeded',
-      gatewayData: { provider: 'YOOKASSA', providerStatus: 'succeeded' },
+      gatewayId: 'provider-payment-1',
+      checkoutUrl: 'https://checkout.example/yookassa',
+      providerMode: 'REDIRECT',
+      providerStatus: 'pending',
+      gatewayData: {
+        provider: 'YOOKASSA',
+        providerStatus: 'pending',
+        providerResponse: {
+          id: 'provider-payment-1',
+          status: 'pending',
+          confirmation: { confirmation_url: 'https://checkout.example/yookassa' },
+        },
+        checkoutUrl: 'https://checkout.example/yookassa',
+      },
     });
   });
 
-  it('creates Heleket refunds with signed payload and bounded result', async () => {
+  it('creates Heleket checkout requests with signed payload and callback-safe result', async () => {
     const calls: unknown[] = [];
-    const service = new PaymentProviderExecutionService({
+    const service = createService({
       post: (url: string, body: unknown, options: unknown) => {
         calls.push({ url, body, options });
-        return of({ data: { result: { uuid: 'refund-uuid-1', status: 'paid' } } });
+        return of({ data: { result: { uuid: 'heleket-payment-1', status: 'new', url: 'https://checkout.example/heleket' } } });
       },
-    } as never, {} as never);
+    });
     const body = {
-      uuid: 'heleket-payment-1',
-      address: 'TRON-refund-address',
-      is_subtract: true,
       amount: '7.25',
+      currency: Currency.USDT,
+      order_id: 'payment-heleket-1',
+      description: 'Crypto checkout',
+      url_success: 'https://user.example/payments/result?paymentId=payment-heleket-1',
+      url_return: 'https://user.example/payments/result?paymentId=payment-heleket-1',
     };
     const sign = createHash('md5')
       .update(`${Buffer.from(JSON.stringify(body), 'utf8').toString('base64')}secret-1`)
       .digest('hex');
 
-    const result = await service.createRefund({
-      gateway: {
-        id: 'gateway-1',
+    const result = await service.createCheckout({
+      gateway: createGateway({
         type: PaymentGatewayType.HELEKET,
         settings: { merchantId: 'merchant-1', apiKey: 'secret-1' },
-      } as never,
-      transaction: {
-        id: 'transaction-1',
-        paymentId: 'payment-1',
-        gatewayId: 'heleket-payment-1',
-        gatewayType: PaymentGatewayType.HELEKET,
-        status: TransactionStatus.COMPLETED,
-        amount: { toString: () => '7.25' },
-        currency: Currency.USDT,
-      } as never,
-      idempotencyKey: 'refund-key-1',
-      refundAddress: 'TRON-refund-address',
-      isSubtract: true,
-    });
-
-    assert.deepStrictEqual(calls, [
-      {
-        url: 'https://api.heleket.com/v1/payment/refund',
-        body,
-        options: {
-          headers: { merchant: 'merchant-1', sign, 'Content-Type': 'application/json' },
-        },
-      },
-    ]);
-    assert.deepStrictEqual(result, {
-      gatewayRefundId: 'refund-uuid-1',
-      providerStatus: 'paid',
-      gatewayData: { provider: 'HELEKET', providerStatus: 'paid' },
-    });
-  });
-
-  it('normalizes raw refund provider failures before throwing', async () => {
-    const rawProviderFailure = 'YooKassa refund failed https://api.yookassa.ru/v3/refunds provider_uuid=0194f4b6-7cc7-7ecb-9f62-123456789abc token=raw-provider-token-secret';
-    const service = new PaymentProviderExecutionService({
-      post: () => throwError(() => new Error(rawProviderFailure)),
-    } as never, {} as never);
-
-    await assert.rejects(
-      service.createRefund({
-        gateway: {
-          id: 'gateway-1',
-          type: PaymentGatewayType.YOOKASSA,
-          settings: { shopId: 'shop-1', apiKey: 'secret-1' },
-        } as never,
-        transaction: {
-          id: 'transaction-1',
-          paymentId: 'payment-1',
-          gatewayId: 'provider-payment-1',
-          gatewayType: PaymentGatewayType.YOOKASSA,
-          status: TransactionStatus.COMPLETED,
-          amount: { toString: () => '12.50' },
-          currency: Currency.RUB,
-        } as never,
-        idempotencyKey: 'refund-key-1',
       }),
-      (error: unknown) => {
-        const serialized = JSON.stringify(error);
-        assert.equal(serialized.includes(rawProviderFailure), false);
-        assert.equal(serialized.includes('raw-provider-token-secret'), false);
-        assert.equal(serialized.includes('0194f4b6-7cc7-7ecb-9f62-123456789abc'), false);
-        assert.equal(serialized.includes('https://api.yookassa.ru'), false);
-        assert.equal(serialized.includes('PAYMENT_PROVIDER_ERROR'), true);
-        return true;
-      },
-    );
-  });
-});
+      transaction: createTransaction({
+        paymentId: 'payment-heleket-1',
+        gatewayType: PaymentGatewayType.HELEKET,
+        amount: '7.25',
+        currency: Currency.USDT,
+      }),
+      description: 'Crypto checkout',
+    });
 
-describe('PaymentProviderExecutionService checkout failures', () => {
-  it('normalizes raw checkout provider failures before throwing', async () => {
-    const rawProviderFailure = 'Platega checkout rejected https://app.platega.io/transaction/process X-Secret=provider-secret paymentId=pay_12345678901234567890';
-    const service = new PaymentProviderExecutionService({
-      post: () => {
-        throw new Error(rawProviderFailure);
+    assert.deepStrictEqual(calls, [{
+      url: 'https://api.heleket.com/v1/payment',
+      body,
+      options: {
+        headers: { merchant: 'merchant-1', sign, 'Content-Type': 'application/json' },
       },
-    } as never, {
-      ruidPublicWebUrl: 'https://user.example',
-      adminPublicBaseUrl: 'https://admin.example',
-      botToken: null,
-    } as never);
+    }]);
+    assert.equal(result.gatewayId, 'heleket-payment-1');
+    assert.equal(result.checkoutUrl, 'https://checkout.example/heleket');
+    assert.equal(result.providerMode, 'REDIRECT');
+    assert.equal(result.providerStatus, 'new');
+    assert.equal(result.gatewayData.provider, 'HELEKET');
+  });
+
+  it('uses explicit success and failure URL overrides for redirect gateways', async () => {
+    const calls: unknown[] = [];
+    const service = createService({
+      post: (url: string, body: unknown, options: unknown) => {
+        calls.push({ url, body, options });
+        return of({ data: { transactionId: 'platega-1', redirect: 'https://checkout.example/platega', status: 'PENDING' } });
+      },
+    });
+
+    await service.createCheckout({
+      gateway: createGateway({
+        type: PaymentGatewayType.PLATEGA,
+        settings: { merchantId: 'merchant-1', secret: 'secret-1', paymentMethod: 4 },
+      }),
+      transaction: createTransaction({ gatewayType: PaymentGatewayType.PLATEGA }),
+      description: 'Platega checkout',
+      successUrl: 'https://reiwa.example/success',
+      failUrl: 'https://reiwa.example/fail',
+    });
+
+    assert.deepStrictEqual(calls, [{
+      url: 'https://app.platega.io/transaction/process',
+      body: {
+        paymentMethod: 4,
+        paymentDetails: { amount: 9.99, currency: Currency.USD },
+        description: 'Platega checkout',
+        payload: 'payment-1',
+        return: 'https://reiwa.example/success',
+        failedUrl: 'https://reiwa.example/fail',
+      },
+      options: {
+        headers: { 'X-MerchantId': 'merchant-1', 'X-Secret': 'secret-1' },
+      },
+    }]);
+  });
+
+  it('normalizes raw provider failures before throwing from checkout creation', async () => {
+    const rawProviderFailure =
+      'Platega checkout rejected https://app.platega.io/transaction/process X-Secret=provider-secret paymentId=pay_12345678901234567890';
+    const service = createService({
+      post: () => throwError(() => new Error(rawProviderFailure)),
+    });
 
     await assert.rejects(
       service.createCheckout({
-        gateway: {
-          id: 'gateway-1',
+        gateway: createGateway({
           type: PaymentGatewayType.PLATEGA,
           settings: { merchantId: 'merchant-1', secret: 'secret-1' },
-        } as never,
-        transaction: {
-          id: 'transaction-1',
-          paymentId: 'payment-1',
-          gatewayType: PaymentGatewayType.PLATEGA,
-          status: TransactionStatus.PENDING,
-          amount: { toString: () => '12.50' },
-          currency: Currency.RUB,
-        } as never,
+        }),
+        transaction: createTransaction({ gatewayType: PaymentGatewayType.PLATEGA }),
         description: 'Plan purchase',
       }),
       (error: unknown) => {
         const serialized = JSON.stringify(error);
+        assert.equal(error instanceof ServiceUnavailableException, true);
         assert.equal(serialized.includes(rawProviderFailure), false);
         assert.equal(serialized.includes('provider-secret'), false);
         assert.equal(serialized.includes('pay_12345678901234567890'), false);
@@ -184,3 +192,53 @@ describe('PaymentProviderExecutionService checkout failures', () => {
     );
   });
 });
+
+function createService(httpService: { readonly post: (...args: never[]) => unknown }): PaymentProviderExecutionService {
+  return new PaymentProviderExecutionService(httpService as never, {
+    domain: 'https://user.example',
+    botToken: 'bot-token-1',
+  } as never);
+}
+
+function createGateway(input: {
+  readonly type: PaymentGatewayType;
+  readonly settings: Record<string, unknown>;
+}) {
+  return {
+    id: 'gateway-1',
+    type: input.type,
+    orderIndex: 1,
+    currency: Currency.USD,
+    isActive: true,
+    settings: input.settings,
+    createdAt: new Date('2026-04-19T12:00:00.000Z'),
+    updatedAt: new Date('2026-04-19T12:00:00.000Z'),
+  } as never;
+}
+
+function createTransaction(input: {
+  readonly paymentId?: string;
+  readonly gatewayType: PaymentGatewayType;
+  readonly amount?: string;
+  readonly currency?: Currency;
+}) {
+  return {
+    id: 'transaction-1',
+    paymentId: input.paymentId ?? 'payment-1',
+    userId: 'user-1',
+    subscriptionId: null,
+    status: TransactionStatus.PENDING,
+    purchaseType: PurchaseType.NEW,
+    channel: PurchaseChannel.WEB,
+    gatewayType: input.gatewayType,
+    gatewayId: null,
+    gatewayData: null,
+    currency: input.currency ?? Currency.USD,
+    paymentAsset: null,
+    amount: { toString: () => input.amount ?? '9.99' },
+    planSnapshot: {},
+    deviceTypes: [],
+    createdAt: new Date('2026-04-19T12:00:00.000Z'),
+    updatedAt: new Date('2026-04-19T12:00:00.000Z'),
+  } as never;
+}

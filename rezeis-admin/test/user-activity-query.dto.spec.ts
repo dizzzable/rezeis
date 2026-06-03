@@ -6,46 +6,50 @@ import { describe, it } from 'node:test';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 
-import { ListUserNotificationsQueryDto } from '../src/modules/user-activity/dto/list-user-notifications-query.dto';
-import { ListUserTransactionsHistoryQueryDto } from '../src/modules/user-activity/dto/list-user-transactions-history-query.dto';
+import { InternalByTelegramQueryDto } from '../src/modules/internal-user/dto/internal-by-telegram-query.dto';
+import { requireUserReference } from '../src/modules/internal-user/utils/user-reference.util';
 
-describe('user-activity query DTOs', () => {
-  it('transforms and validates transactions query pagination', async () => {
-    const dto = plainToInstance(ListUserTransactionsHistoryQueryDto, {
-      userId: '7078f4b8-1df0-4e02-bdd6-d7a15a1bfb2f',
-      page: '2',
-      limit: '15',
+describe('internal user edge identity DTO', () => {
+  it('accepts canonical reiwa_id references', async () => {
+    const dto = plainToInstance(InternalByTelegramQueryDto, {
+      userId: 'cmphfcr6i007v01jg0lcu653h',
     });
 
     const errors = await validate(dto);
+
     assert.deepStrictEqual(errors, []);
-    assert.equal(dto.page, 2);
-    assert.equal(dto.limit, 15);
+    assert.equal(requireUserReference(dto), 'cmphfcr6i007v01jg0lcu653h');
   });
 
-  it('rejects invalid notifications query boolean values', async () => {
-    const dto = plainToInstance(ListUserNotificationsQueryDto, {
-      userId: '7078f4b8-1df0-4e02-bdd6-d7a15a1bfb2f',
-      isRead: 'sometimes',
+  it('accepts positive Telegram id references', async () => {
+    const dto = plainToInstance(InternalByTelegramQueryDto, {
+      telegramId: '123456789',
     });
 
     const errors = await validate(dto);
+
+    assert.deepStrictEqual(errors, []);
+    assert.equal(requireUserReference(dto), '123456789');
+  });
+
+  it('rejects malformed Telegram ids before controller resolution', async () => {
+    const dto = plainToInstance(InternalByTelegramQueryDto, {
+      telegramId: '12-not-a-telegram-id',
+    });
+
+    const errors = await validate(dto);
+
     assert.equal(errors.length, 1);
-    assert.equal(errors[0]?.constraints?.isBoolean, 'isRead must be a boolean value');
+    assert.equal(
+      errors[0]?.constraints?.matches,
+      'telegramId must be a positive numeric string up to 19 digits',
+    );
   });
 
-  it('transforms notifications query pagination and booleans', async () => {
-    const dto = plainToInstance(ListUserNotificationsQueryDto, {
-      userId: '7078f4b8-1df0-4e02-bdd6-d7a15a1bfb2f',
-      isRead: 'false',
-      page: '3',
-      limit: '25',
-    });
-
-    const errors = await validate(dto);
-    assert.deepStrictEqual(errors, []);
-    assert.equal(dto.isRead, false);
-    assert.equal(dto.page, 3);
-    assert.equal(dto.limit, 25);
+  it('fails controller resolution when both identities are omitted', () => {
+    assert.throws(
+      () => requireUserReference({}),
+      /A userId or telegramId is required/,
+    );
   });
 });

@@ -29,9 +29,10 @@ export class EmailService {
   public async sendLinkedAccountVerificationCode(
     input: SendLinkedAccountVerificationCodeInput,
   ): Promise<void> {
-    if (input.emailAddress.trim().length === 0) {
+    const emailAddress = input.emailAddress.trim();
+    if (emailAddress.length === 0 || /[\r\n]/.test(emailAddress)) {
       throw new EmailDeliveryException(
-        'Refusing to send verification code: empty email address',
+        'Refusing to send verification code: invalid email address',
         'definitely-not-delivered',
       );
     }
@@ -39,7 +40,7 @@ export class EmailService {
     // and log the rendered code at debug level so dev environments can observe
     // the issued challenge without leaking it to higher log streams.
     this.logger.debug(
-      `Linked account verification code dispatched to ${input.emailAddress} ` +
+      `Linked account verification code ${input.code} dispatched to ${emailAddress} ` +
         `(expires at ${input.expiresAt.toISOString()})`,
     );
   }

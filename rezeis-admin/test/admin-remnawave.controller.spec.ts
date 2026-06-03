@@ -37,12 +37,16 @@ describe('AdminRemnawaveController', () => {
       authentication: null,
       branding: null,
     };
-    const controller = new AdminRemnawaveController({
-      getStatus: async () => {
-        statusCallsCount += 1;
-        return expectedStatus;
-      },
-    } as never as RemnawaveApiService);
+    const controller = new AdminRemnawaveController(
+      {
+        getStatus: async () => {
+          statusCallsCount += 1;
+          return expectedStatus;
+        },
+      } as never as RemnawaveApiService,
+      {} as never,
+      {} as never,
+    );
 
     const actualStatus = await controller.getStatus();
 

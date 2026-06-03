@@ -1,212 +1,101 @@
+import 'reflect-metadata';
+
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
+import { plainToInstance } from 'class-transformer';
+import { validate } from 'class-validator';
 import fc from 'fast-check';
 
-import { RegisterSchema } from '../src/modules/web-auth/dto/register.dto';
+import { WebAuthRegisterDto } from '../src/modules/web-auth/dto/web-auth-register.dto';
 
-/**
- * Property 1: Registration Input Validation
- *
- * For any string, the username validator SHALL accept it if and only if it matches
- * the pattern ^[a-zA-Z0-9_-]{3,32}$, and the password hash validator SHALL accept
- * it if and only if it is exactly 64 lowercase hex characters.
- *
- * **Validates: Requirements 1.3, 1.4**
- */
-describe('Property 1: Registration Input Validation', () => {
-  const VALID_PASSWORD_HASH = 'a'.repeat(64);
-  const VALID_USERNAME = 'valid-user';
-  const USERNAME_REGEX = /^[a-zA-Z0-9_-]{3,32}$/;
-  const PASSWORD_HASH_REGEX = /^[a-f0-9]{64}$/;
+describe('WebAuthRegisterDto property validation', () => {
+  const VALID_LOGIN = 'valid-user';
+  const VALID_PASSWORD = 'valid-password';
+  const LOGIN_CHARACTERS = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-'.split('');
+  const LOGIN_REGEX = /^[A-Za-z0-9._-]{3,64}$/;
 
-  describe('Username validation', () => {
-    it('accepts any string matching ^[a-zA-Z0-9_-]{3,32}$', () => {
-      const validUsernameArb = fc.stringOf(
-        fc.constantFrom(...'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-'.split('')),
-        { minLength: 3, maxLength: 32 },
-      );
-
-      fc.assert(
-        fc.property(validUsernameArb, (username) => {
-          const result = RegisterSchema.safeParse({ username, passwordHash: VALID_PASSWORD_HASH });
-          assert.ok(
-            result.success,
-            `Expected username "${username}" to pass validation but got: ${JSON.stringify(result.error?.issues)}`,
-          );
-        }),
-        { numRuns: 500 },
-      );
-    });
-
-    it('rejects any string shorter than 3 characters', () => {
-      const shortUsernameArb = fc.stringOf(
-        fc.constantFrom(...'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-'.split('')),
-        { minLength: 0, maxLength: 2 },
-      );
-
-      fc.assert(
-        fc.property(shortUsernameArb, (username) => {
-          const result = RegisterSchema.safeParse({ username, passwordHash: VALID_PASSWORD_HASH });
-          assert.equal(result.success, false, `Expected short username "${username}" (len=${username.length}) to fail`);
-        }),
-        { numRuns: 200 },
-      );
-    });
-
-    it('rejects any string longer than 32 characters', () => {
-      const longUsernameArb = fc.stringOf(
-        fc.constantFrom(...'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-'.split('')),
-        { minLength: 33, maxLength: 100 },
-      );
-
-      fc.assert(
-        fc.property(longUsernameArb, (username) => {
-          const result = RegisterSchema.safeParse({ username, passwordHash: VALID_PASSWORD_HASH });
-          assert.equal(result.success, false, `Expected long username (len=${username.length}) to fail`);
-        }),
-        { numRuns: 200 },
-      );
-    });
-
-    it('rejects any string containing invalid characters (regardless of length)', () => {
-      // Generate strings that contain at least one character NOT in [a-zA-Z0-9_-]
-      const invalidCharArb = fc.unicode().filter((c) => !/^[a-zA-Z0-9_-]$/.test(c));
-      const validCharArb = fc.constantFrom(...'abcdefghijklmnopqrstuvwxyz0123456789_-'.split(''));
-
-      // Build a username of valid length (3-32) but inject at least one invalid char
-      const invalidUsernameArb = fc
-        .tuple(
-          fc.array(validCharArb, { minLength: 2, maxLength: 30 }),
-          invalidCharArb,
-          fc.array(validCharArb, { minLength: 0, maxLength: 10 }),
-        )
-        .map(([prefix, badChar, suffix]) => [...prefix, badChar, ...suffix].join(''))
-        .filter((s) => s.length >= 3 && s.length <= 32);
-
-      fc.assert(
-        fc.property(invalidUsernameArb, (username) => {
-          const result = RegisterSchema.safeParse({ username, passwordHash: VALID_PASSWORD_HASH });
-          assert.equal(
-            result.success,
-            false,
-            `Expected username with invalid chars "${username}" to fail validation`,
-          );
-        }),
-        { numRuns: 500 },
-      );
-    });
-
-    it('validation result matches the regex for arbitrary strings', () => {
-      fc.assert(
-        fc.property(fc.string({ minLength: 0, maxLength: 50 }), (username) => {
-          const result = RegisterSchema.safeParse({ username, passwordHash: VALID_PASSWORD_HASH });
-          const shouldPass = USERNAME_REGEX.test(username);
-          assert.equal(
-            result.success,
-            shouldPass,
-            `Username "${username}": expected ${shouldPass ? 'pass' : 'fail'} but got ${result.success ? 'pass' : 'fail'}`,
-          );
-        }),
-        { numRuns: 1000 },
-      );
-    });
+  it('accepts any login matching the current web-auth login DTO shape', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.stringOf(fc.constantFrom(...LOGIN_CHARACTERS), { minLength: 3, maxLength: 64 }),
+        async (login) => {
+          assert.equal(await isValidRegisterPayload({ login, password: VALID_PASSWORD }), true);
+        },
+      ),
+      { numRuns: 500 },
+    );
   });
 
-  describe('Password hash validation', () => {
-    it('accepts any 64-character lowercase hex string', () => {
-      const validHashArb = fc.stringOf(
-        fc.constantFrom(...'0123456789abcdef'.split('')),
-        { minLength: 64, maxLength: 64 },
-      );
+  it('rejects allowed-character logins outside the 3-64 character bound', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.oneof(
+          fc.stringOf(fc.constantFrom(...LOGIN_CHARACTERS), { minLength: 0, maxLength: 2 }),
+          fc.stringOf(fc.constantFrom(...LOGIN_CHARACTERS), { minLength: 65, maxLength: 100 }),
+        ),
+        async (login) => {
+          assert.equal(await isValidRegisterPayload({ login, password: VALID_PASSWORD }), false);
+        },
+      ),
+      { numRuns: 300 },
+    );
+  });
 
-      fc.assert(
-        fc.property(validHashArb, (passwordHash) => {
-          const result = RegisterSchema.safeParse({ username: VALID_USERNAME, passwordHash });
-          assert.ok(
-            result.success,
-            `Expected valid hash "${passwordHash.substring(0, 10)}..." to pass validation`,
-          );
-        }),
-        { numRuns: 500 },
-      );
-    });
+  it('rejects bounded logins containing characters outside the current login alphabet', async () => {
+    const invalidLoginArbitrary = fc
+      .tuple(
+        fc.array(fc.constantFrom(...LOGIN_CHARACTERS), { minLength: 2, maxLength: 30 }),
+        fc.constantFrom(' ', '@', '!', '/', '\\', ':', 'п', '中'),
+        fc.array(fc.constantFrom(...LOGIN_CHARACTERS), { minLength: 0, maxLength: 30 }),
+      )
+      .map(([prefix, invalidCharacter, suffix]) => [...prefix, invalidCharacter, ...suffix].join(''))
+      .filter((login) => login.length >= 3 && login.length <= 64);
 
-    it('rejects hex strings shorter than 64 characters', () => {
-      const shortHashArb = fc.stringOf(
-        fc.constantFrom(...'0123456789abcdef'.split('')),
-        { minLength: 0, maxLength: 63 },
-      );
+    await fc.assert(
+      fc.asyncProperty(invalidLoginArbitrary, async (login) => {
+        assert.equal(await isValidRegisterPayload({ login, password: VALID_PASSWORD }), false);
+      }),
+      { numRuns: 500 },
+    );
+  });
 
-      fc.assert(
-        fc.property(shortHashArb, (passwordHash) => {
-          const result = RegisterSchema.safeParse({ username: VALID_USERNAME, passwordHash });
-          assert.equal(result.success, false, `Expected short hash (len=${passwordHash.length}) to fail`);
-        }),
-        { numRuns: 200 },
-      );
-    });
+  it('matches the login regex for generated bounded login candidates', async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.string({ minLength: 0, maxLength: 80 }), async (login) => {
+        assert.equal(
+          await isValidRegisterPayload({ login, password: VALID_PASSWORD }),
+          LOGIN_REGEX.test(login),
+        );
+      }),
+      { numRuns: 1000 },
+    );
+  });
 
-    it('rejects hex strings longer than 64 characters', () => {
-      const longHashArb = fc.stringOf(
-        fc.constantFrom(...'0123456789abcdef'.split('')),
-        { minLength: 65, maxLength: 200 },
-      );
+  it('accepts arbitrary plain passwords within the 8-256 character bound', async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.string({ minLength: 8, maxLength: 256 }), async (password) => {
+        assert.equal(await isValidRegisterPayload({ login: VALID_LOGIN, password }), true);
+      }),
+      { numRuns: 500 },
+    );
+  });
 
-      fc.assert(
-        fc.property(longHashArb, (passwordHash) => {
-          const result = RegisterSchema.safeParse({ username: VALID_USERNAME, passwordHash });
-          assert.equal(result.success, false, `Expected long hash (len=${passwordHash.length}) to fail`);
-        }),
-        { numRuns: 200 },
-      );
-    });
-
-    it('rejects 64-character strings with non-hex characters', () => {
-      // Generate a 64-char string that contains at least one non-hex char
-      const nonHexCharArb = fc.char().filter((c) => !/^[a-f0-9]$/.test(c));
-      const hexCharArb = fc.constantFrom(...'0123456789abcdef'.split(''));
-
-      const invalidHashArb = fc
-        .tuple(
-          fc.array(hexCharArb, { minLength: 0, maxLength: 62 }),
-          nonHexCharArb,
-          fc.array(hexCharArb, { minLength: 0, maxLength: 62 }),
-        )
-        .map(([prefix, badChar, suffix]) => {
-          const combined = [...prefix, badChar, ...suffix];
-          // Ensure exactly 64 chars by padding or trimming
-          while (combined.length < 64) combined.push('a');
-          return combined.slice(0, 64).join('');
-        })
-        .filter((s) => s.length === 64 && !PASSWORD_HASH_REGEX.test(s));
-
-      fc.assert(
-        fc.property(invalidHashArb, (passwordHash) => {
-          const result = RegisterSchema.safeParse({ username: VALID_USERNAME, passwordHash });
-          assert.equal(
-            result.success,
-            false,
-            `Expected hash with non-hex chars to fail: "${passwordHash.substring(0, 10)}..."`,
-          );
-        }),
-        { numRuns: 500 },
-      );
-    });
-
-    it('validation result matches the regex for arbitrary strings', () => {
-      fc.assert(
-        fc.property(fc.string({ minLength: 0, maxLength: 100 }), (passwordHash) => {
-          const result = RegisterSchema.safeParse({ username: VALID_USERNAME, passwordHash });
-          const shouldPass = PASSWORD_HASH_REGEX.test(passwordHash);
-          assert.equal(
-            result.success,
-            shouldPass,
-            `Hash "${passwordHash.substring(0, 16)}..." (len=${passwordHash.length}): expected ${shouldPass ? 'pass' : 'fail'} but got ${result.success ? 'pass' : 'fail'}`,
-          );
-        }),
-        { numRuns: 1000 },
-      );
-    });
+  it('rejects plain passwords outside the 8-256 character bound', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.oneof(fc.string({ minLength: 0, maxLength: 7 }), fc.string({ minLength: 257, maxLength: 320 })),
+        async (password) => {
+          assert.equal(await isValidRegisterPayload({ login: VALID_LOGIN, password }), false);
+        },
+      ),
+      { numRuns: 300 },
+    );
   });
 });
+
+async function isValidRegisterPayload(payload: Record<string, unknown>): Promise<boolean> {
+  const dto = plainToInstance(WebAuthRegisterDto, payload);
+  const errors = await validate(dto);
+  return errors.length === 0;
+}

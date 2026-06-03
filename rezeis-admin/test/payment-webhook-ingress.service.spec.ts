@@ -119,18 +119,17 @@ describe('PaymentWebhookIngressService', () => {
   });
 
   it('bounds stalled reconciliation enqueue waits without surfacing raw queue details', async () => {
-    const slowEnqueue = new Promise((resolve) => {
-      setTimeout(() => resolve({ id: 'job-1' }), 50);
-    });
-    const startedAt = Date.now();
+    let enqueueStarted = false;
 
     await assert.rejects(
-      runPaymentReconciliationEnqueueWithTimeout(() => slowEnqueue, 5),
+      runPaymentReconciliationEnqueueWithTimeout(() => {
+        enqueueStarted = true;
+        return new Promise(() => undefined);
+      }, 5),
       PaymentReconciliationEnqueueError,
     );
-    const elapsedMs = Date.now() - startedAt;
 
-    assert.equal(elapsedMs < 45, true);
+    assert.equal(enqueueStarted, true);
   });
 
   it('sanitizes rejected reconciliation enqueue failures', async () => {

@@ -1,345 +1,159 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { PromoCode } from '@prisma/client';
+import { PromocodeAvailability, PromocodeRewardType, SubscriptionStatus } from '@prisma/client';
 
-import { PromocodeValidationService, UserSubscriptionInfo } from '../src/modules/promocodes/services/promocode-validation.service';
+import { PromocodeInterface } from '../src/modules/promocodes/interfaces/promocode.interface';
+import { PromocodeValidationService } from '../src/modules/promocodes/services/promocode-validation.service';
 
-type MockUser = {
-  id: string;
-  hasActiveSubscriptions: boolean;
-  hasAnySubscriptions: boolean;
-};
-
-type MockSubscription = {
-  id: string;
-  planSnapshot: Record<string, unknown> | null;
-  status: string;
-  planId: string | null;
-};
-
-function makePromoCode(overrides: Partial<PromoCode> = {}): PromoCode {
+function createRecord(overrides: Record<string, unknown> = {}) {
   return {
-    id: 'pc-1',
-    code: 'SUMMER2024',
-    codeNormalized: 'SUMMER2024',
-    planSnapshot: null,
+    id: 'promo-1',
+    code: 'PROMO',
     isActive: true,
-    availability: 'ALL',
-    rewardType: 'SUBSCRIPTION',
-    rewardValue: 30,
-    maxActivations: 100,
-    expiresAt: null,
-    allowedUserIds: [],
+    availability: PromocodeAvailability.ALL,
+    rewardType: PromocodeRewardType.DURATION,
+    reward: 7,
+    plan: null,
+    lifetime: null,
+    maxActivations: null,
+    allowedTelegramIds: [],
     allowedPlanIds: [],
-    createdAt: new Date(),
-    updatedAt: new Date(),
-    ...overrides,
-  } as PromoCode;
-}
-
-function makeUser(overrides: Partial<MockUser> = {}): MockUser {
-  return {
-    id: 'user-1',
-    hasActiveSubscriptions: false,
-    hasAnySubscriptions: false,
+    createdAt: new Date('2026-04-20T10:00:00.000Z'),
+    updatedAt: new Date('2026-04-20T10:00:00.000Z'),
+    _count: { activations: 0 },
     ...overrides,
   };
 }
 
-function makeSubscription(planId = 'plan-a', status = 'ACTIVE'): MockSubscription {
+function createPromocode(overrides: Partial<PromocodeInterface> = {}): PromocodeInterface {
   return {
-    id: 'sub-1',
-    planSnapshot: { id: planId, name: 'Pro Plan' },
-    status,
-    planId,
+    id: 'promo-1',
+    code: 'PROMO',
+    isActive: true,
+    availability: PromocodeAvailability.ALL,
+    rewardType: PromocodeRewardType.DURATION,
+    reward: 7,
+    plan: null,
+    lifetime: null,
+    maxActivations: null,
+    allowedTelegramIds: [],
+    allowedPlanIds: [],
+    activationsCount: 0,
+    createdAt: '2026-04-20T10:00:00.000Z',
+    updatedAt: '2026-04-20T10:00:00.000Z',
+    ...overrides,
   };
 }
 
 describe('PromocodeValidationService', () => {
-  const service = new PromocodeValidationService();
+  it('normalizes codes and validates current availability rules', async () => {
+    let findUniqueArgs: unknown;
+    let activationCountArgs: unknown;
+    const service = new PromocodeValidationService({
+      promocode: {
+        findUnique: async (args: unknown) => {
+          findUniqueArgs = args;
+          return createRecord({
+            availability: PromocodeAvailability.ALLOWED,
+            allowedTelegramIds: [BigInt('123456789')],
+          });
+        },
+      },
+      promocodeActivation: {
+        count: async (args: unknown) => {
+          activationCountArgs = args;
+          return 0;
+        },
+      },
+    } as never);
 
-  // --- INACTIVE ---
-
-  it('returns INACTIVE when promo code is not active', () => {
-    const promo = makePromoCode({ isActive: false });
-    const user = makeUser();
-    const result = service.validateForActivation(promo, user, [], 0, false);
-    assert.equal(result, 'INACTIVE');
-  });
-
-  it('allows active promo codes to proceed past inactive check', () => {
-    const promo = makePromoCode({ isActive: true });
-    const user = makeUser({ hasAnySubscriptions: false });
-    // This will fail at SUBSCRIPTION_REQUIRED since it's SUBSCRIPTION type with no subscriptions
-    // But passes the inactive check
-    const result = service.validateForActivation(promo, user, [], 0, false);
-    // SUBSCRIPTION type needs subscription — not INACTIVE
-    assert.notEqual(result, 'INACTIVE');
-  });
-
-  // --- EXPIRED ---
-
-  it('returns EXPIRED when expiresAt is in the past', () => {
-    const pastDate = new Date(Date.now() - 86400000);
-    const promo = makePromoCode({ expiresAt: pastDate, isActive: true });
-    const user = makeUser();
-    const result = service.validateForActivation(promo, user, [], 0, false);
-    assert.equal(result, 'EXPIRED');
-  });
-
-  it('allows promo codes with future expiry dates', () => {
-    const futureDate = new Date(Date.now() + 86400000 * 30);
-    const promo = makePromoCode({ expiresAt: futureDate, isActive: true });
-    const user = makeUser();
-    // Will fail at SUBSCRIPTION_REQUIRED but not EXPIRED
-    const result = service.validateForActivation(promo, user, [], 0, false);
-    assert.notEqual(result, 'EXPIRED');
-  });
-
-  it('allows promo codes with null expiry (never expires)', () => {
-    const promo = makePromoCode({ expiresAt: null, isActive: true });
-    const user = makeUser();
-    const result = service.validateForActivation(promo, user, [], 0, false);
-    assert.notEqual(result, 'EXPIRED');
-  });
-
-  // --- DEPLETED ---
-
-  it('returns DEPLETED when activations count equals maxActivations', () => {
-    const promo = makePromoCode({ maxActivations: 5 });
-    const user = makeUser();
-    const result = service.validateForActivation(promo, user, [], 5, false);
-    assert.equal(result, 'DEPLETED');
-  });
-
-  it('allows promo codes when activations are below maxActivations', () => {
-    const promo = makePromoCode({ maxActivations: 5, rewardType: 'PERSONAL_DISCOUNT' });
-    const user = makeUser();
-    const result = service.validateForActivation(promo, user, [], 4, false);
-    assert.equal(result, null);
-  });
-
-  it('returns DEPLETED when activations count exceeds maxActivations', () => {
-    const promo = makePromoCode({ maxActivations: 3 });
-    const user = makeUser();
-    const result = service.validateForActivation(promo, user, [], 10, false);
-    assert.equal(result, 'DEPLETED');
-  });
-
-  it('treats null maxActivations as unlimited', () => {
-    const promo = makePromoCode({ maxActivations: null });
-    const user = makeUser({ hasAnySubscriptions: true });
-    const subs = [makeSubscription()] as UserSubscriptionInfo[];
-    const result = service.validateForActivation(promo, user, subs, 999, false);
-    assert.notEqual(result, 'DEPLETED');
-  });
-
-  // --- ALREADY_ACTIVATED ---
-
-  it('returns ALREADY_ACTIVATED when user has previously activated', () => {
-    const promo = makePromoCode({ isActive: true });
-    const user = makeUser();
-    const result = service.validateForActivation(promo, user, [], 0, true);
-    assert.equal(result, 'ALREADY_ACTIVATED');
-  });
-
-  it('allows fresh activation when user has no existing activation', () => {
-    const promo = makePromoCode({ isActive: true, rewardType: 'PERSONAL_DISCOUNT' });
-    const user = makeUser();
-    const result = service.validateForActivation(promo, user, [], 0, false);
-    assert.equal(result, null);
-  });
-
-  // --- AVAILABILITY: ALL ---
-
-  it('allows ALL availability to any user with subscription', () => {
-    const promo = makePromoCode({ availability: 'ALL', rewardType: 'PERSONAL_DISCOUNT' });
-    const user = makeUser();
-    const result = service.validateForActivation(promo, user, [], 0, false);
-    assert.equal(result, null);
-  });
-
-  // --- AVAILABILITY: NEW ---
-
-  it('allows NEW availability for users with no subscriptions', () => {
-    const promo = makePromoCode({ availability: 'NEW', rewardType: 'PERSONAL_DISCOUNT' });
-    const user = makeUser({ hasAnySubscriptions: false });
-    const result = service.validateForActivation(promo, user, [], 0, false);
-    assert.equal(result, null);
-  });
-
-  it('returns NOT_AVAILABLE_FOR_USER for NEW availability when user has subscriptions', () => {
-    const promo = makePromoCode({ availability: 'NEW', rewardType: 'PERSONAL_DISCOUNT' });
-    const user = makeUser({ hasAnySubscriptions: true, hasActiveSubscriptions: false });
-    const result = service.validateForActivation(promo, user, [], 0, false);
-    assert.equal(result, 'NOT_AVAILABLE_FOR_USER');
-  });
-
-  // --- AVAILABILITY: EXISTING ---
-
-  it('allows EXISTING availability for users with active subscriptions', () => {
-    const promo = makePromoCode({ availability: 'EXISTING', rewardType: 'PERSONAL_DISCOUNT' });
-    const user = makeUser({ hasActiveSubscriptions: true, hasAnySubscriptions: true });
-    const result = service.validateForActivation(promo, user, [], 0, false);
-    assert.equal(result, null);
-  });
-
-  it('returns NOT_AVAILABLE_FOR_USER for EXISTING availability when user has no active subscriptions', () => {
-    const promo = makePromoCode({ availability: 'EXISTING', rewardType: 'PERSONAL_DISCOUNT' });
-    const user = makeUser({ hasActiveSubscriptions: false, hasAnySubscriptions: false });
-    const result = service.validateForActivation(promo, user, [], 0, false);
-    assert.equal(result, 'NOT_AVAILABLE_FOR_USER');
-  });
-
-  // --- AVAILABILITY: ALLOWED ---
-
-  it('allows ALLOWED availability when user id is in allowedUserIds', () => {
-    const promo = makePromoCode({ availability: 'ALLOWED', allowedUserIds: ['user-1'], rewardType: 'PERSONAL_DISCOUNT' });
-    const user = makeUser({ id: 'user-1' });
-    const result = service.validateForActivation(promo, user, [], 0, false);
-    assert.equal(result, null);
-  });
-
-  it('returns NOT_AVAILABLE_FOR_USER for ALLOWED when user id is not in allowedUserIds', () => {
-    const promo = makePromoCode({ availability: 'ALLOWED', allowedUserIds: ['user-2'], rewardType: 'PERSONAL_DISCOUNT' });
-    const user = makeUser({ id: 'user-1' });
-    const result = service.validateForActivation(promo, user, [], 0, false);
-    assert.equal(result, 'NOT_AVAILABLE_FOR_USER');
-  });
-
-  it('allows ALLOWED availability when allowedUserIds is empty (no restriction)', () => {
-    const promo = makePromoCode({ availability: 'ALLOWED', allowedUserIds: [], rewardType: 'PERSONAL_DISCOUNT' });
-    const user = makeUser({ id: 'user-1' });
-    const result = service.validateForActivation(promo, user, [], 0, false);
-    assert.equal(result, null);
-  });
-
-  // --- AVAILABILITY: INVITED ---
-
-  it('allows INVITED availability (currently falls through — no referral check in Rezeis yet)', () => {
-    const promo = makePromoCode({ availability: 'INVITED', rewardType: 'PERSONAL_DISCOUNT' });
-    const user = makeUser();
-    // Currently falls through to null — not a failure
-    const result = service.validateForActivation(promo, user, [], 0, false);
-    assert.equal(result, null);
-  });
-
-  // --- PLAN_NOT_ELIGIBLE ---
-
-  it('returns PLAN_NOT_ELIGIBLE when allowedPlanIds is set but user has no matching plan', () => {
-    const promo = makePromoCode({ allowedPlanIds: ['plan-x', 'plan-y'], rewardType: 'DURATION' });
-    const user = makeUser({ hasAnySubscriptions: true });
-    const subs = [makeSubscription('plan-a')] as UserSubscriptionInfo[];
-    const result = service.validateForActivation(promo, user, subs, 0, false);
-    assert.equal(result, 'PLAN_NOT_ELIGIBLE');
-  });
-
-  it('allows promo when allowedPlanIds includes one of the user plan ids', () => {
-    const promo = makePromoCode({ allowedPlanIds: ['plan-x'], rewardType: 'DURATION' });
-    const user = makeUser({ hasAnySubscriptions: true });
-    const subs = [makeSubscription('plan-x')] as UserSubscriptionInfo[];
-    const result = service.validateForActivation(promo, user, subs, 0, false);
-    assert.equal(result, null);
-  });
-
-  it('allows promo when allowedPlanIds is empty (no plan restriction)', () => {
-    const promo = makePromoCode({ allowedPlanIds: [], rewardType: 'DURATION' });
-    const user = makeUser({ hasAnySubscriptions: true });
-    const subs = [makeSubscription('plan-any')] as UserSubscriptionInfo[];
-    const result = service.validateForActivation(promo, user, subs, 0, false);
-    assert.equal(result, null);
-  });
-
-  // --- SUBSCRIPTION_REQUIRED ---
-
-  it('returns SUBSCRIPTION_REQUIRED for DURATION type when user has no subscriptions', () => {
-    const promo = makePromoCode({ rewardType: 'DURATION' });
-    const user = makeUser({ hasAnySubscriptions: false });
-    const result = service.validateForActivation(promo, user, [], 0, false);
-    assert.equal(result, 'SUBSCRIPTION_REQUIRED');
-  });
-
-  it('allows DURATION type when user has at least one subscription', () => {
-    const promo = makePromoCode({ rewardType: 'DURATION' });
-    const user = makeUser({ hasAnySubscriptions: true });
-    const subs = [makeSubscription()] as UserSubscriptionInfo[];
-    const result = service.validateForActivation(promo, user, subs, 0, false);
-    assert.equal(result, null);
-  });
-
-  it('does NOT require subscription for PERSONAL_DISCOUNT type', () => {
-    const promo = makePromoCode({ rewardType: 'PERSONAL_DISCOUNT' });
-    const user = makeUser({ hasAnySubscriptions: false });
-    const result = service.validateForActivation(promo, user, [], 0, false);
-    assert.equal(result, null);
-  });
-
-  it('does NOT require subscription for PURCHASE_DISCOUNT type', () => {
-    const promo = makePromoCode({ rewardType: 'PURCHASE_DISCOUNT' });
-    const user = makeUser({ hasAnySubscriptions: false });
-    const result = service.validateForActivation(promo, user, [], 0, false);
-    assert.equal(result, null);
-  });
-
-  it('returns SUBSCRIPTION_REQUIRED for DEVICES type when user has no subscriptions', () => {
-    const promo = makePromoCode({ rewardType: 'DEVICES' });
-    const user = makeUser({ hasAnySubscriptions: false });
-    const result = service.validateForActivation(promo, user, [], 0, false);
-    assert.equal(result, 'SUBSCRIPTION_REQUIRED');
-  });
-
-  it('returns SUBSCRIPTION_REQUIRED for TRAFFIC type when user has no subscriptions', () => {
-    const promo = makePromoCode({ rewardType: 'TRAFFIC' });
-    const user = makeUser({ hasAnySubscriptions: false });
-    const result = service.validateForActivation(promo, user, [], 0, false);
-    assert.equal(result, 'SUBSCRIPTION_REQUIRED');
-  });
-
-  // --- Short-circuit order ---
-
-  it('short-circuits at INACTIVE before checking expiry', () => {
-    const pastDate = new Date(Date.now() - 86400000);
-    const promo = makePromoCode({ isActive: false, expiresAt: pastDate });
-    const user = makeUser();
-    const result = service.validateForActivation(promo, user, [], 0, false);
-    assert.equal(result, 'INACTIVE');
-  });
-
-  it('short-circuits at EXPIRED before checking depletion', () => {
-    const pastDate = new Date(Date.now() - 86400000);
-    const promo = makePromoCode({ isActive: true, expiresAt: pastDate, maxActivations: 1 });
-    const user = makeUser();
-    const result = service.validateForActivation(promo, user, [], 999, false);
-    assert.equal(result, 'EXPIRED');
-  });
-
-  // --- hasRemainingUses ---
-
-  describe('hasRemainingUses', () => {
-    it('returns false when promo code is inactive', () => {
-      const promo = makePromoCode({ isActive: false });
-      assert.equal(service.hasRemainingUses(promo, 0), false);
+    const result = await service.validate(' promo ', {
+      userId: 'user-1',
+      userTelegramId: BigInt('123456789'),
+      isInvitedUser: false,
+      hasActiveSubscriptions: false,
     });
 
-    it('returns false when promo code is expired', () => {
-      const promo = makePromoCode({ isActive: true, expiresAt: new Date(Date.now() - 86400000) });
-      assert.equal(service.hasRemainingUses(promo, 0), false);
+    assert.equal(result.success, true);
+    if (result.success) {
+      assert.equal(result.promocode.code, 'PROMO');
+      assert.deepStrictEqual(result.promocode.allowedTelegramIds, ['123456789']);
+    }
+    assert.deepStrictEqual(findUniqueArgs, {
+      where: { code: 'PROMO' },
+      include: { _count: { select: { activations: true } } },
     });
+    assert.deepStrictEqual(activationCountArgs, {
+      where: { promocodeId: 'promo-1', userId: 'user-1' },
+    });
+  });
 
-    it('returns false when activations are at maxActivations', () => {
-      const promo = makePromoCode({ isActive: true, maxActivations: 5 });
-      assert.equal(service.hasRemainingUses(promo, 5), false);
-    });
+  it('returns bounded failure codes without mutating state', async () => {
+    const service = new PromocodeValidationService({
+      promocode: {
+        findUnique: async () => createRecord({ availability: PromocodeAvailability.ALLOWED }),
+      },
+      promocodeActivation: { count: async () => 0 },
+    } as never);
 
-    it('returns true when promo is active, not expired, and not depleted', () => {
-      const promo = makePromoCode({ isActive: true, maxActivations: 10 });
-      assert.equal(service.hasRemainingUses(promo, 3), true);
-    });
+    assert.deepStrictEqual(await service.validate('', {
+      userId: 'user-1',
+      userTelegramId: null,
+      isInvitedUser: false,
+      hasActiveSubscriptions: false,
+    }), { success: false, errorCode: 'NOT_FOUND', messageKey: 'ntf-promocode-not-found' });
+    assert.deepStrictEqual(await service.validate('PROMO', {
+      userId: 'user-1',
+      userTelegramId: null,
+      isInvitedUser: false,
+      hasActiveSubscriptions: false,
+    }), { success: false, errorCode: 'NOT_AVAILABLE_FOR_USER', messageKey: 'ntf-promocode-not-available' });
+  });
 
-    it('returns true for null maxActivations (unlimited)', () => {
-      const promo = makePromoCode({ isActive: true, maxActivations: null });
-      assert.equal(service.hasRemainingUses(promo, 9999), true);
+  it('resolves eligible and target subscriptions using active ownership and plan filters', async () => {
+    const subscriptionFindManyArgs: unknown[] = [];
+    const service = new PromocodeValidationService({
+      subscription: {
+        findMany: async (args: unknown) => {
+          subscriptionFindManyArgs.push(args);
+          return [
+            { id: 'sub-allowed', planSnapshot: { id: 'plan-allowed' } },
+            { id: 'sub-other', planSnapshot: { id: 'plan-other' } },
+          ];
+        },
+        findUnique: async ({ where }: { readonly where: { readonly id: string } }) => {
+          if (where.id === 'sub-allowed') {
+            return {
+              id: 'sub-allowed',
+              userId: 'user-1',
+              status: SubscriptionStatus.ACTIVE,
+              planSnapshot: { id: 'plan-allowed' },
+            };
+          }
+          return {
+            id: where.id,
+            userId: 'other-user',
+            status: SubscriptionStatus.ACTIVE,
+            planSnapshot: { id: 'plan-allowed' },
+          };
+        },
+      },
+    } as never);
+    const promocode = createPromocode({ allowedPlanIds: ['plan-allowed'] });
+
+    assert.deepStrictEqual(await service.getEligibleSubscriptionIds({ userId: 'user-1', promocode }), ['sub-allowed']);
+    assert.deepStrictEqual(await service.resolveTargetSubscription({ userId: 'user-1', targetSubscriptionId: 'sub-allowed', promocode }), {
+      subscriptionId: 'sub-allowed',
+      errorCode: null,
     });
+    assert.deepStrictEqual(await service.resolveTargetSubscription({ userId: 'user-1', targetSubscriptionId: 'foreign-sub', promocode }), {
+      subscriptionId: null,
+      errorCode: 'SUBSCRIPTION_FOREIGN',
+    });
+    assert.deepStrictEqual(subscriptionFindManyArgs, [{
+      where: { userId: 'user-1', status: SubscriptionStatus.ACTIVE },
+      select: { id: true, planSnapshot: true },
+    }]);
   });
 });

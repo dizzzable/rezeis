@@ -135,7 +135,7 @@ describe('PaymentOpsAlertService Telegram delivery', () => {
           return of({ data: { ok: true } });
         },
       } as never,
-      { botToken: 'bot-token', adminPublicBaseUrl: 'https://admin.example.internal' } as never,
+      { botToken: 'bot-token', domain: 'https://admin.example.internal' } as never,
     );
 
     await service.notifyWebhookReplay({

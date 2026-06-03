@@ -7,16 +7,23 @@ import { ConfigType } from '@nestjs/config';
 import { NestFactory } from '@nestjs/core';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
-import helmet from 'helmet';
 
 import { AppModule } from './app.module';
 import { appConfig } from './common/config/app.config';
 import { AdminSafeExceptionFilter } from './common/filters/admin-safe-exception.filter';
+import { shouldEnableApiDocs } from './common/http/api-docs';
+import { configureBoundedBodyParsers } from './common/http/body-parser-limits';
+import { buildCorsOptions } from './common/http/cors-origin';
+import { configureHttpRuntimeMiddleware } from './common/http/configure-http-runtime';
 import { RequestTimeoutMiddleware } from './common/middleware/request-timeout.middleware';
+import { configureBigIntJsonSerialization } from './common/runtime/bigint-json';
 import { SystemLogsService } from './modules/system-logs/services/system-logs.service';
+
+configureBigIntJsonSerialization();
 
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
+    bodyParser: false,
     rawBody: true,
     bufferLogs: true,
   });
@@ -30,36 +37,17 @@ async function bootstrap(): Promise<void> {
   const port: number = appConfiguration.port;
   const host: string = appConfiguration.host;
 
-  // helmet — keep most defaults but disable CSP entirely. The admin panel
-  // is JWT-protected and ships hashed Vite chunks, but several vendored
-  // chunks (`@tanstack/react-query`, `zod`, etc.) use `new Function`,
-  // which the default helmet CSP blocks via `script-src`. Browser console
-  // floods with "Content Security Policy of your site blocks the use of
-  // 'eval' in JavaScript". X-Frame, HSTS, X-Content-Type-Options stay on.
-  app.use(
-    helmet({
-      contentSecurityPolicy: false,
-      crossOriginEmbedderPolicy: false,
-      crossOriginResourcePolicy: { policy: 'cross-origin' },
-    }),
-  );
+  configureBoundedBodyParsers(app);
+  configureHttpRuntimeMiddleware(app, {
+    nodeEnv: process.env.NODE_ENV,
+    trustProxy: appConfiguration.trustProxy,
+  });
   // Request timeout middleware — 30s default, 120s for uploads/downloads
   const timeoutMiddleware = new RequestTimeoutMiddleware();
   app.use((req: unknown, res: unknown, next: unknown) =>
     timeoutMiddleware.use(req as never, res as never, next as never),
   );
-  // Trust the first proxy hop so `req.ip` reflects the real client IP
-  // when rezeis-admin runs behind nginx / Caddy in docker-compose.
-  // The `BlockedIpGuard` and audit log rely on this for accurate IPs.
-  const httpAdapter = app.getHttpAdapter().getInstance() as { set?: (key: string, value: unknown) => void };
-  if (typeof httpAdapter.set === 'function') {
-    httpAdapter.set('trust proxy', 1);
-  }
-  app.enableCors({
-    origin: true,
-    credentials: true,
-    methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE'],
-  });
+  app.enableCors(buildCorsOptions(appConfiguration.corsOrigins));
   app.setGlobalPrefix('api');
   // Serve admin-side uploads (currently FAQ photos/videos) under
   // `/uploads/*`. Files live on disk in `data/uploads/<feature>/...`
@@ -86,14 +74,16 @@ async function bootstrap(): Promise<void> {
   app.useGlobalFilters(new AdminSafeExceptionFilter());
   app.enableShutdownHooks();
 
-  const swaggerConfiguration = new DocumentBuilder()
-    .setTitle('Rezeis Admin API')
-    .setDescription('Internal API surface for Rezeis Admin')
-    .setVersion('1.0.0')
-    .addBearerAuth({ type: 'http', scheme: 'bearer', bearerFormat: 'JWT' }, 'JWT')
-    .build();
-  const swaggerDocument = SwaggerModule.createDocument(app, swaggerConfiguration);
-  SwaggerModule.setup('api/docs', app, swaggerDocument);
+  if (shouldEnableApiDocs({ docsEnabled: appConfiguration.docsEnabled, nodeEnv: process.env.NODE_ENV })) {
+    const swaggerConfiguration = new DocumentBuilder()
+      .setTitle('Rezeis Admin API')
+      .setDescription('Internal API surface for Rezeis Admin')
+      .setVersion('1.0.0')
+      .addBearerAuth({ type: 'http', scheme: 'bearer', bearerFormat: 'JWT' }, 'JWT')
+      .build();
+    const swaggerDocument = SwaggerModule.createDocument(app, swaggerConfiguration);
+    SwaggerModule.setup('api/docs', app, swaggerDocument);
+  }
 
   await app.listen(port, host);
 }

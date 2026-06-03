@@ -1,5 +1,9 @@
 # Reverse proxies for the rezeis panel
 
+This root `deploy/proxies` tree is the canonical proxy documentation for the
+repository. The older `rezeis-admin/deploy/proxies` tree is kept only as a
+legacy/reference copy and should not be used for new deployments.
+
 These stacks put a TLS-terminating reverse proxy in front of the rezeis
 admin panel, following the same patterns the Remnawave panel uses
 (<https://docs.rw/docs/install/reverse-proxies/>). The panel container
@@ -51,6 +55,8 @@ DNS-01 on another machine). Just name the files `fullchain.pem` +
   `ports`). The proxy is the single public surface.
 - Every proxy stack joins the **external** `remnawave-network`, so it
   resolves `rezeis` by its compose service name.
+- Postgres and Redis stay on the rezeis compose stack's private internal
+  network; proxy/Reiwa-facing containers do not need direct DB/Redis access.
 - The same proxy can also route the Remnawave panel itself
   (`remnawave:3000`) and the reiwa user app (`reiwa-web:80`) — add extra
   `server` / router blocks for those hostnames if you run them together.
@@ -84,6 +90,9 @@ DNS-01 on another machine). Just name the files `fullchain.pem` +
 | **angie**        | nginx-syntax, same TLS profile                            |
 | **traefik**      | file-driven; BYO cert via dynamic `tls` provider          |
 | **try-cloudflare** | dev/demo only — outbound Quick Tunnel, **never prod**   |
+
+Traefik uses only the file provider and does not mount the Docker socket. Its
+dashboard and debug API are disabled by default.
 
 All HTTPS stacks also ship a stealth default server: connections that hit
 the IP without the right SNI get a TLS reject / `204`, so the panel

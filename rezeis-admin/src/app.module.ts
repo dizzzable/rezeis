@@ -17,6 +17,8 @@ import { paymentsConfig } from './common/config/payments.config';
 import { remnawaveConfig } from './common/config/remnawave.config';
 import { redisConfig } from './common/config/redis.config';
 import { webhookConfig } from './common/config/webhook.config';
+import { OutboundHttpModule } from './common/http/outbound-http.module';
+import { AppLifecycleLogger } from './common/lifecycle/app-lifecycle.logger';
 import { PrismaModule } from './common/prisma/prisma.module';
 import { RawCacheModule } from './common/cache/raw-cache.module';
 import { QueueModule } from './common/queue/queue.module';
@@ -82,6 +84,7 @@ import { WebhooksModule } from './modules/webhooks/webhooks.module';
       validate: validateEnvironment,
       load: [appConfig, authConfig, databaseConfig, emailConfig, paymentsConfig, redisConfig, remnawaveConfig, webhookConfig],
     }),
+    OutboundHttpModule,
     ServeStaticModule.forRoot({
       rootPath: join(__dirname, '..', 'web'),
       renderPath: /^(?!\/api\/)(?!\/uploads\/).*/,
@@ -158,6 +161,7 @@ import { WebhooksModule } from './modules/webhooks/webhooks.module';
   controllers: [AppController],
   providers: [
     AppService,
+    AppLifecycleLogger,
     /**
      * Global IP blocklist. Wired as `APP_GUARD` so it runs before any
      * controller-specific guards — even before `AdminJwtAuthGuard`.

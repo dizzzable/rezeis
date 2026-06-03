@@ -1,132 +1,103 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { PromoCode, PromoCodeAvailability } from '@prisma/client';
 
-import { mapPromoCodeRecord } from '../src/modules/promocodes/utils/plan-record.util';
+import {
+  Prisma,
+  Promocode,
+  PromocodeAvailability,
+  PromocodeRewardType,
+} from '@prisma/client';
 
-function makePromoCode(overrides: Partial<PromoCode> = {}): PromoCode {
+import {
+  mapPromocode,
+  parsePromocodePlanSnapshot,
+} from '../src/modules/promocodes/utils/promocode-mappers.util';
+
+type PromocodeWithCount = Promocode & {
+  readonly _count?: { readonly activations: number };
+};
+
+function makePromocode(overrides: Partial<PromocodeWithCount> = {}): PromocodeWithCount {
   return {
-    id: 'pc-1',
-    code: 'SUMMER2024',
-    codeNormalized: 'SUMMER2024',
-    planSnapshot: null,
+    id: 'promo-1',
+    code: 'SUMMER2026',
     isActive: true,
-    availability: 'ALL',
-    rewardType: 'SUBSCRIPTION',
-    rewardValue: 30,
+    availability: PromocodeAvailability.ALL,
+    rewardType: PromocodeRewardType.SUBSCRIPTION,
+    reward: 30,
+    plan: null,
+    lifetime: null,
     maxActivations: 100,
-    expiresAt: null,
-    allowedUserIds: [],
-    allowedPlanIds: [],
-    createdAt: new Date('2024-01-01T00:00:00.000Z'),
-    updatedAt: new Date('2024-01-01T00:00:00.000Z'),
+    allowedTelegramIds: [BigInt('1001'), BigInt('1002')],
+    allowedPlanIds: ['plan-a', 'plan-b'],
+    createdAt: new Date('2026-01-01T00:00:00.000Z'),
+    updatedAt: new Date('2026-01-02T00:00:00.000Z'),
+    _count: { activations: 5 },
     ...overrides,
-  } as PromoCode;
+  } as PromocodeWithCount;
 }
 
-describe('mapPromoCodeRecord', () => {
-  it('maps all promo code fields from database record', () => {
-    const promo = makePromoCode();
-    const result = mapPromoCodeRecord(promo, 5);
+describe('promocode mappers', () => {
+  it('maps current promocode records to the public controller contract', () => {
+    const result = mapPromocode(makePromocode());
 
-    assert.equal(result.id, 'pc-1');
-    assert.equal(result.code, 'SUMMER2024');
-    assert.equal(result.codeNormalized, 'SUMMER2024');
-    assert.equal(result.isActive, true);
-    assert.equal(result.availability, 'ALL');
-    assert.equal(result.rewardType, 'SUBSCRIPTION');
-    assert.equal(result.rewardValue, 30);
-    assert.equal(result.maxActivations, 100);
-  });
-
-  it('computes remainingUses as maxActivations minus activationsCount', () => {
-    const promo = makePromoCode({ maxActivations: 100 });
-    const result = mapPromoCodeRecord(promo, 25);
-
-    assert.equal(result.remainingUses, 75);
-  });
-
-  it('computes remainingUses as 0 when activationsCount equals maxActivations', () => {
-    const promo = makePromoCode({ maxActivations: 10 });
-    const result = mapPromoCodeRecord(promo, 10);
-
-    assert.equal(result.remainingUses, 0);
-  });
-
-  it('sets remainingUses to null when maxActivations is null (unlimited)', () => {
-    const promo = makePromoCode({ maxActivations: null });
-    const result = mapPromoCodeRecord(promo, 999);
-
-    assert.equal(result.remainingUses, null);
-  });
-
-  it('sets remainingUses to null when maxActivations is null (no activations)', () => {
-    const promo = makePromoCode({ maxActivations: null });
-    const result = mapPromoCodeRecord(promo, 0);
-
-    assert.equal(result.remainingUses, null);
-  });
-
-  it('converts expiresAt to ISO string when set', () => {
-    const expiresAt = new Date('2024-12-31T23:59:59.000Z');
-    const promo = makePromoCode({ expiresAt });
-    const result = mapPromoCodeRecord(promo, 0);
-
-    assert.equal(result.expiresAt, '2024-12-31T23:59:59.000Z');
-  });
-
-  it('sets expiresAt to null when expiresAt is null', () => {
-    const promo = makePromoCode({ expiresAt: null });
-    const result = mapPromoCodeRecord(promo, 0);
-
-    assert.equal(result.expiresAt, null);
-  });
-
-  it('converts createdAt and updatedAt to ISO strings', () => {
-    const promo = makePromoCode({
-      createdAt: new Date('2024-03-15T10:30:00.000Z'),
-      updatedAt: new Date('2024-04-20T12:00:00.000Z'),
+    assert.deepStrictEqual(result, {
+      id: 'promo-1',
+      code: 'SUMMER2026',
+      isActive: true,
+      availability: PromocodeAvailability.ALL,
+      rewardType: PromocodeRewardType.SUBSCRIPTION,
+      reward: 30,
+      plan: null,
+      lifetime: null,
+      maxActivations: 100,
+      allowedTelegramIds: ['1001', '1002'],
+      allowedPlanIds: ['plan-a', 'plan-b'],
+      activationsCount: 5,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-02T00:00:00.000Z',
     });
-    const result = mapPromoCodeRecord(promo, 0);
-
-    assert.equal(result.createdAt, '2024-03-15T10:30:00.000Z');
-    assert.equal(result.updatedAt, '2024-04-20T12:00:00.000Z');
   });
 
-  it('maps allowedUserIds as readonly array', () => {
-    const promo = makePromoCode({ allowedUserIds: ['user-1', 'user-2'] });
-    const result = mapPromoCodeRecord(promo, 0);
-
-    assert.deepStrictEqual(result.allowedUserIds, ['user-1', 'user-2']);
-  });
-
-  it('maps allowedPlanIds as readonly array', () => {
-    const promo = makePromoCode({ allowedPlanIds: ['plan-a', 'plan-b'] });
-    const result = mapPromoCodeRecord(promo, 0);
-
-    assert.deepStrictEqual(result.allowedPlanIds, ['plan-a', 'plan-b']);
-  });
-
-  it('records activationsCount correctly', () => {
-    const promo = makePromoCode({ maxActivations: 50 });
-    const result = mapPromoCodeRecord(promo, 42);
-
-    assert.equal(result.activationsCount, 42);
-    assert.equal(result.remainingUses, 8);
-  });
-
-  it('handles zero activations', () => {
-    const promo = makePromoCode({ maxActivations: 10 });
-    const result = mapPromoCodeRecord(promo, 0);
+  it('defaults missing activation counts to zero', () => {
+    const result = mapPromocode(makePromocode({ _count: undefined }));
 
     assert.equal(result.activationsCount, 0);
-    assert.equal(result.remainingUses, 10);
   });
 
-  it('maps non-ALL availability correctly', () => {
-    const promo = makePromoCode({ availability: 'NEW' as PromoCodeAvailability });
-    const result = mapPromoCodeRecord(promo, 0);
+  it('parses valid subscription reward plan snapshots defensively', () => {
+    const result = parsePromocodePlanSnapshot({
+      id: 'plan-1',
+      name: 'Premium',
+      type: 'BOTH',
+      trafficLimit: 1024,
+      deviceLimit: 5,
+      trafficLimitStrategy: 'NO_RESET',
+      internalSquads: ['squad-a', 42, 'squad-b'],
+      externalSquad: 'external-a',
+      duration: 30,
+      tag: 'recommended',
+      description: 'Premium plan',
+    } as Prisma.JsonObject);
 
-    assert.equal(result.availability, 'NEW');
+    assert.deepStrictEqual(result, {
+      id: 'plan-1',
+      name: 'Premium',
+      type: 'BOTH',
+      trafficLimit: 1024,
+      deviceLimit: 5,
+      trafficLimitStrategy: 'NO_RESET',
+      internalSquads: ['squad-a', 'squad-b'],
+      externalSquad: 'external-a',
+      duration: 30,
+      tag: 'recommended',
+      description: 'Premium plan',
+    });
+  });
+
+  it('returns null for malformed plan snapshot payloads', () => {
+    assert.equal(parsePromocodePlanSnapshot(null), null);
+    assert.equal(parsePromocodePlanSnapshot('not-json-object'), null);
+    assert.equal(parsePromocodePlanSnapshot({ name: 'Missing id' } as Prisma.JsonObject), null);
   });
 });

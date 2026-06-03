@@ -7,6 +7,7 @@ import { HttpService } from '@nestjs/axios';
 
 import { paymentsConfig } from '../../../common/config/payments.config';
 import { readGatewaySettings } from '../utils/payment-gateway-settings.util';
+import { normalizePaymentProviderError } from '../utils/payment-provider-error.util';
 import {
   buildResultUrl,
   buildWebhookUrl,
@@ -42,39 +43,46 @@ export class PaymentProviderExecutionService {
     readonly successUrl?: string | null;
     readonly failUrl?: string | null;
   }): Promise<ProviderCheckoutResult> {
-    switch (input.gateway.type) {
-      case PaymentGatewayType.YOOKASSA:
-        return this.createYookassaCheckout(input);
-      case PaymentGatewayType.PLATEGA:
-        return this.createPlategaCheckout(input);
-      case PaymentGatewayType.HELEKET:
-        return this.createHeleketCheckout(input);
-      case PaymentGatewayType.CRYPTOMUS:
-        return this.createCryptomusCheckout(input);
-      case PaymentGatewayType.MULENPAY:
-        return this.createMulenpayCheckout(input);
-      case PaymentGatewayType.TELEGRAM_STARS:
-        return this.createTelegramStarsCheckout(input);
-      case PaymentGatewayType.ANTILOPAY:
-        return this.createAntilopayCheckout(input);
-      case PaymentGatewayType.OVERPAY:
-        return this.createOverpayCheckout(input);
-      case PaymentGatewayType.PAYPALYCH:
-        return this.createPaypalychCheckout(input);
-      case PaymentGatewayType.RIOPAY:
-        return this.createRiopayCheckout(input);
-      case PaymentGatewayType.WATA:
-        return this.createWataCheckout(input);
-      case PaymentGatewayType.AURAPAY:
-        return this.createAurapayCheckout(input);
-      case PaymentGatewayType.ROLLYPAY:
-        return this.createRollypayCheckout(input);
-      case PaymentGatewayType.SEVERPAY:
-        return this.createSeverpayCheckout(input);
-      case PaymentGatewayType.LAVA:
-        return this.createLavaCheckout(input);
-      default:
-        throw new NotFoundException('Payment gateway not supported');
+    try {
+      switch (input.gateway.type) {
+        case PaymentGatewayType.YOOKASSA:
+          return await this.createYookassaCheckout(input);
+        case PaymentGatewayType.PLATEGA:
+          return await this.createPlategaCheckout(input);
+        case PaymentGatewayType.HELEKET:
+          return await this.createHeleketCheckout(input);
+        case PaymentGatewayType.CRYPTOMUS:
+          return await this.createCryptomusCheckout(input);
+        case PaymentGatewayType.MULENPAY:
+          return await this.createMulenpayCheckout(input);
+        case PaymentGatewayType.TELEGRAM_STARS:
+          return await this.createTelegramStarsCheckout(input);
+        case PaymentGatewayType.ANTILOPAY:
+          return await this.createAntilopayCheckout(input);
+        case PaymentGatewayType.OVERPAY:
+          return await this.createOverpayCheckout(input);
+        case PaymentGatewayType.PAYPALYCH:
+          return await this.createPaypalychCheckout(input);
+        case PaymentGatewayType.RIOPAY:
+          return await this.createRiopayCheckout(input);
+        case PaymentGatewayType.WATA:
+          return await this.createWataCheckout(input);
+        case PaymentGatewayType.AURAPAY:
+          return await this.createAurapayCheckout(input);
+        case PaymentGatewayType.ROLLYPAY:
+          return await this.createRollypayCheckout(input);
+        case PaymentGatewayType.SEVERPAY:
+          return await this.createSeverpayCheckout(input);
+        case PaymentGatewayType.LAVA:
+          return await this.createLavaCheckout(input);
+        default:
+          throw new NotFoundException('Payment gateway not supported');
+      }
+    } catch (error: unknown) {
+      if (error instanceof BadRequestException || error instanceof NotFoundException || error instanceof ServiceUnavailableException) {
+        throw error;
+      }
+      throw new ServiceUnavailableException(normalizePaymentProviderError(error));
     }
   }
 

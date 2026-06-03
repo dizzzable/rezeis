@@ -238,14 +238,18 @@ export async function revokeIssuedEmailVerificationChallenge(input: {
 
 // ── Error helpers ──────────────────────────────────────────────────────────
 
-export function attachRevokeFailureContext(primaryError: unknown, revokeError: unknown): unknown {
+export function attachRevokeFailureContext(primaryError: unknown, _revokeError: unknown): unknown {
   if (primaryError instanceof Error) {
+    const sanitizedRevokeFailure = 'ISSUED_CHALLENGE_REVOKE_FAILED';
     const errorWithContext = primaryError as Error & {
       revokeError?: unknown;
       suppressedErrors?: readonly unknown[];
     };
-    errorWithContext.revokeError = revokeError;
-    errorWithContext.suppressedErrors = [...(errorWithContext.suppressedErrors ?? []), revokeError];
+    errorWithContext.revokeError = sanitizedRevokeFailure;
+    errorWithContext.suppressedErrors = [
+      ...(errorWithContext.suppressedErrors ?? []),
+      sanitizedRevokeFailure,
+    ];
     return errorWithContext;
   }
   return primaryError;

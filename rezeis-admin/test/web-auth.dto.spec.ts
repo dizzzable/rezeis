@@ -1,64 +1,109 @@
+import 'reflect-metadata';
+
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { RegisterSchema } from '../src/modules/web-auth/dto/register.dto';
+import { plainToInstance } from 'class-transformer';
+import { validate } from 'class-validator';
 
-describe('RegisterSchema (DTO validation)', () => {
-  describe('username validation', () => {
-    it('accepts valid usernames (alphanumeric, hyphens, underscores, 3-32 chars)', () => {
-      const validUsernames = ['abc', 'user_name', 'my-user', 'User123', 'a'.repeat(32), 'A-B_c'];
-      for (const username of validUsernames) {
-        const result = RegisterSchema.safeParse({ username, passwordHash: 'a'.repeat(64) });
-        assert.ok(result.success, `Expected "${username}" to be valid, got: ${JSON.stringify(result.error?.issues)}`);
+import { WebAuthLoginDto } from '../src/modules/web-auth/dto/web-auth-login.dto';
+import { WebAuthRecoverDto } from '../src/modules/web-auth/dto/web-auth-recover.dto';
+import { WebAuthRegisterDto } from '../src/modules/web-auth/dto/web-auth-register.dto';
+
+describe('web-auth DTO validation', () => {
+  describe('WebAuthRegisterDto', () => {
+    it('accepts the current internal register payload contract', async () => {
+      const errors = await validateDto(WebAuthRegisterDto, {
+        login: 'User.Name-123',
+        password: 'correct horse battery staple',
+        email: 'user@example.com',
+        telegramIdToLink: '123456789',
+        referralCode: 'referrer-code',
+      });
+
+      assert.deepStrictEqual(errors, []);
+    });
+
+    it('rejects stale username/passwordHash register payloads', async () => {
+      const errors = await validateDto(WebAuthRegisterDto, {
+        username: 'valid-user',
+        passwordHash: 'a'.repeat(64),
+      });
+
+      assert.deepStrictEqual(readErrorProperties(errors), ['login', 'password']);
+    });
+
+    it('enforces login syntax and length on register payloads', async () => {
+      for (const login of ['ab', 'a'.repeat(65), 'user name', 'user@name', 'пользователь']) {
+        const errors = await validateDto(WebAuthRegisterDto, {
+          login,
+          password: 'valid-password',
+        });
+
+        assert.ok(errors.some((error) => error.property === 'login'), `Expected ${login} to fail`);
       }
     });
 
-    it('rejects usernames shorter than 3 characters', () => {
-      const result = RegisterSchema.safeParse({ username: 'ab', passwordHash: 'a'.repeat(64) });
-      assert.equal(result.success, false);
+    it('enforces plain password length instead of accepting pre-hashed passwords', async () => {
+      const tooShortErrors = await validateDto(WebAuthRegisterDto, {
+        login: 'valid-user',
+        password: 'short',
+      });
+      const tooLongErrors = await validateDto(WebAuthRegisterDto, {
+        login: 'valid-user',
+        password: 'a'.repeat(257),
+      });
+
+      assert.ok(tooShortErrors.some((error) => error.property === 'password'));
+      assert.ok(tooLongErrors.some((error) => error.property === 'password'));
     });
 
-    it('rejects usernames longer than 32 characters', () => {
-      const result = RegisterSchema.safeParse({ username: 'a'.repeat(33), passwordHash: 'a'.repeat(64) });
-      assert.equal(result.success, false);
-    });
+    it('validates optional email, telegram link, and referral fields when present', async () => {
+      const errors = await validateDto(WebAuthRegisterDto, {
+        login: 'valid-user',
+        password: 'valid-password',
+        email: 'not-an-email',
+        telegramIdToLink: 'not-numeric',
+        referralCode: '',
+      });
 
-    it('rejects usernames with invalid characters', () => {
-      const invalidUsernames = ['user name', 'user@name', 'user.name', 'user!', 'пользователь'];
-      for (const username of invalidUsernames) {
-        const result = RegisterSchema.safeParse({ username, passwordHash: 'a'.repeat(64) });
-        assert.equal(result.success, false, `Expected "${username}" to be invalid`);
-      }
+      assert.deepStrictEqual(readErrorProperties(errors), [
+        'email',
+        'referralCode',
+        'telegramIdToLink',
+      ]);
     });
   });
 
-  describe('passwordHash validation', () => {
-    it('accepts valid SHA-256 hex strings (64 lowercase hex chars)', () => {
-      const validHashes = [
-        'a'.repeat(64),
-        '0123456789abcdef'.repeat(4),
-        'deadbeef'.repeat(8),
-      ];
-      for (const passwordHash of validHashes) {
-        const result = RegisterSchema.safeParse({ username: 'valid-user', passwordHash });
-        assert.ok(result.success, `Expected hash to be valid: ${passwordHash.substring(0, 10)}...`);
-      }
+  describe('WebAuthLoginDto', () => {
+    it('accepts login plus plain password credentials', async () => {
+      const errors = await validateDto(WebAuthLoginDto, {
+        login: 'valid-user',
+        password: 'valid-password',
+      });
+
+      assert.deepStrictEqual(errors, []);
     });
+  });
 
-    it('rejects password hashes that are not 64 characters', () => {
-      const result = RegisterSchema.safeParse({ username: 'valid-user', passwordHash: 'a'.repeat(63) });
-      assert.equal(result.success, false);
+  describe('WebAuthRecoverDto', () => {
+    it('accepts only a bounded login lookup', async () => {
+      const validErrors = await validateDto(WebAuthRecoverDto, { login: 'valid-user' });
+      const invalidErrors = await validateDto(WebAuthRecoverDto, { login: 'ab' });
 
-      const result2 = RegisterSchema.safeParse({ username: 'valid-user', passwordHash: 'a'.repeat(65) });
-      assert.equal(result2.success, false);
-    });
-
-    it('rejects password hashes with non-hex characters', () => {
-      const result = RegisterSchema.safeParse({ username: 'valid-user', passwordHash: 'g'.repeat(64) });
-      assert.equal(result.success, false);
-
-      const result2 = RegisterSchema.safeParse({ username: 'valid-user', passwordHash: 'A'.repeat(64) });
-      assert.equal(result2.success, false);
+      assert.deepStrictEqual(validErrors, []);
+      assert.deepStrictEqual(readErrorProperties(invalidErrors), ['login']);
     });
   });
 });
+
+function validateDto<T extends object>(
+  dtoType: new () => T,
+  payload: Record<string, unknown>,
+): ReturnType<typeof validate> {
+  return validate(plainToInstance(dtoType, payload));
+}
+
+function readErrorProperties(errors: Awaited<ReturnType<typeof validate>>): readonly string[] {
+  return errors.map((error) => error.property).sort();
+}

@@ -3,204 +3,148 @@ import 'reflect-metadata';
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { RequestMethod } from '@nestjs/common';
-import { GUARDS_METADATA, METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
+import { HttpStatus, RequestMethod } from '@nestjs/common';
+import { HTTP_CODE_METADATA, METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 
-import { AdminJwtAuthGuard } from '../src/modules/auth/guards/admin-jwt-auth.guard';
 import { HealthController } from '../src/modules/health/health.controller';
 import { HealthService } from '../src/modules/health/health.service';
-import { QueueStatusService, QueueStatusSnapshot } from '../src/modules/health/queue-status.service';
+
+interface ComponentHealth {
+  readonly status: 'up' | 'down';
+  readonly latencyMs?: number;
+  readonly details?: string;
+}
 
 interface HealthResponse {
-  readonly status: string;
+  readonly status: 'ok' | 'degraded' | 'error';
   readonly service: string;
+  readonly version: string;
+  readonly gitSha: string | null;
   readonly timestamp: string;
-  readonly database: {
-    readonly status: string;
+  readonly uptime: number;
+  readonly components: {
+    readonly database: ComponentHealth;
+    readonly redis: ComponentHealth;
+    readonly queues: ComponentHealth;
+    readonly disk: ComponentHealth;
   };
 }
 
-interface ReadinessResponse {
-  readonly status: string;
-  readonly info: Record<string, { readonly status: string }>;
-  readonly error: Record<string, { readonly status: string }>;
-  readonly details: Record<string, { readonly status: string }>;
+interface CapturedResponse {
+  readonly statusCode: number | null;
+  readonly body: unknown;
 }
 
-const queueStatusService = {
-  getSnapshot: async (): Promise<QueueStatusSnapshot> => ({
-    generatedAt: '2026-04-16T10:01:00.000Z',
-    queues: [],
-  }),
-} as QueueStatusService;
+const healthySnapshot: HealthResponse = {
+  status: 'ok',
+  service: 'rezeis-admin',
+  version: '0.7.3',
+  gitSha: '0123456789abcdef0123456789abcdef01234567',
+  timestamp: '2026-06-03T10:00:00.000Z',
+  uptime: 12,
+  components: {
+    database: { status: 'up', latencyMs: 1 },
+    redis: { status: 'up', latencyMs: 1 },
+    queues: { status: 'up', details: 'waiting=0 active=0 failed=0' },
+    disk: { status: 'up' },
+  },
+};
 
 describe('HealthController', () => {
-  it('exposes the shipped health route contract', () => {
-    const actualControllerPath = Reflect.getMetadata(PATH_METADATA, HealthController) as string | undefined;
-    const actualGetHealthPath = Reflect.getMetadata(
-      PATH_METADATA,
-      HealthController.prototype.getHealth,
-    ) as string | undefined;
-    const actualGetHealthMethod = Reflect.getMetadata(
-      METHOD_METADATA,
-      HealthController.prototype.getHealth,
-    ) as RequestMethod | undefined;
-    const actualGetReadinessPath = Reflect.getMetadata(
-      PATH_METADATA,
-      HealthController.prototype.getReadiness,
-    ) as string | undefined;
-    const actualGetReadinessMethod = Reflect.getMetadata(
-      METHOD_METADATA,
-      HealthController.prototype.getReadiness,
-    ) as RequestMethod | undefined;
-    const actualGetQueueStatusPath = Reflect.getMetadata(
-      PATH_METADATA,
-      HealthController.prototype.getQueueStatus,
-    ) as string | undefined;
-    const actualGetQueueStatusMethod = Reflect.getMetadata(
-      METHOD_METADATA,
-      HealthController.prototype.getQueueStatus,
-    ) as RequestMethod | undefined;
-    const actualGetQueueStatusGuards = Reflect.getMetadata(
-      GUARDS_METADATA,
-      HealthController.prototype.getQueueStatus,
-    ) as readonly unknown[] | undefined;
-    assert.equal(actualControllerPath, 'health');
-    assert.equal(actualGetHealthPath, '/');
-    assert.equal(actualGetHealthMethod, RequestMethod.GET);
-    assert.equal(actualGetReadinessPath, 'readiness');
-    assert.equal(actualGetReadinessMethod, RequestMethod.GET);
-    assert.equal(actualGetQueueStatusPath, 'queues/status');
-    assert.equal(actualGetQueueStatusMethod, RequestMethod.GET);
-    assert.deepStrictEqual(actualGetQueueStatusGuards, [AdminJwtAuthGuard]);
+  it('exposes the current unauthenticated health, liveness, and readiness routes', () => {
+    assert.equal(Reflect.getMetadata(PATH_METADATA, HealthController), 'health');
+    assert.equal(Reflect.getMetadata(PATH_METADATA, HealthController.prototype.getHealth), '/');
+    assert.equal(Reflect.getMetadata(METHOD_METADATA, HealthController.prototype.getHealth), RequestMethod.GET);
+    assert.equal(Reflect.getMetadata(PATH_METADATA, HealthController.prototype.liveness), 'live');
+    assert.equal(Reflect.getMetadata(METHOD_METADATA, HealthController.prototype.liveness), RequestMethod.GET);
+    assert.equal(Reflect.getMetadata(HTTP_CODE_METADATA, HealthController.prototype.liveness), HttpStatus.OK);
+    assert.equal(Reflect.getMetadata(PATH_METADATA, HealthController.prototype.readiness), 'ready');
+    assert.equal(Reflect.getMetadata(METHOD_METADATA, HealthController.prototype.readiness), RequestMethod.GET);
   });
 
-  it('delegates getHealth and returns the response shape unchanged', async () => {
-    let getHealthCallsCount: number = 0;
-    const expectedResponse: HealthResponse = {
-      status: 'ok',
-      service: 'rezeis-admin',
-      timestamp: '2026-04-16T10:00:00.000Z',
-      database: {
-        status: 'up',
+  it('writes the full health snapshot with a service-unavailable status on critical failure', async () => {
+    const expectedSnapshot: HealthResponse = {
+      ...healthySnapshot,
+      status: 'error',
+      components: {
+        ...healthySnapshot.components,
+        database: { status: 'down', latencyMs: 2, details: 'database_unavailable' },
       },
     };
-    const healthService = {
-      getHealth: async (): Promise<HealthResponse> => {
-        getHealthCallsCount += 1;
-        return expectedResponse;
-      },
-      getReadiness: async (): Promise<ReadinessResponse> => ({
-        status: 'ok',
-        info: {},
-        error: {},
-        details: {},
-      }),
-    } as HealthService;
-    const controller = new HealthController(healthService, queueStatusService);
-    const actualResponse = await controller.getHealth();
-    assert.equal(getHealthCallsCount, 1);
-    assert.deepStrictEqual(actualResponse, expectedResponse);
-    assert.deepStrictEqual(Object.keys(actualResponse).sort(), [
-      'database',
-      'service',
-      'status',
-      'timestamp',
-    ]);
-    assert.deepStrictEqual(Object.keys(actualResponse.database), ['status']);
+    const controller = new HealthController(createHealthService(expectedSnapshot));
+    const captured = createResponseCapture();
+
+    await controller.getHealth(captured.response as never);
+
+    assert.equal(captured.result.statusCode, HttpStatus.SERVICE_UNAVAILABLE);
+    assert.deepStrictEqual(captured.result.body, expectedSnapshot);
   });
 
-  it('delegates getReadiness and returns the Terminus-compatible response shape unchanged', async () => {
-    let getReadinessCallsCount: number = 0;
-    const expectedResponse: ReadinessResponse = {
-      status: 'ok',
-      info: {
-        database: {
-          status: 'up',
-        },
-      },
-      error: {},
-      details: {
-        database: {
-          status: 'up',
-        },
-      },
-    };
-    const healthService = {
-      getHealth: async (): Promise<HealthResponse> => ({
-        status: 'ok',
-        service: 'rezeis-admin',
-        timestamp: '2026-04-16T10:00:00.000Z',
-        database: {
-          status: 'up',
-        },
-      }),
-      getReadiness: async (): Promise<ReadinessResponse> => {
-        getReadinessCallsCount += 1;
-        return expectedResponse;
-      },
-    } as HealthService;
-    const controller = new HealthController(healthService, queueStatusService);
-    const actualResponse = await controller.getReadiness();
-    assert.equal(getReadinessCallsCount, 1);
-    assert.deepStrictEqual(actualResponse, expectedResponse);
-    assert.deepStrictEqual(Object.keys(actualResponse).sort(), ['details', 'error', 'info', 'status']);
-    assert.deepStrictEqual(Object.keys(actualResponse.details), ['database']);
+  it('returns ok liveness without touching dependencies', () => {
+    const controller = new HealthController(createHealthService(healthySnapshot));
+
+    assert.deepStrictEqual(controller.liveness(), { status: 'ok' });
   });
 
-  it('delegates getQueueStatus and returns only redacted queue snapshot shape', async () => {
-    let getSnapshotCallsCount: number = 0;
-    const expectedSnapshot: QueueStatusSnapshot = {
-      generatedAt: '2026-04-16T10:02:00.000Z',
-      queues: [
-        {
-          label: 'paymentReconciliationQueue',
-          counts: {
-            waiting: 2,
-            active: 1,
-            delayed: 0,
-            completed: 5,
-            failed: 1,
-          },
-        },
-      ],
-    };
-    const healthService = {
-      getHealth: async (): Promise<HealthResponse> => ({
-        status: 'ok',
-        service: 'rezeis-admin',
-        timestamp: '2026-04-16T10:00:00.000Z',
-        database: {
-          status: 'up',
+  it('writes a compact ready response when database and Redis are up', async () => {
+    const controller = new HealthController(createHealthService(healthySnapshot));
+    const captured = createResponseCapture();
+
+    await controller.readiness(captured.response as never);
+
+    assert.equal(captured.result.statusCode, HttpStatus.OK);
+    assert.deepStrictEqual(captured.result.body, {
+      status: 'ready',
+      database: 'up',
+      redis: 'up',
+    });
+  });
+
+  it('writes not_ready when a critical dependency is down', async () => {
+    const controller = new HealthController(
+      createHealthService({
+        ...healthySnapshot,
+        status: 'error',
+        components: {
+          ...healthySnapshot.components,
+          redis: { status: 'down', latencyMs: 2, details: 'redis_unavailable' },
         },
       }),
-      getReadiness: async (): Promise<ReadinessResponse> => ({
-        status: 'ok',
-        info: {},
-        error: {},
-        details: {},
-      }),
-    } as HealthService;
-    const localQueueStatusService = {
-      getSnapshot: async (): Promise<QueueStatusSnapshot> => {
-        getSnapshotCallsCount += 1;
-        return expectedSnapshot;
-      },
-    } as QueueStatusService;
-    const controller = new HealthController(healthService, localQueueStatusService);
+    );
+    const captured = createResponseCapture();
 
-    const actualResponse = await controller.getQueueStatus();
+    await controller.readiness(captured.response as never);
 
-    assert.equal(getSnapshotCallsCount, 1);
-    assert.deepStrictEqual(actualResponse, expectedSnapshot);
-    assert.deepStrictEqual(Object.keys(actualResponse).sort(), ['generatedAt', 'queues']);
-    assert.deepStrictEqual(Object.keys(actualResponse.queues[0]).sort(), ['counts', 'label']);
-    assert.deepStrictEqual(Object.keys(actualResponse.queues[0].counts).sort(), [
-      'active',
-      'completed',
-      'delayed',
-      'failed',
-      'waiting',
-    ]);
+    assert.equal(captured.result.statusCode, HttpStatus.SERVICE_UNAVAILABLE);
+    assert.deepStrictEqual(captured.result.body, {
+      status: 'not_ready',
+      database: 'up',
+      redis: 'down',
+    });
   });
 });
+
+function createHealthService(snapshot: HealthResponse): HealthService {
+  return {
+    getHealth: async (): Promise<HealthResponse> => snapshot,
+  } as HealthService;
+}
+
+function createResponseCapture(): {
+  readonly response: { status: (statusCode: number) => { json: (body: unknown) => void } };
+  readonly result: CapturedResponse;
+} {
+  const result: { statusCode: number | null; body: unknown } = { statusCode: null, body: undefined };
+  const response = {
+    status(statusCode: number) {
+      result.statusCode = statusCode;
+      return {
+        json(body: unknown) {
+          result.body = body;
+        },
+      };
+    },
+  };
+
+  return { response, result };
+}

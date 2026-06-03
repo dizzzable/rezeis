@@ -1,6 +1,6 @@
-import { HttpModule } from '@nestjs/axios';
 import { Module } from '@nestjs/common';
 
+import { OutboundHttpModule } from '../../common/http/outbound-http.module';
 import { AuthModule } from '../auth/auth.module';
 import { AdminUpdateCheckerController, InternalUpdateCheckerController } from './controllers/admin-update-checker.controller';
 import { UpdateCheckerService } from './services/update-checker.service';
@@ -18,7 +18,7 @@ import { UpdateCheckerService } from './services/update-checker.service';
  * `REZEIS_REIWA_UPDATE_REPO` to also surface reiwa's latest release.
  */
 @Module({
-  imports: [AuthModule, HttpModule],
+  imports: [AuthModule, OutboundHttpModule],
   controllers: [AdminUpdateCheckerController, InternalUpdateCheckerController],
   providers: [UpdateCheckerService],
   exports: [UpdateCheckerService],

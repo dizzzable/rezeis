@@ -6,141 +6,183 @@ import { describe, it } from 'node:test';
 import { RequestMethod } from '@nestjs/common';
 import { GUARDS_METADATA, METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 
-import { InternalApiGuard } from '../src/common/guards/internal-api.guard';
-import { WebAuthController } from '../src/modules/web-auth/web-auth.controller';
-import { WebAuthService } from '../src/modules/web-auth/web-auth.service';
+import { InternalAdminAuthGuard } from '../src/modules/auth/guards/internal-admin-auth.guard';
+import { InternalWebAuthController } from '../src/modules/web-auth/controllers/internal-web-auth.controller';
+import { BotSigninConsumeDto } from '../src/modules/web-auth/dto/bot-signin-consume.dto';
+import { BotSigninIssueDto } from '../src/modules/web-auth/dto/bot-signin-issue.dto';
+import { WebAuthChangePasswordDto } from '../src/modules/web-auth/dto/web-auth-change-password.dto';
+import { WebAuthCheckLoginDto } from '../src/modules/web-auth/dto/web-auth-check-login.dto';
+import { WebAuthLoginDto } from '../src/modules/web-auth/dto/web-auth-login.dto';
+import { WebAuthRecoverDto } from '../src/modules/web-auth/dto/web-auth-recover.dto';
+import { WebAuthRegisterDto } from '../src/modules/web-auth/dto/web-auth-register.dto';
+import { BotSigninTokenService } from '../src/modules/web-auth/services/bot-signin-token.service';
+import { WebAuthService } from '../src/modules/web-auth/services/web-auth.service';
 
-describe('WebAuthController', () => {
-  it('is mounted at internal/web-auth path', () => {
-    const controllerPath = Reflect.getMetadata(PATH_METADATA, WebAuthController) as string | undefined;
-    assert.equal(controllerPath, 'internal/web-auth');
+describe('InternalWebAuthController', () => {
+  it('exposes the current internal web-auth route contract', () => {
+    assert.equal(Reflect.getMetadata(PATH_METADATA, InternalWebAuthController), 'internal/web-auth');
+    assertPostRoute('register', InternalWebAuthController.prototype.register);
+    assertPostRoute('check-login', InternalWebAuthController.prototype.checkLogin);
+    assertPostRoute('login', InternalWebAuthController.prototype.login);
+    assertPostRoute('recover', InternalWebAuthController.prototype.recover);
+    assertPostRoute('change-password', InternalWebAuthController.prototype.changePassword);
+    assertPostRoute('bot-signin/issue', InternalWebAuthController.prototype.issueBotSigninToken);
+    assertPostRoute('bot-signin/consume', InternalWebAuthController.prototype.consumeBotSigninToken);
   });
 
-  it('register endpoint is POST at "register" path', () => {
-    const registerPath = Reflect.getMetadata(
-      PATH_METADATA,
-      WebAuthController.prototype.register,
-    ) as string | undefined;
-    const registerMethod = Reflect.getMetadata(
-      METHOD_METADATA,
-      WebAuthController.prototype.register,
-    ) as RequestMethod | undefined;
-    assert.equal(registerPath, 'register');
-    assert.equal(registerMethod, RequestMethod.POST);
+  it('requires internal admin API-token auth at controller level', () => {
+    const actualGuards = Reflect.getMetadata(GUARDS_METADATA, InternalWebAuthController) as
+      | readonly unknown[]
+      | undefined;
+
+    assert.deepStrictEqual(actualGuards, [InternalAdminAuthGuard]);
   });
 
-  it('login endpoint is POST at "login" path', () => {
-    const loginPath = Reflect.getMetadata(
-      PATH_METADATA,
-      WebAuthController.prototype.login,
-    ) as string | undefined;
-    const loginMethod = Reflect.getMetadata(
-      METHOD_METADATA,
-      WebAuthController.prototype.login,
-    ) as RequestMethod | undefined;
-    assert.equal(loginPath, 'login');
-    assert.equal(loginMethod, RequestMethod.POST);
-  });
-
-  it('uses InternalApiGuard at the controller level', () => {
-    const guards = Reflect.getMetadata(GUARDS_METADATA, WebAuthController) as readonly unknown[] | undefined;
-    assert.ok(guards, 'Expected guards metadata to be defined');
-    assert.ok(guards.includes(InternalApiGuard), 'Expected InternalApiGuard to be applied');
-  });
-
-  it('delegates registration to WebAuthService and returns the result', async () => {
-    const registerCalls: Array<{ username: string; passwordHash: string }> = [];
-    const expectedResult = { userId: 'uuid-1', webAccountId: 'uuid-2' };
-
-    const mockService = {
-      register: async (dto: { username: string; passwordHash: string }) => {
-        registerCalls.push(dto);
-        return expectedResult;
-      },
-    } as unknown as WebAuthService;
-
-    const controller = new WebAuthController(mockService);
-    const dto = {
-      username: 'test-user',
-      passwordHash: 'a'.repeat(64),
+  it('delegates credential lifecycle calls to WebAuthService without legacy request IP plumbing', async () => {
+    const calls: Array<{ method: string; payload: unknown }> = [];
+    const webAuthService = createWebAuthServiceMock(calls);
+    const controller = new InternalWebAuthController(
+      webAuthService,
+      createBotSigninTokenServiceMock(),
+    );
+    const registerDto: WebAuthRegisterDto = {
+      login: 'new-user',
+      password: 'valid-password',
+      email: 'user@example.com',
+    };
+    const checkLoginDto: WebAuthCheckLoginDto = { login: 'new-user' };
+    const loginDto: WebAuthLoginDto = { login: 'new-user', password: 'valid-password' };
+    const recoverDto: WebAuthRecoverDto = { login: 'new-user' };
+    const changePasswordDto: WebAuthChangePasswordDto = {
+      userId: 'user-1',
+      currentPassword: 'old-password',
+      newPassword: 'new-password',
     };
 
-    const result = await controller.register(dto);
-
-    assert.deepStrictEqual(registerCalls, [dto]);
-    assert.deepStrictEqual(result, expectedResult);
-  });
-
-  it('delegates login to WebAuthService with client IP from x-forwarded-for', async () => {
-    const loginCalls: Array<{ dto: any; ip: string }> = [];
-    const expectedResult = {
-      userId: 'uuid-1',
+    assert.deepStrictEqual(await controller.register(registerDto), {
+      userId: 'user-1',
+      webAccountId: 'web-account-1',
+    });
+    assert.deepStrictEqual(await controller.checkLogin(checkLoginDto), { available: true });
+    assert.deepStrictEqual(await controller.login(loginDto), {
+      userId: 'user-1',
       requiresPasswordChange: false,
       telegramLinked: true,
-      emailVerified: false,
-    };
-
-    const mockService = {
-      login: async (dto: any, ip: string) => {
-        loginCalls.push({ dto, ip });
-        return expectedResult;
-      },
-    } as unknown as WebAuthService;
-
-    const controller = new WebAuthController(mockService);
-    const dto = { username: 'test-user', passwordHash: 'a'.repeat(64) };
-    const mockReq = {
-      headers: { 'x-forwarded-for': '203.0.113.50, 10.0.0.1' },
-      ip: '127.0.0.1',
-    } as any;
-
-    const result = await controller.login(dto, mockReq);
-
-    assert.deepStrictEqual(loginCalls, [{ dto, ip: '203.0.113.50' }]);
-    assert.deepStrictEqual(result, expectedResult);
+      emailVerified: true,
+    });
+    assert.deepStrictEqual(await controller.recover(recoverDto), { method: 'telegram' });
+    assert.deepStrictEqual(await controller.changePassword(changePasswordDto), { success: true });
+    assert.deepStrictEqual(calls, [
+      { method: 'register', payload: registerDto },
+      { method: 'checkLoginAvailable', payload: 'new-user' },
+      { method: 'login', payload: loginDto },
+      { method: 'recover', payload: recoverDto },
+      { method: 'changePassword', payload: changePasswordDto },
+    ]);
   });
 
-  it('falls back to x-real-ip when x-forwarded-for is absent', async () => {
-    const loginCalls: Array<{ dto: any; ip: string }> = [];
+  it('keeps bot-signin issue responses wire-stable when no token can be minted', async () => {
+    const calls: Array<{ method: string; payload: unknown }> = [];
+    const controller = new InternalWebAuthController(
+      createWebAuthServiceMock([]),
+      createBotSigninTokenServiceMock(calls, { issueResult: null }),
+    );
+    const dto: BotSigninIssueDto = { telegramId: '123456789' };
 
-    const mockService = {
-      login: async (dto: any, ip: string) => {
-        loginCalls.push({ dto, ip });
-        return { userId: 'uuid-1', requiresPasswordChange: false, telegramLinked: false, emailVerified: false };
-      },
-    } as unknown as WebAuthService;
-
-    const controller = new WebAuthController(mockService);
-    const dto = { username: 'test-user', passwordHash: 'b'.repeat(64) };
-    const mockReq = {
-      headers: { 'x-real-ip': '10.20.30.40' },
-      ip: '192.168.1.100',
-    } as any;
-
-    await controller.login(dto, mockReq);
-
-    assert.equal(loginCalls[0].ip, '10.20.30.40');
+    assert.deepStrictEqual(await controller.issueBotSigninToken(dto), {
+      token: null,
+      expiresAt: null,
+    });
+    assert.deepStrictEqual(calls, [{ method: 'issue', payload: dto.telegramId }]);
   });
 
-  it('falls back to req.ip when both x-forwarded-for and x-real-ip are absent', async () => {
-    const loginCalls: Array<{ dto: any; ip: string }> = [];
+  it('delegates bot-signin issue and consume to BotSigninTokenService', async () => {
+    const calls: Array<{ method: string; payload: unknown }> = [];
+    const issueResult = { token: 'a'.repeat(64), expiresAt: '2026-06-02T12:00:00.000Z' };
+    const controller = new InternalWebAuthController(
+      createWebAuthServiceMock([]),
+      createBotSigninTokenServiceMock(calls, {
+        issueResult,
+        consumeResult: { userId: 'user-1' },
+      }),
+    );
+    const issueDto: BotSigninIssueDto = { telegramId: '123456789' };
+    const consumeDto: BotSigninConsumeDto = { token: 'a'.repeat(64) };
 
-    const mockService = {
-      login: async (dto: any, ip: string) => {
-        loginCalls.push({ dto, ip });
-        return { userId: 'uuid-1', requiresPasswordChange: false, telegramLinked: false, emailVerified: false };
-      },
-    } as unknown as WebAuthService;
+    assert.deepStrictEqual(await controller.issueBotSigninToken(issueDto), issueResult);
+    assert.deepStrictEqual(await controller.consumeBotSigninToken(consumeDto), { userId: 'user-1' });
+    assert.deepStrictEqual(calls, [
+      { method: 'issue', payload: issueDto.telegramId },
+      { method: 'consume', payload: consumeDto.token },
+    ]);
+  });
 
-    const controller = new WebAuthController(mockService);
-    const dto = { username: 'test-user', passwordHash: 'b'.repeat(64) };
-    const mockReq = {
-      headers: {},
-      ip: '192.168.1.100',
-    } as any;
+  it('returns a null userId when bot-signin consume misses', async () => {
+    const controller = new InternalWebAuthController(
+      createWebAuthServiceMock([]),
+      createBotSigninTokenServiceMock([], { consumeResult: null }),
+    );
 
-    await controller.login(dto, mockReq);
-
-    assert.equal(loginCalls[0].ip, '192.168.1.100');
+    assert.deepStrictEqual(
+      await controller.consumeBotSigninToken({ token: 'b'.repeat(64) }),
+      { userId: null },
+    );
   });
 });
+
+function assertPostRoute(expectedPath: string, handler: unknown): void {
+  assert.equal(Reflect.getMetadata(PATH_METADATA, handler), expectedPath);
+  assert.equal(Reflect.getMetadata(METHOD_METADATA, handler), RequestMethod.POST);
+}
+
+function createWebAuthServiceMock(
+  calls: Array<{ method: string; payload: unknown }>,
+): WebAuthService {
+  return {
+    register: async (payload: WebAuthRegisterDto) => {
+      calls.push({ method: 'register', payload });
+      return { userId: 'user-1', webAccountId: 'web-account-1' };
+    },
+    checkLoginAvailable: async (payload: string) => {
+      calls.push({ method: 'checkLoginAvailable', payload });
+      return { available: true };
+    },
+    login: async (payload: WebAuthLoginDto) => {
+      calls.push({ method: 'login', payload });
+      return {
+        userId: 'user-1',
+        requiresPasswordChange: false,
+        telegramLinked: true,
+        emailVerified: true,
+      };
+    },
+    recover: async (payload: WebAuthRecoverDto) => {
+      calls.push({ method: 'recover', payload });
+      return { method: 'telegram' };
+    },
+    changePassword: async (payload: WebAuthChangePasswordDto) => {
+      calls.push({ method: 'changePassword', payload });
+      return { success: true };
+    },
+  } as WebAuthService;
+}
+
+function createBotSigninTokenServiceMock(
+  calls: Array<{ method: string; payload: unknown }> = [],
+  options: {
+    readonly issueResult?: { readonly token: string; readonly expiresAt: string } | null;
+    readonly consumeResult?: { readonly userId: string } | null;
+  } = {},
+): BotSigninTokenService {
+  const { issueResult = { token: 'a'.repeat(64), expiresAt: '2026-06-02T12:00:00.000Z' }, consumeResult = null } = options;
+  return {
+    issue: async (payload: string) => {
+      calls.push({ method: 'issue', payload });
+      return issueResult;
+    },
+    consume: async (payload: string) => {
+      calls.push({ method: 'consume', payload });
+      return consumeResult;
+    },
+  } as BotSigninTokenService;
+}

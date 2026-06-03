@@ -1,4 +1,19 @@
-﻿# Rezeis Admin v0.5.4
+﻿# Rezeis Admin v0.7.3
+
+## Remediation baseline
+
+`v0.7.3` is the current remediation baseline for the unified Rezeis admin image. Package versions, README examples, Docker build metadata, and health version reporting now align on `0.7.3`.
+
+### Docker image metadata
+
+- Unified GHCR image: `ghcr.io/dizzzable/rezeis`.
+- Release tags: `v0.7.3`, `0.7.3`, `0.7`, plus `sha-<short>` for commits.
+- Docker build receives `APP_VERSION` from `rezeis-admin/package.json` and `GIT_SHA` from the GitHub Actions commit SHA.
+- Runtime health reports `version` and non-sensitive `gitSha` metadata.
+
+---
+
+# Rezeis Admin v0.5.4
 
 ## Вариант A — слияние «Каналов рассылок» в «Настройки доставки»
 

@@ -8,6 +8,7 @@ import { BACKUP_QUEUE } from '../../modules/backup/backup.constants';
 import { IMPORT_QUEUE } from '../../modules/imports/imports.constants';
 import { QueueMaintenanceService } from './queue-maintenance.service';
 import { GracefulShutdownService } from './graceful-shutdown.service';
+import { buildBoundedBullMqDefaultJobOptions } from './bullmq-enqueue-options';
 
 /**
  * Global BullMQ connection + maintenance module.
@@ -28,6 +29,7 @@ import { GracefulShutdownService } from './graceful-shutdown.service';
       inject: [redisConfig.KEY],
       useFactory: (configuration: ConfigType<typeof redisConfig>) => ({
         connection: { url: configuration.url },
+        defaultJobOptions: buildBoundedBullMqDefaultJobOptions(),
       }),
     }),
     // Register queues for the maintenance service to inject

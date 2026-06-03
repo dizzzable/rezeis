@@ -40,6 +40,20 @@ describe('InternalPlatformPolicyController', () => {
     assert.equal(actualGetPlatformPolicyMethod, RequestMethod.GET);
   });
 
+  it('keeps the legacy registration-toggle route on the current platform policy controller', () => {
+    const actualGetRegistrationTogglePath = Reflect.getMetadata(
+      PATH_METADATA,
+      InternalPlatformPolicyController.prototype.getRegistrationToggle,
+    ) as string | undefined;
+    const actualGetRegistrationToggleMethod = Reflect.getMetadata(
+      METHOD_METADATA,
+      InternalPlatformPolicyController.prototype.getRegistrationToggle,
+    ) as RequestMethod | undefined;
+
+    assert.equal(actualGetRegistrationTogglePath, 'registration-toggle');
+    assert.equal(actualGetRegistrationToggleMethod, RequestMethod.GET);
+  });
+
   it('returns only the user-safe platform policy contract', async () => {
     let getInternalPlatformPolicyCallsCount: number = 0;
     const expectedPolicy: InternalPlatformPolicyInterface = {
@@ -70,4 +84,44 @@ describe('InternalPlatformPolicyController', () => {
       | undefined;
     assert.deepStrictEqual(actualGuards, [InternalAdminAuthGuard]);
   });
+
+  it('derives registration-toggle enabled state from PUBLIC access mode', async () => {
+    const controller = new InternalPlatformPolicyController(createSettingsService(AccessMode.PUBLIC));
+
+    await assertRegistrationToggle(controller, true);
+  });
+
+  it('closes registration-toggle for non-PUBLIC access modes', async () => {
+    for (const accessMode of [
+      AccessMode.INVITED,
+      AccessMode.PURCHASE_BLOCKED,
+      AccessMode.REG_BLOCKED,
+      AccessMode.RESTRICTED,
+    ]) {
+      const controller = new InternalPlatformPolicyController(createSettingsService(accessMode));
+
+      await assertRegistrationToggle(controller, false);
+    }
+  });
 });
+
+function createSettingsService(accessMode: AccessMode): SettingsService {
+  return {
+    getInternalPlatformPolicy: async (): Promise<InternalPlatformPolicyInterface> => ({
+      rulesRequired: true,
+      rulesLink: null,
+      channelRequired: false,
+      channelLink: null,
+      accessMode,
+      inviteModeStartedAt: null,
+      defaultCurrency: Currency.USD,
+    }),
+  } as SettingsService;
+}
+
+async function assertRegistrationToggle(
+  controller: InternalPlatformPolicyController,
+  expectedEnabled: boolean,
+): Promise<void> {
+  assert.deepStrictEqual(await controller.getRegistrationToggle(), { enabled: expectedEnabled });
+}

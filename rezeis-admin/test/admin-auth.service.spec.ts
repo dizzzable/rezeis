@@ -21,6 +21,8 @@ interface MockAdminUserAuthRecord {
   readonly createdAt: Date;
   readonly lastLoginAt: Date | null;
   readonly lastLoginIp: string | null;
+  readonly rbacRoleId: string | null;
+  readonly mustChangePassword: boolean;
 }
 
 interface MockAdminUserProfileRecord {
@@ -35,6 +37,8 @@ interface MockAdminUserProfileRecord {
   readonly createdAt: Date;
   readonly lastLoginAt: Date | null;
   readonly lastLoginIp: string | null;
+  readonly rbacRoleId: string | null;
+  readonly mustChangePassword: boolean;
 }
 
 interface MockAuditLogCreateArgs {
@@ -95,7 +99,7 @@ interface MockPasswordHashService {
 interface MockAuthConfiguration {
   readonly jwtSecret: string;
   readonly jwtExpiresIn: '12h';
-  readonly internalApiKey: string;
+  readonly cryptKey: string;
 }
 
 const REQUEST_METADATA = {
@@ -222,7 +226,7 @@ function createAdminAuthService(input: {
     },
   };
   const service = new AdminAuthService(
-    { jwtSecret: 'secret', jwtExpiresIn: '12h', internalApiKey: 'internal' } as MockAuthConfiguration,
+    { jwtSecret: 'secret', jwtExpiresIn: '12h', cryptKey: 'crypt-key' } as MockAuthConfiguration,
     jwtService as never,
     passwordHashService as never,
     prismaService as never,
@@ -247,6 +251,8 @@ function buildAdminAuthRecord(input: {
   readonly isActive: boolean;
   readonly tokenVersion: number;
   readonly passwordHash: string;
+  readonly rbacRoleId?: string | null;
+  readonly mustChangePassword?: boolean;
 }): MockAdminUserAuthRecord {
   return {
     id: input.id,
@@ -261,6 +267,8 @@ function buildAdminAuthRecord(input: {
     createdAt: new Date('2026-04-01T00:00:00.000Z'),
     lastLoginAt: new Date('2026-04-15T12:00:00.000Z'),
     lastLoginIp: '198.51.100.1',
+    rbacRoleId: input.rbacRoleId ?? null,
+    mustChangePassword: input.mustChangePassword ?? false,
   };
 }
 
@@ -274,6 +282,8 @@ function buildAdminProfileRecord(input: {
   readonly lastLoginIp: string | null;
   readonly name?: string | null;
   readonly role?: UserRole;
+  readonly rbacRoleId?: string | null;
+  readonly mustChangePassword?: boolean;
 }): MockAdminUserProfileRecord {
   return {
     id: input.id,
@@ -287,6 +297,8 @@ function buildAdminProfileRecord(input: {
     createdAt: new Date('2026-04-01T00:00:00.000Z'),
     lastLoginAt: input.lastLoginAt,
     lastLoginIp: input.lastLoginIp,
+    rbacRoleId: input.rbacRoleId ?? null,
+    mustChangePassword: input.mustChangePassword ?? false,
   };
 }
 
@@ -341,6 +353,8 @@ describe('AdminAuthService', () => {
         createdAt: true,
         lastLoginAt: true,
         lastLoginIp: true,
+        rbacRoleId: true,
+        mustChangePassword: true,
       },
     });
     assert.deepStrictEqual(actualResult, {
@@ -354,6 +368,8 @@ describe('AdminAuthService', () => {
       createdAt: new Date('2026-04-01T00:00:00.000Z'),
       lastLoginAt: null,
       lastLoginIp: null,
+      rbacRoleId: null,
+      mustChangePassword: false,
     });
     assert.deepStrictEqual(auditEntries, [
       {
@@ -490,6 +506,8 @@ describe('AdminAuthService', () => {
           createdAt: true,
           lastLoginAt: true,
           lastLoginIp: true,
+          rbacRoleId: true,
+          mustChangePassword: true,
         },
       },
     ]);
@@ -526,6 +544,8 @@ describe('AdminAuthService', () => {
       createdAt: true,
       lastLoginAt: true,
       lastLoginIp: true,
+      rbacRoleId: true,
+      mustChangePassword: true,
     });
     assert.deepStrictEqual(jwtPayloads, [
       {
@@ -533,6 +553,7 @@ describe('AdminAuthService', () => {
         login: 'admin',
         role: UserRole.ADMIN,
         tokenVersion: 2,
+        rbacRoleId: null,
       },
     ]);
     assert.deepStrictEqual(actualResult, {
@@ -550,6 +571,8 @@ describe('AdminAuthService', () => {
         createdAt: new Date('2026-04-01T00:00:00.000Z'),
         lastLoginAt: actualLastLoginAt,
         lastLoginIp: REQUEST_METADATA.remoteAddress,
+        rbacRoleId: null,
+        mustChangePassword: false,
       },
     });
     assert.equal(auditEntries.length, 1);
@@ -606,6 +629,8 @@ describe('AdminAuthService', () => {
           createdAt: true,
           lastLoginAt: true,
           lastLoginIp: true,
+          rbacRoleId: true,
+          mustChangePassword: true,
         },
       },
     ]);

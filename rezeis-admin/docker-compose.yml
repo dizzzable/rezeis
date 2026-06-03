@@ -25,13 +25,22 @@ services:
     env_file:
       - .env
     environment:
-      - DATABASE_HOST=rezeis-db
-      - DATABASE_URL=postgresql://rezeis:rezeis_secret@rezeis-db:5432/rezeis
-      - REDIS_HOST=rezeis-redis
-      - REDIS_PASSWORD=rezeis
-      - NODE_ENV=production
-      - BACKUP_LOCATION=/app/data/backups
-      - REZEIS_UPDATE_REPO=dizzzable/rezeis
+      DATABASE_HOST: rezeis-db
+      DATABASE_PORT: ${DATABASE_PORT:-5432}
+      DATABASE_NAME: ${DATABASE_NAME:-rezeis}
+      DATABASE_USER: ${DATABASE_USER:-rezeis}
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD in .env to a generated value}
+      # Force this documented stack to use DATABASE_* values instead of a stale
+      # fixed DSN from an older .env file.
+      DATABASE_URL: ''
+      REDIS_HOST: rezeis-redis
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      REDIS_NAME: ${REDIS_NAME:-0}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env to a generated value}
+      NODE_ENV: production
+      RUID_PROCESS_ROLE: api
+      BACKUP_LOCATION: /app/data/backups
+      REZEIS_UPDATE_REPO: dizzzable/rezeis
     # Наружу 8000 не публикуем — reverse proxy ходит на rezeis:8000 по
     # docker-сети. Если нужен доступ с самого VPS для дебага, временно
     # верни строку: `ports: ['127.0.0.1:8000:8000']` (только loopback).
@@ -63,6 +72,7 @@ services:
         reservations:
           memory: 256M
     networks:
+      - rezeis-private
       - remnawave-network
 
   rezeis-worker:
@@ -73,13 +83,19 @@ services:
     env_file:
       - .env
     environment:
-      - DATABASE_HOST=rezeis-db
-      - DATABASE_URL=postgresql://rezeis:rezeis_secret@rezeis-db:5432/rezeis
-      - REDIS_HOST=rezeis-redis
-      - REDIS_PASSWORD=rezeis
-      - NODE_ENV=production
-      - RUID_PROCESS_ROLE=worker
-      - BACKUP_LOCATION=/app/data/backups
+      DATABASE_HOST: rezeis-db
+      DATABASE_PORT: ${DATABASE_PORT:-5432}
+      DATABASE_NAME: ${DATABASE_NAME:-rezeis}
+      DATABASE_USER: ${DATABASE_USER:-rezeis}
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD in .env to a generated value}
+      DATABASE_URL: ''
+      REDIS_HOST: rezeis-redis
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      REDIS_NAME: ${REDIS_NAME:-0}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env to a generated value}
+      NODE_ENV: production
+      RUID_PROCESS_ROLE: worker
+      BACKUP_LOCATION: /app/data/backups
     command: ["node", "dist/worker.js"]
     volumes:
       - rezeis-data:/app/data
@@ -102,6 +118,7 @@ services:
         reservations:
           memory: 128M
     networks:
+      - rezeis-private
       - remnawave-network
 
   rezeis-db:
@@ -114,13 +131,13 @@ services:
     hostname: rezeis-db
     restart: unless-stopped
     environment:
-      POSTGRES_USER: rezeis
-      POSTGRES_PASSWORD: rezeis_secret
-      POSTGRES_DB: rezeis
+      POSTGRES_USER: ${DATABASE_USER:-rezeis}
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD in .env to a generated value}
+      POSTGRES_DB: ${DATABASE_NAME:-rezeis}
     volumes:
       - rezeis-db-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U rezeis"]
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -132,25 +149,34 @@ services:
         reservations:
           memory: 128M
     networks:
-      - remnawave-network
+      - rezeis-private
 
   rezeis-redis:
     image: redis:7-alpine
     container_name: rezeis-redis
     hostname: rezeis-redis
     restart: unless-stopped
-    command: >
-      redis-server
-      --requirepass rezeis
-      --maxmemory 512mb
-      --maxmemory-policy volatile-lru
-      --save 60 1000
-      --appendonly yes
-      --appendfsync everysec
+    command:
+      - redis-server
+      - --requirepass
+      - ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env to a generated value}
+      - --maxmemory
+      - 512mb
+      - --maxmemory-policy
+      - volatile-lru
+      - --save
+      - '60'
+      - '1000'
+      - --appendonly
+      - 'yes'
+      - --appendfsync
+      - everysec
+    environment:
+      REDISCLI_AUTH: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env to a generated value}
     volumes:
       - rezeis-redis-data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "rezeis", "ping"]
+      test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 3s
       retries: 3
@@ -162,7 +188,7 @@ services:
         reservations:
           memory: 64M
     networks:
-      - remnawave-network
+      - rezeis-private
 
 volumes:
   rezeis-data:
@@ -170,6 +196,9 @@ volumes:
   rezeis-redis-data:
 
 networks:
+  rezeis-private:
+    driver: bridge
+    internal: true
   remnawave-network:
     name: remnawave-network
     driver: bridge

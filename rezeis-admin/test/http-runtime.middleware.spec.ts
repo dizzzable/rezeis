@@ -2,12 +2,14 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import type { INestApplication } from '@nestjs/common';
+import helmet from 'helmet';
 
 import {
   configureBoundedBodyParsers,
   HTTP_BODY_PARSER_LIMIT,
 } from '../src/common/http/body-parser-limits';
 import {
+  buildHelmetOptions,
   configureHttpRuntimeMiddleware,
   EXPRESS_POWERED_BY_SETTING,
 } from '../src/common/http/configure-http-runtime';
@@ -16,7 +18,11 @@ import {
   createHttpCompressionMiddleware,
   HTTP_COMPRESSION_THRESHOLD_BYTES,
 } from '../src/common/http/http-compression';
-import { buildCorsOptions, CORS_ALLOWED_METHODS } from '../src/common/http/cors-origin';
+import {
+  buildCorsOptions,
+  CORS_ALLOWED_METHODS,
+  parseCorsOrigins,
+} from '../src/common/http/cors-origin';
 import {
   noRobotsMiddleware,
   NO_ROBOTS_HEADER,
@@ -127,6 +133,66 @@ describe('HTTP runtime middleware foundation', () => {
     });
   });
 
+  it('keeps Helmet CSP disabled outside production to avoid breaking Vite and tests', () => {
+    const options = buildHelmetOptions('development');
+
+    assert.equal(options.contentSecurityPolicy, false);
+    assert.equal(options.crossOriginEmbedderPolicy, false);
+    assert.deepEqual(options.crossOriginResourcePolicy, { policy: 'cross-origin' });
+  });
+
+  it('rolls out production CSP as report-only with explicit SPA directives', () => {
+    const options = buildHelmetOptions('production');
+    const contentSecurityPolicy = options.contentSecurityPolicy;
+
+    assert.notEqual(contentSecurityPolicy, false);
+    assert.equal(typeof contentSecurityPolicy, 'object');
+    if (contentSecurityPolicy === false || contentSecurityPolicy === undefined || contentSecurityPolicy === true) {
+      assert.fail('Expected production CSP options');
+    }
+    assert.equal(contentSecurityPolicy.reportOnly, true);
+    assert.equal(contentSecurityPolicy.useDefaults, false);
+    assert.deepEqual(contentSecurityPolicy.directives?.defaultSrc, ["'self'"]);
+    assert.deepEqual(contentSecurityPolicy.directives?.objectSrc, ["'none'"]);
+    assert.deepEqual(contentSecurityPolicy.directives?.frameAncestors, ["'none'"]);
+    assert.deepEqual(contentSecurityPolicy.directives?.scriptSrc, ["'self'"]);
+    assert.deepEqual(contentSecurityPolicy.directives?.scriptSrcAttr, ["'none'"]);
+    assert.deepEqual(contentSecurityPolicy.directives?.styleSrc, ["'self'", "'unsafe-inline'"]);
+    assert.deepEqual(contentSecurityPolicy.directives?.connectSrc, ["'self'", 'https:', 'wss:', 'ws:']);
+    assert.deepEqual(contentSecurityPolicy.directives?.imgSrc, ["'self'", 'data:', 'blob:', 'https:']);
+    assert.deepEqual(contentSecurityPolicy.directives?.workerSrc, ["'self'", 'blob:']);
+  });
+
+  it('emits a report-only CSP header in production without an enforcing CSP header', async () => {
+    const helmetMiddleware = createHelmetMiddlewareForTest('production');
+    const headers = new Map<string, string>();
+    const response = {
+      setHeader: (name: string, value: string): void => {
+        headers.set(name.toLowerCase(), value);
+      },
+      removeHeader: (name: string): void => {
+        headers.delete(name.toLowerCase());
+      },
+    };
+
+    await new Promise<void>((resolve, reject) => {
+      helmetMiddleware({} as never, response as never, (error?: unknown) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      });
+    });
+
+    assert.equal(headers.has('content-security-policy'), false);
+    const reportOnlyHeader = headers.get('content-security-policy-report-only');
+    assert.ok(reportOnlyHeader);
+    assert.match(reportOnlyHeader, /default-src 'self'/);
+    assert.match(reportOnlyHeader, /script-src 'self'/);
+    assert.match(reportOnlyHeader, /object-src 'none'/);
+  });
+
   it('sets a static no-robots header without reading sensitive request data', () => {
     let headerName: string | undefined;
     let headerValue: string | undefined;
@@ -176,4 +242,59 @@ describe('HTTP runtime middleware foundation', () => {
       methods: [...CORS_ALLOWED_METHODS],
     });
   });
+
+  it('keeps CORS closed when no admin origins are configured outside production', () => {
+    assert.equal(parseCorsOrigins(undefined), false);
+    assert.deepEqual(buildCorsOptions(false), {
+      origin: false,
+      credentials: false,
+      methods: [...CORS_ALLOWED_METHODS],
+    });
+  });
+
+  it('normalizes configured admin CORS origins without reflecting arbitrary origins', () => {
+    assert.equal(parseCorsOrigins(' https://admin.example.com/ '), 'https://admin.example.com');
+    assert.deepEqual(
+      parseCorsOrigins('https://admin.example.com, https://admin.example.com/, http://localhost:5173'),
+      ['https://admin.example.com', 'http://localhost:5173'],
+    );
+  });
+
+  it('fails closed for production when no trusted admin CORS origin is configured', () => {
+    assert.throws(
+      () => parseCorsOrigins(undefined, { requireConfiguredOrigins: true }),
+      /ADMIN_CORS_ORIGINS must define at least one trusted admin origin/,
+    );
+  });
+
+  it('rejects wildcard and invalid credentialed CORS origins', () => {
+    for (const invalidOrigins of [
+      '*',
+      'not-a-url',
+      'ftp://admin.example.com',
+      'https://user:pass@admin.example.com',
+      'https://admin.example.com/panel',
+      'https://admin.example.com?token=secret',
+      'https://admin.example.com#fragment',
+    ]) {
+      assert.throws(() => parseCorsOrigins(invalidOrigins), /ADMIN_CORS_ORIGINS/);
+    }
+  });
+
+  it('does not echo raw CORS origin values in validation errors', () => {
+    assert.throws(
+      () => parseCorsOrigins('https://admin.example.com?token=secret-token'),
+      (error: unknown): boolean => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /ADMIN_CORS_ORIGINS/);
+        assert.doesNotMatch(error.message, /secret-token/);
+        assert.doesNotMatch(error.message, /admin\.example\.com/);
+        return true;
+      },
+    );
+  });
 });
+
+function createHelmetMiddlewareForTest(nodeEnv: string): ReturnType<typeof helmet> {
+  return helmet(buildHelmetOptions(nodeEnv));
+}

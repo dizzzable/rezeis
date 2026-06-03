@@ -5,11 +5,10 @@ import { describe, it } from 'node:test';
 
 import { Request, Response } from 'express';
 
-import {
-  createRequestCorrelationMiddleware,
-  resolveRequestId,
-  sanitizePath,
-} from '../src/common/middleware/request-correlation.middleware';
+import { sanitizePath } from '../src/common/filters/filter-utils';
+import { CORRELATION_ID_HEADER } from '../src/common/logger';
+import { CorrelationIdMiddleware } from '../src/common/middlewares/correlation-id.middleware';
+import { RequestLoggerMiddleware } from '../src/common/middlewares/request-logger.middleware';
 
 interface CapturedResponse {
   readonly headers: Record<string, string>;
@@ -20,7 +19,7 @@ interface CapturedResponse {
 function createResponse(statusCode: number = 200): Response & CapturedResponse {
   const response: CapturedResponse & {
     setHeader(name: string, value: string): void;
-    once(eventName: string, handler: () => void): void;
+    on(eventName: string, handler: () => void): void;
   } = {
     headers: {},
     finishHandlers: [],
@@ -28,7 +27,7 @@ function createResponse(statusCode: number = 200): Response & CapturedResponse {
     setHeader(name: string, value: string): void {
       this.headers[name.toLowerCase()] = value;
     },
-    once(eventName: string, handler: () => void): void {
+    on(eventName: string, handler: () => void): void {
       if (eventName === 'finish') {
         this.finishHandlers.push(handler);
       }
@@ -37,69 +36,74 @@ function createResponse(statusCode: number = 200): Response & CapturedResponse {
   return response as unknown as Response & CapturedResponse;
 }
 
-describe('request correlation middleware', () => {
-  it('preserves safe caller request ids and writes the response header', () => {
-    const logs: string[] = [];
-    const middleware = createRequestCorrelationMiddleware({ log: (message) => logs.push(message) });
+describe('request correlation and logging middlewares', () => {
+  it('preserves safe correlation ids and writes the response header', () => {
+    const middleware = new CorrelationIdMiddleware();
     const request = {
-      headers: { 'x-request-id': 'ops-request-01' },
-      method: 'GET',
-      originalUrl: '/api/health/readiness?token=raw-secret-token',
+      headers: { [CORRELATION_ID_HEADER]: 'ops-request-01' },
     } as unknown as Request;
     const response = createResponse(204);
     let nextCalled = false;
 
-    middleware(request, response, () => {
+    middleware.use(request, response, () => {
       nextCalled = true;
     });
-    response.finishHandlers.forEach((handler) => handler());
 
     assert.equal(nextCalled, true);
-    assert.equal(request.headers['x-request-id'], 'ops-request-01');
-    assert.equal(response.headers['x-request-id'], 'ops-request-01');
-    assert.equal(logs.length, 1);
-    assert.match(logs[0]!, /requestId=ops-request-01/);
-    assert.match(logs[0]!, /method=GET/);
-    assert.match(logs[0]!, /path=\/api\/health\/readiness/);
-    assert.match(logs[0]!, /status=204/);
-    assert.doesNotMatch(logs[0]!, /raw-secret-token/);
-    assert.doesNotMatch(logs[0]!, /\?/);
+    assert.equal(request['correlationId'], 'ops-request-01');
+    assert.equal(response.headers[CORRELATION_ID_HEADER], 'ops-request-01');
   });
 
-  it('generates a safe request id when the incoming header is unsafe', () => {
-    const requestId = resolveRequestId('unsafe id with spaces and bearer-token-secret');
-    assert.match(requestId, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
-    assert.notEqual(requestId, 'unsafe id with spaces and bearer-token-secret');
-
-    const colonRequestId = resolveRequestId('unsafe:semantic:request');
-    assert.match(colonRequestId, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
-    assert.notEqual(colonRequestId, 'unsafe:semantic:request');
-
-    for (const sensitiveRequestId of ['token-secret', 'auth-token', 'cookie-session', 'password-reset']) {
-      const generatedRequestId = resolveRequestId(sensitiveRequestId);
-      assert.match(generatedRequestId, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
-      assert.notEqual(generatedRequestId, sensitiveRequestId);
-    }
-  });
-
-  it('does not echo sensitive-looking request ids in response headers or logs', () => {
-    const logs: string[] = [];
-    const middleware = createRequestCorrelationMiddleware({ log: (message) => logs.push(message) });
+  it('generates a safe correlation id when the incoming header is unsafe', () => {
+    const middleware = new CorrelationIdMiddleware();
     const request = {
-      headers: { 'x-request-id': 'auth-token' },
-      method: 'GET',
-      originalUrl: '/api/health/readiness',
+      headers: { [CORRELATION_ID_HEADER]: 'unsafe id with spaces and bearer-token-secret' },
     } as unknown as Request;
-    const response = createResponse(200);
+    const response = createResponse();
 
-    middleware(request, response, () => undefined);
+    middleware.use(request, response, () => undefined);
+
+    assert.match(request['correlationId'] as string, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+    assert.equal(response.headers[CORRELATION_ID_HEADER], request['correlationId']);
+    assert.notEqual(request['correlationId'], 'unsafe id with spaces and bearer-token-secret');
+  });
+
+  it('logs sanitized paths without query strings or sensitive path segments', () => {
+    const logs: Array<{ level: string; message: string; meta: unknown }> = [];
+    const middleware = new RequestLoggerMiddleware();
+    (middleware as unknown as { logger: { log: (message: string, meta: unknown) => void; warn: (message: string, meta: unknown) => void } }).logger = {
+      log: (message: string, meta: unknown): void => {
+        logs.push({ level: 'log', message, meta });
+      },
+      warn: (message: string, meta: unknown): void => {
+        logs.push({ level: 'warn', message, meta });
+      },
+    };
+    const request = {
+      headers: { 'user-agent': 'test-agent' },
+      method: 'GET',
+      originalUrl: '/api/users/12345/accounts/user@example.com/subscriptions/sub_secret123?token=raw-secret-token',
+      ip: '127.0.0.1',
+      correlationId: 'ops-request-01',
+    } as unknown as Request;
+    const response = createResponse(204);
+
+    middleware.use(request, response, () => undefined);
     response.finishHandlers.forEach((handler) => handler());
 
-    assert.match(request.headers['x-request-id'] as string, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
-    assert.match(response.headers['x-request-id'], /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
-    assert.doesNotMatch(response.headers['x-request-id'], /auth-token/);
     assert.equal(logs.length, 1);
-    assert.doesNotMatch(logs[0]!, /auth-token/);
+    assert.equal(logs[0]!.level, 'log');
+    assert.match(logs[0]!.message, /^GET \/api\/users\/:redacted\/accounts\/:redacted\/subscriptions\/:redacted 204 - \d+ms$/);
+    assert.doesNotMatch(logs[0]!.message, /raw-secret-token|user@example\.com|sub_secret123|\?/);
+    assert.deepStrictEqual(logs[0]!.meta, {
+      correlationId: 'ops-request-01',
+      method: 'GET',
+      url: '/api/users/:redacted/accounts/:redacted/subscriptions/:redacted',
+      statusCode: 204,
+      duration: (logs[0]!.meta as { duration: number }).duration,
+      userAgent: 'test-agent',
+      ip: '127.0.0.1',
+    });
   });
 
   it('redacts high-cardinality and sensitive path segments before logging', () => {

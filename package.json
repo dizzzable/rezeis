@@ -1,0 +1,9 @@
+{
+  "name": "rezeis-workspace",
+  "version": "0.7.3",
+  "private": true,
+  "scripts": {
+    "handoff:update": "node scripts/update-handoff.mjs",
+    "handoff:update:verify": "node scripts/update-handoff.mjs --run-checks"
+  }
+}

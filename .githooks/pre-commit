@@ -1,0 +1,79 @@
+#!/bin/sh
+set -eu
+
+# Optional local hook for running the current trusted Rezeis quality gates and
+# keeping the remediation handoff fresh. It mirrors root CI's blocking checks:
+# backend quality/tests and web quality/build.
+# Enable manually with:
+#   git config core.hooksPath .githooks
+#
+# Audits are intentionally excluded while P0.4 tracks them separately. To bypass
+# this optional local hook for an emergency commit, set REZEIS_SKIP_PRECOMMIT=1.
+# Keep this file and `.githooks/pre-commit.sample` byte-for-byte identical.
+
+if [ "${REZEIS_SKIP_PRECOMMIT:-}" = "1" ]; then
+  echo "pre-commit: skipped by REZEIS_SKIP_PRECOMMIT=1" >&2
+  exit 0
+fi
+
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+
+if [ ! -f "AGENTS.md" ] || [ ! -d "rezeis-admin" ] || [ ! -d "rezeis-admin/web" ]; then
+  echo "pre-commit: run this hook from the Rezeis repository root" >&2
+  exit 1
+fi
+
+for command_name in git npm npx; do
+  if ! command -v "$command_name" >/dev/null 2>&1; then
+    echo "pre-commit: $command_name is required for Rezeis quality gates" >&2
+    exit 1
+  fi
+done
+
+active_hook="$repo_root/.githooks/pre-commit"
+sample_hook="$repo_root/.githooks/pre-commit.sample"
+if [ -f "$active_hook" ] && [ -f "$sample_hook" ]; then
+  active_hook_hash=$(git hash-object "$active_hook")
+  sample_hook_hash=$(git hash-object "$sample_hook")
+  if [ "$active_hook_hash" != "$sample_hook_hash" ]; then
+    echo "pre-commit: .githooks/pre-commit.sample is out of sync" >&2
+    echo "pre-commit: update both hook files in the same change" >&2
+    exit 1
+  fi
+fi
+
+run_step() {
+  label=$1
+  directory=$2
+  shift 2
+
+  if [ ! -d "$repo_root/$directory" ]; then
+    echo "pre-commit: missing directory $directory" >&2
+    exit 1
+  fi
+
+  echo "pre-commit: $label"
+  (cd "$repo_root/$directory" && "$@")
+}
+
+run_step "backend prisma generate" rezeis-admin npm run prisma:generate
+run_step "backend typecheck" rezeis-admin npm run typecheck
+run_step "backend lint" rezeis-admin npm run lint
+run_step "backend tests" rezeis-admin npm test
+
+run_step "web typecheck" rezeis-admin/web npx tsc -p tsconfig.app.json --noEmit --incremental false
+run_step "web tests" rezeis-admin/web npm test
+run_step "web lint" rezeis-admin/web npm run lint
+run_step "web build" rezeis-admin/web npm run build
+
+echo "pre-commit: refreshing handoff timestamp"
+npm run handoff:update
+
+handoff_path="docs/progress/next-session-handoff.md"
+if ! git diff --quiet -- "$handoff_path" || [ -n "$(git ls-files --others --exclude-standard -- "$handoff_path")" ]; then
+  git add -- "$handoff_path"
+  echo "pre-commit: staged refreshed handoff"
+else
+  echo "pre-commit: handoff unchanged"
+fi

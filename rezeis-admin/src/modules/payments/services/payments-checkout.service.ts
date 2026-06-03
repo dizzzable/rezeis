@@ -14,6 +14,7 @@ import {
   InternalPaymentStatusInterface,
 } from '../interfaces/internal-payment-checkout.interface';
 import { isGatewayConfigured } from '../utils/payment-gateway-settings.util';
+import { normalizePaymentProviderError } from '../utils/payment-provider-error.util';
 import { PaymentProviderExecutionService } from './payment-provider-execution.service';
 import { PaymentsTransactionsService } from './payments-transactions.service';
 
@@ -139,10 +140,13 @@ export class PaymentsCheckoutService {
       }
     }
     const gatewayData = readGatewayData(transaction);
-    const failureReason =
+    const rawFailureReason =
       readOptionalString(gatewayData, ['failureReason']) ??
       readOptionalString(gatewayData, ['lastError']) ??
       null;
+    const failureReason = rawFailureReason === null
+      ? null
+      : normalizePaymentProviderError(rawFailureReason);
     return {
       paymentId: transaction.paymentId,
       status: transaction.status,

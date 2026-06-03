@@ -5,8 +5,10 @@ import { Queue } from 'bullmq';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import {
+  PAYMENT_RECONCILIATION_ENQUEUE_FAILED,
   PAYMENT_RECONCILIATION_JOB,
   PAYMENT_RECONCILIATION_QUEUE,
+  runPaymentReconciliationEnqueueWithTimeout,
 } from '../constants/payment-reconciliation.constant';
 import {
   PaymentWebhookIngressResultInterface,
@@ -57,18 +59,28 @@ export class PaymentWebhookIngressService {
     const receivedEvent = await this.paymentWebhookInboxService.recordReceived({ envelope });
     if (!receivedEvent.duplicate) {
       await this.paymentWebhookInboxService.markEnqueued(receivedEvent.event.id);
-      await this.paymentReconciliationQueue.add(
-        PAYMENT_RECONCILIATION_JOB,
-        {
-          eventId: receivedEvent.event.id,
-          paymentId: receivedEvent.event.paymentId,
-          gatewayType: receivedEvent.event.gatewayType,
-        },
-        {
-          removeOnComplete: 100,
-          removeOnFail: 100,
-        },
-      );
+      try {
+        await runPaymentReconciliationEnqueueWithTimeout(() =>
+          this.paymentReconciliationQueue.add(
+            PAYMENT_RECONCILIATION_JOB,
+            {
+              eventId: receivedEvent.event.id,
+              paymentId: receivedEvent.event.paymentId,
+              gatewayType: receivedEvent.event.gatewayType,
+            },
+            {
+              removeOnComplete: 100,
+              removeOnFail: 100,
+            },
+          ),
+        );
+      } catch (error: unknown) {
+        await this.paymentWebhookInboxService.markFailed(
+          receivedEvent.event.id,
+          PAYMENT_RECONCILIATION_ENQUEUE_FAILED,
+        );
+        throw error;
+      }
     }
 
     return {

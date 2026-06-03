@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/dizzzable/rezeis/releases/latest"><img src="https://img.shields.io/badge/version-0.3.0-blue" alt="Version" /></a>
+  <a href="https://github.com/dizzzable/rezeis/releases/latest"><img src="https://img.shields.io/badge/version-0.7.3-blue" alt="Version" /></a>
   <a href="https://github.com/dizzzable/rezeis/pkgs/container/rezeis"><img src="https://img.shields.io/badge/ghcr.io-rezeis-2496ED?logo=docker&logoColor=white" alt="GHCR" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="License" /></a>
   <a href="#"><img src="https://img.shields.io/badge/NestJS-11-red" alt="NestJS" /></a>
@@ -55,13 +55,13 @@ GitHub Container Registry публикует образ при каждом push
 docker pull ghcr.io/dizzzable/rezeis:latest
 
 # Pin to a specific release
-docker pull ghcr.io/dizzzable/rezeis:0.3.0
+docker pull ghcr.io/dizzzable/rezeis:0.7.3
 
-# Pin to a minor line (gets 0.3.x updates automatically)
-docker pull ghcr.io/dizzzable/rezeis:0.3
+# Pin to a minor line (gets 0.7.x updates automatically)
+docker pull ghcr.io/dizzzable/rezeis:0.7
 ```
 
-Доступные теги: `latest`, `0.3.0`, `0.3`, `v0.3.0`, плюс `sha-<short>` для каждого коммита в `main`.
+Доступные теги: `latest`, `0.7.3`, `0.7`, `v0.7.3`, плюс `sha-<short>` для каждого коммита в `main`.
 
 ---
 
@@ -72,11 +72,15 @@ docker pull ghcr.io/dizzzable/rezeis:0.3
 ```bash
 git clone https://github.com/dizzzable/rezeis.git
 cd rezeis/rezeis-admin
-cp .env.example .env  # заполнить DATABASE_URL, REDIS_URL, JWT_SECRET, REZEIS_CRYPT_KEY
+cp .env.example .env
+# заполнить секреты и сгенерировать уникальные DATABASE_PASSWORD, REDIS_PASSWORD,
+# JWT_SECRET, REZEIS_CRYPT_KEY перед запуском production compose
 docker compose up -d
 ```
 
-Контейнер автоматически прогонит миграции через `docker-entrypoint.sh`. Панель будет доступна на порту 8000.
+Production compose строит подключение к PostgreSQL и Redis из отдельных `DATABASE_*` и `REDIS_*` переменных. Не используйте старый примерный `DATABASE_URL` с фиксированным паролем для нового запуска; для уже существующей базы перенесите текущие DB/Redis passwords в `.env` перед `docker compose up -d`. Контейнер автоматически прогонит миграции через `docker-entrypoint.sh`. Панель будет доступна на порту 8000.
+
+В documented split compose режиме API контейнер запускается с `RUID_PROCESS_ROLE=api`, а `rezeis-worker` с `RUID_PROCESS_ROLE=worker`, чтобы scheduled/worker side effects не выполнялись дважды.
 
 Чтобы пропустить миграции (для восстановления из бэкапа):
 
@@ -346,8 +350,8 @@ rezeis/
 
 | Переменная | Обязательная | Описание |
 |-----------|:---:|-----------|
-| `DATABASE_URL` | ✅ | PostgreSQL connection string |
-| `REDIS_URL` | ✅ | Redis/Valkey URL |
+| `DATABASE_HOST`, `DATABASE_PORT`, `DATABASE_NAME`, `DATABASE_USER`, `DATABASE_PASSWORD` | ✅ | PostgreSQL connection settings; production compose requires a generated `DATABASE_PASSWORD` |
+| `REDIS_HOST`, `REDIS_PORT`, `REDIS_NAME`, `REDIS_PASSWORD` | ✅ | Redis connection settings; production compose requires a generated `REDIS_PASSWORD` |
 | `JWT_SECRET` | ✅ | Secret для JWT токенов |
 | `REZEIS_CRYPT_KEY` | ✅ | AES-256 ключ для шифрования TOTP / OAuth secrets |
 | `REMNAWAVE_HOST` | — | Хост панели Remnawave |
@@ -357,7 +361,7 @@ rezeis/
 | `RUID_PROCESS_ROLE` | — | `api` (default), `worker`, `all` |
 | `RUID_SKIP_MIGRATIONS` | — | `true` чтобы пропустить `migrate deploy` при старте |
 
-Полный список — в `rezeis-admin/.env.example`.
+Полный список — в `rezeis-admin/.env.example`. `DATABASE_URL` и `REDIS_URL` остаются только для legacy/manual запусков, где конкретный компонент явно ожидает URL.
 
 ---
 

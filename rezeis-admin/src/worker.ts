@@ -4,7 +4,10 @@ import { INestApplicationContext, Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 
 import { AppModule } from './app.module';
+import { configureBigIntJsonSerialization } from './common/runtime/bigint-json';
 import { getProcessRole } from './common/runtime/process-role.util';
+
+configureBigIntJsonSerialization();
 
 const WORKER_SIGNALS: readonly NodeJS.Signals[] = ['SIGINT', 'SIGTERM'];
 

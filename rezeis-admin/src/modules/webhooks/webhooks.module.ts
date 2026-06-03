@@ -1,7 +1,7 @@
 import { BullModule } from '@nestjs/bullmq';
-import { HttpModule } from '@nestjs/axios';
 import { Module } from '@nestjs/common';
 
+import { OutboundHttpModule } from '../../common/http/outbound-http.module';
 import { AuthModule } from '../auth/auth.module';
 import { RbacModule } from '../rbac/rbac.module';
 import { AdminWebhooksController } from './controllers/admin-webhooks.controller';
@@ -32,7 +32,7 @@ import { WEBHOOK_DELIVERY_QUEUE } from './webhooks.constants';
   imports: [
     AuthModule,
     RbacModule,
-    HttpModule,
+    OutboundHttpModule,
     BullModule.registerQueue({ name: WEBHOOK_DELIVERY_QUEUE }),
   ],
   controllers: [AdminWebhooksController],

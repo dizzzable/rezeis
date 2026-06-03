@@ -1,7 +1,7 @@
-import { HttpModule } from '@nestjs/axios';
 import { BullModule } from '@nestjs/bullmq';
 import { Module } from '@nestjs/common';
 
+import { OutboundHttpModule } from '../../common/http/outbound-http.module';
 import { AuthModule } from '../auth/auth.module';
 import { PartnersModule } from '../partners/partners.module';
 import { PlansModule } from '../plans/plans.module';
@@ -39,7 +39,7 @@ import { TelegramStarsWebhookService } from './services/telegram-stars-webhook.s
 @Module({
   imports: [
     AuthModule,
-    HttpModule,
+    OutboundHttpModule,
     RemnawaveModule,
     SubscriptionsModule,
     PlansModule,

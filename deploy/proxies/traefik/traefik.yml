@@ -3,8 +3,8 @@
 # file provider (see config/tls.yml).
 
 api:
-  dashboard: true
-  debug: true
+  dashboard: false
+  debug: false
 
 entryPoints:
   https:

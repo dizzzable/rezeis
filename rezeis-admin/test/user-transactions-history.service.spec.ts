@@ -1,152 +1,190 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { Currency, PaymentGatewayType, PurchaseChannel, PurchaseType, TransactionStatus } from '@prisma/client';
+import {
+  Currency,
+  PaymentGatewayType,
+  PurchaseChannel,
+  PurchaseType,
+  TransactionStatus,
+} from '@prisma/client';
 
-import { UserTransactionsHistoryService } from '../src/modules/user-activity/services/user-transactions-history.service';
+import { InternalUserEdgeService } from '../src/modules/internal-user/services/internal-user-edge.service';
 
-type UserTransactionsPrisma = ConstructorParameters<typeof UserTransactionsHistoryService>[0];
-type TransactionCountArgs = Parameters<UserTransactionsPrisma['transaction']['count']>[0];
-type TransactionFindManyArgs = Parameters<UserTransactionsPrisma['transaction']['findMany']>[0];
-type TransactionRecord = {
-  id: string;
-  paymentId: string;
-  userId: string;
-  subscriptionId: string | null;
-  status: TransactionStatus;
-  purchaseType: PurchaseType;
-  channel: PurchaseChannel;
-  gatewayType: PaymentGatewayType;
-  currency: Currency;
-  amount: { toString: () => string };
-  paymentAsset: string | null;
-  gatewayId: string | null;
-  planSnapshot: unknown;
-  createdAt: Date;
-  updatedAt: Date;
-};
-type UserTransactionsPrismaDouble = {
-  transaction: {
-    count: (args: TransactionCountArgs) => Promise<number>;
-    findMany: (args: TransactionFindManyArgs) => Promise<TransactionRecord[]>;
-  };
-};
+describe('InternalUserEdgeService activity feed', () => {
+  it('lists recent notifications for the resolved Telegram user', async () => {
+    const state = createState({ userId: 'user-1' });
+    const service = new InternalUserEdgeService(createPrismaDouble(state) as never);
 
-describe('UserTransactionsHistoryService', () => {
-  it('returns paginated transactions ordered newest first', async () => {
-    const state = { countArgs: [] as unknown[], findManyArgs: [] as unknown[] };
-    const prismaDouble: UserTransactionsPrismaDouble = {
-      transaction: {
-        count: async (args: TransactionCountArgs) => {
-          state.countArgs.push(args);
-          return 2;
-        },
-        findMany: async (args: TransactionFindManyArgs) => {
-          state.findManyArgs.push(args);
-          return [
-            createTransaction({ id: 'tx-2', paymentId: 'payment-2', amount: '12.50' }),
-            createTransaction({ id: 'tx-1', paymentId: 'payment-1', amount: '8.00' }),
-          ];
-        },
-      },
-    };
-    const service = new UserTransactionsHistoryService(prismaDouble as unknown as UserTransactionsPrisma);
+    const result = await service.listNotifications('12345');
 
-    const result = await service.listTransactions({
-      userId: 'user-1',
-      page: 2,
-      limit: 10,
-      status: TransactionStatus.COMPLETED,
-      gatewayType: PaymentGatewayType.YOOKASSA,
-      purchaseType: PurchaseType.NEW,
-    });
-
+    assert.deepStrictEqual(state.userFindCalls, [{ where: { telegramId: BigInt(12345) }, select: { id: true } }]);
+    assert.deepStrictEqual(state.notificationFindManyCalls, [
+      { where: { userId: 'user-1' }, orderBy: { createdAt: 'desc' }, take: 50 },
+    ]);
     assert.deepStrictEqual(result, {
-      items: [
+      notifications: [
         {
-          id: 'tx-2',
-          paymentId: 'payment-2',
-          userId: 'user-1',
-          subscriptionId: null,
-          status: TransactionStatus.COMPLETED,
-          purchaseType: PurchaseType.NEW,
-          channel: PurchaseChannel.WEB,
-          gatewayType: PaymentGatewayType.YOOKASSA,
-          currency: Currency.USD,
-          amount: '12.50',
-          paymentAsset: null,
-          gatewayId: null,
-          planSnapshot: { id: 'plan-1' },
+          id: 'notification-1',
+          type: 'PAYMENT_COMPLETED',
+          payload: { paymentId: 'payment-1' },
+          readAt: null,
           createdAt: '2026-04-20T00:00:00.000Z',
-          updatedAt: '2026-04-20T00:00:00.000Z',
         },
+      ],
+    });
+  });
+
+  it('returns unread counts and marks all unread notifications read', async () => {
+    const state = createState({ userId: 'user-1', unreadCount: 7, updateManyCount: 3 });
+    const service = new InternalUserEdgeService(createPrismaDouble(state) as never);
+
+    assert.deepStrictEqual(await service.getUnreadCount('cmphfcr6i007v01jg0lcu653h'), { unread: 7 });
+    const readAll = await service.markAllRead('cmphfcr6i007v01jg0lcu653h');
+
+    assert.deepStrictEqual(readAll, { updated: 3 });
+    assert.deepStrictEqual(state.notificationCountCalls, [
+      { where: { userId: 'user-1', readAt: null } },
+    ]);
+    assert.equal(state.notificationUpdateManyCalls.length, 1);
+    assert.deepStrictEqual(state.notificationUpdateManyCalls[0]?.where, {
+      userId: 'user-1',
+      readAt: null,
+    });
+    assert.ok(state.notificationUpdateManyCalls[0]?.data.readAt instanceof Date);
+  });
+
+  it('marks one notification read only when it belongs to the resolved user', async () => {
+    const state = createState({ userId: 'user-1' });
+    const service = new InternalUserEdgeService(createPrismaDouble(state) as never);
+
+    assert.deepStrictEqual(await service.markOneRead('12345', 'notification-1'), { ok: true });
+
+    assert.deepStrictEqual(state.notificationFindUniqueCalls, [
+      { where: { id: 'notification-1' }, select: { id: true, userId: true } },
+    ]);
+    assert.equal(state.notificationUpdateCalls.length, 1);
+    assert.deepStrictEqual(state.notificationUpdateCalls[0]?.where, { id: 'notification-1' });
+    assert.ok(state.notificationUpdateCalls[0]?.data.readAt instanceof Date);
+  });
+
+  it('rejects attempts to mark another user notification as read', async () => {
+    const state = createState({ userId: 'user-1', notificationOwnerId: 'other-user' });
+    const service = new InternalUserEdgeService(createPrismaDouble(state) as never);
+
+    await assert.rejects(
+      () => service.markOneRead('12345', 'notification-1'),
+      /Notification not found/,
+    );
+    assert.deepStrictEqual(state.notificationUpdateCalls, []);
+  });
+
+  it('lists recent transactions for the resolved user', async () => {
+    const state = createState({ userId: 'user-1' });
+    const service = new InternalUserEdgeService(createPrismaDouble(state) as never);
+
+    const result = await service.listTransactions('12345');
+
+    assert.deepStrictEqual(state.transactionFindManyCalls, [
+      { where: { userId: 'user-1' }, orderBy: { createdAt: 'desc' }, take: 50 },
+    ]);
+    assert.deepStrictEqual(result, {
+      transactions: [
         {
           id: 'tx-1',
           paymentId: 'payment-1',
-          userId: 'user-1',
-          subscriptionId: null,
           status: TransactionStatus.COMPLETED,
           purchaseType: PurchaseType.NEW,
           channel: PurchaseChannel.WEB,
           gatewayType: PaymentGatewayType.YOOKASSA,
           currency: Currency.USD,
           amount: '8.00',
-          paymentAsset: null,
-          gatewayId: null,
-          planSnapshot: { id: 'plan-1' },
           createdAt: '2026-04-20T00:00:00.000Z',
           updatedAt: '2026-04-20T00:00:00.000Z',
         },
       ],
-      total: 2,
-      page: 2,
-      limit: 10,
     });
-    assert.deepStrictEqual(state.countArgs, [
-      {
-        where: {
-          userId: 'user-1',
-          status: TransactionStatus.COMPLETED,
-          gatewayType: PaymentGatewayType.YOOKASSA,
-          purchaseType: PurchaseType.NEW,
-        },
-      },
-    ]);
-    assert.deepStrictEqual(state.findManyArgs, [
-      {
-        where: {
-          userId: 'user-1',
-          status: TransactionStatus.COMPLETED,
-          gatewayType: PaymentGatewayType.YOOKASSA,
-          purchaseType: PurchaseType.NEW,
-        },
-        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-        skip: 10,
-        take: 10,
-      },
-    ]);
   });
 });
 
-function createTransaction(input: {
-  readonly id: string;
-  readonly paymentId: string;
-  readonly amount: string;
-}) {
+function createPrismaDouble(state: ReturnType<typeof createState>) {
   return {
-    id: input.id,
-    paymentId: input.paymentId,
-    userId: 'user-1',
-    subscriptionId: null,
+    user: {
+      findUnique: async (args: unknown) => {
+        state.userFindCalls.push(args);
+        return state.userId === null ? null : { id: state.userId };
+      },
+    },
+    userNotificationEvent: {
+      findMany: async (args: unknown) => {
+        state.notificationFindManyCalls.push(args);
+        return [
+          {
+            id: 'notification-1',
+            type: 'PAYMENT_COMPLETED',
+            payload: { paymentId: 'payment-1' },
+            readAt: null,
+            createdAt: new Date('2026-04-20T00:00:00.000Z'),
+          },
+        ];
+      },
+      count: async (args: unknown) => {
+        state.notificationCountCalls.push(args);
+        return state.unreadCount;
+      },
+      updateMany: async (args: { readonly where: unknown; readonly data: { readonly readAt: Date } }) => {
+        state.notificationUpdateManyCalls.push(args);
+        return { count: state.updateManyCount };
+      },
+      findUnique: async (args: unknown) => {
+        state.notificationFindUniqueCalls.push(args);
+        return { id: 'notification-1', userId: state.notificationOwnerId };
+      },
+      update: async (args: { readonly where: unknown; readonly data: { readonly readAt: Date } }) => {
+        state.notificationUpdateCalls.push(args);
+        return { id: 'notification-1' };
+      },
+    },
+    transaction: {
+      findMany: async (args: unknown) => {
+        state.transactionFindManyCalls.push(args);
+        return [createTransaction()];
+      },
+    },
+  };
+}
+
+function createState(input: {
+  readonly userId?: string | null;
+  readonly notificationOwnerId?: string;
+  readonly unreadCount?: number;
+  readonly updateManyCount?: number;
+} = {}) {
+  return {
+    userId: input.userId ?? 'user-1',
+    notificationOwnerId: input.notificationOwnerId ?? input.userId ?? 'user-1',
+    unreadCount: input.unreadCount ?? 0,
+    updateManyCount: input.updateManyCount ?? 0,
+    userFindCalls: [] as unknown[],
+    notificationFindManyCalls: [] as unknown[],
+    notificationCountCalls: [] as unknown[],
+    notificationUpdateManyCalls: [] as Array<{ readonly where: unknown; readonly data: { readonly readAt: Date } }>,
+    notificationFindUniqueCalls: [] as unknown[],
+    notificationUpdateCalls: [] as Array<{ readonly where: unknown; readonly data: { readonly readAt: Date } }>,
+    transactionFindManyCalls: [] as unknown[],
+  };
+}
+
+function createTransaction() {
+  return {
+    id: 'tx-1',
+    paymentId: 'payment-1',
     status: TransactionStatus.COMPLETED,
     purchaseType: PurchaseType.NEW,
     channel: PurchaseChannel.WEB,
     gatewayType: PaymentGatewayType.YOOKASSA,
     currency: Currency.USD,
-    amount: { toString: (): string => input.amount },
-    paymentAsset: null,
-    gatewayId: null,
-    planSnapshot: { id: 'plan-1' },
+    amount: { toString: (): string => '8.00' },
     createdAt: new Date('2026-04-20T00:00:00.000Z'),
     updatedAt: new Date('2026-04-20T00:00:00.000Z'),
   };

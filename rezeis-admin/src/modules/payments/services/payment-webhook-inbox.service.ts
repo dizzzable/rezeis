@@ -7,6 +7,7 @@ import {
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { PaymentWebhookEnvelopeInterface } from '../interfaces/payment-webhook-envelope.interface';
+import { normalizePaymentProviderError } from '../utils/payment-provider-error.util';
 
 export const PAYMENT_WEBHOOK_STATUS_RECEIVED = PaymentWebhookLifecycleStatus.RECEIVED;
 export const PAYMENT_WEBHOOK_STATUS_ENQUEUED = PaymentWebhookLifecycleStatus.ENQUEUED;
@@ -139,11 +140,12 @@ export class PaymentWebhookInboxService {
   }
 
   public async markFailed(eventId: string, lastError: string): Promise<PaymentWebhookEvent> {
+    const normalizedLastError = normalizePaymentProviderError(lastError, PAYMENT_WEBHOOK_STATUS_FAILED);
     return this.prismaService.paymentWebhookEvent.update({
       where: { id: eventId },
       data: {
         status: PAYMENT_WEBHOOK_STATUS_FAILED,
-        lastError: lastError.slice(0, 2048),
+        lastError: normalizedLastError.slice(0, 2048),
         lastTransitionAt: new Date(),
       },
     });

@@ -1,210 +1,117 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { PromoCodeActivation } from '@prisma/client';
 
+import { PromocodeAvailability, PromocodeRewardType, SubscriptionStatus } from '@prisma/client';
+
+import { PromocodeInterface } from '../src/modules/promocodes/interfaces/promocode.interface';
 import { PromocodeRewardsService } from '../src/modules/promocodes/services/promocode-rewards.service';
 
-function makeActivation(overrides: Partial<PromoCodeActivation> = {}): PromoCodeActivation {
+function buildPromocode(overrides: Partial<PromocodeInterface> = {}): PromocodeInterface {
   return {
-    id: 'activation-1',
-    promoCodeId: 'promo-1',
-    userId: 'user-1',
-    targetSubscriptionId: null,
-    rewardType: 'SUBSCRIPTION',
-    rewardValue: 30,
-    promoCodeSnapshot: { planSnapshot: { id: 'plan-1', name: 'Plan', trafficLimit: null, deviceLimit: 3 } } as never,
-    activatedAt: new Date('2026-04-24T12:00:00.000Z'),
-    createdAt: new Date('2026-04-24T12:00:00.000Z'),
-    updatedAt: new Date('2026-04-24T12:00:00.000Z'),
+    id: 'promo-1',
+    code: 'PROMO',
+    isActive: true,
+    availability: PromocodeAvailability.ALL,
+    rewardType: PromocodeRewardType.DURATION,
+    reward: 7,
+    plan: null,
+    lifetime: null,
+    maxActivations: null,
+    allowedTelegramIds: [],
+    allowedPlanIds: [],
+    activationsCount: 0,
+    createdAt: '2026-04-20T10:00:00.000Z',
+    updatedAt: '2026-04-20T10:00:00.000Z',
     ...overrides,
-  } as PromoCodeActivation;
+  };
 }
 
 describe('PromocodeRewardsService', () => {
-  it('marks created profile sync job failed when subscription reward enqueue fails', async () => {
-    const events: string[] = [];
-    const rawQueueError = new Error('redis://admin:secret@redis.internal payload sub_raw token raw-provider-token');
-    const transactionClient = {
-      subscription: {
-        create: async () => {
-          events.push('subscription.create');
-          return { id: 'subscription-1' };
-        },
-      },
-      promoCodeActivation: {
-        update: async () => {
-          events.push('activation.update');
-          return {};
-        },
-      },
-      profileSyncJob: {
-        create: async () => {
-          events.push('profileSyncJob.create');
-          return { id: 'sync-job-1' };
-        },
-        update: async (input: unknown) => {
-          events.push('profileSyncJob.update');
-          assert.deepStrictEqual(input, {
-            where: { id: 'sync-job-1' },
-            data: {
-              status: 'FAILED',
-              lastError: 'PROFILE_SYNC_ENQUEUE_FAILED',
-              nextRetryAt: null,
-              processedAt: (input as { readonly data: { readonly processedAt: Date } }).data.processedAt,
-            },
-          });
-          return {};
-        },
-      },
-    };
-    const prisma = {
-      $transaction: async (callback: (client: typeof transactionClient) => Promise<unknown>) => {
-        events.push('transaction.begin');
-        const result = await callback(transactionClient);
-        events.push('transaction.commit');
-        return result;
-      },
-      subscription: {
-        create: async () => {
-          throw new Error('root subscription.create should not be used for subscription reward staging');
-        },
-      },
-      promoCodeActivation: {
-        update: async () => {
-          throw new Error('root promoCodeActivation.update should not be used for subscription reward staging');
-        },
-      },
-      profileSyncJob: {
-        create: async () => {
-          throw new Error('root profileSyncJob.create should not be used for subscription reward staging');
-        },
-        update: transactionClient.profileSyncJob.update,
-      },
-    };
-    const queue = {
-      enqueueJob: async (jobId: string) => {
-        events.push(`enqueue:${jobId}`);
-        throw rawQueueError;
-      },
-    };
-    const service = new PromocodeRewardsService(prisma as never, undefined, queue as never);
+  it('applies discount rewards with bounded percentage values', async () => {
+    const updateCalls: unknown[] = [];
+    const service = new PromocodeRewardsService();
 
-    await assert.rejects(() => service.executeReward(makeActivation(), null), rawQueueError);
+    const result = await service.applyReward({
+      transactionClient: {
+        user: {
+          update: async (args: unknown) => {
+            updateCalls.push(args);
+          },
+        },
+      } as never,
+      promocode: buildPromocode({ rewardType: PromocodeRewardType.PERSONAL_DISCOUNT, reward: 250 }),
+      userId: 'user-1',
+      targetSubscriptionId: null,
+    });
 
-    assert.deepStrictEqual(events, [
-      'transaction.begin',
-      'subscription.create',
-      'activation.update',
-      'profileSyncJob.create',
-      'transaction.commit',
-      'enqueue:sync-job-1',
-      'profileSyncJob.update',
+    assert.deepStrictEqual(result, { applied: true, rewardValue: 100 });
+    assert.deepStrictEqual(updateCalls, [
+      { where: { id: 'user-1' }, data: { personalDiscount: 100 } },
     ]);
-    const serializedEvents = JSON.stringify(events);
-    assert.equal(serializedEvents.includes('secret'), false);
-    assert.equal(serializedEvents.includes('raw-provider-token'), false);
   });
 
-  it('preserves the original enqueue error when failed marker update also fails', async () => {
-    const rawQueueError = new Error('bullmq enqueue rejected provider-token');
-    const transactionClient = {
-      subscription: { create: async () => ({ id: 'subscription-1' }) },
-      promoCodeActivation: { update: async () => ({}) },
-      profileSyncJob: {
-        create: async () => ({ id: 'sync-job-2' }),
-      },
-    };
-    const prisma = {
-      $transaction: async (callback: (client: typeof transactionClient) => Promise<unknown>) => callback(transactionClient),
-      profileSyncJob: {
-        update: async () => {
-          throw new Error('marker update failed');
-        },
-      },
-    };
-    const queue = {
-      enqueueJob: async () => {
-        throw rawQueueError;
-      },
-    };
-    const service = new PromocodeRewardsService(prisma as never, undefined, queue as never);
+  it('extends active subscriptions for duration rewards', async () => {
+    const updateCalls: unknown[] = [];
+    const service = new PromocodeRewardsService();
+    const expiresAt = new Date('2026-05-01T00:00:00.000Z');
 
-    await assert.rejects(() => service.executeReward(makeActivation(), null), rawQueueError);
+    const result = await service.applyReward({
+      transactionClient: {
+        subscription: {
+          findUnique: async () => ({ expiresAt, status: SubscriptionStatus.ACTIVE }),
+          update: async (args: unknown) => {
+            updateCalls.push(args);
+          },
+        },
+      } as never,
+      promocode: buildPromocode({ rewardType: PromocodeRewardType.DURATION, reward: 10 }),
+      userId: 'user-1',
+      targetSubscriptionId: 'sub-1',
+    });
+
+    assert.deepStrictEqual(result, { applied: true, rewardValue: 10 });
+    assert.deepStrictEqual(updateCalls, [
+      {
+        where: { id: 'sub-1' },
+        data: { expiresAt: new Date('2026-05-11T00:00:00.000Z') },
+      },
+    ]);
   });
 
-  it('normalizes Remnawave provider failures for existing subscription rewards', async () => {
-    const rawProviderError = new Error(
-      'Remnawave failed https://remnawave.internal/subscriptionUrl profile token=raw-provider-token 0194f4b6-7cc7-7ecb-9f62-123456789abc',
-    );
-    let subscriptionUpdateCalls = 0;
-    const prisma = {
-      subscription: {
-        update: async () => {
-          subscriptionUpdateCalls += 1;
-          throw new Error('local subscription update must not run after provider failure');
+  it('creates local subscription rows from subscription reward plan snapshots', async () => {
+    const createCalls: unknown[] = [];
+    const service = new PromocodeRewardsService();
+    const result = await service.applyReward({
+      transactionClient: {
+        subscription: {
+          create: async (args: unknown) => {
+            createCalls.push(args);
+          },
         },
-      },
-    };
-    const remnawaveCalls: unknown[] = [];
-    const remnawave = {
-      updateSubscriptionUser: async (payload: unknown) => {
-        remnawaveCalls.push(payload);
-        throw rawProviderError;
-      },
-    };
-    const service = new PromocodeRewardsService(prisma as never, remnawave as never, undefined);
-    const cases = [
-      {
-        rewardType: 'DURATION' as const,
-        rewardValue: 7,
-        targetSubscription: {
-          id: 'subscription-duration',
-          userId: 'user-1',
-          remnawaveId: 'remnawave-subscription-duration',
-          expiresAt: new Date('2026-04-24T12:00:00.000Z'),
+      } as never,
+      promocode: buildPromocode({
+        rewardType: PromocodeRewardType.SUBSCRIPTION,
+        reward: null,
+        plan: {
+          id: 'plan-1',
+          name: 'Premium',
+          type: 'BOTH',
+          trafficLimit: 100,
+          deviceLimit: 5,
+          trafficLimitStrategy: 'NO_RESET',
+          internalSquads: ['squad-a'],
+          externalSquad: null,
+          duration: 30,
         },
-      },
-      {
-        rewardType: 'TRAFFIC' as const,
-        rewardValue: 10,
-        targetSubscription: {
-          id: 'subscription-traffic',
-          userId: 'user-1',
-          remnawaveId: 'remnawave-subscription-traffic',
-          trafficLimitBytes: 100,
-        },
-      },
-      {
-        rewardType: 'DEVICES' as const,
-        rewardValue: 2,
-        targetSubscription: {
-          id: 'subscription-devices',
-          userId: 'user-1',
-          remnawaveId: 'remnawave-subscription-devices',
-          deviceLimit: 3,
-        },
-      },
-    ];
+      }),
+      userId: 'user-1',
+      targetSubscriptionId: null,
+    });
 
-    for (const rewardCase of cases) {
-      await assert.rejects(
-        () => service.executeReward(
-          makeActivation({ rewardType: rewardCase.rewardType, rewardValue: rewardCase.rewardValue }),
-          rewardCase.targetSubscription as never,
-        ),
-        (error: unknown) => {
-          const serialized = JSON.stringify(error);
-          assert.equal(serialized.includes('REMNAWAVE_PROVIDER_ERROR'), true, rewardCase.rewardType);
-          assert.equal(serialized.includes('https://remnawave.internal'), false, rewardCase.rewardType);
-          assert.equal(serialized.includes('subscriptionUrl'), false, rewardCase.rewardType);
-          assert.equal(serialized.includes('raw-provider-token'), false, rewardCase.rewardType);
-          assert.equal(serialized.includes('0194f4b6-7cc7-7ecb-9f62-123456789abc'), false, rewardCase.rewardType);
-          return true;
-        },
-      );
-    }
-
-    assert.equal(subscriptionUpdateCalls, 0);
-    assert.equal(remnawaveCalls.length, cases.length);
+    assert.deepStrictEqual(result, { applied: true, rewardValue: 30 });
+    assert.equal(createCalls.length, 1);
+    assert.equal((createCalls[0] as { data: { userId: string } }).data.userId, 'user-1');
+    assert.equal((createCalls[0] as { data: { status: SubscriptionStatus } }).data.status, SubscriptionStatus.ACTIVE);
+    assert.deepStrictEqual((createCalls[0] as { data: { internalSquads: string[] } }).data.internalSquads, ['squad-a']);
   });
 });

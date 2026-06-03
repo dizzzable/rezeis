@@ -208,6 +208,9 @@ function normalizeUuidArray(values: readonly string[]): readonly string[] {
 function normalizePlanWriteInput(input: NormalizedPlanWriteInput): NormalizedPlanWriteInput {
   let trafficLimit = input.trafficLimit;
   let deviceLimit = input.deviceLimit;
+  let archivedRenewMode = input.archivedRenewMode;
+  let replacementPlanIds = input.replacementPlanIds;
+  let allowedUserIds = input.allowedUserIds;
   if (input.type === 'DEVICES') {
     trafficLimit = null;
   } else if (input.type === 'TRAFFIC') {
@@ -216,9 +219,19 @@ function normalizePlanWriteInput(input: NormalizedPlanWriteInput): NormalizedPla
     trafficLimit = null;
     deviceLimit = -1;
   }
+  if (!input.isArchived) {
+    archivedRenewMode = ArchivedPlanRenewModeValue.SELF_RENEW;
+    replacementPlanIds = [];
+  }
+  if (input.availability !== PlanAvailability.ALLOWED) {
+    allowedUserIds = [];
+  }
   return {
     ...input,
+    archivedRenewMode,
     trafficLimit,
     deviceLimit,
+    replacementPlanIds,
+    allowedUserIds,
   };
 }

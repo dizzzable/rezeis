@@ -1,603 +1,231 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { appConfig } from '../src/common/config/app.config';
-import { validateEnvironment } from '../src/common/config/env.schema';
+import {
+  buildDatabaseUrl,
+  buildRedisUrl,
+  validateEnvironment,
+} from '../src/common/config/env.schema';
 
 describe('validateEnvironment', () => {
-  it('parses the SMTP delivery variables into the expected runtime shapes', () => {
-    const actualEnvironment = validateEnvironment(createValidEnvironmentVariables());
-    assert.equal(actualEnvironment.REZEIS_ADMIN_SMTP_HOST, 'smtp.example.com');
-    assert.equal(actualEnvironment.REZEIS_ADMIN_SMTP_PORT, 465);
-    assert.equal(actualEnvironment.REZEIS_ADMIN_SMTP_SECURE, true);
-    assert.equal(actualEnvironment.REZEIS_ADMIN_SMTP_REPLY_TO, 'support@example.com');
-    assert.equal(actualEnvironment.REZEIS_ADMIN_SMTP_TIMEOUT_MS, 10000);
-    assert.equal(actualEnvironment.REZEIS_ADMIN_METRICS_ACCESS_MODE, 'open');
-    assert.equal(actualEnvironment.REZEIS_ADMIN_TRUST_PROXY, 'disabled');
+  it('parses required secrets and runtime defaults', () => {
+    const actualEnvironment = validateEnvironment(createRequiredEnvironment());
+
+    assert.equal(actualEnvironment.NODE_ENV, 'development');
+    assert.equal(actualEnvironment.REZEIS_DOMAIN, 'localhost');
+    assert.equal(actualEnvironment.REZEIS_HOST, '0.0.0.0');
+    assert.equal(actualEnvironment.REZEIS_PORT, 8000);
+    assert.equal(actualEnvironment.REZEIS_LOCALES, 'ru,en');
+    assert.equal(actualEnvironment.REZEIS_DEFAULT_LOCALE, 'ru');
+    assert.equal(actualEnvironment.REZEIS_CRYPT_KEY, 'crypt-key-v2');
+    assert.equal(actualEnvironment.DATABASE_HOST, 'localhost');
+    assert.equal(actualEnvironment.DATABASE_PORT, 5432);
+    assert.equal(actualEnvironment.DATABASE_NAME, 'rezeis');
+    assert.equal(actualEnvironment.DATABASE_USER, 'rezeis');
+    assert.equal(actualEnvironment.DATABASE_PASSWORD, 'database-password-v2');
+    assert.equal(actualEnvironment.REDIS_HOST, 'localhost');
+    assert.equal(actualEnvironment.REDIS_PORT, 6379);
+    assert.equal(actualEnvironment.REDIS_NAME, 0);
+    assert.equal(actualEnvironment.BACKUP_AUTO_ENABLED, true);
+    assert.equal(actualEnvironment.BACKUP_COMPRESSION, true);
+    assert.equal(actualEnvironment.EMAIL_ENABLED, false);
+    assert.equal(actualEnvironment.EMAIL_PORT, 587);
+    assert.equal(actualEnvironment.EMAIL_FROM_ADDRESS, 'no-reply@rezeis.local');
+    assert.equal(actualEnvironment.EMAIL_FROM_NAME, 'Rezeis');
+    assert.equal(actualEnvironment.EMAIL_USE_TLS, true);
+    assert.equal(actualEnvironment.EMAIL_USE_SSL, false);
+    assert.equal(actualEnvironment.REIWA_BOT_URL, 'http://reiwa-bot:5100');
   });
 
-  it('accepts basic-auth protected metrics mode when both credentials are provided', () => {
+  it('coerces split database and Redis config and builds service URLs', () => {
     const actualEnvironment = validateEnvironment({
-      ...createValidEnvironmentVariables(),
-      REZEIS_ADMIN_METRICS_ACCESS_MODE: 'basic',
-      REZEIS_ADMIN_METRICS_BASIC_USER: 'prometheus',
-      REZEIS_ADMIN_METRICS_BASIC_PASSWORD: 'metrics-password',
+      ...createRequiredEnvironment(),
+      DATABASE_HOST: 'db.internal',
+      DATABASE_PORT: '6543',
+      DATABASE_NAME: 'rezeis_prod',
+      DATABASE_USER: 'rezeis_user',
+      DATABASE_PASSWORD: 'p@ ss',
+      REDIS_HOST: 'redis.internal',
+      REDIS_PORT: '6380',
+      REDIS_NAME: '2',
+      REDIS_PASSWORD: 'redis password',
     });
 
-    assert.equal(actualEnvironment.REZEIS_ADMIN_METRICS_ACCESS_MODE, 'basic');
-    assert.equal(actualEnvironment.REZEIS_ADMIN_METRICS_BASIC_USER, 'prometheus');
-    assert.equal(actualEnvironment.REZEIS_ADMIN_METRICS_BASIC_PASSWORD, 'metrics-password');
+    assert.equal(actualEnvironment.DATABASE_PORT, 6543);
+    assert.equal(actualEnvironment.REDIS_PORT, 6380);
+    assert.equal(actualEnvironment.REDIS_NAME, 2);
+    assert.equal(buildDatabaseUrl(actualEnvironment), 'postgresql://rezeis_user:p%40%20ss@db.internal:6543/rezeis_prod');
+    assert.equal(buildRedisUrl(actualEnvironment), 'redis://:redis%20password@redis.internal:6380/2');
   });
 
-  it('normalizes and accepts Redis and Redis TLS URLs', () => {
-    const redisEnvironment = validateEnvironment({
-      ...createValidEnvironmentVariables(),
-      REDIS_URL: '  redis://localhost:6379/1  ',
-    });
-    const redissEnvironment = validateEnvironment({
-      ...createValidEnvironmentVariables(),
-      REDIS_URL: 'rediss://cache.example.com:6380/0',
-    });
-
-    assert.equal(redisEnvironment.REDIS_URL, 'redis://localhost:6379/1');
-    assert.equal(redissEnvironment.REDIS_URL, 'rediss://cache.example.com:6380/0');
-  });
-
-  it('normalizes a comma-separated CORS origin allowlist', () => {
+  it('normalizes blank optional string values to omitted values', () => {
     const actualEnvironment = validateEnvironment({
-      ...createValidEnvironmentVariables(),
-      REZEIS_ADMIN_CORS_ORIGIN: ' https://admin.example.com , https://ops.example.com:8443 , https://admin.example.com ',
+      ...createRequiredEnvironment(),
+      WEBHOOK_URL: '   ',
+      WEBHOOK_SECRET_HEADER: '   ',
+      REMNAWAVE_HOST: '   ',
+      REMNAWAVE_PORT: '   ',
+      REMNAWAVE_TOKEN: '   ',
+      REDIS_PASSWORD: '   ',
+      REZEIS_INTERNAL_SHARED_SECRET: '   ',
+      REZEIS_UPDATE_REPO: '   ',
+      REZEIS_REIWA_UPDATE_REPO: '   ',
     });
 
-    assert.deepEqual(actualEnvironment.REZEIS_ADMIN_CORS_ORIGIN, [
-      'https://admin.example.com',
-      'https://ops.example.com:8443',
-    ]);
+    assert.equal(actualEnvironment.WEBHOOK_URL, undefined);
+    assert.equal(actualEnvironment.WEBHOOK_SECRET_HEADER, undefined);
+    assert.equal(actualEnvironment.REMNAWAVE_HOST, undefined);
+    assert.equal(actualEnvironment.REMNAWAVE_PORT, undefined);
+    assert.equal(actualEnvironment.REMNAWAVE_TOKEN, undefined);
+    assert.equal(actualEnvironment.REDIS_PASSWORD, undefined);
+    assert.equal(actualEnvironment.REZEIS_INTERNAL_SHARED_SECRET, undefined);
+    assert.equal(actualEnvironment.REZEIS_UPDATE_REPO, undefined);
+    assert.equal(actualEnvironment.REZEIS_REIWA_UPDATE_REPO, undefined);
   });
 
-  it('provides the validated normalized CORS origins to app config', () => {
-    const previousEnvironment = process.env;
-    process.env = {
-      ...previousEnvironment,
-      ...createValidEnvironmentVariables(),
-      REZEIS_ADMIN_CORS_ORIGIN: ' https://admin.example.com , https://admin.example.com , https://ops.example.com ',
-    } as NodeJS.ProcessEnv;
-
-    try {
-      assert.deepEqual(appConfig(), {
-        corsOrigin: ['https://admin.example.com', 'https://ops.example.com'],
-        docsEnabled: true,
-        externalReadinessMode: 'disabled',
-        nodeEnv: 'test',
-        port: 3000,
-        serviceName: 'rezeis-admin',
-        trustProxy: 'disabled',
-      });
-    } finally {
-      process.env = previousEnvironment;
-    }
-  });
-
-  it('keeps API docs enabled by default outside production and disabled by default in production', () => {
-    const developmentEnvironment = validateEnvironment({
-      ...createValidEnvironmentVariables(),
-      NODE_ENV: 'development',
-    });
-    const productionEnvironment = validateEnvironment({
-      ...createValidEnvironmentVariables(),
-      NODE_ENV: 'production',
-    });
-
-    assert.equal(developmentEnvironment.REZEIS_ADMIN_DOCS_ENABLED, undefined);
-    assert.equal(productionEnvironment.REZEIS_ADMIN_DOCS_ENABLED, undefined);
-
-    const previousEnvironment = process.env;
-    try {
-      process.env = {
-        ...previousEnvironment,
-        ...createValidEnvironmentVariables(),
-        NODE_ENV: 'development',
-      } as NodeJS.ProcessEnv;
-      assert.equal(appConfig().docsEnabled, true);
-
-      process.env = {
-        ...previousEnvironment,
-        ...createValidEnvironmentVariables(),
-        NODE_ENV: 'production',
-      } as NodeJS.ProcessEnv;
-      assert.equal(appConfig().docsEnabled, false);
-    } finally {
-      process.env = previousEnvironment;
-    }
-  });
-
-  it('allows explicit API docs exposure overrides through validated environment config', () => {
-    const disabledEnvironment = validateEnvironment({
-      ...createValidEnvironmentVariables(),
-      NODE_ENV: 'development',
-      REZEIS_ADMIN_DOCS_ENABLED: 'false',
-    });
-    const enabledEnvironment = validateEnvironment({
-      ...createValidEnvironmentVariables(),
-      NODE_ENV: 'production',
-      REZEIS_ADMIN_DOCS_ENABLED: 'true',
-    });
-
-    assert.equal(disabledEnvironment.REZEIS_ADMIN_DOCS_ENABLED, false);
-    assert.equal(enabledEnvironment.REZEIS_ADMIN_DOCS_ENABLED, true);
-
-    const previousEnvironment = process.env;
-    try {
-      process.env = {
-        ...previousEnvironment,
-        ...createValidEnvironmentVariables(),
-        NODE_ENV: 'development',
-        REZEIS_ADMIN_DOCS_ENABLED: 'false',
-      } as NodeJS.ProcessEnv;
-      assert.equal(appConfig().docsEnabled, false);
-
-      process.env = {
-        ...previousEnvironment,
-        ...createValidEnvironmentVariables(),
-        NODE_ENV: 'production',
-        REZEIS_ADMIN_DOCS_ENABLED: 'true',
-      } as NodeJS.ProcessEnv;
-      assert.equal(appConfig().docsEnabled, true);
-    } finally {
-      process.env = previousEnvironment;
-    }
-  });
-
-  it('rejects invalid API docs exposure values', () => {
-    for (const docsEnabled of ['yes', '1', 'enabled', 'TRUE']) {
-      assert.throws(
-        (): void => {
-          validateEnvironment({
-            ...createValidEnvironmentVariables(),
-            REZEIS_ADMIN_DOCS_ENABLED: docsEnabled,
-          });
-        },
-        assertEnvironmentConfigurationError,
-      );
-    }
-  });
-
-  it('allows only bounded named trusted proxy modes and exposes them through app config', () => {
-    for (const trustProxy of ['loopback', 'linklocal', 'uniquelocal'] as const) {
-      const actualEnvironment = validateEnvironment({
-        ...createValidEnvironmentVariables(),
-        REZEIS_ADMIN_TRUST_PROXY: trustProxy,
-      });
-      assert.equal(actualEnvironment.REZEIS_ADMIN_TRUST_PROXY, trustProxy);
-    }
-
-    const previousEnvironment = process.env;
-    process.env = {
-      ...previousEnvironment,
-      ...createValidEnvironmentVariables(),
-      REZEIS_ADMIN_TRUST_PROXY: 'loopback',
-    } as NodeJS.ProcessEnv;
-
-    try {
-      assert.equal(appConfig().trustProxy, 'loopback');
-    } finally {
-      process.env = previousEnvironment;
-    }
-  });
-
-  it('rejects unsafe trusted proxy configuration values without echoing raw header-like input', () => {
-    for (const trustProxy of [
-      'true',
-      '1',
-      '*',
-      '10.0.0.0/8',
-      'x-forwarded-for: 203.0.113.10',
-      'loopback,uniquelocal',
-    ]) {
-      assert.throws(
-        (): void => {
-          validateEnvironment({
-            ...createValidEnvironmentVariables(),
-            REZEIS_ADMIN_TRUST_PROXY: trustProxy,
-          });
-        },
-        (error: unknown): boolean => {
-          assertEnvironmentConfigurationError(error);
-          const message = error instanceof Error ? error.message : '';
-          assert.match(message, /REZEIS_ADMIN_TRUST_PROXY/);
-          assert.doesNotMatch(message, /203\.0\.113\.10/);
-          assert.doesNotMatch(message, /x-forwarded-for/i);
-          assert.doesNotMatch(message, /10\.0\.0\.0/);
-          return true;
-        },
-      );
-    }
-  });
-
-  it('allows only bounded external readiness modes and exposes them through app config', () => {
-    const disabledEnvironment = validateEnvironment({
-      ...createValidEnvironmentVariables(),
-    });
-    const remnawaveEnvironment = validateEnvironment({
-      ...createValidEnvironmentVariables(),
-      REZEIS_ADMIN_EXTERNAL_READINESS_MODE: 'remnawave',
-    });
-
-    assert.equal(disabledEnvironment.REZEIS_ADMIN_EXTERNAL_READINESS_MODE, 'disabled');
-    assert.equal(remnawaveEnvironment.REZEIS_ADMIN_EXTERNAL_READINESS_MODE, 'remnawave');
-
-    const previousEnvironment = process.env;
-    process.env = {
-      ...previousEnvironment,
-      ...createValidEnvironmentVariables(),
-      REZEIS_ADMIN_EXTERNAL_READINESS_MODE: 'remnawave',
-    } as NodeJS.ProcessEnv;
-
-    try {
-      assert.equal(appConfig().externalReadinessMode, 'remnawave');
-    } finally {
-      process.env = previousEnvironment;
-    }
-  });
-
-  it('rejects unsafe external readiness mode values without echoing secret-like input', () => {
-    for (const externalReadinessMode of ['enabled', 'all', 'remnawave,redis', 'token-secret-remnawave']) {
-      assert.throws(
-        (): void => {
-          validateEnvironment({
-            ...createValidEnvironmentVariables(),
-            REZEIS_ADMIN_EXTERNAL_READINESS_MODE: externalReadinessMode,
-          });
-        },
-        (error: unknown): boolean => {
-          assertEnvironmentConfigurationError(error);
-          const message = error instanceof Error ? error.message : '';
-          assert.match(message, /REZEIS_ADMIN_EXTERNAL_READINESS_MODE/);
-          assert.doesNotMatch(message, /token-secret-remnawave/);
-          return true;
-        },
-      );
-    }
-  });
-
-  it('rejects unsafe CORS origins before runtime CORS is configured', () => {
-    for (const corsOrigin of [
-      '*',
-      'https://admin.example.com/path',
-      'https://admin.example.com?token=secret',
-      'https://user:secret@admin.example.com',
-      'ftp://admin.example.com',
-      'javascript:alert(1)',
-      'data:text/html,<script>alert(1)</script>',
-      'file:///etc/passwd',
-      'not-a-url',
-      'https://admin.example.com,',
-      'https://admin.example.com\r\nAccess-Control-Allow-Origin: *',
-    ]) {
-      assert.throws(
-        (): void => {
-          validateEnvironment({
-            ...createValidEnvironmentVariables(),
-            REZEIS_ADMIN_CORS_ORIGIN: corsOrigin,
-          });
-        },
-        assertEnvironmentConfigurationError,
-      );
-    }
-  });
-
-  it('rejects unsafe Redis URLs before BullMQ receives them', () => {
-    for (const redisUrl of [
-      '   ',
-      'http://localhost:6379/0',
-      'redis://localhost:6379/0\r\nAUTH secret',
-      'not-a-url',
-    ]) {
-      assert.throws(
-        (): void => {
-          validateEnvironment({
-            ...createValidEnvironmentVariables(),
-            REDIS_URL: redisUrl,
-          });
-        },
-        assertEnvironmentConfigurationError,
-      );
-    }
-  });
-
-  it('formats environment validation failures without leaking raw secret values or stack traces', () => {
-    assert.throws(
-      (): void => {
-        validateEnvironment({
-          ...createValidEnvironmentVariables(),
-          REDIS_URL: 'redis://admin:super-secret-redis-password@cache.internal:6379/0\r\nAUTH leaked',
-          REZEIS_ADMIN_DOCS_ENABLED: 'enabled-with-secret-token',
-        });
-      },
-      (error: unknown): boolean => {
-        assertEnvironmentConfigurationError(error);
-        const serializedError = JSON.stringify(error);
-        const message = error instanceof Error ? error.message : '';
-        const stack = error instanceof Error ? error.stack : undefined;
-
-        assert.match(message, /Environment configuration validation failed/);
-        assert.match(message, /REDIS_URL/);
-        assert.match(message, /REZEIS_ADMIN_DOCS_ENABLED/);
-        assert.doesNotMatch(message, /super-secret-redis-password/);
-        assert.doesNotMatch(message, /redis:\/\/admin/);
-        assert.doesNotMatch(message, /enabled-with-secret-token/);
-        assert.equal(stack, '');
-        assert.doesNotMatch(serializedError, /super-secret-redis-password/);
-        return true;
-      },
-    );
-  });
-
-  it('rejects placeholder/default values for secret-like environment variables without echoing them', () => {
-    for (const [environmentKey, placeholderValue] of [
-      ['REZEIS_ADMIN_JWT_SECRET', 'change_me'],
-      ['REZEIS_ADMIN_INTERNAL_API_KEY', 'changeme'],
-      ['REZEIS_ADMIN_METRICS_BASIC_PASSWORD', 'default'],
-      ['REZEIS_ADMIN_SMTP_PASSWORD', 'password'],
-      ['REMNAWAVE_TOKEN', 'secret'],
-      ['REMNAWAVE_WEBHOOK_SECRET', 'replace-me'],
-      ['REMNAWAVE_CADDY_TOKEN', 'example-secret'],
-      ['REMNAWAVE_COOKIE', 'please-change'],
-      ['BOT_TOKEN', 'token'],
-    ] as const) {
-      assert.throws(
-        (): void => {
-          validateEnvironment({
-            ...createValidEnvironmentVariables(),
-            REZEIS_ADMIN_METRICS_ACCESS_MODE:
-              environmentKey === 'REZEIS_ADMIN_METRICS_BASIC_PASSWORD' ? 'basic' : 'open',
-            REZEIS_ADMIN_METRICS_BASIC_USER:
-              environmentKey === 'REZEIS_ADMIN_METRICS_BASIC_PASSWORD' ? 'prometheus' : undefined,
-            REMNAWAVE_HOST: environmentKey.startsWith('REMNAWAVE_') ? 'remnawave' : undefined,
-            REMNAWAVE_PORT: environmentKey.startsWith('REMNAWAVE_') ? '3000' : undefined,
-            REMNAWAVE_TOKEN: environmentKey.startsWith('REMNAWAVE_') ? 'remnawave-runtime-token' : undefined,
-            [environmentKey]: placeholderValue,
-          });
-        },
-        (error: unknown): boolean => {
-          assertEnvironmentConfigurationError(error);
-          const message = error instanceof Error ? error.message : '';
-          assert.match(message, new RegExp(environmentKey));
-          assert.match(message, /must not use a placeholder value/);
-          if (!environmentKey.toLowerCase().includes(placeholderValue.toLowerCase())) {
-            assert.doesNotMatch(message, new RegExp(placeholderValue.replace('-', '[-_]'), 'i'));
-            assert.doesNotMatch(JSON.stringify(error), new RegExp(placeholderValue, 'i'));
-          }
-          return true;
-        },
-      );
-    }
-  });
-
-  it('accepts non-placeholder secret-like environment values', () => {
+  it('accepts explicit optional integration configuration', () => {
     const actualEnvironment = validateEnvironment({
-      ...createValidEnvironmentVariables(),
-      REZEIS_ADMIN_JWT_SECRET: 'jwt-secret-v2-2026',
-      REZEIS_ADMIN_INTERNAL_API_KEY: 'internal-api-key-v2-2026',
-      REZEIS_ADMIN_METRICS_ACCESS_MODE: 'basic',
-      REZEIS_ADMIN_METRICS_BASIC_USER: 'prometheus',
-      REZEIS_ADMIN_METRICS_BASIC_PASSWORD: 'metrics-password-v2-2026',
-      REZEIS_ADMIN_SMTP_PASSWORD: 'smtp-password-v2-2026',
-      REMNAWAVE_HOST: 'remnawave',
-      REMNAWAVE_PORT: '3000',
-      REMNAWAVE_TOKEN: 'remnawave-token-v2-2026',
-      REMNAWAVE_WEBHOOK_SECRET: 'remnawave-webhook-v2-2026',
-      REMNAWAVE_CADDY_TOKEN: 'remnawave-caddy-v2-2026',
-      REMNAWAVE_COOKIE: 'remnawave-cookie-v2-2026',
-      BOT_TOKEN: 'telegram-bot-token-v2-2026',
-    });
-
-    assert.equal(actualEnvironment.REZEIS_ADMIN_JWT_SECRET, 'jwt-secret-v2-2026');
-    assert.equal(actualEnvironment.REZEIS_ADMIN_INTERNAL_API_KEY, 'internal-api-key-v2-2026');
-    assert.equal(actualEnvironment.REMNAWAVE_TOKEN, 'remnawave-token-v2-2026');
-    assert.equal(actualEnvironment.BOT_TOKEN, 'telegram-bot-token-v2-2026');
-  });
-
-  it('validates JWT expiration as an ms-compatible duration before auth config consumes it', () => {
-    for (const jwtExpiresIn of ['900', '15m', '2 h', '7d', '1week', '30 seconds']) {
-      const actualEnvironment = validateEnvironment({
-        ...createValidEnvironmentVariables(),
-        REZEIS_ADMIN_JWT_EXPIRES_IN: jwtExpiresIn,
-      });
-
-      assert.equal(actualEnvironment.REZEIS_ADMIN_JWT_EXPIRES_IN, jwtExpiresIn);
-    }
-  });
-
-  it('rejects invalid JWT expiration values without echoing raw secret-like input', () => {
-    for (const jwtExpiresIn of ['forever', '12parsecs', '1;token=super-secret', 'https://auth.example.com/token']) {
-      assert.throws(
-        (): void => {
-          validateEnvironment({
-            ...createValidEnvironmentVariables(),
-            REZEIS_ADMIN_JWT_EXPIRES_IN: jwtExpiresIn,
-          });
-        },
-        (error: unknown): boolean => {
-          assertEnvironmentConfigurationError(error);
-          const message = error instanceof Error ? error.message : '';
-          assert.match(message, /REZEIS_ADMIN_JWT_EXPIRES_IN/);
-          assert.match(message, /ms-compatible duration/);
-          assert.doesNotMatch(message, /super-secret/i);
-          assert.doesNotMatch(message, /auth\.example\.com/i);
-          assert.doesNotMatch(JSON.stringify(error), /super-secret/i);
-          return true;
-        },
-      );
-    }
-  });
-
-  it('rejects basic-auth protected metrics mode without complete credentials', () => {
-    assert.throws(
-      (): void => {
-        validateEnvironment({
-          ...createValidEnvironmentVariables(),
-          REZEIS_ADMIN_METRICS_ACCESS_MODE: 'basic',
-          REZEIS_ADMIN_METRICS_BASIC_USER: 'prometheus',
-        });
-      },
-      assertEnvironmentConfigurationError,
-    );
-  });
-
-  it('rejects unsafe metrics basic-auth usernames', () => {
-    assert.throws(
-      (): void => {
-        validateEnvironment({
-          ...createValidEnvironmentVariables(),
-          REZEIS_ADMIN_METRICS_ACCESS_MODE: 'basic',
-          REZEIS_ADMIN_METRICS_BASIC_USER: 'prometheus:admin',
-          REZEIS_ADMIN_METRICS_BASIC_PASSWORD: 'metrics-password',
-        });
-      },
-      assertEnvironmentConfigurationError,
-    );
-  });
-
-  it('treats whitespace-only optional SMTP values as omitted', () => {
-    const actualEnvironment = validateEnvironment({
-      ...createValidEnvironmentVariables(),
-      REZEIS_ADMIN_SMTP_USER: '   ',
-      REZEIS_ADMIN_SMTP_PASSWORD: '   ',
-      REZEIS_ADMIN_SMTP_REPLY_TO: '   ',
-      REZEIS_ADMIN_SMTP_IDENTITY_DOMAIN: '   ',
-    });
-    assert.equal(actualEnvironment.REZEIS_ADMIN_SMTP_USER, undefined);
-    assert.equal(actualEnvironment.REZEIS_ADMIN_SMTP_PASSWORD, undefined);
-    assert.equal(actualEnvironment.REZEIS_ADMIN_SMTP_REPLY_TO, undefined);
-    assert.equal(actualEnvironment.REZEIS_ADMIN_SMTP_IDENTITY_DOMAIN, undefined);
-  });
-
-  it('rejects an invalid SMTP sender address', () => {
-    assert.throws(
-      (): void => {
-        validateEnvironment({
-          ...createValidEnvironmentVariables(),
-          REZEIS_ADMIN_SMTP_FROM_ADDRESS: 'not-an-email',
-        });
-      },
-      assertEnvironmentConfigurationError,
-    );
-  });
-
-  it('rejects SMTP timeout values above the bounded resource limit without echoing the raw value', () => {
-    assert.throws(
-      (): void => {
-        validateEnvironment({
-          ...createValidEnvironmentVariables(),
-          REZEIS_ADMIN_SMTP_TIMEOUT_MS: '60001',
-        });
-      },
-      (error: unknown): boolean => {
-        assertEnvironmentConfigurationError(error);
-        const message = error instanceof Error ? error.message : '';
-        assert.match(message, /REZEIS_ADMIN_SMTP_TIMEOUT_MS/);
-        assert.doesNotMatch(message, /60001/);
-        return true;
-      },
-    );
-  });
-
-  it('rejects partial SMTP authentication configuration', () => {
-    assert.throws(
-      (): void => {
-        validateEnvironment({
-          ...createValidEnvironmentVariables(),
-          REZEIS_ADMIN_SMTP_PASSWORD: '',
-        });
-      },
-      assertEnvironmentConfigurationError,
-    );
-  });
-
-  it('rejects an unsafe SMTP identity domain', () => {
-    assert.throws(
-      (): void => {
-        validateEnvironment({
-          ...createValidEnvironmentVariables(),
-          REZEIS_ADMIN_SMTP_IDENTITY_DOMAIN: 'bad domain\r\n',
-        });
-      },
-      assertEnvironmentConfigurationError,
-    );
-  });
-
-  it('accepts a valid SMTP identity domain', () => {
-    const actualEnvironment = validateEnvironment({
-      ...createValidEnvironmentVariables(),
-      REZEIS_ADMIN_SMTP_IDENTITY_DOMAIN: 'mail.example.com',
-    });
-    assert.equal(actualEnvironment.REZEIS_ADMIN_SMTP_IDENTITY_DOMAIN, 'mail.example.com');
-  });
-
-  it('rejects SMTP sender names with control characters', () => {
-    assert.throws(
-      (): void => {
-        validateEnvironment({
-          ...createValidEnvironmentVariables(),
-          REZEIS_ADMIN_SMTP_FROM_NAME: 'Rezeis\r\nAdmin',
-        });
-      },
-      assertEnvironmentConfigurationError,
-    );
-  });
-
-  it('requires remnawave host, port, and token together when any remnawave value is present', () => {
-    assert.throws(
-      (): void => {
-        validateEnvironment({
-          ...createValidEnvironmentVariables(),
-          REMNAWAVE_HOST: 'remnawave',
-        });
-      },
-      assertEnvironmentConfigurationError,
-    );
-
-    const actualEnvironment = validateEnvironment({
-      ...createValidEnvironmentVariables(),
-      REMNAWAVE_HOST: 'remnawave',
-      REMNAWAVE_PORT: '3000',
+      ...createRequiredEnvironment(),
+      WEBHOOK_ENABLED: 'true',
+      WEBHOOK_URL: 'https://hooks.example.com/rezeis',
+      WEBHOOK_SECRET_HEADER: 'a'.repeat(64),
+      REMNAWAVE_HOST: 'remnawave.internal',
+      REMNAWAVE_PORT: '3001',
       REMNAWAVE_TOKEN: 'remnawave-token-v2',
+      REMNAWAVE_WEBHOOK_SECRET: 'remnawave-webhook-secret-v2',
+      REMNAWAVE_CADDY_TOKEN: 'remnawave-caddy-token-v2',
+      REMNAWAVE_COOKIE: 'remnawave-cookie-v2',
+      REZEIS_INTERNAL_SHARED_SECRET: 'internal-shared-secret-v2',
+      REZEIS_UPDATE_REPO: 'owner/rezeis',
+      REZEIS_REIWA_UPDATE_REPO: 'owner/reiwa',
     });
 
-    assert.equal(actualEnvironment.REMNAWAVE_HOST, 'remnawave');
-    assert.equal(actualEnvironment.REMNAWAVE_PORT, 3000);
+    assert.equal(actualEnvironment.WEBHOOK_ENABLED, true);
+    assert.equal(actualEnvironment.WEBHOOK_URL, 'https://hooks.example.com/rezeis');
+    assert.equal(actualEnvironment.WEBHOOK_SECRET_HEADER, 'a'.repeat(64));
+    assert.equal(actualEnvironment.REMNAWAVE_HOST, 'remnawave.internal');
+    assert.equal(actualEnvironment.REMNAWAVE_PORT, 3001);
     assert.equal(actualEnvironment.REMNAWAVE_TOKEN, 'remnawave-token-v2');
+    assert.equal(actualEnvironment.REZEIS_INTERNAL_SHARED_SECRET, 'internal-shared-secret-v2');
+    assert.equal(actualEnvironment.REZEIS_UPDATE_REPO, 'owner/rezeis');
+    assert.equal(actualEnvironment.REZEIS_REIWA_UPDATE_REPO, 'owner/reiwa');
+  });
+
+  it('requires crypt and database secrets', () => {
+    assert.throws(() => {
+      validateEnvironment({ DATABASE_PASSWORD: 'database-password-v2' });
+    });
+    assert.throws(() => {
+      validateEnvironment({ REZEIS_CRYPT_KEY: 'crypt-key-v2' });
+    });
+  });
+
+  it('requires explicit admin CORS origins in production', () => {
+    assert.throws(
+      () => validateEnvironment({
+        ...createRequiredEnvironment(),
+        NODE_ENV: 'production',
+      }),
+      /ADMIN_CORS_ORIGINS must define at least one trusted admin origin/,
+    );
+
+    const actualEnvironment = validateEnvironment({
+      ...createRequiredEnvironment(),
+      NODE_ENV: 'production',
+      ADMIN_CORS_ORIGINS: 'https://admin.example.com',
+    });
+
+    assert.equal(actualEnvironment.NODE_ENV, 'production');
+    assert.equal(actualEnvironment.ADMIN_CORS_ORIGINS, 'https://admin.example.com');
+  });
+
+  it('rejects wildcard and invalid admin CORS origins', () => {
+    for (const invalidEnvironment of [
+      { ADMIN_CORS_ORIGINS: '*' },
+      { ADMIN_CORS_ORIGINS: 'not-a-url' },
+      { ADMIN_CORS_ORIGINS: 'ftp://admin.example.com' },
+      { ADMIN_CORS_ORIGINS: 'https://user:pass@admin.example.com' },
+      { ADMIN_CORS_ORIGINS: 'https://admin.example.com/panel' },
+      { ADMIN_CORS_ORIGINS: 'https://admin.example.com?token=secret' },
+      { ADMIN_CORS_ORIGINS: 'https://admin.example.com#fragment' },
+    ]) {
+      assert.throws(() => {
+        validateEnvironment({
+          ...createRequiredEnvironment(),
+          ...invalidEnvironment,
+        });
+      }, /ADMIN_CORS_ORIGINS/);
+    }
+  });
+
+  it('rejects unsafe admin CORS origins without echoing raw origin values', () => {
+    assert.throws(
+      () => validateEnvironment({
+        ...createRequiredEnvironment(),
+        ADMIN_CORS_ORIGINS: 'https://admin.example.com?token=secret-token',
+      }),
+      (error: unknown): boolean => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /ADMIN_CORS_ORIGINS/);
+        assert.doesNotMatch(error.message, /secret-token/);
+        assert.doesNotMatch(error.message, /admin\.example\.com/);
+        return true;
+      },
+    );
+  });
+
+  it('rejects invalid numeric and URL inputs before bootstrap continues', () => {
+    for (const invalidEnvironment of [
+      { REZEIS_PORT: '0' },
+      { DATABASE_PORT: '70000' },
+      { REDIS_PORT: '0' },
+      { REDIS_NAME: '-1' },
+      { WEBHOOK_URL: 'not-a-url' },
+      { WEBHOOK_SECRET_HEADER: 'short' },
+      { REIWA_BOT_URL: 'not-a-url' },
+      { REZEIS_INTERNAL_SHARED_SECRET: 'short' },
+    ]) {
+      assert.throws(() => {
+        validateEnvironment({
+          ...createRequiredEnvironment(),
+          ...invalidEnvironment,
+        });
+      });
+    }
+  });
+
+  it('parses booleans strictly while preserving true defaults', () => {
+    const defaultEnvironment = validateEnvironment(createRequiredEnvironment());
+    assert.equal(defaultEnvironment.BACKUP_AUTO_ENABLED, true);
+    assert.equal(defaultEnvironment.BACKUP_COMPRESSION, true);
+    assert.equal(defaultEnvironment.EMAIL_USE_TLS, true);
+
+    const explicitEnvironment = validateEnvironment({
+      ...createRequiredEnvironment(),
+      BACKUP_AUTO_ENABLED: 'false',
+      BACKUP_COMPRESSION: 'false',
+      EMAIL_USE_TLS: 'false',
+      EMAIL_ENABLED: 'true',
+      EMAIL_USE_SSL: 'true',
+    });
+    assert.equal(explicitEnvironment.BACKUP_AUTO_ENABLED, false);
+    assert.equal(explicitEnvironment.BACKUP_COMPRESSION, false);
+    assert.equal(explicitEnvironment.EMAIL_USE_TLS, false);
+    assert.equal(explicitEnvironment.EMAIL_ENABLED, true);
+    assert.equal(explicitEnvironment.EMAIL_USE_SSL, true);
+
+    assert.throws(() => {
+      validateEnvironment({
+        ...createRequiredEnvironment(),
+        EMAIL_ENABLED: 'yes',
+      });
+    });
   });
 });
 
-function createValidEnvironmentVariables(): Record<string, unknown> {
+function createRequiredEnvironment(): Record<string, unknown> {
   return {
-    NODE_ENV: 'test',
-    PORT: '3000',
-    DATABASE_URL: 'postgresql://rezeis:secret@localhost:5432/rezeis',
-    REDIS_URL: 'redis://localhost:6379/0',
-    REZEIS_ADMIN_CORS_ORIGIN: 'http://localhost:3000',
-    REZEIS_ADMIN_JWT_SECRET: 'jwt-secret',
-    REZEIS_ADMIN_JWT_EXPIRES_IN: '12h',
-    REZEIS_ADMIN_INTERNAL_API_KEY: 'internal-api-key',
-    REZEIS_ADMIN_SMTP_HOST: 'smtp.example.com',
-    REZEIS_ADMIN_SMTP_PORT: '465',
-    REZEIS_ADMIN_SMTP_SECURE: 'true',
-    REZEIS_ADMIN_SMTP_USER: 'smtp-user',
-    REZEIS_ADMIN_SMTP_PASSWORD: 'smtp-password',
-    REZEIS_ADMIN_SMTP_FROM_ADDRESS: 'no-reply@example.com',
-    REZEIS_ADMIN_SMTP_FROM_NAME: 'Rezeis Admin',
-    REZEIS_ADMIN_SMTP_REPLY_TO: 'support@example.com',
-    REZEIS_ADMIN_SMTP_TIMEOUT_MS: '10000',
+    REZEIS_CRYPT_KEY: 'crypt-key-v2',
+    DATABASE_PASSWORD: 'database-password-v2',
   };
-}
-
-function assertEnvironmentConfigurationError(error: unknown): boolean {
-  assert.ok(error instanceof Error);
-  assert.equal(error.name, 'EnvironmentConfigurationError');
-  assert.match(error.message, /Environment configuration validation failed/);
-  assert.equal(error.stack, '');
-  assert.doesNotMatch(error.message, /ZodError/);
-  return true;
 }

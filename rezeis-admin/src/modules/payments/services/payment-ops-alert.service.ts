@@ -10,6 +10,7 @@ import { firstValueFrom } from 'rxjs';
 import { paymentsConfig } from '../../../common/config/payments.config';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { readPaymentOpsAlertSettings } from '../../../common/utils/payment-ops-alert-settings.util';
+import { redactPaymentDiagnosticMessage } from '../utils/payment-provider-error.util';
 
 interface ReplayAlertContext {
   readonly reason: string;
@@ -35,7 +36,7 @@ export class PaymentOpsAlertService {
       eventTag: '#event_webhook_failed',
       details: [
         `kind:webhook_failed`,
-        `error:${sanitizeMessage(input.event.lastError) ?? 'unknown'}`,
+        `error:${redactPaymentDiagnosticMessage(input.event.lastError) ?? 'unknown'}`,
       ],
     });
   }
@@ -50,7 +51,7 @@ export class PaymentOpsAlertService {
       details: [
         `kind:webhook_replay`,
         `force:${input.context.force ? 'true' : 'false'}`,
-        `reason:${sanitizeMessage(input.context.reason) ?? 'manual_replay'}`,
+        `reason:${redactPaymentDiagnosticMessage(input.context.reason) ?? 'manual_replay'}`,
       ],
     });
   }
@@ -94,7 +95,7 @@ export class PaymentOpsAlertService {
       );
     } catch (error: unknown) {
       this.logger.warn(
-        `Unable to send payment ops alert to Telegram: ${error instanceof Error ? error.message : 'unknown error'}`,
+        `Unable to send payment ops alert to Telegram: ${normalizeTelegramDeliveryError(error)}`,
       );
     }
   }
@@ -116,7 +117,7 @@ export class PaymentOpsAlertService {
 
   private buildEventLink(eventId: string): string | null {
     const adminPublicBaseUrl = this.configuration.domain;
-    if (adminPublicBaseUrl === null) {
+    if (typeof adminPublicBaseUrl !== 'string' || adminPublicBaseUrl.trim().length === 0) {
       return null;
     }
     const normalizedBaseUrl = adminPublicBaseUrl.replace(/\/$/, '');
@@ -139,14 +140,14 @@ function buildWebhookAlertMessage(input: {
     `#status_${normalizeTag(input.event.status ?? 'unknown')}`,
   ];
   const detailLines = [
-    `event_id:${input.event.id}`,
-    `payment_id:${input.event.paymentId}`,
-    `provider_event_id:${input.event.providerEventId}`,
+    `event_id:${input.event.id.length > 0 ? 'hidden' : 'missing'}`,
+    `payment_id:${input.event.paymentId.length > 0 ? 'present' : 'missing'}`,
+    `provider_event_id:${input.event.providerEventId.length > 0 ? 'present' : 'missing'}`,
     `gateway:${input.event.gatewayType}`,
     `status:${input.event.status}`,
     ...input.details,
-    input.eventLink === null ? null : `link:${input.eventLink}`,
-  ].filter((line): line is string => line !== null);
+    `link:${input.eventLink === null ? 'not_configured' : 'configured'}`,
+  ];
   return [...hashtags, ...detailLines].join('\n');
 }
 
@@ -154,9 +155,21 @@ function normalizeTag(value: string | PaymentGatewayType): string {
   return String(value).trim().toLowerCase();
 }
 
-function sanitizeMessage(value: string | null): string | null {
-  if (value === null) {
+function normalizeTelegramDeliveryError(error: unknown): string {
+  const status = readHttpStatus(error);
+  return status === null
+    ? 'TELEGRAM_DELIVERY_FAILED'
+    : `TELEGRAM_DELIVERY_FAILED (status ${status})`;
+}
+
+function readHttpStatus(error: unknown): number | null {
+  if (typeof error !== 'object' || error === null || !('response' in error)) {
     return null;
   }
-  return value.replace(/\s+/g, ' ').trim().slice(0, 300);
+  const response = (error as { readonly response?: unknown }).response;
+  if (typeof response !== 'object' || response === null || !('status' in response)) {
+    return null;
+  }
+  const status = (response as { readonly status?: unknown }).status;
+  return typeof status === 'number' && Number.isFinite(status) ? status : null;
 }

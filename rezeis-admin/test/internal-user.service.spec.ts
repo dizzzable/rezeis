@@ -89,6 +89,7 @@ describe('InternalUserService', () => {
               name: 'Starter',
               description: 'Starter plan',
               tag: 'public',
+              icon: null,
               type: 'TRAFFIC',
               trafficLimit: 1024,
               deviceLimit: 1,
@@ -130,6 +131,7 @@ describe('InternalUserService', () => {
         name: 'Starter',
         description: 'Starter plan',
         tag: 'public',
+        icon: null,
         type: 'TRAFFIC',
         trafficLimit: 1024,
         deviceLimit: 1,
@@ -209,6 +211,7 @@ describe('InternalUserService', () => {
             planSnapshot: { name: 'Expired', type: 'TRAFFIC' },
             trafficLimit: 2048,
             deviceLimit: 1,
+            remnawaveId: null,
             configUrl: 'https://expired.example.com',
             startedAt: new Date(now - 90_000),
             expiresAt: new Date(now - 30_000),
@@ -223,6 +226,7 @@ describe('InternalUserService', () => {
             planSnapshot: { name: 'Current', type: 'UNLIMITED', ignored: 'value' },
             trafficLimit: null,
             deviceLimit: 3,
+            remnawaveId: null,
             configUrl: 'https://current.example.com',
             startedAt: new Date(now - 60_000),
             expiresAt: new Date(now + 60_000),
@@ -243,11 +247,16 @@ describe('InternalUserService', () => {
       status: SubscriptionStatus.ACTIVE,
       isTrial: true,
       plan: {
+        id: null,
         name: 'Current',
         type: 'UNLIMITED',
       },
       trafficLimit: null,
+      trafficUsed: null,
       deviceLimit: 3,
+      userRemnaId: null,
+      profileName: null,
+      url: 'https://current.example.com',
       configUrl: 'https://current.example.com',
       startedAt: new Date(now - 60_000).toISOString(),
       expiresAt: new Date(now + 60_000).toISOString(),
@@ -2692,7 +2701,10 @@ describe('InternalUserService', () => {
     const emailService = createEmailServiceMock({
       sendLinkedAccountVerificationCode: async (): Promise<void> => {
         emailSendCallsCount += 1;
-        throw new EmailDeliveryException('definitely-not-delivered');
+        throw new EmailDeliveryException(
+          'failed to deliver transactional email',
+          'definitely-not-delivered',
+        );
       },
     });
     const service = new InternalUserService(
@@ -2730,7 +2742,10 @@ describe('InternalUserService', () => {
   });
 
   it('keeps the delivery failure primary and hides revoke diagnostics when the compensating revoke also fails', async () => {
-    const deliveryError = new EmailDeliveryException('definitely-not-delivered');
+    const deliveryError = new EmailDeliveryException(
+      'failed to deliver transactional email',
+      'definitely-not-delivered',
+    );
     const revokeError = new Error(
       'failed to revoke issued challenge postgres://admin:secret-password@db.internal/auth token=raw-revoke-token',
     );
@@ -2889,7 +2904,10 @@ describe('InternalUserService', () => {
     };
     const emailService = createEmailServiceMock({
       sendLinkedAccountVerificationCode: async (): Promise<void> => {
-        throw new EmailDeliveryException('delivery-status-uncertain');
+        throw new EmailDeliveryException(
+          'failed to deliver transactional email',
+          'possibly-delivered',
+        );
       },
     });
     const service = new InternalUserService(
@@ -2914,7 +2932,6 @@ describe('InternalUserService', () => {
   it('revokes a just-created challenge when the persisted recipient email is malformed', async () => {
     let authChallengeCreateCallsCount: number = 0;
     let authChallengeCompensationCallsCount: number = 0;
-    let smtpSendCallsCount: number = 0;
     let actualCompensationArgs: unknown;
     const expiresAt = new Date('2026-04-17T05:17:00.000Z');
     const revokedAt = new Date('2026-04-17T05:03:00.000Z');
@@ -2991,18 +3008,7 @@ describe('InternalUserService', () => {
         findMany: async (): Promise<readonly unknown[]> => [],
       },
     };
-    const emailService = new EmailService(
-      {
-        sendMail: async (): Promise<void> => {
-          smtpSendCallsCount += 1;
-        },
-      } as never,
-      {
-        fromAddress: 'no-reply@example.com',
-        fromName: 'Rezeis Admin',
-        replyTo: 'support@example.com',
-      } as never,
-    );
+    const emailService = new EmailService();
     const service = new InternalUserService(
       prismaService as never,
       createPasswordHashServiceMock(),
@@ -3016,12 +3022,11 @@ describe('InternalUserService', () => {
           });
         },
         {
-          name: 'InvalidRecipientEmailDeliveryException',
-          message: 'failed to deliver transactional email',
+          name: 'EmailDeliveryException',
+          message: 'Refusing to send verification code: invalid email address',
         },
       );
       assert.equal(authChallengeCreateCallsCount, 1);
-      assert.equal(smtpSendCallsCount, 0);
       assert.equal(authChallengeCompensationCallsCount, 1);
       assert.deepStrictEqual(actualCompensationArgs, {
         where: {
@@ -4143,6 +4148,7 @@ function createInternalUserRecord(input: {
     isBlocked: false,
     isBotBlocked: false,
     isRulesAccepted: true,
+    onboardingCompletedAt: null,
     createdAt: new Date('2026-04-01T00:00:00.000Z'),
     updatedAt,
     webAccount,
@@ -4192,6 +4198,7 @@ function mapExpectedInternalSession(input: {
     isBlocked: false,
     isBotBlocked: false,
     isRulesAccepted: true,
+    onboardingCompleted: false,
     createdAt: '2026-04-01T00:00:00.000Z',
     updatedAt: input.updatedAt,
     webAccount: {

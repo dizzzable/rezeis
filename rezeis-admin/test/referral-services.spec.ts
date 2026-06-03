@@ -1,126 +1,110 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { ReferralInvitesService } from '../src/modules/referrals/services/referral-invites.service';
-import { ReferralSummaryService } from '../src/modules/referrals/services/referral-summary.service';
+import { NotFoundException } from '@nestjs/common';
 
-describe('ReferralSummaryService', () => {
-  it('builds referral summary from user, invites, referrals, and rewards', async () => {
-    const service = new ReferralSummaryService({
-      user: {
-        findUnique: async () => ({ id: 'user-1', referralCode: 'ref-1', points: 42 }),
-      },
-      referralInvite: {
-        count: async () => 2,
-        findMany: async () => [],
-      },
+import { ReferralsService } from '../src/modules/referrals/services/referrals.service';
+
+function user(id: string, overrides: Record<string, unknown> = {}) {
+  return {
+    id,
+    username: `${id}-username`,
+    name: `${id}-name`,
+    telegramId: BigInt('123456789'),
+    createdAt: new Date('2026-04-01T00:00:00.000Z'),
+    ...overrides,
+  };
+}
+
+describe('ReferralsService', () => {
+  it('lists referrals with current filters and maps user summaries safely', async () => {
+    let findManyArgs: unknown;
+    const service = new ReferralsService({
       referral: {
-        count: async (args: { where: { qualifiedAt?: unknown } }) =>
-          args.where.qualifiedAt ? 1 : 3,
-      },
-      referralReward: {
-        count: async (args: { where: { isIssued: boolean } }) => (args.where.isIssued ? 2 : 1),
-        aggregate: async () => ({ _sum: { amount: 150 } }),
+        findMany: async (args: unknown) => {
+          findManyArgs = args;
+          return [{
+            id: 'referral-1',
+            referrer: user('referrer'),
+            referred: user('referred', { name: '' }),
+            qualifiedAt: new Date('2026-04-05T00:00:00.000Z'),
+            createdAt: new Date('2026-04-02T00:00:00.000Z'),
+          }];
+        },
       },
     } as never);
 
-    const result = await service.getSummary('user-1');
+    const result = await service.listReferrals({ referrerId: 'referrer', qualified: 'true', limit: 10, offset: 5 });
 
-    assert.deepStrictEqual(result, {
-      userId: 'user-1',
-      referralCode: 'ref-1',
-      referralPointsBalance: 42,
-      activeInvitesCount: 2,
-      totalReferrals: 3,
-      qualifiedReferrals: 1,
-      issuedRewardsCount: 2,
-      pendingRewardsCount: 1,
-      totalRewardAmount: 150,
+    assert.deepStrictEqual(findManyArgs, {
+      where: { referrerId: 'referrer', referredId: undefined, qualifiedAt: { not: null } },
+      include: {
+        referrer: { select: { id: true, username: true, name: true, telegramId: true, createdAt: true } },
+        referred: { select: { id: true, username: true, name: true, telegramId: true, createdAt: true } },
+      },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: 10,
+      skip: 5,
     });
+    assert.deepStrictEqual(result, [{
+      id: 'referral-1',
+      referrer: {
+        id: 'referrer',
+        username: 'referrer-username',
+        name: 'referrer-name',
+        telegramId: '123456789',
+        createdAt: '2026-04-01T00:00:00.000Z',
+      },
+      referred: {
+        id: 'referred',
+        username: 'referred-username',
+        name: null,
+        telegramId: '123456789',
+        createdAt: '2026-04-01T00:00:00.000Z',
+      },
+      qualifiedAt: '2026-04-05T00:00:00.000Z',
+      createdAt: '2026-04-02T00:00:00.000Z',
+    }]);
   });
 
-  it('lists referral rewards newest first', async () => {
-    const service = new ReferralSummaryService({
-      referralReward: {
-        findMany: async () => [
-          {
-            id: 'reward-2',
-            referralId: 'referral-1',
-            userId: 'user-1',
-            type: 'POINTS',
-            amount: 100,
-            isIssued: true,
-            createdAt: new Date('2026-04-20T00:00:00.000Z'),
-          },
-        ],
-      },
-    } as never);
-
-    const result = await service.listRewards('user-1');
-
-    assert.deepStrictEqual(result, [
-      {
-        id: 'reward-2',
-        referralId: 'referral-1',
-        userId: 'user-1',
-        type: 'POINTS',
-        amount: 100,
-        isIssued: true,
-        createdAt: '2026-04-20T00:00:00.000Z',
-      },
-    ]);
-  });
-});
-
-describe('ReferralInvitesService', () => {
-  it('creates invite using settings defaults when ttl is omitted', async () => {
-    const createCalls: unknown[] = [];
-    const service = new ReferralInvitesService({
-      user: { findUnique: async () => ({ id: 'user-1' }) },
-      settings: { findFirst: async () => ({ referralSettings: { invites: { maxActiveInvitesPerUser: 5, ttlHours: 24 } } }) },
+  it('creates invite tokens only for existing inviters and maps the created row', async () => {
+    let createArgs: unknown;
+    const service = new ReferralsService({
+      user: { findUnique: async () => ({ id: 'inviter-1' }) },
       referralInvite: {
-        count: async () => 0,
-        findUnique: async () => null,
-        create: async (args: { data: Record<string, unknown> }) => {
-          createCalls.push(args.data);
+        create: async (args: unknown) => {
+          createArgs = args;
           return {
             id: 'invite-1',
-            inviterId: 'user-1',
-            token: String(args.data.token),
-            expiresAt: args.data.expiresAt as Date,
+            token: 'generated-token',
+            inviter: user('inviter-1'),
+            note: 'hello',
+            expiresAt: new Date('2026-05-01T00:00:00.000Z'),
             revokedAt: null,
-            createdAt: new Date('2026-04-20T00:00:00.000Z'),
+            consumedAt: null,
+            createdAt: new Date('2026-04-01T00:00:00.000Z'),
           };
         },
       },
     } as never);
 
-    const result = await service.createInvite({ inviterId: 'user-1' });
+    const result = await service.createInvite({
+      inviterId: 'inviter-1',
+      note: 'hello',
+      expiresAt: '2026-05-01T00:00:00.000Z',
+    });
 
-    assert.equal(result.inviterId, 'user-1');
-    assert.equal(result.revokedAt, null);
-    assert.equal(createCalls.length, 1);
+    assert.equal((createArgs as { data: { inviterId: string; note: string } }).data.inviterId, 'inviter-1');
+    assert.equal(typeof (createArgs as { data: { token: string } }).data.token, 'string');
+    assert.equal((createArgs as { data: { note: string } }).data.note, 'hello');
+    assert.deepStrictEqual(result.invite.expiresAt, '2026-05-01T00:00:00.000Z');
   });
 
-  it('revokes an existing invite', async () => {
-    const service = new ReferralInvitesService({
-      referralInvite: {
-        findUnique: async () => ({ id: 'invite-1' }),
-        update: async () => ({
-          id: 'invite-1',
-          inviterId: 'user-1',
-          token: 'TOKEN1234',
-          expiresAt: new Date('2026-04-21T00:00:00.000Z'),
-          revokedAt: new Date('2026-04-20T12:00:00.000Z'),
-          createdAt: new Date('2026-04-20T00:00:00.000Z'),
-        }),
-      },
+  it('rejects invite creation for missing inviters', async () => {
+    const service = new ReferralsService({
+      user: { findUnique: async () => null },
     } as never);
 
-    const result = await service.revokeInvite('invite-1');
-
-    assert.equal(result.id, 'invite-1');
-    assert.equal(result.inviterId, 'user-1');
-    assert.ok(result.revokedAt !== null);
+    await assert.rejects(service.createInvite({ inviterId: 'missing' }), NotFoundException);
   });
 });

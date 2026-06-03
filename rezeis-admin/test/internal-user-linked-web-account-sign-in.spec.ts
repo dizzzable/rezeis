@@ -280,6 +280,7 @@ function createInternalUserRecord(
     isBlocked: false,
     isBotBlocked: false,
     isRulesAccepted: true,
+    onboardingCompletedAt: null,
     createdAt: new Date('2026-04-18T08:00:00.000Z'),
     updatedAt: new Date('2026-04-18T10:00:00.000Z'),
     webAccount: createWebAccountRecord(),
@@ -303,6 +304,7 @@ function createExpectedSession(): InternalUserSessionInterface {
     isBlocked: false,
     isBotBlocked: false,
     isRulesAccepted: true,
+    onboardingCompleted: false,
     createdAt: '2026-04-18T08:00:00.000Z',
     updatedAt: '2026-04-18T10:00:00.000Z',
     webAccount: {

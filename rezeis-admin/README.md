@@ -2,7 +2,7 @@
 
 Rezeis Admin — NestJS backend + React/Vite frontend for the admin panel.
 
-- **Version:** `0.1.0`
+- **Version:** `0.7.3`
 - **Backend:** NestJS 11 · Prisma 7 · PostgreSQL · Redis · BullMQ
 - **Frontend:** React 19 · Vite 8 · TanStack Query 5 · shadcn/ui · Tailwind 4
 
@@ -57,15 +57,27 @@ cd web && npm run build # → dist/
 
 Both images are published to GHCR on every push to `main`:
 
-- `ghcr.io/dizzzable/rezeis-api:0.1.0`
-- `ghcr.io/dizzzable/rezeis-web:0.1.0`
+- `ghcr.io/dizzzable/rezeis:0.7.3`
+- `ghcr.io/dizzzable/rezeis:0.7`
+- `ghcr.io/dizzzable/rezeis:sha-<short>`
 
 Local build:
 
 ```bash
+cp .env.example .env
+# Set generated DATABASE_PASSWORD and REDIS_PASSWORD before starting compose.
 docker compose build
 docker compose up
 ```
+
+`docker-compose.yml` does not ship production DB/Redis passwords. It requires
+`DATABASE_PASSWORD` and `REDIS_PASSWORD` from `.env` or the shell and builds the
+runtime DB/Redis connection settings from the split `DATABASE_*` and `REDIS_*`
+variables.
+
+The compose stack runs the API container with `RUID_PROCESS_ROLE=api` and the
+worker container with `RUID_PROCESS_ROLE=worker` so scheduled jobs and worker
+side effects do not double-run in split mode.
 
 ## Quality gates
 

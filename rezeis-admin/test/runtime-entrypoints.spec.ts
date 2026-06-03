@@ -16,8 +16,10 @@ type PackageJson = {
 
 type NestCliProject = {
   type: string;
+  root?: string;
   sourceRoot: string;
   entryFile: string;
+  compilerOptions?: Record<string, unknown>;
 };
 
 type NestCliJson = {
@@ -47,16 +49,12 @@ describe('runtime entrypoint contract', () => {
   it('declares API and worker Nest CLI projects without adding a scheduler root', () => {
     const nestCli = readJsonFile<NestCliJson>('nest-cli.json');
 
-    assert.deepEqual(nestCli.projects.app, {
-      type: 'application',
-      sourceRoot: 'src',
-      entryFile: 'main',
-    });
-    assert.deepEqual(nestCli.projects.worker, {
-      type: 'application',
-      sourceRoot: 'src',
-      entryFile: 'worker',
-    });
+    assert.equal(nestCli.projects.app.type, 'application');
+    assert.equal(nestCli.projects.app.sourceRoot, 'src');
+    assert.equal(nestCli.projects.app.entryFile, 'main');
+    assert.equal(nestCli.projects.worker.type, 'application');
+    assert.equal(nestCli.projects.worker.sourceRoot, 'src');
+    assert.equal(nestCli.projects.worker.entryFile, 'worker');
     assert.equal(nestCli.projects.scheduler, undefined);
   });
 });

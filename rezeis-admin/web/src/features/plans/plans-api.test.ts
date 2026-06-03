@@ -7,6 +7,7 @@ const ACTIVE_PLAN: Plan = {
   name: 'Active',
   description: null,
   tag: null,
+  icon: null,
   type: 'TRAFFIC',
   availability: 'ALL',
   trafficLimit: 50,

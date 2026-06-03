@@ -1,0 +1,166 @@
+# Next Session Handoff — Rezeis Remediation
+
+Updated: 2026-06-03
+
+## User Context
+
+The user clarified the intended architecture:
+
+- `rezeis` is the admin panel and stores the system truth.
+- `reiwa` is the user-facing runtime where users interact with the service.
+- The two services communicate on the same Docker network through API calls.
+
+Do not re-litigate that boundary. The remediation work should preserve it.
+
+## Files Created For Handoff
+
+- `AGENTS.md` — session bootstrap rules, current gates, skills, guardrails.
+- `docs/progress/rezeis-remediation-plan.md` — prioritized remediation plan with acceptance criteria.
+- This file — short operational handoff for the next session.
+- `scripts/update-handoff.mjs` — updates this file's gate snapshot table.
+- `package.json` — root handoff scripts only.
+- `.githooks/pre-commit` and `.githooks/pre-commit.sample` — optional local hook and matching template; not enabled automatically.
+
+## Handoff Automation
+
+- `npm run handoff:update` from repo root updates the timestamp and marks checks as not run.
+- `npm run handoff:update:verify` runs the configured checks and writes the observed pass/fail summary.
+- The optional `.githooks/pre-commit` can be enabled manually with `git config core.hooksPath .githooks`; it runs the same trusted backend/web gates as root CI plus `npm run handoff:update`. Audits are tracked in the gate snapshot but remain out of the optional hook to keep local commits fast. `.githooks/pre-commit.sample` is kept in sync as the template copy.
+- Do not make the hook mandatory without explicit user approval.
+
+## Continuation Trigger
+
+Start a future session with `продолжение нужно` or `продолжай rezeis` to activate the repo-level continuation instructions in `AGENTS.md`. The next agent should read this handoff, refresh the timestamp with `npm run handoff:update`, check git status, and begin the current Recommended First Slice without asking for another plan.
+
+## Existing Untracked Files To Leave Alone
+
+- `.claude/`
+- `IMPROVEMENT_PLAN.md`
+
+These existed before this handoff. Do not overwrite or delete them unless explicitly asked.
+
+## Current Gate Snapshot
+
+Generated: 2026-06-03T14:15:07.330Z (checks not re-run; previous observed results preserved)
+
+Run these from `V:\REZEIS_ADMIN_RUID_USER\rezeis` or the listed subdirectory.
+
+| Area | Command | Last observed result |
+| --- | --- | --- |
+| Backend Prisma generate | `npm run prisma:generate` in `rezeis-admin` | Pass |
+| Backend typecheck | `npm run typecheck` in `rezeis-admin` | Pass |
+| Backend lint | `npm run lint` in `rezeis-admin` | Pass |
+| Backend tests | `npm test` in `rezeis-admin` | Pass: 513 tests |
+| Backend maintained tests | `npm run test:maintained` in `rezeis-admin` | Pass: 423 tests (336 core + 22 admin-surfaces + 65 email-linking) |
+| Backend admin surfaces tests | `npm run test:maintained:admin-surfaces` in `rezeis-admin` | Pass: 22 tests |
+| Backend admin auth tests | `node --require ts-node/register --test test/admin-auth.service.spec.ts test/auth.controller.spec.ts test/internal-admin.controller.spec.ts test/current-admin.decorator.spec.ts test/current-internal-request.decorator.spec.ts` in `rezeis-admin` | Pass: 22 tests (5 files) |
+| Backend config tests | `node --require ts-node/register --test test/auth.config.spec.ts test/email.config.spec.ts test/payments.config.spec.ts test/redis.config.spec.ts test/remnawave.config.spec.ts test/env.schema.spec.ts` in `rezeis-admin` | Pass: 16 tests |
+| Backend email service tests | `node --require ts-node/register --test test/email.service.spec.ts` in `rezeis-admin` | Pass: 3 tests |
+| Backend Prisma service tests | `node --require ts-node/register --test test/prisma.service.spec.ts` in `rezeis-admin` | Pass: 5 tests |
+| Backend safe exception tests | `node --require ts-node/register --test test/admin-safe-exception.filter.spec.ts` in `rezeis-admin` | Pass: 4 tests |
+| Backend payment diagnostics tests | `node --require ts-node/register --test test/payment-provider-error.util.spec.ts test/payment-provider-execution.service.spec.ts test/payment-webhook-inbox.service.spec.ts test/payments-checkout.service.spec.ts test/payment-ops-alert-delivery.service.spec.ts` in `rezeis-admin` | Pass: 20 tests |
+| Backend payment reconciliation side effects tests | `node --require ts-node/register --test test/payment-reconciliation-notifications.service.spec.ts` in `rezeis-admin` | Pass: 7 tests |
+| Backend user activity edge tests | `node --require ts-node/register --test test/user-activity-query.dto.spec.ts test/user-notifications.service.spec.ts test/user-transactions-history.service.spec.ts` in `rezeis-admin` | Pass: 13 tests |
+| Backend webhook queue ops tests | `node --require ts-node/register --test test/payment-webhook-ingress.service.spec.ts test/payment-webhook-ops.service.spec.ts` in `rezeis-admin` | Pass: 24 tests |
+| Backend internal platform policy tests | `node --require ts-node/register --test test/internal-platform-policy.controller.spec.ts` in `rezeis-admin` | Pass: 6 tests |
+| Backend health endpoint tests | `node --require ts-node/register --test test/health.controller.spec.ts test/health.service.spec.ts` in `rezeis-admin` | Pass: 11 tests |
+| Backend settings/current contract tests | `node --require ts-node/register --test test/settings.controller.spec.ts test/settings.service.spec.ts test/payment-ops-alert-settings.util.spec.ts` in `rezeis-admin` | Pass: 15 tests |
+| Backend web-auth DTO tests | `node --require ts-node/register --test test/web-auth.dto.spec.ts test/web-auth-register-validation.pbt.spec.ts` in `rezeis-admin` | Pass: 13 tests |
+| Backend web-auth controller tests | `node --require ts-node/register --test test/web-auth.controller.spec.ts` in `rezeis-admin` | Pass: 6 tests |
+| Backend web-auth service/password tests | `node --require ts-node/register --test test/web-auth.service.spec.ts test/web-auth.password-hashing.pbt.spec.ts` in `rezeis-admin` | Pass: 16 tests |
+| Backend runtime/request/HTTP tests | `node --require ts-node/register --test test/request-correlation.middleware.spec.ts test/runtime-entrypoints.spec.ts test/api-docs.spec.ts test/app-lifecycle.logger.spec.ts test/bigint-json.spec.ts test/outbound-http-options.spec.ts test/http-runtime.middleware.spec.ts` in `rezeis-admin` | Pass: 23 tests |
+| Backend payment gateway registry tests | `node --require ts-node/register --test test/payment-gateway-registry.service.spec.ts` in `rezeis-admin` | Pass: 6 tests |
+| Backend plans admin tests | `node --require ts-node/register --test test/plans-admin.service.spec.ts` in `rezeis-admin` | Pass: 4 tests |
+| Backend promocode mapper tests | `node --require ts-node/register --test test/plan-record.util.spec.ts` in `rezeis-admin` | Pass: 4 tests |
+| Backend profile-sync tests | `node --require ts-node/register --test test/profile-sync-queue.service.spec.ts test/profile-sync.processor.spec.ts` in `rezeis-admin` | Pass: 14 tests |
+| Backend payment transaction tests | `node --require ts-node/register --test test/payments-transactions.service.spec.ts test/admin-payment-transactions.controller.spec.ts` in `rezeis-admin` | Pass: 7 tests |
+| Backend push tests | `node --require ts-node/register --test test/push.service.spec.ts` in `rezeis-admin` | Pass: 10 tests |
+| Backend Remnawave API/node tests | `node --require ts-node/register --test test/remnawave-api.service.spec.ts test/remnawave-node-mapper.spec.ts` in `rezeis-admin` | Pass: 14 tests |
+| Backend internal user devices tests | `node --require ts-node/register --test test/internal-user-subscription-devices.service.spec.ts` in `rezeis-admin` | Pass: 5 tests |
+| Backend broadcast tests | `node --require ts-node/register --test test/admin-broadcast.service.spec.ts test/admin-broadcast-delivery.service.spec.ts test/admin-broadcast.controller.spec.ts` in `rezeis-admin` | Pass: 15 tests |
+| Backend email-linking tests | `node --require ts-node/register --test test/linking.service.spec.ts test/linking.controller.spec.ts test/internal-user.service.spec.ts test/internal-user-linked-web-account-sign-in.spec.ts test/complete-web-account-email-verification.dto.spec.ts` in `rezeis-admin` | Pass: 65 tests |
+| Backend audit | `npm audit` in `rezeis-admin` | Pass: found 0 vulnerabilities |
+| Web typecheck | `npx tsc -p tsconfig.app.json --noEmit --incremental false` in `rezeis-admin/web` | Pass |
+| Web tests | `npm test` in `rezeis-admin/web` | Pass: 9 files, 55 tests |
+| Web lint | `npm run lint` in `rezeis-admin/web` | Pass, 26 warnings |
+| Web build | `npm run build` in `rezeis-admin/web` | Pass |
+| Web audit | `npm audit` in `rezeis-admin/web` | Pass: found 0 vulnerabilities |
+
+## Recommended First Slice
+
+P0.1, P0.2, P0.3, and P0.4 are complete: web typecheck/tests/lint/build pass, backend typecheck/lint/full tests pass, root `.github/workflows/ci.yml` now runs full backend `npm test` as the blocking backend test signal, and backend/web audits pass. S1 Admin Security CORS allowlist is complete for runtime/config validation: production now fails closed without `ADMIN_CORS_ORIGINS`, configured origins are normalized and deduplicated, and wildcard/invalid/path-bearing credentialed origins are rejected. S2 CSP Rollout is complete as a production report-only Helmet CSP with explicit SPA directives and no enforcing CSP header yet. S3 Swagger Exposure is complete: `/api/docs` is not mounted in production even when `API_DOCS_ENABLED=true` is accidentally set.
+
+Recommended first slice: continue P1 Admin Security with S4 Admin Token Storage And Cache Isolation from `docs/progress/rezeis-remediation-plan.md`: clear TanStack Query and sensitive client stores on logout/login boundaries, then consider the short-term localStorage failure behavior without starting the larger HttpOnly-cookie migration yet.
+
+Latest S1 verification: `node --require ts-node/register --test test/env.schema.spec.ts test/http-runtime.middleware.spec.ts` passed 23 tests; `npm run typecheck` passed; focused ESLint on changed backend files passed.
+
+Latest S2 verification: `node --require ts-node/register --test test/http-runtime.middleware.spec.ts` passed 16 tests; `npm run typecheck` passed; focused ESLint on changed backend files passed.
+
+Latest S3 verification: `node --require ts-node/register --test test/api-docs.spec.ts test/http-runtime.middleware.spec.ts` passed 18 tests; `npm run typecheck` passed; focused ESLint on changed backend files passed.
+
+Historical P0.3 triage notes retained for context:
+
+- Continue backend test triage from current failure groups. Already fixed and verified: config/env tests, `admin-safe-exception.filter.spec.ts`, payment diagnostic tests, current `PaymentProviderExecutionService` checkout/redaction behavior, current `PaymentsTransactionsService` list/draft behavior, current `AdminPaymentTransactionsController` list/draft delegation, current `WebPushService` persistence/delivery behavior, current `InternalPushController` route/delegation behavior, current `EmailService` debug-only verification dispatch and malformed-recipient rejection behavior, `payment-reconciliation-notifications.service.spec.ts`, user activity edge tests, deterministic `payment-webhook-ingress.service.ts` narrow coverage, deterministic `payment-webhook-ops.service.spec.ts`, the internal platform policy / registration-toggle contract, current health controller/service contracts and public health diagnostic redaction, current settings controller/service contracts, current payment-ops alert settings utility contract, current promocodes/referrals service/controller contracts, current promocode mapper/plan snapshot contract, current `PaymentGatewayRegistryService` default-gateway contract, current `PlansAdminService` write/normalization contract, current `ProfileSyncQueueService` and `ProfileSyncProcessor` contracts, current admin auth service/controller/decorator contracts, current `web-auth` DTO validation/recovery behavior, current `InternalWebAuthController` route/delegation behavior, current `WebAuthService`, current scrypt `PasswordHashService` behavior, current Prisma split-env/adapter contract, current Remnawave API/node mapping contracts, current internal user devices controller contracts, current broadcast service/delivery/controller contracts, current linking service/controller contracts, current internal-user email verification/sign-in contracts, current correlation/request logging behavior, runtime API/worker entrypoint contracts, API docs exposure policy, shutdown lifecycle logging, BigInt JSON serialization, bounded outbound HTTP defaults, and HTTP runtime middleware seams.
+- The settings/worker stale-contract group is closed for this slice. `settings.controller.spec.ts` and `settings.service.spec.ts` now target current endpoints and `SettingsService` JSON settings behavior; `payment-ops-alert-settings.util.spec.ts` covers the extracted payment-ops settings utility.
+- Deleted stale contracts: `settings-notification-delivery.service.spec.ts` targeted notification delivery problem/retry methods that no longer exist on `SettingsService`; `worker-module.spec.ts` targeted the removed dedicated `WorkerModule` split. Current worker behavior is covered by `runtime-entrypoints.spec.ts`: package scripts and `nest-cli.json` expose separate API/worker entrypoints while `src/worker.ts` intentionally loads the full `AppModule` and relies on `RUID_PROCESS_ROLE`.
+- The profile-sync stale-contract group is closed for this slice. `profile-sync-queue.service.spec.ts` now targets `src/modules/profile-sync/profile-sync-queue.service.ts`; `profile-sync.processor.spec.ts` covers current CREATE/UPDATE/no-op behavior. Deleted stale contracts: `profile-sync-job-executor.service.spec.ts` targeted the removed payment-owned executor/admin ops surface (`processNextPendingJob`, `listProblemJobs`, compensation notes, force-link); `job-observability.spec.ts` targeted removed `common/observability` and `modules/metrics` contracts plus the old profile-sync executor payload.
+- The payment-provider execution stale-contract group is closed for this slice. `payment-provider-execution.service.spec.ts` no longer targets removed `createRefund`; it now covers current checkout request wiring for YooKassa/Heleket/Platega and verifies unexpected raw provider checkout failures are normalized before leaving `PaymentProviderExecutionService`.
+- Timeout assertions that were load-sensitive under full-suite pressure were made deterministic in `payment-webhook-ingress.service.spec.ts` and `profile-sync-queue.service.spec.ts` by using never-resolving promises instead of wall-clock `<45ms` checks. Maintained suite passes under load.
+- The payment transaction stale-contract group is closed for this slice. `payments-transactions.service.spec.ts` now targets current list/createDraft behavior, including user-search filters, user mapping, quote rejection payloads, TRIAL rejection, device hints, and existing pending draft reuse. `admin-payment-transactions.controller.spec.ts` now targets current list/draft delegation instead of removed refund/manual correction routes.
+- The push stale-contract group is closed for this slice. `push.service.spec.ts` now targets current `WebPushService` upsert/unsubscribe/sendToUser behavior, including VAPID-disabled no-op delivery, successful provider sends, permanent endpoint cleanup, transient failure counting, and current `InternalPushController` route/delegation/payload validation.
+- The password-recovery stale group is closed for this slice. Deleted stale-only specs targeting removed `InternalUserController` password-recovery/reset endpoints and removed Telegram recovery delivery service: `internal-user-password-recovery.controller.spec.ts`, `internal-user-password-recovery.service.spec.ts`, and `telegram-password-recovery-delivery.service.spec.ts`. Current recovery behavior remains covered by `web-auth.dto.spec.ts`, `web-auth.controller.spec.ts`, and `web-auth.service.spec.ts`.
+- The Prisma stale-contract group is closed for this slice. `prisma.service.spec.ts` now targets the current Prisma 7 no-arg provider and split `DATABASE_*` adapter connection behavior, including explicit `DATABASE_URL` fallback.
+- The Remnawave stale-contract group is partially closed for this slice. `remnawave-api.service.spec.ts` now targets current direct panel methods (`getPanelUserDevices`, `deletePanelUserDevice`, `updatePanelUser`, `resetPanelUserTraffic`) instead of removed subscription wrapper methods. Real regression fixed: `mapNode` now hides sensitive `lastStatusMessage` values containing URLs/tokens/auth/config/subscription data.
+- The internal user devices stale-contract group is closed for this slice. `internal-user-subscription-devices.service.spec.ts` now targets current `InternalUserDevicesController` route/delegation/regenerate behavior instead of removed `InternalUserService.getSubscriptionDevices` / `revokeSubscriptionDevice` methods.
+- The admin auth stale-contract group is closed for this slice. `admin-auth.service.spec.ts` now targets the current `AuthConfiguration` (`cryptKey`, no static internal API key), current `AdminAuthService` select/JWT/profile fields (`rbacRoleId`, `mustChangePassword`), and `auth.controller.spec.ts`, `internal-admin.controller.spec.ts`, `current-admin.decorator.spec.ts`, and `current-internal-request.decorator.spec.ts` now target the current controller paths, `username` DTO wiring, TOTP-required mapping, password-change delegation, and current admin profile shape.
+- The email service stale-contract group is closed for this slice. `email.service.spec.ts` now targets the current no-constructor `EmailService` verification-code contract instead of removed `smtp-mail-client.service` helpers and removed `sendLinkedAccountPasswordResetLink` behavior. Real regression fixed: `EmailService` now rejects empty or CR/LF recipient addresses before the current debug-only dispatch path.
+- The broadcast stale-contract group is closed for this slice. `admin-broadcast.service.spec.ts`, `admin-broadcast-delivery.service.spec.ts`, and `admin-broadcast.controller.spec.ts` now target current `BroadcastService`, `BroadcastDeliveryService`, `broadcast-payload.dto.ts`, and `AdminBroadcastController` behavior: draft list/create/update, audience preview filters, recipient staging, Telegram delivery/finalization, route metadata, DTO validation, queue delegation, and media upload validation. Real regression fixed: `BroadcastDeliveryService` now sanitizes Telegram provider diagnostics before persisting failed message errors or logging edit/delete failures.
+- The users/admin stale-contract group is closed for this slice. `admin-user-search-query.dto.spec.ts`, `admin-user-support-message-delivery.service.spec.ts`, `admin-users.service.spec.ts`, `admin-users.controller.spec.ts`, and `admin-users.http.spec.ts` now target current split users/admin controllers, DTOs, and service contracts; verified as 18 passing tests.
+- The health stale-contract group is closed for this slice. `health.controller.spec.ts` and `health.service.spec.ts` now target the current unauthenticated `/health`, `/health/live`, and `/health/ready` contract instead of removed Terminus queue-readiness/status helpers. Real regression fixed: public health responses no longer expose raw database URLs, Redis URLs, tokens, or local backup paths in component `details`; sanitized diagnostics are kept in bounded logs.
+- The email-linking stale-contract group is closed for this slice. `linking.service.spec.ts` and `linking.controller.spec.ts` now target current `src/modules/linking/services/linking.service` and `InternalLinkingController`; `internal-user.service.spec.ts`, `internal-user-linked-web-account-sign-in.spec.ts`, and `complete-web-account-email-verification.dto.spec.ts` now cover current internal-user email verification/sign-in behavior. Deleted stale-only specs that imported removed `src/modules/linking/email-verification.service`, old cache-backed linking code behavior, or duplicate email controller coverage. Real regressions fixed: duplicate normalized linked emails are rejected before issuing a challenge or sending mail, exhausted email-link challenges are filtered/consumed on final wrong attempt, and compensating revoke failures now attach only a stable sanitized marker instead of raw diagnostics.
+- The api-docs/app-lifecycle/bigint-json/outbound-http/http-runtime stale-contract group is closed for this slice. Current seams now live under `src/common/http`, `src/common/lifecycle`, and `src/common/runtime`; `main.ts` gates Swagger behind `API_DOCS_ENABLED`, installs bounded rawBody-aware parsers, no-robots/helmet/correlation middleware, bounded outbound HTTP defaults, and centralizes CORS/proxy settings through validated config. Maintained suite now covers these contracts.
+- The final stale-contract group is closed for this slice. `backup.service.spec.ts`, `dashboard.controller.spec.ts`, `dashboard.service.spec.ts`, `imports.controller.spec.ts`, `imports.service.spec.ts`, `internal-user-activity.controller.spec.ts`, and `internal-user.controller.spec.ts` now target current runtime contracts. Deleted stale-only specs: `governance.controller.spec.ts`, `governance.service.spec.ts`, and `internal-device-provisioning.controller.spec.ts`.
+- Full backend `npm test` is now trustworthy enough to block CI again.
+
+## Important Findings To Keep In Mind
+
+- Root `.github/workflows/ci.yml` and `.github/workflows/docker-publish.yml` are active; nested `rezeis-admin/.github/workflows/*` is not active for this repository layout.
+- Root CI now runs full backend `npm test` as a blocking backend test signal.
+- Backend tests are now trustworthy enough for CI. Real regressions around env parsing, safe exception output, payment diagnostics, payment transaction list/draft behavior, push subscription/delivery behavior, provider checkout failure redaction, payment reconciliation side effects, webhook queue failure bounds, Remnawave node status redaction, internal platform policy behavior, current settings behavior, health diagnostic redaction, current promocodes/referrals behavior, current payment gateway defaults, plans unarchive/update normalization, profile-sync queue/processor behavior, current email verification dispatch validation, current email-linking duplicate/attempt/revoke-sanitization behavior, current web-auth behavior, current password hashing, request correlation/log sanitization, runtime API/worker scripts, API docs exposure, shutdown lifecycle logging, BigInt JSON serialization, bounded outbound HTTP defaults, and HTTP runtime middleware were fixed or reverified in current slices.
+- Previous stale specs were deleted only after confirming the runtime contract was removed: old metrics modules, old user-activity queue/bot/event modules, old web-registration settings, old web-auth challenge/recovery/property contracts, old internal-user password recovery/reset endpoints, old Telegram password recovery delivery service, old settings notification-delivery retry methods, old dedicated worker module graph, old profile-sync executor/admin ops surface, old job observability/metrics modules, old `EmailVerificationService` contracts, old cache-backed linking code properties, duplicate old linking email controller specs, removed governance module specs, and removed internal-device-provisioning controller specs.
+- Latest full-suite run passes: 513 tests. P0.4 audit triage is closed: backend audit passes after overriding Prisma dev-tooling `@hono/node-server` to `1.19.13`, and web audit passes after overriding transitive `node-fetch` to `2.7.0` while keeping `face-api.js` for `GridScan` webcam tracking.
+- The previous load-sensitive `payment-webhook-ops.service.spec.ts`, `payment-webhook-ingress.service.spec.ts`, and profile-sync queue timeout assertions were made deterministic by using stalled promises instead of wall-clock completion flags; maintained suite now passes under load.
+- React Query cache is not cleared on admin logout/login, creating a cross-admin data exposure risk in a shared browser session.
+- Admin JWT is stored in `localStorage`; OWASP guidance recommends not storing session identifiers or sensitive auth data there.
+- Credentialed admin CORS no longer reflects arbitrary origins: `ADMIN_CORS_ORIGINS` is required in production and invalid/wildcard origins are rejected. Helmet CSP now emits `Content-Security-Policy-Report-Only` in production with explicit SPA directives; it is intentionally not enforcing yet. Swagger is disabled in production even when `API_DOCS_ENABLED=true`; outside production it still requires explicit `API_DOCS_ENABLED=true`.
+- `docker-compose.yml` no longer hardcodes production DB/Redis credentials; it now requires generated `DATABASE_PASSWORD` and `REDIS_PASSWORD`. `.env.example` still needs explicit approval because current repo guardrails prohibit reading/editing `.env.*`. DB/Redis now attach only to the internal `rezeis-private` network; app/worker remain on both `rezeis-private` and external `remnawave-network` for proxy/Reiwa reachability.
+- `docker-compose.yml` now sets `RUID_PROCESS_ROLE=api` on the API service and `RUID_PROCESS_ROLE=worker` on the worker service. `.env.example` may still need cleanup after explicit approval to read/edit `.env.*` files.
+- `.dockerignore` now excludes env files, certs/keys, runtime data, uploads, backups, SQL/dump/tar artifacts, logs, coverage, package-manager caches, and scratch directories from Docker build context.
+- Root `deploy/proxies` is now canonical. Traefik no longer mounts Docker socket, dashboard/debug are disabled, `traefik:v3.3` is pinned, and dev-only `cloudflare/cloudflared:2025.8.1` is pinned. Nested `rezeis-admin/deploy/proxies` is marked legacy/reference-only.
+- Docker/release metadata now aligns on `0.7.3`: Dockerfile accepts `APP_VERSION` and `GIT_SHA`, docker-publish passes package version and commit SHA as build args, health responses include `version` and non-sensitive `gitSha`, and README/docs image examples use unified `ghcr.io/dizzzable/rezeis` tags.
+
+## Internet Research Used
+
+- GitHub Actions docs: workflows are discovered only from repository-root `.github/workflows`.
+- OWASP HTML5 Security Cheat Sheet: localStorage is not appropriate for session identifiers/sensitive auth; CORS should use explicit trusted origins.
+- Docker Compose secrets docs: secrets avoid exposing passwords/API keys through environment variables.
+- Docker rootless docs: non-root/container rootless mode reduces daemon/runtime blast radius.
+- Helmet docs: CSP defaults exist; report-only mode can help roll out a policy safely.
+- Nest deployment docs: health checks are production monitoring endpoints, and logs must avoid sensitive data such as passwords or tokens.
+- TanStack Query docs: `queryClient.clear()` clears all connected caches.
+
+## Suggested Skills For Next Session
+
+- Load `nestjs-platform` for CORS/CSP/Swagger/config/health/deploy work.
+- Load `nestjs-core` for guard/module/provider refactors.
+- Load `react-state` for auth provider, logout/login cache reset, Zustand/TanStack Query boundaries.
+- Load `react-effects` for realtime/socket/service-worker lifecycle fixes.
+- Load `typescript-config` for tsconfig/build strictness work.
+- Load `accessibility` for skip links, landmarks, focus behavior, dialogs.
+
+## Do Not Start With
+
+- Full backend `strictNullChecks` conversion.
+- Global `RbacGuard` conversion before every admin route has explicit metadata and tests.
+- Making pre-commit hooks mandatory without explicit user approval.
+- Rewriting the rezeis/reiwa service boundary.

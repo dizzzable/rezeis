@@ -66,7 +66,7 @@ export function mapNode(raw: unknown): RemnawaveNodeInterface {
     consumptionMultiplier: toNumber(r.consumptionMultiplier),
     tags: Array.isArray(r.tags) ? r.tags.map((t) => toString(t)) : [],
     lastStatusChange: toNullableString(r.lastStatusChange),
-    lastStatusMessage: toNullableString(r.lastStatusMessage),
+    lastStatusMessage: sanitizeStatusMessage(r.lastStatusMessage),
     createdAt: toString(r.createdAt),
     updatedAt: toString(r.updatedAt),
     xrayUptime: toNumber(r.xrayUptime),
@@ -83,6 +83,18 @@ function toString(value: unknown): string {
 
 function toNullableString(value: unknown): string | null {
   return typeof value === 'string' ? value : null;
+}
+
+function sanitizeStatusMessage(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  if (
+    /https?:\/\//i.test(value) ||
+    /(?:^|[?&\s])(token|auth|authorization|subscriptionUrl|configUrl)=/i.test(value) ||
+    /\bBearer\s+\S+/i.test(value)
+  ) {
+    return 'REMNAWAVE_NODE_STATUS_MESSAGE_HIDDEN';
+  }
+  return value;
 }
 
 function toNumber(value: unknown): number {

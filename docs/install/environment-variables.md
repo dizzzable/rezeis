@@ -24,13 +24,17 @@
 
 ## Группы переменных
 
-### `DB_*`
+### `DATABASE_*`
 
-Блок `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` описывает подключение к PostgreSQL. Полный DSN дополнительно задается через `DATABASE_URL`. Эти переменные есть в `.env.example`, `.env.dev.example` и `.env.external.admin.example`. В `.env.external.user.example` их нет.
+Блок `DATABASE_HOST`, `DATABASE_PORT`, `DATABASE_NAME`, `DATABASE_USER`, `DATABASE_PASSWORD` описывает подключение к PostgreSQL. Production `docker-compose.yml` требует явный `DATABASE_PASSWORD` из `.env` или shell и больше не содержит фиксированный пароль или фиксированный `DATABASE_URL`. Runtime и Prisma config строят DSN из split `DATABASE_*`; `DATABASE_URL` остается только backward-compatible override для внешних/ручных запусков и не нужен для нового production compose.
 
 ### `REDIS_*`
 
-Блок `REDIS_HOST`, `REDIS_PORT`, `REDIS_DB`, `REDIS_PASSWORD` задает подключение к Redis. Полный URL также задается через `REDIS_URL`. Эти переменные есть в `.env.example`, `.env.dev.example`, `.env.external.admin.example` и `.env.external.user.example`, потому что `ruid-worker` все еще зависит от Redis в split deployment.
+Блок `REDIS_HOST`, `REDIS_PORT`, `REDIS_NAME`, `REDIS_PASSWORD` задает подключение к Redis. Production `docker-compose.yml` требует явный `REDIS_PASSWORD` из `.env` или shell, передает его в `redis-server --requirepass` и использует `REDISCLI_AUTH` для healthcheck без hardcoded пароля. `REDIS_URL` не нужен для нового production compose; если отдельный legacy компонент ожидает URL, он должен быть собран из тех же split `REDIS_*` значений.
+
+### `ADMIN_CORS_ORIGINS`
+
+`ADMIN_CORS_ORIGINS` задает comma-separated список trusted browser origins для credentialed CORS к `rezeis-admin`. Runtime нормализует значения до `scheme://host[:port]`, удаляет дубликаты и отклоняет `*`, не-HTTP(S) схемы, invalid URLs, embedded credentials, path, query и hash. В `NODE_ENV=production` переменная обязательна: если список пустой или не задан, backend завершит env validation до старта вместо отражения любого browser origin. Для same-origin deploy укажите публичный origin админки, например `https://admin.example.com`; для локальной разработки через Vite proxy переменную можно не задавать, потому что browser обращается к API same-origin через `/api` proxy.
 
 ### `APP_CRYPT_KEY`
 

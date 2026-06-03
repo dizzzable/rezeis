@@ -9,23 +9,31 @@ import { PaymentGatewayRegistryService } from '../src/modules/payments/services/
 describe('PaymentGatewayRegistryService', () => {
   it('creates default gateways idempotently', async () => {
     const { service } = createService([]);
+    const expectedDefaultTypes = [
+      PaymentGatewayType.TELEGRAM_STARS,
+      PaymentGatewayType.YOOKASSA,
+      PaymentGatewayType.ANTILOPAY,
+      PaymentGatewayType.PLATEGA,
+      PaymentGatewayType.OVERPAY,
+      PaymentGatewayType.PAYPALYCH,
+      PaymentGatewayType.RIOPAY,
+      PaymentGatewayType.HELEKET,
+      PaymentGatewayType.CRYPTOMUS,
+      PaymentGatewayType.MULENPAY,
+      PaymentGatewayType.WATA,
+      PaymentGatewayType.AURAPAY,
+      PaymentGatewayType.ROLLYPAY,
+      PaymentGatewayType.SEVERPAY,
+      PaymentGatewayType.LAVA,
+    ];
 
     const firstCreate = await service.createDefaults();
     const secondCreate = await service.createDefaults();
 
-    assert.equal(firstCreate.length, 6);
-    assert.equal(secondCreate.length, 6);
-    assert.deepStrictEqual(
-      secondCreate.map((gateway) => gateway.type),
-      [
-        PaymentGatewayType.TELEGRAM_STARS,
-        PaymentGatewayType.YOOKASSA,
-        PaymentGatewayType.PLATEGA,
-        PaymentGatewayType.HELEKET,
-        PaymentGatewayType.CRYPTOMUS,
-        PaymentGatewayType.MULENPAY,
-      ],
-    );
+    assert.equal(firstCreate.length, expectedDefaultTypes.length);
+    assert.equal(secondCreate.length, expectedDefaultTypes.length);
+    assert.deepStrictEqual(firstCreate.map((gateway) => gateway.type), expectedDefaultTypes);
+    assert.deepStrictEqual(secondCreate.map((gateway) => gateway.type), expectedDefaultTypes);
   });
 
   it('updates active flag, currency, and settings', async () => {

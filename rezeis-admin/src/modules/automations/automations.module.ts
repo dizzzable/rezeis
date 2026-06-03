@@ -1,7 +1,7 @@
 import { BullModule } from '@nestjs/bullmq';
-import { HttpModule } from '@nestjs/axios';
 import { Module } from '@nestjs/common';
 
+import { OutboundHttpModule } from '../../common/http/outbound-http.module';
 import { AuthModule } from '../auth/auth.module';
 import { AutomationActionRegistry } from './actions/action-registry';
 import { AutomationEventBridgeService } from './automation-event-bridge.service';
@@ -26,7 +26,7 @@ import { AUTOMATION_QUEUE } from './automations.constants';
 @Module({
   imports: [
     AuthModule,
-    HttpModule,
+    OutboundHttpModule,
     BullModule.registerQueue({ name: AUTOMATION_QUEUE }),
   ],
   controllers: [AutomationsController],

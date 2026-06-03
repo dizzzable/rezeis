@@ -1,8 +1,56 @@
-node_modules
-dist
 .git
-npm-debug.log
+.gitignore
+.dockerignore
+
+# Dependencies and build output
+node_modules
+web/node_modules
+dist
+web/dist
+coverage
+web/coverage
+*.tsbuildinfo
+vitest-results.json
+
+# Local environment and secrets
+.env
+.env.*
+*.pem
+*.key
+*.crt
+*.cer
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa*
+id_ed25519*
+
+# Runtime data, user uploads, and backups
+data
+uploads
+backups
+*.sql
+*.dump
+*.tar
+*.tar.gz
+*.tgz
+*.bak
+
+# Logs and local diagnostics
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.npm
+.pnpm-store
+
+# Local-only docs/tests/scratchpads are not needed in the production image
 test
 docs
-web/node_modules
-web/dist
+tmp
+temp
+.tmp
+scratch
+scratchpads

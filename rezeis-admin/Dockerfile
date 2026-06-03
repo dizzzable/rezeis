@@ -46,10 +46,12 @@ FROM node:24-alpine AS runtime
 
 WORKDIR /app
 ENV NODE_ENV=production
-# App version baked into the image so health endpoint reports it.
-# Updated automatically via package.json bump → Docker build.
-ARG APP_VERSION=0.5.4
-ENV npm_package_version=${APP_VERSION}
+# App metadata baked into the image so health endpoint reports the release.
+ARG APP_VERSION=0.7.3
+ARG GIT_SHA=unknown
+ENV APP_VERSION=${APP_VERSION} \
+    REZEIS_GIT_SHA=${GIT_SHA} \
+    npm_package_version=${APP_VERSION}
 
 # Install PostgreSQL client tools (pg_dump, psql) for backup/restore.
 # MUST match the major version of the postgres server (see docker-compose.yml).

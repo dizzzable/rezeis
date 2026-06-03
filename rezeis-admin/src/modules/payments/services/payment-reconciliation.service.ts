@@ -9,6 +9,7 @@ import {
   PAYMENT_WEBHOOK_STATUS_FAILED,
   PaymentWebhookInboxService,
 } from './payment-webhook-inbox.service';
+import { normalizePaymentProviderError } from '../utils/payment-provider-error.util';
 import { PaymentOpsAlertService } from './payment-ops-alert.service';
 import { PaymentSubscriptionMutationService } from './payment-subscription-mutation.service';
 
@@ -76,7 +77,7 @@ export class PaymentReconciliationService {
     } catch (error: unknown) {
       const failedEvent = await this.paymentWebhookInboxService.markFailed(
         event.id,
-        error instanceof Error ? error.message : PAYMENT_WEBHOOK_STATUS_FAILED,
+        normalizePaymentProviderError(error, PAYMENT_WEBHOOK_STATUS_FAILED),
       );
       await this.paymentOpsAlertService.notifyWebhookFailed({
         event: failedEvent,

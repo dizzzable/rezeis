@@ -1,205 +1,210 @@
 import assert from 'node:assert/strict';
+import { setImmediate } from 'node:timers';
 import { describe, it } from 'node:test';
 
-import { UserNotificationsService } from '../src/modules/user-activity/services/user-notifications.service';
+import { UserNotificationsService } from '../src/modules/notifications/services/user-notifications.service';
 
-type UserNotificationsPrisma = ConstructorParameters<typeof UserNotificationsService>[0];
-type UserNotificationEventCountArgs = Parameters<UserNotificationsPrisma['userNotificationEvent']['count']>[0];
-type UserNotificationEventFindManyArgs = Parameters<UserNotificationsPrisma['userNotificationEvent']['findMany']>[0];
-type UserNotificationEventUpdateManyArgs = Parameters<UserNotificationsPrisma['userNotificationEvent']['updateMany']>[0];
-type UserNotificationEventUpdateManyResult = Awaited<ReturnType<UserNotificationsPrisma['userNotificationEvent']['updateMany']>>;
-type UserNotificationRecord = {
-  id: string;
-  userId: string;
-  type: string;
-  i18nKey: string | null;
-  i18nKwargs: unknown;
-  renderedText: string | null;
-  isRead: boolean;
-  readAt: Date | null;
-  readSource: string | null;
-  botChatId: string | null;
-  botMessageId: string | null;
-  createdAt: Date;
-};
-type UserNotificationsPrismaDouble = {
-  userNotificationEvent: {
-    count: (args: UserNotificationEventCountArgs) => Promise<number>;
-    findMany: (args: UserNotificationEventFindManyArgs) => Promise<UserNotificationRecord[]>;
-    updateMany: (args: UserNotificationEventUpdateManyArgs) => Promise<UserNotificationEventUpdateManyResult>;
+type NotificationCreateArgs = {
+  readonly data: {
+    readonly userId: string;
+    readonly type: string;
+    readonly payload: Record<string, unknown>;
   };
+  readonly select: Record<string, true>;
 };
 
 describe('UserNotificationsService', () => {
-  it('lists paginated notifications and maps rendered text', async () => {
-    const state = { countArgs: [] as unknown[], findManyArgs: [] as unknown[] };
-    const prismaDouble: UserNotificationsPrismaDouble = {
-      userNotificationEvent: {
-        count: async (args: UserNotificationEventCountArgs) => {
-          state.countArgs.push(args);
-          return 1;
-        },
-        findMany: async (args: UserNotificationEventFindManyArgs) => {
-          state.findManyArgs.push(args);
-          return [createNotification({ id: 'notification-1', isRead: false, renderedText: 'Payment completed' })];
-        },
-        updateMany: async (): Promise<UserNotificationEventUpdateManyResult> => ({ count: 0 }),
-      },
-    };
-    const service = new UserNotificationsService(prismaDouble as unknown as UserNotificationsPrisma);
+  it('persists a notification and fans out pre-rendered operator text', async () => {
+    const state = createState();
+    const service = createService(state, {
+      user: { telegramId: BigInt(12345), isBotBlocked: false, name: 'Nina' },
+    });
 
-    const result = await service.listNotifications({
+    const id = await service.create({
       userId: 'user-1',
-      isRead: false,
-      type: 'PAYMENT_COMPLETED',
-      page: 2,
-      limit: 5,
+      type: 'ADMIN_MESSAGE',
+      payload: { source: 'admin' },
+      preRenderedText: 'Manual message',
     });
+    await flushFanout();
 
-    assert.deepStrictEqual(result, {
-      items: [
-        {
-          id: 'notification-1',
-          userId: 'user-1',
-          type: 'PAYMENT_COMPLETED',
-          title: null,
-          message: 'Payment completed',
-          isRead: false,
-          readAt: null,
-          readSource: null,
-          createdAt: '2026-04-20T00:00:00.000Z',
-        },
-      ],
-      total: 1,
-      page: 2,
-      limit: 5,
-    });
-    assert.deepStrictEqual(state.countArgs, [
+    assert.equal(id, 'notification-1');
+    assert.deepStrictEqual(state.createCalls, [
       {
-        where: {
+        data: {
           userId: 'user-1',
-          isRead: false,
-          type: 'PAYMENT_COMPLETED',
+          type: 'ADMIN_MESSAGE',
+          payload: { source: 'admin' },
         },
+        select: { id: true, userId: true, type: true, payload: true },
       },
     ]);
-    assert.deepStrictEqual(state.findManyArgs, [
+    assert.deepStrictEqual(state.notifyUserCalls, [
       {
-        where: {
-          userId: 'user-1',
-          isRead: false,
-          type: 'PAYMENT_COMPLETED',
-        },
-        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-        skip: 5,
-        take: 5,
+        eventId: 'notification-1',
+        telegramId: '12345',
+        text: 'Manual message',
+        parseMode: 'HTML',
+        buttons: undefined,
       },
+    ]);
+    assert.deepStrictEqual(state.webPushCalls, [
+      { userId: 'user-1', title: 'Reiwa', body: 'Manual message' },
     ]);
   });
 
-  it('returns unread counts', async () => {
-    const prismaDouble: UserNotificationsPrismaDouble = {
-      userNotificationEvent: {
-        count: async (args: UserNotificationEventCountArgs) => {
-          assert.deepStrictEqual(args, { where: { userId: 'user-1', isRead: false } });
-          return 7;
-        },
-        findMany: async (_args: UserNotificationEventFindManyArgs) => [],
-        updateMany: async (_args: UserNotificationEventUpdateManyArgs): Promise<UserNotificationEventUpdateManyResult> => ({ count: 0 }),
-      },
-    };
-    const service = new UserNotificationsService(prismaDouble as unknown as UserNotificationsPrisma);
+  it('honours operator user-notification toggles while keeping the feed row', async () => {
+    const state = createState({ userNotifications: { expires_in_3_days: false } });
+    const service = createService(state, {
+      user: { telegramId: BigInt(12345), isBotBlocked: false, name: 'Nina' },
+    });
 
-    assert.deepStrictEqual(await service.getUnreadCount({ userId: 'user-1' }), { unread: 7 });
-  });
-
-  it('marks a single notification as read with the supplied source', async () => {
-    const updateManyCalls: UserNotificationEventUpdateManyArgs[] = [];
-    const prismaDouble: UserNotificationsPrismaDouble = {
-      userNotificationEvent: {
-        count: async (_args: UserNotificationEventCountArgs) => 0,
-        findMany: async (_args: UserNotificationEventFindManyArgs) => [],
-        updateMany: async (args: UserNotificationEventUpdateManyArgs): Promise<UserNotificationEventUpdateManyResult> => {
-          updateManyCalls.push(args);
-          return { count: 1 };
-        },
-      },
-    };
-    const service = new UserNotificationsService(prismaDouble as unknown as UserNotificationsPrisma);
-
-    const result = await service.markNotificationRead({
-      notificationId: 'notification-1',
+    await service.create({
       userId: 'user-1',
-      readSource: 'MANUAL',
+      type: 'subscription_expiring_3d',
+      payload: { days: 3 },
     });
+    await flushFanout();
 
-    assert.deepStrictEqual(result, { updated: 1 });
-    assert.equal(updateManyCalls.length, 1);
-    assert.deepStrictEqual(updateManyCalls[0], {
-      where: {
-        id: 'notification-1',
-        userId: 'user-1',
-        isRead: false,
-      },
-      data: {
-        isRead: true,
-        readAt: updateManyCalls[0].data?.readAt,
-        readSource: 'MANUAL',
-      },
-    });
-    assert.ok(updateManyCalls[0].data?.readAt instanceof Date);
+    assert.equal(state.createCalls.length, 1);
+    assert.deepStrictEqual(state.userFindCalls, []);
+    assert.deepStrictEqual(state.notifyUserCalls, []);
+    assert.deepStrictEqual(state.webPushCalls, []);
   });
 
-  it('marks all notifications as read with the default source', async () => {
-    const updateManyCalls: UserNotificationEventUpdateManyArgs[] = [];
-    const prismaDouble: UserNotificationsPrismaDouble = {
-      userNotificationEvent: {
-        count: async (_args: UserNotificationEventCountArgs) => 0,
-        findMany: async (_args: UserNotificationEventFindManyArgs) => [],
-        updateMany: async (args: UserNotificationEventUpdateManyArgs): Promise<UserNotificationEventUpdateManyResult> => {
-          updateManyCalls.push(args);
-          return { count: 3 };
-        },
-      },
-    };
-    const service = new UserNotificationsService(prismaDouble as unknown as UserNotificationsPrisma);
-
-    const result = await service.markAllNotificationsRead({ userId: 'user-1' });
-
-    assert.deepStrictEqual(result, { updated: 3 });
-    assert.equal(updateManyCalls.length, 1);
-    assert.deepStrictEqual(updateManyCalls[0], {
-      where: {
-        userId: 'user-1',
-        isRead: false,
-      },
-      data: {
-        isRead: true,
-        readAt: updateManyCalls[0].data?.readAt,
-        readSource: 'INTERNAL_ADMIN',
+  it('renders active templates through Telegram and web-push channels', async () => {
+    const state = createState();
+    const service = createService(state, {
+      user: { telegramId: BigInt(12345), isBotBlocked: false, name: 'Nina' },
+      template: {
+        isActive: true,
+        title: 'Expires soon',
+        body: 'Hello {{name}}, {{days}} day(s) left',
       },
     });
-    assert.ok(updateManyCalls[0].data?.readAt instanceof Date);
+
+    await service.create({
+      userId: 'user-1',
+      type: 'subscription_expiring_3d',
+      payload: { days: 3 },
+    });
+    await flushFanout();
+
+    assert.deepStrictEqual(state.templateLookups, ['expires_in_3_days']);
+    assert.deepStrictEqual(state.notifyUserCalls, [
+      {
+        eventId: 'notification-1',
+        telegramId: '12345',
+        text: '<b>Expires soon</b>\n\nHello Nina, 3 day(s) left',
+        parseMode: 'HTML',
+        buttons: undefined,
+      },
+    ]);
+    assert.deepStrictEqual(state.webPushCalls, [
+      {
+        userId: 'user-1',
+        title: 'Expires soon',
+        body: 'Hello Nina, 3 day(s) left',
+      },
+    ]);
+  });
+
+  it('skips Telegram fanout for blocked bot users but still sends web-push', async () => {
+    const state = createState();
+    const service = createService(state, {
+      user: { telegramId: BigInt(12345), isBotBlocked: true, name: 'Nina' },
+      template: { isActive: true, title: 'Title', body: 'Body' },
+    });
+
+    await service.create({ userId: 'user-1', type: 'custom', payload: {} });
+    await flushFanout();
+
+    assert.deepStrictEqual(state.notifyUserCalls, []);
+    assert.deepStrictEqual(state.webPushCalls, [
+      { userId: 'user-1', title: 'Title', body: 'Body' },
+    ]);
   });
 });
 
-function createNotification(input: {
-  readonly id: string;
-  readonly isRead: boolean;
-  readonly renderedText: string | null;
-}) {
-  return {
-    id: input.id,
-    userId: 'user-1',
-    type: 'PAYMENT_COMPLETED',
-    i18nKey: null,
-    i18nKwargs: null,
-    renderedText: input.renderedText,
-    isRead: input.isRead,
-    readAt: null,
-    readSource: null,
-    botChatId: null,
-    botMessageId: null,
-    createdAt: new Date('2026-04-20T00:00:00.000Z'),
+function createService(
+  state: ReturnType<typeof createState>,
+  input: {
+    readonly user?: { readonly telegramId: bigint | null; readonly isBotBlocked: boolean; readonly name: string | null } | null;
+    readonly template?: { readonly isActive: boolean; readonly title: string; readonly body: string } | null;
+  } = {},
+): UserNotificationsService {
+  const prisma = {
+    userNotificationEvent: {
+      create: async (args: NotificationCreateArgs) => {
+        state.createCalls.push(args);
+        return {
+          id: 'notification-1',
+          userId: args.data.userId,
+          type: args.data.type,
+          payload: args.data.payload,
+        };
+      },
+    },
+    user: {
+      findUnique: async (args: unknown) => {
+        state.userFindCalls.push(args);
+        return input.user ?? null;
+      },
+    },
+    settings: {
+      findUnique: async (args: unknown) => {
+        state.settingsFindCalls.push(args);
+        return {
+          userNotifications: state.userNotifications,
+          systemNotifications: state.systemNotifications,
+        };
+      },
+    },
   };
+  const templates = {
+    getByType: async (type: string) => {
+      state.templateLookups.push(type);
+      return input.template ?? null;
+    },
+  };
+  const botNotifier = {
+    notifyUser: async (call: unknown) => {
+      state.notifyUserCalls.push(call);
+    },
+    notifyBroadcast: async (call: unknown) => {
+      state.notifyBroadcastCalls.push(call);
+    },
+  };
+  const webPush = {
+    sendToUser: async (call: unknown) => {
+      state.webPushCalls.push(call);
+    },
+  };
+  return new UserNotificationsService(
+    prisma as never,
+    templates as never,
+    botNotifier as never,
+    webPush as never,
+  );
+}
+
+function createState(input: {
+  readonly userNotifications?: Record<string, unknown>;
+  readonly systemNotifications?: Record<string, unknown>;
+} = {}) {
+  return {
+    userNotifications: input.userNotifications ?? {},
+    systemNotifications: input.systemNotifications ?? {},
+    createCalls: [] as NotificationCreateArgs[],
+    settingsFindCalls: [] as unknown[],
+    userFindCalls: [] as unknown[],
+    templateLookups: [] as string[],
+    notifyUserCalls: [] as unknown[],
+    notifyBroadcastCalls: [] as unknown[],
+    webPushCalls: [] as unknown[],
+  };
+}
+
+async function flushFanout(): Promise<void> {
+  await new Promise<void>((resolve) => setImmediate(resolve));
 }

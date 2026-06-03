@@ -31,6 +31,8 @@ function buildCurrentAdmin(): CurrentAdminInterface {
     createdAt: new Date('2026-04-01T00:00:00.000Z'),
     lastLoginAt: new Date('2026-04-15T12:00:00.000Z'),
     lastLoginIp: '203.0.113.10',
+    rbacRoleId: null,
+    mustChangePassword: false,
   };
 }
 

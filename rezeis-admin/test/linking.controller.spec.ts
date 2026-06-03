@@ -6,90 +6,98 @@ import { describe, it } from 'node:test';
 import { RequestMethod } from '@nestjs/common';
 import { GUARDS_METADATA, METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 
-import { InternalApiGuard } from '../src/common/guards/internal-api.guard';
-import { LinkingController } from '../src/modules/linking/linking.controller';
-import { LinkingService } from '../src/modules/linking/linking.service';
+import { InternalAdminAuthGuard } from '../src/modules/auth/guards/internal-admin-auth.guard';
+import { InternalLinkingController } from '../src/modules/linking/controllers/internal-linking.controller';
+import { LinkingService } from '../src/modules/linking/services/linking.service';
 
-describe('LinkingController', () => {
-  it('is mounted at internal/link path', () => {
-    const controllerPath = Reflect.getMetadata(PATH_METADATA, LinkingController) as string | undefined;
+describe('InternalLinkingController', () => {
+  it('exposes the current internal linking route contract', () => {
+    const controllerPath = Reflect.getMetadata(PATH_METADATA, InternalLinkingController) as
+      | string
+      | undefined;
+    const guards = Reflect.getMetadata(GUARDS_METADATA, InternalLinkingController) as
+      | readonly unknown[]
+      | undefined;
+
     assert.equal(controllerPath, 'internal/link');
+    assert.deepStrictEqual(guards, [InternalAdminAuthGuard]);
+    assert.deepStrictEqual(route('telegramGenerate'), {
+      path: 'telegram/generate',
+      method: RequestMethod.POST,
+    });
+    assert.deepStrictEqual(route('telegramConsume'), {
+      path: 'telegram/consume',
+      method: RequestMethod.POST,
+    });
+    assert.deepStrictEqual(route('emailInitiate'), {
+      path: 'email/initiate',
+      method: RequestMethod.POST,
+    });
+    assert.deepStrictEqual(route('emailVerify'), {
+      path: 'email/verify',
+      method: RequestMethod.POST,
+    });
   });
 
-  it('uses InternalApiGuard at the controller level', () => {
-    const guards = Reflect.getMetadata(GUARDS_METADATA, LinkingController) as readonly unknown[] | undefined;
-    assert.ok(guards, 'Expected guards metadata to be defined');
-    assert.ok(guards.includes(InternalApiGuard), 'Expected InternalApiGuard to be applied');
-  });
-
-  it('generateCode endpoint is POST at "telegram/generate" path', () => {
-    const path = Reflect.getMetadata(
-      PATH_METADATA,
-      LinkingController.prototype.generateCode,
-    ) as string | undefined;
-    const method = Reflect.getMetadata(
-      METHOD_METADATA,
-      LinkingController.prototype.generateCode,
-    ) as RequestMethod | undefined;
-    assert.equal(path, 'telegram/generate');
-    assert.equal(method, RequestMethod.POST);
-  });
-
-  it('verifyTelegram endpoint is POST at "telegram/verify" path', () => {
-    const path = Reflect.getMetadata(
-      PATH_METADATA,
-      LinkingController.prototype.verifyTelegram,
-    ) as string | undefined;
-    const method = Reflect.getMetadata(
-      METHOD_METADATA,
-      LinkingController.prototype.verifyTelegram,
-    ) as RequestMethod | undefined;
-    assert.equal(path, 'telegram/verify');
-    assert.equal(method, RequestMethod.POST);
-  });
-
-  it('delegates generateCode to LinkingService and returns the result', async () => {
-    const calls: Array<{ userId: string }> = [];
-    const expectedResult = { code: 'AbCd1234', expiresAt: '2025-01-01T00:10:00.000Z' };
-
-    const mockService = {
-      generateLinkingCode: async (dto: { userId: string }) => {
-        calls.push(dto);
-        return expectedResult;
+  it('delegates all current link endpoints to LinkingService unchanged', async () => {
+    const calls: Array<{ readonly method: string; readonly body: unknown }> = [];
+    const service = {
+      telegramGenerate: async (body: unknown): Promise<unknown> => {
+        calls.push({ method: 'telegramGenerate', body });
+        return { code: '123456', expiresAt: '2026-06-03T10:10:00.000Z' };
       },
-    } as unknown as LinkingService;
+      telegramConsume: async (body: unknown): Promise<unknown> => {
+        calls.push({ method: 'telegramConsume', body });
+        return { success: true, userId: 'user-1' };
+      },
+      emailInitiate: async (body: unknown): Promise<unknown> => {
+        calls.push({ method: 'emailInitiate', body });
+        return { success: true, message: 'Verification code sent' };
+      },
+      emailVerify: async (body: unknown): Promise<unknown> => {
+        calls.push({ method: 'emailVerify', body });
+        return { success: true, verified: true };
+      },
+    } as LinkingService;
+    const controller = new InternalLinkingController(service);
 
-    const controller = new LinkingController(mockService);
-    const dto = { userId: '550e8400-e29b-41d4-a716-446655440000' };
+    const telegramGenerateBody = { userId: 'user-1' };
+    const telegramConsumeBody = { code: '123456', telegramId: '777000' };
+    const emailInitiateBody = { userId: 'user-1', email: 'user@example.com' };
+    const emailVerifyBody = { userId: 'user-1', code: '123456' };
 
-    const result = await controller.generateCode(dto);
-
-    assert.deepStrictEqual(calls, [dto]);
-    assert.deepStrictEqual(result, expectedResult);
-  });
-
-  it('delegates verifyTelegram to LinkingService and returns the result', async () => {
-    const calls: Array<{ code: string; telegramId: number; telegramUsername?: string }> = [];
-    const expectedResult = {
+    assert.deepStrictEqual(await controller.telegramGenerate(telegramGenerateBody), {
+      code: '123456',
+      expiresAt: '2026-06-03T10:10:00.000Z',
+    });
+    assert.deepStrictEqual(await controller.telegramConsume(telegramConsumeBody), {
       success: true,
-      message: 'Telegram account linked successfully.',
-      telegramId: 123456789,
-      telegramUsername: 'testuser',
-    };
-
-    const mockService = {
-      verifyTelegramCode: async (dto: { code: string; telegramId: number; telegramUsername?: string }) => {
-        calls.push(dto);
-        return expectedResult;
-      },
-    } as unknown as LinkingService;
-
-    const controller = new LinkingController(mockService);
-    const dto = { code: 'AbCd1234', telegramId: 123456789, telegramUsername: 'testuser' };
-
-    const result = await controller.verifyTelegram(dto);
-
-    assert.deepStrictEqual(calls, [dto]);
-    assert.deepStrictEqual(result, expectedResult);
+      userId: 'user-1',
+    });
+    assert.deepStrictEqual(await controller.emailInitiate(emailInitiateBody), {
+      success: true,
+      message: 'Verification code sent',
+    });
+    assert.deepStrictEqual(await controller.emailVerify(emailVerifyBody), {
+      success: true,
+      verified: true,
+    });
+    assert.deepStrictEqual(calls, [
+      { method: 'telegramGenerate', body: telegramGenerateBody },
+      { method: 'telegramConsume', body: telegramConsumeBody },
+      { method: 'emailInitiate', body: emailInitiateBody },
+      { method: 'emailVerify', body: emailVerifyBody },
+    ]);
   });
 });
+
+function route(methodName: keyof InternalLinkingController): {
+  readonly path: string | undefined;
+  readonly method: RequestMethod | undefined;
+} {
+  const handler = InternalLinkingController.prototype[methodName] as unknown;
+  return {
+    path: Reflect.getMetadata(PATH_METADATA, handler) as string | undefined,
+    method: Reflect.getMetadata(METHOD_METADATA, handler) as RequestMethod | undefined,
+  };
+}

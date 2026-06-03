@@ -1,24 +1,43 @@
 import { z } from 'zod';
 
+import { parseCorsOrigins } from '../http/cors-origin';
+
 const normalizeOptionalString = (value: unknown): unknown => {
   if (typeof value !== 'string') return value;
   const v = value.trim();
   return v === '' ? undefined : v;
 };
 
+const envBoolean = (defaultValue: boolean) => z.preprocess((value) => {
+  if (value === undefined) return undefined;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'true') return true;
+    if (normalized === 'false') return false;
+  }
+  return value;
+}, z.boolean().default(defaultValue));
+
 const webhookSecretPattern = /^[a-zA-Z0-9]{64}$/;
 
 const environmentSchema = z.object({
   // ── Application ──────────────────────────────────────────────────────────
+  NODE_ENV: z.preprocess(normalizeOptionalString, z.string().min(1).default('development')),
   REZEIS_DOMAIN: z.string().min(1).default('localhost'),
   REZEIS_HOST: z.string().min(1).default('0.0.0.0'),
   REZEIS_PORT: z.coerce.number().int().min(1).max(65535).default(8000),
+  API_DOCS_ENABLED: envBoolean(false),
+  ADMIN_CORS_ORIGINS: z.preprocess(normalizeOptionalString, z.string().min(1).optional()),
+  ADMIN_TRUST_PROXY: z.preprocess(
+    normalizeOptionalString,
+    z.enum(['disabled', 'loopback', 'linklocal', 'uniquelocal']).default('disabled'),
+  ),
   REZEIS_LOCALES: z.string().min(1).default('ru,en'),
   REZEIS_DEFAULT_LOCALE: z.string().min(1).default('ru'),
   REZEIS_CRYPT_KEY: z.string().min(1),
 
   // ── Webhook ──────────────────────────────────────────────────────────────
-  WEBHOOK_ENABLED: z.preprocess((v) => v === 'true' || v === true, z.boolean().default(false)),
+  WEBHOOK_ENABLED: envBoolean(false),
   WEBHOOK_URL: z.preprocess(normalizeOptionalString, z.string().url().optional()),
   WEBHOOK_SECRET_HEADER: z.preprocess(
     normalizeOptionalString,
@@ -39,8 +58,8 @@ const environmentSchema = z.object({
   DATABASE_NAME: z.string().min(1).default('rezeis'),
   DATABASE_USER: z.string().min(1).default('rezeis'),
   DATABASE_PASSWORD: z.string().min(1),
-  DATABASE_ECHO: z.preprocess((v) => v === 'true' || v === true, z.boolean().default(false)),
-  DATABASE_ECHO_POOL: z.preprocess((v) => v === 'true' || v === true, z.boolean().default(false)),
+  DATABASE_ECHO: envBoolean(false),
+  DATABASE_ECHO_POOL: envBoolean(false),
   DATABASE_POOL_SIZE: z.coerce.number().int().min(1).default(25),
   DATABASE_MAX_OVERFLOW: z.coerce.number().int().min(0).default(25),
   DATABASE_POOL_TIMEOUT: z.coerce.number().int().min(1).default(10),
@@ -53,27 +72,27 @@ const environmentSchema = z.object({
   REDIS_PASSWORD: z.preprocess(normalizeOptionalString, z.string().min(1).optional()),
 
   // ── Backup ───────────────────────────────────────────────────────────────
-  BACKUP_AUTO_ENABLED: z.preprocess((v) => v === 'true' || v === true, z.boolean().default(true)),
+  BACKUP_AUTO_ENABLED: envBoolean(true),
   BACKUP_INTERVAL_HOURS: z.coerce.number().int().min(1).default(24),
   BACKUP_TIME: z.string().default('00:00'),
   BACKUP_MAX_KEEP: z.coerce.number().int().min(1).default(7),
-  BACKUP_COMPRESSION: z.preprocess((v) => v === 'true' || v === true, z.boolean().default(true)),
-  BACKUP_INCLUDE_LOGS: z.preprocess((v) => v === 'true' || v === true, z.boolean().default(false)),
+  BACKUP_COMPRESSION: envBoolean(true),
+  BACKUP_INCLUDE_LOGS: envBoolean(false),
   BACKUP_LOCATION: z.string().default('/app/data/backups'),
-  BACKUP_SEND_ENABLED: z.preprocess((v) => v === 'true' || v === true, z.boolean().default(false)),
+  BACKUP_SEND_ENABLED: envBoolean(false),
   BACKUP_SEND_CHAT_ID: z.preprocess(normalizeOptionalString, z.string().optional()),
   BACKUP_SEND_TOPIC_ID: z.preprocess(normalizeOptionalString, z.string().optional()),
 
   // ── Email (SMTP) ─────────────────────────────────────────────────────────
-  EMAIL_ENABLED: z.preprocess((v) => v === 'true' || v === true, z.boolean().default(false)),
+  EMAIL_ENABLED: envBoolean(false),
   EMAIL_HOST: z.preprocess(normalizeOptionalString, z.string().optional()),
   EMAIL_PORT: z.coerce.number().int().min(1).max(65535).default(587),
   EMAIL_USERNAME: z.preprocess(normalizeOptionalString, z.string().optional()),
   EMAIL_PASSWORD: z.preprocess(normalizeOptionalString, z.string().optional()),
   EMAIL_FROM_ADDRESS: z.string().default('no-reply@rezeis.local'),
   EMAIL_FROM_NAME: z.string().default('Rezeis'),
-  EMAIL_USE_TLS: z.preprocess((v) => v === 'true' || v === true, z.boolean().default(true)),
-  EMAIL_USE_SSL: z.preprocess((v) => v === 'true' || v === true, z.boolean().default(false)),
+  EMAIL_USE_TLS: envBoolean(true),
+  EMAIL_USE_SSL: envBoolean(false),
 
   // ── Reiwa internal channel ───────────────────────────────────────────────
   /** URL of reiwa-bot's internal HTTP listener (for /invalidate, /notify).
@@ -95,6 +114,18 @@ const environmentSchema = z.object({
   /** reiwa `<owner>/<repo>` GitHub slug. When set, the Updates widget also
    * surfaces the latest reiwa release vs. the version reiwa reports in. */
   REZEIS_REIWA_UPDATE_REPO: z.preprocess(normalizeOptionalString, z.string().min(1).optional()),
+}).superRefine((env, ctx) => {
+  try {
+    parseCorsOrigins(env.ADMIN_CORS_ORIGINS, {
+      requireConfiguredOrigins: env.NODE_ENV === 'production',
+    });
+  } catch (error) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['ADMIN_CORS_ORIGINS'],
+      message: error instanceof Error ? error.message : 'Invalid ADMIN_CORS_ORIGINS value',
+    });
+  }
 });
 
 export type AppEnvironment = z.infer<typeof environmentSchema>;

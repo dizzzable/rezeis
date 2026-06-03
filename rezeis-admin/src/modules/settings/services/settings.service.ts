@@ -16,7 +16,6 @@ import {
 import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.interface';
 import { RequestMetadataInterface } from '../../auth/interfaces/request-metadata.interface';
 import { UpdateBrandingSettingsDto } from '../dto/update-branding-settings.dto';
-import { UpdateCustomIconsDto } from '../dto/custom-icons.dto';
 import {
   SendPaymentOpsAlertTestDto,
   UpdatePaymentOpsAlertSettingsDto,

@@ -1,6 +1,6 @@
 import { Global, Module } from '@nestjs/common';
-import { HttpModule } from '@nestjs/axios';
 
+import { OutboundHttpModule } from '../http/outbound-http.module';
 import { SystemEventsService } from './system-events.service';
 
 /**
@@ -9,7 +9,7 @@ import { SystemEventsService } from './system-events.service';
  */
 @Global()
 @Module({
-  imports: [HttpModule],
+  imports: [OutboundHttpModule],
   providers: [SystemEventsService],
   exports: [SystemEventsService],
 })

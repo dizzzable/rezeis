@@ -1,40 +1,58 @@
+import 'reflect-metadata';
+
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { throwError } from 'rxjs';
 
-import {
-  AdminUserSupportMessageDeliveryException,
-  AdminUserSupportMessageDeliveryService,
-} from '../src/modules/users/services/admin-user-support-message-delivery.service';
+import { RequestMethod } from '@nestjs/common';
+import { METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 
-describe('AdminUserSupportMessageDeliveryService', () => {
-  it('sanitizes Telegram support message failures', async () => {
-    const warnings: string[] = [];
-    const rawTelegramError = new Error(
-      'support delivery failed bot-token chat 12345 https://api.telegram.org/botsecret/sendMessage recovery payload secret',
+import { AdminUserManagementController } from '../src/modules/users/controllers/admin-user-management.controller';
+
+describe('AdminUserManagementController support notifications', () => {
+  it('keeps the current admin support-message route on the management controller', () => {
+    assert.equal(
+      Reflect.getMetadata(PATH_METADATA, AdminUserManagementController.prototype.sendNotification),
+      ':telegramId/notify',
     );
-    Object.assign(rawTelegramError, { response: { status: 403 } });
-    const service = new AdminUserSupportMessageDeliveryService(
-      { post: () => throwError(() => rawTelegramError) } as never,
-      { botToken: 'bot-token' } as never,
+    assert.equal(
+      Reflect.getMetadata(METHOD_METADATA, AdminUserManagementController.prototype.sendNotification),
+      RequestMethod.POST,
     );
-    (service as unknown as { readonly logger: { warn: (message: string) => void } }).logger.warn = (message: string): void => {
-      warnings.push(message);
-    };
+  });
 
-    await assert.rejects(
-      () => service.send({ telegramId: '12345', text: 'Support answer' }),
-      (error: unknown) => error instanceof AdminUserSupportMessageDeliveryException
-        && error.deliveryState === 'definitely-not-delivered',
+  it('persists admin support messages through UserNotificationsService', async () => {
+    const notificationCalls: unknown[] = [];
+    const controller = new AdminUserManagementController(
+      {
+        user: {
+          findFirst: async (args: unknown) => {
+            assert.deepStrictEqual(args, { where: { telegramId: 12345n } });
+            return { id: 'user-1', telegramId: 12345n };
+          },
+        },
+      } as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {
+        create: async (input: unknown) => {
+          notificationCalls.push(input);
+        },
+      } as never,
     );
 
-    assert.deepStrictEqual(warnings, [
-      'Unable to send support message to Telegram: TELEGRAM_RECIPIENT_UNAVAILABLE (status 403)',
+    assert.deepStrictEqual(await controller.sendNotification('12345', { message: 'Support answer' }), {
+      sent: true,
+    });
+    assert.deepStrictEqual(notificationCalls, [
+      {
+        userId: 'user-1',
+        type: 'ADMIN_MESSAGE',
+        payload: { text: 'Support answer' },
+        preRenderedText: 'Support answer',
+      },
     ]);
-    const serialized = JSON.stringify(warnings);
-    assert.equal(serialized.includes('bot-token'), false);
-    assert.equal(serialized.includes('12345'), false);
-    assert.equal(serialized.includes('api.telegram.org'), false);
-    assert.equal(serialized.includes('payload secret'), false);
   });
 });

@@ -1,5 +1,9 @@
 # Reverse-proxy stacks for rezeis-admin
 
+Legacy/reference copy only. Use the repository-root `deploy/proxies` tree for
+new deployments; it is the canonical proxy documentation and contains the
+current hardened runtime settings.
+
 Каждая подпапка — независимый Docker Compose-стек. Стек прокси поднимается
 **первым**, панель — **вторым**. Они встречаются в общей внешней сети
 `remnawave-network` и общаются по docker DNS (прокси ходит на `rezeis:8000`,

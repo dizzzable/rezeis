@@ -1,88 +1,165 @@
-import { describe, it } from 'node:test';
+import 'reflect-metadata';
+
 import assert from 'node:assert/strict';
+import { describe, it } from 'node:test';
+
+import { RequestMethod } from '@nestjs/common';
+import { GUARDS_METADATA, METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
+import { ImportStatus } from '@prisma/client';
 
 import { AdminJwtAuthGuard } from '../src/modules/auth/guards/admin-jwt-auth.guard';
-import { DryRunImportSourceType } from '../src/modules/imports/dto/dry-run-import.dto';
-import { ImportsController } from '../src/modules/imports/imports.controller';
-import { ImportsService } from '../src/modules/imports/imports.service';
+import { AdminImportsController } from '../src/modules/imports/controllers/admin-imports.controller';
 
-describe('ImportsController', () => {
-  it('is guarded by admin jwt guard', () => {
-    const guards = Reflect.getMetadata('__guards__', ImportsController) as unknown[] | undefined;
-    assert.equal(guards?.some((guard) => guard === AdminJwtAuthGuard), true);
+describe('AdminImportsController', () => {
+  it('exposes the current guarded admin imports routes', () => {
+    assert.equal(Reflect.getMetadata(PATH_METADATA, AdminImportsController), 'admin/imports');
+    assert.deepStrictEqual(Reflect.getMetadata(GUARDS_METADATA, AdminImportsController), [AdminJwtAuthGuard]);
+    assertRoute(RequestMethod.GET, '/', AdminImportsController.prototype.listImports);
+    assertRoute(RequestMethod.GET, ':importId', AdminImportsController.prototype.getImport);
+    assertRoute(RequestMethod.POST, 'remnawave', AdminImportsController.prototype.importFromRemnawave);
+    assertRoute(RequestMethod.POST, 'remnawave/sync', AdminImportsController.prototype.syncFromRemnawave);
+    assertRoute(RequestMethod.POST, '3xui', AdminImportsController.prototype.importFrom3xui);
+    assertRoute(RequestMethod.POST, 'remnashop', AdminImportsController.prototype.importFromRemnashop);
+    assertRoute(RequestMethod.POST, 'altshop', AdminImportsController.prototype.importFromAltshop);
+    assertRoute(RequestMethod.POST, 'stealthnet', AdminImportsController.prototype.importFromStealthnet);
+    assertRoute(RequestMethod.POST, 'assign-plan', AdminImportsController.prototype.assignPlanToImported);
+    assertRoute(RequestMethod.POST, ':importId/cancel', AdminImportsController.prototype.cancelImport);
+    assertRoute(RequestMethod.GET, ':importId/plan-preview', AdminImportsController.prototype.previewPlanClone);
+    assertRoute(RequestMethod.POST, ':importId/clone-plans', AdminImportsController.prototype.clonePlans);
   });
 
-  it('delegates dry-run calls and wraps the safe response', async () => {
-    const calls: unknown[] = [];
-    const controller = new ImportsController({
-      createDryRunBatch: (input: { readonly dto: unknown; readonly adminUserId: string | undefined }) => {
-        calls.push(input);
-        return {
-          batch: {
-            id: 'batch-1',
-            adminUserId: input.adminUserId ?? null,
-            sourceType: DryRunImportSourceType.CSV,
-            status: 'DRY_RUN',
-            totalRows: 1,
-            acceptedRows: 1,
-            rejectedRows: 0,
-            writesPerformed: false,
-            createdAt: '2026-04-24T12:00:00.000Z',
-          },
-          result: {
-            sourceType: DryRunImportSourceType.CSV,
-            totalRows: 1,
-            acceptedRows: 1,
-            rejectedRows: 0,
-            validationErrors: [],
-            previewRows: [{ rowNumber: 1, fields: ['email'], identifierPresent: true }],
-            writesPerformed: false,
-          },
-        };
+  it('serializes list/detail import records without wrapping or leaking non-object results', async () => {
+    const record = createImportRecord({ result: ['unexpected-array-result'] });
+    const controller = createController({
+      importsService: {
+        list: async (input: unknown) => {
+          assert.deepStrictEqual(input, { limit: 10, offset: 0 });
+          return [record];
+        },
+        getById: async (importId: string) => {
+          assert.equal(importId, 'import-1');
+          return { ...record, result: { created: 2 } };
+        },
       },
-    } as unknown as ImportsService);
-
-    const actual = await controller.dryRun({ id: 'admin-1' } as Parameters<ImportsController['dryRun']>[0], {
-      sourceType: DryRunImportSourceType.CSV,
-      content: 'email\nuser@example.com',
     });
 
-    assert.deepStrictEqual(calls, [
-      {
-        adminUserId: 'admin-1',
-        dto: { sourceType: DryRunImportSourceType.CSV, content: 'email\nuser@example.com' },
-      },
-    ]);
-    assert.equal(actual.data.result.writesPerformed, false);
-    assert.equal(JSON.stringify(actual).includes('user@example.com'), false);
+    assert.deepStrictEqual(await controller.listImports('10', '-1'), {
+      items: [
+        {
+          id: 'import-1',
+          filename: 'import.json',
+          sourceType: 'remnawave',
+          status: ImportStatus.DRY_RUN,
+          recordsTotal: 2,
+          recordsOk: 1,
+          recordsFailed: 1,
+          errorMessage: null,
+          createdBy: 'admin-1',
+          committedAt: null,
+          rolledBackAt: null,
+          createdAt: '2026-04-24T12:00:00.000Z',
+          result: null,
+        },
+      ],
+      total: 1,
+    });
+    assert.deepStrictEqual((await controller.getImport('import-1')).result, { created: 2 });
   });
 
-  it('delegates rollback calls with admin context', async () => {
+  it('delegates queue-backed import commands with admin context', async () => {
     const calls: unknown[] = [];
-    const controller = new ImportsController({
-      rollbackBatch: async (input: unknown) => {
-        calls.push(input);
-        return {
-          batchId: 'batch-1',
-          status: 'ROLLED_BACK',
-          rolledBack: true,
-          deletedUsers: 2,
-          checkedAt: '2026-04-24T12:00:00.000Z',
-        };
-      },
-    } as unknown as ImportsService);
-
-    const actual = await controller.rollbackBatch({ id: 'admin-1' } as Parameters<ImportsController['rollbackBatch']>[0], 'batch-1');
-
-    assert.deepStrictEqual(calls, [{ batchId: 'batch-1', adminUserId: 'admin-1' }]);
-    assert.deepStrictEqual(actual, {
-      data: {
-        batchId: 'batch-1',
-        status: 'ROLLED_BACK',
-        rolledBack: true,
-        deletedUsers: 2,
-        checkedAt: '2026-04-24T12:00:00.000Z',
+    const controller = createController({
+      importQueueService: {
+        enqueueRemnawaveImport: async (input: unknown) => {
+          calls.push(['remnawave', input]);
+          return { importRecordId: 'import-remna', jobId: 'job-remna' };
+        },
+        enqueueFileImport: async (input: unknown) => {
+          calls.push(['file', input]);
+          return { importRecordId: 'import-file', jobId: 'job-file' };
+        },
+        enqueueAssignPlan: async (input: unknown) => {
+          calls.push(['assign', input]);
+          return 'job-assign';
+        },
+        cancelImport: async (importId: string) => {
+          calls.push(['cancel', importId]);
+          return true;
+        },
       },
     });
+    const admin = { id: 'admin-1' } as never;
+    const file = { buffer: Buffer.from('{}'), originalname: 'backup.json' } as Express.Multer.File;
+
+    assert.deepStrictEqual(await controller.importFromRemnawave(admin), {
+      importRecordId: 'import-remna',
+      jobId: 'job-remna',
+      message: 'Remnawave import enqueued',
+    });
+    assert.deepStrictEqual(await controller.syncFromRemnawave(admin), {
+      importRecordId: 'import-remna',
+      jobId: 'job-remna',
+      message: 'Remnawave sync enqueued',
+    });
+    assert.deepStrictEqual(await controller.importFromAltshop(admin, file), {
+      importRecordId: 'import-file',
+      jobId: 'job-file',
+      message: 'Altshop import enqueued',
+    });
+    assert.deepStrictEqual(await controller.assignPlanToImported(admin, { planId: 'plan-1', userIds: ['user-1'] }), {
+      jobId: 'job-assign',
+      message: 'Plan assignment enqueued',
+    });
+    assert.deepStrictEqual(await controller.cancelImport('import-1'), {
+      canceled: true,
+      message: 'Import canceled',
+    });
+    assert.equal(JSON.stringify(calls).includes('admin-1'), true);
+    assert.equal(JSON.stringify(calls).includes('backup.json'), true);
+  });
+
+  it('rejects file import and assignment requests that miss required inputs', async () => {
+    const controller = createController();
+
+    await assert.rejects(() => controller.importFrom3xui({ id: 'admin-1' } as never), /File is required/);
+    await assert.rejects(
+      () => controller.assignPlanToImported({ id: 'admin-1' } as never, { planId: '' }),
+      /planId is required/,
+    );
   });
 });
+
+function createController(input: {
+  readonly importsService?: Record<string, unknown>;
+  readonly importQueueService?: Record<string, unknown>;
+  readonly backupPlanClonerService?: Record<string, unknown>;
+} = {}): AdminImportsController {
+  return new AdminImportsController(
+    (input.importsService ?? {}) as never,
+    (input.importQueueService ?? {}) as never,
+    (input.backupPlanClonerService ?? {}) as never,
+  );
+}
+
+function createImportRecord(input: { readonly result: unknown }) {
+  return {
+    id: 'import-1',
+    filename: 'import.json',
+    sourceType: 'remnawave',
+    status: ImportStatus.DRY_RUN,
+    recordsTotal: 2,
+    recordsOk: 1,
+    recordsFailed: 1,
+    errorMessage: null,
+    result: input.result,
+    createdBy: 'admin-1',
+    committedAt: null,
+    rolledBackAt: null,
+    createdAt: new Date('2026-04-24T12:00:00.000Z'),
+  };
+}
+
+function assertRoute(requestMethod: RequestMethod, path: string | undefined, target: unknown): void {
+  assert.equal(Reflect.getMetadata(METHOD_METADATA, target), requestMethod);
+  assert.equal(Reflect.getMetadata(PATH_METADATA, target), path);
+}

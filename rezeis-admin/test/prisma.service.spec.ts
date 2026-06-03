@@ -3,248 +3,173 @@ import 'reflect-metadata';
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { ConfigModule } from '@nestjs/config';
 import { Test } from '@nestjs/testing';
 
 import { databaseConfig } from '../src/common/config/database.config';
-import { validateEnvironment } from '../src/common/config/env.schema';
+import { buildDatabaseUrl, validateEnvironment } from '../src/common/config/env.schema';
 import { PrismaModule } from '../src/common/prisma/prisma.module';
-import { buildPrismaTransactionOptions, PrismaService } from '../src/common/prisma/prisma.service';
+import { PrismaService } from '../src/common/prisma/prisma.service';
 
-describe('PrismaService transaction options', () => {
-  it('uses centrally validated database URL and transaction options', () => {
-    const restoreEnvironment = setProcessEnvironment({
-      ...createValidEnvironmentVariables(),
-      DATABASE_URL: 'postgresql://rezeis:secret@db.internal:5432/rezeis',
-      REZEIS_ADMIN_PRISMA_TRANSACTION_MAX_WAIT_MS: '2500',
-      REZEIS_ADMIN_PRISMA_TRANSACTION_TIMEOUT_MS: '45000',
+describe('PrismaService database configuration', () => {
+  it('validates split database settings and builds the canonical URL', () => {
+    const environment = validateEnvironment({
+      REZEIS_CRYPT_KEY: 'crypt-key',
+      DATABASE_HOST: 'db.internal',
+      DATABASE_PORT: '6543',
+      DATABASE_NAME: 'rezeis_prod',
+      DATABASE_USER: 'rezeis_user',
+      DATABASE_PASSWORD: 'p@ ss',
     });
 
-    try {
-      assert.deepStrictEqual(databaseConfig(), {
-        url: 'postgresql://rezeis:secret@db.internal:5432/rezeis',
-        transactionOptions: {
-          maxWait: 2500,
-          timeout: 45000,
-        },
-      });
-    } finally {
-      restoreEnvironment();
-    }
+    assert.equal(environment.DATABASE_HOST, 'db.internal');
+    assert.equal(environment.DATABASE_PORT, 6543);
+    assert.equal(environment.DATABASE_NAME, 'rezeis_prod');
+    assert.equal(environment.DATABASE_USER, 'rezeis_user');
+    assert.equal(environment.DATABASE_PASSWORD, 'p@ ss');
+    assert.equal(buildDatabaseUrl(environment), 'postgresql://rezeis_user:p%40%20ss@db.internal:6543/rezeis_prod');
   });
 
-  it('fails through sanitized environment validation when database URL is missing', () => {
-    const environment = createValidEnvironmentVariables();
-    delete environment.DATABASE_URL;
-    const restoreEnvironment = setProcessEnvironment(environment);
-
-    try {
-      assert.throws((): void => {
-        databaseConfig();
-      }, assertEnvironmentConfigurationError);
-    } finally {
-      restoreEnvironment();
-    }
-  });
-
-  it('rejects malformed and unsupported database URLs without echoing raw credentials', () => {
-    const unsafeDatabaseUrls = [
-      'not-a-url',
-      'http://db.internal:5432/rezeis',
-      'postgresql://admin:secret-password@db.internal:5432/rezeis\u0000',
-    ];
-
-    for (const databaseUrl of unsafeDatabaseUrls) {
-      assert.throws((): void => {
-        validateEnvironment({
-          ...createValidEnvironmentVariables(),
-          DATABASE_URL: databaseUrl,
-        });
-      }, assertEnvironmentConfigurationError);
-    }
-
-    try {
-      validateEnvironment({
-        ...createValidEnvironmentVariables(),
-        DATABASE_URL: 'postgresql://admin:secret-password@db.internal:5432/rezeis\u0000',
-      });
-      assert.fail('Expected invalid database URL to be rejected');
-    } catch (error) {
-      assert.ok(error instanceof Error);
-      const serializedError = JSON.stringify(error);
-      assert.doesNotMatch(error.message, /secret-password/);
-      assert.doesNotMatch(error.message, /postgresql:\/\/admin/);
-      assert.doesNotMatch(serializedError, /secret-password/);
-      assert.doesNotMatch(serializedError, /postgresql:\/\/admin/);
-      assert.equal(error.stack, '');
-    }
-  });
-
-  it('accepts trimmed Postgres database URLs from centralized validation', () => {
-    const actualEnvironment = validateEnvironment({
-      ...createValidEnvironmentVariables(),
-      DATABASE_URL: '  postgres://rezeis:secret@localhost:5432/rezeis  ',
-    });
-
-    assert.equal(actualEnvironment.DATABASE_URL, 'postgres://rezeis:secret@localhost:5432/rezeis');
-  });
-
-  it('builds bounded Prisma transaction defaults from validated configuration', () => {
-    const transactionOptions = buildPrismaTransactionOptions({
-      maxWait: 3500,
-      timeout: 15000,
-    });
-
-    assert.deepStrictEqual(transactionOptions, {
-      maxWait: 3500,
-      timeout: 15000,
-    });
-  });
-
-  it('passes transaction defaults into PrismaClient construction', () => {
-    const service = new PrismaService({
-      url: 'postgresql://rezeis:secret@localhost:5432/rezeis',
-      transactionOptions: {
-        maxWait: 4000,
-        timeout: 20000,
+  it('exposes databaseConfig from split DATABASE_* variables', async () => {
+    await withDatabaseEnvironment(
+      {
+        DATABASE_URL: undefined,
+        DATABASE_HOST: 'postgres.internal',
+        DATABASE_PORT: '6543',
+        DATABASE_NAME: 'rezeis_admin',
+        DATABASE_USER: 'admin_user',
+        DATABASE_PASSWORD: 'secret value',
+        DATABASE_POOL_SIZE: '12',
+        DATABASE_MAX_OVERFLOW: '4',
+        DATABASE_POOL_TIMEOUT: '7',
+        DATABASE_POOL_RECYCLE: '900',
       },
-    });
-
-    const engineConfiguration = service as unknown as {
-      readonly _engineConfig?: {
-        readonly transactionOptions?: {
-          readonly maxWait?: number;
-          readonly timeout?: number;
-        };
-      };
-    };
-
-    assert.equal(engineConfiguration._engineConfig?.transactionOptions?.maxWait, 4000);
-    assert.equal(engineConfiguration._engineConfig?.transactionOptions?.timeout, 20000);
-  });
-
-  it('resolves PrismaService through Nest config injection with transaction defaults', async () => {
-    const restoreEnvironment = setProcessEnvironment({
-      ...createValidEnvironmentVariables(),
-      REZEIS_ADMIN_PRISMA_TRANSACTION_MAX_WAIT_MS: '7777',
-      REZEIS_ADMIN_PRISMA_TRANSACTION_TIMEOUT_MS: '33333',
-    });
-
-    try {
-      const moduleRef = await Test.createTestingModule({
-        imports: [
-          ConfigModule.forRoot({
-            isGlobal: true,
-            cache: false,
-            ignoreEnvFile: true,
-            load: [databaseConfig],
-            validate: validateEnvironment,
-          }),
-          PrismaModule,
-        ],
-      }).compile();
-
-      try {
-        const service = moduleRef.get(PrismaService);
-        const engineConfiguration = service as unknown as {
-          readonly _engineConfig?: {
-            readonly transactionOptions?: {
-              readonly maxWait?: number;
-              readonly timeout?: number;
-            };
-          };
-        };
-
-        assert.equal(engineConfiguration._engineConfig?.transactionOptions?.maxWait, 7777);
-        assert.equal(engineConfiguration._engineConfig?.transactionOptions?.timeout, 33333);
-      } finally {
-        await moduleRef.close();
-      }
-    } finally {
-      restoreEnvironment();
-    }
-  });
-
-  it('validates optional transaction timeout environment variables', () => {
-    const actualEnvironment = validateEnvironment({
-      ...createValidEnvironmentVariables(),
-      REZEIS_ADMIN_PRISMA_TRANSACTION_MAX_WAIT_MS: '4500',
-      REZEIS_ADMIN_PRISMA_TRANSACTION_TIMEOUT_MS: '25000',
-    });
-
-    assert.equal(actualEnvironment.REZEIS_ADMIN_PRISMA_TRANSACTION_MAX_WAIT_MS, 4500);
-    assert.equal(actualEnvironment.REZEIS_ADMIN_PRISMA_TRANSACTION_TIMEOUT_MS, 25000);
-  });
-
-  it('rejects unsafe transaction timeout environment variables', () => {
-    assert.throws(
-      (): void => {
-        validateEnvironment({
-          ...createValidEnvironmentVariables(),
-          REZEIS_ADMIN_PRISMA_TRANSACTION_MAX_WAIT_MS: '0',
+      () => {
+        assert.deepStrictEqual(databaseConfig(), {
+          host: 'postgres.internal',
+          port: 6543,
+          name: 'rezeis_admin',
+          user: 'admin_user',
+          password: 'secret value',
+          url: 'postgresql://admin_user:secret%20value@postgres.internal:6543/rezeis_admin',
+          poolSize: 12,
+          maxOverflow: 4,
+          poolTimeout: 7,
+          poolRecycle: 900,
         });
       },
-      assertEnvironmentConfigurationError,
     );
+  });
 
-    assert.throws(
-      (): void => {
-        validateEnvironment({
-          ...createValidEnvironmentVariables(),
-          REZEIS_ADMIN_PRISMA_TRANSACTION_TIMEOUT_MS: '120001',
-        });
+  it('passes an explicit DATABASE_URL override into Prisma 7 adapter construction', async () => {
+    await withDatabaseEnvironment(
+      {
+        DATABASE_URL: 'postgresql://override:secret@override.internal:5432/rezeis',
+        DATABASE_HOST: 'ignored.internal',
+        DATABASE_PORT: '6543',
+        DATABASE_NAME: 'ignored',
+        DATABASE_USER: 'ignored',
+        DATABASE_PASSWORD: 'ignored',
       },
-      assertEnvironmentConfigurationError,
+      () => {
+        const service = new PrismaService();
+
+        assert.equal(
+          readPrismaConnectionString(service),
+          'postgresql://override:secret@override.internal:5432/rezeis',
+        );
+      },
+    );
+  });
+
+  it('falls back to split DATABASE_* variables when DATABASE_URL is absent', async () => {
+    await withDatabaseEnvironment(
+      {
+        DATABASE_URL: undefined,
+        DATABASE_HOST: 'db.internal',
+        DATABASE_PORT: '6543',
+        DATABASE_NAME: 'rezeis_prod',
+        DATABASE_USER: 'rezeis_user',
+        DATABASE_PASSWORD: 'p@ ss',
+      },
+      () => {
+        const service = new PrismaService();
+
+        assert.equal(
+          readPrismaConnectionString(service),
+          'postgresql://rezeis_user:p%40%20ss@db.internal:6543/rezeis_prod',
+        );
+      },
+    );
+  });
+
+  it('registers PrismaService as a no-argument Nest provider', async () => {
+    await withDatabaseEnvironment(
+      {
+        DATABASE_URL: undefined,
+        DATABASE_HOST: 'db.internal',
+        DATABASE_PORT: '5432',
+        DATABASE_NAME: 'rezeis',
+        DATABASE_USER: 'rezeis',
+        DATABASE_PASSWORD: 'secret',
+      },
+      async () => {
+        const moduleRef = await Test.createTestingModule({
+          imports: [PrismaModule],
+        }).compile();
+
+        try {
+          const service = moduleRef.get(PrismaService);
+
+          assert.equal(typeof service.onModuleInit, 'function');
+          assert.equal(typeof service.onModuleDestroy, 'function');
+          assert.equal(readPrismaConnectionString(service), 'postgresql://rezeis:secret@db.internal:5432/rezeis');
+        } finally {
+          await moduleRef.close();
+        }
+      },
     );
   });
 });
 
-function createValidEnvironmentVariables(): Record<string, unknown> {
-  return {
-    NODE_ENV: 'test',
-    PORT: '3000',
-    DATABASE_URL: 'postgresql://rezeis:secret@localhost:5432/rezeis',
-    REDIS_URL: 'redis://localhost:6379/0',
-    REZEIS_ADMIN_CORS_ORIGIN: 'http://localhost:3000',
-    REZEIS_ADMIN_JWT_SECRET: 'jwt-secret',
-    REZEIS_ADMIN_JWT_EXPIRES_IN: '12h',
-    REZEIS_ADMIN_INTERNAL_API_KEY: 'internal-api-key',
-    REZEIS_ADMIN_SMTP_HOST: 'smtp.example.com',
-    REZEIS_ADMIN_SMTP_PORT: '465',
-    REZEIS_ADMIN_SMTP_SECURE: 'true',
-    REZEIS_ADMIN_SMTP_USER: 'smtp-user',
-    REZEIS_ADMIN_SMTP_PASSWORD: 'smtp-password',
-    REZEIS_ADMIN_SMTP_FROM_ADDRESS: 'no-reply@example.com',
-    REZEIS_ADMIN_SMTP_FROM_NAME: 'Rezeis Admin',
-    REZEIS_ADMIN_SMTP_REPLY_TO: 'support@example.com',
-    REZEIS_ADMIN_SMTP_TIMEOUT_MS: '10000',
+function readPrismaConnectionString(service: PrismaService): string | undefined {
+  const engineConfiguration = service as unknown as {
+    readonly _engineConfig?: {
+      readonly adapter?: {
+        readonly config?: {
+          readonly connectionString?: string;
+        };
+      };
+    };
   };
+
+  return engineConfiguration._engineConfig?.adapter?.config?.connectionString;
 }
 
-function assertEnvironmentConfigurationError(error: unknown): boolean {
-  assert.ok(error instanceof Error);
-  assert.equal(error.name, 'EnvironmentConfigurationError');
-  assert.match(error.message, /Environment configuration validation failed/);
-  assert.equal(error.stack, '');
-  return true;
-}
-
-function setProcessEnvironment(nextEnvironment: Record<string, unknown>): () => void {
+async function withDatabaseEnvironment<T>(
+  nextValues: Record<string, string | undefined>,
+  fn: () => T | Promise<T>,
+): Promise<T> {
   const previousValues = new Map<string, string | undefined>();
 
-  for (const [key, value] of Object.entries(nextEnvironment)) {
+  for (const key of Object.keys(nextValues)) {
     previousValues.set(key, process.env[key]);
-    process.env[key] = String(value);
+    const nextValue = nextValues[key];
+    if (nextValue === undefined) {
+      delete process.env[key];
+      continue;
+    }
+    process.env[key] = nextValue;
   }
 
-  return (): void => {
-    for (const [key, value] of previousValues) {
-      if (value === undefined) {
+  try {
+    return await fn();
+  } finally {
+    for (const [key, previousValue] of previousValues) {
+      if (previousValue === undefined) {
         delete process.env[key];
         continue;
       }
-
-      process.env[key] = value;
+      process.env[key] = previousValue;
     }
-  };
+  }
 }

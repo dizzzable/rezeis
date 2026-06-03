@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { EmailService } from '../../email/services/email.service';
@@ -190,6 +190,16 @@ export class LinkingService {
       throw new NotFoundException('Web account not found for this userId');
     }
     const emailNormalized = input.email.trim().toLowerCase();
+    const existingEmailOwner = await this.prismaService.webAccount.findFirst({
+      where: {
+        emailNormalized,
+        userId: { not: input.userId },
+      },
+      select: { id: true },
+    });
+    if (existingEmailOwner !== null) {
+      throw new ConflictException('Email is already linked to another web account');
+    }
     const code = this.makeNumericCode(6);
     const codeHash = this.hash(code);
     const expiresAt = new Date(Date.now() + LinkingService.CODE_TTL_MS);
@@ -259,6 +269,7 @@ export class LinkingService {
           purpose: LinkingService.EMAIL_PURPOSE,
           consumedAt: null,
           expiresAt: { gt: new Date() },
+          attemptsLeft: { gt: 0 },
         },
         orderBy: { createdAt: 'desc' },
       });
@@ -266,9 +277,14 @@ export class LinkingService {
         return { success: false, verified: false };
       }
       if (challenge.codeHash !== codeHash) {
+        const now = new Date();
+        const attemptsLeft = Math.max(challenge.attemptsLeft - 1, 0);
         await tx.authChallenge.update({
           where: { id: challenge.id },
-          data: { attemptsLeft: { decrement: 1 } },
+          data: {
+            attemptsLeft: { decrement: 1 },
+            consumedAt: attemptsLeft === 0 ? now : null,
+          },
         });
         return { success: false, verified: false };
       }

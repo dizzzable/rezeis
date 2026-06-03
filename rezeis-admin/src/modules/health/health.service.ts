@@ -19,6 +19,7 @@ interface HealthResponse {
   readonly status: 'ok' | 'degraded' | 'error';
   readonly service: string;
   readonly version: string;
+  readonly gitSha: string | null;
   readonly timestamp: string;
   readonly uptime: number;
   readonly components: {
@@ -72,7 +73,8 @@ export class HealthService {
     return {
       status: critical ? 'error' : degraded ? 'degraded' : 'ok',
       service: this.appConfiguration.serviceName,
-      version: process.env.npm_package_version ?? 'unknown',
+      version: process.env.APP_VERSION ?? process.env.npm_package_version ?? 'unknown',
+      gitSha: normalizeGitSha(process.env.REZEIS_GIT_SHA),
       timestamp: new Date().toISOString(),
       uptime: Math.floor((Date.now() - this.startTime) / 1000),
       components: { database, redis, queues, disk },
@@ -85,7 +87,8 @@ export class HealthService {
       await this.prismaService.$queryRawUnsafe('SELECT 1');
       return { status: 'up', latencyMs: Date.now() - start };
     } catch (err) {
-      return { status: 'down', latencyMs: Date.now() - start, details: (err as Error).message };
+      this.logger.warn(`Database health check failed: ${safeHealthLogMessage(err)}`);
+      return { status: 'down', latencyMs: Date.now() - start, details: 'database_unavailable' };
     }
   }
 
@@ -98,7 +101,8 @@ export class HealthService {
       if (pong !== 'PONG') throw new Error(`Unexpected PING response: ${pong}`);
       return { status: 'up', latencyMs: Date.now() - start };
     } catch (err) {
-      return { status: 'down', latencyMs: Date.now() - start, details: (err as Error).message };
+      this.logger.warn(`Redis health check failed: ${safeHealthLogMessage(err)}`);
+      return { status: 'down', latencyMs: Date.now() - start, details: 'redis_unavailable' };
     }
   }
 
@@ -112,7 +116,8 @@ export class HealthService {
         details: `waiting=${counts.waiting} active=${counts.active} failed=${counts.failed}`,
       };
     } catch (err) {
-      return { status: 'down', details: (err as Error).message };
+      this.logger.warn(`Queue health check failed: ${safeHealthLogMessage(err)}`);
+      return { status: 'down', details: 'queue_unavailable' };
     }
   }
 
@@ -125,7 +130,32 @@ export class HealthService {
       await fsp.unlink(testFile);
       return { status: 'up' };
     } catch (err) {
-      return { status: 'down', details: (err as Error).message };
+      this.logger.warn(`Disk health check failed: ${safeHealthLogMessage(err)}`);
+      return { status: 'down', details: 'disk_unavailable' };
     }
   }
+}
+
+function normalizeGitSha(value: string | undefined): string | null {
+  const normalized = value?.trim();
+  if (!normalized || normalized === 'unknown') return null;
+  return normalized.slice(0, 40);
+}
+
+function safeHealthLogMessage(error: unknown): string {
+  if (error instanceof Error && typeof error.message === 'string') {
+    return redactHealthDiagnostic(error.message);
+  }
+  return redactHealthDiagnostic(String(error));
+}
+
+function redactHealthDiagnostic(value: string): string {
+  return value
+    .replace(/\b(?:postgres(?:ql)?|redis):\/\/\S+/giu, '[redacted-url]')
+    .replace(/https?:\/\/\S+/giu, '[redacted-url]')
+    .replace(/[A-Za-z]:\\[^\s'"`]+/gu, '[redacted-path]')
+    .replace(/\/(?:app|data|home|mnt|opt|srv|tmp|var)\/[^\s'"`]+/gu, '[redacted-path]')
+    .replace(/\b(?:api[_-]?key|auth(?:orization)?|bearer\w*|cookie|credential|password|secret|token)\s*[:=]\s*\S+/giu, '[redacted]')
+    .replace(/\b(?:api[_-]?key|auth(?:orization)?|bearer\w*|cookie|credential|password|secret|token)\b/giu, '[redacted]')
+    .slice(0, 256);
 }

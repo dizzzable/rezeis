@@ -141,16 +141,11 @@ describe('PaymentWebhookOpsService reconciliation health queue counts', () => {
   });
 
   it('returns before a stalled BullMQ counts probe finishes', async () => {
-    const slowCounts = new Promise<Record<string, number>>((resolve) => {
-      setTimeout(() => resolve({ waiting: 99 }), 50);
-    });
-    const startedAt = Date.now();
+    const slowCounts = new Promise<Record<string, number>>(() => undefined);
 
     const result = await runPaymentReconciliationQueueCountsWithTimeout(() => slowCounts, 5);
-    const elapsedMs = Date.now() - startedAt;
 
     assert.deepEqual(result, {});
-    assert.equal(elapsedMs < 45, true);
   });
 
   it('falls back to zeroed counts for synchronous BullMQ count failures without surfacing raw details', async () => {
@@ -258,16 +253,11 @@ describe('PaymentWebhookOpsService webhook diagnostic responses', () => {
 
 describe('PaymentWebhookOpsService replay queue inspection bounds', () => {
   it('returns null before a stalled replay job-state inspection finishes', async () => {
-    const slowState = new Promise<string>((resolve) => {
-      setTimeout(() => resolve('waiting'), 50);
-    });
-    const startedAt = Date.now();
+    const slowState = new Promise<string>(() => undefined);
 
     const result = await runPaymentWebhookReplayJobStateInspectionWithTimeout(() => slowState, 5);
-    const elapsedMs = Date.now() - startedAt;
 
     assert.equal(result, null);
-    assert.equal(elapsedMs < 45, true);
   });
 
   it('degrades replay job-state inspection failures without surfacing raw details', async () => {
@@ -312,7 +302,6 @@ describe('PaymentWebhookOpsService replay queue inspection bounds', () => {
       },
     });
 
-    const startedAt = Date.now();
     const result = await service.replayEvent({
       eventId: 'webhook-event-1',
       reason: 'operator retry',
@@ -320,11 +309,9 @@ describe('PaymentWebhookOpsService replay queue inspection bounds', () => {
       currentAdmin: { id: 'admin-1', role: 'ADMIN', username: 'admin' } as never,
       requestMetadata: { requestId: 'request-1', remoteAddress: null, userAgent: null },
     });
-    const elapsedMs = Date.now() - startedAt;
     const serialized = JSON.stringify(result);
 
     assert.equal(result.alreadyQueued, false);
-    assert.equal(elapsedMs < 45, true);
     assert.equal(serialized.includes(rawError), false);
     assert.equal(serialized.includes('secret'), false);
     assert.equal(serialized.includes('redis://'), false);
@@ -339,16 +326,11 @@ describe('PaymentWebhookOpsService replay queue inspection bounds', () => {
   });
 
   it('returns false before a stalled replay queue inspection finishes', async () => {
-    const slowInspection = new Promise<boolean>((resolve) => {
-      setTimeout(() => resolve(true), 50);
-    });
-    const startedAt = Date.now();
+    const slowInspection = new Promise<boolean>(() => undefined);
 
     const result = await runPaymentWebhookReplayQueueInspectionWithTimeout(() => slowInspection, 5);
-    const elapsedMs = Date.now() - startedAt;
 
     assert.equal(result, false);
-    assert.equal(elapsedMs < 45, true);
   });
 
   it('degrades replay duplicate queue inspection failures to not queued without surfacing raw details', async () => {

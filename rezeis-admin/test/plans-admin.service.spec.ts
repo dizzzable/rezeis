@@ -4,6 +4,7 @@ import { describe, it } from 'node:test';
 import { PlanAvailability, PlanType } from '@prisma/client';
 
 import { PlansAdminService } from '../src/modules/plans/services/plans-admin.service';
+import { PlansAdminValidators } from '../src/modules/plans/services/plans-admin.validators';
 
 describe('PlansAdminService', () => {
   it('rejects creating a second active trial plan before persisting', async () => {
@@ -19,11 +20,10 @@ describe('PlansAdminService', () => {
       },
       user: { findMany: async () => [] },
     };
-    const service = new PlansAdminService(
-      prismaService as never,
-      { getInternalSquadOptions: async () => [], getExternalSquadOptions: async () => [] } as never,
-      { syncPlanSnapshotMetadata: async () => 0 } as never,
-    );
+    const service = createService(prismaService, {
+      getInternalSquadOptions: async () => [],
+      getExternalSquadOptions: async () => [],
+    });
 
     await assert.rejects(
       async () => {
@@ -49,10 +49,9 @@ describe('PlansAdminService', () => {
   });
 
   it('blocks deletion when a subscription snapshot still references the plan', async () => {
-    const service = new PlansAdminService(
-      {
-        $transaction: async <T>(callback: (client: any) => Promise<T>): Promise<T> =>
-          callback({
+    const prismaService = {
+      $transaction: async <T>(callback: (client: any) => Promise<T>): Promise<T> =>
+        callback({
           plan: {
             findUnique: async () => ({ id: 'plan-1', name: 'Starter', orderIndex: 1 }),
             findFirst: async () => null,
@@ -61,10 +60,11 @@ describe('PlansAdminService', () => {
             update: async () => undefined,
           },
           $queryRaw: async () => [{ id: 'subscription-1' }],
-          }),
-      } as never,
-      { getInternalSquadOptions: async () => [], getExternalSquadOptions: async () => [] } as never,
-      { syncPlanSnapshotMetadata: async () => 0 } as never,
+        }),
+    };
+    const service = createService(
+      prismaService,
+      { getInternalSquadOptions: async () => [], getExternalSquadOptions: async () => [] },
     );
 
     await assert.rejects(
@@ -81,9 +81,9 @@ describe('PlansAdminService', () => {
     );
   });
 
-  it('normalizes trial plans to one zero-priced duration before persisting', async () => {
+  it('persists paid trial plans with one priced duration and current trial settings', async () => {
     let actualCreateData: unknown;
-    const service = new PlansAdminService(
+    const prismaService =
       {
         plan: {
           findFirst: async (...args: readonly unknown[]) => {
@@ -107,6 +107,7 @@ describe('PlansAdminService', () => {
                   name: 'Trial Plan',
                   description: null,
                   tag: null,
+                  icon: null,
                   isActive: true,
                   isArchived: false,
                   archivedRenewMode: 'SELF_RENEW',
@@ -120,6 +121,7 @@ describe('PlansAdminService', () => {
                   upgradeToPlanIds: [],
                   replacementPlanIds: [],
                   allowedUserIds: [],
+                  trialSettings: { maxClaims: 2, free: false, availabilityScope: 'INVITED' },
                   createdAt: new Date('2026-04-19T12:00:00.000Z'),
                   updatedAt: new Date('2026-04-19T12:00:00.000Z'),
                   durations: [
@@ -136,12 +138,13 @@ describe('PlansAdminService', () => {
             subscription: { update: async () => undefined },
             $queryRaw: async () => [],
           }),
-      } as never,
+      };
+    const service = createService(
+      prismaService,
       {
         getInternalSquadOptions: async () => [{ uuid: '11111111-1111-1111-1111-111111111111', name: 'Core' }],
         getExternalSquadOptions: async () => [],
-      } as never,
-      { syncPlanSnapshotMetadata: async () => 0 } as never,
+      },
     );
 
     await service.createPlan(
@@ -152,10 +155,8 @@ describe('PlansAdminService', () => {
         deviceLimit: 1,
         trafficLimit: 1024,
         internalSquads: ['11111111-1111-1111-1111-111111111111'],
-        durations: [
-          { days: 30, prices: [{ currency: 'USD', price: '9.99' }] },
-          { days: 60, prices: [{ currency: 'USD', price: '19.99' }] },
-        ],
+        trialSettings: { maxClaims: 2, free: false, availabilityScope: 'INVITED' },
+        durations: [{ days: 30, prices: [{ currency: 'USD', price: '9.99' }] }],
       },
       {
         currentAdmin: { id: 'admin-1' } as never,
@@ -167,6 +168,7 @@ describe('PlansAdminService', () => {
       name: 'Trial Plan',
       description: null,
       tag: null,
+      icon: null,
       isActive: true,
       isArchived: false,
       archivedRenewMode: 'SELF_RENEW',
@@ -180,13 +182,14 @@ describe('PlansAdminService', () => {
       upgradeToPlanIds: [],
       replacementPlanIds: [],
       allowedUserIds: [],
+      trialSettings: { maxClaims: 2, free: false, availabilityScope: 'INVITED' },
       orderIndex: 4,
       durations: {
         create: [
           {
             days: 30,
             prices: {
-              create: [{ currency: 'USD', price: '0' }],
+              create: [{ currency: 'USD', price: '9.99' }],
             },
           },
         ],
@@ -197,7 +200,7 @@ describe('PlansAdminService', () => {
   it('clears allowed users and archived replacement state during normalization before update', async () => {
     let actualUpdateData: unknown;
     let actualSyncPlan: unknown;
-    const service = new PlansAdminService(
+    const prismaService =
       {
         plan: {
           findFirst: async (...args: readonly unknown[]) => {
@@ -213,6 +216,7 @@ describe('PlansAdminService', () => {
             name: 'Starter',
             description: null,
             tag: null,
+            icon: null,
             isActive: true,
             isArchived: true,
             archivedRenewMode: 'REPLACE_ON_RENEW',
@@ -226,6 +230,7 @@ describe('PlansAdminService', () => {
             upgradeToPlanIds: [],
             replacementPlanIds: ['33333333-3333-3333-3333-333333333333'],
             allowedUserIds: ['44444444-4444-4444-4444-444444444444'],
+            trialSettings: { maxClaims: 1, free: true, availabilityScope: 'ALL' },
             createdAt: new Date('2026-04-19T12:00:00.000Z'),
             updatedAt: new Date('2026-04-19T12:00:00.000Z'),
             durations: [
@@ -249,6 +254,7 @@ describe('PlansAdminService', () => {
                   name: 'Starter',
                   description: null,
                   tag: null,
+                  icon: null,
                   isActive: true,
                   isArchived: false,
                   archivedRenewMode: 'SELF_RENEW',
@@ -262,6 +268,7 @@ describe('PlansAdminService', () => {
                   upgradeToPlanIds: [],
                   replacementPlanIds: [],
                   allowedUserIds: [],
+                  trialSettings: { maxClaims: 1, free: true, availabilityScope: 'ALL' },
                   createdAt: new Date('2026-04-19T12:00:00.000Z'),
                   updatedAt: new Date('2026-04-19T12:00:00.000Z'),
                   durations: [
@@ -278,17 +285,19 @@ describe('PlansAdminService', () => {
             subscription: { update: async () => undefined },
             $queryRaw: async () => [],
           }),
-      } as never,
+      };
+    const service = createService(
+      prismaService,
       {
         getInternalSquadOptions: async () => [{ uuid: '11111111-1111-1111-1111-111111111111', name: 'Core' }],
         getExternalSquadOptions: async () => [{ uuid: '22222222-2222-2222-2222-222222222222', name: 'Public' }],
-      } as never,
+      },
       {
         syncPlanSnapshotMetadata: async (_client: unknown, plan: unknown) => {
           actualSyncPlan = plan;
           return 0;
         },
-      } as never,
+      },
     );
 
     await service.updatePlan(
@@ -308,6 +317,7 @@ describe('PlansAdminService', () => {
       name: 'Starter',
       description: null,
       tag: null,
+      icon: null,
       isActive: true,
       isArchived: false,
       archivedRenewMode: 'SELF_RENEW',
@@ -321,6 +331,7 @@ describe('PlansAdminService', () => {
       upgradeToPlanIds: [],
       replacementPlanIds: [],
       allowedUserIds: [],
+      trialSettings: { maxClaims: 1, free: true, availabilityScope: 'ALL' },
       durations: {
         deleteMany: {},
         create: [
@@ -346,3 +357,16 @@ describe('PlansAdminService', () => {
     });
   });
 });
+
+function createService(
+  prismaService: object,
+  remnawaveApiService: object,
+  planSnapshotSyncService: object = { syncPlanSnapshotMetadata: async () => 0 },
+): PlansAdminService {
+  return new PlansAdminService(
+    prismaService as never,
+    remnawaveApiService as never,
+    planSnapshotSyncService as never,
+    new PlansAdminValidators(prismaService as never, remnawaveApiService as never),
+  );
+}

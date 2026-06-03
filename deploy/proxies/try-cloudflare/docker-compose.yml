@@ -11,7 +11,7 @@ services:
   rezeis-try-cloudflare:
     container_name: rezeis-try-cloudflare
     hostname: rezeis-try-cloudflare
-    image: cloudflare/cloudflared:latest
+    image: cloudflare/cloudflared:2025.8.1
     networks:
       - remnawave-network
     restart: always

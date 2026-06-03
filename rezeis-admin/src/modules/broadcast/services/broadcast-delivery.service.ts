@@ -245,11 +245,25 @@ export class BroadcastDeliveryService {
           edited++;
         } else {
           const err = await response.text();
-          this.logger.warn(`Edit ${message.id} failed: ${err.slice(0, 200)}`);
+          this.logger.warn(
+            `Edit ${message.id} failed: ${sanitizeTelegramDiagnostic(
+              err,
+              botToken,
+              user.telegramId.toString(),
+              200,
+            )}`,
+          );
           failed++;
         }
       } catch (err: unknown) {
-        this.logger.warn(`Edit ${message.id} threw: ${(err as Error).message}`);
+        this.logger.warn(
+          `Edit ${message.id} threw: ${sanitizeTelegramDiagnostic(
+            err,
+            botToken,
+            user.telegramId.toString(),
+            200,
+          )}`,
+        );
         failed++;
       }
 
@@ -323,11 +337,25 @@ export class BroadcastDeliveryService {
           deleted++;
         } else {
           const err = await response.text();
-          this.logger.warn(`Delete ${message.id} failed: ${err.slice(0, 200)}`);
+          this.logger.warn(
+            `Delete ${message.id} failed: ${sanitizeTelegramDiagnostic(
+              err,
+              botToken,
+              user.telegramId.toString(),
+              200,
+            )}`,
+          );
           failed++;
         }
       } catch (err: unknown) {
-        this.logger.warn(`Delete ${message.id} threw: ${(err as Error).message}`);
+        this.logger.warn(
+          `Delete ${message.id} threw: ${sanitizeTelegramDiagnostic(
+            err,
+            botToken,
+            user.telegramId.toString(),
+            200,
+          )}`,
+        );
         failed++;
       }
 
@@ -483,9 +511,19 @@ export class BroadcastDeliveryService {
         return { ok: true, messageId: data.result?.message_id };
       }
       const errorBody = await response.text();
-      return { ok: false, error: errorBody.slice(0, 500) };
+      return {
+        ok: false,
+        error: sanitizeTelegramDiagnostic(errorBody, botToken, input.chatId),
+      };
     } catch (err: unknown) {
-      return { ok: false, error: err instanceof Error ? err.message : 'Network error' };
+      return {
+        ok: false,
+        error: sanitizeTelegramDiagnostic(
+          err instanceof Error ? err.message : 'Network error',
+          botToken,
+          input.chatId,
+        ),
+      };
     }
   }
 
@@ -522,4 +560,29 @@ export class BroadcastDeliveryService {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function sanitizeTelegramDiagnostic(
+  value: unknown,
+  botToken: string,
+  chatId?: string | null,
+  maxLength = 500,
+): string {
+  const raw = value instanceof Error ? value.message : String(value ?? 'Telegram request failed');
+  let sanitized = raw
+    .replace(/https?:\/\/api\.telegram\.org\/bot[^\s/]+(?:\/\S*)?/giu, '[telegram api url hidden]')
+    .replace(/bot\d{4,}:[A-Za-z0-9_-]+/gu, 'bot[bot-token hidden]');
+
+  if (botToken.length > 0) {
+    sanitized = sanitized.replace(new RegExp(escapeRegExp(botToken), 'gu'), '[bot-token hidden]');
+  }
+  if (chatId && chatId.length > 0) {
+    sanitized = sanitized.replace(new RegExp(escapeRegExp(chatId), 'gu'), '[chat-id hidden]');
+  }
+
+  return sanitized.slice(0, maxLength);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

@@ -11,8 +11,10 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.interface';
 import { RequestMetadataInterface } from '../../auth/interfaces/request-metadata.interface';
 import {
+  PAYMENT_RECONCILIATION_ENQUEUE_FAILED,
   PAYMENT_RECONCILIATION_JOB,
   PAYMENT_RECONCILIATION_QUEUE,
+  runPaymentReconciliationEnqueueWithTimeout,
 } from '../constants/payment-reconciliation.constant';
 import { ListPaymentWebhookEventsQueryDto } from '../dto/list-payment-webhook-events-query.dto';
 import {
@@ -20,7 +22,11 @@ import {
   AdminPaymentWebhookEventListItemInterface,
   AdminReplayPaymentWebhookEventResultInterface,
 } from '../interfaces/admin-payment-webhook-event.interface';
-import { PaymentReconciliationHealthInterface } from '../interfaces/payment-reconciliation-health.interface';
+import {
+  PaymentReconciliationHealthInterface,
+  PaymentReconciliationQueueCountsInterface,
+} from '../interfaces/payment-reconciliation-health.interface';
+import { normalizePaymentProviderError } from '../utils/payment-provider-error.util';
 import { PaymentWebhookPayloadRedactionService } from './payment-webhook-payload-redaction.service';
 import { PaymentWebhookInboxService } from './payment-webhook-inbox.service';
 import { PaymentOpsAlertService } from './payment-ops-alert.service';
@@ -87,24 +93,40 @@ export class PaymentWebhookOpsService {
       force: input.force,
     });
     const jobId = buildReconciliationJobId(event.id);
-    const alreadyQueued = await this.isAlreadyQueued(jobId);
+    const alreadyQueued = await runPaymentWebhookReplayQueueInspectionWithTimeout(
+      () => this.isAlreadyQueued(jobId),
+    );
     const updatedEvent = alreadyQueued
       ? event
       : await this.paymentWebhookInboxService.markReplayRequested(event.id);
     if (!alreadyQueued) {
-      await this.paymentReconciliationQueue.add(
-        PAYMENT_RECONCILIATION_JOB,
-        {
-          eventId: event.id,
-          paymentId: event.paymentId,
-          gatewayType: event.gatewayType,
-        },
-        {
-          jobId,
-          removeOnComplete: 100,
-          removeOnFail: 100,
-        },
-      );
+      try {
+        await runPaymentReconciliationEnqueueWithTimeout(() =>
+          this.paymentReconciliationQueue.add(
+            PAYMENT_RECONCILIATION_JOB,
+            {
+              eventId: event.id,
+              paymentId: event.paymentId,
+              gatewayType: event.gatewayType,
+            },
+            {
+              jobId,
+              removeOnComplete: 100,
+              removeOnFail: 100,
+            },
+          ),
+        );
+      } catch (error: unknown) {
+        try {
+          await this.paymentWebhookInboxService.markFailed(
+            event.id,
+            PAYMENT_RECONCILIATION_ENQUEUE_FAILED,
+          );
+        } catch {
+          // Preserve the bounded enqueue failure; marker failures can contain DB details.
+        }
+        throw error;
+      }
     }
     await this.prismaService.adminAuditLog.create({
       data: {
@@ -138,17 +160,39 @@ export class PaymentWebhookOpsService {
   }
 
   public async getReconciliationHealth(): Promise<PaymentReconciliationHealthInterface> {
-    const queueCounts = await this.paymentReconciliationQueue.getJobCounts(
-      'waiting',
-      'active',
-      'delayed',
-      'completed',
-      'failed',
+    const [queueCounts, groupedStatus, staleEnqueuedCount, staleProcessingCount] = await Promise.all(
+      [
+        runPaymentReconciliationQueueCountsWithTimeout(() =>
+          this.paymentReconciliationQueue.getJobCounts(
+            'waiting',
+            'active',
+            'delayed',
+            'completed',
+            'failed',
+          ) as Promise<Record<string, number>>,
+        ),
+        this.prismaService.paymentWebhookEvent.groupBy({
+          by: ['status'],
+          _count: { _all: true },
+        }),
+        this.prismaService.paymentWebhookEvent.count({
+          where: {
+            status: PaymentWebhookLifecycleStatus.ENQUEUED,
+            lastTransitionAt: {
+              lt: subtractMinutes(new Date(), ENQUEUED_STALE_MINUTES),
+            },
+          } as never,
+        }),
+        this.prismaService.paymentWebhookEvent.count({
+          where: {
+            status: PaymentWebhookLifecycleStatus.PROCESSING,
+            lastTransitionAt: {
+              lt: subtractMinutes(new Date(), PROCESSING_STALE_MINUTES),
+            },
+          } as never,
+        }),
+      ],
     );
-    const groupedStatus = await this.prismaService.paymentWebhookEvent.groupBy({
-      by: ['status'],
-      _count: { _all: true },
-    });
 
     const eventsByStatus: Record<PaymentWebhookLifecycleStatus, number> = {
       [PaymentWebhookLifecycleStatus.RECEIVED]: 0,
@@ -164,30 +208,13 @@ export class PaymentWebhookOpsService {
       eventsByStatus[row.status] = row._count._all;
     }
 
-    const staleEnqueuedCount = await this.prismaService.paymentWebhookEvent.count({
-      where: {
-        status: PaymentWebhookLifecycleStatus.ENQUEUED,
-        lastTransitionAt: {
-          lt: subtractMinutes(new Date(), ENQUEUED_STALE_MINUTES),
-        },
-      } as never,
-    });
-    const staleProcessingCount = await this.prismaService.paymentWebhookEvent.count({
-      where: {
-        status: PaymentWebhookLifecycleStatus.PROCESSING,
-        lastTransitionAt: {
-          lt: subtractMinutes(new Date(), PROCESSING_STALE_MINUTES),
-        },
-      } as never,
-    });
-
     return {
       queue: {
-        waiting: queueCounts.waiting ?? 0,
-        active: queueCounts.active ?? 0,
-        delayed: queueCounts.delayed ?? 0,
-        completed: queueCounts.completed ?? 0,
-        failed: queueCounts.failed ?? 0,
+        waiting: normalizeQueueCount(queueCounts.waiting),
+        active: normalizeQueueCount(queueCounts.active),
+        delayed: normalizeQueueCount(queueCounts.delayed),
+        completed: normalizeQueueCount(queueCounts.completed),
+        failed: normalizeQueueCount(queueCounts.failed),
       },
       eventsByStatus,
       staleEnqueuedCount,
@@ -220,13 +247,64 @@ export class PaymentWebhookOpsService {
     if (job === undefined || job === null) {
       return false;
     }
-    const state = await job.getState();
+    const state = await runPaymentWebhookReplayJobStateInspectionWithTimeout(() => job.getState());
+    if (state === null) {
+      return false;
+    }
     return (
       state === 'waiting' ||
       state === 'active' ||
       state === 'delayed' ||
       state === 'prioritized'
     );
+  }
+}
+
+export async function runPaymentReconciliationQueueCountsWithTimeout(
+  operation: () => Promise<Record<string, number>>,
+  timeoutMs = 5_000,
+): Promise<Partial<PaymentReconciliationQueueCountsInterface>> {
+  try {
+    return await Promise.race([
+      operation(),
+      new Promise<Record<string, number>>((resolve) => {
+        setTimeout(() => resolve({}), timeoutMs);
+      }),
+    ]);
+  } catch {
+    return {};
+  }
+}
+
+export async function runPaymentWebhookReplayQueueInspectionWithTimeout(
+  operation: () => Promise<boolean>,
+  timeoutMs = 5_000,
+): Promise<boolean> {
+  try {
+    return await Promise.race([
+      operation(),
+      new Promise<boolean>((resolve) => {
+        setTimeout(() => resolve(false), timeoutMs);
+      }),
+    ]);
+  } catch {
+    return false;
+  }
+}
+
+export async function runPaymentWebhookReplayJobStateInspectionWithTimeout(
+  operation: () => Promise<string>,
+  timeoutMs = 5_000,
+): Promise<string | null> {
+  try {
+    return await Promise.race([
+      operation(),
+      new Promise<null>((resolve) => {
+        setTimeout(() => resolve(null), timeoutMs);
+      }),
+    ]);
+  } catch {
+    return null;
   }
 }
 
@@ -268,7 +346,7 @@ function mapEventListItem(
     attempts: event.attempts,
     reconciliationAttempts: enrichedEvent.reconciliationAttempts ?? 0,
     replayCount: enrichedEvent.replayCount ?? 0,
-    lastError: event.lastError,
+    lastError: event.lastError === null ? null : normalizePaymentProviderError(event.lastError),
     receivedAt: event.receivedAt.toISOString(),
     processedAt: event.processedAt?.toISOString() ?? null,
     lastTransitionAt:
@@ -302,4 +380,11 @@ function buildReconciliationJobId(eventId: string): string {
 
 function subtractMinutes(baseDate: Date, minutes: number): Date {
   return new Date(baseDate.getTime() - minutes * 60_000);
+}
+
+function normalizeQueueCount(value: number | undefined): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    return 0;
+  }
+  return Math.floor(value);
 }
