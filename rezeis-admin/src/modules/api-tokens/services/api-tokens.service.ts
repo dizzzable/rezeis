@@ -7,13 +7,22 @@ import { JwtService } from '@nestjs/jwt';
 
 import { authConfig } from '../../../common/config/auth.config';
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import {
+  API_TOKEN_JWT_AUDIENCE,
+  API_TOKEN_JWT_EXPIRES_IN,
+  API_TOKEN_JWT_TYPE,
+  API_TOKEN_TTL_MS,
+} from '../../auth/constants/api-token-auth.constants';
+import { hashApiToken } from '../../auth/utils/api-token-hash.util';
 
 export interface ApiTokenListItemInterface {
   readonly id: string;
   readonly name: string;
+  readonly audience: string;
   readonly prefix: string;
   readonly createdBy: string | null;
   readonly lastUsedAt: string | null;
+  readonly expiresAt: string;
   readonly createdAt: string;
 }
 
@@ -22,6 +31,7 @@ export interface ApiTokenCreateResultInterface {
   readonly name: string;
   readonly token: string;
   readonly prefix: string;
+  readonly expiresAt: string;
   readonly createdAt: string;
 }
 
@@ -36,10 +46,9 @@ interface CreateApiTokenInput {
  *
  * Architecture (mirrors Remnawave panel):
  *  - Token is a JWT signed with the same secret as admin JWTs
- *  - JWT payload contains `{ sub: tokenId, type: 'api_token' }`
- *  - The token row must exist in DB for the token to be valid (delete = revoke)
- *  - On each authenticated request, the JWT strategy checks if the token
- *    row still exists (cache-friendly: check by id)
+ *  - JWT payload contains `{ sub: tokenId, type: 'api_token', aud: ... }`
+ *  - Only `sha256(token)` is stored at rest; the raw token is returned once
+ *  - The token row, fingerprint, audience, and expiration must match for the token to be valid
  */
 @Injectable()
 export class ApiTokensService {
@@ -53,30 +62,33 @@ export class ApiTokensService {
   ) {}
 
   /**
-   * Creates a new API token. The token is a long-lived JWT (no expiry)
-   * that can be revoked by deleting the row.
+   * Creates a new API token. The raw JWT is returned once and expires on the
+   * same policy window persisted in the database for rotation visibility.
    */
   public async create(input: CreateApiTokenInput): Promise<ApiTokenCreateResultInterface> {
     try {
       const tokenId = generateTokenId();
-      // Long-lived API token. JwtModule defaults to a 24h `expiresIn`
-      // for admin sessions, so we override it with a 10-year window
-      // (effectively "never expires" — revocation is done by deleting
-      // the row from `api_tokens`). We can't pass `expiresIn: undefined`
-      // here: newer `jsonwebtoken` versions throw on that value.
+      const expiresAt = new Date(Date.now() + API_TOKEN_TTL_MS);
       const token = await this.jwtService.signAsync(
-        { sub: tokenId, type: 'api_token', name: input.name },
-        { secret: this.authConfiguration.jwtSecret, expiresIn: '3650d' },
+        { sub: tokenId, type: API_TOKEN_JWT_TYPE, name: input.name },
+        {
+          secret: this.authConfiguration.jwtSecret,
+          expiresIn: API_TOKEN_JWT_EXPIRES_IN,
+          audience: API_TOKEN_JWT_AUDIENCE,
+        },
       );
-      const prefix = token.slice(0, 12);
+      const tokenHash = hashApiToken(token);
+      const prefix = tokenHash.slice(0, 12);
 
       const record = await this.prismaService.apiToken.create({
         data: {
           id: tokenId,
           name: input.name,
-          token,
+          tokenHash,
+          audience: API_TOKEN_JWT_AUDIENCE,
           prefix,
           createdBy: input.createdBy,
+          expiresAt,
         },
       });
 
@@ -85,8 +97,9 @@ export class ApiTokensService {
       return {
         id: record.id,
         name: record.name,
-        token: record.token,
+        token,
         prefix: record.prefix,
+        expiresAt: record.expiresAt.toISOString(),
         createdAt: record.createdAt.toISOString(),
       };
     } catch (err) {
@@ -108,9 +121,11 @@ export class ApiTokensService {
     return records.map((record) => ({
       id: record.id,
       name: record.name,
+      audience: record.audience,
       prefix: record.prefix,
       createdBy: record.createdBy,
       lastUsedAt: record.lastUsedAt?.toISOString() ?? null,
+      expiresAt: record.expiresAt.toISOString(),
       createdAt: record.createdAt.toISOString(),
     }));
   }
@@ -130,26 +145,6 @@ export class ApiTokensService {
     this.logger.log(`API token "${existing.name}" (${tokenId}) revoked`);
   }
 
-  /**
-   * Validates that a token id exists in the database (used by the auth
-   * guard to verify API token JWTs are not revoked).
-   */
-  public async exists(tokenId: string): Promise<boolean> {
-    const count = await this.prismaService.apiToken.count({
-      where: { id: tokenId },
-    });
-    return count > 0;
-  }
-
-  /**
-   * Records last usage timestamp (fire-and-forget, non-blocking).
-   */
-  public async touchLastUsed(tokenId: string): Promise<void> {
-    await this.prismaService.apiToken.update({
-      where: { id: tokenId },
-      data: { lastUsedAt: new Date() },
-    }).catch(() => { /* ignore — non-critical */ });
-  }
 }
 
 function generateTokenId(): string {

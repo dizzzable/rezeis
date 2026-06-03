@@ -34,8 +34,10 @@ describe('ApiTokensPage RBAC gating', () => {
         id: 'token-1',
         name: 'Reiwa',
         prefix: 'abcdef',
+        audience: 'rezeis-internal-api',
         createdBy: 'admin-1',
         lastUsedAt: null,
+        expiresAt: '2026-12-01T00:00:00.000Z',
         createdAt: '2026-06-03T00:00:00.000Z',
       },
     ])
@@ -54,8 +56,10 @@ describe('ApiTokensPage RBAC gating', () => {
         id: 'token-1',
         name: 'Reiwa',
         prefix: 'abcdef',
+        audience: 'rezeis-internal-api',
         createdBy: 'admin-1',
         lastUsedAt: null,
+        expiresAt: '2026-12-01T00:00:00.000Z',
         createdAt: '2026-06-03T00:00:00.000Z',
       },
     ])

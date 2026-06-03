@@ -28,6 +28,7 @@ interface ApiTokenFormValues {
 interface CreatedTokenState {
   readonly tokenValue: string
   readonly tokenName: string
+  readonly expiresAt: string
 }
 
 function formatDateTime(value: string | null | undefined): string {
@@ -67,6 +68,7 @@ export function ApiTokensPage(): JSX.Element {
       setCreatedToken({
         tokenValue: response.token,
         tokenName: response.name,
+        expiresAt: response.expiresAt,
       })
       form.reset({ name: '' })
       toast.success(t('settings.apiTokens.createSuccess'))
@@ -104,12 +106,17 @@ export function ApiTokensPage(): JSX.Element {
     if (!createdToken) {
       return
     }
-    void navigator.clipboard.writeText(createdToken.tokenValue).then((): void => {
-      toast.success(t('settings.apiTokens.copySuccess'))
-    })
+    void navigator.clipboard.writeText(createdToken.tokenValue)
+      .then((): void => {
+        toast.success(t('settings.apiTokens.copySuccess'))
+      })
+      .catch((): void => {
+        toast.error(t('settings.apiTokens.errors.copy'))
+      })
   }
 
   const tokens = tokensQuery.data ?? []
+  const tokenStatusTimeMs = tokensQuery.dataUpdatedAt
 
   return (
     <div className="space-y-4">
@@ -178,7 +185,11 @@ export function ApiTokensPage(): JSX.Element {
                       <p className="text-sm font-semibold">
                         {t('settings.apiTokens.secretTitle')}: <span className="font-mono">{createdToken.tokenName}</span>
                       </p>
-                      <p className="text-xs text-muted-foreground">{t('settings.apiTokens.secretDescription')}</p>
+                      <p className="text-xs text-muted-foreground">
+                        {t('settings.apiTokens.secretDescription', {
+                          value: formatDateTime(createdToken.expiresAt),
+                        })}
+                      </p>
                       <div className="flex items-center gap-2 rounded-xl border border-border/70 bg-background px-3 py-2 font-mono text-xs">
                         <code className="min-w-0 flex-1 truncate">{createdToken.tokenValue}</code>
                         <Button type="button" variant="ghost" size="icon" className="size-7 shrink-0" onClick={handleCopyToken}>
@@ -225,7 +236,12 @@ export function ApiTokensPage(): JSX.Element {
                 className="flex flex-col gap-3 rounded-2xl border border-border/70 bg-background/80 p-4 sm:flex-row sm:items-center sm:justify-between"
               >
                 <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm font-semibold text-foreground">{token.name}</p>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="truncate text-sm font-semibold text-foreground">{token.name}</p>
+                    {new Date(token.expiresAt).getTime() <= tokenStatusTimeMs ? (
+                      <Badge variant="destructive">{t('settings.apiTokens.values.expired')}</Badge>
+                    ) : null}
+                  </div>
                   <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
                     <span className="font-mono">
                       {token.prefix ? `${token.prefix}…` : t('settings.apiTokens.values.prefixHidden')}
@@ -241,6 +257,10 @@ export function ApiTokensPage(): JSX.Element {
                             value: formatDateTime(token.lastUsedAt),
                           })
                         : t('settings.apiTokens.values.neverUsed')}
+                    </span>
+                    <span>·</span>
+                    <span>
+                      {t('settings.apiTokens.values.expiresAt', { value: formatDateTime(token.expiresAt) })}
                     </span>
                   </div>
                 </div>

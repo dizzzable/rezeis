@@ -3,13 +3,25 @@ import { JwtService } from '@nestjs/jwt';
 import { Request } from 'express';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import {
+  API_TOKEN_JWT_AUDIENCE,
+  API_TOKEN_JWT_TYPE,
+  API_TOKEN_LAST_USED_TOUCH_INTERVAL_MS,
+} from '../constants/api-token-auth.constants';
+import { isApiTokenHashMatch } from '../utils/api-token-hash.util';
+
+interface InternalApiTokenJwtPayload {
+  readonly sub?: unknown;
+  readonly type?: unknown;
+  readonly aud?: unknown;
+}
 
 /**
  * Protects internal API routes with API Token verification.
  *
  * Accepts a Bearer token in the Authorization header. The token must be a
- * valid JWT (signed with the derived secret) AND the token id must exist in
- * the `api_tokens` table (not revoked).
+ * valid JWT (signed with the derived secret), the token fingerprint must match
+ * the `api_tokens` row, and the row must not have been revoked or expired.
  *
  * This replaces the old static `x-internal-api-key` header approach.
  */
@@ -29,27 +41,35 @@ export class InternalAdminAuthGuard implements CanActivate {
     }
 
     try {
-      const payload = this.jwtService.verify(token);
+      const payload = this.jwtService.verify<InternalApiTokenJwtPayload>(token);
 
       // Must be an api_token type JWT
-      if (payload.type !== 'api_token' || typeof payload.sub !== 'string') {
+      if (payload.type !== API_TOKEN_JWT_TYPE || typeof payload.sub !== 'string') {
         throw new UnauthorizedException('Invalid token type');
       }
 
-      // Verify token is not revoked (exists in DB)
-      const exists = await this.prismaService.apiToken.count({
+      if (payload.aud !== undefined && payload.aud !== API_TOKEN_JWT_AUDIENCE) {
+        throw new UnauthorizedException('Invalid token audience');
+      }
+
+      const record = await this.prismaService.apiToken.findUnique({
         where: { id: payload.sub },
+        select: { id: true, tokenHash: true, audience: true, lastUsedAt: true, expiresAt: true },
       });
 
-      if (exists === 0) {
+      if (record === null) {
         throw new UnauthorizedException('API token has been revoked');
       }
 
-      // Fire-and-forget: update lastUsedAt
-      this.prismaService.apiToken.update({
-        where: { id: payload.sub },
-        data: { lastUsedAt: new Date() },
-      }).catch(() => { /* non-critical */ });
+      if (record.audience !== API_TOKEN_JWT_AUDIENCE || !isApiTokenHashMatch(token, record.tokenHash)) {
+        throw new UnauthorizedException('Invalid API token');
+      }
+
+      if (record.expiresAt.getTime() <= Date.now()) {
+        throw new UnauthorizedException('API token has expired');
+      }
+
+      this.touchLastUsed(record.id, record.lastUsedAt);
 
       return true;
     } catch (err: unknown) {
@@ -58,6 +78,24 @@ export class InternalAdminAuthGuard implements CanActivate {
       }
       throw new UnauthorizedException('Invalid API token');
     }
+  }
+
+  private touchLastUsed(tokenId: string, lastUsedAt: Date | null): void {
+    const now = new Date();
+    if (lastUsedAt !== null && now.getTime() - lastUsedAt.getTime() < API_TOKEN_LAST_USED_TOUCH_INTERVAL_MS) {
+      return;
+    }
+
+    void this.prismaService.apiToken.updateMany({
+      where: {
+        id: tokenId,
+        OR: [
+          { lastUsedAt: null },
+          { lastUsedAt: { lt: new Date(now.getTime() - API_TOKEN_LAST_USED_TOUCH_INTERVAL_MS) } },
+        ],
+      },
+      data: { lastUsedAt: now },
+    }).catch(() => { /* non-critical */ });
   }
 
   private extractToken(request: Request): string | null {

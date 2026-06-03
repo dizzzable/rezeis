@@ -406,40 +406,75 @@ Latest S5 verification:
 
 ### S6 API Tokens Hardening
 
+Status: Mostly completed 2026-06-03. Backend hardening is complete for the current single internal audience: new API tokens are created with explicit JWT audience `rezeis-internal-api` and a 180-day TTL; `ApiToken` persists only `tokenHash`, `audience`, prefix, creator, timestamps, and `expiresAt`; migration `20260603190000_api_token_hash_audience` backfills SHA-256 fingerprints and 180-day expiration for existing raw-token rows before dropping the raw `token` column; `InternalAdminAuthGuard` now verifies JWT type, optional legacy-compatible audience, DB audience, timing-safe fingerprint match, and DB expiration before authorizing internal API calls. `lastUsedAt` writes are throttled to one update per token per five minutes to avoid one DB write per internal request. RBAC create/list/delete gating was already completed under S5. Frontend/operator UX now shows expiration/expired state, explains create-update-client-revoke rotation, and handles clipboard failures. Remaining S6 work is limited to future per-audience scopes if concrete additional internal clients need separation.
+
 Files:
 
 - `src/modules/api-tokens/**`
 - `src/modules/auth/guards/internal-admin-auth.guard.ts`
+- `src/modules/auth/constants/api-token-auth.constants.ts`
+- `src/modules/auth/utils/api-token-hash.util.ts`
+- `prisma/schema.prisma`
+- `prisma/migrations/20260603190000_api_token_hash_audience/migration.sql`
 
 Work:
 
-- Add RBAC requirement to create/list/delete API tokens.
-- Consider token scopes/audience for Reiwa vs monitoring vs bot listeners.
-- Consider shorter TTL/rotation and storing only token hash at rest.
-- Ensure `lastUsedAt` updates do not create excessive DB write load.
+- Add RBAC requirement to create/list/delete API tokens. Completed under S5.
+- Consider token scopes/audience for Reiwa vs monitoring vs bot listeners. First audience slice completed with `rezeis-internal-api`; more granular scopes remain open only if separate internal clients need different privileges.
+- Consider shorter TTL/rotation and storing only token hash at rest. Completed for this baseline: hash-only storage, 180-day JWT/DB expiration, and operator rotation guidance.
+- Ensure `lastUsedAt` updates do not create excessive DB write load. Completed with a five-minute update throttle in `InternalAdminAuthGuard`.
 
 Acceptance:
 
 - Not every authenticated admin can mint long-lived internal API tokens.
+- A database leak no longer exposes reusable API-token bearer strings for newly-created or migrated tokens.
+- Expired API tokens no longer authenticate even if their DB row remains present.
+- Operators can identify token expiration and rotate by creating a replacement, updating the integration, and revoking the old token.
+
+Latest S6 verification:
+
+- `cd rezeis-admin && node --require ts-node/register --test test/api-tokens.service.spec.ts test/internal-admin-auth.guard.spec.ts test/admin-api-tokens.controller.spec.ts` passed: 11 tests.
+- `cd rezeis-admin && npm run typecheck` passed.
+- Focused backend ESLint on API-token service, guard, constants, and specs passed.
+- `cd rezeis-admin/web && npx vitest run src/features/settings/api-tokens-page.test.tsx` passed: 3 tests.
+- `cd rezeis-admin/web && npx tsc -p tsconfig.app.json --noEmit --incremental false` passed.
+- Focused web ESLint on API-token page/API/i18n files passed.
 
 ### S7 Payment Diagnostics Sanitization
+
+Status: In progress 2026-06-03. Shared diagnostic redaction now masks auth/proxy-auth headers, cookies/set-cookie values, URL assignments (`profileUrl`, `config_url`, checkout/redirect/callback variants), provider/gateway identifier assignments, existing URL/email/UUID/provider-ID patterns, token words, and long hex secrets. Provider checkout persistence now stores only a redacted `gatewayData.providerResponse` while keeping operational fields such as `gatewayId`, top-level `checkoutUrl`, and provider status available for the checkout flow. Webhook ops routes are now guarded with `RbacGuard` and explicit `payment_webhooks:view/resolve/run` permissions. Remaining S7 work: audit any remaining admin/UI payment payload surfaces, especially webhook raw payload reveal UX and transaction/gateway diagnostic displays, before changing behavior.
 
 Files:
 
 - `src/modules/payments/services/payments-checkout.service.ts`
 - `src/modules/payments/services/payment-webhook-inbox.service.ts`
 - `src/modules/payments/services/payment-ops-alert.service.ts`
+- `src/modules/payments/services/payment-provider-execution.service.ts`
+- `src/modules/payments/services/payment-webhook-payload-redaction.service.ts`
+- `src/modules/payments/controllers/admin-payment-webhooks.controller.ts`
+- `src/modules/payments/utils/payment-provider-error.util.ts`
 - related failing payment tests
 
 Work:
 
 - Sanitize provider URLs, raw tokens, provider IDs, profile/config links, cookies, authorization fragments before storing or returning errors.
 - Keep raw diagnostics only in a protected, redacted, bounded operator log if absolutely needed.
+- Sanitize `gatewayData.providerResponse` before transaction persistence while preserving explicit checkout-flow fields. Completed for the provider checkout path.
+- Gate admin webhook ops routes with route-level RBAC metadata. Completed for list/detail/replay.
+- Continue auditing remaining admin/UI payment payload surfaces with focused specs before changing behavior.
 
 Acceptance:
 
 - Existing redaction-focused payment tests pass.
 - User-facing/internal Reiwa payment status responses expose stable error codes, not provider raw diagnostics.
+- Transaction `gatewayData.providerResponse` no longer persists raw provider response IDs, auth fragments, emails, signatures, or provider URLs.
+- Admin webhook ops routes require explicit `payment_webhooks` permissions in addition to admin JWT authentication.
+
+Latest S7 verification:
+
+- `cd rezeis-admin && node --require ts-node/register --test test/payment-provider-error.util.spec.ts test/payment-provider-execution.service.spec.ts test/payments-checkout.service.spec.ts test/addon-purchase.service.spec.ts test/payment-webhook-inbox.service.spec.ts test/payment-webhook-ops.service.spec.ts test/payment-webhook-payload-redaction.service.spec.ts test/payment-ops-alert-delivery.service.spec.ts test/admin-payment-webhooks.controller.spec.ts` passed: 42 tests.
+- `cd rezeis-admin && npm run typecheck` passed.
+- Focused backend ESLint on changed payment service/controller/spec files passed.
 
 ## P2 — Frontend Correctness And UX
 

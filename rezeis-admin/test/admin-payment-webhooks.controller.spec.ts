@@ -9,6 +9,8 @@ import { GUARDS_METADATA, METHOD_METADATA, PATH_METADATA } from '@nestjs/common/
 import { AdminJwtAuthGuard } from '../src/modules/auth/guards/admin-jwt-auth.guard';
 import { AdminPaymentWebhooksController } from '../src/modules/payments/controllers/admin-payment-webhooks.controller';
 import { PaymentWebhookOpsService } from '../src/modules/payments/services/payment-webhook-ops.service';
+import { REQUIRE_PERMISSION_KEY } from '../src/modules/rbac/decorators/require-permission.decorator';
+import { RbacGuard } from '../src/modules/rbac/guards/rbac.guard';
 
 describe('AdminPaymentWebhooksController', () => {
   it('exposes webhook ops admin routes', () => {
@@ -34,8 +36,11 @@ describe('AdminPaymentWebhooksController', () => {
     );
     assert.deepStrictEqual(
       Reflect.getMetadata(GUARDS_METADATA, AdminPaymentWebhooksController),
-      [AdminJwtAuthGuard],
+      [AdminJwtAuthGuard, RbacGuard],
     );
+    assertRoute(AdminPaymentWebhooksController.prototype.listEvents, '/', RequestMethod.GET, 'view');
+    assertRoute(AdminPaymentWebhooksController.prototype.getEventDetail, ':eventId', RequestMethod.GET, 'resolve');
+    assertRoute(AdminPaymentWebhooksController.prototype.replayEvent, ':eventId/replay', RequestMethod.POST, 'run');
   });
 
   it('delegates list/detail/replay calls unchanged', async () => {
@@ -123,3 +128,11 @@ describe('AdminPaymentWebhooksController', () => {
     ]);
   });
 });
+
+function assertRoute(method: unknown, path: string | undefined, requestMethod: RequestMethod, action: string): void {
+  assert.equal(Reflect.getMetadata(PATH_METADATA, method), path);
+  assert.equal(Reflect.getMetadata(METHOD_METADATA, method), requestMethod);
+  assert.deepStrictEqual(Reflect.getMetadata(REQUIRE_PERMISSION_KEY, method), [
+    { resource: 'payment_webhooks', action },
+  ]);
+}

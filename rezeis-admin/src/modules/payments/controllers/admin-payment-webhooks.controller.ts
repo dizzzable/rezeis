@@ -5,6 +5,8 @@ import { CurrentAdmin } from '../../auth/decorators/current-admin.decorator';
 import { AdminJwtAuthGuard } from '../../auth/guards/admin-jwt-auth.guard';
 import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.interface';
 import { extractRequestMetadata } from '../../auth/utils/request-metadata.util';
+import { RequirePermission } from '../../rbac/decorators/require-permission.decorator';
+import { RbacGuard } from '../../rbac/guards/rbac.guard';
 import {
   ListPaymentWebhookEventsQueryDto,
   PaymentWebhookEventDetailQueryDto,
@@ -18,13 +20,14 @@ import {
 import { PaymentWebhookOpsService } from '../services/payment-webhook-ops.service';
 
 @Controller('admin/payments/webhooks/events')
-@UseGuards(AdminJwtAuthGuard)
+@UseGuards(AdminJwtAuthGuard, RbacGuard)
 export class AdminPaymentWebhooksController {
   public constructor(
     private readonly paymentWebhookOpsService: PaymentWebhookOpsService,
   ) {}
 
   @Get()
+  @RequirePermission('payment_webhooks', 'view')
   public async listEvents(
     @Query() query: ListPaymentWebhookEventsQueryDto,
   ): Promise<readonly AdminPaymentWebhookEventListItemInterface[]> {
@@ -32,6 +35,7 @@ export class AdminPaymentWebhooksController {
   }
 
   @Get(':eventId')
+  @RequirePermission('payment_webhooks', 'resolve')
   public async getEventDetail(
     @Param('eventId', new ParseUUIDPipe({ version: '4' })) eventId: string,
     @Query() query: PaymentWebhookEventDetailQueryDto,
@@ -52,6 +56,7 @@ export class AdminPaymentWebhooksController {
   }
 
   @Post(':eventId/replay')
+  @RequirePermission('payment_webhooks', 'run')
   public async replayEvent(
     @Param('eventId', new ParseUUIDPipe({ version: '4' })) eventId: string,
     @Body() body: ReplayPaymentWebhookEventDto,

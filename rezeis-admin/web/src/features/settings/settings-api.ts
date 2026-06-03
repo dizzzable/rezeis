@@ -35,8 +35,10 @@ const apiTokenSchema = z.object({
   id: z.string(),
   name: z.string(),
   prefix: z.string().optional(),
+  audience: z.string().optional(),
   createdBy: z.string().nullable().optional(),
   lastUsedAt: z.string().nullable().optional(),
+  expiresAt: z.string(),
   createdAt: z.string(),
 })
 
@@ -45,6 +47,7 @@ const createdApiTokenResponseSchema = z.object({
   name: z.string(),
   token: z.string(),
   prefix: z.string().optional(),
+  expiresAt: z.string(),
   createdAt: z.string(),
 })
 

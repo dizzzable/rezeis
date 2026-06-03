@@ -13,6 +13,7 @@ import {
 import { of, throwError } from 'rxjs';
 
 import { PaymentProviderExecutionService } from '../src/modules/payments/services/payment-provider-execution.service';
+import { PaymentWebhookPayloadRedactionService } from '../src/modules/payments/services/payment-webhook-payload-redaction.service';
 
 describe('PaymentProviderExecutionService checkout execution', () => {
   it('creates YooKassa checkout requests with idempotence key and bounded result', async () => {
@@ -24,6 +25,7 @@ describe('PaymentProviderExecutionService checkout execution', () => {
           data: {
             id: 'provider-payment-1',
             status: 'pending',
+            metadata: { apiKey: 'raw-provider-secret' },
             confirmation: { confirmation_url: 'https://checkout.example/yookassa' },
           },
         });
@@ -70,9 +72,10 @@ describe('PaymentProviderExecutionService checkout execution', () => {
         provider: 'YOOKASSA',
         providerStatus: 'pending',
         providerResponse: {
-          id: 'provider-payment-1',
+          id: '***redacted***',
           status: 'pending',
-          confirmation: { confirmation_url: 'https://checkout.example/yookassa' },
+          metadata: { apiKey: '***redacted***' },
+          confirmation: { confirmation_url: '[url hidden]' },
         },
         checkoutUrl: 'https://checkout.example/yookassa',
       },
@@ -125,6 +128,53 @@ describe('PaymentProviderExecutionService checkout execution', () => {
     assert.equal(result.providerMode, 'REDIRECT');
     assert.equal(result.providerStatus, 'new');
     assert.equal(result.gatewayData.provider, 'HELEKET');
+  });
+
+  it('redacts sensitive raw provider response fields before returning gateway data for persistence', async () => {
+    const rawProviderResponse = {
+      id: 'provider-payment-1',
+      status: 'pending',
+      link_url: 'https://checkout.example/paypalych',
+      customerEmail: 'payer@example.com',
+      authorization: 'Bearer raw-access-token',
+      nested: {
+        providerPaymentId: 'pay_1234567890abcdef',
+        signature: 'raw-signature',
+        amount: '9.99',
+      },
+    };
+    const service = createService({
+      post: () => of({ data: rawProviderResponse }),
+    });
+
+    const result = await service.createCheckout({
+      gateway: createGateway({
+        type: PaymentGatewayType.PAYPALYCH,
+        settings: {
+          shopId: 'shop-1',
+          apiKey: 'api-key-1',
+        },
+      }),
+      transaction: createTransaction({ gatewayType: PaymentGatewayType.PAYPALYCH }),
+      description: 'Plan purchase',
+    });
+    const providerResponse = result.gatewayData.providerResponse as Record<string, unknown>;
+    const serialized = JSON.stringify(result.gatewayData);
+
+    assert.equal(result.checkoutUrl, 'https://checkout.example/paypalych');
+    assert.equal(providerResponse.id, '***redacted***');
+    assert.equal(providerResponse.authorization, '***redacted***');
+    assert.equal(providerResponse.customerEmail, '[email hidden]');
+    assert.deepStrictEqual(providerResponse.nested, {
+      providerPaymentId: '***redacted***',
+      signature: '***redacted***',
+      amount: '9.99',
+    });
+    assert.equal(serialized.includes('raw-access-token'), false);
+    assert.equal(serialized.includes('raw-signature'), false);
+    assert.equal(serialized.includes('payer@example.com'), false);
+    assert.equal(serialized.includes('provider-payment-1'), false);
+    assert.equal(serialized.includes('pay_1234567890abcdef'), false);
   });
 
   it('uses explicit success and failure URL overrides for redirect gateways', async () => {
@@ -197,7 +247,7 @@ function createService(httpService: { readonly post: (...args: never[]) => unkno
   return new PaymentProviderExecutionService(httpService as never, {
     domain: 'https://user.example',
     botToken: 'bot-token-1',
-  } as never);
+  } as never, new PaymentWebhookPayloadRedactionService());
 }
 
 function createGateway(input: {

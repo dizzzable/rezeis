@@ -13,6 +13,7 @@ import { AdminApiTokensController } from '../src/modules/api-tokens/controllers/
 import { RbacGuard } from '../src/modules/rbac/guards/rbac.guard';
 import { REQUIRE_PERMISSION_KEY } from '../src/modules/rbac/decorators/require-permission.decorator';
 import { RBAC_RESOURCES, isValidPermission } from '../src/modules/rbac/rbac.resources';
+import { API_TOKEN_JWT_AUDIENCE } from '../src/modules/auth/constants/api-token-auth.constants';
 
 describe('AdminApiTokensController', () => {
   it('is guarded by admin JWT and RBAC guards', () => {
@@ -42,11 +43,11 @@ describe('AdminApiTokensController', () => {
     const controller = new AdminApiTokensController({
       list: async () => {
         calls.push('list');
-        return [{ id: 'token-1', name: 'Reiwa', prefix: 'abc', createdBy: 'admin-1', lastUsedAt: null, createdAt: '2026-06-03T00:00:00.000Z' }];
+        return [{ id: 'token-1', name: 'Reiwa', audience: API_TOKEN_JWT_AUDIENCE, prefix: 'abc', createdBy: 'admin-1', lastUsedAt: null, expiresAt: '2026-12-01T00:00:00.000Z', createdAt: '2026-06-03T00:00:00.000Z' }];
       },
       create: async (input: unknown) => {
         calls.push(['create', input]);
-        return { id: 'token-2', name: 'Monitor', token: 'secret-token', prefix: 'secret', createdAt: '2026-06-03T00:00:00.000Z' };
+        return { id: 'token-2', name: 'Monitor', token: 'secret-token', prefix: 'secret', expiresAt: '2026-12-01T00:00:00.000Z', createdAt: '2026-06-03T00:00:00.000Z' };
       },
       delete: async (tokenId: string) => {
         calls.push(['delete', tokenId]);
@@ -55,13 +56,14 @@ describe('AdminApiTokensController', () => {
     const admin = currentAdmin();
 
     assert.deepStrictEqual(await controller.list(), [
-      { id: 'token-1', name: 'Reiwa', prefix: 'abc', createdBy: 'admin-1', lastUsedAt: null, createdAt: '2026-06-03T00:00:00.000Z' },
+      { id: 'token-1', name: 'Reiwa', audience: API_TOKEN_JWT_AUDIENCE, prefix: 'abc', createdBy: 'admin-1', lastUsedAt: null, expiresAt: '2026-12-01T00:00:00.000Z', createdAt: '2026-06-03T00:00:00.000Z' },
     ]);
     assert.deepStrictEqual(await controller.create({ name: 'Monitor' }, admin), {
       id: 'token-2',
       name: 'Monitor',
       token: 'secret-token',
       prefix: 'secret',
+      expiresAt: '2026-12-01T00:00:00.000Z',
       createdAt: '2026-06-03T00:00:00.000Z',
     });
     await controller.delete('token-2');

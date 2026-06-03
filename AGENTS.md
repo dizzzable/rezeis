@@ -98,6 +98,7 @@ Prefer this order unless the user gives a narrower task:
 - Never run destructive git commands.
 - Never hardcode real secrets or read local secret files.
 - Prefer small, verifiable slices.
+- User preference: after completing a verified remediation slice, create a small commit for the completed work before the final response. Do not commit partial work, failed verification, secret/env files, untracked scratch files, or unrelated user changes.
 - After each slice, run the narrowest relevant gate and update `docs/progress/next-session-handoff.md` if status changes.
 - Use `npm run handoff:update` for a timestamp/status refresh without running gates.
 - Use `npm run handoff:update:verify` only when it is acceptable to run all configured gates; full verification is slow and audits can still be red.

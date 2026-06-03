@@ -9,8 +9,12 @@ describe('PaymentWebhookPayloadRedactionService', () => {
 
     const result = service.redact({
       paymentId: 'payment-1',
+      id: 'provider-event-1',
+      customerEmail: 'payer@example.com',
+      checkoutUrl: 'https://provider.example/checkout?token=secret',
       apiKey: 'secret',
       nested: {
+        providerPaymentId: 'pay_1234567890abcdef',
         signature: 'signed',
         amount: '10.00',
         items: [
@@ -24,8 +28,12 @@ describe('PaymentWebhookPayloadRedactionService', () => {
 
     assert.deepStrictEqual(result, {
       paymentId: 'payment-1',
+      id: '***redacted***',
+      customerEmail: '[email hidden]',
+      checkoutUrl: '[url hidden]',
       apiKey: '***redacted***',
       nested: {
+        providerPaymentId: '***redacted***',
         signature: '***redacted***',
         amount: '10.00',
         items: [

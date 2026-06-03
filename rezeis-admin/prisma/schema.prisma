@@ -1523,20 +1523,24 @@ model Settings {
 // =============================================================================
 
 /// Named API tokens for external service integration (reiwa, bots, etc.).
-/// Each token is a signed JWT that can be verified without DB lookup on hot
-/// path, but the row must exist for the token to remain valid (revocation =
-/// delete the row).
+/// The raw bearer token is shown only once at creation time. At rest we keep a
+/// SHA-256 fingerprint plus the intended audience; deleting the row revokes the
+/// token.
 model ApiToken {
   id         String    @id @default(cuid()) @map("id")
   /// Human-readable label, e.g. "RezeisBot", "Reiwa", "Subpage".
   name       String    @map("name")
-  /// The signed JWT string. Stored so the admin can copy it from the UI.
-  token      String    @unique @map("token")
-  /// Short prefix shown in listings (first 8 chars of token for identification).
+  /// SHA-256 fingerprint of the full bearer token.
+  tokenHash  String    @unique @map("token_hash")
+  /// Intended relying party for the token.
+  audience   String    @default("rezeis-internal-api") @map("audience")
+  /// Short fingerprint prefix shown in listings for identification.
   prefix     String    @map("prefix")
   /// Admin who created this token.
   createdBy  String?   @map("created_by")
   lastUsedAt DateTime? @map("last_used_at") @db.Timestamptz(3)
+  /// Hard expiration for rotation; expired rows no longer authenticate.
+  expiresAt  DateTime  @map("expires_at") @db.Timestamptz(3)
   createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt  DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
 

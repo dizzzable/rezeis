@@ -19,6 +19,7 @@ import {
   resolveSuccessUrl,
   truncate,
 } from './payment-provider-execution.helpers';
+import { PaymentWebhookPayloadRedactionService } from './payment-webhook-payload-redaction.service';
 
 interface ProviderCheckoutResult {
   readonly gatewayId: string | null;
@@ -34,6 +35,7 @@ export class PaymentProviderExecutionService {
     private readonly httpService: HttpService,
     @Inject(paymentsConfig.KEY)
     private readonly configuration: ConfigType<typeof paymentsConfig>,
+    private readonly paymentWebhookPayloadRedactionService: PaymentWebhookPayloadRedactionService,
   ) {}
 
   public async createCheckout(input: {
@@ -134,7 +136,7 @@ export class PaymentProviderExecutionService {
       gatewayData: {
         provider: 'YOOKASSA',
         providerStatus: readOptionalString(data, ['status']),
-        providerResponse: data,
+        providerResponse: this.redactProviderResponse(data),
         checkoutUrl: readOptionalString(confirmation, ['confirmation_url']),
       },
     };
@@ -183,7 +185,7 @@ export class PaymentProviderExecutionService {
       gatewayData: {
         provider: 'PLATEGA',
         providerStatus: readOptionalString(data, ['status']),
-        providerResponse: data,
+        providerResponse: this.redactProviderResponse(data),
         checkoutUrl,
       },
     };
@@ -230,7 +232,7 @@ export class PaymentProviderExecutionService {
       gatewayData: {
         provider: 'HELEKET',
         providerStatus: readOptionalString(result, ['status']),
-        providerResponse: data,
+        providerResponse: this.redactProviderResponse(data),
         checkoutUrl,
       },
     };
@@ -282,7 +284,7 @@ export class PaymentProviderExecutionService {
       gatewayData: {
         provider: 'CRYPTOMUS',
         providerStatus: readOptionalString(result, ['status']),
-        providerResponse: data,
+        providerResponse: this.redactProviderResponse(data),
         checkoutUrl,
       },
     };
@@ -327,7 +329,7 @@ export class PaymentProviderExecutionService {
       gatewayData: {
         provider: 'MULENPAY',
         providerStatus: readOptionalString(data, ['status']),
-        providerResponse: data,
+        providerResponse: this.redactProviderResponse(data),
         checkoutUrl,
       },
     };
@@ -377,7 +379,7 @@ export class PaymentProviderExecutionService {
       gatewayData: {
         provider: 'TELEGRAM_STARS',
         providerStatus: 'invoice_created',
-        providerResponse: data,
+        providerResponse: this.redactProviderResponse(data),
         checkoutUrl: data.result,
       },
     };
@@ -444,7 +446,7 @@ export class PaymentProviderExecutionService {
       checkoutUrl: readOptionalString(data, ['payment_url']),
       providerMode: 'REDIRECT',
       providerStatus: 'PENDING',
-      gatewayData: { provider: 'ANTILOPAY', providerResponse: data, checkoutUrl: readOptionalString(data, ['payment_url']) },
+      gatewayData: { provider: 'ANTILOPAY', providerResponse: this.redactProviderResponse(data), checkoutUrl: readOptionalString(data, ['payment_url']) },
     };
   }
 
@@ -504,7 +506,7 @@ export class PaymentProviderExecutionService {
       checkoutUrl: readOptionalString(checkout, ['redirect_url']),
       providerMode: 'REDIRECT',
       providerStatus: 'PENDING',
-      gatewayData: { provider: 'OVERPAY', providerResponse: data, checkoutUrl: readOptionalString(checkout, ['redirect_url']) },
+      gatewayData: { provider: 'OVERPAY', providerResponse: this.redactProviderResponse(data), checkoutUrl: readOptionalString(checkout, ['redirect_url']) },
     };
   }
 
@@ -552,7 +554,7 @@ export class PaymentProviderExecutionService {
       checkoutUrl: readOptionalString(data, ['link_url', 'link_page_url', 'pay_url']),
       providerMode: 'REDIRECT',
       providerStatus: 'PENDING',
-      gatewayData: { provider: 'PAYPALYCH', providerResponse: data, checkoutUrl: readOptionalString(data, ['link_url', 'link_page_url', 'pay_url']) },
+      gatewayData: { provider: 'PAYPALYCH', providerResponse: this.redactProviderResponse(data), checkoutUrl: readOptionalString(data, ['link_url', 'link_page_url', 'pay_url']) },
     };
   }
 
@@ -596,7 +598,7 @@ export class PaymentProviderExecutionService {
       checkoutUrl: readOptionalString(data, ['paymentLink']),
       providerMode: 'REDIRECT',
       providerStatus: readOptionalString(data, ['status']) ?? 'PENDING',
-      gatewayData: { provider: 'RIOPAY', providerResponse: data, checkoutUrl: readOptionalString(data, ['paymentLink']) },
+      gatewayData: { provider: 'RIOPAY', providerResponse: this.redactProviderResponse(data), checkoutUrl: readOptionalString(data, ['paymentLink']) },
     };
   }
 
@@ -640,7 +642,7 @@ export class PaymentProviderExecutionService {
       checkoutUrl: readOptionalString(data, ['url', 'paymentUrl']),
       providerMode: 'REDIRECT',
       providerStatus: readOptionalString(data, ['status']) ?? 'PENDING',
-      gatewayData: { provider: 'WATA', providerResponse: data, checkoutUrl: readOptionalString(data, ['url', 'paymentUrl']) },
+      gatewayData: { provider: 'WATA', providerResponse: this.redactProviderResponse(data), checkoutUrl: readOptionalString(data, ['url', 'paymentUrl']) },
     };
   }
 
@@ -689,7 +691,7 @@ export class PaymentProviderExecutionService {
       checkoutUrl,
       providerMode: 'REDIRECT',
       providerStatus: readOptionalString(data, ['status']) ?? 'PENDING',
-      gatewayData: { provider: 'AURAPAY', providerResponse: data, checkoutUrl },
+      gatewayData: { provider: 'AURAPAY', providerResponse: this.redactProviderResponse(data), checkoutUrl },
     };
   }
 
@@ -738,7 +740,7 @@ export class PaymentProviderExecutionService {
       checkoutUrl: readOptionalString(data, ['pay_url']),
       providerMode: 'REDIRECT',
       providerStatus: readOptionalString(data, ['status']) ?? 'PENDING',
-      gatewayData: { provider: 'ROLLYPAY', providerResponse: data, checkoutUrl: readOptionalString(data, ['pay_url']) },
+      gatewayData: { provider: 'ROLLYPAY', providerResponse: this.redactProviderResponse(data), checkoutUrl: readOptionalString(data, ['pay_url']) },
     };
   }
 
@@ -801,7 +803,7 @@ export class PaymentProviderExecutionService {
       checkoutUrl,
       providerMode: 'REDIRECT',
       providerStatus: data.status === true ? 'PENDING' : 'FAILED',
-      gatewayData: { provider: 'SEVERPAY', providerResponse: data, checkoutUrl },
+      gatewayData: { provider: 'SEVERPAY', providerResponse: this.redactProviderResponse(data), checkoutUrl },
     };
   }
 
@@ -844,7 +846,7 @@ export class PaymentProviderExecutionService {
       checkoutUrl,
       providerMode: 'REDIRECT',
       providerStatus: readOptionalString(data, ['status']) ?? 'PENDING',
-      gatewayData: { provider: 'LAVA', providerResponse: data, checkoutUrl },
+      gatewayData: { provider: 'LAVA', providerResponse: this.redactProviderResponse(data), checkoutUrl },
     };
   }
 
@@ -876,5 +878,9 @@ export class PaymentProviderExecutionService {
 
   private buildWebhookUrl(gatewayType: PaymentGatewayType): string {
     return buildWebhookUrl(this.configuration.domain, gatewayType);
+  }
+
+  private redactProviderResponse(value: Record<string, unknown>): unknown {
+    return this.paymentWebhookPayloadRedactionService.redact(value);
   }
 }
