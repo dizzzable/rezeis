@@ -398,7 +398,7 @@ function CreateBroadcastForm({ onClose }: { onClose: () => void }) {
       <div className="space-y-2">
         <Label>{t('broadcastPage.form.audience')}</Label>
         <Select value={audience} onValueChange={setAudience}>
-          <SelectTrigger><SelectValue /></SelectTrigger>
+          <SelectTrigger aria-label={t('broadcastPage.form.audience')}><SelectValue /></SelectTrigger>
           <SelectContent>
             {AUDIENCES.map((a) => <SelectItem key={a.value} value={a.value}>{t(a.labelKey)}</SelectItem>)}
           </SelectContent>
@@ -407,8 +407,9 @@ function CreateBroadcastForm({ onClose }: { onClose: () => void }) {
       </div>
 
       <div className="space-y-2">
-        <Label>{t('broadcastPage.form.text')}</Label>
+        <Label htmlFor="broadcast-message-text">{t('broadcastPage.form.text')}</Label>
         <Textarea
+          id="broadcast-message-text"
           placeholder={t('broadcastPage.form.textPlaceholder')}
           value={text}
           onChange={(e) => setText(e.target.value)}

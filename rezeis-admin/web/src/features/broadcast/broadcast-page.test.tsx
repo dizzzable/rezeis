@@ -46,6 +46,22 @@ describe('BroadcastPage create form validation', () => {
     expect(await screen.findByRole('button', { name: 'Refresh broadcasts' })).toBeInTheDocument()
   })
 
+  it('names broadcast compose audience and message controls', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(api, 'get').mockImplementation(async (path: string) => {
+      if (path === '/admin/broadcast/drafts') return { data: [] }
+      return { data: {} }
+    })
+    await loadFeatureBundle('broadcast')
+
+    renderWithProviders(<BroadcastPage />)
+
+    await user.click(screen.getByRole('button', { name: 'New broadcast' }))
+
+    expect(await screen.findByRole('combobox', { name: 'Audience' })).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Message text' })).toBeInTheDocument()
+  })
+
   it('submits normalized payload through the current draft and send endpoints', async () => {
     const user = userEvent.setup()
     vi.spyOn(api, 'get').mockImplementation(async (path: string) => {
