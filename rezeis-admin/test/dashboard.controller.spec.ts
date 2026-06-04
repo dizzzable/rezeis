@@ -8,12 +8,15 @@ import { GUARDS_METADATA, METHOD_METADATA, PATH_METADATA } from '@nestjs/common/
 
 import { AdminJwtAuthGuard } from '../src/modules/auth/guards/admin-jwt-auth.guard';
 import { AdminDashboardController } from '../src/modules/dashboard/controllers/admin-dashboard.controller';
+import { REQUIRE_PERMISSION_KEY } from '../src/modules/rbac/decorators/require-permission.decorator';
+import { RbacGuard } from '../src/modules/rbac/guards/rbac.guard';
 
 describe('AdminDashboardController', () => {
   it('exposes the current guarded admin dashboard routes', () => {
     assert.equal(Reflect.getMetadata(PATH_METADATA, AdminDashboardController), 'admin/dashboard');
     assert.deepStrictEqual(Reflect.getMetadata(GUARDS_METADATA, AdminDashboardController), [
       AdminJwtAuthGuard,
+      RbacGuard,
     ]);
     assertRoute(RequestMethod.GET, 'summary', AdminDashboardController.prototype.getSummary);
     assertRoute(RequestMethod.GET, 'system-health', AdminDashboardController.prototype.getSystemHealth);
@@ -65,4 +68,7 @@ describe('AdminDashboardController', () => {
 function assertRoute(requestMethod: RequestMethod, path: string, target: unknown): void {
   assert.equal(Reflect.getMetadata(METHOD_METADATA, target), requestMethod);
   assert.equal(Reflect.getMetadata(PATH_METADATA, target), path);
+  assert.deepStrictEqual(Reflect.getMetadata(REQUIRE_PERMISSION_KEY, target), [
+    { resource: 'dashboard', action: 'view' },
+  ]);
 }
