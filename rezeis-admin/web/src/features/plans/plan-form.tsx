@@ -2,6 +2,8 @@ import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Plus, Trash2, Archive, ArrowUpRight, Users, Check, ChevronDown } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
+import { useForm, type FieldErrors, type Resolver } from 'react-hook-form'
+import { zodResolver } from '@hookform/resolvers/zod'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -24,41 +26,20 @@ import { cn } from '@/lib/utils'
 import { remnawaveApi } from '@/features/remnawave/remnawave-api'
 import { IconPicker } from '@/features/settings/icon-picker'
 import { usePlans, type Plan } from './plans-api'
+import {
+  PLAN_AVAILABILITIES,
+  PLAN_CURRENCIES,
+  PLAN_TRAFFIC_STRATEGIES,
+  PLAN_TYPES,
+  TAG_PATTERN,
+  TAG_SANITIZE,
+  createPlanFormSchema,
+  type PlanFormData,
+  type PlanFormDraft,
+  type PlanFormValidationMessages,
+} from './plan-form-schema'
 
-const PLAN_TYPES = ['TRAFFIC', 'DEVICES', 'BOTH', 'UNLIMITED'] as const
-const AVAILABILITIES = ['ALL', 'NEW', 'EXISTING', 'INVITED', 'ALLOWED', 'TRIAL'] as const
-const TRAFFIC_STRATEGIES = ['MONTH', 'YEAR', 'NO_RESET', 'DAY', 'WEEK'] as const
-const CURRENCIES = ['RUB', 'USD', 'XTR', 'USDT', 'TON', 'EUR'] as const
-
-/**
- * Mirrors the Remnawave 2.7 contract's `tag` zod rule:
- *   /^[A-Z0-9_]+$/, max 16 characters.
- * We enforce uppercase + the allowed alphabet client-side so the value
- * the operator types matches what the panel will accept on PATCH.
- */
-const TAG_PATTERN = /^[A-Z0-9_]{0,16}$/
-const TAG_SANITIZE = /[^A-Z0-9_]/g
-
-export interface PlanFormData {
-  name: string
-  description?: string
-  tag?: string
-  icon?: string | null
-  type: string
-  availability: string
-  trafficLimit: number
-  deviceLimit: number
-  trafficLimitStrategy: string
-  isArchived?: boolean
-  archivedRenewMode?: string
-  internalSquads?: string[]
-  externalSquad?: string
-  upgradeToPlanIds?: string[]
-  replacementPlanIds?: string[]
-  allowedUserIds?: string[]
-  trialSettings?: { maxClaims: number; free: boolean; availabilityScope: 'ALL' | 'INVITED' }
-  durations: { days: number; prices: { currency: string; price: string }[] }[]
-}
+export type { PlanFormData } from './plan-form-schema'
 
 interface PlanInput extends Partial<Plan> {
   /**
@@ -77,51 +58,78 @@ interface Props {
 
 export function PlanForm({ plan, onSubmit, isLoading }: Props) {
   const { t } = useTranslation()
-  const [name, setName] = useState(plan?.name ?? '')
-  const [description, setDescription] = useState(plan?.description ?? '')
-  const [tag, setTag] = useState(plan?.tag ?? '')
-  const [icon, setIcon] = useState<string | null>(plan?.icon ?? null)
-  const [type, setType] = useState(plan?.type ?? 'TRAFFIC')
-  const [availability, setAvailability] = useState(plan?.availability ?? 'ALL')
-  const [trafficLimitGB, setTrafficLimitGB] = useState(
-    plan ? String(plan.trafficLimit ?? 50) : '50',
-  )
-  const [deviceLimit, setDeviceLimit] = useState(plan?.deviceLimit?.toString() ?? '1')
-  const [trafficStrategy, setTrafficStrategy] = useState(plan?.trafficLimitStrategy ?? 'MONTH')
+  const validationMessages = useMemo<PlanFormValidationMessages>(() => ({
+    nameRequired: t('planForm.validation.nameRequired'),
+    nameTooLong: t('planForm.validation.nameTooLong'),
+    descriptionTooLong: t('planForm.validation.descriptionTooLong'),
+    tagInvalid: t('planForm.tagInvalid'),
+    iconTooLong: t('planForm.validation.iconTooLong'),
+    planTypeInvalid: t('planForm.validation.planTypeInvalid'),
+    availabilityInvalid: t('planForm.validation.availabilityInvalid'),
+    trafficLimitInvalid: t('planForm.validation.trafficLimitInvalid'),
+    deviceLimitInvalid: t('planForm.validation.deviceLimitInvalid'),
+    resetStrategyInvalid: t('planForm.validation.resetStrategyInvalid'),
+    trialMaxClaimsInvalid: t('planForm.validation.trialMaxClaimsInvalid'),
+    durationRequired: t('planForm.validation.durationRequired'),
+    durationDaysInvalid: t('planForm.validation.durationDaysInvalid'),
+    durationDuplicate: t('planForm.validation.durationDuplicate'),
+    trialDurationCount: t('planForm.validation.trialDurationCount'),
+    priceRequired: t('planForm.validation.priceRequired'),
+    priceInvalid: t('planForm.validation.priceInvalid'),
+    currencyInvalid: t('planForm.validation.currencyInvalid'),
+    currencyDuplicate: t('planForm.validation.currencyDuplicate'),
+    paidTrialPriceRequired: t('planForm.validation.paidTrialPriceRequired'),
+    replacementRequired: t('planForm.validation.replacementRequired'),
+    allowedUsersRequired: t('planForm.validation.allowedUsersRequired'),
+  }), [t])
+  const planFormSchema = useMemo(() => createPlanFormSchema(validationMessages), [validationMessages])
+  const initialDraft = useMemo(() => createInitialPlanDraft(plan), [plan])
+  const form = useForm<PlanFormDraft, unknown, PlanFormData>({
+    defaultValues: initialDraft,
+    mode: 'onSubmit',
+    reValidateMode: 'onBlur',
+    resolver: zodResolver(planFormSchema) as Resolver<PlanFormDraft, unknown, PlanFormData>,
+  })
+  const [formErrors, setFormErrors] = useState<Record<string, string>>({})
+  const [name, setName] = useState(initialDraft.name)
+  const [description, setDescription] = useState(initialDraft.description)
+  const [tag, setTag] = useState(initialDraft.tag)
+  const [icon, setIcon] = useState<string | null>(initialDraft.icon)
+  const [type, setType] = useState(initialDraft.type)
+  const [availability, setAvailability] = useState(initialDraft.availability)
+  const [trafficLimitGB, setTrafficLimitGB] = useState(initialDraft.trafficLimitGB)
+  const [deviceLimit, setDeviceLimit] = useState(initialDraft.deviceLimit)
+  const [trafficStrategy, setTrafficStrategy] = useState(initialDraft.trafficLimitStrategy)
   const [selectedInternalSquads, setSelectedInternalSquads] = useState<string[]>(
-    plan?.internalSquads ? [...plan.internalSquads] : [],
+    [...initialDraft.internalSquads],
   )
-  const [externalSquad, setExternalSquad] = useState(plan?.externalSquad ?? '__none__')
+  const [externalSquad, setExternalSquad] = useState(initialDraft.externalSquad)
 
   // Archive & transition state
-  const [isArchived, setIsArchived] = useState(plan?.isArchived ?? false)
-  const [archivedRenewMode, setArchivedRenewMode] = useState(
-    plan?.archivedRenewMode ?? 'SELF_RENEW',
-  )
+  const [isArchived, setIsArchived] = useState(initialDraft.isArchived)
+  const [archivedRenewMode, setArchivedRenewMode] = useState(initialDraft.archivedRenewMode)
   const [upgradeToPlanIds, setUpgradeToPlanIds] = useState<string[]>(
-    plan?.upgradeToPlanIds ? [...plan.upgradeToPlanIds] : [],
+    [...initialDraft.upgradeToPlanIds],
   )
   const [replacementPlanIds, setReplacementPlanIds] = useState<string[]>(
-    plan?.replacementPlanIds ? [...plan.replacementPlanIds] : [],
+    [...initialDraft.replacementPlanIds],
   )
   const [allowedUserIds, setAllowedUserIds] = useState<string[]>(
-    plan?.allowedUserIds ? [...plan.allowedUserIds] : [],
+    [...initialDraft.allowedUserIds],
   )
   const [newAllowedUserId, setNewAllowedUserId] = useState('')
 
   // Trial config (only meaningful when availability === 'TRIAL')
-  const [trialMaxClaims, setTrialMaxClaims] = useState(String(plan?.trialSettings?.maxClaims ?? 1))
-  const [trialFree, setTrialFree] = useState(plan?.trialSettings?.free ?? true)
-  const [trialScope, setTrialScope] = useState<'ALL' | 'INVITED'>(plan?.trialSettings?.availabilityScope ?? 'ALL')
+  const [trialMaxClaims, setTrialMaxClaims] = useState(initialDraft.trialSettings.maxClaims)
+  const [trialFree, setTrialFree] = useState(initialDraft.trialSettings.free)
+  const [trialScope, setTrialScope] = useState<'ALL' | 'INVITED'>(initialDraft.trialSettings.availabilityScope)
 
   const [durations, setDurations] = useState<
     { days: string; prices: { currency: string; price: string }[] }[]
-  >(
-    plan?.durations?.map((d) => ({
-      days: d.days.toString(),
-      prices: d.prices.map((p) => ({ currency: p.currency, price: p.price.toString() })),
-    })) ?? [{ days: '30', prices: [{ currency: 'RUB', price: '299' }] }],
-  )
+  >(initialDraft.durations.map((d) => ({
+    days: d.days,
+    prices: d.prices.map((p) => ({ currency: p.currency, price: p.price })),
+  })))
 
   const { data: internalSquads } = useQuery({
     queryKey: ['remnawave', 'internal-squads'],
@@ -170,39 +178,40 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
     setDurations(updated)
   }
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault()
-    onSubmit({
+  const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
+    const draft: PlanFormDraft = {
       name,
-      description: description || undefined,
-      tag: tag || undefined,
-      icon: icon ?? null,
+      description,
+      tag,
+      icon,
       type,
       availability,
-      trafficLimit: Math.round(parseFloat(trafficLimitGB || '0')),
-      deviceLimit: parseInt(deviceLimit || '0', 10),
+      trafficLimitGB,
+      deviceLimit,
       trafficLimitStrategy: trafficStrategy,
       isArchived,
-      archivedRenewMode: isArchived ? archivedRenewMode : undefined,
-      internalSquads: selectedInternalSquads.length > 0 ? selectedInternalSquads : undefined,
-      externalSquad:
-        externalSquad === '__none__' || externalSquad === '' ? undefined : externalSquad,
-      upgradeToPlanIds: upgradeToPlanIds.length > 0 ? upgradeToPlanIds : undefined,
-      replacementPlanIds: replacementPlanIds.length > 0 ? replacementPlanIds : undefined,
-      allowedUserIds: allowedUserIds.length > 0 ? allowedUserIds : undefined,
-      trialSettings:
-        availability === 'TRIAL'
-          ? {
-              maxClaims: Math.max(1, parseInt(trialMaxClaims, 10) || 1),
-              free: trialFree,
-              availabilityScope: trialScope,
-            }
-          : undefined,
-      durations: durations.map((d) => ({
-        days: parseInt(d.days, 10),
-        prices: d.prices.map((p) => ({ currency: p.currency, price: p.price.trim() || '0' })),
-      })),
-    })
+      archivedRenewMode,
+      internalSquads: selectedInternalSquads,
+      externalSquad,
+      upgradeToPlanIds,
+      replacementPlanIds,
+      allowedUserIds,
+      trialSettings: {
+        maxClaims: trialMaxClaims,
+        free: trialFree,
+        availabilityScope: trialScope,
+      },
+      durations,
+    }
+
+    form.reset(draft)
+    void form.handleSubmit(
+      (data) => {
+        setFormErrors({})
+        onSubmit(data)
+      },
+      (errors) => setFormErrors(flattenHookFormErrors(errors)),
+    )(e)
   }
 
   return (
@@ -217,7 +226,9 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
               onChange={(e) => setName(e.target.value)}
               placeholder={t('planForm.namePlaceholder')}
               required
+              aria-invalid={!!formErrors.name}
             />
+            <FieldError message={formErrors.name} />
           </div>
           <div className="space-y-2">
             <Label>{t('planForm.tag')}</Label>
@@ -233,9 +244,10 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
               maxLength={16}
               autoCapitalize="characters"
               spellCheck={false}
-              aria-invalid={tag.length > 0 && !TAG_PATTERN.test(tag)}
+              aria-invalid={!!formErrors.tag || (tag.length > 0 && !TAG_PATTERN.test(tag))}
             />
             <p className="text-xs text-muted-foreground">{t('planForm.tagHint')}</p>
+            <FieldError message={formErrors.tag} />
           </div>
         </div>
         <div className="space-y-2">
@@ -281,7 +293,7 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              {AVAILABILITIES.map((a) => (
+              {PLAN_AVAILABILITIES.map((a) => (
                 <SelectItem key={a} value={a}>
                   {t(`planForm.availabilities.${a}`)}
                 </SelectItem>
@@ -307,7 +319,9 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
                   max="100"
                   value={trialMaxClaims}
                   onChange={(e) => setTrialMaxClaims(e.target.value)}
+                  aria-invalid={!!formErrors['trialSettings.maxClaims']}
                 />
+                <FieldError message={formErrors['trialSettings.maxClaims']} />
                 <p className="text-xs text-muted-foreground">{t('planForm.trial.maxClaimsHint')}</p>
               </div>
               <div className="space-y-2">
@@ -326,6 +340,7 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
                     {t('planForm.trial.paidNotice')}
                   </p>
                 )}
+                <FieldError message={formErrors['trialSettings.free']} />
               </div>
               <div className="space-y-2">
                 <Label className="text-sm">{t('planForm.trial.scope')}</Label>
@@ -357,8 +372,10 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
             onChange={(e) => setTrafficLimitGB(e.target.value)}
             min="0"
             step="1"
+            aria-invalid={!!formErrors.trafficLimitGB}
           />
           <p className="text-xs text-muted-foreground">{t('planForm.unlimitedHint')}</p>
+          <FieldError message={formErrors.trafficLimitGB} />
         </div>
         <div className="space-y-2">
           <Label>{t('planForm.deviceLimit')}</Label>
@@ -367,8 +384,10 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
             value={deviceLimit}
             onChange={(e) => setDeviceLimit(e.target.value)}
             min="0"
+            aria-invalid={!!formErrors.deviceLimit}
           />
           <p className="text-xs text-muted-foreground">{t('planForm.unlimitedHint')}</p>
+          <FieldError message={formErrors.deviceLimit} />
         </div>
         <div className="space-y-2">
           <Label>{t('planForm.resetStrategy')}</Label>
@@ -377,7 +396,7 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              {TRAFFIC_STRATEGIES.map((s) => (
+              {PLAN_TRAFFIC_STRATEGIES.map((s) => (
                 <SelectItem key={s} value={s}>
                   {t(`planForm.resetStrategies.${s}`)}
                 </SelectItem>
@@ -430,6 +449,7 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
             <Plus className="h-3.5 w-3.5 mr-1" /> {t('planForm.addDuration')}
           </Button>
         </div>
+        <FieldError message={formErrors.durations} />
 
         {durations.map((duration, dIdx) => (
           <div key={dIdx} className="border rounded-lg p-4 space-y-3">
@@ -443,7 +463,9 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
                     value={duration.days}
                     onChange={(e) => updateDuration(dIdx, 'days', e.target.value)}
                     min="1"
+                    aria-invalid={!!formErrors[`durations.${dIdx}.days`]}
                   />
+                  <FieldError message={formErrors[`durations.${dIdx}.days`]} />
                 </div>
               </div>
               {durations.length > 1 ? (
@@ -474,41 +496,50 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
               </div>
               <div className="grid gap-2 md:grid-cols-2 lg:grid-cols-3">
                 {duration.prices.map((price, pIdx) => (
-                  <div key={pIdx} className="flex items-center gap-2">
-                    <Select
-                      value={price.currency}
-                      onValueChange={(v) => updatePrice(dIdx, pIdx, 'currency', v)}
-                    >
-                      <SelectTrigger className="w-24">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {CURRENCIES.map((c) => (
-                          <SelectItem key={c} value={c}>
-                            {c}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                    <Input
-                      type="number"
-                      value={price.price}
-                      onChange={(e) => updatePrice(dIdx, pIdx, 'price', e.target.value)}
-                      min="0"
-                      step="0.01"
-                      className="flex-1"
-                    />
-                    {duration.prices.length > 1 ? (
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon"
-                        className="h-8 w-8 shrink-0"
-                        onClick={() => removePrice(dIdx, pIdx)}
+                  <div key={pIdx} className="space-y-1">
+                    <div className="flex items-center gap-2">
+                      <Select
+                        value={price.currency}
+                        onValueChange={(v) => updatePrice(dIdx, pIdx, 'currency', v)}
                       >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </Button>
-                    ) : null}
+                        <SelectTrigger className="w-24">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {PLAN_CURRENCIES.map((c) => (
+                            <SelectItem key={c} value={c}>
+                              {c}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <Input
+                        type="number"
+                        value={price.price}
+                        onChange={(e) => updatePrice(dIdx, pIdx, 'price', e.target.value)}
+                        min="0"
+                        step="0.01"
+                        className="flex-1"
+                        aria-invalid={!!formErrors[`durations.${dIdx}.prices.${pIdx}.price`]}
+                      />
+                      {duration.prices.length > 1 ? (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8 shrink-0"
+                          onClick={() => removePrice(dIdx, pIdx)}
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </Button>
+                      ) : null}
+                    </div>
+                    <FieldError
+                      message={
+                        formErrors[`durations.${dIdx}.prices.${pIdx}.currency`] ??
+                        formErrors[`durations.${dIdx}.prices.${pIdx}.price`]
+                      }
+                    />
                   </div>
                 ))}
               </div>
@@ -573,6 +604,7 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
                   )}
                 </div>
                 <p className="text-xs text-muted-foreground">{t('planForm.archive.replacementHint')}</p>
+                <FieldError message={formErrors.replacementPlanIds} />
               </div>
             )}
           </div>
@@ -655,6 +687,7 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
                 <Plus className="h-3.5 w-3.5 mr-1" /> {t('planForm.allowedUsers.add')}
               </Button>
             </div>
+            <FieldError message={formErrors.allowedUserIds} />
           </div>
         </>
       )}
@@ -666,6 +699,68 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
       </Button>
     </form>
   )
+}
+
+
+function FieldError({ message }: { readonly message?: string }) {
+  if (!message) return null
+  return <p className="text-xs font-medium text-destructive" role="alert">{message}</p>
+}
+
+function createInitialPlanDraft(plan?: PlanInput): PlanFormDraft {
+  const planDeviceLimit = plan?.deviceLimit
+
+  return {
+    name: plan?.name ?? '',
+    description: plan?.description ?? '',
+    tag: plan?.tag ?? '',
+    icon: plan?.icon ?? null,
+    type: plan?.type ?? 'TRAFFIC',
+    availability: plan?.availability ?? 'ALL',
+    trafficLimitGB: plan ? String(plan.trafficLimit ?? 0) : '50',
+    deviceLimit: plan ? String(planDeviceLimit !== undefined && planDeviceLimit > 0 ? planDeviceLimit : 0) : '1',
+    trafficLimitStrategy: plan?.trafficLimitStrategy ?? 'MONTH',
+    isArchived: plan?.isArchived ?? false,
+    archivedRenewMode: plan?.archivedRenewMode ?? 'SELF_RENEW',
+    internalSquads: plan?.internalSquads ? [...plan.internalSquads] : [],
+    externalSquad: plan?.externalSquad ?? '__none__',
+    upgradeToPlanIds: plan?.upgradeToPlanIds ? [...plan.upgradeToPlanIds] : [],
+    replacementPlanIds: plan?.replacementPlanIds ? [...plan.replacementPlanIds] : [],
+    allowedUserIds: plan?.allowedUserIds ? [...plan.allowedUserIds] : [],
+    trialSettings: {
+      maxClaims: String(plan?.trialSettings?.maxClaims ?? 1),
+      free: plan?.trialSettings?.free ?? true,
+      availabilityScope: plan?.trialSettings?.availabilityScope ?? 'ALL',
+    },
+    durations: plan?.durations?.map((duration) => ({
+      days: duration.days.toString(),
+      prices: duration.prices.map((price) => ({
+        currency: price.currency,
+        price: price.price.toString(),
+      })),
+    })) ?? [{ days: '30', prices: [{ currency: 'RUB', price: '299' }] }],
+  }
+}
+
+function flattenHookFormErrors(errors: FieldErrors<PlanFormDraft>): Record<string, string> {
+  const flattenedErrors: Record<string, string> = {}
+  collectHookFormErrors(errors, [], flattenedErrors)
+  return flattenedErrors
+}
+
+function collectHookFormErrors(value: unknown, path: string[], output: Record<string, string>): void {
+  if (value === null || typeof value !== 'object') return
+
+  const maybeError = value as { readonly message?: unknown }
+  if (typeof maybeError.message === 'string') {
+    const key = path.length > 0 ? path.join('.') : 'form'
+    output[key] ??= maybeError.message
+  }
+
+  for (const [key, child] of Object.entries(value)) {
+    if (key === 'message' || key === 'type' || key === 'types' || key === 'ref') continue
+    collectHookFormErrors(child, [...path, key], output)
+  }
 }
 
 
