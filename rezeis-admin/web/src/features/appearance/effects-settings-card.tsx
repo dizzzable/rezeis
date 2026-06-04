@@ -443,21 +443,37 @@ function CursorPreview({ effect }: { effect: CursorEffectId }) {
     }
   }, [effect])
 
-  const handleMouseMove = (e: React.MouseEvent) => {
-    const canvas = canvasRef.current
-    if (!canvas) return
-    const rect = canvas.getBoundingClientRect()
+  const addTrailPoint = (x: number, y: number) => {
     trailRef.current.push({
-      x: e.clientX - rect.left,
-      y: e.clientY - rect.top,
+      x,
+      y,
       t: performance.now(),
     })
   }
 
+  const handleMouseMove = (e: React.MouseEvent<HTMLButtonElement>) => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const rect = canvas.getBoundingClientRect()
+    const scaleX = rect.width > 0 ? canvas.width / rect.width : 1
+    const scaleY = rect.height > 0 ? canvas.height / rect.height : 1
+    addTrailPoint((e.clientX - rect.left) * scaleX, (e.clientY - rect.top) * scaleY)
+  }
+
+  const handleFocus = () => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    addTrailPoint(canvas.width / 2, canvas.height / 2)
+  }
+
   return (
-    <div
-      className="relative h-[100px] rounded-lg border bg-background/50 overflow-hidden cursor-crosshair"
+    <button
+      type="button"
+      className="relative h-[100px] w-full overflow-hidden rounded-lg border bg-background/50 cursor-crosshair focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
       onMouseMove={handleMouseMove}
+      onFocus={handleFocus}
+      onClick={handleFocus}
+      aria-label={t('effectsSettings.cursorEffect.previewAction')}
     >
       <canvas
         ref={canvasRef}
@@ -468,7 +484,7 @@ function CursorPreview({ effect }: { effect: CursorEffectId }) {
       <div className="absolute inset-0 flex items-center justify-center text-[10px] text-muted-foreground/50 pointer-events-none">
         {t('effectsSettings.cursorEffect.previewHint')}
       </div>
-    </div>
+    </button>
   )
 }
 

@@ -441,6 +441,7 @@ export const en = {
       description: 'Global cursor trail or interaction effect.',
       select: 'Cursor effect',
       previewHint: 'Move cursor here to preview',
+      previewAction: 'Preview cursor effect',
     },
     clickEffect: {
       title: 'Click Effect',

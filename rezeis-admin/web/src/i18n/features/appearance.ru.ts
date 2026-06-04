@@ -441,6 +441,7 @@ export const ru = {
       description: 'Глобальный эффект следа или взаимодействия курсора.',
       select: 'Эффект курсора',
       previewHint: 'Проведите курсором здесь',
+      previewAction: 'Предпросмотр эффекта курсора',
     },
     clickEffect: {
       title: 'Эффект клика',

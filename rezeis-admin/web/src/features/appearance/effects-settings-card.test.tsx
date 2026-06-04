@@ -38,4 +38,19 @@ describe('EffectsSettingsCard accessibility', () => {
     preview.focus()
     expect(preview).toHaveFocus()
   })
+
+  it('makes the cursor-effect preview keyboard-operable and named', async () => {
+    const user = userEvent.setup()
+    await loadFeatureBundle('appearance')
+    useEffectsStore.getState().setCursorEffect('splash')
+
+    renderWithProviders(<EffectsSettingsCard />)
+
+    const preview = screen.getByRole('button', { name: 'Preview cursor effect' })
+    expect(preview).toBeInTheDocument()
+
+    preview.focus()
+    expect(preview).toHaveFocus()
+    await user.keyboard('{Enter}')
+  })
 })
