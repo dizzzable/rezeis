@@ -55,6 +55,18 @@ describe('WebReiwaPage branding URL validation', () => {
       )
     })
   })
+
+  it('gives color controls distinct programmatic names', async () => {
+    vi.spyOn(api, 'get').mockResolvedValue({ data: createBrandingPayload() })
+    vi.spyOn(api, 'patch').mockResolvedValue({ data: createBrandingPayload() })
+
+    renderWithProviders(<WebReiwaPage />)
+
+    await screen.findByRole('heading', { name: /WEB Reiwa/ })
+
+    expect(screen.getByRole('textbox', { name: 'Primary' })).toHaveValue('#22c55e')
+    expect(screen.getByLabelText('Primary color picker')).toHaveAttribute('type', 'color')
+  })
 })
 
 function createBrandingPayload() {

@@ -2446,6 +2446,7 @@
         primaryFg: 'Текст на основном',
         background: 'Фон',
         surface: 'Поверхность',
+        colorPickerAria: 'Палитра цвета: {{name}}',
       },
       card: {
         title: 'Карточка подписки',

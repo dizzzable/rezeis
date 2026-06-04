@@ -563,10 +563,12 @@ function ColorField({
   name: keyof BrandingFormDraft;
   form: UseFormReturn<BrandingFormDraft, unknown, BrandingFormData>;
 }) {
+  const { t } = useTranslation();
   const value = form.watch(name) as string;
+  const textInputId = `branding-${String(name)}-hex`;
   return (
     <div className="space-y-2">
-      <Label>{label}</Label>
+      <Label htmlFor={textInputId}>{label}</Label>
       <div className="flex items-center gap-2">
         <label className="relative flex h-9 w-9 shrink-0 cursor-pointer items-center justify-center rounded-md border overflow-hidden">
           <span className="absolute inset-0" style={{ backgroundColor: value || "#000" }} />
@@ -575,9 +577,11 @@ function ColorField({
             value={value || "#000000"}
             onChange={(e) => form.setValue(name, e.target.value, { shouldDirty: true })}
             className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+            aria-label={t('brandingPage.sections.colors.colorPickerAria', { name: label })}
           />
         </label>
         <Input
+          id={textInputId}
           {...form.register(name)}
           className="font-mono text-xs"
           placeholder="#22c55e"

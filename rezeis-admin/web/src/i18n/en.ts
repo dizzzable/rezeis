@@ -2415,6 +2415,7 @@ export const en = {
         primaryFg: 'Primary Foreground',
         background: 'Background',
         surface: 'Surface',
+        colorPickerAria: '{{name}} color picker',
       },
       card: {
         title: 'Subscription Card',
