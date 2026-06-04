@@ -684,15 +684,16 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
             <p className="text-xs text-muted-foreground">{t('planForm.allowedUsers.hint')}</p>
             <div className="flex flex-wrap gap-2">
               {allowedUserIds.map((uid) => (
-                <Badge
+                <button
                   key={uid}
-                  variant="secondary"
-                  className="cursor-pointer gap-1"
+                  type="button"
+                  className={badgeVariants({ variant: 'secondary', className: 'cursor-pointer gap-1' })}
+                  aria-label={t('planForm.allowedUsers.removeAria', { userId: uid })}
                   onClick={() => setAllowedUserIds((prev) => prev.filter((x) => x !== uid))}
                 >
                   {uid.slice(0, 12)}…
-                  <Trash2 className="h-3 w-3" />
-                </Badge>
+                  <Trash2 className="h-3 w-3" aria-hidden />
+                </button>
               ))}
             </div>
             <div className="flex gap-2">

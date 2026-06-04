@@ -1459,6 +1459,7 @@ export const en = {
       hint: 'Plans with "ALLOWED" availability are visible only to listed users.',
       placeholder: 'User ID or Telegram ID',
       add: 'Add',
+      removeAria: 'Remove allowed user {{userId}}',
     },
     trial: {
       title: 'Trial subscription settings',

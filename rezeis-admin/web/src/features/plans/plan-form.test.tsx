@@ -65,6 +65,27 @@ describe('PlanForm accessibility', () => {
 
     expect(upgradeButton).toHaveAttribute('aria-pressed', 'true')
   })
+
+  it('makes allowed-user chips keyboard-removable and named', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(api, 'get').mockResolvedValue({ data: [] })
+
+    renderWithProviders(
+      <PlanForm
+        plan={{ availability: 'ALLOWED', allowedUserIds: ['user-1234567890'] }}
+        onSubmit={vi.fn()}
+        isLoading={false}
+      />,
+    )
+
+    const removeButton = screen.getByRole('button', { name: 'Remove allowed user user-1234567890' })
+    removeButton.focus()
+    expect(removeButton).toHaveFocus()
+
+    await user.keyboard('[Space]')
+
+    expect(screen.queryByRole('button', { name: 'Remove allowed user user-1234567890' })).not.toBeInTheDocument()
+  })
 })
 
 function planOption(): Plan {
