@@ -86,7 +86,7 @@ export function FaqMediaUploader({
     [onChange, t, value],
   )
 
-  function onDrop(event: DragEvent<HTMLDivElement>) {
+  function onDrop(event: DragEvent<HTMLButtonElement>) {
     event.preventDefault()
     setIsDragging(false)
     if (disabled) return
@@ -111,7 +111,8 @@ export function FaqMediaUploader({
 
   return (
     <div className="space-y-3">
-      <div
+      <button
+        type="button"
         onDragOver={(event) => {
           event.preventDefault()
           if (!disabled) setIsDragging(true)
@@ -123,8 +124,10 @@ export function FaqMediaUploader({
         onDragLeave={() => setIsDragging(false)}
         onDrop={onDrop}
         onClick={() => !disabled && inputRef.current?.click()}
+        disabled={disabled}
+        aria-label={t('faqPage.media.chooseFile')}
         className={cn(
-          'flex flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed px-6 py-8 text-center transition-colors',
+          'flex w-full flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed px-6 py-8 text-center transition-colors',
           isDragging
             ? 'border-primary bg-primary/10'
             : 'border-border hover:border-primary/60 hover:bg-accent/40',
@@ -145,16 +148,17 @@ export function FaqMediaUploader({
         <p className="text-xs text-muted-foreground">
           {t('faqPage.media.hint', { max: MAX_FILES })}
         </p>
-        <input
-          ref={inputRef}
-          type="file"
-          accept={ACCEPTED_MIME}
-          multiple
-          className="hidden"
-          onChange={onSelect}
-          disabled={disabled}
-        />
-      </div>
+      </button>
+      <input
+        ref={inputRef}
+        type="file"
+        accept={ACCEPTED_MIME}
+        multiple
+        className="hidden"
+        onChange={onSelect}
+        disabled={disabled}
+        aria-label={t('faqPage.media.chooseFile')}
+      />
 
       {value.length > 0 ? (
         <SortableMediaGrid value={value} onChange={onChange} onRemove={onRemove} disabled={disabled} />
@@ -272,6 +276,7 @@ function SortableMediaTile({ url, onRemove, disabled }: SortableMediaTileProps):
           onRemove()
         }}
         disabled={disabled}
+        aria-label={t('faqPage.media.removeAriaLabel')}
       >
         <Trash2 className="h-3.5 w-3.5" />
       </Button>

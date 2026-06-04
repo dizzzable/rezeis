@@ -23,6 +23,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -251,6 +252,7 @@ export default function FaqPage(): JSX.Element {
             <DialogTitle>
               {editing ? t('faqPage.editTitle') : t('faqPage.createTitle')}
             </DialogTitle>
+            <DialogDescription>{t('faqPage.dialogDescription')}</DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-1.5">

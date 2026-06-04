@@ -52,4 +52,31 @@ describe('FaqPage accessibility', () => {
     await waitFor(() => expect(deleteSpy).toHaveBeenCalledWith('/admin/faq/faq-1'))
     expect(confirmSpy).not.toHaveBeenCalled()
   })
+
+  it('makes FAQ media upload and remove actions keyboard-operable and named', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(api, 'get').mockResolvedValue({
+      data: [
+        {
+          id: 'faq-1',
+          question: 'How do I start?',
+          answer: 'Open the app and sign in.',
+          mediaUrls: ['https://cdn.example.com/help.png'],
+          orderIndex: 1,
+          isActive: true,
+          locale: null,
+          createdAt: '2026-06-04T00:00:00.000Z',
+          updatedAt: '2026-06-04T00:00:00.000Z',
+        },
+      ],
+    })
+
+    renderWithProviders(<FaqPage />)
+
+    expect(await screen.findByText('How do I start?')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Edit entry' }))
+
+    expect(screen.getByRole('button', { name: 'Choose FAQ media files' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Remove media attachment' })).toBeInTheDocument()
+  })
 })
