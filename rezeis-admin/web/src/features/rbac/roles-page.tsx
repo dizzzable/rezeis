@@ -26,6 +26,17 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from '@/components/ui/alert-dialog';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
@@ -372,20 +383,41 @@ function RoleEditor({
               {t('rolesPage.editor.save')}
             </Button>
             {!role.isSystem && (
-              <Button
-                variant="destructive"
-                size="sm"
-                onClick={() => {
-                  if (window.confirm(t('rolesPage.editor.deleteConfirm', { name: role.displayName }))) {
-                    deleteMutation.mutate();
-                  }
-                }}
-                disabled={deleteMutation.isPending || role.assignedAdminCount > 0}
-                title={role.assignedAdminCount > 0 ? t('rolesPage.editor.deleteAssigned') : ''}
-              >
-                <Trash2 className="mr-2 h-4 w-4" />
-                {t('rolesPage.editor.delete')}
-              </Button>
+              <AlertDialog>
+                <AlertDialogTrigger asChild>
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    disabled={deleteMutation.isPending || role.assignedAdminCount > 0}
+                    title={role.assignedAdminCount > 0 ? t('rolesPage.editor.deleteAssigned') : ''}
+                  >
+                    <Trash2 className="mr-2 h-4 w-4" />
+                    {t('rolesPage.editor.delete')}
+                  </Button>
+                </AlertDialogTrigger>
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>
+                      {t('rolesPage.editor.delete')}
+                    </AlertDialogTitle>
+                    <AlertDialogDescription>
+                      {t('rolesPage.editor.deleteConfirm', { name: role.displayName })}
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel disabled={deleteMutation.isPending}>
+                      {t('common.cancel')}
+                    </AlertDialogCancel>
+                    <AlertDialogAction
+                      className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                      disabled={deleteMutation.isPending}
+                      onClick={() => deleteMutation.mutate()}
+                    >
+                      {t('rolesPage.editor.delete')}
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
             )}
           </div>
         </div>
