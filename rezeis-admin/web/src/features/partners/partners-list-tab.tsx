@@ -175,15 +175,7 @@ export default function PartnersListTab() {
               </TableHeader>
               <TableBody>
                 {data.map((partner) => (
-                  <TableRow
-                    key={partner.id}
-                    className="cursor-pointer hover:bg-muted/40"
-                    onClick={(e) => {
-                      // Avoid opening when toggling switch
-                      if ((e.target as HTMLElement).closest('button[role="switch"]')) return
-                      setSelected(partner)
-                    }}
-                  >
+                  <TableRow key={partner.id}>
                     <TableCell>
                       <p className="text-sm font-medium leading-tight">
                         {partner.user.name ?? partner.user.username ?? '—'}
@@ -242,10 +234,7 @@ export default function PartnersListTab() {
                           size="sm"
                           variant="ghost"
                           className="h-7 text-xs"
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            setSelected(partner)
-                          }}
+                          onClick={() => setSelected(partner)}
                         >
                           <Settings2 className="h-3.5 w-3.5 mr-1" />
                           {t('partnersList.manage')}
@@ -315,13 +304,12 @@ function PartnerRowActions({ partner }: { readonly partner: Partner }) {
           variant="ghost"
           size="icon"
           className="h-7 w-7"
-          onClick={(e) => e.stopPropagation()}
           aria-label={t('partnersList.actions.aria')}
         >
           <MoreHorizontal className="h-4 w-4" />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-56" onClick={(e) => e.stopPropagation()}>
+      <DropdownMenuContent align="end" className="w-56">
         {partner.user.telegramId && (
           <DropdownMenuItem asChild>
             <Link to={`/users/${partner.user.telegramId}`}>
