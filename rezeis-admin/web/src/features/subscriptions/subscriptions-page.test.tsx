@@ -62,4 +62,12 @@ describe('SubscriptionsPage accessibility', () => {
 
     expect(await screen.findByRole('combobox', { name: 'Status' })).toBeInTheDocument()
   })
+
+  it('keeps row navigation on the named action instead of the table row', async () => {
+    renderWithProviders(<SubscriptionsPage />)
+
+    const userCell = await screen.findByText('Alice')
+    expect(userCell.closest('tr')).not.toHaveClass('cursor-pointer')
+    expect(screen.getByRole('button', { name: 'Open user 12345' })).toBeInTheDocument()
+  })
 })

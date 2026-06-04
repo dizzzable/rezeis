@@ -159,8 +159,7 @@ export default function SubscriptionsPage() {
               </TableHeader>
               <TableBody>
                 {data.items.map((sub) => (
-                  <TableRow key={sub.id} className="cursor-pointer hover:bg-muted/30"
-                    onClick={() => navigate(`/users/${sub.userTelegramId?.toString()}`)}>
+                  <TableRow key={sub.id}>
                     <TableCell className="font-mono text-xs">{sub.id}</TableCell>
                     <TableCell>
                       <div>
@@ -180,7 +179,7 @@ export default function SubscriptionsPage() {
                     <TableCell className="text-xs text-muted-foreground">
                       {new Date(sub.expireAt).toLocaleDateString('ru-RU')}
                     </TableCell>
-                    <TableCell onClick={(e) => e.stopPropagation()}>
+                    <TableCell>
                       <Button
                         size="icon"
                         variant="ghost"
