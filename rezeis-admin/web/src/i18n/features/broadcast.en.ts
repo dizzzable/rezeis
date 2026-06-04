@@ -11,7 +11,11 @@ export const en = {
     subtitle: 'Mass messaging to users via Telegram bot',
     newButton: 'New broadcast',
     empty: 'No broadcasts yet',
+    cancelBroadcast: 'Cancel broadcast',
+    deleteBroadcast: 'Delete broadcast',
+    deleteDialogTitle: 'Delete broadcast?',
     deleteConfirm: 'Delete this broadcast?',
+    deleteDialogAction: 'Delete',
     failedCount_one: '{{count}} failed',
     failedCount_other: '{{count}} failed',
     columns: {

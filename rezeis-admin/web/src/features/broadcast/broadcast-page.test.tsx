@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { screen, waitFor } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 
 import { api } from '@/lib/api'
@@ -67,5 +67,43 @@ describe('BroadcastPage create form validation', () => {
       })
     })
     expect(postSpy).toHaveBeenCalledWith('/admin/broadcast/broadcast-1/send', {})
+  })
+
+  it('confirms before deleting a completed broadcast draft', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(api, 'get').mockImplementation(async (path: string) => {
+      if (path === '/admin/broadcast/drafts') {
+        return {
+          data: [
+            {
+              id: 'broadcast-1',
+              audience: 'ALL',
+              status: 'COMPLETED',
+              successCount: 8,
+              totalCount: 8,
+              failedCount: 0,
+              createdAt: '2026-06-04T10:00:00.000Z',
+            },
+          ],
+        }
+      }
+      return { data: {} }
+    })
+    const deleteSpy = vi.spyOn(api, 'delete').mockResolvedValue({ data: {} })
+    await loadFeatureBundle('broadcast')
+
+    renderWithProviders(<BroadcastPage />)
+
+    await user.click(await screen.findByRole('button', { name: 'Delete broadcast' }))
+
+    const dialog = await screen.findByRole('alertdialog', { name: 'Delete broadcast?' })
+    expect(within(dialog).getByText('Delete this broadcast?')).toBeInTheDocument()
+    expect(deleteSpy).not.toHaveBeenCalled()
+
+    await user.click(within(dialog).getByRole('button', { name: 'Delete' }))
+
+    await waitFor(() => {
+      expect(deleteSpy).toHaveBeenCalledWith('/admin/broadcast/broadcast-1')
+    })
   })
 })

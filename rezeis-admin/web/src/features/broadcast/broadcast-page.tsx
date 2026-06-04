@@ -16,6 +16,17 @@ import { Input } from '@/components/ui/input'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from '@/components/ui/alert-dialog'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -174,15 +185,46 @@ export default function BroadcastPage() {
                       <div className="flex gap-1">
                         {b.status === 'PROCESSING' && (
                           <Button size="icon" variant="ghost" className="h-7 w-7 text-muted-foreground"
+                            aria-label={t('broadcastPage.cancelBroadcast')}
                             onClick={() => cancelMutation.mutate(b.id)}>
                             <XCircle className="h-3.5 w-3.5" />
                           </Button>
                         )}
                         {['COMPLETED', 'CANCELED', 'FAILED'].includes(b.status) && (
-                          <Button size="icon" variant="ghost" className="h-7 w-7 text-destructive"
-                            onClick={() => { if (confirm(t('broadcastPage.deleteConfirm'))) deleteMutation.mutate(b.id) }}>
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </Button>
+                          <AlertDialog>
+                            <AlertDialogTrigger asChild>
+                              <Button
+                                size="icon"
+                                variant="ghost"
+                                className="h-7 w-7 text-destructive"
+                                aria-label={t('broadcastPage.deleteBroadcast')}
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </Button>
+                            </AlertDialogTrigger>
+                            <AlertDialogContent>
+                              <AlertDialogHeader>
+                                <AlertDialogTitle>
+                                  {t('broadcastPage.deleteDialogTitle')}
+                                </AlertDialogTitle>
+                                <AlertDialogDescription>
+                                  {t('broadcastPage.deleteConfirm')}
+                                </AlertDialogDescription>
+                              </AlertDialogHeader>
+                              <AlertDialogFooter>
+                                <AlertDialogCancel disabled={deleteMutation.isPending}>
+                                  {t('common.cancel')}
+                                </AlertDialogCancel>
+                                <AlertDialogAction
+                                  className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                                  disabled={deleteMutation.isPending}
+                                  onClick={() => deleteMutation.mutate(b.id)}
+                                >
+                                  {t('broadcastPage.deleteDialogAction')}
+                                </AlertDialogAction>
+                              </AlertDialogFooter>
+                            </AlertDialogContent>
+                          </AlertDialog>
                         )}
                       </div>
                     </TableCell>
