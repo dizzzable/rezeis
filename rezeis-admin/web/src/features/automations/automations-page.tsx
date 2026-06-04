@@ -494,8 +494,9 @@ function ConfigEditor({
     <div className="space-y-4">
       <div className="grid gap-3 md:grid-cols-2">
         <div className="space-y-1.5">
-          <Label>{t('automationsPage.config.name')}</Label>
+          <Label htmlFor="automation-rule-name">{t('automationsPage.config.name')}</Label>
           <Input
+            id="automation-rule-name"
             value={draft.name}
             onChange={(e) => setDraft({ ...draft, name: e.target.value })}
             maxLength={96}
@@ -507,7 +508,7 @@ function ConfigEditor({
             value={draft.triggerKind}
             onValueChange={(v) => setDraft({ ...draft, triggerKind: v as AutomationTriggerKind })}
           >
-            <SelectTrigger>
+            <SelectTrigger aria-label={t('automationsPage.config.trigger')}>
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -520,8 +521,9 @@ function ConfigEditor({
       </div>
 
       <div className="space-y-1.5">
-        <Label>{t('automationsPage.config.description')}</Label>
+        <Label htmlFor="automation-rule-description">{t('automationsPage.config.description')}</Label>
         <Textarea
+          id="automation-rule-description"
           value={draft.description ?? ''}
           onChange={(e) => setDraft({ ...draft, description: e.target.value })}
           rows={2}
@@ -531,10 +533,11 @@ function ConfigEditor({
 
       {draft.triggerKind !== 'MANUAL' && (
         <div className="space-y-1.5">
-          <Label>
+          <Label htmlFor="automation-trigger-spec">
             {draft.triggerKind === 'REALTIME' ? t('automationsPage.config.eventPattern') : t('automationsPage.config.cronExpression')}
           </Label>
           <Input
+            id="automation-trigger-spec"
             value={draft.triggerSpec}
             onChange={(e) => setDraft({ ...draft, triggerSpec: e.target.value })}
             placeholder={
@@ -555,8 +558,9 @@ function ConfigEditor({
       <Separator />
 
       <div className="space-y-1.5">
-        <Label>{t('automationsPage.config.conditionsLabel')}</Label>
+        <Label htmlFor="automation-conditions">{t('automationsPage.config.conditionsLabel')}</Label>
         <Textarea
+          id="automation-conditions"
           value={conditionsText}
           onChange={(e) => {
             const raw = e.target.value;
@@ -636,7 +640,10 @@ function ActionsEditor({
                   value={action.type}
                   onValueChange={(v) => update(idx, { ...action, type: v })}
                 >
-                  <SelectTrigger className="max-w-xs">
+                  <SelectTrigger
+                    className="max-w-xs"
+                    aria-label={`${t('automationsPage.actions.heading')} ${idx + 1}`}
+                  >
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>

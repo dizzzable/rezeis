@@ -107,4 +107,17 @@ describe('AutomationsPage accessibility', () => {
     })
     expect(confirmSpy).not.toHaveBeenCalled()
   })
+
+  it('names automation editor configuration controls', async () => {
+    await loadFeatureBundle('automations')
+
+    renderWithProviders(<AutomationsPage />)
+
+    expect(await screen.findByRole('textbox', { name: 'Name' })).toHaveValue('Payment failure alert')
+    expect(screen.getByRole('combobox', { name: 'Trigger' })).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Description' })).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Event pattern' })).toHaveValue('payment.failed')
+    expect(screen.getByRole('textbox', { name: 'Conditions (JSON-logic-ish, optional)' })).toBeInTheDocument()
+    expect(screen.getByRole('combobox', { name: 'Actions 1' })).toBeInTheDocument()
+  })
 })
