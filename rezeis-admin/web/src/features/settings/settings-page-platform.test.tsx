@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { screen } from '@testing-library/react'
 
 import { renderWithProviders } from '@/test/test-utils'
-import { MultiSubTab, PlatformTab } from './settings-page'
+import { BrandingTab, MultiSubTab, PlatformTab } from './settings-page'
 
 describe('PlatformTab accessibility', () => {
   it('names compact platform settings controls', () => {
@@ -45,5 +45,33 @@ describe('MultiSubTab accessibility', () => {
 
     expect(screen.getByRole('switch', { name: 'Enable Multi-Subscription' })).toBeInTheDocument()
     expect(screen.getByRole('spinbutton', { name: 'Default Max Subscriptions per User' })).toBeInTheDocument()
+  })
+})
+
+describe('BrandingTab accessibility', () => {
+  it('names branding inputs and template editors', () => {
+    renderWithProviders(
+      <BrandingTab
+        settings={{
+          brandingSettings: {
+            projectName: 'Rezeis',
+            webTitle: 'Rezeis VPN',
+            channelUsername: '@rezeis',
+            verification: {
+              telegramTemplate: { ru: 'Код: {code}', en: 'Code: {code}' },
+              passwordResetTelegramTemplate: { ru: 'Сброс: {code}', en: 'Reset: {code}' },
+            },
+          },
+        }}
+      />,
+    )
+
+    expect(screen.getByRole('textbox', { name: 'Project Name' })).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Web Title' })).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Channel Username' })).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Verification (RU)' })).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Verification (EN)' })).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Password Reset (RU)' })).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Password Reset (EN)' })).toBeInTheDocument()
   })
 })

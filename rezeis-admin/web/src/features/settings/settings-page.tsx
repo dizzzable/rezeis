@@ -312,7 +312,7 @@ function FieldError({ message }: { readonly message?: string }) {
 
 // ── Branding Tab ──────────────────────────────────────────────────────────────
 
-function BrandingTab({ settings }: { settings: AdminSettings | undefined }) {
+export function BrandingTab({ settings }: { settings: AdminSettings | undefined }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const branding = settings?.brandingSettings ?? {}
@@ -355,18 +355,33 @@ function BrandingTab({ settings }: { settings: AdminSettings | undefined }) {
       <CardContent className="space-y-6">
         <div className="grid gap-4 md:grid-cols-2">
           <div className="space-y-2">
-            <Label>{t('settingsPage.branding.projectName')}</Label>
-            <Input value={projectName} onChange={(e) => setProjectName(e.target.value)} placeholder={t('settingsPage.branding.projectNamePlaceholder')} />
+            <Label htmlFor="settings-branding-project-name">{t('settingsPage.branding.projectName')}</Label>
+            <Input
+              id="settings-branding-project-name"
+              value={projectName}
+              onChange={(e) => setProjectName(e.target.value)}
+              placeholder={t('settingsPage.branding.projectNamePlaceholder')}
+            />
             <p className="text-xs text-muted-foreground">{t('settingsPage.branding.projectNameHint')}</p>
           </div>
           <div className="space-y-2">
-            <Label>{t('settingsPage.branding.webTitle')}</Label>
-            <Input value={webTitle} onChange={(e) => setWebTitle(e.target.value)} placeholder={t('settingsPage.branding.webTitlePlaceholder')} />
+            <Label htmlFor="settings-branding-web-title">{t('settingsPage.branding.webTitle')}</Label>
+            <Input
+              id="settings-branding-web-title"
+              value={webTitle}
+              onChange={(e) => setWebTitle(e.target.value)}
+              placeholder={t('settingsPage.branding.webTitlePlaceholder')}
+            />
             <p className="text-xs text-muted-foreground">{t('settingsPage.branding.webTitleHint')}</p>
           </div>
           <div className="space-y-2">
-            <Label>{t('settingsPage.branding.channelUsername')}</Label>
-            <Input value={channelUsername} onChange={(e) => setChannelUsername(e.target.value)} placeholder={t('settingsPage.branding.channelUsernamePlaceholder')} />
+            <Label htmlFor="settings-branding-channel-username">{t('settingsPage.branding.channelUsername')}</Label>
+            <Input
+              id="settings-branding-channel-username"
+              value={channelUsername}
+              onChange={(e) => setChannelUsername(e.target.value)}
+              placeholder={t('settingsPage.branding.channelUsernamePlaceholder')}
+            />
           </div>
         </div>
 
@@ -378,8 +393,9 @@ function BrandingTab({ settings }: { settings: AdminSettings | undefined }) {
 
           <div className="grid gap-4 md:grid-cols-2">
             <div className="space-y-2">
-              <Label>{t('settingsPage.branding.verificationRu')}</Label>
+              <Label htmlFor="settings-branding-verification-ru">{t('settingsPage.branding.verificationRu')}</Label>
               <textarea
+                id="settings-branding-verification-ru"
                 className="w-full h-20 font-mono text-xs border rounded-md p-2 bg-muted/30 resize-y"
                 value={verifyTelegramRu}
                 onChange={(e) => setVerifyTelegramRu(e.target.value)}
@@ -387,8 +403,9 @@ function BrandingTab({ settings }: { settings: AdminSettings | undefined }) {
               />
             </div>
             <div className="space-y-2">
-              <Label>{t('settingsPage.branding.verificationEn')}</Label>
+              <Label htmlFor="settings-branding-verification-en">{t('settingsPage.branding.verificationEn')}</Label>
               <textarea
+                id="settings-branding-verification-en"
                 className="w-full h-20 font-mono text-xs border rounded-md p-2 bg-muted/30 resize-y"
                 value={verifyTelegramEn}
                 onChange={(e) => setVerifyTelegramEn(e.target.value)}
@@ -396,8 +413,9 @@ function BrandingTab({ settings }: { settings: AdminSettings | undefined }) {
               />
             </div>
             <div className="space-y-2">
-              <Label>{t('settingsPage.branding.passwordResetRu')}</Label>
+              <Label htmlFor="settings-branding-password-reset-ru">{t('settingsPage.branding.passwordResetRu')}</Label>
               <textarea
+                id="settings-branding-password-reset-ru"
                 className="w-full h-20 font-mono text-xs border rounded-md p-2 bg-muted/30 resize-y"
                 value={passwordResetRu}
                 onChange={(e) => setPasswordResetRu(e.target.value)}
@@ -405,8 +423,9 @@ function BrandingTab({ settings }: { settings: AdminSettings | undefined }) {
               />
             </div>
             <div className="space-y-2">
-              <Label>{t('settingsPage.branding.passwordResetEn')}</Label>
+              <Label htmlFor="settings-branding-password-reset-en">{t('settingsPage.branding.passwordResetEn')}</Label>
               <textarea
+                id="settings-branding-password-reset-en"
                 className="w-full h-20 font-mono text-xs border rounded-md p-2 bg-muted/30 resize-y"
                 value={passwordResetEn}
                 onChange={(e) => setPasswordResetEn(e.target.value)}
