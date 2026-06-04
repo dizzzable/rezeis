@@ -1431,6 +1431,12 @@ export const en = {
     days: 'Days',
     prices: 'Prices',
     addCurrency: 'Add currency',
+    addCurrencyAria: 'Add currency to duration {{index}}',
+    durationDaysAria: 'Duration {{index}} days',
+    removeDurationAria: 'Remove duration {{index}}',
+    currencyAria: 'Duration {{duration}} price {{index}} currency',
+    priceAria: 'Duration {{duration}} price {{index}} amount',
+    removePriceAria: 'Remove duration {{duration}} price {{index}}',
     archive: {
       title: 'Archive & Transitions',
       isArchived: 'Archived plan',

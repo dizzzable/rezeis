@@ -1447,6 +1447,12 @@
     days: 'Дней',
     prices: 'Цены',
     addCurrency: 'Добавить валюту',
+    addCurrencyAria: 'Добавить валюту к сроку {{index}}',
+    durationDaysAria: 'Дней в сроке {{index}}',
+    removeDurationAria: 'Удалить срок {{index}}',
+    currencyAria: 'Валюта цены {{index}} в сроке {{duration}}',
+    priceAria: 'Сумма цены {{index}} в сроке {{duration}}',
+    removePriceAria: 'Удалить цену {{index}} в сроке {{duration}}',
     archive: {
       title: 'Архив и переходы',
       isArchived: 'Архивный тариф',

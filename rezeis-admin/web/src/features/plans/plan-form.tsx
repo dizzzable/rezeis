@@ -463,6 +463,7 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
                     value={duration.days}
                     onChange={(e) => updateDuration(dIdx, 'days', e.target.value)}
                     min="1"
+                    aria-label={t('planForm.durationDaysAria', { index: dIdx + 1 })}
                     aria-invalid={!!formErrors[`durations.${dIdx}.days`]}
                   />
                   <FieldError message={formErrors[`durations.${dIdx}.days`]} />
@@ -475,6 +476,7 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
                   size="icon"
                   className="h-8 w-8 text-destructive"
                   onClick={() => removeDuration(dIdx)}
+                  aria-label={t('planForm.removeDurationAria', { index: dIdx + 1 })}
                 >
                   <Trash2 className="h-4 w-4" />
                 </Button>
@@ -490,6 +492,7 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
                   size="sm"
                   className="h-6 text-xs"
                   onClick={() => addPrice(dIdx)}
+                  aria-label={t('planForm.addCurrencyAria', { index: dIdx + 1 })}
                 >
                   + {t('planForm.addCurrency')}
                 </Button>
@@ -502,7 +505,13 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
                         value={price.currency}
                         onValueChange={(v) => updatePrice(dIdx, pIdx, 'currency', v)}
                       >
-                        <SelectTrigger className="w-24">
+                        <SelectTrigger
+                          className="w-24"
+                          aria-label={t('planForm.currencyAria', {
+                            duration: dIdx + 1,
+                            index: pIdx + 1,
+                          })}
+                        >
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
@@ -520,6 +529,10 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
                         min="0"
                         step="0.01"
                         className="flex-1"
+                        aria-label={t('planForm.priceAria', {
+                          duration: dIdx + 1,
+                          index: pIdx + 1,
+                        })}
                         aria-invalid={!!formErrors[`durations.${dIdx}.prices.${pIdx}.price`]}
                       />
                       {duration.prices.length > 1 ? (
@@ -529,6 +542,10 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
                           size="icon"
                           className="h-8 w-8 shrink-0"
                           onClick={() => removePrice(dIdx, pIdx)}
+                          aria-label={t('planForm.removePriceAria', {
+                            duration: dIdx + 1,
+                            index: pIdx + 1,
+                          })}
                         >
                           <Trash2 className="h-3.5 w-3.5" />
                         </Button>
