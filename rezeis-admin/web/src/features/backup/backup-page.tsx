@@ -202,7 +202,7 @@ export default function BackupPage() {
         <div className="flex items-center gap-2">
           {canCreateBackups ? (
             <Select value={scope} onValueChange={(v) => setScope(v as 'DB' | 'FULL')}>
-              <SelectTrigger className="w-28">
+              <SelectTrigger className="w-28" aria-label={t('backupPage.table.columns.scope')}>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>

@@ -54,6 +54,20 @@ describe('BackupPage RBAC gating', () => {
     expect(screen.queryByRole('button', { name: 'Restore' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Delete' })).not.toBeInTheDocument()
   })
+
+  it('names the backup scope selector when backup creation is allowed', async () => {
+    vi.spyOn(api, 'get').mockResolvedValue({
+      data: { items: [], total: 0, limit: 50, offset: 0 },
+    })
+    grantPermissions([
+      { resource: 'backups', action: 'view' },
+      { resource: 'backups', action: 'create' },
+    ])
+
+    renderWithProviders(<BackupPage />)
+
+    expect(await screen.findByRole('combobox', { name: 'Scope' })).toBeInTheDocument()
+  })
 })
 
 function grantPermissions(permissions: ReadonlyArray<{ resource: string; action: RbacAction }>): void {
