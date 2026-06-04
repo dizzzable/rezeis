@@ -90,7 +90,7 @@ export default function SettingsPage() {
   )
 }
 
-function PlatformTab({ settings }: { settings: AdminSettings | undefined }) {
+export function PlatformTab({ settings }: { settings: AdminSettings | undefined }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const [accessMode, setAccessMode] = useState(settings?.accessMode ?? 'PUBLIC')
@@ -148,7 +148,7 @@ function PlatformTab({ settings }: { settings: AdminSettings | undefined }) {
           <div className="space-y-2">
             <Label>{t('settingsPage.platform.accessMode')}</Label>
             <Select value={accessMode} onValueChange={setAccessMode}>
-              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectTrigger aria-label={t('settingsPage.platform.accessMode')}><SelectValue /></SelectTrigger>
               <SelectContent>
                 {ACCESS_MODES.map((m) => <SelectItem key={m} value={m}>{m}</SelectItem>)}
               </SelectContent>
@@ -160,7 +160,7 @@ function PlatformTab({ settings }: { settings: AdminSettings | undefined }) {
           <div className="space-y-2">
             <Label>{t('settingsPage.platform.defaultCurrency')}</Label>
             <Select value={defaultCurrency} onValueChange={setDefaultCurrency}>
-              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectTrigger aria-label={t('settingsPage.platform.defaultCurrency')}><SelectValue /></SelectTrigger>
               <SelectContent>
                 {CURRENCIES.map((c) => <SelectItem key={c} value={c}>{c}</SelectItem>)}
               </SelectContent>
@@ -176,12 +176,21 @@ function PlatformTab({ settings }: { settings: AdminSettings | undefined }) {
               <Label>{t('settingsPage.platform.rulesRequired')}</Label>
               <p className="text-xs text-muted-foreground">{t('settingsPage.platform.rulesRequiredHint')}</p>
             </div>
-            <Switch checked={rulesRequired} onCheckedChange={setRulesRequired} />
+            <Switch
+              checked={rulesRequired}
+              onCheckedChange={setRulesRequired}
+              aria-label={t('settingsPage.platform.rulesRequired')}
+            />
           </div>
           {rulesRequired && (
             <div className="space-y-2 pl-4 border-l-2">
-              <Label>{t('settingsPage.platform.rulesLink')}</Label>
-              <Input value={rulesLink} onChange={(e) => setRulesLink(e.target.value)} placeholder={t('settingsPage.platform.rulesLinkPlaceholder')} />
+              <Label htmlFor="platform-rules-link">{t('settingsPage.platform.rulesLink')}</Label>
+              <Input
+                id="platform-rules-link"
+                value={rulesLink}
+                onChange={(e) => setRulesLink(e.target.value)}
+                placeholder={t('settingsPage.platform.rulesLinkPlaceholder')}
+              />
             </div>
           )}
         </div>
@@ -192,17 +201,31 @@ function PlatformTab({ settings }: { settings: AdminSettings | undefined }) {
               <Label>{t('settingsPage.platform.channelRequired')}</Label>
               <p className="text-xs text-muted-foreground">{t('settingsPage.platform.channelRequiredHint')}</p>
             </div>
-            <Switch checked={channelRequired} onCheckedChange={setChannelRequired} />
+            <Switch
+              checked={channelRequired}
+              onCheckedChange={setChannelRequired}
+              aria-label={t('settingsPage.platform.channelRequired')}
+            />
           </div>
           {channelRequired && (
             <div className="space-y-3 pl-4 border-l-2">
               <div className="space-y-2">
-                <Label>{t('settingsPage.platform.channelLink')}</Label>
-                <Input value={channelLink} onChange={(e) => setChannelLink(e.target.value)} placeholder={t('settingsPage.platform.channelLinkPlaceholder')} />
+                <Label htmlFor="platform-channel-link">{t('settingsPage.platform.channelLink')}</Label>
+                <Input
+                  id="platform-channel-link"
+                  value={channelLink}
+                  onChange={(e) => setChannelLink(e.target.value)}
+                  placeholder={t('settingsPage.platform.channelLinkPlaceholder')}
+                />
               </div>
               <div className="space-y-2">
-                <Label>{t('settingsPage.platform.channelId')}</Label>
-                <Input value={channelId} onChange={(e) => setChannelId(e.target.value)} placeholder="-1001234567890" />
+                <Label htmlFor="platform-channel-id">{t('settingsPage.platform.channelId')}</Label>
+                <Input
+                  id="platform-channel-id"
+                  value={channelId}
+                  onChange={(e) => setChannelId(e.target.value)}
+                  placeholder="-1001234567890"
+                />
               </div>
             </div>
           )}
