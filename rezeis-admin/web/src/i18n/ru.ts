@@ -1881,6 +1881,7 @@
       waitingReply: 'Ожидает ответа',
     },
     filters: {
+      status: 'Статус',
       all: 'Все',
       open: 'Открытые',
       waiting: 'Ожидающие',
@@ -1894,6 +1895,8 @@
       tgPrefix: 'TG',
       close: 'Закрыть',
       reopen: 'Открыть снова',
+      replyLabel: 'Текст ответа',
+      sendReply: 'Отправить ответ',
       replyPlaceholder: 'Введите ответ…',
       keyHint: 'Enter — отправить · Shift+Enter — новая строка',
     },

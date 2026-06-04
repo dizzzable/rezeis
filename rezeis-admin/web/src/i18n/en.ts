@@ -1859,6 +1859,7 @@ export const en = {
       waitingReply: 'Waiting Reply',
     },
     filters: {
+      status: 'Status',
       all: 'All',
       open: 'Open',
       waiting: 'Waiting',
@@ -1872,6 +1873,8 @@ export const en = {
       tgPrefix: 'TG',
       close: 'Close',
       reopen: 'Reopen',
+      replyLabel: 'Reply message',
+      sendReply: 'Send reply',
       replyPlaceholder: 'Type your reply…',
       keyHint: 'Enter to send · Shift+Enter for new line',
     },

@@ -104,7 +104,7 @@ export default function SupportTicketsPage() {
           <p className="text-muted-foreground">{t('supportTicketsPage.subtitle')}</p>
         </div>
         <Select value={statusFilter} onValueChange={setStatusFilter}>
-          <SelectTrigger className="w-36"><SelectValue /></SelectTrigger>
+          <SelectTrigger className="w-36" aria-label={t('supportTicketsPage.filters.status')}><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value="all">{t('supportTicketsPage.filters.all')}</SelectItem>
             <SelectItem value="open">{t('supportTicketsPage.filters.open')}</SelectItem>
@@ -215,6 +215,7 @@ export default function SupportTicketsPage() {
                 <div className="p-4 border-t">
                   <div className="flex gap-2">
                     <Textarea
+                      aria-label={t('supportTicketsPage.detail.replyLabel')}
                       placeholder={t('supportTicketsPage.detail.replyPlaceholder')}
                       value={replyText}
                       onChange={(e) => setReplyText(e.target.value)}
@@ -230,6 +231,7 @@ export default function SupportTicketsPage() {
                       onClick={() => replyText.trim() && replyMutation.mutate(replyText.trim())}
                       disabled={!replyText.trim() || replyMutation.isPending}
                       className="shrink-0"
+                      aria-label={t('supportTicketsPage.detail.sendReply')}
                     >
                       {replyMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
                     </Button>
