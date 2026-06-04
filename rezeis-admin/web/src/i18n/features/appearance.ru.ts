@@ -447,6 +447,7 @@ export const ru = {
       description: 'Визуальная обратная связь при клике в любом месте страницы.',
       select: 'Эффект клика',
       previewHint: 'Кликните здесь для предпросмотра',
+      previewAction: 'Предпросмотр эффекта клика',
     },
     hoverEffect: {
       title: 'Hover-эффект',

@@ -447,6 +447,7 @@ export const en = {
       description: 'Visual feedback when clicking anywhere on the page.',
       select: 'Click effect',
       previewHint: 'Click here to preview',
+      previewAction: 'Preview click effect',
     },
     hoverEffect: {
       title: 'Hover Effect',

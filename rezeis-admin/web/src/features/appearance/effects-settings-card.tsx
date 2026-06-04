@@ -552,12 +552,7 @@ function ClickPreview({ effect }: { effect: ClickEffectId }) {
     }
   }, [effect])
 
-  const handleClick = (e: React.MouseEvent) => {
-    const canvas = canvasRef.current
-    if (!canvas) return
-    const rect = canvas.getBoundingClientRect()
-    const x = e.clientX - rect.left
-    const y = e.clientY - rect.top
+  const addSparks = (x: number, y: number) => {
     const now = performance.now()
 
     for (let i = 0; i < 8; i++) {
@@ -569,10 +564,26 @@ function ClickPreview({ effect }: { effect: ClickEffectId }) {
     }
   }
 
+  const handleClick = (e: React.MouseEvent<HTMLButtonElement>) => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    if (e.detail === 0) {
+      addSparks(canvas.width / 2, canvas.height / 2)
+      return
+    }
+
+    const rect = canvas.getBoundingClientRect()
+    const scaleX = rect.width > 0 ? canvas.width / rect.width : 1
+    const scaleY = rect.height > 0 ? canvas.height / rect.height : 1
+    addSparks((e.clientX - rect.left) * scaleX, (e.clientY - rect.top) * scaleY)
+  }
+
   return (
-    <div
-      className="relative h-[100px] rounded-lg border bg-background/50 overflow-hidden cursor-pointer"
+    <button
+      type="button"
+      className="relative h-[100px] w-full overflow-hidden rounded-lg border bg-background/50 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
       onClick={handleClick}
+      aria-label={t('effectsSettings.clickEffect.previewAction')}
     >
       <canvas
         ref={canvasRef}
@@ -583,6 +594,6 @@ function ClickPreview({ effect }: { effect: ClickEffectId }) {
       <div className="absolute inset-0 flex items-center justify-center text-[10px] text-muted-foreground/50">
         {t('effectsSettings.clickEffect.previewHint')}
       </div>
-    </div>
+    </button>
   )
 }
