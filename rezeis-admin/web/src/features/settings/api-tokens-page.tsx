@@ -192,8 +192,15 @@ export function ApiTokensPage(): JSX.Element {
                       </p>
                       <div className="flex items-center gap-2 rounded-xl border border-border/70 bg-background px-3 py-2 font-mono text-xs">
                         <code className="min-w-0 flex-1 truncate">{createdToken.tokenValue}</code>
-                        <Button type="button" variant="ghost" size="icon" className="size-7 shrink-0" onClick={handleCopyToken}>
-                          <Copy className="size-3.5" />
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="size-7 shrink-0"
+                          onClick={handleCopyToken}
+                          aria-label={t('settings.apiTokens.copy')}
+                        >
+                          <Copy className="size-3.5" aria-hidden="true" />
                         </Button>
                       </div>
                     </div>

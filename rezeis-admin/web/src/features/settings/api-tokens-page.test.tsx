@@ -1,5 +1,6 @@
 import { describe, expect, it, vi, beforeAll, beforeEach } from 'vitest'
 import { screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 
 import { usePermissionStore } from '@/features/rbac'
 import { loadFeatureBundle } from '@/i18n/i18n'
@@ -74,6 +75,30 @@ describe('ApiTokensPage RBAC gating', () => {
     expect(await screen.findByText('Reiwa')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Create API token' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Revoke' })).toBeInTheDocument()
+  })
+
+  it('names the one-time API token copy action for assistive technology', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(settingsApi, 'listApiTokens').mockResolvedValue([])
+    vi.spyOn(settingsApi, 'createApiToken').mockResolvedValue({
+      id: 'token-1',
+      name: 'Reiwa',
+      token: 'ruid.test.secret',
+      prefix: 'ruid',
+      expiresAt: '2026-12-01T00:00:00.000Z',
+      createdAt: '2026-06-03T00:00:00.000Z',
+    })
+    grantPermissions([
+      { resource: 'api_tokens', action: 'view' },
+      { resource: 'api_tokens', action: 'create' },
+    ])
+
+    renderWithProviders(<ApiTokensPage />)
+
+    await user.type(screen.getByLabelText('Token name'), 'Reiwa')
+    await user.click(screen.getByRole('button', { name: 'Create API token' }))
+
+    expect(await screen.findByRole('button', { name: 'Copy' })).toBeInTheDocument()
   })
 })
 
