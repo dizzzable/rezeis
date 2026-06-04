@@ -10,7 +10,13 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import {
@@ -299,10 +305,8 @@ export default function AddOnsPage() {
         <DialogContent className="max-w-sm">
           <DialogHeader>
             <DialogTitle>{t('addOnsPage.deleteConfirmTitle')}</DialogTitle>
+            <DialogDescription>{t('addOnsPage.deleteConfirmText')}</DialogDescription>
           </DialogHeader>
-          <p className="text-sm text-muted-foreground">
-            {t('addOnsPage.deleteConfirmText')}
-          </p>
           <div className="flex justify-end gap-2 pt-2">
             <Button variant="outline" onClick={() => setDeleteConfirmId(null)}>
               {t('common.cancel')}
@@ -454,6 +458,9 @@ function AddOnDialog({
           <DialogTitle>
             {addOn ? t('addOnsPage.editTitle') : t('addOnsPage.createTitle')}
           </DialogTitle>
+          <DialogDescription>
+            {addOn ? t('addOnsPage.editDescription') : t('addOnsPage.createDescription')}
+          </DialogDescription>
         </DialogHeader>
         <form onSubmit={handleSubmit} className="space-y-4">
           <div className="space-y-2">
@@ -572,7 +579,10 @@ function AddOnDialog({
                       )
                     }
                   >
-                    <SelectTrigger className="w-24">
+                    <SelectTrigger
+                      className="w-24"
+                      aria-label={t('addOnsPage.form.priceCurrencyAria', { index: i + 1 })}
+                    >
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -597,6 +607,7 @@ function AddOnDialog({
                       )
                     }
                     className="flex-1"
+                    aria-label={t('addOnsPage.form.priceAmountAria', { index: i + 1 })}
                   />
                   {prices.length > 1 && (
                     <Button
@@ -605,6 +616,7 @@ function AddOnDialog({
                       variant="ghost"
                       className="h-9 w-9 text-destructive"
                       onClick={() => removePriceRow(i)}
+                      aria-label={t('addOnsPage.form.removePriceAria', { index: i + 1 })}
                     >
                       <Trash2 className="h-3.5 w-3.5" />
                     </Button>
