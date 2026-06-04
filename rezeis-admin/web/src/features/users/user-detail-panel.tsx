@@ -371,7 +371,7 @@ function ProfileTab({
               {t('userDetailPanel.profile.role')}
             </span>
             <Select value={role} onValueChange={(v) => { setRole(v); setDirty(true) }}>
-              <SelectTrigger className="h-7 w-40 text-xs"><SelectValue /></SelectTrigger>
+              <SelectTrigger className="h-7 w-40 text-xs" aria-label={t('userDetailPanel.profile.role')}><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="USER">USER</SelectItem>
                 <SelectItem value="ADMIN">ADMIN</SelectItem>
@@ -387,7 +387,7 @@ function ProfileTab({
               {t('userDetailPanel.profile.maxSubs')}
             </span>
             <Select value={maxSubs} onValueChange={(v) => { setMaxSubs(v); setDirty(true) }}>
-              <SelectTrigger className="h-7 w-40 text-xs"><SelectValue /></SelectTrigger>
+              <SelectTrigger className="h-7 w-40 text-xs" aria-label={t('userDetailPanel.profile.maxSubs')}><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="__default__">{t('userDetailPanel.profile.maxSubsDefault')}</SelectItem>
                 <SelectItem value="-1">∞</SelectItem>
@@ -406,7 +406,7 @@ function ProfileTab({
               <Tag className="h-3 w-3 text-muted-foreground/60" />
               {t('userDetailPanel.profile.personalDiscount')}
             </span>
-            <Input type="number" className="h-7 w-40 text-xs text-right px-2" min="0" max="100" value={personalDiscount} onChange={(e) => { setPersonalDiscount(e.target.value); setDirty(true) }} />
+            <Input type="number" className="h-7 w-40 text-xs text-right px-2" min="0" max="100" value={personalDiscount} onChange={(e) => { setPersonalDiscount(e.target.value); setDirty(true) }} aria-label={t('userDetailPanel.profile.personalDiscount')} />
           </div>
 
           {/* Purchase discount */}
@@ -415,7 +415,7 @@ function ProfileTab({
               <Tag className="h-3 w-3 text-muted-foreground/60" />
               {t('userDetailPanel.profile.purchaseDiscount')}
             </span>
-            <Input type="number" className="h-7 w-40 text-xs text-right px-2" min="0" max="100" value={purchaseDiscount} onChange={(e) => { setPurchaseDiscount(e.target.value); setDirty(true) }} />
+            <Input type="number" className="h-7 w-40 text-xs text-right px-2" min="0" max="100" value={purchaseDiscount} onChange={(e) => { setPurchaseDiscount(e.target.value); setDirty(true) }} aria-label={t('userDetailPanel.profile.purchaseDiscount')} />
           </div>
 
           {/* Partner currency */}
@@ -425,7 +425,7 @@ function ProfileTab({
               {t('userDetailPanel.profile.partnerCurrencyOverride')}
             </span>
             <Select value={currencyOverride} onValueChange={(v) => { setCurrencyOverride(v); setDirty(true) }}>
-              <SelectTrigger className="h-7 w-40 text-xs"><SelectValue /></SelectTrigger>
+              <SelectTrigger className="h-7 w-40 text-xs" aria-label={t('userDetailPanel.profile.partnerCurrencyOverride')}><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="__none__">{t('userDetailPanel.profile.partnerCurrencyDefault')}</SelectItem>
                 <SelectItem value="RUB">RUB</SelectItem>
@@ -448,6 +448,7 @@ function ProfileTab({
               type="number"
               className="h-7 w-40 text-xs text-right px-2"
               placeholder="±"
+              aria-label={t('userDetailPanel.profile.points')}
               value={pointsDelta}
               onChange={(e) => setPointsDelta(e.target.value)}
               onKeyDown={(e) => {
