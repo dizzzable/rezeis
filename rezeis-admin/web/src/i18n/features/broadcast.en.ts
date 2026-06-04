@@ -10,6 +10,7 @@ export const en = {
     title: 'Broadcasts',
     subtitle: 'Mass messaging to users via Telegram bot',
     newButton: 'New broadcast',
+    refreshBroadcasts: 'Refresh broadcasts',
     empty: 'No broadcasts yet',
     cancelBroadcast: 'Cancel broadcast',
     deleteBroadcast: 'Delete broadcast',

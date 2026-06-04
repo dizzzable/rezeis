@@ -116,7 +116,14 @@ export default function BroadcastPage() {
             <p className="text-muted-foreground">{t('broadcastPage.subtitle')}</p>
           </div>
           <div className="flex gap-2">
-            <Button variant="outline" size="icon" onClick={() => refetch()}><RefreshCw className="h-4 w-4" /></Button>
+            <Button
+              variant="outline"
+              size="icon"
+              onClick={() => refetch()}
+              aria-label={t('broadcastPage.refreshBroadcasts')}
+            >
+              <RefreshCw className="h-4 w-4" />
+            </Button>
             <Button onClick={() => setShowCreate(true)}><Plus className="h-4 w-4 mr-2" /> {t('broadcastPage.newButton')}</Button>
           </div>
         </div>

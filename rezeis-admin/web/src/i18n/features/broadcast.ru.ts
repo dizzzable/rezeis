@@ -10,6 +10,7 @@ export const ru = {
     title: 'Рассылки',
     subtitle: 'Массовые сообщения пользователям через Telegram-бота',
     newButton: 'Новая рассылка',
+    refreshBroadcasts: 'Обновить рассылки',
     empty: 'Рассылок пока нет',
     cancelBroadcast: 'Отменить рассылку',
     deleteBroadcast: 'Удалить рассылку',

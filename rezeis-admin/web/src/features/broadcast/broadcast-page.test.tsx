@@ -34,6 +34,18 @@ describe('BroadcastPage create form validation', () => {
     expect(postSpy).not.toHaveBeenCalled()
   })
 
+  it('names the icon-only refresh action', async () => {
+    vi.spyOn(api, 'get').mockImplementation(async (path: string) => {
+      if (path === '/admin/broadcast/drafts') return { data: [] }
+      return { data: {} }
+    })
+    await loadFeatureBundle('broadcast')
+
+    renderWithProviders(<BroadcastPage />)
+
+    expect(await screen.findByRole('button', { name: 'Refresh broadcasts' })).toBeInTheDocument()
+  })
+
   it('submits normalized payload through the current draft and send endpoints', async () => {
     const user = userEvent.setup()
     vi.spyOn(api, 'get').mockImplementation(async (path: string) => {
