@@ -80,7 +80,14 @@ export default function SubscriptionsPage() {
             </h1>
             <p className="text-muted-foreground">{t('subscriptionsPage.subtitle')}</p>
           </div>
-          <Button variant="outline" size="icon" onClick={() => refetch()}><RefreshCw className="h-4 w-4" /></Button>
+          <Button
+            variant="outline"
+            size="icon"
+            onClick={() => refetch()}
+            aria-label={t('subscriptionsPage.refreshSubscriptions')}
+          >
+            <RefreshCw className="h-4 w-4" />
+          </Button>
         </div>
       </FadeIn>
 
@@ -174,8 +181,13 @@ export default function SubscriptionsPage() {
                       {new Date(sub.expireAt).toLocaleDateString('ru-RU')}
                     </TableCell>
                     <TableCell onClick={(e) => e.stopPropagation()}>
-                      <Button size="icon" variant="ghost" className="h-7 w-7"
-                        onClick={() => navigate(`/users/${sub.userTelegramId?.toString()}`)}>
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        className="h-7 w-7"
+                        aria-label={t('subscriptionsPage.openUser', { id: sub.userTelegramId?.toString() ?? sub.id.toString() })}
+                        onClick={() => navigate(`/users/${sub.userTelegramId?.toString()}`)}
+                      >
                         <ExternalLink className="h-3.5 w-3.5" />
                       </Button>
                     </TableCell>

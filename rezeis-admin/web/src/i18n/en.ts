@@ -1937,6 +1937,8 @@ export const en = {
   subscriptionsPage: {
     title: 'Subscriptions',
     subtitle: 'All VPN subscriptions with Remnawave sync',
+    refreshSubscriptions: 'Refresh subscriptions',
+    openUser: 'Open user {{id}}',
     stats: {
       total: 'Total',
       active: 'Active',

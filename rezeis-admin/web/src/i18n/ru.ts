@@ -1959,6 +1959,8 @@
   subscriptionsPage: {
     title: 'Подписки',
     subtitle: 'Все VPN-подписки с синхронизацией Remnawave',
+    refreshSubscriptions: 'Обновить подписки',
+    openUser: 'Открыть пользователя {{id}}',
     stats: {
       total: 'Всего',
       active: 'Активные',
