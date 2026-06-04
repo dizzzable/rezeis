@@ -22,6 +22,17 @@ import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from '@/components/ui/alert-dialog'
 import { toast } from 'sonner'
 import { getErrorMessage } from '@/lib/http-errors'
 
@@ -427,20 +438,41 @@ function SubscriptionCard({
             >
               <RefreshCw className="h-4 w-4" />
             </Button>
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() => {
-                if (confirm(t('webhooksPage.subscriptions.actions.deleteConfirm', { name: subscription.name }))) {
-                  deleteMutation.mutate()
-                }
-              }}
-              disabled={deleteMutation.isPending}
-              title={t('webhooksPage.subscriptions.actions.delete')}
-              aria-label={t('webhooksPage.subscriptions.actions.delete')}
-            >
-              <Trash2 className="h-4 w-4 text-destructive" />
-            </Button>
+            <AlertDialog>
+              <AlertDialogTrigger asChild>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={deleteMutation.isPending}
+                  title={t('webhooksPage.subscriptions.actions.delete')}
+                  aria-label={t('webhooksPage.subscriptions.actions.delete')}
+                >
+                  <Trash2 className="h-4 w-4 text-destructive" />
+                </Button>
+              </AlertDialogTrigger>
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>
+                    {t('webhooksPage.subscriptions.actions.delete')}
+                  </AlertDialogTitle>
+                  <AlertDialogDescription>
+                    {t('webhooksPage.subscriptions.actions.deleteConfirm', { name: subscription.name })}
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel disabled={deleteMutation.isPending}>
+                    {t('common.cancel')}
+                  </AlertDialogCancel>
+                  <AlertDialogAction
+                    className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                    disabled={deleteMutation.isPending}
+                    onClick={() => deleteMutation.mutate()}
+                  >
+                    {t('webhooksPage.subscriptions.actions.delete')}
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
           </div>
         </div>
 
