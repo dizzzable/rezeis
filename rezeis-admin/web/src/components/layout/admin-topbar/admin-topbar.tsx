@@ -49,6 +49,7 @@ export function AdminTopbar({ onOpenMobileSidebar, onOpenSearch }: AdminTopbarPr
 
   return (
     <header
+      aria-label={t('adminShell.topbarLandmark', { defaultValue: 'Admin toolbar' })}
       className={cn(
         'flex h-14 items-center justify-between px-4 md:px-6',
         !glassEnabled
@@ -108,7 +109,11 @@ export function AdminTopbar({ onOpenMobileSidebar, onOpenSearch }: AdminTopbarPr
 
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button variant="ghost" className="relative h-8 w-8 rounded-full">
+            <Button
+              variant="ghost"
+              className="relative h-8 w-8 rounded-full"
+              aria-label={t('adminShell.accountMenu', { defaultValue: 'Admin account menu' })}
+            >
               <Avatar className="h-8 w-8">
                 <AvatarFallback className="bg-primary text-primary-foreground text-xs">
                   {adminInitials}

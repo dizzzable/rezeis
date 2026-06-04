@@ -1,4 +1,5 @@
 import { ChevronLeft } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 
 import { RezeisLogo } from '@/components/branding/rezeis-logo'
 import { Button } from '@/components/ui/button'
@@ -18,12 +19,14 @@ interface AdminSidebarProps {
  * Hidden below md breakpoint; mobile uses the Sheet variant.
  */
 export function AdminSidebar({ collapsed, onToggleCollapsed }: AdminSidebarProps) {
+  const { t } = useTranslation()
   const glassEnabled = useGlassStore((s) => s.glassEnabled)
   const sidebarGlassEnabled = useGlassStore((s) => s.sidebar.enabled)
   const sidebarGlassActive = glassEnabled && sidebarGlassEnabled
 
   return (
     <aside
+      aria-label={t('adminShell.sidebarLandmark', { defaultValue: 'Admin sidebar' })}
       className={cn(
         'relative hidden md:flex flex-col text-sidebar-foreground transition-all duration-300',
         collapsed ? 'w-16' : 'w-64',
@@ -57,6 +60,10 @@ export function AdminSidebar({ collapsed, onToggleCollapsed }: AdminSidebarProps
           size="icon"
           className="w-full text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
           onClick={onToggleCollapsed}
+          aria-label={t(
+            collapsed ? 'adminShell.expandSidebar' : 'adminShell.collapseSidebar',
+            { defaultValue: collapsed ? 'Expand sidebar' : 'Collapse sidebar' },
+          )}
         >
           <ChevronLeft
             className={cn(

@@ -17,7 +17,8 @@
  * locale, glass), so a route change only re-mounts the outlet. The
  * topbar and sidebar do not re-render on route navigation.
  */
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type MouseEvent } from 'react'
+import { useTranslation } from 'react-i18next'
 
 import { RezeisLogo } from '@/components/branding/rezeis-logo'
 import { OfflineIndicator } from '@/components/layout/offline-indicator'
@@ -35,7 +36,10 @@ import { NavItems } from './admin-sidebar/nav-items'
 import { AdminTopbar } from './admin-topbar/admin-topbar'
 import { AnimatedOutlet } from './animated-outlet'
 
+const MAIN_CONTENT_ID = 'admin-main-content'
+
 export default function AdminShell() {
+  const { t } = useTranslation()
   const [collapsed, setCollapsed] = useState(false)
   const [mobileOpen, setMobileOpen] = useState(false)
   const [searchOpen, setSearchOpen] = useState(false)
@@ -59,8 +63,24 @@ export default function AdminShell() {
     return () => window.removeEventListener('keydown', handler)
   }, [])
 
+  function handleSkipToMain(event: MouseEvent<HTMLAnchorElement>): void {
+    const main = document.getElementById(MAIN_CONTENT_ID)
+    if (!main) return
+
+    event.preventDefault()
+    main.focus()
+    main.scrollIntoView?.({ block: 'start' })
+  }
+
   return (
     <TooltipProvider delayDuration={0}>
+      <a
+        href={`#${MAIN_CONTENT_ID}`}
+        onClick={handleSkipToMain}
+        className="fixed left-4 top-4 z-50 -translate-y-24 rounded-md bg-background px-3 py-2 text-sm font-medium text-foreground shadow-lg ring-offset-background transition-transform focus:translate-y-0 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
+      >
+        {t('adminShell.skipToMain', { defaultValue: 'Skip to main content' })}
+      </a>
       <div className="flex h-screen overflow-hidden relative z-10">
         {/* Quick Search Overlay */}
         <QuickSearchOverlay open={searchOpen} onClose={() => setSearchOpen(false)} />
@@ -95,8 +115,11 @@ export default function AdminShell() {
 
           {/* Page content */}
           <main
+            id={MAIN_CONTENT_ID}
+            tabIndex={-1}
+            aria-label={t('adminShell.mainLandmark', { defaultValue: 'Admin workspace' })}
             className={cn(
-              'flex-1 overflow-auto relative',
+              'flex-1 overflow-auto relative focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring',
               glassEnabled ? 'bg-transparent' : 'bg-muted/20',
             )}
           >
