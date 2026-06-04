@@ -52,4 +52,14 @@ describe('SystemLogsPage accessibility', () => {
     await waitFor(() => expect(clearSystemLogs).toHaveBeenCalledTimes(1))
     expect(confirmSpy).not.toHaveBeenCalled()
   })
+
+  it('gives compact log-level button groups programmatic names', async () => {
+    renderWithProviders(<SystemLogsPage />)
+
+    const activeLevelGroup = screen.getByRole('group', { name: 'Active level' })
+    expect(within(activeLevelGroup).getByRole('button', { name: 'error' })).toBeInTheDocument()
+
+    const filterGroup = screen.getByRole('group', { name: 'Filter' })
+    expect(within(filterGroup).getByRole('button', { name: 'ALL' })).toBeInTheDocument()
+  })
 })

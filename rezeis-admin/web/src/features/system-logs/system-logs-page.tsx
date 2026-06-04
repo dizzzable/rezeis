@@ -148,8 +148,8 @@ export default function SystemLogsPage({ embedded = false }: { readonly embedded
         </CardHeader>
         <CardContent className="flex flex-wrap items-end gap-3">
           <div className="space-y-1">
-            <Label>{t('systemLogsPage.controls.activeLevel')}</Label>
-            <div className="flex gap-1">
+            <Label id="system-log-active-level-label">{t('systemLogsPage.controls.activeLevel')}</Label>
+            <div className="flex gap-1" role="group" aria-labelledby="system-log-active-level-label">
               {LEVEL_ORDER.map((level) => (
                 <Button
                   key={level}
@@ -165,8 +165,8 @@ export default function SystemLogsPage({ embedded = false }: { readonly embedded
           </div>
 
           <div className="space-y-1">
-            <Label>{t('systemLogsPage.controls.filter')}</Label>
-            <div className="flex gap-1">
+            <Label id="system-log-filter-label">{t('systemLogsPage.controls.filter')}</Label>
+            <div className="flex gap-1" role="group" aria-labelledby="system-log-filter-label">
               <Button
                 size="sm"
                 variant={filterLevel === 'ALL' ? 'default' : 'outline'}
