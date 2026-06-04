@@ -165,7 +165,7 @@ export default function PaymentsAnalyticsTab(): JSX.Element {
           <div className="flex items-center gap-2">
             <span className="text-xs text-muted-foreground">{t('paymentsAnalytics.windowLabel')}</span>
             <Select value={String(days)} onValueChange={(v) => setDays(Number(v))}>
-              <SelectTrigger className="h-9 w-32"><SelectValue /></SelectTrigger>
+              <SelectTrigger className="h-9 w-32" aria-label={t('paymentsAnalytics.windowAria')}><SelectValue /></SelectTrigger>
               <SelectContent>
                 {WINDOW_OPTIONS.map((option) => (
                   <SelectItem key={option} value={String(option)}>

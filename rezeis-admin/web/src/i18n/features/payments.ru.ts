@@ -98,6 +98,7 @@ export const ru = {
     title: 'Аналитика платежей',
     subtitle: 'Метрики по каждому шлюзу, конверсия, причины отказов и состояние вебхуков.',
     windowLabel: 'Период:',
+    windowAria: 'Период аналитики',
     windowDays_one: '{{count}} день',
     windowDays_few: '{{count}} дня',
     windowDays_many: '{{count}} дней',

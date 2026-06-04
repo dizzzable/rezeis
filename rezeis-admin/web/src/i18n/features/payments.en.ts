@@ -98,6 +98,7 @@ export const en = {
     title: 'Payments analytics',
     subtitle: 'Per-gateway performance, conversion, top failure reasons and webhook health.',
     windowLabel: 'Window:',
+    windowAria: 'Analytics window',
     windowDays_one: '{{count}} day',
     windowDays_other: '{{count}} days',
     summary: {
