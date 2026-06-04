@@ -55,11 +55,13 @@ export default function PanelIconsTab() {
 
   // Hydrate the local draft whenever the server list changes and we have no
   // unsaved edits (avoids clobbering in-progress work on background refetch).
+  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     if (iconsQuery.data && !dirty) {
       setDraft(iconsQuery.data)
     }
   }, [iconsQuery.data, dirty])
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   const saveMutation = useMutation({
     mutationFn: () => saveCustomIcons(draft),
@@ -105,7 +107,7 @@ export default function PanelIconsTab() {
     }
   }
 
-  function onDrop(event: DragEvent<HTMLDivElement>) {
+  function onDrop(event: DragEvent<HTMLButtonElement>) {
     event.preventDefault()
     setIsDragging(false)
     const files = event.dataTransfer?.files
@@ -161,7 +163,8 @@ export default function PanelIconsTab() {
       </CardHeader>
       <CardContent className="space-y-4">
         {/* Drop zone */}
-        <div
+        <button
+          type="button"
           onDragOver={(e) => {
             e.preventDefault()
             setIsDragging(true)
@@ -169,6 +172,7 @@ export default function PanelIconsTab() {
           onDragLeave={() => setIsDragging(false)}
           onDrop={onDrop}
           onClick={() => inputRef.current?.click()}
+          aria-label={t('panelIcons.chooseFiles')}
           className={cn(
             'flex cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed px-6 py-8 text-center transition-colors',
             isDragging ? 'border-primary bg-primary/10' : 'border-border hover:border-primary/60 hover:bg-accent/40',
@@ -183,15 +187,16 @@ export default function PanelIconsTab() {
             {pending > 0 ? t('panelIcons.uploading', { count: pending }) : t('panelIcons.dropHere')}
           </p>
           <p className="text-xs text-muted-foreground">{t('panelIcons.hint')}</p>
-          <input
-            ref={inputRef}
-            type="file"
-            accept={ACCEPTED_MIME}
-            multiple
-            className="hidden"
-            onChange={onSelect}
-          />
-        </div>
+        </button>
+        <input
+          ref={inputRef}
+          type="file"
+          accept={ACCEPTED_MIME}
+          multiple
+          className="hidden"
+          onChange={onSelect}
+          aria-label={t('panelIcons.chooseFiles')}
+        />
 
         {/* Library grid */}
         {draft.length === 0 ? (

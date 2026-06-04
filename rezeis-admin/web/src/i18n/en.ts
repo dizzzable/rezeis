@@ -1328,6 +1328,7 @@ export const en = {
     hint: 'SVG, PNG or WebP, up to 2 MB. SVGs are sanitised on upload.',
     uploading: 'Uploading ({{count}})…',
     uploadFailed: 'Failed to upload {{name}}',
+    chooseFiles: 'Choose icon files',
     empty: 'No icons uploaded yet.',
     untitled: 'Icon',
     nameLabel: 'Icon name',
