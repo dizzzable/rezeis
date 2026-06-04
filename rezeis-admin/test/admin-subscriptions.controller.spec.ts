@@ -7,6 +7,8 @@ import { RequestMethod } from '@nestjs/common';
 import { GUARDS_METADATA, METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 
 import { AdminJwtAuthGuard } from '../src/modules/auth/guards/admin-jwt-auth.guard';
+import { REQUIRE_PERMISSION_KEY } from '../src/modules/rbac/decorators/require-permission.decorator';
+import { RbacGuard } from '../src/modules/rbac/guards/rbac.guard';
 import { AdminSubscriptionsController } from '../src/modules/subscriptions/controllers/admin-subscriptions.controller';
 import { AdminSubscriptionsListService } from '../src/modules/subscriptions/services/admin-subscriptions-list.service';
 import { SubscriptionQuoteService } from '../src/modules/subscriptions/services/subscription-quote.service';
@@ -14,6 +16,10 @@ import { SubscriptionQuoteService } from '../src/modules/subscriptions/services/
 describe('AdminSubscriptionsController', () => {
   it('exposes list, stats, action-policy and quote admin routes', () => {
     assert.equal(Reflect.getMetadata(PATH_METADATA, AdminSubscriptionsController), 'admin/subscriptions');
+    assert.deepStrictEqual(
+      Reflect.getMetadata(GUARDS_METADATA, AdminSubscriptionsController),
+      [AdminJwtAuthGuard, RbacGuard],
+    );
     assert.equal(
       Reflect.getMetadata(PATH_METADATA, AdminSubscriptionsController.prototype.list),
       '/',
@@ -22,6 +28,7 @@ describe('AdminSubscriptionsController', () => {
       Reflect.getMetadata(METHOD_METADATA, AdminSubscriptionsController.prototype.list),
       RequestMethod.GET,
     );
+    assertSubscriptionsViewRoute(AdminSubscriptionsController.prototype.list);
     assert.equal(
       Reflect.getMetadata(PATH_METADATA, AdminSubscriptionsController.prototype.getStats),
       'stats',
@@ -30,6 +37,7 @@ describe('AdminSubscriptionsController', () => {
       Reflect.getMetadata(METHOD_METADATA, AdminSubscriptionsController.prototype.getStats),
       RequestMethod.GET,
     );
+    assertSubscriptionsViewRoute(AdminSubscriptionsController.prototype.getStats);
     assert.equal(
       Reflect.getMetadata(PATH_METADATA, AdminSubscriptionsController.prototype.getActionPolicy),
       'action-policy',
@@ -45,10 +53,6 @@ describe('AdminSubscriptionsController', () => {
     assert.equal(
       Reflect.getMetadata(METHOD_METADATA, AdminSubscriptionsController.prototype.getQuote),
       RequestMethod.POST,
-    );
-    assert.deepStrictEqual(
-      Reflect.getMetadata(GUARDS_METADATA, AdminSubscriptionsController),
-      [AdminJwtAuthGuard],
     );
   });
 
@@ -99,3 +103,9 @@ describe('AdminSubscriptionsController', () => {
     ]);
   });
 });
+
+function assertSubscriptionsViewRoute(method: unknown): void {
+  assert.deepStrictEqual(Reflect.getMetadata(REQUIRE_PERMISSION_KEY, method), [
+    { resource: 'subscriptions', action: 'view' },
+  ]);
+}
