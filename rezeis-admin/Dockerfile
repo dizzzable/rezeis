@@ -50,7 +50,7 @@ RUN addgroup -g 1001 -S rezeis && adduser -u 1001 -S rezeis -G rezeis
 WORKDIR /app
 ENV NODE_ENV=production
 # App metadata baked into the image so health endpoint reports the release.
-ARG APP_VERSION=0.7.3
+ARG APP_VERSION=0.7.5
 ARG GIT_SHA=unknown
 ENV APP_VERSION=${APP_VERSION} \
     REZEIS_GIT_SHA=${GIT_SHA} \
