@@ -71,6 +71,11 @@ services:
           cpus: '2.0'
         reservations:
           memory: 256M
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
     networks:
       - rezeis-private
       - remnawave-network
@@ -105,11 +110,17 @@ services:
       rezeis-redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "node -e 'process.exit(0)'"]
+      # Verify the actual Node worker process (PID 1 via exec) is alive.
+      test: ["CMD-SHELL", "kill -0 1 || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
     deploy:
       resources:
         limits:
@@ -148,6 +159,11 @@ services:
           cpus: '1.0'
         reservations:
           memory: 128M
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
     networks:
       - rezeis-private
 
@@ -161,7 +177,7 @@ services:
       - --requirepass
       - ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env to a generated value}
       - --maxmemory
-      - 512mb
+      - ${REDIS_MAXMEMORY:-512mb}
       - --maxmemory-policy
       - volatile-lru
       - --save
@@ -187,6 +203,11 @@ services:
           cpus: '0.5'
         reservations:
           memory: 64M
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
     networks:
       - rezeis-private
 
