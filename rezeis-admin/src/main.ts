@@ -16,6 +16,7 @@ import { configureBoundedBodyParsers } from './common/http/body-parser-limits';
 import { buildCorsOptions } from './common/http/cors-origin';
 import { configureHttpRuntimeMiddleware } from './common/http/configure-http-runtime';
 import { RequestTimeoutMiddleware } from './common/middleware/request-timeout.middleware';
+import { AdminIoAdapter } from './common/realtime/admin-io.adapter';
 import { configureBigIntJsonSerialization } from './common/runtime/bigint-json';
 import { SystemLogsService } from './modules/system-logs/services/system-logs.service';
 
@@ -48,6 +49,10 @@ async function bootstrap(): Promise<void> {
     timeoutMiddleware.use(req as never, res as never, next as never),
   );
   app.enableCors(buildCorsOptions(appConfiguration.corsOrigins));
+  // Apply the same trusted-origin allowlist to the Socket.IO realtime
+  // gateway (handshake carries an admin JWT + credentials), so the WebSocket
+  // endpoint isn't open to all origins while HTTP CORS is locked down.
+  app.useWebSocketAdapter(new AdminIoAdapter(app, appConfiguration.corsOrigins));
   app.setGlobalPrefix('api');
   // Serve admin-side uploads (currently FAQ photos/videos) under
   // `/uploads/*`. Files live on disk in `data/uploads/<feature>/...`

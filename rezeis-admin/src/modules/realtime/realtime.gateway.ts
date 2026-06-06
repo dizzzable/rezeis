@@ -80,7 +80,10 @@ interface AuthenticatedSocket extends Socket {
   // built-in dev server) route both REST and WebSocket traffic through
   // a single `/api` prefix.
   path: '/api/socket.io',
-  cors: { origin: true, credentials: true },
+  // CORS is applied centrally by `AdminIoAdapter` (main.ts) from the
+  // validated `ADMIN_CORS_ORIGINS` allowlist — the same trusted origins as
+  // the HTTP server. Do not hardcode `origin: true` here (would reopen the
+  // gateway to all origins).
 })
 export class RealtimeGateway
   implements OnGatewayConnection, OnGatewayDisconnect, OnModuleDestroy
