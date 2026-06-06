@@ -16,6 +16,7 @@ WORKDIR /app
 # Install build tools for native addons (better-sqlite3)
 RUN apk add --no-cache python3 make g++
 COPY package.json package-lock.json ./
+ENV HUSKY=0
 RUN npm ci --omit=dev
 
 # ── Stage 2: build backend ───────────────────────────────────────────────────
@@ -44,6 +45,8 @@ RUN npm run build
 # ── Stage 4: runtime ─────────────────────────────────────────────────────────
 FROM node:24-alpine AS runtime
 
+RUN addgroup -g 1001 -S rezeis && adduser -u 1001 -S rezeis -G rezeis
+
 WORKDIR /app
 ENV NODE_ENV=production
 # App metadata baked into the image so health endpoint reports the release.
@@ -55,7 +58,9 @@ ENV APP_VERSION=${APP_VERSION} \
 
 # Install PostgreSQL client tools (pg_dump, psql) for backup/restore.
 # MUST match the major version of the postgres server (see docker-compose.yml).
-RUN apk add --no-cache postgresql17-client
+# su-exec lets the root entrypoint repair data-volume ownership, then drop
+# privileges to the unprivileged `rezeis` user before running the app.
+RUN apk add --no-cache postgresql17-client su-exec
 
 COPY package.json ./
 COPY prisma.config.ts ./
@@ -67,7 +72,13 @@ COPY --from=build-backend /app/node_modules/.prisma ./node_modules/.prisma
 COPY --from=build-frontend /app/dist ./web
 
 RUN mkdir -p /app/data/backups /app/data/uploads \
- && chmod +x /usr/local/bin/docker-entrypoint.sh
+ && chmod +x /usr/local/bin/docker-entrypoint.sh \
+ && chown -R rezeis:rezeis /app
+
+# The container starts as root so the entrypoint can repair the persistent
+# data-volume ownership (named/host volumes can be root-owned on upgrade),
+# then drops to the unprivileged `rezeis` user via su-exec before exec'ing
+# the app. The application process therefore never runs as root.
 
 EXPOSE 8000
 

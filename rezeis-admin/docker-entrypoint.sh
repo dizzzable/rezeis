@@ -18,8 +18,23 @@ set -e
 
 PROCESS_ROLE="${RUID_PROCESS_ROLE:-api}"
 SKIP_MIGRATIONS="${RUID_SKIP_MIGRATIONS:-false}"
+APP_USER="rezeis"
+APP_UID="1001"
 
 echo "[entrypoint] role=${PROCESS_ROLE} skip-migrations=${SKIP_MIGRATIONS}"
+
+# When started as root, ensure the persistent data volume is writable by the
+# unprivileged app user. Named/host volumes mounted over /app/data can be
+# root-owned (e.g. created before the image switched to a non-root user),
+# which silently breaks backups, uploads, and the disk health check. Repair
+# once (only when the top dir is mis-owned) so subsequent starts stay fast.
+if [ "$(id -u)" = "0" ]; then
+  mkdir -p /app/data/backups /app/data/uploads
+  if [ "$(stat -c %u /app/data 2>/dev/null)" != "${APP_UID}" ]; then
+    echo "[entrypoint] repairing /app/data ownership → ${APP_USER}"
+    chown -R "${APP_USER}:${APP_USER}" /app/data
+  fi
+fi
 
 # Worker doesn't run migrations.
 if [ "${PROCESS_ROLE}" != "worker" ] && [ "${SKIP_MIGRATIONS}" != "true" ]; then
@@ -46,6 +61,11 @@ else
   echo "[entrypoint] skipping migrations"
 fi
 
-# Hand off to the requested process. `exec` so signals (SIGTERM from compose
-# stop) reach the Node process and graceful shutdown actually fires.
-exec "$@"
+# Hand off to the requested process, dropping root privileges to the app user
+# if we started as root. `exec` so signals (SIGTERM from compose stop) reach
+# the Node process and graceful shutdown actually fires.
+if [ "$(id -u)" = "0" ]; then
+  exec su-exec "${APP_USER}:${APP_USER}" "$@"
+else
+  exec "$@"
+fi

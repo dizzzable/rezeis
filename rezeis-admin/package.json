@@ -27,7 +27,8 @@
     "lint:fix": "eslint . --fix",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\" \"prisma/**/*.prisma\" \"*.json\"",
-    "admin-cli": "ts-node -r dotenv/config -r tsconfig-paths/register scripts/admin-cli.ts"
+    "admin-cli": "ts-node -r dotenv/config -r tsconfig-paths/register scripts/admin-cli.ts",
+    "prepare": "husky || true"
   },
   "dependencies": {
     "@nestjs/axios": "4.0.1",
@@ -92,7 +93,23 @@
     "ts-node": "10.9.2",
     "tsconfig-paths": "4.2.0",
     "typescript": "5.9.3",
-    "typescript-eslint": "8.59.3"
+    "typescript-eslint": "8.59.3",
+    "fast-check": "^4.0.0",
+    "husky": "^9.1.0",
+    "lint-staged": "^15.5.0"
+  },
+  "lint-staged": {
+    "src/**/*.ts": [
+      "eslint --fix",
+      "tsc --noEmit -p tsconfig.json"
+    ],
+    "test/**/*.ts": [
+      "eslint --fix"
+    ],
+    "web/src/**/*.{ts,tsx}": [
+      "cd web && eslint --fix",
+      "cd web && tsc -p tsconfig.app.json --noEmit"
+    ]
   },
   "overrides": {
     "@hono/node-server": "1.19.13"
