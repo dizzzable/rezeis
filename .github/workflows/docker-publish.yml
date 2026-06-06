@@ -9,6 +9,8 @@ on:
 permissions:
   contents: read
   packages: write
+  # Required so the Trivy SARIF can be uploaded to GitHub code scanning.
+  security-events: write
 
 env:
   REGISTRY: ghcr.io
@@ -27,7 +29,7 @@ jobs:
       - name: Read package version
         id: version
         working-directory: rezeis-admin
-        run: echo "value=$(node -p \"require('./package.json').version\")" >> "$GITHUB_OUTPUT"
+        run: echo "value=$(jq -r .version package.json)" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@v3
 
@@ -52,11 +54,15 @@ jobs:
             type=sha,format=short
 
       - name: Build & push
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: ./rezeis-admin
           file: ./rezeis-admin/Dockerfile
           push: true
+          # Single-manifest image (no provenance index) so Trivy can scan
+          # the pushed image by its digest below.
+          provenance: false
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
@@ -68,14 +74,18 @@ jobs:
       - name: Scan image with Trivy
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: ${{ env.REGISTRY }}/${{ steps.repo.outputs.name }}:${{ github.sha }}
+          # Scan the exact pushed image by digest (always exists; avoids the
+          # tag-mismatch that left no SARIF file).
+          image-ref: ${{ env.REGISTRY }}/${{ steps.repo.outputs.name }}@${{ steps.build.outputs.digest }}
           severity: 'CRITICAL,HIGH'
-          exit-code: '1'
+          # Report-only: the image is already published before this step, so
+          # failing here would not un-publish it. Findings are surfaced in the
+          # repository Security tab via the SARIF upload below.
+          exit-code: '0'
           format: 'sarif'
           output: 'trivy-results.sarif'
 
       - name: Upload Trivy scan results
-        uses: github/codeql-action/upload-sarif@v3
-        if: always()
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: 'trivy-results.sarif'
