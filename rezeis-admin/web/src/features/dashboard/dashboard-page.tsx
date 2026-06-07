@@ -40,6 +40,13 @@ export default function DashboardPage(): JSX.Element {
     refetchIntervalInBackground: false,
   })
 
+  const reiwaHealthQuery = useQuery({
+    queryKey: adminQueryKeys.dashboard.reiwaSystemHealth,
+    queryFn: () => dashboardApi.getReiwaSystemHealth(),
+    refetchInterval: 10_000,
+    refetchIntervalInBackground: false,
+  })
+
   if (summaryQuery.isLoading) {
     return <DashboardLoadingState />
   }
@@ -59,6 +66,8 @@ export default function DashboardPage(): JSX.Element {
       summary={summaryQuery.data}
       health={healthQuery.data ?? null}
       healthLoading={healthQuery.isLoading}
+      reiwaHealth={reiwaHealthQuery.data ?? null}
+      reiwaHealthLoading={reiwaHealthQuery.isLoading}
     />
   )
 }
@@ -67,10 +76,14 @@ function DashboardContent({
   summary,
   health,
   healthLoading,
+  reiwaHealth,
+  reiwaHealthLoading,
 }: {
   readonly summary: DashboardSummaryInterface
   readonly health: SystemHealthResponse | null
   readonly healthLoading: boolean
+  readonly reiwaHealth: SystemHealthResponse | null
+  readonly reiwaHealthLoading: boolean
 }): JSX.Element {
   return (
     <div className="space-y-6">
@@ -89,7 +102,12 @@ function DashboardContent({
       </AnimatedContent>
       <AnimatedContent delay={0.25}>
         <div className="grid gap-4 lg:grid-cols-2">
-          <DashboardSystemHealth health={health} loading={healthLoading} />
+          <DashboardSystemHealth
+            health={health}
+            loading={healthLoading}
+            reiwaHealth={reiwaHealth}
+            reiwaLoading={reiwaHealthLoading}
+          />
           <DashboardActivityFeed />
         </div>
       </AnimatedContent>

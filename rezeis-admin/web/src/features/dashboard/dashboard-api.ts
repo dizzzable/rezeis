@@ -161,6 +161,15 @@ export const dashboardApi = {
     return response.data
   },
 
+  async getReiwaSystemHealth(): Promise<SystemHealthResponse | null> {
+    const response = await api.get<SystemHealthResponse | null>(
+      '/admin/dashboard/system-health/reiwa',
+    )
+    // Backend returns null (serialised as empty body) when reiwa is
+    // unreachable / unconfigured — normalise the falsy/empty case to null.
+    return response.data && typeof response.data === 'object' ? response.data : null
+  },
+
   async getOnlineTrend(hours = 24): Promise<OnlineTrendPoint[]> {
     const response = await api.get<OnlineTrendPoint[]>(`/admin/remnawave/metrics/online-trend?hours=${hours}`)
     return response.data

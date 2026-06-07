@@ -21,6 +21,7 @@ export const adminQueryKeys = {
     all: ['admin', 'dashboard'] as const,
     summary: ['admin', 'dashboard', 'summary'] as const,
     systemHealth: ['admin', 'dashboard', 'system-health'] as const,
+    reiwaSystemHealth: ['admin', 'dashboard', 'system-health', 'reiwa'] as const,
   },
   email: {
     settings: ['admin', 'email', 'settings'] as const,
