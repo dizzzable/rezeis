@@ -25,36 +25,23 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { RezeisLogo } from '@/components/branding/rezeis-logo'
+import { ReiwaMark } from '@/features/branding/reiwa-mark'
 
 import type { SystemHealthResponse } from './dashboard-api'
 
 export function DashboardSystemHealth({
   health,
   loading,
+  reiwaHealth,
+  reiwaLoading,
 }: {
   readonly health: SystemHealthResponse | null
   readonly loading: boolean
+  readonly reiwaHealth: SystemHealthResponse | null
+  readonly reiwaLoading: boolean
 }): JSX.Element {
   const { t } = useTranslation()
-
-  if (loading || !health) {
-    return (
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Server className="h-4 w-4" />
-            {t('dashboardPage.systemHealth.title')}
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <Skeleton className="h-6 w-full" />
-          <Skeleton className="h-6 w-full" />
-          <Skeleton className="h-6 w-full" />
-          <Skeleton className="h-6 w-full" />
-        </CardContent>
-      </Card>
-    )
-  }
 
   return (
     <Card>
@@ -68,28 +55,94 @@ export function DashboardSystemHealth({
         </CardDescription>
       </CardHeader>
       <CardContent>
-        <Tabs defaultValue="vps">
+        {/* Outer tabs = the two services (Rezeis panel + Reiwa cabinet),
+            each branded with its own logo. Works whether they share a VPS or
+            run on separate hosts (Reiwa metrics are pulled over REIWA_URL). */}
+        <Tabs defaultValue="rezeis">
           <TabsList className="mb-4">
-            <TabsTrigger value="vps" className="gap-1.5">
-              <Server className="h-3.5 w-3.5" />
-              {t('dashboardPage.systemHealth.vpsTab')}
+            <TabsTrigger value="rezeis" className="gap-1.5">
+              <RezeisLogo className="h-3.5 w-3.5" />
+              {t('dashboardPage.systemHealth.rezeisTab')}
             </TabsTrigger>
-            <TabsTrigger value="process" className="gap-1.5">
-              <Bot className="h-3.5 w-3.5" />
-              {t('dashboardPage.systemHealth.processTab')}
+            <TabsTrigger value="reiwa" className="gap-1.5">
+              <ReiwaMark className="h-3.5 w-3.5 text-current" />
+              {t('dashboardPage.systemHealth.reiwaTab')}
             </TabsTrigger>
           </TabsList>
 
-          <TabsContent value="vps" className="space-y-4 mt-0">
-            <VpsMetrics health={health} />
+          <TabsContent value="rezeis" className="mt-0">
+            <ServerHealth health={health} loading={loading} />
           </TabsContent>
 
-          <TabsContent value="process" className="space-y-4 mt-0">
-            <ProcessMetrics health={health} />
+          <TabsContent value="reiwa" className="mt-0">
+            <ServerHealth
+              health={reiwaHealth}
+              loading={reiwaLoading}
+              unavailableMessage={t('dashboardPage.systemHealth.reiwaUnavailable')}
+            />
           </TabsContent>
         </Tabs>
       </CardContent>
     </Card>
+  )
+}
+
+/**
+ * One server's health: a skeleton while loading, an "unavailable" note when
+ * there's no data (e.g. Reiwa unreachable/unconfigured), otherwise the
+ * existing VPS / process inner tabs.
+ */
+function ServerHealth({
+  health,
+  loading,
+  unavailableMessage,
+}: {
+  readonly health: SystemHealthResponse | null
+  readonly loading: boolean
+  readonly unavailableMessage?: string
+}): JSX.Element {
+  const { t } = useTranslation()
+
+  if (loading) {
+    return (
+      <div className="space-y-4">
+        <Skeleton className="h-6 w-full" />
+        <Skeleton className="h-6 w-full" />
+        <Skeleton className="h-6 w-full" />
+        <Skeleton className="h-6 w-full" />
+      </div>
+    )
+  }
+
+  if (!health) {
+    return (
+      <p className="py-6 text-center text-sm text-muted-foreground">
+        {unavailableMessage ?? t('dashboardPage.systemHealth.reiwaUnavailable')}
+      </p>
+    )
+  }
+
+  return (
+    <Tabs defaultValue="vps">
+      <TabsList className="mb-4">
+        <TabsTrigger value="vps" className="gap-1.5">
+          <Server className="h-3.5 w-3.5" />
+          {t('dashboardPage.systemHealth.vpsTab')}
+        </TabsTrigger>
+        <TabsTrigger value="process" className="gap-1.5">
+          <Bot className="h-3.5 w-3.5" />
+          {t('dashboardPage.systemHealth.processTab')}
+        </TabsTrigger>
+      </TabsList>
+
+      <TabsContent value="vps" className="space-y-4 mt-0">
+        <VpsMetrics health={health} />
+      </TabsContent>
+
+      <TabsContent value="process" className="space-y-4 mt-0">
+        <ProcessMetrics health={health} />
+      </TabsContent>
+    </Tabs>
   )
 }
 

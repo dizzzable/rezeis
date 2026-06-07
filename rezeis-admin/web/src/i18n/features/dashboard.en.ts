@@ -180,7 +180,10 @@ export const en = {
     },
     systemHealth: {
       title: 'System monitoring',
-      description: 'VPS and process in real-time',
+      description: 'Rezeis and Reiwa servers in real-time',
+      rezeisTab: 'Rezeis',
+      reiwaTab: 'Reiwa',
+      reiwaUnavailable: 'Reiwa is unavailable or not configured (check REIWA_URL and WEBHOOK_SECRET_HEADER)',
       vpsTab: 'VPS',
       processTab: 'Process',
       cpu: 'CPU',
