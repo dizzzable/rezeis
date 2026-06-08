@@ -3,6 +3,7 @@ import { Body, Controller, Post, UseGuards } from '@nestjs/common';
 import { InternalAdminAuthGuard } from '../../auth/guards/internal-admin-auth.guard';
 import { SubscriptionActionPolicyDto } from '../dto/subscription-action-policy.dto';
 import { InternalRenewalOptionsDto } from '../dto/internal-renewal-options.dto';
+import { InternalSubscriptionDeleteDto } from '../dto/internal-subscription-delete.dto';
 import { SubscriptionQuoteDto } from '../dto/subscription-quote.dto';
 import {
   SubscriptionActionPolicyInterface,
@@ -11,6 +12,10 @@ import {
 import { RenewalOptionsInterface } from '../interfaces/subscription-renewal.interface';
 import { SubscriptionQuoteService } from '../services/subscription-quote.service';
 import { SubscriptionRenewalService } from '../services/subscription-renewal.service';
+import {
+  SubscriptionDeletionService,
+  SubscriptionDeleteResult,
+} from '../services/subscription-deletion.service';
 
 @Controller('internal/subscriptions')
 @UseGuards(InternalAdminAuthGuard)
@@ -18,6 +23,7 @@ export class InternalSubscriptionsController {
   public constructor(
     private readonly subscriptionQuoteService: SubscriptionQuoteService,
     private readonly subscriptionRenewalService: SubscriptionRenewalService,
+    private readonly subscriptionDeletionService: SubscriptionDeletionService,
   ) {}
 
   @Post('action-policy')
@@ -43,6 +49,17 @@ export class InternalSubscriptionsController {
       subscriptionIds: input.subscriptionIds,
       gatewayType: input.gatewayType,
       channel: input.channel,
+    });
+  }
+
+  @Post('delete')
+  public async deleteSubscription(
+    @Body() input: InternalSubscriptionDeleteDto,
+  ): Promise<SubscriptionDeleteResult> {
+    return this.subscriptionDeletionService.delete({
+      userId: input.userId,
+      telegramId: input.telegramId,
+      subscriptionId: input.subscriptionId,
     });
   }
 }

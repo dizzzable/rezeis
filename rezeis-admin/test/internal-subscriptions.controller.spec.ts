@@ -35,6 +35,20 @@ describe('InternalSubscriptionsController', () => {
       Reflect.getMetadata(METHOD_METADATA, InternalSubscriptionsController.prototype.getQuote),
       RequestMethod.POST,
     );
+    assert.equal(
+      Reflect.getMetadata(
+        PATH_METADATA,
+        InternalSubscriptionsController.prototype.deleteSubscription,
+      ),
+      'delete',
+    );
+    assert.equal(
+      Reflect.getMetadata(
+        METHOD_METADATA,
+        InternalSubscriptionsController.prototype.deleteSubscription,
+      ),
+      RequestMethod.POST,
+    );
     assert.deepStrictEqual(
       Reflect.getMetadata(GUARDS_METADATA, InternalSubscriptionsController),
       [InternalAdminAuthGuard],
@@ -52,7 +66,7 @@ describe('InternalSubscriptionsController', () => {
         calls.push(['quote', input]);
         return { isEligible: true };
       },
-    } as never as SubscriptionQuoteService, {} as never);
+    } as never as SubscriptionQuoteService, {} as never, {} as never);
 
     assert.deepStrictEqual(await controller.getActionPolicy({ userId: 'user-1' } as never), {
       actions: { NEW: true },
