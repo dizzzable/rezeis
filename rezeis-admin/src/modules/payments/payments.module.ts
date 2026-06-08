@@ -32,6 +32,7 @@ import { PaymentWebhookPayloadRedactionService } from './services/payment-webhoo
 import { PaymentReconciliationService } from './services/payment-reconciliation.service';
 import { PaymentSubscriptionMutationService } from './services/payment-subscription-mutation.service';
 import { PaymentsCheckoutService } from './services/payments-checkout.service';
+import { PaymentsRenewalCheckoutService } from './services/payments-renewal-checkout.service';
 import { PaymentsTransactionsService } from './services/payments-transactions.service';
 import { AddOnPurchaseService } from './services/addon-purchase.service';
 import { TelegramStarsWebhookService } from './services/telegram-stars-webhook.service';
@@ -65,6 +66,7 @@ import { TelegramStarsWebhookService } from './services/telegram-stars-webhook.s
     PaymentGatewayRegistryService,
     PaymentsTransactionsService,
     PaymentsCheckoutService,
+    PaymentsRenewalCheckoutService,
     AddOnPurchaseService,
     PaymentOpsAlertService,
     PaymentProviderExecutionService,

@@ -60,6 +60,7 @@ describe('InternalPaymentsController', () => {
       } as never as PaymentsCheckoutService,
       {} as never,
       {} as never,
+      {} as never,
     );
 
     assert.deepStrictEqual(
@@ -78,6 +79,7 @@ describe('InternalPaymentsController', () => {
 
   it('returns active channel-compatible gateways with default currency first', async () => {
     const controller = new InternalPaymentsController(
+      {} as never,
       {} as never,
       {
         listGateways: async () => [

@@ -12,6 +12,7 @@ import {
   SyncAction,
   SyncJobStatus,
   Transaction,
+  TransactionItem,
 } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
@@ -26,11 +27,22 @@ export class PaymentSubscriptionMutationService {
 
   public async applyCompletedTransaction(
     transaction: Transaction,
-  ): Promise<{ readonly subscription: Subscription; readonly syncJob: ProfileSyncJob }> {
+  ): Promise<{ readonly syncJobs: readonly ProfileSyncJob[] }> {
+    // Combined multi-subscription renewal: the presence of line items marks
+    // this as a single payment fulfilled item-by-item. Handle it before the
+    // single-subscription, plan-centric branches.
+    const items = await this.prismaService.transactionItem.findMany({
+      where: { transactionId: transaction.id },
+    });
+    if (items.length > 0) {
+      return this.applyCombinedRenewal(transaction, items);
+    }
+
     // Add-on top-ups carry a marker in planSnapshot and have no plan/
     // duration — handle them before the plan-centric branches.
     if (isAddOnTransaction(transaction)) {
-      return this.applyAddOnTopUp(transaction);
+      const addOnResult = await this.applyAddOnTopUp(transaction);
+      return { syncJobs: [addOnResult.syncJob] };
     }
 
     const purchasedPlan = await this.getRequiredPlan(transaction);
@@ -77,7 +89,99 @@ export class PaymentSubscriptionMutationService {
       subscriptionId: result.subscription.id,
     });
 
-    return result;
+    return { syncJobs: [result.syncJob] };
+  }
+
+  /**
+   * Fulfills a combined (multi-subscription) renewal payment. Each
+   * not-yet-applied {@link TransactionItem} extends its target
+   * subscription's expiry on the item's plan, enqueues a profile-sync job,
+   * and is stamped with `appliedAt` — all inside a single DB transaction so
+   * fulfillment is all-or-nothing. The `appliedAt` stamp makes a replayed
+   * COMPLETED event idempotent (already-applied items are skipped).
+   */
+  private async applyCombinedRenewal(
+    transaction: Transaction,
+    items: readonly TransactionItem[],
+  ): Promise<{ readonly syncJobs: readonly ProfileSyncJob[] }> {
+    const pending = items.filter((item) => item.appliedAt === null);
+    if (pending.length === 0) {
+      return { syncJobs: [] };
+    }
+
+    const syncJobs = await this.prismaService.$transaction(async (transactionClient) => {
+      const jobs: ProfileSyncJob[] = [];
+      const now = new Date();
+      for (const item of pending) {
+        const plan = await transactionClient.plan.findUnique({ where: { id: item.planId } });
+        if (plan === null) {
+          throw new NotFoundException(`Renewal plan not found: ${item.planId}`);
+        }
+        const currentSubscription = await transactionClient.subscription.findUnique({
+          where: { id: item.subscriptionId },
+        });
+        if (currentSubscription === null) {
+          throw new NotFoundException(`Renewal subscription not found: ${item.subscriptionId}`);
+        }
+        const renewalBase =
+          currentSubscription.expiresAt !== null &&
+          currentSubscription.expiresAt.getTime() > now.getTime()
+            ? currentSubscription.expiresAt
+            : now;
+        const renewedSubscription = await transactionClient.subscription.update({
+          where: { id: currentSubscription.id },
+          data: {
+            status: SubscriptionStatus.ACTIVE,
+            planSnapshot: buildItemPlanSnapshot({
+              item,
+              plan,
+              gatewayType: transaction.gatewayType,
+            }) as Prisma.InputJsonValue,
+            trafficLimit: plan.trafficLimit,
+            deviceLimit: plan.deviceLimit,
+            internalSquads: plan.internalSquads,
+            externalSquad: plan.externalSquad,
+            expiresAt: calculateExpiry(renewalBase, item.durationDays),
+          },
+        });
+        const syncJob = await transactionClient.profileSyncJob.create({
+          data: {
+            subscriptionId: renewedSubscription.id,
+            action:
+              renewedSubscription.remnawaveId === null ? SyncAction.CREATE : SyncAction.UPDATE,
+            status: SyncJobStatus.PENDING,
+            payload: {
+              source: 'PAYMENT_COMPLETION',
+              paymentId: transaction.paymentId,
+              combined: true,
+            } as Prisma.InputJsonObject,
+          },
+        });
+        await transactionClient.transactionItem.update({
+          where: { id: item.id },
+          data: { appliedAt: now },
+        });
+        jobs.push(syncJob);
+      }
+      return jobs;
+    });
+
+    this.events.info(
+      EVENT_TYPES.PAYMENT_COMPLETED,
+      'PAYMENT',
+      `Payment completed: RENEW x${pending.length}`,
+      {
+        userId: transaction.userId,
+        paymentId: transaction.paymentId,
+        purchaseType: transaction.purchaseType,
+        itemCount: pending.length,
+        amount: transaction.amount.toString(),
+        currency: transaction.currency,
+        gatewayType: transaction.gatewayType,
+      },
+    );
+
+    return { syncJobs };
   }
 
   /**
@@ -371,6 +475,37 @@ function buildPlanSnapshot(input: {
     gatewayType: input.transaction.gatewayType,
     amount: input.transaction.amount.toString(),
     currency: input.transaction.currency,
+    snapshotSource: 'PAYMENT_COMPLETION',
+  };
+}
+
+/**
+ * Builds a subscription `planSnapshot` for one combined-renewal line item.
+ * Mirrors {@link buildPlanSnapshot} but draws the duration/amount/currency
+ * from the per-item record rather than the parent transaction (whose amount
+ * is the combined total).
+ */
+function buildItemPlanSnapshot(input: {
+  readonly item: TransactionItem;
+  readonly plan: Plan;
+  readonly gatewayType: Transaction['gatewayType'];
+}): Record<string, unknown> {
+  return {
+    id: input.plan.id,
+    name: input.plan.name,
+    description: input.plan.description,
+    tag: input.plan.tag,
+    type: input.plan.type,
+    trafficLimit: input.plan.trafficLimit,
+    deviceLimit: input.plan.deviceLimit,
+    trafficLimitStrategy: input.plan.trafficLimitStrategy,
+    internalSquads: input.plan.internalSquads,
+    externalSquad: input.plan.externalSquad,
+    selectedDurationDays: input.item.durationDays,
+    purchaseType: PurchaseType.RENEW,
+    gatewayType: input.gatewayType,
+    amount: input.item.amount.toString(),
+    currency: input.item.currency,
     snapshotSource: 'PAYMENT_COMPLETION',
   };
 }

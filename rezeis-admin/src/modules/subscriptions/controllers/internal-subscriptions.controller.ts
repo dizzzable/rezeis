@@ -2,17 +2,23 @@ import { Body, Controller, Post, UseGuards } from '@nestjs/common';
 
 import { InternalAdminAuthGuard } from '../../auth/guards/internal-admin-auth.guard';
 import { SubscriptionActionPolicyDto } from '../dto/subscription-action-policy.dto';
+import { InternalRenewalOptionsDto } from '../dto/internal-renewal-options.dto';
 import { SubscriptionQuoteDto } from '../dto/subscription-quote.dto';
 import {
   SubscriptionActionPolicyInterface,
   SubscriptionQuoteInterface,
 } from '../interfaces/subscription-quote.interface';
+import { RenewalOptionsInterface } from '../interfaces/subscription-renewal.interface';
 import { SubscriptionQuoteService } from '../services/subscription-quote.service';
+import { SubscriptionRenewalService } from '../services/subscription-renewal.service';
 
 @Controller('internal/subscriptions')
 @UseGuards(InternalAdminAuthGuard)
 export class InternalSubscriptionsController {
-  public constructor(private readonly subscriptionQuoteService: SubscriptionQuoteService) {}
+  public constructor(
+    private readonly subscriptionQuoteService: SubscriptionQuoteService,
+    private readonly subscriptionRenewalService: SubscriptionRenewalService,
+  ) {}
 
   @Post('action-policy')
   public async getActionPolicy(
@@ -26,5 +32,17 @@ export class InternalSubscriptionsController {
     @Body() input: SubscriptionQuoteDto,
   ): Promise<SubscriptionQuoteInterface> {
     return this.subscriptionQuoteService.getQuote(input);
+  }
+
+  @Post('renewal-options')
+  public async getRenewalOptions(
+    @Body() input: InternalRenewalOptionsDto,
+  ): Promise<RenewalOptionsInterface> {
+    return this.subscriptionRenewalService.getRenewalOptions({
+      identity: { userId: input.userId, telegramId: input.telegramId },
+      subscriptionIds: input.subscriptionIds,
+      gatewayType: input.gatewayType,
+      channel: input.channel,
+    });
   }
 }
