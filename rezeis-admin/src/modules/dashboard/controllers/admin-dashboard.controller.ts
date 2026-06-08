@@ -42,4 +42,12 @@ export class AdminDashboardController {
   public getSystemHealth(): Promise<SystemHealthResponse> {
     return this.systemHealthService.getSystemHealth();
   }
+
+  @Get('system-health/reiwa')
+  @RequirePermission('dashboard', 'view')
+  @ApiOperation({ summary: "Returns the reiwa server's VPS and process metrics (null when unavailable)" })
+  @ApiOkResponse({ description: 'reiwa system health snapshot, or null when reiwa is unreachable/unconfigured' })
+  public getReiwaSystemHealth(): Promise<SystemHealthResponse | null> {
+    return this.systemHealthService.getReiwaSystemHealth();
+  }
 }

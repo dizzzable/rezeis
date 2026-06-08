@@ -42,6 +42,38 @@ export class SystemHealthService {
     };
   }
 
+  /**
+   * Fetches reiwa's host + process metrics from its internal endpoint so the
+   * dashboard can show the reiwa server alongside this one (split-VPS aware).
+   * Returns `null` when `REIWA_URL` / `WEBHOOK_SECRET_HEADER` are unset or
+   * reiwa is unreachable — the UI then shows a "not available" state.
+   * Same-VPS default targets the docker service name.
+   */
+  public async getReiwaSystemHealth(): Promise<SystemHealthResponse | null> {
+    const baseUrl = (process.env.REIWA_URL ?? 'http://reiwa:5000').trim().replace(/\/+$/, '');
+    const secret = (process.env.WEBHOOK_SECRET_HEADER ?? '').trim();
+    if (!baseUrl || !secret) return null;
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5_000);
+    try {
+      const response = await fetch(`${baseUrl}/api/v1/internal/metrics`, {
+        headers: { 'x-internal-token': secret },
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        this.logger.warn(`reiwa metrics returned HTTP ${response.status}`);
+        return null;
+      }
+      return (await response.json()) as SystemHealthResponse;
+    } catch (error) {
+      this.logger.warn(`Failed to fetch reiwa metrics: ${(error as Error).message}`);
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   private async getVpsHealth(): Promise<VpsHealthSnapshot> {
     const cpuCores = this.getCpuUsage();
     const cpuUsagePercent =

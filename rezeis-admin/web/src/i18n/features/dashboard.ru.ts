@@ -180,7 +180,10 @@ export const ru = {
     },
     systemHealth: {
       title: 'Мониторинг системы',
-      description: 'VPS и процесс в реальном времени',
+      description: 'Серверы Rezeis и Reiwa в реальном времени',
+      rezeisTab: 'Rezeis',
+      reiwaTab: 'Reiwa',
+      reiwaUnavailable: 'Reiwa недоступна или не настроена (проверьте REIWA_URL и WEBHOOK_SECRET_HEADER)',
       vpsTab: 'VPS',
       processTab: 'Процесс',
       cpu: 'CPU',

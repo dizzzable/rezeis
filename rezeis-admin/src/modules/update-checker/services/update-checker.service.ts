@@ -14,6 +14,12 @@ const PACKAGE_JSON: { readonly version?: string } = require('../../../../package
 
 const DEFAULT_GITHUB_REPO = process.env.REZEIS_UPDATE_REPO ?? '';
 const REIWA_GITHUB_REPO = process.env.REZEIS_REIWA_UPDATE_REPO ?? '';
+/** Public base URL of reiwa — used to pull its live version from /health when
+ *  no heartbeat has been reported yet (e.g. right after an admin restart).
+ *  Defaults to the same-VPS docker service name; the zod schema default isn't
+ *  reflected in `process.env`, so the fallback is applied here at the read
+ *  site. Split-VPS deploys set `REIWA_URL=https://<reiwa-domain>` in `.env`. */
+const REIWA_BASE_URL = (process.env.REIWA_URL ?? 'http://reiwa:5000').trim().replace(/\/+$/, '');
 const HTTP_TIMEOUT_MS = 8_000;
 const USER_AGENT = 'rezeis-admin-update-checker';
 
@@ -147,7 +153,12 @@ export class UpdateCheckerService implements OnModuleInit {
    */
   private async safeCheck(): Promise<UpdateStatusInterface> {
     const panelCurrent = (PACKAGE_JSON.version ?? '0.0.0').trim();
-    const reiwaCurrent = this.reiwaReportedVersion ?? '0.0.0';
+    // Prefer the heartbeat-reported version (fast, no network). When it
+    // hasn't arrived yet — typically right after an admin restart, since the
+    // report is in-memory and reiwa only re-announces hourly — pull the live
+    // version from reiwa's /health so the widget doesn't show a stale 0.0.0.
+    const reiwaCurrent =
+      this.reiwaReportedVersion ?? (await this.fetchReiwaVersionFromHealth()) ?? '0.0.0';
 
     const [panel, reiwa] = await Promise.all([
       this.checkRepo(DEFAULT_GITHUB_REPO, panelCurrent),
@@ -161,6 +172,30 @@ export class UpdateCheckerService implements OnModuleInit {
     this.cached = result;
     this.cachedAt = Date.now();
     return result;
+  }
+
+  /**
+   * Pulls reiwa's running version from its public `/api/v1/health` endpoint.
+   * Best-effort fallback for when no heartbeat has been reported yet (the
+   * reported value is in-memory and lost on admin restart). Returns `null`
+   * when `REIWA_URL` is unset or reiwa is unreachable.
+   */
+  private async fetchReiwaVersionFromHealth(): Promise<string | null> {
+    if (!REIWA_BASE_URL || !this.httpService) return null;
+    try {
+      const response = await firstValueFrom(
+        this.httpService.get<{ version?: string }>(`${REIWA_BASE_URL}/api/v1/health`, {
+          headers: { 'User-Agent': USER_AGENT },
+          timeout: HTTP_TIMEOUT_MS,
+          validateStatus: () => true,
+        }),
+      );
+      if (response.status < 200 || response.status >= 300) return null;
+      const version = response.data?.version?.trim().replace(/^v/i, '');
+      return version && version.length > 0 ? version : null;
+    } catch {
+      return null;
+    }
   }
 
   /**
