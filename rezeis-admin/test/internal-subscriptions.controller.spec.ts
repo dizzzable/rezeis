@@ -52,7 +52,7 @@ describe('InternalSubscriptionsController', () => {
         calls.push(['quote', input]);
         return { isEligible: true };
       },
-    } as never as SubscriptionQuoteService);
+    } as never as SubscriptionQuoteService, {} as never);
 
     assert.deepStrictEqual(await controller.getActionPolicy({ userId: 'user-1' } as never), {
       actions: { NEW: true },

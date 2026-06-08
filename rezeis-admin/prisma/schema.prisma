@@ -1059,6 +1059,7 @@ model Subscription {
   user                  User                  @relation("UserSubscriptions", fields: [userId], references: [id], onDelete: Cascade)
   currentSubscriptionOf User?                 @relation("UserCurrentSubscription")
   transactions          Transaction[]         @relation("SubscriptionTransactions")
+  transactionItems      TransactionItem[]     @relation("SubscriptionTransactionItems")
   syncJobs              ProfileSyncJob[]      @relation("SubscriptionSyncJobs")
   promocodeActivations  PromocodeActivation[] @relation("SubscriptionPromocodeActivations")
 
@@ -1211,8 +1212,12 @@ model Transaction {
   createdAt      DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt      DateTime           @updatedAt @map("updated_at") @db.Timestamptz(3)
 
-  user         User          @relation("UserTransactions", fields: [userId], references: [id], onDelete: Restrict)
-  subscription Subscription? @relation("SubscriptionTransactions", fields: [subscriptionId], references: [id], onDelete: SetNull)
+  user         User              @relation("UserTransactions", fields: [userId], references: [id], onDelete: Restrict)
+  subscription Subscription?     @relation("SubscriptionTransactions", fields: [subscriptionId], references: [id], onDelete: SetNull)
+  /// Line items for a combined (multi-subscription) renewal payment. Empty
+  /// for every legacy single-subscription transaction; non-empty marks the
+  /// transaction as a combined renewal fulfilled item-by-item.
+  items        TransactionItem[] @relation("TransactionItems")
 
   @@index([userId])
   @@index([subscriptionId])
@@ -1221,6 +1226,34 @@ model Transaction {
   @@index([purchaseType])
   @@index([createdAt])
   @@map("transactions")
+}
+
+/// One renewal line of a combined (multi-subscription) payment. Each row
+/// targets a single subscription with the plan/duration/price it was quoted
+/// at draft time. `appliedAt` is the per-item idempotency stamp set when the
+/// renewal has been fulfilled, so a replayed COMPLETED event never
+/// double-applies.
+model TransactionItem {
+  id              String    @id @default(cuid()) @map("id")
+  transactionId   String    @map("transaction_id")
+  subscriptionId  String    @map("subscription_id")
+  planId          String    @map("plan_id")
+  /// Snapshot of the plan/duration priced at draft time.
+  planSnapshot    Json      @default("{}") @map("plan_snapshot")
+  durationDays    Int       @map("duration_days")
+  amount          Decimal   @map("amount") @db.Decimal(20, 8)
+  currency        Currency  @map("currency")
+  discountPercent Int       @default(0) @map("discount_percent")
+  /// Idempotency stamp — set when this item's renewal has been applied.
+  appliedAt       DateTime? @map("applied_at") @db.Timestamptz(3)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  transaction  Transaction  @relation("TransactionItems", fields: [transactionId], references: [id], onDelete: Cascade)
+  subscription Subscription @relation("SubscriptionTransactionItems", fields: [subscriptionId], references: [id], onDelete: Restrict)
+
+  @@index([transactionId])
+  @@index([subscriptionId])
+  @@map("transaction_items")
 }
 
 /// Webhook ingress + reconciliation inbox. The lifecycle status is tracked
