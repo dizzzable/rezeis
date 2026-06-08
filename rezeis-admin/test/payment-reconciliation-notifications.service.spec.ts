@@ -317,7 +317,7 @@ function createService(state: ReturnType<typeof createState>): PaymentReconcilia
       if (state.mutationShouldThrow) {
         throw state.mutationError ?? new Error('forced mutation failure');
       }
-      return { subscription: { id: 'subscription-1' }, syncJob: { id: 'sync-1' } };
+      return { syncJobs: [{ id: 'sync-1' }] };
     },
   };
   const paymentOpsAlertService: ReconciliationAlertDouble = {

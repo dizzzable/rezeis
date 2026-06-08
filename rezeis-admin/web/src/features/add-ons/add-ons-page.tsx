@@ -427,7 +427,7 @@ function AddOnDialog({
       isActive,
       applicablePlanIds: selectedPlanIds,
       prices: prices
-        .filter((p) => p.price && parseFloat(p.price) > 0)
+        .filter((p) => p.price.trim() !== '' && parseFloat(p.price) >= 0)
         .map((p) => ({ currency: p.currency, price: p.price.trim() })),
     }
     if (addOn) {

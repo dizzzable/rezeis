@@ -12,11 +12,13 @@ import {
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { PricingService } from '../../plans/services/pricing.service';
+import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
 import { isGatewayConfigured } from '../utils/payment-gateway-settings.util';
 import {
   InternalPaymentCheckoutInterface,
 } from '../interfaces/internal-payment-checkout.interface';
 import { PaymentProviderExecutionService } from './payment-provider-execution.service';
+import { PaymentSubscriptionMutationService } from './payment-subscription-mutation.service';
 
 export interface AddOnCheckoutInput {
   readonly userId?: string;
@@ -53,6 +55,8 @@ export class AddOnPurchaseService {
     private readonly prismaService: PrismaService,
     private readonly pricingService: PricingService,
     private readonly paymentProviderExecutionService: PaymentProviderExecutionService,
+    private readonly paymentSubscriptionMutationService: PaymentSubscriptionMutationService,
+    private readonly profileSyncQueueService: ProfileSyncQueueService,
   ) {}
 
   public async checkout(input: AddOnCheckoutInput): Promise<InternalPaymentCheckoutInterface> {
@@ -179,6 +183,40 @@ export class AddOnPurchaseService {
         deviceTypes: [],
       },
     });
+
+    // ── Free add-on (zero amount): apply immediately, skip the provider ───
+    // A 0-price add-on (e.g. an operator-granted extra) has no real payment.
+    // Mark the draft COMPLETED and run the standard add-on fulfillment so the
+    // subscription limit is raised right away, then return a completed result
+    // with no checkout URL.
+    if (Number(snapshot.price) <= 0) {
+      const completedTransaction = await this.prismaService.transaction.update({
+        where: { id: transaction.id },
+        data: { status: TransactionStatus.COMPLETED },
+      });
+      const { syncJobs } =
+        await this.paymentSubscriptionMutationService.applyCompletedTransaction(
+          completedTransaction,
+        );
+      for (const syncJob of syncJobs) {
+        await this.profileSyncQueueService.enqueue(syncJob.id);
+      }
+      const finalTransaction = await this.prismaService.transaction.findUnique({
+        where: { id: transaction.id },
+      });
+      const tx = finalTransaction ?? completedTransaction;
+      return {
+        paymentId: tx.paymentId,
+        transactionStatus: tx.status,
+        gatewayType: tx.gatewayType,
+        purchaseType: tx.purchaseType,
+        amount: tx.amount.toString(),
+        currency: tx.currency,
+        checkoutUrl: null,
+        providerMode: 'NONE',
+        createdAt: tx.createdAt.toISOString(),
+      };
+    }
 
     // ── Provider checkout ─────────────────────────────────────────────────
     const providerCheckout = await this.paymentProviderExecutionService.createCheckout({
