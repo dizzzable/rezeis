@@ -63,12 +63,16 @@ export class PaymentReconciliationService {
           throw new NotFoundException('Payment transaction not found');
         }
         if (refreshedTransaction.subscriptionId === null) {
-          const { syncJob } =
+          const { syncJobs } =
             await this.paymentSubscriptionMutationService.applyCompletedTransaction(refreshedTransaction);
-          // Push the freshly-created sync job to BullMQ so the Remnawave
-          // profile is provisioned immediately. Without this the row would
-          // sit PENDING until the profile-sync sweep cron picks it up.
-          await this.profileSyncQueueService.enqueue(syncJob.id);
+          // Push the freshly-created sync job(s) to BullMQ so the Remnawave
+          // profile is provisioned immediately. A combined renewal returns
+          // one job per line item; single-subscription transactions return
+          // exactly one. Without this the rows would sit PENDING until the
+          // profile-sync sweep cron picks them up.
+          for (const syncJob of syncJobs) {
+            await this.profileSyncQueueService.enqueue(syncJob.id);
+          }
         }
         await this.runReferralAndPartnerHooks(refreshedTransaction);
       }

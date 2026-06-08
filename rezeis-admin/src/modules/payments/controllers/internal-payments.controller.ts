@@ -5,6 +5,7 @@ import { InternalAdminAuthGuard } from '../../auth/guards/internal-admin-auth.gu
 import { SettingsService } from '../../settings/services/settings.service';
 import { isGatewayAvailableForChannel } from '../../plans/utils/purchase-gateway-policy.util';
 import { InternalPaymentCheckoutDto } from '../dto/internal-payment-checkout.dto';
+import { InternalRenewalCheckoutDto } from '../dto/internal-renewal-checkout.dto';
 import {
   InternalPaymentCheckoutInterface,
   InternalPaymentStatusInterface,
@@ -12,12 +13,14 @@ import {
 import { InternalPaymentGatewayInterface } from '../interfaces/internal-payment-gateway.interface';
 import { PaymentGatewayRegistryService } from '../services/payment-gateway-registry.service';
 import { PaymentsCheckoutService } from '../services/payments-checkout.service';
+import { PaymentsRenewalCheckoutService } from '../services/payments-renewal-checkout.service';
 
 @Controller('internal/payments')
 @UseGuards(InternalAdminAuthGuard)
 export class InternalPaymentsController {
   public constructor(
     private readonly paymentsCheckoutService: PaymentsCheckoutService,
+    private readonly paymentsRenewalCheckoutService: PaymentsRenewalCheckoutService,
     private readonly paymentGatewayRegistryService: PaymentGatewayRegistryService,
     private readonly settingsService: SettingsService,
   ) {}
@@ -80,6 +83,21 @@ export class InternalPaymentsController {
     @Body() input: InternalPaymentCheckoutDto,
   ): Promise<InternalPaymentCheckoutInterface> {
     return this.paymentsCheckoutService.checkout(input);
+  }
+
+  @Post('renewal-checkout')
+  public async renewalCheckout(
+    @Body() input: InternalRenewalCheckoutDto,
+  ): Promise<InternalPaymentCheckoutInterface> {
+    return this.paymentsRenewalCheckoutService.renewalCheckout({
+      userId: input.userId,
+      telegramId: input.telegramId,
+      subscriptionIds: input.subscriptionIds,
+      gatewayType: input.gatewayType,
+      channel: input.channel,
+      successUrl: input.successUrl ?? null,
+      failUrl: input.failUrl ?? null,
+    });
   }
 
   @Get(':paymentId')

@@ -9,6 +9,7 @@ import { AdminSubscriptionsListService } from './services/admin-subscriptions-li
 import { PlanSnapshotSyncService } from './services/plan-snapshot-sync.service';
 import { SubscriptionMutationsService } from './services/subscription-mutations.service';
 import { SubscriptionQuoteService } from './services/subscription-quote.service';
+import { SubscriptionRenewalService } from './services/subscription-renewal.service';
 
 @Module({
   // AuthModule supplies InternalAdminAuthGuard (used by
@@ -18,10 +19,16 @@ import { SubscriptionQuoteService } from './services/subscription-quote.service'
   controllers: [AdminSubscriptionsController, InternalSubscriptionsController],
   providers: [
     SubscriptionQuoteService,
+    SubscriptionRenewalService,
     SubscriptionMutationsService,
     PlanSnapshotSyncService,
     AdminSubscriptionsListService,
   ],
-  exports: [SubscriptionQuoteService, SubscriptionMutationsService, PlanSnapshotSyncService],
+  exports: [
+    SubscriptionQuoteService,
+    SubscriptionRenewalService,
+    SubscriptionMutationsService,
+    PlanSnapshotSyncService,
+  ],
 })
 export class SubscriptionsModule {}
