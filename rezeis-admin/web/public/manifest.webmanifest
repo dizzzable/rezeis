@@ -1,0 +1,19 @@
+{
+  "name": "Rezeis Admin",
+  "short_name": "Rezeis",
+  "description": "Rezeis Admin Panel",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "theme_color": "#09090b",
+  "background_color": "#09090b",
+  "icons": [
+    {
+      "src": "/rezeis-logo.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

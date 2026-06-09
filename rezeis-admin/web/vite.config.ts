@@ -2,12 +2,30 @@
 import { defineConfig } from 'vitest/config'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
+import { VitePWA } from 'vite-plugin-pwa'
 import path from 'path'
 
 export default defineConfig({
   plugins: [
     tailwindcss(),
     react(),
+    VitePWA({
+      strategies: 'injectManifest',
+      srcDir: 'src',
+      filename: 'sw.ts',
+      registerType: 'autoUpdate',
+      injectRegister: false,
+      manifest: false, // own manifest.webmanifest in public/
+      injectManifest: {
+        globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
+        // Admin bundles (charts/three) exceed the 2 MiB default; raise the cap
+        // so the precache manifest isn't silently truncated.
+        maximumFileSizeToCacheInBytes: 6 * 1024 * 1024,
+      },
+      devOptions: {
+        enabled: false,
+      },
+    }),
   ],
   resolve: {
     alias: {

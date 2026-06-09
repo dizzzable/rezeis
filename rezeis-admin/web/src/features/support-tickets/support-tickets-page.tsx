@@ -95,7 +95,7 @@ export default function SupportTicketsPage() {
   // Two-panel layout: list + detail
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="text-2xl font-bold flex items-center gap-2">
             <LifeBuoy className="h-6 w-6" />
@@ -104,7 +104,7 @@ export default function SupportTicketsPage() {
           <p className="text-muted-foreground">{t('supportTicketsPage.subtitle')}</p>
         </div>
         <Select value={statusFilter} onValueChange={setStatusFilter}>
-          <SelectTrigger className="w-36" aria-label={t('supportTicketsPage.filters.status')}><SelectValue /></SelectTrigger>
+          <SelectTrigger className="w-full sm:w-36" aria-label={t('supportTicketsPage.filters.status')}><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value="all">{t('supportTicketsPage.filters.all')}</SelectItem>
             <SelectItem value="open">{t('supportTicketsPage.filters.open')}</SelectItem>
@@ -114,9 +114,9 @@ export default function SupportTicketsPage() {
         </Select>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 min-h-[600px]">
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 lg:min-h-[600px]">
         {/* Ticket list */}
-        <div className="lg:col-span-4 space-y-2 overflow-y-auto max-h-[700px]">
+        <div className="lg:col-span-4 space-y-2 overflow-y-auto lg:max-h-[700px]">
           {isLoading ? (
             Array.from({ length: 5 }).map((_, i) => <Skeleton key={i} className="h-20 w-full" />)
           ) : !data || data.items.length === 0 ? (
