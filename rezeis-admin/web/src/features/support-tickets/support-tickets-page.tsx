@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useSearchParams } from 'react-router-dom';
 import { keepPreviousData, useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { MessageSquare, Send, X, RotateCcw, Loader2, LifeBuoy } from 'lucide-react';
 import { toast } from 'sonner';
@@ -41,9 +42,21 @@ function statusBadge(status: string, t: (key: string) => string) {
 export default function SupportTicketsPage() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
+  const [searchParams] = useSearchParams();
   const [statusFilter, setStatusFilter] = useState('open');
   const [selectedTicket, setSelectedTicket] = useState<string | null>(null);
   const [replyText, setReplyText] = useState('');
+
+  // Deep-link: a push notification opens `/support-tickets?ticket=<id>` — show
+  // all statuses so the target is found, and auto-select it.
+  useEffect(() => {
+    const ticketId = searchParams.get('ticket');
+    if (ticketId) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- sync deep-link query param into selection state
+      setSelectedTicket(ticketId);
+      setStatusFilter('all');
+    }
+  }, [searchParams]);
 
   const { data, isLoading } = useQuery({
     queryKey: ['support-tickets', statusFilter],

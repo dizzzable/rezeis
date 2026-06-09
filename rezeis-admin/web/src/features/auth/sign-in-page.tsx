@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { consumeReturnTo } from '@/lib/return-to'
 import { useTranslation } from 'react-i18next'
 import { useQuery, useMutation } from '@tanstack/react-query'
 import { useForm } from 'react-hook-form'
@@ -120,7 +121,7 @@ function LoginForm() {
     mutationFn: loginApi,
     onSuccess: (data) => {
       login(data.accessToken)
-      navigate('/', { replace: true })
+      navigate(consumeReturnTo() ?? '/', { replace: true })
     },
     onError: (err: unknown) => {
       const responseData = (err as { response?: { data?: { code?: string; message?: string } } }).response?.data
@@ -276,7 +277,7 @@ function RegisterForm() {
     mutationFn: registerApi,
     onSuccess: (data) => {
       login(data.accessToken)
-      navigate('/', { replace: true })
+      navigate(consumeReturnTo() ?? '/', { replace: true })
     },
     onError: (err) => {
       setError(getErrorMessage(err, t('signInPage.register.genericError')))

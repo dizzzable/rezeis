@@ -13,6 +13,7 @@ interface SentPush {
 function buildDispatcher(options: {
   admins: Array<{ id: string; role: string; rbacRoleId: string | null; isActive?: boolean }>;
   permitted: Set<string>; // `${adminId}:${resource}:${action}`
+  disabledPrefs?: Set<string>; // `${adminId}:${category}`
 }) {
   const sent: SentPush[] = [];
   let rbacThrows = false;
@@ -43,6 +44,10 @@ function buildDispatcher(options: {
       return options.permitted.has(`${admin.id}:${resource}:${action}`);
     },
   };
+  const preferences = {
+    isEnabled: async (adminId: string, category: string): Promise<boolean> =>
+      !(options.disabledPrefs?.has(`${adminId}:${category}`) ?? false),
+  };
   let hook: ((e: SystemEventPayload) => void) | null = null;
   const systemEvents = {
     registerHook: (h: (e: SystemEventPayload) => void) => {
@@ -56,6 +61,7 @@ function buildDispatcher(options: {
     webPush as never,
     rbac as never,
     systemEvents as never,
+    preferences as never,
   );
   dispatcher.onModuleInit();
 
@@ -75,8 +81,19 @@ function buildDispatcher(options: {
   };
 }
 
-function event(type: string, category: string, severity: 'INFO' | 'WARNING' | 'ERROR' = 'INFO'): SystemEventPayload {
-  return { type, category: category as SystemEventPayload['category'], severity, message: 'test message' };
+function event(
+  type: string,
+  category: string,
+  severity: 'INFO' | 'WARNING' | 'ERROR' = 'INFO',
+  metadata?: Record<string, unknown>,
+): SystemEventPayload {
+  return {
+    type,
+    category: category as SystemEventPayload['category'],
+    severity,
+    message: 'test message',
+    metadata,
+  };
 }
 
 describe('AdminNotificationDispatcher', () => {
@@ -156,5 +173,50 @@ describe('AdminNotificationDispatcher', () => {
     await d.handle(event(EVENT_TYPES.SUPPORT_TICKET_CREATED, 'SUPPORT'));
 
     assert.equal(d.sent.length, 0);
+  });
+
+  it('respects per-category preference: disabled category is not delivered (eligibility conjunction)', async () => {
+    const d = buildDispatcher({
+      admins: [{ id: 'a1', role: 'ADMIN', rbacRoleId: 'support' }],
+      permitted: new Set(['a1:support_tickets:view']),
+      disabledPrefs: new Set(['a1:support']),
+    });
+
+    await d.handle(event(EVENT_TYPES.SUPPORT_TICKET_CREATED, 'SUPPORT'));
+
+    assert.equal(d.sent.length, 0);
+  });
+
+  it('RBAC gating dominates preferences: permitted+enabled delivers, lacking permission never does', async () => {
+    const d = buildDispatcher({
+      admins: [
+        { id: 'permitted', role: 'ADMIN', rbacRoleId: 'support' },
+        { id: 'nopermission', role: 'ADMIN', rbacRoleId: 'finance' },
+      ],
+      // nopermission has the category enabled by default but lacks the permission.
+      permitted: new Set(['permitted:support_tickets:view']),
+    });
+
+    await d.handle(event(EVENT_TYPES.SUPPORT_TICKET_CREATED, 'SUPPORT'));
+
+    assert.deepStrictEqual(
+      d.sent.map((s) => s.adminId),
+      ['permitted'],
+    );
+  });
+
+  it('deep-links a support push to the specific ticket (payload carries title + ticket url)', async () => {
+    const d = buildDispatcher({
+      admins: [{ id: 'a1', role: 'ADMIN', rbacRoleId: 'support' }],
+      permitted: new Set(['a1:support_tickets:view']),
+    });
+
+    await d.handle(
+      event(EVENT_TYPES.SUPPORT_TICKET_USER_REPLY, 'SUPPORT', 'INFO', { ticketId: 'tk_42' }),
+    );
+
+    assert.equal(d.sent.length, 1);
+    assert.equal(d.sent[0]?.url, '/support-tickets?ticket=tk_42');
+    assert.equal(d.sent[0]?.title, 'Поддержка');
   });
 });

@@ -383,6 +383,7 @@ model AdminUser {
   scopePolicies AdminScopePolicy[] @relation("AdminUserScopePolicy")
   themePresets  AdminThemePreset[] @relation("AdminThemePresetOwner")
   webPushSubscriptions AdminWebPushSubscription[] @relation("AdminUserWebPushSubscriptions")
+  notificationPreferences AdminNotificationPreference[] @relation("AdminUserNotificationPreferences")
 
   @@index([role])
   @@index([isActive])
@@ -1537,6 +1538,25 @@ model AdminWebPushSubscription {
 
   @@index([adminId])
   @@map("admin_web_push_subscriptions")
+}
+
+/// Per-admin per-category opt-in for web-push notifications. Absence of a row
+/// means the category is at its default state (enabled where the admin's role
+/// permits it). Categories are gated by RBAC: a preference only matters when
+/// the admin's role grants the category's gating permission.
+model AdminNotificationPreference {
+  id        String   @id @default(cuid()) @map("id")
+  adminId   String   @map("admin_id")
+  category  String   @map("category")
+  enabled   Boolean  @default(true) @map("enabled")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  admin AdminUser @relation("AdminUserNotificationPreferences", fields: [adminId], references: [id], onDelete: Cascade)
+
+  @@unique([adminId, category])
+  @@index([adminId])
+  @@map("admin_notification_preferences")
 }
 
 /// Singleton row (id = 1).

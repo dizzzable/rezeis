@@ -2,6 +2,7 @@ import { useTranslation } from 'react-i18next'
 import { useQuery, useMutation } from '@tanstack/react-query'
 import { Loader2, KeyRound } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
+import { consumeReturnTo } from '@/lib/return-to'
 
 import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/separator'
@@ -45,7 +46,7 @@ export function OAuthButtons() {
     },
     onSuccess: (data) => {
       login(data.accessToken)
-      navigate('/', { replace: true })
+      navigate(consumeReturnTo() ?? '/', { replace: true })
     },
   })
 
@@ -88,7 +89,7 @@ export function OAuthButtons() {
       })
 
       login(verifyRes.data.accessToken)
-      navigate('/', { replace: true })
+      navigate(consumeReturnTo() ?? '/', { replace: true })
     } catch {
       // User cancelled or error — silently ignore
     }

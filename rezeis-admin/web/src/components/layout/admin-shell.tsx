@@ -30,6 +30,7 @@ import { UpdateBanner } from '@/features/update-checker/update-banner'
 import { useGlassStore } from '@/lib/theme/glass-store'
 import { cn } from '@/lib/utils'
 import { useRealtimeUpdates } from '@/lib/realtime/use-realtime-updates'
+import { useSwNavigation } from '@/lib/use-sw-navigation'
 
 import { AdminSidebar } from './admin-sidebar/admin-sidebar'
 import { NavItems } from './admin-sidebar/nav-items'
@@ -50,6 +51,9 @@ export default function AdminShell() {
   // (i.e. the admin is authenticated). Toasts are limited to WARNING/ERROR
   // events inside the hook itself.
   useRealtimeUpdates()
+
+  // Route push-notification taps (relayed by the service worker) via the router.
+  useSwNavigation()
 
   // Cmd+K / Ctrl+K shortcut to toggle the quick-search palette.
   useEffect(() => {

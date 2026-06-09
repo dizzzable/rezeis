@@ -1,9 +1,11 @@
 import { Module } from '@nestjs/common';
 
 import { AuthModule } from '../auth/auth.module';
+import { AdminNotificationPreferencesController } from './admin-notification-preferences.controller';
 import { AdminPushController } from './admin-push.controller';
 import { InternalPushController } from './internal-push.controller';
 import { AdminNotificationDispatcher } from './services/admin-notification-dispatcher.service';
+import { AdminNotificationPreferencesService } from './services/admin-notification-preferences.service';
 import { WebPushService } from './services/web-push.service';
 
 /**
@@ -27,8 +29,8 @@ import { WebPushService } from './services/web-push.service';
  */
 @Module({
   imports: [AuthModule],
-  controllers: [InternalPushController, AdminPushController],
-  providers: [WebPushService, AdminNotificationDispatcher],
+  controllers: [InternalPushController, AdminPushController, AdminNotificationPreferencesController],
+  providers: [WebPushService, AdminNotificationDispatcher, AdminNotificationPreferencesService],
   exports: [WebPushService],
 })
 export class InternalPushModule {}

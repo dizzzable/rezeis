@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button'
 import { useAuthMe } from '@/features/auth/use-auth-me'
 import { translateErrorMessage } from '@/lib/translate-error'
 import { useAuthStore } from '@/stores/auth-store'
+import { captureReturnTo } from '@/lib/return-to'
 
 interface AuthGuardProps {
   readonly children: ReactNode
@@ -27,6 +28,7 @@ export function AuthGuard({ children }: AuthGuardProps): JSX.Element {
     toast.success(t('auth.loginSuccess'))
   }, [authMeQuery.data, isSessionVerified, pendingLoginRevision, sessionRevision, t])
   if (!token) {
+    captureReturnTo(window.location.pathname + window.location.search + window.location.hash)
     return <Navigate replace to="/login" />
   }
   if (!isSessionVerified && (authMeQuery.isLoading || authMeQuery.isRefetching || authMeQuery.isSuccess)) {
