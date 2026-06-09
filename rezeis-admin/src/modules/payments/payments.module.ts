@@ -21,6 +21,7 @@ import { InternalAddOnsPurchaseController } from './controllers/internal-addons-
 import { PublicPaymentWebhooksController } from './controllers/public-payment-webhooks.controller';
 import { PaymentReconciliationProcessor } from './processors/payment-reconciliation.processor';
 import { PaymentAutoRetryService } from './services/payment-auto-retry.service';
+import { PaymentPendingExpiryService } from './services/payment-pending-expiry.service';
 import { PaymentOpsAlertService } from './services/payment-ops-alert.service';
 import { PaymentProviderExecutionService } from './services/payment-provider-execution.service';
 import { PaymentGatewayRegistryService } from './services/payment-gateway-registry.service';
@@ -80,6 +81,7 @@ import { TelegramStarsWebhookService } from './services/telegram-stars-webhook.s
     PaymentReconciliationService,
     PaymentReconciliationProcessor,
     PaymentAutoRetryService,
+    PaymentPendingExpiryService,
   ],
 })
 export class PaymentsModule {}

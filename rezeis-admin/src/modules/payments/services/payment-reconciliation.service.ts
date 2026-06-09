@@ -40,12 +40,29 @@ export class PaymentReconciliationService {
     await this.paymentWebhookInboxService.markProcessing(event.id);
     try {
       const transaction = await this.findTransactionForEvent(event.paymentId);
-      if (isTerminalTransaction(transaction)) {
+      const nextStatus = mapProviderStatusToTransactionStatus(event.eventStatus);
+
+      // A COMPLETED transaction is final — never re-process (idempotent).
+      if (transaction.status === TransactionStatus.COMPLETED) {
         await this.paymentWebhookInboxService.markProcessed(event.id);
         return;
       }
+      // CANCELED/FAILED (e.g. auto-expired) is terminal UNLESS a late SUCCESS
+      // webhook arrives — then we revive the transaction and fulfil it so a
+      // genuinely-paid-but-late payment is never lost.
+      if (isTerminalTransaction(transaction) && nextStatus !== TransactionStatus.COMPLETED) {
+        await this.paymentWebhookInboxService.markProcessed(event.id);
+        return;
+      }
+      if (
+        isTerminalTransaction(transaction) &&
+        nextStatus === TransactionStatus.COMPLETED
+      ) {
+        this.logger.warn(
+          `Reviving ${transaction.status} transaction ${transaction.id} on a late SUCCESS webhook`,
+        );
+      }
 
-      const nextStatus = mapProviderStatusToTransactionStatus(event.eventStatus);
       await this.prismaService.transaction.update({
         where: { id: transaction.id },
         data: {

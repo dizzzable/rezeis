@@ -100,6 +100,7 @@ export const EVENT_TYPES = {
   PAYMENT_CHECKOUT_CREATED: 'payment.checkout_created',
   PAYMENT_COMPLETED: 'payment.completed',
   PAYMENT_FAILED: 'payment.failed',
+  PAYMENT_EXPIRED: 'payment.expired',
   PAYMENT_WEBHOOK_RECEIVED: 'payment.webhook_received',
 
   // Referral

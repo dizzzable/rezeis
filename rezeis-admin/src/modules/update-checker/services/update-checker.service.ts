@@ -12,8 +12,12 @@ import { shouldRunSchedules } from '../../../common/runtime/process-role.util';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const PACKAGE_JSON: { readonly version?: string } = require('../../../../package.json');
 
-const DEFAULT_GITHUB_REPO = process.env.REZEIS_UPDATE_REPO ?? '';
-const REIWA_GITHUB_REPO = process.env.REZEIS_REIWA_UPDATE_REPO ?? '';
+// Built-in defaults so update checks work out of the box without .env config.
+// Operators on self-hosted forks can override via env to point at their own
+// repos (or set an empty string is not honoured — these are the canonical
+// upstream repos this build is released from).
+const DEFAULT_GITHUB_REPO = (process.env.REZEIS_UPDATE_REPO ?? '').trim() || 'dizzzable/rezeis';
+const REIWA_GITHUB_REPO = (process.env.REZEIS_REIWA_UPDATE_REPO ?? '').trim() || 'dizzzable/reiwa';
 /** Public base URL of reiwa — used to pull its live version from /health when
  *  no heartbeat has been reported yet (e.g. right after an admin restart).
  *  Defaults to the same-VPS docker service name; the zod schema default isn't
