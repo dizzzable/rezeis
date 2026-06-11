@@ -96,12 +96,11 @@ export class BroadcastDeliveryService {
     broadcastId: string,
     messageIds: string[],
   ): Promise<{ sent: number; failed: number }> {
-    const botToken = this.getBotToken();
-    if (!botToken) {
-      await this.failBatch(messageIds, 'BOT_TOKEN not configured');
-      await this.checkAndFinalize(broadcastId);
-      return { sent: 0, failed: messageIds.length };
-    }
+    // BOT_TOKEN is only needed for DIRECT media delivery (sendPhoto/sendVideo).
+    // Text broadcasts are delivered via the reiwa bot (notification path), so a
+    // missing token must NOT fail the whole batch — web-push + cabinet feed +
+    // text Telegram all still work.
+    const botToken = this.configService.get<string>('BOT_TOKEN') ?? null;
 
     const broadcast = await this.prismaService.broadcast.findUnique({
       where: { id: broadcastId },
@@ -130,6 +129,8 @@ export class BroadcastDeliveryService {
       return { sent: 0, failed: messageIds.length };
     }
 
+    const hasMedia = mediaFileId !== null && (mediaType === 'photo' || mediaType === 'video');
+
     const messages = await this.prismaService.broadcastMessage.findMany({
       where: { id: { in: messageIds }, status: BroadcastMessageStatus.PENDING },
       select: { id: true, userId: true },
@@ -149,10 +150,11 @@ export class BroadcastDeliveryService {
         continue;
       }
 
-      // Cabinet feed + web-push for EVERY recipient (text). This is the
-      // guaranteed delivery surface for web-only users (no Telegram). We pass
-      // `skipTelegram` because the broadcast does its own Telegram send below
-      // (with media support the notification path lacks).
+      // Deliver via the notification fanout: cabinet feed (always) + web-push
+      // (always) + Telegram. For TEXT broadcasts the fanout also sends the
+      // Telegram message through the reiwa bot (no rezeis-admin BOT_TOKEN
+      // needed). For MEDIA broadcasts we skip the fanout's Telegram and send
+      // the photo/video directly below (the notify path is text-only).
       let feedOk = false;
       try {
         await this.userNotifications.create({
@@ -160,56 +162,58 @@ export class BroadcastDeliveryService {
           type: 'broadcast',
           payload: { broadcastId, text },
           preRenderedText: text || ' ',
-          skipTelegram: true,
+          skipTelegram: hasMedia,
         });
         feedOk = true;
       } catch (err: unknown) {
         this.logger.warn(
-          `Broadcast feed/web-push failed for ${message.userId}: ${
+          `Broadcast fanout failed for ${message.userId}: ${
             err instanceof Error ? err.message : String(err)
           }`,
         );
       }
 
-      // Telegram delivery (with media) for users who have it.
-      let telegramOk = false;
-      let telegramMessageId: number | undefined;
-      let telegramError: string | null = null;
-      if (user.telegramId !== null) {
-        const result = await this.sendTelegramMessage(botToken, {
-          chatId: user.telegramId.toString(),
-          text,
-          mediaType: mediaType ?? 'none',
-          mediaFileId,
-          parseMode,
-        });
-        telegramOk = result.ok;
-        telegramMessageId = result.messageId;
-        telegramError = result.ok ? null : (result.error ?? 'Unknown error');
+      // Direct media Telegram delivery (needs a local BOT_TOKEN).
+      let mediaOk = false;
+      let mediaMessageId: number | undefined;
+      let mediaError: string | null = null;
+      if (hasMedia && user.telegramId !== null) {
+        if (botToken) {
+          const result = await this.sendTelegramMessage(botToken, {
+            chatId: user.telegramId.toString(),
+            text,
+            mediaType: mediaType ?? 'none',
+            mediaFileId,
+            parseMode,
+          });
+          mediaOk = result.ok;
+          mediaMessageId = result.messageId;
+          mediaError = result.ok ? null : (result.error ?? 'Unknown error');
+          await sleep(TELEGRAM_RATE_LIMIT_MS);
+        } else {
+          mediaError = 'BOT_TOKEN not configured for media delivery';
+        }
+      } else if (!hasMedia && user.telegramId !== null) {
+        // Text Telegram is delivered async by the reiwa fanout; pace the loop
+        // lightly so we don't burst the notify webhook.
         await sleep(TELEGRAM_RATE_LIMIT_MS);
       }
 
-      // Status decision:
-      //   • Telegram users → status tracks Telegram (preserves retry/error
-      //     semantics); the feed/web-push above is a best-effort bonus channel.
-      //   • Web-only users → the cabinet feed IS the delivery channel; SENT
-      //     when the feed row was written.
-      const delivered = user.telegramId !== null ? telegramOk : feedOk;
-      if (delivered) {
+      // SENT when delivered on at least one channel: the cabinet feed row is a
+      // guaranteed in-app surface (and, for text, carries web-push + Telegram);
+      // or the direct media Telegram send succeeded.
+      if (feedOk || mediaOk) {
         await this.prismaService.broadcastMessage.update({
           where: { id: message.id },
           data: {
             status: BroadcastMessageStatus.SENT,
-            telegramMessageId: telegramMessageId ? BigInt(telegramMessageId) : null,
+            telegramMessageId: mediaMessageId ? BigInt(mediaMessageId) : null,
             sentAt: new Date(),
           },
         });
         sent++;
       } else {
-        await this.markFailed(
-          message.id,
-          telegramError ?? 'Delivery failed: no Telegram and feed write failed',
-        );
+        await this.markFailed(message.id, mediaError ?? 'Delivery failed on all channels');
         failed++;
       }
     }

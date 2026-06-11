@@ -72,10 +72,11 @@ describe('BroadcastDeliveryService', () => {
     assert.equal(JSON.stringify(eventCalls).includes('recipientCount'), true);
   });
 
-  it('delivers text broadcasts through Telegram and finalizes completed batches', async () => {
+  it('delivers text broadcasts via the notification fanout (no direct Telegram send)', async () => {
     const fetchCalls: unknown[] = [];
     const messageUpdates: unknown[] = [];
     const broadcastUpdates: unknown[] = [];
+    const createCalls: Array<{ skipTelegram?: boolean }> = [];
     const service = new BroadcastDeliveryService(
       {
         broadcast: {
@@ -94,13 +95,7 @@ describe('BroadcastDeliveryService', () => {
           },
         },
         broadcastMessage: {
-          findMany: async (args: unknown) => {
-            assert.deepStrictEqual(args, {
-              where: { id: { in: ['message-1'] }, status: BroadcastMessageStatus.PENDING },
-              select: { id: true, userId: true },
-            });
-            return [{ id: 'message-1', userId: 'user-1' }];
-          },
+          findMany: async () => [{ id: 'message-1', userId: 'user-1' }],
           update: async (args: unknown) => {
             messageUpdates.push(args);
           },
@@ -111,27 +106,22 @@ describe('BroadcastDeliveryService', () => {
           },
         },
         user: {
-          findUnique: async (args: unknown) => {
-            assert.deepStrictEqual(args, {
-              where: { id: 'user-1' },
-              select: { telegramId: true },
-            });
-            return { telegramId: 12345n };
-          },
+          findUnique: async () => ({ telegramId: 12345n }),
         },
       } as never,
       configService('bot-token'),
       { info: () => undefined } as never,
-      { create: async () => 'evt' } as never,
+      {
+        create: async (input: { skipTelegram?: boolean }) => {
+          createCalls.push(input);
+          return 'evt';
+        },
+      } as never,
     );
 
     await withFetch(async (input, init) => {
       fetchCalls.push({ input, init });
-      return {
-        ok: true,
-        json: async () => ({ result: { message_id: 42 } }),
-        text: async () => '',
-      } as Response;
+      return { ok: true, json: async () => ({}), text: async () => '' } as Response;
     }, async () => {
       assert.deepStrictEqual(await service.deliverBatch('broadcast-1', ['message-1']), {
         sent: 1,
@@ -139,63 +129,80 @@ describe('BroadcastDeliveryService', () => {
       });
     });
 
-    assert.equal((fetchCalls[0] as { readonly input: string }).input, 'https://api.telegram.org/botbot-token/sendMessage');
-    assert.deepStrictEqual(
-      JSON.parse((fetchCalls[0] as { readonly init: { readonly body: string } }).init.body),
-      { chat_id: '12345', text: 'Hello user', parse_mode: 'HTML' },
-    );
+    // Text broadcasts go through the reiwa bot via the fanout — no direct
+    // api.telegram.org call from rezeis-admin, and skipTelegram is false so the
+    // fanout itself sends the Telegram message.
+    assert.equal(fetchCalls.length, 0);
+    assert.equal(createCalls[0]?.skipTelegram, false);
     const messageUpdate = messageUpdates[0] as {
-      readonly data: { readonly status: BroadcastMessageStatus; readonly telegramMessageId: bigint };
+      readonly data: { readonly status: BroadcastMessageStatus };
     };
     assert.equal(messageUpdate.data.status, BroadcastMessageStatus.SENT);
-    assert.equal(messageUpdate.data.telegramMessageId, 42n);
     assert.equal(JSON.stringify(broadcastUpdates).includes(BroadcastStatus.COMPLETED), true);
   });
 
-  it('marks the batch failed and finalizes when BOT_TOKEN is missing', async () => {
-    const updateManyCalls: unknown[] = [];
-    const broadcastUpdates: unknown[] = [];
+  it('delivers text broadcasts even when BOT_TOKEN is missing (via the reiwa bot)', async () => {
+    const messageUpdates: unknown[] = [];
+    const createCalls: Array<{ skipTelegram?: boolean }> = [];
+    const fetchCalls: unknown[] = [];
     const service = new BroadcastDeliveryService(
       {
         broadcast: {
-          findUnique: async () => ({ status: BroadcastStatus.PROCESSING }),
-          update: async (args: unknown) => {
-            broadcastUpdates.push(args);
+          findUnique: async (args: { readonly select?: { readonly payload?: boolean } }) => {
+            if (args.select?.payload) {
+              return {
+                id: 'broadcast-1',
+                status: BroadcastStatus.PROCESSING,
+                payload: { text: 'Important news', mediaType: 'none' },
+              };
+            }
+            return { status: BroadcastStatus.PROCESSING };
           },
+          update: async () => undefined,
         },
         broadcastMessage: {
-          updateMany: async (args: unknown) => {
-            updateManyCalls.push(args);
+          findMany: async () => [{ id: 'message-1', userId: 'user-1' }],
+          update: async (args: unknown) => {
+            messageUpdates.push(args);
           },
           count: async (args: { readonly where: { readonly status: BroadcastMessageStatus } }) => {
             if (args.where.status === BroadcastMessageStatus.PENDING) return 0;
-            if (args.where.status === BroadcastMessageStatus.FAILED) return 2;
+            if (args.where.status === BroadcastMessageStatus.SENT) return 1;
             return 0;
           },
+        },
+        user: {
+          findUnique: async () => ({ telegramId: 12345n }),
         },
       } as never,
       configService(null),
       { info: () => undefined } as never,
-      { create: async () => 'evt' } as never,
+      {
+        create: async (input: { skipTelegram?: boolean }) => {
+          createCalls.push(input);
+          return 'evt';
+        },
+      } as never,
     );
 
-    assert.deepStrictEqual(await service.deliverBatch('broadcast-1', ['message-1', 'message-2']), {
-      sent: 0,
-      failed: 2,
+    await withFetch(async (input, init) => {
+      fetchCalls.push({ input, init });
+      return { ok: true, json: async () => ({}), text: async () => '' } as Response;
+    }, async () => {
+      assert.deepStrictEqual(await service.deliverBatch('broadcast-1', ['message-1']), {
+        sent: 1,
+        failed: 0,
+      });
     });
-    assert.deepStrictEqual(updateManyCalls, [
-      {
-        where: { id: { in: ['message-1', 'message-2'] } },
-        data: {
-          status: BroadcastMessageStatus.FAILED,
-          errorMessage: 'BOT_TOKEN not configured',
-        },
-      },
-    ]);
-    assert.equal(JSON.stringify(broadcastUpdates).includes('failedCount'), true);
+
+    // No direct Telegram call (no token), but the fanout delivered it.
+    assert.equal(fetchCalls.length, 0);
+    assert.equal(createCalls.length, 1);
+    const update = messageUpdates[0] as { readonly data: { readonly status: BroadcastMessageStatus } };
+    assert.equal(update.data.status, BroadcastMessageStatus.SENT);
   });
 
-  it('sanitizes Telegram provider failures before persisting message errors', async () => {
+  it('sanitizes Telegram provider failures on the media path before persisting errors', async () => {
     const messageUpdates: unknown[] = [];
     const service = new BroadcastDeliveryService(
       {
@@ -205,7 +212,7 @@ describe('BroadcastDeliveryService', () => {
               return {
                 id: 'broadcast-1',
                 status: BroadcastStatus.PROCESSING,
-                payload: { text: 'Hello user', mediaType: 'none' },
+                payload: { text: 'Hello user', mediaType: 'photo', mediaFileId: 'file-1' },
               };
             }
             return { status: BroadcastStatus.PROCESSING };
@@ -225,7 +232,9 @@ describe('BroadcastDeliveryService', () => {
       } as never,
       configService('bot-token'),
       { info: () => undefined } as never,
-      { create: async () => 'evt' } as never,
+      // Feed write fails too, so the message is FAILED with the (sanitized)
+      // media Telegram error rather than SENT via the feed fallback.
+      { create: async () => { throw new Error('feed down'); } } as never,
     );
 
     await withFetch(async () => {
@@ -305,10 +314,10 @@ describe('BroadcastDeliveryService', () => {
 
     // No Telegram call for a web-only user.
     assert.equal(fetchCalls.length, 0);
-    // Cabinet feed + web-push attempted with skipTelegram (broadcast owns TG).
+    // Cabinet feed + web-push + (text) reiwa-Telegram via the fanout.
     assert.equal(createCalls.length, 1);
     assert.equal(createCalls[0]?.userId, 'web-user-1');
-    assert.equal(createCalls[0]?.skipTelegram, true);
+    assert.equal(createCalls[0]?.skipTelegram, false);
     // Message marked SENT via the feed channel.
     const update = messageUpdates[0] as { readonly data: { readonly status: BroadcastMessageStatus } };
     assert.equal(update.data.status, BroadcastMessageStatus.SENT);
