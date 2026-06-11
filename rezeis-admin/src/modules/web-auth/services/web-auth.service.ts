@@ -1,9 +1,11 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
+  ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
@@ -11,7 +13,10 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { PasswordHashService } from '../../auth/services/password-hash.service';
 import { loginPolicy } from '../../auth/utils/login-policy.util';
+import { readInviteBypassFlag } from '../../referrals/services/referral-invite-limits.service';
 import { ReferralManualAttachService } from '../../referrals/services/referral-manual-attach.service';
+import { AccessModeGuard } from '../../settings/services/access-mode-guard.service';
+import { SettingsService } from '../../settings/services/settings.service';
 import { WebAuthChangePasswordDto } from '../dto/web-auth-change-password.dto';
 import { WebAuthLoginDto } from '../dto/web-auth-login.dto';
 import { WebAuthRecoverDto } from '../dto/web-auth-recover.dto';
@@ -58,9 +63,45 @@ export class WebAuthService {
     private readonly prismaService: PrismaService,
     private readonly passwordHashService: PasswordHashService,
     private readonly referralManualAttachService: ReferralManualAttachService,
+    private readonly settingsService: SettingsService,
+    private readonly accessModeGuard: AccessModeGuard,
   ) {}
 
   public async register(input: WebAuthRegisterDto): Promise<WebAuthRegisterResultInterface> {
+    // Two-layer enforcement (Property 2): the reiwa edge runs the same
+    // check, but a direct internal API call would otherwise bypass the
+    // platform access mode. See `.kiro/specs/access-mode-enforcement`.
+    const policy = await this.settingsService.getInternalPlatformPolicy();
+    const hasInviteCode =
+      typeof input.referralCode === 'string' && input.referralCode.trim().length > 0;
+    const rejection = this.accessModeGuard.evaluate({
+      gate: 'register',
+      mode: policy.accessMode,
+      hasInvite: hasInviteCode,
+    });
+    if (rejection !== null) {
+      throw rejection.status === 503
+        ? new ServiceUnavailableException({ code: rejection.code, message: rejection.message })
+        : new ForbiddenException({ code: rejection.code, message: rejection.message });
+    }
+
+    // Under `INVITED` mode the referral code must actually resolve to a
+    // valid referrer. We also read the inviter's per-user
+    // `bypassInviteGate` flag (Property 8) — when true, the referrer is
+    // exempt from any future global TTL / slot caps applied at sign-up.
+    if (policy.accessMode === 'INVITED' && hasInviteCode) {
+      const referrer = await this.resolveReferrerWithBypass(input.referralCode!.trim());
+      if (referrer === null) {
+        throw new ForbiddenException({
+          code: 'INVITE_REQUIRED',
+          message: 'Referral code is invalid or has expired',
+        });
+      }
+      this.logger.log(
+        `INVITED registration accepted via referrer=${referrer.id} bypass=${referrer.bypass}`,
+      );
+    }
+
     if (!loginPolicy.isValidLogin(input.login)) {
       throw new BadRequestException('login is invalid');
     }
@@ -176,6 +217,32 @@ export class WebAuthService {
       where: { OR: orConditions },
       select: { id: true },
     });
+  }
+
+  /**
+   * Like {@link resolveReferrer}, but also returns the inviter's
+   * per-user `bypassInviteGate` flag from `User.referralInviteSettings`.
+   * Used by the platform `INVITED` access-mode gate (Requirement 7,
+   * Property 8) so a VIP referrer admits new sign-ups regardless of
+   * future global TTL / slot caps.
+   */
+  private async resolveReferrerWithBypass(
+    code: string,
+  ): Promise<{ id: string; bypass: boolean } | null> {
+    const orConditions: Prisma.UserWhereInput[] = [
+      { id: code },
+      { username: code },
+      { referralCode: code },
+    ];
+    if (/^\d{1,19}$/.test(code)) {
+      orConditions.push({ telegramId: BigInt(code) });
+    }
+    const referrer = await this.prismaService.user.findFirst({
+      where: { OR: orConditions },
+      select: { id: true, referralInviteSettings: true },
+    });
+    if (referrer === null) return null;
+    return { id: referrer.id, bypass: readInviteBypassFlag(referrer.referralInviteSettings) };
   }
 
   /**

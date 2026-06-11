@@ -239,6 +239,8 @@ export const en = {
       title: 'Invite settings',
       useGlobal: 'Use global settings',
       useGlobalHint: 'Disable to set per-user invite limits below.',
+      bypassToggleLabel: 'Bypass access-mode restrictions',
+      bypassToggleHint: 'VIP bypass: this user can register and pass the invite gate even while the platform is in “Invite only” mode. Applies independently of global/per-user referral limits.',
       linkTtlEnabled: 'Enforce link TTL',
       linkTtlSeconds: 'Link TTL (seconds)',
       slotsEnabled: 'Use slot capacity',

@@ -465,6 +465,13 @@ export const en = {
       title: 'Platform Settings',
       description: 'Control access mode, currency, and channel requirements',
       accessMode: 'Access Mode',
+      accessModeLabels: {
+        PUBLIC: 'Public',
+        INVITED: 'Invite only',
+        PURCHASE_BLOCKED: 'Purchases blocked',
+        REG_BLOCKED: 'Registration closed',
+        RESTRICTED: 'Fully restricted',
+      },
       accessModeHints: {
         PUBLIC: 'Open registration — anyone can use the bot and purchase subscriptions',
         INVITED: 'Invite-only — only users with a valid invite link can register',

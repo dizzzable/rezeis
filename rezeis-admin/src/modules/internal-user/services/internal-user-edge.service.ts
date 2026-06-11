@@ -1,12 +1,16 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { Locale, Prisma } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { AccessModeGuard } from '../../settings/services/access-mode-guard.service';
+import { SettingsService } from '../../settings/services/settings.service';
 import { InternalBootstrapUserInput } from '../interfaces/internal-user-bootstrap.interface';
 import {
   InternalUserNotificationInterface,
@@ -40,7 +44,11 @@ import { isInvitedUser } from '../../plans/utils/trial-invite.util';
 export class InternalUserEdgeService {
   private readonly logger = new Logger(InternalUserEdgeService.name);
 
-  public constructor(private readonly prismaService: PrismaService) {}
+  public constructor(
+    private readonly prismaService: PrismaService,
+    private readonly settingsService: SettingsService,
+    private readonly accessModeGuard: AccessModeGuard,
+  ) {}
 
   // ── Bootstrap / language ─────────────────────────────────────────────────
 
@@ -71,6 +79,38 @@ export class InternalUserEdgeService {
     input: InternalBootstrapUserInput,
   ): Promise<InternalUserSessionInterface> {
     const telegramIdBig = this.parseTelegramId(input.telegramId);
+
+    // Two-layer enforcement (Property 2): the bot already short-circuits
+    // a brand-new user under REG_BLOCKED / RESTRICTED, but a direct
+    // internal call would otherwise create a User row and bypass the
+    // platform mode. We re-check here against the Settings row.
+    //
+    // Rule: the gate applies only to BRAND-NEW users. An existing user
+    // continuing to interact with the bot (refreshing name / username)
+    // proceeds even in REG_BLOCKED so they don't get locked out of their
+    // own account.
+    const existing = await this.prismaService.user.findUnique({
+      where: { telegramId: telegramIdBig },
+      select: { id: true },
+    });
+    if (existing === null) {
+      const policy = await this.settingsService.getInternalPlatformPolicy();
+      // For Telegram-driven sign-up there's no referralCode yet; the
+      // INVITED gate would surface as INVITE_REQUIRED. The bot avoids
+      // this path on the edge anyway (it shows a banner), so this is
+      // the defence-in-depth fallback.
+      const rejection = this.accessModeGuard.evaluate({
+        gate: 'register',
+        mode: policy.accessMode,
+        hasInvite: false,
+      });
+      if (rejection !== null) {
+        throw rejection.status === 503
+          ? new ServiceUnavailableException({ code: rejection.code, message: rejection.message })
+          : new ForbiddenException({ code: rejection.code, message: rejection.message });
+      }
+    }
+
     const language = this.parseLocale(input.language);
     const data: Prisma.UserCreateInput = {
       telegramId: telegramIdBig,
@@ -92,16 +132,15 @@ export class InternalUserEdgeService {
   }
 
   public async updateLanguage(
-    telegramId: string,
+    reference: string,
     language: string,
   ): Promise<InternalUserSessionInterface> {
-    const telegramIdBig = this.parseTelegramId(telegramId);
     const locale = this.parseLocale(language);
     if (locale === null) {
       throw new BadRequestException(`Unsupported language: "${language}"`);
     }
     const user = await this.prismaService.user.update({
-      where: { telegramId: telegramIdBig },
+      where: buildUserReferenceWhere(reference),
       data: { language: locale },
       include: INTERNAL_USER_INCLUDE,
     });
@@ -309,6 +348,20 @@ export class InternalUserEdgeService {
   }
 
   // ── Bot block flag ──────────────────────────────────────────────────────
+
+  /**
+   * Lightweight existence probe used before `bootstrapByTelegram` to
+   * tell reiwa-bot whether a Telegram user is brand-new (no `User` row
+   * yet) or returning. Used by the platform `INVITED` / `REG_BLOCKED`
+   * gate so the bot can show a mode banner instead of creating a User.
+   */
+  public async userExists(reference: string): Promise<{ exists: boolean }> {
+    const user = await this.prismaService.user.findUnique({
+      where: buildUserReferenceWhere(reference),
+      select: { id: true },
+    });
+    return { exists: user !== null };
+  }
 
   /**
    * Idempotently marks the user as having blocked the bot. Used by

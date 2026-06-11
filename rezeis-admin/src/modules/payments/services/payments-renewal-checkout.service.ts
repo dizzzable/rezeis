@@ -1,4 +1,9 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import {
+  BadRequestException,
+  ForbiddenException,
+  Injectable,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import {
   PaymentGatewayType,
   Prisma,
@@ -9,6 +14,8 @@ import {
 } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { AccessModeGuard } from '../../settings/services/access-mode-guard.service';
+import { SettingsService } from '../../settings/services/settings.service';
 import { SubscriptionRenewalService } from '../../subscriptions/services/subscription-renewal.service';
 import { PricedRenewalInterface } from '../../subscriptions/interfaces/subscription-renewal.interface';
 import { InternalPaymentCheckoutInterface } from '../interfaces/internal-payment-checkout.interface';
@@ -40,11 +47,27 @@ export class PaymentsRenewalCheckoutService {
     private readonly prismaService: PrismaService,
     private readonly subscriptionRenewalService: SubscriptionRenewalService,
     private readonly paymentProviderExecutionService: PaymentProviderExecutionService,
+    private readonly settingsService: SettingsService,
+    private readonly accessModeGuard: AccessModeGuard,
   ) {}
 
   public async renewalCheckout(
     input: RenewalCheckoutInput,
   ): Promise<InternalPaymentCheckoutInterface> {
+    // Two-layer enforcement (Property 2). Renewal stays open under
+    // PURCHASE_BLOCKED so paying customers don't lose VPN; only
+    // RESTRICTED freezes it (handled by the guard).
+    const policy = await this.settingsService.getInternalPlatformPolicy();
+    const rejection = this.accessModeGuard.evaluate({
+      gate: 'purchase.renewal',
+      mode: policy.accessMode,
+    });
+    if (rejection !== null) {
+      throw rejection.status === 503
+        ? new ServiceUnavailableException({ code: rejection.code, message: rejection.message })
+        : new ForbiddenException({ code: rejection.code, message: rejection.message });
+    }
+
     const channel = input.channel ?? PurchaseChannel.WEB;
 
     const gateway = await this.prismaService.paymentGateway.findUnique({

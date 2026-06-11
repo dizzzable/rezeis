@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, ServiceUnavailableException } from '@nestjs/common';
 import {
   Currency,
   PaymentGatewayType,
@@ -11,6 +11,7 @@ import {
 } from '@prisma/client';
 
 import { PaymentsCheckoutService } from '../src/modules/payments/services/payments-checkout.service';
+import { AccessModeGuard } from '../src/modules/settings/services/access-mode-guard.service';
 
 describe('PaymentsCheckoutService', () => {
   it('creates checkout for an active and configured gateway', async () => {
@@ -28,6 +29,83 @@ describe('PaymentsCheckoutService', () => {
     assert.equal(checkout.paymentId, 'payment-1')
     assert.equal(checkout.checkoutUrl, 'https://checkout.example.com')
     assert.equal(state.transactionUpdates.length, 1)
+  })
+
+  // ── Access-mode wiring (real AccessModeGuard) ──────────────────────────────
+  // Integration coverage for Task 36: checkout consults the platform access
+  // mode through the wired guard, branching on purchaseType.
+
+  it('NEW purchase rejects under PURCHASE_BLOCKED with 403 PURCHASES_DISABLED', async () => {
+    const { service, state } = createService({ accessMode: 'PURCHASE_BLOCKED' })
+    await assert.rejects(
+      () =>
+        service.checkout({
+          userId: 'user-1',
+          purchaseType: PurchaseType.NEW,
+          planId: 'plan-1',
+          durationDays: 30,
+          gatewayType: PaymentGatewayType.YOOKASSA,
+          channel: PurchaseChannel.WEB,
+        }),
+      (error: unknown) =>
+        error instanceof ForbiddenException &&
+        (error.getResponse() as { code?: string }).code === 'PURCHASES_DISABLED',
+    )
+    // Gate fires before the transaction draft — nothing persisted.
+    assert.equal(state.transactionUpdates.length, 0)
+    assert.equal(state.providerCreateCalls, 0)
+  })
+
+  it('UPGRADE purchase rejects under PURCHASE_BLOCKED', async () => {
+    const { service } = createService({ accessMode: 'PURCHASE_BLOCKED' })
+    await assert.rejects(
+      () =>
+        service.checkout({
+          userId: 'user-1',
+          purchaseType: PurchaseType.UPGRADE,
+          planId: 'plan-1',
+          durationDays: 30,
+          gatewayType: PaymentGatewayType.YOOKASSA,
+          channel: PurchaseChannel.WEB,
+          subscriptionId: 'sub-1',
+        }),
+      (error: unknown) =>
+        error instanceof ForbiddenException &&
+        (error.getResponse() as { code?: string }).code === 'PURCHASES_DISABLED',
+    )
+  })
+
+  it('NEW purchase rejects under RESTRICTED with 503 SERVICE_RESTRICTED', async () => {
+    const { service } = createService({ accessMode: 'RESTRICTED' })
+    await assert.rejects(
+      () =>
+        service.checkout({
+          userId: 'user-1',
+          purchaseType: PurchaseType.NEW,
+          planId: 'plan-1',
+          durationDays: 30,
+          gatewayType: PaymentGatewayType.YOOKASSA,
+          channel: PurchaseChannel.WEB,
+        }),
+      (error: unknown) =>
+        error instanceof ServiceUnavailableException &&
+        (error.getResponse() as { code?: string }).code === 'SERVICE_RESTRICTED',
+    )
+  })
+
+  it('NEW purchase passes under INVITED / REG_BLOCKED (purchases unaffected)', async () => {
+    for (const accessMode of ['INVITED', 'REG_BLOCKED'] as const) {
+      const { service } = createService({ accessMode })
+      const checkout = await service.checkout({
+        userId: 'user-1',
+        purchaseType: PurchaseType.NEW,
+        planId: 'plan-1',
+        durationDays: 30,
+        gatewayType: PaymentGatewayType.YOOKASSA,
+        channel: PurchaseChannel.WEB,
+      })
+      assert.equal(checkout.paymentId, 'payment-1')
+    }
   })
 
   it('rejects Telegram Stars checkout on WEB channel', async () => {
@@ -159,6 +237,7 @@ function createService(input: {
   readonly gatewaySettings?: Record<string, unknown>
   readonly transactionGatewayData?: Record<string, unknown>
   readonly draftError?: Error
+  readonly accessMode?: 'PUBLIC' | 'INVITED' | 'PURCHASE_BLOCKED' | 'REG_BLOCKED' | 'RESTRICTED'
 } = {}) {
   const transactionUpdates: Record<string, unknown>[] = []
   const state = {
@@ -249,6 +328,14 @@ function createService(input: {
       prismaService as never,
       paymentsTransactionsService as never,
       paymentProviderExecutionService as never,
+      // SettingsService stub — returns the requested mode (PUBLIC default so
+      // the access-mode gate is a no-op for the legacy tests).
+      {
+        getInternalPlatformPolicy: async () => ({ accessMode: (input.accessMode ?? 'PUBLIC') as never }),
+      } as never,
+      // AccessModeGuard — real guard when `accessMode` is supplied (wiring
+      // test), no-op evaluator otherwise.
+      (input.accessMode === undefined ? { evaluate: () => null } : new AccessModeGuard()) as never,
     ),
     state,
   }

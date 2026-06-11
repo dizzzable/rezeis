@@ -649,20 +649,27 @@ export class AdminUserManagementController {
  * Translates the incoming DTO into a value suitable for
  * `Prisma.UserUpdateInput.referralInviteSettings`.
  *
- * - If the operator selects "use global", or the body has no per-field
- *   overrides, we wipe the column to NULL via `Prisma.JsonNull`. This
- *   keeps query semantics identical to a freshly-created user.
+ * - If the operator selects "use global" AND no `bypassInviteGate` is
+ *   set, we wipe the column to NULL via `Prisma.JsonNull`. This keeps
+ *   query semantics identical to a freshly-created user.
  * - Otherwise we collapse the body into a small JSON object and only
  *   keep the fields that were explicitly provided. Implicit fields
  *   continue to fall back to the global config at read time.
+ * - `bypassInviteGate` is independent of `useGlobalSettings` — when set,
+ *   it is always persisted, even alongside `useGlobalSettings: true`,
+ *   so a VIP user can keep using the global referral limits while still
+ *   bypassing the platform-wide `INVITED` gate.
  */
 function buildInviteSettingsValue(
   body: UpdateUserInviteSettingsDto,
 ): Prisma.InputJsonValue | typeof Prisma.JsonNull {
+  const out: Record<string, unknown> = {};
   if (body.useGlobalSettings === true) {
+    if (body.bypassInviteGate === true) {
+      return { bypassInviteGate: true };
+    }
     return Prisma.JsonNull;
   }
-  const out: Record<string, unknown> = {};
   if (body.useGlobalSettings === false) {
     out.useGlobalSettings = false;
   }
@@ -674,6 +681,7 @@ function buildInviteSettingsValue(
     out.refillThresholdQualified = body.refillThresholdQualified;
   }
   if (body.refillAmount !== undefined) out.refillAmount = body.refillAmount;
+  if (body.bypassInviteGate !== undefined) out.bypassInviteGate = body.bypassInviteGate;
 
   if (Object.keys(out).length === 0) {
     return Prisma.JsonNull;

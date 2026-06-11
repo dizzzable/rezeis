@@ -609,6 +609,12 @@ function UserHeader({
   const identityLabel = t(`userDetailPanel.header.identityKind.${identityKey}`)
 
   const tempPasswordExpiresAt: string | null = user.webAccount?.temporaryPasswordExpiresAt ?? null
+  // The badge is "active" only while the timestamp is in the future. Without
+  // this guard the amber notice lingers forever after expiry, even though the
+  // back-end has long since rejected the temp password.
+  const tempPasswordActive: boolean =
+    tempPasswordExpiresAt !== null &&
+    new Date(tempPasswordExpiresAt).getTime() > Date.now()
 
   return (
     <div className="space-y-3">
@@ -652,11 +658,11 @@ function UserHeader({
       </div>
 
       {/* Inline alerts */}
-      {(user.webAccount?.requiresPasswordChange || tempPasswordExpiresAt) && (
+      {(user.webAccount?.requiresPasswordChange || tempPasswordActive) && (
         <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
-          {tempPasswordExpiresAt
+          {tempPasswordActive
             ? t('userDetailPanel.header.webPasswordTemporary', {
-                expiresAt: new Date(tempPasswordExpiresAt).toLocaleString(
+                expiresAt: new Date(tempPasswordExpiresAt!).toLocaleString(
                   i18n.language === 'ru' ? 'ru-RU' : 'en-US',
                 ),
               })
@@ -1877,6 +1883,7 @@ interface InviteOverride {
   initialSlots?: number | null
   refillThresholdQualified?: number | null
   refillAmount?: number | null
+  bypassInviteGate?: boolean
 }
 
 function readOverride(raw: unknown): InviteOverride {
@@ -1949,6 +1956,12 @@ function InviteSettingsTab({
   )
   const [dirty, setDirty] = useState(false)
 
+  // VIP bypass — persists independently of `useGlobalSettings`: a user can ride
+  // the global referral limits yet still skip the platform invite gate.
+  const [bypassInviteGate, setBypassInviteGate] = useState(
+    initialOverride.bypassInviteGate ?? false,
+  )
+
   const parseNullableInt = (raw: string): number | null => {
     if (raw.trim() === '') return null
     const n = parseInt(raw, 10)
@@ -1960,6 +1973,7 @@ function InviteSettingsTab({
       if (useGlobal) {
         return api.patch(`/admin/users/${telegramId}/invite-settings`, {
           useGlobalSettings: true,
+          bypassInviteGate,
         })
       }
       return api.patch(`/admin/users/${telegramId}/invite-settings`, {
@@ -1970,6 +1984,7 @@ function InviteSettingsTab({
         initialSlots: slotsEnabled ? parseNullableInt(initialSlots) : null,
         refillThresholdQualified: slotsEnabled ? parseNullableInt(refillThreshold) : null,
         refillAmount: slotsEnabled ? parseNullableInt(refillAmount) : null,
+        bypassInviteGate,
       })
     },
     onSuccess: () => {
@@ -2000,6 +2015,24 @@ function InviteSettingsTab({
               setUseGlobal(v)
               setDirty(true)
             }}
+          />
+        </div>
+
+        {/* VIP bypass — independent of the global/override referral limits. */}
+        <div className="flex items-center justify-between rounded-lg border border-amber-500/20 bg-amber-500/5 p-3">
+          <div className="pr-3">
+            <Label className="text-sm">{t('userDetailPanel.invites.bypassToggleLabel')}</Label>
+            <p className="text-xs text-muted-foreground">
+              {t('userDetailPanel.invites.bypassToggleHint')}
+            </p>
+          </div>
+          <Switch
+            checked={bypassInviteGate}
+            onCheckedChange={(v) => {
+              setBypassInviteGate(v)
+              setDirty(true)
+            }}
+            aria-label={t('userDetailPanel.invites.bypassToggleLabel')}
           />
         </div>
 
@@ -2316,14 +2349,15 @@ function WebCabinetTab({
                   {t('userDetailPanel.web.requiresChangeNotice')}
                 </div>
               )}
-              {webAccount.temporaryPasswordExpiresAt && (
-                <InfoRow
-                  label={t('userDetailPanel.web.tempUntil')}
-                  value={new Date(webAccount.temporaryPasswordExpiresAt).toLocaleString(
-                    i18n.language === 'ru' ? 'ru-RU' : 'en-US',
-                  )}
-                />
-              )}
+              {webAccount.temporaryPasswordExpiresAt &&
+                new Date(webAccount.temporaryPasswordExpiresAt).getTime() > Date.now() && (
+                  <InfoRow
+                    label={t('userDetailPanel.web.tempUntil')}
+                    value={new Date(webAccount.temporaryPasswordExpiresAt).toLocaleString(
+                      i18n.language === 'ru' ? 'ru-RU' : 'en-US',
+                    )}
+                  />
+                )}
             </CardContent>
           </Card>
 

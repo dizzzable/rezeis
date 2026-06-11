@@ -1,4 +1,10 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import {
   AddOnType,
   Currency,
@@ -13,6 +19,8 @@ import {
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { PricingService } from '../../plans/services/pricing.service';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
+import { AccessModeGuard } from '../../settings/services/access-mode-guard.service';
+import { SettingsService } from '../../settings/services/settings.service';
 import { isGatewayConfigured } from '../utils/payment-gateway-settings.util';
 import {
   InternalPaymentCheckoutInterface,
@@ -57,9 +65,25 @@ export class AddOnPurchaseService {
     private readonly paymentProviderExecutionService: PaymentProviderExecutionService,
     private readonly paymentSubscriptionMutationService: PaymentSubscriptionMutationService,
     private readonly profileSyncQueueService: ProfileSyncQueueService,
+    private readonly settingsService: SettingsService,
+    private readonly accessModeGuard: AccessModeGuard,
   ) {}
 
   public async checkout(input: AddOnCheckoutInput): Promise<InternalPaymentCheckoutInterface> {
+    // Two-layer enforcement (Property 2): add-on purchases are gated
+    // exactly like NEW/UPGRADE — closed under PURCHASE_BLOCKED and
+    // RESTRICTED.
+    const policy = await this.settingsService.getInternalPlatformPolicy();
+    const rejection = this.accessModeGuard.evaluate({
+      gate: 'purchase.addon',
+      mode: policy.accessMode,
+    });
+    if (rejection !== null) {
+      throw rejection.status === 503
+        ? new ServiceUnavailableException({ code: rejection.code, message: rejection.message })
+        : new ForbiddenException({ code: rejection.code, message: rejection.message });
+    }
+
     const channel = input.channel ?? PurchaseChannel.WEB;
 
     // Resolve the canonical user from either the reiwa_id (web / web-first

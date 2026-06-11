@@ -1,4 +1,10 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import {
   PaymentGatewayType,
   Prisma,
@@ -8,6 +14,11 @@ import {
 } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import {
+  AccessModeGate,
+  AccessModeGuard,
+} from '../../settings/services/access-mode-guard.service';
+import { SettingsService } from '../../settings/services/settings.service';
 import { InternalPaymentCheckoutDto } from '../dto/internal-payment-checkout.dto';
 import {
   InternalPaymentCheckoutInterface,
@@ -24,6 +35,8 @@ export class PaymentsCheckoutService {
     private readonly prismaService: PrismaService,
     private readonly paymentsTransactionsService: PaymentsTransactionsService,
     private readonly paymentProviderExecutionService: PaymentProviderExecutionService,
+    private readonly settingsService: SettingsService,
+    private readonly accessModeGuard: AccessModeGuard,
   ) {}
 
   /**
@@ -52,6 +65,23 @@ export class PaymentsCheckoutService {
   }
 
   public async checkout(input: InternalPaymentCheckoutDto): Promise<InternalPaymentCheckoutInterface> {
+    // Two-layer enforcement (Property 2): the reiwa edge runs the same
+    // gate, but a direct internal API call would otherwise bypass the
+    // platform access mode. Renewal is intentionally NOT gated here —
+    // it flows through `PaymentsRenewalCheckoutService` and uses the
+    // `purchase.renewal` gate (open under PURCHASE_BLOCKED).
+    const policy = await this.settingsService.getInternalPlatformPolicy();
+    const gate = mapPurchaseTypeToAccessGate(input.purchaseType);
+    const rejection = this.accessModeGuard.evaluate({
+      gate,
+      mode: policy.accessMode,
+    });
+    if (rejection !== null) {
+      throw rejection.status === 503
+        ? new ServiceUnavailableException({ code: rejection.code, message: rejection.message })
+        : new ForbiddenException({ code: rejection.code, message: rejection.message });
+    }
+
     const userId = await this.resolveUserId(input);
     const gateway = await this.prismaService.paymentGateway.findUnique({
       where: { type: input.gatewayType },
@@ -231,4 +261,22 @@ function readOptionalString(
     }
   }
   return null;
+}
+/**
+ * Maps a {@link PurchaseType} onto the matching {@link AccessModeGate}.
+ * RENEW lives in `PaymentsRenewalCheckoutService` and gates separately;
+ * if it ever reaches `checkout()` (legacy callers) we treat it as a
+ * renewal so PURCHASE_BLOCKED keeps allowing it.
+ */
+function mapPurchaseTypeToAccessGate(purchaseType: PurchaseType): AccessModeGate {
+  switch (purchaseType) {
+    case PurchaseType.UPGRADE:
+      return 'purchase.upgrade';
+    case PurchaseType.RENEW:
+      return 'purchase.renewal';
+    case PurchaseType.NEW:
+    case PurchaseType.ADDITIONAL:
+    default:
+      return 'purchase.new';
+  }
 }

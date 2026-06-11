@@ -6,13 +6,16 @@ import { describe, it } from 'node:test';
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   NotFoundException,
+  ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
 
 import { PrismaService } from '../src/common/prisma/prisma.service';
 import { PasswordHashService } from '../src/modules/auth/services/password-hash.service';
 import { ReferralManualAttachService } from '../src/modules/referrals/services/referral-manual-attach.service';
+import { AccessModeGuard } from '../src/modules/settings/services/access-mode-guard.service';
 import { WebAuthService } from '../src/modules/web-auth/services/web-auth.service';
 
 describe('WebAuthService', () => {
@@ -276,6 +279,52 @@ describe('WebAuthService', () => {
       (error: unknown) => error instanceof UnauthorizedException && error.message === 'Invalid current password',
     );
   });
+
+  // ── Access-mode wiring (real AccessModeGuard) ──────────────────────────────
+  // Integration coverage for Task 36: register must consult the platform
+  // access mode through the wired guard and reject per the matrix.
+
+  it('register passes under PUBLIC with the real guard', async () => {
+    const service = createService({ accessMode: 'PUBLIC' });
+    const result = await service.register({ login: 'pubuser', password: 'plain-password' });
+    assert.deepStrictEqual(result, { userId: 'user-1', webAccountId: 'web-account-1' });
+  });
+
+  it('register rejects under REG_BLOCKED with 403 REGISTRATION_DISABLED', async () => {
+    const service = createService({ accessMode: 'REG_BLOCKED' });
+    await assert.rejects(
+      () => service.register({ login: 'newuser', password: 'plain-password' }),
+      (error: unknown) =>
+        error instanceof ForbiddenException &&
+        (error.getResponse() as { code?: string }).code === 'REGISTRATION_DISABLED',
+    );
+  });
+
+  it('register rejects under RESTRICTED with 503 SERVICE_RESTRICTED', async () => {
+    const service = createService({ accessMode: 'RESTRICTED' });
+    await assert.rejects(
+      () => service.register({ login: 'newuser', password: 'plain-password' }),
+      (error: unknown) =>
+        error instanceof ServiceUnavailableException &&
+        (error.getResponse() as { code?: string }).code === 'SERVICE_RESTRICTED',
+    );
+  });
+
+  it('register under INVITED requires a referral code (INVITE_REQUIRED without one)', async () => {
+    const service = createService({ accessMode: 'INVITED' });
+    await assert.rejects(
+      () => service.register({ login: 'newuser', password: 'plain-password' }),
+      (error: unknown) =>
+        error instanceof ForbiddenException &&
+        (error.getResponse() as { code?: string }).code === 'INVITE_REQUIRED',
+    );
+  });
+
+  it('register passes under PURCHASE_BLOCKED (registration unaffected)', async () => {
+    const service = createService({ accessMode: 'PURCHASE_BLOCKED' });
+    const result = await service.register({ login: 'pbuser', password: 'plain-password' });
+    assert.deepStrictEqual(result, { userId: 'user-1', webAccountId: 'web-account-1' });
+  });
 });
 
 interface CreatePrismaMockOptions {
@@ -339,11 +388,25 @@ function createService(options: {
   readonly prisma?: PrismaMock;
   readonly passwordHashService?: PasswordHashServiceMock;
   readonly referralManualAttachService?: ReferralManualAttachServiceMock;
+  /** When set, drives the real AccessModeGuard with this platform mode. */
+  readonly accessMode?: 'PUBLIC' | 'INVITED' | 'PURCHASE_BLOCKED' | 'REG_BLOCKED' | 'RESTRICTED';
 } = {}): WebAuthService {
+  // Stub SettingsService → returns the requested mode (PUBLIC by default, so
+  // the gate is a no-op for the existing unit tests). When `accessMode` is
+  // supplied we wire the REAL AccessModeGuard for a true wiring test;
+  // otherwise a no-op evaluator keeps legacy tests fast.
+  const mode = options.accessMode ?? 'PUBLIC';
+  const settingsService = {
+    getInternalPlatformPolicy: async () => ({ accessMode: mode as never }),
+  };
+  const accessModeGuard =
+    options.accessMode === undefined ? { evaluate: () => null } : new AccessModeGuard();
   return new WebAuthService(
     options.prisma ?? createPrismaMock(),
     options.passwordHashService ?? createPasswordHashServiceMock(),
     options.referralManualAttachService ?? createReferralManualAttachServiceMock(),
+    settingsService as never,
+    accessModeGuard as never,
   );
 }
 

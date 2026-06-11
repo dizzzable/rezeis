@@ -65,9 +65,10 @@ export interface InternalBotConfigVisualInterface {
   readonly botDescription: string;
   readonly supportUsername: string;
   readonly channelUsername: string;
-  /** Used by reiwa to choose between "compact" / "full" layout of the
-   *  subscription status card on the welcome screen. */
-  readonly subscriptionInfoFormat: 'compact' | 'full';
+  /** Used by reiwa to choose between `full` (default — full mini-profile),
+   *  `compact` (status line only) or `minimal` (greeting alone) layouts of
+   *  the subscription summary appended to the welcome screen. */
+  readonly subscriptionInfoFormat: 'compact' | 'full' | 'minimal';
   /**
    * Optional URL (or Telegram `file_id`) of the banner image sent before
    * the welcome text on `/start`.

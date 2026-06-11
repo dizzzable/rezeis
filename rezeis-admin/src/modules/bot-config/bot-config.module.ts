@@ -47,6 +47,6 @@ import { ReiwaCacheInvalidatorService } from './services/reiwa-cache-invalidator
     ReiwaCacheInvalidatorService,
     ReiwaCacheInvalidateInterceptor,
   ],
-  exports: [BotButtonsService, BotEmojisService, BotTextsService],
+  exports: [BotButtonsService, BotEmojisService, BotTextsService, ReiwaCacheInvalidatorService],
 })
 export class BotConfigModule {}

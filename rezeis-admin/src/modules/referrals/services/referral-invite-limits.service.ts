@@ -193,6 +193,10 @@ export interface UserInviteOverride {
   readonly initialSlots?: number | null;
   readonly refillThresholdQualified?: number | null;
   readonly refillAmount?: number | null;
+  /** When true, this user's referral link admits new sign-ups even
+   *  under platform `INVITED` mode + exhausted global TTL / slot caps.
+   *  Independent of `useGlobalSettings`. */
+  readonly bypassInviteGate?: boolean;
 }
 
 export function mergeUserInviteOverride(
@@ -233,7 +237,21 @@ function parseUserOverride(value: unknown): UserInviteOverride | null {
     initialSlots: parseNullableInt(v.initialSlots),
     refillThresholdQualified: parseNullableInt(v.refillThresholdQualified),
     refillAmount: parseNullableInt(v.refillAmount),
+    bypassInviteGate: typeof v.bypassInviteGate === 'boolean' ? v.bypassInviteGate : undefined,
   };
+}
+
+/**
+ * Reads the `bypassInviteGate` flag from a raw `User.referralInviteSettings`
+ * JSON value. Returns `false` when the flag is missing or the value is not
+ * a JSON object. Independent of `useGlobalSettings` — the bypass overrides
+ * the platform-level `INVITED` gate regardless of global program limits.
+ *
+ * Used by `consumeReferralCode` (Wave 2) and the admin user-detail UI.
+ */
+export function readInviteBypassFlag(value: unknown): boolean {
+  const parsed = parseUserOverride(value);
+  return parsed?.bypassInviteGate === true;
 }
 
 function parseNullableInt(value: unknown): number | null | undefined {

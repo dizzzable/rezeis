@@ -4,6 +4,7 @@ import { AuthModule } from '../auth/auth.module';
 import { EmailModule } from '../email/email.module';
 import { PlansModule } from '../plans/plans.module';
 import { RemnawaveModule } from '../remnawave/remnawave.module';
+import { SettingsModule } from '../settings/settings.module';
 import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
 import { InternalUserController } from './controllers/internal-user.controller';
 import { InternalUserDevicesController } from './controllers/internal-user-devices.controller';
@@ -15,7 +16,7 @@ import { ExactlyOneUserIdentifierValidator } from './validators/exactly-one-user
  * Registers the first internal user contract module.
  */
 @Module({
-  imports: [AuthModule, EmailModule, PlansModule, RemnawaveModule, SubscriptionsModule],
+  imports: [AuthModule, EmailModule, PlansModule, RemnawaveModule, SettingsModule, SubscriptionsModule],
   controllers: [InternalUserController, InternalUserDevicesController],
   providers: [
     InternalUserService,

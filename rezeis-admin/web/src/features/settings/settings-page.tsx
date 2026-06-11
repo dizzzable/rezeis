@@ -150,7 +150,11 @@ export function PlatformTab({ settings }: { settings: AdminSettings | undefined 
             <Select value={accessMode} onValueChange={setAccessMode}>
               <SelectTrigger aria-label={t('settingsPage.platform.accessMode')}><SelectValue /></SelectTrigger>
               <SelectContent>
-                {ACCESS_MODES.map((m) => <SelectItem key={m} value={m}>{m}</SelectItem>)}
+                {ACCESS_MODES.map((m) => (
+                  <SelectItem key={m} value={m}>
+                    {t(`settingsPage.platform.accessModeLabels.${m}`)}
+                  </SelectItem>
+                ))}
               </SelectContent>
             </Select>
             <p className="text-xs text-muted-foreground">

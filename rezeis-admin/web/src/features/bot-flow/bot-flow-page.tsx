@@ -601,7 +601,7 @@ export default function BotFlowPage() {
 
       {/* Sheet drawers — global emojis & texts */}
       <Sheet open={emojisOpen} onOpenChange={setEmojisOpen}>
-        <SheetContent side="right" className="w-full max-w-2xl overflow-y-auto sm:max-w-2xl">
+        <SheetContent side="right" className="w-full max-w-4xl overflow-y-auto sm:max-w-4xl">
           <SheetHeader>
             <SheetTitle>{t('botStudio.toolbar.emojis')}</SheetTitle>
             <SheetDescription>{t('botStudio.drawers.emojisDescription')}</SheetDescription>
@@ -613,7 +613,7 @@ export default function BotFlowPage() {
       </Sheet>
 
       <Sheet open={textsOpen} onOpenChange={setTextsOpen}>
-        <SheetContent side="right" className="w-full max-w-3xl overflow-y-auto sm:max-w-3xl">
+        <SheetContent side="right" className="w-full max-w-5xl overflow-y-auto sm:max-w-5xl">
           <SheetHeader>
             <SheetTitle>{t('botStudio.toolbar.texts')}</SheetTitle>
             <SheetDescription>{t('botStudio.drawers.textsDescription')}</SheetDescription>

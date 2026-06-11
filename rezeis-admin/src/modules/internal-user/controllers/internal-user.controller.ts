@@ -182,6 +182,20 @@ export class InternalUserController {
   }
 
   /**
+   * Lightweight existence probe used by reiwa-bot before bootstrap: when
+   * the platform is in `REG_BLOCKED` / `INVITED` mode the bot must show
+   * a banner to brand-new Telegram users without creating a `User` row.
+   * Returns `{ exists: boolean }` keyed by `telegramId` (or `userId`),
+   * never throws on missing user.
+   */
+  @Get('exists')
+  public async userExists(
+    @Query() query: InternalByTelegramQueryDto,
+  ): Promise<{ exists: boolean }> {
+    return this.internalUserEdgeService.userExists(requireUserReference(query));
+  }
+
+  /**
    * Updates the user's UI locale. Reiwa pushes this on every `/lang`
    * command so admin-side notifications match the user's choice.
    */
@@ -189,7 +203,10 @@ export class InternalUserController {
   public async updateLanguage(
     @Body() body: InternalUpdateLanguageDto,
   ): Promise<InternalUserSessionInterface> {
-    return this.internalUserEdgeService.updateLanguage(body.telegramId, body.language);
+    return this.internalUserEdgeService.updateLanguage(
+      requireUserReference(body),
+      body.language,
+    );
   }
 
   /** Notifications feed used by the dashboard panel and the bot's activity command. */

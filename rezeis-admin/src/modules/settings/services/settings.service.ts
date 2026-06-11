@@ -5,6 +5,7 @@ import { Prisma, Settings } from '@prisma/client';
 import { ConfigType } from '@nestjs/config';
 
 import { paymentsConfig } from '../../../common/config/payments.config';
+import { ReiwaCacheInvalidatorService } from '../../bot-config/services/reiwa-cache-invalidator.service';
 import {
   PaymentOpsAlertSettingsInterface,
 } from '../../../common/interfaces/payment-ops-alert-settings.interface';
@@ -145,6 +146,8 @@ export class SettingsService {
     @Inject(paymentsConfig.KEY)
     @Optional()
     private readonly paymentConfiguration?: ConfigType<typeof paymentsConfig>,
+    @Optional()
+    private readonly reiwaCacheInvalidator?: ReiwaCacheInvalidatorService,
   ) {}
 
   /**
@@ -345,6 +348,19 @@ export class SettingsService {
         return updatedSettings;
       },
     );
+    // Best-effort policy invalidation — fire-and-forget so an unreachable
+    // reiwa never blocks the admin save. The 60s edge cache TTL is the
+    // backstop if the webhook fails to deliver.
+    if (
+      this.reiwaCacheInvalidator !== undefined &&
+      updateChanges.updatedFields.some((f) =>
+        ['accessMode', 'rulesRequired', 'rulesLink', 'channelRequired', 'channelLink', 'defaultCurrency'].includes(f),
+      )
+    ) {
+      void this.reiwaCacheInvalidator.invalidatePolicy(
+        `platform.${updateChanges.updatedFields.join(',')}`,
+      );
+    }
     return mapPlatformSettings(settings);
   }
 

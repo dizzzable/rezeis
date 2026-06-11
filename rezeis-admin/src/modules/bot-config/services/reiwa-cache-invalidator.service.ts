@@ -47,6 +47,24 @@ export class ReiwaCacheInvalidatorService {
    * the webhook was accepted (HTTP 2xx), `false` otherwise. Never throws.
    */
   public async invalidate(reason: string): Promise<boolean> {
+    return this.dispatch('reiwa.bot.invalidate', { reason });
+  }
+
+  /**
+   * Notify reiwa that the cached platform policy (incl. `accessMode`)
+   * has changed. The reiwa edge drops its cached value so the next
+   * gated request refetches the current mode immediately. Returns
+   * `true` when the webhook was accepted (HTTP 2xx), `false` otherwise.
+   * Never throws.
+   */
+  public async invalidatePolicy(reason: string): Promise<boolean> {
+    return this.dispatch('reiwa.platform.policy_invalidated', { reason });
+  }
+
+  private async dispatch(
+    event: 'reiwa.bot.invalidate' | 'reiwa.platform.policy_invalidated',
+    metadata: Record<string, unknown>,
+  ): Promise<boolean> {
     if (this.endpoint === null || this.secret === null) return false;
     const controller = new AbortController();
     const timer = setTimeout(() => {
@@ -54,11 +72,11 @@ export class ReiwaCacheInvalidatorService {
     }, this.timeoutMs);
     try {
       const body = JSON.stringify({
-        event: 'reiwa.bot.invalidate',
+        event,
         category: 'REIWA',
         severity: 'INFO',
-        message: 'reiwa.bot.invalidate',
-        metadata: { reason },
+        message: event,
+        metadata,
         timestamp: new Date().toISOString(),
       });
       const { header } = buildWebhookSignature({ secret: this.secret, body });
@@ -66,7 +84,7 @@ export class ReiwaCacheInvalidatorService {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Rezeis-Event': 'reiwa.bot.invalidate',
+          'X-Rezeis-Event': event,
           'X-Rezeis-Signature': header,
         },
         body,
@@ -74,16 +92,14 @@ export class ReiwaCacheInvalidatorService {
       });
       if (!response.ok && response.status !== 204) {
         this.logger.warn(
-          `Cache invalidate non-2xx: ${response.status} ${response.statusText} (reason=${reason})`,
+          `Cache invalidate non-2xx: ${response.status} ${response.statusText} (event=${event})`,
         );
         return false;
       }
       return true;
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
-      this.logger.warn(
-        `Cache invalidate request failed (reason=${reason}): ${message}`,
-      );
+      this.logger.warn(`Cache invalidate request failed (event=${event}): ${message}`);
       return false;
     } finally {
       clearTimeout(timer);

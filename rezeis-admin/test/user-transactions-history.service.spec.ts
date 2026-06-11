@@ -11,10 +11,28 @@ import {
 
 import { InternalUserEdgeService } from '../src/modules/internal-user/services/internal-user-edge.service';
 
+/**
+ * Stub the SettingsService + AccessModeGuard dependencies the constructor
+ * gained for the access-mode gate. These tests only exercise the activity
+ * feed, which never hits the gate path.
+ */
+const STUB_SETTINGS_SERVICE = {
+  getInternalPlatformPolicy: async () => ({ accessMode: 'PUBLIC' as const }),
+};
+const STUB_ACCESS_MODE_GUARD = { evaluate: () => null };
+
+function buildService(prisma: unknown): InternalUserEdgeService {
+  return new InternalUserEdgeService(
+    prisma as never,
+    STUB_SETTINGS_SERVICE as never,
+    STUB_ACCESS_MODE_GUARD as never,
+  );
+}
+
 describe('InternalUserEdgeService activity feed', () => {
   it('lists recent notifications for the resolved Telegram user', async () => {
     const state = createState({ userId: 'user-1' });
-    const service = new InternalUserEdgeService(createPrismaDouble(state) as never);
+    const service = buildService(createPrismaDouble(state));
 
     const result = await service.listNotifications('12345');
 
@@ -37,7 +55,7 @@ describe('InternalUserEdgeService activity feed', () => {
 
   it('returns unread counts and marks all unread notifications read', async () => {
     const state = createState({ userId: 'user-1', unreadCount: 7, updateManyCount: 3 });
-    const service = new InternalUserEdgeService(createPrismaDouble(state) as never);
+    const service = buildService(createPrismaDouble(state));
 
     assert.deepStrictEqual(await service.getUnreadCount('cmphfcr6i007v01jg0lcu653h'), { unread: 7 });
     const readAll = await service.markAllRead('cmphfcr6i007v01jg0lcu653h');
@@ -56,7 +74,7 @@ describe('InternalUserEdgeService activity feed', () => {
 
   it('marks one notification read only when it belongs to the resolved user', async () => {
     const state = createState({ userId: 'user-1' });
-    const service = new InternalUserEdgeService(createPrismaDouble(state) as never);
+    const service = buildService(createPrismaDouble(state));
 
     assert.deepStrictEqual(await service.markOneRead('12345', 'notification-1'), { ok: true });
 
@@ -70,7 +88,7 @@ describe('InternalUserEdgeService activity feed', () => {
 
   it('rejects attempts to mark another user notification as read', async () => {
     const state = createState({ userId: 'user-1', notificationOwnerId: 'other-user' });
-    const service = new InternalUserEdgeService(createPrismaDouble(state) as never);
+    const service = buildService(createPrismaDouble(state));
 
     await assert.rejects(
       () => service.markOneRead('12345', 'notification-1'),
@@ -81,7 +99,7 @@ describe('InternalUserEdgeService activity feed', () => {
 
   it('lists recent transactions for the resolved user', async () => {
     const state = createState({ userId: 'user-1' });
-    const service = new InternalUserEdgeService(createPrismaDouble(state) as never);
+    const service = buildService(createPrismaDouble(state));
 
     const result = await service.listTransactions('12345');
 

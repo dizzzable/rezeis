@@ -106,7 +106,14 @@ export class InternalBotConfigService implements OnApplicationBootstrap {
 
     return {
       buttons: buttons.map(mapButton),
-      visual: { ...DEFAULT_VISUAL, bannerUrl: readBannerUrl(textMap) },
+      visual: {
+        welcomeMessage: readWelcomeMessage(textMap),
+        botDescription: DEFAULT_VISUAL.botDescription,
+        supportUsername: DEFAULT_VISUAL.supportUsername,
+        channelUsername: DEFAULT_VISUAL.channelUsername,
+        subscriptionInfoFormat: readSubscriptionInfoFormat(textMap),
+        bannerUrl: readBannerUrl(textMap),
+      },
       features: DEFAULT_FEATURES,
       botEmojis: emojiMap,
       menuTextCustomEmojiIds: emojiMap,
@@ -122,18 +129,83 @@ export class InternalBotConfigService implements OnApplicationBootstrap {
     if (this.seedAttempted) return;
     this.seedAttempted = true;
     try {
-      const existingCount = await this.prismaService.botButton.count();
-      if (existingCount > 0) return;
-      await this.seedDefaultButtons();
-      await this.seedDefaultBannerText();
-      this.logger.log('Seeded default reiwa bot keyboard (4 buttons + banner).');
+      // Emoji + text catalogs are seeded additively (each row is upserted
+      // only when its key is missing) so existing deployments that already
+      // have buttons still get the new mini-profile keys after upgrade,
+      // and operator-edited values are never overwritten.
+      await this.seedDefaultEmojis();
+      await this.seedDefaultTexts();
+
+      const existingButtonCount = await this.prismaService.botButton.count();
+      if (existingButtonCount === 0) {
+        await this.seedDefaultButtons();
+        await this.seedDefaultBannerText();
+        this.logger.log('Seeded default reiwa bot keyboard (5 buttons + banner).');
+      }
     } catch (err: unknown) {
       // Don't poison the cached `seedAttempted` flag on error — let the
       // next request retry rather than ship a degraded payload forever.
       this.seedAttempted = false;
       this.logger.warn(
-        `Bot keyboard seed failed: ${err instanceof Error ? err.message : String(err)}`,
+        `Bot config seed failed: ${err instanceof Error ? err.message : String(err)}`,
       );
+    }
+  }
+
+  /**
+   * Upserts the canonical reiwa-side emoji slot list. Each entry is
+   * inserted only if the key is missing, so operator overrides survive.
+   * Mirrors {@link DEFAULT_EMOJIS} (kept in lockstep with reiwa's
+   * `DEFAULT_PREMIUM_IDS` / `DEFAULT_UNICODE`).
+   */
+  private async seedDefaultEmojis(): Promise<void> {
+    for (const seed of DEFAULT_EMOJIS) {
+      const existing = await this.prismaService.botEmoji.findUnique({
+        where: { key: seed.key },
+        select: { id: true },
+      });
+      if (existing !== null) continue;
+      try {
+        await this.botEmojisService.create({
+          key: seed.key,
+          unicode: seed.unicode,
+          tgEmojiId: seed.tgEmojiId ?? null,
+        });
+      } catch (err: unknown) {
+        this.logger.warn(
+          `Failed to seed bot emoji "${seed.key}": ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+  }
+
+  /**
+   * Upserts the canonical reiwa-side i18n keys (mini-profile labels) so
+   * operators can edit them in the admin "Тексты" panel out of the box.
+   * Idempotent: existing rows are skipped.
+   */
+  private async seedDefaultTexts(): Promise<void> {
+    for (const seed of DEFAULT_TEXTS) {
+      const existing = await this.prismaService.botText.findUnique({
+        where: { key: seed.key },
+        select: { id: true },
+      });
+      if (existing !== null) continue;
+      try {
+        await this.botTextsService.create({
+          key: seed.key,
+          value: seed.value,
+          visible: true,
+        });
+      } catch (err: unknown) {
+        this.logger.warn(
+          `Failed to seed bot text "${seed.key}": ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
     }
   }
 
@@ -186,6 +258,16 @@ export class InternalBotConfigService implements OnApplicationBootstrap {
 }
 
 const BANNER_URL_KEY = 'bot.banner_url';
+const WELCOME_MESSAGE_KEY = 'bot.welcome_message';
+const SUBSCRIPTION_INFO_FORMAT_KEY = 'bot.subscription_info_format';
+
+type SubscriptionInfoFormat = InternalBotConfigVisualInterface['subscriptionInfoFormat'];
+
+const VALID_SUBSCRIPTION_INFO_FORMATS: readonly SubscriptionInfoFormat[] = [
+  'full',
+  'compact',
+  'minimal',
+];
 
 /**
  * Name of the BotFlow that owns the user-facing dynamic screens. We
@@ -366,6 +448,37 @@ function readBannerUrl(textMap: InternalBotTextMap): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+/**
+ * Resolve the operator-managed welcome message. Falls back to the
+ * built-in default when the key is missing or empty (so the bot never
+ * greets users with a blank line if an operator clears the field).
+ */
+function readWelcomeMessage(textMap: InternalBotTextMap): string {
+  const raw = textMap[WELCOME_MESSAGE_KEY];
+  if (typeof raw === 'string' && raw.trim().length > 0) {
+    return raw;
+  }
+  return DEFAULT_VISUAL.welcomeMessage;
+}
+
+/**
+ * Resolve the operator-managed `subscriptionInfoFormat`. Accepts
+ * `full | compact | minimal` (case-insensitive); anything else falls
+ * back to `full` so a typo doesn't break the greeting layout.
+ */
+function readSubscriptionInfoFormat(
+  textMap: InternalBotTextMap,
+): SubscriptionInfoFormat {
+  const raw = textMap[SUBSCRIPTION_INFO_FORMAT_KEY];
+  if (typeof raw === 'string') {
+    const normalised = raw.trim().toLowerCase() as SubscriptionInfoFormat;
+    if (VALID_SUBSCRIPTION_INFO_FORMATS.includes(normalised)) {
+      return normalised;
+    }
+  }
+  return DEFAULT_VISUAL.subscriptionInfoFormat;
+}
+
 const DEFAULT_VISUAL: Omit<InternalBotConfigVisualInterface, 'bannerUrl'> = {
   welcomeMessage: 'Привет, {{firstName}}! 👋\n\nДобро пожаловать в Rezeis VPN.',
   botDescription: 'Быстрый и надёжный VPN',
@@ -382,6 +495,92 @@ const DEFAULT_FEATURES: InternalBotConfigFeaturesInterface = {
   activityFeedEnabled: true,
   partnersEnabled: false,
 };
+
+interface DefaultEmojiSeed {
+  readonly key: string;
+  readonly unicode: string;
+  readonly tgEmojiId: string | null;
+}
+
+/**
+ * Canonical reiwa-side emoji slots surfaced to the admin "Эмодзи" editor.
+ *
+ * Kept in lockstep with reiwa's `DEFAULT_PREMIUM_IDS` (mini-profile icons —
+ * 👤 📱 📈 📅) and `DEFAULT_UNICODE` (status / traffic activity glyphs).
+ * Operators tweak unicode and `tgEmojiId` per row in the admin UI; reiwa
+ * falls back to its baked-in defaults for any key the operator hasn't
+ * configured. The seed is additive — once a row exists the operator's
+ * value wins forever.
+ */
+const DEFAULT_EMOJIS: readonly DefaultEmojiSeed[] = [
+  // Mini-profile (greeting summary)
+  { key: 'SUB_PROFILE', unicode: '👤', tgEmojiId: '5275979556308674886' },
+  { key: 'SUB_DEVICES', unicode: '📱', tgEmojiId: '5278647306525108244' },
+  { key: 'SUB_TRAFFIC', unicode: '📈', tgEmojiId: '5278778882848220741' },
+  { key: 'SUB_EXPIRY',  unicode: '📅', tgEmojiId: '5206222720416643915' },
+  // Status indicators (subscription card / mini-profile)
+  { key: 'STATUS_ACTIVE',   unicode: '🟢', tgEmojiId: null },
+  { key: 'STATUS_LIMITED',  unicode: '🟡', tgEmojiId: null },
+  { key: 'STATUS_EXPIRED',  unicode: '🔴', tgEmojiId: null },
+  { key: 'STATUS_DISABLED', unicode: '⚫', tgEmojiId: null },
+  // Traffic activity dots (≤80% / ≥80% / 100% or LIMITED)
+  { key: 'TRAFFIC_OK',   unicode: '🟢', tgEmojiId: null },
+  { key: 'TRAFFIC_WARN', unicode: '🟠', tgEmojiId: null },
+  { key: 'TRAFFIC_FULL', unicode: '🔴', tgEmojiId: null },
+];
+
+interface DefaultTextSeed {
+  readonly key: string;
+  readonly value: string;
+}
+
+/**
+ * Canonical reiwa-side i18n keys surfaced to the admin "Тексты" editor.
+ * Mirrors the RU pack reiwa ships with — operators can edit values without
+ * a redeploy. Adding a new key here makes it appear in the admin out of
+ * the box; existing rows are never overwritten.
+ */
+const DEFAULT_TEXTS: readonly DefaultTextSeed[] = [
+  // Greeting (admin-editable). `{{firstName}}` is substituted by reiwa.
+  {
+    key: WELCOME_MESSAGE_KEY,
+    value: 'Привет, {{firstName}}! 👋\n\nДобро пожаловать в Rezeis VPN.',
+  },
+  // Layout of the per-subscription summary appended to the welcome:
+  //   `full`    — profile / devices / traffic bar / expiry (default)
+  //   `compact` — status line only
+  //   `minimal` — greeting alone, no summary
+  { key: SUBSCRIPTION_INFO_FORMAT_KEY, value: 'full' },
+  // Mini-profile (greeting summary)
+  { key: 'profile.subscription',       value: 'Подписка' },
+  { key: 'profile.devices',            value: 'Устройств: {{count}} доступно' },
+  { key: 'profile.devices_unlimited',  value: 'Устройств: безлимит' },
+  { key: 'profile.traffic',            value: 'Трафик' },
+  { key: 'profile.until',              value: 'До' },
+  { key: 'profile.unlimited',          value: 'Безлимит' },
+  // Generic fallbacks shared across the bot
+  { key: 'common.not_available',       value: 'Н/Д' },
+  // Platform access-mode kill-switch banners (used by /start when the
+  // operator switches the platform out of PUBLIC). Editable copy so
+  // operators can soften / expand the wording without redeploying.
+  {
+    key: 'access_mode.restricted',
+    value:
+      '🛠 Сервис временно недоступен — ведутся технические работы. Существующие подключения VPN продолжают работать. Попробуйте позже.',
+  },
+  {
+    key: 'access_mode.reg_blocked_new',
+    value: '🚫 Регистрация в сервисе временно отключена. Свяжитесь с поддержкой, если у вас уже есть аккаунт.',
+  },
+  {
+    key: 'access_mode.invited_no_code',
+    value: '✉️ Сейчас регистрация только по приглашению. Откройте бота по invite-ссылке от друга или партнёра.',
+  },
+  {
+    key: 'access_mode.purchase_blocked',
+    value: '🛒 Покупка временно недоступна. Действующие подписки можно продлевать как обычно.',
+  },
+];
 
 type FlowWithScreens = BotFlow & {
   readonly screens: readonly (BotFlowScreen & {
