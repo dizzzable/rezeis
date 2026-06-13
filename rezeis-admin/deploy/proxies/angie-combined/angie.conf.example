@@ -3,21 +3,16 @@
 # 1. Замените PANEL_DOMAIN и APP_DOMAIN на свои домены.
 # 2. Сохраните как `angie.conf` (без .example).
 # 3. Положите рядом fullchain.pem + privkey.key (SAN-cert на оба домена).
-
-upstream rezeis_upstream {
-    server rezeis:8000;
-    keepalive 32;
-}
-
-upstream reiwa_upstream {
-    server reiwa:5000;
-    keepalive 32;
-}
+#
+# Апстримы резолвятся через docker-DNS (127.0.0.11) по запросу, поэтому angie
+# не падает, если rezeis/reiwa ещё не подняты или перезапускаются.
 
 map $http_upgrade $connection_upgrade {
     default upgrade;
     ''      close;
 }
+
+resolver 127.0.0.11 valid=10s ipv6=off;
 
 ssl_protocols       TLSv1.2 TLSv1.3;
 ssl_ciphers         ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;
@@ -35,9 +30,11 @@ server {
     ssl_certificate     /etc/angie/ssl/fullchain.pem;
     ssl_certificate_key /etc/angie/ssl/privkey.key;
 
+    set $rezeis_upstream rezeis:8000;
+
     location ~ ^/api/(admin/events/|internal/user/[^/]+/realtime/) {
         proxy_http_version 1.1;
-        proxy_pass http://rezeis_upstream;
+        proxy_pass http://$rezeis_upstream;
         proxy_set_header Host              $host;
         proxy_set_header X-Real-IP         $remote_addr;
         proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
@@ -54,7 +51,7 @@ server {
 
     location / {
         proxy_http_version 1.1;
-        proxy_pass http://rezeis_upstream;
+        proxy_pass http://$rezeis_upstream;
         proxy_set_header Host              $host;
         proxy_set_header X-Real-IP         $remote_addr;
         proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
@@ -86,9 +83,11 @@ server {
     ssl_certificate     /etc/angie/ssl/fullchain.pem;
     ssl_certificate_key /etc/angie/ssl/privkey.key;
 
+    set $reiwa_upstream reiwa:5000;
+
     location / {
         proxy_http_version 1.1;
-        proxy_pass http://reiwa_upstream;
+        proxy_pass http://$reiwa_upstream;
         proxy_set_header Host              $host;
         proxy_set_header X-Real-IP         $remote_addr;
         proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
