@@ -9,14 +9,31 @@ export class RawCacheService implements OnModuleInit, OnModuleDestroy {
   constructor() {}
 
   onModuleInit() {
-    const redisUrl = process.env.REDIS_URL;
+    const redisUrl = process.env.REDIS_URL ?? this.buildRedisUrlFromDiscreteEnv();
     if (!redisUrl) {
-      this.logger.warn('REDIS_URL not set - cache operations will be no-ops');
+      this.logger.warn('REDIS_URL / REDIS_HOST not set - cache operations will be no-ops');
       return;
     }
     this.redis = new Redis(redisUrl, { lazyConnect: false, maxRetriesPerRequest: 3 });
     this.redis.on('error', (err) => this.logger.error('Redis error', err.message));
     this.redis.on('connect', () => this.logger.log('Redis connected'));
+  }
+
+  /**
+   * Production compose ships the discrete `REDIS_HOST` / `REDIS_PORT` /
+   * `REDIS_PASSWORD` / `REDIS_NAME` vars (not a single `REDIS_URL`). Build the
+   * URL from them when `REDIS_URL` is absent — otherwise this cache silently
+   * no-ops and everything that depends on it (bot-signin magic-link tokens,
+   * temp passwords, etc.) breaks invisibly. Mirrors reiwa's loadConfig fix.
+   */
+  private buildRedisUrlFromDiscreteEnv(): string | null {
+    const host = process.env.REDIS_HOST?.trim();
+    if (!host) return null;
+    const port = process.env.REDIS_PORT?.trim() || '6379';
+    const db = process.env.REDIS_NAME?.trim() || '0';
+    const password = process.env.REDIS_PASSWORD?.trim();
+    const auth = password ? `:${encodeURIComponent(password)}@` : '';
+    return `redis://${auth}${host}:${port}/${db}`;
   }
 
   async onModuleDestroy() {
