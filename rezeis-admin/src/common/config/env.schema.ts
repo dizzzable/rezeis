@@ -12,8 +12,15 @@ const envBoolean = (defaultValue: boolean) => z.preprocess((value) => {
   if (value === undefined) return undefined;
   if (typeof value === 'string') {
     const normalized = value.trim().toLowerCase();
-    if (normalized === 'true') return true;
-    if (normalized === 'false') return false;
+    // Blank value → fall back to the default instead of crashing the boot.
+    // A common install mistake is leaving `WEBHOOK_ENABLED=` empty.
+    if (normalized === '') return undefined;
+    if (normalized === 'true' || normalized === '1' || normalized === 'yes' || normalized === 'on') {
+      return true;
+    }
+    if (normalized === 'false' || normalized === '0' || normalized === 'no' || normalized === 'off') {
+      return false;
+    }
   }
   return value;
 }, z.boolean().default(defaultValue));

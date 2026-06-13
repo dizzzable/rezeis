@@ -1,4 +1,23 @@
-﻿# Rezeis Admin v0.9.5.3
+﻿# Rezeis Admin v0.9.5.4
+
+Патч про удобство установки и устойчивость к ошибкам в `.env`.
+
+### Конфигурация
+- **Пустое значение булевой env-переменной больше не роняет контейнер.**
+  Частая ошибка установки — `WEBHOOK_ENABLED=` (пусто) — раньше валила старт
+  с `expected boolean, received string`. Теперь пустое значение трактуется как
+  дефолт, плюс принимаются `1/0/yes/no/on/off` наряду с `true/false`.
+
+### Документация
+- **Quick Start теперь генерирует секреты одной пачкой** (`openssl rand` →
+  `sed` прямо в `.env`): `REZEIS_CRYPT_KEY`, `DATABASE_PASSWORD`,
+  `REDIS_PASSWORD` (и для reiwa — `REIWA_COOKIE_SECRET`,
+  `REZEIS_INTERNAL_SHARED_SECRET`). Меньше шансов словить ZodError на старте
+  из-за `change_me`/коротких значений.
+
+---
+
+# Rezeis Admin v0.9.5.3
 
 Релиз про reverse proxy: combined-примеры для двух проектов на одном VPS.
 

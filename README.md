@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/dizzzable/rezeis/releases/latest"><img src="https://img.shields.io/badge/version-0.9.5.3-blue" alt="Version" /></a>
+  <a href="https://github.com/dizzzable/rezeis/releases/latest"><img src="https://img.shields.io/badge/version-0.9.5.4-blue" alt="Version" /></a>
   <a href="https://github.com/dizzzable/rezeis/pkgs/container/rezeis"><img src="https://img.shields.io/badge/ghcr.io-rezeis-2496ED?logo=docker&logoColor=white" alt="GHCR" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="License" /></a>
   <a href="#"><img src="https://img.shields.io/badge/NestJS-11-red" alt="NestJS" /></a>
@@ -56,10 +56,10 @@ GitHub Container Registry публикует образ при каждом push
 docker pull ghcr.io/dizzzable/rezeis:latest
 
 # Pin to a specific release
-docker pull ghcr.io/dizzzable/rezeis:v0.9.5.3
+docker pull ghcr.io/dizzzable/rezeis:v0.9.5.4
 ```
 
-Доступные теги: `latest` (актуальный main), `v0.9.5.3` (тег релиза), плюс `sha-<short>` для каждого коммита в `main`. Прод-`docker-compose.yml` использует `latest`.
+Доступные теги: `latest` (актуальный main), `v0.9.5.4` (тег релиза), плюс `sha-<short>` для каждого коммита в `main`. Прод-`docker-compose.yml` использует `latest`.
 
 ---
 
@@ -82,15 +82,19 @@ curl -fsSL -o .env               https://raw.githubusercontent.com/dizzzable/rez
 #    Если Remnawave отдельно — создаём один раз (нужна для связи rezeis ↔ reiwa):
 docker network create remnawave-network 2>/dev/null || true
 
-# 4. Заполнить .env. Минимум что нужно задать:
-#      REZEIS_CRYPT_KEY        (>=32 симв.)        openssl rand -hex 24
-#      DATABASE_PASSWORD                            openssl rand -hex 16
-#      REDIS_PASSWORD                               openssl rand -hex 16
-#      REMNAWAVE_HOST / REMNAWAVE_TOKEN             из панели Remnawave
-#      REZEIS_DOMAIN, ADMIN_CORS_ORIGINS           ваш домен админки
+# 4. Сгенерировать обязательные секреты прямо в .env (значения создаются на месте):
+sed -i "s|^REZEIS_CRYPT_KEY=.*|REZEIS_CRYPT_KEY=$(openssl rand -hex 24)|" .env   # >=32 симв.
+sed -i "s|^DATABASE_PASSWORD=.*|DATABASE_PASSWORD=$(openssl rand -hex 16)|" .env
+sed -i "s|^REDIS_PASSWORD=.*|REDIS_PASSWORD=$(openssl rand -hex 16)|" .env
+
+# 5. Дозаполнить вручную остальное:
+#      REMNAWAVE_HOST / REMNAWAVE_TOKEN   — из панели Remnawave
+#      REZEIS_DOMAIN, ADMIN_CORS_ORIGINS  — ваш домен админки (https://panel.example.com)
+#    (WEBHOOK_ENABLED оставьте false, WEBHOOK_SECRET_HEADER пустым — заполните,
+#     когда будете подключать reiwa/бота; см. docs/environment.md.)
 nano .env
 
-# 5. Запуск (контейнер сам прогонит миграции Prisma на старте)
+# 6. Запуск (контейнер сам прогонит миграции Prisma на старте)
 docker compose up -d
 ```
 

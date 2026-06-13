@@ -189,7 +189,7 @@ describe('validateEnvironment', () => {
     }
   });
 
-  it('parses booleans strictly while preserving true defaults', () => {
+  it('parses booleans leniently while preserving true defaults', () => {
     const defaultEnvironment = validateEnvironment(createRequiredEnvironment());
     assert.equal(defaultEnvironment.BACKUP_AUTO_ENABLED, true);
     assert.equal(defaultEnvironment.BACKUP_COMPRESSION, true);
@@ -209,10 +209,31 @@ describe('validateEnvironment', () => {
     assert.equal(explicitEnvironment.EMAIL_ENABLED, true);
     assert.equal(explicitEnvironment.EMAIL_USE_SSL, true);
 
+    // Common synonyms are accepted (1/0, yes/no, on/off).
+    const synonyms = validateEnvironment({
+      ...createRequiredEnvironment(),
+      EMAIL_ENABLED: 'yes',
+      EMAIL_USE_SSL: 'on',
+      BACKUP_COMPRESSION: '0',
+    });
+    assert.equal(synonyms.EMAIL_ENABLED, true);
+    assert.equal(synonyms.EMAIL_USE_SSL, true);
+    assert.equal(synonyms.BACKUP_COMPRESSION, false);
+
+    // A blank value must NOT crash the boot — it falls back to the default.
+    const blank = validateEnvironment({
+      ...createRequiredEnvironment(),
+      WEBHOOK_ENABLED: '',
+      BACKUP_AUTO_ENABLED: '',
+    });
+    assert.equal(blank.WEBHOOK_ENABLED, false);
+    assert.equal(blank.BACKUP_AUTO_ENABLED, true);
+
+    // A genuinely unparseable value still fails closed.
     assert.throws(() => {
       validateEnvironment({
         ...createRequiredEnvironment(),
-        EMAIL_ENABLED: 'yes',
+        EMAIL_ENABLED: 'maybe',
       });
     });
   });
