@@ -1,4 +1,28 @@
-﻿# Rezeis Admin v0.9.5.2
+﻿# Rezeis Admin v0.9.5.3
+
+Релиз про reverse proxy: combined-примеры для двух проектов на одном VPS.
+
+### Reverse proxy (rezeis + reiwa на одном VPS)
+- **Combined-стеки для всех методов**: `nginx-combined`, `caddy-combined`,
+  `angie-combined`, `traefik-combined` в `rezeis-admin/deploy/proxies/`.
+- Все **443-only** и используют **один заранее выпущенный SAN-сертификат на оба
+  домена** (`acme.sh --standalone -d PANEL -d APP`), который лежит прямо в
+  каталоге прокси и монтируется в контейнер read-only. Порт 80 нужен только в
+  момент выпуска сертификата и в самом прокси не публикуется.
+- Маршрутизация `PANEL_DOMAIN → rezeis:8000` (админка) и
+  `APP_DOMAIN → reiwa:5000` (кабинет / Mini App / webApp бота), с сохранением
+  SSE/realtime (no-buffering / flush).
+- Конфиги проверены: nginx `nginx -t` ok, caddy `adapt` ok, все
+  `docker compose config` валидны.
+
+### Документация
+- `deploy/proxies/README.md` дополнен разделом «один сервис vs два», таблицей
+  combined-вариантов и пошаговым acme.sh SAN-флоу; в главном README — прямые
+  ссылки на правильный путь `rezeis-admin/deploy/proxies/`.
+
+---
+
+# Rezeis Admin v0.9.5.2
 
 Релиз про установку и эксплуатацию: быстрый деплой в стиле Remnawave, единый
 reverse proxy и понятная сеть.
