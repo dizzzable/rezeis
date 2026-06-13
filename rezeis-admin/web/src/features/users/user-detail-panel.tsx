@@ -2362,7 +2362,7 @@ function WebCabinetTab({
                       variant="outline"
                       size="icon"
                       onClick={() =>
-                        copyCredentials(webAccount.login, tempPwQuery.data!.temporaryPassword!)
+                        copyCredentials(webAccount.login ?? null, tempPwQuery.data!.temporaryPassword!)
                       }
                       aria-label={t('userDetailPanel.web.credentialsCopied')}
                     >
