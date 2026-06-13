@@ -177,7 +177,6 @@ describe('validateEnvironment', () => {
       { REDIS_PORT: '0' },
       { REDIS_NAME: '-1' },
       { WEBHOOK_URL: 'not-a-url' },
-      { WEBHOOK_SECRET_HEADER: 'short' },
       { REIWA_URL: 'not-a-url' },
     ]) {
       assert.throws(() => {
@@ -187,6 +186,24 @@ describe('validateEnvironment', () => {
         });
       });
     }
+  });
+
+  it('disables (does not crash on) a malformed WEBHOOK_SECRET_HEADER', () => {
+    // An optional integration secret must not take down the whole panel.
+    // A malformed value is coerced to undefined (signing disabled) + a warning.
+    for (const bad of ['short', 'has-dashes-' + 'a'.repeat(54), 'a'.repeat(63), 'a'.repeat(65)]) {
+      const env = validateEnvironment({
+        ...createRequiredEnvironment(),
+        WEBHOOK_SECRET_HEADER: bad,
+      });
+      assert.equal(env.WEBHOOK_SECRET_HEADER, undefined);
+    }
+    // A valid 64-char alphanumeric value is preserved.
+    const ok = validateEnvironment({
+      ...createRequiredEnvironment(),
+      WEBHOOK_SECRET_HEADER: 'a'.repeat(64),
+    });
+    assert.equal(ok.WEBHOOK_SECRET_HEADER, 'a'.repeat(64));
   });
 
   it('parses booleans leniently while preserving true defaults', () => {

@@ -46,10 +46,22 @@ const environmentSchema = z.object({
   // ── Webhook ──────────────────────────────────────────────────────────────
   WEBHOOK_ENABLED: envBoolean(false),
   WEBHOOK_URL: z.preprocess(normalizeOptionalString, z.string().url().optional()),
-  WEBHOOK_SECRET_HEADER: z.preprocess(
-    normalizeOptionalString,
-    z.string().regex(webhookSecretPattern, 'WEBHOOK_SECRET_HEADER must be exactly 64 alphanumeric characters').optional(),
-  ),
+  WEBHOOK_SECRET_HEADER: z.preprocess((value) => {
+    const normalized = normalizeOptionalString(value);
+    // WEBHOOK_SECRET_HEADER is an OPTIONAL integration secret (signs the
+    // reiwa push channel + outbound webhooks). A malformed value must NOT
+    // crash the whole panel — disable webhook signing and warn loudly so the
+    // operator fixes it. Core secrets like REZEIS_CRYPT_KEY still fail closed.
+    if (typeof normalized === 'string' && !webhookSecretPattern.test(normalized)) {
+      console.warn(
+        '[env] WEBHOOK_SECRET_HEADER is set but is not exactly 64 alphanumeric characters — ' +
+          'webhook signing (reiwa push / outbound webhooks) is DISABLED. ' +
+          'Set a valid value (e.g. `openssl rand -hex 32`) or leave it empty.',
+      );
+      return undefined;
+    }
+    return normalized;
+  }, z.string().regex(webhookSecretPattern).optional()),
 
   // ── Remnawave ────────────────────────────────────────────────────────────
   REMNAWAVE_HOST: z.preprocess(normalizeOptionalString, z.string().min(1).optional()),
