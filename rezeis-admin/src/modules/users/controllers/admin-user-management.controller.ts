@@ -304,7 +304,21 @@ export class AdminUserManagementController {
   @HttpCode(HttpStatus.OK)
   public async deleteUser(@Param('telegramId') telegramId: string, @CurrentAdmin() admin: CurrentAdminInterface, @Req() req: Request) {
     const user = await this.findUserByTelegramId(telegramId);
-    await this.prismaService.user.delete({ where: { id: user.id } });
+    // A user delete is a full removal, but three relations are `onDelete:
+    // Restrict` (financial / credit history): Transaction, PromocodeActivation
+    // and ReferralReward. Left in place they raise a FK violation (P2003) that
+    // surfaces as a 400 "Ошибка удаления". Everything else (subscriptions,
+    // web account, trial grant, referrals, partner, support tickets, …) is
+    // `Cascade`, so removing these three first lets the user delete cleanly.
+    await this.prismaService.$transaction(async (tx) => {
+      await tx.referralReward.deleteMany({ where: { userId: user.id } });
+      await tx.promocodeActivation.deleteMany({ where: { userId: user.id } });
+      // Deleting the transactions cascades their TransactionItem rows, which
+      // are `Restrict` against subscriptions — clearing them also unblocks the
+      // cascade delete of this user's subscriptions.
+      await tx.transaction.deleteMany({ where: { userId: user.id } });
+      await tx.user.delete({ where: { id: user.id } });
+    });
     await this.auditLog(admin, req, 'user.deleted', { userId: user.id, telegramId });
     this.events.warn(EVENT_TYPES.USER_DELETED, 'USER', `User deleted: ${telegramId}`, { userId: user.id, telegramId, adminId: admin.id });
     return { deleted: true };
