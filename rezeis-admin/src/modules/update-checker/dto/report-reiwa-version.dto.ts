@@ -7,8 +7,8 @@ import { IsString, Matches, MaxLength } from 'class-validator';
 export class ReportReiwaVersionDto {
   @IsString()
   @MaxLength(32)
-  @Matches(/^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/, {
-    message: 'version must be a semver string like 0.7.0',
+  @Matches(/^v?\d+\.\d+\.\d+(?:\.\d+)?(?:-[0-9A-Za-z.-]+)?$/, {
+    message: 'version must be a semver string like 0.7.0 or 0.9.5.11',
   })
   public version!: string;
 }
