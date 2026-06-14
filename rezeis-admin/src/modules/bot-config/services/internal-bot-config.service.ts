@@ -565,6 +565,12 @@ const DEFAULT_EMOJIS: readonly DefaultEmojiSeed[] = [
   { key: 'TRAFFIC_OK',   unicode: '🟢', tgEmojiId: null },
   { key: 'TRAFFIC_WARN', unicode: '🟠', tgEmojiId: null },
   { key: 'TRAFFIC_FULL', unicode: '🔴', tgEmojiId: null },
+
+  // Free-trial CTA (bot keyboard "try for free" button icon). The reiwa
+  // trial button resolves its premium icon from this key (TRIAL → GIFT →
+  // PROMO). Ships a TranslucentPack gift glyph so the button renders premium
+  // out of the box; degrades to the 🆓 unicode when the owner lacks premium.
+  { key: 'TRIAL', unicode: '🆓', tgEmojiId: '5276422526350681413' },
 ];
 
 interface DefaultTextSeed {
