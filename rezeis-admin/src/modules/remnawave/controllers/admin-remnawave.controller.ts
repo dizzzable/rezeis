@@ -276,7 +276,13 @@ export class RemnawaveWebhookController {
     @Req() req: Request,
     @Body() body: Record<string, unknown>,
   ): Promise<{ ok: boolean }> {
-    const signature = req.headers['x-webhook-secret'] as string | undefined;
+    // Remnawave signs the payload with HMAC-SHA256 over the JSON body and
+    // sends it in `X-Remnawave-Signature` (+ `X-Remnawave-Timestamp`), per the
+    // official backend-contract. Older/custom senders used `x-webhook-secret`,
+    // so we accept that as a fallback for backward compatibility.
+    const signature =
+      (req.headers['x-remnawave-signature'] as string | undefined) ??
+      (req.headers['x-webhook-secret'] as string | undefined);
     const rawBody = JSON.stringify(body);
 
     if (!this.webhookService.validateSignature(rawBody, signature)) {

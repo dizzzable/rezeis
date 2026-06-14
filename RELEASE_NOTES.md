@@ -1,4 +1,34 @@
-﻿# Rezeis Admin v0.9.5.9
+﻿# Rezeis Admin v0.9.5.10
+
+Фикс приёма вебхуков Remnawave: проверка подписи теперь по официальному контракту.
+
+### Remnawave вебхуки
+- **Приёмник читает правильный заголовок подписи `X-Remnawave-Signature`** (HMAC-SHA256 от JSON-тела), как описано в backend-contract Remnawave. Раньше читался `x-webhook-secret` — поэтому при заданном `REMNAWAVE_WEBHOOK_SECRET` подпись не сходилась и **события молча отбрасывались**. Старый заголовок оставлен как fallback для обратной совместимости.
+
+### Документация
+- **`.env.example`**: уточнён `WEBHOOK_URL` (это произвольный ВНЕШНИЙ приёмник интеграций, НЕ канал reiwa — reiwa-события идут через `REIWA_URL`, путь дописывается в коде). В секции REMNAWAVE добавлен точный путь, который надо вписать в `WEBHOOK_URL` панели Remnawave:
+  ```
+  WEBHOOK_URL=https://<your-rezeis-domain>/api/webhook/remnawave
+  ```
+  Путь приёмника задаёт rezeis (`/api/webhook/remnawave`); префикса `/api/v1/` в rezeis нет.
+
+---
+
+# Rezeis Admin v0.9.5.10
+
+Фикс приёма вебхуков Remnawave: правильное имя заголовка подписи + точная документация пути.
+
+### Remnawave вебхуки
+- **Приёмник теперь читает заголовок `X-Remnawave-Signature`** (HMAC-SHA256 от тела), как в официальном backend-contract Remnawave, а не `x-webhook-secret`. Раньше при заданном `REMNAWAVE_WEBHOOK_SECRET` подпись не сходилась (читался несуществующий заголовок) и **все события панели молча отбрасывались** (`{ ok: false }`). Старое имя `x-webhook-secret` оставлено как fallback для обратной совместимости.
+- Путь приёмника не менялся: `POST /api/webhook/remnawave`. В панели Remnawave в `WEBHOOK_URL` нужно указать именно его: `https://<rezeis-домен>/api/webhook/remnawave` (Remnawave шлёт вебхук на произвольный URL, путь задаёт приёмник; см. их доку).
+
+### Документация (.env.example)
+- Секция REMNAWAVE: добавлен точный URL+заголовки для настройки вебхука в панели Remnawave.
+- `WEBHOOK_URL` помечен как **произвольный внешний** приёмник (мониторинг/интеграции), который **не** нужно направлять на reiwa — события reiwa идут через `REIWA_URL` (путь `/api/v1/webhooks/rezeis` дописывается кодом).
+
+---
+
+# Rezeis Admin v0.9.5.9
 
 Фикс: профиль Remnawave для пробной подписки теперь создаётся сразу, а не через 5 минут.
 
