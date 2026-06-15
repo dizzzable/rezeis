@@ -17,8 +17,8 @@ import {
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { getProcessRole } from '../../../common/runtime/process-role.util';
 import { BotFlowService } from '../../bot-flow/services/bot-flow.service';
-import { CustomEmojiService } from '../../custom-emoji/services/custom-emoji.service';
 import { CustomEmojiPackInterface } from '../../custom-emoji/interfaces/custom-emoji-pack.interface';
+import { readCustomEmojiPacks } from '../../custom-emoji/utils/custom-emoji-packs.util';
 import {
   InternalBotConfigButtonInterface,
   InternalBotConfigFeaturesInterface,
@@ -70,7 +70,6 @@ export class InternalBotConfigService implements OnApplicationBootstrap {
     private readonly botEmojisService: BotEmojisService,
     private readonly botTextsService: BotTextsService,
     private readonly botFlowService: BotFlowService,
-    private readonly customEmojiService: CustomEmojiService,
   ) {}
 
   /**
@@ -106,10 +105,12 @@ export class InternalBotConfigService implements OnApplicationBootstrap {
       this.botFlowService.getActive(DEFAULT_FLOW_NAME),
     ]);
     // Custom-emoji packs are best-effort: a read failure shouldn't blank
-    // the whole bot-config payload, so resolve to [] on error.
-    const customEmojiPacks = await this.customEmojiService
-      .listPacks()
-      .catch(() => []);
+    // the whole bot-config payload, so resolve to [] on error. Read directly
+    // from Settings (pure util) to avoid a CustomEmojiModule import cycle.
+    const customEmojiPacks = await this.prismaService.settings
+      .findFirst({ orderBy: { updatedAt: 'asc' } })
+      .then((settings) => readCustomEmojiPacks(settings?.systemNotifications))
+      .catch(() => [] as CustomEmojiPackInterface[]);
 
     const emojiMap = withDefaultPremiumIds(mapEmojiEntries(emojis));
     // Full map (every row) — used by config-style readers (banner URL,

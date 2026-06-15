@@ -2,7 +2,6 @@ import { Module } from '@nestjs/common';
 
 import { AuthModule } from '../auth/auth.module';
 import { BotFlowModule } from '../bot-flow/bot-flow.module';
-import { CustomEmojiModule } from '../custom-emoji/custom-emoji.module';
 import { AdminBotConfigController } from './controllers/admin-bot-config.controller';
 import { InternalBotConfigController } from './controllers/internal-bot-config.controller';
 import { ReiwaCacheInvalidateInterceptor } from './interceptors/reiwa-cache-invalidate.interceptor';
@@ -37,7 +36,7 @@ import { ReiwaCacheInvalidatorService } from './services/reiwa-cache-invalidator
  * directly from `/uploads/bot-banners/<id>.jpg`.
  */
 @Module({
-  imports: [AuthModule, BotFlowModule, CustomEmojiModule],
+  imports: [AuthModule, BotFlowModule],
   controllers: [AdminBotConfigController, InternalBotConfigController],
   providers: [
     BotBannerUploadService,

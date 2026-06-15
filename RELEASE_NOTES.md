@@ -1,4 +1,13 @@
-﻿# Rezeis Admin v0.9.5.17
+﻿# Rezeis Admin v0.9.5.18
+
+Хотфикс загрузки приложения: устранён циклический импорт модулей.
+
+### Fix
+- **`UndefinedModuleException` на старте (api).** В 0.9.5.17 `BotConfigModule` импортировал `CustomEmojiModule` ради чтения паков кастом-эмодзи, что создавало цикл `BotConfigModule → CustomEmojiModule → SettingsModule → …` и роняло Nest при бутстрапе (`The module at index [1] of the SettingsModule "imports" array is undefined`). Теперь паки читаются напрямую из `Settings` через Prisma + чистую утилиту `readCustomEmojiPacks` — без импорта модуля и без цикла. Функциональность кастом-эмодзи в боте сохранена.
+
+---
+
+# Rezeis Admin v0.9.5.17
 
 Доводка эмодзи в текстах бота и уважение флага «скрыто». Парный релиз с reiwa v0.9.5.15.
 
