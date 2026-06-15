@@ -9,16 +9,18 @@ export interface EmojiAssetStoredInterface {
   readonly size: number;
 }
 
-export type EmojiAssetKind = 'png' | 'webp' | 'jpeg' | 'lottie';
+export type EmojiAssetKind = 'png' | 'webp' | 'jpeg' | 'lottie' | 'webm';
 
 const MAX_IMAGE_BYTES = 1 * 1024 * 1024; // static preview — generous for 100px glyphs
 const MAX_LOTTIE_BYTES = 2 * 1024 * 1024; // un-gzipped Lottie JSON
+const MAX_VIDEO_BYTES = 2 * 1024 * 1024; // VP9 .webm emoji (Telegram caps ~256 KB; margin for stickers)
 
 const EXT_BY_KIND: Record<EmojiAssetKind, string> = {
   png: '.png',
   webp: '.webp',
   jpeg: '.jpg',
   lottie: '.json',
+  webm: '.webm',
 };
 
 /**
@@ -48,7 +50,7 @@ export class EmojiAssetUploadService implements OnModuleInit {
     if (input.buffer.length === 0) {
       throw new BadRequestException('Empty emoji asset');
     }
-    const limit = input.kind === 'lottie' ? MAX_LOTTIE_BYTES : MAX_IMAGE_BYTES;
+    const limit = input.kind === 'lottie' ? MAX_LOTTIE_BYTES : input.kind === 'webm' ? MAX_VIDEO_BYTES : MAX_IMAGE_BYTES;
     if (input.buffer.length > limit) {
       throw new BadRequestException(
         `Emoji asset exceeds ${Math.round(limit / 1024)} KB limit`,

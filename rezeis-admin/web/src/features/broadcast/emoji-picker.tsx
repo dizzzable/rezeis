@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next'
 import { Smile } from 'lucide-react'
 
 import { api } from '@/lib/api'
+import { EmojiPreview } from '@/features/custom-emoji/emoji-preview'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
@@ -357,6 +358,8 @@ interface CustomEmojiLite {
   readonly slug: string
   readonly name: string
   readonly imageUrl: string
+  readonly lottieUrl: string | null
+  readonly videoUrl: string | null
 }
 interface CustomEmojiPackLite {
   readonly id: string
@@ -483,7 +486,13 @@ export function EmojiPicker({
                       }}
                       className="flex aspect-square w-full items-center justify-center rounded hover:bg-muted"
                     >
-                      <img src={emoji.imageUrl} alt={emoji.name} className="h-6 w-6 object-contain" />
+                      <EmojiPreview
+                        imageUrl={emoji.imageUrl}
+                        lottieUrl={emoji.lottieUrl}
+                        videoUrl={emoji.videoUrl}
+                        alt={emoji.name}
+                        className="h-6 w-6"
+                      />
                     </button>
                   ))}
                 </div>

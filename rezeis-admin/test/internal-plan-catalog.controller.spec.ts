@@ -28,19 +28,76 @@ describe('InternalPlanCatalogController', () => {
     );
   });
 
-  it('defaults the channel to WEB and forwards query params unchanged', async () => {
+  it('defaults the channel to WEB and forwards a provided userId unchanged', async () => {
     const catalogCalls: object[] = [];
     const expectedPlans = [{ id: 'plan-1' }];
-    const controller = new InternalPlanCatalogController({
-      getCatalogPlans: async (query: object) => {
-        catalogCalls.push(query);
-        return expectedPlans;
+    const prismaStub = {
+      user: {
+        findFirst: async () => {
+          throw new Error('should not resolve telegramId when userId is present');
+        },
       },
-    } as never as PlanCatalogService);
+    };
+    const controller = new InternalPlanCatalogController(
+      {
+        getCatalogPlans: async (query: object) => {
+          catalogCalls.push(query);
+          return expectedPlans;
+        },
+      } as never as PlanCatalogService,
+      prismaStub as never,
+    );
 
     const actual = await controller.getPlans({ userId: 'user-1' });
 
     assert.deepStrictEqual(catalogCalls, [{ channel: PurchaseChannel.WEB, userId: 'user-1' }]);
     assert.deepStrictEqual(actual, expectedPlans);
+  });
+
+  it('resolves a numeric telegramId to the rezeis userId when no userId is given', async () => {
+    const catalogCalls: object[] = [];
+    const findFirstArgs: object[] = [];
+    const controller = new InternalPlanCatalogController(
+      {
+        getCatalogPlans: async (query: object) => {
+          catalogCalls.push(query);
+          return [];
+        },
+      } as never as PlanCatalogService,
+      {
+        user: {
+          findFirst: async (args: object) => {
+            findFirstArgs.push(args);
+            return { id: 'resolved-user' };
+          },
+        },
+      } as never,
+    );
+
+    await controller.getPlans({ telegramId: '12345' });
+
+    assert.equal((findFirstArgs[0] as { where: { telegramId: bigint } }).where.telegramId, 12345n);
+    assert.deepStrictEqual(catalogCalls, [
+      { channel: PurchaseChannel.WEB, userId: 'resolved-user' },
+    ]);
+  });
+
+  it('falls back to the anonymous catalog for a non-numeric / unknown identity', async () => {
+    const catalogCalls: object[] = [];
+    const controller = new InternalPlanCatalogController(
+      {
+        getCatalogPlans: async (query: object) => {
+          catalogCalls.push(query);
+          return [];
+        },
+      } as never as PlanCatalogService,
+      {
+        user: { findFirst: async () => null },
+      } as never,
+    );
+
+    await controller.getPlans({ telegramId: 'not-a-number' });
+
+    assert.deepStrictEqual(catalogCalls, [{ channel: PurchaseChannel.WEB, userId: undefined }]);
   });
 });

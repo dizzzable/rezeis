@@ -9,6 +9,7 @@ export interface RegistryEmoji {
   readonly name: string
   readonly imageUrl: string
   readonly lottieUrl: string | null
+  readonly videoUrl: string | null
   readonly fallback: string | null
   readonly customEmojiId: string | null
 }

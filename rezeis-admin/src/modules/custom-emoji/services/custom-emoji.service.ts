@@ -127,8 +127,8 @@ export class CustomEmojiService {
     // Download assets with bounded concurrency — a 30-emoji set otherwise
     // serializes ~60 Telegram round-trips and blows past the client timeout.
     const resolved = await mapWithConcurrency(planned, 6, async (item) => {
-      const { imageUrl, lottieUrl } = await this.stickerAssets(token, item.sticker);
-      return { ...item, imageUrl, lottieUrl };
+      const { imageUrl, lottieUrl, videoUrl } = await this.stickerAssets(token, item.sticker);
+      return { ...item, imageUrl, lottieUrl, videoUrl };
     });
 
     const emojis: CustomEmojiInterface[] = [];
@@ -139,6 +139,7 @@ export class CustomEmojiService {
         name: item.name,
         imageUrl: item.imageUrl,
         lottieUrl: item.lottieUrl,
+        videoUrl: item.videoUrl,
         fallback: typeof item.sticker.emoji === 'string' ? item.sticker.emoji : null,
         customEmojiId:
           typeof item.sticker.custom_emoji_id === 'string' ? item.sticker.custom_emoji_id : null,
@@ -168,9 +169,10 @@ export class CustomEmojiService {
   private async stickerAssets(
     token: string,
     sticker: TgSticker,
-  ): Promise<{ imageUrl: string | null; lottieUrl: string | null }> {
+  ): Promise<{ imageUrl: string | null; lottieUrl: string | null; videoUrl: string | null }> {
     let imageUrl: string | null = null;
     let lottieUrl: string | null = null;
+    let videoUrl: string | null = null;
     try {
       if (sticker.is_animated) {
         const tgs = await this.downloadTgFile(token, sticker.file_id);
@@ -178,6 +180,19 @@ export class CustomEmojiService {
         lottieUrl = (await this.assetUpload.persist({ buffer: json, kind: 'lottie' })).url;
         imageUrl = await this.downloadThumb(token, sticker);
       } else if (sticker.is_video) {
+        // Store the actual VP9 .webm so the admin can play the real animated
+        // emoji (not just a frozen thumbnail). Thumbnail stays as the poster /
+        // fallback for browsers that can't decode the clip.
+        try {
+          const webm = await this.downloadTgFile(token, sticker.file_id);
+          videoUrl = (await this.assetUpload.persist({ buffer: Buffer.from(webm), kind: 'webm' })).url;
+        } catch (err: unknown) {
+          this.logger.warn(
+            `Video emoji download failed for ${sticker.custom_emoji_id ?? sticker.file_id}: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
         imageUrl = await this.downloadThumb(token, sticker);
       } else {
         const webp = await this.downloadTgFile(token, sticker.file_id);
@@ -193,7 +208,7 @@ export class CustomEmojiService {
     if (!imageUrl) {
       imageUrl = await this.downloadThumb(token, sticker).catch(() => null);
     }
-    return { imageUrl, lottieUrl };
+    return { imageUrl, lottieUrl, videoUrl };
   }
 
   /** Download a Telegram file by file_id; returns its raw bytes. */
@@ -234,6 +249,7 @@ export class CustomEmojiService {
       target.emojis.flatMap((e) => [
         this.assetUpload.remove(e.imageUrl),
         this.assetUpload.remove(e.lottieUrl),
+        this.assetUpload.remove(e.videoUrl),
       ]),
     );
   }

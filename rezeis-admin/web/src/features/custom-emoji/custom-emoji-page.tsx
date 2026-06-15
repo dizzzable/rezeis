@@ -31,6 +31,7 @@ interface CustomEmoji {
   readonly name: string
   readonly imageUrl: string
   readonly lottieUrl: string | null
+  readonly videoUrl: string | null
   readonly fallback: string | null
   readonly customEmojiId: string | null
 }
@@ -193,7 +194,8 @@ function PackCard({ pack }: { pack: CustomEmojiPack }) {
                 <EmojiPreview
                   key={emoji.slug}
                   imageUrl={emoji.imageUrl}
-                  lottieUrl={null}
+                  lottieUrl={emoji.lottieUrl}
+                  videoUrl={emoji.videoUrl}
                   alt={emoji.name}
                   className="h-6 w-6 shrink-0"
                 />
@@ -274,6 +276,7 @@ function EmojiRow({ packId, emoji }: { packId: string; emoji: CustomEmoji }) {
       <EmojiPreview
         imageUrl={emoji.imageUrl}
         lottieUrl={emoji.lottieUrl}
+        videoUrl={emoji.videoUrl}
         alt={emoji.name}
         className="h-9 w-9 shrink-0"
       />

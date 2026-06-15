@@ -57,6 +57,7 @@ export function CustomEmojiPicker({ value, onChange }: CustomEmojiPickerProps) {
                 <EmojiPreview
                   imageUrl={selected.imageUrl}
                   lottieUrl={selected.lottieUrl}
+                  videoUrl={selected.videoUrl}
                   alt={selected.name}
                   className="h-4 w-4 shrink-0"
                 />
@@ -111,6 +112,7 @@ export function CustomEmojiPicker({ value, onChange }: CustomEmojiPickerProps) {
                             <EmojiPreview
                               imageUrl={emoji.imageUrl}
                               lottieUrl={emoji.lottieUrl}
+                              videoUrl={emoji.videoUrl}
                               alt={emoji.name}
                               className="h-6 w-6"
                             />

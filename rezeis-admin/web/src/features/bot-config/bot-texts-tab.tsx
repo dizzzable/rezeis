@@ -13,6 +13,7 @@ import { Eye, EyeOff, Pencil, Plus, Search, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { EmojiPicker } from '@/features/broadcast/emoji-picker'
+import { EmojiPreview } from '@/features/custom-emoji/emoji-preview'
 import { api } from '@/lib/api'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -187,17 +188,24 @@ function truncate(value: string, max: number): string {
   return `${value.slice(0, max)}…`
 }
 
+interface CustomEmojiLite {
+  readonly slug: string
+  readonly imageUrl: string
+  readonly lottieUrl: string | null
+  readonly videoUrl: string | null
+}
 interface CustomEmojiPackLite {
   readonly id: string
-  readonly emojis: readonly { readonly slug: string; readonly imageUrl: string }[]
+  readonly emojis: readonly CustomEmojiLite[]
 }
 
 const CUSTOM_EMOJI_TOKEN = /(:[a-z0-9_]+:)/g
 
 /**
- * Live preview that renders `:slug:` custom-emoji tokens as their pack image
- * (so operators see the emoji, not the shortcode). Shown only when the value
- * actually contains a token. Plain text / unicode renders as-is.
+ * Live preview that renders `:slug:` custom-emoji tokens as the real emoji —
+ * animated (Lottie / VP9 webm) when available, otherwise the static image — so
+ * operators see the actual emoji, not the shortcode. Shown only when the value
+ * contains a token. Plain text / unicode renders as-is.
  */
 function CustomEmojiPreview({ value }: { readonly value: string }): JSX.Element | null {
   const { t } = useTranslation()
@@ -208,9 +216,9 @@ function CustomEmojiPreview({ value }: { readonly value: string }): JSX.Element 
     staleTime: 60_000,
   })
   const slugMap = useMemo(() => {
-    const map = new Map<string, string>()
+    const map = new Map<string, CustomEmojiLite>()
     for (const pack of packs ?? []) {
-      for (const emoji of pack.emojis) map.set(emoji.slug, emoji.imageUrl)
+      for (const emoji of pack.emojis) map.set(emoji.slug, emoji)
     }
     return map
   }, [packs])
@@ -225,14 +233,16 @@ function CustomEmojiPreview({ value }: { readonly value: string }): JSX.Element 
       <span>
         {parts.map((part, i) => {
           const match = /^:([a-z0-9_]+):$/.exec(part)
-          const url = match ? slugMap.get(match[1]) : undefined
-          if (match && url !== undefined) {
+          const emoji = match ? slugMap.get(match[1]) : undefined
+          if (match && emoji !== undefined) {
             return (
-              <img
+              <EmojiPreview
                 key={`${i}-${part}`}
-                src={url}
+                imageUrl={emoji.imageUrl}
+                lottieUrl={emoji.lottieUrl}
+                videoUrl={emoji.videoUrl}
                 alt={part}
-                className="inline-block h-5 w-5 align-text-bottom object-contain"
+                className="inline-flex h-5 w-5 align-text-bottom"
               />
             )
           }

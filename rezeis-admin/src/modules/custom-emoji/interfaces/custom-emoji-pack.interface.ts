@@ -16,6 +16,9 @@ export interface CustomEmojiInterface {
   readonly name: string;
   readonly imageUrl: string;
   readonly lottieUrl: string | null;
+  /** Animated VP9 `.webm` asset (Telegram video emoji). Played as a looping
+   *  muted `<video>` in the admin; `null` for static / Lottie emoji. */
+  readonly videoUrl: string | null;
   readonly fallback: string | null;
   readonly customEmojiId: string | null;
 }

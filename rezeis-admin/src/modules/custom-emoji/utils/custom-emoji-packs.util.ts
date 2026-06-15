@@ -44,6 +44,7 @@ function readEmoji(value: unknown): CustomEmojiInterface | null {
     name: readString(obj.name) ?? slug,
     imageUrl,
     lottieUrl: readString(obj.lottieUrl),
+    videoUrl: readString(obj.videoUrl),
     fallback: readString(obj.fallback),
     customEmojiId: readString(obj.customEmojiId),
   };
