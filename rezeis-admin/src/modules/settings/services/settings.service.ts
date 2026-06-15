@@ -64,6 +64,7 @@ interface UpdateTelegramDeliveryInput {
   readonly topicId?: number | null;
   readonly topics?: Record<string, number | null>;
   readonly mirrorUserNotifications?: boolean;
+  readonly devChatId?: string | null;
 }
 
 interface SendTelegramDeliveryTestInput {
@@ -594,6 +595,11 @@ export class SettingsService {
           nextTelegram.mirrorUserNotifications = input.mirrorUserNotifications;
           updatedFields.push('mirrorUserNotifications');
         }
+        if (input.devChatId !== undefined) {
+          nextTelegram.devChatId =
+            input.devChatId === null || input.devChatId === '' ? null : input.devChatId;
+          updatedFields.push('devChatId');
+        }
 
         if (nextTelegram.enabled === true && (nextTelegram.chatId === null || nextTelegram.chatId === undefined)) {
           throw new BadRequestException('TELEGRAM_DELIVERY_CHAT_REQUIRED');
@@ -1017,6 +1023,7 @@ function extractUpdatedBrandingFields(
     'iconColors',
     'borderRadius',
     'fontFamily',
+    'profileNaming',
   ];
   return fields.filter((field) => hasOwnField(dto, field)).map((f) => String(f));
 }
@@ -1055,6 +1062,14 @@ export interface TelegramDeliveryConfig {
    * the operator chat stays a system-events firehose unless opted in.
    */
   readonly mirrorUserNotifications: boolean;
+  /**
+   * Developer/operator personal chat id used as a **fallback** target when
+   * the primary delivery is disabled or has no `chatId`. Lets system events
+   * still reach the operator's bot DM (the reiwa bot's dev user) instead of
+   * being silently dropped when no group/channel routing is configured.
+   * `null` = no fallback. Delivered directly via the shared `BOT_TOKEN`.
+   */
+  readonly devChatId: string | null;
 }
 
 function readJsonObject(value: unknown): Record<string, unknown> {
@@ -1087,6 +1102,7 @@ function readTelegramDeliveryConfig(systemNotifications: unknown): TelegramDeliv
     topicId: typeof tg.topicId === 'number' ? tg.topicId : null,
     topics: normalisedTopics,
     mirrorUserNotifications: tg.mirrorUserNotifications === true,
+    devChatId: typeof tg.devChatId === 'string' && tg.devChatId.length > 0 ? tg.devChatId : null,
   };
 }
 

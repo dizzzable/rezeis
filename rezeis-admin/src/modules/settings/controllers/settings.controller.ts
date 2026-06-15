@@ -142,6 +142,7 @@ export class SettingsController {
       topicId: body.topicId,
       topics: body.topics,
       mirrorUserNotifications: body.mirrorUserNotifications,
+      devChatId: body.devChatId,
     });
   }
 

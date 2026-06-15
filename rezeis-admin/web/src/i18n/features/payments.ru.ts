@@ -84,6 +84,8 @@ export const ru = {
         'UUID offer’а в lava.top, который будет привязан к чекауту. Берётся из карточки продукта.',
       lavaWebhookKey:
         'X-Api-Key, который lava.top подставит в заголовок при отправке webhook на наш callback.',
+      cryptopayApiToken:
+        'Crypto-Pay-API-Token из @CryptoBot → Crypto Pay → My Apps → ваше приложение. Включите Webhooks в настройках приложения и укажите наш callback URL.',
       defaultCurrency:
         'Валюта, в которой клиент видит сумму при оплате через этот шлюз. В списке только те валюты, которые шлюз действительно поддерживает.',
     },

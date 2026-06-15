@@ -429,6 +429,12 @@ function TelegramDeliveryForm({ settings }: TelegramDeliveryFormProps) {
         .refine((v) => v === '' || /^-?\d+$/.test(v), {
           message: t('notificationsPage.delivery.validation.chatIdInvalid'),
         }),
+      devChatId: z
+        .string()
+        .trim()
+        .refine((v) => v === '' || /^-?\d+$/.test(v), {
+          message: t('notificationsPage.delivery.validation.chatIdInvalid'),
+        }),
       topicId: topicIdRule,
       topics: z.record(z.string(), topicIdRule),
     })
@@ -450,6 +456,7 @@ function TelegramDeliveryForm({ settings }: TelegramDeliveryFormProps) {
       enabled: tgConfig.enabled === true,
       mirrorUserNotifications: tgConfig.mirrorUserNotifications === true,
       chatId: typeof tgConfig.chatId === 'string' ? tgConfig.chatId : '',
+      devChatId: typeof tgConfig.devChatId === 'string' ? tgConfig.devChatId : '',
       topicId: typeof tgConfig.topicId === 'number' ? String(tgConfig.topicId) : '',
       topics: initialTopics,
     },
@@ -466,6 +473,7 @@ function TelegramDeliveryForm({ settings }: TelegramDeliveryFormProps) {
         enabled: values.enabled,
         mirrorUserNotifications: values.mirrorUserNotifications,
         chatId: values.chatId.trim() || null,
+        devChatId: values.devChatId.trim() || null,
         topicId: values.topicId.trim() && /^\d+$/.test(values.topicId.trim())
           ? parseInt(values.topicId.trim(), 10)
           : null,
@@ -581,9 +589,31 @@ function TelegramDeliveryForm({ settings }: TelegramDeliveryFormProps) {
               />
             </div>
 
-            <Separator />
+            {/* Dev fallback chat id */}
+            <FormField
+              control={form.control}
+              name="devChatId"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel className="flex items-center gap-1.5">
+                    <Smartphone className="h-3.5 w-3.5 text-muted-foreground" />
+                    {t('notificationsPage.delivery.devChatIdLabel')}
+                  </FormLabel>
+                  <FormControl>
+                    <Input
+                      {...field}
+                      placeholder={t('notificationsPage.delivery.devChatIdPlaceholder')}
+                    />
+                  </FormControl>
+                  <FormDescription className="text-[11px]">
+                    {t('notificationsPage.delivery.devChatIdHint')}
+                  </FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
 
-            {/* Per-category routing */}
+            <Separator />
             <div className="space-y-3">
               <div>
                 <Label className="flex items-center gap-1.5 text-sm font-semibold">

@@ -349,3 +349,94 @@ function createTransaction(input: {
     updatedAt: new Date('2026-04-19T12:00:00.000Z'),
   } as never;
 }
+
+describe('PaymentProviderExecutionService — CryptoPay', () => {
+  it('creates a CryptoPay invoice with token header, asset, and payload', async () => {
+    const calls: Array<{ url: string; body: unknown; options: unknown }> = [];
+    const service = createService({
+      post: (url: string, body: unknown, options: unknown) => {
+        calls.push({ url, body, options });
+        return of({
+          data: {
+            ok: true,
+            result: {
+              invoice_id: 555,
+              status: 'active',
+              bot_invoice_url: 'https://t.me/CryptoBot?start=inv_abc',
+            },
+          },
+        });
+      },
+    });
+
+    const result = await service.createCheckout({
+      gateway: createGateway({
+        type: PaymentGatewayType.CRYPTOPAY,
+        settings: { apiToken: 'cp-token-1' },
+      }),
+      transaction: createTransaction({
+        paymentId: 'payment-cp-1',
+        gatewayType: PaymentGatewayType.CRYPTOPAY,
+        amount: '12.5',
+        currency: Currency.USDT,
+      }),
+      description: 'Crypto checkout',
+      successUrl: 'https://user.example/ok',
+    });
+
+    assert.equal(calls.length, 1);
+    const call = calls[0];
+    assert.equal(call.url, 'https://pay.crypt.bot/api/createInvoice');
+    assert.deepStrictEqual(call.body, {
+      currency_type: 'crypto',
+      asset: 'USDT',
+      amount: '12.5',
+      description: 'Crypto checkout',
+      payload: 'payment-cp-1',
+      paid_btn_name: 'callback',
+      paid_btn_url: 'https://user.example/ok',
+    });
+    assert.deepStrictEqual(
+      (call.options as { headers: Record<string, string> }).headers['Crypto-Pay-API-Token'],
+      'cp-token-1',
+    );
+    assert.equal(result.gatewayId, '555');
+    assert.equal(result.checkoutUrl, 'https://t.me/CryptoBot?start=inv_abc');
+    assert.equal(result.providerMode, 'REDIRECT');
+    assert.equal(result.gatewayData.provider, 'CRYPTOPAY');
+  });
+
+  it('rejects CryptoPay checkout when the API token is not configured', async () => {
+    const service = createService({ post: () => of({ data: { ok: true, result: {} } }) });
+
+    await assert.rejects(
+      service.createCheckout({
+        gateway: createGateway({ type: PaymentGatewayType.CRYPTOPAY, settings: {} }),
+        transaction: createTransaction({ gatewayType: PaymentGatewayType.CRYPTOPAY, currency: Currency.USDT }),
+        description: 'Crypto checkout',
+      }),
+      (error: unknown) => {
+        assert.equal(error instanceof ServiceUnavailableException, true);
+        return true;
+      },
+    );
+  });
+
+  it('treats ok=false from createInvoice as a sanitized provider failure', async () => {
+    const service = createService({
+      post: () => of({ data: { ok: false, error: { code: 'INVOICE_ERROR' } } }),
+    });
+
+    await assert.rejects(
+      service.createCheckout({
+        gateway: createGateway({ type: PaymentGatewayType.CRYPTOPAY, settings: { apiToken: 'cp-token-1' } }),
+        transaction: createTransaction({ gatewayType: PaymentGatewayType.CRYPTOPAY, currency: Currency.USDT }),
+        description: 'Crypto checkout',
+      }),
+      (error: unknown) => {
+        assert.equal(error instanceof ServiceUnavailableException, true);
+        return true;
+      },
+    );
+  });
+});

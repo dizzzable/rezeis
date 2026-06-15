@@ -188,6 +188,92 @@ describe('ProfileSyncProcessor', () => {
     }]);
   });
 
+  it('detaches the profile (nulls remnawaveId, keeps row) on successful DELETE', async () => {
+    const subscriptionUpdates: unknown[] = [];
+    const processor = new ProfileSyncProcessor(
+      {
+        profileSyncJob: {
+          findUnique: async () => ({
+            id: 'sync-job-1',
+            action: SyncAction.DELETE,
+            status: SyncJobStatus.PENDING,
+            attempts: 0,
+            subscription: {
+              id: 'subscription-1',
+              userId: 'user-1',
+              remnawaveId: 'rem-user-1',
+              trafficLimit: null,
+              deviceLimit: 0,
+              internalSquads: [],
+              externalSquad: null,
+              expiresAt: new Date('2020-01-01T00:00:00.000Z'),
+              planSnapshot: {},
+            },
+          }),
+          update: async () => undefined,
+        },
+        subscription: {
+          update: async (input: unknown) => { subscriptionUpdates.push(input); },
+        },
+      } as never,
+      {
+        deletePanelUser: async (uuid: string) => {
+          assert.equal(uuid, 'rem-user-1');
+          return { isDeleted: true };
+        },
+      } as never,
+      {} as never,
+      { error: () => undefined, info: () => undefined } as never,
+    );
+
+    await processor.process({ data: { syncJobId: 'sync-job-1' } } as never);
+
+    assert.deepStrictEqual(subscriptionUpdates, [{
+      where: { id: 'subscription-1' },
+      data: { remnawaveId: null },
+    }]);
+  });
+
+  it('leaves remnawaveId intact when panel DELETE reports not-deleted', async () => {
+    const subscriptionUpdates: unknown[] = [];
+    const processor = new ProfileSyncProcessor(
+      {
+        profileSyncJob: {
+          findUnique: async () => ({
+            id: 'sync-job-1',
+            action: SyncAction.DELETE,
+            status: SyncJobStatus.PENDING,
+            attempts: 0,
+            subscription: {
+              id: 'subscription-1',
+              userId: 'user-1',
+              remnawaveId: 'rem-user-1',
+              trafficLimit: null,
+              deviceLimit: 0,
+              internalSquads: [],
+              externalSquad: null,
+              expiresAt: new Date('2020-01-01T00:00:00.000Z'),
+              planSnapshot: {},
+            },
+          }),
+          update: async () => undefined,
+        },
+        subscription: {
+          update: async (input: unknown) => { subscriptionUpdates.push(input); },
+        },
+      } as never,
+      {
+        deletePanelUser: async () => ({ isDeleted: false }),
+      } as never,
+      {} as never,
+      { error: () => undefined, info: () => undefined } as never,
+    );
+
+    await processor.process({ data: { syncJobId: 'sync-job-1' } } as never);
+
+    assert.deepStrictEqual(subscriptionUpdates, []);
+  });
+
   it('marks missing and already-completed jobs as no-ops', async () => {
     let updates = 0;
     const missingProcessor = new ProfileSyncProcessor(

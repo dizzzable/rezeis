@@ -80,6 +80,11 @@ export class AuditService {
     const limit = query.limit ?? 50;
     const where: Prisma.AdminAuditLogWhereInput = {};
     if (query.kind) where.action = query.kind;
+    if (query.systemOnly === 'true' && !query.kind) {
+      // System-events feed: only rows emitted by SystemEventsService, which
+      // persist with an `event.<type>` action prefix.
+      where.action = { startsWith: 'event.' };
+    }
     if (query.actorId) {
       where.adminUserId = query.actorId === 'system' ? null : query.actorId;
     }

@@ -60,6 +60,28 @@ export class CardEffectSlotDto {
  *   - `logoUrl` accepts `data:` URIs (for inline SVGs uploaded through the UI)
  *     OR `http(s)://` URLs.
  */
+/**
+ * Remnawave profile-naming template block (persisted under
+ * `Settings.brandingSettings.profileNaming`). Controls how panel usernames
+ * are generated: `<prefix><sep><login><sep><suffixBase>`.
+ */
+export class ProfileNamingDto {
+  @IsOptional()
+  @IsString()
+  @MaxLength(16)
+  public prefix?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(2)
+  public separator?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
+  public suffixBase?: string;
+}
+
 export class UpdateBrandingSettingsDto {
   @IsOptional()
   @IsString()
@@ -158,4 +180,9 @@ export class UpdateBrandingSettingsDto {
   @IsString()
   @Length(1, 256)
   public fontFamily?: string;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => ProfileNamingDto)
+  public profileNaming?: ProfileNamingDto;
 }

@@ -101,17 +101,13 @@ function PanelBrandingForm({ branding }: PanelBrandingFormProps) {
 
   const saveMutation = useMutation({
     mutationFn: (values: FormValues) =>
-      api.patch('/admin/settings/platform', {
-        brandingSettings: {
-          ...branding,
-          projectName: values.brandName,
-          brandName: values.brandName,
-          logoUrl: values.logoUrl,
-          profileNaming: {
-            prefix: values.namingPrefix,
-            separator: values.namingSeparator,
-            suffixBase: values.namingSuffixBase,
-          },
+      api.patch('/admin/settings/branding', {
+        brandName: values.brandName,
+        logoUrl: values.logoUrl,
+        profileNaming: {
+          prefix: values.namingPrefix,
+          separator: values.namingSeparator,
+          suffixBase: values.namingSuffixBase,
         },
       }),
     onSuccess: () => {

@@ -3194,6 +3194,7 @@ export const en = {
     subtitle: 'Admin actions and system events',
     tabs: {
       audit: 'Log',
+      systemEvents: 'System events',
       systemLogs: 'System logs',
     },
     error: {
@@ -3232,6 +3233,25 @@ export const en = {
       payload: {
         show: 'Show',
         hide: 'Hide',
+      },
+    },
+    systemEvents: {
+      title: 'System events',
+      subtitle: 'System event feed (subscription creation, payments, errors, etc.)',
+      empty: 'No system events found.',
+      columns: {
+        severity: 'Severity',
+        category: 'Category',
+        message: 'Message',
+      },
+      severity: {
+        INFO: 'Info',
+        WARNING: 'Warning',
+        ERROR: 'Error',
+      },
+      filters: {
+        severityPlaceholder: 'Severity',
+        allSeverities: 'All severities',
       },
     },
   },

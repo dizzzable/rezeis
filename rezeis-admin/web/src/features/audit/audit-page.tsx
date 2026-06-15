@@ -1,7 +1,7 @@
 import { lazy, Suspense, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
-import { ClipboardList, AlertCircle, ChevronDown, Filter, ScrollText, X } from 'lucide-react';
+import { ClipboardList, AlertCircle, ChevronDown, Filter, ScrollText, X, Activity } from 'lucide-react';
 import { api } from '@/lib/api';
 import { formatDateTime, cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
@@ -123,6 +123,10 @@ export default function AuditPage() {
             <ClipboardList className="h-3.5 w-3.5" />
             {t('auditPage.tabs.audit')}
           </TabsTrigger>
+          <TabsTrigger value="system-events" className="gap-1.5">
+            <Activity className="h-3.5 w-3.5" />
+            {t('auditPage.tabs.systemEvents')}
+          </TabsTrigger>
           <TabsTrigger value="system-logs" className="gap-1.5">
             <ScrollText className="h-3.5 w-3.5" />
             {t('auditPage.tabs.systemLogs')}
@@ -131,6 +135,10 @@ export default function AuditPage() {
 
         <TabsContent value="audit" className="pt-2">
           <AuditLogTab />
+        </TabsContent>
+
+        <TabsContent value="system-events" className="pt-2">
+          <SystemEventsTab />
         </TabsContent>
 
         <TabsContent value="system-logs" className="pt-2">
@@ -392,6 +400,188 @@ function AuditLogTab() {
                   size="sm"
                   onClick={handleNextPage}
                   disabled={!data.nextCursor}
+                >
+                  {t('auditPage.events.pagination.next')}
+                </Button>
+              </div>
+            </>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+function severityVariant(severity: string): 'default' | 'destructive' | 'warning' | 'success' | 'secondary' {
+  if (severity === 'ERROR') return 'destructive';
+  if (severity === 'WARNING') return 'warning';
+  return 'secondary';
+}
+
+/**
+ * System-events feed — the `SystemEventsService` stream (rows whose audit
+ * `action` starts with `event.`). Surfaces severity / category / message
+ * prominently, unlike the admin-action audit log. Reuses the audit V2
+ * endpoint with `systemOnly=true`.
+ */
+function SystemEventsTab() {
+  const { t } = useTranslation();
+  const [severity, setSeverity] = useState('');
+  const [cursor, setCursor] = useState<string | undefined>(undefined);
+  const [cursors, setCursors] = useState<string[]>([]);
+
+  const params: Record<string, string> = { limit: '50', systemOnly: 'true' };
+  if (cursor) params.cursor = cursor;
+
+  const { data, isLoading, error } = useQuery({
+    queryKey: ['system-events', params],
+    queryFn: ({ signal }) => fetchAuditEvents(params, signal),
+    placeholderData: keepPreviousData,
+    refetchInterval: 30_000,
+  });
+
+  function handleNextPage() {
+    if (data?.nextCursor) {
+      setCursors((prev) => [...prev, cursor ?? '']);
+      setCursor(data.nextCursor);
+    }
+  }
+
+  function handlePrevPage() {
+    const prev = cursors[cursors.length - 1];
+    setCursors((c) => c.slice(0, -1));
+    setCursor(prev || undefined);
+  }
+
+  const readStr = (payload: Record<string, unknown> | null, key: string): string =>
+    payload && typeof payload[key] === 'string' ? (payload[key] as string) : '';
+
+  const visibleItems = (data?.items ?? []).filter((event) => {
+    if (!severity) return true;
+    return readStr(event.payload, 'severity') === severity;
+  });
+
+  if (error)
+    return (
+      <Alert variant="destructive">
+        <AlertCircle className="h-4 w-4" />
+        <AlertTitle>{t('auditPage.error.title')}</AlertTitle>
+        <AlertDescription>{t('auditPage.error.body')}</AlertDescription>
+      </Alert>
+    );
+
+  return (
+    <div className="space-y-6">
+      <Card>
+        <CardHeader className="pb-3">
+          <div className="flex items-center gap-2">
+            <Filter className="h-4 w-4 text-muted-foreground" />
+            <CardTitle className="text-base">{t('auditPage.filters.title')}</CardTitle>
+            <div className="ml-auto w-48">
+              <Select
+                value={severity || 'all'}
+                onValueChange={(v) => setSeverity(v === 'all' ? '' : v)}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder={t('auditPage.systemEvents.filters.severityPlaceholder')} />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">{t('auditPage.systemEvents.filters.allSeverities')}</SelectItem>
+                  <SelectItem value="INFO">{t('auditPage.systemEvents.severity.INFO')}</SelectItem>
+                  <SelectItem value="WARNING">{t('auditPage.systemEvents.severity.WARNING')}</SelectItem>
+                  <SelectItem value="ERROR">{t('auditPage.systemEvents.severity.ERROR')}</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+        </CardHeader>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <div className="flex items-center gap-2">
+            <Activity className="h-5 w-5 text-muted-foreground" />
+            <CardTitle>{t('auditPage.systemEvents.title')}</CardTitle>
+          </div>
+          <CardDescription>{t('auditPage.systemEvents.subtitle')}</CardDescription>
+        </CardHeader>
+        <CardContent>
+          {isLoading ? (
+            <div className="space-y-2">
+              {Array.from({ length: 8 }).map((_, i) => (
+                <Skeleton key={i} className="h-12 w-full" />
+              ))}
+            </div>
+          ) : visibleItems.length === 0 ? (
+            <div className="flex flex-col items-center gap-2 py-12 text-muted-foreground">
+              <Activity className="h-10 w-10 opacity-30" />
+              <p>{t('auditPage.systemEvents.empty')}</p>
+            </div>
+          ) : (
+            <>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>{t('auditPage.events.columns.time')}</TableHead>
+                    <TableHead>{t('auditPage.systemEvents.columns.severity')}</TableHead>
+                    <TableHead>{t('auditPage.systemEvents.columns.category')}</TableHead>
+                    <TableHead>{t('auditPage.events.columns.event')}</TableHead>
+                    <TableHead>{t('auditPage.systemEvents.columns.message')}</TableHead>
+                    <TableHead>{t('auditPage.events.columns.payload')}</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {visibleItems.map((event) => {
+                    const sev = readStr(event.payload, 'severity') || 'INFO';
+                    const category = readStr(event.payload, 'category');
+                    const message = readStr(event.payload, 'message');
+                    return (
+                      <TableRow key={event.id}>
+                        <TableCell className="text-xs text-muted-foreground whitespace-nowrap">
+                          {formatDateTime(event.createdAt)}
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant={severityVariant(sev)} className="text-xs">
+                            {t(`auditPage.systemEvents.severity.${sev}`, sev)}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="text-xs text-muted-foreground">
+                          {category || '—'}
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant="secondary" className="font-mono text-xs">
+                            {event.kind.replace(/^event\./, '')}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="text-sm max-w-xs truncate">
+                          {message || '—'}
+                        </TableCell>
+                        <TableCell>
+                          <PayloadViewer payload={event.payload} />
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+
+              <div className="flex items-center justify-between mt-4">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handlePrevPage}
+                  disabled={cursors.length === 0}
+                >
+                  {t('auditPage.events.pagination.previous')}
+                </Button>
+                <span className="text-xs text-muted-foreground">
+                  {t('auditPage.events.pagination.page', { page: cursors.length + 1 })}
+                </span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleNextPage}
+                  disabled={!data?.nextCursor}
                 >
                   {t('auditPage.events.pagination.next')}
                 </Button>

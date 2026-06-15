@@ -2,8 +2,8 @@ import { z } from 'zod'
 import { api } from '@/lib/api'
 import { unwrapPayloadOrArray } from '@/lib/api-utils'
 
-const currencySchema = z.enum(['USD', 'RUB', 'USDT', 'XTR', 'TON', 'BTC', 'ETH'])
-const paymentGatewayTypeSchema = z.enum(['TELEGRAM_STARS', 'YOOKASSA', 'PLATEGA', 'HELEKET', 'CRYPTOMUS', 'MULENPAY'])
+const currencySchema = z.enum(['USD', 'RUB', 'USDT', 'XTR', 'TON', 'BTC', 'ETH', 'LTC', 'USDC', 'TRX'])
+const paymentGatewayTypeSchema = z.enum(['TELEGRAM_STARS', 'YOOKASSA', 'PLATEGA', 'HELEKET', 'CRYPTOMUS', 'MULENPAY', 'CRYPTOPAY'])
 const purchaseTypeSchema = z.enum(['NEW', 'ADDITIONAL', 'RENEW', 'UPGRADE'])
 const purchaseChannelSchema = z.enum(['WEB', 'TELEGRAM', 'MINI_APP'])
 const transactionStatusSchema = z.enum(['PENDING', 'COMPLETED', 'CANCELED', 'REFUNDED', 'FAILED'])

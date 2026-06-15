@@ -3225,6 +3225,7 @@
     subtitle: 'Действия администраторов и системные события',
     tabs: {
       audit: 'Журнал',
+      systemEvents: 'Системные события',
       systemLogs: 'Системные логи',
     },
     error: {
@@ -3263,6 +3264,25 @@
       payload: {
         show: 'Показать',
         hide: 'Скрыть',
+      },
+    },
+    systemEvents: {
+      title: 'Системные события',
+      subtitle: 'Лента событий системы (создание подписок, платежи, ошибки и т. д.)',
+      empty: 'Системных событий не найдено.',
+      columns: {
+        severity: 'Уровень',
+        category: 'Категория',
+        message: 'Сообщение',
+      },
+      severity: {
+        INFO: 'Инфо',
+        WARNING: 'Предупреждение',
+        ERROR: 'Ошибка',
+      },
+      filters: {
+        severityPlaceholder: 'Уровень',
+        allSeverities: 'Все уровни',
       },
     },
   },

@@ -25,6 +25,7 @@ describe('PaymentGatewayRegistryService', () => {
       PaymentGatewayType.ROLLYPAY,
       PaymentGatewayType.SEVERPAY,
       PaymentGatewayType.LAVA,
+      PaymentGatewayType.CRYPTOPAY,
     ];
 
     const firstCreate = await service.createDefaults();

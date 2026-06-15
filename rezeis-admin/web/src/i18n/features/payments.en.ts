@@ -84,6 +84,8 @@ export const en = {
         'UUID of the lava.top offer to attach to checkout. Copied from the product card.',
       lavaWebhookKey:
         'X-Api-Key that lava.top will inject into the header when calling our webhook.',
+      cryptopayApiToken:
+        'Crypto-Pay-API-Token from @CryptoBot → Crypto Pay → My Apps → your app. Enable Webhooks in the app settings and point them at our callback URL.',
       defaultCurrency:
         'The currency the customer sees when paying through this gateway. The list is restricted to currencies the gateway actually supports.',
     },

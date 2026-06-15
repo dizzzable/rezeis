@@ -96,6 +96,7 @@ enum PaymentGatewayType {
   ROLLYPAY
   SEVERPAY
   LAVA
+  CRYPTOPAY
 }
 
 enum SubscriptionStatus {

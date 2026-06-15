@@ -77,6 +77,8 @@ export class PaymentProviderExecutionService {
           return await this.createSeverpayCheckout(input);
         case PaymentGatewayType.LAVA:
           return await this.createLavaCheckout(input);
+        case PaymentGatewayType.CRYPTOPAY:
+          return await this.createCryptopayCheckout(input);
         default:
           throw new NotFoundException('Payment gateway not supported');
       }
@@ -283,6 +285,64 @@ export class PaymentProviderExecutionService {
       providerStatus: readOptionalString(result, ['status']),
       gatewayData: {
         provider: 'CRYPTOMUS',
+        providerStatus: readOptionalString(result, ['status']),
+        providerResponse: this.redactProviderResponse(data),
+        checkoutUrl,
+      },
+    };
+  }
+
+  private async createCryptopayCheckout(input: {
+    readonly gateway: PaymentGateway;
+    readonly transaction: Transaction;
+    readonly description: string;
+    readonly successUrl?: string | null;
+    readonly failUrl?: string | null;
+  }): Promise<ProviderCheckoutResult> {
+    const settings = readGatewaySettings(input.gateway.settings);
+    const apiToken = requireSetting(settings, 'apiToken');
+    const isTestnet = settings['isTestnet'] === true;
+    const baseUrl = isTestnet ? 'https://testnet-pay.crypt.bot/api' : 'https://pay.crypt.bot/api';
+    const resultUrl = this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
+    // Our gateway currency is already a CryptoPay-supported crypto asset (the
+    // supported-currencies catalog enforces this). USD is mapped to USDT
+    // defensively in case an operator left a stale fiat currency on the row.
+    const asset = input.transaction.currency === Currency.USD ? 'USDT' : input.transaction.currency;
+    const payload: Record<string, unknown> = {
+      currency_type: 'crypto',
+      asset,
+      amount: input.transaction.amount.toString(),
+      description: input.description.slice(0, 1024),
+      payload: input.transaction.paymentId,
+    };
+    // `paid_btn_url` must be an absolute http(s) URL; only attach the
+    // post-payment "Return" button when we actually resolved one.
+    if (typeof resultUrl === 'string' && /^https?:\/\//i.test(resultUrl)) {
+      payload['paid_btn_name'] = 'callback';
+      payload['paid_btn_url'] = resultUrl;
+    }
+    const response = await firstValueFrom(
+      this.httpService.post(`${baseUrl}/createInvoice`, payload, {
+        headers: {
+          'Crypto-Pay-API-Token': apiToken,
+          'Content-Type': 'application/json',
+        },
+      }),
+    );
+    const data = response.data as Record<string, unknown>;
+    if (data['ok'] !== true) {
+      throw new ServiceUnavailableException('CryptoPay createInvoice failed');
+    }
+    const result = readRecord(data['result']);
+    const checkoutUrl = readOptionalString(result, ['bot_invoice_url', 'mini_app_invoice_url', 'web_app_invoice_url']);
+    const invoiceId = readOptionalString(result, ['invoice_id']);
+    return {
+      gatewayId: invoiceId,
+      checkoutUrl,
+      providerMode: 'REDIRECT',
+      providerStatus: readOptionalString(result, ['status']),
+      gatewayData: {
+        provider: 'CRYPTOPAY',
         providerStatus: readOptionalString(result, ['status']),
         providerResponse: this.redactProviderResponse(data),
         checkoutUrl,

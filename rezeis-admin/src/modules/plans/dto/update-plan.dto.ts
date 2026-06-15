@@ -8,7 +8,7 @@ import {
   IsInt,
   IsOptional,
   IsString,
-  IsUUID,
+  Matches,
   MaxLength,
   Min,
   ValidateIf,
@@ -96,19 +96,19 @@ export class UpdatePlanDto {
   @IsOptional()
   @IsArray()
   @ArrayUnique()
-  @IsUUID('4', { each: true })
+  @Matches(/^c[a-z0-9]{20,}$/i, { each: true, message: 'each value in upgradeToPlanIds must be a plan id (CUID)' })
   public upgradeToPlanIds?: string[];
 
   @IsOptional()
   @IsArray()
   @ArrayUnique()
-  @IsUUID('4', { each: true })
+  @Matches(/^c[a-z0-9]{20,}$/i, { each: true, message: 'each value in replacementPlanIds must be a plan id (CUID)' })
   public replacementPlanIds?: string[];
 
   @IsOptional()
   @IsArray()
   @ArrayUnique()
-  @IsUUID('4', { each: true })
+  @Matches(/^c[a-z0-9]{20,}$/i, { each: true, message: 'each value in allowedUserIds must be a reiwa_id (CUID)' })
   public allowedUserIds?: string[];
 
   @IsOptional()

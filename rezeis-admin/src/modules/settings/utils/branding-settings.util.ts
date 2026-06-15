@@ -19,6 +19,7 @@ import {
   DEFAULT_BRANDING,
   ICON_COLOR_MODES,
   IconColorMode,
+  ProfileNamingSettings,
 } from '../interfaces/branding-settings.interface';
 
 /** Hex colour validation: 3, 4, 6 or 8 hex chars after a leading `#`. */
@@ -46,6 +47,7 @@ export function readBrandingSettings(value: unknown): BrandingSettingsInterface 
     iconColors: readHexMap(record, 'iconColors'),
     borderRadius: readString(record, 'borderRadius', DEFAULT_BRANDING.borderRadius),
     fontFamily: readString(record, 'fontFamily', DEFAULT_BRANDING.fontFamily),
+    profileNaming: readProfileNaming(record),
   };
 }
 
@@ -244,4 +246,21 @@ function readClampedNumber(
     return Math.min(Math.max(value, min), max);
   }
   return fallback;
+}
+
+function readProfileNaming(record: Record<string, unknown>): ProfileNamingSettings {
+  const naming = readRecord(record['profileNaming']);
+  const fallback = DEFAULT_BRANDING.profileNaming;
+  const read = (key: keyof ProfileNamingSettings, max: number): string => {
+    const value = naming[key];
+    if (typeof value === 'string' && value.length > 0 && value.length <= max) {
+      return value;
+    }
+    return fallback[key];
+  };
+  return {
+    prefix: read('prefix', 16),
+    separator: read('separator', 2),
+    suffixBase: read('suffixBase', 32),
+  };
 }

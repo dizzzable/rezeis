@@ -107,6 +107,7 @@ function buildTelegramConfig(): TelegramDeliveryConfig {
     topicId: 42,
     topics: { PAYMENT: 7 },
     mirrorUserNotifications: true,
+    devChatId: null,
   };
 }
 
@@ -253,6 +254,7 @@ describe('SettingsController', () => {
       iconColors: {},
       borderRadius: '1rem',
       fontFamily: 'Inter',
+      profileNaming: { prefix: 'rz', separator: '_', suffixBase: 'sub' },
     };
     const icons: CustomIconInterface[] = [{ id: 'icon-1', name: 'Rocket', url: '/uploads/icons/rocket.svg', color: '#ffffff' }];
     const controller = createController({
@@ -315,6 +317,7 @@ describe('SettingsController', () => {
       topicId: telegramDto.topicId,
       topics: telegramDto.topics,
       mirrorUserNotifications: telegramDto.mirrorUserNotifications,
+      devChatId: telegramDto.devChatId,
     });
     assert.deepStrictEqual(calls[2], {
       currentAdmin,

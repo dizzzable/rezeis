@@ -41,6 +41,9 @@ export const GATEWAY_SUPPORTED_CURRENCIES: Readonly<
   // Crypto aggregators — wide stable + native list.
   CRYPTOMUS: ['USDT', 'TON', 'BTC', 'ETH', 'LTC', 'BNB', 'DASH', 'SOL', 'XMR', 'USDC', 'TRX'],
   HELEKET: ['USDT', 'TON', 'BTC', 'ETH', 'LTC', 'BNB', 'DASH', 'SOL', 'XMR', 'USDC', 'TRX'],
+
+  // CryptoPay (@CryptoBot) — supported crypto assets intersected with our enum.
+  CRYPTOPAY: ['USDT', 'TON', 'BTC', 'ETH', 'LTC', 'USDC', 'TRX'],
 };
 
 /**

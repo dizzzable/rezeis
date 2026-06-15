@@ -420,18 +420,34 @@ export class SystemEventsService {
     if (!this.httpService) return;
 
     const tgConfig = await this.loadTelegramConfig();
-    if (!tgConfig.enabled || !tgConfig.botToken || !tgConfig.chatId) return;
+    if (!tgConfig.botToken) return;
 
-    // Filter: if events list is specified, only send matching events
-    if (tgConfig.events.length > 0 && !tgConfig.events.includes(event.type)) return;
-
-    // Resolve topic ID: per-category mapping → default → null (general chat)
-    const topicId = tgConfig.topicMap[event.category] ?? tgConfig.defaultTopicId ?? null;
+    // Resolve the delivery target. The primary group/channel is used when
+    // delivery is enabled AND a chatId is set; otherwise we fall back to the
+    // operator's personal `devChatId` (the reiwa bot's dev user) so system
+    // events are never silently dropped just because group routing isn't
+    // configured (screen 6 "Доставка в Telegram").
+    const primaryActive = tgConfig.enabled && tgConfig.chatId !== null;
+    let targetChatId: string;
+    let topicId: number | null = null;
+    if (primaryActive && tgConfig.chatId !== null) {
+      // Filter: if events list is specified, only send matching events.
+      if (tgConfig.events.length > 0 && !tgConfig.events.includes(event.type)) return;
+      targetChatId = tgConfig.chatId;
+      // Resolve topic ID: per-category mapping → default → null (general chat)
+      topicId = tgConfig.topicMap[event.category] ?? tgConfig.defaultTopicId ?? null;
+    } else if (tgConfig.devChatId !== null) {
+      // Dev fallback: deliver every event to the operator's DM (no topic
+      // routing, no event filter — the firehose is intentional here).
+      targetChatId = tgConfig.devChatId;
+    } else {
+      return;
+    }
 
     const html = this.formatTelegramMessage(event);
 
     const payload: Record<string, unknown> = {
-      chat_id: tgConfig.chatId,
+      chat_id: targetChatId,
       text: html,
       parse_mode: 'HTML',
       disable_web_page_preview: true,
@@ -579,12 +595,13 @@ export class SystemEventsService {
     topicMap: Record<string, number | null>;
     defaultTopicId: number | null;
     events: string[];
+    devChatId: string | null;
   }> {
     const settings = await this.prismaService.settings.findFirst({
       select: { systemNotifications: true },
     });
     if (!settings) {
-      return { enabled: false, botToken: null, chatId: null, topicMap: {}, defaultTopicId: null, events: [] };
+      return { enabled: false, botToken: null, chatId: null, topicMap: {}, defaultTopicId: null, events: [], devChatId: null };
     }
     const json = settings.systemNotifications as Record<string, unknown>;
     const tg = (json?.telegram ?? {}) as Record<string, unknown>;
@@ -604,6 +621,7 @@ export class SystemEventsService {
       topicMap,
       defaultTopicId: typeof tg.topicId === 'number' ? tg.topicId : null,
       events: Array.isArray(tg.events) ? tg.events.filter((e): e is string => typeof e === 'string') : [],
+      devChatId: typeof tg.devChatId === 'string' && tg.devChatId.length > 0 ? tg.devChatId : null,
     };
   }
 }

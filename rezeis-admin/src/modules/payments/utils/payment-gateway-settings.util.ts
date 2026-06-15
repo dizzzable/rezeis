@@ -114,6 +114,13 @@ const lavaSettingsSchema = z
   })
   .strict();
 
+const cryptopaySettingsSchema = z
+  .object({
+    apiToken: z.string().min(1).optional(),
+    isTestnet: z.boolean().optional(),
+  })
+  .strict();
+
 type GatewaySettingsRecord = Record<string, unknown>;
 
 function stripUndefinedEntries(value: GatewaySettingsRecord): Prisma.InputJsonObject {
@@ -183,6 +190,8 @@ export function normalizeGatewaySettingsForStorage(
         return stripUndefinedEntries(severpaySettingsSchema.parse(rawSettings));
       case PaymentGatewayType.LAVA:
         return stripUndefinedEntries(lavaSettingsSchema.parse(rawSettings));
+      case PaymentGatewayType.CRYPTOPAY:
+        return stripUndefinedEntries(cryptopaySettingsSchema.parse(rawSettings));
       default:
         return stripUndefinedEntries(rawSettings);
     }
@@ -236,6 +245,8 @@ export function isGatewayConfigured(
       return hasRequiredStrings(settings, ['mid', 'secretToken']);
     case PaymentGatewayType.LAVA:
       return hasRequiredStrings(settings, ['apiKey', 'offerId']);
+    case PaymentGatewayType.CRYPTOPAY:
+      return hasRequiredStrings(settings, ['apiToken']);
     default:
       return false;
   }

@@ -114,6 +114,18 @@ export interface CardEffectSlot {
   readonly cardEffectOpacity: number;
 }
 
+/**
+ * Remnawave profile-naming template. Profiles are named
+ * `<prefix><separator><login><separator><suffixBase>[<separator>N]`, e.g.
+ * `rz_john_sub`, `rz_john_sub_1`. Persisted inside `Settings.brandingSettings`
+ * (read by `RemnawaveProfileNamingService`).
+ */
+export interface ProfileNamingSettings {
+  readonly prefix: string;
+  readonly separator: string;
+  readonly suffixBase: string;
+}
+
 export interface BrandingSettingsInterface {
   /** Display name shown on the subscription card and headers. */
   readonly brandName: string;
@@ -190,6 +202,12 @@ export interface BrandingSettingsInterface {
   readonly borderRadius: string;
   /** Display font family. */
   readonly fontFamily: string;
+
+  /**
+   * Remnawave profile-naming template (prefix / separator / suffix base).
+   * Read by `RemnawaveProfileNamingService` when provisioning panel profiles.
+   */
+  readonly profileNaming: ProfileNamingSettings;
 }
 
 export const DEFAULT_BRANDING: BrandingSettingsInterface = {
@@ -212,4 +230,5 @@ export const DEFAULT_BRANDING: BrandingSettingsInterface = {
   iconColors: {},
   borderRadius: 'rounded-2xl',
   fontFamily: 'Inter, system-ui, sans-serif',
+  profileNaming: { prefix: 'rz', separator: '_', suffixBase: 'sub' },
 };

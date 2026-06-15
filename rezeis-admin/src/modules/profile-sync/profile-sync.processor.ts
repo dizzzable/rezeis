@@ -250,9 +250,20 @@ export class ProfileSyncProcessor extends WorkerHost {
       this.logger.log(
         `Deleted Remnawave profile '${subscription.remnawaveId}' for subscription ${subscription.id}`,
       );
+      // Detach the now-deleted profile from the local row. The row itself is
+      // retained (it carries trial-claim history via `isTrial`); only the panel
+      // link is cleared so the row no longer references a non-existent profile
+      // and re-provisioning (renewal) starts clean. See
+      // `.kiro/specs/trial-aware-profile-cleanup`.
+      await this.prismaService.subscription.update({
+        where: { id: subscription.id },
+        data: { remnawaveId: null },
+      });
     } else {
+      // Leave `remnawaveId` intact so BullMQ retries and the cron backstop can
+      // re-attempt; never mutate to an inconsistent state on failure.
       this.logger.warn(
-        `Failed to delete Remnawave profile '${subscription.remnawaveId}'`,
+        `Failed to delete Remnawave profile '${subscription.remnawaveId}' (will retry)`,
       );
     }
   }

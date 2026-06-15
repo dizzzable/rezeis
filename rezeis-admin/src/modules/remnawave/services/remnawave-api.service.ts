@@ -2,6 +2,7 @@ import { HttpService } from '@nestjs/axios';
 import { Inject, Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigType } from '@nestjs/config';
 import { GetExternalSquadsCommand, GetInternalSquadsCommand, GetStatusCommand } from '@remnawave/backend-contract';
+import { isAxiosError } from 'axios';
 import { firstValueFrom } from 'rxjs';
 
 import { remnawaveConfig } from '../../../common/config/remnawave.config';
@@ -210,9 +211,44 @@ export class RemnawaveApiService {
 
   /**
    * Deletes a user from the Remnawave panel.
+   *
+   * A `404` from the panel means the profile is already gone — which is
+   * exactly the post-condition cleanup wants — so it is mapped to
+   * `{ isDeleted: true }` instead of bubbling up as an error that would make
+   * the `DELETE` sync job loop forever (the profile can never be re-found).
+   * Any other upstream failure throws so BullMQ retries. See
+   * `.kiro/specs/trial-aware-profile-cleanup`.
    */
   public async deletePanelUser(uuid: string): Promise<{ isDeleted: boolean }> {
-    return this.requestJson<{ isDeleted: boolean }>({ method: 'delete', url: `/api/users/${uuid}` });
+    const baseUrl = this.getBaseUrl();
+    const token = this.configuration.token;
+    if (baseUrl === null || token === null) {
+      throw new ServiceUnavailableException('Remnawave integration is not configured');
+    }
+    try {
+      const response = await firstValueFrom(
+        this.httpService.request<{ response?: { isDeleted?: boolean }; isDeleted?: boolean }>({
+          method: 'delete',
+          url: `/api/users/${uuid}`,
+          baseURL: baseUrl,
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'x-forwarded-for': '127.0.0.1',
+            'x-forwarded-proto': 'https',
+          },
+        }),
+      );
+      const data = response.data;
+      const isDeleted = data?.response?.isDeleted ?? data?.isDeleted ?? true;
+      return { isDeleted };
+    } catch (err: unknown) {
+      if (isAxiosError(err) && err.response?.status === 404) {
+        this.logger.warn(`Remnawave profile ${uuid} already absent (404) — treating delete as success`);
+        return { isDeleted: true };
+      }
+      this.logger.error(`Remnawave DELETE /api/users/${uuid} failed: ${(err as Error).message}`);
+      throw new ServiceUnavailableException('Remnawave integration is unavailable');
+    }
   }
 
   /**

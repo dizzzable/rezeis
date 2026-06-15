@@ -54,6 +54,18 @@ export class UpdateTelegramDeliveryDto {
   @IsOptional()
   @IsBoolean()
   public readonly mirrorUserNotifications?: boolean;
+
+  /**
+   * Developer/operator personal chat id used as a fallback delivery target
+   * when the primary delivery is disabled or has no `chatId`. Lets system
+   * events still reach the operator's bot DM instead of being dropped.
+   * Empty string / null clears it. Sent as a string (accepts negative IDs).
+   */
+  @IsOptional()
+  @ValidateIf((_dto, value) => value !== null)
+  @IsString()
+  @MaxLength(64)
+  public readonly devChatId?: string | null;
 }
 
 /**

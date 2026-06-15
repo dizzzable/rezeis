@@ -23,6 +23,7 @@ import {
   Get,
   HttpCode,
   HttpStatus,
+  Logger,
   NotFoundException,
   Param,
   Patch,
@@ -51,6 +52,8 @@ import { resolveIdentityKind } from '../utils/identity-kind.util';
 @Controller('admin/users')
 @UseGuards(AdminJwtAuthGuard)
 export class AdminUserManagementController {
+  private readonly logger = new Logger(AdminUserManagementController.name);
+
   public constructor(
     private readonly prismaService: PrismaService,
     private readonly events: SystemEventsService,
@@ -304,6 +307,27 @@ export class AdminUserManagementController {
   @HttpCode(HttpStatus.OK)
   public async deleteUser(@Param('telegramId') telegramId: string, @CurrentAdmin() admin: CurrentAdminInterface, @Req() req: Request) {
     const user = await this.findUserByTelegramId(telegramId);
+    // Best-effort: remove this user's Remnawave panel profiles BEFORE the row
+    // deletion. The async `ProfileSyncJob(DELETE)` path can't be used here —
+    // the subscription rows it reads are about to be hard-deleted (Cascade) —
+    // so we call the panel inline. Failures are logged and never block the
+    // delete (the operator action must not hard-fail on a panel hiccup). See
+    // `.kiro/specs/trial-aware-profile-cleanup`.
+    const profileSubs = await this.prismaService.subscription.findMany({
+      where: { userId: user.id, remnawaveId: { not: null } },
+      select: { id: true, remnawaveId: true },
+    });
+    for (const sub of profileSubs) {
+      if (sub.remnawaveId === null) continue;
+      try {
+        await this.remnawaveApiService.deletePanelUser(sub.remnawaveId);
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : 'Unknown error';
+        this.logger.warn(
+          `deleteUser: failed to delete panel profile ${sub.remnawaveId} for subscription ${sub.id}: ${message}`,
+        );
+      }
+    }
     // A user delete is a full removal, but three relations are `onDelete:
     // Restrict` (financial / credit history): Transaction, PromocodeActivation
     // and ReferralReward. Left in place they raise a FK violation (P2003) that

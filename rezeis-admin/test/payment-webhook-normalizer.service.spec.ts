@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 import { describe, it } from 'node:test';
 
 import { BadRequestException } from '@nestjs/common';
@@ -207,6 +207,105 @@ describe('PaymentWebhookNormalizerService', () => {
           verifySignature: true,
         }),
       BadRequestException,
+    );
+  });
+});
+
+describe('PaymentWebhookNormalizerService — CryptoPay', () => {
+  const service = new PaymentWebhookNormalizerService();
+  const apiToken = '12345:AAtoken';
+
+  function signedBody(body: unknown): { rawBody: Buffer; signature: string } {
+    const rawBody = Buffer.from(JSON.stringify(body), 'utf8');
+    const secret = createHash('sha256').update(apiToken).digest();
+    const signature = createHmac('sha256', secret).update(rawBody).digest('hex');
+    return { rawBody, signature };
+  }
+
+  it('normalizes a verified invoice_paid webhook to a SUCCESS-mapping status', () => {
+    const { rawBody, signature } = signedBody({
+      update_id: 9001,
+      update_type: 'invoice_paid',
+      payload: {
+        invoice_id: 555,
+        status: 'paid',
+        asset: 'USDT',
+        amount: '12.5',
+        payload: 'local-payment-cryptopay',
+      },
+    });
+
+    const result = service.normalizeWebhook({
+      gatewayType: PaymentGatewayType.CRYPTOPAY,
+      rawBody,
+      headers: { 'crypto-pay-api-signature': signature },
+      clientIp: null,
+      gatewaySettings: { apiToken },
+      verifySignature: true,
+    });
+
+    assert.equal(result.paymentId, 'local-payment-cryptopay');
+    assert.equal(result.providerEventId, '9001');
+    assert.equal(result.eventStatus, 'paid');
+  });
+
+  it('falls back to invoice_id for the dedup key when update_id is absent', () => {
+    const { rawBody, signature } = signedBody({
+      update_type: 'invoice_paid',
+      payload: { invoice_id: 777, status: 'active', payload: 'pid-2' },
+    });
+
+    const result = service.normalizeWebhook({
+      gatewayType: PaymentGatewayType.CRYPTOPAY,
+      rawBody,
+      headers: { 'crypto-pay-api-signature': signature },
+      clientIp: null,
+      gatewaySettings: { apiToken },
+      verifySignature: true,
+    });
+
+    assert.equal(result.paymentId, 'pid-2');
+    assert.equal(result.providerEventId, '777');
+    assert.equal(result.eventStatus, 'active');
+  });
+
+  it('rejects a CryptoPay webhook with a tampered signature', () => {
+    const { rawBody } = signedBody({
+      update_id: 1,
+      payload: { invoice_id: 1, status: 'paid', payload: 'pid' },
+    });
+
+    assert.throws(
+      () =>
+        service.normalizeWebhook({
+          gatewayType: PaymentGatewayType.CRYPTOPAY,
+          rawBody,
+          headers: { 'crypto-pay-api-signature': 'deadbeef' },
+          clientIp: null,
+          gatewaySettings: { apiToken },
+          verifySignature: true,
+        }),
+      ForbiddenException,
+    );
+  });
+
+  it('rejects a CryptoPay webhook with no signature header', () => {
+    const { rawBody } = signedBody({
+      update_id: 1,
+      payload: { invoice_id: 1, status: 'paid', payload: 'pid' },
+    });
+
+    assert.throws(
+      () =>
+        service.normalizeWebhook({
+          gatewayType: PaymentGatewayType.CRYPTOPAY,
+          rawBody,
+          headers: {},
+          clientIp: null,
+          gatewaySettings: { apiToken },
+          verifySignature: true,
+        }),
+      ForbiddenException,
     );
   });
 });

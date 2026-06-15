@@ -32,6 +32,17 @@ export class ListAuditEventsV2QueryDto {
   @Length(1, 64)
   targetType?: string;
 
+  /**
+   * When `'true'`, restrict the result to system-event rows (those whose
+   * `action` starts with `event.`) — i.e. the `SystemEventsService` feed,
+   * as opposed to admin-action audit entries. Powers the "Системные
+   * события" page.
+   */
+  @IsOptional()
+  @IsString()
+  @Length(1, 8)
+  systemOnly?: string;
+
   @IsOptional()
   @Type(() => Number)
   @IsInt()

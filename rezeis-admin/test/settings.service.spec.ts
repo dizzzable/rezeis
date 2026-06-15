@@ -356,6 +356,7 @@ describe('SettingsService', () => {
       topicId: null,
       topics: { USER: null, PAYMENT: 9 },
       mirrorUserNotifications: true,
+      devChatId: null,
     });
   });
 

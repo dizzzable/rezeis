@@ -121,6 +121,9 @@ export class PaymentWebhookNormalizerService {
       case PaymentGatewayType.LAVA:
         verifyLavaApiKey(input.headers, input.gatewaySettings);
         return;
+      case PaymentGatewayType.CRYPTOPAY:
+        verifyCryptopaySignature(input.rawBody, input.headers, input.gatewaySettings);
+        return;
       default:
         throw new ForbiddenException('PAYMENT_WEBHOOK_SIGNATURE_UNSUPPORTED');
     }
@@ -200,6 +203,14 @@ export class PaymentWebhookNormalizerService {
           ['contractId', 'parentContractId'],
           'PAYMENT_WEBHOOK_PAYMENT_ID_MISSING',
         );
+      case PaymentGatewayType.CRYPTOPAY:
+        // CryptoPay webhook wraps the Invoice in `payload`; our internal id is
+        // the invoice's own `payload` field (set to `paymentId` at checkout).
+        return readRequiredString(
+          readNestedObject(input.rawPayload, 'payload'),
+          ['payload'],
+          'PAYMENT_WEBHOOK_PAYMENT_ID_MISSING',
+        );
       default:
         throw new BadRequestException('PAYMENT_WEBHOOK_PAYMENT_ID_MISSING');
     }
@@ -235,6 +246,13 @@ export class PaymentWebhookNormalizerService {
         return readOptionalString(readNestedObject(input.rawPayload, 'data'), ['id', 'uid']);
       case PaymentGatewayType.LAVA:
         return readOptionalString(input.rawPayload, ['contractId']);
+      case PaymentGatewayType.CRYPTOPAY:
+        // Prefer the per-update id; fall back to the invoice id (stable per
+        // invoice) so dedup keys remain unique even if `update_id` is absent.
+        return (
+          readOptionalString(input.rawPayload, ['update_id']) ??
+          readOptionalString(readNestedObject(input.rawPayload, 'payload'), ['invoice_id'])
+        );
       default:
         return null;
     }
@@ -273,6 +291,10 @@ export class PaymentWebhookNormalizerService {
           readOptionalString(input.rawPayload, ['eventType']) ??
           readOptionalString(input.rawPayload, ['status'])
         );
+      case PaymentGatewayType.CRYPTOPAY:
+        // Invoice `status` is `paid` | `active` | `expired`; `paid` normalizes
+        // to a COMPLETED transaction, the rest stay PENDING/CANCELED.
+        return readOptionalString(readNestedObject(input.rawPayload, 'payload'), ['status']);
       default:
         return null;
     }
@@ -556,6 +578,29 @@ function verifyLavaApiKey(
   const expected = readStringSetting(gatewaySettings, 'webhookApiKey');
   const actual = readHeader(headers, 'x-api-key');
   if (!expected || !actual || !compareSecrets(actual, expected)) {
+    throw new ForbiddenException('PAYMENT_WEBHOOK_SIGNATURE_INVALID');
+  }
+}
+
+/**
+ * CryptoPay (@CryptoBot): the `crypto-pay-api-signature` header is the hex
+ * HMAC-SHA256 of the raw (unparsed) JSON body, signed with a secret that is
+ * the SHA256 digest of the app's API token. Mirrors the official check in
+ * the Crypto Pay API docs.
+ */
+function verifyCryptopaySignature(
+  rawBody: Buffer,
+  headers: Record<string, string | string[] | undefined>,
+  gatewaySettings: Record<string, unknown>,
+): void {
+  const apiToken = readStringSetting(gatewaySettings, 'apiToken');
+  const signature = readHeader(headers, 'crypto-pay-api-signature');
+  if (!apiToken || !signature) {
+    throw new ForbiddenException('PAYMENT_WEBHOOK_SIGNATURE_INVALID');
+  }
+  const secret = createHash('sha256').update(apiToken).digest();
+  const expected = createHmac('sha256', secret).update(rawBody).digest('hex');
+  if (!compareSecrets(expected, signature)) {
     throw new ForbiddenException('PAYMENT_WEBHOOK_SIGNATURE_INVALID');
   }
 }

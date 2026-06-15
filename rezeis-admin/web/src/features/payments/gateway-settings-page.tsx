@@ -425,6 +425,21 @@ const GATEWAY_META: ReadonlyArray<GatewayMeta> = [
       },
     ],
   },
+  {
+    type: 'CRYPTOPAY',
+    displayName: 'CryptoPay',
+    icon: Bitcoin,
+    iconColor: 'text-sky-500',
+    fields: [
+      {
+        key: 'apiToken',
+        labelKey: 'paymentGateways.fields.apiToken',
+        placeholder: '12345:AA…',
+        secret: true,
+        hintKey: 'paymentGateways.hints.cryptopayApiToken',
+      },
+    ],
+  },
 ] as const
 
 const META_BY_TYPE: Record<string, GatewayMeta> = Object.fromEntries(
@@ -725,7 +740,7 @@ function GatewayRow({
           <span className="inline-flex items-center gap-1.5">
             <RowCurrencyBadge code={gateway.currency} />
           </span>
-          <span className="truncate">· /api/payments/webhook/{gateway.type}</span>
+          <span className="truncate">· /api/v1/payments/webhooks/{gateway.type}</span>
         </div>
       </div>
 
@@ -885,7 +900,7 @@ function GatewaySettingsForm({ gateway, onClose }: GatewaySettingsFormProps) {
         </DialogTitle>
         <DialogDescription>
           {t('paymentGateways.settingsDescription', {
-            url: `/api/payments/webhook/${gateway.type}`,
+            url: `/api/v1/payments/webhooks/${gateway.type}`,
           })}
         </DialogDescription>
       </DialogHeader>
