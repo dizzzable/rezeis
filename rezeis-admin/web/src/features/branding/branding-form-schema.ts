@@ -4,6 +4,17 @@ import { CARD_LOGO_PRESETS, type CardLogoPreset } from './branding-options'
 
 export const BRANDING_BG_EFFECTS = ['NONE', 'MESH', 'PARTICLES', 'NOISE', 'AURORA'] as const
 export const BRANDING_ICON_COLOR_MODES = ['default', 'theme', 'custom'] as const
+export const BRANDING_APP_BG_KINDS = ['none', 'gradient', 'texture', 'effect'] as const
+export const BRANDING_APP_BG_TEXTURES = [
+  'dots',
+  'grid',
+  'diagonal',
+  'cross',
+  'waves',
+  'carbon',
+  'triangles',
+  'noise',
+] as const
 
 export interface BrandingFormDraft {
   readonly brandName: string
@@ -29,9 +40,29 @@ export interface BrandingFormDraft {
 }
 
 export interface BrandingAppBackgroundDraft {
+  readonly kind: (typeof BRANDING_APP_BG_KINDS)[number]
   readonly effect: string
   readonly props: Record<string, unknown>
   readonly opacity: number
+  readonly gradient: string
+  readonly texture: BrandingAppBackgroundTextureDraft
+}
+
+export interface BrandingAppBackgroundTextureDraft {
+  readonly pattern: (typeof BRANDING_APP_BG_TEXTURES)[number]
+  readonly color: string
+  readonly background: string
+  readonly scale: number
+  readonly opacity: number
+}
+
+export const DEFAULT_APP_BACKGROUND_DRAFT: BrandingAppBackgroundDraft = {
+  kind: 'none',
+  effect: 'NONE',
+  props: {},
+  opacity: 1,
+  gradient: 'linear-gradient(135deg, #0a0a0a 0%, #171717 100%)',
+  texture: { pattern: 'dots', color: '#22c55e', background: '#0a0a0a', scale: 24, opacity: 0.15 },
 }
 
 export interface BrandingCardEffectSlotDraft {
@@ -78,7 +109,14 @@ const DEFAULT_BRANDING_DRAFT: BrandingFormDraft = {
   cardEffectOpacity: 1,
   cardEffectsByIndex: [],
   bgEffect: 'AURORA',
-  appBackground: { effect: 'NONE', props: {}, opacity: 1 },
+  appBackground: {
+    kind: 'none',
+    effect: 'NONE',
+    props: {},
+    opacity: 1,
+    gradient: 'linear-gradient(135deg, #0a0a0a 0%, #171717 100%)',
+    texture: { pattern: 'dots', color: '#22c55e', background: '#0a0a0a', scale: 24, opacity: 0.15 },
+  },
   iconColorMode: 'default',
   iconColors: {},
   borderRadius: 'rounded-2xl',
@@ -113,9 +151,18 @@ export function createBrandingFormSchema(messages: BrandingFormValidationMessage
       bgEffect: z.enum(BRANDING_BG_EFFECTS),
       appBackground: z
         .object({
+          kind: z.enum(BRANDING_APP_BG_KINDS),
           effect: z.string().max(32),
           props: z.record(z.string(), z.unknown()),
           opacity: z.number().min(0.05).max(1),
+          gradient: z.string().max(512),
+          texture: z.object({
+            pattern: z.enum(BRANDING_APP_BG_TEXTURES),
+            color: z.string(),
+            background: z.string(),
+            scale: z.number().min(8).max(256),
+            opacity: z.number().min(0.05).max(1),
+          }),
         })
         .optional(),
       iconColorMode: z.enum(BRANDING_ICON_COLOR_MODES),
@@ -127,7 +174,7 @@ export function createBrandingFormSchema(messages: BrandingFormValidationMessage
       ...values,
       cardEffectsByIndex: values.cardEffectsByIndex ?? [],
       cardEffectProps: values.cardEffectProps ?? {},
-      appBackground: values.appBackground ?? { effect: 'NONE', props: {}, opacity: 1 },
+      appBackground: values.appBackground ?? DEFAULT_APP_BACKGROUND_DRAFT,
       iconColors: values.iconColors ?? {},
     }))
 }
@@ -147,18 +194,36 @@ export function createInitialBrandingDraft(input?: Partial<BrandingFormDraft> | 
 }
 
 function normalizeAppBackgroundDraft(
-  value: BrandingAppBackgroundDraft | undefined,
+  value: Partial<BrandingAppBackgroundDraft> | undefined,
 ): BrandingAppBackgroundDraft {
   if (typeof value !== 'object' || value === null) {
-    return { effect: 'NONE', props: {}, opacity: 1 }
+    return DEFAULT_APP_BACKGROUND_DRAFT
   }
+  const d = DEFAULT_APP_BACKGROUND_DRAFT
+  const clamp = (n: unknown, min: number, max: number, fb: number): number =>
+    typeof n === 'number' && Number.isFinite(n) ? Math.min(Math.max(n, min), max) : fb
+  // Infer kind for legacy drafts that only carry `effect`.
+  const kind = (BRANDING_APP_BG_KINDS as readonly string[]).includes(value.kind ?? '')
+    ? (value.kind as BrandingAppBackgroundDraft['kind'])
+    : typeof value.effect === 'string' && value.effect !== 'NONE'
+      ? 'effect'
+      : 'none'
+  const t = (value.texture ?? {}) as Partial<BrandingAppBackgroundTextureDraft>
   return {
+    kind,
     effect: typeof value.effect === 'string' ? value.effect : 'NONE',
     props: isPlainRecordUnknown(value.props) ? value.props : {},
-    opacity:
-      typeof value.opacity === 'number' && Number.isFinite(value.opacity)
-        ? Math.min(Math.max(value.opacity, 0.05), 1)
-        : 1,
+    opacity: clamp(value.opacity, 0.05, 1, 1),
+    gradient: typeof value.gradient === 'string' && value.gradient.trim().length > 0 ? value.gradient : d.gradient,
+    texture: {
+      pattern: (BRANDING_APP_BG_TEXTURES as readonly string[]).includes(t.pattern ?? '')
+        ? (t.pattern as BrandingAppBackgroundTextureDraft['pattern'])
+        : d.texture.pattern,
+      color: typeof t.color === 'string' ? t.color : d.texture.color,
+      background: typeof t.background === 'string' ? t.background : d.texture.background,
+      scale: Math.round(clamp(t.scale, 8, 256, d.texture.scale)),
+      opacity: clamp(t.opacity, 0.05, 1, d.texture.opacity),
+    },
   }
 }
 

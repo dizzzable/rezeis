@@ -5,6 +5,7 @@ import { NestFactory } from '@nestjs/core';
 
 import { AppModule } from './app.module';
 import { configureBigIntJsonSerialization } from './common/runtime/bigint-json';
+import { printRezeisBanner } from './common/runtime/startup-banner';
 import { getProcessRole } from './common/runtime/process-role.util';
 
 configureBigIntJsonSerialization();
@@ -47,6 +48,8 @@ async function bootstrapWorker(): Promise<void> {
   if (process.env.RUID_PROCESS_ROLE === undefined || process.env.RUID_PROCESS_ROLE.trim() === '') {
     process.env.RUID_PROCESS_ROLE = 'worker';
   }
+
+  printRezeisBanner('worker');
 
   const logger = new Logger('WorkerBootstrap');
   logger.log(`Process role: ${getProcessRole()}`);

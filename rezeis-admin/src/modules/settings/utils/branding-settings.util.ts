@@ -8,7 +8,12 @@
  */
 
 import {
+  AppBackgroundKind,
+  APP_BACKGROUND_KINDS,
   AppBackgroundSettings,
+  AppBackgroundTexture,
+  APP_BACKGROUND_TEXTURES,
+  AppBackgroundTextureSettings,
   BG_EFFECTS,
   BgEffect,
   BrandingSettingsInterface,
@@ -192,25 +197,64 @@ function readCardEffectSlots(
 }
 
 /**
- * Reads the site-wide app background block. Normalizes the effect id against
- * the registry (unknown → `NONE`), clamps opacity, and treats props as a
- * loose JSON object. Absent/invalid → `{ effect: 'NONE', props: {}, opacity: 1 }`.
+ * Reads the site-wide app background block. Normalizes `kind`, the effect id
+ * (unknown → `NONE`), gradient string, and texture sub-block. Backward-compat:
+ * a payload with only `effect`/`props`/`opacity` (no `kind`) infers
+ * `kind = effect !== 'NONE' ? 'effect' : 'none'`. Absent/invalid → default.
  */
 function readAppBackground(record: Record<string, unknown>): AppBackgroundSettings {
   const value = record['appBackground'];
+  const fallback = DEFAULT_BRANDING.appBackground;
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    return DEFAULT_BRANDING.appBackground;
+    return fallback;
   }
   const slot = value as Record<string, unknown>;
-  const effect = slot['effect'];
-  const validEffect =
-    typeof effect === 'string' && (CARD_EFFECTS as readonly string[]).includes(effect)
-      ? (effect as CardEffect)
+
+  const effectRaw = slot['effect'];
+  const effect =
+    typeof effectRaw === 'string' && (CARD_EFFECTS as readonly string[]).includes(effectRaw)
+      ? (effectRaw as CardEffect)
       : 'NONE';
+
+  // Infer kind for legacy payloads (no `kind` field).
+  const kindRaw = slot['kind'];
+  const kind: AppBackgroundKind =
+    typeof kindRaw === 'string' && (APP_BACKGROUND_KINDS as readonly string[]).includes(kindRaw)
+      ? (kindRaw as AppBackgroundKind)
+      : effect !== 'NONE'
+        ? 'effect'
+        : 'none';
+
   return {
-    effect: validEffect,
+    kind,
+    effect,
     props: readJsonRecord(slot, 'props'),
     opacity: readClampedNumber(slot, 'opacity', 0.05, 1, 1),
+    gradient: readString(slot, 'gradient', fallback.gradient),
+    texture: readAppBackgroundTexture(slot['texture'], fallback.texture),
+  };
+}
+
+function readAppBackgroundTexture(
+  value: unknown,
+  fallback: AppBackgroundTextureSettings,
+): AppBackgroundTextureSettings {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return fallback;
+  }
+  const slot = value as Record<string, unknown>;
+  const patternRaw = slot['pattern'];
+  const pattern =
+    typeof patternRaw === 'string' &&
+    (APP_BACKGROUND_TEXTURES as readonly string[]).includes(patternRaw)
+      ? (patternRaw as AppBackgroundTexture)
+      : fallback.pattern;
+  return {
+    pattern,
+    color: readHex(slot, 'color', fallback.color),
+    background: readHex(slot, 'background', fallback.background),
+    scale: Math.round(readClampedNumber(slot, 'scale', 8, 256, fallback.scale)),
+    opacity: readClampedNumber(slot, 'opacity', 0.05, 1, fallback.opacity),
   };
 }
 

@@ -18,11 +18,13 @@ import { configureHttpRuntimeMiddleware } from './common/http/configure-http-run
 import { RequestTimeoutMiddleware } from './common/middleware/request-timeout.middleware';
 import { AdminIoAdapter } from './common/realtime/admin-io.adapter';
 import { configureBigIntJsonSerialization } from './common/runtime/bigint-json';
+import { printRezeisBanner } from './common/runtime/startup-banner';
 import { SystemLogsService } from './modules/system-logs/services/system-logs.service';
 
 configureBigIntJsonSerialization();
 
 async function bootstrap(): Promise<void> {
+  printRezeisBanner('api');
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     bodyParser: false,
     rawBody: true,

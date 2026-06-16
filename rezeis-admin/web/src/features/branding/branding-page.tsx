@@ -31,11 +31,13 @@ import { CARD_LOGO_PRESETS, CardLogoMark, type CardLogoPreset } from "./card-log
 import {
   createBrandingFormSchema,
   createInitialBrandingDraft,
+  DEFAULT_APP_BACKGROUND_DRAFT,
   type BrandingFormData,
   type BrandingFormDraft,
   type BrandingFormValidationMessages,
 } from "./branding-form-schema";
-import { CardEffectSection, CardEffectPicker } from "./card-effect-section";
+import { CardEffectSection } from "./card-effect-section";
+import { AppBackgroundSection } from "./app-background-section";
 import { CardEffectSlotsSection, type CardEffectSlot } from "./card-effect-slots-section";
 import { GradientBuilder } from "./gradient-builder";
 import { IconColorsSection } from "./icon-colors-section";
@@ -467,29 +469,14 @@ export default function WebReiwaPage() {
           <Controller
             name="appBackground"
             control={form.control}
-            render={({ field }) => {
-              const value = field.value ?? { effect: "NONE", props: {}, opacity: 1 };
-              return (
-                <Card>
-                  <CardHeader>
-                    <CardTitle>{t('brandingPage.sections.appBackground.title')}</CardTitle>
-                    <CardDescription>{t('brandingPage.sections.appBackground.description')}</CardDescription>
-                  </CardHeader>
-                  <CardContent className="space-y-4">
-                    <CardEffectPicker
-                      effect={value.effect}
-                      props={value.props ?? {}}
-                      opacity={value.opacity ?? 1}
-                      onEffectChange={(e) =>
-                        field.onChange({ ...value, effect: e, props: e === "NONE" ? {} : value.props })
-                      }
-                      onPropsChange={(p) => field.onChange({ ...value, props: p })}
-                      onOpacityChange={(o) => field.onChange({ ...value, opacity: o })}
-                    />
-                  </CardContent>
-                </Card>
-              );
-            }}
+            render={({ field }) => (
+              <AppBackgroundSection
+                value={field.value ?? DEFAULT_APP_BACKGROUND_DRAFT}
+                primary={watchedValues.primary}
+                bgPrimary={watchedValues.bgPrimary}
+                onChange={(v) => field.onChange(v)}
+              />
+            )}
           />
 
           <Card>

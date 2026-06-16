@@ -139,12 +139,24 @@ export class InternalUserEdgeService {
     if (locale === null) {
       throw new BadRequestException(`Unsupported language: "${language}"`);
     }
-    const user = await this.prismaService.user.update({
-      where: buildUserReferenceWhere(reference),
-      data: { language: locale },
-      include: INTERNAL_USER_INCLUDE,
-    });
-    return mapInternalUserSession(user);
+    try {
+      const user = await this.prismaService.user.update({
+        where: buildUserReferenceWhere(reference),
+        data: { language: locale },
+        include: INTERNAL_USER_INCLUDE,
+      });
+      return mapInternalUserSession(user);
+    } catch (err: unknown) {
+      // The reiwa locale-detect middleware fires this for every new user on
+      // their first message — before `/start` bootstrap creates the row, and
+      // for users gated out by REG_BLOCKED / RESTRICTED who never get a row.
+      // Treat "no such user" as a clean 404 (the bot already swallows it and
+      // re-syncs the locale on the next bootstrap) instead of a noisy 500.
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2025') {
+        throw new NotFoundException('User not found');
+      }
+      throw err;
+    }
   }
 
   // ── Notifications ────────────────────────────────────────────────────────

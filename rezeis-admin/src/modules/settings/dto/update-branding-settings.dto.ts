@@ -18,6 +18,10 @@ import {
 import { Type } from 'class-transformer';
 
 import {
+  APP_BACKGROUND_KINDS,
+  APP_BACKGROUND_TEXTURES,
+  AppBackgroundKind,
+  AppBackgroundTexture,
   BG_EFFECTS,
   BgEffect,
   CARD_EFFECTS,
@@ -48,12 +52,47 @@ export class CardEffectSlotDto {
 }
 
 /**
- * Site-wide app background block (`appBackground`). Reuses the card-effect
- * registry; `effect: 'NONE'` → plain colour background.
+ * Tiled-texture sub-block for `appBackground.kind === 'texture'`.
+ */
+export class AppBackgroundTextureDto {
+  @IsIn(APP_BACKGROUND_TEXTURES as readonly string[])
+  public pattern!: AppBackgroundTexture;
+
+  @IsOptional()
+  @IsHexColor()
+  public color?: string;
+
+  @IsOptional()
+  @IsHexColor()
+  public background?: string;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(8)
+  @Max(256)
+  public scale?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0.05)
+  @Max(1)
+  public opacity?: number;
+}
+
+/**
+ * Site-wide app background block (`appBackground`). A `kind` discriminator
+ * selects a plain colour (`none`), a static gradient, a static texture, or an
+ * animated effect (reuses the card-effect registry). All sub-fields optional
+ * so partial patches work; only the fields for the chosen `kind` matter.
  */
 export class AppBackgroundDto {
+  @IsOptional()
+  @IsIn(APP_BACKGROUND_KINDS as readonly string[])
+  public kind?: AppBackgroundKind;
+
+  @IsOptional()
   @IsIn(CARD_EFFECTS as readonly string[])
-  public effect!: CardEffect;
+  public effect?: CardEffect;
 
   @IsOptional()
   @IsObject()
@@ -64,6 +103,16 @@ export class AppBackgroundDto {
   @Min(0.05)
   @Max(1)
   public opacity?: number;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(512)
+  public gradient?: string;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => AppBackgroundTextureDto)
+  public texture?: AppBackgroundTextureDto;
 }
 
 /**

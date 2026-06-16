@@ -115,16 +115,67 @@ export interface CardEffectSlot {
 }
 
 /**
- * Site-wide app background — an animated effect rendered BEHIND the whole
- * cabinet (not just the subscription card). Reuses the same `CardEffect`
- * registry as the card effect. `effect: 'NONE'` → plain `bgPrimary` colour
- * (no WebGL layer). Mounted once at the cabinet shell, so it costs at most a
- * single WebGL context regardless of how many cards are on screen.
+ * App-background rendering modes (site-wide background behind the cabinet):
+ *   - `none`     — plain `bgPrimary` colour (default; current behaviour).
+ *   - `gradient` — a static CSS gradient (operator-built / preset / generated).
+ *   - `texture`  — a static, tileable SVG pattern tinted over a base colour.
+ *   - `effect`   — an animated ReactBits effect (reuses the card-effect registry).
+ */
+export const APP_BACKGROUND_KINDS = ['none', 'gradient', 'texture', 'effect'] as const;
+export type AppBackgroundKind = (typeof APP_BACKGROUND_KINDS)[number];
+
+/**
+ * Built-in tileable texture patterns the reiwa SPA can render as a pure-CSS
+ * SVG background (cheap, static, no WebGL). Adding a pattern requires updates
+ * in three places: this list, the reiwa `buildTextureCss` renderer, and the
+ * admin texture picker.
+ */
+export const APP_BACKGROUND_TEXTURES = [
+  'dots',
+  'grid',
+  'diagonal',
+  'cross',
+  'waves',
+  'carbon',
+  'triangles',
+  'noise',
+] as const;
+export type AppBackgroundTexture = (typeof APP_BACKGROUND_TEXTURES)[number];
+
+/** Static tiled-texture configuration for `appBackground.kind === 'texture'`. */
+export interface AppBackgroundTextureSettings {
+  /** Pattern id ∈ `APP_BACKGROUND_TEXTURES`. */
+  readonly pattern: AppBackgroundTexture;
+  /** Pattern stroke/fill colour (hex). */
+  readonly color: string;
+  /** Base colour behind the pattern (hex). */
+  readonly background: string;
+  /** Tile size in px (8–256). */
+  readonly scale: number;
+  /** Pattern opacity over the base (0.05–1). */
+  readonly opacity: number;
+}
+
+/**
+ * Site-wide app background — rendered BEHIND the whole cabinet. A `kind`
+ * discriminator selects between a plain colour, a static gradient, a static
+ * texture, or an animated effect. Reuses the shared card-effect registry for
+ * `effect`. Mounted once at the cabinet shell (a single WebGL context max for
+ * the animated mode; the static modes cost nothing).
+ *
+ * Backward-compat: payloads written before `kind` existed carry only
+ * `effect`/`props`/`opacity`; the reader infers `kind` from the effect id.
  */
 export interface AppBackgroundSettings {
+  readonly kind: AppBackgroundKind;
+  /** Animated effect (kind === 'effect'). */
   readonly effect: CardEffect;
   readonly props: Record<string, unknown>;
   readonly opacity: number;
+  /** Static CSS gradient (kind === 'gradient'). */
+  readonly gradient: string;
+  /** Static tiled texture (kind === 'texture'). */
+  readonly texture: AppBackgroundTextureSettings;
 }
 
 /**
@@ -200,10 +251,10 @@ export interface BrandingSettingsInterface {
   readonly bgEffect: BgEffect;
 
   /**
-   * Site-wide animated app background (reuses the card-effect registry).
-   * `effect: 'NONE'` → plain `bgPrimary` colour. Takes precedence over the
-   * legacy preset `bgEffect` when its effect is non-`NONE`. Additive: an older
-   * reiwa build that doesn't know this field renders the existing background.
+   * Site-wide app background (`none` / `gradient` / `texture` / `effect`).
+   * `none` → plain `bgPrimary` colour. Takes precedence over the legacy preset
+   * `bgEffect` when not `none`. Additive: an older reiwa build that doesn't
+   * know this field renders the existing background.
    */
   readonly appBackground: AppBackgroundSettings;
 
@@ -247,7 +298,20 @@ export const DEFAULT_BRANDING: BrandingSettingsInterface = {
   cardEffectOpacity: 1,
   cardEffectsByIndex: [],
   bgEffect: 'NONE',
-  appBackground: { effect: 'NONE', props: {}, opacity: 1 },
+  appBackground: {
+    kind: 'none',
+    effect: 'NONE',
+    props: {},
+    opacity: 1,
+    gradient: 'linear-gradient(135deg, #0a0a0a 0%, #171717 100%)',
+    texture: {
+      pattern: 'dots',
+      color: '#22c55e',
+      background: '#0a0a0a',
+      scale: 24,
+      opacity: 0.15,
+    },
+  },
   iconColorMode: 'default',
   iconColors: {},
   borderRadius: 'rounded-2xl',
