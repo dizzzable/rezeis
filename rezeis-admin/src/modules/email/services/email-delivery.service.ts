@@ -117,6 +117,9 @@ export class EmailDeliveryService {
    * Send a test email to verify SMTP configuration.
    */
   public async sendTest(to: string): Promise<{ success: boolean; error?: string }> {
+    // Always rebuild from the latest settings — a test must reflect exactly
+    // what the operator just entered, never a stale cached transporter.
+    this.transporter = null;
     return this.sendImmediate({
       to,
       subject: 'Test Email',
@@ -142,6 +145,8 @@ export class EmailDeliveryService {
       return { success: false, error: 'SMTP not configured or disabled' };
     }
 
+    // Rebuild from the latest settings for an accurate connection check.
+    this.transporter = null;
     const transporter = await this.getTransporter(config);
     try {
       await transporter.verify();
@@ -227,16 +232,51 @@ export class EmailDeliveryService {
   private async getTransporter(config: SmtpSettingsInterface): Promise<Transporter> {
     if (this.transporter) return this.transporter;
 
+    // Encryption is chosen primarily by PORT, not by the raw toggle — using
+    // implicit TLS (`secure:true`) on a STARTTLS port (587/25) is the classic
+    // cause of `SSL routines:...:wrong version number`. We auto-heal that:
+    //   - 465        → implicit TLS (SMTPS)
+    //   - 587 / 25   → plaintext socket upgraded via STARTTLS (forced when the
+    //                  operator asked for any encryption)
+    //   - other ports → honour the explicit `useSsl` flag
+    const { secure, requireTls } = deriveSmtpSecurity(config);
+    const useAnyTls = secure || requireTls || config.useTls || config.useSsl;
+
     this.transporter = nodemailer.createTransport({
       host: config.host ?? undefined,
       port: config.port,
-      secure: config.useSsl,
+      secure,
+      requireTLS: requireTls,
       auth: config.username
         ? { user: config.username, pass: config.password ?? '' }
         : undefined,
-      tls: config.useTls ? { rejectUnauthorized: false } : undefined,
+      // Tolerate self-signed / mismatched certs on private relays; keep SNI.
+      tls: useAnyTls
+        ? { rejectUnauthorized: false, servername: config.host ?? undefined }
+        : undefined,
     });
 
     return this.transporter;
   }
+}
+
+/**
+ * Derive nodemailer's `secure` (implicit TLS) + `requireTLS` (STARTTLS) from
+ * the SMTP port and the operator's encryption toggles. Port wins for the two
+ * well-known submission ports so a "use SSL on 587" misconfiguration upgrades
+ * via STARTTLS instead of crashing the TLS handshake.
+ */
+export function deriveSmtpSecurity(config: SmtpSettingsInterface): {
+  readonly secure: boolean;
+  readonly requireTls: boolean;
+} {
+  if (config.port === 465) {
+    return { secure: true, requireTls: false };
+  }
+  if (config.port === 587 || config.port === 25) {
+    return { secure: false, requireTls: config.useTls || config.useSsl };
+  }
+  // Custom port: honour the explicit implicit-TLS flag; otherwise STARTTLS
+  // when the operator enabled TLS.
+  return { secure: config.useSsl, requireTls: !config.useSsl && config.useTls };
 }
