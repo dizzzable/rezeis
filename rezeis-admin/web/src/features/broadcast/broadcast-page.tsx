@@ -38,6 +38,7 @@ import {
   type BroadcastFormValidationMessages,
 } from './broadcast-form-schema'
 import { EmojiPicker } from './emoji-picker'
+import { RenderedCopyPreview } from '@/features/custom-emoji/rendered-copy-preview'
 
 const AUDIENCES = [
   { value: 'ALL', labelKey: 'broadcastPage.audiences.ALL' },
@@ -466,6 +467,12 @@ function CreateBroadcastForm({ onClose }: { onClose: () => void }) {
         <p className="text-xs text-muted-foreground">
           {t('broadcastPage.form.charCount', { count: text.length })}
         </p>
+        {text.trim().length > 0 && (
+          <div className="space-y-1">
+            <p className="text-[11px] font-medium text-muted-foreground">{t('broadcastPage.form.preview')}</p>
+            <RenderedCopyPreview value={text} />
+          </div>
+        )}
         <FieldError message={formErrors.text} />
       </div>
 
@@ -727,6 +734,12 @@ function EditBroadcastForm({ broadcastId, onClose }: { broadcastId: string; onCl
           </div>
         )}
         <p className="text-xs text-muted-foreground">{t('broadcastPage.edit.hint')}</p>
+        {text.trim().length > 0 && (
+          <div className="space-y-1">
+            <p className="text-[11px] font-medium text-muted-foreground">{t('broadcastPage.form.preview')}</p>
+            <RenderedCopyPreview value={text} />
+          </div>
+        )}
       </div>
       <div className="flex gap-3 justify-end">
         <Button type="button" variant="outline" onClick={onClose}>{t('common.cancel')}</Button>

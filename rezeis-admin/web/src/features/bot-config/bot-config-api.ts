@@ -123,6 +123,34 @@ export const updateBotTextSchema = z.object({
 })
 export type UpdateBotTextPayload = z.infer<typeof updateBotTextSchema>
 
+// ── Emoji studio (composite read) ────────────────────────────────────────────
+
+export const slotPremiumPreviewSchema = z.object({
+  slug: z.string(),
+  name: z.string(),
+  imageUrl: z.string(),
+  lottieUrl: z.string().nullable(),
+  videoUrl: z.string().nullable(),
+  packName: z.string(),
+})
+export type SlotPremiumPreview = z.infer<typeof slotPremiumPreviewSchema>
+
+export const emojiStudioSlotSchema = z.object({
+  id: z.string(),
+  key: z.string(),
+  unicode: z.string(),
+  tgEmojiId: z.string().nullable(),
+  premiumPreview: slotPremiumPreviewSchema.nullable(),
+  usedIn: z.array(z.string()),
+})
+export type EmojiStudioSlot = z.infer<typeof emojiStudioSlotSchema>
+
+export const emojiStudioSchema = z.object({
+  slots: z.array(emojiStudioSlotSchema),
+  ownerHasPremium: z.boolean(),
+})
+export type EmojiStudioView = z.infer<typeof emojiStudioSchema>
+
 // ── Query keys ─────────────────────────────────────────────────────────────
 //
 // Single source of truth for invalidations. Importers pass the constant in
@@ -132,6 +160,7 @@ export const BOT_CONFIG_KEYS = {
   all: ['admin', 'bot-config'] as const,
   buttons: ['admin', 'bot-config', 'buttons'] as const,
   emojis: ['admin', 'bot-config', 'emojis'] as const,
+  emojiStudio: ['admin', 'bot-config', 'emoji-studio'] as const,
   texts: ['admin', 'bot-config', 'texts'] as const,
 } as const
 
@@ -174,6 +203,16 @@ export const botConfigApi = {
   },
   async deleteEmoji(id: string): Promise<void> {
     await api.post(`/admin/bot-config/emojis/${id}/delete`)
+  },
+
+  async getEmojiStudio(): Promise<EmojiStudioView> {
+    const response = await api.get('/admin/bot-config/emoji-studio')
+    return emojiStudioSchema.parse(response.data)
+  },
+
+  async setEmojiOwnerPremium(enabled: boolean): Promise<{ ownerHasPremium: boolean }> {
+    const response = await api.put('/admin/bot-config/emoji-studio/owner-premium', { enabled })
+    return z.object({ ownerHasPremium: z.boolean() }).parse(response.data)
   },
 
   // Texts ----------------------------------------------------------------

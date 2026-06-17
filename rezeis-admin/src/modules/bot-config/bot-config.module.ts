@@ -3,11 +3,13 @@ import { Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
 import { BotFlowModule } from '../bot-flow/bot-flow.module';
 import { AdminBotConfigController } from './controllers/admin-bot-config.controller';
+import { AdminBotEmojiStudioController } from './controllers/admin-bot-emoji-studio.controller';
 import { InternalBotConfigController } from './controllers/internal-bot-config.controller';
 import { ReiwaCacheInvalidateInterceptor } from './interceptors/reiwa-cache-invalidate.interceptor';
 import { BotBannerUploadService } from './services/bot-banner-upload.service';
 import { BotButtonsService } from './services/bot-buttons.service';
 import { BotEmojisService } from './services/bot-emojis.service';
+import { BotEmojiStudioService } from './services/bot-emoji-studio.service';
 import { BotTextsService } from './services/bot-texts.service';
 import { InternalBotConfigService } from './services/internal-bot-config.service';
 import { ReiwaCacheInvalidatorService } from './services/reiwa-cache-invalidator.service';
@@ -37,11 +39,12 @@ import { ReiwaCacheInvalidatorService } from './services/reiwa-cache-invalidator
  */
 @Module({
   imports: [AuthModule, BotFlowModule],
-  controllers: [AdminBotConfigController, InternalBotConfigController],
+  controllers: [AdminBotConfigController, AdminBotEmojiStudioController, InternalBotConfigController],
   providers: [
     BotBannerUploadService,
     BotButtonsService,
     BotEmojisService,
+    BotEmojiStudioService,
     BotTextsService,
     InternalBotConfigService,
     ReiwaCacheInvalidatorService,

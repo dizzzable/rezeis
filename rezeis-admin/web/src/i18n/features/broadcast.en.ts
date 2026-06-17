@@ -89,6 +89,7 @@ export const en = {
       textPlaceholder:
         "Enter your message here. Supports HTML: <b>bold</b>, <i>italic</i>, <a href='...'>link</a>",
       charCount: '{{count}} characters',
+      preview: 'Preview',
       mediaLabel: 'Media (optional)',
       media: {
         none: 'No media',

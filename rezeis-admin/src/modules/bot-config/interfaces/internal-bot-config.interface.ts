@@ -211,7 +211,13 @@ export interface InternalBotConfigInterface {
    */
   readonly customEmojis: InternalCustomEmojiMap;
   /**
-   * Operator-managed dynamic screens. Empty when no flow is
+   * Panel-managed flag: whether the bot owner's account has Telegram Premium.
+   * When `false`, reiwa strips `custom_emoji` entities from rendered copy so a
+   * non-premium owner's messages never fail to send. Additive — defaults to
+   * `true` when absent (older reiwa ignores it).
+   */
+  readonly botEmojiOwnerHasPremium: boolean;
+  /**
    * published — reiwa then falls back to its built-in sub-menus.
    * The first screen with `isRoot=true` (if any) is the entry point
    * that overrides reiwa's `/start` welcome screen.

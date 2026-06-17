@@ -8,6 +8,7 @@ import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { getErrorMessage } from '@/lib/http-errors'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -25,6 +26,7 @@ import {
 } from '@/components/ui/alert-dialog'
 
 import { EmojiPreview } from './emoji-preview'
+import { EmojiStudioTab } from './emoji-studio-tab'
 
 interface CustomEmoji {
   readonly slug: string
@@ -60,24 +62,37 @@ export default function CustomEmojiPage() {
         <p className="text-muted-foreground">{t('emojiPacksPage.subtitle')}</p>
       </div>
 
-      <ImportSetCard />
+      <Tabs defaultValue="packs" className="space-y-4">
+        <TabsList>
+          <TabsTrigger value="packs">{t('emojiPacksPage.tabs.packs')}</TabsTrigger>
+          <TabsTrigger value="slots">{t('emojiPacksPage.tabs.slots')}</TabsTrigger>
+        </TabsList>
 
-      {isLoading ? (
-        <Skeleton className="h-40 w-full" />
-      ) : !packs?.length ? (
-        <Card>
-          <CardContent className="py-16 text-center text-muted-foreground">
-            <Smile className="h-10 w-10 mx-auto mb-3 opacity-30" />
-            <p>{t('emojiPacksPage.empty')}</p>
-          </CardContent>
-        </Card>
-      ) : (
-        <div className="space-y-3">
-          {packs.map((pack) => (
-            <PackCard key={pack.id} pack={pack} />
-          ))}
-        </div>
-      )}
+        <TabsContent value="packs" className="space-y-6">
+          <ImportSetCard />
+
+          {isLoading ? (
+            <Skeleton className="h-40 w-full" />
+          ) : !packs?.length ? (
+            <Card>
+              <CardContent className="py-16 text-center text-muted-foreground">
+                <Smile className="h-10 w-10 mx-auto mb-3 opacity-30" />
+                <p>{t('emojiPacksPage.empty')}</p>
+              </CardContent>
+            </Card>
+          ) : (
+            <div className="space-y-3">
+              {packs.map((pack) => (
+                <PackCard key={pack.id} pack={pack} />
+              ))}
+            </div>
+          )}
+        </TabsContent>
+
+        <TabsContent value="slots">
+          <EmojiStudioTab />
+        </TabsContent>
+      </Tabs>
     </div>
   )
 }

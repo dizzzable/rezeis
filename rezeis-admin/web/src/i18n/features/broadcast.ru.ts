@@ -93,6 +93,7 @@ export const ru = {
       textPlaceholder:
         "Введите сообщение здесь. Поддерживается HTML: <b>жирный</b>, <i>курсив</i>, <a href='...'>ссылка</a>",
       charCount: '{{count}} символов',
+      preview: 'Предпросмотр',
       mediaLabel: 'Медиа (опционально)',
       media: {
         none: 'Без медиа',

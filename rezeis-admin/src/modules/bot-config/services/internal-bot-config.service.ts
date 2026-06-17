@@ -104,13 +104,14 @@ export class InternalBotConfigService implements OnApplicationBootstrap {
       // exists — reiwa falls back to its built-in sub-menus.
       this.botFlowService.getActive(DEFAULT_FLOW_NAME),
     ]);
-    // Custom-emoji packs are best-effort: a read failure shouldn't blank
-    // the whole bot-config payload, so resolve to [] on error. Read directly
-    // from Settings (pure util) to avoid a CustomEmojiModule import cycle.
-    const customEmojiPacks = await this.prismaService.settings
+    // Custom-emoji packs + owner-premium flag are best-effort: a read failure
+    // shouldn't blank the whole bot-config payload. Read directly from
+    // Settings (pure util) to avoid a CustomEmojiModule import cycle.
+    const settingsRow = await this.prismaService.settings
       .findFirst({ orderBy: { updatedAt: 'asc' } })
-      .then((settings) => readCustomEmojiPacks(settings?.systemNotifications))
-      .catch(() => [] as CustomEmojiPackInterface[]);
+      .catch(() => null);
+    const customEmojiPacks = readCustomEmojiPacks(settingsRow?.systemNotifications);
+    const botEmojiOwnerHasPremium = readOwnerHasPremium(settingsRow?.systemNotifications);
 
     const emojiMap = withDefaultPremiumIds(mapEmojiEntries(emojis));
     // Full map (every row) — used by config-style readers (banner URL,
@@ -142,6 +143,7 @@ export class InternalBotConfigService implements OnApplicationBootstrap {
       menuTextCustomEmojiIds: toCustomEmojiIdMap(emojiMap),
       translations: visibleTextMap,
       customEmojis: mapCustomEmojis(customEmojiPacks),
+      botEmojiOwnerHasPremium,
       screens: mapFlowScreens(activeFlow),
       screensVersion: activeFlow
         ? `${activeFlow.id}:${activeFlow.version}:${activeFlow.status}`
@@ -452,6 +454,15 @@ function mapButtonStyle(
     default:
       return 'default';
   }
+}
+
+/** Read the panel-managed owner-premium flag from settings JSON (default true). */
+function readOwnerHasPremium(systemNotifications: unknown): boolean {
+  if (typeof systemNotifications !== 'object' || systemNotifications === null) return true;
+  const botEmoji = (systemNotifications as Record<string, unknown>).botEmoji;
+  if (typeof botEmoji !== 'object' || botEmoji === null) return true;
+  const flag = (botEmoji as Record<string, unknown>).ownerHasPremium;
+  return typeof flag === 'boolean' ? flag : true;
 }
 
 function mapEmojiEntries(emojis: readonly BotEmoji[]): InternalBotEmojiMap {
