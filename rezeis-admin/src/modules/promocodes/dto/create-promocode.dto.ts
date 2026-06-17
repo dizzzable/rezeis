@@ -3,6 +3,7 @@ import {
   ArrayUnique,
   IsArray,
   IsBoolean,
+  IsDateString,
   IsEnum,
   IsInt,
   IsNotEmpty,
@@ -11,6 +12,7 @@ import {
   IsString,
   MaxLength,
   Min,
+  ValidateIf,
   ValidateNested,
 } from 'class-validator';
 import { PromocodeAvailability, PromocodeRewardType } from '@prisma/client';
@@ -46,6 +48,15 @@ export class CreatePromocodeDto {
   @IsInt()
   @Min(-1)
   public lifetime?: number | null;
+
+  /**
+   * Absolute expiry date+time (ISO 8601). When set, the code stops applying
+   * after this instant regardless of `lifetime`. `null` clears it.
+   */
+  @IsOptional()
+  @ValidateIf((_, value: unknown) => value !== null)
+  @IsDateString()
+  public expiresAt?: string | null;
 
   @IsOptional()
   @IsInt()

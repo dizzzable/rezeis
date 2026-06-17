@@ -339,8 +339,35 @@ export class WebAuthService {
       where: { loginNormalized },
       include: { user: { select: { telegramId: true } } },
     });
-    if (webAccount === null || webAccount.passwordHash === null) {
+    if (webAccount === null) {
       throw new UnauthorizedException('Invalid login or password');
+    }
+    // Claim-on-first-login: a migrated web-only account (importer-flagged) has
+    // no password yet. Adopt whatever password the user submits, clear the
+    // pending flag, and force a reset on entry. Confined to the explicit flag
+    // so no ordinary null-hash account is claimable.
+    if (webAccount.passwordHash === null) {
+      if (!webAccount.passwordBootstrapPending) {
+        throw new UnauthorizedException('Invalid login or password');
+      }
+      const claimedHash = await this.passwordHashService.hashPassword({
+        plainTextPassword: input.password,
+      });
+      await this.prismaService.webAccount.update({
+        where: { id: webAccount.id },
+        data: {
+          passwordHash: claimedHash,
+          passwordBootstrapPending: false,
+          requiresPasswordChange: true,
+          credentialsBootstrappedAt: webAccount.credentialsBootstrappedAt ?? new Date(),
+        },
+      });
+      return {
+        userId: webAccount.userId,
+        requiresPasswordChange: true,
+        telegramLinked: webAccount.user.telegramId !== null,
+        emailVerified: webAccount.emailVerifiedAt !== null,
+      };
     }
     const ok = await this.passwordHashService.verifyPassword({
       plainTextPassword: input.password,

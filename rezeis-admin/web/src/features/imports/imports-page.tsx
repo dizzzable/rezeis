@@ -59,6 +59,7 @@ import {
 } from '@/components/ui/tabs'
 import { FadeIn, HoverLift } from '@/lib/motion'
 import { RemnawaveIcon } from '@/features/remnawave/remnawave-icon'
+import { RemnashopIcon } from './remnashop-icon'
 import { useHasPermission } from '@/features/rbac'
 
 import {
@@ -196,7 +197,10 @@ export default function ImportsPage(): JSX.Element {
             {canImport ? (
               <>
                 <TabsTrigger value="3xui">3x-ui</TabsTrigger>
-                <TabsTrigger value="remnashop">Remnashop</TabsTrigger>
+                <TabsTrigger value="remnashop" className="gap-1.5">
+                  <RemnashopIcon className="h-3.5 w-3.5" />
+                  Remnashop
+                </TabsTrigger>
                 <TabsTrigger value="altshop">Altshop</TabsTrigger>
                 <TabsTrigger value="stealthnet">STEALTHNET</TabsTrigger>
               </>

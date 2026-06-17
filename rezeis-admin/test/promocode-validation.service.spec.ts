@@ -16,6 +16,7 @@ function createRecord(overrides: Record<string, unknown> = {}) {
     reward: 7,
     plan: null,
     lifetime: null,
+    expiresAt: null,
     maxActivations: null,
     allowedTelegramIds: [],
     allowedPlanIds: [],
@@ -36,6 +37,7 @@ function createPromocode(overrides: Partial<PromocodeInterface> = {}): Promocode
     reward: 7,
     plan: null,
     lifetime: null,
+    expiresAt: null,
     maxActivations: null,
     allowedTelegramIds: [],
     allowedPlanIds: [],
@@ -109,6 +111,44 @@ describe('PromocodeValidationService', () => {
       isInvitedUser: false,
       hasActiveSubscriptions: false,
     }), { success: false, errorCode: 'NOT_AVAILABLE_FOR_USER', messageKey: 'ntf-promocode-not-available' });
+  });
+
+  it('rejects a promocode past its absolute expiresAt deadline', async () => {
+    const past = new Date(Date.now() - 60_000); // 1 min ago
+    const service = new PromocodeValidationService({
+      promocode: {
+        findUnique: async () => createRecord({ expiresAt: past }),
+      },
+      promocodeActivation: { count: async () => 0 },
+    } as never);
+
+    assert.deepStrictEqual(
+      await service.validate('PROMO', {
+        userId: 'user-1',
+        userTelegramId: null,
+        isInvitedUser: false,
+        hasActiveSubscriptions: false,
+      }),
+      { success: false, errorCode: 'EXPIRED', messageKey: 'ntf-promocode-expired' },
+    );
+  });
+
+  it('accepts a promocode whose absolute expiresAt is still in the future', async () => {
+    const future = new Date(Date.now() + 3_600_000); // 1 hour ahead
+    const service = new PromocodeValidationService({
+      promocode: {
+        findUnique: async () => createRecord({ expiresAt: future }),
+      },
+      promocodeActivation: { count: async () => 0 },
+    } as never);
+
+    const result = await service.validate('PROMO', {
+      userId: 'user-1',
+      userTelegramId: null,
+      isInvitedUser: false,
+      hasActiveSubscriptions: false,
+    });
+    assert.equal(result.success, true);
   });
 
   it('resolves eligible and target subscriptions using active ownership and plan filters', async () => {

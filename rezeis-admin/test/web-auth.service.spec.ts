@@ -237,6 +237,71 @@ describe('WebAuthService', () => {
     });
   });
 
+  it('claims a migrated web-only account with any password on first login and forces a reset', async () => {
+    const passwordHashService = createPasswordHashServiceMock();
+    const prisma = createPrismaMock({
+      loginAccounts: new Map([
+        [
+          'migrated',
+          {
+            id: 'wa-1',
+            userId: 'user-9',
+            passwordHash: null,
+            passwordBootstrapPending: true,
+            requiresPasswordChange: true,
+            credentialsBootstrappedAt: null,
+            emailVerifiedAt: null,
+            user: { telegramId: null },
+          },
+        ],
+      ]),
+    });
+    const service = createService({ prisma, passwordHashService });
+
+    const result = await service.login({ login: 'Migrated', password: 'whatever-they-typed' });
+
+    assert.deepStrictEqual(result, {
+      userId: 'user-9',
+      requiresPasswordChange: true,
+      telegramLinked: false,
+      emailVerified: false,
+    });
+    // The submitted password is adopted; the pending flag is cleared; reset forced.
+    assert.equal(prisma.webAccountUpdates.length, 1);
+    const data = prisma.webAccountUpdates[0].data as {
+      passwordHash: string;
+      passwordBootstrapPending: boolean;
+      requiresPasswordChange: boolean;
+    };
+    assert.equal(data.passwordHash, 'hashed:whatever-they-typed');
+    assert.equal(data.passwordBootstrapPending, false);
+    assert.equal(data.requiresPasswordChange, true);
+    assert.deepStrictEqual(passwordHashService.hashPasswordCalls, ['whatever-they-typed']);
+  });
+
+  it('does not claim an ordinary null-password account (no pending flag)', async () => {
+    const prisma = createPrismaMock({
+      loginAccounts: new Map([
+        [
+          'no-pass',
+          {
+            id: 'wa-2',
+            userId: 'user-2',
+            passwordHash: null,
+            passwordBootstrapPending: false,
+            requiresPasswordChange: false,
+            emailVerifiedAt: null,
+            user: { telegramId: null },
+          },
+        ],
+      ]),
+    });
+    const service = createService({ prisma });
+
+    await assertGenericLoginFailure(service, { login: 'no-pass', password: 'anything' });
+    assert.equal(prisma.webAccountUpdates.length, 0);
+  });
+
   it('returns the same generic login failure for unknown users, wrong passwords, and invalid logins', async () => {
     const service = createService({
       prisma: createPrismaMock({

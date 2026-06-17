@@ -32,6 +32,7 @@ export function mapPromocode(record: PromocodeWithCount): PromocodeInterface {
     reward: record.reward,
     plan: parsePromocodePlanSnapshot(record.plan),
     lifetime: record.lifetime,
+    expiresAt: record.expiresAt ? record.expiresAt.toISOString() : null,
     maxActivations: record.maxActivations,
     allowedTelegramIds: record.allowedTelegramIds.map(stringifyBigint),
     allowedPlanIds: [...record.allowedPlanIds],

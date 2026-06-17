@@ -44,7 +44,7 @@ export const en = {
       action: 'Select file',
       selectFile: 'Select Remnashop backup file',
       importing: 'Importing {{filename}}…',
-      hint: 'Accepted formats: .tar.gz backup (with database.json inside) or .json export.',
+      hint: 'Accepted formats: .tar.gz Remnawave/Remnashop backup (with a nested bot_dump_*.sql.gz pg dump or database.json), a .sql(.gz) dump, or a .json export.',
     },
     altshop: {
       title: 'Import from Altshop',

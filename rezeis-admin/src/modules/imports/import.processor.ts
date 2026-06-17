@@ -112,7 +112,7 @@ export class ImportProcessor extends WorkerHost {
         case 'altshop': {
           if (!stagedFilePath) throw new Error('Staged file path missing for altshop import');
           const buffer = await fsp.readFile(stagedFilePath);
-          const { users, subscriptions, transactions, plans, planDurations, planPrices } =
+          const { users, subscriptions, transactions, webAccounts, plans, planDurations, planPrices } =
             await parseAltshopBackup(buffer);
           await job.updateProgress({ stage: 'parsed', percent: 20, records: users.length });
           result = await this.altshopImporterService.run({
@@ -121,6 +121,7 @@ export class ImportProcessor extends WorkerHost {
             users,
             subscriptions,
             transactions,
+            webAccounts,
             importRecordId,
             plans,
             planDurations,

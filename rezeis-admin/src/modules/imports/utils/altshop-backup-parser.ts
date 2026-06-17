@@ -7,6 +7,7 @@ import {
   AltshopSubscription,
   AltshopTransaction,
   AltshopUser,
+  AltshopWebAccount,
 } from '../services/altshop-importer.service';
 
 /**
@@ -58,6 +59,8 @@ interface AltshopBackupData {
   users: AltshopUser[];
   subscriptions: AltshopSubscription[];
   transactions: AltshopTransaction[];
+  /** Cabinet logins (migrated as claim-pending; bcrypt hash dropped). */
+  webAccounts: AltshopWebAccount[];
   /**
    * Optional: the catalog tables. They are present in real altshop
    * backups (`backup_full_*.tar.gz`) but absent in stripped JSON
@@ -155,6 +158,7 @@ function extractDataFromJson(json: Record<string, unknown>): AltshopBackupData {
   const users = (data.users ?? []) as AltshopUser[];
   const subscriptions = (data.subscriptions ?? []) as AltshopSubscription[];
   const transactions = (data.transactions ?? []) as AltshopTransaction[];
+  const webAccountsRaw = (data.web_accounts ?? []) as Array<Record<string, unknown>>;
   const plans = (data.plans ?? []) as AltshopPlan[];
   const planDurations = (data.plan_durations ?? []) as AltshopPlanDuration[];
   const planPrices = (data.plan_prices ?? []) as AltshopPlanPrice[];
@@ -162,6 +166,16 @@ function extractDataFromJson(json: Record<string, unknown>): AltshopBackupData {
   if (!Array.isArray(users) || users.length === 0) {
     throw new BadRequestException('No user records found in the backup data');
   }
+
+  // Web accounts: keep only the identity (login/email); the bcrypt password
+  // hash is intentionally dropped (unusable by the rezeis cabinet).
+  const webAccounts: AltshopWebAccount[] = (Array.isArray(webAccountsRaw) ? webAccountsRaw : [])
+    .map((w) => ({
+      user_telegram_id: Number(w.user_telegram_id),
+      username: typeof w.username === 'string' ? w.username : null,
+      email: typeof w.email === 'string' ? w.email : null,
+    }))
+    .filter((w) => Number.isFinite(w.user_telegram_id) && (w.username !== null || w.email !== null));
 
   // Map altshop subscription format: `plan` field → `plan_snapshot`
   const mappedSubscriptions: AltshopSubscription[] = subscriptions.map((sub) => {
@@ -176,6 +190,7 @@ function extractDataFromJson(json: Record<string, unknown>): AltshopBackupData {
     users,
     subscriptions: mappedSubscriptions,
     transactions,
+    webAccounts,
     plans: Array.isArray(plans) ? plans : [],
     planDurations: Array.isArray(planDurations) ? planDurations : [],
     planPrices: Array.isArray(planPrices) ? planPrices : [],

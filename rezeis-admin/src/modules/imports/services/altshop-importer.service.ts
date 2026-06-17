@@ -13,6 +13,7 @@ import {
 } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { loginPolicy } from '../../auth/utils/login-policy.util';
 import { ImportSummary } from '../interfaces/import-summary.interface';
 import {
   AltshopPlan,
@@ -98,6 +99,20 @@ export interface AltshopSubscription {
 }
 
 /**
+ * Shape of an altshop web-account record (cabinet login). The bcrypt
+ * `password_hash` is intentionally NOT modelled — it is unusable by the rezeis
+ * cabinet (scrypt(SHA256)), so imported accounts are claim-pending instead.
+ */
+export interface AltshopWebAccount {
+  /** Owner's telegram_id (may be a synthetic negative id for web-only users). */
+  readonly user_telegram_id: number;
+  /** Cabinet login. */
+  readonly username: string | null;
+  /** Optional email. */
+  readonly email: string | null;
+}
+
+/**
  * Shape of an altshop transaction record.
  */
 export interface AltshopTransaction {
@@ -133,6 +148,7 @@ interface RunInput {
   readonly users: readonly AltshopUser[];
   readonly subscriptions: readonly AltshopSubscription[];
   readonly transactions?: readonly AltshopTransaction[];
+  readonly webAccounts?: readonly AltshopWebAccount[];
   /** See altshop-backup-parser.ts for shape. */
   readonly plans?: readonly AltshopPlan[];
   readonly planDurations?: readonly AltshopPlanDuration[];
@@ -164,6 +180,14 @@ export class AltshopImporterService {
 
     if (!users || users.length === 0) {
       throw new BadRequestException('No user records provided');
+    }
+
+    // Index web accounts by telegram_id (first one wins per user).
+    const webAccountByTelegramId = new Map<number, AltshopWebAccount>();
+    for (const wa of input.webAccounts ?? []) {
+      if (!webAccountByTelegramId.has(wa.user_telegram_id)) {
+        webAccountByTelegramId.set(wa.user_telegram_id, wa);
+      }
     }
 
     // Index subscriptions by telegram_id
@@ -216,6 +240,16 @@ export class AltshopImporterService {
         const userTxs = txsByTelegramId.get(altshopUser.telegram_id) ?? [];
         for (const tx of userTxs) {
           await this.importTransaction(userId, tx);
+        }
+
+        // Migrate the cabinet login as a claim-pending web account (import mode
+        // only). The bcrypt hash is dropped — the user claims the account with
+        // any password on first sign-in and is then forced to set a new one.
+        if (mode === 'import') {
+          const wa = webAccountByTelegramId.get(altshopUser.telegram_id);
+          if (wa) {
+            await this.upsertClaimPendingWebAccount(userId, wa);
+          }
         }
       } catch (err) {
         const identifier = altshopUser.telegram_id || altshopUser.username || `id:${altshopUser.id}`;
@@ -455,6 +489,48 @@ export class AltshopImporterService {
     }
 
     return 'skipped';
+  }
+
+  // ── Web account (claim-pending) ─────────────────────────────────────────────
+
+  /**
+   * Migrate an altshop cabinet login as a claim-pending `WebAccount`: login
+   * (and email when present), NO password (the altshop bcrypt hash is unusable
+   * by rezeis). On the user's first cabinet sign-in any submitted password is
+   * adopted and a reset is forced. Skips when the user already has a web
+   * account or the login is invalid / collides.
+   */
+  private async upsertClaimPendingWebAccount(userId: string, wa: AltshopWebAccount): Promise<void> {
+    const existing = await this.prismaService.webAccount.findUnique({
+      where: { userId },
+      select: { id: true },
+    });
+    if (existing) return; // don't clobber an existing web account
+
+    const loginRaw = (wa.username ?? '').trim();
+    if (!loginPolicy.isValidLogin(loginRaw)) return; // can't form a usable login
+    const login = loginPolicy.sanitizeLogin(loginRaw);
+    const loginNormalized = loginPolicy.normalizeLogin(loginRaw);
+    const email = wa.email && wa.email.trim().length > 0 ? wa.email.trim() : null;
+    const emailNormalized = email ? email.toLowerCase() : null;
+
+    try {
+      await this.prismaService.webAccount.create({
+        data: {
+          user: { connect: { id: userId } },
+          login,
+          loginNormalized,
+          email,
+          emailNormalized,
+          passwordHash: null,
+          passwordBootstrapPending: true,
+          requiresPasswordChange: true,
+        },
+      });
+    } catch (err) {
+      // login/email unique collision across users — skip, not fatal.
+      this.logger.debug(`altshop webAccount skipped for ${userId}: ${(err as Error).message}`);
+    }
   }
 
   // ── Transaction import ────────────────────────────────────────────────────

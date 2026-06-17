@@ -67,6 +67,7 @@ describe('PromocodeLifecycleService', () => {
         reward: 14,
         plan: Prisma.JsonNull,
         lifetime: null,
+        expiresAt: null,
         maxActivations: null,
         allowedTelegramIds: [BigInt('123456789')],
         allowedPlanIds: ['plan-1'],

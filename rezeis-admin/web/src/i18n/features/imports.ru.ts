@@ -44,7 +44,7 @@ export const ru = {
       action: 'Выбрать файл',
       selectFile: 'Выбрать файл бэкапа Remnashop',
       importing: 'Импорт {{filename}}…',
-      hint: 'Принимаемые форматы: .tar.gz бэкап (с database.json внутри) или .json экспорт.',
+      hint: 'Принимаемые форматы: .tar.gz бэкап Remnawave/Remnashop (с вложенным pg-дампом bot_dump_*.sql.gz или database.json), .sql(.gz) дамп или .json экспорт.',
     },
     altshop: {
       title: 'Импорт из Altshop',

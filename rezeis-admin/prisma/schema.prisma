@@ -1011,6 +1011,11 @@ model WebAccount {
   emailVerifiedAt            DateTime? @map("email_verified_at") @db.Timestamptz(3)
   passwordHash               String?   @map("password_hash")
   requiresPasswordChange     Boolean   @default(false) @map("requires_password_change")
+  /// Set by an importer for a migrated web-only account that has no usable
+  /// password yet. While true, the first cabinet sign-in adopts whatever
+  /// password the user submits, clears this flag, and forces a reset. Only an
+  /// importer sets it — no pre-existing account is claimable.
+  passwordBootstrapPending   Boolean   @default(false) @map("password_bootstrap_pending")
   temporaryPasswordExpiresAt DateTime? @map("temporary_password_expires_at") @db.Timestamptz(3)
   /// Set when the user first enrolls credentials. Acts as an idempotency
   /// guard for `setWebAccountPassword`.
@@ -1681,6 +1686,9 @@ model Promocode {
   plan               Json?                 @map("plan")
   /// Days until the code expires. `-1` (or null) = unlimited.
   lifetime           Int?                  @map("lifetime")
+  /// Absolute expiry timestamp (operator picks an exact date+time). Takes
+  /// precedence over `lifetime` when set; null = no absolute deadline.
+  expiresAt          DateTime?             @map("expires_at") @db.Timestamptz(3)
   /// Maximum number of total activations. `-1` (or null) = unlimited.
   maxActivations     Int?                  @map("max_activations")
   /// Optional allow-list of telegram_ids (donor compatibility — keep as text

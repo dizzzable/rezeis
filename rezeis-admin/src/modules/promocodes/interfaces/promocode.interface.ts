@@ -34,6 +34,7 @@ export interface PromocodeInterface {
   readonly reward: number | null;
   readonly plan: PromocodePlanSnapshotInterface | null;
   readonly lifetime: number | null;
+  readonly expiresAt: string | null;
   readonly maxActivations: number | null;
   readonly allowedTelegramIds: readonly string[];
   readonly allowedPlanIds: readonly string[];

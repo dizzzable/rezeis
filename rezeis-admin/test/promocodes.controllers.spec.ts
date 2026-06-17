@@ -24,6 +24,7 @@ function promo(): PromocodeInterface {
     reward: 7,
     plan: null,
     lifetime: null,
+    expiresAt: null,
     maxActivations: null,
     allowedTelegramIds: [],
     allowedPlanIds: [],

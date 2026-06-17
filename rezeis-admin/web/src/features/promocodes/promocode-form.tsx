@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { DatePicker } from '@/components/ui/date-picker'
 import {
   Select,
   SelectContent,
@@ -34,6 +35,8 @@ export interface PromocodeFormData {
   lifetime?: number
   maxActivations?: number
   allowedPlanIds?: number[]
+  /** Absolute expiry (ISO 8601) or null for none. */
+  expiresAt?: string | null
 }
 
 interface ExistingPromocode {
@@ -44,6 +47,7 @@ interface ExistingPromocode {
   readonly isActive?: boolean
   readonly lifetime?: number | string
   readonly maxActivations?: number | string
+  readonly expiresAt?: string | null
 }
 
 interface Props {
@@ -61,6 +65,16 @@ export function PromocodeForm({ promo, onSubmit, isLoading }: Props) {
   const [isActive, setIsActive] = useState(promo?.isActive ?? true)
   const [lifetime, setLifetime] = useState(promo?.lifetime?.toString() ?? '-1')
   const [maxActivations, setMaxActivations] = useState(promo?.maxActivations?.toString() ?? '-1')
+  // Absolute expiry: a calendar date + a HH:mm time. Empty date = no deadline.
+  const initialExpiry = promo?.expiresAt ? new Date(promo.expiresAt) : undefined
+  const [expiresDate, setExpiresDate] = useState<Date | undefined>(
+    initialExpiry && !Number.isNaN(initialExpiry.getTime()) ? initialExpiry : undefined,
+  )
+  const [expiresTime, setExpiresTime] = useState(
+    initialExpiry && !Number.isNaN(initialExpiry.getTime())
+      ? `${String(initialExpiry.getHours()).padStart(2, '0')}:${String(initialExpiry.getMinutes()).padStart(2, '0')}`
+      : '23:59',
+  )
 
   // Load plans for SUBSCRIPTION reward type
   usePlans(undefined, { enabled: rewardType === 'SUBSCRIPTION' })
@@ -74,6 +88,13 @@ export function PromocodeForm({ promo, onSubmit, isLoading }: Props) {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
+    let expiresAt: string | null = null
+    if (expiresDate) {
+      const [hh, mm] = expiresTime.split(':').map((n) => Number.parseInt(n, 10))
+      const merged = new Date(expiresDate)
+      merged.setHours(Number.isFinite(hh) ? hh : 23, Number.isFinite(mm) ? mm : 59, 0, 0)
+      expiresAt = merged.toISOString()
+    }
     onSubmit({
       code: code.toUpperCase(),
       rewardType,
@@ -82,6 +103,7 @@ export function PromocodeForm({ promo, onSubmit, isLoading }: Props) {
       isActive,
       lifetime: parseInt(lifetime, 10),
       maxActivations: parseInt(maxActivations, 10),
+      expiresAt,
     })
   }
 
@@ -179,6 +201,38 @@ export function PromocodeForm({ promo, onSubmit, isLoading }: Props) {
           />
           <p className="text-xs text-muted-foreground">{t('promocodeForm.unlimitedHint')}</p>
         </div>
+      </div>
+
+      {/* Absolute expiry — calendar date + time */}
+      <div className="space-y-2">
+        <Label>{t('promocodeForm.expiresAt')}</Label>
+        <div className="flex flex-wrap items-center gap-2">
+          <DatePicker
+            value={expiresDate}
+            onChange={setExpiresDate}
+            className="w-48"
+            placeholder={t('promocodeForm.expiresNever')}
+          />
+          <Input
+            type="time"
+            value={expiresTime}
+            onChange={(e) => setExpiresTime(e.target.value)}
+            disabled={!expiresDate}
+            className="w-32"
+            aria-label={t('promocodeForm.expiresTime')}
+          />
+          {expiresDate ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={() => setExpiresDate(undefined)}
+            >
+              {t('promocodeForm.expiresClear')}
+            </Button>
+          ) : null}
+        </div>
+        <p className="text-xs text-muted-foreground">{t('promocodeForm.expiresAtHint')}</p>
       </div>
 
       <Separator />

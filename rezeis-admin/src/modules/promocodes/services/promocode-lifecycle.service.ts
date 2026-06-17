@@ -104,6 +104,7 @@ export class PromocodeLifecycleService {
             ? Prisma.JsonNull
             : (dto.plan as unknown as Prisma.InputJsonValue),
           lifetime: dto.lifetime ?? null,
+          expiresAt: dto.expiresAt ? new Date(dto.expiresAt) : null,
           maxActivations: dto.maxActivations ?? null,
           allowedTelegramIds: (dto.allowedTelegramIds ?? []).map((value) =>
             BigInt(value),
@@ -154,6 +155,9 @@ export class PromocodeLifecycleService {
           : (dto.plan as unknown as Prisma.InputJsonValue);
     }
     if (dto.lifetime !== undefined) updateData.lifetime = dto.lifetime;
+    if (dto.expiresAt !== undefined) {
+      updateData.expiresAt = dto.expiresAt ? new Date(dto.expiresAt) : null;
+    }
     if (dto.maxActivations !== undefined) updateData.maxActivations = dto.maxActivations;
     if (dto.allowedTelegramIds !== undefined) {
       updateData.allowedTelegramIds = dto.allowedTelegramIds.map((value) => BigInt(value));

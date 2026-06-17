@@ -74,7 +74,7 @@ export class PromocodeValidationService {
       return failure('INACTIVE', 'ntf-promocode-inactive');
     }
 
-    if (this.isExpired(record.createdAt, record.lifetime)) {
+    if (this.isExpired(record.createdAt, record.lifetime, record.expiresAt)) {
       return failure('EXPIRED', 'ntf-promocode-expired');
     }
 
@@ -191,8 +191,13 @@ export class PromocodeValidationService {
     return { subscriptionId: subscription.id, errorCode: null };
   }
 
-  /// donor: `is_expired` — derived from creation timestamp + `lifetime`.
-  private isExpired(createdAt: Date, lifetime: number | null): boolean {
+  /// donor: `is_expired` — derived from creation timestamp + `lifetime`, plus
+  /// an optional absolute `expiresAt` deadline (operator-picked date+time).
+  /// Expired when EITHER deadline has passed.
+  private isExpired(createdAt: Date, lifetime: number | null, expiresAt: Date | null | undefined): boolean {
+    if (expiresAt != null && expiresAt.getTime() < Date.now()) {
+      return true;
+    }
     if (lifetime === null || lifetime <= 0) {
       return false;
     }
