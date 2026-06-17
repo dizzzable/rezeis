@@ -30,6 +30,10 @@ export const RBAC_ACTIONS = [
   /// touch many rows and are higher-risk (a misconfigured payload can
   /// overwrite live operator settings).
   'import',
+  /// Anonymous support — reading CLOSED (archived) conversations and their
+  /// attachments. Separated from `view` so archived (often identity-bearing)
+  /// guest threads can be restricted to a subset of agents.
+  'archive',
 ] as const;
 
 export type RbacAction = (typeof RBAC_ACTIONS)[number];
@@ -49,7 +53,7 @@ export const RBAC_RESOURCES: Readonly<Record<string, readonly RbacAction[]>> = {
   payments: ['view', 'create', 'edit', 'delete', 'export'],
   payment_gateways: ['view', 'edit'],
   payment_webhooks: ['view', 'resolve', 'run'],
-  support_tickets: ['view', 'create', 'edit', 'delete', 'resolve'],
+  support_tickets: ['view', 'create', 'edit', 'delete', 'resolve', 'archive'],
   analytics: ['view', 'export'],
 
   // Catalog
@@ -179,6 +183,7 @@ export const SYSTEM_ROLES: readonly SystemRoleSeed[] = [
       { resource: 'support_tickets', action: 'view' },
       { resource: 'support_tickets', action: 'edit' },
       { resource: 'support_tickets', action: 'resolve' },
+      { resource: 'support_tickets', action: 'archive' },
       { resource: 'referrals', action: 'view' },
       { resource: 'partners', action: 'view' },
       { resource: 'withdrawals', action: 'view' },
@@ -199,6 +204,7 @@ export const SYSTEM_ROLES: readonly SystemRoleSeed[] = [
       { resource: 'support_tickets', action: 'view' },
       { resource: 'support_tickets', action: 'edit' },
       { resource: 'support_tickets', action: 'resolve' },
+      { resource: 'support_tickets', action: 'archive' },
       { resource: 'referrals', action: 'view' },
       { resource: 'analytics', action: 'view' },
     ],

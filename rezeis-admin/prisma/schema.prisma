@@ -328,6 +328,28 @@ enum SupportTicketStatus {
 enum SupportTicketAuthorType {
   USER
   ADMIN
+  SYSTEM
+}
+
+/// How a support ticket was opened.
+enum SupportTicketChannel {
+  CABINET
+  GUEST
+}
+
+/// Kind of identity/proof an operator can request inside a conversation.
+enum SupportDocRequestKind {
+  PAYMENT_PROOF
+  DOCUMENT
+  LOGIN
+  OTHER
+}
+
+/// Lifecycle of a document request.
+enum SupportDocRequestStatus {
+  PENDING
+  FULFILLED
+  CANCELLED
 }
 
 // =============================================================================
@@ -1584,6 +1606,11 @@ model Settings {
   multiSubscriptionSettings Json       @default("{}") @map("multi_subscription_settings")
   /// Branding settings (donor: settings.branding_settings JSON).
   brandingSettings          Json       @default("{}") @map("branding_settings")
+  /// Anonymous support chat tunables (enabled flag, guest token TTL,
+  /// attachment caps, Cloudflare Turnstile keys). Managed from the admin
+  /// panel; env vars only seed the defaults. The Turnstile secret is stored
+  /// AES-256-GCM-encrypted, never in plaintext.
+  supportSettings           Json       @default("{}") @map("support_settings")
   /// Bot menu visual settings (donor: settings.bot_menu_settings JSON).
   botMenuSettings           Json       @default("{}") @map("bot_menu_settings")
   /// Operator-uploaded custom icon library, reusable across the panel and the
@@ -1862,22 +1889,53 @@ model NotificationTemplate {
 }
 
 model SupportTicket {
-  id        String              @id @default(cuid()) @map("id")
-  userId    String              @map("user_id")
-  subject   String              @map("subject")
-  status    SupportTicketStatus @default(OPEN) @map("status")
-  closedAt  DateTime?           @map("closed_at") @db.Timestamptz(3)
-  closedBy  String?             @map("closed_by")
-  createdAt DateTime            @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt DateTime            @updatedAt @map("updated_at") @db.Timestamptz(3)
+  id         String                @id @default(cuid()) @map("id")
+  userId     String?               @map("user_id")
+  guestId    String?               @unique @map("guest_id")
+  channel    SupportTicketChannel  @default(CABINET) @map("channel")
+  subject    String                @map("subject")
+  status     SupportTicketStatus   @default(OPEN) @map("status")
+  archivedAt DateTime?             @map("archived_at") @db.Timestamptz(3)
+  closedAt   DateTime?             @map("closed_at") @db.Timestamptz(3)
+  closedBy   String?               @map("closed_by")
+  createdAt  DateTime              @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt  DateTime              @updatedAt @map("updated_at") @db.Timestamptz(3)
 
-  user     User                   @relation("SupportTicketUser", fields: [userId], references: [id], onDelete: Cascade)
+  user     User?                  @relation("SupportTicketUser", fields: [userId], references: [id], onDelete: Cascade)
+  guest    SupportGuest?          @relation(fields: [guestId], references: [id], onDelete: SetNull)
   messages SupportTicketMessage[]
+  docRequests SupportDocumentRequest[]
 
   @@index([userId])
   @@index([status])
+  @@index([channel])
+  @@index([archivedAt])
   @@index([createdAt])
   @@map("support_tickets")
+}
+
+/// Server-bound anonymous identity for a guest support conversation.
+/// One guest row owns exactly one ticket. The raw token / resume code is
+/// never stored — only its SHA-256 hash, so the conversation cannot be
+/// enumerated or hijacked from a client-supplied id.
+model SupportGuest {
+  id          String   @id @default(cuid()) @map("id")
+  secretHash  String   @unique @map("secret_hash")
+  /// Optional secondary token hash for the email "resume" link sent on an
+  /// operator reply. Lets the visitor return from a fresh device without
+  /// rotating the cookie token. NULL until the first email continuity send.
+  emailResumeHash String? @unique @map("email_resume_hash")
+  email       String?  @map("email")
+  displayName String?  @map("display_name")
+  ipHash      String?  @map("ip_hash")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  lastSeenAt  DateTime @default(now()) @map("last_seen_at") @db.Timestamptz(3)
+  expiresAt   DateTime @map("expires_at") @db.Timestamptz(3)
+
+  ticket SupportTicket?
+
+  @@index([expiresAt])
+  @@map("support_guests")
 }
 
 model SupportTicketMessage {
@@ -1887,13 +1945,55 @@ model SupportTicketMessage {
   /// Admin user id (when authorType = ADMIN) or end-user id (when USER).
   authorId   String?                 @map("author_id")
   content    String                  @map("content")
+  metadata   Json?                   @map("metadata")
   createdAt  DateTime                @default(now()) @map("created_at") @db.Timestamptz(3)
 
-  ticket SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  ticket      SupportTicket       @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  attachments SupportAttachment[]
 
   @@index([ticketId])
   @@index([createdAt])
   @@map("support_ticket_messages")
+}
+
+/// File attached to a support message. The on-disk name is a CUID (no
+/// path separators, no caller-controlled bytes), the original name is kept
+/// only for display, and the file is served exclusively through a
+/// permissioned / token-checked controller — never as a static asset.
+model SupportAttachment {
+  id         String   @id @default(cuid()) @map("id")
+  messageId  String   @map("message_id")
+  filename   String   @map("filename")
+  storedName String   @map("stored_name")
+  mimeType   String   @map("mime_type")
+  sizeBytes  Int      @map("size_bytes")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  message SupportTicketMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([messageId])
+  @@map("support_attachments")
+}
+
+/// An operator's in-conversation request for identity/proof (a payment
+/// receipt, a named document, or a login). Creating one also inserts a
+/// SYSTEM message so the visitor sees the ask inline; it is satisfied when a
+/// subsequent USER message arrives (`fulfilledMessageId`).
+model SupportDocumentRequest {
+  id                 String                  @id @default(cuid()) @map("id")
+  ticketId           String                  @map("ticket_id")
+  requestedBy        String                  @map("requested_by")
+  kind               SupportDocRequestKind   @map("kind")
+  label              String                  @map("label")
+  status             SupportDocRequestStatus @default(PENDING) @map("status")
+  fulfilledMessageId String?                 @map("fulfilled_message_id")
+  createdAt          DateTime                @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  ticket SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  @@index([ticketId])
+  @@index([status])
+  @@map("support_document_requests")
 }
 
 // =============================================================================

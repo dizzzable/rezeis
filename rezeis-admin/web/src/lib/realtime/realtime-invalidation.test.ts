@@ -52,4 +52,20 @@ describe('realtime query invalidation keys', () => {
       adminQueryKeys.audit.all,
     ])
   })
+
+  it('invalidates the support ticket queue + open thread on a guest/user reply', () => {
+    expect(getRealtimeInvalidationKeys({ type: 'support.ticket_user_reply' })).toEqual([
+      ['support-tickets'],
+      ['support-ticket'],
+      adminQueryKeys.audit.all,
+    ])
+  })
+
+  it('invalidates the support queue + dashboard on a new ticket', () => {
+    expect(getRealtimeInvalidationKeys({ type: 'support.ticket_created' })).toEqual([
+      ['support-tickets'],
+      adminQueryKeys.dashboard.summary,
+      adminQueryKeys.audit.all,
+    ])
+  })
 })

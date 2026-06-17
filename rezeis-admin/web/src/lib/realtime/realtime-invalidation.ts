@@ -75,6 +75,13 @@ const TYPE_TO_QUERY_KEYS: Record<string, readonly InvalidationKey[]> = {
   // System
   'system.backup_completed': [adminQueryKeys.backups.all],
   'system.broadcast_sent': [adminQueryKeys.broadcast.all, adminQueryKeys.dashboard.summary],
+
+  // Support tickets (operator queue realtime — Phase 4). A guest/user message
+  // fires a SUPPORT event the operator socket receives; invalidate the queue
+  // list + any open thread so the operator sees it without waiting on the
+  // 5s poll. Polling remains as the fallback when the socket is down.
+  'support.ticket_created': [['support-tickets'] as const, adminQueryKeys.dashboard.summary],
+  'support.ticket_user_reply': [['support-tickets'] as const, ['support-ticket'] as const],
 }
 
 /**

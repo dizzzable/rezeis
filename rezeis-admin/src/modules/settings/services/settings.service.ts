@@ -41,6 +41,15 @@ import {
   readPlatformBranding,
 } from '../utils/platform-branding.util';
 import { readCustomIcons } from '../utils/custom-icons.util';
+import {
+  mergeSupportSettings,
+  toSupportLimits,
+  toSupportSettingsView,
+  type StoredSupportSettings,
+  type SupportLimits,
+  type SupportSettingsView,
+} from '../utils/support-settings.util';
+import { UpdateSupportSettingsDto } from '../dto/update-support-settings.dto';
 import { IconUploadService } from './icon-upload.service';
 
 interface UpdatePlatformSettingsInput {
@@ -807,6 +816,107 @@ export class SettingsService {
     const settings = await this.getSettingsRecord(this.prismaService);
     if (!settings) return {};
     return readJsonObject(settings.partnerSettings);
+  }
+
+  // ── Anonymous support chat settings ─────────────────────────────────────
+
+  private async readStoredSupport(): Promise<StoredSupportSettings> {
+    const settings = await this.getSettingsRecord(this.prismaService);
+    if (!settings) return {};
+    return readJsonObject(settings.supportSettings) as StoredSupportSettings;
+  }
+
+  /** Admin-safe view for the SPA (Turnstile secret redacted to a flag). */
+  public async getSupportSettings(): Promise<SupportSettingsView> {
+    return toSupportSettingsView(await this.readStoredSupport());
+  }
+
+  /** Effective runtime limits consumed by the support services. */
+  public async getSupportLimits(): Promise<SupportLimits> {
+    return toSupportLimits(await this.readStoredSupport());
+  }
+
+  /**
+   * Internal runtime config relayed to reiwa (the public edge): the master
+   * enabled flag, the public Turnstile site key, and the decrypted secret
+   * (or the env fallback). Decryption failures degrade to the env value.
+   */
+  public async getSupportRuntimeConfig(): Promise<{
+    readonly enabled: boolean;
+    readonly turnstileSiteKey: string;
+    readonly turnstileSecret: string | null;
+  }> {
+    const stored = await this.readStoredSupport();
+    const view = toSupportSettingsView(stored);
+    let secret: string | null = (process.env.SUPPORT_TURNSTILE_SECRET ?? '').trim() || null;
+    const enc = stored.turnstileSecretEnc;
+    const cryptKey = this.applicationConfiguration.cryptKey;
+    if (typeof enc === 'string' && enc.length > 0 && cryptKey) {
+      try {
+        secret = decryptTotpSecret(enc, cryptKey);
+      } catch (err: unknown) {
+        this.logger.warn(
+          `Failed to decrypt Turnstile secret: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    return { enabled: view.enabled, turnstileSiteKey: view.turnstileSiteKey, turnstileSecret: secret };
+  }
+
+  /** Partial-update the `supportSettings` JSON column (panel-managed). */
+  public async updateSupportSettings(input: {
+    readonly currentAdmin: CurrentAdminInterface;
+    readonly requestMetadata: RequestMetadataInterface;
+    readonly patch: UpdateSupportSettingsDto;
+  }): Promise<SupportSettingsView> {
+    const settings = await this.prismaService.$transaction(async (tx) => {
+      const existing = await this.getOrCreateSettingsRecord(tx);
+      const previous = readJsonObject(existing.supportSettings) as StoredSupportSettings;
+
+      // Encrypt a supplied Turnstile secret; an empty string clears it.
+      let secretEnc: string | null | undefined;
+      if (input.patch.turnstileSecret !== undefined) {
+        const raw = input.patch.turnstileSecret.trim();
+        if (raw.length === 0) {
+          secretEnc = null;
+        } else {
+          const cryptKey = this.applicationConfiguration.cryptKey;
+          if (!cryptKey) {
+            throw new BadRequestException('REZEIS_CRYPT_KEY is required to store a Turnstile secret');
+          }
+          secretEnc = encryptTotpSecret(raw, cryptKey);
+        }
+      }
+
+      const next = mergeSupportSettings(previous, {
+        enabled: input.patch.enabled,
+        guestTokenTtlHours: input.patch.guestTokenTtlHours,
+        attachmentMaxMb: input.patch.attachmentMaxMb,
+        attachmentMaxPerMsg: input.patch.attachmentMaxPerMsg,
+        turnstileSiteKey: input.patch.turnstileSiteKey,
+        turnstileSecretEnc: secretEnc,
+      });
+
+      const updated = await tx.settings.update({
+        where: { id: existing.id },
+        data: { supportSettings: next as unknown as Prisma.InputJsonValue },
+      });
+      await tx.adminAuditLog.create({
+        data: {
+          action: 'settings.supportSettings.update',
+          ipAddress: input.requestMetadata.remoteAddress,
+          userAgent: input.requestMetadata.userAgent,
+          metadata: {
+            requestId: input.requestMetadata.requestId,
+            // Never log the secret itself — only that it was touched.
+            patchKeys: Object.keys(input.patch),
+          },
+          adminUser: { connect: { id: input.currentAdmin.id } },
+        } as never,
+      });
+      return updated;
+    });
+    return toSupportSettingsView(readJsonObject(settings.supportSettings) as StoredSupportSettings);
   }
 
   // ── Custom icon library ────────────────────────────────────────────────

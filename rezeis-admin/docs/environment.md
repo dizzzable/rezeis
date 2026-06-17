@@ -212,3 +212,23 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 **подхватывается автоматически** обычным `docker compose up -d` без `-f` —
 в этом репозитории он публикует порт 8000 на loopback для отладки. На проде
 он не нужен (наружу порт не публикуем, ходит reverse proxy).
+
+## Анонимный чат поддержки (Phase 2–3)
+
+Переменные на стороне rezeis (источник правды). Все имеют безопасные
+значения по умолчанию — задавайте только для тонкой настройки.
+
+| Переменная | По умолчанию | Назначение |
+|---|---|---|
+| `SUPPORT_GUEST_TOKEN_TTL_HOURS` | `72` | Idle-TTL гостевого токена (часы). После простоя разговор нельзя возобновить. |
+| `SUPPORT_ATTACHMENTS_DIR` | `data/support-attachments` | Каталог хранения вложений на диске (том `rezeis-data`). Раздаются только через permissioned/token-контроллер, не статикой. |
+| `SUPPORT_ATTACHMENT_MAX_MB` | `10` | Лимит размера одного вложения (МБ, по декодированным байтам). |
+| `SUPPORT_ATTACHMENT_MAX_PER_MSG` | `5` | Максимум вложений на одно сообщение. |
+
+Гостевой токен хранится только как `sha256` (raw-токен живёт лишь в
+httpOnly-cookie у посетителя). Вложения валидируются по allow-list
+(png/jpeg/webp/pdf) + magic-byte sniff + лимиту размера. Закрытый тикет
+уходит в архив (`CLOSED` + `archivedAt`); чтение архива и его вложений
+требует право RBAC `support_tickets.archive` (засеяно в роли support и
+operator). Captcha-проверка (Cloudflare Turnstile) выполняется на стороне
+reiwa, см. её `environment.md`.
