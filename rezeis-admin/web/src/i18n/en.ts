@@ -2345,6 +2345,10 @@ export const en = {
       topicId: 'Topic ID',
       topicIdPlaceholder: 'Optional',
       save: 'Save settings',
+      saved: 'Backup settings saved',
+      saveFailed: 'Failed to save settings',
+      noTokenTitle: 'Bot token not configured',
+      noTokenDesc: 'To deliver the backup file to Telegram, set a bot token in Settings → Telegram delivery. Without a token the file is not sent — only the event is.',
     },
   },
   addOnsPage: {

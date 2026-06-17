@@ -31,10 +31,12 @@ import {
   SystemEventsService,
 } from '../../../common/services/system-events.service';
 import { BACKUP_QUEUE, BACKUP_JOBS } from '../backup.constants';
+import { SettingsService } from '../../settings/services/settings.service';
 import type { BackupCreateJobData, BackupDeliverTelegramJobData, BackupRestoreJobData } from '../backup.processor';
 
 const DEFAULT_BACKUP_LOCATION = '/app/data/backups';
 const RETENTION_FALLBACK = 7;
+const INTERVAL_HOURS_FALLBACK = 24;
 
 // ── DTOs ────────────────────────────────────────────────────────────────────
 
@@ -68,6 +70,32 @@ interface CreateBackupInput {
   readonly initiatedBy: string | null;
 }
 
+/** Operator-managed backup settings (persisted in `Settings.systemNotifications.backup`). */
+export interface BackupSettingsView {
+  readonly autoEnabled: boolean;
+  readonly intervalHours: number;
+  readonly maxKeep: number;
+  readonly telegram: {
+    readonly enabled: boolean;
+    readonly chatId: string | null;
+    readonly topicId: number | null;
+  };
+  /** Whether an admin bot token is configured (encrypted) or available via env.
+   *  Telegram delivery of the backup FILE only works when this is true. */
+  readonly botTokenConfigured: boolean;
+}
+
+export interface UpdateBackupSettingsInput {
+  readonly autoEnabled?: boolean;
+  readonly intervalHours?: number;
+  readonly maxKeep?: number;
+  readonly telegram?: {
+    readonly enabled?: boolean;
+    readonly chatId?: string | null;
+    readonly topicId?: number | string | null;
+  };
+}
+
 // ── Service ─────────────────────────────────────────────────────────────────
 
 /**
@@ -90,6 +118,7 @@ export class BackupService implements OnModuleInit {
     private readonly databaseConfiguration: ConfigType<typeof databaseConfig>,
     private readonly prismaService: PrismaService,
     private readonly systemEventsService: SystemEventsService,
+    private readonly settingsService: SettingsService,
     @InjectQueue(BACKUP_QUEUE)
     private readonly backupQueue: Queue,
   ) {}
@@ -129,6 +158,61 @@ export class BackupService implements OnModuleInit {
       this.prismaService.backupRecord.findFirst({ orderBy: { createdAt: 'desc' } }),
     ]);
     return { total, lastBackup: lastBackup ? toDto(lastBackup) : null };
+  }
+
+  // ── Settings (persisted in Settings.systemNotifications.backup) ──────────
+
+  /** Read the operator backup settings, merged with env/defaults. */
+  public async getSettings(): Promise<BackupSettingsView> {
+    const cfg = await this.readBackupConfig();
+    const token = await this.resolveBotToken();
+    return {
+      autoEnabled: cfg.autoEnabled,
+      intervalHours: cfg.intervalHours,
+      maxKeep: cfg.maxKeep,
+      telegram: { enabled: cfg.telegram.enabled, chatId: cfg.telegram.chatId, topicId: cfg.telegram.topicId },
+      botTokenConfigured: token !== null,
+    };
+  }
+
+  /** Persist a partial backup-settings patch into `systemNotifications.backup`. */
+  public async updateSettings(patch: UpdateBackupSettingsInput): Promise<BackupSettingsView> {
+    const settings = await this.prismaService.settings.findFirst({
+      orderBy: { updatedAt: 'asc' },
+      select: { id: true, systemNotifications: true },
+    });
+    if (settings === null) {
+      throw new BadRequestException('Settings row not initialised');
+    }
+    const sys =
+      typeof settings.systemNotifications === 'object' && settings.systemNotifications !== null
+        ? (settings.systemNotifications as Record<string, unknown>)
+        : {};
+    const current = this.normalizeBackupConfig(sys.backup);
+
+    const nextTelegram = {
+      enabled: patch.telegram?.enabled ?? current.telegram.enabled,
+      chatId:
+        patch.telegram?.chatId !== undefined
+          ? normalizeNullableString(patch.telegram.chatId)
+          : current.telegram.chatId,
+      topicId:
+        patch.telegram?.topicId !== undefined
+          ? normalizeNullableTopicId(patch.telegram.topicId)
+          : current.telegram.topicId,
+    };
+    const next = {
+      autoEnabled: patch.autoEnabled ?? current.autoEnabled,
+      intervalHours: clampInt(patch.intervalHours ?? current.intervalHours, 1, 168),
+      maxKeep: clampInt(patch.maxKeep ?? current.maxKeep, 1, 100),
+      telegram: nextTelegram,
+    };
+
+    await this.prismaService.settings.update({
+      where: { id: settings.id },
+      data: { systemNotifications: { ...sys, backup: next } as never },
+    });
+    return this.getSettings();
   }
 
   public async resolveDownloadStream(filename: string): Promise<{
@@ -251,10 +335,22 @@ export class BackupService implements OnModuleInit {
 
   // ── Cron ───────────────────────────────────────────────────────────────
 
-  @Cron(CronExpression.EVERY_DAY_AT_3AM)
+  @Cron(CronExpression.EVERY_HOUR)
   public async runScheduled(): Promise<void> {
     if (!shouldRunSchedules()) return;
-    if (process.env.BACKUP_AUTO_ENABLED === 'false') return;
+    const cfg = await this.readBackupConfig();
+    if (!cfg.autoEnabled) return;
+    // Honor the configured interval: only run once enough time has elapsed
+    // since the most recent backup (hourly tick + elapsed check).
+    const last = await this.prismaService.backupRecord.findFirst({
+      orderBy: { createdAt: 'desc' },
+      select: { createdAt: true },
+    });
+    if (last !== null) {
+      const elapsedMs = Date.now() - last.createdAt.getTime();
+      // 1-minute grace so a slightly-early hourly tick still fires on schedule.
+      if (elapsedMs < cfg.intervalHours * 3_600_000 - 60_000) return;
+    }
     try {
       await this.createBackup({ scope: BackupScope.DB, initiatedBy: null });
     } catch (err) {
@@ -437,10 +533,59 @@ export class BackupService implements OnModuleInit {
     return process.env.BACKUP_LOCATION ?? DEFAULT_BACKUP_LOCATION;
   }
 
-  private getRetention(): number {
-    const raw = process.env.BACKUP_MAX_KEEP;
-    const n = raw ? Number.parseInt(raw, 10) : NaN;
-    return Number.isFinite(n) && n > 0 ? n : RETENTION_FALLBACK;
+  /** Read + normalize the persisted backup config, falling back to env/defaults. */
+  private async readBackupConfig(): Promise<{
+    autoEnabled: boolean;
+    intervalHours: number;
+    maxKeep: number;
+    telegram: { enabled: boolean; chatId: string | null; topicId: number | null };
+  }> {
+    const settings = await this.prismaService.settings.findFirst({
+      select: { systemNotifications: true },
+    });
+    const sys =
+      settings && typeof settings.systemNotifications === 'object' && settings.systemNotifications !== null
+        ? (settings.systemNotifications as Record<string, unknown>)
+        : {};
+    return this.normalizeBackupConfig(sys.backup);
+  }
+
+  private normalizeBackupConfig(raw: unknown): {
+    autoEnabled: boolean;
+    intervalHours: number;
+    maxKeep: number;
+    telegram: { enabled: boolean; chatId: string | null; topicId: number | null };
+  } {
+    const b = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>) : {};
+    const tg = typeof b.telegram === 'object' && b.telegram !== null ? (b.telegram as Record<string, unknown>) : {};
+    const envMaxKeep = Number.parseInt(process.env.BACKUP_MAX_KEEP ?? '', 10);
+    return {
+      autoEnabled:
+        typeof b.autoEnabled === 'boolean' ? b.autoEnabled : process.env.BACKUP_AUTO_ENABLED !== 'false',
+      intervalHours:
+        typeof b.intervalHours === 'number' && b.intervalHours > 0
+          ? clampInt(b.intervalHours, 1, 168)
+          : INTERVAL_HOURS_FALLBACK,
+      maxKeep:
+        typeof b.maxKeep === 'number' && b.maxKeep > 0
+          ? clampInt(b.maxKeep, 1, 100)
+          : Number.isFinite(envMaxKeep) && envMaxKeep > 0
+            ? envMaxKeep
+            : RETENTION_FALLBACK,
+      telegram: {
+        enabled: tg.enabled === true,
+        chatId: normalizeNullableString(tg.chatId),
+        topicId: normalizeNullableTopicId(tg.topicId),
+      },
+    };
+  }
+
+  /** Decrypt the admin bot token (settings) or fall back to env BOT_TOKEN. */
+  private async resolveBotToken(): Promise<string | null> {
+    const fromSettings = await this.settingsService.getDecryptedBotToken();
+    if (fromSettings) return fromSettings;
+    const env = process.env.BOT_TOKEN;
+    return typeof env === 'string' && env.length > 0 ? env : null;
   }
 
   private spawnPgDumpToFile(destination: string): Promise<number> {
@@ -492,7 +637,7 @@ export class BackupService implements OnModuleInit {
   }
 
   private async applyRetention(): Promise<void> {
-    const keep = this.getRetention();
+    const keep = (await this.readBackupConfig()).maxKeep;
     const all = await this.prismaService.backupRecord.findMany({
       orderBy: { createdAt: 'desc' },
       select: { id: true, filename: true },
@@ -511,22 +656,41 @@ export class BackupService implements OnModuleInit {
     chatId: string | null;
     topicId: number | null;
   }> {
-    const settings = await this.prismaService.settings.findFirst({
-      select: { systemNotifications: true },
-    });
-    if (!settings) return { enabled: false, botToken: null, chatId: null, topicId: null };
-    const json = settings.systemNotifications as Record<string, unknown>;
-    const tg = (json?.telegram ?? {}) as Record<string, unknown>;
+    const cfg = await this.readBackupConfig();
+    const botToken = await this.resolveBotToken();
     return {
-      enabled: tg.enabled === true,
-      botToken: typeof tg.botToken === 'string' ? tg.botToken : (process.env.BOT_TOKEN ?? null),
-      chatId: typeof tg.chatId === 'string' ? tg.chatId : null,
-      topicId: typeof tg.topicId === 'number' ? tg.topicId : null,
+      enabled: cfg.telegram.enabled,
+      botToken,
+      chatId: cfg.telegram.chatId,
+      topicId: cfg.telegram.topicId,
     };
   }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
+
+function clampInt(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) return min;
+  return Math.min(Math.max(Math.round(value), min), max);
+}
+
+function normalizeNullableString(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+/** Coerce a topic id from a number or numeric string; null/empty → null. */
+function normalizeNullableTopicId(value: unknown): number | null {
+  if (typeof value === 'number') return Number.isFinite(value) && value > 0 ? Math.trunc(value) : null;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (trimmed.length === 0) return null;
+    const n = Number.parseInt(trimmed, 10);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  }
+  return null;
+}
 
 function toDto(row: {
   readonly id: string;

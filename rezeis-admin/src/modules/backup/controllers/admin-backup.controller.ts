@@ -6,6 +6,7 @@ import {
   HttpCode,
   HttpStatus,
   Param,
+  Patch,
   Post,
   Query,
   Res,
@@ -18,7 +19,17 @@ import {
   ApiTags,
 } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { IsEnum, IsInt, IsOptional, Max, Min } from 'class-validator';
+import {
+  IsBoolean,
+  IsEnum,
+  IsInt,
+  IsOptional,
+  IsString,
+  MaxLength,
+  Min,
+  Max,
+  ValidateNested,
+} from 'class-validator';
 import { Response } from 'express';
 import { BackupScope } from '@prisma/client';
 
@@ -27,7 +38,7 @@ import { AdminJwtAuthGuard } from '../../auth/guards/admin-jwt-auth.guard';
 import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.interface';
 import { RequirePermission } from '../../rbac/decorators/require-permission.decorator';
 import { RbacGuard } from '../../rbac/guards/rbac.guard';
-import { BackupRecordDto, BackupService } from '../services/backup.service';
+import { BackupRecordDto, BackupService, type BackupSettingsView } from '../services/backup.service';
 
 class ListBackupsQueryDto {
   @IsOptional()
@@ -47,6 +58,47 @@ class ListBackupsQueryDto {
 class CreateBackupDto {
   @IsEnum(BackupScope)
   scope!: BackupScope;
+}
+
+class BackupTelegramSettingsDto {
+  @IsOptional()
+  @IsBoolean()
+  enabled?: boolean;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  chatId?: string | null;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
+  topicId?: string | null;
+}
+
+class UpdateBackupSettingsDto {
+  @IsOptional()
+  @IsBoolean()
+  autoEnabled?: boolean;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(168)
+  intervalHours?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  maxKeep?: number;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => BackupTelegramSettingsDto)
+  telegram?: BackupTelegramSettingsDto;
 }
 
 interface BackupListResponse {
@@ -82,6 +134,27 @@ export class AdminBackupController {
     return this.backupService.createBackup({
       scope: dto.scope,
       initiatedBy: admin.id,
+    });
+  }
+
+  @Get('settings')
+  @RequirePermission('backups', 'view')
+  @ApiOperation({ summary: 'Returns the operator backup settings (schedule + Telegram delivery)' })
+  public getSettings(): Promise<BackupSettingsView> {
+    return this.backupService.getSettings();
+  }
+
+  @Patch('settings')
+  @RequirePermission('backups', 'create')
+  @ApiOperation({ summary: 'Updates the operator backup settings' })
+  public updateSettings(@Body() dto: UpdateBackupSettingsDto): Promise<BackupSettingsView> {
+    return this.backupService.updateSettings({
+      autoEnabled: dto.autoEnabled,
+      intervalHours: dto.intervalHours,
+      maxKeep: dto.maxKeep,
+      telegram: dto.telegram
+        ? { enabled: dto.telegram.enabled, chatId: dto.telegram.chatId, topicId: dto.telegram.topicId }
+        : undefined,
     });
   }
 

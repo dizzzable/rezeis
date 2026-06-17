@@ -1,7 +1,6 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { useTranslation } from 'react-i18next';
-import { Plus, Download, Trash2, AlertCircle, Archive, RefreshCw, Settings, Send, RotateCcw } from 'lucide-react';
+import { useTranslation } from 'react-i18next';import { Plus, Download, Trash2, AlertCircle, Archive, RefreshCw, Settings, Send, RotateCcw, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api';
 import { adminQueryKeys } from '@/lib/admin-query-keys';
@@ -17,6 +16,7 @@ import { Separator } from '@/components/ui/separator';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { useHasPermission } from '@/features/rbac';
+import { getBackupSettings, saveBackupSettings } from './backup-api';
 import {
   Select,
   SelectContent,
@@ -430,6 +430,14 @@ interface BackupSettingsData {
 
 function BackupSettings() {
   const { t } = useTranslation();
+  const queryClient = useQueryClient();
+  const canEdit = useHasPermission('backups', 'create');
+
+  const { data, isLoading } = useQuery({
+    queryKey: ['admin', 'backup', 'settings'],
+    queryFn: getBackupSettings,
+  });
+
   const [settings, setSettings] = useState<BackupSettingsData>({
     autoEnabled: true,
     intervalHours: 24,
@@ -439,8 +447,40 @@ function BackupSettings() {
     telegramTopicId: '',
   });
 
-  // In a real implementation, these would be loaded from/saved to the backend
-  // via a settings API. For now, they reflect the env-based defaults.
+  // Sync the local edit buffer when the server payload arrives / changes.
+  useEffect(() => {
+    if (!data) return
+    setSettings({
+      autoEnabled: data.autoEnabled,
+      intervalHours: data.intervalHours,
+      maxKeep: data.maxKeep,
+      telegramEnabled: data.telegram.enabled,
+      telegramChatId: data.telegram.chatId ?? '',
+      telegramTopicId: data.telegram.topicId != null ? String(data.telegram.topicId) : '',
+    })
+  }, [data])
+
+  const saveMutation = useMutation({
+    mutationFn: () =>
+      saveBackupSettings({
+        autoEnabled: settings.autoEnabled,
+        intervalHours: settings.intervalHours,
+        maxKeep: settings.maxKeep,
+        telegram: {
+          enabled: settings.telegramEnabled,
+          chatId: settings.telegramChatId.trim() || null,
+          topicId: settings.telegramTopicId.trim() || null,
+        },
+      }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['admin', 'backup', 'settings'] })
+      toast.success(t('backupPage.settings.saved'))
+    },
+    onError: () => toast.error(t('backupPage.settings.saveFailed')),
+  })
+
+  const showTokenWarning =
+    settings.telegramEnabled && data !== undefined && !data.botTokenConfigured
 
   return (
     <Card>
@@ -461,6 +501,7 @@ function BackupSettings() {
             </div>
             <Switch
               checked={settings.autoEnabled}
+              disabled={!canEdit || isLoading}
               onCheckedChange={(v) => setSettings((s) => ({ ...s, autoEnabled: v }))}
               aria-label={t('backupPage.settings.autoBackup')}
             />
@@ -475,6 +516,7 @@ function BackupSettings() {
                   min={1}
                   max={168}
                   value={settings.intervalHours}
+                  disabled={!canEdit || isLoading}
                   onChange={(e) => setSettings((s) => ({ ...s, intervalHours: Number(e.target.value) }))}
                   className="h-8"
                 />
@@ -486,6 +528,7 @@ function BackupSettings() {
                   min={1}
                   max={100}
                   value={settings.maxKeep}
+                  disabled={!canEdit || isLoading}
                   onChange={(e) => setSettings((s) => ({ ...s, maxKeep: Number(e.target.value) }))}
                   className="h-8"
                 />
@@ -505,38 +548,59 @@ function BackupSettings() {
             </div>
             <Switch
               checked={settings.telegramEnabled}
+              disabled={!canEdit || isLoading}
               onCheckedChange={(v) => setSettings((s) => ({ ...s, telegramEnabled: v }))}
               aria-label={t('backupPage.settings.telegramDelivery')}
             />
           </div>
 
           {settings.telegramEnabled && (
-            <div className="grid grid-cols-2 gap-4 pl-4 border-l-2 border-muted">
-              <div className="space-y-1">
-                <Label className="text-xs">{t('backupPage.settings.chatId')}</Label>
-                <Input
-                  value={settings.telegramChatId}
-                  onChange={(e) => setSettings((s) => ({ ...s, telegramChatId: e.target.value }))}
-                  placeholder="-100123456789"
-                  className="h-8 font-mono text-xs"
-                />
+            <div className="space-y-3 pl-4 border-l-2 border-muted">
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-1">
+                  <Label className="text-xs">{t('backupPage.settings.chatId')}</Label>
+                  <Input
+                    value={settings.telegramChatId}
+                    disabled={!canEdit || isLoading}
+                    onChange={(e) => setSettings((s) => ({ ...s, telegramChatId: e.target.value }))}
+                    placeholder="-100123456789"
+                    className="h-8 font-mono text-xs"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs">{t('backupPage.settings.topicId')}</Label>
+                  <Input
+                    value={settings.telegramTopicId}
+                    disabled={!canEdit || isLoading}
+                    onChange={(e) => setSettings((s) => ({ ...s, telegramTopicId: e.target.value }))}
+                    placeholder={t('backupPage.settings.topicIdPlaceholder')}
+                    className="h-8 font-mono text-xs"
+                  />
+                </div>
               </div>
-              <div className="space-y-1">
-                <Label className="text-xs">{t('backupPage.settings.topicId')}</Label>
-                <Input
-                  value={settings.telegramTopicId}
-                  onChange={(e) => setSettings((s) => ({ ...s, telegramTopicId: e.target.value }))}
-                  placeholder={t('backupPage.settings.topicIdPlaceholder')}
-                  className="h-8 font-mono text-xs"
-                />
-              </div>
+              {showTokenWarning && (
+                <Alert variant="destructive">
+                  <AlertCircle className="h-4 w-4" />
+                  <AlertTitle>{t('backupPage.settings.noTokenTitle')}</AlertTitle>
+                  <AlertDescription>{t('backupPage.settings.noTokenDesc')}</AlertDescription>
+                </Alert>
+              )}
             </div>
           )}
         </div>
 
         <div className="flex justify-end">
-          <Button variant="outline" size="sm" disabled>
-            <Send className="mr-2 h-3.5 w-3.5" />
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={!canEdit || isLoading || saveMutation.isPending}
+            onClick={() => saveMutation.mutate()}
+          >
+            {saveMutation.isPending ? (
+              <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Send className="mr-2 h-3.5 w-3.5" />
+            )}
             {t('backupPage.settings.save')}
           </Button>
         </div>

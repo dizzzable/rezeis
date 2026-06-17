@@ -188,4 +188,36 @@ export async function getRestoreExecutorGate(): Promise<BackupRestoreExecutorGat
   return backupRestoreExecutorGateResponseSchema.parse(response.data).data
 }
 
-export const backupApi = { getManifest: getBackupManifest, getExportPolicy: getBackupExportPolicy, exportImports: exportBackupImports, downloadImports: downloadBackupImports, listExportAudits: listBackupExportAudits, getRestorePolicy: getBackupRestorePolicy, dryRunRestoreImports, listRestoreBatches, getRestoreBatch, getRestoreCommitReadiness, getRestoreExecutorGate }
+// ── Backup settings (schedule + Telegram delivery) ───────────────────────────
+
+const backupSettingsSchema = z.object({
+  autoEnabled: z.boolean(),
+  intervalHours: z.number(),
+  maxKeep: z.number(),
+  telegram: z.object({
+    enabled: z.boolean(),
+    chatId: z.string().nullable(),
+    topicId: z.number().nullable(),
+  }),
+  botTokenConfigured: z.boolean(),
+})
+export type BackupSettings = z.infer<typeof backupSettingsSchema>
+
+export interface SaveBackupSettingsPayload {
+  autoEnabled?: boolean
+  intervalHours?: number
+  maxKeep?: number
+  telegram?: { enabled?: boolean; chatId?: string | null; topicId?: string | null }
+}
+
+export async function getBackupSettings(): Promise<BackupSettings> {
+  const response = await api.get('/admin/backup/settings')
+  return backupSettingsSchema.parse(response.data)
+}
+
+export async function saveBackupSettings(payload: SaveBackupSettingsPayload): Promise<BackupSettings> {
+  const response = await api.patch('/admin/backup/settings', payload)
+  return backupSettingsSchema.parse(response.data)
+}
+
+export const backupApi = { getManifest: getBackupManifest, getExportPolicy: getBackupExportPolicy, exportImports: exportBackupImports, downloadImports: downloadBackupImports, listExportAudits: listBackupExportAudits, getRestorePolicy: getBackupRestorePolicy, dryRunRestoreImports, listRestoreBatches, getRestoreBatch, getRestoreCommitReadiness, getRestoreExecutorGate, getBackupSettings, saveBackupSettings }

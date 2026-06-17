@@ -99,30 +99,90 @@ describe('BackupService', () => {
   });
 
   it('reports Telegram delivery availability from settings without exposing tokens', async () => {
-    const service = createService({
-      settings: {
-        findFirst: async (input: unknown) => {
-          assert.deepStrictEqual(input, { select: { systemNotifications: true } });
-          return {
-            systemNotifications: {
-              telegram: {
-                enabled: true,
-                botToken: 'secret-bot-token',
-                chatId: '12345',
+    const service = createService(
+      {
+        settings: {
+          findFirst: async (input: unknown) => {
+            assert.deepStrictEqual(input, { select: { systemNotifications: true } });
+            return {
+              systemNotifications: {
+                backup: {
+                  telegram: { enabled: true, chatId: '12345', topicId: 10 },
+                },
               },
-            },
-          };
+            };
+          },
         },
       },
-    });
+      {},
+      'secret-bot-token',
+    );
 
     assert.equal(await service.shouldDeliverToTelegram(), true);
+  });
+
+  it('does not deliver to Telegram when no bot token is available', async () => {
+    const service = createService(
+      {
+        settings: {
+          findFirst: async () => ({
+            systemNotifications: { backup: { telegram: { enabled: true, chatId: '12345' } } },
+          }),
+        },
+      },
+      {},
+      null,
+    );
+
+    assert.equal(await service.shouldDeliverToTelegram(), false);
+  });
+
+  it('persists backup settings (coercing the topic id) and reports token status', async () => {
+    const state: { systemNotifications: Record<string, unknown> } = {
+      systemNotifications: { other: 'keep' },
+    };
+    const service = createService(
+      {
+        settings: {
+          findFirst: async () => ({ id: 's1', systemNotifications: state.systemNotifications }),
+          update: async (args: { data: { systemNotifications: Record<string, unknown> } }) => {
+            state.systemNotifications = args.data.systemNotifications;
+            return args;
+          },
+        },
+      },
+      {},
+      'tok',
+    );
+
+    const view = await service.updateSettings({
+      autoEnabled: false,
+      intervalHours: 12,
+      maxKeep: 5,
+      telegram: { enabled: true, chatId: '-100999', topicId: '10' },
+    });
+
+    // Persisted: backup sub-object merged, siblings preserved, topic coerced to number.
+    const backup = (state.systemNotifications as { backup: Record<string, unknown> }).backup as {
+      autoEnabled: boolean; intervalHours: number; maxKeep: number;
+      telegram: { enabled: boolean; chatId: string; topicId: number };
+    };
+    assert.equal((state.systemNotifications as { other: string }).other, 'keep');
+    assert.equal(backup.autoEnabled, false);
+    assert.equal(backup.intervalHours, 12);
+    assert.equal(backup.telegram.chatId, '-100999');
+    assert.equal(backup.telegram.topicId, 10);
+
+    // The returned view reflects token availability + the persisted values.
+    assert.equal(view.botTokenConfigured, true);
+    assert.equal(view.telegram.topicId, 10);
   });
 });
 
 function createService(
   prisma: Record<string, unknown>,
   queue: { readonly add?: (...args: unknown[]) => Promise<unknown> | unknown } = {},
+  settingsToken: string | null = null,
 ): BackupService {
   return new BackupService(
     {
@@ -134,6 +194,7 @@ function createService(
     } as never,
     prisma as never,
     { info: () => undefined, error: () => undefined } as never,
+    { getDecryptedBotToken: async () => settingsToken } as never,
     { add: queue.add ?? (async () => ({ id: 'job-1' })) } as never,
   );
 }
