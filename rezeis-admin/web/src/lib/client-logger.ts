@@ -49,6 +49,25 @@ const recent = new Map<string, number>();
 
 let installed = false;
 
+/**
+ * Transient / non-actionable browser noise that must NOT be forwarded to the
+ * dev firehose: PWA service-worker update/registration fetch failures (happen
+ * during a rolling deploy or a network blip — not an app bug) and the harmless
+ * ResizeObserver loop warning some browsers surface as an error.
+ */
+const NON_REPORTABLE_PATTERNS: readonly RegExp[] = [
+  /failed to (update|register|unregister) a serviceworker/i,
+  /an unknown error occurred when fetching the script/i,
+  /the script resource is behind a redirect/i,
+  /serviceworker.*(fetch|script)/i,
+  /resizeobserver loop/i,
+];
+
+function isNonReportable(message: string, stack?: string): boolean {
+  const haystack = `${message}\n${stack ?? ''}`;
+  return NON_REPORTABLE_PATTERNS.some((pattern) => pattern.test(haystack));
+}
+
 function shouldReport(fingerprint: string): boolean {
   const now = Date.now();
   const last = recent.get(fingerprint);
@@ -147,6 +166,7 @@ export function installClientLogger(): void {
       ? redactClientLogValue(event.error.stack)
       : undefined;
     const fingerprint = `${message}|${filename ?? ''}|${event.lineno ?? 0}|${event.colno ?? 0}`;
+    if (isNonReportable(message, stack)) return;
     if (!shouldReport(fingerprint)) return;
     void send({
       message,
@@ -166,6 +186,7 @@ export function installClientLogger(): void {
     const message = redactClientLogValue(reason instanceof Error ? reason.message : String(reason ?? 'Unknown rejection'));
     const stack = reason instanceof Error && reason.stack ? redactClientLogValue(reason.stack) : undefined;
     const fingerprint = `rejection|${message}|${stack?.split('\n')[1] ?? ''}`;
+    if (isNonReportable(message, stack)) return;
     if (!shouldReport(fingerprint)) return;
     void send({
       message,
