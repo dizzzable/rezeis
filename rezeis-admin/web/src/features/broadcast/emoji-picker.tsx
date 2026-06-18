@@ -4,7 +4,6 @@ import { useTranslation } from 'react-i18next'
 import { Smile } from 'lucide-react'
 
 import { api } from '@/lib/api'
-import { EmojiPreview } from '@/features/custom-emoji/emoji-preview'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
@@ -471,7 +470,7 @@ export function EmojiPicker({
             onWheelCapture={(e) => e.stopPropagation()}
           >
             {packs?.map((pack) => (
-              <div key={pack.id} className="space-y-1">
+              <div key={pack.id} className="space-y-1" style={{ contentVisibility: 'auto' }}>
                 <p className="text-[11px] font-medium text-muted-foreground">{pack.name}</p>
                 <div className="grid grid-cols-8 gap-1">
                   {pack.emojis.map((emoji) => (
@@ -486,12 +485,18 @@ export function EmojiPicker({
                       }}
                       className="flex aspect-square w-full items-center justify-center rounded hover:bg-muted"
                     >
-                      <EmojiPreview
-                        imageUrl={emoji.imageUrl}
-                        lottieUrl={emoji.lottieUrl}
-                        videoUrl={emoji.videoUrl}
+                      {/* Static thumbnail only — the picker grid must stay light.
+                          Mounting a Lottie/video player per emoji (a big pack has
+                          hundreds) is what made the picker lag; the animation
+                          still plays wherever the emoji is actually rendered
+                          (preview, plan icon, cabinet feed). */}
+                      <img
+                        src={emoji.imageUrl}
                         alt={emoji.name}
-                        className="h-6 w-6"
+                        loading="lazy"
+                        decoding="async"
+                        draggable={false}
+                        className="h-6 w-6 object-contain"
                       />
                     </button>
                   ))}
