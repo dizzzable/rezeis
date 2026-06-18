@@ -411,8 +411,33 @@ export class SystemEventsService {
           }),
         );
       } catch (err) {
-        this.logger.warn(`Webhook to ${url} failed: ${(err as Error).message}`);
+        const hint = this.isLikelyReiwaUrl(url)
+          ? ' — this URL points at reiwa, which has NO generic /webhook endpoint. ' +
+            'The reiwa integration uses REIWA_URL (+ /api/v1/webhooks/rezeis), NOT WEBHOOK_URL. ' +
+            'Set WEBHOOK_ENABLED=false or point WEBHOOK_URL at a real external consumer.'
+          : '';
+        this.logger.warn(`Webhook to ${url} failed: ${(err as Error).message}${hint}`);
       }
+    }
+  }
+
+  /**
+   * Heuristic: does a generic-webhook URL actually point at reiwa? Operators
+   * sometimes set WEBHOOK_URL to the reiwa domain expecting it to deliver
+   * notifications — but that's the relay's job (REIWA_URL). Comparing hosts
+   * lets us surface an actionable hint instead of a bare 404.
+   */
+  private isLikelyReiwaUrl(url: string): boolean {
+    const reiwaUrl = (process.env.REIWA_URL ?? '').trim();
+    try {
+      const target = new URL(url).host.toLowerCase();
+      if (reiwaUrl.length > 0) {
+        const reiwaHost = new URL(reiwaUrl).host.toLowerCase();
+        if (target === reiwaHost) return true;
+      }
+      return /(^|\.)reiwa\b/.test(target) || /\/webhook$/.test(new URL(url).pathname);
+    } catch {
+      return false;
     }
   }
 
