@@ -127,10 +127,40 @@ export class BotNotifierClient {
     });
   }
 
+  /**
+   * Relay a backup file to a Telegram chat/topic via the reiwa bot. rezeis
+   * does NOT push the bytes — it hands the bot a signed, short-lived download
+   * URL token; the bot fetches the file from rezeis (docker hop) and uploads
+   * it. Used when rezeis has no local bot token (split deployment).
+   */
+  public async relayBackupDocument(input: {
+    readonly recordId: string;
+    readonly token: string;
+    readonly filename: string;
+    readonly caption: string;
+    readonly chatId: string;
+    readonly topicThreadId?: number;
+  }): Promise<void> {
+    await this.deliver('reiwa.backup.document', {
+      recordId: input.recordId,
+      token: input.token,
+      filename: input.filename,
+      caption: input.caption,
+      chatId: input.chatId,
+      ...(typeof input.topicThreadId === 'number' ? { topicThreadId: input.topicThreadId } : {}),
+    });
+  }
+
+  /** Whether the reiwa relay is configured (REIWA_URL + WEBHOOK_SECRET_HEADER). */
+  public get isEnabled(): boolean {
+    return this.endpoint !== null && this.secret !== null;
+  }
+
   private async deliver(
     event: string,
     metadata: Record<string, unknown>,
   ): Promise<{ messageId: number | null }> {
+    if (this.endpoint === null || this.secret === null) return { messageId: null };
     if (this.endpoint === null || this.secret === null) return { messageId: null };
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), BotNotifierClient.TIMEOUT_MS);

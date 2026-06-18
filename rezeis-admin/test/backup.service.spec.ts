@@ -121,12 +121,30 @@ describe('BackupService', () => {
     assert.equal(await service.shouldDeliverToTelegram(), true);
   });
 
-  it('does not deliver to Telegram when no bot token is available', async () => {
+  it('still schedules delivery without a local bot token (relayed via reiwa)', async () => {
     const service = createService(
       {
         settings: {
           findFirst: async () => ({
             systemNotifications: { backup: { telegram: { enabled: true, chatId: '12345' } } },
+          }),
+        },
+      },
+      {},
+      null,
+    );
+
+    // No local bot token → delivery is still scheduled; the job relays the
+    // file through the reiwa bot at run time.
+    assert.equal(await service.shouldDeliverToTelegram(), true);
+  });
+
+  it('does not deliver to Telegram when no chat is configured', async () => {
+    const service = createService(
+      {
+        settings: {
+          findFirst: async () => ({
+            systemNotifications: { backup: { telegram: { enabled: true } } },
           }),
         },
       },

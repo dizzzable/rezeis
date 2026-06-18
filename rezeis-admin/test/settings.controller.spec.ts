@@ -42,9 +42,11 @@ interface DelegatedCall<TBody> {
   readonly enabled?: boolean;
   readonly chatId?: string | null;
   readonly topicId?: number | null;
+  readonly errorTopicId?: number | null;
   readonly topics?: Record<string, number | null>;
   readonly mirrorUserNotifications?: boolean;
   readonly note?: string | null;
+  readonly category?: string | null;
 }
 
 function buildCurrentAdmin(): CurrentAdminInterface {
@@ -106,6 +108,7 @@ function buildTelegramConfig(): TelegramDeliveryConfig {
     enabled: true,
     chatId: '-1001234567890',
     topicId: 42,
+    errorTopicId: null,
     topics: { PAYMENT: 7 },
     mirrorUserNotifications: true,
     devChatId: null,
@@ -328,6 +331,7 @@ describe('SettingsController', () => {
       enabled: telegramDto.enabled,
       chatId: telegramDto.chatId,
       topicId: telegramDto.topicId,
+      errorTopicId: telegramDto.errorTopicId,
       topics: telegramDto.topics,
       mirrorUserNotifications: telegramDto.mirrorUserNotifications,
       devChatId: telegramDto.devChatId,
@@ -338,6 +342,7 @@ describe('SettingsController', () => {
       currentAdmin,
       requestMetadata: { requestId: 'request-6', remoteAddress: '198.51.100.50', userAgent: 'settings-controller-spec' },
       note: telegramTestDto.note,
+      category: telegramTestDto.category ?? null,
     });
     assert.deepStrictEqual(calls[3]?.patch, referralPatch);
     assert.deepStrictEqual(calls[4]?.patch, partnerPatch);

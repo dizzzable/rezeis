@@ -16,6 +16,7 @@ const BASE = {
   devChatId: null as string | null,
   topicMap: {} as Record<string, number | null>,
   defaultTopicId: null as number | null,
+  errorTopicId: null as number | null,
   events: [] as readonly string[],
 };
 
@@ -37,6 +38,22 @@ describe('resolveTelegramDeliveryTarget', () => {
     );
     assert.equal(target?.topicId, 7);
     assert.equal(target?.isDevFallback, false);
+  });
+
+  it('routes ERROR-severity events to the dedicated error topic, overriding category', () => {
+    const target = resolveTelegramDeliveryTarget(
+      { ...BASE, enabled: true, chatId: '-100123', topicMap: { PAYMENT: 42 }, errorTopicId: 99 },
+      { type: 'payment.failed', category: 'PAYMENT', severity: 'ERROR' },
+    );
+    assert.equal(target?.topicId, 99);
+  });
+
+  it('keeps category routing for non-ERROR events even when an error topic is set', () => {
+    const target = resolveTelegramDeliveryTarget(
+      { ...BASE, enabled: true, chatId: '-100123', topicMap: { PAYMENT: 42 }, errorTopicId: 99 },
+      { type: 'payment.completed', category: 'PAYMENT', severity: 'INFO' },
+    );
+    assert.equal(target?.topicId, 42);
   });
 
   it('falls back to the dev DM (no topic) when no primary chat is configured', () => {

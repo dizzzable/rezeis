@@ -311,6 +311,35 @@ export class SystemEventsService {
     this.emit({ type, category, severity: 'ERROR', message, metadata });
   }
 
+  /**
+   * Sends a one-off test card through the SAME Telegram delivery pipeline a
+   * real event uses — so it honours category→topic routing, the operator
+   * group, the reiwa relay (no local bot token), and the dev-DM fallback.
+   * Returns where it was routed so the UI can tell the operator. The event is
+   * NOT persisted to the audit log / realtime stream (delivery-only).
+   */
+  public async sendTelegramTest(input: {
+    readonly category: SystemEventCategory;
+    readonly note: string | null;
+    readonly adminId: string;
+  }): Promise<{ readonly via: 'primary' | 'dev' | 'none' }> {
+    const tgConfig = await this.loadTelegramConfig();
+    const note = input.note?.trim();
+    const event: SystemEventPayload & { timestamp: string } = {
+      type: 'settings.telegram.test',
+      category: input.category,
+      severity: 'INFO',
+      message: `Тестовое сообщение Rezeis (${input.category})${note ? ` — ${note}` : ''}`,
+      metadata: { adminId: input.adminId },
+      timestamp: new Date().toISOString(),
+    };
+    const resolved = resolveTelegramDeliveryTarget(tgConfig, event);
+    const via: 'primary' | 'dev' | 'none' =
+      resolved === null ? 'none' : resolved.isDevFallback ? 'dev' : 'primary';
+    await this.deliverTelegram(event);
+    return { via };
+  }
+
   // ── Private ─────────────────────────────────────────────────────────────────
 
   private logEvent(event: SystemEventPayload & { timestamp: string }): void {
@@ -473,9 +502,15 @@ export class SystemEventsService {
       if (resolved.isDevFallback) {
         await this.deliverToReiwaDev(event, { errorEvent, attachTxt, reportEvent });
       } else {
-        this.logger.warn(
-          `Telegram delivery skipped for ${event.type}: operator chat configured but no bot token available (set telegram.botToken or BOT_TOKEN)`,
-        );
+        // Operator group/topic configured but rezeis has no local bot token
+        // (split deployment). Route the card through the reiwa relay's
+        // broadcast path — the bot owns the token and posts to the exact
+        // chat/topic. This is what makes category routing + the test message
+        // actually work without a token on rezeis.
+        const html = errorEvent
+          ? formatErrorEventCardHtml(reportEvent, getRezeisBuildInfo())
+          : this.formatTelegramMessage(event);
+        await this.deliverViaReiwaBroadcast(event, html, resolved.chatId, resolved.topicId);
       }
       return;
     }
@@ -623,6 +658,39 @@ export class SystemEventsService {
   }
 
   /**
+   * Split-deployment operator delivery: relay the card to a specific
+   * chat/topic through the reiwa bot's broadcast path (the bot owns the
+   * token). Used when an operator group is configured but rezeis has no local
+   * bot token. Best-effort; documents (error `.txt`) are not relayed here —
+   * the card itself carries the actionable summary.
+   */
+  private async deliverViaReiwaBroadcast(
+    event: SystemEventPayload & { timestamp: string },
+    html: string,
+    chatId: string,
+    topicId: number | null,
+  ): Promise<void> {
+    const notifier = this.resolveBotNotifier();
+    if (notifier === null) {
+      this.logger.warn(
+        `Telegram delivery skipped for ${event.type}: no local bot token and reiwa relay unavailable`,
+      );
+      return;
+    }
+    try {
+      await notifier.notifyBroadcast({
+        eventId: `sysevt:${event.type}:${event.timestamp}`,
+        chatId,
+        topicThreadId: topicId ?? undefined,
+        text: html,
+        parseMode: 'HTML',
+      });
+    } catch (err) {
+      this.logger.warn(`Reiwa broadcast relay failed: ${(err as Error).message}`);
+    }
+  }
+
+  /**
    * Auto-archive: when the operator selected the `auto` error-report mode,
    * write the formatted `.txt` for every new ERROR event into the on-disk
    * archive (`data/error-reports/<date>/`). Best-effort and bounded — never
@@ -657,6 +725,13 @@ export class SystemEventsService {
       '',
       `${emoji} <b>Событие: ${event.message}</b>`,
     ];
+
+    // Fraud block — a dedicated, informative card for anti-fraud signals.
+    // Uses `fraud*`-prefixed metadata so it never collides with the generic
+    // user/promocode blocks below.
+    if (event.category === 'FRAUD' && meta['fraudKind'] !== undefined) {
+      lines.push(...formatFraudBlock(meta));
+    }
 
     // User block
     if (meta['userId'] || meta['telegramId']) {
@@ -717,7 +792,7 @@ export class SystemEventsService {
     }
 
     // Promocode block
-    if (meta['code'] || meta['promocodeId']) {
+    if ((meta['code'] || meta['promocodeId']) && event.category !== 'FRAUD') {
       lines.push('');
       lines.push('🎟 <b>Промокод:</b>');
       const promoLines: string[] = [];
@@ -769,6 +844,7 @@ export class SystemEventsService {
     chatId: string | null;
     topicMap: Record<string, number | null>;
     defaultTopicId: number | null;
+    errorTopicId: number | null;
     events: string[];
     devChatId: string | null;
     errorReportMode: 'off' | 'manual' | 'auto';
@@ -787,6 +863,7 @@ export class SystemEventsService {
         events: [],
         devChatId: null,
         errorReportMode: 'manual',
+        errorTopicId: null,
         errorReportTelegramTxt: true,
       };
     }
@@ -810,6 +887,7 @@ export class SystemEventsService {
       chatId: typeof tg.chatId === 'string' ? tg.chatId : null,
       topicMap,
       defaultTopicId: typeof tg.topicId === 'number' ? tg.topicId : null,
+      errorTopicId: typeof tg.errorTopicId === 'number' ? tg.errorTopicId : null,
       events: Array.isArray(tg.events) ? tg.events.filter((e): e is string => typeof e === 'string') : [],
       devChatId: typeof tg.devChatId === 'string' && tg.devChatId.length > 0 ? tg.devChatId : null,
       errorReportMode: mode === 'off' || mode === 'auto' ? mode : 'manual',
@@ -836,3 +914,70 @@ function severityEmoji(severity: SystemEventSeverity): string {
     default: return '⚙️';
   }
 }
+
+/** Minimal HTML escaping for user-supplied values rendered in Telegram HTML. */
+function escapeHtml(value: unknown): string {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+/**
+ * Renders the dedicated anti-fraud block: the sharing metric, the offender's
+ * rezeis profile snapshot (or a "Remnawave-only" note when unmapped), the
+ * Remnawave uuid, and a deep link to the admin user page so the operator can
+ * decide trust-or-block from the message itself.
+ */
+function formatFraudBlock(meta: Record<string, unknown>): string[] {
+  const out: string[] = [];
+
+  const kind = typeof meta['fraudKind'] === 'string' ? (meta['fraudKind'] as string) : null;
+  const kindLabel =
+    kind === 'ip_sharing'
+      ? 'Шеринг по IP'
+      : kind === 'hwid_overage'
+        ? 'Превышение устройств'
+        : 'Сигнал';
+  const count = meta['fraudCount'];
+  const limit = meta['fraudLimit'];
+
+  out.push('');
+  out.push('🚨 <b>Антифрод:</b>');
+  const sig: string[] = [`• <b>Тип:</b> ${kindLabel}`];
+  if (typeof count === 'number' && typeof limit === 'number') {
+    sig.push(`• <b>Превышение:</b> ${count} / ${limit}`);
+  }
+  if (typeof meta['fraudScore'] === 'number') {
+    const conf = typeof meta['fraudConfidence'] === 'number' ? ` (увер. ${meta['fraudConfidence']}%)` : '';
+    sig.push(`• <b>Оценка:</b> ${meta['fraudScore']}${conf}`);
+  }
+  out.push(`<blockquote>${sig.join('\n')}</blockquote>`);
+
+  out.push('');
+  out.push('👤 <b>Нарушитель:</b>');
+  const who: string[] = [];
+  if (meta['fraudHasRezeisAccount'] === true) {
+    if (meta['fraudUserName']) who.push(`• <b>Имя:</b> ${escapeHtml(meta['fraudUserName'])}`);
+    if (meta['fraudUsername']) who.push(`• <b>Username:</b> @${escapeHtml(meta['fraudUsername'])}`);
+    if (meta['fraudTelegramId']) who.push(`• <b>TG ID:</b> <code>${escapeHtml(meta['fraudTelegramId'])}</code>`);
+    if (meta['fraudUserEmail']) who.push(`• <b>Email:</b> ${escapeHtml(meta['fraudUserEmail'])}`);
+    if (meta['fraudUserRole']) who.push(`• <b>Роль:</b> ${escapeHtml(meta['fraudUserRole'])}`);
+    if (typeof meta['fraudSubscriptions'] === 'number') who.push(`• <b>Подписок:</b> ${meta['fraudSubscriptions']}`);
+    who.push(`• <b>Web-кабинет:</b> ${meta['fraudHasWebAccount'] === true ? 'да' : 'нет'}`);
+    who.push(`• <b>Статус:</b> ${meta['fraudUserBlocked'] === true ? '🔴 заблокирован' : '🟢 активен'}`);
+  } else {
+    who.push('• <i>В rezeis не найден — пользователь есть только в Remnawave</i>');
+  }
+  if (meta['remnawaveUuid']) {
+    who.push(`• <b>Remnawave:</b> <code>${escapeHtml(meta['remnawaveUuid'])}</code>`);
+  }
+  out.push(`<blockquote>${who.join('\n')}</blockquote>`);
+
+  if (typeof meta['fraudProfileUrl'] === 'string' && meta['fraudProfileUrl'].length > 0) {
+    out.push(`🔗 <a href="${escapeHtml(meta['fraudProfileUrl'])}">Открыть профиль в rezeis</a>`);
+  }
+
+  return out;
+}
+

@@ -146,6 +146,7 @@ export class SettingsController {
       enabled: body.enabled,
       chatId: body.chatId,
       topicId: body.topicId,
+      errorTopicId: body.errorTopicId,
       topics: body.topics,
       mirrorUserNotifications: body.mirrorUserNotifications,
       devChatId: body.devChatId,
@@ -169,6 +170,7 @@ export class SettingsController {
       currentAdmin,
       requestMetadata: extractRequestMetadata(request),
       note: body.note ?? null,
+      category: body.category ?? null,
     });
     return { sent: true };
   }

@@ -6,6 +6,8 @@ import { SettingsModule } from '../settings/settings.module';
 import { BACKUP_QUEUE } from './backup.constants';
 import { BackupProcessor } from './backup.processor';
 import { AdminBackupController } from './controllers/admin-backup.controller';
+import { InternalBackupDownloadController } from './controllers/internal-backup-download.controller';
+import { BotNotifierClient } from '../notifications/services/bot-notifier.client';
 import { BackupService } from './services/backup.service';
 
 @Module({
@@ -14,8 +16,8 @@ import { BackupService } from './services/backup.service';
     SettingsModule,
     BullModule.registerQueue({ name: BACKUP_QUEUE }),
   ],
-  controllers: [AdminBackupController],
-  providers: [BackupService, BackupProcessor],
+  controllers: [AdminBackupController, InternalBackupDownloadController],
+  providers: [BackupService, BackupProcessor, BotNotifierClient],
   exports: [BackupService],
 })
 export class BackupModule {}

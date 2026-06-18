@@ -354,6 +354,7 @@ describe('SettingsService', () => {
       enabled: true,
       chatId: '-100123',
       topicId: null,
+      errorTopicId: null,
       topics: { USER: null, PAYMENT: 9 },
       mirrorUserNotifications: true,
       devChatId: null,

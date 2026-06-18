@@ -41,6 +41,16 @@ export class UpdateTelegramDeliveryDto {
   public readonly topicId?: number | null;
 
   /**
+   * Optional forum topic that ALL ERROR-severity events route to, regardless
+   * of their category. Lets error logs land in one dedicated thread. `null`
+   * clears it (errors then follow normal category routing).
+   */
+  @IsOptional()
+  @ValidateIf((_dto, value) => value !== null)
+  @IsInt()
+  public readonly errorTopicId?: number | null;
+
+  /**
    * Map of category → topic id. Categories not present in the patch keep
    * their existing values.
    */
@@ -101,4 +111,14 @@ export class SendTelegramDeliveryTestDto {
   @IsString()
   @MaxLength(500)
   public readonly note?: string;
+
+  /**
+   * Optional event category to test routing for (e.g. `FRAUD`, `SYSTEM`).
+   * The test card is delivered to that category's topic so the operator can
+   * verify a specific route. Defaults to `SYSTEM`.
+   */
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
+  public readonly category?: string;
 }

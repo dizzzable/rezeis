@@ -17,6 +17,7 @@ import {
   Logger,
   NotFoundException,
   OnModuleInit,
+  Optional,
 } from '@nestjs/common';
 import { ConfigType } from '@nestjs/config';
 import { Cron, CronExpression } from '@nestjs/schedule';
@@ -32,6 +33,8 @@ import {
 } from '../../../common/services/system-events.service';
 import { BACKUP_QUEUE, BACKUP_JOBS } from '../backup.constants';
 import { SettingsService } from '../../settings/services/settings.service';
+import { BotNotifierClient } from '../../notifications/services/bot-notifier.client';
+import { signBackupDownloadToken } from '../utils/backup-download-token.util';
 import type { BackupCreateJobData, BackupDeliverTelegramJobData, BackupRestoreJobData } from '../backup.processor';
 
 const DEFAULT_BACKUP_LOCATION = '/app/data/backups';
@@ -121,6 +124,8 @@ export class BackupService implements OnModuleInit {
     private readonly settingsService: SettingsService,
     @InjectQueue(BACKUP_QUEUE)
     private readonly backupQueue: Queue,
+    @Optional()
+    private readonly botNotifier?: BotNotifierClient,
   ) {}
 
   // ── Lifecycle ──────────────────────────────────────────────────────────
@@ -461,7 +466,7 @@ export class BackupService implements OnModuleInit {
    */
   public async deliverToTelegram(recordId: string, filename: string): Promise<boolean> {
     const tgConfig = await this.loadTelegramConfig();
-    if (!tgConfig.enabled || !tgConfig.botToken || !tgConfig.chatId) {
+    if (!tgConfig.enabled || !tgConfig.chatId) {
       this.logger.warn('Telegram delivery not configured — skipping');
       return false;
     }
@@ -475,48 +480,97 @@ export class BackupService implements OnModuleInit {
     }
 
     const stat = await fsp.stat(fullPath);
-    // Telegram Bot API limit: 50 MB for documents
+    // Telegram Bot API limit: 50 MB for documents (applies to direct send AND
+    // the reiwa-bot relay, which re-uploads through the same Bot API).
     if (stat.size > 50 * 1024 * 1024) {
       this.logger.warn(`Backup ${filename} too large for Telegram (${formatBytes(stat.size)})`);
       await this.prismaService.backupRecord.update({
         where: { id: recordId },
         data: { deliveryChannel: 'local', deliveryRecipient: 'too_large_for_telegram' },
       });
-      return false;
-    }
-
-    const fileBuffer = await fsp.readFile(fullPath);
-    const formData = new FormData();
-    formData.append('chat_id', tgConfig.chatId);
-    formData.append('document', new Blob([fileBuffer]), filename);
-    formData.append('caption', `🗄 Backup: ${filename}\nSize: ${formatBytes(stat.size)}`);
-    if (tgConfig.topicId) {
-      formData.append('message_thread_id', String(tgConfig.topicId));
-    }
-
-    try {
-      const response = await fetch(
-        `https://api.telegram.org/bot${tgConfig.botToken}/sendDocument`,
-        { method: 'POST', body: formData },
+      this.systemEventsService.warn(
+        EVENT_TYPES.SYSTEM_BACKUP_COMPLETED,
+        'SYSTEM',
+        `Backup stored locally (too large for Telegram): ${filename} (${formatBytes(stat.size)})`,
+        { backupId: recordId, filename, sizeBytes: stat.size, deliveredToTelegram: false },
       );
-
-      if (response.ok) {
-        await this.prismaService.backupRecord.update({
-          where: { id: recordId },
-          data: {
-            deliveryChannel: 'telegram',
-            deliveryRecipient: tgConfig.chatId,
-            deliveredAt: new Date(),
-          },
-        });
-        this.logger.log(`Backup ${filename} delivered to Telegram`);
-        return true;
-      }
-      const errorBody = await response.text();
-      this.logger.warn(`Telegram delivery failed: ${errorBody.slice(0, 300)}`);
       return false;
+    }
+
+    const caption = `🗄 Backup: ${filename}\nSize: ${formatBytes(stat.size)}`;
+
+    // Direct path — only when rezeis has a local bot token (single-process
+    // deployments). On the split deployment the token lives in reiwa.
+    if (tgConfig.botToken) {
+      const fileBuffer = await fsp.readFile(fullPath);
+      const formData = new FormData();
+      formData.append('chat_id', tgConfig.chatId);
+      formData.append('document', new Blob([fileBuffer]), filename);
+      formData.append('caption', caption);
+      if (tgConfig.topicId) {
+        formData.append('message_thread_id', String(tgConfig.topicId));
+      }
+      try {
+        const response = await fetch(
+          `https://api.telegram.org/bot${tgConfig.botToken}/sendDocument`,
+          { method: 'POST', body: formData },
+        );
+        if (response.ok) {
+          await this.prismaService.backupRecord.update({
+            where: { id: recordId },
+            data: {
+              deliveryChannel: 'telegram',
+              deliveryRecipient: tgConfig.chatId,
+              deliveredAt: new Date(),
+            },
+          });
+          this.logger.log(`Backup ${filename} delivered to Telegram`);
+          return true;
+        }
+        const errorBody = await response.text();
+        this.logger.warn(`Telegram delivery failed: ${errorBody.slice(0, 300)}`);
+        return false;
+      } catch (err) {
+        this.logger.warn(`Telegram delivery threw: ${(err as Error).message}`);
+        return false;
+      }
+    }
+
+    // Relay path — hand the reiwa bot a signed download URL token; the bot
+    // fetches the file from rezeis (docker hop) and uploads it to Telegram.
+    if (!this.botNotifier?.isEnabled) {
+      this.logger.warn(
+        'Backup Telegram delivery skipped: no local bot token and reiwa relay unavailable (set BOT_TOKEN or REIWA_URL + WEBHOOK_SECRET_HEADER)',
+      );
+      return false;
+    }
+    const secret = process.env.REZEIS_CRYPT_KEY ?? '';
+    if (secret.length === 0) {
+      this.logger.warn('Backup Telegram relay skipped: REZEIS_CRYPT_KEY is not set');
+      return false;
+    }
+    try {
+      const token = signBackupDownloadToken(recordId, secret);
+      await this.botNotifier.relayBackupDocument({
+        recordId,
+        token,
+        filename,
+        caption,
+        chatId: tgConfig.chatId,
+        topicThreadId: tgConfig.topicId ?? undefined,
+      });
+      await this.prismaService.backupRecord.update({
+        where: { id: recordId },
+        data: {
+          deliveryChannel: 'telegram-relay',
+          deliveryRecipient: tgConfig.chatId,
+          deliveredAt: new Date(),
+        },
+      });
+      this.logger.log(`Backup ${filename} relayed to Telegram via reiwa`);
+      return true;
     } catch (err) {
-      this.logger.warn(`Telegram delivery threw: ${(err as Error).message}`);
+      this.logger.warn(`Backup Telegram relay threw: ${(err as Error).message}`);
       return false;
     }
   }
@@ -524,7 +578,30 @@ export class BackupService implements OnModuleInit {
   /** Check if Telegram delivery is configured and enabled. */
   public async shouldDeliverToTelegram(): Promise<boolean> {
     const config = await this.loadTelegramConfig();
-    return config.enabled && !!config.botToken && !!config.chatId;
+    // A local bot token is NOT required: the split deployment delivers via the
+    // reiwa relay. The delivery job decides direct-vs-relay at run time.
+    return config.enabled && !!config.chatId;
+  }
+
+  /**
+   * Resolves a backup record to its on-disk file for the signed-download
+   * endpoint. Returns `null` when the record or the file is missing.
+   */
+  public async resolveBackupFileForDownload(
+    recordId: string,
+  ): Promise<{ readonly fullPath: string; readonly filename: string } | null> {
+    const record = await this.prismaService.backupRecord.findUnique({
+      where: { id: recordId },
+      select: { filename: true },
+    });
+    if (!record) return null;
+    const fullPath = path.resolve(this.getBackupLocation(), record.filename);
+    try {
+      await fsp.access(fullPath);
+    } catch {
+      return null;
+    }
+    return { fullPath, filename: record.filename };
   }
 
   // ── Private helpers ────────────────────────────────────────────────────

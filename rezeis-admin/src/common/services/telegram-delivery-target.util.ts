@@ -23,6 +23,8 @@ export interface TelegramDeliveryConfigShape {
   readonly devChatId: string | null;
   readonly topicMap: Record<string, number | null>;
   readonly defaultTopicId: number | null;
+  /** Optional topic that ALL ERROR-severity events route to, regardless of category. */
+  readonly errorTopicId: number | null;
   readonly events: readonly string[];
 }
 
@@ -35,16 +37,20 @@ export interface TelegramDeliveryTarget {
 
 export function resolveTelegramDeliveryTarget(
   config: TelegramDeliveryConfigShape,
-  event: { readonly type: string; readonly category: string },
+  event: { readonly type: string; readonly category: string; readonly severity?: string },
 ): TelegramDeliveryTarget | null {
   const primaryActive = config.enabled && config.chatId !== null;
   if (primaryActive && config.chatId !== null) {
     if (config.events.length > 0 && !config.events.includes(event.type)) {
       return null;
     }
+    // ERROR severity gets its own dedicated topic when configured, so error
+    // logs land in one place regardless of which category raised them.
+    const errorRoute =
+      event.severity === 'ERROR' && config.errorTopicId !== null ? config.errorTopicId : null;
     return {
       chatId: config.chatId,
-      topicId: config.topicMap[event.category] ?? config.defaultTopicId ?? null,
+      topicId: errorRoute ?? config.topicMap[event.category] ?? config.defaultTopicId ?? null,
       isDevFallback: false,
     };
   }

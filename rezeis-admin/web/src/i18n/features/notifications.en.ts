@@ -53,6 +53,8 @@ export const en = {
       REFERRAL: 'Referrals',
       PARTNER: 'Partners',
       PROMOCODE: 'Promo codes',
+      SUPPORT: 'Support',
+      FRAUD: 'Anti-fraud',
       SYSTEM: 'System',
     },
     userNotifications: {
@@ -104,6 +106,9 @@ export const en = {
       topicHint: 'If the group is a forum, specify the topic ID. Empty = general chat.',
       routingTitle: 'Category routing',
       routingDescription: 'Specify a topic ID for each event category. Empty = default topic.',
+      errorTopicLabel: 'Errors (ERROR)',
+      errorTopicHint: 'All ERROR-severity events (error logs) go to this topic regardless of category. Empty = follow category routing.',
+      topicHelp: 'How to get a topic ID: open the topic → "Copy link". In a link like t.me/c/3713706224/10, the number after /c/ with a -100 prefix is the Chat ID (-1003713706224), and the last number (10) is the topic ID. The "General" topic has no ID — leave the field empty.',
       mirrorLabel: 'Mirror user notifications',
       mirrorDescription: 'Send a copy of every user notification (expiry, referrals, partner payouts…) into this chat — routed to the USER topic when set. Does not change what users receive.',
       save: 'Save',

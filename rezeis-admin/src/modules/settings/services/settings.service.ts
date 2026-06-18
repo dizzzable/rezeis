@@ -13,6 +13,10 @@ import {
 } from '../../../common/interfaces/payment-ops-alert-settings.interface';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import {
+  SystemEventCategory,
+  SystemEventsService,
+} from '../../../common/services/system-events.service';
+import {
   mergePaymentOpsAlertSettings,
   readPaymentOpsAlertSettings,
 } from '../../../common/utils/payment-ops-alert-settings.util';
@@ -71,6 +75,7 @@ interface UpdateTelegramDeliveryInput {
   readonly enabled?: boolean;
   readonly chatId?: string | null;
   readonly topicId?: number | null;
+  readonly errorTopicId?: number | null;
   readonly topics?: Record<string, number | null>;
   readonly mirrorUserNotifications?: boolean;
   readonly devChatId?: string | null;
@@ -82,6 +87,7 @@ interface SendTelegramDeliveryTestInput {
   readonly currentAdmin: CurrentAdminInterface;
   readonly requestMetadata: RequestMetadataInterface;
   readonly note?: string | null;
+  readonly category?: string | null;
 }
 
 interface UpdatePaymentOpsAlertSettingsInput {
@@ -175,6 +181,8 @@ export class SettingsService {
     private readonly paymentConfiguration?: ConfigType<typeof paymentsConfig>,
     @Optional()
     private readonly reiwaCacheInvalidator?: ReiwaCacheInvalidatorService,
+    @Optional()
+    private readonly systemEvents?: SystemEventsService,
   ) {}
 
   /**
@@ -597,6 +605,10 @@ export class SettingsService {
           nextTelegram.topicId = input.topicId;
           updatedFields.push('topicId');
         }
+        if (input.errorTopicId !== undefined) {
+          nextTelegram.errorTopicId = input.errorTopicId;
+          updatedFields.push('errorTopicId');
+        }
         if (input.topics !== undefined) {
           const mergedTopics: Record<string, number | null> = {};
           for (const [key, value] of Object.entries(previousTopics)) {
@@ -682,6 +694,40 @@ export class SettingsService {
     const config = readTelegramDeliveryConfig(
       (await this.getOrCreateSettingsRecord(this.prismaService)).systemNotifications,
     );
+    const category = normalizeTestCategory(input.category);
+
+    // Preferred path: send through the same delivery pipeline real events use,
+    // so the test honours category→topic routing AND works on the split
+    // deployment (no local bot token → relayed via the reiwa bot).
+    if (this.systemEvents) {
+      const { via } = await this.systemEvents.sendTelegramTest({
+        category,
+        note: input.note ?? null,
+        adminId: input.currentAdmin.id,
+      });
+      if (via === 'none') {
+        throw new BadRequestException('TELEGRAM_DELIVERY_NOT_CONFIGURED');
+      }
+      await this.prismaService.adminAuditLog.create({
+        data: {
+          action: 'settings.telegramDelivery.test.sent',
+          ipAddress: input.requestMetadata.remoteAddress,
+          userAgent: input.requestMetadata.userAgent,
+          metadata: {
+            requestId: input.requestMetadata.requestId,
+            chatId: config.chatId,
+            topicId: config.topicId,
+            category,
+            via,
+          },
+          adminUser: { connect: { id: input.currentAdmin.id } },
+        } as never,
+      });
+      return;
+    }
+
+    // Legacy direct path (only when the system-events service is unavailable
+    // AND a local bot token exists — e.g. single-process deployments).
     if (!config.enabled || config.chatId === null) {
       throw new BadRequestException('TELEGRAM_DELIVERY_NOT_CONFIGURED');
     }
@@ -1192,6 +1238,7 @@ export interface TelegramDeliveryConfig {
   readonly enabled: boolean;
   readonly chatId: string | null;
   readonly topicId: number | null;
+  readonly errorTopicId: number | null;
   readonly topics: Record<string, number | null>;
   /**
    * Mirror user-facing notifications into the operator chat. When true,
@@ -1226,6 +1273,30 @@ function readJsonObject(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+/** Valid system-event categories accepted by the delivery test endpoint. */
+const TEST_EVENT_CATEGORIES: readonly SystemEventCategory[] = [
+  'USER',
+  'AUTH',
+  'SUBSCRIPTION',
+  'PAYMENT',
+  'REFERRAL',
+  'PARTNER',
+  'PROMOCODE',
+  'SUPPORT',
+  'FRAUD',
+  'SYSTEM',
+];
+
+function normalizeTestCategory(value: string | null | undefined): SystemEventCategory {
+  if (typeof value === 'string') {
+    const up = value.toUpperCase();
+    if ((TEST_EVENT_CATEGORIES as readonly string[]).includes(up)) {
+      return up as SystemEventCategory;
+    }
+  }
+  return 'SYSTEM';
+}
+
 function mergeJsonObject(
   existing: unknown,
   patch: Record<string, unknown>,
@@ -1249,6 +1320,7 @@ function readTelegramDeliveryConfig(systemNotifications: unknown): TelegramDeliv
     enabled: tg.enabled === true,
     chatId: typeof tg.chatId === 'string' && tg.chatId.length > 0 ? tg.chatId : null,
     topicId: typeof tg.topicId === 'number' ? tg.topicId : null,
+    errorTopicId: typeof tg.errorTopicId === 'number' ? tg.errorTopicId : null,
     topics: normalisedTopics,
     mirrorUserNotifications: tg.mirrorUserNotifications === true,
     devChatId: typeof tg.devChatId === 'string' && tg.devChatId.length > 0 ? tg.devChatId : null,

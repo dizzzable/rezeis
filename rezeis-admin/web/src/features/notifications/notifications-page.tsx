@@ -98,7 +98,7 @@ const SYSTEM_NOTIFICATION_KEYS = [
   'user_hwid',
 ] as const
 
-const EVENT_CATEGORIES = ['USER', 'AUTH', 'SUBSCRIPTION', 'PAYMENT', 'REFERRAL', 'PARTNER', 'PROMOCODE', 'SYSTEM'] as const
+const EVENT_CATEGORIES = ['USER', 'AUTH', 'SUBSCRIPTION', 'PAYMENT', 'REFERRAL', 'PARTNER', 'PROMOCODE', 'SUPPORT', 'FRAUD', 'SYSTEM'] as const
 
 // ── Main Page ────────────────────────────────────────────────────────────────
 
@@ -493,6 +493,7 @@ function TelegramDeliveryForm({ settings }: TelegramDeliveryFormProps) {
           message: t('notificationsPage.delivery.validation.chatIdInvalid'),
         }),
       topicId: topicIdRule,
+      errorTopicId: topicIdRule,
       topics: z.record(z.string(), topicIdRule),
     })
     .superRefine((data, ctx) => {
@@ -515,6 +516,7 @@ function TelegramDeliveryForm({ settings }: TelegramDeliveryFormProps) {
       chatId: typeof tgConfig.chatId === 'string' ? tgConfig.chatId : '',
       devChatId: typeof tgConfig.devChatId === 'string' ? tgConfig.devChatId : '',
       topicId: typeof tgConfig.topicId === 'number' ? String(tgConfig.topicId) : '',
+      errorTopicId: typeof tgConfig.errorTopicId === 'number' ? String(tgConfig.errorTopicId) : '',
       topics: initialTopics,
     },
   })
@@ -533,6 +535,9 @@ function TelegramDeliveryForm({ settings }: TelegramDeliveryFormProps) {
         devChatId: values.devChatId.trim() || null,
         topicId: values.topicId.trim() && /^\d+$/.test(values.topicId.trim())
           ? parseInt(values.topicId.trim(), 10)
+          : null,
+        errorTopicId: values.errorTopicId.trim() && /^\d+$/.test(values.errorTopicId.trim())
+          ? parseInt(values.errorTopicId.trim(), 10)
           : null,
         topics: topicsPayload,
       })
@@ -705,6 +710,27 @@ function TelegramDeliveryForm({ settings }: TelegramDeliveryFormProps) {
                   />
                 ))}
               </div>
+              <FormField
+                control={form.control}
+                name="errorTopicId"
+                render={({ field }) => (
+                  <FormItem className="space-y-1">
+                    <FormLabel className="text-xs">
+                      {t('notificationsPage.delivery.errorTopicLabel')}
+                    </FormLabel>
+                    <FormControl>
+                      <Input {...field} placeholder="topic_id" className="h-8 text-xs sm:max-w-xs" />
+                    </FormControl>
+                    <FormDescription className="text-[11px]">
+                      {t('notificationsPage.delivery.errorTopicHint')}
+                    </FormDescription>
+                    <FormMessage className="text-[10px]" />
+                  </FormItem>
+                )}
+              />
+              <p className="text-[11px] text-muted-foreground rounded-md bg-muted/50 px-3 py-2">
+                {t('notificationsPage.delivery.topicHelp')}
+              </p>
             </div>
 
             <Separator />

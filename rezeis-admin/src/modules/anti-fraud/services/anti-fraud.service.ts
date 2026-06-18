@@ -492,22 +492,95 @@ export class AntiFraudService {
     });
 
     if (action === 'notify') {
+      const notifyMeta = await this.buildFraudNotifyPayload(created, candidate);
       this.systemEventsService.warn(
         EVENT_TYPES.FRAUD_SIGNAL_OPENED,
         'FRAUD',
         `Fraud signal: ${candidate.title}`,
-        {
-          signalId: created.id,
-          code: created.code,
-          severity: created.severity,
-          score: created.score,
-          confidence: created.confidence,
-          affectedUserIds: candidate.affectedUserIds,
-        },
+        notifyMeta,
       );
     }
 
     return { signal: mapSignal(created), action, created: true };
+  }
+
+  /**
+   * Builds the enriched Telegram payload for a fraud-signal notification:
+   * the sharing metric (count vs limit), the Remnawave uuid, and — when the
+   * offender maps to a rezeis user — a full profile snapshot plus a deep link
+   * to the admin user page. Uses `fraud*`-prefixed keys so the generic event
+   * formatter renders a single dedicated fraud block (no promocode/user
+   * mislabeling).
+   */
+  private async buildFraudNotifyPayload(
+    signal: FraudSignal,
+    candidate: FraudSignalCandidate,
+  ): Promise<Record<string, unknown>> {
+    const meta = (candidate.metadata as Record<string, unknown>) ?? {};
+    const kind = typeof meta.kind === 'string' ? meta.kind : null;
+    const remnawaveUuid = typeof meta.remnawaveUuid === 'string' ? meta.remnawaveUuid : null;
+    const deviceLimit = typeof meta.deviceLimit === 'number' ? meta.deviceLimit : null;
+    const count =
+      kind === 'ip_sharing'
+        ? typeof meta.distinctIpCount === 'number'
+          ? meta.distinctIpCount
+          : null
+        : typeof meta.deviceCount === 'number'
+          ? meta.deviceCount
+          : null;
+
+    const payload: Record<string, unknown> = {
+      signalId: signal.id,
+      signalCode: signal.code,
+      fraudKind: kind,
+      fraudScore: signal.score,
+      fraudConfidence: signal.confidence,
+      fraudCount: count,
+      fraudLimit: deviceLimit,
+      remnawaveUuid,
+      affectedUserIds: candidate.affectedUserIds,
+    };
+
+    const rezeisUserId = candidate.affectedUserIds[0] ?? null;
+    if (rezeisUserId) {
+      const user = await this.prismaService.user.findUnique({
+        where: { id: rezeisUserId },
+        select: {
+          id: true,
+          telegramId: true,
+          username: true,
+          name: true,
+          email: true,
+          role: true,
+          isBlocked: true,
+          webAccount: { select: { id: true } },
+          _count: { select: { subscriptions: true } },
+        },
+      });
+      if (user) {
+        payload.fraudHasRezeisAccount = true;
+        payload.fraudRezeisUserId = user.id;
+        if (user.telegramId !== null) payload.fraudTelegramId = user.telegramId.toString();
+        payload.fraudUsername = user.username ?? null;
+        payload.fraudUserName = user.name || null;
+        payload.fraudUserEmail = user.email ?? null;
+        payload.fraudUserRole = user.role;
+        payload.fraudUserBlocked = user.isBlocked;
+        payload.fraudHasWebAccount = user.webAccount !== null;
+        payload.fraudSubscriptions = user._count.subscriptions;
+        const domain = process.env.REZEIS_DOMAIN;
+        if (domain && domain !== 'localhost' && user.telegramId !== null) {
+          const scheme = domain.includes('.') ? 'https' : 'http';
+          payload.fraudProfileUrl = `${scheme}://${domain}/users/${user.telegramId.toString()}`;
+        }
+      } else {
+        payload.fraudHasRezeisAccount = false;
+      }
+    } else {
+      payload.fraudHasRezeisAccount = false;
+    }
+
+    return payload;
   }
 }
 
