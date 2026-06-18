@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { resolveTelegramDeliveryTarget } from '../src/common/services/telegram-delivery-target.util';
+import { resolveTelegramDeliveryTarget, isEventTelegramAllowed } from '../src/common/services/telegram-delivery-target.util';
 
 /**
  * System-events Telegram delivery fallback contract.
@@ -17,7 +17,6 @@ const BASE = {
   topicMap: {} as Record<string, number | null>,
   defaultTopicId: null as number | null,
   errorTopicId: null as number | null,
-  events: [] as readonly string[],
 };
 
 const EVENT = { type: 'payment.completed', category: 'PAYMENT' };
@@ -76,20 +75,25 @@ describe('resolveTelegramDeliveryTarget', () => {
   it('returns null when neither a primary chat nor a dev chat is set', () => {
     assert.equal(resolveTelegramDeliveryTarget(BASE, EVENT), null);
   });
+});
 
-  it('respects the event allow-list on the primary chat', () => {
-    const cfg = { ...BASE, enabled: true, chatId: '-100123', events: ['user.created'] };
-    assert.equal(resolveTelegramDeliveryTarget(cfg, EVENT), null);
-    assert.ok(
-      resolveTelegramDeliveryTarget(cfg, { type: 'user.created', category: 'USER' }) !== null,
-    );
+describe('isEventTelegramAllowed', () => {
+  it('allows everything in "all" mode', () => {
+    assert.equal(isEventTelegramAllowed('payment.completed', { eventsMode: 'all', events: [] }), true);
+    assert.equal(isEventTelegramAllowed('user.blocked', { eventsMode: 'all', events: ['x'] }), true);
   });
 
-  it('does NOT apply the event allow-list to the dev fallback (dev sees everything)', () => {
-    const target = resolveTelegramDeliveryTarget(
-      { ...BASE, enabled: false, chatId: null, devChatId: '555000', events: ['user.created'] },
-      EVENT,
-    );
-    assert.equal(target?.chatId, '555000');
+  it('in "selected" mode delivers only listed event types', () => {
+    const filter = { eventsMode: 'selected' as const, events: ['payment.completed'] };
+    assert.equal(isEventTelegramAllowed('payment.completed', filter), true);
+    assert.equal(isEventTelegramAllowed('user.blocked', filter), false);
+  });
+
+  it('in "selected" mode with an empty list delivers nothing', () => {
+    assert.equal(isEventTelegramAllowed('payment.completed', { eventsMode: 'selected', events: [] }), false);
+  });
+
+  it('always allows the manual delivery test regardless of mode', () => {
+    assert.equal(isEventTelegramAllowed('settings.telegram.test', { eventsMode: 'selected', events: [] }), true);
   });
 });

@@ -40,6 +40,7 @@ import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.inter
 import { extractRequestMetadata } from '../../auth/utils/request-metadata.util';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
+import { SystemEventsService, EVENT_TYPES } from '../../../common/services/system-events.service';
 import { buildPlanSnapshot } from '../utils/plan-snapshot.util';
 
 @Controller('admin/users')
@@ -49,6 +50,7 @@ export class AdminUserSubscriptionsController {
     private readonly prismaService: PrismaService,
     private readonly remnawaveApiService: RemnawaveApiService,
     private readonly profileSyncQueueService: ProfileSyncQueueService,
+    private readonly systemEvents: SystemEventsService,
   ) {}
 
   // ── Subscription Mutations ─────────────────────────────────────────────
@@ -197,13 +199,37 @@ export class AdminUserSubscriptionsController {
   public async revokeDevice(
     @Param('subscriptionId') subscriptionId: string,
     @Param('hwid') hwid: string,
+    @CurrentAdmin() admin: CurrentAdminInterface,
   ) {
     const sub = await this.prismaService.subscription.findUnique({
       where: { id: subscriptionId },
-      select: { remnawaveId: true },
+      select: {
+        remnawaveId: true,
+        userId: true,
+        user: { select: { telegramId: true, username: true, name: true } },
+      },
     });
     if (!sub?.remnawaveId) throw new NotFoundException('No Remnawave profile linked');
     const result = await this.remnawaveApiService.deletePanelUserDevice(sub.remnawaveId, hwid);
+
+    this.systemEvents.info(
+      EVENT_TYPES.SUBSCRIPTION_DEVICE_REVOKED,
+      'DEVICE',
+      `Device revoked by admin: ${hwid}`,
+      {
+        userId: sub.userId,
+        telegramId: sub.user?.telegramId ? String(sub.user.telegramId) : null,
+        userName: sub.user?.name ?? sub.user?.username ?? sub.userId,
+        username: sub.user?.username ?? null,
+        subscriptionId,
+        remnawaveId: sub.remnawaveId,
+        hwid,
+        remainingDevices: result.total,
+        source: 'ADMIN_PANEL',
+        adminId: admin.id,
+      },
+    );
+
     return { revoked: true, remainingDevices: result.total };
   }
 

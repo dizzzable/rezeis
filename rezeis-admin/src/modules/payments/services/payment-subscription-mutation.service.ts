@@ -83,10 +83,17 @@ export class PaymentSubscriptionMutationService {
       paymentId: transaction.paymentId,
       purchaseType: transaction.purchaseType,
       planName: purchasedPlan.name,
+      planType: purchasedPlan.type,
+      trafficLimitBytes:
+        purchasedPlan.trafficLimit !== null ? purchasedPlan.trafficLimit * 1024 * 1024 * 1024 : undefined,
+      deviceLimit: purchasedPlan.deviceLimit,
+      durationDays: selectedDurationDays ?? undefined,
       amount: transaction.amount.toString(),
       currency: transaction.currency,
       gatewayType: transaction.gatewayType,
+      channel: transaction.channel,
       subscriptionId: result.subscription.id,
+      remnawaveId: result.subscription.remnawaveId ?? undefined,
     });
 
     return { syncJobs: [result.syncJob] };

@@ -151,4 +151,28 @@ describe('SystemEventsService dev-fallback (no bot token)', () => {
     assert.equal(calls.notifyDevDocument, 1);
     assert.equal(calls.notifyDev, 0);
   });
+
+  it('in "selected" mode does NOT deliver an unselected event — not even to the dev DM', async () => {
+    const { service, calls } = buildService({
+      telegram: {
+        enabled: false,
+        chatId: null,
+        devChatId: '813364774',
+        eventsMode: 'selected',
+        events: ['payment.completed'],
+        errorReports: { mode: 'manual', telegramTxt: true },
+      },
+    });
+
+    // Not in the allow-list → must go nowhere on Telegram (panel still has it).
+    service.info('system.heartbeat', 'SYSTEM', 'tick');
+    await flush();
+    assert.equal(calls.notifyDev, 0);
+    assert.equal(calls.notifyDevDocument, 0);
+
+    // A selected event still reaches the dev DM.
+    service.info('payment.completed', 'PAYMENT', 'paid', { amount: '100' });
+    await flush();
+    assert.equal(calls.notifyDev, 1);
+  });
 });

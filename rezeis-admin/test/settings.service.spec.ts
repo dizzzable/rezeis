@@ -359,6 +359,8 @@ describe('SettingsService', () => {
       mirrorUserNotifications: true,
       devChatId: null,
       errorReports: { mode: 'manual', telegramTxt: true },
+      eventsMode: 'all',
+      events: [],
     });
   });
 

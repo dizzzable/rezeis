@@ -81,6 +81,8 @@ interface UpdateTelegramDeliveryInput {
   readonly devChatId?: string | null;
   readonly errorReportMode?: 'off' | 'manual' | 'auto';
   readonly errorReportTelegramTxt?: boolean;
+  readonly eventsMode?: 'all' | 'selected';
+  readonly events?: string[];
 }
 
 interface SendTelegramDeliveryTestInput {
@@ -630,6 +632,18 @@ export class SettingsService {
           nextTelegram.devChatId =
             input.devChatId === null || input.devChatId === '' ? null : input.devChatId;
           updatedFields.push('devChatId');
+        }
+
+        if (input.eventsMode !== undefined) {
+          nextTelegram.eventsMode = input.eventsMode;
+          updatedFields.push('eventsMode');
+        }
+        if (input.events !== undefined) {
+          // Replace wholesale; dedupe + drop blanks for a clean stored list.
+          nextTelegram.events = Array.from(
+            new Set(input.events.map((e) => e.trim()).filter((e) => e.length > 0)),
+          );
+          updatedFields.push('events');
         }
 
         // Error-report config lives in a nested `errorReports` object so it
@@ -1264,6 +1278,9 @@ export interface TelegramDeliveryConfig {
     readonly mode: 'off' | 'manual' | 'auto';
     readonly telegramTxt: boolean;
   };
+  /** Event-selection mode + allow-list (which events reach Telegram). */
+  readonly eventsMode: 'all' | 'selected';
+  readonly events: readonly string[];
 }
 
 function readJsonObject(value: unknown): Record<string, unknown> {
@@ -1278,12 +1295,15 @@ const TEST_EVENT_CATEGORIES: readonly SystemEventCategory[] = [
   'USER',
   'AUTH',
   'SUBSCRIPTION',
+  'DEVICE',
   'PAYMENT',
   'REFERRAL',
   'PARTNER',
   'PROMOCODE',
   'SUPPORT',
   'FRAUD',
+  'NODE',
+  'REMNAWAVE',
   'SYSTEM',
 ];
 
@@ -1328,6 +1348,8 @@ function readTelegramDeliveryConfig(systemNotifications: unknown): TelegramDeliv
       mode: mode === 'off' || mode === 'auto' ? mode : 'manual',
       telegramTxt: errorReports.telegramTxt !== false,
     },
+    eventsMode: tg.eventsMode === 'selected' ? 'selected' : 'all',
+    events: Array.isArray(tg.events) ? tg.events.filter((e): e is string => typeof e === 'string') : [],
   };
 }
 

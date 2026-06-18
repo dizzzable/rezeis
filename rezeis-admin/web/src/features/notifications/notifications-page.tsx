@@ -7,6 +7,7 @@ import { z } from 'zod'
 import {
   Bell,
   Edit2,
+  Filter,
   Hash,
   Loader2,
   Mail,
@@ -27,6 +28,7 @@ import { adminQueryKeys } from '@/lib/admin-query-keys'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Checkbox } from '@/components/ui/checkbox'
 import {
   Dialog,
   DialogContent,
@@ -98,7 +100,57 @@ const SYSTEM_NOTIFICATION_KEYS = [
   'user_hwid',
 ] as const
 
-const EVENT_CATEGORIES = ['USER', 'AUTH', 'SUBSCRIPTION', 'PAYMENT', 'REFERRAL', 'PARTNER', 'PROMOCODE', 'SUPPORT', 'FRAUD', 'SYSTEM'] as const
+const EVENT_CATEGORIES = ['USER', 'AUTH', 'SUBSCRIPTION', 'DEVICE', 'PAYMENT', 'REFERRAL', 'PARTNER', 'PROMOCODE', 'SUPPORT', 'FRAUD', 'NODE', 'REMNAWAVE', 'SYSTEM'] as const
+
+/**
+ * Catalog of deliverable event types grouped by category. Mirrors the backend
+ * `EVENT_TYPES` map — used by the per-event delivery selection UI. Event types
+ * are stable machine identifiers, shown verbatim (as <code>) alongside the
+ * translated category headers.
+ */
+const EVENT_TYPE_CATALOG: Readonly<Record<string, readonly string[]>> = {
+  USER: [
+    'user.registered', 'user.web_registered', 'user.blocked', 'user.unblocked',
+    'user.deleted', 'user.role_changed', 'user.telegram_linked', 'user.email_linked',
+  ],
+  AUTH: ['auth.web_login', 'auth.password_changed', 'auth.password_recovery'],
+  SUBSCRIPTION: [
+    'subscription.created', 'subscription.renewed', 'subscription.upgraded',
+    'subscription.expired', 'subscription.deleted', 'subscription.synced',
+    'subscription.trial_granted',
+  ],
+  DEVICE: ['user_hwid_revoked'],
+  PAYMENT: [
+    'payment.checkout_created', 'payment.completed', 'payment.failed',
+    'payment.expired', 'payment.webhook_received',
+  ],
+  REFERRAL: ['referral.attached', 'referral.qualified', 'referral.reward_issued', 'referral.manual_attached'],
+  PARTNER: [
+    'partner.created', 'partner.activated', 'partner.deactivated', 'partner.earning',
+    'partner.withdrawal_requested', 'partner.withdrawal_approved',
+    'partner.withdrawal_rejected', 'partner.balance_adjusted',
+  ],
+  PROMOCODE: ['promocode.activated', 'promocode.created', 'promocode.depleted'],
+  SUPPORT: ['support.ticket_created', 'support.ticket_user_reply'],
+  FRAUD: ['fraud.signal_opened', 'fraud.connections_dropped'],
+  NODE: [
+    'node.connection_lost', 'node.connection_restored', 'node.created',
+    'node.modified', 'node.enabled', 'node.disabled', 'node.traffic_notify',
+  ],
+  REMNAWAVE: [
+    'remnawave.user.first_connected', 'remnawave.user.expired', 'remnawave.user.limited',
+    'remnawave.user.expire_soon', 'remnawave.user.enabled', 'remnawave.user.disabled',
+    'remnawave.user.traffic_reset', 'remnawave.user.bandwidth_threshold', 'remnawave.panel.started',
+  ],
+  SYSTEM: [
+    'system.startup', 'system.backup_completed', 'system.broadcast_sent', 'system.error',
+    'system.remnawave_sync', 'settings.email.updated', 'notification.template.created',
+    'notification.template.updated', 'notification.template.deleted', 'notification.template.seeded',
+  ],
+}
+
+/** Flat list of every catalog event type. */
+const ALL_EVENT_TYPES: readonly string[] = EVENT_CATEGORIES.flatMap((c) => EVENT_TYPE_CATALOG[c] ?? [])
 
 // ── Main Page ────────────────────────────────────────────────────────────────
 
@@ -495,6 +547,8 @@ function TelegramDeliveryForm({ settings }: TelegramDeliveryFormProps) {
       topicId: topicIdRule,
       errorTopicId: topicIdRule,
       topics: z.record(z.string(), topicIdRule),
+      eventsMode: z.enum(['all', 'selected']),
+      events: z.array(z.string()),
     })
     .superRefine((data, ctx) => {
       if (data.enabled && !data.chatId) {
@@ -518,6 +572,10 @@ function TelegramDeliveryForm({ settings }: TelegramDeliveryFormProps) {
       topicId: typeof tgConfig.topicId === 'number' ? String(tgConfig.topicId) : '',
       errorTopicId: typeof tgConfig.errorTopicId === 'number' ? String(tgConfig.errorTopicId) : '',
       topics: initialTopics,
+      eventsMode: tgConfig.eventsMode === 'selected' ? 'selected' : 'all',
+      events: Array.isArray(tgConfig.events)
+        ? (tgConfig.events as unknown[]).filter((e): e is string => typeof e === 'string')
+        : [...ALL_EVENT_TYPES],
     },
   })
 
@@ -540,6 +598,8 @@ function TelegramDeliveryForm({ settings }: TelegramDeliveryFormProps) {
           ? parseInt(values.errorTopicId.trim(), 10)
           : null,
         topics: topicsPayload,
+        eventsMode: values.eventsMode,
+        events: values.eventsMode === 'selected' ? values.events : [],
       })
     },
     onSuccess: () => {
@@ -561,6 +621,26 @@ function TelegramDeliveryForm({ settings }: TelegramDeliveryFormProps) {
   // eslint-disable-next-line react-hooks/incompatible-library
   const enabled = form.watch('enabled')
   const chatId = form.watch('chatId')
+  // eslint-disable-next-line react-hooks/incompatible-library
+  const eventsMode = form.watch('eventsMode')
+  // eslint-disable-next-line react-hooks/incompatible-library
+  const selectedEvents = form.watch('events')
+  const selectedSet = new Set(selectedEvents)
+
+  const toggleEvent = (type: string, checked: boolean) => {
+    const next = new Set(form.getValues('events'))
+    if (checked) next.add(type)
+    else next.delete(type)
+    form.setValue('events', Array.from(next), { shouldDirty: true })
+  }
+  const toggleCategoryEvents = (cat: string, checked: boolean) => {
+    const next = new Set(form.getValues('events'))
+    for (const type of EVENT_TYPE_CATALOG[cat] ?? []) {
+      if (checked) next.add(type)
+      else next.delete(type)
+    }
+    form.setValue('events', Array.from(next), { shouldDirty: true })
+  }
 
   return (
     <Card>
@@ -731,6 +811,85 @@ function TelegramDeliveryForm({ settings }: TelegramDeliveryFormProps) {
               <p className="text-[11px] text-muted-foreground rounded-md bg-muted/50 px-3 py-2">
                 {t('notificationsPage.delivery.topicHelp')}
               </p>
+            </div>
+
+            <Separator />
+
+            {/* Event selection — which event types are delivered to Telegram */}
+            <div className="space-y-3">
+              <FormField
+                control={form.control}
+                name="eventsMode"
+                render={({ field }) => (
+                  <FormItem className="flex items-center justify-between rounded-lg border px-4 py-3 space-y-0">
+                    <div className="flex items-center gap-2">
+                      <Filter className="h-4 w-4 text-muted-foreground" />
+                      <div>
+                        <FormLabel className="font-medium">
+                          {t('notificationsPage.delivery.eventsSelectLabel')}
+                        </FormLabel>
+                        <FormDescription className="text-xs">
+                          {t('notificationsPage.delivery.eventsSelectDescription')}
+                        </FormDescription>
+                      </div>
+                    </div>
+                    <FormControl>
+                      <Switch
+                        checked={field.value === 'selected'}
+                        onCheckedChange={(on) => field.onChange(on ? 'selected' : 'all')}
+                        aria-label={t('notificationsPage.delivery.eventsSelectLabel')}
+                      />
+                    </FormControl>
+                  </FormItem>
+                )}
+              />
+
+              {eventsMode === 'selected' && (
+                <div className="space-y-3 rounded-lg border p-3">
+                  <p className="text-[11px] text-muted-foreground">
+                    {t('notificationsPage.delivery.eventsSelectHint', { count: selectedSet.size, total: ALL_EVENT_TYPES.length })}
+                  </p>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    {EVENT_CATEGORIES.map((cat) => {
+                      const types = EVENT_TYPE_CATALOG[cat] ?? []
+                      const allOn = types.every((tpe) => selectedSet.has(tpe))
+                      return (
+                        <div key={cat} className="rounded-md border bg-muted/30 p-2.5">
+                          <div className="mb-1.5 flex items-center justify-between gap-2">
+                            <span className="text-xs font-semibold">
+                              {t(String(`notificationsPage.categoryLabels.${cat}`))}
+                            </span>
+                            <button
+                              type="button"
+                              className="text-[10px] text-primary hover:underline"
+                              onClick={() => toggleCategoryEvents(cat, !allOn)}
+                            >
+                              {allOn
+                                ? t('notificationsPage.delivery.eventsDeselectAll')
+                                : t('notificationsPage.delivery.eventsSelectAll')}
+                            </button>
+                          </div>
+                          <div className="space-y-1.5">
+                            {types.map((type) => (
+                              <label
+                                key={type}
+                                className="flex items-center gap-2 text-[11px] cursor-pointer"
+                              >
+                                <Checkbox
+                                  checked={selectedSet.has(type)}
+                                  onCheckedChange={(c) => toggleEvent(type, c === true)}
+                                  aria-label={type}
+                                />
+                                <code className="text-[10px] text-muted-foreground">{type}</code>
+                              </label>
+                            ))}
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
 
             <Separator />

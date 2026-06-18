@@ -12,10 +12,15 @@ export type RealtimeCategory =
   | 'USER'
   | 'AUTH'
   | 'SUBSCRIPTION'
+  | 'DEVICE'
   | 'PAYMENT'
   | 'REFERRAL'
   | 'PARTNER'
   | 'PROMOCODE'
+  | 'SUPPORT'
+  | 'FRAUD'
+  | 'NODE'
+  | 'REMNAWAVE'
   | 'SYSTEM';
 
 export interface RealtimeEvent {
@@ -32,10 +37,15 @@ export const REALTIME_TOPICS: readonly RealtimeCategory[] = [
   'USER',
   'AUTH',
   'SUBSCRIPTION',
+  'DEVICE',
   'PAYMENT',
   'REFERRAL',
   'PARTNER',
   'PROMOCODE',
+  'SUPPORT',
+  'FRAUD',
+  'NODE',
+  'REMNAWAVE',
   'SYSTEM',
 ] as const;
 

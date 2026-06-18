@@ -18,7 +18,8 @@ function buildService(webhookSecret: string | null): RemnawaveWebhookService {
   const prisma = {
     remnawaveWebhookEvent: { create: async () => undefined },
   };
-  return new RemnawaveWebhookService(prisma as never, { webhookSecret } as never);
+  const systemEvents = { emit: () => undefined };
+  return new RemnawaveWebhookService(prisma as never, { webhookSecret } as never, systemEvents as never);
 }
 
 describe('RemnawaveWebhookService.validateSignature', () => {

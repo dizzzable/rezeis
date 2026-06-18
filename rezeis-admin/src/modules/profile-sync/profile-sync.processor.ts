@@ -166,7 +166,7 @@ export class ProfileSyncProcessor extends WorkerHost {
         subscriptionId: subscription.id,
         userId: subscription.userId,
         remnawaveId: existing.uuid,
-        username: naming.username,
+        remnawaveUsername: naming.username,
       });
       return;
     }
@@ -204,7 +204,7 @@ export class ProfileSyncProcessor extends WorkerHost {
       subscriptionId: subscription.id,
       userId: subscription.userId,
       remnawaveId: panelUser.uuid,
-      username: naming.username,
+      remnawaveUsername: naming.username,
     });
   }
 

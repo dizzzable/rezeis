@@ -113,6 +113,8 @@ function buildTelegramConfig(): TelegramDeliveryConfig {
     mirrorUserNotifications: true,
     devChatId: null,
     errorReports: { mode: 'manual', telegramTxt: true },
+    eventsMode: 'all',
+    events: [],
   };
 }
 
@@ -337,6 +339,8 @@ describe('SettingsController', () => {
       devChatId: telegramDto.devChatId,
       errorReportMode: telegramDto.errorReportMode,
       errorReportTelegramTxt: telegramDto.errorReportTelegramTxt,
+      eventsMode: telegramDto.eventsMode,
+      events: telegramDto.events,
     });
     assert.deepStrictEqual(calls[2], {
       currentAdmin,

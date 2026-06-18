@@ -152,6 +152,8 @@ export class SettingsController {
       devChatId: body.devChatId,
       errorReportMode: body.errorReportMode,
       errorReportTelegramTxt: body.errorReportTelegramTxt,
+      eventsMode: body.eventsMode,
+      events: body.events,
     });
   }
 

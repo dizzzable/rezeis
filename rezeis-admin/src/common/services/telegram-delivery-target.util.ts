@@ -25,7 +25,32 @@ export interface TelegramDeliveryConfigShape {
   readonly defaultTopicId: number | null;
   /** Optional topic that ALL ERROR-severity events route to, regardless of category. */
   readonly errorTopicId: number | null;
+}
+
+export interface TelegramEventFilterShape {
+  /** `all` = deliver every event; `selected` = only types in `events`. */
+  readonly eventsMode: 'all' | 'selected';
   readonly events: readonly string[];
+}
+
+/**
+ * Authoritative gate: may this event be delivered to Telegram at all?
+ *
+ * Applies to EVERY Telegram path (operator group, reiwa relay, AND the dev-DM
+ * fallback) — when an event type is not selected it goes nowhere on Telegram,
+ * not even the dev bot. The rezeis panel still records every event (audit log
+ * + realtime) regardless of this gate.
+ *
+ * The manual delivery test (`settings.telegram.test`) always passes — it's an
+ * explicit operator action, not part of the event firehose.
+ */
+export function isEventTelegramAllowed(
+  eventType: string,
+  filter: TelegramEventFilterShape,
+): boolean {
+  if (eventType === 'settings.telegram.test') return true;
+  if (filter.eventsMode !== 'selected') return true;
+  return filter.events.includes(eventType);
 }
 
 export interface TelegramDeliveryTarget {
@@ -41,9 +66,6 @@ export function resolveTelegramDeliveryTarget(
 ): TelegramDeliveryTarget | null {
   const primaryActive = config.enabled && config.chatId !== null;
   if (primaryActive && config.chatId !== null) {
-    if (config.events.length > 0 && !config.events.includes(event.type)) {
-      return null;
-    }
     // ERROR severity gets its own dedicated topic when configured, so error
     // logs land in one place regardless of which category raised them.
     const errorRoute =

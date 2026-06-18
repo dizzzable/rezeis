@@ -34,7 +34,7 @@ import { webhookConfig } from '../config/webhook.config';
 import { buildWebhookSignature } from '../http/webhook-signature.util';
 import { PrismaService } from '../prisma/prisma.service';
 import { RealtimeGateway } from '../../modules/realtime/realtime.gateway';
-import { resolveTelegramDeliveryTarget } from './telegram-delivery-target.util';
+import { resolveTelegramDeliveryTarget, isEventTelegramAllowed } from './telegram-delivery-target.util';
 import {
   buildErrorReportFilename,
   formatErrorEventCardHtml,
@@ -52,12 +52,15 @@ export type SystemEventCategory =
   | 'USER'
   | 'AUTH'
   | 'SUBSCRIPTION'
+  | 'DEVICE'
   | 'PAYMENT'
   | 'REFERRAL'
   | 'PARTNER'
   | 'PROMOCODE'
   | 'SUPPORT'
   | 'FRAUD'
+  | 'NODE'
+  | 'REMNAWAVE'
   | 'SYSTEM';
 
 export type SystemEventSeverity = 'INFO' | 'WARNING' | 'ERROR';
@@ -142,6 +145,26 @@ export const EVENT_TYPES = {
   // Anti-fraud
   FRAUD_SIGNAL_OPENED: 'fraud.signal_opened',
   FRAUD_CONNECTIONS_DROPPED: 'fraud.connections_dropped',
+
+  // Remnawave panel (forwarded webhook events)
+  REMNAWAVE_USER_FIRST_CONNECTED: 'remnawave.user.first_connected',
+  REMNAWAVE_USER_EXPIRED: 'remnawave.user.expired',
+  REMNAWAVE_USER_LIMITED: 'remnawave.user.limited',
+  REMNAWAVE_USER_EXPIRE_SOON: 'remnawave.user.expire_soon',
+  REMNAWAVE_USER_ENABLED: 'remnawave.user.enabled',
+  REMNAWAVE_USER_DISABLED: 'remnawave.user.disabled',
+  REMNAWAVE_USER_TRAFFIC_RESET: 'remnawave.user.traffic_reset',
+  REMNAWAVE_BANDWIDTH_THRESHOLD: 'remnawave.user.bandwidth_threshold',
+  REMNAWAVE_PANEL_STARTED: 'remnawave.panel.started',
+
+  // Node (forwarded webhook events)
+  NODE_CONNECTION_LOST: 'node.connection_lost',
+  NODE_CONNECTION_RESTORED: 'node.connection_restored',
+  NODE_CREATED: 'node.created',
+  NODE_MODIFIED: 'node.modified',
+  NODE_ENABLED: 'node.enabled',
+  NODE_DISABLED: 'node.disabled',
+  NODE_TRAFFIC_NOTIFY: 'node.traffic_notify',
 
   // System
   SYSTEM_STARTUP: 'system.startup',
@@ -501,6 +524,15 @@ export class SystemEventsService {
 
     const tgConfig = await this.loadTelegramConfig();
 
+    // Authoritative event-selection gate. When the operator runs in
+    // `selected` mode, only ticked event types reach Telegram — and that
+    // applies to EVERY path (operator group, reiwa relay, AND the dev-DM
+    // fallback). Unselected events go nowhere on Telegram. The panel still
+    // has them (audit log + realtime already ran in emit()).
+    if (!isEventTelegramAllowed(event.type, { eventsMode: tgConfig.eventsMode, events: tgConfig.events })) {
+      return;
+    }
+
     const reportEvent = this.toErrorReportEvent(event);
     const errorEvent = isErrorEvent(reportEvent);
     const attachTxt =
@@ -742,13 +774,17 @@ export class SystemEventsService {
 
   private formatTelegramMessage(event: SystemEventPayload & { timestamp: string }): string {
     const hashtag = `#${eventTypeToHashtag(event.type)}`;
-    const emoji = severityEmoji(event.severity);
     const meta = event.metadata ?? {};
+    const present = EVENT_PRESENTATION[event.type];
+    const emoji = present?.emoji ?? severityEmoji(event.severity);
+    const title = present?.title ?? event.message;
 
     const lines: string[] = [
       hashtag,
       '',
-      `${emoji} <b>Событие: ${event.message}</b>`,
+      present
+        ? `${emoji} <b>Событие: ${escapeHtml(present.title)}!</b>`
+        : `${emoji} <b>${escapeHtml(title)}</b>`,
     ];
 
     // Fraud block — a dedicated, informative card for anti-fraud signals.
@@ -763,10 +799,16 @@ export class SystemEventsService {
       lines.push('');
       lines.push('👤 <b>Пользователь:</b>');
       const userLines: string[] = [];
-      if (meta['telegramId']) userLines.push(`• <b>ID:</b> <code>${meta['telegramId']}</code>`);
+      if (meta['telegramId']) userLines.push(`• <b>ID:</b> <code>${escapeHtml(meta['telegramId'])}</code>`);
       if (meta['userId']) userLines.push(`• <b>User ID:</b> <code>${String(meta['userId']).slice(0, 12)}</code>`);
-      if (meta['userName']) userLines.push(`• <b>Имя:</b> ${meta['userName']}`);
-      if (meta['username']) userLines.push(`• <b>Username:</b> @${meta['username']}`);
+      const displayName = meta['userName'] ?? meta['firstName'];
+      if (displayName) {
+        const handle = meta['username'] ? ` (@${escapeHtml(meta['username'])})` : '';
+        userLines.push(`• <b>Имя:</b> ${escapeHtml(displayName)}${handle}`);
+      } else if (meta['username']) {
+        userLines.push(`• <b>Username:</b> @${escapeHtml(meta['username'])}`);
+      }
+      if (meta['email'] && !meta['fraudUserEmail']) userLines.push(`• <b>Email:</b> ${escapeHtml(meta['email'])}`);
       lines.push(`<blockquote>${userLines.join('\n')}</blockquote>`);
     }
 
@@ -775,25 +817,79 @@ export class SystemEventsService {
       lines.push('');
       lines.push('💰 <b>Платёж:</b>');
       const payLines: string[] = [];
-      if (meta['paymentId']) payLines.push(`• <b>ID:</b> <code>${meta['paymentId']}</code>`);
-      if (meta['gatewayType']) payLines.push(`• <b>Способ оплаты:</b> ${meta['gatewayType']}`);
-      if (meta['amount']) payLines.push(`• <b>Сумма:</b> ${meta['amount']}${meta['currency'] ? ` ${meta['currency']}` : ''}`);
+      if (meta['paymentId']) payLines.push(`• <b>ID:</b> <code>${escapeHtml(meta['paymentId'])}</code>`);
+      if (meta['gatewayType']) payLines.push(`• <b>Способ оплаты:</b> ${escapeHtml(meta['gatewayType'])}`);
+      if (meta['amount']) payLines.push(`• <b>Сумма:</b> ${fmtAmount(meta['amount'], meta['currency'])}`);
+      if (meta['purchaseType']) payLines.push(`• <b>Тип покупки:</b> ${humanizePurchaseType(meta['purchaseType'])}`);
+      if (typeof meta['receiptUrl'] === 'string') payLines.push(`• <a href="${escapeHtml(meta['receiptUrl'])}">Чек</a>`);
+      else if (typeof meta['checkoutUrl'] === 'string') payLines.push(`• <a href="${escapeHtml(meta['checkoutUrl'])}">Ссылка на оплату</a>`);
+      if (meta['paidAt']) payLines.push(`• <b>Оплачено:</b> ${fmtDate(meta['paidAt'])}`);
       lines.push(`<blockquote>${payLines.join('\n')}</blockquote>`);
     }
 
     // Plan/Subscription block
     if (meta['planName'] || meta['subscriptionId']) {
       lines.push('');
-      lines.push('📦 <b>План:</b>');
+      lines.push('📦 <b>План / подписка:</b>');
       const planLines: string[] = [];
-      if (meta['planName']) planLines.push(`• <b>План:</b> ${meta['planName']}`);
-      if (meta['purchaseType']) planLines.push(`• <b>Тип:</b> ${meta['purchaseType']}`);
-      if (meta['durationDays']) planLines.push(`• <b>Длительность:</b> ${meta['durationDays']} дней`);
+      if (meta['planName']) planLines.push(`• <b>План:</b> ${escapeHtml(meta['planName'])}`);
+      if (meta['planType']) planLines.push(`• <b>Тип:</b> ${humanizePlanType(meta['planType'])}`);
+      else if (meta['purchaseType']) planLines.push(`• <b>Тип:</b> ${humanizePurchaseType(meta['purchaseType'])}`);
+      if (typeof meta['trafficLimitBytes'] === 'number') planLines.push(`• <b>Лимит трафика:</b> ${fmtBytes(meta['trafficLimitBytes'])}`);
+      if (meta['deviceLimit'] !== undefined) planLines.push(`• <b>Лимит устройств:</b> ${escapeHtml(meta['deviceLimit'])}`);
+      if (meta['durationDays']) planLines.push(`• <b>Длительность:</b> ${humanizeDuration(meta['durationDays'])}`);
+      if (meta['isTrial'] !== undefined) planLines.push(`• <b>Триал:</b> ${meta['isTrial'] ? 'да' : 'нет'}`);
+      if (meta['expireAt'] || meta['expiresAt']) planLines.push(`• <b>Действует до:</b> ${fmtDate(meta['expireAt'] ?? meta['expiresAt'])}`);
       if (meta['subscriptionId']) planLines.push(`• <b>Подписка:</b> <code>${String(meta['subscriptionId']).slice(0, 12)}</code>`);
+      if (meta['source']) planLines.push(`• <b>Причина:</b> ${humanizeSource(meta['source'])}`);
       lines.push(`<blockquote>${planLines.join('\n')}</blockquote>`);
     }
 
-    // Partner block
+    // Remnawave profile block — which panel profile this event refers to.
+    // Rendered when the event carries a Remnawave uuid/login and it isn't
+    // already covered by the fraud card or the HWID/device block.
+    const remnaUuid = meta['remnawaveId'] ?? meta['remnawaveUuid'];
+    if ((remnaUuid || meta['remnawaveUsername']) && event.category !== 'FRAUD' && !meta['hwid']) {
+      lines.push('');
+      lines.push('🌐 <b>Профиль Remnawave:</b>');
+      const remnaLines: string[] = [];
+      if (meta['remnawaveUsername']) remnaLines.push(`• <b>Логин:</b> <code>${escapeHtml(meta['remnawaveUsername'])}</code>`);
+      if (remnaUuid) remnaLines.push(`• <b>UUID:</b> <code>${escapeHtml(remnaUuid)}</code>`);
+      if (typeof meta['usedTrafficBytes'] === 'number') {
+        const limit = typeof meta['trafficLimitBytes'] === 'number' && meta['trafficLimitBytes'] > 0
+          ? ` / ${fmtBytes(meta['trafficLimitBytes'])}`
+          : '';
+        remnaLines.push(`• <b>Трафик:</b> ${fmtBytes(meta['usedTrafficBytes'])}${limit}`);
+      }
+      if (meta['expireAt'] && !meta['planName']) remnaLines.push(`• <b>Действует до:</b> ${fmtDate(meta['expireAt'])}`);
+      lines.push(`<blockquote>${remnaLines.join('\n')}</blockquote>`);
+      const panelUrl = buildRemnawavePanelUrl();
+      if (panelUrl) lines.push(`🔗 <a href="${escapeHtml(panelUrl)}">Открыть в панели Remnawave</a>`);
+    }
+    if (meta['filename'] && (event.category === 'SYSTEM' || meta['backupId'])) {
+      lines.push('');
+      lines.push('🗄 <b>Бэкап:</b>');
+      const backupLines: string[] = [];
+      backupLines.push(`• <b>Файл:</b> <code>${escapeHtml(meta['filename'])}</code>`);
+      if (typeof meta['sizeBytes'] === 'number') backupLines.push(`• <b>Размер:</b> ${fmtBytes(meta['sizeBytes'])}`);
+      if (meta['scope']) backupLines.push(`• <b>Объём:</b> ${escapeHtml(meta['scope'])}`);
+      if (typeof meta['checksum'] === 'string') backupLines.push(`• <b>Контрольная сумма:</b> <code>${escapeHtml(meta['checksum'].slice(0, 12))}</code>`);
+      if (meta['deliveredToTelegram'] === false) backupLines.push('• <b>Доставка:</b> только локально (слишком большой)');
+      if (meta['initiatedBy']) backupLines.push(`• <b>Инициатор:</b> <code>${String(meta['initiatedBy']).slice(0, 12)}</code>`);
+      lines.push(`<blockquote>${backupLines.join('\n')}</blockquote>`);
+    }
+
+    // Node block — infrastructure events forwarded from the Remnawave panel.
+    if (meta['nodeName'] || meta['nodeUuid']) {
+      lines.push('');
+      lines.push('🖥 <b>Нода:</b>');
+      const nodeLines: string[] = [];
+      if (meta['nodeName']) nodeLines.push(`• <b>Название:</b> ${escapeHtml(meta['nodeName'])}`);
+      if (meta['countryCode']) nodeLines.push(`• <b>Страна:</b> ${escapeHtml(meta['countryCode'])}`);
+      if (meta['nodeAddress']) nodeLines.push(`• <b>Адрес:</b> <code>${escapeHtml(meta['nodeAddress'])}</code>`);
+      if (meta['nodeUuid']) nodeLines.push(`• <b>UUID:</b> <code>${escapeHtml(String(meta['nodeUuid']).slice(0, 12))}</code>`);
+      lines.push(`<blockquote>${nodeLines.join('\n')}</blockquote>`);
+    }
     if (meta['partnerId'] || meta['earning']) {
       lines.push('');
       lines.push('🤝 <b>Партнёр:</b>');
@@ -850,15 +946,54 @@ export class SystemEventsService {
       lines.push(`<blockquote>${errLines.join('\n')}</blockquote>`);
     }
 
+    // Extra block — curated leftover keys that carry useful context but don't
+    // belong to any dedicated block above. Each is optional and escaped.
+    const extraLines: string[] = [];
+    if (meta['reason']) extraLines.push(`• <b>Причина:</b> ${humanizeSource(meta['reason'])}`);
+    if (meta['note']) extraLines.push(`• <b>Заметка:</b> ${escapeHtml(meta['note'])}`);
+    if (meta['count'] !== undefined) extraLines.push(`• <b>Количество:</b> ${escapeHtml(meta['count'])}`);
+    if (meta['recipients'] !== undefined) extraLines.push(`• <b>Получателей:</b> ${escapeHtml(meta['recipients'])}`);
+    if (meta['templateName']) extraLines.push(`• <b>Шаблон:</b> ${escapeHtml(meta['templateName'])}`);
+    if (meta['ticketId']) extraLines.push(`• <b>Тикет:</b> <code>${String(meta['ticketId']).slice(0, 12)}</code>`);
+    if (meta['subject']) extraLines.push(`• <b>Тема:</b> ${escapeHtml(meta['subject'])}`);
+    if (meta['oldRole'] && meta['newRole']) extraLines.push(`• <b>Роль:</b> ${escapeHtml(meta['oldRole'])} → ${escapeHtml(meta['newRole'])}`);
+    if (extraLines.length > 0) {
+      lines.push('');
+      lines.push('🧩 <b>Дополнительно:</b>');
+      lines.push(`<blockquote>${extraLines.join('\n')}</blockquote>`);
+    }
+
     // Context block
     lines.push('');
     lines.push('<b>Контекст:</b>');
     const ctxLines: string[] = [
       `• <b>Категория:</b> ${event.category}`,
-      `• <b>Уровень:</b> ${event.severity}`,
-      `• <b>Время:</b> ${new Date(event.timestamp).toLocaleString('ru-RU')}`,
     ];
+    const origin = meta['source'] ?? meta['origin'];
+    if (origin) ctxLines.push(`• <b>Источник:</b> ${humanizeSource(origin)}`);
+    if (meta['surface']) ctxLines.push(`• <b>Поверхность:</b> ${escapeHtml(meta['surface'])}`);
+    if (meta['operation']) ctxLines.push(`• <b>Операция:</b> <code>${escapeHtml(meta['operation'])}</code>`);
+    ctxLines.push(`• <b>Уровень:</b> ${event.severity}`);
+    const channel = meta['channel'] ?? meta['purchaseChannel'];
+    if (channel) ctxLines.push(`• <b>Канал покупки:</b> ${humanizeChannel(channel)}`);
+    ctxLines.push(`• <b>Время:</b> ${new Date(event.timestamp).toLocaleString('ru-RU')}`);
     lines.push(`<blockquote>${ctxLines.join('\n')}</blockquote>`);
+
+    // Build info — which release produced this event. Prefers values carried
+    // in metadata (so events relayed from reiwa show reiwa's own build) and
+    // falls back to rezeis's image env (APP_VERSION / REZEIS_GIT_SHA /
+    // REZEIS_GIT_BRANCH baked by the Dockerfile + CI).
+    const fallbackBuild = getRezeisBuildInfo();
+    const buildVersion = (typeof meta['version'] === 'string' && meta['version']) || fallbackBuild.version;
+    const buildCommit = (typeof meta['commit'] === 'string' && meta['commit']) || fallbackBuild.commit;
+    const buildBranch = (typeof meta['branch'] === 'string' && meta['branch']) || fallbackBuild.branch;
+    lines.push('');
+    lines.push('🏷 <b>Сборка:</b>');
+    lines.push(
+      `<blockquote>• <b>Версия:</b> <code>${escapeHtml(buildVersion)}</code>\n` +
+        `• <b>Коммит:</b> <code>${escapeHtml(String(buildCommit).slice(0, 12))}</code>\n` +
+        `• <b>Ветка:</b> <code>${escapeHtml(buildBranch)}</code></blockquote>`,
+    );
 
     return lines.join('\n');
   }
@@ -871,6 +1006,7 @@ export class SystemEventsService {
     defaultTopicId: number | null;
     errorTopicId: number | null;
     events: string[];
+    eventsMode: 'all' | 'selected';
     devChatId: string | null;
     errorReportMode: 'off' | 'manual' | 'auto';
     errorReportTelegramTxt: boolean;
@@ -886,6 +1022,7 @@ export class SystemEventsService {
         topicMap: {},
         defaultTopicId: null,
         events: [],
+        eventsMode: 'all',
         devChatId: null,
         errorReportMode: 'manual',
         errorTopicId: null,
@@ -914,6 +1051,7 @@ export class SystemEventsService {
       defaultTopicId: typeof tg.topicId === 'number' ? tg.topicId : null,
       errorTopicId: typeof tg.errorTopicId === 'number' ? tg.errorTopicId : null,
       events: Array.isArray(tg.events) ? tg.events.filter((e): e is string => typeof e === 'string') : [],
+      eventsMode: tg.eventsMode === 'selected' ? 'selected' : 'all',
       devChatId: typeof tg.devChatId === 'string' && tg.devChatId.length > 0 ? tg.devChatId : null,
       errorReportMode: mode === 'off' || mode === 'auto' ? mode : 'manual',
       errorReportTelegramTxt: errorReports.telegramTxt !== false,
@@ -1006,3 +1144,257 @@ function formatFraudBlock(meta: Record<string, unknown>): string[] {
   return out;
 }
 
+
+// ── Event presentation (emoji + Russian title) ──────────────────────────────
+
+/**
+ * Per-event-type presentation: a distinctive emoji and a human Russian title
+ * for the card header. Keeps the firehose readable at a glance — every event
+ * type gets its own identity instead of a generic severity icon. Falls back to
+ * `severityEmoji` + the raw `event.message` when a type isn't mapped here.
+ */
+const EVENT_PRESENTATION: Record<string, { emoji: string; title: string }> = {
+  // User
+  'user.registered': { emoji: '🆕', title: 'Новый пользователь' },
+  'user.web_registered': { emoji: '🆕', title: 'Регистрация через сайт' },
+  'user.blocked': { emoji: '🔴', title: 'Пользователь заблокирован' },
+  'user.unblocked': { emoji: '🟢', title: 'Пользователь разблокирован' },
+  'user.deleted': { emoji: '🗑', title: 'Пользователь удалён' },
+  'user.role_changed': { emoji: '🛡', title: 'Изменена роль пользователя' },
+  'user.telegram_linked': { emoji: '🔗', title: 'Привязан Telegram' },
+  'user.email_linked': { emoji: '📧', title: 'Привязан Email' },
+  user_hwid_revoked: { emoji: '📱', title: 'Сброшено устройство (HWID)' },
+
+  // Auth
+  'auth.web_login': { emoji: '🔑', title: 'Вход в веб-кабинет' },
+  'auth.password_changed': { emoji: '🔐', title: 'Изменён пароль' },
+  'auth.password_recovery': { emoji: '🔓', title: 'Восстановление пароля' },
+
+  // Subscription
+  'subscription.created': { emoji: '✅', title: 'Подписка создана' },
+  'subscription.renewed': { emoji: '🔄', title: 'Подписка продлена' },
+  'subscription.upgraded': { emoji: '⬆️', title: 'Подписка улучшена' },
+  'subscription.expired': { emoji: '⌛', title: 'Подписка истекла' },
+  'subscription.deleted': { emoji: '🗑', title: 'Подписка удалена' },
+  'subscription.synced': { emoji: '🔄', title: 'Синхронизация подписки' },
+  'subscription.trial_granted': { emoji: '🎁', title: 'Выдан триал' },
+
+  // Payment
+  'payment.checkout_created': { emoji: '🧾', title: 'Создан счёт на оплату' },
+  'payment.completed': { emoji: '💰', title: 'Платёж получен' },
+  'payment.failed': { emoji: '❌', title: 'Платёж не прошёл' },
+  'payment.expired': { emoji: '⌛', title: 'Счёт на оплату истёк' },
+  'payment.webhook_received': { emoji: '📩', title: 'Вебхук платёжки' },
+
+  // Referral
+  'referral.attached': { emoji: '🔗', title: 'Реферал привязан' },
+  'referral.qualified': { emoji: '⭐', title: 'Реферал подтверждён' },
+  'referral.reward_issued': { emoji: '🎉', title: 'Реферальная награда выдана' },
+  'referral.manual_attached': { emoji: '🔗', title: 'Реферал привязан вручную' },
+
+  // Partner
+  'partner.created': { emoji: '🤝', title: 'Создан партнёр' },
+  'partner.activated': { emoji: '🟢', title: 'Партнёр активирован' },
+  'partner.deactivated': { emoji: '🔴', title: 'Партнёр деактивирован' },
+  'partner.earning': { emoji: '💵', title: 'Партнёрское начисление' },
+  'partner.withdrawal_requested': { emoji: '📤', title: 'Запрос на вывод средств' },
+  'partner.withdrawal_approved': { emoji: '✅', title: 'Вывод средств одобрен' },
+  'partner.withdrawal_rejected': { emoji: '❌', title: 'Вывод средств отклонён' },
+  'partner.balance_adjusted': { emoji: '⚖️', title: 'Скорректирован баланс партнёра' },
+
+  // Promocode
+  'promocode.activated': { emoji: '🎟', title: 'Промокод активирован' },
+  'promocode.created': { emoji: '🎟', title: 'Промокод создан' },
+  'promocode.depleted': { emoji: '🚫', title: 'Промокод исчерпан' },
+
+  // Support
+  'support.ticket_created': { emoji: '🆘', title: 'Новое обращение в поддержку' },
+  'support.ticket_user_reply': { emoji: '💬', title: 'Ответ пользователя в тикете' },
+
+  // Anti-fraud
+  'fraud.signal_opened': { emoji: '🚨', title: 'Антифрод: новый сигнал' },
+  'fraud.connections_dropped': { emoji: '✂️', title: 'Антифрод: соединения сброшены' },
+
+  // System
+  'system.startup': { emoji: '🚀', title: 'Запуск системы' },
+  'system.backup_completed': { emoji: '🗄', title: 'Резервная копия создана' },
+  'system.broadcast_sent': { emoji: '📢', title: 'Рассылка отправлена' },
+  'system.error': { emoji: '🚨', title: 'Системная ошибка' },
+  'system.remnawave_sync': { emoji: '🔄', title: 'Синхронизация с Remnawave' },
+  'settings.email.updated': { emoji: '⚙️', title: 'Обновлены настройки почты' },
+  'notification.template.created': { emoji: '📝', title: 'Создан шаблон уведомления' },
+  'notification.template.updated': { emoji: '📝', title: 'Обновлён шаблон уведомления' },
+  'notification.template.deleted': { emoji: '🗑', title: 'Удалён шаблон уведомления' },
+  'notification.template.seeded': { emoji: '🌱', title: 'Засеяны шаблоны уведомлений' },
+
+  // Remnawave panel (forwarded webhook events)
+  'remnawave.user.first_connected': { emoji: '🔌', title: 'Первое подключение' },
+  'remnawave.user.expired': { emoji: '⌛', title: 'Профиль истёк (Remnawave)' },
+  'remnawave.user.limited': { emoji: '🚧', title: 'Достигнут лимит трафика' },
+  'remnawave.user.expire_soon': { emoji: '⏰', title: 'Подписка скоро истекает' },
+  'remnawave.user.enabled': { emoji: '🟢', title: 'Профиль включён (Remnawave)' },
+  'remnawave.user.disabled': { emoji: '🔴', title: 'Профиль отключён (Remnawave)' },
+  'remnawave.user.traffic_reset': { emoji: '♻️', title: 'Сброшен трафик профиля' },
+  'remnawave.user.bandwidth_threshold': { emoji: '📊', title: 'Порог трафика достигнут' },
+  'remnawave.panel.started': { emoji: '🟢', title: 'Панель Remnawave запущена' },
+
+  // Node (forwarded webhook events)
+  'node.connection_lost': { emoji: '🔌', title: 'Нода офлайн' },
+  'node.connection_restored': { emoji: '✅', title: 'Нода снова онлайн' },
+  'node.created': { emoji: '🆕', title: 'Добавлена нода' },
+  'node.modified': { emoji: '🛠', title: 'Нода изменена' },
+  'node.enabled': { emoji: '🟢', title: 'Нода включена' },
+  'node.disabled': { emoji: '🔴', title: 'Нода отключена' },
+  'node.traffic_notify': { emoji: '📊', title: 'Уведомление о трафике ноды' },
+};
+
+/** Human label for a payment/subscription purchase type. */
+function humanizePurchaseType(value: unknown): string {
+  switch (String(value).toUpperCase()) {
+    case 'SUBSCRIPTION': return 'Покупка подписки';
+    case 'RENEW':
+    case 'RENEWAL': return 'Продление';
+    case 'ADD_ON':
+    case 'ADDON': return 'Докупка';
+    case 'UPGRADE': return 'Апгрейд';
+    case 'TRIAL': return 'Триал';
+    default: return escapeHtml(value);
+  }
+}
+
+/** Human label for a system-action `source` (why an event fired). */
+function humanizeSource(value: unknown): string {
+  switch (String(value).toUpperCase()) {
+    case 'EXPIRED_PROFILE_CLEANUP': return 'Очистка истёкших профилей';
+    case 'ADMIN_PANEL':
+    case 'PANEL': return 'Админ-панель';
+    case 'WEB_CABINET':
+    case 'WEB': return 'Веб-кабинет';
+    case 'BOT': return 'Telegram-бот';
+    case 'API': return 'API';
+    case 'WORKER': return 'Worker';
+    case 'SCHEDULER':
+    case 'CRON': return 'Планировщик';
+    case 'REMNAWAVE_SYNC': return 'Синхронизация Remnawave';
+    case 'PAYMENT_WEBHOOK': return 'Вебхук платёжки';
+    default: return escapeHtml(value);
+  }
+}
+
+/**
+ * Tolerant date formatter: ISO/Date-ish values render as `ru-RU` locale
+ * date+time; anything else (already-formatted strings, plain labels) is
+ * returned escaped as-is so the card never shows "Invalid Date".
+ */
+function fmtDate(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? escapeHtml(String(value)) : value.toLocaleString('ru-RU');
+  }
+  if (typeof value === 'number') {
+    const d = new Date(value);
+    return Number.isNaN(d.getTime()) ? escapeHtml(String(value)) : d.toLocaleString('ru-RU');
+  }
+  if (typeof value === 'string') {
+    // Only attempt parsing for ISO-like strings to avoid mangling labels.
+    if (/^\d{4}-\d{2}-\d{2}[T\s]/.test(value) || /^\d{4}-\d{2}-\d{2}$/.test(value)) {
+      const d = new Date(value);
+      if (!Number.isNaN(d.getTime())) return d.toLocaleString('ru-RU');
+    }
+    return escapeHtml(value);
+  }
+  return escapeHtml(String(value));
+}
+
+/** Human-readable byte size (Б/КБ/МБ/ГБ/ТБ); whole numbers drop the decimal. */
+function fmtBytes(bytes: unknown): string {
+  const n = typeof bytes === 'number' ? bytes : Number(bytes);
+  if (!Number.isFinite(n) || n < 0) return escapeHtml(String(bytes));
+  if (n < 1024) return `${n} Б`;
+  const units = ['КБ', 'МБ', 'ГБ', 'ТБ', 'ПБ'];
+  let value = n / 1024;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  const rounded = Number.isInteger(value) ? String(value) : value.toFixed(1);
+  return `${rounded} ${units[unitIndex]}`;
+}
+
+// ── Presentation helpers (formatting niceties) ───────────────────────────────
+
+/** Russian pluralization: picks the form for 1 / 2-4 / 5+ (one/few/many). */
+function pluralRu(n: number, one: string, few: string, many: string): string {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return one;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20)) return few;
+  return many;
+}
+
+/** Money with a currency symbol for fiat (₽/$/€/₴/₸/£), code for the rest. */
+function fmtAmount(amount: unknown, currency: unknown): string {
+  const amt = escapeHtml(amount);
+  const cur = currency ? String(currency).toUpperCase() : '';
+  const symbols: Record<string, string> = {
+    RUB: '₽', USD: '$', EUR: '€', UAH: '₴', KZT: '₸', GBP: '£',
+  };
+  if (cur && symbols[cur]) return `${amt} ${symbols[cur]}`;
+  return cur ? `${amt} ${escapeHtml(cur)}` : amt;
+}
+
+/** Humanizes a duration in days into months / years / weeks when it divides
+ * evenly (30 → "1 месяц", 365 → "1 год"), otherwise plain days. */
+function humanizeDuration(value: unknown): string {
+  const days = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(days) || days <= 0) return escapeHtml(String(value));
+  if (days % 365 === 0) {
+    const y = days / 365;
+    return `${y} ${pluralRu(y, 'год', 'года', 'лет')}`;
+  }
+  if (days % 30 === 0) {
+    const m = days / 30;
+    return `${m} ${pluralRu(m, 'месяц', 'месяца', 'месяцев')}`;
+  }
+  if (days % 7 === 0) {
+    const w = days / 7;
+    return `${w} ${pluralRu(w, 'неделя', 'недели', 'недель')}`;
+  }
+  return `${days} ${pluralRu(days, 'день', 'дня', 'дней')}`;
+}
+
+/** Human label for the purchase channel (PurchaseChannel enum). */
+function humanizeChannel(value: unknown): string {
+  switch (String(value).toUpperCase()) {
+    case 'TELEGRAM':
+    case 'BOT':
+    case 'MINI_APP': return 'Bot / Mini App';
+    case 'WEB': return 'Веб-сайт';
+    case 'ADMIN':
+    case 'PANEL': return 'Админ-панель';
+    default: return escapeHtml(value);
+  }
+}
+
+/** Human label for the plan type (PlanType enum). */
+function humanizePlanType(value: unknown): string {
+  switch (String(value).toUpperCase()) {
+    case 'TRAFFIC': return 'Трафик';
+    case 'DEVICES': return 'Устройства';
+    case 'BOTH': return 'Трафик + устройства';
+    default: return escapeHtml(value);
+  }
+}
+
+/**
+ * Builds a link to the Remnawave panel users page when `REMNAWAVE_HOST` is a
+ * public domain (contains a dot). Docker-internal service names (no dot) are
+ * unreachable from a Telegram client, so we omit the link there and just show
+ * the searchable login + uuid.
+ */
+function buildRemnawavePanelUrl(): string | null {
+  const host = (process.env.REMNAWAVE_HOST ?? '').trim();
+  if (host.length === 0 || !host.includes('.')) return null;
+  return `https://${host}/dashboard/users`;
+}

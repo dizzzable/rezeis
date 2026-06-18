@@ -37,12 +37,15 @@ export const REALTIME_TOPICS = [
   'USER',
   'AUTH',
   'SUBSCRIPTION',
+  'DEVICE',
   'PAYMENT',
   'REFERRAL',
   'PARTNER',
   'PROMOCODE',
   'SUPPORT',
   'FRAUD',
+  'NODE',
+  'REMNAWAVE',
   'SYSTEM',
 ] as const satisfies readonly SystemEventCategory[];
 

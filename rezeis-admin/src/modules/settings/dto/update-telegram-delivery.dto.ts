@@ -1,4 +1,5 @@
 import {
+  IsArray,
   IsBoolean,
   IsIn,
   IsInt,
@@ -12,6 +13,10 @@ import {
 /** Error-report generation modes (see ErrorReportsConfig). */
 export const ERROR_REPORT_MODES = ['off', 'manual', 'auto'] as const;
 export type ErrorReportMode = (typeof ERROR_REPORT_MODES)[number];
+
+/** Event-selection delivery modes (which events reach Telegram). */
+export const TELEGRAM_EVENTS_MODES = ['all', 'selected'] as const;
+export type TelegramEventsMode = (typeof TELEGRAM_EVENTS_MODES)[number];
 
 /**
  * Patch payload for `PATCH /admin/settings/system-notifications/telegram`.
@@ -100,6 +105,25 @@ export class UpdateTelegramDeliveryDto {
   @IsOptional()
   @IsBoolean()
   public readonly errorReportTelegramTxt?: boolean;
+
+  /**
+   * Event-selection mode. `all` (default) delivers every event to Telegram;
+   * `selected` delivers only the event types listed in `events` — anything
+   * else goes nowhere on Telegram (the panel still records it).
+   */
+  @IsOptional()
+  @IsIn(TELEGRAM_EVENTS_MODES)
+  public readonly eventsMode?: TelegramEventsMode;
+
+  /**
+   * Allow-list of event types delivered to Telegram when `eventsMode` is
+   * `selected`. Ignored in `all` mode. Replaces the stored list wholesale.
+   */
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  @MaxLength(128, { each: true })
+  public readonly events?: string[];
 }
 
 /**

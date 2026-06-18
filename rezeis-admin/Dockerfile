@@ -52,8 +52,10 @@ ENV NODE_ENV=production
 # App metadata baked into the image so health endpoint reports the release.
 ARG APP_VERSION=0.7.5
 ARG GIT_SHA=unknown
+ARG GIT_BRANCH=unknown
 ENV APP_VERSION=${APP_VERSION} \
     REZEIS_GIT_SHA=${GIT_SHA} \
+    REZEIS_GIT_BRANCH=${GIT_BRANCH} \
     npm_package_version=${APP_VERSION}
 
 # Install PostgreSQL client tools (pg_dump, psql) for backup/restore.
