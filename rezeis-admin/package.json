@@ -1,6 +1,6 @@
 {
   "name": "rezeis-admin",
-  "version": "0.9.5.33",
+  "version": "0.9.5.34",
   "description": "Rezeis Admin NestJS microservice baseline",
   "private": true,
   "license": "UNLICENSED",
@@ -31,6 +31,8 @@
     "prepare": "husky || true"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1071.0",
+    "@aws-sdk/lib-storage": "^3.1071.0",
     "@nestjs/axios": "4.0.1",
     "@nestjs/bullmq": "11.0.4",
     "@nestjs/common": "^11.1.23",

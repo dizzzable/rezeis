@@ -41,6 +41,18 @@ const DEFAULT_BACKUP_LOCATION = '/app/data/backups';
 const RETENTION_FALLBACK = 7;
 const INTERVAL_HOURS_FALLBACK = 24;
 
+/** Cloud Bot API upload cap; raised via BACKUP_MAX_DELIVERY_BYTES for a Local Bot API Server. */
+const DEFAULT_MAX_DELIVERY_BYTES = 50 * 1024 * 1024;
+const HARD_MAX_DELIVERY_BYTES = 2 * 1024 * 1024 * 1024;
+
+function resolveMaxDeliveryBytes(): number {
+  const raw = Number.parseInt(process.env.BACKUP_MAX_DELIVERY_BYTES ?? '', 10);
+  if (Number.isFinite(raw) && raw > 0) {
+    return Math.min(raw, HARD_MAX_DELIVERY_BYTES);
+  }
+  return DEFAULT_MAX_DELIVERY_BYTES;
+}
+
 // ── DTOs ────────────────────────────────────────────────────────────────────
 
 interface BackupListInput {
@@ -480,9 +492,11 @@ export class BackupService implements OnModuleInit {
     }
 
     const stat = await fsp.stat(fullPath);
-    // Telegram Bot API limit: 50 MB for documents (applies to direct send AND
-    // the reiwa-bot relay, which re-uploads through the same Bot API).
-    if (stat.size > 50 * 1024 * 1024) {
+    // Telegram upload cap: 50 MB on the cloud Bot API, up to 2 GB with a
+    // self-hosted Local Bot API Server. Operators raise the limit via
+    // BACKUP_MAX_DELIVERY_BYTES once their reiwa bot points at a local server.
+    const maxDeliveryBytes = resolveMaxDeliveryBytes();
+    if (stat.size > maxDeliveryBytes) {
       this.logger.warn(`Backup ${filename} too large for Telegram (${formatBytes(stat.size)})`);
       await this.prismaService.backupRecord.update({
         where: { id: recordId },
