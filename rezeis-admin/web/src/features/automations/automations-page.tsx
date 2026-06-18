@@ -14,11 +14,15 @@ import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
+  BookOpen,
   CheckCircle2,
+  ChevronDown,
   Clock,
+  Lightbulb,
   Loader2,
   PlayCircle,
   Plus,
+  Sparkles,
   Trash2,
   XCircle,
   Zap,
@@ -39,13 +43,13 @@ import {
 } from '@/components/ui/alert-dialog';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import {
-  Card,
+import { Card,
   CardContent,
   CardDescription,
   CardHeader,
   CardTitle,
 } from '@/components/ui/card';
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import {
@@ -90,6 +94,55 @@ const ACTION_LABEL_KEYS: Record<string, string> = {
   system_event: 'automationsPage.actionTypes.system_event',
 };
 
+/**
+ * Ready-to-use rule templates. Clicking "use" opens the editor pre-filled with
+ * a draft (not saved until the operator reviews + presses Create). `textKey`
+ * lets the seed Telegram message be localized at apply time.
+ */
+interface RuleTemplate {
+  readonly id: string;
+  readonly triggerKind: AutomationTriggerKind;
+  readonly triggerSpec: string;
+  readonly conditions?: unknown;
+  readonly buildActions: (text: (key: string) => string) => AutomationActionDef[];
+}
+
+const RULE_TEMPLATES: readonly RuleTemplate[] = [
+  {
+    id: 'payment_failed_notify',
+    triggerKind: 'REALTIME',
+    triggerSpec: 'payment.failed',
+    buildActions: (text) => [{ type: 'notify_telegram', params: { text: text('automationsPage.templates.payment_failed_notify.message') } }],
+  },
+  {
+    id: 'fraud_block_ip',
+    triggerKind: 'REALTIME',
+    triggerSpec: 'fraud.signal_opened',
+    buildActions: (text) => [
+      { type: 'block_ip', params: {} },
+      { type: 'notify_telegram', params: { text: text('automationsPage.templates.fraud_block_ip.message') } },
+    ],
+  },
+  {
+    id: 'node_down_notify',
+    triggerKind: 'REALTIME',
+    triggerSpec: 'node.connection_lost',
+    buildActions: (text) => [{ type: 'notify_telegram', params: { text: text('automationsPage.templates.node_down_notify.message') } }],
+  },
+  {
+    id: 'payment_completed_webhook',
+    triggerKind: 'REALTIME',
+    triggerSpec: 'payment.completed',
+    buildActions: () => [{ type: 'webhook_post', params: { url: 'https://example.com/hooks/payment', authorizationHeader: 'Bearer <token>' } }],
+  },
+  {
+    id: 'daily_healthcheck_cron',
+    triggerKind: 'CRON',
+    triggerSpec: '0 9 * * *',
+    buildActions: () => [{ type: 'webhook_post', params: { url: 'https://example.com/healthcheck' } }],
+  },
+];
+
 export default function AutomationsPage() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
@@ -104,6 +157,41 @@ export default function AutomationsPage() {
   });
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  // Opens the editor with an unsaved draft seeded under the synthetic
+  // `__new__` id (shared by the blank "New rule" button and the templates).
+  function openDraft(seed: Partial<AutomationRule> & { name: string; actions: AutomationActionDef[] }) {
+    const blank: AutomationRule = {
+      id: '',
+      name: seed.name,
+      description: seed.description ?? null,
+      isEnabled: false,
+      triggerKind: seed.triggerKind ?? 'REALTIME',
+      triggerSpec: seed.triggerSpec ?? 'payment.failed',
+      conditions: seed.conditions ?? null,
+      actions: seed.actions,
+      createdById: null,
+      lastRunAt: null,
+      lastRunStatus: null,
+      lastRunMessage: null,
+      runCount: 0,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    queryClient.setQueryData(['admin', 'automations', 'rule', '__new__'], blank);
+    setSelectedId('__new__');
+  }
+
+  function useTemplate(template: RuleTemplate) {
+    openDraft({
+      name: t(`automationsPage.templates.${template.id}.name`),
+      description: t(`automationsPage.templates.${template.id}.description`),
+      triggerKind: template.triggerKind,
+      triggerSpec: template.triggerSpec,
+      conditions: template.conditions ?? null,
+      actions: template.buildActions((key) => String(t(key))),
+    });
+  }
 
   // Auto-select the first rule once data is loaded. Uses the
   // "store-prev-prop in render" pattern to avoid an effect.
@@ -128,33 +216,18 @@ export default function AutomationsPage() {
         </div>
         <Button
           onClick={() => {
-            const blank: AutomationRule = {
-              id: '',
+            openDraft({
               name: t('automationsPage.untitledRule'),
-              description: null,
-              isEnabled: false,
-              triggerKind: 'REALTIME',
-              triggerSpec: 'payment.failed',
-              conditions: null,
               actions: [{ type: 'notify_telegram', params: { text: 'Triggered' } }],
-              createdById: null,
-              lastRunAt: null,
-              lastRunStatus: null,
-              lastRunMessage: null,
-              runCount: 0,
-              createdAt: new Date().toISOString(),
-              updatedAt: new Date().toISOString(),
-            };
-            setSelectedId('__new__');
-            // Cache the blank rule under the synthetic id so the editor
-            // can pick it up without a network round-trip.
-            queryClient.setQueryData(['admin', 'automations', 'rule', '__new__'], blank);
+            });
           }}
         >
           <Plus className="mr-2 h-4 w-4" />
           {t('automationsPage.newRule')}
         </Button>
       </header>
+
+      <HelpAndTemplates onUseTemplate={useTemplate} />
 
       {rulesQuery.error && (
         <Alert variant="destructive">
@@ -207,6 +280,127 @@ export default function AutomationsPage() {
 }
 
 // ── Sub-components ────────────────────────────────────────────────────────
+
+/**
+ * Collapsible onboarding panel: explains how automations work, lists trigger
+ * and action types, shows example use-cases, and offers one-click templates
+ * that open the editor pre-filled (unsaved until reviewed).
+ */
+function HelpAndTemplates({ onUseTemplate }: { onUseTemplate: (template: RuleTemplate) => void }) {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+
+  const steps = ['trigger', 'condition', 'action'] as const;
+  const triggerKinds = ['realtime', 'cron', 'manual'] as const;
+  const actionTypes: AutomationActionType[] = ['notify_telegram', 'webhook_post', 'block_ip', 'block_user', 'system_event'];
+  const useCases = ['fraud', 'nodeDown', 'payment', 'daily'] as const;
+
+  return (
+    <Card>
+      <Collapsible open={open} onOpenChange={setOpen}>
+        <CollapsibleTrigger asChild>
+          <button
+            type="button"
+            className="flex w-full items-center justify-between gap-2 px-6 py-4 text-left"
+            aria-expanded={open}
+          >
+            <span className="flex items-center gap-2 text-sm font-semibold">
+              <BookOpen className="h-4 w-4 text-primary" />
+              {t('automationsPage.help.title')}
+            </span>
+            <ChevronDown className={cn('h-4 w-4 text-muted-foreground transition-transform', open && 'rotate-180')} />
+          </button>
+        </CollapsibleTrigger>
+        <CollapsibleContent>
+          <CardContent className="space-y-5 pt-0">
+            <p className="text-sm text-muted-foreground">{t('automationsPage.help.intro')}</p>
+
+            {/* How it works — trigger → condition → action */}
+            <div className="grid gap-3 sm:grid-cols-3">
+              {steps.map((step) => (
+                <div key={step} className="rounded-lg border bg-muted/30 p-3">
+                  <p className="text-xs font-semibold">{t(`automationsPage.help.steps.${step}.title`)}</p>
+                  <p className="mt-1 text-[11px] text-muted-foreground">{t(`automationsPage.help.steps.${step}.body`)}</p>
+                </div>
+              ))}
+            </div>
+
+            {/* Trigger kinds + action types */}
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-1.5">
+                <p className="text-xs font-semibold">{t('automationsPage.help.triggersTitle')}</p>
+                <ul className="space-y-1 text-[11px] text-muted-foreground">
+                  {triggerKinds.map((k) => (
+                    <li key={k}>
+                      <span className="font-medium text-foreground">{t(`automationsPage.triggers.${k}`)}</span>
+                      {' — '}
+                      {t(`automationsPage.help.triggerKinds.${k}`)}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+              <div className="space-y-1.5">
+                <p className="text-xs font-semibold">{t('automationsPage.help.actionsTitle')}</p>
+                <ul className="space-y-1 text-[11px] text-muted-foreground">
+                  {actionTypes.map((a) => (
+                    <li key={a}>
+                      <span className="font-medium text-foreground">{t(ACTION_LABEL_KEYS[a])}</span>
+                      {' — '}
+                      {t(`automationsPage.help.actionDescriptions.${a}`)}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+
+            {/* Example use-cases */}
+            <div className="space-y-1.5">
+              <p className="flex items-center gap-1.5 text-xs font-semibold">
+                <Lightbulb className="h-3.5 w-3.5 text-amber-500" />
+                {t('automationsPage.help.useCasesTitle')}
+              </p>
+              <ul className="ml-4 list-disc space-y-1 text-[11px] text-muted-foreground">
+                {useCases.map((u) => (
+                  <li key={u}>{t(`automationsPage.help.useCases.${u}`)}</li>
+                ))}
+              </ul>
+            </div>
+
+            {/* Conditions hint */}
+            <div className="rounded-md bg-muted/50 px-3 py-2">
+              <p className="text-[11px] text-muted-foreground">{t('automationsPage.help.conditionsHint')}</p>
+            </div>
+
+            <Separator />
+
+            {/* One-click templates */}
+            <div className="space-y-2">
+              <p className="flex items-center gap-1.5 text-xs font-semibold">
+                <Sparkles className="h-3.5 w-3.5 text-primary" />
+                {t('automationsPage.help.templatesTitle')}
+              </p>
+              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                {RULE_TEMPLATES.map((tpl) => (
+                  <div key={tpl.id} className="flex flex-col rounded-lg border p-3">
+                    <p className="text-xs font-medium">{t(`automationsPage.templates.${tpl.id}.name`)}</p>
+                    <p className="mt-0.5 mb-2 flex-1 text-[11px] text-muted-foreground">
+                      {t(`automationsPage.templates.${tpl.id}.description`)}
+                    </p>
+                    <code className="mb-2 truncate text-[10px] text-muted-foreground">{tpl.triggerSpec}</code>
+                    <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => onUseTemplate(tpl)}>
+                      <Plus className="mr-1.5 h-3.5 w-3.5" />
+                      {t('automationsPage.help.useTemplate')}
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </CardContent>
+        </CollapsibleContent>
+      </Collapsible>
+    </Card>
+  );
+}
 
 function RuleList({
   rules,

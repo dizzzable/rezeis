@@ -32,6 +32,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { FadeIn } from '@/lib/motion'
 import { usePlans } from '@/features/plans/plans-api'
 import { IconPicker } from '@/features/settings/icon-picker'
+import { EmojiTextInput } from '@/features/broadcast/emoji-text-input'
 import { AddOnsStatsTab } from './add-ons-stats-tab'
 
 const CURRENCIES = ['RUB', 'USD', 'USDT', 'TON', 'XTR', 'EUR'] as const
@@ -465,20 +466,22 @@ function AddOnDialog({
         <form onSubmit={handleSubmit} className="space-y-4">
           <div className="space-y-2">
             <Label>{t('addOnsPage.form.name')} *</Label>
-            <Input
+            <EmojiTextInput
               value={name}
-              onChange={(e) => setName(e.target.value)}
+              onChange={setName}
               placeholder={t('addOnsPage.form.namePlaceholder')}
               required
+              emojiAriaLabel={t('emojiPicker.trigger')}
             />
           </div>
 
           <div className="space-y-2">
             <Label>{t('addOnsPage.form.description')}</Label>
-            <Input
+            <EmojiTextInput
               value={description}
-              onChange={(e) => setDescription(e.target.value)}
+              onChange={setDescription}
               placeholder={t('addOnsPage.form.descriptionPlaceholder')}
+              emojiAriaLabel={t('emojiPicker.trigger')}
             />
           </div>
 

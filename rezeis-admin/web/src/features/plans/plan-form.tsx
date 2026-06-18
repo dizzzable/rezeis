@@ -25,6 +25,7 @@ import { Switch } from '@/components/ui/switch'
 import { cn } from '@/lib/utils'
 import { remnawaveApi } from '@/features/remnawave/remnawave-api'
 import { IconPicker } from '@/features/settings/icon-picker'
+import { EmojiTextInput } from '@/features/broadcast/emoji-text-input'
 import { usePlans, type Plan } from './plans-api'
 import {
   PLAN_AVAILABILITIES,
@@ -221,12 +222,13 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
         <div className="grid gap-4 md:grid-cols-2">
           <div className="space-y-2">
             <Label>{t('planForm.name')} *</Label>
-            <Input
+            <EmojiTextInput
               value={name}
-              onChange={(e) => setName(e.target.value)}
+              onChange={setName}
               placeholder={t('planForm.namePlaceholder')}
               required
               aria-invalid={!!formErrors.name}
+              emojiAriaLabel={t('emojiPicker.trigger')}
             />
             <FieldError message={formErrors.name} />
           </div>
@@ -252,10 +254,11 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
         </div>
         <div className="space-y-2">
           <Label>{t('planForm.description')}</Label>
-          <Input
+          <EmojiTextInput
             value={description}
-            onChange={(e) => setDescription(e.target.value)}
+            onChange={setDescription}
             placeholder={t('planForm.descriptionPlaceholder')}
+            emojiAriaLabel={t('emojiPicker.trigger')}
           />
         </div>
 

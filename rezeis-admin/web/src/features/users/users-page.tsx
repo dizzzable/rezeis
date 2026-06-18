@@ -157,17 +157,17 @@ const UserListRow = memo(function UserListRow({ user, isSelected, onSelect }: Us
       )}
     >
       <div className="min-w-0 flex-1">
-        <p className="truncate text-sm font-medium">{user.name || '—'}</p>
+        <div className="flex items-center gap-2">
+          <p className="min-w-0 flex-1 truncate text-sm font-medium">{user.name || '—'}</p>
+          {user.role !== 'USER' && (
+            <span className="shrink-0 text-[10px] text-muted-foreground">{user.role}</span>
+          )}
+          <span className={`shrink-0 inline-block h-2.5 w-2.5 rounded-full ${getUserStatusClass(user)}`} />
+        </div>
         <p className="truncate text-xs text-muted-foreground">
           {user.username ? `@${user.username} · ` : ''}
           {user.telegramId ?? user.email ?? user.id}
         </p>
-      </div>
-      <div className="flex shrink-0 flex-col items-end gap-1">
-        <span className={`inline-block h-2.5 w-2.5 rounded-full ${getUserStatusClass(user)}`} />
-        {user.role !== 'USER' && (
-          <span className="text-[10px] text-muted-foreground">{user.role}</span>
-        )}
       </div>
     </button>
   )

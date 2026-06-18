@@ -1501,6 +1501,7 @@ export const en = {
   },
   iconPicker: {
     auto: 'Auto',
+    emoji: 'Emoji',
   },
   planForm: {
     name: 'Plan name',
@@ -1512,7 +1513,7 @@ export const en = {
     icon: 'Plan icon',
     iconAuto: 'Auto',
     iconNone: 'By plan type',
-    iconHint: 'Shown on the plan card in the cabinet. "Auto" uses an icon derived from the plan type.',
+    iconHint: 'Shown on the plan card in the cabinet. "Auto" uses an icon derived from the plan type. You can also pick an emoji (including custom animated ones).',
     description: 'Description',
     descriptionPlaceholder: 'Best value for heavy users',
     planType: 'Plan type',
@@ -2468,7 +2469,7 @@ export const en = {
       active: 'Active',
       icon: 'Add-on icon',
       iconAuto: 'Auto',
-      iconHint: 'Shown on the add-on card in the cabinet. "Auto" uses a type-derived icon.',
+      iconHint: 'Shown on the add-on card in the cabinet. "Auto" uses a type-derived icon. You can also pick an emoji (including custom animated ones).',
       plans: 'Applicable plans',
       plansHint: 'Empty = available for all plans',
       noPlans: 'No plans found',

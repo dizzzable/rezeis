@@ -88,5 +88,72 @@ export const en = {
       runFailed: 'Run failed: {{message}}',
       toggleFailed: 'Failed to toggle rule: {{message}}',
     },
+    help: {
+      title: 'How it works — examples & templates',
+      intro: 'An automation is an "if X happens, do Y" rule. You pick a trigger, optionally add conditions, and one or more actions. Each rule runs independently; its runs appear under the "Runs" tab.',
+      steps: {
+        trigger: {
+          title: '1. Trigger',
+          body: 'What starts the rule: a system event, a schedule (cron), or a manual run.',
+        },
+        condition: {
+          title: '2. Conditions (opt.)',
+          body: 'A JSON-logic filter — the rule fires only when the event data matches.',
+        },
+        action: {
+          title: '3. Actions',
+          body: 'What to do when it fires: notify, webhook, block, etc. Several can run in a row.',
+        },
+      },
+      triggersTitle: 'Trigger types',
+      triggerKinds: {
+        realtime: 'reacts to a system event (pattern, e.g. "payment.*").',
+        cron: 'runs on a UTC schedule (5-field cron expression).',
+        manual: 'fires only via the "Run now" button.',
+      },
+      actionsTitle: 'Actions',
+      actionDescriptions: {
+        notify_telegram: 'send a Telegram message through the configured delivery.',
+        webhook_post: 'POST JSON to an arbitrary URL (with optional auth header).',
+        block_ip: 'block the IP from the trigger data or an explicit one.',
+        block_user: 'block the user by the ID carried in the trigger.',
+        system_event: 'emit your own event back into the bus (type/category/severity).',
+      },
+      useCasesTitle: 'Example use-cases',
+      useCases: {
+        fraud: 'Anti-fraud signal → block the IP and post to Telegram.',
+        nodeDown: 'Node goes offline → instant alert to the on-call operator.',
+        payment: 'Successful payment → send a webhook to an external accounting system.',
+        daily: 'Every morning via cron → ping an external service health-check.',
+      },
+      conditionsHint: 'Conditions use JSON-logic; event variables are prefixed with $, e.g.: { "and": [ { "==": ["$severity", "ERROR"] }, { ">": ["$score", 70] } ] }. Empty = always fire.',
+      templatesTitle: 'Ready-made templates (one click)',
+      useTemplate: 'Use',
+    },
+    templates: {
+      payment_failed_notify: {
+        name: 'Payment failed → Telegram',
+        description: 'Sends a Telegram alert when a payment fails.',
+        message: '❌ Payment failed — check the payment gateway.',
+      },
+      fraud_block_ip: {
+        name: 'Anti-fraud → block IP + Telegram',
+        description: 'On an anti-fraud signal, blocks the IP and notifies.',
+        message: '🚨 Anti-fraud: IP blocked by signal.',
+      },
+      node_down_notify: {
+        name: 'Node offline → Telegram',
+        description: 'Sends an urgent alert when a node goes offline.',
+        message: '🔴 Node offline — check the server.',
+      },
+      payment_completed_webhook: {
+        name: 'Successful payment → webhook',
+        description: 'Sends a webhook to an external system on successful payment. Remember to set the URL and token.',
+      },
+      daily_healthcheck_cron: {
+        name: 'Daily health-check (cron)',
+        description: 'Hits an external service webhook every day at 09:00 UTC.',
+      },
+    },
   },
 } as const

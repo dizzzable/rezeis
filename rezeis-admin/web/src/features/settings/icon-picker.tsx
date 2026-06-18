@@ -12,12 +12,26 @@ import { useTranslation } from 'react-i18next'
 
 import { cn } from '@/lib/utils'
 import { PLAN_ICON_OPTIONS } from '@/features/plans/plan-icon-options'
+import { EmojiPicker } from '@/features/broadcast/emoji-picker'
+import { EmojiIconView } from '@/features/custom-emoji/emoji-icon-view'
 
 import { CUSTOM_ICONS_QUERY_KEY, getCustomIcons } from './custom-icons-api'
 import { CustomIconView } from './custom-icon-view'
 
 /** Prefix marking an `icon` value as a reference to a custom uploaded icon. */
 export const CUSTOM_ICON_PREFIX = 'custom:'
+
+/** Set of built-in Lucide preset keys, for fast emoji-vs-preset detection. */
+const PRESET_KEYS = new Set(PLAN_ICON_OPTIONS.map((o) => o.key))
+
+/**
+ * `true` when an icon value is an emoji (a Unicode glyph or a `:slug:`
+ * custom-pack shortcode) rather than a Lucide preset key, a `custom:<id>`
+ * uploaded icon, or null ("Auto").
+ */
+export function isEmojiIcon(value: string | null): value is string {
+  return value !== null && value.length > 0 && !value.startsWith(CUSTOM_ICON_PREFIX) && !PRESET_KEYS.has(value)
+}
 
 interface IconPickerProps {
   /** Current value: a lucide key, `custom:<id>`, or null ("Auto"). */
@@ -86,6 +100,24 @@ export function IconPicker({ value, onChange, autoLabel }: IconPickerProps) {
           </button>
         )
       })}
+
+      {/* Emoji cell — hosts the emoji picker (standard + custom packs). When an
+          emoji is currently selected, its real glyph/animation overlays the
+          trigger (pointer-events-none so a click still opens the picker). */}
+      <div
+        className={cn(
+          'relative flex h-9 w-9 items-center justify-center rounded-lg border transition-all',
+          isEmojiIcon(value) ? 'border-primary bg-primary/10 ring-2 ring-primary/40' : 'border-border hover:border-primary/40',
+        )}
+        title={t('iconPicker.emoji')}
+      >
+        <EmojiPicker onSelect={(emoji) => onChange(emoji)} ariaLabel={t('iconPicker.emoji')} />
+        {isEmojiIcon(value) && (
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center text-lg">
+            <EmojiIconView value={value} className="h-6 w-6" />
+          </div>
+        )}
+      </div>
     </div>
   )
 }
