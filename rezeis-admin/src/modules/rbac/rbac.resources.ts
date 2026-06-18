@@ -34,6 +34,10 @@ export const RBAC_ACTIONS = [
   /// attachments. Separated from `view` so archived (often identity-bearing)
   /// guest threads can be restricted to a subset of agents.
   'archive',
+  /// Anti-fraud — dropping a flagged user's live connections via Remnawave
+  /// `ip-control`. Separated from `resolve` because it is a destructive,
+  /// session-killing action distinct from triaging the signal row.
+  'enforce',
 ] as const;
 
 export type RbacAction = (typeof RBAC_ACTIONS)[number];
@@ -89,7 +93,7 @@ export const RBAC_RESOURCES: Readonly<Record<string, readonly RbacAction[]>> = {
   blocked_ips: ['view', 'create', 'delete'],
 
   // Realtime / events (future fraud signals + automations)
-  fraud_signals: ['view', 'resolve'],
+  fraud_signals: ['view', 'resolve', 'enforce'],
   automations: ['view', 'create', 'edit', 'delete', 'run'],
   /// Phase 6 — outgoing webhook subscriptions and their delivery history.
   /// `view` covers reading subscriptions + deliveries; `edit` includes

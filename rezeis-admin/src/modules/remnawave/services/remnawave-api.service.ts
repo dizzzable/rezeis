@@ -62,6 +62,8 @@ export interface RemnawavePanelUser {
   status: string;
   subscriptionUrl: string;
   telegramId: number | null;
+  /** Panel-internal numeric id (BigInt). `ip-control` keys users by this. */
+  panelId: number | null;
   email: string | null;
   expireAt: string;
   trafficLimitBytes: number;
@@ -118,6 +120,79 @@ function mapHwidDevice(raw: unknown): RemnawaveHwidDevice {
     createdAt: str(r['createdAt']) ?? '',
     lastSeenAt: str(r['lastSeenAt']) ?? str(r['updatedAt']),
   };
+}
+
+// ── ip-control (active sessions / source IPs) ──────────────────────────────
+
+/** A single source IP a user was seen connecting from, with its last activity. */
+export interface RemnawaveIpSample {
+  ip: string;
+  lastSeen: string;
+}
+
+/** Online users + their source IPs on a single node (fetch-users-ips result). */
+export interface RemnawaveNodeUserIps {
+  userId: string;
+  ips: RemnawaveIpSample[];
+}
+
+/** Per-node IP breakdown for a single user (fetch-ips result). */
+export interface RemnawaveUserNodeIps {
+  nodeUuid: string;
+  nodeName: string;
+  countryCode: string | null;
+  ips: RemnawaveIpSample[];
+}
+
+/** Discriminated input for `drop-connections` mirroring `DropConnectionsRequestDto`. */
+export type RemnawaveDropConnectionsInput = {
+  dropBy:
+    | { by: 'userUuids'; userUuids: string[] }
+    | { by: 'ipAddresses'; ipAddresses: string[] };
+  targetNodes:
+    | { target: 'allNodes' }
+    | { target: 'specificNodes'; nodeUuids: string[] };
+};
+
+function mapIpSamples(raw: unknown): RemnawaveIpSample[] {
+  if (!Array.isArray(raw)) return [];
+  const out: RemnawaveIpSample[] = [];
+  for (const entry of raw) {
+    const r = (entry ?? {}) as Record<string, unknown>;
+    const ip = typeof r['ip'] === 'string' ? r['ip'] : null;
+    const lastSeen = typeof r['lastSeen'] === 'string' ? r['lastSeen'] : null;
+    if (ip !== null && lastSeen !== null) out.push({ ip, lastSeen });
+  }
+  return out;
+}
+
+function mapNodeUsersIps(result: unknown): RemnawaveNodeUserIps[] {
+  const users = (result as { users?: unknown } | null)?.users;
+  if (!Array.isArray(users)) return [];
+  const out: RemnawaveNodeUserIps[] = [];
+  for (const entry of users) {
+    const r = (entry ?? {}) as Record<string, unknown>;
+    const userId = typeof r['userId'] === 'string' ? r['userId'] : null;
+    if (userId === null) continue;
+    out.push({ userId, ips: mapIpSamples(r['ips']) });
+  }
+  return out;
+}
+
+function mapUserNodeIps(result: unknown): RemnawaveUserNodeIps[] {
+  const nodes = (result as { nodes?: unknown } | null)?.nodes;
+  if (!Array.isArray(nodes)) return [];
+  const out: RemnawaveUserNodeIps[] = [];
+  for (const entry of nodes) {
+    const r = (entry ?? {}) as Record<string, unknown>;
+    out.push({
+      nodeUuid: typeof r['nodeUuid'] === 'string' ? r['nodeUuid'] : '',
+      nodeName: typeof r['nodeName'] === 'string' ? r['nodeName'] : '',
+      countryCode: typeof r['countryCode'] === 'string' ? r['countryCode'] : null,
+      ips: mapIpSamples(r['ips']),
+    });
+  }
+  return out;
 }
 
 @Injectable()
@@ -551,6 +626,7 @@ export class RemnawaveApiService {
               : typeof value.telegram_id === 'number'
                 ? (value.telegram_id as number)
                 : null,
+          panelId: typeof value.id === 'number' ? value.id : null,
           email: typeof value.email === 'string' ? value.email : null,
           expireAt:
             typeof value.expireAt === 'string'
@@ -764,6 +840,103 @@ export class RemnawaveApiService {
     } catch {
       return [];
     }
+  }
+
+  // ── ip-control: active sessions / source IPs ──────────────────────────────
+
+  /**
+   * Fetches online users and their source IPs for a single node — the data
+   * behind the panel's "Active sessions" view. Async on the panel side:
+   * `POST fetch-users-ips/{nodeUuid}` returns a `jobId` we then poll.
+   * Returns `[]` on any failure/timeout (fail-soft for the detector).
+   */
+  public async fetchUsersIpsForNode(nodeUuid: string): Promise<readonly RemnawaveNodeUserIps[]> {
+    try {
+      const started = await this.requestJsonWithBody<{ response?: { jobId?: string } }>(
+        'post',
+        `/api/ip-control/fetch-users-ips/${nodeUuid}`,
+        {},
+      );
+      const jobId = started?.response?.jobId;
+      if (typeof jobId !== 'string' || jobId.length === 0) return [];
+      const users = await this.pollIpControlJob(
+        (id) => `/api/ip-control/fetch-users-ips/result/${id}`,
+        jobId,
+        mapNodeUsersIps,
+      );
+      return users ?? [];
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Per-user IP drilldown across nodes (`POST fetch-ips/{uuid}` → poll).
+   * Used for on-demand inspection of one flagged user. Fail-soft → `[]`.
+   */
+  public async fetchUserIps(userUuid: string): Promise<readonly RemnawaveUserNodeIps[]> {
+    try {
+      const started = await this.requestJsonWithBody<{ response?: { jobId?: string } }>(
+        'post',
+        `/api/ip-control/fetch-ips/${userUuid}`,
+        {},
+      );
+      const jobId = started?.response?.jobId;
+      if (typeof jobId !== 'string' || jobId.length === 0) return [];
+      const nodes = await this.pollIpControlJob(
+        (id) => `/api/ip-control/fetch-ips/result/${id}`,
+        jobId,
+        mapUserNodeIps,
+      );
+      return nodes ?? [];
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Drops live connections for the given users or IPs across the targeted
+   * nodes (`POST drop-connections`). Used by the anti-fraud enforcement path.
+   */
+  public async dropConnections(input: RemnawaveDropConnectionsInput): Promise<{ ok: boolean }> {
+    await this.requestJsonWithBody(
+      'post',
+      '/api/ip-control/drop-connections',
+      input as unknown as Record<string, unknown>,
+    );
+    return { ok: true };
+  }
+
+  /**
+   * Polls an `ip-control` result endpoint until the job is completed or
+   * failed, or a bounded number of attempts elapse. Returns the extracted
+   * payload on completion, or `null` on failure/timeout.
+   */
+  private async pollIpControlJob<T>(
+    resultPath: (jobId: string) => string,
+    jobId: string,
+    extract: (result: unknown) => T,
+    options: { attempts?: number; intervalMs?: number } = {},
+  ): Promise<T | null> {
+    const attempts = options.attempts ?? 12;
+    const intervalMs = options.intervalMs ?? 500;
+    for (let i = 0; i < attempts; i++) {
+      try {
+        const raw = await this.requestJson<unknown>({
+          method: 'get',
+          url: resultPath(jobId),
+        });
+        const resp = (raw as { response?: unknown })?.response as
+          | { isCompleted?: boolean; isFailed?: boolean; result?: unknown }
+          | undefined;
+        if (resp?.isFailed === true) return null;
+        if (resp?.isCompleted === true) return extract(resp.result);
+      } catch {
+        return null;
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, intervalMs));
+    }
+    return null;
   }
 
   /**

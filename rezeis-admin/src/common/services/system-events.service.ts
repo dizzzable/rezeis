@@ -141,6 +141,7 @@ export const EVENT_TYPES = {
 
   // Anti-fraud
   FRAUD_SIGNAL_OPENED: 'fraud.signal_opened',
+  FRAUD_CONNECTIONS_DROPPED: 'fraud.connections_dropped',
 
   // System
   SYSTEM_STARTUP: 'system.startup',

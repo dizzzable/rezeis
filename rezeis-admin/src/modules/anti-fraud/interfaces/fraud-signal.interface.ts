@@ -70,3 +70,25 @@ export interface ListFraudSignalsResult {
   readonly items: readonly FraudSignalInterface[];
   readonly nextCursor: string | null;
 }
+
+/** One day of the severity-segmented trend chart. */
+export interface FraudTrendPoint {
+  readonly date: string;
+  readonly high: number;
+  readonly medium: number;
+  readonly low: number;
+}
+
+/** A top sharing offender row derived from open sharing signals. */
+export interface FraudSharingOffender {
+  readonly signalId: string;
+  readonly code: string;
+  readonly severity: FraudSignalSeverity;
+  readonly kind: 'hwid_overage' | 'ip_sharing';
+  readonly count: number;
+  readonly deviceLimit: number;
+  readonly remnawaveUuid: string | null;
+  readonly affectedUserIds: readonly string[];
+  readonly telegramId: string | null;
+  readonly score: number;
+}

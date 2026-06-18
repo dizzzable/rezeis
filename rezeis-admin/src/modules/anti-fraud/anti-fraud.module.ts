@@ -5,6 +5,7 @@ import { RemnawaveModule } from '../remnawave/remnawave.module';
 import { AdminFraudController } from './controllers/admin-fraud.controller';
 import { FraudDetectors } from './detectors/fraud-detectors';
 import { RemnawaveDetectors } from './detectors/remnawave-detectors';
+import { SharingDetectors } from './detectors/sharing-detectors';
 import { AntiFraudService } from './services/anti-fraud.service';
 
 /**
@@ -28,7 +29,7 @@ import { AntiFraudService } from './services/anti-fraud.service';
 @Module({
   imports: [AuthModule, RemnawaveModule],
   controllers: [AdminFraudController],
-  providers: [AntiFraudService, FraudDetectors, RemnawaveDetectors],
+  providers: [AntiFraudService, FraudDetectors, RemnawaveDetectors, SharingDetectors],
   exports: [AntiFraudService],
 })
 export class AntiFraudModule {}

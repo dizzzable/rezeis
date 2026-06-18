@@ -30,7 +30,7 @@
 
 ### `REDIS_*`
 
-Блок `REDIS_HOST`, `REDIS_PORT`, `REDIS_NAME`, `REDIS_PASSWORD` задает подключение к Redis. Production `docker-compose.yml` требует явный `REDIS_PASSWORD` из `.env` или shell, передает его в `redis-server --requirepass` и использует `REDISCLI_AUTH` для healthcheck без hardcoded пароля. `REDIS_URL` не нужен для нового production compose; если отдельный legacy компонент ожидает URL, он должен быть собран из тех же split `REDIS_*` значений.
+Блок `REDIS_HOST`, `REDIS_PORT`, `REDIS_NAME`, `REDIS_PASSWORD` задает подключение к Valkey (drop-in замена Redis, протокол совместим — переменные сохраняют префикс `REDIS_*`). Production `docker-compose.yml` требует явный `REDIS_PASSWORD` из `.env` или shell, передает его в `valkey-server --requirepass` и использует `REDISCLI_AUTH` для healthcheck без hardcoded пароля. `REDIS_URL` не нужен для нового production compose; если отдельный legacy компонент ожидает URL, он должен быть собран из тех же split `REDIS_*` значений.
 
 ### `ADMIN_CORS_ORIGINS`
 

@@ -7,6 +7,7 @@ import {
   Param,
   Post,
   Query,
+  Req,
   UseGuards,
 } from '@nestjs/common';
 import {
@@ -15,12 +16,15 @@ import {
   ApiOperation,
   ApiTags,
 } from '@nestjs/swagger';
+import { Request } from 'express';
 
 import { CurrentAdmin } from '../../auth/decorators/current-admin.decorator';
 import { AdminJwtAuthGuard } from '../../auth/guards/admin-jwt-auth.guard';
 import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.interface';
+import { extractRequestMetadata } from '../../auth/utils/request-metadata.util';
 import { RequirePermission } from '../../rbac/decorators/require-permission.decorator';
 import { RbacGuard } from '../../rbac/guards/rbac.guard';
+import { EnforceFraudSignalDto } from '../dto/enforce-fraud-signal.dto';
 import { ListFraudSignalsQueryDto } from '../dto/list-fraud-signals.dto';
 import { TransitionFraudSignalDto } from '../dto/transition-fraud-signal.dto';
 import {
@@ -67,6 +71,22 @@ export class AdminFraudController {
     return this.antiFraudService.getStats();
   }
 
+  @Get('trend')
+  @RequirePermission('fraud_signals', 'view')
+  @ApiOperation({ summary: 'Severity-segmented signals-per-day trend' })
+  public getTrend(@Query('days') days?: string) {
+    const parsed = Number.parseInt(days ?? '14', 10);
+    return this.antiFraudService.getTrend(Number.isFinite(parsed) ? parsed : 14);
+  }
+
+  @Get('top-offenders')
+  @RequirePermission('fraud_signals', 'view')
+  @ApiOperation({ summary: 'Top sharing offenders from open sharing signals' })
+  public getTopOffenders(@Query('limit') limit?: string) {
+    const parsed = Number.parseInt(limit ?? '10', 10);
+    return this.antiFraudService.getTopOffenders(Number.isFinite(parsed) ? parsed : 10);
+  }
+
   @Get('signals/:id')
   @RequirePermission('fraud_signals', 'view')
   @ApiOperation({ summary: 'Returns one fraud signal' })
@@ -98,5 +118,30 @@ export class AdminFraudController {
   public async runDetectors(): Promise<{ ok: true; processed: number }> {
     const results = await this.antiFraudService.runDetectors();
     return { ok: true, processed: results.length };
+  }
+
+  @Get('signals/:id/live-ips')
+  @RequirePermission('fraud_signals', 'view')
+  @ApiOperation({ summary: 'Live per-node source IPs for the signal user (ip-control drilldown)' })
+  public getLiveIps(@Param('id') id: string) {
+    return this.antiFraudService.getSignalLiveIps(id);
+  }
+
+  @Post('signals/:id/enforce')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('fraud_signals', 'enforce')
+  @ApiOperation({ summary: 'Drops the flagged user/IPs live connections via Remnawave ip-control' })
+  public enforce(
+    @Param('id') id: string,
+    @Body() dto: EnforceFraudSignalDto,
+    @CurrentAdmin() admin: CurrentAdminInterface,
+    @Req() req: Request,
+  ) {
+    return this.antiFraudService.enforceDropConnections({
+      signalId: id,
+      mode: dto.mode ?? 'user',
+      adminId: admin.id,
+      requestMetadata: extractRequestMetadata(req),
+    });
   }
 }

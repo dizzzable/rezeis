@@ -173,12 +173,12 @@ services:
       - rezeis-private
 
   rezeis-redis:
-    image: redis:7-alpine
+    image: valkey/valkey:9-alpine
     container_name: rezeis-redis
     hostname: rezeis-redis
     restart: unless-stopped
     command:
-      - redis-server
+      - valkey-server
       - --requirepass
       - ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env to a generated value}
       - --maxmemory
@@ -197,7 +197,7 @@ services:
     volumes:
       - rezeis-redis-data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "valkey-cli", "ping"]
       interval: 10s
       timeout: 3s
       retries: 3
