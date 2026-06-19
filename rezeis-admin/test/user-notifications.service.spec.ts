@@ -49,7 +49,7 @@ describe('UserNotificationsService', () => {
       },
     ]);
     assert.deepStrictEqual(state.webPushCalls, [
-      { userId: 'user-1', title: 'Reiwa', body: 'Manual message' },
+      { userId: 'user-1', title: 'Reiwa', body: 'Manual message', url: '/dashboard' },
     ]);
   });
 
@@ -105,6 +105,7 @@ describe('UserNotificationsService', () => {
         userId: 'user-1',
         title: 'Expires soon',
         body: 'Hello Nina, 3 day(s) left',
+        url: '/renew',
       },
     ]);
   });
@@ -121,7 +122,7 @@ describe('UserNotificationsService', () => {
 
     assert.deepStrictEqual(state.notifyUserCalls, []);
     assert.deepStrictEqual(state.webPushCalls, [
-      { userId: 'user-1', title: 'Title', body: 'Body' },
+      { userId: 'user-1', title: 'Title', body: 'Body', url: '/dashboard' },
     ]);
   });
 });

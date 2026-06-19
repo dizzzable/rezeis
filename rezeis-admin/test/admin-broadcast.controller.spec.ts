@@ -80,6 +80,7 @@ describe('AdminBroadcastController', () => {
       } as never,
       {} as never,
       {} as never,
+      {} as never,
     );
     const admin = currentAdmin();
     const createDto: CreateBroadcastDraftDto = { audience: BroadcastAudience.ALL };
@@ -152,6 +153,7 @@ describe('AdminBroadcastController', () => {
           return 1;
         },
       } as never,
+      {} as never,
     );
     const admin = currentAdmin();
     const editDto: EditBroadcastDto = { text: 'Updated text', parseMode: 'HTML' };
@@ -242,6 +244,7 @@ describe('AdminBroadcastController', () => {
           };
         },
       } as never,
+      {} as never,
       {} as never,
     );
 
