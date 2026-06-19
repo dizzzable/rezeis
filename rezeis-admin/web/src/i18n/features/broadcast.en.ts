@@ -52,6 +52,16 @@ export const en = {
       canceled: 'Broadcast canceled',
       cancelFailed: 'Failed to cancel',
       deleted: 'Broadcast deleted',
+      scheduled: 'Broadcast scheduled',
+      testSent: 'Test message sent to the developer',
+      testFailed: 'Failed to send test',
+    },
+    schedule: {
+      label: 'Scheduled send',
+      on: 'Schedule',
+      off: 'Now',
+      hint: 'Pick a date and time to send (in your timezone). If the time has already passed, it sends immediately.',
+      willSendIn: 'Will send in about {{minutes}} min.',
     },
     edit: {
       title: 'Edit broadcast',
@@ -86,6 +96,9 @@ export const en = {
       recipients_one: '{{count}} user will receive this message',
       recipients_other: '{{count}} users will receive this message',
       text: 'Message text',
+      titleLabel: 'Title',
+      titlePlaceholder: 'e.g. New plans and discounts',
+      titleHint: 'Shown in the notifications feed and the cabinet bell.',
       textPlaceholder:
         "Enter your message here. Supports HTML: <b>bold</b>, <i>italic</i>, <a href='...'>link</a>",
       charCount: '{{count}} characters',
@@ -108,6 +121,7 @@ export const en = {
       fileIdHint: 'Get file_id by sending the {{type}} to your bot and checking the update.',
       validation: {
         audienceInvalid: 'Choose a valid broadcast audience.',
+        titleTooLong: 'Title must be 128 characters or less.',
         textRequired: 'Enter message text or attach media.',
         textTooLong: 'Message text must be 4096 characters or less.',
         mediaTypeInvalid: 'Choose photo, video, or no media.',
@@ -117,6 +131,8 @@ export const en = {
         mediaFileIdInvalid: 'Telegram file_id cannot contain spaces.',
       },
       sendNow: 'Create and send',
+      testSend: 'Test (dev)',
+      scheduleSend: 'Schedule',
       send_one: 'Send to {{count}} user',
       send_other: 'Send to {{count}} users',
     },

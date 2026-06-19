@@ -175,6 +175,11 @@ export class UserNotificationsService {
           // Browsers render the body as plain text inside the OS
           // Notification surface, so send the stripped form.
           body: stripHtml(rendered.body),
+          // Deep-link the SW click to the page that lets the user act on
+          // the notification (renewal / referrals / feed), mirroring the
+          // cabinet's `resolveNotificationTarget` so PWA pushes and the
+          // in-app bell agree on destinations.
+          url: resolveNotificationPushUrl(input.type),
         });
       }
 
@@ -460,4 +465,21 @@ function escapeHtml(input: string): string {
  */
 function stripHtml(input: string): string {
   return input.replace(/<[^>]*>/g, '');
+}
+
+/**
+ * Resolve the cabinet route a web-push notification should deep-link to when
+ * clicked, mirroring reiwa web's `resolveNotificationTarget` so the PWA push
+ * and the in-app bell agree on destinations:
+ *   • expiry / traffic-limit reminders → the renewal page
+ *   • referral / partner program       → the referrals cabinet
+ *   • broadcasts / news                 → the notifications feed
+ *   • everything else                   → the dashboard
+ */
+function resolveNotificationPushUrl(type: string): string {
+  const t = type.toLowerCase();
+  if (t.includes('expir') || t.includes('limited')) return '/renew';
+  if (t.includes('referral') || t.includes('partner')) return '/referrals';
+  if (t.includes('broadcast') || t.includes('news')) return '/settings/notifications/feed';
+  return '/dashboard';
 }

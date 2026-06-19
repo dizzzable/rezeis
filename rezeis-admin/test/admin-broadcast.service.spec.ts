@@ -51,6 +51,7 @@ describe('BroadcastService', () => {
         audience: BroadcastAudience.ACTIVE_SUBSCRIBERS,
         audiencePlanId: 'plan-1',
         payload: {
+          title: null,
           text: 'Hello subscribers',
           mediaType: 'photo',
           mediaFileId: 'telegram-file-id',
@@ -107,6 +108,7 @@ describe('BroadcastService', () => {
           audience: BroadcastAudience.TRIAL,
           audiencePlanId: null,
           payload: {
+            title: null,
             text: 'Trial notice',
             mediaType: 'video',
             mediaFileId: 'video-file-id',
@@ -118,6 +120,7 @@ describe('BroadcastService', () => {
     ]);
     assert.equal(result.audience, BroadcastAudience.TRIAL);
     assert.deepStrictEqual(result.payload, {
+      title: null,
       text: 'Trial notice',
       mediaType: 'video',
       mediaFileId: 'video-file-id',

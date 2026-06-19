@@ -1,7 +1,7 @@
 import { useMemo, useRef, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
-import { Plus, Megaphone, Send, XCircle, Trash2, Loader2, RefreshCw, Upload, FileImage, FileVideo, X, Pencil } from 'lucide-react'
+import { Plus, Megaphone, Send, XCircle, Trash2, Loader2, RefreshCw, Upload, FileImage, FileVideo, X, Pencil, Clock, FlaskConical } from 'lucide-react'
 import { useForm, type FieldErrors, type Resolver } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { toast } from 'sonner'
@@ -295,6 +295,7 @@ function CreateBroadcastForm({ onClose }: { onClose: () => void }) {
   const queryClient = useQueryClient()
   const validationMessages = useMemo<BroadcastFormValidationMessages>(() => ({
     audienceInvalid: t('broadcastPage.form.validation.audienceInvalid'),
+    titleTooLong: t('broadcastPage.form.validation.titleTooLong'),
     textRequired: t('broadcastPage.form.validation.textRequired'),
     textTooLong: t('broadcastPage.form.validation.textTooLong'),
     mediaTypeInvalid: t('broadcastPage.form.validation.mediaTypeInvalid'),
@@ -307,6 +308,7 @@ function CreateBroadcastForm({ onClose }: { onClose: () => void }) {
   const form = useForm<BroadcastFormDraft, unknown, BroadcastCreateRequest>({
     defaultValues: {
       audience: 'ALL',
+      title: '',
       text: '',
       mediaType: 'none',
       mediaSourceMode: 'upload',
@@ -318,12 +320,15 @@ function CreateBroadcastForm({ onClose }: { onClose: () => void }) {
   })
   const [formErrors, setFormErrors] = useState<Record<string, string>>({})
   const [audience, setAudience] = useState('ALL')
+  const [title, setTitle] = useState('')
   const [text, setText] = useState('')
   const [mediaType, setMediaType] = useState<'none' | 'photo' | 'video'>('none')
   const [mediaSourceMode, setMediaSourceMode] = useState<'upload' | 'url' | 'fileId'>('upload')
   const [mediaValue, setMediaValue] = useState('')
   const [uploaded, setUploaded] = useState<UploadedMedia | null>(null)
   const [isDragging, setIsDragging] = useState(false)
+  const [scheduleEnabled, setScheduleEnabled] = useState(false)
+  const [scheduledAt, setScheduledAt] = useState('')
   const fileInputRef = useRef<HTMLInputElement>(null)
   const textRef = useRef<HTMLTextAreaElement>(null)
 
@@ -398,34 +403,63 @@ function CreateBroadcastForm({ onClose }: { onClose: () => void }) {
   const createMutation = useMutation({
     mutationFn: async (payload: BroadcastCreateRequest) => {
       const response = await api.post<{ id: string }>('/admin/broadcast/drafts', payload)
-      return api.post(`/admin/broadcast/${encodeURIComponent(response.data.id)}/send`, {})
+      const delayMinutes = scheduleEnabled ? computeDelayMinutes(scheduledAt) : undefined
+      return api.post(
+        `/admin/broadcast/${encodeURIComponent(response.data.id)}/send`,
+        delayMinutes !== undefined ? { delayMinutes } : {},
+      )
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: adminQueryKeys.broadcast.all })
-      toast.success(t('broadcastPage.toast.created'))
+      toast.success(
+        scheduleEnabled && computeDelayMinutes(scheduledAt) !== undefined
+          ? t('broadcastPage.toast.scheduled')
+          : t('broadcastPage.toast.created'),
+      )
       onClose()
     },
     onError: (err: { response?: { data?: { message?: string } } }) =>
       toast.error(err.response?.data?.message ?? t('broadcastPage.toast.createFailed')),
   })
 
-  function handleSubmit(e: React.FormEvent<HTMLFormElement>): void {
+  const testMutation = useMutation({
+    mutationFn: async (payload: BroadcastCreateRequest) => {
+      const response = await api.post<{ id: string }>('/admin/broadcast/drafts', payload)
+      return api.post(`/admin/broadcast/${encodeURIComponent(response.data.id)}/test`, {})
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: adminQueryKeys.broadcast.all })
+      toast.success(t('broadcastPage.toast.testSent'))
+    },
+    onError: (err: { response?: { data?: { message?: string } } }) =>
+      toast.error(err.response?.data?.message ?? t('broadcastPage.toast.testFailed')),
+  })
+
+  function validateThen(onValid: (payload: BroadcastCreateRequest) => void) {
     const draft: BroadcastFormDraft = {
       audience,
+      title,
       text,
       mediaType,
       mediaSourceMode,
       mediaValue,
     }
-
     form.reset(draft)
-    void form.handleSubmit(
+    return form.handleSubmit(
       (payload) => {
         setFormErrors({})
-        createMutation.mutate(payload)
+        onValid(payload)
       },
       (errors) => setFormErrors(flattenHookFormErrors(errors)),
-    )(e)
+    )
+  }
+
+  function handleSubmit(e: React.FormEvent<HTMLFormElement>): void {
+    void validateThen((payload) => createMutation.mutate(payload))(e)
+  }
+
+  function handleTest(): void {
+    void validateThen((payload) => testMutation.mutate(payload))()
   }
 
   function formatBytes(bytes: number): string {
@@ -445,6 +479,20 @@ function CreateBroadcastForm({ onClose }: { onClose: () => void }) {
           </SelectContent>
         </Select>
         <FieldError message={formErrors.audience} />
+      </div>
+
+      <div className="space-y-2">
+        <Label htmlFor="broadcast-title">{t('broadcastPage.form.titleLabel')}</Label>
+        <Input
+          id="broadcast-title"
+          placeholder={t('broadcastPage.form.titlePlaceholder')}
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+          maxLength={128}
+          aria-invalid={!!formErrors.title}
+        />
+        <p className="text-xs text-muted-foreground">{t('broadcastPage.form.titleHint')}</p>
+        <FieldError message={formErrors.title} />
       </div>
 
       <div className="space-y-2">
@@ -634,14 +682,55 @@ function CreateBroadcastForm({ onClose }: { onClose: () => void }) {
         ) : null}
       </div>
 
-      <div className="flex gap-3 justify-end">
+      <div className="space-y-2">
+        <div className="flex items-center justify-between">
+          <Label>{t('broadcastPage.schedule.label')}</Label>
+          <Button
+            type="button"
+            size="sm"
+            variant={scheduleEnabled ? 'default' : 'outline'}
+            className="h-7 text-xs"
+            onClick={() => setScheduleEnabled((v) => !v)}
+          >
+            <Clock className="h-3 w-3 mr-1" />
+            {scheduleEnabled ? t('broadcastPage.schedule.on') : t('broadcastPage.schedule.off')}
+          </Button>
+        </div>
+        {scheduleEnabled && (
+          <div className="space-y-1 rounded-md border bg-muted/30 p-3">
+            <Input
+              type="datetime-local"
+              value={scheduledAt}
+              min={toLocalDatetimeValue(new Date(Date.now() + 60_000))}
+              onChange={(e) => setScheduledAt(e.target.value)}
+              aria-label={t('broadcastPage.schedule.label')}
+            />
+            <p className="text-xs text-muted-foreground">
+              {scheduledAt && computeDelayMinutes(scheduledAt) !== undefined
+                ? t('broadcastPage.schedule.willSendIn', { minutes: computeDelayMinutes(scheduledAt) })
+                : t('broadcastPage.schedule.hint')}
+            </p>
+          </div>
+        )}
+      </div>
+
+      <div className="flex flex-wrap gap-3 justify-end">
         <Button type="button" variant="outline" onClick={onClose}>{t('common.cancel')}</Button>
         <Button
-          type="submit"
-          disabled={createMutation.isPending || uploadMutation.isPending}
+          type="button"
+          variant="secondary"
+          onClick={handleTest}
+          disabled={createMutation.isPending || testMutation.isPending || uploadMutation.isPending}
         >
-          {createMutation.isPending ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Send className="h-4 w-4 mr-2" />}
-          {t('broadcastPage.form.sendNow')}
+          {testMutation.isPending ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <FlaskConical className="h-4 w-4 mr-2" />}
+          {t('broadcastPage.form.testSend')}
+        </Button>
+        <Button
+          type="submit"
+          disabled={createMutation.isPending || testMutation.isPending || uploadMutation.isPending}
+        >
+          {createMutation.isPending ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : scheduleEnabled ? <Clock className="h-4 w-4 mr-2" /> : <Send className="h-4 w-4 mr-2" />}
+          {scheduleEnabled ? t('broadcastPage.form.scheduleSend') : t('broadcastPage.form.sendNow')}
         </Button>
       </div>
     </form>
@@ -651,6 +740,26 @@ function CreateBroadcastForm({ onClose }: { onClose: () => void }) {
 function FieldError({ message }: { readonly message?: string }) {
   if (!message) return null
   return <p className="text-xs font-medium text-destructive" role="alert">{message}</p>
+}
+
+/**
+ * Convert a `datetime-local` input value (interpreted in the operator's local
+ * timezone) into a delay in whole minutes from now. Returns `undefined` when
+ * the target is empty, unparseable, or not at least a minute in the future —
+ * the caller then sends immediately instead of scheduling.
+ */
+function computeDelayMinutes(value: string): number | undefined {
+  if (!value) return undefined
+  const target = new Date(value).getTime()
+  if (Number.isNaN(target)) return undefined
+  const diffMinutes = Math.ceil((target - Date.now()) / 60_000)
+  return diffMinutes >= 1 ? diffMinutes : undefined
+}
+
+/** Format a Date as a `datetime-local`-compatible `YYYY-MM-DDTHH:mm` string in local time. */
+function toLocalDatetimeValue(date: Date): string {
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
 
 // ── Edit form ───────────────────────────────────────────────────────────────

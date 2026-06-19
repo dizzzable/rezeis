@@ -324,6 +324,7 @@ function PremiumPicker({
                         lottieUrl={emoji.lottieUrl}
                         videoUrl={emoji.videoUrl}
                         alt={emoji.name}
+                        playMode="hover"
                         className="h-6 w-6"
                       />
                     </button>

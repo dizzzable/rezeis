@@ -3,9 +3,24 @@ import { SubscriptionStatus } from '@prisma/client';
 
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { UserNotificationsService } from '../notifications/services/user-notifications.service';
+import { NotifyButton } from '../notifications/services/bot-notifier.client';
 
 const BATCH_SIZE = 100;
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Inline buttons attached to expiry-warning Telegram notifications:
+ *   • "Продлить" → a Mini App `web_app` button (the bot resolves `webAppPath`
+ *     against its own Mini App URL) that opens the cabinet straight on the
+ *     renewal page. The TMA bootstrap preserves this destination across the
+ *     auth handshake (`?next=/renew`).
+ *   • "Главное меню" → `menu:main` callback, handled by the bot's start page
+ *     (re-renders the welcome screen in place).
+ */
+const EXPIRY_NOTIFICATION_BUTTONS: ReadonlyArray<NotifyButton> = [
+  { text: '🔄 Продлить подписку', webAppPath: '/renew' },
+  { text: '🏠 Главное меню', callbackData: 'menu:main' },
+];
 
 /**
  * Auto-renewal service — donor: altshop `src/services/auto_renew.py` +
@@ -107,6 +122,7 @@ export class AutoRenewService {
           planName,
           daysLeft: input.daysAhead,
         },
+        buttons: EXPIRY_NOTIFICATION_BUTTONS,
       });
       created++;
     }

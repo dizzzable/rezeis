@@ -28,6 +28,7 @@ import {
   BroadcastInterface,
 } from '../interfaces/broadcast.interface';
 import { BroadcastService } from '../services/broadcast.service';
+import { BroadcastDeliveryService } from '../services/broadcast-delivery.service';
 import { BroadcastQueueService } from '../services/broadcast-queue.service';
 import {
   BroadcastMediaUploadService,
@@ -43,6 +44,7 @@ export class AdminBroadcastController {
     private readonly broadcastService: BroadcastService,
     private readonly broadcastMediaUploadService: BroadcastMediaUploadService,
     private readonly broadcastQueueService: BroadcastQueueService,
+    private readonly broadcastDeliveryService: BroadcastDeliveryService,
   ) {}
 
   // ── CRUD ────────────────────────────────────────────────────────────────
@@ -115,6 +117,39 @@ export class AdminBroadcastController {
       result.scheduledFor = new Date(Date.now() + delayMs).toISOString();
     }
     return result;
+  }
+
+  // ── TEST SEND (dev only) ────────────────────────────────────────────────
+
+  @Post(':broadcastId/test')
+  @ApiOperation({ summary: 'Send a preview of a draft to the bot developer (BOT_DEV_ID) only' })
+  public async sendTestBroadcast(
+    @Param('broadcastId') broadcastId: string,
+    @CurrentAdmin() _currentAdmin: CurrentAdminInterface,
+  ): Promise<{ ok: true; message: string }> {
+    const broadcast = await this.broadcastService.getBroadcast(broadcastId);
+    if (broadcast.status !== 'DRAFT') {
+      throw new BadRequestException('Only draft broadcasts can be test-sent');
+    }
+    const result = await this.broadcastDeliveryService.sendTestToDev(broadcastId);
+    if (!result.ok) {
+      throw new BadRequestException(
+        result.reason === 'relay-disabled'
+          ? 'Bot relay not configured (REIWA_URL / WEBHOOK_SECRET_HEADER)'
+          : result.reason === 'empty'
+            ? 'Draft has no content to preview'
+            : 'Test send failed',
+      );
+    }
+    // The test draft is a throwaway preview shell (no recipients/messages) — the
+    // real "send" creates its own fresh draft. Clean it up so test runs don't
+    // accumulate orphan DRAFT rows in the broadcast list. Best-effort.
+    try {
+      await this.broadcastService.deleteBroadcast(broadcastId);
+    } catch {
+      // Non-fatal: the preview already reached the developer.
+    }
+    return { ok: true, message: 'Test preview sent to developer' };
   }
 
   // ── CANCEL ──────────────────────────────────────────────────────────────

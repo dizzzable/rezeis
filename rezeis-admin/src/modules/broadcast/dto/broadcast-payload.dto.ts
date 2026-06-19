@@ -14,6 +14,11 @@ import { BroadcastAudience } from '@prisma/client';
 export class BroadcastPayloadDto {
   @IsOptional()
   @IsString()
+  @MaxLength(128)
+  public title?: string;
+
+  @IsOptional()
+  @IsString()
   @MaxLength(4096)
   public text?: string;
 

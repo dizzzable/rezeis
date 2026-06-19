@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next'
 import { Smile } from 'lucide-react'
 
 import { api } from '@/lib/api'
+import { EmojiPreview } from '@/features/custom-emoji/emoji-preview'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
@@ -485,18 +486,16 @@ export function EmojiPicker({
                       }}
                       className="flex aspect-square w-full items-center justify-center rounded hover:bg-muted"
                     >
-                      {/* Static thumbnail only — the picker grid must stay light.
-                          Mounting a Lottie/video player per emoji (a big pack has
-                          hundreds) is what made the picker lag; the animation
-                          still plays wherever the emoji is actually rendered
-                          (preview, plan icon, cabinet feed). */}
-                      <img
-                        src={emoji.imageUrl}
+                      {/* Static thumbnail by default; the Lottie/video player
+                          mounts only on hover/focus (or selection) so a big
+                          pack never spins up hundreds of players at once. */}
+                      <EmojiPreview
+                        imageUrl={emoji.imageUrl}
+                        lottieUrl={emoji.lottieUrl}
+                        videoUrl={emoji.videoUrl}
                         alt={emoji.name}
-                        loading="lazy"
-                        decoding="async"
-                        draggable={false}
-                        className="h-6 w-6 object-contain"
+                        playMode="hover"
+                        className="h-6 w-6 bg-transparent"
                       />
                     </button>
                   ))}

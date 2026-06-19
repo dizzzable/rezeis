@@ -6,6 +6,7 @@ export const BROADCAST_MEDIA_SOURCE_MODES = ['upload', 'url', 'fileId'] as const
 
 export interface BroadcastFormDraft {
   readonly audience: string
+  readonly title: string
   readonly text: string
   readonly mediaType: 'none' | 'photo' | 'video'
   readonly mediaSourceMode: 'upload' | 'url' | 'fileId'
@@ -15,6 +16,7 @@ export interface BroadcastFormDraft {
 export interface BroadcastCreateRequest {
   readonly audience: (typeof BROADCAST_AUDIENCES)[number]
   readonly payload: {
+    readonly title?: string
     readonly text?: string
     readonly mediaType: 'none' | 'photo' | 'video'
     readonly mediaFileId?: string
@@ -23,6 +25,7 @@ export interface BroadcastCreateRequest {
 
 export interface BroadcastFormValidationMessages {
   readonly audienceInvalid: string
+  readonly titleTooLong: string
   readonly textRequired: string
   readonly textTooLong: string
   readonly mediaTypeInvalid: string
@@ -36,6 +39,7 @@ export function createBroadcastFormSchema(messages: BroadcastFormValidationMessa
   return z
     .object({
       audience: z.enum(BROADCAST_AUDIENCES, { error: messages.audienceInvalid }),
+      title: z.string().trim().max(128, messages.titleTooLong),
       text: z.string().trim().max(4096, messages.textTooLong),
       mediaType: z.enum(BROADCAST_MEDIA_TYPES, { error: messages.mediaTypeInvalid }),
       mediaSourceMode: z.enum(BROADCAST_MEDIA_SOURCE_MODES),
@@ -69,10 +73,12 @@ export function createBroadcastFormSchema(messages: BroadcastFormValidationMessa
       }
     })
     .transform((values): BroadcastCreateRequest => {
+      const title = values.title.trim()
       const text = values.text.trim()
       const mediaValue = values.mediaValue.trim()
       const payload: BroadcastCreateRequest['payload'] = {
         mediaType: values.mediaType,
+        ...(title ? { title } : {}),
         ...(text ? { text } : {}),
         ...(values.mediaType !== 'none' ? { mediaFileId: mediaValue } : {}),
       }

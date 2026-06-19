@@ -212,4 +212,13 @@ export interface NotifyButton {
   readonly text: string;
   readonly url?: string;
   readonly callbackData?: string;
+  /**
+   * Relative path into the reiwa Mini App (e.g. `/renew`). The bot resolves
+   * it against its own `miniAppUrl` and renders a Telegram `web_app` inline
+   * button — opening the Mini App directly at that route. rezeis never needs
+   * to know the bot username / public Mini App URL. Ignored when the bot has
+   * no Mini App URL configured (falls back to a plain URL button when the
+   * bot also knows its public web URL, otherwise dropped).
+   */
+  readonly webAppPath?: string;
 }

@@ -212,6 +212,7 @@ function PackCard({ pack }: { pack: CustomEmojiPack }) {
                   lottieUrl={emoji.lottieUrl}
                   videoUrl={emoji.videoUrl}
                   alt={emoji.name}
+                  playMode="hover"
                   className="h-6 w-6 shrink-0"
                 />
               ))}
@@ -293,6 +294,7 @@ function EmojiRow({ packId, emoji }: { packId: string; emoji: CustomEmoji }) {
         lottieUrl={emoji.lottieUrl}
         videoUrl={emoji.videoUrl}
         alt={emoji.name}
+        playMode="hover"
         className="h-9 w-9 shrink-0"
       />
       <div className="min-w-0 flex-1 space-y-1">

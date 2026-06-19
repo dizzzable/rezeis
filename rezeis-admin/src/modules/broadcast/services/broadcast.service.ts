@@ -261,6 +261,7 @@ function payloadDtoToJson(
   payload: BroadcastPayloadDto | undefined,
 ): Prisma.InputJsonObject {
   return {
+    title: payload?.title ?? null,
     text: payload?.text ?? null,
     mediaType: payload?.mediaType ?? 'none',
     mediaFileId: payload?.mediaFileId ?? null,
@@ -276,6 +277,7 @@ function mergePayload(
     existing !== null && typeof existing === 'object' && !Array.isArray(existing)
       ? { ...(existing as Record<string, unknown>) }
       : {};
+  if (patch.title !== undefined) base.title = patch.title;
   if (patch.text !== undefined) base.text = patch.text;
   if (patch.mediaType !== undefined) base.mediaType = patch.mediaType;
   if (patch.mediaFileId !== undefined) base.mediaFileId = patch.mediaFileId;
@@ -304,6 +306,7 @@ function mapBroadcast(record: Broadcast): BroadcastInterface {
 function readPayload(value: Prisma.JsonValue): BroadcastPayloadInterface {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     return {
+      title: null,
       text: null,
       mediaType: 'none',
       mediaFileId: null,
@@ -312,6 +315,7 @@ function readPayload(value: Prisma.JsonValue): BroadcastPayloadInterface {
   }
   const candidate = value as Record<string, unknown>;
   return {
+    title: typeof candidate.title === 'string' ? candidate.title : null,
     text: typeof candidate.text === 'string' ? candidate.text : null,
     mediaType: readMediaType(candidate.mediaType),
     mediaFileId:

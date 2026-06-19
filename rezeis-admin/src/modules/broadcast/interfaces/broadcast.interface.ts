@@ -1,6 +1,7 @@
 import { BroadcastAudience, BroadcastStatus } from '@prisma/client';
 
 export interface BroadcastPayloadInterface {
+  readonly title: string | null;
   readonly text: string | null;
   readonly mediaType: 'none' | 'photo' | 'video';
   readonly mediaFileId: string | null;

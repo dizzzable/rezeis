@@ -8,6 +8,7 @@ import {
 
 const messages = {
   audienceInvalid: 'audience invalid',
+  titleTooLong: 'title too long',
   textRequired: 'text required',
   textTooLong: 'text too long',
   mediaTypeInvalid: 'media type invalid',
@@ -110,6 +111,7 @@ describe('broadcast form schema', () => {
 function validDraft(): BroadcastFormDraft {
   return {
     audience: 'ALL',
+    title: '',
     text: 'Hello',
     mediaType: 'none',
     mediaSourceMode: 'upload',

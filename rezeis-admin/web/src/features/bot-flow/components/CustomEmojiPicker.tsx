@@ -114,6 +114,8 @@ export function CustomEmojiPicker({ value, onChange }: CustomEmojiPickerProps) {
                               lottieUrl={emoji.lottieUrl}
                               videoUrl={emoji.videoUrl}
                               alt={emoji.name}
+                              playMode="hover"
+                              forcePlay={value === emoji.customEmojiId}
                               className="h-6 w-6"
                             />
                           </button>

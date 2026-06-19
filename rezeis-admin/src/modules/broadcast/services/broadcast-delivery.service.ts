@@ -33,6 +33,52 @@ export class BroadcastDeliveryService {
   ) {}
 
   // ═══════════════════════════════════════════════════════════════════════════
+  //  TEST SEND (dev only)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Send a one-off preview of a broadcast draft to the bot's developer
+   * (`BOT_DEV_ID`) only — never to real recipients. Lets the operator eyeball
+   * the rendered card (title + body + custom-emoji) in Telegram before firing
+   * the real blast. Text-only: media is not previewed (the dev-DM relay only
+   * carries text), so the operator sees the caption/body exactly as users will.
+   *
+   * Best-effort: returns `false` when the reiwa relay is disabled or the draft
+   * has no text, so the controller can surface a precise message.
+   */
+  public async sendTestToDev(broadcastId: string): Promise<{ ok: boolean; reason?: string }> {
+    if (!this.botNotifier.isEnabled) {
+      return { ok: false, reason: 'relay-disabled' };
+    }
+    const broadcast = await this.prismaService.broadcast.findUnique({
+      where: { id: broadcastId },
+      select: { payload: true },
+    });
+    if (!broadcast) return { ok: false, reason: 'not-found' };
+
+    const payload = broadcast.payload as Record<string, unknown> | null;
+    const title = typeof payload?.title === 'string' ? payload.title.trim() : '';
+    const text = typeof payload?.text === 'string' ? payload.text : '';
+    if (!title && !text.trim()) {
+      return { ok: false, reason: 'empty' };
+    }
+
+    // Render the body's `:slug:` custom-emoji shortcodes into Telegram premium
+    // `<tg-emoji>` HTML, mirroring the real delivery path so the preview is
+    // faithful. The dev DM is always sent as HTML.
+    const renderedBody = this.customEmojiService
+      ? await this.customEmojiService.substituteTelegramHtml(text)
+      : text;
+    const composed = title
+      ? `<b>${escapeHtml(title)}</b>\n\n${renderedBody}`
+      : renderedBody;
+
+    await this.botNotifier.notifyDev({ text: composed || ' ', parseMode: 'HTML' });
+    this.logger.log(`Broadcast ${broadcastId} test preview sent to dev`);
+    return { ok: true };
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
   //  STAGE RECIPIENTS
   // ═══════════════════════════════════════════════════════════════════════════
 
@@ -126,6 +172,7 @@ export class BroadcastDeliveryService {
     }
 
     const payload = broadcast.payload as Record<string, unknown> | null;
+    const title = typeof payload?.title === 'string' ? payload.title : null;
     const text = typeof payload?.text === 'string' ? payload.text : '';
     const mediaType = payload?.mediaType as string | undefined;
     const mediaFileId = typeof payload?.mediaFileId === 'string' ? payload.mediaFileId : null;
@@ -182,7 +229,7 @@ export class BroadcastDeliveryService {
         eventId = await this.userNotifications.create({
           userId: message.userId,
           type: 'broadcast',
-          payload: { broadcastId, text },
+          payload: { broadcastId, text, ...(title ? { title } : {}) },
           preRenderedText: telegramText || ' ',
           skipTelegram: true,
         });
@@ -675,4 +722,8 @@ function sanitizeTelegramDiagnostic(
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function escapeHtml(input: string): string {
+  return input.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
