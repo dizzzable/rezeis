@@ -163,3 +163,27 @@ export interface SubscriptionByPlanItem {
   readonly total: number;
   readonly percentage: number;
 }
+
+// ── Usage surfaces (where/how users access the cabinet) ──────────────────────
+
+export interface SurfaceCountInterface {
+  /** Bucket key — surface (tma/pwa/browser), form factor or OS. */
+  readonly key: string;
+  readonly count: number;
+}
+
+export interface UsageSurfaceReportInterface {
+  /** Latest surface per user: `tma` | `pwa` | `browser`. */
+  readonly surfaces: readonly SurfaceCountInterface[];
+  /** Latest form factor per user: `mobile` | `tablet` | `desktop`. */
+  readonly formFactors: readonly SurfaceCountInterface[];
+  /** Latest OS per user: `ios`/`android`/`windows`/`macos`/`linux`/`other`. */
+  readonly operatingSystems: readonly SurfaceCountInterface[];
+  /** Users who have ever opened the cabinet as an installed PWA. */
+  readonly pwaInstalls: number;
+  /** Users seen on any surface within the last 30 days. */
+  readonly activeLast30d: number;
+  /** Users with any surface telemetry recorded. */
+  readonly totalTracked: number;
+  readonly generatedAt: string;
+}

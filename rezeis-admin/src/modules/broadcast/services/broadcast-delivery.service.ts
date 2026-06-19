@@ -37,19 +37,18 @@ export class BroadcastDeliveryService {
   // ═══════════════════════════════════════════════════════════════════════════
 
   /**
-   * Send a one-off preview of a broadcast draft to the bot's developer
-   * (`BOT_DEV_ID`) only — never to real recipients. Lets the operator eyeball
-   * the rendered card (title + body + custom-emoji) in Telegram before firing
-   * the real blast. Text-only: media is not previewed (the dev-DM relay only
-   * carries text), so the operator sees the caption/body exactly as users will.
+   * Send a one-off preview of a broadcast draft to the platform developer(s)
+   * only — never to real recipients. Delivers on TWO surfaces so the dev sees
+   * exactly what users will get:
+   *   • Telegram DM to the bot's `BOT_DEV_ID` (via the reiwa relay), and
+   *   • the in-cabinet feed + web-push of every user whose profile role is
+   *     `DEV` (so the test shows up in the web cabinet too, not just the bot).
    *
-   * Best-effort: returns `false` when the reiwa relay is disabled or the draft
-   * has no text, so the controller can surface a precise message.
+   * Text-only on the Telegram leg (the dev-DM relay carries no media). Returns
+   * `{ ok: false }` with a reason when nothing could be delivered (no relay and
+   * no DEV user) or the draft has no content.
    */
   public async sendTestToDev(broadcastId: string): Promise<{ ok: boolean; reason?: string }> {
-    if (!this.botNotifier.isEnabled) {
-      return { ok: false, reason: 'relay-disabled' };
-    }
     const broadcast = await this.prismaService.broadcast.findUnique({
       where: { id: broadcastId },
       select: { payload: true },
@@ -63,18 +62,49 @@ export class BroadcastDeliveryService {
       return { ok: false, reason: 'empty' };
     }
 
-    // Render the body's `:slug:` custom-emoji shortcodes into Telegram premium
-    // `<tg-emoji>` HTML, mirroring the real delivery path so the preview is
-    // faithful. The dev DM is always sent as HTML.
-    const renderedBody = this.customEmojiService
-      ? await this.customEmojiService.substituteTelegramHtml(text)
-      : text;
-    const composed = title
-      ? `<b>${escapeHtml(title)}</b>\n\n${renderedBody}`
-      : renderedBody;
+    // Render `:slug:` custom-emoji shortcodes into Telegram premium
+    // `<tg-emoji>` HTML for BOTH the title and the body, identical to real
+    // delivery (the dev DM is always HTML), so the preview is faithful.
+    const composed = await this.composeTelegram(title || null, text, true);
 
-    await this.botNotifier.notifyDev({ text: composed || ' ', parseMode: 'HTML' });
-    this.logger.log(`Broadcast ${broadcastId} test preview sent to dev`);
+    // 1) Telegram DM to the bot's BOT_DEV_ID (only when the relay is wired).
+    let relayed = false;
+    if (this.botNotifier.isEnabled) {
+      await this.botNotifier.notifyDev({ text: composed || ' ', parseMode: 'HTML' });
+      relayed = true;
+    }
+
+    // 2) Web cabinet (feed + web-push) for every DEV-role user. `skipTelegram`
+    //    avoids a duplicate Telegram DM (the relay leg above already covers the
+    //    dev's Telegram); the cabinet feed row + web-push are what was missing.
+    const devUsers = await this.prismaService.user.findMany({
+      where: { role: 'DEV', isBlocked: false },
+      select: { id: true },
+    });
+    for (const dev of devUsers) {
+      try {
+        await this.userNotifications.create({
+          userId: dev.id,
+          type: 'broadcast',
+          payload: { broadcastId, text, ...(title ? { title } : {}) },
+          preRenderedText: composed || ' ',
+          skipTelegram: true,
+        });
+      } catch (err: unknown) {
+        this.logger.warn(
+          `Test broadcast cabinet delivery failed for dev ${dev.id}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+
+    if (!relayed && devUsers.length === 0) {
+      return { ok: false, reason: 'relay-disabled' };
+    }
+    this.logger.log(
+      `Broadcast ${broadcastId} test preview: telegram=${relayed} devCabinet=${devUsers.length}`,
+    );
     return { ok: true };
   }
 
@@ -191,13 +221,12 @@ export class BroadcastDeliveryService {
     // HTML (text broadcasts always are; media captions only when the operator
     // chose HTML) — Telegram shows the fallback glyph for bots without the
     // capability. Otherwise we fall back to the plain glyph. The cabinet feed
-    // keeps the raw `:slug:` text (rendered as inline images).
+    // keeps the raw `:slug:` text (rendered as inline images). The operator
+    // title (when set) leads the message as a bold headline — rendered through
+    // the same custom-emoji substitution so premium emoji in the title show up
+    // in Telegram too (not just the cabinet).
     const useHtmlEmoji = hasMedia ? parseMode === 'HTML' : true;
-    const telegramText = this.customEmojiService
-      ? useHtmlEmoji
-        ? await this.customEmojiService.substituteTelegramHtml(text)
-        : await this.customEmojiService.substituteFallbacks(text)
-      : text;
+    const telegramText = await this.composeTelegram(title, text, useHtmlEmoji);
 
     const messages = await this.prismaService.broadcastMessage.findMany({
       where: { id: { in: messageIds }, status: BroadcastMessageStatus.PENDING },
@@ -569,6 +598,40 @@ export class BroadcastDeliveryService {
   // ═══════════════════════════════════════════════════════════════════════════
   //  PRIVATE HELPERS
   // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Compose the Telegram-bound message/caption from an optional operator title
+   * and the body, substituting `:slug:` custom-emoji shortcodes:
+   *   • `useHtmlEmoji` → premium `<tg-emoji>` tags; the title becomes a bold
+   *     headline (`<b>…</b>`) above the body. The title is HTML-escaped first
+   *     (it's plain text) before substitution; the body may carry operator HTML
+   *     so it is substituted raw.
+   *   • otherwise (plain-text media caption) → plain fallback glyphs and a
+   *     plain (non-bold) title line, since HTML tags wouldn't be parsed.
+   */
+  private async composeTelegram(
+    title: string | null,
+    body: string,
+    useHtmlEmoji: boolean,
+  ): Promise<string> {
+    const renderedBody = this.customEmojiService
+      ? useHtmlEmoji
+        ? await this.customEmojiService.substituteTelegramHtml(body)
+        : await this.customEmojiService.substituteFallbacks(body)
+      : body;
+    const trimmedTitle = title?.trim() ?? '';
+    if (trimmedTitle.length === 0) return renderedBody;
+    if (useHtmlEmoji) {
+      const renderedTitle = this.customEmojiService
+        ? await this.customEmojiService.substituteTelegramHtml(escapeHtml(trimmedTitle))
+        : escapeHtml(trimmedTitle);
+      return renderedBody ? `<b>${renderedTitle}</b>\n\n${renderedBody}` : `<b>${renderedTitle}</b>`;
+    }
+    const renderedTitle = this.customEmojiService
+      ? await this.customEmojiService.substituteFallbacks(trimmedTitle)
+      : trimmedTitle;
+    return renderedBody ? `${renderedTitle}\n\n${renderedBody}` : renderedTitle;
+  }
 
   private async getBotToken(): Promise<string | null> {
     // Prefer the panel-managed (encrypted) token; fall back to the env var.

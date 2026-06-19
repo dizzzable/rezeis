@@ -24,6 +24,8 @@ import {
   TopPayerInterface,
   TrialConversionReport,
   UserGrowthInterface,
+  UsageSurfaceReportInterface,
+  SurfaceCountInterface,
 } from '../interfaces/business-analytics.types';
 import {
   addMonths,
@@ -63,6 +65,58 @@ export class BusinessAnalyticsService {
   private readonly logger = new Logger(BusinessAnalyticsService.name);
 
   public constructor(private readonly prismaService: PrismaService) {}
+
+  /**
+   * Usage-surface adoption: how users access the cabinet (Telegram Mini App /
+   * installed PWA / browser), on which form factor (mobile/tablet/desktop) and
+   * OS, plus the PWA-install count and 30-day active reach. Buckets reflect
+   * each user's LATEST reported session.
+   */
+  public async getSurfaceAnalytics(): Promise<UsageSurfaceReportInterface> {
+    const since = new Date(Date.now() - 30 * ANALYTICS_ONE_DAY_MS);
+    const tracked = { lastSeenAt: { not: null } };
+    const [surfaceRows, formRows, osRows, pwaInstalls, activeLast30d, totalTracked] =
+      await Promise.all([
+        this.prismaService.user.groupBy({
+          by: ['lastSurface'],
+          where: tracked,
+          _count: { _all: true },
+        }),
+        this.prismaService.user.groupBy({
+          by: ['lastFormFactor'],
+          where: tracked,
+          _count: { _all: true },
+        }),
+        this.prismaService.user.groupBy({
+          by: ['lastOs'],
+          where: tracked,
+          _count: { _all: true },
+        }),
+        this.prismaService.user.count({ where: { pwaInstalledAt: { not: null } } }),
+        this.prismaService.user.count({ where: { lastSeenAt: { gte: since } } }),
+        this.prismaService.user.count({ where: tracked }),
+      ]);
+    const sortDesc = (a: SurfaceCountInterface, b: SurfaceCountInterface): number =>
+      b.count - a.count;
+    const surfaces = surfaceRows
+      .map((r) => ({ key: r.lastSurface ?? 'other', count: r._count._all }))
+      .sort(sortDesc);
+    const formFactors = formRows
+      .map((r) => ({ key: r.lastFormFactor ?? 'other', count: r._count._all }))
+      .sort(sortDesc);
+    const operatingSystems = osRows
+      .map((r) => ({ key: r.lastOs ?? 'other', count: r._count._all }))
+      .sort(sortDesc);
+    return {
+      surfaces,
+      formFactors,
+      operatingSystems,
+      pwaInstalls,
+      activeLast30d,
+      totalTracked,
+      generatedAt: new Date().toISOString(),
+    };
+  }
 
   public async getReport(): Promise<BusinessAnalyticsReportInterface> {
     const now = new Date();

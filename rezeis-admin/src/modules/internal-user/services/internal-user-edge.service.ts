@@ -389,6 +389,46 @@ export class InternalUserEdgeService {
     });
   }
 
+  // ── Usage-surface tracking ────────────────────────────────────────────────
+
+  /**
+   * Record the surface the user is currently using (called once per cabinet
+   * session): `surface` (tma/pwa/browser), `formFactor` (mobile/tablet/desktop)
+   * and `os`. Refreshes the latest-seen snapshot + `lastSeenAt`, and stamps
+   * `pwaInstalledAt` once the first time the surface is an installed PWA.
+   * Idempotent and cheap. Unknown values are clamped server-side.
+   */
+  public async recordSurfaceSeen(
+    reference: string,
+    input: { surface: string; formFactor: string; os: string },
+  ): Promise<void> {
+    const surface = normalizeSurface(input.surface);
+    const formFactor = normalizeFormFactor(input.formFactor);
+    const os = normalizeOs(input.os);
+    const now = new Date();
+    try {
+      // Refresh the latest-seen surface snapshot on every report.
+      await this.prismaService.user.update({
+        where: buildUserReferenceWhere(reference),
+        data: { lastSurface: surface, lastFormFactor: formFactor, lastOs: os, lastSeenAt: now },
+      });
+      // Stamp the first-install instant only when the surface is an installed
+      // PWA and it isn't set yet — keeps the milestone stable without a
+      // read-modify-write race.
+      if (surface === 'pwa') {
+        await this.prismaService.user.updateMany({
+          where: { ...buildUserReferenceWhere(reference), pwaInstalledAt: null },
+          data: { pwaInstalledAt: now },
+        });
+      }
+    } catch (err: unknown) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2025') {
+        throw new NotFoundException('User not found');
+      }
+      throw err;
+    }
+  }
+
   // ── Helpers ──────────────────────────────────────────────────────────────
 
   private async resolveUserId(telegramId: string): Promise<string> {
@@ -428,4 +468,22 @@ export class InternalUserEdgeService {
     }
     return null;
   }
+}
+
+/** Clamp a client-reported usage surface to a known value. */
+function normalizeSurface(surface: string): string {
+  const value = (surface ?? '').trim().toLowerCase();
+  return value === 'tma' || value === 'pwa' || value === 'browser' ? value : 'browser';
+}
+
+/** Clamp a client-reported form factor to a known value. */
+function normalizeFormFactor(formFactor: string): string {
+  const value = (formFactor ?? '').trim().toLowerCase();
+  return value === 'mobile' || value === 'tablet' || value === 'desktop' ? value : 'desktop';
+}
+
+/** Clamp a client-reported OS to a known value. */
+function normalizeOs(os: string): string {
+  const value = (os ?? '').trim().toLowerCase();
+  return ['ios', 'android', 'windows', 'macos', 'linux'].includes(value) ? value : 'other';
 }

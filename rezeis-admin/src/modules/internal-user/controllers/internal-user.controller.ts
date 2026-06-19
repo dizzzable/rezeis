@@ -6,6 +6,7 @@ import { AcceptInternalUserRulesDto } from '../dto/accept-internal-user-rules.dt
 import { CompleteWebAccountEmailVerificationDto } from '../dto/complete-web-account-email-verification.dto';
 import { InternalBootstrapUserDto } from '../dto/internal-bootstrap-user.dto';
 import { InternalByTelegramQueryDto } from '../dto/internal-by-telegram-query.dto';
+import { InternalSurfaceSeenDto } from '../dto/internal-surface-seen.dto';
 import { InternalUpdateLanguageDto } from '../dto/internal-update-language.dto';
 import { IssueWebAccountEmailVerificationChallengeDto } from '../dto/issue-web-account-email-verification-challenge.dto';
 import { InternalUserSessionQueryDto } from '../dto/internal-user-session-query.dto';
@@ -287,6 +288,24 @@ export class InternalUserController {
     @Body() body: InternalByTelegramQueryDto,
   ): Promise<{ ok: true }> {
     await this.internalUserEdgeService.markBotBlocked(body.telegramId!);
+
+    return { ok: true };
+  }
+
+  /**
+   * Record the surface the user is currently using (called once per cabinet
+   * session): tma / pwa / browser + form factor + os. Stamps the PWA-install
+   * milestone once and refreshes the latest-seen snapshot for usage analytics.
+   */
+  @Post('surface-seen')
+  public async recordSurfaceSeen(
+    @Body() body: InternalSurfaceSeenDto,
+  ): Promise<{ ok: true }> {
+    await this.internalUserEdgeService.recordSurfaceSeen(requireUserReference(body), {
+      surface: body.surface ?? 'browser',
+      formFactor: body.formFactor ?? 'desktop',
+      os: body.os ?? 'other',
+    });
     return { ok: true };
   }
 }

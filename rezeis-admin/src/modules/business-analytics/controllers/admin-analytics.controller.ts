@@ -97,4 +97,11 @@ export class AdminAnalyticsController {
   public getSubscriptionsByPlan() {
     return this.analyticsService.getSubscriptionsByPlan();
   }
+
+  @Get('admin/analytics/surfaces')
+  @RequirePermission('analytics', 'view')
+  @ApiOperation({ summary: 'Usage surfaces (tma/pwa/browser), form factors, OS + PWA installs' })
+  public getSurfaceAnalytics() {
+    return this.analyticsService.getSurfaceAnalytics();
+  }
 }

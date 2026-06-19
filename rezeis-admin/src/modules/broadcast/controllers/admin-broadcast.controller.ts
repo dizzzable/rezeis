@@ -135,7 +135,7 @@ export class AdminBroadcastController {
     if (!result.ok) {
       throw new BadRequestException(
         result.reason === 'relay-disabled'
-          ? 'Bot relay not configured (REIWA_URL / WEBHOOK_SECRET_HEADER)'
+          ? 'No test target: configure the bot relay (REIWA_URL / WEBHOOK_SECRET_HEADER) or set a user role to DEV'
           : result.reason === 'empty'
             ? 'Draft has no content to preview'
             : 'Test send failed',

@@ -147,3 +147,25 @@ export async function getSubscriptionsByPlan(): Promise<readonly SubscriptionByP
   const response = await api.get<readonly SubscriptionByPlan[]>('/admin/analytics/subscriptions-by-plan')
   return response.data
 }
+
+// ── Usage surfaces ───────────────────────────────────────────────────────────
+
+export interface SurfaceCount {
+  key: string
+  count: number
+}
+
+export interface UsageSurfaceReport {
+  surfaces: readonly SurfaceCount[]
+  formFactors: readonly SurfaceCount[]
+  operatingSystems: readonly SurfaceCount[]
+  pwaInstalls: number
+  activeLast30d: number
+  totalTracked: number
+  generatedAt: string
+}
+
+export async function getSurfaceAnalytics(): Promise<UsageSurfaceReport> {
+  const response = await api.get<UsageSurfaceReport>('/admin/analytics/surfaces')
+  return response.data
+}

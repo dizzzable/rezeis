@@ -13,6 +13,7 @@ import {
   BarChart3,
   ArrowRightLeft,
   PieChart as PieChartIcon,
+  Smartphone,
 } from 'lucide-react'
 import {
   Area,
@@ -51,7 +52,9 @@ import {
   getSubscriptionsByPlan,
   getTopPayers,
   getTrialConversion,
+  getSurfaceAnalytics,
   type AdvancedAnalyticsReport,
+  type SurfaceCount,
 } from './analytics-api'
 
 const WINDOW_OPTIONS: ReadonlyArray<{ label: string; days: number }> = [
@@ -154,11 +157,99 @@ function OverviewTab({ report, loading }: { report: AdvancedAnalyticsReport | un
         <KpiCard icon={churn.churnRate > 0.1 ? TrendingDown : TrendingUp} title={t('analyticsPage.kpi.retention')} value={`${(churn.retentionRate * 100).toFixed(1)}%`} subtitle={t('analyticsPage.kpi.retentionSubtitle', { churned: churn.churned, total: churn.prevActive })} negative={churn.churnRate > 0.2} />
       </div>
       <DailyChart daily={report.daily} />
+      <SurfaceUsageCard />
       <div className="grid gap-4 lg:grid-cols-2">
         <FunnelCard funnel={report.funnel} />
         <ProvidersCard providers={report.providers} />
       </div>
     </>
+  )
+}
+
+// ── Usage surfaces card ──────────────────────────────────────────────────────
+
+function SurfaceUsageCard() {
+  const { t } = useTranslation()
+  const { data, isLoading } = useQuery({
+    queryKey: ['analytics', 'surfaces'],
+    queryFn: getSurfaceAnalytics,
+    staleTime: 60_000,
+  })
+
+  const labelFor = (group: 'surface' | 'form' | 'os', key: string): string => {
+    const fallback = key.charAt(0).toUpperCase() + key.slice(1)
+    return String(t(`analyticsPage.surfaces.${group}.${key}`, fallback))
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <Smartphone className="h-4 w-4" />
+          {t('analyticsPage.surfaces.title')}
+        </CardTitle>
+        <CardDescription>{t('analyticsPage.surfaces.subtitle')}</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {isLoading || !data ? (
+          <Skeleton className="h-32 w-full" />
+        ) : (
+          <>
+            <div className="flex flex-wrap gap-6">
+              <div>
+                <p className="text-2xl font-bold tabular-nums">{data.totalTracked.toLocaleString()}</p>
+                <p className="text-xs text-muted-foreground">{t('analyticsPage.surfaces.tracked')}</p>
+              </div>
+              <div>
+                <p className="text-2xl font-bold tabular-nums text-emerald-600">{data.activeLast30d.toLocaleString()}</p>
+                <p className="text-xs text-muted-foreground">{t('analyticsPage.surfaces.active30d')}</p>
+              </div>
+              <div>
+                <p className="text-2xl font-bold tabular-nums text-sky-600">{data.pwaInstalls.toLocaleString()}</p>
+                <p className="text-xs text-muted-foreground">{t('analyticsPage.surfaces.pwaInstalls')}</p>
+              </div>
+            </div>
+            <SurfaceBreakdownRow label={t('analyticsPage.surfaces.bySurface')} items={data.surfaces} labelFor={(k) => labelFor('surface', k)} />
+            <SurfaceBreakdownRow label={t('analyticsPage.surfaces.byForm')} items={data.formFactors} labelFor={(k) => labelFor('form', k)} />
+            <SurfaceBreakdownRow label={t('analyticsPage.surfaces.byOs')} items={data.operatingSystems} labelFor={(k) => labelFor('os', k)} />
+          </>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+function SurfaceBreakdownRow({
+  label,
+  items,
+  labelFor,
+}: {
+  label: string
+  items: readonly SurfaceCount[]
+  labelFor: (key: string) => string
+}) {
+  const { t } = useTranslation()
+  const total = items.reduce((sum, i) => sum + i.count, 0)
+  return (
+    <div className="space-y-1">
+      <p className="text-xs font-medium text-muted-foreground">{label}</p>
+      {items.length === 0 ? (
+        <p className="text-sm text-muted-foreground">{t('analyticsPage.surfaces.empty')}</p>
+      ) : (
+        <div className="flex flex-wrap gap-2">
+          {items.map((item) => {
+            const pct = total > 0 ? Math.round((item.count / total) * 100) : 0
+            return (
+              <Badge key={item.key} variant="outline" className="gap-1.5">
+                {labelFor(item.key)}
+                <span className="font-semibold tabular-nums">{item.count.toLocaleString()}</span>
+                <span className="text-muted-foreground">· {pct}%</span>
+              </Badge>
+            )
+          })}
+        </div>
+      )}
+    </div>
   )
 }
 
