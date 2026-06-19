@@ -61,6 +61,11 @@ const NON_REPORTABLE_PATTERNS: readonly RegExp[] = [
   /the script resource is behind a redirect/i,
   /serviceworker.*(fetch|script)/i,
   /resizeobserver loop/i,
+  // React vs. 3rd-party/extension DOM reconciliation races (most often caused
+  // by browser translation extensions mutating the tree React owns). Not an
+  // app bug we can act on from the firehose.
+  /failed to execute '(removechild|insertbefore)' on 'node'/i,
+  /the node (to be removed|before which the new node is to be inserted) is not a child of this node/i,
 ];
 
 function isNonReportable(message: string, stack?: string): boolean {

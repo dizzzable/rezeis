@@ -47,6 +47,7 @@ export function EmojiPreview({
   forcePlay = false,
 }: EmojiPreviewProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
+  const lottieRef = useRef<HTMLDivElement | null>(null)
   const [visible, setVisible] = useState(false)
   const [hovering, setHovering] = useState(false)
   const [animated, setAnimated] = useState(false)
@@ -73,28 +74,35 @@ export function EmojiPreview({
     return () => observer.disconnect()
   }, [hoverGated])
 
-  // Lottie is only used when there is no video clip (video wins).
+  // Lottie is only used when there is no video clip (video wins). It mounts
+  // into its OWN dedicated leaf div (`lottieRef`), never the shared container —
+  // letting Lottie mutate that subtree freely without desyncing React's
+  // reconciler. Mixing 3rd-party DOM writes with React-rendered siblings in the
+  // same node is what caused `removeChild ... is not a child` crashes.
   useEffect(() => {
     if (!active || videoUrl || !lottieUrl) return
-    const node = containerRef.current
-    if (!node) return
+    const mount = lottieRef.current
+    if (!mount) return
     let anim: AnimationItem | null = null
     let cancelled = false
     void import('lottie-web/build/player/lottie_light').then((mod) => {
-      if (cancelled || !containerRef.current) return
+      if (cancelled || !lottieRef.current) return
       anim = (mod.default ?? mod).loadAnimation({
-        container: containerRef.current,
+        container: lottieRef.current,
         renderer: 'svg',
         loop: true,
         autoplay: true,
         path: lottieUrl,
       })
-      anim.addEventListener('DOMLoaded', () => setAnimated(true))
+      anim.addEventListener('DOMLoaded', () => {
+        if (!cancelled) setAnimated(true)
+      })
     })
     return () => {
       cancelled = true
+      // Destroy the Lottie instance (removes its own SVG from `lottieRef`)
+      // BEFORE React unmounts the leaf div, so the two never race.
       anim?.destroy()
-      // Restore the static thumbnail when the animation unmounts (hover-out).
       setAnimated(false)
     }
   }, [active, lottieUrl, videoUrl])
@@ -107,6 +115,8 @@ export function EmojiPreview({
         onBlur: () => setHovering(false),
       }
     : {}
+
+  const showLottie = active && !videoUrl && !!lottieUrl
 
   return (
     <div
@@ -127,16 +137,25 @@ export function EmojiPreview({
           className="h-full w-full rounded object-contain p-0.5"
         />
       ) : (
-        !animated && (
+        <>
+          {/* Static thumbnail — always the base layer; hidden once the Lottie
+              SVG has painted so there's no flash and no overlap. */}
           <img
             src={imageUrl}
             alt={alt}
             loading="lazy"
             decoding="async"
             draggable={false}
-            className="h-full w-full rounded object-contain p-0.5"
+            className={cn(
+              'h-full w-full rounded object-contain p-0.5',
+              animated && showLottie && 'invisible',
+            )}
           />
-        )
+          {/* Dedicated Lottie mount point — a React leaf the player owns. */}
+          {showLottie && (
+            <div ref={lottieRef} className="absolute inset-0 p-0.5" aria-hidden />
+          )}
+        </>
       )}
     </div>
   )

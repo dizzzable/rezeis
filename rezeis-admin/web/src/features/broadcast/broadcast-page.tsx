@@ -333,6 +333,24 @@ function CreateBroadcastForm({ onClose }: { onClose: () => void }) {
   const [scheduledTime, setScheduledTime] = useState('12:00')
   const fileInputRef = useRef<HTMLInputElement>(null)
   const textRef = useRef<HTMLTextAreaElement>(null)
+  const titleRef = useRef<HTMLInputElement>(null)
+
+  function insertTitleAtCaret(emoji: string): void {
+    const el = titleRef.current
+    if (!el) {
+      setTitle((prev) => (prev + emoji).slice(0, 128))
+      return
+    }
+    const start = el.selectionStart ?? title.length
+    const end = el.selectionEnd ?? title.length
+    const next = (title.slice(0, start) + emoji + title.slice(end)).slice(0, 128)
+    setTitle(next)
+    requestAnimationFrame(() => {
+      el.focus()
+      const caret = Math.min(start + emoji.length, next.length)
+      el.setSelectionRange(caret, caret)
+    })
+  }
 
   function insertAtCaret(emoji: string): void {
     const el = textRef.current
@@ -486,15 +504,28 @@ function CreateBroadcastForm({ onClose }: { onClose: () => void }) {
 
       <div className="space-y-2">
         <Label htmlFor="broadcast-title">{t('broadcastPage.form.titleLabel')}</Label>
-        <Input
-          id="broadcast-title"
-          placeholder={t('broadcastPage.form.titlePlaceholder')}
-          value={title}
-          onChange={(e) => setTitle(e.target.value)}
-          maxLength={128}
-          aria-invalid={!!formErrors.title}
-        />
+        <div className="relative">
+          <Input
+            id="broadcast-title"
+            ref={titleRef}
+            placeholder={t('broadcastPage.form.titlePlaceholder')}
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            maxLength={128}
+            className="pr-10"
+            aria-invalid={!!formErrors.title}
+          />
+          <div className="absolute right-1 top-1/2 -translate-y-1/2">
+            <EmojiPicker onSelect={insertTitleAtCaret} ariaLabel={t('broadcastPage.emoji.trigger')} />
+          </div>
+        </div>
         <p className="text-xs text-muted-foreground">{t('broadcastPage.form.titleHint')}</p>
+        {title.trim().length > 0 && (
+          <div className="space-y-1">
+            <p className="text-[11px] font-medium text-muted-foreground">{t('broadcastPage.form.preview')}</p>
+            <RenderedCopyPreview value={title} />
+          </div>
+        )}
         <FieldError message={formErrors.title} />
       </div>
 
