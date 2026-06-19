@@ -60,6 +60,8 @@ export const en = {
       label: 'Scheduled send',
       on: 'Schedule',
       off: 'Now',
+      datePlaceholder: 'Pick a date',
+      timeLabel: 'Send time',
       hint: 'Pick a date and time to send (in your timezone). If the time has already passed, it sends immediately.',
       willSendIn: 'Will send in about {{minutes}} min.',
     },

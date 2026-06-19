@@ -30,6 +30,7 @@ import {
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { DatePicker } from '@/components/ui/date-picker'
 import { FadeIn } from '@/lib/motion'
 import {
   createBroadcastFormSchema,
@@ -328,7 +329,8 @@ function CreateBroadcastForm({ onClose }: { onClose: () => void }) {
   const [uploaded, setUploaded] = useState<UploadedMedia | null>(null)
   const [isDragging, setIsDragging] = useState(false)
   const [scheduleEnabled, setScheduleEnabled] = useState(false)
-  const [scheduledAt, setScheduledAt] = useState('')
+  const [scheduledDate, setScheduledDate] = useState<Date | undefined>(undefined)
+  const [scheduledTime, setScheduledTime] = useState('12:00')
   const fileInputRef = useRef<HTMLInputElement>(null)
   const textRef = useRef<HTMLTextAreaElement>(null)
 
@@ -403,7 +405,9 @@ function CreateBroadcastForm({ onClose }: { onClose: () => void }) {
   const createMutation = useMutation({
     mutationFn: async (payload: BroadcastCreateRequest) => {
       const response = await api.post<{ id: string }>('/admin/broadcast/drafts', payload)
-      const delayMinutes = scheduleEnabled ? computeDelayMinutes(scheduledAt) : undefined
+      const delayMinutes = scheduleEnabled
+        ? computeDelayMinutes(combineDateTime(scheduledDate, scheduledTime))
+        : undefined
       return api.post(
         `/admin/broadcast/${encodeURIComponent(response.data.id)}/send`,
         delayMinutes !== undefined ? { delayMinutes } : {},
@@ -411,11 +415,10 @@ function CreateBroadcastForm({ onClose }: { onClose: () => void }) {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: adminQueryKeys.broadcast.all })
-      toast.success(
-        scheduleEnabled && computeDelayMinutes(scheduledAt) !== undefined
-          ? t('broadcastPage.toast.scheduled')
-          : t('broadcastPage.toast.created'),
-      )
+      const scheduled =
+        scheduleEnabled &&
+        computeDelayMinutes(combineDateTime(scheduledDate, scheduledTime)) !== undefined
+      toast.success(scheduled ? t('broadcastPage.toast.scheduled') : t('broadcastPage.toast.created'))
       onClose()
     },
     onError: (err: { response?: { data?: { message?: string } } }) =>
@@ -697,17 +700,28 @@ function CreateBroadcastForm({ onClose }: { onClose: () => void }) {
           </Button>
         </div>
         {scheduleEnabled && (
-          <div className="space-y-1 rounded-md border bg-muted/30 p-3">
-            <Input
-              type="datetime-local"
-              value={scheduledAt}
-              min={toLocalDatetimeValue(new Date(Date.now() + 60_000))}
-              onChange={(e) => setScheduledAt(e.target.value)}
-              aria-label={t('broadcastPage.schedule.label')}
-            />
+          <div className="space-y-2 rounded-md border bg-muted/30 p-3">
+            <div className="flex gap-2">
+              <div className="flex-1">
+                <DatePicker
+                  value={scheduledDate}
+                  onChange={setScheduledDate}
+                  placeholder={t('broadcastPage.schedule.datePlaceholder')}
+                />
+              </div>
+              <Input
+                type="time"
+                value={scheduledTime}
+                onChange={(e) => setScheduledTime(e.target.value)}
+                className="w-28"
+                aria-label={t('broadcastPage.schedule.timeLabel')}
+              />
+            </div>
             <p className="text-xs text-muted-foreground">
-              {scheduledAt && computeDelayMinutes(scheduledAt) !== undefined
-                ? t('broadcastPage.schedule.willSendIn', { minutes: computeDelayMinutes(scheduledAt) })
+              {scheduledDate && computeDelayMinutes(combineDateTime(scheduledDate, scheduledTime)) !== undefined
+                ? t('broadcastPage.schedule.willSendIn', {
+                    minutes: computeDelayMinutes(combineDateTime(scheduledDate, scheduledTime)),
+                  })
                 : t('broadcastPage.schedule.hint')}
             </p>
           </div>
@@ -743,23 +757,30 @@ function FieldError({ message }: { readonly message?: string }) {
 }
 
 /**
- * Convert a `datetime-local` input value (interpreted in the operator's local
- * timezone) into a delay in whole minutes from now. Returns `undefined` when
- * the target is empty, unparseable, or not at least a minute in the future —
- * the caller then sends immediately instead of scheduling.
+ * Combine a calendar date (local midnight) with an `HH:mm` time string into a
+ * single local-time `Date`. Returns `null` when the date is unset or the time
+ * is malformed.
  */
-function computeDelayMinutes(value: string): number | undefined {
-  if (!value) return undefined
-  const target = new Date(value).getTime()
-  if (Number.isNaN(target)) return undefined
-  const diffMinutes = Math.ceil((target - Date.now()) / 60_000)
-  return diffMinutes >= 1 ? diffMinutes : undefined
+function combineDateTime(date: Date | undefined, time: string): Date | null {
+  if (!date) return null
+  const [hh, mm] = time.split(':')
+  const hours = Number.parseInt(hh ?? '', 10)
+  const minutes = Number.parseInt(mm ?? '', 10)
+  if (Number.isNaN(hours) || Number.isNaN(minutes)) return null
+  const combined = new Date(date)
+  combined.setHours(hours, minutes, 0, 0)
+  return combined
 }
 
-/** Format a Date as a `datetime-local`-compatible `YYYY-MM-DDTHH:mm` string in local time. */
-function toLocalDatetimeValue(date: Date): string {
-  const pad = (n: number): string => String(n).padStart(2, '0')
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
+/**
+ * Delay in whole minutes from now to the target instant. Returns `undefined`
+ * when the target is null or not at least a minute in the future — the caller
+ * then sends immediately instead of scheduling.
+ */
+function computeDelayMinutes(target: Date | null): number | undefined {
+  if (!target) return undefined
+  const diffMinutes = Math.ceil((target.getTime() - Date.now()) / 60_000)
+  return diffMinutes >= 1 ? diffMinutes : undefined
 }
 
 // ── Edit form ───────────────────────────────────────────────────────────────
