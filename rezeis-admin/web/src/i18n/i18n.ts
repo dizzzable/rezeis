@@ -31,10 +31,13 @@ void i18n.use(initReactI18next).init({
   },
 })
 
-// Pre-load the initial language synchronously so the first render has
-// translations available. Subsequent changeLanguage() calls trigger
-// loadLocale() lazily through the language change event.
-void loadLocale(initialLocale)
+// Pre-load the initial language before first paint. Exposed as a promise so
+// the bootstrap (main.tsx) can await it — otherwise `t()` returns raw keys
+// (e.g. the "auth.verifyingSession" spinner shown during session probing) until
+// the dynamically-imported locale chunk lands, which is visible on slower
+// mobile/iOS networks. Subsequent changeLanguage() calls load lazily via the
+// languageChanged handler below.
+export const i18nReady: Promise<void> = loadLocale(initialLocale)
 
 i18n.on('languageChanged', (lng: string): void => {
   if (lng === 'ru' || lng === 'en') {
