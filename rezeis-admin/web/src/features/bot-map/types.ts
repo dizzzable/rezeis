@@ -69,6 +69,7 @@ export interface NotificationMapNode extends BotMapBaseNode {
   readonly titleEn: string | null
   readonly bodyRu: string
   readonly bodyEn: string | null
+  readonly bannerUrl: string | null
   readonly buttons: ReadonlyArray<NotificationButtonShape>
   readonly isActive: boolean
 }
@@ -120,5 +121,6 @@ export interface UpdateNotificationTemplatePatch {
   readonly titleEn?: string | null
   readonly bodyEn?: string | null
   readonly buttons?: ReadonlyArray<NotificationButtonShape>
+  readonly bannerUrl?: string | null
   readonly isActive?: boolean
 }

@@ -29,6 +29,7 @@ import {
 } from '../dto/bot-config.dto';
 import { ReiwaCacheInvalidateInterceptor } from '../interceptors/reiwa-cache-invalidate.interceptor';
 import { BotBannerUploadService } from '../services/bot-banner-upload.service';
+import { BotBannerService, type BotBannerView } from '../services/bot-banner.service';
 import { BotButtonsService } from '../services/bot-buttons.service';
 import { BotEmojisService } from '../services/bot-emojis.service';
 import { BotTextsService } from '../services/bot-texts.service';
@@ -57,6 +58,7 @@ export class AdminBotConfigController {
     private readonly botTextsService: BotTextsService,
     private readonly cacheInvalidator: ReiwaCacheInvalidatorService,
     private readonly bannerUploadService: BotBannerUploadService,
+    private readonly bannerService: BotBannerService,
   ) {}
 
   // ── Buttons ────────────────────────────────────────────────────────────────
@@ -260,6 +262,51 @@ export class AdminBotConfigController {
       visible: false,
     });
     return { url: fullUrl, size: persisted.size };
+  }
+
+  // ── Banner library (reusable banners) ───────────────────────────────────────
+
+  @Get('banners')
+  @ApiOperation({ summary: 'List the reusable banner library' })
+  public listBanners(): Promise<readonly BotBannerView[]> {
+    return this.bannerService.listAll();
+  }
+
+  @Post('banners')
+  @UseInterceptors(
+    FileInterceptor('file', {
+      limits: { fileSize: 8 * 1024 * 1024 },
+      fileFilter: (_req, file, cb) => {
+        const allowed = /^image\/(png|jpeg|webp|gif)$/;
+        cb(null, allowed.test(file.mimetype));
+      },
+    }),
+    ReiwaCacheInvalidateInterceptor,
+  )
+  @ApiOperation({ summary: 'Upload a banner into the reusable library' })
+  public async createBanner(
+    @UploadedFile() file: Express.Multer.File | undefined,
+    @Body('name') name?: string,
+  ): Promise<BotBannerView> {
+    if (file === undefined) {
+      throw new BadRequestException(
+        'Banner file is required (image/png, image/jpeg, image/webp, image/gif; max 8 MB).',
+      );
+    }
+    return this.bannerService.createFromUpload({
+      buffer: file.buffer,
+      originalName: file.originalname,
+      mimeType: file.mimetype,
+      name,
+    });
+  }
+
+  @Post('banners/:id/delete')
+  @UseInterceptors(ReiwaCacheInvalidateInterceptor)
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({ summary: 'Delete a banner from the library (assignments keep their URL)' })
+  public deleteBanner(@Param('id') id: string): Promise<void> {
+    return this.bannerService.delete(id);
   }
 
   private resolvePublicBannerUrl(relativeUrl: string): string {

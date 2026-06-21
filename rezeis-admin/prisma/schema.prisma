@@ -1924,6 +1924,9 @@ model NotificationTemplate {
   /// `{ labelRu, labelEn?, kind: 'webApp'|'url'|'callback', target }`. Default
   /// `[]` keeps existing rows behaving identically.
   buttons   Json     @default("[]") @map("buttons")
+  /// Optional banner image (absolute URL or `/uploads/...`) delivered with the
+  /// notification. `null` → no image (text-only delivery, today's behavior).
+  bannerUrl String?  @map("banner_url")
   isActive  Boolean  @default(true) @map("is_active")
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
@@ -2236,6 +2239,27 @@ model BotText {
 
   @@index([visible])
   @@map("bot_texts")
+}
+
+/// Reusable banner image library. Operators upload a banner once and assign it
+/// (by `url`) to one or more bot surfaces — graph screens (`BotFlowScreen.media*`),
+/// notifications (`NotificationTemplate.bannerUrl`), or the global welcome
+/// banner (`BotText['bot.banner_url']`). Deleting a row only removes the
+/// library entry; nodes still referencing the URL keep working until reassigned.
+model BotBanner {
+  id        String   @id @default(cuid()) @map("id")
+  /// Operator-facing label for the library card.
+  name      String   @map("name")
+  /// Served URL (`/uploads/bot-banners/<file>` or absolute) — the value
+  /// assigned to nodes and read by reiwa.
+  url       String   @map("url")
+  mimeType  String   @map("mime_type")
+  sizeBytes Int      @map("size_bytes")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@index([createdAt])
+  @@map("bot_banners")
 }
 
 // =============================================================================

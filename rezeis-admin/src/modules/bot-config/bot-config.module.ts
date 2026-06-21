@@ -7,6 +7,7 @@ import { AdminBotEmojiStudioController } from './controllers/admin-bot-emoji-stu
 import { InternalBotConfigController } from './controllers/internal-bot-config.controller';
 import { ReiwaCacheInvalidateInterceptor } from './interceptors/reiwa-cache-invalidate.interceptor';
 import { BotBannerUploadService } from './services/bot-banner-upload.service';
+import { BotBannerService } from './services/bot-banner.service';
 import { BotButtonsService } from './services/bot-buttons.service';
 import { BotEmojisService } from './services/bot-emojis.service';
 import { BotEmojiStudioService } from './services/bot-emoji-studio.service';
@@ -42,6 +43,7 @@ import { ReiwaCacheInvalidatorService } from './services/reiwa-cache-invalidator
   controllers: [AdminBotConfigController, AdminBotEmojiStudioController, InternalBotConfigController],
   providers: [
     BotBannerUploadService,
+    BotBannerService,
     BotButtonsService,
     BotEmojisService,
     BotEmojiStudioService,

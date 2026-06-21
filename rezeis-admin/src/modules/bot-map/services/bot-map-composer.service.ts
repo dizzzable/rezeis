@@ -248,6 +248,7 @@ function toNotificationNode(template: NotificationTemplate): NotificationMapNode
     titleEn: (template as { titleEn?: string | null }).titleEn ?? null,
     bodyRu: template.body,
     bodyEn: (template as { bodyEn?: string | null }).bodyEn ?? null,
+    bannerUrl: (template as { bannerUrl?: string | null }).bannerUrl ?? null,
     isActive: template.isActive,
     buttons: stored.map((b: StoredNotificationButton) => ({
       labelRu: b.labelRu,

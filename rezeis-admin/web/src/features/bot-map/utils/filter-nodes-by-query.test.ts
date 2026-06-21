@@ -45,6 +45,7 @@ const NODES: ReadonlyArray<BotMapNode> = [
     titleEn: 'Expires soon',
     bodyRu: 'Срок действия истекает',
     bodyEn: null,
+    bannerUrl: null,
     buttons: [],
     isActive: true,
   },

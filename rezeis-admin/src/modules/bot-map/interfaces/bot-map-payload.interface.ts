@@ -59,6 +59,8 @@ export interface NotificationMapNode extends BotMapBaseNode {
   readonly titleEn: string | null;
   readonly bodyRu: string;
   readonly bodyEn: string | null;
+  /** Optional banner image delivered with the notification (`null` = none). */
+  readonly bannerUrl: string | null;
   readonly buttons: ReadonlyArray<{
     readonly labelRu: string;
     readonly labelEn: string | null;

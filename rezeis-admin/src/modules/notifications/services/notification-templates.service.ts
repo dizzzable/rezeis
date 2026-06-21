@@ -16,6 +16,7 @@ interface UpsertTemplateInput {
   readonly titleEn?: string | null;
   readonly bodyEn?: string | null;
   readonly buttons?: ReadonlyArray<unknown>;
+  readonly bannerUrl?: string | null;
   readonly isActive?: boolean;
 }
 
@@ -26,6 +27,7 @@ interface UpdateTemplateInput {
   readonly titleEn?: string | null;
   readonly bodyEn?: string | null;
   readonly buttons?: ReadonlyArray<unknown>;
+  readonly bannerUrl?: string | null;
   readonly isActive?: boolean;
 }
 
@@ -84,6 +86,7 @@ export class NotificationTemplatesService implements OnModuleInit {
       titleEn?: string | null;
       bodyEn?: string | null;
       buttons?: Prisma.InputJsonValue;
+      bannerUrl?: string | null;
     } = {
       title: input.title,
       body: input.body,
@@ -94,6 +97,7 @@ export class NotificationTemplatesService implements OnModuleInit {
     if (input.buttons !== undefined) {
       writeFields.buttons = [...input.buttons] as unknown as Prisma.InputJsonValue;
     }
+    if (input.bannerUrl !== undefined) writeFields.bannerUrl = normalizeBannerUrl(input.bannerUrl);
     const template = await this.prismaService.notificationTemplate.upsert({
       where: { type: input.type },
       create: { type: input.type, ...writeFields },
@@ -125,6 +129,7 @@ export class NotificationTemplatesService implements OnModuleInit {
     if (input.buttons !== undefined) {
       data.buttons = [...input.buttons] as unknown as Prisma.InputJsonValue;
     }
+    if (input.bannerUrl !== undefined) data.bannerUrl = normalizeBannerUrl(input.bannerUrl);
     if (input.isActive !== undefined) data.isActive = input.isActive;
     const template = await this.prismaService.notificationTemplate.update({
       where: { id: input.id },
@@ -251,4 +256,11 @@ export class NotificationTemplatesService implements OnModuleInit {
       isActive: true,
     };
   }
+}
+
+/** Normalize an operator-supplied banner reference: empty/whitespace → null. */
+function normalizeBannerUrl(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }

@@ -54,6 +54,7 @@ export class AdminNotificationTemplatesController {
       titleEn: body.titleEn,
       bodyEn: body.bodyEn,
       buttons: body.buttons,
+      bannerUrl: body.bannerUrl,
       isActive: body.isActive ?? true,
     });
   }
@@ -78,6 +79,7 @@ export class AdminNotificationTemplatesController {
       titleEn: body.titleEn,
       bodyEn: body.bodyEn,
       buttons: body.buttons,
+      bannerUrl: body.bannerUrl,
       isActive: body.isActive,
     });
   }

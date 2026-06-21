@@ -81,6 +81,11 @@ export class CreateNotificationTemplateDto {
   public readonly buttons?: NotificationTemplateButtonDto[];
 
   @IsOptional()
+  @IsString()
+  @MaxLength(2_000)
+  public readonly bannerUrl?: string;
+
+  @IsOptional()
   @IsBoolean()
   public readonly isActive?: boolean;
 }
@@ -114,6 +119,11 @@ export class UpdateNotificationTemplateDto {
   @ValidateNested({ each: true })
   @Type(() => NotificationTemplateButtonDto)
   public readonly buttons?: NotificationTemplateButtonDto[];
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(2_000)
+  public readonly bannerUrl?: string;
 
   @IsOptional()
   @IsBoolean()
