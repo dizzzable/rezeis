@@ -11,6 +11,39 @@ import { api } from '@/lib/api'
 import type { BotMapPayload, UpdateNotificationTemplatePatch } from './types'
 
 export const BOT_MAP_QUERY_KEY = ['bot-map'] as const
+export const BOT_BANNERS_QUERY_KEY = ['bot-config', 'banners'] as const
+
+/** A reusable banner library entry (`GET /admin/bot-config/banners`). */
+export interface BotBannerView {
+  readonly id: string
+  readonly name: string
+  readonly url: string
+  readonly mimeType: string
+  readonly sizeBytes: number
+  readonly createdAt: string
+}
+
+/** Fetch the reusable banner library. */
+export async function fetchBanners(): Promise<readonly BotBannerView[]> {
+  const res = await api.get<readonly BotBannerView[]>('/admin/bot-config/banners')
+  return res.data
+}
+
+/** Upload a banner into the library and return the created entry. */
+export async function uploadBanner(file: File, name?: string): Promise<BotBannerView> {
+  const form = new FormData()
+  form.append('file', file)
+  if (name !== undefined && name.trim().length > 0) form.append('name', name.trim())
+  const res = await api.post<BotBannerView>('/admin/bot-config/banners', form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+  return res.data
+}
+
+/** Delete a banner from the library (assignments keep their URL). */
+export async function deleteBanner(id: string): Promise<void> {
+  await api.post(`/admin/bot-config/banners/${encodeURIComponent(id)}/delete`)
+}
 
 /** Fetch the unified node + edge payload backing the list and canvas. */
 export async function fetchBotMap(): Promise<BotMapPayload> {

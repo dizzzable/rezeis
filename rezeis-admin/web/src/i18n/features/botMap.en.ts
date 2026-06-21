@@ -9,6 +9,18 @@ export const en = {
       'Every bot screen and message in one list — see where each button leads, edit RU/EN copy in place.',
     refresh: 'Refresh',
     loadFailed: 'Failed to load the map',
+    banner: {
+      label: 'Banner',
+      none: 'No banner set',
+      pick: 'Pick from library',
+      upload: 'Upload',
+      uploaded: 'Banner uploaded',
+      uploadFailed: 'Banner upload failed',
+      tooLarge: 'File too large (max 8 MB)',
+      clear: 'Remove banner',
+      deleteFromLibrary: 'Delete from library',
+      hint: 'When unset, the bot uses the global banner. PNG/JPEG/WEBP/GIF, up to 8 MB.',
+    },
     tabs: {
       list: 'List',
       diagram: 'Diagram',

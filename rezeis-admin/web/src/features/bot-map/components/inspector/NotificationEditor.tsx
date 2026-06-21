@@ -31,6 +31,7 @@ import {
   patchNotificationTemplate,
 } from '../../bot-map-api'
 import type { NotificationButtonShape, NotificationMapNode } from '../../types'
+import { BannerField } from '../BannerField'
 import { LocaleTextarea } from './LocaleTextarea'
 
 interface NotificationEditorProps {
@@ -192,6 +193,14 @@ export function NotificationEditor({ node }: NotificationEditorProps) {
         <Switch
           checked={isActive}
           onCheckedChange={saveActive}
+          disabled={mutation.isPending}
+        />
+      </div>
+
+      <div className="rounded-lg border p-3">
+        <BannerField
+          value={node.bannerUrl}
+          onChange={(url) => mutation.mutate({ bannerUrl: url ?? '' })}
           disabled={mutation.isPending}
         />
       </div>
