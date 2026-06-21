@@ -9,8 +9,7 @@
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { ExternalLink, Save as SaveIcon } from 'lucide-react'
-import { Link } from 'react-router-dom'
+import { Save as SaveIcon } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { Badge } from '@/components/ui/badge'
@@ -40,13 +39,7 @@ export function ReplyButtonEditor({ node }: ReplyButtonEditorProps) {
 
       {node.buttons.length === 0 ? (
         <div className="rounded-lg border bg-muted/30 p-3 text-xs text-muted-foreground">
-          <p className="mb-3">{t('botMapPage.replyKeyboard.empty')}</p>
-          <Button asChild variant="outline" size="sm">
-            <Link to="/bot-flow">
-              <ExternalLink className="mr-1.5 h-3 w-3" aria-hidden />
-              {t('botMapPage.inspector.openOldEditor')}
-            </Link>
-          </Button>
+          <p>{t('botMapPage.replyKeyboard.empty')}</p>
         </div>
       ) : (
         <ul className="space-y-3">

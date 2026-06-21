@@ -99,8 +99,6 @@ const WebReiwaPage = lazy(() => import('@/features/branding/branding-page'))
 const AnalyticsPage = lazy(
   withFeatureBundle('analytics', () => import('@/features/analytics/analytics-page')),
 )
-const BotConfigPage = lazy(() => import('@/features/bot-config/bot-config-page'))
-const BotFlowPage = lazy(() => import('@/features/bot-flow/bot-flow-page'))
 const BotMapPage = lazy(
   withFeatureBundle('botMap', () => import('@/features/bot-map/bot-map-page')),
 )
@@ -190,8 +188,8 @@ export const router = createBrowserRouter([
           { path: 'web-reiwa', element: withSuspense(<WebReiwaPage />) },
           { path: 'settings/api-tokens', element: withSuspense(<ApiTokensPage />) },
           { path: 'settings/panel', element: withSuspense(<PanelSettingsHub />) },
-          { path: 'bot-config', element: withSuspense(<BotConfigPage />) },
-          { path: 'bot-flow', element: withSuspense(<BotFlowPage />) },
+          { path: 'bot-config', element: <Navigate to="/bot-map" replace /> },
+          { path: 'bot-flow', element: <Navigate to="/bot-map" replace /> },
           { path: 'bot-map', element: withSuspense(<BotMapPage />) },
           { path: 'analytics', element: withSuspense(<AnalyticsPage />) },
           { path: 'admins', element: withSuspense(<AdminsPage />) },

@@ -59,7 +59,6 @@ export const ru = {
       saveFailed: 'Не удалось сохранить',
       enFallback: 'Если EN-перевод пуст, бот покажет RU-копию.',
       emojiAria: 'Вставить эмодзи',
-      openOldEditor: 'Открыть старый редактор графа',
     },
     graphScreen: {
       title: 'Граф-экран бота',
@@ -71,7 +70,7 @@ export const ru = {
       placeholderEn: 'Same screen for English-speaking users…',
       buttonCountLabel: 'Кнопок на экране',
       tooltipFullEditor:
-        'Редактор кнопок и медиа экрана живёт в старом конструкторе — откройте его для расширенных правок.',
+        'Кнопки, медиа и действия экрана редактируются на вкладке «Схема».',
     },
     replyKeyboard: {
       title: 'Главное меню (reply-клавиатура)',
@@ -82,7 +81,7 @@ export const ru = {
       action: 'Действие',
       target: 'Цель',
       visible: 'Видна',
-      empty: 'Кнопок ещё нет — добавьте их в старом конструкторе.',
+      empty: 'Кнопок ещё нет — добавьте их на вкладке «Схема».',
       saveLabel: 'Сохранить подпись',
     },
     notification: {

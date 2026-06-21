@@ -6,14 +6,12 @@
  * stays in the legacy graph editor for now (deep link below); the map
  * page is RU/EN copy + structure overview, not a full structural editor.
  */
-import { ExternalLink, Workflow } from 'lucide-react'
+import { Workflow } from 'lucide-react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
-import { Link } from 'react-router-dom'
 import { toast } from 'sonner'
 
 import { Badge } from '@/components/ui/badge'
-import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import { Label } from '@/components/ui/label'
 
@@ -101,18 +99,12 @@ export function GraphScreenEditor({ node }: GraphScreenEditorProps) {
 
       <div className="rounded-lg border bg-muted/30 p-3 text-xs text-muted-foreground">
         <p className="mb-2">{t('botMapPage.graphScreen.tooltipFullEditor')}</p>
-        <p className="mb-3">
+        <p>
           {t('botMapPage.graphScreen.buttonCountLabel')}:{' '}
           <Badge variant="outline" className="ml-1 text-[10px]">
             {node.buttonCount}
           </Badge>
         </p>
-        <Button asChild variant="outline" size="sm">
-          <Link to="/bot-flow">
-            <ExternalLink className="mr-1.5 h-3 w-3" aria-hidden />
-            {t('botMapPage.inspector.openOldEditor')}
-          </Link>
-        </Button>
       </div>
     </div>
   )

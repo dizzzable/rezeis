@@ -59,7 +59,6 @@ export const en = {
       saveFailed: 'Save failed',
       enFallback: 'When EN is empty, the bot delivers the RU copy.',
       emojiAria: 'Insert emoji',
-      openOldEditor: 'Open the legacy graph editor',
     },
     graphScreen: {
       title: 'Bot graph screen',
@@ -71,7 +70,7 @@ export const en = {
       placeholderEn: 'Same screen for English-speaking users…',
       buttonCountLabel: 'Buttons on this screen',
       tooltipFullEditor:
-        'Buttons and media editing still lives in the legacy editor for now — open it for advanced changes.',
+        "Edit this screen's buttons, media and actions on the Diagram tab.",
     },
     replyKeyboard: {
       title: 'Main menu (reply keyboard)',
@@ -82,7 +81,7 @@ export const en = {
       action: 'Action',
       target: 'Target',
       visible: 'Visible',
-      empty: 'No buttons yet — add them via the legacy bot studio.',
+      empty: 'No buttons yet — add them on the Diagram tab.',
       saveLabel: 'Save label',
     },
     notification: {
