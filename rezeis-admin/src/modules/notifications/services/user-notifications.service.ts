@@ -191,6 +191,12 @@ export class UserNotificationsService {
           text: rendered.html,
           parseMode: 'HTML',
           buttons,
+          bannerUrl:
+            template !== null &&
+            typeof template.bannerUrl === 'string' &&
+            template.bannerUrl.trim().length > 0
+              ? template.bannerUrl.trim()
+              : undefined,
         });
       }
 
@@ -424,6 +430,7 @@ export class UserNotificationsService {
     readonly titleEn: string | null;
     readonly bodyEn: string | null;
     readonly buttons?: unknown;
+    readonly bannerUrl?: string | null;
     readonly isActive: boolean;
   } | null> {
     const canonicalType = resolveToggleKey(type);

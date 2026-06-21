@@ -46,6 +46,7 @@ describe('UserNotificationsService', () => {
         text: 'Manual message',
         parseMode: 'HTML',
         buttons: undefined,
+        bannerUrl: undefined,
       },
     ]);
     assert.deepStrictEqual(state.webPushCalls, [
@@ -98,6 +99,7 @@ describe('UserNotificationsService', () => {
         text: '<b>Expires soon</b>\n\nHello Nina, 3 day(s) left',
         parseMode: 'HTML',
         buttons: undefined,
+        bannerUrl: undefined,
       },
     ]);
     assert.deepStrictEqual(state.webPushCalls, [

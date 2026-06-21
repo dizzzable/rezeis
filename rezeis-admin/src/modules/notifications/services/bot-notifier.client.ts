@@ -56,6 +56,12 @@ export class BotNotifierClient {
     readonly text: string;
     readonly parseMode?: 'MarkdownV2' | 'HTML';
     readonly buttons?: ReadonlyArray<NotifyButton>;
+    /**
+     * Optional banner image (absolute URL or `/uploads/...`) delivered with the
+     * message. reiwa sends it as a photo with the text as caption; relative
+     * `/uploads/...` URLs are fetched from rezeis. Omitted → text-only message.
+     */
+    readonly bannerUrl?: string;
   }): Promise<number | null> {
     const { messageId } = await this.deliver('reiwa.user.notify', {
       eventId: input.eventId,
@@ -63,6 +69,7 @@ export class BotNotifierClient {
       text: input.text,
       parseMode: input.parseMode,
       buttons: input.buttons,
+      bannerUrl: input.bannerUrl,
     });
     return messageId;
   }
