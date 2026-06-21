@@ -58,6 +58,7 @@ export const en = {
       saved: 'Saved',
       saveFailed: 'Save failed',
       enFallback: 'When EN is empty, the bot delivers the RU copy.',
+      emojiAria: 'Insert emoji',
       openOldEditor: 'Open the legacy graph editor',
     },
     graphScreen: {

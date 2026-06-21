@@ -9,6 +9,9 @@ import { useTranslation } from 'react-i18next'
 
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
+import { EmojiPicker } from '@/features/broadcast/emoji-picker'
+
+import { insertAtCaret } from '../../utils/insert-at-caret'
 
 interface LocaleTextareaProps {
   readonly labelRu: string
@@ -36,6 +39,8 @@ export function LocaleTextarea({
   const { t } = useTranslation()
   const ruId = useId()
   const enId = useId()
+  const ruRef = useRef<HTMLTextAreaElement>(null)
+  const enRef = useRef<HTMLTextAreaElement>(null)
 
   // Mirror the props into local state so the operator sees their typing
   // immediately. Sync back when the canonical values change (a refetch
@@ -70,14 +75,45 @@ export function LocaleTextarea({
     onSave({ en: localEn.length === 0 ? null : localEn })
   }
 
+  // Emoji picker → splice at the caret and persist immediately (the picker is
+  // an explicit action, so we don't wait for a blur to save).
+  const insertRu = (emoji: string) => {
+    const el = ruRef.current
+    const start = el?.selectionStart ?? localRu.length
+    const end = el?.selectionEnd ?? localRu.length
+    const { value: next, caret } = insertAtCaret(localRu, start, end, emoji)
+    setLocalRu(next)
+    onSave({ ru: next })
+    requestAnimationFrame(() => {
+      el?.focus()
+      el?.setSelectionRange(caret, caret)
+    })
+  }
+  const insertEn = (emoji: string) => {
+    const el = enRef.current
+    const start = el?.selectionStart ?? localEn.length
+    const end = el?.selectionEnd ?? localEn.length
+    const { value: next, caret } = insertAtCaret(localEn, start, end, emoji)
+    setLocalEn(next)
+    onSave({ en: next.length === 0 ? null : next })
+    requestAnimationFrame(() => {
+      el?.focus()
+      el?.setSelectionRange(caret, caret)
+    })
+  }
+
   return (
     <div className="grid gap-3 lg:grid-cols-2">
       <div className="space-y-1.5">
-        <Label htmlFor={ruId} className="text-xs">
-          {labelRu}
-        </Label>
+        <div className="flex items-center justify-between">
+          <Label htmlFor={ruId} className="text-xs">
+            {labelRu}
+          </Label>
+          <EmojiPicker onSelect={insertRu} ariaLabel={t('botMapPage.inspector.emojiAria')} />
+        </div>
         <Textarea
           id={ruId}
+          ref={ruRef}
           rows={rows}
           value={localRu}
           onChange={(e) => setLocalRu(e.target.value)}
@@ -88,11 +124,15 @@ export function LocaleTextarea({
         />
       </div>
       <div className="space-y-1.5">
-        <Label htmlFor={enId} className="text-xs">
-          {labelEn}
-        </Label>
+        <div className="flex items-center justify-between">
+          <Label htmlFor={enId} className="text-xs">
+            {labelEn}
+          </Label>
+          <EmojiPicker onSelect={insertEn} ariaLabel={t('botMapPage.inspector.emojiAria')} />
+        </div>
         <Textarea
           id={enId}
+          ref={enRef}
           rows={rows}
           value={localEn}
           onChange={(e) => setLocalEn(e.target.value)}

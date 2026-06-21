@@ -58,6 +58,7 @@ export const ru = {
       saved: 'Сохранено',
       saveFailed: 'Не удалось сохранить',
       enFallback: 'Если EN-перевод пуст, бот покажет RU-копию.',
+      emojiAria: 'Вставить эмодзи',
       openOldEditor: 'Открыть старый редактор графа',
     },
     graphScreen: {

@@ -15,10 +15,13 @@ import { DestinationBadge } from '../DestinationBadge'
 interface DestinationEdgeData extends Record<string, unknown> {
   readonly edge: BotMapEdge
   readonly nodesById?: ReadonlyMap<string, BotMapNode>
+  readonly color?: string
+  readonly dashed?: boolean
 }
 
 export function DestinationEdge(props: EdgeProps) {
-  const { sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, data } = props
+  const { sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, data, markerEnd } =
+    props
   const payload = data as DestinationEdgeData | undefined
   const edge = payload?.edge
 
@@ -32,16 +35,19 @@ export function DestinationEdge(props: EdgeProps) {
   })
 
   const invalid = edge ? !edge.valid : false
+  const color = payload?.color ?? 'hsl(var(--muted-foreground))'
+  const dashed = payload?.dashed ?? invalid
 
   return (
     <>
       <BaseEdge
         path={path}
-        style={
-          invalid
-            ? { stroke: 'hsl(var(--destructive))', strokeWidth: 1.5, strokeDasharray: '6 4' }
-            : { stroke: 'hsl(var(--muted-foreground))', strokeWidth: 1.5 }
-        }
+        markerEnd={markerEnd}
+        style={{
+          stroke: color,
+          strokeWidth: invalid ? 1.5 : 2,
+          ...(dashed ? { strokeDasharray: '6 4' } : {}),
+        }}
       />
       {edge && (
         <EdgeLabelRenderer>
