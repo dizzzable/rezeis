@@ -19,6 +19,7 @@ import { cn } from '@/lib/utils'
 
 import type { BotMapNode, BotMapPayload } from '../types'
 import { filterNodesByQuery } from '../utils/filter-nodes-by-query'
+import { CanvasView } from './CanvasView'
 import { InspectorRouter } from './inspector/InspectorRouter'
 import { ListView } from './ListView'
 import { NodeRail } from './NodeRail'
@@ -133,27 +134,17 @@ export function BotMapShell({ payload, isFetching, onRefresh }: BotMapShellProps
           </div>
         </TabsContent>
 
-        <TabsContent value="diagram" className="mt-3 flex flex-1 min-h-0">
-          <DiagramPlaceholder />
+        <TabsContent value="diagram" className="mt-3 flex flex-1 min-h-0 gap-3">
+          <div className="flex-1 min-w-0 overflow-hidden rounded-lg border bg-card">
+            <CanvasView payload={payload} selectedId={selectedId} onSelect={setSelectedId} />
+          </div>
+          <div className="hidden w-96 shrink-0 overflow-hidden rounded-lg border bg-card lg:flex lg:flex-col">
+            <div className="flex-1 overflow-y-auto p-4">
+              <InspectorRouter node={selected} />
+            </div>
+          </div>
         </TabsContent>
       </Tabs>
-    </div>
-  )
-}
-
-function DiagramPlaceholder() {
-  const { t } = useTranslation()
-  return (
-    <div className="flex flex-1 items-center justify-center rounded-lg border border-dashed bg-card">
-      <div className="max-w-md space-y-2 p-6 text-center">
-        <Network className="mx-auto h-10 w-10 text-muted-foreground" aria-hidden />
-        <h2 className="text-base font-semibold">
-          {t('botMapPage.diagram.placeholderTitle')}
-        </h2>
-        <p className="text-sm text-muted-foreground">
-          {t('botMapPage.diagram.placeholderBody')}
-        </p>
-      </div>
     </div>
   )
 }
