@@ -3,24 +3,9 @@ import { SubscriptionStatus } from '@prisma/client';
 
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { UserNotificationsService } from '../notifications/services/user-notifications.service';
-import { NotifyButton } from '../notifications/services/bot-notifier.client';
 
 const BATCH_SIZE = 100;
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
-
-/**
- * Inline buttons attached to expiry-warning Telegram notifications:
- *   • "Продлить" → a Mini App `web_app` button (the bot resolves `webAppPath`
- *     against its own Mini App URL) that opens the cabinet straight on the
- *     renewal page. The TMA bootstrap preserves this destination across the
- *     auth handshake (`?next=/renew`).
- *   • "Главное меню" → `menu:main` callback, handled by the bot's start page
- *     (re-renders the welcome screen in place).
- */
-const EXPIRY_NOTIFICATION_BUTTONS: ReadonlyArray<NotifyButton> = [
-  { text: '🔄 Продлить подписку', webAppPath: '/renew' },
-  { text: '🏠 Главное меню', callbackData: 'menu:main' },
-];
 
 /**
  * Auto-renewal service — donor: altshop `src/services/auto_renew.py` +
@@ -30,6 +15,13 @@ const EXPIRY_NOTIFICATION_BUTTONS: ReadonlyArray<NotifyButton> = [
  *  1. Detect ACTIVE subscriptions past their `expiresAt` → mark EXPIRED
  *  2. (Future) Attempt partner-balance auto-renewal before expiring
  *  3. Create `UserNotificationEvent` rows for expiry warnings (3d, 1d)
+ *
+ * Inline buttons attached to expiry-warning Telegram notifications
+ * ("Продлить" → Mini App `/renew` + "Главное меню" → `menu:main`) are
+ * stored on `NotificationTemplate.buttons` as data and resolved by
+ * `UserNotificationsService.resolveButtonsFor` per-locale; the previous
+ * in-code `EXPIRY_NOTIFICATION_BUTTONS` constant lived here and was
+ * removed in Phase 1 of the bot-studio-redesign spec.
  *
  * This service is designed to be called from a cron interval (e.g., every
  * 30 seconds via `@nestjs/schedule`). The worker module will wire the cron
@@ -122,7 +114,6 @@ export class AutoRenewService {
           planName,
           daysLeft: input.daysAhead,
         },
-        buttons: EXPIRY_NOTIFICATION_BUTTONS,
       });
       created++;
     }

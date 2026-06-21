@@ -13,6 +13,9 @@ interface UpsertTemplateInput {
   readonly type: string;
   readonly title: string;
   readonly body: string;
+  readonly titleEn?: string | null;
+  readonly bodyEn?: string | null;
+  readonly buttons?: ReadonlyArray<unknown>;
   readonly isActive?: boolean;
 }
 
@@ -20,6 +23,9 @@ interface UpdateTemplateInput {
   readonly id: string;
   readonly title?: string;
   readonly body?: string;
+  readonly titleEn?: string | null;
+  readonly bodyEn?: string | null;
+  readonly buttons?: ReadonlyArray<unknown>;
   readonly isActive?: boolean;
 }
 
@@ -71,19 +77,27 @@ export class NotificationTemplatesService implements OnModuleInit {
       where: { type: input.type },
       select: { id: true },
     });
+    const writeFields: {
+      title: string;
+      body: string;
+      isActive: boolean;
+      titleEn?: string | null;
+      bodyEn?: string | null;
+      buttons?: Prisma.InputJsonValue;
+    } = {
+      title: input.title,
+      body: input.body,
+      isActive: input.isActive ?? true,
+    };
+    if (input.titleEn !== undefined) writeFields.titleEn = input.titleEn;
+    if (input.bodyEn !== undefined) writeFields.bodyEn = input.bodyEn;
+    if (input.buttons !== undefined) {
+      writeFields.buttons = [...input.buttons] as unknown as Prisma.InputJsonValue;
+    }
     const template = await this.prismaService.notificationTemplate.upsert({
       where: { type: input.type },
-      create: {
-        type: input.type,
-        title: input.title,
-        body: input.body,
-        isActive: input.isActive ?? true,
-      },
-      update: {
-        title: input.title,
-        body: input.body,
-        isActive: input.isActive ?? true,
-      },
+      create: { type: input.type, ...writeFields },
+      update: writeFields,
     });
     this.events.info(
       existing === null
@@ -106,6 +120,11 @@ export class NotificationTemplatesService implements OnModuleInit {
     const data: Prisma.NotificationTemplateUpdateInput = {};
     if (input.title !== undefined) data.title = input.title;
     if (input.body !== undefined) data.body = input.body;
+    if (input.titleEn !== undefined) data.titleEn = input.titleEn;
+    if (input.bodyEn !== undefined) data.bodyEn = input.bodyEn;
+    if (input.buttons !== undefined) {
+      data.buttons = [...input.buttons] as unknown as Prisma.InputJsonValue;
+    }
     if (input.isActive !== undefined) data.isActive = input.isActive;
     const template = await this.prismaService.notificationTemplate.update({
       where: { id: input.id },
@@ -131,19 +150,31 @@ export class NotificationTemplatesService implements OnModuleInit {
   }
 
   /**
-   * Inserts every catalog template that is not yet present. Existing rows
-   * are intentionally left alone so operator edits survive a re-seed.
+   * Inserts every catalog template that is not yet present, AND backfills
+   * the new `titleEn` / `bodyEn` / `buttons` columns on existing rows that
+   * still hold the migration defaults. The backfill is conservative — it
+   * never touches a row whose EN copy or buttons column was already
+   * authored by an operator (non-null EN string, non-empty buttons array).
    */
   public async seedDefaults(options: SeedDefaultsOptions = {}): Promise<SeedResult> {
     let created = 0;
     let skipped = 0;
+    let backfilled = 0;
     for (const template of DEFAULT_NOTIFICATION_TEMPLATES) {
       const existing = await this.prismaService.notificationTemplate.findUnique({
         where: { type: template.type },
-        select: { id: true },
+        select: { id: true, titleEn: true, bodyEn: true, buttons: true },
       });
       if (existing !== null) {
         skipped += 1;
+        const patch = this.buildBackfillPatch(template, existing);
+        if (patch !== null) {
+          await this.prismaService.notificationTemplate.update({
+            where: { id: existing.id },
+            data: patch,
+          });
+          backfilled += 1;
+        }
         continue;
       }
       await this.prismaService.notificationTemplate.upsert({
@@ -159,7 +190,52 @@ export class NotificationTemplatesService implements OnModuleInit {
         skipped,
       });
     }
+    if (backfilled > 0) {
+      this.logger.log(
+        `Backfilled new locale/buttons columns on ${backfilled} existing notification template(s)`,
+      );
+    }
     return { created, skipped };
+  }
+
+  /**
+   * Decide whether to backfill the new columns on an existing row.
+   * Returns `null` when nothing needs to change. The seed data is the
+   * source of truth for stock rows; an operator edit (non-empty EN copy
+   * or non-empty buttons array) wins and is preserved verbatim.
+   */
+  private buildBackfillPatch(
+    catalog: DefaultNotificationTemplate,
+    existing: {
+      readonly titleEn: string | null;
+      readonly bodyEn: string | null;
+      readonly buttons: unknown;
+    },
+  ): Prisma.NotificationTemplateUpdateInput | null {
+    const patch: Prisma.NotificationTemplateUpdateInput = {};
+    if (
+      existing.titleEn === null &&
+      typeof catalog.titleEn === 'string' &&
+      catalog.titleEn.length > 0
+    ) {
+      patch.titleEn = catalog.titleEn;
+    }
+    if (
+      existing.bodyEn === null &&
+      typeof catalog.bodyEn === 'string' &&
+      catalog.bodyEn.length > 0
+    ) {
+      patch.bodyEn = catalog.bodyEn;
+    }
+    const existingButtons = Array.isArray(existing.buttons) ? existing.buttons : null;
+    if (
+      existingButtons !== null &&
+      existingButtons.length === 0 &&
+      (catalog.buttons?.length ?? 0) > 0
+    ) {
+      patch.buttons = [...catalog.buttons!] as unknown as Prisma.InputJsonValue;
+    }
+    return Object.keys(patch).length > 0 ? patch : null;
   }
 
   private fromCatalog(
@@ -169,6 +245,9 @@ export class NotificationTemplatesService implements OnModuleInit {
       type: template.type,
       title: template.title,
       body: template.body,
+      titleEn: template.titleEn ?? null,
+      bodyEn: template.bodyEn ?? null,
+      buttons: (template.buttons ?? []) as unknown as Prisma.InputJsonValue,
       isActive: true,
     };
   }

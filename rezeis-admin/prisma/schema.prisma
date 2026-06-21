@@ -1907,6 +1907,17 @@ model NotificationTemplate {
   title     String   @map("title")
   /// Body template.
   body      String   @map("body")
+  /// Optional EN copy. When non-empty, delivered to users whose `User.language`
+  /// is EN; otherwise the RU column above is used. Backed by a hand-written
+  /// migration so existing rows keep delivering RU until an operator authors
+  /// the EN translation.
+  titleEn   String?  @map("title_en")
+  bodyEn    String?  @map("body_en")
+  /// Ordered action buttons attached to the message. Replaces the in-code
+  /// expiry-button constant. Each entry shaped
+  /// `{ labelRu, labelEn?, kind: 'webApp'|'url'|'callback', target }`. Default
+  /// `[]` keeps existing rows behaving identically.
+  buttons   Json     @default("[]") @map("buttons")
   isActive  Boolean  @default(true) @map("is_active")
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)

@@ -7,6 +7,12 @@ import { WebPushService } from '../../push/services/web-push.service';
 import { BotNotifierClient, NotifyButton } from './bot-notifier.client';
 import { NotificationTemplatesService } from './notification-templates.service';
 import { isNotificationDeliveryEnabled, resolveToggleKey } from '../utils/notification-toggle.util';
+import {
+  coerceNotificationLocale,
+  resolveTemplateButtons,
+  resolveTemplateLocale,
+  type NotificationLocale,
+} from '../utils/notification-template-locale.util';
 import { readPlatformBranding } from '../../settings/utils/platform-branding.util';
 
 /**
@@ -136,7 +142,7 @@ export class UserNotificationsService {
 
       const user = await this.prismaService.user.findUnique({
         where: { id: input.userId },
-        select: { telegramId: true, isBotBlocked: true, name: true },
+        select: { telegramId: true, isBotBlocked: true, name: true, language: true },
       });
       if (user === null) return;
 
@@ -144,10 +150,33 @@ export class UserNotificationsService {
       // browser pushes in lockstep. `null` when no active template
       // matches the (canonical) type; preRenderedText short-circuits
       // template lookup for explicit operator sends.
+      const locale = coerceNotificationLocale(user.language as string | null | undefined);
+      const template =
+        input.preRenderedText !== undefined ? null : await this.fetchTemplate(input.type);
       const rendered =
         input.preRenderedText !== undefined
           ? { title: 'Reiwa', body: input.preRenderedText, html: input.preRenderedText }
-          : await this.renderMessage(input.type, input.payload, user.name);
+          : template === null || !template.isActive
+            ? null
+            : await this.renderFromTemplate(template, input.payload, user.name, locale);
+
+      // Resolve operator-managed buttons from the same template (single
+      // lookup — Phase 1 of the bot-studio-redesign moved expiry / referral
+      // / partner button declarations from per-emitter constants into
+      // NotificationTemplate.buttons). Caller-supplied `input.buttons`
+      // still wins for ad-hoc sends.
+      const buttons =
+        input.buttons !== undefined
+          ? input.buttons
+          : template === null
+            ? undefined
+            : (() => {
+                const resolved = resolveTemplateButtons(
+                  { buttons: (template as { buttons?: unknown }).buttons ?? null },
+                  locale,
+                );
+                return resolved.length > 0 ? resolved : undefined;
+              })();
 
       // Telegram bot fanout — only for users who haven't blocked us.
       if (
@@ -161,7 +190,7 @@ export class UserNotificationsService {
           telegramId: user.telegramId.toString(),
           text: rendered.html,
           parseMode: 'HTML',
-          buttons: input.buttons,
+          buttons,
         });
       }
 
@@ -384,20 +413,44 @@ export class UserNotificationsService {
    * `null` when no active template matches — the caller skips all push
    * channels (the cabinet feed row still exists).
    */
-  private async renderMessage(
-    type: string,
-    payload: unknown,
-    userName: string | null,
-  ): Promise<{ title: string; body: string; html: string } | null> {
+  /**
+   * Look up the template row matching `type` — first by canonical key
+   * (so `subscription_expiring_3d` hits `expires_in_3_days`), then by
+   * the raw type as a fallback. `null` when no row matches.
+   */
+  private async fetchTemplate(type: string): Promise<{
+    readonly title: string;
+    readonly body: string;
+    readonly titleEn: string | null;
+    readonly bodyEn: string | null;
+    readonly buttons?: unknown;
+    readonly isActive: boolean;
+  } | null> {
     const canonicalType = resolveToggleKey(type);
-    // Prefer the canonical key; fall back to the raw type for any
-    // template authored against the fired string directly.
     const template =
       (await this.templatesService.getByType(canonicalType)) ??
       (await this.templatesService.getByType(type));
-    if (template === null || !template.isActive) return null;
-    // Brand-aware substitution: expose the operator's project name so any
-    // template can use `{{project_name}}` / `{{projectName}}`.
+    if (template === null) return null;
+    return template as never;
+  }
+
+  /**
+   * Render `(title, body, html)` from an already-fetched template row +
+   * locale + the user's payload. Pure substitution; the template lookup
+   * happened upstream so we don't pay for it twice when the caller also
+   * needs the row to resolve buttons.
+   */
+  private async renderFromTemplate(
+    template: {
+      readonly title: string;
+      readonly body: string;
+      readonly titleEn: string | null;
+      readonly bodyEn: string | null;
+    },
+    payload: unknown,
+    userName: string | null,
+    locale: NotificationLocale,
+  ): Promise<{ title: string; body: string; html: string }> {
     const projectName = await this.resolveProjectName();
     const ctx: Record<string, unknown> = {
       ...(payload !== null && typeof payload === 'object' && !Array.isArray(payload)
@@ -407,8 +460,9 @@ export class UserNotificationsService {
       project_name: projectName,
       projectName,
     };
-    const title = substitute(template.title, ctx);
-    const body = substitute(template.body, ctx);
+    const localized = resolveTemplateLocale(template, locale);
+    const title = substitute(localized.title, ctx);
+    const body = substitute(localized.body, ctx);
     const html = `<b>${escapeHtml(title)}</b>\n\n${body}`;
     return { title, body, html };
   }
