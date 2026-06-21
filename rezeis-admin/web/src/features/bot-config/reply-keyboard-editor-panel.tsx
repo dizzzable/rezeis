@@ -42,9 +42,12 @@ import { toast } from 'sonner'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
+import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
+import { BannerField } from '@/features/bot-map/components/BannerField'
 
 import {
   BOT_CONFIG_KEYS,
@@ -53,6 +56,25 @@ import {
 } from './bot-config-api'
 import { BotButtonCreateDialog, BotButtonEditDialog } from './bot-button-dialogs'
 
+/**
+ * Shared cache key with `BotBannerTab` and the canvas reply pseudo-node
+ * thumbnail in `bot-flow-page` — writing through it keeps all three in
+ * sync. The global banner lives in `bot.banner_url` (already rendered by
+ * reiwa's welcome screen); the "one banner for all" flag persists in
+ * `bot.banner_apply_all` with `visible:false` so it stays out of reiwa's
+ * `translations` payload and never trips the byte-parity contract guard.
+ */
+const BOT_TEXTS_QUERY_KEY = ['bot-texts'] as const
+const BANNER_URL_KEY = 'bot.banner_url'
+const BANNER_APPLY_ALL_KEY = 'bot.banner_apply_all'
+
+interface BotTextRow {
+  readonly id: string
+  readonly key: string
+  readonly value: string
+  readonly visible: boolean
+}
+
 export function ReplyKeyboardEditorPanel(): JSX.Element {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
@@ -60,6 +82,49 @@ export function ReplyKeyboardEditorPanel(): JSX.Element {
   const { data: buttons, isLoading } = useQuery({
     queryKey: BOT_CONFIG_KEYS.buttons,
     queryFn: botConfigApi.listButtons,
+  })
+
+  // ── Global bot banner (main-menu inspector) ──────────────────────────────
+  // The operator anchors the whole bot here, so the "one banner for all"
+  // controls live on the main menu. The URL persists in the existing
+  // `bot.banner_url` row; the apply-all flag in `bot.banner_apply_all`.
+  // Both write through the bot-config texts endpoints, so the cache-bust
+  // interceptor pushes them to reiwa with the rest of the config.
+  const { data: botTexts } = useQuery({
+    queryKey: BOT_TEXTS_QUERY_KEY,
+    queryFn: async (): Promise<readonly BotTextRow[]> => {
+      const { data } = await api.get<readonly BotTextRow[]>('/admin/bot-config/texts')
+      return data
+    },
+  })
+  const bannerRow = botTexts?.find((r) => r.key === BANNER_URL_KEY) ?? null
+  const bannerUrl = (bannerRow?.value ?? '').trim()
+  const applyAllRow = botTexts?.find((r) => r.key === BANNER_APPLY_ALL_KEY) ?? null
+  const applyAll = (applyAllRow?.value ?? '').trim().toLowerCase() === 'true'
+
+  const upsertTextMutation = useMutation({
+    mutationFn: async ({
+      key,
+      value,
+      row,
+    }: {
+      readonly key: string
+      readonly value: string
+      readonly row: BotTextRow | null
+    }) => {
+      if (row !== null) {
+        // Raw PATCH (not botConfigApi.updateText) so an empty value is
+        // accepted as a soft-clear, mirroring BotBannerTab's remove path.
+        await api.patch(`/admin/bot-config/texts/${row.id}`, { value })
+      } else if (value.length > 0) {
+        await api.post('/admin/bot-config/texts', { key, value, visible: false })
+      }
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: BOT_TEXTS_QUERY_KEY })
+      toast.success(t('botStudio.replyKeyboard.bannerSection.saved'))
+    },
+    onError: () => toast.error(t('botStudio.replyKeyboard.bannerSection.saveFailed')),
   })
 
   const [order, setOrder] = useState<BotButton[]>([])
@@ -144,6 +209,52 @@ export function ReplyKeyboardEditorPanel(): JSX.Element {
       <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 px-3 py-2 text-[11px] leading-relaxed text-emerald-700 dark:text-emerald-400">
         {t('botStudio.replyKeyboard.autoSaveHint')}
       </div>
+
+      <section className="space-y-3 rounded-md border p-3">
+        <div>
+          <h4 className="text-sm font-semibold">
+            {t('botStudio.replyKeyboard.bannerSection.title')}
+          </h4>
+          <p className="text-[11px] leading-snug text-muted-foreground">
+            {t('botStudio.replyKeyboard.bannerSection.subtitle')}
+          </p>
+        </div>
+
+        <BannerField
+          value={bannerUrl.length > 0 ? bannerUrl : null}
+          onChange={(url) =>
+            upsertTextMutation.mutate({
+              key: BANNER_URL_KEY,
+              value: url ?? '',
+              row: bannerRow,
+            })
+          }
+          disabled={upsertTextMutation.isPending}
+        />
+
+        <div className="flex items-center justify-between gap-2 rounded-md border bg-muted/20 p-2.5">
+          <div className="min-w-0">
+            <Label className="text-xs">
+              {t('botStudio.replyKeyboard.bannerSection.applyAll')}
+            </Label>
+            <p className="text-[10px] leading-snug text-muted-foreground">
+              {t('botStudio.replyKeyboard.bannerSection.applyAllHint')}
+            </p>
+          </div>
+          <Switch
+            checked={applyAll}
+            onCheckedChange={(next) =>
+              upsertTextMutation.mutate({
+                key: BANNER_APPLY_ALL_KEY,
+                value: next ? 'true' : 'false',
+                row: applyAllRow,
+              })
+            }
+            disabled={upsertTextMutation.isPending}
+            aria-label={t('botStudio.replyKeyboard.bannerSection.applyAll')}
+          />
+        </div>
+      </section>
 
       <Button size="sm" variant="outline" onClick={() => setCreating(true)}>
         <Plus className="mr-1 h-4 w-4" aria-hidden />

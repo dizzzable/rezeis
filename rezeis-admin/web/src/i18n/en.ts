@@ -3209,6 +3209,14 @@ export const en = {
       cannotConnect: 'Reply-keyboard buttons are global — they cannot link to a specific screen via edges.',
       bannerAlt: 'Bot banner preview',
       bannerPlaceholder: 'No banner set — use the «🖼️ Banner» button at the top to upload one',
+      bannerSection: {
+        title: 'Bot banner',
+        subtitle: 'Banner image for the bot. Pick from the library, upload your own, or clear it. Applies immediately — reiwa picks it up on the next refresh.',
+        applyAll: 'One banner for all screens',
+        applyAllHint: 'On — the bot uses this banner as a single banner for every screen. Off — each screen and notification can carry its own banner.',
+        saved: 'Banner saved',
+        saveFailed: 'Failed to save the banner',
+      },
     },
     drawers: {
       emojisDescription: 'Premium custom_emoji_id mapping. Reiwa picks these up on its 5-minute refresh.',
