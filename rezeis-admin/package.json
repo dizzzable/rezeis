@@ -1,6 +1,6 @@
 {
   "name": "rezeis-admin",
-  "version": "0.9.5.59",
+  "version": "0.9.5.60",
   "description": "Rezeis Admin NestJS microservice baseline",
   "private": true,
   "license": "UNLICENSED",

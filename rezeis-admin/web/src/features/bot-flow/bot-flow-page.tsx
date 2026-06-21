@@ -77,6 +77,12 @@ import {
 import { buildReplyToScreenEdges, flowToReactFlow, nodesToPositions } from './utils'
 import type { BotFlow, BotFlowScreen } from './types'
 
+import { NodeRail } from '@/features/bot-map/components/NodeRail'
+import { NotificationEditor } from '@/features/bot-map/components/inspector/NotificationEditor'
+import { MiniAppTerminalView } from '@/features/bot-map/components/inspector/MiniAppTerminalView'
+import { BOT_MAP_QUERY_KEY, fetchBotMap } from '@/features/bot-map/bot-map-api'
+import type { BotMapNode } from '@/features/bot-map/types'
+
 const FLOW_NAME = 'Main Flow'
 
 /**
@@ -93,6 +99,7 @@ export default function BotFlowPage() {
   const [nodes, setNodes] = useState<Node[]>([])
   const [edges, setEdges] = useState<Edge[]>([])
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
+  const [railQuery, setRailQuery] = useState('')
 
   // Sheet drawers for global resources
   const [textsOpen, setTextsOpen] = useState(false)
@@ -109,6 +116,15 @@ export default function BotFlowPage() {
     queryKey: BOT_CONFIG_KEYS.buttons,
     queryFn: botConfigApi.listButtons,
   })
+
+  // Unified node list for the left rail — graph screens, main menu,
+  // notifications, and Mini App pages. Driven by the same composer the
+  // "Список" tab uses so every reachable surface is selectable here.
+  const { data: botMap } = useQuery({
+    queryKey: BOT_MAP_QUERY_KEY,
+    queryFn: fetchBotMap,
+  })
+  const botMapNodes: ReadonlyArray<BotMapNode> = botMap?.nodes ?? []
 
   // Load the operator-uploaded welcome banner so we can render it as
   // a thumbnail on the pinned reply-keyboard pseudo-node. The same
@@ -347,6 +363,13 @@ export default function BotFlowPage() {
     setSelectedNodeId(nodeId)
   }, [])
 
+  // Rail selection: drive the same selection model + sync canvas highlight
+  // for nodes that exist on the canvas (graph screens / reply pseudo-node).
+  const handleSelectNode = useCallback((nodeId: string) => {
+    setSelectedNodeId(nodeId)
+    setNodes((nds) => nds.map((n) => ({ ...n, selected: n.id === nodeId })))
+  }, [])
+
   const handleEdgeClick = useCallback(
     (edgeId: string) => {
       const buttonId = edgeId.replace('edge-', '')
@@ -395,6 +418,18 @@ export default function BotFlowPage() {
   }, [flow, selectedNodeId])
 
   const showReplyInspector = selectedNodeId === REPLY_KEYBOARD_NODE_ID
+
+  // Notification / Mini App nodes aren't on the bot-flow canvas — they live
+  // only in the unified bot-map list. When one is selected, open its bot-map
+  // inspector in the right pane instead of the screen editor.
+  const selectedMapNode = useMemo<BotMapNode | null>(() => {
+    if (selectedNodeId === null) return null
+    return botMapNodes.find((n) => n.id === selectedNodeId) ?? null
+  }, [botMapNodes, selectedNodeId])
+  const showNotificationInspector =
+    !showReplyInspector && selectedMapNode?.kind === 'notification'
+  const showTerminalInspector =
+    !showReplyInspector && selectedMapNode?.kind === 'mini-app-terminal'
 
   // Save / Publish only make sense once at least one bot-flow screen exists.
   // The reply-keyboard pseudo-node persists every edit immediately via the
@@ -485,8 +520,8 @@ export default function BotFlowPage() {
 
       {/* Canvas + Sidebar */}
       <div className="flex flex-1 overflow-hidden">
-        {/* Left palette + screen list */}
-        <div className="flex w-52 shrink-0 flex-col overflow-hidden border-r">
+        {/* Left palette + unified node list */}
+        <div className="flex w-60 shrink-0 flex-col overflow-hidden border-r">
           <div className="shrink-0 border-b px-2 pb-1.5 pt-2">
             <button
               type="button"
@@ -505,59 +540,14 @@ export default function BotFlowPage() {
               <span className="text-[11px] font-medium">{t('botFlow.newScreen')}</span>
             </button>
           </div>
-          <div className="flex-1 space-y-0.5 overflow-y-auto px-1.5 py-1.5">
-            <p className="mb-1 px-1 text-[9px] font-medium uppercase tracking-wider text-muted-foreground">
-              {t('botStudio.palette.global')}
-            </p>
-            <button
-              onClick={() => {
-                setSelectedNodeId(REPLY_KEYBOARD_NODE_ID)
-                setNodes((nds) =>
-                  nds.map((n) => ({ ...n, selected: n.id === REPLY_KEYBOARD_NODE_ID })),
-                )
-              }}
-              className={`w-full truncate rounded px-1.5 py-1 text-left text-[11px] transition-colors ${
-                showReplyInspector
-                  ? 'bg-accent text-accent-foreground'
-                  : 'text-foreground/80 hover:bg-muted'
-              }`}
-            >
-              <span className="flex items-center gap-1">
-                <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500" aria-hidden />
-                <span className="truncate">{t('botStudio.replyKeyboard.nodeTitle')}</span>
-              </span>
-            </button>
-
-            <p className="mb-1 mt-2 px-1 text-[9px] font-medium uppercase tracking-wider text-muted-foreground">
-              {t('botFlow.palette')}
-            </p>
-            {flow?.screens
-              .slice()
-              .sort((a, b) => (a.isRoot ? -1 : b.isRoot ? 1 : 0))
-              .map((s) => (
-                <button
-                  key={s.id}
-                  onClick={() => {
-                    setSelectedNodeId(s.id)
-                    setNodes((nds) => nds.map((n) => ({ ...n, selected: n.id === s.id })))
-                  }}
-                  className={`w-full truncate rounded px-1.5 py-1 text-left text-[11px] transition-colors ${
-                    selectedNodeId === s.id
-                      ? 'bg-accent text-accent-foreground'
-                      : 'text-foreground/80 hover:bg-muted'
-                  }`}
-                >
-                  <span className="flex items-center gap-1">
-                    {s.isRoot && (
-                      <span
-                        className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500"
-                        aria-hidden
-                      />
-                    )}
-                    <span className="truncate">{s.name}</span>
-                  </span>
-                </button>
-              ))}
+          <div className="min-h-0 flex-1">
+            <NodeRail
+              nodes={botMapNodes}
+              selectedId={selectedNodeId}
+              onSelect={handleSelectNode}
+              query={railQuery}
+              onQueryChange={setRailQuery}
+            />
           </div>
         </div>
 
@@ -589,6 +579,20 @@ export default function BotFlowPage() {
           <div className="w-80 shrink-0 overflow-y-auto overflow-x-hidden border-l">
             <div className="p-3">
               <ScreenEditorPanel screen={selectedScreen} flowName={FLOW_NAME} />
+            </div>
+          </div>
+        )}
+        {showNotificationInspector && selectedMapNode?.kind === 'notification' && (
+          <div className="w-96 shrink-0 overflow-y-auto overflow-x-hidden border-l">
+            <div className="p-4">
+              <NotificationEditor node={selectedMapNode} />
+            </div>
+          </div>
+        )}
+        {showTerminalInspector && selectedMapNode?.kind === 'mini-app-terminal' && (
+          <div className="w-96 shrink-0 overflow-y-auto overflow-x-hidden border-l">
+            <div className="p-4">
+              <MiniAppTerminalView node={selectedMapNode} />
             </div>
           </div>
         )}
