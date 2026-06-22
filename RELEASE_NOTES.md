@@ -1,4 +1,22 @@
-﻿# Rezeis Admin v0.9.5.65
+﻿# Rezeis Admin v0.9.5.66
+
+Конструктор бота, PW2 — тексты бота прямо в инспекторе системных экранов. Web-only.
+
+### 📝 Тексты экрана в инспекторе invite/rules/help
+- В инспекторе системных экранов (Пригласить / Правила / Поддержка) добавлена секция **«Тексты бота для этого экрана»** — реальные i18n-ключи, которые бот показывает на этом экране, теперь видны и правятся прямо здесь, а не только в общем drawer «Тексты».
+  - **invite**: `referral.hub.*` (заголовок, описание, статистика, подписи кнопок) + `partner.hub.*` + `invite.share/copy/share_prompt`.
+  - **rules**: `rules.intro / unavailable / open_button`.
+  - **help**: `support.title / not_configured`, `help.contact_button / prefill / contact_support`.
+- Каждый ключ — inline RU/EN-редактор с эмодзи-пикером; upsert через существующие texts-эндпоинты (с cache-bust интерсептором), отсутствующий ключ создаётся. Применяется сразу — reiwa подхватит на ближайшем refresh.
+
+### 🧪 Тесты
+- **Web: 193**, tsc/eslint 0, build OK. Backend без изменений.
+
+**Полная история изменений:** https://github.com/dizzzable/rezeis/compare/v0.9.5.65...v0.9.5.66
+
+---
+
+# Rezeis Admin v0.9.5.65
 
 Конструктор бота, W3b-4 (рендер баннеров на под-экранах + флаг «один для всех»). **Требует парный релиз reiwa v0.9.5.39.** Закрывает эпик bot-studio-constructor.
 

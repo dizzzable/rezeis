@@ -14,6 +14,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { EmojiPicker } from '@/features/broadcast/emoji-picker'
 import { insertAtCaret } from '@/features/bot-map/utils/insert-at-caret'
 import { CustomEmojiPicker } from './CustomEmojiPicker'
+import { SystemScreenTexts } from './SystemScreenTexts'
 import type { BotFlowButton, BotFlowButtonAction, BotFlowButtonStyle, BotFlowScreen } from '../types'
 
 interface ScreenEditorPanelProps {
@@ -349,6 +350,8 @@ export function ScreenEditorPanel({ screen, flowName }: ScreenEditorPanelProps) 
           </div>
         </div>
       ) : null}
+
+      <SystemScreenTexts screenName={screenName} />
 
       <Separator />
       <div className="space-y-2">

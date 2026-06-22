@@ -3080,6 +3080,17 @@ export const en = {
   botFlow: {
     title: 'Bot Navigation',
     subtitle: 'Visual editor for Telegram bot screens and buttons',
+    screenTexts: {
+      title: 'Bot texts for this screen',
+      hint: 'The real copy the bot shows on this screen (title, description, stats, button labels). Applies immediately — reiwa picks it up on the next refresh.',
+      ru: 'RU',
+      en: 'EN',
+      enToggle: 'English version',
+      placeholder: 'Text…',
+      save: 'Save',
+      saved: 'Text saved',
+      saveFailed: 'Failed to save text',
+    },
     palette: 'Blocks',
     newScreen: 'New Screen',
     save: 'Save',
