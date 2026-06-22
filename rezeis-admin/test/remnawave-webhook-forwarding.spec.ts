@@ -17,15 +17,32 @@ interface EmittedEvent {
   metadata?: Record<string, unknown>;
 }
 
-function buildService(): { service: RemnawaveWebhookService; stored: string[]; emitted: EmittedEvent[] } {
+interface ReconcileCall {
+  where: Record<string, unknown>;
+  data: Record<string, unknown>;
+}
+
+function buildService(): {
+  service: RemnawaveWebhookService;
+  stored: string[];
+  emitted: EmittedEvent[];
+  reconciled: ReconcileCall[];
+} {
   const stored: string[] = [];
   const emitted: EmittedEvent[] = [];
+  const reconciled: ReconcileCall[] = [];
 
   const prisma = {
     remnawaveWebhookEvent: {
       create: async (args: { data: { eventType: string } }) => {
         stored.push(args.data.eventType);
         return {};
+      },
+    },
+    subscription: {
+      updateMany: async (args: ReconcileCall) => {
+        reconciled.push(args);
+        return { count: 1 };
       },
     },
   };
@@ -41,7 +58,7 @@ function buildService(): { service: RemnawaveWebhookService; stored: string[]; e
     config as never,
     systemEvents as never,
   );
-  return { service, stored, emitted };
+  return { service, stored, emitted, reconciled };
 }
 
 describe('RemnawaveWebhookService forwarding', () => {
@@ -79,5 +96,55 @@ describe('RemnawaveWebhookService forwarding', () => {
     }
     assert.equal(stored.length, 4);
     assert.equal(emitted.length, 0);
+  });
+});
+
+describe('RemnawaveWebhookService reconcile (panel → rezeis)', () => {
+  it('overlays status + expiry + limits onto the matching subscription on user.modified', async () => {
+    const { service, reconciled } = buildService();
+    await service.handleEvent(
+      'user.modified',
+      {
+        data: {
+          uuid: 'uuid-1',
+          status: 'DISABLED',
+          expireAt: '2027-01-01T00:00:00.000Z',
+          trafficLimitBytes: 0,
+          hwidDeviceLimit: 3,
+        },
+      },
+      null,
+    );
+    assert.equal(reconciled.length, 1);
+    assert.equal(reconciled[0]!.where['remnawaveId'], 'uuid-1');
+    assert.equal(reconciled[0]!.data['status'], 'DISABLED');
+    assert.equal(reconciled[0]!.data['deviceLimit'], 3);
+    // 0 bytes (panel "unlimited") → null (local "unlimited").
+    assert.equal(reconciled[0]!.data['trafficLimit'], null);
+    assert.ok(reconciled[0]!.data['expiresAt'] instanceof Date);
+  });
+
+  it('converts a positive byte cap to GB', async () => {
+    const { service, reconciled } = buildService();
+    await service.handleEvent(
+      'user.modified',
+      { data: { uuid: 'uuid-2', trafficLimitBytes: 50 * 1024 ** 3 } },
+      null,
+    );
+    assert.equal(reconciled.length, 1);
+    assert.equal(reconciled[0]!.data['trafficLimit'], 50);
+  });
+
+  it('derives status from the event name when the payload omits it', async () => {
+    const { service, reconciled } = buildService();
+    await service.handleEvent('user.expired', { data: { uuid: 'uuid-3' } }, null);
+    assert.equal(reconciled.length, 1);
+    assert.equal(reconciled[0]!.data['status'], 'EXPIRED');
+  });
+
+  it('skips reconcile when the payload carries no user uuid', async () => {
+    const { service, reconciled } = buildService();
+    await service.handleEvent('user.modified', { data: { status: 'ACTIVE' } }, null);
+    assert.equal(reconciled.length, 0);
   });
 });

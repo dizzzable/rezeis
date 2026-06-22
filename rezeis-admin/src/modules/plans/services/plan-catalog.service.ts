@@ -171,6 +171,11 @@ export class PlanCatalogService {
     readonly channel: PurchaseChannel;
   }): PlanCatalogPlanInterface {
     const { plan, gateways, userContext } = input;
+    // A free trial is claimed (not bought), so it must carry NO price in the
+    // catalog — otherwise a plan flipped from paid→free trial keeps its stale
+    // duration prices and surfaces as a phantom priced slot in the cabinet.
+    const isFreeTrial =
+      plan.availability === PlanAvailability.TRIAL && readTrialSettings(plan.trialSettings).free;
     return {
       id: plan.id,
       orderIndex: plan.orderIndex,
@@ -190,15 +195,17 @@ export class PlanCatalogService {
       durations: plan.durations.map((duration) => ({
         id: duration.id,
         days: duration.days,
-        prices: gateways
-          .map((gateway) =>
-            this.mapCatalogPrice({
-              gateway,
-              durationPrices: duration.prices,
-              userContext,
-            }),
-          )
-          .filter((value): value is PlanCatalogPriceInterface => value !== null),
+        prices: isFreeTrial
+          ? []
+          : gateways
+              .map((gateway) =>
+                this.mapCatalogPrice({
+                  gateway,
+                  durationPrices: duration.prices,
+                  userContext,
+                }),
+              )
+              .filter((value): value is PlanCatalogPriceInterface => value !== null),
       })),
     };
   }

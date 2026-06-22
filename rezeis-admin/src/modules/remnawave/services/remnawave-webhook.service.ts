@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { createHmac } from 'node:crypto';
 import { Inject } from '@nestjs/common';
 import { ConfigType } from '@nestjs/config';
+import { Prisma, SubscriptionStatus } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { remnawaveConfig } from '../../../common/config/remnawave.config';
@@ -53,6 +54,35 @@ const REMNAWAVE_WEBHOOK_EVENT_MAP: Record<
   // Service
   'service.panel_started': { type: EVENT_TYPES.REMNAWAVE_PANEL_STARTED, category: 'NODE', severity: 'INFO' },
 };
+
+/**
+ * Maps a Remnawave panel user `status` string onto the local
+ * `SubscriptionStatus` enum. Unknown / absent statuses yield `undefined`
+ * (the caller then keeps the existing status or derives it from the event).
+ * `DELETED` is local-only and never set from the panel.
+ */
+const PANEL_STATUS_MAP: Readonly<Record<string, SubscriptionStatus>> = {
+  ACTIVE: SubscriptionStatus.ACTIVE,
+  DISABLED: SubscriptionStatus.DISABLED,
+  LIMITED: SubscriptionStatus.LIMITED,
+  EXPIRED: SubscriptionStatus.EXPIRED,
+};
+
+/** Derive the subscription status from a user-lifecycle event name. */
+function statusFromEventName(normalizedEvent: string): SubscriptionStatus | undefined {
+  switch (normalizedEvent) {
+    case 'user.expired':
+      return SubscriptionStatus.EXPIRED;
+    case 'user.limited':
+      return SubscriptionStatus.LIMITED;
+    case 'user.disabled':
+      return SubscriptionStatus.DISABLED;
+    case 'user.enabled':
+      return SubscriptionStatus.ACTIVE;
+    default:
+      return undefined;
+  }
+}
 
 /** Normalizes a panel event name to the lowercased dotted form used as a map key. */
 function normalizeRemnawaveEventName(eventType: string): string {
@@ -143,10 +173,36 @@ export class RemnawaveWebhookService {
 
     this.logger.log(`Webhook event received: ${eventType}`);
 
+    const normalized = normalizeRemnawaveEventName(eventType);
+
+    // Inbound reconciliation (Remnawave → rezeis): a manual operator edit in
+    // the panel (status / expiry / traffic / device limits) raises a user-
+    // scoped webhook. Mirror those runtime fields onto the local Subscription
+    // so the bot greeting + web/TMA cabinet (which read the DB snapshot) show
+    // the change immediately. Best-effort — a reconcile failure must never
+    // drop the webhook (Activity Feed + cards still proceed).
+    //
+    // Echo-safe: this writes ONLY to the local DB and never enqueues a
+    // profile-sync push (those are enqueued by subscription mutation services,
+    // not by a DB write), so there is no panel↔rezeis loop. Panel is the
+    // source of truth for runtime state; rezeis still owns commercial fields
+    // (plan snapshot, price, isTrial), which this never touches.
+    if (normalized.startsWith('user.')) {
+      try {
+        await this.reconcileSubscriptionFromEvent(normalized, payload);
+      } catch (err: unknown) {
+        this.logger.warn(
+          `Subscription reconcile failed for ${eventType}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+
     // Forward curated events to the system-event bus (audit log + realtime +
     // Telegram cards). Unmapped/noisy events are stored only — no Telegram
     // spam. Best-effort: emit() is fire-and-forget and never throws.
-    const mapped = REMNAWAVE_WEBHOOK_EVENT_MAP[normalizeRemnawaveEventName(eventType)];
+    const mapped = REMNAWAVE_WEBHOOK_EVENT_MAP[normalized];
     if (mapped) {
       this.systemEvents.emit({
         type: mapped.type,
@@ -155,6 +211,76 @@ export class RemnawaveWebhookService {
         message: `Remnawave: ${eventType}`,
         metadata: this.extractEventMetadata(eventType, payload),
       });
+    }
+  }
+
+  /**
+   * Reconcile the local `Subscription` snapshot from a user-scoped panel
+   * event. Pulls the panel's canonical runtime fields out of the webhook
+   * payload (`data`, 2.x) and overlays them onto every non-deleted
+   * subscription whose `remnawaveId` matches. Partial: only fields present
+   * in the payload are written; status falls back to the event name.
+   */
+  private async reconcileSubscriptionFromEvent(
+    normalizedEvent: string,
+    payload: Record<string, unknown>,
+  ): Promise<void> {
+    const data =
+      payload['data'] !== null && typeof payload['data'] === 'object'
+        ? (payload['data'] as Record<string, unknown>)
+        : payload;
+    const str = (key: string): string | undefined => {
+      const v = data[key];
+      return typeof v === 'string' && v.length > 0 ? v : undefined;
+    };
+    const num = (key: string): number | undefined => {
+      const v = data[key];
+      return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
+    };
+
+    const uuid = str('uuid') ?? str('userUuid');
+    if (uuid === undefined) return;
+
+    const update: Prisma.SubscriptionUpdateManyMutationInput = {};
+
+    // Status: the panel's canonical `status` wins; otherwise derive it from
+    // the event name (user.expired/limited/disabled/enabled).
+    const panelStatus = str('status');
+    const status =
+      (panelStatus !== undefined
+        ? PANEL_STATUS_MAP[panelStatus.trim().toUpperCase()]
+        : undefined) ?? statusFromEventName(normalizedEvent);
+    if (status !== undefined) update.status = status;
+
+    // Expiry: ISO string → Date.
+    const expireAt = str('expireAt');
+    if (expireAt !== undefined) {
+      const parsed = new Date(expireAt);
+      if (!Number.isNaN(parsed.getTime())) update.expiresAt = parsed;
+    }
+
+    // Traffic limit: panel is bytes (0 = unlimited); local is GB (null =
+    // unlimited). Round to the nearest GB, never below 1 for a positive cap.
+    const trafficLimitBytes = num('trafficLimitBytes');
+    if (trafficLimitBytes !== undefined) {
+      update.trafficLimit =
+        trafficLimitBytes <= 0 ? null : Math.max(1, Math.round(trafficLimitBytes / 1024 ** 3));
+    }
+
+    // Device limit: panel `hwidDeviceLimit` → local `deviceLimit`.
+    const deviceLimit = num('hwidDeviceLimit');
+    if (deviceLimit !== undefined && deviceLimit >= 0) update.deviceLimit = deviceLimit;
+
+    if (Object.keys(update).length === 0) return;
+
+    const result = await this.prismaService.subscription.updateMany({
+      where: { remnawaveId: uuid, status: { not: SubscriptionStatus.DELETED } },
+      data: update,
+    });
+    if (result.count > 0) {
+      this.logger.log(
+        `Reconciled ${result.count} subscription(s) from panel event ${normalizedEvent} (uuid=${uuid})`,
+      );
     }
   }
 

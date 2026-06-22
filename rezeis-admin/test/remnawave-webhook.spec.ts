@@ -17,6 +17,7 @@ import { RemnawaveWebhookService } from '../src/modules/remnawave/services/remna
 function buildService(webhookSecret: string | null): RemnawaveWebhookService {
   const prisma = {
     remnawaveWebhookEvent: { create: async () => undefined },
+    subscription: { updateMany: async () => ({ count: 0 }) },
   };
   const systemEvents = { emit: () => undefined };
   return new RemnawaveWebhookService(prisma as never, { webhookSecret } as never, systemEvents as never);
