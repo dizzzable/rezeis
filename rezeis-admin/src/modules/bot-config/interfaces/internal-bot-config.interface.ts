@@ -237,4 +237,13 @@ export interface InternalBotConfigInterface {
    * is published (built-in fallback in effect).
    */
   readonly screensVersion: string;
+  /**
+   * Operator-assigned premium-emoji icons for the bot's built-in system
+   * buttons (back / invite_share / rules_open / help_contact …), keyed by
+   * a stable system-button id → Telegram `custom_emoji_id`. reiwa applies
+   * these as `icon_custom_emoji_id` so operators can brand the otherwise
+   * code-generated buttons. Sourced from `bot.sysbtn_icon.<key>` BotText
+   * rows. Empty when none assigned. Additive — older reiwa ignores it.
+   */
+  readonly systemButtonIcons: Readonly<Record<string, string>>;
 }

@@ -15,6 +15,7 @@ import { EmojiPicker } from '@/features/broadcast/emoji-picker'
 import { insertAtCaret } from '@/features/bot-map/utils/insert-at-caret'
 import { CustomEmojiPicker } from './CustomEmojiPicker'
 import { SystemScreenTexts } from './SystemScreenTexts'
+import { SystemButtonIconPicker } from './SystemButtonIconPicker'
 import type { BotFlowButton, BotFlowButtonAction, BotFlowButtonStyle, BotFlowScreen } from '../types'
 
 interface ScreenEditorPanelProps {
@@ -74,13 +75,13 @@ export function ScreenEditorPanel({ screen, flowName }: ScreenEditorPanelProps) 
    * operator sees the full picture of what the user will see in
    * Telegram, even though they can't be edited / deleted from here.
    */
-  const systemButtons: ReadonlyArray<{ key: string; label: string }> = (() => {
+  const systemButtons: ReadonlyArray<{ key: string; label: string; iconKey?: string }> = (() => {
     const lower = screenName.trim().toLowerCase()
     if (lower === 'invite') {
       return [
-        { key: 'invite-share', label: t('botFlow.systemButtons.invite.share') },
+        { key: 'invite-share', label: t('botFlow.systemButtons.invite.share'), iconKey: 'invite_share' },
         { key: 'invite-copy', label: t('botFlow.systemButtons.invite.copy') },
-        { key: 'invite-back', label: t('botFlow.systemButtons.back') },
+        { key: 'invite-back', label: t('botFlow.systemButtons.back'), iconKey: 'back' },
       ]
     }
     if (lower === 'rules') {
@@ -90,8 +91,8 @@ export function ScreenEditorPanel({ screen, flowName }: ScreenEditorPanelProps) 
       // ultimate source of truth — the preview here is a hint, not a
       // strict contract.
       return [
-        { key: 'rules-open', label: t('botFlow.systemButtons.rules.open') },
-        { key: 'rules-back', label: t('botFlow.systemButtons.back') },
+        { key: 'rules-open', label: t('botFlow.systemButtons.rules.open'), iconKey: 'rules_open' },
+        { key: 'rules-back', label: t('botFlow.systemButtons.back'), iconKey: 'back' },
       ]
     }
     if (lower === 'help') {
@@ -101,8 +102,8 @@ export function ScreenEditorPanel({ screen, flowName }: ScreenEditorPanelProps) 
       // see when the support handle is numeric / unset and the bot
       // falls back to a callback flow.
       return [
-        { key: 'help-contact', label: t('botFlow.systemButtons.help.contact') },
-        { key: 'help-back', label: t('botFlow.systemButtons.back') },
+        { key: 'help-contact', label: t('botFlow.systemButtons.help.contact'), iconKey: 'help_contact' },
+        { key: 'help-back', label: t('botFlow.systemButtons.back'), iconKey: 'back' },
       ]
     }
     return []
@@ -341,10 +342,15 @@ export function ScreenEditorPanel({ screen, flowName }: ScreenEditorPanelProps) 
             {systemButtons.map((btn) => (
               <div
                 key={btn.key}
-                className="flex items-center gap-2 rounded-md border border-dashed bg-muted/30 px-2.5 py-1.5"
+                className="space-y-1.5 rounded-md border border-dashed bg-muted/30 px-2.5 py-1.5"
               >
-                <Lock className="h-3 w-3 shrink-0 text-muted-foreground" aria-hidden />
-                <span className="truncate text-[11px] font-medium">{btn.label}</span>
+                <div className="flex items-center gap-2">
+                  <Lock className="h-3 w-3 shrink-0 text-muted-foreground" aria-hidden />
+                  <span className="truncate text-[11px] font-medium">{btn.label}</span>
+                </div>
+                {btn.iconKey !== undefined ? (
+                  <SystemButtonIconPicker storageKey={btn.iconKey} />
+                ) : null}
               </div>
             ))}
           </div>

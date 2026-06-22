@@ -149,6 +149,7 @@ export class InternalBotConfigService implements OnApplicationBootstrap {
       screensVersion: activeFlow
         ? `${activeFlow.id}:${activeFlow.version}:${activeFlow.status}`
         : '',
+      systemButtonIcons: readSystemButtonIcons(textMap),
     };
   }
 
@@ -286,6 +287,7 @@ export class InternalBotConfigService implements OnApplicationBootstrap {
 
 const BANNER_URL_KEY = 'bot.banner_url';
 const BANNER_APPLY_ALL_KEY = 'bot.banner_apply_all';
+const SYSBTN_ICON_PREFIX = 'bot.sysbtn_icon.';
 const WELCOME_MESSAGE_KEY = 'bot.welcome_message';
 const SUBSCRIPTION_INFO_FORMAT_KEY = 'bot.subscription_info_format';
 
@@ -583,6 +585,27 @@ function readBannerUrl(textMap: InternalBotTextMap): string | null {
 function readBannerApplyAll(textMap: InternalBotTextMap): boolean {
   const raw = textMap[BANNER_APPLY_ALL_KEY];
   return typeof raw === 'string' && raw.trim().toLowerCase() === 'true';
+}
+
+/**
+ * Collect operator-assigned system-button icons. Each `bot.sysbtn_icon.<key>`
+ * BotText row whose value is a non-empty Telegram `custom_emoji_id` becomes a
+ * `<key> → id` entry. Empty / blank values are skipped (operator cleared the
+ * icon). The `<key>` is the stable system-button id reiwa matches on.
+ */
+function readSystemButtonIcons(
+  textMap: InternalBotTextMap,
+): Readonly<Record<string, string>> {
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(textMap)) {
+    if (!key.startsWith(SYSBTN_ICON_PREFIX)) continue;
+    if (typeof value !== 'string') continue;
+    const id = value.trim();
+    if (id.length === 0) continue;
+    const buttonKey = key.slice(SYSBTN_ICON_PREFIX.length);
+    if (buttonKey.length > 0) out[buttonKey] = id;
+  }
+  return out;
 }
 
 /**

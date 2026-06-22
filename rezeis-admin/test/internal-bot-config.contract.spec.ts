@@ -34,6 +34,7 @@ const EXPECTED_TOP_LEVEL_KEYS = [
   'menuTextCustomEmojiIds',
   'screens',
   'screensVersion',
+  'systemButtonIcons',
   'translations',
   'visual',
 ] as const;
@@ -208,5 +209,8 @@ describe('internal bot-config contract (byte-parity)', () => {
     // Additive `bannerApplyAll` flag (W3b-4): default false when the
     // `bot.banner_apply_all` text row is absent.
     assert.equal(payload.visual.bannerApplyAll, false);
+    // Additive `systemButtonIcons` map (PW4): empty when no
+    // `bot.sysbtn_icon.*` rows are configured.
+    assert.deepStrictEqual(payload.systemButtonIcons, {});
   });
 });

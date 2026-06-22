@@ -3131,7 +3131,7 @@ export const en = {
     },
     systemButtons: {
       title: 'System buttons',
-      description: 'These buttons are appended automatically by the bot — they depend on user data (referral link, support handle) and cannot be edited. To add your own buttons, use «Add button» below.',
+      description: 'These buttons are appended automatically by the bot — they depend on user data (referral link, support handle). The text isn’t editable, but you can give them a premium emoji (icon) below. To add your own buttons, use «Add button» below.',
       back: '◀️ Back to menu',
       invite: {
         share: '📤 Share on Telegram',
