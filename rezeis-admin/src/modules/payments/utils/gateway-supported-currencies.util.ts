@@ -44,6 +44,11 @@ export const GATEWAY_SUPPORTED_CURRENCIES: Readonly<
 
   // CryptoPay (@CryptoBot) — supported crypto assets intersected with our enum.
   CRYPTOPAY: ['USDT', 'TON', 'BTC', 'ETH', 'LTC', 'USDC', 'TRX'],
+
+  // Internal partner-balance "wallet" — not a real gateway, never seeded as a
+  // PaymentGateway row. Prices in the partner's balance currency directly, so
+  // it carries no fixed currency list.
+  PARTNER_BALANCE: [],
 };
 
 /**

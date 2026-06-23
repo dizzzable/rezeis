@@ -68,6 +68,7 @@ type AccrualStrategy = 'ON_EACH_PAYMENT' | 'ON_FIRST_PAYMENT'
 interface PartnerSettings {
   enabled?: boolean
   invitedOnly?: boolean
+  allowBalancePayment?: boolean
   level1Percent?: number | string
   level2Percent?: number | string
   level3Percent?: number | string
@@ -133,6 +134,7 @@ function PartnerSettingsForm({ partner }: PartnerSettingsFormProps) {
   const schema = z.object({
     enabled: z.boolean(),
     invitedOnly: z.boolean(),
+    allowBalancePayment: z.boolean(),
     autoCalculate: z.boolean(),
     accrualStrategy: z.enum(['ON_EACH_PAYMENT', 'ON_FIRST_PAYMENT']),
     level1Percent: percent,
@@ -158,6 +160,7 @@ function PartnerSettingsForm({ partner }: PartnerSettingsFormProps) {
     defaultValues: {
       enabled: partner.enabled ?? false,
       invitedOnly: partner.invitedOnly ?? false,
+      allowBalancePayment: partner.allowBalancePayment ?? false,
       autoCalculate: partner.autoCalculateCommission ?? false,
       accrualStrategy: (partner.accrualStrategy as AccrualStrategy | undefined) ?? 'ON_EACH_PAYMENT',
       level1Percent: partner.level1Percent != null ? String(partner.level1Percent) : '',
@@ -180,6 +183,7 @@ function PartnerSettingsForm({ partner }: PartnerSettingsFormProps) {
       const payload: Record<string, unknown> = {
         enabled: values.enabled,
         invitedOnly: values.invitedOnly,
+        allowBalancePayment: values.allowBalancePayment,
         level1Percent: values.level1Percent ? parseFloat(values.level1Percent) : undefined,
         level2Percent: values.level2Percent ? parseFloat(values.level2Percent) : undefined,
         level3Percent: values.level3Percent ? parseFloat(values.level3Percent) : undefined,
@@ -266,6 +270,24 @@ function PartnerSettingsForm({ partner }: PartnerSettingsFormProps) {
                       <FormLabel>{t('partnerSettingsPage.general.invitedOnly')}</FormLabel>
                       <FormDescription className="text-xs">
                         {t('partnerSettingsPage.general.invitedOnlyHint')}
+                      </FormDescription>
+                    </div>
+                    <FormControl>
+                      <Switch checked={field.value} onCheckedChange={field.onChange} />
+                    </FormControl>
+                  </FormItem>
+                )}
+              />
+
+              <FormField
+                control={form.control}
+                name="allowBalancePayment"
+                render={({ field }) => (
+                  <FormItem className="flex items-center justify-between space-y-0">
+                    <div>
+                      <FormLabel>{t('partnerSettingsPage.general.allowBalancePayment')}</FormLabel>
+                      <FormDescription className="text-xs">
+                        {t('partnerSettingsPage.general.allowBalancePaymentHint')}
                       </FormDescription>
                     </div>
                     <FormControl>

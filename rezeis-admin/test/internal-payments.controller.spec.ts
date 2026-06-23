@@ -61,6 +61,7 @@ describe('InternalPaymentsController', () => {
       {} as never,
       {} as never,
       {} as never,
+      {} as never,
     );
 
     assert.deepStrictEqual(
@@ -89,6 +90,7 @@ describe('InternalPaymentsController', () => {
           { id: 'off', type: PaymentGatewayType.PLATEGA, currency: Currency.RUB, isActive: false, orderIndex: 0 },
         ],
       } as never,
+      {} as never,
       {
         getInternalPlatformPolicy: async () => ({ defaultCurrency: Currency.RUB }),
       } as never,

@@ -10,6 +10,7 @@ import {
   Min,
   MinLength,
 } from 'class-validator';
+import { Currency } from '@prisma/client';
 
 export const SUBSCRIPTION_QUOTE_ACTIONS = ['NEW', 'ADDITIONAL', 'RENEW', 'UPGRADE', 'TRIAL'] as const;
 export type SubscriptionQuoteAction = (typeof SUBSCRIPTION_QUOTE_ACTIONS)[number];
@@ -44,6 +45,16 @@ export class SubscriptionQuoteDto {
   @IsOptional()
   @IsEnum(PaymentGatewayType)
   public gatewayType?: PaymentGatewayType;
+
+  /**
+   * When set, the quote is priced in this currency directly (using the plan's
+   * price row for it), bypassing gateway-currency resolution. Used by the
+   * partner-balance payment flow, where the "currency" is the partner's
+   * balance currency rather than a gateway's.
+   */
+  @IsOptional()
+  @IsEnum(Currency)
+  public currencyOverride?: Currency;
 
   @IsOptional()
   @IsString()

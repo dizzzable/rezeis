@@ -17,6 +17,7 @@ const SUPPORTED_PAYMENT_ASSETS: Readonly<Record<PaymentGatewayType, readonly str
   [PaymentGatewayType.SEVERPAY]: [],
   [PaymentGatewayType.LAVA]: [],
   [PaymentGatewayType.CRYPTOPAY]: ['USDT', 'TON', 'BTC', 'ETH', 'LTC', 'USDC', 'TRX'],
+  [PaymentGatewayType.PARTNER_BALANCE]: [],
 };
 
 export function getSupportedPaymentAssets(

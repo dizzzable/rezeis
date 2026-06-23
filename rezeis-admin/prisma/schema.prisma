@@ -97,6 +97,10 @@ enum PaymentGatewayType {
   SEVERPAY
   LAVA
   CRYPTOPAY
+  /// Internal "wallet" method: a partner pays for a subscription with their
+  /// accrued partner balance. Never routed to an external provider — the
+  /// transaction is completed synchronously after debiting the balance.
+  PARTNER_BALANCE
 }
 
 enum SubscriptionStatus {

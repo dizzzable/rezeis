@@ -36,6 +36,7 @@ import { PaymentsCheckoutService } from './services/payments-checkout.service';
 import { PaymentsRenewalCheckoutService } from './services/payments-renewal-checkout.service';
 import { PaymentsTransactionsService } from './services/payments-transactions.service';
 import { AddOnPurchaseService } from './services/addon-purchase.service';
+import { PartnerBalancePaymentService } from './services/partner-balance-payment.service';
 import { TelegramStarsWebhookService } from './services/telegram-stars-webhook.service';
 
 @Module({
@@ -69,6 +70,7 @@ import { TelegramStarsWebhookService } from './services/telegram-stars-webhook.s
     PaymentsCheckoutService,
     PaymentsRenewalCheckoutService,
     AddOnPurchaseService,
+    PartnerBalancePaymentService,
     PaymentOpsAlertService,
     PaymentProviderExecutionService,
     PaymentWebhookNormalizerService,

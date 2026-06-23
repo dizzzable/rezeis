@@ -1,9 +1,8 @@
-import { PaymentGatewayType, PurchaseChannel, PurchaseType } from '@prisma/client';
+import { PurchaseChannel, PurchaseType } from '@prisma/client';
 import { Type } from 'class-transformer';
 import { IsEnum, IsIn, IsInt, IsOptional, IsString, MaxLength, Min, MinLength } from 'class-validator';
-import { Currency } from '@prisma/client';
 
-const DRAFT_PURCHASE_TYPES: readonly PurchaseType[] = [
+const BALANCE_PURCHASE_TYPES: readonly PurchaseType[] = [
   PurchaseType.NEW,
   PurchaseType.ADDITIONAL,
   PurchaseType.RENEW,
@@ -12,14 +11,24 @@ const DRAFT_PURCHASE_TYPES: readonly PurchaseType[] = [
 
 const DEVICE_TYPES = ['ANDROID', 'IPHONE', 'WINDOWS', 'MAC', 'OTHER'] as const;
 
-export class CreateTransactionDraftDto {
+/**
+ * Payload for paying for a subscription with the partner balance. Identity is
+ * the canonical reiwa_id (`userId`) or the Telegram id, like other internal
+ * payment endpoints.
+ */
+export class InternalPartnerBalanceCheckoutDto {
+  @IsOptional()
   @IsString()
   @MinLength(1)
   @MaxLength(64)
-  public userId!: string;
+  public userId?: string;
+
+  @IsOptional()
+  @IsString()
+  public telegramId?: string;
 
   @IsEnum(PurchaseType)
-  @IsIn(DRAFT_PURCHASE_TYPES)
+  @IsIn(BALANCE_PURCHASE_TYPES)
   public purchaseType!: PurchaseType;
 
   @IsString()
@@ -32,29 +41,17 @@ export class CreateTransactionDraftDto {
   @Min(-1)
   public durationDays!: number;
 
-  @IsEnum(PaymentGatewayType)
-  public gatewayType!: PaymentGatewayType;
-
   @IsOptional()
   @IsString()
   @MinLength(1)
   @MaxLength(64)
-  public sourceSubscriptionId?: string;
+  public subscriptionId?: string;
 
   @IsOptional()
   @IsEnum(PurchaseChannel)
   public channel?: PurchaseChannel;
 
-  /** Device the user intends to use the subscription on (cosmetic hint). */
   @IsOptional()
   @IsIn(DEVICE_TYPES as readonly string[])
   public deviceType?: string;
-
-  /**
-   * Price the draft in this currency directly (partner-balance flow), instead
-   * of resolving the currency from the gateway. Forwarded to the quote.
-   */
-  @IsOptional()
-  @IsEnum(Currency)
-  public currencyOverride?: Currency;
 }

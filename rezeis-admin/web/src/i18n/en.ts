@@ -724,6 +724,8 @@ export const en = {
       enableHint: 'Allow users to become partners and earn commissions',
       invitedOnly: 'Invited users only',
       invitedOnlyHint: 'The partner program is available only to users who registered via a referral link',
+      allowBalancePayment: 'Pay subscriptions with balance',
+      allowBalancePaymentHint: 'Allow partners to pay for new subscriptions and renewals with their partner balance',
       autoCalculate: 'Auto-calculate Commission',
       autoCalculateHint: 'Automatically deduct gateway commission and tax before calculating partner earnings',
       accrualStrategy: 'Accrual Strategy',

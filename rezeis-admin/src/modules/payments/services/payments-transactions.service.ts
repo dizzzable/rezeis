@@ -113,6 +113,7 @@ export class PaymentsTransactionsService {
       durationDays: input.durationDays,
       channel,
       gatewayType: input.gatewayType,
+      currencyOverride: input.currencyOverride,
     });
     if (
       !quote.isEligible ||

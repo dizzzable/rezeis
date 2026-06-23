@@ -3,6 +3,7 @@ import { Prisma, SubscriptionStatus, SyncAction, SyncJobStatus } from '@prisma/c
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
+import { buildPlanSnapshot } from '../../users/utils/plan-snapshot.util';
 
 /**
  * Points exchange types — what the user can trade their referral points for.
@@ -157,7 +158,7 @@ export class ReferralPointsExchangeService {
     readonly type: PointsExchangeType;
     readonly points: number;
     readonly subscriptionId?: string;
-  }): Promise<{ success: boolean; message: string; value?: number }> {
+  }): Promise<{ success: boolean; message: string; value?: number; code?: string }> {
     const config = await this.loadConfig();
     if (!config.exchangeEnabled) {
       throw new BadRequestException('Points exchange is currently disabled');
@@ -190,6 +191,15 @@ export class ReferralPointsExchangeService {
       throw new BadRequestException('Points amount too low for any reward');
     }
 
+    // A gift subscription is a fixed-price item: it always costs exactly one
+    // `pointsCost` and yields one promo code, regardless of how many points the
+    // user typed. Every other reward scales linearly with the points spent.
+    const pointsToCharge =
+      input.type === 'GIFT_SUBSCRIPTION' ? typeConfig.pointsCost : input.points;
+    if (user.points < pointsToCharge) {
+      throw new BadRequestException('Insufficient points balance');
+    }
+
     // Subscriptions whose Remnawave profile must be re-synced after the
     // local mutation commits (expiry extension / traffic top-up). We
     // collect ids inside the tx and enqueue the sync jobs afterwards so
@@ -198,12 +208,15 @@ export class ReferralPointsExchangeService {
     // wrote the local row only and never synced).
     let trafficTopUp: { readonly subscriptionId: string; readonly gb: number } | null = null;
     let expiryExtended: { readonly subscriptionId: string } | null = null;
+    // The single-use promo code minted by a GIFT_SUBSCRIPTION exchange — must
+    // be surfaced to the user (otherwise the reward is invisible/unusable).
+    let giftCode: string | null = null;
 
     await this.prismaService.$transaction(async (tx) => {
       // Deduct points
       await tx.user.update({
         where: { id: input.userId },
-        data: { points: { decrement: input.points } },
+        data: { points: { decrement: pointsToCharge } },
       });
 
       // Apply effect based on type
@@ -231,7 +244,34 @@ export class ReferralPointsExchangeService {
 
         case 'GIFT_SUBSCRIPTION': {
           const giftConfig = config.giftSubscription;
-          // Create a single-use promo code with SUBSCRIPTION reward
+          if (!giftConfig.giftPlanId) {
+            throw new BadRequestException('Gift subscription plan is not configured');
+          }
+          // Build a COMPLETE plan snapshot from the configured gift plan.
+          // A bare `{ id }` snapshot crashes on activation (the SUBSCRIPTION
+          // reward reads `plan.internalSquads`/`deviceLimit`/`duration`).
+          const plan = await tx.plan.findUnique({
+            where: { id: giftConfig.giftPlanId },
+            select: {
+              id: true,
+              name: true,
+              tag: true,
+              type: true,
+              trafficLimit: true,
+              deviceLimit: true,
+              trafficLimitStrategy: true,
+              internalSquads: true,
+              externalSquad: true,
+            },
+          });
+          if (!plan) {
+            throw new BadRequestException('Gift subscription plan not found');
+          }
+          const snapshot = {
+            ...(buildPlanSnapshot(plan) as Record<string, unknown>),
+            duration: giftConfig.giftDurationDays,
+          };
+          // Create a single-use promo code with a SUBSCRIPTION reward.
           const code = generateExchangePromoCode();
           await tx.promocode.create({
             data: {
@@ -240,19 +280,31 @@ export class ReferralPointsExchangeService {
               availability: 'ALL',
               rewardType: 'SUBSCRIPTION',
               reward: giftConfig.giftDurationDays,
-              plan: giftConfig.giftPlanId ? { id: giftConfig.giftPlanId } : undefined,
+              plan: snapshot as Prisma.InputJsonValue,
               maxActivations: 1,
             },
           });
+          giftCode = code;
           break;
         }
 
         case 'DISCOUNT': {
           const discountConfig = config.discount;
           const discountPercent = Math.min(computedValue, discountConfig.maxDiscountPercent);
+          // Clamp the CUMULATIVE personal discount to the configured cap (and
+          // hard-cap at 100) so repeated exchanges can't stack past the limit.
+          const current = await tx.user.findUnique({
+            where: { id: input.userId },
+            select: { personalDiscount: true },
+          });
+          const nextDiscount = Math.min(
+            (current?.personalDiscount ?? 0) + discountPercent,
+            discountConfig.maxDiscountPercent,
+            100,
+          );
           await tx.user.update({
             where: { id: input.userId },
-            data: { personalDiscount: { increment: discountPercent } },
+            data: { personalDiscount: nextDiscount },
           });
           break;
         }
@@ -309,10 +361,15 @@ export class ReferralPointsExchangeService {
     }
 
     this.logger.log(
-      `User ${input.userId} exchanged ${input.points} points for ${input.type} (value: ${computedValue})`,
+      `User ${input.userId} exchanged ${pointsToCharge} points for ${input.type} (value: ${computedValue})`,
     );
 
-    return { success: true, message: `Exchanged ${input.points} points`, value: computedValue };
+    return {
+      success: true,
+      message: `Exchanged ${pointsToCharge} points`,
+      value: giftCode !== null ? 1 : computedValue,
+      code: giftCode ?? undefined,
+    };
   }
 
   // ── Private ─────────────────────────────────────────────────────────────────

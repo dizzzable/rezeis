@@ -219,6 +219,7 @@ export class SubscriptionQuoteService {
           user: context.user,
           channel,
           preferredGatewayType: input.gatewayType,
+          currencyOverride: input.currencyOverride,
         });
     if (selectedPlan !== null && selectedDuration !== null && input.gatewayType !== undefined && price === null) {
       quoteWarnings.push(GATEWAY_NOT_AVAILABLE);
@@ -511,7 +512,33 @@ export class SubscriptionQuoteService {
     readonly user: UserRecord;
     readonly channel: PurchaseChannel;
     readonly preferredGatewayType?: PaymentGatewayType;
+    readonly currencyOverride?: Currency;
   }): Promise<SubscriptionQuotePriceInterface | null> {
+    // Partner-balance flow: price directly in the requested currency using the
+    // plan's price row for it, with no gateway involved. The `gatewayType` on
+    // the returned price is the synthetic PARTNER_BALANCE method.
+    if (input.currencyOverride !== undefined) {
+      const price = input.duration.prices.find(
+        (candidate) => candidate.currency === input.currencyOverride,
+      );
+      if (price === undefined) {
+        return null;
+      }
+      const snapshot = this.pricingService.buildSnapshot({
+        amount: price.price.toString(),
+        currency: price.currency as Currency,
+        purchaseDiscount: input.user.purchaseDiscount,
+        personalDiscount: input.user.personalDiscount,
+      });
+      return {
+        gatewayType: PaymentGatewayType.PARTNER_BALANCE,
+        currency: price.currency,
+        originalPrice: snapshot.originalPrice,
+        price: snapshot.price,
+        discountPercent: snapshot.discountPercent,
+        discountSource: snapshot.discountSource,
+      };
+    }
     let gateways = (await this.prismaService.paymentGateway.findMany({
       where: { isActive: true },
       orderBy: [{ orderIndex: 'asc' }, { type: 'asc' }],

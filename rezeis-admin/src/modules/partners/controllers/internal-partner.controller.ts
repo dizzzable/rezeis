@@ -33,6 +33,20 @@ export class InternalPartnerController {
     });
     if (!partner) return null;
 
+    const [settingsRow, userRow] = await Promise.all([
+      this.prismaService.settings.findUnique({
+        where: { id: 1 },
+        select: { partnerSettings: true, defaultCurrency: true },
+      }),
+      this.prismaService.user.findUnique({
+        where: { id: user.id },
+        select: { partnerBalanceCurrencyOverride: true },
+      }),
+    ]);
+    const partnerSettings = (settingsRow?.partnerSettings ?? {}) as Record<string, unknown>;
+    const balanceCurrency =
+      userRow?.partnerBalanceCurrencyOverride ?? settingsRow?.defaultCurrency ?? null;
+
     return {
       id: partner.id,
       isActive: partner.isActive,
@@ -40,6 +54,10 @@ export class InternalPartnerController {
       totalEarned: partner.totalEarned,
       totalWithdrawn: partner.totalWithdrawn,
       programAvailable: await this.isPartnerProgramAvailable(user.id),
+      /** Whether the operator allows paying for subscriptions with the balance. */
+      balancePaymentEnabled: partnerSettings['allowBalancePayment'] === true,
+      /** Currency the partner balance is denominated in (override → default). */
+      balanceCurrency,
       createdAt: partner.createdAt.toISOString(),
     };
   }

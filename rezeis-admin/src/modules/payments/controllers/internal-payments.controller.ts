@@ -5,6 +5,7 @@ import { InternalAdminAuthGuard } from '../../auth/guards/internal-admin-auth.gu
 import { SettingsService } from '../../settings/services/settings.service';
 import { isGatewayAvailableForChannel } from '../../plans/utils/purchase-gateway-policy.util';
 import { InternalPaymentCheckoutDto } from '../dto/internal-payment-checkout.dto';
+import { InternalPartnerBalanceCheckoutDto } from '../dto/internal-partner-balance-checkout.dto';
 import { InternalRenewalCheckoutDto } from '../dto/internal-renewal-checkout.dto';
 import { toDurationMap } from '../../subscriptions/dto/renewal-duration.dto';
 import {
@@ -13,6 +14,7 @@ import {
 } from '../interfaces/internal-payment-checkout.interface';
 import { InternalPaymentGatewayInterface } from '../interfaces/internal-payment-gateway.interface';
 import { PaymentGatewayRegistryService } from '../services/payment-gateway-registry.service';
+import { PartnerBalancePaymentService } from '../services/partner-balance-payment.service';
 import { PaymentsCheckoutService } from '../services/payments-checkout.service';
 import { PaymentsRenewalCheckoutService } from '../services/payments-renewal-checkout.service';
 
@@ -23,6 +25,7 @@ export class InternalPaymentsController {
     private readonly paymentsCheckoutService: PaymentsCheckoutService,
     private readonly paymentsRenewalCheckoutService: PaymentsRenewalCheckoutService,
     private readonly paymentGatewayRegistryService: PaymentGatewayRegistryService,
+    private readonly partnerBalancePaymentService: PartnerBalancePaymentService,
     private readonly settingsService: SettingsService,
   ) {}
 
@@ -84,6 +87,26 @@ export class InternalPaymentsController {
     @Body() input: InternalPaymentCheckoutDto,
   ): Promise<InternalPaymentCheckoutInterface> {
     return this.paymentsCheckoutService.checkout(input);
+  }
+
+  /**
+   * Pay for a subscription (new / additional / renew / upgrade) using the
+   * partner's accrued balance instead of an external gateway.
+   */
+  @Post('partner-balance/checkout')
+  public async partnerBalanceCheckout(
+    @Body() input: InternalPartnerBalanceCheckoutDto,
+  ): Promise<InternalPaymentCheckoutInterface> {
+    return this.partnerBalancePaymentService.pay({
+      userId: input.userId,
+      telegramId: input.telegramId,
+      purchaseType: input.purchaseType,
+      planId: input.planId,
+      durationDays: input.durationDays,
+      subscriptionId: input.subscriptionId,
+      channel: input.channel,
+      deviceType: input.deviceType,
+    });
   }
 
   @Post('renewal-checkout')
