@@ -245,6 +245,7 @@ describe('SettingsController', () => {
     const calls: Array<DelegatedCall<unknown>> = [];
     const branding: BrandingSettingsInterface = {
       brandName: 'Rezeis',
+      tagline: null,
       logoUrl: null,
       pwaIconUrl: null,
       primary: '#ffffff',

@@ -193,6 +193,12 @@ export interface ProfileNamingSettings {
 export interface BrandingSettingsInterface {
   /** Display name shown on the subscription card and headers. */
   readonly brandName: string;
+  /**
+   * Optional short tagline / subtitle shown under the brand name on the
+   * launch splash and the in-app loader (and used as the PWA manifest
+   * `description`). `null` = no subtitle.
+   */
+  readonly tagline: string | null;
   /** Optional logo URL (data: or http(s) or `/uploads/...`). */
   readonly logoUrl: string | null;
   /**
@@ -291,6 +297,7 @@ export interface BrandingSettingsInterface {
 
 export const DEFAULT_BRANDING: BrandingSettingsInterface = {
   brandName: 'Reiwa',
+  tagline: null,
   logoUrl: null,
   pwaIconUrl: null,
   primary: '#22c55e',

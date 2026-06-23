@@ -418,7 +418,14 @@ export class RemnawaveApiService {
    */
   public async getPanelUserUsage(
     uuid: string,
-  ): Promise<{ username: string | null; usedTrafficBytes: number | null } | null> {
+  ): Promise<{
+    username: string | null;
+    usedTrafficBytes: number | null;
+    status: string | null;
+    expireAt: string | null;
+    trafficLimitBytes: number | null;
+    hwidDeviceLimit: number | null;
+  } | null> {
     try {
       const result = await this.requestJson<unknown>({ method: 'get', url: `/api/users/${uuid}` });
       const root = (result as { response?: unknown })?.response ?? result;
@@ -443,7 +450,23 @@ export class RemnawaveApiService {
           this.coerceTrafficNumber(record['trafficUsedBytes']);
       }
 
-      return { username, usedTrafficBytes };
+      // Authoritative runtime state for read-time overlay (so manual panel
+      // edits surface in the bot + cabinet without waiting for a webhook).
+      const status =
+        typeof record['status'] === 'string' && record['status'].length > 0
+          ? (record['status'] as string)
+          : null;
+      const expireAt =
+        typeof record['expireAt'] === 'string' && record['expireAt'].length > 0
+          ? (record['expireAt'] as string)
+          : null;
+      const trafficLimitBytes = this.coerceTrafficNumber(record['trafficLimitBytes']);
+      const hwidDeviceLimit =
+        typeof record['hwidDeviceLimit'] === 'number' && Number.isFinite(record['hwidDeviceLimit'])
+          ? (record['hwidDeviceLimit'] as number)
+          : null;
+
+      return { username, usedTrafficBytes, status, expireAt, trafficLimitBytes, hwidDeviceLimit };
     } catch {
       return null;
     }

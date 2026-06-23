@@ -34,6 +34,7 @@ export function readBrandingSettings(value: unknown): BrandingSettingsInterface 
   const record = readRecord(value);
   return {
     brandName: readString(record, 'brandName', DEFAULT_BRANDING.brandName),
+    tagline: readNullableString(record, 'tagline'),
     logoUrl: readNullableString(record, 'logoUrl'),
     pwaIconUrl: readNullableString(record, 'pwaIconUrl'),
     primary: readHex(record, 'primary', DEFAULT_BRANDING.primary),

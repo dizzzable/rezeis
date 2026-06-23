@@ -18,6 +18,7 @@ export const BRANDING_APP_BG_TEXTURES = [
 
 export interface BrandingFormDraft {
   readonly brandName: string
+  readonly tagline: string | null
   readonly logoUrl: string | null
   readonly pwaIconUrl: string | null
   readonly primary: string
@@ -96,6 +97,7 @@ const IMAGE_URL_MAX = 524288
 
 const DEFAULT_BRANDING_DRAFT: BrandingFormDraft = {
   brandName: 'Reiwa',
+  tagline: null,
   logoUrl: null,
   pwaIconUrl: null,
   primary: '#22c55e',
@@ -129,6 +131,7 @@ export function createBrandingFormSchema(messages: BrandingFormValidationMessage
   return z
     .object({
       brandName: z.string().trim().min(1).max(64),
+      tagline: optionalNullableString(128),
       logoUrl: optionalImageUrl(messages.imageUrlInvalid),
       pwaIconUrl: optionalImageUrl(messages.imageUrlInvalid),
       primary: z.string().regex(HEX_PATTERN, messages.hexInvalid),
@@ -186,6 +189,7 @@ export function createInitialBrandingDraft(input?: Partial<BrandingFormDraft> | 
   return {
     ...DEFAULT_BRANDING_DRAFT,
     ...(input ?? {}),
+    tagline: normalizeDraftNullableString(input?.tagline),
     logoUrl: normalizeDraftNullableString(input?.logoUrl),
     pwaIconUrl: normalizeDraftNullableString(input?.pwaIconUrl),
     cardPattern: normalizeDraftNullableString(input?.cardPattern),

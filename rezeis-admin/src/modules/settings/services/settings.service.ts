@@ -1387,6 +1387,7 @@ function extractUpdatedBrandingFields(
 ): readonly string[] {
   const fields: Array<keyof UpdateBrandingSettingsDto> = [
     'brandName',
+    'tagline',
     'logoUrl',
     'pwaIconUrl',
     'primary',

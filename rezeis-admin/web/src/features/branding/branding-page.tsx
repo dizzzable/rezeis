@@ -247,6 +247,11 @@ export default function WebReiwaPage() {
                 </div>
               </div>
               <div className="space-y-2">
+                <Label htmlFor="tagline">{t('brandingPage.sections.identity.tagline')}</Label>
+                <Input id="tagline" {...form.register("tagline")} placeholder={t('brandingPage.sections.identity.taglinePlaceholder')} />
+                <p className="text-[11px] text-muted-foreground">{t('brandingPage.sections.identity.taglineHint')}</p>
+              </div>
+              <div className="space-y-2">
                 <Label htmlFor="logoUrl">{t('brandingPage.sections.identity.logoUrl')}</Label>
                 <div className="flex gap-2">
                   <Input

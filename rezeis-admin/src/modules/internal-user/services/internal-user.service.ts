@@ -77,6 +77,35 @@ interface IssuedEmailVerificationChallenge {
 }
 
 /**
+ * Live runtime fields overlaid from the Remnawave panel onto the local
+ * `Subscription` snapshot at read time, so manual operator edits in the panel
+ * surface in the bot + cabinet immediately. Each field is `undefined` when the
+ * panel didn't report it (keep the local value); the panel is the source of
+ * truth for the fields it does report.
+ */
+interface PanelSubscriptionOverlay {
+  status?: SubscriptionStatus;
+  /** Present → override expiry; absent → keep local. */
+  expiresAt?: Date;
+  /** GB; `null` = unlimited (panel reported 0 bytes); absent → keep local. */
+  trafficLimit?: number | null;
+  deviceLimit?: number;
+}
+
+const PANEL_SUBSCRIPTION_STATUS_MAP: Readonly<Record<string, SubscriptionStatus>> = {
+  ACTIVE: SubscriptionStatus.ACTIVE,
+  DISABLED: SubscriptionStatus.DISABLED,
+  LIMITED: SubscriptionStatus.LIMITED,
+  EXPIRED: SubscriptionStatus.EXPIRED,
+};
+
+/** Map a panel `status` string onto the local enum; `undefined` when unknown. */
+function mapPanelSubscriptionStatus(raw: string | null): SubscriptionStatus | undefined {
+  if (raw === null) return undefined;
+  return PANEL_SUBSCRIPTION_STATUS_MAP[raw.trim().toUpperCase()];
+}
+
+/**
  * Handles internal user session reads and narrow writes for internal admin
  * clients. Helpers (mappers, identifier resolution, email-verification
  * challenge plumbing) live in sibling files so the surface of this class
@@ -529,20 +558,22 @@ export class InternalUserService {
     );
     return {
       subscriptions: subscriptions.map((sub, i) => {
+        const u = usages[i];
+        const o = u.overlay;
         return {
           id: sub.id,
-          status: sub.status,
+          status: o?.status ?? sub.status,
           isTrial: sub.isTrial,
           plan: mapSubscriptionPlanSnapshot(sub.planSnapshot),
-          trafficLimit: sub.trafficLimit,
-          trafficUsed: usages[i].trafficUsedGb,
-          deviceLimit: sub.deviceLimit,
+          trafficLimit: o?.trafficLimit !== undefined ? o.trafficLimit : sub.trafficLimit,
+          trafficUsed: u.trafficUsedGb,
+          deviceLimit: o?.deviceLimit ?? sub.deviceLimit,
           userRemnaId: sub.remnawaveId,
-          profileName: usages[i].profileName,
+          profileName: u.profileName,
           url: sub.configUrl,
           configUrl: sub.configUrl,
           startedAt: mapDateValue(sub.startedAt),
-          expiresAt: mapDateValue(sub.expiresAt),
+          expiresAt: mapDateValue(o?.expiresAt !== undefined ? o.expiresAt : sub.expiresAt),
           createdAt: sub.createdAt.toISOString(),
           updatedAt: sub.updatedAt.toISOString(),
         };
@@ -581,20 +612,23 @@ export class InternalUserService {
       return null;
     }
     const usage = await this.resolvePanelUsage(subscription.remnawaveId);
+    const o = usage.overlay;
     return {
       id: subscription.id,
-      status: subscription.status,
+      status: o?.status ?? subscription.status,
       isTrial: subscription.isTrial,
       plan: mapSubscriptionPlanSnapshot(subscription.planSnapshot),
-      trafficLimit: subscription.trafficLimit,
+      trafficLimit: o?.trafficLimit !== undefined ? o.trafficLimit : subscription.trafficLimit,
       trafficUsed: usage.trafficUsedGb,
-      deviceLimit: subscription.deviceLimit,
+      deviceLimit: o?.deviceLimit ?? subscription.deviceLimit,
       userRemnaId: subscription.remnawaveId,
       profileName: usage.profileName,
       url: subscription.configUrl,
       configUrl: subscription.configUrl,
       startedAt: mapDateValue(subscription.startedAt),
-      expiresAt: mapDateValue(subscription.expiresAt),
+      expiresAt: mapDateValue(
+        o?.expiresAt !== undefined ? o.expiresAt : subscription.expiresAt,
+      ),
       createdAt: subscription.createdAt.toISOString(),
       updatedAt: subscription.updatedAt.toISOString(),
     };
@@ -609,19 +643,49 @@ export class InternalUserService {
    */
   private async resolvePanelUsage(
     remnawaveId: string | null,
-  ): Promise<{ profileName: string | null; trafficUsedGb: number | null }> {
+  ): Promise<{
+    profileName: string | null;
+    trafficUsedGb: number | null;
+    overlay: PanelSubscriptionOverlay | null;
+  }> {
     if (this.remnawaveApiService === undefined || remnawaveId === null) {
-      return { profileName: null, trafficUsedGb: null };
+      return { profileName: null, trafficUsedGb: null, overlay: null };
     }
     const usage = await this.remnawaveApiService.getPanelUserUsage(remnawaveId);
     if (usage === null) {
-      return { profileName: null, trafficUsedGb: null };
+      return { profileName: null, trafficUsedGb: null, overlay: null };
     }
     const trafficUsedGb =
       usage.usedTrafficBytes === null
         ? null
         : Math.round((usage.usedTrafficBytes / 1024 ** 3) * 100) / 100;
-    return { profileName: usage.username, trafficUsedGb };
+
+    // Overlay only the fields the panel actually reported (`undefined` = keep
+    // the local snapshot). Defensive typeof guards so a partial payload (or a
+    // test stub) never writes NaN / garbage. Panel is the source of truth.
+    const overlay: PanelSubscriptionOverlay = {};
+    const status = mapPanelSubscriptionStatus(
+      typeof usage.status === 'string' ? usage.status : null,
+    );
+    if (status !== undefined) overlay.status = status;
+    if (typeof usage.expireAt === 'string' && usage.expireAt.length > 0) {
+      const parsed = new Date(usage.expireAt);
+      if (!Number.isNaN(parsed.getTime())) overlay.expiresAt = parsed;
+    }
+    if (typeof usage.trafficLimitBytes === 'number' && Number.isFinite(usage.trafficLimitBytes)) {
+      overlay.trafficLimit =
+        usage.trafficLimitBytes <= 0
+          ? null
+          : Math.max(1, Math.round(usage.trafficLimitBytes / 1024 ** 3));
+    }
+    if (
+      typeof usage.hwidDeviceLimit === 'number' &&
+      Number.isFinite(usage.hwidDeviceLimit) &&
+      usage.hwidDeviceLimit >= 0
+    ) {
+      overlay.deviceLimit = usage.hwidDeviceLimit;
+    }
+    return { profileName: usage.username, trafficUsedGb, overlay };
   }
 
   private async getRequiredUser(

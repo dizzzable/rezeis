@@ -158,6 +158,12 @@ export class UpdateBrandingSettingsDto {
   public brandName?: string;
 
   @IsOptional()
+  @ValidateIf((_, value: unknown) => value !== null)
+  @IsString()
+  @MaxLength(128)
+  public tagline?: string | null;
+
+  @IsOptional()
   @ValidateIf((_, value: unknown) => typeof value === 'string' && value.length > 0)
   @IsString()
   @MaxLength(524288)

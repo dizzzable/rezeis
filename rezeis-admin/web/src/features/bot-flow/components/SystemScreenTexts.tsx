@@ -23,7 +23,6 @@ import { EmojiPicker } from '@/features/broadcast/emoji-picker'
 import { insertAtCaret } from '@/features/bot-map/utils/insert-at-caret'
 import {
   BOT_CONFIG_KEYS,
-  type BotText,
   botConfigApi,
 } from '@/features/bot-config/bot-config-api'
 
@@ -71,12 +70,6 @@ export function SystemScreenTexts({ screenName }: SystemScreenTextsProps) {
   const { t } = useTranslation()
   const keys = SCREEN_TEXT_KEYS[screenName.trim().toLowerCase()]
 
-  const { data: texts } = useQuery({
-    queryKey: BOT_CONFIG_KEYS.texts,
-    queryFn: botConfigApi.listTexts,
-    enabled: keys !== undefined,
-  })
-
   if (keys === undefined || keys.length === 0) return null
 
   return (
@@ -90,11 +83,7 @@ export function SystemScreenTexts({ screenName }: SystemScreenTextsProps) {
           </p>
         </div>
         {keys.map((key) => (
-          <TextKeyEditor
-            key={key}
-            textKey={key}
-            row={texts?.find((r) => r.key === key) ?? null}
-          />
+          <TextKeyEditor key={key} textKey={key} />
         ))}
       </div>
     </>
@@ -103,12 +92,23 @@ export function SystemScreenTexts({ screenName }: SystemScreenTextsProps) {
 
 interface TextKeyEditorProps {
   readonly textKey: string
-  readonly row: BotText | null
 }
 
-function TextKeyEditor({ textKey, row }: TextKeyEditorProps) {
+/**
+ * Inline RU/EN editor for a single bot-config text key (with emoji picker).
+ * Self-fetches its row from the shared texts query so it can be dropped in
+ * anywhere (system-screen texts section AND system-button rows). Upserts the
+ * key (visible:true) so reiwa picks it up via `translations`.
+ */
+export function TextKeyEditor({ textKey }: TextKeyEditorProps) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
+
+  const { data: texts } = useQuery({
+    queryKey: BOT_CONFIG_KEYS.texts,
+    queryFn: botConfigApi.listTexts,
+  })
+  const row = texts?.find((r) => r.key === textKey) ?? null
 
   const rowId = row?.id ?? null
   const rowValue = row?.value ?? ''
