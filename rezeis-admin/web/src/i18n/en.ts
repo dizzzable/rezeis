@@ -6,6 +6,12 @@ export const en = {
     administrator: 'Administrator',
     signOut: 'Sign out',
     telegramAria: 'Open Telegram channel',
+    topbarLandmark: 'Admin toolbar',
+    accountMenu: 'Admin account menu',
+    skipToMain: 'Skip to main content',
+    mainLandmark: 'Admin workspace',
+    sidebarLandmark: 'Admin sidebar',
+    primaryNavigation: 'Primary navigation',
     github: {
       label: 'Updates',
       title: 'Rezeis Admin',
@@ -2019,6 +2025,8 @@ export const en = {
     editTitle: 'Edit entry',
     dialogDescription: 'Create or edit FAQ entries shown to users in the bot and web app.',
     deleteConfirm: 'Delete "{{question}}"?',
+    deleteDialogTitle: 'Delete FAQ entry?',
+    deleteDialogAction: 'Delete',
     save: 'Save',
     cancel: 'Cancel',
     fields: {
@@ -2607,6 +2615,7 @@ export const en = {
       refresh: 'Refresh',
       clear: 'Clear',
       clearConfirm: 'Clear the in-memory log buffer? Already-streamed lines stay.',
+      clearDialogTitle: 'Clear system logs?',
     },
     tail: {
       heading_one: 'Tail · {{count}} line',

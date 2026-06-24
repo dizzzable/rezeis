@@ -83,7 +83,7 @@ export default function AdminShell() {
         onClick={handleSkipToMain}
         className="fixed left-4 top-4 z-50 -translate-y-24 rounded-md bg-background px-3 py-2 text-sm font-medium text-foreground shadow-lg ring-offset-background transition-transform focus:translate-y-0 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
       >
-        {t('adminShell.skipToMain', { defaultValue: 'Skip to main content' })}
+        {t('adminShell.skipToMain')}
       </a>
       <div className="flex h-screen overflow-hidden relative z-10">
         {/* Quick Search Overlay */}
@@ -121,7 +121,7 @@ export default function AdminShell() {
           <main
             id={MAIN_CONTENT_ID}
             tabIndex={-1}
-            aria-label={t('adminShell.mainLandmark', { defaultValue: 'Admin workspace' })}
+            aria-label={t('adminShell.mainLandmark')}
             className={cn(
               'flex-1 overflow-auto relative focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring',
               glassEnabled ? 'bg-transparent' : 'bg-muted/20',

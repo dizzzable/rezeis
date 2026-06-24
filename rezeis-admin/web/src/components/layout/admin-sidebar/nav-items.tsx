@@ -191,7 +191,7 @@ export function NavItems({ collapsed = false, onNavigate }: NavItemsProps) {
 
   return (
     <nav
-      aria-label={t('adminShell.primaryNavigation', { defaultValue: 'Primary navigation' })}
+      aria-label={t('adminShell.primaryNavigation')}
       className="flex flex-col gap-1 px-2"
     >
       <DndContext

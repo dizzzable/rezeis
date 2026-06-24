@@ -26,7 +26,7 @@ export function AdminSidebar({ collapsed, onToggleCollapsed }: AdminSidebarProps
 
   return (
     <aside
-      aria-label={t('adminShell.sidebarLandmark', { defaultValue: 'Admin sidebar' })}
+      aria-label={t('adminShell.sidebarLandmark')}
       className={cn(
         'relative hidden md:flex flex-col text-sidebar-foreground transition-all duration-300',
         collapsed ? 'w-16' : 'w-64',

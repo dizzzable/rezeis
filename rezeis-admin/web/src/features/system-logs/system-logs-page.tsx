@@ -225,7 +225,7 @@ export default function SystemLogsPage({ embedded = false }: { readonly embedded
               <AlertDialogContent>
                 <AlertDialogHeader>
                   <AlertDialogTitle>
-                    {t('systemLogsPage.controls.clearDialogTitle', { defaultValue: 'Clear system logs?' })}
+                    {t('systemLogsPage.controls.clearDialogTitle')}
                   </AlertDialogTitle>
                   <AlertDialogDescription>
                     {t('systemLogsPage.controls.clearConfirm')}

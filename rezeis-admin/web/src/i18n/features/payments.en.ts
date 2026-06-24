@@ -99,6 +99,7 @@ export const en = {
   paymentsAnalytics: {
     title: 'Payments analytics',
     subtitle: 'Per-gateway performance, conversion, top failure reasons and webhook health.',
+    loadError: 'Failed to load payment analytics',
     windowLabel: 'Window:',
     windowAria: 'Analytics window',
     windowDays_one: '{{count}} day',

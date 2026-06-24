@@ -6,6 +6,12 @@
     administrator: 'Администратор',
     signOut: 'Выйти',
     telegramAria: 'Открыть канал в Telegram',
+    topbarLandmark: 'Панель инструментов',
+    accountMenu: 'Меню аккаунта',
+    skipToMain: 'Перейти к основному содержимому',
+    mainLandmark: 'Рабочая область',
+    sidebarLandmark: 'Боковая панель',
+    primaryNavigation: 'Основная навигация',
     github: {
       label: 'Обновления',
       title: 'Rezeis Admin',
@@ -2041,6 +2047,8 @@
     editTitle: 'Редактирование записи',
     dialogDescription: 'Создайте или измените запись FAQ, которую пользователи увидят в боте и веб-приложении.',
     deleteConfirm: 'Удалить «{{question}}»?',
+    deleteDialogTitle: 'Удалить запись FAQ?',
+    deleteDialogAction: 'Удалить',
     save: 'Сохранить',
     cancel: 'Отмена',
     fields: {
@@ -2635,6 +2643,7 @@
       refresh: 'Обновить',
       clear: 'Очистить',
       clearConfirm: 'Очистить кольцевой буфер? Уже отправленные строки останутся.',
+      clearDialogTitle: 'Очистить системные логи?',
     },
     tail: {
       heading_one: 'Tail · {{count}} строка',

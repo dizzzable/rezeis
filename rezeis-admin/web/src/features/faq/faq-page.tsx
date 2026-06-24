@@ -417,7 +417,7 @@ function FaqRow({ item, onEdit, onDelete, onToggle }: FaqRowProps): JSX.Element 
           <AlertDialogContent>
             <AlertDialogHeader>
               <AlertDialogTitle>
-                {t('faqPage.deleteDialogTitle', { defaultValue: 'Delete FAQ entry?' })}
+                {t('faqPage.deleteDialogTitle')}
               </AlertDialogTitle>
               <AlertDialogDescription>
                 {t('faqPage.deleteConfirm', { question: item.question })}
@@ -429,7 +429,7 @@ function FaqRow({ item, onEdit, onDelete, onToggle }: FaqRowProps): JSX.Element 
                 className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
                 onClick={onDelete}
               >
-                {t('faqPage.deleteDialogAction', { defaultValue: 'Delete' })}
+                {t('faqPage.deleteDialogAction')}
               </AlertDialogAction>
             </AlertDialogFooter>
           </AlertDialogContent>

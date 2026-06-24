@@ -99,6 +99,7 @@ export const ru = {
   paymentsAnalytics: {
     title: 'Аналитика платежей',
     subtitle: 'Метрики по каждому шлюзу, конверсия, причины отказов и состояние вебхуков.',
+    loadError: 'Не удалось загрузить аналитику платежей',
     windowLabel: 'Период:',
     windowAria: 'Период аналитики',
     windowDays_one: '{{count}} день',
