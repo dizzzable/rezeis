@@ -1,5 +1,6 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 
+import { EmailDeliveryService } from '../../modules/email/services/email-delivery.service';
 import { EmailDeliveryException } from './email-delivery.exception';
 
 interface SendLinkedAccountVerificationCodeInput {
@@ -22,6 +23,10 @@ interface SendLinkedAccountVerificationCodeInput {
 export class EmailService {
   private readonly logger = new Logger(EmailService.name);
 
+  public constructor(
+    @Optional() private readonly emailDelivery?: EmailDeliveryService,
+  ) {}
+
   /**
    * Delivers the email verification code for a linked web account.
    * Throws {@link EmailDeliveryException} on configuration or transport failure.
@@ -36,12 +41,30 @@ export class EmailService {
         'definitely-not-delivered',
       );
     }
-    // Until the SMTP transport is fully wired we keep delivery side-effect-free
-    // and log the rendered code at debug level so dev environments can observe
-    // the issued challenge without leaking it to higher log streams.
-    this.logger.debug(
-      `Linked account verification code ${input.code} dispatched to ${emailAddress} ` +
-        `(expires at ${input.expiresAt.toISOString()})`,
-    );
+
+    // No real transport wired (minimal runtimes / unit tests): preserve the
+    // historical side-effect-free behaviour and log the rendered code at debug
+    // level so dev environments can still observe the issued challenge.
+    if (this.emailDelivery === undefined) {
+      this.logger.debug(
+        `Linked account verification code ${input.code} dispatched to ${emailAddress} ` +
+          `(expires at ${input.expiresAt.toISOString()})`,
+      );
+      return;
+    }
+
+    // Real SMTP delivery: send the branded code email synchronously so the
+    // caller can revoke the challenge if delivery definitively failed.
+    const result = await this.emailDelivery.sendVerificationCode({
+      to: emailAddress,
+      code: input.code,
+      expiresAt: input.expiresAt,
+    });
+    if (!result.success) {
+      throw new EmailDeliveryException(
+        `Verification email delivery failed: ${result.error ?? 'unknown error'}`,
+        'definitely-not-delivered',
+      );
+    }
   }
 }

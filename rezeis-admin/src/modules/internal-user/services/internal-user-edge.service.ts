@@ -360,7 +360,7 @@ export class InternalUserEdgeService {
       return { eligible: false, reason: 'TRIAL_REQUIRES_PAYMENT' };
     }
 
-    const [trialClaims, activeSubscriptions, invited] = await Promise.all([
+    const [trialClaims, activeSubscriptions, invited, userRow] = await Promise.all([
       this.prismaService.subscription.count({
         where: { userId, isTrial: true },
       }),
@@ -370,6 +370,10 @@ export class InternalUserEdgeService {
       settings.availabilityScope === 'INVITED'
         ? isInvitedUser(this.prismaService, userId)
         : Promise.resolve(true),
+      this.prismaService.user.findUnique({
+        where: { id: userId },
+        select: { telegramId: true },
+      }),
     ]);
 
     if (activeSubscriptions > 0) {
@@ -378,6 +382,7 @@ export class InternalUserEdgeService {
     const claim = evaluateTrialClaim(settings, {
       priorTrialClaims: trialClaims,
       isInvited: invited,
+      hasTelegram: userRow?.telegramId !== null && userRow?.telegramId !== undefined,
     });
     if (!claim.allowed) {
       return { eligible: false, reason: claim.reason };

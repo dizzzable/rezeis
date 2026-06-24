@@ -15,12 +15,20 @@ export interface TrialSettings {
   readonly free: boolean;
   /** Audience: everyone, or only users invited via a referral/partner link. */
   readonly availabilityScope: TrialAvailabilityScope;
+  /**
+   * Require a linked Telegram account before the trial can be claimed.
+   * Applies to BOTH free grants and paid trial checkouts. A web-only user
+   * (no `User.telegramId`) is denied with `TRIAL_REQUIRES_TELEGRAM` until they
+   * link Telegram in the cabinet. Default `false` (backward compatible).
+   */
+  readonly requireTelegramLink: boolean;
 }
 
 export const DEFAULT_TRIAL_SETTINGS: TrialSettings = {
   maxClaims: 1,
   free: true,
   availabilityScope: 'ALL',
+  requireTelegramLink: false,
 };
 
 /**
@@ -40,7 +48,11 @@ export function readTrialSettings(value: Prisma.JsonValue | null | undefined): T
   const free = typeof record['free'] === 'boolean' ? (record['free'] as boolean) : DEFAULT_TRIAL_SETTINGS.free;
   const scope: TrialAvailabilityScope =
     record['availabilityScope'] === 'INVITED' ? 'INVITED' : 'ALL';
-  return { maxClaims, free, availabilityScope: scope };
+  const requireTelegramLink =
+    typeof record['requireTelegramLink'] === 'boolean'
+      ? (record['requireTelegramLink'] as boolean)
+      : DEFAULT_TRIAL_SETTINGS.requireTelegramLink;
+  return { maxClaims, free, availabilityScope: scope, requireTelegramLink };
 }
 
 /** Serialises trial settings for a Prisma JSON write. */
@@ -49,12 +61,16 @@ export function serializeTrialSettings(settings: TrialSettings): Prisma.InputJso
     maxClaims: settings.maxClaims,
     free: settings.free,
     availabilityScope: settings.availabilityScope,
+    requireTelegramLink: settings.requireTelegramLink,
   };
 }
 
 /** Reason a trial claim is rejected. Mirrors the warning/reason codes used
  *  across the free-grant and paid-checkout trial paths. */
-export type TrialClaimDenyReason = 'TRIAL_ALREADY_USED' | 'TRIAL_INVITED_ONLY';
+export type TrialClaimDenyReason =
+  | 'TRIAL_ALREADY_USED'
+  | 'TRIAL_INVITED_ONLY'
+  | 'TRIAL_REQUIRES_TELEGRAM';
 
 export interface TrialClaimContext {
   /** How many trials the user has already claimed (counted by `isTrial`
@@ -62,12 +78,15 @@ export interface TrialClaimContext {
   readonly priorTrialClaims: number;
   /** Whether the user arrived via a referral or partner invite link. */
   readonly isInvited: boolean;
+  /** Whether the user has a linked Telegram account (`User.telegramId`). */
+  readonly hasTelegram: boolean;
 }
 
 /**
  * Single source of truth for the trial abuse guards shared by the free
  * grant and the paid checkout: a user may claim a trial at most
- * `maxClaims` times, and `INVITED`-scoped trials require an invite edge.
+ * `maxClaims` times, `INVITED`-scoped trials require an invite edge, and a
+ * `requireTelegramLink` trial requires a linked Telegram account.
  * The "no active subscription" rule is free-grant specific and stays in
  * the eligibility service rather than here.
  */
@@ -77,6 +96,9 @@ export function evaluateTrialClaim(
 ): { readonly allowed: boolean; readonly reason: TrialClaimDenyReason | null } {
   if (context.priorTrialClaims >= settings.maxClaims) {
     return { allowed: false, reason: 'TRIAL_ALREADY_USED' };
+  }
+  if (settings.requireTelegramLink && !context.hasTelegram) {
+    return { allowed: false, reason: 'TRIAL_REQUIRES_TELEGRAM' };
   }
   if (settings.availabilityScope === 'INVITED' && !context.isInvited) {
     return { allowed: false, reason: 'TRIAL_INVITED_ONLY' };

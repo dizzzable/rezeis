@@ -182,7 +182,7 @@ describe('PlansAdminService', () => {
       upgradeToPlanIds: [],
       replacementPlanIds: [],
       allowedUserIds: [],
-      trialSettings: { maxClaims: 2, free: false, availabilityScope: 'INVITED' },
+      trialSettings: { maxClaims: 2, free: false, availabilityScope: 'INVITED', requireTelegramLink: false },
       orderIndex: 4,
       durations: {
         create: [
@@ -331,7 +331,7 @@ describe('PlansAdminService', () => {
       upgradeToPlanIds: [],
       replacementPlanIds: [],
       allowedUserIds: [],
-      trialSettings: { maxClaims: 1, free: true, availabilityScope: 'ALL' },
+      trialSettings: { maxClaims: 1, free: true, availabilityScope: 'ALL', requireTelegramLink: false },
       durations: {
         deleteMany: {},
         create: [

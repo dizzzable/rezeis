@@ -8,6 +8,7 @@ import type { Transporter } from 'nodemailer';
 import { emailConfig } from '../../../common/config/email.config';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { EVENT_TYPES, SystemEventsService } from '../../../common/services/system-events.service';
+import { readBrandingSettings } from '../../settings/utils/branding-settings.util';
 import { EMAIL_QUEUE, EMAIL_JOBS } from '../email.constants';
 import type { SendEmailPayload, SmtpSettingsInterface } from '../interfaces/email.interface';
 import { EmailTemplateRendererService } from './email-template-renderer.service';
@@ -88,6 +89,7 @@ export class EmailDeliveryService {
       templateType: payload.templateType,
       variables: payload.variables,
       rawHtml: payload.rawHtml,
+      subject: payload.subject,
     });
 
     if (!rendered) {
@@ -114,6 +116,45 @@ export class EmailDeliveryService {
   }
 
   /**
+   * Send a one-time verification / password-reset code as a branded email,
+   * synchronously (the caller needs the success/failure result to decide
+   * whether to keep or revoke the issued challenge). Bypasses the DB template
+   * lookup (uses a self-contained `rawHtml` block) so code delivery never
+   * depends on a seeded template being present.
+   */
+  public async sendVerificationCode(input: {
+    readonly to: string;
+    readonly code: string;
+    readonly expiresAt: Date;
+    /** Optional heading override (defaults to a generic confirmation copy). */
+    readonly heading?: string;
+    readonly intro?: string;
+  }): Promise<{ success: boolean; error?: string }> {
+    const minutes = Math.max(1, Math.round((input.expiresAt.getTime() - Date.now()) / 60_000));
+    const heading = escapeEmailHtml(input.heading ?? 'Код подтверждения');
+    const intro = escapeEmailHtml(
+      input.intro ?? 'Используйте этот код, чтобы подтвердить действие в вашем аккаунте.',
+    );
+    const code = escapeEmailHtml(input.code);
+    const rawHtml = `
+      <h2 style="margin:0 0 12px 0;color:#111827;font-size:20px;">${heading}</h2>
+      <p style="margin:0 0 20px 0;color:#374151;">${intro}</p>
+      <div style="margin:0 0 20px 0;padding:18px 12px;background:#f3f4f6;border-radius:10px;text-align:center;">
+        <span style="font-size:30px;font-weight:700;letter-spacing:8px;color:#111827;font-family:'Courier New',monospace;">${code}</span>
+      </div>
+      <p style="margin:0 0 8px 0;color:#6b7280;font-size:13px;">Код действует ${minutes} мин. Никому его не сообщайте.</p>
+      <p style="margin:0;color:#9ca3af;font-size:12px;">Если вы не запрашивали это действие — просто проигнорируйте письмо.</p>
+    `;
+    return this.sendImmediate({
+      to: input.to,
+      subject: `${input.code} — код подтверждения`,
+      templateType: '__verification_code__',
+      variables: {},
+      rawHtml,
+    });
+  }
+
+  /**
    * Send a test email to verify SMTP configuration.
    */
   public async sendTest(to: string): Promise<{ success: boolean; error?: string }> {
@@ -124,10 +165,12 @@ export class EmailDeliveryService {
       to,
       subject: 'Test Email',
       templateType: '__test__',
-      variables: { serviceName: 'Rezeis Admin' },
+      variables: {},
+      // The branded layout already shows the operator's brand in the header;
+      // keep the body brand-neutral so a test never leaks the panel name.
       rawHtml: `
         <h2 style="margin:0 0 16px 0;color:#1f2937;">SMTP Test</h2>
-        <p>This is a test email from Rezeis Admin.</p>
+        <p>This is a test email confirming your outgoing mail settings.</p>
         <p>If you received this, your SMTP configuration is working correctly.</p>
         <p style="margin-top:16px;padding:12px;background:#f0fdf4;border-radius:8px;color:#166534;">
           &#10004; SMTP connection verified successfully
@@ -210,10 +253,23 @@ export class EmailDeliveryService {
   private async resolveSmtpConfig(): Promise<SmtpSettingsInterface> {
     // Priority 1: DB settings
     const settings = await this.prismaService.settings.findFirst({
-      select: { systemNotifications: true },
+      select: { systemNotifications: true, brandingSettings: true },
     });
     const json = (settings?.systemNotifications ?? {}) as Record<string, unknown>;
     const dbEmail = (json.email ?? {}) as Record<string, unknown>;
+
+    // Sender NAME default = the operator's user-facing brand (e.g. "Reiwa"),
+    // NEVER the hidden admin-panel name. Chain: DB value → explicit
+    // EMAIL_FROM_NAME env → brand. So out of the box users see the project,
+    // not "Rezeis".
+    const brandName = readBrandingSettings(settings?.brandingSettings ?? null).brandName;
+    const dbFromName =
+      typeof dbEmail.fromName === 'string' && dbEmail.fromName.trim().length > 0
+        ? dbEmail.fromName
+        : null;
+    const envFromNameSet =
+      typeof process.env.EMAIL_FROM_NAME === 'string' && process.env.EMAIL_FROM_NAME.trim().length > 0;
+    const fromName = dbFromName ?? (envFromNameSet ? this.emailConfiguration.fromName : brandName);
 
     // Merge: DB overrides env
     return {
@@ -223,7 +279,7 @@ export class EmailDeliveryService {
       username: typeof dbEmail.username === 'string' ? dbEmail.username : this.emailConfiguration.username,
       password: typeof dbEmail.password === 'string' ? dbEmail.password : this.emailConfiguration.password,
       fromAddress: typeof dbEmail.fromAddress === 'string' ? dbEmail.fromAddress : this.emailConfiguration.fromAddress,
-      fromName: typeof dbEmail.fromName === 'string' ? dbEmail.fromName : this.emailConfiguration.fromName,
+      fromName,
       useTls: typeof dbEmail.useTls === 'boolean' ? dbEmail.useTls : this.emailConfiguration.useTls,
       useSsl: typeof dbEmail.useSsl === 'boolean' ? dbEmail.useSsl : this.emailConfiguration.useSsl,
     };
@@ -279,4 +335,12 @@ export function deriveSmtpSecurity(config: SmtpSettingsInterface): {
   // Custom port: honour the explicit implicit-TLS flag; otherwise STARTTLS
   // when the operator enabled TLS.
   return { secure: config.useSsl, requireTls: !config.useSsl && config.useTls };
+}
+
+/** Minimal HTML escaping for values interpolated into a rawHtml email block. */
+function escapeEmailHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }

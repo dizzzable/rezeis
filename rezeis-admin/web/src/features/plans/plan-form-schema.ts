@@ -47,6 +47,7 @@ export interface PlanFormDraft {
     readonly maxClaims: string
     readonly free: boolean
     readonly availabilityScope: 'ALL' | 'INVITED'
+    readonly requireTelegramLink: boolean
   }
   readonly durations: {
     readonly days: string
@@ -74,7 +75,7 @@ export interface PlanFormData {
   readonly upgradeToPlanIds?: string[]
   readonly replacementPlanIds?: string[]
   readonly allowedUserIds?: string[]
-  readonly trialSettings?: { maxClaims: number; free: boolean; availabilityScope: 'ALL' | 'INVITED' }
+  readonly trialSettings?: { maxClaims: number; free: boolean; availabilityScope: 'ALL' | 'INVITED'; requireTelegramLink: boolean }
   readonly durations: { days: number; prices: { currency: string; price: string }[] }[]
 }
 
@@ -141,6 +142,7 @@ export function createPlanFormSchema(messages: PlanFormValidationMessages) {
         maxClaims: integerString({ min: 1, max: 100, message: messages.trialMaxClaimsInvalid }),
         free: z.boolean(),
         availabilityScope: z.enum(['ALL', 'INVITED']),
+        requireTelegramLink: z.boolean(),
       }),
       durations: z.array(durationSchema).min(1, messages.durationRequired),
     })
@@ -198,6 +200,7 @@ export function createPlanFormSchema(messages: PlanFormValidationMessages) {
                 maxClaims: parseInteger(values.trialSettings.maxClaims),
                 free: values.trialSettings.free,
                 availabilityScope: values.trialSettings.availabilityScope,
+                requireTelegramLink: values.trialSettings.requireTelegramLink,
               }
             : undefined,
         durations: values.durations.map((duration) => ({

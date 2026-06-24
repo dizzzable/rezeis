@@ -158,6 +158,16 @@ export const en = {
         fromNameRequired: 'From name is required',
         testEmailInvalid: 'Test recipient must be a valid e-mail',
       },
+      hints: {
+        title: 'How it works',
+        recovery: 'Used for email verification-code and password-reset messages (when email sign-in is enabled).',
+        events: 'Events that have a configured template (e.g. payment, subscription expiry) are emailed to users.',
+        branding: 'Emails are branded automatically: name, logo and primary color come from "Customization".',
+        ports: 'Port 465 = implicit TLS (SSL). Port 587 = STARTTLS. Encryption is auto-selected by port.',
+        deliverability: 'To land in the inbox, configure SPF, DKIM and DMARC on the sending domain.',
+        alignment: 'The "From address" domain must match the domain where SPF/DKIM are set up (DMARC alignment).',
+        verify: '"Verify connection" tests the SMTP login without sending; "Send test" delivers a real email.',
+      },
     },
   },
 } as const

@@ -124,6 +124,7 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
   const [trialMaxClaims, setTrialMaxClaims] = useState(initialDraft.trialSettings.maxClaims)
   const [trialFree, setTrialFree] = useState(initialDraft.trialSettings.free)
   const [trialScope, setTrialScope] = useState<'ALL' | 'INVITED'>(initialDraft.trialSettings.availabilityScope)
+  const [trialRequireTelegram, setTrialRequireTelegram] = useState(initialDraft.trialSettings.requireTelegramLink)
 
   const [durations, setDurations] = useState<
     { days: string; prices: { currency: string; price: string }[] }[]
@@ -201,6 +202,7 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
         maxClaims: trialMaxClaims,
         free: trialFree,
         availabilityScope: trialScope,
+        requireTelegramLink: trialRequireTelegram,
       },
       durations,
     }
@@ -313,6 +315,9 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
           <div className="space-y-4 rounded-lg border border-dashed p-4">
             <Label className="text-base font-medium">{t('planForm.trial.title')}</Label>
             <p className="text-xs text-muted-foreground">{t('planForm.trial.hint')}</p>
+            <p className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] leading-snug text-amber-700 dark:text-amber-400">
+              {t('planForm.trial.telegramNote')}
+            </p>
             <div className="grid gap-4 md:grid-cols-3">
               <div className="space-y-2">
                 <Label className="text-sm">{t('planForm.trial.maxClaims')}</Label>
@@ -358,6 +363,19 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
                 </Select>
                 <p className="text-xs text-muted-foreground">{t('planForm.trial.scopeHint')}</p>
               </div>
+            </div>
+
+            {/* Require Telegram link before claiming the trial (free or paid) */}
+            <div className="flex items-center justify-between rounded-lg border px-3 py-2.5">
+              <div className="space-y-0.5 pr-3">
+                <Label className="text-sm">{t('planForm.trial.requireTelegram')}</Label>
+                <p className="text-xs text-muted-foreground">{t('planForm.trial.requireTelegramHint')}</p>
+              </div>
+              <Switch
+                checked={trialRequireTelegram}
+                onCheckedChange={setTrialRequireTelegram}
+                aria-label={t('planForm.trial.requireTelegram')}
+              />
             </div>
           </div>
         </>
@@ -766,6 +784,7 @@ function createInitialPlanDraft(plan?: PlanInput): PlanFormDraft {
       maxClaims: String(plan?.trialSettings?.maxClaims ?? 1),
       free: plan?.trialSettings?.free ?? true,
       availabilityScope: plan?.trialSettings?.availabilityScope ?? 'ALL',
+      requireTelegramLink: plan?.trialSettings?.requireTelegramLink ?? false,
     },
     durations: plan?.durations?.map((duration) => ({
       days: duration.days.toString(),

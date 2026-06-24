@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { readBrandingSettings } from '../../settings/utils/branding-settings.util';
 import type { EmailBrandingInterface } from '../interfaces/email.interface';
 
 /**
@@ -28,13 +29,15 @@ export class EmailTemplateRendererService {
     templateType: string;
     variables: Record<string, string | number | null>;
     rawHtml?: string;
+    /** Subject for the rawHtml path (DB templates derive it from the title). */
+    subject?: string;
   }): Promise<{ subject: string; html: string } | null> {
     const branding = await this.loadBranding();
 
     // If raw HTML provided, just wrap it in the layout
     if (input.rawHtml) {
       return {
-        subject: 'Notification',
+        subject: input.subject && input.subject.trim().length > 0 ? input.subject : 'Notification',
         html: this.wrapInLayout(input.rawHtml, branding),
       };
     }
@@ -128,21 +131,44 @@ export class EmailTemplateRendererService {
   }
 
   /**
-   * Load branding from Settings.brandingSettings.
+   * Load branding for emails.
+   *
+   * Emails are user-facing and must look like they come from the operator's
+   * service (the reiwa-side brand) — NEVER the hidden admin panel ("Rezeis").
+   * So we resolve the brand through the canonical `readBrandingSettings`
+   * reader (same source the cabinet uses), which defaults to the project brand
+   * ("Reiwa") and the project's primary color — not a "Rezeis" placeholder.
+   * `websiteUrl` is derived from `REZEIS_DOMAIN`; `supportEmail` from the
+   * operator's email support contact / From address.
    */
   private async loadBranding(): Promise<EmailBrandingInterface> {
     const settings = await this.prismaService.settings.findFirst({
-      select: { brandingSettings: true },
+      select: { brandingSettings: true, systemNotifications: true },
     });
 
-    const json = (settings?.brandingSettings ?? {}) as Record<string, unknown>;
+    const branding = readBrandingSettings(settings?.brandingSettings ?? null);
+    const notif = (settings?.systemNotifications ?? {}) as Record<string, unknown>;
+    const emailCfg = (notif.email ?? {}) as Record<string, unknown>;
+
+    const str = (v: unknown): string | null =>
+      typeof v === 'string' && v.trim().length > 0 ? v.trim() : null;
+
+    // Website: the deployment domain (operator's public service URL).
+    const domain = str(process.env.REZEIS_DOMAIN);
+    const websiteUrl =
+      domain !== null && domain !== 'localhost'
+        ? `${domain.includes('.') ? 'https' : 'http'}://${domain}`
+        : null;
+
+    // Support address: operator-configured contact, else the From address.
+    const supportEmail = str(emailCfg.supportEmail) ?? str(emailCfg.fromAddress);
 
     return {
-      serviceName: typeof json.serviceName === 'string' ? json.serviceName : 'Rezeis VPN',
-      logoUrl: typeof json.logoUrl === 'string' ? json.logoUrl : null,
-      primaryColor: typeof json.primaryColor === 'string' ? json.primaryColor : '#2563eb',
-      supportEmail: typeof json.supportEmail === 'string' ? json.supportEmail : null,
-      websiteUrl: typeof json.websiteUrl === 'string' ? json.websiteUrl : null,
+      serviceName: branding.brandName,
+      logoUrl: branding.logoUrl,
+      primaryColor: branding.primary,
+      supportEmail,
+      websiteUrl,
     };
   }
 }

@@ -41,7 +41,7 @@ export interface NormalizedPlanWriteInput {
  * back to the provided base (current plan or hard defaults) per-field.
  */
 function normalizeTrialSettings(
-  patch: { maxClaims?: number; free?: boolean; availabilityScope?: 'ALL' | 'INVITED' } | undefined,
+  patch: { maxClaims?: number; free?: boolean; availabilityScope?: 'ALL' | 'INVITED'; requireTelegramLink?: boolean } | undefined,
   base: TrialSettings,
 ): TrialSettings {
   if (patch === undefined) {
@@ -56,6 +56,8 @@ function normalizeTrialSettings(
         : Math.min(Math.max(Math.trunc(patch.maxClaims), 1), 100),
     free: patch.free === undefined ? base.free : patch.free,
     availabilityScope: scope,
+    requireTelegramLink:
+      patch.requireTelegramLink === undefined ? base.requireTelegramLink : patch.requireTelegramLink,
   };
 }
 

@@ -85,3 +85,47 @@ describe('EmailService', () => {
     assert.deepStrictEqual(debugMessages, []);
   });
 });
+
+describe('EmailService — real SMTP delivery wiring', () => {
+  it('sends a branded verification code through the delivery service when wired', async () => {
+    const calls: Array<{ to: string; code: string; expiresAt: Date }> = [];
+    const delivery = {
+      sendVerificationCode: async (input: { to: string; code: string; expiresAt: Date }) => {
+        calls.push(input);
+        return { success: true };
+      },
+    };
+    const service = new EmailService(delivery as never);
+
+    await service.sendLinkedAccountVerificationCode({
+      emailAddress: '  user@example.com  ',
+      code: '424242',
+      expiresAt: new Date('2026-04-17T05:17:00.000Z'),
+    });
+
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].to, 'user@example.com');
+    assert.equal(calls[0].code, '424242');
+  });
+
+  it('throws definitely-not-delivered when the transport reports failure', async () => {
+    const delivery = {
+      sendVerificationCode: async () => ({ success: false, error: 'SMTP not configured or disabled' }),
+    };
+    const service = new EmailService(delivery as never);
+
+    await assert.rejects(
+      () =>
+        service.sendLinkedAccountVerificationCode({
+          emailAddress: 'user@example.com',
+          code: '111111',
+          expiresAt: new Date('2026-04-17T05:17:00.000Z'),
+        }),
+      (error: unknown): boolean => {
+        assert.ok(error instanceof EmailDeliveryException);
+        assert.equal(error.deliveryState, 'definitely-not-delivered');
+        return true;
+      },
+    );
+  });
+});

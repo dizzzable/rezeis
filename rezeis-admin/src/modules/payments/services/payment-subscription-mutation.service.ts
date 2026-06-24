@@ -442,6 +442,10 @@ export class PaymentSubscriptionMutationService {
         where: { id: currentSubscription.id },
         data: {
           status: SubscriptionStatus.ACTIVE,
+          // Upgrading off a trial onto a regular plan clears the trial flag
+          // (and the trial badge / "active trial" gating). Mirrors the NEW
+          // path: the flag follows the purchased plan's availability.
+          isTrial: input.purchasedPlan.availability === PlanAvailability.TRIAL,
           planSnapshot: buildPlanSnapshot({
             transaction: input.transaction,
             purchasedPlan: input.purchasedPlan,

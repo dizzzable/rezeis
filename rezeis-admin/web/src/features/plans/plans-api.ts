@@ -79,6 +79,7 @@ export interface Plan {
     readonly maxClaims: number
     readonly free: boolean
     readonly availabilityScope: 'ALL' | 'INVITED'
+    readonly requireTelegramLink: boolean
   }
 }
 

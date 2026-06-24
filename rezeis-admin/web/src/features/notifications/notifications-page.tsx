@@ -9,6 +9,7 @@ import {
   Edit2,
   Filter,
   Hash,
+  Info,
   Loader2,
   Mail,
   MessageSquare,
@@ -1082,6 +1083,22 @@ function EmailDeliveryForm({ initial }: EmailDeliveryFormProps) {
         </CardDescription>
       </CardHeader>
       <CardContent>
+        {/* How-it-works + deliverability hints */}
+        <div className="mb-5 rounded-lg border border-blue-500/20 bg-blue-500/5 p-3">
+          <div className="mb-2 flex items-center gap-1.5 text-xs font-medium text-blue-700 dark:text-blue-300">
+            <Info className="h-3.5 w-3.5" aria-hidden />
+            {t('notificationsPage.email.hints.title')}
+          </div>
+          <ul className="space-y-1 text-[11px] leading-snug text-muted-foreground">
+            <li>• {t('notificationsPage.email.hints.recovery')}</li>
+            <li>• {t('notificationsPage.email.hints.events')}</li>
+            <li>• {t('notificationsPage.email.hints.branding')}</li>
+            <li>• {t('notificationsPage.email.hints.ports')}</li>
+            <li>• {t('notificationsPage.email.hints.deliverability')}</li>
+            <li>• {t('notificationsPage.email.hints.alignment')}</li>
+            <li>• {t('notificationsPage.email.hints.verify')}</li>
+          </ul>
+        </div>
         <Form {...form}>
           <form
             onSubmit={form.handleSubmit((values) => saveMutation.mutate(values))}
@@ -1215,7 +1232,7 @@ function EmailDeliveryForm({ initial }: EmailDeliveryFormProps) {
                     <FormControl>
                       <Input
                         {...field}
-                        placeholder="Rezeis VPN"
+                        placeholder="Reiwa"
                         className="h-8 text-xs"
                       />
                     </FormControl>

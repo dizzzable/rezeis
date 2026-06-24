@@ -43,6 +43,10 @@ export class TrialSettingsDto {
   @IsOptional()
   @IsIn(['ALL', 'INVITED'])
   public availabilityScope?: 'ALL' | 'INVITED';
+
+  @IsOptional()
+  @IsBoolean()
+  public requireTelegramLink?: boolean;
 }
 
 export class CreatePlanDto {

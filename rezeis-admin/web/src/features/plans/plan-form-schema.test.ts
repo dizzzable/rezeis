@@ -107,7 +107,7 @@ describe('plan form schema', () => {
     const result = createPlanFormSchema(messages).safeParse({
       ...validDraft(),
       availability: 'TRIAL',
-      trialSettings: { maxClaims: '3', free: false, availabilityScope: 'ALL' },
+      trialSettings: { maxClaims: '3', free: false, availabilityScope: 'ALL', requireTelegramLink: false },
       durations: [
         { days: '7', prices: [{ currency: 'RUB', price: '0' }] },
         { days: '14', prices: [{ currency: 'USD', price: '0' }] },
@@ -141,7 +141,7 @@ function validDraft(): PlanFormDraft {
     upgradeToPlanIds: [],
     replacementPlanIds: [],
     allowedUserIds: [],
-    trialSettings: { maxClaims: '1', free: true, availabilityScope: 'ALL' },
+    trialSettings: { maxClaims: '1', free: true, availabilityScope: 'ALL', requireTelegramLink: false },
     durations: [{ days: '30', prices: [{ currency: 'RUB', price: '299.50' }] }],
   }
 }

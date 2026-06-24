@@ -105,6 +105,28 @@ describe('SubscriptionQuoteService', () => {
     ]);
   });
 
+  it('lets a trial without configured upgrade targets upgrade to any non-trial plan (fallback)', async () => {
+    const service = createService({
+      user: createUser({ maxSubscriptions: 2 }),
+      subscriptions: [createSubscription({ id: 'trial-sub', isTrial: true, planId: 'trial-plan' })],
+      trialGrant: { id: 'trial-grant-1' },
+      plans: [
+        // No upgradeToPlanIds configured on the trial plan.
+        createPlan({ id: 'trial-plan', availability: PlanAvailability.TRIAL }),
+        createPlan({ id: 'paid-plan', availability: PlanAvailability.ALL }),
+      ],
+    });
+
+    const actualPolicy = await service.getActionPolicy({
+      userId: 'user-1',
+      subscriptionId: 'trial-sub',
+      channel: PurchaseChannel.WEB,
+    });
+
+    // Fallback: trial → any active non-trial catalog plan.
+    assert.equal(actualPolicy.actions.UPGRADE, true);
+  });
+
   it('blocks RENEW for a free trial source and steers the user to upgrade', async () => {
     const service = createService({
       user: createUser({ maxSubscriptions: 2 }),

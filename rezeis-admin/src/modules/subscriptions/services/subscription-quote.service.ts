@@ -85,6 +85,11 @@ const TRIAL_INVITED_ONLY: SubscriptionQuoteWarningInterface = {
   message: 'This trial is available only to users invited via a referral or partner link.',
 };
 
+const TRIAL_REQUIRES_TELEGRAM: SubscriptionQuoteWarningInterface = {
+  code: 'TRIAL_REQUIRES_TELEGRAM',
+  message: 'This trial requires a linked Telegram account. Link Telegram in the cabinet first.',
+};
+
 @Injectable()
 export class SubscriptionQuoteService {
   public constructor(
@@ -137,6 +142,8 @@ export class SubscriptionQuoteService {
     const upgradeSelection = await this.getSourceSelection({
       sourceSubscription: context.sourceSubscription,
       purchaseType: PurchaseType.UPGRADE,
+      userId,
+      channel,
     });
     const trialPlans = basePlans.filter((plan) => plan.availability === 'TRIAL');
     // Only FREE trials are claimable via the dedicated trial action; paid
@@ -379,6 +386,8 @@ export class SubscriptionQuoteService {
     return this.getSourceSelection({
       sourceSubscription: input.sourceSubscription,
       purchaseType: input.purchaseType,
+      userId: input.userId,
+      channel: input.channel,
     });
   }
 
@@ -397,18 +406,29 @@ export class SubscriptionQuoteService {
     const needsInviteCheck = input.plans.some(
       (plan) => readTrialSettings(plan.trialSettings).availabilityScope === 'INVITED',
     );
-    const [priorTrialClaims, invited] = await Promise.all([
+    const needsTelegramCheck = input.plans.some(
+      (plan) => readTrialSettings(plan.trialSettings).requireTelegramLink === true,
+    );
+    const [priorTrialClaims, invited, userRow] = await Promise.all([
       this.prismaService.subscription.count({
         where: { userId: input.userId, isTrial: true },
       }),
       needsInviteCheck ? isInvitedUser(this.prismaService, input.userId) : Promise.resolve(true),
+      needsTelegramCheck
+        ? this.prismaService.user.findUnique({
+            where: { id: input.userId },
+            select: { telegramId: true },
+          })
+        : Promise.resolve(null),
     ]);
+    const hasTelegram = !needsTelegramCheck || (userRow?.telegramId !== null && userRow?.telegramId !== undefined);
     const claimable: PlanRecord[] = [];
     const warnings: SubscriptionQuoteWarningInterface[] = [];
     for (const plan of input.plans) {
       const claim = evaluateTrialClaim(readTrialSettings(plan.trialSettings), {
         priorTrialClaims,
         isInvited: invited,
+        hasTelegram,
       });
       if (claim.allowed) {
         claimable.push(plan);
@@ -416,6 +436,8 @@ export class SubscriptionQuoteService {
         warnings.push(TRIAL_ALREADY_USED);
       } else if (claim.reason === 'TRIAL_INVITED_ONLY') {
         warnings.push(TRIAL_INVITED_ONLY);
+      } else if (claim.reason === 'TRIAL_REQUIRES_TELEGRAM') {
+        warnings.push(TRIAL_REQUIRES_TELEGRAM);
       }
     }
     return { plans: claimable, warnings };
@@ -432,6 +454,8 @@ export class SubscriptionQuoteService {
   private async getSourceSelection(input: {
     readonly sourceSubscription: SubscriptionRecord | null;
     readonly purchaseType: 'RENEW' | 'UPGRADE';
+    readonly userId?: string;
+    readonly channel?: PurchaseChannel;
   }): Promise<{ readonly plans: readonly PlanRecord[]; readonly warnings: readonly SubscriptionQuoteWarningInterface[] }> {
     if (input.sourceSubscription === null) {
       return { plans: [], warnings: [SOURCE_SUBSCRIPTION_REQUIRED] };
@@ -448,8 +472,27 @@ export class SubscriptionQuoteService {
       return { plans: [], warnings: [SOURCE_PLAN_MISSING] };
     }
     if (input.purchaseType === PurchaseType.UPGRADE) {
+      let targets = await this.getTransitionPlans(sourcePlan.upgradeToPlanIds);
+      // Trial → regular fallback: a TRIAL plan with no explicitly configured
+      // `upgradeToPlanIds` can still be upgraded to ANY active non-trial
+      // catalog plan, so a trial user is never stuck without an upgrade path.
+      // Applies to both free and paid trials. Operators who want to restrict
+      // the targets simply set explicit `upgradeToPlanIds` on the trial plan.
+      if (
+        targets.length === 0 &&
+        sourcePlan.availability === PlanAvailability.TRIAL &&
+        input.userId !== undefined
+      ) {
+        const catalog = await this.getCatalogOptionPlans({
+          userId: input.userId,
+          channel: input.channel ?? PurchaseChannel.WEB,
+        });
+        targets = catalog.filter(
+          (plan) => plan.availability !== PlanAvailability.TRIAL && plan.id !== sourcePlan.id,
+        );
+      }
       return {
-        plans: await this.getTransitionPlans(sourcePlan.upgradeToPlanIds),
+        plans: targets,
         warnings: [UPGRADE_RESETS_EXPIRY],
       };
     }
