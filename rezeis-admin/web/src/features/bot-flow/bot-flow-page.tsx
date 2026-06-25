@@ -32,7 +32,7 @@
  * server returns the unchanged positionX/Y. We extend it with a sentinel
  * filter so the pinned reply-node never gets a server-side override.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
@@ -46,11 +46,12 @@ import {
   type OnConnect,
   ReactFlowProvider,
 } from '@xyflow/react'
-import { Workflow, Plus, Check, Save, Type, Upload, RefreshCw, Image as ImageIcon } from 'lucide-react'
+import { Workflow, Plus, Check, Save, Type, Upload, RefreshCw, Image as ImageIcon, PanelRightClose, PanelRightOpen } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
 import { Button } from '@/components/ui/button'
+import { cn } from '@/lib/utils'
 import {
   Sheet,
   SheetContent,
@@ -74,8 +75,10 @@ import {
   REPLY_KEYBOARD_NODE_TYPE,
   type ReplyKeyboardNodeData,
 } from './components/ReplyKeyboardNode'
-import { buildReplyToScreenEdges, buildMapEdges, buildSystemScreenBackEdges, botMapNodesToReactFlow, flowToReactFlow, nodesToPositions } from './utils'
+import { buildReplyToScreenEdges, buildMapEdges, buildSystemScreenBackEdges, botMapNodesToReactFlow, flowToReactFlow, nodesToPositions, readMapNodePositions, type MapNodePositions } from './utils'
 import type { BotFlow, BotFlowScreen } from './types'
+
+import { MAP_INFO_NODE_TYPE } from './components/MapInfoNode'
 
 import { NodeRail } from '@/features/bot-map/components/NodeRail'
 import { NotificationEditor } from '@/features/bot-map/components/inspector/NotificationEditor'
@@ -108,6 +111,11 @@ export default function BotFlowPage() {
   const [textsOpen, setTextsOpen] = useState(false)
   const [bannerOpen, setBannerOpen] = useState(false)
 
+  // Right inspector collapse — the operator can hide the screen/notification
+  // editor (like the left rail) to get the full canvas width while arranging
+  // blocks. Selecting a node re-opens it.
+  const [inspectorCollapsed, setInspectorCollapsed] = useState(false)
+
   // ── Load draft flow + reply-keyboard buttons in parallel ───────────────────
   const { data: flow, isLoading: flowLoading } = useQuery<BotFlow>({
     queryKey: ['bot-flow', 'draft', FLOW_NAME],
@@ -134,9 +142,18 @@ export default function BotFlowPage() {
 
   // Project the non-graph bot-map nodes (notifications + Mini App terminals)
   // onto the canvas so a selected event screen is visible and its links to
-  // graph screens are drawn. Memoised so the node-sync effect only re-runs
-  // when the payload actually changes.
-  const mapNodes = useMemo<Node[]>(() => botMapNodesToReactFlow(botMapNodes), [botMapNodes])
+  // graph screens are drawn. Manual positions saved by the operator live in
+  // `flow.layoutData.mapNodePositions` (these nodes have no DB row of their
+  // own) and take precedence over the auto two-column fallback. Memoised so
+  // the node-sync effect only re-runs when the payload actually changes.
+  const savedMapPositions = useMemo<MapNodePositions>(
+    () => readMapNodePositions(flow?.layoutData ?? null),
+    [flow?.layoutData],
+  )
+  const mapNodes = useMemo<Node[]>(
+    () => botMapNodesToReactFlow(botMapNodes, savedMapPositions),
+    [botMapNodes, savedMapPositions],
+  )
 
   // Load the operator-uploaded welcome banner so we can render it as
   // a thumbnail on the pinned reply-keyboard pseudo-node. The same
@@ -278,6 +295,25 @@ export default function BotFlowPage() {
     },
   })
 
+  // Read-only map nodes (notifications / Mini App terminals) have no DB row,
+  // so their manual positions are persisted into the flow's `layoutData` JSON
+  // (merged, never clobbering other layout keys) and re-applied on next load.
+  const saveLayoutMutation = useMutation({
+    mutationFn: async (mapNodePositions: MapNodePositions) => {
+      if (!flow) return
+      const base =
+        flow.layoutData !== null && typeof flow.layoutData === 'object'
+          ? (flow.layoutData as Record<string, unknown>)
+          : {}
+      await api.put(`/admin/bot-flows/${flow.id}/layout`, {
+        layoutData: { ...base, mapNodePositions },
+      })
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['bot-flow', 'draft', FLOW_NAME] })
+    },
+  })
+
   const publishMutation = useMutation({
     mutationFn: async () => {
       await api.post(`/admin/bot-flows/${flow?.id}/publish`)
@@ -412,12 +448,14 @@ export default function BotFlowPage() {
 
   const handleNodeClick = useCallback((nodeId: string) => {
     setSelectedNodeId(nodeId)
+    setInspectorCollapsed(false)
   }, [])
 
   // Rail selection: drive the same selection model + sync canvas highlight
   // for nodes that exist on the canvas (graph screens / reply pseudo-node).
   const handleSelectNode = useCallback((nodeId: string) => {
     setSelectedNodeId(nodeId)
+    setInspectorCollapsed(false)
     setNodes((nds) => nds.map((n) => ({ ...n, selected: n.id === nodeId })))
     // Re-center the canvas on the picked node so a selected notification /
     // Mini App screen (which lives off to the side) comes into view.
@@ -494,13 +532,25 @@ export default function BotFlowPage() {
 
   const handleSave = useCallback(() => {
     if (!flow) return
-    // Only graph-screen nodes have a DB row + position to persist; the
-    // pinned reply node and the read-only map nodes are excluded.
+    // Graph screens persist to their own DB rows; the read-only map nodes
+    // (notifications / Mini App terminals) persist into the flow layout JSON.
+    // Both are saved together so a single "Save positions" keeps the entire
+    // arranged canvas — not just the screen blocks.
     const positions = nodesToPositions(nodes.filter((n) => n.type === 'botScreen'))
-    savePositionsMutation.mutate(positions, {
-      onSuccess: () => toast.success(t('botFlow.saved')),
-    })
-  }, [flow, nodes, savePositionsMutation, t])
+    const mapPositions: MapNodePositions = {}
+    for (const n of nodes) {
+      if (n.type === MAP_INFO_NODE_TYPE) {
+        mapPositions[n.id] = { x: n.position.x, y: n.position.y }
+      }
+    }
+    const hasMapPositions = Object.keys(mapPositions).length > 0
+    Promise.all([
+      positions.length > 0 ? savePositionsMutation.mutateAsync(positions) : Promise.resolve(),
+      hasMapPositions ? saveLayoutMutation.mutateAsync(mapPositions) : Promise.resolve(),
+    ])
+      .then(() => toast.success(t('botFlow.saved')))
+      .catch(() => toast.error(t('botFlow.connectionError')))
+  }, [flow, nodes, savePositionsMutation, saveLayoutMutation, t])
 
   // ── Right inspector router ─────────────────────────────────────────────────
   const selectedScreen = useMemo<BotFlowScreen | null>(() => {
@@ -521,6 +571,14 @@ export default function BotFlowPage() {
     !showReplyInspector && selectedMapNode?.kind === 'notification'
   const showTerminalInspector =
     !showReplyInspector && selectedMapNode?.kind === 'mini-app-terminal'
+
+  // Whether the right inspector has any panel to show for the current
+  // selection — drives the collapse strip vs full-panel rendering.
+  const anyInspectorActive =
+    showReplyInspector ||
+    (selectedScreen !== null && !showReplyInspector) ||
+    showNotificationInspector ||
+    showTerminalInspector
 
   // Save / Publish only make sense once at least one bot-flow screen exists.
   // The reply-keyboard pseudo-node persists every edit immediately via the
@@ -589,7 +647,7 @@ export default function BotFlowPage() {
                 variant="outline"
                 size="sm"
                 onClick={handleSave}
-                disabled={savePositionsMutation.isPending}
+                disabled={savePositionsMutation.isPending || saveLayoutMutation.isPending}
                 title={t('botStudio.toolbar.saveHint')}
               >
                 <Save className="mr-1.5 h-3.5 w-3.5" aria-hidden />
@@ -659,34 +717,66 @@ export default function BotFlowPage() {
           </ReactFlowProvider>
         </div>
 
-        {/* Right inspector */}
-        {showReplyInspector && (
-          <div className="w-80 shrink-0 overflow-y-auto overflow-x-hidden border-l">
+        {/* Right inspector — collapsible like the left rail. When collapsed,
+            a thin strip with an expand button stays so the operator can bring
+            the editor back without re-selecting the node. */}
+        {anyInspectorActive && inspectorCollapsed && (
+          <div className="flex w-9 shrink-0 flex-col items-center border-l pt-2">
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7"
+              onClick={() => setInspectorCollapsed(false)}
+              aria-label={t('botStudio.inspector.expand')}
+              title={t('botStudio.inspector.expand')}
+            >
+              <PanelRightOpen className="h-4 w-4" aria-hidden />
+            </Button>
+          </div>
+        )}
+        {showReplyInspector && !inspectorCollapsed && (
+          <InspectorShell
+            width="w-80"
+            collapseLabel={t('botStudio.inspector.collapse')}
+            onCollapse={() => setInspectorCollapsed(true)}
+          >
             <div className="p-3">
               <ReplyKeyboardEditorPanel />
             </div>
-          </div>
+          </InspectorShell>
         )}
-        {selectedScreen && !showReplyInspector && (
-          <div className="w-80 shrink-0 overflow-y-auto overflow-x-hidden border-l">
+        {selectedScreen && !showReplyInspector && !inspectorCollapsed && (
+          <InspectorShell
+            width="w-80"
+            collapseLabel={t('botStudio.inspector.collapse')}
+            onCollapse={() => setInspectorCollapsed(true)}
+          >
             <div className="p-3">
               <ScreenEditorPanel screen={selectedScreen} flowName={FLOW_NAME} />
             </div>
-          </div>
+          </InspectorShell>
         )}
-        {showNotificationInspector && selectedMapNode?.kind === 'notification' && (
-          <div className="w-96 shrink-0 overflow-y-auto overflow-x-hidden border-l">
+        {showNotificationInspector && selectedMapNode?.kind === 'notification' && !inspectorCollapsed && (
+          <InspectorShell
+            width="w-96"
+            collapseLabel={t('botStudio.inspector.collapse')}
+            onCollapse={() => setInspectorCollapsed(true)}
+          >
             <div className="p-4">
               <NotificationEditor node={selectedMapNode} />
             </div>
-          </div>
+          </InspectorShell>
         )}
-        {showTerminalInspector && selectedMapNode?.kind === 'mini-app-terminal' && (
-          <div className="w-96 shrink-0 overflow-y-auto overflow-x-hidden border-l">
+        {showTerminalInspector && selectedMapNode?.kind === 'mini-app-terminal' && !inspectorCollapsed && (
+          <InspectorShell
+            width="w-96"
+            collapseLabel={t('botStudio.inspector.collapse')}
+            onCollapse={() => setInspectorCollapsed(true)}
+          >
             <div className="p-4">
               <MiniAppTerminalView node={selectedMapNode} />
             </div>
-          </div>
+          </InspectorShell>
         )}
       </div>
 
@@ -714,6 +804,42 @@ export default function BotFlowPage() {
           </div>
         </SheetContent>
       </Sheet>
+    </div>
+  )
+}
+
+/**
+ * Right-inspector container with a collapse affordance. Keeps the per-panel
+ * width and scroll behaviour, adds a sticky header carrying the collapse
+ * button so the operator can hide the editor (like the left rail) and reclaim
+ * canvas width while arranging blocks.
+ */
+function InspectorShell({
+  width,
+  collapseLabel,
+  onCollapse,
+  children,
+}: {
+  width: string
+  collapseLabel: string
+  onCollapse: () => void
+  children: ReactNode
+}) {
+  return (
+    <div className={cn('flex shrink-0 flex-col overflow-hidden border-l', width)}>
+      <div className="flex shrink-0 justify-end border-b px-2 py-1.5">
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7"
+          onClick={onCollapse}
+          aria-label={collapseLabel}
+          title={collapseLabel}
+        >
+          <PanelRightClose className="h-4 w-4" aria-hidden />
+        </Button>
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">{children}</div>
     </div>
   )
 }

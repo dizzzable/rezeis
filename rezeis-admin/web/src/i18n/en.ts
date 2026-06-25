@@ -3225,7 +3225,7 @@ export const en = {
       emojis: 'Emojis',
       texts: 'Texts',
       savePositions: 'Save positions',
-      saveHint: 'Saves screen coordinates on the canvas only. Texts, buttons and emojis are persisted on every edit.',
+      saveHint: 'Saves the layout of every block on the canvas — screens and notification / Mini App nodes. Texts, buttons and emojis are persisted on every edit.',
       publishFlow: 'Publish flow',
       publishHint: 'Publishes the draft screen graph as a new version and busts the bot cache in the same action — no separate refresh needed. Reply keyboard / emojis / texts are persisted automatically.',
       autoSaved: 'Auto-saved',
@@ -3245,6 +3245,10 @@ export const en = {
     },
     palette: {
       global: 'Global',
+    },
+    inspector: {
+      collapse: 'Collapse editor panel',
+      expand: 'Expand editor panel',
     },
     replyKeyboard: {
       nodeTitle: 'Reply keyboard',

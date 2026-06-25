@@ -223,16 +223,23 @@ const MAP_NODE_X_NOTIFICATION = 1040
 const MAP_NODE_X_MINIAPP = 1480
 const MAP_NODE_Y_STEP = 150
 
-export function botMapNodesToReactFlow(nodes: ReadonlyArray<BotMapNode>): Node[] {
+/** Saved canvas positions for read-only map nodes, keyed by node id. */
+export type MapNodePositions = Record<string, { x: number; y: number }>
+
+export function botMapNodesToReactFlow(
+  nodes: ReadonlyArray<BotMapNode>,
+  savedPositions?: MapNodePositions,
+): Node[] {
   const out: Node[] = []
   let notifIndex = 0
   let miniIndex = 0
   for (const node of nodes) {
     if (node.kind === 'notification') {
+      const saved = savedPositions?.[node.id]
       out.push({
         id: node.id,
         type: MAP_INFO_NODE_TYPE,
-        position: { x: MAP_NODE_X_NOTIFICATION, y: notifIndex * MAP_NODE_Y_STEP },
+        position: saved ?? { x: MAP_NODE_X_NOTIFICATION, y: notifIndex * MAP_NODE_Y_STEP },
         data: {
           kind: 'notification',
           title: node.title,
@@ -243,10 +250,11 @@ export function botMapNodesToReactFlow(nodes: ReadonlyArray<BotMapNode>): Node[]
       })
       notifIndex += 1
     } else if (node.kind === 'mini-app-terminal') {
+      const saved = savedPositions?.[node.id]
       out.push({
         id: node.id,
         type: MAP_INFO_NODE_TYPE,
-        position: { x: MAP_NODE_X_MINIAPP, y: miniIndex * MAP_NODE_Y_STEP },
+        position: saved ?? { x: MAP_NODE_X_MINIAPP, y: miniIndex * MAP_NODE_Y_STEP },
         data: {
           kind: 'mini-app-terminal',
           title: node.title,
@@ -256,6 +264,29 @@ export function botMapNodesToReactFlow(nodes: ReadonlyArray<BotMapNode>): Node[]
         } satisfies MapInfoNodeData,
       })
       miniIndex += 1
+    }
+  }
+  return out
+}
+
+/**
+ * Read the persisted map-node positions out of a flow's `layoutData` JSON.
+ * Stored under `mapNodePositions` by the bot-flow page's Save action so the
+ * read-only notification / Mini App nodes keep the operator's manual layout
+ * across reloads (they have no DB row of their own). Tolerant of any
+ * malformed shape — returns an empty map rather than throwing.
+ */
+export function readMapNodePositions(layoutData: unknown): MapNodePositions {
+  if (layoutData === null || typeof layoutData !== 'object') return {}
+  const raw = (layoutData as Record<string, unknown>).mapNodePositions
+  if (raw === null || typeof raw !== 'object') return {}
+  const out: MapNodePositions = {}
+  for (const [id, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (value !== null && typeof value === 'object') {
+      const { x, y } = value as { x?: unknown; y?: unknown }
+      if (typeof x === 'number' && typeof y === 'number') {
+        out[id] = { x, y }
+      }
     }
   }
   return out

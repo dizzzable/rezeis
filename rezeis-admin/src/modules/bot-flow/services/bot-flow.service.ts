@@ -99,6 +99,14 @@ export class BotFlowService {
           name,
           status: BotFlowStatus.DRAFT,
           version: nextVersion,
+          // Carry the canvas layout (incl. the read-only map-node positions
+          // stored under `layoutData.mapNodePositions`) from the published
+          // flow so publishing and then re-opening doesn't reset the
+          // operator's manual arrangement. Screen positionX/Y are cloned
+          // per-row by cloneScreensInto; this preserves the rest.
+          ...(previousPublished?.layoutData != null
+            ? { layoutData: previousPublished.layoutData as Prisma.InputJsonValue }
+            : {}),
         },
         include: { screens: { include: { buttons: true } } },
       });
