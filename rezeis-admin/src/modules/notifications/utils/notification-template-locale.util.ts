@@ -33,12 +33,23 @@ export interface NotificationTemplateButtonsSlice {
   readonly buttons: unknown;
 }
 
+/** Visual style for a notification button (Telegram 9.4 `style`, premium-only). */
+export type NotificationButtonStyle = 'primary' | 'success' | 'danger' | 'default';
+
 /** Single stored button entry — shape mirrors the DTO and the frontend. */
 export interface StoredNotificationButton {
   readonly labelRu: string;
   readonly labelEn?: string | null;
   readonly kind: 'webApp' | 'url' | 'callback';
   readonly target: string;
+  /** Optional button color (premium-owner bots on Bot API 9.4+). */
+  readonly style?: NotificationButtonStyle;
+  /**
+   * Optional 0-based row index for keyboard layout. Buttons sharing a row
+   * render side-by-side; omitted → the consumer falls back to one button per
+   * row (the historical layout), so old stored buttons are unaffected.
+   */
+  readonly row?: number;
 }
 
 /**
@@ -81,6 +92,21 @@ export function isStoredNotificationButton(value: unknown): value is StoredNotif
   if (v.labelEn !== undefined && v.labelEn !== null && typeof v.labelEn !== 'string') return false;
   if (v.kind !== 'webApp' && v.kind !== 'url' && v.kind !== 'callback') return false;
   if (typeof v.target !== 'string') return false;
+  if (
+    v.style !== undefined &&
+    v.style !== 'primary' &&
+    v.style !== 'success' &&
+    v.style !== 'danger' &&
+    v.style !== 'default'
+  ) {
+    return false;
+  }
+  if (
+    v.row !== undefined &&
+    (typeof v.row !== 'number' || !Number.isInteger(v.row) || v.row < 0)
+  ) {
+    return false;
+  }
   return true;
 }
 
@@ -137,12 +163,18 @@ export function resolveTemplateButtons(
   for (const row of stored) {
     if (!validateStoredButton(row)) continue;
     const label = pickButtonLabel(row, locale);
+    // Only attach `style`/`row` when they carry real values — omitting the keys
+    // entirely (rather than setting `undefined`) keeps the emitted button shape
+    // minimal and deep-equal-stable for the locale util's unit tests.
+    const extra: { style?: 'primary' | 'success' | 'danger'; row?: number } = {};
+    if (row.style !== undefined && row.style !== 'default') extra.style = row.style;
+    if (row.row !== undefined) extra.row = row.row;
     if (row.kind === 'webApp') {
-      result.push({ text: label, webAppPath: row.target.trim() });
+      result.push({ text: label, webAppPath: row.target.trim(), ...extra });
     } else if (row.kind === 'url') {
-      result.push({ text: label, url: row.target.trim() });
+      result.push({ text: label, url: row.target.trim(), ...extra });
     } else {
-      result.push({ text: label, callbackData: row.target.trim() });
+      result.push({ text: label, callbackData: row.target.trim(), ...extra });
     }
   }
   return result;

@@ -46,6 +46,8 @@ interface DraftButton {
   labelEn: string
   kind: 'webApp' | 'url' | 'callback'
   target: string
+  style: 'primary' | 'success' | 'danger' | 'default'
+  row: number
 }
 
 let buttonIdCounter = 0
@@ -54,13 +56,18 @@ function makeLocalId(): string {
   return `btn-${Date.now().toString(36)}-${buttonIdCounter}`
 }
 
-function fromShape(button: NotificationButtonShape): DraftButton {
+function fromShape(button: NotificationButtonShape, index: number): DraftButton {
   return {
     localId: makeLocalId(),
     labelRu: button.labelRu,
     labelEn: button.labelEn ?? '',
     kind: button.kind,
     target: button.target,
+    style: button.style ?? 'default',
+    // Legacy buttons carry no row → fall back to their position so each keeps
+    // its own row (the historical one-per-row layout) until the operator groups
+    // them.
+    row: typeof button.row === 'number' && button.row >= 0 ? button.row : index,
   }
 }
 
@@ -70,6 +77,8 @@ function toShape(button: DraftButton): NotificationButtonShape {
     labelEn: button.labelEn.length === 0 ? null : button.labelEn,
     kind: button.kind,
     target: button.target,
+    style: button.style,
+    row: button.row,
   }
 }
 
@@ -146,6 +155,9 @@ export function NotificationEditor({ node }: NotificationEditorProps) {
         labelEn: '',
         kind: 'webApp',
         target: '',
+        style: 'default',
+        // New button starts on its own row (one past the current max).
+        row: prev.reduce((max, b) => Math.max(max, b.row), -1) + 1,
       },
     ])
   }
@@ -398,6 +410,50 @@ function NotificationButtonRow({
           />
         </div>
       </div>
+      <div className="grid grid-cols-2 gap-2">
+        <div className="space-y-1">
+          <Label className="text-[11px]">{t('botMapPage.notification.style')}</Label>
+          <Select
+            value={button.style}
+            onValueChange={(v) => onUpdate({ style: v as DraftButton['style'] })}
+          >
+            <SelectTrigger className="h-8 text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="default" className="text-xs">
+                {t('botMapPage.notification.styleOptions.default')}
+              </SelectItem>
+              <SelectItem value="primary" className="text-xs">
+                {t('botMapPage.notification.styleOptions.primary')}
+              </SelectItem>
+              <SelectItem value="success" className="text-xs">
+                {t('botMapPage.notification.styleOptions.success')}
+              </SelectItem>
+              <SelectItem value="danger" className="text-xs">
+                {t('botMapPage.notification.styleOptions.danger')}
+              </SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="space-y-1">
+          <Label className="text-[11px]">{t('botMapPage.notification.row')}</Label>
+          <Input
+            type="number"
+            min={0}
+            max={7}
+            value={button.row}
+            onChange={(e) => {
+              const next = Number.parseInt(e.target.value, 10)
+              onUpdate({ row: Number.isInteger(next) && next >= 0 ? next : 0 })
+            }}
+            className="h-8 text-xs"
+          />
+          <p className="text-[10px] leading-snug text-muted-foreground">
+            {t('botMapPage.notification.rowHint')}
+          </p>
+        </div>
+      </div>
       <div className="flex justify-end">
         <Button
           size="sm"
@@ -433,11 +489,14 @@ function sameButtons(
   for (let i = 0; i < a.length; i += 1) {
     const left = a[i]
     const right = b[i]
+    const leftRow = typeof left.row === 'number' && left.row >= 0 ? left.row : i
     if (
       left.labelRu !== right.labelRu ||
       (left.labelEn ?? '') !== right.labelEn ||
       left.kind !== right.kind ||
-      left.target !== right.target
+      left.target !== right.target ||
+      (left.style ?? 'default') !== right.style ||
+      leftRow !== right.row
     ) {
       return false
     }

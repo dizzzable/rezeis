@@ -183,11 +183,19 @@ function createService(
       state.webPushCalls.push(call);
     },
   };
+  // Custom-emoji pack substitution: passthrough stub. The helpers no-op for
+  // token-less text in production too, so the rendered strings stay identical
+  // to the pre-emoji-pack behaviour these assertions encode.
+  const customEmoji = {
+    substituteTelegramHtml: async (text: string) => text,
+    substituteFallbacks: async (text: string) => text,
+  };
   return new UserNotificationsService(
     prisma as never,
     templates as never,
     botNotifier as never,
     webPush as never,
+    customEmoji as never,
   );
 }
 

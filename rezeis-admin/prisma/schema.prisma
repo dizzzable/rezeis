@@ -2285,6 +2285,7 @@ enum BotFlowButtonAction {
   CALLBACK     // Trigger a built-in action (e.g. "show_subscription")
   BACK         // Navigate back in history
   START_OVER   // Return to root screen
+  SUPPORT_URL  // Open t.me/<BOT_SUPPORT_USERNAME>?text=<prefill> support DM
 }
 
 /// Style for a flow button (maps to Telegram Bot API `style` field).

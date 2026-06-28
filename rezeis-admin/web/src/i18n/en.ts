@@ -3129,6 +3129,7 @@ export const en = {
       miniApp: 'Mini App',
       active: 'Active',
       disabled: 'Disabled',
+      buttons: 'Buttons',
       cannotConnectInfo: 'Notification and Mini App nodes can’t be linked manually — their routes are defined in the bot code.',
     },
     palette: 'Blocks',
@@ -3194,6 +3195,7 @@ export const en = {
       url: 'URL',
       webAppUrl: 'Mini App URL',
       callbackAction: 'Callback action',
+      supportUrlHint: 'Opens the Telegram support chat (`BOT_SUPPORT_USERNAME` from .env) with a prefilled "Hello! I need help." message. The bot fills in the handle and text automatically.',
       row: 'Row',
       col: 'Pos',
       labelRuPlaceholder: 'RU',
@@ -3212,6 +3214,7 @@ export const en = {
       CALLBACK: 'Built-in action',
       BACK: 'Back',
       START_OVER: 'Start over',
+      SUPPORT_URL: 'Support chat (Telegram)',
     },
     styles: {
       DEFAULT: 'Default',

@@ -1,6 +1,6 @@
 /** Types for the Bot Flow Editor feature. */
 
-export type BotFlowButtonAction = 'NAVIGATE' | 'URL' | 'WEBAPP' | 'CALLBACK' | 'BACK' | 'START_OVER'
+export type BotFlowButtonAction = 'NAVIGATE' | 'URL' | 'WEBAPP' | 'CALLBACK' | 'BACK' | 'START_OVER' | 'SUPPORT_URL'
 export type BotFlowButtonStyle = 'PRIMARY' | 'SUCCESS' | 'DANGER' | 'DEFAULT'
 export type BotFlowParseMode = 'HTML' | 'MARKDOWN' | 'PLAIN'
 export type BotFlowMediaType = 'PHOTO' | 'VIDEO' | 'DOCUMENT' | 'ANIMATION'

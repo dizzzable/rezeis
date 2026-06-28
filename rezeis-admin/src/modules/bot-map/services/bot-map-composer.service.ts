@@ -261,6 +261,8 @@ function toNotificationNode(template: NotificationTemplate): NotificationMapNode
       labelEn: b.labelEn ?? null,
       kind: b.kind,
       target: b.target,
+      style: b.style ?? null,
+      row: b.row ?? null,
     })),
   };
 }
@@ -367,6 +369,15 @@ function composeGraphButtonEdge(
         sourceLabel: label,
         target: 'back',
         destination: { kind: 'back' },
+        valid: true,
+      };
+    case BotFlowButtonAction.SUPPORT_URL:
+      return {
+        id,
+        source,
+        sourceLabel: label,
+        target: 'chat',
+        destination: { kind: 'chat' },
         valid: true,
       };
     default:

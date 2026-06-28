@@ -3,6 +3,7 @@ import { Prisma } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { WebPushService } from '../../push/services/web-push.service';
+import { CustomEmojiService } from '../../custom-emoji/services/custom-emoji.service';
 
 import { BotNotifierClient, NotifyButton } from './bot-notifier.client';
 import { NotificationTemplatesService } from './notification-templates.service';
@@ -78,6 +79,7 @@ export class UserNotificationsService {
     private readonly templatesService: NotificationTemplatesService,
     private readonly botNotifier: BotNotifierClient,
     private readonly webPushService: WebPushService,
+    private readonly customEmojiService: CustomEmojiService,
   ) {}
 
   /**
@@ -468,9 +470,22 @@ export class UserNotificationsService {
       projectName,
     };
     const localized = resolveTemplateLocale(template, locale);
-    const title = substitute(localized.title, ctx);
-    const body = substitute(localized.body, ctx);
-    const html = `<b>${escapeHtml(title)}</b>\n\n${body}`;
+    const titleRaw = substitute(localized.title, ctx);
+    const bodyRaw = substitute(localized.body, ctx);
+    // Resolve `:slug:` custom-emoji pack tokens the operator inserted via the
+    // notification editor's emoji picker — same premium treatment broadcasts
+    // already get, so pack emoji render consistently everywhere:
+    //   • Telegram (HTML): `<tg-emoji>` tags for premium-owner bots, else the
+    //     fallback glyph;
+    //   • cabinet feed / web-push (plain): the fallback glyph, never a raw
+    //     `:slug:`.
+    // Both helpers no-op when the text has no `:` so the common (token-less)
+    // notification path stays a single allocation with no settings read.
+    const html = `<b>${await this.customEmojiService.substituteTelegramHtml(
+      escapeHtml(titleRaw),
+    )}</b>\n\n${await this.customEmojiService.substituteTelegramHtml(bodyRaw)}`;
+    const title = await this.customEmojiService.substituteFallbacks(titleRaw);
+    const body = await this.customEmojiService.substituteFallbacks(bodyRaw);
     return { title, body, html };
   }
 

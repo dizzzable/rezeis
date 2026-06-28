@@ -228,4 +228,16 @@ export interface NotifyButton {
    * bot also knows its public web URL, otherwise dropped).
    */
   readonly webAppPath?: string;
+  /**
+   * Optional Telegram Bot API 9.4 button color (`primary` / `success` /
+   * `danger`). Only premium-owner bots render it; everyone else sees the
+   * default button. `undefined` → default.
+   */
+  readonly style?: 'primary' | 'success' | 'danger';
+  /**
+   * Optional 0-based row index for inline-keyboard layout. Buttons sharing a
+   * row render side-by-side; omitted → the bot lays each button on its own row
+   * (historical behaviour).
+   */
+  readonly row?: number;
 }

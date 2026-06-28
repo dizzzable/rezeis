@@ -28,11 +28,13 @@ export interface MapInfoNodeData extends Record<string, unknown> {
   group: string
   status: string | null
   subtitle: string
+  /** Notification buttons rendered as chips on the canvas node. */
+  buttons?: ReadonlyArray<{ readonly labelRu: string; readonly kind: string; readonly target: string }>
 }
 
 function MapInfoNodeComponent({ id, data, selected }: NodeProps) {
   const { t } = useTranslation()
-  const { kind, title, status, subtitle } = data as unknown as MapInfoNodeData
+  const { kind, title, status, subtitle, buttons } = data as unknown as MapInfoNodeData
   const isNotification = kind === 'notification'
 
   return (
@@ -78,6 +80,66 @@ function MapInfoNodeComponent({ id, data, selected }: NodeProps) {
           >
             {t(status === 'ACTIVE' ? 'botFlow.mapNode.active' : 'botFlow.mapNode.disabled')}
           </span>
+        ) : null}
+
+        {/*
+          Notification buttons as on-canvas chips. The inspector lets the
+          operator edit them, but previously the node showed nothing — so the
+          operator couldn't see at a glance which buttons a notification ships
+          (and the labeled dashed edges below show where each one leads).
+        */}
+        {isNotification && buttons !== undefined && buttons.length > 0 ? (
+          <div className="space-y-1 pt-1">
+            <p className="text-[8px] font-semibold uppercase tracking-wider text-muted-foreground/70">
+              {t('botFlow.mapNode.buttons')}
+            </p>
+            {buttons.map((btn, idx) => (
+              <div
+                key={`${btn.kind}-${idx}`}
+                className="relative flex items-center gap-1 rounded-md border bg-muted/40 px-1.5 py-1 pr-3"
+                title={`${btn.kind}: ${btn.target}`}
+              >
+                <span
+                  className={cn(
+                    'h-1.5 w-1.5 shrink-0 rounded-full',
+                    btn.kind === 'webApp'
+                      ? 'bg-sky-500'
+                      : btn.kind === 'url'
+                        ? 'bg-amber-500'
+                        : 'bg-violet-500',
+                  )}
+                  aria-hidden
+                />
+                <span className="truncate text-[10px] font-medium">{btn.labelRu}</span>
+                {btn.target.length > 0 ? (
+                  <code className="ml-auto shrink-0 truncate font-mono text-[8px] text-muted-foreground/80">
+                    {btn.target}
+                  </code>
+                ) : null}
+                {/*
+                  Per-button source handle so the dashed bot-map edge for THIS
+                  button originates from the button chip itself — the operator
+                  can now read at a glance where each individual button leads
+                  (e.g. a "🏠 Домой" button arrows to the menu screen) instead
+                  of every edge fanning out of one shared node handle.
+                  `buildMapEdges` anchors `sourceHandle` to `${id}-btn-${idx}`.
+                */}
+                <Handle
+                  type="source"
+                  position={Position.Right}
+                  id={`${id}-btn-${idx}`}
+                  isConnectable={false}
+                  style={{
+                    right: '-6px',
+                    background: '#f43f5e',
+                    border: '2px solid var(--color-background)',
+                    width: 8,
+                    height: 8,
+                  }}
+                />
+              </div>
+            ))}
+          </div>
         ) : null}
       </div>
 

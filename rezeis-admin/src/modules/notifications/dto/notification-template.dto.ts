@@ -4,10 +4,13 @@ import {
   IsArray,
   IsBoolean,
   IsIn,
+  IsInt,
   IsOptional,
   IsString,
   Matches,
+  Max,
   MaxLength,
+  Min,
   MinLength,
   ValidateNested,
 } from 'class-validator';
@@ -39,6 +42,16 @@ export class NotificationTemplateButtonDto {
   @MinLength(1)
   @MaxLength(2_000)
   public readonly target!: string;
+
+  @IsOptional()
+  @IsIn(['primary', 'success', 'danger', 'default'])
+  public readonly style?: 'primary' | 'success' | 'danger' | 'default';
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(7)
+  public readonly row?: number;
 }
 
 /**

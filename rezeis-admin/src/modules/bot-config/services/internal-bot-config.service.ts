@@ -870,6 +870,8 @@ function mapFlowButtonAction(
       return 'back';
     case BotFlowButtonAction.START_OVER:
       return 'start_over';
+    case BotFlowButtonAction.SUPPORT_URL:
+      return 'support_url';
     default:
       return 'callback';
   }

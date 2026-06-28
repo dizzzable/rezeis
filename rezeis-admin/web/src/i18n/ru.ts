@@ -3160,6 +3160,7 @@
       miniApp: 'Mini App',
       active: 'Активно',
       disabled: 'Выключено',
+      buttons: 'Кнопки',
       cannotConnectInfo: 'Узлы уведомлений и Mini App нельзя связывать вручную — их маршруты заданы кодом бота.',
     },
     palette: 'Блоки',
@@ -3225,6 +3226,7 @@
       url: 'URL',
       webAppUrl: 'Mini App URL',
       callbackAction: 'Callback действие',
+      supportUrlHint: 'Кнопка ведёт в Telegram-чат поддержки (`BOT_SUPPORT_USERNAME` из .env) с заготовленным текстом «Здравствуйте! Мне нужна помощь.». Хэндл и текст бот подставляет сам.',
       row: 'Ряд',
       col: 'Поз',
       labelRuPlaceholder: 'RU',
@@ -3243,6 +3245,7 @@
       CALLBACK: 'Встроенное действие',
       BACK: 'Назад',
       START_OVER: 'В начало',
+      SUPPORT_URL: 'Чат поддержки (Telegram)',
     },
     styles: {
       DEFAULT: 'По умолчанию',

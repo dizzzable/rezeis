@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
-import { Smile } from 'lucide-react'
+import { ChevronDown, ChevronRight, Smile } from 'lucide-react'
 
 import { api } from '@/lib/api'
 import { EmojiPreview } from '@/features/custom-emoji/emoji-preview'
@@ -378,6 +378,17 @@ export function EmojiPicker({
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
   const [tab, setTab] = useState<'standard' | 'custom'>('standard')
+  // Custom packs render collapsed by default — the operator expands only the
+  // pack they need instead of scrolling a long flat wall of every pack's
+  // emoji. Tracks the set of currently-open pack ids.
+  const [expandedPacks, setExpandedPacks] = useState<ReadonlySet<string>>(() => new Set())
+  const togglePack = (id: string) =>
+    setExpandedPacks((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
 
   const { data: packs } = useQuery<ReadonlyArray<CustomEmojiPackLite>>({
     queryKey: ['admin', 'custom-emoji', 'packs'],
@@ -470,38 +481,58 @@ export function EmojiPicker({
             className="max-h-60 space-y-3 overflow-y-auto overflow-x-hidden overscroll-contain"
             onWheelCapture={(e) => e.stopPropagation()}
           >
-            {packs?.map((pack) => (
-              <div key={pack.id} className="space-y-1" style={{ contentVisibility: 'auto' }}>
-                <p className="text-[11px] font-medium text-muted-foreground">{pack.name}</p>
-                <div className="grid grid-cols-8 gap-1">
-                  {pack.emojis.map((emoji) => (
-                    <button
-                      type="button"
-                      key={emoji.slug}
-                      title={`:${emoji.slug}:`}
-                      aria-label={emoji.name}
-                      onClick={() => {
-                        onSelect(`:${emoji.slug}:`)
-                        setOpen(false)
-                      }}
-                      className="flex aspect-square w-full items-center justify-center rounded hover:bg-muted"
-                    >
-                      {/* Static thumbnail by default; the Lottie/video player
-                          mounts only on hover/focus (or selection) so a big
-                          pack never spins up hundreds of players at once. */}
-                      <EmojiPreview
-                        imageUrl={emoji.imageUrl}
-                        lottieUrl={emoji.lottieUrl}
-                        videoUrl={emoji.videoUrl}
-                        alt={emoji.name}
-                        playMode="hover"
-                        className="h-6 w-6 bg-transparent"
-                      />
-                    </button>
-                  ))}
+            {packs?.map((pack) => {
+              const isExpanded = expandedPacks.has(pack.id)
+              return (
+                <div key={pack.id} className="space-y-1" style={{ contentVisibility: 'auto' }}>
+                  <button
+                    type="button"
+                    onClick={() => togglePack(pack.id)}
+                    aria-expanded={isExpanded}
+                    className="flex w-full items-center gap-1.5 rounded-md px-1 py-1 text-left hover:bg-muted"
+                  >
+                    {isExpanded ? (
+                      <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
+                    ) : (
+                      <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
+                    )}
+                    <span className="truncate text-[11px] font-medium">{pack.name}</span>
+                    <span className="ml-auto shrink-0 rounded bg-muted px-1.5 text-[10px] tabular-nums text-muted-foreground">
+                      {pack.emojis.length}
+                    </span>
+                  </button>
+                  {isExpanded ? (
+                    <div className="grid grid-cols-8 gap-1">
+                      {pack.emojis.map((emoji) => (
+                        <button
+                          type="button"
+                          key={emoji.slug}
+                          title={`:${emoji.slug}:`}
+                          aria-label={emoji.name}
+                          onClick={() => {
+                            onSelect(`:${emoji.slug}:`)
+                            setOpen(false)
+                          }}
+                          className="flex aspect-square w-full items-center justify-center rounded hover:bg-muted"
+                        >
+                          {/* Static thumbnail by default; the Lottie/video player
+                              mounts only on hover/focus (or selection) so a big
+                              pack never spins up hundreds of players at once. */}
+                          <EmojiPreview
+                            imageUrl={emoji.imageUrl}
+                            lottieUrl={emoji.lottieUrl}
+                            videoUrl={emoji.videoUrl}
+                            alt={emoji.name}
+                            playMode="hover"
+                            className="h-6 w-6 bg-transparent"
+                          />
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
                 </div>
-              </div>
-            ))}
+              )
+            })}
           </div>
         )}
       </PopoverContent>

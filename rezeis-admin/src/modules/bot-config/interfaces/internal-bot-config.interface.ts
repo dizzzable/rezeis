@@ -166,7 +166,7 @@ export interface InternalBotConfigScreenButtonInterface {
   readonly labelEn: string;
   readonly row: number;
   readonly col: number;
-  readonly action: 'navigate' | 'url' | 'webapp' | 'callback' | 'back' | 'start_over';
+  readonly action: 'navigate' | 'url' | 'webapp' | 'callback' | 'back' | 'start_over' | 'support_url';
   readonly targetShortId: string | null;
   readonly url: string | null;
   readonly webAppUrl: string | null;

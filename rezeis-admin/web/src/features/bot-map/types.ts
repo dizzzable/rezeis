@@ -58,6 +58,10 @@ export interface NotificationButtonShape {
   readonly labelEn: string | null
   readonly kind: 'webApp' | 'url' | 'callback'
   readonly target: string
+  /** Optional button color (premium-owner bots on Bot API 9.4+). */
+  readonly style?: 'primary' | 'success' | 'danger' | 'default' | null
+  /** Optional 0-based row index; buttons sharing a row render side-by-side. */
+  readonly row?: number | null
 }
 
 export interface NotificationMapNode extends BotMapBaseNode {

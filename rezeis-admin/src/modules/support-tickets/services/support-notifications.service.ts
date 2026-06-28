@@ -225,6 +225,8 @@ function applyTicketDeepLink(
     url: button.url !== undefined ? subst(button.url) : undefined,
     callbackData: button.callbackData !== undefined ? subst(button.callbackData) : undefined,
     webAppPath,
+    style: button.style,
+    row: button.row,
   };
 }
 

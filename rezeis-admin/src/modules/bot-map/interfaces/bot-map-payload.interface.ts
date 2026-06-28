@@ -66,6 +66,8 @@ export interface NotificationMapNode extends BotMapBaseNode {
     readonly labelEn: string | null;
     readonly kind: 'webApp' | 'url' | 'callback';
     readonly target: string;
+    readonly style: 'primary' | 'success' | 'danger' | 'default' | null;
+    readonly row: number | null;
   }>;
   readonly isActive: boolean;
 }

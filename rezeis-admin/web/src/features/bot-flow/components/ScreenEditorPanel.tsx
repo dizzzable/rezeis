@@ -23,7 +23,7 @@ interface ScreenEditorPanelProps {
   flowName: string
 }
 
-const ACTION_TYPES: BotFlowButtonAction[] = ['NAVIGATE', 'URL', 'WEBAPP', 'CALLBACK', 'BACK', 'START_OVER']
+const ACTION_TYPES: BotFlowButtonAction[] = ['NAVIGATE', 'URL', 'WEBAPP', 'CALLBACK', 'BACK', 'START_OVER', 'SUPPORT_URL']
 const BUTTON_STYLES: BotFlowButtonStyle[] = ['DEFAULT', 'PRIMARY', 'SUCCESS', 'DANGER']
 // reiwa distinguishes HTML (parse_mode) from everything else (entity render).
 // Markdown isn't honoured at render time, so we only surface the two modes the
@@ -609,6 +609,11 @@ function ButtonEditor({ button, onUpdate, onDelete }: ButtonEditorProps) {
           placeholder={t('botFlow.button.callbackAction')}
           className="h-7 text-[11px]"
         />
+      )}
+      {button.actionType === 'SUPPORT_URL' && (
+        <p className="rounded-md border border-dashed bg-muted/30 px-2 py-1.5 text-[10px] leading-snug text-muted-foreground">
+          {t('botFlow.button.supportUrlHint')}
+        </p>
       )}
 
       {/* Delete button */}

@@ -246,6 +246,11 @@ export function botMapNodesToReactFlow(
           group: node.group,
           status: node.status ?? null,
           subtitle: node.type,
+          buttons: node.buttons.map((b) => ({
+            labelRu: b.labelRu,
+            kind: b.kind,
+            target: b.target,
+          })),
         } satisfies MapInfoNodeData,
       })
       notifIndex += 1
@@ -311,9 +316,23 @@ export function buildMapEdges(
     if (!validNodeIds.has(edge.target)) continue
     const color = EDGE_COLORS[i % EDGE_COLORS.length]
     i += 1
+    // Anchor the edge to the specific button chip it belongs to. Notification
+    // button edges carry the stable id `notif-btn:<source>:<index>`, and the
+    // chip order in `botMapNodesToReactFlow` matches that index — so the arrow
+    // leaves the right button instead of a single shared node handle. The
+    // index is the final `:`-segment (the source itself contains colons, e.g.
+    // `notif:expires_soon`, so parse from the end).
+    let sourceHandle: string | undefined
+    if (edge.id.startsWith('notif-btn:')) {
+      const idx = Number(edge.id.slice(edge.id.lastIndexOf(':') + 1))
+      if (Number.isInteger(idx) && idx >= 0) {
+        sourceHandle = `${edge.source}-btn-${idx}`
+      }
+    }
     out.push({
       id: `map-edge-${edge.id}`,
       source: edge.source,
+      ...(sourceHandle !== undefined ? { sourceHandle } : {}),
       target: edge.target,
       targetHandle: `${edge.target}-target`,
       type: 'smoothstep',
