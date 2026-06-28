@@ -63,6 +63,7 @@ export const ru = {
       chat: '→ Чат поддержки',
       callback: '→ Колбэк {{id}}',
       back: '→ Назад в меню',
+      mainMenu: '→ Главное меню (reply-клавиатура)',
       invalid: '✕ Цель не задана',
       unsafeUrl: '✕ Небезопасный URL',
     },

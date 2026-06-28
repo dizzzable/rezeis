@@ -33,6 +33,7 @@ import { io, type Socket } from 'socket.io-client';
 import { forceEndAdminSession } from '@/lib/admin-session';
 import { authStorage } from '@/lib/auth-storage';
 import { getRealtimeInvalidationKeys } from './realtime-invalidation';
+import { i18n } from '@/i18n/i18n';
 import {
   REALTIME_CLOSE,
   REALTIME_TOPICS,
@@ -78,13 +79,38 @@ function scheduleInvalidate(
   pending.set(key, handle);
 }
 
+/**
+ * Compose a localized toast title + description from a realtime event.
+ *
+ * The wire `event.type` is a dotted system-event code (`remnawave.user.expired`)
+ * and `event.message` is a server-composed English string — neither is shown
+ * raw. We localize the event via `realtime.events.<flatType>` and the lane via
+ * `realtime.categories.<category>`; unknown events degrade to a humanized
+ * "<Category>: action" label, never the raw dotted key.
+ */
+function composeRealtimeToast(event: RealtimeEvent): { title: string; description?: string } {
+  const flatType = event.type.replace(/\./g, '_');
+  const eventKey = `realtime.events.${flatType}`;
+  const translatedEvent = i18n.t(eventKey);
+  const categoryLabel = String(
+    i18n.t(`realtime.categories.${event.category}`, { defaultValue: event.category }),
+  );
+  if (translatedEvent !== eventKey) {
+    return { title: String(translatedEvent), description: categoryLabel };
+  }
+  // Unknown event → humanized action, never the raw dotted code.
+  const action = event.type.split('.').slice(1).join(' ').replace(/_/g, ' ').trim();
+  return { title: action ? `${categoryLabel}: ${action}` : categoryLabel };
+}
+
 function showToastFor(event: RealtimeEvent): void {
   if (event.severity === 'INFO') return;
-  const opts = { description: event.type, duration: event.severity === 'ERROR' ? 6000 : 4500 };
+  const { title, description } = composeRealtimeToast(event);
+  const opts = { description, duration: event.severity === 'ERROR' ? 6000 : 4500 };
   if (event.severity === 'ERROR') {
-    toast.error(event.message, opts);
+    toast.error(title, opts);
   } else if (event.severity === 'WARNING') {
-    toast.warning(event.message, opts);
+    toast.warning(title, opts);
   }
 }
 

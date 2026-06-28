@@ -48,6 +48,7 @@ export function computeSystemButtons(screen: BotFlow['screens'][number]): System
   }
   if (lower === 'help') {
     return [
+      { key: 'help-open-app', labelKey: 'botFlow.systemButtons.help.openApp', isBack: false },
       { key: 'help-contact', labelKey: 'botFlow.systemButtons.help.contact', isBack: false },
       { key: 'help-back', labelKey: 'botFlow.systemButtons.back', isBack: true },
     ]

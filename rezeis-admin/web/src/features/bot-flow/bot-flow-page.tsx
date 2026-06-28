@@ -171,7 +171,10 @@ export default function BotFlowPage() {
   const bannerUrl = useMemo<string | null>(() => {
     const row = botTexts?.find((r) => r.key === 'bot.banner_url')
     const value = row?.value.trim() ?? ''
-    return value.length > 0 ? value : null
+    // No custom banner set → fall back to the bundled project-default banner
+    // (mirrors reiwa, which sends `assets/banners/default.jpg` on /start when
+    // `bot.banner_url` is empty). Keeps the canvas in sync with what users see.
+    return value.length > 0 ? value : '/bot-default-banner.jpg'
   }, [botTexts])
 
   // ── Project flow + reply-keyboard into React Flow node graph ───────────────

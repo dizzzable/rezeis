@@ -253,7 +253,7 @@ describe('BotMapComposerService.compose', () => {
     assert.equal(expiryEdges.length, 2);
     assert.deepStrictEqual(
       expiryEdges.map((e) => e.destination.kind),
-      ['webApp', 'callback'],
+      ['webApp', 'mainMenu'],
     );
     // The promocode template has no buttons, so the composer emits a
     // virtual click-through edge to /promo.

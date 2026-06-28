@@ -106,6 +106,7 @@ export function ScreenEditorPanel({ screen, flowName }: ScreenEditorPanelProps) 
       // see when the support handle is numeric / unset and the bot
       // falls back to a callback flow.
       return [
+        { key: 'help-open-app', label: t('botFlow.systemButtons.help.openApp'), iconKey: 'help_open_app', textKey: 'help.open_app_button' },
         { key: 'help-contact', label: t('botFlow.systemButtons.help.contact'), iconKey: 'help_contact', textKey: 'help.contact_button' },
         { key: 'help-back', label: t('botFlow.systemButtons.back'), iconKey: 'back', textKey: 'back_to_menu' },
       ]
@@ -365,11 +366,11 @@ export function ScreenEditorPanel({ screen, flowName }: ScreenEditorPanelProps) 
           <p className="text-[10px] leading-snug text-muted-foreground">
             {t('botFlow.systemButtons.description')}
           </p>
-          <div className="space-y-1">
+          <div className="space-y-2">
             {systemButtons.map((btn) => (
               <div
                 key={btn.key}
-                className="space-y-1.5 rounded-md border border-dashed bg-muted/30 px-2.5 py-1.5"
+                className="space-y-2 rounded-md border bg-muted/20 p-3"
               >
                 <div className="flex items-center gap-2">
                   <Lock className="h-3 w-3 shrink-0 text-muted-foreground" aria-hidden />
@@ -379,7 +380,7 @@ export function ScreenEditorPanel({ screen, flowName }: ScreenEditorPanelProps) 
                   <SystemButtonIconPicker storageKey={btn.iconKey} />
                 ) : null}
                 {btn.textKey !== undefined ? (
-                  <TextKeyEditor textKey={btn.textKey} />
+                  <TextKeyEditor textKey={btn.textKey} layout="buttonLabel" />
                 ) : null}
               </div>
             ))}

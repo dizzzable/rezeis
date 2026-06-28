@@ -98,6 +98,7 @@ export type EdgeDestination =
   | { readonly kind: 'chat' }
   | { readonly kind: 'callback'; readonly id: string }
   | { readonly kind: 'back' }
+  | { readonly kind: 'mainMenu' }
 
 export interface BotMapEdge {
   readonly id: string

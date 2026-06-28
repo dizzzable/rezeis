@@ -88,6 +88,26 @@ function ReplyKeyboardNodeComponent({ data, selected }: NodeProps) {
         selected ? 'ring-2 ring-primary border-primary' : 'border-amber-500/60',
       )}
     >
+      {/*
+        Target handle so "main menu" edges INTO this node render — e.g. a
+        notification "Главное меню" (callback `menu:main`) arrows here, since
+        the reply keyboard IS the bot's main menu. `buildMapEdges` points the
+        edge's `targetHandle` at `${REPLY_KEYBOARD_NODE_ID}-target`; without
+        this anchor React Flow silently drops the edge.
+      */}
+      <Handle
+        type="target"
+        position={Position.Left}
+        id={`${REPLY_KEYBOARD_NODE_ID}-target`}
+        style={{
+          top: '18px',
+          left: '-8px',
+          background: 'var(--color-amber-500, #f59e0b)',
+          border: '2px solid var(--color-background)',
+          width: 10,
+          height: 10,
+        }}
+      />
       <div
         className={cn(
           'flex items-center gap-2 px-3 py-2 rounded-t-xl border-b text-xs font-medium',

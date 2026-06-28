@@ -107,13 +107,9 @@ export class BotMapComposerService {
 
     // ── Graph screens ────────────────────────────────────────────────
     const screensByShortId = new Map<string, FlowWithScreens['screens'][number]>();
-    let rootScreenId: string | null = null;
     if (input.flow) {
       for (const screen of input.flow.screens) {
         screensByShortId.set(screen.shortId, screen);
-        if (screen.isRoot && rootScreenId === null) {
-          rootScreenId = screen.id;
-        }
       }
       for (const screen of input.flow.screens) {
         nodes.push(toGraphScreenNode(screen, input.flow));
@@ -158,7 +154,6 @@ export class BotMapComposerService {
           button,
           referencedTerminals,
           screensByShortId,
-          rootScreenId,
         );
         edges.push(synthesized);
       }
@@ -472,7 +467,6 @@ function composeNotificationButtonEdge(
   button: StoredNotificationButton,
   referencedTerminals: Set<string>,
   screensByShortId: Map<string, FlowWithScreens['screens'][number]>,
-  rootScreenId: string | null,
 ): BotMapEdge {
   const id = `notif-btn:${source}:${index}`;
   const label = button.labelRu;
@@ -527,24 +521,29 @@ function composeNotificationButtonEdge(
     };
   }
   // Resolve callbacks that open a graph screen so the canvas draws an arrow
-  // to it: the well-known "main menu" callback → the root screen, and any
-  // callback whose id matches a screen shortId → that screen. Other callbacks
-  // (handled by the bot at runtime) keep a synthetic target with no node.
-  const callbackScreen =
-    target === 'menu:main' || target === 'menu'
-      ? rootScreenId
-      : (screensByShortId.get(target)?.id ?? null);
-  if (callbackScreen !== null) {
-    const shortId =
-      screensByShortId.get(target)?.shortId ??
-      [...screensByShortId.values()].find((s) => s.id === callbackScreen)?.shortId ??
-      target;
+  // to it: the well-known "main menu" callback → the always-present reply
+  // keyboard (the bot's main menu, shown even when no root graph screen is
+  // configured), and any callback whose id matches a screen shortId → that
+  // screen. Other callbacks (handled by the bot at runtime) keep a synthetic
+  // target with no node.
+  if (target === 'menu:main' || target === 'menu') {
     return {
       id,
       source,
       sourceLabel: label,
-      target: callbackScreen,
-      destination: { kind: 'screen', shortId },
+      target: REPLY_KEYBOARD_NODE_ID,
+      destination: { kind: 'mainMenu' },
+      valid: true,
+    };
+  }
+  const callbackScreenNode = screensByShortId.get(target) ?? null;
+  if (callbackScreenNode !== null) {
+    return {
+      id,
+      source,
+      sourceLabel: label,
+      target: callbackScreenNode.id,
+      destination: { kind: 'screen', shortId: callbackScreenNode.shortId },
       valid: true,
     };
   }

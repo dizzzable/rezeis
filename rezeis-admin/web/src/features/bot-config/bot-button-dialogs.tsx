@@ -123,7 +123,7 @@ interface ActionFieldsProps {
  * don't need a target — their behaviour is fully described by the
  * action kind alone.
  */
-function ActionFields({
+export function ActionFields({
   idPrefix,
   actionType,
   actionTarget,
@@ -219,7 +219,7 @@ function ActionFields({
  * SUPPORT_URL always reset target to `null` regardless of UI state so
  * stale typing doesn't leak through after switching action kinds.
  */
-function buildActionPayload(
+export function buildActionPayload(
   actionType: BotButtonAction,
   actionTarget: string,
 ): { actionType: BotButtonAction; actionTarget: string | null } {

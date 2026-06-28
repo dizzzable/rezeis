@@ -81,5 +81,11 @@ export function DestinationBadge({ edge, nodesById }: DestinationBadgeProps) {
           {t('botMapPage.destination.back')}
         </Badge>
       )
+    case 'mainMenu':
+      return (
+        <Badge variant="outline" className="text-[10px] font-normal">
+          {t('botMapPage.destination.mainMenu')}
+        </Badge>
+      )
   }
 }

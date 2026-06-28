@@ -63,6 +63,7 @@ export const en = {
       chat: '→ Support chat',
       callback: '→ Callback {{id}}',
       back: '→ Back to menu',
+      mainMenu: '→ Main menu (reply keyboard)',
       invalid: '✕ Target unset',
       unsafeUrl: '✕ Unsafe URL',
     },

@@ -91,7 +91,9 @@ export type EdgeDestination =
   | { readonly kind: 'url'; readonly host: string; readonly safe: boolean }
   | { readonly kind: 'chat' }
   | { readonly kind: 'callback'; readonly id: string }
-  | { readonly kind: 'back' };
+  | { readonly kind: 'back' }
+  /** The well-known "main menu" callback (`menu:main`) → the reply keyboard. */
+  | { readonly kind: 'mainMenu' };
 
 /** A single button → destination edge synthesised by the composer. */
 export interface BotMapEdge {

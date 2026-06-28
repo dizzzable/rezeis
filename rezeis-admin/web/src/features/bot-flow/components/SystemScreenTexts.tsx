@@ -10,13 +10,14 @@
  * (`createText` / `updateText`, which carry the reiwa cache-bust interceptor),
  * with an optional EN sibling (`<key>@en`). RU + EN both get an emoji picker.
  */
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type RefObject } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Languages, Save as SaveIcon } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Separator } from '@/components/ui/separator'
 import { EmojiPicker } from '@/features/broadcast/emoji-picker'
@@ -56,6 +57,7 @@ const SCREEN_TEXT_KEYS: Readonly<Record<string, readonly string[]>> = {
   help: [
     'support.title',
     'support.not_configured',
+    'help.open_app_button',
     'help.contact_button',
     'help.contact_prefill',
     'help.contact_support',
@@ -92,6 +94,13 @@ export function SystemScreenTexts({ screenName }: SystemScreenTextsProps) {
 
 interface TextKeyEditorProps {
   readonly textKey: string
+  /**
+   * `text` (default) — stacked RU textarea + collapsible EN textarea, for the
+   * multi-line bot copy in the system-screen texts section.
+   * `buttonLabel` — compact RU/EN single-line label card matching the
+   * notification/screen button editor, for system-button labels.
+   */
+  readonly layout?: 'text' | 'buttonLabel'
 }
 
 /**
@@ -100,7 +109,7 @@ interface TextKeyEditorProps {
  * anywhere (system-screen texts section AND system-button rows). Upserts the
  * key (visible:true) so reiwa picks it up via `translations`.
  */
-export function TextKeyEditor({ textKey }: TextKeyEditorProps) {
+export function TextKeyEditor({ textKey, layout = 'text' }: TextKeyEditorProps) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
 
@@ -117,8 +126,8 @@ export function TextKeyEditor({ textKey }: TextKeyEditorProps) {
   const [value, setValue] = useState(rowValue)
   const [valueEn, setValueEn] = useState(rowValueEn)
   const [enOpen, setEnOpen] = useState(rowValueEn.length > 0)
-  const ruRef = useRef<HTMLTextAreaElement | null>(null)
-  const enRef = useRef<HTMLTextAreaElement | null>(null)
+  const ruRef = useRef<HTMLTextAreaElement | HTMLInputElement | null>(null)
+  const enRef = useRef<HTMLTextAreaElement | HTMLInputElement | null>(null)
 
   // Re-sync when the underlying row changes (refetch after save, or the
   // operator selects a different screen feeding the same component tree).
@@ -173,6 +182,58 @@ export function TextKeyEditor({ textKey }: TextKeyEditorProps) {
   const dirty = rowValue !== value || rowValueEn !== (enOpen ? valueEn : '')
   const canSave = value.trim().length > 0 && dirty && !mutation.isPending
 
+  if (layout === 'buttonLabel') {
+    return (
+      <div className="space-y-2">
+        <div className="grid grid-cols-2 gap-2">
+          <div className="space-y-1">
+            <div className="flex items-center justify-between">
+              <Label className="text-[11px]">{t('botFlow.systemButtons.labelRu')}</Label>
+              <EmojiPicker onSelect={insertRu} ariaLabel={t('emojiPicker.trigger')} />
+            </div>
+            <Input
+              ref={ruRef as RefObject<HTMLInputElement>}
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+              maxLength={64}
+              placeholder={t('botFlow.screenTexts.placeholder')}
+              className="text-xs"
+            />
+          </div>
+          <div className="space-y-1">
+            <div className="flex items-center justify-between">
+              <Label className="text-[11px]">{t('botFlow.systemButtons.labelEn')}</Label>
+              <EmojiPicker onSelect={insertEn} ariaLabel={t('emojiPicker.trigger')} />
+            </div>
+            <Input
+              ref={enRef as RefObject<HTMLInputElement>}
+              value={valueEn}
+              onChange={(e) => {
+                setValueEn(e.target.value)
+                setEnOpen(true)
+              }}
+              maxLength={64}
+              placeholder={t('botFlow.screenTexts.placeholder')}
+              className="text-xs"
+            />
+          </div>
+        </div>
+        <div className="flex justify-end">
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-6 px-2 text-[10px]"
+            onClick={() => mutation.mutate()}
+            disabled={!canSave}
+          >
+            <SaveIcon className="mr-1 h-3 w-3" aria-hidden />
+            {t('botFlow.screenTexts.save')}
+          </Button>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="space-y-1.5 rounded-md border bg-muted/20 p-2">
       <code className="block truncate text-[10px] text-muted-foreground">{textKey}</code>
@@ -183,7 +244,7 @@ export function TextKeyEditor({ textKey }: TextKeyEditorProps) {
           <EmojiPicker onSelect={insertRu} ariaLabel={t('emojiPicker.trigger')} />
         </div>
         <textarea
-          ref={ruRef}
+          ref={ruRef as RefObject<HTMLTextAreaElement>}
           value={value}
           onChange={(e) => setValue(e.target.value)}
           rows={2}
@@ -209,7 +270,7 @@ export function TextKeyEditor({ textKey }: TextKeyEditorProps) {
             <EmojiPicker onSelect={insertEn} ariaLabel={t('emojiPicker.trigger')} />
           </div>
           <textarea
-            ref={enRef}
+            ref={enRef as RefObject<HTMLTextAreaElement>}
             value={valueEn}
             onChange={(e) => setValueEn(e.target.value)}
             rows={2}
