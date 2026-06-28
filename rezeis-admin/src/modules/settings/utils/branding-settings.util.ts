@@ -25,10 +25,13 @@ import {
   DEFAULT_BRANDING,
   ICON_COLOR_MODES,
   IconColorMode,
+  PlanCardStyle,
   ProfileNamingSettings,
 } from '../interfaces/branding-settings.interface';
 /** Hex colour validation: 3, 4, 6 or 8 hex chars after a leading `#`. */
 const HEX_PATTERN = /^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
+/** Accepted shapes for an operator-supplied texture image URL. */
+const IMAGE_URL_PATTERN = /^(?:data:image\/[a-z0-9+.-]+;base64,[A-Za-z0-9+/=]+|https?:\/\/.+|\/uploads\/[A-Za-z0-9._/-]+)$/i;
 
 export function readBrandingSettings(value: unknown): BrandingSettingsInterface {
   const record = readRecord(value);
@@ -55,6 +58,7 @@ export function readBrandingSettings(value: unknown): BrandingSettingsInterface 
     iconColors: readHexMap(record, 'iconColors'),
     borderRadius: readString(record, 'borderRadius', DEFAULT_BRANDING.borderRadius),
     fontFamily: readString(record, 'fontFamily', DEFAULT_BRANDING.fontFamily),
+    planCardStyles: readPlanCardStyles(record),
     profileNaming: readProfileNaming(record),
   };
 }
@@ -316,6 +320,64 @@ function readClampedNumber(
     return Math.min(Math.max(value, min), max);
   }
   return fallback;
+}
+
+/**
+ * Reads the per-plan tariff-card styles map (`planCardStyles`), keyed by
+ * `planId`. Each entry is normalized: gradient (string, capped), accent (hex),
+ * texturePreset (allowlisted pattern), textureUrl (data:/http(s)/uploads).
+ * Empty/invalid sub-values are dropped; an entry with no usable field is
+ * skipped. Orphaned plan ids are kept as-is (harmless; readers ignore unknown
+ * ids). Capped at 500 entries to bound the persisted payload.
+ */
+function readPlanCardStyles(
+  record: Record<string, unknown>,
+): Record<string, PlanCardStyle> {
+  const value = record['planCardStyles'];
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return {};
+  }
+  const out: Record<string, PlanCardStyle> = {};
+  let count = 0;
+  for (const [planId, raw] of Object.entries(value as Record<string, unknown>)) {
+    if (count >= 500) break;
+    if (typeof planId !== 'string' || planId.length === 0 || planId.length > 64) continue;
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) continue;
+    const slot = raw as Record<string, unknown>;
+
+    const style: { -readonly [K in keyof PlanCardStyle]: PlanCardStyle[K] } = {};
+
+    const gradient = slot['gradient'];
+    if (typeof gradient === 'string' && gradient.trim().length > 0 && gradient.length <= 512) {
+      style.gradient = gradient.trim();
+    }
+    const accent = slot['accent'];
+    if (typeof accent === 'string' && HEX_PATTERN.test(accent.trim())) {
+      style.accent = accent.trim();
+    }
+    const texturePreset = slot['texturePreset'];
+    if (
+      typeof texturePreset === 'string' &&
+      (APP_BACKGROUND_TEXTURES as readonly string[]).includes(texturePreset)
+    ) {
+      style.texturePreset = texturePreset as AppBackgroundTexture;
+    }
+    const textureUrl = slot['textureUrl'];
+    if (
+      typeof textureUrl === 'string' &&
+      textureUrl.trim().length > 0 &&
+      textureUrl.length <= 524288 &&
+      IMAGE_URL_PATTERN.test(textureUrl.trim())
+    ) {
+      style.textureUrl = textureUrl.trim();
+    }
+
+    // Skip entries that carry no usable styling at all.
+    if (Object.keys(style).length === 0) continue;
+    out[planId] = style;
+    count += 1;
+  }
+  return out;
 }
 
 function readProfileNaming(record: Record<string, unknown>): ProfileNamingSettings {

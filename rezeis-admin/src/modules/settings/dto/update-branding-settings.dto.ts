@@ -269,6 +269,15 @@ export class UpdateBrandingSettingsDto {
   @Length(1, 256)
   public fontFamily?: string;
 
+  /**
+   * Per-plan tariff-card styles, keyed by `planId`. Loosely validated here
+   * (dynamic keys); strictly normalized in `readPlanCardStyles` (gradient/url
+   * caps, hex accent, texture-preset allowlist, orphan-tolerant).
+   */
+  @IsOptional()
+  @IsObject()
+  public planCardStyles?: Record<string, unknown>;
+
   @IsOptional()
   @ValidateNested()
   @Type(() => ProfileNamingDto)

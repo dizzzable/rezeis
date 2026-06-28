@@ -10,7 +10,7 @@
 
 import { Suspense, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Wifi, WalletCards, Share2, Settings } from 'lucide-react'
+import { Wifi, WalletCards, Share2, Settings, Sparkles } from 'lucide-react'
 
 import { ReiwaMark } from './reiwa-mark'
 import { CardLogoMark, type CardLogoPreset } from './card-logo-mark'
@@ -19,6 +19,10 @@ import {
   getCardEffectDefaults,
   type CardEffectId,
 } from './card-effect-registry'
+import { usePlans, type Plan } from '@/features/plans/plans-api'
+import { autoPlanGradient } from './plan-card-styles-section'
+import { buildTextureCss } from './app-texture'
+import type { PlanCardStyleDraft, BrandingAppBackgroundDraft } from './branding-form-schema'
 
 interface BrandingPreviewProps {
   values: {
@@ -37,7 +41,11 @@ interface BrandingPreviewProps {
     cardEffectOpacity?: number
     fontFamily?: string
     borderRadius?: string
+    planCardStyles?: Record<string, PlanCardStyleDraft>
+    appBackground?: BrandingAppBackgroundDraft
   }
+  /** Active configurator tab — drives a context-aware preview view. */
+  focus?: string
 }
 
 /**
@@ -71,7 +79,7 @@ const RADIUS_MAP: Record<string, string> = {
   'rounded-full': '9999px',
 }
 
-export function BrandingPreview({ values }: BrandingPreviewProps) {
+export function BrandingPreview({ values, focus }: BrandingPreviewProps) {
   const { t } = useTranslation()
   const {
     brandName = 'Reiwa',
@@ -89,9 +97,34 @@ export function BrandingPreview({ values }: BrandingPreviewProps) {
     cardEffectOpacity = 1,
     fontFamily = 'Geist Variable, system-ui, sans-serif',
     borderRadius = 'rounded-2xl',
+    planCardStyles = {},
+    appBackground,
   } = values
 
   const radius = RADIUS_MAP[borderRadius] ?? '1rem'
+
+  // Plans power the context-aware tariff preview (planCards tab). Shared,
+  // react-query-cached fetch — free when the section already loaded it.
+  const { data: plans } = usePlans()
+
+  // Live site-wide app background (App background tab). Mirrors the cabinet
+  // shell: gradient / tiled texture / animated effect / plain colour.
+  const AppBgEffect =
+    appBackground?.kind === 'effect' &&
+    appBackground.effect !== 'NONE' &&
+    appBackground.effect in CARD_EFFECT_COMPONENTS
+      ? CARD_EFFECT_COMPONENTS[appBackground.effect as CardEffectId]
+      : null
+  const appBgEffectProps = useMemo<Record<string, unknown>>(() => {
+    if (!AppBgEffect || !appBackground) return {}
+    const base = { ...getCardEffectDefaults(appBackground.effect), ...appBackground.props }
+    if (appBackground.effect === 'aurora' && base['colorStops'] === undefined) {
+      return { colorStops: brandAuroraStops(primary), amplitude: 1.1, blend: 0.55, speed: 0.8, ...base }
+    }
+    return base
+  }, [AppBgEffect, appBackground, primary])
+  const appBgTextureCss =
+    appBackground?.kind === 'texture' ? buildTextureCss(appBackground.texture) : null
 
   // Resolve the live effect component + merged params, mirroring the SPA: the
   // default Aurora is auto-tinted to the brand colour unless the operator has
@@ -122,6 +155,32 @@ export function BrandingPreview({ values }: BrandingPreviewProps) {
           style={{ background: primary, opacity: 0.18 }}
         />
 
+        {/* Live site-wide app background layer (App background tab). */}
+        {appBackground && appBackground.kind !== 'none' && (
+          <div className="pointer-events-none absolute inset-0 overflow-hidden">
+            {appBackground.kind === 'gradient' && (
+              <div className="absolute inset-0" style={{ backgroundImage: appBackground.gradient }} />
+            )}
+            {appBgTextureCss && (
+              <div
+                className="absolute inset-0"
+                style={{
+                  backgroundColor: appBgTextureCss.backgroundColor,
+                  backgroundImage: appBgTextureCss.backgroundImage,
+                  backgroundSize: appBgTextureCss.backgroundSize,
+                }}
+              />
+            )}
+            {AppBgEffect && (
+              <Suspense fallback={null}>
+                <div className="absolute inset-0" style={{ opacity: appBackground.opacity }}>
+                  <AppBgEffect {...appBgEffectProps} />
+                </div>
+              </Suspense>
+            )}
+          </div>
+        )}
+
         {/* Status bar */}
         <div className="relative flex items-center justify-between px-6 pt-3 pb-1">
           <span className="text-[10px] font-medium text-white/50">9:41</span>
@@ -151,6 +210,21 @@ export function BrandingPreview({ values }: BrandingPreviewProps) {
             </div>
           </div>
 
+          {/* Context-aware body: tariff cards on the planCards tab, else the
+              dashboard mock (subscription card + actions + nav). */}
+          {focus === 'planCards' ? (
+            <TariffListPreview
+              plans={(plans ?? []).slice(0, 3)}
+              planCardStyles={planCardStyles}
+              primary={primary}
+              cardLogo={cardLogo}
+              cardLogoUrl={cardLogoUrl}
+              radius={radius}
+              unlimitedLabel={t('brandingPage.sections.planCards.unlimited')}
+              emptyLabel={t('brandingPage.sections.planCards.empty')}
+            />
+          ) : (
+            <>
           {/* Subscription card — live effect over the operator gradient */}
           <div
             className="relative h-[160px] overflow-hidden p-4 ring-1 ring-white/10"
@@ -270,12 +344,143 @@ export function BrandingPreview({ values }: BrandingPreviewProps) {
             <Share2 className="mx-3 h-3.5 w-3.5 text-white/40" />
             <Settings className="mr-3 h-3.5 w-3.5 text-white/40" />
           </div>
+            </>
+          )}
         </div>
       </div>
 
       <p className="mt-3 text-center text-xs text-muted-foreground">
         {t('brandingPage.sections.preview.liveLabel')}
       </p>
+    </div>
+  )
+}
+
+/**
+ * Context-aware tariff preview shown on the "Тарифные карточки" tab. Renders up
+ * to three plans as cabinet-style cards (gradient + texture + accent + clean
+ * icon) using the SAME resolution rules as the reiwa `/plans` page, so the
+ * operator sees per-plan edits live in the phone frame.
+ */
+interface TariffListPreviewProps {
+  readonly plans: ReadonlyArray<Plan>
+  readonly planCardStyles: Record<string, PlanCardStyleDraft>
+  readonly primary: string
+  readonly cardLogo: CardLogoPreset
+  readonly cardLogoUrl?: string | null
+  readonly radius: string
+  readonly unlimitedLabel: string
+  readonly emptyLabel: string
+}
+
+function TariffListPreview({
+  plans,
+  planCardStyles,
+  primary,
+  cardLogo,
+  cardLogoUrl,
+  radius,
+  unlimitedLabel,
+  emptyLabel,
+}: TariffListPreviewProps) {
+  if (plans.length === 0) {
+    return (
+      <div className="mt-2 flex h-[180px] flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-white/10 px-4 text-center">
+        <Sparkles className="h-6 w-6 text-white/30" />
+        <p className="text-[10px] text-white/40">{emptyLabel}</p>
+      </div>
+    )
+  }
+  return (
+    <div className="mt-2 space-y-2.5">
+      {plans.map((plan) => (
+        <TariffPreviewCard
+          key={plan.id}
+          plan={plan}
+          style={planCardStyles[plan.id]}
+          primary={primary}
+          cardLogo={cardLogo}
+          cardLogoUrl={cardLogoUrl}
+          radius={radius}
+          unlimitedLabel={unlimitedLabel}
+        />
+      ))}
+    </div>
+  )
+}
+
+function TariffPreviewCard({
+  plan,
+  style,
+  primary,
+  cardLogo,
+  cardLogoUrl,
+  radius,
+  unlimitedLabel,
+}: {
+  readonly plan: Plan
+  readonly style: PlanCardStyleDraft | undefined
+  readonly primary: string
+  readonly cardLogo: CardLogoPreset
+  readonly cardLogoUrl?: string | null
+  readonly radius: string
+  readonly unlimitedLabel: string
+}) {
+  const gradient = style?.gradient && style.gradient.length > 0 ? style.gradient : autoPlanGradient(plan.id)
+  const accent = style?.accent && style.accent.length > 0 ? style.accent : primary
+  const textureUrl = style?.textureUrl && style.textureUrl.length > 0 ? style.textureUrl : null
+  const textureCss =
+    !textureUrl && style?.texturePreset
+      ? buildTextureCss({
+          pattern: style.texturePreset,
+          color: accent,
+          background: 'transparent',
+          scale: 18,
+          opacity: 0.5,
+        })
+      : null
+  // A raw emoji / shortcode icon (not a lucide key like "zap") renders as text.
+  const isEmoji = !!plan.icon && !/^[a-z0-9_-]+$/i.test(plan.icon)
+
+  return (
+    <div
+      className="relative overflow-hidden p-3 ring-1 ring-white/10"
+      style={{ borderRadius: radius, backgroundImage: gradient }}
+    >
+      {textureUrl ? (
+        <div
+          className="absolute inset-0 opacity-25"
+          style={{ backgroundImage: `url("${textureUrl}")`, backgroundSize: 'cover', backgroundPosition: 'center' }}
+        />
+      ) : textureCss ? (
+        <div
+          className="absolute inset-0"
+          style={{ backgroundImage: textureCss.backgroundImage, backgroundSize: textureCss.backgroundSize }}
+        />
+      ) : null}
+      <div className="absolute inset-0 bg-linear-to-br from-black/30 via-transparent to-black/55" />
+      <CardLogoMark
+        preset={cardLogo}
+        customUrl={cardLogoUrl}
+        className="pointer-events-none absolute -right-3 -bottom-4 h-20 w-20"
+        style={{ color: '#ffffff', opacity: 0.12 }}
+      />
+      <div className="relative flex items-center gap-2.5 text-white">
+        <span className="shrink-0 leading-none drop-shadow" style={{ color: accent }}>
+          {isEmoji ? (
+            <span className="text-xl leading-none">{plan.icon}</span>
+          ) : (
+            <Sparkles className="h-5 w-5" />
+          )}
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-[12px] font-semibold drop-shadow">{plan.name}</p>
+          <p className="text-[9px] font-medium text-white/80">
+            {plan.trafficLimit > 0 ? `${plan.trafficLimit} GB` : unlimitedLabel}
+            {plan.deviceLimit > 0 ? ` · ${plan.deviceLimit}` : ''}
+          </p>
+        </div>
+      </div>
     </div>
   )
 }

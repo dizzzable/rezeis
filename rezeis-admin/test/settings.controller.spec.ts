@@ -274,6 +274,7 @@ describe('SettingsController', () => {
       iconColors: {},
       borderRadius: '1rem',
       fontFamily: 'Inter',
+      planCardStyles: {},
       profileNaming: { prefix: 'rz', separator: '_', suffixBase: 'sub' },
     };
     const icons: CustomIconInterface[] = [{ id: 'icon-1', name: 'Rocket', url: '/uploads/icons/rocket.svg', color: '#ffffff' }];

@@ -179,6 +179,27 @@ export interface AppBackgroundSettings {
 }
 
 /**
+ * Per-plan tariff-card visual style (keyed by `planId` in
+ * `BrandingSettingsInterface.planCardStyles`). All fields optional — an absent
+ * style (or absent map entry) means the reiwa cabinet derives a deterministic
+ * auto gradient from the plan id, so unconfigured/archived plans still look
+ * distinct from each other.
+ *
+ * Texture resolution priority: `textureUrl` (operator-uploaded image) wins over
+ * `texturePreset` (built-in CSS pattern, reuses `APP_BACKGROUND_TEXTURES`).
+ */
+export interface PlanCardStyle {
+  /** CSS background gradient for the card (reuses the card-gradient controls). */
+  readonly gradient?: string | null;
+  /** Accent hex for price/name highlights on the card. */
+  readonly accent?: string | null;
+  /** Built-in texture pattern id ∈ `APP_BACKGROUND_TEXTURES`, overlaid on the gradient. */
+  readonly texturePreset?: AppBackgroundTexture | null;
+  /** Operator-uploaded texture image URL (`/uploads/branding/...`). Priority over `texturePreset`. */
+  readonly textureUrl?: string | null;
+}
+
+/**
  * Remnawave profile-naming template. Profiles are named
  * `<prefix><separator><login><separator><suffixBase>[<separator>N]`, e.g.
  * `rz_john_sub`, `rz_john_sub_1`. Persisted inside `Settings.brandingSettings`
@@ -289,6 +310,14 @@ export interface BrandingSettingsInterface {
   readonly fontFamily: string;
 
   /**
+   * Per-plan tariff-card visual styles, keyed by `planId`. Drives the reiwa
+   * cabinet `/plans` cards. Absent entry → the cabinet derives a deterministic
+   * auto gradient from the plan id. Orphaned ids (plan deleted) are ignored.
+   * Empty object = every plan uses the auto style (default).
+   */
+  readonly planCardStyles: Record<string, PlanCardStyle>;
+
+  /**
    * Remnawave profile-naming template (prefix / separator / suffix base).
    * Read by `RemnawaveProfileNamingService` when provisioning panel profiles.
    */
@@ -331,5 +360,6 @@ export const DEFAULT_BRANDING: BrandingSettingsInterface = {
   iconColors: {},
   borderRadius: 'rounded-2xl',
   fontFamily: 'Inter, system-ui, sans-serif',
+  planCardStyles: {},
   profileNaming: { prefix: 'rz', separator: '_', suffixBase: 'sub' },
 };

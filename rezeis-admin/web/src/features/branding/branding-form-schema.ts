@@ -39,6 +39,15 @@ export interface BrandingFormDraft {
   readonly iconColors?: Record<string, string>
   readonly borderRadius: string
   readonly fontFamily: string
+  readonly planCardStyles?: Record<string, PlanCardStyleDraft>
+}
+
+/** Per-plan tariff-card style draft (mirrors backend `PlanCardStyle`). */
+export interface PlanCardStyleDraft {
+  readonly gradient?: string | null
+  readonly accent?: string | null
+  readonly texturePreset?: (typeof BRANDING_APP_BG_TEXTURES)[number] | null
+  readonly textureUrl?: string | null
 }
 
 export interface BrandingAppBackgroundDraft {
@@ -125,6 +134,7 @@ const DEFAULT_BRANDING_DRAFT: BrandingFormDraft = {
   iconColors: {},
   borderRadius: 'rounded-2xl',
   fontFamily: 'Geist Variable, system-ui, sans-serif',
+  planCardStyles: {},
 }
 
 export function createBrandingFormSchema(messages: BrandingFormValidationMessages) {
@@ -175,6 +185,17 @@ export function createBrandingFormSchema(messages: BrandingFormValidationMessage
       iconColors: z.record(z.string(), z.string()).optional(),
       borderRadius: z.string().trim().min(1).max(64),
       fontFamily: z.string().trim().min(1).max(256),
+      planCardStyles: z
+        .record(
+          z.string(),
+          z.object({
+            gradient: z.string().max(512).nullish(),
+            accent: z.string().nullish(),
+            texturePreset: z.enum(BRANDING_APP_BG_TEXTURES).nullish(),
+            textureUrl: z.string().max(IMAGE_URL_MAX).nullish(),
+          }),
+        )
+        .optional(),
     })
     .transform((values): BrandingFormData => ({
       ...values,
@@ -182,6 +203,7 @@ export function createBrandingFormSchema(messages: BrandingFormValidationMessage
       cardEffectProps: values.cardEffectProps ?? {},
       appBackground: values.appBackground ?? DEFAULT_APP_BACKGROUND_DRAFT,
       iconColors: values.iconColors ?? {},
+      planCardStyles: values.planCardStyles ?? {},
     }))
 }
 
@@ -198,6 +220,9 @@ export function createInitialBrandingDraft(input?: Partial<BrandingFormDraft> | 
     cardEffectsByIndex: Array.isArray(input?.cardEffectsByIndex) ? input.cardEffectsByIndex : [],
     appBackground: normalizeAppBackgroundDraft(input?.appBackground),
     iconColors: isPlainRecord(input?.iconColors) ? input.iconColors : {},
+    planCardStyles: isPlainRecordUnknown(input?.planCardStyles)
+      ? (input.planCardStyles as Record<string, PlanCardStyleDraft>)
+      : {},
   }
 }
 
