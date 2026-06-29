@@ -2445,6 +2445,7 @@ export const en = {
     delivery: {
       telegram: 'Telegram ✓',
       local: 'Local',
+      uploaded: 'Uploaded',
     },
     deleteDialog: {
       title: 'Delete backup?',
@@ -2462,11 +2463,21 @@ export const en = {
       downloadError: 'Download error',
       restoreStarted: 'Restore job enqueued',
       restoreFailed: 'Failed to start restore',
+      uploadRestoreStarted: 'Restore from file enqueued',
+      uploadRestoreFailed: 'Failed to restore from file',
+      uploadInvalidFile: 'Invalid file. Upload a .sql.gz backup',
     },
     restore: 'Restore',
+    restoreUpload: 'Restore from file',
     restoreDialog: {
       title: 'Restore database?',
       description: 'Current data will be overwritten with backup data. This action is irreversible. We recommend creating a fresh backup before restoring.',
+      cancel: 'Cancel',
+      confirm: 'Restore',
+    },
+    uploadRestoreDialog: {
+      title: 'Restore from uploaded file?',
+      description: 'The database will be fully overwritten with the contents of "{{filename}}". This action is irreversible. We recommend creating a fresh backup before restoring.',
       cancel: 'Cancel',
       confirm: 'Restore',
     },

@@ -320,6 +320,79 @@ export class BackupService implements OnModuleInit {
     return { jobId: job.id ?? filename };
   }
 
+  /**
+   * Restore from an UPLOADED backup file (disaster recovery / server
+   * migration). Unlike {@link restoreBackup}, which restores a file already
+   * present on the server, this accepts a `.sql.gz` the operator downloaded
+   * earlier (from this panel or its Telegram delivery) and:
+   *   1. validates it is a gzip dump (the restore pipeline pipes through gunzip),
+   *   2. records it as a BackupRecord so it shows in the list and can be
+   *      re-restored / deleted later,
+   *   3. enqueues the same async restore job as a server-side restore.
+   *
+   * The file is expected to already be on disk under the backup directory
+   * (multer disk storage), identified by `filename`.
+   */
+  public async restoreFromUpload(
+    file: { readonly filename?: string; readonly path?: string; readonly size?: number },
+    initiatedBy: string | null,
+  ): Promise<{ jobId: string }> {
+    const filename = file.filename;
+    if (!filename || !isSafeFilename(filename)) {
+      await this.safeUnlink(file.path);
+      throw new BadRequestException('Invalid uploaded backup filename');
+    }
+    const fullPath = path.resolve(this.getBackupLocation(), filename);
+    // Guard against path traversal escaping the backup directory.
+    if (!fullPath.startsWith(path.resolve(this.getBackupLocation()) + path.sep)) {
+      await this.safeUnlink(fullPath);
+      throw new BadRequestException('Refusing to write outside backup directory');
+    }
+    try {
+      await fsp.access(fullPath);
+    } catch {
+      throw new BadRequestException('Uploaded file was not stored');
+    }
+
+    // The restore pipeline pipes the file through gunzip, so the upload MUST be
+    // a gzip-compressed dump (.sql.gz) — exactly what this panel produces and
+    // delivers. Reject anything else up front with a clear error.
+    if (!(await firstBytesAreGzip(fullPath))) {
+      await this.safeUnlink(fullPath);
+      throw new BadRequestException('Uploaded file is not a gzip (.sql.gz) backup');
+    }
+
+    const stat = await fsp.stat(fullPath);
+    const checksum = await sha256OfFile(fullPath);
+    await this.prismaService.backupRecord.create({
+      data: {
+        filename,
+        scope: BackupScope.DB,
+        sizeBytes: BigInt(stat.size),
+        checksum,
+        deliveryChannel: 'uploaded',
+        deliveryRecipient: initiatedBy,
+        deliveredAt: new Date(),
+      },
+    });
+
+    const job = await this.backupQueue.add(
+      BACKUP_JOBS.RESTORE,
+      { filename, initiatedBy } satisfies BackupRestoreJobData,
+      {
+        attempts: 1, // restore must not auto-retry
+        removeOnComplete: { age: 86_400 },
+        removeOnFail: { age: 604_800 },
+      },
+    );
+    return { jobId: job.id ?? filename };
+  }
+
+  private async safeUnlink(target: string | undefined): Promise<void> {
+    if (!target) return;
+    await fsp.unlink(target).catch((): void => undefined);
+  }
+
   public async deleteBackup(id: string): Promise<void> {
     const record = await this.prismaService.backupRecord.findUnique({
       where: { id },
@@ -470,6 +543,59 @@ export class BackupService implements OnModuleInit {
       fileStream.pipe(gunzip).pipe(psql.stdin);
       fileStream.on('error', (err) => reject(err));
       gunzip.on('error', (err) => reject(new Error(`Decompression failed: ${err.message}`)));
+    });
+  }
+
+  /**
+   * Re-apply any Prisma migrations newer than the restored snapshot.
+   *
+   * A `.sql.gz` dump captures the schema **and** the `_prisma_migrations`
+   * table exactly as they were when the backup was taken. Restoring an OLDER
+   * backup therefore rolls the schema back to that version, while the running
+   * build expects the latest migrations. We run `prisma migrate deploy` right
+   * after a restore so the schema is brought forward to match the current
+   * code — the same step the container entrypoint runs on boot, applied
+   * immediately so the operator does NOT have to restart the container after
+   * restoring a backup from an older version.
+   *
+   * Best-effort: a failure here does not undo the data restore (rows are
+   * already loaded). It is surfaced to the caller so the restore event can
+   * flag that the operator should reconcile the schema (restart / restore a
+   * matching build).
+   */
+  public async runMigrateDeploy(): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      const child = spawn('npx', ['prisma', 'migrate', 'deploy'], {
+        cwd: process.cwd(),
+        env: process.env,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        // npx resolves to npx.cmd on Windows dev hosts; in the Linux container
+        // it's a plain binary on PATH.
+        shell: process.platform === 'win32',
+      });
+      let stderr = '';
+      child.stdout.on('data', (chunk) => {
+        const line = chunk.toString().trim();
+        if (line.length > 0) this.logger.log(`[migrate] ${line}`);
+      });
+      child.stderr.on('data', (chunk) => {
+        stderr += chunk.toString();
+      });
+      child.on('error', (err) => {
+        this.logger.error(`migrate deploy spawn failed: ${err.message}`);
+        resolve(false);
+      });
+      child.on('exit', (code) => {
+        if (code === 0) {
+          this.logger.log('Post-restore migrate deploy: schema up-to-date');
+          resolve(true);
+        } else {
+          this.logger.error(
+            `Post-restore migrate deploy failed (exit ${code}): ${stderr.trim().slice(0, 500) || 'unknown error'}`,
+          );
+          resolve(false);
+        }
+      });
     });
   }
 
@@ -811,6 +937,18 @@ function toDto(row: {
 
 function isSafeFilename(name: string): boolean {
   return /^[A-Za-z0-9._-]+$/.test(name) && !name.includes('..');
+}
+
+/** Read the first two bytes of a file and check the gzip magic (1f 8b). */
+async function firstBytesAreGzip(filePath: string): Promise<boolean> {
+  const fd = await fsp.open(filePath, 'r');
+  try {
+    const buf = Buffer.alloc(2);
+    await fd.read(buf, 0, 2, 0);
+    return buf[0] === 0x1f && buf[1] === 0x8b;
+  } finally {
+    await fd.close();
+  }
 }
 
 async function sha256OfFile(filePath: string): Promise<string> {

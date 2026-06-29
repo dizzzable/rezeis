@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { useTranslation } from 'react-i18next';import { Plus, Download, Trash2, AlertCircle, Archive, RefreshCw, Settings, Send, RotateCcw, Loader2 } from 'lucide-react';
+import { useTranslation } from 'react-i18next';import { Plus, Download, Trash2, AlertCircle, Archive, RefreshCw, Settings, Send, RotateCcw, Loader2, Upload } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api';
 import { adminQueryKeys } from '@/lib/admin-query-keys';
@@ -97,6 +97,8 @@ export default function BackupPage() {
   const [scope, setScope] = useState<'DB' | 'FULL'>('DB');
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [restoreFilename, setRestoreFilename] = useState<string | null>(null);
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const uploadInputRef = useRef<HTMLInputElement>(null);
   const canViewBackups = useHasPermission('backups', 'view');
   const canCreateBackups = useHasPermission('backups', 'create');
   const canDeleteBackups = useHasPermission('backups', 'delete');
@@ -149,6 +151,33 @@ export default function BackupPage() {
     },
     onError: () => toast.error(t('backupPage.toasts.restoreFailed')),
   });
+
+  const uploadRestoreMutation = useMutation({
+    mutationFn: (file: File) => {
+      if (!canRunBackups) throw new Error('Missing backups:run');
+      const form = new FormData();
+      form.append('file', file);
+      return api.post('/admin/backup/restore-upload', form);
+    },
+    onSuccess: () => {
+      toast.success(t('backupPage.toasts.uploadRestoreStarted'));
+      queryClient.invalidateQueries({ queryKey: adminQueryKeys.backups.all });
+      setUploadFile(null);
+    },
+    onError: () => toast.error(t('backupPage.toasts.uploadRestoreFailed')),
+  });
+
+  function onUploadInputChange(e: React.ChangeEvent<HTMLInputElement>): void {
+    const file = e.target.files?.[0] ?? null;
+    // Reset the input so picking the same file again still fires onChange.
+    e.target.value = '';
+    if (!file) return;
+    if (!/\.(sql\.)?gz$/i.test(file.name)) {
+      toast.error(t('backupPage.toasts.uploadInvalidFile'));
+      return;
+    }
+    setUploadFile(file);
+  }
 
   async function downloadBackup(filename: string): Promise<void> {
     try {
@@ -225,6 +254,29 @@ export default function BackupPage() {
               <Plus className="mr-2 h-4 w-4" />
               {createMutation.isPending ? t('backupPage.creating') : t('backupPage.createBackup')}
             </Button>
+          ) : null}
+          {canRunBackups ? (
+            <>
+              <input
+                ref={uploadInputRef}
+                type="file"
+                accept=".gz,.sql.gz,application/gzip"
+                className="hidden"
+                onChange={onUploadInputChange}
+              />
+              <Button
+                variant="outline"
+                onClick={() => uploadInputRef.current?.click()}
+                disabled={uploadRestoreMutation.isPending}
+              >
+                {uploadRestoreMutation.isPending ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                ) : (
+                  <Upload className="mr-2 h-4 w-4" />
+                )}
+                {t('backupPage.restoreUpload')}
+              </Button>
+            </>
           ) : null}
         </div>
       </div>
@@ -315,10 +367,12 @@ export default function BackupPage() {
                       <BackupStatusBadge record={b} />
                     </TableCell>
                     <TableCell className="text-xs text-muted-foreground">
-                      {b.deliveryChannel === 'telegram' ? (
-                        <span className="text-blue-500">Telegram ✓</span>
+                      {b.deliveryChannel === 'telegram' || b.deliveryChannel === 'telegram-relay' ? (
+                        <span className="text-blue-500">{t('backupPage.delivery.telegram')}</span>
+                      ) : b.deliveryChannel === 'uploaded' ? (
+                        t('backupPage.delivery.uploaded')
                       ) : b.deliveryChannel === 'local' ? (
-                        'Local'
+                        t('backupPage.delivery.local')
                       ) : (
                         '—'
                       )}
@@ -409,6 +463,27 @@ export default function BackupPage() {
               onClick={() => restoreFilename && restoreMutation.mutate(restoreFilename)}
             >
               {t('backupPage.restoreDialog.confirm')}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Upload-and-restore confirmation */}
+      <AlertDialog open={!!uploadFile} onOpenChange={(v) => !v && setUploadFile(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t('backupPage.uploadRestoreDialog.title')}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t('backupPage.uploadRestoreDialog.description', { filename: uploadFile?.name ?? '' })}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t('backupPage.uploadRestoreDialog.cancel')}</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={() => uploadFile && uploadRestoreMutation.mutate(uploadFile)}
+            >
+              {t('backupPage.uploadRestoreDialog.confirm')}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

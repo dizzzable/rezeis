@@ -77,7 +77,7 @@ export class BackupProcessor extends WorkerHost {
     return result;
   }
 
-  private async handleRestore(job: Job<BackupRestoreJobData>): Promise<{ success: boolean }> {
+  private async handleRestore(job: Job<BackupRestoreJobData>): Promise<{ success: boolean; migrationsApplied: boolean }> {
     const { filename, initiatedBy } = job.data;
     this.logger.log(`Starting restore from: ${filename}`);
 
@@ -85,16 +85,22 @@ export class BackupProcessor extends WorkerHost {
 
     const success = await this.backupService.runRestore(filename);
 
+    // Bring the schema forward to the current build. Restoring a backup from
+    // an older version rolls the schema back; this re-applies the missing
+    // migrations so the running app matches the data — without a restart.
+    await job.updateProgress({ stage: 'migrating', percent: 70 });
+    const migrationsApplied = await this.backupService.runMigrateDeploy();
+
     await job.updateProgress({ stage: 'completed', percent: 100 });
 
     this.systemEventsService.info(
       'system.restore_completed',
       'SYSTEM',
       `Database restored from ${filename}`,
-      { filename, initiatedBy, success },
+      { filename, initiatedBy, success, migrationsApplied },
     );
 
-    return { success };
+    return { success, migrationsApplied };
   }
 
   private async handleDeliverTelegram(job: Job<BackupDeliverTelegramJobData>): Promise<{ delivered: boolean }> {
