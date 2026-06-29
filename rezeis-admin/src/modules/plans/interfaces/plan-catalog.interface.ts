@@ -19,6 +19,19 @@ export interface PlanCatalogDurationInterface {
   readonly prices: readonly PlanCatalogPriceInterface[];
 }
 
+/**
+ * Gateway-independent, operator-configured price for catalog DISPLAY only
+ * ("от X / N дн" on the tariff card). Unlike `durations[].prices`, these are
+ * emitted regardless of whether a matching payment gateway is currently active,
+ * so the browse card always shows a price. Checkout still uses the
+ * gateway-aware `durations[].prices`. Empty for free trials.
+ */
+export interface PlanCatalogDisplayPriceInterface {
+  readonly currency: Currency;
+  readonly price: string;
+  readonly days: number;
+}
+
 export interface PlanCatalogPlanInterface {
   readonly id: string;
   readonly orderIndex: number;
@@ -40,6 +53,12 @@ export interface PlanCatalogPlanInterface {
   /** For trial plans: whether the trial is free (true) or paid (false). */
   readonly trialFree: boolean;
   readonly durations: readonly PlanCatalogDurationInterface[];
+  /**
+   * Operator-configured prices for display, independent of active gateways.
+   * Lets the catalog card show "от X" even when no gateway is enabled. Empty
+   * for free trials.
+   */
+  readonly displayPrices: readonly PlanCatalogDisplayPriceInterface[];
 }
 
 export interface PlanCatalogQueryContextInterface {

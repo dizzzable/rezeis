@@ -55,6 +55,12 @@ describe('PlanCatalogService', () => {
     assert.equal(actual[0]?.trafficLimitStrategy, 'NO_RESET');
     assert.deepStrictEqual(actual[0]?.internalSquads, []);
     assert.equal(actual[0]?.externalSquad, null);
+    // Gateway-independent display prices expose every configured duration
+    // price so the catalog card can render "от X" without an active gateway.
+    assert.deepStrictEqual(actual[0]?.displayPrices, [
+      { currency: Currency.USD, price: '9.99', days: 30 },
+      { currency: Currency.USDT, price: '12.49', days: 30 },
+    ]);
   });
 
   it('filters plans by authenticated user context and applies discounts to gateway-aware prices', async () => {

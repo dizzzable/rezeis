@@ -207,6 +207,19 @@ export class PlanCatalogService {
               )
               .filter((value): value is PlanCatalogPriceInterface => value !== null),
       })),
+      // Gateway-independent display prices: every configured duration price,
+      // so the catalog card shows "от X" even with no active gateway. Checkout
+      // still relies on the gateway-aware `durations[].prices` above. Free
+      // trials carry no price (claimed, not bought).
+      displayPrices: isFreeTrial
+        ? []
+        : plan.durations.flatMap((duration) =>
+            duration.prices.map((price) => ({
+              currency: price.currency,
+              price: price.price.toString(),
+              days: duration.days,
+            })),
+          ),
     };
   }
 
