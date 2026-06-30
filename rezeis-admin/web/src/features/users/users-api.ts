@@ -1081,8 +1081,72 @@ async function issueWebAccountEmailVerificationChallenge(input: {
   return emailVerificationChallengeSchema.parse(unwrapPayload(response.data))
 }
 
+const accountMergeSummarySchema = z.object({
+  userId: z.string(),
+  login: z.string().nullable(),
+  telegramId: z.string().nullable(),
+  email: z.string().nullable(),
+  name: z.string(),
+  isBlocked: z.boolean(),
+  hasWebAccount: z.boolean(),
+  hasTrialGrant: z.boolean(),
+  subscriptions: z.object({ total: z.number(), active: z.number(), trial: z.number() }),
+  transactionsCount: z.number(),
+  partner: z.object({ isPartner: z.boolean(), balanceMinor: z.number() }),
+  createdAt: z.string(),
+})
+
+const accountMergePreviewSchema = z.object({
+  current: accountMergeSummarySchema,
+  counterpart: accountMergeSummarySchema,
+  conflicts: z.array(z.string()),
+})
+
+const accountMergeResultSchema = z.object({
+  mergedUserId: z.string(),
+  movedCounts: z.object({
+    subscriptions: z.number(),
+    transactions: z.number(),
+    partnerTransactions: z.number(),
+  }),
+  remnawaveSubscriptionIds: z.array(z.string()),
+})
+
+export type AccountMergeSummary = z.infer<typeof accountMergeSummarySchema>
+export type AccountMergePreview = z.infer<typeof accountMergePreviewSchema>
+export type AccountMergeResult = z.infer<typeof accountMergeResultSchema>
+
+export interface AccountMergeChoices {
+  readonly keepLogin?: 'source' | 'target'
+  readonly keepTelegram?: 'source' | 'target'
+  readonly keepEmail?: 'source' | 'target'
+  readonly currentSubscriptionId?: string
+}
+
+async function getAccountMergePreview(input: {
+  readonly userId: string
+  readonly ref: string
+}): Promise<AccountMergePreview> {
+  const response = await api.get(`/admin/users/${encodeURIComponent(input.userId)}/merge-preview`, {
+    params: { ref: input.ref },
+  })
+  return accountMergePreviewSchema.parse(unwrapPayload(response.data))
+}
+
+async function mergeAccounts(input: {
+  readonly sourceId: string
+  readonly targetId: string
+  readonly choices: AccountMergeChoices
+  readonly confirm: boolean
+}): Promise<AccountMergeResult> {
+  const response = await api.post('/admin/users/merge', input)
+  return accountMergeResultSchema.parse(unwrapPayload(response.data))
+}
+
 export const usersApi = {
   searchUser,
+  getAccountMergePreview,
+  mergeAccounts,
   listUsers,
   listCurrentSubscriptionDevices,
   getAccessDiagnostics,

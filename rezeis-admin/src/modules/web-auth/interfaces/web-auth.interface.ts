@@ -45,6 +45,28 @@ export interface WebAuthChangePasswordResultInterface {
 }
 
 /**
+ * Outcome of `POST /api/internal/web-auth/telegram-claim` (self-service link
+ * of a Telegram id to an existing web account):
+ *   - `linked`            — the Telegram id is now bound to the account
+ *                           (`userId` returned); the BFF re-mints the session.
+ *   - `already_linked`    — it was already bound to this account (idempotent).
+ *   - `needs_admin_merge` — the Telegram id is owned by a different account
+ *                           that has material data; an operator must merge.
+ *   - `web_account_has_other_telegram` — the target account is already linked
+ *                           to a different Telegram id.
+ */
+export type WebAuthTelegramClaimStatus =
+  | 'linked'
+  | 'already_linked'
+  | 'needs_admin_merge'
+  | 'web_account_has_other_telegram';
+
+export interface WebAuthTelegramClaimResultInterface {
+  readonly status: WebAuthTelegramClaimStatus;
+  readonly userId?: string;
+}
+
+/**
  * Result of `POST /api/internal/web-auth/bot-signin/issue`.
  *
  * Plaintext token is delivered exactly once on this response and never

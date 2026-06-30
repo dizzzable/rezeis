@@ -29,11 +29,13 @@ import { WebAuthClaimDto } from '../dto/web-auth-claim.dto';
 import { WebAuthLoginDto } from '../dto/web-auth-login.dto';
 import { WebAuthRecoverDto } from '../dto/web-auth-recover.dto';
 import { WebAuthRegisterDto } from '../dto/web-auth-register.dto';
+import { WebAuthTelegramClaimDto } from '../dto/web-auth-telegram-claim.dto';
 import {
   WebAuthChangePasswordResultInterface,
   WebAuthLoginResultInterface,
   WebAuthRecoverResultInterface,
   WebAuthRegisterResultInterface,
+  WebAuthTelegramClaimResultInterface,
 } from '../interfaces/web-auth.interface';
 
 /**
@@ -258,6 +260,160 @@ export class WebAuthService {
 
       return { userId: user.id, webAccountId: webAccount.id };
     });
+  }
+
+  /**
+   * Self-service Telegram link from the Mini App. The reiwa BFF has already
+   * proven control of the Telegram id `T` (via `initData`); the user proves
+   * ownership of their existing web account with login + password. We then bind
+   * `T` to that account when it is SAFE:
+   *
+   *   - `T` is unlinked            → set `target.telegramId = T` (`linked`).
+   *   - `T` already → target       → idempotent (`already_linked`).
+   *   - `T` → a different EMPTY     → retire the empty shell, then link
+   *     shell account B               (`linked`).
+   *   - `T` → a different account   → refuse (`needs_admin_merge`); the
+   *     with material data            operator merges via the admin panel.
+   *   - target already has a        → refuse (`web_account_has_other_telegram`).
+   *     different Telegram linked
+   *
+   * Invalid credentials yield the same generic failure as `login` (no
+   * enumeration). Runs in one transaction; re-pointing/retiring is atomic.
+   */
+  public async telegramClaim(
+    input: WebAuthTelegramClaimDto,
+  ): Promise<WebAuthTelegramClaimResultInterface> {
+    if (!loginPolicy.isValidLogin(input.login)) {
+      throw new UnauthorizedException('Invalid login or password');
+    }
+    const loginNormalized = loginPolicy.normalizeLogin(input.login);
+    const telegramIdBig = BigInt(input.telegramId);
+
+    const outcome = await this.prismaService.$transaction(async (tx) => {
+      // 1. Verify credentials → resolve the target web account / user.
+      const webAccount = await tx.webAccount.findUnique({
+        where: { loginNormalized },
+        select: { userId: true, passwordHash: true },
+      });
+      if (webAccount === null || webAccount.passwordHash === null) {
+        throw new UnauthorizedException('Invalid login or password');
+      }
+      const ok = await this.passwordHashService.verifyPassword({
+        plainTextPassword: input.password,
+        passwordHash: webAccount.passwordHash,
+      });
+      if (!ok) {
+        throw new UnauthorizedException('Invalid login or password');
+      }
+
+      const target = await tx.user.findUnique({
+        where: { id: webAccount.userId },
+        select: { id: true, telegramId: true },
+      });
+      if (target === null) {
+        // WebAccount.userId is an FK, so this is unreachable in practice; treat
+        // as a generic failure rather than leaking internal state.
+        throw new UnauthorizedException('Invalid login or password');
+      }
+
+      // 2. Reconcile the target's current Telegram binding.
+      if (target.telegramId === telegramIdBig) {
+        return { status: 'already_linked' as const, userId: target.id };
+      }
+      if (target.telegramId !== null) {
+        return { status: 'web_account_has_other_telegram' as const };
+      }
+
+      // 3. Who currently owns Telegram id T?
+      const owner = await tx.user.findUnique({
+        where: { telegramId: telegramIdBig },
+        select: { id: true },
+      });
+      if (owner === null) {
+        await tx.user.update({ where: { id: target.id }, data: { telegramId: telegramIdBig } });
+        return { status: 'linked' as const, userId: target.id, retiredShell: false };
+      }
+      if (owner.id === target.id) {
+        return { status: 'already_linked' as const, userId: target.id };
+      }
+
+      // 4. A different account B owns T. Only an EMPTY shell may be retired.
+      if (!(await this.isEmptyShell(tx, owner.id))) {
+        return { status: 'needs_admin_merge' as const };
+      }
+      // Clear the unique telegram id off B before deleting so the subsequent
+      // set on the target can never transiently collide; then retire B and
+      // bind T to the target.
+      await tx.user.update({ where: { id: owner.id }, data: { telegramId: null } });
+      await tx.user.delete({ where: { id: owner.id } });
+      await tx.user.update({ where: { id: target.id }, data: { telegramId: telegramIdBig } });
+      return { status: 'linked' as const, userId: target.id, retiredShell: true };
+    });
+
+    if (outcome.status === 'linked') {
+      this.systemEventsService.info(
+        EVENT_TYPES.USER_TELEGRAM_LINKED,
+        'USER',
+        'Telegram linked via Mini App login',
+        {
+          userId: outcome.userId,
+          telegramId: input.telegramId,
+          source: 'miniapp_link_existing',
+          retiredShell: outcome.retiredShell === true,
+        },
+      );
+      return { status: 'linked', userId: outcome.userId };
+    }
+    if (outcome.status === 'already_linked') {
+      return { status: 'already_linked', userId: outcome.userId };
+    }
+    return { status: outcome.status };
+  }
+
+  /**
+   * True when `userId` is an EMPTY Telegram shell that is safe to retire during
+   * a self-service link: it carries no material data. A trial-only shell IS
+   * empty (its trial subscription / grant are discarded with it). Anything that
+   * would block the `User` delete (`onDelete: Restrict` rows) or that belongs
+   * to someone else's ledger (partner chain) makes it non-empty → the operator
+   * must merge instead.
+   */
+  private async isEmptyShell(
+    tx: Prisma.TransactionClient,
+    userId: string,
+  ): Promise<boolean> {
+    const [
+      webAccount,
+      transactions,
+      partner,
+      nonTrialSubscriptions,
+      referralRewards,
+      promocodeActivations,
+      partnerLedgerEntries,
+      partnerReferralEdges,
+      referralsGiven,
+    ] = await Promise.all([
+      tx.webAccount.findUnique({ where: { userId }, select: { id: true } }),
+      tx.transaction.count({ where: { userId } }),
+      tx.partner.findUnique({ where: { userId }, select: { id: true } }),
+      tx.subscription.count({ where: { userId, isTrial: false } }),
+      tx.referralReward.count({ where: { userId } }),
+      tx.promocodeActivation.count({ where: { userId } }),
+      tx.partnerTransaction.count({ where: { referralUserId: userId } }),
+      tx.partnerReferral.count({ where: { referralUserId: userId } }),
+      tx.referral.count({ where: { referrerId: userId } }),
+    ]);
+    return (
+      webAccount === null &&
+      transactions === 0 &&
+      partner === null &&
+      nonTrialSubscriptions === 0 &&
+      referralRewards === 0 &&
+      promocodeActivations === 0 &&
+      partnerLedgerEntries === 0 &&
+      partnerReferralEdges === 0 &&
+      referralsGiven === 0
+    );
   }
 
   /**

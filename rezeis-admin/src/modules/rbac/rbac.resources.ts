@@ -42,6 +42,11 @@ export const RBAC_ACTIONS = [
   /// advertising requests. Separated from `edit` because it gates the partner
   /// moderation queue specifically.
   'moderate',
+  /// Account consolidation — merging two `User` accounts into one
+  /// (irreversible: moves subscriptions/transactions, sums partner balances).
+  /// Separated from `edit` because of its destructive, cross-account blast
+  /// radius.
+  'merge',
 ] as const;
 
 export type RbacAction = (typeof RBAC_ACTIONS)[number];
@@ -56,7 +61,7 @@ export type RbacAction = (typeof RBAC_ACTIONS)[number];
 export const RBAC_RESOURCES: Readonly<Record<string, readonly RbacAction[]>> = {
   // Operations
   dashboard: ['view'],
-  users: ['view', 'create', 'edit', 'delete', 'bulk_operations'],
+  users: ['view', 'create', 'edit', 'delete', 'bulk_operations', 'merge'],
   subscriptions: ['view', 'create', 'edit', 'delete'],
   payments: ['view', 'create', 'edit', 'delete', 'export'],
   payment_gateways: ['view', 'edit'],

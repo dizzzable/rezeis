@@ -94,6 +94,7 @@ export const EVENT_TYPES = {
   USER_ROLE_CHANGED: 'user.role_changed',
   USER_TELEGRAM_LINKED: 'user.telegram_linked',
   USER_EMAIL_LINKED: 'user.email_linked',
+  USER_ACCOUNTS_MERGED: 'user.accounts_merged',
 
   // Auth
   AUTH_WEB_LOGIN: 'auth.web_login',

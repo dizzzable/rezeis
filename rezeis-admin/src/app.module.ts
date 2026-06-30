@@ -55,7 +55,8 @@ import { NotificationsModule } from './modules/notifications/notifications.modul
 import { OAuthModule } from './modules/oauth/oauth.module';
 import { EmailDeliveryModule } from './modules/email/email.module';
 import { PartnersModule } from './modules/partners/partners.module';
-import { AdvertisingModule } from './modules/advertising/advertising.module';import { PaymentAnalyticsModule } from './modules/payment-analytics/payment-analytics.module';
+import { AdvertisingModule } from './modules/advertising/advertising.module';import { AccountMergeModule } from './modules/account-merge/account-merge.module';
+import { PaymentAnalyticsModule } from './modules/payment-analytics/payment-analytics.module';
 import { PaymentsModule } from './modules/payments/payments.module';
 import { PlansModule } from './modules/plans/plans.module';
 import { ProfileSyncModule } from './modules/profile-sync/profile-sync.module';
@@ -121,6 +122,7 @@ import { WebhooksModule } from './modules/webhooks/webhooks.module';
     AuthModule,
     AntiFraudModule,
     AdvertisingModule,
+    AccountMergeModule,
     ApiTokensModule,
     AuditModule,
     SystemEventsIngestModule,

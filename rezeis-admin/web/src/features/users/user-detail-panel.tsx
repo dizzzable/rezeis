@@ -93,6 +93,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { PermissionGate } from '@/features/rbac'
+import { usersApi, type AccountMergePreview, type AccountMergeChoices } from './users-api'
 
 interface UserDetailPanelProps {
   readonly telegramId: string
@@ -2229,6 +2230,194 @@ function TransactionsTab({ user }: { user: UserDetail }) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
+// Merge accounts — operator consolidation of two accounts into one
+// ══════════════════════════════════════════════════════════════════════════════
+
+function MergeAccountsCard({
+  currentUserId,
+  queryKey,
+}: {
+  currentUserId: string
+  queryKey: string[]
+}) {
+  const { t } = useTranslation()
+  const queryClient = useQueryClient()
+  const [refValue, setRefValue] = useState('')
+  const [preview, setPreview] = useState<AccountMergePreview | null>(null)
+  const [survivor, setSurvivor] = useState<'current' | 'counterpart'>('current')
+  const [keepLogin, setKeepLogin] = useState<'current' | 'counterpart'>('current')
+  const [keepTelegram, setKeepTelegram] = useState<'current' | 'counterpart'>('current')
+  const [keepEmail, setKeepEmail] = useState<'current' | 'counterpart'>('current')
+  const [confirmText, setConfirmText] = useState('')
+
+  const previewMutation = useMutation({
+    mutationFn: () => usersApi.getAccountMergePreview({ userId: currentUserId, ref: refValue.trim() }),
+    onSuccess: (data) => {
+      setPreview(data)
+      setSurvivor('current')
+      setKeepLogin('current')
+      setKeepTelegram('current')
+      setKeepEmail('current')
+      setConfirmText('')
+    },
+    onError: (err) => {
+      setPreview(null)
+      toast.error(getErrorMessage(err, t('userDetailPanel.web.merge.notFound')))
+    },
+  })
+
+  const mergeMutation = useMutation({
+    mutationFn: () => {
+      if (!preview) throw new Error('no preview')
+      const targetId = survivor === 'current' ? preview.current.userId : preview.counterpart.userId
+      const sourceId = survivor === 'current' ? preview.counterpart.userId : preview.current.userId
+      const toSide = (side: 'current' | 'counterpart'): 'source' | 'target' =>
+        side === survivor ? 'target' : 'source'
+      const choices: AccountMergeChoices = {
+        ...(preview.conflicts.includes('login') ? { keepLogin: toSide(keepLogin) } : {}),
+        ...(preview.conflicts.includes('telegram') ? { keepTelegram: toSide(keepTelegram) } : {}),
+        ...(preview.conflicts.includes('email') ? { keepEmail: toSide(keepEmail) } : {}),
+      }
+      return usersApi.mergeAccounts({ sourceId, targetId, choices, confirm: true })
+    },
+    onSuccess: (res) => {
+      toast.success(
+        t('userDetailPanel.web.merge.success', {
+          subscriptions: res.movedCounts.subscriptions,
+          transactions: res.movedCounts.transactions,
+        }),
+      )
+      setPreview(null)
+      setRefValue('')
+      setConfirmText('')
+      queryClient.invalidateQueries({ queryKey })
+    },
+    onError: (err) => toast.error(getErrorMessage(err, t('userDetailPanel.web.merge.failed'))),
+  })
+
+  const confirmed = confirmText.trim().toUpperCase() === 'MERGE'
+  const conflictFields = (['login', 'telegram', 'email'] as const).filter((c) =>
+    preview?.conflicts.includes(c),
+  )
+
+  const renderColumn = (side: 'current' | 'counterpart', acc: AccountMergePreview['current']) => (
+    <button
+      type="button"
+      onClick={() => setSurvivor(side)}
+      className={cn(
+        'space-y-0.5 rounded-lg border p-2 text-left text-[11px] transition-colors',
+        survivor === side ? 'border-primary ring-1 ring-primary' : 'border-border hover:border-primary/40',
+      )}
+    >
+      <p className="font-semibold">
+        {survivor === side
+          ? `✓ ${t('userDetailPanel.web.merge.survivor')}`
+          : t('userDetailPanel.web.merge.willDelete')}
+      </p>
+      <p className="truncate text-muted-foreground">{t('userDetailPanel.web.merge.loginField')}: {acc.login ?? '—'}</p>
+      <p className="truncate text-muted-foreground">TG: {acc.telegramId ?? '—'}</p>
+      <p className="truncate text-muted-foreground">{acc.email ?? '—'}</p>
+      <p className="text-muted-foreground">
+        {t('userDetailPanel.web.merge.subs')}: {acc.subscriptions.total} · {t('userDetailPanel.web.merge.tx')}: {acc.transactionsCount}
+      </p>
+      {acc.partner.isPartner && (
+        <p className="text-muted-foreground">
+          {t('userDetailPanel.web.merge.partner')}: {(acc.partner.balanceMinor / 100).toFixed(0)}₽
+        </p>
+      )}
+    </button>
+  )
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-sm">{t('userDetailPanel.web.merge.title')}</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <p className="text-xs text-muted-foreground">{t('userDetailPanel.web.merge.description')}</p>
+        <div className="flex gap-2">
+          <Input
+            value={refValue}
+            onChange={(e) => setRefValue(e.target.value)}
+            placeholder={t('userDetailPanel.web.merge.refPlaceholder')}
+            className="h-8 text-xs"
+          />
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={refValue.trim().length === 0 || previewMutation.isPending}
+            onClick={() => previewMutation.mutate()}
+          >
+            {t('userDetailPanel.web.merge.find')}
+          </Button>
+        </div>
+
+        {preview && (
+          <div className="space-y-3">
+            <p className="text-[11px] text-muted-foreground">{t('userDetailPanel.web.merge.pickSurvivor')}</p>
+            <div className="grid grid-cols-2 gap-2">
+              {renderColumn('current', preview.current)}
+              {renderColumn('counterpart', preview.counterpart)}
+            </div>
+
+            {conflictFields.length > 0 && (
+              <div className="space-y-1.5 rounded-md border border-border p-2">
+                <p className="text-[11px] font-medium">{t('userDetailPanel.web.merge.conflictsTitle')}</p>
+                {conflictFields.map((c) => {
+                  const value = c === 'login' ? keepLogin : c === 'telegram' ? keepTelegram : keepEmail
+                  const setValue =
+                    c === 'login' ? setKeepLogin : c === 'telegram' ? setKeepTelegram : setKeepEmail
+                  return (
+                    <div key={c} className="flex items-center justify-between gap-2 text-[11px]">
+                      <span className="text-muted-foreground">{t(`userDetailPanel.web.merge.conflict.${c}`)}</span>
+                      <div className="flex gap-1">
+                        {(['current', 'counterpart'] as const).map((sideOpt) => (
+                          <button
+                            key={sideOpt}
+                            type="button"
+                            onClick={() => setValue(sideOpt)}
+                            className={cn(
+                              'rounded border px-2 py-0.5',
+                              value === sideOpt ? 'border-primary bg-primary/10' : 'border-border',
+                            )}
+                          >
+                            {sideOpt === 'current'
+                              ? t('userDetailPanel.web.merge.thisAccount')
+                              : t('userDetailPanel.web.merge.otherAccount')}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+
+            <div className="rounded-md border border-destructive/40 bg-destructive/10 p-2 text-[11px] text-destructive">
+              {t('userDetailPanel.web.merge.warning')}
+            </div>
+            <Input
+              value={confirmText}
+              onChange={(e) => setConfirmText(e.target.value)}
+              placeholder={t('userDetailPanel.web.merge.confirmPlaceholder')}
+              className="h-8 text-xs"
+            />
+            <Button
+              size="sm"
+              variant="destructive"
+              disabled={!confirmed || mergeMutation.isPending}
+              onClick={() => mergeMutation.mutate()}
+            >
+              {t('userDetailPanel.web.merge.execute')}
+            </Button>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
 // Web Cabinet Tab — DEV-only operations on the linked WebAccount
 // ══════════════════════════════════════════════════════════════════════════════
 
@@ -2507,6 +2696,8 @@ function WebCabinetTab({
           </CardContent>
         </Card>
       )}
+
+      <MergeAccountsCard currentUserId={user.id} queryKey={queryKey} />
 
       {/* Temp password modal */}
       <Dialog

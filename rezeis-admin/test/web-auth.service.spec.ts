@@ -488,6 +488,108 @@ describe('WebAuthService', () => {
     const result = await service.register({ login: 'pbuser', password: 'plain-password' });
     assert.deepStrictEqual(result, { userId: 'user-1', webAccountId: 'web-account-1' });
   });
+
+  // ── telegramClaim — self-service Mini App account link ─────────────────────
+
+  it('telegramClaim links a free Telegram id to the existing account', async () => {
+    const { prisma, userUpdates, userDeletes } = createTelegramClaimPrismaMock({
+      loginNormalized: 'web-user',
+      account: { userId: 'A', passwordHash: 'hashed:plain-password' },
+      targetUser: { id: 'A', telegramId: null },
+      telegramOwner: null,
+    });
+    const service = createService({ prisma });
+
+    const result = await service.telegramClaim({ telegramId: '123', login: 'Web-User', password: 'plain-password' });
+
+    assert.deepStrictEqual(result, { status: 'linked', userId: 'A' });
+    assert.equal(userDeletes.length, 0);
+    assert.deepStrictEqual(userUpdates, [{ where: { id: 'A' }, data: { telegramId: BigInt(123) } }]);
+  });
+
+  it('telegramClaim is idempotent when the Telegram id is already on the account', async () => {
+    const { prisma, userUpdates } = createTelegramClaimPrismaMock({
+      loginNormalized: 'web-user',
+      account: { userId: 'A', passwordHash: 'hashed:plain-password' },
+      targetUser: { id: 'A', telegramId: BigInt(123) },
+      telegramOwner: { id: 'A' },
+    });
+    const service = createService({ prisma });
+
+    const result = await service.telegramClaim({ telegramId: '123', login: 'web-user', password: 'plain-password' });
+
+    assert.deepStrictEqual(result, { status: 'already_linked', userId: 'A' });
+    assert.equal(userUpdates.length, 0);
+  });
+
+  it('telegramClaim refuses when the account already has a different Telegram linked', async () => {
+    const { prisma } = createTelegramClaimPrismaMock({
+      loginNormalized: 'web-user',
+      account: { userId: 'A', passwordHash: 'hashed:plain-password' },
+      targetUser: { id: 'A', telegramId: BigInt(999) },
+    });
+    const service = createService({ prisma });
+
+    const result = await service.telegramClaim({ telegramId: '123', login: 'web-user', password: 'plain-password' });
+
+    assert.deepStrictEqual(result, { status: 'web_account_has_other_telegram' });
+  });
+
+  it('telegramClaim retires an empty shell and links the Telegram id to the account', async () => {
+    const { prisma, userUpdates, userDeletes } = createTelegramClaimPrismaMock({
+      loginNormalized: 'web-user',
+      account: { userId: 'A', passwordHash: 'hashed:plain-password' },
+      targetUser: { id: 'A', telegramId: null },
+      telegramOwner: { id: 'B' },
+      shellEmpty: true,
+    });
+    const service = createService({ prisma });
+
+    const result = await service.telegramClaim({ telegramId: '123', login: 'web-user', password: 'plain-password' });
+
+    assert.deepStrictEqual(result, { status: 'linked', userId: 'A' });
+    assert.deepStrictEqual(userDeletes, ['B']);
+    assert.deepStrictEqual(userUpdates, [
+      { where: { id: 'B' }, data: { telegramId: null } },
+      { where: { id: 'A' }, data: { telegramId: BigInt(123) } },
+    ]);
+  });
+
+  it('telegramClaim refuses to merge a Telegram account that has material data', async () => {
+    const { prisma, userDeletes } = createTelegramClaimPrismaMock({
+      loginNormalized: 'web-user',
+      account: { userId: 'A', passwordHash: 'hashed:plain-password' },
+      targetUser: { id: 'A', telegramId: null },
+      telegramOwner: { id: 'B' },
+      shellEmpty: false,
+    });
+    const service = createService({ prisma });
+
+    const result = await service.telegramClaim({ telegramId: '123', login: 'web-user', password: 'plain-password' });
+
+    assert.deepStrictEqual(result, { status: 'needs_admin_merge' });
+    assert.equal(userDeletes.length, 0);
+  });
+
+  it('telegramClaim returns a generic failure on wrong password or unknown login', async () => {
+    const wrongPw = createTelegramClaimPrismaMock({
+      loginNormalized: 'web-user',
+      account: { userId: 'A', passwordHash: 'hashed:correct-password' },
+      targetUser: { id: 'A', telegramId: null },
+    });
+    const wrongService = createService({ prisma: wrongPw.prisma });
+    await assert.rejects(
+      () => wrongService.telegramClaim({ telegramId: '123', login: 'web-user', password: 'wrong-password' }),
+      (error: unknown) => error instanceof UnauthorizedException && error.message === 'Invalid login or password',
+    );
+
+    const unknown = createTelegramClaimPrismaMock({ loginNormalized: 'web-user', account: null });
+    const unknownService = createService({ prisma: unknown.prisma });
+    await assert.rejects(
+      () => unknownService.telegramClaim({ telegramId: '123', login: 'missing', password: 'whatever-pw' }),
+      (error: unknown) => error instanceof UnauthorizedException && error.message === 'Invalid login or password',
+    );
+  });
 });
 
 interface CreatePrismaMockOptions {
@@ -728,4 +830,70 @@ async function assertGenericLoginFailure(
     () => service.login(input),
     (error: unknown) => error instanceof UnauthorizedException && error.message === 'Invalid login or password',
   );
+}
+
+/**
+ * Focused Prisma stub for `telegramClaim` — covers only the surface that method
+ * touches (credential lookup, target/owner resolution, empty-shell counts,
+ * user update/delete) and records the user.update / user.delete calls.
+ */
+function createTelegramClaimPrismaMock(opts: {
+  readonly loginNormalized?: string;
+  readonly account?: { readonly userId: string; readonly passwordHash: string | null } | null;
+  readonly targetUser?: { readonly id: string; readonly telegramId: bigint | null };
+  readonly telegramOwner?: { readonly id: string } | null;
+  readonly shellEmpty?: boolean;
+}): {
+  readonly prisma: PrismaMock;
+  readonly userUpdates: Array<{ where: unknown; data: unknown }>;
+  readonly userDeletes: string[];
+} {
+  const userUpdates: Array<{ where: unknown; data: unknown }> = [];
+  const userDeletes: string[] = [];
+  const empty = opts.shellEmpty !== false; // default: empty shell
+  const tx = {
+    webAccount: {
+      findUnique: async (args: { readonly where: { readonly loginNormalized?: string; readonly userId?: string } }) => {
+        if (args.where.loginNormalized !== undefined) {
+          return opts.account && args.where.loginNormalized === opts.loginNormalized
+            ? opts.account
+            : null;
+        }
+        return null; // isEmptyShell: a shell has no web account
+      },
+    },
+    user: {
+      findUnique: async (args: { readonly where: { readonly id?: string; readonly telegramId?: bigint } }) => {
+        if (args.where.id !== undefined) {
+          if (opts.targetUser && args.where.id === opts.targetUser.id) return opts.targetUser;
+          if (opts.telegramOwner && args.where.id === opts.telegramOwner.id) return { id: opts.telegramOwner.id };
+          return null;
+        }
+        if (args.where.telegramId !== undefined) {
+          return opts.telegramOwner ?? null;
+        }
+        return null;
+      },
+      update: async (args: { readonly where: unknown; readonly data: unknown }) => {
+        userUpdates.push(args);
+        return { id: 'updated' };
+      },
+      delete: async (args: { readonly where: { readonly id: string } }) => {
+        userDeletes.push(args.where.id);
+        return { id: args.where.id };
+      },
+    },
+    transaction: { count: async () => (empty ? 0 : 1) },
+    partner: { findUnique: async () => null },
+    subscription: { count: async () => 0 },
+    referralReward: { count: async () => 0 },
+    promocodeActivation: { count: async () => 0 },
+    partnerTransaction: { count: async () => 0 },
+    partnerReferral: { count: async () => 0 },
+    referral: { count: async () => 0 },
+  };
+  const prisma = {
+    $transaction: async <T>(callback: (transaction: typeof tx) => Promise<T>): Promise<T> => callback(tx),
+  };
+  return { prisma: prisma as unknown as PrismaMock, userUpdates, userDeletes };
 }

@@ -221,10 +221,17 @@ export class ProfileSyncProcessor extends WorkerHost {
     const planSnapshot = readRecord(subscription.planSnapshot);
     const tag = readOptionalString(planSnapshot, 'tag');
     const trafficLimitStrategy = readOptionalString(planSnapshot, 'trafficLimitStrategy');
+    // Rebuild the description so it reflects the user's current identity
+    // (login / username / reiwa_id). This keeps the panel profile correct after
+    // an account merge re-points the subscription to a different user. The
+    // username is intentionally NOT changed (renaming risks 400 duplicate
+    // collisions on the panel).
+    const naming = await this.namingService.generateProfileName(subscription.userId, subscription.id);
 
     await this.remnawaveApiService.updatePanelUser(subscription.remnawaveId, {
       telegramId: contacts.telegramId ? Number(contacts.telegramId) : null,
       email: contacts.email,
+      description: naming.description,
       tag,
       expireAt: subscription.expiresAt?.toISOString(),
       trafficLimitBytes: (subscription.trafficLimit ?? 0) * 1024 * 1024 * 1024,

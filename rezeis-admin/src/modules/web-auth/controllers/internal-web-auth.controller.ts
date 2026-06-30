@@ -10,6 +10,7 @@ import { WebAuthClaimDto } from '../dto/web-auth-claim.dto';
 import { WebAuthLoginDto } from '../dto/web-auth-login.dto';
 import { WebAuthRecoverDto } from '../dto/web-auth-recover.dto';
 import { WebAuthRegisterDto } from '../dto/web-auth-register.dto';
+import { WebAuthTelegramClaimDto } from '../dto/web-auth-telegram-claim.dto';
 import {
   WebAuthBotSigninConsumeResultInterface,
   WebAuthBotSigninIssueResultInterface,
@@ -17,6 +18,7 @@ import {
   WebAuthLoginResultInterface,
   WebAuthRecoverResultInterface,
   WebAuthRegisterResultInterface,
+  WebAuthTelegramClaimResultInterface,
 } from '../interfaces/web-auth.interface';
 import { BotSigninTokenService } from '../services/bot-signin-token.service';
 import { WebAuthService } from '../services/web-auth.service';
@@ -60,6 +62,19 @@ export class InternalWebAuthController {
   })
   public claim(@Body() body: WebAuthClaimDto): Promise<WebAuthRegisterResultInterface> {
     return this.webAuthService.claim(body);
+  }
+
+  @Post('telegram-claim')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Bind the current Telegram id to an existing web account (self-service)',
+    description:
+      "Mini App 'I already have an account' flow. Verifies login+password, then links the caller's Telegram id to that account when safe (free / same / empty-shell). Returns { status, userId? }: `linked` / `already_linked` re-mint the session; `needs_admin_merge` (the Telegram already owns an account with data) and `web_account_has_other_telegram` are typed refusals the BFF maps to 409.",
+  })
+  public telegramClaim(
+    @Body() body: WebAuthTelegramClaimDto,
+  ): Promise<WebAuthTelegramClaimResultInterface> {
+    return this.webAuthService.telegramClaim(body);
   }
 
   @Post('check-login')

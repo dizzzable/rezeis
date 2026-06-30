@@ -73,17 +73,17 @@ export default function SettingsPage() {
         <p className="text-muted-foreground">{t('settingsPage.subtitle')}</p>
       </div>
 
-      <div className="grid gap-6 xl:grid-cols-2 xl:items-start">
+      <div className="grid gap-6 lg:grid-cols-2 lg:items-start">
         <div className="space-y-6">
           <PlatformTab settings={settings} />
           <MultiSubTab settings={settings} />
-          <BotTokenSection settings={settings} />
         </div>
         <div className="space-y-6">
-          <BrandingTab settings={settings} />
+          <BotTokenSection settings={settings} />
           <WebPushSection settings={settings} />
         </div>
       </div>
+      <BrandingTab settings={settings} />
     </div>
   )
 }
@@ -453,7 +453,7 @@ export function BrandingTab({ settings }: { settings: AdminSettings | undefined 
         <CardDescription>{t('settingsPage.branding.description')}</CardDescription>
       </CardHeader>
       <CardContent className="space-y-6">
-        <div className="grid gap-4 md:grid-cols-2">
+        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
           <div className="space-y-2">
             <Label htmlFor="settings-branding-project-name">{t('settingsPage.branding.projectName')}</Label>
             <Input

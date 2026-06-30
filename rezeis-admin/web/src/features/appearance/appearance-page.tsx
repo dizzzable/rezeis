@@ -101,11 +101,13 @@ export default function AppearancePage() {
         </TabsList>
 
         <TabsContent value="presets" className="space-y-4">
-          <div className="grid gap-4 lg:grid-cols-[minmax(220px,260px)_1fr] lg:items-start">
-            <ModeCard orientation="vertical" />
+          <div className="grid gap-4 lg:grid-cols-[minmax(240px,280px)_1fr] lg:items-start">
+            <div className="space-y-4">
+              <ModeCard orientation="vertical" />
+              <RadiusCard />
+            </div>
             <PresetsCard />
           </div>
-          <RadiusCard />
         </TabsContent>
 
         <TabsContent value="customize" className="space-y-4">
@@ -296,7 +298,7 @@ function RadiusCard() {
           ))}
         </div>
         <Separator />
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           <span className="w-20 text-sm text-muted-foreground">
             {t('appearancePage.radius.previewLabel')}
           </span>

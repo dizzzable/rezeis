@@ -36,6 +36,7 @@ describe('ProfileSyncProcessor', () => {
         updatePanelUser: async (...args: unknown[]) => { remnawaveUpdates.push(args); },
       } as never,
       {
+        generateProfileName: async () => ({ username: 'rz_subscription_1', description: 'profile description' }),
         getContactInfo: async () => ({ email: 'user@example.test', telegramId: 123n }),
       } as never,
       { error: () => undefined, info: () => undefined } as never,
@@ -50,6 +51,7 @@ describe('ProfileSyncProcessor', () => {
       {
         telegramId: 123,
         email: 'user@example.test',
+        description: 'profile description',
         tag: 'premium',
         expireAt: '2099-01-01T00:00:00.000Z',
         trafficLimitBytes: 2 * 1024 * 1024 * 1024,
