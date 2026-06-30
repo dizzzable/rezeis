@@ -67,18 +67,22 @@ export default function SettingsPage() {
   if (isLoading) return <div className="space-y-4"><Skeleton className="h-8 w-48" /><Skeleton className="h-64 w-full" /></div>
 
   return (
-    <div className="mx-auto w-full max-w-4xl space-y-6">
+    <div className="mx-auto w-full max-w-6xl space-y-6">
       <div>
         <h1 className="text-2xl font-bold tracking-tight">{t('settingsPage.title')}</h1>
         <p className="text-muted-foreground">{t('settingsPage.subtitle')}</p>
       </div>
 
-      <div className="space-y-6">
-        <PlatformTab settings={settings} />
-        <BrandingTab settings={settings} />
-        <MultiSubTab settings={settings} />
-        <BotTokenSection settings={settings} />
-        <WebPushSection settings={settings} />
+      <div className="grid gap-6 xl:grid-cols-2 xl:items-start">
+        <div className="space-y-6">
+          <PlatformTab settings={settings} />
+          <MultiSubTab settings={settings} />
+          <BotTokenSection settings={settings} />
+        </div>
+        <div className="space-y-6">
+          <BrandingTab settings={settings} />
+          <WebPushSection settings={settings} />
+        </div>
       </div>
     </div>
   )
@@ -132,7 +136,7 @@ export function PlatformTab({ settings }: { settings: AdminSettings | undefined 
   }
 
   return (
-    <Card className="mt-4">
+    <Card>
       <CardHeader>
         <CardTitle>{t('settingsPage.platform.title')}</CardTitle>
         <CardDescription>{t('settingsPage.platform.description')}</CardDescription>
@@ -443,7 +447,7 @@ export function BrandingTab({ settings }: { settings: AdminSettings | undefined 
   }
 
   return (
-    <Card className="mt-4">
+    <Card>
       <CardHeader>
         <CardTitle>{t('settingsPage.branding.title')}</CardTitle>
         <CardDescription>{t('settingsPage.branding.description')}</CardDescription>
@@ -569,7 +573,7 @@ export function MultiSubTab({ settings }: { settings: AdminSettings | undefined 
   })
 
   return (
-    <Card className="mt-4">
+    <Card>
       <CardHeader>
         <CardTitle>{t('settingsPage.multiSub.title')}</CardTitle>
         <CardDescription>{t('settingsPage.multiSub.description')}</CardDescription>

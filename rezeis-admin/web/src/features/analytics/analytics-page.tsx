@@ -194,25 +194,27 @@ function SurfaceUsageCard() {
         {isLoading || !data ? (
           <Skeleton className="h-32 w-full" />
         ) : (
-          <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:gap-8">
-            <div className="min-w-0 flex-1 space-y-4">
-              <div className="flex flex-wrap gap-6">
-                <div>
+          <div className="grid gap-6 lg:grid-cols-[1.5fr_1fr] lg:items-center">
+            <div className="space-y-4">
+              <div className="grid grid-cols-3 gap-3">
+                <div className="rounded-lg border bg-muted/20 p-3">
                   <p className="text-2xl font-bold tabular-nums">{data.totalTracked.toLocaleString()}</p>
                   <p className="text-xs text-muted-foreground">{t('analyticsPage.surfaces.tracked')}</p>
                 </div>
-                <div>
+                <div className="rounded-lg border bg-muted/20 p-3">
                   <p className="text-2xl font-bold tabular-nums text-emerald-600">{data.activeLast30d.toLocaleString()}</p>
                   <p className="text-xs text-muted-foreground">{t('analyticsPage.surfaces.active30d')}</p>
                 </div>
-                <div>
+                <div className="rounded-lg border bg-muted/20 p-3">
                   <p className="text-2xl font-bold tabular-nums text-sky-600">{data.pwaInstalls.toLocaleString()}</p>
                   <p className="text-xs text-muted-foreground">{t('analyticsPage.surfaces.pwaInstalls')}</p>
                 </div>
               </div>
-              <SurfaceBreakdownRow label={t('analyticsPage.surfaces.bySurface')} items={data.surfaces} labelFor={(k) => labelFor('surface', k)} />
-              <SurfaceBreakdownRow label={t('analyticsPage.surfaces.byForm')} items={data.formFactors} labelFor={(k) => labelFor('form', k)} />
-              <SurfaceBreakdownRow label={t('analyticsPage.surfaces.byOs')} items={data.operatingSystems} labelFor={(k) => labelFor('os', k)} />
+              <div className="grid gap-4 sm:grid-cols-3">
+                <SurfaceBreakdownRow label={t('analyticsPage.surfaces.bySurface')} items={data.surfaces} labelFor={(k) => labelFor('surface', k)} />
+                <SurfaceBreakdownRow label={t('analyticsPage.surfaces.byForm')} items={data.formFactors} labelFor={(k) => labelFor('form', k)} />
+                <SurfaceBreakdownRow label={t('analyticsPage.surfaces.byOs')} items={data.operatingSystems} labelFor={(k) => labelFor('os', k)} />
+              </div>
             </div>
             <SurfaceDonut
               label={t('analyticsPage.surfaces.bySurface')}
@@ -250,7 +252,7 @@ function SurfaceDonut({
     value: item.count,
   }))
   return (
-    <div className="mx-auto w-full max-w-60 shrink-0 lg:mx-0">
+    <div className="mx-auto w-full max-w-72 lg:mx-auto">
       <p className="mb-2 text-xs font-medium text-muted-foreground">{label}</p>
       <div className="h-40 w-full">
         <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>

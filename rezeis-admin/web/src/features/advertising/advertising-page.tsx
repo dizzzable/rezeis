@@ -165,7 +165,7 @@ export default function AdvertisingPage() {
                     {t('advertisingPage.campaign.placementsEmpty')}
                   </p>
                 ) : (
-                  <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                  <div className="space-y-3">
                     {c.placements.map((p) => (
                       <PlacementTile key={p.id} placement={p} />
                     ))}
@@ -217,25 +217,25 @@ function PlacementTile({ placement }: { placement: AdPlacement }) {
   }
 
   return (
-    <div className="space-y-2 rounded-lg border p-3">
-      <div className="flex items-center justify-between gap-2">
+    <div className="rounded-lg border p-3">
+      <div className="flex flex-wrap items-center gap-2">
         <Badge variant="outline">{t(`advertisingPage.platforms.${placement.platform}`)}</Badge>
         <Badge variant={placement.ownerType === 'PARTNER' ? 'secondary' : 'outline'}>
           {t(`advertisingPage.owner.${placement.ownerType}`)}
         </Badge>
-        <span className="ml-auto text-xs text-muted-foreground">
+        {placement.channel && (
+          <span className="max-w-[180px] truncate text-sm text-muted-foreground">{placement.channel}</span>
+        )}
+        <div className="flex min-w-[180px] flex-1 items-center gap-1.5">
+          <code className="min-w-0 flex-1 truncate rounded bg-muted px-1.5 py-0.5 text-xs">{placement.payload}</code>
+          <InfoHint text={t('advertisingPage.help.trackingCode')} />
+          <Button size="icon" variant="ghost" className="h-7 w-7 shrink-0" onClick={copyLink} aria-label={t('advertisingPage.actions.copy')}>
+            {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+          </Button>
+        </div>
+        <Badge variant="outline" className="shrink-0 font-normal text-muted-foreground">
           {t(`advertisingPage.status.${placement.status}`)}
-        </span>
-      </div>
-      {placement.channel && <p className="truncate text-sm">{placement.channel}</p>}
-      <div className="flex items-center gap-1.5">
-        <code className="truncate rounded bg-muted px-1.5 py-0.5 text-xs">{placement.payload}</code>
-        <InfoHint text={t('advertisingPage.help.trackingCode')} />
-        <Button size="icon" variant="ghost" className="ml-auto h-7 w-7" onClick={copyLink} aria-label={t('advertisingPage.actions.copy')}>
-          {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
-        </Button>
-      </div>
-      <div className="flex items-center gap-2">
+        </Badge>
         <Button size="sm" variant="ghost" className="h-7 gap-1 text-xs" onClick={() => setShowMetrics((v) => !v)}>
           <BarChart3 className="h-3.5 w-3.5" />
           {t('advertisingPage.metrics.title')}
@@ -243,7 +243,7 @@ function PlacementTile({ placement }: { placement: AdPlacement }) {
         <Button
           size="sm"
           variant="ghost"
-          className="ml-auto h-7 gap-1 text-xs text-destructive"
+          className="h-7 gap-1 text-xs text-destructive"
           onClick={() => archive.mutate()}
           disabled={archive.isPending || placement.status === 'ARCHIVED'}
         >
@@ -251,7 +251,11 @@ function PlacementTile({ placement }: { placement: AdPlacement }) {
           {t('advertisingPage.actions.archive')}
         </Button>
       </div>
-      {showMetrics && <PlacementMetrics placementId={placement.id} />}
+      {showMetrics && (
+        <div className="mt-3">
+          <PlacementMetrics placementId={placement.id} />
+        </div>
+      )}
     </div>
   )
 }
@@ -270,7 +274,7 @@ function PlacementMetrics({ placementId }: { placementId: string }) {
   const money = (v: number | null) =>
     v === null ? t('advertisingPage.metrics.na') : formatMoney(v, (data as AdMetrics).currency)
   return (
-    <div className="grid grid-cols-2 gap-2 rounded-md bg-muted/40 p-2 text-xs">
+    <div className="grid grid-cols-2 gap-x-6 gap-y-2 rounded-md bg-muted/40 p-3 text-xs sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">
       <Metric label={t('advertisingPage.metrics.opens')} value={data.opens.toLocaleString()} />
       <Metric label={t('advertisingPage.metrics.registrations')} value={data.registrations.toLocaleString()} />
       <Metric label={t('advertisingPage.metrics.conversions')} value={data.conversions.toLocaleString()} />
@@ -283,7 +287,7 @@ function PlacementMetrics({ placementId }: { placementId: string }) {
       <Metric label={t('advertisingPage.metrics.regToPurchase')} value={pct(data.registrationToPurchaseRate)} />
       <Metric label={t('advertisingPage.metrics.avgFirstPayment')} value={money(data.avgFirstPaymentMinor)} />
       <Metric label={t('advertisingPage.metrics.daysToPurchase')} value={data.avgDaysToPurchase?.toString() ?? t('advertisingPage.metrics.na')} />
-      <div className="col-span-2">
+      <div className="col-span-full">
         <PlacementTrend placementId={placementId} />
       </div>
     </div>

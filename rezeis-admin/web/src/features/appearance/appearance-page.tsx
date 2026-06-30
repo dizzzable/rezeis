@@ -100,9 +100,11 @@ export default function AppearancePage() {
           <TabsTrigger value="preview">{t('appearancePage.tabs.preview')}</TabsTrigger>
         </TabsList>
 
-        <TabsContent value="presets" className="mx-auto w-full max-w-4xl space-y-4">
-          <ModeCard />
-          <PresetsCard />
+        <TabsContent value="presets" className="space-y-4">
+          <div className="grid gap-4 lg:grid-cols-[minmax(220px,260px)_1fr] lg:items-start">
+            <ModeCard orientation="vertical" />
+            <PresetsCard />
+          </div>
           <RadiusCard />
         </TabsContent>
 
@@ -141,10 +143,11 @@ export default function AppearancePage() {
 // ──────────────────────────────────────────────────────────────────────────────
 // Mode card — light / dark / system
 // ──────────────────────────────────────────────────────────────────────────────
-function ModeCard() {
+function ModeCard({ orientation = 'horizontal' }: { readonly orientation?: 'horizontal' | 'vertical' }) {
   const { t } = useTranslation()
   const mode = useThemeStore((s) => s.mode)
   const setMode = useThemeStore((s) => s.setMode)
+  const vertical = orientation === 'vertical'
 
   const options: Array<{ id: ColorMode; labelKey: string; icon: typeof Sun }> = [
     { id: 'light', labelKey: 'appearancePage.mode.light', icon: Sun },
@@ -159,7 +162,7 @@ function ModeCard() {
         <CardDescription>{t('appearancePage.mode.description')}</CardDescription>
       </CardHeader>
       <CardContent>
-        <div className="grid grid-cols-3 gap-3">
+        <div className={cn(vertical ? 'flex flex-col gap-2' : 'grid grid-cols-3 gap-3')}>
           {options.map((opt) => {
             const selected = mode === opt.id
             return (
@@ -168,18 +171,15 @@ function ModeCard() {
                   type="button"
                   onClick={(): void => setMode(opt.id)}
                   className={cn(
-                    'flex w-full flex-col items-center gap-2 rounded-lg border p-4 transition-colors',
-                    selected
-                      ? 'border-primary bg-primary/5'
-                      : 'hover:border-primary/40',
+                    'flex w-full items-center gap-2 rounded-lg border transition-colors',
+                    vertical ? 'flex-row justify-start gap-3 p-3' : 'flex-col p-4',
+                    selected ? 'border-primary bg-primary/5' : 'hover:border-primary/40',
                   )}
                 >
-                  <opt.icon
-                    className={cn('h-5 w-5', selected && 'text-primary')}
-                  />
+                  <opt.icon className={cn('h-5 w-5 shrink-0', selected && 'text-primary')} />
                   <span className="text-sm font-medium">{t(opt.labelKey)}</span>
                   {selected && (
-                    <Badge variant="default" className="text-xs">
+                    <Badge variant="default" className={cn('text-xs', vertical && 'ml-auto')}>
                       {t('appearancePage.mode.selected')}
                     </Badge>
                   )}
