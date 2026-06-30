@@ -11,6 +11,7 @@ import { RemnawaveModule } from '../remnawave/remnawave.module';
 import { SettingsModule } from '../settings/settings.module';
 import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
 import { PAYMENT_RECONCILIATION_QUEUE } from './constants/payment-reconciliation.constant';
+import { MOY_NALOG_QUEUE } from './constants/moy-nalog.constant';
 import { AdminPaymentGatewaysController } from './controllers/admin-payment-gateways.controller';
 import { AdminPaymentReconciliationController } from './controllers/admin-payment-reconciliation.controller';
 import { AdminPaymentTransactionsController } from './controllers/admin-payment-transactions.controller';
@@ -20,6 +21,7 @@ import { InternalPaymentsController } from './controllers/internal-payments.cont
 import { InternalAddOnsPurchaseController } from './controllers/internal-addons-purchase.controller';
 import { PublicPaymentWebhooksController } from './controllers/public-payment-webhooks.controller';
 import { PaymentReconciliationProcessor } from './processors/payment-reconciliation.processor';
+import { MoyNalogProcessor } from './processors/moy-nalog.processor';
 import { PaymentAutoRetryService } from './services/payment-auto-retry.service';
 import { PaymentPendingExpiryService } from './services/payment-pending-expiry.service';
 import { PaymentOpsAlertService } from './services/payment-ops-alert.service';
@@ -31,6 +33,8 @@ import { PaymentWebhookNormalizerService } from './services/payment-webhook-norm
 import { PaymentWebhookOpsService } from './services/payment-webhook-ops.service';
 import { PaymentWebhookPayloadRedactionService } from './services/payment-webhook-payload-redaction.service';
 import { PaymentReconciliationService } from './services/payment-reconciliation.service';
+import { MoyNalogApiService } from './services/moy-nalog-api.service';
+import { MoyNalogQueueService } from './services/moy-nalog-queue.service';
 import { PaymentSubscriptionMutationService } from './services/payment-subscription-mutation.service';
 import { PaymentsCheckoutService } from './services/payments-checkout.service';
 import { PaymentsRenewalCheckoutService } from './services/payments-renewal-checkout.service';
@@ -52,6 +56,9 @@ import { TelegramStarsWebhookService } from './services/telegram-stars-webhook.s
     ProfileSyncModule,
     BullModule.registerQueue({
       name: PAYMENT_RECONCILIATION_QUEUE,
+    }),
+    BullModule.registerQueue({
+      name: MOY_NALOG_QUEUE,
     }),
   ],
   controllers: [
@@ -82,6 +89,9 @@ import { TelegramStarsWebhookService } from './services/telegram-stars-webhook.s
     PaymentSubscriptionMutationService,
     PaymentReconciliationService,
     PaymentReconciliationProcessor,
+    MoyNalogApiService,
+    MoyNalogQueueService,
+    MoyNalogProcessor,
     PaymentAutoRetryService,
     PaymentPendingExpiryService,
   ],

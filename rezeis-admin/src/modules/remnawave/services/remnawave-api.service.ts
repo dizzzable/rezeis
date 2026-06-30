@@ -337,7 +337,7 @@ export class RemnawaveApiService {
    * Resets traffic counter for a user on the panel.
    */
   public async resetPanelUserTraffic(uuid: string): Promise<void> {
-    await this.requestJson({ method: 'post', url: `/api/users/${uuid}/reset-traffic` });
+    await this.requestJson({ method: 'post', url: `/api/users/${uuid}/actions/reset-traffic` });
   }
 
   /**
@@ -493,11 +493,17 @@ export class RemnawaveApiService {
    */
   public async getPanelUsersByTelegramId(telegramId: string): Promise<RemnawavePanelUser[]> {
     try {
-      const result = await this.requestJson<RemnawavePanelUser[] | { root: RemnawavePanelUser[] }>({
+      const result = await this.requestJson<unknown>({
         method: 'get',
-        url: `/api/users/telegram/${telegramId}`,
+        url: `/api/users/by-telegram-id/${telegramId}`,
       });
-      return Array.isArray(result) ? result : result.root ?? [];
+      // 2.8 wraps the list under `{ response: { users: [...] } }`; older
+      // builds returned a bare array or `{ root: [...] }`. Accept all shapes.
+      const root = (result as { response?: unknown })?.response ?? result;
+      if (Array.isArray(root)) return root as RemnawavePanelUser[];
+      const wrapped =
+        (root as { users?: unknown })?.users ?? (root as { root?: unknown })?.root;
+      return Array.isArray(wrapped) ? (wrapped as RemnawavePanelUser[]) : [];
     } catch {
       return [];
     }
@@ -728,7 +734,7 @@ export class RemnawaveApiService {
     try {
       const response = await this.requestJson<{ response: RemnawaveSystemRecapInterface }>({
         method: 'get',
-        url: '/api/system/recap',
+        url: '/api/system/stats/recap',
       });
       return response.response ?? (response as unknown as RemnawaveSystemRecapInterface);
     } catch {
@@ -743,7 +749,7 @@ export class RemnawaveApiService {
     try {
       const response = await this.requestJson<{ response: RemnawaveBandwidthStatsInterface }>({
         method: 'get',
-        url: '/api/system/bandwidth',
+        url: '/api/system/stats/bandwidth',
       });
       return response.response ?? (response as unknown as RemnawaveBandwidthStatsInterface);
     } catch {
@@ -779,28 +785,28 @@ export class RemnawaveApiService {
    * Enables a node by UUID.
    */
   public async enableNode(uuid: string): Promise<void> {
-    await this.requestJsonWithBody('post', `/api/nodes/enable`, { uuid });
+    await this.requestJsonWithBody('post', `/api/nodes/${uuid}/actions/enable`, {});
   }
 
   /**
    * Disables a node by UUID.
    */
   public async disableNode(uuid: string): Promise<void> {
-    await this.requestJsonWithBody('post', `/api/nodes/disable`, { uuid });
+    await this.requestJsonWithBody('post', `/api/nodes/${uuid}/actions/disable`, {});
   }
 
   /**
    * Restarts a node's xray core by UUID.
    */
   public async restartNode(uuid: string): Promise<void> {
-    await this.requestJsonWithBody('post', `/api/nodes/restart`, { uuid });
+    await this.requestJsonWithBody('post', `/api/nodes/${uuid}/actions/restart`, {});
   }
 
   /**
    * Resets traffic counter for a node.
    */
   public async resetNodeTraffic(uuid: string): Promise<void> {
-    await this.requestJsonWithBody('post', `/api/nodes/reset-traffic`, { uuid });
+    await this.requestJsonWithBody('post', `/api/nodes/${uuid}/actions/reset-traffic`, {});
   }
 
   /**
@@ -1002,9 +1008,12 @@ export class RemnawaveApiService {
   }
 
   /**
-   * Mirror of Remnawave's own /api/system/health probe — returns null on
-   * a degraded panel so the admin Dashboard can fall back to the system
-   * stats card alone.
+   * Health probe for the admin Dashboard. Remnawave 2.8 changed
+   * `/api/system/health` to `{ runtimeMetrics: [...] }` (no status/version),
+   * while older builds returned `{ status, db, redis, version, uptime }`. A
+   * 2xx means the panel is reachable, so we default the status to "ok" and
+   * enrich the version from `/api/system/metadata` (the canonical 2.8 version
+   * source). Returns null when the panel is unreachable.
    */
   public async getRemnawaveHealth(): Promise<RemnawaveHealthInterface | null> {
     try {
@@ -1013,7 +1022,45 @@ export class RemnawaveApiService {
         url: '/api/system/health',
       });
       const root = (response as { response?: unknown })?.response ?? response;
-      return root as RemnawaveHealthInterface;
+      const record = (root ?? {}) as Record<string, unknown>;
+      const legacyStatus =
+        typeof record['status'] === 'string' && record['status'].length > 0
+          ? (record['status'] as string)
+          : null;
+      const metadata = await this.getSystemMetadata();
+      const version =
+        metadata?.version ??
+        (typeof record['version'] === 'string' && record['version'].length > 0
+          ? (record['version'] as string)
+          : undefined);
+      return {
+        status: legacyStatus ?? 'ok',
+        version,
+        uptime: typeof record['uptime'] === 'number' ? (record['uptime'] as number) : undefined,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Panel build metadata (`/api/system/metadata`) — the canonical version
+   * source on Remnawave 2.8 (also carries build number / git commit). Returns
+   * null when unreachable or the endpoint is absent.
+   */
+  public async getSystemMetadata(): Promise<{ readonly version: string | null } | null> {
+    try {
+      const response = await this.requestJson<unknown>({
+        method: 'get',
+        url: '/api/system/metadata',
+      });
+      const root = (response as { response?: unknown })?.response ?? response;
+      const record = (root ?? {}) as Record<string, unknown>;
+      const version =
+        typeof record['version'] === 'string' && record['version'].length > 0
+          ? (record['version'] as string)
+          : null;
+      return { version };
     } catch {
       return null;
     }
@@ -1114,7 +1161,7 @@ export class RemnawaveApiService {
     try {
       const response = await this.requestJson<unknown>({
         method: 'get',
-        url: '/api/subscription-settings/',
+        url: '/api/subscription-settings',
       });
       const root = (response as { response?: unknown })?.response ?? response;
       if (root === null || typeof root !== 'object') return null;
@@ -1211,19 +1258,32 @@ export class RemnawaveApiService {
     if (!input.telegramId && !input.username && !input.email && !input.subscriptionUuid) {
       return null;
     }
+    // Remnawave 2.8 dropped the catch-all `GET /api/users/resolve` in favour of
+    // dedicated by-selector lookups (the POST /resolve only accepts uuid/
+    // username/shortUuid). We branch to the matching `by-*` endpoint so all
+    // four admin selectors keep working on 2.7.4 and 2.8.0.
     try {
-      const params = new URLSearchParams();
-      if (input.telegramId) params.set('telegramId', input.telegramId);
-      if (input.username) params.set('username', input.username);
-      if (input.email) params.set('email', input.email);
-      if (input.subscriptionUuid) params.set('subscriptionUuid', input.subscriptionUuid);
-      const response = await this.requestJson<unknown>({
-        method: 'get',
-        url: `/api/users/resolve?${params.toString()}`,
-      });
+      let url: string | null = null;
+      if (input.subscriptionUuid) {
+        url = `/api/users/by-short-uuid/${encodeURIComponent(input.subscriptionUuid)}`;
+      } else if (input.username) {
+        url = `/api/users/by-username/${encodeURIComponent(input.username)}`;
+      } else if (input.email) {
+        url = `/api/users/by-email/${encodeURIComponent(input.email)}`;
+      } else if (input.telegramId) {
+        url = `/api/users/by-telegram-id/${encodeURIComponent(input.telegramId)}`;
+      }
+      if (url === null) return null;
+      const response = await this.requestJson<unknown>({ method: 'get', url });
       const root = (response as { response?: unknown })?.response ?? response;
       if (root === null || typeof root !== 'object') return null;
-      return mapUserSummary(root);
+      // by-telegram-id returns a collection (a Telegram id can map to several
+      // profiles); the rest return a single user. Take the first match.
+      const collection =
+        (root as { users?: unknown }).users ?? (Array.isArray(root) ? root : null);
+      const user = Array.isArray(collection) ? collection[0] : root;
+      if (user === null || user === undefined || typeof user !== 'object') return null;
+      return mapUserSummary(user);
     } catch {
       return null;
     }

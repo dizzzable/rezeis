@@ -67,6 +67,8 @@ export class PaymentProviderExecutionService {
           return await this.createPaypalychCheckout(input);
         case PaymentGatewayType.RIOPAY:
           return await this.createRiopayCheckout(input);
+        case PaymentGatewayType.VALUTIX:
+          return await this.createValutixCheckout(input);
         case PaymentGatewayType.WATA:
           return await this.createWataCheckout(input);
         case PaymentGatewayType.AURAPAY:
@@ -660,6 +662,52 @@ export class PaymentProviderExecutionService {
       providerMode: 'REDIRECT',
       providerStatus: readOptionalString(data, ['status']) ?? 'PENDING',
       gatewayData: { provider: 'RIOPAY', providerResponse: this.redactProviderResponse(data), checkoutUrl: readOptionalString(data, ['paymentLink']) },
+    };
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  //  VALUTIX — https://api.panel.valutix.kz/v1/orders
+  //  Same platform engine as RIOPAY. Auth: X-Api-Token header.
+  //  Body mirrors RIOPAY but also carries externalUserId.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  private async createValutixCheckout(input: {
+    readonly gateway: PaymentGateway;
+    readonly transaction: Transaction;
+    readonly description: string;
+    readonly successUrl?: string | null;
+    readonly failUrl?: string | null;
+  }): Promise<ProviderCheckoutResult> {
+    const settings = readGatewaySettings(input.gateway.settings);
+    const apiToken = requireSetting(settings, 'apiToken');
+
+    const successUrl = this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
+    const failUrl = this.resolveFailUrl(input.transaction.paymentId, input.failUrl, input.successUrl);
+    const webhookUrl = this.buildWebhookUrl(PaymentGatewayType.VALUTIX);
+
+    const payload = {
+      amount: input.transaction.amount.toString(),
+      externalId: input.transaction.paymentId,
+      externalUserId: input.transaction.userId,
+      purpose: input.description.slice(0, 255),
+      successUrl,
+      failUrl,
+      callbackUrl: webhookUrl,
+    };
+
+    const response = await firstValueFrom(
+      this.httpService.post('https://api.panel.valutix.kz/v1/orders', payload, {
+        headers: { 'Content-Type': 'application/json', 'X-Api-Token': apiToken },
+      }),
+    );
+
+    const data = response.data as Record<string, unknown>;
+    return {
+      gatewayId: readOptionalString(data, ['id']),
+      checkoutUrl: readOptionalString(data, ['paymentLink']),
+      providerMode: 'REDIRECT',
+      providerStatus: readOptionalString(data, ['status']) ?? 'PENDING',
+      gatewayData: { provider: 'VALUTIX', providerResponse: this.redactProviderResponse(data), checkoutUrl: readOptionalString(data, ['paymentLink']) },
     };
   }
 

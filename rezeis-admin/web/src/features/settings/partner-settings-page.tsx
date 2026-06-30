@@ -56,6 +56,7 @@ const GATEWAY_COMMISSIONS: ReadonlyArray<{
   { type: 'OVERPAY', key: 'overpayCommission', label: 'OverPay', default: '3.5' },
   { type: 'PAYPALYCH', key: 'paypalychCommission', label: 'PayPalych', default: '3.5' },
   { type: 'RIOPAY', key: 'riopayCommission', label: 'RioPay', default: '3.5' },
+  { type: 'VALUTIX', key: 'valutixCommission', label: 'Valutix', default: '3.5' },
   { type: 'WATA', key: 'wataCommission', label: 'WATA', default: '3.0' },
   { type: 'AURAPAY', key: 'aurapayCommission', label: 'AuraPay', default: '3.5' },
   { type: 'ROLLYPAY', key: 'rollypayCommission', label: 'RollyPay', default: '3.5' },

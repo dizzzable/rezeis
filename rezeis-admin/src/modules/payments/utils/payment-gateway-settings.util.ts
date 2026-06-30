@@ -15,6 +15,20 @@ const yookassaSettingsSchema = z
     apiKey: z.string().min(1).optional(),
     customer: z.string().min(1).optional(),
     vatCode: z.string().min(1).optional(),
+    // ── Self-employed (НПД) «Мой Налог» income sync — additive, optional ──
+    // Accepts a real boolean or the string forms the admin text/select field
+    // posts, and normalizes to a boolean for storage.
+    selfEmployedEnabled: z
+      .union([z.boolean(), z.enum(['true', 'false'])])
+      .transform((value) => (typeof value === 'boolean' ? value : value === 'true'))
+      .optional(),
+    moyNalogAuthMethod: z.enum(['password', 'refresh']).optional(),
+    moyNalogInn: z.string().min(1).optional(),
+    moyNalogPassword: z.string().min(1).optional(),
+    moyNalogRefreshToken: z.string().min(1).optional(),
+    moyNalogDeviceId: z.string().min(1).optional(),
+    moyNalogProxy: z.string().min(1).optional(),
+    incomeDescriptionTemplate: z.string().min(1).optional(),
   })
   .strict();
 
@@ -77,6 +91,12 @@ const riopaySettingsSchema = z
   })
   .strict();
 
+const valutixSettingsSchema = z
+  .object({
+    apiToken: z.string().min(1).optional(),
+  })
+  .strict();
+
 const wataSettingsSchema = z
   .object({
     apiKey: z.string().min(1).optional(),
@@ -128,6 +148,20 @@ function stripUndefinedEntries(value: GatewaySettingsRecord): Prisma.InputJsonOb
   return Object.fromEntries(normalizedEntries) as Prisma.InputJsonObject;
 }
 
+/**
+ * Drops blank/whitespace-only string entries before validation. The admin
+ * settings form posts every field (blank ones included); without this an
+ * untouched optional field would be a `''` that fails `.min(1)` and rejects
+ * the whole save. Stripping a key also lets an operator clear a previously
+ * stored value, since settings are replaced (not merged) on update.
+ */
+function stripBlankStringEntries(value: GatewaySettingsRecord): GatewaySettingsRecord {
+  const normalizedEntries = Object.entries(value).filter(
+    ([, entryValue]) => !(typeof entryValue === 'string' && entryValue.trim().length === 0),
+  );
+  return Object.fromEntries(normalizedEntries);
+}
+
 function normalizePlategaPaymentMethod(value: unknown): 1 | 2 | undefined {
   if (value === undefined) {
     return undefined;
@@ -152,7 +186,7 @@ export function normalizeGatewaySettingsForStorage(
     throw new BadRequestException('PAYMENT_GATEWAY_SETTINGS_INVALID');
   }
 
-  const rawSettings = value as GatewaySettingsRecord;
+  const rawSettings = stripBlankStringEntries(value as GatewaySettingsRecord);
   try {
     switch (gatewayType) {
       case PaymentGatewayType.TELEGRAM_STARS:
@@ -180,6 +214,8 @@ export function normalizeGatewaySettingsForStorage(
         return stripUndefinedEntries(paypalychSettingsSchema.parse(rawSettings));
       case PaymentGatewayType.RIOPAY:
         return stripUndefinedEntries(riopaySettingsSchema.parse(rawSettings));
+      case PaymentGatewayType.VALUTIX:
+        return stripUndefinedEntries(valutixSettingsSchema.parse(rawSettings));
       case PaymentGatewayType.WATA:
         return stripUndefinedEntries(wataSettingsSchema.parse(rawSettings));
       case PaymentGatewayType.AURAPAY:
@@ -234,6 +270,8 @@ export function isGatewayConfigured(
     case PaymentGatewayType.PAYPALYCH:
       return hasRequiredStrings(settings, ['shopId', 'apiKey']);
     case PaymentGatewayType.RIOPAY:
+      return hasRequiredStrings(settings, ['apiToken']);
+    case PaymentGatewayType.VALUTIX:
       return hasRequiredStrings(settings, ['apiToken']);
     case PaymentGatewayType.WATA:
       return hasRequiredStrings(settings, ['apiKey']);

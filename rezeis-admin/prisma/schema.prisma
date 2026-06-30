@@ -91,6 +91,7 @@ enum PaymentGatewayType {
   OVERPAY
   PAYPALYCH
   RIOPAY
+  VALUTIX
   WATA
   AURAPAY
   ROLLYPAY

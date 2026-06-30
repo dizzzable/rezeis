@@ -316,24 +316,6 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
           <div className="space-y-4 rounded-lg border border-dashed p-4">
             <div className="flex items-center gap-2">
               <Label className="text-base font-medium">{t('planForm.trial.title')}</Label>
-              {/* The Telegram-flow reminder is tucked behind an info icon (hover)
-                  instead of a always-on banner, to keep the form compact. */}
-              <TooltipProvider delayDuration={150}>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <button
-                      type="button"
-                      aria-label={t('planForm.trial.telegramNoteAria')}
-                      className="inline-flex text-amber-500 transition-colors hover:text-amber-400"
-                    >
-                      <Info className="h-4 w-4" />
-                    </button>
-                  </TooltipTrigger>
-                  <TooltipContent className="max-w-xs text-xs leading-snug">
-                    {t('planForm.trial.telegramNote')}
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
             </div>
             <p className="text-xs text-muted-foreground">{t('planForm.trial.hint')}</p>
             <div className="grid gap-4 md:grid-cols-3">
@@ -386,7 +368,28 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
             {/* Require Telegram link before claiming the trial (free or paid) */}
             <div className="flex items-center justify-between rounded-lg border px-3 py-2.5">
               <div className="space-y-0.5 pr-3">
-                <Label className="text-sm">{t('planForm.trial.requireTelegram')}</Label>
+                <div className="flex items-center gap-2">
+                  <Label className="text-sm">{t('planForm.trial.requireTelegram')}</Label>
+                  {/* The Telegram-flow reminder is tucked behind an info icon
+                      (hover) next to the field it explains, to keep the form
+                      compact. */}
+                  <TooltipProvider delayDuration={150}>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button
+                          type="button"
+                          aria-label={t('planForm.trial.telegramNoteAria')}
+                          className="inline-flex text-amber-500 transition-colors hover:text-amber-400"
+                        >
+                          <Info className="h-4 w-4" />
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent className="max-w-xs text-xs leading-snug">
+                        {t('planForm.trial.telegramNote')}
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                </div>
                 <p className="text-xs text-muted-foreground">{t('planForm.trial.requireTelegramHint')}</p>
               </div>
               <Switch

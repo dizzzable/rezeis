@@ -11,6 +11,7 @@ const SUPPORTED_PAYMENT_ASSETS: Readonly<Record<PaymentGatewayType, readonly str
   [PaymentGatewayType.OVERPAY]: [],
   [PaymentGatewayType.PAYPALYCH]: [],
   [PaymentGatewayType.RIOPAY]: [],
+  [PaymentGatewayType.VALUTIX]: [],
   [PaymentGatewayType.WATA]: [],
   [PaymentGatewayType.AURAPAY]: [],
   [PaymentGatewayType.ROLLYPAY]: [],

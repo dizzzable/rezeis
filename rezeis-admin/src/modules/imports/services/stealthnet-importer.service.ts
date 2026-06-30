@@ -568,6 +568,7 @@ export class StealthnetImporterService {
       OVERPAY: PaymentGatewayType.OVERPAY,
       PAYPALYCH: PaymentGatewayType.PAYPALYCH,
       RIOPAY: PaymentGatewayType.RIOPAY,
+      VALUTIX: PaymentGatewayType.VALUTIX,
     };
     // STEALTHNET-specific spellings — admin grants and similar internal
     // operations are intentionally not mapped (they don't represent

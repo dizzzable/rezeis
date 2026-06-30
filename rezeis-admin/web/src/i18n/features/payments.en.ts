@@ -46,6 +46,14 @@ export const en = {
       apiKey: 'API key',
       customerEmail: 'Customer email (for receipts)',
       vatCode: 'VAT code',
+      selfEmployedEnabled: 'Self-employed (НПД): «Мой Налог» income sync',
+      moyNalogAuthMethod: '«Мой Налог» auth method',
+      moyNalogInn: 'Self-employed INN',
+      moyNalogPassword: '«Мой Налог» password',
+      moyNalogRefreshToken: '«Мой Налог» refresh token',
+      moyNalogDeviceId: '«Мой Налог» device ID',
+      moyNalogProxy: 'SOCKS5 proxy for «Мой Налог»',
+      incomeDescriptionTemplate: 'Income description template',
       merchantId: 'Merchant ID',
       merchantUuid: 'Merchant UUID',
       paymentApiKey: 'Payment API key',
@@ -59,6 +67,13 @@ export const en = {
       lavaOfferId: 'Offer ID',
       defaultCurrency: 'Default currency',
     },
+    options: {
+      enabled: 'Enabled',
+      disabled: 'Disabled',
+      moyNalogAuthPassword: 'Password (INN + password)',
+      moyNalogAuthRefresh: 'Refresh token',
+    },
+    selectPlaceholder: 'Select a value',
     hints: {
       paymentNotPayout:
         'Use the PAYMENT key, not the payout one. Found under Heleket dashboard → Settings.',
@@ -70,6 +85,8 @@ export const en = {
         'RSA public key from OverPay back office for Content-Signature verification.',
       riopayToken:
         'X-Api-Token provided by your RioPay manager.',
+      valutixToken:
+        'X-Api-Token provided by your Valutix manager.',
       wataApiKey:
         'JWT API key from the WATA dashboard. Sent as Authorization: Bearer …',
       aurapaySecret:
@@ -88,6 +105,22 @@ export const en = {
         'Crypto-Pay-API-Token from @CryptoBot → Crypto Pay → My Apps → your app. Enable Webhooks in the app settings and point them at our callback URL.',
       defaultCurrency:
         'The currency the customer sees when paying through this gateway. The list is restricted to currencies the gateway actually supports.',
+      selfEmployedEnabled:
+        'Register every successful YooKassa payment as self-employed (НПД) income in «Мой Налог» (lknpd.nalog.ru). The receipt is created asynchronously and never blocks subscription delivery.',
+      moyNalogAuthMethod:
+        'Password — sign in with the «Мой Налог» INN and account password. Refresh token — sign in with a stored token (handier behind a proxy for non-RU servers).',
+      moyNalogInn:
+        'INN of the self-employed person the income is registered to. Used both for password sign-in and for auto-generating the device ID.',
+      moyNalogPassword:
+        '«Мой Налог» account password. Required only for the «Password» auth method.',
+      moyNalogRefreshToken:
+        'Refresh token from lknpd.nalog.ru (obtained when signing in via Госуслуги). Required only for the «Refresh token» auth method.',
+      moyNalogDeviceId:
+        'Device identifier for «Мой Налог». Leave blank to auto-generate it from the INN. For refresh-token auth, use the same device ID that produced the token.',
+      moyNalogProxy:
+        'Optional SOCKS5 proxy (e.g. socks5h://user:pass@host:1080). Needed when the server is outside Russia — lknpd.nalog.ru often blocks non-RU IPs.',
+      incomeDescriptionTemplate:
+        'Template for the receipt service name. Placeholders: {description}, {id}, {amount}. Defaults to «Платеж #{description}». Falls back to the payment id when the description is empty.',
     },
     empty: {
       title: 'No gateways configured yet',

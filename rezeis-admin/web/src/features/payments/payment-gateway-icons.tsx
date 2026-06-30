@@ -29,6 +29,7 @@ import riopayUrl from '@/assets/payments/riopay.svg'
 import rollypayUrl from '@/assets/payments/rollypay.svg'
 import severpayUrl from '@/assets/payments/severpay.svg'
 import telegramStarsUrl from '@/assets/payments/TelegramStars.svg'
+import valutixUrl from '@/assets/payments/valutix.svg'
 import wataUrl from '@/assets/payments/wata.svg'
 import yookassaUrl from '@/assets/payments/Yookassa.svg'
 
@@ -44,6 +45,7 @@ export type PaymentGatewayIconType =
   | 'OVERPAY'
   | 'PAYPALYCH'
   | 'RIOPAY'
+  | 'VALUTIX'
   | 'WATA'
   | 'AURAPAY'
   | 'ROLLYPAY'
@@ -66,6 +68,7 @@ const URL_BY_TYPE: Record<PaymentGatewayIconType, string> = {
   OVERPAY: overpayUrl,
   PAYPALYCH: paypalychUrl,
   RIOPAY: riopayUrl,
+  VALUTIX: valutixUrl,
   WATA: wataUrl,
   AURAPAY: aurapayUrl,
   ROLLYPAY: rollypayUrl,

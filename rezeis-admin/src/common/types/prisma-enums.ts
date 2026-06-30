@@ -7,7 +7,7 @@
 export type UserRole = 'DEV' | 'ADMIN' | 'USER';
 export type Locale = 'AR' | 'AZ' | 'BE' | 'CS' | 'DE' | 'EN' | 'ES' | 'FA' | 'FR' | 'HE' | 'HI' | 'ID' | 'IT' | 'JA' | 'KK' | 'KO' | 'MS' | 'NL' | 'PL' | 'PT' | 'RO' | 'RU' | 'SR' | 'TR' | 'UK' | 'UZ' | 'VI';
 export type Currency = 'USD' | 'XTR' | 'RUB' | 'USDT' | 'TON' | 'BTC' | 'ETH' | 'LTC' | 'BNB' | 'DASH' | 'SOL' | 'XMR' | 'USDC' | 'TRX';
-export type PaymentGatewayType = 'TELEGRAM_STARS' | 'YOOKASSA' | 'YOOMONEY' | 'CRYPTOMUS' | 'HELEKET' | 'CRYPTOPAY' | 'TBANK' | 'ROBOKASSA' | 'STRIPE' | 'MULENPAY' | 'CLOUDPAYMENTS' | 'PAL24' | 'WATA' | 'PLATEGA' | 'AURAPAY' | 'ROLLYPAY' | 'SEVERPAY' | 'LAVA' | 'ANTILOPAY' | 'OVERPAY' | 'PAYPALYCH' | 'RIOPAY';
+export type PaymentGatewayType = 'TELEGRAM_STARS' | 'YOOKASSA' | 'YOOMONEY' | 'CRYPTOMUS' | 'HELEKET' | 'CRYPTOPAY' | 'TBANK' | 'ROBOKASSA' | 'STRIPE' | 'MULENPAY' | 'CLOUDPAYMENTS' | 'PAL24' | 'WATA' | 'PLATEGA' | 'AURAPAY' | 'ROLLYPAY' | 'SEVERPAY' | 'LAVA' | 'ANTILOPAY' | 'OVERPAY' | 'PAYPALYCH' | 'RIOPAY' | 'VALUTIX';
 export type SubscriptionStatus = 'ACTIVE' | 'DISABLED' | 'LIMITED' | 'EXPIRED' | 'DELETED';
 export type TransactionStatus = 'PENDING' | 'COMPLETED' | 'CANCELED' | 'REFUNDED' | 'FAILED';
 export type PurchaseType = 'NEW' | 'RENEW' | 'UPGRADE' | 'ADDITIONAL';

@@ -46,6 +46,14 @@ export const ru = {
       apiKey: 'API key',
       customerEmail: 'Email клиента (для чека)',
       vatCode: 'Код НДС',
+      selfEmployedEnabled: 'Самозанятость (НПД): синхронизация с «Мой Налог»',
+      moyNalogAuthMethod: 'Способ авторизации «Мой Налог»',
+      moyNalogInn: 'ИНН самозанятого',
+      moyNalogPassword: 'Пароль «Мой Налог»',
+      moyNalogRefreshToken: 'Refresh-токен «Мой Налог»',
+      moyNalogDeviceId: 'Device ID «Мой Налог»',
+      moyNalogProxy: 'SOCKS5-прокси для «Мой Налог»',
+      incomeDescriptionTemplate: 'Шаблон описания дохода',
       merchantId: 'Merchant ID',
       merchantUuid: 'Merchant UUID',
       paymentApiKey: 'Payment API key',
@@ -59,6 +67,13 @@ export const ru = {
       lavaOfferId: 'Offer ID',
       defaultCurrency: 'Валюта по умолчанию',
     },
+    options: {
+      enabled: 'Включено',
+      disabled: 'Выключено',
+      moyNalogAuthPassword: 'Пароль (ИНН + пароль)',
+      moyNalogAuthRefresh: 'Refresh-токен',
+    },
+    selectPlaceholder: 'Выберите значение',
     hints: {
       paymentNotPayout:
         'Используйте PAYMENT key, не payout. Найти в кабинете Heleket → Settings.',
@@ -70,6 +85,8 @@ export const ru = {
         'RSA публичный ключ из бэк-офиса OverPay для проверки Content-Signature.',
       riopayToken:
         'Токен X-Api-Token, предоставленный менеджером RioPay.',
+      valutixToken:
+        'Токен X-Api-Token, предоставленный менеджером Valutix.',
       wataApiKey:
         'JWT API key из ЛК WATA. Передаётся в заголовке Authorization: Bearer …',
       aurapaySecret:
@@ -88,6 +105,22 @@ export const ru = {
         'Crypto-Pay-API-Token из @CryptoBot → Crypto Pay → My Apps → ваше приложение. Включите Webhooks в настройках приложения и укажите наш callback URL.',
       defaultCurrency:
         'Валюта, в которой клиент видит сумму при оплате через этот шлюз. В списке только те валюты, которые шлюз действительно поддерживает.',
+      selfEmployedEnabled:
+        'Регистрировать каждый успешный платёж YooKassa как доход самозанятого (НПД) в сервисе «Мой Налог» (lknpd.nalog.ru). Чек формируется асинхронно и не влияет на выдачу подписки.',
+      moyNalogAuthMethod:
+        'Пароль — вход по ИНН и паролю от личного кабинета «Мой Налог». Refresh-токен — вход по сохранённому токену (для серверов вне РФ удобнее с прокси).',
+      moyNalogInn:
+        'ИНН самозанятого, на который регистрируется доход. Используется и для входа по паролю, и для автогенерации Device ID.',
+      moyNalogPassword:
+        'Пароль от личного кабинета «Мой Налог». Требуется только для способа авторизации «Пароль».',
+      moyNalogRefreshToken:
+        'Refresh-токен из lknpd.nalog.ru (получается при входе через Госуслуги). Требуется только для способа авторизации «Refresh-токен».',
+      moyNalogDeviceId:
+        'Идентификатор устройства для «Мой Налог». Если пусто — генерируется автоматически из ИНН. Для входа по refresh-токену укажите тот же Device ID, что использовался при получении токена.',
+      moyNalogProxy:
+        'Необязательный SOCKS5-прокси (например socks5h://user:pass@host:1080). Нужен, если сервер вне РФ — lknpd.nalog.ru часто блокирует не-российские IP.',
+      incomeDescriptionTemplate:
+        'Шаблон названия услуги в чеке. Плейсхолдеры: {description}, {id}, {amount}. По умолчанию «Платеж #{description}». Если описание пустое, подставляется ID платежа.',
     },
     empty: {
       title: 'Шлюзы ещё не настроены',

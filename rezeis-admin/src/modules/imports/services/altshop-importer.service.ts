@@ -646,6 +646,7 @@ export class AltshopImporterService {
       OVERPAY: PaymentGatewayType.OVERPAY,
       PAYPALYCH: PaymentGatewayType.PAYPALYCH,
       RIOPAY: PaymentGatewayType.RIOPAY,
+      VALUTIX: PaymentGatewayType.VALUTIX,
     };
     return validGateways[upper] ?? null;
   }

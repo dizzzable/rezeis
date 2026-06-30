@@ -101,9 +101,10 @@ export class RemnawaveVersionService {
   }
 
   /**
-   * Reads the panel version from `/api/system/recap` (authoritative `version`
-   * field), falling back to `/api/system/health`. Returns `null` when the
-   * panel is unreachable or omits the field.
+   * Reads the panel version from `/api/system/stats/recap` (authoritative
+   * `version` field on every tested build), falling back to the canonical
+   * 2.8 source `/api/system/metadata`. Returns `null` when the panel is
+   * unreachable or omits the field.
    */
   private async readVersion(): Promise<string | null> {
     try {
@@ -115,12 +116,12 @@ export class RemnawaveVersionService {
       this.logger.debug(`recap version read failed: ${(err as Error).message}`);
     }
     try {
-      const health = await this.api.getRemnawaveHealth();
-      if (health !== null && typeof health.version === 'string' && health.version.length > 0) {
-        return health.version;
+      const metadata = await this.api.getSystemMetadata();
+      if (metadata !== null && typeof metadata.version === 'string' && metadata.version.length > 0) {
+        return metadata.version;
       }
     } catch (err) {
-      this.logger.debug(`health version read failed: ${(err as Error).message}`);
+      this.logger.debug(`metadata version read failed: ${(err as Error).message}`);
     }
     return null;
   }

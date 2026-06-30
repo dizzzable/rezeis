@@ -38,6 +38,7 @@ const PAYMENT_GATEWAY_DEFAULTS: readonly PaymentGatewayDefaultInput[] = [
   { type: PaymentGatewayType.SEVERPAY, currency: Currency.USD, isActive: false, orderIndex: 14 },
   { type: PaymentGatewayType.LAVA, currency: Currency.RUB, isActive: false, orderIndex: 15 },
   { type: PaymentGatewayType.CRYPTOPAY, currency: Currency.USDT, isActive: false, orderIndex: 16 },
+  { type: PaymentGatewayType.VALUTIX, currency: Currency.RUB, isActive: false, orderIndex: 17 },
 ];
 
 @Injectable()

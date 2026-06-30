@@ -106,6 +106,9 @@ export class PaymentWebhookNormalizerService {
         // without operator-supplied secrets. The webhook ingress pipeline
         // still records the raw payload, so misuse is auditable.
         return;
+      case PaymentGatewayType.VALUTIX:
+        verifyValutixSignature(input.rawBody, input.headers, input.gatewaySettings);
+        return;
       case PaymentGatewayType.WATA:
         verifyWataSignature(input.rawBody, input.headers, input.gatewaySettings);
         return;
@@ -168,6 +171,13 @@ export class PaymentWebhookNormalizerService {
         return readRequiredString(
           input.rawPayload,
           ['order_id', 'orderId'],
+          'PAYMENT_WEBHOOK_PAYMENT_ID_MISSING',
+        );
+      case PaymentGatewayType.RIOPAY:
+      case PaymentGatewayType.VALUTIX:
+        return readRequiredString(
+          input.rawPayload,
+          ['externalId', 'id'],
           'PAYMENT_WEBHOOK_PAYMENT_ID_MISSING',
         );
       case PaymentGatewayType.WATA:
@@ -236,6 +246,9 @@ export class PaymentWebhookNormalizerService {
         return readOptionalString(input.rawPayload, ['eventId', 'providerEventId']);
       case PaymentGatewayType.CRYPTOMUS:
         return readOptionalString(input.rawPayload, ['uuid', 'invoice_uuid', 'payment_uuid']);
+      case PaymentGatewayType.RIOPAY:
+      case PaymentGatewayType.VALUTIX:
+        return readOptionalString(input.rawPayload, ['id']);
       case PaymentGatewayType.WATA:
         return readOptionalString(input.rawPayload, ['id', 'paymentId']);
       case PaymentGatewayType.AURAPAY:
@@ -275,6 +288,9 @@ export class PaymentWebhookNormalizerService {
         return readOptionalString(input.rawPayload, ['payment_status', 'status']);
       case PaymentGatewayType.CRYPTOMUS:
         return readOptionalString(input.rawPayload, ['status', 'payment_status']);
+      case PaymentGatewayType.RIOPAY:
+      case PaymentGatewayType.VALUTIX:
+        return readOptionalString(input.rawPayload, ['status']);
       case PaymentGatewayType.WATA:
         return readOptionalString(input.rawPayload, ['status', 'transactionStatus']);
       case PaymentGatewayType.AURAPAY:
@@ -461,6 +477,28 @@ function verifyWataSignature(
     throw new ForbiddenException('PAYMENT_WEBHOOK_SIGNATURE_INVALID');
   }
   const expected = createHmac('sha256', secret).update(rawBody).digest('hex');
+  if (!compareSecrets(expected, signature)) {
+    throw new ForbiddenException('PAYMENT_WEBHOOK_SIGNATURE_INVALID');
+  }
+}
+
+/**
+ * Valutix: HMAC-SHA512 of the raw request body keyed by the gateway's
+ * `apiToken`, hex-encoded. Header: `X-Signature`. Verified strictly — a
+ * missing header or mismatch is rejected (unlike RIOPAY, which defines no
+ * signature scheme and stays permissive).
+ */
+function verifyValutixSignature(
+  rawBody: Buffer,
+  headers: Record<string, string | string[] | undefined>,
+  gatewaySettings: Record<string, unknown>,
+): void {
+  const secret = readStringSetting(gatewaySettings, 'apiToken');
+  const signature = readHeader(headers, 'x-signature');
+  if (!secret || !signature) {
+    throw new ForbiddenException('PAYMENT_WEBHOOK_SIGNATURE_INVALID');
+  }
+  const expected = createHmac('sha512', secret).update(rawBody).digest('hex');
   if (!compareSecrets(expected, signature)) {
     throw new ForbiddenException('PAYMENT_WEBHOOK_SIGNATURE_INVALID');
   }

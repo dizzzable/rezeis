@@ -78,12 +78,20 @@ import { getPaymentGatewayIcon } from './payment-gateway-icons'
 // (`PaymentGatewayType` enum) — keeping unsupported entries out so the UI
 // can't promise things the runtime won't deliver.
 
+interface GatewayFieldOption {
+  value: string
+  labelKey: string
+}
+
 interface GatewayField {
   key: string
   labelKey: string
   placeholder: string
   secret?: boolean
   hintKey?: string
+  /** Render as a Select instead of a text input when options are provided. */
+  type?: 'text' | 'select'
+  options?: ReadonlyArray<GatewayFieldOption>
 }
 
 interface GatewayMeta {
@@ -137,6 +145,67 @@ const GATEWAY_META: ReadonlyArray<GatewayMeta> = [
         key: 'vatCode',
         labelKey: 'paymentGateways.fields.vatCode',
         placeholder: '1',
+      },
+      {
+        key: 'selfEmployedEnabled',
+        labelKey: 'paymentGateways.fields.selfEmployedEnabled',
+        placeholder: '',
+        type: 'select',
+        options: [
+          { value: 'false', labelKey: 'paymentGateways.options.disabled' },
+          { value: 'true', labelKey: 'paymentGateways.options.enabled' },
+        ],
+        hintKey: 'paymentGateways.hints.selfEmployedEnabled',
+      },
+      {
+        key: 'moyNalogAuthMethod',
+        labelKey: 'paymentGateways.fields.moyNalogAuthMethod',
+        placeholder: '',
+        type: 'select',
+        options: [
+          { value: 'password', labelKey: 'paymentGateways.options.moyNalogAuthPassword' },
+          { value: 'refresh', labelKey: 'paymentGateways.options.moyNalogAuthRefresh' },
+        ],
+        hintKey: 'paymentGateways.hints.moyNalogAuthMethod',
+      },
+      {
+        key: 'moyNalogInn',
+        labelKey: 'paymentGateways.fields.moyNalogInn',
+        placeholder: '7707083893',
+        hintKey: 'paymentGateways.hints.moyNalogInn',
+      },
+      {
+        key: 'moyNalogPassword',
+        labelKey: 'paymentGateways.fields.moyNalogPassword',
+        placeholder: '••••••••',
+        secret: true,
+        hintKey: 'paymentGateways.hints.moyNalogPassword',
+      },
+      {
+        key: 'moyNalogRefreshToken',
+        labelKey: 'paymentGateways.fields.moyNalogRefreshToken',
+        placeholder: 'refresh-token',
+        secret: true,
+        hintKey: 'paymentGateways.hints.moyNalogRefreshToken',
+      },
+      {
+        key: 'moyNalogDeviceId',
+        labelKey: 'paymentGateways.fields.moyNalogDeviceId',
+        placeholder: 'auto from INN',
+        hintKey: 'paymentGateways.hints.moyNalogDeviceId',
+      },
+      {
+        key: 'moyNalogProxy',
+        labelKey: 'paymentGateways.fields.moyNalogProxy',
+        placeholder: 'socks5h://user:pass@host:1080',
+        secret: true,
+        hintKey: 'paymentGateways.hints.moyNalogProxy',
+      },
+      {
+        key: 'incomeDescriptionTemplate',
+        labelKey: 'paymentGateways.fields.incomeDescriptionTemplate',
+        placeholder: 'Платеж #{description}',
+        hintKey: 'paymentGateways.hints.incomeDescriptionTemplate',
       },
     ],
   },
@@ -306,6 +375,21 @@ const GATEWAY_META: ReadonlyArray<GatewayMeta> = [
         placeholder: 'X-Api-Token',
         secret: true,
         hintKey: 'paymentGateways.hints.riopayToken',
+      },
+    ],
+  },
+  {
+    type: 'VALUTIX',
+    displayName: 'Valutix',
+    icon: CreditCard,
+    iconColor: 'text-green-500',
+    fields: [
+      {
+        key: 'apiToken',
+        labelKey: 'paymentGateways.fields.apiToken',
+        placeholder: 'X-Api-Token',
+        secret: true,
+        hintKey: 'paymentGateways.hints.valutixToken',
       },
     ],
   },
@@ -825,12 +909,12 @@ function GatewaySettingsForm({ gateway, onClose }: GatewaySettingsFormProps) {
   const meta = META_BY_TYPE[gateway.type]
 
   const initialValues: Record<string, string> = Object.fromEntries(
-    (meta?.fields ?? []).map((field) => [
-      field.key,
-      typeof gateway.settings?.[field.key] === 'string'
-        ? (gateway.settings?.[field.key] as string)
-        : '',
-    ]),
+    (meta?.fields ?? []).map((field) => {
+      const raw = gateway.settings?.[field.key]
+      const value =
+        typeof raw === 'string' ? raw : typeof raw === 'boolean' ? String(raw) : ''
+      return [field.key, value]
+    }),
   )
 
   const [values, setValues] = useState<Record<string, string>>(initialValues)
@@ -938,6 +1022,33 @@ function GatewaySettingsForm({ gateway, onClose }: GatewaySettingsFormProps) {
           const value = values[field.key] ?? ''
           const isSecret = field.secret === true
           const visible = showSecrets[field.key] === true
+          if (field.type === 'select' && field.options) {
+            return (
+              <div key={field.key} className="space-y-1.5">
+                <Label>{t(field.labelKey)}</Label>
+                <Select
+                  value={value}
+                  onValueChange={(next): void =>
+                    setValues((prev) => ({ ...prev, [field.key]: next }))
+                  }
+                >
+                  <SelectTrigger className="h-10" aria-label={t(field.labelKey)}>
+                    <SelectValue placeholder={t('paymentGateways.selectPlaceholder')} />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {field.options.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {t(option.labelKey)}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                {field.hintKey && (
+                  <p className="text-xs text-muted-foreground">{t(field.hintKey)}</p>
+                )}
+              </div>
+            )
+          }
           return (
             <div key={field.key} className="space-y-1.5">
               <Label>{t(field.labelKey)}</Label>

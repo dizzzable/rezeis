@@ -175,6 +175,7 @@ function TransactionsTab() {
                   <SelectItem value="OVERPAY">Overpay</SelectItem>
                   <SelectItem value="PAYPALYCH">Paypalych</SelectItem>
                   <SelectItem value="RIOPAY">Riopay</SelectItem>
+                  <SelectItem value="VALUTIX">Valutix</SelectItem>
                   <SelectItem value="CRYPTOPAY">CryptoPay</SelectItem>
                 </SelectContent>
               </Select>

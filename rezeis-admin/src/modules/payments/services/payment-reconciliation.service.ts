@@ -1,5 +1,5 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { Prisma, Transaction, TransactionStatus } from '@prisma/client';
+import { PaymentGatewayType, Prisma, Transaction, TransactionStatus } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { EVENT_TYPES, SystemEventsService } from '../../../common/services/system-events.service';
@@ -11,8 +11,10 @@ import {
   PaymentWebhookInboxService,
 } from './payment-webhook-inbox.service';
 import { normalizePaymentProviderError } from '../utils/payment-provider-error.util';
+import { readGatewaySettings } from '../utils/payment-gateway-settings.util';
 import { PaymentOpsAlertService } from './payment-ops-alert.service';
 import { PaymentSubscriptionMutationService } from './payment-subscription-mutation.service';
+import { MoyNalogQueueService } from './moy-nalog-queue.service';
 
 @Injectable()
 export class PaymentReconciliationService {
@@ -27,6 +29,7 @@ export class PaymentReconciliationService {
     private readonly referralQualificationService: ReferralQualificationService,
     private readonly profileSyncQueueService: ProfileSyncQueueService,
     private readonly systemEvents: SystemEventsService,
+    private readonly moyNalogQueueService: MoyNalogQueueService,
   ) {}
 
   public async reconcileWebhookEvent(eventId: string): Promise<void> {
@@ -94,6 +97,7 @@ export class PaymentReconciliationService {
           }
         }
         await this.runReferralAndPartnerHooks(refreshedTransaction);
+        await this.enqueueMoyNalogIncomeBestEffort(refreshedTransaction);
       }
 
       if (nextStatus === TransactionStatus.FAILED) {
@@ -168,6 +172,38 @@ export class PaymentReconciliationService {
     } catch (error: unknown) {
       this.logger.error(
         `Partner earnings hook failed for transaction ${transaction.id}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  /**
+   * Best-effort enqueue of «Мой Налог» self-employed income registration for
+   * a completed YooKassa payment. Gated on the YooKassa gateway having
+   * self-employed sync enabled so we don't queue no-op jobs. Every failure
+   * (read or enqueue) is logged and swallowed — registering income must never
+   * block, delay, or roll back subscription fulfillment.
+   */
+  private async enqueueMoyNalogIncomeBestEffort(transaction: Transaction): Promise<void> {
+    if (transaction.gatewayType !== PaymentGatewayType.YOOKASSA) {
+      return;
+    }
+    try {
+      const gateway = await this.prismaService.paymentGateway.findUnique({
+        where: { type: PaymentGatewayType.YOOKASSA },
+      });
+      if (gateway === null) {
+        return;
+      }
+      const settings = readGatewaySettings(gateway.settings);
+      if (settings.selfEmployedEnabled !== true) {
+        return;
+      }
+      await this.moyNalogQueueService.enqueueRegisterIncome(transaction.id);
+    } catch (error: unknown) {
+      this.logger.error(
+        `МойНалог enqueue failed for transaction ${transaction.id}: ${
           error instanceof Error ? error.message : String(error)
         }`,
       );

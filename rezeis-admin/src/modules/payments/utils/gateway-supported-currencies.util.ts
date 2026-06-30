@@ -30,6 +30,7 @@ export const GATEWAY_SUPPORTED_CURRENCIES: Readonly<
   OVERPAY: ['RUB'],
   PAYPALYCH: ['RUB'],
   RIOPAY: ['RUB'],
+  VALUTIX: ['RUB'],
   ANTILOPAY: ['RUB'],
   AURAPAY: ['RUB'],
   ROLLYPAY: ['RUB'],

@@ -466,7 +466,7 @@ describe('RemnawaveApiService', () => {
     await service.resetPanelUserTraffic('33333333-3333-4333-8333-333333333333');
 
     assert.deepStrictEqual(capturedRequests, [
-      { method: 'post', url: '/api/users/33333333-3333-4333-8333-333333333333/reset-traffic' },
+      { method: 'post', url: '/api/users/33333333-3333-4333-8333-333333333333/actions/reset-traffic' },
     ]);
   });
 });

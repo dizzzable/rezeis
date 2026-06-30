@@ -17,6 +17,7 @@ import { PaymentReconciliationService } from '../src/modules/payments/services/p
 import { PaymentOpsAlertService } from '../src/modules/payments/services/payment-ops-alert.service';
 import { PaymentSubscriptionMutationService } from '../src/modules/payments/services/payment-subscription-mutation.service';
 import { PaymentWebhookInboxService } from '../src/modules/payments/services/payment-webhook-inbox.service';
+import { MoyNalogQueueService } from '../src/modules/payments/services/moy-nalog-queue.service';
 import { ProfileSyncQueueService } from '../src/modules/profile-sync/profile-sync-queue.service';
 import { ReferralQualificationService } from '../src/modules/referrals/services/referral-qualification.service';
 
@@ -355,6 +356,7 @@ function createService(state: ReturnType<typeof createState>): PaymentReconcilia
     referralQualificationService as unknown as ReferralQualificationService,
     profileSyncQueueService as unknown as ProfileSyncQueueService,
     { warn: () => {}, info: () => {}, error: () => {}, emit: () => {} } as never,
+    { enqueueRegisterIncome: async () => {} } as unknown as MoyNalogQueueService,
   );
 }
 
