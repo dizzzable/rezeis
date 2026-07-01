@@ -59,5 +59,11 @@ export interface InternalUserSessionInterface {
   readonly onboardingCompleted: boolean;
   readonly createdAt: string;
   readonly updatedAt: string;
+  /**
+   * Latest reported cabinet activity (`User.lastSeenAt`), ISO-8601 or `null`.
+   * A real activity signal (stamped on each cabinet session) as opposed to
+   * `updatedAt`, which only changes when the User row itself is written.
+   */
+  readonly lastSeenAt: string | null;
   readonly webAccount: InternalUserWebAccountInterface | null;
 }

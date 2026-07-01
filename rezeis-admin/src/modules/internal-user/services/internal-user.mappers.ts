@@ -41,6 +41,7 @@ export function mapInternalUserSession(user: InternalUserRecord): InternalUserSe
     onboardingCompleted: user.onboardingCompletedAt !== null,
     createdAt: user.createdAt.toISOString(),
     updatedAt: user.updatedAt.toISOString(),
+    lastSeenAt: user.lastSeenAt?.toISOString() ?? null,
     webAccount: user.webAccount === null ? null : {
       id: user.webAccount.id,
       login: user.webAccount.login,

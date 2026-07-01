@@ -203,6 +203,7 @@ const userSessionSchema = z.object({
     isRulesAccepted: z.boolean(),
     createdAt: z.string(),
     updatedAt: z.string(),
+    lastSeenAt: z.string().nullable().optional(),
     webAccount: webAccountSchema.nullable(),
   })
 
@@ -245,11 +246,13 @@ const usersListItemSchema = z.object({
   telegramId: z.string().nullable(),
   username: z.string().nullable(),
   name: z.string().nullable(),
+  login: z.string().nullable(),
   email: z.string().nullable(),
   role: z.string(),
   isBlocked: z.boolean(),
   createdAt: z.string(),
   updatedAt: z.string(),
+  lastSeenAt: z.string().nullable(),
   webAccountContext: z
     .object({
       hasWebAccount: z.boolean(),

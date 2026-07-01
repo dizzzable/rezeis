@@ -56,11 +56,11 @@ const BulkUsersTab = lazy(() => import('@/features/users/bulk-users-page'))
 const ALLOWED_TABS = ['list', 'bulk'] as const
 type UsersTab = (typeof ALLOWED_TABS)[number]
 
-function getUserStatusClass(user: { isBlocked: boolean; updatedAt?: string }): string {
+function getUserStatusClass(user: { isBlocked: boolean; lastSeenAt?: string | null }): string {
   if (user.isBlocked) return 'bg-destructive text-destructive'
   const now = Date.now()
-  const updatedAt = user.updatedAt ? new Date(user.updatedAt).getTime() : 0
-  const diffMin = (now - updatedAt) / 60000
+  const lastSeen = user.lastSeenAt ? new Date(user.lastSeenAt).getTime() : 0
+  const diffMin = (now - lastSeen) / 60000
   if (diffMin < 5) return 'bg-emerald-500 text-emerald-500 status-dot-pulse'
   if (diffMin < 30) return 'bg-amber-500 text-amber-500'
   return 'border border-muted-foreground/50 bg-transparent'
@@ -72,8 +72,10 @@ interface UserListItem {
   username: string | null
   email: string | null
   name: string
+  login: string | null
   role: string
   isBlocked: boolean
+  lastSeenAt: string | null
 }
 
 interface UserListResponse {
@@ -83,10 +85,12 @@ interface UserListResponse {
     username: string | null
     email: string | null
     name: string
+    login: string | null
     role: string
     language: string
     isBlocked: boolean
     createdAt: string
+    lastSeenAt: string | null
   }>
   total: number
 }
@@ -158,7 +162,7 @@ const UserListRow = memo(function UserListRow({ user, isSelected, onSelect }: Us
     >
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
-          <p className="min-w-0 flex-1 truncate text-sm font-medium">{user.name || '—'}</p>
+          <p className="min-w-0 flex-1 truncate text-sm font-medium">{user.name || user.username || user.login || '—'}</p>
           {user.role !== 'USER' && (
             <span className="shrink-0 text-[10px] text-muted-foreground">{user.role}</span>
           )}
@@ -211,8 +215,10 @@ function UsersListTab() {
         username: u.username,
         email: u.email,
         name: u.name,
+        login: u.login,
         role: u.role,
         isBlocked: u.isBlocked,
+        lastSeenAt: u.lastSeenAt,
       })),
     [listData?.items],
   )

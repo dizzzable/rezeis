@@ -77,6 +77,7 @@ describe('AdminUsersController', () => {
         onboardingCompleted: true,
         createdAt: '2026-04-01T00:00:00.000Z',
         updatedAt: '2026-04-16T00:00:00.000Z',
+        lastSeenAt: null,
         webAccount: null,
       },
       subscription: null,

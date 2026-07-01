@@ -4201,6 +4201,7 @@ function mapExpectedInternalSession(input: {
     onboardingCompleted: false,
     createdAt: '2026-04-01T00:00:00.000Z',
     updatedAt: input.updatedAt,
+    lastSeenAt: null,
     webAccount: {
       id: 'web-account-1',
       login: 'user-login',

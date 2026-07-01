@@ -180,6 +180,11 @@ export class WebAuthService {
       'USER',
       `New web registration: ${login}`,
       {
+        // `userId` makes the admin-notification "user" block render; `userName`
+        // carries the login so a web-first user (no name/username/telegram) is
+        // identified by their login instead of a blank line.
+        userId: result.userId,
+        userName: login,
         reiwaId: result.userId,
         webAccountId: result.webAccountId,
         login,

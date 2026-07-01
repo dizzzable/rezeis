@@ -626,7 +626,7 @@ function UserHeader({
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0 flex-1 space-y-2">
           <div className="flex items-center gap-2">
-            <h2 className="truncate text-xl font-bold">{user.name || '—'}</h2>
+            <h2 className="truncate text-xl font-bold">{user.name || user.username || user.webAccount?.login || '—'}</h2>
             {user.username && (
               <span className="truncate text-sm text-muted-foreground">@{user.username}</span>
             )}
@@ -688,18 +688,22 @@ function UserHeader({
 
 /**
  * User status dot with pulse animation.
- * - Online (updatedAt < 5min): green + pulse
- * - AFK (updatedAt < 30min): amber
+ * - Online (lastSeenAt < 5min): green + pulse
+ * - AFK (lastSeenAt < 30min): amber
  * - Blocked: red
  * - Inactive: transparent with border
+ *
+ * Uses `lastSeenAt` (a real cabinet-activity signal) rather than `updatedAt`,
+ * which only changes when the User row is written and never reflected actual
+ * presence.
  */
 function UserStatusDot({ user }: { user: UserDetail }) {
   // TODO: refactor — recompute the dot class via useMemo with a 1-minute interval tick
   // instead of reading Date.now() during render.
   // eslint-disable-next-line react-hooks/purity
   const now = Date.now()
-  const updatedAt = user.updatedAt ? new Date(user.updatedAt).getTime() : 0
-  const diffMin = (now - updatedAt) / 60000
+  const lastSeen = user.lastSeenAt ? new Date(user.lastSeenAt).getTime() : 0
+  const diffMin = (now - lastSeen) / 60000
 
   let dotClass: string
 

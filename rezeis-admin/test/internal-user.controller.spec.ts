@@ -304,6 +304,7 @@ function createSession(): InternalUserSessionInterface {
     onboardingCompleted: true,
     createdAt: '2026-04-01T00:00:00.000Z',
     updatedAt: '2026-04-16T10:00:00.000Z',
+    lastSeenAt: null,
     webAccount: {
       id: 'web-account-1',
       login: 'user-login',

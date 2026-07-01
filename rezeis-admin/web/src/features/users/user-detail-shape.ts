@@ -157,6 +157,7 @@ export interface UserDetail {
   readonly referralCode?: string | null
   readonly createdAt: string
   readonly updatedAt?: string
+  readonly lastSeenAt?: string | null
   readonly subscriptions?: ReadonlyArray<UserSubscription>
   readonly transactions?: ReadonlyArray<UserTransaction>
   readonly referral?: UserReferralBackref | null

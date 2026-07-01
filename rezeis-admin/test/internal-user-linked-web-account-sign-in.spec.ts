@@ -307,6 +307,7 @@ function createExpectedSession(): InternalUserSessionInterface {
     onboardingCompleted: false,
     createdAt: '2026-04-18T08:00:00.000Z',
     updatedAt: '2026-04-18T10:00:00.000Z',
+    lastSeenAt: null,
     webAccount: {
       id: 'web-account-1',
       login: 'User_Login',

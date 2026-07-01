@@ -11,11 +11,18 @@ export interface AdminUserListItemInterface {
   readonly username: string | null;
   readonly email: string | null;
   readonly name: string;
+  readonly login: string | null;
   readonly role: string;
   readonly language: string;
   readonly isBlocked: boolean;
   readonly createdAt: string;
   readonly updatedAt: string;
+  /**
+   * Latest reported cabinet activity (`User.lastSeenAt`), ISO-8601 or `null`.
+   * Drives the list's online/AFK status dot — a real activity signal, unlike
+   * `updatedAt` which only bumps when the User row is written.
+   */
+  readonly lastSeenAt: string | null;
 }
 
 export interface AdminUserListResultInterface {

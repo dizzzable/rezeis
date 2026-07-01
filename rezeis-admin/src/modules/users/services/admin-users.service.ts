@@ -62,6 +62,8 @@ export class AdminUsersService {
           isBlocked: true,
           createdAt: true,
           updatedAt: true,
+          lastSeenAt: true,
+          webAccount: { select: { login: true } },
         },
       }),
       this.prismaService.user.count({ where }),
@@ -73,11 +75,13 @@ export class AdminUsersService {
       username: user.username,
       email: user.email,
       name: user.name,
+      login: user.webAccount?.login ?? null,
       role: user.role,
       language: user.language,
       isBlocked: user.isBlocked,
       createdAt: user.createdAt.toISOString(),
       updatedAt: user.updatedAt.toISOString(),
+      lastSeenAt: user.lastSeenAt?.toISOString() ?? null,
     }));
 
     return { items, total };
