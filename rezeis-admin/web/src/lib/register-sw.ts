@@ -13,8 +13,14 @@ export async function registerServiceWorker(): Promise<void> {
     const { registerSW } = await import('virtual:pwa-register')
 
     let reloadedForNewSw = false
+    // Whether a SW already controlled this page at registration time. On the
+    // very first visit there is no controller; the SW's `clients.claim()` then
+    // fires a `controllerchange` that would otherwise trigger a confusing
+    // "the page reloaded itself" refresh with no stale bundles to pick up.
+    // Only reload for a REAL update (a controller was already present).
+    const hadControllerAtStart = Boolean(navigator.serviceWorker.controller)
     navigator.serviceWorker.addEventListener('controllerchange', () => {
-      if (reloadedForNewSw) return
+      if (reloadedForNewSw || !hadControllerAtStart) return
       reloadedForNewSw = true
       window.location.reload()
     })

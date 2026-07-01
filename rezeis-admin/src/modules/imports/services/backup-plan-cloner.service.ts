@@ -282,29 +282,15 @@ export class BackupPlanClonerService {
           // findUnique can race — fall through to create() below.
         }
 
-        // Build the durations + prices for this plan.
+        // Build the durations + prices for this plan. Dedupe by day-count:
+        // some sources — notably STEALTHNET, which synthesizes durations from a
+        // base `(duration_days, price)` plus `tariff_price_options` that often
+        // REPEAT the base duration — emit the same day-count twice. That later
+        // makes the cloned plan un-editable ("Duration N days is duplicated" /
+        // "Currency X is duplicated for N days"). Collapse duplicates here,
+        // merging their prices and keeping the first price per currency.
         const planDurations = catalog.durations.filter((d) => d.planId === plan.id);
-        const durationCreates: Prisma.PlanDurationCreateWithoutPlanInput[] = planDurations.map(
-          (duration) => {
-            const durationPrices = catalog.prices.filter((p) => p.planDurationId === duration.id);
-            return {
-              days: duration.days,
-              isActive: true,
-              prices: {
-                create: durationPrices
-                  .map((price): Prisma.PlanPriceCreateWithoutPlanDurationInput | null => {
-                    const currency = this.coerceCurrency(price.currency);
-                    if (!currency) return null;
-                    return {
-                      currency,
-                      price: price.price,
-                    };
-                  })
-                  .filter((p): p is Prisma.PlanPriceCreateWithoutPlanDurationInput => p !== null),
-              },
-            };
-          },
-        );
+        const durationCreates = this.buildDedupedDurationCreates(planDurations, catalog.prices);
 
         const created = await this.prismaService.plan.create({
           data: {
@@ -332,10 +318,9 @@ export class BackupPlanClonerService {
         sourceIdToTargetCuid.set(plan.id, created.id);
         existingNames.add(finalName);
         plansCreated += 1;
-        durationsCreated += planDurations.length;
-        pricesCreated += planDurations.reduce(
-          (acc, d) =>
-            acc + catalog.prices.filter((p) => p.planDurationId === d.id).length,
+        durationsCreated += durationCreates.length;
+        pricesCreated += durationCreates.reduce(
+          (acc, d) => acc + (d.prices?.create as ReadonlyArray<unknown> | undefined ?? []).length,
           0,
         );
         namesCreated.push({ sourcePlanId: plan.id, finalName });
@@ -648,6 +633,46 @@ export class BackupPlanClonerService {
     const upper = raw.toUpperCase();
     if (upper in ArchivedPlanRenewMode) return upper as ArchivedPlanRenewMode;
     return ArchivedPlanRenewMode.SELF_RENEW;
+  }
+
+  /**
+   * Builds the `PlanDuration.create` payloads for one plan, collapsing any
+   * duplicate day-counts into a single duration. Prices from every duration
+   * sharing a day-count are merged, keeping the FIRST price seen per currency
+   * (so a repeated base/option pair can't produce a duplicate-currency plan).
+   * This guarantees a cloned plan always passes the admin plan validators,
+   * regardless of how messy the source catalog was.
+   */
+  private buildDedupedDurationCreates(
+    planDurations: ReadonlyArray<NormalizedSourceDuration>,
+    allPrices: ReadonlyArray<NormalizedSourcePrice>,
+  ): Prisma.PlanDurationCreateWithoutPlanInput[] {
+    const byDays = new Map<
+      number,
+      { readonly prices: Prisma.PlanPriceCreateWithoutPlanDurationInput[]; readonly currencies: Set<Currency> }
+    >();
+    const dayOrder: number[] = [];
+
+    for (const duration of planDurations) {
+      let bucket = byDays.get(duration.days);
+      if (bucket === undefined) {
+        bucket = { prices: [], currencies: new Set<Currency>() };
+        byDays.set(duration.days, bucket);
+        dayOrder.push(duration.days);
+      }
+      for (const price of allPrices.filter((p) => p.planDurationId === duration.id)) {
+        const currency = this.coerceCurrency(price.currency);
+        if (!currency || bucket.currencies.has(currency)) continue;
+        bucket.currencies.add(currency);
+        bucket.prices.push({ currency, price: price.price });
+      }
+    }
+
+    return dayOrder.map((days) => ({
+      days,
+      isActive: true,
+      prices: { create: byDays.get(days)?.prices ?? [] },
+    }));
   }
 
   private coerceCurrency(raw: string): Currency | null {

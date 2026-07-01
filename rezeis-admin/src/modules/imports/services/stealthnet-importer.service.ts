@@ -667,8 +667,15 @@ function deriveDurations(
   for (const tariff of tariffs) {
     const planId = stableHashId(tariff.id);
     const baseDurationId = stableHashId(`${tariff.id}#base`);
+    // STEALTHNET stores the baseline `(duration_days, price)` on the tariff
+    // row AND frequently repeats it as a `tariff_price_options` row. Emit the
+    // base once and skip any option that repeats an already-emitted day-count,
+    // so the catalog snapshot never carries duplicate durations.
+    const seenDays = new Set<number>([tariff.duration_days]);
     out.push({ id: baseDurationId, plan_id: planId, days: tariff.duration_days });
     for (const opt of options.filter((o) => o.tariff_id === tariff.id)) {
+      if (seenDays.has(opt.duration_days)) continue;
+      seenDays.add(opt.duration_days);
       out.push({ id: stableHashId(opt.id), plan_id: planId, days: opt.duration_days });
     }
   }
@@ -682,6 +689,9 @@ function derivePrices(
   const out: Record<string, unknown>[] = [];
   for (const tariff of tariffs) {
     const baseDurationId = stableHashId(`${tariff.id}#base`);
+    // Mirror deriveDurations' dedupe so every price points at a duration that
+    // actually exists (options repeating the base day-count are skipped).
+    const seenDays = new Set<number>([tariff.duration_days]);
     out.push({
       id: stableHashId(`${tariff.id}#base-price`),
       plan_duration_id: baseDurationId,
@@ -689,6 +699,8 @@ function derivePrices(
       price: String(tariff.price),
     });
     for (const opt of options.filter((o) => o.tariff_id === tariff.id)) {
+      if (seenDays.has(opt.duration_days)) continue;
+      seenDays.add(opt.duration_days);
       out.push({
         id: stableHashId(`${opt.id}#price`),
         plan_duration_id: stableHashId(opt.id),

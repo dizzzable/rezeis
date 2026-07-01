@@ -89,9 +89,15 @@ interface GatewayField {
   placeholder: string
   secret?: boolean
   hintKey?: string
-  /** Render as a Select instead of a text input when options are provided. */
-  type?: 'text' | 'select'
+  /** Render as a Select / Switch instead of a text input. */
+  type?: 'text' | 'select' | 'toggle'
   options?: ReadonlyArray<GatewayFieldOption>
+  /**
+   * Only render this field when the referenced boolean field's value is
+   * `'true'`. Used to collapse the whole «Мой Налог» (self-employed) block
+   * behind its enable toggle so it appears only when sync is turned on.
+   */
+  dependsOn?: string
 }
 
 interface GatewayMeta {
@@ -150,11 +156,7 @@ const GATEWAY_META: ReadonlyArray<GatewayMeta> = [
         key: 'selfEmployedEnabled',
         labelKey: 'paymentGateways.fields.selfEmployedEnabled',
         placeholder: '',
-        type: 'select',
-        options: [
-          { value: 'false', labelKey: 'paymentGateways.options.disabled' },
-          { value: 'true', labelKey: 'paymentGateways.options.enabled' },
-        ],
+        type: 'toggle',
         hintKey: 'paymentGateways.hints.selfEmployedEnabled',
       },
       {
@@ -162,6 +164,7 @@ const GATEWAY_META: ReadonlyArray<GatewayMeta> = [
         labelKey: 'paymentGateways.fields.moyNalogAuthMethod',
         placeholder: '',
         type: 'select',
+        dependsOn: 'selfEmployedEnabled',
         options: [
           { value: 'password', labelKey: 'paymentGateways.options.moyNalogAuthPassword' },
           { value: 'refresh', labelKey: 'paymentGateways.options.moyNalogAuthRefresh' },
@@ -172,6 +175,7 @@ const GATEWAY_META: ReadonlyArray<GatewayMeta> = [
         key: 'moyNalogInn',
         labelKey: 'paymentGateways.fields.moyNalogInn',
         placeholder: '7707083893',
+        dependsOn: 'selfEmployedEnabled',
         hintKey: 'paymentGateways.hints.moyNalogInn',
       },
       {
@@ -179,6 +183,7 @@ const GATEWAY_META: ReadonlyArray<GatewayMeta> = [
         labelKey: 'paymentGateways.fields.moyNalogPassword',
         placeholder: '••••••••',
         secret: true,
+        dependsOn: 'selfEmployedEnabled',
         hintKey: 'paymentGateways.hints.moyNalogPassword',
       },
       {
@@ -186,12 +191,14 @@ const GATEWAY_META: ReadonlyArray<GatewayMeta> = [
         labelKey: 'paymentGateways.fields.moyNalogRefreshToken',
         placeholder: 'refresh-token',
         secret: true,
+        dependsOn: 'selfEmployedEnabled',
         hintKey: 'paymentGateways.hints.moyNalogRefreshToken',
       },
       {
         key: 'moyNalogDeviceId',
         labelKey: 'paymentGateways.fields.moyNalogDeviceId',
         placeholder: 'auto from INN',
+        dependsOn: 'selfEmployedEnabled',
         hintKey: 'paymentGateways.hints.moyNalogDeviceId',
       },
       {
@@ -199,12 +206,14 @@ const GATEWAY_META: ReadonlyArray<GatewayMeta> = [
         labelKey: 'paymentGateways.fields.moyNalogProxy',
         placeholder: 'socks5h://user:pass@host:1080',
         secret: true,
+        dependsOn: 'selfEmployedEnabled',
         hintKey: 'paymentGateways.hints.moyNalogProxy',
       },
       {
         key: 'incomeDescriptionTemplate',
         labelKey: 'paymentGateways.fields.incomeDescriptionTemplate',
         placeholder: 'Платеж #{description}',
+        dependsOn: 'selfEmployedEnabled',
         hintKey: 'paymentGateways.hints.incomeDescriptionTemplate',
       },
     ],
@@ -1022,6 +1031,34 @@ function GatewaySettingsForm({ gateway, onClose }: GatewaySettingsFormProps) {
           const value = values[field.key] ?? ''
           const isSecret = field.secret === true
           const visible = showSecrets[field.key] === true
+          // Collapse dependent fields (the whole «Мой Налог» block) unless
+          // their controlling toggle is on.
+          if (field.dependsOn && values[field.dependsOn] !== 'true') {
+            return null
+          }
+          if (field.type === 'toggle') {
+            const on = value === 'true'
+            return (
+              <div
+                key={field.key}
+                className="flex items-start justify-between gap-3 rounded-lg border border-border/60 bg-muted/20 px-3 py-2.5"
+              >
+                <div className="space-y-0.5">
+                  <Label>{t(field.labelKey)}</Label>
+                  {field.hintKey && (
+                    <p className="text-xs text-muted-foreground">{t(field.hintKey)}</p>
+                  )}
+                </div>
+                <Switch
+                  checked={on}
+                  onCheckedChange={(next): void =>
+                    setValues((prev) => ({ ...prev, [field.key]: next ? 'true' : 'false' }))
+                  }
+                  aria-label={t(field.labelKey)}
+                />
+              </div>
+            )
+          }
           if (field.type === 'select' && field.options) {
             return (
               <div key={field.key} className="space-y-1.5">
