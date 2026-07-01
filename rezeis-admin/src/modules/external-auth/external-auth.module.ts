@@ -11,6 +11,7 @@ import { ExternalAuthService } from './services/external-auth.service';
 import { ExternalProviderConfigService } from './services/external-provider-config.service';
 import { GoogleOAuthAdapter } from './services/providers/google-oauth.adapter';
 import { MailruOAuthAdapter } from './services/providers/mailru-oauth.adapter';
+import { TelegramOidcAdapter } from './services/providers/telegram-oidc.adapter';
 import { YandexOAuthAdapter } from './services/providers/yandex-oauth.adapter';
 
 /**
@@ -32,6 +33,7 @@ import { YandexOAuthAdapter } from './services/providers/yandex-oauth.adapter';
     GoogleOAuthAdapter,
     YandexOAuthAdapter,
     MailruOAuthAdapter,
+    TelegramOidcAdapter,
   ],
   exports: [ExternalProviderConfigService, DisposableEmailService, ExternalAuthService],
 })

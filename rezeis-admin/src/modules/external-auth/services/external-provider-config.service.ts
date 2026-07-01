@@ -73,11 +73,35 @@ export class ExternalProviderConfigService {
   /** Enabled providers for the web cabinet (public — no secrets). */
   public async getEnabledProviders(): Promise<PublicExternalProvider[]> {
     const rows = await this.prismaService.externalAuthProviderConfig.findMany({
-      where: { isEnabled: true },
-      select: { provider: true, displayName: true },
-      orderBy: { provider: 'asc' },
+      select: {
+        provider: true,
+        displayName: true,
+        isEnabled: true,
+        useOidc: true,
+        clientId: true,
+        clientSecretEnc: true,
+      },
     });
-    return rows.map((r) => ({ provider: r.provider, displayName: r.displayName }));
+    const byProvider = new Map(rows.map((r) => [r.provider, r] as const));
+    const result: PublicExternalProvider[] = [];
+    // Telegram is default-on (reuses the bot token) even before the admin ever
+    // opens the External Auth page — so it must surface without a seeded row.
+    // OAuth providers stay default-off. An explicit admin row always wins.
+    for (const provider of Object.values(ExternalAuthProvider)) {
+      const row = byProvider.get(provider);
+      const enabled = row ? row.isEnabled : provider === ExternalAuthProvider.TELEGRAM;
+      if (!enabled) continue;
+      if (provider === ExternalAuthProvider.TELEGRAM) {
+        // OIDC only when the operator supplied a Client ID + Secret from
+        // @BotFather; otherwise fall back to the classic Login Widget.
+        const mode: 'oidc' | 'widget' =
+          row?.useOidc && row.clientId && row.clientSecretEnc ? 'oidc' : 'widget';
+        result.push({ provider, displayName: row?.displayName ?? DEFAULT_DISPLAY_NAMES[provider], mode });
+      } else {
+        result.push({ provider, displayName: row?.displayName ?? DEFAULT_DISPLAY_NAMES[provider] });
+      }
+    }
+    return result;
   }
 
   /**
@@ -111,7 +135,10 @@ export class ExternalProviderConfigService {
       where: { provider },
       select: { isEnabled: true },
     });
-    return row?.isEnabled === true;
+    // Mirror getEnabledProviders: Telegram is default-on when no row exists yet,
+    // so its callback resolve doesn't fail before the admin seeds config rows.
+    if (!row) return provider === ExternalAuthProvider.TELEGRAM;
+    return row.isEnabled === true;
   }
 
   /**
@@ -127,6 +154,7 @@ export class ExternalProviderConfigService {
       readonly clientId?: string | null;
       readonly clientSecret?: string | null;
       readonly usePkce?: boolean;
+      readonly useOidc?: boolean;
       readonly scopes?: string | null;
     },
   ): Promise<ExternalProviderConfigView> {
@@ -138,6 +166,7 @@ export class ExternalProviderConfigService {
     if (input.displayName !== undefined) data.displayName = input.displayName;
     if (input.clientId !== undefined) data.clientId = input.clientId;
     if (input.usePkce !== undefined) data.usePkce = input.usePkce;
+    if (input.useOidc !== undefined) data.useOidc = input.useOidc;
     if (input.scopes !== undefined) data.scopes = input.scopes;
     if (input.clientSecret !== undefined && input.clientSecret !== null && input.clientSecret !== '') {
       data.clientSecretEnc = this.cryptoService.encrypt(input.clientSecret);
@@ -148,13 +177,21 @@ export class ExternalProviderConfigService {
     const nextHasSecret =
       (input.clientSecret !== undefined && input.clientSecret !== null && input.clientSecret !== '') ||
       Boolean(current?.clientSecretEnc);
+    const nextUseOidc = input.useOidc !== undefined ? input.useOidc : current?.useOidc ?? false;
+    const nextEnabled =
+      input.isEnabled !== undefined
+        ? input.isEnabled
+        : current?.isEnabled ?? provider === ExternalAuthProvider.TELEGRAM;
 
-    if (input.isEnabled === true && OAUTH_PROVIDERS.includes(provider)) {
-      if (!nextClientId || !nextHasSecret) {
-        throw new BadRequestException(
-          `Provider ${provider} requires a client id and client secret before it can be enabled`,
-        );
-      }
+    // OAuth providers always need credentials to be enabled; Telegram needs them
+    // only when using the OAuth2/OIDC flow (the widget reuses the bot token).
+    const requiresCredentials =
+      OAUTH_PROVIDERS.includes(provider) ||
+      (provider === ExternalAuthProvider.TELEGRAM && nextUseOidc);
+    if (nextEnabled && requiresCredentials && (!nextClientId || !nextHasSecret)) {
+      throw new BadRequestException(
+        `Provider ${provider} requires a client id and client secret before it can be enabled`,
+      );
     }
     if (input.isEnabled !== undefined) data.isEnabled = input.isEnabled;
 
@@ -170,6 +207,7 @@ export class ExternalProviderConfigService {
             ? this.cryptoService.encrypt(input.clientSecret)
             : null,
         usePkce: input.usePkce ?? provider !== ExternalAuthProvider.TELEGRAM,
+        useOidc: input.useOidc ?? false,
         scopes: input.scopes ?? null,
       },
       update: data,
@@ -221,6 +259,7 @@ export class ExternalProviderConfigService {
     clientId: string | null;
     clientSecretEnc: string | null;
     usePkce: boolean;
+    useOidc: boolean;
     scopes: string | null;
   }): ExternalProviderConfigView {
     return {
@@ -232,6 +271,7 @@ export class ExternalProviderConfigService {
       usePkce: row.usePkce,
       scopes: row.scopes,
       usesBotToken: row.provider === ExternalAuthProvider.TELEGRAM,
+      useOidc: row.useOidc,
     };
   }
 }

@@ -58,6 +58,23 @@ export const en = {
     usePkce: 'Use PKCE',
     telegramNote: 'Always available, reuses the bot token. No separate keys needed.',
     oauthNote: "Enter the provider's Client ID and Secret, then enable.",
+    telegramOidcNote: 'OIDC mode: sign-in via oauth.telegram.org using a Client ID/Secret (redirect flow, like Google).',
+    telegramUseOidc: 'Use OIDC (Client ID/Secret)',
+    telegramUseOidcHint: 'On — new method via oauth.telegram.org. Off — classic Login Widget (bot token + /setdomain).',
+    redirectUri: 'Redirect URI',
+    redirectUriRegisterHint: 'Register this URL in the provider console ({origin} = your cabinet domain).',
+    helpAria: 'How to configure',
+    redirectUriHint: 'Redirect URI: {{path}} (replace {origin} with your cabinet domain).',
+    help: {
+      TELEGRAM:
+        'OIDC: @BotFather → pick your bot → Login Widget → copy the Client ID and Client Secret and add the Redirect URI. Widget (no OIDC): @BotFather → /setdomain → set your cabinet domain, and set BOT_USERNAME in reiwa .env.',
+      GOOGLE:
+        'Google Cloud Console → APIs & Services → Credentials → Create OAuth client ID → Web application. Copy the Client ID/Secret, add the Authorized redirect URI. Scopes: openid email profile.',
+      YANDEX:
+        'Yandex OAuth (oauth.yandex.ru) → create an app → grant email/profile access. Copy the ID and password (secret), add the Redirect URI.',
+      MAILRU:
+        'Mail.ru OAuth (oauth.mail.ru) → create an app → copy client_id and client_secret, add the Redirect URI.',
+    },
     save: 'Save',
     saved: 'Saved',
     saveFailed: 'Could not save',

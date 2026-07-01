@@ -38,6 +38,10 @@ export class UpdateExternalProviderDto {
   public usePkce?: boolean;
 
   @IsOptional()
+  @IsBoolean()
+  public useOidc?: boolean;
+
+  @IsOptional()
   @IsString()
   @MaxLength(512)
   public scopes?: string | null;

@@ -28,6 +28,11 @@ export interface ExternalProviderConfigView {
   readonly scopes: string | null;
   /** Telegram reuses the bot token; it has no client id/secret to configure. */
   readonly usesBotToken: boolean;
+  /**
+   * Telegram only: when true (and client id/secret set) the OAuth2/OIDC flow
+   * (oauth.telegram.org) is used instead of the classic Login Widget.
+   */
+  readonly useOidc: boolean;
 }
 
 /**
@@ -36,6 +41,12 @@ export interface ExternalProviderConfigView {
 export interface PublicExternalProvider {
   readonly provider: ExternalAuthProvider;
   readonly displayName: string;
+  /**
+   * Telegram sign-in method the cabinet must render: `oidc` = redirect flow
+   * (oauth.telegram.org), `widget` = classic Login Widget. Omitted for the
+   * pure-OAuth providers (always redirect).
+   */
+  readonly mode?: 'oidc' | 'widget';
 }
 
 /** Disposable-email policy modes (Requirement 5.1). */

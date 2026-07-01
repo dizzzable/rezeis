@@ -58,6 +58,23 @@
     usePkce: 'Использовать PKCE',
     telegramNote: 'Всегда доступен, использует токен бота. Отдельные ключи не нужны.',
     oauthNote: 'Укажите Client ID и Secret из консоли провайдера, затем включите.',
+    telegramOidcNote: 'OIDC-режим: вход через oauth.telegram.org по Client ID/Secret (redirect-флоу, как у Google).',
+    telegramUseOidc: 'Использовать OIDC (Client ID/Secret)',
+    telegramUseOidcHint: 'Вкл — новый метод через oauth.telegram.org. Выкл — классический Login Widget (токен бота + /setdomain).',
+    redirectUri: 'Redirect URI',
+    redirectUriRegisterHint: 'Зарегистрируйте этот URL в консоли провайдера ({origin} = домен вашего кабинета).',
+    helpAria: 'Как настроить',
+    redirectUriHint: 'Redirect URI: {{path}} (подставьте домен вашего кабинета вместо {origin}).',
+    help: {
+      TELEGRAM:
+        'OIDC: @BotFather → выберите бота → Login Widget → скопируйте Client ID и Client Secret и добавьте Redirect URI. Виджет (без OIDC): @BotFather → /setdomain → укажите домен кабинета, и задайте BOT_USERNAME в .env reiwa.',
+      GOOGLE:
+        'Google Cloud Console → APIs & Services → Credentials → Create OAuth client ID → Web application. Скопируйте Client ID/Secret, добавьте Authorized redirect URI. Scopes: openid email profile.',
+      YANDEX:
+        'Yandex OAuth (oauth.yandex.ru) → создайте приложение → включите доступ к email/профилю. Скопируйте ID и пароль (secret), добавьте Redirect URI.',
+      MAILRU:
+        'Mail.ru OAuth (oauth.mail.ru) → создайте приложение → скопируйте client_id и client_secret, добавьте Redirect URI.',
+    },
     save: 'Сохранить',
     saved: 'Сохранено',
     saveFailed: 'Не удалось сохранить',

@@ -19,6 +19,7 @@ import {
 import { AuthorizeUrlInput, ExchangeInput, OAuthProviderAdapter } from '../interfaces/oauth-adapter.interface';
 import { GoogleOAuthAdapter } from './providers/google-oauth.adapter';
 import { MailruOAuthAdapter } from './providers/mailru-oauth.adapter';
+import { TelegramOidcAdapter } from './providers/telegram-oidc.adapter';
 import { YandexOAuthAdapter } from './providers/yandex-oauth.adapter';
 import { DisposableEmailService } from './disposable-email.service';
 import { ExternalProviderConfigService } from './external-provider-config.service';
@@ -44,11 +45,16 @@ export class ExternalAuthService {
     google: GoogleOAuthAdapter,
     yandex: YandexOAuthAdapter,
     mailru: MailruOAuthAdapter,
+    telegramOidc: TelegramOidcAdapter,
   ) {
     this.oauthAdapters = new Map<ExternalAuthProvider, OAuthProviderAdapter>([
       [ExternalAuthProvider.GOOGLE, google],
       [ExternalAuthProvider.YANDEX, yandex],
       [ExternalAuthProvider.MAILRU, mailru],
+      // Telegram OIDC (oauth.telegram.org) — the classic Login Widget path is
+      // handled separately by `resolveTelegram`. This adapter drives the
+      // redirect flow when the operator enables Telegram's OIDC mode.
+      [ExternalAuthProvider.TELEGRAM, telegramOidc],
     ]);
   }
 

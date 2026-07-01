@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { KeyRound, Loader2, Save, ShieldCheck } from 'lucide-react'
+import { Info, KeyRound, Loader2, Save, ShieldCheck } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -11,6 +11,7 @@ import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import {
   Select,
   SelectContent,
@@ -20,6 +21,7 @@ import {
 } from '@/components/ui/select'
 import { FadeIn } from '@/lib/motion'
 import { useHasPermission } from '@/features/rbac'
+import { ProviderIcon } from './provider-icons'
 import {
   DISPOSABLE_MODES,
   externalAuthApi,
@@ -83,6 +85,28 @@ export default function ExternalAuthPage() {
   )
 }
 
+function ProviderHelp({ provider, redirectPath }: { provider: string; redirectPath: string }) {
+  const { t } = useTranslation()
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          className="text-muted-foreground transition-colors hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-full"
+          aria-label={t('externalAuthPage.helpAria')}
+        >
+          <Info className="h-3.5 w-3.5" aria-hidden="true" />
+        </button>
+      </TooltipTrigger>
+      <TooltipContent side="bottom" className="max-w-xs whitespace-pre-line text-xs leading-relaxed">
+        {t(`externalAuthPage.help.${provider}`)}
+        {'\n\n'}
+        {t('externalAuthPage.redirectUriHint', { path: redirectPath })}
+      </TooltipContent>
+    </Tooltip>
+  )
+}
+
 function ProviderCard({ config, canEdit }: { config: ExternalProviderConfig; canEdit: boolean }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
@@ -91,6 +115,7 @@ function ProviderCard({ config, canEdit }: { config: ExternalProviderConfig; can
   const [clientId, setClientId] = useState(config.clientId ?? '')
   const [clientSecret, setClientSecret] = useState('')
   const [usePkce, setUsePkce] = useState(config.usePkce)
+  const [useOidc, setUseOidc] = useState(config.useOidc)
   const [scopes, setScopes] = useState(config.scopes ?? '')
 
   const update = useMutation({
@@ -106,18 +131,41 @@ function ProviderCard({ config, canEdit }: { config: ExternalProviderConfig; can
     },
   })
 
-  const isOAuth = !config.usesBotToken
+  const isTelegram = config.usesBotToken
+  // OAuth credential fields show for the pure-OAuth providers, and for Telegram
+  // once the operator switches it to OIDC mode.
+  const showCredentialFields = !isTelegram || useOidc
+  const redirectPath = `/api/v1/auth/ext/${config.provider.toLowerCase()}/callback`
+
+  function handleSave(): void {
+    update.mutate({
+      ...(isTelegram ? {} : { displayName }),
+      clientId: clientId.trim() === '' ? null : clientId.trim(),
+      ...(clientSecret !== '' ? { clientSecret } : {}),
+      usePkce,
+      ...(isTelegram ? { useOidc } : {}),
+      scopes: scopes.trim() === '' ? null : scopes.trim(),
+    })
+  }
 
   return (
     <Card>
       <CardHeader className="flex flex-row items-start justify-between gap-3 space-y-0">
-        <div className="space-y-1">
-          <CardTitle className="text-base">{config.displayName}</CardTitle>
-          <CardDescription>
-            {config.usesBotToken
-              ? t('externalAuthPage.telegramNote')
-              : t('externalAuthPage.oauthNote')}
-          </CardDescription>
+        <div className="flex items-start gap-2.5">
+          <ProviderIcon provider={config.provider} className="mt-0.5 h-6 w-6 shrink-0" />
+          <div className="space-y-1">
+            <CardTitle className="flex items-center gap-1.5 text-base">
+              {config.displayName}
+              <ProviderHelp provider={config.provider} redirectPath={redirectPath} />
+            </CardTitle>
+            <CardDescription>
+              {isTelegram
+                ? useOidc
+                  ? t('externalAuthPage.telegramOidcNote')
+                  : t('externalAuthPage.telegramNote')
+                : t('externalAuthPage.oauthNote')}
+            </CardDescription>
+          </div>
         </div>
         <Switch
           checked={config.isEnabled}
@@ -127,54 +175,73 @@ function ProviderCard({ config, canEdit }: { config: ExternalProviderConfig; can
         />
       </CardHeader>
 
-      {isOAuth && (
-        <CardContent className="space-y-3">
-          <div className="space-y-1.5">
-            <Label className="text-xs">{t('externalAuthPage.displayName')}</Label>
-            <Input value={displayName} disabled={!canEdit} onChange={(e) => setDisplayName(e.target.value)} />
-          </div>
-          <div className="space-y-1.5">
-            <Label className="text-xs">{t('externalAuthPage.clientId')}</Label>
-            <Input value={clientId} disabled={!canEdit} onChange={(e) => setClientId(e.target.value)} placeholder="client-id" />
-          </div>
-          <div className="space-y-1.5">
-            <Label className="text-xs">{t('externalAuthPage.clientSecret')}</Label>
-            <Input
-              type="password"
-              value={clientSecret}
+      <CardContent className="space-y-3">
+        {isTelegram && (
+          <div className="flex items-center justify-between gap-3 rounded-lg border border-border/60 bg-muted/20 px-3 py-2">
+            <div className="space-y-0.5">
+              <Label className="text-xs">{t('externalAuthPage.telegramUseOidc')}</Label>
+              <p className="text-[11px] text-muted-foreground">{t('externalAuthPage.telegramUseOidcHint')}</p>
+            </div>
+            <Switch
+              checked={useOidc}
               disabled={!canEdit}
-              onChange={(e) => setClientSecret(e.target.value)}
-              placeholder={config.hasSecret ? '••••••••' : t('externalAuthPage.secretPlaceholder')}
+              onCheckedChange={setUseOidc}
+              aria-label={t('externalAuthPage.telegramUseOidc')}
             />
-            <p className="text-[11px] text-muted-foreground">{t('externalAuthPage.secretHint')}</p>
           </div>
-          <div className="space-y-1.5">
-            <Label className="text-xs">{t('externalAuthPage.scopes')}</Label>
-            <Input value={scopes} disabled={!canEdit} onChange={(e) => setScopes(e.target.value)} placeholder="openid email profile" />
-          </div>
-          <div className="flex items-center justify-between rounded-lg border border-border/60 bg-muted/20 px-3 py-2">
-            <Label className="text-xs">{t('externalAuthPage.usePkce')}</Label>
-            <Switch checked={usePkce} disabled={!canEdit} onCheckedChange={setUsePkce} aria-label={t('externalAuthPage.usePkce')} />
-          </div>
-          <Button
-            size="sm"
-            className="w-full"
-            disabled={!canEdit || update.isPending}
-            onClick={() =>
-              update.mutate({
-                displayName,
-                clientId: clientId.trim() === '' ? null : clientId.trim(),
-                ...(clientSecret !== '' ? { clientSecret } : {}),
-                usePkce,
-                scopes: scopes.trim() === '' ? null : scopes.trim(),
-              })
-            }
-          >
-            {update.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
-            {t('externalAuthPage.save')}
-          </Button>
-        </CardContent>
-      )}
+        )}
+
+        {showCredentialFields && (
+          <>
+            {!isTelegram && (
+              <div className="space-y-1.5">
+                <Label className="text-xs">{t('externalAuthPage.displayName')}</Label>
+                <Input value={displayName} disabled={!canEdit} onChange={(e) => setDisplayName(e.target.value)} />
+              </div>
+            )}
+            <div className="space-y-1.5">
+              <Label className="text-xs">{t('externalAuthPage.clientId')}</Label>
+              <Input value={clientId} disabled={!canEdit} onChange={(e) => setClientId(e.target.value)} placeholder="client-id" />
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-xs">{t('externalAuthPage.clientSecret')}</Label>
+              <Input
+                type="password"
+                value={clientSecret}
+                disabled={!canEdit}
+                onChange={(e) => setClientSecret(e.target.value)}
+                placeholder={config.hasSecret ? '••••••••' : t('externalAuthPage.secretPlaceholder')}
+              />
+              <p className="text-[11px] text-muted-foreground">{t('externalAuthPage.secretHint')}</p>
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-xs">{t('externalAuthPage.scopes')}</Label>
+              <Input
+                value={scopes}
+                disabled={!canEdit}
+                onChange={(e) => setScopes(e.target.value)}
+                placeholder={isTelegram ? 'openid profile' : 'openid email profile'}
+              />
+            </div>
+            <div className="space-y-1">
+              <Label className="text-xs">{t('externalAuthPage.redirectUri')}</Label>
+              <code className="block truncate rounded-md border border-border/60 bg-muted/30 px-2 py-1.5 text-[11px] text-muted-foreground">
+                {`{origin}${redirectPath}`}
+              </code>
+              <p className="text-[11px] text-muted-foreground">{t('externalAuthPage.redirectUriRegisterHint')}</p>
+            </div>
+            <div className="flex items-center justify-between rounded-lg border border-border/60 bg-muted/20 px-3 py-2">
+              <Label className="text-xs">{t('externalAuthPage.usePkce')}</Label>
+              <Switch checked={usePkce} disabled={!canEdit} onCheckedChange={setUsePkce} aria-label={t('externalAuthPage.usePkce')} />
+            </div>
+          </>
+        )}
+
+        <Button size="sm" className="w-full" disabled={!canEdit || update.isPending} onClick={handleSave}>
+          {update.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
+          {t('externalAuthPage.save')}
+        </Button>
+      </CardContent>
     </Card>
   )
 }

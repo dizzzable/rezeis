@@ -1114,6 +1114,10 @@ model ExternalAuthProviderConfig {
   clientSecretEnc String?              @map("client_secret_enc")
   usePkce         Boolean              @default(true) @map("use_pkce")
   scopes          String?              @map("scopes")
+  /// Telegram only: when true (and client id/secret set) use the OAuth2/OIDC
+  /// flow (oauth.telegram.org) instead of the classic Login Widget. Ignored by
+  /// the pure-OAuth providers, which are always OIDC/OAuth.
+  useOidc         Boolean              @default(false) @map("use_oidc")
   createdAt       DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt       DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
 

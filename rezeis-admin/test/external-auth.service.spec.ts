@@ -103,6 +103,7 @@ function createService(state: MockState) {
     adapter,
     adapter,
     adapter,
+    adapter,
   );
   return { service, calls };
 }

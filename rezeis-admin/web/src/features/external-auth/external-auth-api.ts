@@ -17,6 +17,7 @@ const providerConfigSchema = z.object({
   usePkce: z.boolean(),
   scopes: z.string().nullable(),
   usesBotToken: z.boolean(),
+  useOidc: z.boolean(),
 })
 export type ExternalProviderConfig = z.infer<typeof providerConfigSchema>
 
@@ -34,6 +35,7 @@ export interface UpdateProviderInput {
   readonly clientId?: string | null
   readonly clientSecret?: string | null
   readonly usePkce?: boolean
+  readonly useOidc?: boolean
   readonly scopes?: string | null
 }
 
