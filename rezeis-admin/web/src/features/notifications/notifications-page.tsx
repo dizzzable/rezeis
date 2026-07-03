@@ -616,6 +616,16 @@ function TelegramDeliveryForm({ settings }: TelegramDeliveryFormProps) {
     onError: () => toast.error(t('notificationsPage.toasts.testFailed')),
   })
 
+  // Per-category test: sends a test card to that category's SAVED topic so the
+  // operator can verify routing for a single category. Uses the stored config,
+  // so save topic changes before testing them.
+  const testCategoryMutation = useMutation({
+    mutationFn: (category: string) =>
+      api.post('/admin/settings/system-notifications/telegram/test', { category }),
+    onSuccess: () => toast.success(t('notificationsPage.toasts.testSent')),
+    onError: () => toast.error(t('notificationsPage.toasts.testFailed')),
+  })
+
   // react-hook-form's `form.watch()` is currently flagged by react-doctor as an
   // "incompatible library". This is the documented pattern for subscribing to a
   // single field's value; the React Compiler integration will improve later.
@@ -775,9 +785,31 @@ function TelegramDeliveryForm({ settings }: TelegramDeliveryFormProps) {
                     name={`topics.${cat}` as const}
                     render={({ field }) => (
                       <FormItem className="space-y-1">
-                        <FormLabel className="text-xs">
-                          {t(String(`notificationsPage.categoryLabels.${cat}`))}
-                        </FormLabel>
+                        <div className="flex items-center justify-between gap-1">
+                          <FormLabel className="text-xs">
+                            {t(String(`notificationsPage.categoryLabels.${cat}`))}
+                          </FormLabel>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className="h-5 w-5 shrink-0 text-muted-foreground hover:text-foreground"
+                            aria-label={t('notificationsPage.delivery.testCategoryAria', {
+                              category: t(String(`notificationsPage.categoryLabels.${cat}`)),
+                            })}
+                            title={t('notificationsPage.delivery.testCategoryAria', {
+                              category: t(String(`notificationsPage.categoryLabels.${cat}`)),
+                            })}
+                            disabled={!enabled || !chatId.trim() || testCategoryMutation.isPending}
+                            onClick={() => testCategoryMutation.mutate(cat)}
+                          >
+                            {testCategoryMutation.isPending && testCategoryMutation.variables === cat ? (
+                              <Loader2 className="h-3 w-3 animate-spin" />
+                            ) : (
+                              <Send className="h-3 w-3" />
+                            )}
+                          </Button>
+                        </div>
                         <FormControl>
                           <Input
                             {...field}

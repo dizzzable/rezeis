@@ -76,6 +76,14 @@ export const CARD_EFFECTS = [
   'silk',
   'beams',
   'dither',
+  // Paper Shaders (WebGL2, @paper-design/shaders-react). Prefixed `paper*`
+  // to avoid colliding with the existing reactbits ids (dither/waves/…).
+  'paperMesh',
+  'paperWarp',
+  'paperGrain',
+  'paperDither',
+  'paperSwirl',
+  'paperMetaballs',
 ] as const;
 export type CardEffect = (typeof CARD_EFFECTS)[number];
 

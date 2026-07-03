@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
-import { Prisma, SyncAction, SyncJobStatus } from '@prisma/client';
+import { Prisma, SubscriptionStatus, SyncAction, SyncJobStatus } from '@prisma/client';
 
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { shouldRunSchedules } from '../../common/runtime/process-role.util';
@@ -14,23 +14,33 @@ const CLEANUP_BATCH = 100;
 /**
  * ExpiredProfileCleanupService
  * ────────────────────────────
- * Worker-only cron that removes the Remnawave **panel profile** for expired
- * subscriptions while keeping the local `Subscription` row intact.
+ * Worker-only cron that retires subscriptions once they've been expired past
+ * the grace window: it removes the Remnawave **panel profile** AND soft-deletes
+ * the local `Subscription` row (`status = DELETED`).
  *
- * Why detach but keep the row:
+ * Grace-window contract:
+ *   A subscription expires (`expiresAt` passes) and stays EXPIRED — visible in
+ *   the cabinet/bot and still renewable — for `graceDays` (default 3). After
+ *   that the sweep cleans it on BOTH sides: the panel profile is deleted and
+ *   the row flips to DELETED, so it disappears from the cabinet (the internal
+ *   list filters `status != DELETED`) and can no longer be renewed. A timely
+ *   renewal within the window keeps the same profile (no re-provisioning).
+ *
+ * Why soft-delete (keep the row) instead of hard-delete:
  *   Trial accounting (`grantTrial` / trial eligibility) counts `isTrial`
- *   subscriptions with **no status filter**, plus `TrialGrant` and paid-trial
- *   `Transaction` rows. Those must survive so a user can never re-claim a free
- *   trial or exceed a paid-trial limit just because their old profile expired
- *   and was cleaned off the panel. We therefore only delete the upstream panel
- *   profile (frees panel space + declutters the operator UI) and null the
- *   local `remnawaveId`; the row — incl. `isTrial`, `status`, `planSnapshot` —
- *   is retained as the durable trial-usage ledger.
+ *   subscriptions with **no status filter** (DELETED rows included), plus
+ *   `TrialGrant` and paid-trial `Transaction` rows. Those must survive so a
+ *   user can never re-claim a free trial or exceed a paid-trial limit just
+ *   because their old subscription was cleaned. The row — incl. `isTrial`,
+ *   `planSnapshot` — is retained as the durable trial-usage ledger.
  *
- * The sweep is a thin selector: it finds expired, profile-bearing
- * subscriptions that don't already have a pending/in-flight `DELETE` job and
- * enqueues the existing `ProfileSyncJob(DELETE)` for each. The actual panel
- * call + local detach happen in `ProfileSyncProcessor.handleDelete`.
+ * Two selectors run per sweep:
+ *   1. Profile-bearing expired rows (no pending/in-flight `DELETE` job) →
+ *      enqueue `ProfileSyncJob(DELETE)`; the panel call + `status = DELETED`
+ *      happen in `ProfileSyncProcessor.handleDelete`.
+ *   2. Already-detached expired rows (`remnawaveId = null`, not yet DELETED) —
+ *      e.g. cleaned by an older build that only nulled the profile link — are
+ *      soft-deleted directly here (nothing left to remove on the panel).
  *
  * See `.kiro/specs/trial-aware-profile-cleanup`.
  */
@@ -52,9 +62,14 @@ export class ExpiredProfileCleanupService {
   }
 
   /**
-   * Selects up to `CLEANUP_BATCH` expired, profile-bearing subscriptions with
-   * no pending/in-flight `DELETE` job and enqueues a `DELETE` job for each.
-   * Returns the number of subscriptions enqueued (exposed for tests).
+   * One sweep pass:
+   *   1. Enqueue a `DELETE` job for up to `CLEANUP_BATCH` expired,
+   *      profile-bearing subscriptions with no pending/in-flight `DELETE` job
+   *      (the job deletes the panel profile AND flips the row to DELETED).
+   *   2. Directly soft-delete expired rows that are already detached
+   *      (`remnawaveId = null`) but not yet DELETED — nothing to remove on the
+   *      panel, so no job is needed.
+   * Returns the total number of subscriptions acted on (exposed for tests).
    */
   public async runSweep(): Promise<number> {
     // Panel-managed policy: operators can disable profile deletion entirely
@@ -64,10 +79,42 @@ export class ExpiredProfileCleanupService {
     if (!policy.deleteEnabled) return 0;
 
     const now = new Date();
-    // Only delete profiles whose subscription expired more than `graceDays`
-    // ago — gives the user a renewal window before the panel profile is
-    // detached. graceDays=0 ⇒ delete as soon as expired.
+    // Only act on subscriptions expired more than `graceDays` ago — gives the
+    // user a renewal window before the profile is detached and the row is
+    // retired. graceDays=0 ⇒ act as soon as expired.
     const cutoff = new Date(now.getTime() - policy.graceDays * 24 * 60 * 60 * 1000);
+    const enqueued = await this.enqueueProfileDeletions(cutoff);
+    const softDeleted = await this.softDeleteDetachedExpired(cutoff);
+    return enqueued + softDeleted;
+  }
+
+  /**
+   * Soft-deletes expired subscriptions that no longer carry a panel profile
+   * (`remnawaveId = null`) and aren't already DELETED — e.g. rows an older
+   * build detached but left EXPIRED. Bulk `updateMany`; nothing to call on the
+   * panel. Returns the number of rows flipped to DELETED.
+   */
+  private async softDeleteDetachedExpired(cutoff: Date): Promise<number> {
+    const { count } = await this.prismaService.subscription.updateMany({
+      where: {
+        remnawaveId: null,
+        status: { not: SubscriptionStatus.DELETED },
+        expiresAt: { not: null, lt: cutoff },
+      },
+      data: { status: SubscriptionStatus.DELETED },
+    });
+    if (count > 0) {
+      this.logger.log(`Expired-profile cleanup: soft-deleted ${count} already-detached subscription(s)`);
+    }
+    return count;
+  }
+
+  /**
+   * Selects up to `CLEANUP_BATCH` expired, profile-bearing subscriptions with
+   * no pending/in-flight `DELETE` job and enqueues a `DELETE` job for each.
+   * Returns the number of subscriptions enqueued.
+   */
+  private async enqueueProfileDeletions(cutoff: Date): Promise<number> {
     const candidates = await this.prismaService.subscription.findMany({
       where: {
         remnawaveId: { not: null },

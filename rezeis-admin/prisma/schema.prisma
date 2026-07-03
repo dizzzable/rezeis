@@ -154,11 +154,15 @@ enum ArchivedPlanRenewMode {
 
 /// Traffic reset strategy. `YEAR` is intentionally omitted — pricing logic
 /// in the application currently does not handle it.
+///   - `MONTH`         — reset on a fixed calendar day (Remnawave: 1st, 00:00 UTC).
+///   - `MONTH_ROLLING` — reset monthly on the profile's creation-date anniversary
+///                       (Remnawave `MONTH_ROLLING`); i.e. "from the purchase date".
 enum TrafficLimitStrategy {
   NO_RESET
   DAY
   WEEK
   MONTH
+  MONTH_ROLLING
 }
 
 enum AccessMode {

@@ -5,12 +5,11 @@
  * subscription card. Mirrors the reiwa SPA registry
  * (`reiwa/web/src/components/reactbits/registry.ts`) — keep both in lockstep.
  *
- * Only the dependency-light effects (ogl + canvas) are exposed; reiwa ships
- * `ogl` but not three.js, so Silk/Beams/Dither are intentionally excluded.
- *
- * Each effect reuses the existing admin `components/reactbits/<Name>` so the
- * configurator preview renders the REAL effect, and the control defs drive the
- * tunable parameter UI + the params we persist to branding.
+ * Only the dependency-light effects (ogl + canvas + fiber) plus the WebGL2
+ * Paper Shaders (`paper*`) are exposed. Each effect reuses the existing admin
+ * `components/reactbits/<Name>` so the configurator preview renders the REAL
+ * effect, and the control defs drive the tunable parameter UI + the params we
+ * persist to branding.
  */
 
 import { lazy, type ComponentType, type LazyExoticComponent } from 'react'
@@ -35,6 +34,12 @@ export type CardEffectId =
   | 'silk'
   | 'beams'
   | 'dither'
+  | 'paperMesh'
+  | 'paperWarp'
+  | 'paperGrain'
+  | 'paperDither'
+  | 'paperSwirl'
+  | 'paperMetaballs'
 
 type EffectComponent = LazyExoticComponent<ComponentType<Record<string, unknown>>>
 
@@ -57,6 +62,12 @@ export const CARD_EFFECT_COMPONENTS: Record<CardEffectId, EffectComponent> = {
   silk: lazy(() => import('@/components/reactbits/Silk')),
   beams: lazy(() => import('@/components/reactbits/Beams')),
   dither: lazy(() => import('@/components/reactbits/Dither')),
+  paperMesh: lazy(() => import('@/components/reactbits/paper').then((m) => ({ default: m.PaperMesh }))),
+  paperWarp: lazy(() => import('@/components/reactbits/paper').then((m) => ({ default: m.PaperWarp }))),
+  paperGrain: lazy(() => import('@/components/reactbits/paper').then((m) => ({ default: m.PaperGrain }))),
+  paperDither: lazy(() => import('@/components/reactbits/paper').then((m) => ({ default: m.PaperDither }))),
+  paperSwirl: lazy(() => import('@/components/reactbits/paper').then((m) => ({ default: m.PaperSwirl }))),
+  paperMetaballs: lazy(() => import('@/components/reactbits/paper').then((m) => ({ default: m.PaperMetaballs }))),
 }
 
 export interface CardEffectDef {
@@ -235,6 +246,79 @@ export const CARD_EFFECT_REGISTRY: readonly CardEffectDef[] = [
       { prop: 'waveAmplitude', label: 'Amplitude', type: 'slider', min: 0.05, max: 1, step: 0.05, default: 0.3 },
       { prop: 'pixelSize', label: 'Pixel Size', type: 'slider', min: 1, max: 8, step: 1, default: 2 },
       { prop: 'colorNum', label: 'Color Levels', type: 'slider', min: 2, max: 8, step: 1, default: 4 },
+    ],
+  },
+  {
+    id: 'paperMesh', name: 'Mesh Gradient',
+    controls: [
+      { prop: 'speed', label: 'Speed', type: 'slider', min: 0, max: 3, step: 0.1, default: 1 },
+      { prop: 'distortion', label: 'Distortion', type: 'slider', min: 0, max: 1, step: 0.05, default: 0.8 },
+      { prop: 'swirl', label: 'Swirl', type: 'slider', min: 0, max: 1, step: 0.05, default: 0.1 },
+      { prop: 'colors', label: 'Colors', type: 'colorArray', count: 4, default: ['#e0eaff', '#241d9a', '#f75092', '#9f50d3'] },
+    ],
+  },
+  {
+    id: 'paperWarp', name: 'Warp',
+    controls: [
+      { prop: 'speed', label: 'Speed', type: 'slider', min: 0, max: 5, step: 0.1, default: 1 },
+      { prop: 'shape', label: 'Shape', type: 'select', options: ['checks', 'stripes', 'edge'], default: 'checks' },
+      { prop: 'proportion', label: 'Proportion', type: 'slider', min: 0, max: 1, step: 0.05, default: 0.45 },
+      { prop: 'softness', label: 'Softness', type: 'slider', min: 0, max: 2, step: 0.05, default: 1 },
+      { prop: 'distortion', label: 'Distortion', type: 'slider', min: 0, max: 1, step: 0.05, default: 0.25 },
+      { prop: 'swirl', label: 'Swirl', type: 'slider', min: 0, max: 1, step: 0.05, default: 0.8 },
+      { prop: 'swirlIterations', label: 'Swirl Iterations', type: 'slider', min: 1, max: 20, step: 1, default: 10 },
+      { prop: 'shapeScale', label: 'Shape Scale', type: 'slider', min: 0, max: 1, step: 0.05, default: 0.1 },
+      { prop: 'colors', label: 'Colors', type: 'colorArray', count: 4, default: ['#121212', '#9470ff', '#121212', '#8838ff'] },
+    ],
+  },
+  {
+    id: 'paperGrain', name: 'Grain Gradient',
+    controls: [
+      { prop: 'speed', label: 'Speed', type: 'slider', min: 0, max: 3, step: 0.1, default: 1 },
+      { prop: 'shape', label: 'Shape', type: 'select', options: ['corners', 'wave', 'dots', 'truchet', 'ripple', 'blob'], default: 'corners' },
+      { prop: 'softness', label: 'Softness', type: 'slider', min: 0, max: 1, step: 0.05, default: 0.5 },
+      { prop: 'intensity', label: 'Intensity', type: 'slider', min: 0, max: 1, step: 0.05, default: 0.5 },
+      { prop: 'noise', label: 'Noise', type: 'slider', min: 0, max: 1, step: 0.05, default: 0.25 },
+      { prop: 'colorBack', label: 'Background', type: 'color', default: '#000000' },
+      { prop: 'colors', label: 'Colors', type: 'colorArray', count: 4, default: ['#7300ff', '#eba8ff', '#00bfff', '#2a00ff'] },
+    ],
+  },
+  {
+    id: 'paperDither', name: 'Dithering',
+    controls: [
+      { prop: 'speed', label: 'Speed', type: 'slider', min: 0, max: 3, step: 0.1, default: 1 },
+      { prop: 'shape', label: 'Shape', type: 'select', options: ['sphere', 'wave', 'dots', 'ripple', 'swirl', 'warp'], default: 'sphere' },
+      { prop: 'type', label: 'Dither Type', type: 'select', options: ['2x2', '4x4', '8x8', 'random'], default: '4x4' },
+      { prop: 'size', label: 'Pixel Size', type: 'slider', min: 1, max: 12, step: 1, default: 2 },
+      { prop: 'scale', label: 'Scale', type: 'slider', min: 0.1, max: 2, step: 0.1, default: 0.6 },
+      { prop: 'colorBack', label: 'Background', type: 'color', default: '#000000' },
+      { prop: 'colorFront', label: 'Foreground', type: 'color', default: '#00b2ff' },
+    ],
+  },
+  {
+    id: 'paperSwirl', name: 'Swirl',
+    controls: [
+      { prop: 'speed', label: 'Speed', type: 'slider', min: 0, max: 2, step: 0.05, default: 0.32 },
+      { prop: 'bandCount', label: 'Bands', type: 'slider', min: 1, max: 12, step: 1, default: 4 },
+      { prop: 'twist', label: 'Twist', type: 'slider', min: 0, max: 1, step: 0.05, default: 0.1 },
+      { prop: 'center', label: 'Center', type: 'slider', min: 0, max: 1, step: 0.05, default: 0.2 },
+      { prop: 'proportion', label: 'Proportion', type: 'slider', min: 0, max: 1, step: 0.05, default: 0.5 },
+      { prop: 'softness', label: 'Softness', type: 'slider', min: 0, max: 1, step: 0.05, default: 0 },
+      { prop: 'noiseFrequency', label: 'Noise Frequency', type: 'slider', min: 0, max: 1, step: 0.05, default: 0.4 },
+      { prop: 'noise', label: 'Noise', type: 'slider', min: 0, max: 1, step: 0.05, default: 0.2 },
+      { prop: 'colorBack', label: 'Background', type: 'color', default: '#000000' },
+      { prop: 'colors', label: 'Colors', type: 'colorArray', count: 3, default: ['#ffd1d1', '#ff8a8a', '#660000'] },
+    ],
+  },
+  {
+    id: 'paperMetaballs', name: 'Metaballs',
+    controls: [
+      { prop: 'speed', label: 'Speed', type: 'slider', min: 0, max: 3, step: 0.1, default: 1 },
+      { prop: 'count', label: 'Count', type: 'slider', min: 1, max: 20, step: 1, default: 10 },
+      { prop: 'size', label: 'Size', type: 'slider', min: 0.1, max: 1, step: 0.05, default: 0.83 },
+      { prop: 'scale', label: 'Scale', type: 'slider', min: 0.5, max: 4, step: 0.1, default: 1 },
+      { prop: 'colorBack', label: 'Background', type: 'color', default: '#000000' },
+      { prop: 'colors', label: 'Colors', type: 'colorArray', count: 5, default: ['#6e33cc', '#ff5500', '#ffc105', '#ffc800', '#f585ff'] },
     ],
   },
 ]

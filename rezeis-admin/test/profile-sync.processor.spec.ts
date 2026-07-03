@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { SyncAction, SyncJobStatus } from '@prisma/client';
+import { SubscriptionStatus, SyncAction, SyncJobStatus } from '@prisma/client';
 
 import { ProfileSyncProcessor } from '../src/modules/profile-sync/profile-sync.processor';
 
@@ -190,7 +190,7 @@ describe('ProfileSyncProcessor', () => {
     }]);
   });
 
-  it('detaches the profile (nulls remnawaveId, keeps row) on successful DELETE', async () => {
+  it('soft-deletes the row (status DELETED, nulls remnawaveId) on successful DELETE', async () => {
     const subscriptionUpdates: unknown[] = [];
     const processor = new ProfileSyncProcessor(
       {
@@ -232,7 +232,7 @@ describe('ProfileSyncProcessor', () => {
 
     assert.deepStrictEqual(subscriptionUpdates, [{
       where: { id: 'subscription-1' },
-      data: { remnawaveId: null },
+      data: { remnawaveId: null, status: SubscriptionStatus.DELETED },
     }]);
   });
 

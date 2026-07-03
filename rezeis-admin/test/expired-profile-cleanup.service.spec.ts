@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { afterEach, describe, it } from 'node:test';
 
-import { SyncAction, SyncJobStatus } from '@prisma/client';
+import { SubscriptionStatus, SyncAction, SyncJobStatus } from '@prisma/client';
 
 import { _resetProcessRoleCacheForTests } from '../src/common/runtime/process-role.util';
 import { ExpiredProfileCleanupService } from '../src/modules/profile-sync/expired-profile-cleanup.service';
@@ -45,6 +45,7 @@ describe('ExpiredProfileCleanupService', () => {
               { id: 'sub-2', userId: 'user-2', isTrial: false },
             ];
           },
+          updateMany: async () => ({ count: 0 }),
         },
         profileSyncJob: {
           create: async (input: { readonly data: { readonly subscriptionId: string } }) => {
@@ -93,10 +94,45 @@ describe('ExpiredProfileCleanupService', () => {
     assert.equal(events.length, 2);
   });
 
+  it('soft-deletes already-detached expired rows (remnawaveId null, not DELETED) in bulk', async () => {
+    const updateManyCalls: unknown[] = [];
+    const before = Date.now() - 3 * 24 * 60 * 60 * 1000;
+    const service = new ExpiredProfileCleanupService(
+      {
+        subscription: {
+          findMany: async () => [],
+          updateMany: async (input: unknown) => {
+            updateManyCalls.push(input);
+            return { count: 4 };
+          },
+        },
+      } as never,
+      { enqueue: async () => undefined } as never,
+      { info: () => undefined } as never,
+      settingsMock({ deleteEnabled: true, graceDays: 3 }),
+    );
+
+    const count = await service.runSweep();
+    const after = Date.now() - 3 * 24 * 60 * 60 * 1000;
+
+    assert.equal(count, 4);
+    assert.equal(updateManyCalls.length, 1);
+    const call = updateManyCalls[0] as {
+      readonly where: Record<string, unknown>;
+      readonly data: Record<string, unknown>;
+    };
+    assert.equal(call.where['remnawaveId'], null);
+    assert.deepStrictEqual(call.where['status'], { not: SubscriptionStatus.DELETED });
+    const expiresClause = call.where['expiresAt'] as { not: null; lt: Date };
+    assert.equal(expiresClause.not, null);
+    assert.ok(expiresClause.lt.getTime() >= before && expiresClause.lt.getTime() <= after);
+    assert.deepStrictEqual(call.data, { status: SubscriptionStatus.DELETED });
+  });
+
   it('honours a wider grace window in the cutoff (graceDays=7)', async () => {
     const findManyCalls: unknown[] = [];
     const service = new ExpiredProfileCleanupService(
-      { subscription: { findMany: async (i: unknown) => { findManyCalls.push(i); return []; } } } as never,
+      { subscription: { findMany: async (i: unknown) => { findManyCalls.push(i); return []; }, updateMany: async () => ({ count: 0 }) } } as never,
       { enqueue: async () => undefined } as never,
       { info: () => undefined } as never,
       settingsMock({ deleteEnabled: true, graceDays: 7 }),
@@ -130,7 +166,7 @@ describe('ExpiredProfileCleanupService', () => {
     let createCalled = false;
     const service = new ExpiredProfileCleanupService(
       {
-        subscription: { findMany: async () => [] },
+        subscription: { findMany: async () => [], updateMany: async () => ({ count: 0 }) },
         profileSyncJob: { create: async () => { createCalled = true; return { id: 'x' }; } },
       } as never,
       { enqueue: async () => undefined } as never,

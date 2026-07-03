@@ -121,6 +121,7 @@ export const en = {
       mirrorDescription: 'Send a copy of every user notification (expiry, referrals, partner payouts…) into this chat — routed to the USER topic when set. Does not change what users receive.',
       save: 'Save',
       testMessage: 'Test message',
+      testCategoryAria: 'Send a test notification for the {{category}} category',
       validation: {
         chatIdRequired: 'Chat ID is required when delivery is enabled',
         chatIdInvalid: 'Chat ID must be a number, optionally prefixed with -',

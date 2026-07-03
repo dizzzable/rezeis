@@ -1,6 +1,6 @@
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Logger } from '@nestjs/common';
-import { SyncAction, SyncJobStatus } from '@prisma/client';
+import { SubscriptionStatus, SyncAction, SyncJobStatus } from '@prisma/client';
 import { Job } from 'bullmq';
 
 import { PrismaService } from '../../common/prisma/prisma.service';
@@ -257,14 +257,20 @@ export class ProfileSyncProcessor extends WorkerHost {
       this.logger.log(
         `Deleted Remnawave profile '${subscription.remnawaveId}' for subscription ${subscription.id}`,
       );
-      // Detach the now-deleted profile from the local row. The row itself is
-      // retained (it carries trial-claim history via `isTrial`); only the panel
-      // link is cleared so the row no longer references a non-existent profile
-      // and re-provisioning (renewal) starts clean. See
-      // `.kiro/specs/trial-aware-profile-cleanup`.
+      // Fully retire the subscription: mark it DELETED and detach the now-gone
+      // panel profile. The row is kept (soft-delete) so trial-claim history via
+      // `isTrial` survives — trial counts include DELETED rows, so a user can
+      // never re-claim a free trial or exceed a paid-trial limit just because
+      // their old subscription was cleaned off. `status = DELETED` removes it
+      // from the cabinet/bot (the internal list filters `status != DELETED`)
+      // and blocks renewal (renewal filters `status != DELETED`), matching the
+      // grace-window contract: EXPIRED stays renewable for `graceDays`, then the
+      // sweep cleans it here. Self-service/admin deletes already set DELETED
+      // before enqueuing, so this is idempotent for them.
+      // See `.kiro/specs/trial-aware-profile-cleanup`.
       await this.prismaService.subscription.update({
         where: { id: subscription.id },
-        data: { remnawaveId: null },
+        data: { remnawaveId: null, status: SubscriptionStatus.DELETED },
       });
     } else {
       // Leave `remnawaveId` intact so BullMQ retries and the cron backstop can

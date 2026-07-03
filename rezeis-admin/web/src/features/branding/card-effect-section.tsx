@@ -15,6 +15,7 @@ import { useTranslation } from 'react-i18next'
 
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Label } from '@/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Slider } from '@/components/ui/slider'
 import { Switch } from '@/components/ui/switch'
 import { Check } from 'lucide-react'
@@ -199,9 +200,31 @@ function DynamicControl({
       return <RgbColorControl control={control} value={value as number[]} onChange={onChange} />
     case 'toggle':
       return <ToggleControl control={control} value={value as boolean} onChange={onChange} />
+    case 'select':
+      return <SelectControl control={control} value={value as string} onChange={onChange} />
     default:
       return null
   }
+}
+
+function SelectControl({ control, value, onChange }: { control: ControlDef; value: string; onChange: (v: unknown) => void }) {
+  const options = control.options ?? []
+  const v = typeof value === 'string' && options.includes(value) ? value : (control.default as string)
+  return (
+    <div className="space-y-1.5">
+      <Label className="text-xs">{control.label}</Label>
+      <Select value={v} onValueChange={(next) => onChange(next)}>
+        <SelectTrigger className="h-7 text-xs" aria-label={control.label}>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {options.map((opt) => (
+            <SelectItem key={opt} value={opt} className="text-xs">{opt}</SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </div>
+  )
 }
 
 function SliderControl({ control, value, onChange }: { control: ControlDef; value: number; onChange: (v: unknown) => void }) {

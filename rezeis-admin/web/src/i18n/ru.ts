@@ -1674,8 +1674,8 @@
     deviceLimit: 'Лимит устройств',
     resetStrategy: 'Сброс трафика',
     resetStrategies: {
-      MONTH: 'Каждый месяц',
-      YEAR: 'Каждый год',
+      MONTH: 'Ежемесячно (по календарю, 1-го числа)',
+      MONTH_ROLLING: 'Ежемесячно (по дате создания)',
       NO_RESET: 'Без сброса',
       DAY: 'Каждый день',
       WEEK: 'Каждую неделю',
@@ -3124,6 +3124,12 @@
       silk: 'Шёлк',
       beams: 'Лучи',
       dither: 'Дизеринг',
+      paperMesh: 'Mesh-градиент',
+      paperWarp: 'Варп',
+      paperGrain: 'Зернистый градиент',
+      paperDither: 'Дизеринг (Paper)',
+      paperSwirl: 'Вихрь',
+      paperMetaballs: 'Меташары',
     },
     fonts: {
       geist: 'Geist',

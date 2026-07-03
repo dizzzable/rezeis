@@ -2,7 +2,7 @@ import { z } from 'zod'
 
 export const PLAN_TYPES = ['TRAFFIC', 'DEVICES', 'BOTH', 'UNLIMITED'] as const
 export const PLAN_AVAILABILITIES = ['ALL', 'NEW', 'EXISTING', 'INVITED', 'ALLOWED', 'TRIAL'] as const
-export const PLAN_TRAFFIC_STRATEGIES = ['MONTH', 'YEAR', 'NO_RESET', 'DAY', 'WEEK'] as const
+export const PLAN_TRAFFIC_STRATEGIES = ['MONTH', 'MONTH_ROLLING', 'NO_RESET', 'DAY', 'WEEK'] as const
 export const PLAN_CURRENCIES = [
   'USD',
   'RUB',

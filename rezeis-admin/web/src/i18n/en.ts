@@ -1660,8 +1660,8 @@ export const en = {
     deviceLimit: 'Device limit',
     resetStrategy: 'Traffic reset strategy',
     resetStrategies: {
-      MONTH: 'Monthly',
-      YEAR: 'Yearly',
+      MONTH: 'Monthly (calendar, 1st)',
+      MONTH_ROLLING: 'Monthly (from creation date)',
       NO_RESET: 'No reset',
       DAY: 'Daily',
       WEEK: 'Weekly',
@@ -3093,6 +3093,12 @@ export const en = {
       silk: 'Silk',
       beams: 'Beams',
       dither: 'Dither',
+      paperMesh: 'Mesh Gradient',
+      paperWarp: 'Warp',
+      paperGrain: 'Grain Gradient',
+      paperDither: 'Dithering (Paper)',
+      paperSwirl: 'Swirl',
+      paperMetaballs: 'Metaballs',
     },
     fonts: {
       geist: 'Geist',
