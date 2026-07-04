@@ -15,6 +15,7 @@ const NODES: ReadonlyArray<BotMapNode> = [
     textRu: 'Поддержка',
     textEn: 'Support',
     buttonCount: 2,
+    bannerUrl: null,
   },
   {
     id: '__reply_keyboard__',

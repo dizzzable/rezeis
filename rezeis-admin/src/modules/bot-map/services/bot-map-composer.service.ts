@@ -5,6 +5,7 @@ import {
   BotFlow,
   BotFlowButton,
   BotFlowButtonAction,
+  BotFlowMediaType,
   BotFlowScreen,
   BotFlowStatus,
   NotificationTemplate,
@@ -214,6 +215,10 @@ function toGraphScreenNode(
     textRu: screen.textRu,
     textEn: screen.textEn,
     buttonCount: screen.buttons.length,
+    // Only a PHOTO counts as a per-screen banner (reiwa's `resolveScreenBannerRef`
+    // renders `mediaType==='photo'` + `mediaUrl`). Video/document/animation media
+    // isn't a banner, so it's not surfaced to the banner field.
+    bannerUrl: screen.mediaType === BotFlowMediaType.PHOTO ? screen.mediaUrl : null,
   };
 }
 

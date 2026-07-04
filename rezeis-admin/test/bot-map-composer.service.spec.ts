@@ -9,6 +9,7 @@ import {
   BotButtonStyle,
   BotFlowButtonAction,
   BotFlowButtonStyle,
+  BotFlowMediaType,
   BotFlowParseMode,
   BotFlowStatus,
 } from '@prisma/client';
@@ -212,6 +213,34 @@ describe('BotMapComposerService.compose', () => {
       .sort();
     assert.deepStrictEqual(terminalRoutes, ['/promo', '/renew']);
     assert.equal(out.meta.flowStatus, 'PUBLISHED');
+  });
+
+  it('surfaces a PHOTO screen media as the graph-screen bannerUrl (and null otherwise)', () => {
+    const composer = makeComposer();
+
+    // Baseline: HELP_SCREEN has no media → bannerUrl null.
+    const plain = composer.compose({
+      flow: PUBLISHED_FLOW,
+      replyButtons: REPLY_BUTTONS,
+      templates: [],
+    });
+    const plainScreen = plain.nodes.find((n) => n.kind === 'graph-screen') as
+      | { bannerUrl: string | null }
+      | undefined;
+    assert.equal(plainScreen?.bannerUrl, null);
+
+    // PHOTO media → surfaced as bannerUrl; VIDEO media → NOT a banner (null).
+    const photoFlow = {
+      ...(PUBLISHED_FLOW as unknown as Record<string, unknown>),
+      screens: [
+        { ...(HELP_SCREEN as unknown as Record<string, unknown>), mediaType: BotFlowMediaType.PHOTO, mediaUrl: '/uploads/bot-flow/x.webp' },
+        { ...(HELP_SCREEN as unknown as Record<string, unknown>), id: 'screen-vid', shortId: 'sc_vid', mediaType: BotFlowMediaType.VIDEO, mediaUrl: '/uploads/bot-flow/v.mp4' },
+      ],
+    } as never;
+    const out = composer.compose({ flow: photoFlow, replyButtons: REPLY_BUTTONS, templates: [] });
+    const screens = out.nodes.filter((n) => n.kind === 'graph-screen') as Array<{ id: string; bannerUrl: string | null }>;
+    assert.equal(screens.find((s) => s.id === 'screen-help')?.bannerUrl, '/uploads/bot-flow/x.webp');
+    assert.equal(screens.find((s) => s.id === 'screen-vid')?.bannerUrl, null);
   });
 
   it('emits edges for every flow button — including URL/WEBAPP/BACK and broken NAVIGATE', () => {

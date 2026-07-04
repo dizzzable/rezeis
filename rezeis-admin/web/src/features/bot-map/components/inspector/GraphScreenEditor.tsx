@@ -17,6 +17,7 @@ import { Label } from '@/components/ui/label'
 
 import { BOT_MAP_QUERY_KEY, patchGraphScreen } from '../../bot-map-api'
 import type { GraphScreenMapNode } from '../../types'
+import { BannerField } from '../BannerField'
 import { LocaleTextarea } from './LocaleTextarea'
 
 interface GraphScreenEditorProps {
@@ -96,6 +97,28 @@ export function GraphScreenEditor({ node }: GraphScreenEditorProps) {
         }}
         disabled={mutation.isPending}
       />
+
+      {/* Per-screen banner. Writes the screen's own photo media (mediaType=PHOTO
+          + mediaUrl), which reiwa renders regardless of the global "one banner
+          for all screens" toggle. Clearing removes the media so the screen
+          falls back to no banner (or the global one when that toggle is on). */}
+      <div className="space-y-1.5 rounded-lg border p-3">
+        <Label className="text-xs font-medium">{t('botMapPage.graphScreen.banner')}</Label>
+        <BannerField
+          value={node.bannerUrl}
+          onChange={(url) =>
+            save(
+              url
+                ? { mediaType: 'PHOTO', mediaUrl: url, mediaFileId: null }
+                : { mediaType: null, mediaUrl: null, mediaFileId: null },
+            )
+          }
+          disabled={mutation.isPending}
+        />
+        <p className="text-[10px] leading-snug text-muted-foreground">
+          {t('botMapPage.graphScreen.bannerHint')}
+        </p>
+      </div>
 
       <div className="rounded-lg border bg-muted/30 p-3 text-xs text-muted-foreground">
         <p className="mb-2">{t('botMapPage.graphScreen.tooltipFullEditor')}</p>

@@ -83,6 +83,8 @@ export const en = {
       placeholderRu: 'What the user sees on this screen…',
       placeholderEn: 'Same screen for English-speaking users…',
       buttonCountLabel: 'Buttons on this screen',
+      banner: 'Screen banner',
+      bannerHint: "A custom banner image for this screen — shown instead of the bot's default banner. Clear it to leave the screen with no banner (or the global bot banner when 'One banner for all screens' is on). Changes apply after you publish the flow.",
       tooltipFullEditor:
         "Edit this screen's buttons, media and actions on the Diagram tab.",
     },

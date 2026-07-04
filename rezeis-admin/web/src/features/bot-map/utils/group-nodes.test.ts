@@ -15,6 +15,7 @@ const SAMPLE: ReadonlyArray<BotMapNode> = [
     textRu: '',
     textEn: '',
     buttonCount: 0,
+    bannerUrl: null,
   },
   {
     id: 'screen-root',
@@ -27,6 +28,7 @@ const SAMPLE: ReadonlyArray<BotMapNode> = [
     textRu: '',
     textEn: '',
     buttonCount: 0,
+    bannerUrl: null,
   },
   {
     id: 'mini-app:/renew',

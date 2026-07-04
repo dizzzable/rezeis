@@ -39,6 +39,8 @@ export interface GraphScreenMapNode extends BotMapBaseNode {
   readonly textRu: string
   readonly textEn: string
   readonly buttonCount: number
+  /** Per-screen banner URL (photo media only); `null` when no photo banner. */
+  readonly bannerUrl: string | null
 }
 
 export interface ReplyKeyboardMapNode extends BotMapBaseNode {

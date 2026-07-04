@@ -20,6 +20,7 @@ const PAYLOAD: BotMapPayload = {
       textRu: 'Поддержка',
       textEn: 'Support',
       buttonCount: 0,
+      bannerUrl: null,
     },
     {
       id: '__reply_keyboard__',

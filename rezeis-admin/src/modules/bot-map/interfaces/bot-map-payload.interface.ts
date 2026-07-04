@@ -35,6 +35,12 @@ export interface GraphScreenMapNode extends BotMapBaseNode {
   readonly textRu: string;
   readonly textEn: string;
   readonly buttonCount: number;
+  /**
+   * Per-screen banner URL (only when the screen's media is a PHOTO). `null`
+   * when the screen has no photo banner. Drives the canvas inspector's banner
+   * field; reiwa renders it via `screen.mediaType==='photo'` + `mediaUrl`.
+   */
+  readonly bannerUrl: string | null;
 }
 
 export interface ReplyKeyboardMapNode extends BotMapBaseNode {
