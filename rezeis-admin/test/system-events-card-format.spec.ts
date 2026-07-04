@@ -211,7 +211,7 @@ describe('SystemEventsService card formatting (enriched)', () => {
       });
       await flush();
       const text = getLastText()!;
-      assert.ok(text.includes('🏷 <b>Сборка:</b>'));
+      assert.ok(text.includes('🏗 <b>Сборка:</b>'));
       // metadata wins over image env
       assert.ok(text.includes('1.2.3-reiwa'));
       assert.ok(!text.includes('9.9.9-image'));
@@ -234,7 +234,7 @@ describe('SystemEventsService card formatting (enriched)', () => {
       service.info('payment.completed', 'PAYMENT', 'paid', { amount: '100' });
       await flush();
       const text = getLastText()!;
-      assert.ok(text.includes('🏷 <b>Сборка:</b>'));
+      assert.ok(text.includes('🏗 <b>Сборка:</b>'));
       assert.ok(text.includes('9.9.9-image'));
     } finally {
       if (savedVersion === undefined) delete process.env.APP_VERSION;

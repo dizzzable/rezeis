@@ -90,6 +90,7 @@ export class ReferralManualAttachService {
     this.events.info(EVENT_TYPES.REFERRAL_ATTACHED, 'REFERRAL', 'Referral attached', {
       referralId: referral.id,
       referrerId: input.referrerId,
+      referredUserId: input.userId,
       userId: input.userId,
     });
 

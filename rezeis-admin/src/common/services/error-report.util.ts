@@ -181,25 +181,25 @@ export function formatErrorEventCardHtml(
     '',
     '⚙️ <b>Событие: Произошла ошибка!</b>',
     '',
-    '<b>Почему это важно:</b>',
+    '❗ <b>Почему это важно:</b>',
     `<blockquote>${escapeHtml(d.why)}</blockquote>`,
     '',
-    '<b>Контекст:</b>',
-    `<blockquote>• <b>Источник:</b> ${code(d.source)}\n` +
-      `• <b>Поверхность:</b> ${escapeHtml(d.surface)}\n` +
-      `• <b>Операция:</b> ${code(d.operation)}\n` +
-      `• <b>Уровень:</b> ${escapeHtml(d.level)}</blockquote>`,
+    '🌀 <b>Контекст:</b>',
+    `<blockquote>🔎 Источник: ${code(d.source)}\n` +
+      `🌫 Поверхность: ${escapeHtml(d.surface)}\n` +
+      `❄️ Операция: ${code(d.operation)}\n` +
+      `🧮 Уровень: ${escapeHtml(d.level)}</blockquote>`,
     '',
-    '<b>Информация о сборке:</b>',
-    `<blockquote>• <b>Версия:</b> ${code(d.build.version)}\n` +
-      `• <b>Коммит:</b> ${code(d.build.commit)}\n` +
-      `• <b>Ветка:</b> ${code(d.build.branch)}</blockquote>`,
+    '🏗 <b>Сборка:</b>',
+    `<blockquote>🎯 Версия: ${code(d.build.version)}\n` +
+      `🔩 Коммит: ${code(d.build.commit)}\n` +
+      `⚙️ Ветка: ${code(d.build.branch)}</blockquote>`,
     '',
     '⚠️ <b>Ошибка:</b>',
-    `<blockquote>• <b>Тип:</b> ${code(d.errorType)}\n` +
-      `• <b>Сообщение:</b> ${escapeHtml(d.errorMessage)}</blockquote>`,
+    `<blockquote>🧊 Тип: ${code(d.errorType)}\n` +
+      `💬 Сообщение: ${escapeHtml(d.errorMessage)}</blockquote>`,
     '',
-    '<b>Что проверить дальше:</b>',
+    '🧭 <b>Что проверить дальше:</b>',
     `<blockquote>${escapeHtml(d.nextSteps)}</blockquote>`,
   ];
   return lines.join('\n');

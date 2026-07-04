@@ -469,7 +469,7 @@ export class AdminUserManagementController {
       userId: user.id, referrerId: referrer.id, ...result,
     });
     this.events.info(EVENT_TYPES.REFERRAL_MANUAL_ATTACHED, 'REFERRAL', `Referrer manually attached`, {
-      userId: user.id, referrerId: referrer.id, telegramId,
+      userId: user.id, referrerId: referrer.id, referredUserId: user.id, telegramId,
       historicalPaymentsProcessed: result.historicalPaymentsProcessed,
       partnerChainAttached: result.partnerChainAttached,
     });
