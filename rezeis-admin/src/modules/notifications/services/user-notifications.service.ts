@@ -180,9 +180,14 @@ export class UserNotificationsService {
                 return resolved.length > 0 ? resolved : undefined;
               })();
 
-      // Telegram bot fanout — only for users who haven't blocked us.
+      // Telegram bot fanout — only for users who haven't blocked us and whose
+      // telegramId is a real positive Telegram id. A non-positive value (dirty
+      // import / negative chat id) would be rejected by the bot's /notify with
+      // a 400, so skip Telegram here — the cabinet feed + web-push below still
+      // deliver.
       if (
         user.telegramId !== null &&
+        user.telegramId > 0n &&
         !user.isBotBlocked &&
         rendered !== null &&
         input.skipTelegram !== true

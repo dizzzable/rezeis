@@ -286,7 +286,7 @@ export class BroadcastDeliveryService {
       let mediaError: string | null = null;
       // Text Telegram message id captured from the reiwa bot fanout.
       let textMessageId: number | null = null;
-      if (hasMedia && user.telegramId !== null) {
+      if (hasMedia && user.telegramId !== null && user.telegramId > 0n) {
         if (botToken) {
           const result = await this.sendTelegramMessage(botToken, {
             chatId: user.telegramId.toString(),
@@ -302,7 +302,7 @@ export class BroadcastDeliveryService {
         } else {
           mediaError = 'BOT_TOKEN not configured for media delivery';
         }
-      } else if (!hasMedia && user.telegramId !== null && eventId !== null) {
+      } else if (!hasMedia && user.telegramId !== null && user.telegramId > 0n && eventId !== null) {
         // Text Telegram via the reiwa bot. Reuse the cabinet event id as the
         // notify idempotency key, and persist the returned message id so the
         // broadcast can be edited/deleted in Telegram later.
