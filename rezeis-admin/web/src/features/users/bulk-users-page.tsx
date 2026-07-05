@@ -42,8 +42,10 @@ const DESTRUCTIVE: ReadonlyArray<BulkUserAction> = ['block', 'delete']
 /**
  * Bulk user operations.
  *
- * Operators paste a list of canonical user IDs (Reiwa CUIDs) and pick
- * an action. Up to 1000 IDs per batch.
+ * Operators paste a list of user identifiers — any mix of canonical Reiwa
+ * CUIDs, Telegram IDs, cabinet logins (with or without a leading `@`) and
+ * emails — and pick an action. Each token is resolved server-side; up to
+ * 1000 tokens per batch.
  */
 export default function BulkUsersPage() {
   const { t } = useTranslation()
@@ -155,7 +157,7 @@ export default function BulkUsersPage() {
             <Textarea
               id="bulk-ids"
               rows={8}
-              placeholder="cln1abc... cln2def... cln3ghi..."
+              placeholder={t('bulkUsersPage.idsPlaceholder')}
               value={rawIds}
               onChange={(e) => setRawIds(e.target.value)}
             />

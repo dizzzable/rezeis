@@ -303,12 +303,16 @@ export function ScreenEditorPanel({ screen, flowName }: ScreenEditorPanelProps) 
 
       <Separator />
 
-      {/* Media upload */}
+      {/* Screen banner upload (image or video shown at the top of this screen) */}
       <div className="space-y-1.5">
         <Label className="text-xs">{t('botFlow.fields.media')}</Label>
         {screen.mediaUrl ? (
           <div className="relative rounded-md overflow-hidden border">
-            <img src={screen.mediaUrl} alt="" className="w-full h-24 object-cover" />
+            {screen.mediaType === 'VIDEO' ? (
+              <video src={screen.mediaUrl} className="w-full h-24 object-cover" muted playsInline />
+            ) : (
+              <img src={screen.mediaUrl} alt="" className="w-full h-24 object-cover" />
+            )}
             <Button
               variant="destructive"
               size="sm"

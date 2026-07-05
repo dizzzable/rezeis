@@ -14,7 +14,7 @@ export class BulkUserOperationsDto {
   @ArrayMinSize(1)
   @ArrayMaxSize(1_000)
   @IsString({ each: true })
-  @MaxLength(64, { each: true })
+  @MaxLength(128, { each: true })
   public userIds!: string[];
 
   @IsIn(['block', 'unblock', 'delete', 'set_language', 'set_max_subscriptions'])

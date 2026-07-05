@@ -119,16 +119,55 @@ export class BulkUserOperationsService {
     };
   }
 
+  // ── Token resolution ────────────────────────────────────────────────────
+
+  /**
+   * Resolves an operator-supplied token to a canonical user.
+   *
+   * Accepts any of the identifiers an operator is likely to paste from a
+   * spreadsheet / their own block-list:
+   *   - canonical CUID (`user.id`)
+   *   - numeric Telegram ID
+   *   - email (case-insensitive)
+   *   - web-cabinet login (case-insensitive, tolerant of a leading `@`)
+   *
+   * Returns `null` when nothing matches so the caller can mark the row as
+   * `skipped` (not `error`) — a missing entry in a pasted list is expected.
+   */
+  private async resolveUser(
+    token: string,
+  ): Promise<{ id: string; telegramId: bigint | null; isBlocked: boolean } | null> {
+    const trimmed = token.trim();
+    if (trimmed.length === 0) return null;
+
+    const numeric = /^\d{1,19}$/.test(trimmed);
+    const handle = trimmed.replace(/^@+/, '');
+
+    return this.prismaService.user.findFirst({
+      where: {
+        OR: [
+          { id: trimmed },
+          ...(numeric ? [{ telegramId: BigInt(trimmed) }] : []),
+          { email: { equals: trimmed, mode: 'insensitive' as const } },
+          ...(handle.length > 0
+            ? [{ webAccount: { login: { equals: handle, mode: 'insensitive' as const } } }]
+            : []),
+        ],
+      },
+      select: { id: true, telegramId: true, isBlocked: true },
+    });
+  }
+
   // ── Per-row dispatch ────────────────────────────────────────────────────
 
   private async dispatchOne(
-    userId: string,
+    token: string,
     input: BulkUserOperationInputInterface,
   ): Promise<BulkUserOperationItemResultInterface> {
-    const user = await this.prismaService.user.findUnique({
-      where: { id: userId },
-      select: { id: true, telegramId: true, isBlocked: true },
-    });
+    // The result item always reports the ORIGINAL token so operators can map
+    // outcomes back to the exact list they pasted (CUID / TG ID / email / login).
+    const userId = token;
+    const user = await this.resolveUser(token);
     if (!user) {
       return { userId, status: 'skipped', message: 'User not found' };
     }
@@ -137,11 +176,11 @@ export class BulkUserOperationsService {
       case 'block':
         if (user.isBlocked) return { userId, status: 'skipped', message: 'Already blocked' };
         await this.prismaService.user.update({
-          where: { id: userId },
+          where: { id: user.id },
           data: { isBlocked: true },
         });
-        this.events.warn(EVENT_TYPES.USER_BLOCKED, 'USER', `User bulk-blocked: ${userId}`, {
-          userId,
+        this.events.warn(EVENT_TYPES.USER_BLOCKED, 'USER', `User bulk-blocked: ${user.id}`, {
+          userId: user.id,
           telegramId: user.telegramId?.toString() ?? null,
           adminId: input.adminId,
           source: 'bulk',
@@ -151,11 +190,11 @@ export class BulkUserOperationsService {
       case 'unblock':
         if (!user.isBlocked) return { userId, status: 'skipped', message: 'Already unblocked' };
         await this.prismaService.user.update({
-          where: { id: userId },
+          where: { id: user.id },
           data: { isBlocked: false },
         });
-        this.events.info(EVENT_TYPES.USER_UNBLOCKED, 'USER', `User bulk-unblocked: ${userId}`, {
-          userId,
+        this.events.info(EVENT_TYPES.USER_UNBLOCKED, 'USER', `User bulk-unblocked: ${user.id}`, {
+          userId: user.id,
           telegramId: user.telegramId?.toString() ?? null,
           adminId: input.adminId,
           source: 'bulk',
@@ -163,9 +202,9 @@ export class BulkUserOperationsService {
         return { userId, status: 'ok' };
 
       case 'delete':
-        await this.prismaService.user.delete({ where: { id: userId } });
-        this.events.warn(EVENT_TYPES.USER_DELETED, 'USER', `User bulk-deleted: ${userId}`, {
-          userId,
+        await this.prismaService.user.delete({ where: { id: user.id } });
+        this.events.warn(EVENT_TYPES.USER_DELETED, 'USER', `User bulk-deleted: ${user.id}`, {
+          userId: user.id,
           telegramId: user.telegramId?.toString() ?? null,
           adminId: input.adminId,
           source: 'bulk',
@@ -179,7 +218,7 @@ export class BulkUserOperationsService {
         }
         try {
           await this.prismaService.user.update({
-            where: { id: userId },
+            where: { id: user.id },
             data: { language: lang as never },
           });
           return { userId, status: 'ok' };
@@ -194,7 +233,7 @@ export class BulkUserOperationsService {
           return { userId, status: 'skipped', message: 'maxSubscriptions must be 1..50' };
         }
         await this.prismaService.user.update({
-          where: { id: userId },
+          where: { id: user.id },
           data: { maxSubscriptions: Math.floor(value) },
         });
         return { userId, status: 'ok' };

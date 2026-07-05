@@ -6,14 +6,14 @@ import { ScreenEditorPanel } from './ScreenEditorPanel'
 import type { BotFlowScreen } from '../types'
 
 describe('ScreenEditorPanel accessibility', () => {
-  it('makes the media upload control keyboard-operable and named', () => {
+  it('makes the banner upload control keyboard-operable and named', () => {
     renderWithProviders(<ScreenEditorPanel screen={screenFixture()} flowName="default" />)
 
-    expect(screen.getByRole('button', { name: 'Choose screen media file' })).toBeInTheDocument()
-    expect(screen.getByLabelText('Choose screen media file', { selector: 'input' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Choose screen banner' })).toBeInTheDocument()
+    expect(screen.getByLabelText('Choose screen banner', { selector: 'input' })).toBeInTheDocument()
   })
 
-  it('names the icon-only media remove action', () => {
+  it('names the icon-only banner remove action', () => {
     renderWithProviders(
       <ScreenEditorPanel
         screen={screenFixture({ mediaType: 'PHOTO', mediaUrl: 'https://cdn.example.com/screen.png' })}
@@ -21,7 +21,7 @@ describe('ScreenEditorPanel accessibility', () => {
       />,
     )
 
-    expect(screen.getByRole('button', { name: 'Remove screen media' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Remove screen banner' })).toBeInTheDocument()
   })
 
   it('names compact button editor controls', () => {

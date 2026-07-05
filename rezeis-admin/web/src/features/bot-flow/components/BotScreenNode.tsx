@@ -70,11 +70,15 @@ function BotScreenNodeComponent({ data, id, selected }: NodeProps) {
         {nodeData.textRu || nodeData.textEn || <span className="italic text-muted-foreground">Empty message</span>}
       </div>
 
-      {/* Media preview */}
+      {/* Banner preview */}
       {nodeData.mediaUrl && (
         <div className="px-3 pb-2">
           <div className="h-16 rounded-md bg-muted/50 overflow-hidden">
-            <img src={nodeData.mediaUrl} alt="" className="h-full w-full object-cover" />
+            {nodeData.mediaType === 'VIDEO' ? (
+              <video src={nodeData.mediaUrl} className="h-full w-full object-cover" muted playsInline />
+            ) : (
+              <img src={nodeData.mediaUrl} alt="" className="h-full w-full object-cover" />
+            )}
           </div>
         </div>
       )}

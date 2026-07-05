@@ -1823,7 +1823,7 @@ export const en = {
       'Apply a single action to up to 1000 users in one request. Each row is processed independently; partial failures do not roll back successful rows.',
     configure: 'Configure',
     configureHint:
-      'User IDs are canonical Reiwa IDs (CUIDs), not Telegram IDs. Paste from a spreadsheet — separate with whitespace, commas, or new lines.',
+      'An identifier can be a canonical Reiwa ID (CUID), a Telegram ID, a cabinet login (with or without @), or an email. Paste your own list from a spreadsheet — separate with whitespace, commas, or new lines.',
     action: 'Action',
     actions: {
       block: 'Block',
@@ -1836,7 +1836,8 @@ export const en = {
       language: 'Language code (RU/EN/...)',
       maxSubs: 'Max subscriptions (1–50)',
     },
-    idsLabel: 'User IDs ({{count}} unique)',
+    idsLabel: 'Identifiers ({{count}} unique)',
+    idsPlaceholder: 'cln1abc… · 123456789 · @login · user@example.com',
     confirm: {
       warning: 'This action is destructive',
       typeToConfirm: 'Type {{value}} to confirm.',
@@ -1848,7 +1849,7 @@ export const en = {
     result: {
       title: 'Action {{action}} on {{count}} users',
       summary: 'succeeded {{ok}} · failed {{failed}} · skipped {{skipped}}',
-      userId: 'User ID',
+      userId: 'Identifier',
       status: 'Status',
       message: 'Message',
     },
@@ -3358,12 +3359,12 @@ export const en = {
         PLAIN: 'Plain',
       },
       isRoot: 'Start screen',
-      media: 'Media',
-      chooseMedia: 'Choose screen media file',
-      removeMedia: 'Remove screen media',
+      media: 'Screen banner',
+      chooseMedia: 'Choose screen banner',
+      removeMedia: 'Remove screen banner',
       textRuPlaceholder: 'Message text in Russian…',
       textEnPlaceholder: 'Message text in English…',
-      mediaHint: 'Click to upload image or video',
+      mediaHint: 'Click to upload a screen banner (image or video)',
       placeholders: {
         invite: 'Available placeholders: {{link}} — user referral link. System buttons «📤 Share» / «📋 Copy» / «◀️ Back to menu» are appended automatically.',
         rules: 'Available placeholder: {{rulesLink}} — service rules URL. When the URL is set in Platform Policy, the bot adds an «📜 Open rules» button. «◀️ Back to menu» is always appended. Add your own buttons via «Add button».',
