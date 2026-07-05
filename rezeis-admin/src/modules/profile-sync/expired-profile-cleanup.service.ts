@@ -5,6 +5,7 @@ import { Prisma, SubscriptionStatus, SyncAction, SyncJobStatus } from '@prisma/c
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { shouldRunSchedules } from '../../common/runtime/process-role.util';
 import { EVENT_TYPES, SystemEventsService } from '../../common/services/system-events.service';
+import { RemnawaveApiService } from '../remnawave/services/remnawave-api.service';
 import { SettingsService } from '../settings/services/settings.service';
 import { ProfileSyncQueueService } from './profile-sync-queue.service';
 
@@ -53,6 +54,7 @@ export class ExpiredProfileCleanupService {
     private readonly profileSyncQueueService: ProfileSyncQueueService,
     private readonly events: SystemEventsService,
     private readonly settingsService: SettingsService,
+    private readonly remnawaveApiService: RemnawaveApiService,
   ) {}
 
   @Cron(CronExpression.EVERY_30_MINUTES, { name: 'expired-profile-cleanup' })
@@ -111,13 +113,32 @@ export class ExpiredProfileCleanupService {
 
   /**
    * Selects up to `CLEANUP_BATCH` expired, profile-bearing subscriptions with
-   * no pending/in-flight `DELETE` job and enqueues a `DELETE` job for each.
-   * Returns the number of subscriptions enqueued.
+   * no pending/in-flight `DELETE` job and enqueues a `DELETE` job for each —
+   * BUT only after re-confirming expiry against the live Remnawave panel.
+   *
+   * Why the panel re-check: the sweep decides "expired" from the LOCAL
+   * `expiresAt`, which can be stale — e.g. the operator extended the profile
+   * directly in the panel and the `user.*` webhook that would refresh
+   * `expiresAt` never arrived (observed on Remnawave 2.7.x manual edits). With
+   * no periodic pull-reconcile, the stale local date would delete a
+   * still-valid subscription. So for every candidate we fetch the panel's
+   * canonical `expireAt` first:
+   *   • panel expiry ≥ cutoff  → NOT actually cleanable. Self-heal the local
+   *     `expiresAt` (and revive status to ACTIVE when the panel expiry is in
+   *     the future) and SKIP the deletion.
+   *   • panel expiry < cutoff  → panel confirms expired past grace → delete.
+   *   • panel profile missing (`null`) → nothing to protect → delete/clean up.
+   *   • panel unreachable (throws) → DEFER; never delete on an unverifiable
+   *     date. Re-evaluated next sweep.
+   *
+   * Returns the number of subscriptions enqueued for deletion.
    */
   private async enqueueProfileDeletions(cutoff: Date): Promise<number> {
     const candidates = await this.prismaService.subscription.findMany({
       where: {
         remnawaveId: { not: null },
+        // A DELETED row is already retired — never a cleanup candidate.
+        status: { not: SubscriptionStatus.DELETED },
         // Expired strictly before the grace cutoff. We require a concrete
         // `expiresAt` so the grace window is well-defined; subscriptions with
         // no expiry date are never auto-cleaned (operator can delete manually).
@@ -131,7 +152,7 @@ export class ExpiredProfileCleanupService {
           },
         },
       },
-      select: { id: true, userId: true, isTrial: true },
+      select: { id: true, userId: true, isTrial: true, remnawaveId: true },
       take: CLEANUP_BATCH,
       orderBy: { expiresAt: 'asc' },
     });
@@ -139,7 +160,79 @@ export class ExpiredProfileCleanupService {
     if (candidates.length === 0) return 0;
 
     let enqueued = 0;
+    let selfHealed = 0;
     for (const subscription of candidates) {
+      const remnawaveId = subscription.remnawaveId;
+      if (remnawaveId === null) continue; // defensive — query already filters this
+
+      // ── Panel-authoritative expiry re-check ──────────────────────────────
+      let panelExpiryMs: number | null = null;
+      let panelSubscriptionUrl: string | null = null;
+      try {
+        const panelUser = await this.remnawaveApiService.getPanelUser(remnawaveId);
+        if (panelUser !== null) {
+          const parsed = new Date(panelUser.expireAt);
+          panelExpiryMs = Number.isNaN(parsed.getTime()) ? null : parsed.getTime();
+          panelSubscriptionUrl =
+            typeof panelUser.subscriptionUrl === 'string' && panelUser.subscriptionUrl.length > 0
+              ? panelUser.subscriptionUrl
+              : null;
+        }
+        // panelUser === null → profile already gone from the panel → fall
+        // through to enqueue the cleanup (nothing to protect).
+      } catch (err: unknown) {
+        // Panel unreachable — defer rather than delete an unverifiable sub.
+        const message = err instanceof Error ? err.message : 'Unknown error';
+        this.logger.warn(
+          `Expired-profile cleanup: panel check failed for ${subscription.id}, deferring: ${message}`,
+        );
+        continue;
+      }
+
+      // Panel says the subscription is NOT expired past the grace cutoff — the
+      // local `expiresAt` was stale. Self-heal it and skip deletion.
+      if (panelExpiryMs !== null && panelExpiryMs >= cutoff.getTime()) {
+        const reviveActive = panelExpiryMs > Date.now();
+        try {
+          await this.prismaService.subscription.update({
+            where: { id: subscription.id },
+            data: {
+              expiresAt: new Date(panelExpiryMs),
+              ...(panelSubscriptionUrl !== null ? { configUrl: panelSubscriptionUrl } : {}),
+              ...(reviveActive ? { status: SubscriptionStatus.ACTIVE } : {}),
+            },
+          });
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : 'Unknown error';
+          this.logger.warn(
+            `Expired-profile cleanup: self-heal update failed for ${subscription.id}: ${message}`,
+          );
+          continue;
+        }
+        selfHealed += 1;
+        this.events.info(
+          EVENT_TYPES.SUBSCRIPTION_SYNCED,
+          'SUBSCRIPTION',
+          'Expired-cleanup self-heal: refreshed stale expiry from panel (deletion skipped)',
+          {
+            subscriptionId: subscription.id,
+            userId: subscription.userId,
+            isTrial: subscription.isTrial,
+            panelExpiresAt: new Date(panelExpiryMs).toISOString(),
+            revived: reviveActive,
+            source: 'EXPIRED_PROFILE_CLEANUP',
+          },
+        );
+        this.logger.log(
+          `Expired-profile cleanup: skipped ${subscription.id} — panel expiry ${new Date(
+            panelExpiryMs,
+          ).toISOString()} is newer than the stale local date; self-healed`,
+        );
+        continue;
+      }
+
+      // Panel confirms expired-past-grace, or the profile is already gone from
+      // the panel — proceed with the deletion.
       try {
         const job = await this.prismaService.profileSyncJob.create({
           data: {
@@ -173,6 +266,11 @@ export class ExpiredProfileCleanupService {
 
     if (enqueued > 0) {
       this.logger.log(`Expired-profile cleanup: scheduled ${enqueued} profile deletion(s)`);
+    }
+    if (selfHealed > 0) {
+      this.logger.log(
+        `Expired-profile cleanup: self-healed ${selfHealed} subscription(s) with stale local expiry`,
+      );
     }
     return enqueued;
   }

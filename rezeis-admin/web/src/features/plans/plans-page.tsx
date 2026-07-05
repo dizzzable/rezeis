@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, Pencil, Archive, ArchiveRestore, Package, BarChart3, List } from 'lucide-react'
+import { Plus, Pencil, Archive, ArchiveRestore, Package, BarChart3, List, ArrowUp, ArrowDown } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
@@ -70,6 +70,13 @@ export default function PlansPage() {
       api.patch(`/admin/plans/${id}`, { isActive }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: plansQueryKeys.all }),
     onError: (err) => toast.error(getErrorMessage(err, t('plansPage.toggleActiveFailed'))),
+  })
+
+  const moveMutation = useMutation({
+    mutationFn: ({ id, direction }: { id: string; direction: 'up' | 'down' }) =>
+      api.patch(`/admin/plans/${id}/move`, { direction }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: plansQueryKeys.all }),
+    onError: (err) => toast.error(getErrorMessage(err, t('plansPage.moveFailed'))),
   })
 
   const formatTraffic = (gb: number) =>
@@ -146,8 +153,9 @@ export default function PlansPage() {
           </div>
 
           {/* Plan grid — compact, no expand */}
+          <p className="text-xs text-muted-foreground">{t('plansPage.orderHint')}</p>
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 items-start">
-            {plans.map((plan) => (
+            {plans.map((plan, index) => (
               <div
                 key={plan.id}
                 className={`rounded-lg border bg-card transition-all hover:shadow-md ${
@@ -161,6 +169,26 @@ export default function PlansPage() {
                       {plan.name}
                     </span>
                     <div className="flex items-center gap-0.5 shrink-0">
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        className="h-7 w-7"
+                        onClick={() => moveMutation.mutate({ id: plan.id, direction: 'up' })}
+                        disabled={index === 0 || moveMutation.isPending}
+                        aria-label={t('plansPage.aria.moveUp')}
+                      >
+                        <ArrowUp className="h-3.5 w-3.5" />
+                      </Button>
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        className="h-7 w-7"
+                        onClick={() => moveMutation.mutate({ id: plan.id, direction: 'down' })}
+                        disabled={index === plans.length - 1 || moveMutation.isPending}
+                        aria-label={t('plansPage.aria.moveDown')}
+                      >
+                        <ArrowDown className="h-3.5 w-3.5" />
+                      </Button>
                       <Switch
                         checked={plan.isActive}
                         onCheckedChange={(v) =>

@@ -246,6 +246,15 @@ function PlanStyleRow({
               value={style?.gradient ?? ''}
               onChange={(css) => onPatch({ gradient: css })}
             />
+            {/* Editable CSS readout — paste a ready gradient or copy the built
+                one, mirroring the subscription-card constructor. */}
+            <Input
+              value={style?.gradient ?? ''}
+              onChange={(e) => onPatch({ gradient: e.target.value })}
+              className="h-8 font-mono text-xs"
+              placeholder={t('brandingPage.sections.card.gradientPlaceholder')}
+              aria-label={t('brandingPage.sections.card.gradient')}
+            />
           </div>
 
           {/* Accent */}

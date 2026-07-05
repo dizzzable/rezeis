@@ -445,6 +445,8 @@ export const en = {
     unarchived: 'Plan unarchived',
     unarchiveFailed: 'Failed to unarchive plan',
     toggleActiveFailed: 'Failed to toggle plan active state',
+    moveFailed: 'Failed to change plan order',
+    orderHint: 'The card order here sets how tariffs appear to users in their cabinet. Reorder with the ↑ / ↓ arrows.',
     createTitle: 'Create plan',
     editTitle: 'Edit plan',
     tabs: {
@@ -484,6 +486,8 @@ export const en = {
       edit: 'Edit plan',
       archive: 'Archive plan',
       unarchive: 'Unarchive plan',
+      moveUp: 'Move up',
+      moveDown: 'Move down',
     },
     status: {
       active: 'Active',

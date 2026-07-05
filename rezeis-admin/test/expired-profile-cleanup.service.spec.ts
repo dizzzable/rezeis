@@ -16,6 +16,28 @@ function settingsMock(policy: { deleteEnabled?: boolean; graceDays?: number } = 
   } as never;
 }
 
+/**
+ * Remnawave API mock. `getPanelUser` returns a panel user whose `expireAt` is
+ * `expireOffsetMs` from now (negative = past). Pass `null` to simulate a
+ * missing panel profile, or `'throw'` to simulate an unreachable panel.
+ */
+function remnawaveMock(behaviour: number | null | 'throw') {
+  return {
+    getPanelUser: async () => {
+      if (behaviour === 'throw') throw new Error('panel unreachable');
+      if (behaviour === null) return null;
+      return {
+        uuid: 'rw-uuid',
+        expireAt: new Date(Date.now() + behaviour).toISOString(),
+        subscriptionUrl: 'https://panel.example/sub/xyz',
+        status: 'ACTIVE',
+      };
+    },
+  } as never;
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
 describe('ExpiredProfileCleanupService', () => {
   const originalRole = process.env['RUID_PROCESS_ROLE'];
 
@@ -28,23 +50,24 @@ describe('ExpiredProfileCleanupService', () => {
     _resetProcessRoleCacheForTests();
   });
 
-  it('selects only profile-bearing subs expired past the grace cutoff with no in-flight DELETE job and enqueues a bounded batch', async () => {
+  it('selects only profile-bearing subs expired past the grace cutoff with no in-flight DELETE job and enqueues a bounded batch (panel confirms expired)', async () => {
     const findManyCalls: unknown[] = [];
     const createdJobs: unknown[] = [];
     const enqueued: string[] = [];
     const events: unknown[] = [];
 
-    const before = Date.now() - 3 * 24 * 60 * 60 * 1000;
+    const before = Date.now() - 3 * DAY_MS;
     const service = new ExpiredProfileCleanupService(
       {
         subscription: {
           findMany: async (input: unknown) => {
             findManyCalls.push(input);
             return [
-              { id: 'sub-1', userId: 'user-1', isTrial: true },
-              { id: 'sub-2', userId: 'user-2', isTrial: false },
+              { id: 'sub-1', userId: 'user-1', isTrial: true, remnawaveId: 'rw-1' },
+              { id: 'sub-2', userId: 'user-2', isTrial: false, remnawaveId: 'rw-2' },
             ];
           },
+          update: async () => ({}),
           updateMany: async () => ({ count: 0 }),
         },
         profileSyncJob: {
@@ -59,10 +82,12 @@ describe('ExpiredProfileCleanupService', () => {
       } as never,
       { info: (...args: unknown[]) => { events.push(args); } } as never,
       settingsMock({ deleteEnabled: true, graceDays: 3 }),
+      // Panel confirms both are long expired (30 days ago) → delete proceeds.
+      remnawaveMock(-30 * DAY_MS),
     );
 
     const count = await service.runSweep();
-    const after = Date.now() - 3 * 24 * 60 * 60 * 1000;
+    const after = Date.now() - 3 * DAY_MS;
 
     assert.equal(count, 2);
     // Selection guard: profile present, expired before the grace cutoff, no
@@ -94,9 +119,119 @@ describe('ExpiredProfileCleanupService', () => {
     assert.equal(events.length, 2);
   });
 
+  it('SELF-HEALS a stale local expiry instead of deleting when the panel says the subscription is still valid', async () => {
+    const createdJobs: unknown[] = [];
+    const enqueued: string[] = [];
+    const updates: Array<{ where: unknown; data: Record<string, unknown> }> = [];
+    const events: Array<readonly unknown[]> = [];
+
+    const service = new ExpiredProfileCleanupService(
+      {
+        subscription: {
+          findMany: async () => [
+            { id: 'sub-live', userId: 'user-1', isTrial: false, remnawaveId: 'rw-live' },
+          ],
+          update: async (input: { where: unknown; data: Record<string, unknown> }) => {
+            updates.push(input);
+            return {};
+          },
+          updateMany: async () => ({ count: 0 }),
+        },
+        profileSyncJob: {
+          create: async (input: unknown) => { createdJobs.push(input); return { id: 'job-x' }; },
+        },
+      } as never,
+      { enqueue: async (jobId: string) => { enqueued.push(jobId); } } as never,
+      { info: (...args: unknown[]) => { events.push(args); } } as never,
+      settingsMock({ deleteEnabled: true, graceDays: 3 }),
+      // Panel says the profile is valid for another 20 days → must NOT delete.
+      remnawaveMock(20 * DAY_MS),
+    );
+
+    const count = await service.runSweep();
+
+    // No deletion enqueued.
+    assert.equal(count, 0);
+    assert.equal(createdJobs.length, 0);
+    assert.equal(enqueued.length, 0);
+    // Local expiry self-healed from the panel + status revived to ACTIVE.
+    assert.equal(updates.length, 1);
+    assert.deepStrictEqual(updates[0]?.where, { id: 'sub-live' });
+    assert.ok(updates[0]?.data['expiresAt'] instanceof Date);
+    assert.ok((updates[0]?.data['expiresAt'] as Date).getTime() > Date.now());
+    assert.equal(updates[0]?.data['status'], SubscriptionStatus.ACTIVE);
+    assert.equal(updates[0]?.data['configUrl'], 'https://panel.example/sub/xyz');
+    // A SUBSCRIPTION_SYNCED self-heal event is emitted.
+    assert.equal(events.length, 1);
+    assert.equal(events[0]?.[0], 'subscription.synced');
+  });
+
+  it('DEFERS deletion (no delete, no self-heal) when the panel is unreachable', async () => {
+    const createdJobs: unknown[] = [];
+    const updates: unknown[] = [];
+
+    const service = new ExpiredProfileCleanupService(
+      {
+        subscription: {
+          findMany: async () => [
+            { id: 'sub-x', userId: 'user-1', isTrial: false, remnawaveId: 'rw-x' },
+          ],
+          update: async (input: unknown) => { updates.push(input); return {}; },
+          updateMany: async () => ({ count: 0 }),
+        },
+        profileSyncJob: {
+          create: async (input: unknown) => { createdJobs.push(input); return { id: 'job-x' }; },
+        },
+      } as never,
+      { enqueue: async () => undefined } as never,
+      { info: () => undefined } as never,
+      settingsMock({ deleteEnabled: true, graceDays: 3 }),
+      remnawaveMock('throw'),
+    );
+
+    const count = await service.runSweep();
+
+    assert.equal(count, 0);
+    assert.equal(createdJobs.length, 0);
+    assert.equal(updates.length, 0);
+  });
+
+  it('deletes when the panel profile is already gone (getPanelUser returns null)', async () => {
+    const createdJobs: unknown[] = [];
+    const enqueued: string[] = [];
+
+    const service = new ExpiredProfileCleanupService(
+      {
+        subscription: {
+          findMany: async () => [
+            { id: 'sub-gone', userId: 'user-1', isTrial: false, remnawaveId: 'rw-gone' },
+          ],
+          update: async () => ({}),
+          updateMany: async () => ({ count: 0 }),
+        },
+        profileSyncJob: {
+          create: async (input: { readonly data: { readonly subscriptionId: string } }) => {
+            createdJobs.push(input);
+            return { id: `job-${input.data.subscriptionId}` };
+          },
+        },
+      } as never,
+      { enqueue: async (jobId: string) => { enqueued.push(jobId); } } as never,
+      { info: () => undefined } as never,
+      settingsMock({ deleteEnabled: true, graceDays: 3 }),
+      remnawaveMock(null),
+    );
+
+    const count = await service.runSweep();
+
+    assert.equal(count, 1);
+    assert.equal(createdJobs.length, 1);
+    assert.deepStrictEqual(enqueued, ['job-sub-gone']);
+  });
+
   it('soft-deletes already-detached expired rows (remnawaveId null, not DELETED) in bulk', async () => {
     const updateManyCalls: unknown[] = [];
-    const before = Date.now() - 3 * 24 * 60 * 60 * 1000;
+    const before = Date.now() - 3 * DAY_MS;
     const service = new ExpiredProfileCleanupService(
       {
         subscription: {
@@ -110,10 +245,11 @@ describe('ExpiredProfileCleanupService', () => {
       { enqueue: async () => undefined } as never,
       { info: () => undefined } as never,
       settingsMock({ deleteEnabled: true, graceDays: 3 }),
+      remnawaveMock(-30 * DAY_MS),
     );
 
     const count = await service.runSweep();
-    const after = Date.now() - 3 * 24 * 60 * 60 * 1000;
+    const after = Date.now() - 3 * DAY_MS;
 
     assert.equal(count, 4);
     assert.equal(updateManyCalls.length, 1);
@@ -136,11 +272,12 @@ describe('ExpiredProfileCleanupService', () => {
       { enqueue: async () => undefined } as never,
       { info: () => undefined } as never,
       settingsMock({ deleteEnabled: true, graceDays: 7 }),
+      remnawaveMock(-30 * DAY_MS),
     );
 
-    const lowerBound = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    const lowerBound = Date.now() - 7 * DAY_MS;
     await service.runSweep();
-    const upperBound = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    const upperBound = Date.now() - 7 * DAY_MS;
 
     const where = (findManyCalls[0] as { readonly where: Record<string, unknown> });
     const expiresClause = where.where['expiresAt'] as { not: null; lt: Date };
@@ -154,6 +291,7 @@ describe('ExpiredProfileCleanupService', () => {
       { enqueue: async () => undefined } as never,
       { info: () => undefined } as never,
       settingsMock({ deleteEnabled: false }),
+      remnawaveMock(-30 * DAY_MS),
     );
 
     const count = await service.runSweep();
@@ -172,6 +310,7 @@ describe('ExpiredProfileCleanupService', () => {
       { enqueue: async () => undefined } as never,
       { info: () => undefined } as never,
       settingsMock(),
+      remnawaveMock(-30 * DAY_MS),
     );
 
     const count = await service.runSweep();
@@ -190,6 +329,7 @@ describe('ExpiredProfileCleanupService', () => {
       { enqueue: async () => undefined } as never,
       { info: () => undefined } as never,
       settingsMock(),
+      remnawaveMock(-30 * DAY_MS),
     );
 
     await service.sweepExpiredProfiles();

@@ -19,9 +19,9 @@ function Calendar({
         caption_label: 'text-sm font-medium',
         nav: 'flex items-center gap-1',
         button_previous:
-          'absolute left-1 top-0 inline-flex items-center justify-center rounded-md text-sm font-medium ring-offset-background transition-colors hover:bg-accent hover:text-accent-foreground h-7 w-7 bg-transparent p-0 opacity-50 hover:opacity-100',
+          'absolute left-1 top-0 inline-flex items-center justify-center rounded-md text-sm font-medium ring-offset-background transition-colors hover:bg-accent hover:text-accent-foreground h-8 w-8 border border-input bg-background p-0 disabled:pointer-events-none disabled:opacity-30',
         button_next:
-          'absolute right-1 top-0 inline-flex items-center justify-center rounded-md text-sm font-medium ring-offset-background transition-colors hover:bg-accent hover:text-accent-foreground h-7 w-7 bg-transparent p-0 opacity-50 hover:opacity-100',
+          'absolute right-1 top-0 inline-flex items-center justify-center rounded-md text-sm font-medium ring-offset-background transition-colors hover:bg-accent hover:text-accent-foreground h-8 w-8 border border-input bg-background p-0 disabled:pointer-events-none disabled:opacity-30',
         month_grid: 'w-full border-collapse space-x-1',
         weekdays: 'flex',
         weekday:
