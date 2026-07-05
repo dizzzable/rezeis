@@ -1,3 +1,4 @@
+import { ChevronLeft, ChevronRight } from 'lucide-react'
 import { DayPicker } from 'react-day-picker'
 
 import { cn } from '@/lib/utils'
@@ -12,6 +13,17 @@ function Calendar({
     <DayPicker
       showOutsideDays={showOutsideDays}
       className={cn('p-3', className)}
+      components={{
+        // Render explicit lucide chevrons so the month-nav arrows are always
+        // visible and correctly coloured (the default chevron rendered blank
+        // against an opaque button background).
+        Chevron: ({ orientation, className: chevronClassName }) =>
+          orientation === 'left' ? (
+            <ChevronLeft className={cn('h-4 w-4', chevronClassName)} />
+          ) : (
+            <ChevronRight className={cn('h-4 w-4', chevronClassName)} />
+          ),
+      }}
       classNames={{
         months: 'flex flex-col sm:flex-row gap-2',
         month: 'flex flex-col gap-4',
@@ -19,9 +31,9 @@ function Calendar({
         caption_label: 'text-sm font-medium',
         nav: 'flex items-center gap-1',
         button_previous:
-          'absolute left-1 top-0 inline-flex items-center justify-center rounded-md text-sm font-medium ring-offset-background transition-colors hover:bg-accent hover:text-accent-foreground h-8 w-8 border border-input bg-background p-0 disabled:pointer-events-none disabled:opacity-30',
+          'absolute left-1 top-0 inline-flex items-center justify-center rounded-md text-foreground ring-offset-background transition-colors hover:bg-accent hover:text-accent-foreground h-8 w-8 border border-input bg-transparent p-0 disabled:pointer-events-none disabled:opacity-30',
         button_next:
-          'absolute right-1 top-0 inline-flex items-center justify-center rounded-md text-sm font-medium ring-offset-background transition-colors hover:bg-accent hover:text-accent-foreground h-8 w-8 border border-input bg-background p-0 disabled:pointer-events-none disabled:opacity-30',
+          'absolute right-1 top-0 inline-flex items-center justify-center rounded-md text-foreground ring-offset-background transition-colors hover:bg-accent hover:text-accent-foreground h-8 w-8 border border-input bg-transparent p-0 disabled:pointer-events-none disabled:opacity-30',
         month_grid: 'w-full border-collapse space-x-1',
         weekdays: 'flex',
         weekday:
