@@ -72,7 +72,14 @@ interface Ticket {
   archivedAt: string | null;
   createdAt: string;
   updatedAt: string;
-  user?: { username: string | null; name: string; telegramId: string } | null;
+  user?: {
+    id?: string;
+    username: string | null;
+    name: string;
+    telegramId: string | null;
+    login?: string | null;
+    email?: string | null;
+  } | null;
   guest?: { id: string; email: string | null; displayName: string | null } | null;
   messages: TicketMessage[];
   docRequests?: TicketDocRequest[];
@@ -238,7 +245,7 @@ export default function SupportTicketsPage() {
                     </Badge>
                   ) : (
                     <span className="text-xs text-muted-foreground truncate">
-                      {ticket.user?.username ?? ticket.user?.name ?? ticket.userTelegramId}
+                      {ticket.user?.name || (ticket.user?.username ? `@${ticket.user.username}` : '') || ticket.user?.login || ticket.userTelegramId}
                     </span>
                   )}
                   <span className="text-[10px] text-muted-foreground ml-auto">
@@ -323,11 +330,32 @@ function TicketDetail({
                 </Badge>
               )}
             </CardTitle>
-            <p className="text-xs text-muted-foreground mt-1 truncate">
-              {guest
-                ? `${t('supportTicketsPage.detail.guestContact')}: ${contact ?? t('supportTicketsPage.detail.noContact')}`
-                : `${ticket.user?.username ? `@${ticket.user.username}` : ticket.user?.name ?? ''} · ${t('supportTicketsPage.detail.tgPrefix')}: ${ticket.userTelegramId ?? '—'}`}
-            </p>
+            {guest ? (
+              <p className="text-xs text-muted-foreground mt-1 truncate">
+                {t('supportTicketsPage.detail.guestContact')}: {contact ?? t('supportTicketsPage.detail.noContact')}
+              </p>
+            ) : (
+              <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
+                <span className="font-medium text-foreground truncate">
+                  {ticket.user?.name || ticket.user?.username || ticket.user?.login || '—'}
+                </span>
+                {ticket.user?.username && <span className="truncate">@{ticket.user.username}</span>}
+                {ticket.user?.login && (
+                  <span className="truncate">
+                    {t('supportTicketsPage.detail.loginPrefix')}: {ticket.user.login}
+                  </span>
+                )}
+                <span className="truncate">
+                  {t('supportTicketsPage.detail.tgPrefix')}: {ticket.userTelegramId ?? '—'}
+                </span>
+                {ticket.user?.email && <span className="truncate">{ticket.user.email}</span>}
+                {ticket.user?.id && (
+                  <span className="truncate">
+                    {t('supportTicketsPage.detail.idPrefix')}: {ticket.user.id}
+                  </span>
+                )}
+              </div>
+            )}
           </div>
           <div className="flex items-center gap-2 shrink-0">
             {statusBadge(ticket.status, t)}

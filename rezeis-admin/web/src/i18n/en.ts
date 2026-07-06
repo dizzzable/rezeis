@@ -2304,6 +2304,8 @@ export const en = {
     detail: {
       selectPrompt: 'Select a ticket to view conversation',
       tgPrefix: 'TG',
+      loginPrefix: 'Login',
+      idPrefix: 'Reiwa ID',
       close: 'Close',
       reopen: 'Reopen',
       replyLabel: 'Reply message',

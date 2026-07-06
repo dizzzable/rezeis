@@ -89,7 +89,16 @@ export class SupportTicketsService {
         where,
         include: {
           messages: { orderBy: { createdAt: 'asc' }, take: 1 },
-          user: { select: { id: true, telegramId: true, name: true, username: true, email: true } },
+          user: {
+            select: {
+              id: true,
+              telegramId: true,
+              name: true,
+              username: true,
+              email: true,
+              webAccount: { select: { login: true, email: true } },
+            },
+          },
           guest: { select: { id: true, email: true, displayName: true } },
         },
         orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
@@ -125,7 +134,17 @@ export class SupportTicketsService {
           },
         },
         docRequests: { orderBy: { createdAt: 'asc' } },
-        user: { select: { id: true, telegramId: true, name: true, username: true, email: true, language: true } },
+        user: {
+          select: {
+            id: true,
+            telegramId: true,
+            name: true,
+            username: true,
+            email: true,
+            language: true,
+            webAccount: { select: { login: true, email: true } },
+          },
+        },
       },
     });
     if (ticket === null) {

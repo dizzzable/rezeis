@@ -2,12 +2,13 @@ import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Job } from 'bullmq';
 
 import {
+  PAYMENT_RECONCILIATION_CONCURRENCY,
   PAYMENT_RECONCILIATION_JOB,
   PAYMENT_RECONCILIATION_QUEUE,
 } from '../constants/payment-reconciliation.constant';
 import { PaymentReconciliationService } from '../services/payment-reconciliation.service';
 
-@Processor(PAYMENT_RECONCILIATION_QUEUE)
+@Processor(PAYMENT_RECONCILIATION_QUEUE, { concurrency: PAYMENT_RECONCILIATION_CONCURRENCY })
 export class PaymentReconciliationProcessor extends WorkerHost {
   public constructor(
     private readonly paymentReconciliationService: PaymentReconciliationService,

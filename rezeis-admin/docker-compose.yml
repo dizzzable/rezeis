@@ -146,6 +146,28 @@ services:
     container_name: rezeis-db
     hostname: rezeis-db
     restart: unless-stopped
+    # Performance tuning matched to the container's memory limit (512M) and
+    # SSD-backed storage. Defaults assume a spinning disk (random_page_cost=4)
+    # and a 4 GB OS cache (effective_cache_size), which mislead the planner on a
+    # small SSD VPS into avoiding index scans. These `-c` overrides are safe for
+    # the 512M budget below; if you raise the memory limit, scale
+    # effective_cache_size (~75% of RAM) and shared_buffers (~25%) accordingly.
+    command:
+      - postgres
+      - -c
+      - random_page_cost=1.1          # SSD: index scans are cheap (default 4.0 = HDD)
+      - -c
+      - effective_io_concurrency=200  # SSD can service many concurrent reads
+      - -c
+      - effective_cache_size=384MB    # realistic OS cache for a 512M box (default 4GB lies)
+      - -c
+      - shared_buffers=128MB          # ~25% of the 512M limit
+      - -c
+      - work_mem=8MB                  # per-sort; safe with our small connection pool
+      - -c
+      - maintenance_work_mem=64MB     # faster VACUUM / index builds
+      - -c
+      - wal_compression=on            # less WAL write I/O
     environment:
       POSTGRES_USER: ${DATABASE_USER:-rezeis}
       POSTGRES_PASSWORD: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD in .env to a generated value}

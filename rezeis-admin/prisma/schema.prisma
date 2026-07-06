@@ -1334,6 +1334,12 @@ model Transaction {
   /// Snapshot of the plan/duration at draft time.
   planSnapshot   Json               @default("{}") @map("plan_snapshot")
   deviceTypes    String[]           @default([]) @map("device_types")
+  /// Provisioning idempotency stamp — set (atomically, inside the fulfillment
+  /// transaction) once the subscription has been created/renewed/upgraded for
+  /// this payment. The webhook reconciler fulfils only when this is null, so a
+  /// RENEW/UPGRADE (whose `subscriptionId` points at the SOURCE sub from draft
+  /// time) is provisioned exactly once instead of being wrongly skipped.
+  fulfilledAt    DateTime?          @map("fulfilled_at") @db.Timestamptz(3)
   createdAt      DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt      DateTime           @updatedAt @map("updated_at") @db.Timestamptz(3)
 

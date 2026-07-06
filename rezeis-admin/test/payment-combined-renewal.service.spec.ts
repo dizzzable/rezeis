@@ -156,6 +156,12 @@ function createEnv(input: { subs: SubRow[]; items: ItemRow[] }) {
             return next;
           },
         },
+        transaction: {
+          // Combined renewal stamps `fulfilledAt` on the parent transaction
+          // atomically with the item applications (idempotency for the webhook
+          // reconciler). No assertions on it here — accept and no-op.
+          update: async () => ({}),
+        },
       };
       const result = await cb(txClient);
       // Commit.

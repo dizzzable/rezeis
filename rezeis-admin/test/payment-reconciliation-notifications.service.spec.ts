@@ -57,6 +57,7 @@ type ReconciliationTransactionRecord = {
   paymentId: string;
   userId: string;
   subscriptionId: string | null;
+  fulfilledAt: Date | null;
   status: TransactionStatus;
   isTest: boolean;
   purchaseType: PurchaseType;
@@ -80,6 +81,10 @@ type ReconciliationPrismaDouble = {
     findUnique: (args: TransactionFindUniqueArgs) => Promise<ReconciliationTransactionRecord | null>;
     findFirst: (args: TransactionFindFirstArgs) => Promise<ReconciliationTransactionRecord | null>;
     update: (args: TransactionUpdateArgs) => Promise<ReconciliationTransactionRecord>;
+    updateMany: (args: {
+      where: { id: string; fulfilledAt?: unknown };
+      data: Record<string, unknown>;
+    }) => Promise<{ count: number }>;
   };
 };
 type ReconciliationInboxDouble = {
@@ -143,6 +148,7 @@ describe('PaymentReconciliationService reconciliation side effects', () => {
       eventStatus: 'succeeded',
       initialTransactionStatus: TransactionStatus.PENDING,
       refreshedSubscriptionId: 'subscription-existing',
+      refreshedFulfilledAt: new Date('2026-04-19T11:00:00.000Z'),
     });
     const service = createService(state);
 
@@ -274,6 +280,7 @@ function createService(state: ReturnType<typeof createState>): PaymentReconcilia
             id: 'tx-1',
             status: state.updatedStatus ?? state.initialTransactionStatus,
             subscriptionId: state.refreshedSubscriptionId,
+            fulfilledAt: state.refreshedFulfilledAt,
           });
         }
         return createTransaction({
@@ -283,6 +290,19 @@ function createService(state: ReturnType<typeof createState>): PaymentReconcilia
         });
       },
       findFirst: async (_args: TransactionFindFirstArgs) => null,
+      // Atomic fulfilment claim (where fulfilledAt: null) / release
+      // (where fulfilledAt: { not: null }). The claim matches only when the
+      // refreshed transaction is not yet fulfilled.
+      updateMany: async (args: {
+        where: { id: string; fulfilledAt?: unknown };
+        data: Record<string, unknown>;
+      }) => {
+        const isClaim = args.where.fulfilledAt === null;
+        if (isClaim) {
+          return { count: state.refreshedFulfilledAt === null ? 1 : 0 };
+        }
+        return { count: 1 };
+      },
       update: async (args: TransactionUpdateArgs) => {
         state.transactionUpdateCalls.push(args);
         state.updatedStatus = args.data.status;
@@ -365,6 +385,7 @@ function createState(input: {
   readonly eventStatus: string;
   readonly initialTransactionStatus: TransactionStatus;
   readonly refreshedSubscriptionId: string | null;
+  readonly refreshedFulfilledAt?: Date | null;
   readonly mutationShouldThrow?: boolean;
   readonly mutationError?: Error;
   readonly enqueueError?: Error;
@@ -394,6 +415,7 @@ function createState(input: {
     },
     initialTransactionStatus: input.initialTransactionStatus,
     refreshedSubscriptionId: input.refreshedSubscriptionId,
+    refreshedFulfilledAt: input.refreshedFulfilledAt ?? null,
     updatedStatus: undefined as TransactionStatus | undefined,
     incrementCalls: [] as string[],
     markProcessingCalls: [] as string[],
@@ -416,12 +438,14 @@ function createTransaction(input: {
   readonly id: string;
   readonly status: TransactionStatus;
   readonly subscriptionId: string | null;
+  readonly fulfilledAt?: Date | null;
 }) {
   return {
     id: input.id,
     paymentId: 'payment-1',
     userId: 'user-1',
     subscriptionId: input.subscriptionId,
+    fulfilledAt: input.fulfilledAt ?? null,
     status: input.status,
     isTest: false,
     purchaseType: PurchaseType.NEW,

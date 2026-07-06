@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import {
   AddOnType,
   DeviceType,
@@ -20,6 +20,8 @@ import { SystemEventsService, EVENT_TYPES } from '../../../common/services/syste
 
 @Injectable()
 export class PaymentSubscriptionMutationService {
+  private readonly logger = new Logger(PaymentSubscriptionMutationService.name);
+
   public constructor(
     private readonly prismaService: PrismaService,
     private readonly events: SystemEventsService,
@@ -117,10 +119,20 @@ export class PaymentSubscriptionMutationService {
    * PERSONAL discount is never touched here.
    */
   private async consumePurchaseDiscount(userId: string): Promise<void> {
-    await this.prismaService.user.updateMany({
-      where: { id: userId, purchaseDiscount: { gt: 0 } },
-      data: { purchaseDiscount: 0 },
-    });
+    // Best-effort: this runs AFTER the subscription has been committed. It must
+    // never throw out of `applyCompletedTransaction`, otherwise the reconciler's
+    // fulfilment claim would be released and the (already-provisioned) payment
+    // re-provisioned on retry. A missed discount reset is harmless vs a double.
+    try {
+      await this.prismaService.user.updateMany({
+        where: { id: userId, purchaseDiscount: { gt: 0 } },
+        data: { purchaseDiscount: 0 },
+      });
+    } catch (err: unknown) {
+      this.logger.warn(
+        `consumePurchaseDiscount failed for ${userId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   /**
@@ -194,6 +206,13 @@ export class PaymentSubscriptionMutationService {
         });
         jobs.push(syncJob);
       }
+      // Stamp the transaction-level idempotency flag atomically with the item
+      // applications so the webhook reconciler treats the combined renewal as
+      // fulfilled (its per-item `appliedAt` still guards partial re-runs).
+      await transactionClient.transaction.update({
+        where: { id: transaction.id },
+        data: { fulfilledAt: now },
+      });
       return jobs;
     });
 
@@ -221,9 +240,10 @@ export class PaymentSubscriptionMutationService {
    * Remnawave UPDATE sync so the panel profile reflects the new limit.
    *
    * Idempotent against webhook retries: the target id is read from
-   * `planSnapshot` and stamped onto `transaction.subscriptionId` at the
-   * end, so a replayed COMPLETED event won't re-apply (the
-   * reconciliation guard only fulfills when `subscriptionId === null`).
+   * `planSnapshot` and the fulfillment is stamped onto
+   * `transaction.fulfilledAt` (atomically, in the same tx), so a replayed
+   * COMPLETED event won't re-apply (the reconciliation guard fulfils only when
+   * `fulfilledAt === null`).
    */
   private async applyAddOnTopUp(
     transaction: Transaction,
@@ -280,7 +300,7 @@ export class PaymentSubscriptionMutationService {
 
       await tx.transaction.update({
         where: { id: transaction.id },
-        data: { subscriptionId: updatedSubscription.id },
+        data: { subscriptionId: updatedSubscription.id, fulfilledAt: new Date() },
       });
 
       return { subscription: updatedSubscription, syncJob };
@@ -357,6 +377,7 @@ export class PaymentSubscriptionMutationService {
         where: { id: input.transaction.id },
         data: {
           subscriptionId: createdSubscription.id,
+          fulfilledAt: now,
         },
       });
       // Backfill the user's "current subscription" pointer when they don't
@@ -423,6 +444,10 @@ export class PaymentSubscriptionMutationService {
           },
         },
       });
+      await transactionClient.transaction.update({
+        where: { id: input.transaction.id },
+        data: { fulfilledAt: now },
+      });
       return {
         subscription: renewedSubscription,
         syncJob,
@@ -477,6 +502,10 @@ export class PaymentSubscriptionMutationService {
             paymentId: input.transaction.paymentId,
           },
         },
+      });
+      await transactionClient.transaction.update({
+        where: { id: input.transaction.id },
+        data: { fulfilledAt: now },
       });
       return {
         subscription: upgradedSubscription,

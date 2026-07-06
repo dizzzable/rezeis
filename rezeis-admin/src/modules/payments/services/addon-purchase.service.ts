@@ -51,11 +51,10 @@ export interface AddOnCheckoutInput {
  * subscription's limit + enqueues a Remnawave sync instead of creating a
  * fresh subscription.
  *
- * `Transaction.subscriptionId` is intentionally left `null` at draft
- * time: the reconciliation guard only runs fulfillment when
- * `subscriptionId === null`, and the fulfillment step stamps the target
- * id at the end — giving us idempotency against webhook retries for
- * free.
+ * `Transaction.subscriptionId` is left `null` at draft time (the target id
+ * lives in `planSnapshot`); the fulfillment step stamps both it and
+ * `transaction.fulfilledAt` atomically. The reconciliation guard fulfils only
+ * when `fulfilledAt === null`, giving us idempotency against webhook retries.
  */
 @Injectable()
 export class AddOnPurchaseService {

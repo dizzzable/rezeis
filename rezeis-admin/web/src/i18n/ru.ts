@@ -2338,6 +2338,8 @@
     detail: {
       selectPrompt: 'Выберите тикет, чтобы посмотреть переписку',
       tgPrefix: 'TG',
+      loginPrefix: 'Логин',
+      idPrefix: 'Reiwa ID',
       close: 'Закрыть',
       reopen: 'Открыть снова',
       replyLabel: 'Текст ответа',

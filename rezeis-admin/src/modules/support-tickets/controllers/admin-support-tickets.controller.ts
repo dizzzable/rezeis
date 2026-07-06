@@ -366,7 +366,11 @@ type DocRequestRow = {
 type TicketWithRelations = SupportTicket & {
   readonly messages?: ReadonlyArray<SupportTicketMessage & { readonly attachments?: ReadonlyArray<AttachmentRow> }>;
   readonly docRequests?: ReadonlyArray<DocRequestRow>;
-  readonly user?: Pick<User, 'id' | 'telegramId' | 'name' | 'username' | 'email'> | null;
+  readonly user?:
+    | (Pick<User, 'id' | 'telegramId' | 'name' | 'username' | 'email'> & {
+        readonly webAccount?: { readonly login: string | null; readonly email: string | null } | null;
+      })
+    | null;
   readonly guest?: { readonly id: string; readonly email: string | null; readonly displayName: string | null } | null;
 };
 
@@ -397,7 +401,11 @@ function serializeTicket(ticket: TicketWithRelations): Record<string, unknown> {
           telegramId: ticket.user.telegramId?.toString() ?? null,
           name: ticket.user.name,
           username: ticket.user.username,
-          email: ticket.user.email,
+          // Web-cabinet login (WebAccount.login) — the identifier web-first
+          // users sign in with. Surfaced so the operator can tell WHO wrote the
+          // ticket even when there's no Telegram username.
+          login: ticket.user.webAccount?.login ?? null,
+          email: ticket.user.email ?? ticket.user.webAccount?.email ?? null,
         }
       : null,
     messages: (ticket.messages ?? []).map((message) => ({

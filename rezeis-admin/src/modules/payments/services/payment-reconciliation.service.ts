@@ -85,14 +85,46 @@ export class PaymentReconciliationService {
         if (refreshedTransaction === null) {
           throw new NotFoundException('Payment transaction not found');
         }
-        if (refreshedTransaction.subscriptionId === null) {
-          const { syncJobs } =
-            await this.paymentSubscriptionMutationService.applyCompletedTransaction(refreshedTransaction);
+        // Fulfil exactly once, keyed on `fulfilledAt` — NOT on `subscriptionId`.
+        // RENEW/UPGRADE carry the SOURCE subscription id from draft time, so the
+        // old `subscriptionId === null` guard silently skipped their provisioning
+        // (money captured, nothing delivered).
+        //
+        // Atomically CLAIM fulfilment: flip `fulfilledAt` from null in a single
+        // conditional UPDATE. Only the worker whose update matched (count === 1)
+        // provisions — this prevents a double-provision when two distinct
+        // webhook events for the same payment (or a manual replay racing a live
+        // callback) are reconciled concurrently (processor concurrency > 1, and
+        // the api + worker containers both run this processor).
+        const claim = await this.prismaService.transaction.updateMany({
+          where: { id: refreshedTransaction.id, fulfilledAt: null },
+          data: { fulfilledAt: new Date() },
+        });
+        if (claim.count === 1) {
+          let syncJobs;
+          try {
+            ({ syncJobs } =
+              await this.paymentSubscriptionMutationService.applyCompletedTransaction(refreshedTransaction));
+          } catch (provisionError: unknown) {
+            // Provisioning failed BEFORE commit (the subscription create/renew
+            // tx rolled back; post-commit side effects are best-effort and never
+            // throw). Release the claim so a BullMQ retry / late webhook can
+            // re-provision instead of leaving the payment stuck paid-but-undelivered.
+            await this.prismaService.transaction
+              .updateMany({
+                where: { id: refreshedTransaction.id, fulfilledAt: { not: null } },
+                data: { fulfilledAt: null },
+              })
+              .catch(() => undefined);
+            throw provisionError;
+          }
           // Push the freshly-created sync job(s) to BullMQ so the Remnawave
-          // profile is provisioned immediately. A combined renewal returns
-          // one job per line item; single-subscription transactions return
-          // exactly one. Without this the rows would sit PENDING until the
-          // profile-sync sweep cron picks them up.
+          // profile is provisioned immediately. This runs AFTER the fulfilment
+          // claim + provisioning have committed, and OUTSIDE the release catch
+          // above — so an enqueue failure surfaces the webhook as FAILED (ops
+          // visibility + retry) WITHOUT releasing the claim: the retry early-
+          // returns on the now-COMPLETED transaction and the PENDING sync jobs
+          // are recovered by the profile-sync sweep cron. No double-provision.
           for (const syncJob of syncJobs) {
             await this.profileSyncQueueService.enqueue(syncJob.id);
           }

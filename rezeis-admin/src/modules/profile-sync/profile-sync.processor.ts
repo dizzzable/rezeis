@@ -6,7 +6,7 @@ import { Job } from 'bullmq';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { SystemEventsService, EVENT_TYPES } from '../../common/services/system-events.service';
 import { RemnawaveApiService } from '../remnawave/services/remnawave-api.service';
-import { PROFILE_SYNC_QUEUE } from './profile-sync.constants';
+import { PROFILE_SYNC_CONCURRENCY, PROFILE_SYNC_QUEUE } from './profile-sync.constants';
 import { RemnawaveProfileNamingService } from './remnawave-profile-naming.service';
 
 interface ProfileSyncJobData {
@@ -23,7 +23,7 @@ interface ProfileSyncJobData {
  *
  * Donor parity: altshop `src/infrastructure/taskiq/tasks/remnawave.py`.
  */
-@Processor(PROFILE_SYNC_QUEUE)
+@Processor(PROFILE_SYNC_QUEUE, { concurrency: PROFILE_SYNC_CONCURRENCY })
 export class ProfileSyncProcessor extends WorkerHost {
   private readonly logger = new Logger(ProfileSyncProcessor.name);
 
