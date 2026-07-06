@@ -136,6 +136,14 @@ export class ExternalAuthService {
       // Telegram identity is itself a credential — the user can always
       // re-authenticate via Telegram, so never force finish-setup on them.
       if (isTelegram) {
+        // Backfill `User.telegramId` on the login path. Older OIDC/widget
+        // sign-ins created only a `userOAuthLink` and left `User.telegramId`
+        // null, so the cabinet session carried no telegramId → the reiwa gate
+        // treated them as non-Telegram and forced finish-setup regardless of
+        // the operator's "don't require web credentials for Telegram" toggle.
+        // Setting it makes the session carry telegramId (toggle works) and lets
+        // bot notifications reach the user.
+        await this.ensureTelegramIdLinked(link.userId, profile.providerUserId);
         return { action: 'login', userId: link.userId };
       }
       // For OAuth (email) providers: a shell created by a prior sign-up that
@@ -290,6 +298,14 @@ export class ExternalAuthService {
   private async createShellAccount(profile: ExternalUserProfile): Promise<string> {
     const attachEmail = await this.emailAttachable(profile);
     const emailNormalized = attachEmail ? attachEmail.toLowerCase() : null;
+    // For a NEW Telegram sign-up, stamp `User.telegramId` on the shell so the
+    // cabinet session carries it (the reiwa credential-gate + notifications rely
+    // on it). The step-1.5 lookup already proved this id is free. Non-Telegram
+    // providers never set it (their identity is email / OAuth link only).
+    const telegramId =
+      profile.provider === ExternalAuthProvider.TELEGRAM
+        ? parseBigintOrNull(profile.providerUserId)
+        : null;
 
     const userId = await this.prismaService.$transaction(async (tx) => {
       // NB: `User.email` is a unique column and is intentionally left unset —
@@ -298,7 +314,7 @@ export class ExternalAuthService {
       // would collide with an admin-created / imported `User` that has the same
       // email but no `WebAccount`.
       const user = await tx.user.create({
-        data: { name: profile.name ?? '' },
+        data: { name: profile.name ?? '', ...(telegramId !== null ? { telegramId } : {}) },
         select: { id: true },
       });
       await tx.webAccount.create({
@@ -337,6 +353,38 @@ export class ExternalAuthService {
       },
     );
     return userId;
+  }
+
+  /**
+   * Ensures the resolved user carries `User.telegramId` after a Telegram
+   * sign-in. Sets it only when the row currently has none AND no other user
+   * already owns that id (never steals it / breaks the unique constraint —
+   * a split identity is left as-is and logged). Best-effort: a failure here
+   * must never block a successful login.
+   */
+  private async ensureTelegramIdLinked(userId: string, providerUserId: string): Promise<void> {
+    const telegramId = parseBigintOrNull(providerUserId);
+    if (telegramId === null) return;
+    try {
+      const user = await this.prismaService.user.findUnique({
+        where: { id: userId },
+        select: { telegramId: true },
+      });
+      if (user?.telegramId != null) return;
+      const owner = await this.prismaService.user.findUnique({
+        where: { telegramId },
+        select: { id: true },
+      });
+      if (owner && owner.id !== userId) {
+        this.logger.warn(
+          `Telegram id ${telegramId} already linked to a different user; skipping backfill for ${userId}`,
+        );
+        return;
+      }
+      await this.prismaService.user.update({ where: { id: userId }, data: { telegramId } });
+    } catch (err) {
+      this.logger.warn(`ensureTelegramIdLinked failed for ${userId}: ${(err as Error).message}`);
+    }
   }
 
   private async createLink(userId: string, profile: ExternalUserProfile): Promise<void> {
