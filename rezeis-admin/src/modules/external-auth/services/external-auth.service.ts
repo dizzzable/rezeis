@@ -121,22 +121,18 @@ export class ExternalAuthService {
    */
   public async resolve(profile: ExternalUserProfile): Promise<ExternalAuthResolution> {
     const isTelegram = profile.provider === ExternalAuthProvider.TELEGRAM;
-    // Diagnostic: the external-auth account-matching decision is the source of
-    // the "existing user sent to finish-setup" reports. Logging the provider +
-    // provider user id (a public identifier — Telegram id / OAuth sub, never a
-    // secret) + the chosen branch lets us confirm, per real login, whether an
-    // existing account matched or a new shell was created.
     this.logger.log(`resolve: provider=${profile.provider} providerUserId=${profile.providerUserId}`);
 
     // 0. Telegram canonical identity. `User.telegramId` is the source of truth
     // for a Telegram user, so match it FIRST — before the generic OAuth-link
     // lookup. Otherwise a stale/duplicate shell link (e.g. an empty account a
-    // previous OIDC attempt created) hijacks the login and traps the user on
-    // finish-setup instead of their real (bot / already-registered) account —
-    // the "existing user asked to register again" bug. We (re)point the OAuth
-    // link to the canonical owner so the mapping self-heals for next time.
+    // previous attempt created) hijacks the login and traps the user on
+    // finish-setup instead of their real (bot / already-registered) account.
+    // We (re)point the OAuth link to the canonical owner so it self-heals.
+    // `parseTelegramId` range-guards the value, so an opaque OIDC `sub` (which
+    // is not a real Telegram id) never matches or gets stored.
     if (isTelegram) {
-      const telegramId = parseBigintOrNull(profile.providerUserId);
+      const telegramId = parseTelegramId(profile.providerUserId);
       if (telegramId !== null) {
         const owner = await this.prismaService.user.findUnique({
           where: { telegramId },
@@ -165,18 +161,19 @@ export class ExternalAuthService {
       // Telegram identity is itself a credential — the user can always
       // re-authenticate via Telegram, so never force finish-setup on them.
       if (isTelegram) {
-        // Reached only when NO User owns this telegram id yet (step 0 found
+        // Telegram identity is itself a credential — never force finish-setup.
+        // Reached only when no User owns this telegram id yet (step 0 found
         // none) — e.g. a pre-fix shell whose `User.telegramId` was never set.
-        // Backfill it onto the linked account so the session carries telegramId
-        // (the reiwa credential-gate toggle then works) and bot notifications
-        // reach the user, and future logins match canonically via step 0.
+        // Backfill it (range-guarded) onto the linked account so the session
+        // carries telegramId (the reiwa credential-gate toggle then works) and
+        // bot notifications reach the user; future logins match via step 0.
         await this.ensureTelegramIdLinked(link.userId, profile.providerUserId);
         this.logger.log(`resolve: branch=telegram-oauth-link action=login userId=${link.userId}`);
         return { action: 'login', userId: link.userId };
       }
       // For OAuth (email) providers: a shell created by a prior sign-up that
-      // never completed finish-setup still has no login/password. Route it
-      // back to finish-setup instead of silently logging into a credential-less
+      // never completed finish-setup still has no login/password. Route it back
+      // to finish-setup instead of silently logging into a credential-less
       // account (which then can't sign in by login and looks "missing").
       return (await this.hasCompletedCredentials(link.userId))
         ? { action: 'login', userId: link.userId }
@@ -313,13 +310,13 @@ export class ExternalAuthService {
   private async createShellAccount(profile: ExternalUserProfile): Promise<string> {
     const attachEmail = await this.emailAttachable(profile);
     const emailNormalized = attachEmail ? attachEmail.toLowerCase() : null;
-    // For a NEW Telegram sign-up, stamp `User.telegramId` on the shell so the
-    // cabinet session carries it (the reiwa credential-gate + notifications rely
-    // on it). The step-1.5 lookup already proved this id is free. Non-Telegram
-    // providers never set it (their identity is email / OAuth link only).
+    // Stamp `User.telegramId` on a new Telegram shell so the cabinet session
+    // carries it (credential-gate toggle) and bot notifications work.
+    // `parseTelegramId` range-guards it: a non-Telegram provider or an opaque
+    // OIDC `sub` yields null and is never written into `User.telegramId`.
     const telegramId =
       profile.provider === ExternalAuthProvider.TELEGRAM
-        ? parseBigintOrNull(profile.providerUserId)
+        ? parseTelegramId(profile.providerUserId)
         : null;
 
     const userId = await this.prismaService.$transaction(async (tx) => {
@@ -378,7 +375,7 @@ export class ExternalAuthService {
    * must never block a successful login.
    */
   private async ensureTelegramIdLinked(userId: string, providerUserId: string): Promise<void> {
-    const telegramId = parseBigintOrNull(providerUserId);
+    const telegramId = parseTelegramId(providerUserId);
     if (telegramId === null) return;
     try {
       const user = await this.prismaService.user.findUnique({
@@ -479,12 +476,20 @@ function safeJson(value: unknown): string {
   }
 }
 
-/** Parses a decimal Telegram id string to BigInt; null when not a positive int. */
-function parseBigintOrNull(value: string): bigint | null {
-  if (!/^\d+$/.test(value)) return null;
+/**
+ * Parses a decimal string to a Telegram user id, range-guarded. Returns the
+ * BigInt only for a positive value within the valid Telegram id space (< 2^52 —
+ * Telegram user ids fit in 52 significant bits). This deliberately rejects an
+ * opaque OIDC `sub` (oauth.telegram.org returns a ~19-digit / >2^52 subject that
+ * is NOT a Telegram id) so it can never be matched against or written into
+ * `User.telegramId`.
+ */
+const MAX_TELEGRAM_ID = 1n << 52n;
+function parseTelegramId(value: string): bigint | null {
+  if (!/^\d{1,19}$/.test(value)) return null;
   try {
     const n = BigInt(value);
-    return n > 0n ? n : null;
+    return n > 0n && n < MAX_TELEGRAM_ID ? n : null;
   } catch {
     return null;
   }

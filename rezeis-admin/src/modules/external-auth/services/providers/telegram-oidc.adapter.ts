@@ -27,6 +27,13 @@ interface TelegramTokenResponse {
 
 interface TelegramIdTokenClaims {
   readonly sub?: string | number;
+  /**
+   * The REAL Telegram user id (returned with the `profile` scope). This — NOT
+   * `sub` (an opaque OIDC subject that is not a Telegram id) — is what matches
+   * the same user's bot / Login-Widget account. See
+   * https://core.telegram.org/bots/telegram-login (User Data Structure).
+   */
+  readonly id?: string | number;
   readonly preferred_username?: string;
   readonly name?: string;
   readonly picture?: string;
@@ -85,17 +92,24 @@ export class TelegramOidcAdapter implements OAuthProviderAdapter {
     // separate JWKS signature check) is trustworthy — the same trust model as
     // reading a provider userinfo response. We only read identity claims.
     const claims = decodeJwtClaims(idToken);
+    // Identity = the real Telegram user id from the `id` claim (profile scope),
+    // so an OIDC login resolves to the SAME account as this user's bot / Login
+    // Widget sessions. `sub` is an opaque OIDC subject (not a Telegram id) — use
+    // it only as a last-resort fallback when `id` is absent (openid-only scope).
+    const telegramUserId =
+      claims.id !== undefined && claims.id !== null ? String(claims.id) : null;
     const sub = claims.sub !== undefined && claims.sub !== null ? String(claims.sub) : null;
-    if (!sub) throw new UnauthorizedException('Telegram id_token missing sub claim');
+    const providerUserId = telegramUserId ?? sub;
+    if (!providerUserId) throw new UnauthorizedException('Telegram id_token missing id/sub claim');
 
     return {
       provider: this.provider,
-      providerUserId: sub,
+      providerUserId,
       email: null,
       emailVerified: false,
       name: claims.name ?? claims.preferred_username ?? null,
       avatarUrl: claims.picture ?? null,
-      rawProfile: { sub, preferred_username: claims.preferred_username, name: claims.name },
+      rawProfile: { sub, id: telegramUserId, preferred_username: claims.preferred_username, name: claims.name },
     };
   }
 }
