@@ -181,6 +181,54 @@ describe('PaymentsTransactionsService', () => {
     assert.equal(state.quoteCalls, 0);
   });
 
+  it('rejects a NEW draft when the subscription cap is reached', async () => {
+    const { service, state } = createService({
+      quoteResult: createEligibleQuote(),
+      capacityAvailable: false,
+    });
+
+    await assert.rejects(async () => {
+      await service.createDraft({
+        userId: 'user-1',
+        purchaseType: PurchaseType.NEW,
+        planId: 'plan-1',
+        durationDays: 30,
+        gatewayType: PaymentGatewayType.YOOKASSA,
+        channel: PurchaseChannel.WEB,
+      });
+    }, (error: unknown) => {
+      assert.ok(error instanceof BadRequestException);
+      assert.deepStrictEqual(error.getResponse(), {
+        code: 'SUBSCRIPTION_LIMIT_REACHED',
+        message: 'The user has reached the maximum number of active subscriptions.',
+      });
+      return true;
+    });
+
+    // The cap guard must short-circuit BEFORE quoting or writing anything.
+    assert.equal(state.quoteCalls, 0);
+    assert.equal(state.transactionCreateCalls.length, 0);
+  });
+
+  it('allows an ADDITIONAL draft when capacity remains', async () => {
+    const { service, state } = createService({
+      quoteResult: createEligibleQuote(),
+      capacityAvailable: true,
+    });
+
+    const transaction = await service.createDraft({
+      userId: 'user-1',
+      purchaseType: PurchaseType.ADDITIONAL,
+      planId: 'plan-1',
+      durationDays: 30,
+      gatewayType: PaymentGatewayType.YOOKASSA,
+      channel: PurchaseChannel.WEB,
+    });
+
+    assert.equal(transaction.id, 'transaction-1');
+    assert.equal(state.transactionCreateCalls.length, 1);
+  });
+
   it('reuses an existing pending draft for the same quote context', async () => {
     const { service, state } = createService({
       quoteResult: createEligibleQuote(),
@@ -225,6 +273,9 @@ function createService(input: {
   readonly listTransactions?: readonly StoredTransaction[];
   readonly listTotal?: number;
   readonly matchingUsers?: readonly { readonly id: string }[];
+  /** Subscription-cap mock: capacityAvailable defaults to true. */
+  readonly capacityAvailable?: boolean;
+  readonly capacityMax?: number;
 }): {
   readonly service: PaymentsTransactionsService;
   readonly state: {
@@ -297,6 +348,11 @@ function createService(input: {
       }
       return input.quoteResult;
     },
+    getSubscriptionCapacity: async () => ({
+      activeSubscriptionCount: 0,
+      effectiveMaxSubscriptions: input.capacityMax ?? 1,
+      capacityAvailable: input.capacityAvailable ?? true,
+    }),
   };
   return {
     service: new PaymentsTransactionsService(prismaService as never, quoteService as never),

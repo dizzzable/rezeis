@@ -124,6 +124,33 @@ export class SubscriptionQuoteService {
     throw new NotFoundException('A userId or telegramId is required');
   }
 
+  /**
+   * Capacity snapshot for the subscription cap. `capacityAvailable` uses the
+   * SAME definition as {@link getActionPolicy} (`activeSubscriptionCount <
+   * effectiveMaxSubscriptions`, counting every non-DELETED subscription) so
+   * the server-side purchase guard and the UI action gating never disagree.
+   *
+   * Enforcing this at draft-creation time (see `PaymentsTransactionsService`)
+   * is what actually caps NEW/ADDITIONAL purchases — the action policy alone
+   * only hides the button, so a direct checkout call previously let a user
+   * exceed `maxSubscriptions`. The cap only ever BLOCKS a new purchase; it
+   * never touches subscriptions the user already owns, so lowering the limit
+   * (or disabling multi-subscription) can't push existing subs into any
+   * restricted state — it just stops further purchases.
+   */
+  public async getSubscriptionCapacity(userId: string): Promise<{
+    readonly activeSubscriptionCount: number;
+    readonly effectiveMaxSubscriptions: number;
+    readonly capacityAvailable: boolean;
+  }> {
+    const context = await this.buildContext({ userId, channel: PurchaseChannel.WEB });
+    return {
+      activeSubscriptionCount: context.activeSubscriptionCount,
+      effectiveMaxSubscriptions: context.effectiveMaxSubscriptions,
+      capacityAvailable: context.activeSubscriptionCount < context.effectiveMaxSubscriptions,
+    };
+  }
+
   public async getActionPolicy(
     input: SubscriptionActionPolicyDto,
   ): Promise<SubscriptionActionPolicyInterface> {

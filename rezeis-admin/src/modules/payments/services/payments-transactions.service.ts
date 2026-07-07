@@ -104,6 +104,27 @@ export class PaymentsTransactionsService {
         message: 'Trial purchases cannot be converted to transaction drafts.',
       });
     }
+    // Enforce the per-user subscription cap for purchases that CREATE a new
+    // subscription (NEW / ADDITIONAL). Previously the cap lived only in the
+    // action-policy (UI gating), so a direct checkout call — or the reiwa
+    // edge racing the policy — could exceed `maxSubscriptions` and buy an
+    // unlimited number of subscriptions even with multi-subscription
+    // disabled. RENEW / UPGRADE operate on an existing subscription and never
+    // increase the count, so they are exempt (renewing an expired sub must
+    // stay possible at the cap). Add-on top-ups run through
+    // `AddOnPurchaseService` (not this draft path) and never create a new sub.
+    if (
+      input.purchaseType === PurchaseType.NEW ||
+      input.purchaseType === PurchaseType.ADDITIONAL
+    ) {
+      const capacity = await this.subscriptionQuoteService.getSubscriptionCapacity(input.userId);
+      if (!capacity.capacityAvailable) {
+        throw new BadRequestException({
+          code: 'SUBSCRIPTION_LIMIT_REACHED',
+          message: 'The user has reached the maximum number of active subscriptions.',
+        });
+      }
+    }
     const channel = input.channel ?? PurchaseChannel.WEB;
     const quote = await this.subscriptionQuoteService.getQuote({
       userId: input.userId,
