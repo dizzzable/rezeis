@@ -1,4 +1,6 @@
-import { AuthChallenge, PlanType, Prisma, Subscription, SubscriptionStatus, User, WebAccount } from '@prisma/client';
+import { AuthChallenge, PlanAvailability, PlanType, Prisma, Subscription, SubscriptionStatus, User, WebAccount } from '@prisma/client';
+
+import { readTrialSettings } from '../../plans/utils/trial-settings.util';
 
 import { InternalWebAccountEmailVerificationChallengeInterface } from '../interfaces/internal-web-account-email-verification-challenge.interface';
 import { InternalUserSessionInterface } from '../interfaces/internal-user-session.interface';
@@ -156,6 +158,27 @@ export function mapSubscriptionPlanSnapshot(
     name: readOptionalString(planSnapshot, 'name'),
     type: readOptionalPlanType(planSnapshot, 'type'),
   };
+}
+
+/**
+ * Whether a subscription is a FREE trial (non-renewable → the cabinet disables
+ * "Renew" and steers to Upgrade). Derived from the stored `planSnapshot`: a
+ * free-trial grant persists the full plan (`availability: 'TRIAL'` +
+ * `trialSettings.free: true`), while a PAID trial's completion snapshot carries
+ * neither field, so paid trials correctly resolve to `false` (renewable).
+ * Guarded by `isTrial` so a non-trial subscription can never be flagged.
+ */
+export function readSubscriptionTrialFree(
+  isTrial: boolean,
+  planSnapshot: Prisma.JsonValue,
+): boolean {
+  if (!isTrial || !isJsonObject(planSnapshot)) {
+    return false;
+  }
+  if (planSnapshot['availability'] !== PlanAvailability.TRIAL) {
+    return false;
+  }
+  return readTrialSettings(planSnapshot['trialSettings'] as Prisma.JsonValue).free;
 }
 
 export function collapseLegacyCatalogPrices(

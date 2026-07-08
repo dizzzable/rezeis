@@ -294,7 +294,7 @@ export class ReferralQualificationService {
       return {};
     }
 
-    return settings.referralSettings as unknown as ReferralSettingsJson;
+    return normalizeReferralSettings(settings.referralSettings);
   }
 }
 
@@ -304,6 +304,86 @@ function readRecord(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {};
+}
+
+function readOptionalNumber(record: Record<string, unknown>, ...keys: readonly string[]): number | undefined {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return value;
+    }
+    if (typeof value === 'string' && value.trim().length > 0) {
+      const parsed = Number(value);
+      if (Number.isFinite(parsed)) {
+        return parsed;
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Normalises the raw `Settings.referralSettings` JSON into the internal
+ * {@link ReferralSettingsJson} shape the qualification engine reads.
+ *
+ * The admin panel form persists a camelCase contract (`accrualStrategy`,
+ * `rewardType`, `level1Reward`/`level2Reward`), while the engine historically
+ * read a snake_case/nested donor shape (`accrual_strategy`, `reward.config`).
+ * This bridged reader prefers the FORM keys (so operator config actually
+ * drives referral rewards — previously it was silently ignored and NO reward
+ * rows were created) and falls back to the legacy shape for backward
+ * compatibility with older data and existing tests.
+ */
+function normalizeReferralSettings(raw: unknown): ReferralSettingsJson {
+  const record = readRecord(raw);
+  const result: ReferralSettingsJson = {};
+
+  if (typeof record['enabled'] === 'boolean') {
+    result.enabled = record['enabled'];
+  }
+
+  // Only `ON_FIRST_PAYMENT` changes behavior (it gates accrual to the referred
+  // user's FIRST purchase). Every other value — the form's `ON_EACH_PAYMENT`,
+  // the legacy `ON_EVERY_PAYMENT`, or unset — means "accrue on every qualifying
+  // payment", which is the engine's default when `accrual_strategy` is absent.
+  const accrual = record['accrualStrategy'] ?? record['accrual_strategy'];
+  if (accrual === 'ON_FIRST_PAYMENT') {
+    result.accrual_strategy = 'ON_FIRST_PAYMENT';
+  }
+
+  const eligibleRaw = record['eligiblePlanIds'] ?? record['eligible_plan_ids'];
+  if (Array.isArray(eligibleRaw)) {
+    result.eligible_plan_ids = eligibleRaw.filter((id): id is string => typeof id === 'string');
+  }
+
+  // Reward: prefer the FORM's flat shape (rewardType + levelNReward), else the
+  // legacy nested `reward: { type, strategy, config: { FIRST, SECOND } }`.
+  const rewardType = record['rewardType'];
+  if (rewardType === 'POINTS' || rewardType === 'EXTRA_DAYS') {
+    const first = readOptionalNumber(record, 'level1Reward', 'pointsPerReferral') ?? 0;
+    const second = readOptionalNumber(record, 'level2Reward') ?? 0;
+    result.reward = {
+      type: rewardType,
+      strategy: 'AMOUNT',
+      config: { FIRST: first, SECOND: second },
+    };
+  } else {
+    const legacyReward = readRecord(record['reward']);
+    const legacyType = legacyReward['type'];
+    if (legacyType === 'POINTS' || legacyType === 'EXTRA_DAYS') {
+      const legacyConfig = readRecord(legacyReward['config']);
+      result.reward = {
+        type: legacyType,
+        strategy: legacyReward['strategy'] === 'PERCENT' ? 'PERCENT' : 'AMOUNT',
+        config: {
+          FIRST: readOptionalNumber(legacyConfig, 'FIRST') ?? 0,
+          SECOND: readOptionalNumber(legacyConfig, 'SECOND') ?? 0,
+        },
+      };
+    }
+  }
+
+  return result;
 }
 
 function readOptionalString(record: Record<string, unknown>, key: string): string | null {

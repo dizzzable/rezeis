@@ -65,6 +65,7 @@ import {
   mapInternalEmailVerificationChallenge,
   mapInternalUserSession,
   mapSubscriptionPlanSnapshot,
+  readSubscriptionTrialFree,
   selectCurrentSubscription,
 } from './internal-user.mappers';
 
@@ -564,6 +565,7 @@ export class InternalUserService {
           id: sub.id,
           status: o?.status ?? sub.status,
           isTrial: sub.isTrial,
+          trialFree: readSubscriptionTrialFree(sub.isTrial, sub.planSnapshot),
           plan: mapSubscriptionPlanSnapshot(sub.planSnapshot),
           trafficLimit: o?.trafficLimit !== undefined ? o.trafficLimit : sub.trafficLimit,
           trafficUsed: u.trafficUsedGb,
@@ -617,6 +619,7 @@ export class InternalUserService {
       id: subscription.id,
       status: o?.status ?? subscription.status,
       isTrial: subscription.isTrial,
+      trialFree: readSubscriptionTrialFree(subscription.isTrial, subscription.planSnapshot),
       plan: mapSubscriptionPlanSnapshot(subscription.planSnapshot),
       trafficLimit: o?.trafficLimit !== undefined ? o.trafficLimit : subscription.trafficLimit,
       trafficUsed: usage.trafficUsedGb,

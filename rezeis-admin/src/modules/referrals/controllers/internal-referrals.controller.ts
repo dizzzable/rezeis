@@ -132,8 +132,8 @@ export class InternalReferralsController {
     // Validate slot capacity
     await this.inviteLimitsService.validateCanCreateInvite(user.id);
 
-    // Resolve expiry from settings
-    const expiresAt = await this.inviteLimitsService.resolveInviteExpiry();
+    // Resolve expiry from settings (per-user TTL override applies).
+    const expiresAt = await this.inviteLimitsService.resolveInviteExpiry(user.id);
 
     const result = await this.referralsService.createInvite({
       inviterId: user.id,

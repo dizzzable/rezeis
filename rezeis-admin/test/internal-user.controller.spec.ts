@@ -347,6 +347,7 @@ function createSubscription(): InternalUserSubscriptionInterface {
     id: 'subscription-1',
     status: SubscriptionStatus.ACTIVE,
     isTrial: false,
+    trialFree: false,
     plan: {
       id: 'plan-1',
       name: 'Starter',

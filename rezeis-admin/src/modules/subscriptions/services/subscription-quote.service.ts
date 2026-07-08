@@ -90,6 +90,36 @@ const TRIAL_REQUIRES_TELEGRAM: SubscriptionQuoteWarningInterface = {
   message: 'This trial requires a linked Telegram account. Link Telegram in the cabinet first.',
 };
 
+/**
+ * Warning codes that are purely INFORMATIONAL — they describe a side-effect of
+ * a purchase the user CAN still make (the expiry resets on upgrade; an archived
+ * plan is swapped for its replacement), not a reason the quote is ineligible.
+ * They MUST NOT count towards the `isEligible` gate:
+ *   - `UPGRADE_RESETS_EXPIRY` is attached to every upgrade quote, so treating
+ *     it as blocking made `createDraft` reject every UPGRADE checkout with
+ *     PAYMENT_DRAFT_QUOTE_NOT_ELIGIBLE (a 400 BAD_REQUEST) — most visibly when
+ *     upgrading a trial.
+ *   - `ARCHIVED_PLAN_REPLACEMENT` is attached when renewing a subscription
+ *     whose plan was archived with REPLACE_ON_RENEW — the renewal proceeds
+ *     onto the (valid, priced) replacement plan, so it's a notice, not a
+ *     blocker. Treating it as blocking made `priceRenewalItems` reject every
+ *     such renewal (RENEWAL_ITEM_NOT_PRICEABLE → 400 BAD_REQUEST), i.e. those
+ *     subscriptions could never be renewed at all.
+ * Eligibility still requires a resolvable priced plan/duration, so a missing
+ * replacement or an unpriceable plan stays ineligible via the other guards.
+ */
+const INFORMATIONAL_WARNING_CODES: ReadonlySet<string> = new Set([
+  'UPGRADE_RESETS_EXPIRY',
+  'ARCHIVED_PLAN_REPLACEMENT',
+]);
+
+/** Blocking warnings are everything that is not purely informational. */
+function hasBlockingWarning(
+  warnings: readonly SubscriptionQuoteWarningInterface[],
+): boolean {
+  return warnings.some((warning) => !INFORMATIONAL_WARNING_CODES.has(warning.code));
+}
+
 @Injectable()
 export class SubscriptionQuoteService {
   public constructor(
@@ -264,7 +294,11 @@ export class SubscriptionQuoteService {
       userId,
       purchaseType: input.purchaseType,
       channel,
-      isEligible: selectedPlan !== null && selectedDuration !== null && price !== null && quoteWarnings.length === 0,
+      isEligible:
+        selectedPlan !== null &&
+        selectedDuration !== null &&
+        price !== null &&
+        !hasBlockingWarning(quoteWarnings),
       selectedSubscriptionId: context.sourceSubscription?.id ?? null,
       selectedPlan: selectedPlan === null ? null : mapQuotePlan(selectedPlan),
       selectedDuration:

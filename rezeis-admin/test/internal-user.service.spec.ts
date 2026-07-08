@@ -246,6 +246,9 @@ describe('InternalUserService', () => {
       id: 'subscription-current',
       status: SubscriptionStatus.ACTIVE,
       isTrial: true,
+      // planSnapshot has no `availability: TRIAL`, so this trial is treated as
+      // a paid trial (renewable) → trialFree is false.
+      trialFree: false,
       plan: {
         id: null,
         name: 'Current',

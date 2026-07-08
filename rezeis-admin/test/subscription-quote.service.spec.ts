@@ -127,6 +127,38 @@ describe('SubscriptionQuoteService', () => {
     assert.equal(actualPolicy.actions.UPGRADE, true);
   });
 
+  it('keeps an UPGRADE quote eligible despite the informational reset-expiry warning', async () => {
+    // Regression: UPGRADE_RESETS_EXPIRY is attached to every upgrade quote.
+    // Treating it as a blocking warning made `isEligible` false, so
+    // createDraft rejected the checkout with PAYMENT_DRAFT_QUOTE_NOT_ELIGIBLE
+    // (a 400 BAD_REQUEST) — the "payment on trial upgrade doesn't go through"
+    // bug. The informational warning must NOT block eligibility.
+    const service = createService({
+      user: createUser({ maxSubscriptions: 2 }),
+      subscriptions: [createSubscription({ id: 'trial-sub', isTrial: true, planId: 'trial-plan' })],
+      trialGrant: { id: 'trial-grant-1' },
+      plans: [
+        createPlan({ id: 'trial-plan', availability: PlanAvailability.TRIAL }),
+        createPlan({ id: 'paid-plan', availability: PlanAvailability.ALL }),
+      ],
+    });
+
+    const actualQuote = await service.getQuote({
+      userId: 'user-1',
+      subscriptionId: 'trial-sub',
+      purchaseType: PurchaseType.UPGRADE,
+      planId: 'paid-plan',
+      durationDays: 30,
+      channel: PurchaseChannel.WEB,
+    });
+
+    assert.equal(actualQuote.isEligible, true);
+    assert.equal(actualQuote.price?.price, '10');
+    assert.deepStrictEqual(actualQuote.warnings.map((warning) => warning.code), [
+      'UPGRADE_RESETS_EXPIRY',
+    ]);
+  });
+
   it('blocks RENEW for a free trial source and steers the user to upgrade', async () => {
     const service = createService({
       user: createUser({ maxSubscriptions: 2 }),
@@ -251,7 +283,10 @@ describe('SubscriptionQuoteService', () => {
       channel: PurchaseChannel.WEB,
     });
 
-    assert.equal(actualQuote.isEligible, false);
+    // ARCHIVED_PLAN_REPLACEMENT is an informational notice (the renewal moves
+    // onto the valid replacement plan), so the quote stays ELIGIBLE — otherwise
+    // archived REPLACE_ON_RENEW subscriptions could never be renewed.
+    assert.equal(actualQuote.isEligible, true);
     assert.deepStrictEqual(actualQuote.availablePlans.map((plan) => plan.id), ['new-plan']);
     assert.deepStrictEqual(actualQuote.warnings.map((warning) => warning.code), [
       'ARCHIVED_PLAN_REPLACEMENT',

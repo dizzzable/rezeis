@@ -479,6 +479,8 @@ export class SettingsService {
     readonly platformBranding: PlatformBrandingInterface;
     readonly paymentOpsAlerts: PaymentOpsAlertSettingsInterface;
     readonly multiSubscriptionSettings: Record<string, unknown>;
+    readonly referralSettings: Record<string, unknown>;
+    readonly partnerSettings: Record<string, unknown>;
     readonly botTokenConfigured: boolean;
     readonly webPush: { readonly configured: boolean; readonly publicKey: string; readonly source: 'settings' | 'env' | null };
   }> {
@@ -501,6 +503,12 @@ export class SettingsService {
       platformBranding: readPlatformBranding(settings.platformPolicy),
       paymentOpsAlerts: readPaymentOpsAlertSettings(settings.systemNotifications),
       multiSubscriptionSettings: readJsonObject(settings.multiSubscriptionSettings),
+      // Referral + partner program configs — the SPA's Referrals/Partners
+      // "Settings" tabs hydrate their forms from these keys on the overview
+      // response. Without them the forms always re-init to defaults after a
+      // save (the PATCH persists fine), which reads as "settings don't save".
+      referralSettings: readJsonObject(settings.referralSettings),
+      partnerSettings: readJsonObject(settings.partnerSettings),
       // Only a presence flag — the encrypted token is never sent to the SPA.
       botTokenConfigured: typeof systemNotifications.botTokenEnc === 'string'
         && systemNotifications.botTokenEnc.length > 0,

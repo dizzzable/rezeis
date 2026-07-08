@@ -234,6 +234,36 @@ describe('PartnerEarningsService', () => {
     assert.equal((fake.state.createdTransactions[0] as { earnedAmount: number }).earnedAmount, 2500);
   });
 
+  it('honours an EXPLICIT individual 0% (does not fall back to the global percent)', async () => {
+    // Regression: an individual level percent of 0 (partner earns nothing at
+    // this level) was treated like "unset" and wrongly paid the GLOBAL 10%.
+    // With useGlobalSettings=false + level1Percent=0 the partner must earn 0.
+    const fake = fakePrisma({
+      settings: { enabled: true, levels: { LEVEL_1: 10 } },
+      partners: [
+        {
+          id: 'p1',
+          userId: 'u1',
+          isActive: true,
+          useGlobalSettings: false,
+          accrualStrategy: PartnerAccrualStrategy.ON_EACH_PAYMENT,
+          rewardType: PartnerRewardType.PERCENT,
+          level1Percent: new Prisma.Decimal('0'),
+        },
+      ],
+      edges: [{ partnerId: 'p1', referralUserId: 'payer', level: 1 }],
+    });
+    const service = new PartnerEarningsService(fake.client as never, NULL_LOGGER as never, NULL_NOTIFICATIONS as never);
+    await service.processPartnerEarning({
+      payerUserId: 'payer',
+      paymentAmountMinorUnits: 10000,
+      gatewayType: null,
+      sourceTransactionId: 'tx-1',
+    });
+    // Individual 0% → 0 earned → no partner transaction credited.
+    assert.equal(fake.state.createdTransactions.length, 0);
+  });
+
   it('skips inactive partners', async () => {
     const fake = fakePrisma({
       settings: { enabled: true, levels: { LEVEL_1: 10 } },

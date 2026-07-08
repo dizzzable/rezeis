@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { readJsonObject } from '../../../common/utils/read-json-object.util';
 
 /**
  * Invite limits configuration from `Settings.referralSettings` JSON.
@@ -69,15 +70,29 @@ export class ReferralInviteLimitsService {
       select: { referralSettings: true },
     });
     if (!settings) return DEFAULT_LIMITS;
-    const json = settings.referralSettings as Record<string, unknown>;
-    const inviteLimits = (json?.invite_limits ?? {}) as Record<string, unknown>;
+    const json = (settings.referralSettings ?? {}) as Record<string, unknown>;
+    // The admin form persists camelCase (`inviteLimits.linkTtlEnabled`, …);
+    // the legacy donor shape was snake_case (`invite_limits.link_ttl_enabled`).
+    // Prefer the form contract and fall back to the legacy one so operator
+    // config actually takes effect (previously the snake_case-only reader
+    // silently ignored everything the form saved).
+    const inviteLimits = readJsonObject(json.inviteLimits ?? json.invite_limits);
+    const bool = (...keys: readonly string[]): boolean =>
+      keys.some((key) => inviteLimits[key] === true);
+    const num = (...keys: readonly string[]): number | null => {
+      for (const key of keys) {
+        const value = inviteLimits[key];
+        if (typeof value === 'number' && Number.isFinite(value)) return value;
+      }
+      return null;
+    };
     return {
-      linkTtlEnabled: inviteLimits.link_ttl_enabled === true,
-      linkTtlSeconds: typeof inviteLimits.link_ttl_seconds === 'number' ? inviteLimits.link_ttl_seconds : null,
-      slotsEnabled: inviteLimits.slots_enabled === true,
-      initialSlots: typeof inviteLimits.initial_slots === 'number' ? inviteLimits.initial_slots : null,
-      refillThresholdQualified: typeof inviteLimits.refill_threshold_qualified === 'number' ? inviteLimits.refill_threshold_qualified : null,
-      refillAmount: typeof inviteLimits.refill_amount === 'number' ? inviteLimits.refill_amount : null,
+      linkTtlEnabled: bool('linkTtlEnabled', 'link_ttl_enabled'),
+      linkTtlSeconds: num('linkTtlSeconds', 'link_ttl_seconds'),
+      slotsEnabled: bool('slotsEnabled', 'slots_enabled'),
+      initialSlots: num('initialSlots', 'initial_slots'),
+      refillThresholdQualified: num('refillThresholdQualified', 'refill_threshold_qualified'),
+      refillAmount: num('refillAmount', 'refill_amount'),
     };
   }
 
@@ -108,7 +123,11 @@ export class ReferralInviteLimitsService {
    * Returns the current invite capacity for a user.
    */
   public async getCapacity(userId: string): Promise<InviteCapacitySnapshot> {
-    const limits = await this.getEffectiveLimits();
+    // Per-user override layered over the global program limits — an operator
+    // can raise/lower a specific user's slot count/TTL and it must actually
+    // apply here (previously this read the GLOBAL limits only, so per-user
+    // invite overrides were saved but silently ignored at capacity/creation).
+    const limits = await this.getEffectiveLimitsForUser(userId);
 
     if (!limits.slotsEnabled || limits.initialSlots === null) {
       return { totalSlots: null, usedSlots: 0, remainingSlots: null, canCreateInvite: true };
@@ -158,11 +177,15 @@ export class ReferralInviteLimitsService {
    * Resolves the expiry date for a new invite based on TTL settings.
    * Returns null if TTL is disabled.
    */
-  public async resolveInviteExpiry(explicitExpiresAt?: Date | null): Promise<Date | null> {
+  public async resolveInviteExpiry(
+    userId: string,
+    explicitExpiresAt?: Date | null,
+  ): Promise<Date | null> {
     if (explicitExpiresAt !== undefined && explicitExpiresAt !== null) {
       return explicitExpiresAt;
     }
-    const limits = await this.getEffectiveLimits();
+    // Per-user TTL override applies here too (was global-only before).
+    const limits = await this.getEffectiveLimitsForUser(userId);
     if (!limits.linkTtlEnabled || limits.linkTtlSeconds === null) {
       return null;
     }

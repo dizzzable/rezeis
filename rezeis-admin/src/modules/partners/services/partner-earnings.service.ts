@@ -409,8 +409,14 @@ export class PartnerEarningsService {
 
     if (useIndividual) {
       const indPercent = pickLevelPercent(partner, input.level);
-      if (indPercent !== null && indPercent.gt(0)) {
-        const earned = Math.floor((netAmount * indPercent.toNumber()) / 100);
+      // Honour an EXPLICIT individual percent — including 0% (this partner
+      // earns nothing at this level). Only a `null` (unset) individual percent
+      // falls back to the global rate; previously an explicit 0 was treated
+      // like "unset" and wrongly paid the global percent instead.
+      if (indPercent !== null) {
+        const earned = indPercent.gt(0)
+          ? Math.floor((netAmount * indPercent.toNumber()) / 100)
+          : 0;
         return {
           amount: Math.max(0, earned),
           percent: indPercent,
