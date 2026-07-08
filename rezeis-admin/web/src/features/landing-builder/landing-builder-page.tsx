@@ -11,6 +11,7 @@ import {
   History,
   Plus,
   Rocket,
+  Sparkles,
   Trash2,
 } from 'lucide-react'
 
@@ -49,19 +50,26 @@ import {
 } from '@/components/ui/alert-dialog'
 
 import {
+  LANDING_ANIMATIONS,
+  LANDING_BACKGROUNDS,
   LANDING_BUILDER_KEYS,
   LANDING_SECTION_TYPES,
+  LANDING_SURFACE_STYLES,
   LandingDraftConflictError,
   LandingPublishIncompleteError,
   landingBuilderApi,
+  type LandingAnimation,
+  type LandingBackground,
   type LandingConfig,
   type LandingPublishStrictIssue,
   type LandingRevisionMeta,
   type LandingSectionType,
+  type LandingSurfaceStyle,
 } from './landing-builder-api'
 import { SectionEditor } from './section-editor'
 import { buildDefaultSection, cloneSection, configMissingLocales, missingLocales } from './section-defaults'
 import { LandingPreview, type PreviewWidth } from './preview/landing-preview'
+import { LANDING_TEMPLATES, type LandingTemplate } from './templates'
 
 export default function LandingBuilderPage() {
   const { t } = useTranslation()
@@ -78,9 +86,11 @@ export default function LandingBuilderPage() {
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
   const [previewWidth, setPreviewWidth] = useState<PreviewWidth>('mobile')
   const [previewLocale, setPreviewLocale] = useState<string>('ru')
+  const [selectedId, setSelectedId] = useState<string | null>(null)
   const [conflictVersion, setConflictVersion] = useState<number | null>(null)
   const [publishIssues, setPublishIssues] = useState<LandingPublishStrictIssue[] | null>(null)
   const [rollbackTarget, setRollbackTarget] = useState<string | null>(null)
+  const [templateTarget, setTemplateTarget] = useState<LandingTemplate | null>(null)
   const dirtyRef = useRef(false)
 
   useEffect(() => {
@@ -194,6 +204,25 @@ export default function LandingBuilderPage() {
       sections: config.sections.map((s, i) => (i === index ? { ...s, visible: !s.visible } : s)),
     })
   }
+  const reorderSection = (from: number, to: number): void => {
+    if (from === to || from < 0 || to < 0 || from >= config.sections.length) return
+    const next = [...config.sections]
+    const [removed] = next.splice(from, 1)
+    next.splice(to, 0, removed)
+    update({ ...config, sections: next })
+  }
+  // Select a section from the preview: highlight it and expand its editor card.
+  const selectSection = (id: string): void => {
+    setSelectedId(id)
+    setCollapsed((c) => ({ ...c, [id]: false }))
+  }
+  const applyTemplate = (template: LandingTemplate): void => {
+    update({
+      ...config,
+      theme: template.theme,
+      sections: template.sections.map((s) => ({ ...s, id: `${s.type}-${Math.random().toString(36).slice(2, 8)}` })),
+    })
+  }
 
   return (
     <div className="space-y-4 p-4">
@@ -211,6 +240,7 @@ export default function LandingBuilderPage() {
             />
             <span className="text-sm">{t('landingBuilderPage.enabledToggle')}</span>
           </div>
+          <TemplatePicker onPick={(tpl) => setTemplateTarget(tpl)} />
           <RevisionsDrawer
             onRollback={(id) => setRollbackTarget(id)}
           />
@@ -287,7 +317,32 @@ export default function LandingBuilderPage() {
                         </div>
                       </CardHeader>
                       {!isCollapsed && (
-                        <CardContent>
+                        <CardContent className="space-y-3">
+                          <div className="flex items-center gap-2">
+                            <Label className="text-xs text-muted-foreground">
+                              {t('landingBuilderPage.sectionList.animation', { defaultValue: 'Анимация появления' })}
+                            </Label>
+                            <Select
+                              value={section.animation ?? 'none'}
+                              onValueChange={(v) =>
+                                update({
+                                  ...config,
+                                  sections: config.sections.map((s, i) =>
+                                    i === index ? { ...s, animation: v === 'none' ? undefined : (v as LandingAnimation) } : s,
+                                  ),
+                                })
+                              }
+                            >
+                              <SelectTrigger className="h-8 w-36"><SelectValue /></SelectTrigger>
+                              <SelectContent>
+                                {LANDING_ANIMATIONS.map((a) => (
+                                  <SelectItem key={a} value={a}>
+                                    {t(`landingBuilderPage.animations.${a}`, { defaultValue: a })}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          </div>
                           <SectionEditor
                             section={section}
                             locales={config.locales}
@@ -341,7 +396,17 @@ export default function LandingBuilderPage() {
               </Select>
             </div>
           </div>
-          <LandingPreview config={config} locale={previewLocale} width={previewWidth} />
+          <LandingPreview
+            config={config}
+            locale={previewLocale}
+            width={previewWidth}
+            selectedId={selectedId}
+            onSelect={selectSection}
+            onMove={moveSection}
+            onToggleVisible={toggleVisible}
+            onDelete={deleteSection}
+            onReorder={reorderSection}
+          />
         </div>
       </div>
 
@@ -400,7 +465,82 @@ export default function LandingBuilderPage() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* Apply-template confirm */}
+      <AlertDialog open={templateTarget !== null} onOpenChange={(open) => !open && setTemplateTarget(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t('landingBuilderPage.templates.confirmTitle', { defaultValue: 'Применить шаблон?' })}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t('landingBuilderPage.templates.confirmDescription', {
+                defaultValue: 'Текущая тема и секции будут заменены содержимым шаблона. Это действие можно отменить, не публикуя черновик.',
+              })}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t('landingBuilderPage.revisionsDrawer.cancel')}</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (templateTarget) applyTemplate(templateTarget)
+                setTemplateTarget(null)
+              }}
+            >
+              {t('landingBuilderPage.templates.apply', { defaultValue: 'Применить' })}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
+  )
+}
+
+function TemplatePicker({ onPick }: { onPick: (tpl: LandingTemplate) => void }) {
+  const { t } = useTranslation()
+  const [open, setOpen] = useState(false)
+  return (
+    <Sheet open={open} onOpenChange={setOpen}>
+      <SheetTrigger asChild>
+        <Button variant="outline">
+          <Sparkles className="mr-1 h-4 w-4" aria-hidden />
+          {t('landingBuilderPage.templates.button', { defaultValue: 'Шаблоны' })}
+        </Button>
+      </SheetTrigger>
+      <SheetContent>
+        <SheetHeader>
+          <SheetTitle>{t('landingBuilderPage.templates.title', { defaultValue: 'Готовые шаблоны' })}</SheetTitle>
+        </SheetHeader>
+        <div className="mt-4 space-y-2">
+          {LANDING_TEMPLATES.map((tpl) => (
+            <button
+              key={tpl.id}
+              type="button"
+              className="flex w-full items-center gap-3 rounded-md border p-3 text-left hover:bg-muted/50"
+              onClick={() => {
+                onPick(tpl)
+                setOpen(false)
+              }}
+            >
+              <span
+                className="h-10 w-10 shrink-0 rounded-md border"
+                style={{
+                  background: tpl.theme.colors?.bg ?? '#0a0a0a',
+                  borderColor: tpl.theme.colors?.primary ?? '#22c55e',
+                }}
+                aria-hidden
+              />
+              <div>
+                <div className="text-sm font-medium">
+                  {t(`landingBuilderPage.templates.${tpl.labelKey}.name`, { defaultValue: tpl.id })}
+                </div>
+                <div className="text-xs text-muted-foreground">
+                  {t(`landingBuilderPage.templates.${tpl.labelKey}.desc`, { defaultValue: '' })}
+                </div>
+              </div>
+            </button>
+          ))}
+        </div>
+      </SheetContent>
+    </Sheet>
   )
 }
 
@@ -424,17 +564,24 @@ function SectionCatalog({ onAdd }: { onAdd: (type: LandingSectionType) => void }
 function ThemePanel({ config, onChange }: { config: LandingConfig; onChange: (c: LandingConfig) => void }) {
   const { t } = useTranslation()
   const theme = config.theme
-  const setColor = (key: 'primary' | 'bg' | 'fg' | 'accent', value: string): void => {
-    onChange({ ...config, theme: { ...theme, colors: { ...theme.colors, [key]: value } } })
-  }
+  const patchTheme = (patch: Partial<LandingConfig['theme']>): void =>
+    onChange({ ...config, theme: { ...theme, ...patch } })
+  const setColor = (key: 'primary' | 'bg' | 'fg' | 'accent', value: string): void =>
+    patchTheme({ colors: { ...theme.colors, [key]: value } })
   const contrastWarn = lowContrast(theme.colors?.fg, theme.colors?.bg)
+  const bgColors = theme.backgroundColors ?? []
+  const setBgColor = (i: number, value: string): void => {
+    const next = [...bgColors]
+    next[i] = value
+    patchTheme({ backgroundColors: next.filter((c) => c.length > 0) })
+  }
   return (
     <Card>
       <CardContent className="space-y-4 pt-4">
         <div className="flex items-center gap-2">
           <Switch
             checked={theme.inherit}
-            onCheckedChange={(checked) => onChange({ ...config, theme: { ...theme, inherit: checked } })}
+            onCheckedChange={(checked) => patchTheme({ inherit: checked })}
             aria-label={t('landingBuilderPage.theme.inherit')}
           />
           <div>
@@ -442,24 +589,99 @@ function ThemePanel({ config, onChange }: { config: LandingConfig; onChange: (c:
             <div className="text-xs text-muted-foreground">{t('landingBuilderPage.theme.inheritHint')}</div>
           </div>
         </div>
+
         {!theme.inherit && (
-          <div className="grid grid-cols-2 gap-3">
-            {(['primary', 'bg', 'fg', 'accent'] as const).map((key) => (
-              <div key={key} className="space-y-1">
-                <Label className="text-xs">{t(`landingBuilderPage.theme.${key}`)}</Label>
-                <Input
-                  value={theme.colors?.[key] ?? ''}
-                  onChange={(e) => setColor(key, e.target.value)}
-                  placeholder="#22c55e"
-                  aria-label={t(`landingBuilderPage.theme.${key}`)}
-                />
+          <>
+            <div className="grid grid-cols-2 gap-3">
+              {(['primary', 'bg', 'fg', 'accent'] as const).map((key) => (
+                <div key={key} className="space-y-1">
+                  <Label className="text-xs">{t(`landingBuilderPage.theme.${key}`)}</Label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="color"
+                      value={theme.colors?.[key] ?? '#22c55e'}
+                      onChange={(e) => setColor(key, e.target.value)}
+                      className="h-9 w-9 shrink-0 rounded border bg-transparent"
+                      aria-label={t(`landingBuilderPage.theme.${key}`)}
+                    />
+                    <Input value={theme.colors?.[key] ?? ''} onChange={(e) => setColor(key, e.target.value)} placeholder="#22c55e" />
+                  </div>
+                </div>
+              ))}
+              {contrastWarn && (
+                <p className="col-span-2 text-xs text-amber-500">{t('landingBuilderPage.theme.contrastWarning')}</p>
+              )}
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <Label className="text-xs">{t('landingBuilderPage.theme.radius', { defaultValue: 'Радиус' })}</Label>
+                <Select value={theme.radius ?? 'lg'} onValueChange={(v) => patchTheme({ radius: v as LandingConfig['theme']['radius'] })}>
+                  <SelectTrigger className="h-9"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {(['none', 'sm', 'md', 'lg', 'xl'] as const).map((r) => (
+                      <SelectItem key={r} value={r}>{r}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
-            ))}
-            {contrastWarn && (
-              <p className="col-span-2 text-xs text-amber-500">{t('landingBuilderPage.theme.contrastWarning')}</p>
-            )}
-          </div>
+              <div className="space-y-1">
+                <Label className="text-xs">{t('landingBuilderPage.theme.surface', { defaultValue: 'Стиль поверхностей' })}</Label>
+                <Select value={theme.surfaceStyle ?? 'solid'} onValueChange={(v) => patchTheme({ surfaceStyle: v as LandingSurfaceStyle })}>
+                  <SelectTrigger className="h-9"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {LANDING_SURFACE_STYLES.map((s) => (
+                      <SelectItem key={s} value={s}>{t(`landingBuilderPage.theme.surfaceStyle.${s}`, { defaultValue: s })}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+          </>
         )}
+
+        {/* Background effect — available regardless of inherit (uses brand primary as fallback). */}
+        <div className="space-y-2 rounded-md border border-border/60 p-3">
+          <Label className="text-xs font-medium">{t('landingBuilderPage.theme.background', { defaultValue: 'Фон' })}</Label>
+          <div className="flex flex-wrap gap-1.5">
+            {LANDING_BACKGROUNDS.map((bg) => (
+              <Button
+                key={bg}
+                type="button"
+                size="sm"
+                variant={(theme.background ?? 'none') === bg ? 'default' : 'outline'}
+                onClick={() => patchTheme({ background: bg as LandingBackground })}
+              >
+                {t(`landingBuilderPage.theme.backgrounds.${bg}`, { defaultValue: bg })}
+              </Button>
+            ))}
+          </div>
+          {theme.background && theme.background !== 'none' && (
+            <>
+              <div className="flex items-center gap-2 pt-1">
+                <Switch
+                  checked={theme.animateBackground !== false}
+                  onCheckedChange={(checked) => patchTheme({ animateBackground: checked })}
+                  aria-label={t('landingBuilderPage.theme.animateBackground', { defaultValue: 'Анимировать фон' })}
+                />
+                <span className="text-xs">{t('landingBuilderPage.theme.animateBackground', { defaultValue: 'Анимировать фон' })}</span>
+              </div>
+              <div className="flex items-center gap-2 pt-1">
+                {[0, 1, 2].map((i) => (
+                  <input
+                    key={i}
+                    type="color"
+                    value={bgColors[i] ?? theme.colors?.primary ?? '#22c55e'}
+                    onChange={(e) => setBgColor(i, e.target.value)}
+                    className="h-8 w-8 rounded border bg-transparent"
+                    aria-label={t('landingBuilderPage.theme.backgroundColor', { defaultValue: 'Цвет фона {{n}}', n: i + 1 })}
+                  />
+                ))}
+                <span className="text-xs text-muted-foreground">{t('landingBuilderPage.theme.backgroundColors', { defaultValue: 'Цвета эффекта' })}</span>
+              </div>
+            </>
+          )}
+        </div>
       </CardContent>
     </Card>
   )

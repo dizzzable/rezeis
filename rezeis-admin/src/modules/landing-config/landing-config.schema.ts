@@ -225,10 +225,41 @@ const footerData = z.object({
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+//  Theme / effect enums (declared before use — sectionBase references
+//  LANDING_ANIMATIONS, so these must be hoisted above the section union to
+//  avoid a temporal-dead-zone ReferenceError at module load).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Animated/static background presets — all pure-CSS, no WebGL (pre-login). */
+export const LANDING_BACKGROUNDS = [
+  'none',
+  'gradient',
+  'aurora',
+  'grid',
+  'dots',
+  'glow',
+  'mesh',
+  'noise',
+  'blobs',
+  'spotlight',
+] as const;
+/** Section/card surface style — `glass` = liquid-glass (backdrop-blur). */
+export const LANDING_SURFACE_STYLES = ['solid', 'glass', 'outline'] as const;
+/** Per-section scroll-reveal animation. */
+export const LANDING_ANIMATIONS = ['none', 'fade', 'fadeUp', 'zoom'] as const;
+
+const hexColor = z.string().regex(/^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/);
+
+// ─────────────────────────────────────────────────────────────────────────────
 //  Section discriminated union
 // ─────────────────────────────────────────────────────────────────────────────
 
-const sectionBase = { id: z.string().min(1), visible: z.boolean().default(true) };
+const sectionBase = {
+  id: z.string().min(1),
+  visible: z.boolean().default(true),
+  /// Optional scroll-reveal animation applied when the section enters view.
+  animation: z.enum(LANDING_ANIMATIONS).optional(),
+};
 
 export const sectionSchema = z.discriminatedUnion('type', [
   z.object({ ...sectionBase, type: z.literal('hero'), data: heroData }),
@@ -261,14 +292,22 @@ const themeSchema = z.object({
   inherit: z.boolean().default(true),
   colors: z
     .object({
-      primary: z.string().optional(),
-      bg: z.string().optional(),
-      fg: z.string().optional(),
-      accent: z.string().optional(),
+      primary: hexColor.optional(),
+      bg: hexColor.optional(),
+      fg: hexColor.optional(),
+      accent: hexColor.optional(),
     })
     .optional(),
   font: z.object({ family: z.string().optional(), scale: z.number().optional() }).optional(),
   radius: z.enum(['none', 'sm', 'md', 'lg', 'xl']).optional(),
+  /// Background effect rendered behind all sections (CSS-only, reduced-motion aware).
+  background: z.enum(LANDING_BACKGROUNDS).optional(),
+  /// Up to 4 hex colors driving the background effect (defaults to brand primary).
+  backgroundColors: z.array(hexColor).max(4).optional(),
+  /// Animate the background (respects prefers-reduced-motion). Default true.
+  animateBackground: z.boolean().optional(),
+  /// Card/section surface treatment applied across the landing.
+  surfaceStyle: z.enum(LANDING_SURFACE_STYLES).optional(),
 });
 
 export const landingConfigSchema = z.object({

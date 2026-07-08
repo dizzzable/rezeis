@@ -29,10 +29,34 @@ export const LANDING_SECTION_TYPES = [
 ] as const
 export type LandingSectionType = (typeof LANDING_SECTION_TYPES)[number]
 
+/** Background effect presets — mirror backend `LANDING_BACKGROUNDS`. */
+export const LANDING_BACKGROUNDS = [
+  'none',
+  'gradient',
+  'aurora',
+  'grid',
+  'dots',
+  'glow',
+  'mesh',
+  'noise',
+  'blobs',
+  'spotlight',
+] as const
+export type LandingBackground = (typeof LANDING_BACKGROUNDS)[number]
+
+/** Card/section surface treatment — mirror backend `LANDING_SURFACE_STYLES`. */
+export const LANDING_SURFACE_STYLES = ['solid', 'glass', 'outline'] as const
+export type LandingSurfaceStyle = (typeof LANDING_SURFACE_STYLES)[number]
+
+/** Per-section scroll-reveal animation — mirror backend `LANDING_ANIMATIONS`. */
+export const LANDING_ANIMATIONS = ['none', 'fade', 'fadeUp', 'zoom'] as const
+export type LandingAnimation = (typeof LANDING_ANIMATIONS)[number]
+
 export interface LandingSection {
   id: string
   type: LandingSectionType
   visible: boolean
+  animation?: LandingAnimation
   data: Record<string, unknown>
 }
 
@@ -41,6 +65,10 @@ export interface LandingTheme {
   colors?: { primary?: string; bg?: string; fg?: string; accent?: string }
   font?: { family?: string; scale?: number }
   radius?: 'none' | 'sm' | 'md' | 'lg' | 'xl'
+  background?: LandingBackground
+  backgroundColors?: string[]
+  animateBackground?: boolean
+  surfaceStyle?: LandingSurfaceStyle
 }
 
 export interface LandingConfig {
