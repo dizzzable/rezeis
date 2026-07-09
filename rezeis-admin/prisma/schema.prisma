@@ -1562,6 +1562,11 @@ model Broadcast {
   audience       BroadcastAudience @default(ALL) @map("audience")
   /// Optional plan id used by audience filters that need a plan reference.
   audiencePlanId String?           @map("audience_plan_id")
+  /// Optional structured, multi-select audience filter. When present it
+  /// SUPERSEDES the `audience` enum preset. Shape: BroadcastAudienceFilter
+  /// ({ subscription[], planIds[], inactiveDays, platforms[], contact[] }).
+  /// Additive — legacy drafts (null) keep using the enum preset.
+  audienceFilter Json?             @map("audience_filter")
   /// Optional promo-code tag (uppercased). When set, the dispatcher appends a
   /// Mini App button deep-linking the cabinet `/promo?code=<code>` page to
   /// every delivered message. Validated (exists + usable) at compose AND

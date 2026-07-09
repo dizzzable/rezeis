@@ -18,6 +18,7 @@ const messages = {
   mediaTooLong: 'media too long',
   mediaUrlInvalid: 'media url invalid',
   mediaFileIdInvalid: 'media file id invalid',
+  telegramChannelChatIdInvalid: 'telegram channel chat id invalid',
 } as const
 
 describe('broadcast form schema', () => {
@@ -138,6 +139,50 @@ describe('broadcast form schema', () => {
       expect(flattenBroadcastFormErrors(invalidFileId.error).mediaValue).toBe('media file id invalid')
     }
   })
+
+  it('forwards emailEnabled and telegramChannelChatId when set', () => {
+    const result = createBroadcastFormSchema(messages).safeParse({
+      ...validDraft(),
+      emailEnabled: true,
+      telegramChannelChatId: '  -1001234567890  ',
+    })
+
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.data.payload.emailEnabled).toBe(true)
+    expect(result.data.payload.telegramChannelChatId).toBe('-1001234567890')
+  })
+
+  it('accepts a channel @username and omits channel fields when unset', () => {
+    const withUsername = createBroadcastFormSchema(messages).safeParse({
+      ...validDraft(),
+      telegramChannelChatId: '@my_channel',
+    })
+    expect(withUsername.success).toBe(true)
+    if (withUsername.success) {
+      expect(withUsername.data.payload.telegramChannelChatId).toBe('@my_channel')
+    }
+
+    const unset = createBroadcastFormSchema(messages).safeParse(validDraft())
+    expect(unset.success).toBe(true)
+    if (unset.success) {
+      expect('emailEnabled' in unset.data.payload).toBe(false)
+      expect('telegramChannelChatId' in unset.data.payload).toBe(false)
+    }
+  })
+
+  it('rejects a malformed Telegram channel chat id', () => {
+    const result = createBroadcastFormSchema(messages).safeParse({
+      ...validDraft(),
+      telegramChannelChatId: 'not a valid chat id',
+    })
+
+    expect(result.success).toBe(false)
+    if (result.success) return
+    expect(flattenBroadcastFormErrors(result.error).telegramChannelChatId).toBe(
+      'telegram channel chat id invalid',
+    )
+  })
 })
 
 function validDraft(): BroadcastFormDraft {
@@ -149,5 +194,7 @@ function validDraft(): BroadcastFormDraft {
     mediaType: 'none',
     mediaSourceMode: 'upload',
     mediaValue: '',
+    emailEnabled: false,
+    telegramChannelChatId: '',
   }
 }

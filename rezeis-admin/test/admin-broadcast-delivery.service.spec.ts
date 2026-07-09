@@ -6,12 +6,20 @@ import { BroadcastAudience, BroadcastMessageStatus, BroadcastStatus } from '@pri
 import { BroadcastDeliveryService } from '../src/modules/broadcast/services/broadcast-delivery.service';
 
 /** Minimal BotNotifierClient stub. `messageId` is the value notifyUser resolves to. */
-function botNotifier(messageId: number | null, calls?: unknown[]): never {
+function botNotifier(
+  messageId: number | null,
+  calls?: unknown[],
+  options?: { readonly isEnabled?: boolean; readonly broadcastCalls?: unknown[] },
+): never {
   return {
     notifyUser: async (input: unknown) => {
       calls?.push(input);
       return messageId;
     },
+    notifyBroadcast: async (input: unknown) => {
+      options?.broadcastCalls?.push(input);
+    },
+    isEnabled: options?.isEnabled ?? true,
   } as never;
 }
 
@@ -26,13 +34,27 @@ describe('BroadcastDeliveryService', () => {
           findUnique: async (args: unknown) => {
             assert.deepStrictEqual(args, {
               where: { id: 'broadcast-1' },
-              select: { id: true, status: true, audience: true },
+              select: {
+                id: true,
+                status: true,
+                audience: true,
+                audienceFilter: true,
+                payload: true,
+                promoCode: true,
+              },
             });
             return {
               id: 'broadcast-1',
               status: BroadcastStatus.DRAFT,
               audience: BroadcastAudience.TRIAL,
+              audienceFilter: null,
+              payload: null,
+              promoCode: null,
             };
+          },
+          updateMany: async (args: unknown) => {
+            broadcastUpdates.push(args);
+            return { count: 1 };
           },
           update: async (args: unknown) => {
             broadcastUpdates.push(args);
@@ -82,6 +104,160 @@ describe('BroadcastDeliveryService', () => {
     ]);
     assert.equal(JSON.stringify(broadcastUpdates).includes(BroadcastStatus.PROCESSING), true);
     assert.equal(JSON.stringify(eventCalls).includes('recipientCount'), true);
+  });
+
+  it('posts once to the configured Telegram channel when staging, independent of recipient fanout', async () => {
+    const broadcastCalls: unknown[] = [];
+    const service = new BroadcastDeliveryService(
+      {
+        broadcast: {
+          findUnique: async () => ({
+            id: 'broadcast-1',
+            status: BroadcastStatus.DRAFT,
+            audience: BroadcastAudience.ALL,
+            audienceFilter: null,
+            payload: { text: 'Channel news', telegramChannelChatId: '-100123' },
+            promoCode: null,
+          }),
+          updateMany: async () => ({ count: 1 }),
+          update: async () => undefined,
+        },
+        user: {
+          findMany: async () => [{ id: 'user-1' }],
+        },
+        broadcastMessage: {
+          createMany: async () => undefined,
+          findMany: async () => [{ id: 'message-1' }],
+        },
+      } as never,
+      configService('bot-token'),
+      { info: () => undefined } as never,
+      { create: async () => 'evt' } as never,
+      { getDecryptedBotToken: async () => null } as never,
+      botNotifier(null, undefined, { isEnabled: true, broadcastCalls }),
+    );
+
+    await service.stageRecipients('broadcast-1');
+
+    assert.equal(broadcastCalls.length, 1);
+    const call = broadcastCalls[0] as { readonly chatId: string; readonly text: string };
+    assert.equal(call.chatId, '-100123');
+    assert.equal(call.text.includes('Channel news'), true);
+  });
+
+  it('skips the channel post silently when the reiwa relay is disabled', async () => {
+    const broadcastCalls: unknown[] = [];
+    const service = new BroadcastDeliveryService(
+      {
+        broadcast: {
+          findUnique: async () => ({
+            id: 'broadcast-1',
+            status: BroadcastStatus.DRAFT,
+            audience: BroadcastAudience.ALL,
+            audienceFilter: null,
+            payload: { text: 'Channel news', telegramChannelChatId: '-100123' },
+            promoCode: null,
+          }),
+          updateMany: async () => ({ count: 1 }),
+          update: async () => undefined,
+        },
+        user: { findMany: async () => [] },
+        broadcastMessage: { createMany: async () => undefined, findMany: async () => [] },
+      } as never,
+      configService('bot-token'),
+      { info: () => undefined } as never,
+      { create: async () => 'evt' } as never,
+      { getDecryptedBotToken: async () => null } as never,
+      botNotifier(null, undefined, { isEnabled: false, broadcastCalls }),
+    );
+
+    await service.stageRecipients('broadcast-1');
+
+    assert.equal(broadcastCalls.length, 0);
+  });
+
+  it('no-ops staging (no channel post, no rows) when the atomic claim is lost to a retry', async () => {
+    const broadcastCalls: unknown[] = [];
+    const createManyCalls: unknown[] = [];
+    const service = new BroadcastDeliveryService(
+      {
+        broadcast: {
+          findUnique: async () => ({
+            id: 'broadcast-1',
+            status: BroadcastStatus.DRAFT,
+            audience: BroadcastAudience.ALL,
+            audienceFilter: null,
+            payload: { text: 'Channel news', telegramChannelChatId: '-100123' },
+            promoCode: null,
+          }),
+          // Claim lost (another attempt already flipped DRAFT→PROCESSING).
+          updateMany: async () => ({ count: 0 }),
+          update: async () => undefined,
+        },
+        user: { findMany: async () => [{ id: 'user-1' }] },
+        broadcastMessage: {
+          createMany: async (args: unknown) => {
+            createManyCalls.push(args);
+          },
+          findMany: async () => [{ id: 'message-1' }],
+        },
+      } as never,
+      configService('bot-token'),
+      { info: () => undefined } as never,
+      { create: async () => 'evt' } as never,
+      { getDecryptedBotToken: async () => null } as never,
+      botNotifier(null, undefined, { isEnabled: true, broadcastCalls }),
+    );
+
+    assert.deepStrictEqual(await service.stageRecipients('broadcast-1'), []);
+    // Neither a channel post nor recipient rows on a lost claim.
+    assert.equal(broadcastCalls.length, 0);
+    assert.equal(createManyCalls.length, 0);
+  });
+
+  it('marks the broadcast FAILED (never stuck PROCESSING) when staging throws after the claim', async () => {
+    const broadcastUpdates: unknown[] = [];
+    const service = new BroadcastDeliveryService(
+      {
+        broadcast: {
+          findUnique: async () => ({
+            id: 'broadcast-1',
+            status: BroadcastStatus.DRAFT,
+            audience: BroadcastAudience.ALL,
+            audienceFilter: null,
+            payload: { text: 'News' },
+            promoCode: null,
+          }),
+          updateMany: async () => ({ count: 1 }),
+          update: async (args: unknown) => {
+            broadcastUpdates.push(args);
+          },
+        },
+        // resolveRecipients throws → post-claim failure path.
+        user: {
+          findMany: async () => {
+            throw new Error('db down');
+          },
+        },
+        broadcastMessage: {
+          createMany: async () => undefined,
+          findMany: async () => [],
+        },
+      } as never,
+      configService('bot-token'),
+      { info: () => undefined } as never,
+      { create: async () => 'evt' } as never,
+      { getDecryptedBotToken: async () => null } as never,
+      botNotifier(null, undefined, { isEnabled: false }),
+    );
+
+    assert.deepStrictEqual(await service.stageRecipients('broadcast-1'), []);
+    // The catch path set a terminal FAILED status (no stuck PROCESSING).
+    const failedWrite = broadcastUpdates.find((u) => {
+      const data = (u as { data?: { status?: string } }).data;
+      return data?.status === BroadcastStatus.FAILED;
+    });
+    assert.notEqual(failedWrite, undefined);
   });
 
   it('delivers text broadcasts via the reiwa bot and persists the returned message id', async () => {
@@ -219,6 +395,107 @@ describe('BroadcastDeliveryService', () => {
     assert.equal(createCalls.length, 1);
     const update = messageUpdates[0] as { readonly data: { readonly status: BroadcastMessageStatus } };
     assert.equal(update.data.status, BroadcastMessageStatus.SENT);
+  });
+
+  it('emails recipients with an address when emailEnabled is set, without affecting SENT/FAILED outcome', async () => {
+    const messageUpdates: unknown[] = [];
+    const emailCalls: unknown[] = [];
+    const service = new BroadcastDeliveryService(
+      {
+        broadcast: {
+          findUnique: async (args: { readonly select?: { readonly payload?: boolean } }) => {
+            if (args.select?.payload) {
+              return {
+                id: 'broadcast-1',
+                status: BroadcastStatus.PROCESSING,
+                payload: { title: 'Hi', text: 'Hello user', mediaType: 'none', emailEnabled: true },
+              };
+            }
+            return { status: BroadcastStatus.PROCESSING };
+          },
+          update: async () => undefined,
+        },
+        broadcastMessage: {
+          findMany: async () => [{ id: 'message-1', userId: 'user-1' }],
+          update: async (args: unknown) => {
+            messageUpdates.push(args);
+          },
+          count: async (args: { readonly where: { readonly status: BroadcastMessageStatus } }) => {
+            if (args.where.status === BroadcastMessageStatus.PENDING) return 0;
+            if (args.where.status === BroadcastMessageStatus.SENT) return 1;
+            return 0;
+          },
+        },
+        user: {
+          findUnique: async () => ({ telegramId: null, email: '[email protected]' }),
+        },
+      } as never,
+      configService('bot-token'),
+      { info: () => undefined } as never,
+      { create: async () => 'evt' } as never,
+      { getDecryptedBotToken: async () => null } as never,
+      botNotifier(null),
+      undefined,
+      {
+        send: async (input: unknown) => {
+          emailCalls.push(input);
+        },
+      } as never,
+    );
+
+    assert.deepStrictEqual(await service.deliverBatch('broadcast-1', ['message-1']), {
+      sent: 1,
+      failed: 0,
+    });
+    assert.equal(emailCalls.length, 1);
+    const email = emailCalls[0] as { readonly to: string; readonly subject: string };
+    assert.equal(email.to, '[email protected]');
+    assert.equal(email.subject, 'Hi');
+    const update = messageUpdates[0] as { readonly data: { readonly status: BroadcastMessageStatus } };
+    assert.equal(update.data.status, BroadcastMessageStatus.SENT);
+  });
+
+  it('skips email delivery when emailEnabled is unset, even with an address on file', async () => {
+    const emailCalls: unknown[] = [];
+    const service = new BroadcastDeliveryService(
+      {
+        broadcast: {
+          findUnique: async (args: { readonly select?: { readonly payload?: boolean } }) => {
+            if (args.select?.payload) {
+              return {
+                id: 'broadcast-1',
+                status: BroadcastStatus.PROCESSING,
+                payload: { text: 'Hello user', mediaType: 'none' },
+              };
+            }
+            return { status: BroadcastStatus.PROCESSING };
+          },
+          update: async () => undefined,
+        },
+        broadcastMessage: {
+          findMany: async () => [{ id: 'message-1', userId: 'user-1' }],
+          update: async () => undefined,
+          count: async () => 0,
+        },
+        user: {
+          findUnique: async () => ({ telegramId: null, email: '[email protected]' }),
+        },
+      } as never,
+      configService('bot-token'),
+      { info: () => undefined } as never,
+      { create: async () => 'evt' } as never,
+      { getDecryptedBotToken: async () => null } as never,
+      botNotifier(null),
+      undefined,
+      {
+        send: async (input: unknown) => {
+          emailCalls.push(input);
+        },
+      } as never,
+    );
+
+    await service.deliverBatch('broadcast-1', ['message-1']);
+    assert.equal(emailCalls.length, 0);
   });
 
   it('sanitizes Telegram provider failures on the media path before persisting errors', async () => {

@@ -1,5 +1,5 @@
 import { Injectable, Logger, Optional } from '@nestjs/common';
-import { BroadcastMessageStatus, BroadcastStatus, Prisma } from '@prisma/client';
+import { BroadcastAudience, BroadcastMessageStatus, BroadcastStatus, Prisma } from '@prisma/client';
 import { ConfigService } from '@nestjs/config';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
@@ -8,8 +8,10 @@ import { UserNotificationsService } from '../../notifications/services/user-noti
 import { BotNotifierClient } from '../../notifications/services/bot-notifier.client';
 import { SettingsService } from '../../settings/services/settings.service';
 import { CustomEmojiService } from '../../custom-emoji/services/custom-emoji.service';
+import { EmailDeliveryService } from '../../email/services/email-delivery.service';
 import { TELEGRAM_RATE_LIMIT_MS, BROADCAST_PROMO_BUTTON_LABEL } from '../broadcast.constants';
 import { buildPromoButton } from '../utils/broadcast-promo.util';
+import { buildAudienceWhere, normalizeAudienceFilter } from '../utils/broadcast-audience.util';
 
 /**
  * Broadcast delivery service — handles staging, sending, editing, deleting,
@@ -31,6 +33,8 @@ export class BroadcastDeliveryService {
     private readonly botNotifier: BotNotifierClient,
     @Optional()
     private readonly customEmojiService?: CustomEmojiService,
+    @Optional()
+    private readonly emailDeliveryService?: EmailDeliveryService,
   ) {}
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -120,7 +124,14 @@ export class BroadcastDeliveryService {
   public async stageRecipients(broadcastId: string): Promise<string[]> {
     const broadcast = await this.prismaService.broadcast.findUnique({
       where: { id: broadcastId },
-      select: { id: true, status: true, audience: true },
+      select: {
+        id: true,
+        status: true,
+        audience: true,
+        audienceFilter: true,
+        payload: true,
+        promoCode: true,
+      },
     });
     if (broadcast === null) {
       this.logger.warn(`Broadcast ${broadcastId} not found`);
@@ -131,42 +142,91 @@ export class BroadcastDeliveryService {
       return [];
     }
 
-    const recipientUserIds = await this.resolveRecipients(broadcast.audience);
-    if (recipientUserIds.length === 0) {
-      await this.prismaService.broadcast.update({
-        where: { id: broadcastId },
-        data: { status: BroadcastStatus.COMPLETED, totalCount: 0, startedAt: new Date(), completedAt: new Date() },
-      });
+    // Atomically CLAIM the broadcast (DRAFT → PROCESSING) before doing any
+    // side-effecting work. The start job runs with attempts:3, so a throw after
+    // the channel post but before the status flip would otherwise let a retry
+    // re-enter staging (status still DRAFT) and DOUBLE-post the channel /
+    // duplicate recipient rows. Winning the claim (count === 1) guarantees this
+    // body runs at most once; a retry sees PROCESSING and no-ops.
+    const claim = await this.prismaService.broadcast.updateMany({
+      where: { id: broadcastId, status: BroadcastStatus.DRAFT },
+      data: { status: BroadcastStatus.PROCESSING, startedAt: new Date() },
+    });
+    if (claim.count === 0) {
+      this.logger.warn(
+        `Broadcast ${broadcastId} already claimed (concurrent send or retry) — skipping stage`,
+      );
       return [];
     }
 
-    await this.prismaService.broadcastMessage.createMany({
-      data: recipientUserIds.map((userId) => ({
-        broadcastId,
-        userId,
-        status: BroadcastMessageStatus.PENDING,
-      })),
-    });
+    // We now own the broadcast (status is PROCESSING). Any throw past this
+    // point would otherwise leave it stuck in PROCESSING forever — a retry
+    // no-ops on the claim. Wrap the side-effecting body so a failure is a
+    // clean terminal FAILED instead of a silent stuck state.
+    try {
+      // Additive channel: a ONE-SHOT post to an operator-configured Telegram
+      // channel/group, independent of (and in addition to) the per-recipient
+      // fanout below. Fire-and-forget — a channel post failure never blocks
+      // recipient delivery. Runs once (guarded by the atomic claim above).
+      await this.postToChannelIfConfigured(broadcastId, broadcast.payload, broadcast.promoCode);
 
-    const messages = await this.prismaService.broadcastMessage.findMany({
-      where: { broadcastId, status: BroadcastMessageStatus.PENDING },
-      select: { id: true },
-      orderBy: { createdAt: 'asc' },
-    });
+      const recipientUserIds = await this.resolveRecipients(
+        broadcast.audience,
+        broadcast.audienceFilter,
+      );
+      if (recipientUserIds.length === 0) {
+        await this.prismaService.broadcast.update({
+          where: { id: broadcastId },
+          data: { status: BroadcastStatus.COMPLETED, totalCount: 0, completedAt: new Date() },
+        });
+        return [];
+      }
 
-    await this.prismaService.broadcast.update({
-      where: { id: broadcastId },
-      data: { status: BroadcastStatus.PROCESSING, totalCount: recipientUserIds.length, startedAt: new Date() },
-    });
+      await this.prismaService.broadcastMessage.createMany({
+        data: recipientUserIds.map((userId) => ({
+          broadcastId,
+          userId,
+          status: BroadcastMessageStatus.PENDING,
+        })),
+      });
 
-    this.systemEventsService.info(
-      EVENT_TYPES.SYSTEM_BROADCAST_SENT,
-      'SYSTEM',
-      `Broadcast staging: ${messages.length} recipients`,
-      { broadcastId, recipientCount: messages.length },
-    );
+      const messages = await this.prismaService.broadcastMessage.findMany({
+        where: { broadcastId, status: BroadcastMessageStatus.PENDING },
+        select: { id: true },
+        orderBy: { createdAt: 'asc' },
+      });
 
-    return messages.map((m) => m.id);
+      // Status is already PROCESSING and startedAt is set (atomic claim above);
+      // here we only record the resolved recipient total.
+      await this.prismaService.broadcast.update({
+        where: { id: broadcastId },
+        data: { totalCount: recipientUserIds.length },
+      });
+
+      this.systemEventsService.info(
+        EVENT_TYPES.SYSTEM_BROADCAST_SENT,
+        'SYSTEM',
+        `Broadcast staging: ${messages.length} recipients`,
+        { broadcastId, recipientCount: messages.length },
+      );
+
+      return messages.map((m) => m.id);
+    } catch (err: unknown) {
+      this.logger.error(
+        `Broadcast ${broadcastId} staging failed after claim: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      // Terminal FAILED so the broadcast never hangs in PROCESSING; a start-job
+      // retry then no-ops on the claim (status is no longer DRAFT).
+      await this.prismaService.broadcast
+        .update({
+          where: { id: broadcastId },
+          data: { status: BroadcastStatus.FAILED, completedAt: new Date() },
+        })
+        .catch(() => undefined);
+      return [];
+    }
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -208,6 +268,7 @@ export class BroadcastDeliveryService {
     const mediaType = payload?.mediaType as string | undefined;
     const mediaFileId = typeof payload?.mediaFileId === 'string' ? payload.mediaFileId : null;
     const parseMode = (payload?.parseMode as string) ?? undefined;
+    const emailEnabled = payload?.emailEnabled === true;
 
     if (!text && !mediaFileId) {
       await this.failBatch(messageIds, 'Empty broadcast: no text and no media');
@@ -248,12 +309,34 @@ export class BroadcastDeliveryService {
     for (const message of messages) {
       const user = await this.prismaService.user.findUnique({
         where: { id: message.userId },
-        select: { telegramId: true },
+        select: { telegramId: true, email: true },
       });
       if (!user) {
         await this.markFailed(message.id, 'User not found');
         failed++;
         continue;
+      }
+
+      // Additive channel: email. Best-effort, fire-and-forget — never
+      // affects the SENT/FAILED outcome of the message (the app fanout below
+      // is the channel that decides that). Skips silently when the user has
+      // no email on file or SMTP delivery isn't wired.
+      if (emailEnabled && user.email && this.emailDeliveryService) {
+        try {
+          await this.emailDeliveryService.send({
+            to: user.email,
+            subject: title?.trim() || 'Уведомление',
+            templateType: '__broadcast__',
+            variables: {},
+            rawHtml: renderBroadcastEmailHtml(title, text),
+          });
+        } catch (err: unknown) {
+          this.logger.warn(
+            `Broadcast email failed for ${message.userId}: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
       }
 
       // Deliver via the notification fanout: cabinet feed (always) + web-push
@@ -735,33 +818,71 @@ export class BroadcastDeliveryService {
     }
   }
 
-  private async resolveRecipients(audience: string): Promise<string[]> {
-    // Web-only users (no Telegram) are intentionally included now — broadcasts
-    // reach them via web-push + the in-cabinet feed. `isBotBlocked` only
-    // affects Telegram delivery; it does not exclude web-only users (whose
-    // flag stays false).
-    const where: Record<string, unknown> = {
-      isBlocked: false,
-    };
-
-    switch (audience) {
-      case 'ACTIVE_SUBSCRIBERS':
-        where.subscriptions = { some: { status: 'ACTIVE' } };
-        break;
-      case 'EXPIRED':
-        where.subscriptions = { some: { status: 'EXPIRED' } };
-        where.NOT = { subscriptions: { some: { status: 'ACTIVE' } } };
-        break;
-      case 'TRIAL':
-        where.subscriptions = { some: { isTrial: true, status: 'ACTIVE' } };
-        break;
-      case 'UNSUBSCRIBED':
-        where.subscriptions = { none: {} };
-        break;
+  /**
+   * Additive channel: post the broadcast ONCE to an operator-configured
+   * Telegram channel/group (`payload.telegramChannelChatId`), via the reiwa
+   * relay (`BotNotifierClient.notifyBroadcast` → `reiwa.channel.broadcast`).
+   * No-op when unconfigured or when the relay is disabled. Never throws —
+   * best-effort, and failure here must never block staging recipients.
+   */
+  private async postToChannelIfConfigured(
+    broadcastId: string,
+    rawPayload: Prisma.JsonValue,
+    promoCode: string | null,
+  ): Promise<void> {
+    const payload = rawPayload as Record<string, unknown> | null;
+    const chatId =
+      typeof payload?.telegramChannelChatId === 'string'
+        ? payload.telegramChannelChatId.trim()
+        : '';
+    if (chatId.length === 0) return;
+    if (!this.botNotifier.isEnabled) {
+      this.logger.warn(
+        `Broadcast ${broadcastId}: telegramChannelChatId set but the reiwa relay is disabled`,
+      );
+      return;
     }
 
+    try {
+      // Compose INSIDE the try — substituteTelegramHtml/buildPromoButton can
+      // throw, and this method must never propagate (its failure must not abort
+      // recipient staging).
+      const title = typeof payload?.title === 'string' ? payload.title : null;
+      const text = typeof payload?.text === 'string' ? payload.text : '';
+      const composed = await this.composeTelegram(title, text, true);
+      const promoButton =
+        promoCode && promoCode.length > 0
+          ? buildPromoButton(promoCode, BROADCAST_PROMO_BUTTON_LABEL)
+          : null;
+      await this.botNotifier.notifyBroadcast({
+        eventId: `broadcast-channel:${broadcastId}`,
+        chatId,
+        text: composed || ' ',
+        parseMode: 'HTML',
+        buttons: promoButton ? [promoButton] : undefined,
+      });
+      this.logger.log(`Broadcast ${broadcastId}: posted to channel ${chatId}`);
+    } catch (err: unknown) {
+      this.logger.warn(
+        `Broadcast ${broadcastId}: channel post to ${chatId} failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
+  private async resolveRecipients(
+    audience: BroadcastAudience,
+    audienceFilter: Prisma.JsonValue | null,
+  ): Promise<string[]> {
+    // Single shared where-builder (SAME as the audience-count preview) so the
+    // recipients actually staged always match the previewed count — the two
+    // used to diverge. Web-only users (no Telegram) are intentionally included:
+    // broadcasts reach them via web-push + the in-cabinet feed. A structured
+    // `audienceFilter` supersedes the `audience` enum preset when present.
+    const where = buildAudienceWhere(audience, normalizeAudienceFilter(audienceFilter));
     const users = await this.prismaService.user.findMany({
-      where: where as Prisma.UserWhereInput,
+      where,
       select: { id: true },
     });
     return users.map((u) => u.id);
@@ -770,6 +891,25 @@ export class BroadcastDeliveryService {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Render the raw HTML body for a broadcast email. Plain text: the operator
+ * composes for Telegram (HTML tags / custom-emoji shortcodes), so the email
+ * body escapes the text and only preserves line breaks — no `:slug:` or
+ * Telegram-only markup leaks into the inbox. Wrapped in the branded layout by
+ * `EmailTemplateRendererService` when `rawHtml` is passed to `send()`.
+ */
+function renderBroadcastEmailHtml(title: string | null, text: string): string {
+  const escape = (value: string): string =>
+    value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const trimmedTitle = title?.trim() ?? '';
+  const bodyHtml = escape(text).replace(/\n/g, '<br>');
+  const headingHtml =
+    trimmedTitle.length > 0
+      ? `<h2 style="margin:0 0 16px 0;color:#111827;font-size:20px;">${escape(trimmedTitle)}</h2>`
+      : '';
+  return `${headingHtml}<div style="color:#374151;font-size:15px;line-height:1.6;">${bodyHtml}</div>`;
 }
 
 function sanitizeTelegramDiagnostic(

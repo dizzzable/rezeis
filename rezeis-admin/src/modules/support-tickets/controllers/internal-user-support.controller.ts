@@ -4,9 +4,13 @@ import {
   Controller,
   ForbiddenException,
   Get,
+  Header,
+  HttpException,
+  HttpStatus,
   NotFoundException,
   Param,
   Post,
+  StreamableFile,
   UseGuards,
 } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
@@ -19,6 +23,7 @@ import {
 } from '../../../common/services/system-events.service';
 import { InternalAdminAuthGuard } from '../../auth/guards/internal-admin-auth.guard';
 import { buildUserReferenceWhere } from '../../internal-user/utils/user-reference.util';
+import { SupportAttachmentService } from '../services/support-attachment.service';
 import { SupportTicketsService } from '../services/support-tickets.service';
 
 /**
@@ -42,6 +47,7 @@ export class InternalUserSupportController {
   public constructor(
     private readonly prismaService: PrismaService,
     private readonly supportTicketsService: SupportTicketsService,
+    private readonly supportAttachments: SupportAttachmentService,
     private readonly systemEvents: SystemEventsService,
   ) {}
 
@@ -83,6 +89,31 @@ export class InternalUserSupportController {
       // swallow — read view must still render even if the mark-read fails
     }
     return serializeTicket(ticket);
+  }
+
+  @Get(':userRef/tickets/:ticketId/attachments/:attachmentId')
+  @Header('Cache-Control', 'private, no-store')
+  @ApiOperation({ summary: 'Stream an attachment from the user\'s own ticket' })
+  public async downloadAttachment(
+    @Param('userRef') userRef: string,
+    @Param('ticketId') ticketId: string,
+    @Param('attachmentId') attachmentId: string,
+  ): Promise<StreamableFile> {
+    const userId = await this.resolveUserId(userRef);
+    const ticket = await this.supportTicketsService.getById(ticketId);
+    // Ownership gate: a user may only stream attachments from their own ticket.
+    if (ticket.userId !== userId) {
+      throw new HttpException('Attachment not found', HttpStatus.NOT_FOUND);
+    }
+    const file = await this.supportAttachments.streamForTicket(ticketId, attachmentId);
+    if (file === null) {
+      throw new HttpException('Attachment not found', HttpStatus.NOT_FOUND);
+    }
+    return new StreamableFile(file.stream, {
+      type: file.mimeType,
+      length: file.sizeBytes,
+      disposition: `inline; filename="${encodeURIComponent(file.filename)}"`,
+    });
   }
 
   @Post(':userRef/tickets')
@@ -158,11 +189,20 @@ export class InternalUserSupportController {
 
 // ── Serialization (DB enums UPPERCASE → SPA lowercase) ──────────────────────
 
+interface SerializedAttachment {
+  readonly id: string;
+  readonly filename: string;
+  readonly mimeType: string;
+  readonly sizeBytes: number;
+  readonly createdAt: string;
+}
+
 interface SerializedTicketMessage {
   readonly id: string;
   readonly authorType: string;
   readonly content: string;
   readonly createdAt: string;
+  readonly attachments: readonly SerializedAttachment[];
 }
 
 interface SerializedTicket {
@@ -174,7 +214,19 @@ interface SerializedTicket {
   readonly messages: readonly SerializedTicketMessage[];
 }
 
-type TicketWithMessages = SupportTicket & { messages?: SupportTicketMessage[] };
+interface AttachmentRow {
+  readonly id: string;
+  readonly filename: string;
+  readonly mimeType: string;
+  readonly sizeBytes: number;
+  readonly createdAt: Date;
+}
+
+type MessageWithAttachments = SupportTicketMessage & {
+  readonly attachments?: readonly AttachmentRow[];
+};
+
+type TicketWithMessages = SupportTicket & { messages?: MessageWithAttachments[] };
 
 function serializeTicket(ticket: TicketWithMessages): SerializedTicket {
   return {
@@ -188,6 +240,16 @@ function serializeTicket(ticket: TicketWithMessages): SerializedTicket {
       authorType: message.authorType.toLowerCase(),
       content: message.content,
       createdAt: message.createdAt.toISOString(),
+      // Recipient parity: the cabinet now receives attachment metadata so an
+      // attachment-only reply from an operator renders as a file/image instead
+      // of an empty bubble. The binary is fetched via the streaming endpoint.
+      attachments: (message.attachments ?? []).map((a) => ({
+        id: a.id,
+        filename: a.filename,
+        mimeType: a.mimeType,
+        sizeBytes: a.sizeBytes,
+        createdAt: a.createdAt.toISOString(),
+      })),
     })),
   };
 }

@@ -12,6 +12,8 @@ export interface BroadcastFormDraft {
   readonly mediaType: 'none' | 'photo' | 'video'
   readonly mediaSourceMode: 'upload' | 'url' | 'fileId'
   readonly mediaValue: string
+  readonly emailEnabled: boolean
+  readonly telegramChannelChatId: string
 }
 
 export interface BroadcastCreateRequest {
@@ -22,6 +24,8 @@ export interface BroadcastCreateRequest {
     readonly text?: string
     readonly mediaType: 'none' | 'photo' | 'video'
     readonly mediaFileId?: string
+    readonly emailEnabled?: boolean
+    readonly telegramChannelChatId?: string
   }
 }
 
@@ -37,9 +41,13 @@ export interface BroadcastFormValidationMessages {
   readonly mediaTooLong: string
   readonly mediaUrlInvalid: string
   readonly mediaFileIdInvalid: string
+  readonly telegramChannelChatIdInvalid: string
 }
 
 const PROMO_CODE_PATTERN = /^[A-Z0-9._-]+$/
+// Telegram chat ids: numeric (incl. negative supergroup/channel ids like
+// -1001234567890) or an @username (5-32 chars, letters/digits/underscore).
+const TELEGRAM_CHAT_ID_PATTERN = /^(-?\d+|@[A-Za-z0-9_]{5,32})$/
 
 export function createBroadcastFormSchema(messages: BroadcastFormValidationMessages) {
   return z
@@ -51,6 +59,8 @@ export function createBroadcastFormSchema(messages: BroadcastFormValidationMessa
       mediaType: z.enum(BROADCAST_MEDIA_TYPES, { error: messages.mediaTypeInvalid }),
       mediaSourceMode: z.enum(BROADCAST_MEDIA_SOURCE_MODES),
       mediaValue: z.string().trim().max(256, messages.mediaTooLong),
+      emailEnabled: z.boolean(),
+      telegramChannelChatId: z.string().trim().max(64),
     })
     .superRefine((values, ctx) => {
       const hasText = values.text.trim().length > 0
@@ -58,6 +68,15 @@ export function createBroadcastFormSchema(messages: BroadcastFormValidationMessa
       const promo = values.promoCode.trim().toUpperCase()
       if (promo.length > 0 && !PROMO_CODE_PATTERN.test(promo)) {
         ctx.addIssue({ code: 'custom', path: ['promoCode'], message: messages.promoCodeInvalid })
+      }
+
+      const channelChatId = values.telegramChannelChatId.trim()
+      if (channelChatId.length > 0 && !TELEGRAM_CHAT_ID_PATTERN.test(channelChatId)) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['telegramChannelChatId'],
+          message: messages.telegramChannelChatIdInvalid,
+        })
       }
 
       if (values.mediaType === 'none') {
@@ -89,11 +108,14 @@ export function createBroadcastFormSchema(messages: BroadcastFormValidationMessa
       const text = values.text.trim()
       const promoCode = values.promoCode.trim().toUpperCase()
       const mediaValue = values.mediaValue.trim()
+      const channelChatId = values.telegramChannelChatId.trim()
       const payload: BroadcastCreateRequest['payload'] = {
         mediaType: values.mediaType,
         ...(title ? { title } : {}),
         ...(text ? { text } : {}),
         ...(values.mediaType !== 'none' ? { mediaFileId: mediaValue } : {}),
+        ...(values.emailEnabled ? { emailEnabled: true } : {}),
+        ...(channelChatId ? { telegramChannelChatId: channelChatId } : {}),
       }
 
       return {

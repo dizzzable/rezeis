@@ -4,8 +4,12 @@ import {
   BroadcastAudience,
   BroadcastStatus,
   Prisma,
-  SubscriptionStatus,
 } from '@prisma/client';
+
+import {
+  buildAudienceWhere,
+  normalizeAudienceFilter,
+} from '../utils/broadcast-audience.util';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.interface';
@@ -62,6 +66,9 @@ export class BroadcastService {
         promoCode: promoCode ?? null,
         payload: payloadDtoToJson(input.dto.payload),
         createdBy: input.currentAdmin.id,
+        ...(input.dto.audienceFilter !== undefined
+          ? { audienceFilter: input.dto.audienceFilter as unknown as Prisma.InputJsonValue }
+          : {}),
       },
     });
     return mapBroadcast(created);
@@ -90,6 +97,9 @@ export class BroadcastService {
     };
     if (input.dto.promoCode !== undefined) {
       data.promoCode = await this.resolvePromoCodeForSave(input.dto.promoCode);
+    }
+    if (input.dto.audienceFilter !== undefined) {
+      data.audienceFilter = input.dto.audienceFilter as unknown as Prisma.InputJsonValue;
     }
     if (input.dto.payload !== undefined) {
       data.payload = mergePayload(existing.payload, input.dto.payload);
@@ -266,73 +276,40 @@ export class BroadcastService {
   ): Promise<BroadcastAudiencePreviewInterface> {
     const broadcast = await this.prismaService.broadcast.findUnique({
       where: { id: broadcastId },
-      select: { id: true, audience: true, audiencePlanId: true },
+      select: { id: true, audience: true, audiencePlanId: true, audienceFilter: true },
     });
     if (broadcast === null) {
       throw new NotFoundException('Broadcast not found');
     }
     const totalRecipients = await this.countAudience({
       audience: broadcast.audience,
-      audiencePlanId: broadcast.audiencePlanId,
+      audienceFilter: broadcast.audienceFilter,
     });
     return {
       audience: broadcast.audience,
       audiencePlanId: broadcast.audiencePlanId,
+      audienceFilter: normalizeAudienceFilter(broadcast.audienceFilter),
       totalRecipients,
       generatedAt: new Date().toISOString(),
     };
   }
 
+  /**
+   * Count the recipients an audience resolves to. Uses the SAME shared
+   * where-builder as delivery (`resolveRecipients`), so the preview count
+   * always matches who is actually reached — the two used to diverge (preview
+   * counted Telegram-only, delivery included web users). A structured
+   * `audienceFilter` supersedes the `audience` enum preset when present.
+   */
   private async countAudience(input: {
     readonly audience: BroadcastAudience;
-    readonly audiencePlanId: string | null;
+    readonly audienceFilter: Prisma.JsonValue | null;
   }): Promise<number> {
-    const baseUserWhere: Prisma.UserWhereInput = {
-      isBlocked: false,
-      isBotBlocked: false,
-      telegramId: { not: null },
-    };
-    switch (input.audience) {
-      case BroadcastAudience.ALL:
-        return this.prismaService.user.count({ where: baseUserWhere });
-      case BroadcastAudience.ACTIVE_SUBSCRIBERS:
-        return this.prismaService.user.count({
-          where: {
-            ...baseUserWhere,
-            subscriptions: {
-              some: { status: SubscriptionStatus.ACTIVE },
-            },
-          },
-        });
-      case BroadcastAudience.EXPIRED:
-        return this.prismaService.user.count({
-          where: {
-            ...baseUserWhere,
-            subscriptions: {
-              some: { status: SubscriptionStatus.EXPIRED },
-            },
-            NOT: {
-              subscriptions: { some: { status: SubscriptionStatus.ACTIVE } },
-            },
-          },
-        });
-      case BroadcastAudience.TRIAL:
-        return this.prismaService.user.count({
-          where: {
-            ...baseUserWhere,
-            subscriptions: { some: { isTrial: true, status: SubscriptionStatus.ACTIVE } },
-          },
-        });
-      case BroadcastAudience.UNSUBSCRIBED:
-        return this.prismaService.user.count({
-          where: {
-            ...baseUserWhere,
-            subscriptions: { none: {} },
-          },
-        });
-      default:
-        return 0;
-    }
+    const where = buildAudienceWhere(
+      input.audience,
+      normalizeAudienceFilter(input.audienceFilter),
+    );
+    return this.prismaService.user.count({ where });
   }
 }
 
@@ -358,6 +335,8 @@ function payloadDtoToJson(
     mediaType: payload?.mediaType ?? 'none',
     mediaFileId: payload?.mediaFileId ?? null,
     parseMode: payload?.parseMode ?? null,
+    emailEnabled: payload?.emailEnabled ?? false,
+    telegramChannelChatId: payload?.telegramChannelChatId ?? null,
   };
 }
 
@@ -374,6 +353,10 @@ function mergePayload(
   if (patch.mediaType !== undefined) base.mediaType = patch.mediaType;
   if (patch.mediaFileId !== undefined) base.mediaFileId = patch.mediaFileId;
   if (patch.parseMode !== undefined) base.parseMode = patch.parseMode;
+  if (patch.emailEnabled !== undefined) base.emailEnabled = patch.emailEnabled;
+  if (patch.telegramChannelChatId !== undefined) {
+    base.telegramChannelChatId = patch.telegramChannelChatId;
+  }
   return base as Prisma.InputJsonObject;
 }
 
@@ -383,6 +366,7 @@ function mapBroadcast(record: Broadcast): BroadcastInterface {
     status: record.status,
     audience: record.audience,
     audiencePlanId: record.audiencePlanId,
+    audienceFilter: normalizeAudienceFilter(record.audienceFilter),
     promoCode: record.promoCode,
     payload: readPayload(record.payload),
     totalCount: record.totalCount,
@@ -404,6 +388,8 @@ function readPayload(value: Prisma.JsonValue): BroadcastPayloadInterface {
       mediaType: 'none',
       mediaFileId: null,
       parseMode: null,
+      emailEnabled: false,
+      telegramChannelChatId: null,
     };
   }
   const candidate = value as Record<string, unknown>;
@@ -414,6 +400,12 @@ function readPayload(value: Prisma.JsonValue): BroadcastPayloadInterface {
     mediaFileId:
       typeof candidate.mediaFileId === 'string' ? candidate.mediaFileId : null,
     parseMode: readParseMode(candidate.parseMode),
+    emailEnabled: candidate.emailEnabled === true,
+    telegramChannelChatId:
+      typeof candidate.telegramChannelChatId === 'string' &&
+      candidate.telegramChannelChatId.trim().length > 0
+        ? candidate.telegramChannelChatId.trim()
+        : null,
   };
 }
 

@@ -50,6 +50,7 @@ describe('BroadcastService', () => {
         status: BroadcastStatus.PROCESSING,
         audience: BroadcastAudience.ACTIVE_SUBSCRIBERS,
         audiencePlanId: 'plan-1',
+        audienceFilter: null,
         promoCode: null,
         payload: {
           title: null,
@@ -57,6 +58,8 @@ describe('BroadcastService', () => {
           mediaType: 'photo',
           mediaFileId: 'telegram-file-id',
           parseMode: 'HTML',
+          emailEnabled: false,
+          telegramChannelChatId: null,
         },
         totalCount: 5,
         successCount: 2,
@@ -115,6 +118,8 @@ describe('BroadcastService', () => {
             mediaType: 'video',
             mediaFileId: 'video-file-id',
             parseMode: 'MarkdownV2',
+            emailEnabled: false,
+            telegramChannelChatId: null,
           },
           createdBy: 'admin-1',
         },
@@ -127,6 +132,8 @@ describe('BroadcastService', () => {
       mediaType: 'video',
       mediaFileId: 'video-file-id',
       parseMode: 'MarkdownV2',
+      emailEnabled: false,
+      telegramChannelChatId: null,
     });
   });
 
@@ -208,7 +215,7 @@ describe('BroadcastService', () => {
     );
   });
 
-  it('previews every current audience with Telegram-safe recipient filters', async () => {
+  it('previews every current audience with the unified recipient filter (matches delivery)', async () => {
     const countCalls: unknown[] = [];
     const broadcasts = new Map<string, BroadcastAudience>([
       ['all', BroadcastAudience.ALL],
@@ -254,26 +261,16 @@ describe('BroadcastService', () => {
     );
     assert.equal(previews.every((preview) => !Number.isNaN(Date.parse(preview.generatedAt))), true);
     assert.deepStrictEqual(countCalls, [
+      { where: { isBlocked: false } },
       {
         where: {
           isBlocked: false,
-          isBotBlocked: false,
-          telegramId: { not: null },
-        },
-      },
-      {
-        where: {
-          isBlocked: false,
-          isBotBlocked: false,
-          telegramId: { not: null },
           subscriptions: { some: { status: SubscriptionStatus.ACTIVE } },
         },
       },
       {
         where: {
           isBlocked: false,
-          isBotBlocked: false,
-          telegramId: { not: null },
           subscriptions: { some: { status: SubscriptionStatus.EXPIRED } },
           NOT: { subscriptions: { some: { status: SubscriptionStatus.ACTIVE } } },
         },
@@ -281,16 +278,12 @@ describe('BroadcastService', () => {
       {
         where: {
           isBlocked: false,
-          isBotBlocked: false,
-          telegramId: { not: null },
           subscriptions: { some: { isTrial: true, status: SubscriptionStatus.ACTIVE } },
         },
       },
       {
         where: {
           isBlocked: false,
-          isBotBlocked: false,
-          telegramId: { not: null },
           subscriptions: { none: {} },
         },
       },

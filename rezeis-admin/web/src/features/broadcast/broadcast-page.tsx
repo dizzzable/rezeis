@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
 import { Plus, Megaphone, Send, XCircle, Trash2, Loader2, RefreshCw, Upload, FileImage, FileVideo, X, Pencil, Clock, FlaskConical } from 'lucide-react'
@@ -30,6 +30,7 @@ import {
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Switch } from '@/components/ui/switch'
 import { DatePicker } from '@/components/ui/date-picker'
 import { FadeIn } from '@/lib/motion'
 import {
@@ -40,6 +41,7 @@ import {
 } from './broadcast-form-schema'
 import { EmojiPicker } from './emoji-picker'
 import { RenderedCopyPreview } from '@/features/custom-emoji/rendered-copy-preview'
+import { cn } from '@/lib/utils'
 
 const AUDIENCES = [
   { value: 'ALL', labelKey: 'broadcastPage.audiences.ALL' },
@@ -48,6 +50,105 @@ const AUDIENCES = [
   { value: 'EXPIRED', labelKey: 'broadcastPage.audiences.EXPIRED' },
   { value: 'TRIAL', labelKey: 'broadcastPage.audiences.TRIAL' },
 ] as const
+
+const SUB_BUCKETS = ['ACTIVE', 'EXPIRED', 'TRIAL', 'LIMITED', 'NONE'] as const
+const PLATFORM_OPTS = ['telegram', 'miniapp', 'web'] as const
+const CONTACT_OPTS = ['hasTelegram', 'hasEmail', 'hasWebPush'] as const
+
+function toggleIn(list: string[], value: string): string[] {
+  return list.includes(value) ? list.filter((v) => v !== value) : [...list, value]
+}
+
+/** A row of toggle chips for one multi-select audience-filter category. */
+function FilterChipGroup({
+  label,
+  options,
+  selected,
+  onToggle,
+}: {
+  label: string
+  options: ReadonlyArray<{ value: string; label: string }>
+  selected: string[]
+  onToggle: (value: string) => void
+}) {
+  return (
+    <div className="space-y-1.5">
+      <p className="text-xs font-medium text-muted-foreground">{label}</p>
+      <div className="flex flex-wrap gap-1.5">
+        {options.map((opt) => {
+          const active = selected.includes(opt.value)
+          return (
+            <button
+              key={opt.value}
+              type="button"
+              onClick={() => onToggle(opt.value)}
+              aria-pressed={active}
+              className={cn(
+                'rounded-full border px-3 py-1 text-xs transition-colors',
+                active
+                  ? 'border-primary bg-primary/15 text-primary'
+                  : 'border-border text-muted-foreground hover:bg-muted',
+              )}
+            >
+              {opt.label}
+            </button>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+function looksLikeHttpUrl(value: string): boolean {
+  const trimmed = value.trim()
+  return /^https?:\/\//i.test(trimmed)
+}
+
+/**
+ * Inline visual preview for attached broadcast media. Accepts either a locally
+ * selected `File` (rendered via a revocable object URL) or a remote `url`, and
+ * shows an `<img>` for photos or a `<video controls>` for videos so the
+ * operator sees exactly what will be broadcast before sending.
+ */
+function MediaPreview({
+  file,
+  url,
+  mediaType,
+  label,
+}: {
+  file?: File | null
+  url?: string | null
+  mediaType: 'photo' | 'video'
+  label: string
+}) {
+  const [objectUrl, setObjectUrl] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!file) {
+      setObjectUrl(null)
+      return
+    }
+    const created = URL.createObjectURL(file)
+    setObjectUrl(created)
+    return () => URL.revokeObjectURL(created)
+  }, [file])
+
+  const src = objectUrl ?? (url && url.trim().length > 0 ? url.trim() : null)
+  if (!src) return null
+
+  return (
+    <div className="space-y-1">
+      <p className="text-[11px] font-medium text-muted-foreground">{label}</p>
+      <div className="overflow-hidden rounded-md border bg-background">
+        {mediaType === 'photo' ? (
+          <img src={src} alt="" className="max-h-48 w-full object-contain" />
+        ) : (
+          <video src={src} controls className="max-h-48 w-full object-contain" />
+        )}
+      </div>
+    </div>
+  )
+}
 
 const STATUS_VARIANT: Record<string, 'default' | 'secondary' | 'destructive' | 'outline'> = {
   COMPLETED: 'default',
@@ -306,6 +407,7 @@ function CreateBroadcastForm({ onClose }: { onClose: () => void }) {
     mediaTooLong: t('broadcastPage.form.validation.mediaTooLong'),
     mediaUrlInvalid: t('broadcastPage.form.validation.mediaUrlInvalid'),
     mediaFileIdInvalid: t('broadcastPage.form.validation.mediaFileIdInvalid'),
+    telegramChannelChatIdInvalid: t('broadcastPage.form.validation.telegramChannelChatIdInvalid'),
   }), [t])
   const formSchema = useMemo(() => createBroadcastFormSchema(validationMessages), [validationMessages])
   const form = useForm<BroadcastFormDraft, unknown, BroadcastCreateRequest>({
@@ -317,6 +419,8 @@ function CreateBroadcastForm({ onClose }: { onClose: () => void }) {
       mediaType: 'none',
       mediaSourceMode: 'upload',
       mediaValue: '',
+      emailEnabled: false,
+      telegramChannelChatId: '',
     },
     mode: 'onSubmit',
     reValidateMode: 'onBlur',
@@ -330,7 +434,21 @@ function CreateBroadcastForm({ onClose }: { onClose: () => void }) {
   const [mediaType, setMediaType] = useState<'none' | 'photo' | 'video'>('none')
   const [mediaSourceMode, setMediaSourceMode] = useState<'upload' | 'url' | 'fileId'>('upload')
   const [mediaValue, setMediaValue] = useState('')
+  // Structured audience filter (multi-select). When any is set it supersedes
+  // the `audience` segment above (backend combines categories with AND).
+  const [subBuckets, setSubBuckets] = useState<string[]>([])
+  const [platformFilters, setPlatformFilters] = useState<string[]>([])
+  const [contactFilters, setContactFilters] = useState<string[]>([])
+  const [inactiveDays, setInactiveDays] = useState('')
+  // Additive delivery channels (on top of the always-on cabinet/web-push/TG-DM
+  // fanout): email every resolved recipient with an address, and/or post the
+  // broadcast once to an operator-configured Telegram channel/group.
+  const [emailEnabled, setEmailEnabled] = useState(false)
+  const [telegramChannelChatId, setTelegramChannelChatId] = useState('')
   const [uploaded, setUploaded] = useState<UploadedMedia | null>(null)
+  // The raw selected file, kept only for the local inline preview (the actual
+  // send uses the Telegram file_id returned by the upload endpoint).
+  const [previewFile, setPreviewFile] = useState<File | null>(null)
   const [isDragging, setIsDragging] = useState(false)
   const [scheduleEnabled, setScheduleEnabled] = useState(false)
   const [scheduledDate, setScheduledDate] = useState<Date | undefined>(undefined)
@@ -398,6 +516,7 @@ function CreateBroadcastForm({ onClose }: { onClose: () => void }) {
       toast.error(t('broadcastPage.upload.tooLarge'))
       return
     }
+    setPreviewFile(file)
     uploadMutation.mutate(file)
   }
 
@@ -420,13 +539,34 @@ function CreateBroadcastForm({ onClose }: { onClose: () => void }) {
 
   function clearUpload(): void {
     setUploaded(null)
+    setPreviewFile(null)
     setMediaValue('')
     if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
+  function buildAudienceFilter(): Record<string, unknown> | undefined {
+    const filter: Record<string, unknown> = {}
+    if (subBuckets.length > 0) filter.subscription = subBuckets
+    if (platformFilters.length > 0) filter.platforms = platformFilters
+    if (contactFilters.length > 0) filter.contact = contactFilters
+    const days = Number.parseInt(inactiveDays, 10)
+    if (Number.isFinite(days) && days > 0) filter.inactiveDays = days
+    return Object.keys(filter).length > 0 ? filter : undefined
+  }
+
+  function withAudienceFilter(payload: BroadcastCreateRequest): BroadcastCreateRequest & {
+    audienceFilter?: Record<string, unknown>
+  } {
+    const audienceFilter = buildAudienceFilter()
+    return audienceFilter ? { ...payload, audienceFilter } : payload
+  }
+
   const createMutation = useMutation({
     mutationFn: async (payload: BroadcastCreateRequest) => {
-      const response = await api.post<{ id: string }>('/admin/broadcast/drafts', payload)
+      const response = await api.post<{ id: string }>(
+        '/admin/broadcast/drafts',
+        withAudienceFilter(payload),
+      )
       const delayMinutes = scheduleEnabled
         ? computeDelayMinutes(combineDateTime(scheduledDate, scheduledTime))
         : undefined
@@ -449,7 +589,10 @@ function CreateBroadcastForm({ onClose }: { onClose: () => void }) {
 
   const testMutation = useMutation({
     mutationFn: async (payload: BroadcastCreateRequest) => {
-      const response = await api.post<{ id: string }>('/admin/broadcast/drafts', payload)
+      const response = await api.post<{ id: string }>(
+        '/admin/broadcast/drafts',
+        withAudienceFilter(payload),
+      )
       return api.post(`/admin/broadcast/${encodeURIComponent(response.data.id)}/test`, {})
     },
     onSuccess: () => {
@@ -469,6 +612,8 @@ function CreateBroadcastForm({ onClose }: { onClose: () => void }) {
       mediaType,
       mediaSourceMode,
       mediaValue,
+      emailEnabled,
+      telegramChannelChatId,
     }
     form.reset(draft)
     return form.handleSubmit(
@@ -505,6 +650,81 @@ function CreateBroadcastForm({ onClose }: { onClose: () => void }) {
           </SelectContent>
         </Select>
         <FieldError message={formErrors.audience} />
+      </div>
+
+      <div className="space-y-3 rounded-lg border border-border/60 p-3">
+        <div>
+          <Label>{t('broadcastPage.audienceFilters.title')}</Label>
+          <p className="text-xs text-muted-foreground">{t('broadcastPage.audienceFilters.hint')}</p>
+        </div>
+        <FilterChipGroup
+          label={t('broadcastPage.audienceFilters.subscription')}
+          options={SUB_BUCKETS.map((v) => ({ value: v, label: t(`broadcastPage.audienceFilters.sub.${v}`) }))}
+          selected={subBuckets}
+          onToggle={(v) => setSubBuckets((prev) => toggleIn(prev, v))}
+        />
+        <FilterChipGroup
+          label={t('broadcastPage.audienceFilters.platform')}
+          options={PLATFORM_OPTS.map((v) => ({ value: v, label: t(`broadcastPage.audienceFilters.platforms.${v}`) }))}
+          selected={platformFilters}
+          onToggle={(v) => setPlatformFilters((prev) => toggleIn(prev, v))}
+        />
+        <FilterChipGroup
+          label={t('broadcastPage.audienceFilters.contact')}
+          options={CONTACT_OPTS.map((v) => ({ value: v, label: t(`broadcastPage.audienceFilters.contacts.${v}`) }))}
+          selected={contactFilters}
+          onToggle={(v) => setContactFilters((prev) => toggleIn(prev, v))}
+        />
+        <div className="space-y-1.5">
+          <Label htmlFor="broadcast-inactive-days" className="text-xs font-medium text-muted-foreground">
+            {t('broadcastPage.audienceFilters.inactiveDays')}
+          </Label>
+          <Input
+            id="broadcast-inactive-days"
+            type="number"
+            min={1}
+            value={inactiveDays}
+            onChange={(e) => setInactiveDays(e.target.value)}
+            placeholder={t('broadcastPage.audienceFilters.inactiveDaysPlaceholder')}
+            className="max-w-[160px]"
+          />
+        </div>
+      </div>
+
+      <div className="space-y-3 rounded-lg border border-border/60 p-3">
+        <div>
+          <Label>{t('broadcastPage.channels.title')}</Label>
+          <p className="text-xs text-muted-foreground">{t('broadcastPage.channels.hint')}</p>
+        </div>
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <Label htmlFor="broadcast-email-enabled" className="text-sm font-normal">
+              {t('broadcastPage.channels.email')}
+            </Label>
+            <p className="text-xs text-muted-foreground">{t('broadcastPage.channels.emailHint')}</p>
+          </div>
+          <Switch
+            id="broadcast-email-enabled"
+            checked={emailEnabled}
+            onCheckedChange={setEmailEnabled}
+            aria-label={t('broadcastPage.channels.email')}
+          />
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="broadcast-channel-chat-id" className="text-xs font-medium text-muted-foreground">
+            {t('broadcastPage.channels.telegramChannel')}
+          </Label>
+          <Input
+            id="broadcast-channel-chat-id"
+            value={telegramChannelChatId}
+            onChange={(e) => setTelegramChannelChatId(e.target.value)}
+            placeholder={t('broadcastPage.channels.telegramChannelPlaceholder')}
+            className="font-mono text-xs"
+            aria-invalid={!!formErrors.telegramChannelChatId}
+          />
+          <p className="text-xs text-muted-foreground">{t('broadcastPage.channels.telegramChannelHint')}</p>
+          <FieldError message={formErrors.telegramChannelChatId} />
+        </div>
       </div>
 
       <div className="space-y-2">
@@ -620,28 +840,35 @@ function CreateBroadcastForm({ onClose }: { onClose: () => void }) {
 
             {mediaSourceMode === 'upload' ? (
               uploaded ? (
-                <div className="flex items-center gap-3 rounded-md border bg-background p-3">
-                  {uploaded.mediaType === 'photo' ? (
-                    <FileImage className="h-8 w-8 shrink-0 text-emerald-500" />
-                  ) : (
-                    <FileVideo className="h-8 w-8 shrink-0 text-blue-500" />
-                  )}
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm font-medium">{uploaded.fileName}</p>
-                    <p className="text-xs text-muted-foreground">
-                      {formatBytes(uploaded.sizeBytes)} · file_id: <span className="font-mono">{uploaded.fileId.slice(0, 16)}…</span>
-                    </p>
+                <div className="space-y-2">
+                  <div className="flex items-center gap-3 rounded-md border bg-background p-3">
+                    {uploaded.mediaType === 'photo' ? (
+                      <FileImage className="h-8 w-8 shrink-0 text-emerald-500" />
+                    ) : (
+                      <FileVideo className="h-8 w-8 shrink-0 text-blue-500" />
+                    )}
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-medium">{uploaded.fileName}</p>
+                      <p className="text-xs text-muted-foreground">
+                        {formatBytes(uploaded.sizeBytes)} · file_id: <span className="font-mono">{uploaded.fileId.slice(0, 16)}…</span>
+                      </p>
+                    </div>
+                    <Button
+                      type="button"
+                      size="icon"
+                      variant="ghost"
+                      className="h-7 w-7 text-destructive shrink-0"
+                      onClick={clearUpload}
+                      aria-label={t('broadcastPage.upload.clear')}
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </Button>
                   </div>
-                  <Button
-                    type="button"
-                    size="icon"
-                    variant="ghost"
-                    className="h-7 w-7 text-destructive shrink-0"
-                    onClick={clearUpload}
-                    aria-label={t('broadcastPage.upload.clear')}
-                  >
-                    <X className="h-3.5 w-3.5" />
-                  </Button>
+                  <MediaPreview
+                    file={previewFile}
+                    mediaType={uploaded.mediaType}
+                    label={t('broadcastPage.form.mediaPreview')}
+                  />
                 </div>
               ) : (
                 <>
@@ -714,6 +941,13 @@ function CreateBroadcastForm({ onClose }: { onClose: () => void }) {
                     ? t('broadcastPage.form.urlHint')
                     : t('broadcastPage.form.fileIdHint', { type: t(`broadcastPage.form.media.${mediaType}`) })}
                 </p>
+                {mediaSourceMode === 'url' && looksLikeHttpUrl(mediaValue) && (
+                  <MediaPreview
+                    url={mediaValue}
+                    mediaType={mediaType}
+                    label={t('broadcastPage.form.mediaPreview')}
+                  />
+                )}
               </>
             )}
             <FieldError message={formErrors.mediaValue} />
