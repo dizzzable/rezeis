@@ -1,0 +1,197 @@
+import type {
+  QuestDaysFallback,
+  QuestIconKind,
+  QuestPayload,
+  QuestRepeat,
+  QuestRewardType,
+  QuestType,
+} from './quests-api'
+
+export interface QuestDraft {
+  type: QuestType
+  titleRu: string
+  titleEn: string
+  descRu: string
+  descEn: string
+  rewardType: QuestRewardType
+  rewardAmount: string
+  rewardPlanId: string
+  daysFallback: QuestDaysFallback
+  iconKind: QuestIconKind
+  iconRef: string
+  subBuckets: string[]
+  platforms: string[]
+  contactFilters: string[]
+  inactiveDays: string
+  repeat: QuestRepeat
+  cooldownHours: string
+  startAt: string
+  endAt: string
+  maxCompletionsGlobal: string
+  requiredFriends: string
+  channelId: string
+  enabled: boolean
+}
+
+export interface QuestValidationMessages {
+  readonly titleRequired: string
+  readonly rewardAmountRequired: string
+  readonly planRequired: string
+  readonly channelRequired: string
+  readonly windowInvalid: string
+}
+
+export function emptyQuestDraft(): QuestDraft {
+  return {
+    type: 'LINK_TELEGRAM',
+    titleRu: '',
+    titleEn: '',
+    descRu: '',
+    descEn: '',
+    rewardType: 'POINTS',
+    rewardAmount: '3',
+    rewardPlanId: '',
+    daysFallback: 'MINT_PROMOCODE',
+    iconKind: 'PRESET',
+    iconRef: 'telegram',
+    subBuckets: [],
+    platforms: [],
+    contactFilters: [],
+    inactiveDays: '',
+    repeat: 'ONCE',
+    cooldownHours: '',
+    startAt: '',
+    endAt: '',
+    maxCompletionsGlobal: '',
+    requiredFriends: '',
+    channelId: '',
+    enabled: false,
+  }
+}
+
+function parseIntOrNull(value: string): number | null {
+  const trimmed = value.trim()
+  if (trimmed.length === 0) return null
+  const n = Number.parseInt(trimmed, 10)
+  return Number.isFinite(n) ? n : null
+}
+
+/** Field-level validation. Returns a map of field → message (empty = valid). */
+export function validateQuestDraft(
+  draft: QuestDraft,
+  messages: QuestValidationMessages,
+): Record<string, string> {
+  const errors: Record<string, string> = {}
+  if (draft.titleRu.trim().length === 0 || draft.titleEn.trim().length === 0) {
+    errors.title = messages.titleRequired
+  }
+  const amount = parseIntOrNull(draft.rewardAmount) ?? 0
+  if (draft.rewardType !== 'PROMOCODE' && amount <= 0) {
+    errors.rewardAmount = messages.rewardAmountRequired
+  }
+  if (draft.rewardType === 'DAYS' && draft.daysFallback === 'GRANT_TRIAL' && draft.rewardPlanId.trim().length === 0) {
+    errors.rewardPlanId = messages.planRequired
+  }
+  if (draft.type === 'SUBSCRIBE_CHANNEL' && draft.channelId.trim().length === 0) {
+    errors.channelId = messages.channelRequired
+  }
+  const start = draft.startAt.trim()
+  const end = draft.endAt.trim()
+  if (start.length > 0 && end.length > 0 && new Date(end).getTime() <= new Date(start).getTime()) {
+    errors.endAt = messages.windowInvalid
+  }
+  return errors
+}
+
+/** Build the API payload from a validated draft. */
+export function buildQuestPayload(draft: QuestDraft): QuestPayload {
+  const audienceFilter: QuestAudienceFilterDraft = {}
+  if (draft.subBuckets.length > 0) audienceFilter.subscription = draft.subBuckets
+  if (draft.platforms.length > 0) audienceFilter.platforms = draft.platforms
+  if (draft.contactFilters.length > 0) audienceFilter.contact = draft.contactFilters
+  const inactive = parseIntOrNull(draft.inactiveDays)
+  if (inactive !== null && inactive > 0) audienceFilter.inactiveDays = inactive
+
+  const params: Record<string, unknown> = {}
+  if (draft.type === 'INVITE_FRIENDS') {
+    const required = parseIntOrNull(draft.requiredFriends)
+    if (required !== null && required > 0) params.requiredFriends = required
+  }
+  if (draft.type === 'SUBSCRIBE_CHANNEL' && draft.channelId.trim().length > 0) {
+    params.channelId = draft.channelId.trim()
+  }
+
+  return {
+    type: draft.type,
+    title: { ru: draft.titleRu.trim(), en: draft.titleEn.trim() },
+    description: { ru: draft.descRu.trim(), en: draft.descEn.trim() },
+    iconKind: draft.iconKind,
+    iconRef: draft.iconRef.trim(),
+    rewardType: draft.rewardType,
+    rewardAmount: parseIntOrNull(draft.rewardAmount) ?? 0,
+    rewardPlanId: draft.rewardPlanId.trim().length > 0 ? draft.rewardPlanId.trim() : null,
+    daysFallback: draft.daysFallback,
+    audienceFilter: Object.keys(audienceFilter).length > 0 ? audienceFilter : null,
+    repeat: draft.repeat,
+    cooldownHours: draft.repeat === 'REPEATABLE' ? parseIntOrNull(draft.cooldownHours) : null,
+    startAt: draft.startAt.trim().length > 0 ? draft.startAt.trim() : null,
+    endAt: draft.endAt.trim().length > 0 ? draft.endAt.trim() : null,
+    maxCompletionsGlobal: parseIntOrNull(draft.maxCompletionsGlobal),
+    params: Object.keys(params).length > 0 ? params : null,
+    enabled: draft.enabled,
+  }
+}
+
+interface QuestAudienceFilterDraft {
+  subscription?: string[]
+  platforms?: string[]
+  contact?: string[]
+  inactiveDays?: number
+}
+
+export function questToDraft(quest: {
+  type: QuestType
+  title: { ru: string; en: string }
+  description: { ru: string; en: string }
+  iconKind: QuestIconKind
+  iconRef: string
+  rewardType: QuestRewardType
+  rewardAmount: number
+  rewardPlanId: string | null
+  daysFallback: QuestDaysFallback
+  audienceFilter: QuestAudienceFilterDraft | null
+  repeat: QuestRepeat
+  cooldownHours: number | null
+  startAt: string | null
+  endAt: string | null
+  maxCompletionsGlobal: number | null
+  params: Record<string, unknown> | null
+  enabled: boolean
+}): QuestDraft {
+  const params = quest.params ?? {}
+  return {
+    type: quest.type,
+    titleRu: quest.title.ru,
+    titleEn: quest.title.en,
+    descRu: quest.description.ru,
+    descEn: quest.description.en,
+    rewardType: quest.rewardType,
+    rewardAmount: String(quest.rewardAmount),
+    rewardPlanId: quest.rewardPlanId ?? '',
+    daysFallback: quest.daysFallback,
+    iconKind: quest.iconKind,
+    iconRef: quest.iconRef,
+    subBuckets: quest.audienceFilter?.subscription ?? [],
+    platforms: quest.audienceFilter?.platforms ?? [],
+    contactFilters: quest.audienceFilter?.contact ?? [],
+    inactiveDays: quest.audienceFilter?.inactiveDays ? String(quest.audienceFilter.inactiveDays) : '',
+    repeat: quest.repeat,
+    cooldownHours: quest.cooldownHours ? String(quest.cooldownHours) : '',
+    startAt: quest.startAt ? quest.startAt.slice(0, 16) : '',
+    endAt: quest.endAt ? quest.endAt.slice(0, 16) : '',
+    maxCompletionsGlobal: quest.maxCompletionsGlobal ? String(quest.maxCompletionsGlobal) : '',
+    requiredFriends: typeof params.requiredFriends === 'number' ? String(params.requiredFriends) : '',
+    channelId: typeof params.channelId === 'string' ? params.channelId : '',
+    enabled: quest.enabled,
+  }
+}

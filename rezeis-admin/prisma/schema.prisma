@@ -1009,6 +1009,7 @@ model User {
   partnerReferrals     PartnerReferral[]       @relation("PartnerReferralUser")
   supportTickets       SupportTicket[]         @relation("SupportTicketUser")
   oauthLinks           UserOAuthLink[]         @relation("UserOAuthLinks")
+  questCompletions     QuestCompletion[]       @relation("QuestCompletionUser")
 
   @@index([telegramId])
   @@index([role])
@@ -2910,4 +2911,148 @@ model AdminPasskey {
 
   @@index([adminUserId])
   @@map("admin_passkeys")
+}
+
+// =============================================================================
+//  GAMIFICATION / QUESTS
+// =============================================================================
+
+/// Task category a quest rewards. Detection differs per type (event hook,
+/// referral count, Telegram channel membership, partner callback).
+enum QuestType {
+  LINK_TELEGRAM
+  LINK_EMAIL
+  INVITE_FRIENDS
+  SUBSCRIBE_CHANNEL
+  PARTNER_TASK
+  CUSTOM
+}
+
+/// What a quest grants. POINTS credit the SAME `User.points` balance the
+/// referral points-exchange spends (single pool).
+enum QuestRewardType {
+  POINTS
+  DAYS
+  PROMOCODE
+  DISCOUNT
+  TRAFFIC
+}
+
+/// Whether a quest can be completed once or repeatedly (with a cooldown).
+enum QuestRepeat {
+  ONCE
+  REPEATABLE
+}
+
+/// Icon source: a curated preset key, or an uploaded (sanitized) SVG asset.
+enum QuestIconKind {
+  PRESET
+  SVG
+}
+
+/// Fallback path when a DAYS reward is issued but the user has no active
+/// (bounded) subscription to extend.
+enum QuestDaysFallback {
+  GRANT_TRIAL
+  MINT_PROMOCODE
+}
+
+/// Per-user completion lifecycle. IN_PROGRESS → COMPLETED (claimable) →
+/// CLAIMED (reward reserved; `rewardIssuedAt` guards the idempotent payout).
+enum QuestCompletionStatus {
+  IN_PROGRESS
+  COMPLETED
+  CLAIMED
+}
+
+/// Operator-defined gamification task. Rewards reuse existing primitives
+/// (points / subscription days / promocode / discount / traffic).
+model Quest {
+  id                   String            @id @default(cuid()) @map("id")
+  type                 QuestType         @map("type")
+  /// Localized copy: { ru, en }.
+  title                Json              @default("{}") @map("title")
+  description          Json              @default("{}") @map("description")
+  iconKind             QuestIconKind     @default(PRESET) @map("icon_kind")
+  /// Preset key OR `QuestIconAsset.id` depending on `iconKind`.
+  iconRef              String            @default("") @map("icon_ref")
+  rewardType           QuestRewardType   @map("reward_type")
+  /// Reward magnitude (points / days / percent / GB). PROMOCODE ignores this.
+  rewardAmount         Int               @default(0) @map("reward_amount")
+  /// Plan id for DAYS→GRANT_TRIAL and PROMOCODE(SUBSCRIPTION) rewards.
+  rewardPlanId         String?           @map("reward_plan_id")
+  daysFallback         QuestDaysFallback @default(MINT_PROMOCODE) @map("days_fallback")
+  /// Broadcast-style audience filter (subscription/platform/contact). NULL =
+  /// all, plus per-type auto-hide (e.g. hide LINK_EMAIL when email verified).
+  audienceFilter       Json?             @map("audience_filter")
+  repeat               QuestRepeat       @default(ONCE) @map("repeat")
+  /// Cooldown before a REPEATABLE quest is offered again.
+  cooldownHours        Int?              @map("cooldown_hours")
+  startAt              DateTime?         @map("start_at") @db.Timestamptz(3)
+  endAt                DateTime?         @map("end_at") @db.Timestamptz(3)
+  /// Global cap on issued rewards (budget). NULL = unlimited.
+  maxCompletionsGlobal Int?              @map("max_completions_global")
+  /// Atomic budget counter (reserved rewards). Guarded conditional increment.
+  issuedCount          Int               @default(0) @map("issued_count")
+  /// Type-specific config: { channelId, requiredFriends, partner:{...} }.
+  params               Json?             @map("params")
+  order                Int               @default(0) @map("order")
+  enabled              Boolean           @default(false) @map("enabled")
+  createdBy            String?           @map("created_by")
+  createdAt            DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt            DateTime          @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  completions QuestCompletion[] @relation("QuestCompletions")
+
+  @@index([enabled])
+  @@index([type])
+  @@index([order])
+  @@map("quests")
+}
+
+/// Per-user progress/completion record for a quest. Unique per
+/// (quest, user, periodKey) — `periodKey` is "" for ONCE quests and a period
+/// bucket for REPEATABLE ones.
+model QuestCompletion {
+  id             String                @id @default(cuid()) @map("id")
+  questId        String                @map("quest_id")
+  userId         String                @map("user_id")
+  periodKey      String                @default("") @map("period_key")
+  status         QuestCompletionStatus @default(IN_PROGRESS) @map("status")
+  /// Progress counter (e.g. qualified-friends count for INVITE_FRIENDS).
+  progress       Int                   @default(0) @map("progress")
+  /// Last successful channel-membership verification (SUBSCRIBE_CHANNEL).
+  verifiedAt     DateTime?             @map("verified_at") @db.Timestamptz(3)
+  completedAt    DateTime?             @map("completed_at") @db.Timestamptz(3)
+  claimedAt      DateTime?             @map("claimed_at") @db.Timestamptz(3)
+  /// Set when the reward payout succeeded — the idempotency guard for the
+  /// post-claim issuance (reconciler re-drives CLAIMED && rewardIssuedAt=null).
+  rewardIssuedAt DateTime?             @map("reward_issued_at") @db.Timestamptz(3)
+  /// Snapshot of what was granted (type + value + code) for display/audit.
+  rewardSnapshot Json?                 @map("reward_snapshot")
+  createdAt      DateTime              @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime              @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  quest Quest @relation("QuestCompletions", fields: [questId], references: [id], onDelete: Cascade)
+  user  User  @relation("QuestCompletionUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([questId, userId, periodKey])
+  @@index([userId])
+  @@index([status])
+  @@index([questId, status])
+  @@index([status, rewardIssuedAt])
+  @@map("quest_completions")
+}
+
+/// Sanitized, operator-uploaded SVG icon usable by quests.
+model QuestIconAsset {
+  id         String   @id @default(cuid()) @map("id")
+  name       String   @map("name")
+  /// Sanitized SVG markup (no scripts / external refs / active content).
+  svg        String   @map("svg")
+  sizeBytes  Int      @map("size_bytes")
+  uploadedBy String?  @map("uploaded_by")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  @@map("quest_icon_assets")
 }

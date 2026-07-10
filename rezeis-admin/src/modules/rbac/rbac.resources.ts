@@ -87,6 +87,8 @@ export const RBAC_RESOURCES: Readonly<Record<string, readonly RbacAction[]>> = {
   partners: ['view', 'edit', 'bulk_operations'],
   partner_settings: ['view', 'edit'],
   withdrawals: ['view', 'resolve'],
+  /// Gamification quests catalog + settings (reward-granting tasks).
+  quests: ['view', 'create', 'edit', 'delete'],
 
   // Configuration
   settings: ['view', 'edit'],
@@ -223,6 +225,9 @@ export const SYSTEM_ROLES: readonly SystemRoleSeed[] = [
       { resource: 'support_tickets', action: 'archive' },
       { resource: 'referrals', action: 'view' },
       { resource: 'partners', action: 'view' },
+      { resource: 'quests', action: 'view' },
+      { resource: 'quests', action: 'create' },
+      { resource: 'quests', action: 'edit' },
       { resource: 'withdrawals', action: 'view' },
       { resource: 'analytics', action: 'view' },
       { resource: 'audit', action: 'view' },
