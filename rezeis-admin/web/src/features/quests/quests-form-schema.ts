@@ -30,8 +30,15 @@ export interface QuestDraft {
   maxCompletionsGlobal: string
   requiredFriends: string
   channelId: string
+  partnerMethod: QuestPartnerMethod
+  partnerSlug: string
+  partnerCode: string
+  partnerLandingUrl: string
+  partnerDwellSeconds: string
   enabled: boolean
 }
+
+export type QuestPartnerMethod = 'manual_code' | 'postback' | 'timed_visit'
 
 export interface QuestValidationMessages {
   readonly titleRequired: string
@@ -39,6 +46,7 @@ export interface QuestValidationMessages {
   readonly planRequired: string
   readonly channelRequired: string
   readonly windowInvalid: string
+  readonly partnerRequired: string
 }
 
 export function emptyQuestDraft(): QuestDraft {
@@ -65,6 +73,11 @@ export function emptyQuestDraft(): QuestDraft {
     maxCompletionsGlobal: '',
     requiredFriends: '',
     channelId: '',
+    partnerMethod: 'manual_code',
+    partnerSlug: '',
+    partnerCode: '',
+    partnerLandingUrl: '',
+    partnerDwellSeconds: '',
     enabled: false,
   }
 }
@@ -95,6 +108,14 @@ export function validateQuestDraft(
   if (draft.type === 'SUBSCRIBE_CHANNEL' && draft.channelId.trim().length === 0) {
     errors.channelId = messages.channelRequired
   }
+  if (draft.type === 'PARTNER_TASK') {
+    if (draft.partnerSlug.trim().length === 0) {
+      errors.partnerSlug = messages.partnerRequired
+    }
+    if (draft.partnerMethod === 'manual_code' && draft.partnerCode.trim().length === 0) {
+      errors.partnerCode = messages.partnerRequired
+    }
+  }
   const start = draft.startAt.trim()
   const end = draft.endAt.trim()
   if (start.length > 0 && end.length > 0 && new Date(end).getTime() <= new Date(start).getTime()) {
@@ -119,6 +140,23 @@ export function buildQuestPayload(draft: QuestDraft): QuestPayload {
   }
   if (draft.type === 'SUBSCRIBE_CHANNEL' && draft.channelId.trim().length > 0) {
     params.channelId = draft.channelId.trim()
+  }
+  if (draft.type === 'PARTNER_TASK' && draft.partnerSlug.trim().length > 0) {
+    const partner: Record<string, unknown> = {
+      method: draft.partnerMethod,
+      partnerSlug: draft.partnerSlug.trim(),
+    }
+    if (draft.partnerMethod === 'manual_code' && draft.partnerCode.trim().length > 0) {
+      partner.code = draft.partnerCode.trim()
+    }
+    if (draft.partnerLandingUrl.trim().length > 0) {
+      partner.landingUrl = draft.partnerLandingUrl.trim()
+    }
+    if (draft.partnerMethod === 'timed_visit') {
+      const dwell = parseIntOrNull(draft.partnerDwellSeconds)
+      if (dwell !== null && dwell >= 0) partner.minDwellSeconds = dwell
+    }
+    params.partner = partner
   }
 
   return {
@@ -169,6 +207,9 @@ export function questToDraft(quest: {
   enabled: boolean
 }): QuestDraft {
   const params = quest.params ?? {}
+  const partner = (params.partner ?? {}) as Record<string, unknown>
+  const partnerMethod: QuestPartnerMethod =
+    partner.method === 'postback' || partner.method === 'timed_visit' ? partner.method : 'manual_code'
   return {
     type: quest.type,
     titleRu: quest.title.ru,
@@ -192,6 +233,12 @@ export function questToDraft(quest: {
     maxCompletionsGlobal: quest.maxCompletionsGlobal ? String(quest.maxCompletionsGlobal) : '',
     requiredFriends: typeof params.requiredFriends === 'number' ? String(params.requiredFriends) : '',
     channelId: typeof params.channelId === 'string' ? params.channelId : '',
+    partnerMethod,
+    partnerSlug: typeof partner.partnerSlug === 'string' ? partner.partnerSlug : '',
+    partnerCode: typeof partner.code === 'string' ? partner.code : '',
+    partnerLandingUrl: typeof partner.landingUrl === 'string' ? partner.landingUrl : '',
+    partnerDwellSeconds:
+      typeof partner.minDwellSeconds === 'number' ? String(partner.minDwellSeconds) : '',
     enabled: quest.enabled,
   }
 }

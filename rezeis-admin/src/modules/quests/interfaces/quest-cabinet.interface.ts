@@ -16,6 +16,12 @@ export interface QuestCabinetItem {
   readonly status: 'IN_PROGRESS' | 'COMPLETED';
   readonly progress: number;
   readonly requiredFriends?: number;
+  /** PARTNER_TASK only — the verification method the cabinet renders for. */
+  readonly partnerMethod?: 'manual_code' | 'postback' | 'timed_visit';
+  /** PARTNER_TASK only — operator-approved https landing URL (never an internal ref). */
+  readonly partnerUrl?: string;
+  /** PARTNER_TASK timed_visit — seconds to dwell before the confirm unlocks. */
+  readonly partnerVisitSeconds?: number;
   /** True when the user can press "Забрать" now. */
   readonly claimable: boolean;
 }

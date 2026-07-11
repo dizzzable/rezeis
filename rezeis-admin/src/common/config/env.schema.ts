@@ -158,6 +158,15 @@ const environmentSchema = z
       z.string().min(16).optional(),
     ),
 
+    /**
+     * Per-partner HMAC secrets for PARTNER_TASK quest callbacks, as a JSON
+     * object `{"<partnerSlug>":"<secret>"}`. Each secret signs that partner's
+     * postback (`t=<sec>,v1=<hmac>` over `<t>.<rawBody>`). Malformed JSON is
+     * tolerated (no partners configured) rather than crashing the panel; a
+     * partner quest simply can't be created until its slug has a secret here.
+     */
+    QUEST_PARTNER_SECRETS: z.preprocess(normalizeOptionalString, z.string().optional()),
+
     // ── Update checker ───────────────────────────────────────────────────────
     /** Optional override for the panel `<owner>/<repo>` GitHub slug whose
      * `releases/latest` is compared against the running version. The upstream

@@ -71,10 +71,18 @@ import {
   type QuestValidationMessages,
 } from './quests-form-schema'
 
-// Phase A ships only the quest types with a working end-to-end completion path.
-// SUBSCRIBE_CHANNEL / PARTNER_TASK / CUSTOM need channel/partner verification
-// (Phase B/C) and are gated off both here and in the backend QuestService.
-const QUEST_TYPES: QuestType[] = ['LINK_TELEGRAM', 'LINK_EMAIL', 'INVITE_FRIENDS']
+// Quest types with a working end-to-end completion path. SUBSCRIBE_CHANNEL
+// (Phase B) and PARTNER_TASK (Phase C) are verified via the bot / signed
+// partner callback; CUSTOM has no detection yet and stays gated off (matches
+// the backend QuestService COMPLETABLE_QUEST_TYPES allow-list).
+const QUEST_TYPES: QuestType[] = [
+  'LINK_TELEGRAM',
+  'LINK_EMAIL',
+  'INVITE_FRIENDS',
+  'SUBSCRIBE_CHANNEL',
+  'PARTNER_TASK',
+]
+const PARTNER_METHODS = ['manual_code', 'postback', 'timed_visit'] as const
 const REWARD_TYPES: QuestRewardType[] = ['POINTS', 'DAYS', 'PROMOCODE', 'DISCOUNT', 'TRAFFIC']
 const SUB_BUCKETS = ['ACTIVE', 'EXPIRED', 'TRIAL', 'LIMITED', 'NONE'] as const
 const PLATFORM_OPTS = ['telegram', 'miniapp', 'web'] as const
@@ -442,6 +450,7 @@ function QuestForm({ quest, onClose }: { quest: Quest | null; onClose: () => voi
       planRequired: t('questsAdminPage.validation.planRequired'),
       channelRequired: t('questsAdminPage.validation.channelRequired'),
       windowInvalid: t('questsAdminPage.validation.windowInvalid'),
+      partnerRequired: t('questsAdminPage.validation.partnerRequired'),
     }),
     [t],
   )
@@ -633,6 +642,113 @@ function QuestForm({ quest, onClose }: { quest: Quest | null; onClose: () => voi
             onChange={(e) => set('requiredFriends', e.target.value)}
             className="max-w-[160px]"
           />
+        </div>
+      )}
+      {draft.type === 'SUBSCRIBE_CHANNEL' && (
+        <div className="space-y-1.5">
+          <Label>
+            <LabelWithHint
+              label={t('questsAdminPage.form.channelId')}
+              hint={t('questsAdminPage.help.channelId')}
+            />
+          </Label>
+          <Input
+            value={draft.channelId}
+            onChange={(e) => set('channelId', e.target.value)}
+            placeholder="-1001234567890 · @channel · https://t.me/+invite"
+          />
+          {errors.channelId && <p className="text-xs text-destructive">{errors.channelId}</p>}
+        </div>
+      )}
+      {draft.type === 'PARTNER_TASK' && (
+        <div className="space-y-3 rounded-lg border border-border/60 p-3">
+          <div className="space-y-1.5">
+            <Label>
+              <LabelWithHint
+                label={t('questsAdminPage.form.partnerMethod')}
+                hint={t('questsAdminPage.help.partnerMethod')}
+              />
+            </Label>
+            <Select
+              value={draft.partnerMethod}
+              onValueChange={(v) => set('partnerMethod', v as QuestDraft['partnerMethod'])}
+            >
+              <SelectTrigger className="max-w-[240px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {PARTNER_METHODS.map((m) => (
+                  <SelectItem key={m} value={m}>
+                    {t(`questsAdminPage.partnerMethod.${m}`)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="space-y-1.5">
+            <Label>
+              <LabelWithHint
+                label={t('questsAdminPage.form.partnerSlug')}
+                hint={t('questsAdminPage.help.partnerSlug')}
+              />
+            </Label>
+            <Input
+              value={draft.partnerSlug}
+              onChange={(e) => set('partnerSlug', e.target.value)}
+              placeholder="acme"
+              className="max-w-[240px]"
+            />
+            {errors.partnerSlug && <p className="text-xs text-destructive">{errors.partnerSlug}</p>}
+          </div>
+          {draft.partnerMethod === 'manual_code' && (
+            <div className="space-y-1.5">
+              <Label>
+                <LabelWithHint
+                  label={t('questsAdminPage.form.partnerCode')}
+                  hint={t('questsAdminPage.help.partnerCode')}
+                />
+              </Label>
+              <Input
+                value={draft.partnerCode}
+                onChange={(e) => set('partnerCode', e.target.value)}
+                placeholder="PROMO2026"
+                className="max-w-[240px]"
+              />
+              {errors.partnerCode && <p className="text-xs text-destructive">{errors.partnerCode}</p>}
+            </div>
+          )}
+          <div className="space-y-1.5">
+            <Label>
+              <LabelWithHint
+                label={t('questsAdminPage.form.partnerLandingUrl')}
+                hint={t('questsAdminPage.help.partnerLandingUrl')}
+              />
+            </Label>
+            <Input
+              type="url"
+              value={draft.partnerLandingUrl}
+              onChange={(e) => set('partnerLandingUrl', e.target.value)}
+              placeholder="https://partner.example/offer"
+            />
+          </div>
+          {draft.partnerMethod === 'timed_visit' && (
+            <div className="space-y-1.5">
+              <Label>
+                <LabelWithHint
+                  label={t('questsAdminPage.form.partnerDwellSeconds')}
+                  hint={t('questsAdminPage.help.partnerDwellSeconds')}
+                />
+              </Label>
+              <Input
+                type="number"
+                min={0}
+                max={3600}
+                value={draft.partnerDwellSeconds}
+                onChange={(e) => set('partnerDwellSeconds', e.target.value)}
+                className="max-w-[160px]"
+              />
+            </div>
+          )}
         </div>
       )}
       {/* Icon picker */}

@@ -117,6 +117,22 @@ export class RawCacheService implements OnModuleInit, OnModuleDestroy {
     return this.redis.incrby(key, by);
   }
 
+  /**
+   * Atomically claim a one-time key (anti-replay / nonce dedup). Returns true
+   * only for the FIRST caller within the TTL window; every later claim of the
+   * same key returns false. Uses a single `SET key val NX EX ttl` so there is
+   * no check-then-set race.
+   *
+   * FAIL-CLOSED: when the cache is unavailable we return false (treat as
+   * "already seen") so a replay can never slip through during an outage — the
+   * caller must reject rather than grant on an unverifiable nonce.
+   */
+  async claimOnce(key: string, ttlSeconds: number): Promise<boolean> {
+    if (!this.isReady()) return false;
+    const result = await this.redis.set(key, '1', 'EX', ttlSeconds, 'NX');
+    return result === 'OK';
+  }
+
   async expire(key: string, ttlSeconds: number): Promise<void> {
     if (!this.isReady()) return;
     await this.redis.expire(key, ttlSeconds);

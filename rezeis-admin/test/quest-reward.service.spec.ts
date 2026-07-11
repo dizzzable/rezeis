@@ -227,6 +227,25 @@ describe('QuestRewardService', () => {
     });
   });
 
+  it('rejects a channel quest whose membership proof has expired before reserving reward budget', async () => {
+    const { service, calls } = makeService({
+      quest: pointsQuest({ type: 'SUBSCRIBE_CHANNEL' }),
+      completion: {
+        id: 'c1',
+        status: 'COMPLETED',
+        verifiedAt: new Date(Date.now() - 16 * 60 * 1000),
+        rewardIssuedAt: null,
+        rewardSnapshot: null,
+      },
+    });
+
+    await assert.rejects(() => service.claim({ userId: 'u1', questId: 'q1' }), {
+      message: 'Quest channel membership verification has expired',
+    });
+    assert.equal(calls.completionUpdateMany.length, 0);
+    assert.equal(calls.userUpdate.length, 0);
+  });
+
   it('extends a bounded active subscription for a DAYS reward and enqueues profile-sync', async () => {
     const { service, calls } = makeService({
       quest: pointsQuest({ rewardType: 'DAYS', rewardAmount: 3 }),

@@ -8,6 +8,7 @@ import {
   Prisma,
   Quest,
   QuestCompletionStatus,
+  QuestType,
   SubscriptionStatus,
   SyncAction,
   SyncJobStatus,
@@ -20,6 +21,8 @@ import { buildPlanSnapshot } from '../../users/utils/plan-snapshot.util';
 import { QuestClaimResult } from '../interfaces/quest-claim.interface';
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
+/** Bot recheck runs more often; this is the hard server-side claim boundary. */
+const CHANNEL_MEMBERSHIP_MAX_AGE_MS = 15 * 60 * 1000;
 
 /**
  * Issues quest rewards. Because the reward primitives commit external effects
@@ -67,7 +70,13 @@ export class QuestRewardService {
       where: {
         questId_userId_periodKey: { questId: input.questId, userId: input.userId, periodKey },
       },
-      select: { id: true, status: true, rewardIssuedAt: true, rewardSnapshot: true },
+      select: {
+        id: true,
+        status: true,
+        verifiedAt: true,
+        rewardIssuedAt: true,
+        rewardSnapshot: true,
+      },
     });
     if (completion === null || completion.status === QuestCompletionStatus.IN_PROGRESS) {
       throw new BadRequestException('Quest is not completed yet');
@@ -83,6 +92,14 @@ export class QuestRewardService {
     }
 
     // COMPLETED → reserve budget + claim atomically (single winner).
+    // For channel quests the membership proof must be fresh: a stale `verifiedAt`
+    // (Telegram outage, membership lost between rechecks) must not let an old
+    // completion be cashed in. The same cutoff is enforced atomically inside
+    // reserveAndClaim so a concurrent negative recheck can't be raced.
+    if (quest.type === QuestType.SUBSCRIBE_CHANNEL && !isChannelProofFresh(completion.verifiedAt)) {
+      throw new BadRequestException('Quest channel membership verification has expired');
+    }
+
     await this.reserveAndClaim(quest, completion.id);
     return this.issueReward(quest, input.userId, completion.id);
   }
@@ -101,8 +118,16 @@ export class QuestRewardService {
 
   private async reserveAndClaim(quest: Quest, completionId: string): Promise<void> {
     await this.prismaService.$transaction(async (tx) => {
+      // For channel quests, bind the claim to a still-fresh membership proof in
+      // the same conditional update. A concurrent negative recheck that nulls
+      // `verifiedAt` (or pushes it past the cutoff) makes this match zero rows,
+      // so the claim loses the race instead of paying out on stale proof.
+      const freshnessGuard =
+        quest.type === QuestType.SUBSCRIBE_CHANNEL
+          ? { verifiedAt: { gte: new Date(Date.now() - CHANNEL_MEMBERSHIP_MAX_AGE_MS) } }
+          : {};
       const claimed = await tx.questCompletion.updateMany({
-        where: { id: completionId, status: QuestCompletionStatus.COMPLETED },
+        where: { id: completionId, status: QuestCompletionStatus.COMPLETED, ...freshnessGuard },
         data: { status: QuestCompletionStatus.CLAIMED, claimedAt: new Date() },
       });
       if (claimed.count === 0) {
@@ -413,6 +438,16 @@ export class QuestRewardService {
       );
     }
   }
+}
+
+/**
+ * A channel membership proof is only good for a bounded window. Beyond it the
+ * bot must re-verify before a reward can be claimed. `null` (never verified or
+ * revoked by a negative recheck) is never fresh.
+ */
+function isChannelProofFresh(verifiedAt: Date | null): boolean {
+  if (verifiedAt === null) return false;
+  return verifiedAt.getTime() >= Date.now() - CHANNEL_MEMBERSHIP_MAX_AGE_MS;
 }
 
 function assertWindowActive(quest: Quest): void {

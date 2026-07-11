@@ -15,6 +15,7 @@ const messages: QuestValidationMessages = {
   planRequired: 'plan required',
   channelRequired: 'channel required',
   windowInvalid: 'window invalid',
+  partnerRequired: 'partner required',
 }
 
 function draft(overrides: Partial<QuestDraft> = {}): QuestDraft {
@@ -55,6 +56,27 @@ describe('validateQuestDraft', () => {
     expect(validateQuestDraft(draft({ type: 'SUBSCRIBE_CHANNEL' }), messages).channelId).toBe(
       'channel required',
     )
+  })
+
+  it('requires a partner slug for PARTNER_TASK', () => {
+    expect(validateQuestDraft(draft({ type: 'PARTNER_TASK' }), messages).partnerSlug).toBe(
+      'partner required',
+    )
+  })
+
+  it('requires a code for a manual_code partner quest', () => {
+    const base = draft({ type: 'PARTNER_TASK', partnerSlug: 'acme', partnerMethod: 'manual_code' })
+    expect(validateQuestDraft(base, messages).partnerCode).toBe('partner required')
+    expect(
+      validateQuestDraft({ ...base, partnerCode: 'PROMO' }, messages).partnerCode,
+    ).toBeUndefined()
+  })
+
+  it('does not require a code for postback / timed_visit', () => {
+    expect(
+      validateQuestDraft(draft({ type: 'PARTNER_TASK', partnerSlug: 'acme', partnerMethod: 'postback' }), messages)
+        .partnerCode,
+    ).toBeUndefined()
   })
 
   it('rejects an end date before start date', () => {
@@ -98,6 +120,46 @@ describe('buildQuestPayload', () => {
     expect(payload.params).toEqual({ channelId: '-100123' })
   })
 
+  it('emits a partner block for a manual_code PARTNER_TASK', () => {
+    const payload = buildQuestPayload(
+      draft({
+        type: 'PARTNER_TASK',
+        partnerSlug: 'acme',
+        partnerMethod: 'manual_code',
+        partnerCode: 'PROMO2026',
+        partnerLandingUrl: 'https://acme.example/offer',
+      }),
+    )
+    expect(payload.params).toEqual({
+      partner: {
+        method: 'manual_code',
+        partnerSlug: 'acme',
+        code: 'PROMO2026',
+        landingUrl: 'https://acme.example/offer',
+      },
+    })
+  })
+
+  it('emits a timed_visit partner block with dwell seconds and no code', () => {
+    const payload = buildQuestPayload(
+      draft({
+        type: 'PARTNER_TASK',
+        partnerSlug: 'acme',
+        partnerMethod: 'timed_visit',
+        partnerLandingUrl: 'https://acme.example/land',
+        partnerDwellSeconds: '30',
+      }),
+    )
+    expect(payload.params).toEqual({
+      partner: {
+        method: 'timed_visit',
+        partnerSlug: 'acme',
+        landingUrl: 'https://acme.example/land',
+        minDwellSeconds: 30,
+      },
+    })
+  })
+
   it('sets cooldownHours only for repeatable quests', () => {
     expect(buildQuestPayload(draft({ repeat: 'ONCE', cooldownHours: '24' })).cooldownHours).toBeNull()
     expect(
@@ -133,5 +195,39 @@ describe('questToDraft round-trip', () => {
     expect(restored.cooldownHours).toBe('12')
     expect(restored.startAt).toBe('2026-07-10T12:00')
     expect(restored.enabled).toBe(true)
+  })
+
+  it('restores partner fields from a PARTNER_TASK quest', () => {
+    const restored = questToDraft({
+      type: 'PARTNER_TASK',
+      title: { ru: 'Партнёр', en: 'Partner' },
+      description: { ru: '', en: '' },
+      iconKind: 'PRESET',
+      iconRef: 'gift',
+      rewardType: 'POINTS',
+      rewardAmount: 5,
+      rewardPlanId: null,
+      daysFallback: 'MINT_PROMOCODE',
+      audienceFilter: null,
+      repeat: 'ONCE',
+      cooldownHours: null,
+      startAt: null,
+      endAt: null,
+      maxCompletionsGlobal: null,
+      params: {
+        partner: {
+          method: 'timed_visit',
+          partnerSlug: 'acme',
+          landingUrl: 'https://acme.example/land',
+          minDwellSeconds: 30,
+        },
+      },
+      enabled: true,
+    })
+    expect(restored.type).toBe('PARTNER_TASK')
+    expect(restored.partnerMethod).toBe('timed_visit')
+    expect(restored.partnerSlug).toBe('acme')
+    expect(restored.partnerLandingUrl).toBe('https://acme.example/land')
+    expect(restored.partnerDwellSeconds).toBe('30')
   })
 })

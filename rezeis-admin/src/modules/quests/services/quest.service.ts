@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import {
   Prisma,
   Quest,
@@ -16,10 +16,21 @@ import {
   QuestInterface,
   QuestParams,
 } from '../interfaces/quest.interface';
+import { resolveQuestChannelConfig } from '../utils/quest-channel-config.util';
+import { resolveQuestPartnerConfig } from '../utils/quest-partner-config.util';
+import { QuestPartnerSecretRegistry } from './quest-partner-secret.registry';
+
+/** Narrow view of the secret registry the config gate needs (slug existence). */
+interface PartnerSlugChecker {
+  has(slug: string): boolean;
+}
 
 @Injectable()
 export class QuestService {
-  public constructor(private readonly prismaService: PrismaService) {}
+  public constructor(
+    private readonly prismaService: PrismaService,
+    @Optional() private readonly partnerSecrets?: QuestPartnerSecretRegistry,
+  ) {}
 
   public async list(): Promise<readonly QuestInterface[]> {
     const quests = await this.prismaService.quest.findMany({
@@ -41,7 +52,7 @@ export class QuestService {
     readonly dto: CreateQuestDto;
     readonly currentAdmin: CurrentAdminInterface;
   }): Promise<QuestInterface> {
-    assertCompletableType(input.dto.type);
+    assertCompletableType(input.dto.type, input.dto.params ?? null, this.partnerSecrets);
     assertWindow(input.dto.startAt, input.dto.endAt);
     assertRewardConfig(
       input.dto.rewardType,
@@ -91,12 +102,17 @@ export class QuestService {
         rewardType: true,
         daysFallback: true,
         rewardPlanId: true,
+        params: true,
       },
     });
     if (existing === null) {
       throw new NotFoundException('Quest not found');
     }
-    assertCompletableType(dto.type ?? existing.type);
+    assertCompletableType(
+      dto.type ?? existing.type,
+      dto.params !== undefined ? dto.params : (existing.params as Prisma.JsonValue),
+      this.partnerSecrets,
+    );
     const nextStart = dto.startAt !== undefined ? parseDate(dto.startAt) : existing.startAt;
     const nextEnd = dto.endAt !== undefined ? parseDate(dto.endAt) : existing.endAt;
     assertWindowDates(nextStart, nextEnd);
@@ -190,11 +206,28 @@ const COMPLETABLE_QUEST_TYPES: readonly QuestType[] = [
   QuestType.LINK_TELEGRAM,
   QuestType.LINK_EMAIL,
   QuestType.INVITE_FRIENDS,
+  QuestType.SUBSCRIBE_CHANNEL,
+  QuestType.PARTNER_TASK,
 ];
 
-function assertCompletableType(type: QuestType): void {
+function assertCompletableType(
+  type: QuestType,
+  params: Record<string, unknown> | Prisma.JsonValue | null,
+  partnerSlugs?: PartnerSlugChecker,
+): void {
   if (!COMPLETABLE_QUEST_TYPES.includes(type)) {
     throw new BadRequestException('This quest type is not available yet');
+  }
+  if (type === QuestType.SUBSCRIBE_CHANNEL && resolveQuestChannelConfig(params as Prisma.JsonValue) === null) {
+    throw new BadRequestException('A channel quest requires a valid chat id or username');
+  }
+  if (type === QuestType.PARTNER_TASK) {
+    const config = resolveQuestPartnerConfig(params as Prisma.JsonValue);
+    // The partner slug must resolve to a configured secret, otherwise the
+    // callback / manual-code path can never verify and the quest is unshippable.
+    if (config === null || partnerSlugs === undefined || !partnerSlugs.has(config.partnerSlug)) {
+      throw new BadRequestException('A partner quest requires a valid, configured partner');
+    }
   }
 }
 

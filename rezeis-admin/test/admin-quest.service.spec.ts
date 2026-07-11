@@ -114,9 +114,9 @@ describe('QuestService', () => {
     );
   });
 
-  it('rejects creating a quest type with no completion path (Phase A gate)', async () => {
+  it('rejects creating quest types with no completion path yet', async () => {
     const service = new QuestService({ quest: {} } as never);
-    for (const type of [QuestType.SUBSCRIBE_CHANNEL, QuestType.PARTNER_TASK, QuestType.CUSTOM]) {
+    for (const type of [QuestType.CUSTOM]) {
       await assert.rejects(
         () =>
           service.create({
@@ -131,6 +131,129 @@ describe('QuestService', () => {
         { name: 'BadRequestException', message: 'This quest type is not available yet' },
       );
     }
+  });
+
+  it('allows a channel quest only with a verifiable chat id and safe join URL (Phase B)', async () => {
+    const createCalls: unknown[] = [];
+    const service = new QuestService({
+      quest: {
+        aggregate: async () => ({ _max: { order: 0 } }),
+        create: async (args: unknown) => {
+          createCalls.push(args);
+          return questRecord({ type: QuestType.SUBSCRIBE_CHANNEL });
+        },
+      },
+    } as never);
+
+    await service.create({
+      dto: {
+        type: QuestType.SUBSCRIBE_CHANNEL,
+        title: { ru: 'Подпишись', en: 'Subscribe' },
+        rewardType: 'POINTS',
+        rewardAmount: 3,
+        params: {
+          channelId: '-1001234567890',
+          channelLink: 'https://t.me/+RezeisPrivateInvite',
+        },
+      },
+      currentAdmin: currentAdmin(),
+    });
+
+    assert.deepStrictEqual(
+      (createCalls[0] as { data: { params: unknown } }).data.params,
+      {
+        channelId: '-1001234567890',
+        channelLink: 'https://t.me/+RezeisPrivateInvite',
+      },
+    );
+  });
+
+  it('rejects a channel quest whose config cannot both verify and join a channel', async () => {
+    const service = new QuestService({ quest: {} } as never);
+    await assert.rejects(
+      () =>
+        service.create({
+          dto: {
+            type: QuestType.SUBSCRIBE_CHANNEL,
+            title: { ru: 'Подпишись', en: 'Subscribe' },
+            rewardType: 'POINTS',
+            rewardAmount: 3,
+            params: { channelLink: 'https://t.me/+privateInviteOnly' },
+          },
+          currentAdmin: currentAdmin(),
+        }),
+      { name: 'BadRequestException', message: 'A channel quest requires a valid chat id or username' },
+    );
+  });
+
+  it('allows a partner quest only with a valid config and a known partner slug (Phase C)', async () => {
+    const createCalls: unknown[] = [];
+    const service = new QuestService(
+      {
+        quest: {
+          aggregate: async () => ({ _max: { order: 0 } }),
+          create: async (args: unknown) => {
+            createCalls.push(args);
+            return questRecord({ type: QuestType.PARTNER_TASK });
+          },
+        },
+      } as never,
+      { has: (slug: string) => slug === 'acme' } as never,
+    );
+
+    await service.create({
+      dto: {
+        type: QuestType.PARTNER_TASK,
+        title: { ru: 'Партнёр', en: 'Partner' },
+        rewardType: 'POINTS',
+        rewardAmount: 3,
+        params: { partner: { method: 'manual_code', partnerSlug: 'acme', code: 'PROMO2026' } },
+      },
+      currentAdmin: currentAdmin(),
+    });
+
+    assert.equal(createCalls.length, 1);
+  });
+
+  it('rejects a partner quest whose slug has no configured secret', async () => {
+    const service = new QuestService(
+      { quest: {} } as never,
+      { has: () => false } as never,
+    );
+    await assert.rejects(
+      () =>
+        service.create({
+          dto: {
+            type: QuestType.PARTNER_TASK,
+            title: { ru: 'Партнёр', en: 'Partner' },
+            rewardType: 'POINTS',
+            rewardAmount: 3,
+            params: { partner: { method: 'postback', partnerSlug: 'unknown' } },
+          },
+          currentAdmin: currentAdmin(),
+        }),
+      { name: 'BadRequestException', message: 'A partner quest requires a valid, configured partner' },
+    );
+  });
+
+  it('rejects a partner quest with no partner config at all', async () => {
+    const service = new QuestService(
+      { quest: {} } as never,
+      { has: () => true } as never,
+    );
+    await assert.rejects(
+      () =>
+        service.create({
+          dto: {
+            type: QuestType.PARTNER_TASK,
+            title: { ru: 'Партнёр', en: 'Partner' },
+            rewardType: 'POINTS',
+            rewardAmount: 3,
+          },
+          currentAdmin: currentAdmin(),
+        }),
+      { name: 'BadRequestException', message: 'A partner quest requires a valid, configured partner' },
+    );
   });
 
   it('patches only provided fields and retains history on disable', async () => {

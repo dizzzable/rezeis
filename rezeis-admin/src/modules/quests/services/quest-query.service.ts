@@ -12,6 +12,7 @@ import {
   readRequiredFriends,
   withinWindow,
 } from './quest-progress.service';
+import { resolveQuestPartnerConfig } from '../utils/quest-partner-config.util';
 
 interface CabinetUser {
   readonly points: number;
@@ -116,6 +117,17 @@ function toCabinetItem(
   };
   if (quest.type === QuestType.INVITE_FRIENDS) {
     return { ...base, requiredFriends: readRequiredFriends(quest.params) };
+  }
+  if (quest.type === QuestType.PARTNER_TASK) {
+    const partner = resolveQuestPartnerConfig(quest.params);
+    if (partner === null) return base;
+    // Expose ONLY presentation-safe fields — never the slug, code or secret.
+    return {
+      ...base,
+      partnerMethod: partner.method,
+      ...(partner.landingUrl !== null ? { partnerUrl: partner.landingUrl } : {}),
+      ...(partner.minDwellSeconds !== null ? { partnerVisitSeconds: partner.minDwellSeconds } : {}),
+    };
   }
   return base;
 }

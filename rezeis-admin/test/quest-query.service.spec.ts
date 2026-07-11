@@ -107,9 +107,40 @@ describe('QuestQueryService.listForUser', () => {
       user,
       quests: [quest({ type: QuestType.INVITE_FRIENDS, params: { requiredFriends: 3 } })],
       completions: [{ questId: 'q1', status: 'IN_PROGRESS', progress: 1 }],
+    })
+    const res = await svc.listForUser('u1')
+    assert.equal(res.quests[0].requiredFriends, 3)
+    assert.equal(res.quests[0].progress, 1)
+  })
+
+  it('exposes only safe partner metadata for PARTNER_TASK (no secret / slug / code)', async () => {
+    const svc = makeService({
+      user,
+      quests: [
+        quest({
+          type: QuestType.PARTNER_TASK,
+          params: {
+            partner: {
+              method: 'timed_visit',
+              partnerSlug: 'acme',
+              code: 'SECRET-CODE',
+              landingUrl: 'https://acme.example/land',
+              minDwellSeconds: 30,
+            },
+          },
+        }),
+      ],
+      completions: [],
     });
     const res = await svc.listForUser('u1');
-    assert.equal(res.quests[0].requiredFriends, 3);
-    assert.equal(res.quests[0].progress, 1);
+    const item = res.quests[0] as unknown as Record<string, unknown>;
+    assert.equal(item.partnerMethod, 'timed_visit');
+    assert.equal(item.partnerUrl, 'https://acme.example/land');
+    assert.equal(item.partnerVisitSeconds, 30);
+    // Secrets / internal refs must never reach the cabinet.
+    assert.equal(item.partnerSlug, undefined);
+    assert.equal(item.code, undefined);
+    assert.equal(item.partner, undefined);
+    assert.equal(JSON.stringify(item).includes('SECRET-CODE'), false);
   });
 });

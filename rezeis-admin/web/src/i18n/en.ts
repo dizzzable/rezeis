@@ -803,6 +803,11 @@ export const en = {
       PARTNER_TASK: 'Partner task',
       CUSTOM: 'Custom',
     },
+    partnerMethod: {
+      manual_code: 'Activation code',
+      postback: 'Partner postback',
+      timed_visit: 'Timed visit',
+    },
     rewardTypes: {
       POINTS: 'Points',
       DAYS: 'Subscription days',
@@ -851,6 +856,11 @@ export const en = {
       uploadSvg: 'Upload SVG',
       requiredFriends: 'Friends required',
       channelId: 'Channel ID',
+      partnerMethod: 'Verification method',
+      partnerSlug: 'Partner slug',
+      partnerCode: 'Activation code',
+      partnerLandingUrl: 'Partner URL',
+      partnerDwellSeconds: 'Min. visit time (sec)',
       repeat: 'Repeatability',
       cooldownHours: 'Cooldown between completions (hours)',
       startAt: 'Show from',
@@ -893,6 +903,7 @@ export const en = {
       planRequired: 'Provide a plan for the trial grant',
       channelRequired: 'Provide the channel ID for the subscription',
       windowInvalid: 'End must be later than start',
+      partnerRequired: 'Fill in the required partner fields',
     },
     help: {
       infoAria: 'More info',
@@ -909,6 +920,13 @@ export const en = {
       icon: 'The quest icon in the cabinet. Pick a preset or upload your own SVG (e.g. an advertiser logo).',
       channelId:
         'Numeric Telegram channel ID (e.g. -100…). The bot must be added to the channel to verify subscription.',
+      partnerMethod:
+        'How the task is credited: an activation code the user enters, a signed server postback from the partner, or a visit to a link with a minimum dwell time.',
+      partnerSlug:
+        'Partner identifier. Must match the slug an HMAC secret is configured for in QUEST_PARTNER_SECRETS.',
+      partnerCode: 'Activation code the user enters to complete the task (for the “Activation code” method).',
+      partnerLandingUrl: 'Partner link (https only) the user is sent to.',
+      partnerDwellSeconds: 'Minimum visit time in seconds before it counts (for the “Timed visit” method).',
       requiredFriends:
         'How many friends (qualified referrals) must be invited to complete the quest.',
       enabled: 'Disabled quests are hidden from users and grant no rewards.',
