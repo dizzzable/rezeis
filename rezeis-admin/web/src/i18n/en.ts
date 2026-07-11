@@ -897,14 +897,20 @@ export const en = {
     help: {
       infoAria: 'More info',
       type: 'The event that rewards the user: linking Telegram/email, inviting friends, subscribing to a channel, etc.',
-      rewardType: 'What is granted on completion: points (shared balance), subscription days, a promo code, a discount, or traffic.',
-      daysFallback: 'How to grant days: extend/grant a trial directly, or generate a promo code worth the days.',
+      rewardType:
+        'What is granted on completion: points (shared balance), subscription days, a promo code, a discount, or traffic.',
+      daysFallback:
+        'How to grant days: extend/grant a trial directly, or generate a promo code worth the days.',
       audience: 'Who the quest is shown to. E.g. "Link email" — only users without a linked email.',
-      repeat: 'Once — completed a single time. Repeatable — can be completed again after a cooldown.',
-      maxCompletions: 'Maximum successful completions across all users (activity budget). Empty — no limit.',
+      repeat:
+        'Once — completed a single time. Repeatable — can be completed again after a cooldown.',
+      maxCompletions:
+        'Maximum successful completions across all users (activity budget). Empty — no limit.',
       icon: 'The quest icon in the cabinet. Pick a preset or upload your own SVG (e.g. an advertiser logo).',
-      channelId: 'Numeric Telegram channel ID (e.g. -100…). The bot must be added to the channel to verify subscription.',
-      requiredFriends: 'How many friends (qualified referrals) must be invited to complete the quest.',
+      channelId:
+        'Numeric Telegram channel ID (e.g. -100…). The bot must be added to the channel to verify subscription.',
+      requiredFriends:
+        'How many friends (qualified referrals) must be invited to complete the quest.',
       enabled: 'Disabled quests are hidden from users and grant no rewards.',
     },
     toast: {
@@ -1044,10 +1050,12 @@ export const en = {
     empty: 'No promocodes yet',
     created: 'Promocode created',
     createFailed: 'Failed to create',
-    deleted: 'Promocode deleted',
-    deleteTitle: 'Delete promocode?',
-    deleteText: 'Promocode {{code}} will be permanently deleted.',
-    deleteConfirm: 'Delete',
+    deleted: 'Promocode archived',
+    deleteFailed: 'Failed to archive promocode',
+    deleteTitle: 'Archive promocode?',
+    deleteText:
+      'Promocode {{code}} will be deactivated and hidden. Activation history will be preserved. Restore and code reuse are not available yet.',
+    deleteConfirm: 'Archive',
     applyTitle: 'Apply promocode',
     applied: 'Promocode applied · {{reward}}',
     applyFailed: 'Failed to apply promocode',
@@ -1102,7 +1110,7 @@ export const en = {
     aria: {
       toggleActive: 'Toggle promocode active state',
       apply: 'Apply promocode to user',
-      delete: 'Delete promocode',
+      delete: 'Archive promocode',
     },
     apply: {
       telegramId: 'Telegram ID',

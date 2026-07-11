@@ -54,15 +54,25 @@ describe('PromocodeRewardsService', () => {
   it('extends active subscriptions for duration rewards', async () => {
     const updateCalls: unknown[] = [];
     const service = new PromocodeRewardsService();
-    const expiresAt = new Date('2026-05-01T00:00:00.000Z');
+    const expiresAt = new Date('2026-12-01T00:00:00.000Z');
 
     const result = await service.applyReward({
       transactionClient: {
+        $queryRaw: async () => [], // subscription row lock
         subscription: {
-          findUnique: async () => ({ expiresAt, status: SubscriptionStatus.ACTIVE }),
+          findUnique: async () => ({
+            expiresAt,
+            status: SubscriptionStatus.ACTIVE,
+            remnawaveId: 'rw-1',
+            userId: 'user-1', // isEligibleTarget check
+            planSnapshot: {},
+          }),
           update: async (args: unknown) => {
             updateCalls.push(args);
           },
+        },
+        profileSyncJob: {
+          create: async () => ({ id: 'sync-1' }),
         },
       } as never,
       promocode: buildPromocode({ rewardType: PromocodeRewardType.DURATION, reward: 10 }),
@@ -70,11 +80,13 @@ describe('PromocodeRewardsService', () => {
       targetSubscriptionId: 'sub-1',
     });
 
-    assert.deepStrictEqual(result, { applied: true, rewardValue: 10 });
+    // The reward now also enqueues a Remnawave profile sync so the extended
+    // expiry actually reaches the user's VPN profile (not just the local DB).
+    assert.deepStrictEqual(result, { applied: true, rewardValue: 10, syncJobId: 'sync-1' });
     assert.deepStrictEqual(updateCalls, [
       {
         where: { id: 'sub-1' },
-        data: { expiresAt: new Date('2026-05-11T00:00:00.000Z') },
+        data: { expiresAt: new Date('2026-12-11T00:00:00.000Z') },
       },
     ]);
   });
@@ -92,6 +104,9 @@ describe('PromocodeRewardsService', () => {
         },
         user: {
           updateMany: async () => ({ count: 1 }),
+        },
+        profileSyncJob: {
+          create: async () => ({ id: 'sync-1' }),
         },
       } as never,
       promocode: buildPromocode({
@@ -113,10 +128,16 @@ describe('PromocodeRewardsService', () => {
       targetSubscriptionId: null,
     });
 
-    assert.deepStrictEqual(result, { applied: true, rewardValue: 30 });
+    assert.deepStrictEqual(result, { applied: true, rewardValue: 30, syncJobId: 'sync-1' });
     assert.equal(createCalls.length, 1);
     assert.equal((createCalls[0] as { data: { userId: string } }).data.userId, 'user-1');
-    assert.equal((createCalls[0] as { data: { status: SubscriptionStatus } }).data.status, SubscriptionStatus.ACTIVE);
-    assert.deepStrictEqual((createCalls[0] as { data: { internalSquads: string[] } }).data.internalSquads, ['squad-a']);
+    assert.equal(
+      (createCalls[0] as { data: { status: SubscriptionStatus } }).data.status,
+      SubscriptionStatus.ACTIVE,
+    );
+    assert.deepStrictEqual(
+      (createCalls[0] as { data: { internalSquads: string[] } }).data.internalSquads,
+      ['squad-a'],
+    );
   });
 });

@@ -50,12 +50,12 @@ function createPromocode(overrides: Partial<PromocodeInterface> = {}): Promocode
 
 describe('PromocodeValidationService', () => {
   it('normalizes codes and validates current availability rules', async () => {
-    let findUniqueArgs: unknown;
+    let findFirstArgs: unknown;
     let activationCountArgs: unknown;
     const service = new PromocodeValidationService({
       promocode: {
-        findUnique: async (args: unknown) => {
-          findUniqueArgs = args;
+        findFirst: async (args: unknown) => {
+          findFirstArgs = args;
           return createRecord({
             availability: PromocodeAvailability.ALLOWED,
             allowedTelegramIds: [BigInt('123456789')],
@@ -82,8 +82,8 @@ describe('PromocodeValidationService', () => {
       assert.equal(result.promocode.code, 'PROMO');
       assert.deepStrictEqual(result.promocode.allowedTelegramIds, ['123456789']);
     }
-    assert.deepStrictEqual(findUniqueArgs, {
-      where: { code: 'PROMO' },
+    assert.deepStrictEqual(findFirstArgs, {
+      where: { code: 'PROMO', archivedAt: null },
       include: { _count: { select: { activations: true } } },
     });
     assert.deepStrictEqual(activationCountArgs, {
@@ -94,30 +94,40 @@ describe('PromocodeValidationService', () => {
   it('returns bounded failure codes without mutating state', async () => {
     const service = new PromocodeValidationService({
       promocode: {
-        findUnique: async () => createRecord({ availability: PromocodeAvailability.ALLOWED }),
+        findFirst: async () => createRecord({ availability: PromocodeAvailability.ALLOWED }),
       },
       promocodeActivation: { count: async () => 0 },
     } as never);
 
-    assert.deepStrictEqual(await service.validate('', {
-      userId: 'user-1',
-      userTelegramId: null,
-      isInvitedUser: false,
-      hasActiveSubscriptions: false,
-    }), { success: false, errorCode: 'NOT_FOUND', messageKey: 'ntf-promocode-not-found' });
-    assert.deepStrictEqual(await service.validate('PROMO', {
-      userId: 'user-1',
-      userTelegramId: null,
-      isInvitedUser: false,
-      hasActiveSubscriptions: false,
-    }), { success: false, errorCode: 'NOT_AVAILABLE_FOR_USER', messageKey: 'ntf-promocode-not-available' });
+    assert.deepStrictEqual(
+      await service.validate('', {
+        userId: 'user-1',
+        userTelegramId: null,
+        isInvitedUser: false,
+        hasActiveSubscriptions: false,
+      }),
+      { success: false, errorCode: 'NOT_FOUND', messageKey: 'ntf-promocode-not-found' },
+    );
+    assert.deepStrictEqual(
+      await service.validate('PROMO', {
+        userId: 'user-1',
+        userTelegramId: null,
+        isInvitedUser: false,
+        hasActiveSubscriptions: false,
+      }),
+      {
+        success: false,
+        errorCode: 'NOT_AVAILABLE_FOR_USER',
+        messageKey: 'ntf-promocode-not-available',
+      },
+    );
   });
 
   it('rejects a promocode past its absolute expiresAt deadline', async () => {
     const past = new Date(Date.now() - 60_000); // 1 min ago
     const service = new PromocodeValidationService({
       promocode: {
-        findUnique: async () => createRecord({ expiresAt: past }),
+        findFirst: async () => createRecord({ expiresAt: past }),
       },
       promocodeActivation: { count: async () => 0 },
     } as never);
@@ -137,7 +147,7 @@ describe('PromocodeValidationService', () => {
     const future = new Date(Date.now() + 3_600_000); // 1 hour ahead
     const service = new PromocodeValidationService({
       promocode: {
-        findUnique: async () => createRecord({ expiresAt: future }),
+        findFirst: async () => createRecord({ expiresAt: future }),
       },
       promocodeActivation: { count: async () => 0 },
     } as never);
@@ -182,18 +192,37 @@ describe('PromocodeValidationService', () => {
     } as never);
     const promocode = createPromocode({ allowedPlanIds: ['plan-allowed'] });
 
-    assert.deepStrictEqual(await service.getEligibleSubscriptionIds({ userId: 'user-1', promocode }), ['sub-allowed']);
-    assert.deepStrictEqual(await service.resolveTargetSubscription({ userId: 'user-1', targetSubscriptionId: 'sub-allowed', promocode }), {
-      subscriptionId: 'sub-allowed',
-      errorCode: null,
-    });
-    assert.deepStrictEqual(await service.resolveTargetSubscription({ userId: 'user-1', targetSubscriptionId: 'foreign-sub', promocode }), {
-      subscriptionId: null,
-      errorCode: 'SUBSCRIPTION_FOREIGN',
-    });
-    assert.deepStrictEqual(subscriptionFindManyArgs, [{
-      where: { userId: 'user-1', status: SubscriptionStatus.ACTIVE },
-      select: { id: true, planSnapshot: true },
-    }]);
+    assert.deepStrictEqual(
+      await service.getEligibleSubscriptionIds({ userId: 'user-1', promocode }),
+      ['sub-allowed'],
+    );
+    assert.deepStrictEqual(
+      await service.resolveTargetSubscription({
+        userId: 'user-1',
+        targetSubscriptionId: 'sub-allowed',
+        promocode,
+      }),
+      {
+        subscriptionId: 'sub-allowed',
+        errorCode: null,
+      },
+    );
+    assert.deepStrictEqual(
+      await service.resolveTargetSubscription({
+        userId: 'user-1',
+        targetSubscriptionId: 'foreign-sub',
+        promocode,
+      }),
+      {
+        subscriptionId: null,
+        errorCode: 'SUBSCRIPTION_FOREIGN',
+      },
+    );
+    assert.deepStrictEqual(subscriptionFindManyArgs, [
+      {
+        where: { userId: 'user-1', status: SubscriptionStatus.ACTIVE },
+        select: { id: true, planSnapshot: true },
+      },
+    ]);
   });
 });

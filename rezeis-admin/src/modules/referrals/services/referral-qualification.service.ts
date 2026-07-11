@@ -1,5 +1,5 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { PurchaseType, ReferralRewardType } from '@prisma/client';
+import { Prisma, PurchaseType, ReferralRewardType, TransactionStatus } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { SystemEventsService, EVENT_TYPES } from '../../../common/services/system-events.service';
@@ -34,6 +34,12 @@ export class ReferralQualificationService {
   /**
    * Called after a completed payment. Qualifies the referral edge (if any)
    * and creates reward rows for the referrer (and optionally L2 referrer).
+   *
+   * Atomicity: the referral row is locked with `FOR UPDATE` and all writes
+   * (qualify + reward creates) happen inside a single transaction. Concurrent
+   * duplicate calls for the same user will queue on the lock; only the first
+   * one will see `qualifiedAt === null` and proceed — subsequent calls exit
+   * early, keeping the reward set exactly-once.
    */
   public async qualifyReferralAfterPurchase(transactionId: string): Promise<void> {
     const transaction = await this.prismaService.transaction.findUnique({
@@ -71,10 +77,14 @@ export class ReferralQualificationService {
       return;
     }
 
-    // If accrual_strategy = ON_FIRST_PAYMENT, skip non-NEW purchases
+    // ON_FIRST_PAYMENT pre-filter: only NEW and UPGRADE are eligible types.
+    // RENEW / ADDITIONAL always imply a prior payment, so they never qualify.
+    // For UPGRADE we do an additional DB check inside the transaction below
+    // to confirm this is truly the user's first completed payment.
+    const FIRST_PAYMENT_TYPES: readonly PurchaseType[] = [PurchaseType.NEW, PurchaseType.UPGRADE];
     if (
       settings.accrual_strategy === 'ON_FIRST_PAYMENT' &&
-      transaction.purchaseType !== PurchaseType.NEW
+      !FIRST_PAYMENT_TYPES.includes(transaction.purchaseType)
     ) {
       this.logger.debug(
         `Skipping qualification: accrual_strategy=ON_FIRST_PAYMENT but purchaseType=${transaction.purchaseType}`,
@@ -82,114 +92,124 @@ export class ReferralQualificationService {
       return;
     }
 
-    // Find the L1 referral edge where this user is the referred party
-    const referral = await this.prismaService.referral.findUnique({
-      where: { referredId: transaction.userId },
-      select: {
-        id: true,
-        referrerId: true,
-        level: true,
-        qualifiedAt: true,
-      },
-    });
-
-    if (!referral) {
-      this.logger.debug(`No referral edge for user ${transaction.userId}`);
-      return;
-    }
-
-    // Already qualified — skip
-    if (referral.qualifiedAt !== null) {
-      this.logger.debug(`Referral ${referral.id} already qualified`);
-      return;
-    }
-
-    // Check if referrer is an active Partner (donor parity — skip reward)
-    const referrerPartner = await this.prismaService.partner.findUnique({
-      where: { userId: referral.referrerId },
-      select: { isActive: true },
-    });
-
-    const referrerIsActivePartner = referrerPartner?.isActive === true;
-
-    // Mark referral as qualified
-    await this.prismaService.referral.update({
-      where: { id: referral.id },
-      data: {
-        qualifiedAt: new Date(),
-        qualifiedTransactionId: transaction.id,
-        qualifiedPurchaseChannel: transaction.channel,
-      },
-    });
-
-    // Emit referral qualified event
-    this.events.info(EVENT_TYPES.REFERRAL_QUALIFIED, 'REFERRAL', 'Referral qualified after purchase', {
-      referralId: referral.id,
-      referrerId: referral.referrerId,
-      referredUserId: transaction.userId,
-      userId: transaction.userId,
-      transactionId: transaction.id,
-    });
-
-    // Skip reward creation if referrer is an active partner
-    if (referrerIsActivePartner) {
-      this.logger.debug(
-        `Referrer ${referral.referrerId} is an active partner — skipping reward`,
+    // ── Atomic critical section ──────────────────────────────────────────────
+    // Lock the referral row to serialise concurrent calls for the same user.
+    // All writes execute inside a single transaction; the event fires after
+    // commit so observers never see a partially-qualified referral.
+    const qualified = await this.prismaService.$transaction(async (tx) => {
+      // Lock by referred_id (UNIQUE) so parallel calls queue here.
+      await tx.$queryRaw(
+        Prisma.sql`SELECT "id" FROM "referrals" WHERE "referred_id" = ${transaction.userId} FOR UPDATE`,
       );
-      return;
-    }
 
-    const rewardConfig = settings.reward;
-    if (!rewardConfig) {
-      this.logger.warn('No reward configuration in referralSettings');
-      return;
-    }
+      const referral = await tx.referral.findUnique({
+        where: { referredId: transaction.userId },
+        select: { id: true, referrerId: true, level: true, qualifiedAt: true },
+      });
 
-    const rewardType: ReferralRewardType =
-      rewardConfig.type === 'EXTRA_DAYS'
-        ? ReferralRewardType.EXTRA_DAYS
-        : ReferralRewardType.POINTS;
+      if (!referral) return null;
+      // Already qualified — idempotent exit (concurrent winner ran first).
+      if (referral.qualifiedAt !== null) return null;
 
-    const firstAmount = rewardConfig.config?.FIRST ?? 0;
-    const secondAmount = rewardConfig.config?.SECOND ?? 0;
+      // For UPGRADE under ON_FIRST_PAYMENT: prove this is truly the first
+      // completed payment by counting any prior COMPLETED tx for the same user
+      // (excluding the current one). A paid→paid upgrade has prior completeds.
+      if (
+        settings.accrual_strategy === 'ON_FIRST_PAYMENT' &&
+        transaction.purchaseType === PurchaseType.UPGRADE
+      ) {
+        const priorCount = await tx.transaction.count({
+          where: {
+            userId: transaction.userId,
+            status: TransactionStatus.COMPLETED,
+            id: { not: transaction.id },
+          },
+        });
+        if (priorCount > 0) {
+          this.logger.debug(
+            `Skipping UPGRADE qualification: user has ${priorCount} prior completed transaction(s)`,
+          );
+          return null;
+        }
+      }
 
-    // Create L1 reward for the referrer
-    if (firstAmount > 0) {
-      await this.prismaService.referralReward.create({
+      const referrerPartner = await tx.partner.findUnique({
+        where: { userId: referral.referrerId },
+        select: { isActive: true },
+      });
+      const referrerIsActivePartner = referrerPartner?.isActive === true;
+
+      await tx.referral.update({
+        where: { id: referral.id },
         data: {
-          referralId: referral.id,
-          userId: referral.referrerId,
-          type: rewardType,
-          amount: firstAmount,
+          qualifiedAt: new Date(),
+          qualifiedTransactionId: transaction.id,
+          qualifiedPurchaseChannel: transaction.channel,
         },
       });
-    }
 
-    // Create L2 reward if configured — find the referrer's own referral edge
-    if (secondAmount > 0) {
-      const l2Referral = await this.prismaService.referral.findUnique({
-        where: { referredId: referral.referrerId },
-        select: { id: true, referrerId: true },
-      });
+      const rewardConfig = settings.reward;
+      const rewardType: ReferralRewardType =
+        rewardConfig?.type === 'EXTRA_DAYS'
+          ? ReferralRewardType.EXTRA_DAYS
+          : ReferralRewardType.POINTS;
 
-      if (l2Referral) {
-        // Check if L2 referrer is also an active partner
-        const l2Partner = await this.prismaService.partner.findUnique({
-          where: { userId: l2Referral.referrerId },
-          select: { isActive: true },
-        });
+      const firstAmount = rewardConfig?.config?.FIRST ?? 0;
+      const secondAmount = rewardConfig?.config?.SECOND ?? 0;
 
-        if (l2Partner?.isActive !== true) {
-          await this.prismaService.referralReward.create({
+      if (!referrerIsActivePartner && rewardConfig) {
+        if (firstAmount > 0) {
+          await tx.referralReward.create({
             data: {
-              referralId: l2Referral.id,
-              userId: l2Referral.referrerId,
+              referralId: referral.id,
+              userId: referral.referrerId,
               type: rewardType,
-              amount: secondAmount,
+              amount: firstAmount,
             },
           });
         }
+
+        if (secondAmount > 0) {
+          const l2Referral = await tx.referral.findUnique({
+            where: { referredId: referral.referrerId },
+            select: { id: true, referrerId: true },
+          });
+          if (l2Referral) {
+            const l2Partner = await tx.partner.findUnique({
+              where: { userId: l2Referral.referrerId },
+              select: { isActive: true },
+            });
+            if (l2Partner?.isActive !== true) {
+              await tx.referralReward.create({
+                data: {
+                  referralId: l2Referral.id,
+                  userId: l2Referral.referrerId,
+                  type: rewardType,
+                  amount: secondAmount,
+                },
+              });
+            }
+          }
+        }
       }
+
+      return { referral, transaction };
+    });
+
+    // Post-commit event — never fires for duplicate/skipped calls.
+    if (qualified) {
+      this.events.info(
+        EVENT_TYPES.REFERRAL_QUALIFIED,
+        'REFERRAL',
+        'Referral qualified after purchase',
+        {
+          referralId: qualified.referral.id,
+          referrerId: qualified.referral.referrerId,
+          referredUserId: qualified.transaction.userId,
+          userId: qualified.transaction.userId,
+          transactionId: qualified.transaction.id,
+        },
+      );
     }
   }
 
@@ -306,7 +326,10 @@ function readRecord(value: unknown): Record<string, unknown> {
     : {};
 }
 
-function readOptionalNumber(record: Record<string, unknown>, ...keys: readonly string[]): number | undefined {
+function readOptionalNumber(
+  record: Record<string, unknown>,
+  ...keys: readonly string[]
+): number | undefined {
   for (const key of keys) {
     const value = record[key];
     if (typeof value === 'number' && Number.isFinite(value)) {

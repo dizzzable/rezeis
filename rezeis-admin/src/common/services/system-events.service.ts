@@ -34,7 +34,10 @@ import { webhookConfig } from '../config/webhook.config';
 import { buildWebhookSignature } from '../http/webhook-signature.util';
 import { PrismaService } from '../prisma/prisma.service';
 import { RealtimeGateway } from '../../modules/realtime/realtime.gateway';
-import { resolveTelegramDeliveryTarget, isEventTelegramAllowed } from './telegram-delivery-target.util';
+import {
+  resolveTelegramDeliveryTarget,
+  isEventTelegramAllowed,
+} from './telegram-delivery-target.util';
 import {
   buildErrorReportFilename,
   formatErrorEventCardHtml,
@@ -138,6 +141,7 @@ export const EVENT_TYPES = {
   PROMOCODE_ACTIVATED: 'promocode.activated',
   PROMOCODE_CREATED: 'promocode.created',
   PROMOCODE_DEPLETED: 'promocode.depleted',
+  PROMOCODE_ARCHIVED: 'promocode.archived',
 
   // Support
   SUPPORT_TICKET_CREATED: 'support.ticket_created',
@@ -317,21 +321,36 @@ export class SystemEventsService {
   /**
    * Convenience: emit an INFO event.
    */
-  public info(type: string, category: SystemEventCategory, message: string, metadata?: Record<string, unknown>): void {
+  public info(
+    type: string,
+    category: SystemEventCategory,
+    message: string,
+    metadata?: Record<string, unknown>,
+  ): void {
     this.emit({ type, category, severity: 'INFO', message, metadata });
   }
 
   /**
    * Convenience: emit a WARNING event.
    */
-  public warn(type: string, category: SystemEventCategory, message: string, metadata?: Record<string, unknown>): void {
+  public warn(
+    type: string,
+    category: SystemEventCategory,
+    message: string,
+    metadata?: Record<string, unknown>,
+  ): void {
     this.emit({ type, category, severity: 'WARNING', message, metadata });
   }
 
   /**
    * Convenience: emit an ERROR event.
    */
-  public error(type: string, category: SystemEventCategory, message: string, metadata?: Record<string, unknown>): void {
+  public error(
+    type: string,
+    category: SystemEventCategory,
+    message: string,
+    metadata?: Record<string, unknown>,
+  ): void {
     this.emit({ type, category, severity: 'ERROR', message, metadata });
   }
 
@@ -530,7 +549,12 @@ export class SystemEventsService {
     // applies to EVERY path (operator group, reiwa relay, AND the dev-DM
     // fallback). Unselected events go nowhere on Telegram. The panel still
     // has them (audit log + realtime already ran in emit()).
-    if (!isEventTelegramAllowed(event.type, { eventsMode: tgConfig.eventsMode, events: tgConfig.events })) {
+    if (
+      !isEventTelegramAllowed(event.type, {
+        eventsMode: tgConfig.eventsMode,
+        events: tgConfig.events,
+      })
+    ) {
       return;
     }
 
@@ -621,9 +645,7 @@ export class SystemEventsService {
   }
 
   /** Map an emitted system event to the normalized error-report shape. */
-  private toErrorReportEvent(
-    event: SystemEventPayload & { timestamp: string },
-  ): ErrorReportEvent {
+  private toErrorReportEvent(event: SystemEventPayload & { timestamp: string }): ErrorReportEvent {
     const meta = event.metadata ?? {};
     return {
       kind: `event.${event.type}`,
@@ -653,10 +675,11 @@ export class SystemEventsService {
       form.append('chat_id', input.chatId);
       if (input.topicId) form.append('message_thread_id', String(input.topicId));
       form.append('document', new Blob([txt], { type: 'text/plain' }), filename);
-      const res = await fetch(
-        `https://api.telegram.org/bot${input.botToken}/sendDocument`,
-        { method: 'POST', body: form, signal: AbortSignal.timeout(10_000) },
-      );
+      const res = await fetch(`https://api.telegram.org/bot${input.botToken}/sendDocument`, {
+        method: 'POST',
+        body: form,
+        signal: AbortSignal.timeout(10_000),
+      });
       if (!res.ok) {
         this.logger.warn(`Telegram sendDocument returned ${res.status}`);
       }
@@ -692,7 +715,11 @@ export class SystemEventsService {
    */
   private async deliverToReiwaDev(
     event: SystemEventPayload & { timestamp: string },
-    opts: { readonly errorEvent: boolean; readonly attachTxt: boolean; readonly reportEvent: ErrorReportEvent },
+    opts: {
+      readonly errorEvent: boolean;
+      readonly attachTxt: boolean;
+      readonly reportEvent: ErrorReportEvent;
+    },
   ): Promise<void> {
     const notifier = this.resolveBotNotifier();
     if (notifier === null) return;
@@ -806,7 +833,8 @@ export class SystemEventsService {
       lines.push('');
       lines.push('👤 <b>Пользователь:</b>');
       const userLines: string[] = [];
-      if (meta['telegramId']) userLines.push(`🪪 Telegram ID: <code>${escapeHtml(meta['telegramId'])}</code>`);
+      if (meta['telegramId'])
+        userLines.push(`🪪 Telegram ID: <code>${escapeHtml(meta['telegramId'])}</code>`);
       if (meta['userId']) userLines.push(`👾 Reiwa ID: <code>${escapeHtml(meta['userId'])}</code>`);
       const displayName = meta['userName'] ?? meta['firstName'];
       if (displayName) {
@@ -816,7 +844,8 @@ export class SystemEventsService {
         userLines.push(`👤 Username: @${escapeHtml(meta['username'])}`);
       }
       if (meta['login']) userLines.push(`🔑 Login: <code>${escapeHtml(meta['login'])}</code>`);
-      if (meta['email'] && !meta['fraudUserEmail']) userLines.push(`📧 Email: ${escapeHtml(meta['email'])}`);
+      if (meta['email'] && !meta['fraudUserEmail'])
+        userLines.push(`📧 Email: ${escapeHtml(meta['email'])}`);
       lines.push(`<blockquote>${userLines.join('\n')}</blockquote>`);
     }
 
@@ -826,11 +855,15 @@ export class SystemEventsService {
       lines.push('💰 <b>Платёж:</b>');
       const payLines: string[] = [];
       if (meta['paymentId']) payLines.push(`🆔 ID: <code>${escapeHtml(meta['paymentId'])}</code>`);
-      if (meta['gatewayType']) payLines.push(`💳 Способ оплаты: ${escapeHtml(meta['gatewayType'])}`);
+      if (meta['gatewayType'])
+        payLines.push(`💳 Способ оплаты: ${escapeHtml(meta['gatewayType'])}`);
       if (meta['amount']) payLines.push(`💷 Сумма: ${fmtAmount(meta['amount'], meta['currency'])}`);
-      if (meta['purchaseType']) payLines.push(`💥 Тип покупки: ${humanizePurchaseType(meta['purchaseType'])}`);
-      if (typeof meta['receiptUrl'] === 'string') payLines.push(`📃 <a href="${escapeHtml(meta['receiptUrl'])}">Чек</a>`);
-      else if (typeof meta['checkoutUrl'] === 'string') payLines.push(`🧾 <a href="${escapeHtml(meta['checkoutUrl'])}">Ссылка на оплату</a>`);
+      if (meta['purchaseType'])
+        payLines.push(`💥 Тип покупки: ${humanizePurchaseType(meta['purchaseType'])}`);
+      if (typeof meta['receiptUrl'] === 'string')
+        payLines.push(`📃 <a href="${escapeHtml(meta['receiptUrl'])}">Чек</a>`);
+      else if (typeof meta['checkoutUrl'] === 'string')
+        payLines.push(`🧾 <a href="${escapeHtml(meta['checkoutUrl'])}">Ссылка на оплату</a>`);
       if (meta['paidAt']) payLines.push(`⏰ Оплачено: ${fmtDate(meta['paidAt'])}`);
       lines.push(`<blockquote>${payLines.join('\n')}</blockquote>`);
     }
@@ -847,13 +880,20 @@ export class SystemEventsService {
       }
       if (meta['planName']) planLines.push(`🏷 План: ${escapeHtml(meta['planName'])}`);
       if (meta['planType']) planLines.push(`📦 Тип: ${humanizePlanType(meta['planType'])}`);
-      else if (meta['purchaseType']) planLines.push(`📦 Тип: ${humanizePurchaseType(meta['purchaseType'])}`);
-      if (typeof meta['trafficLimitBytes'] === 'number') planLines.push(`📊 Лимит трафика: ${fmtBytes(meta['trafficLimitBytes'])}`);
-      if (meta['deviceLimit'] !== undefined) planLines.push(`📱 Лимит устройств: ${escapeHtml(meta['deviceLimit'])}`);
-      if (meta['durationDays']) planLines.push(`⏳ Длительность: ${humanizeDuration(meta['durationDays'])}`);
-      if (meta['isTrial'] !== undefined) planLines.push(`🎁 Триал: ${meta['isTrial'] ? 'да' : 'нет'}`);
-      if (meta['expireAt'] || meta['expiresAt']) planLines.push(`📅 Действует до: ${fmtDate(meta['expireAt'] ?? meta['expiresAt'])}`);
-      if (meta['subscriptionId']) planLines.push(`🗳 Подписка ID: <code>${escapeHtml(meta['subscriptionId'])}</code>`);
+      else if (meta['purchaseType'])
+        planLines.push(`📦 Тип: ${humanizePurchaseType(meta['purchaseType'])}`);
+      if (typeof meta['trafficLimitBytes'] === 'number')
+        planLines.push(`📊 Лимит трафика: ${fmtBytes(meta['trafficLimitBytes'])}`);
+      if (meta['deviceLimit'] !== undefined)
+        planLines.push(`📱 Лимит устройств: ${escapeHtml(meta['deviceLimit'])}`);
+      if (meta['durationDays'])
+        planLines.push(`⏳ Длительность: ${humanizeDuration(meta['durationDays'])}`);
+      if (meta['isTrial'] !== undefined)
+        planLines.push(`🎁 Триал: ${meta['isTrial'] ? 'да' : 'нет'}`);
+      if (meta['expireAt'] || meta['expiresAt'])
+        planLines.push(`📅 Действует до: ${fmtDate(meta['expireAt'] ?? meta['expiresAt'])}`);
+      if (meta['subscriptionId'])
+        planLines.push(`🗳 Подписка ID: <code>${escapeHtml(meta['subscriptionId'])}</code>`);
       if (meta['source']) planLines.push(`📌 Причина: ${humanizeSource(meta['source'])}`);
       lines.push(`<blockquote>${planLines.join('\n')}</blockquote>`);
     }
@@ -866,29 +906,41 @@ export class SystemEventsService {
       lines.push('');
       lines.push('🌐 <b>Профиль Remnawave:</b>');
       const remnaLines: string[] = [];
-      if (meta['remnawaveUsername']) remnaLines.push(`🃏 Профиль на панели: <code>${escapeHtml(meta['remnawaveUsername'])}</code>`);
+      if (meta['remnawaveUsername'])
+        remnaLines.push(
+          `🃏 Профиль на панели: <code>${escapeHtml(meta['remnawaveUsername'])}</code>`,
+        );
       if (remnaUuid) remnaLines.push(`🔹 UUID: <code>${escapeHtml(remnaUuid)}</code>`);
       if (typeof meta['usedTrafficBytes'] === 'number') {
-        const limit = typeof meta['trafficLimitBytes'] === 'number' && meta['trafficLimitBytes'] > 0
-          ? ` / ${fmtBytes(meta['trafficLimitBytes'])}`
-          : '';
+        const limit =
+          typeof meta['trafficLimitBytes'] === 'number' && meta['trafficLimitBytes'] > 0
+            ? ` / ${fmtBytes(meta['trafficLimitBytes'])}`
+            : '';
         remnaLines.push(`📊 Трафик: ${fmtBytes(meta['usedTrafficBytes'])}${limit}`);
       }
-      if (meta['expireAt'] && !meta['planName']) remnaLines.push(`📅 Действует до: ${fmtDate(meta['expireAt'])}`);
+      if (meta['expireAt'] && !meta['planName'])
+        remnaLines.push(`📅 Действует до: ${fmtDate(meta['expireAt'])}`);
       lines.push(`<blockquote>${remnaLines.join('\n')}</blockquote>`);
       const panelUrl = buildRemnawavePanelUrl();
-      if (panelUrl) lines.push(`🔗 <a href="${escapeHtml(panelUrl)}">Открыть в панели Remnawave</a>`);
+      if (panelUrl)
+        lines.push(`🔗 <a href="${escapeHtml(panelUrl)}">Открыть в панели Remnawave</a>`);
     }
     if (meta['filename'] && (event.category === 'SYSTEM' || meta['backupId'])) {
       lines.push('');
       lines.push('🗄 <b>Бэкап:</b>');
       const backupLines: string[] = [];
       backupLines.push(`🗂 Файл: <code>${escapeHtml(meta['filename'])}</code>`);
-      if (typeof meta['sizeBytes'] === 'number') backupLines.push(`🗃 Размер: ${fmtBytes(meta['sizeBytes'])}`);
+      if (typeof meta['sizeBytes'] === 'number')
+        backupLines.push(`🗃 Размер: ${fmtBytes(meta['sizeBytes'])}`);
       if (meta['scope']) backupLines.push(`📦 Объём: ${escapeHtml(meta['scope'])}`);
-      if (typeof meta['checksum'] === 'string') backupLines.push(`📰 Контрольная сумма: <code>${escapeHtml(meta['checksum'].slice(0, 12))}</code>`);
-      if (meta['deliveredToTelegram'] === false) backupLines.push('📥 Доставка: только локально (слишком большой)');
-      if (meta['initiatedBy']) backupLines.push(`👤 Инициатор: <code>${escapeHtml(meta['initiatedBy'])}</code>`);
+      if (typeof meta['checksum'] === 'string')
+        backupLines.push(
+          `📰 Контрольная сумма: <code>${escapeHtml(meta['checksum'].slice(0, 12))}</code>`,
+        );
+      if (meta['deliveredToTelegram'] === false)
+        backupLines.push('📥 Доставка: только локально (слишком большой)');
+      if (meta['initiatedBy'])
+        backupLines.push(`👤 Инициатор: <code>${escapeHtml(meta['initiatedBy'])}</code>`);
       lines.push(`<blockquote>${backupLines.join('\n')}</blockquote>`);
     }
 
@@ -898,18 +950,25 @@ export class SystemEventsService {
       lines.push('🖥 <b>Нода:</b>');
       const nodeLines: string[] = [];
       if (meta['nodeName']) nodeLines.push(`🎴 Название: ${escapeHtml(meta['nodeName'])}`);
-      if (meta['countryCode']) nodeLines.push(`🏴 Страна: ${countryCodeToFlag(meta['countryCode'])}`);
-      if (meta['nodeAddress']) nodeLines.push(`💈 Адрес: <code>${escapeHtml(meta['nodeAddress'])}</code>`);
-      if (meta['nodeUuid']) nodeLines.push(`🔹 UUID: <code>${escapeHtml(String(meta['nodeUuid']).slice(0, 12))}</code>`);
+      if (meta['countryCode'])
+        nodeLines.push(`🏴 Страна: ${countryCodeToFlag(meta['countryCode'])}`);
+      if (meta['nodeAddress'])
+        nodeLines.push(`💈 Адрес: <code>${escapeHtml(meta['nodeAddress'])}</code>`);
+      if (meta['nodeUuid'])
+        nodeLines.push(
+          `🔹 UUID: <code>${escapeHtml(String(meta['nodeUuid']).slice(0, 12))}</code>`,
+        );
       lines.push(`<blockquote>${nodeLines.join('\n')}</blockquote>`);
     }
     if (meta['partnerId'] || meta['earning']) {
       lines.push('');
       lines.push('🤝 <b>Партнёр:</b>');
       const partnerLines: string[] = [];
-      if (meta['partnerId']) partnerLines.push(`🗳 ID: <code>${String(meta['partnerId']).slice(0, 12)}</code>`);
+      if (meta['partnerId'])
+        partnerLines.push(`🗳 ID: <code>${String(meta['partnerId']).slice(0, 12)}</code>`);
       if (meta['level']) partnerLines.push(`🏮 Уровень: ${meta['level']}`);
-      if (meta['earning']) partnerLines.push(`💴 Начислено: ${(Number(meta['earning']) / 100).toFixed(2)} ₽`);
+      if (meta['earning'])
+        partnerLines.push(`💴 Начислено: ${(Number(meta['earning']) / 100).toFixed(2)} ₽`);
       if (meta['percent']) partnerLines.push(`🏵 Процент: ${meta['percent']}%`);
       lines.push(`<blockquote>${partnerLines.join('\n')}</blockquote>`);
     }
@@ -924,7 +983,10 @@ export class SystemEventsService {
       }
       if (meta['referredUserId']) {
         refLines.push(`👤 Приглашённый:`);
-        if (meta['referredTelegramId']) refLines.push(`   🪪 Telegram ID: <code>${escapeHtml(meta['referredTelegramId'])}</code>`);
+        if (meta['referredTelegramId'])
+          refLines.push(
+            `   🪪 Telegram ID: <code>${escapeHtml(meta['referredTelegramId'])}</code>`,
+          );
         refLines.push(`   👾 Reiwa ID: <code>${escapeHtml(meta['referredUserId'])}</code>`);
         if (meta['referredName']) {
           const h = meta['referredUsername'] ? ` (@${escapeHtml(meta['referredUsername'])})` : '';
@@ -932,11 +994,15 @@ export class SystemEventsService {
         } else if (meta['referredUsername']) {
           refLines.push(`   👤 Username: @${escapeHtml(meta['referredUsername'])}`);
         }
-        if (meta['referredLogin']) refLines.push(`   🔑 Login: <code>${escapeHtml(meta['referredLogin'])}</code>`);
+        if (meta['referredLogin'])
+          refLines.push(`   🔑 Login: <code>${escapeHtml(meta['referredLogin'])}</code>`);
       }
       if (meta['referrerId']) {
         refLines.push(`👥 Пригласил:`);
-        if (meta['referrerTelegramId']) refLines.push(`   🪪 Telegram ID: <code>${escapeHtml(meta['referrerTelegramId'])}</code>`);
+        if (meta['referrerTelegramId'])
+          refLines.push(
+            `   🪪 Telegram ID: <code>${escapeHtml(meta['referrerTelegramId'])}</code>`,
+          );
         refLines.push(`   👾 Reiwa ID: <code>${escapeHtml(meta['referrerId'])}</code>`);
         if (meta['referrerName']) {
           const h = meta['referrerUsername'] ? ` (@${escapeHtml(meta['referrerUsername'])})` : '';
@@ -944,13 +1010,15 @@ export class SystemEventsService {
         } else if (meta['referrerUsername']) {
           refLines.push(`   👤 Username: @${escapeHtml(meta['referrerUsername'])}`);
         }
-        if (meta['referrerLogin']) refLines.push(`   🔑 Login: <code>${escapeHtml(meta['referrerLogin'])}</code>`);
+        if (meta['referrerLogin'])
+          refLines.push(`   🔑 Login: <code>${escapeHtml(meta['referrerLogin'])}</code>`);
       }
       if (meta['rewardType']) {
         const rv = meta['rewardValue'] !== undefined ? `: ${escapeHtml(meta['rewardValue'])}` : '';
         refLines.push(`🎊 Награда: ${humanizeRewardType(meta['rewardType'])}${rv}`);
       }
-      if (meta['historicalPaymentsProcessed'] !== undefined) refLines.push(`📈 Платежей обработано: ${meta['historicalPaymentsProcessed']}`);
+      if (meta['historicalPaymentsProcessed'] !== undefined)
+        refLines.push(`📈 Платежей обработано: ${meta['historicalPaymentsProcessed']}`);
       lines.push(`<blockquote>${refLines.join('\n')}</blockquote>`);
     }
 
@@ -971,10 +1039,15 @@ export class SystemEventsService {
       lines.push('📱 <b>Устройство:</b>');
       const deviceLines: string[] = [];
       deviceLines.push(`🧬 HWID: <code>${meta['hwid']}</code>`);
-      if (meta['remainingDevices'] !== undefined) deviceLines.push(`📱 Осталось устройств: ${meta['remainingDevices']}`);
+      if (meta['remainingDevices'] !== undefined)
+        deviceLines.push(`📱 Осталось устройств: ${meta['remainingDevices']}`);
       if (meta['planName']) deviceLines.push(`🏷 План: ${escapeHtml(meta['planName'])}`);
-      if (meta['subscriptionId']) deviceLines.push(`🗳 Подписка ID: <code>${String(meta['subscriptionId']).slice(0, 12)}</code>`);
-      if (meta['remnawaveId']) deviceLines.push(`🌊 Remnawave: <code>${String(meta['remnawaveId']).slice(0, 12)}</code>`);
+      if (meta['subscriptionId'])
+        deviceLines.push(
+          `🗳 Подписка ID: <code>${String(meta['subscriptionId']).slice(0, 12)}</code>`,
+        );
+      if (meta['remnawaveId'])
+        deviceLines.push(`🌊 Remnawave: <code>${String(meta['remnawaveId']).slice(0, 12)}</code>`);
       lines.push(`<blockquote>${deviceLines.join('\n')}</blockquote>`);
     }
 
@@ -998,13 +1071,17 @@ export class SystemEventsService {
       const val = meta['addOnValue'] !== undefined ? ` ${escapeHtml(meta['addOnValue'])}` : '';
       extraLines.push(`🛒 Докупка: ${escapeHtml(meta['addOnType'])}${val}`);
     }
-    if (meta['itemCount'] !== undefined) extraLines.push(`🧾 Позиций: ${escapeHtml(meta['itemCount'])}`);
+    if (meta['itemCount'] !== undefined)
+      extraLines.push(`🧾 Позиций: ${escapeHtml(meta['itemCount'])}`);
     if (meta['count'] !== undefined) extraLines.push(`🔢 Количество: ${escapeHtml(meta['count'])}`);
-    if (meta['recipients'] !== undefined) extraLines.push(`👥 Получателей: ${escapeHtml(meta['recipients'])}`);
+    if (meta['recipients'] !== undefined)
+      extraLines.push(`👥 Получателей: ${escapeHtml(meta['recipients'])}`);
     if (meta['templateName']) extraLines.push(`🫧 Шаблон: ${escapeHtml(meta['templateName'])}`);
-    if (meta['ticketId']) extraLines.push(`🚓 Тикет: <code>${String(meta['ticketId']).slice(0, 12)}</code>`);
+    if (meta['ticketId'])
+      extraLines.push(`🚓 Тикет: <code>${String(meta['ticketId']).slice(0, 12)}</code>`);
     if (meta['subject']) extraLines.push(`📨 Тема: ${escapeHtml(meta['subject'])}`);
-    if (meta['oldRole'] && meta['newRole']) extraLines.push(`🥢 Роль: ${escapeHtml(meta['oldRole'])} → ${escapeHtml(meta['newRole'])}`);
+    if (meta['oldRole'] && meta['newRole'])
+      extraLines.push(`🥢 Роль: ${escapeHtml(meta['oldRole'])} → ${escapeHtml(meta['newRole'])}`);
     if (extraLines.length > 0) {
       lines.push('');
       lines.push('🧩 <b>Дополнительно:</b>');
@@ -1014,13 +1091,12 @@ export class SystemEventsService {
     // Context block
     lines.push('');
     lines.push('🌀 <b>Контекст:</b>');
-    const ctxLines: string[] = [
-      `💠 Категория: ${event.category}`,
-    ];
+    const ctxLines: string[] = [`💠 Категория: ${event.category}`];
     const origin = meta['source'] ?? meta['origin'];
     if (origin) ctxLines.push(`🔎 Источник: ${humanizeSource(origin)}`);
     if (meta['surface']) ctxLines.push(`🌫 Поверхность: ${escapeHtml(meta['surface'])}`);
-    if (meta['operation']) ctxLines.push(`❄️ Операция: <code>${escapeHtml(meta['operation'])}</code>`);
+    if (meta['operation'])
+      ctxLines.push(`❄️ Операция: <code>${escapeHtml(meta['operation'])}</code>`);
     ctxLines.push(`🧮 Уровень: ${event.severity}`);
     const channel = meta['channel'] ?? meta['purchaseChannel'];
     if (channel) ctxLines.push(`📣 Канал покупки: ${humanizeChannel(channel)}`);
@@ -1032,9 +1108,12 @@ export class SystemEventsService {
     // falls back to rezeis's image env (APP_VERSION / REZEIS_GIT_SHA /
     // REZEIS_GIT_BRANCH baked by the Dockerfile + CI).
     const fallbackBuild = getRezeisBuildInfo();
-    const buildVersion = (typeof meta['version'] === 'string' && meta['version']) || fallbackBuild.version;
-    const buildCommit = (typeof meta['commit'] === 'string' && meta['commit']) || fallbackBuild.commit;
-    const buildBranch = (typeof meta['branch'] === 'string' && meta['branch']) || fallbackBuild.branch;
+    const buildVersion =
+      (typeof meta['version'] === 'string' && meta['version']) || fallbackBuild.version;
+    const buildCommit =
+      (typeof meta['commit'] === 'string' && meta['commit']) || fallbackBuild.commit;
+    const buildBranch =
+      (typeof meta['branch'] === 'string' && meta['branch']) || fallbackBuild.branch;
     lines.push('');
     lines.push('🏗 <b>Сборка:</b>');
     lines.push(
@@ -1063,7 +1142,8 @@ export class SystemEventsService {
     const meta = event.metadata;
     if (!meta) return event;
     const userId = typeof meta['userId'] === 'string' ? meta['userId'] : null;
-    const referredUserId = typeof meta['referredUserId'] === 'string' ? meta['referredUserId'] : null;
+    const referredUserId =
+      typeof meta['referredUserId'] === 'string' ? meta['referredUserId'] : null;
     const referrerId = typeof meta['referrerId'] === 'string' ? meta['referrerId'] : null;
 
     // Resolve the main user when any of telegramId / name / login is missing
@@ -1075,9 +1155,13 @@ export class SystemEventsService {
         meta['login'] === undefined ||
         (meta['userName'] === undefined && meta['username'] === undefined));
     const referredNeeds =
-      referredUserId !== null && meta['referredTelegramId'] === undefined && meta['referredName'] === undefined;
+      referredUserId !== null &&
+      meta['referredTelegramId'] === undefined &&
+      meta['referredName'] === undefined;
     const referrerNeeds =
-      referrerId !== null && meta['referrerTelegramId'] === undefined && meta['referrerName'] === undefined;
+      referrerId !== null &&
+      meta['referrerTelegramId'] === undefined &&
+      meta['referrerName'] === undefined;
 
     const ids = Array.from(
       new Set(
@@ -1112,7 +1196,8 @@ export class SystemEventsService {
           }
           if (u.username && merged['username'] === undefined) merged['username'] = u.username;
           if (u.name && merged['userName'] === undefined) merged['userName'] = u.name;
-          if (u.webAccount?.login && merged['login'] === undefined) merged['login'] = u.webAccount.login;
+          if (u.webAccount?.login && merged['login'] === undefined)
+            merged['login'] = u.webAccount.login;
         }
       }
       if (referredNeeds && referredUserId !== null) {
@@ -1191,7 +1276,9 @@ export class SystemEventsService {
       topicMap,
       defaultTopicId: typeof tg.topicId === 'number' ? tg.topicId : null,
       errorTopicId: typeof tg.errorTopicId === 'number' ? tg.errorTopicId : null,
-      events: Array.isArray(tg.events) ? tg.events.filter((e): e is string => typeof e === 'string') : [],
+      events: Array.isArray(tg.events)
+        ? tg.events.filter((e): e is string => typeof e === 'string')
+        : [],
       eventsMode: tg.eventsMode === 'selected' ? 'selected' : 'all',
       devChatId: typeof tg.devChatId === 'string' && tg.devChatId.length > 0 ? tg.devChatId : null,
       errorReportMode: mode === 'off' || mode === 'auto' ? mode : 'manual',
@@ -1200,31 +1287,33 @@ export class SystemEventsService {
   }
 }
 
-
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 function eventTypeToHashtag(type: string): string {
   // "payment.completed" → "EventPaymentCompleted"
-  return 'Event' + type
-    .split('.')
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join('');
+  return (
+    'Event' +
+    type
+      .split('.')
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+      .join('')
+  );
 }
 
 function severityEmoji(severity: SystemEventSeverity): string {
   switch (severity) {
-    case 'ERROR': return '🚨';
-    case 'WARNING': return '⚠️';
-    default: return '⚙️';
+    case 'ERROR':
+      return '🚨';
+    case 'WARNING':
+      return '⚠️';
+    default:
+      return '⚙️';
   }
 }
 
 /** Minimal HTML escaping for user-supplied values rendered in Telegram HTML. */
 function escapeHtml(value: unknown): string {
-  return String(value)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+  return String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 /**
@@ -1266,7 +1355,8 @@ function formatFraudBlock(meta: Record<string, unknown>): string[] {
     sig.push(`📈 Превышение: ${count} / ${limit}`);
   }
   if (typeof meta['fraudScore'] === 'number') {
-    const conf = typeof meta['fraudConfidence'] === 'number' ? ` (увер. ${meta['fraudConfidence']}%)` : '';
+    const conf =
+      typeof meta['fraudConfidence'] === 'number' ? ` (увер. ${meta['fraudConfidence']}%)` : '';
     sig.push(`🎯 Оценка: ${meta['fraudScore']}${conf}`);
   }
   out.push(`<blockquote>${sig.join('\n')}</blockquote>`);
@@ -1277,10 +1367,12 @@ function formatFraudBlock(meta: Record<string, unknown>): string[] {
   if (meta['fraudHasRezeisAccount'] === true) {
     if (meta['fraudUserName']) who.push(`👤 Имя: ${escapeHtml(meta['fraudUserName'])}`);
     if (meta['fraudUsername']) who.push(`👤 Username: @${escapeHtml(meta['fraudUsername'])}`);
-    if (meta['fraudTelegramId']) who.push(`🪪 Telegram ID: <code>${escapeHtml(meta['fraudTelegramId'])}</code>`);
+    if (meta['fraudTelegramId'])
+      who.push(`🪪 Telegram ID: <code>${escapeHtml(meta['fraudTelegramId'])}</code>`);
     if (meta['fraudUserEmail']) who.push(`📧 Email: ${escapeHtml(meta['fraudUserEmail'])}`);
     if (meta['fraudUserRole']) who.push(`🥢 Роль: ${escapeHtml(meta['fraudUserRole'])}`);
-    if (typeof meta['fraudSubscriptions'] === 'number') who.push(`📦 Подписок: ${meta['fraudSubscriptions']}`);
+    if (typeof meta['fraudSubscriptions'] === 'number')
+      who.push(`📦 Подписок: ${meta['fraudSubscriptions']}`);
     who.push(`🖥 Web-кабинет: ${meta['fraudHasWebAccount'] === true ? 'да' : 'нет'}`);
     who.push(`🚦 Статус: ${meta['fraudUserBlocked'] === true ? '🔴 заблокирован' : '🟢 активен'}`);
   } else {
@@ -1297,7 +1389,6 @@ function formatFraudBlock(meta: Record<string, unknown>): string[] {
 
   return out;
 }
-
 
 // ── Event presentation (emoji + Russian title) ──────────────────────────────
 
@@ -1405,42 +1496,61 @@ const EVENT_PRESENTATION: Record<string, { emoji: string; title: string }> = {
 /** Human label for a payment/subscription purchase type. */
 function humanizePurchaseType(value: unknown): string {
   switch (String(value).toUpperCase()) {
-    case 'SUBSCRIPTION': return 'Покупка подписки';
+    case 'SUBSCRIPTION':
+      return 'Покупка подписки';
     case 'RENEW':
-    case 'RENEWAL': return 'Продление';
+    case 'RENEWAL':
+      return 'Продление';
     case 'ADD_ON':
-    case 'ADDON': return 'Докупка';
-    case 'UPGRADE': return 'Апгрейд';
-    case 'TRIAL': return 'Триал';
-    default: return escapeHtml(value);
+    case 'ADDON':
+      return 'Докупка';
+    case 'UPGRADE':
+      return 'Апгрейд';
+    case 'TRIAL':
+      return 'Триал';
+    default:
+      return escapeHtml(value);
   }
 }
 
 /** Human label for a referral reward type. */
 function humanizeRewardType(value: unknown): string {
   switch (String(value).toUpperCase()) {
-    case 'POINTS': return 'Баллы';
-    case 'EXTRA_DAYS': return 'Доп. дни';
-    default: return escapeHtml(value);
+    case 'POINTS':
+      return 'Баллы';
+    case 'EXTRA_DAYS':
+      return 'Доп. дни';
+    default:
+      return escapeHtml(value);
   }
 }
 
 /** Human label for a system-action `source` (why an event fired). */
 function humanizeSource(value: unknown): string {
   switch (String(value).toUpperCase()) {
-    case 'EXPIRED_PROFILE_CLEANUP': return 'Очистка истёкших профилей';
+    case 'EXPIRED_PROFILE_CLEANUP':
+      return 'Очистка истёкших профилей';
     case 'ADMIN_PANEL':
-    case 'PANEL': return 'Rezeis Админ-панель';
+    case 'PANEL':
+      return 'Rezeis Админ-панель';
     case 'WEB_CABINET':
-    case 'WEB': return 'Веб-кабинет';
-    case 'BOT': return 'Telegram-бот / Mini App';
-    case 'API': return 'API';
-    case 'WORKER': return 'Worker';
+    case 'WEB':
+      return 'Веб-кабинет';
+    case 'BOT':
+      return 'Telegram-бот / Mini App';
+    case 'API':
+      return 'API';
+    case 'WORKER':
+      return 'Worker';
     case 'SCHEDULER':
-    case 'CRON': return 'Планировщик';
-    case 'REMNAWAVE_SYNC': return 'Синхронизация Remnawave';
-    case 'PAYMENT_WEBHOOK': return 'Вебхук платёжки';
-    default: return escapeHtml(value);
+    case 'CRON':
+      return 'Планировщик';
+    case 'REMNAWAVE_SYNC':
+      return 'Синхронизация Remnawave';
+    case 'PAYMENT_WEBHOOK':
+      return 'Вебхук платёжки';
+    default:
+      return escapeHtml(value);
   }
 }
 
@@ -1452,7 +1562,9 @@ function humanizeSource(value: unknown): string {
 function fmtDate(value: unknown): string {
   if (value === null || value === undefined) return '';
   if (value instanceof Date) {
-    return Number.isNaN(value.getTime()) ? escapeHtml(String(value)) : value.toLocaleString('ru-RU');
+    return Number.isNaN(value.getTime())
+      ? escapeHtml(String(value))
+      : value.toLocaleString('ru-RU');
   }
   if (typeof value === 'number') {
     const d = new Date(value);
@@ -1501,7 +1613,12 @@ function fmtAmount(amount: unknown, currency: unknown): string {
   const amt = escapeHtml(amount);
   const cur = currency ? String(currency).toUpperCase() : '';
   const symbols: Record<string, string> = {
-    RUB: '₽', USD: '$', EUR: '€', UAH: '₴', KZT: '₸', GBP: '£',
+    RUB: '₽',
+    USD: '$',
+    EUR: '€',
+    UAH: '₴',
+    KZT: '₸',
+    GBP: '£',
   };
   if (cur && symbols[cur]) return `${amt} ${symbols[cur]}`;
   return cur ? `${amt} ${escapeHtml(cur)}` : amt;
@@ -1532,21 +1649,29 @@ function humanizeChannel(value: unknown): string {
   switch (String(value).toUpperCase()) {
     case 'TELEGRAM':
     case 'BOT':
-    case 'MINI_APP': return 'Bot / Mini App';
-    case 'WEB': return 'Веб-сайт';
+    case 'MINI_APP':
+      return 'Bot / Mini App';
+    case 'WEB':
+      return 'Веб-сайт';
     case 'ADMIN':
-    case 'PANEL': return 'Админ-панель';
-    default: return escapeHtml(value);
+    case 'PANEL':
+      return 'Админ-панель';
+    default:
+      return escapeHtml(value);
   }
 }
 
 /** Human label for the plan type (PlanType enum). */
 function humanizePlanType(value: unknown): string {
   switch (String(value).toUpperCase()) {
-    case 'TRAFFIC': return 'Трафик';
-    case 'DEVICES': return 'Устройства';
-    case 'BOTH': return 'Трафик + устройства';
-    default: return escapeHtml(value);
+    case 'TRAFFIC':
+      return 'Трафик';
+    case 'DEVICES':
+      return 'Устройства';
+    case 'BOTH':
+      return 'Трафик + устройства';
+    default:
+      return escapeHtml(value);
   }
 }
 

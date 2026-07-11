@@ -1,5 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Prisma, PromocodeRewardType, SubscriptionStatus } from '@prisma/client';
+import {
+  Prisma,
+  PromocodeRewardType,
+  SubscriptionStatus,
+  SyncAction,
+  SyncJobStatus,
+} from '@prisma/client';
 
 import { PromocodeInterface } from '../interfaces/promocode.interface';
 
@@ -32,7 +38,11 @@ export class PromocodeRewardsService {
     readonly promocode: PromocodeInterface;
     readonly userId: string;
     readonly targetSubscriptionId: string | null;
-  }): Promise<{ readonly applied: boolean; readonly rewardValue: number }> {
+  }): Promise<{
+    readonly applied: boolean;
+    readonly rewardValue: number;
+    readonly syncJobId?: string;
+  }> {
     const { promocode } = input;
     const reward = promocode.reward ?? 0;
 
@@ -54,18 +64,24 @@ export class PromocodeRewardsService {
       case PromocodeRewardType.DURATION:
         return this.applyDurationReward({
           transactionClient: input.transactionClient,
+          promocode,
+          userId: input.userId,
           targetSubscriptionId: input.targetSubscriptionId,
           days: reward,
         });
       case PromocodeRewardType.TRAFFIC:
         return this.applyTrafficReward({
           transactionClient: input.transactionClient,
+          promocode,
+          userId: input.userId,
           targetSubscriptionId: input.targetSubscriptionId,
           additionalGigabytes: reward,
         });
       case PromocodeRewardType.DEVICES:
         return this.applyDevicesReward({
           transactionClient: input.transactionClient,
+          promocode,
+          userId: input.userId,
           targetSubscriptionId: input.targetSubscriptionId,
           additionalDevices: reward,
         });
@@ -79,6 +95,63 @@ export class PromocodeRewardsService {
       default:
         return { applied: false, rewardValue: 0 };
     }
+  }
+
+  /**
+   * Enqueue a Remnawave sync for a subscription that a reward just mutated
+   * locally (expiry / traffic / device limit / new subscription). Without
+   * this the change only lives in the local DB and the user's real VPN
+   * profile is never updated — the "promocode activated but nothing
+   * happened" class of bug. Created inside the activation transaction; the
+   * lifecycle caller enqueues it to BullMQ after commit, and the
+   * profile-sync sweep recovers it within 5 min if the enqueue is missed.
+   */
+  private async enqueueSubscriptionSync(input: {
+    readonly transactionClient: Prisma.TransactionClient;
+    readonly subscriptionId: string;
+    readonly remnawaveId: string | null;
+    readonly promocode: PromocodeInterface;
+  }): Promise<string> {
+    const syncJob = await input.transactionClient.profileSyncJob.create({
+      data: {
+        subscriptionId: input.subscriptionId,
+        action: input.remnawaveId === null ? SyncAction.CREATE : SyncAction.UPDATE,
+        status: SyncJobStatus.PENDING,
+        payload: {
+          source: 'PROMOCODE_REWARD',
+          promocodeId: input.promocode.id,
+          code: input.promocode.code,
+          rewardType: input.promocode.rewardType,
+        } as Prisma.InputJsonObject,
+      },
+    });
+    return syncJob.id;
+  }
+
+  private async lockSubscription(
+    transactionClient: Prisma.TransactionClient,
+    subscriptionId: string,
+  ): Promise<void> {
+    await transactionClient.$queryRaw(
+      Prisma.sql`SELECT "id" FROM "subscriptions" WHERE "id" = ${subscriptionId} FOR UPDATE`,
+    );
+  }
+
+  private isEligibleTarget(
+    subscription: {
+      readonly userId: string;
+      readonly status: SubscriptionStatus;
+      readonly planSnapshot: Prisma.JsonValue;
+    },
+    userId: string,
+    promocode: PromocodeInterface,
+  ): boolean {
+    if (subscription.userId !== userId || subscription.status !== SubscriptionStatus.ACTIVE) {
+      return false;
+    }
+    if (promocode.allowedPlanIds.length === 0) return true;
+    const planId = readPlanId(subscription.planSnapshot);
+    return planId !== null && promocode.allowedPlanIds.includes(planId);
   }
 
   /**
@@ -138,52 +211,85 @@ export class PromocodeRewardsService {
 
   private async applyDurationReward(input: {
     readonly transactionClient: Prisma.TransactionClient;
+    readonly promocode: PromocodeInterface;
+    readonly userId: string;
     readonly targetSubscriptionId: string | null;
     readonly days: number;
-  }): Promise<{ readonly applied: boolean; readonly rewardValue: number }> {
+  }): Promise<{
+    readonly applied: boolean;
+    readonly rewardValue: number;
+    readonly syncJobId?: string;
+  }> {
     if (input.targetSubscriptionId === null || input.days <= 0) {
       return { applied: false, rewardValue: 0 };
     }
+    await this.lockSubscription(input.transactionClient, input.targetSubscriptionId);
     const subscription = await input.transactionClient.subscription.findUnique({
       where: { id: input.targetSubscriptionId },
-      select: { expiresAt: true, status: true },
+      select: {
+        expiresAt: true,
+        status: true,
+        remnawaveId: true,
+        userId: true,
+        planSnapshot: true,
+      },
     });
-    if (subscription === null || subscription.status !== SubscriptionStatus.ACTIVE) {
+    if (
+      subscription === null ||
+      !this.isEligibleTarget(subscription, input.userId, input.promocode) ||
+      subscription.expiresAt === null
+    ) {
       return { applied: false, rewardValue: 0 };
     }
-    const baseExpiry = subscription.expiresAt ?? new Date();
-    const nextExpiry = new Date(
-      baseExpiry.getTime() + input.days * 24 * 60 * 60 * 1000,
-    );
+    const baseExpiry = new Date(Math.max(subscription.expiresAt.getTime(), Date.now()));
+    const nextExpiry = new Date(baseExpiry.getTime() + input.days * 24 * 60 * 60 * 1000);
     await input.transactionClient.subscription.update({
       where: { id: input.targetSubscriptionId },
       data: { expiresAt: nextExpiry },
     });
-    return { applied: true, rewardValue: input.days };
+    const syncJobId = await this.enqueueSubscriptionSync({
+      transactionClient: input.transactionClient,
+      subscriptionId: input.targetSubscriptionId,
+      remnawaveId: subscription.remnawaveId,
+      promocode: input.promocode,
+    });
+    return { applied: true, rewardValue: input.days, syncJobId };
   }
 
   private async applyTrafficReward(input: {
     readonly transactionClient: Prisma.TransactionClient;
+    readonly promocode: PromocodeInterface;
+    readonly userId: string;
     readonly targetSubscriptionId: string | null;
     readonly additionalGigabytes: number;
-  }): Promise<{ readonly applied: boolean; readonly rewardValue: number }> {
+  }): Promise<{
+    readonly applied: boolean;
+    readonly rewardValue: number;
+    readonly syncJobId?: string;
+  }> {
     if (input.targetSubscriptionId === null || input.additionalGigabytes <= 0) {
       return { applied: false, rewardValue: 0 };
     }
+    await this.lockSubscription(input.transactionClient, input.targetSubscriptionId);
     const subscription = await input.transactionClient.subscription.findUnique({
       where: { id: input.targetSubscriptionId },
-      select: { trafficLimit: true, status: true, planSnapshot: true },
+      select: {
+        trafficLimit: true,
+        status: true,
+        planSnapshot: true,
+        remnawaveId: true,
+        userId: true,
+      },
     });
-    if (subscription === null || subscription.status !== SubscriptionStatus.ACTIVE) {
+    if (
+      subscription === null ||
+      !this.isEligibleTarget(subscription, input.userId, input.promocode) ||
+      subscription.trafficLimit === null
+    ) {
       return { applied: false, rewardValue: 0 };
     }
-    const currentLimit = subscription.trafficLimit ?? 0;
-    const nextLimit = currentLimit + input.additionalGigabytes;
-    const nextSnapshot = patchSnapshotNumeric(
-      subscription.planSnapshot,
-      'trafficLimit',
-      nextLimit,
-    );
+    const nextLimit = subscription.trafficLimit + input.additionalGigabytes;
+    const nextSnapshot = patchSnapshotNumeric(subscription.planSnapshot, 'trafficLimit', nextLimit);
     await input.transactionClient.subscription.update({
       where: { id: input.targetSubscriptionId },
       data: {
@@ -191,30 +297,49 @@ export class PromocodeRewardsService {
         planSnapshot: nextSnapshot,
       },
     });
-    return { applied: true, rewardValue: input.additionalGigabytes };
+    const syncJobId = await this.enqueueSubscriptionSync({
+      transactionClient: input.transactionClient,
+      subscriptionId: input.targetSubscriptionId,
+      remnawaveId: subscription.remnawaveId,
+      promocode: input.promocode,
+    });
+    return { applied: true, rewardValue: input.additionalGigabytes, syncJobId };
   }
 
   private async applyDevicesReward(input: {
     readonly transactionClient: Prisma.TransactionClient;
+    readonly promocode: PromocodeInterface;
+    readonly userId: string;
     readonly targetSubscriptionId: string | null;
     readonly additionalDevices: number;
-  }): Promise<{ readonly applied: boolean; readonly rewardValue: number }> {
+  }): Promise<{
+    readonly applied: boolean;
+    readonly rewardValue: number;
+    readonly syncJobId?: string;
+  }> {
     if (input.targetSubscriptionId === null || input.additionalDevices <= 0) {
       return { applied: false, rewardValue: 0 };
     }
+    await this.lockSubscription(input.transactionClient, input.targetSubscriptionId);
     const subscription = await input.transactionClient.subscription.findUnique({
       where: { id: input.targetSubscriptionId },
-      select: { deviceLimit: true, status: true, planSnapshot: true },
+      select: {
+        deviceLimit: true,
+        status: true,
+        planSnapshot: true,
+        remnawaveId: true,
+        userId: true,
+      },
     });
-    if (subscription === null || subscription.status !== SubscriptionStatus.ACTIVE) {
+    if (
+      subscription === null ||
+      !this.isEligibleTarget(subscription, input.userId, input.promocode) ||
+      subscription.deviceLimit <= 0
+    ) {
       return { applied: false, rewardValue: 0 };
     }
     const nextLimit = subscription.deviceLimit + input.additionalDevices;
-    const nextSnapshot = patchSnapshotNumeric(
-      subscription.planSnapshot,
-      'deviceLimit',
-      nextLimit,
-    );
+    const nextSnapshot = patchSnapshotNumeric(subscription.planSnapshot, 'deviceLimit', nextLimit);
     await input.transactionClient.subscription.update({
       where: { id: input.targetSubscriptionId },
       data: {
@@ -222,7 +347,13 @@ export class PromocodeRewardsService {
         planSnapshot: nextSnapshot,
       },
     });
-    return { applied: true, rewardValue: input.additionalDevices };
+    const syncJobId = await this.enqueueSubscriptionSync({
+      transactionClient: input.transactionClient,
+      subscriptionId: input.targetSubscriptionId,
+      remnawaveId: subscription.remnawaveId,
+      promocode: input.promocode,
+    });
+    return { applied: true, rewardValue: input.additionalDevices, syncJobId };
   }
 
   private async applySubscriptionReward(input: {
@@ -230,7 +361,11 @@ export class PromocodeRewardsService {
     readonly promocode: PromocodeInterface;
     readonly userId: string;
     readonly targetSubscriptionId: string | null;
-  }): Promise<{ readonly applied: boolean; readonly rewardValue: number }> {
+  }): Promise<{
+    readonly applied: boolean;
+    readonly rewardValue: number;
+    readonly syncJobId?: string;
+  }> {
     const plan = input.promocode.plan;
     if (plan === null) {
       this.logger.warn(
@@ -245,28 +380,46 @@ export class PromocodeRewardsService {
       if (days <= 0) {
         return { applied: false, rewardValue: 0 };
       }
+      await this.lockSubscription(input.transactionClient, input.targetSubscriptionId);
       const subscription = await input.transactionClient.subscription.findUnique({
         where: { id: input.targetSubscriptionId },
-        select: { expiresAt: true, status: true },
+        select: {
+          expiresAt: true,
+          status: true,
+          remnawaveId: true,
+          userId: true,
+          planSnapshot: true,
+        },
       });
-      if (subscription === null || subscription.status !== SubscriptionStatus.ACTIVE) {
+      if (
+        subscription === null ||
+        !this.isEligibleTarget(subscription, input.userId, input.promocode) ||
+        subscription.expiresAt === null
+      ) {
         return { applied: false, rewardValue: 0 };
       }
-      const baseExpiry = subscription.expiresAt ?? new Date();
+      const baseExpiry = new Date(Math.max(subscription.expiresAt.getTime(), Date.now()));
       const nextExpiry = new Date(baseExpiry.getTime() + days * 24 * 60 * 60 * 1000);
       await input.transactionClient.subscription.update({
         where: { id: input.targetSubscriptionId },
         data: { expiresAt: nextExpiry },
       });
-      return { applied: true, rewardValue: days };
+      const syncJobId = await this.enqueueSubscriptionSync({
+        transactionClient: input.transactionClient,
+        subscriptionId: input.targetSubscriptionId,
+        remnawaveId: subscription.remnawaveId,
+        promocode: input.promocode,
+      });
+      return { applied: true, rewardValue: days, syncJobId };
     }
 
-    // Create a brand-new subscription from the plan snapshot. The Remnawave
-    // sync is left to the profile-sync queue; we only persist the local
-    // record so the activation transaction stays fast and atomic.
+    // Create a brand-new subscription from the plan snapshot, then enqueue a
+    // Remnawave CREATE so the user actually gets a working profile. Both the
+    // local row and the sync job are written in the same transaction; the
+    // caller enqueues the job to BullMQ after commit (and the profile-sync
+    // sweep recovers it within 5 min if the enqueue is missed).
     const startedAt = new Date();
-    const expiresAt =
-      days > 0 ? new Date(startedAt.getTime() + days * 24 * 60 * 60 * 1000) : null;
+    const expiresAt = days > 0 ? new Date(startedAt.getTime() + days * 24 * 60 * 60 * 1000) : null;
     const createdSubscription = await input.transactionClient.subscription.create({
       data: {
         userId: input.userId,
@@ -288,8 +441,20 @@ export class PromocodeRewardsService {
       where: { id: input.userId, currentSubscriptionId: null },
       data: { currentSubscriptionId: createdSubscription.id },
     });
-    return { applied: true, rewardValue: days };
+    const syncJobId = await this.enqueueSubscriptionSync({
+      transactionClient: input.transactionClient,
+      subscriptionId: createdSubscription.id,
+      remnawaveId: null,
+      promocode: input.promocode,
+    });
+    return { applied: true, rewardValue: days, syncJobId };
   }
+}
+
+function readPlanId(snapshot: Prisma.JsonValue): string | null {
+  if (snapshot === null || typeof snapshot !== 'object' || Array.isArray(snapshot)) return null;
+  const id = (snapshot as Record<string, unknown>).id;
+  return typeof id === 'string' && id.length > 0 ? id : null;
 }
 
 function clampDiscount(value: number): number {

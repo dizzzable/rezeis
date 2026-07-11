@@ -36,9 +36,7 @@ interface PromocodeActivationListResponse {
 @RequirePermission('promocodes', 'view')
 @Controller('admin/promocodes')
 export class AdminPromocodesController {
-  public constructor(
-    private readonly lifecycleService: PromocodeLifecycleService,
-  ) {}
+  public constructor(private readonly lifecycleService: PromocodeLifecycleService) {}
 
   @Get()
   @ApiOperation({ summary: 'List promocodes (newest first)' })
@@ -72,7 +70,7 @@ export class AdminPromocodesController {
   @Delete(':promocodeId')
   @HttpCode(HttpStatus.NO_CONTENT)
   @RequirePermission('promocodes', 'delete')
-  @ApiOperation({ summary: 'Delete a promocode' })
+  @ApiOperation({ summary: 'Archive and deactivate a promocode' })
   public async delete(@Param('promocodeId') promocodeId: string): Promise<void> {
     await this.lifecycleService.delete(promocodeId);
   }

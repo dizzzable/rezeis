@@ -426,7 +426,11 @@ rezeis/
 
 ## 🔌 API
 
-Swagger UI доступен по адресу `/api/docs` после запуска.
+Swagger UI доступен по адресу `/api/docs`, когда оператор явно задаёт
+`API_DOCS_ENABLED=true`. Флаг работает во всех окружениях, включая production;
+по умолчанию документация выключена. Swagger UI и raw-схемы
+`/api/docs-json`/`/api/docs-yaml` не защищены JWT/RBAC приложения: в production
+их следует открывать только за VPN, reverse-proxy authentication или IP allowlist.
 
 Основные группы эндпоинтов:
 

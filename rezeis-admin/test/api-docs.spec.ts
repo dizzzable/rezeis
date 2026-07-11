@@ -11,8 +11,8 @@ describe('API docs exposure policy', () => {
     assert.equal(shouldEnableApiDocs({ docsEnabled: true }), true);
   });
 
-  it('keeps Swagger disabled in production even when API_DOCS_ENABLED is true', () => {
-    assert.equal(shouldEnableApiDocs({ docsEnabled: true, nodeEnv: 'production' }), false);
+  it('honours explicit API_DOCS_ENABLED=true in production', () => {
+    assert.equal(shouldEnableApiDocs({ docsEnabled: true, nodeEnv: 'production' }), true);
     assert.equal(shouldEnableApiDocs({ docsEnabled: false, nodeEnv: 'production' }), false);
   });
 });

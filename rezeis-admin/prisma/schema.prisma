@@ -1883,6 +1883,7 @@ model Promocode {
   allowedPlanIds     String[]              @default([]) @map("allowed_plan_ids")
   createdAt          DateTime              @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt          DateTime              @updatedAt @map("updated_at") @db.Timestamptz(3)
+  archivedAt         DateTime?             @map("archived_at") @db.Timestamptz(3)
 
   activations PromocodeActivation[]
 
@@ -1890,6 +1891,7 @@ model Promocode {
   @@index([availability])
   @@index([rewardType])
   @@index([createdAt])
+  @@index([archivedAt, createdAt])
   @@map("promocodes")
 }
 

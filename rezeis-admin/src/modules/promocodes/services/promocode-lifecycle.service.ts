@@ -8,9 +8,11 @@ import { Prisma } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { SystemEventsService, EVENT_TYPES } from '../../../common/services/system-events.service';
+import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
 import { CreatePromocodeDto } from '../dto/create-promocode.dto';
 import { UpdatePromocodeDto } from '../dto/update-promocode.dto';
 import {
+  PromocodeActivationErrorCode,
   PromocodeActivationInterface,
   PromocodeActivationResultInterface,
   PromocodeInterface,
@@ -21,9 +23,8 @@ import {
   mapPromocode,
   mapPromocodeActivation,
 } from '../utils/promocode-mappers.util';
-import {
-  PromocodeRewardsService,
-} from './promocode-rewards.service';
+import { isPromocodeDepleted, isPromocodeExpired } from '../utils/promocode-state.util';
+import { PromocodeRewardsService } from './promocode-rewards.service';
 import {
   PromocodeValidationResultInterface,
   PromocodeValidationService,
@@ -34,6 +35,15 @@ interface ActivatePromocodeInput {
   readonly userId: string;
   readonly userTelegramId: bigint | null;
   readonly targetSubscriptionId: string | null;
+}
+
+class PromocodeRevalidationError extends Error {
+  public constructor(
+    public readonly errorCode: PromocodeActivationErrorCode,
+    public readonly messageKey: string,
+  ) {
+    super(errorCode);
+  }
 }
 
 /**
@@ -51,10 +61,12 @@ export class PromocodeLifecycleService {
     private readonly validationService: PromocodeValidationService,
     private readonly rewardsService: PromocodeRewardsService,
     private readonly events: SystemEventsService,
+    private readonly profileSyncQueue: ProfileSyncQueueService,
   ) {}
 
   public async list(): Promise<readonly PromocodeInterface[]> {
     const records = await this.prismaService.promocode.findMany({
+      where: { archivedAt: null },
       include: PROMOCODE_INCLUDE_ACTIVATIONS_COUNT,
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     });
@@ -62,8 +74,8 @@ export class PromocodeLifecycleService {
   }
 
   public async getById(promocodeId: string): Promise<PromocodeInterface> {
-    const record = await this.prismaService.promocode.findUnique({
-      where: { id: promocodeId },
+    const record = await this.prismaService.promocode.findFirst({
+      where: { id: promocodeId, archivedAt: null },
       include: PROMOCODE_INCLUDE_ACTIVATIONS_COUNT,
     });
     if (record === null) {
@@ -77,8 +89,8 @@ export class PromocodeLifecycleService {
     if (normalizedCode.length === 0) {
       return null;
     }
-    const record = await this.prismaService.promocode.findUnique({
-      where: { code: normalizedCode },
+    const record = await this.prismaService.promocode.findFirst({
+      where: { code: normalizedCode, archivedAt: null },
       include: PROMOCODE_INCLUDE_ACTIVATIONS_COUNT,
     });
     return record === null ? null : mapPromocode(record);
@@ -100,37 +112,30 @@ export class PromocodeLifecycleService {
           availability: dto.availability,
           rewardType: dto.rewardType,
           reward: dto.reward ?? null,
-          plan: dto.plan === null || dto.plan === undefined
-            ? Prisma.JsonNull
-            : (dto.plan as unknown as Prisma.InputJsonValue),
+          plan:
+            dto.plan === null || dto.plan === undefined
+              ? Prisma.JsonNull
+              : (dto.plan as unknown as Prisma.InputJsonValue),
           lifetime: dto.lifetime ?? null,
           expiresAt: dto.expiresAt ? new Date(dto.expiresAt) : null,
           maxActivations: dto.maxActivations ?? null,
-          allowedTelegramIds: (dto.allowedTelegramIds ?? []).map((value) =>
-            BigInt(value),
-          ),
+          allowedTelegramIds: (dto.allowedTelegramIds ?? []).map((value) => BigInt(value)),
           allowedPlanIds: dto.allowedPlanIds ?? [],
         },
         include: PROMOCODE_INCLUDE_ACTIVATIONS_COUNT,
       });
       return mapPromocode(record);
     } catch (err: unknown) {
-      if (
-        err instanceof Prisma.PrismaClientKnownRequestError &&
-        err.code === 'P2002'
-      ) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
         throw new ConflictException(`Promocode '${normalizedCode}' already exists`);
       }
       throw err;
     }
   }
 
-  public async update(
-    promocodeId: string,
-    dto: UpdatePromocodeDto,
-  ): Promise<PromocodeInterface> {
-    const existing = await this.prismaService.promocode.findUnique({
-      where: { id: promocodeId },
+  public async update(promocodeId: string, dto: UpdatePromocodeDto): Promise<PromocodeInterface> {
+    const existing = await this.prismaService.promocode.findFirst({
+      where: { id: promocodeId, archivedAt: null },
     });
     if (existing === null) {
       throw new NotFoundException('Promocode not found');
@@ -139,7 +144,7 @@ export class PromocodeLifecycleService {
     if (dto.rewardType !== undefined || dto.plan !== undefined) {
       this.assertPlanSnapshotConsistency(
         dto.rewardType ?? existing.rewardType,
-        dto.plan ?? existing.plan,
+        dto.plan !== undefined ? dto.plan : existing.plan,
       );
     }
 
@@ -150,9 +155,7 @@ export class PromocodeLifecycleService {
     if (dto.reward !== undefined) updateData.reward = dto.reward;
     if (dto.plan !== undefined) {
       updateData.plan =
-        dto.plan === null
-          ? Prisma.JsonNull
-          : (dto.plan as unknown as Prisma.InputJsonValue);
+        dto.plan === null ? Prisma.JsonNull : (dto.plan as unknown as Prisma.InputJsonValue);
     }
     if (dto.lifetime !== undefined) updateData.lifetime = dto.lifetime;
     if (dto.expiresAt !== undefined) {
@@ -166,19 +169,45 @@ export class PromocodeLifecycleService {
       updateData.allowedPlanIds = dto.allowedPlanIds;
     }
 
-    const updated = await this.prismaService.promocode.update({
-      where: { id: promocodeId },
-      data: updateData,
-      include: PROMOCODE_INCLUDE_ACTIVATIONS_COUNT,
-    });
-    return mapPromocode(updated);
+    try {
+      const updated = await this.prismaService.promocode.update({
+        where: { id: promocodeId, archivedAt: null },
+        data: updateData,
+        include: PROMOCODE_INCLUDE_ACTIVATIONS_COUNT,
+      });
+      return mapPromocode(updated);
+    } catch (err: unknown) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2025') {
+        throw new NotFoundException('Promocode not found');
+      }
+      throw err;
+    }
   }
 
   public async delete(promocodeId: string): Promise<void> {
     try {
-      await this.prismaService.promocode.delete({ where: { id: promocodeId } });
+      const archived = await this.prismaService.promocode.update({
+        where: { id: promocodeId, archivedAt: null },
+        data: { isActive: false, archivedAt: new Date() },
+        select: { id: true, code: true, _count: { select: { activations: true } } },
+      });
+      this.events.info(
+        EVENT_TYPES.PROMOCODE_ARCHIVED,
+        'PROMOCODE',
+        `Promocode ${archived.code} archived`,
+        {
+          promocodeId: archived.id,
+          code: archived.code,
+          activationsCount: archived._count.activations,
+        },
+      );
     } catch (err: unknown) {
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2025') {
+        const existing = await this.prismaService.promocode.findUnique({
+          where: { id: promocodeId },
+          select: { archivedAt: true },
+        });
+        if (existing?.archivedAt) return;
         throw new NotFoundException('Promocode not found');
       }
       throw err;
@@ -202,9 +231,7 @@ export class PromocodeLifecycleService {
         return { code };
       }
     }
-    throw new BadRequestException(
-      'Failed to generate a unique code after multiple attempts',
-    );
+    throw new BadRequestException('Failed to generate a unique code after multiple attempts');
   }
 
   public async listUserActivations(input: {
@@ -230,6 +257,50 @@ export class PromocodeLifecycleService {
     return { entries: records.map(mapPromocodeActivation), total };
   }
 
+  private async assertActivatableUnderLock(
+    transactionClient: Prisma.TransactionClient,
+    promocode: PromocodeInterface,
+  ): Promise<void> {
+    const locked = await transactionClient.$queryRaw<Array<{ readonly id: string }>>(
+      Prisma.sql`SELECT "id" FROM "promocodes" WHERE "id" = ${promocode.id} FOR UPDATE`,
+    );
+    if (locked.length === 0) {
+      throw new PromocodeRevalidationError('NOT_FOUND', 'ntf-promocode-not-found');
+    }
+
+    const current = await transactionClient.promocode.findUnique({
+      where: { id: promocode.id },
+      select: {
+        isActive: true,
+        archivedAt: true,
+        createdAt: true,
+        updatedAt: true,
+        lifetime: true,
+        expiresAt: true,
+        maxActivations: true,
+      },
+    });
+    if (current === null) {
+      throw new PromocodeRevalidationError('NOT_FOUND', 'ntf-promocode-not-found');
+    }
+    if (current.archivedAt !== null || !current.isActive) {
+      throw new PromocodeRevalidationError('INACTIVE', 'ntf-promocode-inactive');
+    }
+    if (current.updatedAt.toISOString() !== promocode.updatedAt) {
+      throw new PromocodeRevalidationError('NOT_AVAILABLE_FOR_USER', 'ntf-promocode-not-available');
+    }
+    if (isPromocodeExpired(current)) {
+      throw new PromocodeRevalidationError('EXPIRED', 'ntf-promocode-expired');
+    }
+
+    const activations = await transactionClient.promocodeActivation.count({
+      where: { promocodeId: promocode.id },
+    });
+    if (isPromocodeDepleted(activations, current.maxActivations)) {
+      throw new PromocodeRevalidationError('DEPLETED', 'ntf-promocode-depleted');
+    }
+  }
+
   /**
    * Atomically validates and activates a promocode.
    *
@@ -241,9 +312,7 @@ export class PromocodeLifecycleService {
   public async activate(
     input: ActivatePromocodeInput,
   ): Promise<PromocodeActivationResultInterface> {
-    const userContext = await this.validationService.resolveActivationContext(
-      input.userId,
-    );
+    const userContext = await this.validationService.resolveActivationContext(input.userId);
     const validation = await this.validationService.validate(input.rawCode, {
       userId: input.userId,
       userTelegramId: input.userTelegramId,
@@ -267,6 +336,7 @@ export class PromocodeLifecycleService {
     const rewardValue = this.rewardsService.resolveActivationRewardValue(promocode);
     try {
       const completed = await this.prismaService.$transaction(async (transactionClient) => {
+        await this.assertActivatableUnderLock(transactionClient, promocode);
         const activation = await transactionClient.promocodeActivation.create({
           data: {
             promocodeId: promocode.id,
@@ -286,16 +356,42 @@ export class PromocodeLifecycleService {
         if (!application.applied) {
           throw new RewardNotAppliedError();
         }
-        return { activation, rewardValue: application.rewardValue };
+        return {
+          activation,
+          rewardValue: application.rewardValue,
+          syncJobId: application.syncJobId,
+        };
       });
+      // Push the Remnawave sync to BullMQ immediately (the job row was
+      // created inside the transaction above). Best-effort: if enqueue fails
+      // the profile-sync sweep still recovers the PENDING row within 5 min,
+      // so the reward is never silently lost — it just syncs a bit later.
+      if (completed.syncJobId) {
+        try {
+          await this.profileSyncQueue.enqueue(completed.syncJobId);
+        } catch (enqueueErr: unknown) {
+          const message = enqueueErr instanceof Error ? enqueueErr.message : 'Unknown error';
+          this.events.error(
+            EVENT_TYPES.PROMOCODE_ACTIVATED,
+            'PROMOCODE',
+            `Promocode ${promocode.code} reward synced with delay (enqueue failed: ${message})`,
+            { userId: input.userId, promocodeId: promocode.id, code: promocode.code },
+          );
+        }
+      }
       // Emit promocode activated event
-      this.events.info(EVENT_TYPES.PROMOCODE_ACTIVATED, 'PROMOCODE', `Promocode ${promocode.code} activated`, {
-        userId: input.userId,
-        promocodeId: promocode.id,
-        code: promocode.code,
-        rewardType: promocode.rewardType,
-        rewardValue: completed.rewardValue,
-      });
+      this.events.info(
+        EVENT_TYPES.PROMOCODE_ACTIVATED,
+        'PROMOCODE',
+        `Promocode ${promocode.code} activated`,
+        {
+          userId: input.userId,
+          promocodeId: promocode.id,
+          code: promocode.code,
+          rewardType: promocode.rewardType,
+          rewardValue: completed.rewardValue,
+        },
+      );
       return {
         step: 'ACTIVATED',
         messageKey: this.rewardsService.getSuccessMessageKey(promocode.rewardType),
@@ -306,20 +402,15 @@ export class PromocodeLifecycleService {
         activation: mapPromocodeActivation(completed.activation),
       };
     } catch (err: unknown) {
+      if (err instanceof PromocodeRevalidationError) {
+        return reject(err.errorCode, err.messageKey, promocode);
+      }
       if (err instanceof RewardNotAppliedError) {
-        return reject(
-          'REWARD_NOT_APPLICABLE',
-          'ntf-promocode-reward-failed',
-          promocode,
-        );
+        return reject('REWARD_NOT_APPLICABLE', 'ntf-promocode-reward-failed', promocode);
       }
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
         // Race: another process activated the same promo for the same user.
-        return reject(
-          'ALREADY_ACTIVATED',
-          'ntf-promocode-already-activated',
-          promocode,
-        );
+        return reject('ALREADY_ACTIVATED', 'ntf-promocode-already-activated', promocode);
       }
       throw err;
     }
@@ -330,9 +421,7 @@ export class PromocodeLifecycleService {
       return;
     }
     if (plan === null || plan === undefined) {
-      throw new BadRequestException(
-        'SUBSCRIPTION promocodes require a plan snapshot',
-      );
+      throw new BadRequestException('SUBSCRIPTION promocodes require a plan snapshot');
     }
     if (typeof plan !== 'object' || Array.isArray(plan)) {
       throw new BadRequestException('Plan snapshot must be a JSON object');
@@ -357,10 +446,7 @@ function rejectFromValidation(
   if (validation.success) {
     return reject('INTERNAL_ERROR', 'ntf-promocode-internal-error', null);
   }
-  const failure = validation as Extract<
-    PromocodeValidationResultInterface,
-    { success: false }
-  >;
+  const failure = validation as Extract<PromocodeValidationResultInterface, { success: false }>;
   return reject(failure.errorCode, failure.messageKey, null);
 }
 

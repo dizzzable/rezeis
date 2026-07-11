@@ -135,7 +135,7 @@ rezeis/
 - ✅ Zod validation pipe
 - ✅ Scheduler intervals (centralized cron expressions)
 - ✅ Graceful shutdown (SIGTERM/SIGINT)
-- ✅ Swagger conditional (disabled in production)
+- ✅ Swagger conditional (explicit `API_DOCS_ENABLED=true` opt-in in any environment)
 - ✅ Body size limits (10MB JSON, 1MB urlencoded)
 - ✅ Redis + DB health checks
 - ✅ Correlation ID tracing

@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 
 import { AuthModule } from '../auth/auth.module';
+import { ProfileSyncModule } from '../profile-sync/profile-sync.module';
 import { AdminPromocodesController } from './controllers/admin-promocodes.controller';
 import { AdminPromocodesStatsController } from './controllers/admin-promocodes-stats.controller';
 import { InternalPromocodesController } from './controllers/internal-promocodes.controller';
@@ -24,7 +25,7 @@ import { PromocodesStatsService } from './services/promocodes-stats.service';
  *  - `portal`      — branching activation contract for the user-facing edge
  */
 @Module({
-  imports: [AuthModule],
+  imports: [AuthModule, ProfileSyncModule],
   controllers: [
     AdminPromocodesController,
     AdminPromocodesStatsController,

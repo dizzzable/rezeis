@@ -7,10 +7,8 @@ import {
   PromocodeInterface,
 } from '../interfaces/promocode.interface';
 import { normalizeCode } from '../utils/code-normalizer.util';
-import {
-  PROMOCODE_INCLUDE_ACTIVATIONS_COUNT,
-  mapPromocode,
-} from '../utils/promocode-mappers.util';
+import { PROMOCODE_INCLUDE_ACTIVATIONS_COUNT, mapPromocode } from '../utils/promocode-mappers.util';
+import { isPromocodeDepleted, isPromocodeExpired } from '../utils/promocode-state.util';
 
 export interface PromocodeValidationFailureInterface {
   readonly success: false;
@@ -62,8 +60,8 @@ export class PromocodeValidationService {
       return failure('NOT_FOUND', 'ntf-promocode-not-found');
     }
 
-    const record = await this.prismaService.promocode.findUnique({
-      where: { code },
+    const record = await this.prismaService.promocode.findFirst({
+      where: { code, archivedAt: null },
       include: PROMOCODE_INCLUDE_ACTIVATIONS_COUNT,
     });
     if (record === null) {
@@ -74,13 +72,19 @@ export class PromocodeValidationService {
       return failure('INACTIVE', 'ntf-promocode-inactive');
     }
 
-    if (this.isExpired(record.createdAt, record.lifetime, record.expiresAt)) {
+    if (
+      isPromocodeExpired({
+        createdAt: record.createdAt,
+        lifetime: record.lifetime,
+        expiresAt: record.expiresAt,
+      })
+    ) {
       return failure('EXPIRED', 'ntf-promocode-expired');
     }
 
     const promocodeView = mapPromocode(record);
 
-    if (this.isDepleted(promocodeView.activationsCount, record.maxActivations)) {
+    if (isPromocodeDepleted(promocodeView.activationsCount, record.maxActivations)) {
       return failure('DEPLETED', 'ntf-promocode-depleted');
     }
 
@@ -107,9 +111,7 @@ export class PromocodeValidationService {
    * `DELETED`. The caller resolves this with a single `count()` query so we
    * just receive a boolean.
    */
-  public async resolveActivationContext(
-    userId: string,
-  ): Promise<{
+  public async resolveActivationContext(userId: string): Promise<{
     readonly hasActiveSubscriptions: boolean;
     readonly isInvitedUser: boolean;
   }> {
@@ -191,28 +193,6 @@ export class PromocodeValidationService {
     return { subscriptionId: subscription.id, errorCode: null };
   }
 
-  /// donor: `is_expired` — derived from creation timestamp + `lifetime`, plus
-  /// an optional absolute `expiresAt` deadline (operator-picked date+time).
-  /// Expired when EITHER deadline has passed.
-  private isExpired(createdAt: Date, lifetime: number | null, expiresAt: Date | null | undefined): boolean {
-    if (expiresAt != null && expiresAt.getTime() < Date.now()) {
-      return true;
-    }
-    if (lifetime === null || lifetime <= 0) {
-      return false;
-    }
-    const expiry = createdAt.getTime() + lifetime * 24 * 60 * 60 * 1000;
-    return expiry < Date.now();
-  }
-
-  /// donor: `is_depleted` — `max_activations <= 0` or `null` means unlimited.
-  private isDepleted(used: number, maxActivations: number | null): boolean {
-    if (maxActivations === null || maxActivations <= 0) {
-      return false;
-    }
-    return used >= maxActivations;
-  }
-
   /**
    * Donor: `check_availability` — branches by `availability` enum. The
    * caller supplies `hasActiveSubscriptions` and `isInvitedUser` to keep this
@@ -235,9 +215,7 @@ export class PromocodeValidationService {
         if (context.userTelegramId === null) {
           return false;
         }
-        return record.allowedTelegramIds.some(
-          (allowed) => allowed === context.userTelegramId,
-        );
+        return record.allowedTelegramIds.some((allowed) => allowed === context.userTelegramId);
       default:
         return false;
     }
