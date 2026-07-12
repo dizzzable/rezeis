@@ -225,7 +225,7 @@ export const router = createBrowserRouter([
           { path: 'blocked-ips', element: <Navigate to="/admins#blocked-ips" replace /> },
           { path: 'withdrawals', element: <Navigate to="/partners#withdrawals" replace /> },
           { path: 'support-tickets', element: withSuspense(<SupportTicketsPage />) },
-          { path: 'settings/ai-support', element: withSuspense(<AiSupportPage />) },
+          { path: 'ai-support', element: withSuspense(<AiSupportPage />) },
           { path: 'faq', element: withSuspense(<FaqPage />) },
           { path: 'security/2fa', element: <Navigate to="/settings/panel#security" replace /> },
           {

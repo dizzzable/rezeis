@@ -32,6 +32,7 @@ import {
   Map as MapIcon,
   Globe,
   LayoutTemplate,
+  Bot,
 } from 'lucide-react';
 
 import type { SidebarGroupOrder } from '@/stores/sidebar-store';
@@ -147,6 +148,7 @@ export const navGroups: ReadonlyArray<NavGroup> = [
       { key: 'remnawave', path: '/remnawave', icon: RemnawaveIcon },
       { key: 'notifications', path: '/notifications', icon: Bell },
       { key: 'faq', path: '/faq', icon: HelpCircle },
+      { key: 'aiSupport', path: '/ai-support', icon: Bot },
     ],
   },
   {

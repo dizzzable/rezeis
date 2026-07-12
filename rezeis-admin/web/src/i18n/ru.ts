@@ -137,6 +137,7 @@
       remnawave: 'Remnawave',
       notifications: 'Уведомления',
       faq: 'FAQ',
+      aiSupport: 'AI-Support',
       admins: 'Администраторы',
       roles: 'Роли',
       twoFactor: 'Двухфакторка',

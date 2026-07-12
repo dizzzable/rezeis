@@ -17,7 +17,7 @@
 
 import { lazy, Suspense } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Archive, Bot, FileCog, Key, Paintbrush, Palette, Settings, Shield } from 'lucide-react'
+import { Archive, FileCog, Key, Paintbrush, Palette, Settings, Shield } from 'lucide-react'
 
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -45,7 +45,6 @@ const BackupTab = lazy(() => import('@/features/backup/backup-page'))
 const ConfigPortabilityTab = lazy(() => import('@/features/config-portability/config-portability-page'))
 const NotificationsTab = lazy(() => import('./panel-notifications-tab'))
 const QuestPartnersTab = lazy(() => import('./quest-partners-tab'))
-const AiSupportTab = lazy(() => import('./ai-support-page'))
 
 function TabFallback() {
   return (
@@ -105,10 +104,6 @@ export default function PanelSettingsHub() {
               {t('panelSettings.tabs.config')}
             </TabsTrigger>
           </PermissionGate>
-          <TabsTrigger value="ai-support" className="gap-1.5">
-            <Bot className="h-3.5 w-3.5" />
-            AI-Support
-          </TabsTrigger>
         </TabsList>
 
         <PermissionGate resource="api_tokens" action="view" hideWhileLoading>
@@ -168,12 +163,6 @@ export default function PanelSettingsHub() {
             </Suspense>
           </TabsContent>
         </PermissionGate>
-
-        <TabsContent value="ai-support">
-          <Suspense fallback={<TabFallback />}>
-            <AiSupportTab />
-          </Suspense>
-        </TabsContent>
       </Tabs>
     </div>
   )

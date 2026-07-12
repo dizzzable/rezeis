@@ -137,6 +137,7 @@ export const en = {
       remnawave: 'Remnawave',
       notifications: 'Notifications',
       faq: 'FAQ',
+      aiSupport: 'AI-Support',
       admins: 'Admins',
       roles: 'Roles',
       twoFactor: 'Two-factor',
