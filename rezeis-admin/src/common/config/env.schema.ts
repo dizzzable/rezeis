@@ -177,6 +177,11 @@ const environmentSchema = z
      * are baked in; the Updates widget surfaces the latest reiwa release vs.
      * the version reiwa reports in over the internal channel. */
     REZEIS_REIWA_UPDATE_REPO: z.preprocess(normalizeOptionalString, z.string().min(1).optional()),
+
+    // ── OpenAI (AI Chat) ─────────────────────────────────────────────────────
+    OPENAI_API_KEY: z.preprocess(normalizeOptionalString, z.string().trim().min(1).optional()),
+    OPENAI_API_URL: z.preprocess(normalizeOptionalString, z.string().url().optional()),
+    OPENAI_MODEL: z.string().trim().min(1).default('gpt-4o-mini'),
   })
   .superRefine((env, ctx) => {
     try {

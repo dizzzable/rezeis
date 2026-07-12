@@ -59,6 +59,7 @@ import { EmailDeliveryModule } from './modules/email/email.module';
 import { PartnersModule } from './modules/partners/partners.module';
 import { AdvertisingModule } from './modules/advertising/advertising.module';
 import { AccountMergeModule } from './modules/account-merge/account-merge.module';
+import { AiChatModule } from './modules/ai-chat/ai-chat.module';
 import { PaymentAnalyticsModule } from './modules/payment-analytics/payment-analytics.module';
 import { PaymentsModule } from './modules/payments/payments.module';
 import { PlansModule } from './modules/plans/plans.module';
@@ -138,6 +139,7 @@ import { WebhooksModule } from './modules/webhooks/webhooks.module';
     AntiFraudModule,
     AdvertisingModule,
     AccountMergeModule,
+    AiChatModule,
     ApiTokensModule,
     AuditModule,
     SystemEventsIngestModule,
