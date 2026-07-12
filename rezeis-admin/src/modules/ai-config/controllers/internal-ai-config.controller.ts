@@ -13,7 +13,7 @@ export class InternalAiConfigController {
 
   @Get('settings')
   async getSettings() {
-    return this.aiConfigService.getSettingsMasked();
+    return this.aiConfigService.getSettings();
   }
 
   @Get('instructions')
