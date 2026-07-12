@@ -4,7 +4,6 @@ import { toast } from 'sonner'
 import { Save, Loader2, Plus, Pencil, Trash2, Eye, EyeOff, Bot } from 'lucide-react'
 
 import { api } from '@/lib/api'
-import { unwrapPayload } from '@/lib/api-utils'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -106,37 +105,30 @@ export default function AiSupportPage() {
   const [instructionForm, setInstructionForm] = useState<AiInstructionForm>(EMPTY_INSTRUCTION_FORM)
 
   // ── Queries ──
-  const { data: settings, isLoading: settingsLoading } = useQuery({
+  const { data: settings, isLoading: settingsLoading } = useQuery<AiSupportSettings>({
     queryKey: ['admin', 'ai-config', 'settings'],
-    queryFn: async () => {
-      const response = await api.get('/admin/ai-config')
-      return unwrapPayload(response.data) as AiSupportSettings
-    },
-    onSuccess: (data) => {
-      setSettingsForm({
-        baseUrl: data.baseUrl,
-        apiKey: data.apiKey,
-        model: data.model,
-        modelsEndpoint: data.modelsEndpoint,
-      })
-    },
+    queryFn: async () => (await api.get<AiSupportSettings>('/admin/ai-config')).data,
   })
 
-  const { data: models } = useQuery({
+  // Sync settings into form when loaded
+  if (settings && settingsForm.baseUrl === '' && settings.apiKey !== undefined) {
+    setSettingsForm({
+      baseUrl: settings.baseUrl,
+      apiKey: settings.apiKey,
+      model: settings.model,
+      modelsEndpoint: settings.modelsEndpoint,
+    })
+  }
+
+  const { data: models } = useQuery<AiModel[]>({
     queryKey: ['admin', 'ai-config', 'models'],
-    queryFn: async () => {
-      const response = await api.get('/admin/ai-config/models')
-      return unwrapPayload(response.data) as AiModel[]
-    },
+    queryFn: async () => (await api.get<AiModel[]>('/admin/ai-config/models')).data,
     enabled: false,
   })
 
-  const { data: instructions, isLoading: instructionsLoading } = useQuery({
+  const { data: instructions, isLoading: instructionsLoading } = useQuery<AiInstruction[]>({
     queryKey: ['admin', 'ai-instructions'],
-    queryFn: async () => {
-      const response = await api.get('/admin/ai-instructions')
-      return unwrapPayload(response.data) as AiInstruction[]
-    },
+    queryFn: async () => (await api.get<AiInstruction[]>('/admin/ai-instructions')).data,
   })
 
   // ── Mutations ──
@@ -354,9 +346,9 @@ export default function AiSupportPage() {
                   <Button
                     variant="outline"
                     onClick={handleFetchModels}
-                    disabled={fetchModelsMutation.isLoading}
+                    disabled={fetchModelsMutation.isPending}
                   >
-                    {fetchModelsMutation.isLoading ? (
+                    {fetchModelsMutation.isPending ? (
                       <Loader2 className="h-4 w-4 animate-spin" />
                     ) : (
                       'Загрузить модели'
@@ -365,9 +357,9 @@ export default function AiSupportPage() {
                   <Button
                     variant="outline"
                     onClick={handleTestConnection}
-                    disabled={testConnectionMutation.isLoading}
+                    disabled={testConnectionMutation.isPending}
                   >
-                    {testConnectionMutation.isLoading ? (
+                    {testConnectionMutation.isPending ? (
                       <Loader2 className="h-4 w-4 animate-spin" />
                     ) : (
                       'Тест соединения'
@@ -375,8 +367,8 @@ export default function AiSupportPage() {
                   </Button>
                 </div>
 
-                <Button onClick={handleSaveSettings} disabled={updateSettingsMutation.isLoading}>
-                  {updateSettingsMutation.isLoading ? (
+                <Button onClick={handleSaveSettings} disabled={updateSettingsMutation.isPending}>
+                  {updateSettingsMutation.isPending ? (
                     <Loader2 className="h-4 w-4 animate-spin" />
                   ) : (
                     <Save className="h-4 w-4" />
