@@ -60,6 +60,7 @@ import { PartnersModule } from './modules/partners/partners.module';
 import { AdvertisingModule } from './modules/advertising/advertising.module';
 import { AccountMergeModule } from './modules/account-merge/account-merge.module';
 import { AiChatModule } from './modules/ai-chat/ai-chat.module';
+import { AiConfigModule } from './modules/ai-config/ai-config.module';
 import { PaymentAnalyticsModule } from './modules/payment-analytics/payment-analytics.module';
 import { PaymentsModule } from './modules/payments/payments.module';
 import { PlansModule } from './modules/plans/plans.module';
@@ -140,6 +141,7 @@ import { WebhooksModule } from './modules/webhooks/webhooks.module';
     AdvertisingModule,
     AccountMergeModule,
     AiChatModule,
+    AiConfigModule,
     ApiTokensModule,
     AuditModule,
     SystemEventsIngestModule,

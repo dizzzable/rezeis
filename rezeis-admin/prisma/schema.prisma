@@ -1753,9 +1753,31 @@ model Settings {
   /// Operator-uploaded custom icon library, reusable across the panel and the
   /// reiwa cabinet. Array of `{ id, name, url, color }`.
   customIcons               Json       @default("[]") @map("custom_icons")
+  /// AI-Support settings (baseUrl, apiKey, model, modelsEndpoint).
+  aiSupportSettings         Json       @default("{}") @map("ai_support_settings")
   updatedAt                 DateTime   @updatedAt @map("updated_at") @db.Timestamptz(3)
 
   @@map("settings")
+}
+
+// =============================================================================
+//  AI INSTRUCTIONS
+// =============================================================================
+
+/// AI-support knowledge base entries — instructions and guides used by the
+/// AI chatbot to answer user questions. Editable via the admin panel.
+model AiInstruction {
+  id         String   @id @default(cuid()) @map("id")
+  title      String   @map("title")
+  slug       String   @unique @map("slug")
+  content    String   @map("content")
+  category   String   @default("app") @map("category")
+  orderIndex Int      @default(0) @map("order_index")
+  isActive   Boolean  @default(true) @map("is_active")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@map("ai_instructions")
 }
 
 // =============================================================================
