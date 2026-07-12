@@ -137,6 +137,7 @@ const AutomationsPage = lazy(
 // /withdrawals route redirects into the corresponding tab to preserve
 // external deep links.
 const SupportTicketsPage = lazy(() => import('@/features/support-tickets/support-tickets-page'));
+const AiSupportPage = lazy(() => import('@/features/settings/ai-support-page'));
 const FaqPage = lazy(() => import('@/features/faq/faq-page'));
 // Two-factor UI is now embedded as a tab in /settings/panel; old route redirects.
 // IP allowlist, Webhooks, Blocked IPs are now embedded as tabs in /admins; old routes redirect.
@@ -224,6 +225,7 @@ export const router = createBrowserRouter([
           { path: 'blocked-ips', element: <Navigate to="/admins#blocked-ips" replace /> },
           { path: 'withdrawals', element: <Navigate to="/partners#withdrawals" replace /> },
           { path: 'support-tickets', element: withSuspense(<SupportTicketsPage />) },
+          { path: 'settings/ai-support', element: withSuspense(<AiSupportPage />) },
           { path: 'faq', element: withSuspense(<FaqPage />) },
           { path: 'security/2fa', element: <Navigate to="/settings/panel#security" replace /> },
           {
