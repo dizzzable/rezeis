@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { Save, Loader2, Plus, Pencil, Trash2, Eye, EyeOff, Bot } from 'lucide-react'
@@ -90,7 +90,6 @@ function slugify(text: string): string {
 export default function AiSupportPage() {
   const queryClient = useQueryClient()
 
-  // ── Settings state ──
   const [showApiKey, setShowApiKey] = useState(false)
   const [settingsForm, setSettingsForm] = useState({
     baseUrl: '',
@@ -99,39 +98,31 @@ export default function AiSupportPage() {
     modelsEndpoint: '',
   })
 
-  // ── Instruction state ──
   const [instructionDialogOpen, setInstructionDialogOpen] = useState(false)
   const [editingInstruction, setEditingInstruction] = useState<AiInstruction | null>(null)
   const [instructionForm, setInstructionForm] = useState<AiInstructionForm>(EMPTY_INSTRUCTION_FORM)
 
-  // ── Queries ──
   const { data: settings, isLoading: settingsLoading } = useQuery<AiSupportSettings>({
     queryKey: ['admin', 'ai-config', 'settings'],
     queryFn: async () => (await api.get<AiSupportSettings>('/admin/ai-config')).data,
   })
 
-  // Sync settings into form when loaded
-  if (settings && settingsForm.baseUrl === '' && settings.apiKey !== undefined) {
-    setSettingsForm({
-      baseUrl: settings.baseUrl,
-      apiKey: settings.apiKey,
-      model: settings.model,
-      modelsEndpoint: settings.modelsEndpoint,
-    })
-  }
-
-  const { data: models } = useQuery<AiModel[]>({
-    queryKey: ['admin', 'ai-config', 'models'],
-    queryFn: async () => (await api.get<AiModel[]>('/admin/ai-config/models')).data,
-    enabled: false,
-  })
+  useEffect(() => {
+    if (settings && settingsForm.baseUrl === '' && settings.apiKey !== undefined) {
+      setSettingsForm({
+        baseUrl: settings.baseUrl,
+        apiKey: settings.apiKey,
+        model: settings.model,
+        modelsEndpoint: settings.modelsEndpoint,
+      })
+    }
+  }, [settings])
 
   const { data: instructions, isLoading: instructionsLoading } = useQuery<AiInstruction[]>({
     queryKey: ['admin', 'ai-instructions'],
     queryFn: async () => (await api.get<AiInstruction[]>('/admin/ai-instructions')).data,
   })
 
-  // ── Mutations ──
   const updateSettingsMutation = useMutation({
     mutationFn: (payload: Partial<AiSupportSettings>) =>
       api.patch('/admin/ai-config', payload),
@@ -195,7 +186,6 @@ export default function AiSupportPage() {
     },
   })
 
-  // ── Handlers ──
   function handleSaveSettings() {
     updateSettingsMutation.mutate(settingsForm)
   }
@@ -265,14 +255,11 @@ export default function AiSupportPage() {
         </div>
       </FadeIn>
 
-      {/* ── API Settings ── */}
       <FadeIn>
         <Card>
           <CardHeader>
             <CardTitle>Настройки API</CardTitle>
-            <CardDescription>
-              Подключение к OpenAI-совместимому API
-            </CardDescription>
+            <CardDescription>Подключение к OpenAI-совместимому API</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             {settingsLoading ? (
@@ -286,12 +273,9 @@ export default function AiSupportPage() {
                       id="baseUrl"
                       placeholder="https://api.openai.com/v1"
                       value={settingsForm.baseUrl}
-                      onChange={(e) =>
-                        setSettingsForm({ ...settingsForm, baseUrl: e.target.value })
-                      }
+                      onChange={(e) => setSettingsForm({ ...settingsForm, baseUrl: e.target.value })}
                     />
                   </div>
-
                   <div className="grid gap-2">
                     <Label htmlFor="apiKey">API Key</Label>
                     <div className="flex gap-2">
@@ -300,79 +284,43 @@ export default function AiSupportPage() {
                         type={showApiKey ? 'text' : 'password'}
                         placeholder="sk-..."
                         value={settingsForm.apiKey}
-                        onChange={(e) =>
-                          setSettingsForm({ ...settingsForm, apiKey: e.target.value })
-                        }
+                        onChange={(e) => setSettingsForm({ ...settingsForm, apiKey: e.target.value })}
                       />
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="icon"
-                        onClick={() => setShowApiKey(!showApiKey)}
-                      >
+                      <Button type="button" variant="outline" size="icon" onClick={() => setShowApiKey(!showApiKey)}>
                         {showApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                       </Button>
                     </div>
                   </div>
-
                   <div className="grid gap-2">
                     <Label htmlFor="model">Модель</Label>
                     <Input
                       id="model"
                       placeholder="gpt-4o-mini"
                       value={settingsForm.model}
-                      onChange={(e) =>
-                        setSettingsForm({ ...settingsForm, model: e.target.value })
-                      }
+                      onChange={(e) => setSettingsForm({ ...settingsForm, model: e.target.value })}
                     />
                   </div>
-
                   <div className="grid gap-2">
                     <Label htmlFor="modelsEndpoint">Endpoint для моделей (опционально)</Label>
                     <Input
                       id="modelsEndpoint"
                       placeholder="/v1/models"
                       value={settingsForm.modelsEndpoint}
-                      onChange={(e) =>
-                        setSettingsForm({ ...settingsForm, modelsEndpoint: e.target.value })
-                      }
+                      onChange={(e) => setSettingsForm({ ...settingsForm, modelsEndpoint: e.target.value })}
                     />
                   </div>
                 </div>
-
                 <Separator />
-
                 <div className="flex gap-2">
-                  <Button
-                    variant="outline"
-                    onClick={handleFetchModels}
-                    disabled={fetchModelsMutation.isPending}
-                  >
-                    {fetchModelsMutation.isPending ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : (
-                      'Загрузить модели'
-                    )}
+                  <Button variant="outline" onClick={handleFetchModels} disabled={fetchModelsMutation.isPending}>
+                    {fetchModelsMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Загрузить модели'}
                   </Button>
-                  <Button
-                    variant="outline"
-                    onClick={handleTestConnection}
-                    disabled={testConnectionMutation.isPending}
-                  >
-                    {testConnectionMutation.isPending ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : (
-                      'Тест соединения'
-                    )}
+                  <Button variant="outline" onClick={handleTestConnection} disabled={testConnectionMutation.isPending}>
+                    {testConnectionMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Тест соединения'}
                   </Button>
                 </div>
-
                 <Button onClick={handleSaveSettings} disabled={updateSettingsMutation.isPending}>
-                  {updateSettingsMutation.isPending ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <Save className="h-4 w-4" />
-                  )}
+                  {updateSettingsMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
                   Сохранить
                 </Button>
               </>
@@ -381,14 +329,11 @@ export default function AiSupportPage() {
         </Card>
       </FadeIn>
 
-      {/* ── Instructions ── */}
       <FadeIn>
         <Card>
           <CardHeader>
             <CardTitle>Инструкции</CardTitle>
-            <CardDescription>
-              Гайды по приложениям и подключению. Используются AI-ассистентом для ответов.
-            </CardDescription>
+            <CardDescription>Гайды по приложениям и подключению.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-2">
             {instructionsLoading ? (
@@ -400,33 +345,20 @@ export default function AiSupportPage() {
               </div>
             ) : (
               instructions.map((instruction) => (
-                <div
-                  key={instruction.id}
-                  className="flex items-center justify-between rounded-lg border p-3"
-                >
+                <div key={instruction.id} className="flex items-center justify-between rounded-lg border p-3">
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">
                       <span className="font-medium">{instruction.title}</span>
-                      <span className="text-xs text-muted-foreground bg-muted px-2 py-0.5 rounded">
-                        {instruction.category}
-                      </span>
+                      <span className="text-xs text-muted-foreground bg-muted px-2 py-0.5 rounded">{instruction.category}</span>
                     </div>
-                    <p className="text-sm text-muted-foreground truncate mt-1">
-                      {instruction.content.slice(0, 100)}...
-                    </p>
+                    <p className="text-sm text-muted-foreground truncate mt-1">{instruction.content.slice(0, 100)}...</p>
                   </div>
                   <div className="flex items-center gap-2 ml-4">
                     <Switch
                       checked={instruction.isActive}
-                      onCheckedChange={(isActive) =>
-                        toggleInstructionMutation.mutate({ id: instruction.id, isActive })
-                      }
+                      onCheckedChange={(isActive: boolean) => toggleInstructionMutation.mutate({ id: instruction.id, isActive })}
                     />
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => openInstructionEdit(instruction)}
-                    >
+                    <Button variant="ghost" size="sm" onClick={() => openInstructionEdit(instruction)}>
                       <Pencil className="h-4 w-4" />
                     </Button>
                     <AlertDialog>
@@ -438,15 +370,11 @@ export default function AiSupportPage() {
                       <AlertDialogContent>
                         <AlertDialogHeader>
                           <AlertDialogTitle>Удалить инструкцию?</AlertDialogTitle>
-                          <AlertDialogDescription>
-                            Это действие нельзя отменить. Инструкция «{instruction.title}» будет удалена.
-                          </AlertDialogDescription>
+                          <AlertDialogDescription>Инструкция «{instruction.title}» будет удалена.</AlertDialogDescription>
                         </AlertDialogHeader>
                         <AlertDialogFooter>
                           <AlertDialogCancel>Отмена</AlertDialogCancel>
-                          <AlertDialogAction onClick={() => deleteInstructionMutation.mutate(instruction.id)}>
-                            Удалить
-                          </AlertDialogAction>
+                          <AlertDialogAction onClick={() => deleteInstructionMutation.mutate(instruction.id)}>Удалить</AlertDialogAction>
                         </AlertDialogFooter>
                       </AlertDialogContent>
                     </AlertDialog>
@@ -454,7 +382,6 @@ export default function AiSupportPage() {
                 </div>
               ))
             )}
-
             <Button variant="outline" className="w-full mt-4" onClick={openInstructionCreate}>
               <Plus className="h-4 w-4 mr-2" />
               Добавить инструкцию
@@ -463,18 +390,12 @@ export default function AiSupportPage() {
         </Card>
       </FadeIn>
 
-      {/* ── Instruction Dialog ── */}
       <Dialog open={instructionDialogOpen} onOpenChange={setInstructionDialogOpen}>
         <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>
-              {editingInstruction ? 'Редактировать инструкцию' : 'Новая инструкция'}
-            </DialogTitle>
-            <DialogDescription>
-              Создайте гайд для пользователей по подключению или использованию VPN
-            </DialogDescription>
+            <DialogTitle>{editingInstruction ? 'Редактировать инструкцию' : 'Новая инструкция'}</DialogTitle>
+            <DialogDescription>Создайте гайд для пользователей</DialogDescription>
           </DialogHeader>
-
           <div className="grid gap-4 py-4">
             <div className="grid gap-2">
               <Label htmlFor="instructionTitle">Название *</Label>
@@ -482,68 +403,37 @@ export default function AiSupportPage() {
                 id="instructionTitle"
                 placeholder="Happ (iOS/Android)"
                 value={instructionForm.title}
-                onChange={(e) => {
-                  const title = e.target.value
-                  setInstructionForm({
-                    ...instructionForm,
-                    title,
-                    slug: slugify(title),
-                  })
-                }}
+                onChange={(e) => setInstructionForm({ ...instructionForm, title: e.target.value, slug: slugify(e.target.value) })}
               />
             </div>
-
             <div className="grid gap-2">
               <Label htmlFor="instructionSlug">Slug</Label>
-              <Input
-                id="instructionSlug"
-                placeholder="happ"
-                value={instructionForm.slug}
-                onChange={(e) =>
-                  setInstructionForm({ ...instructionForm, slug: e.target.value })
-                }
-              />
+              <Input id="instructionSlug" placeholder="happ" value={instructionForm.slug} onChange={(e) => setInstructionForm({ ...instructionForm, slug: e.target.value })} />
             </div>
-
             <div className="grid gap-2">
               <Label htmlFor="instructionCategory">Категория</Label>
-              <Select
-                value={instructionForm.category}
-                onValueChange={(value) =>
-                  setInstructionForm({ ...instructionForm, category: value })
-                }
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
+              <Select value={instructionForm.category} onValueChange={(value: string) => setInstructionForm({ ...instructionForm, category: value })}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="app">Приложение</SelectItem>
                   <SelectItem value="vpn">VPN</SelectItem>
                 </SelectContent>
               </Select>
             </div>
-
             <div className="grid gap-2">
               <Label htmlFor="instructionContent">Содержимое (Markdown) *</Label>
               <Textarea
                 id="instructionContent"
-                placeholder="# Инструкция по Happ&#10;&#10;## Установка...&#10;&#10;1. Скачайте приложение&#10;2. ..."
+                placeholder="# Инструкция..."
                 value={instructionForm.content}
-                onChange={(e) =>
-                  setInstructionForm({ ...instructionForm, content: e.target.value })
-                }
+                onChange={(e) => setInstructionForm({ ...instructionForm, content: e.target.value })}
                 className="min-h-[300px] font-mono text-sm"
               />
             </div>
           </div>
-
           <DialogFooter>
-            <Button variant="outline" onClick={() => setInstructionDialogOpen(false)}>
-              Отмена
-            </Button>
-            <Button onClick={handleSubmitInstruction}>
-              {editingInstruction ? 'Сохранить' : 'Создать'}
-            </Button>
+            <Button variant="outline" onClick={() => setInstructionDialogOpen(false)}>Отмена</Button>
+            <Button onClick={handleSubmitInstruction}>{editingInstruction ? 'Сохранить' : 'Создать'}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
