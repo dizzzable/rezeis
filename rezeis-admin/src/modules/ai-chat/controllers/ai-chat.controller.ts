@@ -4,8 +4,11 @@ import {
   Get,
   Param,
   Post,
+  UseGuards,
 } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
+
+import { AdminJwtAuthGuard } from '../../auth/guards/admin-jwt-auth.guard';
 
 import { SendMessageDto } from '../dto/send-message.dto';
 import { CreateConversationDto } from '../dto/create-conversation.dto';
@@ -18,8 +21,13 @@ import { AiChatService } from '../services/ai-chat.service';
  * NOTE: Authentication is intentionally omitted for now. In production
  * this controller should be gated by `AdminJwtAuthGuard` or a dedicated
  * user token guard.
+ *
+ * The `getTariffs` and `getFaq` tool calls are exercised through
+ * the AiChatService function-calling loop and do not need direct
+ * controller-level wiring.
  */
 @ApiTags('ai-chat')
+@UseGuards(AdminJwtAuthGuard)
 @Controller('ai-chat')
 export class AiChatController {
   public constructor(private readonly aiChatService: AiChatService) {}
