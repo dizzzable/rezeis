@@ -65,7 +65,7 @@
     "ioredis": "5.10.1",
     "nest-winston": "1.10.2",
     "nodemailer": "^9.0.3",
-    "openai": "^4.73.0",
+    "openai": "^4.50.0",
     "passport": "0.7.0",
     "passport-jwt": "4.0.1",
     "pg": "^8.20.0",
