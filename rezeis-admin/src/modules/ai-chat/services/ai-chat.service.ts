@@ -9,14 +9,14 @@ interface ChatMessage {
   content: string;
 }
 
-interface ConversationRecord {
+export interface ConversationRecord {
   id: string;
   userId: string;
   createdAt: Date;
   updatedAt: Date;
 }
 
-interface MessageRecord {
+export interface MessageRecord {
   id: string;
   conversationId: string;
   role: 'user' | 'assistant';
