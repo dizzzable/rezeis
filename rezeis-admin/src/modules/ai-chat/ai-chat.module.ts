@@ -1,6 +1,8 @@
 import { Module } from '@nestjs/common';
 
 import { PrismaModule } from '../../common/prisma/prisma.module';
+import { PlansModule } from '../plans/plans.module';
+import { FaqModule } from '../faq/faq.module';
 import { AiChatController } from './controllers/ai-chat.controller';
 import { AiChatService } from './services/ai-chat.service';
 
@@ -18,7 +20,7 @@ import { AiChatService } from './services/ai-chat.service';
  * and returns an informative message to the caller.
  */
 @Module({
-  imports: [PrismaModule],
+  imports: [PrismaModule, PlansModule, FaqModule],
   controllers: [AiChatController],
   providers: [AiChatService],
   exports: [AiChatService],

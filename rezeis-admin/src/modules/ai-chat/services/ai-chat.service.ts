@@ -1,8 +1,56 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import OpenAI from 'openai';
+import type { ChatCompletionTool } from 'openai/resources/chat/completions';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { PurchaseChannel } from '../../../common/types/prisma-enums';
+import type { PlanCatalogQueryContextInterface } from '../../plans/interfaces/plan-catalog.interface';
+import { PlanCatalogService } from '../../plans/services/plan-catalog.service';
+import { FaqService } from '../../faq/services/faq.service';
+
+// ── Exported types / constants ──────────────────────────────────────────────
+
+/** Names of the AI-callable functions exposed to the model. */
+export type AiChatToolName = 'getTariffs' | 'getFaq';
+
+/** OpenAI tool definitions for function calling. */
+export const AI_TOOL_DEFINITIONS: readonly ChatCompletionTool[] = [
+  {
+    type: 'function',
+    function: {
+      name: 'getTariffs',
+      description:
+        'Получить список активных тарифов (планов подписки) из панели управления. Возвращает названия, описания, лимиты и цены.',
+      parameters: {
+        type: 'object',
+        properties: {},
+        required: [],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'getFaq',
+      description:
+        'Получить список активных вопросов и ответов из базы знаний (FAQ). Можно фильтровать по языку.',
+      parameters: {
+        type: 'object',
+        properties: {
+          locale: {
+            type: 'string',
+            description:
+              'Код языка для фильтрации FAQ (например "ru" или "en"). Если не указан, возвращаются все активные записи.',
+          },
+        },
+        required: [],
+      },
+    },
+  },
+] as const;
+
+// ── Internal types ──────────────────────────────────────────────────────────
 
 interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
@@ -43,6 +91,10 @@ let messageCounter = 0;
  *
  * The system prompt is tuned for a friendly, Russian-speaking VPN support
  * persona. No Remnawave / Xray / protocol details are exposed.
+ *
+ * Supports OpenAI function calling: the model can query live tariff data
+ * (PlanCatalogService) and FAQ (FaqService) at runtime instead of relying
+ * on static knowledge.
  */
 @Injectable()
 export class AiChatService {
@@ -56,6 +108,8 @@ export class AiChatService {
   public constructor(
     private readonly configService: ConfigService,
     private readonly prisma: PrismaService,
+    private readonly planCatalogService: PlanCatalogService,
+    private readonly faqService: FaqService,
   ) {
     const apiKey = this.configService.get<string>('OPENAI_API_KEY');
     const baseUrl = this.configService.get<string>('OPENAI_API_URL');
@@ -66,7 +120,9 @@ export class AiChatService {
         apiKey,
         ...(baseUrl ? { baseURL: baseUrl } : {}),
       });
-      this.logger.log(`AI Chat initialised with model=${this.model} url=${baseUrl || 'https://api.openai.com/v1'}`);
+      this.logger.log(
+        `AI Chat initialised with model=${this.model} url=${baseUrl || 'https://api.openai.com/v1'}`,
+      );
     } else {
       this.logger.warn(
         'OPENAI_API_KEY is not set — AI Chat is unavailable. ' +
@@ -78,6 +134,11 @@ export class AiChatService {
   /**
    * Generates a response from the AI model given a user message and
    * optional conversation context.
+   *
+   * Uses OpenAI function calling: the model can request live tariff data
+   * (getTariffs) or FAQ entries (getFaq). Tool calls are resolved against
+   * PlanCatalogService / FaqService and the results are fed back to the
+   * model until a final text response is produced.
    */
   public async generateResponse(
     userId: string,
@@ -102,7 +163,8 @@ export class AiChatService {
 
     const systemPrompt = this.buildSystemPrompt();
 
-    const messages: ChatMessage[] = [
+    // Use OpenAI SDK native types so we can pass tool messages
+    const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
       { role: 'system', content: systemPrompt },
       ...recentMessages.map((m) => ({
         role: m.role as 'user' | 'assistant',
@@ -112,14 +174,62 @@ export class AiChatService {
     ];
 
     try {
-      const response = await this.openai.chat.completions.create({
+      let response = await this.openai.chat.completions.create({
         model: this.model,
         messages,
+        tools: [...AI_TOOL_DEFINITIONS],
+        tool_choice: 'auto',
         temperature: 0.7,
         max_tokens: 1024,
       });
 
-      const reply = response.choices[0]?.message?.content ?? '…';
+      let choice = response.choices[0];
+
+      // ── Tool-calling loop ──────────────────────────────────────────
+      // Keep resolving tool calls until the model returns a plain-text reply.
+      while (choice.finish_reason === 'tool_calls' && choice.message.tool_calls) {
+        const assistantMsg = choice.message;
+        messages.push(assistantMsg);
+
+        for (const toolCall of assistantMsg.tool_calls) {
+          const args: Record<string, unknown> = JSON.parse(toolCall.function.arguments);
+          let result: string;
+
+          switch (toolCall.function.name as AiChatToolName) {
+            case 'getTariffs':
+              result = await this.executeGetTariffs();
+              break;
+            case 'getFaq':
+              result = await this.executeGetFaq(args.locale as string | undefined);
+              break;
+            default:
+              result = JSON.stringify({
+                error: `Неизвестная функция: ${toolCall.function.name}`,
+              });
+              break;
+          }
+
+          messages.push({
+            role: 'tool',
+            tool_call_id: toolCall.id,
+            content: result,
+          });
+        }
+
+        // Next iteration — send tool results back to the model
+        response = await this.openai.chat.completions.create({
+          model: this.model,
+          messages,
+          tools: [...AI_TOOL_DEFINITIONS],
+          tool_choice: 'auto',
+          temperature: 0.7,
+          max_tokens: 1024,
+        });
+
+        choice = response.choices[0];
+      }
+
+      const reply = choice.message?.content ?? '…';
 
       // Persist to in-memory store
       this.saveMessage(convoId, 'user', message);
@@ -127,7 +237,10 @@ export class AiChatService {
 
       return { reply, conversationId: convoId };
     } catch (error) {
-      this.logger.error(`OpenAI API call failed: ${(error as Error).message}`, (error as Error).stack);
+      this.logger.error(
+        `OpenAI API call failed: ${(error as Error).message}`,
+        (error as Error).stack,
+      );
       return {
         reply:
           '😔 Произошла ошибка при обращении к AI. Пожалуйста, повторите попытку позже.',
@@ -179,6 +292,65 @@ export class AiChatService {
     return `По вашему запросу "${query}" информация будет доступна после обновления базы знаний.`;
   }
 
+  // ── Tool execution helpers ────────────────────────────────────────────────
+
+  /**
+   * Fetches the current active tariff plans from PlanCatalogService and
+   * returns them as a JSON string the model can read.
+   */
+  private async executeGetTariffs(): Promise<string> {
+    try {
+      const query: PlanCatalogQueryContextInterface = {
+        channel: 'WEB' as PurchaseChannel,
+      };
+      const plans = await this.planCatalogService.getCatalogPlans(query);
+      const summary = plans.map((p) => ({
+        name: p.name,
+        description: p.description,
+        type: p.type,
+        trafficLimit: p.trafficLimit,
+        deviceLimit: p.deviceLimit,
+        isTrial: p.isTrial,
+        trialFree: p.trialFree,
+        durations: p.durations.map((d) => ({
+          days: d.days,
+          prices: d.prices.map((pr) => ({
+            price: pr.price,
+            currency: pr.currency,
+            gatewayType: pr.gatewayType,
+          })),
+        })),
+        displayPrices: p.displayPrices.map((dp) => ({
+          price: dp.price,
+          currency: dp.currency,
+          days: dp.days,
+        })),
+      }));
+      return JSON.stringify(summary);
+    } catch (err) {
+      this.logger.error(`getTariffs failed: ${(err as Error).message}`);
+      return JSON.stringify({ error: 'Не удалось получить список тарифов.' });
+    }
+  }
+
+  /**
+   * Fetches active FAQ entries from FaqService and returns them as a
+   * JSON string the model can read.
+   */
+  private async executeGetFaq(locale?: string): Promise<string> {
+    try {
+      const items = await this.faqService.getPublicFaq(locale ?? null);
+      const summary = items.map((item) => ({
+        question: item.question,
+        answer: item.answer,
+      }));
+      return JSON.stringify(summary);
+    } catch (err) {
+      this.logger.error(`getFaq failed: ${(err as Error).message}`);
+      return JSON.stringify({ error: 'Не удалось получить FAQ.' });
+    }
+  }
+
   // ── Private helpers ──────────────────────────────────────────────────────
 
   /**
@@ -202,6 +374,8 @@ export class AiChatService {
       '- Если не знаешь ответа — предложи обратиться в поддержку через тикеты.',
       '- Будь краток и по делу. Не используй сложную техническую лексику.',
       '- Обращайся к пользователю на «ты».',
+      '',
+      'Ты можешь запрашивать актуальные тарифы и FAQ из панели управления, когда это необходимо для ответа пользователю.',
       '',
       'Приветствуй пользователя дружелюбно и предлагай помощь по списку выше.',
     ].join('\n');
