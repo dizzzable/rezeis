@@ -21,6 +21,8 @@ interface CreateAiInstructionInput {
   content: string;
   category?: string;
   orderIndex?: number;
+  /** Learned/imported entries are created as drafts (false) for operator review. */
+  isActive?: boolean;
 }
 
 interface UpdateAiInstructionInput {
@@ -84,9 +86,16 @@ export class AiInstructionService implements OnModuleInit {
     ];
 
     for (const seed of seeds) {
-      if (seed.content) {
+      if (!seed.content) continue;
+      try {
         await this.prisma.aiInstruction.create({ data: seed });
         this.logger.log(`Seeded: ${seed.title}`);
+      } catch (error: unknown) {
+        // Race-safe: the api and worker both run onModuleInit; a concurrent boot
+        // may create the same unique slug first. Ignore the duplicate and any
+        // per-seed failure so startup never crashes on seeding.
+        const message = error instanceof Error ? error.message : 'unknown';
+        this.logger.warn(`Skipped seeding "${seed.slug}": ${message}`);
       }
     }
 

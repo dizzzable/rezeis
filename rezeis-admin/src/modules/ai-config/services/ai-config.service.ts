@@ -3,6 +3,7 @@ import { PrismaService } from '../../../common/prisma/prisma.service.js';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
 import type { AiConfigSettings } from '../interfaces/ai-config.interface.js';
+import { decryptApiKey, encryptApiKey } from '../utils/ai-secret-cipher.js';
 
 /**
  * Manages the AI-support configuration stored in the singleton Settings row.
@@ -19,27 +20,59 @@ export class AiConfigService {
     private readonly httpService: HttpService,
   ) {}
 
+  /** Master crypt key (validated at boot by env.schema, min 32 chars). */
+  private cryptKey(): string {
+    return process.env.REZEIS_CRYPT_KEY ?? '';
+  }
+
   /**
-   * Returns the full AI-support settings (including apiKey).
-   * Called by the admin controller (direct get).
+   * Reads the API key from storage, decrypting the `apiKeyEnc` payload. Legacy
+   * plaintext `apiKey` (written before at-rest encryption) is returned as-is and
+   * gets re-encrypted on the next save. A decrypt failure fails safe (empty).
+   */
+  private readApiKey(stored: Record<string, unknown>): string {
+    const enc = stored.apiKeyEnc;
+    if (typeof enc === 'string' && enc.length > 0) {
+      try {
+        return decryptApiKey(enc, this.cryptKey());
+      } catch {
+        this.logger.warn('Failed to decrypt AI API key — returning empty');
+        return '';
+      }
+    }
+    const legacy = stored.apiKey;
+    return typeof legacy === 'string' ? legacy : '';
+  }
+
+  /**
+   * Returns the full AI-support settings (including the decrypted apiKey).
+   * Called by the INTERNAL controller (the trusted BFF needs the real key to
+   * call the provider) and by the service's own test/models helpers. It MUST
+   * NOT be returned to the admin SPA — use {@link getSettingsMasked} there.
    */
   public async getSettings(): Promise<AiConfigSettings> {
     const settings = await this.prisma.settings.findFirst({ where: { id: 1 } });
     if (!settings) {
-      return { baseUrl: '', apiKey: '', model: '', modelsEndpoint: '' };
+      return { baseUrl: '', apiKey: '', model: '', modelsEndpoint: '', enabled: false, systemPrompt: '' };
     }
-    const stored = (settings.aiSupportSettings ?? {}) as Record<string, unknown>;
+    return this.mapStored((settings.aiSupportSettings ?? {}) as Record<string, unknown>);
+  }
+
+  /** Maps a stored `aiSupportSettings` JSON blob into the settings shape. */
+  private mapStored(stored: Record<string, unknown>): AiConfigSettings {
     return {
       baseUrl: (stored.baseUrl as string) ?? '',
-      apiKey: (stored.apiKey as string) ?? '',
+      apiKey: this.readApiKey(stored),
       model: (stored.model as string) ?? '',
       modelsEndpoint: (stored.modelsEndpoint as string) ?? '',
+      enabled: stored.enabled === true,
+      systemPrompt: typeof stored.systemPrompt === 'string' ? stored.systemPrompt : '',
     };
   }
 
   /**
    * Returns the masked AI-support settings (apiKey replaced with placeholders).
-   * Called by the internal controller — the chatbot never needs the raw key.
+   * This is what the admin SPA receives — the raw key never reaches the browser.
    */
   public async getSettingsMasked(): Promise<AiConfigSettings> {
     const full = await this.getSettings();
@@ -51,29 +84,60 @@ export class AiConfigService {
 
   /**
    * Updates the aiSupportSettings JSON column. Merges partial payload over
-   * existing values so omitted fields are preserved.
+   * existing values so omitted fields are preserved. The apiKey is stored
+   * AES-256-GCM-encrypted (`apiKeyEnc`); a blank or masked incoming apiKey means
+   * "keep the existing key", so a round-trip save from the masked admin view can
+   * never overwrite the real key with the mask. Legacy plaintext `apiKey` is
+   * dropped on write.
    */
   public async updateSettings(payload: Partial<AiConfigSettings>): Promise<AiConfigSettings> {
-    const existing = await this.getSettings();
-    const merged: AiConfigSettings = {
+    const row = await this.prisma.settings.findFirst({ where: { id: 1 } });
+    const storedNow = (row?.aiSupportSettings ?? {}) as Record<string, unknown>;
+    const existing = this.mapStored(storedNow);
+
+    const incomingKey = payload.apiKey;
+    const keepExistingKey =
+      incomingKey === undefined ||
+      incomingKey.trim().length === 0 ||
+      incomingKey.includes('***');
+
+    const next: Record<string, unknown> = {
       baseUrl: payload.baseUrl ?? existing.baseUrl,
-      apiKey: payload.apiKey ?? existing.apiKey,
       model: payload.model ?? existing.model,
       modelsEndpoint: payload.modelsEndpoint ?? existing.modelsEndpoint,
+      enabled: payload.enabled ?? existing.enabled,
+      systemPrompt: payload.systemPrompt ?? existing.systemPrompt,
     };
+
+    let resolvedApiKey = existing.apiKey;
+    if (keepExistingKey) {
+      // Preserve the stored encrypted blob VERBATIM so a decrypt failure or a
+      // crypt-key rotation can never wipe the key on an unrelated save (e.g.
+      // toggling `enabled`). Migrate a legacy plaintext key to encrypted form.
+      if (typeof storedNow.apiKeyEnc === 'string' && storedNow.apiKeyEnc.length > 0) {
+        next.apiKeyEnc = storedNow.apiKeyEnc;
+      } else if (typeof storedNow.apiKey === 'string' && storedNow.apiKey.length > 0) {
+        next.apiKeyEnc = encryptApiKey(storedNow.apiKey, this.cryptKey());
+      }
+    } else {
+      resolvedApiKey = incomingKey;
+      next.apiKeyEnc = encryptApiKey(incomingKey, this.cryptKey());
+    }
 
     await this.prisma.settings.upsert({
       where: { id: 1 },
-      create: {
-        id: 1,
-        aiSupportSettings: merged as unknown as object,
-      },
-      update: {
-        aiSupportSettings: merged as unknown as object,
-      },
+      create: { id: 1, aiSupportSettings: next as object },
+      update: { aiSupportSettings: next as object },
     });
 
-    return merged;
+    return {
+      baseUrl: next.baseUrl as string,
+      apiKey: resolvedApiKey,
+      model: next.model as string,
+      modelsEndpoint: next.modelsEndpoint as string,
+      enabled: next.enabled as boolean,
+      systemPrompt: next.systemPrompt as string,
+    };
   }
 
   /**
@@ -90,9 +154,9 @@ export class AiConfigService {
     }
 
     try {
-      const endpoint = config.modelsEndpoint && config.modelsEndpoint.trim()
-        ? config.modelsEndpoint
-        : `${config.baseUrl}/chat/completions`;
+      // Always test the CHAT endpoint the runtime/learning actually use — the
+      // separate `modelsEndpoint` is only for the models listing (fetchModels).
+      const endpoint = `${config.baseUrl.replace(/\/$/, '')}/chat/completions`;
 
       const { data } = await firstValueFrom(
         this.httpService.post(
