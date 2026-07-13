@@ -30,7 +30,10 @@ describe('subscription add-on entitlement schema', () => {
     assert.match(lifetime, /UNTIL_SUBSCRIPTION_END/);
 
     const addOn = block(schema, 'model', 'AddOn');
-    assert.match(addOn, /lifetime\s+AddOnLifetime\s+@default\(UNTIL_NEXT_RESET\)/);
+    // Default is UNTIL_SUBSCRIPTION_END: it is always eligible for a dated
+    // subscription, whereas UNTIL_NEXT_RESET is gated behind the reset-expiry
+    // rollout (OFF by default) and would be withheld from the cabinet.
+    assert.match(addOn, /lifetime\s+AddOnLifetime\s+@default\(UNTIL_SUBSCRIPTION_END\)/);
     assert.match(addOn, /revision\s+Int\s+@default\(1\)/);
     assert.match(addOn, /archivedAt\s+DateTime\?/);
 

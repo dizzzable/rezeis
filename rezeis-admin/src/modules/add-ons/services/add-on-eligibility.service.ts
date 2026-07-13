@@ -63,9 +63,12 @@ const EMPTY_RESULT = (): AddOnEligibilityResult => ({
  *    the legacy footgun where a device add-on turned an unlimited profile
  *    finite).
  *  - `UNTIL_SUBSCRIPTION_END` expires at the term end (requires a term end).
- *  - `UNTIL_NEXT_RESET` expires at the next reset epoch and is only offered
- *    when the strategy has a boundary AND its reset capability is ENABLED
- *    (disabled until staging parity, so such add-ons are withheld for now).
+ *  - `UNTIL_NEXT_RESET` binds expiry to the plan's reset cycle and is valid for
+ *    BOTH traffic and devices (the reset epoch is the profile's monthly refresh
+ *    boundary — traffic rolls back and extra devices are removed on it). It is
+ *    offered only when the strategy has a boundary (not NO_RESET) AND its reset
+ *    capability is ENABLED (disabled until staging parity, so withheld for now).
+ *    Availability is gated by the strategy/capability, NOT by the add-on type.
  *
  * Only eligible add-ons are returned; ineligible ones are withheld. This
  * endpoint is authoritative for discovery but never for money — checkout
@@ -318,6 +321,14 @@ export class AddOnEligibilityService {
     ) {
       return null;
     }
+
+    // A reset-scoped lifetime (`UNTIL_NEXT_RESET`) binds expiry to the plan's
+    // reset cycle. It is valid for BOTH traffic and devices — the reset epoch
+    // is the profile's monthly "refresh" boundary, common to both resources
+    // (on that boundary traffic rolls back to plan baseline and extra devices
+    // are removed). Availability is gated purely by the strategy having a
+    // boundary (not NO_RESET) and the capability being ENABLED — the checks
+    // below — NOT by the add-on type.
 
     if (lifetime === AddOnLifetime.UNTIL_SUBSCRIPTION_END) {
       if (term.endsAt === null) return null; // open-ended term has no expiry date

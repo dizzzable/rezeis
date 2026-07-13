@@ -9,6 +9,7 @@ import { EffectiveProjectionService } from '../src/modules/add-on-entitlements/s
 import { EntitlementBoundaryService } from '../src/modules/add-on-entitlements/services/entitlement-boundary.service';
 import { EntitlementCutoverService } from '../src/modules/add-on-entitlements/services/entitlement-cutover.service';
 import { SubscriptionTermService } from '../src/modules/add-on-entitlements/services/subscription-term.service';
+import { ensureLiveResetEpoch } from '../src/modules/add-on-entitlements/services/reset-epoch.util';
 import { PaymentSubscriptionMutationService } from '../src/modules/payments/services/payment-subscription-mutation.service';
 import { ProfileSyncProcessor } from '../src/modules/profile-sync/profile-sync.processor';
 import { SubscriptionDeletionService } from '../src/modules/subscriptions/services/subscription-deletion.service';
@@ -993,18 +994,21 @@ run('add-on entitlement PostgreSQL concurrency', () => {
     }
   });
 
-  it('direct-purchase UNTIL_NEXT_RESET: binds the entitlement to the live reset epoch when the strategy capability is ENABLED, else falls back to legacy', async () => {
+  it('direct-purchase UNTIL_NEXT_RESET: MINTS-and-binds the current-cycle reset epoch on demand when the capability is ENABLED, else falls back to legacy', async () => {
     const gib = 1024n * 1024n * 1024n;
+    // Anchor in the past so the live cycle is a real calendar-MONTH window
+    // relative to `now` (the money path reads `new Date()` internally, so the
+    // bound epoch is minted for the CURRENT month, NOT this anchor). The term
+    // has NO pre-existing epoch — this is the Phase 2 headline: a purchase
+    // against a term that was already ACTIVE when the flag flipped mints the
+    // current cycle's epoch on demand and binds to it.
     const past = new Date('2026-01-01T00:00:00.000Z');
-    const epochEnd = new Date('2030-02-01T00:00:00.000Z');
 
-    // Builds a subscription + ACTIVE MONTH term (+ live epoch) + a completed
-    // UNTIL_NEXT_RESET add-on transaction, applies it under the given flags,
-    // and returns the ids needed for assertions.
     async function purchaseUntilNextReset(
       suffix: string,
       resetFlag: string | undefined,
-    ): Promise<{ readonly subId: string; readonly txnId: string; readonly epochId: string }> {
+      reapply: boolean,
+    ): Promise<{ readonly subId: string; readonly txnId: string; readonly termId: string }> {
       const subId = `${prefix}-unr-${suffix}`;
       const addOnId = `${prefix}-unr-addon-${suffix}`;
       const lineKey = `${prefix}-unr-line-${suffix}`;
@@ -1021,9 +1025,6 @@ run('add-on entitlement PostgreSQL concurrency', () => {
           baseTrafficLimitBytes: 100n * gib, baseDeviceLimit: 3,
           trafficResetStrategy: 'MONTH', resetAnchorAt: past,
         },
-      });
-      const epoch = await prisma.subscriptionResetEpoch.create({
-        data: { termId: term.id, ordinal: 1, startsAt: past, plannedEndsAt: epochEnd },
       });
       await prisma.addOn.create({
         data: {
@@ -1055,31 +1056,93 @@ run('add-on entitlement PostgreSQL concurrency', () => {
       else process.env.ADDON_RESET_EXPIRY_MONTH = resetFlag;
       try {
         await mutation.applyCompletedTransaction(txn);
+        // Ledger path only: idempotent re-apply must not create a second
+        // entitlement nor a duplicate epoch (find-path returns the just-minted
+        // current window). The legacy column-increment path is NOT idempotent
+        // under double-apply (out of Phase 2 scope) — apply it once.
+        if (reapply) await mutation.applyCompletedTransaction(txn);
       } finally {
         if (prevDirect === undefined) delete process.env.ADDON_ENTITLEMENT_DIRECT_PURCHASE;
         else process.env.ADDON_ENTITLEMENT_DIRECT_PURCHASE = prevDirect;
         if (prevReset === undefined) delete process.env.ADDON_RESET_EXPIRY_MONTH;
         else process.env.ADDON_RESET_EXPIRY_MONTH = prevReset;
       }
-      return { subId, txnId: txn.id, epochId: epoch.id };
+      return { subId, txnId: txn.id, termId: term.id };
     }
 
-    // Reset capability ENABLED → ledger path binds to the live epoch.
-    const on = await purchaseUntilNextReset('on', 'true');
+    // Reset capability ENABLED → ledger path mints the current-cycle epoch on
+    // demand and binds the entitlement to it (offered == bound).
+    const on = await purchaseUntilNextReset('on', 'true', true);
+    assert.equal(await prisma.addOnEntitlement.count({ where: { sourceTransactionId: on.txnId } }), 1,
+      'idempotent re-apply does not create a second entitlement');
     const ent = await prisma.addOnEntitlement.findFirstOrThrow({ where: { sourceTransactionId: on.txnId } });
     assert.equal(ent.state, 'ACTIVE');
     assert.equal(ent.lifetime, 'UNTIL_NEXT_RESET');
-    assert.equal(ent.expiryEpochId, on.epochId, 'bound to the term reset epoch');
-    assert.equal(ent.expiresAt!.getTime(), epochEnd.getTime(), 'expires at the epoch planned boundary');
+    assert.notEqual(ent.expiryEpochId, null, 'bound to a minted reset epoch');
     assert.equal(ent.totalValue, 50n * gib);
+
+    // Exactly one epoch was minted on the term (no duplicate on re-apply).
+    assert.equal(await prisma.subscriptionResetEpoch.count({ where: { termId: on.termId } }), 1,
+      'the current-cycle epoch is minted once (idempotent find-or-create)');
+    const boundEpoch = await prisma.subscriptionResetEpoch.findUniqueOrThrow({ where: { id: ent.expiryEpochId! } });
+    // The bound epoch is a proper calendar-MONTH window (UTC month starts,
+    // one month wide) that CONTAINS the purchase instant — boundary-safe, no
+    // dependence on an independently-captured `now`.
+    assert.equal(boundEpoch.startsAt.getUTCDate(), 1, 'epoch starts at a UTC month start');
+    assert.equal(boundEpoch.startsAt.getUTCHours(), 0);
+    assert.equal(boundEpoch.plannedEndsAt.getUTCDate(), 1, 'epoch ends at a UTC month start');
+    assert.equal(boundEpoch.plannedEndsAt.getUTCHours(), 0);
+    assert.ok(boundEpoch.plannedEndsAt.getTime() > boundEpoch.startsAt.getTime());
+    assert.ok(
+      ent.purchasedAt.getTime() >= boundEpoch.startsAt.getTime() &&
+        ent.purchasedAt.getTime() < boundEpoch.plannedEndsAt.getTime(),
+      'the purchase instant falls within the bound cycle window',
+    );
+    assert.equal(ent.expiresAt!.getTime(), boundEpoch.plannedEndsAt.getTime(),
+      'entitlement expires exactly at the bound epoch boundary');
     const projOn = await prisma.subscriptionEffectiveProjection.findUniqueOrThrow({ where: { subscriptionId: on.subId } });
     assert.equal(projOn.desiredTrafficLimitBytes, 150n * gib);
 
-    // Reset capability OFF (default) → no ledger entitlement, legacy increment.
-    const off = await purchaseUntilNextReset('off', undefined);
+    // Reset capability OFF (default) → no ledger entitlement, no epoch minted,
+    // legacy increment on the traffic column.
+    const off = await purchaseUntilNextReset('off', undefined, false);
     assert.equal(await prisma.addOnEntitlement.count({ where: { sourceTransactionId: off.txnId } }), 0);
+    assert.equal(await prisma.subscriptionResetEpoch.count({ where: { termId: off.termId } }), 0,
+      'the disabled path mints no epoch');
     assert.equal((await prisma.subscription.findUniqueOrThrow({ where: { id: off.subId } })).trafficLimit, 150,
       'legacy path increments the traffic column directly');
+  });
+
+  it('ensureLiveResetEpoch: two concurrent same-window mints converge to one epoch without aborting the transaction (M1)', async () => {
+    const gib = 1024n * 1024n * 1024n;
+    const past = new Date('2026-01-01T00:00:00.000Z');
+    const now = new Date(); // both callers compute the SAME calendar-month window
+    const id = `${prefix}-epoch-race-sub`;
+    await prisma.subscription.create({
+      data: { id, userId, status: 'ACTIVE', planSnapshot: {}, trafficLimit: 100, deviceLimit: 3 },
+    });
+    const term = await prisma.subscriptionTerm.create({
+      data: {
+        subscriptionId: id, generation: 1, status: 'ACTIVE', planSnapshot: {},
+        startsAt: past, endsAt: new Date('2031-01-01T00:00:00.000Z'),
+        baseTrafficLimitBytes: 100n * gib, baseDeviceLimit: 3,
+        trafficResetStrategy: 'MONTH', resetAnchorAt: past,
+      },
+    });
+
+    const call = () =>
+      prisma.$transaction((tx) =>
+        ensureLiveResetEpoch(tx, {
+          termId: term.id, strategy: 'MONTH', anchorAt: past, capability: 'ENABLED', now,
+        }),
+      );
+    // Neither transaction aborts (upsert ON CONFLICT DO NOTHING, not create+catch).
+    const [a, b] = await Promise.all([call(), call()]);
+    assert.notEqual(a, null);
+    assert.notEqual(b, null);
+    assert.equal(a!.id, b!.id, 'both callers converge to the single winning epoch row');
+    assert.equal(await prisma.subscriptionResetEpoch.count({ where: { termId: term.id } }), 1,
+      'exactly one epoch row exists for the contended window');
   });
 
   it('combined renewal producer: schedules a durable term only for the renewed line that already has an active term (flag on)', async () => {

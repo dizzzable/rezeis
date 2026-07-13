@@ -45,6 +45,10 @@ export interface InternalUserTransactionInterface {
 export interface InternalUserAddOnEntitlementInterface {
   readonly id: string;
   readonly subscriptionId: string;
+  /** Catalog add-on id this entitlement was bought from (null for legacy rows).
+   *  Lets the renewal re-offer match a previously-activated add-on to the
+   *  current eligibility catalog by id. */
+  readonly addOnId: string | null;
   readonly receiptName: string;
   readonly type: string;
   readonly valuePerUnit: number;

@@ -45,11 +45,14 @@ interface AddOnPrice {
   price: number
 }
 
+type AddOnLifetime = 'UNTIL_SUBSCRIPTION_END' | 'UNTIL_NEXT_RESET'
+
 interface AddOn {
   id: string
   name: string
   description: string | null
   type: 'EXTRA_TRAFFIC' | 'EXTRA_DEVICES'
+  lifetime: AddOnLifetime
   icon: string | null
   value: number
   isActive: boolean
@@ -62,6 +65,7 @@ interface AddOnFormData {
   name: string
   description?: string
   type: 'EXTRA_TRAFFIC' | 'EXTRA_DEVICES'
+  lifetime: AddOnLifetime
   icon?: string | null
   value: number
   isActive: boolean
@@ -356,6 +360,7 @@ function AddOnDialog({
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [type, setType] = useState<'EXTRA_TRAFFIC' | 'EXTRA_DEVICES'>('EXTRA_TRAFFIC')
+  const [lifetime, setLifetime] = useState<AddOnLifetime>('UNTIL_SUBSCRIPTION_END')
   const [icon, setIcon] = useState<string | null>(null)
   const [value, setValue] = useState('1')
   const [isActive, setIsActive] = useState(true)
@@ -373,6 +378,7 @@ function AddOnDialog({
       setName(addOn.name)
       setDescription(addOn.description ?? '')
       setType(addOn.type)
+      setLifetime(addOn.lifetime)
       setIcon(addOn.icon ?? null)
       setValue(addOn.value.toString())
       setIsActive(addOn.isActive)
@@ -389,6 +395,7 @@ function AddOnDialog({
       setName('')
       setDescription('')
       setType('EXTRA_TRAFFIC')
+      setLifetime('UNTIL_SUBSCRIPTION_END')
       setIcon(null)
       setValue('1')
       setIsActive(true)
@@ -431,6 +438,7 @@ function AddOnDialog({
       name,
       description: description || undefined,
       type,
+      lifetime,
       icon: icon ?? null,
       value: parseInt(value, 10),
       isActive,
@@ -497,7 +505,7 @@ function AddOnDialog({
             <div className="space-y-2">
               <Label>{t('addOnsPage.form.type')}</Label>
               <Select value={type} onValueChange={(v) => setType(v as typeof type)}>
-                <SelectTrigger>
+                <SelectTrigger aria-label={t('addOnsPage.form.type')}>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -523,6 +531,28 @@ function AddOnDialog({
                   : t('addOnsPage.form.valueHintDevices')}
               </p>
             </div>
+          </div>
+
+          <div className="space-y-2">
+            <Label>{t('addOnsPage.form.lifetime')}</Label>
+            <Select value={lifetime} onValueChange={(v) => setLifetime(v as AddOnLifetime)}>
+              <SelectTrigger aria-label={t('addOnsPage.form.lifetime')}>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="UNTIL_SUBSCRIPTION_END">
+                  {t('addOnsPage.form.lifetimeSubscriptionEnd')}
+                </SelectItem>
+                <SelectItem value="UNTIL_NEXT_RESET">
+                  {t('addOnsPage.form.lifetimeNextReset')}
+                </SelectItem>
+              </SelectContent>
+            </Select>
+            <p className="text-[11px] text-muted-foreground">
+              {lifetime === 'UNTIL_NEXT_RESET'
+                ? t('addOnsPage.form.lifetimeResetNote')
+                : t('addOnsPage.form.lifetimeHint')}
+            </p>
           </div>
 
           <div className="flex items-center justify-between">

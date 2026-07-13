@@ -73,6 +73,14 @@ export class AddOnsService {
     if (input.value <= 0) {
       throw new BadRequestException('Add-on value must be positive');
     }
+    // Default to the lifetime that is usable today: UNTIL_SUBSCRIPTION_END is
+    // always eligible for a dated subscription, whereas UNTIL_NEXT_RESET is
+    // gated behind the per-strategy reset-expiry rollout (OFF by default) and
+    // is offered per-subscription by eligibility only for plans with a reset
+    // cycle. The catalog does NOT reject by type or plan strategy — it can't
+    // reliably know the strategy (applicablePlanIds may be empty=all or mixed);
+    // eligibility withholds per-subscription when the plan is NO_RESET.
+    const lifetime = input.lifetime ?? AddOnLifetime.UNTIL_SUBSCRIPTION_END;
     const applicablePlanIds = normalizePlanIds(input.applicablePlanIds);
     await this.assertPlansExist(applicablePlanIds);
     const lastRecord = await this.prismaService.addOn.findFirst({
@@ -84,7 +92,7 @@ export class AddOnsService {
         name: input.name.trim(),
         description: input.description?.trim() ?? null,
         type: input.type,
-        lifetime: input.lifetime ?? AddOnLifetime.UNTIL_NEXT_RESET,
+        lifetime,
         icon: normalizeIcon(input.icon),
         value: input.value,
         isActive: input.isActive ?? true,

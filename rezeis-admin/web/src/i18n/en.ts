@@ -3026,6 +3026,13 @@ export const en = {
       value: 'Value',
       valueHintTraffic: 'Amount in GB',
       valueHintDevices: 'Number of device slots',
+      lifetime: 'Lifetime',
+      lifetimeSubscriptionEnd: 'Until subscription ends',
+      lifetimeNextReset: 'Until next reset',
+      lifetimeHint:
+        'How long the purchased resource lasts: until the subscription ends, or until the next cycle reset.',
+      lifetimeResetNote:
+        '"Until next reset" applies only to plans with a reset cycle (not "No reset"): at the cycle boundary traffic rolls back to the plan and extra devices are removed. Requires reset-based expiry enabled.',
       active: 'Active',
       icon: 'Add-on icon',
       iconAuto: 'Auto',

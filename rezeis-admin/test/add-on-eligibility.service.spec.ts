@@ -250,6 +250,25 @@ describe('AddOnEligibilityService.listForSubscription', () => {
     assert.equal(result.addOns.length, 0);
   });
 
+  it('offers a device add-on with UNTIL_NEXT_RESET when the plan has a reset cycle and capability is ENABLED (device one-time-until-reset)', async () => {
+    // A device add-on CAN be reset-scoped: the reset epoch is the profile's
+    // monthly refresh boundary (extra devices are removed on it). Offered when
+    // the strategy has a boundary (MONTH here) and the capability is ENABLED.
+    const deviceReset: CatalogAddOn = { ...deviceAddOn, id: 'a-device-reset', lifetime: 'UNTIL_NEXT_RESET' };
+    const { service } = build({ status: 'ACTIVE', term: financeTerm, catalog: [deviceReset], enabledMonth: true });
+    const result = await service.listForSubscription('sub-1');
+    assert.equal(result.addOns.length, 1);
+    assert.equal(result.addOns[0]!.eligibility.explanationCode, 'ELIGIBLE_UNTIL_NEXT_RESET');
+  });
+
+  it('withholds a device add-on carrying UNTIL_NEXT_RESET when the plan is NO_RESET (no cycle to reset on)', async () => {
+    const deviceReset: CatalogAddOn = { ...deviceAddOn, id: 'a-device-reset', lifetime: 'UNTIL_NEXT_RESET' };
+    const term: Term = { ...financeTerm, trafficResetStrategy: 'NO_RESET' };
+    const { service } = build({ status: 'ACTIVE', term, catalog: [deviceReset], enabledMonth: true });
+    const result = await service.listForSubscription('sub-1');
+    assert.equal(result.addOns.length, 0);
+  });
+
   it('withholds EXTRA_DEVICES when a persisted term stores a non-positive device baseline (0/negative = unlimited)', async () => {
     for (const bad of [0, -1]) {
       const term: Term = { ...financeTerm, baseDeviceLimit: bad };

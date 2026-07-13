@@ -2771,7 +2771,7 @@ model AddOn {
   orderIndex        Int       @default(0) @map("order_index")
   /// Plan IDs this add-on applies to. Empty = available for all plans.
   applicablePlanIds String[]  @default([]) @map("applicable_plan_ids")
-  lifetime          AddOnLifetime @default(UNTIL_NEXT_RESET) @map("lifetime")
+  lifetime          AddOnLifetime @default(UNTIL_SUBSCRIPTION_END) @map("lifetime")
   revision          Int           @default(1) @map("revision")
   archivedAt        DateTime?     @map("archived_at") @db.Timestamptz(3)
   createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)

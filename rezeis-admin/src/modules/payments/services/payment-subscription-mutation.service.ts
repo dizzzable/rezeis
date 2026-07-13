@@ -24,6 +24,7 @@ import { resolveAddOnRolloutFlags, resolveResetCapabilities } from '../../add-on
 import { GIB_BYTES } from '../../add-on-entitlements/domain/cutover-baseline';
 import { getResetCapability, ResetStrategy } from '../../add-on-entitlements/domain/reset-cycle-policy';
 import { AddOnEntitlementService } from '../../add-on-entitlements/services/add-on-entitlement.service';
+import { ensureLiveResetEpoch } from '../../add-on-entitlements/services/reset-epoch.util';
 import { EffectiveProjectionService } from '../../add-on-entitlements/services/effective-projection.service';
 import { SubscriptionTermService } from '../../add-on-entitlements/services/subscription-term.service';
 
@@ -453,6 +454,7 @@ export class PaymentSubscriptionMutationService {
         baseTrafficLimitBytes: true,
         baseDeviceLimit: true,
         trafficResetStrategy: true,
+        resetAnchorAt: true,
       },
     });
     if (term === null) return null;
@@ -477,22 +479,31 @@ export class PaymentSubscriptionMutationService {
       expiresAt = term.endsAt;
     } else {
       // UNTIL_NEXT_RESET: bind the entitlement's expiry to the term's current
-      // reset epoch, but ONLY when the strategy's commercial reset-expiry
+      // reset epoch. Valid for BOTH traffic and devices — the reset epoch is
+      // the profile's monthly refresh boundary (traffic rolls back, extra
+      // devices are removed on it), so a device entitlement is expired on the
+      // same cycle as a traffic one. Applies ONLY when the strategy's reset
       // capability is ENABLED (post-parity flag) AND the epoch row already
       // exists (created at term activation, T-008e). Otherwise fall back to the
-      // legacy increment — this matches the eligibility quote, which only
-      // OFFERS this lifetime under the same capability gate. Binding to an
-      // existing epoch (never creating one here) keeps the money path free of
+      // legacy increment — this matches the eligibility quote, which OFFERS
+      // this lifetime under the same capability gate. Binding to an existing
+      // epoch (never creating one here) keeps the money path free of
       // reset-lifecycle guesswork.
       const strategy = term.trafficResetStrategy as ResetStrategy;
-      if (strategy === 'NO_RESET') return null;
-      if (getResetCapability(strategy, resolveResetCapabilities()) !== 'ENABLED') return null;
-      const epoch = await tx.subscriptionResetEpoch.findFirst({
-        where: { termId: term.id, plannedEndsAt: { gt: now } },
-        orderBy: { ordinal: 'asc' },
-        select: { id: true, plannedEndsAt: true },
+      // Find-or-create the CURRENT reset-cycle epoch (shared helper): a purchase
+      // against an already-active term mints the epoch on demand so the offered
+      // `expiresAt` (eligibility quotes the same computation) is always honored,
+      // instead of silently degrading to the permanent legacy increment. Returns
+      // null only when there is no commercial reset window (NO_RESET, capability
+      // not ENABLED, or no anchor) → legacy fallback, matching eligibility.
+      const epoch = await ensureLiveResetEpoch(tx, {
+        termId: term.id,
+        strategy,
+        anchorAt: term.resetAnchorAt,
+        capability: getResetCapability(strategy, resolveResetCapabilities()),
+        now,
       });
-      if (epoch === null) return null; // no live epoch → legacy fallback
+      if (epoch === null) return null; // no commercial reset window → legacy fallback
       expiresAt = epoch.plannedEndsAt;
       expiryEpochId = epoch.id;
     }

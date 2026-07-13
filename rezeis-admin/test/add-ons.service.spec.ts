@@ -101,7 +101,7 @@ describe('AddOnsService catalog (T-006)', () => {
     assert.equal((creates[0]!.data as { lifetime: string }).lifetime, 'UNTIL_SUBSCRIPTION_END');
   });
 
-  it('defaults lifetime to UNTIL_NEXT_RESET when omitted', async () => {
+  it('defaults lifetime to UNTIL_SUBSCRIPTION_END when omitted (usable today; UNTIL_NEXT_RESET is gated off)', async () => {
     const { service, creates } = build();
     await service.create({
       name: 'Extra 50GB',
@@ -109,7 +109,39 @@ describe('AddOnsService catalog (T-006)', () => {
       value: 50,
       prices: [{ currency: 'USD' as never, price: '1.00' }],
     });
+    assert.equal((creates[0]!.data as { lifetime: string }).lifetime, 'UNTIL_SUBSCRIPTION_END');
+  });
+
+  it('allows a traffic add-on with UNTIL_NEXT_RESET (traffic has a reset cycle)', async () => {
+    const { service, creates } = build();
+    await service.create({
+      name: 'Extra 50GB',
+      type: 'EXTRA_TRAFFIC' as never,
+      lifetime: 'UNTIL_NEXT_RESET' as never,
+      value: 50,
+      prices: [{ currency: 'USD' as never, price: '1.00' }],
+    });
     assert.equal((creates[0]!.data as { lifetime: string }).lifetime, 'UNTIL_NEXT_RESET');
+  });
+
+  it('allows a device add-on with UNTIL_NEXT_RESET on create (device can be one-time-until-reset; eligibility gates by plan strategy)', async () => {
+    const { service, creates } = build();
+    const result = await service.create({
+      name: 'Extra device',
+      type: 'EXTRA_DEVICES' as never,
+      lifetime: 'UNTIL_NEXT_RESET' as never,
+      value: 1,
+      prices: [{ currency: 'USD' as never, price: '1.00' }],
+    });
+    assert.equal(result.lifetime, 'UNTIL_NEXT_RESET');
+    assert.equal((creates[0]!.data as { lifetime: string }).lifetime, 'UNTIL_NEXT_RESET');
+  });
+
+  it('allows switching type to EXTRA_DEVICES while the (kept) lifetime is UNTIL_NEXT_RESET (no type-based rejection)', async () => {
+    const { service, updates } = build({ existing: record({ type: 'EXTRA_TRAFFIC', lifetime: 'UNTIL_NEXT_RESET' }) });
+    await service.update('addon-1', { type: 'EXTRA_DEVICES' as never });
+    assert.equal(updates.length, 1);
+    assert.equal((updates[0]!.data as { type: string }).type, 'EXTRA_DEVICES');
   });
 
   it('rejects a non-positive value', async () => {

@@ -135,6 +135,7 @@ export class AddOnPurchaseService {
         userId: true,
         status: true,
         trafficLimit: true,
+        deviceLimit: true,
         planSnapshot: true,
       },
     });
@@ -168,7 +169,15 @@ export class AddOnPurchaseService {
         'Subscription has unlimited traffic — extra traffic cannot be applied',
       );
     }
-
+    // Symmetric device guard: `deviceLimit <= 0` is the product's canonical
+    // "unlimited devices", so an extra-device add-on would turn an unlimited
+    // profile finite (the `0 + N` footgun). Eligibility already withholds it;
+    // reject here too so a crafted request can never bypass the discovery gate.
+    if (addOn.type === AddOnType.EXTRA_DEVICES && subscription.deviceLimit <= 0) {
+      throw new BadRequestException(
+        'Subscription has unlimited devices — extra devices cannot be applied',
+      );
+    }
     // ── Pricing (per gateway currency) ────────────────────────────────────
     const currency = gateway.currency;
     const priceRow = addOn.prices.find((p) => p.currency === currency);

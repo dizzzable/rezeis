@@ -99,20 +99,17 @@ describe('ExpiredProfileCleanupService', () => {
             // detached selection (`remnawaveId: null`) returns nothing here.
             if (input.where['remnawaveId'] === null) return [];
             return [
-              { id: 'sub-1', userId: 'user-1', isTrial: true, remnawaveId: 'rw-1', expiresAt: expiresAt1 },
-              { id: 'sub-2', userId: 'user-2', isTrial: false, remnawaveId: 'rw-2', expiresAt: expiresAt2 },
+              { id: 'sub-1', userId: 'user-1', isTrial: false, remnawaveId: 'rw-1', expiresAt: expiresAt1 },
+              { id: 'sub-2', userId: 'user-2', isTrial: true, remnawaveId: 'rw-2', expiresAt: expiresAt2 },
             ];
           },
-          update: async () => ({}),
         },
       } as never,
       eventsMock(events),
       settingsMock({ deleteEnabled: true, graceDays: 3 }),
-      // Panel confirms both are long expired (30 days ago) → delete proceeds.
       remnawaveMock(-30 * DAY_MS),
       deletionMock(deletions),
     );
-
     const count = await service.runSweep();
     const after = Date.now() - 3 * DAY_MS;
 

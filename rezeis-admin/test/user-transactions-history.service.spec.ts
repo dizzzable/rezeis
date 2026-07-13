@@ -143,6 +143,7 @@ describe('InternalUserEdgeService activity feed', () => {
         {
           id: 'ent-1',
           subscriptionId: 'sub-1',
+          addOnId: 'addon-50gb',
           receiptName: 'Extra 50GB',
           type: 'EXTRA_TRAFFIC',
           valuePerUnit: 50,
@@ -246,6 +247,7 @@ function createEntitlement() {
   return {
     id: 'ent-1',
     subscriptionId: 'sub-1',
+    addOnId: 'addon-50gb',
     receiptName: 'Extra 50GB',
     type: 'EXTRA_TRAFFIC',
     valuePerUnit: 50,

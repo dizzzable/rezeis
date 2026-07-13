@@ -32,6 +32,63 @@ describe('AddOnsPage accessibility', () => {
     expect(screen.getByRole('button', { name: 'Remove price 2' })).toBeInTheDocument()
   })
 
+  it('shows an enabled lifetime selector defaulting to subscription-end when creating', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(api, 'get').mockImplementation(async (path: string) => {
+      if (path === '/admin/add-ons') return { data: [] }
+      if (path === '/admin/plans') return { data: [] }
+      if (path === '/admin/settings/icons') return { data: [] }
+      return { data: {} }
+    })
+
+    renderWithProviders(<AddOnsPage />)
+
+    await user.click(await screen.findByRole('button', { name: 'Create add-on' }))
+
+    const lifetime = await screen.findByRole('combobox', { name: 'Lifetime' })
+    // Default type is traffic → the picker is enabled and defaults to the
+    // always-eligible "until subscription ends" option.
+    expect(lifetime).toBeEnabled()
+    expect(lifetime).toHaveTextContent('Until subscription ends')
+  })
+
+  it('keeps the lifetime selector enabled for a device add-on and prefills its reset-scoped mode', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(api, 'get').mockImplementation(async (path: string) => {
+      if (path === '/admin/add-ons')
+        return {
+          data: [
+            {
+              id: 'a1',
+              name: 'Extra device',
+              description: null,
+              type: 'EXTRA_DEVICES',
+              lifetime: 'UNTIL_NEXT_RESET',
+              icon: null,
+              value: 1,
+              isActive: true,
+              orderIndex: 1,
+              applicablePlanIds: [],
+              prices: [{ currency: 'RUB', price: 50 }],
+            },
+          ],
+        }
+      if (path === '/admin/plans') return { data: [] }
+      if (path === '/admin/settings/icons') return { data: [] }
+      return { data: {} }
+    })
+
+    renderWithProviders(<AddOnsPage />)
+
+    await user.click(await screen.findByRole('button', { name: 'Edit add-on' }))
+
+    const lifetime = await screen.findByRole('combobox', { name: 'Lifetime' })
+    // Devices CAN be reset-scoped now → the selector is enabled and prefills
+    // the stored UNTIL_NEXT_RESET mode.
+    expect(lifetime).toBeEnabled()
+    expect(lifetime).toHaveTextContent('Until next reset')
+  })
+
   it('makes applicable plan chips keyboard-operable toggle buttons', async () => {
     const user = userEvent.setup()
     vi.spyOn(api, 'get').mockImplementation(async (path: string) => {

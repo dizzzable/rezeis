@@ -12,8 +12,9 @@ import {
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { resolveResetCapabilities } from '../add-on-rollout.config';
 import { GIB_BYTES } from '../domain/cutover-baseline';
-import { planResetEpoch, ResetStrategy } from '../domain/reset-cycle-policy';
+import { ResetStrategy } from '../domain/reset-cycle-policy';
 import { AddOnEntitlementService } from './add-on-entitlement.service';
+import { ensureLiveResetEpoch } from './reset-epoch.util';
 import { EffectiveProjectionService } from './effective-projection.service';
 import { SubscriptionTermService } from './subscription-term.service';
 
@@ -181,43 +182,29 @@ export class EntitlementBoundaryService {
   }
 
   /**
-   * Creates the term's first reset epoch when the strategy's capability is
-   * ENABLED (`resetExpiry.<strategy>` flag). No-op for NO_RESET, a disabled
-   * capability, or when an epoch already exists for the term (idempotent).
+   * Ensures the term's CURRENT reset-cycle epoch exists when the strategy's
+   * capability is ENABLED (`resetExpiry.<strategy>` flag). Delegates to the
+   * shared {@link ensureLiveResetEpoch} (find-or-create the window containing
+   * `now`), so this is idempotent and also covers a term that was already
+   * ACTIVE when the flag was enabled. No-op for NO_RESET / disabled capability.
    */
   private async createResetEpochIfEnabled(
     tx: Prisma.TransactionClient,
     input: { readonly termId: string; readonly strategy: ResetStrategy; readonly anchorAt: Date | null; readonly now: Date },
   ): Promise<void> {
-    if (input.strategy === 'NO_RESET') return;
-    const capability = resolveResetCapabilities()[input.strategy];
-    if (capability !== 'ENABLED') return;
-
-    const plan = planResetEpoch({
+    const capability = resolveResetCapabilities()[input.strategy] ?? 'DISABLED';
+    const epoch = await ensureLiveResetEpoch(tx, {
+      termId: input.termId,
       strategy: input.strategy,
-      capability: 'ENABLED',
       anchorAt: input.anchorAt,
-      referenceAt: input.now,
+      capability,
+      now: input.now,
     });
-    if (plan === null) return;
-
-    const existing = await tx.subscriptionResetEpoch.findFirst({
-      where: { termId: input.termId },
-      select: { id: true },
-    });
-    if (existing !== null) return;
-
-    await tx.subscriptionResetEpoch.create({
-      data: {
-        termId: input.termId,
-        ordinal: 1,
-        startsAt: plan.startsAt,
-        plannedEndsAt: plan.plannedEndsAt,
-      },
-    });
-    this.logger.log(
-      `Created reset epoch for term ${input.termId} (${input.strategy}, ends ${plan.plannedEndsAt.toISOString()})`,
-    );
+    if (epoch !== null) {
+      this.logger.log(
+        `Reset epoch ensured for term ${input.termId} (${input.strategy}, ends ${epoch.plannedEndsAt.toISOString()})`,
+      );
+    }
   }
 
   public async expireDueForSubscription(

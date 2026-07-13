@@ -301,6 +301,7 @@ export class InternalUserEdgeService {
       entitlements: rows.map((entitlement): InternalUserAddOnEntitlementInterface => ({
         id: entitlement.id,
         subscriptionId: entitlement.subscriptionId,
+        addOnId: entitlement.addOnId,
         receiptName: entitlement.receiptName,
         type: entitlement.type,
         valuePerUnit: entitlement.valuePerUnit,
