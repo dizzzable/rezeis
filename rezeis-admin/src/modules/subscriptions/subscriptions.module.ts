@@ -1,8 +1,13 @@
 import { Module } from '@nestjs/common';
 
+import { AddOnEntitlementsModule } from '../add-on-entitlements/add-on-entitlements.module';
+import { AddOnsModule } from '../add-ons/add-ons.module';
 import { AuthModule } from '../auth/auth.module';
 import { PlansModule } from '../plans/plans.module';
 import { ProfileSyncModule } from '../profile-sync/profile-sync.module';
+import { ExpiredProfileCleanupService } from '../profile-sync/expired-profile-cleanup.service';
+import { RemnawaveModule } from '../remnawave/remnawave.module';
+import { SettingsModule } from '../settings/settings.module';
 import { RbacModule } from '../rbac/rbac.module';
 import { AdminSubscriptionsController } from './controllers/admin-subscriptions.controller';
 import { InternalSubscriptionsController } from './controllers/internal-subscriptions.controller';
@@ -17,13 +22,23 @@ import { SubscriptionRenewalService } from './services/subscription-renewal.serv
   // AuthModule supplies InternalAdminAuthGuard (used by
   // InternalSubscriptionsController) along with the JwtModule it
   // depends on through the Phase 4 AuthModule re-export.
-  imports: [AuthModule, PlansModule, RbacModule, ProfileSyncModule],
+  imports: [
+    AddOnEntitlementsModule,
+    AddOnsModule,
+    AuthModule,
+    PlansModule,
+    RbacModule,
+    ProfileSyncModule,
+    RemnawaveModule,
+    SettingsModule,
+  ],
   controllers: [AdminSubscriptionsController, InternalSubscriptionsController],
   providers: [
     SubscriptionQuoteService,
     SubscriptionRenewalService,
     SubscriptionMutationsService,
     SubscriptionDeletionService,
+    ExpiredProfileCleanupService,
     PlanSnapshotSyncService,
     AdminSubscriptionsListService,
   ],
@@ -31,6 +46,7 @@ import { SubscriptionRenewalService } from './services/subscription-renewal.serv
     SubscriptionQuoteService,
     SubscriptionRenewalService,
     SubscriptionMutationsService,
+    SubscriptionDeletionService,
     PlanSnapshotSyncService,
   ],
 })

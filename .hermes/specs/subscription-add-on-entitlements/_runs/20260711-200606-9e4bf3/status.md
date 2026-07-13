@@ -1,0 +1,24 @@
+# Spec Run Status
+
+- run_id: `20260711-200606-9e4bf3`
+- feature: `subscription-add-on-entitlements`
+- phase: `implementation`
+- status: `implementation-review-in-progress-t003`
+- canonical artifacts promoted: `yes`
+- requirements/design/tasks gates: `passed`
+- product code changed: `yes` (`T-001`–`T-003` implementation working tree)
+- release actions performed: `no`
+- bounded assumption: `reset strategy calendar parity must pass staging fixtures before per-strategy enablement`
+- completed tasks: `T-001`, `T-002`
+- current task: `T-003` final independent review
+- implementation gates:
+  - focused T-001–T-003 plus affected profile-sync/runtime suites: `72/72 passed`
+  - disposable PostgreSQL migration chain: `66/66 applied`
+  - disposable PostgreSQL concurrency/rollback suite: `7/7 passed`
+  - Prisma validate/generate: `passed`
+  - TypeScript typecheck: `passed`
+  - exact-snapshot backend suite: `1251/1251 passed`
+  - git diff check: `passed` (line-ending warnings only)
+- disposable PostgreSQL cleanup: `completed`
+- current blocker: `awaiting clean final independent review; T-003 is not marked completed until no blocker/major findings remain`
+- next gate: `disposition final independent review, then update T-003 metadata`

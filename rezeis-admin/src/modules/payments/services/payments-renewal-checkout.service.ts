@@ -1,10 +1,12 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import {
+  Currency,
   PaymentGatewayType,
   Prisma,
   PurchaseChannel,
@@ -21,6 +23,7 @@ import { SubscriptionRenewalService } from '../../subscriptions/services/subscri
 import { PricedRenewalInterface } from '../../subscriptions/interfaces/subscription-renewal.interface';
 import { InternalPaymentCheckoutInterface } from '../interfaces/internal-payment-checkout.interface';
 import { isGatewayConfigured } from '../utils/payment-gateway-settings.util';
+import { buildRenewalCheckoutFingerprint } from '../utils/checkout-fingerprint.util';
 import { PaymentProviderExecutionService } from './payment-provider-execution.service';
 import { PaymentSubscriptionMutationService } from './payment-subscription-mutation.service';
 
@@ -36,6 +39,13 @@ export interface RenewalCheckoutInput {
   readonly durations?: ReadonlyMap<string, number>;
   /** Optional per-subscription chosen plan id (for plan-less subscriptions). */
   readonly plans?: ReadonlyMap<string, string>;
+  /** Optional client idempotency key for request-level dedup (T-007). */
+  readonly idempotencyKey?: string;
+  /** Contract version the client composed against (defaults to 1). */
+  readonly contractVersion?: number;
+  /** Optional per-subscription selected renewal add-on ids (T-007). Honored
+   *  only when the `renewalAddOns` rollout flag is on. */
+  readonly addOns?: ReadonlyMap<string, readonly string[]>;
 }
 
 /**
@@ -96,11 +106,61 @@ export class PaymentsRenewalCheckoutService {
       channel,
       durations: input.durations,
       plans: input.plans,
+      addOns: input.addOns,
     });
 
-    const transaction =
+    // ── Request-level idempotency (T-007) ─────────────────────────────────
+    // The canonical fingerprint covers the full renewal composition (each
+    // line's plan/duration/term), NOT the total amount. A keyed request that
+    // matches an existing draft replays it; the same key with a different
+    // composition is an IDEMPOTENCY_KEY_CONFLICT. Keyless (legacy) requests
+    // keep the heuristic amount+subscription-set draft reuse below.
+    const idempotencyKey =
+      typeof input.idempotencyKey === 'string' && input.idempotencyKey.length > 0
+        ? input.idempotencyKey
+        : null;
+    const checkoutFingerprint = buildRenewalCheckoutFingerprint({
+      contractVersion: input.contractVersion ?? 1,
+      userId: priced.userId,
+      gatewayType: input.gatewayType,
+      channel,
+      currency: priced.currency,
+      lines: priced.items.map((item) => ({
+        subscriptionId: item.subscriptionId,
+        planId: item.planId,
+        durationDays: item.durationDays,
+        termId: null,
+        addOns: (item.addOnLines ?? []).map((addOn) => ({
+          addOnId: addOn.addOnId,
+          addOnRevision: addOn.catalogRevision,
+          type: addOn.type,
+          value: addOn.value,
+          lifetime: addOn.lifetime,
+          activation: addOn.activation,
+        })),
+      })),
+    });
+    if (idempotencyKey !== null) {
+      const existing = await this.findByIdempotencyKey(priced.userId, idempotencyKey);
+      if (existing !== null) {
+        return this.replayOrConflict(existing, checkoutFingerprint);
+      }
+    }
+
+    const draft =
       (await this.findExistingPendingDraft(priced, input.gatewayType, channel)) ??
-      (await this.createCombinedDraft(priced, input.gatewayType, channel));
+      (await this.createCombinedDraft(
+        priced,
+        input.gatewayType,
+        channel,
+        idempotencyKey,
+        checkoutFingerprint,
+      ));
+    // A concurrent keyed request won the unique race — replay its draft.
+    if ('replay' in draft) {
+      return draft.replay;
+    }
+    const transaction = draft;
 
     // Reuse an already-created provider checkout (idempotent re-tap).
     const existingCheckoutUrl = readCheckoutUrl(transaction);
@@ -169,40 +229,108 @@ export class PaymentsRenewalCheckoutService {
     priced: PricedRenewalInterface,
     gatewayType: PaymentGatewayType,
     channel: PurchaseChannel,
-  ): Promise<Transaction> {
-    return this.prismaService.$transaction(async (tx) => {
-      const created = await tx.transaction.create({
-        data: {
-          userId: priced.userId,
-          subscriptionId: null,
-          status: TransactionStatus.PENDING,
-          purchaseType: PurchaseType.RENEW,
-          channel,
-          gatewayType,
-          currency: priced.currency,
-          amount: new Prisma.Decimal(priced.total),
-          planSnapshot: {
-            combinedRenewal: true,
-            itemCount: priced.items.length,
-            snapshotSource: 'RENEWAL_DRAFT',
-          } as Prisma.InputJsonValue,
-          deviceTypes: [],
-        },
+    idempotencyKey: string | null,
+    checkoutFingerprint: string,
+  ): Promise<Transaction | { readonly replay: InternalPaymentCheckoutInterface }> {
+    try {
+      return await this.prismaService.$transaction(async (tx) => {
+        const created = await tx.transaction.create({
+          data: {
+            userId: priced.userId,
+            subscriptionId: null,
+            status: TransactionStatus.PENDING,
+            purchaseType: PurchaseType.RENEW,
+            channel,
+            gatewayType,
+            currency: priced.currency,
+            amount: new Prisma.Decimal(priced.total),
+            planSnapshot: {
+              combinedRenewal: true,
+              itemCount: priced.items.length,
+              snapshotSource: 'RENEWAL_DRAFT',
+            } as Prisma.InputJsonValue,
+            deviceTypes: [],
+            idempotencyKey,
+            checkoutFingerprint: idempotencyKey !== null ? checkoutFingerprint : null,
+          },
+        });
+        await tx.transactionItem.createMany({
+          data: priced.items.map((item) => ({
+            transactionId: created.id,
+            subscriptionId: item.subscriptionId,
+            planId: item.planId,
+            planSnapshot: item.planSnapshot as Prisma.InputJsonValue,
+            durationDays: item.durationDays,
+            amount: new Prisma.Decimal(item.amount),
+            currency: item.currency,
+            discountPercent: item.discountPercent,
+            addOnLines:
+              (item.addOnLines ?? []).length > 0
+                ? (item.addOnLines as unknown as Prisma.InputJsonValue)
+                : Prisma.JsonNull,
+          })),
+        });
+        return created;
       });
-      await tx.transactionItem.createMany({
-        data: priced.items.map((item) => ({
-          transactionId: created.id,
-          subscriptionId: item.subscriptionId,
-          planId: item.planId,
-          planSnapshot: item.planSnapshot as Prisma.InputJsonValue,
-          durationDays: item.durationDays,
-          amount: new Prisma.Decimal(item.amount),
-          currency: item.currency,
-          discountPercent: item.discountPercent,
-        })),
-      });
-      return created;
+    } catch (error: unknown) {
+      // A concurrent keyed request created the draft first — replay the winner.
+      if (
+        idempotencyKey !== null &&
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2002'
+      ) {
+        const existing = await this.findByIdempotencyKey(priced.userId, idempotencyKey);
+        if (existing !== null) {
+          return { replay: this.replayOrConflict(existing, checkoutFingerprint) };
+        }
+      }
+      throw error;
+    }
+  }
+
+  private findByIdempotencyKey(
+    userId: string,
+    idempotencyKey: string,
+  ): Promise<ExistingRenewalDraft | null> {
+    return this.prismaService.transaction.findFirst({
+      where: { userId, idempotencyKey },
+      select: {
+        paymentId: true,
+        status: true,
+        gatewayType: true,
+        purchaseType: true,
+        amount: true,
+        currency: true,
+        gatewayData: true,
+        createdAt: true,
+        checkoutFingerprint: true,
+      },
     });
+  }
+
+  /** Same composition → replay the existing draft; different → conflict. */
+  private replayOrConflict(
+    existing: ExistingRenewalDraft,
+    checkoutFingerprint: string,
+  ): InternalPaymentCheckoutInterface {
+    if (existing.checkoutFingerprint !== checkoutFingerprint) {
+      throw new ConflictException({
+        code: 'IDEMPOTENCY_KEY_CONFLICT',
+        message: 'Idempotency key was already used for a different renewal composition',
+      });
+    }
+    const checkoutUrl = readCheckoutUrlFromData(existing.gatewayData);
+    return {
+      paymentId: existing.paymentId,
+      transactionStatus: existing.status,
+      gatewayType: existing.gatewayType,
+      purchaseType: existing.purchaseType,
+      amount: existing.amount.toString(),
+      currency: existing.currency,
+      checkoutUrl,
+      providerMode: checkoutUrl !== null ? 'REDIRECT' : 'NONE',
+      createdAt: existing.createdAt.toISOString(),
+    };
   }
 
   /**
@@ -260,6 +388,27 @@ function mapCheckoutResponse(input: {
     providerMode: input.providerMode,
     createdAt: input.transaction.createdAt.toISOString(),
   };
+}
+
+interface ExistingRenewalDraft {
+  readonly paymentId: string;
+  readonly status: TransactionStatus;
+  readonly gatewayType: PaymentGatewayType;
+  readonly purchaseType: PurchaseType;
+  readonly amount: Prisma.Decimal;
+  readonly currency: Currency;
+  readonly gatewayData: Prisma.JsonValue;
+  readonly createdAt: Date;
+  readonly checkoutFingerprint: string | null;
+}
+
+function readCheckoutUrlFromData(gatewayData: Prisma.JsonValue): string | null {
+  const record =
+    typeof gatewayData === 'object' && gatewayData !== null && !Array.isArray(gatewayData)
+      ? (gatewayData as Record<string, unknown>)
+      : {};
+  const value = record['checkoutUrl'];
+  return typeof value === 'string' && value.length > 0 ? value : null;
 }
 
 function readGatewayRecord(transaction: Transaction): Record<string, unknown> {

@@ -6,6 +6,17 @@ import { isAxiosError } from 'axios';
 import { firstValueFrom } from 'rxjs';
 
 import { remnawaveConfig } from '../../../common/config/remnawave.config';
+import {
+  RemnawaveStrictDevice,
+  RemnawaveStrictDeviceList,
+  RemnawaveStrictOutcome,
+  RemnawaveStrictUser,
+  strictInvalidContract,
+  strictNotFound,
+  strictOk,
+  strictUnavailable,
+  strictUnsupported,
+} from '../interfaces/remnawave-strict-outcome.interface';
 import { RemnawaveSquadOptionInterface } from '../interfaces/remnawave-squad-option.interface';
 import {
   RemnawaveExternalSquadDetailInterface,
@@ -200,6 +211,25 @@ function mapUserNodeIps(result: unknown): RemnawaveUserNodeIps[] {
     });
   }
   return out;
+}
+
+/**
+ * Parses a `Retry-After` header (seconds or HTTP-date) into milliseconds.
+ * Returns `null` when absent or unparseable.
+ */
+function parseRetryAfterMs(headers: unknown): number | null {
+  if (headers === null || typeof headers !== 'object') return null;
+  const raw = (headers as Record<string, unknown>)['retry-after'];
+  const value = typeof raw === 'string' ? raw : Array.isArray(raw) && typeof raw[0] === 'string' ? raw[0] : null;
+  if (value === null) return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1000);
+  const dateMs = Date.parse(value);
+  if (!Number.isNaN(dateMs)) {
+    const delta = dateMs - Date.now();
+    return delta > 0 ? delta : 0;
+  }
+  return null;
 }
 
 @Injectable()
@@ -1428,6 +1458,222 @@ export class RemnawaveApiService {
         throw error;
       }
       throw new ServiceUnavailableException('Remnawave auth status is unavailable');
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  //  STRICT ADAPTER (T-010) — paid/destructive operations with normalized
+  //  outcomes for the fulfillment/device sagas. These do NOT swallow errors
+  //  into null/[] like the best-effort UI reads above.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Strictly reads a panel user for read-back verification. Validates the
+   * envelope + required fields and decodes the canonical nullable-unlimited
+   * (`0` upstream → `null`). 404 → `notFound`; malformed 2xx →
+   * `invalidContract`; transport/5xx → `unavailable`.
+   */
+  public async strictGetPanelUser(uuid: string): Promise<RemnawaveStrictOutcome<RemnawaveStrictUser>> {
+    const transport = await this.strictHttp('get', `/api/users/${uuid}`);
+    if (transport.kind !== 'ok') return this.mapStrictTransport(transport);
+    return this.parseStrictUser(transport.data);
+  }
+
+  /**
+   * Absolute desired-limit PATCH. UUID travels in the BODY (2.7.x/2.8.x
+   * contract), canonical unlimited (`null`) is encoded as upstream `0`. Returns
+   * the panel's post-write user so the caller can compare, but callers MUST
+   * still `strictGetPanelUser` for an independent read-back before advancing
+   * the applied revision.
+   */
+  public async strictSetUserLimits(
+    uuid: string,
+    desired: { readonly trafficLimitBytes: bigint | null; readonly hwidDeviceLimit: number | null },
+  ): Promise<RemnawaveStrictOutcome<RemnawaveStrictUser>> {
+    const body: Record<string, unknown> = {
+      uuid,
+      trafficLimitBytes:
+        desired.trafficLimitBytes === null ? 0 : Number(desired.trafficLimitBytes),
+      hwidDeviceLimit: desired.hwidDeviceLimit === null ? 0 : desired.hwidDeviceLimit,
+    };
+    const transport = await this.strictHttp('patch', '/api/users', body);
+    if (transport.kind !== 'ok') return this.mapStrictTransport(transport);
+    return this.parseStrictUser(transport.data);
+  }
+
+  /**
+   * Strictly lists a user's HWID devices for the device-reduction saga.
+   * Validates the envelope, that `total` matches the row count, that every
+   * `hwid` is unique + non-empty and every `createdAt` is present — a device
+   * plan must never be built on an inconsistent list. Row owner fields are
+   * ignored (the user is addressed by URL UUID, never by a trusted row field).
+   */
+  public async strictListUserDevices(
+    uuid: string,
+  ): Promise<RemnawaveStrictOutcome<RemnawaveStrictDeviceList>> {
+    const transport = await this.strictHttp('get', `/api/hwid/devices/${uuid}`);
+    if (transport.kind !== 'ok') return this.mapStrictTransport(transport);
+
+    const root = (transport.data as { response?: unknown })?.response ?? transport.data;
+    if (root === null || typeof root !== 'object') {
+      return strictInvalidContract('device list envelope is not an object');
+    }
+    const record = root as { devices?: unknown; total?: unknown };
+    if (!Array.isArray(record.devices)) {
+      return strictInvalidContract('device list "devices" is not an array');
+    }
+    const devices: RemnawaveStrictDevice[] = [];
+    const seen = new Set<string>();
+    for (const raw of record.devices) {
+      const r = (raw ?? {}) as Record<string, unknown>;
+      const hwid = typeof r['hwid'] === 'string' ? r['hwid'] : '';
+      const createdAt = typeof r['createdAt'] === 'string' ? r['createdAt'] : '';
+      if (hwid.length === 0) return strictInvalidContract('device row has an empty hwid');
+      if (createdAt.length === 0) return strictInvalidContract(`device ${hwid} has no createdAt`);
+      if (seen.has(hwid)) return strictInvalidContract(`duplicate hwid ${hwid} in device list`);
+      seen.add(hwid);
+      devices.push({ hwid, createdAt });
+    }
+    if (typeof record.total !== 'number' || !Number.isInteger(record.total)) {
+      return strictInvalidContract('device list "total" is not an integer');
+    }
+    if (record.total !== devices.length) {
+      return strictInvalidContract(
+        `device list total ${record.total} != rows ${devices.length}`,
+      );
+    }
+    return strictOk({ devices, total: record.total }, this.readEnvelopeVersion(transport.data));
+  }
+
+  /**
+   * Exact single-HWID delete with a STABLE body `{ userUuid, hwid }` (never a
+   * row-owner field). Returns the remaining `total` on success; 404 → the row
+   * was already absent (`notFound`) — the caller treats that as idempotent
+   * success only after a strict read-back.
+   */
+  public async strictDeleteUserDevice(
+    userUuid: string,
+    hwid: string,
+  ): Promise<RemnawaveStrictOutcome<{ readonly total: number }>> {
+    const transport = await this.strictHttp('post', '/api/hwid/devices/delete', { userUuid, hwid });
+    if (transport.kind !== 'ok') return this.mapStrictTransport(transport);
+    const root = (transport.data as { response?: unknown })?.response ?? transport.data;
+    const record = (root ?? {}) as { total?: unknown; devices?: unknown };
+    const total =
+      typeof record.total === 'number' && Number.isInteger(record.total)
+        ? record.total
+        : Array.isArray(record.devices)
+          ? record.devices.length
+          : null;
+    if (total === null) {
+      return strictInvalidContract('device delete response missing a numeric total');
+    }
+    return strictOk({ total }, this.readEnvelopeVersion(transport.data));
+  }
+
+  /** Validates + decodes a strict user object from a `{ response }` envelope. */
+  private parseStrictUser(data: unknown): RemnawaveStrictOutcome<RemnawaveStrictUser> {
+    const root = (data as { response?: unknown })?.response ?? data;
+    if (root === null || typeof root !== 'object') {
+      return strictInvalidContract('user envelope is not an object');
+    }
+    const r = root as Record<string, unknown>;
+    const uuid = r['uuid'];
+    const status = r['status'];
+    const traffic = r['trafficLimitBytes'];
+    const devices = r['hwidDeviceLimit'];
+    if (typeof uuid !== 'string' || uuid.length === 0) {
+      return strictInvalidContract('user missing uuid');
+    }
+    if (typeof status !== 'string' || status.length === 0) {
+      return strictInvalidContract('user missing status');
+    }
+    if (typeof traffic !== 'number' || !Number.isFinite(traffic) || traffic < 0) {
+      return strictInvalidContract('user trafficLimitBytes is not a non-negative number');
+    }
+    if (typeof devices !== 'number' || !Number.isInteger(devices) || devices < 0) {
+      return strictInvalidContract('user hwidDeviceLimit is not a non-negative integer');
+    }
+    return strictOk(
+      {
+        uuid,
+        status,
+        // Canonical unlimited: upstream 0 decodes to null.
+        trafficLimitBytes: traffic === 0 ? null : BigInt(Math.trunc(traffic)),
+        hwidDeviceLimit: devices === 0 ? null : devices,
+      },
+      this.readEnvelopeVersion(data),
+    );
+  }
+
+  /** Best-effort panel-version read from a response envelope (else null). */
+  private readEnvelopeVersion(data: unknown): string | null {
+    const version = (data as { version?: unknown })?.version;
+    return typeof version === 'string' && version.length > 0 ? version : null;
+  }
+
+  /** Maps a non-ok transport result onto a normalized strict outcome. */
+  private mapStrictTransport<T>(
+    transport: { readonly kind: 'status'; readonly status: number; readonly retryAfterMs: number | null } | { readonly kind: 'network' },
+  ): RemnawaveStrictOutcome<T> {
+    if (transport.kind === 'network') return strictUnavailable();
+    const { status, retryAfterMs } = transport;
+    if (status === 404) return strictNotFound();
+    if (status === 405 || status === 501) return strictUnsupported();
+    if (status === 408 || status === 429 || status >= 500) return strictUnavailable(retryAfterMs);
+    // 400/401/403/409/... — a terminal contract/auth rejection. Non-retryable
+    // by hot-loop; the caller raises an incident.
+    return strictInvalidContract(`upstream rejected with status ${status}`);
+  }
+
+  /**
+   * Raw transport for strict operations. Unlike {@link requestJson} it does
+   * NOT collapse failures into a single exception: it distinguishes an HTTP
+   * status response (with a parsed `Retry-After`) from a network/timeout error
+   * and from a not-configured integration, so the strict mappers can classify
+   * the outcome.
+   */
+  private async strictHttp(
+    method: 'get' | 'post' | 'patch' | 'delete',
+    url: string,
+    body?: Record<string, unknown>,
+  ): Promise<
+    | { readonly kind: 'ok'; readonly data: unknown }
+    | { readonly kind: 'status'; readonly status: number; readonly retryAfterMs: number | null }
+    | { readonly kind: 'network' }
+  > {
+    const baseUrl = this.getBaseUrl();
+    const token = this.configuration.token;
+    if (baseUrl === null || token === null) {
+      return { kind: 'network' };
+    }
+    try {
+      const response = await firstValueFrom(
+        this.httpService.request<unknown>({
+          method,
+          url,
+          baseURL: baseUrl,
+          data: body,
+          headers: {
+            Authorization: `Bearer ${token}`,
+            ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+            'x-forwarded-for': '127.0.0.1',
+            'x-forwarded-proto': 'https',
+          },
+        }),
+      );
+      return { kind: 'ok', data: response.data };
+    } catch (err: unknown) {
+      if (isAxiosError(err) && err.response !== undefined) {
+        const status = err.response.status;
+        const retryAfterMs = parseRetryAfterMs(err.response.headers);
+        this.logger.warn(`Remnawave strict ${method.toUpperCase()} ${url} → HTTP ${status}`);
+        return { kind: 'status', status, retryAfterMs };
+      }
+      this.logger.warn(
+        `Remnawave strict ${method.toUpperCase()} ${url} transport error: ${(err as Error).message}`,
+      );
+      return { kind: 'network' };
     }
   }
 

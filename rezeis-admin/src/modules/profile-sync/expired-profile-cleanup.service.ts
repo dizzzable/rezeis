@@ -7,7 +7,7 @@ import { shouldRunSchedules } from '../../common/runtime/process-role.util';
 import { EVENT_TYPES, SystemEventsService } from '../../common/services/system-events.service';
 import { RemnawaveApiService } from '../remnawave/services/remnawave-api.service';
 import { SettingsService } from '../settings/services/settings.service';
-import { ProfileSyncQueueService } from './profile-sync-queue.service';
+import { SubscriptionDeletionService } from '../subscriptions/services/subscription-deletion.service';
 
 /** Max subscriptions cleaned per sweep — bounds the load on the panel. */
 const CLEANUP_BATCH = 100;
@@ -51,10 +51,10 @@ export class ExpiredProfileCleanupService {
 
   public constructor(
     private readonly prismaService: PrismaService,
-    private readonly profileSyncQueueService: ProfileSyncQueueService,
     private readonly events: SystemEventsService,
     private readonly settingsService: SettingsService,
     private readonly remnawaveApiService: RemnawaveApiService,
+    private readonly subscriptionDeletionService: SubscriptionDeletionService,
   ) {}
 
   @Cron(CronExpression.EVERY_30_MINUTES, { name: 'expired-profile-cleanup' })
@@ -97,18 +97,31 @@ export class ExpiredProfileCleanupService {
    * panel. Returns the number of rows flipped to DELETED.
    */
   private async softDeleteDetachedExpired(cutoff: Date): Promise<number> {
-    const { count } = await this.prismaService.subscription.updateMany({
+    const candidates = await this.prismaService.subscription.findMany({
       where: {
         remnawaveId: null,
         status: { not: SubscriptionStatus.DELETED },
         expiresAt: { not: null, lt: cutoff },
       },
-      data: { status: SubscriptionStatus.DELETED },
+      select: { id: true, expiresAt: true },
+      take: CLEANUP_BATCH,
+      orderBy: { expiresAt: 'asc' },
     });
-    if (count > 0) {
-      this.logger.log(`Expired-profile cleanup: soft-deleted ${count} already-detached subscription(s)`);
+    let deleted = 0;
+    for (const candidate of candidates) {
+      if (candidate.expiresAt === null) continue;
+      const result = await this.subscriptionDeletionService.deleteExpiredIfUnchanged({
+        subscriptionId: candidate.id,
+        expectedExpiresAt: candidate.expiresAt,
+        expectedRemnawaveId: null,
+        cutoff,
+      });
+      if (result.deleted) deleted += 1;
     }
-    return count;
+    if (deleted > 0) {
+      this.logger.log(`Expired-profile cleanup: soft-deleted ${deleted} already-detached subscription(s)`);
+    }
+    return deleted;
   }
 
   /**
@@ -152,7 +165,7 @@ export class ExpiredProfileCleanupService {
           },
         },
       },
-      select: { id: true, userId: true, isTrial: true, remnawaveId: true },
+      select: { id: true, userId: true, isTrial: true, remnawaveId: true, expiresAt: true },
       take: CLEANUP_BATCH,
       orderBy: { expiresAt: 'asc' },
     });
@@ -163,7 +176,8 @@ export class ExpiredProfileCleanupService {
     let selfHealed = 0;
     for (const subscription of candidates) {
       const remnawaveId = subscription.remnawaveId;
-      if (remnawaveId === null) continue; // defensive — query already filters this
+      const expectedExpiresAt = subscription.expiresAt;
+      if (remnawaveId === null || expectedExpiresAt === null) continue;
 
       // ── Panel-authoritative expiry re-check ──────────────────────────────
       let panelExpiryMs: number | null = null;
@@ -234,16 +248,15 @@ export class ExpiredProfileCleanupService {
       // Panel confirms expired-past-grace, or the profile is already gone from
       // the panel — proceed with the deletion.
       try {
-        const job = await this.prismaService.profileSyncJob.create({
-          data: {
-            subscriptionId: subscription.id,
-            action: SyncAction.DELETE,
-            status: SyncJobStatus.PENDING,
-            payload: { source: 'EXPIRED_PROFILE_CLEANUP' } as Prisma.InputJsonObject,
-          },
-          select: { id: true },
+        const result = await this.subscriptionDeletionService.deleteExpiredIfUnchanged({
+          subscriptionId: subscription.id,
+          expectedExpiresAt,
+          expectedRemnawaveId: remnawaveId,
+          cutoff,
         });
-        await this.profileSyncQueueService.enqueue(job.id);
+        if (!result.deleted) {
+          continue;
+        }
         enqueued += 1;
         this.events.info(
           EVENT_TYPES.SUBSCRIPTION_DELETED,

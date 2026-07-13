@@ -1,6 +1,8 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, ConflictException } from '@nestjs/common';
 import {
+  AddOnLifetime,
   AddOnType,
+  AddOnEntitlementActorType,
   DeviceType,
   Plan,
   PlanAvailability,
@@ -9,6 +11,7 @@ import {
   PurchaseType,
   Subscription,
   SubscriptionStatus,
+  SubscriptionTermStatus,
   SyncAction,
   SyncJobStatus,
   Transaction,
@@ -17,6 +20,12 @@ import {
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { SystemEventsService, EVENT_TYPES } from '../../../common/services/system-events.service';
+import { resolveAddOnRolloutFlags, resolveResetCapabilities } from '../../add-on-entitlements/add-on-rollout.config';
+import { GIB_BYTES } from '../../add-on-entitlements/domain/cutover-baseline';
+import { getResetCapability, ResetStrategy } from '../../add-on-entitlements/domain/reset-cycle-policy';
+import { AddOnEntitlementService } from '../../add-on-entitlements/services/add-on-entitlement.service';
+import { EffectiveProjectionService } from '../../add-on-entitlements/services/effective-projection.service';
+import { SubscriptionTermService } from '../../add-on-entitlements/services/subscription-term.service';
 
 @Injectable()
 export class PaymentSubscriptionMutationService {
@@ -25,6 +34,9 @@ export class PaymentSubscriptionMutationService {
   public constructor(
     private readonly prismaService: PrismaService,
     private readonly events: SystemEventsService,
+    private readonly addOnEntitlementService: AddOnEntitlementService,
+    private readonly effectiveProjectionService: EffectiveProjectionService,
+    private readonly subscriptionTermService: SubscriptionTermService,
   ) {}
 
   public async applyCompletedTransaction(
@@ -152,8 +164,9 @@ export class PaymentSubscriptionMutationService {
       return { syncJobs: [] };
     }
 
-    const syncJobs = await this.prismaService.$transaction(async (transactionClient) => {
+    const { syncJobs, scheduling } = await this.prismaService.$transaction(async (transactionClient) => {
       const jobs: ProfileSyncJob[] = [];
+      const toSchedule: Array<{ subscriptionId: string; plan: Plan; durationDays: number }> = [];
       const now = new Date();
       for (const item of pending) {
         const plan = await transactionClient.plan.findUnique({ where: { id: item.planId } });
@@ -205,6 +218,65 @@ export class PaymentSubscriptionMutationService {
           data: { appliedAt: now },
         });
         jobs.push(syncJob);
+
+        // Renewal add-on composition (T-007): a PERSISTED add-on line means the
+        // customer already PAID for it (intake only writes `addOnLines` when
+        // `renewalAddOns` was on at checkout). Fulfillment therefore mints them
+        // regardless of the CURRENT flag value — otherwise flipping the flag off
+        // between checkout and the webhook would silently drop paid goods. The
+        // term + PENDING entitlements are created ATOMICALLY here (never lost to
+        // a best-effort failure); lines WITHOUT add-ons keep the post-commit
+        // best-effort scheduling (nothing paid is at risk there).
+        const addOnLines = readRenewalAddOnLines(item.addOnLines);
+        if (addOnLines.length > 0) {
+          const term = await this.scheduleRenewalTermInTransaction(transactionClient, {
+            subscriptionId: renewedSubscription.id,
+            plan,
+            durationDays: item.durationDays,
+          });
+          if (term === null) {
+            // Invariant violation: add-ons were sold for a subscription with no
+            // durable term. Fail closed (roll back, reconciler retries) rather
+            // than silently drop paid goods — intake only offers renewal add-ons
+            // once the subscription has an active term.
+            throw new ConflictException(
+              `Renewal add-ons require a durable term for subscription ${renewedSubscription.id}`,
+            );
+          }
+          for (const addOn of addOnLines) {
+            const totalValue =
+              addOn.type === AddOnType.EXTRA_TRAFFIC
+                ? BigInt(addOn.value) * GIB_BYTES
+                : BigInt(addOn.value);
+            await this.addOnEntitlementService.createPendingInTransaction(transactionClient, {
+              subscriptionId: renewedSubscription.id,
+              termId: term.id,
+              sourceTransactionId: transaction.id,
+              sourceLineKey: addOn.sourceLineKey,
+              addOnId: addOn.addOnId,
+              catalogRevision: addOn.catalogRevision,
+              receiptName: addOn.receiptName,
+              type: addOn.type,
+              valuePerUnit: addOn.value,
+              totalValue,
+              lifetime: addOn.lifetime,
+              applicabilitySnapshot: {},
+              unitAmount: addOn.unitAmount,
+              totalAmount: addOn.unitAmount,
+              currency: item.currency,
+              purchasedAt: transaction.createdAt,
+              // Activates at the renewed term's start (design D-4) and expires
+              // at the renewed term boundary. UNTIL_NEXT_RESET refinement to the
+              // term's first epoch happens at activation (T-008d/e).
+              scheduledActivationAt: term.startsAt,
+              expiresAt: term.endsAt,
+              expiryEpochId: null,
+              correlationId: `payment:${transaction.paymentId}`,
+            });
+          }
+        } else {
+          toSchedule.push({ subscriptionId: renewedSubscription.id, plan, durationDays: item.durationDays });
+        }
       }
       // Stamp the transaction-level idempotency flag atomically with the item
       // applications so the webhook reconciler treats the combined renewal as
@@ -213,8 +285,17 @@ export class PaymentSubscriptionMutationService {
         where: { id: transaction.id },
         data: { fulfilledAt: now },
       });
-      return jobs;
+      return { syncJobs: jobs, scheduling: toSchedule };
     });
+
+    // Durable renewal-term scheduling for each renewed line (design D-4):
+    // best-effort, per line, in a SEPARATE transaction AFTER the combined
+    // renewal commits — identical safety contract to the single-subscription
+    // path (a shadow-model failure can never roll back a real renewal). No-op
+    // unless the flag is on and the line's subscription has an active term.
+    for (const line of scheduling) {
+      await this.scheduleRenewalTermBestEffort(line);
+    }
 
     this.events.info(
       EVENT_TYPES.PAYMENT_COMPLETED,
@@ -253,6 +334,8 @@ export class PaymentSubscriptionMutationService {
       throw new NotFoundException('Add-on marker not found on transaction');
     }
 
+    const flags = resolveAddOnRolloutFlags();
+
     const result = await this.prismaService.$transaction(async (tx) => {
       const subscription = await tx.subscription.findUnique({
         where: { id: marker.targetSubscriptionId },
@@ -264,6 +347,26 @@ export class PaymentSubscriptionMutationService {
         throw new NotFoundException('Target subscription is deleted');
       }
 
+      // ── Durable entitlement-ledger path (flag-gated) ─────────────────────
+      // When direct-purchase rollout is on and the target has an active term,
+      // record the purchase as an immutable entitlement, recompute the
+      // effective projection and mirror it into the legacy limit columns so
+      // profile-sync keeps applying the ledger-backed limit until versioned
+      // sync (T-009) takes over. Falls back to the legacy increment when the
+      // entitlement cannot be fully materialized here.
+      if (
+        flags.directPurchase &&
+        subscription.status === SubscriptionStatus.ACTIVE &&
+        marker.lifetime !== undefined &&
+        marker.sourceLineKey !== undefined
+      ) {
+        const ledgered = await this.applyAddOnViaLedger(tx, transaction, marker, subscription);
+        if (ledgered !== null) {
+          return ledgered;
+        }
+      }
+
+      // ── Legacy increment path ────────────────────────────────────────────
       let updatedSubscription: Subscription;
       if (marker.addOnType === AddOnType.EXTRA_TRAFFIC) {
         if (subscription.trafficLimit === null) {
@@ -277,10 +380,17 @@ export class PaymentSubscriptionMutationService {
           });
         }
       } else {
-        updatedSubscription = await tx.subscription.update({
-          where: { id: subscription.id },
-          data: { deviceLimit: { increment: marker.addOnValue } },
-        });
+        if (subscription.deviceLimit <= 0) {
+          // Unlimited device baseline (0/negative) — adding devices is a no-op
+          // and must NOT turn an unlimited profile finite (the legacy `0 + N`
+          // footgun). Record fulfillment without changing the limit.
+          updatedSubscription = subscription;
+        } else {
+          updatedSubscription = await tx.subscription.update({
+            where: { id: subscription.id },
+            data: { deviceLimit: { increment: marker.addOnValue } },
+          });
+        }
       }
 
       const syncJob = await tx.profileSyncJob.create({
@@ -319,6 +429,187 @@ export class PaymentSubscriptionMutationService {
     });
 
     return result;
+  }
+
+  /**
+   * Flag-gated ledger fulfillment for a captured add-on. Returns `null` when
+   * the entitlement cannot be fully materialized here (no active term, no
+   * usable term window, or a reset-scoped lifetime whose expiry epoch is not
+   * yet available) so the caller falls back to the legacy increment.
+   */
+  private async applyAddOnViaLedger(
+    tx: Prisma.TransactionClient,
+    transaction: Transaction,
+    marker: AddOnMarker,
+    subscription: Subscription,
+  ): Promise<{ readonly subscription: Subscription; readonly syncJob: ProfileSyncJob } | null> {
+    if (marker.lifetime === undefined || marker.sourceLineKey === undefined) return null;
+
+    const term = await tx.subscriptionTerm.findFirst({
+      where: { subscriptionId: subscription.id, status: SubscriptionTermStatus.ACTIVE },
+      select: {
+        id: true,
+        endsAt: true,
+        baseTrafficLimitBytes: true,
+        baseDeviceLimit: true,
+        trafficResetStrategy: true,
+      },
+    });
+    if (term === null) return null;
+
+    const isTraffic = marker.addOnType === AddOnType.EXTRA_TRAFFIC;
+    const baseline = isTraffic ? term.baseTrafficLimitBytes : term.baseDeviceLimit;
+
+    // Unlimited baseline: the add-on is a no-op. Record fulfillment WITHOUT an
+    // increment (the fix for the legacy `0 + N` device bug that turned an
+    // unlimited profile finite) and without a ledger row.
+    if (baseline === null) {
+      return this.recordAddOnLedgerNoOp(tx, transaction, subscription);
+    }
+
+    const now = new Date();
+    let expiresAt: Date;
+    let expiryEpochId: string | null = null;
+    if (marker.lifetime === AddOnLifetime.UNTIL_SUBSCRIPTION_END) {
+      if (term.endsAt === null || term.endsAt.getTime() <= now.getTime()) {
+        return null; // no usable term window → fall back to legacy
+      }
+      expiresAt = term.endsAt;
+    } else {
+      // UNTIL_NEXT_RESET: bind the entitlement's expiry to the term's current
+      // reset epoch, but ONLY when the strategy's commercial reset-expiry
+      // capability is ENABLED (post-parity flag) AND the epoch row already
+      // exists (created at term activation, T-008e). Otherwise fall back to the
+      // legacy increment — this matches the eligibility quote, which only
+      // OFFERS this lifetime under the same capability gate. Binding to an
+      // existing epoch (never creating one here) keeps the money path free of
+      // reset-lifecycle guesswork.
+      const strategy = term.trafficResetStrategy as ResetStrategy;
+      if (strategy === 'NO_RESET') return null;
+      if (getResetCapability(strategy, resolveResetCapabilities()) !== 'ENABLED') return null;
+      const epoch = await tx.subscriptionResetEpoch.findFirst({
+        where: { termId: term.id, plannedEndsAt: { gt: now } },
+        orderBy: { ordinal: 'asc' },
+        select: { id: true, plannedEndsAt: true },
+      });
+      if (epoch === null) return null; // no live epoch → legacy fallback
+      expiresAt = epoch.plannedEndsAt;
+      expiryEpochId = epoch.id;
+    }
+
+    const totalValue = isTraffic ? BigInt(marker.addOnValue) * GIB_BYTES : BigInt(marker.addOnValue);
+    const correlationId = `payment:${transaction.paymentId}`;
+
+    // Bind the source transaction to its target subscription before recording
+    // the entitlement: the ledger's source-line guard requires the transaction
+    // to already point at the subscription (add-on drafts leave it null until
+    // fulfillment). createPending re-reads it FOR UPDATE in this same tx.
+    await tx.transaction.update({
+      where: { id: transaction.id },
+      data: { subscriptionId: subscription.id },
+    });
+
+    const created = await this.addOnEntitlementService.createPendingInTransaction(tx, {
+      subscriptionId: subscription.id,
+      termId: term.id,
+      sourceTransactionId: transaction.id,
+      sourceLineKey: marker.sourceLineKey,
+      addOnId: marker.addOnId,
+      catalogRevision: marker.addOnRevision ?? 1,
+      receiptName: marker.name ?? marker.addOnId,
+      type: marker.addOnType,
+      valuePerUnit: marker.addOnValue,
+      totalValue,
+      lifetime: marker.lifetime,
+      applicabilitySnapshot: {},
+      unitAmount: transaction.amount,
+      totalAmount: transaction.amount,
+      currency: transaction.currency,
+      purchasedAt: transaction.createdAt,
+      // Deterministic per (transaction, line) so an idempotent re-apply
+      // recomputes the identical immutable snapshot. Direct purchases activate
+      // at capture time, which is the transaction's creation instant.
+      scheduledActivationAt: transaction.createdAt,
+      expiresAt,
+      expiryEpochId,
+      correlationId,
+    });
+
+    await this.addOnEntitlementService.transitionInTransaction(tx, {
+      entitlementId: created.entitlementId,
+      command: 'ACTIVATE',
+      commandKey: `activate:${created.entitlementId}`,
+      correlationId,
+      actorType: AddOnEntitlementActorType.SYSTEM,
+      reason: 'DIRECT_PURCHASE_ACTIVATION',
+    });
+
+    const projection = await this.effectiveProjectionService.recomputeInTransaction(tx, {
+      subscriptionId: subscription.id,
+      mode: 'ACTIVE',
+    });
+
+    // Mirror the desired effective limits into the legacy compatibility columns
+    // so profile-sync keeps applying the ledger-backed limit until versioned
+    // sync (T-009) reads the projection directly.
+    const mirroredTraffic =
+      projection.desiredTrafficLimitBytes === null
+        ? null
+        : Number(projection.desiredTrafficLimitBytes / GIB_BYTES);
+    const mirroredDevice = projection.desiredDeviceLimit === null ? 0 : projection.desiredDeviceLimit;
+
+    const updatedSubscription = await tx.subscription.update({
+      where: { id: subscription.id },
+      data: { trafficLimit: mirroredTraffic, deviceLimit: mirroredDevice },
+    });
+
+    const syncJob = await tx.profileSyncJob.create({
+      data: {
+        subscriptionId: updatedSubscription.id,
+        action: updatedSubscription.remnawaveId === null ? SyncAction.CREATE : SyncAction.UPDATE,
+        status: SyncJobStatus.PENDING,
+        aggregateKey: updatedSubscription.id,
+        desiredRevision: projection.desiredRevision,
+        payload: {
+          source: 'ADDON_PURCHASE_LEDGER',
+          paymentId: transaction.paymentId,
+          entitlementId: created.entitlementId,
+          addOnType: marker.addOnType,
+          addOnValue: marker.addOnValue,
+        } as Prisma.InputJsonObject,
+      },
+    });
+
+    await tx.transaction.update({
+      where: { id: transaction.id },
+      data: { subscriptionId: updatedSubscription.id, fulfilledAt: new Date() },
+    });
+
+    return { subscription: updatedSubscription, syncJob };
+  }
+
+  private async recordAddOnLedgerNoOp(
+    tx: Prisma.TransactionClient,
+    transaction: Transaction,
+    subscription: Subscription,
+  ): Promise<{ readonly subscription: Subscription; readonly syncJob: ProfileSyncJob }> {
+    const syncJob = await tx.profileSyncJob.create({
+      data: {
+        subscriptionId: subscription.id,
+        action: subscription.remnawaveId === null ? SyncAction.CREATE : SyncAction.UPDATE,
+        status: SyncJobStatus.PENDING,
+        payload: {
+          source: 'ADDON_PURCHASE_LEDGER',
+          paymentId: transaction.paymentId,
+          note: 'UNLIMITED_NOOP',
+        } as Prisma.InputJsonObject,
+      },
+    });
+    await tx.transaction.update({
+      where: { id: transaction.id },
+      data: { subscriptionId: subscription.id, fulfilledAt: new Date() },
+    });
+    return { subscription, syncJob };
   }
 
   private async createSubscriptionFromPayment(input: {
@@ -405,7 +696,7 @@ export class PaymentSubscriptionMutationService {
     if (input.transaction.subscriptionId === null) {
       throw new NotFoundException('Source subscription not found');
     }
-    return this.prismaService.$transaction(async (transactionClient) => {
+    const result = await this.prismaService.$transaction(async (transactionClient) => {
       const currentSubscription = await transactionClient.subscription.findUnique({
         where: { id: input.transaction.subscriptionId! },
       });
@@ -453,6 +744,93 @@ export class PaymentSubscriptionMutationService {
         syncJob,
       };
     });
+
+    // Durable renewal-term scheduling (design D-4 early-renewal): best-effort,
+    // in a SEPARATE transaction AFTER the renewal commits, so a shadow-model
+    // failure can NEVER roll back a real renewal. Gated by `entitlementShadow`
+    // and only when the subscription already has a durable term (cutover done).
+    await this.scheduleRenewalTermBestEffort({
+      subscriptionId: result.subscription.id,
+      plan: input.purchasedPlan,
+      durationDays: input.selectedDurationDays,
+    });
+
+    return result;
+  }
+
+  /**
+   * Schedules the next durable term for a renewed subscription (design D-4):
+   * `startsAt = current term end` (or `now` if it already ended), plan-derived
+   * baseline, SCHEDULED status — the boundary scheduler activates it at term
+   * start. Best-effort + isolated: any failure is logged and swallowed so the
+   * committed renewal is never affected. No-op when the flag is off, the
+   * subscription has no active term, or a scheduled term already exists.
+   */
+  private async scheduleRenewalTermBestEffort(input: {
+    readonly subscriptionId: string;
+    readonly plan: Plan;
+    readonly durationDays: number;
+  }): Promise<void> {
+    if (!resolveAddOnRolloutFlags().entitlementShadow) return;
+    try {
+      await this.prismaService.$transaction((tx) => this.scheduleRenewalTermInTransaction(tx, input));
+      this.logger.log(`Scheduled renewal term for subscription ${input.subscriptionId}`);
+    } catch (err: unknown) {
+      this.logger.warn(
+        `Best-effort renewal-term scheduling failed for ${input.subscriptionId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  /**
+   * Creates (or reuses) the next SCHEDULED durable term for a renewed
+   * subscription inside the CALLER's transaction and returns its id + window.
+   * `startsAt = current term end` (or `now` if it already ended), plan-derived
+   * baseline, SCHEDULED status. Returns `null` when the subscription has no
+   * ACTIVE term (durable model not applicable — no cutover). If a SCHEDULED
+   * term already exists it is reused (never double-scheduled), so this is
+   * idempotent and safe to call from both the best-effort path (no add-ons)
+   * and the atomic combined-renewal path (paid add-ons bind to the term).
+   */
+  private async scheduleRenewalTermInTransaction(
+    tx: Prisma.TransactionClient,
+    input: { readonly subscriptionId: string; readonly plan: Plan; readonly durationDays: number },
+  ): Promise<{ readonly id: string; readonly startsAt: Date; readonly endsAt: Date | null } | null> {
+    const activeTerm = await tx.subscriptionTerm.findFirst({
+      where: { subscriptionId: input.subscriptionId, status: SubscriptionTermStatus.ACTIVE },
+      orderBy: { generation: 'desc' },
+      select: { endsAt: true },
+    });
+    if (activeTerm === null) return null; // durable model not applicable (no cutover)
+    const alreadyScheduled = await tx.subscriptionTerm.findFirst({
+      where: { subscriptionId: input.subscriptionId, status: SubscriptionTermStatus.SCHEDULED },
+      orderBy: { generation: 'desc' },
+      select: { id: true, startsAt: true, endsAt: true },
+    });
+    if (alreadyScheduled !== null) return alreadyScheduled; // reuse; never double-schedule
+
+    const now = new Date();
+    const startsAt =
+      activeTerm.endsAt !== null && activeTerm.endsAt.getTime() > now.getTime() ? activeTerm.endsAt : now;
+    const endsAt = calculateExpiry(startsAt, input.durationDays);
+    const created = await this.subscriptionTermService.createScheduledInTransaction(tx, {
+      subscriptionId: input.subscriptionId,
+      planId: input.plan.id,
+      planSnapshot: {
+        id: input.plan.id,
+        name: input.plan.name,
+        trafficLimitStrategy: input.plan.trafficLimitStrategy,
+        snapshotSource: 'RENEWAL_TERM',
+      } as Prisma.InputJsonValue,
+      startsAt,
+      endsAt,
+      baseTrafficLimitBytes:
+        input.plan.trafficLimit === null ? null : BigInt(input.plan.trafficLimit) * GIB_BYTES,
+      baseDeviceLimit: input.plan.deviceLimit <= 0 ? null : input.plan.deviceLimit,
+      trafficResetStrategy: input.plan.trafficLimitStrategy,
+      resetAnchorAt: startsAt,
+    });
+    return { id: created.id, startsAt, endsAt };
   }
 
   private async upgradeSubscriptionFromPayment(input: {
@@ -587,9 +965,14 @@ interface AddOnMarker {
   readonly addOnType: AddOnType;
   readonly addOnValue: number;
   readonly targetSubscriptionId: string;
+  // ── v2 entitlement-ledger fields (optional; absent on legacy markers) ──
+  readonly name?: string;
+  readonly addOnRevision?: number;
+  readonly lifetime?: AddOnLifetime;
+  readonly sourceLineKey?: string;
 }
 
-function isAddOnTransaction(transaction: Transaction): boolean {
+export function isAddOnTransaction(transaction: Transaction): boolean {
   return readAddOnMarker(transaction) !== null;
 }
 
@@ -615,12 +998,91 @@ function readAddOnMarker(transaction: Transaction): AddOnMarker | null {
   ) {
     return null;
   }
+  const lifetimeRaw = snapshot['lifetime'];
+  const lifetime =
+    lifetimeRaw === AddOnLifetime.UNTIL_NEXT_RESET || lifetimeRaw === AddOnLifetime.UNTIL_SUBSCRIPTION_END
+      ? lifetimeRaw
+      : undefined;
+  const addOnRevision = snapshot['addOnRevision'];
+  const sourceLineKey = snapshot['sourceLineKey'];
+  const name = snapshot['name'];
   return {
     addOnId,
     addOnType: addOnTypeRaw,
     addOnValue,
     targetSubscriptionId,
+    name: typeof name === 'string' ? name : undefined,
+    addOnRevision: typeof addOnRevision === 'number' ? addOnRevision : undefined,
+    lifetime,
+    sourceLineKey: typeof sourceLineKey === 'string' && sourceLineKey.length > 0 ? sourceLineKey : undefined,
   };
+}
+
+/** One parsed renewal add-on line persisted on a {@link TransactionItem}. */
+interface RenewalAddOnLine {
+  readonly addOnId: string | null;
+  readonly catalogRevision: number;
+  readonly type: AddOnType;
+  readonly value: number;
+  readonly lifetime: AddOnLifetime;
+  readonly sourceLineKey: string;
+  readonly unitAmount: string;
+  readonly receiptName: string;
+}
+
+/**
+ * Parses the `TransactionItem.addOnLines` JSON column into typed renewal
+ * add-on lines, silently skipping malformed entries (defensive: the column is
+ * operator/intake-populated). Returns `[]` for null/non-array/no valid lines.
+ */
+function readRenewalAddOnLines(raw: Prisma.JsonValue | null): readonly RenewalAddOnLine[] {
+  if (!Array.isArray(raw)) return [];
+  const lines: RenewalAddOnLine[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) continue;
+    const record = entry as Record<string, unknown>;
+    const type = record['type'];
+    const lifetime = record['lifetime'];
+    const value = record['value'];
+    const catalogRevision = record['catalogRevision'];
+    const sourceLineKey = record['sourceLineKey'];
+    const unitAmount = record['unitAmount'];
+    const receiptName = record['receiptName'];
+    const addOnId = record['addOnId'];
+    if (
+      (type !== AddOnType.EXTRA_TRAFFIC && type !== AddOnType.EXTRA_DEVICES) ||
+      (lifetime !== AddOnLifetime.UNTIL_NEXT_RESET &&
+        lifetime !== AddOnLifetime.UNTIL_SUBSCRIPTION_END) ||
+      typeof value !== 'number' ||
+      !Number.isInteger(value) ||
+      typeof sourceLineKey !== 'string' ||
+      sourceLineKey.length === 0
+    ) {
+      continue;
+    }
+    lines.push({
+      addOnId: typeof addOnId === 'string' && addOnId.length > 0 ? addOnId : null,
+      catalogRevision:
+        typeof catalogRevision === 'number' && Number.isInteger(catalogRevision) ? catalogRevision : 1,
+      type,
+      value,
+      lifetime,
+      sourceLineKey,
+      unitAmount:
+        typeof unitAmount === 'string'
+          ? unitAmount
+          : typeof unitAmount === 'number'
+            ? String(unitAmount)
+            : '0',
+      receiptName:
+        typeof receiptName === 'string' && receiptName.length > 0
+          ? receiptName
+          : typeof addOnId === 'string' && addOnId.length > 0
+            ? addOnId
+            : 'Add-on',
+    });
+  }
+  return lines;
 }
 
 function readPlanId(transaction: Transaction): string {

@@ -120,6 +120,7 @@ export const EVENT_TYPES = {
   PAYMENT_FAILED: 'payment.failed',
   PAYMENT_EXPIRED: 'payment.expired',
   PAYMENT_WEBHOOK_RECEIVED: 'payment.webhook_received',
+  PAYMENT_FULFILLMENT_RECOVERED: 'payment.fulfillment_recovered',
 
   // Referral
   REFERRAL_ATTACHED: 'referral.attached',
@@ -1430,6 +1431,7 @@ const EVENT_PRESENTATION: Record<string, { emoji: string; title: string }> = {
   'payment.failed': { emoji: '❌', title: 'Платёж не прошёл' },
   'payment.expired': { emoji: '⌛', title: 'Счёт на оплату истёк' },
   'payment.webhook_received': { emoji: '📩', title: 'Вебхук платёжки' },
+  'payment.fulfillment_recovered': { emoji: '🛟', title: 'Восстановлено исполнение платежа' },
 
   // Referral
   'referral.attached': { emoji: '🔗', title: 'Реферал привязан' },

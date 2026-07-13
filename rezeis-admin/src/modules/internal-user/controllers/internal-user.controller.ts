@@ -15,6 +15,7 @@ import { SetWebAccountPasswordDto } from '../dto/set-web-account-password.dto';
 import { SnoozeWebAccountLinkPromptDto } from '../dto/snooze-web-account-link-prompt.dto';
 import { InternalWebAccountEmailVerificationChallengeInterface } from '../interfaces/internal-web-account-email-verification-challenge.interface';
 import {
+  InternalUserAddOnEntitlementInterface,
   InternalUserNotificationInterface,
   InternalUserTransactionInterface,
 } from '../interfaces/internal-user-notification.interface';
@@ -246,6 +247,14 @@ export class InternalUserController {
     @Query() query: InternalByTelegramQueryDto,
   ): Promise<{ transactions: readonly InternalUserTransactionInterface[] }> {
     return this.internalUserEdgeService.listTransactions(requireUserReference(query));
+  }
+
+  /** Durable add-on entitlement history ("My add-ons") for the user. */
+  @Get('add-on-entitlements')
+  public async listAddOnEntitlements(
+    @Query() query: InternalByTelegramQueryDto,
+  ): Promise<{ entitlements: readonly InternalUserAddOnEntitlementInterface[] }> {
+    return this.internalUserEdgeService.listAddOnEntitlements(requireUserReference(query));
   }
 
   // ── Trial ────────────────────────────────────────────────────────────────

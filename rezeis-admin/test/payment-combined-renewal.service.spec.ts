@@ -173,7 +173,13 @@ function createEnv(input: { subs: SubRow[]; items: ItemRow[] }) {
 
   const events = { info: () => undefined };
 
-  const service = new PaymentSubscriptionMutationService(prismaService as never, events as never);
+  const service = new PaymentSubscriptionMutationService(
+    prismaService as never,
+    events as never,
+    {} as never,
+    {} as never,
+    {} as never,
+  );
 
   const transaction = {
     id: 'tx-1',

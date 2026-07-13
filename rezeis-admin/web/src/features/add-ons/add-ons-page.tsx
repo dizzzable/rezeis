@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, Pencil, Trash2, Puzzle, Loader2, BarChart3, List } from 'lucide-react'
+import { Plus, Pencil, Trash2, Puzzle, Loader2, BarChart3, List, Activity } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
@@ -34,6 +34,7 @@ import { usePlans } from '@/features/plans/plans-api'
 import { IconPicker } from '@/features/settings/icon-picker'
 import { EmojiTextInput } from '@/features/broadcast/emoji-text-input'
 import { AddOnsStatsTab } from './add-ons-stats-tab'
+import { AddOnEntitlementsTab } from './add-on-entitlements-tab'
 
 const CURRENCIES = ['RUB', 'USD', 'USDT', 'TON', 'XTR', 'EUR'] as const
 const ADD_ON_TYPES = ['EXTRA_TRAFFIC', 'EXTRA_DEVICES'] as const
@@ -140,6 +141,9 @@ export default function AddOnsPage() {
           </TabsTrigger>
           <TabsTrigger value="stats" className="gap-2">
             <BarChart3 className="h-4 w-4" /> {t('addOnsPage.tabs.stats')}
+          </TabsTrigger>
+          <TabsTrigger value="entitlements" className="gap-2">
+            <Activity className="h-4 w-4" /> {t('addOnsPage.tabs.entitlements')}
           </TabsTrigger>
         </TabsList>
 
@@ -288,6 +292,10 @@ export default function AddOnsPage() {
 
         <TabsContent value="stats">
           <AddOnsStatsTab />
+        </TabsContent>
+
+        <TabsContent value="entitlements">
+          <AddOnEntitlementsTab />
         </TabsContent>
       </Tabs>
 

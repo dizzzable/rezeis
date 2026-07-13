@@ -99,6 +99,104 @@ describe('SubscriptionRenewalService.priceRenewalItems', () => {
     assert.equal(result.items[0]?.amount, '8.00');
   });
 
+  it('renewal add-ons: flag on prices eligible selections into lines + total; TERM_START activation', async () => {
+    const eligibility = eligibleAddOnStub([
+      { id: 'a-traffic', revision: 3, type: 'EXTRA_TRAFFIC', value: 50, lifetime: 'UNTIL_SUBSCRIPTION_END', currency: 'USD', price: '2.50', name: 'Extra 50GB' },
+    ]);
+    const service = createService([sub({ id: 's1', price: '10.00' })], eligibility);
+    const prev = process.env.ADDON_RENEWAL_ADDONS;
+    process.env.ADDON_RENEWAL_ADDONS = 'true';
+    try {
+      const result = await service.priceRenewalItems({
+        identity: { userId: 'u' },
+        subscriptionIds: ['s1'],
+        gatewayType: GATEWAY,
+        addOns: new Map([['s1', ['a-traffic']]]),
+      });
+      assert.equal(result.items[0]?.addOnLines.length, 1);
+      const line = result.items[0]!.addOnLines[0]!;
+      assert.equal(line.addOnId, 'a-traffic');
+      assert.equal(line.catalogRevision, 3);
+      assert.equal(line.type, 'EXTRA_TRAFFIC');
+      assert.equal(line.value, 50);
+      assert.equal(line.activation, 'TERM_START');
+      assert.equal(line.sourceLineKey, 'renew:s1:a-traffic');
+      assert.equal(line.unitAmount, '2.50');
+      // Total = plan line (10.00) + add-on (2.50).
+      assert.equal(result.total, '12.5');
+    } finally {
+      if (prev === undefined) delete process.env.ADDON_RENEWAL_ADDONS;
+      else process.env.ADDON_RENEWAL_ADDONS = prev;
+    }
+  });
+
+  it('renewal add-ons: flag off ignores selections entirely (no lines, plan-only total)', async () => {
+    const eligibility = eligibleAddOnStub([
+      { id: 'a-traffic', revision: 1, type: 'EXTRA_TRAFFIC', value: 50, lifetime: 'UNTIL_SUBSCRIPTION_END', currency: 'USD', price: '2.50', name: 'Extra 50GB' },
+    ]);
+    const service = createService([sub({ id: 's1', price: '10.00' })], eligibility);
+    // renewalAddOns OFF (default)
+    const result = await service.priceRenewalItems({
+      identity: { userId: 'u' },
+      subscriptionIds: ['s1'],
+      gatewayType: GATEWAY,
+      addOns: new Map([['s1', ['a-traffic']]]),
+    });
+    assert.equal(result.items[0]?.addOnLines.length, 0);
+    assert.equal(result.total, '10');
+  });
+
+  it('renewal add-ons: rejects an ineligible add-on id (ADDON_NOT_ELIGIBLE)', async () => {
+    const eligibility = eligibleAddOnStub([
+      { id: 'a-traffic', revision: 1, type: 'EXTRA_TRAFFIC', value: 50, lifetime: 'UNTIL_SUBSCRIPTION_END', currency: 'USD', price: '2.50', name: 'Extra 50GB' },
+    ]);
+    const service = createService([sub({ id: 's1', price: '10.00' })], eligibility);
+    const prev = process.env.ADDON_RENEWAL_ADDONS;
+    process.env.ADDON_RENEWAL_ADDONS = 'true';
+    try {
+      await assert.rejects(
+        () => service.priceRenewalItems({
+          identity: { userId: 'u' }, subscriptionIds: ['s1'], gatewayType: GATEWAY,
+          addOns: new Map([['s1', ['a-unknown']]]),
+        }),
+        (e: unknown) => e instanceof BadRequestException && e.message === 'ADDON_NOT_ELIGIBLE',
+      );
+    } finally {
+      if (prev === undefined) delete process.env.ADDON_RENEWAL_ADDONS;
+      else process.env.ADDON_RENEWAL_ADDONS = prev;
+    }
+  });
+
+  it('renewal add-ons: rejects a duplicate pick and a missing gateway-currency price', async () => {
+    const eligibility = eligibleAddOnStub([
+      { id: 'a-eur-only', revision: 1, type: 'EXTRA_DEVICES', value: 1, lifetime: 'UNTIL_SUBSCRIPTION_END', currency: 'EUR', price: '1.00', name: 'Extra device' },
+    ]);
+    const service = createService([sub({ id: 's1', price: '10.00', currency: Currency.USD })], eligibility);
+    const prev = process.env.ADDON_RENEWAL_ADDONS;
+    process.env.ADDON_RENEWAL_ADDONS = 'true';
+    try {
+      // Duplicate selection.
+      await assert.rejects(
+        () => service.priceRenewalItems({
+          identity: { userId: 'u' }, subscriptionIds: ['s1'], gatewayType: GATEWAY,
+          addOns: new Map([['s1', ['a-eur-only', 'a-eur-only']]]),
+        }),
+        (e: unknown) => e instanceof BadRequestException && e.message === 'ADDON_DUPLICATE_SELECTION',
+      );
+      // Eligible but no USD price → unavailable.
+      await assert.rejects(
+        () => service.priceRenewalItems({
+          identity: { userId: 'u' }, subscriptionIds: ['s1'], gatewayType: GATEWAY,
+          addOns: new Map([['s1', ['a-eur-only']]]),
+        }),
+        (e: unknown) => e instanceof BadRequestException && e.message === 'ADDON_PRICE_UNAVAILABLE',
+      );
+    } finally {
+      if (prev === undefined) delete process.env.ADDON_RENEWAL_ADDONS;
+      else process.env.ADDON_RENEWAL_ADDONS = prev;
+    }
+  });
+
   it('Property 1: combined total equals the sum of item amounts', async () => {
     await fc.assert(
       fc.asyncProperty(
@@ -283,7 +381,10 @@ function sub(input: {
   };
 }
 
-function createService(fixtures: readonly SubFixture[]): SubscriptionRenewalService {
+function createService(
+  fixtures: readonly SubFixture[],
+  eligibilityOverride?: { listForSubscription: (subscriptionId: string) => Promise<unknown> },
+): SubscriptionRenewalService {
   const byId = new Map(fixtures.map((f) => [f.id, f]));
 
   const prismaService = {
@@ -376,5 +477,58 @@ function createService(fixtures: readonly SubFixture[]): SubscriptionRenewalServ
     },
   };
 
-  return new SubscriptionRenewalService(prismaService as never, quoteService as never);
+  const eligibilityService = eligibilityOverride ?? {
+    listForSubscription: async () => ({
+      contractVersion: 2 as const,
+      availability: 'EMPTY' as const,
+      target: null,
+      addOns: [],
+    }),
+  };
+
+  return new SubscriptionRenewalService(
+    prismaService as never,
+    quoteService as never,
+    eligibilityService as never,
+  );
+}
+
+interface StubAddOn {
+  readonly id: string;
+  readonly revision: number;
+  readonly type: string;
+  readonly value: number;
+  readonly lifetime: string;
+  readonly currency: string;
+  readonly price: string;
+  readonly name: string;
+}
+
+/** Eligibility stub returning the given add-ons as AVAILABLE for any subscription. */
+function eligibleAddOnStub(addOns: readonly StubAddOn[]): {
+  listForSubscription: (subscriptionId: string) => Promise<unknown>;
+} {
+  return {
+    listForSubscription: async (subscriptionId: string) => ({
+      contractVersion: 2 as const,
+      availability: 'AVAILABLE' as const,
+      target: { subscriptionId, termId: `${subscriptionId}-term`, planId: 'plan-x' },
+      addOns: addOns.map((a) => ({
+        id: a.id,
+        revision: a.revision,
+        name: a.name,
+        description: null,
+        type: a.type,
+        value: a.value,
+        lifetime: a.lifetime,
+        eligibility: {
+          eligible: true as const,
+          activation: 'NOW' as const,
+          expiresAt: new Date('2030-01-01T00:00:00.000Z').toISOString(),
+          explanationCode: 'ELIGIBLE_UNTIL_SUBSCRIPTION_END',
+        },
+        prices: [{ currency: a.currency, price: a.price }],
+      })),
+    }),
+  };
 }

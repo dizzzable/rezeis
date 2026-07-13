@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   NotFoundException,
@@ -13,6 +14,7 @@ import {
   PurchaseChannel,
   PurchaseType,
   SubscriptionStatus,
+  Transaction,
   TransactionStatus,
 } from '@prisma/client';
 
@@ -22,6 +24,7 @@ import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.s
 import { AccessModeGuard } from '../../settings/services/access-mode-guard.service';
 import { SettingsService } from '../../settings/services/settings.service';
 import { isGatewayConfigured } from '../utils/payment-gateway-settings.util';
+import { buildAddOnCheckoutFingerprint } from '../utils/checkout-fingerprint.util';
 import {
   InternalPaymentCheckoutInterface,
 } from '../interfaces/internal-payment-checkout.interface';
@@ -37,6 +40,9 @@ export interface AddOnCheckoutInput {
   readonly channel?: PurchaseChannel;
   readonly successUrl?: string | null;
   readonly failUrl?: string | null;
+  readonly contractVersion?: number;
+  readonly idempotencyKey?: string;
+  readonly expectedAddOnRevision?: number;
 }
 
 /**
@@ -91,6 +97,10 @@ export class AddOnPurchaseService {
     if (typeof input.userId === 'string' && input.userId.length > 0) {
       userId = input.userId;
     } else if (typeof input.telegramId === 'string' && input.telegramId.length > 0) {
+      // Guard BigInt() against a non-numeric telegramId (would throw a raw 500).
+      if (!/^\d+$/.test(input.telegramId)) {
+        throw new NotFoundException('User not found');
+      }
       const user = await this.prismaService.user.findFirst({
         where: { telegramId: BigInt(input.telegramId) },
         select: { id: true },
@@ -175,6 +185,47 @@ export class AddOnPurchaseService {
       personalDiscount: 0,
     });
 
+    // ── Optimistic catalog-revision guard ────────────────────────────────
+    // If the client pinned the revision it saw, reject a stale composition
+    // rather than silently selling the repriced/changed add-on.
+    if (input.expectedAddOnRevision !== undefined && input.expectedAddOnRevision !== addOn.revision) {
+      throw new ConflictException({
+        code: 'ADDON_REVISION_CONFLICT',
+        message: 'Add-on changed since it was shown; refresh and try again',
+      });
+    }
+
+    // ── Request-level idempotency ────────────────────────────────────────
+    // A logical checkout attempt is identified by its canonical composition.
+    // Same key + same composition → return the existing draft; same key +
+    // different composition → IDEMPOTENCY_KEY_CONFLICT. Keyless (legacy)
+    // requests skip this and always create a fresh draft.
+    const checkoutFingerprint = buildAddOnCheckoutFingerprint({
+      contractVersion: input.contractVersion ?? 1,
+      userId,
+      subscriptionId: subscription.id,
+      termId: null,
+      addOnId: addOn.id,
+      addOnRevision: addOn.revision,
+      type: addOn.type,
+      value: addOn.value,
+      lifetime: addOn.lifetime,
+      gatewayType: gateway.type,
+      channel,
+      currency,
+      amount: snapshot.price,
+    });
+    const idempotencyKey =
+      typeof input.idempotencyKey === 'string' && input.idempotencyKey.length > 0
+        ? input.idempotencyKey
+        : null;
+    if (idempotencyKey !== null) {
+      const existing = await this.findByIdempotencyKey(userId, idempotencyKey);
+      if (existing !== null) {
+        return this.replayOrConflict(existing, checkoutFingerprint);
+      }
+    }
+
     // ── Draft transaction ─────────────────────────────────────────────────
     const planSnapshot: Record<string, unknown> = {
       snapshotSource: 'ADDON_PURCHASE',
@@ -187,10 +238,19 @@ export class AddOnPurchaseService {
       gatewayType: gateway.type,
       amount: snapshot.price,
       currency,
+      // ── v2 entitlement-ledger marker (additive) ─────────────────────────
+      // Consumed by the flag-gated ledger fulfillment (T-005c). The legacy
+      // marker parser ignores these fields, so this is safe on the old path.
+      contractVersion: input.contractVersion ?? 1,
+      addOnRevision: addOn.revision,
+      lifetime: addOn.lifetime,
+      // One add-on line per transaction → a stable per-line dedup key backing
+      // the unique (sourceTransactionId, sourceLineKey) entitlement constraint.
+      sourceLineKey: addOn.id,
     };
 
-    const transaction = await this.prismaService.transaction.create({
-      data: {
+    const transaction = await this.createDraftTransaction(
+      {
         userId,
         // Left null so the reconciliation guard runs fulfillment; the
         // target subscription id lives in planSnapshot and is stamped
@@ -204,8 +264,17 @@ export class AddOnPurchaseService {
         amount: snapshot.price,
         planSnapshot: planSnapshot as Prisma.InputJsonValue,
         deviceTypes: [],
+        idempotencyKey,
+        checkoutFingerprint: idempotencyKey !== null ? checkoutFingerprint : null,
       },
-    });
+      userId,
+      idempotencyKey,
+      checkoutFingerprint,
+    );
+    // A concurrent request with the same key won the race — replay its draft.
+    if ('replay' in transaction) {
+      return transaction.replay;
+    }
 
     // ── Free add-on (zero amount): apply immediately, skip the provider ───
     // A 0-price add-on (e.g. an operator-granted extra) has no real payment.
@@ -242,19 +311,54 @@ export class AddOnPurchaseService {
     }
 
     // ── Provider checkout ─────────────────────────────────────────────────
-    const providerCheckout = await this.paymentProviderExecutionService.createCheckout({
-      gateway,
-      transaction,
-      description: buildAddOnDescription(addOn.name),
-      successUrl: input.successUrl ?? null,
-      failUrl: input.failUrl ?? null,
-    });
+    // The draft's `paymentId` is already the stable merchant reference (passed
+    // to every adapter as order_id / tracking_id / metadata / Idempotence-Key),
+    // so the provider call is idempotent and a late webhook can always find
+    // this draft. If the provider create fails non-deterministically (timeout /
+    // 5xx / network — surfaced as ServiceUnavailableException by the execution
+    // layer) we CANNOT know whether the provider created the payment: stamp the
+    // draft as `PROVIDER_OUTCOME_UNKNOWN` (kept, not deleted) so a keyed retry
+    // replays the same draft (no second checkout) and the webhook reconciler /
+    // recovery sweeper resolve the money. Deterministic config errors
+    // (BadRequest) mean the draft is unusable and propagate unchanged.
+    let providerCheckout;
+    try {
+      providerCheckout = await this.paymentProviderExecutionService.createCheckout({
+        gateway,
+        transaction,
+        description: buildAddOnDescription(addOn.name),
+        successUrl: input.successUrl ?? null,
+        failUrl: input.failUrl ?? null,
+      });
+    } catch (error: unknown) {
+      if (error instanceof ServiceUnavailableException) {
+        await this.prismaService.transaction
+          .update({
+            where: { id: transaction.id },
+            data: {
+              gatewayData: {
+                providerOutcome: 'UNKNOWN',
+                reason: 'PROVIDER_CREATE_UNAVAILABLE',
+              } as Prisma.InputJsonValue,
+            },
+          })
+          .catch(() => undefined);
+        throw new ServiceUnavailableException({
+          code: 'PROVIDER_OUTCOME_UNKNOWN',
+          message: 'Payment provider outcome is unknown; awaiting reconciliation',
+        });
+      }
+      throw error;
+    }
 
     const updatedTransaction = await this.prismaService.transaction.update({
       where: { id: transaction.id },
       data: {
         gatewayId: providerCheckout.gatewayId,
         gatewayData: providerCheckout.gatewayData as Prisma.InputJsonValue,
+        // Persist the payment link so an idempotent replay returns the same
+        // checkout instead of creating a second invoice.
+        checkoutUrl: providerCheckout.checkoutUrl,
       },
     });
 
@@ -270,6 +374,90 @@ export class AddOnPurchaseService {
       createdAt: updatedTransaction.createdAt.toISOString(),
     };
   }
+
+  /**
+   * Create the draft, tolerating a concurrent duplicate under the same
+   * idempotency key: on the unique-index race we replay the winner's draft
+   * instead of surfacing a raw DB error.
+   */
+  private async createDraftTransaction(
+    data: Prisma.TransactionUncheckedCreateInput,
+    userId: string,
+    idempotencyKey: string | null,
+    checkoutFingerprint: string,
+  ): Promise<Transaction | { readonly replay: InternalPaymentCheckoutInterface }> {
+    try {
+      return await this.prismaService.transaction.create({ data });
+    } catch (error: unknown) {
+      if (
+        idempotencyKey !== null &&
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2002'
+      ) {
+        const existing = await this.findByIdempotencyKey(userId, idempotencyKey);
+        if (existing !== null) {
+          return { replay: this.replayOrConflict(existing, checkoutFingerprint) };
+        }
+      }
+      throw error;
+    }
+  }
+
+  private findByIdempotencyKey(
+    userId: string,
+    idempotencyKey: string,
+  ): Promise<ExistingDraft | null> {
+    return this.prismaService.transaction.findFirst({
+      where: { userId, idempotencyKey },
+      select: {
+        paymentId: true,
+        status: true,
+        gatewayType: true,
+        purchaseType: true,
+        amount: true,
+        currency: true,
+        checkoutUrl: true,
+        createdAt: true,
+        checkoutFingerprint: true,
+      },
+    });
+  }
+
+  /** Same composition → replay the existing draft; different → conflict. */
+  private replayOrConflict(
+    existing: ExistingDraft,
+    checkoutFingerprint: string,
+  ): InternalPaymentCheckoutInterface {
+    if (existing.checkoutFingerprint !== checkoutFingerprint) {
+      throw new ConflictException({
+        code: 'IDEMPOTENCY_KEY_CONFLICT',
+        message: 'Idempotency key was already used for a different checkout',
+      });
+    }
+    return {
+      paymentId: existing.paymentId,
+      transactionStatus: existing.status,
+      gatewayType: existing.gatewayType,
+      purchaseType: existing.purchaseType,
+      amount: existing.amount.toString(),
+      currency: existing.currency,
+      checkoutUrl: existing.checkoutUrl,
+      providerMode: existing.checkoutUrl !== null ? 'REDIRECT' : 'NONE',
+      createdAt: existing.createdAt.toISOString(),
+    };
+  }
+}
+
+interface ExistingDraft {
+  readonly paymentId: string;
+  readonly status: TransactionStatus;
+  readonly gatewayType: PaymentGatewayType;
+  readonly purchaseType: PurchaseType;
+  readonly amount: Prisma.Decimal;
+  readonly currency: Currency;
+  readonly checkoutUrl: string | null;
+  readonly createdAt: Date;
+  readonly checkoutFingerprint: string | null;
 }
 
 function buildAddOnDescription(name: string): string {

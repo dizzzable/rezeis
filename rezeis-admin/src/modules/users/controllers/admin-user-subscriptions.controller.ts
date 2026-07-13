@@ -42,6 +42,7 @@ import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.inter
 import { extractRequestMetadata } from '../../auth/utils/request-metadata.util';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
+import { SubscriptionDeletionService } from '../../subscriptions/services/subscription-deletion.service';
 import { SystemEventsService, EVENT_TYPES } from '../../../common/services/system-events.service';
 import { buildPlanSnapshot } from '../utils/plan-snapshot.util';
 
@@ -54,6 +55,7 @@ export class AdminUserSubscriptionsController {
     private readonly remnawaveApiService: RemnawaveApiService,
     private readonly profileSyncQueueService: ProfileSyncQueueService,
     private readonly systemEvents: SystemEventsService,
+    private readonly subscriptionDeletionService: SubscriptionDeletionService,
   ) {}
 
   // ── Subscription Mutations ─────────────────────────────────────────────
@@ -152,54 +154,12 @@ export class AdminUserSubscriptionsController {
     @CurrentAdmin() admin: CurrentAdminInterface,
     @Req() req: Request,
   ) {
-    const sub = await this.prismaService.subscription.findUnique({
-      where: { id: subscriptionId },
-      select: { id: true, userId: true, status: true, remnawaveId: true },
-    });
-    if (!sub) throw new NotFoundException('Subscription not found');
-    // Idempotent: deleting an already-deleted subscription is a no-op — and
-    // critically must NOT re-enqueue a revocation job (the Remnawave profile
-    // may have already been removed and remnawaveId cleared).
-    if (sub.status === SubscriptionStatus.DELETED) {
-      return { deleted: true };
-    }
-
-    // Previously this only flipped the DB status, leaving the Remnawave
-    // profile live forever (the panel never learns the subscription was
-    // deleted) — an EXPIRED subscription deleted from the user card stayed
-    // visible/active on the Remnawave panel. Mirror the self-service delete
-    // path (`SubscriptionDeletionService`): enqueue a revocation job when a
-    // profile exists, only THEN flip the status, matching the "never a
-    // DELETED row with a live profile that isn't already queued for
-    // removal" invariant.
-    const syncJobId = await this.prismaService.$transaction(async (tx) => {
-      let createdJobId: string | null = null;
-      if (sub.remnawaveId !== null) {
-        const job = await tx.profileSyncJob.create({
-          data: {
-            subscriptionId: sub.id,
-            action: SyncAction.DELETE,
-            status: SyncJobStatus.PENDING,
-            payload: { source: 'ADMIN_PANEL' } as Prisma.InputJsonObject,
-          },
-          select: { id: true },
-        });
-        createdJobId = job.id;
-      }
-      await tx.subscription.update({
-        where: { id: subscriptionId },
-        data: { status: SubscriptionStatus.DELETED },
-      });
-      return createdJobId;
-    });
-    if (syncJobId !== null) {
-      await this.profileSyncQueueService.enqueue(syncJobId);
-    }
+    const result = await this.subscriptionDeletionService.deleteByOperator(subscriptionId);
 
     await this.auditLog(admin, req, 'user.subscription.deleted', {
-      userId: sub.userId,
-      subscriptionId: sub.id,
-      hadRemnawaveProfile: sub.remnawaveId !== null,
+      userId: result.userId,
+      subscriptionId,
+      hadRemnawaveProfile: result.hadRemnawaveProfile,
     });
 
     return { deleted: true };

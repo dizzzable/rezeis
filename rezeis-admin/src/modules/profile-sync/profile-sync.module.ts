@@ -3,7 +3,6 @@ import { Module } from '@nestjs/common';
 
 import { RemnawaveModule } from '../remnawave/remnawave.module';
 import { SettingsModule } from '../settings/settings.module';
-import { ExpiredProfileCleanupService } from './expired-profile-cleanup.service';
 import { PROFILE_SYNC_QUEUE } from './profile-sync.constants';
 import { ProfileSyncProcessor } from './profile-sync.processor';
 import { ProfileSyncQueueService } from './profile-sync-queue.service';
@@ -22,7 +21,6 @@ import { RemnawaveProfileNamingService } from './remnawave-profile-naming.servic
     ProfileSyncProcessor,
     ProfileSyncQueueService,
     RemnawaveProfileNamingService,
-    ExpiredProfileCleanupService,
   ],
   exports: [ProfileSyncQueueService, RemnawaveProfileNamingService],
 })

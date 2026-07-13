@@ -1,11 +1,13 @@
 import { PaymentGatewayType, PurchaseChannel } from '@prisma/client';
 import {
   IsEnum,
+  IsInt,
   IsOptional,
   IsString,
   IsUrl,
   Matches,
   MaxLength,
+  Min,
 } from 'class-validator';
 
 /**
@@ -36,6 +38,34 @@ export class InternalAddOnPurchaseDto {
 
   @IsEnum(PaymentGatewayType)
   public gatewayType!: PaymentGatewayType;
+
+  /**
+   * Contract version. Absent/1 = legacy keyless behaviour; 2 = the client
+   * sends an idempotency key and may pin the expected add-on revision.
+   */
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  public contractVersion?: number;
+
+  /**
+   * Client-generated idempotency key for this logical checkout attempt. A
+   * repeat with the same key + same composition returns the same draft.
+   */
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  public idempotencyKey?: string;
+
+  /**
+   * Optional optimistic concurrency guard: the catalog revision the client
+   * believes it is buying. A mismatch is rejected so a repriced add-on is
+   * never silently sold at a stale composition.
+   */
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  public expectedAddOnRevision?: number;
 
   @IsOptional()
   @IsEnum(PurchaseChannel)

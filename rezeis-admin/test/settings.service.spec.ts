@@ -126,6 +126,7 @@ describe('SettingsService', () => {
       accessMode: AccessMode.PUBLIC,
       inviteModeStartedAt: null,
       defaultCurrency: Currency.USD,
+      renewalAddOns: false,
     });
     assert.equal(hasCreateBeenCalled, false);
   });

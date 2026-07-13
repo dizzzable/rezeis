@@ -36,6 +36,7 @@ import {
 } from '../interfaces/branding-settings.interface';
 import { CustomIconInterface } from '../interfaces/custom-icon.interface';
 import { InternalPlatformPolicyInterface } from '../interfaces/internal-platform-policy.interface';import { PlatformSettingsInterface } from '../interfaces/platform-settings.interface';
+import { resolveAddOnRolloutFlags } from '../../add-on-entitlements/add-on-rollout.config';
 import {
   mergeBrandingSettings,
   readBrandingSettings,
@@ -182,6 +183,8 @@ const DEFAULT_INTERNAL_PLATFORM_POLICY: InternalPlatformPolicyInterface = {
   accessMode: 'PUBLIC',
   inviteModeStartedAt: null,
   defaultCurrency: 'USD',
+  // Always overridden from env in getInternalPlatformPolicy — placeholder only.
+  renewalAddOns: false,
 };
 
 /**
@@ -314,10 +317,11 @@ export class SettingsService {
    */
   public async getInternalPlatformPolicy(): Promise<InternalPlatformPolicyInterface> {
     const settings: Settings | null = await this.getSettingsRecord(this.prismaService);
-    if (settings === null) {
-      return DEFAULT_INTERNAL_PLATFORM_POLICY;
-    }
-    return mapInternalPlatformPolicy(settings);
+    const base =
+      settings === null ? DEFAULT_INTERNAL_PLATFORM_POLICY : mapInternalPlatformPolicy(settings);
+    // Capability flags are deployment-time env, not stored in Settings — apply
+    // them here so both the default and the mapped payload reflect the rollout.
+    return { ...base, renewalAddOns: resolveAddOnRolloutFlags().renewalAddOns };
   }
 
   /**
@@ -1434,6 +1438,8 @@ function mapInternalPlatformPolicy(settings: Settings): InternalPlatformPolicyIn
     inviteModeStartedAt:
       settings.inviteModeStartedAt === null ? null : settings.inviteModeStartedAt.toISOString(),
     defaultCurrency: settings.defaultCurrency,
+    // Always overridden from env in getInternalPlatformPolicy — placeholder only.
+    renewalAddOns: false,
   };
 }
 

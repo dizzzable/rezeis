@@ -118,8 +118,42 @@ describe('InternalUserEdgeService activity feed', () => {
           gatewayType: PaymentGatewayType.YOOKASSA,
           currency: Currency.USD,
           amount: '8.00',
+          title: 'Plan X',
           createdAt: '2026-04-20T00:00:00.000Z',
           updatedAt: '2026-04-20T00:00:00.000Z',
+        },
+      ],
+    });
+  });
+
+  it('lists the user add-on entitlement history (own subscriptions only)', async () => {
+    const state = createState({ userId: 'user-1' });
+    const service = buildService(createPrismaDouble(state));
+
+    const result = await service.listAddOnEntitlements('12345');
+
+    assert.deepStrictEqual(state.subscriptionFindManyCalls, [
+      { where: { userId: 'user-1' }, select: { id: true } },
+    ]);
+    assert.deepStrictEqual(state.entitlementFindManyCalls, [
+      { where: { subscriptionId: { in: ['sub-1'] } }, orderBy: { purchasedAt: 'desc' }, take: 100 },
+    ]);
+    assert.deepStrictEqual(result, {
+      entitlements: [
+        {
+          id: 'ent-1',
+          subscriptionId: 'sub-1',
+          receiptName: 'Extra 50GB',
+          type: 'EXTRA_TRAFFIC',
+          valuePerUnit: 50,
+          quantity: 1,
+          lifetime: 'UNTIL_SUBSCRIPTION_END',
+          state: 'ACTIVE',
+          currency: Currency.USD,
+          totalAmount: '2.50',
+          purchasedAt: '2026-04-20T00:00:00.000Z',
+          activatedAt: '2026-04-20T00:00:00.000Z',
+          expiresAt: null,
         },
       ],
     });
@@ -170,6 +204,18 @@ function createPrismaDouble(state: ReturnType<typeof createState>) {
         return [createTransaction()];
       },
     },
+    subscription: {
+      findMany: async (args: unknown) => {
+        state.subscriptionFindManyCalls.push(args);
+        return [{ id: 'sub-1' }];
+      },
+    },
+    addOnEntitlement: {
+      findMany: async (args: unknown) => {
+        state.entitlementFindManyCalls.push(args);
+        return [createEntitlement()];
+      },
+    },
   };
 }
 
@@ -191,6 +237,26 @@ function createState(input: {
     notificationFindUniqueCalls: [] as unknown[],
     notificationUpdateCalls: [] as Array<{ readonly where: unknown; readonly data: { readonly readAt: Date } }>,
     transactionFindManyCalls: [] as unknown[],
+    subscriptionFindManyCalls: [] as unknown[],
+    entitlementFindManyCalls: [] as unknown[],
+  };
+}
+
+function createEntitlement() {
+  return {
+    id: 'ent-1',
+    subscriptionId: 'sub-1',
+    receiptName: 'Extra 50GB',
+    type: 'EXTRA_TRAFFIC',
+    valuePerUnit: 50,
+    quantity: 1,
+    lifetime: 'UNTIL_SUBSCRIPTION_END',
+    state: 'ACTIVE',
+    currency: Currency.USD,
+    totalAmount: { toString: (): string => '2.50' },
+    purchasedAt: new Date('2026-04-20T00:00:00.000Z'),
+    activatedAt: new Date('2026-04-20T00:00:00.000Z'),
+    expiresAt: null,
   };
 }
 
@@ -204,6 +270,7 @@ function createTransaction() {
     gatewayType: PaymentGatewayType.YOOKASSA,
     currency: Currency.USD,
     amount: { toString: (): string => '8.00' },
+    planSnapshot: { name: 'Plan X' },
     createdAt: new Date('2026-04-20T00:00:00.000Z'),
     updatedAt: new Date('2026-04-20T00:00:00.000Z'),
   };

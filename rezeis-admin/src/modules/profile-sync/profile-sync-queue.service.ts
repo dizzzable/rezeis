@@ -16,6 +16,19 @@ import {
 /** Recover stuck CREATE jobs no more than this often (avoid hammering a down panel). */
 const FAILED_RECOVERY_MAX = 50;
 
+/** Max stale-RUNNING (dead-worker) jobs reclaimed per sweep. */
+const STALE_RUNNING_RECOVERY_MAX = 50;
+
+/**
+ * A job that has been `RUNNING` longer than this almost certainly belongs to a
+ * worker that died mid-flight (a live run finishes its Remnawave call + BullMQ
+ * attempts well within this window). Its lease is considered expired and the
+ * row is reclaimed to `PENDING`. Handlers are idempotent (CREATE reuses an
+ * existing panel profile, UPDATE is an absolute write, DELETE re-checks
+ * `isDeleted`), so a re-run cannot double-apply.
+ */
+const STALE_RUNNING_LEASE_MS = 15 * 60 * 1000;
+
 /**
  * Enqueues pending `ProfileSyncJob` rows into BullMQ so the processor can
  * pick them up. Called by:
@@ -89,12 +102,10 @@ export class ProfileSyncQueueService {
    *  1. **PENDING** rows that were created but never enqueued (e.g. by code
    *     paths that only `profileSyncJob.create()` without calling `enqueue`,
    *     or after a producer crash between the two) are pushed to BullMQ.
-   *  2. **FAILED CREATE** rows whose subscription still has no `remnawaveId`
-   *     are reset to PENDING (attempts cleared) and re-enqueued, so once the
-   *     panel comes back the profile is provisioned automatically without an
-   *     operator manually clicking "Sync". UPDATE/DELETE failures are left
-   *     alone — they are non-fatal and re-driven by the next real mutation.
-   *
+   *  2. **FAILED rows** are reset to PENDING and re-enqueued, so CREATE,
+   *     UPDATE, DELETE and TRAFFIC_RESET all recover after transient panel
+   *     outages. Superseded rows are excluded and remain inert.
+
    * BullMQ deduplicates by `jobId` so re-enqueuing an in-flight row is safe.
    */
   @Cron(CronExpression.EVERY_5_MINUTES, { name: 'profile-sync-sweep' })
@@ -104,18 +115,17 @@ export class ProfileSyncQueueService {
     try {
       const swept = await this.sweepPending();
 
-      const stuckCreates = await this.prismaService.profileSyncJob.findMany({
+      const failedJobs = await this.prismaService.profileSyncJob.findMany({
         where: {
           status: SyncJobStatus.FAILED,
-          action: SyncAction.CREATE,
-          subscription: { remnawaveId: null },
+          supersededAt: null,
         },
         select: { id: true },
         take: FAILED_RECOVERY_MAX,
         orderBy: { createdAt: 'asc' },
       });
 
-      for (const job of stuckCreates) {
+      for (const job of failedJobs) {
         await this.prismaService.profileSyncJob.update({
           where: { id: job.id },
           data: { status: SyncJobStatus.PENDING, attempts: 0, lastError: null },
@@ -123,9 +133,36 @@ export class ProfileSyncQueueService {
         await this.enqueue(job.id, /* force */ true);
       }
 
-      if (swept > 0 || stuckCreates.length > 0) {
+      // 3. **Stale RUNNING** rows whose worker died mid-flight (lease expired)
+      //    are reclaimed to PENDING and re-enqueued. Without this a crashed
+      //    worker leaves the row RUNNING forever — the processor's claim only
+      //    matches PENDING/FAILED, so it would never be retried.
+      const cutoff = new Date(Date.now() - STALE_RUNNING_LEASE_MS);
+      const staleRunning = await this.prismaService.profileSyncJob.findMany({
+        where: {
+          status: SyncJobStatus.RUNNING,
+          supersededAt: null,
+          startedAt: { lt: cutoff },
+        },
+        select: { id: true },
+        take: STALE_RUNNING_RECOVERY_MAX,
+        orderBy: { startedAt: 'asc' },
+      });
+      for (const job of staleRunning) {
+        // Guard on status=RUNNING so a worker that finished between the read
+        // and now always wins (no reset of a just-completed row).
+        const reclaimed = await this.prismaService.profileSyncJob.updateMany({
+          where: { id: job.id, status: SyncJobStatus.RUNNING, supersededAt: null },
+          data: { status: SyncJobStatus.PENDING, lastError: null },
+        });
+        if (reclaimed.count === 1) {
+          await this.enqueue(job.id, /* force */ true);
+        }
+      }
+
+      if (swept > 0 || failedJobs.length > 0 || staleRunning.length > 0) {
         this.logger.log(
-          `Profile-sync sweep: re-enqueued ${swept} pending + recovered ${stuckCreates.length} failed CREATE job(s)`,
+          `Profile-sync sweep: re-enqueued ${swept} pending + recovered ${failedJobs.length} failed + ${staleRunning.length} stale-running job(s)`,
         );
       }
     } catch (err: unknown) {

@@ -25,6 +25,35 @@ export interface InternalUserTransactionInterface {
   readonly gatewayType: string;
   readonly currency: string;
   readonly amount: string;
+  /**
+   * Human-readable title for the transaction, derived from `planSnapshot`:
+   * the add-on receipt name (add-on top-ups) or the plan name (plan
+   * purchases). `null` when neither is present — the client then falls back to
+   * a purchase-type / gateway label. Fixes add-on transactions rendering as a
+   * bare gateway name.
+   */
+  readonly title: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
+}
+
+/**
+ * User-safe view of a durable add-on entitlement, shown in the cabinet's
+ * "My add-ons" history. Internal machinery (correlation ids, version,
+ * epoch/term ids, terminal reasons) is intentionally excluded.
+ */
+export interface InternalUserAddOnEntitlementInterface {
+  readonly id: string;
+  readonly subscriptionId: string;
+  readonly receiptName: string;
+  readonly type: string;
+  readonly valuePerUnit: number;
+  readonly quantity: number;
+  readonly lifetime: string;
+  readonly state: string;
+  readonly currency: string;
+  readonly totalAmount: string;
+  readonly purchasedAt: string;
+  readonly activatedAt: string | null;
+  readonly expiresAt: string | null;
 }

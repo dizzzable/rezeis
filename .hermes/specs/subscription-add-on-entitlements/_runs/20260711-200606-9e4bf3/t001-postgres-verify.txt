@@ -1,0 +1,250 @@
+T-001 disposable PostgreSQL verification
+database=throwaway postgres:16-alpine
+◇ injected env (48) from .env // tip: ⌁ auth for agents [www.vestauth.com]
+Loaded Prisma config from prisma.config.ts.
+
+Prisma schema loaded from prisma\schema.prisma.
+Datasource "db": PostgreSQL database "rezeis_t001", schema "public" at "127.0.0.1:54349"
+
+66 migrations found in prisma/migrations
+
+Applying migration `20260514120000_init`
+Applying migration `20260515191450_realtime_phase_1`
+Applying migration `20260515193326_rbac_phase_2`
+Applying migration `20260515203714_fraud_signals_phase_3`
+Applying migration `20260515204748_automations_phase_4`
+Applying migration `20260516120000_security_phase_5`
+Applying migration `20260516130000_webhooks_phase_6`
+Applying migration `20260516173802_add_new_gateways`
+Applying migration `20260517163000_add_ons`
+Applying migration `20260518000000_bot_config`
+Applying migration `20260518010000_faq_items`
+Applying migration `20260518020000_faq_media_urls`
+Applying migration `20260518030000_theme_presets`
+Applying migration `20260519120000_user_referral_invite_settings`
+Applying migration `20260519130000_partner_individual_settings`
+Applying migration `20260520160000_bot_flow_editor`
+Applying migration `20260522120000_remnawave_metrics_webhooks`
+Applying migration `20260522140000_performance_indexes`
+Applying migration `20260522160000_oauth_providers_passkeys`
+Applying migration `20260524012000_add_more_gateways`
+Applying migration `20260524021000_extend_currency_enum`
+Applying migration `20260524201400_referral_rewards_audit`
+Applying migration `20260528193000_bot_button_action`
+Applying migration `20260529000000_web_push_subscriptions`
+Applying migration `20260529001000_bot_notification_channels`
+Applying migration `20260529120000_drop_bot_notification_channels`
+Applying migration `20260531000000_subscription_card_branding`
+Applying migration `20260531120000_plan_icon`
+Applying migration `20260531140000_custom_icons`
+Applying migration `20260531160000_add_on_icon`
+Applying migration `20260601100000_user_onboarding_completed`
+Applying migration `20260601140000_plan_trial_settings`
+Applying migration `20260603190000_api_token_hash_audience`
+Applying migration `20260608120000_add_transaction_items`
+Applying migration `20260609120000_add_admin_web_push`
+Applying migration `20260609160000_add_admin_notification_preferences`
+Applying migration `20260615120000_add_cryptopay_gateway`
+Applying migration `20260617120000_anonymous_support_guest`
+Applying migration `20260617130000_support_attachments`
+Applying migration `20260617140000_support_document_requests`
+Applying migration `20260617150000_support_settings`
+Applying migration `20260617160000_support_guest_email_resume`
+Applying migration `20260617170000_web_account_bootstrap_pending`
+Applying migration `20260617180000_promocode_expires_at`
+Applying migration `20260619130000_add_usage_surface_tracking`
+Applying migration `20260621120000_remnawave_cleanup_settings`
+Applying migration `20260622120000_notification_templates_locale_buttons`
+Applying migration `20260623120000_broadcast_promo_code`
+Applying migration `20260624120000_bot_banner_library`
+Applying migration `20260624130000_partner_balance_payment`
+Applying migration `20260628120000_bot_flow_support_url`
+Applying migration `20260629120000_add_valutix_gateway`
+Applying migration `20260630120000_add_advertising_cabinet`
+Applying migration `20260701140000_add_external_auth`
+Applying migration `20260701150000_admin_appearance_prefs`
+Applying migration `20260701160000_ext_auth_telegram_oidc`
+Applying migration `20260703120000_add_month_rolling_traffic_strategy`
+Applying migration `20260706000000_subpage_config`
+Applying migration `20260706130000_add_transaction_fulfilled_at`
+Applying migration `20260707000000_add_landing_config`
+Applying migration `20260708120000_perf_composite_indexes`
+Applying migration `20260709120000_broadcast_audience_filter`
+Applying migration `20260709140000_gamification_quests`
+Applying migration `20260711013730_archive_promocodes`
+Applying migration `20260712120000_quest_partner_settings`
+Applying migration `20260712130000_add_subscription_add_on_entitlements`
+
+The following migration(s) have been applied:
+
+migrations/
+  └─ 20260514120000_init/
+    └─ migration.sql
+  └─ 20260515191450_realtime_phase_1/
+    └─ migration.sql
+  └─ 20260515193326_rbac_phase_2/
+    └─ migration.sql
+  └─ 20260515203714_fraud_signals_phase_3/
+    └─ migration.sql
+  └─ 20260515204748_automations_phase_4/
+    └─ migration.sql
+  └─ 20260516120000_security_phase_5/
+    └─ migration.sql
+  └─ 20260516130000_webhooks_phase_6/
+    └─ migration.sql
+  └─ 20260516173802_add_new_gateways/
+    └─ migration.sql
+  └─ 20260517163000_add_ons/
+    └─ migration.sql
+  └─ 20260518000000_bot_config/
+    └─ migration.sql
+  └─ 20260518010000_faq_items/
+    └─ migration.sql
+  └─ 20260518020000_faq_media_urls/
+    └─ migration.sql
+  └─ 20260518030000_theme_presets/
+    └─ migration.sql
+  └─ 20260519120000_user_referral_invite_settings/
+    └─ migration.sql
+  └─ 20260519130000_partner_individual_settings/
+    └─ migration.sql
+  └─ 20260520160000_bot_flow_editor/
+    └─ migration.sql
+  └─ 20260522120000_remnawave_metrics_webhooks/
+    └─ migration.sql
+  └─ 20260522140000_performance_indexes/
+    └─ migration.sql
+  └─ 20260522160000_oauth_providers_passkeys/
+    └─ migration.sql
+  └─ 20260524012000_add_more_gateways/
+    └─ migration.sql
+  └─ 20260524021000_extend_currency_enum/
+    └─ migration.sql
+  └─ 20260524201400_referral_rewards_audit/
+    └─ migration.sql
+  └─ 20260528193000_bot_button_action/
+    └─ migration.sql
+  └─ 20260529000000_web_push_subscriptions/
+    └─ migration.sql
+  └─ 20260529001000_bot_notification_channels/
+    └─ migration.sql
+  └─ 20260529120000_drop_bot_notification_channels/
+    └─ migration.sql
+  └─ 20260531000000_subscription_card_branding/
+    └─ migration.sql
+  └─ 20260531120000_plan_icon/
+    └─ migration.sql
+  └─ 20260531140000_custom_icons/
+    └─ migration.sql
+  └─ 20260531160000_add_on_icon/
+    └─ migration.sql
+  └─ 20260601100000_user_onboarding_completed/
+    └─ migration.sql
+  └─ 20260601140000_plan_trial_settings/
+    └─ migration.sql
+  └─ 20260603190000_api_token_hash_audience/
+    └─ migration.sql
+  └─ 20260608120000_add_transaction_items/
+    └─ migration.sql
+  └─ 20260609120000_add_admin_web_push/
+    └─ migration.sql
+  └─ 20260609160000_add_admin_notification_preferences/
+    └─ migration.sql
+  └─ 20260615120000_add_cryptopay_gateway/
+    └─ migration.sql
+  └─ 20260617120000_anonymous_support_guest/
+    └─ migration.sql
+  └─ 20260617130000_support_attachments/
+    └─ migration.sql
+  └─ 20260617140000_support_document_requests/
+    └─ migration.sql
+  └─ 20260617150000_support_settings/
+    └─ migration.sql
+  └─ 20260617160000_support_guest_email_resume/
+    └─ migration.sql
+  └─ 20260617170000_web_account_bootstrap_pending/
+    └─ migration.sql
+  └─ 20260617180000_promocode_expires_at/
+    └─ migration.sql
+  └─ 20260619130000_add_usage_surface_tracking/
+    └─ migration.sql
+  └─ 20260621120000_remnawave_cleanup_settings/
+    └─ migration.sql
+  └─ 20260622120000_notification_templates_locale_buttons/
+    └─ migration.sql
+  └─ 20260623120000_broadcast_promo_code/
+    └─ migration.sql
+  └─ 20260624120000_bot_banner_library/
+    └─ migration.sql
+  └─ 20260624130000_partner_balance_payment/
+    └─ migration.sql
+  └─ 20260628120000_bot_flow_support_url/
+    └─ migration.sql
+  └─ 20260629120000_add_valutix_gateway/
+    └─ migration.sql
+  └─ 20260630120000_add_advertising_cabinet/
+    └─ migration.sql
+  └─ 20260701140000_add_external_auth/
+    └─ migration.sql
+  └─ 20260701150000_admin_appearance_prefs/
+    └─ migration.sql
+  └─ 20260701160000_ext_auth_telegram_oidc/
+    └─ migration.sql
+  └─ 20260703120000_add_month_rolling_traffic_strategy/
+    └─ migration.sql
+  └─ 20260706000000_subpage_config/
+    └─ migration.sql
+  └─ 20260706130000_add_transaction_fulfilled_at/
+    └─ migration.sql
+  └─ 20260707000000_add_landing_config/
+    └─ migration.sql
+  └─ 20260708120000_perf_composite_indexes/
+    └─ migration.sql
+  └─ 20260709120000_broadcast_audience_filter/
+    └─ migration.sql
+  └─ 20260709140000_gamification_quests/
+    └─ migration.sql
+  └─ 20260711013730_archive_promocodes/
+    └─ migration.sql
+  └─ 20260712120000_quest_partner_settings/
+    └─ migration.sql
+  └─ 20260712130000_add_subscription_add_on_entitlements/
+    └─ migration.sql
+
+All migrations have been successfully applied.
+
+[new object inventory]
+add_on_entitlement_events
+add_on_entitlements
+device_reduction_plans
+entitlement_incidents
+subscription_effective_projections
+subscription_reset_epochs
+subscription_terms
+
+[new check constraints]
+add_on_entitlements_boundary_check
+add_on_entitlements_commercial_values_check
+device_reduction_plans_nonnegative_check
+subscription_effective_projections_nonnegative_check
+subscription_reset_epochs_boundary_check
+subscription_reset_epochs_ordinal_check
+subscription_terms_generation_check
+
+[negative checks]
+PASS generation=0 rejected
+PASS reversed epoch rejected
+PASS quantity=2 rejected
+PASS reversed entitlement boundary rejected
+
+[migration replay checksum]
+◇ injected env (48) from .env // tip: ⌘ multiple files { path: ['.env.local', '.env'] }
+Loaded Prisma config from prisma.config.ts.
+
+Prisma schema loaded from prisma\schema.prisma.
+Datasource "db": PostgreSQL database "rezeis_t001", schema "public" at "127.0.0.1:54349"
+
+66 migrations found in prisma/migrations
+
+Database schema is up to date!
+PASS full chain + inventory + negative checks

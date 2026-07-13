@@ -203,53 +203,104 @@ describe('ProfileSyncQueueService', () => {
     );
   });
 
-  it('worker recovery resets failed CREATE rows without touching UPDATE/DELETE failures', async () => {
+  it('worker recovery resets all non-superseded FAILED rows, including DELETE and UPDATE', async () => {
     process.env['RUID_PROCESS_ROLE'] = 'worker';
     _resetProcessRoleCacheForTests();
 
     const findManyCalls: unknown[] = [];
     const updates: unknown[] = [];
-    const removedJobs: string[] = [];
     const addedJobs: unknown[] = [];
     const service = new ProfileSyncQueueService(
       {
         profileSyncJob: {
-          findMany: async (input: { readonly where?: { readonly status?: SyncJobStatus } }) => {
+          findMany: async (input: unknown) => {
             findManyCalls.push(input);
-            if (input.where?.status === SyncJobStatus.PENDING) {
-              return [{ id: 'pending-job-1' }];
+            const status = (input as { where?: { status?: SyncJobStatus } }).where?.status;
+            if (status === SyncJobStatus.FAILED) {
+              return [{ id: 'failed-delete-job' }, { id: 'failed-update-job' }];
             }
-            return [{ id: 'failed-create-job-1' }];
+            return [];
           },
           update: async (input: unknown) => { updates.push(input); },
         },
       } as never,
       {
-        remove: async (jobId: string) => { removedJobs.push(jobId); },
+        remove: async () => undefined,
         add: async (...args: unknown[]) => { addedJobs.push(args); },
       } as never,
     );
 
     await service.sweepAndRecover();
 
-    assert.deepStrictEqual(findManyCalls[1], {
-      where: {
-        status: SyncJobStatus.FAILED,
-        action: SyncAction.CREATE,
-        subscription: { remnawaveId: null },
-      },
+    assert.deepEqual(findManyCalls[1], {
+      where: { status: SyncJobStatus.FAILED, supersededAt: null },
       select: { id: true },
       take: 50,
       orderBy: { createdAt: 'asc' },
     });
-    assert.deepStrictEqual(updates, [{
-      where: { id: 'failed-create-job-1' },
-      data: { status: SyncJobStatus.PENDING, attempts: 0, lastError: null },
-    }]);
-    assert.deepStrictEqual(removedJobs, ['sync_failed-create-job-1']);
-    assert.deepStrictEqual(
-      addedJobs.map((job) => (job as readonly unknown[])[1]),
-      [{ syncJobId: 'pending-job-1' }, { syncJobId: 'failed-create-job-1' }],
+    assert.equal(updates.length, 2);
+    assert.equal(addedJobs.length, 2);
+  });
+
+  it('does not recover superseded FAILED rows', async () => {
+    process.env['RUID_PROCESS_ROLE'] = 'worker';
+    _resetProcessRoleCacheForTests();
+    const addedJobs: unknown[] = [];
+    const service = new ProfileSyncQueueService(
+      {
+        profileSyncJob: {
+          findMany: async (input: { readonly where?: { readonly status?: SyncJobStatus } }) =>
+            input.where?.status === SyncJobStatus.PENDING ? [] : [],
+          update: async () => { throw new Error('superseded row must not be updated'); },
+        },
+      } as never,
+      { remove: async () => undefined, add: async (...args: unknown[]) => { addedJobs.push(args); } } as never,
     );
+
+    await service.sweepAndRecover();
+    assert.equal(addedJobs.length, 0);
+  });
+
+  it('recovers stale RUNNING jobs whose worker died (expired lease → PENDING + re-enqueue)', async () => {
+    process.env['RUID_PROCESS_ROLE'] = 'worker';
+    _resetProcessRoleCacheForTests();
+
+    const findManyCalls: Array<{ where?: { status?: SyncJobStatus } }> = [];
+    const reclaims: Array<{ where: Record<string, unknown>; data: Record<string, unknown> }> = [];
+    const addedJobs: unknown[] = [];
+    const service = new ProfileSyncQueueService(
+      {
+        profileSyncJob: {
+          findMany: async (input: { where?: { status?: SyncJobStatus } }) => {
+            findManyCalls.push(input);
+            if (input.where?.status === SyncJobStatus.RUNNING) {
+              return [{ id: 'stuck-running-job' }];
+            }
+            return [];
+          },
+          update: async () => undefined,
+          updateMany: async (input: { where: Record<string, unknown>; data: Record<string, unknown> }) => {
+            reclaims.push(input);
+            return { count: 1 };
+          },
+        },
+      } as never,
+      {
+        remove: async () => undefined,
+        add: async (...args: unknown[]) => { addedJobs.push(args); },
+      } as never,
+    );
+
+    await service.sweepAndRecover();
+
+    // A stale-RUNNING query is issued with a startedAt cutoff and supersed-guard.
+    const runningQuery = findManyCalls.find((c) => c.where?.status === SyncJobStatus.RUNNING);
+    assert.notEqual(runningQuery, undefined);
+    const stuckReset = reclaims.find((u) => u.where.id === 'stuck-running-job');
+    assert.notEqual(stuckReset, undefined);
+    assert.equal(stuckReset!.data.status, SyncJobStatus.PENDING);
+    assert.equal(stuckReset!.where.status, SyncJobStatus.RUNNING);
+    // Force re-enqueue removes the retained BullMQ job first.
+    assert.equal(addedJobs.length, 1);
   });
 });

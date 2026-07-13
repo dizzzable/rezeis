@@ -1,12 +1,14 @@
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Logger } from '@nestjs/common';
-import { SubscriptionStatus, SyncAction, SyncJobStatus } from '@prisma/client';
+import { EffectiveProjectionState, Prisma, SubscriptionStatus, SyncAction, SyncJobStatus } from '@prisma/client';
 import { Job } from 'bullmq';
 
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { SystemEventsService, EVENT_TYPES } from '../../common/services/system-events.service';
+import { resolveAddOnRolloutFlags } from '../add-on-entitlements/add-on-rollout.config';
 import { RemnawaveApiService } from '../remnawave/services/remnawave-api.service';
 import { PROFILE_SYNC_CONCURRENCY, PROFILE_SYNC_QUEUE } from './profile-sync.constants';
+import { ProfileSyncQueueService } from './profile-sync-queue.service';
 import { RemnawaveProfileNamingService } from './remnawave-profile-naming.service';
 
 interface ProfileSyncJobData {
@@ -32,6 +34,7 @@ export class ProfileSyncProcessor extends WorkerHost {
     private readonly remnawaveApiService: RemnawaveApiService,
     private readonly namingService: RemnawaveProfileNamingService,
     private readonly events: SystemEventsService,
+    private readonly profileSyncQueueService?: ProfileSyncQueueService,
   ) {
     super();
   }
@@ -63,19 +66,36 @@ export class ProfileSyncProcessor extends WorkerHost {
       return;
     }
 
-    if (syncJob.status === SyncJobStatus.COMPLETED) {
+    if (syncJob.status === SyncJobStatus.COMPLETED || syncJob.supersededAt != null) {
       return;
     }
 
-    // Mark as RUNNING
-    await this.prismaService.profileSyncJob.update({
-      where: { id: syncJobId },
+    // ── Versioned convergence guard (T-009a, flag-gated) ──────────────────
+    // A versioned job (carries aggregateKey + desiredRevision) must only push
+    // the LATEST desired state. If the authoritative projection has already
+    // advanced past this job's revision, this job is stale: supersede it (no
+    // upstream write) so an out-of-order older revision can never overwrite a
+    // newer one. Non-versioned jobs and the flag-off path are untouched.
+    if (await this.supersedeIfStaleRevision(syncJob)) {
+      return;
+    }
+
+    // Claim only work that deletion has not superseded since the initial read.
+    const claimed = await this.prismaService.profileSyncJob.updateMany({
+      where: {
+        id: syncJobId,
+        status: { in: [SyncJobStatus.PENDING, SyncJobStatus.FAILED] },
+        supersededAt: null,
+      },
       data: {
         status: SyncJobStatus.RUNNING,
         startedAt: new Date(),
         attempts: { increment: 1 },
       },
     });
+    if (claimed.count !== 1) {
+      return;
+    }
 
     try {
       switch (syncJob.action) {
@@ -95,10 +115,22 @@ export class ProfileSyncProcessor extends WorkerHost {
           this.logger.warn(`Unknown sync action: ${syncJob.action}`);
       }
 
-      await this.prismaService.profileSyncJob.update({
-        where: { id: syncJobId },
+      const completed = await this.prismaService.profileSyncJob.updateMany({
+        where: {
+          id: syncJobId,
+          status: SyncJobStatus.RUNNING,
+          supersededAt: null,
+        },
         data: { status: SyncJobStatus.COMPLETED, completedAt: new Date() },
       });
+      if (completed.count !== 1) {
+        return;
+      }
+
+      // Converge: now that the latest desired revision has been applied,
+      // supersede any older-revision, non-terminal versioned sibling jobs for
+      // the same aggregate so they never re-push a stale state upstream.
+      await this.supersedeOlderSiblings(syncJob);
     } catch (err: unknown) {
       const errorMessage =
         err instanceof Error ? err.message : 'Unknown error';
@@ -121,6 +153,187 @@ export class ProfileSyncProcessor extends WorkerHost {
       });
       throw err; // Let BullMQ retry
     }
+  }
+
+  /**
+   * Versioned desired-state write (T-009/T-010). Returns `true` when it fully
+   * handled the update (caller stops). Flag-gated by `projectionSync` and only
+   * for versioned jobs (aggregateKey + desiredRevision) with an existing panel
+   * profile and projection. Uses the STRICT adapter: absolute limit PATCH →
+   * strict read-back → advance `lastAppliedRevision` only on equality (else
+   * record drift and throw so BullMQ retries / the sweep re-drives). Transient
+   * panel failures throw (retry); returns `false` to fall back to the legacy
+   * absolute update otherwise.
+   */
+  private async tryVersionedDesiredStateWrite(syncJob: SyncJobRecord): Promise<boolean> {
+    if (!resolveAddOnRolloutFlags().projectionSync) return false;
+    if (syncJob.aggregateKey === null || syncJob.desiredRevision === null) return false;
+    const subscription = syncJob.subscription;
+    if (subscription.remnawaveId === null) return false;
+
+    const projection = await this.prismaService.subscriptionEffectiveProjection.findUnique({
+      where: { subscriptionId: subscription.id },
+      select: { desiredRevision: true, desiredTrafficLimitBytes: true, desiredDeviceLimit: true },
+    });
+    if (projection === null) return false;
+
+    const setOutcome = await this.remnawaveApiService.strictSetUserLimits(subscription.remnawaveId, {
+      trafficLimitBytes: projection.desiredTrafficLimitBytes,
+      hwidDeviceLimit: projection.desiredDeviceLimit,
+    });
+    if (setOutcome.kind === 'unavailable') {
+      throw new Error('Remnawave unavailable during desired-state PATCH');
+    }
+    if (setOutcome.kind !== 'ok') {
+      throw new Error(`Strict desired-state PATCH failed: ${setOutcome.kind}`);
+    }
+
+    const readOutcome = await this.remnawaveApiService.strictGetPanelUser(subscription.remnawaveId);
+    if (readOutcome.kind === 'unavailable') {
+      throw new Error('Remnawave unavailable during desired-state read-back');
+    }
+    if (readOutcome.kind !== 'ok') {
+      throw new Error(`Strict desired-state read-back failed: ${readOutcome.kind}`);
+    }
+
+    const bigintEq = (left: bigint | null, right: bigint | null): boolean =>
+      left === null ? right === null : right !== null && left === right;
+    const matches =
+      bigintEq(readOutcome.value.trafficLimitBytes, projection.desiredTrafficLimitBytes) &&
+      readOutcome.value.hwidDeviceLimit === projection.desiredDeviceLimit;
+    const now = new Date();
+
+    if (matches) {
+      // Advance applied revision only for THIS revision (guarded so a concurrent
+      // newer projection is never stamped applied by a stale write).
+      await this.prismaService.subscriptionEffectiveProjection.updateMany({
+        where: { subscriptionId: subscription.id, desiredRevision: projection.desiredRevision },
+        data: {
+          state: EffectiveProjectionState.APPLIED,
+          lastAppliedRevision: projection.desiredRevision,
+          lastAppliedAt: now,
+          observedTrafficLimitBytes: readOutcome.value.trafficLimitBytes,
+          observedDeviceLimit: readOutcome.value.hwidDeviceLimit,
+          observedAt: now,
+          observedContractVersion: readOutcome.detectedVersion,
+          driftClass: null,
+        },
+      });
+      this.logger.log(
+        `Applied desired revision ${projection.desiredRevision} for subscription ${subscription.id}`,
+      );
+      return true;
+    }
+
+    await this.prismaService.subscriptionEffectiveProjection.updateMany({
+      where: { subscriptionId: subscription.id, desiredRevision: projection.desiredRevision },
+      data: {
+        state: EffectiveProjectionState.DRIFTED,
+        observedTrafficLimitBytes: readOutcome.value.trafficLimitBytes,
+        observedDeviceLimit: readOutcome.value.hwidDeviceLimit,
+        observedAt: now,
+        observedContractVersion: readOutcome.detectedVersion,
+        driftClass: 'LIMIT_MISMATCH',
+      },
+    });
+    throw new Error(`Desired-state drift after read-back for subscription ${subscription.id}`);
+  }
+
+  /**
+   * Versioned-convergence stale check (flag-gated by `projectionSync`).
+   *
+   * Returns `true` when the job was superseded (caller must stop). A job is
+   * stale when it carries a `desiredRevision` for its `aggregateKey` but the
+   * authoritative {@link SubscriptionEffectiveProjection} has already advanced
+   * past it — applying it would push an out-of-order older desired state.
+   * Non-versioned jobs (no aggregateKey/revision) and the flag-off path always
+   * return `false` (legacy behavior, no projection read).
+   */
+  private async supersedeIfStaleRevision(syncJob: SyncJobRecord): Promise<boolean> {
+    if (!resolveAddOnRolloutFlags().projectionSync) return false;
+    const aggregateKey = syncJob.aggregateKey;
+    const jobRevision = syncJob.desiredRevision;
+    if (aggregateKey === null || jobRevision === null) return false;
+
+    const projection = await this.prismaService.subscriptionEffectiveProjection.findUnique({
+      where: { subscriptionId: aggregateKey },
+      select: { desiredRevision: true },
+    });
+    if (projection === null || projection.desiredRevision <= jobRevision) {
+      // Not stale by revision — but a queued retirement (DELETE) for the same
+      // aggregate takes priority over a CREATE/UPDATE/TRAFFIC_RESET push: the
+      // profile is about to be removed, so applying a limit is wrong. DELETE
+      // jobs themselves are never blocked here.
+      if (syncJob.action !== SyncAction.DELETE && (await this.hasPendingDelete(aggregateKey))) {
+        await this.markSuperseded(syncJob.id, 'SUPERSEDED_BY_DELETE');
+        return true;
+      }
+      return false;
+    }
+
+    await this.markSuperseded(syncJob.id, 'SUPERSEDED_BY_REVISION');
+    this.logger.log(
+      `Superseded stale profile-sync job ${syncJob.id} (revision ${jobRevision} < projection ${projection.desiredRevision}) for aggregate ${aggregateKey}`,
+    );
+    return true;
+  }
+
+  /** True when a non-terminal DELETE job exists for the aggregate's subscription. */
+  private async hasPendingDelete(subscriptionId: string): Promise<boolean> {
+    const pendingDeletes = await this.prismaService.profileSyncJob.findMany({
+      where: {
+        subscriptionId,
+        action: SyncAction.DELETE,
+        supersededAt: null,
+        status: { in: [SyncJobStatus.PENDING, SyncJobStatus.RUNNING, SyncJobStatus.FAILED] },
+      },
+      select: { id: true },
+      take: 1,
+    });
+    return pendingDeletes.length > 0;
+  }
+
+  /** Terminal supersession via `supersededAt` (no dedicated enum value). */
+  private async markSuperseded(syncJobId: string, cause: string): Promise<void> {
+    await this.prismaService.profileSyncJob.updateMany({
+      where: {
+        id: syncJobId,
+        supersededAt: null,
+        status: { in: [SyncJobStatus.PENDING, SyncJobStatus.FAILED] },
+      },
+      data: {
+        supersededAt: new Date(),
+        status: SyncJobStatus.COMPLETED,
+        cause,
+      },
+    });
+  }
+
+  /**
+   * After the latest desired revision is applied, mark every older-revision,
+   * non-terminal versioned sibling for the same aggregate as superseded so a
+   * queued or previously-failed stale revision never re-pushes upstream. No-op
+   * for non-versioned jobs and when the flag is off.
+   */
+  private async supersedeOlderSiblings(syncJob: SyncJobRecord): Promise<void> {
+    if (!resolveAddOnRolloutFlags().projectionSync) return;
+    const aggregateKey = syncJob.aggregateKey;
+    const jobRevision = syncJob.desiredRevision;
+    if (aggregateKey === null || jobRevision === null) return;
+
+    await this.prismaService.profileSyncJob.updateMany({
+      where: {
+        aggregateKey,
+        desiredRevision: { lt: jobRevision },
+        supersededAt: null,
+        status: { in: [SyncJobStatus.PENDING, SyncJobStatus.FAILED] },
+      },
+      data: {
+        supersededAt: new Date(),
+        status: SyncJobStatus.COMPLETED,
+        cause: 'SUPERSEDED_BY_REVISION',
+      },
+    });
   }
 
   private async handleCreate(syncJob: SyncJobRecord): Promise<void> {
@@ -152,13 +365,18 @@ export class ProfileSyncProcessor extends WorkerHost {
     // of re-creating it — the panel rejects duplicate usernames with 400.
     const existing = await this.remnawaveApiService.getPanelUserByUsername(naming.username);
     if (existing !== null && typeof existing.uuid === 'string' && existing.uuid.length > 0) {
-      await this.prismaService.subscription.update({
-        where: { id: subscription.id },
-        data: {
-          remnawaveId: existing.uuid,
-          configUrl: existing.subscriptionUrl,
-        },
-      });
+      const deleteScheduled = await this.persistProfileLink(
+        subscription.id,
+        existing.uuid,
+        existing.subscriptionUrl,
+      );
+      if (deleteScheduled) {
+        await this.enqueueCompensatingDelete(deleteScheduled);
+        this.logger.warn(
+          `Subscription ${subscription.id} was deleted while CREATE ran; scheduled deletion of linked profile '${existing.uuid}'`,
+        );
+        return;
+      }
       this.logger.log(
         `Linked existing Remnawave profile '${existing.uuid}' (username: ${naming.username}) to subscription ${subscription.id}`,
       );
@@ -186,14 +404,18 @@ export class ProfileSyncProcessor extends WorkerHost {
       externalSquadUuid: subscription.externalSquad,
     });
 
-    // Update subscription with Remnawave profile data
-    await this.prismaService.subscription.update({
-      where: { id: subscription.id },
-      data: {
-        remnawaveId: panelUser.uuid,
-        configUrl: panelUser.subscriptionUrl,
-      },
-    });
+    const deleteScheduled = await this.persistProfileLink(
+      subscription.id,
+      panelUser.uuid,
+      panelUser.subscriptionUrl,
+    );
+    if (deleteScheduled) {
+      await this.enqueueCompensatingDelete(deleteScheduled);
+      this.logger.warn(
+        `Subscription ${subscription.id} was deleted while CREATE ran; scheduled deletion of new profile '${panelUser.uuid}'`,
+      );
+      return;
+    }
 
     this.logger.log(
       `Created Remnawave profile '${panelUser.uuid}' (username: ${naming.username}) for subscription ${subscription.id}`,
@@ -208,12 +430,52 @@ export class ProfileSyncProcessor extends WorkerHost {
     });
   }
 
+  private async persistProfileLink(
+    subscriptionId: string,
+    remnawaveId: string,
+    configUrl: string | null | undefined,
+  ): Promise<string | null> {
+    return this.prismaService.$transaction(async (tx) => {
+      const rows = await tx.$queryRaw<Array<{ status: SubscriptionStatus }>>(Prisma.sql`
+        SELECT "status"::text AS "status"
+        FROM "subscriptions"
+        WHERE "id" = ${subscriptionId}
+        FOR UPDATE
+      `);
+      const current = rows[0];
+      if (current === undefined) {
+        throw new Error(`Subscription ${subscriptionId} disappeared during profile CREATE`);
+      }
+
+      await tx.subscription.update({
+        where: { id: subscriptionId },
+        data: { remnawaveId, configUrl },
+      });
+      if (current.status !== SubscriptionStatus.ACTIVE) {
+        const deleteJobId = await this.createDeleteJobIfMissing(tx, subscriptionId, remnawaveId);
+        if (deleteJobId !== null) {
+          return deleteJobId;
+        }
+      }
+
+      return null;
+    });
+  }
+
   private async handleUpdate(syncJob: SyncJobRecord): Promise<void> {
     const subscription = syncJob.subscription;
     if (subscription.remnawaveId === null) {
       this.logger.warn(
         `Cannot update: subscription ${subscription.id} has no remnawaveId`,
       );
+      return;
+    }
+
+    // Versioned desired-state write (T-009/T-010, flag-gated): reread the
+    // projection, PATCH the absolute latest limits via the STRICT adapter,
+    // strictly read the user back and advance the applied revision only on
+    // equality. Falls back to the legacy absolute update when not applicable.
+    if (await this.tryVersionedDesiredStateWrite(syncJob)) {
       return;
     }
 
@@ -241,21 +503,91 @@ export class ProfileSyncProcessor extends WorkerHost {
       externalSquadUuid: subscription.externalSquad,
     });
 
+    const deleteJobId = await this.ensureDeleteJobIfDeleted(
+      subscription.id,
+      subscription.remnawaveId,
+    );
+    if (deleteJobId !== null) {
+      await this.enqueueCompensatingDelete(deleteJobId);
+    }
     this.logger.log(
       `Updated Remnawave profile '${subscription.remnawaveId}' for subscription ${subscription.id}`,
     );
   }
 
+  private async enqueueCompensatingDelete(syncJobId: string): Promise<void> {
+    if (this.profileSyncQueueService === undefined) {
+      return;
+    }
+    await this.profileSyncQueueService.enqueue(syncJobId);
+  }
+
+  private async ensureDeleteJobIfDeleted(
+    subscriptionId: string,
+    targetRemnawaveId: string | null,
+  ): Promise<string | null> {
+    if (targetRemnawaveId === null) {
+      return null;
+    }
+    return this.prismaService.$transaction(async (tx) => {
+      const rows = await tx.$queryRaw<Array<{ status: SubscriptionStatus }>>(Prisma.sql`
+        SELECT "status"::text AS "status"
+        FROM "subscriptions"
+        WHERE "id" = ${subscriptionId}
+        FOR UPDATE
+      `);
+      if (rows[0]?.status === SubscriptionStatus.DELETED) {
+        return this.createDeleteJobIfMissing(tx, subscriptionId, targetRemnawaveId);
+      }
+      return null;
+    });
+  }
+
+  private async createDeleteJobIfMissing(
+    tx: Prisma.TransactionClient,
+    subscriptionId: string,
+    targetRemnawaveId: string,
+  ): Promise<string | null> {
+    const existingDeletes = await tx.profileSyncJob.findMany({
+      where: {
+        subscriptionId,
+        action: SyncAction.DELETE,
+        status: {
+          in: [SyncJobStatus.PENDING, SyncJobStatus.RUNNING, SyncJobStatus.FAILED],
+        },
+      },
+      select: { id: true, payload: true },
+    });
+    if (existingDeletes.some((job) => readTargetRemnawaveId(job.payload) === targetRemnawaveId)) {
+      return null;
+    }
+    const deleteJob = await tx.profileSyncJob.create({
+      data: {
+        subscriptionId,
+        action: SyncAction.DELETE,
+        status: SyncJobStatus.PENDING,
+        payload: {
+          source: 'CREATE_COMPLETED_AFTER_DELETE',
+          targetRemnawaveId,
+        } as Prisma.InputJsonObject,
+      },
+      select: { id: true },
+    });
+    return deleteJob.id;
+  }
+
   private async handleDelete(syncJob: SyncJobRecord): Promise<void> {
     const subscription = syncJob.subscription;
-    if (subscription.remnawaveId === null) {
+    const targetRemnawaveId =
+      readTargetRemnawaveId(syncJob.payload) ?? subscription.remnawaveId;
+    if (targetRemnawaveId === null) {
       return;
     }
 
-    const result = await this.remnawaveApiService.deletePanelUser(subscription.remnawaveId);
+    const result = await this.remnawaveApiService.deletePanelUser(targetRemnawaveId);
     if (result.isDeleted) {
       this.logger.log(
-        `Deleted Remnawave profile '${subscription.remnawaveId}' for subscription ${subscription.id}`,
+        `Deleted Remnawave profile '${targetRemnawaveId}' for subscription ${subscription.id}`,
       );
       // Fully retire the subscription: mark it DELETED and detach the now-gone
       // panel profile. The row is kept (soft-delete) so trial-claim history via
@@ -268,15 +600,13 @@ export class ProfileSyncProcessor extends WorkerHost {
       // sweep cleans it here. Self-service/admin deletes already set DELETED
       // before enqueuing, so this is idempotent for them.
       // See `.kiro/specs/trial-aware-profile-cleanup`.
-      await this.prismaService.subscription.update({
-        where: { id: subscription.id },
+      await this.prismaService.subscription.updateMany({
+        where: { id: subscription.id, remnawaveId: targetRemnawaveId },
         data: { remnawaveId: null, status: SubscriptionStatus.DELETED },
       });
     } else {
-      // Leave `remnawaveId` intact so BullMQ retries and the cron backstop can
-      // re-attempt; never mutate to an inconsistent state on failure.
-      this.logger.warn(
-        `Failed to delete Remnawave profile '${subscription.remnawaveId}' (will retry)`,
+      throw new Error(
+        `Panel did not confirm deletion of Remnawave profile '${targetRemnawaveId}'`,
       );
     }
   }
@@ -288,6 +618,13 @@ export class ProfileSyncProcessor extends WorkerHost {
     }
 
     await this.remnawaveApiService.resetPanelUserTraffic(subscription.remnawaveId);
+    const deleteJobId = await this.ensureDeleteJobIfDeleted(
+      subscription.id,
+      subscription.remnawaveId,
+    );
+    if (deleteJobId !== null) {
+      await this.enqueueCompensatingDelete(deleteJobId);
+    }
     this.logger.log(
       `Reset traffic for Remnawave profile '${subscription.remnawaveId}'`,
     );
@@ -324,6 +661,10 @@ function readOptionalString(record: Record<string, unknown>, key: string): strin
     return candidate.trim();
   }
   return null;
+}
+
+function readTargetRemnawaveId(value: unknown): string | null {
+  return readOptionalString(readRecord(value), 'targetRemnawaveId');
 }
 
 /**

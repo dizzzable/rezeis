@@ -203,6 +203,72 @@ enum SyncJobStatus {
   FAILED
 }
 
+enum SubscriptionTermStatus {
+  SCHEDULED
+  ACTIVE
+  ENDED
+  CANCELED
+  RECONCILIATION_REQUIRED
+}
+enum ResetEpochCloseSource {
+  SCHEDULER
+  WEBHOOK_RECONCILIATION
+  TERM_END
+  OPERATOR
+}
+enum AddOnLifetime {
+  UNTIL_NEXT_RESET
+  UNTIL_SUBSCRIPTION_END
+}
+enum AddOnEntitlementState {
+  PENDING_ACTIVATION
+  ACTIVE
+  EXPIRING
+  EXPIRED
+  REVERSED
+  REMEDIATION_REQUIRED
+}
+enum AddOnEntitlementActorType {
+  SYSTEM
+  ADMIN
+  USER
+}
+enum EffectiveProjectionState {
+  SHADOW
+  PENDING
+  APPLIED
+  DRIFTED
+  REMEDIATION_REQUIRED
+  DELETED
+}
+enum DeviceReductionPlanState {
+  PENDING
+  IN_PROGRESS
+  BLOCKED
+  APPLIED
+  SUPERSEDED
+  REMEDIATION_REQUIRED
+}
+enum EntitlementIncidentKind {
+  PAID_FULFILLMENT_STALLED
+  PROJECTION_DRIFT
+  DEVICE_REDUCTION_BLOCKED
+  REFUND_OR_CHARGEBACK
+  INVALID_CAPTURED_TARGET
+  RECONCILIATION_REQUIRED
+}
+enum EntitlementIncidentSeverity {
+  INFO
+  WARNING
+  CRITICAL
+}
+enum EntitlementIncidentState {
+  OPEN
+  ACKNOWLEDGED
+  RESOLVED
+}
+
+
 enum BroadcastStatus {
   DRAFT
   PROCESSING
@@ -1188,6 +1254,11 @@ model Subscription {
   transactionItems      TransactionItem[]     @relation("SubscriptionTransactionItems")
   syncJobs              ProfileSyncJob[]      @relation("SubscriptionSyncJobs")
   promocodeActivations  PromocodeActivation[] @relation("SubscriptionPromocodeActivations")
+  terms                 SubscriptionTerm[]                   @relation("SubscriptionTerms")
+  addOnEntitlements     AddOnEntitlement[]                   @relation("SubscriptionAddOnEntitlements")
+  effectiveProjection   SubscriptionEffectiveProjection?    @relation("SubscriptionEffectiveProjection")
+  deviceReductionPlans  DeviceReductionPlan[]                @relation("SubscriptionDeviceReductionPlans")
+  entitlementIncidents  EntitlementIncident[]                @relation("SubscriptionEntitlementIncidents")
 
   @@index([userId])
   @@index([status])
@@ -1212,6 +1283,11 @@ model ProfileSyncJob {
   attempts       Int           @default(0) @map("attempts")
   lastError      String?       @map("last_error")
   payload        Json          @default("{}") @map("payload")
+  desiredRevision BigInt?       @map("desired_revision")
+  aggregateKey    String?       @map("aggregate_key")
+  cause           String?       @map("cause")
+  supersededAt    DateTime?     @map("superseded_at") @db.Timestamptz(3)
+  recoveryData    Json          @default("{}") @map("recovery_data")
   scheduledAt    DateTime?     @map("scheduled_at") @db.Timestamptz(3)
   startedAt      DateTime?     @map("started_at") @db.Timestamptz(3)
   completedAt    DateTime?     @map("completed_at") @db.Timestamptz(3)
@@ -1223,7 +1299,203 @@ model ProfileSyncJob {
   @@index([subscriptionId])
   @@index([status])
   @@index([action])
+  @@index([aggregateKey, desiredRevision])
+  @@index([status, scheduledAt])
   @@map("profile_sync_jobs")
+}
+
+model SubscriptionTerm {
+  id                    String                 @id @default(cuid()) @map("id")
+  subscriptionId        String                 @map("subscription_id")
+  generation            Int                    @map("generation")
+  planId                String?                @map("plan_id")
+  planRevision          Int?                   @map("plan_revision")
+  planSnapshot          Json                   @default("{}") @map("plan_snapshot")
+  startsAt              DateTime               @map("starts_at") @db.Timestamptz(3)
+  endsAt                DateTime?              @map("ends_at") @db.Timestamptz(3)
+  status                SubscriptionTermStatus @default(SCHEDULED) @map("status")
+  baseTrafficLimitBytes BigInt?                @map("base_traffic_limit_bytes")
+  baseDeviceLimit       Int?                   @map("base_device_limit")
+  trafficResetStrategy  TrafficLimitStrategy   @default(NO_RESET) @map("traffic_reset_strategy")
+  resetAnchorAt         DateTime?              @map("reset_anchor_at") @db.Timestamptz(3)
+  endedAt               DateTime?              @map("ended_at") @db.Timestamptz(3)
+  createdAt             DateTime               @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt             DateTime               @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  subscription Subscription                      @relation("SubscriptionTerms", fields: [subscriptionId], references: [id], onDelete: Restrict)
+  resetEpochs  SubscriptionResetEpoch[]          @relation("TermResetEpochs")
+  entitlements AddOnEntitlement[]                @relation("TermAddOnEntitlements")
+  projections  SubscriptionEffectiveProjection[] @relation("ProjectionBaselineTerms")
+
+  @@unique([subscriptionId, generation])
+  @@unique([id, subscriptionId], name: "subscription_terms_id_subscription_id_key")
+  @@index([subscriptionId, status])
+  @@index([status, startsAt])
+  @@index([status, endsAt])
+  @@map("subscription_terms")
+}
+model SubscriptionResetEpoch {
+  id            String                 @id @default(cuid()) @map("id")
+  termId        String                 @map("term_id")
+  ordinal       Int                    @map("ordinal")
+  startsAt      DateTime               @map("starts_at") @db.Timestamptz(3)
+  plannedEndsAt DateTime               @map("planned_ends_at") @db.Timestamptz(3)
+  closedAt      DateTime?              @map("closed_at") @db.Timestamptz(3)
+  closeSource   ResetEpochCloseSource? @map("close_source")
+  createdAt     DateTime               @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  term         SubscriptionTerm   @relation("TermResetEpochs", fields: [termId], references: [id], onDelete: Restrict)
+  entitlements AddOnEntitlement[] @relation("EntitlementExpiryEpoch")
+
+  @@unique([termId, ordinal])
+  @@unique([termId, plannedEndsAt])
+  @@unique([id, termId], name: "subscription_reset_epochs_id_term_id_key")
+  @@index([closedAt, plannedEndsAt])
+  @@map("subscription_reset_epochs")
+}
+model AddOnEntitlement {
+  id                    String                @id @default(cuid()) @map("id")
+  subscriptionId        String                @map("subscription_id")
+  termId                String                @map("term_id")
+  sourceTransactionId   String                @map("source_transaction_id")
+  sourceLineKey         String                @map("source_line_key")
+  addOnId               String?               @map("add_on_id")
+  catalogRevision       Int                   @map("catalog_revision")
+  receiptName           String                @map("receipt_name")
+  type                  AddOnType             @map("type")
+  valuePerUnit          Int                   @map("value_per_unit")
+  quantity              Int                   @default(1) @map("quantity")
+  totalValue            BigInt                @map("total_value")
+  lifetime              AddOnLifetime         @map("lifetime")
+  applicabilitySnapshot Json                  @default("{}") @map("applicability_snapshot")
+  unitAmount            Decimal               @map("unit_amount") @db.Decimal(20, 8)
+  totalAmount           Decimal               @map("total_amount") @db.Decimal(20, 8)
+  currency              Currency              @map("currency")
+  purchasedAt           DateTime              @map("purchased_at") @db.Timestamptz(3)
+  scheduledActivationAt DateTime              @map("scheduled_activation_at") @db.Timestamptz(3)
+  activatedAt           DateTime?             @map("activated_at") @db.Timestamptz(3)
+  expiresAt             DateTime?             @map("expires_at") @db.Timestamptz(3)
+  expiryEpochId         String?               @map("expiry_epoch_id")
+  state                 AddOnEntitlementState @default(PENDING_ACTIVATION) @map("state")
+  terminalReason        String?               @map("terminal_reason")
+  terminalAt            DateTime?             @map("terminal_at") @db.Timestamptz(3)
+  version               Int                   @default(1) @map("version")
+  createdAt             DateTime              @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt             DateTime              @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  subscription      Subscription            @relation("SubscriptionAddOnEntitlements", fields: [subscriptionId], references: [id], onDelete: Restrict)
+  term              SubscriptionTerm        @relation("TermAddOnEntitlements", fields: [termId, subscriptionId], references: [id, subscriptionId], onDelete: Restrict)
+  sourceTransaction Transaction             @relation("TransactionAddOnEntitlements", fields: [sourceTransactionId], references: [id], onDelete: Restrict)
+  addOn             AddOn?                  @relation("CatalogAddOnEntitlements", fields: [addOnId], references: [id], onDelete: Restrict)
+  expiryEpoch       SubscriptionResetEpoch? @relation("EntitlementExpiryEpoch", fields: [expiryEpochId, termId], references: [id, termId], onDelete: Restrict)
+  events            AddOnEntitlementEvent[] @relation("EntitlementEvents")
+  incidents         EntitlementIncident[]   @relation("IncidentEntitlement")
+
+  @@unique([sourceTransactionId, sourceLineKey])
+  @@index([subscriptionId, state])
+  @@index([termId, state])
+  @@index([state, expiresAt])
+  @@index([expiryEpochId])
+  @@map("add_on_entitlements")
+}
+model AddOnEntitlementEvent {
+  id            String                    @id @default(cuid()) @map("id")
+  entitlementId String                    @map("entitlement_id")
+  fromState     AddOnEntitlementState?    @map("from_state")
+  toState       AddOnEntitlementState     @map("to_state")
+  reason        String                    @map("reason")
+  actorType     AddOnEntitlementActorType @map("actor_type")
+  actorId       String?                   @map("actor_id")
+  correlationId String                    @map("correlation_id")
+  commandKey    String                    @map("command_key")
+  metadata      Json                      @default("{}") @map("metadata")
+  createdAt     DateTime                  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  entitlement AddOnEntitlement @relation("EntitlementEvents", fields: [entitlementId], references: [id], onDelete: Restrict)
+
+  @@index([entitlementId, createdAt])
+  @@index([correlationId])
+  @@unique([entitlementId, commandKey])
+  @@map("add_on_entitlement_events")
+}
+model SubscriptionEffectiveProjection {
+  id                             String                   @id @default(cuid()) @map("id")
+  subscriptionId                 String                   @unique @map("subscription_id")
+  baselineTermId                 String                   @map("baseline_term_id")
+  desiredRevision                BigInt                   @default(0) @map("desired_revision")
+  baseTrafficLimitBytes          BigInt?                  @map("base_traffic_limit_bytes")
+  baseDeviceLimit                Int?                     @map("base_device_limit")
+  activeTrafficContributionBytes BigInt                   @default(0) @map("active_traffic_contribution_bytes")
+  activeDeviceContribution       Int                      @default(0) @map("active_device_contribution")
+  desiredTrafficLimitBytes       BigInt?                  @map("desired_traffic_limit_bytes")
+  desiredDeviceLimit             Int?                     @map("desired_device_limit")
+  state                          EffectiveProjectionState @default(SHADOW) @map("state")
+  lastAppliedRevision            BigInt?                  @map("last_applied_revision")
+  lastAppliedAt                  DateTime?                @map("last_applied_at") @db.Timestamptz(3)
+  observedTrafficLimitBytes      BigInt?                  @map("observed_traffic_limit_bytes")
+  observedDeviceLimit            Int?                     @map("observed_device_limit")
+  observedAt                     DateTime?                @map("observed_at") @db.Timestamptz(3)
+  observedContractVersion        String?                  @map("observed_contract_version")
+  driftClass                     String?                  @map("drift_class")
+  createdAt                      DateTime                 @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt                      DateTime                 @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  subscription         Subscription          @relation("SubscriptionEffectiveProjection", fields: [subscriptionId], references: [id], onDelete: Restrict)
+  baselineTerm         SubscriptionTerm      @relation("ProjectionBaselineTerms", fields: [baselineTermId], references: [id], onDelete: Restrict)
+  deviceReductionPlans DeviceReductionPlan[] @relation("ProjectionDeviceReductionPlans")
+
+  @@index([state, updatedAt])
+  @@index([baselineTermId])
+  @@map("subscription_effective_projections")
+}
+model DeviceReductionPlan {
+  id                    String                   @id @default(cuid()) @map("id")
+  subscriptionId        String                   @map("subscription_id")
+  projectionId          String                   @map("projection_id")
+  projectionRevision    BigInt                   @map("projection_revision")
+  desiredLimit          Int                      @map("desired_limit")
+  selectedDevices       Json                     @default("[]") @map("selected_devices")
+  state                 DeviceReductionPlanState @default(PENDING) @map("state")
+  attempts              Int                      @default(0) @map("attempts")
+  lastErrorCode         String?                  @map("last_error_code")
+  postconditionMetadata Json                     @default("{}") @map("postcondition_metadata")
+  startedAt             DateTime?                @map("started_at") @db.Timestamptz(3)
+  completedAt           DateTime?                @map("completed_at") @db.Timestamptz(3)
+  createdAt             DateTime                 @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt             DateTime                 @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  subscription Subscription                    @relation("SubscriptionDeviceReductionPlans", fields: [subscriptionId], references: [id], onDelete: Restrict)
+  projection   SubscriptionEffectiveProjection @relation("ProjectionDeviceReductionPlans", fields: [projectionId], references: [id], onDelete: Restrict)
+
+  @@unique([subscriptionId, projectionRevision])
+  @@index([state, createdAt])
+  @@map("device_reduction_plans")
+}
+model EntitlementIncident {
+  id             String                      @id @default(cuid()) @map("id")
+  subscriptionId String                      @map("subscription_id")
+  entitlementId  String?                     @map("entitlement_id")
+  kind           EntitlementIncidentKind     @map("kind")
+  severity       EntitlementIncidentSeverity @default(WARNING) @map("severity")
+  state          EntitlementIncidentState    @default(OPEN) @map("state")
+  supportRef     String                      @unique @map("support_ref")
+  summaryCode    String                      @map("summary_code")
+  metadata       Json                        @default("{}") @map("metadata")
+  acknowledgedBy String?                     @map("acknowledged_by")
+  acknowledgedAt DateTime?                   @map("acknowledged_at") @db.Timestamptz(3)
+  resolvedBy     String?                     @map("resolved_by")
+  resolvedAt     DateTime?                   @map("resolved_at") @db.Timestamptz(3)
+  resolutionCode String?                     @map("resolution_code")
+  createdAt      DateTime                    @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime                    @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  subscription Subscription      @relation("SubscriptionEntitlementIncidents", fields: [subscriptionId], references: [id], onDelete: Restrict)
+  entitlement  AddOnEntitlement? @relation("IncidentEntitlement", fields: [entitlementId], references: [id], onDelete: Restrict)
+
+  @@index([state, severity, createdAt])
+  @@index([subscriptionId, state])
+  @@index([entitlementId])
+  @@map("entitlement_incidents")
 }
 
 // =============================================================================
@@ -1339,6 +1611,18 @@ model Transaction {
   /// Snapshot of the plan/duration at draft time.
   planSnapshot   Json               @default("{}") @map("plan_snapshot")
   deviceTypes    String[]           @default([]) @map("device_types")
+  /// Request-level idempotency for a logical checkout attempt (add-on/renewal).
+  /// Client-supplied key scoped to the user: a repeat with the same key AND the
+  /// same canonical composition returns the same draft; a different composition
+  /// under the same key is rejected (`IDEMPOTENCY_KEY_CONFLICT`). NULL for
+  /// legacy/keyless drafts — NULLs are distinct in the unique index, so keyless
+  /// rows never collide.
+  idempotencyKey      String?        @map("idempotency_key")
+  /// Canonical composition hash bound to `idempotencyKey`.
+  checkoutFingerprint String?        @map("checkout_fingerprint")
+  /// Provider checkout URL captured at draft time so an idempotent replay can
+  /// return the same payment link without creating a second invoice.
+  checkoutUrl         String?        @map("checkout_url")
   /// Provisioning idempotency stamp — set (atomically, inside the fulfillment
   /// transaction) once the subscription has been created/renewed/upgraded for
   /// this payment. The webhook reconciler fulfils only when this is null, so a
@@ -1354,6 +1638,7 @@ model Transaction {
   /// for every legacy single-subscription transaction; non-empty marks the
   /// transaction as a combined renewal fulfilled item-by-item.
   items        TransactionItem[] @relation("TransactionItems")
+  addOnEntitlements AddOnEntitlement[] @relation("TransactionAddOnEntitlements")
 
   @@index([userId])
   @@index([subscriptionId])
@@ -1364,6 +1649,7 @@ model Transaction {
   /// Backs the anti-fraud failed-payment groupBy + payment analytics
   /// (`status=… AND createdAt>=window`) — equality first, range last.
   @@index([status, createdAt])
+  @@unique([userId, idempotencyKey])
   @@map("transactions")
 }
 
@@ -1383,6 +1669,13 @@ model TransactionItem {
   amount          Decimal   @map("amount") @db.Decimal(20, 8)
   currency        Currency  @map("currency")
   discountPercent Int       @default(0) @map("discount_percent")
+  /// Optional renewal add-on composition for this line (subscription-add-on-
+  /// entitlements, T-007). JSON array of selected add-ons — each entry:
+  /// `{ addOnId, catalogRevision, type, value, lifetime, activation,
+  ///    sourceLineKey, unitAmount, currency, receiptName }`. NULL = no add-ons.
+  /// Consumed by `applyCombinedRenewal` to mint PENDING entitlements on the
+  /// scheduled renewal term. Gated by the `renewalAddOns` rollout flag.
+  addOnLines      Json?     @map("add_on_lines")
   /// Idempotency stamp — set when this item's renewal has been applied.
   appliedAt       DateTime? @map("applied_at") @db.Timestamptz(3)
   createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
@@ -2478,10 +2771,14 @@ model AddOn {
   orderIndex        Int       @default(0) @map("order_index")
   /// Plan IDs this add-on applies to. Empty = available for all plans.
   applicablePlanIds String[]  @default([]) @map("applicable_plan_ids")
+  lifetime          AddOnLifetime @default(UNTIL_NEXT_RESET) @map("lifetime")
+  revision          Int           @default(1) @map("revision")
+  archivedAt        DateTime?     @map("archived_at") @db.Timestamptz(3)
   createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt         DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
 
-  prices AddOnPrice[]
+  prices       AddOnPrice[]
+  entitlements AddOnEntitlement[] @relation("CatalogAddOnEntitlements")
 
   @@index([isActive, orderIndex])
   @@index([type])

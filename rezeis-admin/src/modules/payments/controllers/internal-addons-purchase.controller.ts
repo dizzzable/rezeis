@@ -33,6 +33,9 @@ export class InternalAddOnsPurchaseController {
       channel: input.channel,
       successUrl: input.successUrl ?? null,
       failUrl: input.failUrl ?? null,
+      contractVersion: input.contractVersion,
+      idempotencyKey: input.idempotencyKey,
+      expectedAddOnRevision: input.expectedAddOnRevision,
     });
   }
 }

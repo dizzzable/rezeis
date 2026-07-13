@@ -33,6 +33,51 @@ export interface AddOnsStatsResultInterface {
   readonly totals: AddOnsStatsTotalsInterface;
   readonly topBuyers: readonly AddOnsStatsTopBuyerInterface[];
   readonly timeline: readonly AddOnsStatsTimelinePointInterface[];
+  /**
+   * Completed add-on purchases classified by their linked entitlement/source
+   * line (T-012) rather than the generic `ADDITIONAL` type: legacy top-ups
+   * with no ledger row are `UNKNOWN_ADDITIONAL`; ledgered lines are separated
+   * into committed / active / expired / reversed / remediation.
+   */
+  readonly deliveryBreakdown: Readonly<Record<AddOnDeliveryClass, number>>;
+}
+
+export type AddOnDeliveryClass =
+  | 'UNKNOWN_ADDITIONAL'
+  | 'COMMITTED'
+  | 'ACTIVE'
+  | 'EXPIRED'
+  | 'REVERSED'
+  | 'REMEDIATION_REQUIRED';
+
+function classifyDelivery(state: string | undefined): AddOnDeliveryClass {
+  switch (state) {
+    case 'PENDING_ACTIVATION':
+      return 'COMMITTED';
+    case 'ACTIVE':
+      return 'ACTIVE';
+    case 'EXPIRING':
+    case 'EXPIRED':
+      return 'EXPIRED';
+    case 'REVERSED':
+      return 'REVERSED';
+    case 'REMEDIATION_REQUIRED':
+      return 'REMEDIATION_REQUIRED';
+    default:
+      // No linked entitlement (legacy one-time top-up) → ambiguous.
+      return 'UNKNOWN_ADDITIONAL';
+  }
+}
+
+function emptyDeliveryBreakdown(): Record<AddOnDeliveryClass, number> {
+  return {
+    UNKNOWN_ADDITIONAL: 0,
+    COMMITTED: 0,
+    ACTIVE: 0,
+    EXPIRED: 0,
+    REVERSED: 0,
+    REMEDIATION_REQUIRED: 0,
+  };
 }
 
 function addRevenue(
@@ -63,6 +108,7 @@ export class AddOnsStatsService {
     const rows = await this.prismaService.transaction.findMany({
       where,
       select: {
+        id: true,
         userId: true,
         amount: true,
         currency: true,
@@ -155,6 +201,24 @@ export class AddOnsStatsService {
       }))
       .sort((a, b) => (a.bucket < b.bucket ? -1 : a.bucket > b.bucket ? 1 : 0));
 
+    // Classify each completed purchase by its linked entitlement (source line).
+    const deliveryBreakdown = emptyDeliveryBreakdown();
+    const txIds = rows.map((row) => row.id);
+    const entitlements =
+      txIds.length > 0
+        ? await this.prismaService.addOnEntitlement.findMany({
+            where: { sourceTransactionId: { in: txIds } },
+            select: { sourceTransactionId: true, state: true },
+          })
+        : [];
+    const stateByTxId = new Map<string, string>();
+    for (const entitlement of entitlements) {
+      stateByTxId.set(entitlement.sourceTransactionId, entitlement.state);
+    }
+    for (const row of rows) {
+      deliveryBreakdown[classifyDelivery(stateByTxId.get(row.id))] += 1;
+    }
+
     return {
       totals: {
         purchases: rows.length,
@@ -163,6 +227,7 @@ export class AddOnsStatsService {
       },
       topBuyers,
       timeline,
+      deliveryBreakdown,
     };
   }
 }

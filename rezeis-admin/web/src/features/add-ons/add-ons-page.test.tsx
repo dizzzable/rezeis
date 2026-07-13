@@ -54,4 +54,46 @@ describe('AddOnsPage accessibility', () => {
 
     expect(planButton).toHaveAttribute('aria-pressed', 'true')
   })
+
+  it('renders the entitlement delivery SLO tab from metrics', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(api, 'get').mockImplementation(async (path: string) => {
+      if (path === '/admin/add-ons') return { data: [] }
+      if (path === '/admin/plans') return { data: [] }
+      if (path === '/admin/settings/icons') return { data: [] }
+      if (path === '/admin/add-on-entitlements/metrics') {
+        return {
+          data: {
+            entitlementsByState: { ACTIVE: 4, EXPIRED: 1 },
+            projectionsByState: { APPLIED: 3 },
+            deviceReductionPlansByState: {},
+            openIncidentsByKind: { DEVICE_REDUCTION_BLOCKED: 2 },
+            slo: {
+              objectiveMs: 300000,
+              alertMs: 900000,
+              strandedCapturedOverObjective: 5,
+              strandedCapturedOverAlert: 1,
+              oldestStrandedAgeMs: 1200000,
+              pendingSyncOverObjective: 0,
+              pendingSyncOverAlert: 0,
+              oldestPendingSyncAgeMs: null,
+            },
+          },
+        }
+      }
+      return { data: {} }
+    })
+
+    renderWithProviders(<AddOnsPage />)
+
+    await user.click(await screen.findByRole('tab', { name: 'Delivery' }))
+
+    expect(await screen.findByText('Entitlement delivery')).toBeInTheDocument()
+    // Stranded paid-line count from the SLO backlog is surfaced.
+    expect(await screen.findByText('5')).toBeInTheDocument()
+    // Open incident kind badge is shown.
+    expect(await screen.findByText('DEVICE_REDUCTION_BLOCKED: 2')).toBeInTheDocument()
+    // State breakdown badge.
+    expect(screen.getByText('ACTIVE: 4')).toBeInTheDocument()
+  })
 })

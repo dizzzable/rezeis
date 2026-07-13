@@ -8,11 +8,14 @@ import {
 } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { resolveAddOnRolloutFlags } from '../../add-on-entitlements/add-on-rollout.config';
+import { AddOnEligibilityService } from '../../add-ons/services/add-on-eligibility.service';
 import {
   SubscriptionQuotePlanInterface,
   SubscriptionQuoteWarningInterface,
 } from '../interfaces/subscription-quote.interface';
 import {
+  PricedRenewalAddOnLineInterface,
   PricedRenewalInterface,
   PricedRenewalItemInterface,
   RenewalItemInterface,
@@ -61,6 +64,7 @@ export class SubscriptionRenewalService {
   public constructor(
     private readonly prismaService: PrismaService,
     private readonly subscriptionQuoteService: SubscriptionQuoteService,
+    private readonly addOnEligibilityService: AddOnEligibilityService,
   ) {}
 
   /**
@@ -139,6 +143,9 @@ export class SubscriptionRenewalService {
     readonly durations?: ReadonlyMap<string, number>;
     /** Optional per-subscription chosen plan id (for plan-less subscriptions). */
     readonly plans?: ReadonlyMap<string, string>;
+    /** Optional per-subscription selected renewal add-on ids (T-007). Only
+     *  honored when the `renewalAddOns` rollout flag is on. */
+    readonly addOns?: ReadonlyMap<string, readonly string[]>;
   }): Promise<PricedRenewalInterface> {
     if (input.subscriptionIds.length === 0) {
       throw new BadRequestException('RENEWAL_NO_ITEMS');
@@ -151,6 +158,7 @@ export class SubscriptionRenewalService {
       throw new NotFoundException('RENEWAL_SUBSCRIPTION_NOT_FOUND');
     }
 
+    const renewalAddOnsEnabled = resolveAddOnRolloutFlags().renewalAddOns;
     const items: PricedRenewalItemInterface[] = [];
     for (const subscription of subscriptions) {
       const quote = await this.quoteSubscriptionRenewal({
@@ -170,6 +178,14 @@ export class SubscriptionRenewalService {
       ) {
         throw new BadRequestException('RENEWAL_ITEM_NOT_PRICEABLE');
       }
+      const selectedAddOnIds = renewalAddOnsEnabled
+        ? (input.addOns?.get(subscription.id) ?? [])
+        : [];
+      const addOnLines = await this.priceRenewalAddOnLines({
+        subscriptionId: subscription.id,
+        currency: quote.currency,
+        selectedAddOnIds,
+      });
       items.push({
         subscriptionId: quote.subscriptionId,
         planId: quote.planId,
@@ -188,6 +204,7 @@ export class SubscriptionRenewalService {
           purchaseType: 'RENEW',
           snapshotSource: 'RENEWAL_DRAFT',
         },
+        addOnLines,
       });
     }
 
@@ -196,11 +213,72 @@ export class SubscriptionRenewalService {
       throw new BadRequestException('MIXED_CURRENCY');
     }
     const currency = items[0]!.currency;
+    // Total = every plan line + every priced add-on line across all lines.
     const total = items
-      .reduce((sum, item) => sum.add(new Prisma.Decimal(item.amount)), new Prisma.Decimal(0))
+      .reduce((sum, item) => {
+        const withPlan = sum.add(new Prisma.Decimal(item.amount));
+        return item.addOnLines.reduce(
+          (acc, addOn) => acc.add(new Prisma.Decimal(addOn.unitAmount)),
+          withPlan,
+        );
+      }, new Prisma.Decimal(0))
       .toString();
 
     return { userId, currency, total, items };
+  }
+
+  /**
+   * Validates + prices the selected renewal add-ons for one subscription line
+   * against its authoritative eligibility (contract v2, same-plan proxy). An
+   * unknown/ineligible id, a duplicate pick, or a missing gateway-currency
+   * price is a hard `BadRequestException` — checkout never silently drops or
+   * mis-prices a paid add-on. Returns `[]` when nothing is selected.
+   */
+  private async priceRenewalAddOnLines(input: {
+    readonly subscriptionId: string;
+    readonly currency: Currency;
+    readonly selectedAddOnIds: readonly string[];
+  }): Promise<readonly PricedRenewalAddOnLineInterface[]> {
+    if (input.selectedAddOnIds.length === 0) return [];
+    const seen = new Set<string>();
+    for (const id of input.selectedAddOnIds) {
+      if (seen.has(id)) {
+        throw new BadRequestException('ADDON_DUPLICATE_SELECTION');
+      }
+      seen.add(id);
+    }
+
+    const eligibility = await this.addOnEligibilityService.listForSubscription(input.subscriptionId);
+    if (eligibility.availability !== 'AVAILABLE') {
+      throw new BadRequestException('ADDON_NOT_ELIGIBLE');
+    }
+    const byId = new Map(eligibility.addOns.map((addOn) => [addOn.id, addOn]));
+
+    const lines: PricedRenewalAddOnLineInterface[] = [];
+    for (const addOnId of input.selectedAddOnIds) {
+      const addOn = byId.get(addOnId);
+      if (addOn === undefined) {
+        throw new BadRequestException('ADDON_NOT_ELIGIBLE');
+      }
+      const price = addOn.prices.find((entry) => entry.currency === input.currency);
+      if (price === undefined) {
+        throw new BadRequestException('ADDON_PRICE_UNAVAILABLE');
+      }
+      lines.push({
+        addOnId: addOn.id,
+        catalogRevision: addOn.revision,
+        type: addOn.type,
+        value: addOn.value,
+        lifetime: addOn.lifetime,
+        // Renewal add-ons activate at the renewed term start regardless of the
+        // discovery-time activation hint (which is computed for the CURRENT term).
+        activation: 'TERM_START',
+        sourceLineKey: `renew:${input.subscriptionId}:${addOn.id}`,
+        unitAmount: price.price,
+        receiptName: addOn.name,
+      });
+    }
+    return lines;
   }
 
   /**

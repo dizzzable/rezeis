@@ -1,4 +1,4 @@
-import { AddOnType, Currency } from '@prisma/client';
+import { AddOnLifetime, AddOnType, Currency } from '@prisma/client';
 import {
   ArrayMaxSize,
   ArrayMinSize,
@@ -35,6 +35,10 @@ export class AdminAddOnCreateDto {
 
   @IsEnum(AddOnType)
   public type!: AddOnType;
+
+  @IsOptional()
+  @IsEnum(AddOnLifetime)
+  public lifetime?: AddOnLifetime;
 
   @IsOptional()
   @ValidateIf((_object: object, value: unknown): boolean => value !== null)
@@ -76,6 +80,10 @@ export class AdminAddOnUpdateDto {
   @IsOptional()
   @IsEnum(AddOnType)
   public type?: AddOnType;
+
+  @IsOptional()
+  @IsEnum(AddOnLifetime)
+  public lifetime?: AddOnLifetime;
 
   @IsOptional()
   @ValidateIf((_object: object, value: unknown): boolean => value !== null)

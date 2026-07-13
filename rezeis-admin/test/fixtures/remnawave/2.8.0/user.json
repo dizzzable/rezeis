@@ -1,0 +1,19 @@
+{
+  "version": "2.8.0",
+  "response": {
+    "uuid": "22222222-2222-4222-8222-222222222222",
+    "username": "rz_sub_2",
+    "status": "ACTIVE",
+    "subscriptionUrl": "https://panel.example/sub/def",
+    "telegramId": null,
+    "email": null,
+    "expireAt": "2099-01-01T00:00:00.000Z",
+    "trafficLimitBytes": 0,
+    "hwidDeviceLimit": 0,
+    "trafficLimitStrategy": "NO_RESET",
+    "tag": null,
+    "description": "",
+    "activeInternalSquads": [],
+    "externalSquadUuid": null
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "version": "2.7.4",
+  "response": {
+    "uuid": "11111111-1111-4111-8111-111111111111",
+    "username": "rz_sub_1",
+    "status": "ACTIVE",
+    "subscriptionUrl": "https://panel.example/sub/abc",
+    "telegramId": 12345,
+    "email": null,
+    "expireAt": "2099-01-01T00:00:00.000Z",
+    "trafficLimitBytes": 107374182400,
+    "hwidDeviceLimit": 3,
+    "trafficLimitStrategy": "MONTH",
+    "tag": "premium",
+    "description": "reiwa_id=abc",
+    "activeInternalSquads": [],
+    "externalSquadUuid": null
+  }
+}

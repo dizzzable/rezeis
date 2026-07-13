@@ -2,6 +2,7 @@ import { BullModule } from '@nestjs/bullmq';
 import { Module } from '@nestjs/common';
 
 import { OutboundHttpModule } from '../../common/http/outbound-http.module';
+import { AddOnEntitlementsModule } from '../add-on-entitlements/add-on-entitlements.module';
 import { AuthModule } from '../auth/auth.module';
 import { PartnersModule } from '../partners/partners.module';
 import { AdvertisingModule } from '../advertising/advertising.module';
@@ -41,6 +42,7 @@ import { PaymentsCheckoutService } from './services/payments-checkout.service';
 import { PaymentsRenewalCheckoutService } from './services/payments-renewal-checkout.service';
 import { PaymentsTransactionsService } from './services/payments-transactions.service';
 import { AddOnPurchaseService } from './services/addon-purchase.service';
+import { AddOnFulfillmentRecoveryService } from './services/add-on-fulfillment-recovery.service';
 import { PartnerBalancePaymentService } from './services/partner-balance-payment.service';
 import { TelegramStarsWebhookService } from './services/telegram-stars-webhook.service';
 
@@ -48,6 +50,7 @@ import { TelegramStarsWebhookService } from './services/telegram-stars-webhook.s
   imports: [
     AuthModule,
     OutboundHttpModule,
+    AddOnEntitlementsModule,
     RemnawaveModule,
     SubscriptionsModule,
     PlansModule,
@@ -96,6 +99,7 @@ import { TelegramStarsWebhookService } from './services/telegram-stars-webhook.s
     MoyNalogProcessor,
     PaymentAutoRetryService,
     PaymentPendingExpiryService,
+    AddOnFulfillmentRecoveryService,
   ],
 })
 export class PaymentsModule {}

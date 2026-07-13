@@ -40,6 +40,19 @@ export interface RenewalOptionsInterface {
   readonly total: string | null;
 }
 
+/** One priced renewal add-on line, persisted onto the TransactionItem. */
+export interface PricedRenewalAddOnLineInterface {
+  readonly addOnId: string;
+  readonly catalogRevision: number;
+  readonly type: string;
+  readonly value: number;
+  readonly lifetime: string;
+  readonly activation: string;
+  readonly sourceLineKey: string;
+  readonly unitAmount: string;
+  readonly receiptName: string;
+}
+
 /** A fully priced renewal line item used to build a combined checkout. */
 export interface PricedRenewalItemInterface {
   readonly subscriptionId: string;
@@ -50,6 +63,9 @@ export interface PricedRenewalItemInterface {
   readonly amount: string;
   readonly discountPercent: number;
   readonly planSnapshot: Record<string, unknown>;
+  /** Selected renewal add-ons for this line, priced + eligibility-checked.
+   *  Empty when none selected or the `renewalAddOns` flag is off. */
+  readonly addOnLines: readonly PricedRenewalAddOnLineInterface[];
 }
 
 /** Result of pricing a concrete renewal selection for checkout. */

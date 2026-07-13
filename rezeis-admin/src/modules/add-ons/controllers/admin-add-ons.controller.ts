@@ -29,6 +29,12 @@ export class AdminAddOnsController {
     return this.addOnsService.update(id, body);
   }
 
+  @Post(':id/archive')
+  @RequirePermission('add_ons', 'edit')
+  public archive(@Param('id') id: string): Promise<AddOnInterface> {
+    return this.addOnsService.archive(id);
+  }
+
   @Delete(':id')
   @RequirePermission('add_ons', 'delete')
   public async delete(@Param('id') id: string): Promise<{ deleted: true }> {

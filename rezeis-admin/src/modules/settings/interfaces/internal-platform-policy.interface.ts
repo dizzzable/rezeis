@@ -23,4 +23,12 @@ export interface InternalPlatformPolicyInterface {
   readonly accessMode: AccessMode;
   readonly inviteModeStartedAt: string | null;
   readonly defaultCurrency: Currency;
+  /**
+   * Capability signal: whether renewal add-on composition is enabled
+   * (rezeis env `ADDON_RENEWAL_ADDONS`). The cabinet only shows the renewal
+   * add-on selection step when this is true — otherwise the backend pricing
+   * ignores add-on selections, so surfacing them would mislead. Deployment-time
+   * flag, not panel-editable.
+   */
+  readonly renewalAddOns: boolean;
 }

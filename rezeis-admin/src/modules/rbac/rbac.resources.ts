@@ -78,6 +78,16 @@ export const RBAC_RESOURCES: Readonly<Record<string, readonly RbacAction[]>> = {
   broadcasts: ['view', 'create', 'edit', 'delete', 'run'],
   /// Paid add-ons (extra traffic / devices) catalog CRUD.
   add_ons: ['view', 'create', 'edit', 'delete'],
+  /// Durable add-on entitlement remediation surface (T-013). Separate,
+  /// least-privilege actions over the ledger/projection/device saga:
+  ///   view    — inspect ledger, projection, incidents, delivery metrics;
+  ///   run     — retry a stalled profile-sync push;
+  ///   resolve — force reconcile / acknowledge an incident;
+  ///   enforce — schedule a compensating reversal / waiver (money-affecting);
+  ///   moderate— approve a BLOCKED device-reduction plan (destructive HWID).
+  /// NOT granted to any default non-superadmin role — high-risk money/
+  /// destructive surface; operators receive it only via a custom role.
+  add_on_entitlements: ['view', 'run', 'resolve', 'enforce', 'moderate'],
   /// Operator-managed FAQ entries (+ media uploads).
   faq: ['view', 'create', 'edit', 'delete'],
 

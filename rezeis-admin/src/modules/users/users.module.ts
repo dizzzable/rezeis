@@ -8,6 +8,7 @@ import { ProfileSyncModule } from '../profile-sync/profile-sync.module';
 import { RbacModule } from '../rbac/rbac.module';
 import { ReferralsModule } from '../referrals/referrals.module';
 import { RemnawaveModule } from '../remnawave/remnawave.module';
+import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
 import { AdminBulkUsersController } from './controllers/admin-bulk-users.controller';
 import { AdminUserManagementController } from './controllers/admin-user-management.controller';
 import { AdminUserSubscriptionsController } from './controllers/admin-user-subscriptions.controller';
@@ -33,6 +34,7 @@ import { BulkUserOperationsService } from './services/bulk-user-operations.servi
     RbacModule,
     ReferralsModule,
     RemnawaveModule,
+    SubscriptionsModule,
   ],
   controllers: [AdminUsersController, AdminUserManagementController, AdminUserSubscriptionsController, AdminUserWebController, AdminBulkUsersController],
   providers: [AdminUsersService, BulkUserOperationsService],

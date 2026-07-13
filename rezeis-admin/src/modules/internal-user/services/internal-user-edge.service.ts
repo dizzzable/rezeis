@@ -17,6 +17,7 @@ import { AccessModeGuard } from '../../settings/services/access-mode-guard.servi
 import { SettingsService } from '../../settings/services/settings.service';
 import { InternalBootstrapUserInput } from '../interfaces/internal-user-bootstrap.interface';
 import {
+  InternalUserAddOnEntitlementInterface,
   InternalUserNotificationInterface,
   InternalUserTransactionInterface,
 } from '../interfaces/internal-user-notification.interface';
@@ -267,8 +268,50 @@ export class InternalUserEdgeService {
         gatewayType: transaction.gatewayType,
         currency: transaction.currency,
         amount: transaction.amount.toString(),
+        title: readTransactionTitle(transaction.planSnapshot),
         createdAt: transaction.createdAt.toISOString(),
         updatedAt: transaction.updatedAt.toISOString(),
+      })),
+    };
+  }
+
+  /**
+   * User-facing "My add-ons" history: every durable add-on entitlement across
+   * the user's own subscriptions (own data only, resolved from the identity).
+   * Read-only + user-safe projection; naturally empty until the entitlement
+   * ledger is populated (direct-purchase / renewal add-on rollout).
+   */
+  public async listAddOnEntitlements(
+    telegramId: string,
+  ): Promise<{ entitlements: readonly InternalUserAddOnEntitlementInterface[] }> {
+    const userId = await this.resolveUserId(telegramId);
+    const subscriptions = await this.prismaService.subscription.findMany({
+      where: { userId },
+      select: { id: true },
+    });
+    if (subscriptions.length === 0) {
+      return { entitlements: [] };
+    }
+    const rows = await this.prismaService.addOnEntitlement.findMany({
+      where: { subscriptionId: { in: subscriptions.map((s) => s.id) } },
+      orderBy: { purchasedAt: 'desc' },
+      take: 100,
+    });
+    return {
+      entitlements: rows.map((entitlement): InternalUserAddOnEntitlementInterface => ({
+        id: entitlement.id,
+        subscriptionId: entitlement.subscriptionId,
+        receiptName: entitlement.receiptName,
+        type: entitlement.type,
+        valuePerUnit: entitlement.valuePerUnit,
+        quantity: entitlement.quantity,
+        lifetime: entitlement.lifetime,
+        state: entitlement.state,
+        currency: entitlement.currency,
+        totalAmount: entitlement.totalAmount.toString(),
+        purchasedAt: entitlement.purchasedAt.toISOString(),
+        activatedAt: entitlement.activatedAt === null ? null : entitlement.activatedAt.toISOString(),
+        expiresAt: entitlement.expiresAt === null ? null : entitlement.expiresAt.toISOString(),
       })),
     };
   }
@@ -517,4 +560,23 @@ function normalizeFormFactor(formFactor: string): string {
 function normalizeOs(os: string): string {
   const value = (os ?? '').trim().toLowerCase();
   return ['ios', 'android', 'windows', 'macos', 'linux'].includes(value) ? value : 'other';
+}
+
+/**
+ * Derives a human-readable transaction title from its `planSnapshot`. Both the
+ * add-on purchase marker and the plan-purchase snapshot carry a `name`, so a
+ * single read covers add-on top-ups ("Extra 50GB") and plan purchases alike.
+ * Combined-renewal drafts (no `name`) return `null` → the client uses a
+ * purchase-type / gateway fallback.
+ */
+function readTransactionTitle(planSnapshot: Prisma.JsonValue): string | null {
+  if (
+    typeof planSnapshot !== 'object' ||
+    planSnapshot === null ||
+    Array.isArray(planSnapshot)
+  ) {
+    return null;
+  }
+  const name = (planSnapshot as Record<string, unknown>)['name'];
+  return typeof name === 'string' && name.length > 0 ? name : null;
 }

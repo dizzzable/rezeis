@@ -4,13 +4,14 @@ import { AuthModule } from '../auth/auth.module';
 import { AdminAddOnsController } from './controllers/admin-add-ons.controller';
 import { AdminAddOnsStatsController } from './controllers/admin-add-ons-stats.controller';
 import { InternalAddOnsController } from './controllers/internal-add-ons.controller';
+import { AddOnEligibilityService } from './services/add-on-eligibility.service';
 import { AddOnsService } from './services/add-ons.service';
 import { AddOnsStatsService } from './services/add-ons-stats.service';
 
 @Module({
   imports: [AuthModule],
   controllers: [AdminAddOnsController, AdminAddOnsStatsController, InternalAddOnsController],
-  providers: [AddOnsService, AddOnsStatsService],
-  exports: [AddOnsService],
+  providers: [AddOnsService, AddOnsStatsService, AddOnEligibilityService],
+  exports: [AddOnsService, AddOnEligibilityService],
 })
 export class AddOnsModule {}

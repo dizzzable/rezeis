@@ -18,6 +18,23 @@ import { RenewalDurationDto } from '../../subscriptions/dto/renewal-duration.dto
 import { RenewalPlanDto } from '../../subscriptions/dto/renewal-plan.dto';
 
 /**
+ * One subscription's selected renewal add-ons. `addOnIds` are eligibility-
+ * checked and priced server-side; unknown/ineligible ids are rejected.
+ */
+export class RenewalAddOnSelectionDto {
+  @IsString()
+  @MinLength(1)
+  @MaxLength(64)
+  public subscriptionId!: string;
+
+  @IsArray()
+  @ArrayMaxSize(20)
+  @IsString({ each: true })
+  @MaxLength(64, { each: true })
+  public addOnIds!: string[];
+}
+
+/**
  * Creates one combined provider checkout that renews several subscriptions.
  * Each id in `subscriptionIds` renews on its original (or replacement) plan
  * for its original duration; the provider is charged the summed total.
@@ -80,4 +97,42 @@ export class InternalRenewalCheckoutDto {
   @ValidateNested({ each: true })
   @Type(() => RenewalPlanDto)
   public plans?: RenewalPlanDto[];
+
+  /**
+   * Optional client idempotency key. A retry with the same key + composition
+   * replays the existing draft; the same key with a different composition is
+   * an `IDEMPOTENCY_KEY_CONFLICT`.
+   */
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  public idempotencyKey?: string;
+
+  /** Optional per-subscription selected renewal add-ons (T-007). */
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(50)
+  @ValidateNested({ each: true })
+  @Type(() => RenewalAddOnSelectionDto)
+  public addOns?: RenewalAddOnSelectionDto[];
+}
+
+/**
+ * Normalizes the DTO's add-on selections into a `subscriptionId → addOnIds`
+ * map for the checkout service. Later entries win on duplicate subscriptionId;
+ * empty selections are dropped. Returns `undefined` when nothing is selected.
+ */
+export function toAddOnSelectionMap(
+  selections?: readonly RenewalAddOnSelectionDto[],
+): ReadonlyMap<string, readonly string[]> | undefined {
+  if (selections === undefined || selections.length === 0) {
+    return undefined;
+  }
+  const map = new Map<string, readonly string[]>();
+  for (const selection of selections) {
+    if (selection.addOnIds.length > 0) {
+      map.set(selection.subscriptionId, [...selection.addOnIds]);
+    }
+  }
+  return map.size > 0 ? map : undefined;
 }

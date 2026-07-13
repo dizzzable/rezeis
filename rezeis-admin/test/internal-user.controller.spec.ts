@@ -185,6 +185,7 @@ describe('InternalUserController', () => {
       gatewayType: PaymentGatewayType.YOOKASSA,
       currency: Currency.USD,
       amount: '8.00',
+      title: 'Plan X',
       createdAt: '2026-04-20T00:00:00.000Z',
       updatedAt: '2026-04-20T00:00:00.000Z',
     };
