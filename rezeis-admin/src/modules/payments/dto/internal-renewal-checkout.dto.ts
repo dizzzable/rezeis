@@ -1,4 +1,4 @@
-import { PaymentGatewayType, PurchaseChannel } from '@prisma/client';
+import { Currency, PaymentGatewayType, PurchaseChannel } from '@prisma/client';
 import { Type } from 'class-transformer';
 import {
   ArrayMaxSize,
@@ -97,6 +97,19 @@ export class InternalRenewalCheckoutDto {
   @ValidateNested({ each: true })
   @Type(() => RenewalPlanDto)
   public plans?: RenewalPlanDto[];
+
+  /** Review quote pin. Optional only for rolling compatibility with an older
+   * Reiwa deployment; when either field is present the service requires both
+   * and compares them before creating any draft/provider checkout. */
+  @IsOptional()
+  @IsString()
+  @Matches(/^\d+(?:\.\d{1,8})?$/, { message: 'expectedAmount must be a non-negative decimal string' })
+  @MaxLength(64)
+  public expectedAmount?: string;
+
+  @IsOptional()
+  @IsEnum(Currency)
+  public expectedCurrency?: Currency;
 
   /**
    * Optional client idempotency key. A retry with the same key + composition

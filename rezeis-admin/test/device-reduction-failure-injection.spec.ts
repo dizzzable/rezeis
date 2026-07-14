@@ -29,6 +29,7 @@ function build(plan: Record<string, unknown>, listQueue: unknown[]) {
   const planUpdates: Array<Record<string, unknown>> = [];
   const queue = [...listQueue];
   const prisma = {
+    $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback(prisma),
     deviceReductionPlan: {
       findUnique: async () => plan,
       update: async (args: { data: Record<string, unknown> }) => {
@@ -49,7 +50,14 @@ function build(plan: Record<string, unknown>, listQueue: unknown[]) {
       return { kind: 'ok', value: { total: 1 }, detectedVersion: '2.8.0' };
     },
   };
-  const service = new DeviceReductionExecutionService(prisma as never, remnawave as never);
+  const completion = {
+    completeVerifiedDeviceExpiryInTransaction: async () => ({ completed: 0 }),
+  };
+  const service = new DeviceReductionExecutionService(
+    prisma as never,
+    remnawave as never,
+    completion as never,
+  );
   return { service, deleteCalls, planUpdates };
 }
 

@@ -1,7 +1,8 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { ConflictException, Injectable, Logger } from '@nestjs/common';
 import {
   AddOnEntitlementActorType,
   AddOnEntitlementState,
+  AddOnLifetime,
   AddOnType,
   Prisma,
   SubscriptionTermStatus,
@@ -10,11 +11,12 @@ import {
 } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
 import { resolveResetCapabilities } from '../add-on-rollout.config';
 import { GIB_BYTES } from '../domain/cutover-baseline';
 import { ResetStrategy } from '../domain/reset-cycle-policy';
 import { AddOnEntitlementService } from './add-on-entitlement.service';
-import { ensureLiveResetEpoch } from './reset-epoch.util';
+import { ensureLiveResetEpoch, LiveResetEpoch } from './reset-epoch.util';
 import { EffectiveProjectionService } from './effective-projection.service';
 import { SubscriptionTermService } from './subscription-term.service';
 
@@ -35,6 +37,41 @@ export interface BoundaryExpiryResult {
   /** True when a due EXTRA_DEVICES entitlement began expiry — the caller should
    *  build a device-reduction plan (the desired device limit just dropped). */
   readonly deviceExpiryTriggered: boolean;
+}
+
+export type VerifiedDeviceExpiryCompletionResult =
+  | { readonly status: 'COMPLETED'; readonly completed: number }
+  | { readonly status: 'SUPERSEDED'; readonly completed: 0 };
+
+interface DeferredPlanActivation {
+  readonly planSnapshot: Prisma.InputJsonValue;
+  readonly internalSquads?: readonly string[];
+  readonly externalSquad?: string | null;
+}
+
+function decodeDeferredPlanActivation(
+  snapshot: Prisma.JsonValue | undefined,
+): DeferredPlanActivation | null {
+  if (snapshot === null || snapshot === undefined || Array.isArray(snapshot) || typeof snapshot !== 'object') {
+    return null;
+  }
+  const value = snapshot as Record<string, unknown>;
+  if (typeof value.id !== 'string' || value.id.trim().length === 0) return null;
+  const decoded: {
+    planSnapshot: Prisma.InputJsonValue;
+    internalSquads?: readonly string[];
+    externalSquad?: string | null;
+  } = { planSnapshot: snapshot as Prisma.InputJsonValue };
+  if (Array.isArray(value.internalSquads) && value.internalSquads.every((entry) => typeof entry === 'string')) {
+    decoded.internalSquads = value.internalSquads;
+  }
+  const externalSquad = value.externalSquad;
+  if (externalSquad === null) {
+    decoded.externalSquad = null;
+  } else if (typeof externalSquad === 'string') {
+    decoded.externalSquad = externalSquad;
+  }
+  return decoded;
 }
 
 /**
@@ -69,6 +106,7 @@ export class EntitlementBoundaryService {
     private readonly addOnEntitlementService: AddOnEntitlementService,
     private readonly subscriptionTermService: SubscriptionTermService,
     private readonly effectiveProjectionService: EffectiveProjectionService,
+    private readonly remnawaveApiService?: RemnawaveApiService,
   ) {}
 
   /**
@@ -85,6 +123,7 @@ export class EntitlementBoundaryService {
     subscriptionId: string,
     now: Date = new Date(),
   ): Promise<BoundaryActivationResult> {
+    const panelAnchor = await this.resolveDueMonthRollingPanelAnchor(subscriptionId, now);
     return this.prismaService.$transaction(async (tx) => {
       const due = await tx.subscriptionTerm.findFirst({
         where: {
@@ -93,10 +132,28 @@ export class EntitlementBoundaryService {
           startsAt: { lte: now },
         },
         orderBy: { generation: 'asc' },
-        select: { id: true, startsAt: true, trafficResetStrategy: true, resetAnchorAt: true },
+        select: {
+          id: true,
+          startsAt: true,
+          trafficResetStrategy: true,
+          resetAnchorAt: true,
+          planSnapshot: true,
+        },
       });
       if (due === null) {
         return { activated: false, termId: null, activatedEntitlements: 0, desiredRevision: null, syncJobIds: [] };
+      }
+
+      let resetAnchorAt = due.resetAnchorAt ?? due.startsAt;
+      if (
+        due.trafficResetStrategy === 'MONTH_ROLLING' &&
+        (resolveResetCapabilities().MONTH_ROLLING ?? 'DISABLED') === 'ENABLED'
+      ) {
+        resetAnchorAt = panelAnchor?.termId === due.id ? panelAnchor.anchorAt : null;
+        await tx.subscriptionTerm.update({
+          where: { id: due.id },
+          data: { resetAnchorAt },
+        });
       }
 
       const activation = await this.subscriptionTermService.activateInTransaction(tx, due.id, now);
@@ -107,11 +164,11 @@ export class EntitlementBoundaryService {
       // strategy's capability is ENABLED (staging parity verified). Gated by
       // `resetExpiry.<strategy>` (OFF by default → no epoch, so UNTIL_NEXT_RESET
       // stays on the legacy path). Idempotent per term.
-      await this.createResetEpochIfEnabled(tx, {
+      const epoch = await this.createResetEpochIfEnabled(tx, {
         termId: due.id,
         strategy: due.trafficResetStrategy as ResetStrategy,
-        anchorAt: due.resetAnchorAt ?? due.startsAt,
-        now,
+        anchorAt: resetAnchorAt,
+        now: due.startsAt,
       });
 
       const pending = await tx.addOnEntitlement.findMany({
@@ -121,10 +178,31 @@ export class EntitlementBoundaryService {
           state: AddOnEntitlementState.PENDING_ACTIVATION,
           scheduledActivationAt: { lte: now },
         },
-        select: { id: true },
+        select: { id: true, lifetime: true },
       });
+      if (
+        epoch === null &&
+        pending.some((entitlement) => entitlement.lifetime === AddOnLifetime.UNTIL_NEXT_RESET)
+      ) {
+        throw new ConflictException(
+          `Paid reset entitlement cannot activate without a reset epoch for term ${due.id}`,
+        );
+      }
       let activatedEntitlements = 0;
       for (const entitlement of pending) {
+        if (entitlement.lifetime === AddOnLifetime.UNTIL_NEXT_RESET && epoch !== null) {
+          await tx.addOnEntitlement.updateMany({
+            where: {
+              id: entitlement.id,
+              state: AddOnEntitlementState.PENDING_ACTIVATION,
+              lifetime: AddOnLifetime.UNTIL_NEXT_RESET,
+            },
+            data: {
+              expiryEpochId: epoch.id,
+              expiresAt: epoch.plannedEndsAt,
+            },
+          });
+        }
         const result = await this.addOnEntitlementService.transitionInTransaction(tx, {
           entitlementId: entitlement.id,
           command: 'ACTIVATE',
@@ -141,10 +219,22 @@ export class EntitlementBoundaryService {
         mode: 'ACTIVE',
       });
       const syncJobIds: string[] = [];
-      if (projection.changed) {
+      const deferredPlan = decodeDeferredPlanActivation(due.planSnapshot);
+      if (projection.changed || deferredPlan !== null) {
         const subscription = await tx.subscription.update({
           where: { id: subscriptionId },
           data: {
+            ...(deferredPlan === null
+              ? {}
+              : {
+                  planSnapshot: deferredPlan.planSnapshot,
+                  ...(deferredPlan.internalSquads === undefined
+                    ? {}
+                    : { internalSquads: [...deferredPlan.internalSquads] }),
+                  ...(deferredPlan.externalSquad === undefined
+                    ? {}
+                    : { externalSquad: deferredPlan.externalSquad }),
+                }),
             trafficLimit:
               projection.desiredTrafficLimitBytes === null
                 ? null
@@ -182,6 +272,55 @@ export class EntitlementBoundaryService {
   }
 
   /**
+   * Resolves the only reset strategy whose boundary depends on panel profile
+   * metadata. The panel call happens before the interactive DB transaction.
+   * A missing/unavailable/invalid profile timestamp is represented as a null
+   * anchor so activation remains available while reset-scoped commerce stays
+   * fail-closed.
+   */
+  private async resolveDueMonthRollingPanelAnchor(
+    subscriptionId: string,
+    now: Date,
+  ): Promise<{ readonly termId: string; readonly anchorAt: Date | null } | undefined> {
+    if ((resolveResetCapabilities().MONTH_ROLLING ?? 'DISABLED') !== 'ENABLED') {
+      return undefined;
+    }
+
+    const due = await this.prismaService.subscriptionTerm.findFirst({
+      where: {
+        subscriptionId,
+        status: SubscriptionTermStatus.SCHEDULED,
+        startsAt: { lte: now },
+        trafficResetStrategy: 'MONTH_ROLLING',
+      },
+      orderBy: { generation: 'asc' },
+      select: {
+        id: true,
+        subscription: { select: { remnawaveId: true } },
+      },
+    });
+    if (due === null) return undefined;
+    if (due.subscription.remnawaveId === null || this.remnawaveApiService === undefined) {
+      return { termId: due.id, anchorAt: null };
+    }
+
+    try {
+      const panelUser = await this.remnawaveApiService.getPanelUser(due.subscription.remnawaveId);
+      const timestamp = panelUser?.createdAt;
+      const parsed = typeof timestamp === 'string' ? Date.parse(timestamp) : Number.NaN;
+      return {
+        termId: due.id,
+        anchorAt: Number.isFinite(parsed) ? new Date(parsed) : null,
+      };
+    } catch (error) {
+      this.logger.warn(
+        `Cannot resolve MONTH_ROLLING panel anchor for term ${due.id}: ${(error as Error).message}`,
+      );
+      return { termId: due.id, anchorAt: null };
+    }
+  }
+
+  /**
    * Ensures the term's CURRENT reset-cycle epoch exists when the strategy's
    * capability is ENABLED (`resetExpiry.<strategy>` flag). Delegates to the
    * shared {@link ensureLiveResetEpoch} (find-or-create the window containing
@@ -191,7 +330,7 @@ export class EntitlementBoundaryService {
   private async createResetEpochIfEnabled(
     tx: Prisma.TransactionClient,
     input: { readonly termId: string; readonly strategy: ResetStrategy; readonly anchorAt: Date | null; readonly now: Date },
-  ): Promise<void> {
+  ): Promise<LiveResetEpoch | null> {
     const capability = resolveResetCapabilities()[input.strategy] ?? 'DISABLED';
     const epoch = await ensureLiveResetEpoch(tx, {
       termId: input.termId,
@@ -205,6 +344,67 @@ export class EntitlementBoundaryService {
         `Reset epoch ensured for term ${input.termId} (${input.strategy}, ends ${epoch.plannedEndsAt.toISOString()})`,
       );
     }
+    return epoch;
+  }
+
+  public async completeVerifiedDeviceExpiryForSubscription(
+    subscriptionId: string,
+    projectionRevision: bigint,
+    now: Date = new Date(),
+  ): Promise<VerifiedDeviceExpiryCompletionResult> {
+    return this.prismaService.$transaction((tx) =>
+      this.completeVerifiedDeviceExpiryInTransaction(tx, subscriptionId, projectionRevision, now),
+    );
+  }
+
+  public async completeVerifiedDeviceExpiryInTransaction(
+    tx: Prisma.TransactionClient,
+    subscriptionId: string,
+    projectionRevision: bigint,
+    now: Date = new Date(),
+  ): Promise<VerifiedDeviceExpiryCompletionResult> {
+    // Projection recomputes serialize on this same row. Reading the revision only
+    // after acquiring the lock prevents an older panel verification from
+    // completing entitlements introduced by a newer expiry boundary.
+    const locked = await tx.$queryRaw<Array<{ readonly id: string }>>(Prisma.sql`
+      SELECT "id"
+      FROM "subscriptions"
+      WHERE "id" = ${subscriptionId}
+      FOR UPDATE
+    `);
+    if (locked.length !== 1) {
+      return { status: 'SUPERSEDED', completed: 0 };
+    }
+    const projection = await tx.subscriptionEffectiveProjection.findUnique({
+      where: { subscriptionId },
+      select: { desiredRevision: true },
+    });
+    if (projection === null || projection.desiredRevision !== projectionRevision) {
+      return { status: 'SUPERSEDED', completed: 0 };
+    }
+
+    const due = await tx.addOnEntitlement.findMany({
+      where: {
+        subscriptionId,
+        type: AddOnType.EXTRA_DEVICES,
+        state: AddOnEntitlementState.EXPIRING,
+        expiresAt: { not: null, lte: now },
+      },
+      select: { id: true },
+    });
+    let completed = 0;
+    for (const entitlement of due) {
+      const transition = await this.addOnEntitlementService.transitionInTransaction(tx, {
+        entitlementId: entitlement.id,
+        command: 'COMPLETE_EXPIRY',
+        commandKey: `device-expiry-complete:${entitlement.id}`,
+        correlationId: `device-expiry:${subscriptionId}`,
+        actorType: AddOnEntitlementActorType.SYSTEM,
+        reason: 'DEVICE_REDUCTION_VERIFIED',
+      });
+      if (transition.changed) completed += 1;
+    }
+    return { status: 'COMPLETED', completed };
   }
 
   public async expireDueForSubscription(
@@ -215,10 +415,10 @@ export class EntitlementBoundaryService {
       const due = await tx.addOnEntitlement.findMany({
         where: {
           subscriptionId,
-          state: AddOnEntitlementState.ACTIVE,
+          state: { in: [AddOnEntitlementState.ACTIVE, AddOnEntitlementState.EXPIRING] },
           expiresAt: { not: null, lte: now },
         },
-        select: { id: true, type: true },
+        select: { id: true, type: true, state: true },
       });
       if (due.length === 0) {
         return { began: 0, expired: 0, changed: false, desiredRevision: null, syncJobIds: [], deviceExpiryTriggered: false };
@@ -229,15 +429,17 @@ export class EntitlementBoundaryService {
       let expired = 0;
       let deviceExpiryTriggered = false;
       for (const entitlement of due) {
-        const begin = await this.addOnEntitlementService.transitionInTransaction(tx, {
-          entitlementId: entitlement.id,
-          command: 'BEGIN_EXPIRY',
-          commandKey: `boundary-begin:${entitlement.id}`,
-          correlationId,
-          actorType: AddOnEntitlementActorType.SYSTEM,
-          reason: 'BOUNDARY_EXPIRY',
-        });
-        if (begin.changed) began += 1;
+        if (entitlement.state === AddOnEntitlementState.ACTIVE) {
+          const begin = await this.addOnEntitlementService.transitionInTransaction(tx, {
+            entitlementId: entitlement.id,
+            command: 'BEGIN_EXPIRY',
+            commandKey: `boundary-begin:${entitlement.id}`,
+            correlationId,
+            actorType: AddOnEntitlementActorType.SYSTEM,
+            reason: 'BOUNDARY_EXPIRY',
+          });
+          if (begin.changed) began += 1;
+        }
 
         // Traffic entitlements have no HWID reconciliation — complete now.
         if (entitlement.type === AddOnType.EXTRA_TRAFFIC) {
@@ -250,8 +452,9 @@ export class EntitlementBoundaryService {
             reason: 'TRAFFIC_BOUNDARY_EXPIRY',
           });
           if (complete.changed) expired += 1;
-        } else if (entitlement.type === AddOnType.EXTRA_DEVICES && begin.changed) {
-          // Device slots dropped — a device-reduction plan must be built.
+        } else if (entitlement.type === AddOnType.EXTRA_DEVICES) {
+          // Re-entry for an already EXPIRING row is intentional: transient
+          // planning/execution failures remain durably retryable.
           deviceExpiryTriggered = true;
         }
       }

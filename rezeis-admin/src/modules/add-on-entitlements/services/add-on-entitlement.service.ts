@@ -336,6 +336,7 @@ export class AddOnEntitlementService {
     this.assertImmutableSnapshot(entitlement, input);
     const replay = await this.findRecordedCommand(tx, entitlement.id, commandKey);
     if (replay !== null) {
+      this.assertCreateExpiryFingerprint(replay, entitlement, input);
       return {
         entitlementId: entitlement.id,
         state: entitlement.state as EntitlementState,
@@ -356,6 +357,7 @@ export class AddOnEntitlementService {
         metadata: {
           sourceTransactionId: input.sourceTransactionId,
           sourceLineKey: input.sourceLineKey,
+          createExpiryFingerprint: this.createExpiryFingerprint(input),
         },
       },
       select: { id: true },
@@ -512,8 +514,6 @@ export class AddOnEntitlementService {
     row: ImmutableEntitlementSnapshot,
     input: CreatePendingEntitlementInput,
   ): void {
-    const equalDate = (left: Date | null, right: Date | null): boolean =>
-      left === null ? right === null : right !== null && left.getTime() === right.getTime();
     const matches =
       row.subscriptionId === input.subscriptionId &&
       row.termId === input.termId &&
@@ -532,12 +532,47 @@ export class AddOnEntitlementService {
       new Prisma.Decimal(row.totalAmount.toString()).equals(new Prisma.Decimal(input.totalAmount)) &&
       row.currency === input.currency &&
       row.purchasedAt.getTime() === input.purchasedAt.getTime() &&
-      row.scheduledActivationAt.getTime() === input.scheduledActivationAt.getTime() &&
-      equalDate(row.expiresAt, input.expiresAt) &&
-      row.expiryEpochId === input.expiryEpochId;
+      row.scheduledActivationAt.getTime() === input.scheduledActivationAt.getTime();
 
     if (!matches) {
       throw new ConflictException('Source line is already bound to a different entitlement snapshot');
+    }
+  }
+
+  private createExpiryFingerprint(input: CreatePendingEntitlementInput): Prisma.InputJsonObject {
+    return {
+      expiresAt: input.expiresAt?.toISOString() ?? null,
+      expiryEpochId: input.expiryEpochId,
+    };
+  }
+
+  private assertCreateExpiryFingerprint(
+    event: RecordedEvent,
+    row: ImmutableEntitlementSnapshot & { readonly state: AddOnEntitlementState },
+    input: CreatePendingEntitlementInput,
+  ): void {
+    const metadata =
+      event.metadata !== null && typeof event.metadata === 'object' && !Array.isArray(event.metadata)
+        ? (event.metadata as Record<string, unknown>)
+        : {};
+    const recorded = metadata.createExpiryFingerprint;
+    if (recorded === undefined) {
+      // Compatibility for events created before createExpiryFingerprint shipped:
+      // only an untouched PENDING aggregate still carries provable create-time
+      // expiry values. Once lifecycle progressed, those columns may have been
+      // refined and absence of the original fingerprint must remain fail-closed.
+      const sameLegacyExpiry =
+        row.state === AddOnEntitlementState.PENDING_ACTIVATION &&
+        (row.expiresAt?.getTime() ?? null) === (input.expiresAt?.getTime() ?? null) &&
+        row.expiryEpochId === input.expiryEpochId;
+      if (sameLegacyExpiry) return;
+      throw new ConflictException('Source line is already bound to a different expiry snapshot');
+    }
+    if (
+      this.canonicalJson(recorded) !==
+      this.canonicalJson(this.createExpiryFingerprint(input))
+    ) {
+      throw new ConflictException('Source line is already bound to a different expiry snapshot');
     }
   }
 

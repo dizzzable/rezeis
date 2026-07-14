@@ -204,11 +204,12 @@ describe('PaymentReconciliationService reconciliation side effects', () => {
     assert.deepStrictEqual(state.markProcessedCalls, ['event-1']);
   });
 
-  it('does not re-run side effects for already terminal transactions', async () => {
+  it('does not re-run side effects for an already fulfilled terminal transaction', async () => {
     const state = createState({
       eventStatus: 'succeeded',
       initialTransactionStatus: TransactionStatus.COMPLETED,
       refreshedSubscriptionId: 'subscription-1',
+      refreshedFulfilledAt: new Date('2026-04-19T11:00:00.000Z'),
     });
     const service = createService(state);
 
@@ -219,6 +220,22 @@ describe('PaymentReconciliationService reconciliation side effects', () => {
     assert.deepStrictEqual(state.referralQualificationCalls, []);
     assert.deepStrictEqual(state.partnerEarningCalls, []);
     assert.deepStrictEqual(state.transactionUpdateCalls, []);
+    assert.deepStrictEqual(state.markProcessedCalls, ['event-1']);
+  });
+
+  it('retries fulfillment when a completed transaction has no fulfillment stamp', async () => {
+    const state = createState({
+      eventStatus: 'succeeded',
+      initialTransactionStatus: TransactionStatus.COMPLETED,
+      refreshedSubscriptionId: null,
+      refreshedFulfilledAt: null,
+    });
+    const service = createService(state);
+
+    await service.reconcileWebhookEvent('event-1');
+
+    assert.deepStrictEqual(state.mutationCalls, ['tx-1']);
+    assert.deepStrictEqual(state.profileSyncEnqueueCalls, ['sync-1']);
     assert.deepStrictEqual(state.markProcessedCalls, ['event-1']);
   });
 
@@ -287,6 +304,7 @@ function createService(state: ReturnType<typeof createState>): PaymentReconcilia
           id: 'tx-1',
           status: state.initialTransactionStatus,
           subscriptionId: 'subscription-original',
+          fulfilledAt: state.refreshedFulfilledAt,
         });
       },
       findFirst: async (_args: TransactionFindFirstArgs) => null,

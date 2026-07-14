@@ -5,6 +5,8 @@ import { AddOnEntitlementState, SubscriptionTermStatus } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { shouldRunSchedules } from '../../../common/runtime/process-role.util';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
+import { resolveAddOnRolloutFlags } from '../add-on-rollout.config';
+import { DeviceReductionExecutionService } from './device-reduction-execution.service';
 import { DeviceReductionPlanService } from './device-reduction-plan.service';
 import { EntitlementBoundaryService } from './entitlement-boundary.service';
 
@@ -32,6 +34,7 @@ export class EntitlementBoundarySchedulerService {
     private readonly entitlementBoundaryService: EntitlementBoundaryService,
     private readonly profileSyncQueueService: ProfileSyncQueueService,
     private readonly deviceReductionPlanService: DeviceReductionPlanService,
+    private readonly deviceReductionExecutionService: DeviceReductionExecutionService,
   ) {}
 
   @Cron(CronExpression.EVERY_5_MINUTES, { name: 'entitlement-boundary-sweep' })
@@ -50,7 +53,10 @@ export class EntitlementBoundarySchedulerService {
   ): Promise<{ readonly subscriptions: number; readonly enqueued: number }> {
     const [dueEntitlements, dueTerms] = await Promise.all([
       this.prismaService.addOnEntitlement.findMany({
-        where: { state: AddOnEntitlementState.ACTIVE, expiresAt: { not: null, lte: now } },
+        where: {
+          state: { in: [AddOnEntitlementState.ACTIVE, AddOnEntitlementState.EXPIRING] },
+          expiresAt: { not: null, lte: now },
+        },
         select: { subscriptionId: true },
         distinct: ['subscriptionId'],
         take: MAX_PER_TICK,
@@ -92,10 +98,23 @@ export class EntitlementBoundarySchedulerService {
           await this.profileSyncQueueService.enqueue(syncJobId);
           enqueued += 1;
         }
-        // A device-slot boundary just dropped the desired device limit — build
-        // the deterministic reduction plan (execution stays operator/flag-gated).
+        // A device-slot boundary just dropped the desired device limit. Planning
+        // is re-entered for EXPIRING rows until it reaches a verified terminal
+        // outcome; transient DEFERRED/BLOCKED results remain durably retryable.
         if (result.deviceExpiryTriggered) {
-          await this.deviceReductionPlanService.planForSubscription(subscriptionId);
+          const planning = await this.deviceReductionPlanService.planForSubscription(subscriptionId);
+          if (planning.status === 'VERIFIED') {
+            await this.entitlementBoundaryService.completeVerifiedDeviceExpiryForSubscription(
+              subscriptionId,
+              planning.projectionRevision,
+              now,
+            );
+          } else if (
+            planning.status === 'PLANNED' &&
+            resolveAddOnRolloutFlags().deviceCleanupAuto
+          ) {
+            await this.deviceReductionExecutionService.executePlan(planning.planId);
+          }
         }
       } catch (err: unknown) {
         // One subscription's failure must not abort the whole sweep.

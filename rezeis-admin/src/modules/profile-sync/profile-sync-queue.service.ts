@@ -30,6 +30,16 @@ const STALE_RUNNING_RECOVERY_MAX = 50;
 const STALE_RUNNING_LEASE_MS = 15 * 60 * 1000;
 
 /**
+ * Legacy rows written before recovery classification existed are safe to retry
+ * only during the explicitly enabled rollout. Keep this off by default: an
+ * empty recoveryData object does not prove that the old failure was transient.
+ */
+function shouldRecoverLegacyFailedRows(): boolean {
+  const value = process.env['PROFILE_SYNC_RECOVER_LEGACY_FAILED'];
+  return value === 'true' || value === '1';
+}
+
+/**
  * Enqueues pending `ProfileSyncJob` rows into BullMQ so the processor can
  * pick them up. Called by:
  *  - `PaymentSubscriptionMutationService` after creating a subscription
@@ -82,7 +92,7 @@ export class ProfileSyncQueueService {
    */
   public async sweepPending(): Promise<number> {
     const pendingJobs = await this.prismaService.profileSyncJob.findMany({
-      where: { status: 'PENDING' },
+      where: { status: 'PENDING', supersededAt: null },
       select: { id: true },
       take: 100,
       orderBy: { createdAt: 'asc' },
@@ -115,22 +125,40 @@ export class ProfileSyncQueueService {
     try {
       const swept = await this.sweepPending();
 
+      const failedRecoveryWhere = shouldRecoverLegacyFailedRows()
+        ? {
+            OR: [
+              { recoveryData: { path: ['classification'], equals: 'TRANSIENT' } },
+              { recoveryData: { equals: {} } },
+            ],
+          }
+        : { recoveryData: { path: ['classification'], equals: 'TRANSIENT' } };
       const failedJobs = await this.prismaService.profileSyncJob.findMany({
         where: {
           status: SyncJobStatus.FAILED,
           supersededAt: null,
+          ...failedRecoveryWhere,
         },
         select: { id: true },
         take: FAILED_RECOVERY_MAX,
         orderBy: { createdAt: 'asc' },
       });
 
+      let recoveredFailedCount = 0;
       for (const job of failedJobs) {
-        await this.prismaService.profileSyncJob.update({
-          where: { id: job.id },
+        const recovered = await this.prismaService.profileSyncJob.updateMany({
+          where: {
+            id: job.id,
+            status: SyncJobStatus.FAILED,
+            supersededAt: null,
+            ...failedRecoveryWhere,
+          },
           data: { status: SyncJobStatus.PENDING, attempts: 0, lastError: null },
         });
-        await this.enqueue(job.id, /* force */ true);
+        if (recovered.count === 1) {
+          recoveredFailedCount += 1;
+          await this.enqueue(job.id, /* force */ true);
+        }
       }
 
       // 3. **Stale RUNNING** rows whose worker died mid-flight (lease expired)
@@ -144,7 +172,7 @@ export class ProfileSyncQueueService {
           supersededAt: null,
           startedAt: { lt: cutoff },
         },
-        select: { id: true },
+        select: { id: true, startedAt: true },
         take: STALE_RUNNING_RECOVERY_MAX,
         orderBy: { startedAt: 'asc' },
       });
@@ -152,7 +180,12 @@ export class ProfileSyncQueueService {
         // Guard on status=RUNNING so a worker that finished between the read
         // and now always wins (no reset of a just-completed row).
         const reclaimed = await this.prismaService.profileSyncJob.updateMany({
-          where: { id: job.id, status: SyncJobStatus.RUNNING, supersededAt: null },
+          where: {
+            id: job.id,
+            status: SyncJobStatus.RUNNING,
+            supersededAt: null,
+            startedAt: job.startedAt,
+          },
           data: { status: SyncJobStatus.PENDING, lastError: null },
         });
         if (reclaimed.count === 1) {
@@ -160,9 +193,9 @@ export class ProfileSyncQueueService {
         }
       }
 
-      if (swept > 0 || failedJobs.length > 0 || staleRunning.length > 0) {
+      if (swept > 0 || recoveredFailedCount > 0 || staleRunning.length > 0) {
         this.logger.log(
-          `Profile-sync sweep: re-enqueued ${swept} pending + recovered ${failedJobs.length} failed + ${staleRunning.length} stale-running job(s)`,
+          `Profile-sync sweep: re-enqueued ${swept} pending + recovered ${recoveredFailedCount} failed + ${staleRunning.length} stale-running job(s)`,
         );
       }
     } catch (err: unknown) {

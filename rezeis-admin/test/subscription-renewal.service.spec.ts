@@ -48,6 +48,36 @@ describe('SubscriptionRenewalService.priceRenewalItems', () => {
     assert.equal(result.items[1]?.amount, '5.50');
   });
 
+  it('emits the exact immutable paid renewal snapshot consumed by fulfillment', async () => {
+    const service = createService([sub({ id: 's1', price: '10.00' })]);
+
+    const result = await service.priceRenewalItems({
+      identity: { userId: 'u' },
+      subscriptionIds: ['s1'],
+      gatewayType: GATEWAY,
+    });
+
+    assert.deepStrictEqual(result.items[0]?.planSnapshot, {
+      id: 'plan-s1',
+      name: 'Plan plan-s1',
+      selectedDurationDays: 30,
+      description: null,
+      tag: null,
+      type: 'BOTH',
+      trafficLimit: 1024,
+      deviceLimit: 1,
+      trafficLimitStrategy: 'NO_RESET',
+      internalSquads: [],
+      externalSquad: null,
+      snapshotVersion: 1,
+      amount: '10.00',
+      currency: Currency.USD,
+      gatewayType: GATEWAY,
+      purchaseType: 'RENEW',
+      snapshotSource: 'RENEWAL_DRAFT',
+    });
+  });
+
   it('rejects an empty selection (RENEWAL_NO_ITEMS)', async () => {
     const service = createService([sub({ id: 's1' })]);
     await assert.rejects(

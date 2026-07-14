@@ -125,6 +125,8 @@ export class InternalPaymentsController {
       durations: toDurationMap(input.durations),
       plans: toPlanMap(input.plans),
       idempotencyKey: input.idempotencyKey,
+      expectedAmount: input.expectedAmount,
+      expectedCurrency: input.expectedCurrency,
       addOns: toAddOnSelectionMap(input.addOns),
     });
   }

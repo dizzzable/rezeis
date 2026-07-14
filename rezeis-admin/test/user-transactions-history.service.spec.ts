@@ -136,7 +136,21 @@ describe('InternalUserEdgeService activity feed', () => {
       { where: { userId: 'user-1' }, select: { id: true } },
     ]);
     assert.deepStrictEqual(state.entitlementFindManyCalls, [
-      { where: { subscriptionId: { in: ['sub-1'] } }, orderBy: { purchasedAt: 'desc' }, take: 100 },
+      {
+        where: {
+          subscriptionId: { in: ['sub-1'] },
+          state: { in: ['ACTIVE', 'EXPIRING'] },
+        },
+        orderBy: { purchasedAt: 'desc' },
+      },
+      {
+        where: {
+          subscriptionId: { in: ['sub-1'] },
+          state: { notIn: ['ACTIVE', 'EXPIRING'] },
+        },
+        orderBy: { purchasedAt: 'desc' },
+        take: 99,
+      },
     ]);
     assert.deepStrictEqual(result, {
       entitlements: [
@@ -158,6 +172,31 @@ describe('InternalUserEdgeService activity feed', () => {
         },
       ],
     });
+  });
+
+  it('keeps an older live entitlement when more than 100 newer terminal rows exist', async () => {
+    const live = {
+      ...createEntitlement(),
+      id: 'ent-live-old',
+      purchasedAt: new Date('2025-01-01T00:00:00.000Z'),
+    };
+    const terminal = Array.from({ length: 100 }, (_, index) => ({
+      ...createEntitlement(),
+      id: `ent-expired-${index}`,
+      state: 'EXPIRED',
+      purchasedAt: new Date(Date.UTC(2026, 0, 1, 0, 0, index)),
+    }));
+    const state = createState({ liveEntitlements: [live], terminalEntitlements: terminal });
+    const service = buildService(createPrismaDouble(state));
+
+    const result = await service.listAddOnEntitlements('12345');
+
+    assert.equal(result.entitlements.length, 100);
+    assert.equal(result.entitlements.some((entitlement) => entitlement.id === 'ent-live-old'), true);
+    assert.equal(
+      result.entitlements.filter((entitlement) => entitlement.state === 'EXPIRED').length,
+      99,
+    );
   });
 });
 
@@ -214,7 +253,14 @@ function createPrismaDouble(state: ReturnType<typeof createState>) {
     addOnEntitlement: {
       findMany: async (args: unknown) => {
         state.entitlementFindManyCalls.push(args);
-        return [createEntitlement()];
+        const query = args as {
+          where?: { state?: { in?: string[]; notIn?: string[] } };
+          take?: number;
+        };
+        const rows = query.where?.state?.notIn
+          ? state.terminalEntitlements
+          : state.liveEntitlements;
+        return query.take === undefined ? rows : rows.slice(0, query.take);
       },
     },
   };
@@ -225,12 +271,16 @@ function createState(input: {
   readonly notificationOwnerId?: string;
   readonly unreadCount?: number;
   readonly updateManyCount?: number;
+  readonly liveEntitlements?: ReturnType<typeof createEntitlement>[];
+  readonly terminalEntitlements?: ReturnType<typeof createEntitlement>[];
 } = {}) {
   return {
     userId: input.userId ?? 'user-1',
     notificationOwnerId: input.notificationOwnerId ?? input.userId ?? 'user-1',
     unreadCount: input.unreadCount ?? 0,
     updateManyCount: input.updateManyCount ?? 0,
+    liveEntitlements: input.liveEntitlements ?? [createEntitlement()],
+    terminalEntitlements: input.terminalEntitlements ?? [],
     userFindCalls: [] as unknown[],
     notificationFindManyCalls: [] as unknown[],
     notificationCountCalls: [] as unknown[],

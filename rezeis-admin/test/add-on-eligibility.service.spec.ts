@@ -192,7 +192,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
     assert.equal(result.addOns.length, 0);
   });
 
-  it('fallback offers UNTIL_NEXT_RESET when the snapshot strategy is MONTH and capability ENABLED', async () => {
+  it('fallback withholds UNTIL_NEXT_RESET without a durable ACTIVE term even when capability is ENABLED', async () => {
     const nextReset: CatalogAddOn = { ...trafficAddOn, id: 'a-reset', lifetime: 'UNTIL_NEXT_RESET' };
     const { service } = build({
       status: 'ACTIVE',
@@ -202,8 +202,8 @@ describe('AddOnEligibilityService.listForSubscription', () => {
       sub: { planSnapshot: { id: 'plan-a', trafficLimitStrategy: 'MONTH' } },
     });
     const result = await service.listForSubscription('sub-1');
-    assert.equal(result.addOns.length, 1);
-    assert.equal(result.addOns[0]!.eligibility.explanationCode, 'ELIGIBLE_UNTIL_NEXT_RESET');
+    assert.equal(result.addOns.length, 0);
+    assert.equal(result.availability, 'EMPTY');
   });
 
   it('fallback yields empty planId when the snapshot has no id (add-ons scoped to a plan are excluded)', async () => {
@@ -305,6 +305,51 @@ describe('AddOnEligibilityService.listForSubscription', () => {
     const { service } = build({ status: 'ACTIVE', term: financeTerm, catalog: [nextReset] });
     const result = await service.listForSubscription('sub-1');
     assert.equal(result.addOns.length, 0);
+  });
+
+  // ── Cross-flag offer↔fulfillment guard (production getResetCapabilities seam) ─
+  // The real seam reads the rollout env: a reset-scoped add-on may only be
+  // OFFERED when directPurchase is ON (the intake that honors the reset-epoch
+  // expiry). Reset flag ON + directPurchase OFF must WITHHOLD the offer, else
+  // eligibility advertises a one-time-until-reset service that the money path
+  // (permanent legacy increment) would deliver forever. Uses the un-subclassed
+  // base service so the production `getResetCapabilities()` runs against env.
+  it('withholds UNTIL_NEXT_RESET when reset capability is ENABLED but directPurchase is OFF (offer cannot be fulfilled)', async () => {
+    const nextReset: CatalogAddOn = { ...trafficAddOn, id: 'a-reset', lifetime: 'UNTIL_NEXT_RESET' };
+    const { service } = build({ status: 'ACTIVE', term: financeTerm, catalog: [nextReset] });
+    const prevReset = process.env.ADDON_RESET_EXPIRY_MONTH;
+    const prevDirect = process.env.ADDON_ENTITLEMENT_DIRECT_PURCHASE;
+    process.env.ADDON_RESET_EXPIRY_MONTH = 'true';
+    delete process.env.ADDON_ENTITLEMENT_DIRECT_PURCHASE;
+    try {
+      const result = await service.listForSubscription('sub-1');
+      assert.equal(result.addOns.length, 0, 'reset-scoped add-on is withheld when directPurchase is OFF');
+      assert.equal(result.availability, 'EMPTY');
+    } finally {
+      if (prevReset === undefined) delete process.env.ADDON_RESET_EXPIRY_MONTH;
+      else process.env.ADDON_RESET_EXPIRY_MONTH = prevReset;
+      if (prevDirect === undefined) delete process.env.ADDON_ENTITLEMENT_DIRECT_PURCHASE;
+      else process.env.ADDON_ENTITLEMENT_DIRECT_PURCHASE = prevDirect;
+    }
+  });
+
+  it('offers UNTIL_NEXT_RESET (production seam) when BOTH reset capability and directPurchase are ON', async () => {
+    const nextReset: CatalogAddOn = { ...trafficAddOn, id: 'a-reset', lifetime: 'UNTIL_NEXT_RESET' };
+    const { service } = build({ status: 'ACTIVE', term: financeTerm, catalog: [nextReset] });
+    const prevReset = process.env.ADDON_RESET_EXPIRY_MONTH;
+    const prevDirect = process.env.ADDON_ENTITLEMENT_DIRECT_PURCHASE;
+    process.env.ADDON_RESET_EXPIRY_MONTH = 'true';
+    process.env.ADDON_ENTITLEMENT_DIRECT_PURCHASE = 'true';
+    try {
+      const result = await service.listForSubscription('sub-1');
+      assert.equal(result.addOns.length, 1, 'both flags on → reset-scoped add-on is offered');
+      assert.equal(result.addOns[0]!.eligibility.explanationCode, 'ELIGIBLE_UNTIL_NEXT_RESET');
+    } finally {
+      if (prevReset === undefined) delete process.env.ADDON_RESET_EXPIRY_MONTH;
+      else process.env.ADDON_RESET_EXPIRY_MONTH = prevReset;
+      if (prevDirect === undefined) delete process.env.ADDON_ENTITLEMENT_DIRECT_PURCHASE;
+      else process.env.ADDON_ENTITLEMENT_DIRECT_PURCHASE = prevDirect;
+    }
   });
 
   it('offers UNTIL_NEXT_RESET with the next reset epoch as expiry when the capability is ENABLED', async () => {

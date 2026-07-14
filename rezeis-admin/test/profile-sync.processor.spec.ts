@@ -2,7 +2,14 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { ServiceUnavailableException } from '@nestjs/common';
-import { SubscriptionStatus, SyncAction, SyncJobStatus } from '@prisma/client';
+
+import {
+  SubscriptionStatus,
+  SubscriptionTermStatus,
+  SyncAction,
+  SyncJobStatus,
+  TrafficLimitStrategy,
+} from '@prisma/client';
 
 import { ProfileSyncProcessor } from '../src/modules/profile-sync/profile-sync.processor';
 
@@ -136,9 +143,115 @@ describe('ProfileSyncProcessor', () => {
     assert.equal((claims[0] as { where: { status: { in: SyncJobStatus[] } } }).where.status.in.includes(SyncJobStatus.FAILED), true);
   });
 
-  it('updates existing Remnawave profiles from current profile-sync rows', async () => {
+    it('serializes UPDATE snapshot, claim, and panel write so an older worker cannot roll back a newer state', async () => {
+      let currentTrafficLimit = 1;
+      let panelTrafficLimit = 0;
+      let releaseOldWrite!: () => void;
+      const oldWriteReleased = new Promise<void>((resolve) => { releaseOldWrite = resolve; });
+      let signalOldWrite!: () => void;
+      const oldWriteStarted = new Promise<void>((resolve) => { signalOldWrite = resolve; });
+      let signalNewWrite!: () => void;
+      const newWriteStarted = new Promise<void>((resolve) => { signalNewWrite = resolve; });
+
+      let lockTail = Promise.resolve();
+      let lockHeld = false;
+      const withAggregateLock = async <T>(callback: () => Promise<T>): Promise<T> => {
+        const previous = lockTail;
+        let release!: () => void;
+        lockTail = new Promise<void>((resolve) => { release = resolve; });
+        await previous;
+        lockHeld = true;
+        try {
+          return await callback();
+        } finally {
+          lockHeld = false;
+          release();
+        }
+      };
+
+      const makeJob = (id: string) => ({
+        id,
+        action: SyncAction.UPDATE,
+        status: SyncJobStatus.PENDING,
+        attempts: 0,
+        supersededAt: null,
+        aggregateKey: 'subscription-ordered',
+        desiredRevision: null,
+        createdAt: id === 'older' ? new Date('2026-01-01T00:00:00Z') : new Date('2026-01-02T00:00:00Z'),
+        subscription: {
+          id: 'subscription-ordered', userId: 'user-1', remnawaveId: 'rem-user-ordered',
+          trafficLimit: currentTrafficLimit, deviceLimit: 1, internalSquads: [], externalSquad: null,
+          expiresAt: new Date('2099-01-01T00:00:00Z'), planSnapshot: {},
+        },
+      });
+      const tx = {
+        $executeRaw: async () => 1,
+        $queryRaw: async () => [{ status: SubscriptionStatus.ACTIVE }],
+        profileSyncJob: {
+          findUnique: async (input: { where: { id: string } }) => makeJob(input.where.id),
+          findMany: async () => [],
+          updateMany: async () => ({ count: 1 }),
+          create: async () => ({ id: 'unused-delete' }),
+        },
+        subscriptionEffectiveProjection: { findUnique: async () => null },
+        subscriptionTerm: { updateMany: async () => ({ count: 0 }) },
+      };
+      const prisma = {
+        profileSyncJob: {
+          findUnique: async (input: { where: { id: string } }) => makeJob(input.where.id),
+          findMany: async () => [],
+          updateMany: async () => ({ count: 1 }),
+          update: async () => undefined,
+        },
+        $transaction: async (callback: (client: typeof tx) => Promise<unknown>) =>
+          withAggregateLock(() => callback(tx)),
+      };
+      const processor = new ProfileSyncProcessor(
+        prisma as never,
+        {
+          updatePanelUser: async (_uuid: string, input: { trafficLimitBytes: number }) => {
+            const limitGb = input.trafficLimitBytes / (1024 ** 3);
+            if (limitGb === 1) {
+              signalOldWrite();
+              await oldWriteReleased;
+              panelTrafficLimit = 1;
+            } else {
+              signalNewWrite();
+              panelTrafficLimit = limitGb;
+            }
+            return {};
+          },
+        } as never,
+        {
+          generateProfileName: async () => ({ username: 'rz_ordered', description: 'ordered' }),
+          getContactInfo: async () => ({ email: null, telegramId: null }),
+        } as never,
+        { error: () => undefined, info: () => undefined } as never,
+      );
+
+      const older = processor.process({ data: { syncJobId: 'older' } } as never);
+      await oldWriteStarted;
+      const olderHeldFenceAcrossWrite = lockHeld;
+      const producerAndNewer = (async () => {
+        await withAggregateLock(async () => { currentTrafficLimit = 2; });
+        await processor.process({ data: { syncJobId: 'newer' } } as never);
+      })();
+
+      if (olderHeldFenceAcrossWrite) {
+        releaseOldWrite();
+      } else {
+        await newWriteStarted;
+        releaseOldWrite();
+      }
+      await Promise.all([older, producerAndNewer]);
+
+      assert.equal(panelTrafficLimit, 2, 'the panel must finish at the newest aggregate state');
+    });
+
+    it('updates existing Remnawave profiles from current profile-sync rows', async () => {
     const profileSyncUpdates: unknown[] = [];
     const remnawaveUpdates: unknown[] = [];
+    const termAnchorUpdates: unknown[] = [];
     const processor = new ProfileSyncProcessor(
       {
         profileSyncJob: {
@@ -167,6 +280,12 @@ describe('ProfileSyncProcessor', () => {
         },
         $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
           $queryRaw: async () => [{ status: SubscriptionStatus.ACTIVE }],
+          subscriptionTerm: {
+            updateMany: async (input: unknown) => {
+              termAnchorUpdates.push(input);
+              return { count: 1 };
+            },
+          },
           profileSyncJob: {
             findMany: async () => [],
             create: async () => ({ id: 'unused-delete-job' }),
@@ -174,7 +293,10 @@ describe('ProfileSyncProcessor', () => {
         }),
       } as never,
       {
-        updatePanelUser: async (...args: unknown[]) => { remnawaveUpdates.push(args); },
+        updatePanelUser: async (...args: unknown[]) => {
+          remnawaveUpdates.push(args);
+          return { createdAt: '2025-03-20T09:15:00.000Z' };
+        },
       } as never,
       {
         generateProfileName: async () => ({ username: 'rz_subscription_1', description: 'profile description' }),
@@ -202,6 +324,14 @@ describe('ProfileSyncProcessor', () => {
         externalSquadUuid: 'external-a',
       },
     ]]);
+    assert.deepStrictEqual(termAnchorUpdates, [{
+      where: {
+        subscriptionId: 'subscription-1',
+        status: { in: [SubscriptionTermStatus.ACTIVE, SubscriptionTermStatus.SCHEDULED] },
+        trafficResetStrategy: TrafficLimitStrategy.MONTH_ROLLING,
+      },
+      data: { resetAnchorAt: new Date('2025-03-20T09:15:00.000Z') },
+    }]);
   });
 
   it('enqueues compensating DELETE work when UPDATE finishes after deletion', async () => {
@@ -283,6 +413,7 @@ describe('ProfileSyncProcessor', () => {
   it('creates missing Remnawave profiles and stores returned linkage metadata', async () => {
     const profileSyncUpdates: unknown[] = [];
     const subscriptionUpdates: unknown[] = [];
+    const termAnchorUpdates: unknown[] = [];
     const remnawaveCreates: unknown[] = [];
     const infoEvents: unknown[] = [];
     const processor = new ProfileSyncProcessor(
@@ -319,6 +450,12 @@ describe('ProfileSyncProcessor', () => {
           subscription: {
             update: async (input: unknown) => { subscriptionUpdates.push(input); },
           },
+          subscriptionTerm: {
+            updateMany: async (input: unknown) => {
+              termAnchorUpdates.push(input);
+              return { count: 2 };
+            },
+          },
           profileSyncJob: {
             findMany: async () => [],
             create: async () => ({ id: 'unused-delete-job' }),
@@ -329,7 +466,11 @@ describe('ProfileSyncProcessor', () => {
         getPanelUserByUsername: async () => null,
         createPanelUser: async (input: unknown) => {
           remnawaveCreates.push(input);
-          return { uuid: 'rem-user-created', subscriptionUrl: 'https://sub.example/created' };
+          return {
+            uuid: 'rem-user-created',
+            subscriptionUrl: 'https://sub.example/created',
+            createdAt: '2026-01-15T12:30:00.000Z',
+          };
         },
       } as never,
       {
@@ -362,6 +503,14 @@ describe('ProfileSyncProcessor', () => {
         remnawaveId: 'rem-user-created',
         configUrl: 'https://sub.example/created',
       },
+    }]);
+    assert.deepStrictEqual(termAnchorUpdates, [{
+      where: {
+        subscriptionId: 'subscription-1',
+        status: { in: [SubscriptionTermStatus.ACTIVE, SubscriptionTermStatus.SCHEDULED] },
+        trafficResetStrategy: TrafficLimitStrategy.MONTH_ROLLING,
+      },
+      data: { resetAnchorAt: new Date('2026-01-15T12:30:00.000Z') },
     }]);
     assert.equal(infoEvents.length, 1);
   });
@@ -612,8 +761,11 @@ describe('ProfileSyncProcessor', () => {
               planSnapshot: {},
             },
           }),
-          updateMany: async () => ({ count: 1 }),
-          update: async (input: unknown) => { profileSyncUpdates.push(input); },
+          updateMany: async (input: unknown) => {
+            profileSyncUpdates.push(input);
+            return { count: 1 };
+          },
+          update: async () => assert.fail('failure state must use guarded updateMany'),
         },
         subscription: {
           update: async (input: unknown) => { subscriptionUpdates.push(input); },
@@ -642,13 +794,23 @@ describe('ProfileSyncProcessor', () => {
     );
 
     assert.deepEqual(subscriptionUpdates, []);
-    assert.deepEqual(profileSyncUpdates, [{
-      where: { id: 'sync-job-1' },
-      data: {
-        status: SyncJobStatus.FAILED,
-        lastError: "Panel did not confirm deletion of Remnawave profile 'rem-user-1'",
-      },
-    }]);
+    const failureUpdates = profileSyncUpdates.filter(
+      (input) =>
+        (input as { data?: { status?: SyncJobStatus } }).data?.status === SyncJobStatus.FAILED,
+    );
+    const failureWhere = (failureUpdates[0] as { where: { startedAt?: unknown } }).where;
+    assert.ok(failureWhere.startedAt instanceof Date);
+    assert.deepEqual(failureWhere, {
+      id: 'sync-job-1',
+      status: SyncJobStatus.RUNNING,
+      supersededAt: null,
+      startedAt: failureWhere.startedAt,
+    });
+    assert.deepEqual((failureUpdates[0] as { data: unknown }).data, {
+      status: SyncJobStatus.FAILED,
+      lastError: "Panel did not confirm deletion of Remnawave profile 'rem-user-1'",
+      recoveryData: { classification: 'TERMINAL' },
+    });
   });
 
   it('does NOT emit a SYSTEM error for a transient Remnawave outage (retryable, non-final attempt)', async () => {
@@ -687,6 +849,128 @@ describe('ProfileSyncProcessor', () => {
     await assert.rejects(() => processor.process({ data: { syncJobId: 'sync-job-x' } } as never));
     assert.equal(errorEvents.length, 1);
   });
+
+  it('does not let a late stale worker failure overwrite a job that already completed', async () => {
+    const failureWrites: unknown[] = [];
+    const processor = new ProfileSyncProcessor(
+      {
+        profileSyncJob: {
+          findUnique: async () => ({
+            id: 'sync-job-late-failure', action: SyncAction.DELETE,
+            status: SyncJobStatus.PENDING, attempts: 0, supersededAt: null,
+            subscription: {
+              id: 'subscription-1', userId: 'user-1', remnawaveId: 'rem-user-1',
+              trafficLimit: null, deviceLimit: 0, internalSquads: [], externalSquad: null,
+              expiresAt: null, planSnapshot: {},
+            },
+          }),
+          updateMany: async (input: unknown) => {
+            const data = (input as { data: { status?: SyncJobStatus } }).data;
+            if (data.status === SyncJobStatus.FAILED) {
+              failureWrites.push(input);
+              return { count: 0 }; // another worker already committed COMPLETED
+            }
+            return { count: 1 };
+          },
+          update: async () => { throw new Error('failure path must be compare-and-set, never unconditional'); },
+        },
+      } as never,
+      { deletePanelUser: async () => { throw new Error('late stale failure'); } } as never,
+      {} as never,
+      { error: () => undefined, info: () => undefined } as never,
+    );
+
+    await assert.rejects(
+      () => processor.process({ data: { syncJobId: 'sync-job-late-failure' } } as never),
+      /late stale failure/,
+    );
+    assert.equal(failureWrites.length, 1);
+    const failureWhere = (failureWrites[0] as { where: { startedAt?: unknown } }).where;
+    assert.ok(failureWhere.startedAt instanceof Date);
+    assert.deepEqual(failureWhere, {
+      id: 'sync-job-late-failure',
+      status: SyncJobStatus.RUNNING,
+      supersededAt: null,
+      startedAt: failureWhere.startedAt,
+    });
+  });
+
+  it('fences terminal completion to the lease acquired by this worker', async () => {
+    const updates: unknown[] = [];
+    const processor = new ProfileSyncProcessor(
+      {
+        profileSyncJob: {
+          findUnique: async () => ({
+            id: 'sync-job-lease-fence', action: SyncAction.UPDATE, status: SyncJobStatus.PENDING,
+            attempts: 0, supersededAt: null, startedAt: new Date('2026-01-01T00:00:00.000Z'),
+            subscription: {
+              id: 'subscription-1', userId: 'user-1', remnawaveId: 'rem-user-1',
+              trafficLimit: 1, deviceLimit: 1, internalSquads: [], externalSquad: null,
+              expiresAt: new Date('2099-01-01T00:00:00.000Z'), planSnapshot: {},
+            },
+          }),
+          updateMany: async (input: unknown) => {
+            updates.push(input);
+            return { count: 1 };
+          },
+        },
+        $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
+          $queryRaw: async () => [{ status: SubscriptionStatus.ACTIVE }],
+          profileSyncJob: { findMany: async () => [], create: async () => ({ id: 'unused-delete' }) },
+        }),
+      } as never,
+      { updatePanelUser: async () => undefined } as never,
+      {
+        generateProfileName: async () => ({ username: 'rz_lease', description: 'lease' }),
+        getContactInfo: async () => ({ email: null, telegramId: null }),
+      } as never,
+      { error: () => undefined, info: () => undefined } as never,
+    );
+
+    await processor.process({ data: { syncJobId: 'sync-job-lease-fence' } } as never);
+
+    const claim = updates[0] as { data: { startedAt: Date } };
+    const completion = updates[1] as { where: { startedAt?: Date } };
+    assert.ok(claim.data.startedAt instanceof Date);
+    assert.deepEqual(completion.where.startedAt, claim.data.startedAt);
+  });
+
+  it('fences failure recording to the lease acquired by this worker', async () => {
+    const updates: unknown[] = [];
+    const processor = new ProfileSyncProcessor(
+      {
+        profileSyncJob: {
+          findUnique: async () => ({
+            id: 'sync-job-failure-lease-fence', action: SyncAction.DELETE, status: SyncJobStatus.PENDING,
+            attempts: 0, supersededAt: null, startedAt: new Date('2026-01-01T00:00:00.000Z'),
+            subscription: {
+              id: 'subscription-1', userId: 'user-1', remnawaveId: 'rem-user-1',
+              trafficLimit: null, deviceLimit: 0, internalSquads: [], externalSquad: null,
+              expiresAt: null, planSnapshot: {},
+            },
+          }),
+          updateMany: async (input: unknown) => {
+            updates.push(input);
+            return { count: 1 };
+          },
+        },
+      } as never,
+      { deletePanelUser: async () => { throw new Error('lease-fenced failure'); } } as never,
+      {} as never,
+      { error: () => undefined, info: () => undefined } as never,
+    );
+
+    await assert.rejects(
+      () => processor.process({ data: { syncJobId: 'sync-job-failure-lease-fence' } } as never),
+      /lease-fenced failure/,
+    );
+
+    const claim = updates[0] as { data: { startedAt: Date } };
+    const failure = updates[1] as { where: { startedAt?: Date } };
+    assert.ok(claim.data.startedAt instanceof Date);
+    assert.deepEqual(failure.where.startedAt, claim.data.startedAt);
+  });
+
 
   it('marks missing and already-completed jobs as no-ops', async () => {
     let updates = 0;

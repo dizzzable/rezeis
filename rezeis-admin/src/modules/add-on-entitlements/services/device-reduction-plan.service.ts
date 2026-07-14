@@ -10,7 +10,7 @@ import {
 
 export type DeviceReductionPlanOutcome =
   | { readonly status: 'NOT_APPLICABLE'; readonly reason: string }
-  | { readonly status: 'VERIFIED' }
+  | { readonly status: 'VERIFIED'; readonly projectionRevision: bigint }
   | { readonly status: 'PLANNED'; readonly planId: string; readonly targetCount: number }
   | { readonly status: 'DEFERRED'; readonly reason: string }
   | { readonly status: 'BLOCKED'; readonly reason: string };
@@ -96,7 +96,7 @@ export class DeviceReductionPlanService {
     }
 
     if (selection.overage === 0) {
-      return { status: 'VERIFIED' };
+      return { status: 'VERIFIED', projectionRevision: projection.desiredRevision };
     }
 
     // Persist the immutable plan. The unique (subscriptionId, projectionRevision)

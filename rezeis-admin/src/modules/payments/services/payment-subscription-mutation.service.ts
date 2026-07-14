@@ -22,7 +22,11 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 import { SystemEventsService, EVENT_TYPES } from '../../../common/services/system-events.service';
 import { resolveAddOnRolloutFlags, resolveResetCapabilities } from '../../add-on-entitlements/add-on-rollout.config';
 import { GIB_BYTES } from '../../add-on-entitlements/domain/cutover-baseline';
-import { getResetCapability, ResetStrategy } from '../../add-on-entitlements/domain/reset-cycle-policy';
+import {
+  getResetCapability,
+  provisionalResetAnchor,
+  ResetStrategy,
+} from '../../add-on-entitlements/domain/reset-cycle-policy';
 import { AddOnEntitlementService } from '../../add-on-entitlements/services/add-on-entitlement.service';
 import { ensureLiveResetEpoch } from '../../add-on-entitlements/services/reset-epoch.util';
 import { EffectiveProjectionService } from '../../add-on-entitlements/services/effective-projection.service';
@@ -50,6 +54,12 @@ export class PaymentSubscriptionMutationService {
       where: { transactionId: transaction.id },
     });
     if (items.length > 0) {
+      if (
+        transaction.purchaseType !== PurchaseType.RENEW ||
+        !isCombinedRenewalTransaction(transaction)
+      ) {
+        throw new ConflictException('Combined renewal transaction marker is invalid');
+      }
       const combined = await this.applyCombinedRenewal(transaction, items);
       // A multi-subscription renewal is a plan purchase — consume the
       // one-time "next purchase" discount once it completes.
@@ -165,12 +175,33 @@ export class PaymentSubscriptionMutationService {
       return { syncJobs: [] };
     }
 
-    const { syncJobs, scheduling } = await this.prismaService.$transaction(async (transactionClient) => {
+    const syncJobs = await this.prismaService.$transaction(async (transactionClient) => {
+      // Lock the transaction items inside the fulfillment transaction and claim
+      // each row conditionally. The caller's pre-transaction snapshot is only
+      // a candidate list; it is never authoritative under concurrent replay.
+      const claimedItems: TransactionItem[] = [];
+      for (const candidate of pending) {
+        const claimed = await transactionClient.transactionItem.updateMany({
+          where: { id: candidate.id, appliedAt: null },
+          data: { appliedAt: new Date() },
+        });
+        if (claimed.count === 1) {
+          const fresh = await transactionClient.transactionItem.findUnique({ where: { id: candidate.id } });
+          if (fresh !== null) claimedItems.push(fresh);
+        }
+      }
+      if (claimedItems.length === 0) {
+        return [];
+      }
       const jobs: ProfileSyncJob[] = [];
-      const toSchedule: Array<{ subscriptionId: string; plan: Plan; durationDays: number }> = [];
       const now = new Date();
-      for (const item of pending) {
-        const plan = await transactionClient.plan.findUnique({ where: { id: item.planId } });
+      for (const item of claimedItems) {
+        // A legacy in-flight draft (no snapshotVersion) can't be snapshot-verified;
+        // fall back to the live plan row, exactly as fulfillment did before strict
+        // verification shipped — so paid money is never stranded.
+        const plan =
+          parsePaidRenewalPlanSnapshot(item.planSnapshot, item, transaction.gatewayType) ??
+          (await transactionClient.plan.findUnique({ where: { id: item.planId } }));
         if (plan === null) {
           throw new NotFoundException(`Renewal plan not found: ${item.planId}`);
         }
@@ -180,25 +211,53 @@ export class PaymentSubscriptionMutationService {
         if (currentSubscription === null) {
           throw new NotFoundException(`Renewal subscription not found: ${item.subscriptionId}`);
         }
+
+        const addOnLines = readRenewalAddOnLines(item.addOnLines);
+        const durableTermRequired =
+          resolveAddOnRolloutFlags().entitlementShadow || addOnLines.length > 0;
+        const term = durableTermRequired
+          ? await this.scheduleRenewalTermInTransaction(transactionClient, {
+              subscriptionId: currentSubscription.id,
+              plan,
+              durationDays: item.durationDays,
+            })
+          : null;
+        if (addOnLines.length > 0 && term === null) {
+          throw new ConflictException(
+            `Renewal add-ons require a durable term for subscription ${currentSubscription.id}`,
+          );
+        }
+
+        const lockedSubscription =
+          (term !== null
+            ? await transactionClient.subscription.findUnique({ where: { id: currentSubscription.id } })
+            : currentSubscription);
+        if (lockedSubscription === null) {
+          throw new NotFoundException(`Renewal subscription not found: ${currentSubscription.id}`);
+        }
         const renewalBase =
-          currentSubscription.expiresAt !== null &&
-          currentSubscription.expiresAt.getTime() > now.getTime()
-            ? currentSubscription.expiresAt
+          lockedSubscription.expiresAt !== null &&
+          lockedSubscription.expiresAt.getTime() > now.getTime()
+            ? lockedSubscription.expiresAt
             : now;
         const renewedSubscription = await transactionClient.subscription.update({
           where: { id: currentSubscription.id },
           data: {
             status: SubscriptionStatus.ACTIVE,
-            planSnapshot: buildItemPlanSnapshot({
-              item,
-              plan,
-              gatewayType: transaction.gatewayType,
-            }) as Prisma.InputJsonValue,
-            trafficLimit: plan.trafficLimit,
-            deviceLimit: plan.deviceLimit,
-            internalSquads: plan.internalSquads,
-            externalSquad: plan.externalSquad,
             expiresAt: calculateExpiry(renewalBase, item.durationDays),
+            ...(term === null
+              ? {
+                  planSnapshot: buildItemPlanSnapshot({
+                    item,
+                    plan,
+                    gatewayType: transaction.gatewayType,
+                  }) as Prisma.InputJsonValue,
+                  trafficLimit: plan.trafficLimit,
+                  deviceLimit: plan.deviceLimit,
+                  internalSquads: plan.internalSquads,
+                  externalSquad: plan.externalSquad,
+                }
+              : {}),
           },
         });
         const syncJob = await transactionClient.profileSyncJob.create({
@@ -214,32 +273,17 @@ export class PaymentSubscriptionMutationService {
             } as Prisma.InputJsonObject,
           },
         });
-        await transactionClient.transactionItem.update({
-          where: { id: item.id },
+        await transactionClient.transactionItem.updateMany({
+          where: { id: item.id, appliedAt: null },
           data: { appliedAt: now },
         });
         jobs.push(syncJob);
 
-        // Renewal add-on composition (T-007): a PERSISTED add-on line means the
-        // customer already PAID for it (intake only writes `addOnLines` when
-        // `renewalAddOns` was on at checkout). Fulfillment therefore mints them
-        // regardless of the CURRENT flag value — otherwise flipping the flag off
-        // between checkout and the webhook would silently drop paid goods. The
-        // term + PENDING entitlements are created ATOMICALLY here (never lost to
-        // a best-effort failure); lines WITHOUT add-ons keep the post-commit
-        // best-effort scheduling (nothing paid is at risk there).
-        const addOnLines = readRenewalAddOnLines(item.addOnLines);
+        // Persisted add-on lines are already-paid goods. They bind only to the
+        // distinct term appended for THIS renewal line; the current rollout flag
+        // may gate intake but never fulfillment.
         if (addOnLines.length > 0) {
-          const term = await this.scheduleRenewalTermInTransaction(transactionClient, {
-            subscriptionId: renewedSubscription.id,
-            plan,
-            durationDays: item.durationDays,
-          });
           if (term === null) {
-            // Invariant violation: add-ons were sold for a subscription with no
-            // durable term. Fail closed (roll back, reconciler retries) rather
-            // than silently drop paid goods — intake only offers renewal add-ons
-            // once the subscription has an active term.
             throw new ConflictException(
               `Renewal add-ons require a durable term for subscription ${renewedSubscription.id}`,
             );
@@ -275,28 +319,17 @@ export class PaymentSubscriptionMutationService {
               correlationId: `payment:${transaction.paymentId}`,
             });
           }
-        } else {
-          toSchedule.push({ subscriptionId: renewedSubscription.id, plan, durationDays: item.durationDays });
         }
       }
-      // Stamp the transaction-level idempotency flag atomically with the item
+      // Stamp the transaction-level idempotency flag atomically
       // applications so the webhook reconciler treats the combined renewal as
       // fulfilled (its per-item `appliedAt` still guards partial re-runs).
       await transactionClient.transaction.update({
         where: { id: transaction.id },
         data: { fulfilledAt: now },
       });
-      return { syncJobs: jobs, scheduling: toSchedule };
+      return jobs;
     });
-
-    // Durable renewal-term scheduling for each renewed line (design D-4):
-    // best-effort, per line, in a SEPARATE transaction AFTER the combined
-    // renewal commits — identical safety contract to the single-subscription
-    // path (a shadow-model failure can never roll back a real renewal). No-op
-    // unless the flag is on and the line's subscription has an active term.
-    for (const line of scheduling) {
-      await this.scheduleRenewalTermBestEffort(line);
-    }
 
     this.events.info(
       EVENT_TYPES.PAYMENT_COMPLETED,
@@ -714,25 +747,43 @@ export class PaymentSubscriptionMutationService {
       if (currentSubscription === null) {
         throw new NotFoundException('Source subscription not found');
       }
+      const term = resolveAddOnRolloutFlags().entitlementShadow
+        ? await this.scheduleRenewalTermInTransaction(transactionClient, {
+            subscriptionId: currentSubscription.id,
+            plan: input.purchasedPlan,
+            durationDays: input.selectedDurationDays,
+          })
+        : null;
       const now = new Date();
+      const lockedSubscription =
+        term !== null
+          ? await transactionClient.subscription.findUnique({ where: { id: currentSubscription.id } })
+          : currentSubscription;
+      if (lockedSubscription === null) {
+        throw new NotFoundException('Source subscription not found');
+      }
       const renewalBase =
-        currentSubscription.expiresAt !== null && currentSubscription.expiresAt.getTime() > now.getTime()
-          ? currentSubscription.expiresAt
+        lockedSubscription.expiresAt !== null && lockedSubscription.expiresAt.getTime() > now.getTime()
+          ? lockedSubscription.expiresAt
           : now;
       const renewedSubscription = await transactionClient.subscription.update({
         where: { id: currentSubscription.id },
         data: {
           status: SubscriptionStatus.ACTIVE,
-          planSnapshot: buildPlanSnapshot({
-            transaction: input.transaction,
-            purchasedPlan: input.purchasedPlan,
-            selectedDurationDays: input.selectedDurationDays,
-          }) as Prisma.InputJsonValue,
-          trafficLimit: input.purchasedPlan.trafficLimit,
-          deviceLimit: input.purchasedPlan.deviceLimit,
-          internalSquads: input.purchasedPlan.internalSquads,
-          externalSquad: input.purchasedPlan.externalSquad,
           expiresAt: calculateExpiry(renewalBase, input.selectedDurationDays),
+          ...(term === null
+            ? {
+                planSnapshot: buildPlanSnapshot({
+                  transaction: input.transaction,
+                  purchasedPlan: input.purchasedPlan,
+                  selectedDurationDays: input.selectedDurationDays,
+                }) as Prisma.InputJsonValue,
+                trafficLimit: input.purchasedPlan.trafficLimit,
+                deviceLimit: input.purchasedPlan.deviceLimit,
+                internalSquads: input.purchasedPlan.internalSquads,
+                externalSquad: input.purchasedPlan.externalSquad,
+              }
+            : {}),
         },
       });
       const syncJob = await transactionClient.profileSyncJob.create({
@@ -756,73 +807,54 @@ export class PaymentSubscriptionMutationService {
       };
     });
 
-    // Durable renewal-term scheduling (design D-4 early-renewal): best-effort,
-    // in a SEPARATE transaction AFTER the renewal commits, so a shadow-model
-    // failure can NEVER roll back a real renewal. Gated by `entitlementShadow`
-    // and only when the subscription already has a durable term (cutover done).
-    await this.scheduleRenewalTermBestEffort({
-      subscriptionId: result.subscription.id,
-      plan: input.purchasedPlan,
-      durationDays: input.selectedDurationDays,
-    });
-
     return result;
   }
 
   /**
-   * Schedules the next durable term for a renewed subscription (design D-4):
-   * `startsAt = current term end` (or `now` if it already ended), plan-derived
-   * baseline, SCHEDULED status — the boundary scheduler activates it at term
-   * start. Best-effort + isolated: any failure is logged and swallowed so the
-   * committed renewal is never affected. No-op when the flag is off, the
-   * subscription has no active term, or a scheduled term already exists.
-   */
-  private async scheduleRenewalTermBestEffort(input: {
-    readonly subscriptionId: string;
-    readonly plan: Plan;
-    readonly durationDays: number;
-  }): Promise<void> {
-    if (!resolveAddOnRolloutFlags().entitlementShadow) return;
-    try {
-      await this.prismaService.$transaction((tx) => this.scheduleRenewalTermInTransaction(tx, input));
-      this.logger.log(`Scheduled renewal term for subscription ${input.subscriptionId}`);
-    } catch (err: unknown) {
-      this.logger.warn(
-        `Best-effort renewal-term scheduling failed for ${input.subscriptionId}: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-  }
-
-  /**
-   * Creates (or reuses) the next SCHEDULED durable term for a renewed
-   * subscription inside the CALLER's transaction and returns its id + window.
-   * `startsAt = current term end` (or `now` if it already ended), plan-derived
-   * baseline, SCHEDULED status. Returns `null` when the subscription has no
-   * ACTIVE term (durable model not applicable — no cutover). If a SCHEDULED
-   * term already exists it is reused (never double-scheduled), so this is
-   * idempotent and safe to call from both the best-effort path (no add-ons)
-   * and the atomic combined-renewal path (paid add-ons bind to the term).
+   * Appends one distinct SCHEDULED durable term for this fulfilled renewal.
+   * The subscription row is locked before reading the tail, so concurrent
+   * payments serialize generation/window allocation. Existing SCHEDULED terms
+   * are never reused: each paid renewal owns its own term and entitlements.
    */
   private async scheduleRenewalTermInTransaction(
     tx: Prisma.TransactionClient,
     input: { readonly subscriptionId: string; readonly plan: Plan; readonly durationDays: number },
   ): Promise<{ readonly id: string; readonly startsAt: Date; readonly endsAt: Date | null } | null> {
+    const parent = await tx.$queryRaw<Array<{ id: string; status: SubscriptionStatus }>>(Prisma.sql`
+      SELECT "id", "status"::text AS "status"
+      FROM "subscriptions"
+      WHERE "id" = ${input.subscriptionId}
+      FOR UPDATE
+    `);
+    if (parent.length !== 1 || parent[0]!.status === SubscriptionStatus.DELETED) {
+      throw new ConflictException('Cannot append a renewal term to a missing or deleted subscription');
+    }
+
     const activeTerm = await tx.subscriptionTerm.findFirst({
       where: { subscriptionId: input.subscriptionId, status: SubscriptionTermStatus.ACTIVE },
       orderBy: { generation: 'desc' },
-      select: { endsAt: true },
+      select: { id: true },
     });
     if (activeTerm === null) return null; // durable model not applicable (no cutover)
-    const alreadyScheduled = await tx.subscriptionTerm.findFirst({
-      where: { subscriptionId: input.subscriptionId, status: SubscriptionTermStatus.SCHEDULED },
+
+    const tail = await tx.subscriptionTerm.findFirst({
+      where: {
+        subscriptionId: input.subscriptionId,
+        status: { in: [SubscriptionTermStatus.ACTIVE, SubscriptionTermStatus.SCHEDULED] },
+      },
       orderBy: { generation: 'desc' },
-      select: { id: true, startsAt: true, endsAt: true },
+      select: { id: true, status: true, generation: true, endsAt: true },
     });
-    if (alreadyScheduled !== null) return alreadyScheduled; // reuse; never double-schedule
+    if (tail === null) return null;
+    if (tail.endsAt === null) {
+      throw new ConflictException('Cannot append a renewal term after an open-ended term');
+    }
 
     const now = new Date();
     const startsAt =
-      activeTerm.endsAt !== null && activeTerm.endsAt.getTime() > now.getTime() ? activeTerm.endsAt : now;
+      tail.status === SubscriptionTermStatus.SCHEDULED || tail.endsAt.getTime() > now.getTime()
+        ? tail.endsAt
+        : now;
     const endsAt = calculateExpiry(startsAt, input.durationDays);
     const created = await this.subscriptionTermService.createScheduledInTransaction(tx, {
       subscriptionId: input.subscriptionId,
@@ -830,7 +862,15 @@ export class PaymentSubscriptionMutationService {
       planSnapshot: {
         id: input.plan.id,
         name: input.plan.name,
+        description: input.plan.description,
+        tag: input.plan.tag,
+        type: input.plan.type,
+        trafficLimit: input.plan.trafficLimit,
+        deviceLimit: input.plan.deviceLimit,
         trafficLimitStrategy: input.plan.trafficLimitStrategy,
+        internalSquads: input.plan.internalSquads,
+        externalSquad: input.plan.externalSquad,
+        selectedDurationDays: input.durationDays,
         snapshotSource: 'RENEWAL_TERM',
       } as Prisma.InputJsonValue,
       startsAt,
@@ -839,7 +879,7 @@ export class PaymentSubscriptionMutationService {
         input.plan.trafficLimit === null ? null : BigInt(input.plan.trafficLimit) * GIB_BYTES,
       baseDeviceLimit: input.plan.deviceLimit <= 0 ? null : input.plan.deviceLimit,
       trafficResetStrategy: input.plan.trafficLimitStrategy,
-      resetAnchorAt: startsAt,
+      resetAnchorAt: provisionalResetAnchor(input.plan.trafficLimitStrategy, startsAt),
     });
     return { id: created.id, startsAt, endsAt };
   }
@@ -963,11 +1003,12 @@ function buildItemPlanSnapshot(input: {
     internalSquads: input.plan.internalSquads,
     externalSquad: input.plan.externalSquad,
     selectedDurationDays: input.item.durationDays,
+    snapshotVersion: 1,
     purchaseType: PurchaseType.RENEW,
     gatewayType: input.gatewayType,
     amount: input.item.amount.toString(),
     currency: input.item.currency,
-    snapshotSource: 'PAYMENT_COMPLETION',
+    snapshotSource: 'RENEWAL_DRAFT',
   };
 }
 
@@ -1031,7 +1072,7 @@ function readAddOnMarker(transaction: Transaction): AddOnMarker | null {
 
 /** One parsed renewal add-on line persisted on a {@link TransactionItem}. */
 interface RenewalAddOnLine {
-  readonly addOnId: string | null;
+  readonly addOnId: string;
   readonly catalogRevision: number;
   readonly type: AddOnType;
   readonly value: number;
@@ -1042,60 +1083,169 @@ interface RenewalAddOnLine {
 }
 
 /**
- * Parses the `TransactionItem.addOnLines` JSON column into typed renewal
- * add-on lines, silently skipping malformed entries (defensive: the column is
- * operator/intake-populated). Returns `[]` for null/non-array/no valid lines.
+ * Strictly decodes persisted PAID renewal add-on lines. `null` and `[]` mean
+ * that checkout sold no add-ons. Every other payload is commercial evidence:
+ * one malformed/duplicate entry invalidates the whole transaction so the
+ * surrounding fulfillment transaction rolls back for retry/remediation.
  */
 function readRenewalAddOnLines(raw: Prisma.JsonValue | null): readonly RenewalAddOnLine[] {
-  if (!Array.isArray(raw)) return [];
+  if (raw === null) return [];
+  const malformed = (): never => {
+    throw new ConflictException('Persisted renewal add-on lines are malformed');
+  };
+  if (!Array.isArray(raw)) return malformed();
+
   const lines: RenewalAddOnLine[] = [];
+  const sourceLineKeys = new Set<string>();
   for (const entry of raw) {
-    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) continue;
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return malformed();
     const record = entry as Record<string, unknown>;
-    const type = record['type'];
-    const lifetime = record['lifetime'];
-    const value = record['value'];
+    const addOnId = record['addOnId'];
     const catalogRevision = record['catalogRevision'];
+    const type = record['type'];
+    const value = record['value'];
+    const lifetime = record['lifetime'];
+    const activation = record['activation'];
     const sourceLineKey = record['sourceLineKey'];
     const unitAmount = record['unitAmount'];
     const receiptName = record['receiptName'];
-    const addOnId = record['addOnId'];
+
     if (
+      typeof addOnId !== 'string' ||
+      addOnId.trim().length === 0 ||
+      typeof catalogRevision !== 'number' ||
+      !Number.isInteger(catalogRevision) ||
+      catalogRevision <= 0 ||
       (type !== AddOnType.EXTRA_TRAFFIC && type !== AddOnType.EXTRA_DEVICES) ||
-      (lifetime !== AddOnLifetime.UNTIL_NEXT_RESET &&
-        lifetime !== AddOnLifetime.UNTIL_SUBSCRIPTION_END) ||
       typeof value !== 'number' ||
       !Number.isInteger(value) ||
+      value <= 0 ||
+      (lifetime !== AddOnLifetime.UNTIL_NEXT_RESET &&
+        lifetime !== AddOnLifetime.UNTIL_SUBSCRIPTION_END) ||
+      activation !== 'TERM_START' ||
       typeof sourceLineKey !== 'string' ||
-      sourceLineKey.length === 0
+      sourceLineKey.trim().length === 0 ||
+      typeof unitAmount !== 'string' ||
+      unitAmount.trim().length === 0 ||
+      typeof receiptName !== 'string' ||
+      receiptName.trim().length === 0 ||
+      sourceLineKeys.has(sourceLineKey)
     ) {
-      continue;
+      return malformed();
     }
+
+    let amount: Prisma.Decimal;
+    try {
+      amount = new Prisma.Decimal(unitAmount);
+    } catch {
+      return malformed();
+    }
+    if (!amount.isFinite() || amount.isNegative()) return malformed();
+
+    sourceLineKeys.add(sourceLineKey);
     lines.push({
-      addOnId: typeof addOnId === 'string' && addOnId.length > 0 ? addOnId : null,
-      catalogRevision:
-        typeof catalogRevision === 'number' && Number.isInteger(catalogRevision) ? catalogRevision : 1,
+      addOnId,
+      catalogRevision,
       type,
       value,
       lifetime,
       sourceLineKey,
-      unitAmount:
-        typeof unitAmount === 'string'
-          ? unitAmount
-          : typeof unitAmount === 'number'
-            ? String(unitAmount)
-            : '0',
-      receiptName:
-        typeof receiptName === 'string' && receiptName.length > 0
-          ? receiptName
-          : typeof addOnId === 'string' && addOnId.length > 0
-            ? addOnId
-            : 'Add-on',
+      unitAmount,
+      receiptName,
     });
   }
   return lines;
 }
 
+function isCombinedRenewalTransaction(transaction: Transaction): boolean {
+  if (
+    typeof transaction.planSnapshot !== 'object' ||
+    transaction.planSnapshot === null ||
+    Array.isArray(transaction.planSnapshot)
+  ) {
+    return false;
+  }
+  const marker = transaction.planSnapshot as Record<string, unknown>;
+  // Legacy in-flight drafts wrote the marker without snapshotVersion; treat a
+  // missing version as v1 so a combined renewal paid across the deploy is still
+  // recognized and fulfilled (item-level fallback handles its partial snapshot).
+  return (
+    marker['combinedRenewal'] === true &&
+    (marker['snapshotVersion'] === 1 || marker['snapshotVersion'] === undefined)
+  );
+}
+/**
+ * Verifies a paid renewal item's plan snapshot against the transaction item.
+ *
+ * Returns `null` for a legacy in-flight draft — one persisted before this
+ * strict-snapshot verification shipped, recognizable by a missing
+ * `snapshotVersion`. Those drafts were written with a partial snapshot (no
+ * `type`/`trafficLimitStrategy`/`deviceLimit`/squads) and were always fulfilled
+ * by reading the live plan row, so the caller must fall back to
+ * `plan.findUnique` for them. Failing them here would strand paid money on an
+ * unfulfillable transaction (the reconciler retries forever). New drafts carry
+ * `snapshotVersion: 1` and are verified strictly to pin pricing/limits against
+ * mutable catalog state.
+ */
+function parsePaidRenewalPlanSnapshot(
+  raw: Prisma.JsonValue,
+  item: Pick<TransactionItem, 'planId' | 'durationDays' | 'amount' | 'currency'>,
+  transactionGatewayType: Transaction['gatewayType'],
+): Plan | null {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new ConflictException('Paid renewal plan snapshot is malformed');
+  }
+  const snapshot = raw as Record<string, unknown>;
+  if (snapshot['snapshotVersion'] === undefined) {
+    return null;
+  }
+  const strategies = ['NO_RESET', 'DAY', 'WEEK', 'MONTH', 'MONTH_ROLLING'];
+  const planTypes = ['TRAFFIC', 'DEVICES', 'BOTH', 'UNLIMITED'];
+  const requiredStrings = ['id', 'name', 'type', 'description', 'tag'];
+  if (
+    snapshot['snapshotVersion'] !== 1 ||
+    snapshot['snapshotSource'] !== 'RENEWAL_DRAFT' ||
+    snapshot['purchaseType'] !== PurchaseType.RENEW ||
+    requiredStrings.some((key) =>
+      key === 'description' || key === 'tag'
+        ? !(snapshot[key] === null || typeof snapshot[key] === 'string')
+        : typeof snapshot[key] !== 'string' || (snapshot[key] as string).length === 0,
+    ) ||
+    !planTypes.includes(String(snapshot['type'])) ||
+    snapshot['id'] !== item.planId ||
+    snapshot['selectedDurationDays'] !== item.durationDays ||
+    snapshot['gatewayType'] !== transactionGatewayType ||
+    snapshot['currency'] !== item.currency ||
+    new Prisma.Decimal(String(snapshot['amount'])).comparedTo(item.amount) !== 0 ||
+    !(
+      snapshot['trafficLimit'] === null ||
+      (typeof snapshot['trafficLimit'] === 'number' &&
+        Number.isInteger(snapshot['trafficLimit']) &&
+        snapshot['trafficLimit'] >= 0)
+    ) ||
+    typeof snapshot['deviceLimit'] !== 'number' ||
+    !Number.isInteger(snapshot['deviceLimit']) ||
+    typeof snapshot['trafficLimitStrategy'] !== 'string' ||
+    !strategies.includes(snapshot['trafficLimitStrategy']) ||
+    !Array.isArray(snapshot['internalSquads']) ||
+    snapshot['internalSquads'].some((value) => typeof value !== 'string') ||
+    (snapshot['externalSquad'] !== null && typeof snapshot['externalSquad'] !== 'string')
+  ) {
+    throw new ConflictException('Paid renewal plan snapshot does not match transaction item');
+  }
+  return {
+    id: snapshot['id'] as string,
+    name: snapshot['name'] as string,
+    description: typeof snapshot['description'] === 'string' ? snapshot['description'] : null,
+    tag: typeof snapshot['tag'] === 'string' ? snapshot['tag'] : null,
+    type: snapshot['type'] as Plan['type'],
+    trafficLimit: snapshot['trafficLimit'] as number | null,
+    deviceLimit: snapshot['deviceLimit'] as number,
+    trafficLimitStrategy: snapshot['trafficLimitStrategy'] as Plan['trafficLimitStrategy'],
+    internalSquads: snapshot['internalSquads'] as string[],
+    externalSquad: snapshot['externalSquad'] as string | null,
+  } as Plan;
+}
 function readPlanId(transaction: Transaction): string {
   const planSnapshot =
     typeof transaction.planSnapshot === 'object' &&

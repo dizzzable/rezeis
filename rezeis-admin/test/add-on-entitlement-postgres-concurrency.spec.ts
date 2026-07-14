@@ -977,8 +977,8 @@ run('add-on entitlement PostgreSQL concurrency', () => {
       assert.equal(scheduled.baseDeviceLimit, 3);
       assert.equal(scheduled.trafficResetStrategy, 'NO_RESET');
 
-      // Idempotent: a second renewal on the same subscription does not
-      // double-schedule (a SCHEDULED term already exists).
+      // A second paid renewal is a distinct commercial cycle: it must enqueue
+      // its own generation rather than reusing the first transaction's term.
       const txn2 = await prisma.transaction.create({
         data: {
           paymentId: `${onId}-pay2`, userId, subscriptionId: onId, status: 'COMPLETED',
@@ -987,7 +987,13 @@ run('add-on entitlement PostgreSQL concurrency', () => {
         },
       });
       await mutation.applyCompletedTransaction(txn2);
-      assert.equal(await prisma.subscriptionTerm.count({ where: { subscriptionId: onId, status: 'SCHEDULED' } }), 1);
+      const queued = await prisma.subscriptionTerm.findMany({
+        where: { subscriptionId: onId, status: 'SCHEDULED' },
+        orderBy: { generation: 'asc' },
+      });
+      assert.deepEqual(queued.map((term) => term.generation), [2, 3]);
+      assert.equal(queued[1]!.startsAt.getTime(), queued[0]!.endsAt!.getTime());
+      assert.equal(queued[1]!.endsAt!.getTime(), new Date('2030-07-31T00:00:00.000Z').getTime());
     } finally {
       if (prev === undefined) delete process.env.ADDON_ENTITLEMENT_SHADOW;
       else process.env.ADDON_ENTITLEMENT_SHADOW = prev;
@@ -1316,7 +1322,7 @@ run('add-on entitlement PostgreSQL concurrency', () => {
         addOnLines: [
           {
             addOnId, catalogRevision: 3, type: 'EXTRA_TRAFFIC', value: 50,
-            lifetime: 'UNTIL_SUBSCRIPTION_END', sourceLineKey: lineKey,
+            lifetime: 'UNTIL_SUBSCRIPTION_END', activation: 'TERM_START', sourceLineKey: lineKey,
             unitAmount: '2.50', receiptName: 'Renewal Extra 50GB',
           },
         ] as Prisma.InputJsonValue,
@@ -1376,7 +1382,7 @@ run('add-on entitlement PostgreSQL concurrency', () => {
     await prisma.transactionItem.create({
       data: {
         transactionId: txn.id, subscriptionId: id, planId, durationDays: 30, amount: new Prisma.Decimal('7.50'), currency: 'USD',
-        addOnLines: [{ addOnId, catalogRevision: 1, type: 'EXTRA_TRAFFIC', value: 50, lifetime: 'UNTIL_SUBSCRIPTION_END', sourceLineKey: `renew:${id}:${addOnId}`, unitAmount: '2.50', receiptName: 'x' }] as Prisma.InputJsonValue,
+        addOnLines: [{ addOnId, catalogRevision: 1, type: 'EXTRA_TRAFFIC', value: 50, lifetime: 'UNTIL_SUBSCRIPTION_END', activation: 'TERM_START', sourceLineKey: `renew:${id}:${addOnId}`, unitAmount: '2.50', receiptName: 'x' }] as Prisma.InputJsonValue,
       },
     });
     const mutation = new PaymentSubscriptionMutationService(prisma, { info: () => undefined } as never, entitlements, new EffectiveProjectionService(), terms);
@@ -1423,5 +1429,144 @@ run('add-on entitlement PostgreSQL concurrency', () => {
       'unlimited device baseline stays unlimited (no legacy 0 + N downgrade)');
     const finalTxn = await prisma.transaction.findUniqueOrThrow({ where: { id: txn.id } });
     assert.notEqual(finalTxn.fulfilledAt, null, 'fulfillment still recorded (no reprocessing)');
+  });
+
+  it('fences device-expiry completion behind the subscription lock and supersedes a stale revision', async () => {
+    const id = `${prefix}-device-completion-fence`;
+    const oldTxId = `${id}-old-tx`;
+    const newTxId = `${id}-new-tx`;
+    const expiredAt = new Date('2020-01-01T00:00:00.000Z');
+    await prisma.subscription.create({
+      data: { id, userId, status: 'ACTIVE', planSnapshot: {}, deviceLimit: 1 },
+    });
+    const term = await prisma.subscriptionTerm.create({
+      data: {
+        subscriptionId: id,
+        generation: 1,
+        status: 'ACTIVE',
+        planSnapshot: {},
+        startsAt: new Date('2019-01-01T00:00:00.000Z'),
+        baseDeviceLimit: 1,
+        trafficResetStrategy: 'NO_RESET',
+      },
+    });
+    for (const txId of [oldTxId, newTxId]) {
+      await prisma.transaction.create({
+        data: {
+          id: txId,
+          paymentId: `${txId}-payment`,
+          userId,
+          subscriptionId: id,
+          status: 'COMPLETED',
+          purchaseType: 'ADDITIONAL',
+          channel: 'WEB',
+          gatewayType: 'YOOKASSA',
+          currency: 'USD',
+          amount: new Prisma.Decimal('1.00'),
+          planSnapshot: {},
+        },
+      });
+    }
+    const oldEntitlement = await prisma.addOnEntitlement.create({
+      data: {
+        subscriptionId: id,
+        termId: term.id,
+        sourceTransactionId: oldTxId,
+        sourceLineKey: 'old-device-expiry',
+        catalogRevision: 1,
+        receiptName: 'Old device expiry',
+        type: 'EXTRA_DEVICES',
+        valuePerUnit: 1,
+        totalValue: 1n,
+        lifetime: 'UNTIL_SUBSCRIPTION_END',
+        applicabilitySnapshot: {},
+        unitAmount: new Prisma.Decimal('1.00'),
+        totalAmount: new Prisma.Decimal('1.00'),
+        currency: 'USD',
+        purchasedAt: new Date('2019-06-01T00:00:00.000Z'),
+        scheduledActivationAt: new Date('2019-06-01T00:00:00.000Z'),
+        activatedAt: new Date('2019-06-01T00:00:00.000Z'),
+        expiresAt: expiredAt,
+        state: 'EXPIRING',
+      },
+    });
+    await prisma.subscriptionEffectiveProjection.create({
+      data: {
+        subscriptionId: id,
+        baselineTermId: term.id,
+        desiredRevision: 4n,
+        baseDeviceLimit: 1,
+        activeDeviceContribution: 0,
+        desiredDeviceLimit: 1,
+      },
+    });
+
+    const writerLocked = deferred();
+    const releaseWriter = deferred();
+    let newerEntitlementId = '';
+    const writer = prisma.$transaction(async (tx) => {
+      await tx.$queryRaw(Prisma.sql`SELECT "id" FROM "subscriptions" WHERE "id" = ${id} FOR UPDATE`);
+      writerLocked.resolve();
+      await releaseWriter.promise;
+      await tx.subscriptionEffectiveProjection.update({
+        where: { subscriptionId: id },
+        data: { desiredRevision: 5n },
+      });
+      const newer = await tx.addOnEntitlement.create({
+        data: {
+          subscriptionId: id,
+          termId: term.id,
+          sourceTransactionId: newTxId,
+          sourceLineKey: 'new-device-expiry',
+          catalogRevision: 1,
+          receiptName: 'New device expiry',
+          type: 'EXTRA_DEVICES',
+          valuePerUnit: 1,
+          totalValue: 1n,
+          lifetime: 'UNTIL_SUBSCRIPTION_END',
+          applicabilitySnapshot: {},
+          unitAmount: new Prisma.Decimal('1.00'),
+          totalAmount: new Prisma.Decimal('1.00'),
+          currency: 'USD',
+          purchasedAt: new Date('2019-07-01T00:00:00.000Z'),
+          scheduledActivationAt: new Date('2019-07-01T00:00:00.000Z'),
+          activatedAt: new Date('2019-07-01T00:00:00.000Z'),
+          expiresAt: expiredAt,
+          state: 'EXPIRING',
+        },
+      });
+      newerEntitlementId = newer.id;
+    });
+    await writerLocked.promise;
+
+    const boundary = new EntitlementBoundaryService(
+      prisma,
+      entitlements,
+      terms,
+      new EffectiveProjectionService(),
+    );
+    const complete = (
+      boundary as unknown as {
+        completeVerifiedDeviceExpiryForSubscription(
+          subscriptionId: string,
+          projectionRevision: bigint,
+          now?: Date,
+        ): Promise<{ status: 'COMPLETED' | 'SUPERSEDED'; completed: number }>;
+      }
+    ).completeVerifiedDeviceExpiryForSubscription.bind(boundary);
+    let completionSettled = false;
+    const completion = complete(id, 4n, new Date()).finally(() => {
+      completionSettled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(completionSettled, false, 'completion waits behind the projection writer lock');
+
+    releaseWriter.resolve();
+    await writer;
+    const result = await completion;
+
+    assert.deepStrictEqual(result, { status: 'SUPERSEDED', completed: 0 });
+    assert.equal((await prisma.addOnEntitlement.findUniqueOrThrow({ where: { id: oldEntitlement.id } })).state, 'EXPIRING');
+    assert.equal((await prisma.addOnEntitlement.findUniqueOrThrow({ where: { id: newerEntitlementId } })).state, 'EXPIRING');
   });
 });

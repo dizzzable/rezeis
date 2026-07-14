@@ -26,16 +26,20 @@ interface Opts {
   subscription?: { remnawaveId: string | null; status: string } | null;
   listQueue?: unknown[];
   deleteResults?: unknown[];
+  completionOutcome?: { readonly status: 'COMPLETED' | 'SUPERSEDED'; readonly completed: number };
 }
 
 function build(opts: Opts = {}) {
   const planUpdates: Array<Record<string, unknown>> = [];
   const incidents: Array<Record<string, unknown>> = [];
   const deleteCalls: string[] = [];
+  const completedSubscriptions: string[] = [];
+  const completionRevisions: bigint[] = [];
   const listQueue = [...(opts.listQueue ?? [])];
   const deleteResults = [...(opts.deleteResults ?? [])];
 
   const prisma = {
+    $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback(prisma),
     deviceReductionPlan: {
       findUnique: async () =>
         opts.plan === undefined
@@ -80,8 +84,30 @@ function build(opts: Opts = {}) {
     },
   };
 
-  const service = new DeviceReductionExecutionService(prisma as never, remnawave as never);
-  return { service, planUpdates, incidents, deleteCalls };
+  const completion = {
+    completeVerifiedDeviceExpiryInTransaction: async (
+      _tx: unknown,
+      subscriptionId: string,
+      projectionRevision: bigint,
+    ) => {
+      completedSubscriptions.push(subscriptionId);
+      completionRevisions.push(projectionRevision);
+      return opts.completionOutcome ?? { status: 'COMPLETED', completed: 1 };
+    },
+  };
+  const service = new DeviceReductionExecutionService(
+    prisma as never,
+    remnawave as never,
+    completion as never,
+  );
+  return {
+    service,
+    planUpdates,
+    incidents,
+    deleteCalls,
+    completedSubscriptions,
+    completionRevisions,
+  };
 }
 
 describe('DeviceReductionExecutionService (T-011c)', () => {
@@ -95,7 +121,7 @@ describe('DeviceReductionExecutionService (T-011c)', () => {
 
   it('deletes the planned target and marks APPLIED when the final count is within the limit', async () => {
     enableAuto();
-    const { service, planUpdates, deleteCalls } = build({
+    const { service, planUpdates, deleteCalls, completedSubscriptions } = build({
       // initial list (overage), post-delete final read-back within limit
       listQueue: [okList('old', 'new'), okList('old')],
       deleteResults: [{ kind: 'ok', value: { total: 1 }, detectedVersion: '2.8.0' }],
@@ -105,6 +131,23 @@ describe('DeviceReductionExecutionService (T-011c)', () => {
     assert.deepEqual(deleteCalls, ['new']);
     assert.equal(planUpdates.some((d) => d.state === 'IN_PROGRESS'), true);
     assert.equal(planUpdates.some((d) => d.state === 'APPLIED'), true);
+    assert.deepStrictEqual(completedSubscriptions, ['sub-1']);
+  });
+
+  it('supersedes instead of applying when the completion fence observes a newer projection', async () => {
+    enableAuto();
+    const { service, planUpdates, completedSubscriptions, completionRevisions } = build({
+      listQueue: [okList('old'), okList('old')],
+      completionOutcome: { status: 'SUPERSEDED', completed: 0 },
+    });
+
+    const outcome = await service.executePlan('plan-1');
+
+    assert.equal(outcome.status, 'SUPERSEDED');
+    assert.deepStrictEqual(completedSubscriptions, ['sub-1']);
+    assert.deepStrictEqual(completionRevisions, [4n]);
+    assert.equal(planUpdates.some((data) => data.state === 'APPLIED'), false);
+    assert.equal(planUpdates.some((data) => data.state === 'SUPERSEDED'), true);
   });
 
   it('marks SUPERSEDED when the projection revision advanced past the plan', async () => {

@@ -9,7 +9,10 @@ import {
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { readJsonObject } from '../../../common/utils/read-json-object.util';
-import { resolveResetCapabilities } from '../../add-on-entitlements/add-on-rollout.config';
+import {
+  resolveAddOnRolloutFlags,
+  resolveResetCapabilities,
+} from '../../add-on-entitlements/add-on-rollout.config';
 import { deriveCutoverBaseline } from '../../add-on-entitlements/domain/cutover-baseline';
 import {
   ResetCapabilityMap,
@@ -236,11 +239,12 @@ export class AddOnEligibilityService {
   }
 
   /**
-   * No-term fallback: synthesize the authoritative baseline from the
-   * subscription's own columns + planSnapshot. Uses the exact same pure
-   * derivation as the grandfather cutover (`resetAnchorAt = startsAt`), so the
-   * discovered eligibility matches the term the cutover would eventually create
-   * and the `planId` matches the `planSnapshot.id` checkout validates against.
+   * No-term fallback: synthesize only the non-reset authoritative baseline from
+   * the subscription's own columns + planSnapshot. `subscription.createdAt`
+   * is local provenance, not a trustworthy panel reset anchor (especially for
+   * MONTH_ROLLING), so reset-scoped add-ons remain fail-closed until a durable
+   * ACTIVE term carries a panel-derived `resetAnchorAt`.
+   *
    * `termId` is `''` (sentinel) — nothing reads it for logic and the v2 Zod
    * contract accepts an empty string.
    */
@@ -284,7 +288,7 @@ export class AddOnEligibilityService {
         baseTrafficLimitBytes: baseline.baseTrafficLimitBytes,
         baseDeviceLimit: baseline.baseDeviceLimit,
         trafficResetStrategy: baseline.trafficResetStrategy,
-        resetAnchorAt: baseline.startsAt,
+        resetAnchorAt: null,
       },
     };
   }
@@ -367,11 +371,27 @@ export class AddOnEligibilityService {
   }
 
   /**
-   * Reset-capability seam derived from the staged rollout flags. All strategies
-   * are DISABLED until their `reset_expiry_<strategy>` flag is turned on (after
-   * staging parity is verified against both supported Remnawave versions).
+   * OFFER-side reset-capability seam derived from the staged rollout flags. A
+   * reset strategy is ENABLED for OFFERING a `UNTIL_NEXT_RESET` add-on only when
+   * BOTH conditions hold:
+   *  1. its `reset_expiry_<strategy>` flag is on (staging parity verified), and
+   *  2. `directPurchase` is on — the money intake that actually HONORS the
+   *     one-time-until-reset promise. Direct-purchase intake
+   *     ({@link PaymentSubscriptionMutationService.applyAddOnViaLedger}) binds
+   *     the entitlement to the reset epoch; when directPurchase is OFF the
+   *     intake falls through to the permanent legacy increment, which would
+   *     deliver the service FOREVER rather than until the next reset.
+   *
+   * Withholding the offer (fail-closed) when directPurchase is OFF closes the
+   * offer↔fulfillment gap: a reset-scoped add-on is never advertised with a
+   * reset-epoch expiry the money path cannot fulfill. This is deliberately a
+   * SEPARATE gate from {@link resolveResetCapabilities}, which
+   * {@link EntitlementBoundaryService} uses to EXPIRE already-existing
+   * entitlements — that expiry of prior goods must not depend on intake, so the
+   * boundary resolver stays flag-pure and is intentionally left untouched here.
    */
   protected getResetCapabilities(): ResetCapabilityMap {
+    if (!resolveAddOnRolloutFlags().directPurchase) return {};
     return resolveResetCapabilities();
   }
 }

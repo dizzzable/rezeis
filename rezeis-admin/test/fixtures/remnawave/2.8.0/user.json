@@ -4,6 +4,8 @@
     "uuid": "22222222-2222-4222-8222-222222222222",
     "username": "rz_sub_2",
     "status": "ACTIVE",
+    "createdAt": "2025-02-28T23:59:59.000Z",
+    "lastTrafficResetAt": "2026-06-30T23:59:59.000Z",
     "subscriptionUrl": "https://panel.example/sub/def",
     "telegramId": null,
     "email": null,

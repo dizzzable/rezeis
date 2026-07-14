@@ -153,6 +153,11 @@ export default defineConfig({
     globals: true,
     environment: 'jsdom',
     setupFiles: ['./src/test/setup-tests.ts'],
+    // jsdom + Recharts/userEvent heavy specs occasionally exceed the 5s default
+    // under parallel worker contention (they finish in ~2s in isolation). A
+    // genuinely hung test still fails — this just matches the threshold to the
+    // environment so CI isn't flaky.
+    testTimeout: 15000,
     coverage: {
       provider: 'v8',
       thresholds: {

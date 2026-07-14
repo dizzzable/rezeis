@@ -54,6 +54,13 @@ export function strictInvalidContract<T>(details: string): RemnawaveStrictOutcom
 export interface RemnawaveStrictUser {
   readonly uuid: string;
   readonly status: string;
+  /** Authoritative anchor used by Remnawave MONTH_ROLLING. */
+  readonly createdAt: string;
+  /** Full writable identity projection used by profile-sync read-back. */
+  readonly tag: string | null;
+  readonly trafficLimitStrategy: string;
+  readonly activeInternalSquads: readonly string[];
+  readonly externalSquadUuid: string | null;
   /** Canonical unlimited = `null` (upstream `0` is decoded to `null`). */
   readonly trafficLimitBytes: bigint | null;
   /** Canonical unlimited = `null` (upstream `0` is decoded to `null`). */

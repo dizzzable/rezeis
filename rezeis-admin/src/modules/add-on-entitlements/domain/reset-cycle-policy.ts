@@ -40,6 +40,18 @@ export function getResetCapability(
   return capabilities[strategy] ?? 'DISABLED';
 }
 
+/**
+ * Returns a safe term anchor before panel metadata is available.
+ * Calendar strategies ignore the anchor value. MONTH_ROLLING does not: its
+ * authoritative anchor is Remnawave profile.createdAt, so using term.startsAt
+ * would silently shift commercial expiry. Keep it null (and therefore
+ * fail-closed in eligibility/fulfilment) until profile sync stamps the panel
+ * timestamp.
+ */
+export function provisionalResetAnchor(strategy: ResetStrategy, startsAt: Date): Date | null {
+  return strategy === 'MONTH_ROLLING' ? null : startsAt;
+}
+
 function utcDayStart(value: Date): Date {
   return new Date(Date.UTC(value.getUTCFullYear(), value.getUTCMonth(), value.getUTCDate()));
 }

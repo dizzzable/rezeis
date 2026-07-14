@@ -46,8 +46,13 @@ export class PaymentReconciliationService {
       const transaction = await this.findTransactionForEvent(event.paymentId);
       const nextStatus = mapProviderStatusToTransactionStatus(event.eventStatus);
 
-      // A COMPLETED transaction is final — never re-process (idempotent).
-      if (transaction.status === TransactionStatus.COMPLETED) {
+      // COMPLETED is final only after durable fulfillment. A captured payment
+      // whose mutation rolled back has fulfilledAt=null and must be retried by
+      // the next webhook/manual replay instead of being marked processed.
+      if (
+        transaction.status === TransactionStatus.COMPLETED &&
+        transaction.fulfilledAt !== null
+      ) {
         await this.paymentWebhookInboxService.markProcessed(event.id);
         return;
       }
@@ -59,6 +64,7 @@ export class PaymentReconciliationService {
         return;
       }
       if (
+        transaction.status !== TransactionStatus.COMPLETED &&
         isTerminalTransaction(transaction) &&
         nextStatus === TransactionStatus.COMPLETED
       ) {

@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 
 import {
   getResetCapability,
+  provisionalResetAnchor,
   ResetCyclePolicyError,
   planResetEpoch,
 } from '../src/modules/add-on-entitlements/domain/reset-cycle-policy';
@@ -11,6 +12,13 @@ const at = (value: string) => new Date(value);
 const enabled = 'ENABLED' as const;
 
 describe('reset cycle policy', () => {
+  it('withholds a provisional MONTH_ROLLING anchor until panel createdAt is known', () => {
+    const startsAt = at('2026-07-15T12:30:00.000Z');
+    assert.equal(provisionalResetAnchor('MONTH_ROLLING', startsAt), null);
+    assert.equal(provisionalResetAnchor('MONTH', startsAt), startsAt);
+    assert.equal(provisionalResetAnchor('DAY', startsAt), startsAt);
+  });
+
   it('returns no epoch for NO_RESET', () => {
     assert.equal(
       planResetEpoch({

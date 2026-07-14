@@ -265,11 +265,6 @@ describe('AddOnEntitlementService.transitionInTransaction', () => {
   it('creates one immutable pending aggregate and initial event for a source line', async () => {
     const createdRows: unknown[] = [];
     const createdEvents: unknown[] = [];
-    const row = {
-      id: 'ent-new',
-      state: 'PENDING_ACTIVATION' as const,
-      version: 1,
-    };
     const tx = {
       $queryRaw: (() => {
         let reads = 0;
@@ -333,9 +328,10 @@ describe('AddOnEntitlementService.transitionInTransaction', () => {
     assert.equal(createdEvents.length, 1);
   });
 
-  it('replays the same source line without mutating its immutable snapshot or duplicating its event', async () => {
+  it('replays the same source line after lifecycle expiry refinement without duplicating its event', async () => {
     const purchasedAt = new Date('2026-01-01T00:00:00.000Z');
-    const scheduledActivationAt = new Date('2026-01-01T00:00:00.000Z');
+    const scheduledActivationAt = new Date('2026-02-01T00:00:00.000Z');
+    const initiallyQuotedExpiry = new Date('2026-03-01T00:00:00.000Z');
     const tx = {
       $queryRaw: (() => {
         let reads = 0;
@@ -353,10 +349,21 @@ describe('AddOnEntitlementService.transitionInTransaction', () => {
           id: 'ent-existing',
           state: 'ACTIVE',
           version: 4,
+          expiresAt: new Date('2026-02-02T00:00:00.000Z'),
+          expiryEpochId: 'epoch-refined',
         }),
       },
       addOnEntitlementEvent: {
-        findUnique: async () => ({ id: 'event-created', toState: 'PENDING_ACTIVATION' }),
+        findUnique: async () => ({
+          id: 'event-created',
+          toState: 'PENDING_ACTIVATION',
+          metadata: {
+            createExpiryFingerprint: {
+              expiresAt: initiallyQuotedExpiry.toISOString(),
+              expiryEpochId: null,
+            },
+          },
+        }),
         create: async () => {
           throw new Error('replay must not create another event');
         },
@@ -367,9 +374,9 @@ describe('AddOnEntitlementService.transitionInTransaction', () => {
     const result = await service.createPendingInTransaction(tx as never, {
       subscriptionId: 'sub-1', termId: 'term-1', sourceTransactionId: 'tx-1', sourceLineKey: 'line-1',
       addOnId: null, catalogRevision: 1, receiptName: 'Archived add-on', type: 'EXTRA_DEVICES',
-      valuePerUnit: 1, totalValue: 1n, lifetime: 'UNTIL_SUBSCRIPTION_END', applicabilitySnapshot: {},
-      unitAmount: '1', totalAmount: '1', currency: 'USD', purchasedAt: new Date(),
-      scheduledActivationAt: new Date(), expiresAt: null, expiryEpochId: null, correlationId: 'payment:tx-1',
+      valuePerUnit: 1, totalValue: 1n, lifetime: 'UNTIL_NEXT_RESET', applicabilitySnapshot: {},
+      unitAmount: '1', totalAmount: '1', currency: 'USD', purchasedAt,
+      scheduledActivationAt, expiresAt: initiallyQuotedExpiry, expiryEpochId: null, correlationId: 'payment:tx-1',
     });
 
     assert.deepEqual(result, {
@@ -377,6 +384,62 @@ describe('AddOnEntitlementService.transitionInTransaction', () => {
       state: 'ACTIVE',
       created: false,
       eventId: 'event-created',
+    });
+  });
+
+  it('safely replays a legacy pre-activation source line without an expiry fingerprint', async () => {
+    const expiresAt = new Date('2026-03-01T00:00:00.000Z');
+    const purchasedAt = new Date('2026-01-01T00:00:00.000Z');
+    const scheduledActivationAt = new Date('2026-02-01T00:00:00.000Z');
+    const tx = {
+      $queryRaw: (() => {
+        let reads = 0;
+        return async () => {
+          reads += 1;
+          if (reads === 1) return [{ id: 'tx-legacy', subscriptionId: 'sub-1', status: 'ACTIVE' }];
+          if (reads === 2) return [{ id: 'sub-1', status: 'ACTIVE' }];
+          return [{ id: 'term-1', subscriptionId: 'sub-1' }];
+        };
+      })(),
+      addOnEntitlement: {
+        upsert: async (args: unknown) => ({
+          ...(args as { create: Record<string, unknown> }).create,
+          id: 'ent-legacy',
+          state: 'PENDING_ACTIVATION',
+          version: 1,
+          quantity: 1,
+          unitAmount: { toString: () => '1' },
+          totalAmount: { toString: () => '1' },
+          expiresAt,
+          expiryEpochId: null,
+        }),
+      },
+      addOnEntitlementEvent: {
+        findUnique: async () => ({
+          id: 'event-legacy',
+          toState: 'PENDING_ACTIVATION',
+          metadata: { sourceTransactionId: 'tx-legacy', sourceLineKey: 'line-legacy' },
+        }),
+        create: async () => {
+          throw new Error('legacy replay must not create another event');
+        },
+      },
+    };
+    const service = new AddOnEntitlementService();
+
+    const result = await service.createPendingInTransaction(tx as never, {
+      subscriptionId: 'sub-1', termId: 'term-1', sourceTransactionId: 'tx-legacy', sourceLineKey: 'line-legacy',
+      addOnId: null, catalogRevision: 1, receiptName: 'Legacy add-on', type: 'EXTRA_DEVICES',
+      valuePerUnit: 1, totalValue: 1n, lifetime: 'UNTIL_SUBSCRIPTION_END', applicabilitySnapshot: {},
+      unitAmount: '1', totalAmount: '1', currency: 'USD', purchasedAt,
+      scheduledActivationAt, expiresAt, expiryEpochId: null, correlationId: 'payment:tx-legacy',
+    });
+
+    assert.deepStrictEqual(result, {
+      entitlementId: 'ent-legacy',
+      state: 'PENDING_ACTIVATION',
+      created: false,
+      eventId: 'event-legacy',
     });
   });
 

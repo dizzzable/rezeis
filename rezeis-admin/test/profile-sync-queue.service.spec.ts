@@ -116,12 +116,18 @@ describe('BullMQ enqueue timeout', () => {
 
 describe('ProfileSyncQueueService', () => {
   const originalRole = process.env['RUID_PROCESS_ROLE'];
+  const originalLegacyRecovery = process.env['PROFILE_SYNC_RECOVER_LEGACY_FAILED'];
 
   afterEach(() => {
     if (originalRole === undefined) {
       delete process.env['RUID_PROCESS_ROLE'];
     } else {
       process.env['RUID_PROCESS_ROLE'] = originalRole;
+    }
+    if (originalLegacyRecovery === undefined) {
+      delete process.env['PROFILE_SYNC_RECOVER_LEGACY_FAILED'];
+    } else {
+      process.env['PROFILE_SYNC_RECOVER_LEGACY_FAILED'] = originalLegacyRecovery;
     }
     _resetProcessRoleCacheForTests();
   });
@@ -192,7 +198,7 @@ describe('ProfileSyncQueueService', () => {
 
     assert.equal(swept, 2);
     assert.deepStrictEqual(findManyCalls, [{
-      where: { status: 'PENDING' },
+      where: { status: 'PENDING', supersededAt: null },
       select: { id: true },
       take: 100,
       orderBy: { createdAt: 'asc' },
@@ -203,7 +209,7 @@ describe('ProfileSyncQueueService', () => {
     );
   });
 
-  it('worker recovery resets all non-superseded FAILED rows, including DELETE and UPDATE', async () => {
+  it('worker recovery resets only transient non-superseded FAILED rows, including DELETE and UPDATE', async () => {
     process.env['RUID_PROCESS_ROLE'] = 'worker';
     _resetProcessRoleCacheForTests();
 
@@ -221,7 +227,10 @@ describe('ProfileSyncQueueService', () => {
             }
             return [];
           },
-          update: async (input: unknown) => { updates.push(input); },
+          updateMany: async (input: unknown) => {
+            updates.push(input);
+            return { count: 1 };
+          },
         },
       } as never,
       {
@@ -233,12 +242,33 @@ describe('ProfileSyncQueueService', () => {
     await service.sweepAndRecover();
 
     assert.deepEqual(findManyCalls[1], {
-      where: { status: SyncJobStatus.FAILED, supersededAt: null },
+      where: {
+        status: SyncJobStatus.FAILED,
+        supersededAt: null,
+        recoveryData: { path: ['classification'], equals: 'TRANSIENT' },
+      },
       select: { id: true },
       take: 50,
       orderBy: { createdAt: 'asc' },
     });
     assert.equal(updates.length, 2);
+    assert.deepEqual(
+      updates.map((input) => (input as { where: unknown }).where),
+      [
+        {
+          id: 'failed-delete-job',
+          status: SyncJobStatus.FAILED,
+          supersededAt: null,
+          recoveryData: { path: ['classification'], equals: 'TRANSIENT' },
+        },
+        {
+          id: 'failed-update-job',
+          status: SyncJobStatus.FAILED,
+          supersededAt: null,
+          recoveryData: { path: ['classification'], equals: 'TRANSIENT' },
+        },
+      ],
+    );
     assert.equal(addedJobs.length, 2);
   });
 
@@ -274,11 +304,10 @@ describe('ProfileSyncQueueService', () => {
           findMany: async (input: { where?: { status?: SyncJobStatus } }) => {
             findManyCalls.push(input);
             if (input.where?.status === SyncJobStatus.RUNNING) {
-              return [{ id: 'stuck-running-job' }];
+              return [{ id: 'stuck-running-job', startedAt: new Date('2026-01-01T00:00:00.000Z') }];
             }
             return [];
           },
-          update: async () => undefined,
           updateMany: async (input: { where: Record<string, unknown>; data: Record<string, unknown> }) => {
             reclaims.push(input);
             return { count: 1 };
@@ -293,14 +322,119 @@ describe('ProfileSyncQueueService', () => {
 
     await service.sweepAndRecover();
 
-    // A stale-RUNNING query is issued with a startedAt cutoff and supersed-guard.
     const runningQuery = findManyCalls.find((c) => c.where?.status === SyncJobStatus.RUNNING);
     assert.notEqual(runningQuery, undefined);
     const stuckReset = reclaims.find((u) => u.where.id === 'stuck-running-job');
     assert.notEqual(stuckReset, undefined);
     assert.equal(stuckReset!.data.status, SyncJobStatus.PENDING);
     assert.equal(stuckReset!.where.status, SyncJobStatus.RUNNING);
-    // Force re-enqueue removes the retained BullMQ job first.
+    assert.deepEqual(stuckReset!.where.startedAt, new Date('2026-01-01T00:00:00.000Z'));
     assert.equal(addedJobs.length, 1);
+  });
+
+  it('reclaims legacy FAILED rows with empty recoveryData only after the recovery rollout is enabled', async () => {
+    process.env['RUID_PROCESS_ROLE'] = 'worker';
+    process.env['PROFILE_SYNC_RECOVER_LEGACY_FAILED'] = 'true';
+    _resetProcessRoleCacheForTests();
+
+    const findManyCalls: unknown[] = [];
+    const updates: unknown[] = [];
+    const addedJobs: unknown[] = [];
+    const service = new ProfileSyncQueueService(
+      {
+        profileSyncJob: {
+          findMany: async (input: unknown) => {
+            findManyCalls.push(input);
+            const status = (input as { where?: { status?: SyncJobStatus } }).where?.status;
+            return status === SyncJobStatus.FAILED ? [{ id: 'legacy-failed-job' }] : [];
+          },
+          updateMany: async (input: unknown) => {
+            updates.push(input);
+            return { count: 1 };
+          },
+        },
+      } as never,
+      {
+        remove: async () => undefined,
+        add: async (...args: unknown[]) => { addedJobs.push(args); },
+      } as never,
+    );
+
+    await service.sweepAndRecover();
+
+    const failedQuery = findManyCalls.find(
+      (input) => (input as { where?: { status?: SyncJobStatus } }).where?.status === SyncJobStatus.FAILED,
+    ) as { where: Record<string, unknown> } | undefined;
+    assert.deepEqual(failedQuery?.where, {
+      status: SyncJobStatus.FAILED,
+      supersededAt: null,
+      OR: [
+        { recoveryData: { path: ['classification'], equals: 'TRANSIENT' } },
+        { recoveryData: { equals: {} } },
+      ],
+    });
+    assert.deepEqual((updates[0] as { where: unknown }).where, {
+      id: 'legacy-failed-job',
+      status: SyncJobStatus.FAILED,
+      supersededAt: null,
+      OR: [
+        { recoveryData: { path: ['classification'], equals: 'TRANSIENT' } },
+        { recoveryData: { equals: {} } },
+      ],
+    });
+    assert.equal(addedJobs.length, 1);
+  });
+
+  it('does not recover legacy FAILED rows with empty recoveryData while the rollout is disabled', async () => {
+    process.env['RUID_PROCESS_ROLE'] = 'worker';
+    delete process.env['PROFILE_SYNC_RECOVER_LEGACY_FAILED'];
+    _resetProcessRoleCacheForTests();
+
+    const failedQueries: unknown[] = [];
+    const service = new ProfileSyncQueueService(
+      {
+        profileSyncJob: {
+          findMany: async (input: unknown) => {
+            if ((input as { where?: { status?: SyncJobStatus } }).where?.status === SyncJobStatus.FAILED) {
+              failedQueries.push(input);
+            }
+            return [];
+          },
+        },
+      } as never,
+      { remove: async () => undefined, add: async () => undefined } as never,
+    );
+
+    await service.sweepAndRecover();
+
+    assert.deepEqual((failedQueries[0] as { where: unknown }).where, {
+      status: SyncJobStatus.FAILED,
+      supersededAt: null,
+      recoveryData: { path: ['classification'], equals: 'TRANSIENT' },
+    });
+  });
+
+  it('does not enqueue a stale RUNNING row when the lease was already replaced', async () => {
+    process.env['RUID_PROCESS_ROLE'] = 'worker';
+    _resetProcessRoleCacheForTests();
+
+    const addedJobs: unknown[] = [];
+    const service = new ProfileSyncQueueService(
+      {
+        profileSyncJob: {
+          findMany: async (input: { where?: { status?: SyncJobStatus } }) =>
+            input.where?.status === SyncJobStatus.RUNNING ? [{ id: 'replaced-running-job' }] : [],
+          updateMany: async () => ({ count: 0 }),
+        },
+      } as never,
+      {
+        remove: async () => undefined,
+        add: async (...args: unknown[]) => { addedJobs.push(args); },
+      } as never,
+    );
+
+    await service.sweepAndRecover();
+
+    assert.equal(addedJobs.length, 0);
   });
 });

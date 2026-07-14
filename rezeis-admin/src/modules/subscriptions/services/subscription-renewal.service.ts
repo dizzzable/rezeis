@@ -41,6 +41,7 @@ interface SingleRenewalQuote {
   readonly renewable: boolean;
   readonly requiresPlanSelection: boolean;
   readonly warnings: readonly SubscriptionQuoteWarningInterface[];
+  readonly targetPlan: SubscriptionQuotePlanInterface | null;
 }
 
 const DURATION_ADJUSTED: SubscriptionQuoteWarningInterface = {
@@ -198,9 +199,18 @@ export class SubscriptionRenewalService {
           id: quote.planId,
           name: quote.planName,
           selectedDurationDays: quote.durationDays,
-          gatewayType: input.gatewayType,
+          description: quote.targetPlan?.description ?? null,
+          tag: quote.targetPlan?.tag ?? null,
+          type: quote.targetPlan?.type ?? 'BOTH',
+          trafficLimit: quote.targetPlan?.trafficLimit ?? null,
+          deviceLimit: quote.targetPlan?.deviceLimit ?? 0,
+          trafficLimitStrategy: quote.targetPlan?.trafficLimitStrategy ?? 'NO_RESET',
+          internalSquads: quote.targetPlan?.internalSquads ?? [],
+          externalSquad: quote.targetPlan?.externalSquad ?? null,
+          snapshotVersion: 1,
           amount: quote.amount,
           currency: quote.currency,
+          gatewayType: input.gatewayType,
           purchaseType: 'RENEW',
           snapshotSource: 'RENEWAL_DRAFT',
         },
@@ -331,6 +341,7 @@ export class SubscriptionRenewalService {
         renewable: canSelect,
         requiresPlanSelection: canSelect,
         warnings: discovery.warnings,
+        targetPlan: null,
       };
     }
 
@@ -350,6 +361,7 @@ export class SubscriptionRenewalService {
         renewable: false,
         requiresPlanSelection: false,
         warnings: discovery.warnings,
+        targetPlan: null,
       };
     }
 
@@ -372,6 +384,7 @@ export class SubscriptionRenewalService {
         renewable: false,
         requiresPlanSelection: false,
         warnings: discovery.warnings,
+        targetPlan: null,
       };
     }
 
@@ -403,6 +416,7 @@ export class SubscriptionRenewalService {
         renewable: false,
         requiresPlanSelection: false,
         warnings: mergeWarnings(warnings, priced.warnings),
+        targetPlan,
       };
     }
 
@@ -418,6 +432,7 @@ export class SubscriptionRenewalService {
       renewable: true,
       requiresPlanSelection: false,
       warnings,
+      targetPlan,
     };
   }
 

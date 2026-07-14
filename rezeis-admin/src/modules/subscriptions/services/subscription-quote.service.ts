@@ -696,11 +696,14 @@ function mapQuotePlan(plan: PlanRecord): SubscriptionQuotePlanInterface {
   return {
     id: plan.id,
     name: plan.name,
+    description: plan.description,
     tag: plan.tag,
     type: plan.type,
     trafficLimit: plan.trafficLimit,
     deviceLimit: plan.deviceLimit,
     trafficLimitStrategy: plan.trafficLimitStrategy,
+    internalSquads: [...plan.internalSquads],
+    externalSquad: plan.externalSquad,
     durations: plan.durations.map(mapQuoteDuration),
   };
 }

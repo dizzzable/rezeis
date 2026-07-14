@@ -78,6 +78,10 @@ export interface RemnawavePanelUser {
   panelId: number | null;
   email: string | null;
   expireAt: string;
+  /** Authoritative profile creation timestamp used by MONTH_ROLLING resets. */
+  createdAt: string;
+  /** Most recent panel traffic-reset boundary (nullable on Remnawave 2.7.4). */
+  lastTrafficResetAt: string | null;
   trafficLimitBytes: number;
   hwidDeviceLimit: number;
   trafficLimitStrategy: string | null;
@@ -217,6 +221,47 @@ function mapUserNodeIps(result: unknown): RemnawaveUserNodeIps[] {
  * Parses a `Retry-After` header (seconds or HTTP-date) into milliseconds.
  * Returns `null` when absent or unparseable.
  */
+function isUuid(value: unknown): value is string {
+  return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+function isUpstreamTag(value: string): boolean {
+  return value.length <= 16 && /^[A-Z0-9_]+$/.test(value);
+}
+
+function isUpstreamTrafficLimitStrategy(value: string): boolean {
+  return ['NO_RESET', 'DAY', 'WEEK', 'MONTH', 'MONTH_ROLLING'].includes(value);
+}
+
+function validateStrictUserWrite(desired: {
+  readonly tag?: string | null;
+  readonly trafficLimitStrategy?: string | null;
+  readonly activeInternalSquads?: readonly string[];
+  readonly externalSquadUuid?: string | null;
+}): string | null {
+  if (desired.tag !== undefined && desired.tag !== null && !isUpstreamTag(desired.tag)) {
+    return 'tag is not upstream-compatible';
+  }
+  if (
+    desired.trafficLimitStrategy !== undefined &&
+    desired.trafficLimitStrategy !== null &&
+    !isUpstreamTrafficLimitStrategy(desired.trafficLimitStrategy)
+  ) {
+    return 'trafficLimitStrategy is not upstream-compatible';
+  }
+  if (desired.activeInternalSquads !== undefined && !desired.activeInternalSquads.every(isUuid)) {
+    return 'activeInternalSquads must contain UUIDs';
+  }
+  if (
+    desired.externalSquadUuid !== undefined &&
+    desired.externalSquadUuid !== null &&
+    !isUuid(desired.externalSquadUuid)
+  ) {
+    return 'externalSquadUuid must be a UUID or null';
+  }
+  return null;
+}
+
 function parseRetryAfterMs(headers: unknown): number | null {
   if (headers === null || typeof headers !== 'object') return null;
   const raw = (headers as Record<string, unknown>)['retry-after'];
@@ -700,6 +745,18 @@ export class RemnawaveApiService {
               : value.expireAt instanceof Date
                 ? value.expireAt.toISOString()
                 : '',
+          createdAt:
+            typeof value.createdAt === 'string'
+              ? value.createdAt
+              : value.createdAt instanceof Date
+                ? value.createdAt.toISOString()
+                : '',
+          lastTrafficResetAt:
+            typeof value.lastTrafficResetAt === 'string'
+              ? value.lastTrafficResetAt
+              : value.lastTrafficResetAt instanceof Date
+                ? value.lastTrafficResetAt.toISOString()
+                : null,
           trafficLimitBytes:
             typeof value.trafficLimitBytes === 'number' ? value.trafficLimitBytes : 0,
           hwidDeviceLimit:
@@ -1488,13 +1545,32 @@ export class RemnawaveApiService {
    */
   public async strictSetUserLimits(
     uuid: string,
-    desired: { readonly trafficLimitBytes: bigint | null; readonly hwidDeviceLimit: number | null },
+    desired: {
+      readonly trafficLimitBytes: bigint | null;
+      readonly hwidDeviceLimit: number | null;
+      readonly tag?: string | null;
+      readonly trafficLimitStrategy?: string | null;
+      readonly activeInternalSquads?: readonly string[];
+      readonly externalSquadUuid?: string | null;
+    },
   ): Promise<RemnawaveStrictOutcome<RemnawaveStrictUser>> {
+    const preflight = validateStrictUserWrite(desired);
+    if (preflight !== null) return strictInvalidContract(preflight);
     const body: Record<string, unknown> = {
       uuid,
       trafficLimitBytes:
         desired.trafficLimitBytes === null ? 0 : Number(desired.trafficLimitBytes),
       hwidDeviceLimit: desired.hwidDeviceLimit === null ? 0 : desired.hwidDeviceLimit,
+      ...(desired.tag !== undefined ? { tag: desired.tag } : {}),
+      ...(desired.trafficLimitStrategy !== undefined
+        ? { trafficLimitStrategy: desired.trafficLimitStrategy }
+        : {}),
+      ...(desired.activeInternalSquads !== undefined
+        ? { activeInternalSquads: desired.activeInternalSquads }
+        : {}),
+      ...(desired.externalSquadUuid !== undefined
+        ? { externalSquadUuid: desired.externalSquadUuid }
+        : {}),
     };
     const transport = await this.strictHttp('patch', '/api/users', body);
     if (transport.kind !== 'ok') return this.mapStrictTransport(transport);
@@ -1580,27 +1656,79 @@ export class RemnawaveApiService {
     const r = root as Record<string, unknown>;
     const uuid = r['uuid'];
     const status = r['status'];
+    const createdAt = r['createdAt'];
     const traffic = r['trafficLimitBytes'];
     const devices = r['hwidDeviceLimit'];
+    const tag = r['tag'];
+    const trafficLimitStrategy = r['trafficLimitStrategy'];
+    const activeInternalSquads = r['activeInternalSquads'];
+    const externalSquadUuid = r['externalSquadUuid'];
     if (typeof uuid !== 'string' || uuid.length === 0) {
       return strictInvalidContract('user missing uuid');
     }
     if (typeof status !== 'string' || status.length === 0) {
       return strictInvalidContract('user missing status');
     }
+    if (typeof createdAt !== 'string' || !Number.isFinite(Date.parse(createdAt))) {
+      return strictInvalidContract('user createdAt is not a valid timestamp');
+    }
     if (typeof traffic !== 'number' || !Number.isFinite(traffic) || traffic < 0) {
       return strictInvalidContract('user trafficLimitBytes is not a non-negative number');
     }
-    if (typeof devices !== 'number' || !Number.isInteger(devices) || devices < 0) {
-      return strictInvalidContract('user hwidDeviceLimit is not a non-negative integer');
+    if (devices !== null && (typeof devices !== 'number' || !Number.isInteger(devices) || devices < 0)) {
+      return strictInvalidContract('user hwidDeviceLimit is not a non-negative integer or null');
     }
+    const normalizedTag = tag === null ? null : typeof tag === 'string' ? tag : null;
+    if (tag !== null && normalizedTag === null) {
+      return strictInvalidContract('user tag is not a string or null');
+    }
+    if (normalizedTag !== null && !isUpstreamTag(normalizedTag)) {
+      return strictInvalidContract('user tag is not upstream-compatible');
+    }
+    if (typeof trafficLimitStrategy !== 'string' || !isUpstreamTrafficLimitStrategy(trafficLimitStrategy)) {
+      return strictInvalidContract('user trafficLimitStrategy is not upstream-compatible');
+    }
+    if (!Array.isArray(activeInternalSquads)) {
+      return strictInvalidContract('user activeInternalSquads is not an array');
+    }
+    const normalizedActiveInternalSquads: string[] = [];
+    for (const rawSquad of activeInternalSquads) {
+      const squadUuid =
+        typeof rawSquad === 'string'
+          ? rawSquad
+          : rawSquad !== null && typeof rawSquad === 'object'
+            ? (rawSquad as Record<string, unknown>)['uuid']
+            : null;
+      if (!isUuid(squadUuid)) {
+        return strictInvalidContract('user activeInternalSquads is not an array of UUIDs');
+      }
+      normalizedActiveInternalSquads.push(squadUuid);
+    }
+    const normalizedExternalSquadUuid =
+      externalSquadUuid === null
+        ? null
+        : typeof externalSquadUuid === 'string'
+          ? externalSquadUuid
+          : null;
+    if (externalSquadUuid !== null && normalizedExternalSquadUuid === null) {
+      return strictInvalidContract('user externalSquadUuid is not a UUID or null');
+    }
+    if (normalizedExternalSquadUuid !== null && !isUuid(normalizedExternalSquadUuid)) {
+      return strictInvalidContract('user externalSquadUuid is not a UUID or null');
+    }
+    const normalizedDeviceLimit = devices === null ? null : devices as number;
     return strictOk(
       {
         uuid,
         status,
+        createdAt,
+        tag: normalizedTag,
+        trafficLimitStrategy,
+        activeInternalSquads: normalizedActiveInternalSquads,
+        externalSquadUuid: normalizedExternalSquadUuid,
         // Canonical unlimited: upstream 0 decodes to null.
         trafficLimitBytes: traffic === 0 ? null : BigInt(Math.trunc(traffic)),
-        hwidDeviceLimit: devices === 0 ? null : devices,
+        hwidDeviceLimit: normalizedDeviceLimit === 0 ? null : normalizedDeviceLimit,
       },
       this.readEnvelopeVersion(data),
     );

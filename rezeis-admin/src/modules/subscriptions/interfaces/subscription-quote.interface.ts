@@ -36,11 +36,14 @@ export interface SubscriptionQuoteDurationInterface {
 export interface SubscriptionQuotePlanInterface {
   readonly id: string;
   readonly name: string;
+  readonly description: string | null;
   readonly tag: string | null;
   readonly type: string;
   readonly trafficLimit: number | null;
   readonly deviceLimit: number;
   readonly trafficLimitStrategy: TrafficLimitStrategyValue;
+  readonly internalSquads: readonly string[];
+  readonly externalSquad: string | null;
   readonly durations: readonly SubscriptionQuoteDurationInterface[];
 }
 

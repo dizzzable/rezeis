@@ -47,6 +47,7 @@ describe('RemnawaveApiService strict adapter (T-010)', () => {
     assert.equal(outcome.value.trafficLimitBytes, 107374182400n);
     assert.equal(outcome.value.hwidDeviceLimit, 3);
     assert.equal(outcome.value.status, 'ACTIVE');
+    assert.equal(outcome.value.createdAt, '2024-03-31T10:15:00.000Z');
     assert.equal(outcome.detectedVersion, '2.7.4');
   });
 
@@ -58,6 +59,25 @@ describe('RemnawaveApiService strict adapter (T-010)', () => {
     assert.equal(outcome.value.trafficLimitBytes, null);
     assert.equal(outcome.value.hwidDeviceLimit, null);
     assert.equal(outcome.detectedVersion, '2.8.0');
+  });
+
+  it('strictGetPanelUser accepts a schema-valid nullable hwidDeviceLimit from 2.7.4', async () => {
+    const { service } = build(() => of({ data: fixture('2.7.4/nullable-user.json') }));
+    const outcome = await service.strictGetPanelUser('11111111-1111-4111-8111-111111111111');
+    assert.equal(outcome.kind, 'ok');
+    if (outcome.kind !== 'ok') return;
+    assert.equal(outcome.value.hwidDeviceLimit, null);
+  });
+
+  it('strictGetPanelUser reads the complete writable identity projection', async () => {
+    const { service } = build(() => of({ data: fixture('2.8.0/user.json') }));
+    const outcome = await service.strictGetPanelUser('22222222-2222-4222-8222-222222222222');
+    assert.equal(outcome.kind, 'ok');
+    if (outcome.kind !== 'ok') return;
+    assert.equal(outcome.value.tag, null);
+    assert.equal(outcome.value.trafficLimitStrategy, 'NO_RESET');
+    assert.deepEqual(outcome.value.activeInternalSquads, []);
+    assert.equal(outcome.value.externalSquadUuid, null);
   });
 
   it('strictGetPanelUser maps 404 to notFound', async () => {
@@ -101,6 +121,49 @@ describe('RemnawaveApiService strict adapter (T-010)', () => {
       trafficLimitBytes: 0,
       hwidDeviceLimit: 0,
     });
+  });
+
+  it('strictSetUserLimits propagates the deferred full plan identity when supplied', async () => {
+    const { service, captured } = build(() => of({ data: fixture('2.8.0/user.json') }));
+
+    const outcome = await service.strictSetUserLimits('22222222-2222-4222-8222-222222222222', {
+      trafficLimitBytes: 20n * 1024n ** 3n,
+      hwidDeviceLimit: 4,
+      tag: 'DEFERRED_PREMIUM',
+      trafficLimitStrategy: 'MONTH_ROLLING',
+      activeInternalSquads: ['33333333-3333-4333-8333-333333333333'],
+      externalSquadUuid: '44444444-4444-4444-8444-444444444444',
+    });
+
+    assert.equal(outcome.kind, 'ok');
+    assert.deepEqual(captured[0]!.data, {
+      uuid: '22222222-2222-4222-8222-222222222222',
+      trafficLimitBytes: 20 * 1024 ** 3,
+      hwidDeviceLimit: 4,
+      tag: 'DEFERRED_PREMIUM',
+      trafficLimitStrategy: 'MONTH_ROLLING',
+      activeInternalSquads: ['33333333-3333-4333-8333-333333333333'],
+      externalSquadUuid: '44444444-4444-4444-8444-444444444444',
+    });
+  });
+
+  it('strictSetUserLimits rejects non-upstream-compatible tag and squad values before HTTP', async () => {
+    let httpCalls = 0;
+    const { service } = build(() => {
+      httpCalls += 1;
+      return of({ data: fixture('2.8.0/user.json') });
+    });
+
+    const outcome = await service.strictSetUserLimits('22222222-2222-4222-8222-222222222222', {
+      trafficLimitBytes: 1n,
+      hwidDeviceLimit: null,
+      tag: 'lowercase-not-upstream-compatible',
+      activeInternalSquads: ['not-a-uuid'],
+      externalSquadUuid: 'also-not-a-uuid',
+    });
+
+    assert.equal(outcome.kind, 'invalidContract');
+    assert.equal(httpCalls, 0);
   });
 
   it('strictListUserDevices validates the 2.7.4 list (unique hwids, total==rows)', async () => {

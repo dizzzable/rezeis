@@ -7,6 +7,7 @@ import {
   CutoverClassification,
   deriveCutoverBaseline,
 } from '../domain/cutover-baseline';
+import { provisionalResetAnchor } from '../domain/reset-cycle-policy';
 import { EffectiveProjectionService } from './effective-projection.service';
 import { SubscriptionTermService } from './subscription-term.service';
 
@@ -83,7 +84,31 @@ export class EntitlementCutoverService {
     tx: Prisma.TransactionClient,
     subscription: CutoverSubscriptionRow,
   ): Promise<CutoverSubscriptionResult> {
-    if (subscription.status === SubscriptionStatus.DELETED) {
+    // Serialize cutover with every writer that follows the subscription parent
+    // lock protocol. The candidate row may have been read well before this
+    // transaction, so re-read all baseline columns only after the lock.
+    const locked = await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+      SELECT "id"
+      FROM "subscriptions"
+      WHERE "id" = ${subscription.id}
+      FOR UPDATE
+    `);
+    const current =
+      locked.length === 1
+        ? await tx.subscription.findUnique({
+            where: { id: subscription.id },
+            select: {
+              id: true,
+              status: true,
+              trafficLimit: true,
+              deviceLimit: true,
+              planSnapshot: true,
+              createdAt: true,
+              expiresAt: true,
+            },
+          })
+        : null;
+    if (current === null || current.status === SubscriptionStatus.DELETED) {
       return {
         subscriptionId: subscription.id,
         outcome: 'SKIPPED_DELETED',
@@ -105,18 +130,18 @@ export class EntitlementCutoverService {
       };
     }
 
-    const snapshot = readJsonObject(subscription.planSnapshot);
+    const snapshot = readJsonObject(current.planSnapshot);
     const strategy = typeof snapshot['trafficLimitStrategy'] === 'string'
       ? (snapshot['trafficLimitStrategy'] as string)
       : null;
     const planId = typeof snapshot['id'] === 'string' ? (snapshot['id'] as string) : undefined;
 
     const baseline = deriveCutoverBaseline({
-      trafficLimit: subscription.trafficLimit,
-      deviceLimit: subscription.deviceLimit,
+      trafficLimit: current.trafficLimit,
+      deviceLimit: current.deviceLimit,
       trafficLimitStrategy: strategy,
-      createdAt: subscription.createdAt,
-      expiresAt: subscription.expiresAt,
+      createdAt: current.createdAt,
+      expiresAt: current.expiresAt,
     });
 
     const scheduled = await this.subscriptionTermService.createScheduledInTransaction(tx, {
@@ -128,7 +153,7 @@ export class EntitlementCutoverService {
       baseTrafficLimitBytes: baseline.baseTrafficLimitBytes,
       baseDeviceLimit: baseline.baseDeviceLimit,
       trafficResetStrategy: baseline.trafficResetStrategy,
-      resetAnchorAt: baseline.startsAt,
+      resetAnchorAt: provisionalResetAnchor(baseline.trafficResetStrategy, baseline.startsAt),
     });
     await this.subscriptionTermService.activateInTransaction(tx, scheduled.id, baseline.startsAt);
     await this.effectiveProjectionService.recomputeInTransaction(tx, {

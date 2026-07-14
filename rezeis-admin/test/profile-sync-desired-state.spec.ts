@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict';
 import { afterEach, describe, it } from 'node:test';
 
-import { SubscriptionStatus, SyncAction, SyncJobStatus } from '@prisma/client';
+import {
+  SubscriptionStatus,
+  SubscriptionTermStatus,
+  SyncAction,
+  SyncJobStatus,
+  TrafficLimitStrategy,
+} from '@prisma/client';
 
 import { ProfileSyncProcessor } from '../src/modules/profile-sync/profile-sync.processor';
 
@@ -22,7 +28,9 @@ function versionedJob() {
     desiredRevision: 5n,
     subscription: {
       id: 'sub-1', userId: 'u-1', remnawaveId: 'rem-1', trafficLimit: 10, deviceLimit: 3,
-      internalSquads: [], externalSquad: null, expiresAt: new Date('2099-01-01T00:00:00Z'), planSnapshot: {},
+      internalSquads: ['internal-deferred'], externalSquad: 'external-deferred',
+      expiresAt: new Date('2099-01-01T00:00:00Z'),
+      planSnapshot: { tag: 'deferred-premium', trafficLimitStrategy: 'MONTH_ROLLING' },
     },
   };
 }
@@ -33,6 +41,8 @@ function build(options: {
   setOutcome?: unknown;
 }) {
   const projectionUpdates: Array<Record<string, unknown>> = [];
+  const termAnchorUpdates: unknown[] = [];
+  const strictSetInputs: unknown[] = [];
   let setCalled = false;
   let legacyUpdateCalled = false;
   const prisma = {
@@ -56,16 +66,33 @@ function build(options: {
       cb({
         $queryRaw: async () => [{ status: SubscriptionStatus.ACTIVE }],
         subscription: { update: async () => undefined },
+        subscriptionTerm: {
+          updateMany: async (input: unknown) => {
+            termAnchorUpdates.push(input);
+            return { count: 1 };
+          },
+        },
         profileSyncJob: { findMany: async () => [], create: async () => ({ id: 'x' }) },
       }),
   };
   const remnawave = {
-    strictSetUserLimits: async () => {
+    strictSetUserLimits: async (...args: unknown[]) => {
       setCalled = true;
+      strictSetInputs.push(args);
       return options.setOutcome ?? { kind: 'ok', value: {}, detectedVersion: '2.8.0' };
     },
     strictGetPanelUser: async () =>
-      options.readBack ?? { kind: 'ok', value: { uuid: 'rem-1', status: 'ACTIVE', trafficLimitBytes: 20n * 1024n ** 3n, hwidDeviceLimit: 5 }, detectedVersion: '2.8.0' },
+      options.readBack ?? {
+        kind: 'ok',
+        value: {
+          uuid: 'rem-1',
+          status: 'ACTIVE',
+          createdAt: '2024-03-31T10:15:00.000Z',
+          trafficLimitBytes: 20n * 1024n ** 3n,
+          hwidDeviceLimit: 5,
+        },
+        detectedVersion: '2.8.0',
+      },
     updatePanelUser: async () => { legacyUpdateCalled = true; return {}; },
   };
   const naming = {
@@ -75,7 +102,14 @@ function build(options: {
   const processor = new ProfileSyncProcessor(
     prisma as never, remnawave as never, naming as never, { error: () => undefined, info: () => undefined } as never,
   );
-  return { processor, projectionUpdates, setCalled: () => setCalled, legacyUpdateCalled: () => legacyUpdateCalled };
+  return {
+    processor,
+    projectionUpdates,
+    termAnchorUpdates,
+    strictSetInputs,
+    setCalled: () => setCalled,
+    legacyUpdateCalled: () => legacyUpdateCalled,
+  };
 }
 
 describe('ProfileSyncProcessor versioned desired-state write (T-009/T-010)', () => {
@@ -85,10 +119,29 @@ describe('ProfileSyncProcessor versioned desired-state write (T-009/T-010)', () 
     await h.processor.process({ data: { syncJobId: 'sync-1' } } as never);
     assert.equal(h.setCalled(), true);
     assert.equal(h.legacyUpdateCalled(), false, 'strict path replaces the legacy absolute update');
+    assert.deepStrictEqual(h.strictSetInputs, [[
+      'rem-1',
+      {
+        trafficLimitBytes: 20n * 1024n ** 3n,
+        hwidDeviceLimit: 5,
+        tag: 'deferred-premium',
+        trafficLimitStrategy: 'MONTH_ROLLING',
+        activeInternalSquads: ['internal-deferred'],
+        externalSquadUuid: 'external-deferred',
+      },
+    ]]);
     const applied = h.projectionUpdates.find((d) => d.state === 'APPLIED');
     assert.notEqual(applied, undefined);
     assert.equal(applied!.lastAppliedRevision, 5n);
     assert.equal(applied!.observedContractVersion, '2.8.0');
+    assert.deepStrictEqual(h.termAnchorUpdates, [{
+      where: {
+        subscriptionId: 'sub-1',
+        status: { in: [SubscriptionTermStatus.ACTIVE, SubscriptionTermStatus.SCHEDULED] },
+        trafficResetStrategy: TrafficLimitStrategy.MONTH_ROLLING,
+      },
+      data: { resetAnchorAt: new Date('2024-03-31T10:15:00.000Z') },
+    }]);
   });
 
   it('records DRIFTED and fails the job when read-back disagrees with desired', async () => {

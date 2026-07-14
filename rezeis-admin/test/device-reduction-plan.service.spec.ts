@@ -58,7 +58,7 @@ describe('DeviceReductionPlanService (T-011b)', () => {
   it('returns VERIFIED (no plan) when devices are within the limit', async () => {
     const { service, created } = build({ strictList: devices(['only', '2026-01-01T00:00:00Z']) });
     const outcome = await service.planForSubscription('sub-1');
-    assert.equal(outcome.status, 'VERIFIED');
+    assert.deepStrictEqual(outcome, { status: 'VERIFIED', projectionRevision: 4n });
     assert.equal(created.length, 0);
   });
 

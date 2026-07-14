@@ -292,11 +292,29 @@ export class InternalUserEdgeService {
     if (subscriptions.length === 0) {
       return { entitlements: [] };
     }
-    const rows = await this.prismaService.addOnEntitlement.findMany({
-      where: { subscriptionId: { in: subscriptions.map((s) => s.id) } },
+    const subscriptionIds = subscriptions.map((subscription) => subscription.id);
+    const liveStates = ['ACTIVE', 'EXPIRING'] as const;
+    const liveRows = await this.prismaService.addOnEntitlement.findMany({
+      where: {
+        subscriptionId: { in: subscriptionIds },
+        state: { in: [...liveStates] },
+      },
       orderBy: { purchasedAt: 'desc' },
-      take: 100,
     });
+    const terminalTake = Math.max(0, 100 - liveRows.length);
+    const terminalRows = terminalTake === 0
+      ? []
+      : await this.prismaService.addOnEntitlement.findMany({
+          where: {
+            subscriptionId: { in: subscriptionIds },
+            state: { notIn: [...liveStates] },
+          },
+          orderBy: { purchasedAt: 'desc' },
+          take: terminalTake,
+        });
+    const rows = [...liveRows, ...terminalRows].sort(
+      (left, right) => right.purchasedAt.getTime() - left.purchasedAt.getTime(),
+    );
     return {
       entitlements: rows.map((entitlement): InternalUserAddOnEntitlementInterface => ({
         id: entitlement.id,

@@ -10,6 +10,7 @@ import {
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { resolveAddOnRolloutFlags } from '../add-on-rollout.config';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
+import { EntitlementBoundaryService } from './entitlement-boundary.service';
 
 export type DeviceReductionExecutionOutcome =
   | { readonly status: 'AUTO_DISABLED' }
@@ -54,6 +55,7 @@ export class DeviceReductionExecutionService {
   public constructor(
     private readonly prismaService: PrismaService,
     private readonly remnawaveApiService: RemnawaveApiService,
+    private readonly entitlementBoundaryService: EntitlementBoundaryService,
   ) {}
 
   public async executePlan(
@@ -151,18 +153,32 @@ export class DeviceReductionExecutionService {
     }
 
     if (final.value.total <= guard.desiredLimit) {
-      await this.prismaService.deviceReductionPlan.update({
-        where: { id: planId },
-        data: {
-          state: DeviceReductionPlanState.APPLIED,
-          completedAt: new Date(),
-          postconditionMetadata: {
-            finalCount: final.value.total,
-            deleted,
-            desiredLimit: guard.desiredLimit,
-          } as Prisma.InputJsonValue,
-        },
+      const applied = await this.prismaService.$transaction(async (tx) => {
+        const completion = await this.entitlementBoundaryService.completeVerifiedDeviceExpiryInTransaction(
+          tx,
+          plan.subscriptionId,
+          plan.projectionRevision,
+        );
+        if (completion.status === 'SUPERSEDED') return false;
+
+        await tx.deviceReductionPlan.update({
+          where: { id: planId },
+          data: {
+            state: DeviceReductionPlanState.APPLIED,
+            completedAt: new Date(),
+            postconditionMetadata: {
+              finalCount: final.value.total,
+              deleted,
+              desiredLimit: guard.desiredLimit,
+            } as Prisma.InputJsonValue,
+          },
+        });
+        return true;
       });
+      if (!applied) {
+        await this.markState(planId, DeviceReductionPlanState.SUPERSEDED, 'REVISION_ADVANCED');
+        return { status: 'SUPERSEDED' };
+      }
       return { status: 'APPLIED', deleted };
     }
 
