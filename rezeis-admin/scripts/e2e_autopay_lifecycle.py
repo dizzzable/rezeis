@@ -677,7 +677,7 @@ def run_near_expiry_and_autopay(
         # latest auto-renew tx for this sub
         renew_tx = docker_psql(
             f"""
-            SELECT COALESCE(status,'') || '|' || COALESCE(payment_id,'') || '|' ||
+            SELECT COALESCE(status::text,'') || '|' || COALESCE(payment_id,'') || '|' ||
                    COALESCE(idempotency_key,'')
             FROM transactions
             WHERE purchase_type = 'RENEW'
