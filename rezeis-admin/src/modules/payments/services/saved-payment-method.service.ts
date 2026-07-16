@@ -156,6 +156,44 @@ export class SavedPaymentMethodService {
   }
 
   /**
+   * Picks the newest chargeable saved method for autopay (active + autopay on).
+   * Prefer YOOKASSA — currently the only off-session charge path.
+   */
+  public async findPreferredForCharge(userId: string): Promise<{
+    readonly id: string;
+    readonly gatewayType: PaymentGatewayType;
+    readonly providerMethodId: string;
+  } | null> {
+    const method = await this.prismaService.savedPaymentMethod.findFirst({
+      where: {
+        userId,
+        isActive: true,
+        autopayEnabled: true,
+        gatewayType: PaymentGatewayType.YOOKASSA,
+        providerMethodId: { not: '' },
+      },
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true,
+        gatewayType: true,
+        providerMethodId: true,
+      },
+    });
+    if (method === null) {
+      return null;
+    }
+    const providerMethodId = method.providerMethodId.trim();
+    if (providerMethodId.length === 0 || providerMethodId.startsWith('demo_pm_')) {
+      return null;
+    }
+    return {
+      id: method.id,
+      gatewayType: method.gatewayType,
+      providerMethodId,
+    };
+  }
+
+  /**
    * Resolves a user-owned active saved method for off-session charge.
    * Returns the local id + provider payment_method.id used by YooKassa.
    */

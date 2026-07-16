@@ -103,6 +103,6 @@ import { SavedPaymentMethodService } from './services/saved-payment-method.servi
     AddOnFulfillmentRecoveryService,
     SavedPaymentMethodService,
   ],
-  exports: [SavedPaymentMethodService],
+  exports: [SavedPaymentMethodService, PaymentsRenewalCheckoutService],
 })
 export class PaymentsModule {}

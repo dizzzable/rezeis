@@ -10,6 +10,10 @@ export interface AutoRenewCycleResult {
   readonly expired: number;
   readonly warnings3d: number;
   readonly warnings1d: number;
+  readonly autopayAttempted: number;
+  readonly autopaySucceeded: number;
+  readonly autopayFailed: number;
+  readonly autopaySkipped: number;
   readonly finishedAt: string;
   readonly durationMs: number;
 }
