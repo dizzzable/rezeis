@@ -46,6 +46,7 @@ export const en = {
       apiKey: 'API key',
       customerEmail: 'Customer email (for receipts)',
       vatCode: 'VAT code',
+      savePaymentMethod: 'Save cards for autopayments',
       selfEmployedEnabled: 'Self-employed (НПД): «Мой Налог» income sync',
       moyNalogAuthMethod: '«Мой Налог» auth method',
       moyNalogInn: 'Self-employed INN',
@@ -105,6 +106,8 @@ export const en = {
         'Crypto-Pay-API-Token from @CryptoBot → Crypto Pay → My Apps → your app. Enable Webhooks in the app settings and point them at our callback URL.',
       defaultCurrency:
         'The currency the customer sees when paying through this gateway. The list is restricted to currencies the gateway actually supports.',
+      savePaymentMethod:
+        'On interactive checkout, request YooKassa save_payment_method so the card/wallet appears under Payment methods and can be charged off-session. Has no effect when charging an already saved method. Enabled by default.',
       selfEmployedEnabled:
         'Register every successful YooKassa payment as self-employed (НПД) income in «Мой Налог» (lknpd.nalog.ru). The receipt is created asynchronously and never blocks subscription delivery.',
       moyNalogAuthMethod:

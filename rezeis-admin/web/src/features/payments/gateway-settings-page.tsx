@@ -153,6 +153,13 @@ const GATEWAY_META: ReadonlyArray<GatewayMeta> = [
         placeholder: '1',
       },
       {
+        key: 'savePaymentMethod',
+        labelKey: 'paymentGateways.fields.savePaymentMethod',
+        placeholder: '',
+        type: 'toggle',
+        hintKey: 'paymentGateways.hints.savePaymentMethod',
+      },
+      {
         key: 'selfEmployedEnabled',
         labelKey: 'paymentGateways.fields.selfEmployedEnabled',
         placeholder: '',
@@ -920,6 +927,10 @@ function GatewaySettingsForm({ gateway, onClose }: GatewaySettingsFormProps) {
   const initialValues: Record<string, string> = Object.fromEntries(
     (meta?.fields ?? []).map((field) => {
       const raw = gateway.settings?.[field.key]
+      // YooKassa save_payment_method defaults ON when the operator never set it.
+      if (field.key === 'savePaymentMethod' && (raw === undefined || raw === null || raw === '')) {
+        return [field.key, 'true']
+      }
       const value =
         typeof raw === 'string' ? raw : typeof raw === 'boolean' ? String(raw) : ''
       return [field.key, value]

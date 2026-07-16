@@ -1747,6 +1747,9 @@ model SavedPaymentMethod {
   cardProduct        String?            @map("card_product")
   /// Soft-unbind: false means user detached the method in cabinet (or ops).
   isActive           Boolean            @default(true) @map("is_active")
+  /// When false, method stays bound but is excluded from off-session charges / autopay.
+  /// Distinct from unbind — card remains listed and can be re-enabled without re-save.
+  autopayEnabled     Boolean            @default(true) @map("autopay_enabled")
   unboundAt          DateTime?          @map("unbound_at") @db.Timestamptz(3)
   /// Transaction that first produced this saved method (audit).
   sourceTransactionId String?           @map("source_transaction_id")

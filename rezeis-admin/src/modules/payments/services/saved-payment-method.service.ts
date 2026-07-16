@@ -36,6 +36,7 @@ export class SavedPaymentMethodService {
         cardExpiryYear: true,
         cardIssuerCountry: true,
         cardProduct: true,
+        autopayEnabled: true,
         createdAt: true,
         updatedAt: true,
       },
@@ -53,6 +54,7 @@ export class SavedPaymentMethodService {
         cardExpiryYear: method.cardExpiryYear,
         cardIssuerCountry: method.cardIssuerCountry,
         cardProduct: method.cardProduct,
+        autopayEnabled: method.autopayEnabled,
         createdAt: method.createdAt.toISOString(),
         updatedAt: method.updatedAt.toISOString(),
       })),
@@ -101,6 +103,59 @@ export class SavedPaymentMethodService {
   }
 
   /**
+   * Enables/disables autopay for a bound method without unbinding it.
+   * Card stays listed; resolveActiveForCharge rejects when disabled.
+   */
+  public async setAutopayEnabledForUser(
+    userId: string,
+    methodId: string,
+    autopayEnabled: boolean,
+  ): Promise<{ id: string; autopayEnabled: boolean }> {
+    const existing = await this.prismaService.savedPaymentMethod.findFirst({
+      where: { id: methodId, userId, isActive: true },
+    });
+    if (existing === null) {
+      throw new NotFoundException('Saved payment method not found');
+    }
+
+    if (existing.autopayEnabled === autopayEnabled) {
+      return { id: existing.id, autopayEnabled: existing.autopayEnabled };
+    }
+
+    const updated = await this.prismaService.savedPaymentMethod.update({
+      where: { id: existing.id },
+      data: { autopayEnabled },
+      select: {
+        id: true,
+        autopayEnabled: true,
+        gatewayType: true,
+        methodType: true,
+        cardLast4: true,
+        providerMethodId: true,
+      },
+    });
+
+    this.systemEvents.info(
+      EVENT_TYPES.PAYMENT_METHOD_AUTOPAY_UPDATED,
+      'PAYMENT',
+      autopayEnabled
+        ? `Автосписание включено: ${updated.methodType}`
+        : `Автосписание отключено: ${updated.methodType}`,
+      {
+        userId,
+        savedPaymentMethodId: updated.id,
+        autopayEnabled: updated.autopayEnabled,
+        gatewayType: updated.gatewayType,
+        methodType: updated.methodType,
+        cardLast4: updated.cardLast4,
+        providerMethodId: updated.providerMethodId,
+      },
+    );
+
+    return { id: updated.id, autopayEnabled: updated.autopayEnabled };
+  }
+
+  /**
    * Resolves a user-owned active saved method for off-session charge.
    * Returns the local id + provider payment_method.id used by YooKassa.
    */
@@ -119,12 +174,19 @@ export class SavedPaymentMethodService {
         id: true,
         gatewayType: true,
         providerMethodId: true,
+        autopayEnabled: true,
       },
     });
     if (method === null) {
       throw new BadRequestException({
         code: 'SAVED_PAYMENT_METHOD_NOT_FOUND',
         message: 'Saved payment method not found or inactive',
+      });
+    }
+    if (!method.autopayEnabled) {
+      throw new BadRequestException({
+        code: 'SAVED_PAYMENT_METHOD_AUTOPAY_DISABLED',
+        message: 'Autopay is disabled for this payment method',
       });
     }
     if (method.gatewayType !== input.gatewayType) {
