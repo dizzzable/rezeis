@@ -54,7 +54,11 @@ export class YookassaAdapter implements IPaymentGateway {
   }
 
   async createCheckout(input: GatewayCheckoutInput, settings: Record<string, unknown>): Promise<GatewayCheckoutResult> {
-    const body = {
+    // Default true: request a reusable payment_method on successful payment so
+    // the merchant can run autopayments later. Operators can disable via
+    // gateway settings `savePaymentMethod: false`.
+    const savePaymentMethod = settings['savePaymentMethod'] !== false;
+    const body: Record<string, unknown> = {
       amount: { value: input.amount.toFixed(2), currency: 'RUB' },
       confirmation: {
         type: 'redirect',
@@ -73,6 +77,9 @@ export class YookassaAdapter implements IPaymentGateway {
         }],
       } : undefined,
     };
+    if (savePaymentMethod) {
+      body.save_payment_method = true;
+    }
 
     const response = await this.apiPost<{
       id: string;

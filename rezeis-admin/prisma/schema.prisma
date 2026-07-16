@@ -1076,6 +1076,7 @@ model User {
   supportTickets       SupportTicket[]         @relation("SupportTicketUser")
   oauthLinks           UserOAuthLink[]         @relation("UserOAuthLinks")
   questCompletions     QuestCompletion[]       @relation("QuestCompletionUser")
+  savedPaymentMethods  SavedPaymentMethod[]   @relation("UserSavedPaymentMethods")
 
   @@index([telegramId])
   @@index([role])
@@ -1724,6 +1725,46 @@ model PaymentWebhookEvent {
   @@index([receivedAt])
   @@map("payment_webhook_events")
 }
+
+/// Provider-saved payment instrument (YooKassa `payment_method.id` etc.).
+/// Used for merchant-side autopayments: charge by stored method id.
+/// Unbind is local — YooKassa has no "delete card" API; we stop using the id
+/// and soft-deactivate the row so the cabinet can hide it after user action.
+model SavedPaymentMethod {
+  id                 String             @id @default(cuid()) @map("id")
+  userId             String             @map("user_id")
+  gatewayType        PaymentGatewayType @map("gateway_type")
+  /// Provider payment_method.id (YooKassa) — the token used for off-session charges.
+  providerMethodId   String             @map("provider_method_id")
+  /// bank_card | yoo_money | sberbank | sbp | …
+  methodType         String             @map("method_type")
+  title              String?            @map("title")
+  cardLast4          String?            @map("card_last4")
+  cardFirst6         String?            @map("card_first6")
+  cardExpiryMonth    String?            @map("card_expiry_month")
+  cardExpiryYear     String?            @map("card_expiry_year")
+  cardIssuerCountry  String?            @map("card_issuer_country")
+  cardProduct        String?            @map("card_product")
+  /// Soft-unbind: false means user detached the method in cabinet (or ops).
+  isActive           Boolean            @default(true) @map("is_active")
+  unboundAt          DateTime?          @map("unbound_at") @db.Timestamptz(3)
+  /// Transaction that first produced this saved method (audit).
+  sourceTransactionId String?           @map("source_transaction_id")
+  /// Provider payment id that created the method (YooKassa payment.object.id).
+  sourceGatewayId    String?            @map("source_gateway_id")
+  rawSnapshot        Json?              @map("raw_snapshot")
+  createdAt          DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt          DateTime           @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  user User @relation("UserSavedPaymentMethods", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([gatewayType, providerMethodId])
+  @@index([userId])
+  @@index([userId, isActive])
+  @@index([gatewayType])
+  @@map("saved_payment_methods")
+}
+
 
 // =============================================================================
 //  REFERRALS (minimal — used by plan catalog)

@@ -12,6 +12,7 @@ import {
   buildResultUrl,
   buildWebhookUrl,
   md5,
+  readBooleanSetting,
   readOptionalString,
   readRecord,
   requireSetting,
@@ -103,7 +104,11 @@ export class PaymentProviderExecutionService {
     const shopId = requireSetting(settings, 'shopId');
     const apiKey = requireSetting(settings, 'apiKey');
     const resultUrl = this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
-    const payload = {
+    // When true (default), YooKassa may return a reusable payment_method on
+    // successful payment — required for merchant-side autopayments. Operators
+    // can disable via gateway settings `savePaymentMethod: false`.
+    const savePaymentMethod = readBooleanSetting(settings, 'savePaymentMethod', true);
+    const payload: Record<string, unknown> = {
       amount: {
         value: input.transaction.amount.toString(),
         currency: input.transaction.currency,
@@ -117,8 +122,12 @@ export class PaymentProviderExecutionService {
       metadata: {
         paymentId: input.transaction.paymentId,
         transactionId: input.transaction.id,
+        userId: input.transaction.userId,
       },
     };
+    if (savePaymentMethod) {
+      payload.save_payment_method = true;
+    }
     const response = await firstValueFrom(
       this.httpService.post('https://api.yookassa.ru/v3/payments', payload, {
         auth: {
@@ -142,6 +151,7 @@ export class PaymentProviderExecutionService {
         providerStatus: readOptionalString(data, ['status']),
         providerResponse: this.redactProviderResponse(data),
         checkoutUrl: readOptionalString(confirmation, ['confirmation_url']),
+        savePaymentMethod,
       },
     };
   }
