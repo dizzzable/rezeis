@@ -458,36 +458,64 @@ def ensure_saved_method(
         )
 
     if args.skip_db:
-        raise RuntimeError("Need DB insert for new saved method when user has none (disable --skip-db)")
+        raise RuntimeError(
+            "Need DB for saved method when user has none (disable --skip-db)"
+        )
 
-    # insert row owned by this user (same provider method id is shop-level charge token)
+    # provider_method_id is UNIQUE globally — rebind existing row to this user
+    # for e2e instead of inserting a duplicate (shop-level charge token).
     method_id = docker_psql(
         f"""
-        INSERT INTO saved_payment_methods (
-          id, user_id, gateway_type, provider_method_id, method_type, title,
-          is_active, autopay_enabled, created_at, updated_at
-        ) VALUES (
-          'cme2e' || substr(md5(random()::text), 1, 20),
-          '{user_id}',
-          'YOOKASSA',
-          '{provider_id}',
-          'yoo_money',
-          'E2E autopay method',
-          true,
-          true,
-          NOW(),
-          NOW()
-        ) RETURNING id;
+        UPDATE saved_payment_methods
+        SET user_id = '{user_id}',
+            is_active = true,
+            autopay_enabled = true,
+            unbound_at = NULL,
+            title = COALESCE(title, 'E2E autopay method'),
+            updated_at = NOW()
+        WHERE gateway_type = 'YOOKASSA'
+          AND provider_method_id = '{provider_id}'
+        RETURNING id;
         """.strip(),
         args.db_container,
         args.db_user,
         args.db_name,
     )
-    report.step(
-        "saved_method_inserted",
-        method_id=method_id,
-        provider_method_id=provider_id,
-    )
+    if not method_id:
+        method_id = docker_psql(
+            f"""
+            INSERT INTO saved_payment_methods (
+              id, user_id, gateway_type, provider_method_id, method_type, title,
+              is_active, autopay_enabled, created_at, updated_at
+            ) VALUES (
+              'cme2e' || substr(md5(random()::text), 1, 20),
+              '{user_id}',
+              'YOOKASSA',
+              '{provider_id}',
+              'yoo_money',
+              'E2E autopay method',
+              true,
+              true,
+              NOW(),
+              NOW()
+            ) RETURNING id;
+            """.strip(),
+            args.db_container,
+            args.db_user,
+            args.db_name,
+        )
+        report.step(
+            "saved_method_inserted",
+            method_id=method_id,
+            provider_method_id=provider_id,
+        )
+    else:
+        report.step(
+            "saved_method_rebound",
+            method_id=method_id,
+            provider_method_id=provider_id,
+            user_id=user_id,
+        )
     return method_id
 
 
