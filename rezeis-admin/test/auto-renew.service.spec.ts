@@ -53,7 +53,12 @@ function createHarness(opts: {
     },
   };
 
-  const service = new AutoRenewService(prisma as never, userNotifications as never);
+  const service = new AutoRenewService(
+    prisma as never,
+    userNotifications as never,
+    { createCheckout: async () => ({}) } as never,
+    { findPreferredForCharge: async () => null } as never,
+  );
   return { service, createdFor, counters };
 }
 

@@ -128,6 +128,7 @@ export class InternalPaymentsController {
       expectedAmount: input.expectedAmount,
       expectedCurrency: input.expectedCurrency,
       addOns: toAddOnSelectionMap(input.addOns),
+      savedPaymentMethodId: input.savedPaymentMethodId,
     });
   }
 

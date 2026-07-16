@@ -26,6 +26,7 @@ import { isGatewayConfigured } from '../utils/payment-gateway-settings.util';
 import { buildRenewalCheckoutFingerprint, fingerprint } from '../utils/checkout-fingerprint.util';
 import { PaymentProviderExecutionService } from './payment-provider-execution.service';
 import { PaymentSubscriptionMutationService } from './payment-subscription-mutation.service';
+import { SavedPaymentMethodService } from './saved-payment-method.service';
 
 const PROVIDER_CREATION_CLAIM_PREFIX = '__RENEWAL_PROVIDER_CREATE__:';
 
@@ -52,6 +53,8 @@ export interface RenewalCheckoutInput {
   /** Optional per-subscription selected renewal add-on ids (T-007). Honored
    *  only when the `renewalAddOns` rollout flag is on. */
   readonly addOns?: ReadonlyMap<string, readonly string[]>;
+  /** Local SavedPaymentMethod.id for off-session YooKassa charge. */
+  readonly savedPaymentMethodId?: string;
 }
 
 /**
@@ -71,6 +74,7 @@ export class PaymentsRenewalCheckoutService {
     private readonly profileSyncQueueService: ProfileSyncQueueService,
     private readonly settingsService: SettingsService,
     private readonly accessModeGuard: AccessModeGuard,
+    private readonly savedPaymentMethodService: SavedPaymentMethodService,
   ) {}
 
   public async renewalCheckout(
@@ -165,6 +169,7 @@ export class PaymentsRenewalCheckoutService {
       gatewayType: input.gatewayType,
       channel,
       currency: priced.currency,
+      savedPaymentMethodId: input.savedPaymentMethodId ?? null,
       lines: priced.items.map((item) => ({
         subscriptionId: item.subscriptionId,
         planId: item.planId,
@@ -244,6 +249,7 @@ export class PaymentsRenewalCheckoutService {
     // amount. Complete the combined-renewal draft and fulfill every item
     // directly, mirroring the zero-total path in PaymentsCheckoutService —
     // the user's subscriptions are renewed instead of a "payment failed".
+    // Paid money (amount > 0) never fulfills here — only after webhook SUCCESS.
     if (Number(transaction.amount) <= 0) {
       const completedTransaction = await this.prismaService.transaction.update({
         where: { id: transaction.id },
@@ -287,6 +293,18 @@ export class PaymentsRenewalCheckoutService {
             providerMode: readProviderMode(current) ?? 'REDIRECT',
           });
         }
+        // Off-session drafts can settle without checkoutUrl; replay once gatewayId is real.
+        if (
+          typeof current.gatewayId === 'string' &&
+          current.gatewayId.length > 0 &&
+          !current.gatewayId.startsWith(PROVIDER_CREATION_CLAIM_PREFIX)
+        ) {
+          return mapCheckoutResponse({
+            transaction: current,
+            checkoutUrl: null,
+            providerMode: readProviderMode(current) ?? 'IMMEDIATE',
+          });
+        }
       }
       throw new ServiceUnavailableException({
         code: 'PROVIDER_CHECKOUT_CREATION_UNRESOLVED',
@@ -294,27 +312,53 @@ export class PaymentsRenewalCheckoutService {
       });
     }
 
-    const providerCheckout = await this.paymentProviderExecutionService.createCheckout({
-      gateway,
-      transaction,
-      description: `RENEW x${priced.items.length}`,
-      successUrl: input.successUrl ?? null,
-      failUrl: input.failUrl ?? null,
-    });
-    if (
-      providerCheckout === null ||
-      typeof providerCheckout !== 'object' ||
-      typeof providerCheckout.gatewayId !== 'string' ||
-      providerCheckout.gatewayId.length === 0 ||
-      typeof providerCheckout.checkoutUrl !== 'string' ||
-      providerCheckout.checkoutUrl.length === 0
-    ) {
-      throw new ServiceUnavailableException({
-        code: 'PROVIDER_CHECKOUT_RESULT_INVALID',
-        message: 'Payment provider returned an incomplete checkout result',
+    let providerCheckout: Awaited<
+      ReturnType<PaymentProviderExecutionService['createCheckout']>
+    >;
+    try {
+      const chargedMethod =
+        typeof input.savedPaymentMethodId === 'string' && input.savedPaymentMethodId.length > 0
+          ? await this.savedPaymentMethodService.resolveActiveForCharge({
+              userId: transaction.userId,
+              savedPaymentMethodId: input.savedPaymentMethodId,
+              gatewayType: input.gatewayType,
+            })
+          : null;
+
+      providerCheckout = await this.paymentProviderExecutionService.createCheckout({
+        gateway,
+        transaction,
+        description: `RENEW x${priced.items.length}`,
+        successUrl: input.successUrl ?? null,
+        failUrl: input.failUrl ?? null,
+        paymentMethodId: chargedMethod?.providerMethodId ?? null,
+        savedPaymentMethodId: chargedMethod?.id ?? null,
       });
+      if (
+        providerCheckout === null ||
+        typeof providerCheckout !== 'object' ||
+        typeof providerCheckout.gatewayId !== 'string' ||
+        providerCheckout.gatewayId.length === 0 ||
+        // Off-session charges may complete without a hosted checkout URL.
+        (typeof providerCheckout.checkoutUrl === 'string'
+          ? providerCheckout.checkoutUrl.length === 0 &&
+            providerCheckout.providerMode === 'REDIRECT'
+          : providerCheckout.providerMode === 'REDIRECT')
+      ) {
+        throw new ServiceUnavailableException({
+          code: 'PROVIDER_CHECKOUT_RESULT_INVALID',
+          message: 'Payment provider returned an incomplete checkout result',
+        });
+      }
+    } catch (error: unknown) {
+      // Claim was taken before provider call. If creation fails, leave a
+      // FAILED row (not PENDING+claim) so autopay retries / expire can proceed.
+      await this.failClaimedProviderCreation(transaction.id, providerClaim);
+      throw error;
     }
 
+    // Persist provider ids only; leave status PENDING. IMMEDIATE (checkoutUrl
+    // null) still waits for webhook SUCCESS — do not applyCompletedTransaction.
     const updatedTransaction = await this.prismaService.transaction.update({
       where: { id: transaction.id },
       data: {
@@ -329,6 +373,32 @@ export class PaymentsRenewalCheckoutService {
       checkoutUrl: providerCheckout.checkoutUrl,
       providerMode: providerCheckout.providerMode,
     });
+  }
+
+  /**
+   * After a provider-create claim is taken, any failure must release the
+   * draft from PENDING+claim — otherwise autopay treats it as in-flight
+   * settle forever (no attempt 2/3, no EXPIRE).
+   */
+  private async failClaimedProviderCreation(
+    transactionId: string,
+    providerClaim: string,
+  ): Promise<void> {
+    try {
+      await this.prismaService.transaction.updateMany({
+        where: {
+          id: transactionId,
+          status: TransactionStatus.PENDING,
+          gatewayId: providerClaim,
+        },
+        data: {
+          status: TransactionStatus.FAILED,
+          gatewayId: null,
+        },
+      });
+    } catch {
+      // best-effort; original provider error is rethrown by caller
+    }
   }
 
   /**
@@ -571,6 +641,7 @@ function buildRenewalRequestFingerprint(input: {
     userId: input.userId,
     gatewayType: input.input.gatewayType,
     channel: input.channel,
+    savedPaymentMethodId: input.input.savedPaymentMethodId ?? null,
     subscriptionIds: [...new Set(input.input.subscriptionIds)].sort(),
     durations: [...(input.input.durations?.entries() ?? [])]
       .sort(([left], [right]) => left.localeCompare(right))

@@ -46,6 +46,7 @@ export const ru = {
       apiKey: 'API key',
       customerEmail: 'Email клиента (для чека)',
       vatCode: 'Код НДС',
+      savePaymentMethod: 'Сохранять карты для автоплатежей',
       selfEmployedEnabled: 'Самозанятость (НПД): синхронизация с «Мой Налог»',
       moyNalogAuthMethod: 'Способ авторизации «Мой Налог»',
       moyNalogInn: 'ИНН самозанятого',
@@ -105,6 +106,8 @@ export const ru = {
         'Crypto-Pay-API-Token из @CryptoBot → Crypto Pay → My Apps → ваше приложение. Включите Webhooks в настройках приложения и укажите наш callback URL.',
       defaultCurrency:
         'Валюта, в которой клиент видит сумму при оплате через этот шлюз. В списке только те валюты, которые шлюз действительно поддерживает.',
+      savePaymentMethod:
+        'При интерактивной оплате запрашивать у YooKassa save_payment_method, чтобы карта/кошелёк появился в «Способах оплаты» и можно было списывать без redirect. На charge по уже сохранённому методу флаг не влияет. По умолчанию включено.',
       selfEmployedEnabled:
         'Регистрировать каждый успешный платёж YooKassa как доход самозанятого (НПД) в сервисе «Мой Налог» (lknpd.nalog.ru). Чек формируется асинхронно и не влияет на выдачу подписки.',
       moyNalogAuthMethod:

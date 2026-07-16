@@ -121,6 +121,9 @@ export const EVENT_TYPES = {
   PAYMENT_EXPIRED: 'payment.expired',
   PAYMENT_WEBHOOK_RECEIVED: 'payment.webhook_received',
   PAYMENT_FULFILLMENT_RECOVERED: 'payment.fulfillment_recovered',
+  PAYMENT_METHOD_SAVED: 'payment.method_saved',
+  PAYMENT_METHOD_UNBOUND: 'payment.method_unbound',
+  PAYMENT_METHOD_AUTOPAY_UPDATED: 'payment.method_autopay_updated',
 
   // Referral
   REFERRAL_ATTACHED: 'referral.attached',

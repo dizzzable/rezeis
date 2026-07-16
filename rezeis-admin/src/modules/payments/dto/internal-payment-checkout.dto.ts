@@ -89,4 +89,15 @@ export class InternalPaymentCheckoutDto {
   @IsUrl({ require_protocol: true, protocols: ['http', 'https', 'tg', 'tgapp'] })
   @MaxLength(2048)
   public failUrl?: string;
+
+  /**
+   * Local SavedPaymentMethod.id owned by the user. When set for YOOKASSA,
+   * checkout charges the stored `payment_method_id` off-session (no redirect
+   * page unless the provider still requires 3DS confirmation).
+   */
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  @MaxLength(64)
+  public savedPaymentMethodId?: string;
 }

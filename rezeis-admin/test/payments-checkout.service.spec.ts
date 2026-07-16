@@ -373,6 +373,10 @@ function createService(input: {
       // AccessModeGuard — real guard when `accessMode` is supplied (wiring
       // test), no-op evaluator otherwise.
       (input.accessMode === undefined ? { evaluate: () => null } : new AccessModeGuard()) as never,
+      // SavedPaymentMethodService — only used when savedPaymentMethodId is set.
+      {
+        resolveActiveForCharge: async () => null,
+      } as never,
     ),
     state,
   }

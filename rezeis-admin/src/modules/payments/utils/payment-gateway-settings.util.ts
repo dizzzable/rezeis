@@ -9,19 +9,22 @@ const telegramStarsSettingsSchema = z
   })
   .strict();
 
+const yookassaBooleanSetting = z
+  .union([z.boolean(), z.enum(['true', 'false'])])
+  .transform((value) => (typeof value === 'boolean' ? value : value === 'true'));
+
 const yookassaSettingsSchema = z
   .object({
     shopId: z.string().min(1).optional(),
     apiKey: z.string().min(1).optional(),
     customer: z.string().min(1).optional(),
     vatCode: z.string().min(1).optional(),
+    // Request YooKassa `save_payment_method` on interactive checkout (default true at runtime).
+    savePaymentMethod: yookassaBooleanSetting.optional(),
     // ── Self-employed (НПД) «Мой Налог» income sync — additive, optional ──
     // Accepts a real boolean or the string forms the admin text/select field
     // posts, and normalizes to a boolean for storage.
-    selfEmployedEnabled: z
-      .union([z.boolean(), z.enum(['true', 'false'])])
-      .transform((value) => (typeof value === 'boolean' ? value : value === 'true'))
-      .optional(),
+    selfEmployedEnabled: yookassaBooleanSetting.optional(),
     moyNalogAuthMethod: z.enum(['password', 'refresh']).optional(),
     moyNalogInn: z.string().min(1).optional(),
     moyNalogPassword: z.string().min(1).optional(),

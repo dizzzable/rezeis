@@ -46,23 +46,28 @@ describe('PaymentProviderExecutionService checkout execution', () => {
       description: 'Plan purchase that should be sent to provider',
     });
 
-    assert.deepStrictEqual(calls, [{
-      url: 'https://api.yookassa.ru/v3/payments',
-      body: {
-        amount: { value: '12.50', currency: Currency.RUB },
-        capture: true,
-        confirmation: {
-          type: 'redirect',
-          return_url: 'https://user.example/payments/result?paymentId=payment-1',
-        },
-        description: 'Plan purchase that should be sent to provider',
-        metadata: { paymentId: 'payment-1', transactionId: 'transaction-1' },
+    assert.equal(calls.length, 1);
+    const call = calls[0] as {
+      url: string;
+      body: Record<string, unknown>;
+      options: { auth: unknown; headers: unknown; validateStatus?: (status: number) => boolean };
+    };
+    assert.equal(call.url, 'https://api.yookassa.ru/v3/payments');
+    assert.deepStrictEqual(call.body, {
+      amount: { value: '12.50', currency: Currency.RUB },
+      capture: true,
+      confirmation: {
+        type: 'redirect',
+        return_url: 'https://user.example/payments/result?paymentId=payment-1',
       },
-      options: {
-        auth: { username: 'shop-1', password: 'secret-1' },
-        headers: { 'Idempotence-Key': 'payment-1' },
-      },
-    }]);
+      description: 'Plan purchase that should be sent to provider',
+      metadata: { paymentId: 'payment-1', transactionId: 'transaction-1', userId: 'user-1' },
+      save_payment_method: true,
+    });
+    assert.deepStrictEqual(call.options.auth, { username: 'shop-1', password: 'secret-1' });
+    assert.deepStrictEqual(call.options.headers, { 'Idempotence-Key': 'payment-1' });
+    assert.equal(typeof call.options.validateStatus, 'function');
+    assert.equal(call.options.validateStatus?.(500), true);
     assert.deepStrictEqual(result, {
       gatewayId: 'provider-payment-1',
       checkoutUrl: 'https://checkout.example/yookassa',
@@ -71,6 +76,10 @@ describe('PaymentProviderExecutionService checkout execution', () => {
       gatewayData: {
         provider: 'YOOKASSA',
         providerStatus: 'pending',
+        providerMode: 'REDIRECT',
+        paymentMethodId: null,
+        savedPaymentMethodId: null,
+        savePaymentMethod: true,
         providerResponse: {
           id: '***redacted***',
           status: 'pending',

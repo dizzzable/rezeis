@@ -45,6 +45,7 @@ import { AddOnPurchaseService } from './services/addon-purchase.service';
 import { AddOnFulfillmentRecoveryService } from './services/add-on-fulfillment-recovery.service';
 import { PartnerBalancePaymentService } from './services/partner-balance-payment.service';
 import { TelegramStarsWebhookService } from './services/telegram-stars-webhook.service';
+import { SavedPaymentMethodService } from './services/saved-payment-method.service';
 
 @Module({
   imports: [
@@ -100,6 +101,8 @@ import { TelegramStarsWebhookService } from './services/telegram-stars-webhook.s
     PaymentAutoRetryService,
     PaymentPendingExpiryService,
     AddOnFulfillmentRecoveryService,
+    SavedPaymentMethodService,
   ],
+  exports: [SavedPaymentMethodService, PaymentsRenewalCheckoutService],
 })
 export class PaymentsModule {}

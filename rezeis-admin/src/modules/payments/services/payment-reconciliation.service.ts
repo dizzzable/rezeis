@@ -16,6 +16,7 @@ import { PaymentOpsAlertService } from './payment-ops-alert.service';
 import { PaymentSubscriptionMutationService } from './payment-subscription-mutation.service';
 import { MoyNalogQueueService } from './moy-nalog-queue.service';
 import { AdConversionService } from '../../advertising/services/ad-conversion.service';
+import { SavedPaymentMethodService } from './saved-payment-method.service';
 @Injectable()
 export class PaymentReconciliationService {
   private readonly logger = new Logger(PaymentReconciliationService.name);
@@ -31,6 +32,7 @@ export class PaymentReconciliationService {
     private readonly systemEvents: SystemEventsService,
     private readonly moyNalogQueueService: MoyNalogQueueService,
     private readonly adConversionService: AdConversionService,
+    private readonly savedPaymentMethodService: SavedPaymentMethodService,
   ) {}
 
   public async reconcileWebhookEvent(eventId: string): Promise<void> {
@@ -91,6 +93,9 @@ export class PaymentReconciliationService {
         if (refreshedTransaction === null) {
           throw new NotFoundException('Payment transaction not found');
         }
+        // Persist reusable payment_method from YooKassa webhook payload (if any).
+        // Best-effort: never block fulfillment when the method cannot be stored.
+        await this.persistSavedPaymentMethodBestEffort(refreshedTransaction, event.rawPayload);
         // Fulfil exactly once, keyed on `fulfilledAt` — NOT on `subscriptionId`.
         // RENEW/UPGRADE carry the SOURCE subscription id from draft time, so the
         // old `subscriptionId === null` guard silently skipped their provisioning
@@ -212,6 +217,34 @@ export class PaymentReconciliationService {
     } catch (error: unknown) {
       this.logger.error(
         `Partner earnings hook failed for transaction ${transaction.id}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  /**
+   * Best-effort persistence of a reusable provider payment method after a
+   * successful payment. Failures are logged and never rethrown — a missing
+   * saved method must not roll back subscription fulfillment.
+   */
+  private async persistSavedPaymentMethodBestEffort(
+    transaction: Transaction,
+    rawPayload: unknown,
+  ): Promise<void> {
+    if (transaction.gatewayType !== PaymentGatewayType.YOOKASSA) {
+      return;
+    }
+    try {
+      await this.savedPaymentMethodService.upsertFromYookassaPayment({
+        userId: transaction.userId,
+        transactionId: transaction.id,
+        gatewayId: transaction.gatewayId,
+        rawPayload,
+      });
+    } catch (error: unknown) {
+      this.logger.error(
+        `Saved payment method persistence failed for transaction ${transaction.id}: ${
           error instanceof Error ? error.message : String(error)
         }`,
       );

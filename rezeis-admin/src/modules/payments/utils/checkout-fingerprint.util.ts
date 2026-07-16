@@ -102,6 +102,8 @@ export interface RenewalCheckoutFingerprintInput {
   readonly gatewayType: string;
   readonly channel: string;
   readonly currency: string;
+  /** Local SavedPaymentMethod.id when charging off-session; null/omit for hosted checkout. */
+  readonly savedPaymentMethodId?: string | null;
   readonly lines: readonly RenewalLineFingerprintInput[];
 }
 
@@ -146,6 +148,7 @@ export function buildRenewalCheckoutFingerprint(input: RenewalCheckoutFingerprin
     gatewayType: input.gatewayType,
     channel: input.channel,
     currency: input.currency,
+    savedPaymentMethodId: input.savedPaymentMethodId ?? null,
     lines,
   });
 }

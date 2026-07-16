@@ -54,12 +54,17 @@ export class YookassaAdapter implements IPaymentGateway {
   }
 
   async createCheckout(input: GatewayCheckoutInput, settings: Record<string, unknown>): Promise<GatewayCheckoutResult> {
-    const body = {
+    // Default true: request a reusable payment_method on successful payment so
+    // the merchant can run autopayments later. Operators can disable via
+    // gateway settings `savePaymentMethod: false`.
+    // When charging with paymentMethodId we never re-request save.
+    const paymentMethodId =
+      typeof input.paymentMethodId === 'string' && input.paymentMethodId.trim().length > 0
+        ? input.paymentMethodId.trim()
+        : null;
+    const savePaymentMethod = paymentMethodId === null && settings['savePaymentMethod'] !== false;
+    const body: Record<string, unknown> = {
       amount: { value: input.amount.toFixed(2), currency: 'RUB' },
-      confirmation: {
-        type: 'redirect',
-        return_url: input.successUrl ?? 'https://rezeis.app',
-      },
       capture: true,
       description: input.description.slice(0, 128),
       metadata: { payment_id: input.paymentId, ...input.metadata },
@@ -73,6 +78,17 @@ export class YookassaAdapter implements IPaymentGateway {
         }],
       } : undefined,
     };
+    if (paymentMethodId !== null) {
+      body.payment_method_id = paymentMethodId;
+    } else {
+      body.confirmation = {
+        type: 'redirect',
+        return_url: input.successUrl ?? 'https://rezeis.app',
+      };
+      if (savePaymentMethod) {
+        body.save_payment_method = true;
+      }
+    }
 
     const response = await this.apiPost<{
       id: string;
@@ -80,8 +96,10 @@ export class YookassaAdapter implements IPaymentGateway {
       confirmation?: { confirmation_url?: string };
     }>('payments', body, settings);
 
-    const paymentUrl = response.confirmation?.confirmation_url;
-    if (!paymentUrl) throw new Error('YooKassa did not return confirmation_url');
+    const paymentUrl = response.confirmation?.confirmation_url ?? '';
+    if (paymentMethodId === null && !paymentUrl) {
+      throw new Error('YooKassa did not return confirmation_url');
+    }
 
     return {
       externalPaymentId: response.id,

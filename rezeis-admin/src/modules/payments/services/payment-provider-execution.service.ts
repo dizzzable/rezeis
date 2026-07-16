@@ -12,6 +12,7 @@ import {
   buildResultUrl,
   buildWebhookUrl,
   md5,
+  readBooleanSetting,
   readOptionalString,
   readRecord,
   requireSetting,
@@ -44,6 +45,13 @@ export class PaymentProviderExecutionService {
     readonly description: string;
     readonly successUrl?: string | null;
     readonly failUrl?: string | null;
+    /**
+     * Provider payment_method.id for off-session charge (YooKassa autopay).
+     * When set, YooKassa is called with `payment_method_id` instead of redirect.
+     */
+    readonly paymentMethodId?: string | null;
+    /** Local SavedPaymentMethod.id — stored in gatewayData for audit only. */
+    readonly savedPaymentMethodId?: string | null;
   }): Promise<ProviderCheckoutResult> {
     try {
       switch (input.gateway.type) {
@@ -98,27 +106,55 @@ export class PaymentProviderExecutionService {
     readonly description: string;
     readonly successUrl?: string | null;
     readonly failUrl?: string | null;
+    readonly paymentMethodId?: string | null;
+    readonly savedPaymentMethodId?: string | null;
   }): Promise<ProviderCheckoutResult> {
     const settings = readGatewaySettings(input.gateway.settings);
     const shopId = requireSetting(settings, 'shopId');
     const apiKey = requireSetting(settings, 'apiKey');
-    const resultUrl = this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
-    const payload = {
+    const paymentMethodId =
+      typeof input.paymentMethodId === 'string' && input.paymentMethodId.trim().length > 0
+        ? input.paymentMethodId.trim()
+        : null;
+    // When true (default), YooKassa may return a reusable payment_method on
+    // successful interactive payment — required for merchant-side autopayments.
+    // Operators can disable via gateway settings `savePaymentMethod: false`.
+    // Off-session charges (payment_method_id) never re-request save.
+    const savePaymentMethod =
+      paymentMethodId === null && readBooleanSetting(settings, 'savePaymentMethod', true);
+
+    const payload: Record<string, unknown> = {
       amount: {
         value: input.transaction.amount.toString(),
         currency: input.transaction.currency,
       },
       capture: true,
-      confirmation: {
-        type: 'redirect',
-        return_url: resultUrl,
-      },
       description: input.description.slice(0, 128),
       metadata: {
         paymentId: input.transaction.paymentId,
         transactionId: input.transaction.id,
+        userId: input.transaction.userId,
+        ...(typeof input.savedPaymentMethodId === 'string' &&
+        input.savedPaymentMethodId.length > 0
+          ? { savedPaymentMethodId: input.savedPaymentMethodId }
+          : {}),
       },
     };
+
+    if (paymentMethodId !== null) {
+      // Merchant-initiated charge with a previously saved instrument.
+      payload.payment_method_id = paymentMethodId;
+    } else {
+      const resultUrl = this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
+      payload.confirmation = {
+        type: 'redirect',
+        return_url: resultUrl,
+      };
+      if (savePaymentMethod) {
+        payload.save_payment_method = true;
+      }
+    }
+
     const response = await firstValueFrom(
       this.httpService.post('https://api.yookassa.ru/v3/payments', payload, {
         auth: {
@@ -128,20 +164,54 @@ export class PaymentProviderExecutionService {
         headers: {
           'Idempotence-Key': input.transaction.paymentId,
         },
+        validateStatus: () => true,
       }),
     );
+    if (response.status < 200 || response.status >= 300) {
+      throw new ServiceUnavailableException(
+        `YooKassa create payment failed: HTTP ${response.status} ${JSON.stringify(response.data).slice(0, 300)}`,
+      );
+    }
     const data = response.data as Record<string, unknown>;
     const confirmation = readRecord(data.confirmation);
+    const checkoutUrl = readOptionalString(confirmation, ['confirmation_url']);
+    const providerStatus = readOptionalString(data, ['status']);
+    const gatewayId = readOptionalString(data, ['id']);
+    if (gatewayId === null) {
+      throw new ServiceUnavailableException('YooKassa create payment: missing payment id');
+    }
+    // Interactive checkout must always return a redirect URL. Off-session
+    // charges often complete without confirmation (or only with 3DS).
+    if (paymentMethodId === null && checkoutUrl === null) {
+      throw new ServiceUnavailableException('YooKassa create payment: missing confirmation_url');
+    }
+    if (
+      paymentMethodId !== null &&
+      (providerStatus === 'canceled' || providerStatus === 'cancelled')
+    ) {
+      throw new ServiceUnavailableException(
+        `YooKassa saved-method charge canceled: ${JSON.stringify(data['cancellation_details'] ?? data).slice(0, 300)}`,
+      );
+    }
+
+    const providerMode = checkoutUrl !== null ? 'REDIRECT' : 'IMMEDIATE';
     return {
-      gatewayId: readOptionalString(data, ['id']),
-      checkoutUrl: readOptionalString(confirmation, ['confirmation_url']),
-      providerMode: 'REDIRECT',
-      providerStatus: readOptionalString(data, ['status']),
+      gatewayId,
+      checkoutUrl,
+      providerMode,
+      providerStatus,
       gatewayData: {
         provider: 'YOOKASSA',
-        providerStatus: readOptionalString(data, ['status']),
+        providerStatus,
         providerResponse: this.redactProviderResponse(data),
-        checkoutUrl: readOptionalString(confirmation, ['confirmation_url']),
+        checkoutUrl,
+        providerMode,
+        savePaymentMethod,
+        paymentMethodId,
+        savedPaymentMethodId:
+          typeof input.savedPaymentMethodId === 'string' && input.savedPaymentMethodId.length > 0
+            ? input.savedPaymentMethodId
+            : null,
       },
     };
   }
