@@ -426,6 +426,7 @@ export class AutoRenewService {
         status: true,
         idempotencyKey: true,
         checkoutUrl: true,
+        gatewayId: true,
       },
       take: MAX_AUTOPAY_ATTEMPTS + 2,
     });
@@ -451,7 +452,12 @@ export class AutoRenewService {
       }
       if (row.status === TransactionStatus.PENDING) {
         // Redirect-required PENDING is not a live settle path for autopay.
-        if (row.checkoutUrl === null) {
+        // Claim-prefix gatewayId (provider create that never finished) is also
+        // not settleable — treat as non-pending so retries/expire can run.
+        const isProviderClaim =
+          typeof row.gatewayId === 'string' &&
+          row.gatewayId.startsWith('__RENEWAL_PROVIDER_CREATE__:');
+        if (row.checkoutUrl === null && !isProviderClaim) {
           pending = true;
         }
       }

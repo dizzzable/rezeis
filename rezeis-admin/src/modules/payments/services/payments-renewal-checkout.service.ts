@@ -311,38 +311,49 @@ export class PaymentsRenewalCheckoutService {
       });
     }
 
-    const chargedMethod =
-      typeof input.savedPaymentMethodId === 'string' && input.savedPaymentMethodId.length > 0
-        ? await this.savedPaymentMethodService.resolveActiveForCharge({
-            userId: transaction.userId,
-            savedPaymentMethodId: input.savedPaymentMethodId,
-            gatewayType: input.gatewayType,
-          })
-        : null;
+    let providerCheckout: Awaited<
+      ReturnType<PaymentProviderExecutionService['createCheckout']>
+    >;
+    try {
+      const chargedMethod =
+        typeof input.savedPaymentMethodId === 'string' && input.savedPaymentMethodId.length > 0
+          ? await this.savedPaymentMethodService.resolveActiveForCharge({
+              userId: transaction.userId,
+              savedPaymentMethodId: input.savedPaymentMethodId,
+              gatewayType: input.gatewayType,
+            })
+          : null;
 
-    const providerCheckout = await this.paymentProviderExecutionService.createCheckout({
-      gateway,
-      transaction,
-      description: `RENEW x${priced.items.length}`,
-      successUrl: input.successUrl ?? null,
-      failUrl: input.failUrl ?? null,
-      paymentMethodId: chargedMethod?.providerMethodId ?? null,
-      savedPaymentMethodId: chargedMethod?.id ?? null,
-    });
-    if (
-      providerCheckout === null ||
-      typeof providerCheckout !== 'object' ||
-      typeof providerCheckout.gatewayId !== 'string' ||
-      providerCheckout.gatewayId.length === 0 ||
-      // Off-session charges may complete without a hosted checkout URL.
-      (typeof providerCheckout.checkoutUrl === 'string'
-        ? providerCheckout.checkoutUrl.length === 0 && providerCheckout.providerMode === 'REDIRECT'
-        : providerCheckout.providerMode === 'REDIRECT')
-    ) {
-      throw new ServiceUnavailableException({
-        code: 'PROVIDER_CHECKOUT_RESULT_INVALID',
-        message: 'Payment provider returned an incomplete checkout result',
+      providerCheckout = await this.paymentProviderExecutionService.createCheckout({
+        gateway,
+        transaction,
+        description: `RENEW x${priced.items.length}`,
+        successUrl: input.successUrl ?? null,
+        failUrl: input.failUrl ?? null,
+        paymentMethodId: chargedMethod?.providerMethodId ?? null,
+        savedPaymentMethodId: chargedMethod?.id ?? null,
       });
+      if (
+        providerCheckout === null ||
+        typeof providerCheckout !== 'object' ||
+        typeof providerCheckout.gatewayId !== 'string' ||
+        providerCheckout.gatewayId.length === 0 ||
+        // Off-session charges may complete without a hosted checkout URL.
+        (typeof providerCheckout.checkoutUrl === 'string'
+          ? providerCheckout.checkoutUrl.length === 0 &&
+            providerCheckout.providerMode === 'REDIRECT'
+          : providerCheckout.providerMode === 'REDIRECT')
+      ) {
+        throw new ServiceUnavailableException({
+          code: 'PROVIDER_CHECKOUT_RESULT_INVALID',
+          message: 'Payment provider returned an incomplete checkout result',
+        });
+      }
+    } catch (error: unknown) {
+      // Claim was taken before provider call. If creation fails, leave a
+      // FAILED row (not PENDING+claim) so autopay retries / expire can proceed.
+      await this.failClaimedProviderCreation(transaction.id, providerClaim);
+      throw error;
     }
 
     const updatedTransaction = await this.prismaService.transaction.update({
@@ -359,6 +370,32 @@ export class PaymentsRenewalCheckoutService {
       checkoutUrl: providerCheckout.checkoutUrl,
       providerMode: providerCheckout.providerMode,
     });
+  }
+
+  /**
+   * After a provider-create claim is taken, any failure must release the
+   * draft from PENDING+claim — otherwise autopay treats it as in-flight
+   * settle forever (no attempt 2/3, no EXPIRE).
+   */
+  private async failClaimedProviderCreation(
+    transactionId: string,
+    providerClaim: string,
+  ): Promise<void> {
+    try {
+      await this.prismaService.transaction.updateMany({
+        where: {
+          id: transactionId,
+          status: TransactionStatus.PENDING,
+          gatewayId: providerClaim,
+        },
+        data: {
+          status: TransactionStatus.FAILED,
+          gatewayId: null,
+        },
+      });
+    } catch {
+      // best-effort; original provider error is rethrown by caller
+    }
   }
 
   /**
