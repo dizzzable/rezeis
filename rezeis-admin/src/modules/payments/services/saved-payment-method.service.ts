@@ -1,4 +1,4 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PaymentGatewayType, Prisma } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
@@ -98,6 +98,51 @@ export class SavedPaymentMethodService {
     );
 
     return { unbound: true, id: updated.id };
+  }
+
+  /**
+   * Resolves a user-owned active saved method for off-session charge.
+   * Returns the local id + provider payment_method.id used by YooKassa.
+   */
+  public async resolveActiveForCharge(input: {
+    readonly userId: string;
+    readonly savedPaymentMethodId: string;
+    readonly gatewayType: PaymentGatewayType;
+  }): Promise<{ readonly id: string; readonly providerMethodId: string }> {
+    const method = await this.prismaService.savedPaymentMethod.findFirst({
+      where: {
+        id: input.savedPaymentMethodId,
+        userId: input.userId,
+        isActive: true,
+      },
+      select: {
+        id: true,
+        gatewayType: true,
+        providerMethodId: true,
+      },
+    });
+    if (method === null) {
+      throw new BadRequestException({
+        code: 'SAVED_PAYMENT_METHOD_NOT_FOUND',
+        message: 'Saved payment method not found or inactive',
+      });
+    }
+    if (method.gatewayType !== input.gatewayType) {
+      throw new BadRequestException({
+        code: 'SAVED_PAYMENT_METHOD_GATEWAY_MISMATCH',
+        message: 'Saved payment method does not match the selected gateway',
+      });
+    }
+    if (typeof method.providerMethodId !== 'string' || method.providerMethodId.trim().length === 0) {
+      throw new BadRequestException({
+        code: 'SAVED_PAYMENT_METHOD_INVALID',
+        message: 'Saved payment method has no provider instrument id',
+      });
+    }
+    return {
+      id: method.id,
+      providerMethodId: method.providerMethodId.trim(),
+    };
   }
 
   /**

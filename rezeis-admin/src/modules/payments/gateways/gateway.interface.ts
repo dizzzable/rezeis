@@ -27,12 +27,20 @@ export interface GatewayCheckoutInput {
   customerPhone?: string;
   /** Arbitrary metadata passed through */
   metadata?: Record<string, string>;
+  /**
+   * Provider payment_method.id for off-session / merchant-initiated charge
+   * (YooKassa autopayments). When set, adapters should omit redirect confirmation.
+   */
+  paymentMethodId?: string;
 }
 
 export interface GatewayCheckoutResult {
   /** External payment ID assigned by the gateway */
   externalPaymentId: string;
-  /** URL to redirect the user to for payment */
+  /**
+   * URL to redirect the user to for payment.
+   * May be empty for off-session charges that complete without a hosted page.
+   */
   paymentUrl: string;
   /** Raw gateway response for logging */
   raw?: unknown;

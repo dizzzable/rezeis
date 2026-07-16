@@ -26,6 +26,7 @@ import { isGatewayConfigured } from '../utils/payment-gateway-settings.util';
 import { buildRenewalCheckoutFingerprint, fingerprint } from '../utils/checkout-fingerprint.util';
 import { PaymentProviderExecutionService } from './payment-provider-execution.service';
 import { PaymentSubscriptionMutationService } from './payment-subscription-mutation.service';
+import { SavedPaymentMethodService } from './saved-payment-method.service';
 
 const PROVIDER_CREATION_CLAIM_PREFIX = '__RENEWAL_PROVIDER_CREATE__:';
 
@@ -52,6 +53,8 @@ export interface RenewalCheckoutInput {
   /** Optional per-subscription selected renewal add-on ids (T-007). Honored
    *  only when the `renewalAddOns` rollout flag is on. */
   readonly addOns?: ReadonlyMap<string, readonly string[]>;
+  /** Local SavedPaymentMethod.id for off-session YooKassa charge. */
+  readonly savedPaymentMethodId?: string;
 }
 
 /**
@@ -71,6 +74,7 @@ export class PaymentsRenewalCheckoutService {
     private readonly profileSyncQueueService: ProfileSyncQueueService,
     private readonly settingsService: SettingsService,
     private readonly accessModeGuard: AccessModeGuard,
+    private readonly savedPaymentMethodService: SavedPaymentMethodService,
   ) {}
 
   public async renewalCheckout(
@@ -165,6 +169,7 @@ export class PaymentsRenewalCheckoutService {
       gatewayType: input.gatewayType,
       channel,
       currency: priced.currency,
+      savedPaymentMethodId: input.savedPaymentMethodId ?? null,
       lines: priced.items.map((item) => ({
         subscriptionId: item.subscriptionId,
         planId: item.planId,
@@ -287,6 +292,18 @@ export class PaymentsRenewalCheckoutService {
             providerMode: readProviderMode(current) ?? 'REDIRECT',
           });
         }
+        // Off-session drafts can settle without checkoutUrl; replay once gatewayId is real.
+        if (
+          typeof current.gatewayId === 'string' &&
+          current.gatewayId.length > 0 &&
+          !current.gatewayId.startsWith(PROVIDER_CREATION_CLAIM_PREFIX)
+        ) {
+          return mapCheckoutResponse({
+            transaction: current,
+            checkoutUrl: null,
+            providerMode: readProviderMode(current) ?? 'IMMEDIATE',
+          });
+        }
       }
       throw new ServiceUnavailableException({
         code: 'PROVIDER_CHECKOUT_CREATION_UNRESOLVED',
@@ -294,20 +311,33 @@ export class PaymentsRenewalCheckoutService {
       });
     }
 
+    const chargedMethod =
+      typeof input.savedPaymentMethodId === 'string' && input.savedPaymentMethodId.length > 0
+        ? await this.savedPaymentMethodService.resolveActiveForCharge({
+            userId: transaction.userId,
+            savedPaymentMethodId: input.savedPaymentMethodId,
+            gatewayType: input.gatewayType,
+          })
+        : null;
+
     const providerCheckout = await this.paymentProviderExecutionService.createCheckout({
       gateway,
       transaction,
       description: `RENEW x${priced.items.length}`,
       successUrl: input.successUrl ?? null,
       failUrl: input.failUrl ?? null,
+      paymentMethodId: chargedMethod?.providerMethodId ?? null,
+      savedPaymentMethodId: chargedMethod?.id ?? null,
     });
     if (
       providerCheckout === null ||
       typeof providerCheckout !== 'object' ||
       typeof providerCheckout.gatewayId !== 'string' ||
       providerCheckout.gatewayId.length === 0 ||
-      typeof providerCheckout.checkoutUrl !== 'string' ||
-      providerCheckout.checkoutUrl.length === 0
+      // Off-session charges may complete without a hosted checkout URL.
+      (typeof providerCheckout.checkoutUrl === 'string'
+        ? providerCheckout.checkoutUrl.length === 0 && providerCheckout.providerMode === 'REDIRECT'
+        : providerCheckout.providerMode === 'REDIRECT')
     ) {
       throw new ServiceUnavailableException({
         code: 'PROVIDER_CHECKOUT_RESULT_INVALID',
@@ -571,6 +601,7 @@ function buildRenewalRequestFingerprint(input: {
     userId: input.userId,
     gatewayType: input.input.gatewayType,
     channel: input.channel,
+    savedPaymentMethodId: input.input.savedPaymentMethodId ?? null,
     subscriptionIds: [...new Set(input.input.subscriptionIds)].sort(),
     durations: [...(input.input.durations?.entries() ?? [])]
       .sort(([left], [right]) => left.localeCompare(right))

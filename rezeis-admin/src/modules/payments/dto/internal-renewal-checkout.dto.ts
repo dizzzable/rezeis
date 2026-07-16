@@ -128,6 +128,16 @@ export class InternalRenewalCheckoutDto {
   @ValidateNested({ each: true })
   @Type(() => RenewalAddOnSelectionDto)
   public addOns?: RenewalAddOnSelectionDto[];
+
+  /**
+   * Local SavedPaymentMethod.id for off-session YooKassa charge on renewal.
+   * Must belong to the same user and match `gatewayType`.
+   */
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  @MaxLength(64)
+  public savedPaymentMethodId?: string;
 }
 
 /**

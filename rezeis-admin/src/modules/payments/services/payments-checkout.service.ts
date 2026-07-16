@@ -31,6 +31,7 @@ import { normalizePaymentProviderError } from '../utils/payment-provider-error.u
 import { PaymentProviderExecutionService } from './payment-provider-execution.service';
 import { PaymentSubscriptionMutationService } from './payment-subscription-mutation.service';
 import { PaymentsTransactionsService } from './payments-transactions.service';
+import { SavedPaymentMethodService } from './saved-payment-method.service';
 
 @Injectable()
 export class PaymentsCheckoutService {
@@ -42,6 +43,7 @@ export class PaymentsCheckoutService {
     private readonly profileSyncQueueService: ProfileSyncQueueService,
     private readonly settingsService: SettingsService,
     private readonly accessModeGuard: AccessModeGuard,
+    private readonly savedPaymentMethodService: SavedPaymentMethodService,
   ) {}
 
   /**
@@ -154,6 +156,14 @@ export class PaymentsCheckoutService {
     }
 
     const planSnapshot = readTransactionPlanSnapshot(transaction);
+    const chargedMethod =
+      typeof input.savedPaymentMethodId === 'string' && input.savedPaymentMethodId.length > 0
+        ? await this.savedPaymentMethodService.resolveActiveForCharge({
+            userId,
+            savedPaymentMethodId: input.savedPaymentMethodId,
+            gatewayType: input.gatewayType,
+          })
+        : null;
     const providerCheckout = await this.paymentProviderExecutionService.createCheckout({
       gateway,
       transaction,
@@ -163,6 +173,8 @@ export class PaymentsCheckoutService {
       }),
       successUrl: input.successUrl ?? null,
       failUrl: input.failUrl ?? null,
+      paymentMethodId: chargedMethod?.providerMethodId ?? null,
+      savedPaymentMethodId: chargedMethod?.id ?? null,
     });
 
     const updatedTransaction = await this.prismaService.transaction.update({
