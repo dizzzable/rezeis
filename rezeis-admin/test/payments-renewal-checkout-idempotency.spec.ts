@@ -31,6 +31,7 @@ const EXPECTED_FP = buildRenewalCheckoutFingerprint({
   gatewayType: 'YOOKASSA',
   channel: 'WEB',
   currency: 'USD',
+  savedPaymentMethodId: null,
   lines: [{ subscriptionId: 'sub-1', planId: 'plan-1', durationDays: 30, termId: null, addOns: [] }],
 });
 
@@ -40,6 +41,7 @@ const EXPECTED_REQUEST_FP = fingerprint({
   userId: 'user-1',
   gatewayType: 'YOOKASSA',
   channel: 'WEB',
+  savedPaymentMethodId: null,
   subscriptionIds: ['sub-1'],
   durations: [],
   plans: [],
@@ -138,8 +140,16 @@ function build(options: {
     getInternalPlatformPolicy: options.getInternalPlatformPolicy ?? (async () => ({ accessMode: 'PUBLIC' })),
   };
   const guard = { evaluate: () => null };
+  const savedMethods = { resolveActiveForCharge: async () => null };
   const service = new PaymentsRenewalCheckoutService(
-    prisma as never, renewal as never, provider as never, mutation as never, queue as never, settings as never, guard as never,
+    prisma as never,
+    renewal as never,
+    provider as never,
+    mutation as never,
+    queue as never,
+    settings as never,
+    guard as never,
+    savedMethods as never,
   );
   return { service, created, providerCalls: () => providerCalls };
 }
