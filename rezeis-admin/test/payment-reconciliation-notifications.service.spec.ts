@@ -396,6 +396,7 @@ function createService(state: ReturnType<typeof createState>): PaymentReconcilia
     { warn: () => {}, info: () => {}, error: () => {}, emit: () => {} } as never,
     { enqueueRegisterIncome: async () => {} } as unknown as MoyNalogQueueService,
     { recordFirstPurchase: async () => {}, revertConversion: async () => {} } as never,
+    { upsertFromYookassaPayment: async () => undefined } as never,
   );
 }
 

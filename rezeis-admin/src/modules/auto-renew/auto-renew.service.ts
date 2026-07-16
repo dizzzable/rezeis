@@ -25,9 +25,14 @@ const IDEMPOTENCY_PREFIX = 'auto-renew:';
  *
  * Responsibilities:
  *  1. Within T-5m of expiry: charge preferred saved method (autopay on), up to 3 attempts
- *  2. On success: renewal checkout fulfills → ACTIVE + extended expiresAt
+ *  2. On SUCCESS: never extend here — webhook reconcile → applyCompletedTransaction
+ *     (create may return IMMEDIATE/succeeded; sub stays unextended until callback)
  *  3. After 3 failed attempts (or no chargeable method past due): mark EXPIRED
  *  4. Create `UserNotificationEvent` rows for expiry warnings (3d, 1d)
+ *
+ * This service never writes expiresAt. COMPLETED is only counted as autopay
+ * success / skip-expire; paid extension runs via webhook → reconciliation →
+ * PaymentSubscriptionMutationService.applyCompletedTransaction.
  *
  * Attempt accounting is derived from transaction idempotency keys
  * `auto-renew:{subscriptionId}:{expiresAtMs}:a{n}` — no extra schema.

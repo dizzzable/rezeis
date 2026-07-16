@@ -249,6 +249,7 @@ export class PaymentsRenewalCheckoutService {
     // amount. Complete the combined-renewal draft and fulfill every item
     // directly, mirroring the zero-total path in PaymentsCheckoutService —
     // the user's subscriptions are renewed instead of a "payment failed".
+    // Paid money (amount > 0) never fulfills here — only after webhook SUCCESS.
     if (Number(transaction.amount) <= 0) {
       const completedTransaction = await this.prismaService.transaction.update({
         where: { id: transaction.id },
@@ -356,6 +357,8 @@ export class PaymentsRenewalCheckoutService {
       throw error;
     }
 
+    // Persist provider ids only; leave status PENDING. IMMEDIATE (checkoutUrl
+    // null) still waits for webhook SUCCESS — do not applyCompletedTransaction.
     const updatedTransaction = await this.prismaService.transaction.update({
       where: { id: transaction.id },
       data: {
