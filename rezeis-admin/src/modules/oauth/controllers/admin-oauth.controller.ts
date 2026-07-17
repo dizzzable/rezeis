@@ -27,10 +27,12 @@ import { GitHubAuthService } from '../services/github-auth.service';
 import { OAuthConfigService } from '../services/oauth-config.service';
 import { OAuthLoginService } from '../services/oauth-login.service';
 import { TelegramAuthService } from '../services/telegram-auth.service';
+import { Public } from '../../../common/decorators/public.decorator';
 
 // ── Public endpoints (no JWT required) ───────────────────────────────────────
 
 @Controller('admin/oauth')
+@Public()
 export class OAuthPublicController {
   public constructor(
     private readonly configService: OAuthConfigService,

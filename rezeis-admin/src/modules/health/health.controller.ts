@@ -1,6 +1,7 @@
 import { Controller, Get, HttpCode, HttpStatus, Res } from '@nestjs/common';
 import { Response } from 'express';
 import { SkipThrottle } from '@nestjs/throttler';
+import { Public } from '../../common/decorators/public.decorator';
 
 import { HealthService } from './health.service';
 
@@ -13,6 +14,7 @@ import { HealthService } from './health.service';
  *   GET /api/health/ready — readiness probe (DB + Redis must be up)
  */
 @SkipThrottle()
+@Public()
 @Controller('health')
 export class HealthController {
   public constructor(private readonly healthService: HealthService) {}

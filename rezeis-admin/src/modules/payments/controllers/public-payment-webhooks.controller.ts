@@ -15,8 +15,10 @@ import { paymentsConfig } from '../../../common/config/payments.config';
 import { PaymentWebhookIngressResultInterface } from '../interfaces/payment-webhook-envelope.interface';
 import { PaymentWebhookIngressService } from '../services/payment-webhook-ingress.service';
 import { TelegramStarsWebhookService } from '../services/telegram-stars-webhook.service';
+import { Public } from '../../../common/decorators/public.decorator';
 
 @Controller('v1/payments/webhooks')
+@Public()
 export class PublicPaymentWebhooksController {
   public constructor(
     private readonly paymentWebhookIngressService: PaymentWebhookIngressService,

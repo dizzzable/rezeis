@@ -43,6 +43,7 @@ import {
   RemnawaveWebhookService,
   WebhookEventSummary,
 } from '../services/remnawave-webhook.service';
+import { Public } from '../../../common/decorators/public.decorator';
 
 @Controller('admin/remnawave')
 @UseGuards(AdminJwtAuthGuard, RbacGuard)
@@ -313,6 +314,7 @@ export class AdminRemnawaveController {
 // ── Webhook Receiver (no JWT — uses HMAC signature) ──────────────────────────
 
 @Controller('webhook/remnawave')
+@Public()
 export class RemnawaveWebhookController {
   public constructor(private readonly webhookService: RemnawaveWebhookService) {}
 

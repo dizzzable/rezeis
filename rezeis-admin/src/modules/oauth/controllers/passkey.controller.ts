@@ -14,6 +14,7 @@ import { Request } from 'express';
 import { AdminJwtAuthGuard } from '../../auth/guards/admin-jwt-auth.guard';
 import { PasskeyCredentialInfo } from '../interfaces/passkey.interface';
 import { PasskeyService } from '../services/passkey.service';
+import { Public } from '../../../common/decorators/public.decorator';
 
 /**
  * Passkey (WebAuthn/FIDO2) endpoints.
@@ -25,6 +26,7 @@ import { PasskeyService } from '../services/passkey.service';
 // ── Public endpoints (authentication) ────────────────────────────────────────
 
 @Controller('admin/passkey')
+@Public()
 export class PasskeyPublicController {
   public constructor(private readonly passkeyService: PasskeyService) {}
 
