@@ -16,10 +16,7 @@ import {
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
-import {
-  AccessModeGate,
-  AccessModeGuard,
-} from '../../settings/services/access-mode-guard.service';
+import { AccessModeGate, AccessModeGuard } from '../../settings/services/access-mode-guard.service';
 import { SettingsService } from '../../settings/services/settings.service';
 import { InternalPaymentCheckoutDto } from '../dto/internal-payment-checkout.dto';
 import {
@@ -71,7 +68,9 @@ export class PaymentsCheckoutService {
     throw new BadRequestException('A userId or telegramId is required');
   }
 
-  public async checkout(input: InternalPaymentCheckoutDto): Promise<InternalPaymentCheckoutInterface> {
+  public async checkout(
+    input: InternalPaymentCheckoutDto,
+  ): Promise<InternalPaymentCheckoutInterface> {
     // Two-layer enforcement (Property 2): the reiwa edge runs the same
     // gate, but a direct internal API call would otherwise bypass the
     // platform access mode. Renewal is intentionally NOT gated here —
@@ -141,7 +140,9 @@ export class PaymentsCheckoutService {
         data: { status: TransactionStatus.COMPLETED },
       });
       const { syncJobs } =
-        await this.paymentSubscriptionMutationService.applyCompletedTransaction(completedTransaction);
+        await this.paymentSubscriptionMutationService.applyCompletedTransaction(
+          completedTransaction,
+        );
       for (const syncJob of syncJobs) {
         await this.profileSyncQueueService.enqueue(syncJob.id);
       }
@@ -156,26 +157,32 @@ export class PaymentsCheckoutService {
     }
 
     const planSnapshot = readTransactionPlanSnapshot(transaction);
-    const chargedMethod =
+    const createProviderCheckout = async (
+      chargedMethod: { readonly id: string; readonly providerMethodId: string } | null,
+    ) =>
+      this.paymentProviderExecutionService.createCheckout({
+        gateway,
+        transaction,
+        description: buildCheckoutDescription({
+          purchaseType: input.purchaseType,
+          planSnapshot,
+        }),
+        successUrl: input.successUrl ?? null,
+        failUrl: input.failUrl ?? null,
+        paymentMethodId: chargedMethod?.providerMethodId ?? null,
+        savedPaymentMethodId: chargedMethod?.id ?? null,
+      });
+    const providerCheckout =
       typeof input.savedPaymentMethodId === 'string' && input.savedPaymentMethodId.length > 0
-        ? await this.savedPaymentMethodService.resolveActiveForCharge({
-            userId,
-            savedPaymentMethodId: input.savedPaymentMethodId,
-            gatewayType: input.gatewayType,
-          })
-        : null;
-    const providerCheckout = await this.paymentProviderExecutionService.createCheckout({
-      gateway,
-      transaction,
-      description: buildCheckoutDescription({
-        purchaseType: input.purchaseType,
-        planSnapshot,
-      }),
-      successUrl: input.successUrl ?? null,
-      failUrl: input.failUrl ?? null,
-      paymentMethodId: chargedMethod?.providerMethodId ?? null,
-      savedPaymentMethodId: chargedMethod?.id ?? null,
-    });
+        ? await this.savedPaymentMethodService.withActiveForCharge(
+            {
+              userId,
+              savedPaymentMethodId: input.savedPaymentMethodId,
+              gatewayType: input.gatewayType,
+            },
+            createProviderCheckout,
+          )
+        : await createProviderCheckout(null);
 
     const updatedTransaction = await this.prismaService.transaction.update({
       where: { id: transaction.id },
@@ -216,9 +223,8 @@ export class PaymentsCheckoutService {
       readOptionalString(gatewayData, ['failureReason']) ??
       readOptionalString(gatewayData, ['lastError']) ??
       null;
-    const failureReason = rawFailureReason === null
-      ? null
-      : normalizePaymentProviderError(rawFailureReason);
+    const failureReason =
+      rawFailureReason === null ? null : normalizePaymentProviderError(rawFailureReason);
     return {
       paymentId: transaction.paymentId,
       status: transaction.status,

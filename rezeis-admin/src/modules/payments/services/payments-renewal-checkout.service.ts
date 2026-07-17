@@ -97,7 +97,10 @@ export class PaymentsRenewalCheckoutService {
       const existing = await this.findByIdempotencyKey(resolvedUserId, idempotencyKey);
       if (existing !== null) {
         const persistedRequestFingerprint = readRenewalRequestFingerprint(existing.planSnapshot);
-        if (persistedRequestFingerprint === null || persistedRequestFingerprint !== requestFingerprint) {
+        if (
+          persistedRequestFingerprint === null ||
+          persistedRequestFingerprint !== requestFingerprint
+        ) {
           throw new ConflictException({
             code: 'IDEMPOTENCY_KEY_CONFLICT',
             message: 'Idempotency key was already used for a different renewal request',
@@ -224,7 +227,10 @@ export class PaymentsRenewalCheckoutService {
     // A concurrent keyed request won the unique race — replay its draft.
     if ('replay' in draft) {
       this.assertExpectedQuote(input, draft.replay.amount, draft.replay.currency);
-      if (draft.replay.transactionStatus === TransactionStatus.PENDING && draft.replay.checkoutUrl === null) {
+      if (
+        draft.replay.transactionStatus === TransactionStatus.PENDING &&
+        draft.replay.checkoutUrl === null
+      ) {
         throw new ServiceUnavailableException({
           code: 'PROVIDER_CHECKOUT_CREATION_UNRESOLVED',
           message: 'Provider checkout creation is unresolved; awaiting reconciliation',
@@ -256,7 +262,9 @@ export class PaymentsRenewalCheckoutService {
         data: { status: TransactionStatus.COMPLETED },
       });
       const { syncJobs } =
-        await this.paymentSubscriptionMutationService.applyCompletedTransaction(completedTransaction);
+        await this.paymentSubscriptionMutationService.applyCompletedTransaction(
+          completedTransaction,
+        );
       for (const syncJob of syncJobs) {
         await this.profileSyncQueueService.enqueue(syncJob.id);
       }
@@ -317,25 +325,31 @@ export class PaymentsRenewalCheckoutService {
     >;
     let providerSubmissionStarted = false;
     try {
-      const chargedMethod =
+      const createProviderCheckout = async (
+        chargedMethod: { readonly id: string; readonly providerMethodId: string } | null,
+      ) => {
+        providerSubmissionStarted = true;
+        return this.paymentProviderExecutionService.createCheckout({
+          gateway,
+          transaction,
+          description: `RENEW x${priced.items.length}`,
+          successUrl: input.successUrl ?? null,
+          failUrl: input.failUrl ?? null,
+          paymentMethodId: chargedMethod?.providerMethodId ?? null,
+          savedPaymentMethodId: chargedMethod?.id ?? null,
+        });
+      };
+      providerCheckout =
         typeof input.savedPaymentMethodId === 'string' && input.savedPaymentMethodId.length > 0
-          ? await this.savedPaymentMethodService.resolveActiveForCharge({
-              userId: transaction.userId,
-              savedPaymentMethodId: input.savedPaymentMethodId,
-              gatewayType: input.gatewayType,
-            })
-          : null;
-
-      providerSubmissionStarted = true;
-      providerCheckout = await this.paymentProviderExecutionService.createCheckout({
-        gateway,
-        transaction,
-        description: `RENEW x${priced.items.length}`,
-        successUrl: input.successUrl ?? null,
-        failUrl: input.failUrl ?? null,
-        paymentMethodId: chargedMethod?.providerMethodId ?? null,
-        savedPaymentMethodId: chargedMethod?.id ?? null,
-      });
+          ? await this.savedPaymentMethodService.withActiveForCharge(
+              {
+                userId: transaction.userId,
+                savedPaymentMethodId: input.savedPaymentMethodId,
+                gatewayType: input.gatewayType,
+              },
+              createProviderCheckout,
+            )
+          : await createProviderCheckout(null);
       if (
         providerCheckout === null ||
         typeof providerCheckout !== 'object' ||
@@ -437,7 +451,9 @@ export class PaymentsRenewalCheckoutService {
               snapshotVersion: 1,
               itemCount: priced.items.length,
               snapshotSource: 'RENEWAL_DRAFT',
-              ...(requestFingerprint === null ? {} : { renewalRequestFingerprint: requestFingerprint }),
+              ...(requestFingerprint === null
+                ? {}
+                : { renewalRequestFingerprint: requestFingerprint }),
             } as Prisma.InputJsonValue,
             deviceTypes: [],
             idempotencyKey,
@@ -534,13 +550,17 @@ export class PaymentsRenewalCheckoutService {
   /** Same composition → replay the existing draft; different → conflict. */
   private replayOrConflict(
     existing: ExistingRenewalDraft,
-    input: { readonly checkoutFingerprint: string | null; readonly requestFingerprint: string | null },
+    input: {
+      readonly checkoutFingerprint: string | null;
+      readonly requestFingerprint: string | null;
+    },
   ): InternalPaymentCheckoutInterface {
     const persistedRequestFingerprint = readRenewalRequestFingerprint(existing.planSnapshot);
     const requestMatches =
       input.requestFingerprint !== null && persistedRequestFingerprint === input.requestFingerprint;
     const checkoutMatches =
-      input.checkoutFingerprint !== null && existing.checkoutFingerprint === input.checkoutFingerprint;
+      input.checkoutFingerprint !== null &&
+      existing.checkoutFingerprint === input.checkoutFingerprint;
     if (!requestMatches && !checkoutMatches) {
       throw new ConflictException({
         code: 'IDEMPOTENCY_KEY_CONFLICT',
@@ -700,7 +720,8 @@ async function resolveRenewalUserId(
   prisma: PrismaService,
   input: RenewalCheckoutInput,
 ): Promise<string> {
-  const suppliedUserId = typeof input.userId === 'string' && input.userId.length > 0 ? input.userId : null;
+  const suppliedUserId =
+    typeof input.userId === 'string' && input.userId.length > 0 ? input.userId : null;
   if (typeof input.telegramId === 'string' && input.telegramId.length > 0) {
     const user = await prisma.user.findUnique({
       where: { telegramId: BigInt(input.telegramId) },
