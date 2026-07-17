@@ -93,6 +93,30 @@ describe('PaymentWebhookNormalizerService', () => {
     assert.equal(result.eventStatus, 'paid');
   });
 
+  it('rejects a forged RIOPAY completed webhook without a valid X-Signature', () => {
+    const rawBody = Buffer.from(
+      JSON.stringify({
+        id: 'riopay-provider-id',
+        externalId: 'local-payment-id',
+        status: 'COMPLETED',
+      }),
+      'utf8',
+    );
+
+    assert.throws(
+      () =>
+        service.normalizeWebhook({
+          gatewayType: PaymentGatewayType.RIOPAY,
+          rawBody,
+          headers: { 'x-signature': 'forged' },
+          clientIp: null,
+          gatewaySettings: { apiToken: 'riopay-api-token' },
+          verifySignature: true,
+        }),
+      ForbiddenException,
+    );
+  });
+
   it('normalizes PLATEGA webhooks with callback header verification', () => {
     const rawBody = Buffer.from(
       JSON.stringify({
