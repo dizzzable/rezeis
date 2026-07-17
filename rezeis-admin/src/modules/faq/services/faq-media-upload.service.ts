@@ -30,7 +30,6 @@ const ALLOWED_IMAGE_TYPES = new Set([
   'image/webp',
   'image/gif',
   'image/avif',
-  'image/svg+xml',
 ]);
 const ALLOWED_VIDEO_TYPES = new Set([
   'video/mp4',
@@ -45,7 +44,6 @@ const EXT_BY_MIME: Record<string, string> = {
   'image/webp': '.webp',
   'image/gif': '.gif',
   'image/avif': '.avif',
-  'image/svg+xml': '.svg',
   'video/mp4': '.mp4',
   'video/webm': '.webm',
   'video/quicktime': '.mov',
@@ -83,10 +81,18 @@ export class FaqMediaUploadService implements OnModuleInit {
   }
 
   public async persist(input: PersistInput): Promise<FaqUploadedMediaInterface> {
+    // FAQ uploads are served from the admin origin; SVG can execute script
+    // when opened as a document, so reject it to prevent stored XSS.
+    if (input.mimeType === 'image/svg+xml') {
+      throw new BadRequestException(
+        'SVG-файлы запрещены по соображениям безопасности. Пожалуйста, используйте PNG, JPEG или WebP.',
+      );
+    }
+
     const mediaType = inferMediaType(input.mimeType);
     if (mediaType === null) {
       throw new BadRequestException(
-        `Unsupported file type: ${input.mimeType}. Allowed: image (png, jpeg, webp, gif, avif, svg) or video (mp4, webm, mov, ogv).`,
+        `Unsupported file type: ${input.mimeType}. Allowed: image (png, jpeg, webp, gif, avif) or video (mp4, webm, mov, ogv).`,
       );
     }
     if (input.buffer.length === 0) {
