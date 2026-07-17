@@ -30,6 +30,7 @@ import { AdminJwtAuthGuard } from '../guards/admin-jwt-auth.guard';
 import { CurrentAdminInterface } from '../interfaces/current-admin.interface';
 import { AdminAuthService } from '../services/admin-auth.service';
 import { extractRequestMetadata } from '../utils/request-metadata.util';
+import { Public } from '../../../common/decorators/public.decorator';
 
 interface AuthStatusResponse {
   readonly hasAdmins: boolean;
@@ -73,6 +74,7 @@ export class AdminAuthController {
   ) {}
 
   @Get('status')
+  @Public()
   @ApiOperation({ summary: 'Reports whether at least one admin exists' })
   @ApiOkResponse({ description: 'Bootstrap discovery result' })
   public async getStatus(): Promise<AuthStatusResponse> {
@@ -85,6 +87,7 @@ export class AdminAuthController {
   }
 
   @Post('register')
+  @Public()
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Registers the first DEV admin when the admin table is empty',
@@ -109,6 +112,7 @@ export class AdminAuthController {
   }
 
   @Post('login')
+  @Public()
   @Throttle({ default: { ttl: 60_000, limit: 5 } })
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Authenticates an admin and issues a JWT' })

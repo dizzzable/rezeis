@@ -21,6 +21,12 @@ export class TelegramStarsWebhookService {
     readonly clientIp: string | null;
     readonly botToken: string | null;
   }): Promise<PaymentWebhookIngressResultInterface | null> {
+    await this.paymentWebhookIngressService.verifyWebhookSignature({
+      gatewayType: PaymentGatewayType.TELEGRAM_STARS,
+      rawBody: input.rawBody,
+      headers: input.headers,
+      clientIp: input.clientIp,
+    });
     const parsedPayload = parseTelegramUpdate(input.rawBody);
     if (parsedPayload.preCheckoutQueryId !== null) {
       if (input.botToken === null) {
@@ -52,7 +58,7 @@ export class TelegramStarsWebhookService {
       rawBody: input.rawBody,
       headers: input.headers,
       clientIp: input.clientIp,
-      verifySignature: true,
+      verifySignature: false,
     });
   }
 }

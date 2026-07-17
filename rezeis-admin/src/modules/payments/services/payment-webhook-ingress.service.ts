@@ -10,9 +10,7 @@ import {
   PAYMENT_RECONCILIATION_QUEUE,
   runPaymentReconciliationEnqueueWithTimeout,
 } from '../constants/payment-reconciliation.constant';
-import {
-  PaymentWebhookIngressResultInterface,
-} from '../interfaces/payment-webhook-envelope.interface';
+import { PaymentWebhookIngressResultInterface } from '../interfaces/payment-webhook-envelope.interface';
 import {
   PAYMENT_WEBHOOK_STATUS_ENQUEUED,
   PaymentWebhookInboxService,
@@ -36,6 +34,24 @@ export class PaymentWebhookIngressService {
     @InjectQueue(PAYMENT_RECONCILIATION_QUEUE)
     private readonly paymentReconciliationQueue: Queue,
   ) {}
+
+  public async verifyWebhookSignature(input: {
+    readonly gatewayType: PaymentGatewayType;
+    readonly rawBody: Buffer;
+    readonly headers: Record<string, string | string[] | undefined>;
+    readonly clientIp: string | null;
+  }): Promise<void> {
+    const gateway = await this.prismaService.paymentGateway.findUnique({
+      where: { type: input.gatewayType },
+    });
+    if (gateway === null) {
+      throw new NotFoundException('Payment gateway not found');
+    }
+    this.paymentWebhookNormalizerService.verifyWebhookSignature({
+      ...input,
+      gatewaySettings: gateway.settings,
+    });
+  }
 
   public async ingestWebhook(
     input: IngestWebhookInput,
@@ -86,10 +102,9 @@ export class PaymentWebhookIngressService {
     return {
       accepted: true,
       duplicate: receivedEvent.duplicate,
-      lifecycleStatus:
-        receivedEvent.duplicate
-          ? receivedEvent.event.status ?? PAYMENT_WEBHOOK_STATUS_ENQUEUED
-          : PAYMENT_WEBHOOK_STATUS_ENQUEUED,
+      lifecycleStatus: receivedEvent.duplicate
+        ? (receivedEvent.event.status ?? PAYMENT_WEBHOOK_STATUS_ENQUEUED)
+        : PAYMENT_WEBHOOK_STATUS_ENQUEUED,
     };
   }
 }

@@ -1,4 +1,5 @@
 import { Controller, Get } from '@nestjs/common';
+import { Public } from './common/decorators/public.decorator';
 
 import { AppService } from './app.service';
 
@@ -19,6 +20,7 @@ export class AppController {
    * Returns a baseline service status payload.
    */
   @Get()
+  @Public()
   public getStatus(): AppStatusResponse {
     return this.appService.getStatus();
   }

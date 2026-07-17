@@ -30,6 +30,18 @@ const yookassaTrustedBlockList = createTrustedBlockList(YOOKASSA_TRUSTED_NETWORK
 
 @Injectable()
 export class PaymentWebhookNormalizerService {
+  public verifyWebhookSignature(input: Omit<NormalizeWebhookInput, 'verifySignature'>): void {
+    const rawPayload = parseWebhookPayload(input.rawBody, input.gatewayType);
+    this.verifySignature({
+      gatewayType: input.gatewayType,
+      rawBody: input.rawBody,
+      rawPayload,
+      headers: input.headers,
+      gatewaySettings: readGatewaySettings(input.gatewaySettings as never),
+      clientIp: input.clientIp,
+    });
+  }
+
   public normalizeWebhook(input: NormalizeWebhookInput): PaymentWebhookEnvelopeInterface {
     const rawPayload = parseWebhookPayload(input.rawBody, input.gatewayType);
     const gatewaySettings = readGatewaySettings(input.gatewaySettings as never);
@@ -85,7 +97,12 @@ export class PaymentWebhookNormalizerService {
         verifyYookassaSourceIp(input.clientIp);
         return;
       case PaymentGatewayType.HELEKET:
-        verifyHeleketSignature(input.rawBody, input.rawPayload, input.headers, input.gatewaySettings);
+        verifyHeleketSignature(
+          input.rawBody,
+          input.rawPayload,
+          input.headers,
+          input.gatewaySettings,
+        );
         return;
       case PaymentGatewayType.PLATEGA:
         verifyPlategaHeaders(input.headers, input.gatewaySettings);
@@ -96,10 +113,12 @@ export class PaymentWebhookNormalizerService {
       case PaymentGatewayType.CRYPTOMUS:
         verifyCryptomusSignature(input.rawBody, input.headers, input.gatewaySettings);
         return;
+      case PaymentGatewayType.RIOPAY:
+        verifyRiopaySignature(input.rawBody, input.headers, input.gatewaySettings);
+        return;
       case PaymentGatewayType.ANTILOPAY:
       case PaymentGatewayType.OVERPAY:
       case PaymentGatewayType.PAYPALYCH:
-      case PaymentGatewayType.RIOPAY:
         // Webhook signature verification for these gateways is intentionally
         // permissive at the moment: callers either rely on IP allowlists,
         // network-layer auth, or signed payloads we cannot enforce here
@@ -323,7 +342,11 @@ function parseWebhookPayload(
 ): Record<string, unknown> {
   try {
     const parsedPayload = JSON.parse(rawBody.toString('utf8')) as unknown;
-    if (typeof parsedPayload !== 'object' || parsedPayload === null || Array.isArray(parsedPayload)) {
+    if (
+      typeof parsedPayload !== 'object' ||
+      parsedPayload === null ||
+      Array.isArray(parsedPayload)
+    ) {
       throw new BadRequestException('PAYMENT_WEBHOOK_PAYLOAD_INVALID');
     }
     return parsedPayload as Record<string, unknown>;
@@ -335,9 +358,7 @@ function parseWebhookPayload(
   }
 }
 
-function resolveTelegramPaymentPayload(
-  payload: Record<string, unknown>,
-): Record<string, unknown> {
+function resolveTelegramPaymentPayload(payload: Record<string, unknown>): Record<string, unknown> {
   const message = readNestedObject(payload, 'message');
   const successfulPayment = readNestedObject(message, 'successful_payment');
   if (Object.keys(successfulPayment).length > 0) {
@@ -388,6 +409,22 @@ function verifyTelegramStarsSignature(
 
 function verifyYookassaSourceIp(clientIp: string | null): void {
   if (clientIp === null || !yookassaTrustedBlockList.check(clientIp)) {
+    throw new ForbiddenException('PAYMENT_WEBHOOK_SIGNATURE_INVALID');
+  }
+}
+
+function verifyRiopaySignature(
+  rawBody: Buffer,
+  headers: Record<string, string | string[] | undefined>,
+  gatewaySettings: Record<string, unknown>,
+): void {
+  const apiToken = readStringSetting(gatewaySettings, 'apiToken');
+  const signature = readHeader(headers, 'x-signature');
+  if (!apiToken || !signature) {
+    throw new ForbiddenException('PAYMENT_WEBHOOK_SIGNATURE_INVALID');
+  }
+  const expected = createHmac('sha512', apiToken).update(rawBody).digest('hex');
+  if (!compareSecrets(expected, signature)) {
     throw new ForbiddenException('PAYMENT_WEBHOOK_SIGNATURE_INVALID');
   }
 }
@@ -471,8 +508,7 @@ function verifyWataSignature(
   gatewaySettings: Record<string, unknown>,
 ): void {
   const secret = readStringSetting(gatewaySettings, 'webhookSecret');
-  const signature =
-    readHeader(headers, 'x-signature') ?? readHeader(headers, 'x-wata-signature');
+  const signature = readHeader(headers, 'x-signature') ?? readHeader(headers, 'x-wata-signature');
   if (!secret || !signature) {
     throw new ForbiddenException('PAYMENT_WEBHOOK_SIGNATURE_INVALID');
   }
@@ -525,9 +561,7 @@ function verifyAurapaySignature(
   const sortedKeys = Object.keys(rawPayload)
     .filter((key) => key !== 'sign' && key !== 'signature')
     .sort();
-  const concatenated = sortedKeys
-    .map((key) => stringifyAurapayValue(rawPayload[key]))
-    .join('');
+  const concatenated = sortedKeys.map((key) => stringifyAurapayValue(rawPayload[key])).join('');
   const expected = createHmac('sha256', secret).update(concatenated).digest('hex');
   if (!compareSecrets(expected, signature)) {
     throw new ForbiddenException('PAYMENT_WEBHOOK_SIGNATURE_INVALID');
@@ -667,8 +701,12 @@ function calculateHeleketSignatureCandidates(
 
   return [
     baseCandidate,
-    createHash('md5').update(`${cleanedBody.toString('base64')}${secret}`).digest('hex'),
-    createHash('md5').update(`${sortedBody.toString('base64')}${secret}`).digest('hex'),
+    createHash('md5')
+      .update(`${cleanedBody.toString('base64')}${secret}`)
+      .digest('hex'),
+    createHash('md5')
+      .update(`${sortedBody.toString('base64')}${secret}`)
+      .digest('hex'),
   ];
 }
 
@@ -724,10 +762,7 @@ function readOptionalString(
   return null;
 }
 
-function readStringSetting(
-  settings: Record<string, unknown>,
-  propertyName: string,
-): string | null {
+function readStringSetting(settings: Record<string, unknown>, propertyName: string): string | null {
   const propertyValue = settings[propertyName];
   return typeof propertyValue === 'string' && propertyValue.trim().length > 0
     ? propertyValue.trim()

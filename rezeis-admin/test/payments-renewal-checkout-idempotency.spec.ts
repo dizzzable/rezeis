@@ -303,9 +303,15 @@ describe('PaymentsRenewalCheckoutService idempotency (T-007)', () => {
     const { service, providerCalls } = build({
       candidates: [pending],
       updateMany: async (args) => {
-        if (pending.gatewayId !== null) return { count: 0 };
-        pending.gatewayId = args.data.gatewayId;
-        return { count: 1 };
+        if (args.where.gatewayId === null && pending.gatewayId === null) {
+          pending.gatewayId = args.data.gatewayId;
+          return { count: 1 };
+        }
+        if (args.where.gatewayId === pending.gatewayId) {
+          Object.assign(pending, args.data);
+          return { count: 1 };
+        }
+        return { count: 0 };
       },
       findUnique: async () => pending,
       update: async (args) => {
@@ -368,6 +374,7 @@ describe('PaymentsRenewalCheckoutService idempotency (T-007)', () => {
     await assert.rejects(() => service.renewalCheckout(request), ServiceUnavailableException);
 
     assert.equal(providerCalls(), 1, 'an unresolved external outcome must never be retried blindly');
+    assert.equal(pending.status, 'PENDING', 'an ambiguous provider outcome must remain reconcilable');
     assert.notEqual(pending.gatewayId, null, 'the durable claim remains persisted for recovery');
   });
 

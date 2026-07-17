@@ -70,6 +70,11 @@ export interface UpdateButtonInput {
 
 type ScreenWithButtons = BotFlowScreen & { buttons: BotFlowButton[] };
 
+interface DetectedMedia {
+  readonly mediaType: BotFlowMediaType;
+  readonly extension: string;
+}
+
 @Injectable()
 export class BotFlowScreenService {
   public constructor(private readonly prisma: PrismaService) {}
@@ -235,10 +240,10 @@ export class BotFlowScreenService {
     if (!screen) throw new NotFoundException('Screen not found');
     await this.assertFlowIsDraft(screen.flowId);
 
-    // Determine media type
-    const mediaType = file.mimetype.startsWith('video/') ? 'VIDEO'
-      : file.mimetype === 'image/gif' ? 'ANIMATION'
-      : 'PHOTO';
+    const detected = detectMedia(file.buffer);
+    if (!detected) {
+      throw new BadRequestException('Unsupported or invalid media content');
+    }
 
     // Save file to disk
     const fs = await import('node:fs/promises');
@@ -246,8 +251,7 @@ export class BotFlowScreenService {
     const uploadDir = path.resolve(process.cwd(), 'data', 'uploads', 'bot-flow');
     await fs.mkdir(uploadDir, { recursive: true });
 
-    const ext = path.extname(file.originalname) || (mediaType === 'VIDEO' ? '.mp4' : '.webp');
-    const filename = `${screenId}-${Date.now()}${ext}`;
+    const filename = `${screenId}-${Date.now()}${detected.extension}`;
     const filePath = path.join(uploadDir, filename);
     await fs.writeFile(filePath, file.buffer);
 
@@ -255,7 +259,7 @@ export class BotFlowScreenService {
 
     return this.prisma.botFlowScreen.update({
       where: { id: screenId },
-      data: { mediaType: mediaType as BotFlowMediaType, mediaUrl },
+      data: { mediaType: detected.mediaType, mediaUrl },
       include: { buttons: true },
     });
   }
@@ -272,4 +276,30 @@ export class BotFlowScreenService {
       throw new BadRequestException('Can only edit draft flows');
     }
   }
+}
+
+function detectMedia(buffer: Buffer): DetectedMedia | null {
+  if (buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    return { mediaType: BotFlowMediaType.PHOTO, extension: '.png' };
+  }
+  if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+    return { mediaType: BotFlowMediaType.PHOTO, extension: '.jpg' };
+  }
+  const header = buffer.subarray(0, 12).toString('ascii');
+  if (header.startsWith('GIF87a') || header.startsWith('GIF89a')) {
+    return { mediaType: BotFlowMediaType.ANIMATION, extension: '.gif' };
+  }
+  if (header.startsWith('RIFF') && header.slice(8, 12) === 'WEBP') {
+    return { mediaType: BotFlowMediaType.PHOTO, extension: '.webp' };
+  }
+  if (buffer.length >= 12 && header.slice(4, 8) === 'ftyp') {
+    return { mediaType: BotFlowMediaType.VIDEO, extension: '.mp4' };
+  }
+  if (buffer.length >= 4 && buffer.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]))) {
+    return { mediaType: BotFlowMediaType.VIDEO, extension: '.webm' };
+  }
+  if (header.startsWith('RIFF') && header.slice(8, 12) === 'AVI ') {
+    return { mediaType: BotFlowMediaType.VIDEO, extension: '.avi' };
+  }
+  return null;
 }

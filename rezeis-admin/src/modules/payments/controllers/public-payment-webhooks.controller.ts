@@ -1,12 +1,4 @@
-import {
-  Controller,
-  ParseEnumPipe,
-  Post,
-  RawBody,
-  Param,
-  Req,
-  Inject,
-} from '@nestjs/common';
+import { Controller, ParseEnumPipe, Post, RawBody, Param, Req, Inject } from '@nestjs/common';
 import { ConfigType } from '@nestjs/config';
 import { PaymentGatewayType } from '@prisma/client';
 import type { Request } from 'express';
@@ -15,8 +7,10 @@ import { paymentsConfig } from '../../../common/config/payments.config';
 import { PaymentWebhookIngressResultInterface } from '../interfaces/payment-webhook-envelope.interface';
 import { PaymentWebhookIngressService } from '../services/payment-webhook-ingress.service';
 import { TelegramStarsWebhookService } from '../services/telegram-stars-webhook.service';
+import { Public } from '../../../common/decorators/public.decorator';
 
 @Controller('v1/payments/webhooks')
+@Public()
 export class PublicPaymentWebhooksController {
   public constructor(
     private readonly paymentWebhookIngressService: PaymentWebhookIngressService,
@@ -30,7 +24,10 @@ export class PublicPaymentWebhooksController {
     @Param('gatewayType', new ParseEnumPipe(PaymentGatewayType)) gatewayType: PaymentGatewayType,
     @RawBody() rawBody: Buffer | undefined,
     @Req() request: Request,
-  ): Promise<PaymentWebhookIngressResultInterface | { readonly accepted: true; readonly lifecycleStatus: 'TELEGRAM_PRECHECKOUT' }> {
+  ): Promise<
+    | PaymentWebhookIngressResultInterface
+    | { readonly accepted: true; readonly lifecycleStatus: 'TELEGRAM_PRECHECKOUT' }
+  > {
     const resolvedRawBody = rawBody ?? Buffer.from('{}', 'utf8');
     if (gatewayType === PaymentGatewayType.TELEGRAM_STARS) {
       const telegramResult = await this.telegramStarsWebhookService.handleTelegramUpdate({
@@ -58,13 +55,7 @@ export class PublicPaymentWebhooksController {
 }
 
 function resolveClientIp(request: Request): string | null {
-  const forwardedFor = request.headers['x-forwarded-for'];
-  if (typeof forwardedFor === 'string' && forwardedFor.trim().length > 0) {
-    return forwardedFor.split(',')[0]?.trim() ?? null;
-  }
-  const realIp = request.headers['x-real-ip'];
-  if (typeof realIp === 'string' && realIp.trim().length > 0) {
-    return realIp.trim();
-  }
+  // Express resolves req.ip from the socket and the configured trust-proxy
+  // boundary. Reading forwarding headers directly would trust attacker input.
   return request.ip ?? request.socket.remoteAddress ?? null;
 }

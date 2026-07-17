@@ -13,6 +13,7 @@ import { Response } from 'express';
 
 import { BackupService } from '../services/backup.service';
 import { verifyBackupDownloadToken } from '../utils/backup-download-token.util';
+import { Public } from '../../../common/decorators/public.decorator';
 
 /**
  * Internal, signature-gated backup download used by the reiwa bot to fetch a
@@ -22,6 +23,7 @@ import { verifyBackupDownloadToken } from '../utils/backup-download-token.util';
  * short-lived HMAC token minted by rezeis when it relays the delivery.
  */
 @ApiTags('internal/backups')
+@Public()
 @Controller('internal/backups')
 export class InternalBackupDownloadController {
   public constructor(private readonly backupService: BackupService) {}

@@ -29,7 +29,7 @@ describe('PublicPaymentWebhooksController', () => {
     assert.equal(Reflect.getMetadata(GUARDS_METADATA, PublicPaymentWebhooksController), undefined);
   });
 
-  it('delegates webhook ingress with signature verification enabled', async () => {
+  it('ignores a client-supplied X-Forwarded-For value when resolving the source IP', async () => {
     const calls: unknown[] = [];
     const controller = new PublicPaymentWebhooksController(
       {
@@ -45,15 +45,11 @@ describe('PublicPaymentWebhooksController', () => {
     );
 
     const rawBody = Buffer.from('{"status":"paid"}', 'utf8');
-    const result = await controller.ingest(
-      PaymentGatewayType.YOOKASSA,
-      rawBody,
-      {
-        headers: { 'x-forwarded-for': '185.71.76.1' },
-        ip: '127.0.0.1',
-        socket: { remoteAddress: '127.0.0.1' },
-      } as never,
-    );
+    const result = await controller.ingest(PaymentGatewayType.YOOKASSA, rawBody, {
+      headers: { 'x-forwarded-for': '185.71.76.1' },
+      ip: '127.0.0.1',
+      socket: { remoteAddress: '127.0.0.1' },
+    } as never);
 
     assert.deepStrictEqual(result, {
       accepted: true,
@@ -65,7 +61,7 @@ describe('PublicPaymentWebhooksController', () => {
         gatewayType: PaymentGatewayType.YOOKASSA,
         rawBody,
         headers: { 'x-forwarded-for': '185.71.76.1' },
-        clientIp: '185.71.76.1',
+        clientIp: '127.0.0.1',
         verifySignature: true,
       },
     ]);

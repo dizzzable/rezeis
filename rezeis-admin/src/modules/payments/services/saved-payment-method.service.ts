@@ -4,6 +4,8 @@ import { PaymentGatewayType, Prisma } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { EVENT_TYPES, SystemEventsService } from '../../../common/services/system-events.service';
 
+const CHARGE_LOCK_TIMEOUT_MS = 30_000;
+
 /**
  * Persists provider-saved payment instruments (YooKassa `payment_method`) and
  * exposes list/unbind for the user cabinet.
@@ -65,25 +67,37 @@ export class SavedPaymentMethodService {
   /**
    * Soft-unbinds a saved method owned by the user. Idempotent when already inactive.
    */
-  public async unbindForUser(userId: string, methodId: string): Promise<{ unbound: true; id: string }> {
-    const existing = await this.prismaService.savedPaymentMethod.findFirst({
-      where: { id: methodId, userId },
-    });
-    if (existing === null) {
-      throw new NotFoundException('Saved payment method not found');
-    }
-
-    if (!existing.isActive) {
-      return { unbound: true, id: existing.id };
-    }
-
-    const updated = await this.prismaService.savedPaymentMethod.update({
-      where: { id: existing.id },
-      data: {
-        isActive: false,
-        unboundAt: new Date(),
+  public async unbindForUser(
+    userId: string,
+    methodId: string,
+  ): Promise<{ unbound: true; id: string }> {
+    const { updated, changed } = await this.prismaService.$transaction(
+      async (tx) => {
+        await this.lockForChargeDecision(tx, methodId);
+        const existing = await tx.savedPaymentMethod.findFirst({
+          where: { id: methodId, userId },
+        });
+        if (existing === null) {
+          throw new NotFoundException('Saved payment method not found');
+        }
+        if (!existing.isActive) {
+          return { updated: existing, changed: false };
+        }
+        const updated = await tx.savedPaymentMethod.update({
+          where: { id: existing.id },
+          data: {
+            isActive: false,
+            unboundAt: new Date(),
+          },
+        });
+        return { updated, changed: true };
       },
-    });
+      { timeout: CHARGE_LOCK_TIMEOUT_MS },
+    );
+
+    if (!changed) {
+      return { unbound: true, id: updated.id };
+    }
 
     this.systemEvents.info(
       EVENT_TYPES.PAYMENT_METHOD_UNBOUND,
@@ -111,29 +125,38 @@ export class SavedPaymentMethodService {
     methodId: string,
     autopayEnabled: boolean,
   ): Promise<{ id: string; autopayEnabled: boolean }> {
-    const existing = await this.prismaService.savedPaymentMethod.findFirst({
-      where: { id: methodId, userId, isActive: true },
-    });
-    if (existing === null) {
-      throw new NotFoundException('Saved payment method not found');
-    }
-
-    if (existing.autopayEnabled === autopayEnabled) {
-      return { id: existing.id, autopayEnabled: existing.autopayEnabled };
-    }
-
-    const updated = await this.prismaService.savedPaymentMethod.update({
-      where: { id: existing.id },
-      data: { autopayEnabled },
-      select: {
-        id: true,
-        autopayEnabled: true,
-        gatewayType: true,
-        methodType: true,
-        cardLast4: true,
-        providerMethodId: true,
+    const { updated, changed } = await this.prismaService.$transaction(
+      async (tx) => {
+        await this.lockForChargeDecision(tx, methodId);
+        const existing = await tx.savedPaymentMethod.findFirst({
+          where: { id: methodId, userId, isActive: true },
+        });
+        if (existing === null) {
+          throw new NotFoundException('Saved payment method not found');
+        }
+        if (existing.autopayEnabled === autopayEnabled) {
+          return { updated: existing, changed: false };
+        }
+        const updated = await tx.savedPaymentMethod.update({
+          where: { id: existing.id },
+          data: { autopayEnabled },
+          select: {
+            id: true,
+            autopayEnabled: true,
+            gatewayType: true,
+            methodType: true,
+            cardLast4: true,
+            providerMethodId: true,
+          },
+        });
+        return { updated, changed: true };
       },
-    });
+      { timeout: CHARGE_LOCK_TIMEOUT_MS },
+    );
+
+    if (!changed) {
+      return { id: updated.id, autopayEnabled: updated.autopayEnabled };
+    }
 
     this.systemEvents.info(
       EVENT_TYPES.PAYMENT_METHOD_AUTOPAY_UPDATED,
@@ -202,19 +225,53 @@ export class SavedPaymentMethodService {
     readonly savedPaymentMethodId: string;
     readonly gatewayType: PaymentGatewayType;
   }): Promise<{ readonly id: string; readonly providerMethodId: string }> {
-    const method = await this.prismaService.savedPaymentMethod.findFirst({
-      where: {
-        id: input.savedPaymentMethodId,
-        userId: input.userId,
-        isActive: true,
+    return this.withActiveForCharge(input, async (method) => method);
+  }
+
+  /**
+   * Serializes provider submission with disable/unbind on the saved-method row.
+   * The callback must cover only the provider submission, not later fulfillment.
+   */
+  public async withActiveForCharge<T>(
+    input: {
+      readonly userId: string;
+      readonly savedPaymentMethodId: string;
+      readonly gatewayType: PaymentGatewayType;
+    },
+    submit: (method: { readonly id: string; readonly providerMethodId: string }) => Promise<T>,
+  ): Promise<T> {
+    return this.prismaService.$transaction(
+      async (tx) => {
+        await this.lockForChargeDecision(tx, input.savedPaymentMethodId);
+        const method = await tx.savedPaymentMethod.findFirst({
+          where: {
+            id: input.savedPaymentMethodId,
+            userId: input.userId,
+            isActive: true,
+          },
+          select: {
+            id: true,
+            gatewayType: true,
+            providerMethodId: true,
+            autopayEnabled: true,
+          },
+        });
+        const resolved = this.assertChargeableMethod(method, input.gatewayType);
+        return submit(resolved);
       },
-      select: {
-        id: true,
-        gatewayType: true,
-        providerMethodId: true,
-        autopayEnabled: true,
-      },
-    });
+      { timeout: CHARGE_LOCK_TIMEOUT_MS },
+    );
+  }
+
+  private assertChargeableMethod(
+    method: {
+      readonly id: string;
+      readonly gatewayType: PaymentGatewayType;
+      readonly providerMethodId: string;
+      readonly autopayEnabled: boolean;
+    } | null,
+    gatewayType: PaymentGatewayType,
+  ): { readonly id: string; readonly providerMethodId: string } {
     if (method === null) {
       throw new BadRequestException({
         code: 'SAVED_PAYMENT_METHOD_NOT_FOUND',
@@ -227,13 +284,16 @@ export class SavedPaymentMethodService {
         message: 'Autopay is disabled for this payment method',
       });
     }
-    if (method.gatewayType !== input.gatewayType) {
+    if (method.gatewayType !== gatewayType) {
       throw new BadRequestException({
         code: 'SAVED_PAYMENT_METHOD_GATEWAY_MISMATCH',
         message: 'Saved payment method does not match the selected gateway',
       });
     }
-    if (typeof method.providerMethodId !== 'string' || method.providerMethodId.trim().length === 0) {
+    if (
+      typeof method.providerMethodId !== 'string' ||
+      method.providerMethodId.trim().length === 0
+    ) {
       throw new BadRequestException({
         code: 'SAVED_PAYMENT_METHOD_INVALID',
         message: 'Saved payment method has no provider instrument id',
@@ -243,6 +303,15 @@ export class SavedPaymentMethodService {
       id: method.id,
       providerMethodId: method.providerMethodId.trim(),
     };
+  }
+
+  private async lockForChargeDecision(
+    tx: Prisma.TransactionClient,
+    methodId: string,
+  ): Promise<void> {
+    await tx.$queryRaw(
+      Prisma.sql`SELECT "id" FROM "saved_payment_methods" WHERE "id" = ${methodId} FOR UPDATE`,
+    );
   }
 
   /**
@@ -378,10 +447,7 @@ export class SavedPaymentMethodService {
       );
     } catch (error: unknown) {
       // Unique race: another webhook worker inserted the same method.
-      if (
-        error instanceof Prisma.PrismaClientKnownRequestError &&
-        error.code === 'P2002'
-      ) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
         this.logger.debug(
           `Saved payment method race for ${providerMethodId}; treating as upserted`,
         );

@@ -3,6 +3,8 @@ import 'reflect-metadata';
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
+import { PaymentGatewayType, TransactionStatus } from '@prisma/client';
+
 import { AutoRenewService } from '../src/modules/auto-renew/auto-renew.service';
 
 /**
@@ -112,5 +114,48 @@ describe('AutoRenewService.createExpiryWarnings', () => {
     assert.equal(created, 0);
     assert.equal(h.counters.eventFindMany, 0);
     assert.deepEqual(h.createdFor, []);
+  });
+});
+
+describe('AutoRenewService.processAutopayCharges', () => {
+  it('does not create attempt a2 while the a1 provider outcome is unresolved', async () => {
+    const expiresAt = new Date(Date.now() + 60_000);
+    let renewalCalls = 0;
+    const prisma = {
+      subscription: {
+        findMany: async () => [{ id: 'sub-1', userId: 'user-1', expiresAt }],
+      },
+      transaction: {
+        findMany: async () => [
+          {
+            status: TransactionStatus.PENDING,
+            idempotencyKey: `auto-renew:sub-1:${expiresAt.getTime()}:a1`,
+            checkoutUrl: null,
+            gatewayId: '__RENEWAL_PROVIDER_CREATE__:payment-a1',
+          },
+        ],
+      },
+    };
+    const service = new AutoRenewService(
+      prisma as never,
+      { create: async () => undefined } as never,
+      {
+        renewalCheckout: async () => {
+          renewalCalls += 1;
+          throw new Error('attempt a2 must not be created');
+        },
+      } as never,
+      {
+        findPreferredForCharge: async () => ({
+          id: 'method-1',
+          gatewayType: PaymentGatewayType.YOOKASSA,
+        }),
+      } as never,
+    );
+
+    const result = await service.processAutopayCharges();
+
+    assert.equal(renewalCalls, 0);
+    assert.deepEqual(result, { attempted: 0, succeeded: 0, failed: 0, skipped: 1 });
   });
 });
