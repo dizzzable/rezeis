@@ -315,6 +315,7 @@ export class PaymentsRenewalCheckoutService {
     let providerCheckout: Awaited<
       ReturnType<PaymentProviderExecutionService['createCheckout']>
     >;
+    let providerSubmissionStarted = false;
     try {
       const chargedMethod =
         typeof input.savedPaymentMethodId === 'string' && input.savedPaymentMethodId.length > 0
@@ -325,6 +326,7 @@ export class PaymentsRenewalCheckoutService {
             })
           : null;
 
+      providerSubmissionStarted = true;
       providerCheckout = await this.paymentProviderExecutionService.createCheckout({
         gateway,
         transaction,
@@ -351,9 +353,13 @@ export class PaymentsRenewalCheckoutService {
         });
       }
     } catch (error: unknown) {
-      // Claim was taken before provider call. If creation fails, leave a
-      // FAILED row (not PENDING+claim) so autopay retries / expire can proceed.
-      await this.failClaimedProviderCreation(transaction.id, providerClaim);
+      // Failures before provider submission are authoritative and can release
+      // the attempt. Once submission starts, a timeout or malformed response
+      // is ambiguous: the provider may have charged successfully. Preserve the
+      // payment-id-bound claim so the same cycle cannot create attempt a2.
+      if (!providerSubmissionStarted) {
+        await this.failClaimedProviderCreation(transaction.id, providerClaim);
+      }
       throw error;
     }
 
@@ -376,9 +382,9 @@ export class PaymentsRenewalCheckoutService {
   }
 
   /**
-   * After a provider-create claim is taken, any failure must release the
-   * draft from PENDING+claim — otherwise autopay treats it as in-flight
-   * settle forever (no attempt 2/3, no EXPIRE).
+   * Releases a provider-create claim only when checkout fails before the
+   * external submission begins. Ambiguous external outcomes remain PENDING
+   * for reconciliation against the original payment id.
    */
   private async failClaimedProviderCreation(
     transactionId: string,
