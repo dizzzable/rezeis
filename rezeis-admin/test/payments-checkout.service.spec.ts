@@ -313,6 +313,7 @@ function createService(input: {
         }
       },
       updateMany: async () => ({ count: 1 }),
+      findUniqueOrThrow: async () => transaction,
     },
   }
   const paymentsTransactionsService = {

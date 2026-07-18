@@ -1180,7 +1180,7 @@ run('add-on entitlement PostgreSQL concurrency', () => {
       data: {
         paymentId: `${prefix}-comb-pay`, userId, subscriptionId: null, status: 'COMPLETED',
         purchaseType: 'RENEW', channel: 'WEB', gatewayType: 'YOOKASSA', currency: 'USD',
-        amount: new Prisma.Decimal('5.00'), planSnapshot: {},
+         amount: new Prisma.Decimal('5.00'), planSnapshot: { combinedRenewal: true },
       },
     });
     await prisma.transactionItem.createMany({
@@ -1312,7 +1312,7 @@ run('add-on entitlement PostgreSQL concurrency', () => {
       data: {
         paymentId: `${prefix}-radd-pay`, userId, subscriptionId: null, status: 'COMPLETED',
         purchaseType: 'RENEW', channel: 'WEB', gatewayType: 'YOOKASSA', currency: 'USD',
-        amount: new Prisma.Decimal('7.50'), planSnapshot: {},
+         amount: new Prisma.Decimal('7.50'), planSnapshot: { combinedRenewal: true },
       },
     });
     await prisma.transactionItem.create({
