@@ -188,6 +188,27 @@ const TEMPLATES = [
   },
 ] as never;
 
+describe('BotMapComposerService.build', () => {
+  it('composes the editable draft instead of the published flow', async () => {
+    const calls: string[] = [];
+    const composer = new BotMapComposerService(
+      {
+        getDraft: async (name: string) => {
+          calls.push(`draft:${name}`);
+          return { ...PUBLISHED_FLOW, status: BotFlowStatus.DRAFT };
+        },
+      } as never,
+      { listAll: async () => [] } as never,
+      { listAll: async () => [] } as never,
+    );
+
+    const result = await composer.build();
+
+    assert.deepEqual(calls, ['draft:Main Flow']);
+    assert.equal(result.meta.flowStatus, 'DRAFT');
+  });
+});
+
 describe('BotMapComposerService.compose', () => {
   it('emits a node per surface + Mini App terminals only when referenced', () => {
     const composer = makeComposer();

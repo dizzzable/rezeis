@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { cn } from '@/lib/utils'
 import { useGlassStore } from '@/lib/theme/glass-store'
+import { useAdminBranding } from '@/features/settings/use-admin-branding'
 
 import { NavItems } from './nav-items'
 
@@ -23,6 +24,7 @@ export function AdminSidebar({ collapsed, onToggleCollapsed }: AdminSidebarProps
   const glassEnabled = useGlassStore((s) => s.glassEnabled)
   const sidebarGlassEnabled = useGlassStore((s) => s.sidebar.enabled)
   const sidebarGlassActive = glassEnabled && sidebarGlassEnabled
+  const branding = useAdminBranding()
 
   return (
     <aside
@@ -42,9 +44,9 @@ export function AdminSidebar({ collapsed, onToggleCollapsed }: AdminSidebarProps
           collapsed && 'justify-center px-0',
         )}
       >
-        <RezeisLogo className="h-7 w-7 shrink-0" />
+        <RezeisLogo className="h-7 w-7 shrink-0" src={branding.logoUrl} />
         {!collapsed && (
-          <span className="text-lg font-bold text-sidebar-foreground">Rezeis Admin</span>
+          <span className="truncate text-lg font-bold text-sidebar-foreground">{branding.brandName}</span>
         )}
       </div>
 

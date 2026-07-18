@@ -93,7 +93,7 @@ export class BotMapComposerService {
   /** Live read — used by the controller. */
   public async build(): Promise<BotMapPayload> {
     const [flow, replyButtons, templates] = await Promise.all([
-      this.botFlowService.getActive('Main Flow'),
+      this.botFlowService.getDraft('Main Flow'),
       this.botButtonsService.listAll(),
       this.notificationTemplatesService.listAll(),
     ]);

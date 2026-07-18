@@ -26,14 +26,14 @@ function Calendar({
       }}
       classNames={{
         months: 'flex flex-col sm:flex-row gap-2',
-        month: 'flex flex-col gap-4',
-        month_caption: 'flex justify-center pt-1 relative items-center w-full',
+        month: 'relative flex min-h-[18rem] flex-col gap-4',
+        month_caption: 'flex h-8 w-full items-center justify-center',
         caption_label: 'text-sm font-medium',
-        nav: 'flex items-center gap-1',
+        nav: 'absolute inset-x-0 top-0 flex h-8 items-center justify-between px-1',
         button_previous:
-          'absolute left-1 top-0 inline-flex items-center justify-center rounded-md text-foreground ring-offset-background transition-colors hover:bg-accent hover:text-accent-foreground h-8 w-8 border border-input bg-transparent p-0 disabled:pointer-events-none disabled:opacity-30',
+          'inline-flex h-8 w-8 items-center justify-center rounded-md border border-input bg-transparent p-0 text-foreground ring-offset-background transition-colors hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-30',
         button_next:
-          'absolute right-1 top-0 inline-flex items-center justify-center rounded-md text-foreground ring-offset-background transition-colors hover:bg-accent hover:text-accent-foreground h-8 w-8 border border-input bg-transparent p-0 disabled:pointer-events-none disabled:opacity-30',
+          'inline-flex h-8 w-8 items-center justify-center rounded-md border border-input bg-transparent p-0 text-foreground ring-offset-background transition-colors hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-30',
         month_grid: 'w-full border-collapse space-x-1',
         weekdays: 'flex',
         weekday:

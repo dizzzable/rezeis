@@ -27,6 +27,7 @@ describe('Calendar month navigation', () => {
 
     // Next-month arrow twice → September 2026.
     const next = screen.getByRole('button', { name: /next/i })
+    expect(next.parentElement).toHaveClass('absolute', 'inset-x-0', 'justify-between')
     await user.click(next)
     await user.click(next)
     expect(screen.getByText('September 2026')).toBeInTheDocument()

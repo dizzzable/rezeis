@@ -15,12 +15,13 @@ import { cn } from '@/lib/utils'
 interface RezeisLogoProps {
   readonly className?: string
   readonly alt?: string
+  readonly src?: string | null
 }
 
-export function RezeisLogo({ className, alt = '' }: RezeisLogoProps) {
+export function RezeisLogo({ className, alt = '', src }: RezeisLogoProps) {
   return (
     <img
-      src="/rezeis-logo.svg"
+      src={src || '/rezeis-logo.svg'}
       alt={alt}
       aria-hidden={alt === '' ? true : undefined}
       draggable={false}

@@ -47,7 +47,7 @@ interface BrandingSettings {
 }
 
 interface AdminSettingsPayload {
-  readonly brandingSettings?: BrandingSettings | null
+  readonly branding?: BrandingSettings | null
 }
 
 export default function PanelBrandingTab() {
@@ -65,7 +65,7 @@ export default function PanelBrandingTab() {
     )
   }
 
-  const branding = settingsQuery.data?.brandingSettings ?? {}
+  const branding = settingsQuery.data?.branding ?? {}
   return <PanelBrandingForm branding={branding} />
 }
 
