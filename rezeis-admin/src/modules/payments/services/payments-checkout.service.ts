@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   NotFoundException,
@@ -135,10 +136,13 @@ export class PaymentsCheckoutService {
     // mirroring the free-add-on path — the user gets their subscription
     // without a payment step instead of a "payment failed" error.
     if (Number(transaction.amount) <= 0) {
-      const completedTransaction = await this.prismaService.transaction.update({
-        where: { id: transaction.id },
-        data: { status: TransactionStatus.COMPLETED },
-      });
+      const claim = await this.prismaService.transaction.updateMany({ where: { id: transaction.id, status: TransactionStatus.PENDING, fulfilledAt: null }, data: { status: TransactionStatus.COMPLETED } });
+      if (claim.count !== 1) {
+        const current = await this.prismaService.transaction.findUnique({ where: { id: transaction.id } });
+        if (current?.fulfilledAt !== null) return mapCheckoutResponse({ transaction: current, checkoutUrl: null, providerMode: 'NONE' });
+        throw new ConflictException('Zero-value checkout is already being fulfilled');
+      }
+      const completedTransaction = await this.prismaService.transaction.findUniqueOrThrow({ where: { id: transaction.id } });
       const { syncJobs } =
         await this.paymentSubscriptionMutationService.applyCompletedTransaction(
           completedTransaction,

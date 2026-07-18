@@ -32,7 +32,7 @@ export class InternalPaymentWebhooksController {
       rawBody: rawBody ?? Buffer.from('{}', 'utf8'),
       headers: request.headers,
       clientIp: null,
-      verifySignature: false,
+      verifySignature: true,
     });
   }
 }

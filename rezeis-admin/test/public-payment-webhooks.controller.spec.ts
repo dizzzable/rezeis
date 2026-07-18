@@ -66,4 +66,22 @@ describe('PublicPaymentWebhooksController', () => {
       },
     ]);
   });
+
+  it('rejects oversized CryptoPay webhook bodies before signature processing', async () => {
+    const controller = new PublicPaymentWebhooksController(
+      { ingestWebhook: async () => ({ accepted: true, duplicate: false, lifecycleStatus: 'ENQUEUED' }) } as never,
+      { handleTelegramUpdate: async () => null } as never,
+      paymentsConfig() as never,
+    );
+
+    await assert.rejects(
+      controller.ingest(
+        PaymentGatewayType.CRYPTOPAY,
+        Buffer.alloc(128 * 1024 + 1),
+        { headers: {}, ip: '127.0.0.1', socket: { remoteAddress: '127.0.0.1' } } as never,
+      ),
+      (error: unknown) =>
+        error instanceof Error && error.message.includes('PAYMENT_WEBHOOK_BODY_TOO_LARGE'),
+    );
+  });
 });

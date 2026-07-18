@@ -1,4 +1,4 @@
-import { Controller, ParseEnumPipe, Post, RawBody, Param, Req, Inject } from '@nestjs/common';
+import { BadRequestException, Controller, ParseEnumPipe, Post, RawBody, Param, Req, Inject } from '@nestjs/common';
 import { ConfigType } from '@nestjs/config';
 import { PaymentGatewayType } from '@prisma/client';
 import type { Request } from 'express';
@@ -29,6 +29,9 @@ export class PublicPaymentWebhooksController {
     | { readonly accepted: true; readonly lifecycleStatus: 'TELEGRAM_PRECHECKOUT' }
   > {
     const resolvedRawBody = rawBody ?? Buffer.from('{}', 'utf8');
+    if (resolvedRawBody.byteLength > webhookBodyLimit(gatewayType)) {
+      throw new BadRequestException('PAYMENT_WEBHOOK_BODY_TOO_LARGE');
+    }
     if (gatewayType === PaymentGatewayType.TELEGRAM_STARS) {
       const telegramResult = await this.telegramStarsWebhookService.handleTelegramUpdate({
         rawBody: resolvedRawBody,
@@ -51,6 +54,18 @@ export class PublicPaymentWebhooksController {
       clientIp: resolveClientIp(request),
       verifySignature: true,
     });
+  }
+}
+
+function webhookBodyLimit(gatewayType: PaymentGatewayType): number {
+  switch (gatewayType) {
+    case PaymentGatewayType.TELEGRAM_STARS:
+      return 256 * 1024;
+    case PaymentGatewayType.YOOKASSA:
+    case PaymentGatewayType.CRYPTOPAY:
+      return 128 * 1024;
+    default:
+      return 256 * 1024;
   }
 }
 

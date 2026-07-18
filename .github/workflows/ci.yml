@@ -70,3 +70,35 @@ jobs:
       - run: npm run prisma:generate
       - name: Run backend test suite
         run: npm test
+
+  postgres-concurrency:
+    name: PostgreSQL concurrency
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: rezeis_test
+          POSTGRES_PASSWORD: rezeis_test
+          POSTGRES_DB: rezeis_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rezeis_test -d rezeis_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgresql://rezeis_test:rezeis_test@127.0.0.1:5432/rezeis_test
+    defaults:
+      run:
+        working-directory: rezeis-admin
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: rezeis-admin/package-lock.json
+      - run: npm ci
+      - run: npm run prisma:generate
+      - run: npx prisma migrate deploy
+      - run: node --require ts-node/register --test test/add-on-entitlement-postgres-concurrency.spec.ts
