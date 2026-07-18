@@ -28,6 +28,7 @@ import {
   RemnawaveSystemRecapInterface,
   RemnawaveSystemStatsInterface,
 } from '../interfaces/remnawave-system-stats.interface';
+import { normalizeBandwidthStats } from './remnawave-bandwidth-stats.normalizer';
 import { RemnawaveNodeInterface } from '../interfaces/remnawave-node.interface';
 import { RemnawaveHostInterface } from '../interfaces/remnawave-host.interface';
 import { RemnawaveHwidStatsInterface } from '../interfaces/remnawave-hwid-stats.interface';
@@ -89,6 +90,14 @@ export interface RemnawavePanelUser {
   description: string | null;
   activeInternalSquads: Array<{ uuid: string; name: string }>;
   externalSquadUuid: string | null;
+}
+
+export function buildNodeUsersBandwidthPath(now = new Date()): string {
+  const end = now.toISOString().slice(0, 10);
+  const startDate = new Date(now);
+  startDate.setUTCDate(startDate.getUTCDate() - 1);
+  const start = startDate.toISOString().slice(0, 10);
+  return `/api/bandwidth-stats/nodes/users?start=${start}&end=${end}`;
 }
 
 /**
@@ -834,11 +843,11 @@ export class RemnawaveApiService {
    */
   public async getBandwidthStats(): Promise<RemnawaveBandwidthStatsInterface | null> {
     try {
-      const response = await this.requestJson<{ response: RemnawaveBandwidthStatsInterface }>({
+      const response = await this.requestJson<{ response: unknown }>({
         method: 'get',
         url: '/api/system/stats/bandwidth',
       });
-      return response.response ?? (response as unknown as RemnawaveBandwidthStatsInterface);
+      return normalizeBandwidthStats(response.response ?? response);
     } catch {
       return null;
     }
@@ -909,7 +918,7 @@ export class RemnawaveApiService {
     try {
       const result = await this.requestJsonWithBody<unknown>(
         'post',
-        '/api/bandwidth-stats/nodes/users',
+        buildNodeUsersBandwidthPath(),
         { nodesUuids: [...nodeUuids] },
       );
       const root = (result as { response?: unknown })?.response ?? result;

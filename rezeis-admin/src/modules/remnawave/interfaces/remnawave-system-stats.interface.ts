@@ -34,9 +34,15 @@ export interface RemnawaveSystemRecapInterface {
 }
 
 export interface RemnawaveBandwidthStatsInterface {
-  readonly bandwidthLastTwoDays: { readonly current: number; readonly previous: number; readonly difference: number };
-  readonly bandwidthLastSevenDays: { readonly current: number; readonly previous: number; readonly difference: number };
-  readonly bandwidthLast30Days: { readonly current: number; readonly previous: number; readonly difference: number };
-  readonly bandwidthCalendarMonth: { readonly current: number; readonly previous: number; readonly difference: number };
-  readonly bandwidthCurrentYear: { readonly current: number; readonly previous: number; readonly difference: number };
+  readonly bandwidthLastTwoDays: RemnawaveBandwidthWindowInterface;
+  readonly bandwidthLastSevenDays: RemnawaveBandwidthWindowInterface;
+  readonly bandwidthLast30Days: RemnawaveBandwidthWindowInterface;
+  readonly bandwidthCalendarMonth: RemnawaveBandwidthWindowInterface;
+  readonly bandwidthCurrentYear: RemnawaveBandwidthWindowInterface;
+}
+
+export interface RemnawaveBandwidthWindowInterface {
+  readonly current: number;
+  readonly previous: number;
+  readonly difference: number;
 }

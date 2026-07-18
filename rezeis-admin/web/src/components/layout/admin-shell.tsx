@@ -32,6 +32,8 @@ import { useGlassStore } from '@/lib/theme/glass-store'
 import { cn } from '@/lib/utils'
 import { useRealtimeUpdates } from '@/lib/realtime/use-realtime-updates'
 import { useSwNavigation } from '@/lib/use-sw-navigation'
+import { applyAdminPwaIcon } from '@/lib/admin-pwa-icon'
+import { useAdminBranding } from '@/features/settings/use-admin-branding'
 
 import { AdminSidebar } from './admin-sidebar/admin-sidebar'
 import { NavItems } from './admin-sidebar/nav-items'
@@ -47,6 +49,7 @@ export default function AdminShell() {
   const [searchOpen, setSearchOpen] = useState(false)
 
   const glassEnabled = useGlassStore((s) => s.glassEnabled)
+  const branding = useAdminBranding()
 
   // Persist the admin's active look (theme/presets/glass/effects/density) to
   // the server per-admin so it follows them across devices and browsers.
@@ -59,6 +62,11 @@ export default function AdminShell() {
 
   // Route push-notification taps (relayed by the service worker) via the router.
   useSwNavigation()
+
+  useEffect(() => {
+    document.title = branding.brandName
+    applyAdminPwaIcon(branding.adminPwaIconUrl)
+  }, [branding.adminPwaIconUrl, branding.brandName])
 
   // Cmd+K / Ctrl+K shortcut to toggle the quick-search palette.
   useEffect(() => {
@@ -99,8 +107,8 @@ export default function AdminShell() {
           <SheetContent side="left" className="flex w-64 flex-col overflow-hidden bg-sidebar p-0 text-sidebar-foreground">
             <SheetHeader className="flex h-14 flex-row items-center px-4">
               <SheetTitle className="flex items-center gap-2 text-lg font-bold text-sidebar-foreground">
-                <RezeisLogo className="h-7 w-7" />
-                Rezeis Admin
+                <RezeisLogo className="h-7 w-7" src={branding.logoUrl} />
+                {branding.brandName}
               </SheetTitle>
             </SheetHeader>
             <ScrollArea className="min-h-0 flex-1 py-2">
