@@ -1377,7 +1377,7 @@ run('add-on entitlement PostgreSQL concurrency', () => {
       data: { subscriptionId: id, generation: 1, status: 'ACTIVE', planSnapshot: {}, startsAt: new Date('2020-01-01T00:00:00.000Z'), endsAt: new Date('2030-05-01T00:00:00.000Z'), baseTrafficLimitBytes: 100n * gib, baseDeviceLimit: 3, trafficResetStrategy: 'NO_RESET', resetAnchorAt: new Date('2020-01-01T00:00:00.000Z') },
     });
     const txn = await prisma.transaction.create({
-      data: { paymentId: `${prefix}-raddoff-pay`, userId, subscriptionId: null, status: 'COMPLETED', purchaseType: 'RENEW', channel: 'WEB', gatewayType: 'YOOKASSA', currency: 'USD', amount: new Prisma.Decimal('7.50'), planSnapshot: {} },
+      data: { paymentId: `${prefix}-raddoff-pay`, userId, subscriptionId: null, status: 'COMPLETED', purchaseType: 'RENEW', channel: 'WEB', gatewayType: 'YOOKASSA', currency: 'USD', amount: new Prisma.Decimal('7.50'), planSnapshot: { combinedRenewal: true } },
     });
     await prisma.transactionItem.create({
       data: {
