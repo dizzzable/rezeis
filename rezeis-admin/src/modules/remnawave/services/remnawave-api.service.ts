@@ -92,6 +92,14 @@ export interface RemnawavePanelUser {
   externalSquadUuid: string | null;
 }
 
+export function buildNodeUsersBandwidthPath(now = new Date()): string {
+  const end = now.toISOString().slice(0, 10);
+  const startDate = new Date(now);
+  startDate.setUTCDate(startDate.getUTCDate() - 1);
+  const start = startDate.toISOString().slice(0, 10);
+  return `/api/bandwidth-stats/nodes/users?start=${start}&end=${end}`;
+}
+
 /**
  * Unwraps the Remnawave `{ response: {...} }` envelope returned by the
  * create/update user endpoints. The panel wraps the user object under
@@ -910,7 +918,7 @@ export class RemnawaveApiService {
     try {
       const result = await this.requestJsonWithBody<unknown>(
         'post',
-        '/api/bandwidth-stats/nodes/users',
+        buildNodeUsersBandwidthPath(),
         { nodesUuids: [...nodeUuids] },
       );
       const root = (result as { response?: unknown })?.response ?? result;

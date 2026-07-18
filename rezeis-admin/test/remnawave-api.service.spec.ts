@@ -2,9 +2,19 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { of, throwError } from 'rxjs';
 
-import { RemnawaveApiService } from '../src/modules/remnawave/services/remnawave-api.service';
+import {
+  buildNodeUsersBandwidthPath,
+  RemnawaveApiService,
+} from '../src/modules/remnawave/services/remnawave-api.service';
 
 describe('RemnawaveApiService', () => {
+  it('includes the required UTC date range in node-user bandwidth requests', () => {
+    assert.equal(
+      buildNodeUsersBandwidthPath(new Date('2026-07-18T00:30:00.000Z')),
+      '/api/bandwidth-stats/nodes/users?start=2026-07-17&end=2026-07-18',
+    );
+  });
+
   it('maps auth status from the official Remnawave contract', async () => {
     const capturedPaths: string[] = [];
     const service = new RemnawaveApiService(
