@@ -87,6 +87,7 @@ jobs:
           --health-cmd "pg_isready -U rezeis_test -d rezeis_test"
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
+      DATABASE_URL: postgresql://rezeis_test:rezeis_test@127.0.0.1:5432/rezeis_test
       TEST_DATABASE_URL: postgresql://rezeis_test:rezeis_test@127.0.0.1:5432/rezeis_test
     defaults:
       run:
