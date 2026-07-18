@@ -1,4 +1,4 @@
-import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, createPublicKey, createVerify, timingSafeEqual } from 'node:crypto';
 import { BlockList } from 'node:net';
 
 import { BadRequestException, ForbiddenException, Injectable } from '@nestjs/common';
@@ -117,13 +117,13 @@ export class PaymentWebhookNormalizerService {
         verifyRiopaySignature(input.rawBody, input.headers, input.gatewaySettings);
         return;
       case PaymentGatewayType.ANTILOPAY:
+        verifyAntilopaySignature(input.rawBody, input.headers, input.gatewaySettings);
+        return;
       case PaymentGatewayType.OVERPAY:
+        verifyOverpaySignature(input.rawBody, input.headers, input.gatewaySettings);
+        return;
       case PaymentGatewayType.PAYPALYCH:
-        // Webhook signature verification for these gateways is intentionally
-        // permissive at the moment: callers either rely on IP allowlists,
-        // network-layer auth, or signed payloads we cannot enforce here
-        // without operator-supplied secrets. The webhook ingress pipeline
-        // still records the raw payload, so misuse is auditable.
+        verifyPaypalychSignature(input.rawBody, input.headers, input.gatewaySettings);
         return;
       case PaymentGatewayType.VALUTIX:
         verifyValutixSignature(input.rawBody, input.headers, input.gatewaySettings);
@@ -425,6 +425,44 @@ function verifyRiopaySignature(
   }
   const expected = createHmac('sha512', apiToken).update(rawBody).digest('hex');
   if (!compareSecrets(expected, signature)) {
+    throw new ForbiddenException('PAYMENT_WEBHOOK_SIGNATURE_INVALID');
+  }
+}
+
+function verifyAntilopaySignature(rawBody: Buffer, headers: Record<string, string | string[] | undefined>, settings: Record<string, unknown>): void {
+  const publicKey = readStringSetting(settings, 'publicKey');
+  const signature = readHeader(headers, 'x-apay-callback');
+  if (!publicKey || !signature) throw new ForbiddenException('PAYMENT_WEBHOOK_SIGNATURE_INVALID');
+  try {
+    const key = createPublicKey({ key: Buffer.from(publicKey, 'base64'), format: 'der', type: 'spki' });
+    const verifier = createVerify('SHA256');
+    verifier.update(rawBody);
+    if (!verifier.verify(key, signature, 'base64')) throw new ForbiddenException('PAYMENT_WEBHOOK_SIGNATURE_INVALID');
+  } catch (error: unknown) {
+    if (error instanceof ForbiddenException) throw error;
+    throw new ForbiddenException('PAYMENT_WEBHOOK_SIGNATURE_INVALID');
+  }
+}
+
+function verifyOverpaySignature(rawBody: Buffer, headers: Record<string, string | string[] | undefined>, settings: Record<string, unknown>): void {
+  const publicKey = readStringSetting(settings, 'publicKey');
+  const signature = readHeader(headers, 'content-signature');
+  if (!publicKey || !signature) throw new ForbiddenException('PAYMENT_WEBHOOK_SIGNATURE_INVALID');
+  try {
+    const key = publicKey.includes('BEGIN') ? createPublicKey(publicKey) : createPublicKey({ key: Buffer.from(publicKey, 'base64'), format: 'der', type: 'spki' });
+    const verifier = createVerify('SHA256');
+    verifier.update(rawBody);
+    if (!verifier.verify(key, signature, 'base64')) throw new ForbiddenException('PAYMENT_WEBHOOK_SIGNATURE_INVALID');
+  } catch (error: unknown) {
+    if (error instanceof ForbiddenException) throw error;
+    throw new ForbiddenException('PAYMENT_WEBHOOK_SIGNATURE_INVALID');
+  }
+}
+
+function verifyPaypalychSignature(rawBody: Buffer, headers: Record<string, string | string[] | undefined>, settings: Record<string, unknown>): void {
+  const secret = readStringSetting(settings, 'secretKey');
+  const signature = readHeader(headers, 'x-signature');
+  if (!secret || !signature || !compareSecrets(createHmac('sha256', secret).update(rawBody).digest('hex'), signature)) {
     throw new ForbiddenException('PAYMENT_WEBHOOK_SIGNATURE_INVALID');
   }
 }

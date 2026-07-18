@@ -291,10 +291,18 @@ export class AddOnPurchaseService {
     // subscription limit is raised right away, then return a completed result
     // with no checkout URL.
     if (Number(snapshot.price) <= 0) {
-      const completedTransaction = await this.prismaService.transaction.update({
-        where: { id: transaction.id },
+      const claim = await this.prismaService.transaction.updateMany({
+        where: { id: transaction.id, status: TransactionStatus.PENDING, fulfilledAt: null },
         data: { status: TransactionStatus.COMPLETED },
       });
+      if (claim.count !== 1) {
+        const current = await this.prismaService.transaction.findUnique({ where: { id: transaction.id } });
+        if (current?.fulfilledAt !== null) {
+          return { paymentId: current.paymentId, transactionStatus: current.status, gatewayType: current.gatewayType, purchaseType: current.purchaseType, amount: current.amount.toString(), currency: current.currency, checkoutUrl: null, providerMode: 'NONE', createdAt: current.createdAt.toISOString() };
+        }
+        throw new ConflictException('Zero-value add-on checkout is already being fulfilled');
+      }
+      const completedTransaction = await this.prismaService.transaction.findUniqueOrThrow({ where: { id: transaction.id } });
       const { syncJobs } =
         await this.paymentSubscriptionMutationService.applyCompletedTransaction(
           completedTransaction,

@@ -312,6 +312,8 @@ function createService(input: {
           gatewayData: args.data.gatewayData,
         }
       },
+      updateMany: async () => ({ count: 1 }),
+      findUniqueOrThrow: async () => transaction,
     },
   }
   const paymentsTransactionsService = {

@@ -33,14 +33,7 @@ export class PaymentWebhookInboxService {
       const updatedEvent = await this.prismaService.paymentWebhookEvent.update({
         where: { id: existingEvent.id },
         data: {
-          paymentId: input.envelope.paymentId,
-          eventStatus: input.envelope.eventStatus,
-          payloadHash: input.envelope.payloadHash,
-          rawPayload: input.envelope.rawPayload as Prisma.InputJsonValue,
           attempts: { increment: 1 },
-          lastError: null,
-          receivedAt: new Date(input.envelope.receivedAt),
-          lastTransitionAt: new Date(),
         } as never,
       });
       return { event: updatedEvent, duplicate: true };

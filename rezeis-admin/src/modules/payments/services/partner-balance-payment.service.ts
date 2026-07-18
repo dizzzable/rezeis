@@ -126,8 +126,8 @@ export class PartnerBalancePaymentService {
       currencyOverride: balanceCurrency,
     });
 
-    const amountMinor = Math.round(Number(draft.amount) * 100);
-    if (!Number.isFinite(amountMinor) || amountMinor < 0) {
+    const amountMinor = toExactMinorUnits(draft.amount.toString());
+    if (amountMinor === null) {
       throw new BadRequestException('PARTNER_BALANCE_INVALID_AMOUNT');
     }
     if (partner.balance < amountMinor) {
@@ -229,6 +229,13 @@ export class PartnerBalancePaymentService {
     }
     throw new NotFoundException('A userId or telegramId is required');
   }
+}
+
+function toExactMinorUnits(amount: string): number | null {
+  const match = /^(\d+)(?:\.(\d{1,2}))?$/.exec(amount);
+  if (!match) return null;
+  const minor = BigInt(match[1]) * 100n + BigInt((match[2] ?? '').padEnd(2, '0'));
+  return minor <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(minor) : null;
 }
 
 function mapPurchaseTypeToAccessGate(purchaseType: PurchaseType): AccessModeGate {
