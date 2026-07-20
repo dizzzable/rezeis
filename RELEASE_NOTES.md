@@ -1,3 +1,21 @@
+# Rezeis Admin v0.9.6.52
+
+🔧 **Патч STEALTHNET-импорта** — подписки из dump снова поднимаются, extra devices / expire / баланс→points (копейки), модалки импорта не переполняются.
+
+### 🐛 Исправления
+- **P0:** парсер читает `public.subscriptions` (fallback `secondary_subscriptions`) — 325 профилей больше не теряются.
+- **Extra devices:** `included_devices + extra_devices` → `deviceLimit` + `planSnapshot`; synthetic EXTRA_DEVICES catalog.
+- **expire_at** из dump как fallback, если panel недоступна.
+- **Баланс → points:** округление до копеек (integer half-up) + rate; идемпотентно при `points = 0`.
+- **UI:** progress / clone-plans dialog — max-height + scroll, плитки не вылезают.
+
+### ✅ Гейты
+CI #32: Backend quality / Backend tests / PostgreSQL / Web — pass.  
+Focused: stealthnet-backup-parser + balanceToPoints + imports.controller.
+
+**Полный список изменений:** https://github.com/dizzzable/rezeis/compare/v0.9.6.51...v0.9.6.52
+
+---
 # Rezeis Admin v0.9.6.51
 
 📣 **Рекламный кабинет + аналитика регистрации** — spend/pause SPA, история заявок партнёров, dual QR, snapshot IP/UA/Referer/UTM и elevated CSV-экспорт. Парный кабинет: **reiwa v0.9.6.34**.
