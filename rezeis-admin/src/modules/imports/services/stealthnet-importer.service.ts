@@ -750,11 +750,12 @@ export class StealthnetImporterService {
 export function balanceToPoints(balance: number, rate: number): number {
   if (!Number.isFinite(balance) || balance <= 0) return 0;
   if (!Number.isFinite(rate) || rate <= 0) return 0;
-  // Round to kopecks (2 dp) first — monetary display precision.
-  const major = Math.round(balance * 100) / 100;
-  if (major <= 0) return 0;
-  // Whole loyalty points; half-up is fairer for migration goodwill than floor.
-  return Math.round(major * rate);
+  // Integer kopecks (half-up). Small epsilon kills IEEE dust on *100
+  // (e.g. 1.005 * 100 → 100.4999… without epsilon).
+  const kopecks = Math.round(balance * 100 + 1e-8);
+  if (kopecks <= 0) return 0;
+  // points = (kopecks/100) * rate, half-up via integer arithmetic.
+  return Math.round((kopecks * rate) / 100 + 1e-8);
 }
 
 /**

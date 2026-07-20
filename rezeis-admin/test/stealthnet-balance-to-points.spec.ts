@@ -9,15 +9,15 @@ describe('balanceToPoints (STEALTHNET wallet → loyalty points)', () => {
     assert.equal(balanceToPoints(20, 1), 20);
   });
 
-  it('rounds kopecks half-up to 2 decimals before rate', () => {
-    // 10.004 → 10.00 major → 10 pts
+  it('rounds kopecks half-up then applies rate', () => {
     assert.equal(balanceToPoints(10.004, 1), 10);
-    // 10.005 → 10.01 major → 10 pts (half-up on *100: 1000.5 → 1001 → 10.01)
-    assert.equal(balanceToPoints(10.005, 1), 10);
-    // classic: 10.50 → 11 when rate 1? No: 10.50 major * 1 = 10.5 → Math.round → 11
+    // 10.50 → 1050 kopecks → 11 points at rate 1
     assert.equal(balanceToPoints(10.5, 1), 11);
     assert.equal(balanceToPoints(10.49, 1), 10);
-    assert.equal(balanceToPoints(10.5, 2), 21); // 10.50 * 2 = 21
+    assert.equal(balanceToPoints(10.5, 2), 21);
+    // half-kopeck edge with rate 100: 1.005 → 101 kopecks → 101 points
+    assert.equal(balanceToPoints(1.005, 100), 101);
+    assert.equal(balanceToPoints(1.004, 100), 100);
   });
 
   it('rejects non-positive / invalid inputs', () => {
