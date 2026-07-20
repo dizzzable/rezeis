@@ -291,60 +291,388 @@ describe('AdPlacementRequestService moderation', () => {
   }
   const config = { botUsername: null, miniAppShortName: null, webBaseUrl: null } as never;
 
-  it('approves as-is → ACTIVE and creates one placement per platform', async () => {
+  function activeRow(overrides: Record<string, unknown> = {}) {
+    return {
+      id: 'r1',
+      partnerId: 'partner1',
+      platforms: ['TELEGRAM', 'YOUTUBE'],
+      channel: 'chan',
+      notes: null,
+      proposedWindowDays: 30,
+      approvedWindowDays: 30,
+      selfFundedBudgetNote: null,
+      status: 'ACTIVE',
+      reviewedBy: 'admin',
+      reviewedAt: new Date(),
+      campaignId: 'cmp1',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      ...overrides,
+    };
+  }
+
+  function mockTxPrisma(opts: {
+    initialStatus: string;
+    partnerId?: string;
+    platforms?: string[];
+    proposedWindowDays?: number;
+    approvedWindowDays?: number | null;
+  }) {
     const placements: Array<Record<string, unknown>> = [];
-    let requestStatus = 'PENDING';
-    const prisma = {
+    let status = opts.initialStatus;
+    let claimCount = 0;
+    const partnerId = opts.partnerId ?? 'partner1';
+    const platforms = opts.platforms ?? ['TELEGRAM', 'YOUTUBE'];
+    const proposedWindowDays = opts.proposedWindowDays ?? 30;
+    const approvedWindowDays = opts.approvedWindowDays ?? 30;
+
+    const tx = {
       adPlacementRequest: {
-        findUnique: async () => ({
-          id: 'r1',
-          partnerId: 'partner1',
-          platforms: ['TELEGRAM', 'YOUTUBE'],
-          channel: 'chan',
-          notes: null,
-          proposedWindowDays: 30,
-          status: requestStatus,
-          reviewedBy: null,
-        }),
-        update: async (args: { data: { status?: string } }) => {
-          requestStatus = args.data.status ?? requestStatus;
-          return { id: 'r1', partnerId: 'partner1', platforms: ['TELEGRAM', 'YOUTUBE'], channel: 'chan', notes: null, proposedWindowDays: 30, approvedWindowDays: 30, selfFundedBudgetNote: null, status: 'ACTIVE', reviewedBy: 'admin', reviewedAt: new Date(), campaignId: 'cmp1', createdAt: new Date(), updatedAt: new Date() };
+        updateMany: async (args: {
+          where: { id?: string; status?: string; partnerId?: string };
+          data: { status?: string };
+        }) => {
+          if (args.where.status !== undefined && args.where.status !== status) {
+            return { count: 0 };
+          }
+          if (args.where.partnerId !== undefined && args.where.partnerId !== partnerId) {
+            return { count: 0 };
+          }
+          claimCount += 1;
+          status = args.data.status ?? status;
+          return { count: 1 };
         },
+        findUniqueOrThrow: async () =>
+          activeRow({
+            partnerId,
+            platforms,
+            proposedWindowDays,
+            approvedWindowDays,
+            status,
+          }),
+        findUnique: async () =>
+          activeRow({
+            partnerId,
+            platforms,
+            proposedWindowDays,
+            approvedWindowDays,
+            status,
+          }),
+        update: async () =>
+          activeRow({
+            partnerId,
+            platforms,
+            proposedWindowDays,
+            approvedWindowDays,
+            status: 'ACTIVE',
+          }),
       },
-      partner: { findUnique: async () => ({ id: 'partner1' }) },
+      partner: { findUnique: async () => ({ id: partnerId }) },
       adCampaign: {
-        create: async () => ({ id: 'cmp1' }),
-        findUnique: async () => ({ id: 'cmp1', name: 'x', status: 'ACTIVE', notes: null, createdBy: null, createdAt: new Date(), updatedAt: new Date(), placements: [] }),
+        create: async () => ({ id: 'cmp1', name: 'x', status: 'ACTIVE', notes: null, createdBy: null, createdAt: new Date(), updatedAt: new Date() }),
+        findUnique: async () => ({
+          id: 'cmp1',
+          name: 'x',
+          status: 'ACTIVE',
+          notes: null,
+          createdBy: null,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          placements: [],
+        }),
       },
       adPlacement: {
-        findUnique: async () => null, // every minted code is unique
+        findUnique: async () => null,
         create: async (args: { data: Record<string, unknown> }) => {
           placements.push(args.data);
           return args.data;
         },
       },
-    } as unknown as PrismaService;
+    };
+
+    const prisma = {
+      adPlacementRequest: {
+        findUnique: async () => ({
+          id: 'r1',
+          partnerId,
+          platforms,
+          channel: 'chan',
+          notes: null,
+          proposedWindowDays,
+          approvedWindowDays,
+          status: opts.initialStatus,
+          reviewedBy: opts.initialStatus === 'COUNTERED' ? 'admin' : null,
+        }),
+        updateMany: tx.adPlacementRequest.updateMany,
+        findUniqueOrThrow: tx.adPlacementRequest.findUniqueOrThrow,
+      },
+      $transaction: async (fn: (t: typeof tx) => Promise<unknown>) => fn(tx),
+      _placements: placements,
+      _claimCount: () => claimCount,
+    } as unknown as PrismaService & {
+      _placements: Array<Record<string, unknown>>;
+      _claimCount: () => number;
+    };
+    return prisma;
+  }
+
+  it('approves as-is → ACTIVE and creates one placement per platform', async () => {
+    const prisma = mockTxPrisma({ initialStatus: 'PENDING' });
     const Svc = await load();
     const result = await new Svc(prisma, config).approve('r1', 'admin', {});
     assert.equal(result.request.status, 'ACTIVE');
-    assert.equal(placements.length, 2);
-    assert.equal(placements[0].ownerType, 'PARTNER');
-    assert.equal(placements[0].attributionWindowDays, 30);
+    assert.equal(prisma._placements.length, 2);
+    assert.equal(prisma._placements[0].ownerType, 'PARTNER');
+    assert.equal(prisma._placements[0].attributionWindowDays, 30);
   });
 
   it('counters with a different window → COUNTERED, no placements yet', async () => {
+    let status = 'PENDING';
     const placements: unknown[] = [];
     const prisma = {
       adPlacementRequest: {
-        findUnique: async () => ({ id: 'r1', partnerId: 'p', platforms: ['TELEGRAM'], channel: null, notes: null, proposedWindowDays: 90, status: 'PENDING', reviewedBy: null }),
-        update: async () => ({ id: 'r1', partnerId: 'p', platforms: ['TELEGRAM'], channel: null, notes: null, proposedWindowDays: 90, approvedWindowDays: 30, selfFundedBudgetNote: null, status: 'COUNTERED', reviewedBy: 'admin', reviewedAt: new Date(), campaignId: null, createdAt: new Date(), updatedAt: new Date() }),
+        findUnique: async () => ({
+          id: 'r1',
+          partnerId: 'p',
+          platforms: ['TELEGRAM'],
+          channel: null,
+          notes: null,
+          proposedWindowDays: 90,
+          status,
+          reviewedBy: null,
+        }),
+        updateMany: async (args: { where: { status?: string }; data: { status?: string } }) => {
+          if (args.where.status !== status) return { count: 0 };
+          status = args.data.status ?? status;
+          return { count: 1 };
+        },
+        findUniqueOrThrow: async () => ({
+          id: 'r1',
+          partnerId: 'p',
+          platforms: ['TELEGRAM'],
+          channel: null,
+          notes: null,
+          proposedWindowDays: 90,
+          approvedWindowDays: 30,
+          selfFundedBudgetNote: null,
+          status: 'COUNTERED',
+          reviewedBy: 'admin',
+          reviewedAt: new Date(),
+          campaignId: null,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        }),
       },
-      adPlacement: { create: async () => { placements.push({}); return {}; } },
+      adPlacement: {
+        create: async () => {
+          placements.push({});
+          return {};
+        },
+      },
     } as unknown as PrismaService;
     const Svc = await load();
     const result = await new Svc(prisma, config).approve('r1', 'admin', { approvedWindowDays: 30 });
     assert.equal(result.request.status, 'COUNTERED');
     assert.equal(result.campaign, null);
     assert.equal(placements.length, 0);
+  });
+
+  it('accept from COUNTERED → ACTIVE with approved window', async () => {
+    const prisma = mockTxPrisma({
+      initialStatus: 'COUNTERED',
+      platforms: ['TELEGRAM'],
+      proposedWindowDays: 90,
+      approvedWindowDays: 30,
+    });
+    const Svc = await load();
+    const result = await new Svc(prisma, config).accept('r1', 'partner1');
+    assert.equal(result.request.status, 'ACTIVE');
+    assert.equal(prisma._placements.length, 1);
+    assert.equal(prisma._placements[0].attributionWindowDays, 30);
+    assert.equal(prisma._placements[0].ownerType, 'PARTNER');
+  });
+
+  it('accept wrong partner → not found', async () => {
+    const prisma = {
+      adPlacementRequest: {
+        findUnique: async () => ({
+          id: 'r1',
+          partnerId: 'partner1',
+          platforms: ['TELEGRAM'],
+          status: 'COUNTERED',
+          approvedWindowDays: 30,
+          proposedWindowDays: 90,
+        }),
+      },
+    } as unknown as PrismaService;
+    const Svc = await load();
+    await assert.rejects(() => new Svc(prisma, config).accept('r1', 'other-partner'), /not found/i);
+  });
+
+  it('second concurrent accept claim loses → no duplicate placements', async () => {
+    let status = 'COUNTERED';
+    const placements: unknown[] = [];
+    const tx = {
+      adPlacementRequest: {
+        updateMany: async (args: { where: { status?: string } }) => {
+          if (args.where.status !== status) return { count: 0 };
+          status = 'ACTIVE';
+          return { count: 1 };
+        },
+        findUniqueOrThrow: async () => activeRow({ platforms: ['TELEGRAM'], status: 'ACTIVE' }),
+        update: async () => activeRow({ platforms: ['TELEGRAM'], status: 'ACTIVE' }),
+      },
+      partner: { findUnique: async () => ({ id: 'partner1' }) },
+      adCampaign: {
+        create: async () => ({ id: 'cmp1' }),
+        findUnique: async () => ({
+          id: 'cmp1',
+          name: 'x',
+          status: 'ACTIVE',
+          notes: null,
+          createdBy: null,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          placements: [],
+        }),
+      },
+      adPlacement: {
+        findUnique: async () => null,
+        create: async (args: { data: unknown }) => {
+          placements.push(args.data);
+          return args.data;
+        },
+      },
+    };
+    const prisma = {
+      adPlacementRequest: {
+        findUnique: async () => ({
+          id: 'r1',
+          partnerId: 'partner1',
+          platforms: ['TELEGRAM'],
+          status: 'COUNTERED',
+          approvedWindowDays: 30,
+          proposedWindowDays: 90,
+          reviewedBy: 'admin',
+        }),
+      },
+      $transaction: async (fn: (t: typeof tx) => Promise<unknown>) => fn(tx),
+    } as unknown as PrismaService;
+    const Svc = await load();
+    const svc = new Svc(prisma, config);
+    const first = await svc.accept('r1', 'partner1');
+    assert.equal(first.request.status, 'ACTIVE');
+    assert.equal(placements.length, 1);
+    await assert.rejects(() => svc.accept('r1', 'partner1'), /not available for activation/i);
+    assert.equal(placements.length, 1);
+  });
+});
+
+describe('AdvertisingCampaignService spend / status', () => {
+  async function load() {
+    const mod = await import('../src/modules/advertising/services/advertising-campaign.service');
+    return mod.AdvertisingCampaignService;
+  }
+  const config = {
+    botUsername: 'TestBot',
+    miniAppShortName: null,
+    webBaseUrl: 'https://app.example',
+  } as never;
+
+  it('createPlacement stores COMPANY spend and nulls PARTNER spend', async () => {
+    const created: Array<Record<string, unknown>> = [];
+    const prisma = {
+      adCampaign: { findUnique: async () => ({ id: 'c1' }) },
+      adPlacement: {
+        findUnique: async () => null,
+        create: async (args: { data: Record<string, unknown> }) => {
+          created.push(args.data);
+          return { ...args.data, id: `p${created.length}`, trackingCode: 'abc1234567', createdAt: new Date(), updatedAt: new Date(), promoCodeId: null, channel: null, partnerId: null, signupBonusType: 'NONE', signupBonus: null, status: 'ACTIVE' };
+        },
+      },
+    } as unknown as PrismaService;
+    const Svc = await load();
+    const svc = new Svc(prisma, config);
+
+    await svc.createPlacement({
+      campaignId: 'c1',
+      platform: 'YOUTUBE',
+      ownerType: 'COMPANY',
+      attributionWindowDays: 30,
+      spendAmountMinor: 300000,
+      spendCurrency: 'rub',
+    } as never);
+    assert.equal(created[0].spendAmount, 300000);
+    assert.equal(created[0].spendCurrency, 'RUB');
+
+    await svc.createPlacement({
+      campaignId: 'c1',
+      platform: 'TELEGRAM',
+      ownerType: 'PARTNER',
+      partnerId: 'partner1',
+      attributionWindowDays: 30,
+      spendAmountMinor: 999999,
+      spendCurrency: 'USD',
+    } as never);
+    assert.equal(created[1].spendAmount, null);
+    assert.equal(created[1].spendCurrency, null);
+  });
+
+  it('updatePlacement nulls PARTNER spend (even legacy non-null) and applies COMPANY spend/status', async () => {
+    const updates: Array<Record<string, unknown>> = [];
+    const prisma = {
+      adPlacement: {
+        findUnique: async ({ where }: { where: { id: string } }) => {
+          if (where.id === 'partner-p') {
+            // Legacy bad row: PARTNER still holding a budget that must be scrubbed.
+            return { id: 'partner-p', ownerType: 'PARTNER', campaignId: 'c1', platform: 'TELEGRAM', channel: null, partnerId: 'p1', trackingCode: 'codepart01', attributionWindowDays: 30, promoCodeId: null, spendAmount: 50000, spendCurrency: 'USD', signupBonusType: 'NONE', signupBonus: null, status: 'ACTIVE', createdAt: new Date(), updatedAt: new Date() };
+          }
+          return { id: 'company-p', ownerType: 'COMPANY', campaignId: 'c1', platform: 'YOUTUBE', channel: 'x', partnerId: null, trackingCode: 'codecomp01', attributionWindowDays: 30, promoCodeId: null, spendAmount: 100, spendCurrency: 'RUB', signupBonusType: 'NONE', signupBonus: null, status: 'ACTIVE', createdAt: new Date(), updatedAt: new Date() };
+        },
+        update: async (args: { where: { id: string }; data: Record<string, unknown> }) => {
+          updates.push({ id: args.where.id, ...args.data });
+          return {
+            id: args.where.id,
+            ownerType: args.where.id === 'partner-p' ? 'PARTNER' : 'COMPANY',
+            campaignId: 'c1',
+            platform: 'TELEGRAM',
+            channel: args.data.channel ?? null,
+            partnerId: null,
+            trackingCode: 'code000001',
+            attributionWindowDays: args.data.attributionWindowDays ?? 30,
+            promoCodeId: null,
+            spendAmount: args.data.spendAmount ?? null,
+            spendCurrency: args.data.spendCurrency ?? null,
+            signupBonusType: 'NONE',
+            signupBonus: null,
+            status: args.data.status ?? 'ACTIVE',
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          };
+        },
+      },
+    } as unknown as PrismaService;
+    const Svc = await load();
+    const svc = new Svc(prisma, config);
+
+    await svc.updatePlacement('partner-p', {
+      spendAmountMinor: 99999,
+      spendCurrency: 'EUR',
+      status: 'PAUSED',
+    } as never);
+    const partnerUpdate = updates.find((u) => u.id === 'partner-p')!;
+    assert.equal(partnerUpdate.spendAmount, null);
+    assert.equal(partnerUpdate.spendCurrency, null);
+    assert.equal(partnerUpdate.status, 'PAUSED');
+
+    await svc.updatePlacement('company-p', {
+      spendAmountMinor: 450000,
+      spendCurrency: 'rub',
+      status: 'PAUSED',
+    } as never);
+    const companyUpdate = updates.find((u) => u.id === 'company-p')!;
+    assert.equal(companyUpdate.spendAmount, 450000);
+    assert.equal(companyUpdate.spendCurrency, 'RUB');
+    assert.equal(companyUpdate.status, 'PAUSED');
   });
 });

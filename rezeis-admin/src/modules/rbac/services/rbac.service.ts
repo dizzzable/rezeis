@@ -388,13 +388,17 @@ export class RbacService implements OnModuleInit {
           granted.add(permissionToToken(resource, action));
         }
       }
-      // Sensitive surfaces stay locked behind explicit DEV/superadmin.
+      // Sensitive surfaces stay locked behind explicit DEV/superadmin
+      // or an assigned custom role — never implicit on bare ADMIN.
       for (const action of RBAC_RESOURCES.rbac_roles) {
         granted.delete(permissionToToken('rbac_roles', action));
       }
       for (const action of RBAC_RESOURCES.admins) {
         granted.delete(permissionToToken('admins', action));
       }
+      // Bulk raw registration PII dump is elevated (S7); requires
+      // superadmin / custom role with users:export_registration.
+      granted.delete(permissionToToken('users', 'export_registration'));
     }
 
     const entry: PermissionCacheEntry = {

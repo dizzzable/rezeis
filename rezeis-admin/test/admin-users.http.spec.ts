@@ -9,16 +9,20 @@ import { Locale, UserRole } from '@prisma/client';
 import request from 'supertest';
 
 import { AdminJwtAuthGuard } from '../src/modules/auth/guards/admin-jwt-auth.guard';
+import { PrismaService } from '../src/common/prisma/prisma.service';
 import { RbacGuard } from '../src/modules/rbac/guards/rbac.guard';
 import { AdminUserListQueryDto } from '../src/modules/users/dto/admin-user-list-query.dto';
 import { AdminUserSearchQueryDto } from '../src/modules/users/dto/admin-user-search-query.dto';
 import { AdminUsersController } from '../src/modules/users/controllers/admin-users.controller';
 import { AdminUsersService } from '../src/modules/users/services/admin-users.service';
+import { RegistrationExportService } from '../src/modules/users/services/registration-export.service';
 
 describe('AdminUsersController HTTP contract', () => {
   let application: INestApplication;
   const listCalls: Array<{ readonly query: AdminUserListQueryDto }> = [];
   const searchCalls: Array<{ readonly query: AdminUserSearchQueryDto }> = [];
+  const exportCalls: Array<Record<string, unknown>> = [];
+  const auditCalls: Array<Record<string, unknown>> = [];
 
   before(async () => {
     const testingModule: TestingModule = await Test.createTestingModule({
@@ -37,10 +41,42 @@ describe('AdminUsersController HTTP contract', () => {
             },
           } satisfies Pick<AdminUsersService, 'listUsers' | 'searchUser'>,
         },
+        {
+          provide: RegistrationExportService,
+          useValue: {
+            exportCsv: async (query: Record<string, unknown>) => {
+              exportCalls.push(query);
+              return {
+                csv: '\ufeffuser_id\r\nu1',
+                rowCount: 1,
+                limit: 1000,
+                from: null,
+                to: null,
+              };
+            },
+          },
+        },
+        {
+          provide: PrismaService,
+          useValue: {
+            adminAuditLog: {
+              create: async (args: { data: Record<string, unknown> }) => {
+                auditCalls.push(args.data);
+                return args.data;
+              },
+            },
+          },
+        },
       ],
     })
       .overrideGuard(AdminJwtAuthGuard)
-      .useValue({ canActivate: (): boolean => true })
+      .useValue({
+        canActivate: (ctx: { switchToHttp: () => { getRequest: () => Record<string, unknown> } }): boolean => {
+          const req = ctx.switchToHttp().getRequest();
+          req.user = { id: 'admin-1', role: 'DEV', rbacRoleId: null };
+          return true;
+        },
+      })
       .overrideGuard(RbacGuard)
       .useValue({ canActivate: (): boolean => true })
       .compile();
@@ -129,6 +165,24 @@ describe('AdminUsersController HTTP contract', () => {
     assert.deepStrictEqual(multiIdentifierResponse.body.message, [
       'Exactly one identifier must be provided: userId, telegramId, email, or login',
     ]);
+  });
+
+  it('exports registration CSV with audit metadata when permitted', async () => {
+    exportCalls.length = 0;
+    auditCalls.length = 0;
+
+    const response = await request(application.getHttpServer())
+      .get('/api/admin/users/export/registration.csv')
+      .query({ limit: '100' })
+      .expect(200);
+
+    assert.equal(exportCalls.length, 1);
+    assert.equal(exportCalls[0]?.limit, 100);
+    assert.equal(response.headers['content-type']?.includes('text/csv'), true);
+    assert.equal(response.headers['x-export-row-count'], '1');
+    assert.ok(String(response.text).includes('user_id'));
+    assert.equal(auditCalls.length, 1);
+    assert.equal(auditCalls[0]?.action, 'users.registration.export');
   });
 });
 

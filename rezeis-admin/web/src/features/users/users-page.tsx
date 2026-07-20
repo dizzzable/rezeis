@@ -22,10 +22,12 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
-import { Search, Users as UsersIcon, Plus, Loader2, ListChecks, ArrowLeft } from 'lucide-react'
+import { Search, Users as UsersIcon, Plus, Loader2, ListChecks, ArrowLeft, Download } from 'lucide-react'
 
 import { api } from '@/lib/api'
 import { toast } from 'sonner'
+import { PermissionGate } from '@/features/rbac'
+import { downloadCsv } from '@/features/partners/csv-download'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -99,17 +101,49 @@ interface UserListResponse {
 export default function UsersPage() {
   const { t } = useTranslation()
   const { activeTab, setTab: handleTabChange } = useTabSync<UsersTab>(ALLOWED_TABS, 'list')
+  const [exporting, setExporting] = useState(false)
+
+  const exportRegistration = async () => {
+    setExporting(true)
+    try {
+      await downloadCsv({
+        path: '/admin/users/export/registration.csv',
+        filename: 'registration-export.csv',
+        params: { limit: 1000 },
+      })
+      toast.success(t('usersPage.export.registrationSuccess'))
+    } catch (err) {
+      toast.error(getErrorMessage(err, t('usersPage.export.registrationError')))
+    } finally {
+      setExporting(false)
+    }
+  }
 
   return (
     <div className="space-y-4">
-      <div>
-        <h1 className="flex items-center gap-2 text-2xl font-bold tracking-tight">
-          <UsersIcon className="h-6 w-6" />
-          {t('usersPage.title')}
-        </h1>
-        <p className="text-muted-foreground">
-          {t('usersPage.subtitle')}
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="flex items-center gap-2 text-2xl font-bold tracking-tight">
+            <UsersIcon className="h-6 w-6" />
+            {t('usersPage.title')}
+          </h1>
+          <p className="text-muted-foreground">
+            {t('usersPage.subtitle')}
+          </p>
+        </div>
+        <PermissionGate resource="users" action="export_registration">
+          <Button
+            variant="outline"
+            size="sm"
+            className="gap-1.5"
+            onClick={() => void exportRegistration()}
+            disabled={exporting}
+            data-testid="export-registration-csv"
+          >
+            {exporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+            {t('usersPage.export.registration')}
+          </Button>
+        </PermissionGate>
       </div>
 
       <Tabs value={activeTab} onValueChange={handleTabChange}>

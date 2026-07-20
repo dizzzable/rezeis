@@ -166,4 +166,29 @@ export interface UserDetail {
   readonly webAccount?: UserWebAccount | null
   readonly effectiveInviteSettings?: InviteEffective | null
   readonly userInviteSettingsOverride?: InviteOverride | null
+  /** Present when admin has users:view_registration (otherwise null/stripped). */
+  readonly canViewRegistration?: boolean
+  readonly registrationIp?: string | null
+  readonly registrationUserAgent?: string | null
+  readonly registrationReferer?: string | null
+  readonly registrationUtm?: Record<string, string> | null
+  readonly registrationChannel?: string | null
+  readonly acquisitionAt?: string | null
+  readonly acquisitionPlacement?: {
+    readonly id: string
+    readonly platform: string
+    readonly channel?: string | null
+    readonly trackingCode: string
+    readonly status: string
+    readonly ownerType: string
+    readonly campaignId: string
+    readonly campaignName: string
+  } | null
+  readonly acquiredByPartner?: {
+    readonly partnerId: string
+    readonly level?: number | null
+    readonly name?: string | null
+    readonly username?: string | null
+    readonly telegramId?: string | null
+  } | null
 }

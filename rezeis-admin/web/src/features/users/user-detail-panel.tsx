@@ -55,7 +55,7 @@ import type {
 import { DatePicker } from '@/components/ui/date-picker'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import {
   Collapsible,
   CollapsibleContent,
@@ -149,6 +149,7 @@ export default function UserDetailPanel({ telegramId }: UserDetailPanelProps) {
             {t('userDetailPanel.tabs.transactions')} ({user.transactions?.length ?? 0})
           </TabsTrigger>
           <TabsTrigger value="web">{t('userDetailPanel.tabs.web')}</TabsTrigger>
+          <TabsTrigger value="analytics">{t('userDetailPanel.tabs.analytics')}</TabsTrigger>
         </TabsList>
 
         <TabsContent value="profile">
@@ -176,11 +177,173 @@ export default function UserDetailPanel({ telegramId }: UserDetailPanelProps) {
         <TabsContent value="web">
           <WebCabinetTab user={user} telegramId={telegramId} queryKey={queryKey} />
         </TabsContent>
+        <TabsContent value="analytics">
+          <AnalyticsTab user={user} />
+        </TabsContent>
       </Tabs>
     </div>
   )
 }
 
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Analytics Tab — registration snapshot + ad acquisition (read-only)
+// ══════════════════════════════════════════════════════════════════════════════
+
+function AnalyticsTab({ user }: { user: UserDetail }) {
+  const { t, i18n } = useTranslation()
+  const locale = i18n.language?.startsWith('ru') ? 'ru-RU' : 'en-US'
+  const canPii = user.canViewRegistration === true
+  const utm = user.registrationUtm ?? null
+  const placement = user.acquisitionPlacement ?? null
+
+  return (
+    <div className="space-y-3">
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base">{t('userDetailPanel.analytics.networkTitle')}</CardTitle>
+          <CardDescription>{t('userDetailPanel.analytics.networkHint')}</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-2 text-sm">
+          <AnalyticsRow
+            label={t('userDetailPanel.analytics.registeredAt')}
+            value={user.createdAt ? new Date(user.createdAt).toLocaleString(locale) : '—'}
+          />
+          <AnalyticsRow
+            label={t('userDetailPanel.analytics.channel')}
+            value={user.registrationChannel ?? '—'}
+          />
+          {canPii ? (
+            <>
+              <AnalyticsRow
+                label={t('userDetailPanel.analytics.ip')}
+                value={user.registrationIp ?? '—'}
+                mono
+                copyable={Boolean(user.registrationIp)}
+              />
+              <AnalyticsRow
+                label={t('userDetailPanel.analytics.referer')}
+                value={user.registrationReferer ?? '—'}
+                mono
+              />
+              <AnalyticsRow
+                label={t('userDetailPanel.analytics.userAgent')}
+                value={user.registrationUserAgent ?? '—'}
+                mono
+              />
+            </>
+          ) : (
+            <p className="text-xs text-muted-foreground">{t('userDetailPanel.analytics.piiDenied')}</p>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base">{t('userDetailPanel.analytics.utmTitle')}</CardTitle>
+          <CardDescription>{t('userDetailPanel.analytics.utmHint')}</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-2 text-sm">
+          {canPii && utm && Object.keys(utm).length > 0 ? (
+            Object.entries(utm).map(([k, v]) => (
+              <AnalyticsRow key={k} label={k} value={String(v)} mono />
+            ))
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              {canPii
+                ? t('userDetailPanel.analytics.utmEmpty')
+                : t('userDetailPanel.analytics.piiDenied')}
+            </p>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base">{t('userDetailPanel.analytics.adTitle')}</CardTitle>
+          <CardDescription>{t('userDetailPanel.analytics.adHint')}</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-2 text-sm">
+          {placement ? (
+            <>
+              <AnalyticsRow label={t('userDetailPanel.analytics.campaign')} value={placement.campaignName} />
+              <AnalyticsRow label={t('userDetailPanel.analytics.platform')} value={placement.platform} />
+              <AnalyticsRow label={t('userDetailPanel.analytics.channelLabel')} value={placement.channel ?? '—'} />
+              <AnalyticsRow
+                label={t('userDetailPanel.analytics.trackingCode')}
+                value={placement.trackingCode}
+                mono
+                copyable
+              />
+              <AnalyticsRow
+                label={t('userDetailPanel.analytics.acquisitionAt')}
+                value={
+                  user.acquisitionAt ? new Date(user.acquisitionAt).toLocaleString(locale) : '—'
+                }
+              />
+              <AnalyticsRow label={t('userDetailPanel.analytics.ownerType')} value={placement.ownerType} />
+            </>
+          ) : (
+            <p className="text-xs text-muted-foreground">{t('userDetailPanel.analytics.adEmpty')}</p>
+          )}
+          {user.acquiredByPartner && (
+            <AnalyticsRow
+              label={t('userDetailPanel.analytics.partnerSource')}
+              value={
+                user.acquiredByPartner.username ||
+                user.acquiredByPartner.name ||
+                user.acquiredByPartner.partnerId
+              }
+            />
+          )}
+          {user.referral?.referrer && (
+            <AnalyticsRow
+              label={t('userDetailPanel.analytics.referralSource')}
+              value={
+                user.referral.referrer.username ||
+                user.referral.referrer.name ||
+                '—'
+              }
+            />
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+
+function AnalyticsRow({
+  label,
+  value,
+  mono,
+  copyable,
+}: {
+  label: string
+  value: string
+  mono?: boolean
+  copyable?: boolean
+}) {
+  const { t } = useTranslation()
+  return (
+    <div className="flex items-start justify-between gap-3">
+      <span className="shrink-0 text-muted-foreground">{label}</span>
+      <span className={`min-w-0 text-right ${mono ? 'break-all font-mono text-xs' : ''}`}>{value}</span>
+      {copyable && value !== '—' && (
+        <Button
+          size="icon"
+          variant="ghost"
+          className="h-6 w-6 shrink-0"
+          onClick={() => {
+            void navigator.clipboard.writeText(value)
+            toast.success(t('userDetailPanel.analytics.copied'))
+          }}
+        >
+          <Copy className="h-3 w-3" />
+        </Button>
+      )}
+    </div>
+  )
+}
 
 // ══════════════════════════════════════════════════════════════════════════════
 // Profile Tab — two-column layout: info (left) + actions (right)

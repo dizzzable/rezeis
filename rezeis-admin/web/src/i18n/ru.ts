@@ -1944,6 +1944,11 @@
     selectUser: 'Выберите пользователя слева',
     backToList: 'К списку',
     createUser: 'Создать пользователя',
+    export: {
+      registration: 'Экспорт регистрации (CSV)',
+      registrationSuccess: 'CSV с регистрациями скачан',
+      registrationError: 'Не удалось экспортировать данные регистрации',
+    },
     tabs: {
       list: 'Список',
       bulk: 'Массовые операции',

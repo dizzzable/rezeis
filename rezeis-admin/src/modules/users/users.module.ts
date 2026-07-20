@@ -15,6 +15,7 @@ import { AdminUserSubscriptionsController } from './controllers/admin-user-subsc
 import { AdminUserWebController } from './controllers/admin-user-web.controller';
 import { AdminUsersController } from './controllers/admin-users.controller';
 import { AdminUsersService } from './services/admin-users.service';
+import { RegistrationExportService } from './services/registration-export.service';
 import { BulkUserOperationsService } from './services/bulk-user-operations.service';
 
 /**
@@ -37,6 +38,6 @@ import { BulkUserOperationsService } from './services/bulk-user-operations.servi
     SubscriptionsModule,
   ],
   controllers: [AdminUsersController, AdminUserManagementController, AdminUserSubscriptionsController, AdminUserWebController, AdminBulkUsersController],
-  providers: [AdminUsersService, BulkUserOperationsService],
+  providers: [AdminUsersService, BulkUserOperationsService, RegistrationExportService],
 })
 export class UsersModule {}

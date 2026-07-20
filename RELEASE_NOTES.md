@@ -1,4 +1,28 @@
-﻿# Rezeis Admin v0.9.6.37
+# Rezeis Admin v0.9.6.51
+
+📣 **Рекламный кабинет + аналитика регистрации** — spend/pause SPA, история заявок партнёров, dual QR, snapshot IP/UA/Referer/UTM и elevated CSV-экспорт. Парный кабинет: **reiwa v0.9.6.34**.
+
+### 📣 Рекламный кабинет
+- **Бюджет COMPANY** при create/edit (minor units + валюта) → cost для CAC / ROAS / ROI.
+- **PARTNER** без операторского бюджета (cost = комиссия); сервис force-null spend.
+- **Пауза / активация** ACTIVE ↔ PAUSED; dual local QR (бот + web); multi-link copy.
+- **Заявки партнёров:** Ожидают / История / Все; counter window; toast встречных условий.
+
+### 📊 Регистрация и RBAC
+- Write-once `registration*` snapshot (web); вкладка «Аналитика» (PII за `users:view_registration`).
+- Elevated **`users:export_registration`** CSV (cap 1000/5000, audit, formula-guard); bare ADMIN без export.
+
+### 🛡️ Надёжность
+- Атомарный accept COUNTERED; web-only ad hand-off по userId; merge target-first registration*.
+
+### 🧪 Качество
+- Targeted: advertising-services, registration-export util/service/permission (deny×2/pass×2), SPA vitest — green.
+- AI Support WIP **не** в этом релизе.
+
+**Полный список изменений:** https://github.com/dizzzable/rezeis/compare/v0.9.6.45...v0.9.6.51
+
+---
+# Rezeis Admin v0.9.6.37
 
 🎮 Новый модуль **Геймификация / Задания (Quests)** — награды за действия пользователей (привязка Telegram/email, приглашение друзей). Плюс лёгкая иконка с блеском в кабинете reiwa.
 

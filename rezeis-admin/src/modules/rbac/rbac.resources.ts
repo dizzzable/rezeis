@@ -47,6 +47,13 @@ export const RBAC_ACTIONS = [
   /// Separated from `edit` because of its destructive, cross-account blast
   /// radius.
   'merge',
+  /// User registration telemetry (IP / UA / Referer / UTM) on the Analytics
+  /// tab. Separated from `view` so PII can be granted via custom roles without
+  /// opening full user edit rights.
+  'view_registration',
+  /// Bulk raw registration PII export (CSV). Elevated vs `view_registration`
+  /// because exports are high-blast-radius (full IP/UA/Referer/UTM dumps).
+  'export_registration',
 ] as const;
 
 export type RbacAction = (typeof RBAC_ACTIONS)[number];
@@ -61,7 +68,16 @@ export type RbacAction = (typeof RBAC_ACTIONS)[number];
 export const RBAC_RESOURCES: Readonly<Record<string, readonly RbacAction[]>> = {
   // Operations
   dashboard: ['view'],
-  users: ['view', 'create', 'edit', 'delete', 'bulk_operations', 'merge'],
+  users: [
+    'view',
+    'create',
+    'edit',
+    'delete',
+    'bulk_operations',
+    'merge',
+    'view_registration',
+    'export_registration',
+  ],
   subscriptions: ['view', 'create', 'edit', 'delete'],
   payments: ['view', 'create', 'edit', 'delete', 'export'],
   payment_gateways: ['view', 'edit'],
@@ -207,6 +223,7 @@ export const SYSTEM_ROLES: readonly SystemRoleSeed[] = [
     permissions: [
       { resource: 'dashboard', action: 'view' },
       { resource: 'users', action: 'view' },
+      { resource: 'users', action: 'view_registration' },
       { resource: 'users', action: 'edit' },
       { resource: 'users', action: 'create' },
       { resource: 'users', action: 'bulk_operations' },
@@ -251,6 +268,7 @@ export const SYSTEM_ROLES: readonly SystemRoleSeed[] = [
     permissions: [
       { resource: 'dashboard', action: 'view' },
       { resource: 'users', action: 'view' },
+      { resource: 'users', action: 'view_registration' },
       { resource: 'subscriptions', action: 'view' },
       { resource: 'payments', action: 'view' },
       { resource: 'support_tickets', action: 'view' },

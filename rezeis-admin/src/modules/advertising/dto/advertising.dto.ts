@@ -218,6 +218,18 @@ export class IngestClickDto {
   @Length(1, 32)
   public readonly telegramId?: string;
 
+  /** Web-only users may attribute via rezeis user id when telegramId is absent. */
+  @IsOptional()
+  @IsString()
+  @Length(1, 64)
+  public readonly userId?: string;
+
+  /** BOT | MINIAPP | WEB — defaults to BOT when omitted. */
+  @IsOptional()
+  @IsString()
+  @Length(1, 16)
+  public readonly surface?: string;
+
   @IsOptional()
   @IsBoolean()
   public readonly isNewUser?: boolean;

@@ -59,6 +59,11 @@ export class AccountMergeService {
           maxSubscriptions: true,
           acquisitionPlacementId: true,
           acquisitionAt: true,
+          registrationIp: true,
+          registrationUserAgent: true,
+          registrationReferer: true,
+          registrationUtm: true,
+          registrationChannel: true,
           partner: { select: { id: true, balance: true, totalEarned: true, totalWithdrawn: true } },
           webAccount: { select: { id: true } },
           trialGrant: { select: { id: true } },
@@ -76,6 +81,11 @@ export class AccountMergeService {
           maxSubscriptions: true,
           acquisitionPlacementId: true,
           acquisitionAt: true,
+          registrationIp: true,
+          registrationUserAgent: true,
+          registrationReferer: true,
+          registrationUtm: true,
+          registrationChannel: true,
           partner: { select: { id: true } },
           webAccount: { select: { id: true } },
           trialGrant: { select: { id: true } },
@@ -203,6 +213,17 @@ export class AccountMergeService {
           acquisitionPlacementId:
             target.acquisitionPlacementId ?? source.acquisitionPlacementId ?? undefined,
           acquisitionAt: target.acquisitionAt ?? source.acquisitionAt ?? undefined,
+          // Registration snapshot: target-first write-once (same as acquisition).
+          registrationIp: target.registrationIp ?? source.registrationIp ?? undefined,
+          registrationUserAgent:
+            target.registrationUserAgent ?? source.registrationUserAgent ?? undefined,
+          registrationReferer: target.registrationReferer ?? source.registrationReferer ?? undefined,
+          registrationUtm:
+            (target.registrationUtm as Prisma.InputJsonValue | null) ??
+            (source.registrationUtm as Prisma.InputJsonValue | null) ??
+            undefined,
+          registrationChannel:
+            target.registrationChannel ?? source.registrationChannel ?? undefined,
           currentSubscriptionId: currentSubscriptionId ?? undefined,
         },
       });

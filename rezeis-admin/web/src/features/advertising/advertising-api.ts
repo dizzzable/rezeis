@@ -127,6 +127,44 @@ export interface CreatePlacementInput {
   signupBonus?: { type: AdSignupBonusType; trialDurationDays?: number; trialTrafficGb?: number; trialDeviceLimit?: number; tariffPlanId?: string; tariffDurationDays?: number }
 }
 
+export interface UpdatePlacementInput {
+  channel?: string
+  attributionWindowDays?: number
+  promoCodeId?: string | null
+  spendAmountMinor?: number
+  spendCurrency?: string
+  status?: AdPlacementStatus
+  signupBonus?: {
+    type: AdSignupBonusType
+    trialDurationDays?: number
+    trialTrafficGb?: number
+    trialDeviceLimit?: number
+    tariffPlanId?: string
+    tariffDurationDays?: number
+  }
+}
+
+/** Convert major units (e.g. 3000.50 RUB) to minor (300050). Invalid → undefined. */
+export function majorToMinor(major: string | number): number | undefined {
+  if (typeof major === 'string' && major.trim() === '') return undefined
+  const n = typeof major === 'number' ? major : Number(String(major).replace(',', '.').trim())
+  if (!Number.isFinite(n) || n < 0) return undefined
+  return Math.round(n * 100)
+}
+
+/** PARTNER cost is commission, never operator budget — strip spend before API. */
+export function placementSpendPayload(
+  ownerType: AdOwnerType,
+  spendMajor: string,
+  currency: string,
+): { spendAmountMinor?: number; spendCurrency?: string } {
+  if (ownerType === 'PARTNER') return {}
+  const spendAmountMinor = majorToMinor(spendMajor)
+  if (spendAmountMinor === undefined) return {}
+  const spendCurrency = currency.trim().toUpperCase() || 'RUB'
+  return { spendAmountMinor, spendCurrency }
+}
+
 export const getAdOverview = () =>
   api.get<AdOverview>('/admin/advertising/overview').then((r) => r.data)
 
@@ -138,6 +176,9 @@ export const createAdCampaign = (input: CreateCampaignInput) =>
 
 export const createAdPlacement = (input: CreatePlacementInput) =>
   api.post<AdPlacement>('/admin/advertising/placements', input).then((r) => r.data)
+
+export const updateAdPlacement = (id: string, input: UpdatePlacementInput) =>
+  api.patch<AdPlacement>(`/admin/advertising/placements/${id}`, input).then((r) => r.data)
 
 export const archiveAdPlacement = (id: string) =>
   api.delete<{ archived: boolean }>(`/admin/advertising/placements/${id}`).then((r) => r.data)
@@ -155,10 +196,56 @@ export const listAdRequests = (status?: string) =>
     .get<AdPlacementRequest[]>('/admin/advertising/requests', { params: status ? { status } : {} })
     .then((r) => r.data)
 
+export interface ModerateRequestResult {
+  request: AdPlacementRequest
+  campaign: AdCampaign | null
+}
+
 export const approveAdRequest = (id: string, approvedWindowDays?: number) =>
   api
-    .post(`/admin/advertising/requests/${id}/approve`, approvedWindowDays ? { approvedWindowDays } : {})
+    .post<ModerateRequestResult>(
+      `/admin/advertising/requests/${id}/approve`,
+      approvedWindowDays ? { approvedWindowDays } : {},
+    )
     .then((r) => r.data)
 
 export const rejectAdRequest = (id: string) =>
-  api.post(`/admin/advertising/requests/${id}/reject`, {}).then((r) => r.data)
+  api.post<AdPlacementRequest>(`/admin/advertising/requests/${id}/reject`, {}).then((r) => r.data)
+
+/** Operator counters when the approved window differs from the partner's proposal. */
+export function isCounterOffer(
+  proposedWindowDays: number,
+  approvedWindowDays: number | null | undefined,
+): boolean {
+  if (approvedWindowDays == null) return false
+  return approvedWindowDays !== proposedWindowDays
+}
+
+/** Human-readable terms line for queue / history rows (testable pure mapper). */
+export function formatRequestTerms(request: Pick<
+  AdPlacementRequest,
+  'proposedWindowDays' | 'approvedWindowDays' | 'status'
+>): { kind: 'proposed' | 'agreed' | 'counter'; proposed: number; approved: number | null } {
+  const proposed = request.proposedWindowDays
+  const approved = request.approvedWindowDays
+  if (approved == null) {
+    return { kind: 'proposed', proposed, approved: null }
+  }
+  if (isCounterOffer(proposed, approved) || request.status === 'COUNTERED') {
+    return { kind: 'counter', proposed, approved }
+  }
+  return { kind: 'agreed', proposed, approved }
+}
+
+const HISTORY_STATUSES: ReadonlySet<AdRequestStatus> = new Set([
+  'APPROVED',
+  'COUNTERED',
+  'ACCEPTED',
+  'ACTIVE',
+  'REJECTED',
+  'EXPIRED',
+])
+
+export function isHistoryRequest(status: AdRequestStatus): boolean {
+  return HISTORY_STATUSES.has(status)
+}

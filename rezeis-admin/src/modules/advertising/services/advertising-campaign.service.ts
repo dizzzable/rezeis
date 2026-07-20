@@ -105,14 +105,22 @@ export class AdvertisingCampaignService {
       throw new NotFoundException('Placement not found');
     }
     const isPartner = existing.ownerType === 'PARTNER';
+    // PARTNER cost is commission only — force null budget even if legacy rows
+    // still carry spend from a bad write or owner-type change.
+    const spendAmount = isPartner ? null : input.spendAmountMinor;
+    const spendCurrency = isPartner
+      ? null
+      : input.spendCurrency === undefined
+        ? undefined
+        : input.spendCurrency.toUpperCase();
     const placement = await this.prismaService.adPlacement.update({
       where: { id },
       data: {
         channel: input.channel === undefined ? undefined : input.channel.trim() || null,
         attributionWindowDays: input.attributionWindowDays,
         promoCodeId: input.promoCodeId === undefined ? undefined : input.promoCodeId || null,
-        spendAmount: isPartner ? undefined : input.spendAmountMinor,
-        spendCurrency: isPartner ? undefined : input.spendCurrency?.toUpperCase(),
+        spendAmount,
+        spendCurrency,
         status: input.status,
         signupBonusType: input.signupBonus?.type,
         signupBonus:
