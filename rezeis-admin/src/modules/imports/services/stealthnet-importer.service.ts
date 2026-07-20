@@ -737,16 +737,24 @@ export class StealthnetImporterService {
 // importer emits.
 
 /**
- * Converts a leftover STEALTHNET wallet balance into loyalty points using the
- * operator-chosen rate (points per 1 currency unit), floored and never
- * negative. Credited once per migrated user (guarded by a `points = 0`
- * conditional update in the run loop) so both freshly-created and re-matched
- * existing users keep the value they had in the old bot without double-credit.
+ * Converts a leftover STEALTHNET wallet balance into loyalty points.
+ *
+ * STEALTHNET stores balance as major currency units (double, e.g. RUB).
+ * Fractional coppers/kopecks are first rounded half-up to 2 decimals so
+ * float dust (`10.005`, `19.999999`) does not strand or invent value,
+ * then `major * rate` is rounded half-up to whole points.
+ *
+ * Rate = points per 1 major unit (default 1:1). Never negative.
+ * Credited once per migrated user (guarded by `points = 0` updateMany).
  */
-function balanceToPoints(balance: number, rate: number): number {
+export function balanceToPoints(balance: number, rate: number): number {
   if (!Number.isFinite(balance) || balance <= 0) return 0;
   if (!Number.isFinite(rate) || rate <= 0) return 0;
-  return Math.floor(balance * rate);
+  // Round to kopecks (2 dp) first — monetary display precision.
+  const major = Math.round(balance * 100) / 100;
+  if (major <= 0) return 0;
+  // Whole loyalty points; half-up is fairer for migration goodwill than floor.
+  return Math.round(major * rate);
 }
 
 /**
@@ -857,7 +865,6 @@ function mapTariffToPlanRow(
       tariff.traffic_limit_bytes && tariff.traffic_limit_bytes > 0
         ? Number(tariff.traffic_limit_bytes)
         : 0,
-    device_limit: tariff.device_limit ?? tariff.included_devices,
     traffic_limit_strategy: mapResetMode(tariff.traffic_reset_mode),
     replacement_plan_ids: [],
     upgrade_to_plan_ids: [],
