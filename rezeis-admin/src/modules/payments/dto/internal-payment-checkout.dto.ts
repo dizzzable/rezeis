@@ -1,5 +1,6 @@
 import { PaymentGatewayType, PurchaseChannel, PurchaseType } from '@prisma/client';
 import {
+  IsBoolean,
   IsEnum,
   IsIn,
   IsInt,
@@ -100,4 +101,13 @@ export class InternalPaymentCheckoutDto {
   @MinLength(1)
   @MaxLength(64)
   public savedPaymentMethodId?: string;
+
+  /**
+   * When false, YooKassa interactive checkout skips binding the card.
+   * Default (omit / true): save when gateway settings allow it.
+   * Ignored for off-session charges (savedPaymentMethodId set).
+   */
+  @IsOptional()
+  @IsBoolean()
+  public savePaymentMethod?: boolean;
 }

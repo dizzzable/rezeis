@@ -52,6 +52,12 @@ export class PaymentProviderExecutionService {
     readonly paymentMethodId?: string | null;
     /** Local SavedPaymentMethod.id — stored in gatewayData for audit only. */
     readonly savedPaymentMethodId?: string | null;
+    /**
+     * Per-request override for YooKassa `save_payment_method`.
+     * When false, do not bind the card. When true/omit, use gateway settings
+     * (default true). Ignored when paymentMethodId is set (off-session).
+     */
+    readonly savePaymentMethod?: boolean;
   }): Promise<ProviderCheckoutResult> {
     try {
       switch (input.gateway.type) {
@@ -119,9 +125,12 @@ export class PaymentProviderExecutionService {
     // When true (default), YooKassa may return a reusable payment_method on
     // successful interactive payment — required for merchant-side autopayments.
     // Operators can disable via gateway settings `savePaymentMethod: false`.
-    // Off-session charges (payment_method_id) never re-request save.
+    // Per-request false from cabinet wins over the gateway default.
+    const settings = readGatewaySettings(input.gateway);
     const savePaymentMethod =
-      paymentMethodId === null && readBooleanSetting(settings, 'savePaymentMethod', true);
+      paymentMethodId === null &&
+      input.savePaymentMethod !== false &&
+      readBooleanSetting(settings, 'savePaymentMethod', true);
 
     const payload: Record<string, unknown> = {
       amount: {
