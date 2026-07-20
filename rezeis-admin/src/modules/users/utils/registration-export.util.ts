@@ -168,12 +168,32 @@ function quote(value: string): string {
   let v = value === null || value === undefined ? '' : String(value);
   // Defang spreadsheet formula injection even when values are padded with
   // whitespace / control characters (tab, CR, LF, NUL, etc.).
-  const formulaRisk = /^[\s\u0000-\u001f\u007f]*[=+\-@]/.test(v);
-  if (formulaRisk) {
+  if (hasLeadingFormulaRisk(v)) {
     v = `'${v}`;
   }
   if (/[",\r\n]/.test(v)) {
     return `"${v.replace(/"/g, '""')}"`;
   }
   return v;
+}
+
+/** True when value (after leading whitespace/controls) starts with a formula char. */
+function hasLeadingFormulaRisk(value: string): boolean {
+  let i = 0;
+  while (i < value.length) {
+    const code = value.charCodeAt(i);
+    // space, tab, CR, LF, NUL..US, DEL
+    const isWsOrControl =
+      code === 0x20 ||
+      code === 0x09 ||
+      code === 0x0a ||
+      code === 0x0d ||
+      code === 0x7f ||
+      (code >= 0x00 && code <= 0x1f);
+    if (!isWsOrControl) break;
+    i += 1;
+  }
+  if (i >= value.length) return false;
+  const first = value[i];
+  return first === '=' || first === '+' || first === '-' || first === '@';
 }
