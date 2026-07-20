@@ -1920,6 +1920,11 @@ export const en = {
     selectUser: 'Select a user on the left',
     backToList: 'Back to list',
     createUser: 'Create user',
+    export: {
+      registration: 'Export registration CSV',
+      registrationSuccess: 'Registration export downloaded',
+      registrationError: 'Failed to export registration data',
+    },
     tabs: {
       list: 'List',
       bulk: 'Bulk operations',

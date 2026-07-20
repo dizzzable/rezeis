@@ -5,6 +5,7 @@ import { ReferralsModule } from '../referrals/referrals.module';
 import { SettingsModule } from '../settings/settings.module';
 import { InternalWebAuthController } from './controllers/internal-web-auth.controller';
 import { BotSigninTokenService } from './services/bot-signin-token.service';
+import { RegistrationSnapshotService } from './services/registration-snapshot.service';
 import { WebAuthService } from './services/web-auth.service';
 
 /**
@@ -22,7 +23,7 @@ import { WebAuthService } from './services/web-auth.service';
 @Module({
   imports: [AuthModule, ReferralsModule, SettingsModule],
   controllers: [InternalWebAuthController],
-  providers: [WebAuthService, BotSigninTokenService],
-  exports: [WebAuthService, BotSigninTokenService],
+  providers: [WebAuthService, BotSigninTokenService, RegistrationSnapshotService],
+  exports: [WebAuthService, BotSigninTokenService, RegistrationSnapshotService],
 })
 export class WebAuthModule {}

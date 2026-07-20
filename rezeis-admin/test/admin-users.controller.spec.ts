@@ -82,16 +82,21 @@ describe('AdminUsersController', () => {
       },
       subscription: null,
     };
-    const controller = new AdminUsersController({
-      listUsers: async (query: unknown) => {
-        calls.push(['list', query]);
-        return listResult;
-      },
-      searchUser: async (query: unknown) => {
-        calls.push(['search', query]);
-        return searchResult;
-      },
-    } as never);
+    const controller = new AdminUsersController(
+      {
+        listUsers: async (query: unknown) => {
+          calls.push(['list', query]);
+          return listResult;
+        },
+        searchUser: async (query: unknown) => {
+          calls.push(['search', query]);
+          return searchResult;
+        },
+      } as never,
+      // RegistrationExportService + PrismaService (export route deps; unused here)
+      {} as never,
+      {} as never,
+    );
     const listQuery = { search: 'user', limit: 25, offset: 0 };
     const searchQuery = { login: 'user_login' };
 

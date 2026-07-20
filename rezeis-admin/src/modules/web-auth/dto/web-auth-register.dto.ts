@@ -1,4 +1,74 @@
-import { IsEmail, IsOptional, IsString, Length, Matches } from 'class-validator';
+import { Type } from 'class-transformer';
+import {
+  IsEmail,
+  IsObject,
+  IsOptional,
+  IsString,
+  Length,
+  Matches,
+  MaxLength,
+  ValidateNested,
+} from 'class-validator';
+
+export class RegistrationUtmDto {
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  public readonly source?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  public readonly medium?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  public readonly campaign?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  public readonly content?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  public readonly term?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(512)
+  public readonly raw?: string;
+}
+
+export class RegistrationSnapshotDto {
+  @IsOptional()
+  @IsString()
+  @MaxLength(16)
+  public readonly channel?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  public readonly ip?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(512)
+  public readonly userAgent?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(1024)
+  public readonly referer?: string;
+
+  @IsOptional()
+  @IsObject()
+  @ValidateNested()
+  @Type(() => RegistrationUtmDto)
+  public readonly utm?: RegistrationUtmDto;
+}
 
 /**
  * Body for `POST /api/internal/web-auth/register`.
@@ -49,4 +119,10 @@ export class WebAuthRegisterDto {
   @IsString()
   @Length(1, 64)
   public readonly referralCode?: string;
+
+  /** Write-once registration network snapshot (filled by reiwa BFF). */
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => RegistrationSnapshotDto)
+  public readonly registrationSnapshot?: RegistrationSnapshotDto;
 }

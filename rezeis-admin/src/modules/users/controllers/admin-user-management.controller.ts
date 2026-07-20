@@ -40,6 +40,7 @@ import { CurrentAdmin } from '../../auth/decorators/current-admin.decorator';
 import { AdminJwtAuthGuard } from '../../auth/guards/admin-jwt-auth.guard';
 import { RequirePermission } from '../../rbac/decorators/require-permission.decorator';
 import { RbacGuard } from '../../rbac/guards/rbac.guard';
+import { RbacService } from '../../rbac/services/rbac.service';
 import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.interface';
 import { extractRequestMetadata } from '../../auth/utils/request-metadata.util';
 import { UserNotificationsService } from '../../notifications/services/user-notifications.service';
@@ -65,6 +66,7 @@ export class AdminUserManagementController {
     private readonly referralInviteLimitsService: ReferralInviteLimitsService,
     private readonly remnawaveApiService: RemnawaveApiService,
     private readonly userNotifications: UserNotificationsService,
+    private readonly rbacService: RbacService,
   ) {}
 
   // ── User Profile ────────────────────────────────────────────────────────────
@@ -98,9 +100,12 @@ export class AdminUserManagementController {
 
   /** Get full user detail by telegramId (aggregated view for admin panel). */
   @Get(':telegramId')
-  public async getUser(@Param('telegramId') telegramId: string) {
+  public async getUser(
+    @Param('telegramId') telegramId: string,
+    @CurrentAdmin() admin: CurrentAdminInterface,
+  ) {
     const user = await this.findUserByTelegramId(telegramId);
-    const [subscriptions, transactions, referral, referralsGiven, partner, webAccount] =
+    const [subscriptions, transactions, referral, referralsGiven, partner, webAccount, acquisitionPlacement] =
       await Promise.all([
         this.prismaService.subscription.findMany({
           where: { userId: user.id, NOT: { status: SubscriptionStatus.DELETED } },
@@ -138,11 +143,34 @@ export class AdminUserManagementController {
           },
         }),
         this.prismaService.webAccount.findFirst({ where: { userId: user.id } }),
+        user.acquisitionPlacementId
+          ? this.prismaService.adPlacement.findUnique({
+              where: { id: user.acquisitionPlacementId },
+              select: {
+                id: true,
+                platform: true,
+                channel: true,
+                trackingCode: true,
+                status: true,
+                ownerType: true,
+                campaign: { select: { id: true, name: true } },
+              },
+            })
+          : Promise.resolve(null),
       ]);
 
     const partnerReferral = await this.prismaService.partnerReferral.findFirst({
       where: { referralUserId: user.id },
-      select: { id: true },
+      select: {
+        id: true,
+        level: true,
+        partner: {
+          select: {
+            id: true,
+            user: { select: { id: true, name: true, username: true, telegramId: true } },
+          },
+        },
+      },
     });
     const hasReferralAttribution = referral !== null;
     const hasPartnerAttribution = partnerReferral !== null;
@@ -165,8 +193,26 @@ export class AdminUserManagementController {
         : null,
     });
 
-    return {
-      ...user,
+    const canViewRegistration = await this.rbacService.hasPermission(
+      { id: admin.id, role: admin.role, rbacRoleId: admin.rbacRoleId ?? null },
+      'users',
+      'view_registration',
+    );
+
+    // Drop raw registration columns from the spread; re-attach under RBAC.
+    const {
+      registrationIp: _rip,
+      registrationUserAgent: _rua,
+      registrationReferer: _rr,
+      registrationUtm: _rutm,
+      registrationChannel: _rch,
+      acquisitionAt: _acqAt,
+      acquisitionPlacementId: _acqId,
+      ...userPublic
+    } = user;
+
+    const base = {
+      ...userPublic,
       telegramId: user.telegramId?.toString() ?? null,
       identityKind,
       subscriptions: await this.enrichSubscriptionsWithRemnawave(subscriptions).then((enriched) =>
@@ -211,6 +257,50 @@ export class AdminUserManagementController {
           }
         : null,
       currentSubscriptionId: user.currentSubscriptionId,
+      acquisitionAt: user.acquisitionAt?.toISOString() ?? null,
+      acquisitionPlacement: acquisitionPlacement
+        ? {
+            id: acquisitionPlacement.id,
+            platform: acquisitionPlacement.platform,
+            channel: acquisitionPlacement.channel,
+            trackingCode: acquisitionPlacement.trackingCode,
+            status: acquisitionPlacement.status,
+            ownerType: acquisitionPlacement.ownerType,
+            campaignId: acquisitionPlacement.campaign.id,
+            campaignName: acquisitionPlacement.campaign.name,
+          }
+        : null,
+      acquiredByPartner: partnerReferral?.partner
+        ? {
+            partnerId: partnerReferral.partner.id,
+            level: partnerReferral.level,
+            name: partnerReferral.partner.user?.name ?? null,
+            username: partnerReferral.partner.user?.username ?? null,
+            telegramId: partnerReferral.partner.user?.telegramId?.toString() ?? null,
+          }
+        : null,
+      canViewRegistration,
+    };
+
+    if (!canViewRegistration) {
+      // Strip raw registration PII for roles without users:view_registration.
+      return {
+        ...base,
+        registrationIp: null,
+        registrationUserAgent: null,
+        registrationReferer: null,
+        registrationUtm: null,
+        registrationChannel: user.registrationChannel ?? null,
+      };
+    }
+
+    return {
+      ...base,
+      registrationIp: user.registrationIp ?? null,
+      registrationUserAgent: user.registrationUserAgent ?? null,
+      registrationReferer: user.registrationReferer ?? null,
+      registrationUtm: user.registrationUtm ?? null,
+      registrationChannel: user.registrationChannel ?? null,
     };
   }
 

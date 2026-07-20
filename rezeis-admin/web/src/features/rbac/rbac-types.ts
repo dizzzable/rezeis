@@ -20,7 +20,11 @@ export type RbacAction =
   | 'export'
   | 'import'
   | 'archive'
-  | 'enforce';
+  | 'enforce'
+  | 'moderate'
+  | 'merge'
+  | 'view_registration'
+  | 'export_registration';
 
 export interface RbacPermission {
   resource: string;

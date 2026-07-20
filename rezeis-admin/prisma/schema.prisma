@@ -1052,6 +1052,16 @@ model User {
   /// per-placement attribution window.
   acquisitionPlacementId         String?   @map("acquisition_placement_id")
   acquisitionAt                  DateTime? @map("acquisition_at") @db.Timestamptz(3)
+  /// Write-once registration network snapshot (web register / first credential
+  /// create). Captured for ROI + anti-bot; admin-only via users:view_registration.
+  /// Bot-only users typically leave these null (no browser edge).
+  registrationIp                 String?   @map("registration_ip")
+  registrationUserAgent          String?   @map("registration_user_agent")
+  registrationReferer            String?   @map("registration_referer")
+  /// JSON: { source?, medium?, campaign?, content?, term?, raw? } — classic UTM.
+  registrationUtm                Json?     @map("registration_utm")
+  /// Channel that produced the snapshot: web | tma | bot | oauth.
+  registrationChannel            String?   @map("registration_channel")
   /// Optional pointer to the user's currently selected subscription.
   currentSubscriptionId          String?   @unique @map("current_subscription_id")
   createdAt                      DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)

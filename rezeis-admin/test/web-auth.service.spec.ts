@@ -672,6 +672,9 @@ function createService(options: {
   const cacheService = options.cacheService ?? { set: async () => undefined, get: async () => null, del: async () => undefined };
   const systemEventsService = { info: () => undefined, warn: () => undefined, error: () => undefined, emit: () => undefined };
   const emailDeliveryService = { getSmtpSettings: async () => ({ enabled: true, host: 'smtp.example.com' }) };
+  const registrationSnapshotService = {
+    captureBestEffort: async () => undefined,
+  };
   return new WebAuthService(
     options.prisma ?? createPrismaMock(),
     options.passwordHashService ?? createPasswordHashServiceMock(),
@@ -681,6 +684,7 @@ function createService(options: {
     cacheService as never,
     systemEventsService as never,
     emailDeliveryService as never,
+    registrationSnapshotService as never,
   );
 }
 

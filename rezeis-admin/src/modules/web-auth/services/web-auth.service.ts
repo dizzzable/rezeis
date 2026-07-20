@@ -37,6 +37,7 @@ import {
   WebAuthRegisterResultInterface,
   WebAuthTelegramClaimResultInterface,
 } from '../interfaces/web-auth.interface';
+import { RegistrationSnapshotService } from './registration-snapshot.service';
 
 /**
  * WebAuthService
@@ -78,6 +79,7 @@ export class WebAuthService {
     private readonly cacheService: RawCacheService,
     private readonly systemEventsService: SystemEventsService,
     private readonly emailDeliveryService: EmailDeliveryService,
+    private readonly registrationSnapshotService: RegistrationSnapshotService,
   ) {}
 
   public async register(input: WebAuthRegisterDto): Promise<WebAuthRegisterResultInterface> {
@@ -194,6 +196,24 @@ export class WebAuthService {
         source: 'web',
       },
     );
+
+    // Write-once registration snapshot (IP/UA/Referer/UTM). Best-effort;
+    // never blocks account creation. Bot-first users keep acquisition* from
+    // the bot path; this only fills empty registration* fields once.
+    const snap = input.registrationSnapshot;
+    if (snap !== undefined) {
+      await this.registrationSnapshotService.captureBestEffort({
+        userId: result.userId,
+        channel:
+          snap.channel === 'tma' || snap.channel === 'bot' || snap.channel === 'oauth'
+            ? snap.channel
+            : 'web',
+        ip: snap.ip ?? null,
+        userAgent: snap.userAgent ?? null,
+        referer: snap.referer ?? null,
+        utm: snap.utm ?? null,
+      });
+    }
 
     // Phase 5 — consume the referral invite link (best-effort, outside the
     // credential transaction so a referral hiccup never blocks sign-up).
