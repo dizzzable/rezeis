@@ -68,26 +68,25 @@ describe('PaymentProviderExecutionService checkout execution', () => {
     assert.deepStrictEqual(call.options.headers, { 'Idempotence-Key': 'payment-1' });
     assert.equal(typeof call.options.validateStatus, 'function');
     assert.equal(call.options.validateStatus?.(500), true);
-    assert.deepStrictEqual(result, {
-      gatewayId: 'provider-payment-1',
-      checkoutUrl: 'https://checkout.example/yookassa',
-      providerMode: 'REDIRECT',
+    assert.equal(result.gatewayId, 'provider-payment-1');
+    assert.equal(result.checkoutUrl, 'https://checkout.example/yookassa');
+    assert.equal(result.providerMode, 'REDIRECT');
+    assert.equal(result.providerStatus, 'pending');
+    assert.equal(result.yookassaPaymentPayload !== undefined, true);
+    assert.deepStrictEqual(result.gatewayData, {
+      provider: 'YOOKASSA',
       providerStatus: 'pending',
-      gatewayData: {
-        provider: 'YOOKASSA',
-        providerStatus: 'pending',
-        providerMode: 'REDIRECT',
-        paymentMethodId: null,
-        savedPaymentMethodId: null,
-        savePaymentMethod: true,
-        providerResponse: {
-          id: '***redacted***',
-          status: 'pending',
-          metadata: { apiKey: '***redacted***' },
-          confirmation: { confirmation_url: '[url hidden]' },
-        },
-        checkoutUrl: 'https://checkout.example/yookassa',
+      providerMode: 'REDIRECT',
+      paymentMethodId: null,
+      savedPaymentMethodId: null,
+      savePaymentMethod: true,
+      providerResponse: {
+        id: '***redacted***',
+        status: 'pending',
+        metadata: { apiKey: '***redacted***' },
+        confirmation: { confirmation_url: '[url hidden]' },
       },
+      checkoutUrl: 'https://checkout.example/yookassa',
     });
   });
 
@@ -129,6 +128,38 @@ describe('PaymentProviderExecutionService checkout execution', () => {
     assert.equal(call.options.headers['Idempotence-Key'], 'payment-secret-alias');
   });
 
+  it('returns a terminal YooKassa cancellation for an off-session charge', async () => {
+    const service = createService({
+      post: () =>
+        of({
+          data: {
+            id: 'provider-canceled-1',
+            status: 'canceled',
+            cancellation_details: { party: 'yoo_kassa', reason: 'permission_revoked' },
+          },
+        }),
+    });
+
+    const result = await service.createCheckout({
+      gateway: createGateway({
+        type: PaymentGatewayType.YOOKASSA,
+        settings: { shopId: 'shop-1', apiKey: 'secret-1' },
+      }),
+      transaction: createTransaction({ gatewayType: PaymentGatewayType.YOOKASSA }),
+      description: 'Autopay renewal',
+      paymentMethodId: 'provider-method-1',
+      savedPaymentMethodId: 'saved-method-1',
+    });
+
+    assert.equal(result.gatewayId, 'provider-canceled-1');
+    assert.equal(result.providerStatus, 'canceled');
+    assert.equal(result.checkoutUrl, null);
+    assert.equal(result.providerMode, 'IMMEDIATE');
+    assert.deepStrictEqual(result.gatewayData['cancellation_details'], {
+      party: 'yoo_kassa',
+      reason: 'permission_revoked',
+    });
+  });
 
   it('creates Heleket checkout requests with signed payload and callback-safe result', async () => {
     const calls: unknown[] = [];

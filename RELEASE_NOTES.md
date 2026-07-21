@@ -1,3 +1,28 @@
+# Rezeis Admin v0.9.6.57
+
+💳 **YooKassa autopay harden + уведомление о первом трафике** — закрыты гонки double-fulfill, cancel/poll/permission_revoked, карточка «пользователь начал использовать трафик» в топик «Пользователи». Кабинет без изменений: **reiwa v0.9.6.38**.
+
+### Payments (YooKassa)
+- **Fulfillment claim:** atomic `COMPLETED + fulfilledAt` с lease-fencing — release только своего lease, не чужого.
+- **Create-response path:** off-session `succeeded` → claim → provision; enqueue после commit (не reopen claim).
+- **Canceled create:** терминальный `CANCELED` пишется до disable autopay; `permission_revoked` → autopay off (best-effort).
+- **Pending-expiry poll:** GET YooKassa; `succeeded` без webhook → fulfill + post-hooks; claim placeholders **не** авто-отменяются.
+- **Reconciler:** stale claim recovery (2m) fenced; live claim mid-lease не ack/не clear.
+
+### Operator notify — first traffic
+- Раз в жизни пользователя: `usedTrafficBytes > 0` → `user.first_traffic` (категория **USER** → топик «Пользователи»).
+- Карточка: пользователь + подписка (статус, трафик used/limit, устройства, «Осталось»).
+- Идемпотентность: `users.first_traffic_at` + atomic claim; string counters нормализуются.
+- Первое подключение (`remnawave.user.first_connected`) отдельно, категория REMNAWAVE.
+
+### ✅ Гейты
+- Focused suites: **71 pass** (checkout, execution, pending-expiry, claim fence, renewal idempotency, webhook first-traffic, card format).
+- `tsc` backend + web: green.
+- Codex pre-release: **BLOCK → fixes → SHIP** (high confidence).
+
+**Полный список изменений:** https://github.com/dizzzable/rezeis/compare/v0.9.6.56...v0.9.6.57
+
+---
 # Rezeis Admin v0.9.6.56
 
 🔒 **Security: Trivy code-scanning (21 open)** — закрыты HIGH/MEDIUM findings в runtime-образе. Парный кабинет: **reiwa v0.9.6.38**.

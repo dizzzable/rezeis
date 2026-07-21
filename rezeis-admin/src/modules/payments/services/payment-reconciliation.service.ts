@@ -47,6 +47,7 @@ export class PaymentReconciliationService {
     try {
       const transaction = await this.findTransactionForEvent(event.paymentId);
       const nextStatus = mapProviderStatusToTransactionStatus(event.eventStatus);
+      await this.disablePermissionRevokedAutopayBestEffort(transaction, event.rawPayload, nextStatus);
 
       // COMPLETED is final only after durable fulfillment. A captured payment
       // whose mutation rolled back has fulfilledAt=null and must be retried by
@@ -55,8 +56,44 @@ export class PaymentReconciliationService {
         transaction.status === TransactionStatus.COMPLETED &&
         transaction.fulfilledAt !== null
       ) {
-        await this.paymentWebhookInboxService.markProcessed(event.id);
-        return;
+        // Crash recovery only: NEW payments claim fulfilledAt before
+        // applyCompleted stamps subscriptionId. A *stale* claim (lease expired)
+        // with no subscription means provision never finished — release and
+        // fall through. A *fresh* claim means checkout is still provisioning;
+        // do NOT clear it or we race double-fulfill with the live path.
+        const claimAgeMs =
+          transaction.fulfilledAt instanceof Date
+            ? Date.now() - transaction.fulfilledAt.getTime()
+            : Number.POSITIVE_INFINITY;
+        const STALE_CLAIM_MS = 2 * 60 * 1000;
+        if (
+          transaction.purchaseType === 'NEW' &&
+          transaction.subscriptionId === null &&
+          claimAgeMs >= STALE_CLAIM_MS
+        ) {
+          this.logger.warn(
+            `Recovering stale incomplete fulfillment claim for transaction ${transaction.id} (ageMs=${claimAgeMs})`,
+          );
+          // Fence on the observed lease timestamp so we never clear a newer
+          // claim that was written after this worker loaded the row.
+          await this.prismaService.transaction.updateMany({
+            where: { id: transaction.id, fulfilledAt: transaction.fulfilledAt },
+            data: { fulfilledAt: null },
+          });
+        } else if (
+          transaction.purchaseType === 'NEW' &&
+          transaction.subscriptionId === null &&
+          claimAgeMs < STALE_CLAIM_MS
+        ) {
+          // Live checkout still provisioning — do not ack the webhook or it
+          // will never retry after the lease expires.
+          throw new Error(
+            `Fulfillment claim still in progress for transaction ${transaction.id}; retry later`,
+          );
+        } else {
+          await this.paymentWebhookInboxService.markProcessed(event.id);
+          return;
+        }
       }
       // CANCELED/FAILED (e.g. auto-expired) is terminal UNLESS a late SUCCESS
       // webhook arrives — then we revive the transaction and fulfil it so a
@@ -93,9 +130,6 @@ export class PaymentReconciliationService {
         if (refreshedTransaction === null) {
           throw new NotFoundException('Payment transaction not found');
         }
-        // Persist reusable payment_method from YooKassa webhook payload (if any).
-        // Best-effort: never block fulfillment when the method cannot be stored.
-        await this.persistSavedPaymentMethodBestEffort(refreshedTransaction, event.rawPayload);
         // Fulfil exactly once, keyed on `fulfilledAt` — NOT on `subscriptionId`.
         // RENEW/UPGRADE carry the SOURCE subscription id from draft time, so the
         // old `subscriptionId === null` guard silently skipped their provisioning
@@ -107,9 +141,10 @@ export class PaymentReconciliationService {
         // webhook events for the same payment (or a manual replay racing a live
         // callback) are reconciled concurrently (processor concurrency > 1, and
         // the api + worker containers both run this processor).
+        const claimedAt = new Date();
         const claim = await this.prismaService.transaction.updateMany({
           where: { id: refreshedTransaction.id, fulfilledAt: null },
-          data: { fulfilledAt: new Date() },
+          data: { fulfilledAt: claimedAt },
         });
         if (claim.count === 1) {
           let syncJobs;
@@ -119,11 +154,11 @@ export class PaymentReconciliationService {
           } catch (provisionError: unknown) {
             // Provisioning failed BEFORE commit (the subscription create/renew
             // tx rolled back; post-commit side effects are best-effort and never
-            // throw). Release the claim so a BullMQ retry / late webhook can
-            // re-provision instead of leaving the payment stuck paid-but-undelivered.
+            // throw). Release only this lease so a BullMQ retry / late webhook
+            // can re-provision without erasing a newer concurrent claim.
             await this.prismaService.transaction
               .updateMany({
-                where: { id: refreshedTransaction.id, fulfilledAt: { not: null } },
+                where: { id: refreshedTransaction.id, fulfilledAt: claimedAt },
                 data: { fulfilledAt: null },
               })
               .catch(() => undefined);
@@ -140,9 +175,9 @@ export class PaymentReconciliationService {
             await this.profileSyncQueueService.enqueue(syncJob.id);
           }
         }
-        await this.runReferralAndPartnerHooks(refreshedTransaction);
-        await this.enqueueMoyNalogIncomeBestEffort(refreshedTransaction);
-        await this.recordAdConversionBestEffort(refreshedTransaction);
+        // Saved method + referral/partner/МойНалог/ads — always best-effort after
+        // a SUCCESS status (even if this worker lost the fulfill claim).
+        await this.runPostFulfillmentHooks(refreshedTransaction, event.rawPayload);
       }
 
       if (nextStatus === TransactionStatus.FAILED) {
@@ -173,6 +208,65 @@ export class PaymentReconciliationService {
     }
   }
 
+  /**
+   * Shared post-completion side effects (saved method, referrals, partner,
+   * МойНалог, ad conversion). Safe to call after entitlement has been applied
+   * by either webhook reconciliation or the pending-expiry poll path.
+   */
+  public async runPostFulfillmentHooks(
+    transaction: Transaction,
+    rawPayload?: unknown,
+  ): Promise<void> {
+    if (rawPayload !== undefined) {
+      await this.persistSavedPaymentMethodBestEffort(transaction, rawPayload);
+    }
+    await this.runReferralAndPartnerHooks(transaction);
+    await this.enqueueMoyNalogIncomeBestEffort(transaction);
+    await this.recordAdConversionBestEffort(transaction);
+  }
+
+  private async disablePermissionRevokedAutopayBestEffort(
+    transaction: Transaction,
+    rawPayload: unknown,
+    nextStatus: TransactionStatus,
+  ): Promise<void> {
+    if (transaction.gatewayType !== PaymentGatewayType.YOOKASSA || nextStatus !== TransactionStatus.CANCELED) {
+      return;
+    }
+    const raw = asRecord(rawPayload);
+    const payment = asRecord(raw?.['object']) ?? raw;
+    const details = asRecord(payment?.['cancellation_details']);
+    const reason = typeof details?.['reason'] === 'string' ? details['reason'] : null;
+    if (reason === null || !reason.toLowerCase().includes('permission_revoked')) {
+      return;
+    }
+    const gatewayData = asRecord(transaction.gatewayData);
+    const paymentMethod = asRecord(payment?.['payment_method']);
+    const providerMethodId =
+      (typeof gatewayData?.['paymentMethodId'] === 'string' && gatewayData['paymentMethodId'].length > 0
+        ? gatewayData['paymentMethodId']
+        : null) ??
+      (typeof paymentMethod?.['id'] === 'string' && paymentMethod['id'].length > 0
+        ? paymentMethod['id']
+        : null);
+    if (providerMethodId === null) {
+      return;
+    }
+    try {
+      await this.savedPaymentMethodService.disableAutopayForProviderMethod({
+        userId: transaction.userId,
+        gatewayType: PaymentGatewayType.YOOKASSA,
+        providerMethodId,
+        reason,
+      });
+    } catch (error: unknown) {
+      this.logger.error(
+        `Could not disable revoked autopay method for ${transaction.id}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
   private async findTransactionForEvent(paymentReference: string): Promise<Transaction> {
     const transaction =
       (await this.prismaService.transaction.findUnique({
@@ -371,4 +465,8 @@ function mergeGatewayData(
 function decimalToMinorUnits(amount: Prisma.Decimal): number {
   const minor = amount.mul(100).toFixed(0, Prisma.Decimal.ROUND_FLOOR);
   return Number(minor);
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }

@@ -113,6 +113,7 @@ const EVENT_TYPE_CATALOG: Readonly<Record<string, readonly string[]>> = {
   USER: [
     'user.registered', 'user.web_registered', 'user.blocked', 'user.unblocked',
     'user.deleted', 'user.role_changed', 'user.telegram_linked', 'user.email_linked',
+    'user.first_traffic',
   ],
   AUTH: ['auth.web_login', 'auth.password_changed', 'auth.password_recovery'],
   SUBSCRIPTION: [

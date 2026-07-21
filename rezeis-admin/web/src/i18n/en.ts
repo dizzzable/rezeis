@@ -816,6 +816,7 @@ export const en = {
       remnawave_user_disabled: 'Profile disabled',
       remnawave_user_enabled: 'Profile enabled',
       remnawave_user_first_connected: 'First connection',
+      user_first_traffic: 'User started using traffic',
       remnawave_user_traffic_reset: 'Traffic reset',
       remnawave_user_expire_soon: 'Subscription expiring soon',
       remnawave_user_bandwidth_threshold: 'Bandwidth threshold reached',

@@ -98,6 +98,7 @@ export const EVENT_TYPES = {
   USER_TELEGRAM_LINKED: 'user.telegram_linked',
   USER_EMAIL_LINKED: 'user.email_linked',
   USER_ACCOUNTS_MERGED: 'user.accounts_merged',
+  USER_FIRST_TRAFFIC: 'user.first_traffic',
 
   // Auth
   AUTH_WEB_LOGIN: 'auth.web_login',
@@ -882,22 +883,37 @@ export class SystemEventsService {
       if (!meta['paymentId'] && !meta['amount'] && typeof meta['receiptUrl'] === 'string') {
         planLines.push(`📃 <a href="${escapeHtml(meta['receiptUrl'])}">Чек</a>`);
       }
+      if (meta['subscriptionId'])
+        planLines.push(`🗳 ID: <code>${escapeHtml(meta['subscriptionId'])}</code>`);
       if (meta['planName']) planLines.push(`🏷 План: ${escapeHtml(meta['planName'])}`);
+      if (meta['status'] !== undefined)
+        planLines.push(`🚦 Статус: ${humanizeSubscriptionStatus(meta['status'])}`);
       if (meta['planType']) planLines.push(`📦 Тип: ${humanizePlanType(meta['planType'])}`);
       else if (meta['purchaseType'])
         planLines.push(`📦 Тип: ${humanizePurchaseType(meta['purchaseType'])}`);
-      if (typeof meta['trafficLimitBytes'] === 'number')
+      // Prefer "used / limit" when usage is known (first connect / first traffic
+      // cards). Fall back to limit-only for purchase/renewal events.
+      if (typeof meta['usedTrafficBytes'] === 'number') {
+        const limit =
+          typeof meta['trafficLimitBytes'] === 'number' && meta['trafficLimitBytes'] > 0
+            ? ` / ${fmtBytes(meta['trafficLimitBytes'])}`
+            : '';
+        planLines.push(`📊 Трафик: ${fmtBytes(meta['usedTrafficBytes'])}${limit}`);
+      } else if (typeof meta['trafficLimitBytes'] === 'number') {
         planLines.push(`📊 Лимит трафика: ${fmtBytes(meta['trafficLimitBytes'])}`);
+      }
       if (meta['deviceLimit'] !== undefined)
         planLines.push(`📱 Лимит устройств: ${escapeHtml(meta['deviceLimit'])}`);
       if (meta['durationDays'])
         planLines.push(`⏳ Длительность: ${humanizeDuration(meta['durationDays'])}`);
       if (meta['isTrial'] !== undefined)
         planLines.push(`🎁 Триал: ${meta['isTrial'] ? 'да' : 'нет'}`);
-      if (meta['expireAt'] || meta['expiresAt'])
-        planLines.push(`📅 Действует до: ${fmtDate(meta['expireAt'] ?? meta['expiresAt'])}`);
-      if (meta['subscriptionId'])
-        planLines.push(`🗳 Подписка ID: <code>${escapeHtml(meta['subscriptionId'])}</code>`);
+      const expireRaw = meta['expireAt'] ?? meta['expiresAt'];
+      if (expireRaw !== undefined && expireRaw !== null) {
+        const remaining = fmtRemaining(expireRaw);
+        if (remaining) planLines.push(`⏱ Осталось: ${remaining}`);
+        planLines.push(`📅 Действует до: ${fmtDate(expireRaw)}`);
+      }
       if (meta['source']) planLines.push(`📌 Причина: ${humanizeSource(meta['source'])}`);
       lines.push(`<blockquote>${planLines.join('\n')}</blockquote>`);
     }
@@ -915,14 +931,16 @@ export class SystemEventsService {
           `🃏 Профиль на панели: <code>${escapeHtml(meta['remnawaveUsername'])}</code>`,
         );
       if (remnaUuid) remnaLines.push(`🔹 UUID: <code>${escapeHtml(remnaUuid)}</code>`);
-      if (typeof meta['usedTrafficBytes'] === 'number') {
+      // When a subscription block already owns usage/limit, skip the duplicate
+      // traffic line here so first-connect / first-traffic cards stay clean.
+      if (typeof meta['usedTrafficBytes'] === 'number' && !meta['subscriptionId']) {
         const limit =
           typeof meta['trafficLimitBytes'] === 'number' && meta['trafficLimitBytes'] > 0
             ? ` / ${fmtBytes(meta['trafficLimitBytes'])}`
             : '';
         remnaLines.push(`📊 Трафик: ${fmtBytes(meta['usedTrafficBytes'])}${limit}`);
       }
-      if (meta['expireAt'] && !meta['planName'])
+      if (meta['expireAt'] && !meta['planName'] && !meta['subscriptionId'])
         remnaLines.push(`📅 Действует до: ${fmtDate(meta['expireAt'])}`);
       lines.push(`<blockquote>${remnaLines.join('\n')}</blockquote>`);
       const panelUrl = buildRemnawavePanelUrl();
@@ -1477,8 +1495,11 @@ const EVENT_PRESENTATION: Record<string, { emoji: string; title: string }> = {
   'notification.template.deleted': { emoji: '🗑', title: 'Удалён шаблон уведомления' },
   'notification.template.seeded': { emoji: '🌱', title: 'Засеяны шаблоны уведомлений' },
 
+  // User traffic usage (detected from Remnawave webhooks; category USER → topic «Пользователи»).
+  'user.first_traffic': { emoji: '📶', title: 'Пользователь начал использовать трафик' },
+
   // Remnawave panel (forwarded webhook events)
-  'remnawave.user.first_connected': { emoji: '🔌', title: 'Первое подключение' },
+  'remnawave.user.first_connected': { emoji: '🔌', title: 'Первое подключение пользователя' },
   'remnawave.user.expired': { emoji: '⌛', title: 'Профиль истёк (Remnawave)' },
   'remnawave.user.limited': { emoji: '🚧', title: 'Достигнут лимит трафика' },
   'remnawave.user.expire_soon': { emoji: '⏰', title: 'Подписка скоро истекает' },
@@ -1554,6 +1575,8 @@ function humanizeSource(value: unknown): string {
       return 'Синхронизация Remnawave';
     case 'PAYMENT_WEBHOOK':
       return 'Вебхук платёжки';
+    case 'REMNAWAVE_WEBHOOK':
+      return 'Вебхук Remnawave';
     default:
       return escapeHtml(value);
   }
@@ -1678,6 +1701,59 @@ function humanizePlanType(value: unknown): string {
     default:
       return escapeHtml(value);
   }
+}
+
+/** Human label for SubscriptionStatus (and similar panel statuses). */
+function humanizeSubscriptionStatus(value: unknown): string {
+  switch (String(value).toUpperCase()) {
+    case 'ACTIVE':
+      return 'Активна';
+    case 'DISABLED':
+      return 'Отключена';
+    case 'LIMITED':
+      return 'Ограничена';
+    case 'EXPIRED':
+      return 'Истекла';
+    case 'DELETED':
+      return 'Удалена';
+    case 'PENDING':
+      return 'Ожидает';
+    default:
+      return escapeHtml(value);
+  }
+}
+
+/**
+ * Relative remaining lifetime from an expire-at value. Returns null when the
+ * input is not a parseable future/past timestamp so callers can fall back to
+ * the absolute date line alone.
+ */
+function fmtRemaining(value: unknown): string | null {
+  let ms: number | null = null;
+  if (value instanceof Date) {
+    ms = value.getTime();
+  } else if (typeof value === 'number' && Number.isFinite(value)) {
+    ms = value;
+  } else if (typeof value === 'string' && value.length > 0) {
+    const parsed = Date.parse(value);
+    if (!Number.isNaN(parsed)) ms = parsed;
+  }
+  if (ms === null || Number.isNaN(ms)) return null;
+
+  const diffMs = ms - Date.now();
+  if (diffMs <= 0) return 'истекла';
+
+  const totalMinutes = Math.floor(diffMs / 60_000);
+  const days = Math.floor(totalMinutes / (60 * 24));
+  const hours = Math.floor((totalMinutes % (60 * 24)) / 60);
+  const minutes = totalMinutes % 60;
+  const parts: string[] = [];
+  if (days > 0) parts.push(`${days} ${pluralRu(days, 'день', 'дня', 'дней')}`);
+  if (hours > 0) parts.push(`${hours} ${pluralRu(hours, 'час', 'часа', 'часов')}`);
+  if (minutes > 0 || parts.length === 0) {
+    parts.push(`${minutes} ${pluralRu(minutes, 'минута', 'минуты', 'минут')}`);
+  }
+  return parts.join(' ');
 }
 
 /**

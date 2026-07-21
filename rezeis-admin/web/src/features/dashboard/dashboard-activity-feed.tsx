@@ -76,6 +76,7 @@ const POSITIVE_EVENTS = new Set<string>([
   'user.created',
   'user.enabled',
   'user.first_connected',
+  'user.first_traffic',
   'user.traffic_reset',
   'service.login_attempt_success',
   'service.panel_started',

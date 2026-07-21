@@ -148,3 +148,113 @@ describe('RemnawaveWebhookService reconcile (panel → rezeis)', () => {
     assert.equal(reconciled.length, 0);
   });
 });
+describe('RemnawaveWebhookService first traffic usage', () => {
+  function buildTrafficService(options?: {
+    readonly subscription?: Record<string, unknown> | null;
+    readonly userByTelegram?: Record<string, unknown> | null;
+  }) {
+    const emitted: EmittedEvent[] = [];
+    let firstTrafficClaimed = false;
+    let firstTrafficUpdates = 0;
+    const claimWheres: Array<Record<string, unknown>> = [];
+    const prisma = {
+      remnawaveWebhookEvent: { create: async () => ({}) },
+      subscription: {
+        updateMany: async () => ({ count: 0 }),
+        findFirst: async () =>
+          options && 'subscription' in options
+            ? options.subscription
+            : {
+                id: 'sub-1',
+                status: 'ACTIVE',
+                trafficLimit: 50,
+                deviceLimit: 3,
+                expiresAt: new Date('2027-01-01T00:00:00.000Z'),
+                user: { id: 'user-1', telegramId: 858568447n, name: 'Anna', username: 'anna' },
+              },
+      },
+      user: {
+        updateMany: async (args: { where: Record<string, unknown> }) => {
+          firstTrafficUpdates += 1;
+          claimWheres.push(args.where);
+          // Simulate atomic claim: only one concurrent winner gets count=1.
+          if (firstTrafficClaimed) return { count: 0 };
+          firstTrafficClaimed = true;
+          return { count: 1 };
+        },
+        findUnique: async () => options?.userByTelegram ?? null,
+      },
+    };
+    const systemEvents = {
+      emit: (event: EmittedEvent) => emitted.push(event),
+      info: (type: string, category: string, _message: string, metadata?: Record<string, unknown>) => {
+        emitted.push({ type, category, severity: 'INFO', metadata });
+      },
+    };
+    return {
+      service: new RemnawaveWebhookService(prisma as never, { webhookSecret: null } as never, systemEvents as never),
+      emitted,
+      getFirstTrafficUpdates: () => firstTrafficUpdates,
+      claimWheres,
+    };
+  }
+
+  it('emits a USER card only once after traffic becomes positive', async () => {
+    const { service, emitted, getFirstTrafficUpdates, claimWheres } = buildTrafficService();
+    const payload = { data: { uuid: 'uuid-traffic-1', username: 'anna_vpn', usedTrafficBytes: 1_024, trafficLimitBytes: 50 * 1024 ** 3 } };
+    await service.handleEvent('user.modified', payload, null);
+    await service.handleEvent('user.modified', payload, null);
+    const firstTrafficEvents = emitted.filter((event) => event.type === 'user.first_traffic');
+    assert.equal(firstTrafficEvents.length, 1);
+    assert.equal(firstTrafficEvents[0]?.category, 'USER');
+    assert.equal(firstTrafficEvents[0]?.metadata?.['userId'], 'user-1');
+    assert.equal(firstTrafficEvents[0]?.metadata?.['subscriptionId'], 'sub-1');
+    assert.equal(firstTrafficEvents[0]?.metadata?.['usedTrafficBytes'], 1_024);
+    assert.equal(getFirstTrafficUpdates(), 2);
+    assert.deepEqual(claimWheres[0], { id: 'user-1', firstTrafficAt: null });
+  });
+
+  it('accepts string usedTraffic values from panel JSON', async () => {
+    // Real Remnawave webhooks are JSON — counters often arrive as strings.
+    // BigInt is not JSON-serializable and never reaches handleEvent storage.
+    const { service, emitted } = buildTrafficService();
+    await service.handleEvent('user.modified', {
+      data: { uuid: 'uuid-traffic-str', usedTrafficBytes: '2048', trafficLimitBytes: '107374182400' },
+    }, null);
+    const events = emitted.filter((event) => event.type === 'user.first_traffic');
+    assert.equal(events.length, 1);
+    assert.equal(events[0]?.metadata?.['usedTrafficBytes'], 2048);
+    assert.equal(events[0]?.metadata?.['trafficLimitBytes'], 107374182400);
+  });
+
+  it('emits only once under concurrent webhooks racing the claim', async () => {
+    const { service, emitted, getFirstTrafficUpdates } = buildTrafficService();
+    const payload = { data: { uuid: 'uuid-race', usedTrafficBytes: 500 } };
+    await Promise.all([
+      service.handleEvent('user.modified', payload, null),
+      service.handleEvent('user.modified', payload, null),
+      service.handleEvent('user.modified', payload, null),
+    ]);
+    assert.equal(emitted.filter((event) => event.type === 'user.first_traffic').length, 1);
+    assert.equal(getFirstTrafficUpdates(), 3);
+  });
+
+  it('does not claim or emit first traffic for zero usage', async () => {
+    const { service, emitted, getFirstTrafficUpdates } = buildTrafficService();
+    await service.handleEvent('user.modified', { data: { uuid: 'uuid-traffic-0', usedTraffic: 0 } }, null);
+    assert.equal(emitted.filter((event) => event.type === 'user.first_traffic').length, 0);
+    assert.equal(getFirstTrafficUpdates(), 0);
+  });
+
+  it('does not emit when local user cannot be resolved', async () => {
+    const { service, emitted, getFirstTrafficUpdates } = buildTrafficService({
+      subscription: null,
+      userByTelegram: null,
+    });
+    await service.handleEvent('user.modified', {
+      data: { uuid: 'unknown-uuid', usedTrafficBytes: 999 },
+    }, null);
+    assert.equal(emitted.filter((event) => event.type === 'user.first_traffic').length, 0);
+    assert.equal(getFirstTrafficUpdates(), 0);
+  });
+});

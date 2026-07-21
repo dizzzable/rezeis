@@ -23,12 +23,18 @@ import {
 } from './payment-provider-execution.helpers';
 import { PaymentWebhookPayloadRedactionService } from './payment-webhook-payload-redaction.service';
 
+function isYookassaCanceled(providerStatus: string | null): boolean {
+  const status = providerStatus?.trim().toLowerCase();
+  return status === 'canceled' || status === 'cancelled';
+}
+
 interface ProviderCheckoutResult {
   readonly gatewayId: string | null;
   readonly checkoutUrl: string | null;
   readonly providerMode: string;
   readonly providerStatus: string | null;
   readonly gatewayData: Record<string, unknown>;
+  readonly yookassaPaymentPayload?: unknown;
 }
 
 @Injectable()
@@ -175,36 +181,31 @@ export class PaymentProviderExecutionService {
     }
     const data = response.data as Record<string, unknown>;
     const confirmation = readRecord(data.confirmation);
-    const checkoutUrl = readOptionalString(confirmation, ['confirmation_url']);
+    const responseCheckoutUrl = readOptionalString(confirmation, ['confirmation_url']);
     const providerStatus = readOptionalString(data, ['status']);
+    const isCanceled = isYookassaCanceled(providerStatus);
+    const checkoutUrl = isCanceled ? null : responseCheckoutUrl;
     const gatewayId = readOptionalString(data, ['id']);
     if (gatewayId === null) {
       throw new ServiceUnavailableException('YooKassa create payment: missing payment id');
     }
     // Interactive checkout must always return a redirect URL. Off-session
     // charges often complete without confirmation (or only with 3DS).
-    if (paymentMethodId === null && checkoutUrl === null) {
+    if (paymentMethodId === null && checkoutUrl === null && !isCanceled) {
       throw new ServiceUnavailableException('YooKassa create payment: missing confirmation_url');
     }
-    if (
-      paymentMethodId !== null &&
-      (providerStatus === 'canceled' || providerStatus === 'cancelled')
-    ) {
-      throw new ServiceUnavailableException(
-        `YooKassa saved-method charge canceled: ${JSON.stringify(data['cancellation_details'] ?? data).slice(0, 300)}`,
-      );
-    }
-
     const providerMode = checkoutUrl !== null ? 'REDIRECT' : 'IMMEDIATE';
     return {
       gatewayId,
       checkoutUrl,
       providerMode,
       providerStatus,
+      yookassaPaymentPayload: data,
       gatewayData: {
         provider: 'YOOKASSA',
         providerStatus,
         providerResponse: this.redactProviderResponse(data),
+        ...(isCanceled ? { cancellation_details: this.redactProviderResponse(readRecord(data['cancellation_details'])) } : {}),
         checkoutUrl,
         providerMode,
         savePaymentMethod,

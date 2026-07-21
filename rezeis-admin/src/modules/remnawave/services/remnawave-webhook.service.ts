@@ -61,6 +61,17 @@ const REMNAWAVE_WEBHOOK_EVENT_MAP: Record<
  * (the caller then keeps the existing status or derives it from the event).
  * `DELETED` is local-only and never set from the panel.
  */
+interface LocalUserContext {
+  readonly user: { readonly id: string; readonly telegramId: bigint | null; readonly name: string; readonly username: string | null };
+  readonly subscription: {
+    readonly id: string;
+    readonly status: SubscriptionStatus;
+    readonly trafficLimit: number | null;
+    readonly deviceLimit: number;
+    readonly expiresAt: Date | null;
+  } | null;
+}
+
 const PANEL_STATUS_MAP: Readonly<Record<string, SubscriptionStatus>> = {
   ACTIVE: SubscriptionStatus.ACTIVE,
   DISABLED: SubscriptionStatus.DISABLED,
@@ -202,6 +213,27 @@ export class RemnawaveWebhookService {
     // Forward curated events to the system-event bus (audit log + realtime +
     // Telegram cards). Unmapped/noisy events are stored only — no Telegram
     // spam. Best-effort: emit() is fire-and-forget and never throws.
+    const hasTrafficUsage = normalized.startsWith('user.') && this.hasPositiveTrafficUsage(payload);
+    let userContext: LocalUserContext | null = null;
+    if (hasTrafficUsage || normalized === 'user.first_connected') {
+      try {
+        userContext = await this.resolveLocalUserContext(payload);
+      } catch (err: unknown) {
+        this.logger.warn(
+          `Local user lookup failed for ${eventType}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+
+    if (hasTrafficUsage && userContext !== null) {
+      try {
+        await this.emitFirstTrafficUsage(eventType, payload, userContext);
+      } catch (err: unknown) {
+        this.logger.warn(
+          `First traffic usage handling failed for ${eventType}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
     const mapped = REMNAWAVE_WEBHOOK_EVENT_MAP[normalized];
     if (mapped) {
       this.systemEvents.emit({
@@ -209,7 +241,10 @@ export class RemnawaveWebhookService {
         category: mapped.category,
         severity: mapped.severity,
         message: `Remnawave: ${eventType}`,
-        metadata: this.extractEventMetadata(eventType, payload),
+        metadata:
+          normalized === 'user.first_connected'
+            ? this.enrichUserMetadata(this.extractEventMetadata(eventType, payload), userContext)
+            : this.extractEventMetadata(eventType, payload),
       });
     }
   }
@@ -284,6 +319,110 @@ export class RemnawaveWebhookService {
     }
   }
 
+
+  /**
+   * Coerces panel traffic counters (bytes) from number | numeric string | bigint
+   * into a finite JS number. Mirrors remnawave-api.service coerceTrafficNumber so
+   * JSON-stringified webhooks still trigger first-traffic cards.
+   */
+  private coerceTrafficNumber(value: unknown): number | null {
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    if (typeof value === 'bigint') {
+      // Only accept values that fit safely in Number (panel counters are far below).
+      if (value > BigInt(Number.MAX_SAFE_INTEGER) || value < BigInt(Number.MIN_SAFE_INTEGER)) {
+        return null;
+      }
+      return Number(value);
+    }
+    if (typeof value === 'string' && value.trim() !== '') {
+      const parsed = Number(value.trim());
+      return Number.isFinite(parsed) ? parsed : null;
+    }
+    return null;
+  }
+
+  /** Returns whether a user webhook reports a positive traffic consumption value. */
+  private hasPositiveTrafficUsage(payload: Record<string, unknown>): boolean {
+    const data =
+      payload['data'] !== null && typeof payload['data'] === 'object'
+        ? (payload['data'] as Record<string, unknown>)
+        : payload;
+    const usedTraffic = this.coerceTrafficNumber(data['usedTrafficBytes'] ?? data['usedTraffic']);
+    return usedTraffic !== null && usedTraffic > 0;
+  }
+
+  private async resolveLocalUserContext(payload: Record<string, unknown>): Promise<LocalUserContext | null> {
+    const metadata = this.extractEventMetadata('user.context', payload);
+    const remnawaveId = typeof metadata['remnawaveId'] === 'string' ? metadata['remnawaveId'] : null;
+    const telegramId = typeof metadata['telegramId'] === 'string' ? metadata['telegramId'] : null;
+
+    if (remnawaveId !== null) {
+      const subscription = await this.prismaService.subscription.findFirst({
+        where: { remnawaveId, status: { not: SubscriptionStatus.DELETED } },
+        orderBy: { updatedAt: 'desc' },
+        select: {
+          id: true,
+          status: true,
+          trafficLimit: true,
+          deviceLimit: true,
+          expiresAt: true,
+          user: { select: { id: true, telegramId: true, name: true, username: true } },
+        },
+      });
+      if (subscription !== null) return { user: subscription.user, subscription };
+    }
+
+    if (telegramId === null || !/^\d+$/.test(telegramId)) return null;
+    const user = await this.prismaService.user.findUnique({
+      where: { telegramId: BigInt(telegramId) },
+      select: { id: true, telegramId: true, name: true, username: true },
+    });
+    return user === null ? null : { user, subscription: null };
+  }
+
+  private async emitFirstTrafficUsage(
+    eventType: string,
+    payload: Record<string, unknown>,
+    context: LocalUserContext,
+  ): Promise<void> {
+    const claimed = await this.prismaService.user.updateMany({
+      where: { id: context.user.id, firstTrafficAt: null },
+      data: { firstTrafficAt: new Date() },
+    });
+    if (claimed.count !== 1) return;
+
+    this.systemEvents.info(
+      EVENT_TYPES.USER_FIRST_TRAFFIC,
+      'USER',
+      'User started using traffic',
+      this.enrichUserMetadata(this.extractEventMetadata(eventType, payload), context),
+    );
+  }
+
+  private enrichUserMetadata(
+    metadata: Record<string, unknown>,
+    context: LocalUserContext | null,
+  ): Record<string, unknown> {
+    if (context === null) return metadata;
+
+    const enriched = { ...metadata };
+    enriched['userId'] = context.user.id;
+    if (context.user.telegramId !== null) enriched['telegramId'] = context.user.telegramId.toString();
+    if (context.user.name) enriched['userName'] = context.user.name;
+    if (context.user.username) enriched['username'] = context.user.username;
+
+    if (context.subscription !== null) {
+      enriched['subscriptionId'] = context.subscription.id;
+      enriched['status'] = context.subscription.status;
+      enriched['deviceLimit'] = context.subscription.deviceLimit;
+      if (context.subscription.expiresAt !== null) enriched['expireAt'] = context.subscription.expiresAt.toISOString();
+      if (enriched['trafficLimitBytes'] === undefined && context.subscription.trafficLimit !== null) {
+        enriched['trafficLimitBytes'] = context.subscription.trafficLimit * 1024 ** 3;
+      }
+    }
+    return enriched;
+  }
+
   /**
    * Maps a raw Remnawave webhook payload onto the card metadata keys the
    * formatter understands. Reads from `payload.data` (2.x) with a flat
@@ -317,10 +456,11 @@ export class RemnawaveWebhookService {
     if (telegramId) meta['telegramId'] = telegramId;
     const expireAt = str('expireAt');
     if (expireAt) meta['expireAt'] = expireAt;
-    const trafficLimit = num('trafficLimitBytes');
-    if (trafficLimit !== undefined) meta['trafficLimitBytes'] = trafficLimit;
-    const usedTraffic = num('usedTrafficBytes') ?? num('usedTraffic');
-    if (usedTraffic !== undefined) meta['usedTrafficBytes'] = usedTraffic;
+    const trafficLimit =
+      this.coerceTrafficNumber(data['trafficLimitBytes']) ?? num('trafficLimitBytes') ?? null;
+    if (trafficLimit !== null) meta['trafficLimitBytes'] = trafficLimit;
+    const usedTraffic = this.coerceTrafficNumber(data['usedTrafficBytes'] ?? data['usedTraffic']);
+    if (usedTraffic !== null) meta['usedTrafficBytes'] = usedTraffic;
 
     // Node-scoped fields
     const nodeName = str('name') ?? str('nodeName');

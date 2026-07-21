@@ -240,6 +240,7 @@ export const en = {
         user_expired: 'Subscription expired',
         user_traffic_reset: 'Traffic reset',
         user_first_connected: 'First connection',
+        user_first_traffic: 'User started using traffic',
         user_expiration: 'Subscription expiring soon',
         user_bandwidth_usage_threshold_reached: 'Bandwidth threshold reached',
         user_not_connected: 'User never connected',

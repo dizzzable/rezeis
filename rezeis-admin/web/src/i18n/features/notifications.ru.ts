@@ -43,6 +43,7 @@ export const ru = {
       trial_getted: 'Пробный период получен',
       node_status: 'Статус ноды Remnawave',
       user_first_connected: 'Первое подключение к VPN',
+      user_first_traffic: 'Пользователь начал использовать трафик',
       user_hwid: 'Новое устройство (HWID)',
     },
     categoryLabels: {

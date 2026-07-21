@@ -241,4 +241,41 @@ describe('SystemEventsService card formatting (enriched)', () => {
       else process.env.APP_VERSION = savedVersion;
     }
   });
+
+  it('renders first-traffic card with status, used traffic and remaining time', async () => {
+    const { service, getLastText } = buildService();
+    const expireAt = new Date(Date.now() + 30 * 24 * 60 * 60_000 + 17 * 60 * 60_000).toISOString();
+    service.info('user.first_traffic', 'USER', 'User started using traffic', {
+      userId: 'user-1',
+      telegramId: '706093898',
+      userName: 'Игорь Высоких',
+      username: 'vs7ka',
+      subscriptionId: '64d8eb5d-3226-4ea3-a256-91c6d0c31c7f',
+      status: 'ACTIVE',
+      usedTrafficBytes: 5_263_000,
+      trafficLimitBytes: 100 * 1024 ** 3,
+      deviceLimit: 1,
+      expireAt,
+      remnawaveId: 'panel-uuid-abc',
+      remnawaveUsername: 'igor_vpn',
+      source: 'REMNAWAVE_WEBHOOK',
+    });
+    await flush();
+    const text = getLastText()!;
+    assert.ok(text.includes('#EventUserFirst_traffic'));
+    assert.ok(text.includes('Событие: Пользователь начал использовать трафик!'));
+    assert.ok(text.includes('👤 <b>Пользователь:</b>'));
+    assert.ok(text.includes('Игорь Высоких (@vs7ka)'));
+    assert.ok(text.includes('📦 <b>План / подписка:</b>'));
+    assert.ok(text.includes('64d8eb5d-3226-4ea3-a256-91c6d0c31c7f'));
+    assert.ok(text.includes('Статус: Активна'));
+    assert.ok(text.includes('Трафик:'));
+    assert.ok(text.includes('100 ГБ'));
+    assert.ok(text.includes('Лимит устройств: 1'));
+    assert.ok(text.includes('Осталось:'));
+    // Traffic is owned by the subscription block — no duplicate in Remnawave block.
+    assert.ok(text.includes('🌐 <b>Профиль Remnawave:</b>'));
+    assert.ok(!text.includes('📊 Трафик:') || text.indexOf('📊 Трафик:') === text.lastIndexOf('📊 Трафик:'));
+    assert.ok(text.includes('Вебхук Remnawave'));
+  });
 });

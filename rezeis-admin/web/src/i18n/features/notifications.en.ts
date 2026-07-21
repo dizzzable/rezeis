@@ -43,6 +43,7 @@ export const en = {
       trial_getted: 'Trial period received',
       node_status: 'Remnawave node status',
       user_first_connected: 'First VPN connection',
+      user_first_traffic: 'User started using traffic',
       user_hwid: 'New device (HWID)',
     },
     categoryLabels: {

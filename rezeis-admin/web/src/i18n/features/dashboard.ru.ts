@@ -240,6 +240,7 @@ export const ru = {
         user_expired: 'Подписка истекла',
         user_traffic_reset: 'Сброшен трафик',
         user_first_connected: 'Первое подключение',
+        user_first_traffic: 'Пользователь начал использовать трафик',
         user_expiration: 'Скоро истечение подписки',
         user_bandwidth_usage_threshold_reached: 'Достигнут порог трафика',
         user_not_connected: 'Пользователь не подключался',

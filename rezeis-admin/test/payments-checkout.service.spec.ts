@@ -275,6 +275,43 @@ describe('PaymentsCheckoutService', () => {
     assert.equal(checkout.checkoutUrl, null)
     assert.equal(state.applyCompletedCalls, 1)
     assert.equal(state.enqueueCalls, 1)
+    assert.equal(state.transactionUpdateMany.some((data) => data.fulfilledAt instanceof Date), true)
+  })
+
+  it('does not provision twice when the immediate claim was already fulfilled', async () => {
+    // Simulate race: reconciler already claimed fulfilledAt before create-response path.
+    const alreadyFulfilledAt = new Date('2026-07-21T12:00:00.000Z')
+    const { service, state } = createService({
+      immediateClaimCount: 0,
+      fulfilledAt: alreadyFulfilledAt,
+      // Pre-mark COMPLETED so findUnique after a lost claim returns terminal state.
+      initialStatus: TransactionStatus.COMPLETED,
+      providerCheckout: {
+        gatewayId: 'provider-succeeded-1',
+        checkoutUrl: null,
+        providerMode: 'IMMEDIATE',
+        providerStatus: 'succeeded',
+        gatewayData: { provider: 'YOOKASSA', providerStatus: 'succeeded' },
+      },
+    })
+    const checkout = await service.checkout({
+      userId: 'user-1',
+      purchaseType: PurchaseType.NEW,
+      planId: 'plan-1',
+      durationDays: 30,
+      gatewayType: PaymentGatewayType.YOOKASSA,
+      channel: PurchaseChannel.WEB,
+    })
+    assert.equal(checkout.transactionStatus, TransactionStatus.COMPLETED)
+    assert.equal(state.applyCompletedCalls, 0)
+    assert.equal(state.enqueueCalls, 0)
+  })
+
+  it('persists a canceled provider result without provisioning', async () => {
+    const { service, state } = createService({ providerCheckout: { gatewayId: 'provider-canceled-1', checkoutUrl: null, providerMode: 'IMMEDIATE', providerStatus: 'CANCELLED', gatewayData: { provider: 'YOOKASSA', cancellation_details: { reason: 'permission_revoked' } } } })
+    const checkout = await service.checkout({ userId: 'user-1', purchaseType: PurchaseType.NEW, planId: 'plan-1', durationDays: 30, gatewayType: PaymentGatewayType.YOOKASSA, channel: PurchaseChannel.WEB })
+    assert.equal(checkout.transactionStatus, TransactionStatus.CANCELED)
+    assert.equal(state.applyCompletedCalls, 0)
   })
 })
 
@@ -286,6 +323,10 @@ function createService(input: {
   readonly draftError?: Error
   readonly accessMode?: 'PUBLIC' | 'INVITED' | 'PURCHASE_BLOCKED' | 'REG_BLOCKED' | 'RESTRICTED'
   readonly amount?: string
+  readonly immediateClaimCount?: number
+  readonly fulfilledAt?: Date | null
+  /** Optional starting status for race fixtures (default PENDING). */
+  readonly initialStatus?: TransactionStatus
   providerCheckout?: {
     gatewayId: string
     checkoutUrl: string | null
@@ -297,6 +338,7 @@ function createService(input: {
   const transactionUpdates: Record<string, unknown>[] = []
   const state = {
     transactionUpdates,
+    transactionUpdateMany: [] as Record<string, unknown>[],
     providerCreateCalls: 0,
     applyCompletedCalls: 0,
     enqueueCalls: 0,
@@ -308,7 +350,7 @@ function createService(input: {
     paymentId,
     userId: 'user-1',
     subscriptionId: null,
-    status: TransactionStatus.PENDING,
+    status: (input.initialStatus ?? TransactionStatus.PENDING) as TransactionStatus,
     purchaseType: PurchaseType.NEW,
     channel: PurchaseChannel.WEB,
     gatewayType,
@@ -316,6 +358,7 @@ function createService(input: {
     amount: { toString: () => input.amount ?? '9.99' },
     paymentAsset: null,
     gatewayId: null,
+    fulfilledAt: input.fulfilledAt ?? null,
     gatewayData: input.transactionGatewayData ?? null,
     planSnapshot: {
       id: 'plan-1',
@@ -345,6 +388,12 @@ function createService(input: {
         }
       },
       updateMany: async (args: { readonly data: Record<string, unknown> }) => {
+        state.transactionUpdateMany.push(args.data)
+        if (input.immediateClaimCount === 0) {
+          transaction.status = TransactionStatus.COMPLETED
+          transaction.fulfilledAt = input.fulfilledAt ?? new Date()
+          return { count: 0 }
+        }
         Object.assign(transaction, args.data)
         return { count: 1 }
       },
@@ -359,7 +408,7 @@ function createService(input: {
       return {
         id: 'transaction-1',
         paymentId,
-        status: TransactionStatus.PENDING,
+        status: TransactionStatus.PENDING as TransactionStatus,
         gatewayType,
         purchaseType: PurchaseType.NEW,
         channel: PurchaseChannel.WEB,

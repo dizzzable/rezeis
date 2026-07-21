@@ -1,0 +1,1 @@
+ALTER TABLE users ADD COLUMN IF NOT EXISTS first_traffic_at TIMESTAMPTZ(3);

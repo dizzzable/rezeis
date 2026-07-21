@@ -27,6 +27,7 @@ import {
 import { isGatewayConfigured } from '../utils/payment-gateway-settings.util';
 import { normalizePaymentProviderError } from '../utils/payment-provider-error.util';
 import { PaymentProviderExecutionService } from './payment-provider-execution.service';
+import { claimForImmediateFulfillment, releaseFulfillmentClaim } from './payment-fulfillment-claim.util';
 import { PaymentSubscriptionMutationService } from './payment-subscription-mutation.service';
 import { PaymentsTransactionsService } from './payments-transactions.service';
 import { SavedPaymentMethodService } from './saved-payment-method.service';
@@ -136,17 +137,31 @@ export class PaymentsCheckoutService {
     // mirroring the free-add-on path — the user gets their subscription
     // without a payment step instead of a "payment failed" error.
     if (Number(transaction.amount) <= 0) {
-      const claim = await this.prismaService.transaction.updateMany({ where: { id: transaction.id, status: TransactionStatus.PENDING, fulfilledAt: null }, data: { status: TransactionStatus.COMPLETED } });
-      if (claim.count !== 1) {
+      const claimedAt = await claimForImmediateFulfillment(this.prismaService, transaction.id);
+      if (claimedAt === null) {
         const current = await this.prismaService.transaction.findUnique({ where: { id: transaction.id } });
-        if (current?.fulfilledAt !== null) return mapCheckoutResponse({ transaction: current, checkoutUrl: null, providerMode: 'NONE' });
+        if (current?.status === TransactionStatus.COMPLETED && current.fulfilledAt !== null) {
+          return mapCheckoutResponse({ transaction: current, checkoutUrl: null, providerMode: 'NONE' });
+        }
         throw new ConflictException('Zero-value checkout is already being fulfilled');
       }
-      const completedTransaction = await this.prismaService.transaction.findUniqueOrThrow({ where: { id: transaction.id } });
-      const { syncJobs } =
-        await this.paymentSubscriptionMutationService.applyCompletedTransaction(
-          completedTransaction,
+      const completedTransaction = await this.prismaService.transaction.findUniqueOrThrow({
+        where: { id: transaction.id },
+      });
+      let syncJobs;
+      try {
+        ({ syncJobs } =
+          await this.paymentSubscriptionMutationService.applyCompletedTransaction(
+            completedTransaction,
+          ));
+      } catch (provisionError: unknown) {
+        await releaseFulfillmentClaim(this.prismaService, transaction.id, claimedAt).catch(
+          () => undefined,
         );
+        throw provisionError;
+      }
+      // Enqueue after provision commit — never release the claim on queue errors
+      // (profile-sync sweep recovers PENDING jobs; reopening would double-provision).
       for (const syncJob of syncJobs) {
         await this.profileSyncQueueService.enqueue(syncJob.id);
       }
@@ -193,43 +208,56 @@ export class PaymentsCheckoutService {
       data: {
         gatewayId: providerCheckout.gatewayId,
         gatewayData: providerCheckout.gatewayData as Prisma.InputJsonValue,
+        checkoutUrl: providerCheckout.checkoutUrl,
       },
     });
+
+    if (isProviderCanceled(providerCheckout.providerStatus)) {
+      // Terminal cancel first so a later autopay-disable failure cannot leave
+      // the row stuck PENDING.
+      const canceledTransaction = await this.prismaService.transaction.update({
+        where: { id: transaction.id },
+        data: { status: TransactionStatus.CANCELED, gatewayData: providerCheckout.gatewayData as Prisma.InputJsonValue },
+      });
+      await disablePermissionRevokedAutopay(
+        this.savedPaymentMethodService,
+        transaction.userId,
+        input.gatewayType,
+        providerCheckout.gatewayData,
+      ).catch(() => undefined);
+      return mapCheckoutResponse({ transaction: canceledTransaction, checkoutUrl: null, providerMode: providerCheckout.providerMode });
+    }
 
     // Off-session YooKassa may return status=succeeded in the create response.
     // Fulfill immediately (same claim pattern as zero-total checkout); webhook
     // remains the path for PENDING / redirect / 3DS.
     if (isProviderSucceeded(providerCheckout.providerStatus)) {
-      const claim = await this.prismaService.transaction.updateMany({
-        where: {
-          id: transaction.id,
-          status: TransactionStatus.PENDING,
-          fulfilledAt: null,
-        },
-        data: {
-          status: TransactionStatus.COMPLETED,
-        },
-      });
-      if (claim.count === 1) {
+      const claimedAt = await claimForImmediateFulfillment(this.prismaService, transaction.id);
+      if (claimedAt !== null) {
         const completedTransaction = await this.prismaService.transaction.findUniqueOrThrow({
           where: { id: transaction.id },
         });
+        // Best-effort: never block entitlement on method-upsert failures
+        // (matches reconciler persistSavedPaymentMethodBestEffort).
+        await persistImmediateYookassaMethod(
+          this.savedPaymentMethodService,
+          transaction,
+          providerCheckout,
+        ).catch(() => undefined);
+        let syncJobs;
         try {
-          const { syncJobs } =
+          ({ syncJobs } =
             await this.paymentSubscriptionMutationService.applyCompletedTransaction(
               completedTransaction,
-            );
-          for (const syncJob of syncJobs) {
-            await this.profileSyncQueueService.enqueue(syncJob.id);
-          }
+            ));
         } catch (provisionError: unknown) {
-          await this.prismaService.transaction
-            .updateMany({
-              where: { id: transaction.id, status: TransactionStatus.COMPLETED },
-              data: { status: TransactionStatus.PENDING, fulfilledAt: null },
-            })
-            .catch(() => undefined);
+          await releaseFulfillmentClaim(this.prismaService, transaction.id, claimedAt).catch(
+            () => undefined,
+          );
           throw provisionError;
+        }
+        for (const syncJob of syncJobs) {
+          await this.profileSyncQueueService.enqueue(syncJob.id);
         }
         const finalTransaction =
           (await this.prismaService.transaction.findUnique({ where: { id: transaction.id } })) ??
@@ -240,6 +268,14 @@ export class PaymentsCheckoutService {
           providerMode: providerCheckout.providerMode,
         });
       }
+      const current = await this.prismaService.transaction.findUnique({ where: { id: transaction.id } });
+      if (current?.status === TransactionStatus.COMPLETED && current.fulfilledAt !== null) {
+        return mapCheckoutResponse({ transaction: current, checkoutUrl: null, providerMode: providerCheckout.providerMode });
+      }
+    }
+
+    if (providerCheckout.checkoutUrl !== null && typeof input.savedPaymentMethodId === 'string' && input.savedPaymentMethodId.length > 0) {
+      this.savedPaymentMethodService.notifyAutopayConfirmationRequired({ userId: transaction.userId, paymentId: transaction.paymentId, checkoutUrl: providerCheckout.checkoutUrl });
     }
 
     return mapCheckoutResponse({
@@ -307,8 +343,35 @@ function buildCheckoutDescription(input: {
 }
 
 
+async function disablePermissionRevokedAutopay(
+  savedPaymentMethodService: SavedPaymentMethodService,
+  userId: string,
+  gatewayType: PaymentGatewayType,
+  gatewayData: Record<string, unknown>,
+): Promise<void> {
+  const details = gatewayData['cancellation_details'];
+  const reason = typeof details === 'object' && details !== null ? (details as Record<string, unknown>)['reason'] : null;
+  const providerMethodId = gatewayData['paymentMethodId'];
+  if (gatewayType === PaymentGatewayType.YOOKASSA && typeof reason === 'string' && reason.toLowerCase().includes('permission_revoked') && typeof providerMethodId === 'string') {
+    await savedPaymentMethodService.disableAutopayForProviderMethod({ userId, gatewayType, providerMethodId, reason });
+  }
+}
+
+async function persistImmediateYookassaMethod(
+  savedPaymentMethodService: SavedPaymentMethodService,
+  transaction: Transaction,
+  providerCheckout: { readonly gatewayId: string | null; readonly yookassaPaymentPayload?: unknown },
+): Promise<void> {
+  if (transaction.gatewayType !== PaymentGatewayType.YOOKASSA || providerCheckout.yookassaPaymentPayload === undefined) return;
+  await savedPaymentMethodService.upsertFromYookassaPayment({ userId: transaction.userId, transactionId: transaction.id, gatewayId: providerCheckout.gatewayId, rawPayload: providerCheckout.yookassaPaymentPayload });
+}
 function isProviderSucceeded(providerStatus: string | null | undefined): boolean {
   return String(providerStatus ?? '').trim().toLowerCase() === 'succeeded';
+}
+
+function isProviderCanceled(providerStatus: string | null | undefined): boolean {
+  const status = String(providerStatus ?? '').trim().toLowerCase();
+  return status === 'canceled' || status === 'cancelled';
 }
 
 function mapCheckoutResponse(input: {

@@ -178,6 +178,57 @@ export class SavedPaymentMethodService {
     return { id: updated.id, autopayEnabled: updated.autopayEnabled };
   }
 
+  /** Disables autopay after a provider revokes a reusable instrument. */
+  public async disableAutopayForProviderMethod(input: {
+    readonly providerMethodId: string;
+    readonly reason: string;
+    readonly userId?: string;
+    readonly gatewayType?: PaymentGatewayType;
+  }): Promise<{ id: string; autopayEnabled: false } | null> {
+    const providerMethodId = input.providerMethodId.trim();
+    if (providerMethodId.length === 0) return null;
+    const gatewayType = input.gatewayType ?? PaymentGatewayType.YOOKASSA;
+    const candidate = await this.prismaService.savedPaymentMethod.findFirst({
+      where: { gatewayType, providerMethodId, isActive: true, autopayEnabled: true, ...(input.userId === undefined ? {} : { userId: input.userId }) },
+      select: { id: true },
+    });
+    if (candidate === null) return null;
+
+    const updated = await this.prismaService.$transaction(async (tx) => {
+      await this.lockForChargeDecision(tx, candidate.id);
+      const method = await tx.savedPaymentMethod.findFirst({
+        where: { id: candidate.id, gatewayType, providerMethodId, isActive: true, autopayEnabled: true, ...(input.userId === undefined ? {} : { userId: input.userId }) },
+        select: { id: true, userId: true, gatewayType: true, methodType: true, cardLast4: true, providerMethodId: true },
+      });
+      if (method === null) return null;
+      await tx.savedPaymentMethod.update({ where: { id: method.id }, data: { autopayEnabled: false } });
+      return method;
+    }, { timeout: CHARGE_LOCK_TIMEOUT_MS });
+    if (updated === null) return null;
+
+    this.systemEvents.warn(
+      EVENT_TYPES.PAYMENT_METHOD_AUTOPAY_UPDATED,
+      'PAYMENT',
+      `Автосписание отключено провайдером: ${updated.methodType}`,
+      { userId: updated.userId, savedPaymentMethodId: updated.id, gatewayType: updated.gatewayType, methodType: updated.methodType, cardLast4: updated.cardLast4, providerMethodId: updated.providerMethodId, reason: input.reason },
+    );
+    return { id: updated.id, autopayEnabled: false };
+  }
+
+  /** Emits an operator-visible event when an off-session charge needs 3DS. */
+  public notifyAutopayConfirmationRequired(input: {
+    readonly userId: string;
+    readonly paymentId: string;
+    readonly checkoutUrl: string;
+  }): void {
+    this.systemEvents.warn(
+      'payment.autopay_confirmation_required',
+      'PAYMENT',
+      'Автосписание ожидает подтверждения пользователя (3DS/redirect)',
+      input,
+    );
+  }
+
   /**
    * Picks the newest chargeable saved method for autopay (active + autopay on).
    * Prefer YOOKASSA — currently the only off-session charge path.

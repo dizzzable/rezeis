@@ -1039,6 +1039,9 @@ model User {
   lastFormFactor                 String?   @map("last_form_factor")
   lastOs                         String?   @map("last_os")
   lastSeenAt                     DateTime? @map("last_seen_at") @db.Timestamptz(3)
+  /// First observed non-zero traffic consumption from the Remnawave webhook.
+  /// Used as an idempotency guard for the operator first-traffic card.
+  firstTrafficAt                 DateTime? @map("first_traffic_at") @db.Timestamptz(3)
   /// Timestamp the user finished (or skipped) the cabinet onboarding tour.
   /// NULL = never completed → the tour auto-starts. Persisted server-side so
   /// the "seen" state survives across devices/browsers (the SPA also keeps a
