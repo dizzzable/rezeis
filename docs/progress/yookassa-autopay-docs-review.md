@@ -1,6 +1,6 @@
 ﻿# Документальное ревью YooKassa autopay — PR #33
 
-> **Статус (обновлено 2026-07-21):** код **выпущен** в rezeis **v0.9.6.57** (+ follow-up: lease-fenced claim, per-request `savePaymentMethod` + consent UI в кабинете). Staging matrix у провайдера — ops checklist. Dual path: live money = `PaymentProviderExecutionService`; `YookassaAdapter` помечен legacy.
+> **Статус (обновлено 2026-07-21):** код **выпущен** в rezeis **v0.9.6.57** (+ follow-up: lease-fenced claim, per-request `savePaymentMethod` + consent UI purchase/renewal, unit tests all resolver reason codes). Dead unregistered `YookassaAdapter` **удалён** — live money only via `PaymentProviderExecutionService`. Staging matrix у провайдера — ops checklist.
 
 Проверены commit `4c9e939` (PR #33; merge `c85e4a5`) и последующие harden на main.
 
