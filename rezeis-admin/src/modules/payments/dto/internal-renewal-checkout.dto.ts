@@ -4,6 +4,7 @@ import {
   ArrayMaxSize,
   ArrayMinSize,
   IsArray,
+  IsBoolean,
   IsEnum,
   IsOptional,
   IsString,
@@ -138,6 +139,16 @@ export class InternalRenewalCheckoutDto {
   @MinLength(1)
   @MaxLength(64)
   public savedPaymentMethodId?: string;
+
+  /** Per-request YooKassa bind-card intent (interactive renew only). See checkout DTO. */
+  @IsOptional()
+  @IsBoolean()
+  public savePaymentMethod?: boolean;
+
+  /** Explicit consent to save the method for autopay. Required when save is true. */
+  @IsOptional()
+  @IsBoolean()
+  public savePaymentMethodConsent?: boolean;
 }
 
 /**

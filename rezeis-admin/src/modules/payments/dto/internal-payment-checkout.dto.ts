@@ -1,5 +1,6 @@
 import { PaymentGatewayType, PurchaseChannel, PurchaseType } from '@prisma/client';
 import {
+  IsBoolean,
   IsEnum,
   IsIn,
   IsInt,
@@ -100,4 +101,24 @@ export class InternalPaymentCheckoutDto {
   @MinLength(1)
   @MaxLength(64)
   public savedPaymentMethodId?: string;
+
+  /**
+   * Per-request YooKassa bind-card intent (interactive checkout only).
+   * - `true`  → request `save_payment_method` (requires consent below)
+   * - `false` → do not bind a card for this payment
+   * - omit    → gateway setting default (operators can force-off globally)
+   * Ignored for off-session charges (`savedPaymentMethodId` set).
+   */
+  @IsOptional()
+  @IsBoolean()
+  public savePaymentMethod?: boolean;
+
+  /**
+   * Explicit user consent to save the payment method for future autopay.
+   * Required when `savePaymentMethod` resolves to true. Cabinets should
+   * only send `true` after the user ticks the consent checkbox.
+   */
+  @IsOptional()
+  @IsBoolean()
+  public savePaymentMethodConsent?: boolean;
 }

@@ -1,13 +1,20 @@
 /**
- * YooKassa payment gateway adapter.
+ * YooKassa payment gateway adapter (LEGACY / non-runtime path).
+ *
+ * **Canonical checkout** runs through
+ * `PaymentProviderExecutionService.createYookassaCheckout` (Nest HttpService,
+ * off-session charge, consent-gated `save_payment_method`, redacted
+ * gatewayData). This adapter remains only for IPaymentGateway interface
+ * completeness and must not diverge on new payment behaviour — prefer the
+ * execution service for all live money paths.
  *
  * Docs: https://yookassa.ru/developers/
- * Auth: Basic auth (shopId:secretKey), HMAC-SHA256 webhook signature.
+ * Auth: Basic auth (shopId:secretKey).
  *
  * Settings shape:
  *   shopId: string
- *   secretKey: string
- *   webhookSecret: string  — used to verify incoming webhooks
+ *   secretKey | apiKey: string
+ *   savePaymentMethod?: boolean  — global opt-out (default true for legacy)
  */
 
 import { Injectable, Logger } from '@nestjs/common';
@@ -60,9 +67,8 @@ export class YookassaAdapter implements IPaymentGateway {
   }
 
   async createCheckout(input: GatewayCheckoutInput, settings: Record<string, unknown>): Promise<GatewayCheckoutResult> {
-    // Default true: request a reusable payment_method on successful payment so
-    // the merchant can run autopayments later. Operators can disable via
-    // gateway settings `savePaymentMethod: false`.
+    // Legacy path: gateway-wide default only. Live money uses
+    // PaymentProviderExecutionService (per-request + consent).
     // When charging with paymentMethodId we never re-request save.
     const paymentMethodId =
       typeof input.paymentMethodId === 'string' && input.paymentMethodId.trim().length > 0

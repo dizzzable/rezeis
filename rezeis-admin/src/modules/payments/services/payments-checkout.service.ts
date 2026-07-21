@@ -190,6 +190,8 @@ export class PaymentsCheckoutService {
         failUrl: input.failUrl ?? null,
         paymentMethodId: chargedMethod?.providerMethodId ?? null,
         savedPaymentMethodId: chargedMethod?.id ?? null,
+        savePaymentMethod: input.savePaymentMethod,
+        savePaymentMethodConsent: input.savePaymentMethodConsent,
       });
     const providerCheckout =
       typeof input.savedPaymentMethodId === 'string' && input.savedPaymentMethodId.length > 0

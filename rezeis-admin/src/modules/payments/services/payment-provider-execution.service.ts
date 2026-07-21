@@ -28,6 +28,47 @@ function isYookassaCanceled(providerStatus: string | null): boolean {
   return status === 'canceled' || status === 'cancelled';
 }
 
+/** Version string stamped into gatewayData / metadata for autopay consent audit. */
+export const YOOKASSA_AUTOPAY_CONSENT_VERSION = 'yookassa-autopay-v1';
+
+/**
+ * Resolves whether interactive YooKassa checkout should request
+ * `save_payment_method`. Off-session charges never save again.
+ *
+ * Rules (in order):
+ * 1. Off-session (`paymentMethodId` set) → never save
+ * 2. Gateway `savePaymentMethod: false` → never save
+ * 3. Request `savePaymentMethod: false` → never save
+ * 4. Request `savePaymentMethod: true` requires `consent === true`
+ * 5. Request omitted → legacy gateway default (true), without consent stamp
+ *    (older clients); new cabinets always send an explicit boolean + consent
+ */
+export function resolveYookassaSavePaymentMethod(input: {
+  readonly paymentMethodId: string | null;
+  readonly gatewayAllows: boolean;
+  readonly requestSave: boolean | null | undefined;
+  readonly consent: boolean | null | undefined;
+}): { readonly save: boolean; readonly consent: boolean; readonly reason: string } {
+  if (input.paymentMethodId !== null) {
+    return { save: false, consent: false, reason: 'off_session' };
+  }
+  if (!input.gatewayAllows) {
+    return { save: false, consent: false, reason: 'gateway_disabled' };
+  }
+  if (input.requestSave === false) {
+    return { save: false, consent: false, reason: 'request_opt_out' };
+  }
+  if (input.requestSave === true) {
+    if (input.consent === true) {
+      return { save: true, consent: true, reason: 'request_with_consent' };
+    }
+    // Explicit save without consent is rejected (YooKassa requires informed consent).
+    return { save: false, consent: false, reason: 'consent_required' };
+  }
+  // Legacy clients that omit the field: keep previous gateway-default behaviour.
+  return { save: true, consent: false, reason: 'legacy_gateway_default' };
+}
+
 interface ProviderCheckoutResult {
   readonly gatewayId: string | null;
   readonly checkoutUrl: string | null;
@@ -59,6 +100,13 @@ export class PaymentProviderExecutionService {
     readonly paymentMethodId?: string | null;
     /** Local SavedPaymentMethod.id — stored in gatewayData for audit only. */
     readonly savedPaymentMethodId?: string | null;
+    /**
+     * Per-request bind-card intent for interactive YooKassa. See
+     * {@link resolveYookassaSavePaymentMethod}.
+     */
+    readonly savePaymentMethod?: boolean | null;
+    /** Explicit user consent to bind the card for future autopay. */
+    readonly savePaymentMethodConsent?: boolean | null;
   }): Promise<ProviderCheckoutResult> {
     try {
       switch (input.gateway.type) {
@@ -115,6 +163,8 @@ export class PaymentProviderExecutionService {
     readonly failUrl?: string | null;
     readonly paymentMethodId?: string | null;
     readonly savedPaymentMethodId?: string | null;
+    readonly savePaymentMethod?: boolean | null;
+    readonly savePaymentMethodConsent?: boolean | null;
   }): Promise<ProviderCheckoutResult> {
     const settings = readGatewaySettings(input.gateway.settings);
     const shopId = requireSetting(settings, 'shopId');
@@ -123,12 +173,15 @@ export class PaymentProviderExecutionService {
       typeof input.paymentMethodId === 'string' && input.paymentMethodId.trim().length > 0
         ? input.paymentMethodId.trim()
         : null;
-    // When true (default), YooKassa may return a reusable payment_method on
-    // successful interactive payment — required for merchant-side autopayments.
-    // Operators can disable via gateway settings `savePaymentMethod: false`.
-    // Off-session charges (payment_method_id) never re-request save.
-    const savePaymentMethod =
-      paymentMethodId === null && readBooleanSetting(settings, 'savePaymentMethod', true);
+    // Interactive bind: gateway allow + per-request intent + explicit consent.
+    // Off-session charges never re-request save. See resolveYookassaSavePaymentMethod.
+    const saveDecision = resolveYookassaSavePaymentMethod({
+      paymentMethodId,
+      gatewayAllows: readBooleanSetting(settings, 'savePaymentMethod', true),
+      requestSave: input.savePaymentMethod,
+      consent: input.savePaymentMethodConsent,
+    });
+    const savePaymentMethod = saveDecision.save;
 
     const payload: Record<string, unknown> = {
       amount: {
@@ -144,6 +197,13 @@ export class PaymentProviderExecutionService {
         ...(typeof input.savedPaymentMethodId === 'string' &&
         input.savedPaymentMethodId.length > 0
           ? { savedPaymentMethodId: input.savedPaymentMethodId }
+          : {}),
+        savePaymentMethod,
+        ...(savePaymentMethod && saveDecision.consent
+          ? {
+              savePaymentMethodConsent: true,
+              consentVersion: YOOKASSA_AUTOPAY_CONSENT_VERSION,
+            }
           : {}),
       },
     };
@@ -209,6 +269,12 @@ export class PaymentProviderExecutionService {
         checkoutUrl,
         providerMode,
         savePaymentMethod,
+        savePaymentMethodConsent: saveDecision.consent,
+        // Only stamp consent audit when the user explicitly consented
+        // (not for legacy gateway-default saves without a client checkbox).
+        consentVersion: saveDecision.consent ? YOOKASSA_AUTOPAY_CONSENT_VERSION : null,
+        consentAt: saveDecision.consent ? new Date().toISOString() : null,
+        savePaymentMethodReason: saveDecision.reason,
         paymentMethodId,
         savedPaymentMethodId:
           typeof input.savedPaymentMethodId === 'string' && input.savedPaymentMethodId.length > 0

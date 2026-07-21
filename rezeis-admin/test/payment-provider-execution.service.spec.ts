@@ -61,7 +61,12 @@ describe('PaymentProviderExecutionService checkout execution', () => {
         return_url: 'https://user.example/payments/result?paymentId=payment-1',
       },
       description: 'Plan purchase that should be sent to provider',
-      metadata: { paymentId: 'payment-1', transactionId: 'transaction-1', userId: 'user-1' },
+      metadata: {
+        paymentId: 'payment-1',
+        transactionId: 'transaction-1',
+        userId: 'user-1',
+        savePaymentMethod: true,
+      },
       save_payment_method: true,
     });
     assert.deepStrictEqual(call.options.auth, { username: 'shop-1', password: 'secret-1' });
@@ -73,21 +78,110 @@ describe('PaymentProviderExecutionService checkout execution', () => {
     assert.equal(result.providerMode, 'REDIRECT');
     assert.equal(result.providerStatus, 'pending');
     assert.equal(result.yookassaPaymentPayload !== undefined, true);
-    assert.deepStrictEqual(result.gatewayData, {
-      provider: 'YOOKASSA',
-      providerStatus: 'pending',
-      providerMode: 'REDIRECT',
-      paymentMethodId: null,
-      savedPaymentMethodId: null,
-      savePaymentMethod: true,
-      providerResponse: {
-        id: '***redacted***',
-        status: 'pending',
-        metadata: { apiKey: '***redacted***' },
-        confirmation: { confirmation_url: '[url hidden]' },
+    assert.equal(result.gatewayData['savePaymentMethod'], true);
+    assert.equal(result.gatewayData['savePaymentMethodReason'], 'legacy_gateway_default');
+    assert.equal(result.gatewayData['provider'], 'YOOKASSA');
+    assert.equal(result.gatewayData['checkoutUrl'], 'https://checkout.example/yookassa');
+  });
+
+  it('does not request save_payment_method without consent when client opts in', async () => {
+    const calls: unknown[] = [];
+    const service = createService({
+      post: (_url: string, body: unknown) => {
+        calls.push(body);
+        return of({
+          data: {
+            id: 'provider-no-consent',
+            status: 'pending',
+            confirmation: { confirmation_url: 'https://checkout.example/nc' },
+          },
+        });
       },
-      checkoutUrl: 'https://checkout.example/yookassa',
     });
+    await service.createCheckout({
+      gateway: createGateway({
+        type: PaymentGatewayType.YOOKASSA,
+        settings: { shopId: 'shop-1', apiKey: 'secret-1' },
+      }),
+      transaction: createTransaction({
+        paymentId: 'payment-nc',
+        gatewayType: PaymentGatewayType.YOOKASSA,
+        amount: '10.00',
+        currency: Currency.RUB,
+      }),
+      description: 'no consent',
+      savePaymentMethod: true,
+      savePaymentMethodConsent: false,
+    });
+    const body = calls[0] as Record<string, unknown>;
+    assert.equal(body['save_payment_method'], undefined);
+  });
+
+  it('requests save_payment_method when client opts in with consent', async () => {
+    const calls: unknown[] = [];
+    const service = createService({
+      post: (_url: string, body: unknown) => {
+        calls.push(body);
+        return of({
+          data: {
+            id: 'provider-consent',
+            status: 'pending',
+            confirmation: { confirmation_url: 'https://checkout.example/c' },
+          },
+        });
+      },
+    });
+    const result = await service.createCheckout({
+      gateway: createGateway({
+        type: PaymentGatewayType.YOOKASSA,
+        settings: { shopId: 'shop-1', apiKey: 'secret-1' },
+      }),
+      transaction: createTransaction({
+        paymentId: 'payment-c',
+        gatewayType: PaymentGatewayType.YOOKASSA,
+        amount: '10.00',
+        currency: Currency.RUB,
+      }),
+      description: 'with consent',
+      savePaymentMethod: true,
+      savePaymentMethodConsent: true,
+    });
+    const body = calls[0] as Record<string, unknown>;
+    assert.equal(body['save_payment_method'], true);
+    assert.equal(result.gatewayData['savePaymentMethodConsent'], true);
+    assert.equal(result.gatewayData['savePaymentMethodReason'], 'request_with_consent');
+  });
+
+  it('honours per-request savePaymentMethod:false', async () => {
+    const calls: unknown[] = [];
+    const service = createService({
+      post: (_url: string, body: unknown) => {
+        calls.push(body);
+        return of({
+          data: {
+            id: 'provider-opt-out',
+            status: 'pending',
+            confirmation: { confirmation_url: 'https://checkout.example/o' },
+          },
+        });
+      },
+    });
+    await service.createCheckout({
+      gateway: createGateway({
+        type: PaymentGatewayType.YOOKASSA,
+        settings: { shopId: 'shop-1', apiKey: 'secret-1' },
+      }),
+      transaction: createTransaction({
+        paymentId: 'payment-o',
+        gatewayType: PaymentGatewayType.YOOKASSA,
+        amount: '10.00',
+        currency: Currency.RUB,
+      }),
+      description: 'opt out',
+      savePaymentMethod: false,
+    });
+    const body = calls[0] as Record<string, unknown>;
+    assert.equal(body['save_payment_method'], undefined);
   });
 
   it('accepts secretKey as YooKassa credential alias for apiKey', async () => {

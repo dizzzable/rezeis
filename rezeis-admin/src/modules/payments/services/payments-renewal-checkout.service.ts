@@ -56,6 +56,10 @@ export interface RenewalCheckoutInput {
   readonly addOns?: ReadonlyMap<string, readonly string[]>;
   /** Local SavedPaymentMethod.id for off-session YooKassa charge. */
   readonly savedPaymentMethodId?: string;
+  /** Per-request YooKassa bind-card intent (interactive only). */
+  readonly savePaymentMethod?: boolean;
+  /** Explicit consent to save method for autopay. */
+  readonly savePaymentMethodConsent?: boolean;
 }
 
 /**
@@ -353,6 +357,8 @@ export class PaymentsRenewalCheckoutService {
           failUrl: input.failUrl ?? null,
           paymentMethodId: chargedMethod?.providerMethodId ?? null,
           savedPaymentMethodId: chargedMethod?.id ?? null,
+          savePaymentMethod: input.savePaymentMethod,
+          savePaymentMethodConsent: input.savePaymentMethodConsent,
         });
       };
       providerCheckout =
