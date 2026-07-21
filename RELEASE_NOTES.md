@@ -1,24 +1,28 @@
 # Rezeis Admin v0.9.6.57
 
-💳 **YooKassa autopay harden + уведомление о первом трафике** — закрыты гонки double-fulfill, cancel/poll/permission_revoked, карточка «пользователь начал использовать трафик» в топик «Пользователи». Кабинет без изменений: **reiwa v0.9.6.38**.
+💳 **YooKassa autopay + уведомление о первом трафике** — усилена обработка автоплатежей; операторская карточка, когда пользователь впервые начал трафик. Кабинет без изменений: **reiwa v0.9.6.38**.
 
-### Payments (YooKassa)
-- **Fulfillment claim:** atomic `COMPLETED + fulfilledAt` с lease-fencing — release только своего lease, не чужого.
-- **Create-response path:** off-session `succeeded` → claim → provision; enqueue после commit (не reopen claim).
-- **Canceled create:** терминальный `CANCELED` пишется до disable autopay; `permission_revoked` → autopay off (best-effort).
-- **Pending-expiry poll:** GET YooKassa; `succeeded` без webhook → fulfill + post-hooks; claim placeholders **не** авто-отменяются.
-- **Reconciler:** stale claim recovery (2m) fenced; live claim mid-lease не ack/не clear.
+### Платежи (YooKassa)
+- **Один раз выдать доступ** — claim `COMPLETED + fulfilledAt` с lease: нет double-fulfill при гонке webhook / create-response.
+- **Мгновенное списание** — `succeeded` сразу от YooKassa → выдача без ожидания webhook.
+- **Отмена** — терминальный `CANCELED` сразу; `permission_revoked` отключает автоплатёж.
+- **Зависшие PENDING** — poll GET: оплачено → fulfill; локальные claim-placeholder **не** авто-отменяются.
+- **Сбой enqueue sync** — claim не снимается (нет повторной выдачи); recovery подхватывает jobs.
 
-### Operator notify — first traffic
-- Раз в жизни пользователя: `usedTrafficBytes > 0` → `user.first_traffic` (категория **USER** → топик «Пользователи»).
-- Карточка: пользователь + подписка (статус, трафик used/limit, устройства, «Осталось»).
-- Идемпотентность: `users.first_traffic_at` + atomic claim; string counters нормализуются.
-- Первое подключение (`remnawave.user.first_connected`) отдельно, категория REMNAWAVE.
+### Уведомление: первый трафик
+- Один раз на пользователя при `usedTrafficBytes > 0` → `user.first_traffic` (топик **USER / «Пользователи»**).
+- Карточка: пользователь, статус, трафик, устройства, «Осталось».
+- Идемпотентность: `users.first_traffic_at`; «Первое подключение» отдельно (`REMNAWAVE`).
+
+### После деплоя
+1. Миграция `first_traffic_at`.
+2. Топик USER → «Пользователи».
+3. В selected-events — `user.first_traffic`.
 
 ### ✅ Гейты
-- Focused suites: **71 pass** (checkout, execution, pending-expiry, claim fence, renewal idempotency, webhook first-traffic, card format).
-- `tsc` backend + web: green.
-- Codex pre-release: **BLOCK → fixes → SHIP** (high confidence).
+- focused tests: **71 pass**.
+- typecheck backend + web: ✅.
+- Codex pre-release: **SHIP**.
 
 **Полный список изменений:** https://github.com/dizzzable/rezeis/compare/v0.9.6.56...v0.9.6.57
 
