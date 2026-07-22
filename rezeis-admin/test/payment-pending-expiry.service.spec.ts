@@ -2,7 +2,7 @@ import 'reflect-metadata';
 
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { of, throwError } from 'rxjs';
+import { Observable, of, throwError } from 'rxjs';
 import { PaymentGatewayType, TransactionStatus } from '@prisma/client';
 
 import { PaymentPendingExpiryService } from '../src/modules/payments/services/payment-pending-expiry.service';
@@ -82,7 +82,7 @@ describe('PaymentPendingExpiryService YooKassa poll', () => {
 });
 
 function createService(input: {
-  readonly get: () => ReturnType<typeof of> | ReturnType<typeof throwError>;
+  readonly get: () => Observable<unknown>;
   readonly updates?: Array<{ data: Record<string, unknown> }>;
   readonly cancels?: unknown[];
   readonly state?: { applyCalls: number; enqueueCalls: number };
