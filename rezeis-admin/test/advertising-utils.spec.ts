@@ -7,7 +7,6 @@ import {
   generateTrackingCode,
   isValidTrackingCode,
   parseAdPayload,
-  parseAdUtm,
   TELEGRAM_START_PAYLOAD_MAX,
 } from '../src/modules/advertising/utils/tracking-code.util';
 import {
@@ -63,6 +62,17 @@ describe('tracking-code.util', () => {
     });
     assert.equal(full.miniAppStart, 'https://t.me/RezeisBot/app?startapp=ad_xy12');
     assert.equal(full.miniAppWeb, 'https://reiwa.example/?campaign=ad_xy12');
+  });
+
+  it('never creates an invalid Telegram link when Reiwa has no bot username', () => {
+    const links = buildAdDeepLinks({
+      adminReiwaBotUsername: null,
+      miniAppWebBaseUrl: 'https://reiwa.example',
+      code: 'xy12',
+    });
+    assert.equal(links.botStart, null);
+    assert.equal(links.miniAppStart, null);
+    assert.equal(links.miniAppWeb, 'https://reiwa.example/?campaign=ad_xy12');
   });
 
   it('buildAdDeepLinks keeps Telegram links strictly ad_<code> (no UTM in payload)', () => {

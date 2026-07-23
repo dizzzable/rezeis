@@ -91,7 +91,7 @@ export function parseAdUtm(payload: string): Record<string, string> {
 
 /** Ready-to-share links for a placement's tracking code. All Telegram links use adminReiwaBotUsername for Reiwa compatibility. */
 export interface AdDeepLinks {
-  readonly botStart: string;
+  readonly botStart: string | null;
   readonly miniAppStart: string | null;
   readonly miniAppWeb: string | null;
 }
@@ -102,7 +102,7 @@ export interface AdDeepLinks {
  * configured.
  */
 export function buildAdDeepLinks(input: {
-  readonly adminReiwaBotUsername: string;
+  readonly adminReiwaBotUsername?: string | null;
   readonly miniAppShortName?: string | null;
   readonly miniAppWebBaseUrl?: string | null;
   readonly code: string;
@@ -113,11 +113,11 @@ export function buildAdDeepLinks(input: {
   readonly utmCreative?: string;
 }): AdDeepLinks {
   const payload = buildAdPayload(input.code);
-  const bot = input.adminReiwaBotUsername.replace(/^@+/, '').trim();
-  const botStart = `https://t.me/${bot}?start=${payload}`;
+  const bot = (input.adminReiwaBotUsername ?? '').replace(/^@+/, '').trim();
+  const botStart = bot.length > 0 ? `https://t.me/${bot}?start=${payload}` : null;
   const shortName = (input.miniAppShortName ?? '').trim();
   const miniAppStart =
-    shortName.length > 0 ? `https://t.me/${bot}/${shortName}?startapp=${payload}` : null;
+    bot.length > 0 && shortName.length > 0 ? `https://t.me/${bot}/${shortName}?startapp=${payload}` : null;
   const webBase = (input.miniAppWebBaseUrl ?? '').replace(/\/+$/, '').trim();
   const webParams = new URLSearchParams({ campaign: payload });
   if (input.utmSource) webParams.set('utm_source', input.utmSource);

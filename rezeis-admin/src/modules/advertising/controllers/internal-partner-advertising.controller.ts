@@ -1,13 +1,12 @@
-import { Body, Controller, ForbiddenException, Get, Inject, Param, Post, UseGuards } from '@nestjs/common';
-import { ConfigType } from '@nestjs/config';
+import { Body, Controller, ForbiddenException, Get, Param, Post, UseGuards } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 
-import { advertisingConfig } from '../../../common/config/advertising.config';
 import { InternalAdminAuthGuard } from '../../auth/guards/internal-admin-auth.guard';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { buildUserReferenceWhere } from '../../internal-user/utils/user-reference.util';
 import { CreateAdRequestDto } from '../dto/advertising.dto';
 import { AdPlacementRequestService } from '../services/ad-placement-request.service';
+import { ReiwaAdvertisingLinkConfigService } from '../services/reiwa-advertising-link-config.service';
 import { buildAdDeepLinks, buildAdPayload } from '../utils/tracking-code.util';
 
 /**
@@ -22,8 +21,7 @@ export class InternalPartnerAdvertisingController {
   public constructor(
     private readonly prismaService: PrismaService,
     private readonly requestService: AdPlacementRequestService,
-    @Inject(advertisingConfig.KEY)
-    private readonly adConfig: ConfigType<typeof advertisingConfig>,
+    private readonly reiwaAdvertisingLinks: ReiwaAdvertisingLinkConfigService,
   ) {}
 
   @Get('requests')
@@ -78,6 +76,7 @@ export class InternalPartnerAdvertisingController {
       orderBy: { createdAt: 'desc' },
       select: { id: true, platform: true, channel: true, trackingCode: true, status: true, campaignId: true },
     });
+    const linkConfig = await this.reiwaAdvertisingLinks.resolve();
     const stats = await Promise.all(
       placements.map(async (p) => {
         const [opens, registrations, conversions, acquired] = await Promise.all([
@@ -99,16 +98,12 @@ export class InternalPartnerAdvertisingController {
                 })
               )._sum.earnedAmount ?? 0;
         const payload = buildAdPayload(p.trackingCode);
-        const botUsername = this.adConfig.adminReiwaBotUsername;
-        const links =
-          botUsername && botUsername.length > 0
-            ? buildAdDeepLinks({
-                adminReiwaBotUsername: botUsername,
-                miniAppShortName: this.adConfig.miniAppShortName,
-                miniAppWebBaseUrl: this.adConfig.webBaseUrl,
-                code: p.trackingCode,
-              })
-            : { botStart: '', miniAppStart: null, miniAppWeb: null };
+        const links = buildAdDeepLinks({
+          adminReiwaBotUsername: linkConfig.adminReiwaBotUsername,
+          miniAppShortName: linkConfig.miniAppShortName,
+          miniAppWebBaseUrl: linkConfig.webBaseUrl,
+          code: p.trackingCode,
+        });
         return {
           placementId: p.id,
           platform: p.platform,

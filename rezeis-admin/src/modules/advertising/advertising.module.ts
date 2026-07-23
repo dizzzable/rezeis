@@ -15,6 +15,7 @@ import { AdMetricsService } from './services/ad-metrics.service';
 import { AdPlacementRequestService } from './services/ad-placement-request.service';
 import { AdSignupBonusService } from './services/ad-signup-bonus.service';
 import { AdvertisingCampaignService } from './services/advertising-campaign.service';
+import { ReiwaAdvertisingLinkConfigService } from './services/reiwa-advertising-link-config.service';
 
 /**
  * Advertising cabinet — marketing attribution layered beside the referral
@@ -37,6 +38,7 @@ import { AdvertisingCampaignService } from './services/advertising-campaign.serv
     AdConversionService,
     AdMetricsService,
     AdSignupBonusService,
+    ReiwaAdvertisingLinkConfigService,
   ],
   exports: [AdConversionService, AdPlacementRequestService],
 })

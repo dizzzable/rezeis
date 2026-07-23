@@ -2,7 +2,10 @@ import { BadRequestException, Inject, Injectable, Logger, NotFoundException } fr
 import { ConfigType } from '@nestjs/config';
 import { Prisma } from '@prisma/client';
 
-import { advertisingConfig } from '../../../common/config/advertising.config';
+import {
+  advertisingConfig,
+  AdvertisingConfiguration,
+} from '../../../common/config/advertising.config';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import {
   CreateCampaignDto,
@@ -14,6 +17,7 @@ import {
 import { AdCampaignView, AdPlacementView } from '../interfaces/advertising.interface';
 import { mapCampaign, mapPlacement } from '../utils/advertising-mappers';
 import { generateTrackingCode, isValidTrackingCode } from '../utils/tracking-code.util';
+import { ReiwaAdvertisingLinkConfigService } from './reiwa-advertising-link-config.service';
 
 @Injectable()
 export class AdvertisingCampaignService {
@@ -23,6 +27,7 @@ export class AdvertisingCampaignService {
     private readonly prismaService: PrismaService,
     @Inject(advertisingConfig.KEY)
     private readonly config: ConfigType<typeof advertisingConfig>,
+    private readonly reiwaAdvertisingLinks: ReiwaAdvertisingLinkConfigService,
   ) {}
 
   public async listCampaigns(): Promise<AdCampaignView[]> {
@@ -30,7 +35,8 @@ export class AdvertisingCampaignService {
       orderBy: { createdAt: 'desc' },
       include: { placements: { orderBy: { createdAt: 'asc' } } },
     });
-    return campaigns.map((c) => mapCampaign(c, this.config));
+    const linkConfig = await this.resolveLinkConfig();
+    return campaigns.map((c) => mapCampaign(c, linkConfig));
   }
 
   public async getCampaign(id: string): Promise<AdCampaignView> {
@@ -41,7 +47,7 @@ export class AdvertisingCampaignService {
     if (campaign === null) {
       throw new NotFoundException('Campaign not found');
     }
-    return mapCampaign(campaign, this.config);
+    return mapCampaign(campaign, await this.resolveLinkConfig());
   }
 
   public async createCampaign(input: CreateCampaignDto, createdBy: string | null): Promise<AdCampaignView> {
@@ -54,7 +60,7 @@ export class AdvertisingCampaignService {
       },
       include: { placements: true },
     });
-    return mapCampaign(campaign, this.config);
+    return mapCampaign(campaign, await this.resolveLinkConfig());
   }
 
   public async updateCampaign(id: string, input: UpdateCampaignDto): Promise<AdCampaignView> {
@@ -68,7 +74,7 @@ export class AdvertisingCampaignService {
       },
       include: { placements: { orderBy: { createdAt: 'asc' } } },
     });
-    return mapCampaign(campaign, this.config);
+    return mapCampaign(campaign, await this.resolveLinkConfig());
   }
 
   public async createPlacement(input: CreatePlacementDto): Promise<AdPlacementView> {
@@ -108,7 +114,7 @@ export class AdvertisingCampaignService {
         status: 'ACTIVE',
       },
     });
-    return mapPlacement(placement, this.config);
+    return mapPlacement(placement, await this.resolveLinkConfig());
   }
 
   public async updatePlacement(id: string, input: UpdatePlacementDto): Promise<AdPlacementView> {
@@ -139,7 +145,7 @@ export class AdvertisingCampaignService {
           input.signupBonus === undefined ? undefined : buildSignupBonusJson(input.signupBonus),
       },
     });
-    return mapPlacement(placement, this.config);
+    return mapPlacement(placement, await this.resolveLinkConfig());
   }
 
   /**
@@ -172,6 +178,10 @@ export class AdvertisingCampaignService {
     if (campaign === null) {
       throw new NotFoundException('Campaign not found');
     }
+  }
+
+  private async resolveLinkConfig(): Promise<AdvertisingConfiguration> {
+    return { ...this.config, ...(await this.reiwaAdvertisingLinks.resolve()) };
   }
 
   /** Mints a tracking code not already used by another placement. */

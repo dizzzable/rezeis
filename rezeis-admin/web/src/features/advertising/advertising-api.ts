@@ -24,7 +24,7 @@ export type AdRequestStatus =
   | 'EXPIRED'
 
 export interface AdDeepLinks {
-  botStart: string
+  botStart: string | null
   miniAppStart: string | null
   miniAppWeb: string | null
 }

@@ -12,6 +12,13 @@ import type { PartnerEarningsService } from '../src/modules/partners/services/pa
 import type { SubscriptionMutationsService } from '../src/modules/subscriptions/services/subscription-mutations.service';
 
 const DAY = 24 * 60 * 60 * 1000;
+const reiwaAdvertisingLinks = {
+  resolve: async () => ({
+    adminReiwaBotUsername: 'ReiwaBot',
+    miniAppShortName: null,
+    webBaseUrl: 'https://reiwa.example',
+  }),
+} as never;
 
 describe('AdConversionService.recordFirstPurchase', () => {
   function build(overrides: {
@@ -435,7 +442,7 @@ describe('AdPlacementRequestService moderation', () => {
   it('approves as-is → ACTIVE and creates one placement per platform', async () => {
     const prisma = mockTxPrisma({ initialStatus: 'PENDING' });
     const Svc = await load();
-    const result = await new Svc(prisma, config).approve('r1', 'admin', {});
+    const result = await new Svc(prisma, config, reiwaAdvertisingLinks).approve('r1', 'admin', {});
     assert.equal(result.request.status, 'ACTIVE');
     assert.equal(prisma._placements.length, 2);
     assert.equal(prisma._placements[0].ownerType, 'PARTNER');
@@ -487,7 +494,7 @@ describe('AdPlacementRequestService moderation', () => {
       },
     } as unknown as PrismaService;
     const Svc = await load();
-    const result = await new Svc(prisma, config).approve('r1', 'admin', { approvedWindowDays: 30 });
+    const result = await new Svc(prisma, config, reiwaAdvertisingLinks).approve('r1', 'admin', { approvedWindowDays: 30 });
     assert.equal(result.request.status, 'COUNTERED');
     assert.equal(result.campaign, null);
     assert.equal(placements.length, 0);
@@ -501,7 +508,7 @@ describe('AdPlacementRequestService moderation', () => {
       approvedWindowDays: 30,
     });
     const Svc = await load();
-    const result = await new Svc(prisma, config).accept('r1', 'partner1');
+    const result = await new Svc(prisma, config, reiwaAdvertisingLinks).accept('r1', 'partner1');
     assert.equal(result.request.status, 'ACTIVE');
     assert.equal(prisma._placements.length, 1);
     assert.equal(prisma._placements[0].attributionWindowDays, 30);
@@ -522,7 +529,7 @@ describe('AdPlacementRequestService moderation', () => {
       },
     } as unknown as PrismaService;
     const Svc = await load();
-    await assert.rejects(() => new Svc(prisma, config).accept('r1', 'other-partner'), /not found/i);
+    await assert.rejects(() => new Svc(prisma, config, reiwaAdvertisingLinks).accept('r1', 'other-partner'), /not found/i);
   });
 
   it('second concurrent accept claim loses → no duplicate placements', async () => {
@@ -576,7 +583,7 @@ describe('AdPlacementRequestService moderation', () => {
       partner: { findUnique: async () => ({ id: 'partner1' }) },
     } as unknown as PrismaService;
     const Svc = await load();
-    const svc = new Svc(prisma, config);
+    const svc = new Svc(prisma, config, reiwaAdvertisingLinks);
     const first = await svc.accept('r1', 'partner1');
     assert.equal(first.request.status, 'ACTIVE');
     assert.equal(placements.length, 1);
@@ -610,9 +617,9 @@ describe('AdvertisingCampaignService spend / status', () => {
       },
     } as unknown as PrismaService;
     const Svc = await load();
-    const svc = new Svc(prisma, config);
+    const svc = new Svc(prisma, config, reiwaAdvertisingLinks);
 
-    await svc.createPlacement({
+    const companyPlacement = await svc.createPlacement({
       campaignId: 'c1',
       platform: 'YOUTUBE',
       ownerType: 'COMPANY',
@@ -622,6 +629,11 @@ describe('AdvertisingCampaignService spend / status', () => {
     } as never);
     assert.equal(created[0].spendAmount, 300000);
     assert.equal(created[0].spendCurrency, 'RUB');
+    assert.deepEqual(companyPlacement.links, {
+      botStart: 'https://t.me/ReiwaBot?start=ad_abc1234567',
+      miniAppStart: null,
+      miniAppWeb: 'https://reiwa.example/?campaign=ad_abc1234567',
+    });
 
     await svc.createPlacement({
       campaignId: 'c1',
@@ -643,7 +655,7 @@ describe('AdvertisingCampaignService spend / status', () => {
       adPlacement: { findUnique: async () => null, create: async () => ({}) },
     } as unknown as PrismaService;
     const Svc = await load();
-    const svc = new Svc(prisma, config);
+    const svc = new Svc(prisma, config, reiwaAdvertisingLinks);
 
     await assert.rejects(
       () =>
@@ -703,7 +715,7 @@ describe('AdvertisingCampaignService spend / status', () => {
       },
     } as unknown as PrismaService;
     const Svc = await load();
-    const svc = new Svc(prisma, config);
+    const svc = new Svc(prisma, config, reiwaAdvertisingLinks);
 
     await svc.updatePlacement('partner-p', {
       spendAmountMinor: 99999,

@@ -8,12 +8,16 @@ import {
 import { ConfigType } from '@nestjs/config';
 import { AdPlatform, Prisma } from '@prisma/client';
 
-import { advertisingConfig } from '../../../common/config/advertising.config';
+import {
+  advertisingConfig,
+  AdvertisingConfiguration,
+} from '../../../common/config/advertising.config';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { CreateAdRequestDto, ModerateRequestDto } from '../dto/advertising.dto';
 import { AdCampaignView, AdPlacementRequestView } from '../interfaces/advertising.interface';
 import { mapCampaign, mapRequest } from '../utils/advertising-mappers';
 import { generateTrackingCode, isValidTrackingCode } from '../utils/tracking-code.util';
+import { ReiwaAdvertisingLinkConfigService } from './reiwa-advertising-link-config.service';
 
 type TxClient = Prisma.TransactionClient;
 
@@ -35,6 +39,7 @@ export class AdPlacementRequestService {
     private readonly prismaService: PrismaService,
     @Inject(advertisingConfig.KEY)
     private readonly config: ConfigType<typeof advertisingConfig>,
+    private readonly reiwaAdvertisingLinks: ReiwaAdvertisingLinkConfigService,
   ) {}
 
   public async listRequests(status?: string): Promise<AdPlacementRequestView[]> {
@@ -161,6 +166,7 @@ export class AdPlacementRequestService {
     readonly reviewerId: string | null;
     readonly windowDays: number;
   }): Promise<{ request: AdPlacementRequestView; campaign: AdCampaignView }> {
+    const linkConfig = await this.resolveLinkConfig();
     return this.prismaService.$transaction(async (tx) => {
       const claimWhere: Prisma.AdPlacementRequestWhereInput = {
         id: input.id,
@@ -238,9 +244,13 @@ export class AdPlacementRequestService {
 
       return {
         request: mapRequest(updated),
-        campaign: mapCampaign(full ?? campaign, this.config),
+        campaign: mapCampaign(full ?? campaign, linkConfig),
       };
     });
+  }
+
+  private async resolveLinkConfig(): Promise<AdvertisingConfiguration> {
+    return { ...this.config, ...(await this.reiwaAdvertisingLinks.resolve()) };
   }
 
   private async requirePending(id: string) {
