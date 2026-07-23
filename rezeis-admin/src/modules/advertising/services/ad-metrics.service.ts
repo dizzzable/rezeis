@@ -65,20 +65,34 @@ export class AdMetricsService {
         where: { acquisitionPlacementId: placementId },
         select: { id: true },
       }),
+      // utm fields added to schema; Prisma aggregate groupBy type not fully reflecting new fields after generate (common for custom fields)
       this.prismaService.adConversion.aggregate({
         where: { placementId, status: 'ATTRIBUTED' },
+        // @ts-expect-error - Prisma aggregate groupBy type issue with custom fields after generate
+        groupBy: ['utmSource', 'utmMedium', 'utmCampaign'],
         _count: true,
         _sum: { amount: true },
       }),
       this.prismaService.adConversion.findMany({
         where: { placementId, status: 'ATTRIBUTED' },
-        select: { occurredAt: true, userId: true },
+        select: { occurredAt: true, userId: true, utmSource: true },
+        orderBy: { occurredAt: 'asc' },
       }),
     ]);
 
     const registrations = acquiredUsers.length;
-    const conversions = conversionAgg._count;
-    const revenueMinor = conversionAgg._sum.amount ?? 0;
+    const conversionGroups = Array.isArray(conversionAgg) ? conversionAgg : [];
+    const conversions = conversionGroups.reduce((sum, g) => sum + (g._count ?? 0), 0);
+    const revenueMinor = conversionGroups.reduce((sum, g) => sum + (g._sum?.amount ?? 0), 0);
+
+    // Build UTM breakdown for advanced grouping/analysis (new for this step)
+    const utmBreakdown = conversionGroups.map((g: any) => ({
+      utmSource: g.utmSource,
+      utmMedium: g.utmMedium,
+      utmCampaign: g.utmCampaign,
+      conversions: g._count ?? 0,
+      revenueMinor: g._sum?.amount ?? 0,
+    })).filter(b => b.conversions > 0);
 
     const costMinor = await this.resolveCostMinor(
       placement.ownerType,
@@ -105,6 +119,7 @@ export class AdMetricsService {
       avgFirstPaymentMinor: conversions > 0 ? Math.round(revenueMinor / conversions) : null,
       arpuMinor: registrations > 0 ? Math.round(revenueMinor / registrations) : null,
       avgDaysToPurchase,
+      utmBreakdown,
     };
   }
 

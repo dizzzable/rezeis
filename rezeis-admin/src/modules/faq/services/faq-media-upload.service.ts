@@ -84,6 +84,17 @@ export class FaqMediaUploadService implements OnModuleInit {
     // FAQ uploads are served from the admin origin; SVG can execute script
     // when opened as a document, so reject it to prevent stored XSS.
     if (input.mimeType === 'image/svg+xml') {
+      try {
+        // Strict decoding + check for <script> tag (case-insensitive)
+        const content = input.buffer.toString('utf8');
+        if (/<\/?script/i.test(content)) {
+          throw new Error('SVG contains script tag');
+        }
+      } catch (e) {
+        throw new BadRequestException(
+          'SVG-файлы запрещены по соображениям безопасности. Пожалуйста, используйте PNG, JPEG или WebP.',
+        );
+      }
       throw new BadRequestException(
         'SVG-файлы запрещены по соображениям безопасности. Пожалуйста, используйте PNG, JPEG или WebP.',
       );
