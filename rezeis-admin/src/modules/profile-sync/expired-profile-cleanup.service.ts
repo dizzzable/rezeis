@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
-import { Prisma, SubscriptionStatus, SyncAction, SyncJobStatus } from '@prisma/client';
+import { SubscriptionStatus, SyncAction, SyncJobStatus } from '@prisma/client';
 
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { shouldRunSchedules } from '../../common/runtime/process-role.util';
@@ -258,17 +258,6 @@ export class ExpiredProfileCleanupService {
           continue;
         }
         enqueued += 1;
-        this.events.info(
-          EVENT_TYPES.SUBSCRIPTION_DELETED,
-          'SUBSCRIPTION',
-          'Expired profile cleanup scheduled',
-          {
-            subscriptionId: subscription.id,
-            userId: subscription.userId,
-            isTrial: subscription.isTrial,
-            source: 'EXPIRED_PROFILE_CLEANUP',
-          },
-        );
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : 'Unknown error';
         this.logger.warn(

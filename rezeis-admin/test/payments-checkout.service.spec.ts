@@ -7,6 +7,8 @@ import {
   PaymentGatewayType,
   PurchaseChannel,
   PurchaseType,
+  SubscriptionStatus,
+  SyncJobStatus,
   TransactionStatus,
 } from '@prisma/client';
 
@@ -251,6 +253,260 @@ describe('PaymentsCheckoutService', () => {
     assert.equal(status.failureReason, 'PAYMENT_PROVIDER_TIMEOUT')
   })
 
+  it('does not apply profile provisioning to unfinished or non-creation payments', async () => {
+    for (const fixture of [
+      {
+        initialStatus: TransactionStatus.PENDING,
+        purchaseType: PurchaseType.NEW,
+      },
+      {
+        initialStatus: TransactionStatus.COMPLETED,
+        purchaseType: PurchaseType.RENEW,
+      },
+    ] as const) {
+      const { service, state } = createService(fixture)
+
+      const status = await service.getPaymentStatus({
+        paymentId: 'payment-1',
+        userId: 'user-1',
+      })
+
+      assert.equal(status.subscriptionProvisioningStatus, 'NOT_APPLICABLE')
+      assert.equal(status.subscriptionProvisioningFailureCode, null)
+      assert.equal(state.subscriptionQueries.length, 0)
+    }
+  })
+
+  it('does not treat an ADDON_PURCHASE transaction as a new subscription', async () => {
+    const { service, state } = createService({
+      initialStatus: TransactionStatus.COMPLETED,
+      purchaseType: PurchaseType.ADDITIONAL,
+      subscriptionId: 'subscription-1',
+      transactionPlanSnapshot: {
+        snapshotSource: 'ADDON_PURCHASE',
+        addOnId: 'addon-1',
+        targetSubscriptionId: 'subscription-1',
+      },
+      subscription: {
+        status: SubscriptionStatus.ACTIVE,
+        remnawaveId: 'remnawave-1',
+        configUrl: 'https://subscription.example.com/config',
+      },
+    })
+
+    const status = await service.getPaymentStatus({
+      paymentId: 'payment-1',
+      userId: 'user-1',
+    })
+
+    assert.equal(status.subscriptionProvisioningStatus, 'NOT_APPLICABLE')
+    assert.equal(status.subscriptionProvisioningFailureCode, null)
+    assert.equal(state.subscriptionQueries.length, 0)
+  })
+
+  it('reports FULFILLING while a completed creation payment has no subscription id', async () => {
+    const { service, state } = createService({
+      initialStatus: TransactionStatus.COMPLETED,
+      purchaseType: PurchaseType.ADDITIONAL,
+    })
+
+    const status = await service.getPaymentStatus({
+      paymentId: 'payment-1',
+      userId: 'user-1',
+    })
+
+    assert.equal(status.subscriptionProvisioningStatus, 'FULFILLING')
+    assert.equal(status.subscriptionProvisioningFailureCode, null)
+    assert.equal(state.subscriptionQueries.length, 0)
+  })
+
+  it('reports PROFILE_PENDING for a local subscription without a complete panel profile', async () => {
+    const { service, state } = createService({
+      initialStatus: TransactionStatus.COMPLETED,
+      subscriptionId: 'subscription-1',
+      subscription: {
+        status: SubscriptionStatus.ACTIVE,
+        remnawaveId: 'remnawave-1',
+        configUrl: null,
+      },
+      syncJob: {
+        status: SyncJobStatus.RUNNING,
+        attempts: 1,
+        recoveryData: {},
+      },
+    })
+
+    const status = await service.getPaymentStatus({
+      paymentId: 'payment-1',
+      userId: 'user-1',
+    })
+
+    assert.equal(status.subscriptionProvisioningStatus, 'PROFILE_PENDING')
+    assert.equal(status.subscriptionProvisioningFailureCode, null)
+    assert.equal(state.subscriptionQueries.length, 1)
+    assert.deepEqual(state.subscriptionQueries[0], {
+      where: { id: 'subscription-1' },
+      select: {
+        status: true,
+        remnawaveId: true,
+        configUrl: true,
+        syncJobs: {
+          where: {
+            action: 'CREATE',
+            supersededAt: null,
+          },
+          select: {
+            status: true,
+            attempts: true,
+            recoveryData: true,
+          },
+          orderBy: { createdAt: 'desc' },
+          take: 1,
+        },
+      },
+    })
+  })
+
+  it('tracks an UPGRADE that must create a missing panel profile', async () => {
+    for (const fixture of [
+      {
+        syncJob: {
+          status: SyncJobStatus.RUNNING,
+          attempts: 1,
+          recoveryData: {},
+        },
+        expectedStatus: 'PROFILE_PENDING',
+        expectedFailureCode: null,
+      },
+      {
+        syncJob: {
+          status: SyncJobStatus.FAILED,
+          attempts: 5,
+          recoveryData: { classification: 'TERMINAL' },
+        },
+        expectedStatus: 'FAILED',
+        expectedFailureCode: 'PROFILE_SYNC_FAILED',
+      },
+    ] as const) {
+      const { service, state } = createService({
+        initialStatus: TransactionStatus.COMPLETED,
+        purchaseType: PurchaseType.UPGRADE,
+        subscriptionId: 'subscription-1',
+        subscription: {
+          status: SubscriptionStatus.ACTIVE,
+          remnawaveId: null,
+          configUrl: null,
+        },
+        syncJob: fixture.syncJob,
+      })
+
+      const status = await service.getPaymentStatus({
+        paymentId: 'payment-1',
+        userId: 'user-1',
+      })
+
+      assert.equal(status.subscriptionProvisioningStatus, fixture.expectedStatus)
+      assert.equal(
+        status.subscriptionProvisioningFailureCode,
+        fixture.expectedFailureCode,
+      )
+      assert.equal(state.subscriptionQueries.length, 1)
+    }
+  })
+
+  it('keeps exhausted transient CREATE failures retryable', async () => {
+    const { service } = createService({
+      initialStatus: TransactionStatus.COMPLETED,
+      subscriptionId: 'subscription-1',
+      subscription: {
+        status: SubscriptionStatus.ACTIVE,
+        remnawaveId: null,
+        configUrl: null,
+      },
+      syncJob: {
+        status: SyncJobStatus.FAILED,
+        attempts: 5,
+        recoveryData: { classification: 'TRANSIENT' },
+      },
+    })
+
+    const status = await service.getPaymentStatus({
+      paymentId: 'payment-1',
+      userId: 'user-1',
+    })
+
+    assert.equal(status.subscriptionProvisioningStatus, 'PROFILE_PENDING')
+    assert.equal(status.subscriptionProvisioningFailureCode, null)
+  })
+
+  it('reports READY only for a non-deleted exact subscription with both panel fields', async () => {
+    const readyFixture = {
+      initialStatus: TransactionStatus.COMPLETED,
+      subscriptionId: 'subscription-1',
+      subscription: {
+        status: SubscriptionStatus.ACTIVE,
+        remnawaveId: 'remnawave-1',
+        configUrl: 'https://subscription.example.com/config',
+      },
+    } as const
+    const { service } = createService(readyFixture)
+
+    const readyStatus = await service.getPaymentStatus({
+      paymentId: 'payment-1',
+      userId: 'user-1',
+    })
+
+    assert.equal(readyStatus.subscriptionProvisioningStatus, 'READY')
+    assert.equal(readyStatus.subscriptionProvisioningFailureCode, null)
+
+    const { service: deletedService } = createService({
+      ...readyFixture,
+      subscription: {
+        ...readyFixture.subscription,
+        status: SubscriptionStatus.DELETED,
+      },
+    })
+    const deletedStatus = await deletedService.getPaymentStatus({
+      paymentId: 'payment-1',
+      userId: 'user-1',
+    })
+
+    assert.equal(deletedStatus.subscriptionProvisioningStatus, 'PROFILE_PENDING')
+    assert.equal(deletedStatus.subscriptionProvisioningFailureCode, null)
+  })
+
+  it('exposes only a stable failure code for a terminal exhausted CREATE job', async () => {
+    const rawLastError =
+      'Profile create failed https://panel.example/api/users?token=super-secret configUrl'
+    const { service } = createService({
+      initialStatus: TransactionStatus.COMPLETED,
+      subscriptionId: 'subscription-1',
+      subscription: {
+        status: SubscriptionStatus.ACTIVE,
+        remnawaveId: null,
+        configUrl: null,
+      },
+      syncJob: {
+        status: SyncJobStatus.FAILED,
+        attempts: 5,
+        recoveryData: { classification: 'TERMINAL' },
+        lastError: rawLastError,
+      },
+    })
+
+    const status = await service.getPaymentStatus({
+      paymentId: 'payment-1',
+      userId: 'user-1',
+    })
+    const serialized = JSON.stringify(status)
+
+    assert.equal(status.subscriptionProvisioningStatus, 'FAILED')
+    assert.equal(status.subscriptionProvisioningFailureCode, 'PROFILE_SYNC_FAILED')
+    assert.equal(serialized.includes(rawLastError), false)
+    assert.equal(serialized.includes('super-secret'), false)
+    assert.equal(serialized.includes('panel.example'), false)
+  })
+
   it('fulfills immediately when provider returns succeeded off-session', async () => {
     const { service, state } = createService({
       providerCheckout: {
@@ -320,6 +576,7 @@ function createService(input: {
   readonly gatewayCurrency?: Currency
   readonly gatewaySettings?: Record<string, unknown>
   readonly transactionGatewayData?: Record<string, unknown>
+  readonly transactionPlanSnapshot?: Record<string, unknown>
   readonly draftError?: Error
   readonly accessMode?: 'PUBLIC' | 'INVITED' | 'PURCHASE_BLOCKED' | 'REG_BLOCKED' | 'RESTRICTED'
   readonly amount?: string
@@ -327,6 +584,19 @@ function createService(input: {
   readonly fulfilledAt?: Date | null
   /** Optional starting status for race fixtures (default PENDING). */
   readonly initialStatus?: TransactionStatus
+  readonly purchaseType?: PurchaseType
+  readonly subscriptionId?: string | null
+  readonly subscription?: null | {
+    readonly status: SubscriptionStatus
+    readonly remnawaveId: string | null
+    readonly configUrl: string | null
+  }
+  readonly syncJob?: null | {
+    readonly status: SyncJobStatus
+    readonly attempts: number
+    readonly recoveryData: Record<string, unknown>
+    readonly lastError?: string | null
+  }
   providerCheckout?: {
     gatewayId: string
     checkoutUrl: string | null
@@ -342,6 +612,7 @@ function createService(input: {
     providerCreateCalls: 0,
     applyCompletedCalls: 0,
     enqueueCalls: 0,
+    subscriptionQueries: [] as unknown[],
   }
   const paymentId = 'payment-1'
   const gatewayType = input.gatewayType ?? PaymentGatewayType.YOOKASSA
@@ -349,9 +620,9 @@ function createService(input: {
     id: 'transaction-1',
     paymentId,
     userId: 'user-1',
-    subscriptionId: null,
+    subscriptionId: input.subscriptionId ?? null,
     status: (input.initialStatus ?? TransactionStatus.PENDING) as TransactionStatus,
-    purchaseType: PurchaseType.NEW,
+    purchaseType: input.purchaseType ?? PurchaseType.NEW,
     channel: PurchaseChannel.WEB,
     gatewayType,
     currency: input.gatewayCurrency ?? Currency.USD,
@@ -360,11 +631,13 @@ function createService(input: {
     gatewayId: null,
     fulfilledAt: input.fulfilledAt ?? null,
     gatewayData: input.transactionGatewayData ?? null,
-    planSnapshot: {
-      id: 'plan-1',
-      name: 'Starter',
-      selectedDurationDays: 30,
-    },
+    planSnapshot:
+      input.transactionPlanSnapshot ??
+      {
+        id: 'plan-1',
+        name: 'Starter',
+        selectedDurationDays: 30,
+      },
     createdAt: new Date('2026-04-19T12:00:00.000Z'),
     updatedAt: new Date('2026-04-19T12:00:00.000Z'),
   }
@@ -399,6 +672,25 @@ function createService(input: {
       },
       findUniqueOrThrow: async () => transaction,
     },
+    subscription: {
+      findUnique: async (args: unknown) => {
+        state.subscriptionQueries.push(args)
+        if (input.subscription === null || input.subscription === undefined) {
+          return null
+        }
+        return {
+          ...input.subscription,
+          syncJobs:
+            input.syncJob === null || input.syncJob === undefined
+              ? []
+              : [
+                  {
+                    ...input.syncJob,
+                  },
+                ],
+        }
+      },
+    },
   }
   const paymentsTransactionsService = {
     createDraft: async () => {
@@ -410,7 +702,7 @@ function createService(input: {
         paymentId,
         status: TransactionStatus.PENDING as TransactionStatus,
         gatewayType,
-        purchaseType: PurchaseType.NEW,
+        purchaseType: input.purchaseType ?? PurchaseType.NEW,
         channel: PurchaseChannel.WEB,
         currency: input.gatewayCurrency ?? Currency.USD,
         amount: '9.99',

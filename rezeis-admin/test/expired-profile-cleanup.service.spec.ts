@@ -143,6 +143,9 @@ describe('ExpiredProfileCleanupService', () => {
     assert.equal(deletions[0]?.expectedExpiresAt.getTime(), expiresAt1.getTime());
     assert.equal(deletions[1]?.expectedExpiresAt.getTime(), expiresAt2.getTime());
     assert.ok(deletions[0]?.cutoff instanceof Date);
+    // The deletion service owns subscription.deleted publication after its
+    // transaction commits; the cleanup coordinator must not emit a duplicate.
+    assert.equal(events.length, 0);
   });
 
   it('SELF-HEALS a stale local expiry instead of deleting when the panel says the subscription is still valid', async () => {

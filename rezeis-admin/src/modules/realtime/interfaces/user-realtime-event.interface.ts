@@ -130,6 +130,15 @@ export const USER_EVENT_WHITELIST: Readonly<Record<string, UserEventProjection>>
       };
     },
   },
+  'subscription.deleted': {
+    category: 'SUBSCRIPTION',
+    project: (metadata, target) => {
+      if (!matchesUser(metadata, target)) return null;
+      return {
+        subscriptionId: asString(metadata, 'subscriptionId'),
+      };
+    },
+  },
   'subscription.upgraded': {
     category: 'SUBSCRIPTION',
     project: (metadata, target) => {

@@ -5,6 +5,8 @@ import { NotFoundException } from '@nestjs/common';
 import { SubscriptionStatus, SyncAction, SyncJobStatus } from '@prisma/client';
 import fc from 'fast-check';
 
+import { EVENT_TYPES } from '../src/common/services/system-events.service';
+import { USER_EVENT_WHITELIST } from '../src/modules/realtime/interfaces/user-realtime-event.interface';
 import { SubscriptionDeletionService } from '../src/modules/subscriptions/services/subscription-deletion.service';
 
 interface FakeState {
@@ -23,6 +25,14 @@ interface FakeState {
   }>;
   updatedStatus: SubscriptionStatus | null;
   enqueued: string[];
+  enqueueError?: Error;
+  emittedEvents: Array<{
+    type: string;
+    category: string;
+    message: string;
+    metadata: Readonly<Record<string, unknown>>;
+  }>;
+  loggedErrors: string[];
   lifecycleCalls: Array<{ kind: 'entitlements' | 'terms'; subscriptionId: string; tx: unknown }>;
   deletionWork: string[];
   lockedSubscription?: FakeState['subscription'];
@@ -86,7 +96,20 @@ function buildService(state: FakeState) {
   };
   const queue = {
     enqueue: async (jobId: string) => {
+      if (state.enqueueError !== undefined) {
+        throw state.enqueueError;
+      }
       state.enqueued.push(jobId);
+    },
+  };
+  const events = {
+    info: (
+      type: string,
+      category: string,
+      message: string,
+      metadata: Readonly<Record<string, unknown>>,
+    ) => {
+      state.emittedEvents.push({ type, category, message, metadata });
     },
   };
   const entitlements = {
@@ -102,12 +125,22 @@ function buildService(state: FakeState) {
       state.lifecycleCalls.push({ kind: 'terms', subscriptionId, tx: transaction });
     },
   };
-  return new SubscriptionDeletionService(
+  const service = new SubscriptionDeletionService(
     prisma as never,
     queue as never,
     entitlements as never,
     terms as never,
+    events as never,
   );
+  const logger = (
+    service as unknown as {
+      logger: { error: (message: string) => void };
+    }
+  ).logger;
+  logger.error = (message: string) => {
+    state.loggedErrors.push(message);
+  };
+  return service;
 }
 
 function freshState(
@@ -118,6 +151,8 @@ function freshState(
     createdJobs: [],
     updatedStatus: null,
     enqueued: [],
+    emittedEvents: [],
+    loggedErrors: [],
     lifecycleCalls: [],
     deletionWork: [],
   };
@@ -140,6 +175,18 @@ describe('SubscriptionDeletionService', () => {
     assert.equal(state.createdJobs.length, 1);
     assert.equal(state.createdJobs[0]?.action, SyncAction.DELETE);
     assert.deepStrictEqual(state.enqueued, ['job-1']);
+    assert.deepStrictEqual(state.emittedEvents, [
+      {
+        type: EVENT_TYPES.SUBSCRIPTION_DELETED,
+        category: 'SUBSCRIPTION',
+        message: 'Subscription deleted',
+        metadata: {
+          subscriptionId: 'sub-1',
+          userId: 'user-1',
+          source: 'SELF_SERVICE_DELETE',
+        },
+      },
+    ]);
     assert.deepEqual(
       state.lifecycleCalls.map(({ kind, subscriptionId }) => ({ kind, subscriptionId })),
       [
@@ -204,6 +251,7 @@ describe('SubscriptionDeletionService', () => {
     assert.equal(state.createdJobs.length, 0);
     assert.deepEqual(state.deletionWork, []);
     assert.deepEqual(state.enqueued, []);
+    assert.deepEqual(state.emittedEvents, []);
   });
 
   it('is idempotent: deleting an already-DELETED subscription is a no-op success', async () => {
@@ -221,6 +269,7 @@ describe('SubscriptionDeletionService', () => {
     assert.equal(state.updatedStatus, null);
     assert.equal(state.createdJobs.length, 0);
     assert.deepStrictEqual(state.enqueued, []);
+    assert.deepStrictEqual(state.emittedEvents, []);
     assert.equal(state.lifecycleCalls.length, 0);
   });
 
@@ -239,6 +288,48 @@ describe('SubscriptionDeletionService', () => {
     assert.equal(state.updatedStatus, SubscriptionStatus.DELETED);
     assert.equal(state.createdJobs.length, 0);
     assert.deepStrictEqual(state.enqueued, []);
+    assert.equal(state.emittedEvents.length, 1);
+  });
+
+  it('keeps the committed PENDING delete job recoverable when the immediate queue push fails', async () => {
+    const state = freshState({
+      id: 'sub-queue-outage',
+      userId: 'user-1',
+      status: SubscriptionStatus.ACTIVE,
+      remnawaveId: 'rw-outage',
+    });
+    state.enqueueError = new Error('Redis unavailable');
+    const service = buildService(state);
+
+    const result = await service.delete({
+      userId: 'user-1',
+      subscriptionId: 'sub-queue-outage',
+    });
+
+    assert.deepStrictEqual(result, { deleted: true });
+    assert.equal(state.updatedStatus, SubscriptionStatus.DELETED);
+    assert.equal(state.createdJobs.length, 1);
+    assert.equal(state.createdJobs[0]?.status, SyncJobStatus.PENDING);
+    assert.deepStrictEqual(state.enqueued, []);
+    assert.equal(state.emittedEvents.length, 1);
+    assert.equal(state.loggedErrors.length, 1);
+    assert.match(state.loggedErrors[0] ?? '', /pending-job sweep will retry it: Redis unavailable/);
+  });
+
+  it('projects subscription.deleted to its owner with subscriptionId only', () => {
+    const projection = USER_EVENT_WHITELIST[EVENT_TYPES.SUBSCRIPTION_DELETED];
+    assert.notEqual(projection, undefined);
+
+    const metadata = {
+      subscriptionId: 'sub-safe',
+      userId: 'user-1',
+      source: 'ADMIN_PANEL',
+      targetRemnawaveId: 'must-not-leak',
+    };
+    assert.deepStrictEqual(projection?.project(metadata, { userId: 'user-1', telegramId: null }), {
+      subscriptionId: 'sub-safe',
+    });
+    assert.equal(projection?.project(metadata, { userId: 'other-user', telegramId: null }), null);
   });
 
   it('rejects deletion of a subscription owned by another user (no mutation)', async () => {

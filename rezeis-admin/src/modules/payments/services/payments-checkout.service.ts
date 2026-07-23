@@ -11,11 +11,15 @@ import {
   Prisma,
   PurchaseChannel,
   PurchaseType,
+  SubscriptionStatus,
+  SyncAction,
+  SyncJobStatus,
   Transaction,
   TransactionStatus,
 } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { PROFILE_SYNC_MAX_ATTEMPTS } from '../../profile-sync/profile-sync.constants';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
 import { AccessModeGate, AccessModeGuard } from '../../settings/services/access-mode-guard.service';
 import { SettingsService } from '../../settings/services/settings.service';
@@ -23,6 +27,8 @@ import { InternalPaymentCheckoutDto } from '../dto/internal-payment-checkout.dto
 import {
   InternalPaymentCheckoutInterface,
   InternalPaymentStatusInterface,
+  SubscriptionProvisioningFailureCode,
+  SubscriptionProvisioningStatus,
 } from '../interfaces/internal-payment-checkout.interface';
 import { isGatewayConfigured } from '../utils/payment-gateway-settings.util';
 import { normalizePaymentProviderError } from '../utils/payment-provider-error.util';
@@ -314,6 +320,7 @@ export class PaymentsCheckoutService {
       null;
     const failureReason =
       rawFailureReason === null ? null : normalizePaymentProviderError(rawFailureReason);
+    const subscriptionProvisioning = await this.resolveSubscriptionProvisioning(transaction);
     return {
       paymentId: transaction.paymentId,
       status: transaction.status,
@@ -324,9 +331,130 @@ export class PaymentsCheckoutService {
       checkoutUrl: readOptionalString(gatewayData, ['checkoutUrl']),
       failureReason,
       subscriptionId: transaction.subscriptionId,
+      subscriptionProvisioningStatus: subscriptionProvisioning.status,
+      subscriptionProvisioningFailureCode: subscriptionProvisioning.failureCode,
       updatedAt: transaction.updatedAt.toISOString(),
     };
   }
+
+  private async resolveSubscriptionProvisioning(
+    transaction: Transaction,
+  ): Promise<SubscriptionProvisioningResult> {
+    if (!isSubscriptionProvisioningPayment(transaction)) {
+      return NOT_APPLICABLE_PROVISIONING;
+    }
+    if (transaction.subscriptionId === null) {
+      return {
+        status: 'FULFILLING',
+        failureCode: null,
+      };
+    }
+
+    const subscription = await this.prismaService.subscription.findUnique({
+      where: { id: transaction.subscriptionId },
+      select: {
+        status: true,
+        remnawaveId: true,
+        configUrl: true,
+        syncJobs: {
+          where: {
+            action: SyncAction.CREATE,
+            supersededAt: null,
+          },
+          select: {
+            status: true,
+            attempts: true,
+            recoveryData: true,
+          },
+          orderBy: { createdAt: 'desc' },
+          take: 1,
+        },
+      },
+    });
+
+    return mapSubscriptionProvisioningStatus(subscription);
+  }
+}
+
+interface SubscriptionProvisioningResult {
+  readonly status: SubscriptionProvisioningStatus;
+  readonly failureCode: SubscriptionProvisioningFailureCode | null;
+}
+
+interface SubscriptionProvisioningSnapshot {
+  readonly status: SubscriptionStatus;
+  readonly remnawaveId: string | null;
+  readonly configUrl: string | null;
+  readonly syncJobs: readonly {
+    readonly status: SyncJobStatus;
+    readonly attempts: number;
+    readonly recoveryData: unknown;
+  }[];
+}
+
+const NOT_APPLICABLE_PROVISIONING: SubscriptionProvisioningResult = {
+  status: 'NOT_APPLICABLE',
+  failureCode: null,
+};
+
+function isSubscriptionProvisioningPayment(transaction: Transaction): boolean {
+  const snapshotSource = readOptionalString(readTransactionPlanSnapshot(transaction), [
+    'snapshotSource',
+  ]);
+  return (
+    transaction.status === TransactionStatus.COMPLETED &&
+    snapshotSource !== 'ADDON_PURCHASE' &&
+    (transaction.purchaseType === PurchaseType.NEW ||
+      transaction.purchaseType === PurchaseType.ADDITIONAL ||
+      transaction.purchaseType === PurchaseType.UPGRADE)
+  );
+}
+
+function mapSubscriptionProvisioningStatus(
+  subscription: SubscriptionProvisioningSnapshot | null,
+): SubscriptionProvisioningResult {
+  if (subscription === null) {
+    return {
+      status: 'PROFILE_PENDING',
+      failureCode: null,
+    };
+  }
+
+  if (
+    subscription.status !== SubscriptionStatus.DELETED &&
+    isPopulatedString(subscription.remnawaveId) &&
+    isPopulatedString(subscription.configUrl)
+  ) {
+    return {
+      status: 'READY',
+      failureCode: null,
+    };
+  }
+
+  const latestCreateJob = subscription.syncJobs[0];
+  const recoveryClassification =
+    latestCreateJob === undefined
+      ? null
+      : readOptionalString(readRecord(latestCreateJob.recoveryData), ['classification']);
+  if (
+    latestCreateJob?.status === SyncJobStatus.FAILED &&
+    latestCreateJob.attempts >= PROFILE_SYNC_MAX_ATTEMPTS &&
+    recoveryClassification === 'TERMINAL'
+  ) {
+    return {
+      status: 'FAILED',
+      failureCode: 'PROFILE_SYNC_FAILED',
+    };
+  }
+
+  return {
+    status: 'PROFILE_PENDING',
+    failureCode: null,
+  };
+}
+
+function isPopulatedString(value: string | null): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
 }
 
 function buildCheckoutDescription(input: {
