@@ -20,7 +20,7 @@ jobs:
     name: Build & push unified image
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Lower-case repo name
         id: repo

@@ -22,6 +22,17 @@ APP_USER="rezeis"
 APP_UID="1001"
 PRISMA="./node_modules/.bin/prisma"
 
+is_auto_recoverable_migration() {
+  case "$1" in
+    20260708120000_perf_composite_indexes|20260724120000_reconcile_subscription_expiry_index)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 echo "[entrypoint] role=${PROCESS_ROLE} skip-migrations=${SKIP_MIGRATIONS}"
 
 # When started as root, ensure the persistent data volume is writable by the
@@ -45,13 +56,11 @@ if [ "${PROCESS_ROLE}" != "worker" ] && [ "${SKIP_MIGRATIONS}" != "true" ]; then
   # already gate startup, but this protects against external/managed DBs that
   # depends_on can't health-check.
   #
-  # P3009 auto-recovery: if a previous deploy left a migration in the FAILED
-  # state, Prisma refuses to apply anything (a plain retry loop can never clear
-  # it). A Prisma/PostgreSQL migration runs in a transaction, so a failed one
-  # leaves NOTHING half-applied — marking it rolled-back lets the next deploy
-  # re-apply it cleanly (our migrations are idempotent, e.g. CREATE INDEX
-  # IF NOT EXISTS). Each distinct failed migration is rolled back at MOST once,
-  # so a genuinely-broken migration still fails fast instead of looping forever.
+  # P3009 auto-recovery is deliberately allow-listed. PostgreSQL migrations are
+  # not guaranteed to be transactional, so marking an arbitrary failed
+  # migration rolled back can replay partially applied DDL. Only the two index
+  # migrations designed to be retry-safe may be resolved automatically; every
+  # other failed migration stops for operator review.
   attempt=0
   max_attempts=30
   resolved_migration=""
@@ -68,12 +77,25 @@ if [ "${PROCESS_ROLE}" != "worker" ] && [ "${SKIP_MIGRATIONS}" != "true" ]; then
 
     if echo "${deploy_output}" | grep -q "P3009"; then
       failed_migration="$(echo "${deploy_output}" | grep -oE '[0-9]{14}_[A-Za-z0-9_]+' | head -n 1)"
-      if [ -n "${failed_migration}" ] && [ "${failed_migration}" != "${resolved_migration}" ]; then
+      if [ -z "${failed_migration}" ]; then
+        echo "[entrypoint] FATAL: P3009 did not include a parseable migration name; manual recovery required"
+        exit "${status}"
+      fi
+      if ! is_auto_recoverable_migration "${failed_migration}"; then
+        echo "[entrypoint] FATAL: migration ${failed_migration} is not safe to auto-resolve; manual recovery required"
+        exit "${status}"
+      fi
+      if [ "${failed_migration}" != "${resolved_migration}" ]; then
         echo "[entrypoint] failed migration detected (P3009): ${failed_migration} — marking rolled-back so it can be re-applied"
-        "${PRISMA}" migrate resolve --rolled-back "${failed_migration}" 2>&1 || true
+        if ! "${PRISMA}" migrate resolve --rolled-back "${failed_migration}" 2>&1; then
+          echo "[entrypoint] FATAL: failed to mark ${failed_migration} rolled back"
+          exit "${status}"
+        fi
         resolved_migration="${failed_migration}"
         continue
       fi
+      echo "[entrypoint] FATAL: ${failed_migration} failed again after one safe recovery attempt"
+      exit "${status}"
     fi
 
     attempt=$((attempt + 1))

@@ -163,7 +163,7 @@ cd rezeis-admin && npm install && npx prisma generate && npx prisma migrate depl
 cd rezeis-admin/web && npm install && npm run dev
 ```
 
-**Системные требования:** Node.js 22+, PostgreSQL 17, Redis/Valkey 8.
+**Системные требования:** Node.js 24 LTS, PostgreSQL 17, Redis/Valkey 8.
 
 ---
 

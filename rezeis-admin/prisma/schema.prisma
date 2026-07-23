@@ -1282,7 +1282,7 @@ model Subscription {
   /// Backs the per-minute expiry sweep + warnings (`status=ACTIVE AND
   /// expiresAt<now`) and the profile-cleanup sweep — equality column first,
   /// range column last.
-  @@index([status, expiresAt])
+  @@index([status, expiresAt], map: "subscriptions_status_expires_at_idx")
   @@map("subscriptions")
 }
 

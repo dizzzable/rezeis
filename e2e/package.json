@@ -3,15 +3,18 @@
   "version": "1.0.0",
   "private": true,
   "description": "End-to-end smoke test for the rezeis-admin <-> reiwa pair",
+  "engines": {
+    "node": "^24.0.0"
+  },
   "scripts": {
     "test": "tsx e2e-runner.ts"
   },
   "dependencies": {
-    "axios": "^1.7.9",
-    "tsx": "^4.19.2"
+    "axios": "^1.18.1",
+    "tsx": "^4.23.1"
   },
   "devDependencies": {
-    "@types/node": "^22.10.0",
+    "@types/node": "24.13.3",
     "typescript": "^5.7.2"
   }
 }

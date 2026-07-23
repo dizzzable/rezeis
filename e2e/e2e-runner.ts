@@ -406,7 +406,7 @@ async function scenarioReiwaPlansProxy(ctx: ScenarioContext): Promise<string> {
   // either an array or `{ plans: [] }`. As long as the status is 200,
   // the entire round-trip (Bearer → admin → DB) is healthy.
   assert(plans.status === 200, `unexpected status ${plans.status}: ${JSON.stringify(plans.data)}`);
-  const body = plans.data as { plans?: unknown[] } & unknown[];
+  const body = plans.data as { plans?: unknown[] } | unknown[];
   const count = Array.isArray(body) ? body.length : (body.plans?.length ?? -1);
   return `200 OK · plans=${count}`;
 }

@@ -1,9 +1,12 @@
 {
   "name": "rezeis-admin",
-  "version": "0.9.6.61",
+  "version": "0.9.6.62",
   "description": "Rezeis Admin NestJS microservice baseline",
   "private": true,
   "license": "UNLICENSED",
+  "engines": {
+    "node": "^24.0.0"
+  },
   "main": "dist/main.js",
   "scripts": {
     "build": "nest build",
@@ -87,7 +90,7 @@
     "@types/better-sqlite3": "7.6.13",
     "@types/express": "5.0.3",
     "@types/multer": "^2.1.0",
-    "@types/node": "24.12.2",
+    "@types/node": "24.13.3",
     "@types/nodemailer": "6.4.17",
     "@types/passport-jwt": "4.0.1",
     "@types/supertest": "6.0.3",
