@@ -8,8 +8,8 @@ import { registerAs } from '@nestjs/config';
  * only the ready-made links are omitted.
  */
 export interface AdvertisingConfiguration {
-  /** Public bot username without a leading `@` (e.g. `RezeisBot`). */
-  readonly botUsername: string | null;
+  /** Public bot username for Reiwa (Telegram deep links `t.me/<bot>?start=...`). Used by cabinet and Reiwa. */
+  readonly adminReiwaBotUsername: string | null;
   /** Mini-App short name for `t.me/<bot>/<shortName>?startapp=...` links. */
   readonly miniAppShortName: string | null;
   /** Web base URL for the Mini-App campaign form (`<base>/?campaign=...`). */
@@ -32,7 +32,7 @@ function deriveWebBaseUrl(): string | null {
 export const advertisingConfig = registerAs(
   'advertising',
   (): AdvertisingConfiguration => ({
-    botUsername: normalizeOptional(process.env.BOT_USERNAME)?.replace(/^@+/, '') ?? null,
+    adminReiwaBotUsername: normalizeOptional(process.env.REIWA_BOT_USERNAME) ?? normalizeOptional(process.env.BOT_USERNAME)?.replace(/^@+/, '') ?? null,
     miniAppShortName: normalizeOptional(process.env.MINIAPP_SHORT_NAME),
     webBaseUrl: normalizeOptional(process.env.MINIAPP_CUSTOM_URL) ?? deriveWebBaseUrl(),
   }),

@@ -65,10 +65,9 @@ export class AdMetricsService {
         where: { acquisitionPlacementId: placementId },
         select: { id: true },
       }),
-      this.prismaService.adConversion.aggregate({
+      this.prismaService.adConversion.groupBy({
         where: { placementId, status: 'ATTRIBUTED' },
-        // @ts-expect-error - Prisma aggregate groupBy type issue with custom UTM fields
-        groupBy: ['utmSource', 'utmMedium', 'utmCampaign'],
+        by: ['utmSource', 'utmMedium', 'utmCampaign'],
         _count: true,
         _sum: { amount: true },
       }),

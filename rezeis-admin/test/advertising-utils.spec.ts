@@ -7,6 +7,7 @@ import {
   generateTrackingCode,
   isValidTrackingCode,
   parseAdPayload,
+  parseAdUtm,
   TELEGRAM_START_PAYLOAD_MAX,
 } from '../src/modules/advertising/utils/tracking-code.util';
 import {
@@ -49,19 +50,52 @@ describe('tracking-code.util', () => {
   });
 
   it('builds deep links and omits Mini-App links when unconfigured', () => {
-    const links = buildAdDeepLinks({ botUsername: '@RezeisBot', code: 'xy12' });
+    const links = buildAdDeepLinks({ adminReiwaBotUsername: '@RezeisBot', code: 'xy12' });
     assert.equal(links.botStart, 'https://t.me/RezeisBot?start=ad_xy12');
     assert.equal(links.miniAppStart, null);
     assert.equal(links.miniAppWeb, null);
 
     const full = buildAdDeepLinks({
-      botUsername: 'RezeisBot',
+      adminReiwaBotUsername: 'RezeisBot',
       miniAppShortName: 'app',
       miniAppWebBaseUrl: 'https://reiwa.example/',
       code: 'xy12',
     });
     assert.equal(full.miniAppStart, 'https://t.me/RezeisBot/app?startapp=ad_xy12');
     assert.equal(full.miniAppWeb, 'https://reiwa.example/?campaign=ad_xy12');
+  });
+
+  it('buildAdDeepLinks keeps Telegram links strictly ad_<code> (no UTM in payload)', () => {
+    const links = buildAdDeepLinks({
+      adminReiwaBotUsername: 'RezeisBot',
+      code: 'abc123',
+    });
+    assert.equal(links.botStart, 'https://t.me/RezeisBot?start=ad_abc123');
+    assert.equal(links.miniAppStart, null);
+  });
+
+  it('buildAdDeepLinks emits miniAppWeb with campaign=ad_<code> + separately URL-encoded UTM query params', () => {
+    const links = buildAdDeepLinks({
+      adminReiwaBotUsername: 'RezeisBot',
+      miniAppShortName: 'app',
+      miniAppWebBaseUrl: 'https://reiwa.example/',
+      code: 'abc123',
+      utmSource: 'source',
+      utmCampaign: 'campaign',
+      utmCreative: 'creative',
+    });
+    assert.equal(links.miniAppWeb, 'https://reiwa.example/?campaign=ad_abc123&utm_source=source&utm_campaign=campaign&utm_creative=creative');
+  });
+
+  it('parseAdPayload is strict and rejects malformed payloads', () => {
+    assert.equal(parseAdPayload('ad_abc123&utm_foo=bar'), null);
+    assert.equal(parseAdPayload('ad_abc123 with space'), null);
+    assert.equal(parseAdPayload('ad_abc123?foo=bar'), null);
+    assert.equal(parseAdPayload('ad_abc123&utm_foo=bar&extra=1'), null);
+  });
+
+  it('parseAdPayload accepts exact ad_<code> payloads', () => {
+    assert.equal(parseAdPayload('ad_abc123'), 'abc123');
   });
 });
 

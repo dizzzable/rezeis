@@ -78,7 +78,6 @@ export class InternalPartnerAdvertisingController {
       orderBy: { createdAt: 'desc' },
       select: { id: true, platform: true, channel: true, trackingCode: true, status: true, campaignId: true },
     });
-    const botUsername = this.adConfig.botUsername ?? '';
     const stats = await Promise.all(
       placements.map(async (p) => {
         const [opens, registrations, conversions, acquired] = await Promise.all([
@@ -100,10 +99,11 @@ export class InternalPartnerAdvertisingController {
                 })
               )._sum.earnedAmount ?? 0;
         const payload = buildAdPayload(p.trackingCode);
+        const botUsername = this.adConfig.adminReiwaBotUsername;
         const links =
-          botUsername.length > 0
+          botUsername && botUsername.length > 0
             ? buildAdDeepLinks({
-                botUsername,
+                adminReiwaBotUsername: botUsername,
                 miniAppShortName: this.adConfig.miniAppShortName,
                 miniAppWebBaseUrl: this.adConfig.webBaseUrl,
                 code: p.trackingCode,

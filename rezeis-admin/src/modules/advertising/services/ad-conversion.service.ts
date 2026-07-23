@@ -53,6 +53,21 @@ export class AdConversionService {
         return; // outside the window → organic.
       }
 
+      // Fetch utm from the originating click (best-effort; should always exist for attributed conversions).
+      const click = await this.prismaService.adClick.findFirst({
+        where: {
+          placementId: placement.id,
+          userId: input.userId,
+        },
+        select: {
+          utmSource: true,
+          utmMedium: true,
+          utmCampaign: true,
+          utmContent: true,
+          utmCreative: true,
+        },
+      });
+
       const amountMinor = toMinorUnits(input.amount);
 
       // Idempotent create: unique on userId AND transactionId. A replay or a
@@ -67,6 +82,11 @@ export class AdConversionService {
           currency: input.currency,
           status: 'ATTRIBUTED',
           occurredAt: input.completedAt,
+          utmSource: click?.utmSource ?? null,
+          utmMedium: click?.utmMedium ?? null,
+          utmCampaign: click?.utmCampaign ?? null,
+          utmContent: click?.utmContent ?? null,
+          utmCreative: click?.utmCreative ?? null,
         },
       });
       this.logger.log(`Recorded ad conversion for placement ${placement.id} (tx ${input.id})`);

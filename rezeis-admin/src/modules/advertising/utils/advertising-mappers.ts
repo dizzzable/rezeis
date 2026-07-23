@@ -66,7 +66,7 @@ export function mapPlacement(
     trackingCode: placement.trackingCode,
     payload: buildAdPayload(placement.trackingCode),
     links: buildAdDeepLinks({
-      botUsername: config.botUsername ?? '',
+      adminReiwaBotUsername: config.adminReiwaBotUsername ?? '',
       miniAppShortName: config.miniAppShortName,
       miniAppWebBaseUrl: config.webBaseUrl,
       code: placement.trackingCode,

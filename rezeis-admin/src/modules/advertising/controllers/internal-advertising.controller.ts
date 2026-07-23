@@ -30,6 +30,11 @@ export class InternalAdvertisingController {
       userId: input.userId ?? null,
       surface,
       isNewUser: input.isNewUser ?? false,
+      utmSource: input.utmSource,
+      utmMedium: input.utmMedium,
+      utmCampaign: input.utmCampaign,
+      utmContent: input.utmContent,
+      utmCreative: input.utmCreative,
     });
     return { ok: true };
   }

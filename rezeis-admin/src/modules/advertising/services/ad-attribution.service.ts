@@ -47,6 +47,11 @@ export class AdAttributionService {
           userId,
           surface: input.surface ?? AdClickSurface.BOT,
           isNewUser: input.isNewUser ?? false,
+          utmSource: input.utmSource,
+          utmMedium: input.utmMedium,
+          utmCampaign: input.utmCampaign,
+          utmContent: input.utmContent,
+          utmCreative: input.utmCreative,
         },
       });
 

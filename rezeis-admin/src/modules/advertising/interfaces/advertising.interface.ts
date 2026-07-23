@@ -88,6 +88,14 @@ export interface AdMetrics {
   readonly avgFirstPaymentMinor: number | null;
   readonly arpuMinor: number | null;
   readonly avgDaysToPurchase: number | null;
+  /** Breakdown of conversions and revenue by UTM source/medium/campaign (for advanced attribution analysis). */
+  readonly utmBreakdown?: Array<{
+    utmSource?: string;
+    utmMedium?: string;
+    utmCampaign?: string;
+    conversions: number;
+    revenueMinor: number;
+  }>;
 }
 
 export interface AdClickRecordInput {
@@ -96,6 +104,11 @@ export interface AdClickRecordInput {
   readonly userId?: string | null;
   readonly surface?: AdClickSurface;
   readonly isNewUser?: boolean;
+  readonly utmSource?: string | null;
+  readonly utmMedium?: string | null;
+  readonly utmCampaign?: string | null;
+  readonly utmContent?: string | null;
+  readonly utmCreative?: string | null;
 }
 
 export interface AdConversionView {

@@ -40,6 +40,15 @@ describe('AdConversionService.recordFirstPurchase', () => {
           return args.data;
         }),
       },
+      adClick: {
+        findFirst: async () => ({
+          utmSource: null,
+          utmMedium: null,
+          utmCampaign: null,
+          utmContent: null,
+          utmCreative: null,
+        }),
+      },
     } as unknown as PrismaService;
     return { service: new AdConversionService(prisma), created };
   }
@@ -249,7 +258,7 @@ describe('AdMetricsService.getPlacementMetrics', () => {
       adClick: { count: async () => 100 },
       user: { findMany: async () => [{ id: 'u1' }, { id: 'u2' }, { id: 'u3' }] },
       adConversion: {
-        aggregate: async () => ({ _count: 15, _sum: { amount: 900000 } }), // 9000.00
+        groupBy: async () => [{ _count: 15, _sum: { amount: 900000 }, utmSource: 'source' }], // 9000.00
         findMany: async () => [],
         findFirst: async () => ({ currency: 'RUB' }),
       },
@@ -271,7 +280,7 @@ describe('AdMetricsService.getPlacementMetrics', () => {
       adClick: { count: async () => 50 },
       user: { findMany: async () => [{ id: 'u1' }, { id: 'u2' }] },
       adConversion: {
-        aggregate: async () => ({ _count: 2, _sum: { amount: 200000 } }),
+        groupBy: async () => [{ _count: 2, _sum: { amount: 200000 }, utmSource: null }],
         findMany: async () => [],
         findFirst: async () => ({ currency: 'RUB' }),
       },
@@ -289,7 +298,7 @@ describe('AdPlacementRequestService moderation', () => {
     const mod = await import('../src/modules/advertising/services/ad-placement-request.service');
     return mod.AdPlacementRequestService;
   }
-  const config = { botUsername: null, miniAppShortName: null, webBaseUrl: null } as never;
+  const config = { adminReiwaBotUsername: null, miniAppShortName: null, webBaseUrl: null } as never;
 
   function activeRow(overrides: Record<string, unknown> = {}) {
     return {
@@ -557,6 +566,7 @@ describe('AdPlacementRequestService moderation', () => {
         }),
       },
       $transaction: async (fn: (t: typeof tx) => Promise<unknown>) => fn(tx),
+      partner: { findUnique: async () => ({ id: 'partner1' }) },
     } as unknown as PrismaService;
     const Svc = await load();
     const svc = new Svc(prisma, config);
@@ -574,7 +584,7 @@ describe('AdvertisingCampaignService spend / status', () => {
     return mod.AdvertisingCampaignService;
   }
   const config = {
-    botUsername: 'TestBot',
+    adminReiwaBotUsername: 'TestBot',
     miniAppShortName: null,
     webBaseUrl: 'https://app.example',
   } as never;
@@ -583,6 +593,7 @@ describe('AdvertisingCampaignService spend / status', () => {
     const created: Array<Record<string, unknown>> = [];
     const prisma = {
       adCampaign: { findUnique: async () => ({ id: 'c1' }) },
+      partner: { findUnique: async () => ({ id: 'partner1' }) },
       adPlacement: {
         findUnique: async () => null,
         create: async (args: { data: Record<string, unknown> }) => {
@@ -616,6 +627,38 @@ describe('AdvertisingCampaignService spend / status', () => {
     } as never);
     assert.equal(created[1].spendAmount, null);
     assert.equal(created[1].spendCurrency, null);
+  });
+
+  it('rejects a PARTNER placement when the partner is missing or unknown', async () => {
+    const prisma = {
+      adCampaign: { findUnique: async () => ({ id: 'c1' }) },
+      partner: { findUnique: async () => null },
+      adPlacement: { findUnique: async () => null, create: async () => ({}) },
+    } as unknown as PrismaService;
+    const Svc = await load();
+    const svc = new Svc(prisma, config);
+
+    await assert.rejects(
+      () =>
+        svc.createPlacement({
+          campaignId: 'c1',
+          platform: 'TELEGRAM',
+          ownerType: 'PARTNER',
+          partnerId: 'unknown',
+          attributionWindowDays: 30,
+        } as never),
+      /Partner not found/i,
+    );
+    await assert.rejects(
+      () =>
+        svc.createPlacement({
+          campaignId: 'c1',
+          platform: 'TELEGRAM',
+          ownerType: 'PARTNER',
+          attributionWindowDays: 30,
+        } as never),
+      /requires a partner/i,
+    );
   });
 
   it('updatePlacement nulls PARTNER spend (even legacy non-null) and applies COMPANY spend/status', async () => {

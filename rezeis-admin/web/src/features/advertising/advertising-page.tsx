@@ -66,6 +66,7 @@ import {
   type AdRequestStatus,
   type AdSignupBonusType,
 } from './advertising-api'
+import { partnersAdminApi } from '../partners/partners-api'
 
 const PLATFORMS: AdPlatform[] = [
   'TELEGRAM',
@@ -691,6 +692,10 @@ function NewPlacementDialog({ campaignId }: { campaignId: string }) {
   const [trialDays, setTrialDays] = useState('3')
   const [tariffPlanId, setTariffPlanId] = useState('')
   const [tariffDays, setTariffDays] = useState('30')
+  const { data: partners = [] } = useQuery({
+    queryKey: ['advertising-partners'],
+    queryFn: () => partnersAdminApi.listPartners(),
+  })
   const queryClient = useQueryClient()
   const create = useMutation({
     mutationFn: () =>
@@ -767,7 +772,19 @@ function NewPlacementDialog({ campaignId }: { campaignId: string }) {
           {ownerType === 'PARTNER' && (
             <div className="space-y-1.5">
               <Label>{t('advertisingPage.placement.partnerIdLabel')}</Label>
-              <Input value={partnerId} onChange={(e) => setPartnerId(e.target.value)} placeholder="partner id" />
+              <Select value={partnerId} onValueChange={setPartnerId}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Выберите партнёра" />
+                </SelectTrigger>
+                <SelectContent>
+                  {partners.map((p) => (
+                    <SelectItem key={p.id} value={p.id}>
+                      {p.user?.name || p.id} ({p.id})
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">Партнёр, которому принадлежит размещение. Изменение владельца может повлиять на attribution и метрики.</p>
             </div>
           )}
           <div className="space-y-1.5">

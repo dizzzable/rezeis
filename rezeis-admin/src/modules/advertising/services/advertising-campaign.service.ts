@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { ConfigType } from '@nestjs/config';
 import { Prisma } from '@prisma/client';
 
@@ -74,6 +74,18 @@ export class AdvertisingCampaignService {
   public async createPlacement(input: CreatePlacementDto): Promise<AdPlacementView> {
     await this.requireCampaign(input.campaignId);
     const ownerType = input.ownerType ?? 'COMPANY';
+    if (ownerType === 'PARTNER') {
+      if (!input.partnerId) {
+        throw new BadRequestException('Partner placement requires a partner');
+      }
+      const partner = await this.prismaService.partner.findUnique({
+        where: { id: input.partnerId },
+        select: { id: true },
+      });
+      if (partner === null) {
+        throw new BadRequestException('Partner not found');
+      }
+    }
     // PARTNER placements never carry an operator-funded budget (their cost is
     // the commission we pay), so the budget is dropped for them.
     const spendAmount = ownerType === 'PARTNER' ? null : input.spendAmountMinor ?? null;

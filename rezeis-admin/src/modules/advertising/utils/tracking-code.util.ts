@@ -62,13 +62,34 @@ export function parseAdPayload(payload: string | null | undefined): string | nul
   }
   const trimmed = payload.trim();
   if (!trimmed.startsWith(AD_CODE_PREFIX)) {
-    return null;
+    // UTM params may be appended; extract code from first segment.
+    const firstSegment = trimmed.split(/[&?]/)[0]!;
+    if (!firstSegment.startsWith(AD_CODE_PREFIX)) {
+      return null;
+    }
+    const code = firstSegment.slice(AD_CODE_PREFIX.length);
+    return isValidTrackingCode(code) ? code : null;
   }
   const code = trimmed.slice(AD_CODE_PREFIX.length);
   return isValidTrackingCode(code) ? code : null;
 }
 
-/** Ready-to-share links for a placement's tracking code. */
+/** Extracts utm parameters from a deep-link payload (e.g. ?start=ad_xxx&utm_source=... ). */
+export function parseAdUtm(payload: string): Record<string, string> {
+  const utm: Record<string, string> = {};
+  if (!payload.includes('utm_')) return utm;
+  const search = payload.includes('?') ? payload.slice(payload.indexOf('?') + 1) : payload;
+  const pairs = search.split(/[&?]/);
+  for (const pair of pairs) {
+    if (pair.includes('=')) {
+      const [key, value] = pair.split('=');
+      if (key.startsWith('utm_')) utm[key] = value;
+    }
+  }
+  return utm;
+}
+
+/** Ready-to-share links for a placement's tracking code. All Telegram links use adminReiwaBotUsername for Reiwa compatibility. */
 export interface AdDeepLinks {
   readonly botStart: string;
   readonly miniAppStart: string | null;
@@ -76,23 +97,34 @@ export interface AdDeepLinks {
 }
 
 /**
- * Builds the deep links operators paste into ads. `botUsername` is required;
+ * Builds the deep links operators paste into ads. Uses `adminReiwaBotUsername` for Reiwa Telegram compatibility.
  * the Mini-App links are emitted only when a Mini-App short-name / web base is
  * configured.
  */
 export function buildAdDeepLinks(input: {
-  readonly botUsername: string;
+  readonly adminReiwaBotUsername: string;
   readonly miniAppShortName?: string | null;
   readonly miniAppWebBaseUrl?: string | null;
   readonly code: string;
+  readonly utmSource?: string;
+  readonly utmCampaign?: string;
+  readonly utmMedium?: string;
+  readonly utmContent?: string;
+  readonly utmCreative?: string;
 }): AdDeepLinks {
   const payload = buildAdPayload(input.code);
-  const bot = input.botUsername.replace(/^@+/, '').trim();
+  const bot = input.adminReiwaBotUsername.replace(/^@+/, '').trim();
   const botStart = `https://t.me/${bot}?start=${payload}`;
   const shortName = (input.miniAppShortName ?? '').trim();
   const miniAppStart =
     shortName.length > 0 ? `https://t.me/${bot}/${shortName}?startapp=${payload}` : null;
   const webBase = (input.miniAppWebBaseUrl ?? '').replace(/\/+$/, '').trim();
-  const miniAppWeb = webBase.length > 0 ? `${webBase}/?campaign=${payload}` : null;
+  const webParams = new URLSearchParams({ campaign: payload });
+  if (input.utmSource) webParams.set('utm_source', input.utmSource);
+  if (input.utmCampaign) webParams.set('utm_campaign', input.utmCampaign);
+  if (input.utmMedium) webParams.set('utm_medium', input.utmMedium);
+  if (input.utmContent) webParams.set('utm_content', input.utmContent);
+  if (input.utmCreative) webParams.set('utm_creative', input.utmCreative);
+  const miniAppWeb = webBase.length > 0 ? `${webBase}/?${webParams.toString()}` : null;
   return { botStart, miniAppStart, miniAppWeb };
 }

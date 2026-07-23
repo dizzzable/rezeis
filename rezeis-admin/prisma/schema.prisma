@@ -2545,6 +2545,11 @@ model AdClick {
   telegramId  BigInt?        @map("telegram_id") @db.BigInt
   /// `users.id` once resolved (scalar FK, no relation).
   userId      String?        @map("user_id")
+  utmSource       String?         @map("utm_source")
+  utmMedium       String?         @map("utm_medium")
+  utmCampaign     String?         @map("utm_campaign")
+  utmContent      String?         @map("utm_content")
+  utmCreative     String?         @map("utm_creative")
   surface     AdClickSurface @default(BOT) @map("surface")
   isNewUser   Boolean        @default(false) @map("is_new_user")
   occurredAt  DateTime       @default(now()) @map("occurred_at") @db.Timestamptz(3)
@@ -2554,6 +2559,9 @@ model AdClick {
   @@index([placementId, occurredAt])
   @@index([campaignId])
   @@index([userId])
+  @@index([utmSource])
+  @@index([utmMedium])
+  @@index([utmCampaign])
   @@map("ad_clicks")
 }
 
@@ -2572,6 +2580,11 @@ model AdConversion {
   currency      String             @map("currency")
   status        AdConversionStatus @default(ATTRIBUTED) @map("status")
   occurredAt    DateTime           @default(now()) @map("occurred_at") @db.Timestamptz(3)
+  utmSource       String?         @map("utm_source")
+  utmMedium       String?         @map("utm_medium")
+  utmCampaign     String?         @map("utm_campaign")
+  utmContent      String?         @map("utm_content")
+  utmCreative     String?         @map("utm_creative")
 
   placement AdPlacement @relation("AdPlacementConversions", fields: [placementId], references: [id], onDelete: Cascade)
 

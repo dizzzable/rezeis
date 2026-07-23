@@ -224,6 +224,32 @@ export class IngestClickDto {
   @Length(1, 64)
   public readonly userId?: string;
 
+  /** Optional utm params from the deep link payload (e.g. utm_source, utm_medium). */
+  @IsOptional()
+  @IsString()
+  @Length(1, 64)
+  public readonly utmSource?: string;
+
+  @IsOptional()
+  @IsString()
+  @Length(1, 64)
+  public readonly utmMedium?: string;
+
+  @IsOptional()
+  @IsString()
+  @Length(1, 64)
+  public readonly utmCampaign?: string;
+
+  @IsOptional()
+  @IsString()
+  @Length(1, 64)
+  public readonly utmContent?: string;
+
+  @IsOptional()
+  @IsString()
+  @Length(1, 64)
+  public readonly utmCreative?: string;
+
   /** BOT | MINIAPP | WEB — defaults to BOT when omitted. */
   @IsOptional()
   @IsString()
