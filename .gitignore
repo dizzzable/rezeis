@@ -42,3 +42,7 @@ stealthnet-backup-*.sql.gz
 
 # Agent scratch / local tooling
 .claude/
+
+# Local agent planning and verification artifacts
+.omx/
+/rezeis-admin/goal/
