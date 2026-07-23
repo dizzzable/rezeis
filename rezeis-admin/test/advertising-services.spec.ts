@@ -270,6 +270,13 @@ describe('AdMetricsService.getPlacementMetrics', () => {
     assert.equal(metrics.cac, 20000); // 300000 / 15
     assert.equal(metrics.roas, 3); // 900000 / 300000
     assert.equal(metrics.roi, 2); // (900000-300000)/300000
+    assert.deepEqual(metrics.utmBreakdown, [{
+      utmSource: 'source',
+      utmMedium: undefined,
+      utmCampaign: undefined,
+      conversions: 15,
+      revenueMinor: 900000,
+    }]);
   });
 
   it('uses partner commission as cost for a PARTNER placement', async () => {

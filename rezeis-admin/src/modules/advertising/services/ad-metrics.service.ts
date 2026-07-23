@@ -79,15 +79,15 @@ export class AdMetricsService {
     ]);
 
     const registrations = acquiredUsers.length;
-    const conversionGroups = Array.isArray(conversionAgg) ? conversionAgg : [];
+    const conversionGroups = conversionAgg;
     const conversions = conversionGroups.reduce((sum, g) => sum + (g._count ?? 0), 0);
     const revenueMinor = conversionGroups.reduce((sum, g) => sum + (g._sum?.amount ?? 0), 0);
 
     // Build UTM breakdown for advanced grouping/analysis (new for this step)
-    const utmBreakdown = conversionGroups.map((g: any) => ({
-      utmSource: g.utmSource,
-      utmMedium: g.utmMedium,
-      utmCampaign: g.utmCampaign,
+    const utmBreakdown = conversionGroups.map((g) => ({
+      utmSource: g.utmSource ?? undefined,
+      utmMedium: g.utmMedium ?? undefined,
+      utmCampaign: g.utmCampaign ?? undefined,
       conversions: g._count ?? 0,
       revenueMinor: g._sum?.amount ?? 0,
     })).filter(b => b.conversions > 0);
