@@ -24,11 +24,25 @@ PRISMA="./node_modules/.bin/prisma"
 
 is_auto_recoverable_migration() {
   case "$1" in
-    20260708120000_perf_composite_indexes|20260724120000_reconcile_subscription_expiry_index)
+    20260708120000_perf_composite_indexes|20260724120000_reconcile_subscription_expiry_index|20260724120500_drop_conflicting_subscription_expiry_index|20260724121000_swap_subscription_expiry_index)
       return 0
       ;;
     *)
       return 1
+      ;;
+  esac
+}
+
+cleanup_retry_artifacts() {
+  case "$1" in
+    20260724120000_reconcile_subscription_expiry_index)
+      echo "[entrypoint] removing a possibly incomplete subscription expiry staging index"
+      if ! printf '%s\n' \
+        'DROP INDEX CONCURRENTLY IF EXISTS "public"."subscriptions_status_expires_at_rebuild_idx";' \
+        | "${PRISMA}" db execute --stdin 2>&1; then
+        echo "[entrypoint] FATAL: failed to remove the subscription expiry staging index"
+        return 1
+      fi
       ;;
   esac
 }
@@ -58,8 +72,8 @@ if [ "${PROCESS_ROLE}" != "worker" ] && [ "${SKIP_MIGRATIONS}" != "true" ]; then
   #
   # P3009 auto-recovery is deliberately allow-listed. PostgreSQL migrations are
   # not guaranteed to be transactional, so marking an arbitrary failed
-  # migration rolled back can replay partially applied DDL. Only the two index
-  # migrations designed to be retry-safe may be resolved automatically; every
+  # migration rolled back can replay partially applied DDL. Only explicitly
+  # retry-safe index migrations may be resolved automatically; every
   # other failed migration stops for operator review.
   attempt=0
   max_attempts=30
@@ -86,6 +100,9 @@ if [ "${PROCESS_ROLE}" != "worker" ] && [ "${SKIP_MIGRATIONS}" != "true" ]; then
         exit "${status}"
       fi
       if [ "${failed_migration}" != "${resolved_migration}" ]; then
+        if ! cleanup_retry_artifacts "${failed_migration}"; then
+          exit "${status}"
+        fi
         echo "[entrypoint] failed migration detected (P3009): ${failed_migration} — marking rolled-back so it can be re-applied"
         if ! "${PRISMA}" migrate resolve --rolled-back "${failed_migration}" 2>&1; then
           echo "[entrypoint] FATAL: failed to mark ${failed_migration} rolled back"
