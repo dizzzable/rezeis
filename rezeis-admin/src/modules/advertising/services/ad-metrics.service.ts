@@ -65,10 +65,9 @@ export class AdMetricsService {
         where: { acquisitionPlacementId: placementId },
         select: { id: true },
       }),
-      // utm fields added to schema; Prisma aggregate groupBy type not fully reflecting new fields after generate (common for custom fields)
       this.prismaService.adConversion.aggregate({
         where: { placementId, status: 'ATTRIBUTED' },
-        // @ts-expect-error - Prisma aggregate groupBy type issue with custom fields after generate
+        // @ts-expect-error - Prisma aggregate groupBy type issue with custom UTM fields
         groupBy: ['utmSource', 'utmMedium', 'utmCampaign'],
         _count: true,
         _sum: { amount: true },
