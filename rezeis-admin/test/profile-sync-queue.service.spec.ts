@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { afterEach, describe, it } from 'node:test';
 
-import { SyncAction, SyncJobStatus } from '@prisma/client';
+import { SyncJobStatus } from '@prisma/client';
 
 import { runBullMqEnqueueWithTimeout } from '../src/common/queue/bullmq-enqueue-options';
 import { isBullMqJobAlreadyQueued } from '../src/common/queue/bullmq-duplicate-inspection';

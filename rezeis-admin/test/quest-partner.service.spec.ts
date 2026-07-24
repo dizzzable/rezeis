@@ -127,7 +127,6 @@ describe('QuestPartnerService', () => {
   });
 
   it('is idempotent on a concurrent completion create (P2002 → COMPLETED)', async () => {
-    const calls: Record<string, unknown[]> = { create: [] };
     const prisma = {
       user: { findUnique: async () => ({ id: 'user-1' }) },
       quest: { findUnique: async () => partnerQuest({ method: 'manual_code', partnerSlug: 'acme', code: 'PROMO2026' }) },

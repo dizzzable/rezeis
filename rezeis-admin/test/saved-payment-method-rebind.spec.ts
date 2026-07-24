@@ -3,8 +3,6 @@ import 'reflect-metadata';
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { PaymentGatewayType } from '@prisma/client';
-
 import { SavedPaymentMethodService } from '../src/modules/payments/services/saved-payment-method.service';
 
 describe('SavedPaymentMethodService.upsertFromYookassaPayment ownership', () => {

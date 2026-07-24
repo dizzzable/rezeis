@@ -17,9 +17,6 @@ function miniDump(opts: {
   readonly withExtra?: boolean;
 }): string {
   const table = opts.subscriptionTable ?? 'subscriptions';
-  const extra = opts.withExtra
-    ? '\texpire_at\textra_devices\textra_devices_monthly_price'
-    : '';
   const extraVals = opts.withExtra ? '\t2026-08-01 00:00:00\t2\t80' : '';
   // columns must match COPY header
   const subCols = opts.withExtra

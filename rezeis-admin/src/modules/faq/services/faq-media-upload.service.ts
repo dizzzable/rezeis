@@ -90,7 +90,7 @@ export class FaqMediaUploadService implements OnModuleInit {
         if (/<\/?script/i.test(content)) {
           throw new Error('SVG contains script tag');
         }
-      } catch (e) {
+      } catch {
         throw new BadRequestException(
           'SVG-файлы запрещены по соображениям безопасности. Пожалуйста, используйте PNG, JPEG или WebP.',
         );

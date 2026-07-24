@@ -33,7 +33,6 @@ import type {
   BotMapEdge,
   BotMapNode,
   BotMapPayload,
-  EdgeDestination,
   GraphScreenMapNode,
   MiniAppTerminalMapNode,
   NotificationMapNode,

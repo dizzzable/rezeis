@@ -1,7 +1,7 @@
 import { InjectQueue } from '@nestjs/bullmq';
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
-import { SyncAction, SyncJobStatus } from '@prisma/client';
+import { SyncJobStatus } from '@prisma/client';
 import { Queue } from 'bullmq';
 
 import { PrismaService } from '../../common/prisma/prisma.service';

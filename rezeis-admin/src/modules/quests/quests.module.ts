@@ -19,7 +19,6 @@ import { QuestProgressService } from './services/quest-progress.service';
 import { QuestReconcilerService } from './services/quest-reconciler.service';
 import { QuestRewardService } from './services/quest-reward.service';
 import { QuestService } from './services/quest.service';
-import { SettingsService } from '../settings/services/settings.service';
 
 /**
  * Quests module — gamification tasks that reward users (points / subscription

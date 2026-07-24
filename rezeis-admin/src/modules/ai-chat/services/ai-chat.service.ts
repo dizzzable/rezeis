@@ -52,11 +52,6 @@ export const AI_TOOL_DEFINITIONS: readonly ChatCompletionTool[] = [
 
 // ── Internal types ──────────────────────────────────────────────────────────
 
-interface ChatMessage {
-  role: 'system' | 'user' | 'assistant';
-  content: string;
-}
-
 export interface ConversationRecord {
   id: string;
   userId: string;
@@ -77,7 +72,6 @@ export interface MessageRecord {
  * would be replaced by database-backed models; the interface matches
  * what the controller expects so swapping the backend is transparent.
  */
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
 const _conversations = new Map<string, ConversationRecord>();
 const _messages = new Map<string, MessageRecord[]>();
 
