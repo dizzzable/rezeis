@@ -942,11 +942,13 @@ export const en = {
       rewardPlanArchivedTag: 'archived',
       rewardPlanInactiveTag: 'off',
       channelIdPlaceholder: '-100…',
+      channelLinkPlaceholder: 'https://t.me/yourchannel',
       icon: 'Icon',
       iconKind: 'Icon kind',
       uploadSvg: 'Upload SVG',
       requiredFriends: 'Friends required',
       channelId: 'Channel ID',
+      channelLink: 'Channel link',
       partnerMethod: 'Verification method',
       partnerSlug: 'Partner slug',
       partnerCode: 'Activation code',
@@ -992,7 +994,10 @@ export const en = {
       titleRequired: 'Provide a title in both languages',
       rewardAmountRequired: 'Provide a reward amount greater than zero',
       planRequired: 'Provide a plan for the trial grant',
-      channelRequired: 'Provide the channel ID for the subscription',
+      channelLinkRequired: 'Provide the Telegram channel link',
+      channelLinkInvalid: 'Provide a valid Telegram link: https://t.me/…',
+      channelIdInvalid: 'Provide a valid numeric channel ID in the -100… format',
+      channelIdRequiredForInvite: 'A private invite link requires the numeric channel ID',
       windowInvalid: 'End must be later than start',
       partnerRequired: 'Fill in the required partner fields',
     },
@@ -1012,7 +1017,9 @@ export const en = {
         'Maximum successful completions across all users (activity budget). Empty — no limit.',
       icon: 'The quest icon in the cabinet. Pick a preset or upload your own SVG (e.g. an advertiser logo).',
       channelId:
-        'Numeric Telegram channel ID (e.g. -100…). The bot must be added to the channel to verify subscription.',
+        'Required only for a private channel: numeric ID in the -100… format. Add the bot as a channel administrator so it can verify membership.',
+      channelLink:
+        'The link users follow to join the channel. A public channel only needs https://t.me/username; a private channel also needs its numeric channel ID.',
       partnerMethod:
         'How the task is credited: an activation code the user enters, a signed server postback from the partner, or a visit to a link with a minimum dwell time.',
       partnerSlug:

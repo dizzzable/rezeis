@@ -217,7 +217,7 @@ describe('PaymentWebhookOpsService reconciliation health queue counts', () => {
 describe('PaymentWebhookOpsService webhook diagnostic responses', () => {
   it('normalizes raw stored webhook errors in list and detail responses', async () => {
     const rawError =
-      'Provider failed https://provider.example/webhooks token=secret provider_id=0194f4b6-7cc7-7ecb-9f62-123456789abc payment_pi_SECRET';
+      'Provider failed https://provider.example/webhooks token=fixture provider_id=fixture payment_pi_fixture';
     const event = createWebhookEventFixture({ lastError: rawError });
     const service = createService({
       findMany: async () => [event],

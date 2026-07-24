@@ -30,6 +30,7 @@ export interface QuestDraft {
   maxCompletionsGlobal: string
   requiredFriends: string
   channelId: string
+  channelLink: string
   partnerMethod: QuestPartnerMethod
   partnerSlug: string
   partnerCode: string
@@ -44,7 +45,10 @@ export interface QuestValidationMessages {
   readonly titleRequired: string
   readonly rewardAmountRequired: string
   readonly planRequired: string
-  readonly channelRequired: string
+  readonly channelLinkRequired: string
+  readonly channelLinkInvalid: string
+  readonly channelIdInvalid: string
+  readonly channelIdRequiredForInvite: string
   readonly windowInvalid: string
   readonly partnerRequired: string
 }
@@ -73,6 +77,7 @@ export function emptyQuestDraft(): QuestDraft {
     maxCompletionsGlobal: '',
     requiredFriends: '',
     channelId: '',
+    channelLink: '',
     partnerMethod: 'manual_code',
     partnerSlug: '',
     partnerCode: '',
@@ -105,8 +110,23 @@ export function validateQuestDraft(
   if (draft.rewardType === 'DAYS' && draft.daysFallback === 'GRANT_TRIAL' && draft.rewardPlanId.trim().length === 0) {
     errors.rewardPlanId = messages.planRequired
   }
-  if (draft.type === 'SUBSCRIBE_CHANNEL' && draft.channelId.trim().length === 0) {
-    errors.channelId = messages.channelRequired
+  if (draft.type === 'SUBSCRIBE_CHANNEL') {
+    const channelId = draft.channelId.trim()
+    const channelLink = draft.channelLink.trim()
+    const isPublicLink = isTelegramPublicChannelLink(channelLink)
+    const isPrivateInvite = isTelegramPrivateInviteLink(channelLink)
+
+    if (channelLink.length === 0) {
+      errors.channelLink = messages.channelLinkRequired
+    } else if (!isPublicLink && !isPrivateInvite) {
+      errors.channelLink = messages.channelLinkInvalid
+    }
+
+    if (channelId.length > 0 && !isTelegramChannelId(channelId)) {
+      errors.channelId = messages.channelIdInvalid
+    } else if (isPrivateInvite && channelId.length === 0) {
+      errors.channelId = messages.channelIdRequiredForInvite
+    }
   }
   if (draft.type === 'PARTNER_TASK') {
     if (draft.partnerSlug.trim().length === 0) {
@@ -138,8 +158,13 @@ export function buildQuestPayload(draft: QuestDraft): QuestPayload {
     const required = parseIntOrNull(draft.requiredFriends)
     if (required !== null && required > 0) params.requiredFriends = required
   }
-  if (draft.type === 'SUBSCRIBE_CHANNEL' && draft.channelId.trim().length > 0) {
-    params.channelId = draft.channelId.trim()
+  if (draft.type === 'SUBSCRIBE_CHANNEL') {
+    if (draft.channelId.trim().length > 0) {
+      params.channelId = draft.channelId.trim()
+    }
+    if (draft.channelLink.trim().length > 0) {
+      params.channelLink = draft.channelLink.trim()
+    }
   }
   if (draft.type === 'PARTNER_TASK' && draft.partnerSlug.trim().length > 0) {
     const partner: Record<string, unknown> = {
@@ -233,6 +258,12 @@ export function questToDraft(quest: {
     maxCompletionsGlobal: quest.maxCompletionsGlobal ? String(quest.maxCompletionsGlobal) : '',
     requiredFriends: typeof params.requiredFriends === 'number' ? String(params.requiredFriends) : '',
     channelId: typeof params.channelId === 'string' ? params.channelId : '',
+    channelLink:
+      typeof params.channelLink === 'string'
+        ? params.channelLink
+        : typeof params.channelUsername === 'string'
+          ? `https://t.me/${params.channelUsername.replace(/^@/, '')}`
+          : '',
     partnerMethod,
     partnerSlug: typeof partner.partnerSlug === 'string' ? partner.partnerSlug : '',
     partnerCode: typeof partner.code === 'string' ? partner.code : '',
@@ -241,4 +272,16 @@ export function questToDraft(quest: {
       typeof partner.minDwellSeconds === 'number' ? String(partner.minDwellSeconds) : '',
     enabled: quest.enabled,
   }
+}
+
+function isTelegramChannelId(value: string): boolean {
+  return /^-100\d{6,20}$/.test(value)
+}
+
+function isTelegramPublicChannelLink(value: string): boolean {
+  return /^https:\/\/(?:t\.me|telegram\.me)\/[A-Za-z][A-Za-z0-9_]{4,31}\/?$/.test(value)
+}
+
+function isTelegramPrivateInviteLink(value: string): boolean {
+  return /^https:\/\/(?:t\.me|telegram\.me)\/\+[A-Za-z0-9_-]{5,128}\/?$/.test(value)
 }

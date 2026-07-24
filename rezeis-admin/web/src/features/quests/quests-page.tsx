@@ -476,7 +476,10 @@ function QuestForm({ quest, onClose }: { quest: Quest | null; onClose: () => voi
       titleRequired: t('questsAdminPage.validation.titleRequired'),
       rewardAmountRequired: t('questsAdminPage.validation.rewardAmountRequired'),
       planRequired: t('questsAdminPage.validation.planRequired'),
-      channelRequired: t('questsAdminPage.validation.channelRequired'),
+      channelLinkRequired: t('questsAdminPage.validation.channelLinkRequired'),
+      channelLinkInvalid: t('questsAdminPage.validation.channelLinkInvalid'),
+      channelIdInvalid: t('questsAdminPage.validation.channelIdInvalid'),
+      channelIdRequiredForInvite: t('questsAdminPage.validation.channelIdRequiredForInvite'),
       windowInvalid: t('questsAdminPage.validation.windowInvalid'),
       partnerRequired: t('questsAdminPage.validation.partnerRequired'),
     }),
@@ -702,19 +705,35 @@ function QuestForm({ quest, onClose }: { quest: Quest | null; onClose: () => voi
         </div>
       )}
       {draft.type === 'SUBSCRIBE_CHANNEL' && (
-        <div className="space-y-1.5">
-          <Label>
-            <LabelWithHint
-              label={t('questsAdminPage.form.channelId')}
-              hint={t('questsAdminPage.help.channelId')}
+        <div className="space-y-3">
+          <div className="space-y-1.5">
+            <Label>
+              <LabelWithHint
+                label={t('questsAdminPage.form.channelLink')}
+                hint={t('questsAdminPage.help.channelLink')}
+              />
+            </Label>
+            <Input
+              value={draft.channelLink}
+              onChange={(e) => set('channelLink', e.target.value)}
+              placeholder={t('questsAdminPage.form.channelLinkPlaceholder')}
             />
-          </Label>
-          <Input
-            value={draft.channelId}
-            onChange={(e) => set('channelId', e.target.value)}
-            placeholder="-1001234567890 · @channel · https://t.me/+invite"
-          />
-          {errors.channelId && <p className="text-xs text-destructive">{errors.channelId}</p>}
+            {errors.channelLink && <p className="text-xs text-destructive">{errors.channelLink}</p>}
+          </div>
+          <div className="space-y-1.5">
+            <Label>
+              <LabelWithHint
+                label={t('questsAdminPage.form.channelId')}
+                hint={t('questsAdminPage.help.channelId')}
+              />
+            </Label>
+            <Input
+              value={draft.channelId}
+              onChange={(e) => set('channelId', e.target.value)}
+              placeholder={t('questsAdminPage.form.channelIdPlaceholder')}
+            />
+            {errors.channelId && <p className="text-xs text-destructive">{errors.channelId}</p>}
+          </div>
         </div>
       )}
       {draft.type === 'PARTNER_TASK' && (

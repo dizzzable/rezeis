@@ -6,7 +6,7 @@ import {
   verifyBackupDownloadToken,
 } from '../src/modules/backup/utils/backup-download-token.util';
 
-const SECRET = 'test-crypt-key-0123456789';
+const SECRET = 'fixture';
 
 describe('backup download token', () => {
   it('round-trips a valid token back to its record id', () => {

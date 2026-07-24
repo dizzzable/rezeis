@@ -13,7 +13,10 @@ const messages: QuestValidationMessages = {
   titleRequired: 'title required',
   rewardAmountRequired: 'reward required',
   planRequired: 'plan required',
-  channelRequired: 'channel required',
+  channelLinkRequired: 'channel link required',
+  channelLinkInvalid: 'channel link invalid',
+  channelIdInvalid: 'channel id invalid',
+  channelIdRequiredForInvite: 'channel id required for invite',
   windowInvalid: 'window invalid',
   partnerRequired: 'partner required',
 }
@@ -52,10 +55,38 @@ describe('validateQuestDraft', () => {
     ).toBeUndefined()
   })
 
-  it('requires a channel id for SUBSCRIBE_CHANNEL', () => {
-    expect(validateQuestDraft(draft({ type: 'SUBSCRIBE_CHANNEL' }), messages).channelId).toBe(
-      'channel required',
+  it('requires a join link for SUBSCRIBE_CHANNEL', () => {
+    expect(validateQuestDraft(draft({ type: 'SUBSCRIBE_CHANNEL' }), messages).channelLink).toBe(
+      'channel link required',
     )
+  })
+
+  it('accepts a public channel link without a numeric ID', () => {
+    expect(
+      validateQuestDraft(
+        draft({ type: 'SUBSCRIBE_CHANNEL', channelLink: 'https://t.me/rezeisnews' }),
+        messages,
+      ),
+    ).toEqual({})
+  })
+
+  it('requires a valid numeric ID together with a private invite link', () => {
+    expect(
+      validateQuestDraft(
+        draft({ type: 'SUBSCRIBE_CHANNEL', channelLink: 'https://t.me/+AbCdEf12345' }),
+        messages,
+      ).channelId,
+    ).toBe('channel id required for invite')
+    expect(
+      validateQuestDraft(
+        draft({
+          type: 'SUBSCRIBE_CHANNEL',
+          channelId: '-1001234567890',
+          channelLink: 'https://t.me/+AbCdEf12345',
+        }),
+        messages,
+      ),
+    ).toEqual({})
   })
 
   it('requires a partner slug for PARTNER_TASK', () => {
@@ -113,11 +144,25 @@ describe('buildQuestPayload', () => {
     expect(payload.params).toEqual({ requiredFriends: 3 })
   })
 
-  it('emits channelId param for SUBSCRIBE_CHANNEL', () => {
+  it('emits a public channel link for SUBSCRIBE_CHANNEL', () => {
     const payload = buildQuestPayload(
-      draft({ type: 'SUBSCRIBE_CHANNEL', channelId: '-100123' }),
+      draft({ type: 'SUBSCRIBE_CHANNEL', channelLink: 'https://t.me/rezeisnews' }),
     )
-    expect(payload.params).toEqual({ channelId: '-100123' })
+    expect(payload.params).toEqual({ channelLink: 'https://t.me/rezeisnews' })
+  })
+
+  it('emits the channel ID and invite link for a private channel', () => {
+    const payload = buildQuestPayload(
+      draft({
+        type: 'SUBSCRIBE_CHANNEL',
+        channelId: '-1001234567890',
+        channelLink: 'https://t.me/+AbCdEf12345',
+      }),
+    )
+    expect(payload.params).toEqual({
+      channelId: '-1001234567890',
+      channelLink: 'https://t.me/+AbCdEf12345',
+    })
   })
 
   it('emits a partner block for a manual_code PARTNER_TASK', () => {
@@ -229,5 +274,33 @@ describe('questToDraft round-trip', () => {
     expect(restored.partnerSlug).toBe('acme')
     expect(restored.partnerLandingUrl).toBe('https://acme.example/land')
     expect(restored.partnerDwellSeconds).toBe('30')
+  })
+
+  it('restores channel configuration from a SUBSCRIBE_CHANNEL quest', () => {
+    const restored = questToDraft({
+      type: 'SUBSCRIBE_CHANNEL',
+      title: { ru: 'Подписаться', en: 'Subscribe' },
+      description: { ru: '', en: '' },
+      iconKind: 'PRESET',
+      iconRef: 'telegram',
+      rewardType: 'POINTS',
+      rewardAmount: 5,
+      rewardPlanId: null,
+      daysFallback: 'MINT_PROMOCODE',
+      audienceFilter: null,
+      repeat: 'ONCE',
+      cooldownHours: null,
+      startAt: null,
+      endAt: null,
+      maxCompletionsGlobal: null,
+      params: {
+        channelId: '-1001234567890',
+        channelLink: 'https://t.me/+AbCdEf12345',
+      },
+      enabled: true,
+    })
+
+    expect(restored.channelId).toBe('-1001234567890')
+    expect(restored.channelLink).toBe('https://t.me/+AbCdEf12345')
   })
 })

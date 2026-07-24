@@ -11,7 +11,7 @@ import {
 } from '../src/modules/settings/utils/quest-partner-settings.util';
 import { encryptTotpSecret } from '../src/modules/two-factor/utils/secret-cipher';
 
-const KEY = 'test-crypt-key-0123456789';
+const KEY = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 
 describe('quest-partner-settings.util', () => {
   it('readQuestPartnerStore tolerates junk and returns an empty partner list', () => {
