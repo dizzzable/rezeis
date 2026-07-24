@@ -169,15 +169,26 @@ export class InternalReferralsController {
   @Post('exchange')
   public async executeExchange(
     @Param('userRef') userRef: string,
-    @Body() body: { type: PointsExchangeType; points: number; subscriptionId?: string },
+    @Body()
+    body: {
+      type?: unknown;
+      points?: unknown;
+      subscriptionId?: unknown;
+      idempotencyKey?: unknown;
+    },
   ) {
     const user = await this.resolveUser(userRef);
     if (!user) return { error: 'User not found' };
     return this.pointsExchangeService.executeExchange({
       userId: user.id,
-      type: body.type,
-      points: body.points,
-      subscriptionId: body.subscriptionId,
+      type: body.type as PointsExchangeType,
+      points: body.points as number,
+      subscriptionId:
+        typeof body.subscriptionId === 'string' && body.subscriptionId.length > 0
+          ? body.subscriptionId
+          : undefined,
+      idempotencyKey:
+        typeof body.idempotencyKey === 'string' ? body.idempotencyKey : undefined,
     });
   }
 

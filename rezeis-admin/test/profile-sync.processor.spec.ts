@@ -260,6 +260,7 @@ describe('ProfileSyncProcessor', () => {
             action: SyncAction.UPDATE,
             status: SyncJobStatus.PENDING,
             attempts: 0,
+            payload: { propagateStatus: true },
             subscription: {
               id: 'subscription-1',
               userId: 'user-1',
@@ -268,6 +269,7 @@ describe('ProfileSyncProcessor', () => {
               deviceLimit: 3,
               internalSquads: ['internal-a'],
               externalSquad: 'external-a',
+              status: SubscriptionStatus.DISABLED,
               expiresAt: new Date('2099-01-01T00:00:00.000Z'),
               planSnapshot: { tag: 'premium', trafficLimitStrategy: 'MONTH' },
             },
@@ -315,6 +317,7 @@ describe('ProfileSyncProcessor', () => {
         telegramId: 123,
         email: 'user@example.test',
         description: 'profile description',
+        status: SubscriptionStatus.DISABLED,
         tag: 'premium',
         expireAt: '2099-01-01T00:00:00.000Z',
         trafficLimitBytes: 2 * 1024 * 1024 * 1024,

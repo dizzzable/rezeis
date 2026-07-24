@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, it } from 'node:test';
 
 import { parseStealthnetBackup } from '../src/modules/imports/utils/stealthnet-backup-parser';
@@ -10,7 +11,7 @@ import { parseStealthnetBackup } from '../src/modules/imports/utils/stealthnet-b
  */
 const REAL_DUMP =
   process.env.STEALTHNET_DUMP_PATH ??
-  'C:\\Users\\dizzable\\Downloads\\Telegram Desktop\\stealthnet-backup-2026-07-20T15-52-41.sql';
+  resolve(process.cwd(), '..', 'stealthnet-backup-2026-05-27T07-00-00.sql');
 
 function miniDump(opts: {
   readonly subscriptionTable?: 'subscriptions' | 'secondary_subscriptions';
@@ -81,7 +82,7 @@ describe('parseStealthnetBackup', () => {
     assert.ok(sub.expire_at?.includes('2026-08-01'));
   });
 
-  it('parses the operator real dump when available (363 clients / 325 subs)', async () => {
+  it('parses the operator real dump referral data when available', async () => {
     let buf: Buffer;
     try {
       buf = readFileSync(REAL_DUMP);
@@ -90,12 +91,11 @@ describe('parseStealthnetBackup', () => {
       return;
     }
     const data = await parseStealthnetBackup(buf);
-    assert.equal(data.clients.length, 363);
-    assert.equal(data.subscriptions.length, 325, 'must not drop subscriptions table');
+    assert.equal(data.clients.length, 287);
+    assert.equal(data.subscriptions.length, 0, 'the backup has an empty legacy secondary_subscriptions block');
     assert.equal(data.tariffs.length, 3);
-    assert.ok(data.subscriptions.every((s) => s.remnawave_uuid));
-    const withExtra = data.subscriptions.filter((s) => s.extra_devices > 0);
-    assert.equal(withExtra.length, 3);
-    assert.ok(data.tariffs.some((t) => t.included_devices >= 1));
+    assert.equal(data.referralCredits.length, 2);
+    assert.equal(data.clients.filter((client) => client.referrer_id !== null).length, 1);
+    assert.equal(data.referralCredits.reduce((total, credit) => total + credit.amount, 0), 18);
   });
 });

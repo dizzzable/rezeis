@@ -3,6 +3,7 @@ import { Module } from '@nestjs/common';
 
 import { AuthModule } from '../auth/auth.module';
 import { RemnawaveModule } from '../remnawave/remnawave.module';
+import { ProfileSyncModule } from '../profile-sync/profile-sync.module';
 import { ImportProcessor } from './import.processor';
 import { IMPORT_QUEUE } from './imports.constants';
 import { AdminImportsController } from './controllers/admin-imports.controller';
@@ -14,12 +15,14 @@ import { ImportsService } from './services/imports.service';
 import { RemnashopImporterService } from './services/remnashop-importer.service';
 import { RemnawaveImporterService } from './services/remnawave-importer.service';
 import { StealthnetImporterService } from './services/stealthnet-importer.service';
+import { StealthnetReferralSyncService } from './services/stealthnet-referral-sync.service';
 import { ThreeXuiImporterService } from './services/threexui-importer.service';
 
 @Module({
   imports: [
     AuthModule,
     RemnawaveModule,
+    ProfileSyncModule,
     BullModule.registerQueue({ name: IMPORT_QUEUE }),
   ],
   controllers: [AdminImportsController],
@@ -32,9 +35,10 @@ import { ThreeXuiImporterService } from './services/threexui-importer.service';
     RemnashopImporterService,
     AltshopImporterService,
     StealthnetImporterService,
+    StealthnetReferralSyncService,
     BackupPlanClonerService,
     BulkPlanAssignmentService,
   ],
-  exports: [ImportsService, ImportQueueService, BackupPlanClonerService],
+  exports: [ImportsService, ImportQueueService, BackupPlanClonerService, StealthnetReferralSyncService],
 })
 export class ImportsModule {}

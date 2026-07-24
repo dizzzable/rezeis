@@ -133,12 +133,6 @@ export class ReferralQualificationService {
         }
       }
 
-      const referrerPartner = await tx.partner.findUnique({
-        where: { userId: referral.referrerId },
-        select: { isActive: true },
-      });
-      const referrerIsActivePartner = referrerPartner?.isActive === true;
-
       await tx.referral.update({
         where: { id: referral.id },
         data: {
@@ -148,50 +142,11 @@ export class ReferralQualificationService {
         },
       });
 
-      const rewardConfig = settings.reward;
-      const rewardType: ReferralRewardType =
-        rewardConfig?.type === 'EXTRA_DAYS'
-          ? ReferralRewardType.EXTRA_DAYS
-          : ReferralRewardType.POINTS;
-
-      const firstAmount = rewardConfig?.config?.FIRST ?? 0;
-      const secondAmount = rewardConfig?.config?.SECOND ?? 0;
-
-      if (!referrerIsActivePartner && rewardConfig) {
-        if (firstAmount > 0) {
-          await tx.referralReward.create({
-            data: {
-              referralId: referral.id,
-              userId: referral.referrerId,
-              type: rewardType,
-              amount: firstAmount,
-            },
-          });
-        }
-
-        if (secondAmount > 0) {
-          const l2Referral = await tx.referral.findUnique({
-            where: { referredId: referral.referrerId },
-            select: { id: true, referrerId: true },
-          });
-          if (l2Referral) {
-            const l2Partner = await tx.partner.findUnique({
-              where: { userId: l2Referral.referrerId },
-              select: { isActive: true },
-            });
-            if (l2Partner?.isActive !== true) {
-              await tx.referralReward.create({
-                data: {
-                  referralId: l2Referral.id,
-                  userId: l2Referral.referrerId,
-                  type: rewardType,
-                  amount: secondAmount,
-                },
-              });
-            }
-          }
-        }
-      }
+      await this.createConfiguredRewards(tx, {
+        referralId: referral.id,
+        referrerId: referral.referrerId,
+        reward: settings.reward,
+      });
 
       return { referral, transaction };
     });
@@ -211,6 +166,69 @@ export class ReferralQualificationService {
         },
       );
     }
+  }
+
+  /**
+   * Explicit admin qualification for a valid, already attached edge. The
+   * operation is idempotent and creates the same *pending* reward rows as the
+   * payment path; rewards are not issued here, so the usual reviewed issue
+   * workflow (including profile sync for EXTRA_DAYS) remains in control.
+   */
+  public async qualifyReferralManually(input: {
+    readonly referredUserId: string;
+    readonly actorAdminId: string | null;
+  }): Promise<{ readonly referralId: string; readonly qualified: boolean; readonly rewardsCreated: number }> {
+    const settings = await this.loadReferralSettings();
+    const result = await this.prismaService.$transaction(async (tx) => {
+      await tx.$queryRaw(
+        Prisma.sql`SELECT "id" FROM "referrals" WHERE "referred_id" = ${input.referredUserId} FOR UPDATE`,
+      );
+      const referral = await tx.referral.findUnique({
+        where: { referredId: input.referredUserId },
+        select: { id: true, referrerId: true, qualifiedAt: true },
+      });
+      if (!referral) {
+        throw new NotFoundException('Referral attribution not found for user');
+      }
+      if (referral.qualifiedAt !== null) {
+        return { referralId: referral.id, referrerId: referral.referrerId, qualified: false, rewardsCreated: 0 };
+      }
+
+      await tx.referral.update({
+        where: { id: referral.id },
+        data: { qualifiedAt: new Date() },
+      });
+      const rewardsCreated = await this.createConfiguredRewards(tx, {
+        referralId: referral.id,
+        referrerId: referral.referrerId,
+        reward: settings.reward,
+        grantedBy: input.actorAdminId,
+      });
+      return { referralId: referral.id, referrerId: referral.referrerId, qualified: true, rewardsCreated };
+    });
+
+    if (result.qualified) {
+      this.events.info(
+        EVENT_TYPES.REFERRAL_QUALIFIED,
+        'REFERRAL',
+        'Referral manually qualified',
+        {
+          referralId: result.referralId,
+          referrerId: result.referrerId,
+          referredUserId: input.referredUserId,
+          userId: input.referredUserId,
+          manual: true,
+          actorAdminId: input.actorAdminId,
+          rewardsCreated: result.rewardsCreated,
+        },
+      );
+    }
+
+    return {
+      referralId: result.referralId,
+      qualified: result.qualified,
+      rewardsCreated: result.rewardsCreated,
+    };
   }
 
   /**
@@ -266,8 +284,8 @@ export class ReferralQualificationService {
             select: { id: true, expiresAt: true },
           });
 
-          if (subscription) {
-            const baseDate = subscription.expiresAt ?? now;
+          if (subscription !== null && subscription.expiresAt !== null) {
+            const baseDate = new Date(Math.max(subscription.expiresAt.getTime(), now.getTime()));
             const newExpiresAt = new Date(baseDate);
             newExpiresAt.setUTCDate(newExpiresAt.getUTCDate() + reward.amount);
 
@@ -315,6 +333,65 @@ export class ReferralQualificationService {
     }
 
     return normalizeReferralSettings(settings.referralSettings);
+  }
+
+  private async createConfiguredRewards(
+    tx: Prisma.TransactionClient,
+    input: {
+      readonly referralId: string;
+      readonly referrerId: string;
+      readonly reward: ReferralSettingsJson['reward'] | undefined;
+      readonly grantedBy?: string | null;
+    },
+  ): Promise<number> {
+    if (!input.reward) return 0;
+    const referrerPartner = await tx.partner.findUnique({
+      where: { userId: input.referrerId },
+      select: { isActive: true },
+    });
+    if (referrerPartner?.isActive === true) return 0;
+
+    const rewardType =
+      input.reward.type === 'EXTRA_DAYS'
+        ? ReferralRewardType.EXTRA_DAYS
+        : ReferralRewardType.POINTS;
+    let created = 0;
+    const firstAmount = input.reward.config.FIRST ?? 0;
+    if (firstAmount > 0) {
+      await tx.referralReward.create({
+        data: {
+          referralId: input.referralId,
+          userId: input.referrerId,
+          type: rewardType,
+          amount: firstAmount,
+          ...(input.grantedBy ? { grantedBy: input.grantedBy } : {}),
+        },
+      });
+      created += 1;
+    }
+
+    const secondAmount = input.reward.config.SECOND ?? 0;
+    if (secondAmount <= 0) return created;
+    const l2Referral = await tx.referral.findUnique({
+      where: { referredId: input.referrerId },
+      select: { id: true, referrerId: true },
+    });
+    if (!l2Referral) return created;
+    const l2Partner = await tx.partner.findUnique({
+      where: { userId: l2Referral.referrerId },
+      select: { isActive: true },
+    });
+    if (l2Partner?.isActive === true) return created;
+    await tx.referralReward.create({
+      data: {
+        referralId: l2Referral.id,
+        userId: l2Referral.referrerId,
+        type: rewardType,
+        amount: secondAmount,
+        ...(input.grantedBy ? { grantedBy: input.grantedBy } : {}),
+      },
+    });
+    return created + 1;
   }
 }
 

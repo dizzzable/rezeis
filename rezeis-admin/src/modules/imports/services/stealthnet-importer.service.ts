@@ -15,6 +15,7 @@ import {
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
 import { ImportSummary } from '../interfaces/import-summary.interface';
+import { StealthnetReferralSyncService } from './stealthnet-referral-sync.service';
 import {
   buildPanelLookup,
   panelSubscriptionState,
@@ -25,6 +26,7 @@ import {
 import {
   StealthnetClient,
   StealthnetPayment,
+  StealthnetReferralCredit,
   StealthnetSubscription,
   StealthnetTariff,
   StealthnetTariffCategory,
@@ -42,6 +44,7 @@ interface RunInput {
   readonly tariffCategories: readonly StealthnetTariffCategory[];
   readonly tariffPriceOptions: readonly StealthnetTariffPriceOption[];
   readonly payments: readonly StealthnetPayment[];
+  readonly referralCredits: readonly StealthnetReferralCredit[];
   /**
    * Optional migration goodwill: convert each imported user's leftover
    * STEALTHNET wallet balance into loyalty points. Applied only on user
@@ -90,6 +93,7 @@ export class StealthnetImporterService {
   public constructor(
     private readonly prismaService: PrismaService,
     private readonly remnawaveApiService: RemnawaveApiService,
+    private readonly stealthnetReferralSyncService: StealthnetReferralSyncService,
   ) {}
 
   public async run(input: RunInput): Promise<ImportSummary> {
@@ -103,6 +107,7 @@ export class StealthnetImporterService {
       tariffCategories,
       tariffPriceOptions,
       payments,
+      referralCredits,
     } = input;
 
     if (clients.length === 0) {
@@ -141,6 +146,7 @@ export class StealthnetImporterService {
     let subscriptionsUpdated = 0;
     let transactionsCreated = 0;
     const createdUserIds: string[] = [];
+    const sourceUserIds = new Map<string, string>();
 
     // Resolve the balance→points conversion once. Default: enabled at 1:1 so
     // callers that omit the option keep the migration-friendly behaviour.
@@ -163,6 +169,7 @@ export class StealthnetImporterService {
           skipped += 1;
           continue;
         }
+        sourceUserIds.set(client.id, userId);
 
         const wasJustCreated = await this.wasJustCreated(userId);
         if (wasJustCreated) {
@@ -211,6 +218,16 @@ export class StealthnetImporterService {
       }
     }
 
+    // Referral edges require both sides to be resolved first, so they must run
+    // after the user pass rather than inside it. This also makes a re-import
+    // idempotent and safe for users that were matched to existing accounts.
+    const referralImport = await this.stealthnetReferralSyncService.syncImport({
+      clients,
+      payments,
+      referralCredits,
+      sourceUserIds,
+    });
+
     // Ensure sellable EXTRA_DEVICES catalog rows exist for any observed
     // STEALTHNET extra-device prices (tariff price_per_extra_device or
     // subscription-level monthly extras). Idempotent by name.
@@ -236,6 +253,7 @@ export class StealthnetImporterService {
       transactionsProcessed: payments.length,
       transactionsCreated,
       pointsGranted,
+      stealthnetReferrals: JSON.parse(JSON.stringify(referralImport)),
       addOnsCreated,
       errors,
       rollback: { createdUserIds },
@@ -503,7 +521,10 @@ export class StealthnetImporterService {
             internalSquads: fresh.internalSquads.length > 0 ? fresh.internalSquads : tariffSquads,
             externalSquad: fresh.externalSquad,
             configUrl: fresh.configUrl,
-            expiresAt: fresh.expiresAt ?? backupExpiresAt,
+            // A null panel expiry is a lifetime profile. Falling back to an
+            // obsolete backup expiry turns it into a finite local subscription
+            // and later makes duration rewards corrupt its lifetime contract.
+            expiresAt: fresh.expiresAt,
             planSnapshot,
           };
         })()

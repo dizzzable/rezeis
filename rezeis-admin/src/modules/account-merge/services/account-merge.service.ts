@@ -119,6 +119,7 @@ export class AccountMergeService {
       ]);
 
       // 3. Dedupe-then-repoint the userId-unique collections.
+      await this.moveReferralPointsExchanges(tx, source.id, target.id);
       await this.movePromocodeActivations(tx, source.id, target.id);
       const partnerTransactions = await this.movePartnerTransactionsAsReferral(tx, source.id, target.id);
       await this.movePartnerReferralsAsReferral(tx, source.id, target.id);
@@ -291,6 +292,32 @@ export class AccountMergeService {
       movedCounts: result.movedCounts,
       remnawaveSubscriptionIds: result.remnawaveSubscriptionIds,
     };
+  }
+
+  /**
+   * `(userId, idempotencyKey)` unique — retain the complete source ledger,
+   * but clear a source key that already belongs to the target. The target
+   * exchange remains the canonical replay for that key after the accounts
+   * become one; the historical source row is still auditable.
+   */
+  private async moveReferralPointsExchanges(tx: Tx, sourceId: string, targetId: string): Promise<void> {
+    const targetRows = await tx.referralPointsExchange.findMany({
+      where: { userId: targetId, idempotencyKey: { not: null } },
+      select: { idempotencyKey: true },
+    });
+    const targetKeys = targetRows
+      .map((row) => row.idempotencyKey)
+      .filter((key): key is string => key !== null);
+    if (targetKeys.length > 0) {
+      await tx.referralPointsExchange.updateMany({
+        where: { userId: sourceId, idempotencyKey: { in: targetKeys } },
+        data: { idempotencyKey: null },
+      });
+    }
+    await tx.referralPointsExchange.updateMany({
+      where: { userId: sourceId },
+      data: { userId: targetId },
+    });
   }
 
   /** `(promocodeId, userId)` unique — drop source rows that collide on target. */

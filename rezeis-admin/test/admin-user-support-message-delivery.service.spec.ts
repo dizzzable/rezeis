@@ -36,6 +36,8 @@ describe('AdminUserManagementController support notifications', () => {
       {} as never,
       {} as never,
       {} as never,
+      {} as never,
+      {} as never,
       {
         create: async (input: unknown) => {
           notificationCalls.push(input);

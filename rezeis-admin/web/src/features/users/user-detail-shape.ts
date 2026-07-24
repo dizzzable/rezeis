@@ -111,6 +111,7 @@ export interface UserWebAccount {
 
 export interface UserReferralBackref {
   readonly level: number
+  readonly qualifiedAt?: string | null
   readonly referrer?: { readonly name?: string | null; readonly username?: string | null } | null
 }
 

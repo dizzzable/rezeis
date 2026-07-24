@@ -25,6 +25,7 @@ interface MergeFixtures {
   readonly targetReferred?: { id: string } | null;
   readonly remnawaveSubs?: Array<{ id: string }>;
   readonly currentSub?: { id: string } | null;
+  readonly targetExchangeKeys?: string[];
 }
 
 function createMergeMock(fx: MergeFixtures): { prisma: PrismaService; calls: Call[]; events: string[] } {
@@ -63,6 +64,10 @@ function createMergeMock(fx: MergeFixtures): { prisma: PrismaService; calls: Cal
         rec('transaction', 'updateMany', a);
         return { count: fx.txCount ?? 0 };
       },
+    },
+    referralPointsExchange: {
+      findMany: async () => (fx.targetExchangeKeys ?? []).map((idempotencyKey) => ({ idempotencyKey })),
+      updateMany: async (a: Record<string, unknown>) => { rec('referralPointsExchange', 'updateMany', a); return { count: 0 }; },
     },
     referralReward: { updateMany: async (a: Record<string, unknown>) => { rec('referralReward', 'updateMany', a); return { count: 0 }; } },
     referralInvite: { updateMany: async (a: Record<string, unknown>) => { rec('referralInvite', 'updateMany', a); return { count: 0 }; } },
@@ -218,10 +223,40 @@ describe('AccountMergeService', () => {
     // Subscriptions + transactions re-pointed source→target.
     assert.ok(calls.some((c) => c.model === 'subscription' && c.op === 'updateMany'));
     assert.ok(calls.some((c) => c.model === 'transaction' && c.op === 'updateMany'));
+    assert.ok(calls.some((c) => c.model === 'referralPointsExchange' && c.op === 'updateMany'));
     assert.ok(calls.some((c) => c.model === 'referralInvite' && c.op === 'updateMany'));
     // Source user deleted.
     assert.ok(calls.some((c) => c.model === 'user' && c.op === 'delete'));
     assert.deepStrictEqual(events, ['user.accounts_merged']);
+  });
+
+  it('clears source exchange keys that would collide on the merged target', async () => {
+    const { prisma, calls } = createMergeMock({
+      source: { ...baseSource },
+      target: { ...baseTarget },
+      targetExchangeKeys: ['same-request'],
+    });
+
+    await service(prisma).merge({ sourceId: 'SRC', targetId: 'TGT', choices: {}, confirm: true, actorAdminId: 'a' });
+
+    const exchangeUpdates = calls.filter(
+      (call) => call.model === 'referralPointsExchange' && call.op === 'updateMany',
+    );
+    assert.deepStrictEqual(exchangeUpdates, [
+      {
+        model: 'referralPointsExchange',
+        op: 'updateMany',
+        args: {
+          where: { userId: 'SRC', idempotencyKey: { in: ['same-request'] } },
+          data: { idempotencyKey: null },
+        },
+      },
+      {
+        model: 'referralPointsExchange',
+        op: 'updateMany',
+        args: { where: { userId: 'SRC' }, data: { userId: 'TGT' } },
+      },
+    ]);
   });
 
   it('sums partner balances and deletes the source partner when both are partners', async () => {

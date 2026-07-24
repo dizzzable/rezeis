@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 
 import { AuthModule } from '../auth/auth.module';
 import { InternalUserModule } from '../internal-user/internal-user.module';
+import { ImportsModule } from '../imports/imports.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { PartnersModule } from '../partners/partners.module';
 import { ProfileSyncModule } from '../profile-sync/profile-sync.module';
@@ -29,6 +30,7 @@ import { BulkUserOperationsService } from './services/bulk-user-operations.servi
   imports: [
     AuthModule,
     InternalUserModule,
+    ImportsModule,
     NotificationsModule,
     PartnersModule,
     ProfileSyncModule,

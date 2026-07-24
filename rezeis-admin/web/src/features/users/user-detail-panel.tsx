@@ -91,9 +91,10 @@ import {
   DialogContent,
   DialogHeader,
   DialogTitle,
+  DialogTrigger,
 } from '@/components/ui/dialog'
 import { PermissionGate } from '@/features/rbac'
-import { usersApi, type AccountMergePreview, type AccountMergeChoices } from './users-api'
+import { usersApi, type AccountMergePreview, type AccountMergeChoices, type UserOperation } from './users-api'
 
 interface UserDetailPanelProps {
   readonly telegramId: string
@@ -145,9 +146,7 @@ export default function UserDetailPanel({ telegramId }: UserDetailPanelProps) {
             <TabsTrigger value="referrals">{t('userDetailPanel.tabs.referrals')}</TabsTrigger>
           )}
           <TabsTrigger value="invites">{t('userDetailPanel.tabs.invites')}</TabsTrigger>
-          <TabsTrigger value="transactions">
-            {t('userDetailPanel.tabs.transactions')} ({user.transactions?.length ?? 0})
-          </TabsTrigger>
+          <TabsTrigger value="operations">{t('userDetailPanel.tabs.operations')}</TabsTrigger>
           <TabsTrigger value="web">{t('userDetailPanel.tabs.web')}</TabsTrigger>
           <TabsTrigger value="analytics">{t('userDetailPanel.tabs.analytics')}</TabsTrigger>
         </TabsList>
@@ -171,8 +170,8 @@ export default function UserDetailPanel({ telegramId }: UserDetailPanelProps) {
         <TabsContent value="invites">
           <InviteSettingsTab user={user} telegramId={telegramId} queryKey={queryKey} />
         </TabsContent>
-        <TabsContent value="transactions">
-          <TransactionsTab user={user} />
+        <TabsContent value="operations">
+          <OperationsTab telegramId={telegramId} />
         </TabsContent>
         <TabsContent value="web">
           <WebCabinetTab user={user} telegramId={telegramId} queryKey={queryKey} />
@@ -699,10 +698,20 @@ function InfoRow({ label, value, mono, icon }: { label: string; value: string | 
  * Painted in pink to read as a Remnawave-link affordance distinct from
  * the rest of the plain InfoRow stack.
  */
-function RemnawaveProfileRow({ sub }: { sub: UserSubscription }) {
+function RemnawaveProfileRow({
+  sub,
+  onLinkProfile,
+  isLinkingProfile,
+}: {
+  sub: UserSubscription
+  onLinkProfile: (remnawaveId: string) => void
+  isLinkingProfile: boolean
+}) {
   const { t } = useTranslation()
   const profileName = sub.remnawaveProfileName?.trim()
   const remnawaveId = sub.remnawaveId
+  const [linkDialogOpen, setLinkDialogOpen] = useState(false)
+  const [candidateId, setCandidateId] = useState('')
 
   function handleCopy(): void {
     if (!remnawaveId) return
@@ -743,7 +752,54 @@ function RemnawaveProfileRow({ sub }: { sub: UserSubscription }) {
           >
             <Copy className="h-3 w-3" />
           </button>
-        ) : null}
+        ) : (
+          <PermissionGate resource="subscriptions" action="edit">
+            <Dialog open={linkDialogOpen} onOpenChange={setLinkDialogOpen}>
+              <DialogTrigger asChild>
+                <Button size="sm" variant="outline" className="h-6 px-2 text-[10px]">
+                  <Link2 className="mr-1 h-3 w-3" />
+                  {t('userDetailPanel.subscriptions.remnawaveProfile.link')}
+                </Button>
+              </DialogTrigger>
+              <DialogContent className="max-w-md">
+                <DialogHeader>
+                  <DialogTitle>{t('userDetailPanel.subscriptions.remnawaveProfile.linkTitle')}</DialogTitle>
+                </DialogHeader>
+                <div className="space-y-3">
+                  <p id={`remnawave-profile-hint-${sub.id}`} className="text-sm text-muted-foreground">
+                    {t('userDetailPanel.subscriptions.remnawaveProfile.linkHint')}
+                  </p>
+                  <Label htmlFor={`remnawave-profile-${sub.id}`} className="sr-only">
+                    {t('userDetailPanel.subscriptions.remnawaveProfile.linkLabel')}
+                  </Label>
+                  <Input
+                    id={`remnawave-profile-${sub.id}`}
+                    value={candidateId}
+                    onChange={(event) => setCandidateId(event.target.value)}
+                    placeholder={t('userDetailPanel.subscriptions.remnawaveProfile.linkPlaceholder')}
+                    aria-describedby={`remnawave-profile-hint-${sub.id}`}
+                    autoComplete="off"
+                  />
+                  <div className="flex justify-end gap-2">
+                    <Button variant="outline" onClick={() => setLinkDialogOpen(false)}>
+                      {t('userDetailPanel.subscriptions.cancel')}
+                    </Button>
+                    <Button
+                      onClick={() => {
+                        onLinkProfile(candidateId.trim())
+                        setLinkDialogOpen(false)
+                      }}
+                      disabled={candidateId.trim().length === 0 || isLinkingProfile}
+                    >
+                      {isLinkingProfile ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : null}
+                      {t('userDetailPanel.subscriptions.remnawaveProfile.linkAction')}
+                    </Button>
+                  </div>
+                </div>
+              </DialogContent>
+            </Dialog>
+          </PermissionGate>
+        )}
       </span>
     </div>
   )
@@ -906,8 +962,25 @@ function SubscriptionsTab({ user, telegramId, queryKey }: { user: UserDetail; te
   const updateSubMutation = useMutation({
     mutationFn: ({ id, data }: { id: string; data: Record<string, unknown> }) =>
       api.patch(`/admin/users/subscriptions/${id}`, data),
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey }); toast.success(t('userDetailPanel.toasts.subUpdated')) },
+    onSuccess: (response) => {
+      queryClient.invalidateQueries({ queryKey })
+      if ((response.data as { remnawaveLinkRequired?: boolean }).remnawaveLinkRequired === true) {
+        toast.warning(t('userDetailPanel.toasts.remnawaveLinkRequired'))
+        return
+      }
+      toast.success(t('userDetailPanel.toasts.subUpdated'))
+    },
     onError: (err) => toast.error(getErrorMessage(err, t('userDetailPage.subscriptionUpdateFailed'))),
+  })
+
+  const linkRemnawaveProfileMutation = useMutation({
+    mutationFn: ({ id, remnawaveId }: { id: string; remnawaveId: string }) =>
+      api.patch(`/admin/users/subscriptions/${id}/remnawave-link`, { remnawaveId }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey })
+      toast.success(t('userDetailPanel.toasts.remnawaveLinked'))
+    },
+    onError: (err) => toast.error(getErrorMessage(err, t('userDetailPanel.toasts.syncFailed'))),
   })
 
   const syncMutation = useMutation({
@@ -1100,6 +1173,11 @@ function SubscriptionsTab({ user, telegramId, queryKey }: { user: UserDetail; te
               onResetTraffic={() => resetTrafficMutation.mutate(sub.id)}
               onDelete={() => deleteSubMutation.mutate(sub.id)}
               onAssignPlan={(planId) => assignPlanMutation.mutate({ id: sub.id, planId })}
+              onLinkRemnawaveProfile={(remnawaveId) => linkRemnawaveProfileMutation.mutate({ id: sub.id, remnawaveId })}
+              isLinkingRemnawaveProfile={
+                linkRemnawaveProfileMutation.isPending
+                && linkRemnawaveProfileMutation.variables?.id === sub.id
+              }
             />
           ))}
         </div>
@@ -1285,6 +1363,8 @@ function SubscriptionCard({
   onResetTraffic,
   onDelete,
   onAssignPlan,
+  onLinkRemnawaveProfile,
+  isLinkingRemnawaveProfile,
 }: {
   sub: UserSubscription
   isOpen: boolean
@@ -1296,6 +1376,8 @@ function SubscriptionCard({
   onResetTraffic: () => void
   onDelete: () => void
   onAssignPlan: (planId: string) => void
+  onLinkRemnawaveProfile: (remnawaveId: string) => void
+  isLinkingRemnawaveProfile: boolean
 }) {
   const { t, i18n } = useTranslation()
   const locale = i18n.language === 'ru' ? 'ru-RU' : 'en-US'
@@ -1389,7 +1471,11 @@ function SubscriptionCard({
         <InfoRow icon={<Wifi className="h-3 w-3" />} label={t('userDetailPanel.subscriptions.traffic')} value={sub.trafficLimit ? `${sub.trafficLimit} GB` : '∞'} />
         <InfoRow icon={<Monitor className="h-3 w-3" />} label={t('userDetailPanel.subscriptions.devices')} value={String(sub.deviceLimit || '∞')} />
         <InfoRow icon={<Calendar className="h-3 w-3" />} label={t('userDetailPanel.subscriptions.expires')} value={sub.expireAt ? new Date(sub.expireAt).toLocaleDateString(locale) : '—'} />
-        <RemnawaveProfileRow sub={sub} />
+        <RemnawaveProfileRow
+          sub={sub}
+          onLinkProfile={onLinkRemnawaveProfile}
+          isLinkingProfile={isLinkingRemnawaveProfile}
+        />
       </div>
 
       {/* Quick actions — accordion (only one open at a time) */}
@@ -2005,23 +2091,104 @@ function ReferralsTab({ user, telegramId, queryKey }: { user: UserDetail; telegr
     onError: (err) => toast.error(getErrorMessage(err, t('referralsActions.attach.failed'))),
   })
 
+  const stealthnetSyncMutation = useMutation({
+    mutationFn: async () => (
+      await api.post<{ status: string }>(`/admin/users/${telegramId}/referral/sync-stealthnet`)
+    ).data,
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey })
+      if (result.status === 'CREATED') {
+        toast.success(t('userDetailPage.referrals.stealthnetSync.success'))
+      } else if (result.status === 'ALREADY_EXISTS') {
+        toast.info(t('userDetailPage.referrals.stealthnetSync.alreadySynced'))
+      } else if (result.status === 'SOURCE_NOT_FOUND') {
+        toast.error(t('userDetailPage.referrals.stealthnetSync.notFound'))
+      } else {
+        toast.error(t('userDetailPage.referrals.stealthnetSync.conflict'))
+      }
+    },
+    onError: (err) => toast.error(getErrorMessage(err, t('userDetailPage.referrals.stealthnetSync.failed'))),
+  })
+
+  const qualifyMutation = useMutation({
+    mutationFn: async () => (
+      await api.post<{ qualified: boolean; rewardsCreated: number }>(`/admin/users/${telegramId}/referral/qualify`)
+    ).data,
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey })
+      toast.success(
+        result.qualified
+          ? t('userDetailPage.referrals.qualification.success', { count: result.rewardsCreated })
+          : t('userDetailPage.referrals.qualification.alreadyQualified'),
+      )
+    },
+    onError: (err) => toast.error(getErrorMessage(err, t('userDetailPage.referrals.qualification.failed'))),
+  })
+
   return (
     <div className="space-y-4">
       <Card>
         <CardHeader><CardTitle className="text-base">{t('userDetailPage.referrals.referredByTitle')}</CardTitle></CardHeader>
         <CardContent>
           {user.referral ? (
+            <>
             <p className="text-sm">
               <span className="text-muted-foreground">{t('userDetailPage.referrals.referrerLabel')} </span>
               <span className="font-medium">{user.referral.referrer?.name ?? user.referral.referrer?.username ?? '—'}</span>
               <span className="ml-2 text-muted-foreground">{t('userDetailPage.referrals.levelLabel')} {user.referral.level}</span>
             </p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {user.referral.qualifiedAt
+                ? t('userDetailPage.referrals.qualification.qualified')
+                : t('userDetailPage.referrals.qualification.pending')}
+            </p>
+            {!user.referral.qualifiedAt && (
+              <PermissionGate resource="referrals" action="edit">
+                <AlertDialog>
+                  <AlertDialogTrigger asChild>
+                    <Button size="sm" variant="outline" className="mt-3" disabled={qualifyMutation.isPending}>
+                      {qualifyMutation.isPending
+                        ? <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
+                        : <UserCheck className="mr-2 h-3.5 w-3.5" />}
+                      {t('userDetailPage.referrals.qualification.action')}
+                    </Button>
+                  </AlertDialogTrigger>
+                  <AlertDialogContent>
+                    <AlertDialogHeader>
+                      <AlertDialogTitle>{t('userDetailPage.referrals.qualification.confirmTitle')}</AlertDialogTitle>
+                      <AlertDialogDescription>
+                        {t('userDetailPage.referrals.qualification.confirmDescription')}
+                      </AlertDialogDescription>
+                    </AlertDialogHeader>
+                    <AlertDialogFooter>
+                      <AlertDialogCancel>{t('userDetailPanel.actions.cancel')}</AlertDialogCancel>
+                      <AlertDialogAction onClick={() => qualifyMutation.mutate()}>
+                        {t('userDetailPage.referrals.qualification.action')}
+                      </AlertDialogAction>
+                    </AlertDialogFooter>
+                  </AlertDialogContent>
+                </AlertDialog>
+              </PermissionGate>
+            )}
+            </>
           ) : user.isPartner ? (
             <p className="text-sm text-muted-foreground">{t('userDetailPanel.referrals.partnerHint')}</p>
           ) : (
             <div className="space-y-3">
               <p className="text-sm text-muted-foreground">{t('userDetailPage.referrals.noReferrer')}</p>
-              <PermissionGate resource="users" action="edit">
+              <PermissionGate resource="referrals" action="edit">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => stealthnetSyncMutation.mutate()}
+                disabled={stealthnetSyncMutation.isPending}
+              >
+                {stealthnetSyncMutation.isPending
+                  ? <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
+                  : <RefreshCw className="mr-2 h-3.5 w-3.5" />}
+                {t('userDetailPage.referrals.stealthnetSync.action')}
+              </Button>
+              <p className="text-xs text-muted-foreground">{t('userDetailPage.referrals.stealthnetSync.hint')}</p>
               <div className="flex gap-2">
                 <Input placeholder={t('userDetailPanel.referrals.referrerIdPlaceholder')} value={referrerId} onChange={(e) => setReferrerId(e.target.value)} className="h-9 max-w-48" />
                 <Button size="sm" onClick={() => attachMutation.mutate()} disabled={!referrerId || attachMutation.isPending}>
@@ -2365,6 +2532,8 @@ function InviteSettingsTab({
 // Transactions Tab
 // ══════════════════════════════════════════════════════════════════════════════
 
+// Kept as a payment-only fallback while OperationsTab owns the active surface.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function TransactionsTab({ user }: { user: UserDetail }) {
   const { t } = useTranslation()
   const txs = user.transactions ?? []
@@ -2405,6 +2574,134 @@ function TransactionsTab({ user }: { user: UserDetail }) {
 // ══════════════════════════════════════════════════════════════════════════════
 // Merge accounts — operator consolidation of two accounts into one
 // ══════════════════════════════════════════════════════════════════════════════
+
+function OperationsTab({ telegramId }: { telegramId: string }) {
+  const { t, i18n } = useTranslation()
+  const [page, setPage] = useState(1)
+  const locale = i18n.language?.startsWith('ru') ? 'ru-RU' : 'en-US'
+  const { data, isLoading, isError, refetch } = useQuery({
+    queryKey: ['admin', 'users', telegramId, 'operations', page],
+    queryFn: () => usersApi.listUserOperations({ userId: telegramId, page, limit: 25 }),
+  })
+
+  if (isLoading) return <Skeleton className="h-48 w-full" />
+
+  if (isError || !data) {
+    return (
+      <Card>
+        <CardContent className="flex flex-col items-center gap-3 py-8 text-center">
+          <p className="text-sm text-muted-foreground">{t('userDetailPanel.operations.loadError')}</p>
+          <Button variant="outline" size="sm" onClick={() => void refetch()}>
+            <RefreshCw className="mr-2 h-4 w-4" />
+            {t('userDetailPanel.operations.retry')}
+          </Button>
+        </CardContent>
+      </Card>
+    )
+  }
+
+  const totalPages = Math.max(1, Math.ceil(data.total / data.limit))
+  return (
+    <div className="space-y-3">
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base">{t('userDetailPanel.operations.title')}</CardTitle>
+          <CardDescription>{t('userDetailPanel.operations.hint')}</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-2">
+          {data.items.length === 0 ? (
+            <p className="py-5 text-center text-sm text-muted-foreground">{t('userDetailPanel.operations.empty')}</p>
+          ) : (
+            data.items.map((operation) => (
+              <OperationCard key={`${operation.kind}:${operation.id}`} operation={operation} locale={locale} />
+            ))
+          )}
+        </CardContent>
+      </Card>
+      {data.total > data.limit && (
+        <div className="flex items-center justify-between gap-3">
+          <Button variant="outline" size="sm" disabled={page === 1} onClick={() => setPage((value) => value - 1)}>
+            {t('userDetailPanel.operations.previous')}
+          </Button>
+          <span className="text-xs text-muted-foreground">
+            {t('userDetailPanel.operations.page', { page, total: totalPages, count: data.total })}
+          </span>
+          <Button variant="outline" size="sm" disabled={page >= totalPages} onClick={() => setPage((value) => value + 1)}>
+            {t('userDetailPanel.operations.next')}
+          </Button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function OperationCard({ operation, locale }: { operation: UserOperation; locale: string }) {
+  const { t } = useTranslation()
+  const occurredAt = new Date(operation.occurredAt).toLocaleString(locale, { dateStyle: 'medium', timeStyle: 'short' })
+
+  if (operation.kind === 'PAYMENT') {
+    return (
+      <div className="space-y-2 rounded-lg border p-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2"><Badge variant="success">{t('userDetailPanel.operations.payment')}</Badge><span className="text-xs text-muted-foreground">{occurredAt}</span></div>
+          <span className="font-mono text-sm">{operation.payload.amount} {operation.payload.currency}</span>
+        </div>
+        <p className="font-mono text-xs text-muted-foreground">{operation.payload.paymentId ?? t('userDetailPanel.operations.noPaymentId')}</p>
+        <div className="flex flex-wrap gap-1.5 text-xs">
+          <Badge variant="secondary">{operation.payload.status}</Badge>
+          {operation.payload.gatewayType && <Badge variant="outline">{operation.payload.gatewayType}</Badge>}
+          {operation.payload.purchaseType && <Badge variant="outline">{operation.payload.purchaseType}</Badge>}
+        </div>
+      </div>
+    )
+  }
+
+  if (operation.kind === 'PROMOCODE_ACTIVATION') {
+    const target = operation.payload.targetSubscription?.label ?? operation.payload.targetSubscription?.id
+    return (
+      <div className="space-y-2 rounded-lg border p-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2"><Badge variant="secondary">{t('userDetailPanel.operations.promocode')}</Badge><span className="text-xs text-muted-foreground">{occurredAt}</span></div>
+          <span className="font-mono text-sm">{operation.payload.codeMasked}</span>
+        </div>
+        <p className="text-sm">
+          {t('userDetailPanel.operations.promoReward', {
+            type: t(`userDetailPanel.operations.promoRewardTypes.${operation.payload.rewardType.toLowerCase()}`, {
+              defaultValue: operation.payload.rewardType,
+            }),
+            value: operation.payload.rewardValue,
+          })}
+        </p>
+        {target && <p className="text-xs text-muted-foreground">{t('userDetailPanel.operations.subscription', { subscription: target })}</p>}
+      </div>
+    )
+  }
+
+  const target = operation.payload.targetSubscription?.label ?? operation.payload.targetSubscription?.id
+  const exchangeTypeKey = operation.payload.type.toLowerCase()
+  const syncError = operation.payload.sync?.lastError
+  return (
+    <div className="space-y-2 rounded-lg border p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2"><Badge>{t('userDetailPanel.operations.pointsExchange')}</Badge><span className="text-xs text-muted-foreground">{occurredAt}</span></div>
+        <span className="font-mono text-sm">−{operation.payload.pointsSpent} {t('userDetailPanel.operations.points')}</span>
+      </div>
+      <p className="text-sm">{t(`userDetailPanel.operations.exchangeTypes.${exchangeTypeKey}`, { value: operation.payload.rewardValue })}</p>
+      {target && <p className="text-xs text-muted-foreground">{t('userDetailPanel.operations.subscription', { subscription: target })}</p>}
+      {operation.payload.sync && (
+        <p className={cn('text-xs', syncError ? 'text-destructive' : 'text-muted-foreground')}>
+          {syncError
+            ? t('userDetailPanel.operations.syncFailed', { error: syncError })
+            : t('userDetailPanel.operations.syncStatus', {
+              status: t(`userDetailPanel.operations.syncStatuses.${operation.payload.sync.status.toLowerCase()}`, {
+                defaultValue: operation.payload.sync.status,
+              }),
+            })}
+        </p>
+      )}
+    </div>
+  )
+}
 
 function MergeAccountsCard({
   currentUserId,

@@ -348,6 +348,15 @@ enum ReferralRewardType {
   EXTRA_DAYS
 }
 
+/// Immutable point-spend operation. Kept distinct from payment transactions
+/// so financial reporting never has to interpret a synthetic zero-value payment.
+enum ReferralPointsExchangeType {
+  SUBSCRIPTION_DAYS
+  GIFT_SUBSCRIPTION
+  DISCOUNT
+  TRAFFIC
+}
+
 /// Partner accrual level — donor stores 1/2/3 in plain int columns; we mirror
 /// the named enum for type safety.
 enum PartnerLevel {
@@ -1083,6 +1092,7 @@ model User {
   partner              Partner?                @relation("UserPartner")
   referralInvites      ReferralInvite[]        @relation("InviterUser")
   promocodeActivations PromocodeActivation[]   @relation("UserPromocodeActivations")
+  referralPointsExchanges ReferralPointsExchange[] @relation("UserReferralPointsExchanges")
   referralRewards      ReferralReward[]        @relation("ReferralRewardUser")
   partnerTransactions  PartnerTransaction[]    @relation("PartnerTransactionReferral")
   partnerReferrals     PartnerReferral[]       @relation("PartnerReferralUser")
@@ -1268,6 +1278,7 @@ model Subscription {
   transactionItems      TransactionItem[]     @relation("SubscriptionTransactionItems")
   syncJobs              ProfileSyncJob[]      @relation("SubscriptionSyncJobs")
   promocodeActivations  PromocodeActivation[] @relation("SubscriptionPromocodeActivations")
+  referralPointsExchanges ReferralPointsExchange[] @relation("SubscriptionReferralPointsExchanges")
   terms                 SubscriptionTerm[]                   @relation("SubscriptionTerms")
   addOnEntitlements     AddOnEntitlement[]                   @relation("SubscriptionAddOnEntitlements")
   effectiveProjection   SubscriptionEffectiveProjection?    @relation("SubscriptionEffectiveProjection")
@@ -1309,6 +1320,7 @@ model ProfileSyncJob {
   updatedAt      DateTime      @updatedAt @map("updated_at") @db.Timestamptz(3)
 
   subscription Subscription @relation("SubscriptionSyncJobs", fields: [subscriptionId], references: [id], onDelete: Cascade)
+  referralPointsExchange ReferralPointsExchange? @relation("ProfileSyncJobReferralPointsExchange")
 
   @@index([subscriptionId])
   @@index([status])
@@ -2261,7 +2273,8 @@ model Promocode {
   updatedAt          DateTime              @updatedAt @map("updated_at") @db.Timestamptz(3)
   archivedAt         DateTime?             @map("archived_at") @db.Timestamptz(3)
 
-  activations PromocodeActivation[]
+  activations                 PromocodeActivation[]
+  giftIssuedForPointsExchange ReferralPointsExchange? @relation("GiftPromocodeReferralPointsExchange")
 
   @@index([isActive])
   @@index([availability])
@@ -2299,6 +2312,39 @@ model PromocodeActivation {
   @@map("promocode_activations")
 }
 
+/// Durable record of a user spending referral points. The snapshots capture
+/// the exact applied effect, which may differ from a requested value after
+/// product caps are applied.
+model ReferralPointsExchange {
+  id                     String                     @id @default(cuid()) @map("id")
+  userId                 String                     @map("user_id")
+  targetSubscriptionId   String?                    @map("target_subscription_id")
+  type                   ReferralPointsExchangeType @map("type")
+  pointsSpent            Int                        @map("points_spent")
+  rewardValue            Int                        @map("reward_value")
+  expiresAtBefore        DateTime?                  @map("expires_at_before") @db.Timestamptz(3)
+  expiresAtAfter         DateTime?                  @map("expires_at_after") @db.Timestamptz(3)
+  trafficLimitBefore     Int?                       @map("traffic_limit_before")
+  trafficLimitAfter      Int?                       @map("traffic_limit_after")
+  personalDiscountBefore Int?                       @map("personal_discount_before")
+  personalDiscountAfter  Int?                       @map("personal_discount_after")
+  giftPromocodeId        String?                    @unique @map("gift_promocode_id")
+  profileSyncJobId       String?                    @unique @map("profile_sync_job_id")
+  idempotencyKey         String?                    @map("idempotency_key")
+  createdAt              DateTime                   @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user               User            @relation("UserReferralPointsExchanges", fields: [userId], references: [id], onDelete: Cascade)
+  targetSubscription Subscription?   @relation("SubscriptionReferralPointsExchanges", fields: [targetSubscriptionId], references: [id], onDelete: SetNull)
+  giftPromocode      Promocode?      @relation("GiftPromocodeReferralPointsExchange", fields: [giftPromocodeId], references: [id], onDelete: SetNull)
+  profileSyncJob     ProfileSyncJob? @relation("ProfileSyncJobReferralPointsExchange", fields: [profileSyncJobId], references: [id], onDelete: SetNull)
+
+  @@unique([userId, idempotencyKey])
+  @@index([userId, createdAt])
+  @@index([targetSubscriptionId, createdAt])
+  @@index([type, createdAt])
+  @@map("referral_points_exchanges")
+}
+
 // =============================================================================
 //  REFERRAL REWARDS, PARTNER LEDGER
 // =============================================================================
@@ -2320,6 +2366,9 @@ model ReferralReward {
   /// "Issue reward" dialog. NULL for rewards created automatically by
   /// `ReferralQualificationService` after a qualifying purchase.
   grantedBy    String?            @map("granted_by")
+  /// Stable identifier from an external reward ledger. It prevents an
+  /// idempotent import retry from duplicating a historically issued reward.
+  sourceKey    String?            @unique @map("source_key")
   /// Set when an admin (or the refund handler) revokes a pending or
   /// issued reward. We keep the row for audit but stop counting it
   /// in stats.

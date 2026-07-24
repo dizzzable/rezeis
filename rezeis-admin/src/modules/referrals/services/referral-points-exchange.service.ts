@@ -1,43 +1,36 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { Prisma, SubscriptionStatus, SyncAction, SyncJobStatus } from '@prisma/client';
+import {
+  Prisma,
+  ReferralPointsExchangeType,
+  SubscriptionStatus,
+  SyncAction,
+  SyncJobStatus,
+} from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
 import { buildPlanSnapshot } from '../../users/utils/plan-snapshot.util';
 
-/**
- * Points exchange types — what the user can trade their referral points for.
- * Donor: `PointsExchangeType` enum in altshop.
- */
 export type PointsExchangeType = 'SUBSCRIPTION_DAYS' | 'GIFT_SUBSCRIPTION' | 'DISCOUNT' | 'TRAFFIC';
 
-/**
- * Per-type exchange configuration from `Settings.referralSettings.points_exchange`.
- */
 export interface ExchangeTypeConfig {
   enabled: boolean;
   pointsCost: number;
   minPoints: number;
-  maxPoints: number; // -1 = unlimited
+  maxPoints: number;
 }
 
-/**
- * Full points exchange configuration.
- */
 export interface PointsExchangeConfig {
   exchangeEnabled: boolean;
   pointsPerDay: number;
   minExchangePoints: number;
-  maxExchangePoints: number; // -1 = unlimited
-  subscriptionDays: ExchangeTypeConfig & { /* no extra fields */ };
+  maxExchangePoints: number;
+  subscriptionDays: ExchangeTypeConfig;
   giftSubscription: ExchangeTypeConfig & { giftPlanId: string | null; giftDurationDays: number };
   discount: ExchangeTypeConfig & { maxDiscountPercent: number };
   traffic: ExchangeTypeConfig & { maxTrafficGb: number };
 }
 
-/**
- * Exchange option returned to the user — shows what's available and computed values.
- */
 export interface ExchangeOption {
   type: PointsExchangeType;
   enabled: boolean;
@@ -45,13 +38,27 @@ export interface ExchangeOption {
   pointsCost: number;
   minPoints: number;
   maxPoints: number;
-  computedValue: number; // days / percent / GB depending on type
+  computedValue: number;
 }
 
 export interface ExchangeOptionsResponse {
   exchangeEnabled: boolean;
   pointsBalance: number;
   types: ExchangeOption[];
+}
+
+interface AppliedExchange {
+  readonly targetSubscriptionId: string | null;
+  readonly rewardValue: number;
+  readonly giftCode: string | null;
+  readonly giftPromocodeId: string | null;
+  readonly syncJobId: string | null;
+  readonly expiresAtBefore: Date | null;
+  readonly expiresAtAfter: Date | null;
+  readonly trafficLimitBefore: number | null;
+  readonly trafficLimitAfter: number | null;
+  readonly personalDiscountBefore: number | null;
+  readonly personalDiscountAfter: number | null;
 }
 
 const DEFAULT_CONFIG: PointsExchangeConfig = {
@@ -66,17 +73,9 @@ const DEFAULT_CONFIG: PointsExchangeConfig = {
 };
 
 /**
- * Handles the referral points exchange system.
- *
- * Donor: `referral_exchange.py`, `referral_exchange_execution.py`,
- *        `referral_exchange_options.py`, `referral_exchange_values.py`.
- *
- * Users accumulate `points` on their User record via referral rewards.
- * They can then exchange those points for:
- *   - SUBSCRIPTION_DAYS: extend current subscription by N days
- *   - GIFT_SUBSCRIPTION: generate a single-use promo code for a friend
- *   - DISCOUNT: get a personal discount percent on next purchase
- *   - TRAFFIC: add GB to current subscription traffic limit
+ * Applies referral point rewards as one durable transaction. A successful
+ * exchange always has an immutable ledger record and, for panel-facing
+ * rewards, a durable PENDING ProfileSyncJob before points are committed.
  */
 @Injectable()
 export class ReferralPointsExchangeService {
@@ -87,88 +86,54 @@ export class ReferralPointsExchangeService {
     private readonly profileSyncQueueService: ProfileSyncQueueService,
   ) {}
 
-  /**
-   * Creates a PENDING `ProfileSyncJob` (UPDATE / CREATE) for the given
-   * subscription and enqueues it so the worker pushes the local limit /
-   * expiry change to the Remnawave panel via `updatePanelUser`.
-   */
-  private async enqueueProfileSync(
-    subscriptionId: string,
-    payload: Record<string, unknown>,
-  ): Promise<void> {
-    const subscription = await this.prismaService.subscription.findUnique({
-      where: { id: subscriptionId },
-      select: { remnawaveId: true },
-    });
-    const job = await this.prismaService.profileSyncJob.create({
-      data: {
-        subscriptionId,
-        action:
-          subscription?.remnawaveId == null ? SyncAction.CREATE : SyncAction.UPDATE,
-        status: SyncJobStatus.PENDING,
-        payload: payload as Prisma.InputJsonObject,
-      },
-      select: { id: true },
-    });
-    await this.profileSyncQueueService.enqueue(job.id);
-  }
-
-  /**
-   * Returns the available exchange options for a user, including their
-   * current points balance and computed values for each type.
-   */
   public async getExchangeOptions(userId: string): Promise<ExchangeOptionsResponse> {
     const [user, config] = await Promise.all([
-      this.prismaService.user.findUnique({
-        where: { id: userId },
-        select: { points: true },
-      }),
+      this.prismaService.user.findUnique({ where: { id: userId }, select: { points: true } }),
       this.loadConfig(),
     ]);
-
-    if (!user) {
-      throw new NotFoundException('User not found');
-    }
-
-    const balance = user.points;
-    const types: ExchangeOption[] = [
-      this.buildOption('SUBSCRIPTION_DAYS', config.subscriptionDays, balance, config),
-      this.buildOption('GIFT_SUBSCRIPTION', config.giftSubscription, balance, config),
-      this.buildOption('DISCOUNT', config.discount, balance, config),
-      this.buildOption('TRAFFIC', config.traffic, balance, config),
-    ];
+    if (user === null) throw new NotFoundException('User not found');
 
     return {
       exchangeEnabled: config.exchangeEnabled,
-      pointsBalance: balance,
-      types,
+      pointsBalance: user.points,
+      types: [
+        this.buildOption('SUBSCRIPTION_DAYS', config.subscriptionDays, user.points),
+        this.buildOption('GIFT_SUBSCRIPTION', config.giftSubscription, user.points),
+        this.buildOption('DISCOUNT', config.discount, user.points),
+        this.buildOption('TRAFFIC', config.traffic, user.points),
+      ],
     };
   }
 
-  /**
-   * Executes a points exchange for the given user.
-   *
-   * @param userId - The user performing the exchange
-   * @param type - Which exchange type to execute
-   * @param points - How many points to spend
-   * @param subscriptionId - Target subscription (for SUBSCRIPTION_DAYS / TRAFFIC)
-   */
   public async executeExchange(input: {
     readonly userId: string;
     readonly type: PointsExchangeType;
     readonly points: number;
     readonly subscriptionId?: string;
-  }): Promise<{ success: boolean; message: string; value?: number; code?: string }> {
+    readonly idempotencyKey?: string;
+  }): Promise<{
+    readonly success: boolean;
+    readonly message: string;
+    readonly value?: number;
+    readonly code?: string;
+    readonly syncPending?: boolean;
+  }> {
+    this.validateInput(input);
+    // A network retry must replay its already committed result even if an
+    // operator changed the exchange configuration in the meantime.
+    if (input.idempotencyKey !== undefined) {
+      const previous = await this.findPreviousExchange(input.userId, input.idempotencyKey);
+      if (previous !== null) return this.replayExchange(previous);
+    }
+
     const config = await this.loadConfig();
     if (!config.exchangeEnabled) {
       throw new BadRequestException('Points exchange is currently disabled');
     }
-
     const typeConfig = this.getTypeConfig(config, input.type);
     if (!typeConfig.enabled) {
       throw new BadRequestException(`Exchange type ${input.type} is not enabled`);
     }
-
     if (input.points < typeConfig.minPoints) {
       throw new BadRequestException(`Minimum ${typeConfig.minPoints} points required`);
     }
@@ -176,262 +141,429 @@ export class ReferralPointsExchangeService {
       throw new BadRequestException(`Maximum ${typeConfig.maxPoints} points allowed`);
     }
 
-    // Deduct points atomically
-    const user = await this.prismaService.user.findUnique({
-      where: { id: input.userId },
-      select: { id: true, points: true, currentSubscriptionId: true },
-    });
-    if (!user) throw new NotFoundException('User not found');
-    if (user.points < input.points) {
-      throw new BadRequestException('Insufficient points balance');
-    }
-
     const computedValue = Math.floor(input.points / typeConfig.pointsCost);
     if (computedValue <= 0) {
       throw new BadRequestException('Points amount too low for any reward');
     }
+    const pointsToCharge = input.type === 'GIFT_SUBSCRIPTION' ? typeConfig.pointsCost : input.points;
 
-    // A gift subscription is a fixed-price item: it always costs exactly one
-    // `pointsCost` and yields one promo code, regardless of how many points the
-    // user typed. Every other reward scales linearly with the points spent.
-    const pointsToCharge =
-      input.type === 'GIFT_SUBSCRIPTION' ? typeConfig.pointsCost : input.points;
-    if (user.points < pointsToCharge) {
-      throw new BadRequestException('Insufficient points balance');
-    }
+    try {
+      const outcome = await this.prismaService.$transaction(async (tx) => {
+        const user = await tx.user.findUnique({
+          where: { id: input.userId },
+          select: { id: true, currentSubscriptionId: true },
+        });
+        if (user === null) throw new NotFoundException('User not found');
 
-    // Resolve the target subscription for the reward types that need one.
-    // `User.currentSubscriptionId` is only maintained by importers, so for a
-    // user who bought or received their subscription through the normal
-    // purchase / promocode flow it is null — the previous code then threw
-    // "No active subscription to extend" and the exchange failed. Fall back to
-    // the user's most recent ACTIVE subscription so the exchange always
-    // targets a real subscription when one exists.
-    const targetSubscriptionId =
-      input.type === 'SUBSCRIPTION_DAYS' || input.type === 'TRAFFIC'
-        ? await this.resolveActiveSubscriptionId(
-            input.userId,
-            input.subscriptionId ?? user.currentSubscriptionId,
-          )
-        : null;
+        const targetSubscriptionId =
+          input.type === 'SUBSCRIPTION_DAYS' || input.type === 'TRAFFIC'
+            ? await this.resolveActiveSubscriptionId(
+              tx,
+              input.userId,
+              input.subscriptionId,
+              user.currentSubscriptionId,
+            )
+            : null;
 
-    // Subscriptions whose Remnawave profile must be re-synced after the
-    // local mutation commits (expiry extension / traffic top-up). We
-    // collect ids inside the tx and enqueue the sync jobs afterwards so
-    // a rollback never leaves an orphan job — and, critically, so the
-    // panel actually receives the change (the previous implementation
-    // wrote the local row only and never synced).
-    let trafficTopUp: { readonly subscriptionId: string; readonly gb: number } | null = null;
-    let expiryExtended: { readonly subscriptionId: string } | null = null;
-    // The single-use promo code minted by a GIFT_SUBSCRIPTION exchange — must
-    // be surfaced to the user (otherwise the reward is invisible/unusable).
-    let giftCode: string | null = null;
-
-    await this.prismaService.$transaction(async (tx) => {
-      // Deduct points
-      await tx.user.update({
-        where: { id: input.userId },
-        data: { points: { decrement: pointsToCharge } },
+        const applied = await this.applyExchange({
+          tx,
+          input,
+          config,
+          computedValue,
+          pointsToCharge,
+          targetSubscriptionId,
+        });
+        const ledger = await tx.referralPointsExchange.create({
+          data: {
+            userId: input.userId,
+            targetSubscriptionId: applied.targetSubscriptionId,
+            type: input.type as ReferralPointsExchangeType,
+            pointsSpent: pointsToCharge,
+            rewardValue: applied.rewardValue,
+            expiresAtBefore: applied.expiresAtBefore,
+            expiresAtAfter: applied.expiresAtAfter,
+            trafficLimitBefore: applied.trafficLimitBefore,
+            trafficLimitAfter: applied.trafficLimitAfter,
+            personalDiscountBefore: applied.personalDiscountBefore,
+            personalDiscountAfter: applied.personalDiscountAfter,
+            giftPromocodeId: applied.giftPromocodeId,
+            profileSyncJobId: applied.syncJobId,
+            idempotencyKey: input.idempotencyKey,
+          },
+          select: { id: true },
+        });
+        return { ...applied, ledgerId: ledger.id };
       });
 
-      // Apply effect based on type
-      switch (input.type) {
-        case 'SUBSCRIPTION_DAYS': {
-          const subId = targetSubscriptionId;
-          if (!subId) throw new BadRequestException('No active subscription to extend');
-          const sub = await tx.subscription.findUnique({
-            where: { id: subId },
-            select: { id: true, expiresAt: true, status: true },
-          });
-          if (!sub || sub.status === SubscriptionStatus.DELETED) {
-            throw new BadRequestException('Subscription not found or deleted');
-          }
-          const baseDate = sub.expiresAt ?? new Date();
-          const newExpiry = new Date(baseDate);
-          newExpiry.setUTCDate(newExpiry.getUTCDate() + computedValue);
-          await tx.subscription.update({
-            where: { id: sub.id },
-            data: { expiresAt: newExpiry },
-          });
-          expiryExtended = { subscriptionId: sub.id };
-          break;
-        }
-
-        case 'GIFT_SUBSCRIPTION': {
-          const giftConfig = config.giftSubscription;
-          if (!giftConfig.giftPlanId) {
-            throw new BadRequestException('Gift subscription plan is not configured');
-          }
-          // Build a COMPLETE plan snapshot from the configured gift plan.
-          // A bare `{ id }` snapshot crashes on activation (the SUBSCRIPTION
-          // reward reads `plan.internalSquads`/`deviceLimit`/`duration`).
-          const plan = await tx.plan.findUnique({
-            where: { id: giftConfig.giftPlanId },
-            select: {
-              id: true,
-              name: true,
-              tag: true,
-              type: true,
-              trafficLimit: true,
-              deviceLimit: true,
-              trafficLimitStrategy: true,
-              internalSquads: true,
-              externalSquad: true,
-            },
-          });
-          if (!plan) {
-            throw new BadRequestException('Gift subscription plan not found');
-          }
-          const snapshot = {
-            ...(buildPlanSnapshot(plan) as Record<string, unknown>),
-            duration: giftConfig.giftDurationDays,
-          };
-          // Create a single-use promo code with a SUBSCRIPTION reward.
-          const code = generateExchangePromoCode();
-          await tx.promocode.create({
-            data: {
-              code,
-              isActive: true,
-              availability: 'ALL',
-              rewardType: 'SUBSCRIPTION',
-              reward: giftConfig.giftDurationDays,
-              plan: snapshot as Prisma.InputJsonValue,
-              maxActivations: 1,
-            },
-          });
-          giftCode = code;
-          break;
-        }
-
-        case 'DISCOUNT': {
-          const discountConfig = config.discount;
-          const discountPercent = Math.min(computedValue, discountConfig.maxDiscountPercent);
-          // Clamp the CUMULATIVE personal discount to the configured cap (and
-          // hard-cap at 100) so repeated exchanges can't stack past the limit.
-          const current = await tx.user.findUnique({
-            where: { id: input.userId },
-            select: { personalDiscount: true },
-          });
-          const nextDiscount = Math.min(
-            (current?.personalDiscount ?? 0) + discountPercent,
-            discountConfig.maxDiscountPercent,
-            100,
+      if (outcome.syncJobId !== null) {
+        try {
+          await this.profileSyncQueueService.enqueue(outcome.syncJobId);
+        } catch (error: unknown) {
+          this.logger.warn(
+            `Points exchange ${outcome.ledgerId}: persisted sync job ${outcome.syncJobId} will be recovered by sweep: ${toErrorMessage(error)}`,
           );
-          await tx.user.update({
-            where: { id: input.userId },
-            data: { personalDiscount: nextDiscount },
-          });
-          break;
-        }
-
-        case 'TRAFFIC': {
-          const trafficConfig = config.traffic;
-          const trafficGb = Math.min(computedValue, trafficConfig.maxTrafficGb);
-          const subId = targetSubscriptionId;
-          if (!subId) throw new BadRequestException('No active subscription for traffic');
-          const sub = await tx.subscription.findUnique({
-            where: { id: subId },
-            select: { id: true, trafficLimit: true },
-          });
-          if (!sub) throw new BadRequestException('Subscription not found');
-          if (sub.trafficLimit === null) {
-            // Unlimited traffic — nothing to add
-            break;
-          }
-          await tx.subscription.update({
-            where: { id: sub.id },
-            data: { trafficLimit: { increment: trafficGb } },
-          });
-          trafficTopUp = { subscriptionId: sub.id, gb: trafficGb };
-          break;
         }
       }
+
+      this.logger.log(
+        `User ${input.userId} exchanged ${pointsToCharge} points for ${input.type} (actual value: ${outcome.rewardValue}, record: ${outcome.ledgerId})`,
+      );
+      return {
+        success: true,
+        message: `Exchanged ${pointsToCharge} points`,
+        value: outcome.rewardValue,
+        code: outcome.giftCode ?? undefined,
+        syncPending: outcome.syncJobId !== null,
+      };
+    } catch (error: unknown) {
+      if (input.idempotencyKey !== undefined && isUniqueIdempotencyError(error)) {
+        const previous = await this.findPreviousExchange(input.userId, input.idempotencyKey);
+        if (previous !== null) return this.replayExchange(previous);
+      }
+      throw error;
+    }
+  }
+
+  private async applyExchange(input: {
+    readonly tx: Prisma.TransactionClient;
+    readonly input: {
+      readonly userId: string;
+      readonly type: PointsExchangeType;
+      readonly subscriptionId?: string;
+    };
+    readonly config: PointsExchangeConfig;
+    readonly computedValue: number;
+    readonly pointsToCharge: number;
+    readonly targetSubscriptionId: string | null;
+  }): Promise<AppliedExchange> {
+    const empty = (): Omit<AppliedExchange, 'targetSubscriptionId' | 'rewardValue'> => ({
+      giftCode: null,
+      giftPromocodeId: null,
+      syncJobId: null,
+      expiresAtBefore: null,
+      expiresAtAfter: null,
+      trafficLimitBefore: null,
+      trafficLimitAfter: null,
+      personalDiscountBefore: null,
+      personalDiscountAfter: null,
     });
 
-    // Post-commit Remnawave sync. Both the traffic top-up and the expiry
-    // extension change the panel profile, so enqueue an UPDATE sync job.
-    // Failures here are logged but don't reverse the (committed) points
-    // spend — the sweep/retry path and admin re-sync are the safety net.
-    try {
-      if (trafficTopUp !== null) {
-
-        await this.enqueueProfileSync(trafficTopUp.subscriptionId, {
-          source: 'REFERRAL_EXCHANGE_TRAFFIC',
-
-          topUpGb: trafficTopUp.gb,
+    switch (input.input.type) {
+      case 'SUBSCRIPTION_DAYS': {
+        const subscription = await this.loadLockedTarget(
+          input.tx,
+          input.input.userId,
+          input.targetSubscriptionId,
+          'No active subscription to extend',
+        );
+        if (subscription.expiresAt === null) {
+          throw new BadRequestException('Unlimited subscription does not need a duration exchange');
+        }
+        if (subscription.remnawaveId === null) {
+          throw new BadRequestException(
+            'Subscription needs a Remnawave profile repair before points can be exchanged',
+          );
+        }
+        await this.spendPoints(input.tx, input.input.userId, input.pointsToCharge);
+        const base = new Date(Math.max(subscription.expiresAt.getTime(), Date.now()));
+        const expiresAtAfter = new Date(base.getTime() + input.computedValue * MS_PER_DAY);
+        await input.tx.subscription.update({
+          where: { id: subscription.id },
+          data: { expiresAt: expiresAtAfter, status: SubscriptionStatus.ACTIVE },
         });
-      }
-      if (expiryExtended !== null) {
-
-        await this.enqueueProfileSync(expiryExtended.subscriptionId, {
+        const syncJobId = await this.createSubscriptionSyncJob(input.tx, subscription, {
           source: 'REFERRAL_EXCHANGE_DAYS',
+          pointsExchangeType: input.input.type,
         });
+        return {
+          ...empty(),
+          targetSubscriptionId: subscription.id,
+          rewardValue: input.computedValue,
+          expiresAtBefore: subscription.expiresAt,
+          expiresAtAfter,
+          syncJobId,
+        };
       }
-    } catch (err: unknown) {
-      this.logger.error(
-        `Points-exchange Remnawave sync enqueue failed for user ${input.userId}: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
+
+      case 'TRAFFIC': {
+        const subscription = await this.loadLockedTarget(
+          input.tx,
+          input.input.userId,
+          input.targetSubscriptionId,
+          'No active subscription for traffic',
+        );
+        if (subscription.trafficLimit === null) {
+          throw new BadRequestException('Unlimited subscription traffic cannot be topped up');
+        }
+        if (subscription.remnawaveId === null) {
+          throw new BadRequestException(
+            'Subscription needs a Remnawave profile repair before points can be exchanged',
+          );
+        }
+        const trafficGb = Math.min(input.computedValue, input.config.traffic.maxTrafficGb);
+        if (trafficGb <= 0) throw new BadRequestException('Traffic exchange has no reward');
+        await this.spendPoints(input.tx, input.input.userId, input.pointsToCharge);
+        const trafficLimitAfter = subscription.trafficLimit + trafficGb;
+        await input.tx.subscription.update({
+          where: { id: subscription.id },
+          data: { trafficLimit: trafficLimitAfter },
+        });
+        const syncJobId = await this.createSubscriptionSyncJob(input.tx, subscription, {
+          source: 'REFERRAL_EXCHANGE_TRAFFIC',
+          pointsExchangeType: input.input.type,
+          topUpGb: trafficGb,
+        });
+        return {
+          ...empty(),
+          targetSubscriptionId: subscription.id,
+          rewardValue: trafficGb,
+          trafficLimitBefore: subscription.trafficLimit,
+          trafficLimitAfter,
+          syncJobId,
+        };
+      }
+
+      case 'DISCOUNT': {
+        await this.spendPoints(input.tx, input.input.userId, input.pointsToCharge);
+        const current = await input.tx.user.findUnique({
+          where: { id: input.input.userId },
+          select: { personalDiscount: true },
+        });
+        const personalDiscountBefore = current?.personalDiscount ?? 0;
+        const personalDiscountAfter = Math.min(
+          personalDiscountBefore + Math.min(input.computedValue, input.config.discount.maxDiscountPercent),
+          input.config.discount.maxDiscountPercent,
+          100,
+        );
+        const rewardValue = personalDiscountAfter - personalDiscountBefore;
+        if (rewardValue <= 0) {
+          throw new BadRequestException('Personal discount is already at its maximum');
+        }
+        await input.tx.user.update({
+          where: { id: input.input.userId },
+          data: { personalDiscount: personalDiscountAfter },
+        });
+        return {
+          ...empty(),
+          targetSubscriptionId: null,
+          rewardValue,
+          personalDiscountBefore,
+          personalDiscountAfter,
+        };
+      }
+
+      case 'GIFT_SUBSCRIPTION': {
+        const giftConfig = input.config.giftSubscription;
+        if (!giftConfig.giftPlanId) {
+          throw new BadRequestException('Gift subscription plan is not configured');
+        }
+        const plan = await input.tx.plan.findUnique({
+          where: { id: giftConfig.giftPlanId },
+          select: {
+            id: true,
+            name: true,
+            tag: true,
+            type: true,
+            trafficLimit: true,
+            deviceLimit: true,
+            trafficLimitStrategy: true,
+            internalSquads: true,
+            externalSquad: true,
+          },
+        });
+        if (plan === null) throw new BadRequestException('Gift subscription plan not found');
+        await this.spendPoints(input.tx, input.input.userId, input.pointsToCharge);
+        const giftCode = generateExchangePromoCode();
+        const gift = await input.tx.promocode.create({
+          data: {
+            code: giftCode,
+            isActive: true,
+            availability: 'ALL',
+            rewardType: 'SUBSCRIPTION',
+            reward: giftConfig.giftDurationDays,
+            plan: {
+              ...(buildPlanSnapshot(plan) as Record<string, unknown>),
+              duration: giftConfig.giftDurationDays,
+            } as Prisma.InputJsonValue,
+            maxActivations: 1,
+          },
+          select: { id: true },
+        });
+        return {
+          ...empty(),
+          targetSubscriptionId: null,
+          rewardValue: 1,
+          giftCode,
+          giftPromocodeId: gift.id,
+        };
+      }
+    }
+  }
+
+  private async spendPoints(
+    tx: Prisma.TransactionClient,
+    userId: string,
+    points: number,
+  ): Promise<void> {
+    const updated = await tx.user.updateMany({
+      where: { id: userId, points: { gte: points } },
+      data: { points: { decrement: points } },
+    });
+    if (updated.count !== 1) {
+      throw new BadRequestException('Insufficient points balance');
+    }
+  }
+
+  private async loadLockedTarget(
+    tx: Prisma.TransactionClient,
+    userId: string,
+    subscriptionId: string | null,
+    missingMessage: string,
+  ) {
+    if (subscriptionId === null) throw new BadRequestException(missingMessage);
+    await tx.$queryRaw(
+      Prisma.sql`SELECT "id" FROM "subscriptions" WHERE "id" = ${subscriptionId} FOR UPDATE`,
+    );
+    const subscription = await tx.subscription.findUnique({
+      where: { id: subscriptionId },
+      select: {
+        id: true,
+        userId: true,
+        status: true,
+        expiresAt: true,
+        trafficLimit: true,
+        remnawaveId: true,
+      },
+    });
+    if (
+      subscription === null ||
+      subscription.userId !== userId ||
+      subscription.status !== SubscriptionStatus.ACTIVE
+    ) {
+      throw new BadRequestException('Subscription is not an active user subscription');
+    }
+    return subscription;
+  }
+
+  private async createSubscriptionSyncJob(
+    tx: Prisma.TransactionClient,
+    subscription: { readonly id: string; readonly remnawaveId: string | null },
+    payload: Record<string, unknown>,
+  ): Promise<string> {
+    if (subscription.remnawaveId === null) {
+      throw new BadRequestException(
+        'Subscription needs a Remnawave profile repair before points can be exchanged',
       );
     }
+    const job = await tx.profileSyncJob.create({
+      data: {
+        subscriptionId: subscription.id,
+        action: SyncAction.UPDATE,
+        status: SyncJobStatus.PENDING,
+        payload: payload as Prisma.InputJsonObject,
+      },
+      select: { id: true },
+    });
+    return job.id;
+  }
 
-    this.logger.log(
-      `User ${input.userId} exchanged ${pointsToCharge} points for ${input.type} (value: ${computedValue})`,
-    );
+  private async resolveActiveSubscriptionId(
+    tx: Prisma.TransactionClient,
+    userId: string,
+    explicitId: string | undefined,
+    currentSubscriptionId: string | null,
+  ): Promise<string | null> {
+    if (explicitId !== undefined) {
+      const explicit = await tx.subscription.findFirst({
+        where: { id: explicitId, userId, status: SubscriptionStatus.ACTIVE },
+        select: { id: true },
+      });
+      return explicit?.id ?? null;
+    }
 
+    if (currentSubscriptionId !== null) {
+      const current = await tx.subscription.findFirst({
+        where: { id: currentSubscriptionId, userId, status: SubscriptionStatus.ACTIVE },
+        select: { id: true },
+      });
+      if (current !== null) return current.id;
+    }
+
+    const now = new Date();
+    const live = await tx.subscription.findFirst({
+      where: { userId, status: SubscriptionStatus.ACTIVE, expiresAt: { gte: now } },
+      orderBy: [{ expiresAt: 'desc' }, { createdAt: 'desc' }],
+      select: { id: true },
+    });
+    if (live !== null) return live.id;
+
+    const unlimited = await tx.subscription.findFirst({
+      where: { userId, status: SubscriptionStatus.ACTIVE, expiresAt: null },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true },
+    });
+    if (unlimited !== null) return unlimited.id;
+
+    const stale = await tx.subscription.findFirst({
+      where: { userId, status: SubscriptionStatus.ACTIVE },
+      orderBy: [{ expiresAt: 'desc' }, { createdAt: 'desc' }],
+      select: { id: true },
+    });
+    return stale?.id ?? null;
+  }
+
+  private async findPreviousExchange(userId: string, idempotencyKey: string) {
+    return this.prismaService.referralPointsExchange.findUnique({
+      where: { userId_idempotencyKey: { userId, idempotencyKey } },
+      select: {
+        pointsSpent: true,
+        rewardValue: true,
+        profileSyncJobId: true,
+        giftPromocode: { select: { code: true } },
+      },
+    });
+  }
+
+  private replayExchange(exchange: {
+    readonly pointsSpent: number;
+    readonly rewardValue: number;
+    readonly profileSyncJobId: string | null;
+    readonly giftPromocode: { readonly code: string } | null;
+  }) {
     return {
       success: true,
-      message: `Exchanged ${pointsToCharge} points`,
-      value: giftCode !== null ? 1 : computedValue,
-      code: giftCode ?? undefined,
+      message: `Exchanged ${exchange.pointsSpent} points`,
+      value: exchange.rewardValue,
+      code: exchange.giftPromocode?.code,
+      syncPending: exchange.profileSyncJobId !== null,
     };
   }
 
-  // ── Private ─────────────────────────────────────────────────────────────────
-
-  /**
-   * Resolves the subscription an exchange should target. Prefers an explicit
-   * id (validated to belong to the user and be ACTIVE); otherwise falls back
-   * to the user's most recent ACTIVE subscription. Returns `null` only when
-   * the user truly has no active subscription.
-   *
-   * This deliberately does NOT rely solely on `User.currentSubscriptionId`,
-   * which is only backfilled by the importers — purchase / promocode users
-   * would otherwise never be able to spend points on days or traffic.
-   */
-  private async resolveActiveSubscriptionId(
-    userId: string,
-    preferredId: string | null,
-  ): Promise<string | null> {
-    if (preferredId) {
-      const preferred = await this.prismaService.subscription.findFirst({
-        where: { id: preferredId, userId, status: SubscriptionStatus.ACTIVE },
-        select: { id: true },
-      });
-      if (preferred) return preferred.id;
+  private validateInput(input: {
+    readonly type: PointsExchangeType;
+    readonly points: number;
+    readonly idempotencyKey?: string;
+  }): void {
+    if (!isPointsExchangeType(input.type)) {
+      throw new BadRequestException('Unknown points exchange type');
     }
-    const active = await this.prismaService.subscription.findFirst({
-      where: { userId, status: SubscriptionStatus.ACTIVE },
-      orderBy: [{ createdAt: 'desc' }],
-      select: { id: true },
-    });
-    return active?.id ?? null;
+    if (!Number.isSafeInteger(input.points) || input.points <= 0) {
+      throw new BadRequestException('Points must be a positive integer');
+    }
+    if (
+      input.idempotencyKey !== undefined &&
+      (input.idempotencyKey.length === 0 || input.idempotencyKey.length > 128)
+    ) {
+      throw new BadRequestException('Invalid idempotency key');
+    }
   }
 
-  private buildOption(
-    type: PointsExchangeType,
-    typeConfig: ExchangeTypeConfig,
-    balance: number,
-    _globalConfig: PointsExchangeConfig,
-  ): ExchangeOption {
-    const computedValue = typeConfig.pointsCost > 0
-      ? Math.floor(balance / typeConfig.pointsCost)
-      : 0;
-    const available = typeConfig.enabled && balance >= typeConfig.minPoints;
+  private buildOption(type: PointsExchangeType, typeConfig: ExchangeTypeConfig, balance: number): ExchangeOption {
+    const computedValue = typeConfig.pointsCost > 0 ? Math.floor(balance / typeConfig.pointsCost) : 0;
     return {
       type,
       enabled: typeConfig.enabled,
-      available,
+      available: typeConfig.enabled && balance >= typeConfig.minPoints,
       pointsCost: typeConfig.pointsCost,
       minPoints: typeConfig.minPoints,
       maxPoints: typeConfig.maxPoints,
@@ -449,58 +581,60 @@ export class ReferralPointsExchangeService {
   }
 
   private async loadConfig(): Promise<PointsExchangeConfig> {
-    const settings = await this.prismaService.settings.findFirst({
-      select: { referralSettings: true },
-    });
-    if (!settings) return DEFAULT_CONFIG;
+    const settings = await this.prismaService.settings.findFirst({ select: { referralSettings: true } });
+    if (settings === null) return DEFAULT_CONFIG;
     const json = settings.referralSettings as Record<string, unknown>;
-    // The admin panel persists this block in camelCase (`pointsExchange`);
-    // older installs may still carry the legacy snake_case (`points_exchange`)
-    // shape. Read both so the two halves of the system actually meet — a
-    // mismatch here silently resolves `exchangeEnabled` to false and surfaces
-    // "exchange temporarily unavailable" in the cabinet.
-    const pe = pickObject(json, ['pointsExchange', 'points_exchange']);
+    const pointsExchange = pickObject(json, ['pointsExchange', 'points_exchange']);
     return {
-      exchangeEnabled: pickBool(pe, ['exchangeEnabled', 'exchange_enabled']),
-      pointsPerDay: pickNumber(pe, ['pointsPerDay', 'points_per_day'], 100),
-      minExchangePoints: pickNumber(pe, ['minExchangePoints', 'min_exchange_points'], 100),
-      maxExchangePoints: pickNumber(pe, ['maxExchangePoints', 'max_exchange_points'], -1),
-      subscriptionDays: readTypeConfig(pe, ['subscriptionDays', 'subscription_days']),
+      exchangeEnabled: pickBool(pointsExchange, ['exchangeEnabled', 'exchange_enabled']),
+      pointsPerDay: pickNumber(pointsExchange, ['pointsPerDay', 'points_per_day'], 100),
+      minExchangePoints: pickNumber(pointsExchange, ['minExchangePoints', 'min_exchange_points'], 100),
+      maxExchangePoints: pickNumber(pointsExchange, ['maxExchangePoints', 'max_exchange_points'], -1),
+      subscriptionDays: readTypeConfig(pointsExchange, ['subscriptionDays', 'subscription_days']),
       giftSubscription: {
-        ...readTypeConfig(pe, ['giftSubscription', 'gift_subscription']),
-        giftPlanId: readSectionString(pe, ['giftSubscription', 'gift_subscription'], ['giftPlanId', 'gift_plan_id']),
-        giftDurationDays: readSectionNumber(pe, ['giftSubscription', 'gift_subscription'], ['giftDurationDays', 'gift_duration_days'], 30),
+        ...readTypeConfig(pointsExchange, ['giftSubscription', 'gift_subscription']),
+        giftPlanId: readSectionString(pointsExchange, ['giftSubscription', 'gift_subscription'], ['giftPlanId', 'gift_plan_id']),
+        giftDurationDays: readSectionNumber(pointsExchange, ['giftSubscription', 'gift_subscription'], ['giftDurationDays', 'gift_duration_days'], 30),
       },
       discount: {
-        ...readTypeConfig(pe, ['discount']),
-        maxDiscountPercent: readSectionNumber(pe, ['discount'], ['maxDiscountPercent', 'max_discount_percent'], 50),
+        ...readTypeConfig(pointsExchange, ['discount']),
+        maxDiscountPercent: readSectionNumber(pointsExchange, ['discount'], ['maxDiscountPercent', 'max_discount_percent'], 50),
       },
       traffic: {
-        ...readTypeConfig(pe, ['traffic']),
-        maxTrafficGb: readSectionNumber(pe, ['traffic'], ['maxTrafficGb', 'max_traffic_gb'], 100),
+        ...readTypeConfig(pointsExchange, ['traffic']),
+        maxTrafficGb: readSectionNumber(pointsExchange, ['traffic'], ['maxTrafficGb', 'max_traffic_gb'], 100),
       },
     };
   }
 }
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
-/** Returns the first key that holds an object, as an object. */
+function isPointsExchangeType(value: string): value is PointsExchangeType {
+  return value === 'SUBSCRIPTION_DAYS' || value === 'GIFT_SUBSCRIPTION' || value === 'DISCOUNT' || value === 'TRAFFIC';
+}
+
+function isUniqueIdempotencyError(error: unknown): boolean {
+  return error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002';
+}
+
+function toErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 function pickObject(parent: Record<string, unknown> | undefined, keys: readonly string[]): Record<string, unknown> {
-  if (!parent) return {};
+  if (parent === undefined) return {};
   for (const key of keys) {
-    const val = parent[key];
-    if (val !== null && typeof val === 'object') return val as Record<string, unknown>;
+    const value = parent[key];
+    if (value !== null && typeof value === 'object') return value as Record<string, unknown>;
   }
   return {};
 }
 
-/** True when any of the candidate keys is strictly `true`. */
 function pickBool(obj: Record<string, unknown>, keys: readonly string[]): boolean {
   return keys.some((key) => obj[key] === true);
 }
 
-/** First candidate key holding a number, else `fallback`. */
 function pickNumber(obj: Record<string, unknown>, keys: readonly string[], fallback: number): number {
   for (const key of keys) {
     if (typeof obj[key] === 'number') return obj[key] as number;
@@ -508,27 +642,22 @@ function pickNumber(obj: Record<string, unknown>, keys: readonly string[], fallb
   return fallback;
 }
 
-/** First candidate key holding a non-empty string, else `null`. */
 function pickString(obj: Record<string, unknown>, keys: readonly string[]): string | null {
   for (const key of keys) {
-    const val = obj[key];
-    if (typeof val === 'string' && val.length > 0) return val;
+    const value = obj[key];
+    if (typeof value === 'string' && value.length > 0) return value;
   }
   return null;
 }
 
 function readTypeConfig(parent: Record<string, unknown>, sectionKeys: readonly string[]): ExchangeTypeConfig {
-  const obj = pickObject(parent, sectionKeys);
-  const pointsCost = pickNumber(obj, ['pointsCost', 'points_cost'], 100);
+  const section = pickObject(parent, sectionKeys);
+  const pointsCost = pickNumber(section, ['pointsCost', 'points_cost'], 100);
   return {
-    enabled: pickBool(obj, ['enabled']),
+    enabled: pickBool(section, ['enabled']),
     pointsCost,
-    // The admin panel only persists `pointsCost` per type — there is no
-    // separate minimum input. Default the floor to the cost so a configured
-    // option is actually reachable; legacy snake_case installs may still
-    // carry an explicit `min_points`.
-    minPoints: pickNumber(obj, ['minPoints', 'min_points'], pointsCost),
-    maxPoints: pickNumber(obj, ['maxPoints', 'max_points'], -1),
+    minPoints: pickNumber(section, ['minPoints', 'min_points'], pointsCost),
+    maxPoints: pickNumber(section, ['maxPoints', 'max_points'], -1),
   };
 }
 
@@ -543,7 +672,7 @@ function readSectionNumber(parent: Record<string, unknown>, sectionKeys: readonl
 function generateExchangePromoCode(): string {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let code = 'GIFT-';
-  for (let i = 0; i < 8; i++) {
+  for (let index = 0; index < 8; index += 1) {
     code += chars[Math.floor(Math.random() * chars.length)];
   }
   return code;

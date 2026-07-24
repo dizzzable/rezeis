@@ -91,31 +91,37 @@ describe('ReferralPointsExchangeService', () => {
       },
       profileSyncJob: { create: async () => ({ id: 'sync-1' }) },
       $transaction: async (callback: (tx: unknown) => Promise<void>) => callback({
-        user: { update: async (args: unknown) => txCalls.push(['user.update', args]) },
+        $queryRaw: async () => [],
+        user: {
+          findUnique: async () => ({ id: 'user-1', currentSubscriptionId: 'sub-1' }),
+          updateMany: async (args: unknown) => {
+            txCalls.push(['user.updateMany', args]);
+            return { count: 1 };
+          },
+        },
         subscription: {
-          findUnique: async () => ({ id: 'sub-1', expiresAt: new Date('2026-05-01T00:00:00.000Z'), status: SubscriptionStatus.ACTIVE }),
+          findFirst: async () => ({ id: 'sub-1' }),
+          findUnique: async () => ({ id: 'sub-1', userId: 'user-1', expiresAt: new Date('2026-05-01T00:00:00.000Z'), trafficLimit: 100, remnawaveId: 'rw-1', status: SubscriptionStatus.ACTIVE }),
           update: async (args: unknown) => txCalls.push(['subscription.update', args]),
         },
         promocode: { create: async (args: unknown) => txCalls.push(['promocode.create', args]) },
+        profileSyncJob: { create: async () => ({ id: 'sync-1' }) },
+        referralPointsExchange: { create: async () => ({ id: 'exchange-1' }) },
       }),
     } as never, {
       enqueue: async (jobId: string) => queueCalls.push(jobId),
     } as never);
 
-    const result = await service.executeExchange({ userId: 'user-1', type: 'SUBSCRIPTION_DAYS', points: 200 });
+    const result = await service.executeExchange({ userId: 'user-1', type: 'SUBSCRIPTION_DAYS', points: 200, subscriptionId: 'sub-1' });
 
-    assert.deepStrictEqual(result, { success: true, message: 'Exchanged 200 points', value: 2, code: undefined });
-    assert.deepStrictEqual(txCalls, [
-      ['user.update', { where: { id: 'user-1' }, data: { points: { decrement: 200 } } }],
-      ['subscription.update', { where: { id: 'sub-1' }, data: { expiresAt: new Date('2026-05-03T00:00:00.000Z') } }],
-    ]);
+    assert.deepStrictEqual(result, { success: true, message: 'Exchanged 200 points', value: 2, code: undefined, syncPending: true });
+    assert.deepStrictEqual(txCalls[0], ['user.updateMany', { where: { id: 'user-1', points: { gte: 200 } }, data: { points: { decrement: 200 } } }]);
+    const extension = txCalls.find((call) => Array.isArray(call) && call[0] === 'subscription.update') as [string, { data: { expiresAt: Date } }];
+    assert.ok(extension[1].data.expiresAt.getTime() >= Date.now() + 2 * 24 * 60 * 60 * 1000 - 1_000);
     assert.deepStrictEqual(queueCalls, ['sync-1']);
   });
 
-  it('falls back to the user active subscription when currentSubscriptionId is null (purchase/promo users)', async () => {
-    // Regression: purchase / promocode users have a null currentSubscriptionId
-    // (only importers backfill it). The exchange must resolve their active
-    // subscription instead of failing with "no active subscription".
+  it('rejects a lifetime subscription instead of silently converting it into a finite term', async () => {
     const txCalls: unknown[] = [];
     const queueCalls: string[] = [];
     const findFirstCalls: unknown[] = [];
@@ -131,9 +137,20 @@ describe('ReferralPointsExchangeService', () => {
       },
       profileSyncJob: { create: async () => ({ id: 'sync-2' }) },
       $transaction: async (callback: (tx: unknown) => Promise<void>) => callback({
-        user: { update: async (args: unknown) => txCalls.push(['user.update', args]) },
+        $queryRaw: async () => [],
+        user: {
+          findUnique: async () => ({ id: 'user-1', currentSubscriptionId: null }),
+          updateMany: async (args: unknown) => {
+            txCalls.push(['user.updateMany', args]);
+            return { count: 1 };
+          },
+        },
         subscription: {
-          findUnique: async () => ({ id: 'active-sub-9', expiresAt: null, status: SubscriptionStatus.ACTIVE }),
+          findFirst: async (args: unknown) => {
+            findFirstCalls.push(args);
+            return { id: 'active-sub-9' };
+          },
+          findUnique: async () => ({ id: 'active-sub-9', userId: 'user-1', expiresAt: null, trafficLimit: null, remnawaveId: 'rw-1', status: SubscriptionStatus.ACTIVE }),
           update: async (args: unknown) => txCalls.push(['subscription.update', args]),
         },
       }),
@@ -141,18 +158,48 @@ describe('ReferralPointsExchangeService', () => {
       enqueue: async (jobId: string) => queueCalls.push(jobId),
     } as never);
 
-    const result = await service.executeExchange({ userId: 'user-1', type: 'SUBSCRIPTION_DAYS', points: 200 });
-
-    assert.equal(result.success, true);
-    assert.equal(result.value, 2);
-    // The active-subscription fallback was consulted and the extension applied.
+    await assert.rejects(
+      service.executeExchange({ userId: 'user-1', type: 'SUBSCRIPTION_DAYS', points: 200 }),
+      BadRequestException,
+    );
     assert.ok(findFirstCalls.length >= 1);
-    const applied = txCalls.find((c) => Array.isArray(c) && c[0] === 'subscription.update') as
-      | [string, { where: { id: string } }]
-      | undefined;
-    assert.ok(applied);
-    assert.equal(applied[1].where.id, 'active-sub-9');
-    assert.deepStrictEqual(queueCalls, ['sync-2']);
+    assert.deepStrictEqual(txCalls, []);
+    assert.deepStrictEqual(queueCalls, []);
+  });
+
+  it('refuses to spend points on an unlinked legacy subscription', async () => {
+    const txCalls: unknown[] = [];
+    const service = new ReferralPointsExchangeService({
+      settings: { findFirst: async () => ({ referralSettings }) },
+      user: { findUnique: async () => ({ id: 'user-1', points: 250, currentSubscriptionId: 'legacy-sub' }) },
+      $transaction: async (callback: (tx: unknown) => Promise<void>) => callback({
+        $queryRaw: async () => [],
+        user: {
+          findUnique: async () => ({ id: 'user-1', currentSubscriptionId: 'legacy-sub' }),
+          updateMany: async (args: unknown) => {
+            txCalls.push(['user.updateMany', args]);
+            return { count: 1 };
+          },
+        },
+        subscription: {
+          findFirst: async () => ({ id: 'legacy-sub' }),
+          findUnique: async () => ({
+            id: 'legacy-sub',
+            userId: 'user-1',
+            expiresAt: new Date('2026-05-01T00:00:00.000Z'),
+            trafficLimit: 100,
+            remnawaveId: null,
+            status: SubscriptionStatus.ACTIVE,
+          }),
+        },
+      }),
+    } as never, {} as never);
+
+    await assert.rejects(
+      service.executeExchange({ userId: 'user-1', type: 'SUBSCRIPTION_DAYS', points: 100, subscriptionId: 'legacy-sub' }),
+      { message: 'Subscription needs a Remnawave profile repair before points can be exchanged' },
+    );
+    assert.deepStrictEqual(txCalls, []);
   });
 
   it('mints a single-use gift promo code with a complete plan snapshot and charges exactly the points cost', async () => {
@@ -174,7 +221,13 @@ describe('ReferralPointsExchangeService', () => {
       settings: { findFirst: async () => ({ referralSettings: giftSettings }) },
       user: { findUnique: async () => ({ id: 'user-1', points: 1200, currentSubscriptionId: null }) },
       $transaction: async (callback: (tx: unknown) => Promise<void>) => callback({
-        user: { update: async (args: unknown) => txCalls.push(['user.update', args]) },
+        user: {
+          findUnique: async () => ({ id: 'user-1' }),
+          updateMany: async (args: unknown) => {
+            txCalls.push(['user.updateMany', args]);
+            return { count: 1 };
+          },
+        },
         plan: {
           findUnique: async () => ({
             id: 'plan-x',
@@ -188,7 +241,13 @@ describe('ReferralPointsExchangeService', () => {
             externalSquad: null,
           }),
         },
-        promocode: { create: async (args: unknown) => txCalls.push(['promocode.create', args]) },
+        promocode: {
+          create: async (args: unknown) => {
+            txCalls.push(['promocode.create', args]);
+            return { id: 'gift-promo-1' };
+          },
+        },
+        referralPointsExchange: { create: async () => ({ id: 'exchange-gift-1' }) },
       }),
     } as never, {} as never);
 
@@ -201,7 +260,7 @@ describe('ReferralPointsExchangeService', () => {
     assert.equal(typeof result.code, 'string');
     assert.match(result.code as string, /^GIFT-[A-Z0-9]{8}$/);
 
-    const deduct = txCalls.find((c) => Array.isArray(c) && c[0] === 'user.update') as [string, { data: { points: { decrement: number } } }];
+    const deduct = txCalls.find((c) => Array.isArray(c) && c[0] === 'user.updateMany') as [string, { data: { points: { decrement: number } } }];
     assert.equal(deduct[1].data.points.decrement, 500);
 
     const created = txCalls.find((c) => Array.isArray(c) && c[0] === 'promocode.create') as [string, { data: { plan: Record<string, unknown>; rewardType: string; reward: number; maxActivations: number } }];
@@ -235,9 +294,14 @@ describe('ReferralPointsExchangeService', () => {
       user: { findUnique: async () => ({ id: 'user-1', points: 1000, currentSubscriptionId: null }) },
       $transaction: async (callback: (tx: unknown) => Promise<void>) => callback({
         user: {
+          updateMany: async (args: unknown) => {
+            txCalls.push(['user.updateMany', args]);
+            return { count: 1 };
+          },
           update: async (args: unknown) => txCalls.push(['user.update', args]),
-          findUnique: async () => ({ personalDiscount: 45 }),
+          findUnique: async () => ({ id: 'user-1', personalDiscount: 45 }),
         },
+        referralPointsExchange: { create: async () => ({ id: 'exchange-discount-1' }) },
       }),
     } as never, {} as never);
 
@@ -256,5 +320,41 @@ describe('ReferralPointsExchangeService', () => {
     } as never, {} as never);
 
     await assert.rejects(service.executeExchange({ userId: 'user-1', type: 'TRAFFIC', points: 50 }), BadRequestException);
+  });
+
+  it('replays an idempotent exchange after configuration changes', async () => {
+    let loadedSettings = false;
+    const service = new ReferralPointsExchangeService({
+      referralPointsExchange: {
+        findUnique: async () => ({
+          pointsSpent: 200,
+          rewardValue: 2,
+          profileSyncJobId: 'sync-1',
+          giftPromocode: null,
+        }),
+      },
+      settings: {
+        findFirst: async () => {
+          loadedSettings = true;
+          return { referralSettings: { points_exchange: { exchange_enabled: false } } };
+        },
+      },
+    } as never, {} as never);
+
+    const result = await service.executeExchange({
+      userId: 'user-1',
+      type: 'SUBSCRIPTION_DAYS',
+      points: 200,
+      idempotencyKey: 'retry-after-settings-change',
+    });
+
+    assert.deepStrictEqual(result, {
+      success: true,
+      message: 'Exchanged 200 points',
+      value: 2,
+      code: undefined,
+      syncPending: true,
+    });
+    assert.equal(loadedSettings, false);
   });
 });

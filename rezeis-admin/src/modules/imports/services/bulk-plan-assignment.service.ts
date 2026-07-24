@@ -2,6 +2,7 @@ import { BadRequestException, Injectable, Logger, NotFoundException } from '@nes
 import { Prisma, SubscriptionStatus, SyncAction } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
 
 export interface BulkPlanAssignmentInput {
   /** Plan ID to assign */
@@ -52,7 +53,10 @@ export interface BulkPlanAssignmentResult {
 export class BulkPlanAssignmentService {
   private readonly logger = new Logger(BulkPlanAssignmentService.name);
 
-  public constructor(private readonly prismaService: PrismaService) {}
+  public constructor(
+    private readonly prismaService: PrismaService,
+    private readonly profileSyncQueueService: ProfileSyncQueueService,
+  ) {}
 
   public async assignPlan(input: BulkPlanAssignmentInput): Promise<BulkPlanAssignmentResult> {
     // Load the plan with durations
@@ -234,14 +238,24 @@ export class BulkPlanAssignmentService {
           subscription.status === SubscriptionStatus.LIMITED)
       ) {
         const action = subscription.remnawaveId ? SyncAction.UPDATE : SyncAction.CREATE;
-        await this.prismaService.profileSyncJob.create({
+        const syncJob = await this.prismaService.profileSyncJob.create({
           data: {
             subscriptionId: subscription.id,
             action,
             payload: { bulkPlanAssignment: true, planId: plan.id, applyImmediately: true } satisfies Prisma.InputJsonValue,
           },
+          select: { id: true },
         });
         syncJobsCreated += 1;
+        try {
+          await this.profileSyncQueueService.enqueue(syncJob.id);
+        } catch (error: unknown) {
+          this.logger.warn(
+            `Bulk plan assignment persisted sync job ${syncJob.id} for ${subscription.id}; sweep will retry enqueue: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
       }
     }
 

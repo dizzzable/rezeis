@@ -1099,6 +1099,63 @@ const accountMergeSummarySchema = z.object({
   createdAt: z.string(),
 })
 
+const operationSubscriptionSchema = z.object({
+  id: z.string(),
+  label: z.string().nullable(),
+}).nullable()
+
+const userOperationSchema = z.discriminatedUnion('kind', [
+  z.object({
+    id: z.string(),
+    kind: z.literal('PAYMENT'),
+    occurredAt: z.string(),
+    payload: z.object({
+      paymentId: z.string().nullable(),
+      status: z.string(),
+      purchaseType: z.string().nullable(),
+      gatewayType: z.string().nullable(),
+      currency: z.string(),
+      amount: z.string(),
+    }),
+  }),
+  z.object({
+    id: z.string(),
+    kind: z.literal('PROMOCODE_ACTIVATION'),
+    occurredAt: z.string(),
+    payload: z.object({
+      codeMasked: z.string(),
+      rewardType: z.string(),
+      rewardValue: z.number(),
+      targetSubscription: operationSubscriptionSchema,
+    }),
+  }),
+  z.object({
+    id: z.string(),
+    kind: z.literal('POINTS_EXCHANGE'),
+    occurredAt: z.string(),
+    payload: z.object({
+      type: z.enum(['SUBSCRIPTION_DAYS', 'GIFT_SUBSCRIPTION', 'DISCOUNT', 'TRAFFIC']),
+      pointsSpent: z.number(),
+      rewardValue: z.number(),
+      expiresAtBefore: z.string().nullable(),
+      expiresAtAfter: z.string().nullable(),
+      trafficLimitBefore: z.number().nullable(),
+      trafficLimitAfter: z.number().nullable(),
+      personalDiscountBefore: z.number().nullable(),
+      personalDiscountAfter: z.number().nullable(),
+      targetSubscription: operationSubscriptionSchema,
+      sync: z.object({ status: z.string(), lastError: z.string().nullable() }).nullable(),
+    }),
+  }),
+])
+
+const userOperationsSchema = z.object({
+  items: z.array(userOperationSchema),
+  total: z.number().int().nonnegative(),
+  page: z.number().int().positive(),
+  limit: z.number().int().positive(),
+})
+
 const accountMergePreviewSchema = z.object({
   current: accountMergeSummarySchema,
   counterpart: accountMergeSummarySchema,
@@ -1118,6 +1175,8 @@ const accountMergeResultSchema = z.object({
 export type AccountMergeSummary = z.infer<typeof accountMergeSummarySchema>
 export type AccountMergePreview = z.infer<typeof accountMergePreviewSchema>
 export type AccountMergeResult = z.infer<typeof accountMergeResultSchema>
+export type UserOperation = z.infer<typeof userOperationSchema>
+export type UserOperations = z.infer<typeof userOperationsSchema>
 
 export interface AccountMergeChoices {
   readonly keepLogin?: 'source' | 'target'
@@ -1136,6 +1195,17 @@ async function getAccountMergePreview(input: {
   return accountMergePreviewSchema.parse(unwrapPayload(response.data))
 }
 
+async function listUserOperations(input: {
+  readonly userId: string
+  readonly page?: number
+  readonly limit?: number
+}): Promise<UserOperations> {
+  const response = await api.get(`/admin/users/${encodeURIComponent(input.userId)}/operations`, {
+    params: { page: input.page, limit: input.limit },
+  })
+  return userOperationsSchema.parse(unwrapPayload(response.data))
+}
+
 async function mergeAccounts(input: {
   readonly sourceId: string
   readonly targetId: string
@@ -1148,6 +1218,7 @@ async function mergeAccounts(input: {
 
 export const usersApi = {
   searchUser,
+  listUserOperations,
   getAccountMergePreview,
   mergeAccounts,
   listUsers,

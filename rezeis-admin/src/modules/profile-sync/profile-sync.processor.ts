@@ -160,6 +160,7 @@ export class ProfileSyncProcessor extends WorkerHost {
             externalSquad: true,
             expiresAt: true,
             planSnapshot: true,
+            status: true,
           },
         },
       },
@@ -590,6 +591,12 @@ export class ProfileSyncProcessor extends WorkerHost {
         telegramId: contacts.telegramId ? Number(contacts.telegramId) : null,
         email: contacts.email,
         description: naming.description,
+        // Status is a separate panel field. It is intentionally forwarded
+        // only for an explicit admin toggle; derived local states such as
+        // EXPIRED/LIMITED must not overwrite Remnawave during routine syncs.
+        ...(readBoolean(readRecord(current.payload), 'propagateStatus')
+          ? { status: subscription.status }
+          : {}),
         tag,
         expireAt: subscription.expiresAt?.toISOString(),
         trafficLimitBytes: (subscription.trafficLimit ?? 0) * 1024 * 1024 * 1024,
@@ -788,6 +795,7 @@ type SyncJobRecord = NonNullable<
     externalSquad: string | null;
     expiresAt: Date | null;
     planSnapshot: unknown;
+    status: SubscriptionStatus;
   };
 };
 
@@ -826,6 +834,10 @@ function readOptionalString(record: Record<string, unknown>, key: string): strin
     return candidate.trim();
   }
   return null;
+}
+
+function readBoolean(record: Record<string, unknown>, key: string): boolean {
+  return record[key] === true;
 }
 
 function readTargetRemnawaveId(value: unknown): string | null {

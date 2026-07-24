@@ -140,6 +140,7 @@ export class ImportProcessor extends WorkerHost {
             tariffCategories,
             tariffPriceOptions,
             payments,
+            referralCredits,
           } = await parseStealthnetBackup(buffer);
           await job.updateProgress({ stage: 'parsed', percent: 20, records: clients.length });
           result = await this.stealthnetImporterService.run({
@@ -152,6 +153,7 @@ export class ImportProcessor extends WorkerHost {
             tariffCategories,
             tariffPriceOptions,
             payments,
+            referralCredits,
             ...(balanceToPoints ? { balanceToPoints } : {}),
           });
           break;

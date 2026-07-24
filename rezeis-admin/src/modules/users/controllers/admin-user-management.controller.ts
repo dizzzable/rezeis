@@ -28,6 +28,7 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   Req,
   UseGuards,
 } from '@nestjs/common';
@@ -47,7 +48,9 @@ import { UserNotificationsService } from '../../notifications/services/user-noti
 import { PartnerEarningsService } from '../../partners/services/partner-earnings.service';
 import { ReferralInviteLimitsService } from '../../referrals/services/referral-invite-limits.service';
 import { ReferralManualAttachService } from '../../referrals/services/referral-manual-attach.service';
+import { ReferralQualificationService } from '../../referrals/services/referral-qualification.service';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
+import { StealthnetReferralSyncService } from '../../imports/services/stealthnet-referral-sync.service';
 import { UpdatePartnerSettingsDto } from '../dto/update-partner-settings.dto';
 import { UpdateUserInviteSettingsDto } from '../dto/update-user-invite-settings.dto';
 import { resolveIdentityKind } from '../utils/identity-kind.util';
@@ -63,6 +66,8 @@ export class AdminUserManagementController {
     private readonly events: SystemEventsService,
     private readonly partnerEarningsService: PartnerEarningsService,
     private readonly referralManualAttachService: ReferralManualAttachService,
+    private readonly referralQualificationService: ReferralQualificationService,
+    private readonly stealthnetReferralSyncService: StealthnetReferralSyncService,
     private readonly referralInviteLimitsService: ReferralInviteLimitsService,
     private readonly remnawaveApiService: RemnawaveApiService,
     private readonly userNotifications: UserNotificationsService,
@@ -96,6 +101,137 @@ export class AdminUserManagementController {
     });
     await this.auditLog(admin, req, 'user.created', { userId: user.id, telegramId: body.telegramId ?? null });
     return { ...user, telegramId: user.telegramId?.toString() ?? null };
+  }
+
+  /**
+   * Paginated, typed user history. Payments remain payment records, while
+   * promocode activations and referral point exchanges keep their own domain
+   * semantics instead of being forged into zero-value transactions.
+   */
+  @Get(':telegramId/operations')
+  public async listUserOperations(
+    @Param('telegramId') telegramId: string,
+    @Query('page') pageInput?: string,
+    @Query('limit') limitInput?: string,
+  ) {
+    const user = await this.findUserByTelegramId(telegramId);
+    // We merge three independently ordered timelines in memory. Keep the
+    // bounded prefix finite so a crafted page value cannot load millions of
+    // records from every table.
+    const page = normalizePositiveInteger(pageInput, 1, 1, 100);
+    const limit = normalizePositiveInteger(limitInput, 25, 1, 100);
+    const take = page * limit;
+
+    const [transactions, promocodes, exchanges, transactionCount, promocodeCount, exchangeCount] = await Promise.all([
+      this.prismaService.transaction.findMany({
+        where: { userId: user.id },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        take,
+        select: {
+          id: true,
+          paymentId: true,
+          status: true,
+          purchaseType: true,
+          gatewayType: true,
+          currency: true,
+          amount: true,
+          createdAt: true,
+        },
+      }),
+      this.prismaService.promocodeActivation.findMany({
+        where: { userId: user.id },
+        orderBy: [{ activatedAt: 'desc' }, { id: 'desc' }],
+        take,
+        select: {
+          id: true,
+          promocodeCode: true,
+          rewardType: true,
+          rewardValue: true,
+          activatedAt: true,
+          targetSubscription: { select: { id: true, planSnapshot: true } },
+        },
+      }),
+      this.prismaService.referralPointsExchange.findMany({
+        where: { userId: user.id },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        take,
+        select: {
+          id: true,
+          type: true,
+          pointsSpent: true,
+          rewardValue: true,
+          expiresAtBefore: true,
+          expiresAtAfter: true,
+          trafficLimitBefore: true,
+          trafficLimitAfter: true,
+          personalDiscountBefore: true,
+          personalDiscountAfter: true,
+          createdAt: true,
+          targetSubscription: { select: { id: true, planSnapshot: true } },
+          profileSyncJob: { select: { status: true, lastError: true } },
+        },
+      }),
+      this.prismaService.transaction.count({ where: { userId: user.id } }),
+      this.prismaService.promocodeActivation.count({ where: { userId: user.id } }),
+      this.prismaService.referralPointsExchange.count({ where: { userId: user.id } }),
+    ]);
+
+    const items = [
+      ...transactions.map((transaction) => ({
+        id: transaction.id,
+        kind: 'PAYMENT' as const,
+        occurredAt: transaction.createdAt,
+        payload: {
+          paymentId: transaction.paymentId,
+          status: transaction.status,
+          purchaseType: transaction.purchaseType,
+          gatewayType: transaction.gatewayType,
+          currency: transaction.currency,
+          amount: transaction.amount.toString(),
+        },
+      })),
+      ...promocodes.map((activation) => ({
+        id: activation.id,
+        kind: 'PROMOCODE_ACTIVATION' as const,
+        occurredAt: activation.activatedAt,
+        payload: {
+          codeMasked: maskPromocode(activation.promocodeCode),
+          rewardType: activation.rewardType,
+          rewardValue: activation.rewardValue,
+          targetSubscription: serializeOperationSubscription(activation.targetSubscription),
+        },
+      })),
+      ...exchanges.map((exchange) => ({
+        id: exchange.id,
+        kind: 'POINTS_EXCHANGE' as const,
+        occurredAt: exchange.createdAt,
+        payload: {
+          type: exchange.type,
+          pointsSpent: exchange.pointsSpent,
+          rewardValue: exchange.rewardValue,
+          expiresAtBefore: exchange.expiresAtBefore?.toISOString() ?? null,
+          expiresAtAfter: exchange.expiresAtAfter?.toISOString() ?? null,
+          trafficLimitBefore: exchange.trafficLimitBefore,
+          trafficLimitAfter: exchange.trafficLimitAfter,
+          personalDiscountBefore: exchange.personalDiscountBefore,
+          personalDiscountAfter: exchange.personalDiscountAfter,
+          targetSubscription: serializeOperationSubscription(exchange.targetSubscription),
+          sync: exchange.profileSyncJob
+            ? { status: exchange.profileSyncJob.status, lastError: exchange.profileSyncJob.lastError }
+            : null,
+        },
+      })),
+    ]
+      .sort((left, right) => right.occurredAt.getTime() - left.occurredAt.getTime() || right.id.localeCompare(left.id))
+      .slice((page - 1) * limit, page * limit)
+      .map((item) => ({ ...item, occurredAt: item.occurredAt.toISOString() }));
+
+    return {
+      items,
+      total: transactionCount + promocodeCount + exchangeCount,
+      page,
+      limit,
+    };
   }
 
   /** Get full user detail by telegramId (aggregated view for admin panel). */
@@ -566,6 +702,57 @@ export class AdminUserManagementController {
     return result;
   }
 
+  /** Retry this user's source referral edge from a completed STEALTHNET import. */
+  @Post(':telegramId/referral/sync-stealthnet')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('referrals', 'edit')
+  public async syncStealthnetReferrer(
+    @Param('telegramId') telegramId: string,
+    @CurrentAdmin() admin: CurrentAdminInterface,
+    @Req() req: Request,
+  ) {
+    const user = await this.findUserByTelegramId(telegramId);
+    const result = await this.stealthnetReferralSyncService.syncForUser(user.id);
+    await this.auditLog(admin, req, 'user.referral.stealthnet_synced', {
+      userId: user.id,
+      telegramId,
+      ...result,
+    });
+    if (result.status === 'CREATED') {
+      this.events.info(EVENT_TYPES.REFERRAL_MANUAL_ATTACHED, 'REFERRAL', 'Referral restored from STEALTHNET', {
+        userId: user.id,
+        referredUserId: user.id,
+        referrerId: result.referrerUserId,
+        telegramId,
+        importRecordId: result.importRecordId,
+        source: 'stealthnet',
+      });
+    }
+    return result;
+  }
+
+  /** Manually qualifies the user's existing referral edge and stages configured rewards. */
+  @Post(':telegramId/referral/qualify')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('referrals', 'edit')
+  public async qualifyReferral(
+    @Param('telegramId') telegramId: string,
+    @CurrentAdmin() admin: CurrentAdminInterface,
+    @Req() req: Request,
+  ) {
+    const user = await this.findUserByTelegramId(telegramId);
+    const result = await this.referralQualificationService.qualifyReferralManually({
+      referredUserId: user.id,
+      actorAdminId: admin.id,
+    });
+    await this.auditLog(admin, req, 'user.referral.manually_qualified', {
+      userId: user.id,
+      telegramId,
+      ...result,
+    });
+    return result;
+  }
+
   /**
    * Attach a user as a referral to this user's partner account.
    *
@@ -834,4 +1021,44 @@ function buildInviteSettingsValue(
     return Prisma.JsonNull;
   }
   return out as Prisma.InputJsonValue;
+}
+
+function normalizePositiveInteger(
+  value: string | undefined,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  if (value === undefined) return fallback;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) return fallback;
+  return Math.min(max, Math.max(min, parsed));
+}
+
+function maskPromocode(code: string): string {
+  if (code.length <= 4) return '••••';
+  return `${code.slice(0, 2)}••••${code.slice(-2)}`;
+}
+
+function serializeOperationSubscription(
+  subscription: { readonly id: string; readonly planSnapshot: unknown } | null,
+): { id: string; label: string | null } | null {
+  if (subscription === null) return null;
+  const snapshot = subscription.planSnapshot;
+  const label =
+    snapshot !== null && typeof snapshot === 'object' && !Array.isArray(snapshot)
+      ? readOperationPlanLabel(snapshot as Record<string, unknown>)
+      : null;
+  return { id: subscription.id, label };
+}
+
+function readOperationPlanLabel(snapshot: Record<string, unknown>): string | null {
+  const direct = snapshot.name;
+  if (typeof direct === 'string' && direct.trim().length > 0) return direct.trim();
+  const nested = snapshot.originalPlanSnapshot;
+  if (nested !== null && typeof nested === 'object' && !Array.isArray(nested)) {
+    const name = (nested as Record<string, unknown>).name;
+    if (typeof name === 'string' && name.trim().length > 0) return name.trim();
+  }
+  return null;
 }

@@ -149,6 +149,21 @@ export interface StealthnetPayment {
   readonly bot_id: string | null;
 }
 
+/**
+ * Historical referral reward already credited by STEALTHNET. It is imported
+ * as an issued audit record only: the corresponding wallet balance is moved
+ * separately by the user importer, so applying it again would double-credit
+ * the referrer.
+ */
+export interface StealthnetReferralCredit {
+  readonly id: string;
+  readonly referrer_id: string;
+  readonly payment_id: string;
+  readonly amount: number;
+  readonly level: number;
+  readonly created_at: string;
+}
+
 export interface StealthnetBackupData {
   readonly clients: readonly StealthnetClient[];
   readonly subscriptions: readonly StealthnetSubscription[];
@@ -156,6 +171,7 @@ export interface StealthnetBackupData {
   readonly tariffCategories: readonly StealthnetTariffCategory[];
   readonly tariffPriceOptions: readonly StealthnetTariffPriceOption[];
   readonly payments: readonly StealthnetPayment[];
+  readonly referralCredits: readonly StealthnetReferralCredit[];
 }
 
 // ── Entry point ─────────────────────────────────────────────────────────────
@@ -240,6 +256,7 @@ function parseSqlDump(sql: string): StealthnetBackupData {
     tariffCategories: extractTariffCategories(blocksByTable.get('tariff_categories')),
     tariffPriceOptions: extractTariffPriceOptions(blocksByTable.get('tariff_price_options')),
     payments: extractPayments(blocksByTable.get('payments')),
+    referralCredits: extractReferralCredits(blocksByTable.get('referral_credits')),
   };
 }
 
@@ -581,4 +598,25 @@ function extractPayments(block: CopyBlock | undefined): StealthnetPayment[] {
     device_count: readNullableInt(row, deviceCountIdx),
     bot_id: readNullableString(row, botIdIdx),
   }));
+}
+
+function extractReferralCredits(block: CopyBlock | undefined): StealthnetReferralCredit[] {
+  if (!block) return [];
+  const idIdx = colIndex(block, 'id');
+  const referrerIdIdx = colIndex(block, 'referrer_id');
+  const paymentIdIdx = colIndex(block, 'payment_id');
+  const amountIdx = colIndex(block, 'amount');
+  const levelIdx = colIndex(block, 'level');
+  const createdAtIdx = colIndex(block, 'created_at');
+
+  return block.rows
+    .map((row) => ({
+      id: readString(row, idIdx),
+      referrer_id: readString(row, referrerIdIdx),
+      payment_id: readString(row, paymentIdIdx),
+      amount: Math.max(0, readInt(row, amountIdx, 0)),
+      level: Math.max(1, readInt(row, levelIdx, 1)),
+      created_at: readString(row, createdAtIdx, new Date().toISOString()),
+    }))
+    .filter((credit) => credit.id.length > 0 && credit.referrer_id.length > 0 && credit.payment_id.length > 0);
 }

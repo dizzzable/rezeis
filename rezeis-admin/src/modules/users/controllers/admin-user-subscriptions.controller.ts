@@ -46,6 +46,8 @@ import { SubscriptionDeletionService } from '../../subscriptions/services/subscr
 import { SystemEventsService, EVENT_TYPES } from '../../../common/services/system-events.service';
 import { buildPlanSnapshot } from '../utils/plan-snapshot.util';
 
+const REMNAWAVE_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 @Controller('admin/users')
 @UseGuards(AdminJwtAuthGuard, RbacGuard)
 @RequirePermission('subscriptions', 'view')
@@ -72,6 +74,13 @@ export class AdminUserSubscriptionsController {
     const data: Prisma.SubscriptionUpdateInput = {};
     let assignedPlanId: string | null = null;
 
+    if (body.status !== undefined) {
+      if (body.status !== SubscriptionStatus.ACTIVE && body.status !== SubscriptionStatus.DISABLED) {
+        throw new BadRequestException('Only ACTIVE or DISABLED can be set by the subscription editor');
+      }
+      data.status = body.status;
+    }
+
     if (body.planId !== undefined && body.planId !== null) {
       const planId = String(body.planId);
       const plan = await this.prismaService.plan.findUnique({ where: { id: planId } });
@@ -84,7 +93,6 @@ export class AdminUserSubscriptionsController {
       data.externalSquad = plan.externalSquad ?? null;
       assignedPlanId = plan.id;
     }
-    if (body.status !== undefined) data.status = body.status as SubscriptionStatus;
     if (body.trafficLimit !== undefined && assignedPlanId === null) {
       data.trafficLimit = Number(body.trafficLimit);
     }
@@ -93,7 +101,9 @@ export class AdminUserSubscriptionsController {
     }
     if (body.expireDays !== undefined) {
       const days = Number(body.expireDays);
-      const base = sub.expiresAt ?? new Date();
+      const base = sub.expiresAt === null
+        ? new Date()
+        : new Date(Math.max(sub.expiresAt.getTime(), Date.now()));
       const newExpiry = new Date(base.getTime() + days * 24 * 60 * 60 * 1000);
       if (newExpiry.getTime() < Date.now()) {
         throw new BadRequestException(
@@ -106,13 +116,9 @@ export class AdminUserSubscriptionsController {
       data.expiresAt = new Date(String(body.expiresAt));
     }
 
-    const updated = await this.prismaService.subscription.update({
-      where: { id: subscriptionId },
-      data,
-    });
-
     // Anything that changes the underlying profile shape must be propagated
-    // to Remnawave. We only enqueue if there is something to push.
+    // to Remnawave. The local mutation and durable job live in one transaction;
+    // a queue outage only delays the push because the sweep can recover PENDING.
     const requiresPanelPush =
       assignedPlanId !== null
       || body.trafficLimit !== undefined
@@ -120,11 +126,60 @@ export class AdminUserSubscriptionsController {
       || body.expireDays !== undefined
       || body.expiresAt !== undefined
       || body.status !== undefined;
-    if (requiresPanelPush) {
-      await this.enqueueSubscriptionSync(updated.id, updated.remnawaveId);
+    const outcome = await this.prismaService.$transaction(async (tx) => {
+      const updated = await tx.subscription.update({
+        where: { id: subscriptionId },
+        data,
+      });
+      // A generic editor update must never provision a second panel profile
+      // for an imported/legacy row whose link is missing. Creation remains an
+      // explicit "give subscription" flow; operators can repair a link before
+      // pushing local edits upstream.
+      if (!requiresPanelPush || updated.remnawaveId === null) {
+        return {
+          updated,
+          syncJobId: null as string | null,
+          remnawaveLinkRequired: requiresPanelPush && updated.remnawaveId === null,
+        };
+      }
+
+      const syncJob = await tx.profileSyncJob.create({
+        data: {
+          subscriptionId: updated.id,
+          action: SyncAction.UPDATE,
+          status: SyncJobStatus.PENDING,
+          payload: {
+            source: 'ADMIN_MUTATION',
+            // Remnawave only receives status when the operator explicitly
+            // changed it. Derived EXPIRED/LIMITED states must never be pushed.
+            propagateStatus: body.status !== undefined,
+          } as Prisma.InputJsonObject,
+        },
+        select: { id: true },
+      });
+      return { updated, syncJobId: syncJob.id, remnawaveLinkRequired: false };
+    });
+
+    if (outcome.syncJobId !== null) {
+      try {
+        await this.profileSyncQueueService.enqueue(outcome.syncJobId);
+      } catch (error: unknown) {
+        // The state and job are already durable. The periodic queue recovery
+        // picks this up, so do not turn a successful edit into a false failure.
+        this.systemEvents.warn(
+          EVENT_TYPES.SYSTEM_REMNAWAVE_SYNC,
+          'SYSTEM',
+          'Admin subscription update queued for deferred Remnawave sync',
+          { subscriptionId, syncJobId: outcome.syncJobId, error: error instanceof Error ? error.message : String(error) },
+        );
+      }
     }
 
-    return updated;
+    return {
+      ...outcome.updated,
+      syncPending: outcome.syncJobId !== null,
+      remnawaveLinkRequired: outcome.remnawaveLinkRequired,
+    };
   }
 
   @Patch('subscriptions/:subscriptionId/squads')
@@ -144,6 +199,84 @@ export class AdminUserSubscriptionsController {
     });
     await this.enqueueSubscriptionSync(updated.id, updated.remnawaveId);
     return updated;
+  }
+
+  /**
+   * Explicitly repairs a legacy local-to-panel link. Generic edits never
+   * create a profile for an unlinked row: that could duplicate an existing
+   * imported user. The UUID is verified against the panel before persisting.
+   */
+  @Patch('subscriptions/:subscriptionId/remnawave-link')
+  @RequirePermission('subscriptions', 'edit')
+  public async linkRemnawaveProfile(
+    @Param('subscriptionId') subscriptionId: string,
+    @Body() body: { remnawaveId?: unknown },
+    @CurrentAdmin() admin: CurrentAdminInterface,
+    @Req() req: Request,
+  ) {
+    const remnawaveId = typeof body.remnawaveId === 'string' ? body.remnawaveId.trim() : '';
+    if (!REMNAWAVE_UUID_PATTERN.test(remnawaveId)) {
+      throw new BadRequestException('A valid Remnawave profile UUID is required');
+    }
+
+    const subscription = await this.prismaService.subscription.findUnique({
+      where: { id: subscriptionId },
+      select: {
+        id: true,
+        userId: true,
+        remnawaveId: true,
+        configUrl: true,
+        user: { select: { id: true, telegramId: true, email: true } },
+      },
+    });
+    if (subscription === null) throw new NotFoundException('Subscription not found');
+    if (subscription.remnawaveId !== null) {
+      throw new BadRequestException('Subscription already has a Remnawave profile linked');
+    }
+
+    const alreadyLinked = await this.prismaService.subscription.findFirst({
+      where: { remnawaveId, NOT: { id: subscriptionId } },
+      select: { id: true },
+    });
+    if (alreadyLinked !== null) {
+      throw new BadRequestException('This Remnawave profile is already linked to another subscription');
+    }
+
+    const panelUser = await this.remnawaveApiService.getPanelUser(remnawaveId);
+    if (panelUser === null) throw new NotFoundException('Remnawave profile was not found');
+
+    const expectedMarker = `reiwa_id: ${subscription.user.id}`;
+    const markerMatches = panelUser.description
+      ?.split(/\r?\n/)
+      .some((line) => line.trim() === expectedMarker) ?? false;
+    const telegramMatches =
+      subscription.user.telegramId !== null &&
+      panelUser.telegramId !== null &&
+      subscription.user.telegramId.toString() === String(panelUser.telegramId);
+    const emailMatches =
+      subscription.user.email !== null &&
+      panelUser.email !== null &&
+      subscription.user.email.trim().toLowerCase() === panelUser.email.trim().toLowerCase();
+    if (!markerMatches && !telegramMatches && !emailMatches) {
+      throw new BadRequestException('Remnawave profile does not belong to this subscription user');
+    }
+
+    const linked = await this.prismaService.subscription.update({
+      where: { id: subscriptionId },
+      data: {
+        remnawaveId,
+        configUrl: panelUser.subscriptionUrl || subscription.configUrl,
+      },
+    });
+    await this.auditLog(admin, req, 'user.subscription.remnawave_linked', {
+      userId: subscription.userId,
+      subscriptionId,
+      previousRemnawaveId: subscription.remnawaveId,
+      remnawaveId,
+      ownershipVerifiedBy: markerMatches ? 'reiwa_id' : telegramMatches ? 'telegram_id' : 'email',
+      configUrlChanged: (panelUser.subscriptionUrl || subscription.configUrl) !== subscription.configUrl,
+    });
+    return linked;
   }
 
   @Delete('subscriptions/:subscriptionId')
