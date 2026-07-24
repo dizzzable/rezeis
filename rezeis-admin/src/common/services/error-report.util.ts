@@ -67,6 +67,9 @@ interface DerivedError {
   readonly level: string;
   readonly errorType: string;
   readonly errorMessage: string;
+  readonly filename: string | null;
+  readonly lineno: number | null;
+  readonly colno: number | null;
   readonly why: string;
   readonly nextSteps: string;
   readonly build: BuildInfo;
@@ -89,6 +92,11 @@ function stripOriginPrefix(message: string): string {
 function readStr(meta: Record<string, unknown>, key: string): string | null {
   const value = meta[key];
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
+}
+
+function readPositiveInteger(meta: Record<string, unknown>, key: string): number | null {
+  const value = meta[key];
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : null;
 }
 
 /**
@@ -133,6 +141,9 @@ export function deriveError(
     readStr(meta, 'scope') ?? readStr(meta, 'operation') ?? readStr(meta, 'path') ?? '—';
   const errorType = readStr(meta, 'errorName') ?? readStr(meta, 'errorType') ?? '—';
   const errorMessage = stripOriginPrefix(event.message) || '—';
+  const filename = readStr(meta, 'filename');
+  const lineno = readPositiveInteger(meta, 'lineno');
+  const colno = readPositiveInteger(meta, 'colno');
   const stack = readStr(meta, 'stack');
   const build: BuildInfo = {
     version: readStr(meta, 'version') ?? fallbackBuild.version,
@@ -146,6 +157,9 @@ export function deriveError(
     level: event.severity,
     errorType,
     errorMessage,
+    filename,
+    lineno,
+    colno,
     why: readStr(meta, 'why') ?? defaultWhy(surface),
     nextSteps: readStr(meta, 'nextSteps') ?? defaultNextSteps(stack !== null, txtAttached),
     build,
@@ -188,6 +202,10 @@ export function formatErrorEventCardHtml(
     `<blockquote>🔎 Источник: ${code(d.source)}\n` +
       `🌫 Поверхность: ${escapeHtml(d.surface)}\n` +
       `❄️ Операция: ${code(d.operation)}\n` +
+      (d.filename !== null ? `📄 Файл: ${code(d.filename)}\n` : '') +
+      (d.lineno !== null
+        ? `📍 Место: ${code(`строка ${d.lineno}${d.colno !== null ? `, столбец ${d.colno}` : ''}`)}\n`
+        : '') +
       `🧮 Уровень: ${escapeHtml(d.level)}</blockquote>`,
     '',
     '🏗 <b>Сборка:</b>',
@@ -242,6 +260,8 @@ export function formatErrorReportTxt(
     `Источник:    ${d.source}`,
     `Поверхность: ${d.surface}`,
     `Операция:    ${d.operation}`,
+    `Файл:        ${d.filename ?? '—'}`,
+    `Строка:      ${d.lineno !== null ? `${d.lineno}${d.colno !== null ? `:${d.colno}` : ''}` : '—'}`,
     `Уровень:     ${d.level}`,
     '',
     '## Информация о сборке',

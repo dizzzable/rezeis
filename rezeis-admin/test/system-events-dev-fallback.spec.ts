@@ -21,8 +21,11 @@ import { BotNotifierClient } from '../src/modules/notifications/services/bot-not
 interface NotifierCalls {
   notifyDev: number;
   notifyDevDocument: number;
+  notifyBroadcast: number;
+  notifyBroadcastDocument: number;
   lastCaption: string | null;
   lastFilename: string | null;
+  lastBroadcastTopicId: number | null;
 }
 
 function buildService(opts: {
@@ -31,8 +34,11 @@ function buildService(opts: {
   const calls: NotifierCalls = {
     notifyDev: 0,
     notifyDevDocument: 0,
+    notifyBroadcast: 0,
+    notifyBroadcastDocument: 0,
     lastCaption: null,
     lastFilename: null,
+    lastBroadcastTopicId: null,
   };
 
   const notifier = {
@@ -43,6 +49,15 @@ function buildService(opts: {
       calls.notifyDevDocument += 1;
       calls.lastCaption = input.caption ?? null;
       calls.lastFilename = input.filename;
+    },
+    notifyBroadcast: async () => {
+      calls.notifyBroadcast += 1;
+    },
+    notifyBroadcastDocument: async (input: { caption?: string; filename: string; topicThreadId?: number }) => {
+      calls.notifyBroadcastDocument += 1;
+      calls.lastCaption = input.caption ?? null;
+      calls.lastFilename = input.filename;
+      calls.lastBroadcastTopicId = input.topicThreadId ?? null;
     },
   };
 
@@ -150,6 +165,26 @@ describe('SystemEventsService dev-fallback (no bot token)', () => {
 
     assert.equal(calls.notifyDevDocument, 1);
     assert.equal(calls.notifyDev, 0);
+  });
+
+  it('relays an ERROR document to the configured group topic without a local bot token', async () => {
+    const { service, calls } = buildService({
+      telegram: {
+        enabled: true,
+        chatId: '-1001234567890',
+        errorTopicId: 77,
+        errorReports: { mode: 'manual', telegramTxt: true },
+      },
+    });
+
+    service.error('reiwa.error', 'SYSTEM', '[reiwa:web] boom', { source: 'web', stack: 'at x' });
+    await flush();
+
+    assert.equal(calls.notifyBroadcastDocument, 1);
+    assert.equal(calls.notifyBroadcast, 0);
+    assert.equal(calls.lastBroadcastTopicId, 77);
+    assert.ok(calls.lastFilename?.startsWith('error_'));
+    assert.ok(calls.lastCaption?.includes('#EventError'));
   });
 
   it('in "selected" mode does NOT deliver an unselected event — not even to the dev DM', async () => {

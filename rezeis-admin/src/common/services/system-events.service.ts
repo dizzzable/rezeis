@@ -575,6 +575,13 @@ export class SystemEventsService {
       errorEvent && tgConfig.errorReportTelegramTxt && tgConfig.errorReportMode !== 'off';
 
     const resolved = resolveTelegramDeliveryTarget(tgConfig, enriched);
+    if (errorEvent) {
+      this.logger.log(
+        `Telegram error report route: type=${event.type} target=${
+          resolved?.isDevFallback ? 'dev-fallback' : resolved !== null ? 'group' : 'dev-fallback'
+        } topic=${resolved?.topicId ?? 'none'} attachment=${attachTxt ? 'document' : 'card-only'}`,
+      );
+    }
     if (resolved === null) {
       // No operator group AND no manual devChatId configured → automatic
       // dev-fallback: route the event to the reiwa bot's BOT_DEV_ID via the
@@ -601,9 +608,15 @@ export class SystemEventsService {
         // chat/topic. This is what makes category routing + the test message
         // actually work without a token on rezeis.
         const html = errorEvent
-          ? formatErrorEventCardHtml(reportEvent, getRezeisBuildInfo(), false)
+          ? formatErrorEventCardHtml(reportEvent, getRezeisBuildInfo(), attachTxt)
           : this.formatTelegramMessage(enriched);
-        await this.deliverViaReiwaBroadcast(enriched, html, resolved.chatId, resolved.topicId);
+        await this.deliverViaReiwaBroadcast(enriched, {
+          html,
+          chatId: resolved.chatId,
+          topicId: resolved.topicId,
+          attachTxt,
+          reportEvent,
+        });
       }
       return;
     }
@@ -754,17 +767,19 @@ export class SystemEventsService {
   }
 
   /**
-   * Split-deployment operator delivery: relay the card to a specific
-   * chat/topic through the reiwa bot's broadcast path (the bot owns the
-   * token). Used when an operator group is configured but rezeis has no local
-   * bot token. Best-effort; documents (error `.txt`) are not relayed here —
-   * the card itself carries the actionable summary.
+   * Split-deployment operator delivery through the reiwa bot. Error reports
+   * retain both their `.txt` attachment and the configured forum topic, even
+   * though Rezeis intentionally does not keep the Telegram bot token.
    */
   private async deliverViaReiwaBroadcast(
     event: SystemEventPayload & { timestamp: string },
-    html: string,
-    chatId: string,
-    topicId: number | null,
+    opts: {
+      readonly html: string;
+      readonly chatId: string;
+      readonly topicId: number | null;
+      readonly attachTxt: boolean;
+      readonly reportEvent: ErrorReportEvent;
+    },
   ): Promise<void> {
     const notifier = this.resolveBotNotifier();
     if (notifier === null) {
@@ -774,13 +789,25 @@ export class SystemEventsService {
       return;
     }
     try {
-      await notifier.notifyBroadcast({
-        eventId: `sysevt:${event.type}:${event.timestamp}`,
-        chatId,
-        topicThreadId: topicId ?? undefined,
-        text: html,
-        parseMode: 'HTML',
-      });
+      if (opts.attachTxt) {
+        await notifier.notifyBroadcastDocument({
+          eventId: `sysevt:${event.type}:${event.timestamp}:error-report`,
+          chatId: opts.chatId,
+          topicThreadId: opts.topicId ?? undefined,
+          filename: buildErrorReportFilename(opts.reportEvent),
+          content: formatErrorReportTxt(opts.reportEvent, getRezeisBuildInfo()),
+          caption: opts.html,
+          parseMode: 'HTML',
+        });
+      } else {
+        await notifier.notifyBroadcast({
+          eventId: `sysevt:${event.type}:${event.timestamp}`,
+          chatId: opts.chatId,
+          topicThreadId: opts.topicId ?? undefined,
+          text: opts.html,
+          parseMode: 'HTML',
+        });
+      }
     } catch (err) {
       this.logger.warn(`Reiwa broadcast relay failed: ${(err as Error).message}`);
     }

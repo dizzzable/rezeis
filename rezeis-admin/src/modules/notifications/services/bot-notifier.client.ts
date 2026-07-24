@@ -97,6 +97,31 @@ export class BotNotifierClient {
   }
 
   /**
+   * Deliver a text document to an operator chat or forum topic through the
+   * reiwa bot. This keeps full error reports available on split deployments,
+   * where Rezeis deliberately does not keep the Telegram bot token.
+   */
+  public async notifyBroadcastDocument(input: {
+    readonly eventId: string;
+    readonly chatId: string;
+    readonly filename: string;
+    readonly content: string;
+    readonly caption?: string;
+    readonly topicThreadId?: number;
+    readonly parseMode?: 'MarkdownV2' | 'HTML';
+  }): Promise<void> {
+    await this.deliver('reiwa.channel.broadcast.document', {
+      eventId: input.eventId,
+      chatId: input.chatId,
+      filename: input.filename,
+      content: input.content,
+      caption: input.caption,
+      topicThreadId: input.topicThreadId,
+      parseMode: input.parseMode,
+    });
+  }
+
+  /**
    * Deliver a system-event card to the bot's developer/operator
    * (`BOT_DEV_ID`) — the automatic fallback used when no operator
    * group/topic is configured. reiwa relays it to the bot, which knows
