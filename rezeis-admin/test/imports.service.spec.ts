@@ -84,7 +84,8 @@ describe('ImportsService', () => {
     const calls: unknown[] = [];
     const service = new ImportsService({
       importRecord: {
-        findUnique: async () => createImportRecord({ id: 'import-1', status: ImportStatus.DRY_RUN }),
+        findUnique: async () =>
+          createImportRecord({ id: 'import-1', status: ImportStatus.DRY_RUN }),
         update: async (input: unknown) => {
           calls.push(input);
           return createImportRecord({ id: 'import-1', status: ImportStatus.COMMITTED });
@@ -102,18 +103,49 @@ describe('ImportsService', () => {
   it('blocks rollback for imports that are not committed', async () => {
     const service = new ImportsService({
       importRecord: {
-        findUnique: async () => createImportRecord({ id: 'import-1', status: ImportStatus.DRY_RUN }),
+        findUnique: async () =>
+          createImportRecord({ id: 'import-1', status: ImportStatus.DRY_RUN }),
       },
     } as never);
 
-    await assert.rejects(() => service.rollback('import-1'), /Only COMMITTED imports can be rolled back/);
+    await assert.rejects(
+      () => service.rollback('import-1'),
+      /Only COMMITTED imports can be rolled back/,
+    );
+  });
+
+  it('blocks rollback after an imported user has newer payment activity', async () => {
+    const record = {
+      ...createImportRecord({ id: 'import-1', status: ImportStatus.COMMITTED }),
+      result: { rollback: { createdUserIds: ['user-1'] } },
+      committedAt: new Date('2026-04-25T12:00:00.000Z'),
+    };
+    const service = new ImportsService({
+      importRecord: { findUnique: async () => record },
+      $transaction: async (callback: (tx: unknown) => Promise<unknown>) =>
+        callback({
+          transaction: {
+            count: async () => 1,
+            deleteMany: async () => assert.fail('must not delete transactions'),
+          },
+          user: { deleteMany: async () => assert.fail('must not delete users') },
+        }),
+    } as never);
+
+    await assert.rejects(() => service.rollback('import-1'), /newer payment activity/);
+  });
+
+  it('blocks rollback when an import wrote history onto matched existing users', async () => {
+    const record = {
+      ...createImportRecord({ id: 'import-1', status: ImportStatus.COMMITTED }),
+      result: { rollback: { createdUserIds: [], hasMatchedWrites: true } },
+    };
+    const service = new ImportsService({ importRecord: { findUnique: async () => record } } as never);
+    await assert.rejects(() => service.rollback('import-1'), /changed matched existing users/);
   });
 });
 
-function createImportRecord(input: {
-  readonly id?: string;
-  readonly status?: ImportStatus;
-}) {
+function createImportRecord(input: { readonly id?: string; readonly status?: ImportStatus }) {
   return {
     id: input.id ?? 'import-1',
     filename: 'import.json',

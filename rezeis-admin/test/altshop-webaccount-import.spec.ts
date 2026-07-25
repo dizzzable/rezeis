@@ -82,6 +82,47 @@ describe('AltshopImporterService — claim-pending web account', () => {
 
     assert.equal(created.length, 0);
   });
+
+  it('matches a web-only user by its existing cabinet identity on retry', async () => {
+    const created: Array<Record<string, unknown>> = [];
+    const createdUsers: unknown[] = [];
+    const prisma = buildPrisma({
+      created,
+      createdUsers,
+      existingWebAccount: { id: 'wa-existing' },
+      webAccountOwnerId: 'existing-web-user',
+    });
+    const service = new AltshopImporterService(prisma as never, { getAllPanelUsers: async () => [] } as never);
+    await service.run({
+      mode: 'import', createdBy: null,
+      users: [{ id: 1, telegram_id: -5, username: 'weblogin', name: 'Web', role: 1 } as never],
+      subscriptions: [],
+      webAccounts: [{ user_telegram_id: -5, username: 'weblogin', email: 'we@example.com' }],
+    });
+    assert.deepEqual(createdUsers, []);
+    assert.deepEqual(created, []);
+  });
+
+  it('skips a web-only row when login and email belong to different users', async () => {
+    const created: Array<Record<string, unknown>> = [];
+    const createdUsers: unknown[] = [];
+    const prisma = buildPrisma({
+      created,
+      createdUsers,
+      existingWebAccount: null,
+      webAccountOwners: { login: 'user-by-login', email: 'user-by-email' },
+    });
+    const service = new AltshopImporterService(prisma as never, { getAllPanelUsers: async () => [] } as never);
+    const result = await service.run({
+      mode: 'import', createdBy: null,
+      users: [{ id: 1, telegram_id: -5, username: 'weblogin', name: 'Web', role: 1 } as never],
+      subscriptions: [],
+      webAccounts: [{ user_telegram_id: -5, username: 'weblogin', email: 'we@example.com' }],
+    });
+    assert.equal(result.skipped, 1);
+    assert.deepEqual(createdUsers, []);
+    assert.deepEqual(created, []);
+  });
 });
 
 /** A non-gzip JSON buffer (parseAltshopBackup detects raw JSON). */
@@ -93,6 +134,9 @@ function buildPrisma(opts: {
   created: Array<Record<string, unknown>>;
   existingWebAccount: { id: string } | null;
   telegramMatch?: boolean;
+  webAccountOwnerId?: string;
+  webAccountOwners?: { login?: string; email?: string };
+  createdUsers?: unknown[];
 }): Record<string, unknown> {
   return {
     user: {
@@ -101,11 +145,20 @@ function buildPrisma(opts: {
         if (args.where.telegramId !== undefined) return opts.telegramMatch ? { id: 'user-existing' } : null;
         return null;
       },
-      create: async () => ({ id: 'user-new' }),
+      create: async () => {
+        opts.createdUsers?.push({ id: 'user-new' });
+        return { id: 'user-new' };
+      },
       update: async () => ({ id: 'user-new' }),
     },
     webAccount: {
       findUnique: async () => opts.existingWebAccount,
+      findFirst: async (args: { where: { loginNormalized?: string; emailNormalized?: string } }) => {
+        const ownerId = args.where.loginNormalized
+          ? opts.webAccountOwners?.login ?? opts.webAccountOwnerId
+          : opts.webAccountOwners?.email ?? opts.webAccountOwnerId;
+        return ownerId ? { userId: ownerId } : null;
+      },
       create: async (args: { data: Record<string, unknown> }) => {
         opts.created.push(args.data);
         return { id: `wa-${opts.created.length}` };

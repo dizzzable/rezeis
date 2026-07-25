@@ -3,179 +3,196 @@ import {
   Currency,
   ImportStatus,
   Locale,
+  PartnerAccrualStrategy,
+  PartnerRewardType,
   PaymentGatewayType,
   Prisma,
   PurchaseChannel,
   PurchaseType,
+  ReferralInviteSource,
+  ReferralRewardType,
   SubscriptionStatus,
   TransactionStatus,
 } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
-import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
 import { loginPolicy } from '../../auth/utils/login-policy.util';
+import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
 import { ImportSummary } from '../interfaces/import-summary.interface';
 import {
   buildPanelLookup,
+  isLivePanelStatus,
   panelSubscriptionState,
   reconcileMissingPanelStatus,
   resolvePanelProfile,
   type PanelLookup,
 } from '../utils/remnawave-overlay.util';
-import {
+import type {
   AltshopPlan,
   AltshopPlanDuration,
   AltshopPlanPrice,
 } from '../utils/altshop-backup-parser';
 
-/**
- * Shape of an altshop user record as exported from the altshop PostgreSQL DB.
- * Matches the `users` table (SQLAlchemy model in `src/infrastructure/database/models/sql/user.py`).
- */
 export interface AltshopUser {
-  /** Auto-increment PK from altshop */
   readonly id: number;
-  /** Telegram user ID */
   readonly telegram_id: number;
-  /** Telegram @username */
   readonly username: string | null;
-  /** Personal referral code */
   readonly referral_code: string | null;
-  /** Display name */
   readonly name: string | null;
-  /** Role enum: USER=1, PREVIEW=2, ADMIN=3, DEV=4, OWNER=5, SYSTEM=6 */
   readonly role: number;
-  /** Locale code */
   readonly language: string | null;
-  /** Personal discount percent */
   readonly personal_discount: number;
-  /** Purchase discount percent */
   readonly purchase_discount: number;
-  /** Loyalty/referral points */
   readonly points: number;
-  /** Admin-blocked flag */
   readonly is_blocked: boolean;
-  /** User blocked the bot */
   readonly is_bot_blocked: boolean;
-  /** Rules acceptance flag */
   readonly is_rules_accepted: boolean;
-  /** Whether trial is available */
   readonly is_trial_available: boolean;
-  /** ISO timestamp */
+  readonly max_subscriptions?: number;
+  readonly referral_invite_settings?: Record<string, unknown> | null;
+  readonly partner_balance_currency_override?: string | null;
   readonly created_at: string;
-  /** ISO timestamp */
   readonly updated_at: string;
 }
 
-/**
- * Shape of an altshop subscription record.
- */
 export interface AltshopSubscription {
-  /** Auto-increment PK */
   readonly id: number;
-  /** Remnawave user UUID */
   readonly user_remna_id: string | null;
-  /** Owner's telegram_id */
   readonly user_telegram_id: number;
-  /** Status: ACTIVE, DISABLED, LIMITED, EXPIRED, DELETED */
   readonly status: string;
-  /** Trial subscription flag */
   readonly is_trial: boolean;
-  /** Traffic limit */
   readonly traffic_limit: number;
-  /** Max devices */
   readonly device_limit: number;
-  /** Traffic limit strategy */
   readonly traffic_limit_strategy: string | null;
-  /** Optional tag */
   readonly tag: string | null;
-  /** Remnawave inbound squad UUIDs */
   readonly internal_squads: string[];
-  /** External squad UUID */
   readonly external_squad: string | null;
-  /** Expiration timestamp (ISO) */
   readonly expire_at: string | null;
-  /** Subscription connect URL */
   readonly url: string | null;
-  /** Frozen plan data at purchase time */
   readonly plan_snapshot: Record<string, unknown> | null;
-  /** Device type */
   readonly device_type: string | null;
-  /** ISO timestamp */
   readonly created_at: string;
 }
 
-/**
- * Shape of an altshop web-account record (cabinet login). The bcrypt
- * `password_hash` is intentionally NOT modelled — it is unusable by the rezeis
- * cabinet (scrypt(SHA256)), so imported accounts are claim-pending instead.
- */
 export interface AltshopWebAccount {
-  /** Owner's telegram_id (may be a synthetic negative id for web-only users). */
   readonly user_telegram_id: number;
-  /** Cabinet login. */
   readonly username: string | null;
-  /** Optional email. */
   readonly email: string | null;
 }
 
-/**
- * Shape of an altshop transaction record.
- */
+/** Historical checkout imported for audit only — it never triggers fulfillment. */
 export interface AltshopTransaction {
-  /** Auto-increment PK */
   readonly id: number;
-  /** Stable payment identifier (provider-facing) */
-  readonly payment_id: string;
-  /** Payer's telegram_id */
+  readonly payment_id: string | null;
   readonly user_telegram_id: number;
-  /** Status: PENDING, COMPLETED, CANCELED, REFUNDED, FAILED */
   readonly status: string;
-  /** Purchase type: NEW, RENEW, CHANGE */
+  readonly is_test?: boolean;
   readonly purchase_type: string;
-  /** Gateway type */
   readonly gateway_type: string;
-  /** Pricing breakdown (JSONB) */
   readonly pricing: Record<string, unknown> | null;
-  /** Currency: USD, XTR, RUB */
   readonly currency: string;
-  /** Frozen plan data */
+  readonly payment_asset?: string | null;
+  readonly device_types?: string[] | null;
+  readonly renew_items?: Record<string, unknown>[] | null;
   readonly plan_snapshot: Record<string, unknown> | null;
-  /** Purchase channel: WEB, TELEGRAM */
   readonly channel: string | null;
-  /** ISO timestamp */
   readonly created_at: string;
+}
+
+export interface AltshopReferral {
+  readonly id: number;
+  readonly referrer_telegram_id: number;
+  readonly referred_telegram_id: number;
+  readonly level: number | string;
+  readonly invite_source?: string | null;
+  readonly qualified_at?: string | null;
+  readonly qualified_transaction_id?: number | null;
+  readonly qualified_purchase_channel?: string | null;
+  readonly created_at: string;
+}
+
+/** Historical reward only: it must not credit points or extra days a second time. */
+export interface AltshopReferralReward {
+  readonly id: number;
+  readonly referral_id: number;
+  readonly user_telegram_id: number;
+  readonly type: string;
+  readonly amount: number;
+  readonly is_issued: boolean;
+  readonly created_at: string;
+}
+
+export interface AltshopPartner {
+  readonly id: number;
+  readonly user_telegram_id: number;
+  readonly balance: number;
+  readonly total_earned: number;
+  readonly total_withdrawn: number;
+  readonly is_active: boolean;
+  readonly individual_settings: Record<string, unknown> | null;
+  readonly created_at: string;
+}
+
+export interface AltshopPartnerReferral {
+  readonly id: number;
+  readonly partner_id: number;
+  readonly parent_partner_id: number | null;
+  readonly referral_telegram_id: number;
+  readonly level: number;
+  readonly created_at: string;
+}
+
+export interface AltshopPartnerTransaction {
+  readonly id: number;
+  readonly partner_id: number;
+  readonly referral_telegram_id: number;
+  readonly level: number;
+  readonly payment_amount: number;
+  readonly percent: number | string;
+  readonly earned_amount: number;
+  readonly source_transaction_id: number | null;
+  readonly description: string | null;
+  readonly created_at: string;
+}
+
+/** Counts of source tables intentionally excluded from automatic import. */
+export interface AltshopExcludedDataSummary {
+  readonly settings: number;
+  readonly paymentGateways: number;
+  readonly referralInvites: number;
+  readonly promocodes: number;
+  readonly promocodeActivations: number;
+  readonly partnerWithdrawals: number;
+  readonly broadcasts: number;
+  readonly broadcastMessages: number;
 }
 
 interface RunInput {
   readonly mode: 'import' | 'sync';
   readonly createdBy: string | null;
-  /** Pre-allocated `ImportRecord.id` to update instead of creating new. */
   readonly importRecordId?: string | null;
   readonly users: readonly AltshopUser[];
   readonly subscriptions: readonly AltshopSubscription[];
   readonly transactions?: readonly AltshopTransaction[];
   readonly webAccounts?: readonly AltshopWebAccount[];
-  /** See altshop-backup-parser.ts for shape. */
+  readonly referrals?: readonly AltshopReferral[];
+  readonly referralRewards?: readonly AltshopReferralReward[];
+  readonly partners?: readonly AltshopPartner[];
+  readonly partnerReferrals?: readonly AltshopPartnerReferral[];
+  readonly partnerTransactions?: readonly AltshopPartnerTransaction[];
+  readonly excludedData?: AltshopExcludedDataSummary;
   readonly plans?: readonly AltshopPlan[];
   readonly planDurations?: readonly AltshopPlanDuration[];
   readonly planPrices?: readonly AltshopPlanPrice[];
 }
 
-/**
- * Importer for altshop (Python/SQLAlchemy) data.
- *
- * Expects JSON arrays: users + subscriptions + optional transactions
- * (exported from altshop's PostgreSQL database).
- *
- * Matching priority:
- *   1. telegram_id → match by telegramId
- *   2. No match → create new User (import mode only)
- *
- * After matching/creating a User:
- *   - Creates or updates Subscriptions linked by user_remna_id (Remnawave UUID)
- *   - Optionally imports transactions as historical records
- */
+type SubscriptionOutcome =
+  | 'created'
+  | 'updated'
+  | 'skipped'
+  | 'owner-mismatch'
+  | 'panel-owner-mismatch';
+
 @Injectable()
 export class AltshopImporterService {
   private readonly logger = new Logger(AltshopImporterService.name);
@@ -186,414 +203,737 @@ export class AltshopImporterService {
   ) {}
 
   public async run(input: RunInput): Promise<ImportSummary> {
-    const { users, subscriptions, transactions, mode, createdBy, importRecordId, plans, planDurations, planPrices } = input;
+    const {
+      users,
+      subscriptions,
+      transactions = [],
+      referrals = [],
+      referralRewards = [],
+      partners = [],
+      partnerReferrals = [],
+      partnerTransactions = [],
+      mode,
+      createdBy,
+      importRecordId,
+      plans,
+      planDurations,
+      planPrices,
+    } = input;
+    if (users.length === 0) throw new BadRequestException('No user records provided');
 
-    if (!users || users.length === 0) {
-      throw new BadRequestException('No user records provided');
-    }
-
-    // Index web accounts by telegram_id (first one wins per user).
-    const webAccountByTelegramId = new Map<number, AltshopWebAccount>();
-    for (const wa of input.webAccounts ?? []) {
-      if (!webAccountByTelegramId.has(wa.user_telegram_id)) {
-        webAccountByTelegramId.set(wa.user_telegram_id, wa);
-      }
-    }
-
-    // Index subscriptions by telegram_id
-    const subsByTelegramId = new Map<number, AltshopSubscription[]>();
-    for (const sub of subscriptions ?? []) {
-      const existing = subsByTelegramId.get(sub.user_telegram_id) ?? [];
-      existing.push(sub);
-      subsByTelegramId.set(sub.user_telegram_id, existing);
-    }
-
-    // Live Remnawave snapshot for the read-only cross-check (scales past the
-    // bulk ceiling via per-UUID fallback; fail-soft to backup if unreachable).
+    const webAccountByTelegramId = firstByKey(input.webAccounts ?? [], (row) => row.user_telegram_id);
+    const subscriptionsByTelegramId = groupBy(subscriptions, (row) => row.user_telegram_id);
+    const transactionsByTelegramId = groupBy(transactions, (row) => row.user_telegram_id);
     const panelLookup = await buildPanelLookup(() => this.remnawaveApiService.getAllPanelUsers());
 
-    // Index transactions by telegram_id
-    const txsByTelegramId = new Map<number, AltshopTransaction[]>();
-    for (const tx of transactions ?? []) {
-      const existing = txsByTelegramId.get(tx.user_telegram_id) ?? [];
-      existing.push(tx);
-      txsByTelegramId.set(tx.user_telegram_id, existing);
-    }
-
     const errors: string[] = [];
-    let created = 0;
-    let updated = 0;
-    let skipped = 0;
-    let subscriptionsCreated = 0;
-    let subscriptionsUpdated = 0;
     const createdUserIds: string[] = [];
+    const userIdsByTelegramId = new Map<number, string>();
+    const transactionIdsBySourceId = new Map<number, string>();
+    const counts = {
+      created: 0,
+      updated: 0,
+      skipped: 0,
+      subscriptionsCreated: 0,
+      subscriptionsUpdated: 0,
+      transactionsCreated: 0,
+      transactionsExisting: 0,
+      transactionsSkipped: 0,
+    };
+    const conflicts = {
+      missingStableIdentity: 0,
+      subscriptionOwnerMismatch: 0,
+      panelOwnerMismatch: 0,
+      nonDirectReferral: 0,
+      referralConflict: 0,
+      referralRewardSkipped: 0,
+      partnerAttribution: 0,
+      partnerSkipped: 0,
+      partnerReferralConflict: 0,
+      partnerTransactionSkipped: 0,
+    };
 
-    for (const altshopUser of users) {
+    for (const sourceUser of users) {
       try {
-        const userId = await this.matchOrCreateUser(altshopUser, mode);
-        if (userId === null) {
-          skipped += 1;
+        const user = await this.matchOrCreateUser(
+          sourceUser,
+          webAccountByTelegramId.get(sourceUser.telegram_id),
+          mode,
+        );
+        if (!user) {
+          counts.skipped += 1;
+          conflicts.missingStableIdentity += 1;
           continue;
         }
-
-        const wasCreated = await this.wasJustCreated(userId);
-        if (wasCreated) {
-          created += 1;
-          createdUserIds.push(userId);
+        if (user.created) {
+          counts.created += 1;
+          createdUserIds.push(user.id);
         } else {
-          updated += 1;
+          counts.updated += 1;
+        }
+        if (isPositiveTelegramId(sourceUser.telegram_id)) {
+          userIdsByTelegramId.set(sourceUser.telegram_id, user.id);
         }
 
-        // Sync subscriptions for this user
-        const userSubs = subsByTelegramId.get(altshopUser.telegram_id) ?? [];
-        for (const sub of userSubs) {
-          const subResult = await this.syncSubscription(userId, sub, panelLookup);
-          if (subResult === 'created') subscriptionsCreated += 1;
-          if (subResult === 'updated') subscriptionsUpdated += 1;
+        for (const subscription of subscriptionsByTelegramId.get(sourceUser.telegram_id) ?? []) {
+          const outcome = await this.syncSubscription(
+            user.id,
+            sourceUser.telegram_id,
+            subscription,
+            panelLookup,
+          );
+          if (outcome === 'created') counts.subscriptionsCreated += 1;
+          if (outcome === 'updated') counts.subscriptionsUpdated += 1;
+          if (outcome === 'owner-mismatch') conflicts.subscriptionOwnerMismatch += 1;
+          if (outcome === 'panel-owner-mismatch') conflicts.panelOwnerMismatch += 1;
         }
 
-        // Import transactions (historical, no dedup needed — just skip if exists)
-        const userTxs = txsByTelegramId.get(altshopUser.telegram_id) ?? [];
-        for (const tx of userTxs) {
-          await this.importTransaction(userId, tx);
+        for (const transaction of transactionsByTelegramId.get(sourceUser.telegram_id) ?? []) {
+          const result = await this.importTransaction(user.id, transaction);
+          if (result.id) transactionIdsBySourceId.set(transaction.id, result.id);
+          if (result.outcome === 'created') counts.transactionsCreated += 1;
+          else if (result.outcome === 'existing') counts.transactionsExisting += 1;
+          else counts.transactionsSkipped += 1;
         }
 
-        // Migrate the cabinet login as a claim-pending web account (import mode
-        // only). The bcrypt hash is dropped — the user claims the account with
-        // any password on first sign-in and is then forced to set a new one.
         if (mode === 'import') {
-          const wa = webAccountByTelegramId.get(altshopUser.telegram_id);
-          if (wa) {
-            await this.upsertClaimPendingWebAccount(userId, wa);
-          }
+          const account = webAccountByTelegramId.get(sourceUser.telegram_id);
+          if (account) await this.upsertClaimPendingWebAccount(user.id, account);
         }
-      } catch (err) {
-        const identifier = altshopUser.telegram_id || altshopUser.username || `id:${altshopUser.id}`;
-        const message = `${identifier}: ${(err as Error).message}`;
-        errors.push(message);
-        this.logger.warn(`altshop importer row failed: ${message}`);
+      } catch (error) {
+        const message = (error as Error).message;
+        if (errors.length < 50) errors.push(`user row failed: ${message}`);
+        this.logger.warn(`AltShop import user row failed: ${message}`);
       }
+    }
+
+    let referralResult = { created: 0, existing: 0, rewardsCreated: 0, rewardsExisting: 0 };
+    try {
+      referralResult = await this.importReferrals({
+        referrals,
+        referralRewards,
+        partnerReferralTelegramIds: new Set(partnerReferrals.map((row) => row.referral_telegram_id)),
+        userIdsByTelegramId,
+        transactionIdsBySourceId,
+        conflicts,
+      });
+    } catch (error) {
+      this.recordStageFailure(errors, 'referral history', error);
+    }
+    let partnerResult = {
+      created: 0,
+      existing: 0,
+      referralsCreated: 0,
+      referralsExisting: 0,
+      transactionsCreated: 0,
+      transactionsExisting: 0,
+    };
+    try {
+      partnerResult = await this.importPartnerData({
+        partners,
+        partnerReferrals,
+        partnerTransactions,
+        userIdsByTelegramId,
+        transactionIdsBySourceId,
+        conflicts,
+      });
+    } catch (error) {
+      this.recordStageFailure(errors, 'partner history', error);
     }
 
     const finalStatus = errors.length === 0 ? ImportStatus.COMMITTED : ImportStatus.FAILED;
-    const resultPayload: Prisma.InputJsonValue = {
+    const result: Prisma.InputJsonValue = {
       mode,
       fetched: users.length,
-      created,
-      updated,
-      skipped,
-      subscriptionsCreated,
-      subscriptionsUpdated,
-      transactionsProcessed: (transactions ?? []).length,
+      ...counts,
+      transactionsProcessed: transactions.length,
+      referralsProcessed: referrals.length,
+      referralsCreated: referralResult.created,
+      referralsExisting: referralResult.existing,
+      referralRewardsProcessed: referralRewards.length,
+      referralRewardsCreated: referralResult.rewardsCreated,
+      referralRewardsExisting: referralResult.rewardsExisting,
+      partnersProcessed: partners.length,
+      partnersCreated: partnerResult.created,
+      partnersExisting: partnerResult.existing,
+      partnerReferralsProcessed: partnerReferrals.length,
+      partnerReferralsCreated: partnerResult.referralsCreated,
+      partnerReferralsExisting: partnerResult.referralsExisting,
+      partnerTransactionsProcessed: partnerTransactions.length,
+      partnerTransactionsCreated: partnerResult.transactionsCreated,
+      partnerTransactionsExisting: partnerResult.transactionsExisting,
+      conflicts,
+      excludedData: jsonInput(input.excludedData ?? emptyExcludedData()),
       errors,
-      rollback: { createdUserIds },
-      // Catalog snapshot — drives the optional "Clone plans" post-import
-      // step. Stored as-is; the cloner reads it back and adapts shapes
-      // there. Total payload is small (a few KB even on real boxes).
-      // Cast through JSON.parse(JSON.stringify(...)) to coerce
-      // `Record<string, unknown>[]` rows into Prisma.InputJsonValue
-      // without copy-pasting the typed altshop interfaces here.
-      catalog: JSON.parse(JSON.stringify({
+      // Matched users may receive historical rows. We intentionally block
+      // rollback for such a run: no pre-import snapshot exists to restore
+      // their previous state, and pretending that a partial delete is an undo
+      // would leave silent accounting history behind.
+      rollback: { createdUserIds, hasMatchedWrites: counts.updated > 0 },
+      catalog: jsonInput({
         plans: plans ?? [],
         planDurations: planDurations ?? [],
         planPrices: planPrices ?? [],
-      })),
+      }),
     };
     const errorMessage = errors.length === 0 ? null : errors.slice(0, 5).join('; ');
-
-    // See remnawave-importer.service.ts for rationale.
+    const recordData = {
+      status: finalStatus,
+      recordsTotal: users.length,
+      recordsOk: counts.created + counts.updated,
+      recordsFailed: errors.length,
+      result,
+      errorMessage,
+      committedAt: new Date(),
+    };
     const importRecord = importRecordId
-      ? await this.prismaService.importRecord.update({
-          where: { id: importRecordId },
-          data: {
-            status: finalStatus,
-            recordsTotal: users.length,
-            recordsOk: created + updated,
-            recordsFailed: errors.length,
-            result: resultPayload,
-            errorMessage,
-            committedAt: new Date(),
-          },
-        })
+      ? await this.prismaService.importRecord.update({ where: { id: importRecordId }, data: recordData })
       : await this.prismaService.importRecord.create({
           data: {
+            ...recordData,
             filename: `altshop-${mode}-${new Date().toISOString()}.json`,
             sourceType: 'altshop',
-            status: finalStatus,
-            recordsTotal: users.length,
-            recordsOk: created + updated,
-            recordsFailed: errors.length,
-            result: resultPayload,
-            errorMessage,
             createdBy,
-            committedAt: new Date(),
           },
         });
 
     return {
       importRecordId: importRecord.id,
       fetched: users.length,
-      created,
-      updated,
-      skipped,
-      subscriptionsCreated,
-      subscriptionsUpdated,
+      created: counts.created,
+      updated: counts.updated,
+      skipped: counts.skipped,
+      subscriptionsCreated: counts.subscriptionsCreated,
+      subscriptionsUpdated: counts.subscriptionsUpdated,
       errors,
     };
   }
 
-  // ── User matching ─────────────────────────────────────────────────────────
-
   private async matchOrCreateUser(
-    altshopUser: AltshopUser,
+    source: AltshopUser,
+    webAccount: AltshopWebAccount | undefined,
     mode: 'import' | 'sync',
-  ): Promise<string | null> {
-    // Priority 1: telegram_id
-    if (altshopUser.telegram_id > 0) {
-      const user = await this.prismaService.user.findUnique({
-        where: { telegramId: BigInt(altshopUser.telegram_id) },
+  ): Promise<{ id: string; created: boolean } | null> {
+    if (isPositiveTelegramId(source.telegram_id)) {
+      const existing = await this.prismaService.user.findUnique({
+        where: { telegramId: BigInt(source.telegram_id) },
         select: { id: true },
       });
-      if (user) {
-        await this.updateUserFields(user.id, altshopUser);
-        return user.id;
+      if (existing) {
+        await this.updateSafeUserIdentity(existing.id, source);
+        return { id: existing.id, created: false };
       }
+    } else {
+      const identity = await this.resolveWebIdentity(webAccount);
+      if (!identity.hasStableIdentity || identity.conflict) return null;
+      if (identity.userId) return { id: identity.userId, created: false };
     }
 
-    // No match — create (import mode only)
-    if (mode === 'sync') {
-      return null;
-    }
-
-    const newUser = await this.prismaService.user.create({
+    if (mode === 'sync') return null;
+    const created = await this.prismaService.user.create({
       data: {
-        telegramId: altshopUser.telegram_id > 0 ? BigInt(altshopUser.telegram_id) : null,
-        username: altshopUser.username || null,
-        name: altshopUser.name || altshopUser.username || `altshop-${altshopUser.id}`,
-        language: this.mapLocale(altshopUser.language),
-        personalDiscount: altshopUser.personal_discount,
-        purchaseDiscount: altshopUser.purchase_discount,
-        points: altshopUser.points,
-        isBlocked: altshopUser.is_blocked,
-        isBotBlocked: altshopUser.is_bot_blocked,
-        isRulesAccepted: altshopUser.is_rules_accepted,
+        telegramId: isPositiveTelegramId(source.telegram_id) ? BigInt(source.telegram_id) : null,
+        username: nonEmpty(source.username),
+        name: nonEmpty(source.name) ?? nonEmpty(source.username) ?? `altshop-${source.id}`,
+        language: this.mapLocale(source.language),
+        personalDiscount: nonNegativeInt(source.personal_discount),
+        purchaseDiscount: nonNegativeInt(source.purchase_discount),
+        points: nonNegativeInt(source.points),
+        isBlocked: source.is_blocked === true,
+        isBotBlocked: source.is_bot_blocked === true,
+        isRulesAccepted: source.is_rules_accepted !== false,
+        maxSubscriptions: normaliseMaxSubscriptions(source.max_subscriptions),
+        partnerBalanceCurrencyOverride: this.mapCurrency(source.partner_balance_currency_override ?? ''),
+        referralInviteSettings: source.referral_invite_settings
+          ? jsonInput(source.referral_invite_settings)
+          : undefined,
       },
     });
-    return newUser.id;
+    return { id: created.id, created: true };
   }
 
-  private async updateUserFields(userId: string, altshopUser: AltshopUser): Promise<void> {
+  /** Existing accounts retain financial, access and subscription settings. */
+  private async updateSafeUserIdentity(userId: string, source: AltshopUser): Promise<void> {
     const data: Prisma.UserUpdateInput = {};
-    if (altshopUser.username) data.username = altshopUser.username;
-    if (altshopUser.name) data.name = altshopUser.name;
-    if (altshopUser.personal_discount > 0) data.personalDiscount = altshopUser.personal_discount;
-    if (altshopUser.purchase_discount > 0) data.purchaseDiscount = altshopUser.purchase_discount;
-    if (altshopUser.points > 0) data.points = altshopUser.points;
-    data.isBlocked = altshopUser.is_blocked;
-    data.isBotBlocked = altshopUser.is_bot_blocked;
+    if (nonEmpty(source.username)) data.username = source.username.trim();
+    if (nonEmpty(source.name)) data.name = source.name.trim();
     if (Object.keys(data).length > 0) {
       await this.prismaService.user.update({ where: { id: userId }, data });
     }
   }
 
-  private async wasJustCreated(userId: string): Promise<boolean> {
-    const user = await this.prismaService.user.findUnique({
-      where: { id: userId },
-      select: { createdAt: true },
-    });
-    if (!user) return false;
-    return Date.now() - user.createdAt.getTime() < 5000;
-  }
-
-  // ── Subscription sync ─────────────────────────────────────────────────────
-
   private async syncSubscription(
     userId: string,
-    sub: AltshopSubscription,
+    expectedTelegramId: number,
+    source: AltshopSubscription,
     panelLookup: PanelLookup,
-  ): Promise<'created' | 'updated' | 'skipped'> {
-    if (sub.user_remna_id) {
-      const existing = await this.prismaService.subscription.findFirst({
-        where: { remnawaveId: sub.user_remna_id },
-        select: { id: true, userId: true },
-      });
+  ): Promise<SubscriptionOutcome> {
+    const remnawaveId = nonEmpty(source.user_remna_id);
+    if (!remnawaveId) return 'skipped';
+    const existing = await this.prismaService.subscription.findFirst({
+      where: { remnawaveId },
+      select: { id: true, userId: true, planSnapshot: true },
+    });
+    const { panel, known } = await resolvePanelProfile(remnawaveId, panelLookup, (uuid) =>
+      this.remnawaveApiService.getPanelUser(uuid),
+    );
+    if (
+      panel &&
+      panel.telegramId !== null &&
+      (!isPositiveTelegramId(expectedTelegramId) || panel.telegramId !== expectedTelegramId)
+    ) return 'panel-owner-mismatch';
+    if (existing && existing.userId !== userId) return 'owner-mismatch';
 
-      // Remnawave is the truth: if the panel still has this profile, overlay
-      // its FRESH state (active subscriptions become accurate). If it's gone,
-      // keep the backup's own (stale) state as-is — the user re-buys via bot.
-      const { panel, known } = await resolvePanelProfile(
-        sub.user_remna_id,
-        panelLookup,
-        (uuid) => this.remnawaveApiService.getPanelUser(uuid),
-      );
-      const fresh = panel ? panelSubscriptionState(panel) : null;
-      const status = fresh
-        ? fresh.status
-        : reconcileMissingPanelStatus(known, this.mapStatus(sub.status));
-      const expiresAt = fresh ? fresh.expiresAt : sub.expire_at ? new Date(sub.expire_at) : null;
-      const trafficLimit = fresh ? fresh.trafficLimit : sub.traffic_limit > 0 ? sub.traffic_limit : null;
-      const deviceLimit = fresh ? fresh.deviceLimit : sub.device_limit;
-      const internalSquads = fresh ? fresh.internalSquads : (sub.internal_squads ?? []);
-      const externalSquad = fresh ? fresh.externalSquad : (sub.external_squad ?? null);
-      const configUrl = fresh ? fresh.configUrl : (sub.url || null);
-
-      const subscriptionData: Prisma.SubscriptionUpdateInput = {
-        status,
-        isTrial: sub.is_trial,
-        trafficLimit,
-        deviceLimit,
-        configUrl,
-        expiresAt,
-        internalSquads,
-        externalSquad,
-        planSnapshot: {
-          importedFrom: 'altshop',
-          tag: sub.tag,
-          trafficLimitStrategy: sub.traffic_limit_strategy,
-          deviceType: sub.device_type,
-          originalPlanSnapshot: sub.plan_snapshot as Prisma.InputJsonValue,
-        },
-      };
-
-      if (existing) {
-        await this.prismaService.subscription.update({
-          where: { id: existing.id },
-          data: subscriptionData,
-        });
-        if (existing.userId !== userId) {
-          await this.prismaService.subscription.update({
-            where: { id: existing.id },
-            data: { user: { connect: { id: userId } } },
-          });
-        }
-        return 'updated';
-      }
-
-      const newSub = await this.prismaService.subscription.create({
-        data: {
-          user: { connect: { id: userId } },
-          remnawaveId: sub.user_remna_id,
-          status,
-          isTrial: sub.is_trial,
-          trafficLimit,
-          deviceLimit,
-          configUrl,
-          expiresAt,
-          startedAt: sub.created_at ? new Date(sub.created_at) : new Date(),
-          internalSquads,
-          externalSquad,
-          planSnapshot: {
-            importedFrom: 'altshop',
-            tag: sub.tag,
-            trafficLimitStrategy: sub.traffic_limit_strategy,
-            deviceType: sub.device_type,
-            originalPlanSnapshot: sub.plan_snapshot as Prisma.InputJsonValue,
-          },
-        },
-      });
-
-      // No ProfileSyncJob: import is READ-ONLY toward Remnawave (the truth) —
-      // it never pushes the backup's possibly-stale state back, and gone/expired
-      // profiles are not re-provisioned (the user re-buys via the bot).
-
-      // Set as current subscription if user doesn't have one
-      const user = await this.prismaService.user.findUnique({
-        where: { id: userId },
-        select: { currentSubscriptionId: true },
-      });
-      if (!user?.currentSubscriptionId) {
-        await this.prismaService.user.update({
-          where: { id: userId },
-          data: { currentSubscriptionId: newSub.id },
-        });
-      }
-
-      return 'created';
+    const fresh = panel ? panelSubscriptionState(panel) : null;
+    const status = fresh
+      ? fresh.status
+      : reconcileMissingPanelStatus(known, this.mapStatus(source.status));
+    const subscriptionData: Prisma.SubscriptionUpdateInput = {
+      status,
+      isTrial: source.is_trial === true,
+      trafficLimit: fresh ? fresh.trafficLimit : positiveNumberOrNull(source.traffic_limit),
+      deviceLimit: fresh ? fresh.deviceLimit : nonNegativeInt(source.device_limit),
+      configUrl: fresh ? fresh.configUrl : nonEmpty(source.url),
+      expiresAt: fresh ? fresh.expiresAt : this.parseOptionalDate(source.expire_at),
+      internalSquads: fresh ? fresh.internalSquads : stringArray(source.internal_squads),
+      externalSquad: fresh ? fresh.externalSquad : nonEmpty(source.external_squad),
+      planSnapshot: this.buildSubscriptionPlanSnapshot(source, existing?.planSnapshot),
+    };
+    if (existing) {
+      await this.prismaService.subscription.update({ where: { id: existing.id }, data: subscriptionData });
+      return 'updated';
     }
-
-    return 'skipped';
+    const created = await this.prismaService.subscription.create({
+      data: {
+        user: { connect: { id: userId } },
+        remnawaveId,
+        status,
+        isTrial: source.is_trial === true,
+        trafficLimit: fresh ? fresh.trafficLimit : positiveNumberOrNull(source.traffic_limit),
+        deviceLimit: fresh ? fresh.deviceLimit : nonNegativeInt(source.device_limit),
+        configUrl: fresh ? fresh.configUrl : nonEmpty(source.url),
+        expiresAt: fresh ? fresh.expiresAt : this.parseOptionalDate(source.expire_at),
+        internalSquads: fresh ? fresh.internalSquads : stringArray(source.internal_squads),
+        externalSquad: fresh ? fresh.externalSquad : nonEmpty(source.external_squad),
+        planSnapshot: this.buildSubscriptionPlanSnapshot(source),
+        startedAt: this.parseOptionalDate(source.created_at) ?? new Date(),
+      },
+    });
+    const user = await this.prismaService.user.findUnique({
+      where: { id: userId },
+      select: { currentSubscriptionId: true },
+    });
+    if (!user?.currentSubscriptionId && isLivePanelStatus(status)) {
+      await this.prismaService.user.update({
+        where: { id: userId },
+        data: { currentSubscriptionId: created.id },
+      });
+    }
+    return 'created';
   }
 
-  // ── Web account (claim-pending) ─────────────────────────────────────────────
-
-  /**
-   * Migrate an altshop cabinet login as a claim-pending `WebAccount`: login
-   * (and email when present), NO password (the altshop bcrypt hash is unusable
-   * by rezeis). On the user's first cabinet sign-in any submitted password is
-   * adopted and a reset is forced. Skips when the user already has a web
-   * account or the login is invalid / collides.
-   */
-  private async upsertClaimPendingWebAccount(userId: string, wa: AltshopWebAccount): Promise<void> {
-    const existing = await this.prismaService.webAccount.findUnique({
+  private async upsertClaimPendingWebAccount(userId: string, source: AltshopWebAccount): Promise<void> {
+    const current = await this.prismaService.webAccount.findUnique({
       where: { userId },
       select: { id: true },
     });
-    if (existing) return; // don't clobber an existing web account
-
-    const loginRaw = (wa.username ?? '').trim();
-    if (!loginPolicy.isValidLogin(loginRaw)) return; // can't form a usable login
+    if (current) return;
+    const loginRaw = nonEmpty(source.username);
+    if (!loginRaw || !loginPolicy.isValidLogin(loginRaw)) return;
     const login = loginPolicy.sanitizeLogin(loginRaw);
-    const loginNormalized = loginPolicy.normalizeLogin(loginRaw);
-    const email = wa.email && wa.email.trim().length > 0 ? wa.email.trim() : null;
-    const emailNormalized = email ? email.toLowerCase() : null;
-
+    const email = nonEmpty(source.email);
     try {
       await this.prismaService.webAccount.create({
         data: {
           user: { connect: { id: userId } },
           login,
-          loginNormalized,
+          loginNormalized: loginPolicy.normalizeLogin(loginRaw),
           email,
-          emailNormalized,
+          emailNormalized: email?.toLowerCase() ?? null,
           passwordHash: null,
           passwordBootstrapPending: true,
           requiresPasswordChange: true,
         },
       });
-    } catch (err) {
-      // login/email unique collision across users — skip, not fatal.
-      this.logger.debug(`altshop webAccount skipped for ${userId}: ${(err as Error).message}`);
+    } catch (error) {
+      // Existing login/email belongs to another account. Never disclose or overwrite it.
+      this.logger.debug(`AltShop claim-pending web account skipped: ${(error as Error).name}`);
     }
   }
 
-  // ── Transaction import ────────────────────────────────────────────────────
-
-  private async importTransaction(userId: string, tx: AltshopTransaction): Promise<void> {
-    // Skip if transaction with this payment_id already exists
+  private async importTransaction(
+    userId: string,
+    source: AltshopTransaction,
+  ): Promise<{ outcome: 'created' | 'existing' | 'skipped'; id?: string }> {
+    if (!Number.isSafeInteger(source.id) || source.id <= 0) return { outcome: 'skipped' };
+    const paymentId = `altshop:${source.id}`;
     const existing = await this.prismaService.transaction.findUnique({
-      where: { paymentId: tx.payment_id },
+      where: { paymentId },
       select: { id: true },
     });
-    if (existing) return;
-
-    const amount = this.extractAmount(tx.pricing);
-    const gatewayType = this.mapGatewayType(tx.gateway_type);
-    const currency = this.mapCurrency(tx.currency);
-
-    // Skip if gateway or currency is not supported in our enum
-    if (!gatewayType || !currency) return;
-
-    await this.prismaService.transaction.create({
+    if (existing) return { outcome: 'existing', id: existing.id };
+    const gatewayType = this.mapGatewayType(source.gateway_type);
+    const currency = this.mapCurrency(source.currency);
+    const amount = this.extractAmount(source.pricing);
+    if (!gatewayType || !currency || amount === null) return { outcome: 'skipped' };
+    const created = await this.prismaService.transaction.create({
       data: {
         user: { connect: { id: userId } },
-        paymentId: tx.payment_id,
-        status: this.mapTransactionStatus(tx.status),
-        purchaseType: this.mapPurchaseType(tx.purchase_type),
+        paymentId,
+        status: this.mapTransactionStatus(source.status),
+        purchaseType: this.mapPurchaseType(source.purchase_type),
         gatewayType,
         amount,
         currency,
-        channel: this.mapChannel(tx.channel),
-        planSnapshot: {
+        channel: this.mapChannel(source.channel),
+        paymentAsset: nonEmpty(source.payment_asset),
+        deviceTypes: stringArray(source.device_types),
+        planSnapshot: jsonInput({
           importedFrom: 'altshop',
-          originalPricing: tx.pricing as Prisma.InputJsonValue,
-          originalPlanSnapshot: tx.plan_snapshot as Prisma.InputJsonValue,
-        },
-        createdAt: tx.created_at ? new Date(tx.created_at) : new Date(),
+          sourceTransactionId: source.id,
+          sourcePaymentId: source.payment_id,
+          sourceIsTest: source.is_test === true,
+          originalPricing: source.pricing,
+          originalPlanSnapshot: source.plan_snapshot,
+          originalRenewItems: source.renew_items ?? [],
+        }),
+        createdAt: this.parseOptionalDate(source.created_at) ?? new Date(),
       },
+    });
+    return { outcome: 'created', id: created.id };
+  }
+
+  private async importReferrals(input: {
+    readonly referrals: readonly AltshopReferral[];
+    readonly referralRewards: readonly AltshopReferralReward[];
+    readonly partnerReferralTelegramIds: ReadonlySet<number>;
+    readonly userIdsByTelegramId: ReadonlyMap<number, string>;
+    readonly transactionIdsBySourceId: ReadonlyMap<number, string>;
+    readonly conflicts: {
+      nonDirectReferral: number;
+      referralConflict: number;
+      referralRewardSkipped: number;
+      partnerAttribution: number;
+    };
+  }): Promise<{ created: number; existing: number; rewardsCreated: number; rewardsExisting: number }> {
+    const referralIds = new Map<number, { id: string; referrerId: string }>();
+    let created = 0;
+    let existing = 0;
+    for (const source of input.referrals) {
+      if (!this.isDirectReferral(source.level)) {
+        input.conflicts.nonDirectReferral += 1;
+        continue;
+      }
+      const referrerId = input.userIdsByTelegramId.get(source.referrer_telegram_id);
+      const referredId = input.userIdsByTelegramId.get(source.referred_telegram_id);
+      if (!referrerId || !referredId || referrerId === referredId) {
+        input.conflicts.referralConflict += 1;
+        continue;
+      }
+      if (input.partnerReferralTelegramIds.has(source.referred_telegram_id)) {
+        input.conflicts.partnerAttribution += 1;
+        continue;
+      }
+      const partnerReferral = await this.prismaService.partnerReferral.findFirst({
+        where: { referralUserId: referredId },
+        select: { id: true },
+      });
+      if (partnerReferral) {
+        input.conflicts.partnerAttribution += 1;
+        continue;
+      }
+      const stored = await this.prismaService.referral.findUnique({
+        where: { referredId },
+        select: { id: true, referrerId: true },
+      });
+      if (stored) {
+        if (stored.referrerId === referrerId) {
+          existing += 1;
+          referralIds.set(source.id, stored);
+        } else input.conflicts.referralConflict += 1;
+        continue;
+      }
+      try {
+        const qualifiedTransactionId = source.qualified_transaction_id
+          ? input.transactionIdsBySourceId.get(source.qualified_transaction_id)
+          : undefined;
+        const row = await this.prismaService.referral.create({
+          data: {
+            referrerId,
+            referredId,
+            level: 1,
+            inviteSource: this.mapReferralSource(source.invite_source),
+            qualifiedAt: this.parseOptionalDate(source.qualified_at),
+            qualifiedTransactionId,
+            qualifiedPurchaseChannel: this.mapOptionalChannel(source.qualified_purchase_channel),
+            ...(this.parseOptionalDate(source.created_at)
+              ? { createdAt: this.parseOptionalDate(source.created_at)! }
+              : {}),
+          },
+          select: { id: true, referrerId: true },
+        });
+        created += 1;
+        referralIds.set(source.id, row);
+      } catch (error) {
+        if (!this.isUniqueConstraintError(error)) throw error;
+        const concurrent = await this.prismaService.referral.findUnique({
+          where: { referredId },
+          select: { id: true, referrerId: true },
+        });
+        if (concurrent?.referrerId === referrerId) {
+          existing += 1;
+          referralIds.set(source.id, concurrent);
+        } else input.conflicts.referralConflict += 1;
+      }
+    }
+
+    let rewardsCreated = 0;
+    let rewardsExisting = 0;
+    for (const source of input.referralRewards) {
+      if (!Number.isSafeInteger(source.id) || source.id <= 0) {
+        input.conflicts.referralRewardSkipped += 1;
+        continue;
+      }
+      const sourceKey = `altshop:referral-reward:${source.id}`;
+      if (await this.prismaService.referralReward.findUnique({ where: { sourceKey }, select: { id: true } })) {
+        rewardsExisting += 1;
+        continue;
+      }
+      const referral = referralIds.get(source.referral_id);
+      const userId = input.userIdsByTelegramId.get(source.user_telegram_id);
+      const type = this.mapReferralRewardType(source.type);
+      if (!referral || userId !== referral.referrerId || !type || !positiveInt(source.amount)) {
+        input.conflicts.referralRewardSkipped += 1;
+        continue;
+      }
+      const createdAt = this.parseOptionalDate(source.created_at) ?? new Date();
+      try {
+        await this.prismaService.referralReward.create({
+          data: {
+            referralId: referral.id,
+            userId: referral.referrerId,
+            type,
+            amount: Math.trunc(source.amount),
+            isIssued: source.is_issued === true,
+            issuedAt: source.is_issued === true ? createdAt : null,
+            createdAt,
+            sourceKey,
+          },
+        });
+        rewardsCreated += 1;
+      } catch (error) {
+        if (this.isUniqueConstraintError(error)) rewardsExisting += 1;
+        else throw error;
+      }
+    }
+    return { created, existing, rewardsCreated, rewardsExisting };
+  }
+
+  private async importPartnerData(input: {
+    readonly partners: readonly AltshopPartner[];
+    readonly partnerReferrals: readonly AltshopPartnerReferral[];
+    readonly partnerTransactions: readonly AltshopPartnerTransaction[];
+    readonly userIdsByTelegramId: ReadonlyMap<number, string>;
+    readonly transactionIdsBySourceId: ReadonlyMap<number, string>;
+    readonly conflicts: { partnerSkipped: number; partnerReferralConflict: number; partnerTransactionSkipped: number };
+  }): Promise<{
+    created: number;
+    existing: number;
+    referralsCreated: number;
+    referralsExisting: number;
+    transactionsCreated: number;
+    transactionsExisting: number;
+  }> {
+    const partnerIdsBySourceId = new Map<number, string>();
+    let created = 0;
+    let existing = 0;
+    for (const source of input.partners) {
+      const userId = input.userIdsByTelegramId.get(source.user_telegram_id);
+      if (!Number.isSafeInteger(source.id) || source.id <= 0 || !userId) {
+        input.conflicts.partnerSkipped += 1;
+        continue;
+      }
+      const current = await this.prismaService.partner.findUnique({
+        where: { userId },
+        select: { id: true },
+      });
+      if (current) {
+        existing += 1;
+        partnerIdsBySourceId.set(source.id, current.id);
+        continue;
+      }
+      const settings = isPlainObject(source.individual_settings) ? source.individual_settings : {};
+      const row = await this.prismaService.partner.create({
+        data: {
+          userId,
+          balance: nonNegativeInt(source.balance),
+          totalEarned: nonNegativeInt(source.total_earned),
+          totalWithdrawn: nonNegativeInt(source.total_withdrawn),
+          isActive: source.is_active !== false,
+          useGlobalSettings: settings.use_global_settings !== false,
+          accrualStrategy: this.mapPartnerAccrualStrategy(settings.accrual_strategy),
+          rewardType: this.mapPartnerRewardType(settings.reward_type),
+          level1Percent: this.decimalOrNull(settings.level1_percent),
+          level2Percent: this.decimalOrNull(settings.level2_percent),
+          level3Percent: this.decimalOrNull(settings.level3_percent),
+          level1FixedAmount: nonNegativeIntOrNull(settings.level1_fixed_amount),
+          level2FixedAmount: nonNegativeIntOrNull(settings.level2_fixed_amount),
+          level3FixedAmount: nonNegativeIntOrNull(settings.level3_fixed_amount),
+          ...(this.parseOptionalDate(source.created_at)
+            ? { createdAt: this.parseOptionalDate(source.created_at)! }
+            : {}),
+        },
+        select: { id: true },
+      });
+      created += 1;
+      partnerIdsBySourceId.set(source.id, row.id);
+    }
+
+    let referralsCreated = 0;
+    let referralsExisting = 0;
+    for (const source of input.partnerReferrals) {
+      const partnerId = partnerIdsBySourceId.get(source.partner_id);
+      const referralUserId = input.userIdsByTelegramId.get(source.referral_telegram_id);
+      if (!partnerId || !referralUserId || !this.isPartnerLevel(source.level)) {
+        input.conflicts.partnerReferralConflict += 1;
+        continue;
+      }
+      const existingRow = await this.prismaService.partnerReferral.findUnique({
+        where: { partnerId_referralUserId: { partnerId, referralUserId } },
+        select: { id: true, parentPartnerId: true, level: true },
+      });
+      const parentPartnerId = source.parent_partner_id
+        ? partnerIdsBySourceId.get(source.parent_partner_id) ?? null
+        : null;
+      if (existingRow) {
+        if (existingRow.parentPartnerId !== parentPartnerId || existingRow.level !== source.level) {
+          input.conflicts.partnerReferralConflict += 1;
+        } else referralsExisting += 1;
+        continue;
+      }
+      try {
+        await this.prismaService.partnerReferral.create({
+          data: {
+            partnerId,
+            referralUserId,
+            parentPartnerId,
+            level: source.level,
+            ...(this.parseOptionalDate(source.created_at)
+              ? { createdAt: this.parseOptionalDate(source.created_at)! }
+              : {}),
+          },
+        });
+        referralsCreated += 1;
+      } catch (error) {
+        if (this.isUniqueConstraintError(error)) referralsExisting += 1;
+        else throw error;
+      }
+    }
+
+    let transactionsCreated = 0;
+    let transactionsExisting = 0;
+    for (const source of input.partnerTransactions) {
+      if (!Number.isSafeInteger(source.id) || source.id <= 0) {
+        input.conflicts.partnerTransactionSkipped += 1;
+        continue;
+      }
+      const sourceKey = `altshop:partner-transaction:${source.id}`;
+      const existingRow = await this.prismaService.partnerTransaction.findUnique({
+        where: { sourceKey },
+        select: { id: true },
+      });
+      if (existingRow) {
+        transactionsExisting += 1;
+        continue;
+      }
+      const partnerId = partnerIdsBySourceId.get(source.partner_id);
+      const referralUserId = input.userIdsByTelegramId.get(source.referral_telegram_id);
+      const percent = this.decimalOrNull(source.percent);
+      if (!partnerId || !referralUserId || !this.isPartnerLevel(source.level) || percent === null) {
+        input.conflicts.partnerTransactionSkipped += 1;
+        continue;
+      }
+      try {
+        await this.prismaService.partnerTransaction.create({
+          data: {
+            partnerId,
+            referralUserId,
+            level: source.level,
+            paymentAmount: nonNegativeInt(source.payment_amount),
+            percent,
+            earnedAmount: nonNegativeInt(source.earned_amount),
+            sourceTransactionId: source.source_transaction_id
+              ? input.transactionIdsBySourceId.get(source.source_transaction_id) ?? null
+              : null,
+            description: nonEmpty(source.description),
+            sourceKey,
+            createdAt: this.parseOptionalDate(source.created_at) ?? new Date(),
+          },
+        });
+        transactionsCreated += 1;
+      } catch (error) {
+        if (this.isUniqueConstraintError(error)) transactionsExisting += 1;
+        else throw error;
+      }
+    }
+    return { created, existing, referralsCreated, referralsExisting, transactionsCreated, transactionsExisting };
+  }
+
+  private buildSubscriptionPlanSnapshot(
+    source: AltshopSubscription,
+    existingSnapshot?: Prisma.JsonValue,
+  ): Prisma.InputJsonValue {
+    const planId =
+      isPlainObject(existingSnapshot) && typeof existingSnapshot.planId === 'string'
+        ? existingSnapshot.planId
+        : undefined;
+    return jsonInput({
+      importedFrom: 'altshop',
+      ...(planId ? { planId } : {}),
+      tag: source.tag,
+      trafficLimitStrategy: source.traffic_limit_strategy,
+      deviceType: source.device_type,
+      originalPlanSnapshot: source.plan_snapshot,
     });
   }
 
-  // ── Helpers ───────────────────────────────────────────────────────────────
+  private async resolveWebIdentity(source: AltshopWebAccount | undefined): Promise<{
+    userId: string | null;
+    hasStableIdentity: boolean;
+    conflict: boolean;
+  }> {
+    if (!source) return { userId: null, hasStableIdentity: false, conflict: false };
+    const login = nonEmpty(source.username);
+    const email = nonEmpty(source.email)?.toLowerCase();
+    const loginNormalized = login && loginPolicy.isValidLogin(login)
+      ? loginPolicy.normalizeLogin(login)
+      : null;
+    if (!loginNormalized && !email) {
+      return { userId: null, hasStableIdentity: false, conflict: false };
+    }
+    const [byLogin, byEmail] = await Promise.all([
+      loginNormalized
+        ? this.prismaService.webAccount.findFirst({
+          where: { loginNormalized },
+          select: { userId: true },
+        })
+        : null,
+      email
+        ? this.prismaService.webAccount.findFirst({
+          where: { emailNormalized: email },
+          select: { userId: true },
+        })
+        : null,
+    ]);
+    if (byLogin && byEmail && byLogin.userId !== byEmail.userId) {
+      return { userId: null, hasStableIdentity: true, conflict: true };
+    }
+    return {
+      userId: byLogin?.userId ?? byEmail?.userId ?? null,
+      hasStableIdentity: true,
+      conflict: false,
+    };
+  }
 
   private mapStatus(status: string): SubscriptionStatus {
     switch (status.toUpperCase()) {
@@ -602,40 +942,38 @@ export class AltshopImporterService {
       case 'LIMITED': return SubscriptionStatus.LIMITED;
       case 'EXPIRED': return SubscriptionStatus.EXPIRED;
       case 'DELETED': return SubscriptionStatus.DELETED;
-      default: return SubscriptionStatus.ACTIVE;
+      default: return SubscriptionStatus.EXPIRED;
     }
   }
 
-  private mapLocale(locale: string | null): Locale {
-    if (!locale) return Locale.EN;
-    const upper = locale.toUpperCase();
-    if (upper in Locale) return upper as Locale;
-    return Locale.EN;
+  private mapLocale(value: string | null): Locale {
+    const normalized = (value ?? '').toUpperCase();
+    return normalized in Locale ? (normalized as Locale) : Locale.EN;
   }
 
-  private mapTransactionStatus(status: string): TransactionStatus {
-    switch (status.toUpperCase()) {
+  private mapTransactionStatus(value: string): TransactionStatus {
+    switch (value.toUpperCase()) {
       case 'COMPLETED': return TransactionStatus.COMPLETED;
-      case 'PENDING': return TransactionStatus.PENDING;
-      case 'CANCELED': return TransactionStatus.CANCELED;
+      case 'CANCELED':
+      case 'CANCELLED':
       case 'REFUNDED': return TransactionStatus.CANCELED;
       case 'FAILED': return TransactionStatus.FAILED;
       default: return TransactionStatus.PENDING;
     }
   }
 
-  private mapPurchaseType(type: string): PurchaseType {
-    switch (type.toUpperCase()) {
-      case 'NEW': return PurchaseType.NEW;
+  private mapPurchaseType(value: string): PurchaseType {
+    switch (value.toUpperCase()) {
       case 'RENEW': return PurchaseType.RENEW;
-      case 'CHANGE': return PurchaseType.UPGRADE;
+      case 'CHANGE':
+      case 'UPGRADE': return PurchaseType.UPGRADE;
+      case 'ADDITIONAL': return PurchaseType.ADDITIONAL;
       default: return PurchaseType.NEW;
     }
   }
 
-  private mapGatewayType(gateway: string): PaymentGatewayType | null {
-    const upper = gateway.toUpperCase();
-    const validGateways: Record<string, PaymentGatewayType> = {
+  private mapGatewayType(value: string): PaymentGatewayType | null {
+    const lookup: Record<string, PaymentGatewayType> = {
       YOOKASSA: PaymentGatewayType.YOOKASSA,
       TELEGRAM_STARS: PaymentGatewayType.TELEGRAM_STARS,
       PLATEGA: PaymentGatewayType.PLATEGA,
@@ -647,36 +985,144 @@ export class AltshopImporterService {
       PAYPALYCH: PaymentGatewayType.PAYPALYCH,
       RIOPAY: PaymentGatewayType.RIOPAY,
       VALUTIX: PaymentGatewayType.VALUTIX,
+      WATA: PaymentGatewayType.WATA,
+      AURAPAY: PaymentGatewayType.AURAPAY,
+      ROLLYPAY: PaymentGatewayType.ROLLYPAY,
+      SEVERPAY: PaymentGatewayType.SEVERPAY,
+      LAVA: PaymentGatewayType.LAVA,
+      CRYPTOPAY: PaymentGatewayType.CRYPTOPAY,
     };
-    return validGateways[upper] ?? null;
+    return lookup[value.toUpperCase()] ?? null;
   }
 
-  private mapCurrency(currency: string): Currency | null {
-    const upper = currency.toUpperCase();
-    const validCurrencies: Record<string, Currency> = {
-      USD: Currency.USD,
-      RUB: Currency.RUB,
-      USDT: Currency.USDT,
-      XTR: Currency.XTR,
-      TON: Currency.TON,
-      BTC: Currency.BTC,
-      ETH: Currency.ETH,
-    };
-    return validCurrencies[upper] ?? null;
+  private mapCurrency(value: string): Currency | null {
+    const normalized = value.toUpperCase();
+    return normalized in Currency ? (normalized as Currency) : null;
   }
 
-  private mapChannel(channel: string | null): PurchaseChannel {
-    if (!channel) return PurchaseChannel.TELEGRAM;
-    return channel.toUpperCase() === 'WEB' ? PurchaseChannel.WEB : PurchaseChannel.TELEGRAM;
+  private mapChannel(value: string | null): PurchaseChannel {
+    return value?.toUpperCase() === 'WEB' ? PurchaseChannel.WEB : PurchaseChannel.TELEGRAM;
   }
 
-  private extractAmount(pricing: Record<string, unknown> | null): number {
-    if (!pricing) return 0;
-    // altshop stores pricing as JSONB with various structures
-    // Try common patterns
-    if (typeof pricing.amount === 'number') return pricing.amount;
-    if (typeof pricing.total === 'number') return pricing.total;
-    if (typeof pricing.price === 'number') return pricing.price;
-    return 0;
+  private mapOptionalChannel(value: string | null | undefined): PurchaseChannel | null {
+    if (!value) return null;
+    return this.mapChannel(value);
   }
+
+  private mapReferralSource(value: string | null | undefined): ReferralInviteSource {
+    return value?.toUpperCase() === 'BOT'
+      ? ReferralInviteSource.BOT
+      : value?.toUpperCase() === 'WEB'
+        ? ReferralInviteSource.WEB
+        : ReferralInviteSource.UNKNOWN;
+  }
+
+  private mapReferralRewardType(value: string): ReferralRewardType | null {
+    if (value.toUpperCase() === 'POINTS') return ReferralRewardType.POINTS;
+    if (['DAYS', 'EXTRA_DAYS'].includes(value.toUpperCase())) return ReferralRewardType.EXTRA_DAYS;
+    return null;
+  }
+
+  private mapPartnerAccrualStrategy(value: unknown): PartnerAccrualStrategy {
+    return value === 'ONCE_PER_USER'
+      ? PartnerAccrualStrategy.ONCE_PER_USER
+      : PartnerAccrualStrategy.ON_EACH_PAYMENT;
+  }
+
+  private mapPartnerRewardType(value: unknown): PartnerRewardType {
+    return value === 'FIXED' ? PartnerRewardType.FIXED : PartnerRewardType.PERCENT;
+  }
+
+  private isDirectReferral(value: number | string): boolean {
+    return value === 1 || ['1', 'DIRECT', 'FIRST', 'LEVEL_1'].includes(String(value).toUpperCase());
+  }
+
+  private isPartnerLevel(value: number): boolean {
+    return Number.isSafeInteger(value) && value >= 1 && value <= 3;
+  }
+
+  private extractAmount(pricing: Record<string, unknown> | null): number | null {
+    if (!pricing) return null;
+    const value = pricing.final_amount ?? pricing.amount ?? pricing.total ?? pricing.price ?? pricing.original_amount;
+    const amount = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : NaN;
+    return Number.isFinite(amount) && amount >= 0 ? amount : null;
+  }
+
+  private decimalOrNull(value: unknown): string | null {
+    const parsed = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : NaN;
+    return Number.isFinite(parsed) && parsed >= 0 && parsed <= 100 ? parsed.toFixed(2) : null;
+  }
+
+  private parseOptionalDate(value: string | null | undefined): Date | null {
+    if (!value) return null;
+    const result = new Date(value);
+    return Number.isNaN(result.getTime()) ? null : result;
+  }
+
+  private isUniqueConstraintError(error: unknown): boolean {
+    return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === 'P2002';
+  }
+
+  private recordStageFailure(errors: string[], stage: string, error: unknown): void {
+    const message = `${stage} failed: ${(error as Error).message}`;
+    if (errors.length < 50) errors.push(message);
+    this.logger.error(`AltShop import ${message}`);
+  }
+}
+
+function groupBy<T>(rows: readonly T[], key: (row: T) => number): Map<number, T[]> {
+  const result = new Map<number, T[]>();
+  for (const row of rows) result.set(key(row), [...(result.get(key(row)) ?? []), row]);
+  return result;
+}
+
+function firstByKey<T>(rows: readonly T[], key: (row: T) => number): Map<number, T> {
+  const result = new Map<number, T>();
+  for (const row of rows) if (!result.has(key(row))) result.set(key(row), row);
+  return result;
+}
+
+function emptyExcludedData(): AltshopExcludedDataSummary {
+  return { settings: 0, paymentGateways: 0, referralInvites: 0, promocodes: 0, promocodeActivations: 0, partnerWithdrawals: 0, broadcasts: 0, broadcastMessages: 0 };
+}
+
+function isPositiveTelegramId(value: number): boolean {
+  return Number.isSafeInteger(value) && value > 0;
+}
+
+function nonEmpty(value: string | null | undefined): string | null {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : null;
+}
+
+function nonNegativeInt(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.trunc(value) : 0;
+}
+
+function nonNegativeIntOrNull(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.trunc(value) : null;
+}
+
+function positiveInt(value: unknown): boolean {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0;
+}
+
+function normaliseMaxSubscriptions(value: number | undefined): number {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.min(50, Math.max(1, Math.trunc(value))) : 1;
+}
+
+function positiveNumberOrNull(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function jsonInput(value: unknown): Prisma.InputJsonValue {
+  return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
 }

@@ -210,16 +210,19 @@ enum SubscriptionTermStatus {
   CANCELED
   RECONCILIATION_REQUIRED
 }
+
 enum ResetEpochCloseSource {
   SCHEDULER
   WEBHOOK_RECONCILIATION
   TERM_END
   OPERATOR
 }
+
 enum AddOnLifetime {
   UNTIL_NEXT_RESET
   UNTIL_SUBSCRIPTION_END
 }
+
 enum AddOnEntitlementState {
   PENDING_ACTIVATION
   ACTIVE
@@ -228,11 +231,13 @@ enum AddOnEntitlementState {
   REVERSED
   REMEDIATION_REQUIRED
 }
+
 enum AddOnEntitlementActorType {
   SYSTEM
   ADMIN
   USER
 }
+
 enum EffectiveProjectionState {
   SHADOW
   PENDING
@@ -241,6 +246,7 @@ enum EffectiveProjectionState {
   REMEDIATION_REQUIRED
   DELETED
 }
+
 enum DeviceReductionPlanState {
   PENDING
   IN_PROGRESS
@@ -249,6 +255,7 @@ enum DeviceReductionPlanState {
   SUPERSEDED
   REMEDIATION_REQUIRED
 }
+
 enum EntitlementIncidentKind {
   PAID_FULFILLMENT_STALLED
   PROJECTION_DRIFT
@@ -257,17 +264,18 @@ enum EntitlementIncidentKind {
   INVALID_CAPTURED_TARGET
   RECONCILIATION_REQUIRED
 }
+
 enum EntitlementIncidentSeverity {
   INFO
   WARNING
   CRITICAL
 }
+
 enum EntitlementIncidentState {
   OPEN
   ACKNOWLEDGED
   RESOLVED
 }
-
 
 enum BroadcastStatus {
   DRAFT
@@ -443,27 +451,27 @@ enum SupportDocRequestStatus {
 /// Authenticated admin operator. The first DEV admin is bootstrapped via
 /// `/api/internal/auth/bootstrap-first-admin` when the table is empty.
 model AdminUser {
-  id                 String    @id @default(cuid()) @map("id")
-  login              String    @map("login")
-  loginNormalized    String    @unique @map("login_normalized")
-  email              String?   @unique @map("email")
-  passwordHash       String    @map("password_hash")
-  name               String?   @map("name")
-  role               UserRole  @default(ADMIN) @map("role")
-  isActive           Boolean   @default(true) @map("is_active")
+  id                  String    @id @default(cuid()) @map("id")
+  login               String    @map("login")
+  loginNormalized     String    @unique @map("login_normalized")
+  email               String?   @unique @map("email")
+  passwordHash        String    @map("password_hash")
+  name                String?   @map("name")
+  role                UserRole  @default(ADMIN) @map("role")
+  isActive            Boolean   @default(true) @map("is_active")
   /// Incremented on password change / session revoke — invalidates old JWTs.
-  tokenVersion       Int       @default(0) @map("token_version")
-  lastLoginAt        DateTime? @map("last_login_at") @db.Timestamptz(3)
-  lastLoginIp        String?   @map("last_login_ip")
-  passwordChangedAt  DateTime? @map("password_changed_at") @db.Timestamptz(3)
+  tokenVersion        Int       @default(0) @map("token_version")
+  lastLoginAt         DateTime? @map("last_login_at") @db.Timestamptz(3)
+  lastLoginIp         String?   @map("last_login_ip")
+  passwordChangedAt   DateTime? @map("password_changed_at") @db.Timestamptz(3)
   /// Forces the admin to change their password on next sign-in. Set when an
   /// operator resets a password or imports a new admin with a temporary one.
-  mustChangePassword Boolean   @default(false) @map("must_change_password")
+  mustChangePassword  Boolean   @default(false) @map("must_change_password")
   /// Optional pointer to a custom RBAC role. When `null` the admin still
   /// gets the implicit permissions tied to their `role` enum (DEV --> all,
   /// ADMIN --> safe-write defaults). When set the role's permission matrix
   /// fully replaces the legacy `role`-derived defaults.
-  rbacRoleId         String?   @map("rbac_role_id")
+  rbacRoleId          String?   @map("rbac_role_id")
   ///
   /// ── 2FA (TOTP) — Phase 5 ──────────────────────────────────────────
   ///
@@ -471,31 +479,31 @@ model AdminUser {
   /// then `totpSecretEncrypted` is empty and login skips the second-factor
   /// step. Operators with `totpEnabled = true` MUST present a valid 6-digit
   /// code on every login and on every privileged action that re-prompts.
-  totpEnabled        Boolean   @default(false) @map("totp_enabled")
+  totpEnabled         Boolean   @default(false) @map("totp_enabled")
   /// AES-256-GCM-encrypted Base32 TOTP secret. Encryption key is derived
   /// from REZEIS_CRYPT_KEY so the database alone does not expose secrets.
   /// Format: `iv:ciphertext:tag`, all hex-encoded.
-  totpSecretEncrypted String?  @map("totp_secret_encrypted")
+  totpSecretEncrypted String?   @map("totp_secret_encrypted")
   /// SHA-256 hashes of single-use TOTP recovery codes. Stored as a string
   /// array; each value is consumed (removed) on use. We store hashes only;
   /// the plaintext codes are shown to the operator exactly once during
   /// enrollment.
-  totpRecoveryCodes  String[]  @default([]) @map("totp_recovery_codes")
-  totpEnrolledAt     DateTime? @map("totp_enrolled_at") @db.Timestamptz(3)
+  totpRecoveryCodes   String[]  @default([]) @map("totp_recovery_codes")
+  totpEnrolledAt      DateTime? @map("totp_enrolled_at") @db.Timestamptz(3)
   /// The admin's ACTIVE appearance selection (theme mode/preset/radius, glass
   /// on/off + per-element settings, effects, density/font). Opaque JSON blob
   /// mirroring the web client's persisted store shapes — persisted per-admin so
   /// the chosen theme/effects follow the operator across devices/browsers
   /// instead of resetting to defaults from empty localStorage.
-  appearancePrefs    Json?     @map("appearance_prefs")
-  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt          DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+  appearancePrefs     Json?     @map("appearance_prefs")
+  createdAt           DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt           DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
 
-  auditLogs     AdminAuditLog[]    @relation("AdminAuditLogActor")
-  rbacRole      AdminRole?         @relation("AdminUserRbacRole", fields: [rbacRoleId], references: [id], onDelete: SetNull)
-  scopePolicies AdminScopePolicy[] @relation("AdminUserScopePolicy")
-  themePresets  AdminThemePreset[] @relation("AdminThemePresetOwner")
-  webPushSubscriptions AdminWebPushSubscription[] @relation("AdminUserWebPushSubscriptions")
+  auditLogs               AdminAuditLog[]               @relation("AdminAuditLogActor")
+  rbacRole                AdminRole?                    @relation("AdminUserRbacRole", fields: [rbacRoleId], references: [id], onDelete: SetNull)
+  scopePolicies           AdminScopePolicy[]            @relation("AdminUserScopePolicy")
+  themePresets            AdminThemePreset[]            @relation("AdminThemePresetOwner")
+  webPushSubscriptions    AdminWebPushSubscription[]    @relation("AdminUserWebPushSubscriptions")
   notificationPreferences AdminNotificationPreference[] @relation("AdminUserNotificationPreferences")
 
   @@index([role])
@@ -559,20 +567,20 @@ model AdminAuditLog {
 /// Retention: cleaned up by the Phase 5 daily cron — see
 /// `LoginGuardService.cleanupOldAttempts()`.
 model AdminLoginAttempt {
-  id           String   @id @default(cuid()) @map("id")
+  id              String   @id @default(cuid()) @map("id")
   /// Normalised login as supplied by the client. Empty string means the
   /// guard rejected the request before we read the body.
   loginNormalized String   @default("") @map("login_normalized")
-  ipAddress    String   @map("ip_address")
+  ipAddress       String   @map("ip_address")
   /// `true` for successful authentications. We keep both successes and
   /// failures so the audit UI can render "last successful login from this
   /// IP" in addition to failure spikes.
-  success      Boolean  @default(false) @map("success")
+  success         Boolean  @default(false) @map("success")
   /// Short reason code: `invalid_password`, `admin_not_found`, `ip_blocked`,
   /// `rate_limited`, `totp_required`, `totp_invalid`, etc.
-  reason       String?  @map("reason")
-  userAgent    String?  @map("user_agent")
-  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  reason          String?  @map("reason")
+  userAgent       String?  @map("user_agent")
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
 
   @@index([loginNormalized, createdAt])
   @@index([ipAddress, createdAt])
@@ -588,19 +596,19 @@ model AdminLoginAttempt {
 /// mechanism (see scripts/admin-cli.ts in Phase 9). The active flag lets
 /// operators temporarily disable an entry without deleting it.
 model AdminIpAllowlist {
-  id          String    @id @default(cuid()) @map("id")
+  id          String   @id @default(cuid()) @map("id")
   /// Single IPv4/IPv6 address or CIDR range (`1.2.3.0/24`, `2001:db8::/32`).
-  address     String    @unique @map("address")
+  address     String   @unique @map("address")
   /// Free-form label visible in the admin UI (e.g. `Office VPN`,
   /// `Operator-Anna-home`). No PII expected.
-  label       String    @default("") @map("label")
+  label       String   @default("") @map("label")
   /// `true` to enforce the entry; `false` lets operators stage-add an
   /// address without enabling it yet.
-  isActive    Boolean   @default(true) @map("is_active")
+  isActive    Boolean  @default(true) @map("is_active")
   /// Pointer to the admin who created the entry.
-  createdById String?   @map("created_by_id")
-  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt   DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdById String?  @map("created_by_id")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
 
   @@index([isActive])
   @@index([createdAt])
@@ -716,31 +724,31 @@ model WebhookSubscription {
 /// Retention: the daily cleanup cron (in `WebhookDispatcherService`) drops
 /// rows older than 30 days so the table stays bounded.
 model WebhookDelivery {
-  id              String                @id @default(cuid()) @map("id")
-  subscriptionId  String                @map("subscription_id")
+  id             String                @id @default(cuid()) @map("id")
+  subscriptionId String                @map("subscription_id")
   /// SystemEvents event type ("payment.completed" etc.).
-  eventType       String                @map("event_type")
+  eventType      String                @map("event_type")
   /// JSON payload that was POSTed (or will be). Kept for "Replay" feature
   /// from the UI.
-  payload         Json                  @map("payload")
-  status          WebhookDeliveryStatus @default(PENDING) @map("status")
-  attempt         Int                   @default(0) @map("attempt")
+  payload        Json                  @map("payload")
+  status         WebhookDeliveryStatus @default(PENDING) @map("status")
+  attempt        Int                   @default(0) @map("attempt")
   /// HTTP status from the last attempt. `null` while pending.
-  httpStatus      Int?                  @map("http_status")
+  httpStatus     Int?                  @map("http_status")
   /// First few chars of the response body for diagnostics. Always
   /// truncated to `MAX_RESPONSE_BODY_PREVIEW` chars to keep storage
   /// predictable.
-  responseBody    String?               @map("response_body")
+  responseBody   String?               @map("response_body")
   /// Last error message (transport-level — DNS, timeout, TLS, …).
-  errorMessage    String?               @map("error_message")
+  errorMessage   String?               @map("error_message")
   /// Round-trip time in ms, populated on completion.
-  durationMs      Int?                  @map("duration_ms")
+  durationMs     Int?                  @map("duration_ms")
   /// When the next retry is scheduled. `null` once the delivery is
   /// terminal (SUCCEEDED or FAILED with no more retries).
-  nextRetryAt     DateTime?             @map("next_retry_at") @db.Timestamptz(3)
-  startedAt       DateTime?             @map("started_at") @db.Timestamptz(3)
-  finishedAt      DateTime?             @map("finished_at") @db.Timestamptz(3)
-  createdAt       DateTime              @default(now()) @map("created_at") @db.Timestamptz(3)
+  nextRetryAt    DateTime?             @map("next_retry_at") @db.Timestamptz(3)
+  startedAt      DateTime?             @map("started_at") @db.Timestamptz(3)
+  finishedAt     DateTime?             @map("finished_at") @db.Timestamptz(3)
+  createdAt      DateTime              @default(now()) @map("created_at") @db.Timestamptz(3)
 
   subscription WebhookSubscription @relation("WebhookSubscriptionDeliveries", fields: [subscriptionId], references: [id], onDelete: Cascade)
 
@@ -1080,26 +1088,26 @@ model User {
   updatedAt                      DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
 
   // Relations
-  subscriptions        Subscription[]          @relation("UserSubscriptions")
-  currentSubscription  Subscription?           @relation("UserCurrentSubscription", fields: [currentSubscriptionId], references: [id], onDelete: SetNull)
-  webAccount           WebAccount?             @relation("UserWebAccount")
-  transactions         Transaction[]           @relation("UserTransactions")
-  notificationEvents   UserNotificationEvent[] @relation("UserNotificationEvents")
-  webPushSubscriptions WebPushSubscription[]   @relation("UserWebPushSubscriptions")
-  trialGrant           TrialGrant?             @relation("UserTrialGrant")
-  referredBy           Referral?               @relation("ReferredUser")
-  referralsGiven       Referral[]              @relation("ReferrerUser")
-  partner              Partner?                @relation("UserPartner")
-  referralInvites      ReferralInvite[]        @relation("InviterUser")
-  promocodeActivations PromocodeActivation[]   @relation("UserPromocodeActivations")
+  subscriptions           Subscription[]           @relation("UserSubscriptions")
+  currentSubscription     Subscription?            @relation("UserCurrentSubscription", fields: [currentSubscriptionId], references: [id], onDelete: SetNull)
+  webAccount              WebAccount?              @relation("UserWebAccount")
+  transactions            Transaction[]            @relation("UserTransactions")
+  notificationEvents      UserNotificationEvent[]  @relation("UserNotificationEvents")
+  webPushSubscriptions    WebPushSubscription[]    @relation("UserWebPushSubscriptions")
+  trialGrant              TrialGrant?              @relation("UserTrialGrant")
+  referredBy              Referral?                @relation("ReferredUser")
+  referralsGiven          Referral[]               @relation("ReferrerUser")
+  partner                 Partner?                 @relation("UserPartner")
+  referralInvites         ReferralInvite[]         @relation("InviterUser")
+  promocodeActivations    PromocodeActivation[]    @relation("UserPromocodeActivations")
   referralPointsExchanges ReferralPointsExchange[] @relation("UserReferralPointsExchanges")
-  referralRewards      ReferralReward[]        @relation("ReferralRewardUser")
-  partnerTransactions  PartnerTransaction[]    @relation("PartnerTransactionReferral")
-  partnerReferrals     PartnerReferral[]       @relation("PartnerReferralUser")
-  supportTickets       SupportTicket[]         @relation("SupportTicketUser")
-  oauthLinks           UserOAuthLink[]         @relation("UserOAuthLinks")
-  questCompletions     QuestCompletion[]       @relation("QuestCompletionUser")
-  savedPaymentMethods  SavedPaymentMethod[]   @relation("UserSavedPaymentMethods")
+  referralRewards         ReferralReward[]         @relation("ReferralRewardUser")
+  partnerTransactions     PartnerTransaction[]     @relation("PartnerTransactionReferral")
+  partnerReferrals        PartnerReferral[]        @relation("PartnerReferralUser")
+  supportTickets          SupportTicket[]          @relation("SupportTicketUser")
+  oauthLinks              UserOAuthLink[]          @relation("UserOAuthLinks")
+  questCompletions        QuestCompletion[]        @relation("QuestCompletionUser")
+  savedPaymentMethods     SavedPaymentMethod[]     @relation("UserSavedPaymentMethods")
 
   @@index([telegramId])
   @@index([role])
@@ -1272,18 +1280,18 @@ model Subscription {
   createdAt      DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt      DateTime           @updatedAt @map("updated_at") @db.Timestamptz(3)
 
-  user                  User                  @relation("UserSubscriptions", fields: [userId], references: [id], onDelete: Cascade)
-  currentSubscriptionOf User?                 @relation("UserCurrentSubscription")
-  transactions          Transaction[]         @relation("SubscriptionTransactions")
-  transactionItems      TransactionItem[]     @relation("SubscriptionTransactionItems")
-  syncJobs              ProfileSyncJob[]      @relation("SubscriptionSyncJobs")
-  promocodeActivations  PromocodeActivation[] @relation("SubscriptionPromocodeActivations")
-  referralPointsExchanges ReferralPointsExchange[] @relation("SubscriptionReferralPointsExchanges")
-  terms                 SubscriptionTerm[]                   @relation("SubscriptionTerms")
-  addOnEntitlements     AddOnEntitlement[]                   @relation("SubscriptionAddOnEntitlements")
-  effectiveProjection   SubscriptionEffectiveProjection?    @relation("SubscriptionEffectiveProjection")
-  deviceReductionPlans  DeviceReductionPlan[]                @relation("SubscriptionDeviceReductionPlans")
-  entitlementIncidents  EntitlementIncident[]                @relation("SubscriptionEntitlementIncidents")
+  user                    User                             @relation("UserSubscriptions", fields: [userId], references: [id], onDelete: Cascade)
+  currentSubscriptionOf   User?                            @relation("UserCurrentSubscription")
+  transactions            Transaction[]                    @relation("SubscriptionTransactions")
+  transactionItems        TransactionItem[]                @relation("SubscriptionTransactionItems")
+  syncJobs                ProfileSyncJob[]                 @relation("SubscriptionSyncJobs")
+  promocodeActivations    PromocodeActivation[]            @relation("SubscriptionPromocodeActivations")
+  referralPointsExchanges ReferralPointsExchange[]         @relation("SubscriptionReferralPointsExchanges")
+  terms                   SubscriptionTerm[]               @relation("SubscriptionTerms")
+  addOnEntitlements       AddOnEntitlement[]               @relation("SubscriptionAddOnEntitlements")
+  effectiveProjection     SubscriptionEffectiveProjection? @relation("SubscriptionEffectiveProjection")
+  deviceReductionPlans    DeviceReductionPlan[]            @relation("SubscriptionDeviceReductionPlans")
+  entitlementIncidents    EntitlementIncident[]            @relation("SubscriptionEntitlementIncidents")
 
   @@index([userId])
   @@index([status])
@@ -1301,25 +1309,25 @@ model Subscription {
 /// subscription. Materialized in the database so workers can resume after
 /// restart.
 model ProfileSyncJob {
-  id             String        @id @default(cuid()) @map("id")
-  subscriptionId String        @map("subscription_id")
-  action         SyncAction    @map("action")
-  status         SyncJobStatus @default(PENDING) @map("status")
-  attempts       Int           @default(0) @map("attempts")
-  lastError      String?       @map("last_error")
-  payload        Json          @default("{}") @map("payload")
+  id              String        @id @default(cuid()) @map("id")
+  subscriptionId  String        @map("subscription_id")
+  action          SyncAction    @map("action")
+  status          SyncJobStatus @default(PENDING) @map("status")
+  attempts        Int           @default(0) @map("attempts")
+  lastError       String?       @map("last_error")
+  payload         Json          @default("{}") @map("payload")
   desiredRevision BigInt?       @map("desired_revision")
   aggregateKey    String?       @map("aggregate_key")
   cause           String?       @map("cause")
   supersededAt    DateTime?     @map("superseded_at") @db.Timestamptz(3)
   recoveryData    Json          @default("{}") @map("recovery_data")
-  scheduledAt    DateTime?     @map("scheduled_at") @db.Timestamptz(3)
-  startedAt      DateTime?     @map("started_at") @db.Timestamptz(3)
-  completedAt    DateTime?     @map("completed_at") @db.Timestamptz(3)
-  createdAt      DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt      DateTime      @updatedAt @map("updated_at") @db.Timestamptz(3)
+  scheduledAt     DateTime?     @map("scheduled_at") @db.Timestamptz(3)
+  startedAt       DateTime?     @map("started_at") @db.Timestamptz(3)
+  completedAt     DateTime?     @map("completed_at") @db.Timestamptz(3)
+  createdAt       DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt       DateTime      @updatedAt @map("updated_at") @db.Timestamptz(3)
 
-  subscription Subscription @relation("SubscriptionSyncJobs", fields: [subscriptionId], references: [id], onDelete: Cascade)
+  subscription           Subscription            @relation("SubscriptionSyncJobs", fields: [subscriptionId], references: [id], onDelete: Cascade)
   referralPointsExchange ReferralPointsExchange? @relation("ProfileSyncJobReferralPointsExchange")
 
   @@index([subscriptionId])
@@ -1360,6 +1368,7 @@ model SubscriptionTerm {
   @@index([status, endsAt])
   @@map("subscription_terms")
 }
+
 model SubscriptionResetEpoch {
   id            String                 @id @default(cuid()) @map("id")
   termId        String                 @map("term_id")
@@ -1379,6 +1388,7 @@ model SubscriptionResetEpoch {
   @@index([closedAt, plannedEndsAt])
   @@map("subscription_reset_epochs")
 }
+
 model AddOnEntitlement {
   id                    String                @id @default(cuid()) @map("id")
   subscriptionId        String                @map("subscription_id")
@@ -1424,6 +1434,7 @@ model AddOnEntitlement {
   @@index([expiryEpochId])
   @@map("add_on_entitlements")
 }
+
 model AddOnEntitlementEvent {
   id            String                    @id @default(cuid()) @map("id")
   entitlementId String                    @map("entitlement_id")
@@ -1439,11 +1450,12 @@ model AddOnEntitlementEvent {
 
   entitlement AddOnEntitlement @relation("EntitlementEvents", fields: [entitlementId], references: [id], onDelete: Restrict)
 
+  @@unique([entitlementId, commandKey])
   @@index([entitlementId, createdAt])
   @@index([correlationId])
-  @@unique([entitlementId, commandKey])
   @@map("add_on_entitlement_events")
 }
+
 model SubscriptionEffectiveProjection {
   id                             String                   @id @default(cuid()) @map("id")
   subscriptionId                 String                   @unique @map("subscription_id")
@@ -1474,6 +1486,7 @@ model SubscriptionEffectiveProjection {
   @@index([baselineTermId])
   @@map("subscription_effective_projections")
 }
+
 model DeviceReductionPlan {
   id                    String                   @id @default(cuid()) @map("id")
   subscriptionId        String                   @map("subscription_id")
@@ -1497,6 +1510,7 @@ model DeviceReductionPlan {
   @@index([state, createdAt])
   @@map("device_reduction_plans")
 }
+
 model EntitlementIncident {
   id             String                      @id @default(cuid()) @map("id")
   subscriptionId String                      @map("subscription_id")
@@ -1618,54 +1632,55 @@ model PaymentGateway {
 }
 
 model Transaction {
-  id             String             @id @default(cuid()) @map("id")
+  id                  String             @id @default(cuid()) @map("id")
   /// Stable provider-facing payment identifier (UUID).
-  paymentId      String             @unique @default(cuid()) @map("payment_id")
-  userId         String             @map("user_id")
-  subscriptionId String?            @map("subscription_id")
-  status         TransactionStatus  @default(PENDING) @map("status")
-  purchaseType   PurchaseType       @map("purchase_type")
-  channel        PurchaseChannel    @default(WEB) @map("channel")
-  gatewayType    PaymentGatewayType @map("gateway_type")
+  paymentId           String             @unique @default(cuid()) @map("payment_id")
+  userId              String             @map("user_id")
+  subscriptionId      String?            @map("subscription_id")
+  status              TransactionStatus  @default(PENDING) @map("status")
+  purchaseType        PurchaseType       @map("purchase_type")
+  channel             PurchaseChannel    @default(WEB) @map("channel")
+  gatewayType         PaymentGatewayType @map("gateway_type")
   /// Provider-side payment reference (e.g., YooKassa payment id).
-  gatewayId      String?            @map("gateway_id")
+  gatewayId           String?            @map("gateway_id")
   /// Optional raw provider payload kept for ops.
-  gatewayData    Json?              @map("gateway_data")
-  currency       Currency           @map("currency")
-  paymentAsset   String?            @map("payment_asset")
-  amount         Decimal            @map("amount") @db.Decimal(20, 8)
+  gatewayData         Json?              @map("gateway_data")
+  currency            Currency           @map("currency")
+  paymentAsset        String?            @map("payment_asset")
+  amount              Decimal            @map("amount") @db.Decimal(20, 8)
   /// Snapshot of the plan/duration at draft time.
-  planSnapshot   Json               @default("{}") @map("plan_snapshot")
-  deviceTypes    String[]           @default([]) @map("device_types")
+  planSnapshot        Json               @default("{}") @map("plan_snapshot")
+  deviceTypes         String[]           @default([]) @map("device_types")
   /// Request-level idempotency for a logical checkout attempt (add-on/renewal).
   /// Client-supplied key scoped to the user: a repeat with the same key AND the
   /// same canonical composition returns the same draft; a different composition
   /// under the same key is rejected (`IDEMPOTENCY_KEY_CONFLICT`). NULL for
   /// legacy/keyless drafts — NULLs are distinct in the unique index, so keyless
   /// rows never collide.
-  idempotencyKey      String?        @map("idempotency_key")
+  idempotencyKey      String?            @map("idempotency_key")
   /// Canonical composition hash bound to `idempotencyKey`.
-  checkoutFingerprint String?        @map("checkout_fingerprint")
+  checkoutFingerprint String?            @map("checkout_fingerprint")
   /// Provider checkout URL captured at draft time so an idempotent replay can
   /// return the same payment link without creating a second invoice.
-  checkoutUrl         String?        @map("checkout_url")
+  checkoutUrl         String?            @map("checkout_url")
   /// Provisioning idempotency stamp — set (atomically, inside the fulfillment
   /// transaction) once the subscription has been created/renewed/upgraded for
   /// this payment. The webhook reconciler fulfils only when this is null, so a
   /// RENEW/UPGRADE (whose `subscriptionId` points at the SOURCE sub from draft
   /// time) is provisioned exactly once instead of being wrongly skipped.
-  fulfilledAt    DateTime?          @map("fulfilled_at") @db.Timestamptz(3)
-  createdAt      DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt      DateTime           @updatedAt @map("updated_at") @db.Timestamptz(3)
+  fulfilledAt         DateTime?          @map("fulfilled_at") @db.Timestamptz(3)
+  createdAt           DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt           DateTime           @updatedAt @map("updated_at") @db.Timestamptz(3)
 
-  user         User              @relation("UserTransactions", fields: [userId], references: [id], onDelete: Restrict)
-  subscription Subscription?     @relation("SubscriptionTransactions", fields: [subscriptionId], references: [id], onDelete: SetNull)
+  user              User               @relation("UserTransactions", fields: [userId], references: [id], onDelete: Restrict)
+  subscription      Subscription?      @relation("SubscriptionTransactions", fields: [subscriptionId], references: [id], onDelete: SetNull)
   /// Line items for a combined (multi-subscription) renewal payment. Empty
   /// for every legacy single-subscription transaction; non-empty marks the
   /// transaction as a combined renewal fulfilled item-by-item.
-  items        TransactionItem[] @relation("TransactionItems")
+  items             TransactionItem[]  @relation("TransactionItems")
   addOnEntitlements AddOnEntitlement[] @relation("TransactionAddOnEntitlements")
 
+  @@unique([userId, idempotencyKey])
   @@index([userId])
   @@index([subscriptionId])
   @@index([status])
@@ -1675,7 +1690,6 @@ model Transaction {
   /// Backs the anti-fraud failed-payment groupBy + payment analytics
   /// (`status=… AND createdAt>=window`) — equality first, range last.
   @@index([status, createdAt])
-  @@unique([userId, idempotencyKey])
   @@map("transactions")
 }
 
@@ -1756,33 +1770,33 @@ model PaymentWebhookEvent {
 /// Unbind is local — YooKassa has no "delete card" API; we stop using the id
 /// and soft-deactivate the row so the cabinet can hide it after user action.
 model SavedPaymentMethod {
-  id                 String             @id @default(cuid()) @map("id")
-  userId             String             @map("user_id")
-  gatewayType        PaymentGatewayType @map("gateway_type")
+  id                  String             @id @default(cuid()) @map("id")
+  userId              String             @map("user_id")
+  gatewayType         PaymentGatewayType @map("gateway_type")
   /// Provider payment_method.id (YooKassa) — the token used for off-session charges.
-  providerMethodId   String             @map("provider_method_id")
+  providerMethodId    String             @map("provider_method_id")
   /// bank_card | yoo_money | sberbank | sbp | …
-  methodType         String             @map("method_type")
-  title              String?            @map("title")
-  cardLast4          String?            @map("card_last4")
-  cardFirst6         String?            @map("card_first6")
-  cardExpiryMonth    String?            @map("card_expiry_month")
-  cardExpiryYear     String?            @map("card_expiry_year")
-  cardIssuerCountry  String?            @map("card_issuer_country")
-  cardProduct        String?            @map("card_product")
+  methodType          String             @map("method_type")
+  title               String?            @map("title")
+  cardLast4           String?            @map("card_last4")
+  cardFirst6          String?            @map("card_first6")
+  cardExpiryMonth     String?            @map("card_expiry_month")
+  cardExpiryYear      String?            @map("card_expiry_year")
+  cardIssuerCountry   String?            @map("card_issuer_country")
+  cardProduct         String?            @map("card_product")
   /// Soft-unbind: false means user detached the method in cabinet (or ops).
-  isActive           Boolean            @default(true) @map("is_active")
+  isActive            Boolean            @default(true) @map("is_active")
   /// When false, method stays bound but is excluded from off-session charges / autopay.
   /// Distinct from unbind — card remains listed and can be re-enabled without re-save.
-  autopayEnabled     Boolean            @default(true) @map("autopay_enabled")
-  unboundAt          DateTime?          @map("unbound_at") @db.Timestamptz(3)
+  autopayEnabled      Boolean            @default(true) @map("autopay_enabled")
+  unboundAt           DateTime?          @map("unbound_at") @db.Timestamptz(3)
   /// Transaction that first produced this saved method (audit).
-  sourceTransactionId String?           @map("source_transaction_id")
+  sourceTransactionId String?            @map("source_transaction_id")
   /// Provider payment id that created the method (YooKassa payment.object.id).
-  sourceGatewayId    String?            @map("source_gateway_id")
-  rawSnapshot        Json?              @map("raw_snapshot")
-  createdAt          DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt          DateTime           @updatedAt @map("updated_at") @db.Timestamptz(3)
+  sourceGatewayId     String?            @map("source_gateway_id")
+  rawSnapshot         Json?              @map("raw_snapshot")
+  createdAt           DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt           DateTime           @updatedAt @map("updated_at") @db.Timestamptz(3)
 
   user User @relation("UserSavedPaymentMethods", fields: [userId], references: [id], onDelete: Cascade)
 
@@ -1792,7 +1806,6 @@ model SavedPaymentMethod {
   @@index([gatewayType])
   @@map("saved_payment_methods")
 }
-
 
 // =============================================================================
 //  REFERRALS (minimal — used by plan catalog)
@@ -1849,36 +1862,36 @@ model ReferralInvite {
 
 /// Partner balance ledger. One record per user.
 model Partner {
-  id             String   @id @default(cuid()) @map("id")
-  userId         String   @unique @map("user_id")
+  id             String  @id @default(cuid()) @map("id")
+  userId         String  @unique @map("user_id")
   /// Balance stored in minor units (cents/kopecks) for integer precision.
-  balance        Int      @default(0) @map("balance")
-  totalEarned    Int      @default(0) @map("total_earned")
-  totalWithdrawn Int      @default(0) @map("total_withdrawn")
-  isActive       Boolean  @default(true) @map("is_active")
+  balance        Int     @default(0) @map("balance")
+  totalEarned    Int     @default(0) @map("total_earned")
+  totalWithdrawn Int     @default(0) @map("total_withdrawn")
+  isActive       Boolean @default(true) @map("is_active")
 
   /// Whether this partner uses the global partner settings (`Settings.partnerSettings`)
   /// or its own per-user override defined by the columns below.
   /// Donor: altshop `partner.individual_settings.use_global_settings`.
-  useGlobalSettings Boolean              @default(true) @map("use_global_settings")
+  useGlobalSettings Boolean                @default(true) @map("use_global_settings")
   accrualStrategy   PartnerAccrualStrategy @default(ON_EACH_PAYMENT) @map("accrual_strategy")
   rewardType        PartnerRewardType      @default(PERCENT) @map("reward_type")
 
   /// Per-level percentages used when `rewardType = PERCENT` and
   /// `useGlobalSettings = false`. NULL falls back to the global value.
   /// Stored as numeric(5,2) to match `partner_transactions.percent`.
-  level1Percent     Decimal? @map("level1_percent") @db.Decimal(5, 2)
-  level2Percent     Decimal? @map("level2_percent") @db.Decimal(5, 2)
-  level3Percent     Decimal? @map("level3_percent") @db.Decimal(5, 2)
+  level1Percent Decimal? @map("level1_percent") @db.Decimal(5, 2)
+  level2Percent Decimal? @map("level2_percent") @db.Decimal(5, 2)
+  level3Percent Decimal? @map("level3_percent") @db.Decimal(5, 2)
 
   /// Per-level fixed amounts (in minor units) used when
   /// `rewardType = FIXED` and `useGlobalSettings = false`.
-  level1FixedAmount Int?     @map("level1_fixed_amount")
-  level2FixedAmount Int?     @map("level2_fixed_amount")
-  level3FixedAmount Int?     @map("level3_fixed_amount")
+  level1FixedAmount Int? @map("level1_fixed_amount")
+  level2FixedAmount Int? @map("level2_fixed_amount")
+  level3FixedAmount Int? @map("level3_fixed_amount")
 
-  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
 
   user         User                 @relation("UserPartner", fields: [userId], references: [id], onDelete: Cascade)
   withdrawals  PartnerWithdrawal[]  @relation("PartnerWithdrawals")
@@ -2198,18 +2211,18 @@ model SubpageConfig {
 /// source of truth; reiwa fetches the effective published config via the
 /// internal endpoint.
 model LandingConfig {
-  id        String   @id @default(cuid()) @map("id")
+  id                  String   @id @default(cuid()) @map("id")
   /// Singleton guard — always "default"; unique so only one row can exist.
-  key       String   @unique @default("default") @map("key")
+  key                 String   @unique @default("default") @map("key")
   /// Draft config JSON (schemaVersion + enabled + theme + sections).
-  draft     Json     @map("draft")
+  draft               Json     @map("draft")
   /// FK to the currently published revision (null until first publish).
-  publishedRevisionId String? @map("published_revision_id")
+  publishedRevisionId String?  @map("published_revision_id")
   /// Optimistic-concurrency token: bumped on every successful draft save. A
   /// save carrying a stale `version` is rejected 409 so a concurrent second
   /// editor cannot silently clobber the first.
-  version   Int      @default(0) @map("version")
-  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  version             Int      @default(0) @map("version")
+  updatedAt           DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
 
   @@map("landing_configs")
 }
@@ -2395,6 +2408,9 @@ model ReferralReward {
 /// the same table can absorb future ledger kinds without a new enum.
 model PartnerTransaction {
   id                  String   @id @default(cuid()) @map("id")
+  /// Immutable donor-ledger identifier. Allows retry-safe historical imports
+  /// without treating a provider payment id as a globally unique checkout id.
+  sourceKey           String?  @unique @map("source_key")
   partnerId           String   @map("partner_id")
   /// User the accrual is attributed to (donor field name preserved).
   referralUserId      String   @map("referral_user_id")
@@ -2594,11 +2610,11 @@ model AdClick {
   telegramId  BigInt?        @map("telegram_id") @db.BigInt
   /// `users.id` once resolved (scalar FK, no relation).
   userId      String?        @map("user_id")
-  utmSource       String?         @map("utm_source")
-  utmMedium       String?         @map("utm_medium")
-  utmCampaign     String?         @map("utm_campaign")
-  utmContent      String?         @map("utm_content")
-  utmCreative     String?         @map("utm_creative")
+  utmSource   String?        @map("utm_source")
+  utmMedium   String?        @map("utm_medium")
+  utmCampaign String?        @map("utm_campaign")
+  utmContent  String?        @map("utm_content")
+  utmCreative String?        @map("utm_creative")
   surface     AdClickSurface @default(BOT) @map("surface")
   isNewUser   Boolean        @default(false) @map("is_new_user")
   occurredAt  DateTime       @default(now()) @map("occurred_at") @db.Timestamptz(3)
@@ -2629,11 +2645,11 @@ model AdConversion {
   currency      String             @map("currency")
   status        AdConversionStatus @default(ATTRIBUTED) @map("status")
   occurredAt    DateTime           @default(now()) @map("occurred_at") @db.Timestamptz(3)
-  utmSource       String?         @map("utm_source")
-  utmMedium       String?         @map("utm_medium")
-  utmCampaign     String?         @map("utm_campaign")
-  utmContent      String?         @map("utm_content")
-  utmCreative     String?         @map("utm_creative")
+  utmSource     String?            @map("utm_source")
+  utmMedium     String?            @map("utm_medium")
+  utmCampaign   String?            @map("utm_campaign")
+  utmContent    String?            @map("utm_content")
+  utmCreative   String?            @map("utm_creative")
 
   placement AdPlacement @relation("AdPlacementConversions", fields: [placementId], references: [id], onDelete: Cascade)
 
@@ -2724,21 +2740,21 @@ model NotificationTemplate {
 }
 
 model SupportTicket {
-  id         String                @id @default(cuid()) @map("id")
-  userId     String?               @map("user_id")
-  guestId    String?               @unique @map("guest_id")
-  channel    SupportTicketChannel  @default(CABINET) @map("channel")
-  subject    String                @map("subject")
-  status     SupportTicketStatus   @default(OPEN) @map("status")
-  archivedAt DateTime?             @map("archived_at") @db.Timestamptz(3)
-  closedAt   DateTime?             @map("closed_at") @db.Timestamptz(3)
-  closedBy   String?               @map("closed_by")
-  createdAt  DateTime              @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt  DateTime              @updatedAt @map("updated_at") @db.Timestamptz(3)
+  id         String               @id @default(cuid()) @map("id")
+  userId     String?              @map("user_id")
+  guestId    String?              @unique @map("guest_id")
+  channel    SupportTicketChannel @default(CABINET) @map("channel")
+  subject    String               @map("subject")
+  status     SupportTicketStatus  @default(OPEN) @map("status")
+  archivedAt DateTime?            @map("archived_at") @db.Timestamptz(3)
+  closedAt   DateTime?            @map("closed_at") @db.Timestamptz(3)
+  closedBy   String?              @map("closed_by")
+  createdAt  DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt  DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
 
-  user     User?                  @relation("SupportTicketUser", fields: [userId], references: [id], onDelete: Cascade)
-  guest    SupportGuest?          @relation(fields: [guestId], references: [id], onDelete: SetNull)
-  messages SupportTicketMessage[]
+  user        User?                    @relation("SupportTicketUser", fields: [userId], references: [id], onDelete: Cascade)
+  guest       SupportGuest?            @relation(fields: [guestId], references: [id], onDelete: SetNull)
+  messages    SupportTicketMessage[]
   docRequests SupportDocumentRequest[]
 
   @@index([userId])
@@ -2754,18 +2770,18 @@ model SupportTicket {
 /// never stored — only its SHA-256 hash, so the conversation cannot be
 /// enumerated or hijacked from a client-supplied id.
 model SupportGuest {
-  id          String   @id @default(cuid()) @map("id")
-  secretHash  String   @unique @map("secret_hash")
+  id              String   @id @default(cuid()) @map("id")
+  secretHash      String   @unique @map("secret_hash")
   /// Optional secondary token hash for the email "resume" link sent on an
   /// operator reply. Lets the visitor return from a fresh device without
   /// rotating the cookie token. NULL until the first email continuity send.
-  emailResumeHash String? @unique @map("email_resume_hash")
-  email       String?  @map("email")
-  displayName String?  @map("display_name")
-  ipHash      String?  @map("ip_hash")
-  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
-  lastSeenAt  DateTime @default(now()) @map("last_seen_at") @db.Timestamptz(3)
-  expiresAt   DateTime @map("expires_at") @db.Timestamptz(3)
+  emailResumeHash String?  @unique @map("email_resume_hash")
+  email           String?  @map("email")
+  displayName     String?  @map("display_name")
+  ipHash          String?  @map("ip_hash")
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  lastSeenAt      DateTime @default(now()) @map("last_seen_at") @db.Timestamptz(3)
+  expiresAt       DateTime @map("expires_at") @db.Timestamptz(3)
 
   ticket SupportTicket?
 
@@ -2874,27 +2890,27 @@ enum AddOnType {
 /// Example: "+50 GB Traffic" (EXTRA_TRAFFIC, value=50, price per currency).
 /// When no `applicablePlanIds` are set, the add-on is available for ALL plans.
 model AddOn {
-  id                String    @id @default(cuid()) @map("id")
-  name              String    @map("name")
-  description       String?   @map("description")
-  type              AddOnType @map("type")
+  id                String        @id @default(cuid()) @map("id")
+  name              String        @map("name")
+  description       String?       @map("description")
+  type              AddOnType     @map("type")
   /// Optional icon shown on the add-on card in the reiwa cabinet. Either a
   /// built-in lucide glyph key or `custom:<id>` referencing the operator's
   /// custom icon library. `null` falls back to a type-derived default icon.
-  icon              String?   @map("icon")
+  icon              String?       @map("icon")
   /// Magnitude of the add-on:
   ///   - EXTRA_TRAFFIC → GB to add
   ///   - EXTRA_DEVICES → device slots to add
-  value             Int       @map("value")
-  isActive          Boolean   @default(true) @map("is_active")
-  orderIndex        Int       @default(0) @map("order_index")
+  value             Int           @map("value")
+  isActive          Boolean       @default(true) @map("is_active")
+  orderIndex        Int           @default(0) @map("order_index")
   /// Plan IDs this add-on applies to. Empty = available for all plans.
-  applicablePlanIds String[]  @default([]) @map("applicable_plan_ids")
+  applicablePlanIds String[]      @default([]) @map("applicable_plan_ids")
   lifetime          AddOnLifetime @default(UNTIL_SUBSCRIPTION_END) @map("lifetime")
   revision          Int           @default(1) @map("revision")
   archivedAt        DateTime?     @map("archived_at") @db.Timestamptz(3)
-  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt         DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdAt         DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime      @updatedAt @map("updated_at") @db.Timestamptz(3)
 
   prices       AddOnPrice[]
   entitlements AddOnEntitlement[] @relation("CatalogAddOnEntitlements")
@@ -2960,40 +2976,40 @@ enum BotButtonAction {
 /// from the admin panel; the bot service reads the latest snapshot and
 /// rebuilds keyboards accordingly.
 model BotButton {
-  id                 String          @id @default(cuid()) @map("id")
+  id                String          @id @default(cuid()) @map("id")
   /// Stable button identifier the bot service uses when wiring up
   /// callbacks, e.g. `subscriptions`, `support`, `referrals`. Slug is
   /// case-insensitive and must be unique.
-  buttonId           String          @unique @map("button_id")
-  label              String          @map("label")
+  buttonId          String          @unique @map("button_id")
+  label             String          @map("label")
   /// Display style — see `BotButtonStyle`.
-  style              BotButtonStyle  @default(PRIMARY) @map("style")
+  style             BotButtonStyle  @default(PRIMARY) @map("style")
   /// Optional Telegram Premium custom emoji id (string). Non-premium
   /// users see a fallback emoji rendered by the bot side.
-  iconCustomEmojiId  String?         @map("icon_custom_emoji_id")
+  iconCustomEmojiId String?         @map("icon_custom_emoji_id")
   /// Soft-delete-style visibility flag. Hidden buttons are not rendered
   /// but remain in the catalog so settings can be restored.
-  visible            Boolean         @default(true) @map("visible")
+  visible           Boolean         @default(true) @map("visible")
   /// When `true`, the button claims the entire row regardless of its
   /// natural width. Otherwise it shares a row with the next half-width
   /// neighbour.
-  onePerRow          Boolean         @default(false) @map("one_per_row")
+  onePerRow         Boolean         @default(false) @map("one_per_row")
   /// Render order — lower values come first inside the keyboard.
-  orderIndex         Int             @default(0) @map("order_index")
+  orderIndex        Int             @default(0) @map("order_index")
   /// What the button does when tapped. See `BotButtonAction`.
   /// Defaults to CALLBACK so existing rows light up the legacy
   /// callback-based handlers (cabinet/invite/rules/help) without a
   /// data migration.
-  actionType         BotButtonAction @default(CALLBACK) @map("action_type")
+  actionType        BotButtonAction @default(CALLBACK) @map("action_type")
   /// Action payload — interpretation depends on `actionType`:
   ///   - URL / WEBAPP   → absolute URL
   ///   - SCREEN         → `BotFlowScreen.shortId`
   ///   - CALLBACK / SUPPORT_URL → unused (kept null)
   /// Validation lives at the service layer (URL parsing, shortId
   /// existence check) so the schema stays simple.
-  actionTarget       String?         @map("action_target")
-  createdAt          DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt          DateTime        @updatedAt @map("updated_at") @db.Timestamptz(3)
+  actionTarget      String?         @map("action_target")
+  createdAt         DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime        @updatedAt @map("updated_at") @db.Timestamptz(3)
 
   @@index([visible, orderIndex])
   @@map("bot_buttons")
@@ -3002,16 +3018,16 @@ model BotButton {
 /// Editable emoji catalog. Each row is a single key (`STAR`, `CHECK`, …)
 /// with a Unicode fallback and an optional Telegram Premium custom emoji.
 model BotEmoji {
-  id         String   @id @default(cuid()) @map("id")
+  id        String   @id @default(cuid()) @map("id")
   /// Upper-case slug used by the bot when rendering text:
   /// `{{emoji.STAR}}`. Unique per row.
-  key        String   @unique @map("key")
+  key       String   @unique @map("key")
   /// Default Unicode codepoint shown to non-Premium users.
-  unicode    String   @map("unicode")
+  unicode   String   @map("unicode")
   /// Telegram Premium animated/custom emoji id (string).
-  tgEmojiId  String?  @map("tg_emoji_id")
-  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  tgEmojiId String?  @map("tg_emoji_id")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
 
   @@map("bot_emojis")
 }
@@ -3067,13 +3083,13 @@ enum BotFlowStatus {
 
 /// Action type for a flow button.
 enum BotFlowButtonAction {
-  NAVIGATE     // Go to another screen in the flow
-  URL          // Open external URL
-  WEBAPP       // Open Telegram Mini App
-  CALLBACK     // Trigger a built-in action (e.g. "show_subscription")
-  BACK         // Navigate back in history
-  START_OVER   // Return to root screen
-  SUPPORT_URL  // Open t.me/<BOT_SUPPORT_USERNAME>?text=<prefill> support DM
+  NAVIGATE // Go to another screen in the flow
+  URL // Open external URL
+  WEBAPP // Open Telegram Mini App
+  CALLBACK // Trigger a built-in action (e.g. "show_subscription")
+  BACK // Navigate back in history
+  START_OVER // Return to root screen
+  SUPPORT_URL // Open t.me/<BOT_SUPPORT_USERNAME>?text=<prefill> support DM
 }
 
 /// Style for a flow button (maps to Telegram Bot API `style` field).
@@ -3116,7 +3132,7 @@ model BotFlow {
   createdAt   DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt   DateTime      @updatedAt @map("updated_at") @db.Timestamptz(3)
 
-  screens     BotFlowScreen[]
+  screens BotFlowScreen[]
 
   @@unique([name, version])
   @@index([status])
@@ -3126,37 +3142,37 @@ model BotFlow {
 /// A single screen (node) in the flow graph. Represents one Telegram message
 /// with optional media and an inline keyboard.
 model BotFlowScreen {
-  id          String             @id @default(cuid()) @map("id")
+  id      String  @id @default(cuid()) @map("id")
   /// Short ID used in callback_data (8 chars, fits in 64-byte limit).
-  shortId     String             @map("short_id")
-  flowId      String             @map("flow_id")
-  flow        BotFlow            @relation(fields: [flowId], references: [id], onDelete: Cascade)
+  shortId String  @map("short_id")
+  flowId  String  @map("flow_id")
+  flow    BotFlow @relation(fields: [flowId], references: [id], onDelete: Cascade)
 
   /// Internal label for the editor (not shown to users).
-  name        String             @default("New Screen") @map("name")
+  name        String            @default("New Screen") @map("name")
   /// Message text sent to the user — Russian.
-  textRu      String             @default("") @map("text_ru") @db.Text
+  textRu      String            @default("") @map("text_ru") @db.Text
   /// Message text sent to the user — English.
-  textEn      String             @default("") @map("text_en") @db.Text
+  textEn      String            @default("") @map("text_en") @db.Text
   /// Parse mode for the message text.
-  parseMode   BotFlowParseMode   @default(HTML) @map("parse_mode")
+  parseMode   BotFlowParseMode  @default(HTML) @map("parse_mode")
   /// Optional media attachment.
-  mediaType   BotFlowMediaType?  @map("media_type")
+  mediaType   BotFlowMediaType? @map("media_type")
   /// Telegram file_id for the media (used when sending).
-  mediaFileId String?            @map("media_file_id")
+  mediaFileId String?           @map("media_file_id")
   /// Preview URL for the editor (WebP thumbnail or direct URL).
-  mediaUrl    String?            @map("media_url")
+  mediaUrl    String?           @map("media_url")
 
   /// Position on the React Flow canvas.
-  positionX   Float              @default(0) @map("position_x")
-  positionY   Float              @default(0) @map("position_y")
+  positionX Float   @default(0) @map("position_x")
+  positionY Float   @default(0) @map("position_y")
   /// Whether this is the entry point of the flow.
-  isRoot      Boolean            @default(false) @map("is_root")
+  isRoot    Boolean @default(false) @map("is_root")
 
-  createdAt   DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt   DateTime           @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
 
-  buttons     BotFlowButton[]
+  buttons BotFlowButton[]
 
   @@unique([flowId, shortId])
   @@index([flowId])
@@ -3166,37 +3182,37 @@ model BotFlowScreen {
 /// A button in a flow screen's inline keyboard. Buttons with action=NAVIGATE
 /// define edges in the graph (targetScreenId points to another screen).
 model BotFlowButton {
-  id                String              @id @default(cuid()) @map("id")
-  screenId          String              @map("screen_id")
-  screen            BotFlowScreen       @relation(fields: [screenId], references: [id], onDelete: Cascade)
+  id       String        @id @default(cuid()) @map("id")
+  screenId String        @map("screen_id")
+  screen   BotFlowScreen @relation(fields: [screenId], references: [id], onDelete: Cascade)
 
   /// Button label text shown to the user — Russian.
-  labelRu           String              @default("Кнопка") @map("label_ru")
+  labelRu String @default("Кнопка") @map("label_ru")
   /// Button label text shown to the user — English.
-  labelEn           String              @default("Button") @map("label_en")
+  labelEn String @default("Button") @map("label_en")
   /// Row index (0-based) for inline keyboard layout.
-  row               Int                 @default(0) @map("row")
+  row     Int    @default(0) @map("row")
   /// Column index within the row.
-  col               Int                 @default(0) @map("col")
+  col     Int    @default(0) @map("col")
 
   /// What happens when the user presses this button.
-  actionType        BotFlowButtonAction @map("action_type")
+  actionType     BotFlowButtonAction @map("action_type")
   /// For NAVIGATE: shortId of the target screen.
-  targetScreenId    String?             @map("target_screen_id")
+  targetScreenId String?             @map("target_screen_id")
   /// For URL: external URL to open.
-  url               String?             @map("url")
+  url            String?             @map("url")
   /// For WEBAPP: Telegram Mini App URL.
-  webAppUrl         String?             @map("web_app_url")
+  webAppUrl      String?             @map("web_app_url")
   /// For CALLBACK: built-in action identifier (e.g. "show_subscription").
-  callbackAction    String?             @map("callback_action")
+  callbackAction String?             @map("callback_action")
 
   /// Visual style (maps to Telegram Bot API `style` field).
-  style             BotFlowButtonStyle  @default(DEFAULT) @map("style")
+  style             BotFlowButtonStyle @default(DEFAULT) @map("style")
   /// Optional Telegram Premium custom emoji ID shown before the label.
-  iconCustomEmojiId String?             @map("icon_custom_emoji_id")
+  iconCustomEmojiId String?            @map("icon_custom_emoji_id")
 
-  createdAt         DateTime            @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt         DateTime            @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
 
   @@index([screenId])
   @@map("bot_flow_buttons")
@@ -3209,26 +3225,26 @@ model BotFlowButton {
 /// Time-series samples collected from the Remnawave panel every 5 minutes.
 /// Powers the online trends chart and per-node traffic history on the dashboard.
 model RemnawaveMetricSample {
-  id              String   @id @default(cuid()) @map("id")
+  id                 String   @id @default(cuid()) @map("id")
   /// Total users online at sample time.
-  onlineNow       Int      @map("online_now")
+  onlineNow          Int      @map("online_now")
   /// Total registered users on the panel.
-  totalUsers      Int      @map("total_users")
+  totalUsers         Int      @map("total_users")
   /// Number of nodes currently online.
-  nodesOnline     Int      @map("nodes_online")
+  nodesOnline        Int      @map("nodes_online")
   /// Total bandwidth consumed (bytes) across all nodes at sample time.
-  totalBytesLifetime BigInt @map("total_bytes_lifetime")
+  totalBytesLifetime BigInt   @map("total_bytes_lifetime")
   /// Per-node snapshot: JSON array of { uuid, name, usersOnline, trafficUsedBytes, isConnected }.
-  nodesSnapshot   Json     @default("[]") @map("nodes_snapshot")
+  nodesSnapshot      Json     @default("[]") @map("nodes_snapshot")
   /// Panel CPU cores count.
-  cpuCores        Int      @default(0) @map("cpu_cores")
+  cpuCores           Int      @default(0) @map("cpu_cores")
   /// Panel memory used (bytes).
-  memoryUsed      BigInt   @default(0) @map("memory_used")
+  memoryUsed         BigInt   @default(0) @map("memory_used")
   /// Panel memory total (bytes).
-  memoryTotal     BigInt   @default(0) @map("memory_total")
+  memoryTotal        BigInt   @default(0) @map("memory_total")
   /// Panel uptime in seconds.
-  uptime          Int      @default(0) @map("uptime")
-  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  uptime             Int      @default(0) @map("uptime")
+  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
 
   @@index([createdAt])
   @@map("remnawave_metric_samples")
@@ -3272,36 +3288,36 @@ enum AuthProviderType {
 /// Each row represents one configured provider (e.g. GitHub, Telegram).
 /// Secrets are stored AES-256-GCM encrypted (same key as TOTP secrets).
 model AuthProviderConfig {
-  id              String           @id @default(cuid()) @map("id")
-  type            AuthProviderType @unique @map("type")
+  id                 String           @id @default(cuid()) @map("id")
+  type               AuthProviderType @unique @map("type")
   /// Whether this provider is currently enabled for login.
-  isEnabled       Boolean          @default(false) @map("is_enabled")
+  isEnabled          Boolean          @default(false) @map("is_enabled")
   /// Display name shown on the login page button.
-  displayName     String           @map("display_name")
+  displayName        String           @map("display_name")
   /// OAuth2 Client ID from the provider.
-  clientId        String?          @map("client_id")
+  clientId           String?          @map("client_id")
   /// OAuth2 Client Secret (AES-256-GCM encrypted).
-  clientSecretEnc String?          @map("client_secret_enc")
+  clientSecretEnc    String?          @map("client_secret_enc")
   /// Frontend domain (without protocol) for redirect URIs.
-  frontendDomain  String?          @map("frontend_domain")
+  frontendDomain     String?          @map("frontend_domain")
   /// Backend domain (full URL) for callback endpoints.
-  backendDomain   String?          @map("backend_domain")
+  backendDomain      String?          @map("backend_domain")
   /// Provider-specific: Authorization URL (Generic OAuth2).
-  authorizationUrl String?         @map("authorization_url")
+  authorizationUrl   String?          @map("authorization_url")
   /// Provider-specific: Token URL (Generic OAuth2).
-  tokenUrl        String?          @map("token_url")
+  tokenUrl           String?          @map("token_url")
   /// Provider-specific: Keycloak realm name.
-  realm           String?          @map("realm")
+  realm              String?          @map("realm")
   /// Provider-specific: Keycloak/PocketID domain.
-  providerDomain  String?          @map("provider_domain")
+  providerDomain     String?          @map("provider_domain")
   /// Whether to use PKCE (Generic OAuth2).
-  usePkce         Boolean          @default(false) @map("use_pkce")
+  usePkce            Boolean          @default(false) @map("use_pkce")
   /// Whitelist of allowed email addresses (empty = allow all).
-  allowedEmails   String[]         @default([]) @map("allowed_emails")
+  allowedEmails      String[]         @default([]) @map("allowed_emails")
   /// Whitelist of allowed Telegram IDs (Telegram provider only).
-  allowedTelegramIds BigInt[]      @default([]) @map("allowed_telegram_ids")
-  createdAt       DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt       DateTime         @updatedAt @map("updated_at") @db.Timestamptz(3)
+  allowedTelegramIds BigInt[]         @default([]) @map("allowed_telegram_ids")
+  createdAt          DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt          DateTime         @updatedAt @map("updated_at") @db.Timestamptz(3)
 
   @@index([isEnabled])
   @@map("auth_provider_configs")
@@ -3311,19 +3327,19 @@ model AuthProviderConfig {
 /// linked providers (e.g. GitHub + Telegram). Used to match OAuth callbacks
 /// to existing admin accounts.
 model AdminOAuthLink {
-  id            String           @id @default(cuid()) @map("id")
-  adminUserId   String           @map("admin_user_id")
-  providerType  AuthProviderType @map("provider_type")
+  id             String           @id @default(cuid()) @map("id")
+  adminUserId    String           @map("admin_user_id")
+  providerType   AuthProviderType @map("provider_type")
   /// Provider-specific user identifier (GitHub user ID, Telegram ID, etc.).
-  providerUserId String          @map("provider_user_id")
+  providerUserId String           @map("provider_user_id")
   /// Provider-supplied email (if available).
-  providerEmail String?          @map("provider_email")
+  providerEmail  String?          @map("provider_email")
   /// Provider-supplied display name.
-  providerName  String?          @map("provider_name")
+  providerName   String?          @map("provider_name")
   /// Raw profile data from the provider (sanitized).
-  profileData   Json             @default("{}") @map("profile_data")
-  linkedAt      DateTime         @default(now()) @map("linked_at") @db.Timestamptz(3)
-  lastUsedAt    DateTime?        @map("last_used_at") @db.Timestamptz(3)
+  profileData    Json             @default("{}") @map("profile_data")
+  linkedAt       DateTime         @default(now()) @map("linked_at") @db.Timestamptz(3)
+  lastUsedAt     DateTime?        @map("last_used_at") @db.Timestamptz(3)
 
   @@unique([providerType, providerUserId])
   @@index([adminUserId])
@@ -3334,24 +3350,24 @@ model AdminOAuthLink {
 /// WebAuthn/Passkey credential stored for an admin user.
 /// Each admin can register multiple passkeys (e.g. laptop + phone + YubiKey).
 model AdminPasskey {
-  id              String   @id @default(cuid()) @map("id")
-  adminUserId     String   @map("admin_user_id")
+  id           String    @id @default(cuid()) @map("id")
+  adminUserId  String    @map("admin_user_id")
   /// Human-readable name for the credential (e.g. "MacBook Pro", "YubiKey 5").
-  name            String   @map("name")
+  name         String    @map("name")
   /// Base64url-encoded credential ID from the authenticator.
-  credentialId    String   @unique @map("credential_id")
+  credentialId String    @unique @map("credential_id")
   /// Base64url-encoded public key (COSE format).
-  publicKey       String   @map("public_key")
+  publicKey    String    @map("public_key")
   /// Signature counter — incremented on each use, detects cloned keys.
-  counter         BigInt   @default(0) @map("counter")
+  counter      BigInt    @default(0) @map("counter")
   /// Authenticator type: "platform" (built-in) or "cross-platform" (USB key).
-  transports      String[] @default([]) @map("transports")
+  transports   String[]  @default([]) @map("transports")
   /// Whether this credential is backed up (synced across devices).
-  backedUp        Boolean  @default(false) @map("backed_up")
+  backedUp     Boolean   @default(false) @map("backed_up")
   /// AAGUID of the authenticator (identifies the make/model).
-  aaguid          String?  @map("aaguid")
-  registeredAt    DateTime @default(now()) @map("registered_at") @db.Timestamptz(3)
-  lastUsedAt      DateTime? @map("last_used_at") @db.Timestamptz(3)
+  aaguid       String?   @map("aaguid")
+  registeredAt DateTime  @default(now()) @map("registered_at") @db.Timestamptz(3)
+  lastUsedAt   DateTime? @map("last_used_at") @db.Timestamptz(3)
 
   @@index([adminUserId])
   @@map("admin_passkeys")

@@ -2,7 +2,7 @@
 
 Rezeis Admin — NestJS backend + React/Vite frontend for the admin panel.
 
-- **Version:** `0.7.3`
+- **Version:** `0.9.6.66`
 - **Backend:** NestJS 11 · Prisma 7 · PostgreSQL · Redis · BullMQ
 - **Frontend:** React 19 · Vite 8 · TanStack Query 5 · shadcn/ui · Tailwind 4
 
@@ -57,8 +57,8 @@ cd web && npm run build # → dist/
 
 Both images are published to GHCR on every push to `main`:
 
-- `ghcr.io/dizzzable/rezeis:0.7.3`
-- `ghcr.io/dizzzable/rezeis:0.7`
+- `ghcr.io/dizzzable/rezeis:0.9.6.66`
+- `ghcr.io/dizzzable/rezeis:0.9.6`
 - `ghcr.io/dizzzable/rezeis:sha-<short>`
 
 Local build:

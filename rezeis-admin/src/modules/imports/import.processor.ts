@@ -63,8 +63,11 @@ export class ImportProcessor extends WorkerHost {
   }
 
   private async handleRun(job: Job<ImportRunJobData>): Promise<unknown> {
-    const { importRecordId, sourceType, mode, createdBy, stagedFilePath, balanceToPoints } = job.data;
-    this.logger.log(`Processing import: source=${sourceType} mode=${mode} record=${importRecordId}`);
+    const { importRecordId, sourceType, mode, createdBy, stagedFilePath, balanceToPoints } =
+      job.data;
+    this.logger.log(
+      `Processing import: source=${sourceType} mode=${mode} record=${importRecordId}`,
+    );
 
     // Mark as PROCESSING (custom status — we'll use DRY_RUN as "in progress")
     await this.prismaService.importRecord.update({
@@ -87,20 +90,39 @@ export class ImportProcessor extends WorkerHost {
           const buffer = await fsp.readFile(stagedFilePath);
           const clients = parseThreeXuiBackup(buffer);
           await job.updateProgress({ stage: 'parsed', percent: 20, records: clients.length });
-          result = await this.threexuiImporterService.run({ mode, createdBy, clients, importRecordId });
+          result = await this.threexuiImporterService.run({
+            mode,
+            createdBy,
+            clients,
+            importRecordId,
+          });
           break;
         }
 
         case 'remnashop': {
           if (!stagedFilePath) throw new Error('Staged file path missing for remnashop import');
           const buffer = await fsp.readFile(stagedFilePath);
-          const { users, subscriptions, plans, planDurations, planPrices } = await parseRemnashopBackup(buffer);
+          const {
+            users,
+            subscriptions,
+            transactions,
+            referrals,
+            referralRewards,
+            excludedData,
+            plans,
+            planDurations,
+            planPrices,
+          } = await parseRemnashopBackup(buffer);
           await job.updateProgress({ stage: 'parsed', percent: 20, records: users.length });
           result = await this.remnashopImporterService.run({
             mode,
             createdBy,
             users,
             subscriptions,
+            transactions,
+            referrals,
+            referralRewards,
+            excludedData,
             importRecordId,
             plans,
             planDurations,
@@ -112,8 +134,21 @@ export class ImportProcessor extends WorkerHost {
         case 'altshop': {
           if (!stagedFilePath) throw new Error('Staged file path missing for altshop import');
           const buffer = await fsp.readFile(stagedFilePath);
-          const { users, subscriptions, transactions, webAccounts, plans, planDurations, planPrices } =
-            await parseAltshopBackup(buffer);
+          const {
+            users,
+            subscriptions,
+            transactions,
+            webAccounts,
+            referrals,
+            referralRewards,
+            partners,
+            partnerReferrals,
+            partnerTransactions,
+            excludedData,
+            plans,
+            planDurations,
+            planPrices,
+          } = await parseAltshopBackup(buffer);
           await job.updateProgress({ stage: 'parsed', percent: 20, records: users.length });
           result = await this.altshopImporterService.run({
             mode,
@@ -122,6 +157,12 @@ export class ImportProcessor extends WorkerHost {
             subscriptions,
             transactions,
             webAccounts,
+            referrals,
+            referralRewards,
+            partners,
+            partnerReferrals,
+            partnerTransactions,
+            excludedData,
             importRecordId,
             plans,
             planDurations,
@@ -201,7 +242,9 @@ export class ImportProcessor extends WorkerHost {
 
   private async handleAssignPlan(job: Job<ImportAssignPlanJobData>): Promise<unknown> {
     const { importRecordId, planId, createdBy, userIds, applyImmediately } = job.data;
-    this.logger.log(`Processing bulk plan assignment: plan=${planId} import=${importRecordId} applyImmediately=${applyImmediately === true}`);
+    this.logger.log(
+      `Processing bulk plan assignment: plan=${planId} import=${importRecordId} applyImmediately=${applyImmediately === true}`,
+    );
 
     await job.updateProgress({ stage: 'assigning', percent: 10 });
 

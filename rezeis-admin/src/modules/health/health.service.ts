@@ -96,7 +96,9 @@ export class HealthService {
     const start = Date.now();
     try {
       // Use the BullMQ queue's internal connection to ping Redis
-      const client = await this.sampleQueue.client;
+      const client = (await this.sampleQueue.client) as unknown as {
+        ping: () => Promise<string>;
+      };
       const pong = await client.ping();
       if (pong !== 'PONG') throw new Error(`Unexpected PING response: ${pong}`);
       return { status: 'up', latencyMs: Date.now() - start };

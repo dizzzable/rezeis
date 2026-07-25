@@ -18,6 +18,7 @@ jobs:
       - run: npx prisma generate
       - run: npm run typecheck
       - run: npx eslint . --quiet
+      - run: npm test
 
   web:
     runs-on: ubuntu-latest
