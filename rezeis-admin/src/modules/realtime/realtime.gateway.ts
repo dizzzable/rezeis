@@ -337,7 +337,6 @@ export class RealtimeGateway
     const allowed = new Set<RealtimeTopic>();
     for (const topic of REALTIME_TOPICS) {
       const { resource, action } = REALTIME_TOPIC_PERMISSION[topic];
-      // eslint-disable-next-line no-await-in-loop -- small fixed catalog; RBAC is cached per-admin.
       if (await this.rbacService.hasPermission(admin, resource, action)) {
         allowed.add(topic);
       }

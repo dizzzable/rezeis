@@ -629,7 +629,11 @@ export class ProfileSyncProcessor extends WorkerHost {
           await this.reprovisionMissingProfile(subscription.id, subscription.remnawaveId);
           const refreshed = await this.loadSyncJob(this.prismaService, syncJob.id);
           if (refreshed === null) {
-            throw new Error(`Profile sync job ${syncJob.id} disappeared during UPDATE re-provision`);
+            const missing = new Error(
+              `Profile sync job ${syncJob.id} disappeared during UPDATE re-provision`,
+            );
+            (missing as Error & { cause?: unknown }).cause = err;
+            throw missing;
           }
           this.logger.warn(
             `Remnawave profile for subscription ${subscription.id} was missing (404); re-provisioning via CREATE`,
