@@ -371,7 +371,7 @@ export class SavedPaymentMethodService {
    */
   public async upsertFromYookassaPayment(input: {
     readonly userId: string;
-    readonly transactionId: string;
+    readonly transactionId: string | null;
     readonly gatewayId: string | null;
     readonly rawPayload: unknown;
   }): Promise<void> {
@@ -516,6 +516,23 @@ export class SavedPaymentMethodService {
         }`,
       );
     }
+  }
+
+  /**
+   * Persists a method returned by YooKassa's standalone zero-amount binding
+   * API. It deliberately reuses the normal ownership and rebind safeguards,
+   * but has no source transaction because no money was charged.
+   */
+  public async upsertFromYookassaPaymentMethod(input: {
+    readonly userId: string;
+    readonly rawPaymentMethod: unknown;
+  }): Promise<void> {
+    await this.upsertFromYookassaPayment({
+      userId: input.userId,
+      transactionId: null,
+      gatewayId: null,
+      rawPayload: { payment_method: input.rawPaymentMethod },
+    });
   }
 }
 

@@ -1108,6 +1108,7 @@ model User {
   oauthLinks              UserOAuthLink[]          @relation("UserOAuthLinks")
   questCompletions        QuestCompletion[]        @relation("QuestCompletionUser")
   savedPaymentMethods     SavedPaymentMethod[]     @relation("UserSavedPaymentMethods")
+  paymentMethodSetups     PaymentMethodSetup[]     @relation("UserPaymentMethodSetups")
 
   @@index([telegramId])
   @@index([role])
@@ -1805,6 +1806,43 @@ model SavedPaymentMethod {
   @@index([userId, isActive])
   @@index([gatewayType])
   @@map("saved_payment_methods")
+}
+
+/// Standalone reusable-instrument setup. Unlike a Transaction, this never
+/// represents a charge: YooKassa verifies and binds a card for zero amount.
+model PaymentMethodSetup {
+  id               String                   @id @default(cuid()) @map("id")
+  userId           String                   @map("user_id")
+  gatewayType      PaymentGatewayType       @map("gateway_type")
+  status           PaymentMethodSetupStatus @default(PENDING) @map("status")
+  providerMethodId String?                  @unique @map("provider_method_id")
+  providerStatus   String?                  @map("provider_status")
+  consentVersion   String                   @map("consent_version")
+  consentAt        DateTime                 @map("consent_at") @db.Timestamptz(3)
+  consentIp        String?                  @map("consent_ip")
+  consentUserAgent String?                  @map("consent_user_agent")
+  returnUrl        String                   @map("return_url")
+  rawSnapshot      Json?                    @map("raw_snapshot")
+  expiresAt        DateTime                 @map("expires_at") @db.Timestamptz(3)
+  lastCheckedAt    DateTime?                @map("last_checked_at") @db.Timestamptz(3)
+  completedAt      DateTime?                @map("completed_at") @db.Timestamptz(3)
+  createdAt        DateTime                 @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt        DateTime                 @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  user User @relation("UserPaymentMethodSetups", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status])
+  @@index([expiresAt])
+  @@map("payment_method_setups")
+}
+
+/// Lifecycle of a standalone (zero-amount) payment-method binding.
+enum PaymentMethodSetupStatus {
+  PENDING
+  ACTIVE
+  INACTIVE
+  FAILED
+  EXPIRED
 }
 
 // =============================================================================

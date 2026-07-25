@@ -36,6 +36,7 @@ export interface ErrorReportEvent {
 }
 
 export interface BuildInfo {
+  readonly service?: string;
   readonly version: string;
   readonly commit: string;
   readonly branch: string;
@@ -46,6 +47,7 @@ const UNKNOWN = 'unknown';
 /** rezeis build info from the image env (baked by the Dockerfile). */
 export function getRezeisBuildInfo(): BuildInfo {
   return {
+    service: 'rezeis',
     version:
       process.env.APP_VERSION ?? process.env.npm_package_version ?? UNKNOWN,
     commit: normalizeShortSha(process.env.REZEIS_GIT_SHA) ?? UNKNOWN,
@@ -146,6 +148,9 @@ export function deriveError(
   const colno = readPositiveInteger(meta, 'colno');
   const stack = readStr(meta, 'stack');
   const build: BuildInfo = {
+    service:
+      readStr(meta, 'service') ??
+      (event.kind.includes('reiwa') ? 'reiwa' : fallbackBuild.service ?? 'rezeis'),
     version: readStr(meta, 'version') ?? fallbackBuild.version,
     commit: readStr(meta, 'commit') ?? fallbackBuild.commit,
     branch: readStr(meta, 'branch') ?? fallbackBuild.branch,
@@ -209,7 +214,8 @@ export function formatErrorEventCardHtml(
       `🧮 Уровень: ${escapeHtml(d.level)}</blockquote>`,
     '',
     '🏗 <b>Сборка:</b>',
-    `<blockquote>🎯 Версия: ${code(d.build.version)}\n` +
+    `<blockquote>🧩 Сервис: ${code(d.build.service ?? 'rezeis')}\n` +
+      `🎯 Версия: ${code(d.build.version)}\n` +
       `🔩 Коммит: ${code(d.build.commit)}\n` +
       `⚙️ Ветка: ${code(d.build.branch)}</blockquote>`,
     '',
@@ -265,6 +271,7 @@ export function formatErrorReportTxt(
     `Уровень:     ${d.level}`,
     '',
     '## Информация о сборке',
+    `Сервис: ${d.build.service ?? 'rezeis'}`,
     `Версия: ${d.build.version}`,
     `Коммит: ${d.build.commit}`,
     `Ветка:  ${d.build.branch}`,

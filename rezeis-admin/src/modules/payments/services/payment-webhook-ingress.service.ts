@@ -16,6 +16,7 @@ import {
   PaymentWebhookInboxService,
 } from './payment-webhook-inbox.service';
 import { PaymentWebhookNormalizerService } from './payment-webhook-normalizer.service';
+import { PaymentMethodSetupService } from './payment-method-setup.service';
 
 interface IngestWebhookInput {
   readonly gatewayType: PaymentGatewayType;
@@ -31,6 +32,7 @@ export class PaymentWebhookIngressService {
     private readonly prismaService: PrismaService,
     private readonly paymentWebhookNormalizerService: PaymentWebhookNormalizerService,
     private readonly paymentWebhookInboxService: PaymentWebhookInboxService,
+    private readonly paymentMethodSetupService: PaymentMethodSetupService,
     @InjectQueue(PAYMENT_RECONCILIATION_QUEUE)
     private readonly paymentReconciliationQueue: Queue,
   ) {}
@@ -61,6 +63,30 @@ export class PaymentWebhookIngressService {
     });
     if (gateway === null) {
       throw new NotFoundException('Payment gateway not found');
+    }
+
+    // YooKassa `payment_method.*` events (zero-amount card binding) carry a
+    // payment_method object, not a payment, so the paymentId-centric pipeline
+    // below can't handle them. Verify the source and route to the setup
+    // service. Handled idempotently there; a re-delivery is a safe no-op.
+    const paymentMethodEvent = extractYookassaPaymentMethodEvent(
+      input.gatewayType,
+      input.rawBody,
+    );
+    if (paymentMethodEvent !== null) {
+      if (input.verifySignature) {
+        this.paymentWebhookNormalizerService.verifyWebhookSignature({
+          gatewayType: input.gatewayType,
+          rawBody: input.rawBody,
+          headers: input.headers,
+          clientIp: input.clientIp,
+          gatewaySettings: gateway.settings,
+        });
+      }
+      await this.paymentMethodSetupService.handleYookassaPaymentMethodEvent(
+        paymentMethodEvent.object,
+      );
+      return { accepted: true, duplicate: false, lifecycleStatus: PAYMENT_WEBHOOK_STATUS_ENQUEUED };
     }
 
     const envelope = this.paymentWebhookNormalizerService.normalizeWebhook({
@@ -107,4 +133,37 @@ export class PaymentWebhookIngressService {
         : PAYMENT_WEBHOOK_STATUS_ENQUEUED,
     };
   }
+}
+
+/**
+ * Detects a YooKassa `payment_method.*` notification (e.g. `payment_method.active`
+ * for a zero-amount binding) and returns its `object`. Returns null for every
+ * other gateway/event so the standard payment pipeline handles them unchanged.
+ */
+function extractYookassaPaymentMethodEvent(
+  gatewayType: PaymentGatewayType,
+  rawBody: Buffer,
+): { readonly event: string; readonly object: Record<string, unknown> } | null {
+  if (gatewayType !== PaymentGatewayType.YOOKASSA) {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawBody.toString('utf8'));
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return null;
+  }
+  const root = parsed as Record<string, unknown>;
+  const event = typeof root.event === 'string' ? root.event : '';
+  if (!event.startsWith('payment_method.')) {
+    return null;
+  }
+  const object =
+    typeof root.object === 'object' && root.object !== null && !Array.isArray(root.object)
+      ? (root.object as Record<string, unknown>)
+      : {};
+  return { event, object };
 }

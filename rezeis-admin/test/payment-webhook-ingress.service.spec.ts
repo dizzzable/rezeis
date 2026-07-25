@@ -39,6 +39,7 @@ describe('PaymentWebhookIngressService', () => {
           return { id: eventId, status: 'ENQUEUED' };
         },
       } as never,
+      { handleYookassaPaymentMethodEvent: async () => undefined } as never,
       {
         add: async (...args: readonly unknown[]) => {
           calls.push(['queue.add', ...args]);
@@ -97,6 +98,7 @@ describe('PaymentWebhookIngressService', () => {
           return { id: eventId, status: 'ENQUEUED' };
         },
       } as never,
+      { handleYookassaPaymentMethodEvent: async () => undefined } as never,
       {
         add: async (...args: readonly unknown[]) => {
           calls.push(['queue.add', ...args]);
@@ -152,6 +154,7 @@ describe('PaymentWebhookIngressService', () => {
         },
         markEnqueued: async (eventId: string) => ({ id: eventId, status: 'ENQUEUED' }),
       } as never,
+      { handleYookassaPaymentMethodEvent: async () => undefined } as never,
       {
         add: async () => ({ id: 'job-1' }),
       } as never,
@@ -264,6 +267,7 @@ describe('PaymentWebhookIngressService', () => {
           return { id: eventId, status: 'FAILED', lastError };
         },
       } as never,
+      { handleYookassaPaymentMethodEvent: async () => undefined } as never,
       {
         add: async () => {
           throw new Error(rawError);
@@ -325,6 +329,7 @@ describe('PaymentWebhookIngressService', () => {
           return { id: eventId, status: 'ENQUEUED' };
         },
       } as never,
+      { handleYookassaPaymentMethodEvent: async () => undefined } as never,
       {
         add: async (...args: readonly unknown[]) => {
           calls.push(['queue.add', ...args]);
@@ -352,5 +357,66 @@ describe('PaymentWebhookIngressService', () => {
         { removeOnComplete: 100, removeOnFail: 100 },
       ],
     ]);
+  });
+
+  it('routes a YooKassa payment_method.active event to the setup service, not payment reconciliation', async () => {
+    const handled: unknown[] = [];
+    let verified = false;
+    let normalizeCalled = false;
+    let enqueued = false;
+    const service = new PaymentWebhookIngressService(
+      {
+        paymentGateway: {
+          findUnique: async () => ({ type: PaymentGatewayType.YOOKASSA, settings: {} }),
+        },
+      } as never,
+      {
+        verifyWebhookSignature: () => {
+          verified = true;
+        },
+        normalizeWebhook: () => {
+          normalizeCalled = true;
+          throw new Error('payment_method events must skip payment normalization');
+        },
+      } as never,
+      {
+        recordReceived: async () => {
+          throw new Error('payment_method events must not enter the payment inbox');
+        },
+      } as never,
+      {
+        handleYookassaPaymentMethodEvent: async (object: unknown) => {
+          handled.push(object);
+        },
+      } as never,
+      {
+        add: async () => {
+          enqueued = true;
+          return { id: 'job' };
+        },
+      } as never,
+    );
+
+    const body = Buffer.from(
+      JSON.stringify({
+        event: 'payment_method.active',
+        object: { id: 'pm-1', status: 'active', saved: true, metadata: { paymentMethodSetupId: 's-1' } },
+      }),
+      'utf8',
+    );
+    const result = await service.ingestWebhook({
+      gatewayType: PaymentGatewayType.YOOKASSA,
+      rawBody: body,
+      headers: {},
+      clientIp: '185.71.76.1',
+      verifySignature: true,
+    });
+
+    assert.equal(verified, true, 'source must still be verified');
+    assert.equal(normalizeCalled, false);
+    assert.equal(enqueued, false);
+    assert.equal(handled.length, 1);
+    assert.equal((handled[0] as { id: string }).id, 'pm-1');
+    assert.equal(result.accepted, true);
   });
 });

@@ -22,18 +22,30 @@ import {
   NotFoundException,
   Param,
   Patch,
+  Post,
+  Req,
   UseGuards,
 } from '@nestjs/common';
-import { IsBoolean } from 'class-validator';
+import { IsBoolean, IsUrl } from 'class-validator';
+import type { Request } from 'express';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { InternalAdminAuthGuard } from '../../auth/guards/internal-admin-auth.guard';
 import { SavedPaymentMethodService } from '../../payments/services/saved-payment-method.service';
+import { PaymentMethodSetupService } from '../../payments/services/payment-method-setup.service';
 import { buildUserReferenceWhere } from '../utils/user-reference.util';
 
 class UpdatePaymentMethodAutopayDto {
   @IsBoolean()
   public autopayEnabled!: boolean;
+}
+
+class StartPaymentMethodSetupDto {
+  @IsUrl({ protocols: ['http', 'https'], require_protocol: true })
+  public returnUrl!: string;
+
+  @IsBoolean()
+  public consent!: boolean;
 }
 
 @Controller('internal/user')
@@ -42,6 +54,7 @@ export class InternalUserPaymentMethodsController {
   public constructor(
     private readonly prismaService: PrismaService,
     private readonly savedPaymentMethodService: SavedPaymentMethodService,
+    private readonly paymentMethodSetupService: PaymentMethodSetupService,
   ) {}
 
   /**
@@ -52,7 +65,40 @@ export class InternalUserPaymentMethodsController {
   @Get(':userRef/payment-methods')
   public async listPaymentMethods(@Param('userRef') userRef: string) {
     const userId = await this.resolveUserId(userRef);
-    return this.savedPaymentMethodService.listActiveForUser(userId);
+    const [methods, capabilities] = await Promise.all([
+      this.savedPaymentMethodService.listActiveForUser(userId),
+      this.paymentMethodSetupService.getCapabilities(),
+    ]);
+    return { ...methods, capabilities };
+  }
+
+  /** Starts a zero-amount hosted YooKassa card binding. */
+  @Post(':userRef/payment-methods/setup')
+  public async startPaymentMethodSetup(
+    @Param('userRef') userRef: string,
+    @Body() body: StartPaymentMethodSetupDto,
+    @Req() request: Request,
+  ) {
+    const userId = await this.resolveUserId(userRef);
+    return this.paymentMethodSetupService.startYookassaSetup({
+      userId,
+      returnUrl: body.returnUrl,
+      consent: body.consent,
+      // Audit the consent context for a "save my card" agreement. Reiwa is the
+      // BFF, so forwarded client hints are the closest we get to the end user.
+      consentIp: readForwardedClientIp(request),
+      consentUserAgent: readForwardedUserAgent(request),
+    });
+  }
+
+  /** Pollable, user-scoped status after YooKassa redirects back to Reiwa. */
+  @Get(':userRef/payment-methods/setup/:setupId')
+  public async getPaymentMethodSetupStatus(
+    @Param('userRef') userRef: string,
+    @Param('setupId') setupId: string,
+  ) {
+    const userId = await this.resolveUserId(userRef);
+    return this.paymentMethodSetupService.getStatusForUser({ userId, setupId });
   }
 
   /**
@@ -100,4 +146,24 @@ export class InternalUserPaymentMethodsController {
     }
     return user.id;
   }
+}
+
+/**
+ * Reiwa is the BFF, so the direct socket IP is reiwa's. Prefer the forwarded
+ * client hint it relays; fall back to the socket address. Best-effort audit
+ * data for the consent record — never used for auth decisions.
+ */
+function readForwardedClientIp(request: Request): string | null {
+  const header = request.headers['x-forwarded-for'];
+  const raw = Array.isArray(header) ? header[0] : header;
+  const first = typeof raw === 'string' ? raw.split(',')[0]?.trim() : '';
+  if (first) return first.slice(0, 100);
+  const socketIp = request.ip ?? request.socket.remoteAddress ?? null;
+  return socketIp ? socketIp.slice(0, 100) : null;
+}
+
+function readForwardedUserAgent(request: Request): string | null {
+  const header = request.headers['x-client-user-agent'] ?? request.headers['user-agent'];
+  const raw = Array.isArray(header) ? header[0] : header;
+  return typeof raw === 'string' && raw.trim().length > 0 ? raw.trim().slice(0, 500) : null;
 }

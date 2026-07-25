@@ -52,4 +52,20 @@ describe('error report formatter', () => {
     assert.ok(!card.includes('📄 Файл:'));
     assert.ok(!card.includes('📍 Место:'));
   });
+
+  it('uses Reiwa build metadata instead of the panel build fallback', () => {
+    const card = formatErrorEventCardHtml(
+      browserError({
+        service: 'reiwa',
+        version: '0.9.6.54',
+        commit: 'reiwa-commit-123456',
+        branch: 'main',
+      }),
+      build,
+      false,
+    );
+    assert.ok(card.includes('Сервис: <code>reiwa</code>'));
+    assert.ok(card.includes('Версия: <code>0.9.6.54</code>'));
+    assert.ok(card.includes('Коммит: <code>reiwa-commit-123456</code>'));
+  });
 });
