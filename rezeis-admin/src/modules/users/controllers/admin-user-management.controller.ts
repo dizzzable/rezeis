@@ -51,6 +51,8 @@ import { ReferralManualAttachService } from '../../referrals/services/referral-m
 import { ReferralQualificationService } from '../../referrals/services/referral-qualification.service';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
 import { StealthnetReferralSyncService } from '../../imports/services/stealthnet-referral-sync.service';
+import { AdjustUserPartnerBalanceDto } from '../dto/adjust-user-partner-balance.dto';
+import { AdjustUserPointsDto } from '../dto/adjust-user-points.dto';
 import { UpdatePartnerSettingsDto } from '../dto/update-partner-settings.dto';
 import { UpdateUserInviteSettingsDto } from '../dto/update-user-invite-settings.dto';
 import { resolveIdentityKind } from '../utils/identity-kind.util';
@@ -495,7 +497,7 @@ export class AdminUserManagementController {
   @RequirePermission('users', 'edit')
   public async adjustPoints(
     @Param('telegramId') telegramId: string,
-    @Body() body: { delta: number },
+    @Body() body: AdjustUserPointsDto,
   ) {
     const user = await this.findUserByTelegramId(telegramId);
     const newPoints = (user.points ?? 0) + body.delta;
@@ -620,7 +622,7 @@ export class AdminUserManagementController {
   @RequirePermission('users', 'edit')
   public async adjustPartnerBalance(
     @Param('telegramId') telegramId: string,
-    @Body() body: { amount: number; reason?: string },
+    @Body() body: AdjustUserPartnerBalanceDto,
     @CurrentAdmin() admin: CurrentAdminInterface,
     @Req() req: Request,
   ) {

@@ -40,6 +40,39 @@ describe('Registration export permission (RbacService + HTTP)', () => {
       assert.equal(canExportAgain, false);
     });
 
+    it('bare ADMIN is denied high-risk surfaces (no near-superadmin via wildcard)', async () => {
+      const prisma = {} as unknown as PrismaService;
+      const rbac = new RbacService(prisma);
+      const bareAdmin = { id: 'legacy-admin-2', role: UserRole.ADMIN, rbacRoleId: null };
+
+      // These were implicitly granted by the old grant-all-then-subtract
+      // fallback (money-affecting / destructive / secret-bearing). They must
+      // now require DEV / superadmin / an explicit custom role.
+      const deniedPairs: ReadonlyArray<[string, string]> = [
+        ['admins', 'view'],
+        ['rbac_roles', 'edit'],
+        ['add_on_entitlements', 'enforce'],
+        ['config_portability', 'export'],
+        ['backups', 'run'],
+        ['api_tokens', 'create'],
+        ['system_logs', 'delete'],
+        ['automations', 'run'],
+        ['webhooks', 'edit'],
+      ];
+      for (const [resource, action] of deniedPairs) {
+        assert.equal(
+          await rbac.hasPermission(bareAdmin, resource, action),
+          false,
+          `bare ADMIN must NOT have ${resource}:${action}`,
+        );
+      }
+
+      // …but the everyday operator surface still works.
+      assert.equal(await rbac.hasPermission(bareAdmin, 'payments', 'view'), true);
+      assert.equal(await rbac.hasPermission(bareAdmin, 'subscriptions', 'edit'), true);
+      assert.equal(await rbac.hasPermission(bareAdmin, 'dashboard', 'view'), true);
+    });
+
     it('DEV and superadmin-named role receive export_registration', async () => {
       const prisma = {
         adminRole: {

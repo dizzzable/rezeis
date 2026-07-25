@@ -41,7 +41,7 @@
 | `REZEIS_CRYPT_KEY` | Ключ шифрования секретов в БД (мин. 32 символа). | **да** | свой, ≥32 симв., **секрет** |
 | `API_DOCS_ENABLED` | Swagger на `/api/docs`. | — | `false` в проде |
 | `ADMIN_CORS_ORIGINS` | Список доверенных origin (через запятую). В проде обязателен непустой. | прод | `https://panel.example.com` |
-| `ADMIN_TRUST_PROXY` | Доверие к заголовкам reverse-proxy. | — | `loopback` за локальным прокси |
+| `ADMIN_TRUST_PROXY` | Доверие к заголовкам reverse-proxy (`disabled`/`loopback`/`linklocal`/`uniquelocal`). По умолчанию **`uniquelocal`**: панель почти всегда за локальным прокси, `req.ip` должен резолвить реальный IP клиента (rate-limit, blocked-IP, аудит). Публичные прокси не доверяются, XFF подделать нельзя. Ставьте `disabled` только если приложение смотрит в интернет напрямую. | — | `uniquelocal` (по умолчанию); `disabled` без прокси |
 
 ### Webhook (исходящие системные события + подпись)
 

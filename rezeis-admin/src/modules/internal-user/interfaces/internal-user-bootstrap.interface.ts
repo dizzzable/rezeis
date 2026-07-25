@@ -11,4 +11,9 @@ export interface InternalBootstrapUserInput {
   readonly username?: string | null;
   readonly name: string;
   readonly language?: string | null;
+  /**
+   * Referral token from a `ref_<token>` bot deep-link. Bound to the
+   * inviter only when this call creates a brand-new user. Best-effort.
+   */
+  readonly referralCode?: string | null;
 }

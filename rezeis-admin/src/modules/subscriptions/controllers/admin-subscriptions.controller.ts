@@ -39,7 +39,13 @@ export class AdminSubscriptionsController {
     return this.listService.getStats();
   }
 
+  // Read-only quote/policy computations over subscription + plan data — gate
+  // on `subscriptions:view` like the rest of the controller. Without an
+  // explicit @RequirePermission the RbacGuard passes ANY authenticated admin
+  // (it allows endpoints that declare no permission), so these were reachable
+  // by operators with no subscriptions access.
   @Post('action-policy')
+  @RequirePermission('subscriptions', 'view')
   public async getActionPolicy(
     @Body() input: SubscriptionActionPolicyDto,
   ): Promise<SubscriptionActionPolicyInterface> {
@@ -47,6 +53,7 @@ export class AdminSubscriptionsController {
   }
 
   @Post('quote')
+  @RequirePermission('subscriptions', 'view')
   public async getQuote(
     @Body() input: SubscriptionQuoteDto,
   ): Promise<SubscriptionQuoteInterface> {

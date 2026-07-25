@@ -11,6 +11,7 @@ import { ConfigType } from '@nestjs/config';
 
 import { paymentsConfig } from '../../../common/config/payments.config';
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { SettingsService } from '../../settings/services/settings.service';
 
 /**
  * Broadcast media upload — accepts a raw file buffer from the operator,
@@ -64,13 +65,14 @@ export class BroadcastMediaUploadService {
     private readonly prismaService: PrismaService,
     @Inject(paymentsConfig.KEY)
     private readonly paymentConfiguration: ConfigType<typeof paymentsConfig>,
+    private readonly settingsService: SettingsService,
   ) {}
 
   public async upload(input: UploadInput): Promise<UploadedMediaInterface> {
     this.assertSize(input)
     this.assertMimeType(input)
 
-    const botToken = this.paymentConfiguration.botToken
+    const botToken = await this.resolveBotToken()
     if (!botToken) {
       throw new ServiceUnavailableException('BOT_TOKEN is not configured')
     }
@@ -127,6 +129,21 @@ export class BroadcastMediaUploadService {
       mimeType: input.mimeType,
       sizeBytes: input.buffer.length,
     }
+  }
+
+  /**
+   * Resolve the bot token the SAME way the broadcast delivery worker does:
+   * prefer the panel-managed (encrypted) token, then fall back to env
+   * `BOT_TOKEN`. A Telegram `file_id` is bound to the bot that uploaded it,
+   * so if the upload used a different token than the sender, every media
+   * broadcast would fail with "wrong file identifier". Keeping both paths in
+   * lock-step guarantees the stash upload and the send use one identity.
+   * (See BroadcastDeliveryService.getBotToken.)
+   */
+  private async resolveBotToken(): Promise<string | null> {
+    const stored = await this.settingsService.getDecryptedBotToken()
+    if (stored) return stored
+    return this.paymentConfiguration.botToken
   }
 
   private assertSize(input: UploadInput): void {

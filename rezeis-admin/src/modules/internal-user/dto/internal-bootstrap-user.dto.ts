@@ -26,4 +26,16 @@ export class InternalBootstrapUserDto {
   @IsString()
   @Length(2, 8)
   public readonly language?: string;
+
+  /**
+   * Optional referral token carried by a `t.me/<bot>?start=ref_<token>`
+   * deep-link. Bound to the inviting user ONLY on a brand-new bootstrap
+   * (first `/start`). Accepts the same identifiers as the web register
+   * flow (reiwa_id / telegramId / username / referralCode). Loosely
+   * length-bounded — resolution is best-effort and never fails bootstrap.
+   */
+  @IsOptional()
+  @IsString()
+  @Length(1, 128)
+  public readonly referralCode?: string;
 }

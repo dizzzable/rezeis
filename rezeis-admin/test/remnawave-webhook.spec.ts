@@ -41,9 +41,35 @@ describe('RemnawaveWebhookService.validateSignature', () => {
     assert.equal(service.validateSignature('{"event":"x"}', undefined), false);
   });
 
-  it('accepts everything in open mode (no secret configured)', () => {
+  it('fails CLOSED in production when no secret is configured (rejects all)', () => {
     const service = buildService(null);
-    assert.equal(service.validateSignature('{"event":"x"}', undefined), true);
+    const previous = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
+    try {
+      // No signature and even a "correct-looking" one are both refused: with no
+      // secret there is nothing to verify against, so nothing can be trusted.
+      assert.equal(service.validateSignature('{"event":"x"}', undefined), false);
+      assert.equal(service.validateSignature('{"event":"x"}', 'deadbeef'), false);
+    } finally {
+      process.env.NODE_ENV = previous;
+    }
+  });
+
+  it('accepts everything in NON-production dev mode (no secret configured)', () => {
+    const service = buildService(null);
+    const previous = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'development';
+    try {
+      assert.equal(service.validateSignature('{"event":"x"}', undefined), true);
+    } finally {
+      process.env.NODE_ENV = previous;
+    }
+  });
+
+  it('uses constant-time comparison but still rejects a length-mismatched signature', () => {
+    const service = buildService('panel-secret');
+    // Correct HMAC is 64 hex chars; a short candidate must be rejected without throwing.
+    assert.equal(service.validateSignature('{"event":"x"}', 'ab'), false);
   });
 });
 

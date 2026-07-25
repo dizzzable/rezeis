@@ -1,7 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
 import * as os from 'node:os';
-import { execSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
 
 import {
   CpuCoreInfo,
@@ -87,7 +90,7 @@ export class SystemHealthService {
     const freeMem = os.freemem();
     const usedMem = totalMem - freeMem;
 
-    const disk = this.getDiskUsage();
+    const disk = await this.getDiskUsage();
     const loadAvg = os.loadavg() as [number, number, number];
     const network = this.getNetworkStats();
     const cpuInfo = os.cpus();
@@ -183,15 +186,21 @@ export class SystemHealthService {
   /**
    * Gets disk usage for the root partition. Uses `df` on Linux/macOS,
    * `wmic` on Windows. Falls back to zeros on failure.
+   *
+   * Async on purpose: this runs on the dashboard health endpoint. The previous
+   * `execSync` blocked the ENTIRE Node event loop for up to 5s per call,
+   * starving every concurrent request while the child process ran. `execFile`
+   * (no shell) with the arg vector avoids that and can't be shell-injected.
    */
-  private getDiskUsage(): { used: number; total: number } {
+  private async getDiskUsage(): Promise<{ used: number; total: number }> {
     try {
       if (process.platform === 'win32') {
-        const output = execSync('wmic logicaldisk get size,freespace /format:csv', {
-          encoding: 'utf-8',
-          timeout: 5000,
-        });
-        const lines = output
+        const { stdout } = await execFileAsync(
+          'wmic',
+          ['logicaldisk', 'get', 'size,freespace', '/format:csv'],
+          { encoding: 'utf-8', timeout: 5000 },
+        );
+        const lines = stdout
           .trim()
           .split('\n')
           .filter((l) => l.trim().length > 0);
@@ -211,12 +220,15 @@ export class SystemHealthService {
         return { used: totalSize - totalFree, total: totalSize };
       }
 
-      // Linux/macOS: use df
-      const output = execSync('df -B1 / | tail -1', {
+      // Linux/macOS: `df -B1 /` (no shell, no `| tail` pipe — we take the last
+      // data line ourselves so there's no shell to inject into).
+      const { stdout } = await execFileAsync('df', ['-B1', '/'], {
         encoding: 'utf-8',
         timeout: 5000,
       });
-      const parts = output.trim().split(/\s+/);
+      const dataLines = stdout.trim().split('\n').filter((l) => l.trim().length > 0);
+      const lastLine = dataLines[dataLines.length - 1] ?? '';
+      const parts = lastLine.trim().split(/\s+/);
       const total = parseInt(parts[1], 10);
       const used = parseInt(parts[2], 10);
       if (!isNaN(total) && !isNaN(used)) {

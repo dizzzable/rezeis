@@ -552,6 +552,61 @@ describe('BroadcastDeliveryService', () => {
     assert.equal(persisted.includes('[chat-id hidden]'), true);
   });
 
+  it('marks SENT via the feed but persists the media error when the media Telegram send fails (MEDIUM #2)', async () => {
+    const messageUpdates: Array<{ data: Record<string, unknown> }> = [];
+    const service = new BroadcastDeliveryService(
+      {
+        broadcast: {
+          findUnique: async (args: { readonly select?: { readonly payload?: boolean } }) => {
+            if (args.select?.payload) {
+              return {
+                id: 'broadcast-1',
+                status: BroadcastStatus.PROCESSING,
+                payload: { text: 'Hello', mediaType: 'photo', mediaFileId: 'file-1' },
+              };
+            }
+            return { status: BroadcastStatus.PROCESSING };
+          },
+          update: async () => undefined,
+        },
+        broadcastMessage: {
+          findMany: async () => [{ id: 'message-1', userId: 'user-1' }],
+          update: async (args: { data: Record<string, unknown> }) => {
+            messageUpdates.push(args);
+          },
+          count: async () => 0,
+        },
+        user: {
+          findUnique: async () => ({ telegramId: 12345n }),
+        },
+      } as never,
+      configService('bot-token'),
+      { info: () => undefined } as never,
+      // Cabinet feed row succeeds → the message is a real in-app surface.
+      { create: async () => 'event-1' } as never,
+      { getDecryptedBotToken: async () => null } as never,
+      botNotifier(null),
+    );
+
+    // Media Telegram send fails.
+    await withFetch(async () => {
+      throw new Error('telegram outage');
+    }, async () => {
+      assert.deepStrictEqual(await service.deliverBatch('broadcast-1', ['message-1']), {
+        sent: 1,
+        failed: 0,
+      });
+    });
+
+    const update = messageUpdates.find((u) => u.data.status === BroadcastMessageStatus.SENT);
+    assert.ok(update, 'must be marked SENT (feed delivered)');
+    // The media failure is not swallowed — it is recorded on the row.
+    assert.ok(
+      typeof update.data.errorMessage === 'string' && (update.data.errorMessage as string).length > 0,
+      'media failure must be persisted on the SENT row',
+    );
+  });
+
   it('delivers to web-only users via the cabinet feed without Telegram', async () => {
     const messageUpdates: unknown[] = [];
     const createCalls: Array<{ userId: string; skipTelegram?: boolean }> = [];

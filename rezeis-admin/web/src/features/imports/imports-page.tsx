@@ -426,6 +426,9 @@ function FileUploadTab({ source, onStart, onRecordId }: FileUploadTabProps): JSX
   // STEALTHNET-only: convert leftover wallet balance → loyalty points on import.
   const [convertBalance, setConvertBalance] = useState(true)
   const [balanceRate, setBalanceRate] = useState('1')
+  // All file imports: opt-in push to Remnawave after import (OFF by default —
+  // imports only READ from the panel unless the operator asks to reconcile).
+  const [syncToPanel, setSyncToPanel] = useState(false)
 
   const path = `/admin/imports/${source}`
   const i18nKey = source === '3xui' ? 'threexui' : source
@@ -438,6 +441,7 @@ function FileUploadTab({ source, onStart, onRecordId }: FileUploadTabProps): JSX
         formData.append('convertBalanceToPoints', String(convertBalance))
         formData.append('balancePointsRate', convertBalance ? balanceRate : '0')
       }
+      formData.append('syncToPanel', String(syncToPanel))
       const response = await api.post<ImportEnqueuedResponse>(path, formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
       })
@@ -489,6 +493,20 @@ function FileUploadTab({ source, onStart, onRecordId }: FileUploadTabProps): JSX
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
+          <div className="flex items-center justify-between gap-3 rounded-lg border border-border/60 bg-muted/30 p-3">
+            <div className="space-y-0.5">
+              <Label className="text-sm">{t('importsPage.syncToPanel.label')}</Label>
+              <p className="text-xs text-muted-foreground">
+                {t('importsPage.syncToPanel.hint')}
+              </p>
+            </div>
+            <Switch
+              checked={syncToPanel}
+              onCheckedChange={setSyncToPanel}
+              disabled={importMutation.isPending}
+              aria-label={t('importsPage.syncToPanel.label')}
+            />
+          </div>
           {source === 'stealthnet' ? (
             <div className="space-y-3 rounded-lg border border-border/60 bg-muted/30 p-3">
               <div className="flex items-center justify-between gap-3">

@@ -26,6 +26,8 @@ interface MergeFixtures {
   readonly remnawaveSubs?: Array<{ id: string }>;
   readonly currentSub?: { id: string } | null;
   readonly targetExchangeKeys?: string[];
+  readonly targetQuestKeys?: Array<{ questId: string; periodKey: string }>;
+  readonly sourceQuestRows?: Array<{ id: string; questId: string; periodKey: string }>;
 }
 
 function createMergeMock(fx: MergeFixtures): { prisma: PrismaService; calls: Call[]; events: string[] } {
@@ -76,6 +78,21 @@ function createMergeMock(fx: MergeFixtures): { prisma: PrismaService; calls: Cal
     supportTicket: { updateMany: async (a: Record<string, unknown>) => { rec('supportTicket', 'updateMany', a); return { count: 0 }; } },
     adClick: { updateMany: async (a: Record<string, unknown>) => { rec('adClick', 'updateMany', a); return { count: 0 }; } },
     broadcastMessage: { updateMany: async (a: Record<string, unknown>) => { rec('broadcastMessage', 'updateMany', a); return { count: 0 }; } },
+    userOAuthLink: { updateMany: async (a: Record<string, unknown>) => { rec('userOAuthLink', 'updateMany', a); return { count: 0 }; } },
+    savedPaymentMethod: { updateMany: async (a: Record<string, unknown>) => { rec('savedPaymentMethod', 'updateMany', a); return { count: 0 }; } },
+    paymentMethodSetup: { updateMany: async (a: Record<string, unknown>) => { rec('paymentMethodSetup', 'updateMany', a); return { count: 0 }; } },
+    questCompletion: {
+      findMany: async (a: { where: { userId: string } }) => {
+        // Target lookup returns taken (questId, periodKey); source lookup
+        // returns the full source rows (with ids) to dedupe.
+        if (a.where.userId === (fx.target as { id?: string } | null)?.id) {
+          return fx.targetQuestKeys ?? [];
+        }
+        return fx.sourceQuestRows ?? [];
+      },
+      deleteMany: async (a: Record<string, unknown>) => { rec('questCompletion', 'deleteMany', a); return { count: 0 }; },
+      updateMany: async (a: Record<string, unknown>) => { rec('questCompletion', 'updateMany', a); return { count: 0 }; },
+    },
     promocodeActivation: {
       findMany: async () => [],
       deleteMany: async (a: Record<string, unknown>) => { rec('promocodeActivation', 'deleteMany', a); return { count: 0 }; },
@@ -225,9 +242,51 @@ describe('AccountMergeService', () => {
     assert.ok(calls.some((c) => c.model === 'transaction' && c.op === 'updateMany'));
     assert.ok(calls.some((c) => c.model === 'referralPointsExchange' && c.op === 'updateMany'));
     assert.ok(calls.some((c) => c.model === 'referralInvite' && c.op === 'updateMany'));
+    // HIGH #14: OAuth links + saved cards + card setups re-pointed, not lost.
+    assert.ok(calls.some((c) => c.model === 'userOAuthLink' && c.op === 'updateMany'));
+    assert.ok(calls.some((c) => c.model === 'savedPaymentMethod' && c.op === 'updateMany'));
+    assert.ok(calls.some((c) => c.model === 'paymentMethodSetup' && c.op === 'updateMany'));
+    assert.ok(calls.some((c) => c.model === 'questCompletion' && c.op === 'updateMany'));
     // Source user deleted.
     assert.ok(calls.some((c) => c.model === 'user' && c.op === 'delete'));
     assert.deepStrictEqual(events, ['user.accounts_merged']);
+  });
+
+  it('re-points OAuth links and saved payment instruments to the target (HIGH #14)', async () => {
+    const { prisma, calls } = createMergeMock({ source: { ...baseSource }, target: { ...baseTarget } });
+    await service(prisma).merge({ sourceId: 'SRC', targetId: 'TGT', choices: {}, confirm: true, actorAdminId: 'a' });
+
+    for (const model of ['userOAuthLink', 'savedPaymentMethod', 'paymentMethodSetup']) {
+      const move = calls.find((c) => c.model === model && c.op === 'updateMany');
+      assert.ok(move, `${model} must be re-pointed`);
+      assert.deepStrictEqual((move?.args as { where: unknown; data: unknown }), {
+        where: { userId: 'SRC' },
+        data: { userId: 'TGT' },
+      });
+    }
+  });
+
+  it('dedupes quest completions on (questId, periodKey): drops the source dupe, keeps target', async () => {
+    const { prisma, calls } = createMergeMock({
+      source: { ...baseSource },
+      target: { ...baseTarget },
+      // Target already completed quest Q1 for the empty default period.
+      targetQuestKeys: [{ questId: 'Q1', periodKey: '' }],
+      // Source has the same Q1 (collides → dropped) plus a unique Q2 (moves).
+      sourceQuestRows: [
+        { id: 'QC_SRC_1', questId: 'Q1', periodKey: '' },
+        { id: 'QC_SRC_2', questId: 'Q2', periodKey: '' },
+      ],
+    });
+    await service(prisma).merge({ sourceId: 'SRC', targetId: 'TGT', choices: {}, confirm: true, actorAdminId: 'a' });
+
+    const del = calls.find((c) => c.model === 'questCompletion' && c.op === 'deleteMany');
+    assert.deepStrictEqual((del?.args as { where: unknown }).where, { id: { in: ['QC_SRC_1'] } });
+    const move = calls.find((c) => c.model === 'questCompletion' && c.op === 'updateMany');
+    assert.deepStrictEqual((move?.args as { where: unknown; data: unknown }), {
+      where: { userId: 'SRC' },
+      data: { userId: 'TGT' },
+    });
   });
 
   it('clears source exchange keys that would collide on the merged target', async () => {

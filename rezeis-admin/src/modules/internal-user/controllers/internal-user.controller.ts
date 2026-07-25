@@ -180,6 +180,7 @@ export class InternalUserController {
       username: body.username ?? null,
       name: body.name,
       language: body.language ?? null,
+      referralCode: body.referralCode ?? null,
     });
   }
 

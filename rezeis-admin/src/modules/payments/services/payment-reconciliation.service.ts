@@ -49,6 +49,22 @@ export class PaymentReconciliationService {
       const nextStatus = mapProviderStatusToTransactionStatus(event.eventStatus);
       await this.disablePermissionRevokedAutopayBestEffort(transaction, event.rawPayload, nextStatus);
 
+      // Refund / chargeback on an already-fulfilled payment: the provider is
+      // telling us a COMPLETED payment was reversed. This MUST undo the
+      // side-effects fulfillment produced (partner accruals, referral rewards,
+      // МойНалог income, ad conversion) — otherwise the platform keeps paying
+      // out on money it no longer has. Handled here explicitly because the
+      // block below would otherwise early-return and silently swallow it.
+      if (
+        isRefundProviderStatus(event.eventStatus) &&
+        transaction.status === TransactionStatus.COMPLETED &&
+        transaction.fulfilledAt !== null
+      ) {
+        await this.handleRefundReversal(transaction, event.eventStatus);
+        await this.paymentWebhookInboxService.markProcessed(event.id);
+        return;
+      }
+
       // COMPLETED is final only after durable fulfillment. A captured payment
       // whose mutation rolled back has fulfilledAt=null and must be retried by
       // the next webhook/manual replay instead of being marked processed.
@@ -223,6 +239,107 @@ export class PaymentReconciliationService {
     await this.runReferralAndPartnerHooks(transaction);
     await this.enqueueMoyNalogIncomeBestEffort(transaction);
     await this.recordAdConversionBestEffort(transaction);
+  }
+
+  /**
+   * Reverses every side-effect a COMPLETED payment produced, after a refund /
+   * chargeback. Symmetric counterpart to {@link runPostFulfillmentHooks}:
+   *   - partner accruals debited + ledger rows removed,
+   *   - referral qualification + rewards reversed,
+   *   - МойНалог income cancellation enqueued,
+   *   - ad conversion reverted.
+   *
+   * Idempotent end-to-end: guarded by a `refundReversedAt` stamp on the
+   * transaction's `gatewayData`, and each downstream reversal is itself
+   * idempotent, so a replayed refund webhook is a no-op. Each hook is
+   * best-effort — one failing reversal is logged and never blocks the others,
+   * mirroring the fulfillment path. The transaction is marked CANCELED and
+   * stamped so the reversal is visible and never repeats.
+   */
+  private async handleRefundReversal(
+    transaction: Transaction,
+    providerStatus: string | null,
+  ): Promise<void> {
+    const gatewayData = asRecord(transaction.gatewayData);
+    if (typeof gatewayData?.['refundReversedAt'] === 'string') {
+      // Already reversed — idempotent no-op on a replayed refund webhook.
+      return;
+    }
+
+    this.logger.warn(
+      `Refund/chargeback on fulfilled transaction ${transaction.id} (providerStatus=${providerStatus}) — reversing side-effects`,
+    );
+
+    // Partner accruals: debit balances + remove ledger rows.
+    try {
+      await this.partnerEarningsService.reverseEarningsForTransaction(transaction.id);
+    } catch (error: unknown) {
+      this.logger.error(
+        `Partner earnings reversal failed for ${transaction.id}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+
+    // Referral qualification + rewards.
+    try {
+      await this.referralQualificationService.reverseQualificationForTransaction(transaction.id);
+    } catch (error: unknown) {
+      this.logger.error(
+        `Referral reversal failed for ${transaction.id}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+
+    // МойНалог income cancellation (async — needs the tax API).
+    try {
+      await this.moyNalogQueueService.enqueueCancelIncome(transaction.id);
+    } catch (error: unknown) {
+      this.logger.error(
+        `МойНалог cancel enqueue failed for ${transaction.id}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+
+    // Ad conversion.
+    try {
+      await this.adConversionService.revertConversion(transaction.id);
+    } catch (error: unknown) {
+      this.logger.error(
+        `Ad conversion revert failed for ${transaction.id}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+
+    // Mark CANCELED + stamp the reversal so it is auditable and never repeats.
+    await this.prismaService.transaction.update({
+      where: { id: transaction.id },
+      data: {
+        status: TransactionStatus.CANCELED,
+        gatewayData: mergeGatewayData(transaction.gatewayData, {
+          providerStatus,
+          refundReversedAt: new Date().toISOString(),
+        }) as Prisma.InputJsonValue,
+      },
+    });
+
+    this.systemEvents.warn(
+      EVENT_TYPES.PAYMENT_FAILED,
+      'PAYMENT',
+      `Платёж возвращён (refund/chargeback): ${transaction.purchaseType}`,
+      {
+        userId: transaction.userId,
+        paymentId: transaction.paymentId,
+        gatewayType: transaction.gatewayType,
+        amount: transaction.amount.toString(),
+        currency: transaction.currency,
+        providerStatus,
+        refund: true,
+      },
+    );
   }
 
   private async disablePermissionRevokedAutopayBestEffort(
@@ -430,6 +547,22 @@ function mapProviderStatusToTransactionStatus(providerStatus: string | null): Tr
     return TransactionStatus.CANCELED;
   }
   return TransactionStatus.PENDING;
+}
+
+/**
+ * True when the provider status specifically signals a REFUND / CHARGEBACK
+ * (as opposed to an ordinary decline/cancel/expiry). A refund on an
+ * already-fulfilled payment must reverse side-effects; a plain cancel/expiry
+ * of a never-completed payment must not.
+ */
+function isRefundProviderStatus(providerStatus: string | null): boolean {
+  const normalized = String(providerStatus ?? '').toUpperCase();
+  return (
+    normalized === 'REFUNDED' ||
+    normalized === 'REFUNDED_PAYMENT' ||
+    normalized === 'CHARGEBACK' ||
+    normalized === 'REVERSED'
+  );
 }
 
 function isTerminalTransaction(transaction: Transaction): boolean {

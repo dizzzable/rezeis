@@ -135,9 +135,16 @@ export class WebhookSubscriptionsService {
 
   /**
    * Issues a fresh signing secret. Returns the plaintext (one-time view)
-   * so the operator can copy it into their receiver. Existing in-flight
-   * deliveries continue to be signed with the OLD secret to avoid race
-   * conditions; only fresh `dispatch()` calls pick up the new value.
+   * so the operator can copy it into their receiver.
+   *
+   * Rotation semantics: `WebhookDispatcher.processDelivery` re-reads
+   * `subscription.secret` on every attempt, so the new secret takes effect
+   * IMMEDIATELY — including for deliveries already queued or sitting in the
+   * RETRYING backoff window (up to `WEBHOOK_RETRY_DELAYS_SEC` later). There is
+   * no per-delivery secret snapshot. Operators rotating a secret should expect
+   * any in-flight/retrying delivery to be signed with the NEW value; update the
+   * receiver before (or immediately after) rotating to avoid transient
+   * "signature mismatch" rejections on those deliveries.
    */
   public async regenerateSecret(id: string): Promise<WebhookSubscriptionCreateResult> {
     const secret = generateSecret();

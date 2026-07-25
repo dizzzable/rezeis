@@ -69,6 +69,10 @@ export const en = {
         rateLabel: 'Points per 1 balance unit',
       },
     },
+    syncToPanel: {
+      label: 'Sync to panel after import',
+      hint: 'After importing, push the affected subscriptions to Remnawave (update linked profiles, create missing ones). Off by default — imports only read from the panel.',
+    },
     importDone: 'Import done · {{summary}}',
     syncDone: 'Sync done · {{summary}}',
     success:

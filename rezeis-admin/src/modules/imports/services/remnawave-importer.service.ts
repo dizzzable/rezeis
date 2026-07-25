@@ -105,7 +105,7 @@ export class RemnawaveImporterService {
         }
 
         // ── Subscription sync ─────────────────────────────────────────────
-        const subResult = await this.syncSubscription(userId, panelUser);
+        const subResult = await this.syncSubscription(userId, panelUser, input.importRecordId ?? null);
         if (subResult === 'created') subscriptionsCreated += 1;
         if (subResult === 'updated') subscriptionsUpdated += 1;
 
@@ -131,7 +131,11 @@ export class RemnawaveImporterService {
       subscriptionsUpdated,
       descriptionWritebacks,
       errors,
-      rollback: { createdUserIds },
+      // `hasMatchedWrites` blocks a destructive rollback when this run UPDATED
+      // pre-existing users (their prior state is not snapshotted, so deleting
+      // them on undo would lose unrestorable data). Must be set by EVERY
+      // importer that can update matched users — see ImportsService.rollback.
+      rollback: { createdUserIds, hasMatchedWrites: updated > 0 },
     } satisfies Prisma.InputJsonValue;
     const errorMessage = errors.length === 0 ? null : errors.slice(0, 5).join('; ');
 
@@ -290,6 +294,7 @@ export class RemnawaveImporterService {
   private async syncSubscription(
     userId: string,
     panelUser: RemnawavePanelUser,
+    importRecordId: string | null,
   ): Promise<'created' | 'updated' | 'skipped'> {
     // Check if subscription with this remnawaveId already exists
     const existing = await this.prismaService.subscription.findFirst({
@@ -313,6 +318,8 @@ export class RemnawaveImporterService {
       externalSquad: panelUser.externalSquadUuid ?? null,
       planSnapshot: {
         importedFrom: 'remnawave',
+        // Durable link for bulk plan re-assignment (see BulkPlanAssignmentService).
+        ...(importRecordId ? { importRecordId } : {}),
         tag: panelUser.tag,
         trafficLimitStrategy: panelUser.trafficLimitStrategy,
       } satisfies Prisma.InputJsonValue,
@@ -349,6 +356,8 @@ export class RemnawaveImporterService {
         externalSquad: panelUser.externalSquadUuid ?? null,
         planSnapshot: {
           importedFrom: 'remnawave',
+          // Durable link for bulk plan re-assignment (see BulkPlanAssignmentService).
+          ...(importRecordId ? { importRecordId } : {}),
           tag: panelUser.tag,
           trafficLimitStrategy: panelUser.trafficLimitStrategy,
         } satisfies Prisma.InputJsonValue,

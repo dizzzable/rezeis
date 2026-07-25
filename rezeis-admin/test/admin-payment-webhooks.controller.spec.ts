@@ -72,8 +72,10 @@ describe('AdminPaymentWebhooksController', () => {
         { includeRaw: true } as never,
         { id: 'admin-1' } as never,
         {
-          headers: { 'x-request-id': 'request-1', 'x-forwarded-for': '203.0.113.10' },
-          ip: '127.0.0.1',
+          // `req.ip` (trust-proxy resolved) is the only trusted source; a
+          // spoofable X-Forwarded-For is deliberately ignored now.
+          headers: { 'x-request-id': 'request-1' },
+          ip: '203.0.113.10',
         } as never,
       ),
       { id: 'event-1', rawPayload: null },
@@ -84,8 +86,10 @@ describe('AdminPaymentWebhooksController', () => {
         { reason: 'manual retry', force: true } as never,
         { id: 'admin-1' } as never,
         {
-          headers: { 'x-request-id': 'request-1', 'x-forwarded-for': '203.0.113.10' },
-          ip: '127.0.0.1',
+          // `req.ip` (trust-proxy resolved) is the only trusted source; a
+          // spoofable X-Forwarded-For is deliberately ignored now.
+          headers: { 'x-request-id': 'request-1' },
+          ip: '203.0.113.10',
         } as never,
       ),
       { alreadyQueued: false, event: { id: 'event-1' } },

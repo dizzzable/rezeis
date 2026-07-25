@@ -100,7 +100,7 @@ export class ThreeXuiImporterService {
           updated += 1;
         }
 
-        const subResult = await this.syncSubscription(userId, client);
+        const subResult = await this.syncSubscription(userId, client, importRecordId ?? null);
         if (subResult === 'created') subscriptionsCreated += 1;
         if (subResult === 'updated') subscriptionsUpdated += 1;
       } catch (err) {
@@ -121,7 +121,9 @@ export class ThreeXuiImporterService {
       subscriptionsCreated,
       subscriptionsUpdated,
       errors,
-      rollback: { createdUserIds },
+      // hasMatchedWrites blocks a destructive rollback when matched users were
+      // updated (no pre-import snapshot to restore). See ImportsService.rollback.
+      rollback: { createdUserIds, hasMatchedWrites: updated > 0 },
     } satisfies Prisma.InputJsonValue;
     const errorMessage = errors.length === 0 ? null : errors.slice(0, 5).join('; ');
 
@@ -238,6 +240,7 @@ export class ThreeXuiImporterService {
   private async syncSubscription(
     userId: string,
     client: ThreeXuiClient,
+    importRecordId: string | null,
   ): Promise<'created' | 'updated' | 'skipped'> {
     // Use subId as the unique identifier for the subscription from 3x-ui
     const externalId = client.subId || client.uuid || client.email;
@@ -263,6 +266,8 @@ export class ThreeXuiImporterService {
 
     const planSnapshot: Prisma.InputJsonValue = {
       importedFrom: '3xui',
+      // Durable link for bulk plan re-assignment (see BulkPlanAssignmentService).
+      ...(importRecordId ? { importRecordId } : {}),
       email: client.email,
       subId: client.subId,
       uuid: client.uuid,

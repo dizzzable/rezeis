@@ -4,6 +4,7 @@ import { AuthModule } from '../auth/auth.module';
 import { EmailModule } from '../email/email.module';
 import { PaymentsModule } from '../payments/payments.module';
 import { PlansModule } from '../plans/plans.module';
+import { ReferralsModule } from '../referrals/referrals.module';
 import { RemnawaveModule } from '../remnawave/remnawave.module';
 import { SettingsModule } from '../settings/settings.module';
 import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
@@ -23,6 +24,7 @@ import { ExactlyOneUserIdentifierValidator } from './validators/exactly-one-user
     EmailModule,
     PaymentsModule,
     PlansModule,
+    ReferralsModule,
     RemnawaveModule,
     SettingsModule,
     SubscriptionsModule,

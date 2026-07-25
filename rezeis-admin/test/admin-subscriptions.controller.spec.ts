@@ -46,6 +46,10 @@ describe('AdminSubscriptionsController', () => {
       Reflect.getMetadata(METHOD_METADATA, AdminSubscriptionsController.prototype.getActionPolicy),
       RequestMethod.POST,
     );
+    // MEDIUM #16: action-policy + quote must require subscriptions:view — an
+    // endpoint with no @RequirePermission is allowed for any authenticated
+    // admin by the RbacGuard.
+    assertSubscriptionsViewRoute(AdminSubscriptionsController.prototype.getActionPolicy);
     assert.equal(
       Reflect.getMetadata(PATH_METADATA, AdminSubscriptionsController.prototype.getQuote),
       'quote',
@@ -54,6 +58,7 @@ describe('AdminSubscriptionsController', () => {
       Reflect.getMetadata(METHOD_METADATA, AdminSubscriptionsController.prototype.getQuote),
       RequestMethod.POST,
     );
+    assertSubscriptionsViewRoute(AdminSubscriptionsController.prototype.getQuote);
   });
 
   it('delegates list, stats, action-policy and quote calls unchanged', async () => {

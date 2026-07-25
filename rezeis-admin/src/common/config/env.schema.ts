@@ -47,9 +47,16 @@ const environmentSchema = z
     REZEIS_PORT: z.coerce.number().int().min(1).max(65535).default(8000),
     API_DOCS_ENABLED: envBoolean(false),
     ADMIN_CORS_ORIGINS: z.preprocess(normalizeOptionalString, z.string().min(1).optional()),
+    // Default `uniquelocal`: the panel almost always sits behind a local
+    // reverse proxy (nginx/caddy on the same host / private network), so
+    // trusting private + loopback hops lets `req.ip` resolve to the real
+    // client address for rate-limiting, blocked-IP checks and audit. Public
+    // proxy addresses are still NOT trusted, so a client cannot spoof
+    // X-Forwarded-For. Set `disabled` only when the app is directly
+    // internet-facing with no proxy in front.
     ADMIN_TRUST_PROXY: z.preprocess(
       normalizeOptionalString,
-      z.enum(['disabled', 'loopback', 'linklocal', 'uniquelocal']).default('disabled'),
+      z.enum(['disabled', 'loopback', 'linklocal', 'uniquelocal']).default('uniquelocal'),
     ),
     REZEIS_LOCALES: z.string().min(1).default('ru,en'),
     REZEIS_DEFAULT_LOCALE: z.string().min(1).default('ru'),
@@ -194,6 +201,20 @@ const environmentSchema = z
         path: ['ADMIN_CORS_ORIGINS'],
         message: error instanceof Error ? error.message : 'Invalid ADMIN_CORS_ORIGINS value',
       });
+    }
+
+    // Remnawave webhooks fail closed in production without a secret (the
+    // service refuses every unsigned payload). Warn loudly at boot so the gap
+    // is obvious rather than surfacing only as a silently empty Activity Feed.
+    // This is a warning, not a hard failure, to avoid bricking a panel that
+    // simply doesn't use Remnawave webhooks — the runtime guard already
+    // rejects spoofed traffic.
+    if (env.NODE_ENV === 'production' && !env.REMNAWAVE_WEBHOOK_SECRET) {
+      console.warn(
+        '[env] REMNAWAVE_WEBHOOK_SECRET is not set in production — all incoming ' +
+          'Remnawave webhooks will be REJECTED (fail-closed). Set it to the ' +
+          "panel's WEBHOOK_SECRET_HEADER value to receive node/subscription events.",
+      );
     }
   });
 

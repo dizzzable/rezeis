@@ -289,6 +289,39 @@ describe('BroadcastService', () => {
       },
     ]);
   });
+
+  it('rewrites cabinet-feed events in ONE bulk statement, not a per-row loop (MEDIUM #18)', async () => {
+    let executeRawCalls = 0;
+    let perRowUpdateCalls = 0;
+    const service = new BroadcastService({
+      broadcast: {
+        findUnique: async () => ({ id: 'broadcast-1', payload: { text: 'old' } }),
+        update: async () => undefined,
+      },
+      userNotificationEvent: {
+        // These must NOT be used anymore — the old loop called findMany + update-per-row.
+        findMany: async () => {
+          throw new Error('must not read all feed rows into memory');
+        },
+        update: async () => {
+          perRowUpdateCalls += 1;
+        },
+      },
+      $executeRaw: async () => {
+        executeRawCalls += 1;
+        return 0;
+      },
+    } as never);
+
+    await service.updateBroadcastContent({
+      broadcastId: 'broadcast-1',
+      text: 'corrected text',
+      parseMode: 'HTML',
+    });
+
+    assert.equal(executeRawCalls, 1, 'must issue exactly one bulk feed-rewrite statement');
+    assert.equal(perRowUpdateCalls, 0, 'must not update feed rows one-by-one');
+  });
 });
 
 function currentAdmin(): CurrentAdminInterface {

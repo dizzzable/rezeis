@@ -12,6 +12,7 @@ import {
 } from '@prisma/client';
 
 import { ProfileSyncProcessor } from '../src/modules/profile-sync/profile-sync.processor';
+import { RemnawaveProfileNotFoundError } from '../src/modules/remnawave/services/remnawave-api.service';
 
 /** Prisma mock for a DELETE job whose handler will throw, at a given attempt. */
 function deleteJobPrismaMock(attempts: number, onUpdate: (input: unknown) => void) {
@@ -974,6 +975,206 @@ describe('ProfileSyncProcessor', () => {
     assert.deepEqual(failure.where.startedAt, claim.data.startedAt);
   });
 
+
+  it('re-provisions via CREATE when UPDATE hits a 404 (imported profile missing from the panel)', async () => {
+    // Imported subscription: remnawaveId came from a donor dump but the profile
+    // no longer exists in the connected panel. UPDATE → 404 must detach the
+    // stale id and re-create the profile, not retry forever.
+    let remnawaveIdCleared = false;
+    let createCalled = false;
+    const subscriptionUpdates: unknown[] = [];
+    // findUnique returns the still-linked row until we clear the id, then the
+    // detached row (remnawaveId: null) so handleCreate takes the create path.
+    const makeSubscription = () => ({
+      id: 'subscription-imported',
+      userId: 'user-1',
+      remnawaveId: remnawaveIdCleared ? null : 'rem-stale-uuid',
+      trafficLimit: 10,
+      deviceLimit: 2,
+      internalSquads: ['internal-a'],
+      externalSquad: null,
+      status: SubscriptionStatus.ACTIVE,
+      expiresAt: new Date('2099-01-01T00:00:00.000Z'),
+      planSnapshot: { tag: 'imported', trafficLimitStrategy: 'NO_RESET' },
+    });
+    const processor = new ProfileSyncProcessor(
+      {
+        profileSyncJob: {
+          findUnique: async () => ({
+            id: 'sync-job-reprovision',
+            action: SyncAction.UPDATE,
+            status: SyncJobStatus.PENDING,
+            attempts: 0,
+            supersededAt: null,
+            payload: { source: 'ADMIN_MUTATION' },
+            subscription: makeSubscription(),
+          }),
+          updateMany: async () => ({ count: 1 }),
+          update: async () => undefined,
+        },
+        subscription: {
+          updateMany: async (input: unknown) => {
+            subscriptionUpdates.push(input);
+            remnawaveIdCleared = true;
+            return { count: 1 };
+          },
+          update: async (input: unknown) => { subscriptionUpdates.push(input); },
+        },
+        $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
+          $queryRaw: async () => [{ status: SubscriptionStatus.ACTIVE }],
+          subscription: { update: async (input: unknown) => { subscriptionUpdates.push(input); } },
+          subscriptionTerm: { updateMany: async () => ({ count: 0 }) },
+          profileSyncJob: { findMany: async () => [], create: async () => ({ id: 'unused-delete' }) },
+        }),
+      } as never,
+      {
+        updatePanelUser: async () => { throw new RemnawaveProfileNotFoundError('rem-stale-uuid'); },
+        getPanelUserByUsername: async () => null,
+        createPanelUser: async () => {
+          createCalled = true;
+          return {
+            uuid: 'rem-fresh-uuid',
+            subscriptionUrl: 'https://sub.example/fresh',
+            createdAt: '2026-02-01T00:00:00.000Z',
+          };
+        },
+      } as never,
+      {
+        generateProfileName: async () => ({ username: 'rz_subscription_imported', description: 'reprovision' }),
+        getContactInfo: async () => ({ email: null, telegramId: null }),
+      } as never,
+      { error: () => undefined, info: () => undefined, warn: () => undefined } as never,
+    );
+
+    await processor.process({ data: { syncJobId: 'sync-job-reprovision' } } as never);
+
+    assert.equal(createCalled, true, 'must re-provision the missing profile via createPanelUser');
+    // The stale id was detached (fenced on the old uuid) before CREATE...
+    assert.deepStrictEqual(subscriptionUpdates[0], {
+      where: { id: 'subscription-imported', remnawaveId: 'rem-stale-uuid' },
+      data: { remnawaveId: null, configUrl: null },
+    });
+    // ...and the fresh profile was linked back.
+    assert.deepStrictEqual(subscriptionUpdates[1], {
+      where: { id: 'subscription-imported' },
+      data: { remnawaveId: 'rem-fresh-uuid', configUrl: 'https://sub.example/fresh' },
+    });
+  });
+
+  it('does NOT re-provision on a transient panel outage during UPDATE (fails for retry)', async () => {
+    // A ServiceUnavailableException (panel down) must NOT be treated as a
+    // missing profile — the job fails and BullMQ retries; no CREATE.
+    let createCalled = false;
+    let idCleared = false;
+    const processor = new ProfileSyncProcessor(
+      {
+        profileSyncJob: {
+          findUnique: async () => ({
+            id: 'sync-job-outage',
+            action: SyncAction.UPDATE,
+            status: SyncJobStatus.PENDING,
+            attempts: 0,
+            supersededAt: null,
+            payload: {},
+            subscription: {
+              id: 'subscription-1', userId: 'user-1', remnawaveId: 'rem-user-1',
+              trafficLimit: 1, deviceLimit: 1, internalSquads: [], externalSquad: null,
+              status: SubscriptionStatus.ACTIVE,
+              expiresAt: new Date('2099-01-01T00:00:00.000Z'), planSnapshot: {},
+            },
+          }),
+          updateMany: async () => ({ count: 1 }),
+          update: async () => undefined,
+        },
+        subscription: {
+          updateMany: async () => { idCleared = true; return { count: 1 }; },
+        },
+      } as never,
+      {
+        updatePanelUser: async () => { throw new ServiceUnavailableException('Remnawave integration is unavailable'); },
+        getPanelUserByUsername: async () => null,
+        createPanelUser: async () => { createCalled = true; return { uuid: 'x' }; },
+      } as never,
+      {
+        generateProfileName: async () => ({ username: 'rz_subscription_1', description: 'x' }),
+        getContactInfo: async () => ({ email: null, telegramId: null }),
+      } as never,
+      { error: () => undefined, info: () => undefined, warn: () => undefined } as never,
+    );
+
+    await assert.rejects(
+      () => processor.process({ data: { syncJobId: 'sync-job-outage' } } as never),
+      /unavailable/,
+    );
+    assert.equal(createCalled, false, 'transient outage must not trigger re-provision');
+    assert.equal(idCleared, false, 'transient outage must not detach the profile id');
+  });
+
+  it('provisions via CREATE when an UPDATE job finds the subscription already unlinked (retry after a detached re-provision)', async () => {
+    // Reachable when a prior 404 re-provision detached the stale id but its
+    // follow-up CREATE failed transiently: the job stays action=UPDATE and
+    // retries with remnawaveId already null. It must NOT silently complete
+    // (which would strand the ACTIVE subscription with no profile) — it must
+    // delegate to CREATE and re-link a fresh/reused profile.
+    let createCalled = false;
+    let updatePanelCalled = false;
+    const subscriptionUpdates: unknown[] = [];
+    const processor = new ProfileSyncProcessor(
+      {
+        profileSyncJob: {
+          findUnique: async () => ({
+            id: 'sync-job-unlinked',
+            action: SyncAction.UPDATE,
+            status: SyncJobStatus.PENDING,
+            attempts: 1,
+            supersededAt: null,
+            payload: { source: 'IMPORT_SYNC' },
+            subscription: {
+              id: 'subscription-unlinked', userId: 'user-1', remnawaveId: null,
+              trafficLimit: 5, deviceLimit: 1, internalSquads: [], externalSquad: null,
+              status: SubscriptionStatus.ACTIVE,
+              expiresAt: new Date('2099-01-01T00:00:00.000Z'), planSnapshot: {},
+            },
+          }),
+          updateMany: async () => ({ count: 1 }),
+          update: async () => undefined,
+        },
+        subscription: {
+          updateMany: async (input: unknown) => { subscriptionUpdates.push(input); return { count: 1 }; },
+          update: async (input: unknown) => { subscriptionUpdates.push(input); },
+        },
+        $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
+          $queryRaw: async () => [{ status: SubscriptionStatus.ACTIVE }],
+          subscription: { update: async (input: unknown) => { subscriptionUpdates.push(input); } },
+          subscriptionTerm: { updateMany: async () => ({ count: 0 }) },
+          profileSyncJob: { findMany: async () => [], create: async () => ({ id: 'unused-delete' }) },
+        }),
+      } as never,
+      {
+        updatePanelUser: async () => { updatePanelCalled = true; return { uuid: 'should-not-be-called' }; },
+        getPanelUserByUsername: async () => null,
+        createPanelUser: async () => {
+          createCalled = true;
+          return { uuid: 'rem-fresh', subscriptionUrl: 'https://sub/fresh', createdAt: '2026-02-01T00:00:00.000Z' };
+        },
+      } as never,
+      {
+        generateProfileName: async () => ({ username: 'rz_subscription_unlinked', description: 'x' }),
+        getContactInfo: async () => ({ email: null, telegramId: null }),
+      } as never,
+      { error: () => undefined, info: () => undefined, warn: () => undefined } as never,
+    );
+
+    await processor.process({ data: { syncJobId: 'sync-job-unlinked' } } as never);
+
+    assert.equal(updatePanelCalled, false, 'must not PATCH — there is no linked profile to update');
+    assert.equal(createCalled, true, 'must provision the missing profile via createPanelUser');
+    // The fresh profile was linked back to the previously-unlinked subscription.
+    assert.deepStrictEqual(subscriptionUpdates[0], {
+      where: { id: 'subscription-unlinked' },
+      data: { remnawaveId: 'rem-fresh', configUrl: 'https://sub/fresh' },
+    });
+  });
 
   it('marks missing and already-completed jobs as no-ops', async () => {
     let updates = 0;

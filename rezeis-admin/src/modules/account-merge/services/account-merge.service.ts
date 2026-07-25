@@ -116,6 +116,16 @@ export class AccountMergeService {
         tx.supportTicket.updateMany({ where: { userId: source.id }, data: { userId: target.id } }),
         tx.adClick.updateMany({ where: { userId: source.id }, data: { userId: target.id } }),
         tx.broadcastMessage.updateMany({ where: { userId: source.id }, data: { userId: target.id } }),
+        // OAuth links + saved payment instruments: all keyed on a GLOBALLY
+        // unique provider id (UserOAuthLink `(provider, providerUserId)`,
+        // SavedPaymentMethod `(gatewayType, providerMethodId)`,
+        // PaymentMethodSetup `providerMethodId`), so re-pointing userId can
+        // never collide on the target. Previously these were silently
+        // cascade-DELETED with the source user — losing a person's social
+        // logins and bound cards on merge (HIGH #14).
+        tx.userOAuthLink.updateMany({ where: { userId: source.id }, data: { userId: target.id } }),
+        tx.savedPaymentMethod.updateMany({ where: { userId: source.id }, data: { userId: target.id } }),
+        tx.paymentMethodSetup.updateMany({ where: { userId: source.id }, data: { userId: target.id } }),
       ]);
 
       // 3. Dedupe-then-repoint the userId-unique collections.
@@ -124,6 +134,7 @@ export class AccountMergeService {
       const partnerTransactions = await this.movePartnerTransactionsAsReferral(tx, source.id, target.id);
       await this.movePartnerReferralsAsReferral(tx, source.id, target.id);
       await this.moveAdConversion(tx, source.id, target.id);
+      await this.moveQuestCompletions(tx, source.id, target.id);
 
       // 4. Referral edges: drop any direct source↔target edge (would become a
       //    self-referral), then move referredBy (1:1 unique) + referralsGiven.
@@ -363,6 +374,36 @@ export class AccountMergeService {
       await tx.partnerReferral.deleteMany({ where: { id: { in: dupes } } });
     }
     await tx.partnerReferral.updateMany({ where: { referralUserId: sourceId }, data: { referralUserId: targetId } });
+  }
+
+  /**
+   * `(questId, userId, periodKey)` unique — a merge can produce two rows for
+   * the same quest+period (one per account). The target's completion wins
+   * (its claim/reward-issued state is canonical for the surviving user); the
+   * source's colliding row is dropped, non-colliding source completions are
+   * re-pointed so the merged account keeps quests only the source had.
+   * Previously the whole set was cascade-deleted with the source (HIGH #14).
+   */
+  private async moveQuestCompletions(tx: Tx, sourceId: string, targetId: string): Promise<void> {
+    const targetRows = await tx.questCompletion.findMany({
+      where: { userId: targetId },
+      select: { questId: true, periodKey: true },
+    });
+    const taken = new Set(targetRows.map((r) => `${r.questId} ${r.periodKey}`));
+    const sourceRows = await tx.questCompletion.findMany({
+      where: { userId: sourceId },
+      select: { id: true, questId: true, periodKey: true },
+    });
+    const dupes = sourceRows
+      .filter((r) => taken.has(`${r.questId} ${r.periodKey}`))
+      .map((r) => r.id);
+    if (dupes.length > 0) {
+      await tx.questCompletion.deleteMany({ where: { id: { in: dupes } } });
+    }
+    await tx.questCompletion.updateMany({
+      where: { userId: sourceId },
+      data: { userId: targetId },
+    });
   }
 
   /** `AdConversion.userId` unique — keep the target's, drop the source's. */

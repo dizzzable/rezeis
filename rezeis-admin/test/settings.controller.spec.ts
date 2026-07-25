@@ -71,10 +71,13 @@ function buildRequest(requestId: string): Request {
   return {
     headers: {
       'x-request-id': requestId,
-      'x-forwarded-for': '198.51.100.50, 203.0.113.10',
+      // Spoofed by the client — must be IGNORED. Only `req.ip` (which already
+      // honours `trust proxy`) is trusted for remoteAddress resolution.
+      'x-forwarded-for': '10.0.0.1, 203.0.113.10',
       'user-agent': 'settings-controller-spec',
     },
-    ip: '127.0.0.1',
+    // The address Express resolved (honouring `trust proxy`).
+    ip: '198.51.100.50',
     socket: {
       remoteAddress: '127.0.0.2',
     },

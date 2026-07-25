@@ -200,7 +200,7 @@ export class StealthnetImporterService {
         // Subscriptions
         const userSubs = subsByOwner.get(client.id) ?? [];
         for (const sub of userSubs) {
-          const result = await this.syncSubscription(userId, sub, tariffById, panelLookup);
+          const result = await this.syncSubscription(userId, sub, tariffById, panelLookup, importRecordId ?? null);
           if (result === 'created') subscriptionsCreated += 1;
           else if (result === 'updated') subscriptionsUpdated += 1;
         }
@@ -256,7 +256,9 @@ export class StealthnetImporterService {
       stealthnetReferrals: JSON.parse(JSON.stringify(referralImport)),
       addOnsCreated,
       errors,
-      rollback: { createdUserIds },
+      // hasMatchedWrites blocks a destructive rollback when matched users were
+      // updated (no pre-import snapshot to restore). See ImportsService.rollback.
+      rollback: { createdUserIds, hasMatchedWrites: updated > 0 },
       // Catalog snapshot — reused by BackupPlanClonerService for the
       // optional second-step clone. We pre-translate STEALTHNET rows
       // into the same shape altshop emits so the cloner doesn't need
@@ -451,6 +453,7 @@ export class StealthnetImporterService {
     sub: StealthnetSubscription,
     tariffById: ReadonlyMap<string, StealthnetTariff>,
     panelLookup: PanelLookup,
+    importRecordId: string | null,
   ): Promise<'created' | 'updated' | 'skipped'> {
     if (!sub.remnawave_uuid) return 'skipped';
 
@@ -470,6 +473,8 @@ export class StealthnetImporterService {
 
     const planSnapshot: Prisma.InputJsonValue = {
       importedFrom: 'stealthnet',
+      // Durable link for bulk plan re-assignment (see BulkPlanAssignmentService).
+      ...(importRecordId ? { importRecordId } : {}),
       sourceSubscriptionId: sub.id,
       sourceTariffId: sub.tariff_id,
       // Mirror altshop's `originalPlanSnapshot.id` shape so the Plan

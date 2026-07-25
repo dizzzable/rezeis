@@ -123,8 +123,6 @@ export class BulkPlanAssignmentService {
     }
 
     if (input.importRecordId) {
-      // Find all users who have subscriptions created during this import
-      // by looking at subscriptions with planSnapshot.importedFrom matching the import source
       const importRecord = await this.prismaService.importRecord.findUnique({
         where: { id: input.importRecordId },
       });
@@ -132,11 +130,28 @@ export class BulkPlanAssignmentService {
         throw new NotFoundException(`Import record '${input.importRecordId}' not found`);
       }
 
-      // Get all subscriptions that were imported from this source type
-      // and created around the same time as the import
+      // Durable link (preferred): importers stamp `planSnapshot.importRecordId`
+      // onto every subscription they create/update, so we can target EXACTLY
+      // the subscriptions produced by this import — regardless of how long the
+      // import ran or how many other imports of the same source type happened
+      // around it.
+      const byRecord = await this.prismaService.subscription.findMany({
+        where: { planSnapshot: { path: ['importRecordId'], equals: importRecord.id } },
+        select: { userId: true },
+        distinct: ['userId'],
+      });
+      if (byRecord.length > 0) {
+        return byRecord.map((s) => s.userId);
+      }
+
+      // Legacy fallback: subscriptions imported BEFORE the durable stamp
+      // existed carry no `importRecordId`. Fall back to the old heuristic
+      // (source type + a creation-time window around the import) so re-plan
+      // still works for those historical imports. The window is intentionally
+      // wide on the tail because a large import can run well past 5 minutes.
       const importTime = importRecord.createdAt;
       const windowStart = new Date(importTime.getTime() - 60_000); // 1 min before
-      const windowEnd = new Date(importTime.getTime() + 300_000); // 5 min after
+      const windowEnd = new Date(importTime.getTime() + 6 * 60 * 60_000); // 6 h after
 
       const subscriptions = await this.prismaService.subscription.findMany({
         where: {
@@ -146,6 +161,12 @@ export class BulkPlanAssignmentService {
         select: { userId: true },
         distinct: ['userId'],
       });
+
+      this.logger.warn(
+        `Bulk plan assignment: import ${importRecord.id} has no durable importRecordId stamp on its ` +
+          `subscriptions (legacy import); falling back to the source-type + time-window heuristic ` +
+          `(matched ${subscriptions.length} users). New imports use the exact stamp.`,
+      );
 
       return subscriptions.map((s) => s.userId);
     }

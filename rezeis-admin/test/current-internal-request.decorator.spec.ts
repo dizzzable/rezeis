@@ -45,10 +45,11 @@ describe('CurrentInternalRequest', () => {
     const request = {
       headers: {
         'x-request-id': ['internal-request-3', 'internal-request-ignored'],
-        'x-forwarded-for': '198.51.100.82, 203.0.113.12',
+        // Spoofed — must be ignored in favour of the trust-proxy-resolved req.ip.
+        'x-forwarded-for': '10.0.0.1, 203.0.113.12',
         'user-agent': ['internal-bootstrap-spec', 'ignored-user-agent'],
       },
-      ip: '127.0.0.3',
+      ip: '198.51.100.82',
       socket: {
         remoteAddress: '127.0.0.4',
       },

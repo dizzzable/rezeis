@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { isValidPermission } from '../../rbac/rbac.resources';
 import {
   ALL_SECTIONS,
   CONFIG_EXPORT_VERSION,
@@ -14,11 +15,35 @@ import {
 
 export type ImportStrategy = 'skip' | 'overwrite';
 
+/**
+ * Sections that can create/alter RBAC grants. Importing them is a
+ * privilege-escalation surface, so we gate them behind `rbac_roles:edit`
+ * (see `PRIVILEGED_SECTION_TOKEN`) in addition to the endpoint's own
+ * `config_portability:import` permission.
+ */
+const PRIVILEGED_SECTIONS: ReadonlySet<ConfigExportSection> = new Set([
+  'roles',
+  'permissions',
+]);
+
+/** The permission an importer must hold to import roles/permissions. */
+const PRIVILEGED_SECTION_TOKEN = 'rbac_roles:edit';
+
 export interface ConfigImportInput {
   readonly payload: ConfigExportPayloadInterface;
   readonly sections: readonly ConfigExportSection[] | null;
   readonly strategy: ImportStrategy;
   readonly dryRun: boolean;
+  /**
+   * Flat `resource:action` tokens the importing admin effectively holds.
+   * Used to enforce two invariants on RBAC-bearing sections:
+   *   1. `roles`/`permissions` may only be imported by an admin who holds
+   *      `rbac_roles:edit`;
+   *   2. an admin can never import a permission it does not itself hold
+   *      (no self-escalation via a crafted export payload).
+   * Superadmin/DEV hold the full catalog, so both checks pass for them.
+   */
+  readonly importerPermissions: ReadonlySet<string>;
 }
 
 export interface SectionImportSummaryInterface {
@@ -73,6 +98,23 @@ export class ConfigImportService {
     const requested = input.sections === null || input.sections.length === 0
       ? ALL_SECTIONS
       : input.sections;
+
+    // Privilege-escalation guard: importing roles/permissions can hand out
+    // grants, so an admin needs `rbac_roles:edit` on top of the endpoint's
+    // `config_portability:import`. Without this, an admin whose ONLY power
+    // is config import could inject `rbac_roles:edit`/`admins:edit` grants
+    // and take over the panel.
+    const touchesPrivileged = requested.some((section) => {
+      if (!PRIVILEGED_SECTIONS.has(section)) return false;
+      const rows = (input.payload.sections[section] ?? []) as unknown[];
+      return rows.length > 0;
+    });
+    if (touchesPrivileged && !input.importerPermissions.has(PRIVILEGED_SECTION_TOKEN)) {
+      throw new BadRequestException(
+        'Importing roles/permissions requires the rbac_roles:edit permission',
+      );
+    }
+
     const startedAt = new Date();
 
     const summaries: SectionImportSummaryInterface[] = [];
@@ -84,7 +126,7 @@ export class ConfigImportService {
         for (const section of requested) {
           const rows = (input.payload.sections[section] ?? []) as Array<Record<string, unknown>>;
           summaries.push(
-            await this.importSection(tx, section, rows, input.strategy),
+            await this.importSection(tx, section, rows, input.strategy, input.importerPermissions),
           );
         }
         if (input.dryRun) {
@@ -127,6 +169,7 @@ export class ConfigImportService {
     section: ConfigExportSection,
     rows: Array<Record<string, unknown>>,
     strategy: ImportStrategy,
+    importerPermissions: ReadonlySet<string>,
   ): Promise<SectionImportSummaryInterface> {
     const errors: string[] = [];
     let created = 0;
@@ -145,7 +188,12 @@ export class ConfigImportService {
         case 'permissions':
           // Permissions hang off roles via FK. Drop rows whose role is
           // missing in the destination instead of failing the section.
-          ({ created, updated, skipped } = await this.upsertPermissions(tx, rows, strategy));
+          ({ created, updated, skipped } = await this.upsertPermissions(
+            tx,
+            rows,
+            strategy,
+            importerPermissions,
+          ));
           break;
         case 'scopePolicies':
           ({ created, updated, skipped } = await this.upsertById(tx.adminScopePolicy, rows, strategy));
@@ -230,6 +278,7 @@ export class ConfigImportService {
     tx: PrismaTransactionClient,
     rows: Array<Record<string, unknown>>,
     strategy: ImportStrategy,
+    importerPermissions: ReadonlySet<string>,
   ): Promise<{ created: number; updated: number; skipped: number }> {
     let created = 0;
     const updated = 0;
@@ -240,6 +289,22 @@ export class ConfigImportService {
       const resource = row['resource'];
       const action = row['action'];
       if (typeof roleId !== 'string' || typeof resource !== 'string' || typeof action !== 'string') {
+        skipped += 1;
+        continue;
+      }
+      // Reject grants that aren't in the RBAC catalog: `upsertPermissions`
+      // writes `adminPermission` rows directly (bypassing the validated
+      // role-editor path), so a crafted payload could otherwise persist a
+      // bogus/forged (resource, action).
+      if (!isValidPermission(resource, action)) {
+        skipped += 1;
+        continue;
+      }
+      // Self-escalation guard: never let an admin import a permission it
+      // does not itself hold. Combined with the section-level
+      // `rbac_roles:edit` gate this closes the "grant myself anything"
+      // path — a limited admin can only import grants ⊆ its own set.
+      if (!importerPermissions.has(permissionToken(resource, action))) {
         skipped += 1;
         continue;
       }
@@ -295,6 +360,10 @@ export class ConfigImportService {
     await tx.settings.create({ data: { ...data, id: 1 } });
     return { created: 1, updated: 0, skipped: 0 };
   }
+}
+
+function permissionToken(resource: string, action: string): string {
+  return `${resource}:${action}`;
 }
 
 class DryRunRollback extends Error {

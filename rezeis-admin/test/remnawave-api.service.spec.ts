@@ -5,6 +5,7 @@ import { of, throwError } from 'rxjs';
 import {
   buildNodeUsersBandwidthPath,
   RemnawaveApiService,
+  RemnawaveProfileNotFoundError,
 } from '../src/modules/remnawave/services/remnawave-api.service';
 
 describe('RemnawaveApiService', () => {
@@ -459,6 +460,69 @@ describe('RemnawaveApiService', () => {
     assert.equal(serializedSettings.includes(rawHappRouting), false);
     assert.equal(serializedSettings.includes('raw-happ-token-secret'), false);
     assert.equal(serializedSettings.includes('raw-route-token-secret'), false);
+  });
+
+  it('surfaces a 404 carrying the panel USER_NOT_FOUND envelope as RemnawaveProfileNotFoundError', async () => {
+    const service = new RemnawaveApiService(
+      {
+        request: () =>
+          throwError(() => ({
+            isAxiosError: true,
+            // Remnawave's own not-found body (code A025) — the profile is truly gone.
+            response: { status: 404, data: { message: 'User not found', errorCode: 'A025' } },
+            message: 'Request failed with status code 404',
+          })),
+      } as never,
+      { host: 'remnawave', port: 3000, token: 'secret', webhookSecret: null, caddyToken: null, cookie: null },
+    );
+
+    await assert.rejects(
+      () => service.updatePanelUser('33333333-3333-4333-8333-333333333333', { status: 'ACTIVE' }),
+      (err: unknown) => {
+        assert.ok(err instanceof RemnawaveProfileNotFoundError);
+        assert.equal(err.uuid, '33333333-3333-4333-8333-333333333333');
+        return true;
+      },
+    );
+  });
+
+  it('treats a bare 404 with no panel error envelope (proxy/gateway) as a transient outage, NOT a missing profile', async () => {
+    const service = new RemnawaveApiService(
+      {
+        request: () =>
+          throwError(() => ({
+            isAxiosError: true,
+            // A generic gateway 404 page — no A025, so it must not detach the profile.
+            response: { status: 404, data: '<html>404 Not Found</html>' },
+            message: 'Request failed with status code 404',
+          })),
+      } as never,
+      { host: 'remnawave', port: 3000, token: 'secret', webhookSecret: null, caddyToken: null, cookie: null },
+    );
+
+    await assert.rejects(
+      () => service.updatePanelUser('33333333-3333-4333-8333-333333333333', { status: 'ACTIVE' }),
+      { name: 'ServiceUnavailableException', message: 'Remnawave integration is unavailable' },
+    );
+  });
+
+  it('maps a non-404 PATCH /api/users failure to the generic service-unavailable error', async () => {
+    const service = new RemnawaveApiService(
+      {
+        request: () =>
+          throwError(() => ({
+            isAxiosError: true,
+            response: { status: 500 },
+            message: 'Request failed with status code 500',
+          })),
+      } as never,
+      { host: 'remnawave', port: 3000, token: 'secret', webhookSecret: null, caddyToken: null, cookie: null },
+    );
+
+    await assert.rejects(
+      () => service.updatePanelUser('33333333-3333-4333-8333-333333333333', { status: 'ACTIVE' }),
+      { name: 'ServiceUnavailableException', message: 'Remnawave integration is unavailable' },
+    );
   });
 
   it('resets subscription user traffic through the Remnawave reset-traffic action', async () => {

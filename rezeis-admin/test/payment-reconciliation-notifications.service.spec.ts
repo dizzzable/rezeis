@@ -109,9 +109,11 @@ type ProcessPartnerEarningArg = {
 };
 type ReconciliationPartnerEarningsDouble = {
   processPartnerEarning: (input: ProcessPartnerEarningArg) => Promise<void>;
+  reverseEarningsForTransaction: (transactionId: string) => Promise<number>;
 };
 type ReconciliationReferralQualificationDouble = {
   qualifyReferralAfterPurchase: (transactionId: string) => Promise<void>;
+  reverseQualificationForTransaction: (transactionId: string) => Promise<void>;
 };
 type ReconciliationProfileSyncQueueDouble = {
   enqueue: (syncJobId: string) => Promise<void>;
@@ -283,6 +285,74 @@ describe('PaymentReconciliationService reconciliation side effects', () => {
     assert.doesNotMatch(JSON.stringify(state.markFailedCalls), /sub_secret/);
     assert.doesNotMatch(JSON.stringify(state.markFailedCalls), /provider-token/);
   });
+
+  it('reverses all side-effects on a refund of an already-fulfilled payment (HIGH #6)', async () => {
+    const state = createState({
+      eventStatus: 'REFUNDED',
+      initialTransactionStatus: TransactionStatus.COMPLETED,
+      refreshedSubscriptionId: 'subscription-1',
+      refreshedFulfilledAt: new Date('2026-04-19T11:00:00.000Z'),
+    });
+    const service = createService(state);
+
+    await service.reconcileWebhookEvent('event-1');
+
+    // All four reversals ran; no forward hooks re-ran.
+    assert.deepStrictEqual(state.partnerReversalCalls, ['tx-1']);
+    assert.deepStrictEqual(state.referralReversalCalls, ['tx-1']);
+    assert.deepStrictEqual(state.moyNalogCancelCalls, ['tx-1']);
+    assert.deepStrictEqual(state.adRevertCalls, ['tx-1']);
+    assert.deepStrictEqual(state.partnerEarningCalls, []);
+    assert.deepStrictEqual(state.referralQualificationCalls, []);
+    // Transaction marked CANCELED + stamped, webhook processed.
+    assert.equal(state.transactionUpdateCalls.length, 1);
+    assert.equal(state.transactionUpdateCalls[0].data.status, TransactionStatus.CANCELED);
+    assert.equal(
+      typeof (state.transactionUpdateCalls[0].data.gatewayData as Record<string, unknown>).refundReversedAt,
+      'string',
+    );
+    assert.deepStrictEqual(state.markProcessedCalls, ['event-1']);
+  });
+
+  it('is idempotent: a replayed refund webhook (already reversed) does nothing', async () => {
+    const state = createState({
+      eventStatus: 'REFUNDED_PAYMENT',
+      initialTransactionStatus: TransactionStatus.COMPLETED,
+      refreshedSubscriptionId: 'subscription-1',
+      refreshedFulfilledAt: new Date('2026-04-19T11:00:00.000Z'),
+      gatewayDataOverride: { refundReversedAt: '2026-04-19T12:00:00.000Z' },
+    });
+    const service = createService(state);
+
+    await service.reconcileWebhookEvent('event-1');
+
+    assert.deepStrictEqual(state.partnerReversalCalls, []);
+    assert.deepStrictEqual(state.referralReversalCalls, []);
+    assert.deepStrictEqual(state.moyNalogCancelCalls, []);
+    assert.deepStrictEqual(state.adRevertCalls, []);
+    assert.deepStrictEqual(state.transactionUpdateCalls, []);
+    assert.deepStrictEqual(state.markProcessedCalls, ['event-1']);
+  });
+
+  it('does NOT trigger reversal for a plain cancel/expiry of a fulfilled payment', async () => {
+    // An ordinary CANCELED provider status on a fulfilled tx must NOT reverse
+    // (only a refund/chargeback does) — it early-returns as already-fulfilled.
+    const state = createState({
+      eventStatus: 'canceled',
+      initialTransactionStatus: TransactionStatus.COMPLETED,
+      refreshedSubscriptionId: 'subscription-1',
+      refreshedFulfilledAt: new Date('2026-04-19T11:00:00.000Z'),
+    });
+    const service = createService(state);
+
+    await service.reconcileWebhookEvent('event-1');
+
+    assert.deepStrictEqual(state.partnerReversalCalls, []);
+    assert.deepStrictEqual(state.referralReversalCalls, []);
+    assert.deepStrictEqual(state.moyNalogCancelCalls, []);
+    assert.deepStrictEqual(state.adRevertCalls, []);
+    assert.deepStrictEqual(state.markProcessedCalls, ['event-1']);
+  });
 });
 
 function createService(state: ReturnType<typeof createState>): PaymentReconciliationService {
@@ -298,6 +368,7 @@ function createService(state: ReturnType<typeof createState>): PaymentReconcilia
             status: state.updatedStatus ?? state.initialTransactionStatus,
             subscriptionId: state.refreshedSubscriptionId,
             fulfilledAt: state.refreshedFulfilledAt,
+            gatewayData: state.gatewayDataOverride,
           });
         }
         return createTransaction({
@@ -305,6 +376,7 @@ function createService(state: ReturnType<typeof createState>): PaymentReconcilia
           status: state.initialTransactionStatus,
           subscriptionId: 'subscription-original',
           fulfilledAt: state.refreshedFulfilledAt,
+          gatewayData: state.gatewayDataOverride,
         });
       },
       findFirst: async (_args: TransactionFindFirstArgs) => null,
@@ -369,11 +441,20 @@ function createService(state: ReturnType<typeof createState>): PaymentReconcilia
       state.partnerEarningCalls.push(input);
       state.callOrder.push('partner-earnings');
     },
+    reverseEarningsForTransaction: async (transactionId: string) => {
+      state.partnerReversalCalls.push(transactionId);
+      state.callOrder.push('partner-reversal');
+      return 0;
+    },
   };
   const referralQualificationService: ReconciliationReferralQualificationDouble = {
     qualifyReferralAfterPurchase: async (transactionId: string) => {
       state.referralQualificationCalls.push(transactionId);
       state.callOrder.push('referral-qualification');
+    },
+    reverseQualificationForTransaction: async (transactionId: string) => {
+      state.referralReversalCalls.push(transactionId);
+      state.callOrder.push('referral-reversal');
     },
   };
   const profileSyncQueueService: ReconciliationProfileSyncQueueDouble = {
@@ -394,8 +475,20 @@ function createService(state: ReturnType<typeof createState>): PaymentReconcilia
     referralQualificationService as unknown as ReferralQualificationService,
     profileSyncQueueService as unknown as ProfileSyncQueueService,
     { warn: () => {}, info: () => {}, error: () => {}, emit: () => {} } as never,
-    { enqueueRegisterIncome: async () => {} } as unknown as MoyNalogQueueService,
-    { recordFirstPurchase: async () => {}, revertConversion: async () => {} } as never,
+    {
+      enqueueRegisterIncome: async () => {},
+      enqueueCancelIncome: async (transactionId: string) => {
+        state.moyNalogCancelCalls.push(transactionId);
+        state.callOrder.push('moynalog-cancel');
+      },
+    } as unknown as MoyNalogQueueService,
+    {
+      recordFirstPurchase: async () => {},
+      revertConversion: async (transactionId: string) => {
+        state.adRevertCalls.push(transactionId);
+        state.callOrder.push('ad-revert');
+      },
+    } as never,
     { upsertFromYookassaPayment: async () => undefined } as never,
   );
 }
@@ -408,6 +501,7 @@ function createState(input: {
   readonly mutationShouldThrow?: boolean;
   readonly mutationError?: Error;
   readonly enqueueError?: Error;
+  readonly gatewayDataOverride?: Record<string, unknown> | null;
 }) {
   const now = new Date('2026-04-19T12:00:00.000Z');
   return {
@@ -450,6 +544,11 @@ function createState(input: {
     alertCalls: [] as NotifyWebhookFailedArgs[],
     referralQualificationCalls: [] as string[],
     partnerEarningCalls: [] as ProcessPartnerEarningArg[],
+    partnerReversalCalls: [] as string[],
+    referralReversalCalls: [] as string[],
+    moyNalogCancelCalls: [] as string[],
+    adRevertCalls: [] as string[],
+    gatewayDataOverride: input.gatewayDataOverride ?? null,
   };
 }
 
@@ -458,6 +557,7 @@ function createTransaction(input: {
   readonly status: TransactionStatus;
   readonly subscriptionId: string | null;
   readonly fulfilledAt?: Date | null;
+  readonly gatewayData?: Record<string, unknown> | null;
 }) {
   return {
     id: input.id,
@@ -475,7 +575,7 @@ function createTransaction(input: {
     paymentAsset: null,
     planSnapshot: { id: 'plan-1', selectedDurationDays: 30, pricing: { discountSource: 'PURCHASE', discountPercent: 20 } },
     gatewayId: null,
-    gatewayData: null,
+    gatewayData: input.gatewayData ?? null,
     deviceTypes: [],
     createdAt: new Date('2026-04-20T00:00:00.000Z'),
     updatedAt: new Date('2026-04-20T00:00:00.000Z'),

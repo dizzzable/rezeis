@@ -179,6 +179,7 @@ export class AdminImportsController {
   public async importFrom3xui(
     @CurrentAdmin() admin: CurrentAdminInterface,
     @UploadedFile() file?: Express.Multer.File,
+    @Body() body?: { syncToPanel?: string },
   ): Promise<ImportEnqueuedResponse> {
     if (!file) {
       throw new BadRequestException('File is required. Upload a .db (SQLite) or .json file.');
@@ -189,6 +190,7 @@ export class AdminImportsController {
       createdBy: admin.id,
       fileBuffer: file.buffer,
       originalFilename: file.originalname,
+      syncToPanel: body?.syncToPanel === 'true',
     });
     return { importRecordId, jobId, message: '3x-ui import enqueued' };
   }
@@ -202,6 +204,7 @@ export class AdminImportsController {
   public async importFromRemnashop(
     @CurrentAdmin() admin: CurrentAdminInterface,
     @UploadedFile() file?: Express.Multer.File,
+    @Body() body?: { syncToPanel?: string },
   ): Promise<ImportEnqueuedResponse> {
     if (!file) {
       throw new BadRequestException('File is required. Upload a .tar.gz backup or .json export.');
@@ -212,6 +215,7 @@ export class AdminImportsController {
       createdBy: admin.id,
       fileBuffer: file.buffer,
       originalFilename: file.originalname,
+      syncToPanel: body?.syncToPanel === 'true',
     });
     return { importRecordId, jobId, message: 'Remnashop import enqueued' };
   }
@@ -225,6 +229,7 @@ export class AdminImportsController {
   public async importFromAltshop(
     @CurrentAdmin() admin: CurrentAdminInterface,
     @UploadedFile() file?: Express.Multer.File,
+    @Body() body?: { syncToPanel?: string },
   ): Promise<ImportEnqueuedResponse> {
     if (!file) {
       throw new BadRequestException('File is required. Upload a .tar.gz backup or database.json.');
@@ -235,6 +240,7 @@ export class AdminImportsController {
       createdBy: admin.id,
       fileBuffer: file.buffer,
       originalFilename: file.originalname,
+      syncToPanel: body?.syncToPanel === 'true',
     });
     return { importRecordId, jobId, message: 'Altshop import enqueued' };
   }
@@ -248,7 +254,7 @@ export class AdminImportsController {
   public async importFromStealthnet(
     @CurrentAdmin() admin: CurrentAdminInterface,
     @UploadedFile() file?: Express.Multer.File,
-    @Body() body?: { convertBalanceToPoints?: string; balancePointsRate?: string },
+    @Body() body?: { convertBalanceToPoints?: string; balancePointsRate?: string; syncToPanel?: string },
   ): Promise<ImportEnqueuedResponse> {
     if (!file) {
       throw new BadRequestException('File is required. Upload a STEALTHNET pg_dump .sql file.');
@@ -264,6 +270,7 @@ export class AdminImportsController {
       fileBuffer: file.buffer,
       originalFilename: file.originalname,
       balanceToPoints: { enabled, rate },
+      syncToPanel: body?.syncToPanel === 'true',
     });
     return { importRecordId, jobId, message: 'STEALTHNET import enqueued' };
   }

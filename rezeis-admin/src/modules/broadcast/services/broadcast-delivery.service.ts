@@ -409,14 +409,26 @@ export class BroadcastDeliveryService {
             : textMessageId !== null
               ? BigInt(textMessageId)
               : null;
+        // Partial success: the cabinet feed row delivered (SENT is correct —
+        // the user has an in-app surface), but the direct media Telegram send
+        // failed. Persist the media error on the row so the outcome isn't
+        // silently swallowed — the operator can see the photo/video never
+        // reached Telegram even though the broadcast counts as delivered.
+        const partialMediaError = hasMedia && !mediaOk ? (mediaError ?? 'Media delivery failed') : null;
         await this.prismaService.broadcastMessage.update({
           where: { id: message.id },
           data: {
             status: BroadcastMessageStatus.SENT,
             telegramMessageId,
             sentAt: new Date(),
+            errorMessage: partialMediaError,
           },
         });
+        if (partialMediaError !== null) {
+          this.logger.warn(
+            `Broadcast ${message.id} marked SENT via cabinet feed but media Telegram delivery failed: ${partialMediaError}`,
+          );
+        }
         sent++;
       } else {
         await this.markFailed(message.id, mediaError ?? 'Delivery failed on all channels');

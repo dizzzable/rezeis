@@ -11,9 +11,12 @@ import {
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 
+import { CurrentAdmin } from '../../auth/decorators/current-admin.decorator';
 import { AdminJwtAuthGuard } from '../../auth/guards/admin-jwt-auth.guard';
+import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.interface';
 import { RequirePermission } from '../../rbac/decorators/require-permission.decorator';
 import { RbacGuard } from '../../rbac/guards/rbac.guard';
+import { RbacService } from '../../rbac/services/rbac.service';
 import {
   ALL_SECTIONS_LITERAL,
   ConfigExportQueryDto,
@@ -37,6 +40,7 @@ export class AdminConfigPortabilityController {
   public constructor(
     private readonly exportService: ConfigExportService,
     private readonly importService: ConfigImportService,
+    private readonly rbacService: RbacService,
   ) {}
 
   @Get('sections')
@@ -58,13 +62,28 @@ export class AdminConfigPortabilityController {
   @HttpCode(HttpStatus.OK)
   @RequirePermission('config_portability', 'import')
   @ApiOperation({ summary: 'Imports a previously-exported configuration JSON' })
-  public importConfig(@Body() dto: ConfigImportDto) {
+  public async importConfig(
+    @Body() dto: ConfigImportDto,
+    @CurrentAdmin() admin: CurrentAdminInterface,
+  ) {
     const sections = normaliseSections(dto.sections);
+    // Resolve the importer's effective grants so the service can enforce
+    // the RBAC-escalation invariants (gate roles/permissions behind
+    // rbac_roles:edit and forbid importing grants the admin lacks).
+    const effective = await this.rbacService.getEffectivePermissions({
+      id: admin.id,
+      role: admin.role,
+      rbacRoleId: admin.rbacRoleId,
+    });
+    const importerPermissions = new Set(
+      effective.map((p) => `${p.resource}:${p.action}`),
+    );
     return this.importService.importConfig({
       payload: dto.payload as unknown as ConfigExportPayloadInterface,
       sections,
       strategy: dto.strategy,
       dryRun: dto.dryRun,
+      importerPermissions,
     });
   }
 }

@@ -14,7 +14,10 @@ import { Job } from 'bullmq';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { SystemEventsService, EVENT_TYPES } from '../../common/services/system-events.service';
 import { resolveAddOnRolloutFlags } from '../add-on-entitlements/add-on-rollout.config';
-import { RemnawaveApiService } from '../remnawave/services/remnawave-api.service';
+import {
+  RemnawaveApiService,
+  RemnawaveProfileNotFoundError,
+} from '../remnawave/services/remnawave-api.service';
 import {
   PROFILE_SYNC_CONCURRENCY,
   PROFILE_SYNC_MAX_ATTEMPTS,
@@ -571,9 +574,17 @@ export class ProfileSyncProcessor extends WorkerHost {
     for (let convergenceAttempt = 0; convergenceAttempt < 3; convergenceAttempt += 1) {
       const subscription = current.subscription;
       if (subscription.remnawaveId === null) {
+        // No panel link to update. This is reachable when a prior re-provision
+        // detached a stale id (404) but its follow-up CREATE then failed
+        // transiently: the job stays action=UPDATE and retries here. Silently
+        // returning would mark the job COMPLETED and strand the ACTIVE
+        // subscription with no profile forever. Delegate to CREATE instead —
+        // it idempotently reuses a profile by username or provisions a fresh
+        // one and re-links, and it is safe when no create is actually needed.
         this.logger.warn(
-          `Cannot update: subscription ${subscription.id} has no remnawaveId`,
+          `Subscription ${subscription.id} has no remnawaveId during UPDATE; provisioning via CREATE`,
         );
+        await this.handleCreate(current);
         return;
       }
 
@@ -587,24 +598,47 @@ export class ProfileSyncProcessor extends WorkerHost {
         subscription.id,
       );
 
-      const panelUser = await this.remnawaveApiService.updatePanelUser(subscription.remnawaveId, {
-        telegramId: contacts.telegramId ? Number(contacts.telegramId) : null,
-        email: contacts.email,
-        description: naming.description,
-        // Status is a separate panel field. It is intentionally forwarded
-        // only for an explicit admin toggle; derived local states such as
-        // EXPIRED/LIMITED must not overwrite Remnawave during routine syncs.
-        ...(readBoolean(readRecord(current.payload), 'propagateStatus')
-          ? { status: subscription.status }
-          : {}),
-        tag,
-        expireAt: subscription.expiresAt?.toISOString(),
-        trafficLimitBytes: (subscription.trafficLimit ?? 0) * 1024 * 1024 * 1024,
-        hwidDeviceLimit: toPanelDeviceLimit(subscription.deviceLimit),
-        trafficLimitStrategy,
-        activeInternalSquads: subscription.internalSquads,
-        externalSquadUuid: subscription.externalSquad,
-      });
+      let panelUser: Awaited<ReturnType<RemnawaveApiService['updatePanelUser']>>;
+      try {
+        panelUser = await this.remnawaveApiService.updatePanelUser(subscription.remnawaveId, {
+          telegramId: contacts.telegramId ? Number(contacts.telegramId) : null,
+          email: contacts.email,
+          description: naming.description,
+          // Status is a separate panel field. It is intentionally forwarded
+          // only for an explicit admin toggle; derived local states such as
+          // EXPIRED/LIMITED must not overwrite Remnawave during routine syncs.
+          ...(readBoolean(readRecord(current.payload), 'propagateStatus')
+            ? { status: subscription.status }
+            : {}),
+          tag,
+          expireAt: subscription.expiresAt?.toISOString(),
+          trafficLimitBytes: (subscription.trafficLimit ?? 0) * 1024 * 1024 * 1024,
+          hwidDeviceLimit: toPanelDeviceLimit(subscription.deviceLimit),
+          trafficLimitStrategy,
+          activeInternalSquads: subscription.internalSquads,
+          externalSquadUuid: subscription.externalSquad,
+        });
+      } catch (err: unknown) {
+        // The linked profile no longer exists on the panel (404). This is the
+        // imported-subscription case: `remnawaveId` came from a donor dump but
+        // the profile is gone from the currently connected panel, so a PATCH
+        // can never land and the job would retry forever. Re-provision: detach
+        // the stale id and fall through to CREATE, which idempotently reuses an
+        // existing profile by username or creates a fresh one and re-links it.
+        if (err instanceof RemnawaveProfileNotFoundError) {
+          await this.reprovisionMissingProfile(subscription.id, subscription.remnawaveId);
+          const refreshed = await this.loadSyncJob(this.prismaService, syncJob.id);
+          if (refreshed === null) {
+            throw new Error(`Profile sync job ${syncJob.id} disappeared during UPDATE re-provision`);
+          }
+          this.logger.warn(
+            `Remnawave profile for subscription ${subscription.id} was missing (404); re-provisioning via CREATE`,
+          );
+          await this.handleCreate(refreshed);
+          return;
+        }
+        throw err;
+      }
 
       const latest = await this.loadSyncJob(this.prismaService, syncJob.id);
       if (latest === null) {
@@ -632,6 +666,23 @@ export class ProfileSyncProcessor extends WorkerHost {
     throw new ServiceUnavailableException(
       `Subscription ${current.subscription.id} changed repeatedly during profile UPDATE`,
     );
+  }
+
+  /**
+   * Detaches a stale `remnawaveId` (and its `configUrl`) from a subscription
+   * whose panel profile returned 404, so the subsequent CREATE re-provisions a
+   * fresh profile. Fenced on the old id: if a concurrent write already
+   * re-linked the row to a different profile, this is a no-op and that link
+   * wins (we never clobber a newer link).
+   */
+  private async reprovisionMissingProfile(
+    subscriptionId: string,
+    staleRemnawaveId: string,
+  ): Promise<void> {
+    await this.prismaService.subscription.updateMany({
+      where: { id: subscriptionId, remnawaveId: staleRemnawaveId },
+      data: { remnawaveId: null, configUrl: null },
+    });
   }
 
   private async enqueueCompensatingDelete(syncJobId: string): Promise<void> {

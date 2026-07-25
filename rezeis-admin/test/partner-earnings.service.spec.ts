@@ -46,6 +46,8 @@ function fakePrisma(opts: {
     sourceTransactionId: string | null;
     referralUserId: string;
   }>;
+  /** When true, partnerTransaction.create throws P2002 (unique sourceKey race). */
+  createThrowsUnique?: boolean;
 }) {
   const createdTransactions: Array<Record<string, unknown>> = [];
   const partnerById = new Map(opts.partners.map((p) => [p.id, { ...p, balance: p.balance ?? 0, totalEarned: p.totalEarned ?? 0 }]));
@@ -54,6 +56,12 @@ function fakePrisma(opts: {
   const tx = {
     partnerTransaction: {
       create: async (args: { data: Record<string, unknown> }) => {
+        if (opts.createThrowsUnique === true) {
+          throw new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+            code: 'P2002',
+            clientVersion: 'test',
+          });
+        }
         createdTransactions.push(args.data);
         existing.push({
           partnerId: args.data.partnerId as string,
@@ -178,6 +186,42 @@ describe('PartnerEarningsService', () => {
     });
     assert.equal(fake.state.createdTransactions.length, 1);
     assert.equal((fake.state.createdTransactions[0] as { earnedAmount: number }).earnedAmount, 1000);
+    // Deterministic sourceKey enables the unique-index race guard.
+    assert.equal(
+      (fake.state.createdTransactions[0] as { sourceKey: string }).sourceKey,
+      'runtime:p1:tx-1',
+    );
+  });
+
+  it('does not double-credit when a concurrent accrual wins the unique race (P2002)', async () => {
+    const fake = fakePrisma({
+      settings: { enabled: true, levels: { LEVEL_1: 10 } },
+      partners: [
+        {
+          id: 'p1',
+          userId: 'u1',
+          isActive: true,
+          useGlobalSettings: true,
+          accrualStrategy: PartnerAccrualStrategy.ON_EACH_PAYMENT,
+          rewardType: PartnerRewardType.PERCENT,
+          balance: 500,
+          totalEarned: 500,
+        },
+      ],
+      edges: [{ partnerId: 'p1', referralUserId: 'payer', level: 1 }],
+      createThrowsUnique: true,
+    });
+    const service = new PartnerEarningsService(fake.client as never, NULL_LOGGER as never, NULL_NOTIFICATIONS as never);
+    // Must resolve (idempotent no-op), not throw.
+    await service.processPartnerEarning({
+      payerUserId: 'payer',
+      paymentAmountMinorUnits: 10000,
+      gatewayType: null,
+      sourceTransactionId: 'tx-1',
+    });
+    // Balance untouched — the racing create rolled back the increment.
+    assert.equal(fake.state.partnerById.get('p1')?.balance, 500);
+    assert.equal(fake.state.partnerById.get('p1')?.totalEarned, 500);
   });
 
   it('uses individual fixed amount when reward type is FIXED', async () => {

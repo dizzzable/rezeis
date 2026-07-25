@@ -17,9 +17,12 @@ import {
 } from '@nestjs/websockets';
 import type { Server, Socket } from 'socket.io';
 
+import type { UserRole } from '@prisma/client';
+
 import { authConfig } from '../../common/config/auth.config';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { AdminJwtPayloadInterface } from '../auth/interfaces/admin-jwt-payload.interface';
+import { RbacService } from '../rbac/services/rbac.service';
 import {
   REALTIME_CLOSE,
   REALTIME_EVENT,
@@ -31,6 +34,7 @@ import {
 } from './realtime.constants';
 import {
   REALTIME_TOPICS,
+  REALTIME_TOPIC_PERMISSION,
   RealtimeEventInterface,
   RealtimeTopic,
 } from './interfaces/realtime-event.interface';
@@ -40,7 +44,10 @@ interface AuthenticatedSocket extends Socket {
     adminId: string;
     login: string;
     tokenVersion: number;
+    /** Topics the client has explicitly subscribed to (⊆ allowedTopics). */
     topics: Set<RealtimeTopic>;
+    /** Topics this admin is permitted to receive, resolved from RBAC at connect. */
+    allowedTopics: Set<RealtimeTopic>;
   };
 }
 
@@ -104,6 +111,7 @@ export class RealtimeGateway
     private readonly prismaService: PrismaService,
     @Inject(authConfig.KEY)
     private readonly authConfiguration: ConfigType<typeof authConfig>,
+    private readonly rbacService: RbacService,
   ) {}
 
   // ── Lifecycle ──────────────────────────────────────────────────────────
@@ -146,7 +154,14 @@ export class RealtimeGateway
 
     const admin = await this.prismaService.adminUser.findUnique({
       where: { id: payload.sub },
-      select: { id: true, login: true, isActive: true, tokenVersion: true },
+      select: {
+        id: true,
+        login: true,
+        isActive: true,
+        tokenVersion: true,
+        role: true,
+        rbacRoleId: true,
+      },
     });
     if (!admin) {
       this.deny(client, REALTIME_CLOSE.AUTH_FAILURE, 'admin_not_found');
@@ -165,18 +180,27 @@ export class RealtimeGateway
       return;
     }
 
+    const allowedTopics = await this.resolveAllowedTopics({
+      id: admin.id,
+      role: admin.role,
+      rbacRoleId: admin.rbacRoleId,
+    });
+
     const authed = client as AuthenticatedSocket;
     authed.data = {
       adminId: admin.id,
       login: admin.login,
       tokenVersion: admin.tokenVersion,
       topics: new Set<RealtimeTopic>(),
+      allowedTopics,
     };
     this.sockets.set(authed.id, authed);
 
+    // Advertise only the topics this admin may actually receive so the SPA
+    // never renders subscribe controls for events it will never be sent.
     authed.emit(REALTIME_READY, {
       adminId: admin.id,
-      topics: REALTIME_TOPICS,
+      topics: Array.from(allowedTopics),
     });
 
     this.logger.debug(
@@ -201,7 +225,12 @@ export class RealtimeGateway
     const authed = this.sockets.get(client.id);
     if (!authed) return { ok: false, topics: [] };
     const requested = this.parseTopics(payload);
-    requested.forEach((t) => authed.data.topics.add(t));
+    // RBAC gate: silently drop topics the admin isn't permitted to receive so
+    // a crafted `subscribe` frame can't opt a restricted operator into
+    // money/fraud/partner streams they can't view in the panel.
+    requested
+      .filter((t) => authed.data.allowedTopics.has(t))
+      .forEach((t) => authed.data.topics.add(t));
     return { ok: true, topics: Array.from(authed.data.topics) };
   }
 
@@ -228,9 +257,17 @@ export class RealtimeGateway
    */
   public broadcast(event: RealtimeEventInterface): void {
     if (this.sockets.size === 0) return;
+    const category = event.category as RealtimeTopic;
     for (const socket of this.sockets.values()) {
-      const topics = socket.data.topics;
-      if (topics.size === 0 || topics.has(event.category)) {
+      const { topics, allowedTopics } = socket.data;
+      // Hard RBAC gate first: never emit a category the admin cannot view,
+      // regardless of what they (or a spoofed subscribe) asked for.
+      if (!allowedTopics.has(category)) {
+        continue;
+      }
+      // Empty explicit subscription = "all topics I'm allowed to see" (the
+      // panel's default global-counter view), otherwise honour the opt-in set.
+      if (topics.size === 0 || topics.has(category)) {
         socket.emit(REALTIME_EVENT, event);
       }
     }
@@ -283,6 +320,29 @@ export class RealtimeGateway
     if (!Array.isArray(payload)) return [];
     const allowed = new Set<string>(REALTIME_TOPICS);
     return payload.filter((p): p is RealtimeTopic => typeof p === 'string' && allowed.has(p));
+  }
+
+  /**
+   * Resolves the set of topics an admin may receive from their RBAC
+   * permissions. A topic is allowed only when the admin holds the mapped
+   * `resource:view` permission (DEV / superadmin get everything via
+   * `hasPermission`). Resolved once at connect — role changes force a
+   * reconnect via `disconnectAdmin`, which re-runs this.
+   */
+  private async resolveAllowedTopics(admin: {
+    readonly id: string;
+    readonly role: UserRole;
+    readonly rbacRoleId: string | null;
+  }): Promise<Set<RealtimeTopic>> {
+    const allowed = new Set<RealtimeTopic>();
+    for (const topic of REALTIME_TOPICS) {
+      const { resource, action } = REALTIME_TOPIC_PERMISSION[topic];
+      // eslint-disable-next-line no-await-in-loop -- small fixed catalog; RBAC is cached per-admin.
+      if (await this.rbacService.hasPermission(admin, resource, action)) {
+        allowed.add(topic);
+      }
+    }
+    return allowed;
   }
 
   private deny(socket: Socket, code: number, reason: string): void {

@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { createHmac } from 'node:crypto';
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import { Inject } from '@nestjs/common';
 import { ConfigType } from '@nestjs/config';
 import { Prisma, SubscriptionStatus } from '@prisma/client';
@@ -133,19 +133,38 @@ export class RemnawaveWebhookService {
 
   /**
    * Validates the webhook signature (HMAC-SHA256).
-   * Returns true if valid or if no secret is configured (open mode).
+   *
+   * Fail-closed: a missing `REMNAWAVE_WEBHOOK_SECRET` rejects every request in
+   * production, so an unconfigured deployment can never accept unsigned,
+   * spoofable webhooks (which drive audit-log / realtime cards and can revive
+   * subscriptions). Only a NON-production runtime keeps the permissive
+   * "accept all" behaviour, and even then it emits a loud warning so the gap is
+   * obvious. The comparison uses `timingSafeEqual` to avoid leaking the
+   * expected digest through response-timing side channels.
    */
   public validateSignature(rawBody: string, signature: string | undefined): boolean {
     const secret = this.configuration.webhookSecret;
     if (!secret) {
-      // No secret configured — accept all (dev mode)
+      if (process.env.NODE_ENV === 'production') {
+        // Fail closed: never accept unsigned webhooks in production.
+        this.logger.error(
+          'Remnawave webhook rejected: REMNAWAVE_WEBHOOK_SECRET is not configured. ' +
+            'Set it to the panel\'s WEBHOOK_SECRET_HEADER value — unsigned webhooks are refused in production.',
+        );
+        return false;
+      }
+      // Non-production only: accept all so local dev works without a secret.
+      this.logger.warn(
+        'Remnawave webhook signature check DISABLED: no REMNAWAVE_WEBHOOK_SECRET configured (non-production). ' +
+          'All webhook payloads are accepted — do NOT run production this way.',
+      );
       return true;
     }
     if (!signature) {
       return false;
     }
     const expected = createHmac('sha256', secret).update(rawBody).digest('hex');
-    return signature === expected;
+    return timingSafeEqualHex(signature, expected);
   }
 
   /**
@@ -531,4 +550,28 @@ export interface WebhookEventSummary {
   readonly payload: Record<string, unknown>;
   readonly createdAt: string;
   readonly isProcessed: boolean;
+}
+
+/**
+ * Constant-time comparison of two hex-encoded digests. Falls back to a plain
+ * (still constant-time) `false` when the candidate is not a same-length hex
+ * string, so a malformed signature header can't throw or leak length via an
+ * exception path.
+ */
+function timingSafeEqualHex(candidate: string, expected: string): boolean {
+  if (candidate.length !== expected.length) {
+    return false;
+  }
+  let candidateBuf: Buffer;
+  let expectedBuf: Buffer;
+  try {
+    candidateBuf = Buffer.from(candidate, 'hex');
+    expectedBuf = Buffer.from(expected, 'hex');
+  } catch {
+    return false;
+  }
+  if (candidateBuf.length !== expectedBuf.length || candidateBuf.length === 0) {
+    return false;
+  }
+  return timingSafeEqual(candidateBuf, expectedBuf);
 }

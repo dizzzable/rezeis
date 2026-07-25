@@ -31,6 +31,7 @@ import {
 import {
   buildTrustedProxyValue,
   EXPRESS_TRUST_PROXY_SETTING,
+  parseTrustedProxyMode,
 } from '../src/common/http/trusted-proxy';
 
 describe('HTTP runtime middleware foundation', () => {
@@ -108,11 +109,23 @@ describe('HTTP runtime middleware foundation', () => {
     ]);
   });
 
-  it('keeps trusted proxy disabled by default and accepts only bounded named modes', () => {
+  it('maps bounded named proxy modes and treats an explicit "disabled" as no trust', () => {
     assert.equal(buildTrustedProxyValue('disabled'), false);
     assert.equal(buildTrustedProxyValue('loopback'), 'loopback');
     assert.equal(buildTrustedProxyValue('linklocal'), 'linklocal');
     assert.equal(buildTrustedProxyValue('uniquelocal'), 'uniquelocal');
+  });
+
+  it('defaults to uniquelocal (panel behind a local proxy) and only disables on explicit "disabled"', () => {
+    // Unset / unknown → uniquelocal so req.ip resolves the real client behind
+    // a local reverse proxy instead of collapsing to the proxy address.
+    assert.equal(parseTrustedProxyMode(undefined), 'uniquelocal');
+    assert.equal(parseTrustedProxyMode(''), 'uniquelocal');
+    assert.equal(parseTrustedProxyMode('garbage'), 'uniquelocal');
+    // Explicit opt-out for a directly internet-facing deployment.
+    assert.equal(parseTrustedProxyMode('disabled'), 'disabled');
+    assert.equal(parseTrustedProxyMode('loopback'), 'loopback');
+    assert.equal(parseTrustedProxyMode('UNIQUELOCAL'), 'uniquelocal');
   });
 
   it('registers no-robots, helmet, compression, and safe correlation middleware in order', () => {

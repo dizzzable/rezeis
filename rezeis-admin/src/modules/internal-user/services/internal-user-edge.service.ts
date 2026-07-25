@@ -15,6 +15,7 @@ import {
 } from '../../../common/services/system-events.service';
 import { AccessModeGuard } from '../../settings/services/access-mode-guard.service';
 import { SettingsService } from '../../settings/services/settings.service';
+import { ReferralManualAttachService } from '../../referrals/services/referral-manual-attach.service';
 import { InternalBootstrapUserInput } from '../interfaces/internal-user-bootstrap.interface';
 import {
   InternalUserAddOnEntitlementInterface,
@@ -54,6 +55,7 @@ export class InternalUserEdgeService {
     private readonly settingsService: SettingsService,
     private readonly accessModeGuard: AccessModeGuard,
     private readonly systemEventsService: SystemEventsService,
+    private readonly referralManualAttachService: ReferralManualAttachService,
   ) {}
 
   // ── Bootstrap / language ─────────────────────────────────────────────────
@@ -153,9 +155,69 @@ export class InternalUserEdgeService {
           source: 'telegram_bot',
         },
       );
+
+      // Bind the inviting user from a `ref_<token>` bot deep-link — ONLY on a
+      // brand-new bootstrap, mirroring the web register flow. Previously the
+      // bot's referral links (`t.me/<bot>?start=ref_<token>`) silently did
+      // nothing: `ref_` was never parsed and `referralCode` never reached
+      // here, so the referrer never got the reward. Best-effort: a bad /
+      // duplicate / self referral must never fail the /start bootstrap.
+      if (typeof input.referralCode === 'string' && input.referralCode.trim().length > 0) {
+        await this.consumeReferralCode(user.id, input.referralCode);
+      }
     }
 
     return mapInternalUserSession(user);
+  }
+
+  /**
+   * Resolves a referral code to a referrer and attaches the new user as their
+   * referral. Silently no-ops on self-referral, unknown codes, or an
+   * already-attributed user — bootstrap must never fail because of a bad or
+   * duplicate referral deep-link. Mirrors `WebAuthService.consumeReferralCode`.
+   */
+  private async consumeReferralCode(newUserId: string, rawCode: string): Promise<void> {
+    try {
+      const code = rawCode.trim();
+      if (code.length === 0) {
+        return;
+      }
+      const referrer = await this.resolveReferrer(code);
+      if (referrer === null || referrer.id === newUserId) {
+        return;
+      }
+      await this.referralManualAttachService.attachReferrerManually({
+        userId: newUserId,
+        referrerId: referrer.id,
+      });
+    } catch (error: unknown) {
+      // Duplicate attribution / self-referral throw BadRequest — expected,
+      // must not break the bootstrap response.
+      this.logger.warn(
+        `Bot referral consume skipped for user ${newUserId}: ${(error as Error).message}`,
+      );
+    }
+  }
+
+  /**
+   * Resolves a referral code into a referrer `User`. Accepts the canonical
+   * reiwa_id (CUID), a numeric telegramId, a username, or the user's
+   * `referralCode`. Returns `null` when nothing matches. Mirrors
+   * `WebAuthService.resolveReferrer` so the bot and web paths behave alike.
+   */
+  private async resolveReferrer(code: string): Promise<{ id: string } | null> {
+    const orConditions: Prisma.UserWhereInput[] = [
+      { id: code },
+      { username: code },
+      { referralCode: code },
+    ];
+    if (/^\d{1,19}$/.test(code)) {
+      orConditions.push({ telegramId: BigInt(code) });
+    }
+    return this.prismaService.user.findFirst({
+      where: { OR: orConditions },
+      select: { id: true },
+    });
   }
 
   public async updateLanguage(

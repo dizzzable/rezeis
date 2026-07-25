@@ -29,6 +29,13 @@ export interface ImportRunJobData {
    * into loyalty points on CREATE. Ignored by other sources.
    */
   readonly balanceToPoints?: { readonly enabled: boolean; readonly rate: number };
+  /**
+   * File imports only: after a successful import, enqueue a profile-sync for
+   * every subscription this import touched (UPDATE for linked profiles, CREATE
+   * for unlinked ones) so panel state is reconciled. OFF by default — imports
+   * normally only READ from the panel. See `ImportProcessor.enqueuePostImportSync`.
+   */
+  readonly syncToPanel?: boolean;
 }
 
 export interface ImportAssignPlanJobData {
@@ -79,6 +86,7 @@ export class ImportQueueService {
     fileBuffer: Buffer;
     originalFilename: string;
     balanceToPoints?: { enabled: boolean; rate: number };
+    syncToPanel?: boolean;
   }): Promise<{ importRecordId: string; jobId: string }> {
     // Stage file to disk
     await fsp.mkdir(this.stageDir, { recursive: true });
@@ -110,6 +118,7 @@ export class ImportQueueService {
         createdBy: input.createdBy,
         stagedFilePath,
         ...(input.balanceToPoints ? { balanceToPoints: input.balanceToPoints } : {}),
+        ...(input.syncToPanel ? { syncToPanel: true } : {}),
       } satisfies ImportRunJobData,
       {
         attempts: 1, // imports should not auto-retry (data mutation)

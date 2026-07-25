@@ -45,12 +45,26 @@ interface EmittedEvent {
   readonly metadata?: Record<string, unknown>;
 }
 
-function buildService(existing: { id: string } | null) {
+interface AttachCall {
+  readonly userId: string;
+  readonly referrerId: string;
+}
+
+function buildService(
+  existing: { id: string } | null,
+  options: {
+    readonly referrer?: { id: string } | null;
+    readonly attach?: (input: AttachCall) => Promise<void>;
+  } = {},
+) {
   const events: EmittedEvent[] = [];
+  const attachCalls: AttachCall[] = [];
   const prisma = {
     user: {
       findUnique: async () => existing,
       upsert: async () => fakeUser(),
+      // Referrer resolution (resolveReferrer): returns the configured referrer.
+      findFirst: async () => options.referrer ?? null,
     },
   };
   const systemEvents = {
@@ -58,13 +72,20 @@ function buildService(existing: { id: string } | null) {
       events.push({ type, category, metadata });
     },
   };
+  const referralManualAttach = {
+    attachReferrerManually: async (input: AttachCall) => {
+      attachCalls.push(input);
+      if (options.attach) await options.attach(input);
+    },
+  };
   const service = new InternalUserEdgeService(
     prisma as never,
     STUB_SETTINGS as never,
     STUB_GUARD as never,
     systemEvents as never,
+    referralManualAttach as never,
   );
-  return { service, events };
+  return { service, events, attachCalls };
 }
 
 describe('InternalUserEdgeService.bootstrapByTelegram registration event', () => {
@@ -93,5 +114,72 @@ describe('InternalUserEdgeService.bootstrapByTelegram registration event', () =>
       language: 'RU',
     });
     assert.equal(events.filter((e) => e.type === 'user.registered').length, 0);
+  });
+});
+
+describe('InternalUserEdgeService.bootstrapByTelegram referral binding', () => {
+  it('binds the referrer from a ref_ deep-link token on a brand-new user', async () => {
+    const { service, attachCalls } = buildService(null, { referrer: { id: 'referrer-1' } });
+    await service.bootstrapByTelegram({
+      telegramId: '1036459677',
+      username: 'Frodmaker',
+      name: 'Maylo',
+      language: 'RU',
+      referralCode: 'referrer-1',
+    });
+    assert.deepEqual(attachCalls, [{ userId: 'user-cuid-1', referrerId: 'referrer-1' }]);
+  });
+
+  it('does NOT bind a referrer for a returning user even with a referralCode', async () => {
+    const { service, attachCalls } = buildService(
+      { id: 'user-cuid-1' },
+      { referrer: { id: 'referrer-1' } },
+    );
+    await service.bootstrapByTelegram({
+      telegramId: '1036459677',
+      username: 'Frodmaker',
+      name: 'Maylo',
+      referralCode: 'referrer-1',
+    });
+    assert.equal(attachCalls.length, 0);
+  });
+
+  it('ignores an unknown referral code without failing bootstrap', async () => {
+    const { service, attachCalls } = buildService(null, { referrer: null });
+    const session = await service.bootstrapByTelegram({
+      telegramId: '1036459677',
+      username: 'Frodmaker',
+      name: 'Maylo',
+      referralCode: 'does-not-exist',
+    });
+    assert.equal(attachCalls.length, 0);
+    assert.equal(session.id, 'user-cuid-1');
+  });
+
+  it('never lets an attach failure break bootstrap (best-effort)', async () => {
+    const { service } = buildService(null, {
+      referrer: { id: 'referrer-1' },
+      attach: async () => {
+        throw new Error('User already has a referral attribution');
+      },
+    });
+    // Must resolve, not throw.
+    const session = await service.bootstrapByTelegram({
+      telegramId: '1036459677',
+      username: 'Frodmaker',
+      name: 'Maylo',
+      referralCode: 'referrer-1',
+    });
+    assert.equal(session.id, 'user-cuid-1');
+  });
+
+  it('does not attempt binding when no referralCode is supplied', async () => {
+    const { service, attachCalls } = buildService(null, { referrer: { id: 'referrer-1' } });
+    await service.bootstrapByTelegram({
+      telegramId: '1036459677',
+      username: 'Frodmaker',
+      name: 'Maylo',
+    });
+    assert.equal(attachCalls.length, 0);
   });
 });

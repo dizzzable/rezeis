@@ -232,6 +232,84 @@ export class ReferralQualificationService {
   }
 
   /**
+   * Reverses the referral qualification produced by a now-refunded /
+   * charged-back transaction. Only un-qualifies the edge that THIS transaction
+   * qualified (`qualifiedTransactionId === transactionId`), then revokes every
+   * reward on that edge:
+   *   - pending (not issued) → mark revoked (never pays out).
+   *   - already issued → reverse the effect (debit POINTS, roll back EXTRA_DAYS)
+   *     and mark revoked so it can't be reversed twice.
+   *
+   * Idempotent: an already-cleared qualification (or already-revoked reward) is
+   * skipped. All writes run in one transaction so the edge and its rewards
+   * reverse atomically.
+   */
+  public async reverseQualificationForTransaction(transactionId: string): Promise<void> {
+    try {
+      await this.prismaService.$transaction(async (tx) => {
+        const referral = await tx.referral.findFirst({
+          where: { qualifiedTransactionId: transactionId },
+          select: { id: true },
+        });
+        if (referral === null) return;
+
+        const rewards = await tx.referralReward.findMany({
+          where: { referralId: referral.id, revokedAt: null },
+          select: { id: true, userId: true, type: true, amount: true, isIssued: true },
+        });
+
+        const now = new Date();
+        for (const reward of rewards) {
+          if (reward.isIssued) {
+            // Reverse the applied effect before revoking.
+            if (reward.type === ReferralRewardType.POINTS) {
+              await tx.user.update({
+                where: { id: reward.userId },
+                data: { points: { decrement: reward.amount } },
+              });
+            } else if (reward.type === ReferralRewardType.EXTRA_DAYS) {
+              const user = await tx.user.findUnique({
+                where: { id: reward.userId },
+                select: { currentSubscriptionId: true },
+              });
+              if (user?.currentSubscriptionId) {
+                const subscription = await tx.subscription.findUnique({
+                  where: { id: user.currentSubscriptionId },
+                  select: { id: true, expiresAt: true },
+                });
+                if (subscription !== null && subscription.expiresAt !== null) {
+                  const rolledBack = new Date(subscription.expiresAt);
+                  rolledBack.setUTCDate(rolledBack.getUTCDate() - reward.amount);
+                  await tx.subscription.update({
+                    where: { id: subscription.id },
+                    data: { expiresAt: rolledBack },
+                  });
+                }
+              }
+            }
+          }
+          await tx.referralReward.update({
+            where: { id: reward.id },
+            data: { revokedAt: now, revokeReason: `Refund/chargeback on transaction ${transactionId}` },
+          });
+        }
+
+        // Clear the qualification so a legitimate later re-payment can re-qualify.
+        await tx.referral.update({
+          where: { id: referral.id },
+          data: { qualifiedAt: null, qualifiedTransactionId: null, qualifiedPurchaseChannel: null },
+        });
+      });
+    } catch (error: unknown) {
+      this.logger.error(
+        `Referral qualification reversal failed for transaction ${transactionId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  /**
    * Marks a reward as issued and applies the effect (points or extra days).
    */
   public async issueReward(rewardId: string): Promise<void> {

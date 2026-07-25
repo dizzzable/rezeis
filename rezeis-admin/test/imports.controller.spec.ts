@@ -119,11 +119,17 @@ describe('AdminImportsController', () => {
       jobId: 'job-remna',
       message: 'Remnawave sync enqueued',
     });
-    assert.deepStrictEqual(await controller.importFromAltshop(admin, file), {
+    assert.deepStrictEqual(await controller.importFromAltshop(admin, file, { syncToPanel: 'true' }), {
       importRecordId: 'import-file',
       jobId: 'job-file',
       message: 'Altshop import enqueued',
     });
+    // The opt-in "sync to panel after import" flag reaches the queue as a boolean.
+    const altshopCall = calls.find(
+      (c): c is [string, { syncToPanel?: unknown }] =>
+        Array.isArray(c) && c[0] === 'file' && (c[1] as { sourceType?: string }).sourceType === 'altshop',
+    );
+    assert.equal((altshopCall?.[1] as { syncToPanel?: unknown }).syncToPanel, true);
     assert.deepStrictEqual(await controller.assignPlanToImported(admin, { planId: 'plan-1', userIds: ['user-1'] }), {
       jobId: 'job-assign',
       message: 'Plan assignment enqueued',

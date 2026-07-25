@@ -30,13 +30,49 @@ export class PaymentWebhookInboxService {
     });
 
     if (existingEvent !== null) {
-      const updatedEvent = await this.prismaService.paymentWebhookEvent.update({
+      // Many gateways (HELEKET, CRYPTOMUS, PLATEGA, WATA, …) reuse the same
+      // provider event/invoice id across every status update of one payment
+      // (e.g. confirm_check → paid). Deduping purely on
+      // `(gatewayType, providerEventId)` would drop the FINAL `paid`
+      // notification as a duplicate of the earlier `pending` one — the
+      // payment would then hang PENDING and auto-cancel, losing real money.
+      //
+      // A collision is only a TRUE duplicate when the payload is byte-for-byte
+      // identical (same `payloadHash`). When the hash differs the provider has
+      // sent a genuinely new state, so we refresh the stored row and report it
+      // as NOT a duplicate — the ingress then re-enqueues reconciliation and
+      // the new status is applied (reconciliation is idempotent, same as a
+      // manual replay).
+      const isSamePayload =
+        existingEvent.payloadHash !== null &&
+        existingEvent.payloadHash === input.envelope.payloadHash;
+
+      if (isSamePayload) {
+        const updatedEvent = await this.prismaService.paymentWebhookEvent.update({
+          where: { id: existingEvent.id },
+          data: {
+            attempts: { increment: 1 },
+          } as never,
+        });
+        return { event: updatedEvent, duplicate: true };
+      }
+
+      const refreshedEvent = await this.prismaService.paymentWebhookEvent.update({
         where: { id: existingEvent.id },
         data: {
+          paymentId: input.envelope.paymentId,
+          eventStatus: input.envelope.eventStatus,
+          payloadHash: input.envelope.payloadHash,
+          rawPayload: input.envelope.rawPayload as Prisma.InputJsonValue,
+          status: PAYMENT_WEBHOOK_STATUS_RECEIVED,
+          lastError: null,
           attempts: { increment: 1 },
+          receivedAt: new Date(input.envelope.receivedAt),
+          lastTransitionAt: new Date(input.envelope.receivedAt),
+          processedAt: null,
         } as never,
       });
-      return { event: updatedEvent, duplicate: true };
+      return { event: refreshedEvent, duplicate: false };
     }
 
     try {

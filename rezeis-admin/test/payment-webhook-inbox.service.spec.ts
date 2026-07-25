@@ -23,17 +23,49 @@ describe('PaymentWebhookInboxService', () => {
     assert.equal(state.events.length, 1);
   });
 
-  it('treats repeated providerEventId as duplicate and increments attempts without recreating the event', async () => {
+  it('treats repeated providerEventId with the SAME payload as duplicate and increments attempts without recreating the event', async () => {
     const { service, state } = createService([
       createStoredEvent({ providerEventId: 'event-1', attempts: 1, status: PAYMENT_WEBHOOK_STATUS_ENQUEUED }),
     ]);
 
     const result = await service.recordReceived({
+      // Same providerEventId AND same payloadHash ('hash-1') → real duplicate.
       envelope: createEnvelope({ providerEventId: 'event-1' }),
     });
 
     assert.equal(result.duplicate, true);
     assert.equal(result.event.attempts, 2);
+    assert.equal(state.events.length, 1);
+  });
+
+  it('treats a repeated providerEventId with a CHANGED payload (status progressed) as NOT a duplicate and refreshes the stored event', async () => {
+    // Regression guard: gateways like HELEKET/CRYPTOMUS reuse one provider
+    // id across pending → paid. The final `paid` notification must NOT be
+    // swallowed as a duplicate, otherwise the payment hangs PENDING.
+    const { service, state } = createService([
+      createStoredEvent({ providerEventId: 'event-1', attempts: 1, status: PAYMENT_WEBHOOK_STATUS_ENQUEUED }),
+    ]);
+
+    const result = await service.recordReceived({
+      envelope: {
+        // Same gatewayType + providerEventId as the stored pending event,
+        // but a different payload (status progressed to paid).
+        gatewayType: PaymentGatewayType.YOOKASSA,
+        paymentId: 'payment-1',
+        providerEventId: 'event-1',
+        eventStatus: 'paid',
+        receivedAt: '2026-04-19T12:05:00.000Z',
+        payloadHash: 'hash-2-paid',
+        rawPayload: { object: { id: 'payment-1', status: 'paid' } },
+      },
+    });
+
+    assert.equal(result.duplicate, false);
+    assert.equal(result.event.eventStatus, 'paid');
+    assert.equal(result.event.payloadHash, 'hash-2-paid');
+    assert.equal(result.event.status, PAYMENT_WEBHOOK_STATUS_RECEIVED);
+    assert.equal(result.event.attempts, 2);
+    // Refreshed in place — no second row created.
     assert.equal(state.events.length, 1);
   });
 

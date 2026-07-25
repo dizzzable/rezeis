@@ -24,10 +24,20 @@ function normalizeHeaderValue(headerValue: string | string[] | undefined): strin
 }
 
 function resolveRemoteAddress(request: Request): string | null {
-  const forwardedForHeader: string | null = normalizeHeaderValue(request.headers['x-forwarded-for']);
-  if (forwardedForHeader) {
-    const forwardedAddress: string | undefined = forwardedForHeader.split(',')[0]?.trim();
-    return forwardedAddress ?? null;
+  // `req.ip` already honours `app.set('trust proxy', ADMIN_TRUST_PROXY)`:
+  // when the proxy chain is trusted Express derives the client IP from
+  // `X-Forwarded-For` itself; when it is NOT trusted the header is ignored.
+  // Parsing `X-Forwarded-For` here unconditionally (as we used to) let any
+  // client spoof the header — bypassing the login fail2ban counter and even
+  // auto-banning a victim's real IP. Mirror `blocked-ip.guard.ts::extractIp`.
+  if (typeof request.ip === 'string' && request.ip.length > 0) {
+    // Strip the IPv4-mapped IPv6 prefix Node injects for v4 clients
+    // (`::ffff:1.2.3.4` → `1.2.3.4`).
+    return request.ip.replace(/^::ffff:/, '');
   }
-  return request.ip || request.socket.remoteAddress || null;
+  const remote: string | undefined = request.socket.remoteAddress;
+  if (typeof remote === 'string' && remote.length > 0) {
+    return remote.replace(/^::ffff:/, '');
+  }
+  return null;
 }

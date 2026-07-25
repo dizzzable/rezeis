@@ -281,6 +281,7 @@ export class AltshopImporterService {
             sourceUser.telegram_id,
             subscription,
             panelLookup,
+            importRecordId ?? null,
           );
           if (outcome === 'created') counts.subscriptionsCreated += 1;
           if (outcome === 'updated') counts.subscriptionsUpdated += 1;
@@ -467,6 +468,7 @@ export class AltshopImporterService {
     expectedTelegramId: number,
     source: AltshopSubscription,
     panelLookup: PanelLookup,
+    importRecordId: string | null,
   ): Promise<SubscriptionOutcome> {
     const remnawaveId = nonEmpty(source.user_remna_id);
     if (!remnawaveId) return 'skipped';
@@ -497,7 +499,7 @@ export class AltshopImporterService {
       expiresAt: fresh ? fresh.expiresAt : this.parseOptionalDate(source.expire_at),
       internalSquads: fresh ? fresh.internalSquads : stringArray(source.internal_squads),
       externalSquad: fresh ? fresh.externalSquad : nonEmpty(source.external_squad),
-      planSnapshot: this.buildSubscriptionPlanSnapshot(source, existing?.planSnapshot),
+      planSnapshot: this.buildSubscriptionPlanSnapshot(source, importRecordId, existing?.planSnapshot),
     };
     if (existing) {
       await this.prismaService.subscription.update({ where: { id: existing.id }, data: subscriptionData });
@@ -515,7 +517,7 @@ export class AltshopImporterService {
         expiresAt: fresh ? fresh.expiresAt : this.parseOptionalDate(source.expire_at),
         internalSquads: fresh ? fresh.internalSquads : stringArray(source.internal_squads),
         externalSquad: fresh ? fresh.externalSquad : nonEmpty(source.external_squad),
-        planSnapshot: this.buildSubscriptionPlanSnapshot(source),
+        planSnapshot: this.buildSubscriptionPlanSnapshot(source, importRecordId),
         startedAt: this.parseOptionalDate(source.created_at) ?? new Date(),
       },
     });
@@ -881,6 +883,7 @@ export class AltshopImporterService {
 
   private buildSubscriptionPlanSnapshot(
     source: AltshopSubscription,
+    importRecordId: string | null,
     existingSnapshot?: Prisma.JsonValue,
   ): Prisma.InputJsonValue {
     const planId =
@@ -889,6 +892,9 @@ export class AltshopImporterService {
         : undefined;
     return jsonInput({
       importedFrom: 'altshop',
+      // Durable link back to the import (bulk plan re-assignment targets this
+      // instead of a fragile created-at time window). See BulkPlanAssignmentService.
+      ...(importRecordId ? { importRecordId } : {}),
       ...(planId ? { planId } : {}),
       tag: source.tag,
       trafficLimitStrategy: source.traffic_limit_strategy,

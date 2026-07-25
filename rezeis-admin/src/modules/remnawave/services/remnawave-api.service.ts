@@ -67,6 +67,38 @@ import {
 } from './remnawave-extended-mappers';
 
 /**
+ * Thrown by `updatePanelUser` when the panel reports the target profile does
+ * not exist (HTTP 404). Distinct from the generic `ServiceUnavailableException`
+ * (panel down / transient) so the profile-sync UPDATE path can react: a missing
+ * profile is re-provisioned (UPDATE → CREATE) instead of being retried forever.
+ *
+ * This happens for imported subscriptions whose `remnawaveId` came from a donor
+ * dump (e.g. STEALTHNET) but whose profile no longer exists in the currently
+ * connected panel.
+ */
+export class RemnawaveProfileNotFoundError extends Error {
+  public constructor(public readonly uuid: string) {
+    super(`Remnawave profile ${uuid} not found`);
+    this.name = 'RemnawaveProfileNotFoundError';
+  }
+}
+
+/**
+ * True only when a 404 body is Remnawave's own USER_NOT_FOUND error envelope
+ * (`code: 'A025'`, or the literal "User not found" message) — i.e. the panel
+ * itself says the profile is gone. A generic 404 from a proxy/gateway carries
+ * no such envelope and returns false, so it is treated as a transient outage
+ * rather than a missing profile (which would trigger a destructive detach).
+ */
+function isPanelUserNotFound(data: unknown): boolean {
+  if (data === null || typeof data !== 'object') return false;
+  const record = data as Record<string, unknown>;
+  if (record['errorCode'] === 'A025' || record['code'] === 'A025') return true;
+  const message = record['message'];
+  return typeof message === 'string' && message.toLowerCase().includes('user not found');
+}
+
+/**
  * Remnawave panel user — shape returned by the panel API.
  */
 export interface RemnawavePanelUser {
@@ -371,8 +403,48 @@ export class RemnawaveApiService {
     if (input.trafficLimitStrategy !== undefined) body['trafficLimitStrategy'] = input.trafficLimitStrategy;
     if (input.activeInternalSquads !== undefined) body['activeInternalSquads'] = input.activeInternalSquads;
     if (input.externalSquadUuid !== undefined) body['externalSquadUuid'] = input.externalSquadUuid;
-    const raw = await this.requestJsonWithBody<unknown>('patch', '/api/users', body);
-    return unwrapPanelUser(raw);
+
+    // Distinguish "profile does not exist" (404) from "panel unavailable"
+    // (transient). A generic `requestJsonWithBody` masks every failure as
+    // ServiceUnavailableException, which would make the sync job retry a
+    // permanently-missing profile forever. Surfacing 404 as a typed error lets
+    // the UPDATE handler re-provision the profile (UPDATE → CREATE). Same
+    // transport shape as `deletePanelUser` for its own 404 handling.
+    const baseUrl = this.getBaseUrl();
+    const token = this.configuration.token;
+    if (baseUrl === null || token === null) {
+      throw new ServiceUnavailableException('Remnawave integration is not configured');
+    }
+    try {
+      const response = await firstValueFrom(
+        this.httpService.request<unknown>({
+          method: 'patch',
+          url: '/api/users',
+          baseURL: baseUrl,
+          data: body,
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+            'x-forwarded-for': '127.0.0.1',
+            'x-forwarded-proto': 'https',
+          },
+        }),
+      );
+      return unwrapPanelUser(response.data);
+    } catch (err: unknown) {
+      // Only a 404 that carries Remnawave's own USER_NOT_FOUND envelope (code
+      // A025 / "User not found") means the profile is genuinely gone. A bare 404
+      // from a reverse proxy / gateway during a deploy, a wrong host, or an
+      // upstream with no healthy backends must NOT be read as "profile missing"
+      // — otherwise a host outage would mass-detach valid remnawaveIds. Those
+      // fall through to ServiceUnavailableException and retry harmlessly.
+      if (isAxiosError(err) && err.response?.status === 404 && isPanelUserNotFound(err.response.data)) {
+        this.logger.warn(`Remnawave PATCH /api/users: profile ${uuid} not found (404 A025)`);
+        throw new RemnawaveProfileNotFoundError(uuid);
+      }
+      this.logger.error(`Remnawave PATCH /api/users failed: ${(err as Error).message}`);
+      throw new ServiceUnavailableException('Remnawave integration is unavailable');
+    }
   }
 
   /**

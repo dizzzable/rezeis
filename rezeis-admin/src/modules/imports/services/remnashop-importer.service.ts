@@ -273,6 +273,7 @@ export class RemnashopImporterService {
             remnashopUser.telegram_id,
             sub,
             panelLookup,
+            importRecordId ?? null,
           );
           if (subResult === 'created') subscriptionsCreated += 1;
           if (subResult === 'updated') subscriptionsUpdated += 1;
@@ -465,6 +466,7 @@ export class RemnashopImporterService {
     expectedTelegramId: number,
     sub: RemnashopSubscription,
     panelLookup: PanelLookup,
+    importRecordId: string | null,
   ): Promise<'created' | 'updated' | 'skipped' | 'owner-mismatch' | 'panel-owner-mismatch'> {
     // If subscription has a Remnawave UUID, use it as the unique key
     if (sub.user_remna_id) {
@@ -511,7 +513,7 @@ export class RemnashopImporterService {
         expiresAt,
         internalSquads,
         externalSquad,
-        planSnapshot: this.buildSubscriptionPlanSnapshot(sub, existing?.planSnapshot),
+        planSnapshot: this.buildSubscriptionPlanSnapshot(sub, importRecordId, existing?.planSnapshot),
       };
 
       if (existing) {
@@ -535,7 +537,7 @@ export class RemnashopImporterService {
           startedAt: this.parseOptionalDate(sub.created_at) ?? new Date(),
           internalSquads,
           externalSquad,
-          planSnapshot: this.buildSubscriptionPlanSnapshot(sub),
+          planSnapshot: this.buildSubscriptionPlanSnapshot(sub, importRecordId),
         },
       });
 
@@ -747,6 +749,7 @@ export class RemnashopImporterService {
 
   private buildSubscriptionPlanSnapshot(
     sub: RemnashopSubscription,
+    importRecordId: string | null,
     existingSnapshot?: Prisma.JsonValue,
   ): Prisma.InputJsonValue {
     // A plan cloned or selected locally after a previous import is target
@@ -763,6 +766,8 @@ export class RemnashopImporterService {
 
     return {
       importedFrom: 'remnashop',
+      // Durable link for bulk plan re-assignment (see BulkPlanAssignmentService).
+      ...(importRecordId ? { importRecordId } : {}),
       ...(existingPlanId ? { planId: existingPlanId } : {}),
       tag: sub.tag,
       trafficLimitStrategy: sub.traffic_limit_strategy,
