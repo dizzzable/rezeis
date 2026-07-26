@@ -202,6 +202,7 @@ export class SubscriptionRenewalService {
           description: quote.targetPlan?.description ?? null,
           tag: quote.targetPlan?.tag ?? null,
           type: quote.targetPlan?.type ?? 'BOTH',
+          icon: quote.targetPlan?.icon ?? null,
           trafficLimit: quote.targetPlan?.trafficLimit ?? null,
           deviceLimit: quote.targetPlan?.deviceLimit ?? 0,
           trafficLimitStrategy: quote.targetPlan?.trafficLimitStrategy ?? 'NO_RESET',

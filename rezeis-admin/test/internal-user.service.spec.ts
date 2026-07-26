@@ -223,7 +223,7 @@ describe('InternalUserService', () => {
             userId: 'user-1',
             status: SubscriptionStatus.ACTIVE,
             isTrial: true,
-            planSnapshot: { name: 'Current', type: 'UNLIMITED', ignored: 'value' },
+            planSnapshot: { name: 'Current', type: 'UNLIMITED', icon: 'custom:brand-1', ignored: 'value' },
             trafficLimit: null,
             deviceLimit: 3,
             remnawaveId: null,
@@ -253,6 +253,8 @@ describe('InternalUserService', () => {
         id: null,
         name: 'Current',
         type: 'UNLIMITED',
+        // Icon frozen in the snapshot is surfaced to the cabinet card.
+        icon: 'custom:brand-1',
       },
       trafficLimit: null,
       trafficUsed: null,

@@ -38,6 +38,10 @@ export class PlanSnapshotSyncService {
     for (const subscription of subscriptions) {
       const planSnapshot =
         isJsonObject(subscription.planSnapshot) ? { ...subscription.planSnapshot } : {};
+      // NOTE: `icon` is deliberately NOT re-synced here. Labels and limits track
+      // the live plan, but the icon is frozen at purchase time — a customer's
+      // card must not change its glyph because the operator restyled the plan.
+      // Do not add `planSnapshot.icon = plan.icon` "for consistency".
       planSnapshot.name = plan.name;
       planSnapshot.tag = plan.tag;
       planSnapshot.type = plan.type;

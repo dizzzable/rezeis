@@ -351,6 +351,7 @@ export class QuestRewardService {
           name: true,
           tag: true,
           type: true,
+          icon: true,
           trafficLimit: true,
           deviceLimit: true,
           trafficLimitStrategy: true,

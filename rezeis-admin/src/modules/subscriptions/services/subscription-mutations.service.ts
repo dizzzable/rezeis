@@ -129,6 +129,9 @@ export class SubscriptionMutationsService {
         id: true,
         name: true,
         type: true,
+        // Frozen into `planSnapshot` below so the cabinet card can render the
+        // plan's own icon on trial subscriptions too (usually a user's first).
+        icon: true,
         trafficLimit: true,
         deviceLimit: true,
         trafficLimitStrategy: true,

@@ -262,6 +262,13 @@ function PartnerSettingsForm({ partner }: PartnerSettingsFormProps) {
                   </FormItem>
                 )}
               />
+              {/* Gates the PARTNER program specifically: read by
+                  `InternalPartnerController.isPartnerProgramAvailable`, which
+                  also blocks withdrawal requests. Distinct from the identically
+                  named referral setting — the two programs are separate.
+                  Must stay in the form: settings are PATCH-merged, so dropping
+                  the key would freeze whatever is stored today with no way to
+                  turn it off. */}
               <FormField
                 control={form.control}
                 name="invitedOnly"

@@ -353,6 +353,7 @@ function createSubscription(): InternalUserSubscriptionInterface {
       id: 'plan-1',
       name: 'Starter',
       type: PlanType.TRAFFIC,
+      icon: null,
     },
     trafficLimit: 10737418240,
     trafficUsed: 1.5,

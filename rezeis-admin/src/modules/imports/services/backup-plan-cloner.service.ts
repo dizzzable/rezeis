@@ -407,6 +407,10 @@ export class BackupPlanClonerService {
           name: targetPlan.name,
           tag: targetPlan.tag,
           type: targetPlan.type,
+          // Donor snapshots carry no icon, so the spread above cannot supply
+          // one — take it from the cloned plan or the card keeps falling back
+          // to the status glyph forever.
+          icon: targetPlan.icon,
           trafficLimit: targetPlan.trafficLimit,
           deviceLimit: targetPlan.deviceLimit,
           trafficLimitStrategy: targetPlan.trafficLimitStrategy,

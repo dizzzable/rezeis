@@ -119,6 +119,15 @@ export const EVENT_TYPES = {
   PAYMENT_CHECKOUT_CREATED: 'payment.checkout_created',
   PAYMENT_COMPLETED: 'payment.completed',
   PAYMENT_FAILED: 'payment.failed',
+  /**
+   * Money given back to the customer. Deliberately NOT `payment.failed`: that
+   * type can be bound to a customer email template, and a refund is not a
+   * failed payment — the customer would get "your payment did not go through"
+   * about their own refund.
+   */
+  PAYMENT_REFUNDED: 'payment.refunded',
+  /** Refund smaller than the captured amount — needs an operator decision. */
+  PAYMENT_REFUND_PARTIAL: 'payment.refund_partial',
   PAYMENT_EXPIRED: 'payment.expired',
   PAYMENT_WEBHOOK_RECEIVED: 'payment.webhook_received',
   PAYMENT_FULFILLMENT_RECOVERED: 'payment.fulfillment_recovered',
@@ -1477,6 +1486,8 @@ const EVENT_PRESENTATION: Record<string, { emoji: string; title: string }> = {
   'payment.checkout_created': { emoji: '🧾', title: 'Создан счёт на оплату' },
   'payment.completed': { emoji: '💰', title: 'Платёж получен' },
   'payment.failed': { emoji: '❌', title: 'Платёж не прошёл' },
+  'payment.refunded': { emoji: '↩️', title: 'Платёж возвращён' },
+  'payment.refund_partial': { emoji: '⚠️', title: 'Частичный возврат платежа' },
   'payment.expired': { emoji: '⌛', title: 'Счёт на оплату истёк' },
   'payment.webhook_received': { emoji: '📩', title: 'Вебхук платёжки' },
   'payment.fulfillment_recovered': { emoji: '🛟', title: 'Восстановлено исполнение платежа' },

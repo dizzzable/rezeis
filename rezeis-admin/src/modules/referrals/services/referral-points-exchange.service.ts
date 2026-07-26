@@ -364,6 +364,7 @@ export class ReferralPointsExchangeService {
             name: true,
             tag: true,
             type: true,
+            icon: true,
             trafficLimit: true,
             deviceLimit: true,
             trafficLimitStrategy: true,

@@ -1,5 +1,13 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { PaymentGatewayType, Prisma, Transaction, TransactionStatus } from '@prisma/client';
+import {
+  PaymentGatewayType,
+  Prisma,
+  SubscriptionStatus,
+  SyncAction,
+  SyncJobStatus,
+  Transaction,
+  TransactionStatus,
+} from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { EVENT_TYPES, SystemEventsService } from '../../../common/services/system-events.service';
@@ -60,7 +68,7 @@ export class PaymentReconciliationService {
         transaction.status === TransactionStatus.COMPLETED &&
         transaction.fulfilledAt !== null
       ) {
-        await this.handleRefundReversal(transaction, event.eventStatus);
+        await this.handleRefundReversal(transaction, event.eventStatus, event.rawPayload);
         await this.paymentWebhookInboxService.markProcessed(event.id);
         return;
       }
@@ -128,10 +136,22 @@ export class PaymentReconciliationService {
         );
       }
 
+      // Backfill the provider payment id when checkout never persisted it (the
+      // process can die between the provider's 200 and the follow-up update, and
+      // the payment webhook still fulfils the row because it keys on our own
+      // `metadata.paymentId`). A later `refund.succeeded` references ONLY the
+      // provider id, so without this the refund can't find the transaction and
+      // its payouts would never be reversed.
+      const gatewayIdBackfill = resolveYookassaGatewayIdBackfill(
+        transaction.gatewayType,
+        event.rawPayload,
+        transaction.gatewayId,
+      );
       await this.prismaService.transaction.update({
         where: { id: transaction.id },
         data: {
           status: nextStatus,
+          ...(gatewayIdBackfill !== null ? { gatewayId: gatewayIdBackfill } : {}),
           gatewayData: mergeGatewayData(transaction.gatewayData, {
             providerStatus: event.eventStatus,
             reconciledAt: new Date().toISOString(),
@@ -259,10 +279,72 @@ export class PaymentReconciliationService {
   private async handleRefundReversal(
     transaction: Transaction,
     providerStatus: string | null,
+    rawPayload?: Prisma.JsonValue,
   ): Promise<void> {
     const gatewayData = asRecord(transaction.gatewayData);
     if (typeof gatewayData?.['refundReversedAt'] === 'string') {
       // Already reversed — idempotent no-op on a replayed refund webhook.
+      return;
+    }
+
+    // A PARTIAL refund must not run the all-or-nothing reversal: that would
+    // wipe the partner's entire commission, un-qualify the referral and cancel
+    // the full tax income over what may be a small giveback. We can only tell
+    // the difference when the provider reports the refunded amount (YooKassa
+    // does); when it doesn't, the historical full-reversal behaviour stands.
+    // Refunds ACCUMULATE. Comparing only this event's amount would mean two
+    // 500-of-1000 refunds both land in the partial branch: the customer is made
+    // whole while the partner commission, referral qualification, tax income and
+    // subscription are never reversed. Track the running total in the same key
+    // the operator-initiated refund path writes (`refundedAmountTotal`) and
+    // reverse once it reaches the captured amount.
+    const refundedAmount = resolveRefundedAmount(rawPayload);
+    const paidAmount = Number(transaction.amount.toString());
+    const previouslyRefunded = readRefundedTotal(gatewayData);
+    const cumulativeRefunded =
+      refundedAmount === null ? null : previouslyRefunded + refundedAmount;
+    if (
+      cumulativeRefunded !== null &&
+      Number.isFinite(paidAmount) &&
+      paidAmount > 0 &&
+      cumulativeRefunded < paidAmount - 0.000001
+    ) {
+      this.logger.warn(
+        `Partial refund on transaction ${transaction.id} (${cumulativeRefunded} of ${paidAmount} ` +
+          `after this ${refundedAmount}) — side-effects left intact; operator review required`,
+      );
+      await this.prismaService.transaction.update({
+        where: { id: transaction.id },
+        data: {
+          gatewayData: mergeGatewayData(transaction.gatewayData, {
+            providerStatus,
+            partialRefundAt: new Date().toISOString(),
+            refundedAmountTotal: cumulativeRefunded.toFixed(2),
+            refundNeedsManualReview: true,
+          }) as Prisma.InputJsonValue,
+        },
+      });
+      this.systemEvents.warn(
+        EVENT_TYPES.PAYMENT_REFUND_PARTIAL,
+        'PAYMENT',
+        // Operator-facing detail lives in the metadata, not the message: an
+        // event type can be bound to a customer email template, whose subject
+        // is the message itself.
+        `Частичный возврат платежа: ${transaction.purchaseType}`,
+        {
+          userId: transaction.userId,
+          paymentId: transaction.paymentId,
+          gatewayType: transaction.gatewayType,
+          amount: transaction.amount.toString(),
+          refundedAmount: String(refundedAmount),
+          refundedAmountTotal: cumulativeRefunded.toFixed(2),
+          currency: transaction.currency,
+          providerStatus,
+          refund: true,
+          partial: true,
+          needsManualReview: true,
+        },
+      );
       return;
     }
 
@@ -314,6 +396,14 @@ export class PaymentReconciliationService {
       );
     }
 
+    // Revoke the access this payment paid for. Only a NEW purchase can be
+    // reversed mechanically — the subscription exists *because* of this
+    // transaction, so expiring it restores the pre-payment state exactly.
+    // RENEW/UPGRADE mutate a subscription that predates the payment (added days,
+    // switched plan), and un-mixing that from later activity is guesswork, so
+    // those are surfaced for manual handling instead of being half-undone.
+    const revocation = await this.revokeRefundedSubscriptionBestEffort(transaction);
+
     // Mark CANCELED + stamp the reversal so it is auditable and never repeats.
     await this.prismaService.transaction.update({
       where: { id: transaction.id },
@@ -322,12 +412,15 @@ export class PaymentReconciliationService {
         gatewayData: mergeGatewayData(transaction.gatewayData, {
           providerStatus,
           refundReversedAt: new Date().toISOString(),
+          subscriptionRevoked: revocation.revoked,
+          ...revocation.audit,
+          ...(revocation.needsManualReview ? { refundNeedsManualReview: true } : {}),
         }) as Prisma.InputJsonValue,
       },
     });
 
     this.systemEvents.warn(
-      EVENT_TYPES.PAYMENT_FAILED,
+      EVENT_TYPES.PAYMENT_REFUNDED,
       'PAYMENT',
       `Платёж возвращён (refund/chargeback): ${transaction.purchaseType}`,
       {
@@ -338,8 +431,133 @@ export class PaymentReconciliationService {
         currency: transaction.currency,
         providerStatus,
         refund: true,
+        subscriptionRevoked: revocation.revoked,
+        needsManualReview: revocation.needsManualReview,
       },
     );
+  }
+
+  /**
+   * Expires the subscription a refunded NEW purchase created and pushes the
+   * revocation to Remnawave, so a refunded customer stops consuming paid
+   * capacity. Never throws: the money-side reversal above already ran and must
+   * stay committed even if the panel sync can't be queued right now.
+   *
+   * Returns whether access was actually revoked, and whether an operator has to
+   * finish the job by hand (RENEW/UPGRADE, or a purchase with no subscription
+   * linked).
+   */
+  private async revokeRefundedSubscriptionBestEffort(transaction: Transaction): Promise<{
+    revoked: boolean;
+    needsManualReview: boolean;
+    audit: Record<string, unknown>;
+  }> {
+    if (transaction.purchaseType !== 'NEW' || transaction.subscriptionId === null) {
+      return { revoked: false, needsManualReview: true, audit: {} };
+    }
+    let jobId: string | null = null;
+    let revoked = false;
+    let audit: Record<string, unknown> = {};
+    try {
+      const now = new Date();
+      // A RENEW updates the SAME subscription row and the original NEW
+      // transaction keeps pointing at it forever. So a chargeback on a
+      // months-old first payment would expire a subscription the customer has
+      // since paid to extend. If any other completed payment touched this
+      // subscription, the "restore the pre-payment state" assumption no longer
+      // holds — hand it to an operator instead of burning paid-for access.
+      const otherPaidCount = await this.prismaService.transaction.count({
+        where: {
+          subscriptionId: transaction.subscriptionId,
+          status: TransactionStatus.COMPLETED,
+          id: { not: transaction.id },
+        },
+      });
+      if (otherPaidCount > 0) {
+        this.logger.warn(
+          `Refunded transaction ${transaction.id} targets subscription ${transaction.subscriptionId} ` +
+            `with ${otherPaidCount} other completed payment(s) — leaving access intact for manual review`,
+        );
+        return {
+          revoked: false,
+          needsManualReview: true,
+          audit: { refundRevocationSkippedReason: 'SUBSCRIPTION_HAS_OTHER_PAYMENTS' },
+        };
+      }
+
+      const subscription = await this.prismaService.subscription.findUnique({
+        where: { id: transaction.subscriptionId },
+        select: { id: true, remnawaveId: true, status: true, expiresAt: true },
+      });
+      if (subscription === null || subscription.status === SubscriptionStatus.DELETED) {
+        return { revoked: false, needsManualReview: false, audit: {} };
+      }
+      // An operator-imposed DISABLED (ban) outranks an automated refund
+      // revocation: overwriting it with EXPIRED would quietly lift the ban.
+      if (subscription.status === SubscriptionStatus.DISABLED) {
+        return {
+          revoked: false,
+          needsManualReview: true,
+          audit: { refundRevocationSkippedReason: 'SUBSCRIPTION_DISABLED' },
+        };
+      }
+      // Hand back what we are about to overwrite, so a disputed or erroneous
+      // refund can be undone by hand without guessing what the customer had.
+      // The caller folds this into its single `gatewayData` write — writing it
+      // here would be clobbered by that later merge (it starts from the stale
+      // in-memory `transaction.gatewayData`).
+      audit = {
+        refundRevokedSubscriptionId: subscription.id,
+        refundRevokedFromExpiresAt: subscription.expiresAt?.toISOString() ?? null,
+        refundRevokedFromStatus: subscription.status,
+        refundRevokedAt: now.toISOString(),
+      };
+      await this.prismaService.subscription.update({
+        where: { id: subscription.id },
+        data: { status: SubscriptionStatus.EXPIRED, expiresAt: now },
+      });
+      revoked = true;
+      if (subscription.remnawaveId !== null) {
+        const job = await this.prismaService.profileSyncJob.create({
+          data: {
+            subscriptionId: subscription.id,
+            action: SyncAction.UPDATE,
+            status: SyncJobStatus.PENDING,
+            payload: {
+              source: 'PAYMENT_REFUND',
+              // No `propagateStatus`: EXPIRED is a DERIVED local state, and the
+              // sync processor documents that derived states must never be
+              // pushed upstream (a rejected status would retry forever). The
+              // `expireAt: now` written above already cuts access.
+            } as Prisma.InputJsonObject,
+          },
+          select: { id: true },
+        });
+        jobId = job.id;
+      }
+    } catch (error: unknown) {
+      this.logger.error(
+        `Subscription revocation failed for refunded transaction ${transaction.id}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return { revoked, needsManualReview: true, audit };
+    }
+    // Enqueue OUTSIDE the try: the row is already EXPIRED and the job row
+    // exists, so a queue hiccup is recoverable by the profile-sync sweep — it
+    // must not be reported as "not revoked / needs manual review".
+    if (jobId !== null) {
+      try {
+        await this.profileSyncQueueService.enqueue(jobId);
+      } catch (error: unknown) {
+        this.logger.warn(
+          `Refund revocation sync enqueue failed for ${transaction.id} (sweep will recover): ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
+    return { revoked, needsManualReview: !revoked, audit };
   }
 
   private async disablePermissionRevokedAutopayBestEffort(
@@ -518,6 +736,67 @@ export class PaymentReconciliationService {
   }
 }
 
+/**
+ * Running total already refunded against a transaction, as recorded by earlier
+ * refund events and by operator-initiated refunds. Shared key so both writers
+ * agree; unreadable/absent values count as zero.
+ */
+function readRefundedTotal(gatewayData: Record<string, unknown> | null): number {
+  const raw = gatewayData?.['refundedAmountTotal'];
+  const parsed = typeof raw === 'string' ? Number(raw) : typeof raw === 'number' ? raw : Number.NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+/**
+ * Amount actually refunded, when the provider reports it on the refund event
+ * (YooKassa's refund object carries `amount: { value, currency }`). `null` when
+ * the payload doesn't say — callers then treat the refund as full, preserving
+ * the pre-existing behaviour for providers that only signal a status.
+ */
+function resolveRefundedAmount(rawPayload: Prisma.JsonValue | undefined): number | null {
+  if (rawPayload === undefined) return null;
+  const payload = asRecord(rawPayload);
+  if (payload === null) return null;
+  const refundObject = asRecord(payload['object']);
+  if (refundObject === null) return null;
+  const amount = asRecord(refundObject['amount']);
+  if (amount === null) return null;
+  const value = amount['value'];
+  const parsed =
+    typeof value === 'string' ? Number(value) : typeof value === 'number' ? value : Number.NaN;
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+/**
+ * Provider payment id to write back onto a YooKassa transaction whose
+ * `gatewayId` was never persisted (null, or still holding the checkout claim
+ * marker). Only `payment.*` notifications carry the payment object — a
+ * `refund.succeeded` object's `id` is the REFUND id and must never land here.
+ * Returns `null` when there is nothing to backfill.
+ */
+function resolveYookassaGatewayIdBackfill(
+  gatewayType: PaymentGatewayType,
+  rawPayload: Prisma.JsonValue,
+  currentGatewayId: string | null,
+): string | null {
+  if (gatewayType !== PaymentGatewayType.YOOKASSA) return null;
+  if (
+    typeof currentGatewayId === 'string' &&
+    currentGatewayId.length > 0 &&
+    !currentGatewayId.startsWith('__')
+  ) {
+    return null;
+  }
+  const payload = asRecord(rawPayload);
+  if (payload === null) return null;
+  const eventName = payload['event'];
+  if (typeof eventName !== 'string' || !eventName.startsWith('payment.')) return null;
+  const paymentObject = asRecord(payload['object']);
+  if (paymentObject === null) return null;
+  const providerId = paymentObject['id'];
+  return typeof providerId === 'string' && providerId.length > 0 ? providerId : null;
+}
+
 function mapProviderStatusToTransactionStatus(providerStatus: string | null): TransactionStatus {
   const normalizedStatus = String(providerStatus ?? '').toUpperCase();
   if (
@@ -532,7 +811,9 @@ function mapProviderStatusToTransactionStatus(providerStatus: string | null): Tr
   }
   if (
     normalizedStatus === 'REFUNDED_PAYMENT' ||
-    normalizedStatus === 'REFUNDED'
+    normalizedStatus === 'REFUNDED' ||
+    // Heleket / Cryptomus emit the raw `refund_paid` on a completed refund.
+    normalizedStatus === 'REFUND_PAID'
   ) {
     return TransactionStatus.CANCELED;
   }
@@ -560,6 +841,9 @@ function isRefundProviderStatus(providerStatus: string | null): boolean {
   return (
     normalized === 'REFUNDED' ||
     normalized === 'REFUNDED_PAYMENT' ||
+    // Heleket / Cryptomus completed-refund status (`refund_paid`). `refund_process`
+    // is intentionally NOT here — an in-flight refund must not reverse yet.
+    normalized === 'REFUND_PAID' ||
     normalized === 'CHARGEBACK' ||
     normalized === 'REVERSED'
   );

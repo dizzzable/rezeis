@@ -9,6 +9,7 @@ import { Currency, PaymentGatewayType, PurchaseChannel, PurchaseType, Transactio
 
 import { AdminJwtAuthGuard } from '../src/modules/auth/guards/admin-jwt-auth.guard';
 import { AdminPaymentTransactionsController } from '../src/modules/payments/controllers/admin-payment-transactions.controller';
+import { PaymentRefundService } from '../src/modules/payments/services/payment-refund.service';
 import { PaymentsTransactionsService } from '../src/modules/payments/services/payments-transactions.service';
 import { REQUIRE_PERMISSION_KEY } from '../src/modules/rbac/decorators/require-permission.decorator';
 import { RbacGuard } from '../src/modules/rbac/guards/rbac.guard';
@@ -25,6 +26,21 @@ describe('AdminPaymentTransactionsController', () => {
     );
     assertRoute(AdminPaymentTransactionsController.prototype.listTransactions, '/', RequestMethod.GET, 'view');
     assertRoute(AdminPaymentTransactionsController.prototype.createDraft, 'draft', RequestMethod.POST, 'create');
+    assertRoute(
+      AdminPaymentTransactionsController.prototype.getRefundEligibility,
+      ':transactionId/refund-eligibility',
+      RequestMethod.GET,
+      'view',
+    );
+    // Issuing money back is gated on its own permission, NOT on `edit` — a role
+    // that may correct transaction metadata must not inherit the ability to
+    // refund.
+    assertRoute(
+      AdminPaymentTransactionsController.prototype.refundTransaction,
+      ':transactionId/refund',
+      RequestMethod.POST,
+      'refund',
+    );
   });
 
   it('delegates current transaction list and draft endpoints', async () => {
@@ -59,7 +75,29 @@ describe('AdminPaymentTransactionsController', () => {
         };
       },
     } as unknown as PaymentsTransactionsService;
-    const controller = new AdminPaymentTransactionsController(transactionsService);
+    const refundService = {
+      getEligibility: async (transactionId: string) => {
+        calls.push(['refundEligibility', transactionId]);
+        return {
+          refundable: true,
+          reason: null,
+          refundableAmount: '8.00',
+          currency: 'USD',
+          refundedAmount: '0.00',
+        };
+      },
+      refundTransaction: async (input: { transactionId: string; amount: string | null }) => {
+        calls.push(['refund', input.transactionId, input.amount]);
+        return {
+          transactionId: input.transactionId,
+          refundId: 'refund-1',
+          amount: '8.00',
+          currency: 'USD',
+          providerStatus: 'succeeded',
+        };
+      },
+    } as unknown as PaymentRefundService;
+    const controller = new AdminPaymentTransactionsController(transactionsService, refundService);
     const query = {
       userSearch: 'alice',
       status: TransactionStatus.PENDING,
@@ -79,10 +117,24 @@ describe('AdminPaymentTransactionsController', () => {
 
     assert.deepStrictEqual(await controller.listTransactions(query), { items: [], total: 0 });
     assert.equal((await controller.createDraft(draft)).id, 'transaction-1');
+    assert.equal((await controller.getRefundEligibility('transaction-1')).refundable, true);
+    assert.equal(
+      (
+        await controller.refundTransaction(
+          'transaction-1',
+          { amount: '5.00', reason: 'duplicate charge' },
+          { id: 'admin-1' } as never,
+          { headers: {}, ip: '203.0.113.5', socket: { remoteAddress: '203.0.113.5' } } as never,
+        )
+      ).refundId,
+      'refund-1',
+    );
 
     assert.deepStrictEqual(calls, [
       ['list', query],
       ['createDraft', draft],
+      ['refundEligibility', 'transaction-1'],
+      ['refund', 'transaction-1', '5.00'],
     ]);
   });
 });

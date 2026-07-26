@@ -21,6 +21,12 @@ export interface InviteLimitsConfig {
   refillThresholdQualified: number | null;
   /** How many slots are added on each refill. */
   refillAmount: number | null;
+  /**
+   * VIP exemption: this user's invites ignore the TTL and slot caps entirely.
+   * Kept separate from `useGlobalSettings` so an operator can hand out the
+   * exemption without having to clone the whole limits block onto the user.
+   */
+  bypassInviteGate: boolean;
 }
 
 export interface InviteCapacitySnapshot {
@@ -41,6 +47,7 @@ const DEFAULT_LIMITS: InviteLimitsConfig = {
   initialSlots: null,
   refillThresholdQualified: null,
   refillAmount: null,
+  bypassInviteGate: false,
 };
 
 /**
@@ -93,6 +100,8 @@ export class ReferralInviteLimitsService {
       initialSlots: num('initialSlots', 'initial_slots'),
       refillThresholdQualified: num('refillThresholdQualified', 'refill_threshold_qualified'),
       refillAmount: num('refillAmount', 'refill_amount'),
+      // Global config has no bypass — it is a per-user exemption only.
+      bypassInviteGate: false,
     };
   }
 
@@ -129,13 +138,25 @@ export class ReferralInviteLimitsService {
     // invite overrides were saved but silently ignored at capacity/creation).
     const limits = await this.getEffectiveLimitsForUser(userId);
 
-    if (!limits.slotsEnabled || limits.initialSlots === null) {
+    // VIP exemption — unlimited capacity regardless of the global slot config.
+    if (limits.bypassInviteGate || !limits.slotsEnabled || limits.initialSlots === null) {
       return { totalSlots: null, usedSlots: 0, remainingSlots: null, canCreateInvite: true };
     }
 
     const [inviteCount, qualifiedCount] = await Promise.all([
+      // Only LIVE invites occupy a slot — matching what the setting promises
+      // ("limit how many *active* invite links each user can have"). Counting
+      // every invite ever created meant an expired or already-redeemed link
+      // held its slot forever: with a short TTL a user burned through their
+      // allowance just by opening the invite screen, and after N successful
+      // referrals they could never invite again even though refills were on.
       this.prismaService.referralInvite.count({
-        where: { inviterId: userId },
+        where: {
+          inviterId: userId,
+          revokedAt: null,
+          consumedAt: null,
+          OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+        },
       }),
       this.prismaService.referral.count({
         where: { referrerId: userId, qualifiedAt: { not: null } },
@@ -186,7 +207,8 @@ export class ReferralInviteLimitsService {
     }
     // Per-user TTL override applies here too (was global-only before).
     const limits = await this.getEffectiveLimitsForUser(userId);
-    if (!limits.linkTtlEnabled || limits.linkTtlSeconds === null) {
+    // VIP exemption — never expire this user's invites.
+    if (limits.bypassInviteGate || !limits.linkTtlEnabled || limits.linkTtlSeconds === null) {
       return null;
     }
     const expiresAt = new Date();
@@ -227,10 +249,15 @@ export function mergeUserInviteOverride(
   override: unknown,
 ): InviteLimitsConfig {
   const parsed = parseUserOverride(override);
+  // The bypass is deliberately read BEFORE the `useGlobalSettings` shortcut:
+  // an operator grants the exemption on its own, without wanting to fork the
+  // whole limits block for that user.
+  const bypassInviteGate = parsed?.bypassInviteGate === true;
   if (parsed === null || parsed.useGlobalSettings === true) {
-    return global;
+    return bypassInviteGate ? { ...global, bypassInviteGate } : global;
   }
   return {
+    bypassInviteGate,
     linkTtlEnabled:
       typeof parsed.linkTtlEnabled === 'boolean' ? parsed.linkTtlEnabled : global.linkTtlEnabled,
     linkTtlSeconds:

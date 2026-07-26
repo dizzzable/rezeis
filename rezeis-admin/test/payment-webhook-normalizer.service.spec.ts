@@ -69,6 +69,39 @@ describe('PaymentWebhookNormalizerService', () => {
     assert.equal(result.eventStatus, 'succeeded');
   });
 
+  it('normalizes a YOOKASSA refund.succeeded to REFUNDED, keyed by the original payment id', () => {
+    // The refund object carries `payment_id` (the original YooKassa payment id)
+    // and its own `status: succeeded` — but no `metadata.paymentId`. The
+    // normalizer must key by `payment_id` (matched via `gatewayId` downstream)
+    // and surface REFUNDED so the reconciler reverses the payment's side-effects
+    // instead of reading `succeeded` as a fresh completed payment.
+    const rawBody = Buffer.from(
+      JSON.stringify({
+        type: 'notification',
+        event: 'refund.succeeded',
+        object: {
+          id: 'yoo-refund-id',
+          status: 'succeeded',
+          payment_id: 'yoo-original-payment-id',
+          amount: { value: '100.00', currency: 'RUB' },
+        },
+      }),
+      'utf8',
+    );
+
+    const result = service.normalizeWebhook({
+      gatewayType: PaymentGatewayType.YOOKASSA,
+      rawBody,
+      headers: { 'x-forwarded-for': '185.71.76.1' },
+      clientIp: '185.71.76.1',
+      gatewaySettings: {},
+      verifySignature: true,
+    });
+
+    assert.equal(result.paymentId, 'yoo-original-payment-id');
+    assert.equal(result.eventStatus, 'REFUNDED');
+  });
+
   it('normalizes HELEKET webhooks with md5 signature verification', () => {
     const payload = {
       order_id: 'heleket-payment-id',

@@ -162,13 +162,27 @@ export class PaymentWebhookNormalizerService {
           ['invoice_payload', 'payload'],
           'PAYMENT_WEBHOOK_PAYMENT_ID_MISSING',
         );
-      case PaymentGatewayType.YOOKASSA:
+      case PaymentGatewayType.YOOKASSA: {
+        const yookassaObject = readNestedObject(input.rawPayload, 'object');
+        // Refund notification (`event: refund.succeeded`): `object` is a Refund,
+        // which carries `payment_id` (the original YooKassa payment id) but has
+        // no `metadata.paymentId`. Resolve to that gateway id — the reconciler's
+        // `findTransactionForEvent` falls back to a `gatewayId` lookup, so the
+        // original transaction is found and its side-effects get reversed.
+        if (isYookassaRefundEvent(input.rawPayload)) {
+          return readRequiredString(
+            yookassaObject,
+            ['payment_id', 'paymentId'],
+            'PAYMENT_WEBHOOK_PAYMENT_ID_MISSING',
+          );
+        }
         return readRequiredString(
-          readNestedObject(readNestedObject(input.rawPayload, 'object'), 'metadata'),
+          readNestedObject(yookassaObject, 'metadata'),
           // Primary path writes `paymentId`; adapter/legacy payloads used `payment_id`.
           ['paymentId', 'payment_id'],
           'PAYMENT_WEBHOOK_PAYMENT_ID_MISSING',
         );
+      }
       case PaymentGatewayType.HELEKET:
         return readRequiredString(
           input.rawPayload,
@@ -299,6 +313,12 @@ export class PaymentWebhookNormalizerService {
       case PaymentGatewayType.TELEGRAM_STARS:
         return resolveTelegramPaymentStatus(input.rawPayload);
       case PaymentGatewayType.YOOKASSA:
+        // A successful refund maps to our canonical REFUNDED status. The refund
+        // object's own `status` is `succeeded`, which would otherwise be read as
+        // a COMPLETED payment and silently skip the refund reversal.
+        if (isYookassaRefundEvent(input.rawPayload)) {
+          return 'REFUNDED';
+        }
         return readOptionalString(readNestedObject(input.rawPayload, 'object'), ['status']);
       case PaymentGatewayType.HELEKET:
         return readOptionalString(input.rawPayload, ['status', 'payment_status']);
@@ -783,6 +803,15 @@ function readRequiredString(
     throw new BadRequestException(errorCode);
   }
   return resolvedValue;
+}
+
+/**
+ * True for a YooKassa `refund.succeeded` notification. Refund notifications
+ * carry the Refund object (with `payment_id`) rather than a Payment object, so
+ * both the payment-id resolution and the event status branch specially.
+ */
+function isYookassaRefundEvent(rawPayload: Record<string, unknown>): boolean {
+  return readOptionalString(rawPayload, ['event']) === 'refund.succeeded';
 }
 
 function readOptionalString(

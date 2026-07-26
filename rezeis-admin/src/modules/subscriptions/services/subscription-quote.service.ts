@@ -699,6 +699,7 @@ function mapQuotePlan(plan: PlanRecord): SubscriptionQuotePlanInterface {
     description: plan.description,
     tag: plan.tag,
     type: plan.type,
+    icon: plan.icon,
     trafficLimit: plan.trafficLimit,
     deviceLimit: plan.deviceLimit,
     trafficLimitStrategy: plan.trafficLimitStrategy,

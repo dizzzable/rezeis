@@ -149,7 +149,12 @@ function isExpiredSubscription(subscription: Subscription, now: Date): boolean {
 
 export function mapSubscriptionPlanSnapshot(
   planSnapshot: Prisma.JsonValue,
-): { readonly id: string | null; readonly name: string | null; readonly type: PlanType | null } | null {
+): {
+  readonly id: string | null;
+  readonly name: string | null;
+  readonly type: PlanType | null;
+  readonly icon: string | null;
+} | null {
   if (!isJsonObject(planSnapshot)) {
     return null;
   }
@@ -157,6 +162,8 @@ export function mapSubscriptionPlanSnapshot(
     id: readOptionalString(planSnapshot, 'id'),
     name: readOptionalString(planSnapshot, 'name'),
     type: readOptionalPlanType(planSnapshot, 'type'),
+    // Older subscriptions created before icon was snapshotted → null (fallback).
+    icon: readOptionalString(planSnapshot, 'icon'),
   };
 }
 

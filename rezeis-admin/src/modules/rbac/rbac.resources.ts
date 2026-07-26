@@ -54,6 +54,11 @@ export const RBAC_ACTIONS = [
   /// Bulk raw registration PII export (CSV). Elevated vs `view_registration`
   /// because exports are high-blast-radius (full IP/UA/Referer/UTM dumps).
   'export_registration',
+  /// Issuing a payment refund to the customer through the provider. Separated
+  /// from `edit` because it moves real money out and cannot be undone — a role
+  /// that may correct transaction metadata must not implicitly be able to
+  /// refund. Granted to nobody by default; the operator assigns it explicitly.
+  'refund',
 ] as const;
 
 export type RbacAction = (typeof RBAC_ACTIONS)[number];
@@ -79,7 +84,7 @@ export const RBAC_RESOURCES: Readonly<Record<string, readonly RbacAction[]>> = {
     'export_registration',
   ],
   subscriptions: ['view', 'create', 'edit', 'delete'],
-  payments: ['view', 'create', 'edit', 'delete', 'export'],
+  payments: ['view', 'create', 'edit', 'delete', 'export', 'refund'],
   payment_gateways: ['view', 'edit'],
   payment_webhooks: ['view', 'resolve', 'run'],
   support_tickets: ['view', 'create', 'edit', 'delete', 'resolve', 'archive'],

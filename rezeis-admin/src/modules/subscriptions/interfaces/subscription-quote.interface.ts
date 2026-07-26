@@ -39,6 +39,12 @@ export interface SubscriptionQuotePlanInterface {
   readonly description: string | null;
   readonly tag: string | null;
   readonly type: string;
+  /**
+   * Plan icon identifier — carried through the quote so the renewal draft can
+   * freeze it into the subscription snapshot. `null` → the cabinet card falls
+   * back to a status glyph.
+   */
+  readonly icon: string | null;
   readonly trafficLimit: number | null;
   readonly deviceLimit: number;
   readonly trafficLimitStrategy: TrafficLimitStrategyValue;

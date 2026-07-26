@@ -4,6 +4,13 @@ interface InternalUserSubscriptionPlanInterface {
   readonly id: string | null;
   readonly name: string | null;
   readonly type: PlanType | null;
+  /**
+   * Plan icon identifier frozen in the subscription's `planSnapshot` (lucide
+   * key, `custom:<id>`, or a `:emoji:` shortcode). The cabinet renders it beside
+   * the plan name; `null` when the plan had no icon → the card falls back to a
+   * status glyph. Frozen at snapshot time, so it does not track later plan edits.
+   */
+  readonly icon: string | null;
 }
 
 /**

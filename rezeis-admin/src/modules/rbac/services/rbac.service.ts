@@ -87,10 +87,14 @@ const LEGACY_ADMIN_ALLOWED_RESOURCES: ReadonlySet<string> = new Set([
 /**
  * Even within allowed resources, these specific high-blast-radius actions
  * stay locked for a legacy bare-ADMIN. `users:export_registration` is a bulk
- * raw PII dump (elevated, S7).
+ * raw PII dump (elevated, S7). `payments:refund` moves real money out to a
+ * customer and cannot be undone — a legacy admin inherits every action of an
+ * allowed resource, so without this entry the refund button would silently
+ * appear for accounts that were never explicitly granted it.
  */
 const LEGACY_ADMIN_DENIED_TOKENS: ReadonlySet<string> = new Set([
   'users:export_registration',
+  'payments:refund',
 ]);
 
 interface PermissionCacheEntry {

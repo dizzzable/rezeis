@@ -201,6 +201,31 @@ describe('WebAuthService', () => {
     ]);
   });
 
+  it('accepts a bot-issued invite token on web registration and burns it', async () => {
+    // Parity with the bot path: a token shared from the Telegram invite hub has
+    // to attribute the inviter on the web sign-up too, and be spent exactly
+    // once (claimed before the attach, so two racing registrations can't both
+    // redeem it).
+    const prisma = createPrismaMock({
+      invitesByToken: new Map([['bot-token', { id: 'invite-1', inviterId: 'inviter-9' }]]),
+    });
+    const referralManualAttachService = createReferralManualAttachServiceMock();
+    const service = createService({ prisma, referralManualAttachService });
+
+    await service.register({
+      login: 'new-user',
+      password: 'plain-password',
+      referralCode: 'bot-token',
+    });
+
+    assert.deepStrictEqual(referralManualAttachService.attachCalls, [
+      { userId: 'user-1', referrerId: 'inviter-9' },
+    ]);
+    assert.equal(prisma.inviteConsumeCalls.length, 1);
+    assert.equal(prisma.inviteConsumeCalls[0].id, 'invite-1');
+    assert.ok(prisma.inviteConsumeCalls[0].consumedAt instanceof Date);
+  });
+
   it('checks login availability without creating an account', async () => {
     const prisma = createPrismaMock({ existingWebAccountByLoginNormalized: new Map([['taken', { id: 'existing' }]]) });
     const service = createService({ prisma });
@@ -601,6 +626,10 @@ interface CreatePrismaMockOptions {
   readonly recoveryAccounts?: Map<string, RecoveryAccountRecord>;
   readonly accountsByUserId?: Map<string, ChangePasswordAccountRecord>;
   readonly referrersByCode?: Map<string, { readonly id: string }>;
+  /** Live bot-issued invites, keyed by raw token. */
+  readonly invitesByToken?: Map<string, { readonly id: string; readonly inviterId: string }>;
+  /** A `Referral` edge already exists for the registering user. */
+  readonly referralEdgeExists?: boolean;
 }
 
 interface LoginAccountRecord {
@@ -639,6 +668,7 @@ interface PrismaMock extends PrismaService {
   readonly userEmailUpdateCalls: Array<{ readonly where: unknown; readonly data: unknown }>;
   readonly webAccountUpdates: Array<{ readonly where: unknown; readonly data: unknown }>;
   readonly referrerLookupCodes: string[];
+  readonly inviteConsumeCalls: Array<{ readonly id: string; readonly consumedAt: unknown }>;
   readonly transactionCallsCount: number;
 }
 
@@ -694,6 +724,7 @@ function createPrismaMock(options: CreatePrismaMockOptions = {}): PrismaMock {
   const userEmailUpdateCalls: Array<{ where: unknown; data: unknown }> = [];
   const webAccountUpdates: Array<{ where: unknown; data: unknown }> = [];
   const referrerLookupCodes: string[] = [];
+  const inviteConsumeCalls: Array<{ id: string; consumedAt: unknown }> = [];
   let transactionCallsCount = 0;
 
   const tx = {
@@ -751,6 +782,9 @@ function createPrismaMock(options: CreatePrismaMockOptions = {}): PrismaMock {
     get referrerLookupCodes() {
       return referrerLookupCodes;
     },
+    get inviteConsumeCalls() {
+      return inviteConsumeCalls;
+    },
     get transactionCallsCount() {
       return transactionCallsCount;
     },
@@ -759,7 +793,15 @@ function createPrismaMock(options: CreatePrismaMockOptions = {}): PrismaMock {
       return callback(tx);
     },
     user: {
-      findFirst: async (args: { readonly where: { readonly OR: Array<Record<string, unknown>> } }) => {
+      findFirst: async (args: {
+        readonly where: { readonly OR?: Array<Record<string, unknown>>; readonly id?: string };
+      }) => {
+        // `resolveReferrerWithBypass` looks the inviter up by id once an invite
+        // token matched; the plain code path still passes an OR list.
+        if (args.where.OR === undefined) {
+          const byId = args.where.id;
+          return byId === undefined ? null : (options.referrersByCode?.get(byId) ?? { id: byId });
+        }
         const codes = args.where.OR.flatMap((condition) => Object.values(condition).map(String));
         referrerLookupCodes.push(codes[0]);
         for (const code of codes) {
@@ -769,6 +811,23 @@ function createPrismaMock(options: CreatePrismaMockOptions = {}): PrismaMock {
           }
         }
         return null;
+      },
+    },
+    referral: {
+      // Checked before releasing a claim: an existing edge means the invite was
+      // genuinely spent even though a later attach step threw.
+      findUnique: async () => (options.referralEdgeExists === true ? { id: 'referral-1' } : null),
+    },
+    referralInvite: {
+      findFirst: async (args: { readonly where: { readonly token: string } }) => {
+        return options.invitesByToken?.get(args.where.token) ?? null;
+      },
+      updateMany: async (args: {
+        readonly where: { readonly id: string; readonly consumedAt?: unknown };
+        readonly data: { readonly consumedAt: unknown };
+      }) => {
+        inviteConsumeCalls.push({ id: args.where.id, consumedAt: args.data.consumedAt });
+        return { count: 1 };
       },
     },
     webAccount: {

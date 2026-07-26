@@ -1,4 +1,5 @@
 import { Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
+import { AccessMode } from '@prisma/client';
 
 import { InternalAdminAuthGuard } from '../../auth/guards/internal-admin-auth.guard';
 import { PrismaService } from '../../../common/prisma/prisma.service';
@@ -35,12 +36,21 @@ export class InternalReferralsController {
   @Get('summary')
   public async getSummary(@Param('userRef') userRef: string) {
     const user = await this.resolveUser(userRef);
-    if (!user) return { totalReferrals: 0, qualifiedReferrals: 0, pointsBalance: 0, programAvailable: false };
+    if (!user) {
+      return {
+        totalReferrals: 0,
+        qualifiedReferrals: 0,
+        pointsBalance: 0,
+        programAvailable: false,
+        referralCode: null,
+      };
+    }
 
-    const [totalReferrals, qualifiedReferrals, programAvailable] = await Promise.all([
+    const [totalReferrals, qualifiedReferrals, programAvailable, policy] = await Promise.all([
       this.prismaService.referral.count({ where: { referrerId: user.id } }),
       this.prismaService.referral.count({ where: { referrerId: user.id, qualifiedAt: { not: null } } }),
       this.isReferralProgramAvailable(user.id),
+      this.prismaService.settings.findUnique({ where: { id: 1 }, select: { accessMode: true } }),
     ]);
 
     return {
@@ -48,6 +58,16 @@ export class InternalReferralsController {
       qualifiedReferrals,
       pointsBalance: user.points,
       programAvailable,
+      // The user's permanent, reusable referral code — the same reiwa_id the
+      // cabinet already shares. `resolveReferrer` accepts it directly, so a
+      // link built from it never expires and never consumes an invite slot.
+      // Single-use `ReferralInvite` tokens stay reserved for the INVITED
+      // access mode, where one-shot admission is the whole point.
+      referralCode: user.id,
+      // Under INVITED only a real invite token admits a new sign-up, so the
+      // client must share a minted token rather than this permanent code —
+      // otherwise the friend who taps the link is turned away at registration.
+      admissionRequiresInvite: policy?.accessMode === AccessMode.INVITED,
     };
   }
 
@@ -115,7 +135,12 @@ export class InternalReferralsController {
   }
 
   /**
-   * Creates a new referral invite for the user, respecting slot limits.
+   * Returns the user's share invite, creating one only when they have no live
+   * invite yet. The bot calls this every time the invite hub is opened, so
+   * minting a fresh token per call both changed the user's share link under
+   * them and burned an invite slot per screen view (slots count every invite
+   * ever created) — a user with N slots was permanently locked out after N
+   * visits without a single friend joining.
    */
   @Post('invite')
   public async createInvite(@Param('userRef') userRef: string) {
@@ -129,6 +154,11 @@ export class InternalReferralsController {
       return { error: 'REFERRAL_PROGRAM_INVITED_ONLY' };
     }
 
+    const existing = await this.referralsService.findReusableInvite(user.id);
+    if (existing !== null) {
+      return { invite: existing };
+    }
+
     // Validate slot capacity
     await this.inviteLimitsService.validateCanCreateInvite(user.id);
 
@@ -137,7 +167,9 @@ export class InternalReferralsController {
 
     const result = await this.referralsService.createInvite({
       inviterId: user.id,
-      expiresAt: expiresAt?.toISOString(),
+      // `null` (not `undefined`) so "TTL disabled" / VIP bypass really means no
+      // expiry — an absent field would fall back to the default 30-day window.
+      expiresAt: expiresAt === null ? null : expiresAt.toISOString(),
     });
 
     return result;

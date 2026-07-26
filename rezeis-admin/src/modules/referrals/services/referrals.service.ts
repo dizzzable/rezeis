@@ -102,6 +102,34 @@ export class ReferralsService {
     return invites.map(mapReferralInvite);
   }
 
+  /**
+   * The user's current share invite, if they still have a usable one: not
+   * revoked, not yet consumed, and not expired. Returned to callers that want a
+   * stable share link (the bot's invite hub) instead of minting a new token —
+   * and therefore burning a slot — on every view. Newest first, so a user who
+   * accumulated several keeps sharing the most recent one.
+   */
+  public async findReusableInvite(inviterId: string): Promise<ReferralInviteInterface | null> {
+    const invite = await this.prismaService.referralInvite.findFirst({
+      where: {
+        inviterId,
+        revokedAt: null,
+        consumedAt: null,
+        // Skip operator-issued invites: those carry a `note` and are handed out
+        // deliberately (targeted / VIP). Reusing one as the user's public share
+        // link would leak the operator's note and spend a purpose-made invite.
+        note: null,
+        OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+      },
+      // Tie-break on id: two invites can share a millisecond, and an
+      // undetermined winner would make the share link flip between calls —
+      // exactly the instability this reuse exists to remove.
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      include: REFERRAL_INVITE_INCLUDE,
+    });
+    return invite === null ? null : mapReferralInvite(invite);
+  }
+
   public async createInvite(
     input: CreateReferralInviteDto,
   ): Promise<CreateReferralInviteResultInterface> {
@@ -190,6 +218,11 @@ export class ReferralsService {
 }
 
 function resolveInviteExpiry(input: CreateReferralInviteDto): Date | null {
+  // Explicit `null` = never expires. Distinct from an absent field, which
+  // still falls back to the default window below.
+  if (input.expiresAt === null) {
+    return null;
+  }
   if (input.expiresAt !== undefined) {
     return new Date(input.expiresAt);
   }

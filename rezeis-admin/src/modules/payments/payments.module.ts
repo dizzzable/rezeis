@@ -40,6 +40,7 @@ import { MoyNalogQueueService } from './services/moy-nalog-queue.service';
 import { PaymentSubscriptionMutationService } from './services/payment-subscription-mutation.service';
 import { PaymentsCheckoutService } from './services/payments-checkout.service';
 import { PaymentsRenewalCheckoutService } from './services/payments-renewal-checkout.service';
+import { PaymentRefundService } from './services/payment-refund.service';
 import { PaymentsTransactionsService } from './services/payments-transactions.service';
 import { AddOnPurchaseService } from './services/addon-purchase.service';
 import { AddOnFulfillmentRecoveryService } from './services/add-on-fulfillment-recovery.service';
@@ -81,6 +82,7 @@ import { PaymentMethodSetupService } from './services/payment-method-setup.servi
   providers: [
     PaymentGatewayRegistryService,
     PaymentsTransactionsService,
+    PaymentRefundService,
     PaymentsCheckoutService,
     PaymentsRenewalCheckoutService,
     AddOnPurchaseService,

@@ -24,7 +24,9 @@ export type RbacAction =
   | 'moderate'
   | 'merge'
   | 'view_registration'
-  | 'export_registration';
+  | 'export_registration'
+  /** Issuing a payment refund. Separate from `edit` — it moves real money. */
+  | 'refund';
 
 export interface RbacPermission {
   resource: string;

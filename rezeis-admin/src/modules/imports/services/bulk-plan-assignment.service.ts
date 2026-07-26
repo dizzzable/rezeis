@@ -181,6 +181,7 @@ export class BulkPlanAssignmentService {
       name: string;
       tag: string | null;
       type: string;
+      icon: string | null;
       trafficLimit: number | null;
       deviceLimit: number;
       trafficLimitStrategy: string;
@@ -220,6 +221,10 @@ export class BulkPlanAssignmentService {
         name: plan.name,
         tag: plan.tag,
         type: plan.type,
+        // This is a FULL snapshot replacement, so the icon has to be written
+        // here too — attaching a real plan to imported subscriptions is exactly
+        // the case where the card should stop showing the status-glyph fallback.
+        icon: plan.icon,
         trafficLimit: plan.trafficLimit,
         deviceLimit: plan.deviceLimit,
         trafficLimitStrategy: plan.trafficLimitStrategy,

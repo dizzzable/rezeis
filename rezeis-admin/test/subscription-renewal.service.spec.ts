@@ -64,6 +64,9 @@ describe('SubscriptionRenewalService.priceRenewalItems', () => {
       description: null,
       tag: null,
       type: 'BOTH',
+      // Frozen at draft time so fulfillment can restore it without re-reading
+      // the (mutable) plan row — a renewal must not drop the plan's glyph.
+      icon: 'icon-plan-s1',
       trafficLimit: 1024,
       deviceLimit: 1,
       trafficLimitStrategy: 'NO_RESET',
@@ -446,6 +449,7 @@ function createService(
     name: `Plan ${id}`,
     tag: null,
     type: 'BOTH',
+    icon: `icon-${id}`,
     trafficLimit: 1024,
     deviceLimit: 1,
     trafficLimitStrategy: 'NO_RESET',

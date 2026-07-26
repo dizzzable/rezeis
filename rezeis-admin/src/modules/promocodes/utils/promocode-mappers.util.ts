@@ -103,6 +103,7 @@ export function parsePromocodePlanSnapshot(
     tag: typeof candidate.tag === 'string' ? candidate.tag : null,
     description:
       typeof candidate.description === 'string' ? candidate.description : null,
+    icon: typeof candidate.icon === 'string' ? candidate.icon : null,
   };
 }
 

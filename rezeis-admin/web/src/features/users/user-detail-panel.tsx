@@ -32,6 +32,7 @@ import {
   Smartphone,
   Tag,
   Trash2,
+  Undo2,
   UserCheck,
   UserX,
   Wallet,
@@ -93,7 +94,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from '@/components/ui/dialog'
-import { PermissionGate } from '@/features/rbac'
+import { PermissionGate, useHasPermission } from '@/features/rbac'
 import { usersApi, type AccountMergePreview, type AccountMergeChoices, type UserOperation } from './users-api'
 
 interface UserDetailPanelProps {
@@ -2647,10 +2648,17 @@ function OperationCard({ operation, locale }: { operation: UserOperation; locale
           <span className="font-mono text-sm">{operation.payload.amount} {operation.payload.currency}</span>
         </div>
         <p className="font-mono text-xs text-muted-foreground">{operation.payload.paymentId ?? t('userDetailPanel.operations.noPaymentId')}</p>
-        <div className="flex flex-wrap gap-1.5 text-xs">
-          <Badge variant="secondary">{operation.payload.status}</Badge>
-          {operation.payload.gatewayType && <Badge variant="outline">{operation.payload.gatewayType}</Badge>}
-          {operation.payload.purchaseType && <Badge variant="outline">{operation.payload.purchaseType}</Badge>}
+        <div className="flex flex-wrap items-center justify-between gap-1.5 text-xs">
+          <div className="flex flex-wrap gap-1.5">
+            <Badge variant="secondary">{operation.payload.status}</Badge>
+            {operation.payload.gatewayType && <Badge variant="outline">{operation.payload.gatewayType}</Badge>}
+            {operation.payload.purchaseType && <Badge variant="outline">{operation.payload.purchaseType}</Badge>}
+          </div>
+          <RefundPaymentAction
+            transactionId={operation.id}
+            amount={operation.payload.amount}
+            currency={operation.payload.currency}
+          />
         </div>
       </div>
     )
@@ -2700,6 +2708,146 @@ function OperationCard({ operation, locale }: { operation: UserOperation; locale
         </p>
       )}
     </div>
+  )
+}
+
+/**
+ * Operator-issued refund for a single payment.
+ *
+ * Eligibility is resolved by the backend (gateway support, fulfilment state,
+ * remaining refundable balance) and only fetched once the operator actually
+ * holds `payments:refund` — so the common case costs no extra request. The
+ * money-side reversal is NOT done here: the provider's `refund.succeeded`
+ * webhook drives it, which is why the dialog says the refund was *requested*.
+ */
+function RefundPaymentAction({
+  transactionId,
+  amount,
+  currency,
+}: {
+  transactionId: string
+  amount: string
+  currency: string
+}) {
+  const { t } = useTranslation()
+  const queryClient = useQueryClient()
+  const canRefund = useHasPermission('payments', 'refund')
+  const [open, setOpen] = useState(false)
+  const [customAmount, setCustomAmount] = useState('')
+
+  const eligibility = useQuery({
+    queryKey: ['admin', 'payments', 'transactions', transactionId, 'refund-eligibility'],
+    queryFn: async () => {
+      const { data } = await api.get(`/admin/payments/transactions/${transactionId}/refund-eligibility`)
+      return data as {
+        refundable: boolean
+        reason: string | null
+        refundableAmount: string
+        currency: string
+        refundedAmount: string
+      }
+    },
+    enabled: canRefund && open,
+    staleTime: 0,
+  })
+
+  const refundMutation = useMutation({
+    mutationFn: async (payload: { amount?: string }) =>
+      api.post(`/admin/payments/transactions/${transactionId}/refund`, payload),
+    onSuccess: () => {
+      setOpen(false)
+      setCustomAmount('')
+      queryClient.invalidateQueries({ queryKey: ['admin', 'users'] })
+      queryClient.invalidateQueries({ queryKey: ['admin', 'payments'] })
+      toast.success(t('userDetailPanel.refund.requested'))
+    },
+    onError: (err) => toast.error(getErrorMessage(err, t('userDetailPanel.refund.failed'))),
+  })
+
+  if (!canRefund) return null
+
+  const blockedReason = eligibility.data && !eligibility.data.refundable ? eligibility.data.reason : null
+  // No `?? amount` fallback: if eligibility could not be read we must not
+  // present the full payment as refundable — a role holding `payments:refund`
+  // without `payments:view` gets a 403 here, and showing an armed form on a
+  // guessed amount is exactly how an unintended refund happens.
+  const maxAmount = eligibility.data?.refundableAmount ?? null
+  const blocked = blockedReason !== null || eligibility.isError || maxAmount === null
+
+  return (
+    <AlertDialog
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next)
+        // Reset on every close: a leftover partial amount from a cancelled
+        // attempt must not be submitted on the next open, where the labels
+        // describe a full refund.
+        if (!next) setCustomAmount('')
+      }}
+    >
+      <AlertDialogTrigger asChild>
+        <Button variant="ghost" size="sm" className="h-7 px-2 text-xs text-muted-foreground hover:text-destructive">
+          <Undo2 className="mr-1 h-3.5 w-3.5" />
+          {t('userDetailPanel.refund.action')}
+        </Button>
+      </AlertDialogTrigger>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>{t('userDetailPanel.refund.title')}</AlertDialogTitle>
+          <AlertDialogDescription>
+            {t('userDetailPanel.refund.description', { amount, currency })}
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+
+        {eligibility.isLoading ? (
+          <p className="text-sm text-muted-foreground">{t('userDetailPanel.refund.checking')}</p>
+        ) : eligibility.isError ? (
+          <p className="text-sm text-destructive">
+            {getErrorMessage(eligibility.error, t('userDetailPanel.refund.checkFailed'))}
+          </p>
+        ) : blockedReason ? (
+          <p className="text-sm text-destructive">
+            {t(`userDetailPanel.refund.reasons.${blockedReason}`, {
+              defaultValue: t('userDetailPanel.refund.reasons.default'),
+            })}
+          </p>
+        ) : (
+          <div className="space-y-2">
+            <label className="text-xs text-muted-foreground" htmlFor={`refund-amount-${transactionId}`}>
+              {t('userDetailPanel.refund.amountLabel', { max: maxAmount ?? amount, currency })}
+            </label>
+            <Input
+              id={`refund-amount-${transactionId}`}
+              inputMode="decimal"
+              placeholder={maxAmount ?? amount}
+              value={customAmount}
+              onChange={(e) => setCustomAmount(e.target.value)}
+            />
+            <p className="text-xs text-muted-foreground">{t('userDetailPanel.refund.partialHint')}</p>
+          </div>
+        )}
+
+        <AlertDialogFooter>
+          <AlertDialogCancel>{t('common.cancel', { defaultValue: 'Отмена' })}</AlertDialogCancel>
+          <AlertDialogAction
+            disabled={refundMutation.isPending || eligibility.isLoading || eligibility.isFetching || blocked}
+            className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            onClick={(e) => {
+              // Keep the dialog open until the request settles, so a provider
+              // error is shown in place instead of vanishing with the dialog.
+              e.preventDefault()
+              refundMutation.mutate(
+                customAmount.trim().length > 0 ? { amount: customAmount.trim() } : {},
+              )
+            }}
+          >
+            {refundMutation.isPending
+              ? t('userDetailPanel.refund.submitting')
+              : t('userDetailPanel.refund.confirm')}
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   )
 }
 

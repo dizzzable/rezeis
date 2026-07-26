@@ -94,7 +94,40 @@ describe('promocode mappers', () => {
       duration: 30,
       tag: 'recommended',
       description: 'Premium plan',
+      icon: null,
     });
+  });
+
+  it('carries the plan icon through the reward snapshot', () => {
+    // The parser rebuilds the snapshot from a whitelist, so anything it does not
+    // name is dropped. A promo / quest / referral-granted subscription must
+    // freeze the same icon a paid purchase would.
+    const withIcon = parsePromocodePlanSnapshot({
+      id: 'plan-1',
+      name: 'Premium',
+      type: 'BOTH',
+      trafficLimit: null,
+      deviceLimit: 0,
+      trafficLimitStrategy: 'NO_RESET',
+      internalSquads: [],
+      externalSquad: null,
+      icon: 'custom:abc123',
+    } as Prisma.JsonObject);
+
+    assert.equal(withIcon?.icon, 'custom:abc123');
+    // A non-string icon degrades to null instead of leaking into the snapshot.
+    const malformed = parsePromocodePlanSnapshot({
+      id: 'plan-1',
+      name: 'Premium',
+      type: 'BOTH',
+      trafficLimit: null,
+      deviceLimit: 0,
+      trafficLimitStrategy: 'NO_RESET',
+      internalSquads: [],
+      externalSquad: null,
+      icon: 42,
+    } as Prisma.JsonObject);
+    assert.equal(malformed?.icon, null);
   });
 
   it('returns null for malformed plan snapshot payloads', () => {

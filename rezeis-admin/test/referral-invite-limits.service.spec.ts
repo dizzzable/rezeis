@@ -46,6 +46,8 @@ describe('ReferralInviteLimitsService.getEffectiveLimits', () => {
       initialSlots: 5,
       refillThresholdQualified: null,
       refillAmount: null,
+      // Per-user VIP exemption; never set by the global config.
+      bypassInviteGate: false,
     });
   });
 
@@ -68,6 +70,7 @@ describe('ReferralInviteLimitsService.getEffectiveLimits', () => {
       initialSlots: 3,
       refillThresholdQualified: 2,
       refillAmount: 1,
+      bypassInviteGate: false,
     });
   });
 
@@ -81,6 +84,43 @@ describe('ReferralInviteLimitsService.getEffectiveLimits', () => {
       initialSlots: null,
       refillThresholdQualified: null,
       refillAmount: null,
+      bypassInviteGate: false,
+    });
+  });
+
+  it('exempts a bypassInviteGate user from TTL and slot caps', async () => {
+    // The flag was read and only logged — an operator granting the VIP
+    // exemption saw no effect. It must lift both caps, and it must work even
+    // when the user otherwise inherits the global settings.
+    const prisma = {
+      settings: {
+        findFirst: async () => ({
+          referralSettings: {
+            inviteLimits: {
+              linkTtlEnabled: true,
+              linkTtlSeconds: 3600,
+              slotsEnabled: true,
+              initialSlots: 1,
+            },
+          },
+        }),
+      },
+      user: {
+        findUnique: async () => ({
+          referralInviteSettings: { useGlobalSettings: true, bypassInviteGate: true },
+        }),
+      },
+      referralInvite: { count: async () => 99 },
+      referral: { count: async () => 0 },
+    };
+    const service = new ReferralInviteLimitsService(prisma as never);
+
+    assert.equal(await service.resolveInviteExpiry('user-1'), null);
+    assert.deepStrictEqual(await service.getCapacity('user-1'), {
+      totalSlots: null,
+      usedSlots: 0,
+      remainingSlots: null,
+      canCreateInvite: true,
     });
   });
 });

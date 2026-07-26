@@ -10,6 +10,12 @@ export interface PlanSnapshotInput {
   readonly name: string;
   readonly tag: string | null;
   readonly type: string;
+  /**
+   * Plan icon identifier (lucide key, `custom:<id>`, or a `:emoji:` shortcode),
+   * frozen at snapshot time so the cabinet's subscription card can show the
+   * plan's own icon. `null`/absent → the card falls back to a status glyph.
+   */
+  readonly icon: string | null;
   readonly trafficLimit: number | null;
   readonly deviceLimit: number;
   readonly trafficLimitStrategy: string;
@@ -30,6 +36,7 @@ export function buildPlanSnapshot(plan: PlanSnapshotInput): Prisma.InputJsonValu
     name: plan.name,
     tag: plan.tag,
     type: plan.type,
+    icon: plan.icon ?? null,
     trafficLimit: plan.trafficLimit,
     deviceLimit: plan.deviceLimit,
     trafficLimitStrategy: plan.trafficLimitStrategy,

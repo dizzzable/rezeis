@@ -100,6 +100,63 @@ describe('ReferralsService', () => {
     assert.deepStrictEqual(result.invite.expiresAt, '2026-05-01T00:00:00.000Z');
   });
 
+  it('honours an explicit null expiry instead of applying the default TTL', async () => {
+    // "TTL disabled" and the per-user VIP bypass both resolve to "no expiry".
+    // They reach this service as `expiresAt: null`; treating that like an
+    // absent field silently re-imposed a 30-day window on links meant to be
+    // permanent — so the bypass appeared to do nothing end-to-end.
+    let createArgs: unknown;
+    const service = new ReferralsService({
+      user: { findUnique: async () => ({ id: 'inviter-1' }) },
+      referralInvite: {
+        create: async (args: unknown) => {
+          createArgs = args;
+          return {
+            id: 'invite-1',
+            token: 'generated-token',
+            inviter: user('inviter-1'),
+            note: null,
+            expiresAt: null,
+            revokedAt: null,
+            consumedAt: null,
+            createdAt: new Date('2026-04-01T00:00:00.000Z'),
+          };
+        },
+      },
+    } as never);
+
+    const result = await service.createInvite({ inviterId: 'inviter-1', expiresAt: null });
+
+    assert.equal((createArgs as { data: { expiresAt: Date | null } }).data.expiresAt, null);
+    assert.equal(result.invite.expiresAt, null);
+  });
+
+  it('still applies the default TTL when no expiry is specified at all', async () => {
+    let createArgs: unknown;
+    const service = new ReferralsService({
+      user: { findUnique: async () => ({ id: 'inviter-1' }) },
+      referralInvite: {
+        create: async (args: unknown) => {
+          createArgs = args;
+          return {
+            id: 'invite-1',
+            token: 'generated-token',
+            inviter: user('inviter-1'),
+            note: null,
+            expiresAt: new Date('2026-05-01T00:00:00.000Z'),
+            revokedAt: null,
+            consumedAt: null,
+            createdAt: new Date('2026-04-01T00:00:00.000Z'),
+          };
+        },
+      },
+    } as never);
+
+    await service.createInvite({ inviterId: 'inviter-1' });
+
+    assert.ok((createArgs as { data: { expiresAt: Date | null } }).data.expiresAt instanceof Date);
+  });
+
   it('rejects invite creation for missing inviters', async () => {
     const service = new ReferralsService({
       user: { findUnique: async () => null },

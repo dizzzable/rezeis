@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
 import { useForm } from 'react-hook-form'
@@ -45,9 +46,10 @@ interface ReferralSettings {
   rewardType?: RewardType
   level1Reward?: number | string
   level2Reward?: number | string
-  level3Reward?: number | string
   pointsPerReferral?: number | string
-  qualifyOnPurchase?: boolean
+  /** Plans whose purchase qualifies a referral. Empty/absent = every plan. */
+  eligiblePlanIds?: string[]
+  eligible_plan_ids?: string[]
   inviteLinkTtlDays?: number | string
   inviteSlots?: number | string
   inviteLimits?: {
@@ -102,9 +104,7 @@ function ReferralSettingsForm({ referral }: ReferralSettingsFormProps) {
     rewardType: z.enum(['EXTRA_DAYS', 'POINTS']),
     level1Reward: numString,
     level2Reward: numString,
-    level3Reward: numString,
     pointsPerReferral: numString,
-    qualifyOnPurchase: z.boolean(),
     inviteLinkTtlDays: numString,
     inviteSlots: numString,
     inviteSlotsEnabled: z.boolean(),
@@ -129,6 +129,17 @@ function ReferralSettingsForm({ referral }: ReferralSettingsFormProps) {
   const inviteLimits = referral.inviteLimits ?? {}
   const pe = referral.pointsExchange ?? {}
 
+  // Which plans count towards a referral. Kept outside the form schema (like
+  // the promocode plan scope) because it is a chip multi-select, not an input.
+  // Reuses the `plans` query already loaded above for the gift-plan picker.
+  const [eligiblePlanIds, setEligiblePlanIds] = useState<string[]>(
+    referral.eligiblePlanIds ?? referral.eligible_plan_ids ?? [],
+  )
+  const toggleEligiblePlan = (planId: string) =>
+    setEligiblePlanIds((prev) =>
+      prev.includes(planId) ? prev.filter((id) => id !== planId) : [...prev, planId],
+    )
+
   const form = useForm<FormValues>({
     resolver: zodResolver(schema),
     defaultValues: {
@@ -138,9 +149,7 @@ function ReferralSettingsForm({ referral }: ReferralSettingsFormProps) {
       rewardType: referral.rewardType ?? 'EXTRA_DAYS',
       level1Reward: String(referral.level1Reward ?? referral.pointsPerReferral ?? '5'),
       level2Reward: referral.level2Reward != null ? String(referral.level2Reward) : '',
-      level3Reward: referral.level3Reward != null ? String(referral.level3Reward) : '',
       pointsPerReferral: referral.pointsPerReferral != null ? String(referral.pointsPerReferral) : '',
-      qualifyOnPurchase: referral.qualifyOnPurchase ?? true,
       inviteLinkTtlDays: inviteLimits.linkTtlSeconds
         ? String(Math.round(inviteLimits.linkTtlSeconds / 86400))
         : referral.inviteLinkTtlDays != null
@@ -185,11 +194,11 @@ function ReferralSettingsForm({ referral }: ReferralSettingsFormProps) {
         rewardType: values.rewardType,
         level1Reward: values.level1Reward ? parseInt(values.level1Reward, 10) : undefined,
         level2Reward: values.level2Reward ? parseInt(values.level2Reward, 10) : undefined,
-        level3Reward: values.level3Reward ? parseInt(values.level3Reward, 10) : undefined,
         pointsPerReferral: values.pointsPerReferral
           ? parseInt(values.pointsPerReferral, 10)
           : undefined,
-        qualifyOnPurchase: values.qualifyOnPurchase,
+        // Empty list = every plan qualifies (backend only filters when non-empty).
+        eligiblePlanIds,
         inviteLimits: {
           linkTtlEnabled: values.linkTtlEnabled,
           linkTtlSeconds: values.inviteLinkTtlDays ? parseInt(values.inviteLinkTtlDays, 10) * 86400 : null,
@@ -294,23 +303,11 @@ function ReferralSettingsForm({ referral }: ReferralSettingsFormProps) {
                   </FormItem>
                 )}
               />
-              <FormField
-                control={form.control}
-                name="qualifyOnPurchase"
-                render={({ field }) => (
-                  <FormItem className="flex items-center justify-between space-y-0">
-                    <div>
-                      <FormLabel>{t('referralSettingsPage.general.qualifyOnPurchase')}</FormLabel>
-                      <FormDescription className="text-xs">
-                        {t('referralSettingsPage.general.qualifyOnPurchaseHint')}
-                      </FormDescription>
-                    </div>
-                    <FormControl>
-                      <Switch checked={field.value} onCheckedChange={field.onChange} />
-                    </FormControl>
-                  </FormItem>
-                )}
-              />
+              {/* `qualifyOnPurchase` removed: a referral qualifies on the
+                  referred user's purchase unconditionally — there is no code
+                  path that reads this flag, so the switch only looked like a
+                  choice. Use "Accrual strategy" below to control WHICH purchase
+                  qualifies. */}
               <FormField
                 control={form.control}
                 name="accrualStrategy"
@@ -369,8 +366,12 @@ function ReferralSettingsForm({ referral }: ReferralSettingsFormProps) {
                   </FormItem>
                 )}
               />
-              <div className="grid gap-3 grid-cols-1 sm:grid-cols-3">
-                {(['level1Reward', 'level2Reward', 'level3Reward'] as const).map((name, idx) => (
+              {/* The referral program pays two levels (FIRST / SECOND). A third
+                  level exists only in the PARTNER program, which is a separate
+                  system with its own settings page — offering `level3Reward`
+                  here saved a value nothing would ever read. */}
+              <div className="grid gap-3 grid-cols-1 sm:grid-cols-2">
+                {(['level1Reward', 'level2Reward'] as const).map((name, idx) => (
                   <FormField
                     key={name}
                     control={form.control}
@@ -380,9 +381,7 @@ function ReferralSettingsForm({ referral }: ReferralSettingsFormProps) {
                         <FormLabel className="text-xs">
                           {idx === 0
                             ? t('referralSettingsPage.rewards.level1')
-                            : idx === 1
-                              ? t('referralSettingsPage.rewards.level2')
-                              : t('referralSettingsPage.rewards.level3')}
+                            : t('referralSettingsPage.rewards.level2')}
                         </FormLabel>
                         <FormControl>
                           <Input
@@ -402,6 +401,56 @@ function ReferralSettingsForm({ referral }: ReferralSettingsFormProps) {
                     )}
                   />
                 ))}
+              </div>
+
+              {/* Qualification scope. A referral is always earned by a PURCHASE
+                  — this narrows WHICH purchases count, which is the real
+                  anti-abuse lever (e.g. don't pay out for a trial or the
+                  cheapest plan). Empty selection = every plan qualifies. */}
+              <div className="space-y-2 pt-1">
+                <div className="flex items-center justify-between gap-2">
+                  <FormLabel className="text-xs">
+                    {t('referralSettingsPage.rewards.eligiblePlans')}
+                  </FormLabel>
+                  {eligiblePlanIds.length > 0 ? (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 px-2 text-xs"
+                      onClick={() => setEligiblePlanIds([])}
+                    >
+                      {t('referralSettingsPage.rewards.eligiblePlansClear')}
+                    </Button>
+                  ) : null}
+                </div>
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                  {(plans ?? [])
+                    .filter((p) => !p.isArchived)
+                    .map((p) => {
+                      const selected = eligiblePlanIds.includes(p.id)
+                      return (
+                        <Button
+                          key={p.id}
+                          type="button"
+                          variant={selected ? 'default' : 'outline'}
+                          size="sm"
+                          className="h-auto min-h-9 justify-start whitespace-normal py-1.5 text-left text-xs"
+                          onClick={() => toggleEligiblePlan(p.id)}
+                          aria-pressed={selected}
+                        >
+                          {p.name}
+                        </Button>
+                      )
+                    })}
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  {eligiblePlanIds.length === 0
+                    ? t('referralSettingsPage.rewards.eligiblePlansAllHint')
+                    : t('referralSettingsPage.rewards.eligiblePlansHint', {
+                        count: eligiblePlanIds.length,
+                      })}
+                </p>
               </div>
             </CardContent>
           </Card>

@@ -865,6 +865,7 @@ export class PaymentSubscriptionMutationService {
         description: input.plan.description,
         tag: input.plan.tag,
         type: input.plan.type,
+        icon: input.plan.icon ?? null,
         trafficLimit: input.plan.trafficLimit,
         deviceLimit: input.plan.deviceLimit,
         trafficLimitStrategy: input.plan.trafficLimitStrategy,
@@ -966,6 +967,7 @@ function buildPlanSnapshot(input: {
     description: input.purchasedPlan.description,
     tag: input.purchasedPlan.tag,
     type: input.purchasedPlan.type,
+    icon: input.purchasedPlan.icon ?? null,
     trafficLimit: input.purchasedPlan.trafficLimit,
     deviceLimit: input.purchasedPlan.deviceLimit,
     trafficLimitStrategy: input.purchasedPlan.trafficLimitStrategy,
@@ -997,6 +999,7 @@ function buildItemPlanSnapshot(input: {
     description: input.plan.description,
     tag: input.plan.tag,
     type: input.plan.type,
+    icon: input.plan.icon ?? null,
     trafficLimit: input.plan.trafficLimit,
     deviceLimit: input.plan.deviceLimit,
     trafficLimitStrategy: input.plan.trafficLimitStrategy,
@@ -1238,6 +1241,10 @@ function parsePaidRenewalPlanSnapshot(
     name: snapshot['name'] as string,
     description: typeof snapshot['description'] === 'string' ? snapshot['description'] : null,
     tag: typeof snapshot['tag'] === 'string' ? snapshot['tag'] : null,
+    // Carried through so the renewal keeps the plan icon frozen at draft time.
+    // Legacy drafts predate the field — absent → `null`, and the card falls
+    // back to the status glyph exactly as it did before.
+    icon: typeof snapshot['icon'] === 'string' ? snapshot['icon'] : null,
     type: snapshot['type'] as Plan['type'],
     trafficLimit: snapshot['trafficLimit'] as number | null,
     deviceLimit: snapshot['deviceLimit'] as number,

@@ -60,6 +60,23 @@ export class ReferralQualificationService {
 
     const settings = await this.loadReferralSettings();
 
+    // Operator kill-switch. `enabled` was parsed but never checked, so turning
+    // the referral program off in the panel kept qualifying referrals and
+    // handing out rewards. Only an explicit `false` disables — an absent flag
+    // stays enabled so existing installs are unaffected.
+    //
+    // Scope: this gates the REFERRAL program only. The partner program is a
+    // separate system with its own `partnerSettings.enabled`
+    // (`PartnerEarningsService.processPartnerEarning`) and its own payout path,
+    // and it must keep working when referral rewards are switched off — the two
+    // only share the invite-code mechanic, not the economics.
+    if (settings.enabled === false) {
+      this.logger.debug(
+        `Skipping qualification for ${transactionId}: referral program is disabled`,
+      );
+      return;
+    }
+
     // Extract planId from planSnapshot JSON
     const planSnapshot = readRecord(transaction.planSnapshot);
     const transactionPlanId = readOptionalString(planSnapshot, 'id');
@@ -179,6 +196,10 @@ export class ReferralQualificationService {
     readonly actorAdminId: string | null;
   }): Promise<{ readonly referralId: string; readonly qualified: boolean; readonly rewardsCreated: number }> {
     const settings = await this.loadReferralSettings();
+    // Deliberately NOT gated on `settings.enabled`. Turning the program off
+    // stops the automatic engine; an admin explicitly qualifying one referral
+    // by hand is a deliberate, audited act (`grantedBy` is stamped below) and
+    // is exactly how a support case gets settled after the program is paused.
     const result = await this.prismaService.$transaction(async (tx) => {
       await tx.$queryRaw(
         Prisma.sql`SELECT "id" FROM "referrals" WHERE "referred_id" = ${input.referredUserId} FOR UPDATE`,
@@ -516,8 +537,13 @@ function normalizeReferralSettings(raw: unknown): ReferralSettingsJson {
   const record = readRecord(raw);
   const result: ReferralSettingsJson = {};
 
-  if (typeof record['enabled'] === 'boolean') {
-    result.enabled = record['enabled'];
+  // The admin form falls back to a legacy `enable` key when reading, so an
+  // older install can hold the switch under that name. Now that this flag
+  // actually gates accrual, reading only `enabled` would show the toggle OFF
+  // in the panel while rewards kept being handed out.
+  const enabledFlag = record['enabled'] ?? record['enable'];
+  if (typeof enabledFlag === 'boolean') {
+    result.enabled = enabledFlag;
   }
 
   // Only `ON_FIRST_PAYMENT` changes behavior (it gates accrual to the referred

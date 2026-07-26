@@ -106,7 +106,11 @@ export class WebAuthService {
     // exempt from any future global TTL / slot caps applied at sign-up.
     if (policy.accessMode === 'INVITED' && hasInviteCode) {
       const referrer = await this.resolveReferrerWithBypass(input.referralCode!.trim());
-      if (referrer === null) {
+      // Admission requires a real single-use invite. A permanent sharing code
+      // still attributes the referral once registered, but it does not open the
+      // gate — otherwise every existing user is an unlimited invite generator
+      // and the whole INVITED mode is decorative.
+      if (referrer === null || !referrer.viaInvite) {
         throw new ForbiddenException({
           code: 'INVITE_REQUIRED',
           message: 'Referral code is invalid or has expired',
@@ -457,10 +461,31 @@ export class WebAuthService {
       if (referrer === null || referrer.id === newUserId) {
         return;
       }
-      await this.referralManualAttachService.attachReferrerManually({
-        userId: newUserId,
-        referrerId: referrer.id,
-      });
+      // Single-use invite: claim it atomically BEFORE attaching, so two
+      // concurrent registrations can't both spend the same token (which would
+      // give the inviter two referrals and two rewards). Mirrors the bot path.
+      const inviteId = referrer.inviteId;
+      const claimedAt = new Date();
+      if (inviteId !== undefined) {
+        const claimed = await this.prismaService.referralInvite.updateMany({
+          where: { id: inviteId, consumedAt: null },
+          data: { consumedAt: claimedAt },
+        });
+        if (claimed.count === 0) {
+          return;
+        }
+      }
+      try {
+        await this.referralManualAttachService.attachReferrerManually({
+          userId: newUserId,
+          referrerId: referrer.id,
+        });
+      } catch (attachError) {
+        if (inviteId !== undefined) {
+          await this.releaseInviteClaimBestEffort(inviteId, claimedAt, newUserId);
+        }
+        throw attachError;
+      }
     } catch (error) {
       // Duplicate attribution / self-referral throw BadRequest — these are
       // expected and must not break the registration response.
@@ -471,11 +496,83 @@ export class WebAuthService {
   }
 
   /**
-   * Resolves a referral code into a referrer `User`. Accepts the canonical
-   * reiwa_id (CUID), a numeric telegramId, a username, or the user's
-   * `referralCode`. Returns `null` when nothing matches.
+   * Resolves a referral code into a referrer `User`. Accepts a bot-issued
+   * single-use `ReferralInvite.token`, the canonical reiwa_id (CUID), a numeric
+   * telegramId, a username, or the user's `referralCode`. Returns `null` when
+   * nothing matches. Mirrors `InternalUserEdgeService.resolveReferrer` so a
+   * token shared from the bot works on the web sign-up too.
    */
-  private async resolveReferrer(code: string): Promise<{ id: string } | null> {
+  private async resolveReferrer(
+    code: string,
+  ): Promise<{ id: string; inviteId?: string } | null> {
+    // Invite tokens first — they live in the narrower, server-generated
+    // namespace, whereas `username` is user-controlled and could be squatted to
+    // hijack a live invite link.
+    const invite = await this.findLiveInvite(code);
+    if (invite !== null) {
+      const inviter = await this.prismaService.user.findFirst({
+        where: { id: invite.inviterId, isBlocked: false },
+        select: { id: true },
+      });
+      return inviter === null ? null : { id: inviter.id, inviteId: invite.id };
+    }
+    const user = await this.prismaService.user.findFirst({
+      // A blocked user keeps their link but stops attributing referrals.
+      where: { isBlocked: false, OR: this.buildReferrerConditions(code) },
+      select: { id: true },
+    });
+    return user === null ? null : { id: user.id };
+  }
+
+  /**
+   * Releases a single-use invite claim after a failed attach. Fenced on our own
+   * claim timestamp so a concurrent sign-up's claim is never reopened, and
+   * skipped entirely when the `Referral` edge already exists — the attach
+   * service creates that edge before its later steps, so a partial failure
+   * still means the invite was genuinely spent (releasing it would let a second
+   * user redeem it and pay the inviter twice).
+   */
+  private async releaseInviteClaimBestEffort(
+    inviteId: string,
+    claimedAt: Date,
+    newUserId: string,
+  ): Promise<void> {
+    try {
+      const attributed = await this.prismaService.referral.findUnique({
+        where: { referredId: newUserId },
+        select: { id: true },
+      });
+      if (attributed !== null) {
+        return;
+      }
+      await this.prismaService.referralInvite.updateMany({
+        where: { id: inviteId, consumedAt: claimedAt },
+        data: { consumedAt: null },
+      });
+    } catch (error) {
+      this.logger.warn(
+        `Failed to release referral invite claim ${inviteId}: ${(error as Error).message}`,
+      );
+    }
+  }
+
+  /** Live (unrevoked, unconsumed, unexpired) invite for a raw token. */
+  private async findLiveInvite(
+    token: string,
+  ): Promise<{ id: string; inviterId: string } | null> {
+    return this.prismaService.referralInvite.findFirst({
+      where: {
+        token,
+        revokedAt: null,
+        consumedAt: null,
+        OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+      },
+      select: { id: true, inviterId: true },
+    });
+  }
+
+  /** Shared `User` lookup shapes for a referral code. */
+  private buildReferrerConditions(code: string): Prisma.UserWhereInput[] {
     const orConditions: Prisma.UserWhereInput[] = [
       { id: code },
       { username: code },
@@ -484,10 +581,7 @@ export class WebAuthService {
     if (/^\d{1,19}$/.test(code)) {
       orConditions.push({ telegramId: BigInt(code) });
     }
-    return this.prismaService.user.findFirst({
-      where: { OR: orConditions },
-      select: { id: true },
-    });
+    return orConditions;
   }
 
   /**
@@ -499,21 +593,25 @@ export class WebAuthService {
    */
   private async resolveReferrerWithBypass(
     code: string,
-  ): Promise<{ id: string; bypass: boolean } | null> {
-    const orConditions: Prisma.UserWhereInput[] = [
-      { id: code },
-      { username: code },
-      { referralCode: code },
-    ];
-    if (/^\d{1,19}$/.test(code)) {
-      orConditions.push({ telegramId: BigInt(code) });
-    }
+  ): Promise<{ id: string; bypass: boolean; viaInvite: boolean } | null> {
+    // A bot-issued invite token must open the INVITED gate, and it is the ONLY
+    // thing that may: `viaInvite` lets the caller reject a permanent sharing
+    // code, which resolves to a referrer for attribution but must not act as an
+    // unlimited pass into an invite-only platform.
+    const invite = await this.findLiveInvite(code);
     const referrer = await this.prismaService.user.findFirst({
-      where: { OR: orConditions },
+      where:
+        invite !== null
+          ? { id: invite.inviterId, isBlocked: false }
+          : { isBlocked: false, OR: this.buildReferrerConditions(code) },
       select: { id: true, referralInviteSettings: true },
     });
     if (referrer === null) return null;
-    return { id: referrer.id, bypass: readInviteBypassFlag(referrer.referralInviteSettings) };
+    return {
+      id: referrer.id,
+      bypass: readInviteBypassFlag(referrer.referralInviteSettings),
+      viaInvite: invite !== null,
+    };
   }
 
   /**

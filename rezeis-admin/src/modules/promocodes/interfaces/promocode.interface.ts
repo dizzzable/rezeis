@@ -23,6 +23,12 @@ export interface PromocodePlanSnapshotInterface {
   readonly duration?: number;
   readonly tag?: string | null;
   readonly description?: string | null;
+  /**
+   * Plan icon identifier, carried so a promo/quest/referral-granted
+   * subscription freezes the same icon a paid purchase would. Optional —
+   * promocodes stored before the field existed simply have no icon.
+   */
+  readonly icon?: string | null;
 }
 
 export interface PromocodeInterface {

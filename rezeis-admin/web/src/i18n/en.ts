@@ -1073,9 +1073,13 @@ export const en = {
       points: 'Points',
       level1: 'Level 1 reward',
       level2: 'Level 2 reward',
-      level3: 'Level 3 reward',
       unitDays: 'days',
       unitPoints: 'points',
+      eligiblePlans: 'Plans that qualify a referral',
+      eligiblePlansClear: 'Clear',
+      eligiblePlansAllHint:
+        'Nothing selected — buying any plan qualifies the referral. Pick plans to stop paying out for trials or the cheapest tier.',
+      eligiblePlansHint: '{{count}} plan(s) selected. Buying any other plan does not qualify.',
     },
     inviteLimits: {
       title: 'Invite Link Limits',

@@ -154,6 +154,11 @@ describe('Referral controllers', () => {
       qualifiedReferrals: 2,
       pointsBalance: 250,
       programAvailable: true,
+      // The permanent, reusable share code the bot and cabinet both build their
+      // referral link from — NOT a single-use invite token.
+      referralCode: 'user-1',
+      // PUBLIC platform: the permanent code admits sign-ups, so no token needed.
+      admissionRequiresInvite: false,
     });
   });
 });

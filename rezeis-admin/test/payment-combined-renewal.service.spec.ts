@@ -189,6 +189,53 @@ describe('PaymentSubscriptionMutationService — combined renewal', () => {
     assert.ok(env.committedItems.get('it-unlimited')!.appliedAt !== null);
   });
 
+  it('carries the frozen plan icon from the paid draft into the renewed snapshot', async () => {
+    // Regression: the draft snapshot is preferred over the live plan row, so a
+    // field the draft parser drops is silently reset. `icon` used to be dropped,
+    // which wiped the plan glyph off the cabinet card on every renewal.
+    const env = createEnv({
+      subs: [{
+        id: 'sub-icon',
+        expiresAt: new Date(Date.now() + 10 * DAY_MS),
+        remnawaveId: 'rw',
+        planSnapshot: { id: 'plan-1', icon: 'zap' },
+      }],
+      items: [{
+        id: 'it-icon',
+        subscriptionId: 'sub-icon',
+        planId: 'plan-1',
+        durationDays: 30,
+        appliedAt: null,
+        planSnapshot: { ...validPlanSnapshot('plan-1', 30), icon: 'zap' },
+      }],
+    });
+
+    await env.service.applyCompletedTransaction(env.transaction as never);
+
+    const renewed = env.committedSubs.get('sub-icon')!;
+    assert.equal((renewed.planSnapshot as { icon?: unknown }).icon, 'zap');
+  });
+
+  it('freezes the icon as null when the paid draft predates the field', async () => {
+    const env = createEnv({
+      subs: [{ id: 'sub-no-icon', expiresAt: new Date(Date.now() + 10 * DAY_MS), remnawaveId: 'rw' }],
+      items: [{
+        id: 'it-no-icon',
+        subscriptionId: 'sub-no-icon',
+        planId: 'plan-1',
+        durationDays: 30,
+        appliedAt: null,
+        planSnapshot: validPlanSnapshot('plan-1', 30),
+      }],
+    });
+
+    await env.service.applyCompletedTransaction(env.transaction as never);
+
+    // Explicit null (not `undefined`): the reader maps a missing key to null
+    // anyway, but the written shape must stay stable across all snapshot paths.
+    assert.equal((env.committedSubs.get('sub-no-icon')!.planSnapshot as { icon?: unknown }).icon, null);
+  });
+
   it('fails closed on paid snapshot gateway, plan type, or nullable-shape drift', async () => {
     const missingDescription = validPlanSnapshot('plan-1', 30);
     delete missingDescription['description'];
