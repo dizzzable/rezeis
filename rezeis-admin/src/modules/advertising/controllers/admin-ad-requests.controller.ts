@@ -53,9 +53,15 @@ export class AdminAdRequestsController {
     @CurrentAdmin() admin: CurrentAdminInterface,
     @Req() req: Request,
     @Param('id') id: string,
+    @Body() input: ModerateRequestDto,
   ) {
-    const request = await this.requestService.reject(id, admin.id);
-    await this.audit(admin, req, 'advertising.request.rejected', { requestId: id });
+    // The reason reaches the partner with the notification. Rejecting in silence
+    // left them with a status change and no way to learn what to change.
+    const request = await this.requestService.reject(id, admin.id, input.notes ?? null);
+    await this.audit(admin, req, 'advertising.request.rejected', {
+      requestId: id,
+      hasReason: (input.notes ?? '').trim().length > 0,
+    });
     return request;
   }
 

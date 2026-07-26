@@ -20,6 +20,7 @@ function createService(state: MockState) {
     userCreated: 0,
     webAccountCreated: 0,
     webAccountUpdated: [] as Array<Record<string, unknown>>,
+    snapshotChannels: [] as string[],
     events: 0,
   };
 
@@ -111,6 +112,14 @@ function createService(state: MockState) {
     passwordHashService as never,
     systemEventsService as never,
     emailDeliveryService as never,
+    // A social signup now stamps `registrationChannel: 'oauth'` — without it an
+    // operator could not tell a Google/Yandex/Telegram registration from an
+    // imported row.
+    {
+      captureBestEffort: async (input: { channel: string }) => {
+        calls.snapshotChannels.push(input.channel);
+      },
+    } as never,
     adapter,
     adapter,
     adapter,
@@ -203,11 +212,16 @@ describe('ExternalAuthService.resolve', () => {
   it('creates a shell + finish_setup for a brand-new identity', async () => {
     const { service, calls } = createService({ linkByIdentity: null, accountByEmail: null });
     const result = await service.resolve(profile());
-    assert.deepStrictEqual(result, { action: 'finish_setup', userId: 'new-user-1' });
+    // `created` distinguishes this branch from an account that already existed
+    // and merely never finished setup — reiwa claims advertising attribution only
+    // for the former, so keying on the action alone would credit a placement with
+    // a months-old customer.
+    assert.deepStrictEqual(result, { action: 'finish_setup', userId: 'new-user-1', created: true });
     assert.equal(calls.userCreated, 1);
     assert.equal(calls.webAccountCreated, 1);
     assert.equal(calls.linkCreated, 1);
     assert.equal(calls.events, 1);
+    assert.deepEqual(calls.snapshotChannels, ['oauth'], 'a social signup is stamped as such');
   });
 
   it('creates a shell for a brand-new Telegram user (no link, no telegram match) → finish_setup', async () => {

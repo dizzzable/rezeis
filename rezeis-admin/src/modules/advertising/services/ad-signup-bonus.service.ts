@@ -9,6 +9,14 @@ const DEFAULT_TRIAL_DAYS = 3;
 const DEFAULT_TARIFF_DAYS = 30;
 
 /**
+ * How recently an account must have been created to count as a signup for the
+ * purposes of an advertising bonus. Generous enough to cover a click that lands
+ * before registration finishes (the web funnel attributes at register time) and
+ * any clock skew, tight enough that a dormant account cannot farm the offer.
+ */
+const NEW_ACCOUNT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+/**
  * Grants a placement's optional signup bonus to a brand-new user, reusing the
  * existing `SubscriptionMutationsService.grantTrial` path (creates the local
  * subscription + enqueues Remnawave provisioning). Best-effort and granted at
@@ -42,6 +50,28 @@ export class AdSignupBonusService {
         where: { userId: input.userId, status: { not: 'DELETED' } },
       });
       if (existing > 0) {
+        return;
+      }
+
+      // "No subscription" is not the same as "new". The tracking code is printed
+      // in the advertisement itself, so any long-standing account whose
+      // subscription lapsed could open the link and collect a free paid plan —
+      // and each one also inflated the placement's registrations, dragging CAC
+      // down and ROAS up. Bound the grant to accounts created around the click.
+      const user = await this.prismaService.user.findUnique({
+        where: { id: input.userId },
+        select: { createdAt: true },
+      });
+      if (user === null) {
+        return;
+      }
+      const accountAgeMs = Date.now() - user.createdAt.getTime();
+      if (accountAgeMs > NEW_ACCOUNT_MAX_AGE_MS) {
+        this.logger.log(
+          `Signup bonus skipped for user ${input.userId}: account is ${Math.round(
+            accountAgeMs / (24 * 60 * 60 * 1000),
+          )} days old, not a new signup`,
+        );
         return;
       }
 

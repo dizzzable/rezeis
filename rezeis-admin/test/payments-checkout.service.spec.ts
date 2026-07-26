@@ -175,6 +175,10 @@ describe('PaymentsCheckoutService', () => {
     assert.equal(state.providerCreateCalls, 0)
     assert.equal(state.applyCompletedCalls, 1)
     assert.equal(state.enqueueCalls, 1)
+    // Deliberately no post-fulfilment hooks: no money moved. A 0-value
+    // AdConversion would consume this user's unique conversion slot and hide
+    // their later real purchase from the placement's revenue.
+    assert.deepEqual(state.postFulfillmentHookCalls, [])
   })
 
   it('propagates entitlement deny from transaction draft creation', async () => {
@@ -532,6 +536,10 @@ describe('PaymentsCheckoutService', () => {
     assert.equal(state.applyCompletedCalls, 1)
     assert.equal(state.enqueueCalls, 1)
     assert.equal(state.transactionUpdateMany.some((data) => data.fulfilledAt instanceof Date), true)
+    // Money captured off-session on a saved card: partner commission, МойНалог
+    // income and the advertising conversion are owed here. Only the webhook and
+    // the pending-expiry poll used to run them, so this whole path paid nobody.
+    assert.equal(state.postFulfillmentHookCalls.length, 1)
   })
 
   it('does not provision twice when the immediate claim was already fulfilled', async () => {
@@ -612,6 +620,7 @@ function createService(input: {
     providerCreateCalls: 0,
     applyCompletedCalls: 0,
     enqueueCalls: 0,
+    postFulfillmentHookCalls: [] as string[],
     subscriptionQueries: [] as unknown[],
   }
   const paymentId = 'payment-1'
@@ -757,6 +766,13 @@ function createService(input: {
       // SavedPaymentMethodService — only used when savedPaymentMethodId is set.
       {
         resolveActiveForCharge: async () => null,
+      } as never,
+      // PaymentReconciliationService — referral / partner / МойНалог / ad-conversion
+      // hooks. Only the paths that capture real money must call it.
+      {
+        runPostFulfillmentHooksBestEffort: async (transaction: { id: string }) => {
+          state.postFulfillmentHookCalls.push(transaction.id)
+        },
       } as never,
     ),
     state,

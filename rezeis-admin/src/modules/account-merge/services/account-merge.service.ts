@@ -406,17 +406,22 @@ export class AccountMergeService {
     });
   }
 
-  /** `AdConversion.userId` unique — keep the target's, drop the source's. */
+  /**
+   * At most one ATTRIBUTED conversion per user — keep the target's, drop the
+   * source's. The uniqueness is now a partial index (a REVERTED row must not
+   * block a later purchase), so the target is probed with `findFirst` on that
+   * status rather than by unique key. REVERTED history moves across so the
+   * placement's refund record survives the merge.
+   */
   private async moveAdConversion(tx: Tx, sourceId: string, targetId: string): Promise<void> {
-    const targetConv = await tx.adConversion.findUnique({
-      where: { userId: targetId },
+    const targetConv = await tx.adConversion.findFirst({
+      where: { userId: targetId, status: 'ATTRIBUTED' },
       select: { id: true },
     });
     if (targetConv !== null) {
-      await tx.adConversion.deleteMany({ where: { userId: sourceId } });
-    } else {
-      await tx.adConversion.updateMany({ where: { userId: sourceId }, data: { userId: targetId } });
+      await tx.adConversion.deleteMany({ where: { userId: sourceId, status: 'ATTRIBUTED' } });
     }
+    await tx.adConversion.updateMany({ where: { userId: sourceId }, data: { userId: targetId } });
   }
 
   /** `Referral.referredId` unique (the 1:1 `referredBy`). */

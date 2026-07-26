@@ -159,6 +159,12 @@ export class PartnerBalancePaymentService {
       await this.restoreBalance(partner.id, amountMinor);
       throw new NotFoundException('Transaction draft not found');
     }
+    // Post-fulfilment hooks are intentionally NOT run here: this is paid from a
+    // partner's internal balance, not with new external money. Registering it as
+    // МойНалог income would double-declare revenue that was already declared when
+    // the customer paid, and paying partner commission on a balance spend would
+    // recycle commission already earned. Whether such a purchase should count as
+    // advertising revenue is a product decision, not a bug fix.
     try {
       const { syncJobs } =
         await this.paymentSubscriptionMutationService.applyCompletedTransaction(transactionRow);

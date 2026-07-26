@@ -4,6 +4,7 @@ import { AdClickSurface } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { PartnerEarningsService } from '../../partners/services/partner-earnings.service';
 import { AdClickRecordInput } from '../interfaces/advertising.interface';
+import { isNewAccountAtTouch } from '../utils/ad-attribution-window.util';
 import { AdSignupBonusService } from './ad-signup-bonus.service';
 
 /**
@@ -30,44 +31,94 @@ export class AdAttributionService {
     try {
       const placement = await this.prismaService.adPlacement.findUnique({
         where: { trackingCode: input.code },
+        include: { campaign: { select: { status: true } } },
       });
-      if (placement === null || placement.status !== 'ACTIVE') {
+      // The campaign status gates too: an "archived" campaign used to keep
+      // accruing opens, handing out signup bonuses and attaching partner chains,
+      // so spending continued after the operator believed they had closed it.
+      if (
+        placement === null ||
+        placement.status !== 'ACTIVE' ||
+        placement.campaign.status !== 'ACTIVE'
+      ) {
         // Unknown / inactive code — record nothing, fall through to normal flow.
+        // Logged: a silent return here is indistinguishable from "the request
+        // never arrived", which is exactly what made a dead web funnel look
+        // like an empty cabinet instead of a bug.
+        this.logger.warn(
+          `ad click ignored (code=${input.code}): ${
+            placement === null
+              ? 'placement not found'
+              : `placement status=${placement.status}, campaign status=${placement.campaign.status}`
+          }`,
+        );
         return;
       }
 
       const telegramId = parseTelegramId(input.telegramId);
       const userId = await this.resolveUserId(input.userId ?? null, telegramId);
 
-      await this.prismaService.adClick.create({
-        data: {
-          placementId: placement.id,
-          campaignId: placement.campaignId,
-          telegramId,
-          userId,
-          surface: input.surface ?? AdClickSurface.BOT,
-          isNewUser: input.isNewUser ?? false,
-          utmSource: input.utmSource,
-          utmMedium: input.utmMedium,
-          utmCampaign: input.utmCampaign,
-          utmContent: input.utmContent,
-          utmCreative: input.utmCreative,
-        },
-      });
+      if (input.attributeOnly !== true) {
+        await this.prismaService.adClick.create({
+          data: {
+            placementId: placement.id,
+            campaignId: placement.campaignId,
+            telegramId,
+            userId,
+            surface: input.surface ?? AdClickSurface.BOT,
+            isNewUser: input.isNewUser ?? false,
+            utmSource: input.utmSource,
+            utmMedium: input.utmMedium,
+            utmCampaign: input.utmCampaign,
+            utmContent: input.utmContent,
+            utmCreative: input.utmCreative,
+          },
+        });
+      }
 
       if (userId === null) {
         return;
       }
 
-      // First-touch: set acquisition only when unset (atomic, immutable).
+      // Advertising acquires NEW users. An existing customer who opens an ad link
+      // used to be booked as a fresh registration, and their next renewal became
+      // the placement's "first purchase" — so a campaign shown to an existing
+      // audience reported several times the payback it earned. The open above is
+      // still counted; only the acquisition claim is refused.
+      const account = await this.prismaService.user.findUnique({
+        where: { id: userId },
+        select: { createdAt: true, acquisitionPlacementId: true },
+      });
+      if (account === null) {
+        return;
+      }
+      const touchedAt = new Date();
+      if (account.acquisitionPlacementId === null && !isNewAccountAtTouch(account.createdAt, touchedAt)) {
+        this.logger.log(
+          `ad acquisition skipped (code=${input.code}, user=${userId}): account created ${account.createdAt.toISOString()} is not a new signup`,
+        );
+        return;
+      }
+
+      // First-touch: set acquisition only when unset (atomic, immutable). The
+      // window is frozen here — reading it at payment time let an operator edit
+      // rewrite which past purchases counted as advertising revenue.
       const updated = await this.prismaService.user.updateMany({
         where: { id: userId, acquisitionPlacementId: null },
-        data: { acquisitionPlacementId: placement.id, acquisitionAt: new Date() },
+        data: {
+          acquisitionPlacementId: placement.id,
+          acquisitionAt: touchedAt,
+          acquisitionWindowDays: placement.attributionWindowDays,
+        },
       });
 
       // Attach the partner-referral chain for PARTNER placements so commission
       // flows — only on first touch (when we actually claimed acquisition) and
       // never for the partner's own account (self-attribution guard).
+      //
+      // A user who already belongs to another partner is refused inside
+      // `attachPartnerReferralChain` — one guard shared with the referral and
+      // backfill paths, so an ad link can never become a way around it.
       if (
         updated.count > 0 &&
         placement.ownerType === 'PARTNER' &&

@@ -1072,6 +1072,11 @@ model User {
   /// per-placement attribution window.
   acquisitionPlacementId         String?   @map("acquisition_placement_id")
   acquisitionAt                  DateTime? @map("acquisition_at") @db.Timestamptz(3)
+  /// The placement's attribution window as it stood at first touch. The window
+  /// used to be read from the placement when the purchase landed, so widening it
+  /// retroactively turned old renewals into ad revenue and narrowing it changed
+  /// which past purchases counted — an operator edit rewrote reported payback.
+  acquisitionWindowDays          Int?      @map("acquisition_window_days")
   /// Write-once registration network snapshot (web register / first credential
   /// create). Captured for ROI + anti-bot; admin-only via users:view_registration.
   /// Bot-only users typically leave these null (no browser edge).
@@ -2626,6 +2631,10 @@ model AdPlacementRequest {
   /// Informational self-funded budget note (partner's own money, NOT our P&L).
   selfFundedBudgetNote String?         @map("self_funded_budget_note")
   status               AdRequestStatus @default(PENDING) @map("status")
+  /// Why the operator decided what they decided. Kept apart from `notes`, which
+  /// is the PARTNER's own message — writing the decision there would erase the
+  /// context the decision was made on.
+  reviewNotes          String?         @map("review_notes")
   /// Admin cuid that reviewed the request (scalar, no relation).
   reviewedBy           String?         @map("reviewed_by")
   reviewedAt           DateTime?       @map("reviewed_at") @db.Timestamptz(3)
@@ -2670,17 +2679,43 @@ model AdClick {
 
 /// The attributed user's FIRST completed purchase, with its transaction
 /// revenue. One per user; reverted on refund.
+/// Reporting exchange rates: 1 unit of `quote` equals `rate` units of `base`.
+/// `MANUAL` rows are operator decisions (Telegram Stars has no market price) and
+/// are never overwritten by the hourly refresh.
+model FxRate {
+  id        String   @id @default(cuid()) @map("id")
+  base      String   @map("base")
+  quote     String   @map("quote")
+  rate      Decimal  @map("rate") @db.Decimal(30, 12)
+  source    String   @map("source")
+  fetchedAt DateTime @map("fetched_at") @db.Timestamptz(3)
+
+  @@unique([base, quote])
+  @@map("fx_rates")
+}
+
 model AdConversion {
   id            String             @id @default(cuid()) @map("id")
   placementId   String             @map("placement_id")
   campaignId    String             @map("campaign_id")
-  /// `users.id` — one first-purchase conversion per user (scalar FK).
-  userId        String             @unique @map("user_id")
+  /// `users.id`. One ATTRIBUTED conversion per user, enforced by a PARTIAL unique
+  /// index (see the migration) rather than a plain unique column: a REVERTED row
+  /// used to keep occupying the slot after a refund, so the customer's next real
+  /// purchase could never be recorded and the placement lost that revenue forever.
+  userId        String             @map("user_id")
   /// `transactions.id` of the first purchase (scalar FK, unique).
   transactionId String             @unique @map("transaction_id")
   /// Revenue in minor units, sourced from the Transaction.
   amount        Int                @map("amount")
   currency      String             @map("currency")
+  /// Revenue converted into the reporting base currency, in minor units, at the
+  /// rate that held when the conversion was recorded. Reports sum THIS column:
+  /// adding raw `amount` across currencies produced a meaningless total, and
+  /// converting at read time would rewrite past payback figures every day.
+  /// Null when no rate was available — counted as unconverted, never as zero.
+  amountBase    Int?               @map("amount_base")
+  baseCurrency  String?            @map("base_currency")
+  fxRate        Decimal?           @map("fx_rate") @db.Decimal(30, 12)
   status        AdConversionStatus @default(ATTRIBUTED) @map("status")
   occurredAt    DateTime           @default(now()) @map("occurred_at") @db.Timestamptz(3)
   utmSource     String?            @map("utm_source")
@@ -2694,6 +2729,7 @@ model AdConversion {
   @@index([placementId])
   @@index([campaignId])
   @@index([status])
+  @@index([userId])
   @@map("ad_conversions")
 }
 

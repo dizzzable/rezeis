@@ -17,6 +17,7 @@ import { CreateAdRequestDto, ModerateRequestDto } from '../dto/advertising.dto';
 import { AdCampaignView, AdPlacementRequestView } from '../interfaces/advertising.interface';
 import { mapCampaign, mapRequest } from '../utils/advertising-mappers';
 import { generateTrackingCode, isValidTrackingCode } from '../utils/tracking-code.util';
+import { UserNotificationsService } from '../../notifications/services/user-notifications.service';
 import { ReiwaAdvertisingLinkConfigService } from './reiwa-advertising-link-config.service';
 
 type TxClient = Prisma.TransactionClient;
@@ -40,6 +41,7 @@ export class AdPlacementRequestService {
     @Inject(advertisingConfig.KEY)
     private readonly config: ConfigType<typeof advertisingConfig>,
     private readonly reiwaAdvertisingLinks: ReiwaAdvertisingLinkConfigService,
+    private readonly userNotificationsService: UserNotificationsService,
   ) {}
 
   public async listRequests(status?: string): Promise<AdPlacementRequestView[]> {
@@ -98,7 +100,10 @@ export class AdPlacementRequestService {
           approvedWindowDays: approvedWindow,
           reviewedBy: reviewerId,
           reviewedAt: new Date(),
-          notes: input.notes?.trim() || request.notes,
+          // The operator's note goes to `reviewNotes`. Writing it into `notes`
+          // overwrote the PARTNER's own message — the very context the
+          // counter-offer was a reply to.
+          reviewNotes: input.notes?.trim() || null,
         },
       });
       if (claimed.count === 0) {
@@ -106,6 +111,12 @@ export class AdPlacementRequestService {
       }
       const updated = await this.prismaService.adPlacementRequest.findUniqueOrThrow({
         where: { id },
+      });
+      await this.notifyPartner(updated.partnerId, 'advertising.request_countered', {
+        requestId: updated.id,
+        proposedWindowDays: updated.proposedWindowDays,
+        approvedWindowDays: updated.approvedWindowDays,
+        reviewNotes: updated.reviewNotes,
       });
       return { request: mapRequest(updated), campaign: null };
     }
@@ -139,11 +150,20 @@ export class AdPlacementRequestService {
     });
   }
 
-  public async reject(id: string, reviewerId: string | null): Promise<AdPlacementRequestView> {
+  public async reject(
+    id: string,
+    reviewerId: string | null,
+    reviewNotes?: string | null,
+  ): Promise<AdPlacementRequestView> {
     await this.requirePending(id);
     const claimed = await this.prismaService.adPlacementRequest.updateMany({
       where: { id, status: 'PENDING' },
-      data: { status: 'REJECTED', reviewedBy: reviewerId, reviewedAt: new Date() },
+      data: {
+        status: 'REJECTED',
+        reviewedBy: reviewerId,
+        reviewedAt: new Date(),
+        reviewNotes: reviewNotes?.trim() || null,
+      },
     });
     if (claimed.count === 0) {
       throw new BadRequestException('Request is not pending review');
@@ -151,7 +171,44 @@ export class AdPlacementRequestService {
     const updated = await this.prismaService.adPlacementRequest.findUniqueOrThrow({
       where: { id },
     });
+    // The partner submitted a request and then heard nothing at all: the status
+    // only changed in a screen they had no reason to reopen.
+    await this.notifyPartner(updated.partnerId, 'advertising.request_rejected', {
+      requestId: updated.id,
+      reviewNotes: updated.reviewNotes,
+    });
     return mapRequest(updated);
+  }
+
+  /**
+   * Best-effort status notification for the requesting partner. Never throws:
+   * moderation must not fail because a notification could not be written.
+   */
+  private async notifyPartner(
+    partnerId: string,
+    type: string,
+    payload: Record<string, unknown>,
+  ): Promise<void> {
+    try {
+      const partner = await this.prismaService.partner.findUnique({
+        where: { id: partnerId },
+        select: { userId: true },
+      });
+      if (partner === null) {
+        return;
+      }
+      await this.userNotificationsService.create({
+        userId: partner.userId,
+        type,
+        payload,
+      });
+    } catch (error: unknown) {
+      this.logger.warn(
+        `advertising request notification failed (partner=${partnerId}, type=${type}): ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
   }
 
   /**
@@ -167,7 +224,7 @@ export class AdPlacementRequestService {
     readonly windowDays: number;
   }): Promise<{ request: AdPlacementRequestView; campaign: AdCampaignView }> {
     const linkConfig = await this.resolveLinkConfig();
-    return this.prismaService.$transaction(async (tx) => {
+    const result = await this.prismaService.$transaction(async (tx) => {
       const claimWhere: Prisma.AdPlacementRequestWhereInput = {
         id: input.id,
         status: input.expectedStatus,
@@ -247,6 +304,15 @@ export class AdPlacementRequestService {
         campaign: mapCampaign(full ?? campaign, linkConfig),
       };
     });
+    // After the transaction commits: an approved partner now learns that their
+    // links are live, instead of having to guess by reopening the cabinet.
+    await this.notifyPartner(result.request.partnerId, 'advertising.request_activated', {
+      requestId: result.request.id,
+      approvedWindowDays: result.request.approvedWindowDays,
+      campaignId: result.campaign?.id ?? null,
+      placements: result.campaign?.placements.length ?? 0,
+    });
+    return result;
   }
 
   private async resolveLinkConfig(): Promise<AdvertisingConfiguration> {

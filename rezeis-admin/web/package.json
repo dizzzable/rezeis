@@ -10,7 +10,7 @@
     "predev": "node scripts/sync-flags.mjs",
     "dev": "vite",
     "prebuild": "node scripts/sync-flags.mjs",
-    "build": "tsc && vite build",
+    "build": "tsc -b && vite build",
     "lint": "eslint .",
     "lint:strict": "eslint . --max-warnings=0",
     "lint:fix": "eslint . --fix",

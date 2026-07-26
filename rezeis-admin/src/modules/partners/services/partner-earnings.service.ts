@@ -332,6 +332,25 @@ export class PartnerEarningsService {
       return false;
     }
 
+    // One partner chain per user. `@@unique([partnerId, referralUserId])` only
+    // stops the *same* partner twice, so a user who already belongs to partner A
+    // could pick up a second level-1 edge from partner B — and
+    // `processPartnerEarning` pays every edge it finds, on every payment,
+    // forever. Guarded here rather than at each call site so the referral,
+    // advertising and backfill paths cannot diverge. Re-running the SAME chain
+    // stays idempotent (the upserts below are no-ops), which is why this compares
+    // the partner instead of merely checking that an edge exists.
+    const existingL1 = await this.prismaService.partnerReferral.findFirst({
+      where: { referralUserId: input.newUserId, level: 1 },
+      select: { partnerId: true },
+    });
+    if (existingL1 !== null && existingL1.partnerId !== referrerPartner.id) {
+      this.logger.warn(
+        `Refusing a second partner chain for user ${input.newUserId}: already attributed to partner ${existingL1.partnerId}, requested ${referrerPartner.id}`,
+      );
+      return false;
+    }
+
     await this.upsertPartnerReferral({
       partnerId: referrerPartner.id,
       referralUserId: input.newUserId,

@@ -10,6 +10,11 @@ export const en = {
     subtitle:
       'External paid promotion: opens, registrations, first purchases, revenue, spend and ROI per placement.',
     loadError: 'Failed to load the advertising cabinet',
+    actionFailed: 'The action did not go through',
+    campaignsLoadFailed: 'Failed to load campaigns',
+    unconvertedNote:
+      'Conversions with no known rate: {{count}}. Their revenue is excluded from the total — set a rate manually to include it.',
+    convertedNote: 'All amounts are expressed in {{currency}} at the rate held when the purchase was made.',
     overview: {
       campaigns: 'Campaigns',
       activePlacements: 'Active placements',
@@ -28,12 +33,18 @@ export const en = {
       activate: 'Activate',
       copy: 'Copy link',
       copied: 'Link copied',
+      retry: 'Retry',
       create: 'Create',
       save: 'Save',
       cancel: 'Cancel',
       refresh: 'Refresh',
     },
     campaign: {
+      editTitle: 'Edit campaign',
+      statusLabel: 'Status',
+      updated: 'Campaign updated',
+      pausedNote:
+        'The campaign is not active: visits to any of its placements are not counted, even for an active placement.',
       nameLabel: 'Campaign name',
       namePlaceholder: 'October launch',
       notesLabel: 'Notes',
@@ -41,11 +52,21 @@ export const en = {
       placementsEmpty: 'No placements in this campaign yet.',
     },
     placement: {
+      trackingOffNote:
+        'Tracking is off: visits through these links are not counted while the placement or its campaign is inactive.',
+      archiveConfirmTitle: 'Archive this placement?',
+      archiveConfirmBody:
+        'The placement will stop counting visits: clicks on advertising already published with this link will no longer reach the statistics. The tracking code and all collected history are kept — the placement can be brought back by activating it again.',
       platformLabel: 'Platform',
       channelLabel: 'Channel / blogger',
       ownerLabel: 'Owner',
       windowLabel: 'Attribution window (days)',
       bonusLabel: 'Signup bonus',
+      partnerPlaceholder: 'Select a partner',
+      partnerHint:
+        'The partner this placement belongs to. Changing the owner affects attribution and metrics.',
+      planPlaceholder: 'Select a plan',
+      planHint: 'This plan is granted as the signup bonus for this link.',
       partnerIdLabel: 'Partner id',
       trialDurationLabel: 'Trial duration (days)',
       tariffPlanIdLabel: 'Tariff plan id',
@@ -55,7 +76,7 @@ export const en = {
       spendShort: 'Spend {{amount}}',
       statusLabel: 'Status',
       partnerSpendNote:
-        'Partner placements do not use an operator budget. Cost is the commission paid for acquired users.',
+        'Partner placements always cost 0: the partner promotes at their own expense and earns through the partner program, which is their own responsibility. CAC, ROAS and ROI are therefore not shown for them — only visits, registrations and revenue.',
       created: 'Placement created',
       updated: 'Placement updated',
       archived: 'Placement archived',
@@ -88,7 +109,24 @@ export const en = {
       PAUSED: 'Paused',
       ARCHIVED: 'Archived',
     },
+    chart: {
+      period: 'Period',
+      days: '{{count}} d',
+    },
+    utm: {
+      title: 'UTM breakdown',
+      empty: 'No tags have arrived yet. Add utm_source and utm_medium to the advertisement link and they will be recorded on the first visit.',
+      source: 'Source',
+      medium: 'Medium',
+      campaign: 'Campaign',
+      opens: 'Visits',
+      conversions: 'Purchases',
+      revenue: 'Revenue',
+      none: '(no tag)',
+    },
     metrics: {
+      loadFailed: 'Failed to load placement metrics',
+      chartLoadFailed: 'Failed to load the chart',
       title: 'Metrics',
       opens: 'Opens',
       registrations: 'Registrations',
@@ -113,6 +151,7 @@ export const en = {
       qrWeb: 'QR → web',
     },
     requests: {
+      loadFailed: 'Failed to load partner requests',
       title: 'Partner requests',
       subtitle: 'Moderation queue and history of partner advertising applications.',
       empty: 'No partner advertising requests in this view.',
@@ -132,6 +171,10 @@ export const en = {
       approveWindow: 'Window (days)',
       approveWindowHint: 'Change to counter with a different attribution window; leave as proposed to approve as-is.',
       platforms: 'Platforms',
+      rejectReasonLabel: 'Rejection reason (the partner sees this)',
+      rejectReasonPlaceholder: 'For example: the channel audience does not match',
+      reviewNote: 'Decision: {{note}}',
+      reviewedAt: 'Reviewed {{at}}',
       partnerId: 'Partner {{id}}…',
       budgetNote: 'Budget note: {{note}}',
       approved: 'Request approved and activated',

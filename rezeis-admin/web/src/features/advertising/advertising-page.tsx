@@ -4,6 +4,17 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { Megaphone, Info, Plus, Copy, Archive, BarChart3, Pencil, Pause, Play } from 'lucide-react'
 
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from '@/components/ui/alert-dialog'
 import { LocalQr } from '@/components/ui/local-qr'
 import { Button } from '@/components/ui/button'
 import {
@@ -55,9 +66,13 @@ import {
   listAdCampaigns,
   listAdRequests,
   placementSpendPayload,
+  SPEND_CURRENCIES,
+  updateAdCampaign,
+  type AdUtmBreakdownRow,
   rejectAdRequest,
   updateAdPlacement,
   type AdMetrics,
+  type AdCampaign,
   type AdPlacement,
   type AdPlacementRequest,
   type AdPlatform,
@@ -66,7 +81,9 @@ import {
   type AdRequestStatus,
   type AdSignupBonusType,
 } from './advertising-api'
+import { getErrorMessage } from '@/lib/http-errors'
 import { partnersAdminApi } from '../partners/partners-api'
+import { usePlans } from '../plans/plans-api'
 
 const PLATFORMS: AdPlatform[] = [
   'TELEGRAM',
@@ -133,13 +150,26 @@ export default function AdvertisingPage() {
         <OverviewTile
           label={t('advertisingPage.overview.revenue')}
           value={overview.data ? Math.round(overview.data.revenueMinor / 100) : undefined}
+          suffix={overview.data?.currency}
         />
       </div>
+      {overview.data !== undefined && (
+        <p className="text-xs text-muted-foreground">
+          {t('advertisingPage.convertedNote', { currency: overview.data.currency })}
+          {overview.data.unconvertedConversions > 0 &&
+            ` ${t('advertisingPage.unconvertedNote', { count: overview.data.unconvertedConversions })}`}
+        </p>
+      )}
 
       <RequestsPanel />
 
       {campaigns.isLoading ? (
         <Skeleton className="h-40 w-full" />
+      ) : campaigns.isError ? (
+        <InlineError
+          message={t('advertisingPage.campaignsLoadFailed')}
+          onRetry={() => void campaigns.refetch()}
+        />
       ) : (campaigns.data?.length ?? 0) === 0 ? (
         <p className="text-sm text-muted-foreground">{t('advertisingPage.campaign.empty')}</p>
       ) : (
@@ -148,10 +178,25 @@ export default function AdvertisingPage() {
             <Card key={c.id}>
               <CardHeader className="flex-row items-center justify-between space-y-0">
                 <div>
-                  <CardTitle className="text-base">{c.name}</CardTitle>
+                  <CardTitle className="flex items-center gap-2 text-base">
+                    {c.name}
+                    {c.status !== 'ACTIVE' && (
+                      <Badge variant="outline" className="text-[10px]">
+                        {t(`advertisingPage.status.${c.status}`)}
+                      </Badge>
+                    )}
+                  </CardTitle>
                   {c.notes && <CardDescription>{c.notes}</CardDescription>}
+                  {c.status !== 'ACTIVE' && c.placements.length > 0 && (
+                    <CardDescription className="text-amber-700 dark:text-amber-500">
+                      {t('advertisingPage.campaign.pausedNote')}
+                    </CardDescription>
+                  )}
                 </div>
-                <NewPlacementDialog campaignId={c.id} />
+                <div className="flex items-center gap-1">
+                  <EditCampaignDialog campaign={c} />
+                  <NewPlacementDialog campaignId={c.id} />
+                </div>
               </CardHeader>
               <CardContent>
                 {c.placements.length === 0 ? (
@@ -174,11 +219,24 @@ export default function AdvertisingPage() {
   )
 }
 
-function OverviewTile({ label, value }: { label: string; value: number | undefined }) {
+function OverviewTile({
+  label,
+  value,
+  suffix,
+}: {
+  label: string
+  value: number | undefined
+  suffix?: string
+}) {
   return (
     <Card>
       <CardContent className="p-3">
-        <p className="text-xl font-bold tabular-nums">{value?.toLocaleString() ?? '—'}</p>
+        <p className="text-xl font-bold tabular-nums">
+          {value?.toLocaleString() ?? '—'}
+          {value !== undefined && suffix !== undefined && (
+            <span className="ml-1 text-xs font-normal text-muted-foreground">{suffix}</span>
+          )}
+        </p>
         <p className="text-xs text-muted-foreground">{label}</p>
       </CardContent>
     </Card>
@@ -196,14 +254,17 @@ function PlacementTile({ placement }: { placement: AdPlacement }) {
   const nextStatus: AdPlacementStatus = placement.status === 'ACTIVE' ? 'PAUSED' : 'ACTIVE'
 
   const archive = useMutation({
+    onError: (error: unknown) => toast.error(getErrorMessage(error, t('advertisingPage.actionFailed'))),
     mutationFn: () => archiveAdPlacement(placement.id),
     onSuccess: () => {
       toast.success(t('advertisingPage.placement.archived'))
       queryClient.invalidateQueries({ queryKey: ['admin', 'advertising'] })
+      queryClient.invalidateQueries({ queryKey: ['admin', 'advertising', 'overview'] })
     },
   })
 
   const toggleStatus = useMutation({
+    onError: (error: unknown) => toast.error(getErrorMessage(error, t('advertisingPage.actionFailed'))),
     mutationFn: () => updateAdPlacement(placement.id, { status: nextStatus }),
     onSuccess: () => {
       toast.success(
@@ -291,17 +352,39 @@ function PlacementTile({ placement }: { placement: AdPlacement }) {
             )}
           </Button>
         )}
-        <Button
-          size="sm"
-          variant="ghost"
-          className="h-7 gap-1 text-xs text-destructive"
-          onClick={() => archive.mutate()}
-          disabled={archive.isPending || placement.status === 'ARCHIVED'}
-        >
-          <Archive className="h-3.5 w-3.5" />
-          {t('advertisingPage.actions.archive')}
-        </Button>
+        <AlertDialog>
+          <AlertDialogTrigger asChild>
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-7 gap-1 text-xs text-destructive"
+              disabled={archive.isPending || placement.status === 'ARCHIVED'}
+            >
+              <Archive className="h-3.5 w-3.5" />
+              {t('advertisingPage.actions.archive')}
+            </Button>
+          </AlertDialogTrigger>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>{t('advertisingPage.placement.archiveConfirmTitle')}</AlertDialogTitle>
+              <AlertDialogDescription>
+                {t('advertisingPage.placement.archiveConfirmBody')}
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>{t('advertisingPage.actions.cancel')}</AlertDialogCancel>
+              <AlertDialogAction onClick={() => archive.mutate()}>
+                {t('advertisingPage.actions.archive')}
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </div>
+      {placement.status !== 'ACTIVE' && (
+        <p className="mt-2 rounded-md border border-amber-500/40 bg-amber-500/5 p-2 text-[11px] text-amber-700 dark:text-amber-500">
+          {t('advertisingPage.placement.trackingOffNote')}
+        </p>
+      )}
       <div className="mt-2 flex flex-wrap items-start gap-3">
         <div className="min-w-[200px] flex-1 space-y-1 text-xs">
           {botUrl && (
@@ -330,6 +413,27 @@ function PlacementTile({ placement }: { placement: AdPlacement }) {
   )
 }
 
+/**
+ * Inline "this failed, try again" row. These queries run with `retry: false`, so
+ * every failure used to render as an empty state or an endless skeleton — which
+ * is how a completely dead advertising funnel looked exactly like a placement
+ * that had not been clicked yet.
+ */
+function InlineError({ message, onRetry }: { message: string; onRetry: () => void }) {
+  const { t } = useTranslation()
+  return (
+    <div
+      role="alert"
+      className="flex flex-wrap items-center gap-2 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive"
+    >
+      <span className="flex-1">{message}</span>
+      <Button size="sm" variant="outline" className="h-7 text-xs" onClick={onRetry}>
+        {t('advertisingPage.actions.retry')}
+      </Button>
+    </div>
+  )
+}
+
 function LinkCopyRow({ label, value, onCopy }: { label: string; value: string; onCopy: () => void }) {
   return (
     <div className="flex items-center gap-1.5">
@@ -344,12 +448,22 @@ function LinkCopyRow({ label, value, onCopy }: { label: string; value: string; o
 
 function PlacementMetrics({ placementId }: { placementId: string }) {
   const { t } = useTranslation()
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ['admin', 'advertising', 'metrics', placementId],
     queryFn: () => getPlacementMetrics(placementId),
   })
-  if (isLoading || !data) {
+  if (isLoading) {
     return <Skeleton className="h-24 w-full" />
+  }
+  // `retry` is off for these queries, so without this branch a 403/404/500 left
+  // the skeleton up forever and read as "this placement has no data".
+  if (isError || !data) {
+    return (
+      <InlineError
+        message={t('advertisingPage.metrics.loadFailed')}
+        onRetry={() => void refetch()}
+      />
+    )
   }
   const fmtRatio = (v: number | null) => (v === null ? t('advertisingPage.metrics.na') : v.toFixed(2))
   const pct = (v: number) => `${Math.round(v * 100)}%`
@@ -369,24 +483,141 @@ function PlacementMetrics({ placementId }: { placementId: string }) {
       <Metric label={t('advertisingPage.metrics.regToPurchase')} value={pct(data.registrationToPurchaseRate)} />
       <Metric label={t('advertisingPage.metrics.avgFirstPayment')} value={money(data.avgFirstPaymentMinor)} />
       <Metric label={t('advertisingPage.metrics.daysToPurchase')} value={data.avgDaysToPurchase?.toString() ?? t('advertisingPage.metrics.na')} />
+      <Metric label={t('advertisingPage.metrics.arpu')} value={money(data.arpuMinor)} />
+      {data.unconvertedConversions > 0 && (
+        <p className="col-span-full text-[11px] text-amber-600 dark:text-amber-500">
+          {t('advertisingPage.unconvertedNote', { count: data.unconvertedConversions })}
+        </p>
+      )}
       <div className="col-span-full">
         <PlacementTrend placementId={placementId} />
+      </div>
+      <div className="col-span-full">
+        <UtmBreakdown rows={data.utmBreakdown ?? []} currency={data.currency} />
       </div>
     </div>
   )
 }
 
+/**
+ * Per-UTM rows. The API has returned a breakdown all along and the operator could
+ * never see it — and it was empty anyway, because nothing wrote utm tags onto a
+ * click. Opens without purchases is the row worth looking at: a creative that
+ * brings traffic and sells nothing.
+ */
+function UtmBreakdown({ rows, currency }: { rows: AdUtmBreakdownRow[]; currency: string }) {
+  const { t } = useTranslation()
+  if (rows.length === 0) {
+    return <p className="text-[11px] text-muted-foreground">{t('advertisingPage.utm.empty')}</p>
+  }
+  const dash = t('advertisingPage.utm.none')
+  return (
+    <div className="space-y-1">
+      <p className="text-[11px] font-medium text-muted-foreground">{t('advertisingPage.utm.title')}</p>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[420px] text-[11px]">
+          <thead className="text-muted-foreground">
+            <tr>
+              <th className="py-1 pr-3 text-left font-normal">{t('advertisingPage.utm.source')}</th>
+              <th className="py-1 pr-3 text-left font-normal">{t('advertisingPage.utm.medium')}</th>
+              <th className="py-1 pr-3 text-left font-normal">{t('advertisingPage.utm.campaign')}</th>
+              <th className="py-1 pr-3 text-right font-normal">{t('advertisingPage.utm.opens')}</th>
+              <th className="py-1 pr-3 text-right font-normal">{t('advertisingPage.utm.conversions')}</th>
+              <th className="py-1 text-right font-normal">{t('advertisingPage.utm.revenue')}</th>
+            </tr>
+          </thead>
+          <tbody className="tabular-nums">
+            {rows.map((row) => (
+              <tr
+                key={`${row.utmSource ?? ''}|${row.utmMedium ?? ''}|${row.utmCampaign ?? ''}`}
+                className="border-t border-border/50"
+              >
+                <td className="py-1 pr-3">{row.utmSource ?? dash}</td>
+                <td className="py-1 pr-3">{row.utmMedium ?? dash}</td>
+                <td className="py-1 pr-3">{row.utmCampaign ?? dash}</td>
+                <td className="py-1 pr-3 text-right">{row.opens.toLocaleString()}</td>
+                <td className="py-1 pr-3 text-right">{row.conversions.toLocaleString()}</td>
+                <td className="py-1 text-right">{formatMoney(row.revenueMinor, currency)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Plan chooser for the TARIFF signup bonus. It used to be a free-text cuid: a
+ * typo passed validation (the DTO only checks length), the grant then failed with
+ * a warn nobody reads, and every user attracted by that advertisement silently
+ * never received the bonus it promised.
+ */
+function PlanPicker({ value, onChange }: { value: string; onChange: (id: string) => void }) {
+  const { t } = useTranslation()
+  const { data: plans = [] } = usePlans()
+  const selectable = plans.filter((plan) => plan.isActive && !plan.isArchived)
+  return (
+    <>
+      <Select value={value} onValueChange={onChange}>
+        <SelectTrigger data-testid="bonus-plan">
+          <SelectValue placeholder={t('advertisingPage.placement.planPlaceholder')} />
+        </SelectTrigger>
+        <SelectContent>
+          {selectable.map((plan) => (
+            <SelectItem key={plan.id} value={plan.id}>
+              {plan.name}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      <p className="text-xs text-muted-foreground">{t('advertisingPage.placement.planHint')}</p>
+    </>
+  )
+}
+
+const CHART_PERIODS = [7, 14, 30, 90] as const
+
 function PlacementTrend({ placementId }: { placementId: string }) {
   const { t } = useTranslation()
-  const { data } = useQuery({
-    queryKey: ['admin', 'advertising', 'chart', placementId],
-    queryFn: () => getPlacementChartData(placementId, 14),
+  // The API has accepted `days` from the start and the client hard-coded 14, so
+  // an operator could never look past two weeks of a campaign.
+  const [days, setDays] = useState<number>(14)
+  const { data, isError, refetch } = useQuery({
+    queryKey: ['admin', 'advertising', 'chart', placementId, days],
+    queryFn: () => getPlacementChartData(placementId, days),
   })
+  if (isError) {
+    return (
+      <InlineError
+        message={t('advertisingPage.metrics.chartLoadFailed')}
+        onRetry={() => void refetch()}
+      />
+    )
+  }
+  // The API always returns one bucket per day in the window, so an empty array
+  // can only mean the request never produced data.
   if (!data || data.length === 0) {
     return null
   }
   return (
-    <div className="h-28 w-full">
+    <div className="w-full">
+      <div className="mb-1 flex flex-wrap items-center gap-1">
+        <span className="mr-1 text-[11px] text-muted-foreground">{t('advertisingPage.chart.period')}</span>
+        {CHART_PERIODS.map((period) => (
+          <Button
+            key={period}
+            size="sm"
+            variant={period === days ? 'secondary' : 'ghost'}
+            className="h-6 px-2 text-[11px]"
+            onClick={() => setDays(period)}
+            aria-pressed={period === days}
+          >
+            {t('advertisingPage.chart.days', { count: period })}
+          </Button>
+        ))}
+      </div>
+      <div className="h-28 w-full">
       <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
         <AreaChart data={data} margin={{ top: 4, right: 4, bottom: 0, left: 4 }}>
           <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
@@ -396,6 +627,7 @@ function PlacementTrend({ placementId }: { placementId: string }) {
           <Area type="monotone" dataKey="registrations" stroke="#10b981" fill="#10b981" fillOpacity={0.25} name={t('advertisingPage.metrics.registrations')} />
         </AreaChart>
       </ResponsiveContainer>
+      </div>
     </div>
   )
 }
@@ -456,6 +688,11 @@ function RequestsPanel() {
       <CardContent className="space-y-2">
         {requests.isLoading ? (
           <Skeleton className="h-16 w-full" />
+        ) : requests.isError ? (
+          <InlineError
+            message={t('advertisingPage.requests.loadFailed')}
+            onRetry={() => void requests.refetch()}
+          />
         ) : rows.length === 0 ? (
           <p className="text-sm text-muted-foreground" data-testid="requests-empty">
             {filter === 'PENDING' ? t('advertisingPage.requests.emptyPending') : t('advertisingPage.requests.empty')}
@@ -499,7 +736,9 @@ function RequestRow({ request, moderation }: { request: AdPlacementRequest; mode
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const [windowDays, setWindowDays] = useState(String(request.proposedWindowDays))
+  const [rejectReason, setRejectReason] = useState('')
   const windowInputId = `request-window-${request.id}`
+  const reasonInputId = `request-reason-${request.id}`
   const parseWindowDays = (): number | null => {
     const days = Number(windowDays)
     if (!Number.isFinite(days) || !Number.isInteger(days) || days < 1 || days > 365) {
@@ -509,6 +748,7 @@ function RequestRow({ request, moderation }: { request: AdPlacementRequest; mode
   }
 
   const approve = useMutation({
+    onError: (error: unknown) => toast.error(getErrorMessage(error, t('advertisingPage.actionFailed'))),
     mutationFn: () => {
       const approved = parseWindowDays() ?? request.proposedWindowDays
       return approveAdRequest(request.id, approved)
@@ -523,7 +763,8 @@ function RequestRow({ request, moderation }: { request: AdPlacementRequest; mode
     },
   })
   const reject = useMutation({
-    mutationFn: () => rejectAdRequest(request.id),
+    onError: (error: unknown) => toast.error(getErrorMessage(error, t('advertisingPage.actionFailed'))),
+    mutationFn: () => rejectAdRequest(request.id, rejectReason),
     onSuccess: () => {
       toast.success(t('advertisingPage.requests.rejected'))
       queryClient.invalidateQueries({ queryKey: ['admin', 'advertising'] })
@@ -560,6 +801,18 @@ function RequestRow({ request, moderation }: { request: AdPlacementRequest; mode
             {request.notes}
           </p>
         )}
+        {request.reviewNotes && (
+          <p className="text-xs text-muted-foreground" data-testid="request-review-note">
+            {t('advertisingPage.requests.reviewNote', { note: request.reviewNotes })}
+          </p>
+        )}
+        {request.reviewedAt !== null && (
+          <p className="text-[11px] text-muted-foreground">
+            {t('advertisingPage.requests.reviewedAt', {
+              at: new Date(request.reviewedAt).toLocaleString(),
+            })}
+          </p>
+        )}
         {request.selfFundedBudgetNote && (
           <p className="text-xs text-muted-foreground" data-testid="request-budget-note">
             {t('advertisingPage.requests.budgetNote', { note: request.selfFundedBudgetNote })}
@@ -586,6 +839,20 @@ function RequestRow({ request, moderation }: { request: AdPlacementRequest; mode
               onChange={(e) => setWindowDays(e.target.value)}
               title={t('advertisingPage.requests.approveWindowHint')}
               data-testid="request-approve-window"
+            />
+          </div>
+          <div className="flex flex-col gap-0.5">
+            <Label htmlFor={reasonInputId} className="text-[10px] text-muted-foreground">
+              {t('advertisingPage.requests.rejectReasonLabel')}
+            </Label>
+            <Input
+              id={reasonInputId}
+              className="h-7 w-48 text-xs"
+              value={rejectReason}
+              onChange={(e) => setRejectReason(e.target.value)}
+              placeholder={t('advertisingPage.requests.rejectReasonPlaceholder')}
+              maxLength={2000}
+              data-testid="request-reject-reason"
             />
           </div>
           <Button
@@ -626,6 +893,7 @@ function NewCampaignDialog() {
   const [notes, setNotes] = useState('')
   const queryClient = useQueryClient()
   const create = useMutation({
+    onError: (error: unknown) => toast.error(getErrorMessage(error, t('advertisingPage.actionFailed'))),
     mutationFn: () => createAdCampaign({ name: name.trim(), notes: notes.trim() || undefined }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['admin', 'advertising'] })
@@ -698,6 +966,7 @@ function NewPlacementDialog({ campaignId }: { campaignId: string }) {
   })
   const queryClient = useQueryClient()
   const create = useMutation({
+    onError: (error: unknown) => toast.error(getErrorMessage(error, t('advertisingPage.actionFailed'))),
     mutationFn: () =>
       createAdPlacement({
         campaignId,
@@ -774,7 +1043,7 @@ function NewPlacementDialog({ campaignId }: { campaignId: string }) {
               <Label>{t('advertisingPage.placement.partnerIdLabel')}</Label>
               <Select value={partnerId} onValueChange={setPartnerId}>
                 <SelectTrigger>
-                  <SelectValue placeholder="Выберите партнёра" />
+                  <SelectValue placeholder={t('advertisingPage.placement.partnerPlaceholder')} />
                 </SelectTrigger>
                 <SelectContent>
                   {partners.map((p) => (
@@ -784,7 +1053,7 @@ function NewPlacementDialog({ campaignId }: { campaignId: string }) {
                   ))}
                 </SelectContent>
               </Select>
-              <p className="text-xs text-muted-foreground">Партнёр, которому принадлежит размещение. Изменение владельца может повлиять на attribution и метрики.</p>
+              <p className="text-xs text-muted-foreground">{t('advertisingPage.placement.partnerHint')}</p>
             </div>
           )}
           <div className="space-y-1.5">
@@ -811,12 +1080,18 @@ function NewPlacementDialog({ campaignId }: { campaignId: string }) {
               </div>
               <div className="space-y-1.5">
                 <Label>{t('advertisingPage.placement.spendCurrencyLabel')}</Label>
-                <Input
-                  value={spendCurrency}
-                  onChange={(e) => setSpendCurrency(e.target.value.toUpperCase())}
-                  maxLength={8}
-                  data-testid="create-spend-currency"
-                />
+                <Select value={spendCurrency} onValueChange={setSpendCurrency}>
+                  <SelectTrigger data-testid="create-spend-currency">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {SPEND_CURRENCIES.map((code) => (
+                      <SelectItem key={code} value={code}>
+                        {code}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
             </div>
           )}
@@ -843,7 +1118,7 @@ function NewPlacementDialog({ campaignId }: { campaignId: string }) {
             <>
               <div className="space-y-1.5">
                 <Label>{t('advertisingPage.placement.tariffPlanIdLabel')}</Label>
-                <Input value={tariffPlanId} onChange={(e) => setTariffPlanId(e.target.value)} placeholder="plan id" />
+                <PlanPicker value={tariffPlanId} onChange={setTariffPlanId} />
               </div>
               <div className="space-y-1.5">
                 <Label>{t('advertisingPage.placement.tariffDurationLabel')}</Label>
@@ -865,6 +1140,97 @@ function NewPlacementDialog({ campaignId }: { campaignId: string }) {
   )
 }
 
+/**
+ * Campaign rename / status / notes. `PATCH /campaigns/:id` shipped with the
+ * cabinet and never had a caller, so a campaign could be created and then never
+ * renamed or closed — and closing matters, because the campaign status now gates
+ * attribution for every placement under it.
+ */
+function EditCampaignDialog({ campaign }: { campaign: AdCampaign }) {
+  const { t } = useTranslation()
+  const [open, setOpen] = useState(false)
+  const [name, setName] = useState(campaign.name)
+  const [notes, setNotes] = useState(campaign.notes ?? '')
+  const [status, setStatus] = useState<AdPlacementStatus>(campaign.status)
+  const queryClient = useQueryClient()
+
+  const save = useMutation({
+    onError: (error: unknown) => toast.error(getErrorMessage(error, t('advertisingPage.actionFailed'))),
+    mutationFn: () =>
+      updateAdCampaign(campaign.id, {
+        name: name.trim(),
+        notes: notes.trim(),
+        status,
+      }),
+    onSuccess: () => {
+      toast.success(t('advertisingPage.campaign.updated'))
+      queryClient.invalidateQueries({ queryKey: ['admin', 'advertising'] })
+      setOpen(false)
+    },
+  })
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next)
+        if (next) {
+          setName(campaign.name)
+          setNotes(campaign.notes ?? '')
+          setStatus(campaign.status)
+        }
+      }}
+    >
+      <DialogTrigger asChild>
+        <Button size="sm" variant="ghost" className="h-7 gap-1 text-xs">
+          <Pencil className="h-3.5 w-3.5" />
+          {t('advertisingPage.actions.edit')}
+        </Button>
+      </DialogTrigger>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>{t('advertisingPage.campaign.editTitle')}</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-3">
+          <div className="space-y-1.5">
+            <Label>{t('advertisingPage.campaign.nameLabel')}</Label>
+            <Input value={name} onChange={(e) => setName(e.target.value)} maxLength={100} />
+          </div>
+          <div className="space-y-1.5">
+            <Label>{t('advertisingPage.campaign.notesLabel')}</Label>
+            <Input value={notes} onChange={(e) => setNotes(e.target.value)} maxLength={2000} />
+          </div>
+          <div className="space-y-1.5">
+            <Label>{t('advertisingPage.campaign.statusLabel')}</Label>
+            <Select value={status} onValueChange={(v) => setStatus(v as AdPlacementStatus)}>
+              <SelectTrigger data-testid="edit-campaign-status">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="ACTIVE">{t('advertisingPage.status.ACTIVE')}</SelectItem>
+                <SelectItem value="PAUSED">{t('advertisingPage.status.PAUSED')}</SelectItem>
+                <SelectItem value="ARCHIVED">{t('advertisingPage.status.ARCHIVED')}</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setOpen(false)}>
+            {t('advertisingPage.actions.cancel')}
+          </Button>
+          <Button
+            onClick={() => save.mutate()}
+            disabled={save.isPending || name.trim().length < 3}
+            data-testid="edit-campaign-save"
+          >
+            {t('advertisingPage.actions.save')}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 function EditPlacementDialog({ placement }: { placement: AdPlacement }) {
   const { t } = useTranslation()
   const [open, setOpen] = useState(false)
@@ -877,6 +1243,13 @@ function EditPlacementDialog({ placement }: { placement: AdPlacement }) {
   const [status, setStatus] = useState<AdPlacementStatus>(
     placement.status === 'ARCHIVED' ? 'ARCHIVED' : placement.status,
   )
+  // A placement handing out free subscriptions could not be corrected from here:
+  // the only way to stop a mistaken TRIAL/TARIFF was to pause or archive the
+  // placement, which also stopped counting the paid traffic still arriving.
+  const [bonusType, setBonusType] = useState<AdSignupBonusType>(placement.signupBonusType)
+  const [trialDays, setTrialDays] = useState('3')
+  const [tariffPlanId, setTariffPlanId] = useState('')
+  const [tariffDays, setTariffDays] = useState('30')
   const queryClient = useQueryClient()
 
   const resetFromPlacement = () => {
@@ -885,9 +1258,14 @@ function EditPlacementDialog({ placement }: { placement: AdPlacement }) {
     setSpendMajor(placement.spendAmountMinor != null ? String(placement.spendAmountMinor / 100) : '')
     setSpendCurrency(placement.spendCurrency ?? 'RUB')
     setStatus(placement.status)
+    setBonusType(placement.signupBonusType)
+    setTrialDays('3')
+    setTariffPlanId('')
+    setTariffDays('30')
   }
 
   const save = useMutation({
+    onError: (error: unknown) => toast.error(getErrorMessage(error, t('advertisingPage.actionFailed'))),
     mutationFn: () => {
       const body: Parameters<typeof updateAdPlacement>[1] = {
         channel: channel.trim() || undefined,
@@ -896,6 +1274,20 @@ function EditPlacementDialog({ placement }: { placement: AdPlacement }) {
       }
       if (placement.ownerType === 'COMPANY') {
         Object.assign(body, placementSpendPayload('COMPANY', spendMajor, spendCurrency))
+      }
+      // Left untouched -> omit, so an edit of the channel cannot silently rewrite
+      // a bonus whose details the list response does not carry.
+      if (bonusType !== placement.signupBonusType) {
+        body.signupBonus =
+          bonusType === 'NONE'
+            ? { type: 'NONE' }
+            : bonusType === 'TRIAL'
+              ? { type: 'TRIAL', trialDurationDays: Math.max(1, Number(trialDays) || 3) }
+              : {
+                  type: 'TARIFF',
+                  tariffPlanId: tariffPlanId.trim() || undefined,
+                  tariffDurationDays: Math.max(1, Number(tariffDays) || 30),
+                }
       }
       return updateAdPlacement(placement.id, body)
     },
@@ -955,17 +1347,54 @@ function EditPlacementDialog({ placement }: { placement: AdPlacement }) {
               </div>
               <div className="space-y-1.5">
                 <Label>{t('advertisingPage.placement.spendCurrencyLabel')}</Label>
-                <Input
-                  value={spendCurrency}
-                  onChange={(e) => setSpendCurrency(e.target.value.toUpperCase())}
-                  maxLength={8}
-                  data-testid="edit-spend-currency"
-                />
+                <Select value={spendCurrency} onValueChange={setSpendCurrency}>
+                  <SelectTrigger data-testid="edit-spend-currency">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {SPEND_CURRENCIES.map((code) => (
+                      <SelectItem key={code} value={code}>
+                        {code}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
             </div>
           )}
           {placement.ownerType === 'PARTNER' && (
             <p className="text-xs text-muted-foreground">{t('advertisingPage.placement.partnerSpendNote')}</p>
+          )}
+          <div className="space-y-1.5">
+            <Label>{labelWithHint(t('advertisingPage.placement.bonusLabel'), t('advertisingPage.help.signupBonus'))}</Label>
+            <Select value={bonusType} onValueChange={(v) => setBonusType(v as AdSignupBonusType)}>
+              <SelectTrigger data-testid="edit-bonus-type">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="NONE">{t('advertisingPage.bonus.NONE')}</SelectItem>
+                <SelectItem value="TRIAL">{t('advertisingPage.bonus.TRIAL')}</SelectItem>
+                <SelectItem value="TARIFF">{t('advertisingPage.bonus.TARIFF')}</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          {bonusType !== placement.signupBonusType && bonusType === 'TRIAL' && (
+            <div className="space-y-1.5">
+              <Label>{t('advertisingPage.placement.trialDurationLabel')}</Label>
+              <Input type="number" min="1" max="730" value={trialDays} onChange={(e) => setTrialDays(e.target.value)} />
+            </div>
+          )}
+          {bonusType !== placement.signupBonusType && bonusType === 'TARIFF' && (
+            <>
+              <div className="space-y-1.5">
+                <Label>{t('advertisingPage.placement.tariffPlanIdLabel')}</Label>
+                <PlanPicker value={tariffPlanId} onChange={setTariffPlanId} />
+              </div>
+              <div className="space-y-1.5">
+                <Label>{t('advertisingPage.placement.tariffDurationLabel')}</Label>
+                <Input type="number" min="1" max="730" value={tariffDays} onChange={(e) => setTariffDays(e.target.value)} />
+              </div>
+            </>
           )}
           {placement.status !== 'ARCHIVED' && (
             <div className="space-y-1.5">

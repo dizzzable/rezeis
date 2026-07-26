@@ -4,6 +4,7 @@ import { Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
 import { EmailDeliveryModule } from '../email/email.module';
 import { OAuthModule } from '../oauth/oauth.module';
+import { WebAuthModule } from '../web-auth/web-auth.module';
 import { AdminExternalAuthController } from './controllers/admin-external-auth.controller';
 import { InternalExternalAuthController } from './controllers/internal-external-auth.controller';
 import { DisposableEmailService } from './services/disposable-email.service';
@@ -24,7 +25,13 @@ import { YandexOAuthAdapter } from './services/providers/yandex-oauth.adapter';
  * token) and resolved here. Kept separate from the admin-only `OAuthModule`.
  */
 @Module({
-  imports: [OAuthModule, AuthModule, EmailDeliveryModule, HttpModule.register({ timeout: 10_000 })],
+  imports: [
+    OAuthModule,
+    AuthModule,
+    EmailDeliveryModule,
+    WebAuthModule,
+    HttpModule.register({ timeout: 10_000 }),
+  ],
   controllers: [AdminExternalAuthController, InternalExternalAuthController],
   providers: [
     ExternalProviderConfigService,

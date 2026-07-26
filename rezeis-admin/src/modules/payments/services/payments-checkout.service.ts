@@ -37,6 +37,7 @@ import { claimForImmediateFulfillment, releaseFulfillmentClaim } from './payment
 import { PaymentSubscriptionMutationService } from './payment-subscription-mutation.service';
 import { PaymentsTransactionsService } from './payments-transactions.service';
 import { SavedPaymentMethodService } from './saved-payment-method.service';
+import { PaymentReconciliationService } from './payment-reconciliation.service';
 
 @Injectable()
 export class PaymentsCheckoutService {
@@ -49,6 +50,7 @@ export class PaymentsCheckoutService {
     private readonly settingsService: SettingsService,
     private readonly accessModeGuard: AccessModeGuard,
     private readonly savedPaymentMethodService: SavedPaymentMethodService,
+    private readonly paymentReconciliationService: PaymentReconciliationService,
   ) {}
 
   /**
@@ -174,6 +176,11 @@ export class PaymentsCheckoutService {
       const finalTransaction =
         (await this.prismaService.transaction.findUnique({ where: { id: transaction.id } })) ??
         completedTransaction;
+      // Deliberately NO post-fulfilment hooks here: `amount <= 0` means no money
+      // changed hands. Partner commission would be 0, МойНалог would register a
+      // zero-rouble income, and — worst — `AdConversion.userId` is unique, so a
+      // 0-value conversion would permanently consume this user's only conversion
+      // slot and hide their later real purchase from the placement's revenue.
       return mapCheckoutResponse({
         transaction: finalTransaction,
         checkoutUrl: null,
@@ -270,6 +277,10 @@ export class PaymentsCheckoutService {
         const finalTransaction =
           (await this.prismaService.transaction.findUnique({ where: { id: transaction.id } })) ??
           completedTransaction;
+        // Off-session charge on a saved card: the money is captured here, so the
+        // post-fulfilment hooks are owed here too. No `rawPayload` — the saved
+        // method was already persisted above.
+        await this.paymentReconciliationService.runPostFulfillmentHooksBestEffort(finalTransaction);
         return mapCheckoutResponse({
           transaction: finalTransaction,
           checkoutUrl: null,

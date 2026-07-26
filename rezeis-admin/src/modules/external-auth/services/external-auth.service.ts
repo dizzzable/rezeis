@@ -18,6 +18,7 @@ import {
   ExternalUserProfile,
 } from '../interfaces/external-auth.interface';
 import { AuthorizeUrlInput, ExchangeInput, OAuthProviderAdapter } from '../interfaces/oauth-adapter.interface';
+import { RegistrationSnapshotService } from '../../web-auth/services/registration-snapshot.service';
 import { GoogleOAuthAdapter } from './providers/google-oauth.adapter';
 import { MailruOAuthAdapter } from './providers/mailru-oauth.adapter';
 import { TelegramOidcAdapter } from './providers/telegram-oidc.adapter';
@@ -43,6 +44,7 @@ export class ExternalAuthService {
     private readonly passwordHashService: PasswordHashService,
     private readonly systemEventsService: SystemEventsService,
     private readonly emailDeliveryService: EmailDeliveryService,
+    private readonly registrationSnapshotService: RegistrationSnapshotService,
     google: GoogleOAuthAdapter,
     yandex: YandexOAuthAdapter,
     mailru: MailruOAuthAdapter,
@@ -207,7 +209,7 @@ export class ExternalAuthService {
     this.logger.log(
       `resolve: branch=new-shell action=finish_setup userId=${userId} isTelegram=${isTelegram}`,
     );
-    return { action: 'finish_setup', userId };
+    return { action: 'finish_setup', userId, created: true };
   }
 
   /**
@@ -350,6 +352,17 @@ export class ExternalAuthService {
         },
       });
       return user.id;
+    });
+
+    // Mark the registration channel. Social signups skipped the snapshot
+    // entirely, so `registrationChannel` stayed null and an operator could not
+    // tell a Google/Yandex/Telegram registration from an imported row. Network
+    // details (ip / ua / referer / utm) are not available here — this is an
+    // internal call from reiwa — so only the channel is stamped; the rest stays
+    // null rather than being invented.
+    await this.registrationSnapshotService.captureBestEffort({
+      userId,
+      channel: 'oauth',
     });
 
     this.systemEventsService.info(

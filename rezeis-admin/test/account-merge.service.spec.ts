@@ -107,7 +107,9 @@ function createMergeMock(fx: MergeFixtures): { prisma: PrismaService; calls: Cal
       updateMany: async (a: Record<string, unknown>) => { rec('partnerReferral', 'updateMany', a); return { count: 0 }; },
     },
     adConversion: {
-      findUnique: async () => fx.targetConv ?? null,
+      // Uniqueness is a partial index on ATTRIBUTED rows now, so the merge probes
+      // the target with findFirst instead of a unique-key lookup.
+      findFirst: async () => fx.targetConv ?? null,
       deleteMany: async (a: Record<string, unknown>) => { rec('adConversion', 'deleteMany', a); return { count: 0 }; },
       updateMany: async (a: Record<string, unknown>) => { rec('adConversion', 'updateMany', a); return { count: 0 }; },
     },

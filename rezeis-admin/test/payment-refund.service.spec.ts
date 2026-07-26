@@ -99,12 +99,20 @@ function createService(input: {
       });
     },
   };
+  // A FULL refund now reverses the side-effects here instead of waiting for a
+  // provider webhook that some gateways never send.
+  const reversals: string[] = [];
   const service = new PaymentRefundService(
     prisma as never,
     httpService as never,
     new PaymentWebhookPayloadRedactionService(),
+    {
+      reverseFulfilledPayment: async (transaction: { id: string }) => {
+        reversals.push(transaction.id);
+      },
+    } as never,
   );
-  return { service, state };
+  return { service, state, reversals };
 }
 
 describe('PaymentRefundService.getEligibility', () => {
@@ -154,6 +162,38 @@ describe('PaymentRefundService.getEligibility', () => {
 });
 
 describe('PaymentRefundService.refundTransaction', () => {
+  // The reversal used to run only from a `refund.succeeded` webhook. A gateway
+  // that sends none — or a refund the operator issues in the provider's own
+  // dashboard — left the partner commission paid, the income declared to the tax
+  // service and the advertising revenue standing forever.
+  it('reverses the side-effects itself on a full refund', async () => {
+    const { service, reversals } = createService();
+    await service.refundTransaction({
+      transactionId: 'tx-1',
+      amount: null, // null = refund everything
+      reason: null,
+      currentAdmin: ADMIN,
+      requestMetadata: REQUEST_META,
+    });
+    assert.deepEqual(reversals, ['tx-1']);
+  });
+
+  it('leaves the side-effects alone on a partial refund', async () => {
+    // An all-or-nothing reversal would wipe the whole commission and cancel the
+    // full tax income over a small giveback, so a partial refund is escalated to
+    // an operator instead — the same rule the webhook path applies.
+    const { service, reversals } = createService();
+    await service.refundTransaction({
+      transactionId: 'tx-1',
+      amount: '100.00',
+      reason: null,
+      currentAdmin: ADMIN,
+      requestMetadata: REQUEST_META,
+    });
+    assert.deepEqual(reversals, []);
+  });
+
+
   it('calls the provider with a transaction+amount idempotence key and records the audit trail', async () => {
     const { service, state } = createService();
 

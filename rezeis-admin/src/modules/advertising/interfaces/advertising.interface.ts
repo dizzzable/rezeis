@@ -65,6 +65,8 @@ export interface AdPlacementRequestView {
   readonly approvedWindowDays: number | null;
   readonly selfFundedBudgetNote: string | null;
   readonly status: AdRequestStatus;
+  /** The operator's decision note, separate from the partner's own `notes`. */
+  readonly reviewNotes: string | null;
   readonly reviewedBy: string | null;
   readonly reviewedAt: string | null;
   readonly campaignId: string | null;
@@ -77,9 +79,17 @@ export interface AdMetrics {
   readonly opens: number;
   readonly registrations: number;
   readonly conversions: number;
+  /**
+   * Revenue and cost in ONE currency (`currency`), converted at the rate that
+   * held when each purchase was recorded. Every ratio below divides comparable
+   * numbers; previously these were raw minor units summed across currencies and
+   * labelled with the budget's currency, which made ROAS and CAC fiction.
+   */
   readonly revenueMinor: number;
   readonly costMinor: number;
   readonly currency: string;
+  /** Attributed conversions with no known rate — excluded from `revenueMinor`. */
+  readonly unconvertedConversions: number;
   readonly cac: number | null;
   readonly roas: number | null;
   readonly roi: number | null;
@@ -88,11 +98,16 @@ export interface AdMetrics {
   readonly avgFirstPaymentMinor: number | null;
   readonly arpuMinor: number | null;
   readonly avgDaysToPurchase: number | null;
-  /** Breakdown of conversions and revenue by UTM source/medium/campaign (for advanced attribution analysis). */
+  /**
+   * Per-UTM breakdown: opens come from the clicks, conversions and revenue from
+   * the attributed purchases. A row with opens and no conversions is a creative
+   * that brings traffic and sells nothing — the reason to have this at all.
+   */
   readonly utmBreakdown?: Array<{
     utmSource?: string;
     utmMedium?: string;
     utmCampaign?: string;
+    opens: number;
     conversions: number;
     revenueMinor: number;
   }>;
@@ -104,6 +119,13 @@ export interface AdClickRecordInput {
   readonly userId?: string | null;
   readonly surface?: AdClickSurface;
   readonly isNewUser?: boolean;
+  /**
+   * Claims first-touch attribution for the user without recording another open.
+   * The web funnel counts the open when the browser lands on the ad link (no
+   * session yet) and binds the account later, at registration — one landing
+   * must stay one `AdClick`, or every web signup would inflate opens twice.
+   */
+  readonly attributeOnly?: boolean;
   readonly utmSource?: string | null;
   readonly utmMedium?: string | null;
   readonly utmCampaign?: string | null;

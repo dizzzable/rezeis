@@ -11,6 +11,7 @@ import {
   IsBoolean,
   IsEnum,
   IsInt,
+  IsNumber,
   IsOptional,
   IsString,
   Length,
@@ -18,6 +19,13 @@ import {
   Min,
   ValidateNested,
 } from 'class-validator';
+
+/**
+ * Ceiling for an advertising budget in minor units — 20 million major units.
+ * A fat-fingered extra digit used to be accepted and then divided into every
+ * ratio on the placement.
+ */
+const MAX_SPEND_MINOR = 2_000_000_000;
 
 export class AdSignupBonusDto {
   @IsEnum(AdSignupBonusType)
@@ -115,15 +123,23 @@ export class CreatePlacementDto {
   @Length(1, 64)
   public readonly promoCodeId?: string;
 
+  /**
+   * `null` clears the budget. `@IsOptional()` skips validation for both null and
+   * undefined, and the two mean different things downstream: undefined leaves the
+   * stored value alone, null erases it. Without the nullable type the operator
+   * could set a wrong budget but never remove it — the UI reported success and
+   * silently kept the old number, so CAC and ROAS stayed wrong by that factor.
+   */
   @IsOptional()
   @IsInt()
   @Min(0)
-  public readonly spendAmountMinor?: number;
+  @Max(MAX_SPEND_MINOR)
+  public readonly spendAmountMinor?: number | null;
 
   @IsOptional()
   @IsString()
   @Length(3, 8)
-  public readonly spendCurrency?: string;
+  public readonly spendCurrency?: string | null;
 
   @IsOptional()
   @ValidateNested()
@@ -148,15 +164,23 @@ export class UpdatePlacementDto {
   @Length(1, 64)
   public readonly promoCodeId?: string;
 
+  /**
+   * `null` clears the budget. `@IsOptional()` skips validation for both null and
+   * undefined, and the two mean different things downstream: undefined leaves the
+   * stored value alone, null erases it. Without the nullable type the operator
+   * could set a wrong budget but never remove it — the UI reported success and
+   * silently kept the old number, so CAC and ROAS stayed wrong by that factor.
+   */
   @IsOptional()
   @IsInt()
   @Min(0)
-  public readonly spendAmountMinor?: number;
+  @Max(MAX_SPEND_MINOR)
+  public readonly spendAmountMinor?: number | null;
 
   @IsOptional()
   @IsString()
   @Length(3, 8)
-  public readonly spendCurrency?: string;
+  public readonly spendCurrency?: string | null;
 
   @IsOptional()
   @IsEnum(AdPlacementStatus)
@@ -206,6 +230,18 @@ export class CreateAdRequestDto {
   @IsString()
   @Length(0, 200)
   public readonly selfFundedBudgetNote?: string;
+}
+
+/** Operator-owned reporting rate: 1 `quote` = `rate` units of the base currency. */
+export class SetFxRateDto {
+  @IsString()
+  @Length(2, 8)
+  public readonly quote!: string;
+
+  @IsNumber()
+  @Min(0.000000000001)
+  @Max(1_000_000_000)
+  public readonly rate!: number;
 }
 
 export class IngestClickDto {
@@ -259,4 +295,13 @@ export class IngestClickDto {
   @IsOptional()
   @IsBoolean()
   public readonly isNewUser?: boolean;
+
+  /**
+   * Binds the user to the placement without recording a second open. The web
+   * funnel records the open anonymously on landing and calls back with the
+   * account at registration.
+   */
+  @IsOptional()
+  @IsBoolean()
+  public readonly attributeOnly?: boolean;
 }

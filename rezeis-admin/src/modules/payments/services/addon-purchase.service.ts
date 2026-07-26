@@ -303,6 +303,9 @@ export class AddOnPurchaseService {
         throw new ConflictException('Zero-value add-on checkout is already being fulfilled');
       }
       const completedTransaction = await this.prismaService.transaction.findUniqueOrThrow({ where: { id: transaction.id } });
+      // No post-fulfilment hooks: a free add-on moves no money, so partner
+      // commission and МойНалог income do not apply, and a 0-value AdConversion
+      // would consume this user's unique conversion slot.
       const { syncJobs } =
         await this.paymentSubscriptionMutationService.applyCompletedTransaction(
           completedTransaction,

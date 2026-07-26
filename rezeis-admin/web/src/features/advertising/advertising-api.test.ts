@@ -34,8 +34,27 @@ describe('placementSpendPayload', () => {
     expect(placementSpendPayload('PARTNER', '9999', 'USD')).toEqual({})
   })
 
-  it('omits spend when major amount is empty/invalid', () => {
-    expect(placementSpendPayload('COMPANY', '', 'RUB')).toEqual({})
+  // Omitting the field means "leave the stored budget alone", so a wrong amount
+  // could be typed but never removed: the operator got a success toast and the old
+  // number kept dividing into CAC and ROAS. An empty field is an explicit clear.
+  it('clears spend explicitly when the major amount is empty/invalid', () => {
+    expect(placementSpendPayload('COMPANY', '', 'RUB')).toEqual({
+      spendAmountMinor: null,
+      spendCurrency: null,
+    })
+    expect(placementSpendPayload('COMPANY', 'abc', 'RUB')).toEqual({
+      spendAmountMinor: null,
+      spendCurrency: null,
+    })
+  })
+
+  // Free text used to reach the API, and the budget currency becomes the label on
+  // revenue, CAC and ROAS — 'RUR' or a typo silently mislabelled every number.
+  it('falls back to the first known currency for an unknown code', () => {
+    expect(placementSpendPayload('COMPANY', '3000', 'RUR')).toEqual({
+      spendAmountMinor: 300000,
+      spendCurrency: 'RUB',
+    })
   })
 })
 

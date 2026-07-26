@@ -262,6 +262,29 @@ export class PaymentReconciliationService {
   }
 
   /**
+   * {@link runPostFulfillmentHooks} for the paths that fulfil a payment inline
+   * and answer an HTTP request: the money is already captured and the
+   * entitlement already granted, so a hook failure must never surface as a
+   * failed checkout. Every individual hook already swallows its own errors —
+   * this is the belt for anything thrown between them.
+   *
+   * Safe to call more than once for the same transaction: partner accrual is
+   * keyed on (partnerId, sourceTransactionId), the МойНалог job id is derived
+   * from the transaction id, and the ad conversion is unique per user.
+   */
+  public async runPostFulfillmentHooksBestEffort(transaction: Transaction): Promise<void> {
+    try {
+      await this.runPostFulfillmentHooks(transaction);
+    } catch (error: unknown) {
+      this.logger.error(
+        `Post-fulfilment hooks failed for transaction ${transaction.id}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  /**
    * Reverses every side-effect a COMPLETED payment produced, after a refund /
    * chargeback. Symmetric counterpart to {@link runPostFulfillmentHooks}:
    *   - partner accruals debited + ledger rows removed,
@@ -345,6 +368,32 @@ export class PaymentReconciliationService {
           needsManualReview: true,
         },
       );
+      return;
+    }
+
+    await this.reverseFulfilledPayment(transaction, providerStatus);
+  }
+
+  /**
+   * Runs the full reversal for a payment the caller has already established was
+   * refunded in full: partner debit, referral un-qualification, tax-income
+   * cancellation, advertising-conversion revert, access revocation.
+   *
+   * Public because a refund issued from the admin panel must reverse the same
+   * things a provider webhook does. Previously only the webhook path called it,
+   * so a gateway that sends no refund event — or a refund the operator made in
+   * the provider's own dashboard — left commission paid, income declared and the
+   * advertising revenue standing forever.
+   *
+   * Idempotent: the `refundReversedAt` stamp written at the end short-circuits a
+   * second run, and every downstream reversal is itself idempotent.
+   */
+  public async reverseFulfilledPayment(
+    transaction: Transaction,
+    providerStatus: string | null,
+  ): Promise<void> {
+    const stamped = asRecord(transaction.gatewayData);
+    if (typeof stamped?.['refundReversedAt'] === 'string') {
       return;
     }
 

@@ -66,10 +66,26 @@ export interface AdOverview {
   opens: number
   registrations: number
   conversions: number
+  /** Revenue in one reporting currency, converted at the time of each purchase. */
+  revenueMinor: number
+  currency: string
+  /** Conversions with no known rate — excluded from revenueMinor. */
+  unconvertedConversions: number
+}
+
+export interface AdUtmBreakdownRow {
+  utmSource?: string
+  utmMedium?: string
+  utmCampaign?: string
+  opens: number
+  conversions: number
   revenueMinor: number
 }
 
 export interface AdMetrics {
+  unconvertedConversions: number
+  /** Per-UTM rows: opens from clicks, conversions and revenue from purchases. */
+  utmBreakdown?: AdUtmBreakdownRow[]
   opens: number
   registrations: number
   conversions: number
@@ -102,6 +118,8 @@ export interface AdPlacementRequest {
   approvedWindowDays: number | null
   selfFundedBudgetNote: string | null
   status: AdRequestStatus
+  /** The operator's decision note — distinct from the partner's own `notes`. */
+  reviewNotes: string | null
   reviewedBy: string | null
   reviewedAt: string | null
   campaignId: string | null
@@ -122,8 +140,8 @@ export interface CreatePlacementInput {
   partnerId?: string
   attributionWindowDays: number
   promoCodeId?: string
-  spendAmountMinor?: number
-  spendCurrency?: string
+  spendAmountMinor?: number | null
+  spendCurrency?: string | null
   signupBonus?: { type: AdSignupBonusType; trialDurationDays?: number; trialTrafficGb?: number; trialDeviceLimit?: number; tariffPlanId?: string; tariffDurationDays?: number }
 }
 
@@ -131,8 +149,8 @@ export interface UpdatePlacementInput {
   channel?: string
   attributionWindowDays?: number
   promoCodeId?: string | null
-  spendAmountMinor?: number
-  spendCurrency?: string
+  spendAmountMinor?: number | null
+  spendCurrency?: string | null
   status?: AdPlacementStatus
   signupBonus?: {
     type: AdSignupBonusType
@@ -152,16 +170,31 @@ export function majorToMinor(major: string | number): number | undefined {
   return Math.round(n * 100)
 }
 
-/** PARTNER cost is commission, never operator budget — strip spend before API. */
+/** Currencies an operator can book a budget in. Free text used to reach the API,
+ * so 'RUR' or 'ЮАНЬ' became the label on revenue, CAC and ROAS. */
+export const SPEND_CURRENCIES = ['RUB', 'USD', 'EUR', 'KZT', 'UAH', 'BYN', 'TRY', 'CNY'] as const
+export type SpendCurrency = (typeof SPEND_CURRENCIES)[number]
+
+/**
+ * PARTNER cost is commission, never operator budget — spend is stripped for them.
+ *
+ * An empty amount now sends an explicit `null` instead of omitting the field:
+ * omitting it means "leave the stored value alone", so a wrong budget could be
+ * typed but never cleared. The operator saw a success toast and the old number
+ * kept dividing into CAC and ROAS.
+ */
 export function placementSpendPayload(
   ownerType: AdOwnerType,
   spendMajor: string,
   currency: string,
-): { spendAmountMinor?: number; spendCurrency?: string } {
+): { spendAmountMinor?: number | null; spendCurrency?: string | null } {
   if (ownerType === 'PARTNER') return {}
   const spendAmountMinor = majorToMinor(spendMajor)
-  if (spendAmountMinor === undefined) return {}
-  const spendCurrency = currency.trim().toUpperCase() || 'RUB'
+  if (spendAmountMinor === undefined) return { spendAmountMinor: null, spendCurrency: null }
+  const trimmed = currency.trim().toUpperCase()
+  const spendCurrency = (SPEND_CURRENCIES as readonly string[]).includes(trimmed)
+    ? trimmed
+    : SPEND_CURRENCIES[0]
   return { spendAmountMinor, spendCurrency }
 }
 
@@ -173,6 +206,19 @@ export const listAdCampaigns = () =>
 
 export const createAdCampaign = (input: CreateCampaignInput) =>
   api.post<AdCampaign>('/admin/advertising/campaigns', input).then((r) => r.data)
+
+export interface UpdateCampaignInput {
+  name?: string
+  status?: AdPlacementStatus
+  notes?: string
+}
+
+/**
+ * `PATCH /campaigns/:id` has existed since the cabinet shipped and had no client:
+ * a campaign could be created but never renamed, paused or closed.
+ */
+export const updateAdCampaign = (id: string, input: UpdateCampaignInput) =>
+  api.patch<AdCampaign>(`/admin/advertising/campaigns/${id}`, input).then((r) => r.data)
 
 export const createAdPlacement = (input: CreatePlacementInput) =>
   api.post<AdPlacement>('/admin/advertising/placements', input).then((r) => r.data)
@@ -209,8 +255,13 @@ export const approveAdRequest = (id: string, approvedWindowDays?: number) =>
     )
     .then((r) => r.data)
 
-export const rejectAdRequest = (id: string) =>
-  api.post<AdPlacementRequest>(`/admin/advertising/requests/${id}/reject`, {}).then((r) => r.data)
+export const rejectAdRequest = (id: string, notes?: string) =>
+  api
+    .post<AdPlacementRequest>(
+      `/admin/advertising/requests/${id}/reject`,
+      notes && notes.trim() ? { notes: notes.trim() } : {},
+    )
+    .then((r) => r.data)
 
 /** Operator counters when the approved window differs from the partner's proposal. */
 export function isCounterOffer(

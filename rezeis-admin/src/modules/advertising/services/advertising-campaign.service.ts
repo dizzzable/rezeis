@@ -126,11 +126,15 @@ export class AdvertisingCampaignService {
     // PARTNER cost is commission only — force null budget even if legacy rows
     // still carry spend from a bad write or owner-type change.
     const spendAmount = isPartner ? null : input.spendAmountMinor;
+    // Three-way, and the difference matters: undefined = leave as is,
+    // null = clear, string = set. Calling toUpperCase on a null would throw.
     const spendCurrency = isPartner
       ? null
       : input.spendCurrency === undefined
         ? undefined
-        : input.spendCurrency.toUpperCase();
+        : input.spendCurrency === null
+          ? null
+          : input.spendCurrency.toUpperCase();
     const placement = await this.prismaService.adPlacement.update({
       where: { id },
       data: {
@@ -149,28 +153,37 @@ export class AdvertisingCampaignService {
   }
 
   /**
-   * Archives a placement. A placement with recorded clicks or conversions is
-   * never hard-deleted (it would orphan attribution history); it is set to
-   * ARCHIVED instead. An untouched placement is removed outright.
+   * Archives a placement. Never deletes: the tracking code is printed in live
+   * creatives, and a hard delete took it with them — every later click on paid
+   * advertising then landed on "placement not found" and was dropped, silently,
+   * with no way to recover what the code used to be.
+   *
+   * "Untouched" was also measured wrong: it counted clicks and conversions but
+   * not users already attributed to the placement, and web registration can set
+   * `acquisitionPlacementId` without ever writing a click row. Those users would
+   * have been left pointing at a row that no longer exists — counted as
+   * registrations forever, but never able to produce a conversion.
+   *
+   * The return value keeps its shape for API compatibility; `archived` is now
+   * always true, so the operator UI can stop claiming an outcome it never
+   * verified.
    */
   public async deletePlacement(id: string): Promise<{ archived: boolean }> {
     const existing = await this.prismaService.adPlacement.findUnique({
       where: { id },
-      include: { _count: { select: { clicks: true, conversions: true } } },
+      select: { id: true, status: true },
     });
     if (existing === null) {
       throw new NotFoundException('Placement not found');
     }
-    const used = existing._count.clicks > 0 || existing._count.conversions > 0;
-    if (used) {
-      await this.prismaService.adPlacement.update({
-        where: { id },
-        data: { status: 'ARCHIVED' },
-      });
+    if (existing.status === 'ARCHIVED') {
       return { archived: true };
     }
-    await this.prismaService.adPlacement.delete({ where: { id } });
-    return { archived: false };
+    await this.prismaService.adPlacement.update({
+      where: { id },
+      data: { status: 'ARCHIVED' },
+    });
+    return { archived: true };
   }
 
   private async requireCampaign(id: string): Promise<void> {

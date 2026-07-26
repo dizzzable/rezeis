@@ -73,6 +73,10 @@ describe('AdvertisingPage', () => {
       registrations: 10,
       conversions: 3,
       revenueMinor: 900000,
+      // Both became required: the cabinet reports one currency now, and says how
+      // many conversions had no rate instead of folding them in as zero.
+      currency: 'RUB',
+      unconvertedConversions: 0,
     })
     vi.mocked(listAdCampaigns).mockResolvedValue([campaign])
     vi.mocked(listAdRequests).mockResolvedValue([])
@@ -144,6 +148,7 @@ describe('AdvertisingPage', () => {
       proposedWindowDays: 90,
       approvedWindowDays: null,
       selfFundedBudgetNote: null,
+      reviewNotes: null,
       status: 'PENDING',
       reviewedBy: null,
       reviewedAt: null,
@@ -190,6 +195,7 @@ describe('AdvertisingPage', () => {
       proposedWindowDays: 30,
       approvedWindowDays: null,
       selfFundedBudgetNote: null,
+      reviewNotes: null,
       status: 'PENDING',
       reviewedBy: null,
       reviewedAt: null,
@@ -223,6 +229,7 @@ describe('AdvertisingPage', () => {
       proposedWindowDays: 90,
       approvedWindowDays: null,
       selfFundedBudgetNote: null,
+      reviewNotes: null,
       status: 'PENDING',
       reviewedBy: null,
       reviewedAt: null,

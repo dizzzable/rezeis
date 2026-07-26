@@ -110,6 +110,7 @@ export function mapRequest(request: AdPlacementRequest): AdPlacementRequestView 
     approvedWindowDays: request.approvedWindowDays,
     selfFundedBudgetNote: request.selfFundedBudgetNote,
     status: request.status,
+    reviewNotes: request.reviewNotes,
     reviewedBy: request.reviewedBy,
     reviewedAt: request.reviewedAt?.toISOString() ?? null,
     campaignId: request.campaignId,

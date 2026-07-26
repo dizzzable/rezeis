@@ -30,6 +30,7 @@ export class InternalAdvertisingController {
       userId: input.userId ?? null,
       surface,
       isNewUser: input.isNewUser ?? false,
+      attributeOnly: input.attributeOnly ?? false,
       utmSource: input.utmSource,
       utmMedium: input.utmMedium,
       utmCampaign: input.utmCampaign,

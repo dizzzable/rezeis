@@ -26,7 +26,9 @@ import {
   CreatePlacementDto,
   UpdateCampaignDto,
   UpdatePlacementDto,
+  SetFxRateDto,
 } from '../dto/advertising.dto';
+import { FxRateService } from '../../fx/fx-rate.service';
 import { AdvertisingCampaignService } from '../services/advertising-campaign.service';
 import { AdMetricsService } from '../services/ad-metrics.service';
 
@@ -39,6 +41,7 @@ export class AdminAdvertisingController {
     private readonly campaignService: AdvertisingCampaignService,
     private readonly metricsService: AdMetricsService,
     private readonly prismaService: PrismaService,
+    private readonly fxRateService: FxRateService,
   ) {}
 
   @Get('overview')
@@ -46,6 +49,40 @@ export class AdminAdvertisingController {
   @ApiOperation({ summary: 'Top-level advertising-cabinet totals' })
   public getOverview() {
     return this.metricsService.getOverview();
+  }
+
+  /**
+   * Reporting exchange rates. Fiat and listed coins are fetched automatically;
+   * this exists for what no exchange quotes — Telegram Stars above all — because
+   * without a rate that revenue can only be reported as unconverted.
+   */
+  @Get('fx-rates')
+  @RequirePermission('advertising', 'view')
+  @ApiOperation({ summary: 'Reporting currency and the known exchange rates' })
+  public async listFxRates() {
+    const base = this.fxRateService.getBaseCurrency();
+    const rates = await this.prismaService.fxRate.findMany({
+      where: { base },
+      orderBy: [{ source: 'asc' }, { quote: 'asc' }],
+      select: { quote: true, rate: true, source: true, fetchedAt: true },
+    });
+    return {
+      base,
+      rates: rates.map((r) => ({
+        quote: r.quote,
+        rate: Number(r.rate),
+        source: r.source,
+        fetchedAt: r.fetchedAt.toISOString(),
+      })),
+    };
+  }
+
+  @Post('fx-rates')
+  @RequirePermission('advertising', 'edit')
+  @ApiOperation({ summary: 'Sets an operator-owned rate (never overwritten by the auto-refresh)' })
+  public async setFxRate(@Body() input: SetFxRateDto) {
+    await this.fxRateService.setManualRate(input.quote, input.rate);
+    return { ok: true };
   }
 
   @Get('campaigns')

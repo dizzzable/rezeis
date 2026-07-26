@@ -100,6 +100,9 @@ interface MockAuthConfiguration {
   readonly jwtSecret: string;
   readonly jwtExpiresIn: '12h';
   readonly cryptKey: string;
+  /** Internal-signature settings live on the same config namespace. */
+  readonly internalSharedSecret: string;
+  readonly internalSignatureMode: 'off' | 'log' | 'require';
 }
 
 const REQUEST_METADATA = {
@@ -226,7 +229,13 @@ function createAdminAuthService(input: {
     },
   };
   const service = new AdminAuthService(
-    { jwtSecret: 'secret', jwtExpiresIn: '12h', cryptKey: 'crypt-key' } as MockAuthConfiguration,
+    {
+      jwtSecret: 'secret',
+      jwtExpiresIn: '12h',
+      cryptKey: 'crypt-key',
+      internalSharedSecret: '',
+      internalSignatureMode: 'off',
+    } as MockAuthConfiguration,
     jwtService as never,
     passwordHashService as never,
     prismaService as never,

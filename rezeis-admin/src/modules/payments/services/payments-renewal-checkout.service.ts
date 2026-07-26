@@ -28,6 +28,7 @@ import { PaymentProviderExecutionService } from './payment-provider-execution.se
 import { claimForImmediateFulfillment, releaseFulfillmentClaim } from './payment-fulfillment-claim.util';
 import { PaymentSubscriptionMutationService } from './payment-subscription-mutation.service';
 import { SavedPaymentMethodService } from './saved-payment-method.service';
+import { PaymentReconciliationService } from './payment-reconciliation.service';
 
 const PROVIDER_CREATION_CLAIM_PREFIX = '__RENEWAL_PROVIDER_CREATE__:';
 
@@ -80,6 +81,7 @@ export class PaymentsRenewalCheckoutService {
     private readonly settingsService: SettingsService,
     private readonly accessModeGuard: AccessModeGuard,
     private readonly savedPaymentMethodService: SavedPaymentMethodService,
+    private readonly paymentReconciliationService: PaymentReconciliationService,
   ) {}
 
   public async renewalCheckout(
@@ -291,6 +293,9 @@ export class PaymentsRenewalCheckoutService {
       const finalTransaction =
         (await this.prismaService.transaction.findUnique({ where: { id: transaction.id } })) ??
         completedTransaction;
+      // No post-fulfilment hooks on a zero-total renewal — see the same decision
+      // in PaymentsCheckoutService: no money moved, and a 0-value AdConversion
+      // would burn the user's unique conversion slot.
       return mapCheckoutResponse({
         transaction: finalTransaction,
         checkoutUrl: null,
@@ -457,6 +462,8 @@ export class PaymentsRenewalCheckoutService {
         const finalTransaction =
           (await this.prismaService.transaction.findUnique({ where: { id: transaction.id } })) ??
           completedTransaction;
+        // Auto-renew charge on a saved card: money captured here, hooks owed here.
+        await this.paymentReconciliationService.runPostFulfillmentHooksBestEffort(finalTransaction);
         return mapCheckoutResponse({
           transaction: finalTransaction,
           checkoutUrl: null,

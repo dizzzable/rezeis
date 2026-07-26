@@ -12,6 +12,7 @@ import { firstValueFrom } from 'rxjs';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.interface';
 import { RequestMetadataInterface } from '../../auth/interfaces/request-metadata.interface';
+import { PaymentReconciliationService } from './payment-reconciliation.service';
 import { readGatewaySettings } from '../utils/payment-gateway-settings.util';
 import { redactPaymentDiagnosticMessage } from '../utils/payment-provider-error.util';
 import {
@@ -66,6 +67,7 @@ export class PaymentRefundService {
     private readonly prismaService: PrismaService,
     private readonly httpService: HttpService,
     private readonly redactionService: PaymentWebhookPayloadRedactionService,
+    private readonly paymentReconciliationService: PaymentReconciliationService,
   ) {}
 
   /** Eligibility snapshot used to enable/disable the panel's refund control. */
@@ -238,6 +240,38 @@ export class PaymentRefundService {
       `Refund issued by admin ${input.currentAdmin.id} for transaction ${transaction.id}: ` +
         `${amountValue} ${transaction.currency} (refundId=${refundId}, status=${providerStatus})`,
     );
+
+    // Reverse the side-effects here rather than only on a `refund.succeeded`
+    // webhook. Not every gateway sends one, and a refund the operator issues in
+    // the provider's own dashboard never produces one at all — the partner kept
+    // the commission, the income stayed declared to the tax service and the
+    // advertising revenue stood forever. Only for a FULL refund: a partial one
+    // must not wipe an all-or-nothing reversal, which is the same rule the
+    // webhook path applies. Idempotent, so a webhook arriving afterwards is a
+    // no-op, and best-effort, so the refund itself is never reported as failed
+    // after the money has already gone back.
+    const paidAmount = Number(transaction.amount.toString());
+    const fullyRefunded =
+      countsTowardsBalance &&
+      Number.isFinite(paidAmount) &&
+      paidAmount > 0 &&
+      refundedTotal >= paidAmount - 0.000001;
+    if (fullyRefunded) {
+      try {
+        const fresh = await this.prismaService.transaction.findUnique({
+          where: { id: transaction.id },
+        });
+        if (fresh !== null) {
+          await this.paymentReconciliationService.reverseFulfilledPayment(fresh, providerStatus);
+        }
+      } catch (error: unknown) {
+        this.logger.error(
+          `Refund reversal failed for transaction ${transaction.id}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
 
     return {
       transactionId: transaction.id,

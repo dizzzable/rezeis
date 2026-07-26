@@ -70,8 +70,15 @@ export interface EmailPolicyResult {
   readonly reason?: 'disposable' | 'no_mx' | 'not_allowlisted';
 }
 
-/** Outcome of resolving a verified external profile to an account decision. */
+/**
+ * Outcome of resolving a verified external profile to an account decision.
+ *
+ * `created` marks the branch that actually minted a new account. It is NOT the
+ * same as `action: 'finish_setup'`, which is also returned for accounts that
+ * already existed but have never finished setup — anything keyed on the action
+ * alone would treat a months-old customer as a fresh signup.
+ */
 export type ExternalAuthResolution =
   | { readonly action: 'login'; readonly userId: string }
-  | { readonly action: 'finish_setup'; readonly userId: string }
+  | { readonly action: 'finish_setup'; readonly userId: string; readonly created?: boolean }
   | { readonly action: 'denied' };
