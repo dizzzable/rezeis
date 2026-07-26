@@ -24,6 +24,16 @@ export interface TrialSettings {
   readonly requireTelegramLink: boolean;
 }
 
+/**
+ * The claim-limit refusal message, shared by the guard that throws it and the
+ * edge service that turns it back into a reason.
+ *
+ * It lives here because that coupling used to be two copies of an English
+ * sentence in different modules: rewording, localizing or wrapping the throw
+ * would have silently regressed the cabinet to a bare 400 with no test failing.
+ */
+export const TRIAL_CLAIM_LIMIT_MESSAGE = 'User has reached the trial claim limit';
+
 export const DEFAULT_TRIAL_SETTINGS: TrialSettings = {
   maxClaims: 1,
   free: true,

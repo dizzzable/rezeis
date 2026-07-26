@@ -7,7 +7,7 @@ import {
 import { PlanAvailability, Prisma, SubscriptionStatus } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
-import { readTrialSettings } from '../../plans/utils/trial-settings.util';
+import { readTrialSettings, TRIAL_CLAIM_LIMIT_MESSAGE } from '../../plans/utils/trial-settings.util';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
 
 interface ToggleStatusInput {
@@ -156,7 +156,7 @@ export class SubscriptionMutationsService {
       where: { userId: input.userId, isTrial: true },
     });
     if (priorClaims >= maxClaims) {
-      throw new BadRequestException('User has reached the trial claim limit');
+      throw new BadRequestException(TRIAL_CLAIM_LIMIT_MESSAGE);
     }
 
     const now = new Date();
