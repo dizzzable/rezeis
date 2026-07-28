@@ -116,6 +116,7 @@ export const en = {
       automations: 'Automations',
       analytics: 'Analytics',
       plans: 'Plans',
+      tariffConstructor: 'Tariff constructor',
       addOns: 'Add-ons',
       promocodes: 'Promo codes',
       broadcast: 'Broadcast',
