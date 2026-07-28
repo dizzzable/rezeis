@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { ArgumentsHost, BadRequestException, NotFoundException } from '@nestjs/common';
+import { ArgumentsHost, BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 
 import { AdminSafeExceptionFilter } from '../src/common/filters/admin-safe-exception.filter';
 
@@ -132,6 +132,29 @@ describe('AdminSafeExceptionFilter', () => {
       'The user has reached the maximum number of active subscriptions.',
     );
     assert.equal(body.requestId, 'request.safe-limit-1');
+  });
+
+  it('preserves the safe paid-user deletion conflict contract', () => {
+    const captured = runFilter(
+      new ConflictException({
+        code: 'USER_DELETE_PROTECTED_HISTORY',
+        message:
+          'This user has protected payment, partner-ledger, or reward history and cannot be permanently deleted. Block the account instead; audit records must be preserved.',
+      }),
+      {
+        originalUrl: '/api/admin/users/12345',
+        headers: { 'x-request-id': 'request.safe-user-delete-1' },
+      },
+    );
+
+    assert.equal(captured.statusCode, 409);
+    const body = assertResponseBody(captured.body);
+    assert.equal(body.code, 'USER_DELETE_PROTECTED_HISTORY');
+    assert.equal(body.errorCode, 'USER_DELETE_PROTECTED_HISTORY');
+    assert.equal(
+      body.message,
+      'This user has protected payment, partner-ledger, or reward history and cannot be permanently deleted. Block the account instead; audit records must be preserved.',
+    );
   });
 
   it('does not forward non-allowlisted product codes from exception bodies', () => {

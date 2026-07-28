@@ -3418,7 +3418,7 @@ function DeleteButton({ telegramId }: { telegramId: string }) {
   const mutation = useMutation({
     mutationFn: () => api.delete(`/admin/users/${telegramId}`),
     onSuccess: () => toast.success(t('userDetailPanel.toasts.userDeleted')),
-    onError: () => toast.error(t('userDetailPanel.toasts.deleteFailed')),
+    onError: (error) => toast.error(getErrorMessage(error, t('userDetailPanel.toasts.deleteFailed'))),
   })
 
   // Gate the irreversible delete (also wipes the Remnawave panel profile)

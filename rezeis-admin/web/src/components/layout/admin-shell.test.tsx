@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { Route, Routes } from 'react-router-dom'
+import { Route, Routes } from 'react-router'
 
 import AdminShell from '@/components/layout/admin-shell'
 import { useSidebarStore } from '@/stores/sidebar-store'

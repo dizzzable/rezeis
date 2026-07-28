@@ -2205,7 +2205,7 @@ export const en = {
       warning: 'This action is destructive',
       typeToConfirm: 'Type {{value}} to confirm.',
       deleteScopeNote:
-        'Bulk delete affects the local database only — Remnawave panel profiles are NOT removed.',
+        'Accounts with payment or reward history are not deleted and return an exact reason. Clean local accounts are deleted, followed by best-effort Remnawave cleanup.',
     },
     runOn_one: 'Run on {{count}} user',
     runOn_other: 'Run on {{count}} users',

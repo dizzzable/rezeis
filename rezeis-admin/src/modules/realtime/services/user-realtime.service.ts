@@ -114,7 +114,7 @@ export class UserRealtimeService {
         type: event.type,
         category: projection.category,
         severity: projection.severity ?? event.severity,
-        message: event.message,
+        message: projection.message ?? event.message,
         metadata: projected,
         timestamp: event.timestamp,
       };

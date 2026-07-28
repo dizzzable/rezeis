@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Link } from 'react-router-dom'
+import { Link } from 'react-router'
 import { ArrowDownAZ, ArrowUpAZ, Copy, Filter, MoreHorizontal, Search, Settings2, UserSearch } from 'lucide-react'
 import { toast } from 'sonner'
 

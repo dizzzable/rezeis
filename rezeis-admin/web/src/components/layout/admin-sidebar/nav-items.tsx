@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from 'react'
 import type { ComponentType, SVGProps } from 'react'
 import { useTranslation } from 'react-i18next'
-import { useLocation } from 'react-router-dom'
+import { useLocation } from 'react-router'
 import {
   DndContext,
   closestCorners,

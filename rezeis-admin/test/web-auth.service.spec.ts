@@ -596,6 +596,26 @@ describe('WebAuthService', () => {
     assert.equal(userDeletes.length, 0);
   });
 
+  it('telegramClaim preserves a shell with referral point exchange history', async () => {
+    const { prisma, userDeletes } = createTelegramClaimPrismaMock({
+      loginNormalized: 'web-user',
+      account: { userId: 'A', passwordHash: 'hashed:plain-password' },
+      targetUser: { id: 'A', telegramId: null },
+      telegramOwner: { id: 'B' },
+      referralPointsExchangeCount: 1,
+    });
+    const service = createService({ prisma });
+
+    const result = await service.telegramClaim({
+      telegramId: '123',
+      login: 'web-user',
+      password: 'plain-password',
+    });
+
+    assert.deepStrictEqual(result, { status: 'needs_admin_merge' });
+    assert.equal(userDeletes.length, 0);
+  });
+
   it('telegramClaim returns a generic failure on wrong password or unknown login', async () => {
     const wrongPw = createTelegramClaimPrismaMock({
       loginNormalized: 'web-user',
@@ -906,6 +926,7 @@ function createTelegramClaimPrismaMock(opts: {
   readonly targetUser?: { readonly id: string; readonly telegramId: bigint | null };
   readonly telegramOwner?: { readonly id: string } | null;
   readonly shellEmpty?: boolean;
+  readonly referralPointsExchangeCount?: number;
 }): {
   readonly prisma: PrismaMock;
   readonly userUpdates: Array<{ where: unknown; data: unknown }>;
@@ -951,6 +972,9 @@ function createTelegramClaimPrismaMock(opts: {
     subscription: { count: async () => 0 },
     referralReward: { count: async () => 0 },
     promocodeActivation: { count: async () => 0 },
+    referralPointsExchange: {
+      count: async () => opts.referralPointsExchangeCount ?? 0,
+    },
     partnerTransaction: { count: async () => 0 },
     partnerReferral: { count: async () => 0 },
     referral: { count: async () => 0 },

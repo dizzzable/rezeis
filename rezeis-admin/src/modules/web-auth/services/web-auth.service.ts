@@ -418,6 +418,7 @@ export class WebAuthService {
       nonTrialSubscriptions,
       referralRewards,
       promocodeActivations,
+      referralPointsExchanges,
       partnerLedgerEntries,
       partnerReferralEdges,
       referralsGiven,
@@ -428,6 +429,7 @@ export class WebAuthService {
       tx.subscription.count({ where: { userId, isTrial: false } }),
       tx.referralReward.count({ where: { userId } }),
       tx.promocodeActivation.count({ where: { userId } }),
+      tx.referralPointsExchange.count({ where: { userId } }),
       tx.partnerTransaction.count({ where: { referralUserId: userId } }),
       tx.partnerReferral.count({ where: { referralUserId: userId } }),
       tx.referral.count({ where: { referrerId: userId } }),
@@ -439,6 +441,7 @@ export class WebAuthService {
       nonTrialSubscriptions === 0 &&
       referralRewards === 0 &&
       promocodeActivations === 0 &&
+      referralPointsExchanges === 0 &&
       partnerLedgerEntries === 0 &&
       partnerReferralEdges === 0 &&
       referralsGiven === 0

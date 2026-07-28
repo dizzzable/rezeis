@@ -1,6 +1,6 @@
 import type { JSX } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Navigate, Outlet, useLocation } from 'react-router-dom'
+import { Navigate, Outlet, useLocation } from 'react-router'
 import { PageTabs, type PageTabItem } from '@/components/layout/page-tabs'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'

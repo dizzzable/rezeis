@@ -15,7 +15,7 @@
  * is exactly one source of truth for user-detail UX.
  */
 import { lazy, Suspense } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { useNavigate, useParams } from 'react-router'
 import { useTranslation } from 'react-i18next'
 import { ArrowLeft } from 'lucide-react'
 

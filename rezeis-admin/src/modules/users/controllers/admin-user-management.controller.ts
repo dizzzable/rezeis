@@ -55,6 +55,7 @@ import { AdjustUserPartnerBalanceDto } from '../dto/adjust-user-partner-balance.
 import { AdjustUserPointsDto } from '../dto/adjust-user-points.dto';
 import { UpdatePartnerSettingsDto } from '../dto/update-partner-settings.dto';
 import { UpdateUserInviteSettingsDto } from '../dto/update-user-invite-settings.dto';
+import { UserDeletionService } from '../services/user-deletion.service';
 import { resolveIdentityKind } from '../utils/identity-kind.util';
 
 @Controller('admin/users')
@@ -74,6 +75,7 @@ export class AdminUserManagementController {
     private readonly remnawaveApiService: RemnawaveApiService,
     private readonly userNotifications: UserNotificationsService,
     private readonly rbacService: RbacService,
+    private readonly userDeletionService: UserDeletionService,
   ) {}
 
   // ── User Profile ────────────────────────────────────────────────────────────
@@ -545,44 +547,9 @@ export class AdminUserManagementController {
   @RequirePermission('users', 'delete')
   public async deleteUser(@Param('telegramId') telegramId: string, @CurrentAdmin() admin: CurrentAdminInterface, @Req() req: Request) {
     const user = await this.findUserByTelegramId(telegramId);
-    // Best-effort: remove this user's Remnawave panel profiles BEFORE the row
-    // deletion. The async `ProfileSyncJob(DELETE)` path can't be used here —
-    // the subscription rows it reads are about to be hard-deleted (Cascade) —
-    // so we call the panel inline. Failures are logged and never block the
-    // delete (the operator action must not hard-fail on a panel hiccup). See
-    // `.kiro/specs/trial-aware-profile-cleanup`.
-    const profileSubs = await this.prismaService.subscription.findMany({
-      where: { userId: user.id, remnawaveId: { not: null } },
-      select: { id: true, remnawaveId: true },
-    });
-    for (const sub of profileSubs) {
-      if (sub.remnawaveId === null) continue;
-      try {
-        await this.remnawaveApiService.deletePanelUser(sub.remnawaveId);
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : 'Unknown error';
-        this.logger.warn(
-          `deleteUser: failed to delete panel profile ${sub.remnawaveId} for subscription ${sub.id}: ${message}`,
-        );
-      }
-    }
-    // A user delete is a full removal, but three relations are `onDelete:
-    // Restrict` (financial / credit history): Transaction, PromocodeActivation
-    // and ReferralReward. Left in place they raise a FK violation (P2003) that
-    // surfaces as a 400 "Ошибка удаления". Everything else (subscriptions,
-    // web account, trial grant, referrals, partner, support tickets, …) is
-    // `Cascade`, so removing these three first lets the user delete cleanly.
-    await this.prismaService.$transaction(async (tx) => {
-      await tx.referralReward.deleteMany({ where: { userId: user.id } });
-      await tx.promocodeActivation.deleteMany({ where: { userId: user.id } });
-      // Deleting the transactions cascades their TransactionItem rows, which
-      // are `Restrict` against subscriptions — clearing them also unblocks the
-      // cascade delete of this user's subscriptions.
-      await tx.transaction.deleteMany({ where: { userId: user.id } });
-      await tx.user.delete({ where: { id: user.id } });
-    });
+    await this.userDeletionService.deleteUser(user.id);
     await this.auditLog(admin, req, 'user.deleted', { userId: user.id, telegramId });
-    this.events.warn(EVENT_TYPES.USER_DELETED, 'USER', `User deleted: ${telegramId}`, { userId: user.id, telegramId, adminId: admin.id });
+    this.events.warn(EVENT_TYPES.USER_DELETED, 'USER', 'User account deleted', { userId: user.id, telegramId, adminId: admin.id });
     return { deleted: true };
   }
 

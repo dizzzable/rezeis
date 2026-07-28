@@ -49,6 +49,8 @@ export interface UserRealtimeEventInterface {
 export interface UserEventProjection {
   readonly category: UserRealtimeCategory;
   readonly severity?: SystemEventSeverity;
+  /** Optional fixed end-user message when the admin event text is not public-safe. */
+  readonly message?: string;
   /**
    * Decide whether the admin event belongs to the user identified by
    * `userId` / `telegramId`. Return the sanitised metadata to ship, or
@@ -96,6 +98,19 @@ function matchesUser(
  * ids, no admin ids, no provider tokens.
  */
 export const USER_EVENT_WHITELIST: Readonly<Record<string, UserEventProjection>> = {
+  // Account lifecycle. This is intentionally terminal for the cabinet: the
+  // client closes EventSource, clears its session, and redirects to sign-in.
+  // Never project admin identity or any deleted-user PII.
+  'user.deleted': {
+    category: 'NOTIFICATION',
+    severity: 'WARNING',
+    message: 'Account deleted',
+    project: (metadata, target) => {
+      if (!matchesUser(metadata, target)) return null;
+      return {};
+    },
+  },
+
   // Subscription lifecycle
   'subscription.created': {
     category: 'SUBSCRIPTION',

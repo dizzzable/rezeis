@@ -1,6 +1,6 @@
 {
   "name": "rezeis-admin",
-  "version": "0.9.6.72",
+  "version": "0.9.6.73",
   "description": "Rezeis Admin NestJS microservice baseline",
   "private": true,
   "license": "MIT",
@@ -121,6 +121,7 @@
     ]
   },
   "overrides": {
+    "brace-expansion": "5.0.8",
     "fast-uri": "3.1.4",
     "find-my-way": "9.7.0",
     "multer": "2.2.0",

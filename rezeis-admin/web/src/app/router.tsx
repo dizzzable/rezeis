@@ -1,5 +1,5 @@
 /* eslint-disable react-refresh/only-export-components */
-import { createBrowserRouter, Navigate, useLocation } from 'react-router-dom';
+import { createBrowserRouter, Navigate, useLocation } from 'react-router';
 import { lazy as reactLazy, Suspense, type ComponentType, type LazyExoticComponent } from 'react';
 import ProtectedRoute from './protected-route';
 import AdminShell from '@/components/layout/admin-shell';

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { act, renderHook } from '@testing-library/react'
-import { MemoryRouter, useLocation } from 'react-router-dom'
+import { MemoryRouter, useLocation } from 'react-router'
 import type { ReactNode } from 'react'
 
 import { useTabSync } from './use-tab-sync'

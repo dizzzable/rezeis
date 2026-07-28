@@ -1,6 +1,6 @@
 import type { JSX } from 'react'
 import { useMemo } from 'react'
-import { useLocation, useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 
 function isItemActive(currentLocation: string, pathname: string, item: PageTabItem): boolean {

@@ -5,6 +5,7 @@ import {
   EVENT_TYPES,
   SystemEventsService,
 } from '../../../common/services/system-events.service';
+import { UserDeletionService } from './user-deletion.service';
 
 export type BulkUserAction = 'block' | 'unblock' | 'delete' | 'set_language' | 'set_max_subscriptions';
 
@@ -59,6 +60,7 @@ export class BulkUserOperationsService {
   public constructor(
     private readonly prismaService: PrismaService,
     private readonly events: SystemEventsService,
+    private readonly userDeletionService: UserDeletionService,
   ) {}
 
   public async execute(input: BulkUserOperationInputInterface): Promise<BulkUserOperationResultInterface> {
@@ -202,8 +204,8 @@ export class BulkUserOperationsService {
         return { userId, status: 'ok' };
 
       case 'delete':
-        await this.prismaService.user.delete({ where: { id: user.id } });
-        this.events.warn(EVENT_TYPES.USER_DELETED, 'USER', `User bulk-deleted: ${user.id}`, {
+        await this.userDeletionService.deleteUser(user.id);
+        this.events.warn(EVENT_TYPES.USER_DELETED, 'USER', 'User account deleted', {
           userId: user.id,
           telegramId: user.telegramId?.toString() ?? null,
           adminId: input.adminId,

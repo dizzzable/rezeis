@@ -1,5 +1,5 @@
 import { useTranslation } from 'react-i18next'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router'
 import { LogOut, Menu, Palette, Search } from 'lucide-react'
 
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'

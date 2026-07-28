@@ -1,5 +1,5 @@
 import { useTranslation } from 'react-i18next'
-import { NavLink } from 'react-router-dom'
+import { NavLink } from 'react-router'
 import { useQuery } from '@tanstack/react-query'
 import { useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'

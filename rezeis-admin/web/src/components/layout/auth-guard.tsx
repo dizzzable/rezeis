@@ -1,7 +1,7 @@
 import { useEffect, type JSX, type ReactNode } from 'react'
 import { LoaderCircle, Shield } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import { Navigate } from 'react-router-dom'
+import { Navigate } from 'react-router'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { useAuthMe } from '@/features/auth/use-auth-me'

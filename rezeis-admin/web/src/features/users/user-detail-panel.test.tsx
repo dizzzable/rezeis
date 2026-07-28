@@ -58,6 +58,17 @@ describe('UserDetailPanel accessibility', () => {
 
     await user.click(await screen.findByRole('button', { name: 'Delete user?' }))
 
+    expect(
+      screen.getByText(
+        'This action is irreversible. Accounts with payments or other protected history cannot be deleted.',
+      ),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByText(
+        "Financial and reward history is never deleted—block that user instead. A clean local account is deleted before best-effort Remnawave cleanup.",
+      ),
+    ).toBeInTheDocument()
+
     // The destructive action is disabled until the confirmation matches.
     const confirmAction = await screen.findByRole('button', { name: 'Delete forever' })
     expect(confirmAction).toBeDisabled()

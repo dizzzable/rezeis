@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router'
 import { consumeReturnTo } from '@/lib/return-to'
 import { useTranslation } from 'react-i18next'
 import { useQuery, useMutation } from '@tanstack/react-query'

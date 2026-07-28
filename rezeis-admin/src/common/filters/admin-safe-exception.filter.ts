@@ -35,6 +35,7 @@ const SAFE_PRODUCT_CODES = new Set<string>([
   'PAYMENT_DRAFT_TRIAL_UNSUPPORTED',
   'PARTNER_BALANCE_DISABLED',
   'PARTNER_BALANCE_NOT_AVAILABLE',
+  'USER_DELETE_PROTECTED_HISTORY',
 ]);
 const SENSITIVE_HTTP_TEXT_PATTERNS = [
   /\b(?:postgres|mysql|mongodb|redis|amqp|http|https):\/\/\S+/iu,

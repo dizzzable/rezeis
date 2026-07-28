@@ -18,6 +18,7 @@ import { AdminUsersController } from './controllers/admin-users.controller';
 import { AdminUsersService } from './services/admin-users.service';
 import { RegistrationExportService } from './services/registration-export.service';
 import { BulkUserOperationsService } from './services/bulk-user-operations.service';
+import { UserDeletionService } from './services/user-deletion.service';
 
 /**
  * Admin users module — full user management surface.
@@ -40,6 +41,6 @@ import { BulkUserOperationsService } from './services/bulk-user-operations.servi
     SubscriptionsModule,
   ],
   controllers: [AdminUsersController, AdminUserManagementController, AdminUserSubscriptionsController, AdminUserWebController, AdminBulkUsersController],
-  providers: [AdminUsersService, BulkUserOperationsService, RegistrationExportService],
+  providers: [AdminUsersService, BulkUserOperationsService, RegistrationExportService, UserDeletionService],
 })
 export class UsersModule {}

@@ -13,7 +13,7 @@
  */
 
 import { useState } from 'react'
-import { useLocation, useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router'
 
 export interface UseTabSyncResult<TTab extends string> {
   readonly activeTab: TTab
