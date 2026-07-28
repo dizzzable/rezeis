@@ -83,6 +83,7 @@ import { UpdateCheckerModule } from './modules/update-checker/update-checker.mod
 import { UsersModule } from './modules/users/users.module';
 import { WebAuthModule } from './modules/web-auth/web-auth.module';
 import { WebhooksModule } from './modules/webhooks/webhooks.module';
+import { TariffConstructorModule } from './modules/tariff-constructor/tariff-constructor.module';
 
 /**
  * Configures the root NestJS application module.
@@ -190,6 +191,7 @@ import { WebhooksModule } from './modules/webhooks/webhooks.module';
     UsersModule,
     WebAuthModule,
     WebhooksModule,
+    TariffConstructorModule,
   ],
   controllers: [AppController],
   providers: [
