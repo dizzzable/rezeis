@@ -95,6 +95,29 @@ const minimumSelections = [
 ];
 
 describe('TariffConstructorService', () => {
+  it('locks the singleton before draft replacement reads', async () => {
+    const order: string[] = [];
+    const tx = {
+      $executeRaw: async (query: { strings: readonly string[] }) => { order.push('lock'); assert.match(query.strings.join(''), /pg_advisory_xact_lock\(hashtext/); return 1; },
+      plan: { findFirst: async () => ({ id: 'plan-1' }) },
+      tariffConstructor: { findUnique: async () => { order.push('read'); return null; }, create: async () => { throw new Error('stop-after-order'); } },
+    };
+    const service = new TariffConstructorService({ $transaction: async (callback: (client: typeof tx) => unknown) => callback(tx) } as never);
+    await assert.rejects(service.saveDraft({ basePlanId: 'plan-1', durations: [{ days: 30, currency: Currency.RUB, baseAmount: '1' }], modules: revision.modules.map((module) => ({ type: module.type, minValue: module.minValue, maxValue: module.maxValue, defaultValue: module.defaultValue, step: module.step, prices: [{ days: 30, currency: Currency.RUB, perStepAmount: '1' }] })) }, { id: 'admin-1' } as never, {} as never), /stop-after-order/);
+    assert.deepEqual(order, ['lock', 'read']);
+  });
+
+  it('locks the singleton before publish draft/version reads', async () => {
+    const order: string[] = [];
+    const tx = {
+      $executeRaw: async (query: { strings: readonly string[] }) => { order.push('lock'); assert.match(query.strings.join(''), /pg_advisory_xact_lock\(hashtext/); return 1; },
+      tariffConstructor: { findUnique: async () => { order.push('read'); return null; } },
+    };
+    const service = new TariffConstructorService({ $transaction: async (callback: (client: typeof tx) => unknown) => callback(tx) } as never);
+    await assert.rejects(service.publish({ id: 'admin-1' } as never, {} as never), { message: 'TARIFF_CONSTRUCTOR_DRAFT_EMPTY' });
+    assert.deepEqual(order, ['lock', 'read']);
+  });
+
   it('charges the duration base exactly once at minimum and adds independent module steps', async () => {
     const service = createService();
     const minimum = await service.quote({
@@ -170,6 +193,21 @@ describe('TariffConstructorService', () => {
         selections: minimumSelections,
       }),
       { name: 'ConflictException', message: 'TARIFF_CONSTRUCTOR_REVISION_MISMATCH' },
+    );
+  });
+
+  it('rejects literal zero module limits for the MVP', async () => {
+    await assert.rejects(
+      createService().quote({
+        revisionId: revision.id,
+        durationDays: 30,
+        currency: Currency.RUB,
+        selections: [
+          { type: TariffConstructorModuleType.TRAFFIC, value: 0 },
+          { type: TariffConstructorModuleType.DEVICES, value: 1 },
+        ],
+      }),
+      { name: 'BadRequestException' },
     );
   });
 

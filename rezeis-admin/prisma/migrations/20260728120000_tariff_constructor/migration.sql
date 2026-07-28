@@ -34,7 +34,7 @@ CREATE TABLE "tariff_constructor_modules" (
   "step" INTEGER NOT NULL,
   CONSTRAINT "tariff_constructor_modules_pkey" PRIMARY KEY ("id"),
   CONSTRAINT "tariff_constructor_modules_range_check" CHECK (
-    "min_value" >= 0 AND
+    "min_value" >= 1 AND
     "max_value" >= "min_value" AND
     "default_value" BETWEEN "min_value" AND "max_value" AND
     "step" > 0 AND
@@ -84,7 +84,7 @@ CREATE TABLE "tariff_constructor_revision_modules" (
   "step" INTEGER NOT NULL,
   CONSTRAINT "tariff_constructor_revision_modules_pkey" PRIMARY KEY ("id"),
   CONSTRAINT "tariff_constructor_revision_modules_range_check" CHECK (
-    "min_value" >= 0 AND
+    "min_value" >= 1 AND
     "max_value" >= "min_value" AND
     "default_value" BETWEEN "min_value" AND "max_value" AND
     "step" > 0 AND
@@ -95,6 +95,7 @@ CREATE TABLE "tariff_constructor_revision_modules" (
 
 CREATE TABLE "tariff_constructor_revision_module_prices" (
   "id" TEXT NOT NULL,
+  "revision_id" TEXT NOT NULL,
   "module_id" TEXT NOT NULL,
   "duration_id" TEXT NOT NULL,
   "amount" DECIMAL(20,8) NOT NULL,
@@ -104,6 +105,7 @@ CREATE TABLE "tariff_constructor_revision_module_prices" (
 
 CREATE UNIQUE INDEX "tariff_constructors_key_key" ON "tariff_constructors"("key");
 CREATE UNIQUE INDEX "tariff_constructors_published_revision_id_key" ON "tariff_constructors"("published_revision_id");
+CREATE UNIQUE INDEX "tariff_constructors_published_revision_id_id_key" ON "tariff_constructors"("published_revision_id", "id");
 CREATE INDEX "tariff_constructors_is_enabled_idx" ON "tariff_constructors"("is_enabled");
 CREATE INDEX "tariff_constructors_base_plan_id_idx" ON "tariff_constructors"("base_plan_id");
 CREATE UNIQUE INDEX "tariff_constructor_durations_constructor_id_days_currency_key" ON "tariff_constructor_durations"("constructor_id", "days", "currency");
@@ -113,12 +115,16 @@ CREATE INDEX "tariff_constructor_modules_constructor_id_idx" ON "tariff_construc
 CREATE UNIQUE INDEX "tariff_constructor_module_prices_module_id_duration_id_key" ON "tariff_constructor_module_prices"("module_id", "duration_id");
 CREATE INDEX "tariff_constructor_module_prices_duration_id_idx" ON "tariff_constructor_module_prices"("duration_id");
 CREATE UNIQUE INDEX "tariff_constructor_revisions_constructor_id_version_key" ON "tariff_constructor_revisions"("constructor_id", "version");
+CREATE UNIQUE INDEX "tariff_constructor_revisions_id_constructor_id_key" ON "tariff_constructor_revisions"("id", "constructor_id");
 CREATE INDEX "tariff_constructor_revisions_constructor_id_published_at_idx" ON "tariff_constructor_revisions"("constructor_id", "published_at");
 CREATE UNIQUE INDEX "tariff_constructor_revision_durations_revision_id_days_currency_key" ON "tariff_constructor_revision_durations"("revision_id", "days", "currency");
 CREATE INDEX "tariff_constructor_revision_durations_revision_id_idx" ON "tariff_constructor_revision_durations"("revision_id");
 CREATE UNIQUE INDEX "tariff_constructor_revision_modules_revision_id_type_key" ON "tariff_constructor_revision_modules"("revision_id", "type");
 CREATE INDEX "tariff_constructor_revision_modules_revision_id_idx" ON "tariff_constructor_revision_modules"("revision_id");
-CREATE UNIQUE INDEX "tariff_constructor_revision_module_prices_module_id_duration_id_key" ON "tariff_constructor_revision_module_prices"("module_id", "duration_id");
+CREATE UNIQUE INDEX "tariff_constructor_revision_durations_id_revision_id_key" ON "tariff_constructor_revision_durations"("id", "revision_id");
+CREATE UNIQUE INDEX "tariff_constructor_revision_modules_id_revision_id_key" ON "tariff_constructor_revision_modules"("id", "revision_id");
+CREATE UNIQUE INDEX "tariff_constructor_revision_module_prices_revision_id_module_id_duration_id_key" ON "tariff_constructor_revision_module_prices"("revision_id", "module_id", "duration_id");
+CREATE INDEX "tariff_constructor_revision_module_prices_module_id_revision_id_idx" ON "tariff_constructor_revision_module_prices"("module_id", "revision_id");
 CREATE INDEX "tariff_constructor_revision_module_prices_duration_id_idx" ON "tariff_constructor_revision_module_prices"("duration_id");
 
 ALTER TABLE "tariff_constructors" ADD CONSTRAINT "tariff_constructors_base_plan_id_fkey" FOREIGN KEY ("base_plan_id") REFERENCES "plans"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
@@ -129,9 +135,9 @@ ALTER TABLE "tariff_constructor_module_prices" ADD CONSTRAINT "tariff_constructo
 ALTER TABLE "tariff_constructor_revisions" ADD CONSTRAINT "tariff_constructor_revisions_constructor_id_fkey" FOREIGN KEY ("constructor_id") REFERENCES "tariff_constructors"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 ALTER TABLE "tariff_constructor_revision_durations" ADD CONSTRAINT "tariff_constructor_revision_durations_revision_id_fkey" FOREIGN KEY ("revision_id") REFERENCES "tariff_constructor_revisions"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 ALTER TABLE "tariff_constructor_revision_modules" ADD CONSTRAINT "tariff_constructor_revision_modules_revision_id_fkey" FOREIGN KEY ("revision_id") REFERENCES "tariff_constructor_revisions"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
-ALTER TABLE "tariff_constructor_revision_module_prices" ADD CONSTRAINT "tariff_constructor_revision_module_prices_module_id_fkey" FOREIGN KEY ("module_id") REFERENCES "tariff_constructor_revision_modules"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
-ALTER TABLE "tariff_constructor_revision_module_prices" ADD CONSTRAINT "tariff_constructor_revision_module_prices_duration_id_fkey" FOREIGN KEY ("duration_id") REFERENCES "tariff_constructor_revision_durations"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
-ALTER TABLE "tariff_constructors" ADD CONSTRAINT "tariff_constructors_published_revision_id_fkey" FOREIGN KEY ("published_revision_id") REFERENCES "tariff_constructor_revisions"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "tariff_constructor_revision_module_prices" ADD CONSTRAINT "tariff_constructor_revision_module_prices_module_revision_fkey" FOREIGN KEY ("module_id", "revision_id") REFERENCES "tariff_constructor_revision_modules"("id", "revision_id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "tariff_constructor_revision_module_prices" ADD CONSTRAINT "tariff_constructor_revision_module_prices_duration_revision_fkey" FOREIGN KEY ("duration_id", "revision_id") REFERENCES "tariff_constructor_revision_durations"("id", "revision_id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "tariff_constructors" ADD CONSTRAINT "tariff_constructors_published_revision_id_fkey" FOREIGN KEY ("published_revision_id", "id") REFERENCES "tariff_constructor_revisions"("id", "constructor_id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 CREATE FUNCTION prevent_tariff_constructor_revision_mutation() RETURNS trigger AS $$
 BEGIN
@@ -143,3 +149,7 @@ CREATE TRIGGER tariff_constructor_revisions_immutable BEFORE UPDATE OR DELETE ON
 CREATE TRIGGER tariff_constructor_revision_durations_immutable BEFORE UPDATE OR DELETE ON "tariff_constructor_revision_durations" FOR EACH ROW EXECUTE FUNCTION prevent_tariff_constructor_revision_mutation();
 CREATE TRIGGER tariff_constructor_revision_modules_immutable BEFORE UPDATE OR DELETE ON "tariff_constructor_revision_modules" FOR EACH ROW EXECUTE FUNCTION prevent_tariff_constructor_revision_mutation();
 CREATE TRIGGER tariff_constructor_revision_module_prices_immutable BEFORE UPDATE OR DELETE ON "tariff_constructor_revision_module_prices" FOR EACH ROW EXECUTE FUNCTION prevent_tariff_constructor_revision_mutation();
+
+-- Forward-only migration. If deployment fails before completion, restore the
+-- pre-migration database snapshot. Manual teardown must drop immutable triggers
+-- before their tables, then drop prevent_tariff_constructor_revision_mutation().

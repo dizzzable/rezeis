@@ -10,6 +10,7 @@ import { RequirePermission } from '../rbac/decorators/require-permission.decorat
 import { RbacGuard } from '../rbac/guards/rbac.guard';
 import {
   QuoteTariffConstructorDto,
+  CheckoutTariffConstructorDto,
   SaveTariffConstructorDraftDto,
   ToggleTariffConstructorDto,
 } from './dto/tariff-constructor.dto';
@@ -19,6 +20,8 @@ import {
   TariffConstructorQuoteOutput,
   TariffConstructorService,
 } from './tariff-constructor.service';
+import { InternalPaymentCheckoutInterface } from '../payments/interfaces/internal-payment-checkout.interface';
+import { TariffConstructorCheckoutService } from './tariff-constructor-checkout.service';
 
 @Controller('admin/tariff-constructors')
 @UseGuards(AdminJwtAuthGuard, RbacGuard)
@@ -69,7 +72,7 @@ export class AdminTariffConstructorController {
 @Controller('internal/tariff-constructor')
 @UseGuards(InternalAdminAuthGuard)
 export class InternalTariffConstructorController {
-  public constructor(private readonly service: TariffConstructorService) {}
+  public constructor(private readonly service: TariffConstructorService, private readonly checkoutService: TariffConstructorCheckoutService) {}
 
   @Get('manifest')
   public manifest(): Promise<TariffConstructorManifestOutput> {
@@ -79,5 +82,10 @@ export class InternalTariffConstructorController {
   @Post('quote')
   public quote(@Body() input: QuoteTariffConstructorDto): Promise<TariffConstructorQuoteOutput> {
     return this.service.quote(input);
+  }
+
+  @Post('checkout')
+  public checkout(@Body() input: CheckoutTariffConstructorDto): Promise<InternalPaymentCheckoutInterface> {
+    return this.checkoutService.checkout(input);
   }
 }

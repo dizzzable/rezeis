@@ -4,7 +4,6 @@ export const TARIFF_MODULE_TYPES = ['TRAFFIC', 'DEVICES'] as const
 
 const amount = z.string().trim().regex(/^\d+(?:\.\d{1,8})?$/, 'Enter a non-negative amount with up to 8 decimals.')
 const positiveInteger = z.number().int().min(1)
-const nonNegativeInteger = z.number().int().min(0)
 
 const durationSchema = z.object({
   days: positiveInteger,
@@ -20,9 +19,9 @@ const priceSchema = z.object({
 
 const moduleSchema = z.object({
   type: z.enum(TARIFF_MODULE_TYPES),
-  minValue: nonNegativeInteger,
-  maxValue: nonNegativeInteger,
-  defaultValue: nonNegativeInteger,
+  minValue: positiveInteger,
+  maxValue: positiveInteger,
+  defaultValue: positiveInteger,
   step: positiveInteger,
   prices: z.array(priceSchema).min(1),
 })

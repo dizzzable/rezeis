@@ -134,6 +134,7 @@ export class TariffConstructorService {
     this.validateDraft(input);
     return this.prisma.$transaction(async (tx) => {
       await this.assertActiveBasePlan(tx, input.basePlanId);
+      await this.lockSingleton(tx);
       const existing = await tx.tariffConstructor.findUnique({
         where: { key: SINGLETON_KEY },
       });
@@ -209,7 +210,9 @@ export class TariffConstructorService {
     actor: CurrentAdminInterface,
     requestMetadata: RequestMetadataInterface,
   ): Promise<{ revisionId: string; version: number }> {
-    return this.prisma.$transaction(async (tx) => {
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+      await this.lockSingleton(tx);
       const constructor = await tx.tariffConstructor.findUnique({
         where: { key: SINGLETON_KEY },
       });
@@ -258,6 +261,7 @@ export class TariffConstructorService {
         });
         await tx.tariffConstructorRevisionModulePrice.createMany({
           data: module.prices.map((price) => ({
+            revisionId: revision.id,
             moduleId: moduleRow.id,
             durationId: durationIds.get(price.durationId)!,
             amount: price.amount,
@@ -284,7 +288,13 @@ export class TariffConstructorService {
         }),
       });
       return { revisionId: revision.id, version: revision.version };
-    });
+      });
+    } catch (error: unknown) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        throw new ConflictException('TARIFF_CONSTRUCTOR_PUBLISH_CONFLICT');
+      }
+      throw error;
+    }
   }
 
   public async toggle(
@@ -401,7 +411,7 @@ export class TariffConstructorService {
     return row === null ? null : this.loadDraft(this.prisma, row);
   }
 
-  private async getEffectiveRevision(): Promise<Revision | null> {
+  public async getEffectiveRevision(): Promise<Revision | null> {
     const constructor = await this.prisma.tariffConstructor.findUnique({
       where: { key: SINGLETON_KEY },
       select: { isEnabled: true, publishedRevisionId: true },
@@ -511,6 +521,7 @@ export class TariffConstructorService {
   }): void {
     if (
       module.step <= 0 ||
+      module.minValue < 1 ||
       module.maxValue < module.minValue ||
       module.defaultValue < module.minValue ||
       module.defaultValue > module.maxValue ||
@@ -530,6 +541,12 @@ export class TariffConstructorService {
       select: { id: true },
     });
     if (plan === null) throw new BadRequestException('TARIFF_CONSTRUCTOR_BASE_PLAN_UNAVAILABLE');
+  }
+
+  private async lockSingleton(tx: Prisma.TransactionClient): Promise<void> {
+    await tx.$executeRaw(Prisma.sql`
+      SELECT pg_advisory_xact_lock(hashtext(${`rezeis:tariff-constructor:${SINGLETON_KEY}`}))
+    `);
   }
 
   private durationKey(days: number, currency: Currency): string {

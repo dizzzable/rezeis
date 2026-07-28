@@ -1,4 +1,4 @@
-import { Currency, TariffConstructorModuleType } from '@prisma/client';
+import { Currency, PaymentGatewayType, PurchaseChannel, PurchaseType, TariffConstructorModuleType } from '@prisma/client';
 import { Type } from 'class-transformer';
 import {
   ArrayMinSize,
@@ -6,9 +6,14 @@ import {
   IsBoolean,
   IsEnum,
   IsInt,
+  IsIn,
+  IsOptional,
   IsString,
+  IsUrl,
   Matches,
+  MaxLength,
   Min,
+  MinLength,
   ValidateNested,
 } from 'class-validator';
 
@@ -46,17 +51,17 @@ export class TariffConstructorModuleDto {
 
   @Type(() => Number)
   @IsInt()
-  @Min(0)
+  @Min(1)
   public minValue!: number;
 
   @Type(() => Number)
   @IsInt()
-  @Min(0)
+  @Min(1)
   public maxValue!: number;
 
   @Type(() => Number)
   @IsInt()
-  @Min(0)
+  @Min(1)
   public defaultValue!: number;
 
   @Type(() => Number)
@@ -99,7 +104,7 @@ export class TariffConstructorSelectionDto {
 
   @Type(() => Number)
   @IsInt()
-  @Min(0)
+  @Min(1)
   public value!: number;
 }
 
@@ -119,4 +124,48 @@ export class QuoteTariffConstructorDto {
   @ValidateNested({ each: true })
   @Type(() => TariffConstructorSelectionDto)
   public selections!: TariffConstructorSelectionDto[];
+}
+
+const CONSTRUCTOR_PURCHASE_TYPES = [PurchaseType.NEW, PurchaseType.ADDITIONAL] as const;
+const CONSTRUCTOR_CHANNELS = [PurchaseChannel.WEB, PurchaseChannel.TELEGRAM] as const;
+
+export class CheckoutTariffConstructorDto extends QuoteTariffConstructorDto {
+  @IsOptional() @IsString() @MinLength(1) @MaxLength(64)
+  public userId?: string;
+
+  @IsOptional() @IsString() @Matches(/^\d+$/)
+  public telegramId?: string;
+
+  @IsEnum(PurchaseType) @IsIn(CONSTRUCTOR_PURCHASE_TYPES)
+  public purchaseType!: 'NEW' | 'ADDITIONAL';
+
+  @IsEnum(PaymentGatewayType)
+  public gatewayType!: PaymentGatewayType;
+
+  @IsEnum(PurchaseChannel) @IsIn(CONSTRUCTOR_CHANNELS)
+  public channel!: 'WEB' | 'TELEGRAM';
+
+  @IsString() @MinLength(1) @MaxLength(128)
+  public idempotencyKey!: string;
+
+  @IsString() @Matches(/^\d+(?:\.\d{1,8})?$/)
+  public expectedAmount!: string;
+
+  @IsEnum(Currency)
+  public expectedCurrency!: Currency;
+
+  @IsOptional() @IsString() @IsUrl({ require_protocol: true, protocols: ['http', 'https'] }) @MaxLength(2048)
+  public successUrl?: string;
+
+  @IsOptional() @IsString() @IsUrl({ require_protocol: true, protocols: ['http', 'https'] }) @MaxLength(2048)
+  public failUrl?: string;
+
+  @IsOptional() @IsString() @MinLength(1) @MaxLength(64)
+  public savedPaymentMethodId?: string;
+
+  @IsOptional() @IsBoolean()
+  public savePaymentMethod?: boolean;
+
+  @IsOptional() @IsBoolean()
+  public savePaymentMethodConsent?: boolean;
 }

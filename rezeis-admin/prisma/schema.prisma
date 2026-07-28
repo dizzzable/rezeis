@@ -1636,7 +1636,7 @@ model TariffConstructor {
   createdAt           DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt           DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
 
-  publishedRevision TariffConstructorRevision? @relation("CurrentTariffConstructorRevision", fields: [publishedRevisionId], references: [id], onDelete: Restrict)
+  publishedRevision TariffConstructorRevision? @relation("CurrentTariffConstructorRevision", fields: [publishedRevisionId, id], references: [id, constructorId], onDelete: Restrict)
   basePlan          Plan                       @relation(fields: [basePlanId], references: [id], onDelete: Restrict)
   revisions          TariffConstructorRevision[] @relation("TariffConstructorRevisions")
   durations          TariffConstructorDuration[]
@@ -1644,6 +1644,7 @@ model TariffConstructor {
 
   @@index([isEnabled])
   @@index([basePlanId])
+  @@unique([publishedRevisionId, id])
   @@map("tariff_constructors")
 }
 
@@ -1707,6 +1708,7 @@ model TariffConstructorRevision {
   modules     TariffConstructorRevisionModule[]
 
   @@unique([constructorId, version])
+  @@unique([id, constructorId])
   @@index([constructorId, publishedAt])
   @@map("tariff_constructor_revisions")
 }
@@ -1722,6 +1724,7 @@ model TariffConstructorRevisionDuration {
   prices   TariffConstructorRevisionModulePrice[]
 
   @@unique([revisionId, days, currency])
+  @@unique([id, revisionId])
   @@index([revisionId])
   @@map("tariff_constructor_revision_durations")
 }
@@ -1739,20 +1742,23 @@ model TariffConstructorRevisionModule {
   prices   TariffConstructorRevisionModulePrice[]
 
   @@unique([revisionId, type])
+  @@unique([id, revisionId])
   @@index([revisionId])
   @@map("tariff_constructor_revision_modules")
 }
 
 model TariffConstructorRevisionModulePrice {
   id         String                     @id @default(cuid()) @map("id")
+  revisionId String                     @map("revision_id")
   moduleId   String                     @map("module_id")
   durationId String                     @map("duration_id")
   amount     Decimal                    @map("amount") @db.Decimal(20, 8)
 
-  module   TariffConstructorRevisionModule   @relation(fields: [moduleId], references: [id], onDelete: Restrict)
-  duration TariffConstructorRevisionDuration @relation(fields: [durationId], references: [id], onDelete: Restrict)
+  module   TariffConstructorRevisionModule   @relation(fields: [moduleId, revisionId], references: [id, revisionId], onDelete: Restrict)
+  duration TariffConstructorRevisionDuration @relation(fields: [durationId, revisionId], references: [id, revisionId], onDelete: Restrict)
 
-  @@unique([moduleId, durationId])
+  @@unique([revisionId, moduleId, durationId])
+  @@index([moduleId, revisionId])
   @@index([durationId])
   @@map("tariff_constructor_revision_module_prices")
 }
