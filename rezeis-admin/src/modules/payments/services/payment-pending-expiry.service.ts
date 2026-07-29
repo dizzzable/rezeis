@@ -123,6 +123,7 @@ export class PaymentPendingExpiryService {
     // them — keep PENDING so webhook (metadata.paymentId) or ops can resolve.
     if (
       tx.gatewayId.startsWith('__RENEWAL_PROVIDER_CREATE__:') ||
+      tx.gatewayId.startsWith('__CHECKOUT_PROVIDER_CREATE__:') ||
       tx.gatewayId.startsWith('claim:')
     ) {
       this.logger.warn(

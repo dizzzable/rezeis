@@ -33,6 +33,7 @@ import {
   Globe,
   LayoutTemplate,
   Bot,
+  Calculator,
 } from 'lucide-react';
 
 import type { SidebarGroupOrder } from '@/stores/sidebar-store';
@@ -89,7 +90,8 @@ export const navGroups: ReadonlyArray<NavGroup> = [
   {
     key: 'catalog',
     items: [
-      { key: 'plans', path: '/plans', icon: Package },
+      { key: 'plans', path: '/plans', icon: Package, requiredPermission: { resource: 'plans', action: 'view' } },
+      { key: 'tariffConstructor', path: '/plans/tariff-constructor', icon: Calculator, requiredPermission: { resource: 'plans', action: 'view' } },
       { key: 'addOns', path: '/add-ons', icon: Puzzle },
       { key: 'promocodes', path: '/promocodes', icon: Tag },
       { key: 'broadcast', path: '/broadcast', icon: Megaphone },

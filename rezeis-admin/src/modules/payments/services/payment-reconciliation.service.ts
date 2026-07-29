@@ -25,6 +25,7 @@ import { PaymentSubscriptionMutationService } from './payment-subscription-mutat
 import { MoyNalogQueueService } from './moy-nalog-queue.service';
 import { AdConversionService } from '../../advertising/services/ad-conversion.service';
 import { SavedPaymentMethodService } from './saved-payment-method.service';
+import { TARIFF_CONSTRUCTOR_SNAPSHOT_SOURCE } from '../../tariff-constructor/tariff-constructor-snapshot';
 @Injectable()
 export class PaymentReconciliationService {
   private readonly logger = new Logger(PaymentReconciliationService.name);
@@ -90,8 +91,12 @@ export class PaymentReconciliationService {
             ? Date.now() - transaction.fulfilledAt.getTime()
             : Number.POSITIVE_INFINITY;
         const STALE_CLAIM_MS = 2 * 60 * 1000;
+        const createsSubscription =
+          transaction.purchaseType === 'NEW' ||
+          (transaction.purchaseType === 'ADDITIONAL' &&
+            isConstructorSnapshot(transaction.planSnapshot));
         if (
-          transaction.purchaseType === 'NEW' &&
+          createsSubscription &&
           transaction.subscriptionId === null &&
           claimAgeMs >= STALE_CLAIM_MS
         ) {
@@ -104,8 +109,9 @@ export class PaymentReconciliationService {
             where: { id: transaction.id, fulfilledAt: transaction.fulfilledAt },
             data: { fulfilledAt: null },
           });
+          transaction.fulfilledAt = null;
         } else if (
-          transaction.purchaseType === 'NEW' &&
+          createsSubscription &&
           transaction.subscriptionId === null &&
           claimAgeMs < STALE_CLAIM_MS
         ) {
@@ -445,9 +451,9 @@ export class PaymentReconciliationService {
       );
     }
 
-    // Revoke the access this payment paid for. Only a NEW purchase can be
-    // reversed mechanically — the subscription exists *because* of this
-    // transaction, so expiring it restores the pre-payment state exactly.
+    // Revoke access only when this payment created a standalone subscription:
+    // normal NEW or strictly marked constructor ADDITIONAL. Ordinary ADDITIONAL
+    // add-ons mutate existing access and remain manual-review only.
     // RENEW/UPGRADE mutate a subscription that predates the payment (added days,
     // switched plan), and un-mixing that from later activity is guesswork, so
     // those are surfaced for manual handling instead of being half-undone.
@@ -501,7 +507,10 @@ export class PaymentReconciliationService {
     needsManualReview: boolean;
     audit: Record<string, unknown>;
   }> {
-    if (transaction.purchaseType !== 'NEW' || transaction.subscriptionId === null) {
+    const createdStandaloneSubscription =
+      transaction.purchaseType === 'NEW' ||
+      (transaction.purchaseType === 'ADDITIONAL' && isConstructorSnapshot(transaction.planSnapshot));
+    if (!createdStandaloneSubscription || transaction.subscriptionId === null) {
       return { revoked: false, needsManualReview: true, audit: {} };
     }
     let jobId: string | null = null;
@@ -783,6 +792,11 @@ export class PaymentReconciliationService {
       );
     }
   }
+}
+
+function isConstructorSnapshot(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  return (value as Record<string, unknown>)['snapshotSource'] === TARIFF_CONSTRUCTOR_SNAPSHOT_SOURCE;
 }
 
 /**

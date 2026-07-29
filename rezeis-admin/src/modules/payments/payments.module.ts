@@ -48,6 +48,7 @@ import { PartnerBalancePaymentService } from './services/partner-balance-payment
 import { TelegramStarsWebhookService } from './services/telegram-stars-webhook.service';
 import { SavedPaymentMethodService } from './services/saved-payment-method.service';
 import { PaymentMethodSetupService } from './services/payment-method-setup.service';
+import { PaymentCheckoutExecutorService } from './services/payment-checkout-executor.service';
 
 @Module({
   imports: [
@@ -106,7 +107,8 @@ import { PaymentMethodSetupService } from './services/payment-method-setup.servi
     AddOnFulfillmentRecoveryService,
     SavedPaymentMethodService,
     PaymentMethodSetupService,
+    PaymentCheckoutExecutorService,
   ],
-  exports: [SavedPaymentMethodService, PaymentMethodSetupService, PaymentsRenewalCheckoutService],
+  exports: [SavedPaymentMethodService, PaymentMethodSetupService, PaymentsRenewalCheckoutService, PaymentCheckoutExecutorService],
 })
 export class PaymentsModule {}

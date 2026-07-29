@@ -255,6 +255,24 @@ describe('PaymentReconciliationService reconciliation side effects', () => {
     assert.deepStrictEqual(state.markProcessedCalls, ['event-1']);
   });
 
+  it('recovers a stale constructor ADDITIONAL create-subscription claim', async () => {
+    const state = createState({
+      eventStatus: 'succeeded',
+      initialTransactionStatus: TransactionStatus.COMPLETED,
+      refreshedSubscriptionId: null,
+      refreshedFulfilledAt: new Date('2020-01-01T00:00:00.000Z'),
+      purchaseType: PurchaseType.ADDITIONAL,
+      planSnapshotOverride: constructorSnapshotMarker(),
+    });
+    const service = createService(state);
+
+    await service.reconcileWebhookEvent('event-1');
+
+    assert.equal(state.staleClaimReleased, true);
+    assert.deepStrictEqual(state.mutationCalls, ['tx-1']);
+    assert.deepStrictEqual(state.markProcessedCalls, ['event-1']);
+  });
+
   it('stores only bounded webhook failure diagnostics when reconciliation side effects fail', async () => {
     const rawProviderDiagnostic = 'provider reconciliation failed at https://provider.example/webhooks/0194f4b6-7cc7-7ecb-9f62-123456789abc with token=provider-secret-fragment payment_provider_id=provider-raw-id';
     const state = createState({
@@ -353,6 +371,41 @@ describe('PaymentReconciliationService reconciliation side effects', () => {
     const gatewayData = state.transactionUpdateCalls[0].data.gatewayData as Record<string, unknown>;
     assert.equal(gatewayData.subscriptionRevoked, true);
     assert.equal(gatewayData.refundRevokedFromStatus, 'ACTIVE');
+  });
+
+  it('revokes the standalone subscription created by constructor ADDITIONAL', async () => {
+    const state = createState({
+      eventStatus: 'REFUNDED',
+      initialTransactionStatus: TransactionStatus.COMPLETED,
+      refreshedSubscriptionId: 'subscription-1',
+      refreshedFulfilledAt: new Date('2026-04-19T11:00:00.000Z'),
+      purchaseType: PurchaseType.ADDITIONAL,
+      planSnapshotOverride: constructorSnapshotMarker(),
+    });
+    await createService(state).reconcileWebhookEvent('event-1');
+
+    assert.equal(state.subscriptionUpdateCalls.length, 1);
+    assert.equal(state.subscriptionUpdateCalls[0].data.status, SubscriptionStatus.EXPIRED);
+    const gatewayData = state.transactionUpdateCalls[0].data.gatewayData as Record<string, unknown>;
+    assert.equal(gatewayData.subscriptionRevoked, true);
+    assert.equal(gatewayData.refundNeedsManualReview, undefined);
+  });
+
+  it('does not mechanically revoke an ordinary ADDITIONAL purchase', async () => {
+    const state = createState({
+      eventStatus: 'REFUNDED',
+      initialTransactionStatus: TransactionStatus.COMPLETED,
+      refreshedSubscriptionId: 'subscription-1',
+      refreshedFulfilledAt: new Date('2026-04-19T11:00:00.000Z'),
+      purchaseType: PurchaseType.ADDITIONAL,
+      planSnapshotOverride: { snapshotSource: 'ADDON_PURCHASE' },
+    });
+    await createService(state).reconcileWebhookEvent('event-1');
+
+    assert.deepEqual(state.subscriptionUpdateCalls, []);
+    const gatewayData = state.transactionUpdateCalls[0].data.gatewayData as Record<string, unknown>;
+    assert.equal(gatewayData.subscriptionRevoked, false);
+    assert.equal(gatewayData.refundNeedsManualReview, true);
   });
 
   it('does NOT revoke a subscription that later payments extended', async () => {
@@ -557,16 +610,20 @@ function createService(state: ReturnType<typeof createState>): PaymentReconcilia
             id: 'tx-1',
             status: state.updatedStatus ?? state.initialTransactionStatus,
             subscriptionId: state.refreshedSubscriptionId,
-            fulfilledAt: state.refreshedFulfilledAt,
+            fulfilledAt: state.staleClaimReleased ? null : state.refreshedFulfilledAt,
             gatewayData: state.gatewayDataOverride,
+            purchaseType: state.purchaseType,
+            planSnapshot: state.planSnapshotOverride,
           });
         }
         return createTransaction({
           id: 'tx-1',
           status: state.initialTransactionStatus,
-          subscriptionId: 'subscription-original',
+          subscriptionId: state.refreshedSubscriptionId,
           fulfilledAt: state.refreshedFulfilledAt,
           gatewayData: state.gatewayDataOverride,
+          purchaseType: state.purchaseType,
+          planSnapshot: state.planSnapshotOverride,
         });
       },
       findFirst: async (_args: TransactionFindFirstArgs) => null,
@@ -582,13 +639,15 @@ function createService(state: ReturnType<typeof createState>): PaymentReconcilia
       }) => {
         const isClaim = args.where.fulfilledAt === null;
         if (isClaim) {
-          return { count: state.refreshedFulfilledAt === null ? 1 : 0 };
+          return { count: state.refreshedFulfilledAt === null || state.staleClaimReleased ? 1 : 0 };
         }
+        if (args.data['fulfilledAt'] === null) state.staleClaimReleased = true;
         return { count: 1 };
       },
       update: async (args: TransactionUpdateArgs) => {
         state.transactionUpdateCalls.push(args);
         state.updatedStatus = args.data.status;
+        if (args.data['fulfilledAt'] === null) state.staleClaimReleased = true;
         state.callOrder.push('update');
         return createTransaction({
           id: args.where.id,
@@ -722,6 +781,8 @@ function createState(input: {
   } | null;
   /** Completed payments on the same subscription besides the refunded one. */
   readonly otherCompletedPaymentsOnSubscription?: number;
+  readonly purchaseType?: PurchaseType;
+  readonly planSnapshotOverride?: Record<string, unknown>;
 }) {
   const now = new Date('2026-04-19T12:00:00.000Z');
   return {
@@ -750,6 +811,7 @@ function createState(input: {
     refreshedSubscriptionId: input.refreshedSubscriptionId,
     refreshedFulfilledAt: input.refreshedFulfilledAt ?? null,
     updatedStatus: undefined as TransactionStatus | undefined,
+    staleClaimReleased: false,
     incrementCalls: [] as string[],
     markProcessingCalls: [] as string[],
     markProcessedCalls: [] as string[],
@@ -769,6 +831,8 @@ function createState(input: {
     moyNalogCancelCalls: [] as string[],
     adRevertCalls: [] as string[],
     gatewayDataOverride: input.gatewayDataOverride ?? null,
+    purchaseType: input.purchaseType ?? PurchaseType.NEW,
+    planSnapshotOverride: input.planSnapshotOverride ?? {},
     subscriptionRow:
       input.subscriptionRow === undefined
         ? {
@@ -790,6 +854,8 @@ function createTransaction(input: {
   readonly subscriptionId: string | null;
   readonly fulfilledAt?: Date | null;
   readonly gatewayData?: Record<string, unknown> | null;
+  readonly purchaseType?: PurchaseType;
+  readonly planSnapshot?: Record<string, unknown>;
 }) {
   return {
     id: input.id,
@@ -799,17 +865,29 @@ function createTransaction(input: {
     fulfilledAt: input.fulfilledAt ?? null,
     status: input.status,
     isTest: false,
-    purchaseType: PurchaseType.NEW,
+    purchaseType: input.purchaseType ?? PurchaseType.NEW,
     channel: PurchaseChannel.WEB,
     gatewayType: PaymentGatewayType.YOOKASSA,
     currency: Currency.USD,
     amount: new Prisma.Decimal('8.00'),
     paymentAsset: null,
-    planSnapshot: { id: 'plan-1', selectedDurationDays: 30, pricing: { discountSource: 'PURCHASE', discountPercent: 20 } },
+    planSnapshot: input.planSnapshot ?? { id: 'plan-1', selectedDurationDays: 30, pricing: { discountSource: 'PURCHASE', discountPercent: 20 } },
     gatewayId: null,
     gatewayData: input.gatewayData ?? null,
     deviceTypes: [],
     createdAt: new Date('2026-04-20T00:00:00.000Z'),
     updatedAt: new Date('2026-04-20T00:00:00.000Z'),
+  };
+}
+
+function constructorSnapshotMarker(): Record<string, unknown> {
+  return {
+    snapshotSource: 'TARIFF_CONSTRUCTOR_CHECKOUT', snapshotVersion: 1,
+    revisionId: 'revision-1', revision: 1,
+    selections: [{ type: 'TRAFFIC', value: 10 }, { type: 'DEVICES', value: 1 }],
+    lines: [{ kind: 'BASE', module: null, value: null, steps: null, perStepAmount: null, amount: '8' }, { kind: 'MODULE', module: 'TRAFFIC', value: 10, steps: 0, perStepAmount: '0', amount: '0' }, { kind: 'MODULE', module: 'DEVICES', value: 1, steps: 0, perStepAmount: '0', amount: '0' }],
+    amount: '8', currency: 'USD',
+    basePlan: { id: 'plan-1', name: 'Custom', description: '', tag: null, type: 'BOTH', icon: null, trafficLimitStrategy: 'NO_RESET', internalSquads: ['squad-1'], externalSquad: null },
+    trafficLimit: 10, deviceLimit: 1, durationDays: 30, channel: 'WEB', gatewayType: 'YOOKASSA', purchaseType: 'ADDITIONAL',
   };
 }

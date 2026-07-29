@@ -31,6 +31,11 @@ import { AddOnEntitlementService } from '../../add-on-entitlements/services/add-
 import { ensureLiveResetEpoch } from '../../add-on-entitlements/services/reset-epoch.util';
 import { EffectiveProjectionService } from '../../add-on-entitlements/services/effective-projection.service';
 import { SubscriptionTermService } from '../../add-on-entitlements/services/subscription-term.service';
+import { decodeTariffConstructorSnapshot, TariffConstructorSnapshot } from '../../tariff-constructor/tariff-constructor-snapshot';
+
+function readJsonRecord(value: Prisma.JsonValue | null | undefined): Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
 
 @Injectable()
 export class PaymentSubscriptionMutationService {
@@ -47,6 +52,19 @@ export class PaymentSubscriptionMutationService {
   public async applyCompletedTransaction(
     transaction: Transaction,
   ): Promise<{ readonly syncJobs: readonly ProfileSyncJob[] }> {
+    const constructorSnapshot = decodeTariffConstructorSnapshot(transaction.planSnapshot);
+    if (constructorSnapshot !== null) {
+      const result = await this.createConstructorSubscription(transaction, constructorSnapshot);
+      this.events.info(EVENT_TYPES.PAYMENT_COMPLETED, 'PAYMENT', `Payment completed: ${transaction.purchaseType}`, {
+        userId: transaction.userId, paymentId: transaction.paymentId, purchaseType: transaction.purchaseType,
+        planName: constructorSnapshot.basePlan.name, planType: constructorSnapshot.basePlan.type,
+        trafficLimitBytes: constructorSnapshot.trafficLimit * 1024 * 1024 * 1024,
+        deviceLimit: constructorSnapshot.deviceLimit, durationDays: constructorSnapshot.durationDays,
+        amount: transaction.amount.toString(), currency: transaction.currency, gatewayType: transaction.gatewayType,
+        channel: transaction.channel, subscriptionId: result.subscription.id,
+      });
+      return { syncJobs: [result.syncJob] };
+    }
     // Combined multi-subscription renewal: the presence of line items marks
     // this as a single payment fulfilled item-by-item. Handle it before the
     // single-subscription, plan-centric branches.
@@ -730,6 +748,60 @@ export class PaymentSubscriptionMutationService {
     });
 
     return result;
+  }
+
+  private async createConstructorSubscription(transaction: Transaction, snapshot: TariffConstructorSnapshot): Promise<{ readonly subscription: Subscription; readonly syncJob: ProfileSyncJob }> {
+    if (transaction.purchaseType !== PurchaseType.NEW && transaction.purchaseType !== PurchaseType.ADDITIONAL) throw new ConflictException('Tariff constructor purchase type is invalid');
+    if (transaction.amount.cmp(snapshot.amount) !== 0 || transaction.currency !== snapshot.currency || transaction.gatewayType !== snapshot.gatewayType || transaction.channel !== snapshot.channel || transaction.purchaseType !== snapshot.purchaseType) throw new ConflictException('Tariff constructor transaction does not match its snapshot');
+    return this.prismaService.$transaction(async (tx) => {
+      await tx.$executeRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtext(${`rezeis:subscription-capacity:${transaction.userId}`}))`);
+      const alreadyFulfilled = await tx.transaction.findUnique({ where: { id: transaction.id }, select: { subscriptionId: true } });
+      if (alreadyFulfilled?.subscriptionId !== null) {
+        const subscription = await tx.subscription.findUnique({ where: { id: alreadyFulfilled!.subscriptionId! } });
+        if (subscription === null) throw new ConflictException('Fulfilled constructor subscription is missing');
+        const syncJob = await tx.profileSyncJob.findFirst({ where: { subscriptionId: subscription.id, action: SyncAction.CREATE }, orderBy: { createdAt: 'desc' } });
+        if (syncJob === null) throw new ConflictException('Fulfilled constructor profile sync job is missing');
+        return { subscription, syncJob };
+      }
+      const user = await tx.user.findUnique({ where: { id: transaction.userId }, select: { maxSubscriptions: true } });
+      if (user === null) throw new NotFoundException('User not found');
+      const settings = await tx.settings.findFirst({ orderBy: { updatedAt: 'asc' }, select: { multiSubscriptionSettings: true } });
+      const config = readJsonRecord(settings?.multiSubscriptionSettings);
+      const rawDefault = config['defaultMaxSubscriptions'];
+      const globalDefault = config['enabled'] === true && typeof rawDefault === 'number' && Number.isFinite(rawDefault) && rawDefault >= 1 ? Math.floor(rawDefault) : 1;
+      const maxSubscriptions = config['enabled'] === true ? Math.max(user.maxSubscriptions, globalDefault) : user.maxSubscriptions;
+      const subscriptionCount = await tx.subscription.count({ where: { userId: transaction.userId, status: { not: SubscriptionStatus.DELETED } } });
+      if (subscriptionCount >= maxSubscriptions) throw new ConflictException({ code: 'SUBSCRIPTION_LIMIT_REACHED', message: 'The user has reached the maximum number of active subscriptions.' });
+      const now = new Date();
+      const planSnapshot = {
+        id: snapshot.basePlan.id,
+        name: snapshot.basePlan.name,
+        description: snapshot.basePlan.description,
+        tag: snapshot.basePlan.tag,
+        type: snapshot.basePlan.type,
+        icon: snapshot.basePlan.icon,
+        trafficLimit: snapshot.trafficLimit,
+        deviceLimit: snapshot.deviceLimit,
+        trafficLimitStrategy: snapshot.basePlan.trafficLimitStrategy,
+        internalSquads: snapshot.basePlan.internalSquads,
+        externalSquad: snapshot.basePlan.externalSquad,
+        selectedDurationDays: snapshot.durationDays,
+        purchaseType: transaction.purchaseType,
+        gatewayType: transaction.gatewayType,
+        amount: transaction.amount.toString(),
+        currency: transaction.currency,
+        snapshotSource: 'PAYMENT_COMPLETION',
+        tariffConstructor: snapshot,
+      };
+      const subscription = await tx.subscription.create({ data: { userId: transaction.userId, status: SubscriptionStatus.ACTIVE, isTrial: false, planSnapshot: planSnapshot as unknown as Prisma.InputJsonValue, trafficLimit: snapshot.trafficLimit, deviceLimit: snapshot.deviceLimit, internalSquads: [...snapshot.basePlan.internalSquads], externalSquad: snapshot.basePlan.externalSquad, startedAt: now, expiresAt: calculateExpiry(now, snapshot.durationDays) } });
+      const syncJob = await tx.profileSyncJob.create({ data: { subscriptionId: subscription.id, action: SyncAction.CREATE, status: SyncJobStatus.PENDING, payload: { source: 'PAYMENT_COMPLETION', paymentId: transaction.paymentId, tariffConstructorRevisionId: snapshot.revisionId, trafficLimit: snapshot.trafficLimit, deviceLimit: snapshot.deviceLimit } } });
+      await tx.transaction.update({ where: { id: transaction.id }, data: { subscriptionId: subscription.id, fulfilledAt: now } });
+      await tx.user.updateMany({ where: { id: transaction.userId, currentSubscriptionId: null }, data: { currentSubscriptionId: subscription.id } });
+      // Constructor quotes are revision arithmetic only; they do not apply the
+      // user's purchaseDiscount. Preserve that one-time benefit for a normal
+      // plan purchase instead of consuming unpaid discount value here.
+      return { subscription, syncJob };
+    });
   }
 
   private async renewSubscriptionFromPayment(input: {

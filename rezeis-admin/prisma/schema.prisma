@@ -238,6 +238,11 @@ enum AddOnEntitlementActorType {
   USER
 }
 
+enum TariffConstructorModuleType {
+  TRAFFIC
+  DEVICES
+}
+
 enum EffectiveProjectionState {
   SHADOW
   PENDING
@@ -1583,6 +1588,7 @@ model Plan {
   updatedAt            DateTime              @updatedAt @map("updated_at") @db.Timestamptz(3)
 
   durations PlanDuration[]
+  tariffConstructors TariffConstructor[]
 
   @@index([isActive])
   @@index([isArchived])
@@ -1616,6 +1622,145 @@ model PlanPrice {
   @@index([planDurationId])
   @@index([currency])
   @@map("plan_prices")
+}
+
+/// Singleton tariff constructor. Draft rows are editable; published revisions
+/// are append-only copies and the feature remains disabled until toggled.
+model TariffConstructor {
+  id                  String   @id @default(cuid()) @map("id")
+  key                 String   @unique @default("default") @map("key")
+  isEnabled           Boolean  @default(false) @map("is_enabled")
+  draftVersion        Int      @default(1) @map("draft_version")
+  basePlanId          String   @map("base_plan_id")
+  publishedRevisionId String?  @unique @map("published_revision_id")
+  createdAt           DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt           DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  publishedRevision TariffConstructorRevision? @relation("CurrentTariffConstructorRevision", fields: [publishedRevisionId, id], references: [id, constructorId], onDelete: Restrict)
+  basePlan          Plan                       @relation(fields: [basePlanId], references: [id], onDelete: Restrict)
+  revisions          TariffConstructorRevision[] @relation("TariffConstructorRevisions")
+  durations          TariffConstructorDuration[]
+  modules            TariffConstructorModule[]
+
+  @@index([isEnabled])
+  @@index([basePlanId])
+  @@unique([publishedRevisionId, id])
+  @@map("tariff_constructors")
+}
+
+model TariffConstructorDuration {
+  id            String   @id @default(cuid()) @map("id")
+  constructorId String   @map("constructor_id")
+  days          Int      @map("days")
+  currency      Currency @map("currency")
+  baseAmount    Decimal  @map("base_amount") @db.Decimal(20, 8)
+
+  constructor TariffConstructor @relation(fields: [constructorId], references: [id], onDelete: Cascade)
+  prices      TariffConstructorModulePrice[]
+
+  @@unique([constructorId, days, currency])
+  @@index([constructorId])
+  @@map("tariff_constructor_durations")
+}
+
+model TariffConstructorModule {
+  id            String                      @id @default(cuid()) @map("id")
+  constructorId String                      @map("constructor_id")
+  type          TariffConstructorModuleType @map("type")
+  minValue      Int                         @map("min_value")
+  maxValue      Int                         @map("max_value")
+  defaultValue  Int                         @map("default_value")
+  step          Int                         @map("step")
+
+  constructor TariffConstructor              @relation(fields: [constructorId], references: [id], onDelete: Cascade)
+  prices      TariffConstructorModulePrice[]
+
+  @@unique([constructorId, type])
+  @@index([constructorId])
+  @@map("tariff_constructor_modules")
+}
+
+model TariffConstructorModulePrice {
+  id         String                     @id @default(cuid()) @map("id")
+  moduleId   String                     @map("module_id")
+  durationId String                     @map("duration_id")
+  amount     Decimal                    @map("amount") @db.Decimal(20, 8)
+
+  module   TariffConstructorModule   @relation(fields: [moduleId], references: [id], onDelete: Cascade)
+  duration TariffConstructorDuration @relation(fields: [durationId], references: [id], onDelete: Cascade)
+
+  @@unique([moduleId, durationId])
+  @@index([durationId])
+  @@map("tariff_constructor_module_prices")
+}
+
+model TariffConstructorRevision {
+  id            String   @id @default(cuid()) @map("id")
+  constructorId String   @map("constructor_id")
+  version       Int      @map("version")
+  basePlanId    String   @map("base_plan_id")
+  publishedBy   String?  @map("published_by")
+  publishedAt   DateTime @default(now()) @map("published_at") @db.Timestamptz(3)
+
+  constructor TariffConstructor  @relation("TariffConstructorRevisions", fields: [constructorId], references: [id], onDelete: Restrict)
+  currentFor   TariffConstructor? @relation("CurrentTariffConstructorRevision")
+  durations   TariffConstructorRevisionDuration[]
+  modules     TariffConstructorRevisionModule[]
+
+  @@unique([constructorId, version])
+  @@unique([id, constructorId])
+  @@index([constructorId, publishedAt])
+  @@map("tariff_constructor_revisions")
+}
+
+model TariffConstructorRevisionDuration {
+  id         String   @id @default(cuid()) @map("id")
+  revisionId String   @map("revision_id")
+  days       Int      @map("days")
+  currency   Currency @map("currency")
+  baseAmount Decimal  @map("base_amount") @db.Decimal(20, 8)
+
+  revision TariffConstructorRevision @relation(fields: [revisionId], references: [id], onDelete: Restrict)
+  prices   TariffConstructorRevisionModulePrice[]
+
+  @@unique([revisionId, days, currency])
+  @@unique([id, revisionId])
+  @@index([revisionId])
+  @@map("tariff_constructor_revision_durations")
+}
+
+model TariffConstructorRevisionModule {
+  id         String                      @id @default(cuid()) @map("id")
+  revisionId String                      @map("revision_id")
+  type       TariffConstructorModuleType @map("type")
+  minValue   Int                         @map("min_value")
+  maxValue   Int                         @map("max_value")
+  defaultValue Int                       @map("default_value")
+  step       Int                         @map("step")
+
+  revision TariffConstructorRevision              @relation(fields: [revisionId], references: [id], onDelete: Restrict)
+  prices   TariffConstructorRevisionModulePrice[]
+
+  @@unique([revisionId, type])
+  @@unique([id, revisionId])
+  @@index([revisionId])
+  @@map("tariff_constructor_revision_modules")
+}
+
+model TariffConstructorRevisionModulePrice {
+  id         String                     @id @default(cuid()) @map("id")
+  revisionId String                     @map("revision_id")
+  moduleId   String                     @map("module_id")
+  durationId String                     @map("duration_id")
+  amount     Decimal                    @map("amount") @db.Decimal(20, 8)
+
+  module   TariffConstructorRevisionModule   @relation(fields: [moduleId, revisionId], references: [id, revisionId], onDelete: Restrict)
+  duration TariffConstructorRevisionDuration @relation(fields: [durationId, revisionId], references: [id, revisionId], onDelete: Restrict)
+
+  @@unique([revisionId, moduleId, durationId])
+  @@index([moduleId, revisionId])
+  @@index([durationId])
+  @@map("tariff_constructor_revision_module_prices")
 }
 
 // =============================================================================

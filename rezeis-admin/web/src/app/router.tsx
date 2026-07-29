@@ -76,6 +76,7 @@ const UserDetailPage = lazy(
   withFeatureBundle('userDetail', () => import('@/features/users/user-detail-page')),
 );
 const PlansPage = lazy(() => import('@/features/plans/plans-page'));
+const TariffConstructorPage = lazy(() => import('@/features/tariff-constructor/tariff-constructor-page'));
 const SubscriptionsPage = lazy(() => import('@/features/subscriptions/subscriptions-page'));
 const PaymentsPage = lazy(
   withFeatureBundle('payments', () => import('@/features/payments/payments-page')),
@@ -187,6 +188,7 @@ export const router = createBrowserRouter([
           { path: 'users', element: withSuspense(<UsersPage />) },
           { path: 'users/:telegramId', element: withSuspense(<UserDetailPage />) },
           { path: 'plans', element: withSuspense(<PlansPage />) },
+          { path: 'plans/tariff-constructor', element: withSuspense(<TariffConstructorPage />) },
           { path: 'add-ons', element: withSuspense(<AddOnsPage />) },
           { path: 'subscriptions', element: withSuspense(<SubscriptionsPage />) },
           { path: 'payments', element: withSuspense(<PaymentsPage />) },

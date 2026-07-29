@@ -116,6 +116,7 @@
       automations: 'Автоматизации',
       analytics: 'Аналитика',
       plans: 'Тарифы',
+      tariffConstructor: 'Конструктор тарифов',
       addOns: 'Доп. услуги',
       promocodes: 'Промокоды',
       broadcast: 'Рассылки',
