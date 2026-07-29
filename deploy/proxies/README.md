@@ -94,6 +94,10 @@ DNS-01 on another machine). Just name the files `fullchain.pem` +
 Traefik uses only the file provider and does not mount the Docker socket. Its
 dashboard and debug API are disabled by default.
 
+The Nginx and Angie templates allow request bodies up to **32 MB**, leaving
+multipart overhead above the panel's 25 MB FAQ media limit. Caddy and Traefik
+do not impose a smaller request-body limit in these templates.
+
 All HTTPS stacks also ship a stealth default server: connections that hit
 the IP without the right SNI get a TLS reject / `204`, so the panel
 hostname isn't trivially discoverable by scanning the IP.

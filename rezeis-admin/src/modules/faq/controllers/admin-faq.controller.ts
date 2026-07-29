@@ -113,7 +113,7 @@ export class AdminFaqController {
   @Delete(':id')
   @HttpCode(HttpStatus.NO_CONTENT)
   @RequirePermission('faq', 'delete')
-  @ApiOperation({ summary: 'Delete a FAQ entry (attached media files are NOT cleaned up)' })
+  @ApiOperation({ summary: 'Delete a FAQ entry and reap its unreferenced local media' })
   public async delete(@Param('id') id: string): Promise<void> {
     await this.faqService.delete(id);
   }
@@ -127,8 +127,7 @@ export class AdminFaqController {
   )
   @ApiConsumes('multipart/form-data')
   @ApiOperation({
-    summary:
-      'Upload a single image or video and return a relative URL for `mediaUrls`',
+    summary: 'Upload a single image or video and return a relative URL for `mediaUrls`',
   })
   public async upload(
     @UploadedFile() file: Express.Multer.File | undefined,

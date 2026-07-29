@@ -3,6 +3,7 @@ import { FaqItem, Prisma } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { shouldRunSchedules } from '../../../common/runtime/process-role.util';
+import { FaqMediaUploadService } from './faq-media-upload.service';
 
 export interface FaqItemInterface {
   readonly id: string;
@@ -26,7 +27,10 @@ export interface FaqItemInterface {
 export class FaqService implements OnModuleInit {
   private readonly logger = new Logger(FaqService.name);
 
-  public constructor(private readonly prismaService: PrismaService) {}
+  public constructor(
+    private readonly prismaService: PrismaService,
+    private readonly faqMediaUploadService: FaqMediaUploadService,
+  ) {}
 
   /**
    * Seed the standard FAQ once, on a fresh install, when the table is empty.
@@ -122,6 +126,13 @@ export class FaqService implements OnModuleInit {
       where: { id },
       data,
     });
+
+    if (input.mediaUrls !== undefined) {
+      const retainedUrls = new Set(updated.mediaUrls);
+      const removedUrls = existing.mediaUrls.filter((url) => !retainedUrls.has(url));
+      await this.cleanupUnusedLocalMedia(removedUrls);
+    }
+
     return mapFaqItem(updated);
   }
 
@@ -130,6 +141,31 @@ export class FaqService implements OnModuleInit {
     const existing = await this.prismaService.faqItem.findUnique({ where: { id } });
     if (!existing) throw new NotFoundException('FAQ item not found');
     await this.prismaService.faqItem.delete({ where: { id } });
+    await this.cleanupUnusedLocalMedia(existing.mediaUrls);
+  }
+
+  /** Reap detached local files without ever turning a successful CRUD write into an error. */
+  private async cleanupUnusedLocalMedia(urls: readonly string[]): Promise<void> {
+    const localUrls = [...new Set(urls)].filter((url) =>
+      this.faqMediaUploadService.isManagedUrl(url),
+    );
+
+    await Promise.all(
+      localUrls.map(async (url) => {
+        try {
+          const remainingReferences = await this.prismaService.faqItem.count({
+            where: { mediaUrls: { has: url } },
+          });
+          if (remainingReferences === 0) {
+            await this.faqMediaUploadService.remove(url);
+          }
+        } catch (error: unknown) {
+          this.logger.warn(
+            `FAQ media cleanup skipped for ${url}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }),
+    );
   }
 }
 

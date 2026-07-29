@@ -14,7 +14,7 @@
 import { closestCenter, DndContext, DragEndEvent, PointerSensor, useSensor, useSensors } from '@dnd-kit/core'
 import { arrayMove, SortableContext, useSortable, rectSortingStrategy } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { ChangeEvent, DragEvent, useCallback, useRef, useState, type JSX } from 'react'
+import { ChangeEvent, DragEvent, useCallback, useEffect, useRef, useState, type JSX } from 'react'
 import { useTranslation } from 'react-i18next'
 import { GripVertical, ImageIcon, Loader2, Trash2, Upload, Video } from 'lucide-react'
 import { toast } from 'sonner'
@@ -34,21 +34,41 @@ interface UploadResponse {
 interface FaqMediaUploaderProps {
   readonly value: readonly string[]
   readonly onChange: (next: string[]) => void
+  readonly onUploadingChange?: (isUploading: boolean) => void
   readonly disabled?: boolean
 }
 
-const ACCEPTED_MIME = 'image/*,video/*'
+// Keep the native picker aligned with the backend allow-list. Broad
+// `image/*,video/*` advertised SVG and formats the server intentionally rejects.
+const ACCEPTED_MIME = [
+  'image/png',
+  'image/jpeg',
+  'image/webp',
+  'image/gif',
+  'image/avif',
+  'video/mp4',
+  'video/webm',
+  'video/quicktime',
+  'video/ogg',
+].join(',')
 const MAX_FILES = 20
 
 export function FaqMediaUploader({
   value,
   onChange,
+  onUploadingChange,
   disabled,
 }: FaqMediaUploaderProps): JSX.Element {
   const { t } = useTranslation()
   const inputRef = useRef<HTMLInputElement | null>(null)
   const [isDragging, setIsDragging] = useState(false)
   const [pendingCount, setPendingCount] = useState(0)
+  const isUploading = pendingCount > 0
+  const isInteractionDisabled = disabled || isUploading
+
+  useEffect(() => {
+    onUploadingChange?.(isUploading)
+  }, [isUploading, onUploadingChange])
 
   const handleFiles = useCallback(
     async (files: FileList | File[]) => {
@@ -89,7 +109,7 @@ export function FaqMediaUploader({
   function onDrop(event: DragEvent<HTMLButtonElement>) {
     event.preventDefault()
     setIsDragging(false)
-    if (disabled) return
+    if (isInteractionDisabled) return
     const files = event.dataTransfer?.files
     if (files && files.length > 0) {
       void handleFiles(files)
@@ -115,33 +135,34 @@ export function FaqMediaUploader({
         type="button"
         onDragOver={(event) => {
           event.preventDefault()
-          if (!disabled) setIsDragging(true)
+          if (!isInteractionDisabled) setIsDragging(true)
         }}
         onDragEnter={(event) => {
           event.preventDefault()
-          if (!disabled) setIsDragging(true)
+          if (!isInteractionDisabled) setIsDragging(true)
         }}
         onDragLeave={() => setIsDragging(false)}
         onDrop={onDrop}
-        onClick={() => !disabled && inputRef.current?.click()}
-        disabled={disabled}
+        onClick={() => !isInteractionDisabled && inputRef.current?.click()}
+        disabled={isInteractionDisabled}
+        aria-busy={isUploading}
         aria-label={t('faqPage.media.chooseFile')}
         className={cn(
           'flex w-full flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed px-6 py-8 text-center transition-colors',
           isDragging
             ? 'border-primary bg-primary/10'
             : 'border-border hover:border-primary/60 hover:bg-accent/40',
-          disabled && 'cursor-not-allowed opacity-60',
-          !disabled && 'cursor-pointer',
+          isInteractionDisabled && 'cursor-not-allowed opacity-60',
+          !isInteractionDisabled && 'cursor-pointer',
         )}
       >
-        {pendingCount > 0 ? (
+        {isUploading ? (
           <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
         ) : (
           <Upload className="h-6 w-6 text-muted-foreground" />
         )}
         <p className="text-sm font-medium">
-          {pendingCount > 0
+          {isUploading
             ? t('faqPage.media.uploading', { count: pendingCount })
             : t('faqPage.media.dropHere')}
         </p>
@@ -156,12 +177,17 @@ export function FaqMediaUploader({
         multiple
         className="hidden"
         onChange={onSelect}
-        disabled={disabled}
+        disabled={isInteractionDisabled}
         aria-label={t('faqPage.media.chooseFile')}
       />
 
       {value.length > 0 ? (
-        <SortableMediaGrid value={value} onChange={onChange} onRemove={onRemove} disabled={disabled} />
+        <SortableMediaGrid
+          value={value}
+          onChange={onChange}
+          onRemove={onRemove}
+          disabled={isInteractionDisabled}
+        />
       ) : null}
     </div>
   )

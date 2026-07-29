@@ -86,6 +86,7 @@ export default function FaqPage(): JSX.Element {
   const [editing, setEditing] = useState<FaqItem | null>(null)
   const [formState, setFormState] = useState<FaqFormState>(EMPTY_FORM)
   const [showDialog, setShowDialog] = useState(false)
+  const [isUploading, setIsUploading] = useState(false)
 
   const { data: items, isLoading } = useQuery({
     queryKey: ['admin', 'faq'],
@@ -99,6 +100,7 @@ export default function FaqPage(): JSX.Element {
       void queryClient.invalidateQueries({ queryKey: ['admin', 'faq'] })
       setShowDialog(false)
       setEditing(null)
+      setIsUploading(false)
       toast.success(t('faqPage.toasts.created'))
     },
     onError: (error) => {
@@ -121,6 +123,7 @@ export default function FaqPage(): JSX.Element {
       void queryClient.invalidateQueries({ queryKey: ['admin', 'faq'] })
       setShowDialog(false)
       setEditing(null)
+      setIsUploading(false)
       toast.success(t('faqPage.toasts.updated'))
     },
     onError: (error) => {
@@ -152,6 +155,7 @@ export default function FaqPage(): JSX.Element {
   function openCreate() {
     setEditing(null)
     setFormState(EMPTY_FORM)
+    setIsUploading(false)
     setShowDialog(true)
   }
 
@@ -165,15 +169,18 @@ export default function FaqPage(): JSX.Element {
       locale: item.locale ?? '',
       isActive: item.isActive,
     })
+    setIsUploading(false)
     setShowDialog(true)
   }
 
   function closeDialog() {
+    if (isUploading) return
     setShowDialog(false)
     setEditing(null)
   }
 
   function handleSubmit() {
+    if (isUploading) return
     const trimmedQuestion = formState.question.trim()
     const trimmedAnswer = formState.answer.trim()
     if (trimmedQuestion.length === 0 || trimmedAnswer.length === 0) {
@@ -200,6 +207,8 @@ export default function FaqPage(): JSX.Element {
   function handleDelete(item: FaqItem) {
     deleteMutation.mutate(item.id)
   }
+
+  const isSaving = createMutation.isPending || updateMutation.isPending
 
   return (
     <div className="space-y-6">
@@ -246,8 +255,22 @@ export default function FaqPage(): JSX.Element {
         </CardContent>
       </Card>
 
-      <Dialog open={showDialog} onOpenChange={(open) => { if (!open) closeDialog() }}>
-        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+      <Dialog
+        open={showDialog}
+        onOpenChange={(open) => {
+          if (!open) closeDialog()
+        }}
+      >
+        <DialogContent
+          className="max-w-2xl max-h-[90vh] overflow-y-auto"
+          aria-busy={isUploading || isSaving}
+          onEscapeKeyDown={(event) => {
+            if (isUploading) event.preventDefault()
+          }}
+          onPointerDownOutside={(event) => {
+            if (isUploading) event.preventDefault()
+          }}
+        >
           <DialogHeader>
             <DialogTitle>
               {editing ? t('faqPage.editTitle') : t('faqPage.createTitle')}
@@ -281,6 +304,8 @@ export default function FaqPage(): JSX.Element {
               <FaqMediaUploader
                 value={formState.mediaUrls}
                 onChange={(next) => setFormState((prev) => ({ ...prev, mediaUrls: next }))}
+                onUploadingChange={setIsUploading}
+                disabled={isSaving}
               />
             </div>
 
@@ -322,15 +347,16 @@ export default function FaqPage(): JSX.Element {
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={closeDialog}>
+            <Button variant="outline" onClick={closeDialog} disabled={isUploading}>
               {t('faqPage.cancel')}
             </Button>
             <Button
               onClick={handleSubmit}
-              disabled={createMutation.isPending || updateMutation.isPending}
+              disabled={isUploading || isSaving}
+              aria-busy={isUploading || isSaving}
               className="gap-2"
             >
-              {createMutation.isPending || updateMutation.isPending ? (
+              {isUploading || isSaving ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
               ) : (
                 <Save className="h-4 w-4" />
