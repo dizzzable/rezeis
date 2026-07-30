@@ -75,7 +75,10 @@ describe('SubscriptionQuoteService', () => {
       UPGRADE: false,
       TRIAL: false,
     });
-    assert.deepStrictEqual(actualPolicy.availablePlans.map((plan) => plan.id), ['plan-new']);
+    assert.deepStrictEqual(
+      actualPolicy.availablePlans.map((plan) => plan.id),
+      ['plan-new'],
+    );
   });
 
   it('blocks NEW when an active trial requires upgrade and exposes upgrade candidates', async () => {
@@ -84,7 +87,11 @@ describe('SubscriptionQuoteService', () => {
       subscriptions: [createSubscription({ id: 'trial-sub', isTrial: true, planId: 'trial-plan' })],
       trialGrant: { id: 'trial-grant-1' },
       plans: [
-        createPlan({ id: 'trial-plan', availability: PlanAvailability.TRIAL, upgradeToPlanIds: ['paid-plan'] }),
+        createPlan({
+          id: 'trial-plan',
+          availability: PlanAvailability.TRIAL,
+          upgradeToPlanIds: ['paid-plan'],
+        }),
         createPlan({ id: 'paid-plan', availability: PlanAvailability.ALL }),
       ],
     });
@@ -97,12 +104,15 @@ describe('SubscriptionQuoteService', () => {
 
     assert.equal(actualPolicy.actions.NEW, false);
     assert.equal(actualPolicy.actions.UPGRADE, true);
-    assert.deepStrictEqual(actualPolicy.warnings.map((warning) => warning.code), [
-      'TRIAL_FREE_NOT_RENEWABLE',
-      'UPGRADE_RESETS_EXPIRY',
-      'TRIAL_UPGRADE_REQUIRED',
-      'TRIAL_ALREADY_USED',
-    ]);
+    assert.deepStrictEqual(
+      actualPolicy.warnings.map((warning) => warning.code),
+      [
+        'TRIAL_NOT_RENEWABLE',
+        'UPGRADE_RESETS_EXPIRY',
+        'TRIAL_UPGRADE_REQUIRED',
+        'TRIAL_ALREADY_USED',
+      ],
+    );
   });
 
   it('lets a trial without configured upgrade targets upgrade to any non-trial plan (fallback)', async () => {
@@ -154,9 +164,10 @@ describe('SubscriptionQuoteService', () => {
 
     assert.equal(actualQuote.isEligible, true);
     assert.equal(actualQuote.price?.price, '10');
-    assert.deepStrictEqual(actualQuote.warnings.map((warning) => warning.code), [
-      'UPGRADE_RESETS_EXPIRY',
-    ]);
+    assert.deepStrictEqual(
+      actualQuote.warnings.map((warning) => warning.code),
+      ['UPGRADE_RESETS_EXPIRY'],
+    );
   });
 
   it('blocks RENEW for a free trial source and steers the user to upgrade', async () => {
@@ -183,21 +194,29 @@ describe('SubscriptionQuoteService', () => {
     assert.equal(actualPolicy.actions.RENEW, false);
     assert.equal(actualPolicy.actions.UPGRADE, true);
     assert.equal(
-      actualPolicy.warnings.some((warning) => warning.code === 'TRIAL_FREE_NOT_RENEWABLE'),
+      actualPolicy.warnings.some((warning) => warning.code === 'TRIAL_NOT_RENEWABLE'),
       true,
     );
   });
 
-  it('keeps RENEW available for a paid trial source', async () => {
+  it('blocks RENEW for an expired paid trial so maxClaims cannot be bypassed', async () => {
     const service = createService({
       user: createUser({ maxSubscriptions: 2 }),
-      subscriptions: [createSubscription({ id: 'paid-trial-sub', isTrial: true, planId: 'paid-trial-plan' })],
+      subscriptions: [
+        createSubscription({
+          id: 'paid-trial-sub',
+          isTrial: true,
+          planId: 'paid-trial-plan',
+          status: SubscriptionStatus.EXPIRED,
+        }),
+      ],
       plans: [
         createPlan({
           id: 'paid-trial-plan',
           availability: PlanAvailability.TRIAL,
           trialSettings: { free: false },
         }),
+        createPlan({ id: 'regular-plan', availability: PlanAvailability.ALL }),
       ],
     });
 
@@ -207,10 +226,48 @@ describe('SubscriptionQuoteService', () => {
       channel: PurchaseChannel.WEB,
     });
 
-    assert.equal(actualPolicy.actions.RENEW, true);
+    assert.equal(actualPolicy.actions.RENEW, false);
+    assert.equal(actualPolicy.actions.UPGRADE, true);
     assert.equal(
-      actualPolicy.warnings.some((warning) => warning.code === 'TRIAL_FREE_NOT_RENEWABLE'),
-      false,
+      actualPolicy.warnings.some((warning) => warning.code === 'TRIAL_NOT_RENEWABLE'),
+      true,
+    );
+  });
+
+  it('keeps an exhausted paid trial out of NEW checkout quotes', async () => {
+    const service = createService({
+      user: createUser({ maxSubscriptions: 2 }),
+      subscriptions: [
+        createSubscription({
+          id: 'paid-trial-sub',
+          isTrial: true,
+          planId: 'paid-trial-plan',
+          status: SubscriptionStatus.EXPIRED,
+        }),
+      ],
+      trialGrant: { id: 'trial-grant-1' },
+      plans: [
+        createPlan({
+          id: 'paid-trial-plan',
+          availability: PlanAvailability.TRIAL,
+          trialSettings: { free: false, maxClaims: 1 },
+        }),
+      ],
+    });
+
+    const actualQuote = await service.getQuote({
+      userId: 'user-1',
+      purchaseType: PurchaseType.ADDITIONAL,
+      planId: 'paid-trial-plan',
+      durationDays: 30,
+      channel: PurchaseChannel.WEB,
+    });
+
+    assert.equal(actualQuote.isEligible, false);
+    assert.deepStrictEqual(actualQuote.availablePlans, []);
+    assert.equal(
+      actualQuote.warnings.some((warning) => warning.code === 'TRIAL_ALREADY_USED'),
+      true,
     );
   });
 
@@ -228,10 +285,10 @@ describe('SubscriptionQuoteService', () => {
     });
 
     assert.equal(actualPolicy.actions.TRIAL, false);
-    assert.deepStrictEqual(actualPolicy.warnings.map((warning) => warning.code), [
-      'SOURCE_SUBSCRIPTION_REQUIRED',
-      'TRIAL_ALREADY_USED',
-    ]);
+    assert.deepStrictEqual(
+      actualPolicy.warnings.map((warning) => warning.code),
+      ['SOURCE_SUBSCRIPTION_REQUIRED', 'TRIAL_ALREADY_USED'],
+    );
   });
 
   it('returns an explicit trial-used warning for trial quote attempts after a grant exists', async () => {
@@ -252,10 +309,10 @@ describe('SubscriptionQuoteService', () => {
 
     assert.equal(actualQuote.isEligible, false);
     assert.deepStrictEqual(actualQuote.availablePlans, []);
-    assert.deepStrictEqual(actualQuote.warnings.map((warning) => warning.code), [
-      'TRIAL_ALREADY_USED',
-      'PLAN_NOT_AVAILABLE',
-    ]);
+    assert.deepStrictEqual(
+      actualQuote.warnings.map((warning) => warning.code),
+      ['TRIAL_ALREADY_USED', 'PLAN_NOT_AVAILABLE'],
+    );
   });
 
   it('returns replacement renew options for archived replace-on-renew source plans', async () => {
@@ -287,10 +344,14 @@ describe('SubscriptionQuoteService', () => {
     // onto the valid replacement plan), so the quote stays ELIGIBLE — otherwise
     // archived REPLACE_ON_RENEW subscriptions could never be renewed.
     assert.equal(actualQuote.isEligible, true);
-    assert.deepStrictEqual(actualQuote.availablePlans.map((plan) => plan.id), ['new-plan']);
-    assert.deepStrictEqual(actualQuote.warnings.map((warning) => warning.code), [
-      'ARCHIVED_PLAN_REPLACEMENT',
-    ]);
+    assert.deepStrictEqual(
+      actualQuote.availablePlans.map((plan) => plan.id),
+      ['new-plan'],
+    );
+    assert.deepStrictEqual(
+      actualQuote.warnings.map((warning) => warning.code),
+      ['ARCHIVED_PLAN_REPLACEMENT'],
+    );
   });
 
   it('calculates discount-aware quote pricing without creating transactions', async () => {
@@ -334,10 +395,10 @@ describe('SubscriptionQuoteService', () => {
     });
 
     assert.equal(actualQuote.isEligible, false);
-    assert.deepStrictEqual(actualQuote.warnings.map((warning) => warning.code), [
-      'SOURCE_PLAN_MISSING',
-      'PLAN_SELECTION_REQUIRED',
-    ]);
+    assert.deepStrictEqual(
+      actualQuote.warnings.map((warning) => warning.code),
+      ['SOURCE_PLAN_MISSING', 'PLAN_SELECTION_REQUIRED'],
+    );
   });
 });
 
@@ -359,6 +420,8 @@ function createService(input: {
     },
     subscription: {
       findMany: async () => input.subscriptions,
+      count: async () =>
+        input.subscriptions.filter((subscription) => subscription.isTrial === true).length,
     },
     trialGrant: {
       findUnique: async () => input.trialGrant ?? null,
@@ -378,7 +441,15 @@ function createService(input: {
       findFirst: async () => null,
     },
     plan: {
-      findMany: async (args: { readonly where?: { readonly id?: { readonly in?: readonly string[] }, readonly isActive?: boolean, readonly isArchived?: boolean } } = {}) => {
+      findMany: async (
+        args: {
+          readonly where?: {
+            readonly id?: { readonly in?: readonly string[] };
+            readonly isActive?: boolean;
+            readonly isArchived?: boolean;
+          };
+        } = {},
+      ) => {
         const ids = args.where?.id?.in;
         return input.plans.filter((plan) => {
           const id = plan.id as string;
@@ -399,11 +470,12 @@ function createService(input: {
     },
   };
   const planCatalogService = {
-    getCatalogPlans: async () => input.plans
-      .filter((plan) => plan.isActive !== false && plan.isArchived !== true)
-      .map((plan) => ({
-        id: plan.id,
-      })),
+    getCatalogPlans: async () =>
+      input.plans
+        .filter((plan) => plan.isActive !== false && plan.isArchived !== true)
+        .map((plan) => ({
+          id: plan.id,
+        })),
   };
   return new SubscriptionQuoteService(
     prismaService as never,
@@ -429,11 +501,12 @@ function createSubscription(input: {
   readonly id: string;
   readonly isTrial: boolean;
   readonly planId: string | null;
+  readonly status?: SubscriptionStatus;
 }): Record<string, unknown> {
   return {
     id: input.id,
     userId: 'user-1',
-    status: SubscriptionStatus.ACTIVE,
+    status: input.status ?? SubscriptionStatus.ACTIVE,
     isTrial: input.isTrial,
     planSnapshot: input.planId === null ? {} : { id: input.planId },
     createdAt: new Date('2026-04-19T12:00:00.000Z'),

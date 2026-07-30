@@ -248,6 +248,8 @@ describe('SettingsController', () => {
   it('forwards current notification, Telegram, referral, partner, branding, and icon settings contracts', async () => {
     const calls: Array<DelegatedCall<unknown>> = [];
     const branding: BrandingSettingsInterface = {
+      themePresetId: null,
+      themePresetVersion: null,
       brandName: 'Rezeis',
       tagline: null,
       logoUrl: null,
@@ -277,7 +279,21 @@ describe('SettingsController', () => {
       iconColorMode: 'default',
       iconColors: {},
       borderRadius: '1rem',
+      cornerRadii: { cardPx: 24, itemPx: 14, pillPx: 9999 },
       fontFamily: 'Inter',
+      surfaceTheme: {
+        foreground: '#fafafa',
+        mutedForeground: '#a1a1a1',
+        surface: '#18181b',
+        surfaceHigh: '#27272a',
+        borderSoft: '#ffffff',
+        borderStrong: '#ffffff',
+        surfaceOpacity: 0.7,
+        surfaceHighOpacity: 0.8,
+        borderSoftOpacity: 0.06,
+        borderStrongOpacity: 0.12,
+        glassBlurPx: 16,
+      },
       planCardStyles: {},
       navItems: [
         { id: 'subscriptions', visible: true },

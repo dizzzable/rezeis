@@ -12,11 +12,11 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useForm, Controller, type Resolver, type UseFormReturn } from "react-hook-form";
+import { useForm, useWatch, Controller, type FieldPath, type Resolver, type UseFormReturn } from "react-hook-form";
 import { useTranslation } from 'react-i18next';
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bookmark, Check, Loader2, Paintbrush, RotateCcw, Save, Sparkles, Upload, Wand2, X } from "lucide-react";
+import { Bookmark, Check, Loader2, Paintbrush, RotateCcw, Save, Search, Sparkles, Upload, Wand2, X } from "lucide-react";
 import { toast } from "sonner";
 
 import api from "@/lib/api";
@@ -25,6 +25,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Slider } from "@/components/ui/slider";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
@@ -33,7 +34,10 @@ import { CARD_LOGO_PRESETS, CardLogoMark, type CardLogoPreset } from "./card-log
 import {
   createBrandingFormSchema,
   createInitialBrandingDraft,
+  CORNER_RADII_BY_LEGACY_CLASS,
   DEFAULT_APP_BACKGROUND_DRAFT,
+  type BrandingCornerRadiiDraft,
+  type BrandingSurfaceThemeDraft,
   type BrandingFormData,
   type BrandingFormDraft,
   type BrandingFormValidationMessages,
@@ -48,7 +52,14 @@ import { useCustomGradients } from "./use-custom-gradients";
 import { IconColorsSection } from "./icon-colors-section";
 import { PlanCardStylesSection } from "./plan-card-styles-section";
 import { NavConfigSection } from "./nav-config-section";
-import { FONT_OPTIONS, THEME_PRESETS, CARD_GRADIENT_PRESETS, gradientFromPrimary, type ThemePreset } from "./theme-presets";
+import {
+  CARD_GRADIENT_PRESETS,
+  FONT_OPTIONS,
+  THEME_PRESETS,
+  createThemePresetVisualPatch,
+  gradientFromPrimary,
+  type ThemePreset,
+} from "./theme-presets";
 
 // ── Schema ──────────────────────────────────────────────────────────────────
 
@@ -93,10 +104,12 @@ export default function WebReiwaPage() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const [tab, setTab] = useState<BrandingTab>('brand');
+  const [presetQuery, setPresetQuery] = useState('');
   const customGradients = useCustomGradients();
   const validationMessages = useMemo<BrandingFormValidationMessages>(() => ({
     hexInvalid: t('brandingPage.invalidHex'),
     imageUrlInvalid: t('brandingPage.invalidImageUrl'),
+    gradientInvalid: t('brandingPage.invalidGradient'),
   }), [t]);
   const brandingSchema = useMemo(
     () => createBrandingFormSchema(validationMessages),
@@ -136,12 +149,24 @@ export default function WebReiwaPage() {
   });
 
   function applyPreset(preset: ThemePreset): void {
-    form.setValue("primary", preset.primary, { shouldDirty: true });
-    form.setValue("primaryFg", preset.primaryFg, { shouldDirty: true });
-    form.setValue("bgPrimary", preset.bgPrimary, { shouldDirty: true });
-    form.setValue("bgSecondary", preset.bgSecondary, { shouldDirty: true });
-    form.setValue("cardGradient", preset.cardGradient, { shouldDirty: true });
-    form.setValue("bgEffect", preset.bgEffect, { shouldDirty: true });
+    const patch = createThemePresetVisualPatch(preset);
+    form.setValue("themePresetId", patch.themePresetId, { shouldDirty: true });
+    form.setValue("themePresetVersion", patch.themePresetVersion, { shouldDirty: true });
+    form.setValue("primary", patch.primary, { shouldDirty: true });
+    form.setValue("primaryFg", patch.primaryFg, { shouldDirty: true });
+    form.setValue("bgPrimary", patch.bgPrimary, { shouldDirty: true });
+    form.setValue("bgSecondary", patch.bgSecondary, { shouldDirty: true });
+    form.setValue("cardGradient", patch.cardGradient, { shouldDirty: true });
+    form.setValue("cardPattern", patch.cardPattern, { shouldDirty: true });
+    form.setValue("cardEffect", patch.cardEffect, { shouldDirty: true });
+    form.setValue("cardEffectProps", patch.cardEffectProps, { shouldDirty: true });
+    form.setValue("cardEffectOpacity", patch.cardEffectOpacity, { shouldDirty: true });
+    form.setValue("bgEffect", patch.bgEffect, { shouldDirty: true });
+    form.setValue("appBackground", patch.appBackground, { shouldDirty: true });
+    form.setValue("borderRadius", patch.borderRadius, { shouldDirty: true });
+    form.setValue("cornerRadii", patch.cornerRadii, { shouldDirty: true });
+    form.setValue("fontFamily", patch.fontFamily, { shouldDirty: true });
+    form.setValue("surfaceTheme", patch.surfaceTheme, { shouldDirty: true });
   }
 
   function generateGradient(): void {
@@ -149,8 +174,22 @@ export default function WebReiwaPage() {
     form.setValue("cardGradient", gradientFromPrimary(primary), { shouldDirty: true });
   }
 
-  // eslint-disable-next-line react-hooks/incompatible-library -- react-hook-form watch() pattern
-  const watchedValues = form.watch();
+  // The form is seeded with a complete draft and every server response is
+  // normalized through createInitialBrandingDraft, so the watched snapshot is
+  // complete even though react-hook-form exposes it as DeepPartial.
+  const watchedValues = useWatch({ control: form.control }) as BrandingFormDraft;
+  const filteredThemePresets = useMemo(() => {
+    const needle = presetQuery.trim().toLocaleLowerCase();
+    if (!needle) return THEME_PRESETS;
+    return THEME_PRESETS.filter((preset) =>
+      [
+        preset.code,
+        preset.name,
+        preset.id,
+        preset.visualFamily,
+      ].some((value) => value.toLocaleLowerCase().includes(needle)),
+    );
+  }, [presetQuery]);
 
   if (isLoading) {
     return (
@@ -214,15 +253,37 @@ export default function WebReiwaPage() {
                 </CardTitle>
                 <CardDescription>{t('brandingPage.sections.presets.description')}</CardDescription>
               </CardHeader>
-              <CardContent>
-                <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-                  {THEME_PRESETS.map((preset) => {
-                    const isActive = watchedValues.primary?.toLowerCase() === preset.primary.toLowerCase();
+              <CardContent className="space-y-4">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="relative w-full sm:max-w-sm">
+                    <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                    <Input
+                      value={presetQuery}
+                      onChange={(event) => setPresetQuery(event.target.value)}
+                      placeholder={t('brandingPage.sections.presets.searchPlaceholder')}
+                      aria-label={t('brandingPage.sections.presets.searchLabel')}
+                      className="pl-9"
+                    />
+                  </div>
+                  <span className="text-sm text-muted-foreground">
+                    {t('brandingPage.sections.presets.count', {
+                      visible: filteredThemePresets.length,
+                      total: THEME_PRESETS.length,
+                    })}
+                  </span>
+                </div>
+                <div className="grid max-h-[640px] grid-cols-2 gap-3 overflow-y-auto pr-1 sm:grid-cols-3 xl:grid-cols-4">
+                  {filteredThemePresets.map((preset) => {
+                    const isActive =
+                      watchedValues.themePresetId === preset.id &&
+                      watchedValues.themePresetVersion === preset.version;
                     return (
                       <button
                         key={preset.id}
                         type="button"
                         onClick={() => applyPreset(preset)}
+                        aria-pressed={isActive}
+                        aria-label={`${preset.code} ${preset.name}`}
                         className={`group relative flex flex-col gap-2 rounded-xl border p-3 text-left transition-all hover:scale-[1.02] ${
                           isActive ? "border-primary ring-2 ring-primary/40" : "border-border hover:border-primary/40"
                         }`}
@@ -231,9 +292,21 @@ export default function WebReiwaPage() {
                           className="h-12 w-full rounded-lg ring-1 ring-white/10"
                           style={{ backgroundImage: preset.cardGradient }}
                         />
+                        <div className="flex h-2 overflow-hidden rounded-full">
+                          {preset.palette.map((color, index) => (
+                            <span
+                              key={`${preset.id}-${color}-${index}`}
+                              className="h-full flex-1"
+                              style={{ backgroundColor: color }}
+                            />
+                          ))}
+                        </div>
                         <div className="flex items-center justify-between">
-                          <span className="text-xs font-medium">
-                            {t(`brandingPage.presets.${preset.id}`)}
+                          <span className="min-w-0 text-xs font-medium">
+                            <span className="mr-1 font-mono text-[10px] text-muted-foreground">
+                              {preset.code}
+                            </span>
+                            <span className="line-clamp-1">{preset.name}</span>
                           </span>
                           <span
                             className="h-3 w-3 rounded-full ring-1 ring-white/20"
@@ -249,6 +322,11 @@ export default function WebReiwaPage() {
                     );
                   })}
                 </div>
+                {filteredThemePresets.length === 0 && (
+                  <div className="rounded-lg border border-dashed px-4 py-8 text-center text-sm text-muted-foreground">
+                    {t('brandingPage.sections.presets.empty')}
+                  </div>
+                )}
               </CardContent>
             </Card>
 
@@ -383,7 +461,16 @@ export default function WebReiwaPage() {
                       name="borderRadius"
                       control={form.control}
                       render={({ field }) => (
-                        <Select value={field.value} onValueChange={field.onChange}>
+                        <Select
+                          value={field.value}
+                          onValueChange={(value) => {
+                            field.onChange(value)
+                            const radii = CORNER_RADII_BY_LEGACY_CLASS[value]
+                            if (radii) {
+                              form.setValue('cornerRadii', radii, { shouldDirty: true })
+                            }
+                          }}
+                        >
                           <SelectTrigger>
                             <SelectValue />
                           </SelectTrigger>
@@ -412,7 +499,7 @@ export default function WebReiwaPage() {
                             {FONT_OPTIONS.map((f) => (
                               <SelectItem key={f.id} value={f.value}>
                                 <span style={{ fontFamily: f.value }}>
-                                  {t(`brandingPage.fonts.${f.id}`)}
+                                  {f.label}
                                 </span>
                               </SelectItem>
                             ))}
@@ -421,6 +508,126 @@ export default function WebReiwaPage() {
                       )}
                     />
                   </div>
+                </div>
+                <div className="grid gap-5 border-t pt-4 sm:grid-cols-3">
+                  <CornerRadiusSliderField
+                    label={t('brandingPage.sections.effects.cardRadius')}
+                    name="cardPx"
+                    value={watchedValues.cornerRadii.cardPx}
+                    max={48}
+                    form={form}
+                  />
+                  <CornerRadiusSliderField
+                    label={t('brandingPage.sections.effects.itemRadius')}
+                    name="itemPx"
+                    value={watchedValues.cornerRadii.itemPx}
+                    max={32}
+                    form={form}
+                  />
+                  <CornerRadiusSliderField
+                    label={t('brandingPage.sections.effects.pillRadius')}
+                    name="pillPx"
+                    value={watchedValues.cornerRadii.pillPx}
+                    max={64}
+                    capsule
+                    form={form}
+                  />
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  {t('brandingPage.sections.effects.cornerRadiiHint')}
+                </p>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle>{t('brandingPage.sections.surfaces.title')}</CardTitle>
+                <CardDescription>{t('brandingPage.sections.surfaces.description')}</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-5">
+                <div className="grid grid-cols-2 gap-4 xl:grid-cols-3">
+                  <SurfaceColorField
+                    label={t('brandingPage.sections.surfaces.foreground')}
+                    name="foreground"
+                    form={form}
+                  />
+                  <SurfaceColorField
+                    label={t('brandingPage.sections.surfaces.mutedForeground')}
+                    name="mutedForeground"
+                    form={form}
+                  />
+                  <SurfaceColorField
+                    label={t('brandingPage.sections.surfaces.surface')}
+                    name="surface"
+                    form={form}
+                  />
+                  <SurfaceColorField
+                    label={t('brandingPage.sections.surfaces.surfaceHigh')}
+                    name="surfaceHigh"
+                    form={form}
+                  />
+                  <SurfaceColorField
+                    label={t('brandingPage.sections.surfaces.borderSoft')}
+                    name="borderSoft"
+                    form={form}
+                  />
+                  <SurfaceColorField
+                    label={t('brandingPage.sections.surfaces.borderStrong')}
+                    name="borderStrong"
+                    form={form}
+                  />
+                </div>
+                <div className="grid gap-5 sm:grid-cols-2">
+                  <SurfaceSliderField
+                    label={t('brandingPage.sections.surfaces.surfaceOpacity')}
+                    name="surfaceOpacity"
+                    value={watchedValues.surfaceTheme.surfaceOpacity}
+                    min={0}
+                    max={1}
+                    step={0.01}
+                    format={(value) => `${Math.round(value * 100)}%`}
+                    form={form}
+                  />
+                  <SurfaceSliderField
+                    label={t('brandingPage.sections.surfaces.surfaceHighOpacity')}
+                    name="surfaceHighOpacity"
+                    value={watchedValues.surfaceTheme.surfaceHighOpacity}
+                    min={0}
+                    max={1}
+                    step={0.01}
+                    format={(value) => `${Math.round(value * 100)}%`}
+                    form={form}
+                  />
+                  <SurfaceSliderField
+                    label={t('brandingPage.sections.surfaces.borderSoftOpacity')}
+                    name="borderSoftOpacity"
+                    value={watchedValues.surfaceTheme.borderSoftOpacity}
+                    min={0}
+                    max={1}
+                    step={0.01}
+                    format={(value) => `${Math.round(value * 100)}%`}
+                    form={form}
+                  />
+                  <SurfaceSliderField
+                    label={t('brandingPage.sections.surfaces.borderStrongOpacity')}
+                    name="borderStrongOpacity"
+                    value={watchedValues.surfaceTheme.borderStrongOpacity}
+                    min={0}
+                    max={1}
+                    step={0.01}
+                    format={(value) => `${Math.round(value * 100)}%`}
+                    form={form}
+                  />
+                  <SurfaceSliderField
+                    label={t('brandingPage.sections.surfaces.glassBlur')}
+                    name="glassBlurPx"
+                    value={watchedValues.surfaceTheme.glassBlurPx}
+                    min={0}
+                    max={40}
+                    step={1}
+                    format={(value) => `${value}px`}
+                    form={form}
+                  />
                 </div>
               </CardContent>
             </Card>
@@ -753,7 +960,7 @@ export default function WebReiwaPage() {
                   <NavConfigSection
                     value={(field.value ?? []) as NavItemDraft[]}
                     onChange={(next) => field.onChange(next)}
-                    gap={form.watch('navGap') ?? 2}
+                    gap={watchedValues.navGap ?? 2}
                     onGapChange={(next) => form.setValue('navGap', next, { shouldDirty: true })}
                   />
                 ) : (
@@ -874,4 +1081,141 @@ function ColorField({
       </div>
     </div>
   );
+}
+
+function SurfaceColorField({
+  label,
+  name,
+  form,
+}: {
+  readonly label: string;
+  readonly name: keyof Pick<
+    BrandingSurfaceThemeDraft,
+    'foreground' | 'mutedForeground' | 'surface' | 'surfaceHigh' | 'borderSoft' | 'borderStrong'
+  >;
+  readonly form: UseFormReturn<BrandingFormDraft, unknown, BrandingFormData>;
+}) {
+  const path = `surfaceTheme.${name}` as FieldPath<BrandingFormDraft>;
+  const value = form.watch(path) as string;
+  const inputId = `branding-surface-${name}`;
+
+  return (
+    <div className="space-y-2">
+      <Label htmlFor={inputId}>{label}</Label>
+      <div className="flex items-center gap-2">
+        <label className="relative flex h-9 w-9 shrink-0 cursor-pointer items-center justify-center overflow-hidden rounded-md border">
+          <span className="absolute inset-0" style={{ backgroundColor: value || '#000000' }} />
+          <input
+            type="color"
+            value={value || '#000000'}
+            onChange={(event) =>
+              form.setValue(path, event.target.value, { shouldDirty: true })
+            }
+            className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+            aria-label={label}
+          />
+        </label>
+        <Input
+          id={inputId}
+          {...form.register(path)}
+          className="font-mono text-xs"
+          placeholder="#18181b"
+        />
+      </div>
+    </div>
+  );
+}
+
+function SurfaceSliderField({
+  label,
+  name,
+  value,
+  min,
+  max,
+  step,
+  format,
+  form,
+}: {
+  readonly label: string;
+  readonly name: keyof Pick<
+    BrandingSurfaceThemeDraft,
+    | 'surfaceOpacity'
+    | 'surfaceHighOpacity'
+    | 'borderSoftOpacity'
+    | 'borderStrongOpacity'
+    | 'glassBlurPx'
+  >;
+  readonly value: number;
+  readonly min: number;
+  readonly max: number;
+  readonly step: number;
+  readonly format: (value: number) => string;
+  readonly form: UseFormReturn<BrandingFormDraft, unknown, BrandingFormData>;
+}) {
+  const path = `surfaceTheme.${name}` as FieldPath<BrandingFormDraft>;
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between gap-3">
+        <Label>{label}</Label>
+        <span className="font-mono text-xs text-muted-foreground">{format(value)}</span>
+      </div>
+      <Slider
+        value={[value]}
+        min={min}
+        max={max}
+        step={step}
+        onValueChange={(next) =>
+          form.setValue(path, next[0] ?? value, { shouldDirty: true })
+        }
+      />
+    </div>
+  );
+}
+
+function CornerRadiusSliderField({
+  label,
+  name,
+  value,
+  max,
+  capsule = false,
+  form,
+}: {
+  readonly label: string
+  readonly name: keyof BrandingCornerRadiiDraft
+  readonly value: number
+  readonly max: number
+  readonly capsule?: boolean
+  readonly form: UseFormReturn<BrandingFormDraft, unknown, BrandingFormData>
+}) {
+  const { t } = useTranslation()
+  const path = `cornerRadii.${name}` as FieldPath<BrandingFormDraft>
+  const sliderValue = capsule && value >= max ? max : value
+  const displayed =
+    capsule && value >= max
+      ? t('brandingPage.sections.effects.capsule')
+      : `${Math.round(value)}px`
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between gap-3">
+        <Label>{label}</Label>
+        <span className="font-mono text-xs text-muted-foreground">{displayed}</span>
+      </div>
+      <Slider
+        value={[sliderValue]}
+        min={0}
+        max={max}
+        step={1}
+        onValueChange={(next) => {
+          const selected = next[0] ?? sliderValue
+          form.setValue(
+            path,
+            capsule && selected >= max ? 9999 : selected,
+            { shouldDirty: true },
+          )
+        }}
+      />
+    </div>
+  )
 }

@@ -11,6 +11,8 @@ export type SubscriptionQuoteWarningCode =
   | 'UPGRADE_RESETS_EXPIRY'
   | 'TRIAL_UPGRADE_REQUIRED'
   | 'TRIAL_ALREADY_USED'
+  | 'TRIAL_NOT_RENEWABLE'
+  /** @deprecated Kept for compatibility with older Reiwa clients. */
   | 'TRIAL_FREE_NOT_RENEWABLE'
   | 'TRIAL_INVITED_ONLY'
   | 'TRIAL_REQUIRES_TELEGRAM'

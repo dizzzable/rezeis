@@ -1,8 +1,10 @@
 import {
+  ArrayMaxSize,
   IsArray,
   IsBoolean,
   IsHexColor,
   IsIn,
+  IsInt,
   IsNumber,
   IsObject,
   IsOptional,
@@ -14,9 +16,11 @@ import {
   Min,
   MinLength,
   ValidateIf,
+  ValidateBy,
   ValidateNested,
+  type ValidationOptions,
 } from 'class-validator';
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 
 import {
   APP_BACKGROUND_KINDS,
@@ -34,6 +38,150 @@ import {
   NAV_DESTINATIONS,
   NavDestinationId,
 } from '../interfaces/branding-settings.interface';
+import {
+  isSafeBrandingGradient,
+  isSafeBrandingGradientOrNone,
+} from '../utils/branding-css.util';
+
+/**
+ * Relative branding assets are intentionally confined to the one upload
+ * bucket mirrored durably by Reiwa. External HTTPS and inline data images
+ * remain supported. Plain HTTP is intentionally excluded: Reiwa is normally
+ * served over HTTPS and its CSP blocks mixed-content branding images.
+ */
+const DATA_IMAGE_BASE64_PATTERN =
+  /^data:image\/[a-z0-9+.-]+;base64,[A-Za-z0-9+/=]+$/i;
+const BRANDING_UPLOAD_PATH_PATTERN =
+  /^\/uploads\/branding\/(?![A-Za-z0-9._-]*\.\.)[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+function isAllowedBrandingImageUrl(value: string): boolean {
+  if (
+    DATA_IMAGE_BASE64_PATTERN.test(value) ||
+    BRANDING_UPLOAD_PATH_PATTERN.test(value)
+  ) {
+    return true;
+  }
+  try {
+    const url = new URL(value);
+    return (
+      url.protocol === 'https:' &&
+      url.username.length === 0 &&
+      url.password.length === 0
+    );
+  } catch {
+    return false;
+  }
+}
+
+function IsBrandingImageUrl(
+  validationOptions?: ValidationOptions,
+): PropertyDecorator {
+  return ValidateBy(
+    {
+      name: 'isBrandingImageUrl',
+      validator: {
+        validate: (value: unknown): boolean =>
+          typeof value === 'string' && isAllowedBrandingImageUrl(value),
+        defaultMessage: (): string =>
+          '$property must be a data:image base64 URI, an HTTPS URL, or a safe /uploads/branding/ path',
+      },
+    },
+    validationOptions,
+  );
+}
+
+function IsBrandingGradient(
+  options?: { readonly allowNone?: boolean },
+  validationOptions?: ValidationOptions,
+): PropertyDecorator {
+  return ValidateBy(
+    {
+      name: 'isBrandingGradient',
+      validator: {
+        validate: (value: unknown): boolean =>
+          options?.allowNone === true
+            ? isSafeBrandingGradientOrNone(value)
+            : isSafeBrandingGradient(value),
+        defaultMessage: (): string =>
+          '$property must contain only valid CSS gradient layers',
+      },
+    },
+    validationOptions,
+  );
+}
+
+function hasOnlyAllowedPlanTextureUrls(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return true;
+  }
+  return Object.values(value as Record<string, unknown>).every((style) => {
+    if (typeof style !== 'object' || style === null || Array.isArray(style)) {
+      return true;
+    }
+    const textureUrl = (style as Record<string, unknown>)['textureUrl'];
+    if (textureUrl === undefined || textureUrl === null) return true;
+    if (typeof textureUrl !== 'string') return false;
+    const normalized = textureUrl.trim();
+    return normalized.length === 0 || isAllowedBrandingImageUrl(normalized);
+  });
+}
+
+function HasAllowedPlanTextureUrls(
+  validationOptions?: ValidationOptions,
+): PropertyDecorator {
+  return ValidateBy(
+    {
+      name: 'hasAllowedPlanTextureUrls',
+      validator: {
+        validate: hasOnlyAllowedPlanTextureUrls,
+        defaultMessage: (): string =>
+          'planCardStyles textureUrl values must be data:image base64 URIs, HTTPS URLs, or safe /uploads/branding/ paths',
+      },
+    },
+    validationOptions,
+  );
+}
+
+function HasSafePlanGradients(
+  validationOptions?: ValidationOptions,
+): PropertyDecorator {
+  return ValidateBy(
+    {
+      name: 'hasSafePlanGradients',
+      validator: {
+        validate: (value: unknown): boolean => {
+          if (
+            typeof value !== 'object' ||
+            value === null ||
+            Array.isArray(value)
+          ) {
+            return true;
+          }
+          return Object.values(value as Record<string, unknown>).every(
+            (style) => {
+              if (
+                typeof style !== 'object' ||
+                style === null ||
+                Array.isArray(style)
+              ) {
+                return true;
+              }
+              const gradient = (style as Record<string, unknown>)['gradient'];
+              return (
+                gradient === undefined ||
+                gradient === null ||
+                isSafeBrandingGradient(gradient)
+              );
+            },
+          );
+        },
+        defaultMessage: (): string =>
+          'planCardStyles gradient values must contain only valid CSS gradient layers',
+      },
+    },
+    validationOptions,
+  );
+}
 
 /**
  * One per-position card-background slot in `cardEffectsByIndex`. Mirrors the
@@ -57,6 +205,7 @@ export class CardEffectSlotDto {
   @ValidateIf((_, value: unknown) => value !== null)
   @IsString()
   @MaxLength(512)
+  @IsBrandingGradient()
   public cardGradient?: string | null;
 }
 
@@ -116,6 +265,7 @@ export class AppBackgroundDto {
   @IsOptional()
   @IsString()
   @MaxLength(512)
+  @IsBrandingGradient()
   public gradient?: string;
 
   @IsOptional()
@@ -124,18 +274,40 @@ export class AppBackgroundDto {
   public texture?: AppBackgroundTextureDto;
 }
 
+export class CornerRadiiDto {
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ allowInfinity: false, allowNaN: false })
+  @Min(0)
+  @Max(48)
+  public cardPx?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ allowInfinity: false, allowNaN: false })
+  @Min(0)
+  @Max(32)
+  public itemPx?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ allowInfinity: false, allowNaN: false })
+  @Min(0)
+  @Max(9999)
+  public pillPx?: number;
+}
+
 /**
  * Patch payload for `PATCH /admin/settings/branding`.
  *
  * Every field is optional so the admin UI can submit incremental changes.
  * Validation rules are intentionally strict:
  *   - colour fields accept 3 / 4 / 6 / 8-digit hex with leading `#`,
- *   - `cardGradient` accepts any non-empty string (CSS background grammar is
- *     hard to validate in DTOs; the SPA renders it under the same-origin
- *     stylesheet so XSS surface is limited to the admin user themselves),
+ *   - gradient fields accept only CSS gradient layers and cannot start
+ *     external image requests or escape from their property value,
  *   - `bgEffect` is constrained to the predefined preset list,
- *   - `logoUrl` accepts `data:` URIs (for inline SVGs uploaded through the UI)
- *     OR `http(s)://` URLs.
+ *   - image assets accept safe `/uploads/branding/...` paths (mirrored by
+ *     Reiwa), external HTTPS URLs, or inline `data:image` base64 values.
  */
 /**
  * Remnawave profile-naming template block (persisted under
@@ -172,7 +344,97 @@ export class NavItemDto {
   public visible!: boolean;
 }
 
+/**
+ * Partial patch for the Reiwa cabinet's resolved text/glass surface tokens.
+ * Every supplied colour is a real hex value and every alpha/blur value stays
+ * within the CSS-safe runtime bounds. Missing fields are preserved by the
+ * settings merge utility.
+ */
+export class SurfaceThemeDto {
+  @IsOptional()
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @IsHexColor()
+  public foreground?: string;
+
+  @IsOptional()
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @IsHexColor()
+  public mutedForeground?: string;
+
+  @IsOptional()
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @IsHexColor()
+  public surface?: string;
+
+  @IsOptional()
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @IsHexColor()
+  public surfaceHigh?: string;
+
+  @IsOptional()
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @IsHexColor()
+  public borderSoft?: string;
+
+  @IsOptional()
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @IsHexColor()
+  public borderStrong?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ allowInfinity: false, allowNaN: false })
+  @Min(0)
+  @Max(1)
+  public surfaceOpacity?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ allowInfinity: false, allowNaN: false })
+  @Min(0)
+  @Max(1)
+  public surfaceHighOpacity?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ allowInfinity: false, allowNaN: false })
+  @Min(0)
+  @Max(1)
+  public borderSoftOpacity?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ allowInfinity: false, allowNaN: false })
+  @Min(0)
+  @Max(1)
+  public borderStrongOpacity?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ allowInfinity: false, allowNaN: false })
+  @Min(0)
+  @Max(40)
+  public glassBlurPx?: number;
+}
+
 export class UpdateBrandingSettingsDto {
+  @IsOptional()
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @IsString()
+  @MinLength(1)
+  @MaxLength(128)
+  @Matches(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/, {
+    message: 'themePresetId must be a stable alphanumeric preset id',
+  })
+  public themePresetId?: string | null;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(2_147_483_647)
+  public themePresetVersion?: number | null;
+
   @IsOptional()
   @IsString()
   @MinLength(1)
@@ -186,30 +448,27 @@ export class UpdateBrandingSettingsDto {
   public tagline?: string | null;
 
   @IsOptional()
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @ValidateIf((_, value: unknown) => typeof value === 'string' && value.length > 0)
   @IsString()
   @MaxLength(524288)
-  @Matches(/^(?:data:image\/[a-z0-9+.-]+;base64,[A-Za-z0-9+/=]+|https?:\/\/.+|\/uploads\/[A-Za-z0-9._/-]+)$/i, {
-    message: 'logoUrl must be a data: URI, an http(s) URL, or an /uploads/ path',
-  })
+  @IsBrandingImageUrl()
   public logoUrl?: string | null;
 
   @IsOptional()
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @ValidateIf((_, value: unknown) => typeof value === 'string' && value.length > 0)
   @IsString()
   @MaxLength(524288)
-  @Matches(/^(?:data:image\/[a-z0-9+.-]+;base64,[A-Za-z0-9+/=]+|https?:\/\/.+|\/uploads\/[A-Za-z0-9._/-]+)$/i, {
-    message: 'pwaIconUrl must be a data: URI, an http(s) URL, or an /uploads/ path',
-  })
+  @IsBrandingImageUrl()
   public pwaIconUrl?: string | null;
 
   @IsOptional()
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @ValidateIf((_, value: unknown) => typeof value === 'string' && value.length > 0)
   @IsString()
   @MaxLength(524288)
-  @Matches(/^(?:data:image\/[a-z0-9+.-]+;base64,[A-Za-z0-9+/=]+|https?:\/\/.+|\/uploads\/[A-Za-z0-9._/-]+)$/i, {
-    message: 'adminPwaIconUrl must be a data: URI, an http(s) URL, or an /uploads/ path',
-  })
+  @IsBrandingImageUrl()
   public adminPwaIconUrl?: string | null;
 
   @IsOptional()
@@ -232,12 +491,14 @@ export class UpdateBrandingSettingsDto {
   @IsString()
   @MinLength(1)
   @MaxLength(512)
+  @IsBrandingGradient()
   public cardGradient?: string;
 
   @IsOptional()
   @ValidateIf((_, value: unknown) => typeof value === 'string' && value.length > 0)
   @IsString()
-  @MaxLength(524288)
+  @MaxLength(512)
+  @IsBrandingGradient({ allowNone: true })
   public cardPattern?: string | null;
 
   @IsOptional()
@@ -245,12 +506,11 @@ export class UpdateBrandingSettingsDto {
   public cardLogo?: CardLogoPreset;
 
   @IsOptional()
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @ValidateIf((_, value: unknown) => typeof value === 'string' && value.length > 0)
   @IsString()
   @MaxLength(524288)
-  @Matches(/^(?:data:image\/[a-z0-9+.-]+;base64,[A-Za-z0-9+/=]+|https?:\/\/.+|\/uploads\/[A-Za-z0-9._/-]+)$/i, {
-    message: 'cardLogoUrl must be a data: URI, an http(s) URL, or an /uploads/ path',
-  })
+  @IsBrandingImageUrl()
   public cardLogoUrl?: string | null;
 
   @IsOptional()
@@ -269,6 +529,7 @@ export class UpdateBrandingSettingsDto {
 
   @IsOptional()
   @IsArray()
+  @ArrayMaxSize(20)
   @ValidateNested({ each: true })
   @Type(() => CardEffectSlotDto)
   public cardEffectsByIndex?: CardEffectSlotDto[];
@@ -296,9 +557,21 @@ export class UpdateBrandingSettingsDto {
   public borderRadius?: string;
 
   @IsOptional()
+  @IsObject()
+  @ValidateNested()
+  @Type(() => CornerRadiiDto)
+  public cornerRadii?: CornerRadiiDto;
+
+  @IsOptional()
   @IsString()
   @Length(1, 256)
   public fontFamily?: string;
+
+  @ValidateIf((_, value: unknown) => value !== undefined)
+  @IsObject()
+  @ValidateNested()
+  @Type(() => SurfaceThemeDto)
+  public surfaceTheme?: SurfaceThemeDto;
 
   /**
    * Per-plan tariff-card styles, keyed by `planId`. Loosely validated here
@@ -307,6 +580,8 @@ export class UpdateBrandingSettingsDto {
    */
   @IsOptional()
   @IsObject()
+  @HasAllowedPlanTextureUrls()
+  @HasSafePlanGradients()
   public planCardStyles?: Record<string, unknown>;
 
   /**

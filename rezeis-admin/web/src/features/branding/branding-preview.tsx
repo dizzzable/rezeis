@@ -41,6 +41,8 @@ import {
   DEFAULT_NAV_ITEMS,
   type PlanCardStyleDraft,
   type BrandingAppBackgroundDraft,
+  type BrandingCornerRadiiDraft,
+  type BrandingSurfaceThemeDraft,
   type NavItemDraft,
   type NavDestinationId,
 } from './branding-form-schema'
@@ -69,6 +71,8 @@ interface BrandingPreviewProps {
     }[]
     fontFamily?: string
     borderRadius?: string
+    cornerRadii?: BrandingCornerRadiiDraft
+    surfaceTheme?: BrandingSurfaceThemeDraft
     planCardStyles?: Record<string, PlanCardStyleDraft>
     appBackground?: BrandingAppBackgroundDraft
     navItems?: readonly NavItemDraft[]
@@ -98,6 +102,24 @@ function shadeHex(hex: string, amount: number): string {
     amount >= 0 ? Math.round(n + (255 - n) * amount) : Math.round(n * (1 + amount))
   const toHex = (n: number) => Math.max(0, Math.min(255, n)).toString(16).padStart(2, '0')
   return `#${toHex(mix(r))}${toHex(mix(g))}${toHex(mix(b))}`
+}
+
+function toRgba(hex: string, opacity: number): string {
+  const raw = hex.trim().replace(/^#/, '')
+  const normalized =
+    raw.length === 3 || raw.length === 4
+      ? raw
+          .slice(0, 3)
+          .split('')
+          .map((character) => character + character)
+          .join('')
+      : raw.slice(0, 6)
+  if (!/^[0-9a-f]{6}$/i.test(normalized)) return hex
+  const alpha = Math.min(1, Math.max(0, opacity))
+  return `rgba(${Number.parseInt(normalized.slice(0, 2), 16)}, ${Number.parseInt(
+    normalized.slice(2, 4),
+    16,
+  )}, ${Number.parseInt(normalized.slice(4, 6), 16)}, ${alpha})`
 }
 
 const RADIUS_MAP: Record<string, string> = {
@@ -310,7 +332,6 @@ export function BrandingPreview({ values, focus }: BrandingPreviewProps) {
     primary = '#22c55e',
     primaryFg = '#0a0a0a',
     bgPrimary = '#0a0a0a',
-    bgSecondary = '#171717',
     cardGradient = 'linear-gradient(135deg, #064e3b 0%, #22c55e 100%)',
     cardPattern,
     cardLogo = 'DEFAULT',
@@ -321,13 +342,31 @@ export function BrandingPreview({ values, focus }: BrandingPreviewProps) {
     cardEffectsByIndex = [],
     fontFamily = 'Geist Variable, system-ui, sans-serif',
     borderRadius = 'rounded-2xl',
+    cornerRadii,
+    surfaceTheme = {
+      foreground: '#fafafa',
+      mutedForeground: '#a1a1a1',
+      surface: '#18181b',
+      surfaceHigh: '#27272a',
+      borderSoft: '#ffffff',
+      borderStrong: '#ffffff',
+      surfaceOpacity: 0.7,
+      surfaceHighOpacity: 0.8,
+      borderSoftOpacity: 0.06,
+      borderStrongOpacity: 0.12,
+      glassBlurPx: 16,
+    },
     planCardStyles = {},
     appBackground,
     navItems,
     navGap = 2,
   } = values
 
-  const radius = RADIUS_MAP[borderRadius] ?? '1rem'
+  const radius = cornerRadii
+    ? `${cornerRadii.cardPx}px`
+    : RADIUS_MAP[borderRadius] ?? '1rem'
+  const itemRadius = `${cornerRadii?.itemPx ?? 14}px`
+  const pillRadius = `${cornerRadii?.pillPx ?? 9999}px`
 
   // Plans power the context-aware tariff preview (planCards tab). Shared,
   // react-query-cached fetch — free when the section already loaded it.
@@ -380,8 +419,13 @@ export function BrandingPreview({ values, focus }: BrandingPreviewProps) {
     <div className="flex flex-col items-center">
       {/* Phone frame */}
       <div
-        className="relative w-[300px] overflow-hidden rounded-[2.5rem] border-4 border-zinc-800 shadow-2xl"
-        style={{ backgroundColor: bgPrimary, fontFamily }}
+        className="relative w-[300px] overflow-hidden rounded-[2.5rem] border-4 shadow-2xl"
+        style={{
+          backgroundColor: bgPrimary,
+          borderColor: toRgba(surfaceTheme.borderStrong, surfaceTheme.borderStrongOpacity),
+          color: surfaceTheme.foreground,
+          fontFamily,
+        }}
       >
         {/* Ambient brand glow */}
         <div
@@ -417,8 +461,8 @@ export function BrandingPreview({ values, focus }: BrandingPreviewProps) {
 
         {/* Status bar */}
         <div className="relative flex items-center justify-between px-6 pt-3 pb-1">
-          <span className="text-[10px] font-medium text-white/50">9:41</span>
-          <span className="text-[10px] text-white/50">●●● ▮</span>
+          <span className="text-[10px] font-medium" style={{ color: surfaceTheme.mutedForeground }}>9:41</span>
+          <span className="text-[10px]" style={{ color: surfaceTheme.mutedForeground }}>●●● ▮</span>
         </div>
 
         {/* Content area */}
@@ -432,15 +476,29 @@ export function BrandingPreview({ values, focus }: BrandingPreviewProps) {
                 <ReiwaMark className="h-7 w-7" style={{ color: primary }} />
               )}
               <div className="leading-tight">
-                <p className="text-xs font-semibold text-white">{brandName}</p>
-                <p className="truncate text-[9px] text-white/40">
+                <p className="text-xs font-semibold" style={{ color: surfaceTheme.foreground }}>{brandName}</p>
+                <p className="truncate text-[9px]" style={{ color: surfaceTheme.mutedForeground }}>
                   {tagline?.trim() || t('brandingPage.sections.preview.welcome')}
                 </p>
               </div>
             </div>
             <div className="flex gap-1.5">
-              <span className="h-6 w-6 rounded-full border border-white/10 bg-white/5" />
-              <span className="h-6 w-6 rounded-full border border-white/10 bg-white/5" />
+              <span
+                className="h-6 w-6 rounded-full border"
+                style={{
+                  backgroundColor: toRgba(surfaceTheme.surface, surfaceTheme.surfaceOpacity),
+                  borderColor: toRgba(surfaceTheme.borderSoft, surfaceTheme.borderSoftOpacity),
+                  backdropFilter: `blur(${surfaceTheme.glassBlurPx}px)`,
+                }}
+              />
+              <span
+                className="h-6 w-6 rounded-full border"
+                style={{
+                  backgroundColor: toRgba(surfaceTheme.surface, surfaceTheme.surfaceOpacity),
+                  borderColor: toRgba(surfaceTheme.borderSoft, surfaceTheme.borderSoftOpacity),
+                  backdropFilter: `blur(${surfaceTheme.glassBlurPx}px)`,
+                }}
+              />
             </div>
           </div>
 
@@ -483,8 +541,19 @@ export function BrandingPreview({ values, focus }: BrandingPreviewProps) {
                 className="flex flex-col items-center gap-1 rounded-2xl py-2.5"
                 style={
                   i === 1
-                    ? { backgroundColor: primary }
-                    : { backgroundColor: `${bgSecondary}cc`, border: '1px solid rgba(255,255,255,0.08)' }
+                    ? { borderRadius: itemRadius, backgroundColor: primary }
+                    : {
+                        borderRadius: itemRadius,
+                        backgroundColor: toRgba(
+                          surfaceTheme.surface,
+                          surfaceTheme.surfaceOpacity,
+                        ),
+                        border: `1px solid ${toRgba(
+                          surfaceTheme.borderSoft,
+                          surfaceTheme.borderSoftOpacity,
+                        )}`,
+                        backdropFilter: `blur(${surfaceTheme.glassBlurPx}px)`,
+                      }
                 }
               >
                 <div
@@ -493,7 +562,7 @@ export function BrandingPreview({ values, focus }: BrandingPreviewProps) {
                 />
                 <span
                   className="text-[9px] font-medium"
-                  style={{ color: i === 1 ? primaryFg : 'rgba(255,255,255,0.6)' }}
+                  style={{ color: i === 1 ? primaryFg : surfaceTheme.mutedForeground }}
                 >
                   {label}
                 </span>
@@ -503,8 +572,20 @@ export function BrandingPreview({ values, focus }: BrandingPreviewProps) {
 
           {/* Bottom nav pill — reflects the configured navItems + navGap (Навигация tab) */}
           <div
-            className="mt-4 flex w-fit items-center justify-center rounded-full border border-white/10 px-1.5 py-1.5"
-            style={{ backgroundColor: `${bgSecondary}e6`, gap: `${navGap}px` }}
+            className="mt-4 flex w-fit items-center justify-center rounded-full border px-1.5 py-1.5"
+            style={{
+              backgroundColor: toRgba(
+                surfaceTheme.surfaceHigh,
+                surfaceTheme.surfaceHighOpacity,
+              ),
+              borderColor: toRgba(
+                surfaceTheme.borderSoft,
+                surfaceTheme.borderSoftOpacity,
+              ),
+              backdropFilter: `blur(${surfaceTheme.glassBlurPx}px)`,
+              gap: `${navGap}px`,
+              borderRadius: pillRadius,
+            }}
           >
             {visibleNav.map((item, i) => {
               const Icon = NAV_ICONS[item.id];
@@ -513,7 +594,7 @@ export function BrandingPreview({ values, focus }: BrandingPreviewProps) {
                 <div
                   key={item.id}
                   className="flex items-center gap-1.5 rounded-full px-3 py-1.5"
-                  style={{ backgroundColor: primary }}
+                  style={{ backgroundColor: primary, borderRadius: pillRadius }}
                 >
                   <Icon className="h-3.5 w-3.5" style={{ color: primaryFg }} />
                   <span className="text-[9px] font-medium" style={{ color: primaryFg }}>
@@ -521,7 +602,11 @@ export function BrandingPreview({ values, focus }: BrandingPreviewProps) {
                   </span>
                 </div>
               ) : (
-                <Icon key={item.id} className="h-3.5 w-3.5 text-white/40" />
+                <Icon
+                  key={item.id}
+                  className="h-3.5 w-3.5"
+                  style={{ color: surfaceTheme.mutedForeground }}
+                />
               );
             })}
           </div>

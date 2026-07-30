@@ -13,7 +13,19 @@
  */
 
 import { useTranslation } from 'react-i18next'
-import { Bell, CreditCard, Globe, MessageSquare, Shield, Tag, CircleHelp } from 'lucide-react'
+import {
+  Bell,
+  BookOpen,
+  CircleHelp,
+  CreditCard,
+  Download,
+  Globe,
+  MessageSquare,
+  Puzzle,
+  Shield,
+  Tag,
+  WalletCards,
+} from 'lucide-react'
 import type { ComponentType, SVGProps } from 'react'
 
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -37,6 +49,10 @@ const ICONS: readonly IconDef[] = [
   { key: 'language', Icon: Globe, accent: '#a78bfa' },
   { key: 'support', Icon: MessageSquare, accent: '#22c55e' },
   { key: 'faq', Icon: CircleHelp, accent: '#a1a1aa' },
+  { key: 'paymentMethods', Icon: WalletCards, accent: '#38bdf8' },
+  { key: 'addons', Icon: Puzzle, accent: '#fb7185' },
+  { key: 'install', Icon: Download, accent: '#2dd4bf' },
+  { key: 'tutorial', Icon: BookOpen, accent: '#f59e0b' },
 ]
 
 interface IconColorsSectionProps {

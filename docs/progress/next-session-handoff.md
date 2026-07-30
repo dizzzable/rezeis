@@ -1,6 +1,6 @@
 # Next Session Handoff — Rezeis Remediation
 
-Updated: 2026-06-04
+Updated: 2026-07-30
 
 ## User Context
 
@@ -41,7 +41,7 @@ These existed before this handoff. Do not overwrite or delete them unless explic
 
 ## Current Gate Snapshot
 
-Generated: 2026-06-04T16:08:13.877Z (checks not re-run; previous observed results preserved)
+Generated: 2026-07-30T18:48:02.485Z (checks not re-run; previous observed results preserved)
 
 Run these from `V:\REZEIS_ADMIN_RUID_USER\rezeis` or the listed subdirectory.
 
@@ -236,6 +236,8 @@ Historical P0.3 triage notes retained for context:
 
 ## Internet Research Used
 
+- MDN `<script>` reference (checked 2026-07-30): dynamically loaded scripts expose explicit `load` / `error` events; Reiwa's Telegram SDK loader now signals those states instead of treating a fixed timeout as a final web-mode decision. https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Elements/script
+- MDN CSS `<gradient>` reference (checked 2026-07-30): persisted branding image values are limited to linear, radial, conic, and repeating gradient functions; raster assets continue through the dedicated validated asset fields. https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/Values/gradient
 - GitHub Actions docs: workflows are discovered only from repository-root `.github/workflows`.
 - OWASP HTML5 Security Cheat Sheet: localStorage is not appropriate for session identifiers/sensitive auth; CORS should use explicit trusted origins.
 - Docker Compose secrets docs: secrets avoid exposing passwords/API keys through environment variables.

@@ -261,7 +261,10 @@ export const NAV_DESTINATIONS = [
 export type NavDestinationId = (typeof NAV_DESTINATIONS)[number];
 
 /** Destinations that must always stay visible in the navigation. */
-export const NAV_ESSENTIAL_DESTINATIONS: readonly NavDestinationId[] = ['subscriptions', 'settings'];
+export const NAV_ESSENTIAL_DESTINATIONS: readonly NavDestinationId[] = [
+  'subscriptions',
+  'settings',
+];
 
 /** Max destinations shown in the bottom nav before it gets too crowded. */
 export const NAV_MAX_VISIBLE = 5;
@@ -272,7 +275,66 @@ export interface NavItemSetting {
   readonly visible: boolean;
 }
 
+/**
+ * Theme-owned cabinet surface tokens. Colours and opacities are kept
+ * separate so presets can reuse the same tint at different translucency
+ * levels without persisting CSS-only `rgba(...)` strings.
+ *
+ * These defaults mirror the dark Reiwa UI that shipped before the tokens
+ * became configurable, keeping older JSON payloads visually identical.
+ */
+export interface SurfaceThemeSettings {
+  /** Default high-contrast copy and icon colour. */
+  readonly foreground: string;
+  /** Secondary / helper copy colour. */
+  readonly mutedForeground: string;
+  /** Base glass surface tint. */
+  readonly surface: string;
+  /** Elevated glass surface tint. */
+  readonly surfaceHigh: string;
+  /** Subtle border tint. */
+  readonly borderSoft: string;
+  /** Emphasised border tint. */
+  readonly borderStrong: string;
+  /** Base surface alpha (0–1). */
+  readonly surfaceOpacity: number;
+  /** Elevated surface alpha (0–1). */
+  readonly surfaceHighOpacity: number;
+  /** Subtle border alpha (0–1). */
+  readonly borderSoftOpacity: number;
+  /** Emphasised border alpha (0–1). */
+  readonly borderStrongOpacity: number;
+  /** Backdrop blur radius in px (0–40). */
+  readonly glassBlurPx: number;
+}
+
+/**
+ * Exact cabinet corner geometry. Unlike the legacy Tailwind class, these
+ * values preserve angular source concepts without quantisation.
+ */
+export interface CornerRadiiSettings {
+  /** Main cards, sheets and modal surfaces (0–48 px). */
+  readonly cardPx: number;
+  /** Inputs, buttons and nested items (0–32 px). */
+  readonly itemPx: number;
+  /** Chips and stadium controls (0–9999 px; 9999 = capsule). */
+  readonly pillPx: number;
+}
+
 export interface BrandingSettingsInterface {
+  /**
+   * Stable id of the ready-made theme currently applied by WEB Reiwa.
+   * `null` means the operator has a custom/legacy theme with no preset
+   * identity. The id is informational; all resolved visual tokens are stored
+   * alongside it so Reiwa never depends on the admin panel at render time.
+   */
+  readonly themePresetId: string | null;
+  /**
+   * Schema/generator version of `themePresetId`. Lets future releases
+   * distinguish presets with the same stable id but updated resolved tokens.
+   */
+  readonly themePresetVersion: number | null;
+
   /** Display name shown on the subscription card and headers. */
   readonly brandName: string;
   /**
@@ -374,8 +436,17 @@ export interface BrandingSettingsInterface {
 
   /** Tailwind-friendly border-radius token (e.g. `rounded-2xl`). */
   readonly borderRadius: string;
+  /** Exact, independently editable Reiwa corner radii. */
+  readonly cornerRadii: CornerRadiiSettings;
   /** Display font family. */
   readonly fontFamily: string;
+
+  /**
+   * Themeable text, glass-surface and border tokens. Stored as a complete
+   * normalized block on reads; older rows without it receive the shipped
+   * dark defaults.
+   */
+  readonly surfaceTheme: SurfaceThemeSettings;
 
   /**
    * Per-plan tariff-card visual styles, keyed by `planId`. Drives the reiwa
@@ -409,6 +480,8 @@ export interface BrandingSettingsInterface {
 }
 
 export const DEFAULT_BRANDING: BrandingSettingsInterface = {
+  themePresetId: null,
+  themePresetVersion: null,
   brandName: 'Reiwa',
   tagline: null,
   logoUrl: null,
@@ -444,7 +517,25 @@ export const DEFAULT_BRANDING: BrandingSettingsInterface = {
   iconColorMode: 'default',
   iconColors: {},
   borderRadius: 'rounded-2xl',
-  fontFamily: 'Inter, system-ui, sans-serif',
+  cornerRadii: {
+    cardPx: 24,
+    itemPx: 14,
+    pillPx: 9999,
+  },
+  fontFamily: 'Geist Variable, system-ui, sans-serif',
+  surfaceTheme: {
+    foreground: '#fafafa',
+    mutedForeground: '#a1a1a1',
+    surface: '#18181b',
+    surfaceHigh: '#27272a',
+    borderSoft: '#ffffff',
+    borderStrong: '#ffffff',
+    surfaceOpacity: 0.7,
+    surfaceHighOpacity: 0.8,
+    borderSoftOpacity: 0.06,
+    borderStrongOpacity: 0.12,
+    glassBlurPx: 16,
+  },
   planCardStyles: {},
   navItems: [
     { id: 'subscriptions', visible: true },

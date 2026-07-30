@@ -1,4 +1,13 @@
-import { AuthChallenge, PlanAvailability, PlanType, Prisma, Subscription, SubscriptionStatus, User, WebAccount } from '@prisma/client';
+import {
+  AuthChallenge,
+  PlanAvailability,
+  PlanType,
+  Prisma,
+  Subscription,
+  SubscriptionStatus,
+  User,
+  WebAccount,
+} from '@prisma/client';
 
 import { readTrialSettings } from '../../plans/utils/trial-settings.util';
 
@@ -44,19 +53,22 @@ export function mapInternalUserSession(user: InternalUserRecord): InternalUserSe
     createdAt: user.createdAt.toISOString(),
     updatedAt: user.updatedAt.toISOString(),
     lastSeenAt: user.lastSeenAt?.toISOString() ?? null,
-    webAccount: user.webAccount === null ? null : {
-      id: user.webAccount.id,
-      login: user.webAccount.login,
-      loginNormalized: user.webAccount.loginNormalized,
-      email: user.webAccount.email,
-      emailNormalized: user.webAccount.emailNormalized,
-      emailVerifiedAt: mapDateValue(user.webAccount.emailVerifiedAt),
-      requiresPasswordChange: user.webAccount.requiresPasswordChange,
-      linkPromptSnoozeUntil: mapDateValue(user.webAccount.linkPromptSnoozeUntil),
-      credentialsBootstrappedAt: mapDateValue(user.webAccount.credentialsBootstrappedAt),
-      createdAt: user.webAccount.createdAt.toISOString(),
-      updatedAt: user.webAccount.updatedAt.toISOString(),
-    },
+    webAccount:
+      user.webAccount === null
+        ? null
+        : {
+            id: user.webAccount.id,
+            login: user.webAccount.login,
+            loginNormalized: user.webAccount.loginNormalized,
+            email: user.webAccount.email,
+            emailNormalized: user.webAccount.emailNormalized,
+            emailVerifiedAt: mapDateValue(user.webAccount.emailVerifiedAt),
+            requiresPasswordChange: user.webAccount.requiresPasswordChange,
+            linkPromptSnoozeUntil: mapDateValue(user.webAccount.linkPromptSnoozeUntil),
+            credentialsBootstrappedAt: mapDateValue(user.webAccount.credentialsBootstrappedAt),
+            createdAt: user.webAccount.createdAt.toISOString(),
+            updatedAt: user.webAccount.updatedAt.toISOString(),
+          },
   };
 }
 
@@ -130,7 +142,9 @@ function isUpcomingSubscription(subscription: Subscription, now: Date): boolean 
   if (subscription.startedAt === null) {
     return false;
   }
-  return subscription.startedAt.getTime() > now.getTime() && !isExpiredSubscription(subscription, now);
+  return (
+    subscription.startedAt.getTime() > now.getTime() && !isExpiredSubscription(subscription, now)
+  );
 }
 
 function hasFutureExpiry(subscription: Subscription, now: Date): boolean {
@@ -147,9 +161,7 @@ function isExpiredSubscription(subscription: Subscription, now: Date): boolean {
   return subscription.expiresAt.getTime() <= now.getTime();
 }
 
-export function mapSubscriptionPlanSnapshot(
-  planSnapshot: Prisma.JsonValue,
-): {
+export function mapSubscriptionPlanSnapshot(planSnapshot: Prisma.JsonValue): {
   readonly id: string | null;
   readonly name: string | null;
   readonly type: PlanType | null;
@@ -168,11 +180,11 @@ export function mapSubscriptionPlanSnapshot(
 }
 
 /**
- * Whether a subscription is a FREE trial (non-renewable → the cabinet disables
- * "Renew" and steers to Upgrade). Derived from the stored `planSnapshot`: a
+ * Whether a subscription is a FREE trial. Derived from the stored
+ * `planSnapshot`: a
  * free-trial grant persists the full plan (`availability: 'TRIAL'` +
  * `trialSettings.free: true`), while a PAID trial's completion snapshot carries
- * neither field, so paid trials correctly resolve to `false` (renewable).
+ * neither field, so paid trials correctly resolve to `false`.
  * Guarded by `isTrial` so a non-trial subscription can never be flagged.
  */
 export function readSubscriptionTrialFree(

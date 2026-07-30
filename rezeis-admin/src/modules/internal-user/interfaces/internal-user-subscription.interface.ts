@@ -30,9 +30,8 @@ export interface InternalUserSubscriptionInterface {
   readonly isTrial: boolean;
   /**
    * True only for a FREE trial (availability `TRIAL` + `trialSettings.free`).
-   * A free trial cannot be renewed — it must be UPGRADED to a paid plan — so
-   * the cabinet disables the "Renew" action for it. Paid trials are renewable
-   * and stay `false`.
+   * This distinguishes a zero-cost grant from a paid trial checkout. All trial
+   * subscriptions are non-renewable and must be upgraded.
    */
   readonly trialFree: boolean;
   readonly plan: InternalUserSubscriptionPlanInterface | null;

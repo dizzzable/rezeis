@@ -63,8 +63,12 @@ export const en = {
     presets: {
       title: 'Preset themes',
       description:
-        'Curated shadcn-compatible blocks. Selecting a preset clears any custom overrides.',
+        'The 104 approved concepts plus legacy shadcn themes. Selecting a preset clears color overrides.',
       applied: 'Preset "{{id}}" applied',
+      searchPlaceholder: 'Search by code, name, or style…',
+      searchLabel: 'Search preset themes',
+      count: '{{visible}} of {{total}} themes',
+      empty: 'No themes match this search.',
     },
     radius: {
       title: 'Corner radius',

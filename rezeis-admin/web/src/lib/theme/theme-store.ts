@@ -74,7 +74,7 @@ export interface ThemeState {
   presetId: string
   /** Light / dark / system. */
   mode: ColorMode
-  /** Base radius in rem (0–1.5). */
+  /** Base radius in rem (0–3, matching the 0–48px concept range). */
   radius: number
   /** Operator-pasted CSS block from shadcnthemer / ui.shadcn / tweakcn. */
   customCss: string
@@ -111,7 +111,7 @@ export const useThemeStore = create<ThemeState>()(
       ...INITIAL,
       setPreset: (id) => set({ presetId: id }),
       setMode: (mode) => set({ mode }),
-      setRadius: (radius) => set({ radius: Math.max(0, Math.min(1.5, radius)) }),
+      setRadius: (radius) => set({ radius: Math.max(0, Math.min(3, radius)) }),
       setCustomCss: (css) => set({ customCss: css }),
       setOverride: (mode, token, value) =>
         set((state) => {

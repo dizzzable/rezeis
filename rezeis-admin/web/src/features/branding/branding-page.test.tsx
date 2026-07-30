@@ -37,7 +37,11 @@ describe('WebReiwaPage branding URL validation', () => {
     await user.type(screen.getByLabelText('Logo URL (optional)'), 'ftp://example.com/logo.png')
     await user.click(screen.getByRole('button', { name: 'Save' }))
 
-    expect(await screen.findByText('Enter an HTTP(S) URL or a data:image URL.')).toBeInTheDocument()
+    expect(
+      await screen.findByText(
+        'Enter an HTTPS URL, data:image URL, or a branding upload path.',
+      ),
+    ).toBeInTheDocument()
     expect(patchSpy).not.toHaveBeenCalled()
   }, 20_000)
 

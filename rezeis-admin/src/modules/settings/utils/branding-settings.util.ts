@@ -22,6 +22,7 @@ import {
   CardEffect,
   CardEffectSlot,
   CardLogoPreset,
+  CornerRadiiSettings,
   DEFAULT_BRANDING,
   ICON_COLOR_MODES,
   IconColorMode,
@@ -32,38 +33,57 @@ import {
   NavItemSetting,
   PlanCardStyle,
   ProfileNamingSettings,
+  SurfaceThemeSettings,
 } from '../interfaces/branding-settings.interface';
+import {
+  isSafeBrandingGradient,
+  isSafeBrandingGradientOrNone,
+} from './branding-css.util';
 /** Hex colour validation: 3, 4, 6 or 8 hex chars after a leading `#`. */
 const HEX_PATTERN = /^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
+/** Stable preset ids are intentionally URL/log/cache-key friendly. */
+const THEME_PRESET_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const THEME_PRESET_VERSION_MAX = 2_147_483_647;
 /** Accepted shapes for an operator-supplied texture image URL. */
-const IMAGE_URL_PATTERN = /^(?:data:image\/[a-z0-9+.-]+;base64,[A-Za-z0-9+/=]+|https?:\/\/.+|\/uploads\/[A-Za-z0-9._/-]+)$/i;
+const IMAGE_URL_PATTERN =
+  /^(?:data:image\/[a-z0-9+.-]+;base64,[A-Za-z0-9+/=]+|https?:\/\/(?![^/\s]+@)[^\s]+|\/uploads\/branding\/(?![A-Za-z0-9._-]*\.\.)[A-Za-z0-9][A-Za-z0-9._-]*)$/i;
 
 export function readBrandingSettings(value: unknown): BrandingSettingsInterface {
   const record = readRecord(value);
   return {
+    themePresetId: readThemePresetId(record),
+    themePresetVersion: readThemePresetVersion(record),
     brandName: readString(record, 'brandName', DEFAULT_BRANDING.brandName),
     tagline: readNullableString(record, 'tagline'),
-    logoUrl: readNullableString(record, 'logoUrl'),
-    pwaIconUrl: readNullableString(record, 'pwaIconUrl'),
-    adminPwaIconUrl: readNullableString(record, 'adminPwaIconUrl'),
+    logoUrl: readNullableImageUrl(record, 'logoUrl'),
+    pwaIconUrl: readNullableImageUrl(record, 'pwaIconUrl'),
+    adminPwaIconUrl: readNullableImageUrl(record, 'adminPwaIconUrl'),
     primary: readHex(record, 'primary', DEFAULT_BRANDING.primary),
     primaryFg: readHex(record, 'primaryFg', DEFAULT_BRANDING.primaryFg),
     bgPrimary: readHex(record, 'bgPrimary', DEFAULT_BRANDING.bgPrimary),
     bgSecondary: readHex(record, 'bgSecondary', DEFAULT_BRANDING.bgSecondary),
-    cardGradient: readString(record, 'cardGradient', DEFAULT_BRANDING.cardGradient),
-    cardPattern: readNullableString(record, 'cardPattern'),
+    cardGradient: readGradient(record, 'cardGradient', DEFAULT_BRANDING.cardGradient),
+    cardPattern: readNullableGradient(record, 'cardPattern'),
     cardLogo: readCardLogo(record, DEFAULT_BRANDING.cardLogo),
-    cardLogoUrl: readNullableString(record, 'cardLogoUrl'),
+    cardLogoUrl: readNullableImageUrl(record, 'cardLogoUrl'),
     cardEffect: readCardEffect(record, DEFAULT_BRANDING.cardEffect),
     cardEffectProps: readJsonRecord(record, 'cardEffectProps'),
-    cardEffectOpacity: readClampedNumber(record, 'cardEffectOpacity', 0.05, 1, DEFAULT_BRANDING.cardEffectOpacity),
+    cardEffectOpacity: readClampedNumber(
+      record,
+      'cardEffectOpacity',
+      0.05,
+      1,
+      DEFAULT_BRANDING.cardEffectOpacity,
+    ),
     cardEffectsByIndex: readCardEffectSlots(record, 'cardEffectsByIndex'),
     bgEffect: readBgEffect(record, DEFAULT_BRANDING.bgEffect),
     appBackground: readAppBackground(record),
     iconColorMode: readIconColorMode(record, DEFAULT_BRANDING.iconColorMode),
     iconColors: readHexMap(record, 'iconColors'),
     borderRadius: readString(record, 'borderRadius', DEFAULT_BRANDING.borderRadius),
+    cornerRadii: readCornerRadii(record),
     fontFamily: readString(record, 'fontFamily', DEFAULT_BRANDING.fontFamily),
+    surfaceTheme: readSurfaceTheme(record),
     planCardStyles: readPlanCardStyles(record),
     navItems: readNavItems(record),
     navGap: readNavGap(record),
@@ -85,10 +105,46 @@ export function mergeBrandingSettings(input: {
   for (const key of Object.keys(input.patch) as Array<keyof BrandingSettingsInterface>) {
     const value = input.patch[key];
     if (value !== undefined) {
-      merged[key] = value;
+      if (key === 'surfaceTheme') {
+        const surfacePatch = readRecord(value);
+        merged[key] = readSurfaceTheme({
+          surfaceTheme: {
+            ...current.surfaceTheme,
+            ...surfacePatch,
+          },
+        });
+      } else if (key === 'appBackground') {
+        const backgroundPatch = readRecord(value);
+        const texturePatch = readRecord(backgroundPatch['texture']);
+        merged[key] = {
+          ...current.appBackground,
+          ...backgroundPatch,
+          texture: {
+            ...current.appBackground.texture,
+            ...texturePatch,
+          },
+        };
+      } else if (key === 'cornerRadii') {
+        merged[key] = readCornerRadii({
+          cornerRadii: {
+            ...current.cornerRadii,
+            ...readRecord(value),
+          },
+        });
+      } else if (key === 'profileNaming') {
+        merged[key] = {
+          ...current.profileNaming,
+          ...readRecord(value),
+        };
+      } else {
+        merged[key] = value;
+      }
     }
   }
-  return merged;
+  // Persist the same bounded, canonical shape that is exposed by the read
+  // path. This prevents malformed/oversized nested records from becoming
+  // durable state while preserving the documented partial-patch semantics.
+  return { ...readBrandingSettings(merged) };
 }
 
 function readRecord(value: unknown): Record<string, unknown> {
@@ -97,11 +153,7 @@ function readRecord(value: unknown): Record<string, unknown> {
     : {};
 }
 
-function readString(
-  record: Record<string, unknown>,
-  key: string,
-  fallback: string,
-): string {
+function readString(record: Record<string, unknown>, key: string, fallback: string): string {
   const value = record[key];
   if (typeof value === 'string') {
     const trimmed = value.trim();
@@ -112,10 +164,7 @@ function readString(
   return fallback;
 }
 
-function readNullableString(
-  record: Record<string, unknown>,
-  key: string,
-): string | null {
+function readNullableString(record: Record<string, unknown>, key: string): string | null {
   const value = record[key];
   if (typeof value === 'string') {
     const trimmed = value.trim();
@@ -126,11 +175,43 @@ function readNullableString(
   return null;
 }
 
-function readHex(
+function readNullableImageUrl(
   record: Record<string, unknown>,
   key: string,
-  fallback: string,
-): string {
+): string | null {
+  const value = record[key];
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 &&
+    trimmed.length <= 524_288 &&
+    IMAGE_URL_PATTERN.test(trimmed)
+    ? trimmed
+    : null;
+}
+
+function readThemePresetId(record: Record<string, unknown>): string | null {
+  const value = record['themePresetId'];
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim();
+  return THEME_PRESET_ID_PATTERN.test(trimmed) ? trimmed : null;
+}
+
+function readThemePresetVersion(record: Record<string, unknown>): number | null {
+  const value = record['themePresetVersion'];
+  if (
+    typeof value !== 'number' ||
+    !Number.isInteger(value) ||
+    value < 1 ||
+    value > THEME_PRESET_VERSION_MAX
+  ) {
+    return null;
+  }
+  return value;
+}
+
+function readHex(record: Record<string, unknown>, key: string, fallback: string): string {
   const value = record[key];
   if (typeof value === 'string' && HEX_PATTERN.test(value.trim())) {
     return value.trim();
@@ -138,10 +219,53 @@ function readHex(
   return fallback;
 }
 
-function readBgEffect(
-  record: Record<string, unknown>,
-  fallback: BgEffect,
-): BgEffect {
+function readSurfaceTheme(record: Record<string, unknown>): SurfaceThemeSettings {
+  const value = readRecord(record['surfaceTheme']);
+  const fallback = DEFAULT_BRANDING.surfaceTheme;
+  return {
+    foreground: readHex(value, 'foreground', fallback.foreground),
+    mutedForeground: readHex(value, 'mutedForeground', fallback.mutedForeground),
+    surface: readHex(value, 'surface', fallback.surface),
+    surfaceHigh: readHex(value, 'surfaceHigh', fallback.surfaceHigh),
+    borderSoft: readHex(value, 'borderSoft', fallback.borderSoft),
+    borderStrong: readHex(value, 'borderStrong', fallback.borderStrong),
+    surfaceOpacity: readClampedNumber(value, 'surfaceOpacity', 0, 1, fallback.surfaceOpacity),
+    surfaceHighOpacity: readClampedNumber(
+      value,
+      'surfaceHighOpacity',
+      0,
+      1,
+      fallback.surfaceHighOpacity,
+    ),
+    borderSoftOpacity: readClampedNumber(
+      value,
+      'borderSoftOpacity',
+      0,
+      1,
+      fallback.borderSoftOpacity,
+    ),
+    borderStrongOpacity: readClampedNumber(
+      value,
+      'borderStrongOpacity',
+      0,
+      1,
+      fallback.borderStrongOpacity,
+    ),
+    glassBlurPx: readClampedNumber(value, 'glassBlurPx', 0, 40, fallback.glassBlurPx),
+  };
+}
+
+function readCornerRadii(record: Record<string, unknown>): CornerRadiiSettings {
+  const value = readRecord(record['cornerRadii']);
+  const fallback = DEFAULT_BRANDING.cornerRadii;
+  return {
+    cardPx: readClampedNumber(value, 'cardPx', 0, 48, fallback.cardPx),
+    itemPx: readClampedNumber(value, 'itemPx', 0, 32, fallback.itemPx),
+    pillPx: readClampedNumber(value, 'pillPx', 0, 9999, fallback.pillPx),
+  };
+}
+
+function readBgEffect(record: Record<string, unknown>, fallback: BgEffect): BgEffect {
   const value = record['bgEffect'];
   if (typeof value === 'string') {
     const upper = value.toUpperCase() as BgEffect;
@@ -152,10 +276,7 @@ function readBgEffect(
   return fallback;
 }
 
-function readCardLogo(
-  record: Record<string, unknown>,
-  fallback: CardLogoPreset,
-): CardLogoPreset {
+function readCardLogo(record: Record<string, unknown>, fallback: CardLogoPreset): CardLogoPreset {
   const value = record['cardLogo'];
   if (typeof value === 'string') {
     const upper = value.toUpperCase() as CardLogoPreset;
@@ -166,10 +287,7 @@ function readCardLogo(
   return fallback;
 }
 
-function readCardEffect(
-  record: Record<string, unknown>,
-  fallback: CardEffect,
-): CardEffect {
+function readCardEffect(record: Record<string, unknown>, fallback: CardEffect): CardEffect {
   const value = record['cardEffect'];
   if (typeof value === 'string' && (CARD_EFFECTS as readonly string[]).includes(value)) {
     return value as CardEffect;
@@ -183,10 +301,7 @@ function readCardEffect(
  * props). Invalid/non-object entries are dropped. Capped at 20 slots to bound
  * the persisted payload. Returns `[]` when absent.
  */
-function readCardEffectSlots(
-  record: Record<string, unknown>,
-  key: string,
-): CardEffectSlot[] {
+function readCardEffectSlots(record: Record<string, unknown>, key: string): CardEffectSlot[] {
   const value = record[key];
   if (!Array.isArray(value)) {
     return [];
@@ -202,10 +317,9 @@ function readCardEffectSlots(
       continue;
     }
     const gradientRaw = slot['cardGradient'];
-    const cardGradient =
-      typeof gradientRaw === 'string' && gradientRaw.trim().length > 0
-        ? gradientRaw.trim().slice(0, 512)
-        : null;
+    const cardGradient = isSafeBrandingGradient(gradientRaw)
+      ? gradientRaw.trim()
+      : null;
     out.push({
       cardEffect: effect as CardEffect,
       cardEffectProps: readJsonRecord(slot, 'cardEffectProps'),
@@ -250,7 +364,7 @@ function readAppBackground(record: Record<string, unknown>): AppBackgroundSettin
     effect,
     props: readJsonRecord(slot, 'props'),
     opacity: readClampedNumber(slot, 'opacity', 0.05, 1, 1),
-    gradient: readString(slot, 'gradient', fallback.gradient),
+    gradient: readGradient(slot, 'gradient', fallback.gradient),
     texture: readAppBackgroundTexture(slot['texture'], fallback.texture),
   };
 }
@@ -294,32 +408,69 @@ function readIconColorMode(
  * validation. Defends the SPA against malformed/oversized payloads (the values
  * are injected into inline styles, so we never store non-hex strings).
  */
-function readHexMap(
-  record: Record<string, unknown>,
-  key: string,
-): Record<string, string> {
+function readHexMap(record: Record<string, unknown>, key: string): Record<string, string> {
   const value = record[key];
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     return {};
   }
   const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-    if (typeof v === 'string' && HEX_PATTERN.test(v.trim())) {
+  for (const [k, v] of Object.entries(value as Record<string, unknown>).slice(0, 100)) {
+    if (
+      k.length > 0 &&
+      k.length <= 64 &&
+      typeof v === 'string' &&
+      HEX_PATTERN.test(v.trim())
+    ) {
       out[k] = v.trim();
     }
   }
   return out;
 }
 
-function readJsonRecord(
-  record: Record<string, unknown>,
-  key: string,
-): Record<string, unknown> {
+function readJsonRecord(record: Record<string, unknown>, key: string): Record<string, unknown> {
   const value = record[key];
-  if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
-    return value as Record<string, unknown>;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return {};
+
+  const sanitized = sanitizeJsonValue(value, 0, { remaining: 512 });
+  return typeof sanitized === 'object' && sanitized !== null && !Array.isArray(sanitized)
+    ? (sanitized as Record<string, unknown>)
+    : {};
+}
+
+function sanitizeJsonValue(
+  value: unknown,
+  depth: number,
+  budget: { remaining: number },
+): unknown {
+  if (budget.remaining <= 0) return undefined;
+  budget.remaining -= 1;
+
+  if (value === null || typeof value === 'boolean') return value;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
+  if (typeof value === 'string') return value.length <= 4096 ? value : undefined;
+  if (depth >= 5 || typeof value !== 'object') return undefined;
+
+  if (Array.isArray(value)) {
+    const result: unknown[] = [];
+    for (const entry of value.slice(0, 64)) {
+      const sanitized = sanitizeJsonValue(entry, depth + 1, budget);
+      if (sanitized !== undefined) result.push(sanitized);
+      if (budget.remaining <= 0) break;
+    }
+    return result;
   }
-  return {};
+
+  const result: Record<string, unknown> = {};
+  let accepted = 0;
+  for (const [entryKey, entryValue] of Object.entries(value as Record<string, unknown>)) {
+    if (accepted >= 64 || budget.remaining <= 0) break;
+    if (entryKey.length === 0 || entryKey.length > 128) continue;
+    const sanitized = sanitizeJsonValue(entryValue, depth + 1, budget);
+    if (sanitized === undefined) continue;
+    result[entryKey] = sanitized;
+    accepted += 1;
+  }
+  return result;
 }
 
 function readClampedNumber(
@@ -344,9 +495,7 @@ function readClampedNumber(
  * skipped. Orphaned plan ids are kept as-is (harmless; readers ignore unknown
  * ids). Capped at 500 entries to bound the persisted payload.
  */
-function readPlanCardStyles(
-  record: Record<string, unknown>,
-): Record<string, PlanCardStyle> {
+function readPlanCardStyles(record: Record<string, unknown>): Record<string, PlanCardStyle> {
   const value = record['planCardStyles'];
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     return {};
@@ -362,7 +511,7 @@ function readPlanCardStyles(
     const style: { -readonly [K in keyof PlanCardStyle]: PlanCardStyle[K] } = {};
 
     const gradient = slot['gradient'];
-    if (typeof gradient === 'string' && gradient.trim().length > 0 && gradient.length <= 512) {
+    if (isSafeBrandingGradient(gradient)) {
       style.gradient = gradient.trim();
     }
     const accent = slot['accent'];
@@ -402,6 +551,23 @@ function readPlanCardStyles(
     count += 1;
   }
   return out;
+}
+
+function readGradient(
+  record: Record<string, unknown>,
+  key: string,
+  fallback: string,
+): string {
+  const value = record[key];
+  return isSafeBrandingGradient(value) ? value.trim() : fallback;
+}
+
+function readNullableGradient(
+  record: Record<string, unknown>,
+  key: string,
+): string | null {
+  const value = record[key];
+  return isSafeBrandingGradientOrNone(value) ? value.trim() : null;
 }
 
 /**

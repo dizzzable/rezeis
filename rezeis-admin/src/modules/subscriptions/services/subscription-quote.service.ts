@@ -54,15 +54,16 @@ const UPGRADE_RESETS_EXPIRY: SubscriptionQuoteWarningInterface = {
 };
 const TRIAL_UPGRADE_REQUIRED: SubscriptionQuoteWarningInterface = {
   code: 'TRIAL_UPGRADE_REQUIRED',
-  message: 'An existing trial subscription must be upgraded instead of creating a new subscription.',
+  message:
+    'An existing trial subscription must be upgraded instead of creating a new subscription.',
 };
 const TRIAL_ALREADY_USED: SubscriptionQuoteWarningInterface = {
   code: 'TRIAL_ALREADY_USED',
   message: 'The user has already used a trial subscription.',
 };
-const TRIAL_FREE_NOT_RENEWABLE: SubscriptionQuoteWarningInterface = {
-  code: 'TRIAL_FREE_NOT_RENEWABLE',
-  message: 'A free trial cannot be renewed — upgrade to a paid plan instead.',
+const TRIAL_NOT_RENEWABLE: SubscriptionQuoteWarningInterface = {
+  code: 'TRIAL_NOT_RENEWABLE',
+  message: 'A trial subscription cannot be renewed — upgrade to a regular plan instead.',
 };
 const SUBSCRIPTION_LIMIT_REACHED: SubscriptionQuoteWarningInterface = {
   code: 'SUBSCRIPTION_LIMIT_REACHED',
@@ -114,9 +115,7 @@ const INFORMATIONAL_WARNING_CODES: ReadonlySet<string> = new Set([
 ]);
 
 /** Blocking warnings are everything that is not purely informational. */
-function hasBlockingWarning(
-  warnings: readonly SubscriptionQuoteWarningInterface[],
-): boolean {
+function hasBlockingWarning(warnings: readonly SubscriptionQuoteWarningInterface[]): boolean {
   return warnings.some((warning) => !INFORMATIONAL_WARNING_CODES.has(warning.code));
 }
 
@@ -254,7 +253,7 @@ export class SubscriptionQuoteService {
       sourceSubscription: context.sourceSubscription,
     });
     const selectedPlan =
-      input.planId === undefined ? null : plans.find((plan) => plan.id === input.planId) ?? null;
+      input.planId === undefined ? null : (plans.find((plan) => plan.id === input.planId) ?? null);
     const quoteWarnings = [...warnings];
     if (input.planId === undefined) {
       quoteWarnings.push(PLAN_SELECTION_REQUIRED);
@@ -267,10 +266,14 @@ export class SubscriptionQuoteService {
     const selectedDuration =
       selectedPlan === null || input.durationDays === undefined
         ? null
-        : selectedPlan.durations.find((duration) => duration.days === input.durationDays) ?? null;
+        : (selectedPlan.durations.find((duration) => duration.days === input.durationDays) ?? null);
     if (selectedPlan !== null && input.durationDays === undefined) {
       quoteWarnings.push(DURATION_SELECTION_REQUIRED);
-    } else if (selectedPlan !== null && input.durationDays !== undefined && selectedDuration === null) {
+    } else if (
+      selectedPlan !== null &&
+      input.durationDays !== undefined &&
+      selectedDuration === null
+    ) {
       quoteWarnings.push({
         code: 'DURATION_NOT_AVAILABLE',
         message: 'The selected duration is not available for this plan.',
@@ -280,14 +283,19 @@ export class SubscriptionQuoteService {
       selectedPlan === null || selectedDuration === null
         ? null
         : await this.calculateQuotePrice({
-          plan: selectedPlan,
-          duration: selectedDuration,
-          user: context.user,
-          channel,
-          preferredGatewayType: input.gatewayType,
-          currencyOverride: input.currencyOverride,
-        });
-    if (selectedPlan !== null && selectedDuration !== null && input.gatewayType !== undefined && price === null) {
+            plan: selectedPlan,
+            duration: selectedDuration,
+            user: context.user,
+            channel,
+            preferredGatewayType: input.gatewayType,
+            currencyOverride: input.currencyOverride,
+          });
+    if (
+      selectedPlan !== null &&
+      selectedDuration !== null &&
+      input.gatewayType !== undefined &&
+      price === null
+    ) {
       quoteWarnings.push(GATEWAY_NOT_AVAILABLE);
     }
     return {
@@ -301,8 +309,7 @@ export class SubscriptionQuoteService {
         !hasBlockingWarning(quoteWarnings),
       selectedSubscriptionId: context.sourceSubscription?.id ?? null,
       selectedPlan: selectedPlan === null ? null : mapQuotePlan(selectedPlan),
-      selectedDuration:
-        selectedDuration === null ? null : mapQuoteDuration(selectedDuration),
+      selectedDuration: selectedDuration === null ? null : mapQuoteDuration(selectedDuration),
       availablePlans: plans.map(mapQuotePlan),
       price,
       warnings: dedupeWarnings(quoteWarnings),
@@ -359,7 +366,7 @@ export class SubscriptionQuoteService {
     ]);
     const sourceSubscription = input.subscriptionId
       ? subscriptions.find((subscription) => subscription.id === input.subscriptionId)
-      : subscriptions[0] ?? null;
+      : (subscriptions[0] ?? null);
     if (input.subscriptionId !== undefined && sourceSubscription === undefined) {
       throw new NotFoundException('Subscription not found');
     }
@@ -411,9 +418,19 @@ export class SubscriptionQuoteService {
     readonly channel: PurchaseChannel;
     readonly purchaseType: SubscriptionQuoteAction;
     readonly sourceSubscription: SubscriptionRecord | null;
-  }): Promise<{ readonly plans: readonly PlanRecord[]; readonly warnings: readonly SubscriptionQuoteWarningInterface[] }> {
-    if (input.purchaseType === PurchaseType.NEW || input.purchaseType === PurchaseType.ADDITIONAL || input.purchaseType === 'TRIAL') {
-      const plans = await this.getCatalogOptionPlans({ userId: input.userId, channel: input.channel });
+  }): Promise<{
+    readonly plans: readonly PlanRecord[];
+    readonly warnings: readonly SubscriptionQuoteWarningInterface[];
+  }> {
+    if (
+      input.purchaseType === PurchaseType.NEW ||
+      input.purchaseType === PurchaseType.ADDITIONAL ||
+      input.purchaseType === 'TRIAL'
+    ) {
+      const plans = await this.getCatalogOptionPlans({
+        userId: input.userId,
+        channel: input.channel,
+      });
       if (input.purchaseType === 'TRIAL') {
         // FREE-grant trial claim flow. Paid trials are NOT offered here —
         // they go through the NEW purchase pipeline below.
@@ -465,7 +482,10 @@ export class SubscriptionQuoteService {
   private async filterClaimablePaidTrials(input: {
     readonly userId: string;
     readonly plans: readonly PlanRecord[];
-  }): Promise<{ readonly plans: readonly PlanRecord[]; readonly warnings: readonly SubscriptionQuoteWarningInterface[] }> {
+  }): Promise<{
+    readonly plans: readonly PlanRecord[];
+    readonly warnings: readonly SubscriptionQuoteWarningInterface[];
+  }> {
     const needsInviteCheck = input.plans.some(
       (plan) => readTrialSettings(plan.trialSettings).availabilityScope === 'INVITED',
     );
@@ -484,7 +504,8 @@ export class SubscriptionQuoteService {
           })
         : Promise.resolve(null),
     ]);
-    const hasTelegram = !needsTelegramCheck || (userRow?.telegramId !== null && userRow?.telegramId !== undefined);
+    const hasTelegram =
+      !needsTelegramCheck || (userRow?.telegramId !== null && userRow?.telegramId !== undefined);
     const claimable: PlanRecord[] = [];
     const warnings: SubscriptionQuoteWarningInterface[] = [];
     for (const plan of input.plans) {
@@ -519,9 +540,22 @@ export class SubscriptionQuoteService {
     readonly purchaseType: 'RENEW' | 'UPGRADE';
     readonly userId?: string;
     readonly channel?: PurchaseChannel;
-  }): Promise<{ readonly plans: readonly PlanRecord[]; readonly warnings: readonly SubscriptionQuoteWarningInterface[] }> {
+  }): Promise<{
+    readonly plans: readonly PlanRecord[];
+    readonly warnings: readonly SubscriptionQuoteWarningInterface[];
+  }> {
     if (input.sourceSubscription === null) {
       return { plans: [], warnings: [SOURCE_SUBSCRIPTION_REQUIRED] };
+    }
+    // Trial activation limits apply to both free and paid trials. Renewal
+    // mutates the existing row and therefore would not increment the
+    // `isTrial` subscription count used by `maxClaims`; allowing it would make
+    // a maxClaims=1 paid trial renewable forever. A trial is always upgraded
+    // to a regular plan instead. Use the immutable subscription marker rather
+    // than the current plan availability so changing a plan later cannot
+    // reopen this bypass.
+    if (input.purchaseType === PurchaseType.RENEW && input.sourceSubscription.isTrial) {
+      return { plans: [], warnings: [TRIAL_NOT_RENEWABLE] };
     }
     const sourcePlanId = readSnapshotPlanId(input.sourceSubscription.planSnapshot);
     if (sourcePlanId === null) {
@@ -574,15 +608,6 @@ export class SubscriptionQuoteService {
         plans: targets,
         warnings: [UPGRADE_RESETS_EXPIRY],
       };
-    }
-    // A free trial is a one-time grant — it cannot be renewed. The user must
-    // upgrade to a paid plan instead (UPGRADE stays available when the trial
-    // has `upgradeToPlanIds` configured). Paid trials remain renewable.
-    if (
-      sourcePlan.availability === PlanAvailability.TRIAL &&
-      readTrialSettings(sourcePlan.trialSettings).free
-    ) {
-      return { plans: [], warnings: [TRIAL_FREE_NOT_RENEWABLE] };
     }
     if (!sourcePlan.isArchived) {
       return { plans: [sourcePlan], warnings: [] };
@@ -661,15 +686,19 @@ export class SubscriptionQuoteService {
         discountSource: snapshot.discountSource,
       };
     }
-    let gateways = (await this.prismaService.paymentGateway.findMany({
-      where: { isActive: true },
-      orderBy: [{ orderIndex: 'asc' }, { type: 'asc' }],
-    })).filter((gateway) => isGatewayAvailableForChannel(gateway.type, input.channel));
+    let gateways = (
+      await this.prismaService.paymentGateway.findMany({
+        where: { isActive: true },
+        orderBy: [{ orderIndex: 'asc' }, { type: 'asc' }],
+      })
+    ).filter((gateway) => isGatewayAvailableForChannel(gateway.type, input.channel));
     if (input.preferredGatewayType !== undefined) {
       gateways = gateways.filter((gateway) => gateway.type === input.preferredGatewayType);
     }
     for (const gateway of gateways) {
-      const price = input.duration.prices.find((candidate) => candidate.currency === gateway.currency);
+      const price = input.duration.prices.find(
+        (candidate) => candidate.currency === gateway.currency,
+      );
       if (price === undefined) {
         continue;
       }
@@ -709,7 +738,9 @@ function mapQuotePlan(plan: PlanRecord): SubscriptionQuotePlanInterface {
   };
 }
 
-function mapQuoteDuration(duration: PlanRecord['durations'][number]): SubscriptionQuoteDurationInterface {
+function mapQuoteDuration(
+  duration: PlanRecord['durations'][number],
+): SubscriptionQuoteDurationInterface {
   return {
     id: duration.id,
     days: duration.days,
@@ -724,7 +755,9 @@ function readSnapshotPlanId(snapshot: Prisma.JsonValue): string | null {
   return typeof planId === 'string' ? planId : null;
 }
 
-function dedupeWarnings(warnings: readonly SubscriptionQuoteWarningInterface[]): readonly SubscriptionQuoteWarningInterface[] {
+function dedupeWarnings(
+  warnings: readonly SubscriptionQuoteWarningInterface[],
+): readonly SubscriptionQuoteWarningInterface[] {
   const seenCodes = new Set<string>();
   const uniqueWarnings: SubscriptionQuoteWarningInterface[] = [];
   for (const warning of warnings) {

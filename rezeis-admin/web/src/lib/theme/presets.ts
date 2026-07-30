@@ -12,6 +12,12 @@
  * curated presets and operator-supplied themes.
  */
 
+import {
+  CONCEPT_PRESETS,
+  createConceptThemeCss,
+  type ConceptClassification,
+} from './concept-presets'
+
 export interface ThemePreset {
   /** Stable id stored in the theme store. */
   id: string
@@ -23,6 +29,14 @@ export interface ThemePreset {
   swatch: string
   /** Full `:root { … } .dark { … }` block. */
   css: string
+  /** Present only for presets derived from the 104-concept source book. */
+  kind?: 'concept'
+  code?: string
+  palette?: readonly string[]
+  fonts?: readonly string[]
+  sourcePage?: number
+  mobileWidth?: number
+  classification?: ConceptClassification
 }
 
 // ── Default — shadcn 2024 neutral ────────────────────────────────────────────
@@ -585,7 +599,7 @@ const LIQUID_GLASS_CSS = `:root {
   --sidebar-ring: oklch(0.623 0.214 259.815);
 }`
 
-export const THEME_PRESETS: ThemePreset[] = [
+export const LEGACY_THEME_PRESETS: ThemePreset[] = [
   {
     id: 'default',
     name: 'Neutral',
@@ -644,10 +658,47 @@ export const THEME_PRESETS: ThemePreset[] = [
   },
 ]
 
+export const CONCEPT_THEME_PRESETS: ThemePreset[] = CONCEPT_PRESETS.map(
+  (descriptor): ThemePreset => ({
+    id: descriptor.id,
+    name: descriptor.name,
+    description: [
+      descriptor.classification.visualFamily,
+      ...descriptor.classification.visualTags,
+    ]
+      .filter((value, index, values) => values.indexOf(value) === index)
+      .join(' · '),
+    swatch: descriptor.palette[3],
+    css: createConceptThemeCss(descriptor),
+    kind: 'concept',
+    code: descriptor.code,
+    palette: descriptor.palette,
+    fonts: descriptor.fonts,
+    sourcePage: descriptor.sourcePage,
+    mobileWidth: descriptor.mobileWidth,
+    classification: descriptor.classification,
+  }),
+)
+
+export const THEME_PRESETS: ThemePreset[] = [
+  ...LEGACY_THEME_PRESETS,
+  ...CONCEPT_THEME_PRESETS,
+]
+
 export const PRESET_BY_ID: Record<string, ThemePreset> = Object.fromEntries(
   THEME_PRESETS.map((preset) => [preset.id, preset]),
 )
 
 export function getPresetCss(id: string): string {
   return PRESET_BY_ID[id]?.css ?? ''
+}
+
+export function getPresetRecommendedRadiusRem(
+  preset: ThemePreset,
+): number | null {
+  const radiusPx = preset.classification?.canonicalRadius
+  if (typeof radiusPx !== 'number' || !Number.isFinite(radiusPx)) {
+    return null
+  }
+  return Math.min(3, Math.max(0, radiusPx / 16))
 }

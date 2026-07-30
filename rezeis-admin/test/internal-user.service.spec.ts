@@ -223,7 +223,12 @@ describe('InternalUserService', () => {
             userId: 'user-1',
             status: SubscriptionStatus.ACTIVE,
             isTrial: true,
-            planSnapshot: { name: 'Current', type: 'UNLIMITED', icon: 'custom:brand-1', ignored: 'value' },
+            planSnapshot: {
+              name: 'Current',
+              type: 'UNLIMITED',
+              icon: 'custom:brand-1',
+              ignored: 'value',
+            },
             trafficLimit: null,
             deviceLimit: 3,
             remnawaveId: null,
@@ -247,7 +252,7 @@ describe('InternalUserService', () => {
       status: SubscriptionStatus.ACTIVE,
       isTrial: true,
       // planSnapshot has no `availability: TRIAL`, so this trial is treated as
-      // a paid trial (renewable) → trialFree is false.
+      // a paid trial → trialFree is false.
       trialFree: false,
       plan: {
         id: null,
@@ -751,8 +756,9 @@ describe('InternalUserService', () => {
       user: {
         findUnique: async (...args: readonly unknown[]): Promise<unknown> => {
           actualUserWhereCalls.push((args[0] as { readonly where: unknown }).where);
-          const where = (args[0] as { readonly where: { readonly email?: string; readonly id?: string } })
-            .where;
+          const where = (
+            args[0] as { readonly where: { readonly email?: string; readonly id?: string } }
+          ).where;
           if (where.email !== undefined) {
             return null;
           }
@@ -850,8 +856,9 @@ describe('InternalUserService', () => {
       user: {
         findUnique: async (...args: readonly unknown[]): Promise<unknown> => {
           actualUserWhereCalls.push((args[0] as { readonly where: unknown }).where);
-          const where = (args[0] as { readonly where: { readonly email?: string; readonly id?: string } })
-            .where;
+          const where = (
+            args[0] as { readonly where: { readonly email?: string; readonly id?: string } }
+          ).where;
           if (where.email !== undefined) {
             return null;
           }
@@ -1019,7 +1026,9 @@ describe('InternalUserService', () => {
       createPasswordHashServiceMock(),
       createEmailServiceMock(),
     );
-    const actualSession = await service.acceptRules({ userId: '11111111-1111-1111-1111-111111111111' });
+    const actualSession = await service.acceptRules({
+      userId: '11111111-1111-1111-1111-111111111111',
+    });
     assert.equal(findUniqueCallsCount, 1);
     assert.equal(findFirstCallsCount, 0);
     assert.equal(updateManyCallsCount, 1);
@@ -1093,7 +1102,9 @@ describe('InternalUserService', () => {
       createPasswordHashServiceMock(),
       createEmailServiceMock(),
     );
-    const actualSession = await service.acceptRules({ userId: '11111111-1111-1111-1111-111111111111' });
+    const actualSession = await service.acceptRules({
+      userId: '11111111-1111-1111-1111-111111111111',
+    });
     assert.equal(findUniqueCallsCount, 1);
     assert.equal(findFirstCallsCount, 0);
     assert.equal(updateManyCallsCount, 1);
@@ -1471,8 +1482,7 @@ describe('InternalUserService', () => {
       user: {
         findUnique: async (): Promise<unknown> => {
           findUniqueCallsCount += 1;
-          const credentialsBootstrappedAt =
-            findUniqueCallsCount === 1 ? null : handoffCompletedAt;
+          const credentialsBootstrappedAt = findUniqueCallsCount === 1 ? null : handoffCompletedAt;
           return {
             id: 'user-1',
             telegramId: null,
@@ -1555,7 +1565,10 @@ describe('InternalUserService', () => {
       assert.equal(actualSession.webAccount?.login, 'New-Login');
       assert.equal(actualSession.webAccount?.loginNormalized, 'new-login');
       assert.equal(actualSession.webAccount?.linkPromptSnoozeUntil, null);
-      assert.equal(actualSession.webAccount?.credentialsBootstrappedAt, handoffCompletedAt.toISOString());
+      assert.equal(
+        actualSession.webAccount?.credentialsBootstrappedAt,
+        handoffCompletedAt.toISOString(),
+      );
     } finally {
       Date.now = originalDateNow;
     }
@@ -1608,7 +1621,8 @@ describe('InternalUserService', () => {
               emailNormalized: 'user@example.com',
               emailVerifiedAt: null,
               requiresPasswordChange: true,
-              linkPromptSnoozeUntil: findUniqueCallsCount === 1 ? new Date('2026-04-20T05:00:00.000Z') : null,
+              linkPromptSnoozeUntil:
+                findUniqueCallsCount === 1 ? new Date('2026-04-20T05:00:00.000Z') : null,
               credentialsBootstrappedAt: existingCredentialsBootstrappedAt,
               temporaryPasswordExpiresAt: new Date('2026-04-18T05:00:00.000Z'),
               passwordHash: 'old-password-hash',
@@ -2443,7 +2457,10 @@ describe('InternalUserService', () => {
       assert.equal(authChallengeCleanupCallsCount, 1);
       assert.equal(emailSendCallsCount, 1);
       assert.ok(actualLockQuery);
-      assert.match(String((actualLockQuery as { readonly strings: readonly string[] }).strings.join('')), /FOR UPDATE/);
+      assert.match(
+        String((actualLockQuery as { readonly strings: readonly string[] }).strings.join('')),
+        /FOR UPDATE/,
+      );
       assert.deepStrictEqual(actualOperationOrder, ['cleanup', 'create']);
       assert.deepStrictEqual(actualCleanupArgs, {
         where: {
@@ -2471,7 +2488,10 @@ describe('InternalUserService', () => {
       assert.equal(actualDeliveredEmailAddress, 'user@example.com');
       assert.equal(actualDeliveredExpiresAt?.getTime(), expiresAt.getTime());
       assert.match(actualDeliveredCode ?? '', /^\d{6}$/);
-      assert.equal(actualCreateData?.codeHash, createChallengeHashForTest(actualDeliveredCode ?? ''));
+      assert.equal(
+        actualCreateData?.codeHash,
+        createChallengeHashForTest(actualDeliveredCode ?? ''),
+      );
       assert.deepStrictEqual(actualResponse, {
         webAccountId: 'web-account-1',
         email: 'user@example.com',
@@ -2575,9 +2595,8 @@ describe('InternalUserService', () => {
       },
     };
     const prismaService: MockPrismaService = {
-      $transaction: async <T>(
-        callback: (input: MockTransactionClient) => Promise<T>,
-      ): Promise<T> => callback(transactionClient),
+      $transaction: async <T>(callback: (input: MockTransactionClient) => Promise<T>): Promise<T> =>
+        callback(transactionClient),
       authChallenge: {
         findFirst: async (): Promise<unknown> => null,
         create: async (): Promise<unknown> => null,
@@ -2669,7 +2688,8 @@ describe('InternalUserService', () => {
         updateMany: async (): Promise<unknown> => ({ count: 0 }),
       },
       user: {
-        findUnique: async (): Promise<unknown> => createInternalUserRecord({ emailVerifiedAt: null }),
+        findUnique: async (): Promise<unknown> =>
+          createInternalUserRecord({ emailVerifiedAt: null }),
       },
       webAccount: {
         findUnique: async (): Promise<unknown> => createWebAccountRecord({ emailVerifiedAt: null }),
@@ -2677,7 +2697,8 @@ describe('InternalUserService', () => {
       $queryRaw: async (): Promise<unknown> => [{ id: 'web-account-1' }],
     };
     const prismaService: MockPrismaService = {
-      $transaction: async <T>(callback: (input: MockTransactionClient) => Promise<T>): Promise<T> => callback(transactionClient),
+      $transaction: async <T>(callback: (input: MockTransactionClient) => Promise<T>): Promise<T> =>
+        callback(transactionClient),
       authChallenge: {
         findFirst: async (): Promise<unknown> => null,
         create: async (): Promise<unknown> => null,
@@ -2779,7 +2800,8 @@ describe('InternalUserService', () => {
         updateMany: async (): Promise<unknown> => ({ count: 0 }),
       },
       user: {
-        findUnique: async (): Promise<unknown> => createInternalUserRecord({ emailVerifiedAt: null }),
+        findUnique: async (): Promise<unknown> =>
+          createInternalUserRecord({ emailVerifiedAt: null }),
       },
       webAccount: {
         findUnique: async (): Promise<unknown> => createWebAccountRecord({ emailVerifiedAt: null }),
@@ -2787,7 +2809,8 @@ describe('InternalUserService', () => {
       $queryRaw: async (): Promise<unknown> => [{ id: 'web-account-1' }],
     };
     const prismaService: MockPrismaService = {
-      $transaction: async <T>(callback: (input: MockTransactionClient) => Promise<T>): Promise<T> => callback(transactionClient),
+      $transaction: async <T>(callback: (input: MockTransactionClient) => Promise<T>): Promise<T> =>
+        callback(transactionClient),
       authChallenge: {
         findFirst: async (): Promise<unknown> => null,
         create: async (): Promise<unknown> => null,
@@ -2874,7 +2897,8 @@ describe('InternalUserService', () => {
         updateMany: async (): Promise<unknown> => ({ count: 0 }),
       },
       user: {
-        findUnique: async (): Promise<unknown> => createInternalUserRecord({ emailVerifiedAt: null }),
+        findUnique: async (): Promise<unknown> =>
+          createInternalUserRecord({ emailVerifiedAt: null }),
       },
       webAccount: {
         findUnique: async (): Promise<unknown> => createWebAccountRecord({ emailVerifiedAt: null }),
@@ -2882,7 +2906,8 @@ describe('InternalUserService', () => {
       $queryRaw: async (): Promise<unknown> => [{ id: 'web-account-1' }],
     };
     const prismaService: MockPrismaService = {
-      $transaction: async <T>(callback: (input: MockTransactionClient) => Promise<T>): Promise<T> => callback(transactionClient),
+      $transaction: async <T>(callback: (input: MockTransactionClient) => Promise<T>): Promise<T> =>
+        callback(transactionClient),
       authChallenge: {
         findFirst: async (): Promise<unknown> => null,
         create: async (): Promise<unknown> => null,
@@ -3087,7 +3112,9 @@ describe('InternalUserService', () => {
     );
     await assert.rejects(
       async (): Promise<void> => {
-        await service.issueWebAccountEmailVerificationChallenge({ email: 'user@example.com' } as never);
+        await service.issueWebAccountEmailVerificationChallenge({
+          email: 'user@example.com',
+        } as never);
       },
       {
         name: 'BadRequestException',
@@ -3096,7 +3123,9 @@ describe('InternalUserService', () => {
     );
     await assert.rejects(
       async (): Promise<void> => {
-        await service.issueWebAccountEmailVerificationChallenge({ telegramId: '123456789' } as never);
+        await service.issueWebAccountEmailVerificationChallenge({
+          telegramId: '123456789',
+        } as never);
       },
       {
         name: 'BadRequestException',
@@ -3152,7 +3181,10 @@ describe('InternalUserService', () => {
           userFindUniqueCallsCount += 1;
           currentUserReadIndex += 1;
           if (currentUserReadIndex === 1) {
-            return createInternalUserRecord({ emailVerifiedAt: null, updatedAt: new Date('2026-04-18T08:25:00.000Z') });
+            return createInternalUserRecord({
+              emailVerifiedAt: null,
+              updatedAt: new Date('2026-04-18T08:25:00.000Z'),
+            });
           }
           return createInternalUserRecord({
             emailVerifiedAt: completedAt,
@@ -3175,7 +3207,9 @@ describe('InternalUserService', () => {
       },
     };
     const prismaService: MockPrismaService = {
-      $transaction: async <T>(callback: (input: MockTransactionClient) => Promise<T>): Promise<T> => {
+      $transaction: async <T>(
+        callback: (input: MockTransactionClient) => Promise<T>,
+      ): Promise<T> => {
         transactionCallsCount += 1;
         return callback(transactionClient);
       },
@@ -3253,11 +3287,14 @@ describe('InternalUserService', () => {
           emailVerifiedAt: completedAt,
         },
       });
-      assert.deepStrictEqual(actualResponse, mapExpectedInternalSession({
-        emailVerifiedAt: completedAt.toISOString(),
-        updatedAt: completedAt.toISOString(),
-        credentialsBootstrappedAt: '2026-04-18T08:00:00.000Z',
-      }));
+      assert.deepStrictEqual(
+        actualResponse,
+        mapExpectedInternalSession({
+          emailVerifiedAt: completedAt.toISOString(),
+          updatedAt: completedAt.toISOString(),
+          credentialsBootstrappedAt: '2026-04-18T08:00:00.000Z',
+        }),
+      );
     } finally {
       Date.now = originalDateNow;
     }
@@ -3285,7 +3322,8 @@ describe('InternalUserService', () => {
       $queryRaw: async (): Promise<unknown> => [],
     };
     const prismaService: MockPrismaService = {
-      $transaction: async <T>(callback: (input: MockTransactionClient) => Promise<T>): Promise<T> => callback(transactionClient),
+      $transaction: async <T>(callback: (input: MockTransactionClient) => Promise<T>): Promise<T> =>
+        callback(transactionClient),
       authChallenge: {
         findFirst: async (): Promise<unknown> => null,
         create: async (): Promise<unknown> => null,
@@ -3340,7 +3378,8 @@ describe('InternalUserService', () => {
         updateMany: async (): Promise<unknown> => ({ count: 0 }),
       },
       user: {
-        findUnique: async (): Promise<unknown> => createInternalUserRecord({ emailVerifiedAt: new Date('2026-04-01T01:00:00.000Z') }),
+        findUnique: async (): Promise<unknown> =>
+          createInternalUserRecord({ emailVerifiedAt: new Date('2026-04-01T01:00:00.000Z') }),
       },
       webAccount: {
         update: async (): Promise<unknown> => null,
@@ -3349,7 +3388,8 @@ describe('InternalUserService', () => {
       $queryRaw: async (): Promise<unknown> => [],
     };
     const prismaService: MockPrismaService = {
-      $transaction: async <T>(callback: (input: MockTransactionClient) => Promise<T>): Promise<T> => callback(transactionClient),
+      $transaction: async <T>(callback: (input: MockTransactionClient) => Promise<T>): Promise<T> =>
+        callback(transactionClient),
       authChallenge: {
         findFirst: async (): Promise<unknown> => null,
         create: async (): Promise<unknown> => null,
@@ -3409,7 +3449,8 @@ describe('InternalUserService', () => {
         updateMany: async (): Promise<unknown> => ({ count: 0 }),
       },
       user: {
-        findUnique: async (): Promise<unknown> => createInternalUserRecord({ emailVerifiedAt: null }),
+        findUnique: async (): Promise<unknown> =>
+          createInternalUserRecord({ emailVerifiedAt: null }),
       },
       webAccount: {
         update: async (): Promise<unknown> => null,
@@ -3418,7 +3459,8 @@ describe('InternalUserService', () => {
       $queryRaw: async (): Promise<unknown> => [{ id: 'web-account-1' }],
     };
     const prismaService: MockPrismaService = {
-      $transaction: async <T>(callback: (input: MockTransactionClient) => Promise<T>): Promise<T> => callback(transactionClient),
+      $transaction: async <T>(callback: (input: MockTransactionClient) => Promise<T>): Promise<T> =>
+        callback(transactionClient),
       authChallenge: {
         findFirst: async (): Promise<unknown> => null,
         create: async (): Promise<unknown> => null,
@@ -3487,7 +3529,8 @@ describe('InternalUserService', () => {
         updateMany: async (): Promise<unknown> => ({ count: 0 }),
       },
       user: {
-        findUnique: async (): Promise<unknown> => createInternalUserRecord({ emailVerifiedAt: null }),
+        findUnique: async (): Promise<unknown> =>
+          createInternalUserRecord({ emailVerifiedAt: null }),
       },
       webAccount: {
         update: async (): Promise<unknown> => null,
@@ -3500,7 +3543,8 @@ describe('InternalUserService', () => {
       $queryRaw: async (): Promise<unknown> => [{ id: 'web-account-1' }],
     };
     const prismaService: MockPrismaService = {
-      $transaction: async <T>(callback: (input: MockTransactionClient) => Promise<T>): Promise<T> => callback(transactionClient),
+      $transaction: async <T>(callback: (input: MockTransactionClient) => Promise<T>): Promise<T> =>
+        callback(transactionClient),
       authChallenge: {
         findFirst: async (): Promise<unknown> => null,
         create: async (): Promise<unknown> => null,
@@ -3598,7 +3642,8 @@ describe('InternalUserService', () => {
         updateMany: async (): Promise<unknown> => ({ count: 0 }),
       },
       user: {
-        findUnique: async (): Promise<unknown> => createInternalUserRecord({ emailVerifiedAt: null }),
+        findUnique: async (): Promise<unknown> =>
+          createInternalUserRecord({ emailVerifiedAt: null }),
       },
       webAccount: {
         update: async (): Promise<unknown> => {
@@ -3610,7 +3655,8 @@ describe('InternalUserService', () => {
       $queryRaw: async (): Promise<unknown> => [{ id: 'web-account-1' }],
     };
     const prismaService: MockPrismaService = {
-      $transaction: async <T>(callback: (input: MockTransactionClient) => Promise<T>): Promise<T> => callback(transactionClient),
+      $transaction: async <T>(callback: (input: MockTransactionClient) => Promise<T>): Promise<T> =>
+        callback(transactionClient),
       authChallenge: {
         findFirst: async (): Promise<unknown> => null,
         create: async (): Promise<unknown> => null,
@@ -3697,7 +3743,8 @@ describe('InternalUserService', () => {
         updateMany: async (): Promise<unknown> => ({ count: 0 }),
       },
       user: {
-        findUnique: async (): Promise<unknown> => createInternalUserRecord({ emailVerifiedAt: null }),
+        findUnique: async (): Promise<unknown> =>
+          createInternalUserRecord({ emailVerifiedAt: null }),
       },
       webAccount: {
         update: async (): Promise<unknown> => null,
@@ -3706,7 +3753,8 @@ describe('InternalUserService', () => {
       $queryRaw: async (): Promise<unknown> => [{ id: 'web-account-1' }],
     };
     const prismaService: MockPrismaService = {
-      $transaction: async <T>(callback: (input: MockTransactionClient) => Promise<T>): Promise<T> => callback(transactionClient),
+      $transaction: async <T>(callback: (input: MockTransactionClient) => Promise<T>): Promise<T> =>
+        callback(transactionClient),
       authChallenge: {
         findFirst: async (): Promise<unknown> => null,
         create: async (): Promise<unknown> => null,
@@ -3766,7 +3814,9 @@ describe('InternalUserService', () => {
   it('rejects non-canonical identifiers on the email verification completion write path', async () => {
     let transactionCallsCount: number = 0;
     const prismaService: MockPrismaService = {
-      $transaction: async <T>(callback: (input: MockTransactionClient) => Promise<T>): Promise<T> => {
+      $transaction: async <T>(
+        callback: (input: MockTransactionClient) => Promise<T>,
+      ): Promise<T> => {
         transactionCallsCount += 1;
         return callback({} as MockTransactionClient);
       },
@@ -3798,7 +3848,10 @@ describe('InternalUserService', () => {
     );
     await assert.rejects(
       async (): Promise<void> => {
-        await service.completeWebAccountEmailVerification({ email: 'user@example.com', code: '123456' } as never);
+        await service.completeWebAccountEmailVerification({
+          email: 'user@example.com',
+          code: '123456',
+        } as never);
       },
       {
         name: 'BadRequestException',
@@ -3807,7 +3860,10 @@ describe('InternalUserService', () => {
     );
     await assert.rejects(
       async (): Promise<void> => {
-        await service.completeWebAccountEmailVerification({ telegramId: '123456789', code: '123456' } as never);
+        await service.completeWebAccountEmailVerification({
+          telegramId: '123456789',
+          code: '123456',
+        } as never);
       },
       {
         name: 'BadRequestException',
@@ -3816,7 +3872,6 @@ describe('InternalUserService', () => {
     );
     assert.equal(transactionCallsCount, 0);
   });
-
 
   it('rejects email verification issuance when the resolved user has no web account', async () => {
     let authChallengeCreateCallsCount: number = 0;
@@ -3861,9 +3916,8 @@ describe('InternalUserService', () => {
       $queryRaw: async (): Promise<unknown> => [{ id: 'web-account-1' }],
     };
     const prismaService: MockPrismaService = {
-      $transaction: async <T>(
-        callback: (input: MockTransactionClient) => Promise<T>,
-      ): Promise<T> => callback(transactionClient),
+      $transaction: async <T>(callback: (input: MockTransactionClient) => Promise<T>): Promise<T> =>
+        callback(transactionClient),
       authChallenge: {
         findFirst: async (): Promise<unknown> => null,
         create: async (): Promise<unknown> => {
@@ -3960,9 +4014,8 @@ describe('InternalUserService', () => {
       $queryRaw: async (): Promise<unknown> => [{ id: 'web-account-1' }],
     };
     const prismaService: MockPrismaService = {
-      $transaction: async <T>(
-        callback: (input: MockTransactionClient) => Promise<T>,
-      ): Promise<T> => callback(transactionClient),
+      $transaction: async <T>(callback: (input: MockTransactionClient) => Promise<T>): Promise<T> =>
+        callback(transactionClient),
       authChallenge: {
         findFirst: async (): Promise<unknown> => {
           authChallengeFindFirstCallsCount += 1;
@@ -4059,9 +4112,8 @@ describe('InternalUserService', () => {
       $queryRaw: async (): Promise<unknown> => [{ id: 'web-account-1' }],
     };
     const prismaService: MockPrismaService = {
-      $transaction: async <T>(
-        callback: (input: MockTransactionClient) => Promise<T>,
-      ): Promise<T> => callback(transactionClient),
+      $transaction: async <T>(callback: (input: MockTransactionClient) => Promise<T>): Promise<T> =>
+        callback(transactionClient),
       authChallenge: {
         findFirst: async (): Promise<unknown> => {
           authChallengeFindFirstCallsCount += 1;
@@ -4131,13 +4183,14 @@ function createInternalUserRecord(input: {
   readonly webAccount?: Record<string, unknown> | null;
 }): Record<string, unknown> {
   const updatedAt = input.updatedAt ?? new Date('2026-04-18T08:25:00.000Z');
-  const webAccount = input.webAccount === undefined
-    ? createWebAccountRecord({
-        emailVerifiedAt: input.emailVerifiedAt ?? null,
-        updatedAt,
-        credentialsBootstrappedAt: input.credentialsBootstrappedAt ?? null,
-      })
-    : input.webAccount;
+  const webAccount =
+    input.webAccount === undefined
+      ? createWebAccountRecord({
+          emailVerifiedAt: input.emailVerifiedAt ?? null,
+          updatedAt,
+          credentialsBootstrappedAt: input.credentialsBootstrappedAt ?? null,
+        })
+      : input.webAccount;
   return {
     id: 'user-1',
     telegramId: null,
@@ -4173,7 +4226,8 @@ function createWebAccountRecord(input: {
     login: 'user-login',
     loginNormalized: 'user-login',
     email: input.email === undefined ? 'user@example.com' : input.email,
-    emailNormalized: input.emailNormalized === undefined ? 'user@example.com' : input.emailNormalized,
+    emailNormalized:
+      input.emailNormalized === undefined ? 'user@example.com' : input.emailNormalized,
     emailVerifiedAt: input.emailVerifiedAt ?? null,
     requiresPasswordChange: false,
     linkPromptSnoozeUntil: null,

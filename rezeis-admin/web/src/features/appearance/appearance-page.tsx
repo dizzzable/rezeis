@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
   Bar,
@@ -16,6 +16,7 @@ import {
   Moon,
   Palette,
   RotateCcw,
+  Search,
   Sparkles,
   Sun,
 } from 'lucide-react'
@@ -29,6 +30,7 @@ import {
   CardTitle,
 } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Slider } from '@/components/ui/slider'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -55,7 +57,10 @@ import {
 } from '@/lib/theme/theme-store'
 import { useTheme } from '@/lib/theme/theme-provider'
 import { useAppearanceStore } from '@/lib/theme/appearance-store'
-import { THEME_PRESETS } from '@/lib/theme/presets'
+import {
+  THEME_PRESETS,
+  getPresetRecommendedRadiusRem,
+} from '@/lib/theme/presets'
 
 import { SavedThemesCard } from './saved-themes-card'
 import { GlassSettingsCard } from './glass-settings-card'
@@ -190,16 +195,38 @@ function ModeCard({ orientation = 'horizontal' }: { readonly orientation?: 'hori
 // ──────────────────────────────────────────────────────────────────────────────
 function PresetsCard() {
   const { t } = useTranslation()
+  const [query, setQuery] = useState('')
   const presetId = useThemeStore((s) => s.presetId)
   const setPreset = useThemeStore((s) => s.setPreset)
+  const setRadius = useThemeStore((s) => s.setRadius)
   const clearOverrides = useThemeStore((s) => s.clearOverrides)
+  const filteredPresets = useMemo(() => {
+    const needle = query.trim().toLocaleLowerCase()
+    if (!needle) return THEME_PRESETS
 
-  const handlePick = (id: string): void => {
-    setPreset(id)
+    return THEME_PRESETS.filter((preset) =>
+      [
+        preset.id,
+        preset.name,
+        preset.description,
+        preset.code,
+        ...(preset.classification?.visualTags ?? []),
+      ]
+        .filter(Boolean)
+        .some((value) => value?.toLocaleLowerCase().includes(needle)),
+    )
+  }, [query])
+
+  const handlePick = (preset: (typeof THEME_PRESETS)[number]): void => {
+    setPreset(preset.id)
+    const recommendedRadius = getPresetRecommendedRadiusRem(preset)
+    if (recommendedRadius !== null) {
+      setRadius(recommendedRadius)
+    }
     // Clear overrides when switching presets so the new preset shows pure.
     clearOverrides('light')
     clearOverrides('dark')
-    toast.success(t('appearancePage.presets.applied', { id }))
+    toast.success(t('appearancePage.presets.applied', { id: preset.name }))
   }
 
   return (
@@ -208,15 +235,35 @@ function PresetsCard() {
         <CardTitle>{t('appearancePage.presets.title')}</CardTitle>
         <CardDescription>{t('appearancePage.presets.description')}</CardDescription>
       </CardHeader>
-      <CardContent>
+      <CardContent className="space-y-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="relative w-full sm:max-w-sm">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder={t('appearancePage.presets.searchPlaceholder')}
+              aria-label={t('appearancePage.presets.searchLabel')}
+              className="pl-9"
+            />
+          </div>
+          <p className="text-sm text-muted-foreground">
+            {t('appearancePage.presets.count', {
+              visible: filteredPresets.length,
+              total: THEME_PRESETS.length,
+            })}
+          </p>
+        </div>
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
-          {THEME_PRESETS.map((preset) => {
+          {filteredPresets.map((preset) => {
             const selected = presetId === preset.id
             return (
               <HoverLift key={preset.id}>
                 <button
                   type="button"
-                  onClick={(): void => handlePick(preset.id)}
+                  onClick={(): void => handlePick(preset)}
+                  aria-pressed={selected}
+                  aria-label={`${preset.code ? `${preset.code} ` : ''}${preset.name}`}
                   className={cn(
                     'w-full rounded-lg border p-4 text-left transition-colors',
                     selected
@@ -224,14 +271,33 @@ function PresetsCard() {
                       : 'hover:border-primary/40',
                   )}
                 >
-                  <div className="mb-3 flex items-center justify-between">
-                    <div
-                      className="h-8 w-8 rounded-full border"
-                      style={{ backgroundColor: preset.swatch }}
-                    />
+                  <div className="mb-3 flex items-start justify-between gap-2">
+                    {preset.palette ? (
+                      <div className="flex h-8 flex-1 overflow-hidden rounded-md border">
+                        {preset.palette.map((color, index) => (
+                          <span
+                            key={`${preset.id}-${color}-${index}`}
+                            className="h-full flex-1"
+                            style={{ backgroundColor: color }}
+                          />
+                        ))}
+                      </div>
+                    ) : (
+                      <div
+                        className="h-8 w-8 rounded-full border"
+                        style={{ backgroundColor: preset.swatch }}
+                      />
+                    )}
                     {selected && <Check className="h-4 w-4 text-primary" />}
                   </div>
-                  <p className="text-sm font-semibold">{preset.name}</p>
+                  <div className="flex items-center gap-2">
+                    {preset.code && (
+                      <Badge variant="outline" className="px-1.5 font-mono text-[10px]">
+                        {preset.code}
+                      </Badge>
+                    )}
+                    <p className="truncate text-sm font-semibold">{preset.name}</p>
+                  </div>
                   <p className="mt-1 text-xs text-muted-foreground">
                     {preset.description}
                   </p>
@@ -240,6 +306,11 @@ function PresetsCard() {
             )
           })}
         </div>
+        {filteredPresets.length === 0 && (
+          <div className="rounded-lg border border-dashed px-4 py-8 text-center text-sm text-muted-foreground">
+            {t('appearancePage.presets.empty')}
+          </div>
+        )}
       </CardContent>
     </Card>
   )
@@ -253,7 +324,7 @@ function RadiusCard() {
   const radius = useThemeStore((s) => s.radius)
   const setRadius = useThemeStore((s) => s.setRadius)
 
-  const presets = [0, 0.25, 0.5, 0.625, 1]
+  const presets = [0, 0.25, 0.5, 0.625, 1, 1.5, 2, 3]
 
   return (
     <Card>
@@ -271,7 +342,7 @@ function RadiusCard() {
         <Slider
           value={[radius]}
           min={0}
-          max={1.5}
+          max={3}
           step={0.025}
           onValueChange={(v: number[]): void => setRadius(v[0] ?? 0.5)}
         />
@@ -647,6 +718,7 @@ function LayoutTabContent() {
                   <button
                     type="button"
                     onClick={(): void => setDensity(opt.id)}
+                    aria-pressed={selected}
                     className={cn(
                       'flex w-full flex-col items-center gap-2 rounded-lg border p-4 capitalize transition-colors',
                       selected
@@ -682,6 +754,7 @@ function LayoutTabContent() {
                   <button
                     type="button"
                     onClick={(): void => setFontSize(opt.id)}
+                    aria-pressed={selected}
                     className={cn(
                       'flex w-full flex-col items-center gap-2 rounded-lg border p-4 capitalize transition-colors',
                       selected

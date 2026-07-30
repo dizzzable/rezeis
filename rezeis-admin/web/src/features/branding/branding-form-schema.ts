@@ -15,6 +15,32 @@ export const BRANDING_APP_BG_TEXTURES = [
   'triangles',
   'noise',
 ] as const
+export const BRANDING_CARD_EFFECTS = [
+  'NONE',
+  'aurora',
+  'threads',
+  'softAurora',
+  'rippleGrid',
+  'radar',
+  'plasma',
+  'particles',
+  'liquidChrome',
+  'lineWaves',
+  'iridescence',
+  'grainient',
+  'galaxy',
+  'balatro',
+  'waves',
+  'silk',
+  'beams',
+  'dither',
+  'paperMesh',
+  'paperWarp',
+  'paperGrain',
+  'paperDither',
+  'paperSwirl',
+  'paperMetaballs',
+] as const
 
 /** Cabinet nav destinations (mirrors backend `NAV_DESTINATIONS`). */
 export const BRANDING_NAV_DESTINATIONS = [
@@ -51,6 +77,8 @@ export const DEFAULT_NAV_ITEMS: readonly NavItemDraft[] = [
 ]
 
 export interface BrandingFormDraft {
+  readonly themePresetId: string | null
+  readonly themePresetVersion: number | null
   readonly brandName: string
   readonly tagline: string | null
   readonly logoUrl: string | null
@@ -72,10 +100,32 @@ export interface BrandingFormDraft {
   readonly iconColorMode: (typeof BRANDING_ICON_COLOR_MODES)[number]
   readonly iconColors?: Record<string, string>
   readonly borderRadius: string
+  readonly cornerRadii: BrandingCornerRadiiDraft
   readonly fontFamily: string
+  readonly surfaceTheme: BrandingSurfaceThemeDraft
   readonly planCardStyles?: Record<string, PlanCardStyleDraft>
   readonly navItems?: readonly NavItemDraft[]
   readonly navGap?: number
+}
+
+export interface BrandingSurfaceThemeDraft {
+  readonly foreground: string
+  readonly mutedForeground: string
+  readonly surface: string
+  readonly surfaceHigh: string
+  readonly borderSoft: string
+  readonly borderStrong: string
+  readonly surfaceOpacity: number
+  readonly surfaceHighOpacity: number
+  readonly borderSoftOpacity: number
+  readonly borderStrongOpacity: number
+  readonly glassBlurPx: number
+}
+
+export interface BrandingCornerRadiiDraft {
+  readonly cardPx: number
+  readonly itemPx: number
+  readonly pillPx: number
 }
 
 /** Per-plan tariff-card style draft (mirrors backend `PlanCardStyle`). */
@@ -115,6 +165,37 @@ export const DEFAULT_APP_BACKGROUND_DRAFT: BrandingAppBackgroundDraft = {
   texture: { pattern: 'dots', color: '#22c55e', background: '#0a0a0a', scale: 24, opacity: 0.15 },
 }
 
+export const DEFAULT_SURFACE_THEME_DRAFT: BrandingSurfaceThemeDraft = {
+  foreground: '#fafafa',
+  mutedForeground: '#a1a1a1',
+  surface: '#18181b',
+  surfaceHigh: '#27272a',
+  borderSoft: '#ffffff',
+  borderStrong: '#ffffff',
+  surfaceOpacity: 0.7,
+  surfaceHighOpacity: 0.8,
+  borderSoftOpacity: 0.06,
+  borderStrongOpacity: 0.12,
+  glassBlurPx: 16,
+}
+
+export const DEFAULT_CORNER_RADII_DRAFT: BrandingCornerRadiiDraft = {
+  cardPx: 24,
+  itemPx: 14,
+  pillPx: 9999,
+}
+
+export const CORNER_RADII_BY_LEGACY_CLASS: Readonly<
+  Record<string, BrandingCornerRadiiDraft>
+> = {
+  'rounded-none': { cardPx: 0, itemPx: 0, pillPx: 0 },
+  'rounded-lg': { cardPx: 12, itemPx: 8, pillPx: 12 },
+  'rounded-xl': { cardPx: 16, itemPx: 12, pillPx: 9999 },
+  'rounded-2xl': DEFAULT_CORNER_RADII_DRAFT,
+  'rounded-3xl': { cardPx: 32, itemPx: 18, pillPx: 9999 },
+  'rounded-full': { cardPx: 40, itemPx: 24, pillPx: 9999 },
+}
+
 export interface BrandingCardEffectSlotDraft {
   readonly cardEffect: string
   readonly cardEffectProps: Record<string, unknown>
@@ -132,19 +213,24 @@ export type BrandingFormData = Omit<BrandingFormDraft, 'cardEffectsByIndex'> & {
 export interface BrandingFormValidationMessages {
   readonly hexInvalid: string
   readonly imageUrlInvalid: string
+  readonly gradientInvalid: string
 }
 
-const HEX_PATTERN = /^#([0-9a-fA-F]{3,8})$/
+const HEX_PATTERN = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/
 const DATA_IMAGE_BASE64_PATTERN = /^data:image\/[a-z0-9+.-]+;base64,[A-Za-z0-9+/=]+$/i
+const BRANDING_UPLOAD_PATH_PATTERN =
+  /^\/uploads\/branding\/(?![A-Za-z0-9._-]*\.\.)[A-Za-z0-9][A-Za-z0-9._-]*$/
 /**
- * Max length for image-bearing fields (`logoUrl`, `cardLogoUrl`,
- * `cardPattern`). Generous enough to hold an inline `data:image` base64
+ * Max length for image-bearing fields (`logoUrl`, `cardLogoUrl`). Generous
+ * enough to hold an inline `data:image` base64
  * logo (~512 KB string ≈ a ~384 KB image) — the previous 8 KB cap rejected
  * almost every real PNG/SVG data URI with a bare "Invalid input".
  */
 const IMAGE_URL_MAX = 524288
 
 const DEFAULT_BRANDING_DRAFT: BrandingFormDraft = {
+  themePresetId: null,
+  themePresetVersion: null,
   brandName: 'Reiwa',
   tagline: null,
   logoUrl: null,
@@ -161,7 +247,7 @@ const DEFAULT_BRANDING_DRAFT: BrandingFormDraft = {
   cardEffectProps: {},
   cardEffectOpacity: 1,
   cardEffectsByIndex: [],
-  bgEffect: 'AURORA',
+  bgEffect: 'NONE',
   appBackground: {
     kind: 'none',
     effect: 'NONE',
@@ -173,7 +259,9 @@ const DEFAULT_BRANDING_DRAFT: BrandingFormDraft = {
   iconColorMode: 'default',
   iconColors: {},
   borderRadius: 'rounded-2xl',
+  cornerRadii: DEFAULT_CORNER_RADII_DRAFT,
   fontFamily: 'Geist Variable, system-ui, sans-serif',
+  surfaceTheme: DEFAULT_SURFACE_THEME_DRAFT,
   planCardStyles: {},
   navItems: DEFAULT_NAV_ITEMS,
   navGap: 2,
@@ -182,6 +270,12 @@ const DEFAULT_BRANDING_DRAFT: BrandingFormDraft = {
 export function createBrandingFormSchema(messages: BrandingFormValidationMessages) {
   return z
     .object({
+      themePresetId: z
+        .string()
+        .trim()
+        .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/)
+        .nullable(),
+      themePresetVersion: z.number().int().min(1).max(2_147_483_647).nullable(),
       brandName: z.string().trim().min(1).max(64),
       tagline: optionalNullableString(128),
       logoUrl: optionalImageUrl(messages.imageUrlInvalid),
@@ -190,57 +284,86 @@ export function createBrandingFormSchema(messages: BrandingFormValidationMessage
       primaryFg: z.string().regex(HEX_PATTERN, messages.hexInvalid),
       bgPrimary: z.string().regex(HEX_PATTERN, messages.hexInvalid),
       bgSecondary: z.string().regex(HEX_PATTERN, messages.hexInvalid),
-      cardGradient: z.string().trim().min(1).max(512),
-      cardPattern: optionalNullableString(IMAGE_URL_MAX),
+      cardGradient: safeGradientSchema(messages.gradientInvalid),
+      cardPattern: optionalGradientSchema(messages.gradientInvalid, true),
       cardLogo: z.enum(CARD_LOGO_PRESETS),
       cardLogoUrl: optionalImageUrl(messages.imageUrlInvalid),
-      cardEffect: z.string().max(32),
+      cardEffect: z.enum(BRANDING_CARD_EFFECTS),
       cardEffectProps: z.record(z.string(), z.unknown()).optional(),
       cardEffectOpacity: z.number().min(0.05).max(1),
       cardEffectsByIndex: z
         .array(
           z.object({
-            cardEffect: z.string().max(32),
+            cardEffect: z.enum(BRANDING_CARD_EFFECTS),
             cardEffectProps: z.record(z.string(), z.unknown()),
             cardEffectOpacity: z.number().min(0.05).max(1),
-            cardGradient: z.string().max(512).nullish(),
+            cardGradient: optionalGradientSchema(messages.gradientInvalid),
           }),
         )
+        .max(20)
         .optional(),
       bgEffect: z.enum(BRANDING_BG_EFFECTS),
       appBackground: z
         .object({
           kind: z.enum(BRANDING_APP_BG_KINDS),
-          effect: z.string().max(32),
+          effect: z.enum(BRANDING_CARD_EFFECTS),
           props: z.record(z.string(), z.unknown()),
           opacity: z.number().min(0.05).max(1),
-          gradient: z.string().max(512),
+          gradient: safeGradientSchema(messages.gradientInvalid),
           texture: z.object({
             pattern: z.enum(BRANDING_APP_BG_TEXTURES),
-            color: z.string(),
-            background: z.string(),
+            color: z.string().regex(HEX_PATTERN, messages.hexInvalid),
+            background: z.string().regex(HEX_PATTERN, messages.hexInvalid),
             scale: z.number().min(8).max(256),
             opacity: z.number().min(0.05).max(1),
           }),
         })
         .optional(),
       iconColorMode: z.enum(BRANDING_ICON_COLOR_MODES),
-      iconColors: z.record(z.string(), z.string()).optional(),
+      iconColors: z
+        .record(
+          z.string().min(1).max(64),
+          z.string().regex(HEX_PATTERN, messages.hexInvalid),
+        )
+        .refine((value) => Object.keys(value).length <= 100)
+        .optional(),
       borderRadius: z.string().trim().min(1).max(64),
+      cornerRadii: z.object({
+        cardPx: z.number().min(0).max(48),
+        itemPx: z.number().min(0).max(32),
+        pillPx: z.number().min(0).max(9999),
+      }),
       fontFamily: z.string().trim().min(1).max(256),
+      surfaceTheme: z.object({
+        foreground: z.string().regex(HEX_PATTERN, messages.hexInvalid),
+        mutedForeground: z.string().regex(HEX_PATTERN, messages.hexInvalid),
+        surface: z.string().regex(HEX_PATTERN, messages.hexInvalid),
+        surfaceHigh: z.string().regex(HEX_PATTERN, messages.hexInvalid),
+        borderSoft: z.string().regex(HEX_PATTERN, messages.hexInvalid),
+        borderStrong: z.string().regex(HEX_PATTERN, messages.hexInvalid),
+        surfaceOpacity: z.number().min(0).max(1),
+        surfaceHighOpacity: z.number().min(0).max(1),
+        borderSoftOpacity: z.number().min(0).max(1),
+        borderStrongOpacity: z.number().min(0).max(1),
+        glassBlurPx: z.number().min(0).max(40),
+      }),
       planCardStyles: z
         .record(
-          z.string(),
+          z.string().min(1).max(64),
           z.object({
-            gradient: z.string().max(512).nullish(),
-            accent: z.string().nullish(),
+            gradient: optionalGradientSchema(messages.gradientInvalid),
+            accent: z
+              .string()
+              .regex(HEX_PATTERN, messages.hexInvalid)
+              .nullish(),
             texturePreset: z.enum(BRANDING_APP_BG_TEXTURES).nullish(),
-            textureUrl: z.string().max(IMAGE_URL_MAX).nullish(),
-            cardEffect: z.string().max(32).nullish(),
+            textureUrl: optionalImageUrl(messages.imageUrlInvalid),
+            cardEffect: z.enum(BRANDING_CARD_EFFECTS).nullish(),
             cardEffectProps: z.record(z.string(), z.unknown()).optional(),
             cardEffectOpacity: z.number().min(0.05).max(1).nullish(),
           }),
         )
+        .refine((value) => Object.keys(value).length <= 500)
         .optional(),
       navItems: z
         .array(
@@ -268,6 +391,16 @@ export function createInitialBrandingDraft(input?: Partial<BrandingFormDraft> | 
   return {
     ...DEFAULT_BRANDING_DRAFT,
     ...(input ?? {}),
+    themePresetId:
+      typeof input?.themePresetId === 'string' && input.themePresetId.trim().length > 0
+        ? input.themePresetId.trim()
+        : null,
+    themePresetVersion:
+      typeof input?.themePresetVersion === 'number' &&
+      Number.isInteger(input.themePresetVersion) &&
+      input.themePresetVersion > 0
+        ? input.themePresetVersion
+        : null,
     tagline: normalizeDraftNullableString(input?.tagline),
     logoUrl: normalizeDraftNullableString(input?.logoUrl),
     pwaIconUrl: normalizeDraftNullableString(input?.pwaIconUrl),
@@ -277,11 +410,96 @@ export function createInitialBrandingDraft(input?: Partial<BrandingFormDraft> | 
     cardEffectsByIndex: Array.isArray(input?.cardEffectsByIndex) ? input.cardEffectsByIndex : [],
     appBackground: normalizeAppBackgroundDraft(input?.appBackground),
     iconColors: isPlainRecord(input?.iconColors) ? input.iconColors : {},
+    cornerRadii: normalizeCornerRadiiDraft(
+      input?.cornerRadii,
+      input?.borderRadius,
+    ),
+    surfaceTheme: normalizeSurfaceThemeDraft(input?.surfaceTheme),
     planCardStyles: isPlainRecordUnknown(input?.planCardStyles)
       ? (input.planCardStyles as Record<string, PlanCardStyleDraft>)
       : {},
     navItems: Array.isArray(input?.navItems) ? input.navItems : DEFAULT_NAV_ITEMS,
     navGap: typeof input?.navGap === 'number' ? input.navGap : 2,
+  }
+}
+
+function normalizeCornerRadiiDraft(
+  value: Partial<BrandingCornerRadiiDraft> | undefined,
+  legacyClass: string | undefined,
+): BrandingCornerRadiiDraft {
+  const fallback =
+    (typeof legacyClass === 'string'
+      ? CORNER_RADII_BY_LEGACY_CLASS[legacyClass]
+      : undefined) ??
+    DEFAULT_CORNER_RADII_DRAFT
+  if (typeof value !== 'object' || value === null) return fallback
+
+  const number = (
+    candidate: unknown,
+    minimum: number,
+    maximum: number,
+    defaultValue: number,
+  ): number =>
+    typeof candidate === 'number' && Number.isFinite(candidate)
+      ? Math.min(maximum, Math.max(minimum, candidate))
+      : defaultValue
+
+  return {
+    cardPx: number(value.cardPx, 0, 48, fallback.cardPx),
+    itemPx: number(value.itemPx, 0, 32, fallback.itemPx),
+    pillPx: number(value.pillPx, 0, 9999, fallback.pillPx),
+  }
+}
+
+function normalizeSurfaceThemeDraft(
+  value: Partial<BrandingSurfaceThemeDraft> | undefined,
+): BrandingSurfaceThemeDraft {
+  if (typeof value !== 'object' || value === null) {
+    return DEFAULT_SURFACE_THEME_DRAFT
+  }
+
+  const fallback = DEFAULT_SURFACE_THEME_DRAFT
+  const color = (candidate: unknown, defaultValue: string): string =>
+    typeof candidate === 'string' && HEX_PATTERN.test(candidate.trim())
+      ? candidate.trim()
+      : defaultValue
+  const number = (
+    candidate: unknown,
+    minimum: number,
+    maximum: number,
+    defaultValue: number,
+  ): number =>
+    typeof candidate === 'number' && Number.isFinite(candidate)
+      ? Math.min(maximum, Math.max(minimum, candidate))
+      : defaultValue
+
+  return {
+    foreground: color(value.foreground, fallback.foreground),
+    mutedForeground: color(value.mutedForeground, fallback.mutedForeground),
+    surface: color(value.surface, fallback.surface),
+    surfaceHigh: color(value.surfaceHigh, fallback.surfaceHigh),
+    borderSoft: color(value.borderSoft, fallback.borderSoft),
+    borderStrong: color(value.borderStrong, fallback.borderStrong),
+    surfaceOpacity: number(value.surfaceOpacity, 0, 1, fallback.surfaceOpacity),
+    surfaceHighOpacity: number(
+      value.surfaceHighOpacity,
+      0,
+      1,
+      fallback.surfaceHighOpacity,
+    ),
+    borderSoftOpacity: number(
+      value.borderSoftOpacity,
+      0,
+      1,
+      fallback.borderSoftOpacity,
+    ),
+    borderStrongOpacity: number(
+      value.borderStrongOpacity,
+      0,
+      1,
+      fallback.borderStrongOpacity,
+    ),
+    glassBlurPx: number(value.glassBlurPx, 0, 40, fallback.glassBlurPx),
   }
 }
 
@@ -303,7 +521,11 @@ function normalizeAppBackgroundDraft(
   const t = (value.texture ?? {}) as Partial<BrandingAppBackgroundTextureDraft>
   return {
     kind,
-    effect: typeof value.effect === 'string' ? value.effect : 'NONE',
+    effect:
+      typeof value.effect === 'string' &&
+      (BRANDING_CARD_EFFECTS as readonly string[]).includes(value.effect)
+        ? value.effect
+        : 'NONE',
     props: isPlainRecordUnknown(value.props) ? value.props : {},
     opacity: clamp(value.opacity, 0.05, 1, 1),
     gradient: typeof value.gradient === 'string' && value.gradient.trim().length > 0 ? value.gradient : d.gradient,
@@ -311,8 +533,14 @@ function normalizeAppBackgroundDraft(
       pattern: (BRANDING_APP_BG_TEXTURES as readonly string[]).includes(t.pattern ?? '')
         ? (t.pattern as BrandingAppBackgroundTextureDraft['pattern'])
         : d.texture.pattern,
-      color: typeof t.color === 'string' ? t.color : d.texture.color,
-      background: typeof t.background === 'string' ? t.background : d.texture.background,
+      color:
+        typeof t.color === 'string' && HEX_PATTERN.test(t.color.trim())
+          ? t.color.trim()
+          : d.texture.color,
+      background:
+        typeof t.background === 'string' && HEX_PATTERN.test(t.background.trim())
+          ? t.background.trim()
+          : d.texture.background,
       scale: Math.round(clamp(t.scale, 8, 256, d.texture.scale)),
       opacity: clamp(t.opacity, 0.05, 1, d.texture.opacity),
     },
@@ -324,6 +552,28 @@ function optionalImageUrl(message: string) {
     .refine((value) => value === null || isAllowedImageUrl(value), { message })
 }
 
+function safeGradientSchema(message: string) {
+  return z
+    .string()
+    .trim()
+    .min(1)
+    .max(512)
+    .refine(isSafeBrandingGradient, { message })
+}
+
+function optionalGradientSchema(message: string, allowNone = false) {
+  return optionalNullableString(512)
+    .refine(
+      (value) =>
+        value === null ||
+        (allowNone && value === 'none') ||
+        isSafeBrandingGradient(value),
+      { message },
+    )
+    .optional()
+    .transform((value) => value ?? null)
+}
+
 function optionalNullableString(maxLength: number) {
   return z
     .union([z.string(), z.null(), z.undefined()])
@@ -332,18 +582,66 @@ function optionalNullableString(maxLength: number) {
     .transform((value) => (value.length > 0 ? value : null))
 }
 
+export function isSafeBrandingGradient(value: unknown): value is string {
+  if (typeof value !== 'string') return false
+  const input = value.trim()
+  if (
+    input.length === 0 ||
+    input.length > 512 ||
+    /(?:url|image-set|-webkit-image-set|cross-fade|element|paint)\s*\(/i.test(input) ||
+    /[;{}@\\]/.test(input) ||
+    /\/\*|\*\//.test(input) ||
+    hasControlCharacter(input)
+  ) {
+    return false
+  }
+
+  let index = 0
+  while (index < input.length) {
+    while (index < input.length && /\s/.test(input[index] ?? '')) index += 1
+    const match = /^(?:(?:repeating-)?(?:linear|radial|conic)-gradient)\s*\(/i.exec(
+      input.slice(index),
+    )
+    if (!match) return false
+    index += match[0].length
+
+    let depth = 1
+    while (index < input.length && depth > 0) {
+      const character = input[index]
+      if (character === '(') depth += 1
+      if (character === ')') depth -= 1
+      index += 1
+    }
+    if (depth !== 0) return false
+
+    while (index < input.length && /\s/.test(input[index] ?? '')) index += 1
+    if (index === input.length) return true
+    if (input[index] !== ',') return false
+    index += 1
+  }
+  return false
+}
+
+function hasControlCharacter(value: string): boolean {
+  return Array.from(value).some((character) => {
+    const codePoint = character.codePointAt(0) ?? 0
+    return codePoint <= 0x1f || codePoint === 0x7f
+  })
+}
+
 function isAllowedImageUrl(value: string): boolean {
   if (DATA_IMAGE_BASE64_PATTERN.test(value)) {
     return true
   }
-  // Relative upload path served same-origin by the admin (and proxied by reiwa),
+  // Relative upload path served same-origin by the admin and mirrored durably
+  // by Reiwa while the panel is unavailable,
   // e.g. an uploaded logo / PWA icon at `/uploads/branding/<hash>.png`.
-  if (/^\/uploads\/[A-Za-z0-9._/-]+$/.test(value)) {
+  if (BRANDING_UPLOAD_PATH_PATTERN.test(value)) {
     return true
   }
   try {
     const url = new URL(value)
-    return (url.protocol === 'http:' || url.protocol === 'https:') && !url.username && !url.password
+    return url.protocol === 'https:' && !url.username && !url.password
   } catch {
     return false
   }

@@ -3284,7 +3284,8 @@
     saved: 'Брендинг сохранён',
     saveFailed: 'Не удалось сохранить брендинг',
     invalidHex: 'Должен быть валидный hex-цвет',
-    invalidImageUrl: 'Введите HTTP(S) URL или data:image URL.',
+    invalidImageUrl: 'Введите HTTPS URL, data:image URL или путь загруженного брендинга.',
+    invalidGradient: 'Используйте только CSS-градиенты: linear, radial или conic.',
     tabs: {
       brand: 'Бренд',
       colors: 'Цвета и оформление',
@@ -3322,7 +3323,12 @@
       },
       presets: {
         title: 'Готовые темы',
-        description: 'Примените палитру в один клик, затем при желании донастройте цвета.',
+        description:
+          '104 полноценные визуальные системы. Тема меняет только оформление и сохраняет бренд, навигацию и индивидуальные настройки карточек.',
+        searchPlaceholder: 'Поиск по коду, названию или стилю…',
+        searchLabel: 'Поиск тем WEB Reiwa',
+        count: '{{visible}} из {{total}} тем',
+        empty: 'По этому запросу тем нет.',
       },
       identity: {
         title: 'Идентичность',
@@ -3444,11 +3450,33 @@
       },
       effects: {
         title: 'Эффекты и типографика',
-        description: 'Скругление углов и шрифт.',
+        description: 'Геометрия углов и шрифт.',
         bgEffect: 'Фоновый эффект',
-        borderRadius: 'Скругление углов',
+        borderRadius: 'Быстрый стиль углов',
+        cardRadius: 'Карточки и окна',
+        itemRadius: 'Кнопки и поля',
+        pillRadius: 'Капсулы и вкладки',
+        capsule: 'Капсула',
+        cornerRadiiHint:
+          'Пресет задаёт радиусы исходного концепта. После применения каждый уровень можно настроить независимо.',
         fontFamily: 'Шрифт',
         fontFamilyPlaceholder: 'Inter, system-ui, sans-serif',
+      },
+      surfaces: {
+        title: 'Семантические поверхности',
+        description:
+          'Текст, стеклянные поверхности, границы и размытие всего кабинета. Эти настройки сохраняют читаемость светлых и тёмных тем.',
+        foreground: 'Основной текст',
+        mutedForeground: 'Приглушённый текст',
+        surface: 'Цвет поверхности',
+        surfaceHigh: 'Цвет поднятой поверхности',
+        borderSoft: 'Мягкая граница',
+        borderStrong: 'Контрастная граница',
+        surfaceOpacity: 'Прозрачность поверхности',
+        surfaceHighOpacity: 'Прозрачность поднятой поверхности',
+        borderSoftOpacity: 'Прозрачность мягкой границы',
+        borderStrongOpacity: 'Прозрачность контрастной границы',
+        glassBlur: 'Размытие стекла',
       },
       iconColors: {
         title: 'Цвета иконок меню',
@@ -3467,6 +3495,10 @@
           language: 'Язык',
           support: 'Поддержка',
           faq: 'Помощь',
+          paymentMethods: 'Способы оплаты',
+          addons: 'Дополнения',
+          install: 'Установка',
+          tutorial: 'Инструкция',
         },
       },
       preview: {

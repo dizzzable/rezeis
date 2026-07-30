@@ -3241,7 +3241,8 @@ export const en = {
     saved: 'Branding saved successfully',
     saveFailed: 'Failed to save branding',
     invalidHex: 'Must be a valid hex color',
-    invalidImageUrl: 'Enter an HTTP(S) URL or a data:image URL.',
+    invalidImageUrl: 'Enter an HTTPS URL, data:image URL, or a branding upload path.',
+    invalidGradient: 'Use CSS gradient layers only (linear, radial, or conic).',
     tabs: {
       brand: 'Brand',
       colors: 'Colors & layout',
@@ -3279,7 +3280,12 @@ export const en = {
       },
       presets: {
         title: 'Theme Presets',
-        description: 'Apply a full palette in one click, then fine-tune colors if you want.',
+        description:
+          '104 complete visual systems. Applying one changes only theme-owned fields and preserves your identity, navigation and per-card overrides.',
+        searchPlaceholder: 'Search by code, name, or style…',
+        searchLabel: 'Search WEB Reiwa themes',
+        count: '{{visible}} of {{total}} themes',
+        empty: 'No themes match this search.',
       },
       identity: {
         title: 'Identity',
@@ -3402,11 +3408,33 @@ export const en = {
       },
       effects: {
         title: 'Effects & Typography',
-        description: 'Corner radius and font.',
+        description: 'Corner geometry and font.',
         bgEffect: 'Background Effect',
-        borderRadius: 'Border Radius',
+        borderRadius: 'Quick corner style',
+        cardRadius: 'Cards & dialogs',
+        itemRadius: 'Buttons & fields',
+        pillRadius: 'Pills & tabs',
+        capsule: 'Capsule',
+        cornerRadiiHint:
+          'A preset starts with the source concept radii. Each level remains independently editable afterwards.',
         fontFamily: 'Font Family',
         fontFamilyPlaceholder: 'Inter, system-ui, sans-serif',
+      },
+      surfaces: {
+        title: 'Semantic surfaces',
+        description:
+          'Text, glass, borders and blur used across the cabinet. These controls keep both light and dark presets readable.',
+        foreground: 'Foreground',
+        mutedForeground: 'Muted foreground',
+        surface: 'Surface tint',
+        surfaceHigh: 'Raised surface tint',
+        borderSoft: 'Soft border',
+        borderStrong: 'Strong border',
+        surfaceOpacity: 'Surface opacity',
+        surfaceHighOpacity: 'Raised opacity',
+        borderSoftOpacity: 'Soft border opacity',
+        borderStrongOpacity: 'Strong border opacity',
+        glassBlur: 'Glass blur',
       },
       iconColors: {
         title: 'Menu Icon Colors',
@@ -3425,6 +3453,10 @@ export const en = {
           language: 'Language',
           support: 'Support',
           faq: 'Help',
+          paymentMethods: 'Payment methods',
+          addons: 'Add-ons',
+          install: 'Install',
+          tutorial: 'Tutorial',
         },
       },
       preview: {
