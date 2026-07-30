@@ -21,7 +21,7 @@ vi.mock('./card-effect-section', () => ({
   CardEffectPicker: () => <div data-testid="card-effect-picker" />,
 }))
 
-describe('WebReiwaPage branding URL validation', () => {
+describe('WebReiwaPage branding settings', () => {
   beforeEach(() => {
     vi.restoreAllMocks()
   })
@@ -56,15 +56,13 @@ describe('WebReiwaPage branding URL validation', () => {
     await user.type(screen.getByLabelText('Logo URL (optional)'), ' https://cdn.example.com/logo.png ')
     await user.click(screen.getByRole('button', { name: 'Save' }))
 
-    await waitFor(() => {
-      expect(patchSpy).toHaveBeenCalledWith(
-        '/admin/settings/branding',
-        expect.objectContaining({
-          logoUrl: 'https://cdn.example.com/logo.png',
-          cardLogoUrl: null,
-        }),
-      )
-    })
+    await waitFor(() => expect(patchSpy).toHaveBeenCalledOnce())
+    expect(patchSpy).toHaveBeenCalledWith(
+      '/admin/settings/branding',
+      {
+        logoUrl: 'https://cdn.example.com/logo.png',
+      },
+    )
   }, 20_000)
 
   it('gives color controls distinct programmatic names', async () => {
@@ -77,6 +75,69 @@ describe('WebReiwaPage branding URL validation', () => {
 
     expect(screen.getByRole('textbox', { name: 'Primary' })).toHaveValue('#22c55e')
     expect(screen.getByLabelText('Primary color picker')).toHaveAttribute('type', 'color')
+  }, 20_000)
+
+  it('submits a selected WEB Reiwa theme through the settings PATCH', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(api, 'get').mockResolvedValue({ data: createBrandingPayload() })
+    const patchSpy = vi.spyOn(api, 'patch').mockResolvedValue({
+      data: createBrandingPayload(),
+    })
+
+    renderWithProviders(<WebReiwaPage />)
+
+    await screen.findByRole('heading', { name: /WEB Reiwa/ })
+    await user.click(screen.getByRole('button', { name: 'A Vital Link' }))
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(patchSpy).toHaveBeenCalledOnce())
+    expect(patchSpy).toHaveBeenCalledWith(
+      '/admin/settings/branding',
+      expect.objectContaining({
+        themePresetId: 'concept-a',
+        themePresetVersion: 2,
+        cornerRadii: expect.objectContaining({
+          cardPx: expect.any(Number),
+          itemPx: expect.any(Number),
+          pillPx: expect.any(Number),
+        }),
+      }),
+    )
+  }, 20_000)
+
+  it('does not let an unchanged legacy field block saving a selected theme', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(api, 'get').mockResolvedValue({
+      data: {
+        ...createBrandingPayload(),
+        cardEffectsByIndex: [
+          {
+            cardEffect: 'aurora',
+            cardEffectProps: {},
+            cardEffectOpacity: 1,
+            cardGradient: 'url(https://legacy.example/card.png)',
+          },
+        ],
+      },
+    })
+    const patchSpy = vi.spyOn(api, 'patch').mockResolvedValue({
+      data: createBrandingPayload(),
+    })
+
+    renderWithProviders(<WebReiwaPage />)
+
+    await screen.findByRole('heading', { name: /WEB Reiwa/ })
+    await user.click(screen.getByRole('button', { name: 'A Vital Link' }))
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(patchSpy).toHaveBeenCalledOnce())
+    const payload = patchSpy.mock.calls[0]?.[1] as Record<string, unknown>
+    expect(payload).toMatchObject({
+      themePresetId: 'concept-a',
+      themePresetVersion: 2,
+    })
+    expect(payload).not.toHaveProperty('cardEffectsByIndex')
+    expect(payload).not.toHaveProperty('brandName')
   }, 20_000)
 })
 

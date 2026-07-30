@@ -33,7 +33,9 @@ import { BrandingPreview } from "./branding-preview";
 import { CARD_LOGO_PRESETS, CardLogoMark, type CardLogoPreset } from "./card-logo-mark";
 import {
   createBrandingFormSchema,
+  createBrandingDirtyPatch,
   createInitialBrandingDraft,
+  getBrandingChangedFields,
   CORNER_RADII_BY_LEGACY_CLASS,
   DEFAULT_APP_BACKGROUND_DRAFT,
   type BrandingCornerRadiiDraft,
@@ -76,6 +78,21 @@ const BORDER_RADIUS_VALUES = [
 const BRANDING_TABS = ['brand', 'colors', 'card', 'appbg', 'icons', 'planCards', 'nav'] as const;
 type BrandingTab = (typeof BRANDING_TABS)[number];
 
+function tabForBrandingField(field: string): BrandingTab {
+  if (['brandName', 'tagline', 'logoUrl', 'pwaIconUrl', 'themePresetId', 'themePresetVersion'].includes(field)) {
+    return 'brand';
+  }
+  if (['primary', 'primaryFg', 'bgPrimary', 'bgSecondary', 'borderRadius', 'cornerRadii', 'fontFamily', 'surfaceTheme'].includes(field)) {
+    return 'colors';
+  }
+  if (field.startsWith('card')) return 'card';
+  if (field === 'bgEffect' || field === 'appBackground') return 'appbg';
+  if (field.startsWith('icon')) return 'icons';
+  if (field === 'planCardStyles') return 'planCards';
+  if (field.startsWith('nav')) return 'nav';
+  return 'brand';
+}
+
 // ── API ─────────────────────────────────────────────────────────────────────
 
 async function fetchBranding(): Promise<BrandingFormDraft> {
@@ -83,7 +100,7 @@ async function fetchBranding(): Promise<BrandingFormDraft> {
   return createInitialBrandingDraft(data);
 }
 
-async function updateBranding(values: BrandingFormData): Promise<BrandingFormDraft> {
+async function updateBranding(values: Partial<BrandingFormData>): Promise<BrandingFormDraft> {
   const { data } = await api.patch<Partial<BrandingFormDraft>>("/admin/settings/branding", values);
   return createInitialBrandingDraft(data);
 }
@@ -139,14 +156,46 @@ export default function WebReiwaPage() {
     mutationFn: updateBranding,
     onSuccess: (data) => {
       queryClient.setQueryData(["admin", "branding"], data);
+      form.reset(data);
       toast.success(t('brandingPage.saved'));
     },
     onError: () => toast.error(t('brandingPage.saveFailed')),
   });
 
-  const onSubmit = form.handleSubmit((values) => {
-    mutation.mutate(values);
-  });
+  const onSubmit = (): void => {
+    form.clearErrors();
+    const values = form.getValues();
+    const result = createBrandingDirtyPatch({
+      values,
+      dirtyFields: getBrandingChangedFields(
+        values,
+        branding ?? createInitialBrandingDraft(),
+      ),
+      schema: brandingSchema,
+    });
+    if (!result.success) {
+      for (const issue of result.error.issues) {
+        if (issue.path.length === 0) continue;
+        form.setError(issue.path.join('.') as FieldPath<BrandingFormDraft>, {
+          type: 'validate',
+          message: issue.message,
+        });
+      }
+      const firstIssue = result.error.issues[0];
+      const firstField = firstIssue?.path[0];
+      if (typeof firstField === 'string') {
+        setTab(tabForBrandingField(firstField));
+      }
+      toast.error(
+        firstIssue
+          ? `${t('brandingPage.validationFailed')}: ${firstIssue.message}`
+          : t('brandingPage.validationFailed'),
+      );
+      return;
+    }
+    if (result.fields.length === 0) return;
+    mutation.mutate(result.data);
+  };
 
   function applyPreset(preset: ThemePreset): void {
     const patch = createThemePresetVisualPatch(preset);

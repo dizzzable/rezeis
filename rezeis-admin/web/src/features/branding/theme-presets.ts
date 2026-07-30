@@ -14,7 +14,7 @@ import {
   getConceptSourceStyle,
   type ConceptPresetDescriptor,
   type HexColor,
-} from '@/lib/theme/concept-presets'
+} from '../../lib/theme/concept-presets'
 
 import type {
   BrandingAppBackgroundDraft,

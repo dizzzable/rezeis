@@ -1,5 +1,10 @@
+import 'reflect-metadata'
+
+import { plainToInstance } from 'class-transformer'
+import { validate } from 'class-validator'
 import { describe, expect, it } from 'vitest'
 
+import { UpdateBrandingSettingsDto } from '../../../../src/modules/settings/dto/update-branding-settings.dto'
 import { CARD_EFFECT_REGISTRY } from './card-effect-registry'
 import {
   CONCEPT_PRESETS,
@@ -7,8 +12,10 @@ import {
   getConceptSourceStyle,
 } from '@/lib/theme/concept-presets'
 import {
+  createBrandingDirtyPatch,
   createBrandingFormSchema,
   createInitialBrandingDraft,
+  type BrandingDirtyFields,
 } from './branding-form-schema'
 import {
   THEME_PRESETS,
@@ -43,6 +50,55 @@ describe('WEB Reiwa 104-theme catalog', () => {
         ...createThemePresetVisualPatch(preset),
       })
       expect(result.success, `${preset.code} ${preset.name}`).toBe(true)
+    }
+  })
+
+  it('builds a minimal valid PATCH for every theme despite unchanged legacy settings', () => {
+    const schema = createBrandingFormSchema(validationMessages)
+    const legacyBase = createInitialBrandingDraft({
+      brandName: 'Legacy operator',
+      cardEffectsByIndex: [
+        {
+          cardEffect: 'aurora',
+          cardEffectProps: {},
+          cardEffectOpacity: 1,
+          cardGradient: 'url(https://legacy.example/card.png)',
+        },
+      ],
+    })
+
+    for (const preset of THEME_PRESETS) {
+      const visualPatch = createThemePresetVisualPatch(preset)
+      const dirtyFields = Object.fromEntries(
+        Object.keys(visualPatch).map((field) => [field, true]),
+      ) as BrandingDirtyFields
+      const result = createBrandingDirtyPatch({
+        values: { ...legacyBase, ...visualPatch },
+        dirtyFields,
+        schema,
+      })
+
+      expect(result.success, `${preset.code} ${preset.name}`).toBe(true)
+      if (!result.success) continue
+      expect(result.data.themePresetId).toBe(preset.id)
+      expect(result.data.themePresetVersion).toBe(preset.version)
+      expect(result.data).not.toHaveProperty('brandName')
+      expect(result.data).not.toHaveProperty('cardEffectsByIndex')
+    }
+  })
+
+  it('passes every resolved visual PATCH through the NestJS branding DTO', async () => {
+    for (const preset of THEME_PRESETS) {
+      const dto = plainToInstance(
+        UpdateBrandingSettingsDto,
+        createThemePresetVisualPatch(preset),
+      )
+      const errors = await validate(dto, {
+        forbidNonWhitelisted: true,
+        whitelist: true,
+      })
+
+      expect(errors, `${preset.code} ${preset.name}`).toEqual([])
     }
   })
 

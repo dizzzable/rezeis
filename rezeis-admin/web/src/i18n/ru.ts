@@ -3283,6 +3283,7 @@
     saving: 'Сохранение…',
     saved: 'Брендинг сохранён',
     saveFailed: 'Не удалось сохранить брендинг',
+    validationFailed: 'Проверьте выделенную настройку',
     invalidHex: 'Должен быть валидный hex-цвет',
     invalidImageUrl: 'Введите HTTPS URL, data:image URL или путь загруженного брендинга.',
     invalidGradient: 'Используйте только CSS-градиенты: linear, radial или conic.',

@@ -3240,6 +3240,7 @@ export const en = {
     saving: 'Saving…',
     saved: 'Branding saved successfully',
     saveFailed: 'Failed to save branding',
+    validationFailed: 'Check the highlighted setting',
     invalidHex: 'Must be a valid hex color',
     invalidImageUrl: 'Enter an HTTPS URL, data:image URL, or a branding upload path.',
     invalidGradient: 'Use CSS gradient layers only (linear, radial, or conic).',

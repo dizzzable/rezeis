@@ -387,6 +387,69 @@ export function createBrandingFormSchema(messages: BrandingFormValidationMessage
     }))
 }
 
+export type BrandingFormSchema = ReturnType<typeof createBrandingFormSchema>
+export type BrandingFormField = keyof BrandingFormDraft
+export type BrandingDirtyFields = Partial<Record<BrandingFormField, unknown>>
+
+export type BrandingDirtyPatchResult =
+  | {
+      readonly success: true
+      readonly data: Partial<BrandingFormData>
+      readonly fields: readonly BrandingFormField[]
+    }
+  | {
+      readonly success: false
+      readonly error: z.ZodError
+      readonly fields: readonly BrandingFormField[]
+    }
+
+export function getBrandingChangedFields(
+  values: BrandingFormDraft,
+  baseline: BrandingFormDraft,
+): BrandingDirtyFields {
+  const changed: BrandingDirtyFields = {}
+  for (const field of Object.keys(DEFAULT_BRANDING_DRAFT) as BrandingFormField[]) {
+    if (!areBrandingValuesEqual(values[field], baseline[field])) {
+      changed[field] = true
+    }
+  }
+  return changed
+}
+
+/**
+ * Validates and resolves only the top-level fields changed by the operator.
+ *
+ * The endpoint is a PATCH, so unchanged persisted settings must not be
+ * re-submitted. This is especially important for installations carrying
+ * legacy values that a newer client intentionally no longer accepts: those
+ * values can be edited independently, but cannot block applying a new theme.
+ */
+export function createBrandingDirtyPatch(input: {
+  readonly values: BrandingFormDraft
+  readonly dirtyFields: BrandingDirtyFields
+  readonly schema: BrandingFormSchema
+}): BrandingDirtyPatchResult {
+  const fields = Object.keys(input.dirtyFields).filter(
+    (field): field is BrandingFormField => field in DEFAULT_BRANDING_DRAFT,
+  )
+  const candidate: Record<string, unknown> = { ...DEFAULT_BRANDING_DRAFT }
+  for (const field of fields) {
+    candidate[field] = input.values[field]
+  }
+
+  const result = input.schema.safeParse(candidate)
+  if (!result.success) {
+    return { success: false, error: result.error, fields }
+  }
+
+  const data: Partial<BrandingFormData> = {}
+  const writableData = data as Record<string, unknown>
+  for (const field of fields) {
+    writableData[field] = result.data[field]
+  }
+  return { success: true, data, fields }
+}
+
 export function createInitialBrandingDraft(input?: Partial<BrandingFormDraft> | null): BrandingFormDraft {
   return {
     ...DEFAULT_BRANDING_DRAFT,
@@ -421,6 +484,38 @@ export function createInitialBrandingDraft(input?: Partial<BrandingFormDraft> | 
     navItems: Array.isArray(input?.navItems) ? input.navItems : DEFAULT_NAV_ITEMS,
     navGap: typeof input?.navGap === 'number' ? input.navGap : 2,
   }
+}
+
+function areBrandingValuesEqual(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return (
+      Array.isArray(left) &&
+      Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((value, index) => areBrandingValuesEqual(value, right[index]))
+    )
+  }
+  if (
+    typeof left !== 'object' ||
+    left === null ||
+    typeof right !== 'object' ||
+    right === null
+  ) {
+    return false
+  }
+  const leftRecord = left as Record<string, unknown>
+  const rightRecord = right as Record<string, unknown>
+  const leftKeys = Object.keys(leftRecord).sort()
+  const rightKeys = Object.keys(rightRecord).sort()
+  return (
+    leftKeys.length === rightKeys.length &&
+    leftKeys.every(
+      (key, index) =>
+        key === rightKeys[index] &&
+        areBrandingValuesEqual(leftRecord[key], rightRecord[key]),
+    )
+  )
 }
 
 function normalizeCornerRadiiDraft(
