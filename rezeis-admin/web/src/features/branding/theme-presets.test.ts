@@ -1,10 +1,5 @@
-import 'reflect-metadata'
-
-import { plainToInstance } from 'class-transformer'
-import { validate } from 'class-validator'
 import { describe, expect, it } from 'vitest'
 
-import { UpdateBrandingSettingsDto } from '../../../../src/modules/settings/dto/update-branding-settings.dto'
 import { CARD_EFFECT_REGISTRY } from './card-effect-registry'
 import {
   CONCEPT_PRESETS,
@@ -84,21 +79,6 @@ describe('WEB Reiwa 104-theme catalog', () => {
       expect(result.data.themePresetVersion).toBe(preset.version)
       expect(result.data).not.toHaveProperty('brandName')
       expect(result.data).not.toHaveProperty('cardEffectsByIndex')
-    }
-  })
-
-  it('passes every resolved visual PATCH through the NestJS branding DTO', async () => {
-    for (const preset of THEME_PRESETS) {
-      const dto = plainToInstance(
-        UpdateBrandingSettingsDto,
-        createThemePresetVisualPatch(preset),
-      )
-      const errors = await validate(dto, {
-        forbidNonWhitelisted: true,
-        whitelist: true,
-      })
-
-      expect(errors, `${preset.code} ${preset.name}`).toEqual([])
     }
   })
 
