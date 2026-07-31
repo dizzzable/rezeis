@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 import 'reflect-metadata';
 
 import { BadRequestException, ConflictException, ServiceUnavailableException } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 
 import { PaymentsRenewalCheckoutService } from '../src/modules/payments/services/payments-renewal-checkout.service';
 import { buildRenewalCheckoutFingerprint, fingerprint } from '../src/modules/payments/utils/checkout-fingerprint.util';
@@ -82,10 +83,16 @@ function build(options: {
   existing?: Record<string, unknown> | null;
   candidates?: Array<Record<string, unknown>>;
   priceRenewalItems?: () => Promise<typeof PRICED>;
+  assertRenewalPolicy?: (input: {
+    readonly subscriptionIds: readonly string[];
+    readonly targetPlanIds?: readonly string[];
+  }) => Promise<void>;
   paymentGatewayFindUnique?: () => Promise<Record<string, unknown> | null>;
   userFindUnique?: () => Promise<{ id: string } | null>;
   getInternalPlatformPolicy?: () => Promise<{ accessMode: string }>;
   providerCreateCheckout?: () => Promise<Record<string, unknown>>;
+  findFirst?: () => Promise<Record<string, unknown> | null>;
+  transactionError?: unknown;
   updateMany?: (args: { where: Record<string, unknown>; data: Record<string, unknown> }) => Promise<{ count: number }>;
   findUnique?: (args: { where: Record<string, unknown> }) => Promise<Record<string, unknown> | null>;
   update?: (args: { where: Record<string, unknown>; data: Record<string, unknown> }) => Promise<Record<string, unknown>>;
@@ -98,7 +105,7 @@ function build(options: {
     },
     user: { findUnique: options.userFindUnique ?? (async () => ({ id: 'user-1' })) },
     transaction: {
-      findFirst: async () => options.existing ?? null,
+      findFirst: options.findFirst ?? (async () => options.existing ?? null),
       findMany: async () => options.candidates ?? [],
       findUnique: options.findUnique ?? (async () => null),
       create: async (args: { data: Record<string, unknown> }) => {
@@ -113,8 +120,11 @@ function build(options: {
       })),
     },
     transactionItem: { createMany: async () => ({ count: 1 }) },
-    $transaction: async (cb: (tx: unknown) => Promise<unknown>) =>
-      cb({
+    $transaction: async (cb: (tx: unknown) => Promise<unknown>) => {
+      if (options.transactionError !== undefined) {
+        throw options.transactionError;
+      }
+      return cb({
         transaction: {
           create: async (args: { data: Record<string, unknown> }) => {
             created.push(args.data);
@@ -122,9 +132,13 @@ function build(options: {
           },
         },
         transactionItem: { createMany: async () => ({ count: 1 }) },
-      }),
+      });
+    },
   };
-  const renewal = { priceRenewalItems: options.priceRenewalItems ?? (async () => PRICED) };
+  const renewal = {
+    priceRenewalItems: options.priceRenewalItems ?? (async () => PRICED),
+    assertRenewalPolicy: options.assertRenewalPolicy ?? (async () => undefined),
+  };
   const provider = {
     createCheckout: async () => {
       providerCalls += 1;
@@ -178,7 +192,8 @@ describe('PaymentsRenewalCheckoutService idempotency (T-007)', () => {
     );
   });
 
-  it('replays a keyed draft before mutable gateway validation and repricing', async () => {
+  it('replays a keyed draft after source policy validation but before gateway validation and repricing', async () => {
+    let policyChecks = 0;
     const { service, created, providerCalls } = build({
       existing: draftRow({
         checkoutFingerprint: EXPECTED_FP,
@@ -188,6 +203,11 @@ describe('PaymentsRenewalCheckoutService idempotency (T-007)', () => {
       getInternalPlatformPolicy: async () => { throw new Error('policy lookup must not run'); },
       paymentGatewayFindUnique: async () => { throw new Error('gateway lookup must not run'); },
       priceRenewalItems: async () => { throw new Error('pricing must not run'); },
+      assertRenewalPolicy: async (input) => {
+        policyChecks += 1;
+        assert.deepStrictEqual(input.subscriptionIds, ['sub-1']);
+        assert.deepStrictEqual(input.targetPlanIds, ['plan-1']);
+      },
     });
 
     const result = await service.renewalCheckout(baseInput);
@@ -195,7 +215,76 @@ describe('PaymentsRenewalCheckoutService idempotency (T-007)', () => {
     assert.equal(result.checkoutUrl, 'https://pay/existing');
     assert.equal(created.length, 0);
     assert.equal(providerCalls(), 0);
+    assert.equal(policyChecks, 1);
   });
+
+  it('rejects an old idempotent checkout when the source is no longer renewable', async () => {
+    const { service, created, providerCalls } = build({
+      existing: draftRow({
+        checkoutFingerprint: EXPECTED_FP,
+        checkoutUrl: 'https://pay/existing',
+        planSnapshot: { renewalRequestFingerprint: EXPECTED_REQUEST_FP },
+      }),
+      assertRenewalPolicy: async () => {
+        throw new BadRequestException('TRIAL_NOT_RENEWABLE');
+      },
+      paymentGatewayFindUnique: async () => {
+        throw new Error('gateway lookup must not run');
+      },
+      priceRenewalItems: async () => {
+        throw new Error('pricing must not run');
+      },
+    });
+
+    await assert.rejects(
+      () => service.renewalCheckout(baseInput),
+      (error: unknown) =>
+        error instanceof BadRequestException && error.message === 'TRIAL_NOT_RENEWABLE',
+    );
+    assert.equal(created.length, 0);
+    assert.equal(providerCalls(), 0);
+  });
+
+  for (const policyFailure of [
+    { name: 'trial source', code: 'TRIAL_NOT_RENEWABLE' },
+    { name: 'trial target', code: 'TRIAL_PLAN_NOT_RENEWAL_TARGET' },
+  ]) {
+    it(`revalidates the P2002 winner and rejects replay for its ${policyFailure.name}`, async () => {
+      let lookups = 0;
+      let policyChecks = 0;
+      const winner = draftRow({
+        checkoutFingerprint: EXPECTED_FP,
+        checkoutUrl: 'https://pay/winner',
+        planSnapshot: { renewalRequestFingerprint: EXPECTED_REQUEST_FP },
+      });
+      const { service, created, providerCalls } = build({
+        findFirst: async () => {
+          lookups += 1;
+          return lookups === 3 ? winner : null;
+        },
+        transactionError: new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+          code: 'P2002',
+          clientVersion: 'test',
+        }),
+        assertRenewalPolicy: async (input) => {
+          policyChecks += 1;
+          assert.deepStrictEqual(input.subscriptionIds, ['sub-1']);
+          assert.deepStrictEqual(input.targetPlanIds, ['plan-1']);
+          throw new BadRequestException(policyFailure.code);
+        },
+      });
+
+      await assert.rejects(
+        () => service.renewalCheckout(baseInput),
+        (error: unknown) =>
+          error instanceof BadRequestException && error.message === policyFailure.code,
+      );
+      assert.equal(lookups, 3, 'the P2002 path reloads the concurrent winner');
+      assert.equal(policyChecks, 1, 'the concurrent winner must pass persisted renewal policy');
+      assert.equal(created.length, 0);
+      assert.equal(providerCalls(), 0);
+    });
+  }
 
   it('rejects a changed raw command under the same key before gateway lookup or repricing', async () => {
     const { service } = build({

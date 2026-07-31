@@ -76,6 +76,7 @@ export class UserDeletionService {
             const partnerWithdrawalCount = await tx.partnerWithdrawal.count({
               where: { partner: { userId } },
             });
+            const trialClaimCount = await tx.trialClaim.count({ where: { userId } });
 
             if (
               transactionCount > 0 ||
@@ -83,7 +84,8 @@ export class UserDeletionService {
               referralPointsExchangeCount > 0 ||
               referralRewardCount > 0 ||
               partnerTransactionCount > 0 ||
-              partnerWithdrawalCount > 0
+              partnerWithdrawalCount > 0 ||
+              trialClaimCount > 0
             ) {
               throw protectedHistoryConflict();
             }

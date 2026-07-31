@@ -5,6 +5,7 @@ import { BadRequestException } from '@nestjs/common';
 import {
   Currency,
   PaymentGatewayType,
+  PlanAvailability,
   PurchaseChannel,
   PurchaseType,
   TransactionStatus,
@@ -246,6 +247,7 @@ describe('PaymentsTransactionsService', () => {
             type: 'BOTH',
             tag: null,
             name: 'Starter',
+            availability: PlanAvailability.ALL,
             id: 'plan-1',
           },
         }),
@@ -370,6 +372,7 @@ function createEligibleQuote(): QuoteResult {
     selectedPlan: {
       id: 'plan-1',
       name: 'Starter',
+      availability: PlanAvailability.ALL,
       tag: null,
       type: 'BOTH',
       trafficLimit: 1024,
@@ -398,6 +401,7 @@ function createDraftSnapshot(purchaseType: PurchaseType): Record<string, unknown
   return {
     id: 'plan-1',
     name: 'Starter',
+    availability: PlanAvailability.ALL,
     tag: null,
     type: 'BOTH',
     trafficLimit: 1024,
@@ -418,6 +422,7 @@ interface QuoteResult {
   selectedPlan: {
     id: string;
     name: string;
+    availability: PlanAvailability;
     tag: string | null;
     type: string;
     trafficLimit: number | null;

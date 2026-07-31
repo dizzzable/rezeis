@@ -38,6 +38,7 @@ function createMergeMock(fx: MergeFixtures): { prisma: PrismaService; calls: Cal
   };
 
   const tx = {
+    $queryRaw: async () => [{ id: 'locked-user' }],
     user: {
       findUnique: async (a: { where: { id: string } }) => {
         if (a.where.id === (fx.source as { id?: string } | null)?.id) return fx.source ?? null;
@@ -81,6 +82,7 @@ function createMergeMock(fx: MergeFixtures): { prisma: PrismaService; calls: Cal
     userOAuthLink: { updateMany: async (a: Record<string, unknown>) => { rec('userOAuthLink', 'updateMany', a); return { count: 0 }; } },
     savedPaymentMethod: { updateMany: async (a: Record<string, unknown>) => { rec('savedPaymentMethod', 'updateMany', a); return { count: 0 }; } },
     paymentMethodSetup: { updateMany: async (a: Record<string, unknown>) => { rec('paymentMethodSetup', 'updateMany', a); return { count: 0 }; } },
+    trialClaim: { updateMany: async (a: Record<string, unknown>) => { rec('trialClaim', 'updateMany', a); return { count: 0 }; } },
     questCompletion: {
       findMany: async (a: { where: { userId: string } }) => {
         // Target lookup returns taken (questId, periodKey); source lookup
@@ -248,6 +250,7 @@ describe('AccountMergeService', () => {
     assert.ok(calls.some((c) => c.model === 'userOAuthLink' && c.op === 'updateMany'));
     assert.ok(calls.some((c) => c.model === 'savedPaymentMethod' && c.op === 'updateMany'));
     assert.ok(calls.some((c) => c.model === 'paymentMethodSetup' && c.op === 'updateMany'));
+    assert.ok(calls.some((c) => c.model === 'trialClaim' && c.op === 'updateMany'));
     assert.ok(calls.some((c) => c.model === 'questCompletion' && c.op === 'updateMany'));
     // Source user deleted.
     assert.ok(calls.some((c) => c.model === 'user' && c.op === 'delete'));

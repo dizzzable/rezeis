@@ -401,11 +401,10 @@ export class WebAuthService {
 
   /**
    * True when `userId` is an EMPTY Telegram shell that is safe to retire during
-   * a self-service link: it carries no material data. A trial-only shell IS
-   * empty (its trial subscription / grant are discarded with it). Anything that
-   * would block the `User` delete (`onDelete: Restrict` rows) or that belongs
-   * to someone else's ledger (partner chain) makes it non-empty → the operator
-   * must merge instead.
+   * a self-service link. A trial claim is durable eligibility history, so a
+   * trial-only shell is no longer empty. Anything that would block the `User`
+   * delete (`onDelete: Restrict` rows) or that belongs to someone else's ledger
+   * (partner chain) makes it non-empty → the operator must merge instead.
    */
   private async isEmptyShell(
     tx: Prisma.TransactionClient,
@@ -422,6 +421,7 @@ export class WebAuthService {
       partnerLedgerEntries,
       partnerReferralEdges,
       referralsGiven,
+      trialClaims,
     ] = await Promise.all([
       tx.webAccount.findUnique({ where: { userId }, select: { id: true } }),
       tx.transaction.count({ where: { userId } }),
@@ -433,6 +433,7 @@ export class WebAuthService {
       tx.partnerTransaction.count({ where: { referralUserId: userId } }),
       tx.partnerReferral.count({ where: { referralUserId: userId } }),
       tx.referral.count({ where: { referrerId: userId } }),
+      tx.trialClaim.count({ where: { userId } }),
     ]);
     return (
       webAccount === null &&
@@ -444,7 +445,8 @@ export class WebAuthService {
       referralPointsExchanges === 0 &&
       partnerLedgerEntries === 0 &&
       partnerReferralEdges === 0 &&
-      referralsGiven === 0
+      referralsGiven === 0 &&
+      trialClaims === 0
     );
   }
 

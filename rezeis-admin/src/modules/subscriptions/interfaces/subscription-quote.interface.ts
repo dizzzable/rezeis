@@ -1,7 +1,8 @@
-import { Currency, PaymentGatewayType, PurchaseChannel } from '@prisma/client';
+import { Currency, PaymentGatewayType, PlanAvailability, PurchaseChannel } from '@prisma/client';
 
 import { CatalogDiscountSource } from '../../plans/interfaces/plan-catalog.interface';
 import { TrafficLimitStrategyValue } from '../../plans/dto/traffic-limit-strategy.dto';
+import { TrialSettings } from '../../plans/utils/trial-settings.util';
 import { SubscriptionQuoteAction } from '../dto/subscription-quote.dto';
 
 export type SubscriptionQuoteWarningCode =
@@ -12,6 +13,8 @@ export type SubscriptionQuoteWarningCode =
   | 'TRIAL_UPGRADE_REQUIRED'
   | 'TRIAL_ALREADY_USED'
   | 'TRIAL_NOT_RENEWABLE'
+  | 'TRIAL_PLAN_NOT_RENEWAL_TARGET'
+  | 'SUBSCRIPTION_DISABLED_NOT_RENEWABLE'
   /** @deprecated Kept for compatibility with older Reiwa clients. */
   | 'TRIAL_FREE_NOT_RENEWABLE'
   | 'TRIAL_INVITED_ONLY'
@@ -38,6 +41,7 @@ export interface SubscriptionQuoteDurationInterface {
 export interface SubscriptionQuotePlanInterface {
   readonly id: string;
   readonly name: string;
+  readonly availability: PlanAvailability;
   readonly description: string | null;
   readonly tag: string | null;
   readonly type: string;
@@ -52,6 +56,8 @@ export interface SubscriptionQuotePlanInterface {
   readonly trafficLimitStrategy: TrafficLimitStrategyValue;
   readonly internalSquads: readonly string[];
   readonly externalSquad: string | null;
+  /** Frozen for paid-trial reservation; ignored for non-trial plans. */
+  readonly trialSettings: TrialSettings;
   readonly durations: readonly SubscriptionQuoteDurationInterface[];
 }
 

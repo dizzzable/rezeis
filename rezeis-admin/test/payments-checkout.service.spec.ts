@@ -216,6 +216,33 @@ describe('PaymentsCheckoutService', () => {
     assert.equal(state.transactionUpdates.length, 0)
   })
 
+  it('releases a paid-trial reservation when provider checkout creation fails', async () => {
+    const { service, state } = createService({
+      providerError: new ServiceUnavailableException('provider unavailable'),
+    })
+
+    await assert.rejects(
+      () =>
+        service.checkout({
+          userId: 'user-1',
+          purchaseType: PurchaseType.NEW,
+          planId: 'plan-1',
+          durationDays: 30,
+          gatewayType: PaymentGatewayType.YOOKASSA,
+          channel: PurchaseChannel.WEB,
+        }),
+      /provider unavailable/,
+    )
+
+    assert.equal(state.providerCreateCalls, 1)
+    assert.equal(
+      state.transactionUpdateMany.some((data) => data.status === TransactionStatus.FAILED),
+      true,
+    )
+    assert.equal(state.trialClaimUpdates.length, 1)
+    assert.equal(state.trialClaimUpdates[0]?.data.releaseReason, 'PROVIDER_CHECKOUT_CREATION_FAILED')
+  })
+
   it('normalizes provider failure diagnostics in payment status responses', async () => {
     const rawFailureReason =
       'provider failed https://pay.example/checkout/0194f4b6-7cc7-7ecb-9f62-123456789abc?token=raw-provider-token-secret providerUuid=provider-id-123 auth cookie subscriptionUrl configUrl'
@@ -586,6 +613,7 @@ function createService(input: {
   readonly transactionGatewayData?: Record<string, unknown>
   readonly transactionPlanSnapshot?: Record<string, unknown>
   readonly draftError?: Error
+  readonly providerError?: Error
   readonly accessMode?: 'PUBLIC' | 'INVITED' | 'PURCHASE_BLOCKED' | 'REG_BLOCKED' | 'RESTRICTED'
   readonly amount?: string
   readonly immediateClaimCount?: number
@@ -617,6 +645,10 @@ function createService(input: {
   const state = {
     transactionUpdates,
     transactionUpdateMany: [] as Record<string, unknown>[],
+    trialClaimUpdates: [] as Array<{
+      readonly where: Record<string, unknown>
+      readonly data: Record<string, unknown>
+    }>,
     providerCreateCalls: 0,
     applyCompletedCalls: 0,
     enqueueCalls: 0,
@@ -671,7 +703,7 @@ function createService(input: {
       },
       updateMany: async (args: { readonly data: Record<string, unknown> }) => {
         state.transactionUpdateMany.push(args.data)
-        if (input.immediateClaimCount === 0) {
+        if ('fulfilledAt' in args.data && input.immediateClaimCount === 0) {
           transaction.status = TransactionStatus.COMPLETED
           transaction.fulfilledAt = input.fulfilledAt ?? new Date()
           return { count: 0 }
@@ -680,6 +712,15 @@ function createService(input: {
         return { count: 1 }
       },
       findUniqueOrThrow: async () => transaction,
+    },
+    trialClaim: {
+      updateMany: async (args: {
+        readonly where: Record<string, unknown>
+        readonly data: Record<string, unknown>
+      }) => {
+        state.trialClaimUpdates.push(args)
+        return { count: 1 }
+      },
     },
     subscription: {
       findUnique: async (args: unknown) => {
@@ -701,8 +742,11 @@ function createService(input: {
       },
     },
   }
+  Object.assign(prismaService, {
+    $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback(prismaService),
+  })
   const paymentsTransactionsService = {
-    createDraft: async () => {
+    createCheckoutDraft: async () => {
       if (input.draftError !== undefined) {
         throw input.draftError
       }
@@ -721,6 +765,9 @@ function createService(input: {
   const paymentProviderExecutionService = {
     createCheckout: async () => {
       state.providerCreateCalls += 1
+      if (input.providerError !== undefined) {
+        throw input.providerError
+      }
       if (input.providerCheckout !== undefined) {
         return input.providerCheckout
       }

@@ -33,6 +33,7 @@ describe('AdminUserSubscriptionsController', () => {
       { enqueue: async (jobId: string) => enqueued.push(jobId) } as never,
       { warn: () => undefined } as never,
       {} as never,
+      {} as never,
     );
 
     const result = await controller.updateSubscription('legacy-subscription', {
@@ -72,6 +73,7 @@ describe('AdminUserSubscriptionsController', () => {
       {} as never,
       { enqueue: async () => undefined } as never,
       { warn: () => undefined } as never,
+      {} as never,
       {} as never,
     );
 
@@ -120,6 +122,7 @@ describe('AdminUserSubscriptionsController', () => {
       {} as never,
       {} as never,
       {} as never,
+      {} as never,
     );
 
     const result = await controller.linkRemnawaveProfile(
@@ -142,6 +145,7 @@ describe('AdminUserSubscriptionsController', () => {
     const controller = new AdminUserSubscriptionsController(
       {} as never,
       { getPanelUser: async () => { queried = true; return null; } } as never,
+      {} as never,
       {} as never,
       {} as never,
       {} as never,
@@ -183,6 +187,7 @@ describe('AdminUserSubscriptionsController', () => {
           description: 'reiwa_id: another-user',
         }),
       } as never,
+      {} as never,
       {} as never,
       {} as never,
       {} as never,

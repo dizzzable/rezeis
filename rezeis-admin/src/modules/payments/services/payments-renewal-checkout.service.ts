@@ -113,6 +113,7 @@ export class PaymentsRenewalCheckoutService {
             message: 'Idempotency key was already used for a different renewal request',
           });
         }
+        await this.assertPersistedRenewalPolicy(existing, resolvedUserId, input.subscriptionIds);
         const replay = this.replayOrConflict(existing, {
           checkoutFingerprint: existing.checkoutFingerprint,
           requestFingerprint,
@@ -128,9 +129,10 @@ export class PaymentsRenewalCheckoutService {
       }
     }
 
-    // Persisted keyed replay is intentionally independent of mutable runtime
-    // policy. A new checkout still passes the purchase gate before any gateway,
-    // pricing, draft, or provider side effect.
+    // Persisted keyed replay remains independent of mutable catalog pricing and
+    // gateway configuration, but it is never independent of source safety:
+    // trial/disabled subscriptions and trial targets are re-checked above.
+    // A new checkout still passes the purchase gate before any side effect.
     const policy = await this.settingsService.getInternalPlatformPolicy();
     const rejection = this.accessModeGuard.evaluate({
       gate: 'purchase.renewal',
@@ -200,6 +202,7 @@ export class PaymentsRenewalCheckoutService {
         ? await this.findByIdempotencyKey(priced.userId, idempotencyKey)
         : null;
     if (existing !== null) {
+      await this.assertPersistedRenewalPolicy(existing, priced.userId, input.subscriptionIds);
       const replay = this.replayOrConflict(existing, {
         checkoutFingerprint,
         requestFingerprint,
@@ -579,6 +582,11 @@ export class PaymentsRenewalCheckoutService {
       ) {
         const existing = await this.findByIdempotencyKey(priced.userId, idempotencyKey);
         if (existing !== null) {
+          await this.assertPersistedRenewalPolicy(
+            existing,
+            priced.userId,
+            priced.items.map((item) => item.subscriptionId),
+          );
           return {
             replay: this.replayOrConflict(existing, {
               checkoutFingerprint,
@@ -635,7 +643,26 @@ export class PaymentsRenewalCheckoutService {
         checkoutUrl: true,
         createdAt: true,
         checkoutFingerprint: true,
+        items: {
+          select: { subscriptionId: true, planId: true },
+        },
       },
+    });
+  }
+
+  private async assertPersistedRenewalPolicy(
+    existing: ExistingRenewalDraft,
+    userId: string,
+    requestedSubscriptionIds: readonly string[],
+  ): Promise<void> {
+    const persistedItems = existing.items ?? [];
+    await this.subscriptionRenewalService.assertRenewalPolicy({
+      identity: { userId },
+      subscriptionIds:
+        persistedItems.length > 0
+          ? persistedItems.map((item) => item.subscriptionId)
+          : requestedSubscriptionIds,
+      targetPlanIds: persistedItems.map((item) => item.planId),
     });
   }
 
@@ -777,6 +804,10 @@ interface ExistingRenewalDraft {
   readonly checkoutUrl: string | null;
   readonly createdAt: Date;
   readonly checkoutFingerprint: string | null;
+  readonly items?: readonly {
+    readonly subscriptionId: string;
+    readonly planId: string;
+  }[];
 }
 
 function buildRenewalRequestFingerprint(input: {

@@ -61,7 +61,11 @@ function build(overrides: Overrides = {}) {
         };
       },
     },
+    trialClaim: { updateMany: async () => ({ count: 0 }) },
   };
+  Object.assign(prismaService, {
+    $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback(prismaService),
+  });
 
   const settingsService = {
     getInternalPlatformPolicy: async () => ({ accessMode: 'PUBLIC', defaultCurrency: 'RUB' }),
@@ -71,7 +75,7 @@ function build(overrides: Overrides = {}) {
     evaluate: () => overrides.accessRejection ?? null,
   };
   const paymentsTransactionsService = {
-    createDraft: async () => {
+    createCheckoutDraft: async () => {
       calls.push('createDraft');
       return { id: 'tx-1', paymentId: 'pay-1', amount: draftAmount };
     },
@@ -132,7 +136,6 @@ describe('PartnerBalancePaymentService', () => {
       'createDraft',
       'debit:500',
       'fulfill',
-      'complete',
       'enqueue:job-1',
     ]);
   });

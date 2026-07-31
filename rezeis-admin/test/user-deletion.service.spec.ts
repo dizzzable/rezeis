@@ -19,6 +19,7 @@ interface FakeState {
   referralRewardCount: number;
   partnerTransactionCount: number;
   partnerWithdrawalCount: number;
+  trialClaimCount: number;
   deleteError: unknown;
   panelError: unknown;
   transactionError: unknown;
@@ -33,6 +34,7 @@ function buildService(overrides: Partial<FakeState> = {}) {
     referralRewardCount: 0,
     partnerTransactionCount: 0,
     partnerWithdrawalCount: 0,
+    trialClaimCount: 0,
     deleteError: null,
     panelError: null,
     transactionError: null,
@@ -74,6 +76,12 @@ function buildService(overrides: Partial<FakeState> = {}) {
       count: async () => {
         state.order.push('count:partner-withdrawal');
         return state.partnerWithdrawalCount;
+      },
+    },
+    trialClaim: {
+      count: async () => {
+        state.order.push('count:trial-claim');
+        return state.trialClaimCount;
       },
     },
     subscription: {
@@ -149,6 +157,7 @@ describe('UserDeletionService', () => {
       'count:referral-reward',
       'count:partner-transaction',
       'count:partner-withdrawal',
+      'count:trial-claim',
     ]);
   });
 
@@ -176,6 +185,14 @@ describe('UserDeletionService', () => {
     assert.equal(withdrawal.state.order.includes('delete:user'), false);
   });
 
+  it('preserves durable trial-claim history', async () => {
+    const { service, state } = buildService({ trialClaimCount: 1 });
+
+    await assertProtectedHistoryConflict(() => service.deleteUser('user-1'));
+
+    assert.equal(state.order.includes('delete:user'), false);
+  });
+
   it('deletes a clean local account before its snapshotted Remnawave profile', async () => {
     const { service, state } = buildService();
 
@@ -189,6 +206,7 @@ describe('UserDeletionService', () => {
       'count:referral-reward',
       'count:partner-transaction',
       'count:partner-withdrawal',
+      'count:trial-claim',
       'snapshot:profiles',
       'delete:user',
       'delete:panel:rw-1',

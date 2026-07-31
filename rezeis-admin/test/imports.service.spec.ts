@@ -135,6 +135,47 @@ describe('ImportsService', () => {
     await assert.rejects(() => service.rollback('import-1'), /newer payment activity/);
   });
 
+  it('removes trial claims before transactions and imported users during rollback', async () => {
+    const record = {
+      ...createImportRecord({ id: 'import-1', status: ImportStatus.COMMITTED }),
+      result: { rollback: { createdUserIds: ['user-1'] } },
+      committedAt: new Date('2026-04-25T12:00:00.000Z'),
+    };
+    const calls: string[] = [];
+    const service = new ImportsService({
+      importRecord: {
+        findUnique: async () => record,
+        update: async () => record,
+      },
+      $transaction: async (callback: (tx: unknown) => Promise<unknown>) =>
+        callback({
+          transaction: {
+            count: async () => 0,
+            deleteMany: async () => {
+              calls.push('transactions');
+              return { count: 0 };
+            },
+          },
+          trialClaim: {
+            deleteMany: async () => {
+              calls.push('trial-claims');
+              return { count: 1 };
+            },
+          },
+          user: {
+            deleteMany: async () => {
+              calls.push('users');
+              return { count: 1 };
+            },
+          },
+        }),
+    } as never);
+
+    await service.rollback('import-1');
+
+    assert.deepStrictEqual(calls, ['trial-claims', 'transactions', 'users']);
+  });
+
   it('blocks rollback when an import wrote history onto matched existing users', async () => {
     const record = {
       ...createImportRecord({ id: 'import-1', status: ImportStatus.COMMITTED }),

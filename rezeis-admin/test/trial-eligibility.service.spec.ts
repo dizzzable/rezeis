@@ -35,21 +35,15 @@ function build(opts: {
     },
     subscription: {
       count: async (args: { where: Record<string, unknown> }) => {
-        if ('isTrial' in args.where) {
-          // A consumed trial keeps counting after the user deletes it, because
-          // deletion is a soft delete. Pin the shape: adding a status filter
-          // here would hand the offer back to everyone who already spent their
-          // trial, and a stub that only checked `'isTrial' in where` would stay
-          // green through exactly that regression.
-          assert.deepEqual(
-            Object.keys(args.where).sort(),
-            ['isTrial', 'userId'],
-            'the trial claim count must not filter by subscription status',
-          );
-          return opts.trialSubscriptions ?? 0;
-        }
+        assert.deepEqual(args.where, {
+          userId: 'u1',
+          status: { in: ['ACTIVE', 'LIMITED'] },
+        });
         return opts.activeSubscriptions ?? 0;
       },
+    },
+    trialClaim: {
+      aggregate: async () => ({ _sum: { units: opts.trialSubscriptions ?? 0 } }),
     },
   } as unknown as PrismaService;
 
@@ -103,7 +97,7 @@ describe('trial eligibility', () => {
     );
   });
 
-  it('refuses a user who already consumed the trial, deleted subscription included', async () => {
+  it('refuses a user who already consumed the trial, even after the subscription is upgraded', async () => {
     // Deletion is a soft delete, so the row is still counted — a consumed trial
     // must stay consumed, otherwise the offer reappears after every deletion.
     const { service } = build({ trialPlan: PLAN_WITH_DURATION, trialSubscriptions: 1 });

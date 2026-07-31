@@ -26,6 +26,7 @@ import { InternalUserSessionInterface } from '../interfaces/internal-user-sessio
 import { buildUserReferenceWhere } from '../utils/user-reference.util';
 import { mapInternalUserSession, INTERNAL_USER_INCLUDE } from './internal-user.mappers';
 import { evaluateTrialClaim, readTrialSettings, TRIAL_CLAIM_LIMIT_MESSAGE } from '../../plans/utils/trial-settings.util';
+import { countCommittedTrialClaimUnits } from '../../subscriptions/services/trial-claim-ledger.util';
 import { isInvitedUser } from '../../plans/utils/trial-invite.util';
 
 /**
@@ -641,9 +642,7 @@ export class InternalUserEdgeService {
     }
 
     const [trialClaims, activeSubscriptions, invited, userRow] = await Promise.all([
-      this.prismaService.subscription.count({
-        where: { userId, isTrial: true },
-      }),
+      countCommittedTrialClaimUnits(this.prismaService, userId),
       this.prismaService.subscription.count({
         where: { userId, status: { in: ['ACTIVE', 'LIMITED'] } },
       }),

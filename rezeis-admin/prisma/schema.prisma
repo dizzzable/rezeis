@@ -119,6 +119,21 @@ enum TransactionStatus {
   FAILED
 }
 
+/// Durable lifecycle of one trial quota allocation. A reservation is created
+/// before a paid checkout can reach the provider and remains unresolved until
+/// a provider-terminal failure/cancel or successful fulfillment is known.
+enum TrialClaimStatus {
+  RESERVED
+  CONSUMED
+  RELEASED
+}
+
+enum TrialClaimSource {
+  FREE
+  PAID
+  LEGACY
+}
+
 enum PurchaseType {
   NEW
   RENEW
@@ -1097,6 +1112,7 @@ model User {
   currentSubscription     Subscription?            @relation("UserCurrentSubscription", fields: [currentSubscriptionId], references: [id], onDelete: SetNull)
   webAccount              WebAccount?              @relation("UserWebAccount")
   transactions            Transaction[]            @relation("UserTransactions")
+  trialClaims             TrialClaim[]             @relation("UserTrialClaims")
   notificationEvents      UserNotificationEvent[]  @relation("UserNotificationEvents")
   webPushSubscriptions    WebPushSubscription[]    @relation("UserWebPushSubscriptions")
   trialGrant              TrialGrant?              @relation("UserTrialGrant")
@@ -1126,8 +1142,9 @@ model User {
   @@map("users")
 }
 
-/// Single trial allocation per user — used as a hard guard so quote service
-/// can answer `hasUsedTrial` without scanning subscription history.
+/// Latest trial allocation marker per user. Retained for compatibility with
+/// existing admin/edge integrations; durable eligibility is enforced by the
+/// immutable TrialClaim ledger below.
 model TrialGrant {
   id        String   @id @default(cuid()) @map("id")
   userId    String   @unique @map("user_id")
@@ -1137,6 +1154,38 @@ model TrialGrant {
   user User @relation("UserTrialGrant", fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("trial_grants")
+}
+
+/// Durable trial quota ledger. CONSUMED rows are immutable audit history and
+/// survive a later upgrade/deletion of the subscription. Paid trials reserve a
+/// slot before any provider or balance side effect; only provider-confirmed
+/// terminal failure/cancel releases it. Local payment timeout never does.
+model TrialClaim {
+  id             String           @id @default(cuid()) @map("id")
+  userId         String           @map("user_id")
+  /// Attribution only. Eligibility intentionally counts globally per user.
+  planId         String?          @map("plan_id")
+  transactionId  String?          @unique @map("transaction_id")
+  subscriptionId String?          @unique @map("subscription_id")
+  source         TrialClaimSource @map("source")
+  status         TrialClaimStatus @map("status")
+  /// Normally one. Legacy backfill may aggregate an unknowable historical
+  /// allowance into one fail-closed row.
+  units          Int              @default(1) @map("units")
+  reservedAt     DateTime?        @map("reserved_at") @db.Timestamptz(3)
+  consumedAt     DateTime?        @map("consumed_at") @db.Timestamptz(3)
+  releasedAt     DateTime?        @map("released_at") @db.Timestamptz(3)
+  releaseReason  String?          @map("release_reason")
+  createdAt      DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime         @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  user         User          @relation("UserTrialClaims", fields: [userId], references: [id], onDelete: Restrict)
+  transaction  Transaction?  @relation("TransactionTrialClaim", fields: [transactionId], references: [id], onDelete: Restrict)
+  subscription Subscription? @relation("SubscriptionTrialClaim", fields: [subscriptionId], references: [id], onDelete: SetNull)
+
+  @@index([userId, status])
+  @@index([status, createdAt])
+  @@map("trial_claims")
 }
 
 // =============================================================================
@@ -1298,6 +1347,7 @@ model Subscription {
   effectiveProjection     SubscriptionEffectiveProjection? @relation("SubscriptionEffectiveProjection")
   deviceReductionPlans    DeviceReductionPlan[]            @relation("SubscriptionDeviceReductionPlans")
   entitlementIncidents    EntitlementIncident[]            @relation("SubscriptionEntitlementIncidents")
+  trialClaim              TrialClaim?                      @relation("SubscriptionTrialClaim")
 
   @@index([userId])
   @@index([status])
@@ -1573,7 +1623,7 @@ model Plan {
   allowedUserIds       String[]              @default([]) @map("allowed_user_ids")
   /// Trial-plan tunables, used only when `availability = TRIAL`. JSON shape:
   /// `{ maxClaims: number (>=1, how many times a user may claim the trial),
-  ///    free: boolean (free grant vs. paid checkout — paid is not yet wired),
+  ///    free: boolean (free grant vs. paid checkout through the normal NEW flow),
   ///    availabilityScope: 'ALL' | 'INVITED' (who may claim it) }`.
   /// Empty `{}` = defaults (maxClaims 1, free true, scope ALL).
   trialSettings        Json                  @default("{}") @map("trial_settings")
@@ -1685,6 +1735,7 @@ model Transaction {
   /// transaction as a combined renewal fulfilled item-by-item.
   items             TransactionItem[]  @relation("TransactionItems")
   addOnEntitlements AddOnEntitlement[] @relation("TransactionAddOnEntitlements")
+  trialClaim        TrialClaim?        @relation("TransactionTrialClaim")
 
   @@unique([userId, idempotencyKey])
   @@index([userId])

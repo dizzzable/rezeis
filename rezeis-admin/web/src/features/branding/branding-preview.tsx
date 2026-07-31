@@ -356,11 +356,9 @@ function resolvePreviewCardContrast(
 }
 
 function previewReadabilityZones(contrast: PreviewCardContrast): string {
-  const veil = contrast.veilOpacity
-  const edge = Math.min(0.84, veil + 0.12)
-  const artworkWindow = Math.max(0.035, veil * 0.28)
   const channels = contrast.veilChannels
-  return `linear-gradient(180deg, rgb(${channels} / ${edge}) 0%, rgb(${channels} / ${veil}) 24%, rgb(${channels} / ${artworkWindow}) 30%, rgb(${channels} / ${artworkWindow}) 35%, rgb(${channels} / ${veil}) 41%, rgb(${channels} / ${veil}) 82%, rgb(${channels} / ${edge}) 100%)`
+  const veil = Math.min(0.75, Math.max(0, contrast.veilOpacity))
+  return `linear-gradient(180deg, rgb(${channels} / ${veil}) 0%, rgb(${channels} / ${veil}) 100%)`
 }
 
 function parsePreviewHex(value: string, backdrop: PreviewRgb = PREVIEW_BLACK): PreviewRgb | null {
@@ -613,22 +611,21 @@ function PreviewSubscriptionCard({
       ),
     [Effect, effectProps, foundation, primaryFg, visual.effect, visual.gradient, visual.opacity],
   )
-  const localSupportStyle = Effect
-    ? { backgroundColor: contrast.supportBackground }
-    : undefined
-
   return (
     <div
       data-preview-subscription-card
       data-preview-card-foreground={
         contrast.foreground === '#0a0a0a' ? 'dark' : 'light'
       }
-      data-preview-card-support-background={contrast.supportBackground}
       className="relative isolate h-[160px] overflow-hidden p-4 [contain:paint]"
       style={{
         borderRadius: radius,
         color: contrast.foreground,
         boxShadow: `inset 0 0 0 1px ${toRgba(contrast.foreground, 0.1)}`,
+        textShadow:
+          contrast.foreground === '#0a0a0a'
+            ? '0 1px 1px rgba(255, 255, 255, 0.16)'
+            : '0 1px 2px rgba(0, 0, 0, 0.42)',
       }}
     >
       {/* Layer order mirrors the normal reiwa card frame. */}
@@ -654,9 +651,9 @@ function PreviewSubscriptionCard({
           }}
         />
       )}
-      {/* The selected effect owns an opaque palette surface. Keeping this
-          whole branch inside Suspense preserves the cheap theme-card fallback
-          until the lazy renderer has loaded. */}
+      {/* Reduced motion preserves the selected palette without starting the
+          infinite renderer. The live preview otherwise owns the same opaque
+          effect surface as reiwa. */}
       {Effect && reducedMotion && (
         <div
           aria-hidden="true"
@@ -704,15 +701,15 @@ function PreviewSubscriptionCard({
           </div>
         </Suspense>
       )}
-      {!Effect && (
-        <div
-          data-preview-card-layer="readability"
-          data-preview-card-readability="wcag-copy-zones"
-          data-preview-card-veil-opacity={contrast.veilOpacity}
-          className="pointer-events-none absolute inset-0"
-          style={{ background: previewReadabilityZones(contrast) }}
-        />
-      )}
+      <div
+        data-preview-card-layer="readability"
+        data-preview-card-readability="wcag-full-card-veil"
+        data-preview-card-artwork={Effect ? 'animated' : 'static'}
+        data-preview-card-veil-opacity={contrast.veilOpacity}
+        data-preview-card-veil-rgb={contrast.veilChannels}
+        className="pointer-events-none absolute inset-0"
+        style={{ background: previewReadabilityZones(contrast) }}
+      />
       {/* Watermark — operator-configurable glyph or custom image */}
       <CardLogoMark
         preset={cardLogo}
@@ -724,36 +721,21 @@ function PreviewSubscriptionCard({
       {/* Card content */}
       <div className="relative flex h-full flex-col justify-between">
         <div className="flex items-center justify-between">
-          <div
-            data-preview-card-local-support={Effect ? 'plan' : undefined}
-            className={Effect ? '-m-1 flex items-center gap-1.5 rounded-md px-1.5 py-1' : 'flex items-center gap-1.5'}
-            style={localSupportStyle}
-          >
+          <div className="flex items-center gap-1.5">
             <Wifi className="h-3.5 w-3.5 opacity-90" />
             <span className="text-[11px] font-semibold">{brandName}</span>
           </div>
           <span
-            data-preview-card-local-support={Effect ? 'status' : undefined}
             className="rounded-full px-2 py-0.5 text-[8px] font-bold uppercase backdrop-blur-md"
             style={{
-              backgroundColor:
-                localSupportStyle?.backgroundColor ??
-                toRgba(contrast.foreground, 0.16),
+              backgroundColor: toRgba(contrast.foreground, 0.16),
             }}
           >
             {t('brandingPage.sections.preview.statusLabel')}
           </span>
         </div>
 
-        <p
-          data-preview-card-profile-support
-          className="-mx-1 w-fit max-w-full truncate px-1 font-mono text-sm tracking-[0.18em]"
-          style={{
-            backgroundColor:
-              localSupportStyle?.backgroundColor ??
-              `rgb(${contrast.veilChannels} / ${contrast.veilOpacity})`,
-          }}
-        >
+        <p className="w-fit max-w-full truncate font-mono text-sm tracking-[0.18em]">
           usr_a1b2c3d4e5f6
         </p>
 
@@ -768,11 +750,7 @@ function PreviewSubscriptionCard({
             />
           </div>
           <div className="flex items-end justify-between">
-            <div
-              data-preview-card-local-support={Effect ? 'expiry' : undefined}
-              className={Effect ? '-m-1 rounded-md px-1.5 py-1' : undefined}
-              style={localSupportStyle}
-            >
+            <div>
               <p className="text-[10px] font-medium uppercase">
                 {t('brandingPage.sections.preview.remaining')}
               </p>
@@ -783,11 +761,7 @@ function PreviewSubscriptionCard({
                 {t('brandingPage.sections.preview.until', { date: '03/2026' })}
               </p>
             </div>
-            <div
-              data-preview-card-local-support={Effect ? 'device' : undefined}
-              className={Effect ? '-m-1 rounded-md px-1.5 py-1 text-right' : 'text-right'}
-              style={localSupportStyle}
-            >
+            <div className="text-right">
               <p className="text-[10px] font-medium uppercase">
                 {t('brandingPage.sections.preview.device')}
               </p>

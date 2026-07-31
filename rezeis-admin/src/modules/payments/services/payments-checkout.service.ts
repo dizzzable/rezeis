@@ -38,6 +38,9 @@ import { PaymentSubscriptionMutationService } from './payment-subscription-mutat
 import { PaymentsTransactionsService } from './payments-transactions.service';
 import { SavedPaymentMethodService } from './saved-payment-method.service';
 import { PaymentReconciliationService } from './payment-reconciliation.service';
+import { releasePaidTrialClaim } from '../../subscriptions/services/trial-claim-ledger.util';
+
+const PROVIDER_CREATION_CLAIM_PREFIX = '__CHECKOUT_PROVIDER_CREATE__:';
 
 @Injectable()
 export class PaymentsCheckoutService {
@@ -113,7 +116,7 @@ export class PaymentsCheckoutService {
       throw new BadRequestException('PAYMENT_GATEWAY_CHANNEL_UNSUPPORTED');
     }
 
-    const createdDraft = await this.paymentsTransactionsService.createDraft({
+    const createdDraft = await this.paymentsTransactionsService.createCheckoutDraft({
       userId,
       purchaseType: input.purchaseType,
       planId: input.planId,
@@ -189,6 +192,48 @@ export class PaymentsCheckoutService {
     }
 
     const planSnapshot = readTransactionPlanSnapshot(transaction);
+    const providerClaim = `${PROVIDER_CREATION_CLAIM_PREFIX}${transaction.paymentId}`;
+    const providerCreationClaim = await this.prismaService.transaction.updateMany({
+      where: {
+        id: transaction.id,
+        status: TransactionStatus.PENDING,
+        gatewayId: null,
+        checkoutUrl: null,
+      },
+      data: { gatewayId: providerClaim },
+    });
+    if (providerCreationClaim.count !== 1) {
+      const current = await this.prismaService.transaction.findUnique({
+        where: { id: transaction.id },
+      });
+      if (current !== null) {
+        const checkoutUrl = readCheckoutUrl(current);
+        if (checkoutUrl !== null) {
+          return mapCheckoutResponse({
+            transaction: current,
+            checkoutUrl,
+            providerMode: readProviderMode(current) ?? 'REDIRECT',
+          });
+        }
+        if (
+          current.status === TransactionStatus.COMPLETED ||
+          (typeof current.gatewayId === 'string' &&
+            current.gatewayId.length > 0 &&
+            !current.gatewayId.startsWith(PROVIDER_CREATION_CLAIM_PREFIX))
+        ) {
+          return mapCheckoutResponse({
+            transaction: current,
+            checkoutUrl: null,
+            providerMode: readProviderMode(current) ?? 'IMMEDIATE',
+          });
+        }
+      }
+      throw new ServiceUnavailableException({
+        code: 'PROVIDER_CHECKOUT_CREATION_UNRESOLVED',
+        message: 'Provider checkout creation is already claimed; awaiting reconciliation',
+      });
+    }
+
     const createProviderCheckout = async (
       chargedMethod: { readonly id: string; readonly providerMethodId: string } | null,
     ) =>
@@ -206,17 +251,23 @@ export class PaymentsCheckoutService {
         savePaymentMethod: input.savePaymentMethod,
         savePaymentMethodConsent: input.savePaymentMethodConsent,
       });
-    const providerCheckout =
-      typeof input.savedPaymentMethodId === 'string' && input.savedPaymentMethodId.length > 0
-        ? await this.savedPaymentMethodService.withActiveForCharge(
-            {
-              userId,
-              savedPaymentMethodId: input.savedPaymentMethodId,
-              gatewayType: input.gatewayType,
-            },
-            createProviderCheckout,
-          )
-        : await createProviderCheckout(null);
+    let providerCheckout: Awaited<ReturnType<PaymentProviderExecutionService['createCheckout']>>;
+    try {
+      providerCheckout =
+        typeof input.savedPaymentMethodId === 'string' && input.savedPaymentMethodId.length > 0
+          ? await this.savedPaymentMethodService.withActiveForCharge(
+              {
+                userId,
+                savedPaymentMethodId: input.savedPaymentMethodId,
+                gatewayType: input.gatewayType,
+              },
+              createProviderCheckout,
+            )
+          : await createProviderCheckout(null);
+    } catch (error: unknown) {
+      await this.failClaimedProviderCreation(transaction.id, providerClaim, error);
+      throw error;
+    }
 
     const updatedTransaction = await this.prismaService.transaction.update({
       where: { id: transaction.id },
@@ -230,9 +281,16 @@ export class PaymentsCheckoutService {
     if (isProviderCanceled(providerCheckout.providerStatus)) {
       // Terminal cancel first so a later autopay-disable failure cannot leave
       // the row stuck PENDING.
-      const canceledTransaction = await this.prismaService.transaction.update({
-        where: { id: transaction.id },
-        data: { status: TransactionStatus.CANCELED, gatewayData: providerCheckout.gatewayData as Prisma.InputJsonValue },
+      const canceledTransaction = await this.prismaService.$transaction(async (tx) => {
+        const canceled = await tx.transaction.update({
+          where: { id: transaction.id },
+          data: {
+            status: TransactionStatus.CANCELED,
+            gatewayData: providerCheckout.gatewayData as Prisma.InputJsonValue,
+          },
+        });
+        await releasePaidTrialClaim(tx, transaction.id, 'PROVIDER_TERMINAL_CANCELED');
+        return canceled;
       });
       await disablePermissionRevokedAutopay(
         this.savedPaymentMethodService,
@@ -302,6 +360,44 @@ export class PaymentsCheckoutService {
       checkoutUrl: providerCheckout.checkoutUrl,
       providerMode: providerCheckout.providerMode,
     });
+  }
+
+  /**
+   * A checkout request can fail after the provider receives it. The local
+   * draft is therefore terminal but still revivable by a late provider success;
+   * its paid-trial reservation is released so that a provider error cannot
+   * permanently exhaust the user's trial quota.
+   */
+  private async failClaimedProviderCreation(
+    transactionId: string,
+    providerClaim: string,
+    error: unknown,
+  ): Promise<void> {
+    try {
+      await this.prismaService.$transaction(async (tx) => {
+        const failed = await tx.transaction.updateMany({
+          where: {
+            id: transactionId,
+            status: TransactionStatus.PENDING,
+            gatewayId: providerClaim,
+          },
+          data: {
+            status: TransactionStatus.FAILED,
+            gatewayId: null,
+            gatewayData: {
+              failureReason: normalizePaymentProviderError(error),
+              providerCreateFailedAt: new Date().toISOString(),
+            } as Prisma.InputJsonValue,
+          },
+        });
+        if (failed.count === 1) {
+          await releasePaidTrialClaim(tx, transactionId, 'PROVIDER_CHECKOUT_CREATION_FAILED');
+        }
+      });
+    } catch {
+      // Preserve the original provider error; reconciliation can still resolve
+      // an ambiguous external outcome through the transaction payment id.
+    }
   }
 
   public async getPaymentStatus(input: {

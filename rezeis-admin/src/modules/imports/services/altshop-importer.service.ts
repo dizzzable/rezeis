@@ -13,11 +13,17 @@ import {
   ReferralRewardType,
   SubscriptionStatus,
   TransactionStatus,
+  TrialClaimSource,
 } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { loginPolicy } from '../../auth/utils/login-policy.util';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
+import {
+  lockTrialClaimUser,
+  recordConsumedLegacyTrialAvailability,
+  recordConsumedTrialSubscription,
+} from '../../subscriptions/services/trial-claim-ledger.util';
 import { ImportSummary } from '../interfaces/import-summary.interface';
 import {
   buildPanelLookup,
@@ -289,6 +295,16 @@ export class AltshopImporterService {
           if (outcome === 'panel-owner-mismatch') conflicts.panelOwnerMismatch += 1;
         }
 
+        if (sourceUser.is_trial_available === false) {
+          await this.prismaService.$transaction(async (tx) => {
+            await lockTrialClaimUser(tx, user.id);
+            await recordConsumedLegacyTrialAvailability(tx, {
+              userId: user.id,
+              consumedAt: this.parseOptionalDate(sourceUser.created_at) ?? new Date(),
+            });
+          });
+        }
+
         for (const transaction of transactionsByTelegramId.get(sourceUser.telegram_id) ?? []) {
           const result = await this.importTransaction(user.id, transaction);
           if (result.id) transactionIdsBySourceId.set(transaction.id, result.id);
@@ -502,11 +518,24 @@ export class AltshopImporterService {
       planSnapshot: this.buildSubscriptionPlanSnapshot(source, importRecordId, existing?.planSnapshot),
     };
     if (existing) {
-      await this.prismaService.subscription.update({ where: { id: existing.id }, data: subscriptionData });
+      if (source.is_trial === true) {
+        await this.prismaService.$transaction(async (tx) => {
+          await lockTrialClaimUser(tx, userId);
+          await tx.subscription.update({ where: { id: existing.id }, data: subscriptionData });
+          await recordConsumedTrialSubscription(tx, {
+            userId,
+            planId: null,
+            subscriptionId: existing.id,
+            source: TrialClaimSource.LEGACY,
+            consumedAt: this.parseOptionalDate(source.created_at) ?? new Date(),
+          });
+        });
+      } else {
+        await this.prismaService.subscription.update({ where: { id: existing.id }, data: subscriptionData });
+      }
       return 'updated';
     }
-    const created = await this.prismaService.subscription.create({
-      data: {
+    const createData: Prisma.SubscriptionCreateInput = {
         user: { connect: { id: userId } },
         remnawaveId,
         status,
@@ -519,8 +548,21 @@ export class AltshopImporterService {
         externalSquad: fresh ? fresh.externalSquad : nonEmpty(source.external_squad),
         planSnapshot: this.buildSubscriptionPlanSnapshot(source, importRecordId),
         startedAt: this.parseOptionalDate(source.created_at) ?? new Date(),
-      },
-    });
+    };
+    const created = source.is_trial === true
+      ? await this.prismaService.$transaction(async (tx) => {
+          await lockTrialClaimUser(tx, userId);
+          const subscription = await tx.subscription.create({ data: createData });
+          await recordConsumedTrialSubscription(tx, {
+            userId,
+            planId: null,
+            subscriptionId: subscription.id,
+            source: TrialClaimSource.LEGACY,
+            consumedAt: this.parseOptionalDate(source.created_at) ?? new Date(),
+          });
+          return subscription;
+        })
+      : await this.prismaService.subscription.create({ data: createData });
     const user = await this.prismaService.user.findUnique({
       where: { id: userId },
       select: { currentSubscriptionId: true },

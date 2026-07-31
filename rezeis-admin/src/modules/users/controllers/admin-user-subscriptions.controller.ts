@@ -43,6 +43,7 @@ import { extractRequestMetadata } from '../../auth/utils/request-metadata.util';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
 import { SubscriptionDeletionService } from '../../subscriptions/services/subscription-deletion.service';
+import { SubscriptionMutationsService } from '../../subscriptions/services/subscription-mutations.service';
 import { SystemEventsService, EVENT_TYPES } from '../../../common/services/system-events.service';
 import { buildPlanSnapshot } from '../utils/plan-snapshot.util';
 
@@ -58,6 +59,7 @@ export class AdminUserSubscriptionsController {
     private readonly profileSyncQueueService: ProfileSyncQueueService,
     private readonly systemEvents: SystemEventsService,
     private readonly subscriptionDeletionService: SubscriptionDeletionService,
+    private readonly subscriptionMutationsService: SubscriptionMutationsService,
   ) {}
 
   // ── Subscription Mutations ─────────────────────────────────────────────
@@ -400,6 +402,25 @@ export class AdminUserSubscriptionsController {
     const plan = await this.prismaService.plan.findUnique({ where: { id: body.planId } });
     if (!plan) throw new NotFoundException('Plan not found');
 
+    if (body.isTrial === true) {
+      const granted = await this.subscriptionMutationsService.grantTrial({
+        userId: user.id,
+        planId: plan.id,
+        durationDays: body.durationDays,
+      });
+      const subscription = await this.prismaService.subscription.findUniqueOrThrow({
+        where: { id: granted.subscriptionId },
+      });
+      await this.auditLog(admin, req, 'user.subscription.given', {
+        userId: user.id,
+        subscriptionId: subscription.id,
+        planId: plan.id,
+        durationDays: body.durationDays,
+        isTrial: true,
+      });
+      return subscription;
+    }
+
     const startedAt = new Date();
     const expiresAt = new Date(startedAt.getTime() + body.durationDays * 24 * 60 * 60 * 1000);
 
@@ -407,7 +428,7 @@ export class AdminUserSubscriptionsController {
       data: {
         userId: user.id,
         status: SubscriptionStatus.ACTIVE,
-        isTrial: body.isTrial ?? false,
+        isTrial: false,
         planSnapshot: buildPlanSnapshot(plan),
         trafficLimit: plan.trafficLimit,
         deviceLimit: plan.deviceLimit,
@@ -448,31 +469,19 @@ export class AdminUserSubscriptionsController {
     const duration = trialPlan.durations[0];
     if (!duration) throw new BadRequestException('Trial plan has no duration configured');
 
-    const startedAt = new Date();
-    const expiresAt = new Date(startedAt.getTime() + duration.days * 24 * 60 * 60 * 1000);
-
-    const subscription = await this.prismaService.subscription.create({
-      data: {
-        userId: user.id,
-        status: SubscriptionStatus.ACTIVE,
-        isTrial: true,
-        planSnapshot: buildPlanSnapshot(trialPlan),
-        trafficLimit: trialPlan.trafficLimit,
-        deviceLimit: trialPlan.deviceLimit,
-        internalSquads: trialPlan.internalSquads,
-        externalSquad: trialPlan.externalSquad,
-        startedAt,
-        expiresAt,
-      },
+    const granted = await this.subscriptionMutationsService.grantTrial({
+      userId: user.id,
+      planId: trialPlan.id,
+      durationDays: duration.days,
+    });
+    const subscription = await this.prismaService.subscription.findUniqueOrThrow({
+      where: { id: granted.subscriptionId },
     });
 
     await this.auditLog(admin, req, 'user.trial.granted', {
       userId: user.id,
       subscriptionId: subscription.id,
     });
-
-    // Enqueue sync-job so the worker creates the Remnawave profile.
-    await this.enqueueSubscriptionSync(subscription.id, subscription.remnawaveId);
 
     return subscription;
   }

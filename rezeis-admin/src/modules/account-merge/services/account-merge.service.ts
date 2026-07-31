@@ -13,6 +13,7 @@ import {
 } from '../../../common/services/system-events.service';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
 import { AccountMergeInput, AccountMergeResult } from '../interfaces/account-merge.interface';
+import { lockTrialClaimUser } from '../../subscriptions/services/trial-claim-ledger.util';
 
 type Tx = Prisma.TransactionClient;
 
@@ -94,6 +95,12 @@ export class AccountMergeService {
       if (source === null) throw new NotFoundException('Source account not found');
       if (target === null) throw new NotFoundException('Target account not found');
 
+      // Serialize quota admission/claim writers on both identities. Stable id
+      // order prevents two opposite merge attempts from deadlocking.
+      for (const userId of [source.id, target.id].sort()) {
+        await lockTrialClaimUser(tx, userId);
+      }
+
       const srcBalance = source.partner?.balance ?? 0;
 
       // 1. Free the source's unique scalars up-front so the later target set
@@ -126,6 +133,10 @@ export class AccountMergeService {
         tx.userOAuthLink.updateMany({ where: { userId: source.id }, data: { userId: target.id } }),
         tx.savedPaymentMethod.updateMany({ where: { userId: source.id }, data: { userId: target.id } }),
         tx.paymentMethodSetup.updateMany({ where: { userId: source.id }, data: { userId: target.id } }),
+        // Trial quota is global per surviving identity. Preserve every
+        // CONSUMED/RESERVED/RELEASED audit row; transaction/subscription ids
+        // remain stable and globally unique, so this re-point cannot collide.
+        tx.trialClaim.updateMany({ where: { userId: source.id }, data: { userId: target.id } }),
       ]);
 
       // 3. Dedupe-then-repoint the userId-unique collections.

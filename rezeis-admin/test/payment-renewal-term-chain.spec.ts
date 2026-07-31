@@ -4,6 +4,150 @@ import { describe, it } from 'node:test';
 import { PaymentSubscriptionMutationService } from '../src/modules/payments/services/payment-subscription-mutation.service';
 
 describe('PaymentSubscriptionMutationService renewal term queue', () => {
+  for (const blockedSource of [
+    { name: 'free trial', status: 'ACTIVE', isTrial: true },
+    { name: 'paid trial', status: 'EXPIRED', isTrial: true },
+    { name: 'disabled subscription', status: 'DISABLED', isTrial: false },
+  ]) {
+    it(`rejects single renewal fulfillment for a ${blockedSource.name}`, async () => {
+      let updates = 0;
+      let lockQueries = 0;
+      const tx = {
+        $queryRaw: async (query: unknown) => {
+          assertForUpdate(query);
+          lockQueries += 1;
+          return [{ id: 'sub-1' }];
+        },
+        subscription: {
+          findUnique: async () => ({
+            id: 'sub-1',
+            status: blockedSource.status,
+            isTrial: blockedSource.isTrial,
+            expiresAt: new Date('2026-08-01T00:00:00.000Z'),
+            remnawaveId: 'rw-1',
+          }),
+          update: async () => {
+            updates += 1;
+            return {};
+          },
+        },
+      };
+      const prisma = {
+        $transaction: async (callback: (client: unknown) => Promise<unknown>) => callback(tx),
+      };
+      const service = new PaymentSubscriptionMutationService(
+        prisma as never,
+        { info: () => undefined } as never,
+        {} as never,
+        {} as never,
+        {} as never,
+      );
+      const renew = (
+        service as unknown as {
+          renewSubscriptionFromPayment(input: {
+            transaction: unknown;
+            purchasedPlan: unknown;
+            selectedDurationDays: number;
+          }): Promise<unknown>;
+        }
+      ).renewSubscriptionFromPayment.bind(service);
+
+      await assert.rejects(() =>
+        renew({
+          transaction: {
+            id: 'tx-1',
+            paymentId: 'pay-1',
+            subscriptionId: 'sub-1',
+          },
+          purchasedPlan: { id: 'plan-1', availability: 'ALL' },
+          selectedDurationDays: 30,
+        }),
+      );
+      assert.equal(updates, 0);
+      assert.equal(lockQueries, 1, 'source policy must run after an unconditional row lock');
+    });
+  }
+
+  it('uses checkout-time ALL availability when the live plan later becomes TRIAL', async () => {
+    const expiry = new Date('2026-08-01T00:00:00.000Z');
+    let updateData: Record<string, unknown> | null = null;
+    let lockQueries = 0;
+    const tx = {
+      $queryRaw: async (query: unknown) => {
+        assertForUpdate(query);
+        lockQueries += 1;
+        return [{ id: 'sub-1' }];
+      },
+      subscription: {
+        findUnique: async () => ({
+          id: 'sub-1',
+          status: 'ACTIVE',
+          isTrial: false,
+          expiresAt: expiry,
+          remnawaveId: 'rw-1',
+        }),
+        update: async ({ data }: { data: Record<string, unknown> }) => {
+          updateData = data;
+          return { id: 'sub-1', remnawaveId: 'rw-1', expiresAt: data.expiresAt };
+        },
+      },
+      profileSyncJob: { create: async () => ({ id: 'job-1', subscriptionId: 'sub-1' }) },
+      transaction: { update: async () => undefined },
+    };
+    const prisma = { $transaction: async (callback: (client: unknown) => unknown) => callback(tx) };
+    const service = new PaymentSubscriptionMutationService(
+      prisma as never,
+      { info: () => undefined } as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+    const renew = (
+      service as unknown as {
+        renewSubscriptionFromPayment(input: {
+          transaction: unknown;
+          purchasedPlan: unknown;
+          selectedDurationDays: number;
+        }): Promise<unknown>;
+      }
+    ).renewSubscriptionFromPayment.bind(service);
+
+    await renew({
+      transaction: {
+        id: 'tx-1',
+        paymentId: 'pay-1',
+        subscriptionId: 'sub-1',
+        planSnapshot: { availability: 'ALL', selectedDurationDays: 30 },
+        gatewayType: 'YOOKASSA',
+        amount: '10',
+        currency: 'USD',
+        userId: 'user-1',
+        purchaseType: 'RENEW',
+      },
+      purchasedPlan: {
+        id: 'plan-1',
+        availability: 'TRIAL',
+        name: 'Plan',
+        description: null,
+        tag: null,
+        type: 'BOTH',
+        trafficLimit: 1024,
+        deviceLimit: 1,
+        trafficLimitStrategy: 'NO_RESET',
+        internalSquads: [],
+        externalSquad: null,
+      },
+      selectedDurationDays: 30,
+    });
+
+    assert.equal(lockQueries, 1);
+    assert.ok(updateData);
+    assert.equal(
+      (updateData.expiresAt as Date).getTime(),
+      expiry.getTime() + 30 * 86_400_000,
+    );
+  });
+
   it('appends a distinct term after the latest scheduled tail instead of reusing it', async () => {
     const activeEndsAt = new Date('2026-08-01T00:00:00.000Z');
     const scheduledEndsAt = new Date('2026-08-31T00:00:00.000Z');
@@ -202,3 +346,11 @@ describe('PaymentSubscriptionMutationService renewal term queue', () => {
     }
   });
 });
+
+function assertForUpdate(query: unknown): void {
+  const statement =
+    typeof query === 'object' && query !== null && 'sql' in query
+      ? String((query as { readonly sql: unknown }).sql)
+      : String(query);
+  assert.match(statement.replace(/\s+/g, ' '), /\bFOR\s+UPDATE\b/i);
+}

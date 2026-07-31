@@ -25,6 +25,7 @@ import { PaymentSubscriptionMutationService } from './payment-subscription-mutat
 import { MoyNalogQueueService } from './moy-nalog-queue.service';
 import { AdConversionService } from '../../advertising/services/ad-conversion.service';
 import { SavedPaymentMethodService } from './saved-payment-method.service';
+import { releasePaidTrialClaim } from '../../subscriptions/services/trial-claim-ledger.util';
 @Injectable()
 export class PaymentReconciliationService {
   private readonly logger = new Logger(PaymentReconciliationService.name);
@@ -123,6 +124,16 @@ export class PaymentReconciliationService {
       // webhook arrives — then we revive the transaction and fulfil it so a
       // genuinely-paid-but-late payment is never lost.
       if (isTerminalTransaction(transaction) && nextStatus !== TransactionStatus.COMPLETED) {
+        if (
+          nextStatus === TransactionStatus.CANCELED ||
+          nextStatus === TransactionStatus.FAILED
+        ) {
+          await releasePaidTrialClaim(
+            this.prismaService,
+            transaction.id,
+            `PROVIDER_TERMINAL_${nextStatus}`,
+          );
+        }
         await this.paymentWebhookInboxService.markProcessed(event.id);
         return;
       }
@@ -147,16 +158,28 @@ export class PaymentReconciliationService {
         event.rawPayload,
         transaction.gatewayId,
       );
-      await this.prismaService.transaction.update({
-        where: { id: transaction.id },
-        data: {
-          status: nextStatus,
-          ...(gatewayIdBackfill !== null ? { gatewayId: gatewayIdBackfill } : {}),
-          gatewayData: mergeGatewayData(transaction.gatewayData, {
-            providerStatus: event.eventStatus,
-            reconciledAt: new Date().toISOString(),
-          }) as Prisma.InputJsonValue,
-        },
+      await this.prismaService.$transaction(async (tx) => {
+        await tx.transaction.update({
+          where: { id: transaction.id },
+          data: {
+            status: nextStatus,
+            ...(gatewayIdBackfill !== null ? { gatewayId: gatewayIdBackfill } : {}),
+            gatewayData: mergeGatewayData(transaction.gatewayData, {
+              providerStatus: event.eventStatus,
+              reconciledAt: new Date().toISOString(),
+            }) as Prisma.InputJsonValue,
+          },
+        });
+        if (
+          nextStatus === TransactionStatus.CANCELED ||
+          nextStatus === TransactionStatus.FAILED
+        ) {
+          await releasePaidTrialClaim(
+            tx,
+            transaction.id,
+            `PROVIDER_TERMINAL_${nextStatus}`,
+          );
+        }
       });
 
       if (nextStatus === TransactionStatus.COMPLETED) {

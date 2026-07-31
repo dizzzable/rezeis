@@ -18,6 +18,7 @@ import { isGatewayAvailableForChannel } from '../utils/purchase-gateway-policy.u
 import { PLAN_INCLUDE, PlanRecord } from '../utils/plan-record.util';
 import { getSupportedPaymentAssets } from '../utils/supported-payment-assets.util';
 import { readTrialSettings } from '../utils/trial-settings.util';
+import { countCommittedTrialClaimUnits } from '../../subscriptions/services/trial-claim-ledger.util';
 import { PricingService } from './pricing.service';
 
 interface CatalogUserContext {
@@ -112,9 +113,7 @@ export class PlanCatalogService {
             select: { id: true },
           })
         : Promise.resolve(null),
-      this.prismaService.subscription.count({
-        where: { userId, isTrial: true },
-      }),
+      countCommittedTrialClaimUnits(this.prismaService, userId),
     ]);
     return {
       user,

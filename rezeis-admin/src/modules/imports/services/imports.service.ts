@@ -88,9 +88,11 @@ export class ImportsService {
 
     // Delete in one transaction. `Transaction.user` is `onDelete: Restrict`,
     // so a created user that carries imported transactions can't be removed
-    // until those transactions are gone — delete them first (their line items
-    // cascade), then the users. Subscriptions, web accounts, profile-sync
-    // jobs, referrals and partner rows all cascade from `User`.
+    // until those transactions are gone. Trial claims also intentionally
+    // restrict user deletion, so this explicit import rollback removes its
+    // claims first, then transactions (whose line items cascade), then users.
+    // Subscriptions, web accounts, profile-sync jobs, referrals and partner
+    // rows all cascade from `User`.
     //
     // Remnawave panel profiles are intentionally left untouched: they are the
     // SOURCE of the import (the backup/panel we read from), not data this
@@ -115,6 +117,7 @@ export class ImportsService {
             'Rollback blocked: imported users have newer payment activity. Resolve them manually instead.',
           );
         }
+        await tx.trialClaim.deleteMany({ where: { userId: { in: createdUserIds } } });
         await tx.transaction.deleteMany({ where: { userId: { in: createdUserIds } } });
         const deleted = await tx.user.deleteMany({ where: { id: { in: createdUserIds } } });
         deletedUsers = deleted.count;

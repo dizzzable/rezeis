@@ -113,6 +113,7 @@ export const EVENT_TYPES = {
   SUBSCRIPTION_DELETED: 'subscription.deleted',
   SUBSCRIPTION_SYNCED: 'subscription.synced',
   SUBSCRIPTION_TRIAL_GRANTED: 'subscription.trial_granted',
+  TRIAL_CLAIM_LATE_SUCCESS_OVER_CAP: 'trial.claim_late_success_over_cap',
   SUBSCRIPTION_DEVICE_REVOKED: 'user_hwid_revoked',
 
   // Payment

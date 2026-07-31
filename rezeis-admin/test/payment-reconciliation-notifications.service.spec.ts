@@ -75,6 +75,7 @@ type ReconciliationTransactionRecord = {
   updatedAt: Date;
 };
 type ReconciliationPrismaDouble = {
+  $transaction: <T>(callback: (tx: ReconciliationPrismaDouble) => Promise<T>) => Promise<T>;
   paymentWebhookEvent: {
     findUnique: (args: PaymentWebhookFindUniqueArgs) => Promise<ReconciliationWebhookEventRecord | null>;
   };
@@ -87,6 +88,9 @@ type ReconciliationPrismaDouble = {
       where: { id: string; fulfilledAt?: unknown };
       data: Record<string, unknown>;
     }) => Promise<{ count: number }>;
+  };
+  trialClaim: {
+    updateMany: (args: unknown) => Promise<{ count: number }>;
   };
   subscription: {
     findUnique: (args: unknown) => Promise<{
@@ -546,7 +550,7 @@ describe('PaymentReconciliationService reconciliation side effects', () => {
 });
 
 function createService(state: ReturnType<typeof createState>): PaymentReconciliationService {
-  const prismaService: ReconciliationPrismaDouble = {
+  const prismaService = {
     paymentWebhookEvent: {
       findUnique: async (_args: PaymentWebhookFindUniqueArgs) => state.event,
     },
@@ -597,6 +601,7 @@ function createService(state: ReturnType<typeof createState>): PaymentReconcilia
         });
       },
     },
+    trialClaim: { updateMany: async () => ({ count: 0 }) },
     // Refund revocation surface (D3). Without these the revocation branch threw
     // inside its own try/catch and every refund test passed while never
     // exercising it.
@@ -613,6 +618,11 @@ function createService(state: ReturnType<typeof createState>): PaymentReconcilia
         return { id: 'sync-job-1' };
       },
     },
+  } as Omit<ReconciliationPrismaDouble, '$transaction'>;
+  const transactionalPrisma: ReconciliationPrismaDouble = {
+    ...prismaService,
+    $transaction: async <T>(callback: (tx: ReconciliationPrismaDouble) => Promise<T>): Promise<T> =>
+      callback(transactionalPrisma),
   };
   const paymentWebhookInboxService: ReconciliationInboxDouble = {
     incrementReconciliationAttempts: async (eventId: string) => {
@@ -676,7 +686,7 @@ function createService(state: ReturnType<typeof createState>): PaymentReconcilia
     },
   };
   return new PaymentReconciliationService(
-    prismaService as unknown as PrismaService,
+    transactionalPrisma as unknown as PrismaService,
     paymentWebhookInboxService as unknown as PaymentWebhookInboxService,
     paymentSubscriptionMutationService as unknown as PaymentSubscriptionMutationService,
     paymentOpsAlertService as unknown as PaymentOpsAlertService,

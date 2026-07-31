@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { BadRequestException } from '@nestjs/common';
-import { Currency, PaymentGatewayType, Prisma } from '@prisma/client';
+import { Currency, PaymentGatewayType, PlanAvailability, Prisma } from '@prisma/client';
 import fc from 'fast-check';
 
 import { SubscriptionRenewalService } from '../src/modules/subscriptions/services/subscription-renewal.service';
@@ -72,7 +72,8 @@ describe('SubscriptionRenewalService.priceRenewalItems', () => {
       trafficLimitStrategy: 'NO_RESET',
       internalSquads: [],
       externalSquad: null,
-      snapshotVersion: 1,
+      snapshotVersion: 2,
+      availability: PlanAvailability.ALL,
       amount: '10.00',
       currency: Currency.USD,
       gatewayType: GATEWAY,
@@ -447,6 +448,7 @@ function createService(
   const buildPlan = (id: string, days: readonly number[]) => ({
     id,
     name: `Plan ${id}`,
+    availability: PlanAvailability.ALL,
     tag: null,
     type: 'BOTH',
     icon: `icon-${id}`,

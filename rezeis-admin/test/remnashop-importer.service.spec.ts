@@ -110,6 +110,54 @@ describe('RemnashopImporterService', () => {
     );
   });
 
+  it('preserves an unavailable donor trial marker across import retries', async () => {
+    const claims: Array<{ readonly create: Record<string, unknown> }> = [];
+    let consumedClaimExists = false;
+    const service = new RemnashopImporterService(
+      {
+        user: { findUnique: async () => ({ id: 'user-1' }), update: async () => undefined },
+        subscription: { findFirst: async () => null },
+        referral: { findUnique: async () => null },
+        partnerReferral: { findFirst: async () => null },
+        referralReward: { findUnique: async () => null },
+        transaction: { findUnique: async () => null },
+        importRecord: { create: async () => ({ id: 'import-1' }) },
+        $transaction: async (callback: (tx: unknown) => Promise<unknown>) =>
+          callback({
+            $queryRaw: async () => [{ id: 'user-1' }],
+            trialClaim: {
+              findFirst: async () => (consumedClaimExists ? { id: 'existing-claim' } : null),
+              upsert: async (input: { readonly create: Record<string, unknown> }) => {
+                claims.push(input);
+                consumedClaimExists = true;
+              },
+            },
+          }),
+      } as never,
+      { getAllPanelUsers: async () => [] } as never,
+    );
+
+    const input = {
+      mode: 'import' as const,
+      createdBy: null,
+      users: [user(100000001, false)],
+      subscriptions: [],
+    };
+    await service.run(input);
+    await service.run(input);
+
+    assert.equal(claims.length, 1);
+    assert.deepEqual(claims[0]?.create, {
+      id: 'legacy-trial-unavailable:user-1',
+      userId: 'user-1',
+      planId: null,
+      source: 'LEGACY',
+      status: 'CONSUMED',
+      units: 1,
+      consumedAt: new Date('2026-01-01T00:00:00.000Z'),
+    });
+  });
+
   it('keeps a direct referral out when the target user already has partner attribution', async () => {
     let result: Record<string, unknown> | null = null;
     const users = new Map([[100000001n, 'referrer'], [100000002n, 'referred']]);
@@ -244,7 +292,7 @@ describe('RemnashopImporterService', () => {
   });
 });
 
-function user(telegramId: number) {
+function user(telegramId: number, isTrialAvailable = true) {
   return {
     id: telegramId - 100000000,
     telegram_id: telegramId,
@@ -259,7 +307,7 @@ function user(telegramId: number) {
     is_blocked: false,
     is_bot_blocked: false,
     is_rules_accepted: true,
-    is_trial_available: true,
+    is_trial_available: isTrialAvailable,
     created_at: '2026-01-01T00:00:00.000Z',
     updated_at: '2026-01-01T00:00:00.000Z',
   };

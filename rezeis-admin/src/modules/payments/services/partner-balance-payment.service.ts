@@ -11,7 +11,6 @@ import {
   PaymentGatewayType,
   PurchaseChannel,
   PurchaseType,
-  TransactionStatus,
 } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
@@ -22,6 +21,7 @@ import { SettingsService } from '../../settings/services/settings.service';
 import { InternalPaymentCheckoutInterface } from '../interfaces/internal-payment-checkout.interface';
 import { PaymentSubscriptionMutationService } from './payment-subscription-mutation.service';
 import { PaymentsTransactionsService } from './payments-transactions.service';
+import { releasePaidTrialClaim } from '../../subscriptions/services/trial-claim-ledger.util';
 
 export interface PartnerBalancePaymentInput {
   readonly userId?: string;
@@ -114,7 +114,7 @@ export class PartnerBalancePaymentService {
     // 6. Price the purchase in the balance currency (shared quote pipeline).
     //    Throws PAYMENT_DRAFT_QUOTE_NOT_ELIGIBLE when the plan has no price in
     //    that currency or the purchase isn't allowed.
-    const draft = await this.paymentsTransactionsService.createDraft({
+    const draft = await this.paymentsTransactionsService.createCheckoutDraft({
       userId: user.id,
       purchaseType: input.purchaseType,
       planId: input.planId,
@@ -128,9 +128,19 @@ export class PartnerBalancePaymentService {
 
     const amountMinor = toExactMinorUnits(draft.amount.toString());
     if (amountMinor === null) {
+      await releasePaidTrialClaim(
+        this.prismaService,
+        draft.id,
+        'PARTNER_BALANCE_INVALID_AMOUNT_PRE_DEBIT',
+      );
       throw new BadRequestException('PARTNER_BALANCE_INVALID_AMOUNT');
     }
     if (partner.balance < amountMinor) {
+      await releasePaidTrialClaim(
+        this.prismaService,
+        draft.id,
+        'PARTNER_BALANCE_INSUFFICIENT_PRE_DEBIT',
+      );
       throw new BadRequestException({
         code: 'INSUFFICIENT_PARTNER_BALANCE',
         message: 'Partner balance is insufficient for this purchase.',
@@ -144,6 +154,11 @@ export class PartnerBalancePaymentService {
       data: { balance: { decrement: amountMinor } },
     });
     if (debit.count === 0) {
+      await releasePaidTrialClaim(
+        this.prismaService,
+        draft.id,
+        'PARTNER_BALANCE_RACE_LOST_PRE_DEBIT',
+      );
       throw new BadRequestException({
         code: 'INSUFFICIENT_PARTNER_BALANCE',
         message: 'Partner balance is insufficient for this purchase.',
@@ -156,7 +171,12 @@ export class PartnerBalancePaymentService {
       where: { id: draft.id },
     });
     if (transactionRow === null) {
-      await this.restoreBalance(partner.id, amountMinor);
+      await this.restoreBalanceAndReleaseTrial(
+        partner.id,
+        amountMinor,
+        draft.id,
+        'PARTNER_BALANCE_DRAFT_MISSING_ROLLED_BACK',
+      );
       throw new NotFoundException('Transaction draft not found');
     }
     // Post-fulfilment hooks are intentionally NOT run here: this is paid from a
@@ -165,24 +185,36 @@ export class PartnerBalancePaymentService {
     // the customer paid, and paying partner commission on a balance spend would
     // recycle commission already earned. Whether such a purchase should count as
     // advertising revenue is a product decision, not a bug fix.
+    let syncJobs;
     try {
-      const { syncJobs } =
-        await this.paymentSubscriptionMutationService.applyCompletedTransaction(transactionRow);
-      await this.prismaService.transaction.update({
-        where: { id: draft.id },
-        data: { status: TransactionStatus.COMPLETED },
-      });
-      for (const syncJob of syncJobs) {
-        await this.profileSyncQueueService.enqueue(syncJob.id);
-      }
+      ({ syncJobs } =
+        await this.paymentSubscriptionMutationService.applyCompletedTransaction(transactionRow));
     } catch (err: unknown) {
-      await this.restoreBalance(partner.id, amountMinor);
+      await this.restoreBalanceAndReleaseTrial(
+        partner.id,
+        amountMinor,
+        draft.id,
+        'PARTNER_BALANCE_FULFILLMENT_ROLLED_BACK',
+      );
       this.logger.error(
         `Partner-balance payment fulfillment failed for user ${user.id}: ${
           err instanceof Error ? err.message : String(err)
         }`,
       );
       throw err;
+    }
+    // From here entitlement + paid-trial claim are durably committed. Never
+    // restore balance after this boundary: a status/queue hiccup is recoverable,
+    // while refunding would give the user a live subscription for free.
+    for (const syncJob of syncJobs) {
+      try {
+        await this.profileSyncQueueService.enqueue(syncJob.id);
+      } catch (err: unknown) {
+        this.logger.warn(
+          `Partner-balance sync enqueue failed for transaction ${draft.id} ` +
+            `(sweep will recover): ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }
 
     this.events.info(
@@ -207,10 +239,24 @@ export class PartnerBalancePaymentService {
     };
   }
 
-  private async restoreBalance(partnerId: string, amountMinor: number): Promise<void> {
-    await this.prismaService.partner
-      .update({ where: { id: partnerId }, data: { balance: { increment: amountMinor } } })
-      .catch((): void => undefined);
+  private async restoreBalanceAndReleaseTrial(
+    partnerId: string,
+    amountMinor: number,
+    transactionId: string,
+    releaseReason: string,
+  ): Promise<boolean> {
+    try {
+      await this.prismaService.$transaction(async (tx) => {
+        await tx.partner.update({
+          where: { id: partnerId },
+          data: { balance: { increment: amountMinor } },
+        });
+        await releasePaidTrialClaim(tx, transactionId, releaseReason);
+      });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private async resolveUser(input: PartnerBalancePaymentInput): Promise<{

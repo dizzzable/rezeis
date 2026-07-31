@@ -4,11 +4,18 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { PlanAvailability, Prisma, SubscriptionStatus } from '@prisma/client';
+import {
+  PlanAvailability,
+  Prisma,
+  SubscriptionStatus,
+  TrialClaimSource,
+  TrialClaimStatus,
+} from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { readTrialSettings, TRIAL_CLAIM_LIMIT_MESSAGE } from '../../plans/utils/trial-settings.util';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
+import { countCommittedTrialClaimUnits } from './trial-claim-ledger.util';
 
 interface ToggleStatusInput {
   readonly subscriptionId: string;
@@ -152,17 +159,26 @@ export class SubscriptionMutationsService {
     // counts). Defaults to 1 for non-trial plans / legacy data.
     const maxClaims =
       plan.availability === PlanAvailability.TRIAL ? readTrialSettings(plan.trialSettings).maxClaims : 1;
-    const priorClaims = await this.prismaService.subscription.count({
-      where: { userId: input.userId, isTrial: true },
-    });
-    if (priorClaims >= maxClaims) {
-      throw new BadRequestException(TRIAL_CLAIM_LIMIT_MESSAGE);
-    }
-
     const now = new Date();
     const expiresAt = new Date(now.getTime() + input.durationDays * 24 * 60 * 60 * 1000);
 
     const result = await this.prismaService.$transaction(async (tx) => {
+      // Serialize trial claims per user. The count and create must share the
+      // same row lock; otherwise two concurrent requests can both observe
+      // maxClaims - 1 and create one subscription each.
+      const lockedUser = await tx.$queryRaw<readonly { readonly id: string }[]>(Prisma.sql`
+        SELECT "id"
+        FROM "users"
+        WHERE "id" = ${input.userId}
+        FOR UPDATE
+      `);
+      if (lockedUser.length !== 1) {
+        throw new NotFoundException('User not found');
+      }
+      const priorClaims = await countCommittedTrialClaimUnits(tx, input.userId);
+      if (priorClaims >= maxClaims) {
+        throw new BadRequestException(TRIAL_CLAIM_LIMIT_MESSAGE);
+      }
       const subscription = await tx.subscription.create({
         data: {
           userId: input.userId,
@@ -175,6 +191,17 @@ export class SubscriptionMutationsService {
           externalSquad: plan.externalSquad,
           startedAt: now,
           expiresAt,
+        },
+      });
+      await tx.trialClaim.create({
+        data: {
+          userId: input.userId,
+          planId: input.planId,
+          subscriptionId: subscription.id,
+          source: TrialClaimSource.FREE,
+          status: TrialClaimStatus.CONSUMED,
+          units: 1,
+          consumedAt: now,
         },
       });
       // `TrialGrant.userId` is unique — upsert so repeat claims (maxClaims > 1)

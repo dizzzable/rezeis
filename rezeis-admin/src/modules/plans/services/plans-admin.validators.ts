@@ -8,13 +8,12 @@ import { ArchivedPlanRenewModeValue } from '../utils/archived-plan-renew-mode.ut
 
 import { NormalizedPlanWriteInput } from './plans-admin.normalizers';
 
-const ACTIVE_PUBLIC_AVAILABILITIES: ReadonlySet<PlanAvailability> = new Set([
+const ASSIGNABLE_TRANSITION_AVAILABILITIES: ReadonlySet<PlanAvailability> = new Set([
   PlanAvailability.ALL,
   PlanAvailability.NEW,
   PlanAvailability.EXISTING,
   PlanAvailability.INVITED,
   PlanAvailability.ALLOWED,
-  PlanAvailability.TRIAL,
 ]);
 
 /**
@@ -151,6 +150,17 @@ export class PlansAdminValidators {
     readonly planId: string | null;
     readonly input: NormalizedPlanWriteInput;
   }): Promise<void> {
+    if (input.input.availability === PlanAvailability.TRIAL && input.planId !== null) {
+      const currentPlan = await this.prismaService.plan.findUnique({
+        where: { id: input.planId },
+        select: { availability: true },
+      });
+      if (currentPlan !== null && currentPlan.availability !== PlanAvailability.TRIAL) {
+        throw new BadRequestException(
+          'Existing non-trial plans cannot be converted to TRIAL; create a dedicated trial plan.',
+        );
+      }
+    }
     if (
       input.input.availability !== PlanAvailability.TRIAL ||
       !input.input.isActive ||
@@ -210,12 +220,12 @@ export class PlansAdminValidators {
         (plan) =>
           !plan.isActive ||
           plan.isArchived ||
-          !ACTIVE_PUBLIC_AVAILABILITIES.has(plan.availability),
+          !ASSIGNABLE_TRANSITION_AVAILABILITIES.has(plan.availability),
       )
       .map((plan) => plan.id);
     if (invalidIds.length > 0) {
       throw new BadRequestException(
-        `Replacement and upgrade plans must be active public plans: ${invalidIds.join(', ')}`,
+        `Replacement and upgrade plans must be active non-trial public plans: ${invalidIds.join(', ')}`,
       );
     }
   }

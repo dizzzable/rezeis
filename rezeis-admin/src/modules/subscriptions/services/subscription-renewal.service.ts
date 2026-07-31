@@ -2,6 +2,7 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import {
   Currency,
   PaymentGatewayType,
+  PlanAvailability,
   Prisma,
   PurchaseChannel,
   SubscriptionStatus,
@@ -67,6 +68,57 @@ export class SubscriptionRenewalService {
     private readonly subscriptionQuoteService: SubscriptionQuoteService,
     private readonly addOnEligibilityService: AddOnEligibilityService,
   ) {}
+
+  /**
+   * Re-checks the immutable renewal policy without repricing. Keyed checkout
+   * replays call this before returning a persisted payment link, so a draft
+   * created before a subscription became a trial/disabled row cannot bypass
+   * the same policy enforced by quote creation.
+   */
+  public async assertRenewalPolicy(input: {
+    readonly identity: RenewalIdentity;
+    readonly subscriptionIds: readonly string[];
+    readonly targetPlanIds?: readonly string[];
+  }): Promise<void> {
+    const userId = await this.resolveUserId(input.identity);
+    const subscriptionIds = [...new Set(input.subscriptionIds)];
+    const subscriptions = await this.prismaService.subscription.findMany({
+      where: {
+        userId,
+        id: { in: subscriptionIds },
+        status: { not: SubscriptionStatus.DELETED },
+      },
+      select: { id: true, status: true, isTrial: true },
+    });
+    if (subscriptions.length !== subscriptionIds.length) {
+      throw new NotFoundException('RENEWAL_SUBSCRIPTION_NOT_FOUND');
+    }
+    if (subscriptions.some((subscription) => subscription.isTrial)) {
+      throw new BadRequestException('TRIAL_NOT_RENEWABLE');
+    }
+    if (
+      subscriptions.some(
+        (subscription) => subscription.status === SubscriptionStatus.DISABLED,
+      )
+    ) {
+      throw new BadRequestException('SUBSCRIPTION_DISABLED_NOT_RENEWABLE');
+    }
+
+    const targetPlanIds = [...new Set(input.targetPlanIds ?? [])];
+    if (targetPlanIds.length === 0) {
+      return;
+    }
+    const trialTarget = await this.prismaService.plan.findFirst({
+      where: {
+        id: { in: targetPlanIds },
+        availability: PlanAvailability.TRIAL,
+      },
+      select: { id: true },
+    });
+    if (trialTarget !== null) {
+      throw new BadRequestException('TRIAL_PLAN_NOT_RENEWAL_TARGET');
+    }
+  }
 
   /**
    * Lists the user's renewable subscriptions, each priced against the given
@@ -175,7 +227,8 @@ export class SubscriptionRenewalService {
         quote.amount === null ||
         quote.currency === null ||
         quote.planId === null ||
-        quote.durationDays === null
+        quote.durationDays === null ||
+        quote.targetPlan === null
       ) {
         throw new BadRequestException('RENEWAL_ITEM_NOT_PRICEABLE');
       }
@@ -208,7 +261,8 @@ export class SubscriptionRenewalService {
           trafficLimitStrategy: quote.targetPlan?.trafficLimitStrategy ?? 'NO_RESET',
           internalSquads: quote.targetPlan?.internalSquads ?? [],
           externalSquad: quote.targetPlan?.externalSquad ?? null,
-          snapshotVersion: 1,
+          snapshotVersion: 2,
+          availability: quote.targetPlan.availability,
           amount: quote.amount,
           currency: quote.currency,
           gatewayType: input.gatewayType,

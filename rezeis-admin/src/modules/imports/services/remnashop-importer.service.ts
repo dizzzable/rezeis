@@ -11,10 +11,16 @@ import {
   ReferralRewardType,
   SubscriptionStatus,
   TransactionStatus,
+  TrialClaimSource,
 } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
+import {
+  lockTrialClaimUser,
+  recordConsumedLegacyTrialAvailability,
+  recordConsumedTrialSubscription,
+} from '../../subscriptions/services/trial-claim-ledger.util';
 import { ImportSummary } from '../interfaces/import-summary.interface';
 import {
   buildPanelLookup,
@@ -281,6 +287,16 @@ export class RemnashopImporterService {
           if (subResult === 'panel-owner-mismatch') conflictCounts.panelOwnerMismatch += 1;
         }
 
+        if (remnashopUser.is_trial_available === false) {
+          await this.prismaService.$transaction(async (tx) => {
+            await lockTrialClaimUser(tx, userId);
+            await recordConsumedLegacyTrialAvailability(tx, {
+              userId,
+              consumedAt: this.parseOptionalDate(remnashopUser.created_at) ?? new Date(),
+            });
+          });
+        }
+
         // Historical rows are imported for audit only: no checkout, payment
         // provider or subscription fulfillment code is invoked here.
         const userTransactions = transactionsByTelegramId.get(remnashopUser.telegram_id) ?? [];
@@ -517,15 +533,31 @@ export class RemnashopImporterService {
       };
 
       if (existing) {
-        await this.prismaService.subscription.update({
-          where: { id: existing.id },
-          data: subscriptionData,
-        });
+        if (sub.is_trial) {
+          await this.prismaService.$transaction(async (tx) => {
+            await lockTrialClaimUser(tx, userId);
+            await tx.subscription.update({
+              where: { id: existing.id },
+              data: subscriptionData,
+            });
+            await recordConsumedTrialSubscription(tx, {
+              userId,
+              planId: null,
+              subscriptionId: existing.id,
+              source: TrialClaimSource.LEGACY,
+              consumedAt: this.parseOptionalDate(sub.created_at) ?? new Date(),
+            });
+          });
+        } else {
+          await this.prismaService.subscription.update({
+            where: { id: existing.id },
+            data: subscriptionData,
+          });
+        }
         return 'updated';
       }
 
-      const newSub = await this.prismaService.subscription.create({
-        data: {
+      const createData: Prisma.SubscriptionCreateInput = {
           user: { connect: { id: userId } },
           remnawaveId: sub.user_remna_id,
           status,
@@ -538,8 +570,21 @@ export class RemnashopImporterService {
           internalSquads,
           externalSquad,
           planSnapshot: this.buildSubscriptionPlanSnapshot(sub, importRecordId),
-        },
-      });
+      };
+      const newSub = sub.is_trial
+        ? await this.prismaService.$transaction(async (tx) => {
+            await lockTrialClaimUser(tx, userId);
+            const created = await tx.subscription.create({ data: createData });
+            await recordConsumedTrialSubscription(tx, {
+              userId,
+              planId: null,
+              subscriptionId: created.id,
+              source: TrialClaimSource.LEGACY,
+              consumedAt: this.parseOptionalDate(sub.created_at) ?? new Date(),
+            });
+            return created;
+          })
+        : await this.prismaService.subscription.create({ data: createData });
 
       // No ProfileSyncJob: import is READ-ONLY toward Remnawave (the truth) —
       // it never pushes the backup's possibly-stale state back, and gone/expired

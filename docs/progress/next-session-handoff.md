@@ -1,6 +1,6 @@
 # Next Session Handoff — Rezeis Remediation
 
-Updated: 2026-07-30
+Updated: 2026-07-31
 
 ## User Context
 
@@ -41,7 +41,7 @@ These existed before this handoff. Do not overwrite or delete them unless explic
 
 ## Current Gate Snapshot
 
-Generated: 2026-07-30T18:48:02.485Z (checks not re-run; previous observed results preserved)
+Generated: 2026-07-31T16:50:56.830Z (checks not re-run; previous observed results preserved)
 
 Run these from `V:\REZEIS_ADMIN_RUID_USER\rezeis` or the listed subdirectory.
 
@@ -50,7 +50,7 @@ Run these from `V:\REZEIS_ADMIN_RUID_USER\rezeis` or the listed subdirectory.
 | Backend Prisma generate | `npm run prisma:generate` in `rezeis-admin` | Pass |
 | Backend typecheck | `npm run typecheck` in `rezeis-admin` | Pass |
 | Backend lint | `npm run lint` in `rezeis-admin` | Pass |
-| Backend tests | `npm test` in `rezeis-admin` | Pass: 513 tests |
+| Backend tests | `npm test` in `rezeis-admin` | Pass: 1908 tests |
 | Backend maintained tests | `npm run test:maintained` in `rezeis-admin` | Pass: 423 tests (336 core + 22 admin-surfaces + 65 email-linking) |
 | Backend admin surfaces tests | `npm run test:maintained:admin-surfaces` in `rezeis-admin` | Pass: 23 tests |
 | Backend admin auth tests | `node --require ts-node/register --test test/admin-auth.service.spec.ts test/auth.controller.spec.ts test/internal-admin.controller.spec.ts test/current-admin.decorator.spec.ts test/current-internal-request.decorator.spec.ts` in `rezeis-admin` | Pass: 22 tests (5 files) |
@@ -81,10 +81,24 @@ Run these from `V:\REZEIS_ADMIN_RUID_USER\rezeis` or the listed subdirectory.
 | Backend email-linking tests | `node --require ts-node/register --test test/linking.service.spec.ts test/linking.controller.spec.ts test/internal-user.service.spec.ts test/internal-user-linked-web-account-sign-in.spec.ts test/complete-web-account-email-verification.dto.spec.ts` in `rezeis-admin` | Pass: 65 tests |
 | Backend audit | `npm audit` in `rezeis-admin` | Pass: found 0 vulnerabilities |
 | Web typecheck | `npx tsc -p tsconfig.app.json --noEmit --incremental false` in `rezeis-admin/web` | Pass |
-| Web tests | `npm test` in `rezeis-admin/web` | Pass: 12 files, 65 tests |
-| Web lint | `npm run lint` in `rezeis-admin/web` | Pass, 26 warnings |
+| Web tests | `npm test` in `rezeis-admin/web` | Pass: 69 files, 327 tests |
+| Web lint | `npm run lint` in `rezeis-admin/web` | Pass, 31 pre-existing warnings |
 | Web build | `npm run build` in `rezeis-admin/web` | Pass |
 | Web audit | `npm audit` in `rezeis-admin/web` | Pass: found 0 vulnerabilities |
+
+## Codex Trial Ledger Continuation
+
+The active working tree contains the Codex trial-ledger continuation: a durable `TrialClaim` ledger is now wired through free and paid trial eligibility, checkout reservations, fulfillment, terminal-payment release, renewal policy, import/merge handling, and migration of legacy trial evidence.
+
+The final lifecycle audit found and resolved an account-deletion bypass: trial claims now restrict user deletion; the explicit deletion service refuses users with claim history; Telegram self-service linking does not retire a trial-bearing shell; and the explicit import rollback deletes its trial claims before their restricted transactions and users. This preserves eligibility history outside the one intentional rollback path.
+
+Follow-up audit fixes: checkout provider-creation is now fenced per transaction. On a provider-create exception, the fenced draft becomes `FAILED` and its paid-trial reservation is released; a late provider success can still revive and fulfill that transaction through the existing reconciliation path. Both donor importers now turn `is_trial_available=false` into one deterministic legacy consumed claim under the user lock, including after an earlier trial was upgraded and no imported subscription remains marked trial.
+
+Verification on 2026-07-31: `npm run prisma:generate`, `npm run typecheck`, and the first focused trial/payment/deletion suite passed (88 tests across imports, checkout, transactions, balance payment, free-trial serialization, user deletion, and web authentication). The follow-up provider/import suite passed 54 tests; focused ESLint and `git diff --check` passed.
+
+Release verification for `v0.9.6.80`: full backend `npm test` passed 1908 tests, full web `npm test` passed 327 tests across 69 files, web typecheck passed, backend `npm run lint` passed with zero warnings after removing the two dead symbols left by the ledger refactor (`TransactionStatus` import in `partner-balance-payment.service.ts`, `readSnapshotTrialSettings` in `payments-transactions.service.ts`), and web `npm run lint` reported only its 31 pre-existing warnings with none in the changed branding files.
+
+Known P2 gaps still not covered by dedicated tests: a full late/replayed provider-success state-machine test around `TRIAL_CLAIM_LATE_SUCCESS_OVER_CAP`, a concurrency test for simultaneous free-claim grants, and an account-merge assertion that trial history survives the merge. The production behavior is implemented; only the proving tests are missing.
 
 ## Recommended First Slice
 
@@ -188,7 +202,7 @@ Historical P0.3 triage notes retained for context:
 - Root CI now runs full backend `npm test` as a blocking backend test signal.
 - Backend tests are now trustworthy enough for CI. Real regressions around env parsing, safe exception output, payment diagnostics, payment transaction list/draft behavior, push subscription/delivery behavior, provider checkout failure redaction, payment reconciliation side effects, webhook queue failure bounds, Remnawave node status redaction, internal platform policy behavior, current settings behavior, health diagnostic redaction, current promocodes/referrals behavior, current payment gateway defaults, plans unarchive/update normalization, profile-sync queue/processor behavior, current email verification dispatch validation, current email-linking duplicate/attempt/revoke-sanitization behavior, current web-auth behavior, current password hashing, request correlation/log sanitization, runtime API/worker scripts, API docs exposure, shutdown lifecycle logging, BigInt JSON serialization, bounded outbound HTTP defaults, and HTTP runtime middleware were fixed or reverified in current slices.
 - Previous stale specs were deleted only after confirming the runtime contract was removed: old metrics modules, old user-activity queue/bot/event modules, old web-registration settings, old web-auth challenge/recovery/property contracts, old internal-user password recovery/reset endpoints, old Telegram password recovery delivery service, old settings notification-delivery retry methods, old dedicated worker module graph, old profile-sync executor/admin ops surface, old job observability/metrics modules, old `EmailVerificationService` contracts, old cache-backed linking code properties, duplicate old linking email controller specs, removed governance module specs, and removed internal-device-provisioning controller specs.
-- Latest full-suite run passes: 513 tests. P0.4 audit triage is closed: backend audit passes after overriding Prisma dev-tooling `@hono/node-server` to `1.19.13`, and web audit passes after overriding transitive `node-fetch` to `2.7.0` while keeping `face-api.js` for `GridScan` webcam tracking.
+- Latest full-suite run passes: 1908 tests. P0.4 audit triage is closed: backend audit passes after overriding Prisma dev-tooling `@hono/node-server` to `1.19.13`, and web audit passes after overriding transitive `node-fetch` to `2.7.0` while keeping `face-api.js` for `GridScan` webcam tracking.
 - The previous load-sensitive `payment-webhook-ops.service.spec.ts`, `payment-webhook-ingress.service.spec.ts`, and profile-sync queue timeout assertions were made deterministic by using stalled promises instead of wall-clock completion flags; maintained suite now passes under load.
 - React Query cache and sensitive client stores are now cleared on admin login/logout boundaries, closing the short-term shared-browser cross-admin cache exposure. The longer-term HttpOnly-cookie/BFF session migration is still open.
 - Admin JWT is still a bearer token persisted in `localStorage` when available, with a same-tab in-memory fallback when writes fail. OWASP guidance still recommends not storing session identifiers or sensitive auth data there, so this remains a later architecture/security follow-up.

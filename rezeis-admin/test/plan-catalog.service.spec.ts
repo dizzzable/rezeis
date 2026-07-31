@@ -89,6 +89,7 @@ describe('PlanCatalogService', () => {
         }),
       },
       subscription: { findFirst: async () => null, count: async () => 0 },
+      trialClaim: { aggregate: async () => ({ _sum: { units: 0 } }) },
       referral: { findFirst: async () => ({ id: 'ref-1' }) },
       partnerReferral: { findFirst: async () => null },
     };

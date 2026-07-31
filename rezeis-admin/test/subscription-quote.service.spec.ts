@@ -234,6 +234,106 @@ describe('SubscriptionQuoteService', () => {
     );
   });
 
+  it('blocks RENEW for a disabled regular subscription', async () => {
+    const service = createService({
+      user: createUser({ maxSubscriptions: 2 }),
+      subscriptions: [
+        createSubscription({
+          id: 'disabled-sub',
+          isTrial: false,
+          planId: 'regular-plan',
+          status: SubscriptionStatus.DISABLED,
+        }),
+      ],
+      plans: [createPlan({ id: 'regular-plan', availability: PlanAvailability.ALL })],
+    });
+
+    const quote = await service.getQuote({
+      userId: 'user-1',
+      subscriptionId: 'disabled-sub',
+      purchaseType: PurchaseType.RENEW,
+      planId: 'regular-plan',
+      durationDays: 30,
+      channel: PurchaseChannel.WEB,
+    });
+
+    assert.equal(quote.isEligible, false);
+    assert.equal(
+      quote.warnings.some(
+        (warning) => warning.code === 'SUBSCRIPTION_DISABLED_NOT_RENEWABLE',
+      ),
+      true,
+    );
+  });
+
+  it('blocks self-renew before payment when the live source plan became TRIAL', async () => {
+    const service = createService({
+      user: createUser({ maxSubscriptions: 2 }),
+      subscriptions: [
+        createSubscription({
+          id: 'regular-sub',
+          isTrial: false,
+          planId: 'reclassified-plan',
+        }),
+      ],
+      plans: [
+        createPlan({
+          id: 'reclassified-plan',
+          availability: PlanAvailability.TRIAL,
+        }),
+      ],
+    });
+
+    const quote = await service.getQuote({
+      userId: 'user-1',
+      subscriptionId: 'regular-sub',
+      purchaseType: PurchaseType.RENEW,
+      planId: 'reclassified-plan',
+      durationDays: 30,
+      channel: PurchaseChannel.WEB,
+    });
+
+    assert.equal(quote.isEligible, false);
+    assert.deepStrictEqual(quote.availablePlans, []);
+    assert.equal(
+      quote.warnings.some((warning) => warning.code === 'TRIAL_PLAN_NOT_RENEWAL_TARGET'),
+      true,
+    );
+  });
+
+  it('allows the second paid-trial claim when maxClaims is 2', async () => {
+    const service = createService({
+      user: createUser({ maxSubscriptions: 3 }),
+      subscriptions: [
+        createSubscription({
+          id: 'first-paid-trial',
+          isTrial: true,
+          planId: 'paid-trial-plan',
+          status: SubscriptionStatus.EXPIRED,
+        }),
+      ],
+      trialGrant: { id: 'legacy-marker-does-not-imply-exhaustion' },
+      plans: [
+        createPlan({
+          id: 'paid-trial-plan',
+          availability: PlanAvailability.TRIAL,
+          trialSettings: { free: false, maxClaims: 2 },
+        }),
+      ],
+    });
+
+    const quote = await service.getQuote({
+      userId: 'user-1',
+      purchaseType: PurchaseType.ADDITIONAL,
+      planId: 'paid-trial-plan',
+      durationDays: 30,
+      channel: PurchaseChannel.WEB,
+    });
+
+    assert.equal(quote.isEligible, true);
+    assert.equal(quote.selectedPlan?.id, 'paid-trial-plan');
+  });
+
   it('keeps an exhausted paid trial out of NEW checkout quotes', async () => {
     const service = createService({
       user: createUser({ maxSubscriptions: 2 }),
@@ -271,7 +371,7 @@ describe('SubscriptionQuoteService', () => {
     );
   });
 
-  it('blocks trial when a local trial grant exists even without an active trial subscription', async () => {
+  it('uses subscription claim count instead of the legacy TrialGrant marker', async () => {
     const service = createService({
       user: createUser({ maxSubscriptions: 2 }),
       subscriptions: [],
@@ -284,14 +384,14 @@ describe('SubscriptionQuoteService', () => {
       channel: PurchaseChannel.WEB,
     });
 
-    assert.equal(actualPolicy.actions.TRIAL, false);
+    assert.equal(actualPolicy.actions.TRIAL, true);
     assert.deepStrictEqual(
       actualPolicy.warnings.map((warning) => warning.code),
-      ['SOURCE_SUBSCRIPTION_REQUIRED', 'TRIAL_ALREADY_USED'],
+      ['SOURCE_SUBSCRIPTION_REQUIRED'],
     );
   });
 
-  it('returns an explicit trial-used warning for trial quote attempts after a grant exists', async () => {
+  it('keeps a free trial claimable when only the legacy TrialGrant marker exists', async () => {
     const service = createService({
       user: createUser({ maxSubscriptions: 2 }),
       subscriptions: [],
@@ -307,12 +407,43 @@ describe('SubscriptionQuoteService', () => {
       channel: PurchaseChannel.WEB,
     });
 
-    assert.equal(actualQuote.isEligible, false);
-    assert.deepStrictEqual(actualQuote.availablePlans, []);
-    assert.deepStrictEqual(
-      actualQuote.warnings.map((warning) => warning.code),
-      ['TRIAL_ALREADY_USED', 'PLAN_NOT_AVAILABLE'],
-    );
+    assert.equal(actualQuote.isEligible, true);
+    assert.equal(actualQuote.selectedPlan?.id, 'trial-plan');
+    assert.deepStrictEqual(actualQuote.warnings, []);
+  });
+
+  it('filters TRIAL plans out of configured upgrade targets', async () => {
+    const service = createService({
+      user: createUser({ maxSubscriptions: 2 }),
+      subscriptions: [createSubscription({ id: 'sub-1', isTrial: false, planId: 'plan-1' })],
+      plans: [
+        createPlan({
+          id: 'plan-1',
+          availability: PlanAvailability.ALL,
+          upgradeToPlanIds: ['trial-target', 'regular-target'],
+        }),
+        createPlan({ id: 'trial-target', availability: PlanAvailability.TRIAL }),
+        createPlan({ id: 'regular-target', availability: PlanAvailability.ALL }),
+      ],
+    });
+
+    const policy = await service.getActionPolicy({
+      userId: 'user-1',
+      subscriptionId: 'sub-1',
+      channel: PurchaseChannel.WEB,
+    });
+
+    assert.equal(policy.actions.UPGRADE, true);
+    const quote = await service.getQuote({
+      userId: 'user-1',
+      subscriptionId: 'sub-1',
+      purchaseType: PurchaseType.UPGRADE,
+      planId: 'trial-target',
+      durationDays: 30,
+      channel: PurchaseChannel.WEB,
+    });
+    assert.equal(quote.isEligible, false);
+    assert.equal(quote.availablePlans.some((plan) => plan.id === 'trial-target'), false);
   });
 
   it('returns replacement renew options for archived replace-on-renew source plans', async () => {
@@ -406,6 +537,7 @@ function createService(input: {
   readonly user: Record<string, unknown>;
   readonly subscriptions: readonly Record<string, unknown>[];
   readonly trialGrant?: Record<string, unknown> | null;
+  readonly trialClaimUnits?: number;
   readonly plans: readonly Record<string, unknown>[];
   readonly multiSubscriptionSettings?: Record<string, unknown> | null;
 }): SubscriptionQuoteService {
@@ -425,6 +557,15 @@ function createService(input: {
     },
     trialGrant: {
       findUnique: async () => input.trialGrant ?? null,
+    },
+    trialClaim: {
+      aggregate: async () => ({
+        _sum: {
+          units:
+            input.trialClaimUnits ??
+            input.subscriptions.filter((subscription) => subscription.isTrial === true).length,
+        },
+      }),
     },
     paymentGateway: {
       findMany: async () => [
