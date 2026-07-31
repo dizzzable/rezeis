@@ -271,9 +271,109 @@ function createChartPalette(
 
 function backgroundColors(background: string | null): HexColor[] {
   if (background === null) return []
-  return [...background.matchAll(/#[0-9A-Fa-f]{6}(?:[0-9A-Fa-f]{2})?/g)].map(
-    ([color]) => color.slice(0, 7).toUpperCase() as HexColor,
+  return backgroundColorStops(background).map(
+    (color) => color.slice(0, 7) as HexColor,
   )
+}
+
+function backgroundColorStops(background: string): HexColor[] {
+  return [
+    ...background.matchAll(
+      /#[0-9A-Fa-f]{6}(?:[0-9A-Fa-f]{2})?(?![0-9A-Fa-f])/g,
+    ),
+  ].map(([color]) => color.toUpperCase() as HexColor)
+}
+
+function splitBackgroundLayers(background: string): string[] {
+  const layers: string[] = []
+  let depth = 0
+  let start = 0
+
+  for (let index = 0; index < background.length; index += 1) {
+    const character = background[index]
+    if (character === '(') depth += 1
+    else if (character === ')') depth = Math.max(0, depth - 1)
+    else if (character === ',' && depth === 0) {
+      layers.push(background.slice(start, index).trim())
+      start = index + 1
+    }
+  }
+
+  const tail = background.slice(start).trim()
+  if (tail.length > 0 && tail !== 'none') layers.push(tail)
+  return layers
+}
+
+function backgroundContrastSamples(
+  background: string,
+  bodyBackground: HexColor,
+): HexColor[] {
+  let samples: HexColor[] = [bodyBackground]
+
+  // CSS paints the first listed layer on top, so compose from the bottom up.
+  for (const layer of splitBackgroundLayers(background).reverse()) {
+    const stops = backgroundColorStops(layer)
+    if (stops.length === 0) continue
+    const canExposeUnderlying =
+      /\btransparent\b/i.test(layer) ||
+      stops.some((stop) => parseHex(stop).a === 0)
+    const composited = canExposeUnderlying ? [...samples] : []
+
+    for (const stop of stops) {
+      const alpha = parseHex(stop).a
+      if (alpha >= 1) {
+        composited.push(stop.slice(0, 7) as HexColor)
+      } else if (alpha > 0) {
+        composited.push(
+          ...samples.map((sample) => flattenHex(stop, sample)),
+        )
+      }
+    }
+
+    samples = [...new Set(composited)]
+  }
+
+  return samples
+}
+
+/**
+ * Bare page copy is painted directly over the fixed concept background.
+ * Some source boards intentionally mix very light and very dark stops, so no
+ * single foreground can remain readable over the unmodified artwork. Keep the
+ * approved composition intact and add only the smallest neutral support veil
+ * needed for WCAG AA normal text. The byte-rounded safety margin also covers
+ * CSS alpha quantisation.
+ */
+function backgroundReadabilityOverlay(
+  background: string,
+  bodyBackground: HexColor,
+  foreground: HexColor,
+): HexColor {
+  const samples = backgroundContrastSamples(background, bodyBackground)
+  const support = bestNeutralContrast(foreground)
+  let requiredOpacity = 0
+
+  for (const sample of samples) {
+    if (contrastRatio(foreground, sample) >= 4.5) continue
+
+    let low = 0
+    let high = 1
+    for (let iteration = 0; iteration < 18; iteration += 1) {
+      const midpoint = (low + high) / 2
+      const supported = mixHex(support, sample, midpoint)
+      if (contrastRatio(foreground, supported) >= 4.5) {
+        high = midpoint
+      } else {
+        low = midpoint
+      }
+    }
+    requiredOpacity = Math.max(requiredOpacity, high)
+  }
+
+  if (requiredOpacity === 0) return withAlpha(support, 0)
+  const safeOpacity = Math.min(1, requiredOpacity + 0.025)
+  const alphaByte = Math.ceil(safeOpacity * 255)
+  return withAlpha(support, alphaByte / 255)
 }
 
 function sourceBackgroundColor(
@@ -561,7 +661,7 @@ function buildMeshBackground(
   ].join(', ')
 }
 
-function buildOppositeBackground(
+function buildOppositeBaseBackground(
   descriptor: ConceptPresetDescriptor,
   values: ThemeTokenValues,
 ): string {
@@ -577,14 +677,14 @@ function buildOppositeBackground(
   }
 }
 
-function buildModeBackground(
+function buildModeBaseBackground(
   descriptor: ConceptPresetDescriptor,
   mode: ConceptSourceMode,
   values: ThemeTokenValues,
 ): string {
   const source = getConceptSourceStyle(descriptor)
   if (mode !== getConceptSourceMode(descriptor)) {
-    return buildOppositeBackground(descriptor, values)
+    return buildOppositeBaseBackground(descriptor, values)
   }
   if (descriptor.classification.backgroundType === 'mesh-gradient') {
     return buildMeshBackground(descriptor, values)
@@ -594,10 +694,241 @@ function buildModeBackground(
     : source.background ?? 'none'
 }
 
-function shadowFor(descriptor: ConceptPresetDescriptor): string {
+function seededUnit(code: string, salt: number): number {
+  let value = salt * 97
+  for (const character of code) {
+    value = (value * 31 + character.charCodeAt(0)) % 10_007
+  }
+  return value / 10_007
+}
+
+function seededPercent(
+  descriptor: ConceptPresetDescriptor,
+  salt: number,
+  minimum: number,
+  maximum: number,
+): string {
+  const value = minimum + seededUnit(descriptor.code, salt) * (maximum - minimum)
+  return `${value.toFixed(1)}%`
+}
+
+function decorStrength(descriptor: ConceptPresetDescriptor): number {
+  const base: Record<ConceptDecorDensity, number> = {
+    none: 0,
+    light: 0.1,
+    medium: 0.14,
+    dense: 0.18,
+  }
+  return Math.min(
+    0.24,
+    base[descriptor.classification.decorDensity] +
+      descriptor.classification.directDecorCount * 0.003,
+  )
+}
+
+function decorLayerCount(
+  descriptor: ConceptPresetDescriptor,
+  availableLayers: number,
+): number {
+  if (descriptor.classification.directDecorCount <= 0) return 0
+
+  const densityLimit: Record<ConceptDecorDensity, number> = {
+    none: 0,
+    light: 1,
+    medium: 2,
+    dense: 4,
+  }
+  const directDecorLimit = Math.ceil(
+    descriptor.classification.directDecorCount / 4,
+  )
+  return Math.min(
+    availableLayers,
+    densityLimit[descriptor.classification.decorDensity],
+    directDecorLimit,
+  )
+}
+
+function polarRedMonolithDecor(
+  descriptor: ConceptPresetDescriptor,
+  strength: number,
+): readonly string[] {
+  const blue = descriptor.palette[3]
+  const mutedBlue = descriptor.palette[5]
+  const red = descriptor.palette[2]
+
+  return [
+    `conic-gradient(from 0deg at 86% 40%, ${withAlpha(blue, strength)} 0deg 90deg, transparent 90deg 360deg)`,
+    `conic-gradient(from 0deg at 70% 40%, ${withAlpha(red, strength * 0.82)} 0deg 90deg, transparent 90deg 360deg)`,
+    `conic-gradient(from 180deg at 32% 72%, ${withAlpha(blue, strength * 0.64)} 0deg 90deg, transparent 90deg 360deg)`,
+    `conic-gradient(from 180deg at 70% 86%, ${withAlpha(mutedBlue, strength * 0.52)} 0deg 90deg, transparent 90deg 360deg)`,
+  ]
+}
+
+/**
+ * Reconstruct the semantic atmosphere that is visible in the concept boards
+ * but cannot be stored as Pencil raster data. Every position is derived from
+ * the stable concept code, so the same descriptor always yields identical CSS.
+ */
+function semanticDecorLayers(
+  descriptor: ConceptPresetDescriptor,
+  values: ThemeTokenValues,
+): readonly string[] {
+  const strength = decorStrength(descriptor)
+  if (strength === 0) return []
+  if (descriptor.code === 'CU') {
+    return polarRedMonolithDecor(descriptor, strength)
+  }
+
+  const [first, second, third, fourth] = createChartPalette(
+    descriptor.palette,
+    values.primary,
+    values['chart-2'],
+  )
+  const x1 = seededPercent(descriptor, 1, 12, 38)
+  const y1 = seededPercent(descriptor, 2, 8, 34)
+  const x2 = seededPercent(descriptor, 3, 66, 92)
+  const y2 = seededPercent(descriptor, 4, 62, 92)
+  const bandStart = seededPercent(descriptor, 5, 58, 72)
+  const bandEnd = seededPercent(descriptor, 6, 78, 92)
+  const familyLayers: Record<ConceptVisualFamily, readonly string[]> = {
+    glass: [
+      `radial-gradient(ellipse 54% 48% at ${x1} ${y1}, ${withAlpha(first, strength)} 0%, transparent 68%)`,
+      `radial-gradient(ellipse 48% 42% at ${x2} ${y2}, ${withAlpha(second, strength * 0.82)} 0%, transparent 72%)`,
+      `linear-gradient(118deg, transparent 18%, ${withAlpha(PURE_WHITE, strength * 0.36)} 46%, transparent 68%)`,
+      `radial-gradient(circle at 50% 48%, transparent 0 34%, ${withAlpha(third, strength * 0.42)} 35%, transparent 58%)`,
+    ],
+    'glass-dimensional': [
+      `radial-gradient(ellipse 58% 48% at ${x1} ${y1}, ${withAlpha(first, strength)} 0%, transparent 66%)`,
+      `radial-gradient(circle at ${x2} ${y2}, transparent 0 18%, ${withAlpha(PURE_WHITE, strength * 0.5)} 19%, ${withAlpha(second, strength * 0.54)} 28%, transparent 48%)`,
+      `linear-gradient(112deg, transparent 22%, ${withAlpha(PURE_WHITE, strength * 0.42)} 47%, transparent 64%)`,
+      `radial-gradient(ellipse 70% 32% at 50% 104%, ${withAlpha(fourth, strength * 0.7)} 0%, transparent 72%)`,
+    ],
+    editorial: [
+      `conic-gradient(from 0deg at ${bandStart} 42%, ${withAlpha(first, strength * 0.72)} 0deg 90deg, transparent 90deg 360deg)`,
+      `conic-gradient(from 180deg at 34% 78%, ${withAlpha(second, strength * 0.58)} 0deg 90deg, transparent 90deg 360deg)`,
+      `linear-gradient(90deg, transparent 0 ${bandStart}, ${withAlpha(third, strength * 0.44)} ${bandStart} ${bandEnd}, transparent ${bandEnd})`,
+      `repeating-linear-gradient(0deg, transparent 0 23px, ${withAlpha(values.foreground, strength * 0.12)} 23px 24px)`,
+    ],
+    'hard-edge': [
+      `conic-gradient(from 0deg at ${bandStart} 38%, ${withAlpha(first, strength)} 0deg 90deg, transparent 90deg 360deg)`,
+      `conic-gradient(from 180deg at 36% 76%, ${withAlpha(second, strength * 0.72)} 0deg 90deg, transparent 90deg 360deg)`,
+      `linear-gradient(90deg, transparent 0 ${bandStart}, ${withAlpha(third, strength * 0.58)} ${bandStart} ${bandEnd}, transparent ${bandEnd})`,
+      `repeating-linear-gradient(135deg, transparent 0 26px, ${withAlpha(fourth, strength * 0.24)} 26px 28px)`,
+    ],
+    technical: [
+      `repeating-linear-gradient(90deg, transparent 0 31px, ${withAlpha(first, strength * 0.34)} 31px 32px)`,
+      `repeating-linear-gradient(0deg, transparent 0 31px, ${withAlpha(second, strength * 0.28)} 31px 32px)`,
+      `radial-gradient(circle at ${x2} ${y1}, ${withAlpha(third, strength * 0.74)} 0 2px, transparent 3px 100%)`,
+      `linear-gradient(90deg, transparent 0 ${bandStart}, ${withAlpha(fourth, strength * 0.46)} ${bandStart} ${bandEnd}, transparent ${bandEnd})`,
+    ],
+    atmospheric: [
+      `radial-gradient(ellipse 72% 44% at ${x1} ${y1}, ${withAlpha(first, strength)} 0%, transparent 70%)`,
+      `radial-gradient(ellipse 64% 38% at ${x2} ${y2}, ${withAlpha(second, strength * 0.78)} 0%, transparent 74%)`,
+      `linear-gradient(180deg, ${withAlpha(third, strength * 0.34)} 0%, transparent 42% 70%, ${withAlpha(fourth, strength * 0.28)} 100%)`,
+      `radial-gradient(ellipse 90% 24% at 50% 108%, ${withAlpha(first, strength * 0.48)} 0%, transparent 72%)`,
+    ],
+  }
+  const tagLayers: string[] = []
+  if (
+    descriptor.classification.visualTags.includes('atmospheric') &&
+    descriptor.classification.visualFamily !== 'atmospheric'
+  ) {
+    tagLayers.push(
+      `radial-gradient(ellipse 82% 28% at 50% 106%, ${withAlpha(second, strength * 0.42)} 0%, transparent 74%)`,
+    )
+  }
+  if (
+    descriptor.classification.visualTags.includes('technical') &&
+    descriptor.classification.visualFamily !== 'technical'
+  ) {
+    tagLayers.push(
+      `repeating-linear-gradient(90deg, transparent 0 47px, ${withAlpha(values.foreground, strength * 0.1)} 47px 48px)`,
+    )
+  }
+  if (
+    descriptor.classification.visualTags.includes('editorial') &&
+    descriptor.classification.visualFamily !== 'editorial'
+  ) {
+    tagLayers.push(
+      `linear-gradient(90deg, transparent 0 ${bandStart}, ${withAlpha(third, strength * 0.3)} ${bandStart} ${bandEnd}, transparent ${bandEnd})`,
+    )
+  }
+
+  const family = familyLayers[descriptor.classification.visualFamily]
+  return [family[0], ...tagLayers, ...family.slice(1)]
+}
+
+function buildConceptComposition(
+  descriptor: ConceptPresetDescriptor,
+  mode: ConceptSourceMode,
+  values: ThemeTokenValues,
+): {
+  readonly image: string
+  readonly decorLayerCount: number
+  readonly readabilityOverlay: HexColor
+} {
+  const base = buildModeBaseBackground(descriptor, mode, values)
+  const availableDecor = semanticDecorLayers(descriptor, values)
+  const count = decorLayerCount(descriptor, availableDecor.length)
+  const layers = availableDecor.slice(0, count)
+  if (base !== 'none') layers.push(base)
+  const artwork = layers.length > 0 ? layers.join(', ') : 'none'
+  const readabilityOverlay = backgroundReadabilityOverlay(
+    artwork,
+    values.background,
+    values.foreground,
+  )
+  if (readabilityOverlay.slice(7, 9) !== '00' && artwork !== 'none') {
+    layers.unshift(
+      `linear-gradient(${readabilityOverlay}, ${readabilityOverlay})`,
+    )
+  }
+
+  return {
+    image: layers.length > 0 ? layers.join(', ') : 'none',
+    decorLayerCount: count,
+    readabilityOverlay,
+  }
+}
+
+function shadowFor(
+  descriptor: ConceptPresetDescriptor,
+  values: ThemeTokenValues,
+): string {
   if (!descriptor.classification.shadow) return 'none'
   const source = getConceptSourceStyle(descriptor)
-  return `0 18px 46px ${withAlpha(source.accent, 0.18)}`
+  switch (descriptor.classification.visualFamily) {
+    case 'hard-edge':
+      return `4px 4px 0 ${withAlpha(source.border, 0.28)}`
+    case 'technical':
+      return `0 8px 0 ${withAlpha(values.foreground, 0.12)}, 0 18px 34px ${withAlpha(source.accent, 0.12)}`
+    case 'editorial':
+      return `0 2px 0 ${withAlpha(values.foreground, 0.14)}, 0 16px 30px ${withAlpha(values.foreground, 0.1)}`
+    case 'glass-dimensional':
+      return `inset 0 1px 0 ${withAlpha(PURE_WHITE, 0.3)}, 0 18px 46px ${withAlpha(source.accent, 0.2)}`
+    case 'glass':
+      return `0 14px 38px ${withAlpha(source.accent, 0.16)}`
+    case 'atmospheric':
+      return `0 20px 54px ${withAlpha(source.accent, 0.14)}`
+  }
+}
+
+function blurFor(descriptor: ConceptPresetDescriptor): number {
+  if (!descriptor.classification.backgroundBlur) return 0
+  switch (descriptor.classification.visualFamily) {
+    case 'glass-dimensional':
+      return 24
+    case 'glass':
+      return 18
+    case 'atmospheric':
+      return 16
+    case 'editorial':
+      return 10
+    case 'technical':
+      return 8
+    case 'hard-edge':
+      return 0
+  }
 }
 
 function conceptDeclarations(
@@ -605,16 +936,21 @@ function conceptDeclarations(
   mode: ConceptSourceMode,
   values: ThemeTokenValues,
 ): readonly string[] {
+  const composition = buildConceptComposition(descriptor, mode, values)
   return [
-    `  --concept-background-image: ${buildModeBackground(descriptor, mode, values)};`,
+    `  --concept-background-image: ${composition.image};`,
+    `  --concept-background-readability-overlay: ${composition.readabilityOverlay};`,
     `  --concept-background-type: ${descriptor.classification.backgroundType};`,
+    `  --concept-composition-family: ${descriptor.classification.visualFamily};`,
     `  --concept-effect: ${descriptor.classification.effectClass};`,
     `  --concept-source-mode: ${getConceptSourceMode(descriptor)};`,
     `  --concept-surface-radius: ${descriptor.classification.surfaceRadius}px;`,
     `  --concept-canonical-radius: ${descriptor.classification.canonicalRadius}px;`,
-    `  --concept-backdrop-blur: ${descriptor.classification.backgroundBlur ? 20 : 0}px;`,
-    `  --concept-surface-shadow: ${shadowFor(descriptor)};`,
+    `  --concept-surface-radius-delta: calc(${descriptor.classification.surfaceRadius}px - ${descriptor.classification.canonicalRadius}px);`,
+    `  --concept-backdrop-blur: ${blurFor(descriptor)}px;`,
+    `  --concept-surface-shadow: ${shadowFor(descriptor, values)};`,
     `  --concept-decor-density: ${descriptor.classification.decorDensity};`,
+    `  --concept-decor-layer-count: ${composition.decorLayerCount};`,
   ]
 }
 
@@ -627,6 +963,38 @@ function renderTokenBlock(
     (token) => `  --${token}: ${values[token]};`,
   )
   return `${selector} {\n${[...declarations, ...extra].join('\n')}\n}`
+}
+
+function conceptRuntimeCss(): string {
+  return `h1,
+h2,
+h3,
+h4,
+[data-concept-heading] {
+  font-family: var(--font-heading);
+}
+
+.font-mono,
+.tabular-nums,
+code,
+kbd,
+samp,
+[data-concept-data] {
+  font-family: var(--font-data);
+}
+
+[data-concept-surface="card"] {
+  border-radius: max(
+    0px,
+    calc(var(--radius) + var(--concept-surface-radius-delta, 0px))
+  );
+}
+
+:root:not([data-liquid-glass-cards="on"]) [data-concept-surface="card"] {
+  box-shadow: var(--concept-surface-shadow);
+  -webkit-backdrop-filter: blur(var(--concept-backdrop-blur));
+  backdrop-filter: blur(var(--concept-backdrop-blur));
+}`
 }
 
 /**
@@ -656,6 +1024,7 @@ export function createConceptThemeCss(
   background-repeat: no-repeat;
   background-size: cover;
 }`,
+    conceptRuntimeCss(),
   ].join('\n')
 }
 

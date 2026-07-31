@@ -14,6 +14,7 @@ import {
 } from './branding-form-schema'
 import {
   THEME_PRESETS,
+  createConceptReiwaPreset,
   createThemePresetVisualPatch,
 } from './theme-presets'
 
@@ -91,6 +92,101 @@ describe('WEB Reiwa 104-theme catalog', () => {
     }
   })
 
+  it('reconstructs all presets deterministically with unique card compositions', () => {
+    const reconstructed = CONCEPT_PRESETS.map(createConceptReiwaPreset)
+    const cardGradients = THEME_PRESETS.map((preset) => preset.cardGradient)
+
+    expect(reconstructed).toEqual(THEME_PRESETS)
+    expect(new Set(cardGradients).size).toBe(THEME_PRESETS.length)
+  })
+
+  it('uses a broad semantic composition matrix instead of one generic layout', () => {
+    const appCompositions = new Set(
+      THEME_PRESETS.map((preset) => preset.appComposition),
+    )
+    const cardCompositions = new Set(
+      THEME_PRESETS.map((preset) => preset.cardComposition),
+    )
+
+    expect(appCompositions.size).toBeGreaterThanOrEqual(7)
+    expect(cardCompositions.size).toBeGreaterThanOrEqual(7)
+  })
+
+  it('maps Polar Red Monolith to angular app bands and an orbital card', () => {
+    const preset = THEME_PRESETS.find(({ code }) => code === 'CU')
+
+    expect(preset).toBeDefined()
+    expect(preset?.appComposition).toBe('orthogonal-bands')
+    expect(preset?.cardComposition).toBe('orbit-spotlight')
+    expect(preset?.cardGradient).toContain('radial-gradient(circle')
+    expect(preset?.cardGradient).toContain('transparent 0 27%')
+    expect(preset?.cardGradient).toContain('28% 30%')
+    expect(preset?.appBackground.gradient).toContain('#EDF5F7')
+    expect(preset?.appBackground.gradient).toContain('#C7DBE1')
+    expect(preset?.appBackground.gradient).toContain('#91AAB2')
+    expect(preset?.appBackground.gradient).toContain('#E845452A')
+    expect(preset?.appBackground.gradient).not.toContain(
+      'linear-gradient(145deg, #FFFFFF 0%, #1B2529 100%)',
+    )
+  })
+
+  it('persists a complete gradient and texture recipe for every app background', () => {
+    for (const preset of THEME_PRESETS) {
+      const { gradient, texture } = preset.appBackground
+
+      expect(preset.appBackground.kind, `${preset.code} app kind`).toBe(
+        'gradient',
+      )
+      expect(gradient, `${preset.code} app gradient`).toContain('gradient(')
+      expect(
+        extractGradientHexColors(gradient).length,
+        `${preset.code} app gradient colors`,
+      ).toBeGreaterThan(0)
+      expect(texture.pattern, `${preset.code} texture pattern`).toBeTruthy()
+      expect(texture.color, `${preset.code} texture color`).toMatch(
+        /^#[\da-f]{6}$/i,
+      )
+      expect(texture.background, `${preset.code} texture background`).toMatch(
+        /^#[\da-f]{6}$/i,
+      )
+      expect(texture.scale, `${preset.code} texture scale`).toBeGreaterThan(0)
+      expect(texture.opacity, `${preset.code} texture opacity`).toBeGreaterThan(0)
+      expect(texture.opacity, `${preset.code} texture opacity`).toBeLessThanOrEqual(1)
+    }
+  })
+
+  it('keeps muted text and strong boundaries readable on composited surfaces', () => {
+    for (const preset of THEME_PRESETS) {
+      const {
+        mutedForeground,
+        surface,
+        surfaceHigh,
+        borderStrong,
+        surfaceOpacity,
+        surfaceHighOpacity,
+      } = preset.surfaceTheme
+      const appSamples = extractGradientSamples(
+        preset.appBackground.gradient,
+        preset.bgPrimary,
+      )
+      const compositedSurfaces = appSamples.flatMap((appSample) => [
+        mix(surface, appSample, surfaceOpacity),
+        mix(surfaceHigh, appSample, surfaceHighOpacity),
+      ])
+
+      for (const background of compositedSurfaces) {
+        expect(
+          contrast(mutedForeground, background),
+          `${preset.code} muted text on ${background}`,
+        ).toBeGreaterThanOrEqual(4.5)
+        expect(
+          contrast(borderStrong, background),
+          `${preset.code} strong border on ${background}`,
+        ).toBeGreaterThanOrEqual(3)
+      }
+    }
+  })
+
   it('carries source semantics and exact angular geometry into Reiwa', () => {
     for (const [index, preset] of THEME_PRESETS.entries()) {
       const descriptor = CONCEPT_PRESETS[index]
@@ -112,7 +208,7 @@ describe('WEB Reiwa 104-theme catalog', () => {
     }
   })
 
-  it('changes only theme-owned fields and preserves operator content/layout overrides', () => {
+  it('keeps the pure visual patch limited while the page handler owns slot synchronization', () => {
     const base = createInitialBrandingDraft({
       brandName: 'Operator VPN',
       tagline: 'Private access',
@@ -135,11 +231,13 @@ describe('WEB Reiwa 104-theme catalog', () => {
       ],
       navGap: 9,
     })
+    const visualPatch = createThemePresetVisualPatch(THEME_PRESETS[37])
     const resolved = {
       ...base,
-      ...createThemePresetVisualPatch(THEME_PRESETS[37]),
+      ...visualPatch,
     }
 
+    expect(visualPatch).not.toHaveProperty('cardEffectsByIndex')
     expect(resolved.brandName).toBe(base.brandName)
     expect(resolved.tagline).toBe(base.tagline)
     expect(resolved.logoUrl).toBe(base.logoUrl)
@@ -160,6 +258,50 @@ function contrast(left: string, right: string): number {
   const light = Math.max(leftLuminance, rightLuminance)
   const dark = Math.min(leftLuminance, rightLuminance)
   return (light + 0.05) / (dark + 0.05)
+}
+
+function extractGradientHexColors(gradient: string): string[] {
+  return [
+    ...new Set(
+      [...gradient.matchAll(/#[\da-f]{6}(?:[\da-f]{2})?/gi)].map((match) =>
+        match[0].slice(0, 7).toUpperCase(),
+      ),
+    ),
+  ]
+}
+
+function extractGradientSamples(
+  gradient: string,
+  fallback: string,
+): string[] {
+  const colors = [...gradient.matchAll(/#[\da-f]{6}(?:[\da-f]{2})?/gi)].map(
+    (match) => match[0].toUpperCase(),
+  )
+  const opaqueColors = colors.filter((color) => color.length === 7)
+  const backdrops = opaqueColors.length > 0 ? opaqueColors : [fallback]
+  const translucentSamples = colors
+    .filter((color) => color.length === 9)
+    .flatMap((color) => {
+      const alpha = Number.parseInt(color.slice(7, 9), 16) / 255
+      return backdrops.map((backdrop) =>
+        mix(color.slice(0, 7), backdrop, alpha),
+      )
+    })
+
+  return [...new Set([...backdrops, ...translucentSamples])]
+}
+
+function mix(left: string, right: string, leftWeight: number): string {
+  const channel = (offset: number): string =>
+    Math.round(
+      Number.parseInt(left.slice(offset, offset + 2), 16) * leftWeight +
+        Number.parseInt(right.slice(offset, offset + 2), 16) *
+          (1 - leftWeight),
+    )
+      .toString(16)
+      .padStart(2, '0')
+
+  return `#${channel(1)}${channel(3)}${channel(5)}`
 }
 
 function luminance(hex: string): number {

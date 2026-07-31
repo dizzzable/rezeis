@@ -6,7 +6,7 @@
  * - Debounced re-render to avoid rapid WebGL context creation/destruction
  * - key={bgId} forces full unmount→remount when background type changes
  * - Props come directly from store (per-background registry defaults)
- * - CSS gradient fallback on error
+ * - Transparent fallback on error so the selected concept remains visible
  */
 import { Component, Suspense, useState, useEffect, useRef, useMemo, type ReactNode, type CSSProperties } from 'react'
 import { useGlassStore, type BackgroundId } from '@/lib/theme/glass-store'
@@ -31,7 +31,7 @@ class GlassErrorBoundary extends Component<{ children: ReactNode; resetKey: stri
 
   render() {
     if (this.state.hasError) {
-      return <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_center,oklch(0.25_0.04_260)_0%,oklch(0.08_0.02_260)_100%)]" />
+      return <div className="absolute inset-0 bg-transparent" />
     }
     return this.props.children
   }

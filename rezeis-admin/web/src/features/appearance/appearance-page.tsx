@@ -198,6 +198,7 @@ function PresetsCard() {
   const [query, setQuery] = useState('')
   const presetId = useThemeStore((s) => s.presetId)
   const setPreset = useThemeStore((s) => s.setPreset)
+  const setMode = useThemeStore((s) => s.setMode)
   const setRadius = useThemeStore((s) => s.setRadius)
   const clearOverrides = useThemeStore((s) => s.clearOverrides)
   const filteredPresets = useMemo(() => {
@@ -219,11 +220,15 @@ function PresetsCard() {
 
   const handlePick = (preset: (typeof THEME_PRESETS)[number]): void => {
     setPreset(preset.id)
+    if (preset.sourceMode) {
+      setMode(preset.sourceMode)
+    }
     const recommendedRadius = getPresetRecommendedRadiusRem(preset)
     if (recommendedRadius !== null) {
       setRadius(recommendedRadius)
     }
-    // Clear overrides when switching presets so the new preset shows pure.
+    // Structured token overrides belong to the selected preset. Operator-authored
+    // CSS is an independent persisted layer and must survive preset switches.
     clearOverrides('light')
     clearOverrides('dark')
     toast.success(t('appearancePage.presets.applied', { id: preset.name }))

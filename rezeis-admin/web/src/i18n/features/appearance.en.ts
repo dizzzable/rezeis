@@ -9,7 +9,7 @@ export const en = {
   appearancePage: {
     title: 'Appearance',
     subtitle:
-      'Pick a preset, customize individual colors, paste a theme from shadcnthemer or tweakcn, and adjust corner radius. Changes apply instantly and persist in this browser.',
+      'Pick a preset, customize individual colors, paste a theme from shadcnthemer or tweakcn, and adjust corner radius. Changes apply instantly and follow this admin across browsers and devices.',
     reset: 'Reset',
     resetSuccess: 'Theme reset to defaults',
     tabs: {
@@ -81,7 +81,7 @@ export const en = {
     customize: {
       title: 'Custom colors',
       description:
-        'Pick a color for any token. Overrides are layered on top of the active preset and persist in this browser.',
+        'Pick a color for any token. Overrides are layered on top of the active preset and follow this admin across browsers and devices.',
       modeLight: 'Light',
       modeDark: 'Dark',
       modeBadge: '{{mode}} mode',
@@ -99,7 +99,7 @@ export const en = {
       clipboardEmpty: 'Clipboard is empty',
       clipboardError: 'Could not read the clipboard',
       footer:
-        'Themes persist locally in your browser only. Clearing site data resets the override.',
+        'Theme settings are kept locally for instant rendering and synchronised to this admin when connected. Clearing site data restores the saved look after sign-in.',
     },
     layout: {
       density: {

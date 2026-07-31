@@ -5,6 +5,8 @@ import userEvent from '@testing-library/user-event'
 import api from '@/lib/api'
 import { renderWithProviders } from '@/test/test-utils'
 import WebReiwaPage from './branding-page'
+import { CONCEPT_CARD_PRESETS } from './concept-card-presets'
+import { THEME_PRESETS } from './theme-presets'
 
 // WebReiwaPage mounts every tab's section tree at once (kept mounted so the
 // form/preview stay intact), so the first render is heavy — under the full
@@ -20,6 +22,39 @@ vi.mock('./card-effect-section', () => ({
   CardEffectSection: () => <div data-testid="card-effect-section" />,
   CardEffectPicker: () => <div data-testid="card-effect-picker" />,
 }))
+
+vi.mock('./concept-card-preset-gallery', async () => {
+  const {
+    CONCEPT_CARD_PRESETS: presets,
+    createConceptCardPresetVisualPatch,
+  } = await import('./concept-card-presets')
+  const preset = presets[0]
+
+  return {
+    ConceptCardPresetGallery: ({
+      onApply,
+      labels,
+    }: {
+      onApply: (
+        selectedPreset: typeof preset,
+        patch: ReturnType<typeof createConceptCardPresetVisualPatch>,
+      ) => void
+      labels?: {
+        apply?: (selectedPreset: typeof preset) => string
+      }
+    }) => (
+      <button
+        type="button"
+        onClick={() =>
+          onApply(preset, createConceptCardPresetVisualPatch(preset))
+        }
+      >
+        {labels?.apply?.(preset) ??
+          `Apply ${preset.code} ${preset.name}; effect ${preset.cardEffectName}`}
+      </button>
+    ),
+  }
+})
 
 describe('WebReiwaPage branding settings', () => {
   beforeEach(() => {
@@ -105,7 +140,7 @@ describe('WebReiwaPage branding settings', () => {
     )
   }, 20_000)
 
-  it('does not let an unchanged legacy field block saving a selected theme', async () => {
+  it('synchronizes existing positional card slots when applying a full theme', async () => {
     const user = userEvent.setup()
     vi.spyOn(api, 'get').mockResolvedValue({
       data: {
@@ -116,6 +151,19 @@ describe('WebReiwaPage branding settings', () => {
             cardEffectProps: {},
             cardEffectOpacity: 1,
             cardGradient: 'url(https://legacy.example/card.png)',
+          },
+          {
+            cardEffect: 'waves',
+            cardEffectProps: { speed: 2 },
+            cardEffectOpacity: 0.4,
+            cardGradient: null,
+          },
+          {
+            cardEffect: 'threads',
+            cardEffectProps: { amplitude: 3 },
+            cardEffectOpacity: 0.75,
+            cardGradient:
+              'linear-gradient(135deg, #111827 0%, #2563eb 100%)',
           },
         ],
       },
@@ -132,12 +180,109 @@ describe('WebReiwaPage branding settings', () => {
 
     await waitFor(() => expect(patchSpy).toHaveBeenCalledOnce())
     const payload = patchSpy.mock.calls[0]?.[1] as Record<string, unknown>
+    const selectedTheme = THEME_PRESETS[0]
     expect(payload).toMatchObject({
       themePresetId: 'concept-a',
       themePresetVersion: 2,
+      cardEffectsByIndex: [
+        {
+          cardEffect: selectedTheme.cardEffect,
+          cardEffectProps: selectedTheme.cardEffectProps,
+          cardEffectOpacity: selectedTheme.cardEffectOpacity,
+          cardGradient: selectedTheme.cardGradient,
+        },
+        {
+          cardEffect: selectedTheme.cardEffect,
+          cardEffectProps: selectedTheme.cardEffectProps,
+          cardEffectOpacity: selectedTheme.cardEffectOpacity,
+          cardGradient: selectedTheme.cardGradient,
+        },
+        {
+          cardEffect: selectedTheme.cardEffect,
+          cardEffectProps: selectedTheme.cardEffectProps,
+          cardEffectOpacity: selectedTheme.cardEffectOpacity,
+          cardGradient: selectedTheme.cardGradient,
+        },
+      ],
     })
-    expect(payload).not.toHaveProperty('cardEffectsByIndex')
     expect(payload).not.toHaveProperty('brandName')
+  }, 20_000)
+
+  it('applies an independent concept card and synchronizes existing positional slots', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(api, 'get').mockResolvedValue({
+      data: {
+        ...createBrandingPayload(),
+        cardEffectsByIndex: [
+          {
+            cardEffect: 'aurora',
+            cardEffectProps: { speed: 0.3 },
+            cardEffectOpacity: 0.7,
+            cardGradient:
+              'linear-gradient(135deg, #172554 0%, #2563eb 100%)',
+          },
+          {
+            cardEffect: 'waves',
+            cardEffectProps: { speed: 2 },
+            cardEffectOpacity: 0.4,
+            cardGradient: null,
+          },
+          {
+            cardEffect: 'threads',
+            cardEffectProps: { amplitude: 3 },
+            cardEffectOpacity: 0.75,
+            cardGradient:
+              'linear-gradient(135deg, #111827 0%, #2563eb 100%)',
+          },
+        ],
+      },
+    })
+    const patchSpy = vi.spyOn(api, 'patch').mockResolvedValue({
+      data: createBrandingPayload(),
+    })
+
+    renderWithProviders(<WebReiwaPage />)
+
+    await screen.findByRole('heading', { name: /WEB Reiwa/ })
+    await user.click(
+      screen.getByRole('tab', { name: 'Subscription card' }),
+    )
+    await user.click(
+      screen.getByRole('button', {
+        name: /^Apply A Vital Link; effect /,
+      }),
+    )
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(patchSpy).toHaveBeenCalledOnce())
+    const selectedCard = CONCEPT_CARD_PRESETS[0]
+    expect(patchSpy).toHaveBeenCalledWith('/admin/settings/branding', {
+      cardGradient: selectedCard.cardGradient,
+      cardPattern: selectedCard.cardPattern,
+      cardEffect: selectedCard.cardEffect,
+      cardEffectProps: selectedCard.cardEffectProps,
+      cardEffectOpacity: selectedCard.cardEffectOpacity,
+      cardEffectsByIndex: [
+        {
+          cardEffect: selectedCard.cardEffect,
+          cardEffectProps: selectedCard.cardEffectProps,
+          cardEffectOpacity: selectedCard.cardEffectOpacity,
+          cardGradient: selectedCard.cardGradient,
+        },
+        {
+          cardEffect: selectedCard.cardEffect,
+          cardEffectProps: selectedCard.cardEffectProps,
+          cardEffectOpacity: selectedCard.cardEffectOpacity,
+          cardGradient: selectedCard.cardGradient,
+        },
+        {
+          cardEffect: selectedCard.cardEffect,
+          cardEffectProps: selectedCard.cardEffectProps,
+          cardEffectOpacity: selectedCard.cardEffectOpacity,
+          cardGradient: selectedCard.cardGradient,
+        },
+      ],
+    })
   }, 20_000)
 })
 

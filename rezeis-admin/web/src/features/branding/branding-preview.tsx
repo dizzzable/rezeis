@@ -8,7 +8,7 @@
  * the operator is editing, so changes are visible instantly.
  */
 
-import { Suspense, useMemo, useState } from 'react'
+import { Suspense, useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { motion, type PanInfo } from 'motion/react'
 import {
@@ -49,6 +49,7 @@ import {
 
 interface BrandingPreviewProps {
   values: {
+    themePresetId?: string | null
     brandName?: string
     tagline?: string | null
     logoUrl?: string | null
@@ -151,23 +152,410 @@ interface PreviewCardVisual {
   readonly opacity: number
 }
 
+type PreviewRgb = readonly [number, number, number]
+
+interface PreviewCardContrast {
+  readonly foreground: '#0a0a0a' | '#ffffff'
+  readonly foundation: string
+  readonly veilChannels: string
+  readonly veilOpacity: number
+}
+
+interface PreviewAppReadability {
+  readonly veil: 'dark' | 'light'
+  readonly veilChannels: string
+  readonly veilOpacity: number
+}
+
+interface PreviewAppVeilCandidate {
+  readonly veil: 'dark' | 'light'
+  readonly veilRgb: PreviewRgb
+  readonly rawOpacity: number
+  readonly veilOpacity: number
+}
+
+const PREVIEW_BLACK: PreviewRgb = [0, 0, 0]
+const PREVIEW_WHITE: PreviewRgb = [255, 255, 255]
+
+// Mirrors reiwa's conservative fragment-output policy. These shaders can
+// amplify, add or post-process their input uniforms into display extremes, so
+// preview contrast must sample the output gamut rather than only input colours.
+const FULL_OUTPUT_GAMUT_EFFECTS = new Set([
+  'softAurora',
+  'rippleGrid',
+  'radar',
+  'particles',
+  'liquidChrome',
+  'lineWaves',
+  'grainient',
+  'galaxy',
+  'balatro',
+])
+
+function previewRgbVectorColor(value: unknown): string | null {
+  if (
+    !Array.isArray(value) ||
+    value.length !== 3 ||
+    value.some(
+      (channel) => typeof channel !== 'number' || !Number.isFinite(channel),
+    )
+  ) {
+    return null
+  }
+  const scale = value.every((channel) => channel >= 0 && channel <= 1)
+    ? 255
+    : 1
+  return `#${value
+    .map((channel) =>
+      Math.round(Math.min(255, Math.max(0, channel * scale)))
+        .toString(16)
+        .padStart(2, '0'),
+    )
+    .join('')}`
+}
+
+function resolvePreviewEffectColors(
+  effect: string,
+  props: Readonly<Record<string, unknown>>,
+): string {
+  const colors: string[] = []
+  for (const value of Object.values(props)) {
+    if (typeof value === 'string' && /^#[\da-f]{3,8}$/i.test(value)) {
+      colors.push(value)
+      continue
+    }
+    if (!Array.isArray(value)) continue
+    colors.push(
+      ...value.filter(
+        (entry): entry is string =>
+          typeof entry === 'string' && /^#[\da-f]{3,8}$/i.test(entry),
+      ),
+    )
+    const vector = previewRgbVectorColor(value)
+    if (vector) colors.push(vector)
+  }
+  if (effect === 'rippleGrid' && props['enableRainbow'] === true) {
+    colors.push(
+      '#ff0000',
+      '#ffff00',
+      '#00ff00',
+      '#00ffff',
+      '#0000ff',
+      '#ff00ff',
+    )
+  }
+  if (['dither', 'radar', 'plasma', 'beams', 'galaxy'].includes(effect)) {
+    colors.push('#000000')
+  }
+  if (['liquidChrome', 'galaxy'].includes(effect)) {
+    colors.push('#ffffff')
+  }
+  if (FULL_OUTPUT_GAMUT_EFFECTS.has(effect)) {
+    colors.push('#000000', '#ffffff')
+  }
+  return [...new Set(colors)].join(' ')
+}
+
+function usePrefersReducedMotion(): boolean {
+  const [reduced, setReduced] = useState(
+    () =>
+      typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+  )
+
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return
+    const media = window.matchMedia('(prefers-reduced-motion: reduce)')
+    const update = () => setReduced(media.matches)
+    update()
+    media.addEventListener?.('change', update)
+    return () => media.removeEventListener?.('change', update)
+  }, [])
+
+  return reduced
+}
+
+/**
+ * Lightweight mirror of reiwa's artwork contrast resolver. Branding gradients
+ * are produced by colour inputs and the concept catalogue, so sampling their
+ * hex stops keeps the live preview aligned without mounting another renderer.
+ */
+function resolvePreviewCardContrast(
+  gradient: string,
+  foundation: string,
+  preferredForeground: string,
+  effectArtwork = '',
+  effectOpacity = 0,
+): PreviewCardContrast {
+  const foundationRgb = parsePreviewHex(foundation)
+  const baseSamples = Array.from(gradient.matchAll(/#[\da-f]{3,8}(?![\da-f])/gi))
+    .map((match) => parsePreviewHex(match[0], foundationRgb ?? PREVIEW_BLACK))
+    .filter((sample): sample is PreviewRgb => sample !== null)
+  const effectSamples = Array.from(
+    effectArtwork.matchAll(/#[\da-f]{3,8}(?![\da-f])/gi),
+  )
+    .map((match) => parsePreviewHex(match[0]))
+    .filter((sample): sample is PreviewRgb => sample !== null)
+  const clampedEffectOpacity = Math.min(1, Math.max(0, effectOpacity))
+  const samples =
+    effectSamples.length > 0 && clampedEffectOpacity > 0
+      ? [
+          ...baseSamples,
+          ...baseSamples.flatMap((base) =>
+            effectSamples.map((effect) =>
+              previewComposite(effect, base, clampedEffectOpacity),
+            ),
+          ),
+        ]
+      : baseSamples
+  const resolvedSamples =
+    samples.length > 0
+      ? samples
+      : [foundationRgb ?? (isPreviewLight(preferredForeground) ? PREVIEW_BLACK : PREVIEW_WHITE)]
+  const darkRequirement = previewRequiredVeil(resolvedSamples, PREVIEW_BLACK, PREVIEW_WHITE)
+  const lightRequirement = previewRequiredVeil(resolvedSamples, PREVIEW_WHITE, PREVIEW_BLACK)
+  const prefersLight = isPreviewLight(preferredForeground)
+  const useLight =
+    Math.abs(darkRequirement - lightRequirement) <= 0.015
+      ? prefersLight
+      : lightRequirement < darkRequirement
+  const rawRequirement = useLight ? lightRequirement : darkRequirement
+  const veil = useLight ? PREVIEW_BLACK : PREVIEW_WHITE
+
+  return {
+    foreground: useLight ? '#ffffff' : '#0a0a0a',
+    foundation,
+    veilChannels: veil.join(' '),
+    veilOpacity:
+      Math.round(Math.min(0.75, Math.max(0.12, rawRequirement + 0.025)) * 1000) / 1000,
+  }
+}
+
+function previewReadabilityZones(contrast: PreviewCardContrast): string {
+  const veil = contrast.veilOpacity
+  const edge = Math.min(0.84, veil + 0.12)
+  const artworkWindow = Math.max(0.035, veil * 0.28)
+  const channels = contrast.veilChannels
+  return `linear-gradient(180deg, rgb(${channels} / ${edge}) 0%, rgb(${channels} / ${veil}) 24%, rgb(${channels} / ${artworkWindow}) 30%, rgb(${channels} / ${artworkWindow}) 35%, rgb(${channels} / ${veil}) 41%, rgb(${channels} / ${veil}) 82%, rgb(${channels} / ${edge}) 100%)`
+}
+
+function parsePreviewHex(value: string, backdrop: PreviewRgb = PREVIEW_BLACK): PreviewRgb | null {
+  let raw = value.trim().replace(/^#/, '')
+  if (![3, 4, 6, 8].includes(raw.length) || !/^[\da-f]+$/i.test(raw)) return null
+  if (raw.length === 3 || raw.length === 4) {
+    raw = raw
+      .split('')
+      .map((channel) => `${channel}${channel}`)
+      .join('')
+  }
+  const rgb = [0, 2, 4].map((offset) =>
+    Number.parseInt(raw.slice(offset, offset + 2), 16),
+  ) as unknown as PreviewRgb
+  if (raw.length !== 8) return rgb
+  const alpha = Number.parseInt(raw.slice(6, 8), 16) / 255
+  return previewComposite(rgb, backdrop, alpha)
+}
+
+function previewRequiredVeil(
+  samples: readonly PreviewRgb[],
+  foreground: PreviewRgb,
+  veil: PreviewRgb,
+): number {
+  let required = 0
+  for (const sample of samples) {
+    if (previewContrast(foreground, sample) >= 4.5) continue
+    let low = 0
+    let high = 1
+    for (let iteration = 0; iteration < 18; iteration += 1) {
+      const midpoint = (low + high) / 2
+      if (previewContrast(foreground, previewComposite(veil, sample, midpoint)) >= 4.5) {
+        high = midpoint
+      } else {
+        low = midpoint
+      }
+    }
+    required = Math.max(required, high)
+  }
+  return required
+}
+
+function previewSupportsContrast(
+  samples: readonly PreviewRgb[],
+  textColors: readonly PreviewRgb[],
+  veil: PreviewRgb,
+  opacity: number,
+): boolean {
+  return samples.every((sample) => {
+    const supported = previewComposite(veil, sample, opacity)
+    return textColors.every(
+      (text) => previewContrast(text, supported) >= 4.5,
+    )
+  })
+}
+
+function resolvePreviewAppVeilCandidate(
+  samples: readonly PreviewRgb[],
+  textColors: readonly PreviewRgb[],
+  veil: 'dark' | 'light',
+  veilRgb: PreviewRgb,
+): PreviewAppVeilCandidate | null {
+  const rawOpacity = Math.max(
+    ...textColors.map((text) =>
+      previewRequiredVeil(samples, text, veilRgb),
+    ),
+  )
+  if (rawOpacity <= 0) return null
+
+  const veilOpacity =
+    Math.round(Math.min(0.88, Math.max(0, rawOpacity + 0.03)) * 1000) /
+    1000
+  if (!previewSupportsContrast(samples, textColors, veilRgb, veilOpacity)) {
+    return null
+  }
+
+  return { veil, veilRgb, rawOpacity, veilOpacity }
+}
+
+function previewComposite(
+  foreground: PreviewRgb,
+  background: PreviewRgb,
+  alpha: number,
+): PreviewRgb {
+  return foreground.map(
+    (channel, index) => channel * alpha + background[index] * (1 - alpha),
+  ) as unknown as PreviewRgb
+}
+
+function previewContrast(left: PreviewRgb, right: PreviewRgb): number {
+  const leftLuminance = previewLuminance(left)
+  const rightLuminance = previewLuminance(right)
+  return (
+    (Math.max(leftLuminance, rightLuminance) + 0.05) /
+    (Math.min(leftLuminance, rightLuminance) + 0.05)
+  )
+}
+
+function previewLuminance(rgb: PreviewRgb): number {
+  const [red, green, blue] = rgb.map((channel) => {
+    const normalized = channel / 255
+    return normalized <= 0.04045
+      ? normalized / 12.92
+      : ((normalized + 0.055) / 1.055) ** 2.4
+  })
+  return 0.2126 * red + 0.7152 * green + 0.0722 * blue
+}
+
+function isPreviewLight(value: string): boolean {
+  const color = parsePreviewHex(value)
+  return color ? previewLuminance(color) >= 0.5 : true
+}
+
+function resolvePreviewAppReadability(
+  gradient: string,
+  foundation: string,
+  foreground: string,
+  mutedForeground: string,
+  texture:
+    | {
+        readonly background: string
+        readonly color: string
+        readonly opacity: number
+      }
+    | undefined,
+  textureMode: 'none' | 'texture' | 'concept',
+): PreviewAppReadability | null {
+  const foundationRgb = parsePreviewHex(foundation) ?? PREVIEW_BLACK
+  const gradientSamples = Array.from(
+    gradient.matchAll(/#[\da-f]{3,8}(?![\da-f])/gi),
+  )
+    .map((match) => parsePreviewHex(match[0], foundationRgb))
+    .filter((sample): sample is PreviewRgb => sample !== null)
+  const textureBackground = texture
+    ? parsePreviewHex(texture.background)
+    : null
+  const textureColor = texture ? parsePreviewHex(texture.color) : null
+  const textureSamples: PreviewRgb[] =
+    textureMode === 'texture'
+      ? [textureBackground, textureColor].filter(
+          (sample): sample is PreviewRgb => sample !== null,
+        )
+      : textureMode === 'concept' && textureBackground && textureColor
+        ? [
+            textureBackground,
+            previewComposite(
+              textureColor,
+              textureBackground,
+              Math.min(1, Math.max(0, texture?.opacity ?? 0)),
+            ),
+          ]
+        : []
+  const samples = [...gradientSamples, ...textureSamples]
+  if (samples.length === 0) return null
+  const textColors = [foreground, mutedForeground]
+    .map((value) => parsePreviewHex(value))
+    .filter((sample): sample is PreviewRgb => sample !== null)
+  const resolvedTextColors = textColors.length > 0 ? textColors : [PREVIEW_WHITE]
+  const candidates = [
+    resolvePreviewAppVeilCandidate(
+      samples,
+      resolvedTextColors,
+      'dark',
+      PREVIEW_BLACK,
+    ),
+    resolvePreviewAppVeilCandidate(
+      samples,
+      resolvedTextColors,
+      'light',
+      PREVIEW_WHITE,
+    ),
+  ].filter(
+    (candidate): candidate is PreviewAppVeilCandidate => candidate !== null,
+  )
+  if (candidates.length === 0) return null
+
+  candidates.sort((left, right) => left.rawOpacity - right.rawOpacity)
+  const selected = candidates[0]!
+
+  return {
+    veil: selected.veil,
+    veilChannels: selected.veilRgb.join(' '),
+    veilOpacity: selected.veilOpacity,
+  }
+}
+
+function previewAppReadabilityZones(
+  readability: PreviewAppReadability,
+): string {
+  const channels = readability.veilChannels
+  const veil = readability.veilOpacity
+  const edge = Math.min(0.88, veil + 0.12)
+  return `linear-gradient(180deg, rgb(${channels} / ${edge}) 0%, rgb(${channels} / ${veil}) 16%, rgb(${channels} / ${veil}) 28%, rgb(${channels} / ${veil}) 40%, rgb(${channels} / ${veil}) 60%, rgb(${channels} / ${veil}) 72%, rgb(${channels} / ${veil}) 84%, rgb(${channels} / ${edge}) 100%)`
+}
+
 /** One subscription-card mock in the preview, with its own effect + gradient. */
 function PreviewSubscriptionCard({
   visual,
   primary,
+  primaryFg,
+  foundation,
   brandName,
   cardPattern,
   cardLogo,
   cardLogoUrl,
   radius,
+  reducedMotion,
 }: {
   visual: PreviewCardVisual
   primary: string
+  primaryFg: string
+  foundation: string
   brandName: string
   cardPattern?: string | null
   cardLogo: CardLogoPreset
   cardLogoUrl?: string | null
   radius: string
+  reducedMotion: boolean
 }) {
   const { t } = useTranslation()
   const Effect =
@@ -182,67 +570,131 @@ function PreviewSubscriptionCard({
     }
     return base
   }, [Effect, visual.effect, visual.effectProps, primary])
+  const contrast = useMemo(
+    () =>
+      resolvePreviewCardContrast(
+        visual.gradient,
+        foundation,
+        primaryFg,
+        resolvePreviewEffectColors(visual.effect, effectProps),
+        Effect ? visual.opacity : 0,
+      ),
+    [Effect, effectProps, foundation, primaryFg, visual.effect, visual.gradient, visual.opacity],
+  )
 
   return (
     <div
-      className="relative h-[160px] overflow-hidden p-4 ring-1 ring-white/10"
-      style={{ borderRadius: radius }}
+      data-preview-subscription-card
+      data-preview-card-foreground={
+        contrast.foreground === '#0a0a0a' ? 'dark' : 'light'
+      }
+      className="relative isolate h-[160px] overflow-hidden p-4 [contain:paint]"
+      style={{
+        borderRadius: radius,
+        color: contrast.foreground,
+        boxShadow: `inset 0 0 0 1px ${toRgba(contrast.foreground, 0.1)}`,
+      }}
     >
-      {/* Static foundation / fallback: dark base + operator gradient */}
-      <div className="absolute inset-0" style={{ backgroundColor: '#0b0b0d' }} />
-      <div className="absolute inset-0" style={{ backgroundImage: visual.gradient, opacity: 0.85 }} />
+      {/* Layer order mirrors the normal reiwa card frame. */}
+      <div
+        data-preview-card-layer="foundation"
+        className="absolute inset-0"
+        style={{ backgroundColor: contrast.foundation }}
+      />
+      <div
+        data-preview-card-layer="gradient"
+        className="absolute inset-0"
+        style={{ backgroundImage: visual.gradient }}
+      />
       {/* Live animated effect layer (the REAL ReactBits effect) */}
-      {Effect && (
+      {Effect && !reducedMotion && (
         <Suspense fallback={null}>
-          <div className="absolute inset-0" style={{ opacity: visual.opacity }}>
+          <div
+            aria-hidden="true"
+            data-preview-card-layer="effect"
+            className="absolute inset-0"
+            style={{ opacity: visual.opacity }}
+          >
             <Effect {...effectProps} />
           </div>
         </Suspense>
       )}
-      <div className="absolute inset-0 bg-linear-to-b from-black/40 via-transparent to-black/60" />
       {cardPattern && cardPattern !== 'none' && (
-        <div className="absolute inset-0 opacity-40" style={{ backgroundImage: cardPattern }} />
+        <div
+          data-preview-card-layer="pattern"
+          className="pointer-events-none absolute inset-0 opacity-40"
+          style={{
+            backgroundImage: cardPattern,
+            backgroundSize: cardPattern.includes('gradient(')
+              ? '24px 24px'
+              : undefined,
+          }}
+        />
       )}
+      <div
+        data-preview-card-layer="readability"
+        data-preview-card-readability="wcag-copy-zones"
+        data-preview-card-veil-opacity={contrast.veilOpacity}
+        className="pointer-events-none absolute inset-0"
+        style={{ background: previewReadabilityZones(contrast) }}
+      />
       {/* Watermark — operator-configurable glyph or custom image */}
       <CardLogoMark
         preset={cardLogo}
         customUrl={cardLogoUrl}
         className="pointer-events-none absolute -right-4 -bottom-6 h-28 w-28"
-        style={{ color: '#ffffff', opacity: 0.12 }}
+        style={{ color: contrast.foreground, opacity: 0.12 }}
       />
 
       {/* Card content */}
-      <div className="relative flex h-full flex-col justify-between text-white">
+      <div className="relative flex h-full flex-col justify-between">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-1.5">
             <Wifi className="h-3.5 w-3.5 opacity-90" />
-            <span className="text-[11px] font-semibold opacity-95">{brandName}</span>
+            <span className="text-[11px] font-semibold">{brandName}</span>
           </div>
-          <span className="rounded-full bg-white/25 px-2 py-0.5 text-[8px] font-bold uppercase backdrop-blur-md">
+          <span
+            className="rounded-full px-2 py-0.5 text-[8px] font-bold uppercase backdrop-blur-md"
+            style={{ backgroundColor: toRgba(contrast.foreground, 0.16) }}
+          >
             {t('brandingPage.sections.preview.statusLabel')}
           </span>
         </div>
 
-        <p className="font-mono text-sm tracking-[0.18em] opacity-90">usr_a1b2c3d4e5f6</p>
+        <p
+          data-preview-card-profile-support
+          className="-mx-1 w-fit max-w-full truncate px-1 font-mono text-sm tracking-[0.18em]"
+          style={{
+            backgroundColor: `rgb(${contrast.veilChannels} / ${contrast.veilOpacity})`,
+          }}
+        >
+          usr_a1b2c3d4e5f6
+        </p>
 
         <div>
-          <div className="mb-2 h-1.5 w-full overflow-hidden rounded-full bg-black/35">
-            <div className="h-full w-2/3 rounded-full bg-white/85" />
+          <div
+            className="mb-2 h-1.5 w-full overflow-hidden rounded-full"
+            style={{ backgroundColor: toRgba(contrast.foreground, 0.18) }}
+          >
+            <div
+              className="h-full w-2/3 rounded-full"
+              style={{ backgroundColor: toRgba(contrast.foreground, 0.82) }}
+            />
           </div>
           <div className="flex items-end justify-between">
             <div>
-              <p className="text-[8px] uppercase opacity-60">
+              <p className="text-[10px] font-medium uppercase">
                 {t('brandingPage.sections.preview.remaining')}
               </p>
               <p className="text-[13px] font-bold leading-none">
                 {t('brandingPage.sections.preview.daysMock')}
               </p>
-              <p className="mt-0.5 text-[8px] opacity-55">
+              <p className="mt-0.5 text-[10px]">
                 {t('brandingPage.sections.preview.until', { date: '03/2026' })}
               </p>
             </div>
             <div className="text-right">
-              <p className="text-[8px] uppercase opacity-60">
+              <p className="text-[10px] font-medium uppercase">
                 {t('brandingPage.sections.preview.device')}
               </p>
               <p className="text-[11px] font-medium">iPhone 15</p>
@@ -258,19 +710,25 @@ function PreviewSubscriptionCard({
 function SubscriptionCardsPreview({
   cards,
   primary,
+  primaryFg,
+  foundation,
   brandName,
   cardPattern,
   cardLogo,
   cardLogoUrl,
   radius,
+  reducedMotion,
 }: {
   cards: readonly PreviewCardVisual[]
   primary: string
+  primaryFg: string
+  foundation: string
   brandName: string
   cardPattern?: string | null
   cardLogo: CardLogoPreset
   cardLogoUrl?: string | null
   radius: string
+  reducedMotion: boolean
 }) {
   const { t } = useTranslation()
   const [page, setPage] = useState(0)
@@ -296,11 +754,14 @@ function SubscriptionCardsPreview({
         <PreviewSubscriptionCard
           visual={cards[active] ?? cards[0]!}
           primary={primary}
+          primaryFg={primaryFg}
+          foundation={foundation}
           brandName={brandName}
           cardPattern={cardPattern}
           cardLogo={cardLogo}
           cardLogoUrl={cardLogoUrl}
           radius={radius}
+          reducedMotion={reducedMotion}
         />
       </motion.div>
       {multi && (
@@ -312,10 +773,15 @@ function SubscriptionCardsPreview({
               aria-label={t('brandingPage.sections.preview.cardDot', { index: i + 1 })}
               aria-current={i === active}
               onClick={() => setPage(i)}
-              className={`h-1.5 rounded-full transition-all ${
-                i === active ? 'w-4 bg-white/80' : 'w-1.5 bg-white/30'
-              }`}
-            />
+              className="flex h-6 w-6 items-center justify-center rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-black/70"
+            >
+              <span
+                aria-hidden="true"
+                className={`h-1.5 rounded-full transition-all ${
+                  i === active ? 'w-4 bg-white/80' : 'w-1.5 bg-white/30'
+                }`}
+              />
+            </button>
           ))}
         </div>
       )}
@@ -325,13 +791,16 @@ function SubscriptionCardsPreview({
 
 export function BrandingPreview({ values, focus }: BrandingPreviewProps) {
   const { t } = useTranslation()
+  const reducedMotion = usePrefersReducedMotion()
   const {
+    themePresetId,
     brandName = 'Reiwa',
     tagline,
     logoUrl,
     primary = '#22c55e',
     primaryFg = '#0a0a0a',
     bgPrimary = '#0a0a0a',
+    bgSecondary = '#18181b',
     cardGradient = 'linear-gradient(135deg, #064e3b 0%, #22c55e 100%)',
     cardPattern,
     cardLogo = 'DEFAULT',
@@ -388,8 +857,44 @@ export function BrandingPreview({ values, focus }: BrandingPreviewProps) {
     }
     return base
   }, [AppBgEffect, appBackground, primary])
+  const overlaysConceptTexture =
+    appBackground?.kind === 'gradient' &&
+    typeof themePresetId === 'string' &&
+    themePresetId.startsWith('concept-')
   const appBgTextureCss =
-    appBackground?.kind === 'texture' ? buildTextureCss(appBackground.texture) : null
+    appBackground?.kind === 'texture' || overlaysConceptTexture
+      ? buildTextureCss(appBackground.texture)
+      : null
+  const appReadability = useMemo(
+    () =>
+      appBackground &&
+      appBackground.kind !== 'none' &&
+      appBackground.kind !== 'effect'
+        ? resolvePreviewAppReadability(
+            appBackground.kind === 'gradient'
+              ? appBackground.gradient
+              : '',
+            appBackground.kind === 'texture'
+              ? appBackground.texture.background
+              : bgPrimary,
+            surfaceTheme.foreground,
+            surfaceTheme.mutedForeground,
+            appBackground.texture,
+            appBackground.kind === 'texture'
+              ? 'texture'
+              : overlaysConceptTexture
+                ? 'concept'
+                : 'none',
+          )
+        : null,
+    [
+      appBackground,
+      bgPrimary,
+      overlaysConceptTexture,
+      surfaceTheme.foreground,
+      surfaceTheme.mutedForeground,
+    ],
+  )
 
   // Configured bottom navigation (Навигация tab) → live preview pill.
   const navSource = navItems && navItems.length > 0 ? navItems : DEFAULT_NAV_ITEMS
@@ -435,21 +940,45 @@ export function BrandingPreview({ values, focus }: BrandingPreviewProps) {
 
         {/* Live site-wide app background layer (App background tab). */}
         {appBackground && appBackground.kind !== 'none' && (
-          <div className="pointer-events-none absolute inset-0 overflow-hidden">
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-0 overflow-hidden"
+          >
             {appBackground.kind === 'gradient' && (
               <div className="absolute inset-0" style={{ backgroundImage: appBackground.gradient }} />
             )}
             {appBgTextureCss && (
               <div
+                data-preview-app-background-texture={appBackground.texture.pattern}
                 className="absolute inset-0"
                 style={{
-                  backgroundColor: appBgTextureCss.backgroundColor,
+                  backgroundColor:
+                    appBackground.kind === 'texture'
+                      ? appBgTextureCss.backgroundColor
+                      : undefined,
                   backgroundImage: appBgTextureCss.backgroundImage,
                   backgroundSize: appBgTextureCss.backgroundSize,
+                  backgroundRepeat: 'repeat',
+                  mixBlendMode: overlaysConceptTexture
+                    ? 'soft-light'
+                    : undefined,
                 }}
               />
             )}
-            {AppBgEffect && (
+            {appReadability && appReadability.veilOpacity > 0 && (
+              <div
+                data-preview-app-readability="wcag-direct-copy-zones"
+                data-preview-app-readability-veil={appReadability.veil}
+                data-preview-app-readability-opacity={
+                  appReadability.veilOpacity
+                }
+                className="absolute inset-0"
+                style={{
+                  background: previewAppReadabilityZones(appReadability),
+                }}
+              />
+            )}
+            {AppBgEffect && !reducedMotion && (
               <Suspense fallback={null}>
                 <div className="absolute inset-0" style={{ opacity: appBackground.opacity }}>
                   <AppBgEffect {...appBgEffectProps} />
@@ -514,6 +1043,7 @@ export function BrandingPreview({ values, focus }: BrandingPreviewProps) {
               radius={radius}
               unlimitedLabel={t('brandingPage.sections.planCards.unlimited')}
               emptyLabel={t('brandingPage.sections.planCards.empty')}
+              reducedMotion={reducedMotion}
             />
           ) : (
             <>
@@ -522,11 +1052,14 @@ export function BrandingPreview({ values, focus }: BrandingPreviewProps) {
           <SubscriptionCardsPreview
             cards={previewCards}
             primary={primary}
+            primaryFg={primaryFg}
+            foundation={bgSecondary}
             brandName={brandName}
             cardPattern={cardPattern}
             cardLogo={cardLogo}
             cardLogoUrl={cardLogoUrl}
             radius={radius}
+            reducedMotion={reducedMotion}
           />
 
           {/* Action buttons */}
@@ -637,6 +1170,7 @@ interface TariffListPreviewProps {
   readonly radius: string
   readonly unlimitedLabel: string
   readonly emptyLabel: string
+  readonly reducedMotion: boolean
 }
 
 function TariffListPreview({
@@ -648,6 +1182,7 @@ function TariffListPreview({
   radius,
   unlimitedLabel,
   emptyLabel,
+  reducedMotion,
 }: TariffListPreviewProps) {
   if (plans.length === 0) {
     return (
@@ -669,6 +1204,7 @@ function TariffListPreview({
           cardLogoUrl={cardLogoUrl}
           radius={radius}
           unlimitedLabel={unlimitedLabel}
+          reducedMotion={reducedMotion}
         />
       ))}
     </div>
@@ -683,6 +1219,7 @@ function TariffPreviewCard({
   cardLogoUrl,
   radius,
   unlimitedLabel,
+  reducedMotion,
 }: {
   readonly plan: Plan
   readonly style: PlanCardStyleDraft | undefined
@@ -691,6 +1228,7 @@ function TariffPreviewCard({
   readonly cardLogoUrl?: string | null
   readonly radius: string
   readonly unlimitedLabel: string
+  readonly reducedMotion: boolean
 }) {
   const gradient = style?.gradient && style.gradient.length > 0 ? style.gradient : autoPlanGradient(plan.id)
   const accent = style?.accent && style.accent.length > 0 ? style.accent : primary
@@ -729,9 +1267,13 @@ function TariffPreviewCard({
       className="relative overflow-hidden p-3 ring-1 ring-white/10"
       style={{ borderRadius: radius, backgroundImage: gradient }}
     >
-      {EffectComp && !textureUrl && (
+      {EffectComp && !textureUrl && !reducedMotion && (
         <Suspense fallback={null}>
-          <div className="absolute inset-0" style={{ opacity: effectOpacity }}>
+          <div
+            aria-hidden="true"
+            className="absolute inset-0"
+            style={{ opacity: effectOpacity }}
+          >
             <EffectComp {...effectProps} />
           </div>
         </Suspense>

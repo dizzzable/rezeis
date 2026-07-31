@@ -32,6 +32,14 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { BrandingPreview } from "./branding-preview";
 import { CARD_LOGO_PRESETS, CardLogoMark, type CardLogoPreset } from "./card-logo-mark";
 import {
+  ConceptCardPresetGallery,
+  type ConceptCardPresetGalleryLabels,
+} from "./concept-card-preset-gallery";
+import {
+  CONCEPT_CARD_PRESETS,
+  type ConceptCardPresetVisualPatch,
+} from "./concept-card-presets";
+import {
   createBrandingFormSchema,
   createBrandingDirtyPatch,
   createInitialBrandingDraft,
@@ -199,23 +207,58 @@ export default function WebReiwaPage() {
 
   function applyPreset(preset: ThemePreset): void {
     const patch = createThemePresetVisualPatch(preset);
+    const cardPatch: ConceptCardPresetVisualPatch = {
+      cardGradient: patch.cardGradient,
+      cardPattern: patch.cardPattern,
+      cardEffect: patch.cardEffect,
+      cardEffectProps: patch.cardEffectProps ?? {},
+      cardEffectOpacity: patch.cardEffectOpacity,
+    };
     form.setValue("themePresetId", patch.themePresetId, { shouldDirty: true });
     form.setValue("themePresetVersion", patch.themePresetVersion, { shouldDirty: true });
     form.setValue("primary", patch.primary, { shouldDirty: true });
     form.setValue("primaryFg", patch.primaryFg, { shouldDirty: true });
     form.setValue("bgPrimary", patch.bgPrimary, { shouldDirty: true });
     form.setValue("bgSecondary", patch.bgSecondary, { shouldDirty: true });
-    form.setValue("cardGradient", patch.cardGradient, { shouldDirty: true });
-    form.setValue("cardPattern", patch.cardPattern, { shouldDirty: true });
-    form.setValue("cardEffect", patch.cardEffect, { shouldDirty: true });
-    form.setValue("cardEffectProps", patch.cardEffectProps, { shouldDirty: true });
-    form.setValue("cardEffectOpacity", patch.cardEffectOpacity, { shouldDirty: true });
+    applyConceptCardPreset(cardPatch, true);
+
     form.setValue("bgEffect", patch.bgEffect, { shouldDirty: true });
     form.setValue("appBackground", patch.appBackground, { shouldDirty: true });
     form.setValue("borderRadius", patch.borderRadius, { shouldDirty: true });
     form.setValue("cornerRadii", patch.cornerRadii, { shouldDirty: true });
     form.setValue("fontFamily", patch.fontFamily, { shouldDirty: true });
     form.setValue("surfaceTheme", patch.surfaceTheme, { shouldDirty: true });
+  }
+
+  function applyConceptCardPreset(
+    patch: ConceptCardPresetVisualPatch,
+    synchronizeSlots = false,
+  ): void {
+    // Page colors/background, geometry and navigation stay untouched.
+    form.setValue("cardGradient", patch.cardGradient, { shouldDirty: true });
+    form.setValue("cardPattern", patch.cardPattern, { shouldDirty: true });
+    form.setValue("cardEffect", patch.cardEffect, { shouldDirty: true });
+    form.setValue("cardEffectProps", { ...patch.cardEffectProps }, { shouldDirty: true });
+    form.setValue("cardEffectOpacity", patch.cardEffectOpacity, { shouldDirty: true });
+
+    // A positional slot wins over the global card visual in Reiwa. Preserve
+    // the configured slot count, but synchronize its visual when an explicit
+    // full-theme or concept-card preset is chosen. Otherwise the UI would say
+    // that a preset was applied while Reiwa kept rendering stale slot artwork.
+    if (!synchronizeSlots) return;
+    const existingSlots = form.getValues("cardEffectsByIndex") ?? [];
+    if (existingSlots.length === 0) return;
+    form.setValue(
+      "cardEffectsByIndex",
+      existingSlots.map((slot) => ({
+        ...slot,
+        cardEffect: patch.cardEffect,
+        cardEffectProps: { ...patch.cardEffectProps },
+        cardEffectOpacity: patch.cardEffectOpacity,
+        cardGradient: patch.cardGradient,
+      })),
+      { shouldDirty: true },
+    );
   }
 
   function generateGradient(): void {
@@ -239,6 +282,51 @@ export default function WebReiwaPage() {
       ].some((value) => value.toLocaleLowerCase().includes(needle)),
     );
   }, [presetQuery]);
+  const conceptCardGalleryLabels = useMemo<ConceptCardPresetGalleryLabels>(
+    () => ({
+      catalogLabel: t('brandingPage.sections.card.catalogLabel'),
+      searchLabel: t('brandingPage.sections.card.catalogSearchLabel'),
+      searchPlaceholder: t('brandingPage.sections.card.catalogSearchPlaceholder'),
+      familyFilterLabel: t('brandingPage.sections.card.catalogFamilyFilter'),
+      allFamilies: t('brandingPage.sections.card.catalogAllFamilies'),
+      effectFilterLabel: t('brandingPage.sections.card.catalogEffectFilter'),
+      allEffects: t('brandingPage.sections.card.catalogAllEffects'),
+      effect: t('brandingPage.sections.card.catalogEffect'),
+      pattern: t('brandingPage.sections.card.catalogPattern'),
+      noPattern: t('brandingPage.sections.card.catalogNoPattern'),
+      selected: t('brandingPage.sections.card.catalogApplied'),
+      noResults: t('brandingPage.sections.card.catalogNoResults'),
+      showMore: t('brandingPage.sections.card.catalogShowMore'),
+      results: (visible, total) =>
+        t('brandingPage.sections.card.catalogResults', { visible, total }),
+      apply: (preset) =>
+        t('brandingPage.sections.card.catalogApply', {
+          code: preset.code,
+          name: preset.name,
+          effect: preset.cardEffectName,
+        }),
+    }),
+    [t],
+  );
+  const selectedConceptCardPresetId = useMemo(() => {
+    const props = JSON.stringify(watchedValues.cardEffectProps ?? {});
+    return (
+      CONCEPT_CARD_PRESETS.find(
+        (preset) =>
+          preset.cardGradient === watchedValues.cardGradient &&
+          preset.cardPattern === watchedValues.cardPattern &&
+          preset.cardEffect === watchedValues.cardEffect &&
+          preset.cardEffectOpacity === watchedValues.cardEffectOpacity &&
+          JSON.stringify(preset.cardEffectProps) === props,
+      )?.id ?? null
+    );
+  }, [
+    watchedValues.cardEffect,
+    watchedValues.cardEffectOpacity,
+    watchedValues.cardEffectProps,
+    watchedValues.cardGradient,
+    watchedValues.cardPattern,
+  ]);
 
   if (isLoading) {
     return (
@@ -684,6 +772,29 @@ export default function WebReiwaPage() {
 
           {/* ── Subscription card tab ─────────────────────────────────── */}
           <div className={gate('card')}>
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <Sparkles className="h-4 w-4" />
+                  {t('brandingPage.sections.card.catalogTitle')}
+                </CardTitle>
+                <CardDescription>
+                  {t('brandingPage.sections.card.catalogDescription')}
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                {tab === 'card' ? (
+                  <ConceptCardPresetGallery
+                    selectedPresetId={selectedConceptCardPresetId}
+                    onApply={(_preset, patch) =>
+                      applyConceptCardPreset(patch, true)
+                    }
+                    labels={conceptCardGalleryLabels}
+                  />
+                ) : null}
+              </CardContent>
+            </Card>
+
             <Card>
               <CardHeader>
                 <CardTitle>{t('brandingPage.sections.card.title')}</CardTitle>

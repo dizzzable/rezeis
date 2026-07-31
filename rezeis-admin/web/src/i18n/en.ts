@@ -3282,7 +3282,7 @@ export const en = {
       presets: {
         title: 'Theme Presets',
         description:
-          '104 complete visual systems. Applying one changes only theme-owned fields and preserves your identity, navigation and per-card overrides.',
+          '104 complete visual systems. Applying one preserves identity and navigation, and synchronizes existing per-card slots with the selected theme. You can tune the slots again afterwards.',
         searchPlaceholder: 'Search by code, name, or style…',
         searchLabel: 'Search WEB Reiwa themes',
         count: '{{visible}} of {{total}} themes',
@@ -3326,6 +3326,24 @@ export const en = {
       card: {
         title: 'Subscription Card',
         description: 'Gradient and pattern for the subscription card.',
+        catalogTitle: 'Concept subscription cards',
+        catalogDescription:
+          'Apply any of the 104 concept cards independently. The cabinet theme stays untouched, while existing card slots are synchronized with the selected visual and can be tuned again afterwards.',
+        catalogLabel: 'Concept subscription-card presets',
+        catalogSearchLabel: 'Search concept subscription cards',
+        catalogSearchPlaceholder: 'Name, code, family or effect',
+        catalogFamilyFilter: 'Filter by visual family',
+        catalogAllFamilies: 'All visual families',
+        catalogEffectFilter: 'Filter by animation effect',
+        catalogAllEffects: 'All animation effects',
+        catalogEffect: 'Effect',
+        catalogPattern: 'Pattern',
+        catalogNoPattern: 'No pattern',
+        catalogApplied: 'Applied',
+        catalogNoResults: 'No concept cards match these filters.',
+        catalogShowMore: 'Show more cards',
+        catalogResults: '{{visible}} of {{total}} cards',
+        catalogApply: 'Apply {{code}} {{name}}; effect {{effect}}',
         gradient: 'Card Gradient (CSS)',
         gradientPlaceholder: 'linear-gradient(135deg, #064e3b 0%, #22c55e 100%)',
         generate: 'From primary',

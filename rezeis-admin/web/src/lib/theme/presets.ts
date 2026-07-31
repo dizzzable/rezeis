@@ -15,7 +15,9 @@
 import {
   CONCEPT_PRESETS,
   createConceptThemeCss,
+  getConceptSourceMode,
   type ConceptClassification,
+  type ConceptSourceMode,
 } from './concept-presets'
 
 export interface ThemePreset {
@@ -37,6 +39,7 @@ export interface ThemePreset {
   sourcePage?: number
   mobileWidth?: number
   classification?: ConceptClassification
+  sourceMode?: ConceptSourceMode
 }
 
 // ── Default — shadcn 2024 neutral ────────────────────────────────────────────
@@ -677,6 +680,7 @@ export const CONCEPT_THEME_PRESETS: ThemePreset[] = CONCEPT_PRESETS.map(
     sourcePage: descriptor.sourcePage,
     mobileWidth: descriptor.mobileWidth,
     classification: descriptor.classification,
+    sourceMode: getConceptSourceMode(descriptor),
   }),
 )
 

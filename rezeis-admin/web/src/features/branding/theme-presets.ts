@@ -25,6 +25,16 @@ import type {
 
 export const THEME_PRESET_VERSION = 2
 
+export type ConceptComposition =
+  | 'orthogonal-bands'
+  | 'technical-grid'
+  | 'paper-fields'
+  | 'orbit-spotlight'
+  | 'horizon-waves'
+  | 'aurora-veil'
+  | 'organic-mesh'
+  | 'spotlight'
+
 const FONT_STACK_BY_SOURCE: Readonly<Record<string, string>> = {
   Geist: '"Geist Variable", system-ui, sans-serif',
   'Funnel Sans': '"Funnel Sans Variable", system-ui, sans-serif',
@@ -46,6 +56,8 @@ export interface ThemePreset {
   readonly palette: readonly HexColor[]
   readonly sourcePage: number
   readonly visualFamily: string
+  readonly appComposition: ConceptComposition
+  readonly cardComposition: ConceptComposition
   readonly primary: HexColor
   readonly primaryFg: HexColor
   readonly bgPrimary: HexColor
@@ -121,23 +133,58 @@ export function createConceptReiwaPreset(
   const source = getConceptSourceStyle(descriptor)
   const isLight = getConceptSourceMode(descriptor) === 'light'
   const bgPrimary = getConceptSourceBackgroundColor(descriptor)
-  const foreground = ensureTextContrast(
-    opaqueHex(source.foreground),
-    bgPrimary,
-  )
   const primary = opaqueHex(source.accent)
   const secondaryAccent = pickPrimary(
     descriptor.palette.filter((color) => color !== primary) as HexColor[],
     bgPrimary,
   )
-  const surface = opaqueHex(source.surface)
-  const surfaceHigh = opaqueHex(source.card)
-  const mutedForeground = ensureTextContrast(
-    opaqueHex(source.mutedForeground),
-    surface,
-  )
   const border = opaqueHex(source.border)
   const appGradient = buildBackgroundGradient(descriptor, bgPrimary)
+  const appSamples = extractGradientHexColors(appGradient, bgPrimary)
+  const foreground = ensureTextContrast(
+    opaqueHex(source.foreground),
+    bgPrimary,
+  )
+  const readableSurface = resolveReadableSurface(
+    opaqueHex(source.surface),
+    sourceAlpha(
+      source.surface,
+      descriptor.classification.backgroundBlur ? (isLight ? 0.72 : 0.64) : 0.9,
+    ),
+    bgPrimary,
+    appSamples,
+    foreground,
+  )
+  const readableSurfaceHigh = resolveReadableSurface(
+    opaqueHex(source.card),
+    sourceAlpha(
+      source.card,
+      descriptor.classification.backgroundBlur ? (isLight ? 0.84 : 0.78) : 0.96,
+    ),
+    bgPrimary,
+    appSamples,
+    foreground,
+  )
+  const surface = readableSurface.color
+  const surfaceHigh = readableSurfaceHigh.color
+  const surfaceOpacity = readableSurface.opacity
+  const surfaceHighOpacity = readableSurfaceHigh.opacity
+  const surfaceSamples = appSamples.flatMap((sample) => [
+    mixHex(surface, sample, surfaceOpacity),
+    mixHex(surfaceHigh, sample, surfaceHighOpacity),
+  ])
+  // The global semantic foreground must remain readable on the cabinet
+  // foundation. Surface copies use the same source family and are almost
+  // opaque; muted/control tokens below are the pairs that need composited
+  // worst-case enforcement.
+  const mutedForeground = ensureContrastAcross(
+    opaqueHex(source.mutedForeground),
+    surfaceSamples,
+    4.5,
+  )
+  // Keep a small guard above the 3:1 UI threshold so 8-bit rounding and
+  // browser colour conversion cannot drop a nominally valid boundary below it.
+  const borderStrong = ensureContrastAcross(border, surfaceSamples, 3.1)
   const effect = deriveCardEffect(descriptor)
   const cardPattern = deriveCardPattern(descriptor, primary)
   const hasBlur = descriptor.classification.backgroundBlur
@@ -151,6 +198,8 @@ export function createConceptReiwaPreset(
     palette: descriptor.palette,
     sourcePage: descriptor.sourcePage,
     visualFamily: descriptor.classification.visualFamily,
+    appComposition: classifyAppComposition(descriptor),
+    cardComposition: classifyCardComposition(descriptor),
     primary,
     primaryFg: contrastText(primary),
     bgPrimary,
@@ -164,7 +213,12 @@ export function createConceptReiwaPreset(
       secondaryAccent,
       bgPrimary,
     ),
-    cardEffectOpacity: descriptor.classification.effectClass === 'flat' ? 0.45 : 0.72,
+    cardEffectOpacity:
+      effect === 'paperGrain'
+        ? 0.62
+        : descriptor.classification.effectClass === 'flat'
+          ? 0.68
+          : 0.84,
     bgEffect: deriveLegacyBgEffect(descriptor),
     appBackground: buildAppBackground(
       descriptor,
@@ -181,9 +235,9 @@ export function createConceptReiwaPreset(
       surface,
       surfaceHigh,
       borderSoft: border,
-      borderStrong: ensureUiContrast(border, surface),
-      surfaceOpacity: sourceAlpha(source.surface, hasBlur ? (isLight ? 0.72 : 0.64) : 0.9),
-      surfaceHighOpacity: sourceAlpha(source.card, hasBlur ? (isLight ? 0.84 : 0.78) : 0.96),
+      borderStrong,
+      surfaceOpacity,
+      surfaceHighOpacity,
       borderSoftOpacity: sourceAlpha(source.border, isLight ? 0.18 : 0.14),
       borderStrongOpacity: Math.min(
         1,
@@ -250,17 +304,199 @@ function ensureTextContrast(
   return target
 }
 
-function ensureUiContrast(
+function ensureContrastAcross(
   preferred: HexColor,
-  background: HexColor,
+  backgrounds: readonly HexColor[],
+  minimum: number,
 ): HexColor {
-  if (contrastRatio(preferred, background) >= 3) return preferred
-  const target = contrastText(background)
-  for (let preferredWeight = 0.99; preferredWeight >= 0; preferredWeight -= 0.01) {
+  if (
+    backgrounds.every(
+      (background) => contrastRatio(preferred, background) >= minimum,
+    )
+  ) {
+    return preferred
+  }
+
+  const black: HexColor = '#000000'
+  const white: HexColor = '#FFFFFF'
+  const minimumRatio = (candidate: HexColor): number =>
+    Math.min(
+      ...backgrounds.map((background) =>
+        contrastRatio(candidate, background),
+      ),
+    )
+  const target =
+    minimumRatio(black) >= minimumRatio(white) ? black : white
+
+  for (
+    let preferredWeight = 0.99;
+    preferredWeight >= 0;
+    preferredWeight -= 0.01
+  ) {
     const candidate = mixHex(preferred, target, preferredWeight)
-    if (contrastRatio(candidate, background) >= 3.1) return candidate
+    if (minimumRatio(candidate) >= minimum + 0.05) return candidate
   }
   return target
+}
+
+function extractGradientHexColors(
+  gradient: string,
+  fallback: HexColor,
+): readonly HexColor[] {
+  const colors = [...gradient.matchAll(/#[\da-f]{6}(?:[\da-f]{2})?/gi)].map(
+    (match) => match[0].toUpperCase() as HexColor,
+  )
+  const opaqueBackdrops = colors
+    .filter((color) => color.length === 7)
+    .map(opaqueHex)
+  const backdrops =
+    opaqueBackdrops.length > 0 ? opaqueBackdrops : [fallback]
+  const translucentSamples = colors
+    .filter((color) => color.length === 9)
+    .flatMap((color) =>
+      backdrops.map((backdrop) =>
+        mixHex(opaqueHex(color), backdrop, sourceAlpha(color, 1)),
+      ),
+    )
+  return [...new Set([...backdrops, ...translucentSamples])]
+}
+
+interface ReadableSurface {
+  readonly color: HexColor
+  readonly opacity: number
+}
+
+/**
+ * Preserve the source glass recipe whenever its semantic foreground remains
+ * readable over every app-gradient stop. If an exceptionally translucent,
+ * accent-coloured surface crosses both light and dark stops, strengthen only
+ * that surface towards the concept foundation. This avoids flattening the
+ * other concepts while giving the runtime one stable text tone.
+ */
+function resolveReadableSurface(
+  preferred: HexColor,
+  preferredOpacity: number,
+  foundation: HexColor,
+  appSamples: readonly HexColor[],
+  foreground: HexColor,
+): ReadableSurface {
+  const isReadable = (color: HexColor, opacity: number): boolean =>
+    appSamples.every(
+      (sample) =>
+        contrastRatio(foreground, mixHex(color, sample, opacity)) >= 4.6,
+    )
+
+  if (isReadable(preferred, preferredOpacity)) {
+    return { color: preferred, opacity: preferredOpacity }
+  }
+
+  for (
+    let opacity = Math.max(0.72, preferredOpacity);
+    opacity <= 0.96;
+    opacity += 0.04
+  ) {
+    for (
+      let preferredWeight = 0.95;
+      preferredWeight >= 0;
+      preferredWeight -= 0.05
+    ) {
+      const candidate = mixHex(preferred, foundation, preferredWeight)
+      if (isReadable(candidate, opacity)) {
+        return {
+          color: candidate,
+          opacity: Math.min(0.96, Number(opacity.toFixed(2))),
+        }
+      }
+    }
+  }
+
+  return { color: foundation, opacity: 0.96 }
+}
+
+function stableSeed(value: string): number {
+  let hash = 0x811c9dc5
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193)
+  }
+  return hash >>> 0
+}
+
+function conceptTags(descriptor: ConceptPresetDescriptor): Set<string> {
+  return new Set(descriptor.classification.visualTags)
+}
+
+export function classifyAppComposition(
+  descriptor: ConceptPresetDescriptor,
+): ConceptComposition {
+  const name = descriptor.name.toLocaleLowerCase()
+  const tags = conceptTags(descriptor)
+  if (/monolith|bauhaus|swiss|construct|modular/.test(name)) {
+    return 'orthogonal-bands'
+  }
+  if (
+    tags.has('technical') ||
+    /grid|circuit|blueprint|matrix|terminal|map|cartograph|signal/.test(name)
+  ) {
+    return 'technical-grid'
+  }
+  if (
+    tags.has('editorial') ||
+    /paper|linen|parchment|editorial|collage|news/.test(name)
+  ) {
+    return 'paper-fields'
+  }
+  if (/aurora|borealis|veil/.test(name)) return 'aurora-veil'
+  if (/orbit|lunar|planet|saturn|neptune|venus|polar/.test(name)) {
+    return 'orbit-spotlight'
+  }
+  if (/ocean|lagoon|wave|tide|horizon/.test(name)) return 'horizon-waves'
+  if (descriptor.classification.visualFamily === 'glass-dimensional') {
+    return 'organic-mesh'
+  }
+  if (descriptor.classification.visualFamily === 'hard-edge') {
+    return 'orthogonal-bands'
+  }
+  if (
+    descriptor.classification.visualFamily.includes('glass') ||
+    tags.has('atmospheric')
+  ) {
+    return 'spotlight'
+  }
+  return descriptor.classification.backgroundType === 'mesh-gradient'
+    ? 'organic-mesh'
+    : 'spotlight'
+}
+
+export function classifyCardComposition(
+  descriptor: ConceptPresetDescriptor,
+): ConceptComposition {
+  const name = descriptor.name.toLocaleLowerCase()
+  const tags = conceptTags(descriptor)
+  if (/polar|orbit|lunar|planet|saturn|neptune|venus|monolith/.test(name)) {
+    return 'orbit-spotlight'
+  }
+  if (/ocean|lagoon|wave|tide|horizon/.test(name)) return 'horizon-waves'
+  if (/aurora|borealis|veil/.test(name)) return 'aurora-veil'
+  if (
+    tags.has('technical') ||
+    /grid|circuit|blueprint|matrix|terminal|map|cartograph|signal/.test(name)
+  ) {
+    return 'technical-grid'
+  }
+  if (
+    tags.has('editorial') ||
+    /paper|linen|parchment|editorial|collage|swiss|news/.test(name)
+  ) {
+    return 'paper-fields'
+  }
+  if (descriptor.classification.visualFamily === 'hard-edge') {
+    return 'orthogonal-bands'
+  }
+  if (descriptor.classification.visualFamily === 'glass-dimensional') {
+    return 'organic-mesh'
+  }
+  return 'spotlight'
 }
 
 function buildCardGradient(
@@ -268,10 +504,46 @@ function buildCardGradient(
   canvas: HexColor,
 ): string {
   const source = getConceptSourceStyle(descriptor)
-  const card = opaqueHex(source.card)
-  const surface = opaqueHex(source.surface)
   const accent = opaqueHex(source.accent)
-  return `linear-gradient(135deg, ${card} 0%, ${mixHex(card, accent, 0.78)} 58%, ${mixHex(surface, canvas, 0.72)} 100%)`
+  const seed = stableSeed(`${descriptor.id}:${descriptor.name}:card`)
+  const palette = descriptor.palette.map(opaqueHex)
+  const ordered = [...palette].sort((left, right) => luminance(left) - luminance(right))
+  const dark = ordered[0]
+  const darkTwo = ordered[1] ?? mixHex(dark, canvas, 0.72)
+  const light = ordered.at(-1) ?? contrastText(dark)
+  const secondary = ordered[Math.min(ordered.length - 1, 4)] ?? accent
+  const x = 58 + (seed % 31)
+  const y = 8 + ((seed >>> 8) % 35)
+  const angle = 112 + ((seed >>> 16) % 67)
+
+  switch (classifyCardComposition(descriptor)) {
+    case 'orbit-spotlight':
+      return [
+        `radial-gradient(circle at ${x}% ${y}%, ${withAlpha(light, 'E8')} 0%, ${withAlpha(accent, 'A0')} 13%, transparent 38%)`,
+        `radial-gradient(circle at ${x}% ${y}%, transparent 0 27%, ${withAlpha(secondary, '68')} 28% 30%, transparent 31%)`,
+        `linear-gradient(${angle}deg, ${dark} 0%, ${mixHex(dark, accent, 0.84)} 56%, ${darkTwo} 100%)`,
+      ].join(', ')
+    case 'technical-grid':
+      return `linear-gradient(${angle}deg, ${dark} 0 44%, ${mixHex(dark, accent, 0.7)} 44% 67%, ${darkTwo} 67% 100%)`
+    case 'paper-fields':
+      return `linear-gradient(${angle}deg, ${light} 0 34%, ${mixHex(light, accent, 0.82)} 34% 72%, ${mixHex(light, canvas, 0.72)} 72% 100%)`
+    case 'orthogonal-bands':
+      return `linear-gradient(${angle}deg, ${dark} 0 52%, ${accent} 52% 68%, ${mixHex(darkTwo, secondary, 0.72)} 68% 100%)`
+    case 'horizon-waves':
+      return [
+        `radial-gradient(ellipse 90% 58% at ${x}% 8%, ${withAlpha(secondary, 'CC')} 0%, transparent 64%)`,
+        `linear-gradient(180deg, ${darkTwo} 0%, ${mixHex(dark, accent, 0.72)} 54%, ${dark} 100%)`,
+      ].join(', ')
+    case 'aurora-veil':
+    case 'organic-mesh':
+      return [
+        `radial-gradient(circle at ${100 - x}% ${y}%, ${withAlpha(accent, 'D6')} 0%, transparent 48%)`,
+        `radial-gradient(circle at ${x}% ${100 - y}%, ${withAlpha(secondary, 'B8')} 0%, transparent 52%)`,
+        `linear-gradient(${angle}deg, ${dark} 0%, ${darkTwo} 100%)`,
+      ].join(', ')
+    case 'spotlight':
+      return `radial-gradient(circle at ${x}% ${y}%, ${accent} 0%, ${mixHex(darkTwo, accent, 0.74)} 38%, ${dark} 100%)`
+  }
 }
 
 function buildBackgroundGradient(
@@ -279,21 +551,93 @@ function buildBackgroundGradient(
   canvas: HexColor,
 ): string {
   const source = getConceptSourceStyle(descriptor)
-  if (source.background?.includes('gradient(')) {
-    return source.background
-  }
-  if (source.background?.startsWith('#')) {
+  let base: string
+  if (descriptor.code === 'CU') {
+    // Pencil EaXoT: a light polar mesh under the red monolith and blue slabs.
+    // Keep this foundation explicit; the generic mesh fallback picks dark
+    // palette swatches and turns the right half almost black.
+    base = [
+      'radial-gradient(circle at 48% 108%, #91AAB2 0%, transparent 56%)',
+      'linear-gradient(135deg, #EDF5F7 0%, #C7DBE1 54%, #FFFDFB 100%)',
+    ].join(', ')
+  } else if (source.background?.includes('gradient(')) {
+    base = source.background
+  } else if (source.background?.startsWith('#')) {
     const solid = opaqueHex(source.background as HexColor)
-    return `linear-gradient(135deg, ${solid} 0%, ${solid} 100%)`
+    base = `linear-gradient(135deg, ${solid} 0%, ${solid} 100%)`
+  } else {
+    const [a, b, c] = descriptor.palette.map(opaqueHex)
+    base = [
+      `radial-gradient(circle at 14% 10%, ${withAlpha(a, '72')} 0%, transparent 42%)`,
+      `radial-gradient(circle at 86% 14%, ${withAlpha(c, '58')} 0%, transparent 46%)`,
+      `linear-gradient(145deg, ${canvas} 0%, ${b} 100%)`,
+    ].join(', ')
+  }
+  return addAppComposition(descriptor, base)
+}
+
+function addAppComposition(
+  descriptor: ConceptPresetDescriptor,
+  base: string,
+): string {
+  const seed = stableSeed(`${descriptor.id}:${descriptor.name}:app`)
+  const palette = descriptor.palette.map(opaqueHex)
+  const accent = opaqueHex(getConceptSourceStyle(descriptor).accent)
+  const secondary = palette[3] ?? palette[2] ?? accent
+  const support = palette[4] ?? palette[1] ?? accent
+  const anchor = 58 + (seed % 24)
+  const band = 10 + ((seed >>> 8) % 17)
+
+  if (descriptor.code === 'CU') {
+    return [
+      'conic-gradient(from 0deg at 86% 40%, #376EA82E 0deg 90deg, transparent 90deg 360deg)',
+      'conic-gradient(from 0deg at 70% 40%, #E845452A 0deg 90deg, transparent 90deg 360deg)',
+      'conic-gradient(from 180deg at 32% 72%, #376EA824 0deg 90deg, transparent 90deg 360deg)',
+      base,
+    ].join(', ')
   }
 
-  const [a, b, c, d] = descriptor.palette
-  return [
-    `radial-gradient(circle at 12% 8%, ${withAlpha(a, '8F')} 0%, transparent 40%)`,
-    `radial-gradient(circle at 88% 16%, ${withAlpha(c, '70')} 0%, transparent 44%)`,
-    `radial-gradient(circle at 50% 100%, ${withAlpha(d, '66')} 0%, transparent 48%)`,
-    `linear-gradient(145deg, ${canvas} 0%, ${b} 100%)`,
-  ].join(', ')
+  switch (classifyAppComposition(descriptor)) {
+    case 'orthogonal-bands':
+      return [
+        `linear-gradient(90deg, transparent 0 ${anchor}%, ${withAlpha(accent, '28')} ${anchor}% ${anchor + band}%, ${withAlpha(secondary, '24')} ${anchor + band}% 100%)`,
+        `linear-gradient(0deg, ${withAlpha(secondary, '1F')} 0 24%, transparent 24% 100%)`,
+        base,
+      ].join(', ')
+    case 'technical-grid':
+      return [
+        `repeating-linear-gradient(0deg, ${withAlpha(accent, '16')} 0 1px, transparent 1px 28px)`,
+        `repeating-linear-gradient(90deg, ${withAlpha(accent, '12')} 0 1px, transparent 1px 28px)`,
+        base,
+      ].join(', ')
+    case 'paper-fields':
+      return [
+        `linear-gradient(90deg, ${withAlpha(support, '20')} 0 ${24 + (seed % 18)}%, transparent ${24 + (seed % 18)}% 100%)`,
+        base,
+      ].join(', ')
+    case 'orbit-spotlight':
+      return [
+        `radial-gradient(circle at ${anchor}% 14%, transparent 0 18%, ${withAlpha(accent, '22')} 19% 21%, transparent 22% 100%)`,
+        base,
+      ].join(', ')
+    case 'horizon-waves':
+      return [
+        `repeating-radial-gradient(ellipse 70% 34% at 50% 112%, transparent 0 12%, ${withAlpha(accent, '16')} 13% 14%, transparent 15% 22%)`,
+        base,
+      ].join(', ')
+    case 'aurora-veil':
+    case 'organic-mesh':
+      return [
+        `radial-gradient(circle at ${anchor}% 12%, ${withAlpha(accent, '34')} 0%, transparent 38%)`,
+        `radial-gradient(circle at ${100 - anchor}% 86%, ${withAlpha(secondary, '2B')} 0%, transparent 44%)`,
+        base,
+      ].join(', ')
+    case 'spotlight':
+      return [
+        `radial-gradient(circle at ${anchor}% 8%, ${withAlpha(accent, '24')} 0%, transparent 42%)`,
+        base,
+      ].join(', ')
+  }
 }
 
 function deriveCardPattern(
@@ -392,10 +736,25 @@ function buildAppBackground(
   background: HexColor,
 ): BrandingAppBackgroundDraft {
   const tags = new Set(descriptor.classification.visualTags)
-  const pattern = tags.has('technical') ? 'grid' : 'noise'
+  const composition = classifyAppComposition(descriptor)
+  const pattern =
+    composition === 'technical-grid'
+      ? 'grid'
+      : composition === 'horizon-waves'
+        ? 'waves'
+        : composition === 'orthogonal-bands'
+          ? 'diagonal'
+          : composition === 'orbit-spotlight'
+            ? 'cross'
+            : tags.has('editorial')
+              ? 'noise'
+              : 'dots'
 
   return {
-    kind: descriptor.classification.backgroundType === 'solid' ? 'none' : 'gradient',
+    // Even a source concept with a solid foundation can have semantic bands,
+    // zones or paper fields reconstructed above it. Keep every concept in the
+    // gradient branch so Reiwa does not silently discard that composition.
+    kind: 'gradient',
     effect: 'NONE',
     props: {},
     opacity: 1,
