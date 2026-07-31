@@ -159,6 +159,7 @@ interface PreviewCardContrast {
   readonly foundation: string
   readonly veilChannels: string
   readonly veilOpacity: number
+  readonly supportBackground: string
 }
 
 interface PreviewAppReadability {
@@ -214,10 +215,10 @@ function previewRgbVectorColor(value: unknown): string | null {
     .join('')}`
 }
 
-function resolvePreviewEffectColors(
+function resolvePreviewEffectInputColors(
   effect: string,
   props: Readonly<Record<string, unknown>>,
-): string {
+): readonly string[] {
   const colors: string[] = []
   for (const value of Object.values(props)) {
     if (typeof value === 'string' && /^#[\da-f]{3,8}$/i.test(value)) {
@@ -250,10 +251,31 @@ function resolvePreviewEffectColors(
   if (['liquidChrome', 'galaxy'].includes(effect)) {
     colors.push('#ffffff')
   }
+  return [...new Set(colors)]
+}
+
+function resolvePreviewEffectColors(
+  effect: string,
+  props: Readonly<Record<string, unknown>>,
+): string {
+  const colors = [...resolvePreviewEffectInputColors(effect, props)]
   if (FULL_OUTPUT_GAMUT_EFFECTS.has(effect)) {
     colors.push('#000000', '#ffffff')
   }
   return [...new Set(colors)].join(' ')
+}
+
+function previewEffectPalette(
+  colors: readonly string[],
+  fallback: string,
+): { readonly backgroundColor: string; readonly backgroundImage: string } {
+  const first = colors[0] ?? fallback
+  const middle = colors[Math.floor((colors.length - 1) / 2)] ?? first
+  const last = colors.at(-1) ?? middle
+  return {
+    backgroundColor: first,
+    backgroundImage: `radial-gradient(95% 135% at 4% 100%, ${first} 0%, transparent 64%), radial-gradient(85% 120% at 100% 2%, ${last} 0%, transparent 60%), linear-gradient(135deg, ${first}, ${middle}, ${last})`,
+  }
 }
 
 function usePrefersReducedMotion(): boolean {
@@ -329,6 +351,7 @@ function resolvePreviewCardContrast(
     veilChannels: veil.join(' '),
     veilOpacity:
       Math.round(Math.min(0.75, Math.max(0.12, rawRequirement + 0.025)) * 1000) / 1000,
+    supportBackground: useLight ? '#18181b' : '#f4f4f5',
   }
 }
 
@@ -570,6 +593,15 @@ function PreviewSubscriptionCard({
     }
     return base
   }, [Effect, visual.effect, visual.effectProps, primary])
+  const effectPalette = useMemo(
+    () =>
+      previewEffectPalette(
+        resolvePreviewEffectInputColors(visual.effect, effectProps),
+        foundation,
+      ),
+    [effectProps, foundation, visual.effect],
+  )
+  const effectOpacity = Math.min(1, Math.max(0.05, visual.opacity))
   const contrast = useMemo(
     () =>
       resolvePreviewCardContrast(
@@ -581,6 +613,9 @@ function PreviewSubscriptionCard({
       ),
     [Effect, effectProps, foundation, primaryFg, visual.effect, visual.gradient, visual.opacity],
   )
+  const localSupportStyle = Effect
+    ? { backgroundColor: contrast.supportBackground }
+    : undefined
 
   return (
     <div
@@ -588,6 +623,7 @@ function PreviewSubscriptionCard({
       data-preview-card-foreground={
         contrast.foreground === '#0a0a0a' ? 'dark' : 'light'
       }
+      data-preview-card-support-background={contrast.supportBackground}
       className="relative isolate h-[160px] overflow-hidden p-4 [contain:paint]"
       style={{
         borderRadius: radius,
@@ -606,19 +642,6 @@ function PreviewSubscriptionCard({
         className="absolute inset-0"
         style={{ backgroundImage: visual.gradient }}
       />
-      {/* Live animated effect layer (the REAL ReactBits effect) */}
-      {Effect && !reducedMotion && (
-        <Suspense fallback={null}>
-          <div
-            aria-hidden="true"
-            data-preview-card-layer="effect"
-            className="absolute inset-0"
-            style={{ opacity: visual.opacity }}
-          >
-            <Effect {...effectProps} />
-          </div>
-        </Suspense>
-      )}
       {cardPattern && cardPattern !== 'none' && (
         <div
           data-preview-card-layer="pattern"
@@ -631,13 +654,65 @@ function PreviewSubscriptionCard({
           }}
         />
       )}
-      <div
-        data-preview-card-layer="readability"
-        data-preview-card-readability="wcag-copy-zones"
-        data-preview-card-veil-opacity={contrast.veilOpacity}
-        className="pointer-events-none absolute inset-0"
-        style={{ background: previewReadabilityZones(contrast) }}
-      />
+      {/* The selected effect owns an opaque palette surface. Keeping this
+          whole branch inside Suspense preserves the cheap theme-card fallback
+          until the lazy renderer has loaded. */}
+      {Effect && reducedMotion && (
+        <div
+          aria-hidden="true"
+          data-preview-card-layer="effect"
+          data-preview-card-effect-runtime="static-palette"
+          data-preview-card-effect-foundation={effectPalette.backgroundColor}
+          className="absolute inset-0"
+          style={{ backgroundColor: effectPalette.backgroundColor }}
+        >
+          <div
+            data-preview-card-effect-artwork
+            className="absolute inset-0"
+            style={{
+              backgroundImage: effectPalette.backgroundImage,
+              opacity: effectOpacity,
+            }}
+          />
+        </div>
+      )}
+      {Effect && !reducedMotion && (
+        <Suspense fallback={null}>
+          <div
+            aria-hidden="true"
+            data-preview-card-layer="effect"
+            data-preview-card-effect-runtime="live"
+            data-preview-card-effect-foundation={effectPalette.backgroundColor}
+            className="absolute inset-0"
+            style={{ backgroundColor: effectPalette.backgroundColor }}
+          >
+            <div
+              data-preview-card-effect-artwork
+              className="absolute inset-0"
+              style={{
+                backgroundImage: effectPalette.backgroundImage,
+                opacity: effectOpacity,
+              }}
+            />
+            <div
+              data-preview-card-effect-renderer
+              className="absolute inset-0"
+              style={{ opacity: effectOpacity }}
+            >
+              <Effect {...effectProps} />
+            </div>
+          </div>
+        </Suspense>
+      )}
+      {!Effect && (
+        <div
+          data-preview-card-layer="readability"
+          data-preview-card-readability="wcag-copy-zones"
+          data-preview-card-veil-opacity={contrast.veilOpacity}
+          className="pointer-events-none absolute inset-0"
+          style={{ background: previewReadabilityZones(contrast) }}
+        />
+      )}
       {/* Watermark — operator-configurable glyph or custom image */}
       <CardLogoMark
         preset={cardLogo}
@@ -649,13 +724,22 @@ function PreviewSubscriptionCard({
       {/* Card content */}
       <div className="relative flex h-full flex-col justify-between">
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-1.5">
+          <div
+            data-preview-card-local-support={Effect ? 'plan' : undefined}
+            className={Effect ? '-m-1 flex items-center gap-1.5 rounded-md px-1.5 py-1' : 'flex items-center gap-1.5'}
+            style={localSupportStyle}
+          >
             <Wifi className="h-3.5 w-3.5 opacity-90" />
             <span className="text-[11px] font-semibold">{brandName}</span>
           </div>
           <span
+            data-preview-card-local-support={Effect ? 'status' : undefined}
             className="rounded-full px-2 py-0.5 text-[8px] font-bold uppercase backdrop-blur-md"
-            style={{ backgroundColor: toRgba(contrast.foreground, 0.16) }}
+            style={{
+              backgroundColor:
+                localSupportStyle?.backgroundColor ??
+                toRgba(contrast.foreground, 0.16),
+            }}
           >
             {t('brandingPage.sections.preview.statusLabel')}
           </span>
@@ -665,7 +749,9 @@ function PreviewSubscriptionCard({
           data-preview-card-profile-support
           className="-mx-1 w-fit max-w-full truncate px-1 font-mono text-sm tracking-[0.18em]"
           style={{
-            backgroundColor: `rgb(${contrast.veilChannels} / ${contrast.veilOpacity})`,
+            backgroundColor:
+              localSupportStyle?.backgroundColor ??
+              `rgb(${contrast.veilChannels} / ${contrast.veilOpacity})`,
           }}
         >
           usr_a1b2c3d4e5f6
@@ -682,7 +768,11 @@ function PreviewSubscriptionCard({
             />
           </div>
           <div className="flex items-end justify-between">
-            <div>
+            <div
+              data-preview-card-local-support={Effect ? 'expiry' : undefined}
+              className={Effect ? '-m-1 rounded-md px-1.5 py-1' : undefined}
+              style={localSupportStyle}
+            >
               <p className="text-[10px] font-medium uppercase">
                 {t('brandingPage.sections.preview.remaining')}
               </p>
@@ -693,7 +783,11 @@ function PreviewSubscriptionCard({
                 {t('brandingPage.sections.preview.until', { date: '03/2026' })}
               </p>
             </div>
-            <div className="text-right">
+            <div
+              data-preview-card-local-support={Effect ? 'device' : undefined}
+              className={Effect ? '-m-1 rounded-md px-1.5 py-1 text-right' : 'text-right'}
+              style={localSupportStyle}
+            >
               <p className="text-[10px] font-medium uppercase">
                 {t('brandingPage.sections.preview.device')}
               </p>

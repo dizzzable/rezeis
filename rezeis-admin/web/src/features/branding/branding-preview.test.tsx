@@ -12,6 +12,8 @@ vi.mock('./card-effect-registry', () => ({
     liquidChrome: () => <div data-testid="preview-effect-renderer" />,
     lineWaves: () => <div data-testid="preview-effect-renderer" />,
     rippleGrid: () => <div data-testid="preview-effect-renderer" />,
+    paperWarp: () => <div data-testid="preview-effect-renderer" />,
+    paperGrain: () => <div data-testid="preview-effect-renderer" />,
   },
   getCardEffectDefaults: () => ({}),
 }))
@@ -107,10 +109,57 @@ describe('BrandingPreview subscription card', () => {
     expect(layers).toEqual([
       'foundation',
       'gradient',
-      'effect',
       'pattern',
-      'readability',
+      'effect',
     ])
+    expect(
+      card?.querySelector('[data-preview-card-layer="readability"]'),
+    ).not.toBeInTheDocument()
+    expect(
+      card?.querySelector('[data-preview-card-effect-renderer]'),
+    ).toHaveStyle({ opacity: '0.84' })
+  })
+
+  it.each([
+    {
+      effect: 'paperWarp',
+      colors: ['#121212', '#9470ff', '#8838ff'],
+      opacity: 0.72,
+    },
+    {
+      effect: 'paperGrain',
+      colors: ['#7300ff', '#00bfff', '#000000'],
+      opacity: 0.68,
+    },
+  ])('keeps $effect independent from the theme card artwork', ({ effect, colors, opacity }) => {
+    const { container } = renderWithProviders(
+      <BrandingPreview
+        values={{
+          bgSecondary: '#f8fafc',
+          cardGradient: 'linear-gradient(135deg, #ffffff, #e2e8f0)',
+          cardPattern: 'linear-gradient(#ff000033 1px, transparent 1px)',
+          cardEffect: effect,
+          cardEffectProps: { colors },
+          cardEffectOpacity: opacity,
+        }}
+      />,
+    )
+
+    const card = container.querySelector('[data-preview-subscription-card]')
+    const effectLayer = card?.querySelector(
+      '[data-preview-card-layer="effect"]',
+    )
+    const pattern = card?.querySelector('[data-preview-card-layer="pattern"]')
+    const artwork = card?.querySelector('[data-preview-card-effect-artwork]')
+
+    expect(effectLayer).toHaveStyle({ backgroundColor: colors[0] })
+    expect(artwork).toHaveStyle({ opacity: String(opacity) })
+    expect(
+      card?.querySelector('[data-preview-card-layer="readability"]'),
+    ).not.toBeInTheDocument()
+    expect(pattern?.compareDocumentPosition(effectLayer as Node)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    )
   })
 
   it('uses adaptive local readability zones instead of a black full-card film', () => {
@@ -425,7 +474,7 @@ describe('BrandingPreview subscription card', () => {
     expect(failures).toEqual([])
   })
 
-  it('accounts for bright animated colours in the card contrast veil', () => {
+  it('keeps bright animated colours vivid and supports copy locally', () => {
     const { container } = renderWithProviders(
       <BrandingPreview
         values={{
@@ -440,12 +489,22 @@ describe('BrandingPreview subscription card', () => {
       />,
     )
 
-    const readability = container.querySelector(
-      '[data-preview-card-layer="readability"]',
+    const card = container.querySelector(
+      '[data-preview-subscription-card]',
     )
+    const foreground =
+      card?.getAttribute('data-preview-card-foreground') === 'dark'
+        ? hexRgb('#0a0a0a')
+        : hexRgb('#ffffff')
+    const support = card?.getAttribute(
+      'data-preview-card-support-background',
+    )
+
     expect(
-      Number(readability?.getAttribute('data-preview-card-veil-opacity')),
-    ).toBeGreaterThan(0.12)
+      card?.querySelector('[data-preview-card-layer="readability"]'),
+    ).not.toBeInTheDocument()
+    expect(support).toBeTruthy()
+    expect(contrast(foreground, hexRgb(support!))).toBeGreaterThanOrEqual(4.5)
   })
 
   it('includes numeric shader colour vectors in preview contrast', () => {
@@ -463,12 +522,13 @@ describe('BrandingPreview subscription card', () => {
       />,
     )
 
-    const readability = container.querySelector(
-      '[data-preview-card-layer="readability"]',
+    const effect = container.querySelector(
+      '[data-preview-card-layer="effect"]',
     )
-    expect(
-      Number(readability?.getAttribute('data-preview-card-veil-opacity')),
-    ).toBeGreaterThan(0.12)
+    expect(effect).toHaveAttribute(
+      'data-preview-card-effect-foundation',
+      '#ffffff',
+    )
   })
 
   it('keeps concept CS readable when LineWaves amplifies dark inputs to yellow', () => {
@@ -493,15 +553,15 @@ describe('BrandingPreview subscription card', () => {
     )
 
     const card = container.querySelector('[data-preview-subscription-card]')
-    const readability = card?.querySelector(
-      '[data-preview-card-layer="readability"]',
-    )
-    const veil = Number(
-      readability?.getAttribute('data-preview-card-veil-opacity'),
+    const support = card?.getAttribute(
+      'data-preview-card-support-background',
     )
 
     expect(card).toHaveAttribute('data-preview-card-foreground', 'dark')
-    expect(veil).toBeGreaterThanOrEqual(0.45)
+    expect(support).toBe('#f4f4f5')
+    expect(contrast(hexRgb('#0a0a0a'), hexRgb(support!))).toBeGreaterThanOrEqual(
+      4.5,
+    )
   })
 
   it.each([
@@ -521,10 +581,7 @@ describe('BrandingPreview subscription card', () => {
         },
         cardEffectOpacity: 0.84,
       },
-      base: '#163B3B',
-      shaderExtreme: '#000000',
       foreground: [10, 10, 10] as Rgb,
-      veil: [255, 255, 255] as Rgb,
     },
     {
       name: 'light foreground over a RippleGrid white extreme',
@@ -541,52 +598,30 @@ describe('BrandingPreview subscription card', () => {
         },
         cardEffectOpacity: 0.68,
       },
-      base: '#204B54',
-      shaderExtreme: '#ffffff',
       foreground: [255, 255, 255] as Rgb,
-      veil: [0, 0, 0] as Rgb,
     },
   ])(
-    'applies full local profile support after the weak shader window: $name',
-    ({ values, base, shaderExtreme, foreground, veil }) => {
+    'applies opaque local support without a full-card veil: $name',
+    ({ values, foreground }) => {
       const { container } = renderWithProviders(
         <BrandingPreview values={values} />,
       )
       const card = container.querySelector(
         '[data-preview-subscription-card]',
       )
-      const readability = card?.querySelector(
-        '[data-preview-card-layer="readability"]',
-      )
       const profileSupport = card?.querySelector(
         '[data-preview-card-profile-support]',
       )
-      const veilOpacity = Number(
-        readability?.getAttribute('data-preview-card-veil-opacity'),
-      )
-      const artworkWindow = Math.max(0.035, veilOpacity * 0.28)
-      const shaderSample = composite(
-        hexRgb(shaderExtreme),
-        hexRgb(base),
-        values.cardEffectOpacity,
-      )
-      const globallySupported = composite(
-        veil,
-        shaderSample,
-        artworkWindow,
-      )
-      const locallySupported = composite(
-        veil,
-        globallySupported,
-        veilOpacity,
+      const support = card?.getAttribute(
+        'data-preview-card-support-background',
       )
 
       expect(profileSupport).not.toBeNull()
-      expect(profileSupport?.getAttribute('style')).toContain(
-        `rgba(${veil.join(', ')}, ${veilOpacity})`,
-      )
-      expect(contrast(foreground, globallySupported)).toBeLessThan(4.5)
-      expect(contrast(foreground, locallySupported)).toBeGreaterThanOrEqual(
+      expect(
+        card?.querySelector('[data-preview-card-layer="readability"]'),
+      ).not.toBeInTheDocument()
+      expect(profileSupport).toHaveStyle({ backgroundColor: support! })
+      expect(contrast(foreground, hexRgb(support!))).toBeGreaterThanOrEqual(
         4.5,
       )
     },
@@ -625,6 +660,19 @@ describe('BrandingPreview subscription card', () => {
     )
 
     expect(queryByTestId('preview-effect-renderer')).not.toBeInTheDocument()
+    const effect = container.querySelector(
+      '[data-preview-card-layer="effect"]',
+    )
+    expect(effect).toHaveAttribute(
+      'data-preview-card-effect-runtime',
+      'static-palette',
+    )
+    expect(
+      effect?.querySelector('[data-preview-card-effect-artwork]'),
+    ).toHaveStyle({ opacity: '0.8' })
+    expect(
+      container.querySelector('[data-preview-card-layer="readability"]'),
+    ).not.toBeInTheDocument()
     const dots = container.querySelectorAll('button[aria-current]')
     expect(dots).toHaveLength(2)
     dots.forEach((dot) => {
