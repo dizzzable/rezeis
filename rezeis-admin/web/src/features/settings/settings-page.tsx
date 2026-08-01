@@ -421,7 +421,7 @@ export function BrandingTab({ settings }: { settings: AdminSettings | undefined 
   const [channelUsername, setChannelUsername] = useState(branding.channelUsername ?? '')
   const [channelRecheck, setChannelRecheck] = useState(branding.channelRecheck ?? true)
   const [requireTelegramWebCredentials, setRequireTelegramWebCredentials] = useState(
-    branding.requireTelegramWebCredentials ?? true,
+    branding.requireTelegramWebCredentials ?? false,
   )
 
   // Verification templates

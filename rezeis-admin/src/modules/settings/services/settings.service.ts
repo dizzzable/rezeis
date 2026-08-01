@@ -175,7 +175,7 @@ const DEFAULT_INTERNAL_PLATFORM_POLICY: InternalPlatformPolicyInterface = {
   channelId: null,
   channelUsername: null,
   channelRecheck: true,
-  requireTelegramWebCredentials: true,
+  requireTelegramWebCredentials: false,
   accessMode: 'PUBLIC',
   inviteModeStartedAt: null,
   defaultCurrency: 'USD',
