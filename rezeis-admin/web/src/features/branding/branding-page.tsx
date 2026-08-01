@@ -296,6 +296,7 @@ export default function WebReiwaPage() {
       | ReturnType<typeof createConceptThemePresetVisualPatch>
       | BrandingThemeVariantsDraft['light'],
     synchronizeSlots: boolean,
+    applyCardArtwork = true,
   ): void {
     const cardPatch: ConceptCardPresetVisualPatch = {
       cardGradient: patch.cardGradient,
@@ -312,7 +313,16 @@ export default function WebReiwaPage() {
     form.setValue("primaryFg", patch.primaryFg, { shouldDirty: true });
     form.setValue("bgPrimary", patch.bgPrimary, { shouldDirty: true });
     form.setValue("bgSecondary", patch.bgSecondary, { shouldDirty: true });
-    applyConceptCardPreset(cardPatch, synchronizeSlots);
+    if (applyCardArtwork) {
+      applyConceptCardPreset(cardPatch, synchronizeSlots);
+    } else {
+      // Changing only the default brightness must not replace the animation
+      // selected by the operator. The gradient still follows the selected
+      // brightness, including its lightweight per-position fallback.
+      form.setValue("cardGradient", cardPatch.cardGradient, { shouldDirty: true });
+      form.setValue("cardPattern", cardPatch.cardPattern, { shouldDirty: true });
+      if (synchronizeSlots) synchronizeCardSlotGradient(cardPatch.cardGradient);
+    }
 
     form.setValue("bgEffect", patch.bgEffect, { shouldDirty: true });
     form.setValue("appBackground", patch.appBackground, { shouldDirty: true });
@@ -645,7 +655,7 @@ export default function WebReiwaPage() {
                               const variant = watchedValues.themeVariants?.[mode];
                               if (!variant) return;
                               form.setValue('themeDefaultMode', mode, { shouldDirty: true });
-                              applyConceptVisualPatch(variant, true);
+                              applyConceptVisualPatch(variant, true, false);
                             }}
                           >
                             <SelectTrigger id="themeDefaultMode">

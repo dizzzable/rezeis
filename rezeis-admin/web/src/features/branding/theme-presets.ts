@@ -1064,7 +1064,8 @@ function deriveCardEffect(descriptor: ConceptPresetDescriptor): string {
   const name = descriptor.name.toLocaleLowerCase()
   const tags = new Set(descriptor.classification.visualTags)
 
-  if (/paper|linen|parchment|editorial|collage|swiss/.test(name)) return 'paperGrain'
+  if (/sakura|botanical|floral|petal|garden/.test(name)) return 'paperSwirl'
+  if (/paper|linen|parchment|collage|swiss/.test(name)) return 'paperGrain'
   if (/chrome|metal|silver|pearl|porcelain|ceramic|prism|hologram/.test(name)) {
     return 'liquidChrome'
   }
@@ -1078,7 +1079,7 @@ function deriveCardEffect(descriptor: ConceptPresetDescriptor): string {
   }
   if (/smoke|mist|plasma|bloom|veil/.test(name)) return 'plasma'
   if (tags.has('technical')) return 'dither'
-  if (tags.has('editorial')) return 'paperGrain'
+  if (tags.has('editorial')) return 'paperMesh'
   if (descriptor.classification.backgroundBlur) return 'softAurora'
   return 'grainient'
 }
@@ -1117,6 +1118,26 @@ function buildEffectProps(
         colors: [primary, accent, mixHex(primary, background, 0.55), background],
         speed: 0.35,
         noise: 0.2,
+      }
+    case 'paperMesh':
+      return {
+        colors: [primary, accent, mixHex(primary, background, 0.55), background],
+        distortion: 0.78,
+        swirl: 0.15,
+        speed: 0.72,
+      }
+    case 'paperSwirl':
+      return {
+        colorBack: background,
+        colors: [primary, accent, mixHex(primary, background, 0.55)],
+        bandCount: 4,
+        twist: 0.22,
+        center: 0.24,
+        proportion: 0.52,
+        softness: 0.18,
+        noiseFrequency: 0.55,
+        noise: 0.16,
+        speed: 0.58,
       }
     case 'grainient':
       return {

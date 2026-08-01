@@ -14,6 +14,8 @@ vi.mock('./card-effect-registry', () => ({
     rippleGrid: () => <div data-testid="preview-effect-renderer" />,
     paperWarp: () => <div data-testid="preview-effect-renderer" />,
     paperGrain: () => <div data-testid="preview-effect-renderer" />,
+    paperMesh: () => <div data-testid="preview-effect-renderer" />,
+    paperSwirl: () => <div data-testid="preview-effect-renderer" />,
   },
   getCardEffectDefaults: () => ({}),
 }))
@@ -691,7 +693,7 @@ describe('BrandingPreview subscription card', () => {
     },
   )
 
-  it('keeps a static selected palette while reduced motion preserves accessible carousel targets', () => {
+  it('keeps the configured card effect live while reduced motion preserves accessible carousel targets', () => {
     vi.stubGlobal(
       'matchMedia',
       vi.fn().mockReturnValue({
@@ -700,7 +702,7 @@ describe('BrandingPreview subscription card', () => {
         removeEventListener: vi.fn(),
       }),
     )
-    const { container, queryByTestId } = renderWithProviders(
+    const { container, getByTestId } = renderWithProviders(
       <BrandingPreview
         values={{
           cardEffect: 'aurora',
@@ -723,13 +725,13 @@ describe('BrandingPreview subscription card', () => {
       />,
     )
 
-    expect(queryByTestId('preview-effect-renderer')).not.toBeInTheDocument()
+    expect(getByTestId('preview-effect-renderer')).toBeInTheDocument()
     const effect = container.querySelector(
       '[data-preview-card-layer="effect"]',
     )
     expect(effect).toHaveAttribute(
       'data-preview-card-effect-runtime',
-      'static-palette',
+      'live',
     )
     expect(
       effect?.querySelector('[data-preview-card-effect-artwork]'),

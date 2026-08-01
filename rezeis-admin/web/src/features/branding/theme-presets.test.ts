@@ -131,6 +131,31 @@ describe('WEB Reiwa theme catalog', () => {
     }
   })
 
+  it('maps floral and editorial concepts to visibly dynamic Paper effects', () => {
+    const midnightSakura = CONCEPT_THEME_PRESETS.find(
+      (preset) => preset.code === 'CA',
+    )
+    const editorialEffects = new Set(['paperMesh', 'paperSwirl'])
+
+    expect(midnightSakura?.name).toBe('Midnight Sakura')
+    expect(midnightSakura?.cardEffect).toBe('paperSwirl')
+    expect(midnightSakura?.cardEffectProps).toMatchObject({
+      speed: expect.any(Number),
+      colors: expect.any(Array),
+    })
+
+    const editorialPaperPresets = CONCEPT_THEME_PRESETS.filter((preset) => {
+      const descriptor = CONCEPT_PRESETS.find(
+        (candidate) => candidate.id === preset.id,
+      )
+      return (
+        new Set<string>(descriptor?.classification.visualTags).has('editorial') &&
+        editorialEffects.has(preset.cardEffect)
+      )
+    })
+    expect(editorialPaperPresets).not.toHaveLength(0)
+  })
+
   it('builds a minimal valid PATCH for every theme despite unchanged legacy settings', () => {
     const schema = createBrandingFormSchema(validationMessages)
     const legacyBase = createInitialBrandingDraft({

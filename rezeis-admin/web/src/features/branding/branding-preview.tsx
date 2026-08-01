@@ -572,7 +572,6 @@ function PreviewSubscriptionCard({
   cardLogo,
   cardLogoUrl,
   radius,
-  reducedMotion,
 }: {
   visual: PreviewCardVisual
   primary: string
@@ -583,7 +582,6 @@ function PreviewSubscriptionCard({
   cardLogo: CardLogoPreset
   cardLogoUrl?: string | null
   radius: string
-  reducedMotion: boolean
 }) {
   const { t } = useTranslation()
   const Effect =
@@ -655,29 +653,10 @@ function PreviewSubscriptionCard({
           }}
         />
       )}
-      {/* Reduced motion preserves the selected palette without starting the
-          infinite renderer. The live preview otherwise owns the same opaque
-          effect surface as reiwa. */}
-      {Effect && reducedMotion && (
-        <div
-          aria-hidden="true"
-          data-preview-card-layer="effect"
-          data-preview-card-effect-runtime="static-palette"
-          data-preview-card-effect-foundation={effectPalette.backgroundColor}
-          className="absolute inset-0"
-          style={{ backgroundColor: effectPalette.backgroundColor }}
-        >
-          <div
-            data-preview-card-effect-artwork
-            className="absolute inset-0"
-            style={{
-              backgroundImage: effectPalette.backgroundImage,
-              opacity: effectOpacity,
-            }}
-          />
-        </div>
-      )}
-      {Effect && !reducedMotion && (
+      {/* Subscription-card effects intentionally stay live in the preview.
+          Reiwa treats an explicitly configured card effect as branded artwork
+          rather than decorative motion, so this must mirror the live card. */}
+      {Effect && (
         <Suspense fallback={null}>
           <div
             aria-hidden="true"
@@ -790,7 +769,6 @@ function SubscriptionCardsPreview({
   cardLogo,
   cardLogoUrl,
   radius,
-  reducedMotion,
 }: {
   cards: readonly PreviewCardVisual[]
   primary: string
@@ -801,7 +779,6 @@ function SubscriptionCardsPreview({
   cardLogo: CardLogoPreset
   cardLogoUrl?: string | null
   radius: string
-  reducedMotion: boolean
 }) {
   const { t } = useTranslation()
   const [page, setPage] = useState(0)
@@ -834,7 +811,6 @@ function SubscriptionCardsPreview({
           cardLogo={cardLogo}
           cardLogoUrl={cardLogoUrl}
           radius={radius}
-          reducedMotion={reducedMotion}
         />
       </motion.div>
       {multi && (
@@ -1199,7 +1175,6 @@ export function BrandingPreview({ values, focus }: BrandingPreviewProps) {
             cardLogo={cardLogo}
             cardLogoUrl={cardLogoUrl}
             radius={radius}
-            reducedMotion={reducedMotion}
           />
 
           {/* Action buttons */}
