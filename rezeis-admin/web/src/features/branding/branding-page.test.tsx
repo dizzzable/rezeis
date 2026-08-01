@@ -6,7 +6,7 @@ import api from '@/lib/api'
 import { renderWithProviders } from '@/test/test-utils'
 import WebReiwaPage from './branding-page'
 import { CONCEPT_CARD_PRESETS } from './concept-card-presets'
-import { THEME_PRESETS } from './theme-presets'
+import { CONCEPT_THEME_PRESETS } from './theme-presets'
 
 // WebReiwaPage mounts every tab's section tree at once (kept mounted so the
 // form/preview stay intact), so the first render is heavy — under the full
@@ -180,7 +180,7 @@ describe('WebReiwaPage branding settings', () => {
 
     await waitFor(() => expect(patchSpy).toHaveBeenCalledOnce())
     const payload = patchSpy.mock.calls[0]?.[1] as Record<string, unknown>
-    const selectedTheme = THEME_PRESETS[0]
+    const selectedTheme = CONCEPT_THEME_PRESETS[0]
     expect(payload).toMatchObject({
       themePresetId: 'concept-a',
       themePresetVersion: 2,

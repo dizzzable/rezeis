@@ -64,10 +64,15 @@ import { PlanCardStylesSection } from "./plan-card-styles-section";
 import { NavConfigSection } from "./nav-config-section";
 import {
   CARD_GRADIENT_PRESETS,
+  CONCEPT_THEME_PRESETS,
   FONT_OPTIONS,
+  LEGACY_THEME_PRESETS,
   THEME_PRESETS,
-  createThemePresetVisualPatch,
+  createConceptThemePresetVisualPatch,
+  createLegacyThemePresetVisualPatch,
   gradientFromPrimary,
+  type ConceptThemePreset,
+  type LegacyThemePreset,
   type ThemePreset,
 } from "./theme-presets";
 
@@ -206,7 +211,34 @@ export default function WebReiwaPage() {
   };
 
   function applyPreset(preset: ThemePreset): void {
-    const patch = createThemePresetVisualPatch(preset);
+    if (preset.kind === 'legacy') {
+      applyLegacyPreset(preset);
+      return;
+    }
+    applyConceptPreset(preset);
+  }
+
+  /**
+   * A standard theme repaints the palette, the card gradient and the legacy
+   * background effect — nothing else. Corner radii, typography, semantic
+   * surfaces, card artwork and the app background stay as the operator left
+   * them, exactly as these themes behaved before the concept catalog arrived.
+   */
+  function applyLegacyPreset(preset: LegacyThemePreset): void {
+    const patch = createLegacyThemePresetVisualPatch(preset);
+    form.setValue("themePresetId", patch.themePresetId, { shouldDirty: true });
+    form.setValue("themePresetVersion", patch.themePresetVersion, { shouldDirty: true });
+    form.setValue("primary", patch.primary, { shouldDirty: true });
+    form.setValue("primaryFg", patch.primaryFg, { shouldDirty: true });
+    form.setValue("bgPrimary", patch.bgPrimary, { shouldDirty: true });
+    form.setValue("bgSecondary", patch.bgSecondary, { shouldDirty: true });
+    form.setValue("cardGradient", patch.cardGradient, { shouldDirty: true });
+    form.setValue("bgEffect", patch.bgEffect, { shouldDirty: true });
+    synchronizeCardSlotGradient(patch.cardGradient);
+  }
+
+  function applyConceptPreset(preset: ConceptThemePreset): void {
+    const patch = createConceptThemePresetVisualPatch(preset);
     const cardPatch: ConceptCardPresetVisualPatch = {
       cardGradient: patch.cardGradient,
       cardPattern: patch.cardPattern,
@@ -228,6 +260,22 @@ export default function WebReiwaPage() {
     form.setValue("cornerRadii", patch.cornerRadii, { shouldDirty: true });
     form.setValue("fontFamily", patch.fontFamily, { shouldDirty: true });
     form.setValue("surfaceTheme", patch.surfaceTheme, { shouldDirty: true });
+  }
+
+  /**
+   * A positional slot gradient wins over the global card visual in Reiwa, so a
+   * stale slot would make the applied standard theme invisible on the card.
+   * Only the gradient is synchronized — the slot animation stays operator-owned
+   * because a standard theme never had an opinion about it.
+   */
+  function synchronizeCardSlotGradient(cardGradient: string | null): void {
+    const existingSlots = form.getValues("cardEffectsByIndex") ?? [];
+    if (existingSlots.length === 0) return;
+    form.setValue(
+      "cardEffectsByIndex",
+      existingSlots.map((slot) => ({ ...slot, cardGradient })),
+      { shouldDirty: true },
+    );
   }
 
   function applyConceptCardPreset(
@@ -270,10 +318,21 @@ export default function WebReiwaPage() {
   // normalized through createInitialBrandingDraft, so the watched snapshot is
   // complete even though react-hook-form exposes it as DeepPartial.
   const watchedValues = useWatch({ control: form.control }) as BrandingFormDraft;
-  const filteredThemePresets = useMemo(() => {
+  const legacyPresetLabel = (preset: LegacyThemePreset): string =>
+    t(`brandingPage.presets.${preset.id}`);
+  const filteredLegacyPresets = useMemo(() => {
     const needle = presetQuery.trim().toLocaleLowerCase();
-    if (!needle) return THEME_PRESETS;
-    return THEME_PRESETS.filter((preset) =>
+    if (!needle) return LEGACY_THEME_PRESETS;
+    return LEGACY_THEME_PRESETS.filter((preset) =>
+      [preset.id, t(`brandingPage.presets.${preset.id}`)].some((value) =>
+        value.toLocaleLowerCase().includes(needle),
+      ),
+    );
+  }, [presetQuery, t]);
+  const filteredConceptPresets = useMemo(() => {
+    const needle = presetQuery.trim().toLocaleLowerCase();
+    if (!needle) return CONCEPT_THEME_PRESETS;
+    return CONCEPT_THEME_PRESETS.filter((preset) =>
       [
         preset.code,
         preset.name,
@@ -282,6 +341,8 @@ export default function WebReiwaPage() {
       ].some((value) => value.toLocaleLowerCase().includes(needle)),
     );
   }, [presetQuery]);
+  const visibleThemePresetCount =
+    filteredLegacyPresets.length + filteredConceptPresets.length;
   const conceptCardGalleryLabels = useMemo<ConceptCardPresetGalleryLabels>(
     () => ({
       catalogLabel: t('brandingPage.sections.card.catalogLabel'),
@@ -404,62 +465,62 @@ export default function WebReiwaPage() {
                   </div>
                   <span className="text-sm text-muted-foreground">
                     {t('brandingPage.sections.presets.count', {
-                      visible: filteredThemePresets.length,
+                      visible: visibleThemePresetCount,
                       total: THEME_PRESETS.length,
                     })}
                   </span>
                 </div>
-                <div className="grid max-h-[640px] grid-cols-2 gap-3 overflow-y-auto pr-1 sm:grid-cols-3 xl:grid-cols-4">
-                  {filteredThemePresets.map((preset) => {
-                    const isActive =
-                      watchedValues.themePresetId === preset.id &&
-                      watchedValues.themePresetVersion === preset.version;
-                    return (
-                      <button
-                        key={preset.id}
-                        type="button"
-                        onClick={() => applyPreset(preset)}
-                        aria-pressed={isActive}
-                        aria-label={`${preset.code} ${preset.name}`}
-                        className={`group relative flex flex-col gap-2 rounded-xl border p-3 text-left transition-all hover:scale-[1.02] ${
-                          isActive ? "border-primary ring-2 ring-primary/40" : "border-border hover:border-primary/40"
-                        }`}
-                      >
-                        <div
-                          className="h-12 w-full rounded-lg ring-1 ring-white/10"
-                          style={{ backgroundImage: preset.cardGradient }}
-                        />
-                        <div className="flex h-2 overflow-hidden rounded-full">
-                          {preset.palette.map((color, index) => (
-                            <span
-                              key={`${preset.id}-${color}-${index}`}
-                              className="h-full flex-1"
-                              style={{ backgroundColor: color }}
-                            />
-                          ))}
-                        </div>
-                        <div className="flex items-center justify-between">
-                          <span className="min-w-0 text-xs font-medium">
-                            <span className="mr-1 font-mono text-[10px] text-muted-foreground">
-                              {preset.code}
-                            </span>
-                            <span className="line-clamp-1">{preset.name}</span>
-                          </span>
-                          <span
-                            className="h-3 w-3 rounded-full ring-1 ring-white/20"
-                            style={{ backgroundColor: preset.primary }}
+                <div className="max-h-[640px] space-y-5 overflow-y-auto pr-1">
+                  {filteredLegacyPresets.length > 0 && (
+                    <section className="space-y-2">
+                      <h3 className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                        {t('brandingPage.sections.presets.standardGroup')}
+                        <span className="font-normal normal-case tracking-normal">
+                          {filteredLegacyPresets.length}
+                        </span>
+                      </h3>
+                      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-4">
+                        {filteredLegacyPresets.map((preset) => (
+                          <ThemePresetButton
+                            key={preset.id}
+                            preset={preset}
+                            label={legacyPresetLabel(preset)}
+                            isActive={
+                              watchedValues.themePresetId === preset.id &&
+                              watchedValues.themePresetVersion === preset.version
+                            }
+                            onSelect={() => applyPreset(preset)}
                           />
-                        </div>
-                        {isActive && (
-                          <span className="absolute right-2 top-2 flex h-5 w-5 items-center justify-center rounded-full bg-primary text-primary-foreground">
-                            <Check className="h-3 w-3" />
-                          </span>
-                        )}
-                      </button>
-                    );
-                  })}
+                        ))}
+                      </div>
+                    </section>
+                  )}
+                  {filteredConceptPresets.length > 0 && (
+                    <section className="space-y-2">
+                      <h3 className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                        {t('brandingPage.sections.presets.conceptGroup')}
+                        <span className="font-normal normal-case tracking-normal">
+                          {filteredConceptPresets.length}
+                        </span>
+                      </h3>
+                      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-4">
+                        {filteredConceptPresets.map((preset) => (
+                          <ThemePresetButton
+                            key={preset.id}
+                            preset={preset}
+                            label={preset.name}
+                            isActive={
+                              watchedValues.themePresetId === preset.id &&
+                              watchedValues.themePresetVersion === preset.version
+                            }
+                            onSelect={() => applyPreset(preset)}
+                          />
+                        ))}
+                      </div>
+                    </section>
+                  )}
                 </div>
-                {filteredThemePresets.length === 0 && (
+                {visibleThemePresetCount === 0 && (
                   <div className="rounded-lg border border-dashed px-4 py-8 text-center text-sm text-muted-foreground">
                     {t('brandingPage.sections.presets.empty')}
                   </div>
@@ -1241,6 +1302,68 @@ function ColorField({
       </div>
     </div>
   );
+}
+
+function ThemePresetButton({
+  preset,
+  label,
+  isActive,
+  onSelect,
+}: {
+  readonly preset: ThemePreset
+  readonly label: string
+  readonly isActive: boolean
+  readonly onSelect: () => void
+}) {
+  const ariaLabel =
+    preset.kind === 'concept' ? `${preset.code} ${preset.name}` : label
+  const palette =
+    preset.kind === 'concept' ? preset.palette : ([preset.primary, preset.bgPrimary, preset.bgSecondary] as const)
+
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      aria-pressed={isActive}
+      aria-label={ariaLabel}
+      className={`group relative flex flex-col gap-2 rounded-xl border p-3 text-left transition-all hover:scale-[1.02] ${
+        isActive ? 'border-primary ring-2 ring-primary/40' : 'border-border hover:border-primary/40'
+      }`}
+    >
+      <div
+        className="h-12 w-full rounded-lg ring-1 ring-white/10"
+        style={{ backgroundImage: preset.cardGradient }}
+      />
+      <div className="flex h-2 overflow-hidden rounded-full">
+        {palette.map((color, index) => (
+          <span
+            key={`${preset.id}-${color}-${index}`}
+            className="h-full flex-1"
+            style={{ backgroundColor: color }}
+          />
+        ))}
+      </div>
+      <div className="flex items-center justify-between gap-2">
+        <span className="min-w-0 text-xs font-medium">
+          {preset.kind === 'concept' && (
+            <span className="mr-1 font-mono text-[10px] text-muted-foreground">
+              {preset.code}
+            </span>
+          )}
+          <span className="line-clamp-1">{label}</span>
+        </span>
+        <span
+          className="h-3 w-3 shrink-0 rounded-full ring-1 ring-white/20"
+          style={{ backgroundColor: preset.primary }}
+        />
+      </div>
+      {isActive && (
+        <span className="absolute right-2 top-2 flex h-5 w-5 items-center justify-center rounded-full bg-primary text-primary-foreground">
+          <Check className="h-3 w-3" />
+        </span>
+      )}
+    </button>
+  )
 }
 
 function SurfaceColorField({

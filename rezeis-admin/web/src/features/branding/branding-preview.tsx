@@ -159,7 +159,6 @@ interface PreviewCardContrast {
   readonly foundation: string
   readonly veilChannels: string
   readonly veilOpacity: number
-  readonly supportBackground: string
 }
 
 interface PreviewAppReadability {
@@ -351,11 +350,15 @@ function resolvePreviewCardContrast(
     veilChannels: veil.join(' '),
     veilOpacity:
       Math.round(Math.min(0.75, Math.max(0.12, rawRequirement + 0.025)) * 1000) / 1000,
-    supportBackground: useLight ? '#18181b' : '#f4f4f5',
   }
 }
 
-function previewReadabilityZones(contrast: PreviewCardContrast): string {
+/**
+ * Mirrors reiwa's `staticArtworkVeil`. Only static card artwork is filmed:
+ * animated artwork stays uncovered so the shader reads as vividly in the
+ * preview as it does in the cabinet.
+ */
+function previewStaticArtworkVeil(contrast: PreviewCardContrast): string {
   const channels = contrast.veilChannels
   const veil = Math.min(0.75, Math.max(0, contrast.veilOpacity))
   return `linear-gradient(180deg, rgb(${channels} / ${veil}) 0%, rgb(${channels} / ${veil}) 100%)`
@@ -617,15 +620,12 @@ function PreviewSubscriptionCard({
       data-preview-card-foreground={
         contrast.foreground === '#0a0a0a' ? 'dark' : 'light'
       }
+      data-preview-card-artwork={Effect ? 'animated' : 'static'}
       className="relative isolate h-[160px] overflow-hidden p-4 [contain:paint]"
       style={{
         borderRadius: radius,
         color: contrast.foreground,
         boxShadow: `inset 0 0 0 1px ${toRgba(contrast.foreground, 0.1)}`,
-        textShadow:
-          contrast.foreground === '#0a0a0a'
-            ? '0 1px 1px rgba(255, 255, 255, 0.16)'
-            : '0 1px 2px rgba(0, 0, 0, 0.42)',
       }}
     >
       {/* Layer order mirrors the normal reiwa card frame. */}
@@ -701,15 +701,16 @@ function PreviewSubscriptionCard({
           </div>
         </Suspense>
       )}
-      <div
-        data-preview-card-layer="readability"
-        data-preview-card-readability="wcag-full-card-veil"
-        data-preview-card-artwork={Effect ? 'animated' : 'static'}
-        data-preview-card-veil-opacity={contrast.veilOpacity}
-        data-preview-card-veil-rgb={contrast.veilChannels}
-        className="pointer-events-none absolute inset-0"
-        style={{ background: previewReadabilityZones(contrast) }}
-      />
+      {!Effect && (
+        <div
+          data-preview-card-layer="readability"
+          data-preview-card-readability="wcag-full-card-veil"
+          data-preview-card-veil-opacity={contrast.veilOpacity}
+          data-preview-card-veil-rgb={contrast.veilChannels}
+          className="pointer-events-none absolute inset-0"
+          style={{ background: previewStaticArtworkVeil(contrast) }}
+        />
+      )}
       {/* Watermark — operator-configurable glyph or custom image */}
       <CardLogoMark
         preset={cardLogo}

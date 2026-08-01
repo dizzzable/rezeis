@@ -1,10 +1,17 @@
 /**
- * One-click WEB Reiwa themes derived from the canonical 104-concept catalog.
+ * One-click WEB Reiwa themes.
  *
- * The source book and audited Pencil boards expose palettes, semantic
- * surfaces, typography and geometry. This adapter persists their fully
- * resolved Reiwa representation, so the runtime never depends on the admin
- * catalog and continues to render it while Rezeis is unavailable.
+ * Two families live here behind a `kind` discriminant:
+ *
+ *   • `legacy` — the eight standard themes shipped before the concept catalog.
+ *     They only ever owned a palette, a card gradient and a background effect,
+ *     so they stay that narrow: geometry, typography, semantic surfaces and the
+ *     app background remain operator-owned.
+ *   • `concept` — resolved from the canonical 104-concept catalog. The source
+ *     book and audited Pencil boards expose palettes, semantic surfaces,
+ *     typography and geometry. This adapter persists their fully resolved Reiwa
+ *     representation, so the runtime never depends on the admin catalog and
+ *     continues to render it while Rezeis is unavailable.
  */
 
 import {
@@ -48,9 +55,38 @@ const FONT_STACK_BY_SOURCE: Readonly<Record<string, string>> = {
   'IBM Plex Mono': '"IBM Plex Mono", ui-monospace, SFMono-Regular, monospace',
 }
 
-export interface ThemePreset {
+export type ThemePresetBgEffect =
+  | 'NONE'
+  | 'MESH'
+  | 'PARTICLES'
+  | 'NOISE'
+  | 'AURORA'
+
+/** Everything both theme families resolve. */
+interface ThemePresetBase {
+  /** Stable id persisted in branding. Doubles as the i18n key for legacy ids. */
   readonly id: string
   readonly version: number
+  readonly primary: HexColor
+  readonly primaryFg: HexColor
+  readonly bgPrimary: HexColor
+  readonly bgSecondary: HexColor
+  readonly cardGradient: string
+  readonly bgEffect: ThemePresetBgEffect
+}
+
+/**
+ * One of the eight standard themes that predate the concept catalog. It has no
+ * source page, no audited composition and no typography of its own, so it does
+ * not pretend to: the fields above are exactly what it ever owned.
+ */
+export interface LegacyThemePreset extends ThemePresetBase {
+  readonly kind: 'legacy'
+}
+
+/** A theme fully resolved from one of the 104 audited concepts. */
+export interface ConceptThemePreset extends ThemePresetBase {
+  readonly kind: 'concept'
   readonly code: string
   readonly name: string
   readonly palette: readonly HexColor[]
@@ -58,16 +94,10 @@ export interface ThemePreset {
   readonly visualFamily: string
   readonly appComposition: ConceptComposition
   readonly cardComposition: ConceptComposition
-  readonly primary: HexColor
-  readonly primaryFg: HexColor
-  readonly bgPrimary: HexColor
-  readonly bgSecondary: HexColor
-  readonly cardGradient: string
   readonly cardPattern: string | null
   readonly cardEffect: string
   readonly cardEffectProps: Readonly<Record<string, unknown>>
   readonly cardEffectOpacity: number
-  readonly bgEffect: 'NONE' | 'MESH' | 'PARTICLES' | 'NOISE' | 'AURORA'
   readonly appBackground: BrandingAppBackgroundDraft
   readonly borderRadius: string
   readonly cornerRadii: BrandingCornerRadiiDraft
@@ -75,14 +105,126 @@ export interface ThemePreset {
   readonly surfaceTheme: BrandingSurfaceThemeDraft
 }
 
-export const THEME_PRESETS: readonly ThemePreset[] = CONCEPT_PRESETS.map(
-  createConceptReiwaPreset,
-)
+export type ThemePreset = LegacyThemePreset | ConceptThemePreset
+
+/**
+ * The eight standard themes, verbatim from before the concept release. Their
+ * bare ids stay unprefixed so branding saved by an operator earlier keeps
+ * resolving to the same entry.
+ */
+export const LEGACY_THEME_PRESETS: readonly LegacyThemePreset[] = [
+  {
+    kind: 'legacy',
+    id: 'emerald',
+    version: THEME_PRESET_VERSION,
+    primary: '#22c55e',
+    primaryFg: '#0a0a0a',
+    bgPrimary: '#0a0a0a',
+    bgSecondary: '#171717',
+    cardGradient: 'linear-gradient(135deg, #064e3b 0%, #22c55e 100%)',
+    bgEffect: 'AURORA',
+  },
+  {
+    kind: 'legacy',
+    id: 'royal',
+    version: THEME_PRESET_VERSION,
+    primary: '#6366f1',
+    primaryFg: '#0a0a0a',
+    bgPrimary: '#09090b',
+    bgSecondary: '#18181b',
+    cardGradient: 'linear-gradient(135deg, #1e1b4b 0%, #6366f1 100%)',
+    bgEffect: 'AURORA',
+  },
+  {
+    kind: 'legacy',
+    id: 'sunset',
+    version: THEME_PRESET_VERSION,
+    primary: '#f97316',
+    primaryFg: '#0a0a0a',
+    bgPrimary: '#0c0a09',
+    bgSecondary: '#1c1917',
+    cardGradient: 'linear-gradient(135deg, #7c2d12 0%, #f97316 100%)',
+    bgEffect: 'AURORA',
+  },
+  {
+    kind: 'legacy',
+    id: 'rose',
+    version: THEME_PRESET_VERSION,
+    primary: '#f43f5e',
+    primaryFg: '#0a0a0a',
+    bgPrimary: '#0a0a0a',
+    bgSecondary: '#18181b',
+    cardGradient: 'linear-gradient(135deg, #881337 0%, #f43f5e 100%)',
+    bgEffect: 'AURORA',
+  },
+  {
+    kind: 'legacy',
+    id: 'cyan',
+    version: THEME_PRESET_VERSION,
+    primary: '#06b6d4',
+    primaryFg: '#0a0a0a',
+    bgPrimary: '#08090a',
+    bgSecondary: '#15191c',
+    cardGradient: 'linear-gradient(135deg, #164e63 0%, #06b6d4 100%)',
+    bgEffect: 'AURORA',
+  },
+  {
+    kind: 'legacy',
+    id: 'violet',
+    version: THEME_PRESET_VERSION,
+    primary: '#a855f7',
+    primaryFg: '#0a0a0a',
+    bgPrimary: '#0a0812',
+    bgSecondary: '#1a1625',
+    cardGradient: 'linear-gradient(135deg, #4c1d95 0%, #a855f7 100%)',
+    bgEffect: 'AURORA',
+  },
+  {
+    kind: 'legacy',
+    id: 'amber',
+    version: THEME_PRESET_VERSION,
+    primary: '#f59e0b',
+    primaryFg: '#0a0a0a',
+    bgPrimary: '#0c0a09',
+    bgSecondary: '#1c1917',
+    cardGradient: 'linear-gradient(135deg, #78350f 0%, #f59e0b 100%)',
+    bgEffect: 'MESH',
+  },
+  {
+    kind: 'legacy',
+    id: 'mono',
+    version: THEME_PRESET_VERSION,
+    primary: '#e5e5e5',
+    primaryFg: '#0a0a0a',
+    bgPrimary: '#0a0a0a',
+    bgSecondary: '#171717',
+    cardGradient: 'linear-gradient(135deg, #262626 0%, #525252 100%)',
+    bgEffect: 'NOISE',
+  },
+] as const
+
+export const CONCEPT_THEME_PRESETS: readonly ConceptThemePreset[] =
+  CONCEPT_PRESETS.map(createConceptReiwaPreset)
+
+export const THEME_PRESETS: readonly ThemePreset[] = [
+  ...LEGACY_THEME_PRESETS,
+  ...CONCEPT_THEME_PRESETS,
+]
 
 export const THEME_PRESET_BY_ID: Readonly<Record<string, ThemePreset>> =
   Object.fromEntries(THEME_PRESETS.map((preset) => [preset.id, preset]))
 
-export type ThemePresetVisualPatch = Pick<
+/**
+ * Only concept themes resolve an audited app-background texture, so the
+ * runtime overlay is keyed on the preset identity rather than on the presence
+ * of a texture recipe (every gradient draft carries a default one).
+ */
+export function isConceptThemePresetId(id: unknown): boolean {
+  return typeof id === 'string' && id.startsWith('concept-')
+}
+
+/** The exact fields a standard theme has always owned. */
+export type LegacyThemePresetVisualPatch = Pick<
   BrandingFormDraft,
   | 'themePresetId'
   | 'themePresetVersion'
@@ -91,21 +233,31 @@ export type ThemePresetVisualPatch = Pick<
   | 'bgPrimary'
   | 'bgSecondary'
   | 'cardGradient'
-  | 'cardPattern'
-  | 'cardEffect'
-  | 'cardEffectProps'
-  | 'cardEffectOpacity'
   | 'bgEffect'
-  | 'appBackground'
-  | 'borderRadius'
-  | 'cornerRadii'
-  | 'fontFamily'
-  | 'surfaceTheme'
 >
 
-export function createThemePresetVisualPatch(
-  preset: ThemePreset,
-): ThemePresetVisualPatch {
+/** A concept additionally owns card artwork, geometry, typography, surfaces. */
+export type ConceptThemePresetVisualPatch = LegacyThemePresetVisualPatch &
+  Pick<
+    BrandingFormDraft,
+    | 'cardPattern'
+    | 'cardEffect'
+    | 'cardEffectProps'
+    | 'cardEffectOpacity'
+    | 'appBackground'
+    | 'borderRadius'
+    | 'cornerRadii'
+    | 'fontFamily'
+    | 'surfaceTheme'
+  >
+
+export type ThemePresetVisualPatch =
+  | LegacyThemePresetVisualPatch
+  | ConceptThemePresetVisualPatch
+
+function createSharedThemePresetVisualPatch(
+  preset: ThemePresetBase,
+): LegacyThemePresetVisualPatch {
   return {
     themePresetId: preset.id,
     themePresetVersion: preset.version,
@@ -114,11 +266,25 @@ export function createThemePresetVisualPatch(
     bgPrimary: preset.bgPrimary,
     bgSecondary: preset.bgSecondary,
     cardGradient: preset.cardGradient,
+    bgEffect: preset.bgEffect,
+  }
+}
+
+export function createLegacyThemePresetVisualPatch(
+  preset: LegacyThemePreset,
+): LegacyThemePresetVisualPatch {
+  return createSharedThemePresetVisualPatch(preset)
+}
+
+export function createConceptThemePresetVisualPatch(
+  preset: ConceptThemePreset,
+): ConceptThemePresetVisualPatch {
+  return {
+    ...createSharedThemePresetVisualPatch(preset),
     cardPattern: preset.cardPattern,
     cardEffect: preset.cardEffect,
     cardEffectProps: { ...preset.cardEffectProps },
     cardEffectOpacity: preset.cardEffectOpacity,
-    bgEffect: preset.bgEffect,
     appBackground: preset.appBackground,
     borderRadius: preset.borderRadius,
     cornerRadii: preset.cornerRadii,
@@ -127,9 +293,26 @@ export function createThemePresetVisualPatch(
   }
 }
 
+export function createThemePresetVisualPatch(
+  preset: LegacyThemePreset,
+): LegacyThemePresetVisualPatch
+export function createThemePresetVisualPatch(
+  preset: ConceptThemePreset,
+): ConceptThemePresetVisualPatch
+export function createThemePresetVisualPatch(
+  preset: ThemePreset,
+): ThemePresetVisualPatch
+export function createThemePresetVisualPatch(
+  preset: ThemePreset,
+): ThemePresetVisualPatch {
+  return preset.kind === 'legacy'
+    ? createLegacyThemePresetVisualPatch(preset)
+    : createConceptThemePresetVisualPatch(preset)
+}
+
 export function createConceptReiwaPreset(
   descriptor: ConceptPresetDescriptor,
-): ThemePreset {
+): ConceptThemePreset {
   const source = getConceptSourceStyle(descriptor)
   const isLight = getConceptSourceMode(descriptor) === 'light'
   const bgPrimary = getConceptSourceBackgroundColor(descriptor)
@@ -191,6 +374,7 @@ export function createConceptReiwaPreset(
   const cornerRadii = exactCornerRadii(descriptor)
 
   return {
+    kind: 'concept',
     id: descriptor.id,
     version: THEME_PRESET_VERSION,
     code: descriptor.code,
@@ -771,7 +955,7 @@ function buildAppBackground(
 
 function deriveLegacyBgEffect(
   descriptor: ConceptPresetDescriptor,
-): ThemePreset['bgEffect'] {
+): ThemePresetBgEffect {
   if (descriptor.classification.backgroundType === 'mesh-gradient') return 'MESH'
   if (descriptor.classification.visualTags.includes('technical')) return 'PARTICLES'
   if (descriptor.classification.visualTags.includes('editorial')) return 'NOISE'

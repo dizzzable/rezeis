@@ -5,7 +5,7 @@ import {
   createConceptCardPresetVisualPatch,
   filterConceptCardPresets,
 } from './concept-card-presets'
-import { THEME_PRESETS } from './theme-presets'
+import { CONCEPT_THEME_PRESETS } from './theme-presets'
 
 describe('independent concept subscription-card presets', () => {
   it('derives exactly 104 stable unique entries from the theme catalog', () => {
@@ -15,7 +15,7 @@ describe('independent concept subscription-card presets', () => {
     )
 
     for (const [index, preset] of CONCEPT_CARD_PRESETS.entries()) {
-      const theme = THEME_PRESETS[index]
+      const theme = CONCEPT_THEME_PRESETS[index]
       expect(preset).toMatchObject({
         id: theme.id,
         sourceThemePresetId: theme.id,

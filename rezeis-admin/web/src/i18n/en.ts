@@ -3282,11 +3282,13 @@ export const en = {
       presets: {
         title: 'Theme Presets',
         description:
-          '104 complete visual systems. Applying one preserves identity and navigation, and synchronizes existing per-card slots with the selected theme. You can tune the slots again afterwards.',
+          '8 standard themes and 104 concepts. A standard theme only changes the palette, card gradient and background effect; a concept applies a full visual system. Identity and navigation are preserved.',
         searchPlaceholder: 'Search by code, name, or style…',
         searchLabel: 'Search WEB Reiwa themes',
         count: '{{visible}} of {{total}} themes',
         empty: 'No themes match this search.',
+        standardGroup: 'Standard',
+        conceptGroup: 'Concepts',
       },
       identity: {
         title: 'Identity',

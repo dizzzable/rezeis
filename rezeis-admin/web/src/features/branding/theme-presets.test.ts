@@ -13,8 +13,11 @@ import {
   type BrandingDirtyFields,
 } from './branding-form-schema'
 import {
+  CONCEPT_THEME_PRESETS,
+  LEGACY_THEME_PRESETS,
   THEME_PRESETS,
   createConceptReiwaPreset,
+  createLegacyThemePresetVisualPatch,
   createThemePresetVisualPatch,
 } from './theme-presets'
 
@@ -24,15 +27,83 @@ const validationMessages = {
   gradientInvalid: 'gradient invalid',
 } as const
 
-describe('WEB Reiwa 104-theme catalog', () => {
-  it('contains exactly 104 stable unique concept ids', () => {
+describe('WEB Reiwa theme catalog', () => {
+  it('keeps 8 standard themes ahead of 104 unique concepts', () => {
     const ids = THEME_PRESETS.map((preset) => preset.id)
 
-    expect(THEME_PRESETS).toHaveLength(104)
-    expect(new Set(ids).size).toBe(104)
-    expect(ids[0]).toBe('concept-a')
+    expect(LEGACY_THEME_PRESETS).toHaveLength(8)
+    expect(CONCEPT_THEME_PRESETS).toHaveLength(104)
+    expect(THEME_PRESETS).toHaveLength(112)
+    expect(new Set(ids).size).toBe(112)
+    expect(ids.slice(0, 8)).toEqual([
+      'emerald',
+      'royal',
+      'sunset',
+      'rose',
+      'cyan',
+      'violet',
+      'amber',
+      'mono',
+    ])
+    expect(ids[8]).toBe('concept-a')
     expect(ids.at(-1)).toBe('concept-cz')
     expect(THEME_PRESETS.every((preset) => preset.version === 2)).toBe(true)
+    expect(LEGACY_THEME_PRESETS.every((preset) => preset.kind === 'legacy')).toBe(
+      true,
+    )
+    expect(CONCEPT_THEME_PRESETS.every((preset) => preset.kind === 'concept')).toBe(
+      true,
+    )
+  })
+
+  it('keeps a standard theme patch from stomping concept-owned fields', () => {
+    const base = createInitialBrandingDraft({
+      cardEffect: 'aurora',
+      cardEffectProps: { speed: 1.2 },
+      cardEffectOpacity: 0.77,
+      cardPattern: 'radial-gradient(circle, #fff 1px, transparent 1px)',
+      borderRadius: 'rounded-none',
+      cornerRadii: {
+        cardPx: 0,
+        itemPx: 0,
+        pillPx: 0,
+      },
+      fontFamily: '"Newsreader Variable", Georgia, serif',
+      surfaceTheme: {
+        ...createInitialBrandingDraft().surfaceTheme,
+        foreground: '#fafafa',
+      },
+      appBackground: {
+        ...createInitialBrandingDraft().appBackground!,
+        kind: 'gradient',
+        gradient: 'linear-gradient(180deg, #111 0%, #222 100%)',
+      },
+    })
+    const patch = createLegacyThemePresetVisualPatch(LEGACY_THEME_PRESETS[1])
+    const resolved = { ...base, ...patch }
+
+    expect(Object.keys(patch).sort()).toEqual(
+      [
+        'bgEffect',
+        'bgPrimary',
+        'bgSecondary',
+        'cardGradient',
+        'primary',
+        'primaryFg',
+        'themePresetId',
+        'themePresetVersion',
+      ].sort(),
+    )
+    expect(patch.themePresetId).toBe('royal')
+    expect(resolved.cardEffect).toBe(base.cardEffect)
+    expect(resolved.cardEffectProps).toEqual(base.cardEffectProps)
+    expect(resolved.cardEffectOpacity).toBe(base.cardEffectOpacity)
+    expect(resolved.cardPattern).toBe(base.cardPattern)
+    expect(resolved.borderRadius).toBe(base.borderRadius)
+    expect(resolved.cornerRadii).toEqual(base.cornerRadii)
+    expect(resolved.fontFamily).toBe(base.fontFamily)
+    expect(resolved.surfaceTheme).toEqual(base.surfaceTheme)
+    expect(resolved.appBackground).toEqual(base.appBackground)
   })
 
   it('produces only supported effects and schema-valid resolved payloads', () => {
@@ -40,12 +111,20 @@ describe('WEB Reiwa 104-theme catalog', () => {
     const schema = createBrandingFormSchema(validationMessages)
 
     for (const preset of THEME_PRESETS) {
-      expect(effects.has(preset.cardEffect as never)).toBe(true)
+      const visualPatch = createThemePresetVisualPatch(preset)
+      if (preset.kind === 'concept') {
+        expect(effects.has(preset.cardEffect as never)).toBe(true)
+      }
       const result = schema.safeParse({
         ...createInitialBrandingDraft(),
-        ...createThemePresetVisualPatch(preset),
+        ...visualPatch,
       })
-      expect(result.success, `${preset.code} ${preset.name}`).toBe(true)
+      expect(
+        result.success,
+        preset.kind === 'concept'
+          ? `${preset.code} ${preset.name}`
+          : preset.id,
+      ).toBe(true)
     }
   })
 
@@ -73,8 +152,10 @@ describe('WEB Reiwa 104-theme catalog', () => {
         dirtyFields,
         schema,
       })
+      const label =
+        preset.kind === 'concept' ? `${preset.code} ${preset.name}` : preset.id
 
-      expect(result.success, `${preset.code} ${preset.name}`).toBe(true)
+      expect(result.success, label).toBe(true)
       if (!result.success) continue
       expect(result.data.themePresetId).toBe(preset.id)
       expect(result.data.themePresetVersion).toBe(preset.version)
@@ -84,7 +165,9 @@ describe('WEB Reiwa 104-theme catalog', () => {
   })
 
   it('keeps required foreground pairs at WCAG AA contrast', () => {
-    for (const preset of THEME_PRESETS) {
+    // Standard themes keep their historical colours verbatim (amber sits just
+    // under 4.5 by design). Concepts are audited to AA.
+    for (const preset of CONCEPT_THEME_PRESETS) {
       expect(contrast(preset.primary, preset.primaryFg)).toBeGreaterThanOrEqual(4.5)
       expect(
         contrast(preset.bgPrimary, preset.surfaceTheme.foreground),
@@ -92,20 +175,20 @@ describe('WEB Reiwa 104-theme catalog', () => {
     }
   })
 
-  it('reconstructs all presets deterministically with unique card compositions', () => {
+  it('reconstructs all concept presets deterministically with unique card compositions', () => {
     const reconstructed = CONCEPT_PRESETS.map(createConceptReiwaPreset)
-    const cardGradients = THEME_PRESETS.map((preset) => preset.cardGradient)
+    const cardGradients = CONCEPT_THEME_PRESETS.map((preset) => preset.cardGradient)
 
-    expect(reconstructed).toEqual(THEME_PRESETS)
-    expect(new Set(cardGradients).size).toBe(THEME_PRESETS.length)
+    expect(reconstructed).toEqual(CONCEPT_THEME_PRESETS)
+    expect(new Set(cardGradients).size).toBe(CONCEPT_THEME_PRESETS.length)
   })
 
   it('uses a broad semantic composition matrix instead of one generic layout', () => {
     const appCompositions = new Set(
-      THEME_PRESETS.map((preset) => preset.appComposition),
+      CONCEPT_THEME_PRESETS.map((preset) => preset.appComposition),
     )
     const cardCompositions = new Set(
-      THEME_PRESETS.map((preset) => preset.cardComposition),
+      CONCEPT_THEME_PRESETS.map((preset) => preset.cardComposition),
     )
 
     expect(appCompositions.size).toBeGreaterThanOrEqual(7)
@@ -113,7 +196,7 @@ describe('WEB Reiwa 104-theme catalog', () => {
   })
 
   it('maps Polar Red Monolith to angular app bands and an orbital card', () => {
-    const preset = THEME_PRESETS.find(({ code }) => code === 'CU')
+    const preset = CONCEPT_THEME_PRESETS.find(({ code }) => code === 'CU')
 
     expect(preset).toBeDefined()
     expect(preset?.appComposition).toBe('orthogonal-bands')
@@ -130,8 +213,8 @@ describe('WEB Reiwa 104-theme catalog', () => {
     )
   })
 
-  it('persists a complete gradient and texture recipe for every app background', () => {
-    for (const preset of THEME_PRESETS) {
+  it('persists a complete gradient and texture recipe for every concept app background', () => {
+    for (const preset of CONCEPT_THEME_PRESETS) {
       const { gradient, texture } = preset.appBackground
 
       expect(preset.appBackground.kind, `${preset.code} app kind`).toBe(
@@ -156,7 +239,7 @@ describe('WEB Reiwa 104-theme catalog', () => {
   })
 
   it('keeps muted text and strong boundaries readable on composited surfaces', () => {
-    for (const preset of THEME_PRESETS) {
+    for (const preset of CONCEPT_THEME_PRESETS) {
       const {
         mutedForeground,
         surface,
@@ -188,7 +271,7 @@ describe('WEB Reiwa 104-theme catalog', () => {
   })
 
   it('carries source semantics and exact angular geometry into Reiwa', () => {
-    for (const [index, preset] of THEME_PRESETS.entries()) {
+    for (const [index, preset] of CONCEPT_THEME_PRESETS.entries()) {
       const descriptor = CONCEPT_PRESETS[index]
       const source = getConceptSourceStyle(descriptor)
 
@@ -231,7 +314,7 @@ describe('WEB Reiwa 104-theme catalog', () => {
       ],
       navGap: 9,
     })
-    const visualPatch = createThemePresetVisualPatch(THEME_PRESETS[37])
+    const visualPatch = createThemePresetVisualPatch(CONCEPT_THEME_PRESETS[37])
     const resolved = {
       ...base,
       ...visualPatch,

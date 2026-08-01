@@ -12,7 +12,10 @@ import {
   CARD_EFFECT_REGISTRY,
   getCardEffectDef,
 } from './card-effect-registry'
-import { THEME_PRESETS, type ThemePreset } from './theme-presets'
+import {
+  CONCEPT_THEME_PRESETS,
+  type ConceptThemePreset,
+} from './theme-presets'
 
 export interface ConceptCardPreset {
   readonly id: string
@@ -45,7 +48,7 @@ export interface ConceptCardPresetFilter {
 }
 
 export const CONCEPT_CARD_PRESETS: readonly ConceptCardPreset[] =
-  THEME_PRESETS.map(createConceptCardPreset)
+  CONCEPT_THEME_PRESETS.map(createConceptCardPreset)
 
 export const CONCEPT_CARD_PRESET_BY_ID: Readonly<
   Record<string, ConceptCardPreset>
@@ -105,7 +108,7 @@ export function filterConceptCardPresets(
   })
 }
 
-function createConceptCardPreset(theme: ThemePreset): ConceptCardPreset {
+function createConceptCardPreset(theme: ConceptThemePreset): ConceptCardPreset {
   return {
     id: theme.id,
     sourceThemePresetId: theme.id,
