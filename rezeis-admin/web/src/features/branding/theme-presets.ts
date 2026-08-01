@@ -29,6 +29,7 @@ import type {
   BrandingAppBackgroundDraft,
   BrandingCornerRadiiDraft,
   BrandingFormDraft,
+  BrandingSubscriptionCardTextDraft,
   BrandingSurfaceThemeDraft,
 } from './branding-form-schema'
 
@@ -260,10 +261,23 @@ export type ThemePresetVisualPatch =
  * receives these values as data, so an end user can change only brightness
  * (when the operator permits it) and never gains the concept catalogue.
  */
+/**
+ * Brightness snapshots must be directly submittable as the current branding
+ * DTO. The card-text policy is not a concept visual token, so it is inherited
+ * from the operator (or `auto` when called outside the form) rather than
+ * derived from a concept palette.
+ */
 export type ConceptThemeModeVariants = Readonly<{
-  light: ConceptThemePresetVisualPatch
-  dark: ConceptThemePresetVisualPatch
+  light: ConceptThemePresetVisualPatch &
+    Pick<BrandingFormDraft, 'subscriptionCardText'>
+  dark: ConceptThemePresetVisualPatch &
+    Pick<BrandingFormDraft, 'subscriptionCardText'>
 }>
+
+const DEFAULT_VARIANT_SUBSCRIPTION_CARD_TEXT: BrandingSubscriptionCardTextDraft = {
+  mode: 'auto',
+  color: null,
+}
 
 function createSharedThemePresetVisualPatch(
   preset: ThemePresetBase,
@@ -305,6 +319,8 @@ export function createConceptThemePresetVisualPatch(
 
 export function createConceptThemeModeVariants(
   preset: ConceptThemePreset,
+  subscriptionCardText: BrandingSubscriptionCardTextDraft =
+    DEFAULT_VARIANT_SUBSCRIPTION_CARD_TEXT,
 ): ConceptThemeModeVariants {
   const descriptor = CONCEPT_PRESETS.find(
     (candidate) => candidate.id === preset.id,
@@ -316,13 +332,18 @@ export function createConceptThemeModeVariants(
     throw new Error(`Unknown concept theme preset: ${preset.id}`)
   }
 
+  const createVariant = (mode: ConceptSourceMode) => ({
+    ...createConceptThemePresetVisualPatch(
+      createConceptReiwaPresetForMode(descriptor, mode),
+    ),
+    // Copy, do not retain the form reference: brightness snapshots should not
+    // mutate if a user subsequently edits this global policy.
+    subscriptionCardText: { ...subscriptionCardText },
+  })
+
   return {
-    light: createConceptThemePresetVisualPatch(
-      createConceptReiwaPresetForMode(descriptor, 'light'),
-    ),
-    dark: createConceptThemePresetVisualPatch(
-      createConceptReiwaPresetForMode(descriptor, 'dark'),
-    ),
+    light: createVariant('light'),
+    dark: createVariant('dark'),
   }
 }
 

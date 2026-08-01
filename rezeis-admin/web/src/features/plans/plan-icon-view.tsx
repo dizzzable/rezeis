@@ -13,6 +13,7 @@
  * `!!icon` check, the other a regex) and from rendering raw `:slug:` text.
  */
 
+import { createElement } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Sparkles, type LucideIcon } from 'lucide-react'
 
@@ -48,7 +49,7 @@ export function PlanIconView({ value, className, fallback: Fallback = Sparkles }
   if (typeof value === 'string' && value.length > 0) {
     // 1) Built-in Lucide preset key.
     const Preset = PRESET_MAP.get(value)
-    if (Preset) return <Preset className={className} />
+    if (Preset) return createElement(Preset, { className })
     // 2) Uploaded custom icon.
     if (isCustom) {
       const id = value.slice(CUSTOM_ICON_PREFIX.length)

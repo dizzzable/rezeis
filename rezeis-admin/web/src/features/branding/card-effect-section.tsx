@@ -10,7 +10,7 @@
  *   - opacity: 0.05–1
  */
 
-import { Suspense, useMemo } from 'react'
+import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -21,11 +21,14 @@ import { Switch } from '@/components/ui/switch'
 import { Check } from 'lucide-react'
 
 import {
-  CARD_EFFECT_COMPONENTS,
   CARD_EFFECT_REGISTRY,
   getCardEffectDef,
   getCardEffectDefaults,
 } from './card-effect-registry'
+import {
+  buildCardEffectPreviewArtwork,
+  resolveCardEffectPreviewColors,
+} from './card-effect-preview-utils'
 import type { ControlDef } from '@/features/appearance/background-controls'
 
 interface CardEffectSectionProps {
@@ -103,8 +106,12 @@ export function CardEffectPicker({
           )}
         </button>
         {CARD_EFFECT_REGISTRY.map((e) => {
-          const Eff = CARD_EFFECT_COMPONENTS[e.id]
           const isActive = effect === e.id
+          const thumbnailArtwork = isActive
+            ? buildCardEffectPreviewArtwork(
+                resolveCardEffectPreviewColors(e.id, mergedProps),
+              )
+            : null
           return (
             <button
               key={e.id}
@@ -116,15 +123,17 @@ export function CardEffectPicker({
                 isActive ? 'border-primary ring-2 ring-primary/40' : 'border-border hover:border-primary/40'
               }`}
             >
-              {/* Static thumbnail: render the live effect at default props only
-                  for the ACTIVE one (cheap) and a label otherwise. */}
-              {isActive ? (
-                <Suspense fallback={null}>
-                  <div className="pointer-events-none absolute inset-0">
-                    <Eff {...mergedProps} />
-                  </div>
-                </Suspense>
-              ) : null}
+              {/* The phone preview owns the sole live GPU renderer. The picker
+                  uses a deterministic CSS swatch, so selecting an effect does
+                  not create a second WebGL context and evict the preview. */}
+              {thumbnailArtwork && (
+                <div
+                  aria-hidden="true"
+                  data-card-effect-thumbnail
+                  className="pointer-events-none absolute inset-0"
+                  style={{ backgroundImage: thumbnailArtwork }}
+                />
+              )}
               <span className="absolute inset-x-0 bottom-0 bg-black/55 px-1 py-0.5 text-center text-[9px] font-medium text-white">
                 {t(`brandingPage.cardEffects.${e.id}`, { defaultValue: e.name })}
               </span>

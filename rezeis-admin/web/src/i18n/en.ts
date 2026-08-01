@@ -3374,6 +3374,18 @@ export const en = {
         removeSwatch: 'Remove from palette',
         pattern: 'Card Pattern (CSS background-image, optional)',
         patternPlaceholder: 'url(…) or none',
+        textMode: 'Card text',
+        textModeHint:
+          'Auto chooses contrast. Light, dark, and custom remain the operator\'s literal decision.',
+        textModes: {
+          auto: 'Automatic contrast',
+          light: 'Light text',
+          dark: 'Dark text',
+          custom: 'Custom colour',
+        },
+        textColor: 'Custom text colour',
+        textColorHint:
+          'The colour is sent to Reiwa unchanged. The live preview warns when contrast is weak.',
         builderTitle: 'Gradient Builder',
         builder_linear: 'Linear',
         builder_radial: 'Radial',
@@ -3504,6 +3516,7 @@ export const en = {
         liveLabel: 'Preview updates in real-time as you edit',
         welcome: 'Welcome back',
         statusLabel: 'Active',
+        cardTextContrastWarning: 'Check text contrast',
         cardDot: 'Card {{index}}',
         remaining: 'Remaining',
         daysMock: '90 days',

@@ -71,7 +71,6 @@ export async function enablePush(): Promise<EnablePushResult> {
     // problem — it's the push service rejecting the subscription (e.g. a
     // VAPID key mismatch, or the browser's push service being unreachable).
     // Report it distinctly instead of the misleading "permission denied".
-    // eslint-disable-next-line no-console -- surfaces the real cause for the operator
     console.error('[push] pushManager.subscribe failed', err)
     return 'subscribe-failed'
   }

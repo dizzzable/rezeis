@@ -50,7 +50,6 @@ export function LocaleTextarea({
   const [localEn, setLocalEn] = useState(valueEn)
   const lastSyncedRu = useRef(valueRu)
   const lastSyncedEn = useRef(valueEn)
-  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     if (lastSyncedRu.current !== valueRu && localRu === lastSyncedRu.current) {
       setLocalRu(valueRu)
@@ -63,8 +62,6 @@ export function LocaleTextarea({
     }
     lastSyncedEn.current = valueEn
   }, [valueEn, localEn])
-  /* eslint-enable react-hooks/set-state-in-effect */
-
   const handleBlurRu = () => {
     if (localRu === valueRu) return
     onSave({ ru: localRu })

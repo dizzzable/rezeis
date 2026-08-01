@@ -37,6 +37,9 @@ import {
   NavItemSetting,
   PlanCardStyle,
   ProfileNamingSettings,
+  SubscriptionCardTextMode,
+  SubscriptionCardTextSettings,
+  SUBSCRIPTION_CARD_TEXT_MODES,
   SurfaceThemeSettings,
 } from '../interfaces/branding-settings.interface';
 import {
@@ -45,6 +48,7 @@ import {
 } from './branding-css.util';
 /** Hex colour validation: 3, 4, 6 or 8 hex chars after a leading `#`. */
 const HEX_PATTERN = /^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
+const OPAQUE_HEX_PATTERN = /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i;
 /** Stable preset ids are intentionally URL/log/cache-key friendly. */
 const THEME_PRESET_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const THEME_PRESET_VERSION_MAX = 2_147_483_647;
@@ -71,6 +75,7 @@ export function readBrandingSettings(value: unknown): BrandingSettingsInterface 
     bgSecondary: readHex(record, 'bgSecondary', DEFAULT_BRANDING.bgSecondary),
     cardGradient: readGradient(record, 'cardGradient', DEFAULT_BRANDING.cardGradient),
     cardPattern: readNullableGradient(record, 'cardPattern'),
+    subscriptionCardText: readSubscriptionCardText(record),
     cardLogo: readCardLogo(record, DEFAULT_BRANDING.cardLogo),
     cardLogoUrl: readNullableImageUrl(record, 'cardLogoUrl'),
     cardEffect: readCardEffect(record, DEFAULT_BRANDING.cardEffect),
@@ -146,6 +151,40 @@ export function mergeBrandingSettings(input: {
       } else {
         merged[key] = value;
       }
+    }
+  }
+  // `subscriptionCardText` is a global operator decision.  Newer variants
+  // may contain a copied value for a brightness snapshot, but a direct
+  // root-level PATCH must never leave those copies stale.  Legacy variants
+  // intentionally have no property at all; they use the root value until an
+  // operator explicitly changes this policy, at which point copying it is
+  // safe and makes every brightness snapshot deterministic.
+  if (
+    input.patch.subscriptionCardText !== undefined ||
+    input.patch.themeVariants !== undefined
+  ) {
+    const subscriptionCardText =
+      input.patch.subscriptionCardText !== undefined
+        ? readSubscriptionCardText({
+            subscriptionCardText: input.patch.subscriptionCardText,
+          })
+        : current.subscriptionCardText;
+    // A direct theme-variant PATCH must never turn this global operator
+    // policy into a per-brightness setting. The root setting remains the
+    // source of truth and its complete copies make the DTO snapshots stable.
+    merged.subscriptionCardText = subscriptionCardText;
+    const variants = readThemeVariants({ themeVariants: merged.themeVariants });
+    if (variants) {
+      merged.themeVariants = {
+        light: {
+          ...variants.light,
+          subscriptionCardText: { ...subscriptionCardText },
+        },
+        dark: {
+          ...variants.dark,
+          subscriptionCardText: { ...subscriptionCardText },
+        },
+      };
     }
   }
   // Persist the same bounded, canonical shape that is exposed by the read
@@ -280,6 +319,8 @@ function readThemeVariant(
     return null;
   }
 
+  const subscriptionCardText = readOptionalSubscriptionCardText(record);
+
   return {
     primary: readHex(record, 'primary', DEFAULT_BRANDING.primary),
     primaryFg: readHex(record, 'primaryFg', DEFAULT_BRANDING.primaryFg),
@@ -287,6 +328,9 @@ function readThemeVariant(
     bgSecondary: readHex(record, 'bgSecondary', DEFAULT_BRANDING.bgSecondary),
     cardGradient: readGradient(record, 'cardGradient', DEFAULT_BRANDING.cardGradient),
     cardPattern: readNullableGradient(record, 'cardPattern'),
+    // Do not materialise a missing legacy field to `auto`: Reiwa deliberately
+    // falls back to the root policy, including a later global direct PATCH.
+    ...(subscriptionCardText ? { subscriptionCardText } : {}),
     cardEffect: readCardEffect(record, DEFAULT_BRANDING.cardEffect),
     cardEffectProps: readJsonRecord(record, 'cardEffectProps'),
     cardEffectOpacity: readClampedNumber(
@@ -312,6 +356,38 @@ function readHex(record: Record<string, unknown>, key: string, fallback: string)
     return value.trim();
   }
   return fallback;
+}
+
+function readSubscriptionCardText(
+  record: Record<string, unknown>,
+): SubscriptionCardTextSettings {
+  const value = readRecord(record['subscriptionCardText']);
+  const mode = (SUBSCRIPTION_CARD_TEXT_MODES as readonly string[]).includes(
+    value['mode'] as string,
+  )
+    ? (value['mode'] as SubscriptionCardTextMode)
+    : DEFAULT_BRANDING.subscriptionCardText.mode;
+  const color = value['color'];
+  if (mode !== 'custom') {
+    return { mode, color: null };
+  }
+  if (typeof color !== 'string' || !OPAQUE_HEX_PATTERN.test(color.trim())) {
+    // A legacy malformed `custom` value must not behave like an invisible or
+    // arbitrary foreground. Return the complete safe policy instead.
+    return { ...DEFAULT_BRANDING.subscriptionCardText };
+  }
+  return {
+    mode,
+    color: color.trim(),
+  };
+}
+
+function readOptionalSubscriptionCardText(
+  record: Record<string, unknown>,
+): SubscriptionCardTextSettings | undefined {
+  return Object.prototype.hasOwnProperty.call(record, 'subscriptionCardText')
+    ? readSubscriptionCardText(record)
+    : undefined;
 }
 
 function readSurfaceTheme(record: Record<string, unknown>): SurfaceThemeSettings {

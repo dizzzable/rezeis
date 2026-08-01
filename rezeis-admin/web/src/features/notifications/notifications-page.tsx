@@ -633,9 +633,7 @@ function TelegramDeliveryForm({ settings }: TelegramDeliveryFormProps) {
   // eslint-disable-next-line react-hooks/incompatible-library
   const enabled = form.watch('enabled')
   const chatId = form.watch('chatId')
-  // eslint-disable-next-line react-hooks/incompatible-library
   const eventsMode = form.watch('eventsMode')
-  // eslint-disable-next-line react-hooks/incompatible-library
   const selectedEvents = form.watch('events')
   const selectedSet = new Set(selectedEvents)
 
@@ -1368,5 +1366,3 @@ function EmailDeliveryForm({ initial }: EmailDeliveryFormProps) {
     </Card>
   )
 }
-
-

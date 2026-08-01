@@ -17,11 +17,9 @@
  * covers exactly the same section types as the canonical
  * `LANDING_SECTION_TYPES` catalog, so the two copies cannot silently drift.
  */
-import type { ComponentType } from 'react'
+import type { LandingSection, LocalizedText } from '../landing-builder-api'
 
-import type { LandingSection, LandingSectionType, LocalizedText } from '../landing-builder-api'
-
-export function pickLocalized(value: unknown, locale: string, defaultLocale: string): string {
+function pickLocalized(value: unknown, locale: string, defaultLocale: string): string {
   if (value === null || typeof value !== 'object') return ''
   const map = value as LocalizedText
   const primary = map[locale]
@@ -34,7 +32,7 @@ export function pickLocalized(value: unknown, locale: string, defaultLocale: str
   return ''
 }
 
-export function safeUrl(value: unknown): string | null {
+function safeUrl(value: unknown): string | null {
   if (typeof value !== 'string') return null
   const trimmed = value.trim()
   if (trimmed.length === 0) return null
@@ -112,7 +110,7 @@ function resolveCtaHref(action: unknown, url: unknown): string | null {
   return null
 }
 
-function Hero({ section, locale, defaultLocale, primaryColor }: SectionProps) {
+export function Hero({ section, locale, defaultLocale, primaryColor }: SectionProps) {
   const data = section.data as {
     eyebrow?: unknown
     heading?: unknown
@@ -174,7 +172,7 @@ function SectionHeading({ text, placeholder }: { text: string; placeholder: stri
     </h2>
   )
 }
-function FeaturesGrid({ section, locale, defaultLocale, primaryColor }: SectionProps) {
+export function FeaturesGrid({ section, locale, defaultLocale, primaryColor }: SectionProps) {
   const data = section.data as { heading?: unknown; items?: Array<{ title?: unknown; body?: unknown }> }
   const heading = pickLocalized(data.heading, locale, defaultLocale)
   const items = Array.isArray(data.items) ? data.items : []
@@ -215,7 +213,7 @@ function FeaturesGrid({ section, locale, defaultLocale, primaryColor }: SectionP
   )
 }
 
-function HowItWorks({ section, locale, defaultLocale, primaryColor }: SectionProps) {
+export function HowItWorks({ section, locale, defaultLocale, primaryColor }: SectionProps) {
   const data = section.data as { heading?: unknown; steps?: Array<{ title?: unknown; body?: unknown }> }
   const heading = pickLocalized(data.heading, locale, defaultLocale)
   const steps = Array.isArray(data.steps) ? data.steps : []
@@ -256,7 +254,7 @@ function HowItWorks({ section, locale, defaultLocale, primaryColor }: SectionPro
     </section>
   )
 }
-function Pricing({ section, locale, defaultLocale, primaryColor }: SectionProps) {
+export function Pricing({ section, locale, defaultLocale, primaryColor }: SectionProps) {
   const data = section.data as {
     heading?: unknown
     source?: unknown
@@ -304,7 +302,7 @@ function Pricing({ section, locale, defaultLocale, primaryColor }: SectionProps)
   )
 }
 
-function Faq({ section, locale, defaultLocale }: SectionProps) {
+export function Faq({ section, locale, defaultLocale }: SectionProps) {
   const data = section.data as { heading?: unknown; items?: Array<{ question?: unknown; answer?: unknown }> }
   const heading = pickLocalized(data.heading, locale, defaultLocale)
   const items = Array.isArray(data.items) ? data.items : []
@@ -329,7 +327,7 @@ function Faq({ section, locale, defaultLocale }: SectionProps) {
     </section>
   )
 }
-function Testimonials({ section, locale, defaultLocale }: SectionProps) {
+export function Testimonials({ section, locale, defaultLocale }: SectionProps) {
   const data = section.data as { heading?: unknown; items?: Array<{ quote?: unknown; author?: unknown }> }
   const heading = pickLocalized(data.heading, locale, defaultLocale)
   const items = Array.isArray(data.items) ? data.items : []
@@ -353,7 +351,7 @@ function Testimonials({ section, locale, defaultLocale }: SectionProps) {
   )
 }
 
-function Stats({ section, locale, defaultLocale, primaryColor }: SectionProps) {
+export function Stats({ section, locale, defaultLocale, primaryColor }: SectionProps) {
   const data = section.data as { heading?: unknown; items?: Array<{ value?: unknown; label?: unknown }> }
   const heading = pickLocalized(data.heading, locale, defaultLocale)
   const items = Array.isArray(data.items) ? data.items : []
@@ -377,7 +375,7 @@ function Stats({ section, locale, defaultLocale, primaryColor }: SectionProps) {
   )
 }
 
-function TrustLogos({ section, locale, defaultLocale }: SectionProps) {
+export function TrustLogos({ section, locale, defaultLocale }: SectionProps) {
   const data = section.data as { heading?: unknown; logos?: Array<{ image?: { src?: unknown; alt?: unknown } }> }
   const heading = pickLocalized(data.heading, locale, defaultLocale)
   const logos = Array.isArray(data.logos) ? data.logos : []
@@ -400,7 +398,7 @@ function TrustLogos({ section, locale, defaultLocale }: SectionProps) {
     </section>
   )
 }
-function CtaBanner({ section, locale, defaultLocale, primaryColor }: SectionProps) {
+export function CtaBanner({ section, locale, defaultLocale, primaryColor }: SectionProps) {
   const data = section.data as { heading?: unknown; body?: unknown; cta?: { label?: unknown; action?: unknown; url?: unknown } }
   const heading = ph(pickLocalized(data.heading, locale, defaultLocale), 'Заголовок CTA / CTA heading')
   const body = pickLocalized(data.body, locale, defaultLocale)
@@ -447,7 +445,7 @@ function CtaBanner({ section, locale, defaultLocale, primaryColor }: SectionProp
   )
 }
 
-function Footer({ section, locale, defaultLocale }: SectionProps) {
+export function Footer({ section, locale, defaultLocale }: SectionProps) {
   const data = section.data as { columns?: Array<{ title?: unknown }>; legal?: unknown }
   const columns = Array.isArray(data.columns) ? data.columns : []
   const legal = pickLocalized(data.legal, locale, defaultLocale)
@@ -466,15 +464,3 @@ function Footer({ section, locale, defaultLocale }: SectionProps) {
 }
 
 /** Fixed registry — the same 10 section types the canonical schema defines. */
-export const PREVIEW_SECTIONS: Record<LandingSectionType, ComponentType<SectionProps>> = {
-  hero: Hero,
-  featuresGrid: FeaturesGrid,
-  howItWorks: HowItWorks,
-  pricing: Pricing,
-  faq: Faq,
-  testimonials: Testimonials,
-  stats: Stats,
-  trustLogos: TrustLogos,
-  ctaBanner: CtaBanner,
-  footer: Footer,
-}

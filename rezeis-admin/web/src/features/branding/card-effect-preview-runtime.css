@@ -1,0 +1,13 @@
+@keyframes card-effect-preview-drift {
+  0%, 100% { background-position: 0% 50%, 100% 50%, 0% 50%; }
+  50% { background-position: 28% 42%, 72% 58%, 100% 50%; }
+}
+
+.card-effect-preview__css-artwork {
+  background-size: 170% 170%, 165% 165%, 190% 190%;
+  animation: card-effect-preview-drift 18s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card-effect-preview__css-artwork { animation: none; }
+}

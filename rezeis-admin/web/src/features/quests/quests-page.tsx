@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { createElement, useCallback, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
@@ -149,16 +149,7 @@ function SvgIconThumb({ iconId, className }: { iconId: string; className?: strin
     staleTime: Infinity,
     enabled: iconId.trim().length > 0,
   })
-  const [url, setUrl] = useState<string | null>(null)
-  useEffect(() => {
-    if (!blob) {
-      setUrl(null)
-      return
-    }
-    const objectUrl = URL.createObjectURL(blob)
-    setUrl(objectUrl)
-    return () => URL.revokeObjectURL(objectUrl)
-  }, [blob])
+  const url = useBlobObjectUrl(blob)
   if (!url) return <span className={cn('inline-block h-5 w-5', className)} />
   return <img src={url} alt="" className={cn('h-5 w-5 object-contain', className)} />
 }
@@ -174,7 +165,31 @@ function QuestIconThumb({
 }) {
   if (iconKind === 'SVG') return <SvgIconThumb iconId={iconRef} className={className} />
   const Icon = PRESET_ICON_MAP.get(iconRef) ?? Trophy
-  return <Icon className={cn('h-5 w-5', className)} />
+  return createElement(Icon, { className: cn('h-5 w-5', className) })
+}
+
+function useBlobObjectUrl(blob: Blob | undefined): string | null {
+  const resourceRef = useRef<{ blob: Blob; url: string } | null>(null)
+
+  const subscribe = useCallback((onStoreChange: () => void) => {
+    if (!blob) return () => undefined
+
+    const url = URL.createObjectURL(blob)
+    resourceRef.current = { blob, url }
+    onStoreChange()
+
+    return () => {
+      URL.revokeObjectURL(url)
+      if (resourceRef.current?.url === url) resourceRef.current = null
+    }
+  }, [blob])
+
+  const getSnapshot = useCallback(() => {
+    const resource = resourceRef.current
+    return resource !== null && resource.blob === blob ? resource.url : null
+  }, [blob])
+
+  return useSyncExternalStore(subscribe, getSnapshot, () => null)
 }
 
 function FilterChipGroup({

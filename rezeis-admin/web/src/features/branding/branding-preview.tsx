@@ -37,8 +37,15 @@ import {
   getCardEffectDefaults,
   type CardEffectId,
 } from './card-effect-registry'
+import {
+  CardEffectPreviewLayer,
+} from './card-effect-preview-runtime'
+import {
+  isPreviewCardEffect,
+  resolveCardEffectPreviewOpacity,
+} from './card-effect-preview-utils'
 import { usePlans, type Plan } from '@/features/plans/plans-api'
-import { autoPlanGradient } from './plan-card-styles-section'
+import { autoPlanGradient } from './plan-card-style-utils'
 import { buildTextureCss } from './app-texture'
 import { PlanIconView } from '@/features/plans/plan-icon-view'
 import {
@@ -46,6 +53,7 @@ import {
   type PlanCardStyleDraft,
   type BrandingAppBackgroundDraft,
   type BrandingCornerRadiiDraft,
+  type BrandingSubscriptionCardTextDraft,
   type BrandingSurfaceThemeDraft,
   type NavItemDraft,
   type NavDestinationId,
@@ -63,6 +71,7 @@ interface BrandingPreviewProps {
     bgSecondary?: string
     cardGradient?: string
     cardPattern?: string | null
+    subscriptionCardText?: BrandingSubscriptionCardTextDraft
     cardLogo?: CardLogoPreset
     cardLogoUrl?: string | null
     cardEffect?: string
@@ -154,15 +163,17 @@ interface PreviewCardVisual {
   readonly effect: string
   readonly effectProps: Record<string, unknown>
   readonly opacity: number
+  readonly subscriptionCardText: BrandingSubscriptionCardTextDraft
 }
 
 type PreviewRgb = readonly [number, number, number]
 
 interface PreviewCardContrast {
-  readonly foreground: '#0a0a0a' | '#ffffff'
+  readonly foreground: string
   readonly foundation: string
   readonly veilChannels: string
   readonly veilOpacity: number
+  readonly weakManualContrast: boolean
 }
 
 interface PreviewAppReadability {
@@ -268,19 +279,6 @@ function resolvePreviewEffectColors(
   return [...new Set(colors)].join(' ')
 }
 
-function previewEffectPalette(
-  colors: readonly string[],
-  fallback: string,
-): { readonly backgroundColor: string; readonly backgroundImage: string } {
-  const first = colors[0] ?? fallback
-  const middle = colors[Math.floor((colors.length - 1) / 2)] ?? first
-  const last = colors.at(-1) ?? middle
-  return {
-    backgroundColor: first,
-    backgroundImage: `radial-gradient(95% 135% at 4% 100%, ${first} 0%, transparent 64%), radial-gradient(85% 120% at 100% 2%, ${last} 0%, transparent 60%), linear-gradient(135deg, ${first}, ${middle}, ${last})`,
-  }
-}
-
 function usePrefersReducedMotion(): boolean {
   const [reduced, setReduced] = useState(
     () =>
@@ -312,6 +310,10 @@ function resolvePreviewCardContrast(
   preferredForeground: string,
   effectArtwork = '',
   effectOpacity = 0,
+  subscriptionCardText: BrandingSubscriptionCardTextDraft = {
+    mode: 'auto',
+    color: null,
+  },
 ): PreviewCardContrast {
   const foundationRgb = parsePreviewHex(foundation)
   const baseSamples = Array.from(gradient.matchAll(/#[\da-f]{3,8}(?![\da-f])/gi))
@@ -338,6 +340,39 @@ function resolvePreviewCardContrast(
     samples.length > 0
       ? samples
       : [foundationRgb ?? (isPreviewLight(preferredForeground) ? PREVIEW_BLACK : PREVIEW_WHITE)]
+  const manualForeground = resolvePreviewManualCardForeground(subscriptionCardText)
+  if (manualForeground) {
+    const foregroundRgb = parsePreviewHex(manualForeground)
+    if (foregroundRgb) {
+      // Reiwa evaluates both support veils for a forced foreground and takes
+      // the weaker safe candidate. Keeping that policy here makes a custom
+      // text colour render identically in the preview and real cabinet.
+      const darkRequirement = previewRequiredVeil(
+        resolvedSamples,
+        foregroundRgb,
+        PREVIEW_BLACK,
+      )
+      const lightRequirement = previewRequiredVeil(
+        resolvedSamples,
+        foregroundRgb,
+        PREVIEW_WHITE,
+      )
+      const useLightVeil = lightRequirement < darkRequirement
+      const rawRequirement = useLightVeil ? lightRequirement : darkRequirement
+      const veil = useLightVeil ? PREVIEW_WHITE : PREVIEW_BLACK
+      return {
+        foreground: manualForeground,
+        foundation,
+        veilChannels: veil.join(' '),
+        veilOpacity:
+          Math.round(Math.min(0.75, Math.max(0.12, rawRequirement + 0.025)) * 1000) /
+          1000,
+        weakManualContrast: resolvedSamples.some(
+          (sample) => previewContrast(foregroundRgb, sample) < 4.5,
+        ),
+      }
+    }
+  }
   const darkRequirement = previewRequiredVeil(resolvedSamples, PREVIEW_BLACK, PREVIEW_WHITE)
   const lightRequirement = previewRequiredVeil(resolvedSamples, PREVIEW_WHITE, PREVIEW_BLACK)
   const prefersLight = isPreviewLight(preferredForeground)
@@ -354,7 +389,28 @@ function resolvePreviewCardContrast(
     veilChannels: veil.join(' '),
     veilOpacity:
       Math.round(Math.min(0.75, Math.max(0.12, rawRequirement + 0.025)) * 1000) / 1000,
+    weakManualContrast: false,
   }
+}
+
+function resolvePreviewManualCardForeground(
+  value: BrandingSubscriptionCardTextDraft,
+): string | null {
+  if (value.mode === 'light') return '#ffffff'
+  if (value.mode === 'dark') return '#0a0a0a'
+  if (
+    value.mode === 'custom' &&
+    value.color &&
+    isOpaquePreviewHex(value.color) &&
+    parsePreviewHex(value.color)
+  ) {
+    return value.color
+  }
+  return null
+}
+
+function isOpaquePreviewHex(value: string): boolean {
+  return /^#(?:[\da-f]{3}|[\da-f]{6})$/i.test(value.trim())
 }
 
 /**
@@ -584,27 +640,16 @@ function PreviewSubscriptionCard({
   radius: string
 }) {
   const { t } = useTranslation()
-  const Effect =
-    visual.effect !== 'NONE' && visual.effect in CARD_EFFECT_COMPONENTS
-      ? CARD_EFFECT_COMPONENTS[visual.effect as CardEffectId]
-      : null
+  const hasEffect = isPreviewCardEffect(visual.effect)
   const effectProps = useMemo<Record<string, unknown>>(() => {
-    if (!Effect) return {}
+    if (!hasEffect) return {}
     const base = { ...getCardEffectDefaults(visual.effect), ...visual.effectProps }
     if (visual.effect === 'aurora' && base['colorStops'] === undefined) {
       return { colorStops: brandAuroraStops(primary), amplitude: 1.1, blend: 0.55, speed: 0.8, ...base }
     }
     return base
-  }, [Effect, visual.effect, visual.effectProps, primary])
-  const effectPalette = useMemo(
-    () =>
-      previewEffectPalette(
-        resolvePreviewEffectInputColors(visual.effect, effectProps),
-        foundation,
-      ),
-    [effectProps, foundation, visual.effect],
-  )
-  const effectOpacity = Math.min(1, Math.max(0.05, visual.opacity))
+  }, [hasEffect, visual.effect, visual.effectProps, primary])
+  const effectOpacity = resolveCardEffectPreviewOpacity(visual.opacity)
   const contrast = useMemo(
     () =>
       resolvePreviewCardContrast(
@@ -612,9 +657,19 @@ function PreviewSubscriptionCard({
         foundation,
         primaryFg,
         resolvePreviewEffectColors(visual.effect, effectProps),
-        Effect ? visual.opacity : 0,
+        hasEffect ? effectOpacity : 0,
+        visual.subscriptionCardText,
       ),
-    [Effect, effectProps, foundation, primaryFg, visual.effect, visual.gradient, visual.opacity],
+    [
+      effectProps,
+      effectOpacity,
+      foundation,
+      hasEffect,
+      primaryFg,
+      visual.effect,
+      visual.gradient,
+      visual.subscriptionCardText,
+    ],
   )
   return (
     <div
@@ -622,7 +677,8 @@ function PreviewSubscriptionCard({
       data-preview-card-foreground={
         contrast.foreground === '#0a0a0a' ? 'dark' : 'light'
       }
-      data-preview-card-artwork={Effect ? 'animated' : 'static'}
+      data-preview-card-text-mode={visual.subscriptionCardText.mode}
+      data-preview-card-artwork={hasEffect ? 'animated' : 'static'}
       className="relative isolate h-[160px] overflow-hidden p-4 [contain:paint]"
       style={{
         borderRadius: radius,
@@ -656,42 +712,21 @@ function PreviewSubscriptionCard({
       {/* Subscription-card effects intentionally stay live in the preview.
           Reiwa treats an explicitly configured card effect as branded artwork
           rather than decorative motion, so this must mirror the live card. */}
-      {Effect && (
-        <Suspense fallback={null}>
-          <div
-            aria-hidden="true"
-            data-preview-card-layer="effect"
-            data-preview-card-effect-runtime="live"
-            data-preview-card-effect-foundation={effectPalette.backgroundColor}
-            className="absolute inset-0"
-            style={{ backgroundColor: effectPalette.backgroundColor }}
-          >
-            <div
-              data-preview-card-effect-artwork
-              className="absolute inset-0"
-              style={{
-                backgroundImage: effectPalette.backgroundImage,
-                opacity: effectOpacity,
-              }}
-            />
-            <div
-              data-preview-card-effect-renderer
-              className="absolute inset-0"
-              style={{ opacity: effectOpacity }}
-            >
-              <Effect {...effectProps} />
-            </div>
-          </div>
-        </Suspense>
+      {hasEffect && (
+        <CardEffectPreviewLayer
+          effect={visual.effect}
+          props={effectProps}
+          opacity={visual.opacity}
+        />
       )}
-      {!Effect && (
+      {!hasEffect && (
         <div
           data-preview-card-layer="readability"
           data-preview-card-readability="wcag-full-card-veil"
           data-preview-card-veil-opacity={contrast.veilOpacity}
           data-preview-card-veil-rgb={contrast.veilChannels}
           className="pointer-events-none absolute inset-0"
-          style={{ background: previewStaticArtworkVeil(contrast) }}
+              style={{ background: previewStaticArtworkVeil(contrast) }}
         />
       )}
       {/* Watermark — operator-configurable glyph or custom image */}
@@ -701,6 +736,15 @@ function PreviewSubscriptionCard({
         className="pointer-events-none absolute -right-4 -bottom-6 h-28 w-28"
         style={{ color: contrast.foreground, opacity: 0.12 }}
       />
+      {contrast.weakManualContrast && (
+        <span
+          data-preview-card-contrast-warning
+          role="status"
+          className="absolute bottom-1 left-2 z-10 rounded bg-black/55 px-1.5 py-0.5 text-[8px] font-medium text-white"
+        >
+          {t('brandingPage.sections.preview.cardTextContrastWarning')}
+        </span>
+      )}
 
       {/* Card content */}
       <div className="relative flex h-full flex-col justify-between">
@@ -918,6 +962,7 @@ export function BrandingPreview({ values, focus }: BrandingPreviewProps) {
     bgSecondary = '#18181b',
     cardGradient = 'linear-gradient(135deg, #064e3b 0%, #22c55e 100%)',
     cardPattern,
+    subscriptionCardText = { mode: 'auto', color: null },
     cardLogo = 'DEFAULT',
     cardLogoUrl,
     cardEffect = 'aurora',
@@ -1031,9 +1076,17 @@ export function BrandingPreview({ values, focus }: BrandingPreviewProps) {
         effect: slot?.cardEffect ?? cardEffect,
         effectProps: slot?.cardEffectProps ?? cardEffectProps,
         opacity: slot?.cardEffectOpacity ?? cardEffectOpacity,
+        subscriptionCardText,
       }
     })
-  }, [cardEffectsByIndex, cardGradient, cardEffect, cardEffectProps, cardEffectOpacity])
+  }, [
+    cardEffectsByIndex,
+    cardGradient,
+    cardEffect,
+    cardEffectProps,
+    cardEffectOpacity,
+    subscriptionCardText,
+  ])
 
   return (
     <div className="flex flex-col items-center">

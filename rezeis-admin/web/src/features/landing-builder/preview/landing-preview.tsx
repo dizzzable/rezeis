@@ -2,7 +2,7 @@ import { useDeferredValue, useEffect, useRef, useState, type CSSProperties } fro
 import { createPortal } from 'react-dom'
 
 import type { LandingConfig, LandingSection } from '../landing-builder-api'
-import { PREVIEW_SECTIONS } from './preview-sections'
+import { PREVIEW_SECTIONS } from './preview-section-registry'
 // Raw CSS injected into the iframe <head> — the admin app's global CSS does
 // not reach the isolated preview document, so the landing visual system
 // (backgrounds / glass / reveal) must be shipped in explicitly. Kept in

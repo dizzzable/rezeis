@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
 import { Plus, Megaphone, Send, XCircle, Trash2, Loader2, RefreshCw, Upload, FileImage, FileVideo, X, Pencil, Clock, FlaskConical } from 'lucide-react'
@@ -105,6 +105,36 @@ function looksLikeHttpUrl(value: string): boolean {
 }
 
 /**
+ * Keeps a revocable browser object URL in an external-store subscription.
+ * The URL lifecycle belongs to the browser, so React only re-renders after the
+ * subscription publishes its new resource instead of mirroring `file` through
+ * a synchronous state update in an Effect.
+ */
+function useObjectUrl(file: File | null | undefined): string | null {
+  const resourceRef = useRef<{ file: File; url: string } | null>(null)
+
+  const subscribe = useCallback((onStoreChange: () => void) => {
+    if (!file) return () => undefined
+
+    const url = URL.createObjectURL(file)
+    resourceRef.current = { file, url }
+    onStoreChange()
+
+    return () => {
+      URL.revokeObjectURL(url)
+      if (resourceRef.current?.url === url) resourceRef.current = null
+    }
+  }, [file])
+
+  const getSnapshot = useCallback(() => {
+    const resource = resourceRef.current
+    return resource !== null && resource.file === file ? resource.url : null
+  }, [file])
+
+  return useSyncExternalStore(subscribe, getSnapshot, () => null)
+}
+
+/**
  * Inline visual preview for attached broadcast media. Accepts either a locally
  * selected `File` (rendered via a revocable object URL) or a remote `url`, and
  * shows an `<img>` for photos or a `<video controls>` for videos so the
@@ -121,18 +151,7 @@ function MediaPreview({
   mediaType: 'photo' | 'video'
   label: string
 }) {
-  const [objectUrl, setObjectUrl] = useState<string | null>(null)
-
-  useEffect(() => {
-    if (!file) {
-      setObjectUrl(null)
-      return
-    }
-    const created = URL.createObjectURL(file)
-    setObjectUrl(created)
-    return () => URL.revokeObjectURL(created)
-  }, [file])
-
+  const objectUrl = useObjectUrl(file)
   const src = objectUrl ?? (url && url.trim().length > 0 ? url.trim() : null)
   if (!src) return null
 

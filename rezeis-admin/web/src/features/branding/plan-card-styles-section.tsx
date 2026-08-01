@@ -9,7 +9,7 @@
  * a deterministic auto gradient (mirrors the reiwa cabinet), so the operator
  * sees distinct cards out of the box.
  */
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Loader2, Upload, Wand2, X } from 'lucide-react'
 import { toast } from 'sonner'
@@ -27,6 +27,7 @@ import { CardEffectPicker } from './card-effect-section'
 import { getCardEffectDefaults } from './card-effect-registry'
 import { CARD_GRADIENT_PRESETS, gradientFromPrimary } from './theme-presets'
 import { APP_BG_TEXTURE_PATTERNS, buildTextureCss } from './app-texture'
+import { resolvePlanCardTextureCss } from './plan-card-style-utils'
 import type { PlanCardStyleDraft } from './branding-form-schema'
 import { PlanIconView } from '@/features/plans/plan-icon-view'
 
@@ -40,7 +41,7 @@ interface PlanCardStylesSectionProps {
 }
 
 /** Deterministic auto gradient from a plan id — mirrors reiwa `autoPlanStyle`. */
-export function autoPlanGradient(planId: string): string {
+function autoPlanGradient(planId: string): string {
   let h = 0
   for (let i = 0; i < planId.length; i += 1) {
     h = (h * 31 + planId.charCodeAt(i)) >>> 0
@@ -412,17 +413,7 @@ function TariffCardThumb({
   readonly className?: string
 }) {
   const gradient = style?.gradient && style.gradient.length > 0 ? style.gradient : autoPlanGradient(planId)
-  const textureCss = useMemo(() => {
-    if (style?.textureUrl) return null
-    if (!style?.texturePreset) return null
-    return buildTextureCss({
-      pattern: style.texturePreset,
-      color: isHex(style?.accent) ? (style!.accent as string) : '#ffffff',
-      background: 'transparent',
-      scale: 16,
-      opacity: 0.5,
-    })
-  }, [style?.textureUrl, style?.texturePreset, style?.accent])
+  const textureCss = resolvePlanCardTextureCss(style)
 
   return (
     <div

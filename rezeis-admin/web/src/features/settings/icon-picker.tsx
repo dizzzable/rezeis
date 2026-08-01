@@ -17,21 +17,7 @@ import { EmojiIconView } from '@/features/custom-emoji/emoji-icon-view'
 
 import { CUSTOM_ICONS_QUERY_KEY, getCustomIcons } from './custom-icons-api'
 import { CustomIconView } from './custom-icon-view'
-
-/** Prefix marking an `icon` value as a reference to a custom uploaded icon. */
-export const CUSTOM_ICON_PREFIX = 'custom:'
-
-/** Set of built-in Lucide preset keys, for fast emoji-vs-preset detection. */
-const PRESET_KEYS = new Set(PLAN_ICON_OPTIONS.map((o) => o.key))
-
-/**
- * `true` when an icon value is an emoji (a Unicode glyph or a `:slug:`
- * custom-pack shortcode) rather than a Lucide preset key, a `custom:<id>`
- * uploaded icon, or null ("Auto").
- */
-export function isEmojiIcon(value: string | null): value is string {
-  return value !== null && value.length > 0 && !value.startsWith(CUSTOM_ICON_PREFIX) && !PRESET_KEYS.has(value)
-}
+import { CUSTOM_ICON_PREFIX, isEmojiIcon } from './icon-picker-utils'
 
 interface IconPickerProps {
   /** Current value: a lucide key, `custom:<id>`, or null ("Auto"). */

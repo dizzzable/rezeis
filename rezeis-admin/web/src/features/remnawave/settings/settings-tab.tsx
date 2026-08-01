@@ -12,7 +12,7 @@
  * The delivery + plugins cards are read-only mirrors of Remnawave; only the
  * cleanup policy writes (and it writes to OUR Settings, never to Remnawave).
  */
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Loader2, Plug, Trash2 } from 'lucide-react'
@@ -39,9 +39,10 @@ import {
   TableRow,
 } from '@/components/ui/table'
 
-import { remnawaveApi } from '../remnawave-api'
+import { remnawaveApi, type RemnawaveCleanupSettings } from '../remnawave-api'
 import { KEYS } from '../remnawave-query-keys'
 import { TabHeader } from '../shared/tab-header'
+import { getCleanupSettingsFormKey } from './cleanup-settings-form-key'
 
 export function SettingsTab() {
   const { t } = useTranslation()
@@ -146,22 +147,31 @@ export function SettingsTab() {
  * panels where deleting a profile could wipe another project's user.
  */
 function CleanupCard() {
-  const { t } = useTranslation()
-  const queryClient = useQueryClient()
   const { data, isLoading } = useQuery({
     queryKey: KEYS.cleanupSettings,
     queryFn: remnawaveApi.getCleanupSettings,
   })
 
-  const [deleteEnabled, setDeleteEnabled] = useState(true)
-  const [graceDays, setGraceDays] = useState('3')
+  return (
+    <CleanupCardForm
+      key={getCleanupSettingsFormKey(data)}
+      initialSettings={data}
+      isLoading={isLoading}
+    />
+  )
+}
 
-  // Hydrate the form once the server value lands (and on refetch).
-  useEffect(() => {
-    if (!data) return
-    setDeleteEnabled(data.deleteEnabled)
-    setGraceDays(String(data.graceDays))
-  }, [data])
+function CleanupCardForm({
+  initialSettings,
+  isLoading,
+}: {
+  initialSettings: RemnawaveCleanupSettings | undefined
+  isLoading: boolean
+}) {
+  const { t } = useTranslation()
+  const queryClient = useQueryClient()
+  const [deleteEnabled, setDeleteEnabled] = useState(initialSettings?.deleteEnabled ?? true)
+  const [graceDays, setGraceDays] = useState(() => String(initialSettings?.graceDays ?? 3))
 
   const mutation = useMutation({
     mutationFn: () =>

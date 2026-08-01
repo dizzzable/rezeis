@@ -88,6 +88,30 @@ export const CARD_EFFECTS = [
 export type CardEffect = (typeof CARD_EFFECTS)[number];
 
 /**
+ * Foreground strategy for the subscription card itself. `auto` preserves the
+ * cabinet's contrast resolver; the remaining choices deliberately keep the
+ * operator's decision literal instead of changing it from the card artwork.
+ */
+export const SUBSCRIPTION_CARD_TEXT_MODES = [
+  'auto',
+  'light',
+  'dark',
+  'custom',
+] as const;
+export type SubscriptionCardTextMode =
+  (typeof SUBSCRIPTION_CARD_TEXT_MODES)[number];
+
+/**
+ * One global subscription-card text decision. A custom colour is retained
+ * only in `custom` mode; all accepted custom values are opaque hex colours so
+ * the preview and the Reiwa contrast compositor have one unambiguous result.
+ */
+export interface SubscriptionCardTextSettings {
+  readonly mode: SubscriptionCardTextMode;
+  readonly color: string | null;
+}
+
+/**
  * How the menu/section icons in the reiwa cabinet are coloured:
  *   - `default` — each icon keeps its own distinct accent (current look).
  *   - `theme`   — every icon uses the brand `primary` colour.
@@ -338,6 +362,12 @@ export interface BrandingThemeVariant {
   readonly bgSecondary: string;
   readonly cardGradient: string;
   readonly cardPattern: string | null;
+  /**
+   * Optional only for variants saved before card-text controls existed.
+   * Reiwa falls back to the root policy when this is absent; it must not be
+   * eagerly replaced with `auto`, or a later root-level choice is masked.
+   */
+  readonly subscriptionCardText?: SubscriptionCardTextSettings;
   readonly cardEffect: CardEffect;
   readonly cardEffectProps: Record<string, unknown>;
   readonly cardEffectOpacity: number;
@@ -413,6 +443,12 @@ export interface BrandingSettingsInterface {
   readonly cardGradient: string;
   /** Optional CSS background-image (pattern overlay) for the card. */
   readonly cardPattern: string | null;
+  /**
+   * Explicit text colour policy for subscription cards. It is intentionally
+   * separate from `primaryFg`: primary buttons and card content can require
+   * different contrast decisions on an operator-created gradient.
+   */
+  readonly subscriptionCardText: SubscriptionCardTextSettings;
 
   /**
    * Watermark glyph shown on the subscription card. One of the built-in
@@ -536,6 +572,10 @@ export const DEFAULT_BRANDING: BrandingSettingsInterface = {
   bgSecondary: '#171717',
   cardGradient: 'linear-gradient(135deg, #064e3b 0%, #22c55e 100%)',
   cardPattern: null,
+  subscriptionCardText: {
+    mode: 'auto',
+    color: null,
+  },
   cardLogo: 'DEFAULT',
   cardLogoUrl: null,
   cardEffect: 'aurora',

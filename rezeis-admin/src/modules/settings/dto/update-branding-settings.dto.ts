@@ -39,6 +39,8 @@ import {
   IconColorMode,
   NAV_DESTINATIONS,
   NavDestinationId,
+  SubscriptionCardTextMode,
+  SUBSCRIPTION_CARD_TEXT_MODES,
 } from '../interfaces/branding-settings.interface';
 import {
   isSafeBrandingGradient,
@@ -55,6 +57,10 @@ const DATA_IMAGE_BASE64_PATTERN =
   /^data:image\/[a-z0-9+.-]+;base64,[A-Za-z0-9+/=]+$/i;
 const BRANDING_UPLOAD_PATH_PATTERN =
   /^\/uploads\/branding\/(?![A-Za-z0-9._-]*\.\.)[A-Za-z0-9][A-Za-z0-9._-]*$/;
+// Subscription-card copy must stay opaque. Supporting alpha here would make
+// contrast depend on the underlying animated artwork and let the admin
+// preview disagree with the runtime compositor.
+const OPAQUE_HEX_COLOR_PATTERN = /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i;
 
 function isAllowedBrandingImageUrl(value: string): boolean {
   if (
@@ -419,6 +425,22 @@ export class SurfaceThemeDto {
   public glassBlurPx?: number;
 }
 
+/** Explicit subscription-card foreground policy, separate from primary UI text. */
+export class SubscriptionCardTextDto {
+  @IsIn(SUBSCRIPTION_CARD_TEXT_MODES as readonly string[])
+  public mode!: SubscriptionCardTextMode;
+
+  // Non-custom modes intentionally ignore any stale colour left by an older
+  // client. Only a literal custom choice needs a valid colour payload.
+  @ValidateIf((object: SubscriptionCardTextDto) => object.mode === 'custom')
+  @IsString()
+  @IsHexColor()
+  @Matches(OPAQUE_HEX_COLOR_PATTERN, {
+    message: 'subscriptionCardText.color must be an opaque hexadecimal colour',
+  })
+  public color!: string | null;
+}
+
 /** One fully resolved light/dark representation of an operator concept. */
 export class BrandingThemeVariantDto {
   @IsHexColor()
@@ -443,6 +465,12 @@ export class BrandingThemeVariantDto {
   @MaxLength(512)
   @IsBrandingGradient({ allowNone: true })
   public cardPattern!: string | null;
+
+  @ValidateIf((_, value: unknown) => value !== undefined)
+  @IsObject()
+  @ValidateNested()
+  @Type(() => SubscriptionCardTextDto)
+  public subscriptionCardText?: SubscriptionCardTextDto;
 
   @IsIn(CARD_EFFECTS as readonly string[])
   public cardEffect!: CardEffect;
@@ -598,6 +626,12 @@ export class UpdateBrandingSettingsDto {
   @MaxLength(512)
   @IsBrandingGradient({ allowNone: true })
   public cardPattern?: string | null;
+
+  @ValidateIf((_, value: unknown) => value !== undefined)
+  @IsObject()
+  @ValidateNested()
+  @Type(() => SubscriptionCardTextDto)
+  public subscriptionCardText?: SubscriptionCardTextDto;
 
   @IsOptional()
   @IsIn(CARD_LOGO_PRESETS as readonly string[])

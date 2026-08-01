@@ -1,0 +1,267 @@
+/** Runtime-safe renderer for the WEB Reiwa card preview. */
+
+import {
+  Component,
+  Suspense,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react'
+
+import { CARD_EFFECT_COMPONENTS, type CardEffectId } from './card-effect-registry'
+import {
+  PAPER_CARD_EFFECTS,
+  buildCardEffectPreviewArtwork,
+  isPreviewCardEffect,
+  requiresPreviewCardEffectWebGL,
+  resolveCardEffectPreviewColors,
+  resolveCardEffectPreviewOpacity,
+} from './card-effect-preview-utils'
+
+import './card-effect-preview-runtime.css'
+
+interface CardEffectCapabilities {
+  readonly webgl: boolean
+  readonly webgl2: boolean
+}
+
+type CardEffectPreviewRuntime =
+  | 'probing'
+  | 'native'
+  | 'webgl1-fallback'
+  | 'css-fallback'
+
+class PreviewEffectErrorBoundary extends Component<{
+  readonly children: ReactNode
+  readonly resetKey: string
+  readonly onError: () => void
+}, { hasError: boolean }> {
+  state = { hasError: false }
+
+  static getDerivedStateFromError() {
+    return { hasError: true }
+  }
+
+  componentDidCatch() {
+    this.props.onError()
+  }
+
+  componentDidUpdate(previous: Readonly<{ resetKey: string }>) {
+    if (previous.resetKey !== this.props.resetKey && this.state.hasError) {
+      this.setState({ hasError: false })
+    }
+  }
+
+  render() {
+    return this.state.hasError ? null : this.props.children
+  }
+}
+
+function EffectReadySignal({
+  presentationKey,
+  onReady,
+}: {
+  readonly presentationKey: string
+  readonly onReady: (key: string) => void
+}) {
+  useEffect(() => {
+    onReady(presentationKey)
+  }, [onReady, presentationKey])
+
+  return null
+}
+
+function detectCapabilities(): CardEffectCapabilities {
+  if (typeof document === 'undefined') return { webgl: false, webgl2: false }
+
+  const probe = (kind: 'webgl' | 'webgl2'): boolean => {
+    const canvas = document.createElement('canvas')
+    try {
+      const context = canvas.getContext(kind, {
+        alpha: true,
+        antialias: false,
+        depth: false,
+        stencil: false,
+        powerPreference: 'low-power',
+      })
+      if (context === null || !('getExtension' in context)) return false
+      const loseContext = context.getExtension('WEBGL_lose_context') as
+        | { loseContext?: () => void }
+        | null
+      loseContext?.loseContext?.()
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  const webgl2 = probe('webgl2')
+  return { webgl2, webgl: webgl2 || probe('webgl') }
+}
+
+function resolveAuroraFallbackProps(
+  props: Readonly<Record<string, unknown>>,
+): Readonly<Record<string, unknown>> {
+  const colors = resolveCardEffectPreviewColors('aurora', props)
+  const middle = colors[Math.floor((colors.length - 1) / 2)] ?? colors[0]
+  const speed = props['speed']
+  return {
+    colorStops: [colors[0], middle, colors.at(-1) ?? colors[0]],
+    amplitude: 1.05,
+    blend: 0.56,
+    speed:
+      typeof speed === 'number' && Number.isFinite(speed)
+        ? Math.min(Math.max(speed, 0.15), 1.25)
+        : 0.7,
+  }
+}
+
+export function CardEffectPreviewLayer({
+  effect,
+  props,
+  opacity,
+}: {
+  readonly effect: string
+  readonly props: Readonly<Record<string, unknown>>
+  readonly opacity: number
+}) {
+  const rootRef = useRef<HTMLDivElement>(null)
+  const [capabilitySnapshot, setCapabilitySnapshot] = useState<{
+    readonly scope: string
+    readonly capabilities: CardEffectCapabilities
+  } | null>(null)
+  const [failedScope, setFailedScope] = useState<string | null>(null)
+  const [readyKey, setReadyKey] = useState<string | null>(null)
+  const propsKey = useMemo(() => JSON.stringify(props), [props])
+  const scope = `${effect}:${propsKey}`
+  const valid = isPreviewCardEffect(effect)
+
+  // The probe allocates a temporary canvas, so schedule it after React has
+  // committed the unchanging gradient/pattern baseline instead of performing
+  // browser work during render. The one-frame probing state intentionally has
+  // no effect layer and therefore cannot flash a foreign colour.
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined
+    const frame = window.requestAnimationFrame(() => {
+      setCapabilitySnapshot({
+        scope: effect,
+        capabilities:
+          valid && requiresPreviewCardEffectWebGL(effect)
+            ? detectCapabilities()
+            : { webgl: false, webgl2: false },
+      })
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [effect, valid])
+
+  const capabilities = capabilitySnapshot?.scope === effect
+    ? capabilitySnapshot.capabilities
+    : null
+  const effectFailed = failedScope === scope
+  const runtime: CardEffectPreviewRuntime | null =
+    !valid
+      ? null
+      : capabilities === null
+        ? 'probing'
+        : effectFailed
+          ? 'css-fallback'
+          : !requiresPreviewCardEffectWebGL(effect)
+            ? 'native'
+            : !capabilities.webgl || (PAPER_CARD_EFFECTS.has(effect) && !capabilities.webgl2)
+              ? 'css-fallback'
+              : !capabilities.webgl2 && effect !== 'aurora'
+                ? 'webgl1-fallback'
+                : 'native'
+  const runtimeEffect: CardEffectId | null = !valid
+    ? null
+    : runtime === 'webgl1-fallback'
+      ? 'aurora'
+      : effect
+  const Effect = runtimeEffect === null || runtime === 'css-fallback' || runtime === 'probing' || runtime === null
+    ? null
+    : CARD_EFFECT_COMPONENTS[runtimeEffect]
+  const runtimeProps = runtime === 'webgl1-fallback'
+    ? resolveAuroraFallbackProps(props)
+    : props
+  const overlayOpacity = resolveCardEffectPreviewOpacity(opacity)
+  const presentationKey = `${scope}:${runtime}`
+  const isReady = runtime === 'css-fallback' || readyKey === presentationKey
+
+  useEffect(() => {
+    if (Effect === null) return
+    const root = rootRef.current
+    if (root === null || typeof MutationObserver === 'undefined') return
+
+    const listeners = new Map<HTMLCanvasElement, () => void>()
+    const markFailed = () => setFailedScope(scope)
+    const observeCanvas = () => {
+      root.querySelectorAll('canvas').forEach((canvas) => {
+        if (listeners.has(canvas)) return
+        canvas.addEventListener('webglcontextlost', markFailed)
+        canvas.addEventListener('webglcontextcreationerror', markFailed)
+        listeners.set(canvas, () => {
+          canvas.removeEventListener('webglcontextlost', markFailed)
+          canvas.removeEventListener('webglcontextcreationerror', markFailed)
+        })
+      })
+    }
+    const observer = new MutationObserver(observeCanvas)
+    observer.observe(root, { childList: true, subtree: true })
+    observeCanvas()
+
+    return () => {
+      observer.disconnect()
+      listeners.forEach((remove) => remove())
+    }
+  }, [Effect, presentationKey, scope])
+
+  if (!valid || runtime === null) return null
+
+  return (
+    <div
+      ref={rootRef}
+      aria-hidden="true"
+      data-preview-card-layer="effect"
+      data-preview-card-effect-runtime={runtime}
+      data-preview-card-effect-ready={isReady ? 'true' : 'false'}
+      data-preview-card-effect-foundation="transparent"
+      className="absolute inset-0"
+      style={{ isolation: 'isolate', overflow: 'hidden', contain: 'paint' }}
+    >
+      {runtime === 'css-fallback' && (
+        <div
+          data-preview-card-effect-artwork
+          className="card-effect-preview__css-artwork absolute inset-0"
+          style={{
+            backgroundImage: buildCardEffectPreviewArtwork(
+              resolveCardEffectPreviewColors(effect, props),
+            ),
+            opacity: overlayOpacity,
+          }}
+        />
+      )}
+      {Effect !== null && (
+        <PreviewEffectErrorBoundary
+          resetKey={presentationKey}
+          onError={() => setFailedScope(scope)}
+        >
+          <Suspense fallback={null}>
+            <div
+              data-preview-card-effect-renderer
+              className="absolute inset-0"
+              style={{ opacity: overlayOpacity }}
+            >
+              <Effect {...runtimeProps} />
+            </div>
+            <EffectReadySignal
+              presentationKey={presentationKey}
+              onReady={setReadyKey}
+            />
+          </Suspense>
+        </PreviewEffectErrorBoundary>
+      )}
+    </div>
+  )
+}

@@ -6,6 +6,7 @@ export const BRANDING_BG_EFFECTS = ['NONE', 'MESH', 'PARTICLES', 'NOISE', 'AUROR
 export const BRANDING_ICON_COLOR_MODES = ['default', 'theme', 'custom'] as const
 export const BRANDING_THEME_MODE_POLICIES = ['fixed', 'user-selectable'] as const
 export const BRANDING_THEME_MODES = ['light', 'dark'] as const
+export const BRANDING_SUBSCRIPTION_CARD_TEXT_MODES = ['auto', 'light', 'dark', 'custom'] as const
 export const BRANDING_APP_BG_KINDS = ['none', 'gradient', 'texture', 'effect'] as const
 export const BRANDING_APP_BG_TEXTURES = [
   'dots',
@@ -97,6 +98,7 @@ export interface BrandingFormDraft {
   readonly bgSecondary: string
   readonly cardGradient: string
   readonly cardPattern: string | null
+  readonly subscriptionCardText: BrandingSubscriptionCardTextDraft
   readonly cardLogo: CardLogoPreset
   readonly cardLogoUrl: string | null
   readonly cardEffect: string
@@ -128,6 +130,7 @@ export interface BrandingThemeVariantDraft {
   readonly bgSecondary: string
   readonly cardGradient: string
   readonly cardPattern: string | null
+  readonly subscriptionCardText: BrandingSubscriptionCardTextDraft
   readonly cardEffect: string
   readonly cardEffectProps: Record<string, unknown>
   readonly cardEffectOpacity: number
@@ -143,6 +146,12 @@ export interface BrandingThemeVariantDraft {
 export interface BrandingThemeVariantsDraft {
   readonly light: BrandingThemeVariantDraft
   readonly dark: BrandingThemeVariantDraft
+}
+
+/** Text policy for subscription-card content, independent of primary-button text. */
+export interface BrandingSubscriptionCardTextDraft {
+  readonly mode: (typeof BRANDING_SUBSCRIPTION_CARD_TEXT_MODES)[number]
+  readonly color: string | null
 }
 
 export interface BrandingSurfaceThemeDraft {
@@ -254,6 +263,7 @@ export interface BrandingFormValidationMessages {
 }
 
 const HEX_PATTERN = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/
+const OPAQUE_HEX_PATTERN = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/
 const DATA_IMAGE_BASE64_PATTERN = /^data:image\/[a-z0-9+.-]+;base64,[A-Za-z0-9+/=]+$/i
 const BRANDING_UPLOAD_PATH_PATTERN =
   /^\/uploads\/branding\/(?![A-Za-z0-9._-]*\.\.)[A-Za-z0-9][A-Za-z0-9._-]*$/
@@ -281,6 +291,7 @@ const DEFAULT_BRANDING_DRAFT: BrandingFormDraft = {
   bgSecondary: '#171717',
   cardGradient: 'linear-gradient(135deg, #064e3b 0%, #22c55e 100%)',
   cardPattern: null,
+  subscriptionCardText: { mode: 'auto', color: null },
   cardLogo: 'DEFAULT',
   cardLogoUrl: null,
   cardEffect: 'aurora',
@@ -346,6 +357,15 @@ export function createBrandingFormSchema(messages: BrandingFormValidationMessage
     borderStrongOpacity: z.number().min(0).max(1),
     glassBlurPx: z.number().min(0).max(40),
   })
+  const subscriptionCardTextSchema = z
+    .object({
+      mode: z.enum(BRANDING_SUBSCRIPTION_CARD_TEXT_MODES),
+      color: z.string().regex(OPAQUE_HEX_PATTERN, messages.hexInvalid).nullable(),
+    })
+    .refine((value) => value.mode !== 'custom' || value.color !== null, {
+      path: ['color'],
+      message: messages.hexInvalid,
+    })
   const themeVariantSchema = z.object({
     primary: z.string().regex(HEX_PATTERN, messages.hexInvalid),
     primaryFg: z.string().regex(HEX_PATTERN, messages.hexInvalid),
@@ -353,6 +373,7 @@ export function createBrandingFormSchema(messages: BrandingFormValidationMessage
     bgSecondary: z.string().regex(HEX_PATTERN, messages.hexInvalid),
     cardGradient: safeGradientSchema(messages.gradientInvalid),
     cardPattern: optionalGradientSchema(messages.gradientInvalid, true),
+    subscriptionCardText: subscriptionCardTextSchema,
     cardEffect: z.enum(BRANDING_CARD_EFFECTS),
     cardEffectProps: z.record(z.string(), z.unknown()),
     cardEffectOpacity: z.number().min(0.05).max(1),
@@ -388,6 +409,7 @@ export function createBrandingFormSchema(messages: BrandingFormValidationMessage
       bgSecondary: z.string().regex(HEX_PATTERN, messages.hexInvalid),
       cardGradient: safeGradientSchema(messages.gradientInvalid),
       cardPattern: optionalGradientSchema(messages.gradientInvalid, true),
+      subscriptionCardText: subscriptionCardTextSchema,
       cardLogo: z.enum(CARD_LOGO_PRESETS),
       cardLogoUrl: optionalImageUrl(messages.imageUrlInvalid),
       cardEffect: z.enum(BRANDING_CARD_EFFECTS),
@@ -515,6 +537,9 @@ export function createBrandingDirtyPatch(input: {
 }
 
 export function createInitialBrandingDraft(input?: Partial<BrandingFormDraft> | null): BrandingFormDraft {
+  const subscriptionCardText = normalizeSubscriptionCardTextDraft(
+    input?.subscriptionCardText,
+  )
   return {
     ...DEFAULT_BRANDING_DRAFT,
     ...(input ?? {}),
@@ -532,13 +557,15 @@ export function createInitialBrandingDraft(input?: Partial<BrandingFormDraft> | 
       input?.themeModePolicy === 'user-selectable' ? 'user-selectable' : 'fixed',
     themeDefaultMode:
       input?.themeDefaultMode === 'light' ? 'light' : 'dark',
-    themeVariants: isThemeVariantsDraft(input?.themeVariants)
-      ? input.themeVariants
-      : null,
+    themeVariants: normalizeThemeVariantsDraft(
+      input?.themeVariants,
+      subscriptionCardText,
+    ),
     tagline: normalizeDraftNullableString(input?.tagline),
     logoUrl: normalizeDraftNullableString(input?.logoUrl),
     pwaIconUrl: normalizeDraftNullableString(input?.pwaIconUrl),
     cardPattern: normalizeDraftNullableString(input?.cardPattern),
+    subscriptionCardText,
     cardLogoUrl: normalizeDraftNullableString(input?.cardLogoUrl),
     cardEffectProps: isPlainRecord(input?.cardEffectProps) ? input.cardEffectProps : {},
     cardEffectsByIndex: Array.isArray(input?.cardEffectsByIndex) ? input.cardEffectsByIndex : [],
@@ -557,11 +584,57 @@ export function createInitialBrandingDraft(input?: Partial<BrandingFormDraft> | 
   }
 }
 
+function normalizeSubscriptionCardTextDraft(
+  value: unknown,
+): BrandingSubscriptionCardTextDraft {
+  if (!isPlainRecordUnknown(value)) {
+    return { ...DEFAULT_BRANDING_DRAFT.subscriptionCardText }
+  }
+  const mode = BRANDING_SUBSCRIPTION_CARD_TEXT_MODES.includes(
+    value.mode as BrandingSubscriptionCardTextDraft['mode'],
+  )
+    ? (value.mode as BrandingSubscriptionCardTextDraft['mode'])
+    : 'auto'
+  if (mode !== 'custom') return { mode, color: null }
+  const color =
+    typeof value.color === 'string' && OPAQUE_HEX_PATTERN.test(value.color.trim())
+      ? value.color.trim()
+      : null
+  return color ? { mode, color } : { mode: 'auto', color: null }
+}
+
 function isThemeVariantsDraft(
   value: unknown,
 ): value is BrandingThemeVariantsDraft {
   if (!isPlainRecordUnknown(value)) return false
   return isPlainRecordUnknown(value.light) && isPlainRecordUnknown(value.dark)
+}
+
+/**
+ * API snapshots may contain a valid pre-card-text variant pair.  The backend
+ * preserves that absence so Reiwa can fall back to the root policy; the form,
+ * however, always submits complete variant DTOs.  Hydrate the missing fields
+ * from the root decision only in this editable draft, never in persistence.
+ */
+function normalizeThemeVariantsDraft(
+  value: unknown,
+  fallbackSubscriptionCardText: BrandingSubscriptionCardTextDraft,
+): BrandingThemeVariantsDraft | null {
+  if (!isThemeVariantsDraft(value)) return null
+  const normalizeVariant = (variant: BrandingThemeVariantsDraft['light']) => {
+    const candidate = variant as unknown as Record<string, unknown>
+    return {
+      ...candidate,
+      subscriptionCardText: normalizeSubscriptionCardTextDraft(
+        candidate.subscriptionCardText ?? fallbackSubscriptionCardText,
+      ),
+    } as BrandingThemeVariantsDraft['light']
+  }
+
+  return {
+    light: normalizeVariant(value.light),
+    dark: normalizeVariant(value.dark),
+  }
 }
 
 function areBrandingValuesEqual(left: unknown, right: unknown): boolean {

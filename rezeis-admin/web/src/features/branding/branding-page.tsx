@@ -101,7 +101,7 @@ function tabForBrandingField(field: string): BrandingTab {
   if (['primary', 'primaryFg', 'bgPrimary', 'bgSecondary', 'borderRadius', 'cornerRadii', 'fontFamily', 'surfaceTheme'].includes(field)) {
     return 'colors';
   }
-  if (field.startsWith('card')) return 'card';
+  if (field.startsWith('card') || field === 'subscriptionCardText') return 'card';
   if (field === 'bgEffect' || field === 'appBackground') return 'appbg';
   if (field.startsWith('icon')) return 'icons';
   if (field === 'planCardStyles') return 'planCards';
@@ -270,12 +270,14 @@ export default function WebReiwaPage() {
   function createThemeVariantsWithSlots(
     preset: ConceptThemePreset,
   ): BrandingThemeVariantsDraft {
-    const variants = createConceptThemeModeVariants(preset);
     const slotCount = (form.getValues("cardEffectsByIndex") ?? []).length;
+    const subscriptionCardText = form.getValues('subscriptionCardText');
+    const variants = createConceptThemeModeVariants(preset, subscriptionCardText);
     const withSlots = (
       variant: (typeof variants)["light"],
     ): BrandingThemeVariantsDraft["light"] => ({
       ...variant,
+      subscriptionCardText: { ...subscriptionCardText },
       cardEffectProps: { ...(variant.cardEffectProps ?? {}) },
       cardEffectsByIndex: Array.from({ length: slotCount }, () => ({
         cardEffect: variant.cardEffect,
@@ -313,6 +315,9 @@ export default function WebReiwaPage() {
     form.setValue("primaryFg", patch.primaryFg, { shouldDirty: true });
     form.setValue("bgPrimary", patch.bgPrimary, { shouldDirty: true });
     form.setValue("bgSecondary", patch.bgSecondary, { shouldDirty: true });
+    if ('subscriptionCardText' in patch) {
+      form.setValue('subscriptionCardText', { ...patch.subscriptionCardText }, { shouldDirty: true });
+    }
     if (applyCardArtwork) {
       applyConceptCardPreset(cardPatch, synchronizeSlots);
     } else {
@@ -382,6 +387,27 @@ export default function WebReiwaPage() {
   function generateGradient(): void {
     const primary = form.getValues("primary");
     form.setValue("cardGradient", gradientFromPrimary(primary), { shouldDirty: true });
+  }
+
+  /**
+   * Brightness variants are full Reiwa snapshots. Keep the one global control
+   * mirrored into both so changing the user-visible brightness never silently
+   * restores an old card-text decision.
+   */
+  function setSubscriptionCardText(
+    value: BrandingFormDraft['subscriptionCardText'],
+  ): void {
+    form.setValue('subscriptionCardText', value, { shouldDirty: true });
+    const variants = form.getValues('themeVariants');
+    if (!variants) return;
+    form.setValue(
+      'themeVariants',
+      {
+        light: { ...variants.light, subscriptionCardText: { ...value } },
+        dark: { ...variants.dark, subscriptionCardText: { ...value } },
+      },
+      { shouldDirty: true },
+    );
   }
 
   // The form is seeded with a complete draft and every server response is
@@ -1176,6 +1202,74 @@ export default function WebReiwaPage() {
                     placeholder={t('brandingPage.sections.card.patternPlaceholder')}
                   />
                 </div>
+                <Controller
+                  name="subscriptionCardText"
+                  control={form.control}
+                  render={({ field }) => (
+                    <div className="space-y-3 rounded-lg border border-dashed bg-muted/20 p-3">
+                      <div className="space-y-1">
+                        <Label htmlFor="subscriptionCardTextMode">
+                          {t('brandingPage.sections.card.textMode')}
+                        </Label>
+                        <p className="text-xs text-muted-foreground">
+                          {t('brandingPage.sections.card.textModeHint')}
+                        </p>
+                      </div>
+                      <Select
+                        value={field.value.mode}
+                        onValueChange={(mode) =>
+                          setSubscriptionCardText({
+                            ...field.value,
+                            mode: mode as BrandingFormDraft['subscriptionCardText']['mode'],
+                            color: mode === 'custom' ? field.value.color : null,
+                          })
+                        }
+                      >
+                        <SelectTrigger id="subscriptionCardTextMode">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="auto">
+                            {t('brandingPage.sections.card.textModes.auto')}
+                          </SelectItem>
+                          <SelectItem value="light">
+                            {t('brandingPage.sections.card.textModes.light')}
+                          </SelectItem>
+                          <SelectItem value="dark">
+                            {t('brandingPage.sections.card.textModes.dark')}
+                          </SelectItem>
+                          <SelectItem value="custom">
+                            {t('brandingPage.sections.card.textModes.custom')}
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+                      {field.value.mode === 'custom' && (
+                        <div className="space-y-2">
+                          <Label htmlFor="subscriptionCardTextColor">
+                            {t('brandingPage.sections.card.textColor')}
+                          </Label>
+                          <Input
+                            id="subscriptionCardTextColor"
+                            value={field.value.color ?? ''}
+                            onChange={(event) =>
+                              setSubscriptionCardText({
+                                ...field.value,
+                                color: event.target.value || null,
+                              })
+                            }
+                            aria-invalid={!!form.formState.errors.subscriptionCardText?.color}
+                            className="font-mono text-xs"
+                            placeholder="#ffffff"
+                          />
+                          <FieldError message={form.formState.errors.subscriptionCardText?.color?.message} />
+                          <p className="text-[11px] text-muted-foreground">
+                            {t('brandingPage.sections.card.textColorHint')}
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                />
               </CardContent>
             </Card>
 

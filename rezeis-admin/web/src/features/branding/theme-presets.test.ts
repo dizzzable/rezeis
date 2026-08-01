@@ -238,9 +238,23 @@ describe('WEB Reiwa theme catalog', () => {
       expect(sourceVariant.bgPrimary, `${preset.code} source background`).toBe(source.bgPrimary)
       expect(sourceVariant.cardGradient, `${preset.code} source card`).toBe(source.cardGradient)
       expect(sourceVariant.fontFamily, `${preset.code} source font`).toBe(source.fontFamily)
+      expect(sourceVariant.subscriptionCardText, `${preset.code} card text`).toEqual({
+        mode: 'auto',
+        color: null,
+      })
       expect(variants.light.themePresetId).toBe(preset.id)
       expect(variants.dark.themePresetId).toBe(preset.id)
     }
+  })
+
+  it('inherits an operator card-text policy into both concept brightness variants', () => {
+    const preset = CONCEPT_THEME_PRESETS.find(({ code }) => code === 'CA')!
+    const subscriptionCardText = { mode: 'custom' as const, color: '#123456' }
+    const variants = createConceptThemeModeVariants(preset, subscriptionCardText)
+
+    expect(variants.light.subscriptionCardText).toEqual(subscriptionCardText)
+    expect(variants.dark.subscriptionCardText).toEqual(subscriptionCardText)
+    expect(variants.light.cardGradient).not.toBe(variants.dark.cardGradient)
   })
 
   it('uses a broad semantic composition matrix instead of one generic layout', () => {

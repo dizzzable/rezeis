@@ -3,14 +3,8 @@ import { useMemo } from 'react'
 import { cn } from '@/lib/utils'
 
 import { EmojiPreview } from './emoji-preview'
+import { SHORTCODE_RE } from './emoji-icon-value'
 import { useEmojiRegistry } from './use-emoji-registry'
-
-const SHORTCODE_RE = /^:([a-z0-9_]+):$/
-
-/** `true` when the shortcode/value is a custom-pack emoji reference. */
-export function isShortcodeEmoji(value: string): boolean {
-  return SHORTCODE_RE.test(value)
-}
 
 /**
  * EmojiIconView

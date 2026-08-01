@@ -174,6 +174,43 @@ describe('branding form schema', () => {
     expect(invalid.success).toBe(false)
   })
 
+  it('hydrates a legacy variant pair from the root card-text policy for the editable draft', () => {
+    const base = createInitialBrandingDraft()
+    const legacyVariant: Record<string, unknown> = { ...base }
+    delete legacyVariant.subscriptionCardText
+    const legacy = createInitialBrandingDraft({
+      ...base,
+      subscriptionCardText: { mode: 'custom', color: '#123456' },
+      themeVariants: {
+        light: { ...legacyVariant, themeVariants: null } as never,
+        dark: { ...legacyVariant, themeVariants: null } as never,
+      },
+    })
+
+    expect(legacy.themeVariants?.light.subscriptionCardText).toEqual({
+      mode: 'custom',
+      color: '#123456',
+    })
+    expect(legacy.themeVariants?.dark.subscriptionCardText).toEqual({
+      mode: 'custom',
+      color: '#123456',
+    })
+    expect(createBrandingFormSchema(messages).safeParse(legacy).success).toBe(true)
+  })
+
+  it('repairs malformed custom card text and clears stale non-custom colours in legacy drafts', () => {
+    expect(
+      createInitialBrandingDraft({
+        subscriptionCardText: { mode: 'custom', color: 'rgb(1, 2, 3)' } as never,
+      }).subscriptionCardText,
+    ).toEqual({ mode: 'auto', color: null })
+    expect(
+      createInitialBrandingDraft({
+        subscriptionCardText: { mode: 'light', color: '#123456' },
+      }).subscriptionCardText,
+    ).toEqual({ mode: 'light', color: null })
+  })
+
   it('keeps exact corner radii editable and clamps malformed legacy input', () => {
     const custom = createInitialBrandingDraft({
       cornerRadii: { cardPx: 2, itemPx: 1, pillPx: 0 },

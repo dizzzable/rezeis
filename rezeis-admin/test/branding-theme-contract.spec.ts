@@ -130,6 +130,118 @@ describe('WEB Reiwa preset and surface theme contract', () => {
     assert.equal(invalid.themeVariants, null);
   });
 
+  it('keeps legacy variant pairs on the root card-text policy through unrelated and direct patches', () => {
+    const legacyVariantBase: Record<string, unknown> = { ...DEFAULT_BRANDING };
+    delete legacyVariantBase.subscriptionCardText;
+    const light = {
+      ...legacyVariantBase,
+      primary: '#165eff',
+      bgPrimary: '#f5f8ff',
+      bgSecondary: '#eef3ff',
+      cardGradient: 'linear-gradient(135deg, #f5f8ff 0%, #b8d0ff 100%)',
+      appBackground: { ...DEFAULT_BRANDING.appBackground },
+      cornerRadii: { ...DEFAULT_BRANDING.cornerRadii },
+      surfaceTheme: { ...DEFAULT_BRANDING.surfaceTheme },
+      cardEffectsByIndex: [],
+    };
+    const dark = {
+      ...light,
+      primary: '#8cb4ff',
+      bgPrimary: '#0c1324',
+      bgSecondary: '#121d36',
+      cardGradient: 'linear-gradient(135deg, #0c1324 0%, #293f70 100%)',
+    };
+
+    const merged = mergeBrandingSettings({
+      existing: {
+        themePresetId: 'concept-cu',
+        themePresetVersion: 2,
+        subscriptionCardText: { mode: 'custom', color: '#F8FAFC' },
+        themeVariants: { light, dark },
+      },
+      patch: { brandName: 'Preserved concept' },
+    });
+    const reread = readBrandingSettings(merged);
+
+    assert.equal(reread.brandName, 'Preserved concept');
+    assert.equal(reread.themeVariants?.light.bgPrimary, '#f5f8ff');
+    assert.equal(reread.themeVariants?.dark.bgPrimary, '#0c1324');
+    assert.deepEqual(reread.subscriptionCardText, {
+      mode: 'custom',
+      color: '#F8FAFC',
+    });
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(
+        reread.themeVariants?.light ?? {},
+        'subscriptionCardText',
+      ),
+      false,
+    );
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(
+        reread.themeVariants?.dark ?? {},
+        'subscriptionCardText',
+      ),
+      false,
+    );
+
+    const directlyPatched = readBrandingSettings(
+      mergeBrandingSettings({
+        existing: merged,
+        patch: { subscriptionCardText: { mode: 'dark', color: null } },
+      }),
+    );
+
+    assert.deepEqual(directlyPatched.subscriptionCardText, {
+      mode: 'dark',
+      color: null,
+    });
+    assert.deepEqual(directlyPatched.themeVariants?.light.subscriptionCardText, {
+      mode: 'dark',
+      color: null,
+    });
+    assert.deepEqual(directlyPatched.themeVariants?.dark.subscriptionCardText, {
+      mode: 'dark',
+      color: null,
+    });
+
+    const variantOnlyPatched = readBrandingSettings(
+      mergeBrandingSettings({
+        existing: {
+          ...directlyPatched,
+          subscriptionCardText: { mode: 'custom', color: '#F8FAFC' },
+        },
+        patch: {
+          themeVariants: {
+            light: {
+              ...directlyPatched.themeVariants!.light,
+              subscriptionCardText: { mode: 'light', color: null },
+            },
+            dark: {
+              ...directlyPatched.themeVariants!.dark,
+              subscriptionCardText: { mode: 'dark', color: null },
+            },
+          },
+        },
+      }),
+    );
+
+    // Variant snapshots are transport copies, not independent controls. A
+    // direct API client cannot make text change when a user switches theme.
+    assert.deepEqual(variantOnlyPatched.subscriptionCardText, {
+      mode: 'custom',
+      color: '#F8FAFC',
+    });
+    assert.deepEqual(variantOnlyPatched.themeVariants?.light.subscriptionCardText, {
+      mode: 'custom',
+      color: '#F8FAFC',
+    });
+    assert.deepEqual(variantOnlyPatched.themeVariants?.dark.subscriptionCardText, {
+      mode: 'custom',
+      color: '#F8FAFC',
+    });
+  });
+
   it('drops legacy relative branding assets that Reiwa cannot mirror durably', () => {
     const branding = readBrandingSettings({
       logoUrl: '/uploads/icons/legacy-logo.svg',
@@ -465,6 +577,119 @@ describe('UpdateBrandingSettingsDto — preset and surface tokens', () => {
       ).some((error) => error.property === 'cardEffectsByIndex'),
       true,
     );
+  });
+
+  it('accepts an explicit custom card-text policy and rejects a missing custom colour', async () => {
+    const accepted = plainToInstance(UpdateBrandingSettingsDto, {
+      subscriptionCardText: { mode: 'custom', color: '#F8FAFC' },
+    });
+    const rejected = plainToInstance(UpdateBrandingSettingsDto, {
+      subscriptionCardText: { mode: 'custom', color: null },
+    });
+    const translucent = plainToInstance(UpdateBrandingSettingsDto, {
+      subscriptionCardText: { mode: 'custom', color: '#f8fafc80' },
+    });
+    const nullPolicy = plainToInstance(UpdateBrandingSettingsDto, {
+      subscriptionCardText: null,
+    });
+
+    assert.deepEqual(
+      await validate(accepted, { whitelist: true, forbidNonWhitelisted: true }),
+      [],
+    );
+    assert.equal(
+      (
+        await validate(rejected, {
+          whitelist: true,
+          forbidNonWhitelisted: true,
+        })
+      ).some((error) => error.property === 'subscriptionCardText'),
+      true,
+    );
+    assert.equal(
+      (
+        await validate(nullPolicy, {
+          whitelist: true,
+          forbidNonWhitelisted: true,
+        })
+      ).some((error) => error.property === 'subscriptionCardText'),
+      true,
+    );
+    assert.equal(
+      (
+        await validate(translucent, {
+          whitelist: true,
+          forbidNonWhitelisted: true,
+        })
+      ).some((error) => error.property === 'subscriptionCardText'),
+      true,
+    );
+  });
+
+  it('repairs malformed custom card text and clears stale colours from non-custom modes', async () => {
+    assert.deepEqual(
+      readBrandingSettings({
+        subscriptionCardText: { mode: 'custom', color: 'rgb(1, 2, 3)' },
+      }).subscriptionCardText,
+      { mode: 'auto', color: null },
+    );
+    assert.deepEqual(
+      readBrandingSettings({
+        subscriptionCardText: { mode: 'custom', color: '#1234' },
+      }).subscriptionCardText,
+      { mode: 'auto', color: null },
+    );
+    assert.deepEqual(
+      readBrandingSettings({
+        subscriptionCardText: { mode: 'light', color: '#123456' },
+      }).subscriptionCardText,
+      { mode: 'light', color: null },
+    );
+
+    const staleNonCustom = plainToInstance(UpdateBrandingSettingsDto, {
+      subscriptionCardText: { mode: 'dark', color: 'legacy-value' },
+    });
+    assert.deepEqual(
+      await validate(staleNonCustom, {
+        whitelist: true,
+        forbidNonWhitelisted: true,
+      }),
+      [],
+    );
+  });
+
+  it('accepts an old complete theme-variant payload without a card-text field', async () => {
+    const legacyVariant = {
+      primary: DEFAULT_BRANDING.primary,
+      primaryFg: DEFAULT_BRANDING.primaryFg,
+      bgPrimary: DEFAULT_BRANDING.bgPrimary,
+      bgSecondary: DEFAULT_BRANDING.bgSecondary,
+      cardGradient: DEFAULT_BRANDING.cardGradient,
+      cardPattern: DEFAULT_BRANDING.cardPattern,
+      cardEffect: DEFAULT_BRANDING.cardEffect,
+      cardEffectProps: DEFAULT_BRANDING.cardEffectProps,
+      cardEffectOpacity: DEFAULT_BRANDING.cardEffectOpacity,
+      cardEffectsByIndex: DEFAULT_BRANDING.cardEffectsByIndex,
+      bgEffect: DEFAULT_BRANDING.bgEffect,
+      appBackground: DEFAULT_BRANDING.appBackground,
+      borderRadius: DEFAULT_BRANDING.borderRadius,
+      cornerRadii: DEFAULT_BRANDING.cornerRadii,
+      fontFamily: DEFAULT_BRANDING.fontFamily,
+      surfaceTheme: DEFAULT_BRANDING.surfaceTheme,
+    };
+    const dto = plainToInstance(UpdateBrandingSettingsDto, {
+      themeVariants: {
+        light: legacyVariant,
+        dark: legacyVariant,
+      },
+    });
+
+    const errors = await validate(dto, {
+      whitelist: true,
+      forbidNonWhitelisted: true,
+    });
+    const variantError = errors.find((error) => error.property === 'themeVariants');
+    assert.equal(variantError, undefined);
   });
 
   it('accepts only safe relative assets from the bucket mirrored by Reiwa', async () => {

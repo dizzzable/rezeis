@@ -67,9 +67,9 @@ import {
 } from './bot-config-api'
 import {
   ActionFields,
-  buildActionPayload,
   BotButtonCreateDialog,
 } from './bot-button-dialogs'
+import { buildActionPayload } from './bot-button-payload'
 
 const REPLY_BUTTON_STYLES: BotButtonStyle[] = ['DEFAULT', 'PRIMARY', 'SUCCESS', 'DANGER']
 

@@ -1,6 +1,6 @@
 # Next Session Handoff — Rezeis Remediation
 
-Updated: 2026-07-31
+Updated: 2026-08-01
 
 ## User Context
 
@@ -41,7 +41,7 @@ These existed before this handoff. Do not overwrite or delete them unless explic
 
 ## Current Gate Snapshot
 
-Generated: 2026-07-31T16:50:56.830Z (checks not re-run; previous observed results preserved)
+Generated: 2026-08-01T22:28:45.923Z
 
 Run these from `V:\REZEIS_ADMIN_RUID_USER\rezeis` or the listed subdirectory.
 
@@ -50,61 +50,14 @@ Run these from `V:\REZEIS_ADMIN_RUID_USER\rezeis` or the listed subdirectory.
 | Backend Prisma generate | `npm run prisma:generate` in `rezeis-admin` | Pass |
 | Backend typecheck | `npm run typecheck` in `rezeis-admin` | Pass |
 | Backend lint | `npm run lint` in `rezeis-admin` | Pass |
-| Backend tests | `npm test` in `rezeis-admin` | Pass: 1917 tests |
-| Backend maintained tests | `npm run test:maintained` in `rezeis-admin` | Pass: 423 tests (336 core + 22 admin-surfaces + 65 email-linking) |
-| Backend admin surfaces tests | `npm run test:maintained:admin-surfaces` in `rezeis-admin` | Pass: 23 tests |
-| Backend admin auth tests | `node --require ts-node/register --test test/admin-auth.service.spec.ts test/auth.controller.spec.ts test/internal-admin.controller.spec.ts test/current-admin.decorator.spec.ts test/current-internal-request.decorator.spec.ts` in `rezeis-admin` | Pass: 22 tests (5 files) |
-| Backend config tests | `node --require ts-node/register --test test/auth.config.spec.ts test/email.config.spec.ts test/payments.config.spec.ts test/redis.config.spec.ts test/remnawave.config.spec.ts test/env.schema.spec.ts` in `rezeis-admin` | Pass: 16 tests |
-| Backend email service tests | `node --require ts-node/register --test test/email.service.spec.ts` in `rezeis-admin` | Pass: 3 tests |
-| Backend Prisma service tests | `node --require ts-node/register --test test/prisma.service.spec.ts` in `rezeis-admin` | Pass: 5 tests |
-| Backend safe exception tests | `node --require ts-node/register --test test/admin-safe-exception.filter.spec.ts` in `rezeis-admin` | Pass: 4 tests |
-| Backend payment diagnostics tests | `node --require ts-node/register --test test/payment-provider-error.util.spec.ts test/payment-provider-execution.service.spec.ts test/payment-webhook-inbox.service.spec.ts test/payments-checkout.service.spec.ts test/payment-ops-alert-delivery.service.spec.ts` in `rezeis-admin` | Pass: 20 tests |
-| Backend payment reconciliation side effects tests | `node --require ts-node/register --test test/payment-reconciliation-notifications.service.spec.ts` in `rezeis-admin` | Pass: 7 tests |
-| Backend user activity edge tests | `node --require ts-node/register --test test/user-activity-query.dto.spec.ts test/user-notifications.service.spec.ts test/user-transactions-history.service.spec.ts` in `rezeis-admin` | Pass: 13 tests |
-| Backend webhook queue ops tests | `node --require ts-node/register --test test/payment-webhook-ingress.service.spec.ts test/payment-webhook-ops.service.spec.ts` in `rezeis-admin` | Pass: 24 tests |
-| Backend internal platform policy tests | `node --require ts-node/register --test test/internal-platform-policy.controller.spec.ts` in `rezeis-admin` | Pass: 6 tests |
-| Backend health endpoint tests | `node --require ts-node/register --test test/health.controller.spec.ts test/health.service.spec.ts` in `rezeis-admin` | Pass: 11 tests |
-| Backend settings/current contract tests | `node --require ts-node/register --test test/settings.controller.spec.ts test/settings.service.spec.ts test/payment-ops-alert-settings.util.spec.ts` in `rezeis-admin` | Pass: 15 tests |
-| Backend web-auth DTO tests | `node --require ts-node/register --test test/web-auth.dto.spec.ts test/web-auth-register-validation.pbt.spec.ts` in `rezeis-admin` | Pass: 13 tests |
-| Backend web-auth controller tests | `node --require ts-node/register --test test/web-auth.controller.spec.ts` in `rezeis-admin` | Pass: 6 tests |
-| Backend web-auth service/password tests | `node --require ts-node/register --test test/web-auth.service.spec.ts test/web-auth.password-hashing.pbt.spec.ts` in `rezeis-admin` | Pass: 16 tests |
-| Backend runtime/request/HTTP tests | `node --require ts-node/register --test test/request-correlation.middleware.spec.ts test/runtime-entrypoints.spec.ts test/api-docs.spec.ts test/app-lifecycle.logger.spec.ts test/bigint-json.spec.ts test/outbound-http-options.spec.ts test/http-runtime.middleware.spec.ts` in `rezeis-admin` | Pass: 23 tests |
-| Backend payment gateway registry tests | `node --require ts-node/register --test test/payment-gateway-registry.service.spec.ts` in `rezeis-admin` | Pass: 6 tests |
-| Backend plans admin tests | `node --require ts-node/register --test test/plans-admin.service.spec.ts` in `rezeis-admin` | Pass: 4 tests |
-| Backend promocode mapper tests | `node --require ts-node/register --test test/plan-record.util.spec.ts` in `rezeis-admin` | Pass: 4 tests |
-| Backend profile-sync tests | `node --require ts-node/register --test test/profile-sync-queue.service.spec.ts test/profile-sync.processor.spec.ts` in `rezeis-admin` | Pass: 14 tests |
-| Backend payment transaction tests | `node --require ts-node/register --test test/payments-transactions.service.spec.ts test/admin-payment-transactions.controller.spec.ts` in `rezeis-admin` | Pass: 7 tests |
-| Backend push tests | `node --require ts-node/register --test test/push.service.spec.ts` in `rezeis-admin` | Pass: 10 tests |
-| Backend Remnawave API/node tests | `node --require ts-node/register --test test/remnawave-api.service.spec.ts test/remnawave-node-mapper.spec.ts` in `rezeis-admin` | Pass: 14 tests |
-| Backend internal user devices tests | `node --require ts-node/register --test test/internal-user-subscription-devices.service.spec.ts` in `rezeis-admin` | Pass: 5 tests |
-| Backend broadcast tests | `node --require ts-node/register --test test/admin-broadcast.service.spec.ts test/admin-broadcast-delivery.service.spec.ts test/admin-broadcast.controller.spec.ts` in `rezeis-admin` | Pass: 15 tests |
-| Backend email-linking tests | `node --require ts-node/register --test test/linking.service.spec.ts test/linking.controller.spec.ts test/internal-user.service.spec.ts test/internal-user-linked-web-account-sign-in.spec.ts test/complete-web-account-email-verification.dto.spec.ts` in `rezeis-admin` | Pass: 65 tests |
+| Backend tests | `npm test` in `rezeis-admin` | Pass (tests 1922 ℹ suites 354 ℹ pass 1922) |
+| Backend maintained tests | `npm run test:maintained` in `rezeis-admin` | Pass (tests 526 ℹ suites 95 ℹ pass 526) |
 | Backend audit | `npm audit` in `rezeis-admin` | Pass: found 0 vulnerabilities |
 | Web typecheck | `npx tsc -p tsconfig.app.json --noEmit --incremental false` in `rezeis-admin/web` | Pass |
-| Web tests | `npm test` in `rezeis-admin/web` | Pass: 69 files, 327 tests |
-| Web lint | `npm run lint` in `rezeis-admin/web` | Pass, 31 pre-existing warnings |
+| Web tests | `npm test` in `rezeis-admin/web` | Pass (Tests 353 passed (353)) |
+| Web lint | `npm run lint` in `rezeis-admin/web` | Pass |
 | Web build | `npm run build` in `rezeis-admin/web` | Pass |
 | Web audit | `npm audit` in `rezeis-admin/web` | Pass: found 0 vulnerabilities |
-
-## Codex Trial Ledger Continuation
-
-The active working tree contains the Codex trial-ledger continuation: a durable `TrialClaim` ledger is now wired through free and paid trial eligibility, checkout reservations, fulfillment, terminal-payment release, renewal policy, import/merge handling, and migration of legacy trial evidence.
-
-The final lifecycle audit found and resolved an account-deletion bypass: trial claims now restrict user deletion; the explicit deletion service refuses users with claim history; Telegram self-service linking does not retire a trial-bearing shell; and the explicit import rollback deletes its trial claims before their restricted transactions and users. This preserves eligibility history outside the one intentional rollback path.
-
-Follow-up audit fixes: checkout provider-creation is now fenced per transaction. On a provider-create exception, the fenced draft becomes `FAILED` and its paid-trial reservation is released; a late provider success can still revive and fulfill that transaction through the existing reconciliation path. Both donor importers now turn `is_trial_available=false` into one deterministic legacy consumed claim under the user lock, including after an earlier trial was upgraded and no imported subscription remains marked trial.
-
-Verification on 2026-07-31: `npm run prisma:generate`, `npm run typecheck`, and the first focused trial/payment/deletion suite passed (88 tests across imports, checkout, transactions, balance payment, free-trial serialization, user deletion, and web authentication). The follow-up provider/import suite passed 54 tests; focused ESLint and `git diff --check` passed.
-
-Release verification for `v0.9.6.80`: full backend `npm test` passed 1908 tests, full web `npm test` passed 327 tests across 69 files, web typecheck passed, backend `npm run lint` passed with zero warnings after removing the two dead symbols left by the ledger refactor (`TransactionStatus` import in `partner-balance-payment.service.ts`, `readSnapshotTrialSettings` in `payments-transactions.service.ts`), and web `npm run lint` reported only its 31 pre-existing warnings with none in the changed branding files.
-
-The three trial-ledger P2 gaps left open by `v0.9.6.80` are now closed by regression tests, with no production change required:
-
-- `test/trial-claim-late-success.spec.ts` drives the real `PaymentReconciliationService` and the real `PaymentSubscriptionMutationService` against one in-memory ledger over the full reserve → provider-cancel release → late SUCCESS revival → webhook replay path. It asserts the released unit frees quota, the revived claim is consumed in place (no second claim row, no second subscription), `trial.claim_late_success_over_cap` fires exactly once with `usedUnits`/`maxClaims`, no event fires when the freed slot was never reused or on the ordinary first-attempt path, and a stale cancel arriving after fulfillment cannot release a consumed unit.
-- `test/subscription-mutations-trial.spec.ts` now also covers a single-claim trial requested four times concurrently: exactly one claim unit is committed, the winner returns its subscription without an error, and each loser gets `BadRequestException(TRIAL_CLAIM_LIMIT_MESSAGE)` rather than a leaked unique-constraint failure. Both concurrency cases still assert the `FOR UPDATE` row lock is taken before the count and the ledger write.
-- `test/trial-claim-account-merge.spec.ts` runs `AccountMergeService` against a ledger whose fake `user.delete` enforces the `ON DELETE RESTRICT` foreign key, so the source's `trial_claims` rows must be re-pointed before the source is removed. It then proves the merged identity is refused a fresh trial through the real `SubscriptionMutationsService.grantTrial`, while an unrelated identity is still granted one.
-
-Each of these was verified to go red under inverted production logic (release skipped on provider-terminal, `usedUnits >= maxClaims` instead of `>`, `priorClaims > maxClaims` instead of `>=`, and the merge's `trialClaim.updateMany` re-point removed); the inversions were reverted and are not committed.
 
 ## Recommended First Slice
 

@@ -1527,6 +1527,7 @@ function extractUpdatedBrandingFields(dto: UpdateBrandingSettingsDto): readonly 
     'bgSecondary',
     'cardGradient',
     'cardPattern',
+    'subscriptionCardText',
     'cardLogo',
     'cardLogoUrl',
     'cardEffect',

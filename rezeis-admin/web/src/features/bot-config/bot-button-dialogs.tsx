@@ -51,6 +51,7 @@ import {
   type CreateBotButtonPayload,
   type UpdateBotButtonPayload,
 } from './bot-config-api'
+import { buildActionPayload } from './bot-button-payload'
 
 const STYLES: BotButtonStyle[] = ['DEFAULT', 'PRIMARY', 'SUCCESS', 'DANGER']
 const ACTION_TYPES: BotButtonAction[] = ['CALLBACK', 'URL', 'WEBAPP', 'SCREEN', 'SUPPORT_URL']
@@ -219,17 +220,6 @@ export function ActionFields({
  * SUPPORT_URL always reset target to `null` regardless of UI state so
  * stale typing doesn't leak through after switching action kinds.
  */
-export function buildActionPayload(
-  actionType: BotButtonAction,
-  actionTarget: string,
-): { actionType: BotButtonAction; actionTarget: string | null } {
-  if (actionType === 'CALLBACK' || actionType === 'SUPPORT_URL') {
-    return { actionType, actionTarget: null }
-  }
-  const trimmed = actionTarget.trim()
-  return { actionType, actionTarget: trimmed.length > 0 ? trimmed : null }
-}
-
 // ── Edit ───────────────────────────────────────────────────────────────────
 
 interface BotButtonEditDialogProps {

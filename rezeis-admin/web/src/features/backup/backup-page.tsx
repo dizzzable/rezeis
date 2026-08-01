@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';import { Plus, Download, Trash2, AlertCircle, Archive, RefreshCw, Settings, Send, RotateCcw, Loader2, Upload } from 'lucide-react';
 import { toast } from 'sonner';
@@ -16,7 +16,8 @@ import { Separator } from '@/components/ui/separator';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { useHasPermission } from '@/features/rbac';
-import { getBackupSettings, saveBackupSettings } from './backup-api';
+import { getBackupSettings, saveBackupSettings, type BackupSettings } from './backup-api';
+import { getBackupSettingsFormKey } from './backup-settings-form-key';
 import {
   Select,
   SelectContent,
@@ -503,37 +504,60 @@ interface BackupSettingsData {
   telegramTopicId: string;
 }
 
-function BackupSettings() {
-  const { t } = useTranslation();
-  const queryClient = useQueryClient();
-  const canEdit = useHasPermission('backups', 'create');
+const DEFAULT_BACKUP_SETTINGS: BackupSettingsData = {
+  autoEnabled: true,
+  intervalHours: 24,
+  maxKeep: 7,
+  telegramEnabled: false,
+  telegramChatId: '',
+  telegramTopicId: '',
+};
 
+function toBackupSettingsData(data: BackupSettings | undefined): BackupSettingsData {
+  if (!data) return DEFAULT_BACKUP_SETTINGS;
+
+  return {
+    autoEnabled: data.autoEnabled,
+    intervalHours: data.intervalHours,
+    maxKeep: data.maxKeep,
+    telegramEnabled: data.telegram.enabled,
+    telegramChatId: data.telegram.chatId ?? '',
+    telegramTopicId: data.telegram.topicId != null ? String(data.telegram.topicId) : '',
+  };
+}
+
+function BackupSettings() {
   const { data, isLoading } = useQuery({
     queryKey: ['admin', 'backup', 'settings'],
     queryFn: getBackupSettings,
   });
 
-  const [settings, setSettings] = useState<BackupSettingsData>({
-    autoEnabled: true,
-    intervalHours: 24,
-    maxKeep: 7,
-    telegramEnabled: false,
-    telegramChatId: '',
-    telegramTopicId: '',
-  });
+  return (
+    <BackupSettingsForm
+      key={getBackupSettingsFormKey(data)}
+      initialSettings={toBackupSettingsData(data)}
+      hasData={data !== undefined}
+      isLoading={isLoading}
+      botTokenConfigured={data?.botTokenConfigured ?? false}
+    />
+  );
+}
 
-  // Sync the local edit buffer when the server payload arrives / changes.
-  useEffect(() => {
-    if (!data) return
-    setSettings({
-      autoEnabled: data.autoEnabled,
-      intervalHours: data.intervalHours,
-      maxKeep: data.maxKeep,
-      telegramEnabled: data.telegram.enabled,
-      telegramChatId: data.telegram.chatId ?? '',
-      telegramTopicId: data.telegram.topicId != null ? String(data.telegram.topicId) : '',
-    })
-  }, [data])
+function BackupSettingsForm({
+  initialSettings,
+  hasData,
+  isLoading,
+  botTokenConfigured,
+}: {
+  initialSettings: BackupSettingsData;
+  hasData: boolean;
+  isLoading: boolean;
+  botTokenConfigured: boolean;
+}) {
+  const { t } = useTranslation();
+  const queryClient = useQueryClient();
+  const canEdit = useHasPermission('backups', 'create');
+  const [settings, setSettings] = useState<BackupSettingsData>(initialSettings);
 
   const saveMutation = useMutation({
     mutationFn: () =>
@@ -555,7 +579,7 @@ function BackupSettings() {
   })
 
   const showTokenWarning =
-    settings.telegramEnabled && data !== undefined && !data.botTokenConfigured
+    settings.telegramEnabled && hasData && !botTokenConfigured
 
   return (
     <Card>

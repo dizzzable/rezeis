@@ -12,7 +12,7 @@ import {
   configMissingLocales,
   missingLocales,
 } from './section-defaults'
-import { PREVIEW_SECTIONS } from './preview/preview-sections'
+import { PREVIEW_SECTIONS } from './preview/preview-section-registry'
 
 const LOCALES = ['ru', 'en'] as const
 

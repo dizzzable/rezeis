@@ -104,7 +104,6 @@ function PanelBrandingForm({ branding }: PanelBrandingFormProps) {
   const namingPrefix = form.watch('namingPrefix')
   const namingSeparator = form.watch('namingSeparator')
   const namingSuffixBase = form.watch('namingSuffixBase')
-  // eslint-disable-next-line react-hooks/incompatible-library
   const adminPwaIconUrl = form.watch('adminPwaIconUrl')
 
   // Apply the saved admin PWA icon on mount so the installed-app icon reflects

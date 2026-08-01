@@ -3416,6 +3416,18 @@
         removeSwatch: 'Удалить из палитры',
         pattern: 'Паттерн карточки (CSS background-image, опционально)',
         patternPlaceholder: 'url(…) или none',
+        textMode: 'Текст на карточке',
+        textModeHint:
+          'Авто подбирает контраст. Светлый, тёмный и свой цвет всегда остаются решением оператора.',
+        textModes: {
+          auto: 'Автоматический контраст',
+          light: 'Светлый текст',
+          dark: 'Тёмный текст',
+          custom: 'Свой цвет',
+        },
+        textColor: 'Свой цвет текста',
+        textColorHint:
+          'Цвет передаётся в Reiwa без замены. Если контраст слабый, живой предпросмотр покажет предупреждение.',
         builderTitle: 'Конструктор градиента',
         builder_linear: 'Линейный',
         builder_radial: 'Радиальный',
@@ -3546,6 +3558,7 @@
         liveLabel: 'Превью обновляется в реальном времени',
         welcome: 'С возвращением',
         statusLabel: 'Активна',
+        cardTextContrastWarning: 'Проверьте контраст текста',
         cardDot: 'Карточка {{index}}',
         remaining: 'Осталось',
         daysMock: '90 дн.',

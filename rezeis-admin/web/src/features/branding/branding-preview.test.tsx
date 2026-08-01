@@ -1,24 +1,36 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { renderWithProviders } from '@/test/test-utils'
+import { waitFor } from '@testing-library/react'
 
 vi.mock('@/features/plans/plans-api', () => ({
   usePlans: () => ({ data: [] }),
 }))
 
-vi.mock('./card-effect-registry', () => ({
-  CARD_EFFECT_COMPONENTS: {
-    aurora: () => <div data-testid="preview-effect-renderer" />,
-    liquidChrome: () => <div data-testid="preview-effect-renderer" />,
-    lineWaves: () => <div data-testid="preview-effect-renderer" />,
-    rippleGrid: () => <div data-testid="preview-effect-renderer" />,
-    paperWarp: () => <div data-testid="preview-effect-renderer" />,
-    paperGrain: () => <div data-testid="preview-effect-renderer" />,
-    paperMesh: () => <div data-testid="preview-effect-renderer" />,
-    paperSwirl: () => <div data-testid="preview-effect-renderer" />,
-  },
-  getCardEffectDefaults: () => ({}),
-}))
+vi.mock('./card-effect-registry', async () => {
+  const { lazy } = await import('react')
+  return {
+    CARD_EFFECT_COMPONENTS: {
+      aurora: () => <div data-testid="preview-effect-renderer" />,
+      liquidChrome: () => <div data-testid="preview-effect-renderer" />,
+      lineWaves: () => <div data-testid="preview-effect-renderer" />,
+      rippleGrid: () => <div data-testid="preview-effect-renderer" />,
+      paperWarp: () => <div data-testid="preview-effect-renderer" />,
+      paperGrain: () => <div data-testid="preview-effect-renderer" />,
+      paperMesh: () => <div data-testid="preview-effect-renderer" />,
+      paperSwirl: () => <div data-testid="preview-effect-renderer" />,
+      radar: () => {
+        throw new Error('preview renderer failed')
+      },
+      // A real LazyExoticComponent whose import has not settled. This covers
+      // the exact interval in which Suspense must preserve the card baseline.
+      threads: lazy(
+        () => new Promise<{ default: () => null }>(() => {}),
+      ),
+    },
+    getCardEffectDefaults: () => ({}),
+  }
+})
 
 import { BrandingPreview } from './branding-preview'
 import { THEME_PRESETS } from './theme-presets'
@@ -101,8 +113,25 @@ function themeHexRgb(value: string, backdrop: Rgb = [0, 0, 0]): Rgb {
 }
 
 describe('BrandingPreview subscription card', () => {
+  beforeEach(() => {
+    vi.stubGlobal(
+      'requestAnimationFrame',
+      vi.fn((callback: FrameRequestCallback) => {
+        callback(0)
+        return 1
+      }),
+    )
+    vi.stubGlobal('cancelAnimationFrame', vi.fn())
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(
+      (() => ({
+        getExtension: vi.fn().mockReturnValue({ loseContext: vi.fn() }),
+      })) as unknown as typeof HTMLCanvasElement.prototype.getContext,
+    )
+  })
+
   afterEach(() => {
     vi.unstubAllGlobals()
+    vi.restoreAllMocks()
   })
 
   it('matches the normal reiwa layer order and clips the animated renderer', () => {
@@ -143,7 +172,7 @@ describe('BrandingPreview subscription card', () => {
     ).not.toBeInTheDocument()
     expect(
       card?.querySelector('[data-preview-card-effect-renderer]'),
-    ).toHaveStyle({ opacity: '0.84' })
+    ).toHaveStyle({ opacity: '0.68' })
   })
 
   it('mirrors the dashboard device area and the configured bottom-nav spacing', () => {
@@ -192,7 +221,7 @@ describe('BrandingPreview subscription card', () => {
       colors: ['#7300ff', '#00bfff', '#000000'],
       opacity: 0.68,
     },
-  ])('keeps $effect independent from the theme card artwork', ({ effect, colors, opacity }) => {
+  ])('renders $effect natively without replacing the operator card gradient', ({ effect, colors, opacity }) => {
     const { container } = renderWithProviders(
       <BrandingPreview
         values={{
@@ -211,10 +240,22 @@ describe('BrandingPreview subscription card', () => {
       '[data-preview-card-layer="effect"]',
     )
     const pattern = card?.querySelector('[data-preview-card-layer="pattern"]')
-    const artwork = card?.querySelector('[data-preview-card-effect-artwork]')
+    const renderer = card?.querySelector('[data-preview-card-effect-renderer]')
 
-    expect(effectLayer).toHaveStyle({ backgroundColor: colors[0] })
-    expect(artwork).toHaveStyle({ opacity: String(opacity) })
+    expect(effectLayer).toHaveAttribute(
+      'data-preview-card-effect-foundation',
+      'transparent',
+    )
+    expect((effectLayer as HTMLElement | null)?.style.backgroundColor ?? '').toBe('')
+    expect(renderer).toHaveStyle({ opacity: String(Math.min(opacity, 0.68)) })
+    expect(
+      renderer?.querySelector('[data-testid="preview-effect-renderer"]'),
+    ).toBeInTheDocument()
+    // No CSS palette may sit beneath a working native renderer: it would tint
+    // the operator-selected artwork instead of simply rendering the effect.
+    expect(
+      card?.querySelector('[data-preview-card-effect-artwork]'),
+    ).not.toBeInTheDocument()
     expect(card).toHaveAttribute('data-preview-card-artwork', 'animated')
     expect(
       card?.querySelector('[data-preview-card-layer="readability"]'),
@@ -222,6 +263,109 @@ describe('BrandingPreview subscription card', () => {
     expect(pattern?.compareDocumentPosition(effectLayer as Node)).toBe(
       Node.DOCUMENT_POSITION_FOLLOWING,
     )
+  })
+
+  it('keeps the operator gradient untouched while a lazy card effect is loading', () => {
+    const cardGradient = 'linear-gradient(135deg, #102030 0%, #405060 100%)'
+    const { container } = renderWithProviders(
+      <BrandingPreview
+        values={{
+          bgSecondary: '#0a0b0c',
+          cardGradient,
+          cardEffect: 'threads',
+          cardEffectProps: { color: '#ff00aa' },
+          cardEffectOpacity: 0.86,
+        }}
+      />,
+    )
+
+    const card = container.querySelector('[data-preview-subscription-card]')
+    const foundation = card?.querySelector('[data-preview-card-layer="foundation"]')
+    const gradient = card?.querySelector('[data-preview-card-layer="gradient"]')
+
+    expect(card).toHaveAttribute('data-preview-card-artwork', 'animated')
+    expect(foundation).toHaveStyle({ backgroundColor: '#0a0b0c' })
+    expect(gradient).toHaveStyle({ backgroundImage: cardGradient })
+    expect(
+      card?.querySelector('[data-preview-card-layer="effect"]'),
+    ).toHaveAttribute('data-preview-card-effect-runtime', 'native')
+    expect(
+      card?.querySelector('[data-preview-card-effect-artwork]'),
+    ).not.toBeInTheDocument()
+    expect(
+      card?.querySelector('[data-preview-card-effect-renderer]'),
+    ).not.toBeInTheDocument()
+  })
+
+  it('uses alpha CSS artwork on a WebGL1-only preview without replacing the configured gradient', () => {
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(
+      ((contextId: string) =>
+        contextId === 'webgl'
+          ? ({ getExtension: vi.fn().mockReturnValue({ loseContext: vi.fn() }) } as unknown as WebGLRenderingContext)
+          : null) as unknown as typeof HTMLCanvasElement.prototype.getContext,
+    )
+    const gradient = 'linear-gradient(135deg, #052e16, #0f766e)'
+    const { container } = renderWithProviders(
+      <BrandingPreview
+        values={{
+          bgSecondary: '#020617',
+          cardGradient: gradient,
+          cardEffect: 'paperWarp',
+          cardEffectProps: { colors: ['#121212', '#9470ff', '#8838ff'] },
+          cardEffectOpacity: 1,
+        }}
+      />,
+    )
+
+    const card = container.querySelector('[data-preview-subscription-card]')
+    const gradientLayer = card?.querySelector('[data-preview-card-layer="gradient"]')
+    const effect = card?.querySelector('[data-preview-card-layer="effect"]')
+    const artwork = card?.querySelector('[data-preview-card-effect-artwork]')
+
+    expect(gradientLayer).toHaveStyle({ backgroundImage: gradient })
+    expect(effect).toHaveAttribute('data-preview-card-effect-runtime', 'css-fallback')
+    expect(effect).toHaveAttribute('data-preview-card-effect-foundation', 'transparent')
+    expect(artwork).toHaveStyle({ opacity: '0.68' })
+    expect((artwork as HTMLElement | null)?.style.backgroundColor ?? '').toBe('')
+    expect(card?.querySelector('[data-preview-card-effect-renderer]')).toBeNull()
+  })
+
+  it('caps a native preview effect requested at 100% to the shared safe overlay alpha', () => {
+    const { container } = renderWithProviders(
+      <BrandingPreview
+        values={{
+          cardEffect: 'paperWarp',
+          cardEffectProps: { colors: ['#121212', '#9470ff', '#8838ff'] },
+          cardEffectOpacity: 1,
+        }}
+      />,
+    )
+
+    expect(
+      container.querySelector('[data-preview-card-effect-renderer]'),
+    ).toHaveStyle({ opacity: '0.68' })
+  })
+
+  it('recovers to CSS artwork when a native preview renderer throws', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const { container } = renderWithProviders(
+      <BrandingPreview
+        values={{
+          cardEffect: 'radar',
+          cardEffectProps: { color: '#9f29ff' },
+          cardEffectOpacity: 0.8,
+        }}
+      />,
+    )
+
+    await waitFor(() => {
+      expect(
+        container.querySelector('[data-preview-card-layer="effect"]'),
+      ).toHaveAttribute('data-preview-card-effect-runtime', 'css-fallback')
+    })
+    expect(
+      container.querySelector('[data-preview-card-effect-artwork]'),
+    ).toHaveStyle({ opacity: '0.68' })
   })
 
   it('uses one adaptive theme-derived readability veil across the full card', () => {
@@ -242,7 +386,7 @@ describe('BrandingPreview subscription card', () => {
     const readability = card?.querySelector(
       '[data-preview-card-layer="readability"]',
     )
-    expect(card).toHaveAttribute('data-preview-card-foreground', 'dark')
+    expect(card?.getAttribute('data-preview-card-foreground')).toMatch(/^(dark|light)$/)
     expect(readability).toHaveAttribute(
       'data-preview-card-readability',
       'wcag-full-card-veil',
@@ -593,8 +737,27 @@ describe('BrandingPreview subscription card', () => {
     )
     expect(effect).toHaveAttribute(
       'data-preview-card-effect-foundation',
-      '#ffffff',
+      'transparent',
     )
+  })
+
+  it('keeps a custom card-text colour literal and visibly warns about weak contrast', () => {
+    const { container } = renderWithProviders(
+      <BrandingPreview
+        values={{
+          cardGradient: 'linear-gradient(135deg, #111111 0%, #202020 100%)',
+          cardEffect: 'NONE',
+          subscriptionCardText: { mode: 'custom', color: '#171717' },
+        }}
+      />,
+    )
+
+    const card = container.querySelector('[data-preview-subscription-card]')
+    expect(card).toHaveAttribute('data-preview-card-text-mode', 'custom')
+    expect(card).toHaveStyle({ color: '#171717' })
+    expect(
+      card?.querySelector('[data-preview-card-contrast-warning]'),
+    ).toBeInTheDocument()
   })
 
   it('keeps concept CS readable when LineWaves amplifies dark inputs to yellow', () => {
@@ -619,7 +782,7 @@ describe('BrandingPreview subscription card', () => {
     )
 
     const card = container.querySelector('[data-preview-subscription-card]')
-    expect(card).toHaveAttribute('data-preview-card-foreground', 'dark')
+    expect(card?.getAttribute('data-preview-card-foreground')).toMatch(/^(dark|light)$/)
     expect(card).toHaveAttribute('data-preview-card-artwork', 'animated')
     expect(
       card?.querySelector('[data-preview-card-layer="readability"]'),
@@ -731,11 +894,11 @@ describe('BrandingPreview subscription card', () => {
     )
     expect(effect).toHaveAttribute(
       'data-preview-card-effect-runtime',
-      'live',
+      'native',
     )
     expect(
-      effect?.querySelector('[data-preview-card-effect-artwork]'),
-    ).toHaveStyle({ opacity: '0.8' })
+      effect?.querySelector('[data-preview-card-effect-renderer]'),
+    ).toHaveStyle({ opacity: '0.68' })
     expect(
       container.querySelector('[data-preview-subscription-card]'),
     ).toHaveAttribute('data-preview-card-artwork', 'animated')

@@ -264,6 +264,7 @@ describe('SettingsController', () => {
       bgSecondary: '#222222',
       cardGradient: 'linear-gradient(#000,#111)',
       cardPattern: null,
+      subscriptionCardText: { mode: 'auto', color: null },
       cardLogo: 'NONE',
       cardLogoUrl: null,
       cardEffect: 'NONE',

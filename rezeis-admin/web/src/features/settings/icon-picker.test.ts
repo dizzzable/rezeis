@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { isEmojiIcon, CUSTOM_ICON_PREFIX } from './icon-picker'
+import { isEmojiIcon, CUSTOM_ICON_PREFIX } from './icon-picker-utils'
 
 /**
  * `isEmojiIcon` must classify icon values exactly: emoji = a Unicode glyph or a

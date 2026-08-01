@@ -10,7 +10,7 @@
  *   • Referral attach
  */
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
 import {
@@ -818,6 +818,29 @@ type IdentityKind =
   | 'WEB_ONLY'
   | 'LOCAL_ONLY'
 
+function useCurrentTime() {
+  const [currentTime, setCurrentTime] = useState<number | null>(null)
+
+  useEffect(() => {
+    const refresh = () => setCurrentTime(Date.now())
+    const initialTimer = window.setTimeout(refresh, 0)
+    const interval = window.setInterval(refresh, 60_000)
+
+    return () => {
+      window.clearTimeout(initialTimer)
+      window.clearInterval(interval)
+    }
+  }, [])
+
+  return currentTime
+}
+
+function isFutureTimestamp(value: string | null | undefined, currentTime: number | null) {
+  if (!value || currentTime === null) return false
+  const timestamp = new Date(value).getTime()
+  return Number.isFinite(timestamp) && timestamp > currentTime
+}
+
 function UserHeader({
   user,
   telegramId,
@@ -828,6 +851,7 @@ function UserHeader({
   queryKey: string[]
 }) {
   const { t, i18n } = useTranslation()
+  const currentTime = useCurrentTime()
 
   const identityKey = (user.identityKind ?? 'LOCAL_ONLY') as IdentityKind
   const identityLabel = t(`userDetailPanel.header.identityKind.${identityKey}`)
@@ -838,7 +862,7 @@ function UserHeader({
   // back-end has long since rejected the temp password.
   const tempPasswordActive: boolean =
     tempPasswordExpiresAt !== null &&
-    new Date(tempPasswordExpiresAt).getTime() > Date.now()
+    isFutureTimestamp(tempPasswordExpiresAt, currentTime)
 
   return (
     <div className="space-y-3">
@@ -3049,6 +3073,7 @@ function WebCabinetTab({
   queryKey: string[]
 }) {
   const { t, i18n } = useTranslation()
+  const currentTime = useCurrentTime()
   const queryClient = useQueryClient()
   const [tempCredentials, setTempCredentials] = useState<{
     login: string | null
@@ -3125,6 +3150,12 @@ function WebCabinetTab({
   })
 
   const webAccount = user.webAccount
+  const activeTemporaryPasswordExpiresAt = isFutureTimestamp(
+    webAccount?.temporaryPasswordExpiresAt,
+    currentTime,
+  )
+    ? webAccount?.temporaryPasswordExpiresAt ?? null
+    : null
   const currentTelegramId =
     user.telegramId !== undefined && user.telegramId !== null ? String(user.telegramId) : null
 
@@ -3193,11 +3224,10 @@ function WebCabinetTab({
                   {t('userDetailPanel.web.requiresChangeNotice')}
                 </div>
               )}
-              {webAccount.temporaryPasswordExpiresAt &&
-                new Date(webAccount.temporaryPasswordExpiresAt).getTime() > Date.now() && (
+              {activeTemporaryPasswordExpiresAt && (
                   <InfoRow
                     label={t('userDetailPanel.web.tempUntil')}
-                    value={new Date(webAccount.temporaryPasswordExpiresAt).toLocaleString(
+                    value={new Date(activeTemporaryPasswordExpiresAt).toLocaleString(
                       i18n.language === 'ru' ? 'ru-RU' : 'en-US',
                     )}
                   />
