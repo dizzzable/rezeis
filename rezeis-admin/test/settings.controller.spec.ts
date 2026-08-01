@@ -250,6 +250,9 @@ describe('SettingsController', () => {
     const branding: BrandingSettingsInterface = {
       themePresetId: null,
       themePresetVersion: null,
+      themeModePolicy: 'fixed',
+      themeDefaultMode: 'dark',
+      themeVariants: null,
       brandName: 'Rezeis',
       tagline: null,
       logoUrl: null,

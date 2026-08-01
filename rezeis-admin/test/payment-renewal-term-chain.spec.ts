@@ -69,7 +69,10 @@ describe('PaymentSubscriptionMutationService renewal term queue', () => {
   }
 
   it('uses checkout-time ALL availability when the live plan later becomes TRIAL', async () => {
-    const expiry = new Date('2026-08-01T00:00:00.000Z');
+    // The renewal base must stay in the future. A fixed calendar date makes
+    // this assertion flip after that date, even though the service correctly
+    // starts an already-expired subscription from the current instant.
+    const expiry = new Date(Date.now() + 86_400_000);
     let updateData: Record<string, unknown> | null = null;
     let lockQueries = 0;
     const tx = {
