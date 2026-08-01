@@ -90,6 +90,46 @@ describe('WEB Reiwa preset and surface theme contract', () => {
     );
   });
 
+  it('keeps two complete brightness variants for one operator-selected concept only', () => {
+    const light = {
+      ...DEFAULT_BRANDING,
+      primary: '#165eff',
+      bgPrimary: '#f5f8ff',
+      bgSecondary: '#eef3ff',
+      cardGradient: 'linear-gradient(135deg, #f5f8ff 0%, #b8d0ff 100%)',
+      appBackground: { ...DEFAULT_BRANDING.appBackground },
+      cornerRadii: { ...DEFAULT_BRANDING.cornerRadii },
+      surfaceTheme: { ...DEFAULT_BRANDING.surfaceTheme },
+      cardEffectsByIndex: [],
+    };
+    const dark = {
+      ...light,
+      primary: '#8cb4ff',
+      bgPrimary: '#0c1324',
+      bgSecondary: '#121d36',
+      cardGradient: 'linear-gradient(135deg, #0c1324 0%, #293f70 100%)',
+    };
+    const branding = readBrandingSettings({
+      themePresetId: 'concept-cu',
+      themePresetVersion: 2,
+      themeModePolicy: 'user-selectable',
+      themeDefaultMode: 'light',
+      themeVariants: { light, dark },
+    });
+
+    assert.equal(branding.themePresetId, 'concept-cu');
+    assert.equal(branding.themeModePolicy, 'user-selectable');
+    assert.equal(branding.themeDefaultMode, 'light');
+    assert.equal(branding.themeVariants?.light.bgPrimary, '#f5f8ff');
+    assert.equal(branding.themeVariants?.dark.bgPrimary, '#0c1324');
+
+    const invalid = readBrandingSettings({
+      themeModePolicy: 'user-selectable',
+      themeVariants: { light, dark: { primary: '#ffffff' } },
+    });
+    assert.equal(invalid.themeVariants, null);
+  });
+
   it('drops legacy relative branding assets that Reiwa cannot mirror durably', () => {
     const branding = readBrandingSettings({
       logoUrl: '/uploads/icons/legacy-logo.svg',

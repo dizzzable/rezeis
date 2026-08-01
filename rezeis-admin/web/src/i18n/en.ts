@@ -3290,6 +3290,24 @@ export const en = {
         standardGroup: 'Standard',
         conceptGroup: 'Concepts',
       },
+      themeMode: {
+        title: 'Selected concept mode',
+        description:
+          'You choose the concept. When allowed, a Reiwa user can only switch the light or dark representation of this same concept.',
+        permissionLabel: 'Who can choose the mode',
+        fixed: 'Operator mode only',
+        userSelectable: 'User may choose light or dark',
+        defaultLabel: 'Default mode',
+        light: 'Light',
+        dark: 'Dark',
+        hint:
+          'The theme catalogue is never exposed to the user: this switch changes only the light or dark representation of the concept chosen here.',
+        prepareHint:
+          'This concept was saved in the legacy format. Regenerate both representations to allow a user mode choice.',
+        prepareAction: 'Prepare modes',
+        conceptRequired:
+          'Choose one of the 104 concepts to configure light and dark representations. Standard themes always remain operator-fixed.',
+      },
       identity: {
         title: 'Identity',
         description: 'Brand name and logo shown in the user app.',
@@ -3491,6 +3509,10 @@ export const en = {
         daysMock: '90 days',
         until: 'until {{date}}',
         device: 'Device',
+        devicesTitle: 'Connected devices',
+        lastSeen: 'Last active 01 Aug 2026',
+        copyLink: 'Copy',
+        regenerate: 'Regenerate',
         actions: {
           buy: 'Buy',
           connect: 'Connect',

@@ -4,6 +4,7 @@ import { CARD_EFFECT_REGISTRY } from './card-effect-registry'
 import {
   CONCEPT_PRESETS,
   getConceptSourceBackgroundColor,
+  getConceptSourceMode,
   getConceptSourceStyle,
 } from '@/lib/theme/concept-presets'
 import {
@@ -17,6 +18,8 @@ import {
   LEGACY_THEME_PRESETS,
   THEME_PRESETS,
   createConceptReiwaPreset,
+  createConceptThemeModeVariants,
+  createConceptThemePresetVisualPatch,
   createLegacyThemePresetVisualPatch,
   createThemePresetVisualPatch,
 } from './theme-presets'
@@ -181,6 +184,38 @@ describe('WEB Reiwa theme catalog', () => {
 
     expect(reconstructed).toEqual(CONCEPT_THEME_PRESETS)
     expect(new Set(cardGradients).size).toBe(CONCEPT_THEME_PRESETS.length)
+  })
+
+  it('resolves two valid brightnesses for every concept without exposing a second preset', () => {
+    const schema = createBrandingFormSchema(validationMessages)
+
+    for (const preset of CONCEPT_THEME_PRESETS) {
+      const variants = createConceptThemeModeVariants(preset)
+      const sourceMode = getConceptSourceMode(CONCEPT_PRESETS.find(
+        (descriptor) => descriptor.id === preset.id,
+      )!)
+      const source = createConceptThemePresetVisualPatch(preset)
+      const sourceVariant = variants[sourceMode]
+      const completeVariants = {
+        light: { ...variants.light, cardEffectsByIndex: [] },
+        dark: { ...variants.dark, cardEffectsByIndex: [] },
+      }
+      const result = schema.safeParse({
+        ...createInitialBrandingDraft(),
+        ...source,
+        themeModePolicy: 'user-selectable',
+        themeDefaultMode: sourceMode,
+        themeVariants: completeVariants,
+      })
+
+      expect(result.success, `${preset.code} ${preset.name}`).toBe(true)
+      expect(sourceVariant.primary, `${preset.code} source primary`).toBe(source.primary)
+      expect(sourceVariant.bgPrimary, `${preset.code} source background`).toBe(source.bgPrimary)
+      expect(sourceVariant.cardGradient, `${preset.code} source card`).toBe(source.cardGradient)
+      expect(sourceVariant.fontFamily, `${preset.code} source font`).toBe(source.fontFamily)
+      expect(variants.light.themePresetId).toBe(preset.id)
+      expect(variants.dark.themePresetId).toBe(preset.id)
+    }
   })
 
   it('uses a broad semantic composition matrix instead of one generic layout', () => {

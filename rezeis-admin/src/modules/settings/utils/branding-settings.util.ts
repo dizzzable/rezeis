@@ -16,6 +16,10 @@ import {
   AppBackgroundTextureSettings,
   BG_EFFECTS,
   BgEffect,
+  BrandingThemeMode,
+  BrandingThemeModePolicy,
+  BrandingThemeVariant,
+  BrandingThemeVariants,
   BrandingSettingsInterface,
   CARD_EFFECTS,
   CARD_LOGO_PRESETS,
@@ -53,6 +57,9 @@ export function readBrandingSettings(value: unknown): BrandingSettingsInterface 
   return {
     themePresetId: readThemePresetId(record),
     themePresetVersion: readThemePresetVersion(record),
+    themeModePolicy: readThemeModePolicy(record),
+    themeDefaultMode: readThemeDefaultMode(record),
+    themeVariants: readThemeVariants(record),
     brandName: readString(record, 'brandName', DEFAULT_BRANDING.brandName),
     tagline: readNullableString(record, 'tagline'),
     logoUrl: readNullableImageUrl(record, 'logoUrl'),
@@ -209,6 +216,94 @@ function readThemePresetVersion(record: Record<string, unknown>): number | null 
     return null;
   }
   return value;
+}
+
+function readThemeModePolicy(
+  record: Record<string, unknown>,
+): BrandingThemeModePolicy {
+  return record['themeModePolicy'] === 'user-selectable'
+    ? 'user-selectable'
+    : 'fixed';
+}
+
+function readThemeDefaultMode(
+  record: Record<string, unknown>,
+): BrandingThemeMode {
+  return record['themeDefaultMode'] === 'light' ? 'light' : 'dark';
+}
+
+/**
+ * Drops an incomplete variant pair instead of silently mixing operator data
+ * with defaults. A brightness switch must be atomic: both representations are
+ * either complete and safe, or Reiwa stays on the operator's root branding.
+ */
+function readThemeVariants(
+  record: Record<string, unknown>,
+): BrandingThemeVariants | null {
+  const value = readRecord(record['themeVariants']);
+  const light = readThemeVariant(readRecord(value['light']));
+  const dark = readThemeVariant(readRecord(value['dark']));
+  return light && dark ? { light, dark } : null;
+}
+
+function readThemeVariant(
+  record: Record<string, unknown>,
+): BrandingThemeVariant | null {
+  const requiredHex = ['primary', 'primaryFg', 'bgPrimary', 'bgSecondary'];
+  if (
+    requiredHex.some((key) => {
+      const value = record[key];
+      return typeof value !== 'string' || !HEX_PATTERN.test(value.trim());
+    }) ||
+    !isSafeBrandingGradient(record['cardGradient']) ||
+    !Array.isArray(record['cardEffectsByIndex']) ||
+    typeof record['cardEffect'] !== 'string' ||
+    !(CARD_EFFECTS as readonly string[]).includes(record['cardEffect']) ||
+    typeof record['cardEffectProps'] !== 'object' ||
+    record['cardEffectProps'] === null ||
+    Array.isArray(record['cardEffectProps']) ||
+    typeof record['cardEffectOpacity'] !== 'number' ||
+    record['cardEffectOpacity'] < 0.05 ||
+    record['cardEffectOpacity'] > 1 ||
+    typeof record['bgEffect'] !== 'string' ||
+    !(BG_EFFECTS as readonly string[]).includes(
+      (record['bgEffect'] as string).toUpperCase(),
+    ) ||
+    Object.keys(readRecord(record['appBackground'])).length === 0 ||
+    typeof record['borderRadius'] !== 'string' ||
+    record['borderRadius'].trim().length === 0 ||
+    Object.keys(readRecord(record['cornerRadii'])).length === 0 ||
+    typeof record['fontFamily'] !== 'string' ||
+    record['fontFamily'].trim().length === 0 ||
+    Object.keys(readRecord(record['surfaceTheme'])).length === 0
+  ) {
+    return null;
+  }
+
+  return {
+    primary: readHex(record, 'primary', DEFAULT_BRANDING.primary),
+    primaryFg: readHex(record, 'primaryFg', DEFAULT_BRANDING.primaryFg),
+    bgPrimary: readHex(record, 'bgPrimary', DEFAULT_BRANDING.bgPrimary),
+    bgSecondary: readHex(record, 'bgSecondary', DEFAULT_BRANDING.bgSecondary),
+    cardGradient: readGradient(record, 'cardGradient', DEFAULT_BRANDING.cardGradient),
+    cardPattern: readNullableGradient(record, 'cardPattern'),
+    cardEffect: readCardEffect(record, DEFAULT_BRANDING.cardEffect),
+    cardEffectProps: readJsonRecord(record, 'cardEffectProps'),
+    cardEffectOpacity: readClampedNumber(
+      record,
+      'cardEffectOpacity',
+      0.05,
+      1,
+      DEFAULT_BRANDING.cardEffectOpacity,
+    ),
+    cardEffectsByIndex: readCardEffectSlots(record, 'cardEffectsByIndex'),
+    bgEffect: readBgEffect(record, DEFAULT_BRANDING.bgEffect),
+    appBackground: readAppBackground(record),
+    borderRadius: readString(record, 'borderRadius', DEFAULT_BRANDING.borderRadius),
+    cornerRadii: readCornerRadii(record),
+    fontFamily: readString(record, 'fontFamily', DEFAULT_BRANDING.fontFamily),
+    surfaceTheme: readSurfaceTheme(record),
+  };
 }
 
 function readHex(record: Record<string, unknown>, key: string, fallback: string): string {

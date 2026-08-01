@@ -1513,6 +1513,9 @@ function extractUpdatedBrandingFields(dto: UpdateBrandingSettingsDto): readonly 
   const fields: Array<keyof UpdateBrandingSettingsDto> = [
     'themePresetId',
     'themePresetVersion',
+    'themeModePolicy',
+    'themeDefaultMode',
+    'themeVariants',
     'brandName',
     'tagline',
     'logoUrl',

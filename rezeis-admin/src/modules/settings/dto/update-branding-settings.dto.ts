@@ -31,6 +31,8 @@ import {
   BgEffect,
   CARD_EFFECTS,
   CARD_LOGO_PRESETS,
+  BrandingThemeMode,
+  BrandingThemeModePolicy,
   CardEffect,
   CardLogoPreset,
   ICON_COLOR_MODES,
@@ -417,6 +419,87 @@ export class SurfaceThemeDto {
   public glassBlurPx?: number;
 }
 
+/** One fully resolved light/dark representation of an operator concept. */
+export class BrandingThemeVariantDto {
+  @IsHexColor()
+  public primary!: string;
+
+  @IsHexColor()
+  public primaryFg!: string;
+
+  @IsHexColor()
+  public bgPrimary!: string;
+
+  @IsHexColor()
+  public bgSecondary!: string;
+
+  @IsString()
+  @MaxLength(512)
+  @IsBrandingGradient()
+  public cardGradient!: string;
+
+  @ValidateIf((_, value: unknown) => value !== null)
+  @IsString()
+  @MaxLength(512)
+  @IsBrandingGradient({ allowNone: true })
+  public cardPattern!: string | null;
+
+  @IsIn(CARD_EFFECTS as readonly string[])
+  public cardEffect!: CardEffect;
+
+  @IsObject()
+  public cardEffectProps!: Record<string, unknown>;
+
+  @IsNumber()
+  @Min(0.05)
+  @Max(1)
+  public cardEffectOpacity!: number;
+
+  @IsArray()
+  @ArrayMaxSize(20)
+  @ValidateNested({ each: true })
+  @Type(() => CardEffectSlotDto)
+  public cardEffectsByIndex!: CardEffectSlotDto[];
+
+  @IsIn(BG_EFFECTS as readonly string[])
+  public bgEffect!: BgEffect;
+
+  @IsObject()
+  @ValidateNested()
+  @Type(() => AppBackgroundDto)
+  public appBackground!: AppBackgroundDto;
+
+  @IsString()
+  @Length(1, 64)
+  public borderRadius!: string;
+
+  @IsObject()
+  @ValidateNested()
+  @Type(() => CornerRadiiDto)
+  public cornerRadii!: CornerRadiiDto;
+
+  @IsString()
+  @Length(1, 256)
+  public fontFamily!: string;
+
+  @IsObject()
+  @ValidateNested()
+  @Type(() => SurfaceThemeDto)
+  public surfaceTheme!: SurfaceThemeDto;
+}
+
+export class BrandingThemeVariantsDto {
+  @IsObject()
+  @ValidateNested()
+  @Type(() => BrandingThemeVariantDto)
+  public light!: BrandingThemeVariantDto;
+
+  @IsObject()
+  @ValidateNested()
+  @Type(() => BrandingThemeVariantDto)
+  public dark!: BrandingThemeVariantDto;
+}
+
 export class UpdateBrandingSettingsDto {
   @IsOptional()
   @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
@@ -434,6 +517,21 @@ export class UpdateBrandingSettingsDto {
   @Min(1)
   @Max(2_147_483_647)
   public themePresetVersion?: number | null;
+
+  @IsOptional()
+  @IsIn(['fixed', 'user-selectable'] as const)
+  public themeModePolicy?: BrandingThemeModePolicy;
+
+  @IsOptional()
+  @IsIn(['light', 'dark'] as const)
+  public themeDefaultMode?: BrandingThemeMode;
+
+  @IsOptional()
+  @ValidateIf((_, value: unknown) => value !== null)
+  @IsObject()
+  @ValidateNested()
+  @Type(() => BrandingThemeVariantsDto)
+  public themeVariants?: BrandingThemeVariantsDto | null;
 
   @IsOptional()
   @IsString()

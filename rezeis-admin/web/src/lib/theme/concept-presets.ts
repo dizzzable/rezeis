@@ -119,8 +119,11 @@ export const CONCEPT_REQUIRED_TOKENS = [
   'sidebar-ring',
 ] as const
 
-type ConceptThemeToken = (typeof CONCEPT_REQUIRED_TOKENS)[number]
-type ThemeTokenValues = Record<ConceptThemeToken, HexColor>
+export type ConceptThemeToken = (typeof CONCEPT_REQUIRED_TOKENS)[number]
+export type ConceptThemeTokenValues = Readonly<
+  Record<ConceptThemeToken, HexColor>
+>
+type ThemeTokenValues = ConceptThemeTokenValues
 
 interface Rgb {
   readonly r: number
@@ -590,6 +593,31 @@ function buildThemeTokens(
   return mode === getConceptSourceMode(descriptor)
     ? buildSourceTokens(descriptor, source)
     : buildOppositeTokens(descriptor, source, mode)
+}
+
+/**
+ * Resolved semantic values and background artwork for one mode of a concept.
+ *
+ * Rezeis owns the 104-concept catalogue, while Reiwa only receives the
+ * already-resolved public branding payload. Keeping this resolver next to the
+ * catalogue lets WEB Reiwa persist both light and dark representations of the
+ * *same* operator-selected concept without duplicating the catalogue in the
+ * client cabinet.
+ */
+export interface ConceptThemeModeVisual {
+  readonly tokens: ConceptThemeTokenValues
+  readonly backgroundImage: string
+}
+
+export function getConceptThemeModeVisual(
+  descriptor: ConceptPresetDescriptor,
+  mode: ConceptSourceMode,
+): ConceptThemeModeVisual {
+  const tokens = buildThemeTokens(descriptor, mode)
+  return {
+    tokens,
+    backgroundImage: buildConceptComposition(descriptor, mode, tokens).image,
+  }
 }
 
 function quoteFont(font: string): string {

@@ -321,6 +321,40 @@ export interface CornerRadiiSettings {
   readonly pillPx: number;
 }
 
+/** One allowed brightness for an operator-selected conceptual WEB Reiwa theme. */
+export type BrandingThemeMode = 'light' | 'dark';
+/** `fixed` keeps the operator mode; `user-selectable` exposes only light/dark in Reiwa. */
+export type BrandingThemeModePolicy = 'fixed' | 'user-selectable';
+
+/**
+ * Fully resolved visual representation of the same theme concept. It omits
+ * brand identity and the preset id by design: Reiwa users can switch only the
+ * brightness of the operator-selected concept, never the concept itself.
+ */
+export interface BrandingThemeVariant {
+  readonly primary: string;
+  readonly primaryFg: string;
+  readonly bgPrimary: string;
+  readonly bgSecondary: string;
+  readonly cardGradient: string;
+  readonly cardPattern: string | null;
+  readonly cardEffect: CardEffect;
+  readonly cardEffectProps: Record<string, unknown>;
+  readonly cardEffectOpacity: number;
+  readonly cardEffectsByIndex: readonly CardEffectSlot[];
+  readonly bgEffect: BgEffect;
+  readonly appBackground: AppBackgroundSettings;
+  readonly borderRadius: string;
+  readonly cornerRadii: CornerRadiiSettings;
+  readonly fontFamily: string;
+  readonly surfaceTheme: SurfaceThemeSettings;
+}
+
+export interface BrandingThemeVariants {
+  readonly light: BrandingThemeVariant;
+  readonly dark: BrandingThemeVariant;
+}
+
 export interface BrandingSettingsInterface {
   /**
    * Stable id of the ready-made theme currently applied by WEB Reiwa.
@@ -334,6 +368,12 @@ export interface BrandingSettingsInterface {
    * distinguish presets with the same stable id but updated resolved tokens.
    */
   readonly themePresetVersion: number | null;
+  /** Whether a Reiwa user may choose a light/dark representation. */
+  readonly themeModePolicy: BrandingThemeModePolicy;
+  /** Operator-selected actual/default representation. */
+  readonly themeDefaultMode: BrandingThemeMode;
+  /** Both resolved representations of the selected concept, otherwise `null`. */
+  readonly themeVariants: BrandingThemeVariants | null;
 
   /** Display name shown on the subscription card and headers. */
   readonly brandName: string;
@@ -482,6 +522,9 @@ export interface BrandingSettingsInterface {
 export const DEFAULT_BRANDING: BrandingSettingsInterface = {
   themePresetId: null,
   themePresetVersion: null,
+  themeModePolicy: 'fixed',
+  themeDefaultMode: 'dark',
+  themeVariants: null,
   brandName: 'Reiwa',
   tagline: null,
   logoUrl: null,

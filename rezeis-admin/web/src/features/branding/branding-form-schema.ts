@@ -4,6 +4,8 @@ import { CARD_LOGO_PRESETS, type CardLogoPreset } from './branding-options'
 
 export const BRANDING_BG_EFFECTS = ['NONE', 'MESH', 'PARTICLES', 'NOISE', 'AURORA'] as const
 export const BRANDING_ICON_COLOR_MODES = ['default', 'theme', 'custom'] as const
+export const BRANDING_THEME_MODE_POLICIES = ['fixed', 'user-selectable'] as const
+export const BRANDING_THEME_MODES = ['light', 'dark'] as const
 export const BRANDING_APP_BG_KINDS = ['none', 'gradient', 'texture', 'effect'] as const
 export const BRANDING_APP_BG_TEXTURES = [
   'dots',
@@ -79,6 +81,12 @@ export const DEFAULT_NAV_ITEMS: readonly NavItemDraft[] = [
 export interface BrandingFormDraft {
   readonly themePresetId: string | null
   readonly themePresetVersion: number | null
+  /** Whether only the operator's default mode is used, or the user may switch brightness. */
+  readonly themeModePolicy: (typeof BRANDING_THEME_MODE_POLICIES)[number]
+  /** Operator-chosen mode; also the initial mode when user selection is enabled. */
+  readonly themeDefaultMode: (typeof BRANDING_THEME_MODES)[number]
+  /** Fully resolved light/dark representations of one selected concept. */
+  readonly themeVariants: BrandingThemeVariantsDraft | null
   readonly brandName: string
   readonly tagline: string | null
   readonly logoUrl: string | null
@@ -106,6 +114,35 @@ export interface BrandingFormDraft {
   readonly planCardStyles?: Record<string, PlanCardStyleDraft>
   readonly navItems?: readonly NavItemDraft[]
   readonly navGap?: number
+}
+
+/**
+ * Renderable visual subset for one brightness of an operator-selected concept.
+ * The concept id itself deliberately lives outside this object: Reiwa users
+ * can select a mode, never another concept preset.
+ */
+export interface BrandingThemeVariantDraft {
+  readonly primary: string
+  readonly primaryFg: string
+  readonly bgPrimary: string
+  readonly bgSecondary: string
+  readonly cardGradient: string
+  readonly cardPattern: string | null
+  readonly cardEffect: string
+  readonly cardEffectProps: Record<string, unknown>
+  readonly cardEffectOpacity: number
+  readonly cardEffectsByIndex: readonly BrandingCardEffectSlotDraft[]
+  readonly bgEffect: (typeof BRANDING_BG_EFFECTS)[number]
+  readonly appBackground: BrandingAppBackgroundDraft
+  readonly borderRadius: string
+  readonly cornerRadii: BrandingCornerRadiiDraft
+  readonly fontFamily: string
+  readonly surfaceTheme: BrandingSurfaceThemeDraft
+}
+
+export interface BrandingThemeVariantsDraft {
+  readonly light: BrandingThemeVariantDraft
+  readonly dark: BrandingThemeVariantDraft
 }
 
 export interface BrandingSurfaceThemeDraft {
@@ -231,6 +268,9 @@ const IMAGE_URL_MAX = 524288
 const DEFAULT_BRANDING_DRAFT: BrandingFormDraft = {
   themePresetId: null,
   themePresetVersion: null,
+  themeModePolicy: 'fixed',
+  themeDefaultMode: 'dark',
+  themeVariants: null,
   brandName: 'Reiwa',
   tagline: null,
   logoUrl: null,
@@ -268,6 +308,63 @@ const DEFAULT_BRANDING_DRAFT: BrandingFormDraft = {
 }
 
 export function createBrandingFormSchema(messages: BrandingFormValidationMessages) {
+  const cardEffectSlotSchema = z.object({
+    cardEffect: z.enum(BRANDING_CARD_EFFECTS),
+    cardEffectProps: z.record(z.string(), z.unknown()),
+    cardEffectOpacity: z.number().min(0.05).max(1),
+    cardGradient: optionalGradientSchema(messages.gradientInvalid),
+  })
+  const appBackgroundSchema = z.object({
+    kind: z.enum(BRANDING_APP_BG_KINDS),
+    effect: z.enum(BRANDING_CARD_EFFECTS),
+    props: z.record(z.string(), z.unknown()),
+    opacity: z.number().min(0.05).max(1),
+    gradient: safeGradientSchema(messages.gradientInvalid),
+    texture: z.object({
+      pattern: z.enum(BRANDING_APP_BG_TEXTURES),
+      color: z.string().regex(HEX_PATTERN, messages.hexInvalid),
+      background: z.string().regex(HEX_PATTERN, messages.hexInvalid),
+      scale: z.number().min(8).max(256),
+      opacity: z.number().min(0.05).max(1),
+    }),
+  })
+  const cornerRadiiSchema = z.object({
+    cardPx: z.number().min(0).max(48),
+    itemPx: z.number().min(0).max(32),
+    pillPx: z.number().min(0).max(9999),
+  })
+  const surfaceThemeSchema = z.object({
+    foreground: z.string().regex(HEX_PATTERN, messages.hexInvalid),
+    mutedForeground: z.string().regex(HEX_PATTERN, messages.hexInvalid),
+    surface: z.string().regex(HEX_PATTERN, messages.hexInvalid),
+    surfaceHigh: z.string().regex(HEX_PATTERN, messages.hexInvalid),
+    borderSoft: z.string().regex(HEX_PATTERN, messages.hexInvalid),
+    borderStrong: z.string().regex(HEX_PATTERN, messages.hexInvalid),
+    surfaceOpacity: z.number().min(0).max(1),
+    surfaceHighOpacity: z.number().min(0).max(1),
+    borderSoftOpacity: z.number().min(0).max(1),
+    borderStrongOpacity: z.number().min(0).max(1),
+    glassBlurPx: z.number().min(0).max(40),
+  })
+  const themeVariantSchema = z.object({
+    primary: z.string().regex(HEX_PATTERN, messages.hexInvalid),
+    primaryFg: z.string().regex(HEX_PATTERN, messages.hexInvalid),
+    bgPrimary: z.string().regex(HEX_PATTERN, messages.hexInvalid),
+    bgSecondary: z.string().regex(HEX_PATTERN, messages.hexInvalid),
+    cardGradient: safeGradientSchema(messages.gradientInvalid),
+    cardPattern: optionalGradientSchema(messages.gradientInvalid, true),
+    cardEffect: z.enum(BRANDING_CARD_EFFECTS),
+    cardEffectProps: z.record(z.string(), z.unknown()),
+    cardEffectOpacity: z.number().min(0.05).max(1),
+    cardEffectsByIndex: z.array(cardEffectSlotSchema).max(20),
+    bgEffect: z.enum(BRANDING_BG_EFFECTS),
+    appBackground: appBackgroundSchema,
+    borderRadius: z.string().trim().min(1).max(64),
+    cornerRadii: cornerRadiiSchema,
+    fontFamily: z.string().trim().min(1).max(256),
+    surfaceTheme: surfaceThemeSchema,
+  })
+
   return z
     .object({
       themePresetId: z
@@ -276,6 +373,11 @@ export function createBrandingFormSchema(messages: BrandingFormValidationMessage
         .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/)
         .nullable(),
       themePresetVersion: z.number().int().min(1).max(2_147_483_647).nullable(),
+      themeModePolicy: z.enum(BRANDING_THEME_MODE_POLICIES),
+      themeDefaultMode: z.enum(BRANDING_THEME_MODES),
+      themeVariants: z
+        .object({ light: themeVariantSchema, dark: themeVariantSchema })
+        .nullable(),
       brandName: z.string().trim().min(1).max(64),
       tagline: optionalNullableString(128),
       logoUrl: optionalImageUrl(messages.imageUrlInvalid),
@@ -292,33 +394,11 @@ export function createBrandingFormSchema(messages: BrandingFormValidationMessage
       cardEffectProps: z.record(z.string(), z.unknown()).optional(),
       cardEffectOpacity: z.number().min(0.05).max(1),
       cardEffectsByIndex: z
-        .array(
-          z.object({
-            cardEffect: z.enum(BRANDING_CARD_EFFECTS),
-            cardEffectProps: z.record(z.string(), z.unknown()),
-            cardEffectOpacity: z.number().min(0.05).max(1),
-            cardGradient: optionalGradientSchema(messages.gradientInvalid),
-          }),
-        )
+        .array(cardEffectSlotSchema)
         .max(20)
         .optional(),
       bgEffect: z.enum(BRANDING_BG_EFFECTS),
-      appBackground: z
-        .object({
-          kind: z.enum(BRANDING_APP_BG_KINDS),
-          effect: z.enum(BRANDING_CARD_EFFECTS),
-          props: z.record(z.string(), z.unknown()),
-          opacity: z.number().min(0.05).max(1),
-          gradient: safeGradientSchema(messages.gradientInvalid),
-          texture: z.object({
-            pattern: z.enum(BRANDING_APP_BG_TEXTURES),
-            color: z.string().regex(HEX_PATTERN, messages.hexInvalid),
-            background: z.string().regex(HEX_PATTERN, messages.hexInvalid),
-            scale: z.number().min(8).max(256),
-            opacity: z.number().min(0.05).max(1),
-          }),
-        })
-        .optional(),
+      appBackground: appBackgroundSchema.optional(),
       iconColorMode: z.enum(BRANDING_ICON_COLOR_MODES),
       iconColors: z
         .record(
@@ -328,25 +408,9 @@ export function createBrandingFormSchema(messages: BrandingFormValidationMessage
         .refine((value) => Object.keys(value).length <= 100)
         .optional(),
       borderRadius: z.string().trim().min(1).max(64),
-      cornerRadii: z.object({
-        cardPx: z.number().min(0).max(48),
-        itemPx: z.number().min(0).max(32),
-        pillPx: z.number().min(0).max(9999),
-      }),
+      cornerRadii: cornerRadiiSchema,
       fontFamily: z.string().trim().min(1).max(256),
-      surfaceTheme: z.object({
-        foreground: z.string().regex(HEX_PATTERN, messages.hexInvalid),
-        mutedForeground: z.string().regex(HEX_PATTERN, messages.hexInvalid),
-        surface: z.string().regex(HEX_PATTERN, messages.hexInvalid),
-        surfaceHigh: z.string().regex(HEX_PATTERN, messages.hexInvalid),
-        borderSoft: z.string().regex(HEX_PATTERN, messages.hexInvalid),
-        borderStrong: z.string().regex(HEX_PATTERN, messages.hexInvalid),
-        surfaceOpacity: z.number().min(0).max(1),
-        surfaceHighOpacity: z.number().min(0).max(1),
-        borderSoftOpacity: z.number().min(0).max(1),
-        borderStrongOpacity: z.number().min(0).max(1),
-        glassBlurPx: z.number().min(0).max(40),
-      }),
+      surfaceTheme: surfaceThemeSchema,
       planCardStyles: z
         .record(
           z.string().min(1).max(64),
@@ -464,6 +528,13 @@ export function createInitialBrandingDraft(input?: Partial<BrandingFormDraft> | 
       input.themePresetVersion > 0
         ? input.themePresetVersion
         : null,
+    themeModePolicy:
+      input?.themeModePolicy === 'user-selectable' ? 'user-selectable' : 'fixed',
+    themeDefaultMode:
+      input?.themeDefaultMode === 'light' ? 'light' : 'dark',
+    themeVariants: isThemeVariantsDraft(input?.themeVariants)
+      ? input.themeVariants
+      : null,
     tagline: normalizeDraftNullableString(input?.tagline),
     logoUrl: normalizeDraftNullableString(input?.logoUrl),
     pwaIconUrl: normalizeDraftNullableString(input?.pwaIconUrl),
@@ -484,6 +555,13 @@ export function createInitialBrandingDraft(input?: Partial<BrandingFormDraft> | 
     navItems: Array.isArray(input?.navItems) ? input.navItems : DEFAULT_NAV_ITEMS,
     navGap: typeof input?.navGap === 'number' ? input.navGap : 2,
   }
+}
+
+function isThemeVariantsDraft(
+  value: unknown,
+): value is BrandingThemeVariantsDraft {
+  if (!isPlainRecordUnknown(value)) return false
+  return isPlainRecordUnknown(value.light) && isPlainRecordUnknown(value.dark)
 }
 
 function areBrandingValuesEqual(left: unknown, right: unknown): boolean {

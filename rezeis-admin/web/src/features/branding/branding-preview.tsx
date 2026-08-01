@@ -23,6 +23,10 @@ import {
   TicketPercent,
   LifeBuoy,
   CircleHelp,
+  Copy,
+  Info,
+  RefreshCw,
+  Trash2,
   type LucideIcon,
 } from 'lucide-react'
 
@@ -858,6 +862,72 @@ function SubscriptionCardsPreview({
   )
 }
 
+/**
+ * A compact, non-interactive copy of the dashboard device area.  The live
+ * preview previously jumped straight from the action buttons to an icon-only
+ * nav, which made its rhythm noticeably different from the real cabinet.
+ * This uses the same hierarchy as Reiwa: title/actions, device rows, then the
+ * bottom navigation as the final fixed visual anchor.
+ */
+function DashboardDevicesPreview({
+  primary,
+  surfaceTheme,
+  itemRadius,
+}: {
+  primary: string
+  surfaceTheme: BrandingSurfaceThemeDraft
+  itemRadius: string
+}) {
+  const { t } = useTranslation()
+  const devices = ['iPhone 12 Pro Max', 'Windows 11 Pro', 'Windows 11 amd64']
+
+  return (
+    <section
+      data-preview-devices
+      className="mt-4 flex min-h-0 flex-1 flex-col overflow-hidden"
+    >
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-[11px] font-semibold" style={{ color: surfaceTheme.foreground }}>
+          {t('brandingPage.sections.preview.devicesTitle')}
+        </p>
+        <div className="flex items-center gap-2 text-[8px]" style={{ color: surfaceTheme.mutedForeground }}>
+          <Info className="h-3 w-3" />
+          <span className="flex items-center gap-1"><Copy className="h-3 w-3" />{t('brandingPage.sections.preview.copyLink')}</span>
+          <span className="flex items-center gap-1"><RefreshCw className="h-3 w-3" />{t('brandingPage.sections.preview.regenerate')}</span>
+        </div>
+      </div>
+      <div className="mt-2 space-y-1.5">
+        {devices.map((name) => (
+          <div
+            key={name}
+            className="flex items-center gap-2 border px-2 py-1.5"
+            style={{
+              borderRadius: itemRadius,
+              backgroundColor: toRgba(surfaceTheme.surface, surfaceTheme.surfaceOpacity),
+              borderColor: toRgba(surfaceTheme.borderSoft, surfaceTheme.borderSoftOpacity),
+              backdropFilter: `blur(${surfaceTheme.glassBlurPx}px)`,
+            }}
+          >
+            <div
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md"
+              style={{ backgroundColor: toRgba(surfaceTheme.surfaceHigh, surfaceTheme.surfaceHighOpacity) }}
+            >
+              <MonitorSmartphone className="h-3.5 w-3.5" style={{ color: primary }} />
+            </div>
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-[9px] font-medium" style={{ color: surfaceTheme.foreground }}>{name}</p>
+              <p className="truncate text-[7px]" style={{ color: surfaceTheme.mutedForeground }}>
+                {t('brandingPage.sections.preview.lastSeen')}
+              </p>
+            </div>
+            <Trash2 className="h-3 w-3 shrink-0" style={{ color: surfaceTheme.mutedForeground }} />
+          </div>
+        ))}
+      </div>
+    </section>
+  )
+}
+
 export function BrandingPreview({ values, focus }: BrandingPreviewProps) {
   const { t } = useTranslation()
   const reducedMotion = usePrefersReducedMotion()
@@ -993,7 +1063,8 @@ export function BrandingPreview({ values, focus }: BrandingPreviewProps) {
     <div className="flex flex-col items-center">
       {/* Phone frame */}
       <div
-        className="relative w-[300px] overflow-hidden rounded-[2.5rem] border-4 shadow-2xl"
+        data-preview-phone-frame
+        className="relative flex h-[560px] w-[300px] flex-col overflow-hidden rounded-[2.5rem] border-4 shadow-2xl"
         style={{
           backgroundColor: bgPrimary,
           borderColor: toRgba(surfaceTheme.borderStrong, surfaceTheme.borderStrongOpacity),
@@ -1064,7 +1135,7 @@ export function BrandingPreview({ values, focus }: BrandingPreviewProps) {
         </div>
 
         {/* Content area */}
-        <div className="relative px-4 pb-4">
+        <div className="relative flex min-h-0 flex-1 flex-col px-4 pb-0">
           {/* Header: logo + brand + actions */}
           <div className="flex items-center justify-between py-3">
             <div className="flex items-center gap-2">
@@ -1173,44 +1244,66 @@ export function BrandingPreview({ values, focus }: BrandingPreviewProps) {
           </div>
 
           {/* Bottom nav pill — reflects the configured navItems + navGap (Навигация tab) */}
+          <DashboardDevicesPreview
+            primary={primary}
+            surfaceTheme={surfaceTheme}
+            itemRadius={itemRadius}
+          />
+
           <div
-            className="mt-4 flex w-fit items-center justify-center rounded-full border px-1.5 py-1.5"
-            style={{
-              backgroundColor: toRgba(
-                surfaceTheme.surfaceHigh,
-                surfaceTheme.surfaceHighOpacity,
-              ),
-              borderColor: toRgba(
-                surfaceTheme.borderSoft,
-                surfaceTheme.borderSoftOpacity,
-              ),
-              backdropFilter: `blur(${surfaceTheme.glassBlurPx}px)`,
-              gap: `${navGap}px`,
-              borderRadius: pillRadius,
-            }}
+            data-preview-bottom-nav
+            data-preview-nav-gap={navGap}
+            className="mt-auto -mx-1 pb-3 pt-2"
           >
-            {visibleNav.map((item, i) => {
-              const Icon = NAV_ICONS[item.id];
-              const active = i === 0;
-              return active ? (
-                <div
-                  key={item.id}
-                  className="flex items-center gap-1.5 rounded-full px-3 py-1.5"
-                  style={{ backgroundColor: primary, borderRadius: pillRadius }}
-                >
-                  <Icon className="h-3.5 w-3.5" style={{ color: primaryFg }} />
-                  <span className="text-[9px] font-medium" style={{ color: primaryFg }}>
-                    {t(`brandingPage.sections.nav.dest.${item.id}`)}
-                  </span>
-                </div>
-              ) : (
-                <Icon
-                  key={item.id}
-                  className="h-3.5 w-3.5"
-                  style={{ color: surfaceTheme.mutedForeground }}
-                />
-              );
-            })}
+            <div
+              className="mx-auto w-fit max-w-full rounded-3xl border px-1 py-1.5 shadow-[0_8px_32px_rgba(0,0,0,0.18)]"
+              style={{
+                backgroundColor: toRgba(
+                  surfaceTheme.surfaceHigh,
+                  surfaceTheme.surfaceHighOpacity,
+                ),
+                borderColor: toRgba(
+                  surfaceTheme.borderSoft,
+                  surfaceTheme.borderSoftOpacity,
+                ),
+                backdropFilter: `blur(${surfaceTheme.glassBlurPx}px)`,
+                borderRadius: pillRadius,
+              }}
+            >
+              <div
+                data-preview-nav-items
+                className="relative flex"
+                style={{ gap: `${navGap}px` }}
+              >
+                {visibleNav.map((item, i) => {
+                  const Icon = NAV_ICONS[item.id];
+                  const active = i === 0;
+                  return (
+                    <div
+                      key={item.id}
+                      data-preview-nav-tab={item.id}
+                      className="relative z-10 flex min-h-[44px] w-[50px] flex-col items-center justify-center gap-1 px-1 py-1.5"
+                      style={{
+                        borderRadius: itemRadius,
+                        color: active ? primaryFg : surfaceTheme.mutedForeground,
+                      }}
+                    >
+                      {active && (
+                        <span
+                          aria-hidden="true"
+                          className="absolute inset-0 -z-10"
+                          style={{ backgroundColor: primary, borderRadius: itemRadius }}
+                        />
+                      )}
+                      <Icon className="h-3.5 w-3.5 shrink-0" />
+                      <span className="max-w-full truncate text-[7px] font-medium leading-none tracking-tight">
+                        {t(`brandingPage.sections.nav.dest.${item.id}`)}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
           </div>
             </>
           )}

@@ -144,6 +144,41 @@ describe('BrandingPreview subscription card', () => {
     ).toHaveStyle({ opacity: '0.84' })
   })
 
+  it('mirrors the dashboard device area and the configured bottom-nav spacing', () => {
+    const { container } = renderWithProviders(
+      <BrandingPreview
+        values={{
+          navGap: 17,
+          navItems: [
+            { id: 'subscriptions', visible: true },
+            { id: 'referrals', visible: true },
+            { id: 'settings', visible: true },
+          ],
+        }}
+      />,
+    )
+
+    const nav = container.querySelector('[data-preview-bottom-nav]')
+    const navItems = container.querySelector('[data-preview-nav-items]')
+
+    expect(container.querySelector('[data-preview-phone-frame]')).toHaveClass('h-[560px]')
+    expect(container.querySelector('[data-preview-devices]')).toBeInTheDocument()
+    expect(nav).toHaveAttribute('data-preview-nav-gap', '17')
+    expect(navItems).toHaveStyle({ gap: '17px' })
+    expect(
+      container.querySelectorAll('[data-preview-nav-tab]'),
+    ).toHaveLength(3)
+    expect(
+      container.querySelector('[data-preview-nav-tab="subscriptions"]'),
+    ).toHaveTextContent(/подпис|sub/i)
+    expect(
+      container.querySelector('[data-preview-nav-tab="referrals"]'),
+    ).toHaveTextContent(/реферал|referral/i)
+    expect(
+      container.querySelector('[data-preview-nav-tab="settings"]'),
+    ).toHaveTextContent(/настрой|settings/i)
+  })
+
   it.each([
     {
       effect: 'paperWarp',

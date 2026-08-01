@@ -50,6 +50,7 @@ import {
   type BrandingSurfaceThemeDraft,
   type BrandingFormData,
   type BrandingFormDraft,
+  type BrandingThemeVariantsDraft,
   type BrandingFormValidationMessages,
   type PlanCardStyleDraft,
   type NavItemDraft,
@@ -68,6 +69,7 @@ import {
   FONT_OPTIONS,
   LEGACY_THEME_PRESETS,
   THEME_PRESETS,
+  createConceptThemeModeVariants,
   createConceptThemePresetVisualPatch,
   createLegacyThemePresetVisualPatch,
   gradientFromPrimary,
@@ -75,6 +77,7 @@ import {
   type LegacyThemePreset,
   type ThemePreset,
 } from "./theme-presets";
+import { CONCEPT_PRESETS, getConceptSourceMode } from "../../lib/theme/concept-presets";
 
 // ── Schema ──────────────────────────────────────────────────────────────────
 
@@ -92,7 +95,7 @@ const BRANDING_TABS = ['brand', 'colors', 'card', 'appbg', 'icons', 'planCards',
 type BrandingTab = (typeof BRANDING_TABS)[number];
 
 function tabForBrandingField(field: string): BrandingTab {
-  if (['brandName', 'tagline', 'logoUrl', 'pwaIconUrl', 'themePresetId', 'themePresetVersion'].includes(field)) {
+  if (['brandName', 'tagline', 'logoUrl', 'pwaIconUrl', 'themePresetId', 'themePresetVersion', 'themeModePolicy', 'themeDefaultMode', 'themeVariants'].includes(field)) {
     return 'brand';
   }
   if (['primary', 'primaryFg', 'bgPrimary', 'bgSecondary', 'borderRadius', 'cornerRadii', 'fontFamily', 'surfaceTheme'].includes(field)) {
@@ -228,6 +231,11 @@ export default function WebReiwaPage() {
     const patch = createLegacyThemePresetVisualPatch(preset);
     form.setValue("themePresetId", patch.themePresetId, { shouldDirty: true });
     form.setValue("themePresetVersion", patch.themePresetVersion, { shouldDirty: true });
+    // The brightness chooser is intentionally a capability of the resolved
+    // concept family only. A legacy palette remains exactly operator-fixed.
+    form.setValue("themeModePolicy", "fixed", { shouldDirty: true });
+    form.setValue("themeDefaultMode", "dark", { shouldDirty: true });
+    form.setValue("themeVariants", null, { shouldDirty: true });
     form.setValue("primary", patch.primary, { shouldDirty: true });
     form.setValue("primaryFg", patch.primaryFg, { shouldDirty: true });
     form.setValue("bgPrimary", patch.bgPrimary, { shouldDirty: true });
@@ -239,6 +247,56 @@ export default function WebReiwaPage() {
 
   function applyConceptPreset(preset: ConceptThemePreset): void {
     const patch = createConceptThemePresetVisualPatch(preset);
+    const descriptor = CONCEPT_PRESETS.find((candidate) => candidate.id === preset.id);
+    if (!descriptor) return;
+    const sourceMode = getConceptSourceMode(descriptor);
+    form.setValue("themeModePolicy", "fixed", { shouldDirty: true });
+    form.setValue("themeDefaultMode", sourceMode, { shouldDirty: true });
+    form.setValue(
+      "themeVariants",
+      createThemeVariantsWithSlots(preset),
+      { shouldDirty: true },
+    );
+    applyConceptVisualPatch(patch, true);
+  }
+
+  /**
+   * The public variant must be a complete renderable snapshot, including each
+   * configured subscription-card position.  The operator still picks only one
+   * concept: these are its two brightness representations, never a user theme
+   * catalogue.  We keep the existing number of slots and resolve every slot
+   * from the corresponding mode so an old slot cannot leak the opposite mode.
+   */
+  function createThemeVariantsWithSlots(
+    preset: ConceptThemePreset,
+  ): BrandingThemeVariantsDraft {
+    const variants = createConceptThemeModeVariants(preset);
+    const slotCount = (form.getValues("cardEffectsByIndex") ?? []).length;
+    const withSlots = (
+      variant: (typeof variants)["light"],
+    ): BrandingThemeVariantsDraft["light"] => ({
+      ...variant,
+      cardEffectProps: { ...(variant.cardEffectProps ?? {}) },
+      cardEffectsByIndex: Array.from({ length: slotCount }, () => ({
+        cardEffect: variant.cardEffect,
+        cardEffectProps: { ...(variant.cardEffectProps ?? {}) },
+        cardEffectOpacity: variant.cardEffectOpacity,
+        cardGradient: variant.cardGradient,
+      })),
+    });
+
+    return {
+      light: withSlots(variants.light),
+      dark: withSlots(variants.dark),
+    };
+  }
+
+  function applyConceptVisualPatch(
+    patch:
+      | ReturnType<typeof createConceptThemePresetVisualPatch>
+      | BrandingThemeVariantsDraft['light'],
+    synchronizeSlots: boolean,
+  ): void {
     const cardPatch: ConceptCardPresetVisualPatch = {
       cardGradient: patch.cardGradient,
       cardPattern: patch.cardPattern,
@@ -246,13 +304,15 @@ export default function WebReiwaPage() {
       cardEffectProps: patch.cardEffectProps ?? {},
       cardEffectOpacity: patch.cardEffectOpacity,
     };
-    form.setValue("themePresetId", patch.themePresetId, { shouldDirty: true });
-    form.setValue("themePresetVersion", patch.themePresetVersion, { shouldDirty: true });
+    if ('themePresetId' in patch) {
+      form.setValue("themePresetId", patch.themePresetId, { shouldDirty: true });
+      form.setValue("themePresetVersion", patch.themePresetVersion, { shouldDirty: true });
+    }
     form.setValue("primary", patch.primary, { shouldDirty: true });
     form.setValue("primaryFg", patch.primaryFg, { shouldDirty: true });
     form.setValue("bgPrimary", patch.bgPrimary, { shouldDirty: true });
     form.setValue("bgSecondary", patch.bgSecondary, { shouldDirty: true });
-    applyConceptCardPreset(cardPatch, true);
+    applyConceptCardPreset(cardPatch, synchronizeSlots);
 
     form.setValue("bgEffect", patch.bgEffect, { shouldDirty: true });
     form.setValue("appBackground", patch.appBackground, { shouldDirty: true });
@@ -318,6 +378,15 @@ export default function WebReiwaPage() {
   // normalized through createInitialBrandingDraft, so the watched snapshot is
   // complete even though react-hook-form exposes it as DeepPartial.
   const watchedValues = useWatch({ control: form.control }) as BrandingFormDraft;
+  const selectedConceptPreset = useMemo(
+    () =>
+      CONCEPT_THEME_PRESETS.find(
+        (preset) =>
+          preset.id === watchedValues.themePresetId &&
+          preset.version === watchedValues.themePresetVersion,
+      ) ?? null,
+    [watchedValues.themePresetId, watchedValues.themePresetVersion],
+  );
   const legacyPresetLabel = (preset: LegacyThemePreset): string =>
     t(`brandingPage.presets.${preset.id}`);
   const filteredLegacyPresets = useMemo(() => {
@@ -524,6 +593,93 @@ export default function WebReiwaPage() {
                   <div className="rounded-lg border border-dashed px-4 py-8 text-center text-sm text-muted-foreground">
                     {t('brandingPage.sections.presets.empty')}
                   </div>
+                )}
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle>{t('brandingPage.sections.themeMode.title')}</CardTitle>
+                <CardDescription>{t('brandingPage.sections.themeMode.description')}</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                {selectedConceptPreset ? (
+                  watchedValues.themeVariants ? (
+                    <>
+                      <div className="grid gap-4 sm:grid-cols-2">
+                        <div className="space-y-2">
+                          <Label htmlFor="themeModePolicy">
+                            {t('brandingPage.sections.themeMode.permissionLabel')}
+                          </Label>
+                          <Select
+                            value={watchedValues.themeModePolicy}
+                            onValueChange={(value) =>
+                              form.setValue(
+                                'themeModePolicy',
+                                value as BrandingFormDraft['themeModePolicy'],
+                                { shouldDirty: true },
+                              )
+                            }
+                          >
+                            <SelectTrigger id="themeModePolicy">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="fixed">
+                                {t('brandingPage.sections.themeMode.fixed')}
+                              </SelectItem>
+                              <SelectItem value="user-selectable">
+                                {t('brandingPage.sections.themeMode.userSelectable')}
+                              </SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        <div className="space-y-2">
+                          <Label htmlFor="themeDefaultMode">
+                            {t('brandingPage.sections.themeMode.defaultLabel')}
+                          </Label>
+                          <Select
+                            value={watchedValues.themeDefaultMode}
+                            onValueChange={(value) => {
+                              const mode = value as BrandingFormDraft['themeDefaultMode'];
+                              const variant = watchedValues.themeVariants?.[mode];
+                              if (!variant) return;
+                              form.setValue('themeDefaultMode', mode, { shouldDirty: true });
+                              applyConceptVisualPatch(variant, true);
+                            }}
+                          >
+                            <SelectTrigger id="themeDefaultMode">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="light">
+                                {t('brandingPage.sections.themeMode.light')}
+                              </SelectItem>
+                              <SelectItem value="dark">
+                                {t('brandingPage.sections.themeMode.dark')}
+                              </SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        {t('brandingPage.sections.themeMode.hint')}
+                      </p>
+                    </>
+                  ) : (
+                    <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-dashed p-4">
+                      <p className="text-sm text-muted-foreground">
+                        {t('brandingPage.sections.themeMode.prepareHint')}
+                      </p>
+                      <Button type="button" variant="outline" onClick={() => applyConceptPreset(selectedConceptPreset)}>
+                        {t('brandingPage.sections.themeMode.prepareAction')}
+                      </Button>
+                    </div>
+                  )
+                ) : (
+                  <p className="text-sm text-muted-foreground">
+                    {t('brandingPage.sections.themeMode.conceptRequired')}
+                  </p>
                 )}
               </CardContent>
             </Card>

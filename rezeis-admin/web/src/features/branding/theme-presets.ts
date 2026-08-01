@@ -16,9 +16,11 @@
 
 import {
   CONCEPT_PRESETS,
+  getConceptThemeModeVisual,
   getConceptSourceBackgroundColor,
   getConceptSourceMode,
   getConceptSourceStyle,
+  type ConceptSourceMode,
   type ConceptPresetDescriptor,
   type HexColor,
 } from '../../lib/theme/concept-presets'
@@ -237,23 +239,31 @@ export type LegacyThemePresetVisualPatch = Pick<
 >
 
 /** A concept additionally owns card artwork, geometry, typography, surfaces. */
-export type ConceptThemePresetVisualPatch = LegacyThemePresetVisualPatch &
-  Pick<
-    BrandingFormDraft,
-    | 'cardPattern'
-    | 'cardEffect'
-    | 'cardEffectProps'
-    | 'cardEffectOpacity'
-    | 'appBackground'
-    | 'borderRadius'
-    | 'cornerRadii'
-    | 'fontFamily'
-    | 'surfaceTheme'
-  >
+export type ConceptThemePresetVisualPatch = LegacyThemePresetVisualPatch & {
+  readonly cardPattern: string | null
+  readonly cardEffect: string
+  readonly cardEffectProps: Record<string, unknown>
+  readonly cardEffectOpacity: number
+  readonly appBackground: BrandingAppBackgroundDraft
+  readonly borderRadius: string
+  readonly cornerRadii: BrandingCornerRadiiDraft
+  readonly fontFamily: string
+  readonly surfaceTheme: BrandingSurfaceThemeDraft
+}
 
 export type ThemePresetVisualPatch =
   | LegacyThemePresetVisualPatch
   | ConceptThemePresetVisualPatch
+
+/**
+ * Two resolved representations of one operator-selected concept. Reiwa
+ * receives these values as data, so an end user can change only brightness
+ * (when the operator permits it) and never gains the concept catalogue.
+ */
+export type ConceptThemeModeVariants = Readonly<{
+  light: ConceptThemePresetVisualPatch
+  dark: ConceptThemePresetVisualPatch
+}>
 
 function createSharedThemePresetVisualPatch(
   preset: ThemePresetBase,
@@ -293,6 +303,29 @@ export function createConceptThemePresetVisualPatch(
   }
 }
 
+export function createConceptThemeModeVariants(
+  preset: ConceptThemePreset,
+): ConceptThemeModeVariants {
+  const descriptor = CONCEPT_PRESETS.find(
+    (candidate) => candidate.id === preset.id,
+  )
+  // A concept preset is built from this canonical catalogue. Keeping the
+  // explicit error protects future refactors from silently shipping a partial
+  // theme variant when an id is renamed.
+  if (!descriptor) {
+    throw new Error(`Unknown concept theme preset: ${preset.id}`)
+  }
+
+  return {
+    light: createConceptThemePresetVisualPatch(
+      createConceptReiwaPresetForMode(descriptor, 'light'),
+    ),
+    dark: createConceptThemePresetVisualPatch(
+      createConceptReiwaPresetForMode(descriptor, 'dark'),
+    ),
+  }
+}
+
 export function createThemePresetVisualPatch(
   preset: LegacyThemePreset,
 ): LegacyThemePresetVisualPatch
@@ -313,6 +346,19 @@ export function createThemePresetVisualPatch(
 export function createConceptReiwaPreset(
   descriptor: ConceptPresetDescriptor,
 ): ConceptThemePreset {
+  return createConceptReiwaPresetForMode(
+    descriptor,
+    getConceptSourceMode(descriptor),
+  )
+}
+
+function createConceptReiwaPresetForMode(
+  descriptor: ConceptPresetDescriptor,
+  mode: ConceptSourceMode,
+): ConceptThemePreset {
+  if (mode !== getConceptSourceMode(descriptor)) {
+    return createOppositeConceptReiwaPreset(descriptor, mode)
+  }
   const source = getConceptSourceStyle(descriptor)
   const isLight = getConceptSourceMode(descriptor) === 'light'
   const bgPrimary = getConceptSourceBackgroundColor(descriptor)
@@ -431,6 +477,178 @@ export function createConceptReiwaPreset(
         ? Math.min(32, Math.max(12, descriptor.classification.canonicalRadius))
         : 0,
     },
+  }
+}
+
+/**
+ * Builds the alternate brightness of an audited concept. The concept's
+ * typography, geometry, visual family and animation remain the same; only
+ * semantic surfaces and the colour foundations move to the catalogue's
+ * opposite light/dark token set. This is intentionally not a generic colour
+ * inversion — every composition still comes from its own descriptor.
+ */
+function createOppositeConceptReiwaPreset(
+  descriptor: ConceptPresetDescriptor,
+  mode: ConceptSourceMode,
+): ConceptThemePreset {
+  const source = getConceptSourceStyle(descriptor)
+  const visual = getConceptThemeModeVisual(descriptor, mode)
+  const tokens = visual.tokens
+  const isLight = mode === 'light'
+  const bgPrimary = opaqueHex(tokens.background)
+  const primary = opaqueHex(tokens.primary)
+  const secondaryAccent = opaqueHex(tokens['chart-2'])
+  const surface = opaqueHex(tokens.secondary)
+  const surfaceHigh = opaqueHex(tokens.card)
+  const foreground = ensureTextContrast(opaqueHex(tokens.foreground), bgPrimary)
+  const cardGradient = buildModeCardGradient(
+    descriptor,
+    mode,
+    bgPrimary,
+    surfaceHigh,
+    primary,
+    secondaryAccent,
+  )
+  const appGradient = compactModeAppGradient(
+    descriptor,
+    visual.backgroundImage,
+    bgPrimary,
+    surface,
+    primary,
+    secondaryAccent,
+  )
+  const effect = deriveCardEffect(descriptor)
+
+  return {
+    kind: 'concept',
+    id: descriptor.id,
+    version: THEME_PRESET_VERSION,
+    code: descriptor.code,
+    name: descriptor.name,
+    palette: descriptor.palette,
+    sourcePage: descriptor.sourcePage,
+    visualFamily: descriptor.classification.visualFamily,
+    appComposition: classifyAppComposition(descriptor),
+    cardComposition: classifyCardComposition(descriptor),
+    primary,
+    primaryFg: contrastText(primary),
+    bgPrimary,
+    bgSecondary: surface,
+    cardGradient,
+    cardPattern: deriveCardPattern(descriptor, primary),
+    cardEffect: effect,
+    cardEffectProps: buildEffectProps(
+      effect,
+      primary,
+      secondaryAccent,
+      bgPrimary,
+    ),
+    cardEffectOpacity:
+      effect === 'paperGrain'
+        ? 0.62
+        : descriptor.classification.effectClass === 'flat'
+          ? 0.68
+          : 0.84,
+    bgEffect: deriveLegacyBgEffect(descriptor),
+    appBackground: buildAppBackground(
+      descriptor,
+      appGradient,
+      primary,
+      bgPrimary,
+    ),
+    borderRadius: radiusClassForConcept(descriptor),
+    cornerRadii: exactCornerRadii(descriptor),
+    fontFamily: fontStack(source.bodyFont),
+    surfaceTheme: {
+      foreground,
+      mutedForeground: ensureContrastAcross(
+        opaqueHex(tokens['muted-foreground']),
+        [surface, surfaceHigh],
+        4.5,
+      ),
+      surface,
+      surfaceHigh,
+      borderSoft: opaqueHex(tokens.border),
+      borderStrong: ensureContrastAcross(
+        opaqueHex(tokens.border),
+        [surface, surfaceHigh],
+        3.1,
+      ),
+      surfaceOpacity: isLight ? 0.94 : 0.9,
+      surfaceHighOpacity: isLight ? 0.98 : 0.96,
+      borderSoftOpacity: isLight ? 0.18 : 0.14,
+      borderStrongOpacity: isLight ? 0.38 : 0.34,
+      glassBlurPx: descriptor.classification.backgroundBlur
+        ? Math.min(32, Math.max(12, descriptor.classification.canonicalRadius))
+        : 0,
+    },
+  }
+}
+
+function buildModeCardGradient(
+  descriptor: ConceptPresetDescriptor,
+  mode: ConceptSourceMode,
+  background: HexColor,
+  card: HexColor,
+  primary: HexColor,
+  accent: HexColor,
+): string {
+  const seed = stableSeed(`${descriptor.id}:${mode}:card-variant`)
+  const x = 58 + (seed % 31)
+  const y = 8 + ((seed >>> 8) % 35)
+  const angle = 112 + ((seed >>> 16) % 67)
+  const primaryWash = mode === 'light' ? '54' : 'A8'
+  const accentWash = mode === 'light' ? '40' : '88'
+
+  switch (classifyCardComposition(descriptor)) {
+    case 'technical-grid':
+    case 'orthogonal-bands':
+      return `linear-gradient(${angle}deg, ${card} 0 45%, ${withAlpha(primary, primaryWash)} 45% 68%, ${background} 68% 100%)`
+    case 'paper-fields':
+      return `linear-gradient(${angle}deg, ${card} 0%, ${withAlpha(primary, primaryWash)} 56%, ${background} 100%)`
+    case 'horizon-waves':
+      return [
+        `radial-gradient(ellipse 92% 64% at ${x}% 8%, ${withAlpha(accent, accentWash)} 0%, transparent 66%)`,
+        `linear-gradient(180deg, ${card} 0%, ${background} 100%)`,
+      ].join(', ')
+    case 'orbit-spotlight':
+    case 'aurora-veil':
+    case 'organic-mesh':
+    case 'spotlight':
+      return [
+        `radial-gradient(circle at ${x}% ${y}%, ${withAlpha(primary, primaryWash)} 0%, transparent 48%)`,
+        `radial-gradient(circle at ${100 - x}% ${100 - y}%, ${withAlpha(accent, accentWash)} 0%, transparent 54%)`,
+        `linear-gradient(${angle}deg, ${card} 0%, ${background} 100%)`,
+      ].join(', ')
+  }
+}
+
+/**
+ * The form/API deliberately caps persisted CSS artwork at 512 characters.
+ * A handful of opposite-mode concept compositions contain many decorative
+ * layers, so keep their visual family but compact them into a safe, durable
+ * two/three-layer background rather than dropping the whole light/dark pair.
+ */
+function compactModeAppGradient(
+  descriptor: ConceptPresetDescriptor,
+  artwork: string,
+  background: HexColor,
+  surface: HexColor,
+  primary: HexColor,
+  accent: HexColor,
+): string {
+  if (artwork !== 'none' && artwork.length <= 512) return artwork
+
+  switch (classifyAppComposition(descriptor)) {
+    case 'technical-grid':
+    case 'orthogonal-bands':
+      return `linear-gradient(90deg, ${background} 0 42%, ${surface} 42% 68%, ${primary} 68% 100%)`
+    case 'paper-fields':
+      return `linear-gradient(135deg, ${surface} 0%, ${background} 58%, ${primary} 100%)`
+    case 'horizon-waves':
+      return `radial-gradient(ellipse 92% 46% at 70% 10%, ${accent} 0%, transparent 68%), linear-gradient(180deg, ${surface}, ${background})`
+    default:
+      return `radial-gradient(circle at 74% 18%, ${primary} 0%, transparent 50%), linear-gradient(135deg, ${surface}, ${background})`
   }
 }
 

@@ -155,6 +155,25 @@ describe('branding form schema', () => {
     ).toBe(true)
   })
 
+  it('normalizes malformed variants and rejects an incomplete user-selectable mode pair', () => {
+    const legacy = createInitialBrandingDraft({
+      themeModePolicy: 'user-selectable',
+      themeDefaultMode: 'light',
+      themeVariants: { light: {} } as never,
+    })
+
+    expect(legacy.themeModePolicy).toBe('user-selectable')
+    expect(legacy.themeDefaultMode).toBe('light')
+    expect(legacy.themeVariants).toBeNull()
+
+    const invalid = createBrandingFormSchema(messages).safeParse({
+      ...createInitialBrandingDraft(),
+      themeModePolicy: 'user-selectable',
+      themeVariants: { light: {}, dark: {} },
+    })
+    expect(invalid.success).toBe(false)
+  })
+
   it('keeps exact corner radii editable and clamps malformed legacy input', () => {
     const custom = createInitialBrandingDraft({
       cornerRadii: { cardPx: 2, itemPx: 1, pillPx: 0 },
