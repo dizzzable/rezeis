@@ -27,6 +27,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 import { BrandingPreview } from "./branding-preview";
@@ -101,7 +102,7 @@ function tabForBrandingField(field: string): BrandingTab {
   if (['primary', 'primaryFg', 'bgPrimary', 'bgSecondary', 'borderRadius', 'cornerRadii', 'fontFamily', 'surfaceTheme'].includes(field)) {
     return 'colors';
   }
-  if (field.startsWith('card') || field === 'subscriptionCardText') return 'card';
+  if (field.startsWith('card') || field === 'subscriptionCardText' || field === 'subscriptionCardGlass') return 'card';
   if (field === 'bgEffect' || field === 'appBackground') return 'appbg';
   if (field.startsWith('icon')) return 'icons';
   if (field === 'planCardStyles') return 'planCards';
@@ -1270,6 +1271,79 @@ export default function WebReiwaPage() {
                     </div>
                   )}
                 />
+                <Controller
+                  name="subscriptionCardGlass"
+                  control={form.control}
+                  render={({ field }) => (
+                    <div className="space-y-3 rounded-lg border border-dashed bg-muted/20 p-3">
+                      <div className="flex items-start justify-between gap-4">
+                        <div className="space-y-1">
+                          <Label htmlFor="subscriptionCardGlassEnabled">
+                            {t('brandingPage.sections.card.glass.title')}
+                          </Label>
+                          <p className="text-xs text-muted-foreground">
+                            {t('brandingPage.sections.card.glass.description')}
+                          </p>
+                        </div>
+                        <Switch
+                          id="subscriptionCardGlassEnabled"
+                          checked={field.value.enabled}
+                          onCheckedChange={(enabled) =>
+                            field.onChange({ ...field.value, enabled })
+                          }
+                          aria-label={t('brandingPage.sections.card.glass.title')}
+                        />
+                      </div>
+                      {field.value.enabled && (
+                        <div className="grid gap-3 sm:grid-cols-2">
+                          <div className="space-y-1.5">
+                            <Label htmlFor="subscriptionCardGlassTint" className="text-xs">
+                              {t('brandingPage.sections.card.glass.tint')}
+                            </Label>
+                            <input
+                              id="subscriptionCardGlassTint"
+                              type="color"
+                              value={field.value.tint}
+                              onChange={(event) =>
+                                field.onChange({ ...field.value, tint: event.target.value })
+                              }
+                              className="h-8 w-full cursor-pointer rounded border bg-transparent"
+                            />
+                          </div>
+                          <CardGlassSlider
+                            label={t('brandingPage.sections.card.glass.opacity')}
+                            value={field.value.opacity}
+                            min={0}
+                            max={1}
+                            step={0.01}
+                            format={(value) => `${Math.round(value * 100)}%`}
+                            onChange={(opacity) => field.onChange({ ...field.value, opacity })}
+                          />
+                          <CardGlassSlider
+                            label={t('brandingPage.sections.card.glass.blur')}
+                            value={field.value.blurPx}
+                            min={0}
+                            max={40}
+                            step={1}
+                            format={(value) => `${value}px`}
+                            onChange={(blurPx) => field.onChange({ ...field.value, blurPx })}
+                          />
+                          <CardGlassSlider
+                            label={t('brandingPage.sections.card.glass.border')}
+                            value={field.value.borderOpacity}
+                            min={0}
+                            max={1}
+                            step={0.01}
+                            format={(value) => `${Math.round(value * 100)}%`}
+                            onChange={(borderOpacity) =>
+                              field.onChange({ ...field.value, borderOpacity })
+                            }
+                          />
+                        </div>
+                      )}
+                    </div>
+                  )}
+                />
               </CardContent>
             </Card>
 
@@ -1714,6 +1788,41 @@ function SurfaceSliderField({
       />
     </div>
   );
+}
+
+function CardGlassSlider({
+  label,
+  value,
+  min,
+  max,
+  step,
+  format,
+  onChange,
+}: {
+  readonly label: string
+  readonly value: number
+  readonly min: number
+  readonly max: number
+  readonly step: number
+  readonly format: (value: number) => string
+  readonly onChange: (value: number) => void
+}) {
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between gap-3">
+        <Label className="text-xs">{label}</Label>
+        <span className="font-mono text-xs text-muted-foreground">{format(value)}</span>
+      </div>
+      <Slider
+        value={[value]}
+        min={min}
+        max={max}
+        step={step}
+        onValueChange={(next) => onChange(next[0] ?? value)}
+        aria-label={label}
+      />
+    </div>
+  )
 }
 
 function CornerRadiusSliderField({

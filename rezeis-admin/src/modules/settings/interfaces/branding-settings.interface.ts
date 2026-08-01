@@ -111,6 +111,15 @@ export interface SubscriptionCardTextSettings {
   readonly color: string | null;
 }
 
+/** A composited glass film above card artwork; independent from the effect itself. */
+export interface SubscriptionCardGlassSettings {
+  readonly enabled: boolean;
+  readonly tint: string;
+  readonly opacity: number;
+  readonly blurPx: number;
+  readonly borderOpacity: number;
+}
+
 /**
  * How the menu/section icons in the reiwa cabinet are coloured:
  *   - `default` — each icon keeps its own distinct accent (current look).
@@ -450,6 +459,9 @@ export interface BrandingSettingsInterface {
    */
   readonly subscriptionCardText: SubscriptionCardTextSettings;
 
+  /** Optional operator-controlled glass composition above every subscription card. */
+  readonly subscriptionCardGlass: SubscriptionCardGlassSettings;
+
   /**
    * Watermark glyph shown on the subscription card. One of the built-in
    * `CARD_LOGO_PRESETS` keys. `DEFAULT` = Reiwa mark, `NONE` = hidden.
@@ -575,6 +587,13 @@ export const DEFAULT_BRANDING: BrandingSettingsInterface = {
   subscriptionCardText: {
     mode: 'auto',
     color: null,
+  },
+  subscriptionCardGlass: {
+    enabled: false,
+    tint: '#ffffff',
+    opacity: 0.14,
+    blurPx: 8,
+    borderOpacity: 0.18,
   },
   cardLogo: 'DEFAULT',
   cardLogoUrl: null,

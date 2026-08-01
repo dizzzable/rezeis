@@ -441,6 +441,42 @@ export class SubscriptionCardTextDto {
   public color!: string | null;
 }
 
+/** Independent glass film applied above subscription-card artwork. */
+export class SubscriptionCardGlassDto {
+  @IsOptional()
+  @IsBoolean()
+  public enabled?: boolean;
+
+  @IsOptional()
+  @IsString()
+  @IsHexColor()
+  @Matches(OPAQUE_HEX_COLOR_PATTERN, {
+    message: 'subscriptionCardGlass.tint must be an opaque hexadecimal colour',
+  })
+  public tint?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ allowInfinity: false, allowNaN: false })
+  @Min(0)
+  @Max(1)
+  public opacity?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ allowInfinity: false, allowNaN: false })
+  @Min(0)
+  @Max(40)
+  public blurPx?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ allowInfinity: false, allowNaN: false })
+  @Min(0)
+  @Max(1)
+  public borderOpacity?: number;
+}
+
 /** One fully resolved light/dark representation of an operator concept. */
 export class BrandingThemeVariantDto {
   @IsHexColor()
@@ -632,6 +668,12 @@ export class UpdateBrandingSettingsDto {
   @ValidateNested()
   @Type(() => SubscriptionCardTextDto)
   public subscriptionCardText?: SubscriptionCardTextDto;
+
+  @IsOptional()
+  @IsObject()
+  @ValidateNested()
+  @Type(() => SubscriptionCardGlassDto)
+  public subscriptionCardGlass?: SubscriptionCardGlassDto;
 
   @IsOptional()
   @IsIn(CARD_LOGO_PRESETS as readonly string[])

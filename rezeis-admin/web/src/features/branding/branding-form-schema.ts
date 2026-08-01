@@ -99,6 +99,7 @@ export interface BrandingFormDraft {
   readonly cardGradient: string
   readonly cardPattern: string | null
   readonly subscriptionCardText: BrandingSubscriptionCardTextDraft
+  readonly subscriptionCardGlass: BrandingSubscriptionCardGlassDraft
   readonly cardLogo: CardLogoPreset
   readonly cardLogoUrl: string | null
   readonly cardEffect: string
@@ -152,6 +153,15 @@ export interface BrandingThemeVariantsDraft {
 export interface BrandingSubscriptionCardTextDraft {
   readonly mode: (typeof BRANDING_SUBSCRIPTION_CARD_TEXT_MODES)[number]
   readonly color: string | null
+}
+
+/** Independent glass film above subscription-card artwork. */
+export interface BrandingSubscriptionCardGlassDraft {
+  readonly enabled: boolean
+  readonly tint: string
+  readonly opacity: number
+  readonly blurPx: number
+  readonly borderOpacity: number
 }
 
 export interface BrandingSurfaceThemeDraft {
@@ -231,6 +241,15 @@ export const DEFAULT_CORNER_RADII_DRAFT: BrandingCornerRadiiDraft = {
   pillPx: 9999,
 }
 
+/** Disabled by default so an existing card retains its exact visual result. */
+export const DEFAULT_SUBSCRIPTION_CARD_GLASS_DRAFT: BrandingSubscriptionCardGlassDraft = {
+  enabled: false,
+  tint: '#ffffff',
+  opacity: 0.14,
+  blurPx: 8,
+  borderOpacity: 0.18,
+}
+
 export const CORNER_RADII_BY_LEGACY_CLASS: Readonly<
   Record<string, BrandingCornerRadiiDraft>
 > = {
@@ -292,6 +311,7 @@ const DEFAULT_BRANDING_DRAFT: BrandingFormDraft = {
   cardGradient: 'linear-gradient(135deg, #064e3b 0%, #22c55e 100%)',
   cardPattern: null,
   subscriptionCardText: { mode: 'auto', color: null },
+  subscriptionCardGlass: DEFAULT_SUBSCRIPTION_CARD_GLASS_DRAFT,
   cardLogo: 'DEFAULT',
   cardLogoUrl: null,
   cardEffect: 'aurora',
@@ -366,6 +386,13 @@ export function createBrandingFormSchema(messages: BrandingFormValidationMessage
       path: ['color'],
       message: messages.hexInvalid,
     })
+  const subscriptionCardGlassSchema = z.object({
+    enabled: z.boolean(),
+    tint: z.string().regex(OPAQUE_HEX_PATTERN, messages.hexInvalid),
+    opacity: z.number().min(0).max(1),
+    blurPx: z.number().min(0).max(40),
+    borderOpacity: z.number().min(0).max(1),
+  })
   const themeVariantSchema = z.object({
     primary: z.string().regex(HEX_PATTERN, messages.hexInvalid),
     primaryFg: z.string().regex(HEX_PATTERN, messages.hexInvalid),
@@ -410,6 +437,7 @@ export function createBrandingFormSchema(messages: BrandingFormValidationMessage
       cardGradient: safeGradientSchema(messages.gradientInvalid),
       cardPattern: optionalGradientSchema(messages.gradientInvalid, true),
       subscriptionCardText: subscriptionCardTextSchema,
+      subscriptionCardGlass: subscriptionCardGlassSchema,
       cardLogo: z.enum(CARD_LOGO_PRESETS),
       cardLogoUrl: optionalImageUrl(messages.imageUrlInvalid),
       cardEffect: z.enum(BRANDING_CARD_EFFECTS),
@@ -540,6 +568,9 @@ export function createInitialBrandingDraft(input?: Partial<BrandingFormDraft> | 
   const subscriptionCardText = normalizeSubscriptionCardTextDraft(
     input?.subscriptionCardText,
   )
+  const subscriptionCardGlass = normalizeSubscriptionCardGlassDraft(
+    input?.subscriptionCardGlass,
+  )
   return {
     ...DEFAULT_BRANDING_DRAFT,
     ...(input ?? {}),
@@ -566,6 +597,7 @@ export function createInitialBrandingDraft(input?: Partial<BrandingFormDraft> | 
     pwaIconUrl: normalizeDraftNullableString(input?.pwaIconUrl),
     cardPattern: normalizeDraftNullableString(input?.cardPattern),
     subscriptionCardText,
+    subscriptionCardGlass,
     cardLogoUrl: normalizeDraftNullableString(input?.cardLogoUrl),
     cardEffectProps: isPlainRecord(input?.cardEffectProps) ? input.cardEffectProps : {},
     cardEffectsByIndex: Array.isArray(input?.cardEffectsByIndex) ? input.cardEffectsByIndex : [],
@@ -601,6 +633,33 @@ function normalizeSubscriptionCardTextDraft(
       ? value.color.trim()
       : null
   return color ? { mode, color } : { mode: 'auto', color: null }
+}
+
+function normalizeSubscriptionCardGlassDraft(
+  value: unknown,
+): BrandingSubscriptionCardGlassDraft {
+  if (!isPlainRecordUnknown(value)) {
+    return { ...DEFAULT_SUBSCRIPTION_CARD_GLASS_DRAFT }
+  }
+  const fallback = DEFAULT_SUBSCRIPTION_CARD_GLASS_DRAFT
+  const tint =
+    typeof value.tint === 'string' && OPAQUE_HEX_PATTERN.test(value.tint.trim())
+      ? value.tint.trim()
+      : fallback.tint
+  const boundedNumber = (
+    key: 'opacity' | 'blurPx' | 'borderOpacity',
+    max: number,
+  ): number =>
+    typeof value[key] === 'number' && Number.isFinite(value[key])
+      ? Math.min(max, Math.max(0, value[key] as number))
+      : fallback[key]
+  return {
+    enabled: value.enabled === true,
+    tint,
+    opacity: boundedNumber('opacity', 1),
+    blurPx: boundedNumber('blurPx', 40),
+    borderOpacity: boundedNumber('borderOpacity', 1),
+  }
 }
 
 function isThemeVariantsDraft(

@@ -265,6 +265,13 @@ describe('SettingsController', () => {
       cardGradient: 'linear-gradient(#000,#111)',
       cardPattern: null,
       subscriptionCardText: { mode: 'auto', color: null },
+      subscriptionCardGlass: {
+        enabled: false,
+        tint: '#ffffff',
+        opacity: 0.14,
+        blurPx: 8,
+        borderOpacity: 0.18,
+      },
       cardLogo: 'NONE',
       cardLogoUrl: null,
       cardEffect: 'NONE',

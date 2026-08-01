@@ -658,6 +658,86 @@ describe('UpdateBrandingSettingsDto — preset and surface tokens', () => {
     );
   });
 
+  it('persists card glass globally, clamps stale storage, and validates its patch', async () => {
+    const persisted = readBrandingSettings({
+      subscriptionCardGlass: {
+        enabled: true,
+        tint: '#e2e8f0',
+        opacity: 0.2,
+        blurPx: 12,
+        borderOpacity: 0.3,
+      },
+    });
+    assert.deepEqual(persisted.subscriptionCardGlass, {
+      enabled: true,
+      tint: '#e2e8f0',
+      opacity: 0.2,
+      blurPx: 12,
+      borderOpacity: 0.3,
+    });
+
+    const merged = readBrandingSettings(
+      mergeBrandingSettings({
+        existing: persisted,
+        patch: { subscriptionCardGlass: { opacity: 0.42 } },
+      }),
+    );
+    assert.deepEqual(merged.subscriptionCardGlass, {
+      ...persisted.subscriptionCardGlass,
+      opacity: 0.42,
+    });
+    assert.deepEqual(
+      readBrandingSettings({
+        subscriptionCardGlass: {
+          enabled: 'yes',
+          tint: '#ffffff80',
+          opacity: 5,
+          blurPx: -2,
+          borderOpacity: Number.NaN,
+        },
+      }).subscriptionCardGlass,
+      {
+        enabled: false,
+        tint: '#ffffff',
+        opacity: 1,
+        blurPx: 0,
+        borderOpacity: DEFAULT_BRANDING.subscriptionCardGlass.borderOpacity,
+      },
+    );
+
+    const accepted = plainToInstance(UpdateBrandingSettingsDto, {
+      subscriptionCardGlass: {
+        enabled: true,
+        tint: '#e2e8f0',
+        opacity: 0.2,
+        blurPx: 12,
+        borderOpacity: 0.3,
+      },
+    });
+    const rejected = plainToInstance(UpdateBrandingSettingsDto, {
+      subscriptionCardGlass: {
+        enabled: true,
+        tint: '#e2e8f080',
+        opacity: 1.1,
+        blurPx: 41,
+        borderOpacity: -0.1,
+      },
+    });
+    assert.deepEqual(
+      await validate(accepted, { whitelist: true, forbidNonWhitelisted: true }),
+      [],
+    );
+    assert.equal(
+      (
+        await validate(rejected, {
+          whitelist: true,
+          forbidNonWhitelisted: true,
+        })
+      ).some((error) => error.property === 'subscriptionCardGlass'),
+      true,
+    );
+  });
+
   it('accepts an old complete theme-variant payload without a card-text field', async () => {
     const legacyVariant = {
       primary: DEFAULT_BRANDING.primary,

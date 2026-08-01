@@ -49,10 +49,12 @@ import { autoPlanGradient } from './plan-card-style-utils'
 import { buildTextureCss } from './app-texture'
 import { PlanIconView } from '@/features/plans/plan-icon-view'
 import {
+  DEFAULT_SUBSCRIPTION_CARD_GLASS_DRAFT,
   DEFAULT_NAV_ITEMS,
   type PlanCardStyleDraft,
   type BrandingAppBackgroundDraft,
   type BrandingCornerRadiiDraft,
+  type BrandingSubscriptionCardGlassDraft,
   type BrandingSubscriptionCardTextDraft,
   type BrandingSurfaceThemeDraft,
   type NavItemDraft,
@@ -72,6 +74,7 @@ interface BrandingPreviewProps {
     cardGradient?: string
     cardPattern?: string | null
     subscriptionCardText?: BrandingSubscriptionCardTextDraft
+    subscriptionCardGlass?: BrandingSubscriptionCardGlassDraft
     cardLogo?: CardLogoPreset
     cardLogoUrl?: string | null
     cardEffect?: string
@@ -164,6 +167,7 @@ interface PreviewCardVisual {
   readonly effectProps: Record<string, unknown>
   readonly opacity: number
   readonly subscriptionCardText: BrandingSubscriptionCardTextDraft
+  readonly subscriptionCardGlass: BrandingSubscriptionCardGlassDraft
 }
 
 type PreviewRgb = readonly [number, number, number]
@@ -729,6 +733,30 @@ function PreviewSubscriptionCard({
               style={{ background: previewStaticArtworkVeil(contrast) }}
         />
       )}
+      {visual.subscriptionCardGlass.enabled && (
+        <div
+          data-preview-card-layer="glass"
+          className="pointer-events-none absolute inset-0 z-0"
+          style={{
+            backgroundColor: toRgba(
+              visual.subscriptionCardGlass.tint,
+              visual.subscriptionCardGlass.opacity,
+            ),
+            border: `1px solid ${toRgba(
+              visual.subscriptionCardGlass.tint,
+              visual.subscriptionCardGlass.borderOpacity,
+            )}`,
+            backdropFilter:
+              visual.subscriptionCardGlass.blurPx > 0
+                ? `blur(${visual.subscriptionCardGlass.blurPx}px)`
+                : undefined,
+            WebkitBackdropFilter:
+              visual.subscriptionCardGlass.blurPx > 0
+                ? `blur(${visual.subscriptionCardGlass.blurPx}px)`
+                : undefined,
+          }}
+        />
+      )}
       {/* Watermark — operator-configurable glyph or custom image */}
       <CardLogoMark
         preset={cardLogo}
@@ -963,6 +991,7 @@ export function BrandingPreview({ values, focus }: BrandingPreviewProps) {
     cardGradient = 'linear-gradient(135deg, #064e3b 0%, #22c55e 100%)',
     cardPattern,
     subscriptionCardText = { mode: 'auto', color: null },
+    subscriptionCardGlass = DEFAULT_SUBSCRIPTION_CARD_GLASS_DRAFT,
     cardLogo = 'DEFAULT',
     cardLogoUrl,
     cardEffect = 'aurora',
@@ -1077,6 +1106,7 @@ export function BrandingPreview({ values, focus }: BrandingPreviewProps) {
         effectProps: slot?.cardEffectProps ?? cardEffectProps,
         opacity: slot?.cardEffectOpacity ?? cardEffectOpacity,
         subscriptionCardText,
+        subscriptionCardGlass,
       }
     })
   }, [
@@ -1086,6 +1116,7 @@ export function BrandingPreview({ values, focus }: BrandingPreviewProps) {
     cardEffectProps,
     cardEffectOpacity,
     subscriptionCardText,
+    subscriptionCardGlass,
   ])
 
   return (

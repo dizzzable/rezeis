@@ -239,6 +239,7 @@ export function CardEffectPreviewLayer({
               resolveCardEffectPreviewColors(effect, props),
             ),
             opacity: overlayOpacity,
+            mixBlendMode: 'screen',
           }}
         />
       )}
@@ -251,7 +252,7 @@ export function CardEffectPreviewLayer({
             <div
               data-preview-card-effect-renderer
               className="absolute inset-0"
-              style={{ opacity: overlayOpacity }}
+              style={{ opacity: overlayOpacity, mixBlendMode: 'screen' }}
             >
               <Effect {...runtimeProps} />
             </div>

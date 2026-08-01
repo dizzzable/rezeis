@@ -172,7 +172,7 @@ describe('BrandingPreview subscription card', () => {
     ).not.toBeInTheDocument()
     expect(
       card?.querySelector('[data-preview-card-effect-renderer]'),
-    ).toHaveStyle({ opacity: '0.68' })
+    ).toHaveStyle({ opacity: '0.84', mixBlendMode: 'screen' })
   })
 
   it('mirrors the dashboard device area and the configured bottom-nav spacing', () => {
@@ -247,7 +247,7 @@ describe('BrandingPreview subscription card', () => {
       'transparent',
     )
     expect((effectLayer as HTMLElement | null)?.style.backgroundColor ?? '').toBe('')
-    expect(renderer).toHaveStyle({ opacity: String(Math.min(opacity, 0.68)) })
+    expect(renderer).toHaveStyle({ opacity: String(opacity), mixBlendMode: 'screen' })
     expect(
       renderer?.querySelector('[data-testid="preview-effect-renderer"]'),
     ).toBeInTheDocument()
@@ -325,12 +325,13 @@ describe('BrandingPreview subscription card', () => {
     expect(gradientLayer).toHaveStyle({ backgroundImage: gradient })
     expect(effect).toHaveAttribute('data-preview-card-effect-runtime', 'css-fallback')
     expect(effect).toHaveAttribute('data-preview-card-effect-foundation', 'transparent')
-    expect(artwork).toHaveStyle({ opacity: '0.68' })
+    expect(artwork).toHaveStyle({ opacity: '1', mixBlendMode: 'screen' })
     expect((artwork as HTMLElement | null)?.style.backgroundColor ?? '').toBe('')
+    expect((artwork as HTMLElement | null)?.style.backgroundImage).not.toContain('linear-gradient')
     expect(card?.querySelector('[data-preview-card-effect-renderer]')).toBeNull()
   })
 
-  it('caps a native preview effect requested at 100% to the shared safe overlay alpha', () => {
+  it('uses a native preview effect at the saved 100% intensity without replacing the gradient', () => {
     const { container } = renderWithProviders(
       <BrandingPreview
         values={{
@@ -343,7 +344,7 @@ describe('BrandingPreview subscription card', () => {
 
     expect(
       container.querySelector('[data-preview-card-effect-renderer]'),
-    ).toHaveStyle({ opacity: '0.68' })
+    ).toHaveStyle({ opacity: '1', mixBlendMode: 'screen' })
   })
 
   it('recovers to CSS artwork when a native preview renderer throws', async () => {
@@ -365,7 +366,7 @@ describe('BrandingPreview subscription card', () => {
     })
     expect(
       container.querySelector('[data-preview-card-effect-artwork]'),
-    ).toHaveStyle({ opacity: '0.68' })
+    ).toHaveStyle({ opacity: '0.8', mixBlendMode: 'screen' })
   })
 
   it('uses one adaptive theme-derived readability veil across the full card', () => {
@@ -898,7 +899,7 @@ describe('BrandingPreview subscription card', () => {
     )
     expect(
       effect?.querySelector('[data-preview-card-effect-renderer]'),
-    ).toHaveStyle({ opacity: '0.68' })
+    ).toHaveStyle({ opacity: '0.8', mixBlendMode: 'screen' })
     expect(
       container.querySelector('[data-preview-subscription-card]'),
     ).toHaveAttribute('data-preview-card-artwork', 'animated')

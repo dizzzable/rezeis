@@ -5,8 +5,6 @@ import {
   type CardEffectId,
 } from './card-effect-registry'
 
-export const CARD_EFFECT_SAFE_OVERLAY_OPACITY = 0.68
-
 export const PAPER_CARD_EFFECTS = new Set([
   'paperMesh',
   'paperWarp',
@@ -57,10 +55,7 @@ const FULL_OUTPUT_GAMUT_EFFECTS = new Set([
 ])
 
 export function resolveCardEffectPreviewOpacity(opacity: number): number {
-  return Math.min(
-    Math.max(Number.isFinite(opacity) ? opacity : 1, 0.05),
-    CARD_EFFECT_SAFE_OVERLAY_OPACITY,
-  )
+  return Math.min(Math.max(Number.isFinite(opacity) ? opacity : 1, 0.05), 1)
 }
 
 export function isPreviewCardEffect(effect: string): effect is CardEffectId {
@@ -133,7 +128,10 @@ export function buildCardEffectPreviewArtwork(colors: readonly string[]): string
   const first = colors[0] ?? '#5227FF'
   const middle = colors[Math.floor((colors.length - 1) / 2)] ?? first
   const last = colors.at(-1) ?? middle
-  return `radial-gradient(95% 135% at 4% 100%, ${first} 0%, transparent 64%), radial-gradient(85% 120% at 100% 2%, ${last} 0%, transparent 60%), linear-gradient(135deg, ${first}, ${middle}, ${last})`
+  // Keep fallback art translucent at every selected opacity. The configured
+  // gradient is the card foundation; a fallback must enhance it, never replace
+  // it with a full-frame palette of its own.
+  return `radial-gradient(70% 110% at 4% 100%, ${first} 0%, transparent 72%), radial-gradient(66% 100% at 100% 2%, ${last} 0%, transparent 72%), radial-gradient(54% 66% at 52% 50%, ${middle} 0%, transparent 82%)`
 }
 
 function isSafeHexColor(value: unknown): value is string {

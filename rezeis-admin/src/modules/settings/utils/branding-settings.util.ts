@@ -39,6 +39,7 @@ import {
   ProfileNamingSettings,
   SubscriptionCardTextMode,
   SubscriptionCardTextSettings,
+  SubscriptionCardGlassSettings,
   SUBSCRIPTION_CARD_TEXT_MODES,
   SurfaceThemeSettings,
 } from '../interfaces/branding-settings.interface';
@@ -76,6 +77,7 @@ export function readBrandingSettings(value: unknown): BrandingSettingsInterface 
     cardGradient: readGradient(record, 'cardGradient', DEFAULT_BRANDING.cardGradient),
     cardPattern: readNullableGradient(record, 'cardPattern'),
     subscriptionCardText: readSubscriptionCardText(record),
+    subscriptionCardGlass: readSubscriptionCardGlass(record),
     cardLogo: readCardLogo(record, DEFAULT_BRANDING.cardLogo),
     cardLogoUrl: readNullableImageUrl(record, 'cardLogoUrl'),
     cardEffect: readCardEffect(record, DEFAULT_BRANDING.cardEffect),
@@ -123,6 +125,13 @@ export function mergeBrandingSettings(input: {
           surfaceTheme: {
             ...current.surfaceTheme,
             ...surfacePatch,
+          },
+        });
+      } else if (key === 'subscriptionCardGlass') {
+        merged[key] = readSubscriptionCardGlass({
+          subscriptionCardGlass: {
+            ...current.subscriptionCardGlass,
+            ...readRecord(value),
           },
         });
       } else if (key === 'appBackground') {
@@ -388,6 +397,37 @@ function readOptionalSubscriptionCardText(
   return Object.prototype.hasOwnProperty.call(record, 'subscriptionCardText')
     ? readSubscriptionCardText(record)
     : undefined;
+}
+
+function readSubscriptionCardGlass(
+  record: Record<string, unknown>,
+): SubscriptionCardGlassSettings {
+  const value = readRecord(record['subscriptionCardGlass']);
+  const fallback = DEFAULT_BRANDING.subscriptionCardGlass;
+  return {
+    enabled: typeof value['enabled'] === 'boolean' ? value['enabled'] : fallback.enabled,
+    tint: readOpaqueHex(value, 'tint', fallback.tint),
+    opacity: readClampedNumber(value, 'opacity', 0, 1, fallback.opacity),
+    blurPx: readClampedNumber(value, 'blurPx', 0, 40, fallback.blurPx),
+    borderOpacity: readClampedNumber(
+      value,
+      'borderOpacity',
+      0,
+      1,
+      fallback.borderOpacity,
+    ),
+  };
+}
+
+function readOpaqueHex(
+  record: Record<string, unknown>,
+  key: string,
+  fallback: string,
+): string {
+  const value = record[key];
+  return typeof value === 'string' && OPAQUE_HEX_PATTERN.test(value.trim())
+    ? value.trim()
+    : fallback;
 }
 
 function readSurfaceTheme(record: Record<string, unknown>): SurfaceThemeSettings {

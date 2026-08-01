@@ -3386,6 +3386,15 @@ export const en = {
         textColor: 'Custom text colour',
         textColorHint:
           'The colour is sent to Reiwa unchanged. The live preview warns when contrast is weak.',
+        glass: {
+          title: 'Glass above animation',
+          description:
+            'A separate layer over the card artwork. Turn it off to show the animation and gradient without blur or tint.',
+          tint: 'Glass tint',
+          opacity: 'Glass opacity',
+          blur: 'Glass blur',
+          border: 'Border opacity',
+        },
         builderTitle: 'Gradient Builder',
         builder_linear: 'Linear',
         builder_radial: 'Radial',
