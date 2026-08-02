@@ -359,6 +359,55 @@ describe('WEB Reiwa preset and surface theme contract', () => {
     assert.equal(reread.appBackground.texture.opacity, 0.25);
   });
 
+  it('keeps a direct operator card artwork patch ahead of both theme variants and stale slots', () => {
+    const variant = {
+      primary: DEFAULT_BRANDING.primary,
+      primaryFg: DEFAULT_BRANDING.primaryFg,
+      bgPrimary: DEFAULT_BRANDING.bgPrimary,
+      bgSecondary: DEFAULT_BRANDING.bgSecondary,
+      cardGradient: 'linear-gradient(135deg, #111111, #222222)',
+      cardPattern: 'linear-gradient(90deg, #ffffff22 1px, transparent 1px)',
+      cardEffect: 'paperWarp',
+      cardEffectProps: { shape: 'stripes' },
+      cardEffectOpacity: 0.7,
+      cardEffectsByIndex: [
+        {
+          mode: 'override',
+          cardEffect: 'aurora',
+          cardEffectProps: { speed: 2 },
+          cardEffectOpacity: 0.4,
+          cardGradient: 'linear-gradient(135deg, #450a0a, #ef4444)',
+        },
+      ],
+      bgEffect: DEFAULT_BRANDING.bgEffect,
+      appBackground: DEFAULT_BRANDING.appBackground,
+      borderRadius: DEFAULT_BRANDING.borderRadius,
+      cornerRadii: DEFAULT_BRANDING.cornerRadii,
+      fontFamily: DEFAULT_BRANDING.fontFamily,
+      surfaceTheme: DEFAULT_BRANDING.surfaceTheme,
+    };
+    const merged = readBrandingSettings(
+      mergeBrandingSettings({
+        existing: { themeVariants: { light: variant, dark: variant } },
+        patch: {
+          cardGradient: 'linear-gradient(135deg, #001122, #334455)',
+          cardPattern: 'linear-gradient(#22d3ee22 1px, transparent 1px)',
+        },
+      }),
+    );
+
+    assert.equal(merged.cardGradient, 'linear-gradient(135deg, #001122, #334455)');
+    assert.equal(merged.cardPattern, 'linear-gradient(#22d3ee22 1px, transparent 1px)');
+    for (const mode of ['light', 'dark'] as const) {
+      const resolved = merged.themeVariants?.[mode];
+      assert.equal(resolved?.cardGradient, merged.cardGradient);
+      assert.equal(resolved?.cardPattern, merged.cardPattern);
+      assert.equal(resolved?.cardEffectsByIndex[0]?.cardGradient, null);
+      assert.equal(resolved?.cardEffectsByIndex[0]?.mode, 'override');
+      assert.equal(resolved?.cardEffectsByIndex[0]?.cardEffect, 'aurora');
+    }
+  });
+
   it('bounds nested branding collections and effect props before persistence', () => {
     const iconColors = Object.fromEntries(
       Array.from({ length: 120 }, (_, index) => [`icon-${index}`, '#abcdef']),

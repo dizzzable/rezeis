@@ -191,21 +191,15 @@ describe('WebReiwaPage branding settings', () => {
       themePresetVersion: 2,
       cardEffectsByIndex: [
         {
-          cardEffect: selectedTheme.cardEffect,
-          cardEffectProps: selectedTheme.cardEffectProps,
-          cardEffectOpacity: selectedTheme.cardEffectOpacity,
+          mode: 'inherit',
           cardGradient: null,
         },
         {
-          cardEffect: selectedTheme.cardEffect,
-          cardEffectProps: selectedTheme.cardEffectProps,
-          cardEffectOpacity: selectedTheme.cardEffectOpacity,
+          mode: 'inherit',
           cardGradient: null,
         },
         {
-          cardEffect: selectedTheme.cardEffect,
-          cardEffectProps: selectedTheme.cardEffectProps,
-          cardEffectOpacity: selectedTheme.cardEffectOpacity,
+          mode: 'inherit',
           cardGradient: null,
         },
       ],
@@ -289,21 +283,15 @@ describe('WebReiwaPage branding settings', () => {
       cardEffectOpacity: selectedCard.cardEffectOpacity,
       cardEffectsByIndex: [
         {
-          cardEffect: selectedCard.cardEffect,
-          cardEffectProps: selectedCard.cardEffectProps,
-          cardEffectOpacity: selectedCard.cardEffectOpacity,
+          mode: 'inherit',
           cardGradient: null,
         },
         {
-          cardEffect: selectedCard.cardEffect,
-          cardEffectProps: selectedCard.cardEffectProps,
-          cardEffectOpacity: selectedCard.cardEffectOpacity,
+          mode: 'inherit',
           cardGradient: null,
         },
         {
-          cardEffect: selectedCard.cardEffect,
-          cardEffectProps: selectedCard.cardEffectProps,
-          cardEffectOpacity: selectedCard.cardEffectOpacity,
+          mode: 'inherit',
           cardGradient: null,
         },
       ],
@@ -358,22 +346,22 @@ describe('WebReiwaPage branding settings', () => {
     expect(payload).toMatchObject({
       cardGradient: CARD_GRADIENT_PRESETS.find((preset) => preset.id === 'indigo')?.value,
       cardEffectsByIndex: [
-        expect.objectContaining({ cardGradient: null, cardEffect: 'paperWarp' }),
-        expect.objectContaining({ cardGradient: null, cardEffect: 'grainient' }),
+        { mode: 'inherit', cardGradient: null },
+        { mode: 'inherit', cardGradient: null },
       ],
       themeVariants: {
         light: expect.objectContaining({
           cardGradient: CARD_GRADIENT_PRESETS.find((preset) => preset.id === 'indigo')?.value,
           cardEffectsByIndex: [
-            expect.objectContaining({ cardGradient: null, cardEffect: 'paperWarp' }),
-            expect.objectContaining({ cardGradient: null, cardEffect: 'grainient' }),
+            { mode: 'inherit', cardGradient: null },
+            { mode: 'inherit', cardGradient: null },
           ],
         }),
         dark: expect.objectContaining({
           cardGradient: CARD_GRADIENT_PRESETS.find((preset) => preset.id === 'indigo')?.value,
           cardEffectsByIndex: [
-            expect.objectContaining({ cardGradient: null, cardEffect: 'paperWarp' }),
-            expect.objectContaining({ cardGradient: null, cardEffect: 'grainient' }),
+            { mode: 'inherit', cardGradient: null },
+            { mode: 'inherit', cardGradient: null },
           ],
         }),
       },

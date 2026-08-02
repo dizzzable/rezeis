@@ -93,29 +93,6 @@ function contrast(left: Rgb, right: Rgb): number {
   return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05)
 }
 
-function fullHeightGradientOpacities(
-  readability: Element,
-): readonly [number, number] {
-  const background = (readability as HTMLElement).style.background
-  const stops = new Map<number, number>()
-  for (const match of background.matchAll(
-    /rgba\(\s*[\d.]+,\s*[\d.]+,\s*[\d.]+,\s*([\d.]+)\s*\)\s*(0|100)%/g,
-  )) {
-    stops.set(Number(match[2]), Number(match[1]))
-  }
-  for (const match of background.matchAll(
-    /rgb\(\s*[\d.]+\s+[\d.]+\s+[\d.]+\s*\/\s*([\d.]+)\s*\)\s*(0|100)%/g,
-  )) {
-    stops.set(Number(match[2]), Number(match[1]))
-  }
-  const start = stops.get(0)
-  const end = stops.get(100)
-  if (start === undefined || end === undefined) {
-    throw new Error('Expected a generated full-height readability gradient')
-  }
-  return [start, end]
-}
-
 function themeHexRgb(value: string, backdrop: Rgb = [0, 0, 0]): Rgb {
   let body = value.replace(/^#/, '')
   if (body.length === 3 || body.length === 4) {
@@ -201,7 +178,7 @@ describe('BrandingPreview subscription card', () => {
     ).toHaveStyle({ opacity: '0.84' })
     expect(
       card?.querySelector('[data-preview-card-layer="effect"]'),
-    ).toHaveStyle({ mixBlendMode: 'screen' })
+    ).not.toHaveStyle({ mixBlendMode: 'screen' })
   })
 
   it('mirrors the dashboard device area and the configured bottom-nav spacing', () => {
@@ -277,7 +254,7 @@ describe('BrandingPreview subscription card', () => {
     )
     expect((effectLayer as HTMLElement | null)?.style.backgroundColor ?? '').toBe('')
     expect(renderer).toHaveStyle({ opacity: String(opacity) })
-    expect(effectLayer).toHaveStyle({ mixBlendMode: 'screen' })
+    expect(effectLayer).not.toHaveStyle({ mixBlendMode: 'screen' })
     expect(
       renderer?.querySelector('[data-testid="preview-effect-renderer"]'),
     ).toBeInTheDocument()
@@ -356,7 +333,7 @@ describe('BrandingPreview subscription card', () => {
     expect(effect).toHaveAttribute('data-preview-card-effect-runtime', 'css-fallback')
     expect(effect).toHaveAttribute('data-preview-card-effect-foundation', 'transparent')
     expect(artwork).toHaveStyle({ opacity: '1' })
-    expect(effect).toHaveStyle({ mixBlendMode: 'screen' })
+    expect(effect).not.toHaveStyle({ mixBlendMode: 'screen' })
     expect((artwork as HTMLElement | null)?.style.backgroundColor ?? '').toBe('')
     expect((artwork as HTMLElement | null)?.style.backgroundImage).not.toContain('linear-gradient')
     expect(card?.querySelector('[data-preview-card-effect-renderer]')).toBeNull()
@@ -526,7 +503,7 @@ describe('BrandingPreview subscription card', () => {
     ).toHaveStyle({ opacity: '1' })
     expect(
       container.querySelector('[data-preview-card-layer="effect"]'),
-    ).toHaveStyle({ mixBlendMode: 'screen' })
+    ).not.toHaveStyle({ mixBlendMode: 'screen' })
   })
 
   it('recovers to CSS artwork when a native preview renderer throws', async () => {
@@ -551,10 +528,10 @@ describe('BrandingPreview subscription card', () => {
     ).toHaveStyle({ opacity: '0.8' })
     expect(
       container.querySelector('[data-preview-card-layer="effect"]'),
-    ).toHaveStyle({ mixBlendMode: 'screen' })
+    ).not.toHaveStyle({ mixBlendMode: 'screen' })
   })
 
-  it('uses one adaptive theme-derived readability veil across the full card', () => {
+  it('uses the selected foreground without changing normal card artwork', () => {
     const { container } = renderWithProviders(
       <BrandingPreview
         values={{
@@ -569,25 +546,11 @@ describe('BrandingPreview subscription card', () => {
     )
 
     const card = container.querySelector('[data-preview-subscription-card]')
-    const readability = card?.querySelector(
-      '[data-preview-card-layer="readability"]',
-    )
     expect(card?.getAttribute('data-preview-card-foreground')).toMatch(/^(dark|light)$/)
-    expect(readability).toHaveAttribute(
-      'data-preview-card-readability',
-      'wcag-full-card-veil',
-    )
-    const veil = readability?.getAttribute('data-preview-card-veil-opacity')
-    expect(veil).toBeTruthy()
-    expect(fullHeightGradientOpacities(readability!)).toEqual([
-      Number(veil),
-      Number(veil),
-    ])
-    expect(readability).not.toHaveClass(
-      'from-black/40',
-      'to-black/60',
-      'bg-linear-to-b',
-    )
+    expect(card).toHaveStyle({ color: '#0a0a0a' })
+    expect(
+      card?.querySelector('[data-preview-card-layer="readability"]'),
+    ).not.toBeInTheDocument()
     expect(
       card?.querySelector('[data-preview-card-layer="effect"]'),
     ).not.toBeInTheDocument()
@@ -595,7 +558,7 @@ describe('BrandingPreview subscription card', () => {
       Array.from(card?.querySelectorAll('[data-preview-card-layer]') ?? []).map(
         (layer) => layer.getAttribute('data-preview-card-layer'),
       ),
-    ).toEqual(['foundation', 'gradient', 'readability'])
+    ).toEqual(['foundation', 'gradient'])
   })
 
   it('previews a concept texture over its gradient like the reiwa runtime', () => {
@@ -1058,12 +1021,14 @@ describe('BrandingPreview subscription card', () => {
           cardEffectProps: {},
           cardEffectsByIndex: [
             {
+              mode: 'override',
               cardEffect: 'aurora',
               cardEffectProps: {},
               cardEffectOpacity: 0.8,
               cardGradient: 'linear-gradient(#111827, #2563eb)',
             },
             {
+              mode: 'override',
               cardEffect: 'aurora',
               cardEffectProps: {},
               cardEffectOpacity: 0.8,
@@ -1085,7 +1050,7 @@ describe('BrandingPreview subscription card', () => {
     expect(
       effect?.querySelector('[data-preview-card-effect-renderer]'),
     ).toHaveStyle({ opacity: '0.8' })
-    expect(effect).toHaveStyle({ mixBlendMode: 'screen' })
+    expect(effect).not.toHaveStyle({ mixBlendMode: 'screen' })
     expect(
       container.querySelector('[data-preview-subscription-card]'),
     ).toHaveAttribute('data-preview-card-artwork', 'animated')

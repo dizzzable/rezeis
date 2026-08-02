@@ -162,6 +162,40 @@ export function mergeBrandingSettings(input: {
       }
     }
   }
+  // A direct card-artwork edit is an explicit operator override. Theme
+  // variants are complete snapshots, so leaving their old gradient/pattern in
+  // place would make the cabinet switch back to previous artwork whenever the
+  // user changes light/dark mode. A theme-only PATCH intentionally does not
+  // enter this branch: concepts are still allowed to define different
+  // starting artwork per brightness.
+  if (input.patch.cardGradient !== undefined || input.patch.cardPattern !== undefined) {
+    const rootArtwork = readBrandingSettings(merged);
+    const variants = readThemeVariants({ themeVariants: merged.themeVariants });
+    if (variants) {
+      const synchronizeVariant = (variant: BrandingThemeVariant) => ({
+        ...variant,
+        ...(input.patch.cardGradient !== undefined
+          ? {
+              cardGradient: rootArtwork.cardGradient,
+              // A global selection deliberately clears stale positional
+              // copies: they otherwise make the selected operator gradient
+              // look as though it was ignored.
+              cardEffectsByIndex: variant.cardEffectsByIndex.map((slot) => ({
+                ...slot,
+                cardGradient: null,
+              })),
+            }
+          : {}),
+        ...(input.patch.cardPattern !== undefined
+          ? { cardPattern: rootArtwork.cardPattern }
+          : {}),
+      });
+      merged.themeVariants = {
+        light: synchronizeVariant(variants.light),
+        dark: synchronizeVariant(variants.dark),
+      };
+    }
+  }
   // `subscriptionCardText` is a global operator decision.  Newer variants
   // may contain a copied value for a brightness snapshot, but a direct
   // root-level PATCH must never leave those copies stale.  Legacy variants
@@ -523,15 +557,24 @@ function readCardEffectSlots(record: Record<string, unknown>, key: string): Card
       continue;
     }
     const slot = entry as Record<string, unknown>;
-    const effect = slot['cardEffect'];
-    if (typeof effect !== 'string' || !(CARD_EFFECTS as readonly string[]).includes(effect)) {
-      continue;
-    }
+    const mode = slot['mode'] === 'override' ? 'override' : 'inherit';
     const gradientRaw = slot['cardGradient'];
     const cardGradient = isSafeBrandingGradient(gradientRaw)
       ? gradientRaw.trim()
       : null;
+    if (mode === 'inherit') {
+      out.push({ mode, cardGradient });
+      continue;
+    }
+    const effect = slot['cardEffect'];
+    if (typeof effect !== 'string' || !(CARD_EFFECTS as readonly string[]).includes(effect)) {
+      // A malformed explicit override must not turn into an invisible stale
+      // winner. Keep only its safe static gradient and inherit the effect.
+      out.push({ mode: 'inherit', cardGradient });
+      continue;
+    }
     out.push({
+      mode,
       cardEffect: effect as CardEffect,
       cardEffectProps: readJsonRecord(slot, 'cardEffectProps'),
       cardEffectOpacity: readClampedNumber(slot, 'cardEffectOpacity', 0.05, 1, 1),

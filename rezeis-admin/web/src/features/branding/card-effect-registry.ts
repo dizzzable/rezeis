@@ -183,6 +183,7 @@ export const CARD_EFFECT_REGISTRY: readonly CardEffectDef[] = [
       { prop: 'timeSpeed', label: 'Speed', type: 'slider', min: 0.05, max: 2, step: 0.05, default: 0.25 },
       { prop: 'grainAmount', label: 'Grain', type: 'slider', min: 0, max: 0.5, step: 0.01, default: 0.1 },
       { prop: 'warpStrength', label: 'Warp', type: 'slider', min: 0, max: 5, step: 0.1, default: 1 },
+      { prop: 'contrast', label: 'Contrast', type: 'slider', min: 0.5, max: 2.5, step: 0.05, default: 1.5 },
     ],
   },
   {
@@ -263,7 +264,7 @@ export const CARD_EFFECT_REGISTRY: readonly CardEffectDef[] = [
       { prop: 'speed', label: 'Speed', type: 'slider', min: 0, max: 5, step: 0.1, default: 1 },
       { prop: 'shape', label: 'Shape', type: 'select', options: ['checks', 'stripes', 'edge'], default: 'checks' },
       { prop: 'proportion', label: 'Proportion', type: 'slider', min: 0, max: 1, step: 0.05, default: 0.45 },
-      { prop: 'softness', label: 'Softness', type: 'slider', min: 0, max: 2, step: 0.05, default: 1 },
+      { prop: 'softness', label: 'Softness', type: 'slider', min: 0, max: 1, step: 0.05, default: 1 },
       { prop: 'distortion', label: 'Distortion', type: 'slider', min: 0, max: 1, step: 0.05, default: 0.25 },
       { prop: 'swirl', label: 'Swirl', type: 'slider', min: 0, max: 1, step: 0.05, default: 0.8 },
       { prop: 'swirlIterations', label: 'Swirl Iterations', type: 'slider', min: 1, max: 20, step: 1, default: 10 },

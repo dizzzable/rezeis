@@ -23,9 +23,10 @@ import { CARD_GRADIENT_PRESETS } from './theme-presets'
 import { useCustomGradients } from './use-custom-gradients'
 
 export interface CardEffectSlot {
-  cardEffect: string
-  cardEffectProps: Record<string, unknown>
-  cardEffectOpacity: number
+  mode?: 'inherit' | 'override'
+  cardEffect?: string
+  cardEffectProps?: Record<string, unknown>
+  cardEffectOpacity?: number
   /** Optional per-slot static gradient. Null/absent = use the global gradient. */
   cardGradient?: string | null
 }
@@ -67,7 +68,7 @@ export function CardEffectSlotsSection({
     if (slotsRef.current.length >= MAX_SLOTS) return
     const next = [
       ...slotsRef.current,
-      { cardEffect: 'aurora', cardEffectProps: getCardEffectDefaults('aurora'), cardEffectOpacity: 1 },
+      { mode: 'inherit' as const, cardGradient: null },
     ]
     slotsRef.current = next
     onChange(next)
@@ -94,6 +95,9 @@ export function CardEffectSlotsSection({
 
         {slots.map((slot, index) => (
           <div key={index} className="space-y-2 rounded-xl border border-border/60 bg-muted/20 p-3">
+            {(() => {
+              const overridesEffect = slot.mode === 'override'
+              return <>
             <div className="flex items-center justify-between">
               <span className="text-sm font-medium">
                 {t('brandingPage.sections.cardEffectSlots.slotLabel', { index: index + 1 })}
@@ -110,17 +114,44 @@ export function CardEffectSlotsSection({
                 {t('brandingPage.sections.cardEffectSlots.removeSlot')}
               </Button>
             </div>
+            <div className="flex items-center justify-between rounded-lg border border-border/60 bg-background/40 p-2.5">
+              <span className="text-xs text-muted-foreground">
+                {overridesEffect
+                  ? t('brandingPage.sections.cardEffectSlots.effectOverride')
+                  : t('brandingPage.sections.cardEffectSlots.effectInherit')}
+              </span>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-6 px-2 text-[11px]"
+                onClick={() => updateSlot(index, overridesEffect
+                  ? { mode: 'inherit' }
+                  : {
+                      mode: 'override',
+                      cardEffect: 'aurora',
+                      cardEffectProps: getCardEffectDefaults('aurora'),
+                      cardEffectOpacity: 1,
+                    })}
+              >
+                {overridesEffect
+                  ? t('brandingPage.sections.cardEffectSlots.effectUseGlobal')
+                  : t('brandingPage.sections.cardEffectSlots.effectCustomize')}
+              </Button>
+            </div>
             {/* Reuse the picker body (grid + opacity + dynamic controls) WITHOUT
                 the surrounding Card/title to avoid duplicate headers. */}
-            <CardEffectPicker
-              effect={slot.cardEffect}
-              props={slot.cardEffectProps ?? {}}
-              opacity={slot.cardEffectOpacity ?? 1}
-              livePreview={livePreview}
-              onEffectChange={(e) => updateSlot(index, { cardEffect: e })}
-              onPropsChange={(p) => updateSlot(index, { cardEffectProps: p })}
-              onOpacityChange={(o) => updateSlot(index, { cardEffectOpacity: o })}
-            />
+            {overridesEffect && (
+              <CardEffectPicker
+                effect={slot.cardEffect ?? 'aurora'}
+                props={slot.cardEffectProps ?? {}}
+                opacity={slot.cardEffectOpacity ?? 1}
+                livePreview={livePreview}
+                onEffectChange={(e) => updateSlot(index, { mode: 'override', cardEffect: e })}
+                onPropsChange={(p) => updateSlot(index, { mode: 'override', cardEffectProps: p })}
+                onOpacityChange={(o) => updateSlot(index, { mode: 'override', cardEffectOpacity: o })}
+              />
+            )}
 
             {/* Per-slot static gradient — overrides the global card gradient
                 for this card position. Absent = use the global gradient. */}
@@ -178,6 +209,8 @@ export function CardEffectSlotsSection({
                 placeholder={t('brandingPage.sections.cardEffectSlots.gradientPlaceholder')}
               />
             </div>
+              </>
+            })()}
           </div>
         ))}
 

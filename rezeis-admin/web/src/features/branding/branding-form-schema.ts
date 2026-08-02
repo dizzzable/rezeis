@@ -262,9 +262,10 @@ export const CORNER_RADII_BY_LEGACY_CLASS: Readonly<
 }
 
 export interface BrandingCardEffectSlotDraft {
-  readonly cardEffect: string
-  readonly cardEffectProps: Record<string, unknown>
-  readonly cardEffectOpacity: number
+  readonly mode?: 'inherit' | 'override'
+  readonly cardEffect?: string
+  readonly cardEffectProps?: Record<string, unknown>
+  readonly cardEffectOpacity?: number
   readonly cardGradient?: string | null
 }
 
@@ -340,9 +341,10 @@ const DEFAULT_BRANDING_DRAFT: BrandingFormDraft = {
 
 export function createBrandingFormSchema(messages: BrandingFormValidationMessages) {
   const cardEffectSlotSchema = z.object({
-    cardEffect: z.enum(BRANDING_CARD_EFFECTS),
-    cardEffectProps: z.record(z.string(), z.unknown()),
-    cardEffectOpacity: z.number().min(0.05).max(1),
+    mode: z.enum(['inherit', 'override']).optional(),
+    cardEffect: z.enum(BRANDING_CARD_EFFECTS).optional(),
+    cardEffectProps: z.record(z.string(), z.unknown()).optional(),
+    cardEffectOpacity: z.number().min(0.05).max(1).optional(),
     cardGradient: optionalGradientSchema(messages.gradientInvalid),
   })
   const appBackgroundSchema = z.object({

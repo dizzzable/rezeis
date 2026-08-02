@@ -220,9 +220,9 @@ export function CardEffectPreviewLayer({
       className="absolute inset-0"
       style={{
         overflow: 'hidden',
-        // The whole effect group is a sibling of the configured gradient.
-        // Blend here so opaque shader pixels cannot cover that gradient.
-        mixBlendMode: 'screen',
+        // Match the public Reiwa card: operator-selected artwork uses normal
+        // source-over alpha. `screen` silently recoloured the gradient below
+        // it, so this preview used to reproduce the same misleading result.
       }}
     >
       {runtime === 'css-fallback' && (

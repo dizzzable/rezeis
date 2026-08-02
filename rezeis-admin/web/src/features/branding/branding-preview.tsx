@@ -81,9 +81,10 @@ interface BrandingPreviewProps {
     cardEffectProps?: Record<string, unknown>
     cardEffectOpacity?: number
     cardEffectsByIndex?: readonly {
-      cardEffect: string
-      cardEffectProps: Record<string, unknown>
-      cardEffectOpacity: number
+      mode?: 'inherit' | 'override'
+      cardEffect?: string
+      cardEffectProps?: Record<string, unknown>
+      cardEffectOpacity?: number
       cardGradient?: string | null
     }[]
     fontFamily?: string
@@ -417,17 +418,6 @@ function isOpaquePreviewHex(value: string): boolean {
   return /^#(?:[\da-f]{3}|[\da-f]{6})$/i.test(value.trim())
 }
 
-/**
- * Mirrors reiwa's `staticArtworkVeil`. Only static card artwork is filmed:
- * animated artwork stays uncovered so the shader reads as vividly in the
- * preview as it does in the cabinet.
- */
-function previewStaticArtworkVeil(contrast: PreviewCardContrast): string {
-  const channels = contrast.veilChannels
-  const veil = Math.min(0.75, Math.max(0, contrast.veilOpacity))
-  return `linear-gradient(180deg, rgb(${channels} / ${veil}) 0%, rgb(${channels} / ${veil}) 100%)`
-}
-
 function parsePreviewHex(value: string, backdrop: PreviewRgb = PREVIEW_BLACK): PreviewRgb | null {
   let raw = value.trim().replace(/^#/, '')
   if (![3, 4, 6, 8].includes(raw.length) || !/^[\da-f]+$/i.test(raw)) return null
@@ -723,16 +713,9 @@ function PreviewSubscriptionCard({
           opacity={visual.opacity}
         />
       )}
-      {!hasEffect && (
-        <div
-          data-preview-card-layer="readability"
-          data-preview-card-readability="wcag-full-card-veil"
-          data-preview-card-veil-opacity={contrast.veilOpacity}
-          data-preview-card-veil-rgb={contrast.veilChannels}
-          className="pointer-events-none absolute inset-0"
-              style={{ background: previewStaticArtworkVeil(contrast) }}
-        />
-      )}
+      {/* Choosing a text tone must not repaint the operator's gradient. The
+          contrast calculation is retained for the foreground and warning,
+          while any visual film is an explicit glass setting below. */}
       {visual.subscriptionCardGlass.enabled && (
         <div
           data-preview-card-layer="glass"
@@ -1100,11 +1083,12 @@ export function BrandingPreview({ values, focus }: BrandingPreviewProps) {
     return Array.from({ length: count }, (_, i) => {
       const slot = slots[i]
       const slotGradient = (slot?.cardGradient ?? '').trim()
+      const slotOverridesEffect = slot?.mode === 'override'
       return {
         gradient: slotGradient.length > 0 ? slotGradient : cardGradient,
-        effect: slot?.cardEffect ?? cardEffect,
-        effectProps: slot?.cardEffectProps ?? cardEffectProps,
-        opacity: slot?.cardEffectOpacity ?? cardEffectOpacity,
+        effect: slotOverridesEffect ? slot?.cardEffect ?? cardEffect : cardEffect,
+        effectProps: slotOverridesEffect ? slot?.cardEffectProps ?? cardEffectProps : cardEffectProps,
+        opacity: slotOverridesEffect ? slot?.cardEffectOpacity ?? cardEffectOpacity : cardEffectOpacity,
         subscriptionCardText,
         subscriptionCardGlass,
       }

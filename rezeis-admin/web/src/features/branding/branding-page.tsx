@@ -280,13 +280,10 @@ export default function WebReiwaPage() {
       subscriptionCardText: { ...subscriptionCardText },
       cardEffectProps: { ...(variant.cardEffectProps ?? {}) },
       cardEffectsByIndex: Array.from({ length: slotCount }, () => ({
-        cardEffect: variant.cardEffect,
-        cardEffectProps: { ...(variant.cardEffectProps ?? {}) },
-        cardEffectOpacity: variant.cardEffectOpacity,
-        // A slot only owns a gradient when the operator explicitly gives it
-        // one in the per-position editor. A theme/brightness preset owns the
-        // global gradient, so copying it here would permanently mask every
-        // later global gradient selection in Reiwa.
+        // A concept establishes the global artwork. Slots are placeholders,
+        // not hidden copies of that artwork, so later operator changes keep
+        // taking effect until a slot is explicitly switched to override.
+        mode: "inherit" as const,
         cardGradient: null,
       })),
     });
@@ -332,7 +329,7 @@ export default function WebReiwaPage() {
       // selected by the operator. The gradient still follows the selected
       // brightness, including its lightweight per-position fallback.
       setGlobalCardGradient(cardPatch.cardGradient, { synchronizeThemeVariants: false });
-      form.setValue("cardPattern", cardPatch.cardPattern, { shouldDirty: true });
+      setGlobalCardPattern(cardPatch.cardPattern, { synchronizeThemeVariants: false });
     }
 
     form.setValue("bgEffect", patch.bgEffect, { shouldDirty: true });
@@ -359,6 +356,33 @@ export default function WebReiwaPage() {
     }
   }
 
+  /**
+   * `cardPattern` is part of the same operator-owned artwork as the gradient.
+   * Keeping it in both brightness snapshots prevents a mode switch from
+   * resurrecting the pattern that a later operator edit replaced.
+   */
+  function setGlobalCardPattern(
+    cardPattern: string | null,
+    { synchronizeThemeVariants = true }: { readonly synchronizeThemeVariants?: boolean } = {},
+  ): void {
+    form.setValue("cardPattern", cardPattern, { shouldDirty: true });
+    if (!synchronizeThemeVariants) return;
+    const variants = form.getValues("themeVariants");
+    if (!variants) return;
+    const synchronizeVariant = (variant: BrandingThemeVariantsDraft["light"]) => ({
+      ...variant,
+      cardPattern,
+    });
+    form.setValue(
+      "themeVariants",
+      {
+        light: synchronizeVariant(variants.light),
+        dark: synchronizeVariant(variants.dark),
+      },
+      { shouldDirty: true },
+    );
+  }
+
   function synchronizeCardSlotGradient(): void {
     const existingSlots = form.getValues("cardEffectsByIndex") ?? [];
     if (existingSlots.length === 0) return;
@@ -368,7 +392,11 @@ export default function WebReiwaPage() {
       // from copying the current CSS: copying turns the theme's starting card
       // into a hidden per-slot override and makes the operator's next global
       // gradient choice appear to have no effect.
-      existingSlots.map((slot) => ({ ...slot, cardGradient: null })),
+      existingSlots.map((slot) =>
+        slot.mode === "override"
+          ? { ...slot, cardGradient: null }
+          : { mode: "inherit" as const, cardGradient: null },
+      ),
       { shouldDirty: true },
     );
   }
@@ -386,10 +414,11 @@ export default function WebReiwaPage() {
     const synchronizeVariant = (variant: BrandingThemeVariantsDraft['light']) => ({
       ...variant,
       cardGradient,
-      cardEffectsByIndex: (variant.cardEffectsByIndex ?? []).map((slot) => ({
-        ...slot,
-        cardGradient: null,
-      })),
+      cardEffectsByIndex: (variant.cardEffectsByIndex ?? []).map((slot) =>
+        slot.mode === "override"
+          ? { ...slot, cardGradient: null }
+          : { mode: "inherit" as const, cardGradient: null },
+      ),
     });
     form.setValue(
       'themeVariants',
@@ -408,25 +437,21 @@ export default function WebReiwaPage() {
   ): void {
     // Page colors/background, geometry and navigation stay untouched.
     setGlobalCardGradient(patch.cardGradient, { synchronizeThemeVariants });
-    form.setValue("cardPattern", patch.cardPattern, { shouldDirty: true });
+    setGlobalCardPattern(patch.cardPattern, { synchronizeThemeVariants });
     form.setValue("cardEffect", patch.cardEffect, { shouldDirty: true });
     form.setValue("cardEffectProps", { ...patch.cardEffectProps }, { shouldDirty: true });
     form.setValue("cardEffectOpacity", patch.cardEffectOpacity, { shouldDirty: true });
 
-    // A positional slot wins over the global card visual in Reiwa. Preserve
-    // the configured slot count, but synchronize its visual when an explicit
-    // full-theme or concept-card preset is chosen. Otherwise the UI would say
-    // that a preset was applied while Reiwa kept rendering stale slot artwork.
+    // Preserve the configured slot count, but reset their artwork to inherit
+    // when the operator applies a full theme/card preset. Otherwise stale
+    // hidden slot values would keep rendering after the selected preset.
     if (!synchronizeSlots) return;
     const existingSlots = form.getValues("cardEffectsByIndex") ?? [];
     if (existingSlots.length === 0) return;
     form.setValue(
       "cardEffectsByIndex",
-      existingSlots.map((slot) => ({
-        ...slot,
-        cardEffect: patch.cardEffect,
-        cardEffectProps: { ...patch.cardEffectProps },
-        cardEffectOpacity: patch.cardEffectOpacity,
+      existingSlots.map(() => ({
+        mode: "inherit" as const,
         cardGradient: null,
       })),
       { shouldDirty: true },
@@ -1244,11 +1269,21 @@ export default function WebReiwaPage() {
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="cardPattern">{t('brandingPage.sections.card.pattern')}</Label>
-                  <Input
-                    id="cardPattern"
-                    {...form.register("cardPattern")}
-                    className="font-mono text-xs"
-                    placeholder={t('brandingPage.sections.card.patternPlaceholder')}
+                  <Controller
+                    name="cardPattern"
+                    control={form.control}
+                    render={({ field }) => (
+                      <Input
+                        id="cardPattern"
+                        value={field.value ?? ""}
+                        onChange={(event) =>
+                          setGlobalCardPattern(event.target.value.trim() || null)
+                        }
+                        onBlur={field.onBlur}
+                        className="font-mono text-xs"
+                        placeholder={t('brandingPage.sections.card.patternPlaceholder')}
+                      />
+                    )}
                   />
                 </div>
                 <Controller

@@ -145,14 +145,19 @@ export const ICON_KEYS = [
 ] as const;
 export type IconKey = (typeof ICON_KEYS)[number];
 
+export const CARD_EFFECT_SLOT_MODES = ['inherit', 'override'] as const;
+export type CardEffectSlotMode = (typeof CARD_EFFECT_SLOT_MODES)[number];
+
 /**
- * A single per-position card-background slot. Mirrors the global card-effect
- * fields so each slot can fully describe one card's animated background.
+ * A single per-position card-background slot. A slot inherits the global
+ * operator effect unless it is explicitly switched to `override`; this keeps
+ * theme-generated placeholders from masking later global edits.
  */
 export interface CardEffectSlot {
-  readonly cardEffect: CardEffect;
-  readonly cardEffectProps: Record<string, unknown>;
-  readonly cardEffectOpacity: number;
+  readonly mode: CardEffectSlotMode;
+  readonly cardEffect?: CardEffect;
+  readonly cardEffectProps?: Record<string, unknown>;
+  readonly cardEffectOpacity?: number;
   /**
    * Optional per-slot static card gradient (CSS background). When set it
    * overrides the global `cardGradient` for the Nth subscription card; when

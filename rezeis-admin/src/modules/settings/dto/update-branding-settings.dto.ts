@@ -30,6 +30,7 @@ import {
   BG_EFFECTS,
   BgEffect,
   CARD_EFFECTS,
+  CARD_EFFECT_SLOT_MODES,
   CARD_LOGO_PRESETS,
   BrandingThemeMode,
   BrandingThemeModePolicy,
@@ -196,8 +197,13 @@ function HasSafePlanGradients(
  * global card-effect fields.
  */
 export class CardEffectSlotDto {
+  @IsOptional()
+  @IsIn(CARD_EFFECT_SLOT_MODES as readonly string[])
+  public mode?: 'inherit' | 'override';
+
+  @IsOptional()
   @IsIn(CARD_EFFECTS as readonly string[])
-  public cardEffect!: CardEffect;
+  public cardEffect?: CardEffect;
 
   @IsOptional()
   @IsObject()
