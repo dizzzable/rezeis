@@ -3414,8 +3414,8 @@
         saved: 'Градиент сохранён в палитру',
         customSwatch: 'Свой сохранённый градиент',
         removeSwatch: 'Удалить из палитры',
-        pattern: 'Паттерн карточки (CSS background-image, опционально)',
-        patternPlaceholder: 'url(…) или none',
+        pattern: 'Паттерн карточки (CSS-градиент, опционально)',
+        patternPlaceholder: 'repeating-linear-gradient(…) или none',
         textMode: 'Текст на карточке',
         textModeHint:
           'Авто подбирает контраст. Светлый, тёмный и свой цвет всегда остаются решением оператора.',
@@ -3474,6 +3474,8 @@
         effectOverride: 'Свой эффект слота',
         effectUseGlobal: 'Использовать общий',
         effectCustomize: 'Настроить отдельно',
+        effectModeHint:
+          'Этот выбор меняет только анимацию. Градиент слота настраивается отдельно до сброса.',
         removeSlot: 'Удалить',
         gradientLabel: 'Градиент карточки',
         gradientUseGlobal: 'Сбросить (общий)',

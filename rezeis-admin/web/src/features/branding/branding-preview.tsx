@@ -8,7 +8,7 @@
  * the operator is editing, so changes are visible instantly.
  */
 
-import { Suspense, useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { motion, type PanInfo } from 'motion/react'
 import {
@@ -33,9 +33,7 @@ import {
 import { ReiwaMark } from './reiwa-mark'
 import { CardLogoMark, type CardLogoPreset } from './card-logo-mark'
 import {
-  CARD_EFFECT_COMPONENTS,
   getCardEffectDefaults,
-  type CardEffectId,
 } from './card-effect-registry'
 import {
   CardEffectPreviewLayer,
@@ -282,26 +280,6 @@ function resolvePreviewEffectColors(
     colors.push('#000000', '#ffffff')
   }
   return [...new Set(colors)].join(' ')
-}
-
-function usePrefersReducedMotion(): boolean {
-  const [reduced, setReduced] = useState(
-    () =>
-      typeof window !== 'undefined' &&
-      typeof window.matchMedia === 'function' &&
-      window.matchMedia('(prefers-reduced-motion: reduce)').matches,
-  )
-
-  useEffect(() => {
-    if (typeof window.matchMedia !== 'function') return
-    const media = window.matchMedia('(prefers-reduced-motion: reduce)')
-    const update = () => setReduced(media.matches)
-    update()
-    media.addEventListener?.('change', update)
-    return () => media.removeEventListener?.('change', update)
-  }, [])
-
-  return reduced
 }
 
 /**
@@ -961,7 +939,6 @@ function DashboardDevicesPreview({
 
 export function BrandingPreview({ values, focus }: BrandingPreviewProps) {
   const { t } = useTranslation()
-  const reducedMotion = usePrefersReducedMotion()
   const {
     themePresetId,
     brandName = 'Reiwa',
@@ -1015,20 +992,16 @@ export function BrandingPreview({ values, focus }: BrandingPreviewProps) {
 
   // Live site-wide app background (App background tab). Mirrors the cabinet
   // shell: gradient / tiled texture / animated effect / plain colour.
-  const AppBgEffect =
-    appBackground?.kind === 'effect' &&
-    appBackground.effect !== 'NONE' &&
-    appBackground.effect in CARD_EFFECT_COMPONENTS
-      ? CARD_EFFECT_COMPONENTS[appBackground.effect as CardEffectId]
-      : null
   const appBgEffectProps = useMemo<Record<string, unknown>>(() => {
-    if (!AppBgEffect || !appBackground) return {}
+    if (appBackground?.kind !== 'effect' || !isPreviewCardEffect(appBackground.effect)) {
+      return {}
+    }
     const base = { ...getCardEffectDefaults(appBackground.effect), ...appBackground.props }
     if (appBackground.effect === 'aurora' && base['colorStops'] === undefined) {
       return { colorStops: brandAuroraStops(primary), amplitude: 1.1, blend: 0.55, speed: 0.8, ...base }
     }
     return base
-  }, [AppBgEffect, appBackground, primary])
+  }, [appBackground, primary])
   const overlaysConceptTexture =
     appBackground?.kind === 'gradient' &&
     typeof themePresetId === 'string' &&
@@ -1162,12 +1135,24 @@ export function BrandingPreview({ values, focus }: BrandingPreviewProps) {
                 }}
               />
             )}
-            {AppBgEffect && !reducedMotion && (
-              <Suspense fallback={null}>
-                <div className="absolute inset-0" style={{ opacity: appBackground.opacity }}>
-                  <AppBgEffect {...appBgEffectProps} />
-                </div>
-              </Suspense>
+            {appBackground.kind === 'effect' && appBackground.effect !== 'NONE' && (
+              <div
+                data-preview-app-background-layer="foundation"
+                className="absolute inset-0"
+                style={{ backgroundImage: appBackground.gradient }}
+              />
+            )}
+            {appBackground.kind === 'effect' && isPreviewCardEffect(appBackground.effect) && (
+              <div
+                data-preview-app-background-layer="effect"
+                className="absolute inset-0"
+              >
+                <CardEffectPreviewLayer
+                  effect={appBackground.effect}
+                  props={appBgEffectProps}
+                  opacity={appBackground.opacity}
+                />
+              </div>
             )}
           </div>
         )}
@@ -1227,7 +1212,6 @@ export function BrandingPreview({ values, focus }: BrandingPreviewProps) {
               radius={radius}
               unlimitedLabel={t('brandingPage.sections.planCards.unlimited')}
               emptyLabel={t('brandingPage.sections.planCards.empty')}
-              reducedMotion={reducedMotion}
             />
           ) : (
             <>
@@ -1375,7 +1359,6 @@ interface TariffListPreviewProps {
   readonly radius: string
   readonly unlimitedLabel: string
   readonly emptyLabel: string
-  readonly reducedMotion: boolean
 }
 
 function TariffListPreview({
@@ -1387,7 +1370,6 @@ function TariffListPreview({
   radius,
   unlimitedLabel,
   emptyLabel,
-  reducedMotion,
 }: TariffListPreviewProps) {
   if (plans.length === 0) {
     return (
@@ -1409,7 +1391,6 @@ function TariffListPreview({
           cardLogoUrl={cardLogoUrl}
           radius={radius}
           unlimitedLabel={unlimitedLabel}
-          reducedMotion={reducedMotion}
         />
       ))}
     </div>
@@ -1424,7 +1405,6 @@ function TariffPreviewCard({
   cardLogoUrl,
   radius,
   unlimitedLabel,
-  reducedMotion,
 }: {
   readonly plan: Plan
   readonly style: PlanCardStyleDraft | undefined
@@ -1433,7 +1413,6 @@ function TariffPreviewCard({
   readonly cardLogoUrl?: string | null
   readonly radius: string
   readonly unlimitedLabel: string
-  readonly reducedMotion: boolean
 }) {
   const gradient = style?.gradient && style.gradient.length > 0 ? style.gradient : autoPlanGradient(plan.id)
   const accent = style?.accent && style.accent.length > 0 ? style.accent : primary
@@ -1450,18 +1429,14 @@ function TariffPreviewCard({
       : null
   // Per-plan animated effect (opt-in) — mirrors the cabinet tariff card.
   const effect = style?.cardEffect && style.cardEffect !== 'NONE' ? style.cardEffect : 'NONE'
-  const EffectComp =
-    effect !== 'NONE' && effect in CARD_EFFECT_COMPONENTS
-      ? CARD_EFFECT_COMPONENTS[effect as CardEffectId]
-      : null
   const effectProps = useMemo<Record<string, unknown>>(() => {
-    if (!EffectComp) return {}
+    if (!isPreviewCardEffect(effect)) return {}
     const base = { ...getCardEffectDefaults(effect), ...(style?.cardEffectProps ?? {}) }
     if (effect === 'aurora' && base['colorStops'] === undefined) {
       return { colorStops: brandAuroraStops(primary), amplitude: 1.1, blend: 0.55, speed: 0.8, ...base }
     }
     return base
-  }, [EffectComp, effect, style?.cardEffectProps, primary])
+  }, [effect, style?.cardEffectProps, primary])
   const effectOpacity = typeof style?.cardEffectOpacity === 'number' ? style.cardEffectOpacity : 1
   // Icon resolves exactly like the cabinet tariff card: lucide preset →
   // glyph, `custom:<id>` → uploaded icon, `:slug:`/unicode → emoji, else
@@ -1469,19 +1444,16 @@ function TariffPreviewCard({
 
   return (
     <div
+      data-preview-tariff-card
       className="relative overflow-hidden p-3 ring-1 ring-white/10"
       style={{ borderRadius: radius, backgroundImage: gradient }}
     >
-      {EffectComp && !textureUrl && !reducedMotion && (
-        <Suspense fallback={null}>
-          <div
-            aria-hidden="true"
-            className="absolute inset-0"
-            style={{ opacity: effectOpacity }}
-          >
-            <EffectComp {...effectProps} />
-          </div>
-        </Suspense>
+      {isPreviewCardEffect(effect) && !textureUrl && (
+        <CardEffectPreviewLayer
+          effect={effect}
+          props={effectProps}
+          opacity={effectOpacity}
+        />
       )}
       {textureUrl ? (
         <div

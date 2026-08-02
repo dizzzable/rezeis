@@ -298,18 +298,17 @@ describe('WebReiwaPage branding settings', () => {
     })
   }, 20_000)
 
-  it('makes a gradient selected from the operator palette override legacy conceptual slot gradients', async () => {
+  it('keeps explicit slot gradients when the global palette changes', async () => {
     const user = userEvent.setup()
-    const staleSlots = [
+    const slotOverrides = [
       {
-        cardEffect: 'paperWarp',
-        cardEffectProps: { speed: 1 },
-        cardEffectOpacity: 0.84,
+        mode: 'inherit' as const,
         cardGradient: 'linear-gradient(135deg, #2d0a4d 0%, #8545f7 100%)',
       },
       {
-        cardEffect: 'grainient',
-        cardEffectProps: { noise: 0.25 },
+        mode: 'override' as const,
+        cardEffect: 'waves',
+        cardEffectProps: { waveSpeedX: 0.0125 },
         cardEffectOpacity: 0.68,
         cardGradient: 'linear-gradient(135deg, #0c4a6e 0%, #22d3ee 100%)',
       },
@@ -319,10 +318,10 @@ describe('WebReiwaPage branding settings', () => {
       data: {
         ...createBrandingPayload(),
         themePresetId: 'concept-cu',
-        cardEffectsByIndex: staleSlots,
+        cardEffectsByIndex: slotOverrides,
         themeVariants: {
-          light: { ...variants.light, cardEffectsByIndex: staleSlots },
-          dark: { ...variants.dark, cardEffectsByIndex: staleSlots },
+          light: { ...variants.light, cardEffectsByIndex: slotOverrides },
+          dark: { ...variants.dark, cardEffectsByIndex: slotOverrides },
         },
       },
     })
@@ -334,6 +333,9 @@ describe('WebReiwaPage branding settings', () => {
 
     await screen.findByRole('heading', { name: /WEB Reiwa/ })
     await user.click(screen.getByRole('tab', { name: 'Subscription card' }))
+    expect(
+      screen.getByPlaceholderText('repeating-linear-gradient(…) or none'),
+    ).toBeInTheDocument()
     const indigoGradient = screen
       .getAllByRole('button', { name: 'Indigo' })
       .find((button) => button.className.includes('aspect-square'))
@@ -343,26 +345,17 @@ describe('WebReiwaPage branding settings', () => {
 
     await waitFor(() => expect(patchSpy).toHaveBeenCalledOnce())
     const payload = patchSpy.mock.calls[0]?.[1] as Record<string, unknown>
+    expect(payload).not.toHaveProperty('cardEffectsByIndex')
     expect(payload).toMatchObject({
       cardGradient: CARD_GRADIENT_PRESETS.find((preset) => preset.id === 'indigo')?.value,
-      cardEffectsByIndex: [
-        { mode: 'inherit', cardGradient: null },
-        { mode: 'inherit', cardGradient: null },
-      ],
       themeVariants: {
         light: expect.objectContaining({
           cardGradient: CARD_GRADIENT_PRESETS.find((preset) => preset.id === 'indigo')?.value,
-          cardEffectsByIndex: [
-            { mode: 'inherit', cardGradient: null },
-            { mode: 'inherit', cardGradient: null },
-          ],
+          cardEffectsByIndex: slotOverrides,
         }),
         dark: expect.objectContaining({
           cardGradient: CARD_GRADIENT_PRESETS.find((preset) => preset.id === 'indigo')?.value,
-          cardEffectsByIndex: [
-            { mode: 'inherit', cardGradient: null },
-            { mode: 'inherit', cardGradient: null },
-          ],
+          cardEffectsByIndex: slotOverrides,
         }),
       },
     })

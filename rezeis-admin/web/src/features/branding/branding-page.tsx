@@ -341,16 +341,16 @@ export default function WebReiwaPage() {
   }
 
   /**
-   * A positional slot gradient wins over the global card visual in Reiwa, so a
-   * stale slot would make the operator's selected global gradient invisible on
-   * the card. Clearing that field makes the slot inherit the global value.
+   * Reiwa resolves a slot gradient independently from its effect mode. A
+   * global gradient edit must therefore leave explicit slot gradients alone:
+   * those cards intentionally remain on their own artwork until the operator
+   * resets the slot itself.
    */
   function setGlobalCardGradient(
     cardGradient: string,
     { synchronizeThemeVariants = true }: { readonly synchronizeThemeVariants?: boolean } = {},
   ): void {
     form.setValue("cardGradient", cardGradient, { shouldDirty: true });
-    synchronizeCardSlotGradient();
     if (synchronizeThemeVariants) {
       synchronizeThemeVariantCardGradients(cardGradient);
     }
@@ -383,30 +383,12 @@ export default function WebReiwaPage() {
     );
   }
 
-  function synchronizeCardSlotGradient(): void {
-    const existingSlots = form.getValues("cardEffectsByIndex") ?? [];
-    if (existingSlots.length === 0) return;
-    form.setValue(
-      "cardEffectsByIndex",
-      // `null` means inherit the global value. This is deliberately different
-      // from copying the current CSS: copying turns the theme's starting card
-      // into a hidden per-slot override and makes the operator's next global
-      // gradient choice appear to have no effect.
-      existingSlots.map((slot) =>
-        slot.mode === "override"
-          ? { ...slot, cardGradient: null }
-          : { mode: "inherit" as const, cardGradient: null },
-      ),
-      { shouldDirty: true },
-    );
-  }
-
   /**
    * A manually selected card gradient is an operator override, not a
    * brightness token. Reiwa resolves the selected light/dark variant after
    * reading root settings, so both complete variant snapshots must receive
-   * the same override too. Page palettes remain per-mode; only stale
-   * positional gradient copies are cleared, while effects stay independent.
+   * the same override too. Page palettes and explicit positional overrides
+   * remain independent.
    */
   function synchronizeThemeVariantCardGradients(cardGradient: string): void {
     const variants = form.getValues('themeVariants');
@@ -414,11 +396,6 @@ export default function WebReiwaPage() {
     const synchronizeVariant = (variant: BrandingThemeVariantsDraft['light']) => ({
       ...variant,
       cardGradient,
-      cardEffectsByIndex: (variant.cardEffectsByIndex ?? []).map((slot) =>
-        slot.mode === "override"
-          ? { ...slot, cardGradient: null }
-          : { mode: "inherit" as const, cardGradient: null },
-      ),
     });
     form.setValue(
       'themeVariants',

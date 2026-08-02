@@ -15,6 +15,7 @@ import {
   buildCardEffectPreviewArtwork,
   isPreviewCardEffect,
   observePreviewCardEffectCanvases,
+  requiresPreviewCardEffectCanvas2d,
   requiresPreviewCardEffectWebGL,
   requiresPreviewCardEffectWebGL2,
   resolveCardEffectPreviewColors,
@@ -24,6 +25,7 @@ import {
 import './card-effect-preview-runtime.css'
 
 interface CardEffectCapabilities {
+  readonly canvas2d: boolean
   readonly webgl: boolean
   readonly webgl2: boolean
 }
@@ -31,7 +33,6 @@ interface CardEffectCapabilities {
 type CardEffectPreviewRuntime =
   | 'probing'
   | 'native'
-  | 'webgl1-fallback'
   | 'css-fallback'
 
 class PreviewEffectErrorBoundary extends Component<{
@@ -78,7 +79,9 @@ function EffectReadySignal({
 }
 
 function detectCapabilities(): CardEffectCapabilities {
-  if (typeof document === 'undefined') return { webgl: false, webgl2: false }
+  if (typeof document === 'undefined') {
+    return { canvas2d: false, webgl: false, webgl2: false }
+  }
 
   const probe = (kind: 'webgl' | 'webgl2'): boolean => {
     const canvas = document.createElement('canvas')
@@ -102,24 +105,14 @@ function detectCapabilities(): CardEffectCapabilities {
   }
 
   const webgl2 = probe('webgl2')
-  return { webgl2, webgl: webgl2 || probe('webgl') }
-}
-
-function resolveAuroraFallbackProps(
-  props: Readonly<Record<string, unknown>>,
-): Readonly<Record<string, unknown>> {
-  const colors = resolveCardEffectPreviewColors('aurora', props)
-  const middle = colors[Math.floor((colors.length - 1) / 2)] ?? colors[0]
-  const speed = props['speed']
-  return {
-    colorStops: [colors[0], middle, colors.at(-1) ?? colors[0]],
-    amplitude: 1.05,
-    blend: 0.56,
-    speed:
-      typeof speed === 'number' && Number.isFinite(speed)
-        ? Math.min(Math.max(speed, 0.15), 1.25)
-        : 0.7,
-  }
+  const canvas2d = (() => {
+    try {
+      return document.createElement('canvas').getContext('2d') !== null
+    } catch {
+      return false
+    }
+  })()
+  return { canvas2d, webgl2, webgl: webgl2 || probe('webgl') }
 }
 
 export function CardEffectPreviewLayer({
@@ -152,9 +145,11 @@ export function CardEffectPreviewLayer({
       setCapabilitySnapshot({
         scope: effect,
         capabilities:
-          valid && requiresPreviewCardEffectWebGL(effect)
+          valid &&
+          (requiresPreviewCardEffectWebGL(effect) ||
+            requiresPreviewCardEffectCanvas2d(effect))
             ? detectCapabilities()
-            : { webgl: false, webgl2: false },
+            : { canvas2d: false, webgl: false, webgl2: false },
       })
     })
     return () => window.cancelAnimationFrame(frame)
@@ -171,24 +166,20 @@ export function CardEffectPreviewLayer({
         ? 'probing'
         : effectFailed
           ? 'css-fallback'
-          : !requiresPreviewCardEffectWebGL(effect)
-            ? 'native'
+          : requiresPreviewCardEffectCanvas2d(effect)
+            ? capabilities.canvas2d
+              ? 'native'
+              : 'css-fallback'
+            : !requiresPreviewCardEffectWebGL(effect)
+              ? 'native'
             : !capabilities.webgl || (requiresPreviewCardEffectWebGL2(effect) && !capabilities.webgl2)
               ? 'css-fallback'
-              : !capabilities.webgl2 && effect !== 'aurora'
-                ? 'webgl1-fallback'
-                : 'native'
-  const runtimeEffect: CardEffectId | null = !valid
-    ? null
-    : runtime === 'webgl1-fallback'
-      ? 'aurora'
-      : effect
+              : 'native'
+  const runtimeEffect: CardEffectId | null = !valid ? null : effect
   const Effect = runtimeEffect === null || runtime === 'css-fallback' || runtime === 'probing' || runtime === null
     ? null
     : CARD_EFFECT_COMPONENTS[runtimeEffect]
-  const runtimeProps = runtime === 'webgl1-fallback'
-    ? resolveAuroraFallbackProps(props)
-    : props
+  const runtimeProps = props
   const overlayOpacity = resolveCardEffectPreviewOpacity(opacity)
   const presentationKey = `${scope}:${runtime}`
   const isReady = runtime === 'css-fallback' || readyKey === presentationKey
@@ -204,8 +195,13 @@ export function CardEffectPreviewLayer({
     if (root === null || typeof MutationObserver === 'undefined') return
 
     const markFailed = () => setFailedScope(scope)
-    return observePreviewCardEffectCanvases(root, markFailed)
-  }, [rendererCommitted, scope])
+    return observePreviewCardEffectCanvases(
+      root,
+      markFailed,
+      1_200,
+      requiresPreviewCardEffectCanvas2d(effect) ? '2d' : 'any',
+    )
+  }, [effect, rendererCommitted, scope])
 
   if (!valid || runtime === null) return null
 
@@ -245,6 +241,7 @@ export function CardEffectPreviewLayer({
           <Suspense fallback={null}>
             <div
               data-preview-card-effect-renderer
+              data-preview-card-effect-renderer-source={runtimeEffect}
               className="absolute inset-0"
               style={{ opacity: overlayOpacity }}
             >

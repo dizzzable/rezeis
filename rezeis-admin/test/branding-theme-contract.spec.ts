@@ -388,7 +388,12 @@ describe('WEB Reiwa preset and surface theme contract', () => {
     };
     const merged = readBrandingSettings(
       mergeBrandingSettings({
-        existing: { themeVariants: { light: variant, dark: variant } },
+        existing: {
+          // Imported and pre-variant rows can carry the same stale slot at
+          // the root as in the light/dark snapshots.
+          cardEffectsByIndex: variant.cardEffectsByIndex,
+          themeVariants: { light: variant, dark: variant },
+        },
         patch: {
           cardGradient: 'linear-gradient(135deg, #001122, #334455)',
           cardPattern: 'linear-gradient(#22d3ee22 1px, transparent 1px)',
@@ -398,6 +403,7 @@ describe('WEB Reiwa preset and surface theme contract', () => {
 
     assert.equal(merged.cardGradient, 'linear-gradient(135deg, #001122, #334455)');
     assert.equal(merged.cardPattern, 'linear-gradient(#22d3ee22 1px, transparent 1px)');
+    assert.equal(merged.cardEffectsByIndex[0]?.cardGradient, null);
     for (const mode of ['light', 'dark'] as const) {
       const resolved = merged.themeVariants?.[mode];
       assert.equal(resolved?.cardGradient, merged.cardGradient);
@@ -405,6 +411,108 @@ describe('WEB Reiwa preset and surface theme contract', () => {
       assert.equal(resolved?.cardEffectsByIndex[0]?.cardGradient, null);
       assert.equal(resolved?.cardEffectsByIndex[0]?.mode, 'override');
       assert.equal(resolved?.cardEffectsByIndex[0]?.cardEffect, 'aurora');
+    }
+
+    const combined = readBrandingSettings(
+      mergeBrandingSettings({
+        existing: {
+          cardEffectsByIndex: variant.cardEffectsByIndex,
+          themeVariants: { light: variant, dark: variant },
+        },
+        patch: {
+          cardGradient: 'linear-gradient(135deg, #102030, #405060)',
+          cardEffectsByIndex: [
+            {
+              mode: 'override',
+              cardEffect: 'aurora',
+              cardEffectProps: { speed: 1 },
+              cardEffectOpacity: 0.6,
+              cardGradient: 'linear-gradient(135deg, #0f172a, #1e3a8a)',
+            },
+          ],
+        },
+      }),
+    );
+
+    // A same-request slot payload is a deliberate override, not stale data
+    // to clear while applying the new root gradient.
+    assert.equal(
+      combined.cardEffectsByIndex[0]?.cardGradient,
+      'linear-gradient(135deg, #0f172a, #1e3a8a)',
+    );
+    for (const mode of ['light', 'dark'] as const) {
+      assert.equal(
+        combined.themeVariants?.[mode].cardEffectsByIndex[0]?.cardGradient,
+        'linear-gradient(135deg, #0f172a, #1e3a8a)',
+      );
+    }
+  });
+
+  it('keeps direct root effect and background edits ahead of stale light/dark snapshots', () => {
+    const staleVariant = {
+      primary: DEFAULT_BRANDING.primary,
+      primaryFg: DEFAULT_BRANDING.primaryFg,
+      bgPrimary: DEFAULT_BRANDING.bgPrimary,
+      bgSecondary: DEFAULT_BRANDING.bgSecondary,
+      cardGradient: DEFAULT_BRANDING.cardGradient,
+      cardPattern: DEFAULT_BRANDING.cardPattern,
+      cardEffect: 'paperWarp',
+      cardEffectProps: { stale: true },
+      cardEffectOpacity: 0.35,
+      cardEffectsByIndex: [{ mode: 'inherit' as const }],
+      bgEffect: 'MESH' as const,
+      appBackground: {
+        ...DEFAULT_BRANDING.appBackground,
+        kind: 'effect' as const,
+        effect: 'galaxy' as const,
+        props: { stale: true },
+        opacity: 0.4,
+      },
+      borderRadius: DEFAULT_BRANDING.borderRadius,
+      cornerRadii: DEFAULT_BRANDING.cornerRadii,
+      fontFamily: DEFAULT_BRANDING.fontFamily,
+      surfaceTheme: DEFAULT_BRANDING.surfaceTheme,
+    };
+    const merged = readBrandingSettings(
+      mergeBrandingSettings({
+        existing: {
+          cardEffect: 'paperWarp',
+          cardEffectProps: { stale: true },
+          cardEffectOpacity: 0.35,
+          cardEffectsByIndex: [{ mode: 'inherit' }],
+          bgEffect: 'MESH',
+          appBackground: staleVariant.appBackground,
+          themeVariants: { light: staleVariant, dark: staleVariant },
+        },
+        patch: {
+          cardEffect: 'waves',
+          cardEffectProps: { amplitude: 3 },
+          cardEffectOpacity: 0.8,
+          cardEffectsByIndex: [
+            {
+              mode: 'override',
+              cardEffect: 'aurora',
+              cardEffectProps: { speed: 1.2 },
+              cardEffectOpacity: 0.6,
+            },
+          ],
+          bgEffect: 'AURORA',
+          appBackground: {
+            kind: 'gradient',
+            gradient: 'linear-gradient(135deg, #101828, #1d2939)',
+          },
+        },
+      }),
+    );
+
+    for (const mode of ['light', 'dark'] as const) {
+      const resolved = merged.themeVariants?.[mode];
+      assert.equal(resolved?.cardEffect, 'waves');
+      assert.deepEqual(resolved?.cardEffectProps, { amplitude: 3 });
+      assert.equal(resolved?.cardEffectOpacity, 0.8);
+      assert.equal(resolved?.cardEffectsByIndex[0]?.cardEffect, 'aurora');
+      assert.equal(resolved?.bgEffect, 'AURORA');
+      assert.deepEqual(resolved?.appBackground, merged.appBackground);
     }
   });
 

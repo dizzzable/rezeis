@@ -115,11 +115,16 @@ export function CardEffectSlotsSection({
               </Button>
             </div>
             <div className="flex items-center justify-between rounded-lg border border-border/60 bg-background/40 p-2.5">
-              <span className="text-xs text-muted-foreground">
-                {overridesEffect
-                  ? t('brandingPage.sections.cardEffectSlots.effectOverride')
-                  : t('brandingPage.sections.cardEffectSlots.effectInherit')}
-              </span>
+              <div className="space-y-0.5">
+                <span className="block text-xs text-muted-foreground">
+                  {overridesEffect
+                    ? t('brandingPage.sections.cardEffectSlots.effectOverride')
+                    : t('brandingPage.sections.cardEffectSlots.effectInherit')}
+                </span>
+                <span className="block text-[11px] text-muted-foreground">
+                  {t('brandingPage.sections.cardEffectSlots.effectModeHint')}
+                </span>
+              </div>
               <Button
                 type="button"
                 variant="ghost"

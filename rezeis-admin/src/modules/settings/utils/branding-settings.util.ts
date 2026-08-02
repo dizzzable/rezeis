@@ -162,38 +162,83 @@ export function mergeBrandingSettings(input: {
       }
     }
   }
-  // A direct card-artwork edit is an explicit operator override. Theme
-  // variants are complete snapshots, so leaving their old gradient/pattern in
-  // place would make the cabinet switch back to previous artwork whenever the
-  // user changes light/dark mode. A theme-only PATCH intentionally does not
-  // enter this branch: concepts are still allowed to define different
-  // starting artwork per brightness.
-  if (input.patch.cardGradient !== undefined || input.patch.cardPattern !== undefined) {
-    const rootArtwork = readBrandingSettings(merged);
+  // A direct root visual edit is an explicit operator override. Theme
+  // variants are complete snapshots, so leaving an old value in either
+  // snapshot would make the cabinet revive it whenever the user changes
+  // light/dark mode. A theme-only PATCH intentionally does not enter this
+  // branch: concepts are still allowed to define different starting visuals
+  // per brightness.
+  const hasDirectVisualPatch =
+    input.patch.cardGradient !== undefined ||
+    input.patch.cardPattern !== undefined ||
+    input.patch.cardEffect !== undefined ||
+    input.patch.cardEffectProps !== undefined ||
+    input.patch.cardEffectOpacity !== undefined ||
+    input.patch.cardEffectsByIndex !== undefined ||
+    input.patch.bgEffect !== undefined ||
+    input.patch.appBackground !== undefined;
+  if (hasDirectVisualPatch) {
+    const rootVisuals = readBrandingSettings(merged);
     const variants = readThemeVariants({ themeVariants: merged.themeVariants });
     if (variants) {
       const synchronizeVariant = (variant: BrandingThemeVariant) => ({
         ...variant,
         ...(input.patch.cardGradient !== undefined
           ? {
-              cardGradient: rootArtwork.cardGradient,
-              // A global selection deliberately clears stale positional
-              // copies: they otherwise make the selected operator gradient
-              // look as though it was ignored.
-              cardEffectsByIndex: variant.cardEffectsByIndex.map((slot) => ({
-                ...slot,
-                cardGradient: null,
-              })),
+              cardGradient: rootVisuals.cardGradient,
             }
           : {}),
         ...(input.patch.cardPattern !== undefined
-          ? { cardPattern: rootArtwork.cardPattern }
+          ? { cardPattern: rootVisuals.cardPattern }
           : {}),
+        ...(input.patch.cardEffect !== undefined
+          ? { cardEffect: rootVisuals.cardEffect }
+          : {}),
+        ...(input.patch.cardEffectProps !== undefined
+          ? { cardEffectProps: rootVisuals.cardEffectProps }
+          : {}),
+        ...(input.patch.cardEffectOpacity !== undefined
+          ? { cardEffectOpacity: rootVisuals.cardEffectOpacity }
+          : {}),
+        ...(input.patch.bgEffect !== undefined
+          ? { bgEffect: rootVisuals.bgEffect }
+          : {}),
+        ...(input.patch.appBackground !== undefined
+          ? { appBackground: rootVisuals.appBackground }
+          : {}),
+        ...(input.patch.cardEffectsByIndex !== undefined
+          ? {
+              // A supplied array is a deliberate new slot configuration and
+              // must survive a combined root-gradient + slot PATCH.
+              cardEffectsByIndex: rootVisuals.cardEffectsByIndex,
+            }
+          : input.patch.cardGradient !== undefined
+            ? {
+                // A root gradient has no slot mode discriminator. Clear old
+                // per-slot copies in both root and variant snapshots so they
+                // cannot mask the new global choice.
+                cardEffectsByIndex: variant.cardEffectsByIndex.map((slot) => ({
+                  ...slot,
+                  cardGradient: null,
+                })),
+              }
+            : {}),
       });
       merged.themeVariants = {
         light: synchronizeVariant(variants.light),
         dark: synchronizeVariant(variants.dark),
       };
+    }
+    if (
+      input.patch.cardGradient !== undefined &&
+      input.patch.cardEffectsByIndex === undefined
+    ) {
+      // The root array is read before a theme variant, so it needs the same
+      // stale-gradient cleanup as the two snapshots above.
+      merged.cardEffectsByIndex = rootVisuals.cardEffectsByIndex.map((slot) => ({
+        ...slot,
+        cardGradient: null,
+      }));
     }
   }
   // `subscriptionCardText` is a global operator decision.  Newer variants

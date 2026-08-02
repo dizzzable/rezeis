@@ -3372,8 +3372,8 @@ export const en = {
         saved: 'Gradient saved to palette',
         customSwatch: 'Your saved gradient',
         removeSwatch: 'Remove from palette',
-        pattern: 'Card Pattern (CSS background-image, optional)',
-        patternPlaceholder: 'url(…) or none',
+        pattern: 'Card Pattern (CSS gradient, optional)',
+        patternPlaceholder: 'repeating-linear-gradient(…) or none',
         textMode: 'Card text',
         textModeHint:
           'Auto chooses contrast. Light, dark, and custom remain the operator\'s literal decision.',
@@ -3432,6 +3432,8 @@ export const en = {
         effectOverride: 'Custom slot effect',
         effectUseGlobal: 'Use global',
         effectCustomize: 'Customize separately',
+        effectModeHint:
+          'This changes only the animation. A slot gradient stays independent until reset.',
         removeSlot: 'Remove',
         gradientLabel: 'Card gradient',
         gradientUseGlobal: 'Reset (global)',

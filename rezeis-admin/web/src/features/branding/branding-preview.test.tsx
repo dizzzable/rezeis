@@ -18,8 +18,10 @@ const delayedPreviewRenderer = vi.hoisted(() => {
   }
 })
 
+const previewPlans = vi.hoisted(() => ({ data: [] as unknown[] }))
+
 vi.mock('@/features/plans/plans-api', () => ({
-  usePlans: () => ({ data: [] }),
+  usePlans: () => ({ data: previewPlans.data }),
 }))
 
 vi.mock('./card-effect-registry', async () => {
@@ -39,6 +41,7 @@ vi.mock('./card-effect-registry', async () => {
       paperGrain: () => <canvas data-testid="preview-effect-renderer" />,
       paperMesh: () => <canvas data-testid="preview-effect-renderer" />,
       paperSwirl: () => <canvas data-testid="preview-effect-renderer" />,
+      waves: () => <canvas data-testid="preview-effect-renderer" />,
       radar: () => {
         throw new Error('preview renderer failed')
       },
@@ -116,6 +119,7 @@ function themeHexRgb(value: string, backdrop: Rgb = [0, 0, 0]): Rgb {
 
 describe('BrandingPreview subscription card', () => {
   beforeEach(() => {
+    previewPlans.data = []
     vi.stubGlobal(
       'requestAnimationFrame',
       vi.fn((callback: FrameRequestCallback) => {
@@ -356,6 +360,116 @@ describe('BrandingPreview subscription card', () => {
     expect(
       container.querySelector('[data-preview-card-effect-renderer]'),
     ).toBeInTheDocument()
+  })
+
+  it('keeps WebGL1-compatible effects native instead of substituting Aurora', () => {
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(
+      ((contextId: string) =>
+        contextId === 'webgl'
+          ? ({ getExtension: vi.fn().mockReturnValue({ loseContext: vi.fn() }) } as unknown as WebGLRenderingContext)
+          : null) as unknown as typeof HTMLCanvasElement.prototype.getContext,
+    )
+    const { container } = renderWithProviders(
+      <BrandingPreview values={{ cardEffect: 'lineWaves', cardEffectProps: {} }} />,
+    )
+
+    const effect = container.querySelector('[data-preview-card-layer="effect"]')
+    expect(effect).toHaveAttribute('data-preview-card-effect-runtime', 'native')
+    expect(
+      effect?.querySelector('[data-preview-card-effect-renderer]'),
+    ).toHaveAttribute('data-preview-card-effect-renderer-source', 'lineWaves')
+  })
+
+  it('uses a CSS fallback when the Canvas2D Waves renderer cannot initialise', () => {
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(
+      ((contextId: string) =>
+        contextId === '2d'
+          ? null
+          : ({ getExtension: vi.fn().mockReturnValue({ loseContext: vi.fn() }) } as unknown as WebGLRenderingContext)) as unknown as typeof HTMLCanvasElement.prototype.getContext,
+    )
+    const { container } = renderWithProviders(
+      <BrandingPreview values={{ cardEffect: 'waves', cardEffectProps: {} }} />,
+    )
+
+    const effect = container.querySelector('[data-preview-card-layer="effect"]')
+    expect(effect).toHaveAttribute('data-preview-card-effect-runtime', 'css-fallback')
+    expect(
+      effect?.querySelector('[data-preview-card-effect-artwork]'),
+    ).toBeInTheDocument()
+    expect(
+      effect?.querySelector('[data-preview-card-effect-renderer]'),
+    ).not.toBeInTheDocument()
+  })
+
+  it('guards configured app-background artwork and preserves its gradient foundation', () => {
+    const appGradient = 'linear-gradient(135deg, #020617, #1d4ed8)'
+    const { container } = renderWithProviders(
+      <BrandingPreview
+        values={{
+          appBackground: {
+            kind: 'effect',
+            effect: 'lineWaves',
+            props: { color1: '#38bdf8', color2: '#1d4ed8', color3: '#020617' },
+            opacity: 0.72,
+            gradient: appGradient,
+            texture: {
+              pattern: 'dots',
+              color: '#38bdf8',
+              background: '#020617',
+              scale: 24,
+              opacity: 0.15,
+            },
+          },
+        }}
+      />,
+    )
+
+    expect(
+      container.querySelector('[data-preview-app-background-layer="foundation"]'),
+    ).toHaveStyle({ backgroundImage: appGradient })
+    const effect = container.querySelector('[data-preview-app-background-layer="effect"]')
+    expect(
+      effect?.querySelector('[data-preview-card-layer="effect"]'),
+    ).toHaveAttribute('data-preview-card-effect-runtime', 'native')
+    expect(
+      effect?.querySelector('[data-preview-card-effect-renderer]'),
+    ).toHaveStyle({ opacity: '0.72' })
+  })
+
+  it('uses the guarded renderer for per-plan effects in the tariff preview', () => {
+    previewPlans.data = [
+      {
+        id: 'starter',
+        name: 'Starter',
+        icon: 'sparkles',
+        trafficLimit: 10,
+        deviceLimit: 2,
+      },
+    ]
+    const { container } = renderWithProviders(
+      <BrandingPreview
+        focus="planCards"
+        values={{
+          planCardStyles: {
+            starter: {
+              cardEffect: 'lineWaves',
+              cardEffectProps: { color1: '#38bdf8', color2: '#1d4ed8', color3: '#020617' },
+              cardEffectOpacity: 0.68,
+            },
+          },
+        }}
+      />,
+    )
+
+    const tariff = container.querySelector('[data-preview-tariff-card]')
+    const effect = tariff?.querySelector('[data-preview-card-layer="effect"]')
+    expect(effect).toHaveAttribute('data-preview-card-effect-runtime', 'native')
+    expect(
+      effect?.querySelector('[data-preview-card-effect-renderer]'),
+    ).toHaveAttribute('data-preview-card-effect-renderer-source', 'lineWaves')
+    expect(
+      effect?.querySelector('[data-preview-card-effect-renderer]'),
+    ).toHaveStyle({ opacity: '0.68' })
   })
 
   it.each([

@@ -78,6 +78,10 @@ export function requiresPreviewCardEffectWebGL(effect: string): boolean {
   return effect !== 'NONE' && !CANVAS_2D_EFFECTS.has(effect)
 }
 
+export function requiresPreviewCardEffectCanvas2d(effect: string): boolean {
+  return CANVAS_2D_EFFECTS.has(effect)
+}
+
 export function requiresPreviewCardEffectWebGL2(effect: string): boolean {
   return WEBGL2_ONLY_CARD_EFFECTS.has(effect)
 }
@@ -166,13 +170,27 @@ export function observePreviewCardEffectCanvases(
   root: HTMLElement,
   onFailure: () => void,
   timeoutMs = 1_200,
+  requiredContext: 'any' | '2d' = 'any',
 ): () => void {
   const listeners = new Map<HTMLCanvasElement, () => void>()
-  let sawCanvas = false
+  let sawUsableCanvas = false
+
+  const supportsRequiredContext = (canvas: HTMLCanvasElement): boolean => {
+    if (requiredContext !== '2d') return true
+    try {
+      return canvas.getContext('2d') !== null
+    } catch {
+      return false
+    }
+  }
 
   const observeCanvas = () => {
     root.querySelectorAll('canvas').forEach((canvas) => {
-      sawCanvas = true
+      if (!supportsRequiredContext(canvas)) {
+        onFailure()
+        return
+      }
+      sawUsableCanvas = true
       if (listeners.has(canvas)) return
       canvas.addEventListener('webglcontextlost', onFailure)
       canvas.addEventListener('webglcontextcreationerror', onFailure)
@@ -187,7 +205,7 @@ export function observePreviewCardEffectCanvases(
   observer.observe(root, { childList: true, subtree: true })
   observeCanvas()
   const readinessTimer = window.setTimeout(() => {
-    if (!sawCanvas) onFailure()
+    if (!sawUsableCanvas) onFailure()
   }, timeoutMs)
 
   return () => {
