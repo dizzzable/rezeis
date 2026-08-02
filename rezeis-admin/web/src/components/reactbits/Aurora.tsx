@@ -1,23 +1,22 @@
 import { useEffect, useRef } from 'react';
 import { Renderer, Program, Mesh, Color, Triangle } from 'ogl';
 
-const VERT = `#version 300 es
-in vec2 position;
+// GLSL ES 1.00 compiles on WebGL1 and WebGL2. OGL can silently fall back to
+// WebGL1 when a mobile browser refuses another WebGL2 context, so a 3.00-only
+// shader leaves the preview canvas blank on exactly those constrained devices.
+const VERT = `attribute vec2 position;
 void main() {
   gl_Position = vec4(position, 0.0, 1.0);
 }
 `;
 
-const FRAG = `#version 300 es
-precision highp float;
+const FRAG = `precision highp float;
 
 uniform float uTime;
 uniform float uAmplitude;
 uniform vec3 uColorStops[3];
 uniform vec2 uResolution;
 uniform float uBlend;
-
-out vec4 fragColor;
 
 vec3 permute(vec3 x) {
   return mod(((x * 34.0) + 1.0) * x, 289.0);
@@ -93,7 +92,7 @@ void main() {
   
   vec3 auroraColor = intensity * rampColor;
   
-  fragColor = vec4(auroraColor * auroraAlpha, auroraAlpha);
+  gl_FragColor = vec4(auroraColor * auroraAlpha, auroraAlpha);
 }
 `;
 
@@ -106,9 +105,15 @@ interface AuroraProps {
 }
 
 export default function Aurora(props: AuroraProps) {
-  const { colorStops = ['#5227FF', '#7cff67', '#5227FF'], amplitude = 1.0, blend = 0.5 } = props;
-  const propsRef = useRef<AuroraProps>(props);
-  propsRef.current = props;
+  const resolvedProps = {
+    colorStops: props.colorStops ?? ['#5227FF', '#7cff67', '#5227FF'],
+    amplitude: props.amplitude ?? 1.0,
+    blend: props.blend ?? 0.5,
+    speed: props.speed ?? 1.0,
+    time: props.time,
+  };
+  const propsRef = useRef(resolvedProps);
+  propsRef.current = resolvedProps;
 
   const ctnDom = useRef<HTMLDivElement>(null);
 
@@ -116,36 +121,47 @@ export default function Aurora(props: AuroraProps) {
     const ctn = ctnDom.current;
     if (!ctn) return;
 
-    const renderer = new Renderer({
-      alpha: true,
-      premultipliedAlpha: true,
-      antialias: true
-    });
+    let renderer: Renderer;
+    try {
+      renderer = new Renderer({
+        alpha: true,
+        premultipliedAlpha: true,
+        antialias: true
+      });
+    } catch {
+      return;
+    }
     const gl = renderer.gl;
+    if (!gl) return;
     gl.clearColor(0, 0, 0, 0);
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-    gl.canvas.style.backgroundColor = 'transparent';
+    const canvas = gl.canvas as HTMLCanvasElement;
+    canvas.style.backgroundColor = 'transparent';
+    canvas.style.width = '100%';
+    canvas.style.height = '100%';
 
     let program: Program | undefined;
 
     function resize() {
       if (!ctn) return;
-      const width = ctn.offsetWidth;
-      const height = ctn.offsetHeight;
+      const width = Math.max(1, Math.floor(ctn.offsetWidth));
+      const height = Math.max(1, Math.floor(ctn.offsetHeight));
       renderer.setSize(width, height);
       if (program) {
         program.uniforms.uResolution.value = [width, height];
       }
     }
-    window.addEventListener('resize', resize);
+    const resizeObserver = new ResizeObserver(resize);
+    resizeObserver.observe(ctn);
 
     const geometry = new Triangle(gl);
     if (geometry.attributes.uv) {
       delete geometry.attributes.uv;
     }
 
-    const colorStopsArray = colorStops.map(hex => {
+    const initial = propsRef.current;
+    const colorStopsArray = initial.colorStops.map(hex => {
       const c = new Color(hex);
       return [c.r, c.g, c.b];
     });
@@ -155,45 +171,62 @@ export default function Aurora(props: AuroraProps) {
       fragment: FRAG,
       uniforms: {
         uTime: { value: 0 },
-        uAmplitude: { value: amplitude },
+        uAmplitude: { value: initial.amplitude },
         uColorStops: { value: colorStopsArray },
         uResolution: { value: [ctn.offsetWidth, ctn.offsetHeight] },
-        uBlend: { value: blend }
+        uBlend: { value: initial.blend }
       }
     });
 
     const mesh = new Mesh(gl, { geometry, program });
-    ctn.appendChild(gl.canvas);
+    ctn.appendChild(canvas);
 
     let animateId = 0;
+    let contextLost = false;
     const update = (t: number) => {
+      if (contextLost) return;
       animateId = requestAnimationFrame(update);
-      const { time = t * 0.01, speed = 1.0 } = propsRef.current;
+      const current = propsRef.current;
+      const time = current.time ?? t * 0.01;
       if (program) {
-        program.uniforms.uTime.value = time * speed * 0.1;
-        program.uniforms.uAmplitude.value = propsRef.current.amplitude ?? 1.0;
-        program.uniforms.uBlend.value = propsRef.current.blend ?? blend;
-        const stops = propsRef.current.colorStops ?? colorStops;
-        program.uniforms.uColorStops.value = stops.map((hex: string) => {
+        program.uniforms.uTime.value = time * current.speed * 0.1;
+        program.uniforms.uAmplitude.value = current.amplitude;
+        program.uniforms.uBlend.value = current.blend;
+        program.uniforms.uColorStops.value = current.colorStops.map((hex: string) => {
           const c = new Color(hex);
           return [c.r, c.g, c.b];
         });
         renderer.render({ scene: mesh });
       }
     };
-    animateId = requestAnimationFrame(update);
+
+    const handleContextLost = (event: Event) => {
+      event.preventDefault();
+      contextLost = true;
+      cancelAnimationFrame(animateId);
+    };
+    const handleContextRestored = () => {
+      contextLost = false;
+      cancelAnimationFrame(animateId);
+      animateId = requestAnimationFrame(update);
+    };
+    canvas.addEventListener('webglcontextlost', handleContextLost);
+    canvas.addEventListener('webglcontextrestored', handleContextRestored);
 
     resize();
+    animateId = requestAnimationFrame(update);
 
     return () => {
       cancelAnimationFrame(animateId);
-      window.removeEventListener('resize', resize);
-      if (ctn && gl.canvas.parentNode === ctn) {
-        ctn.removeChild(gl.canvas);
+      resizeObserver.disconnect();
+      canvas.removeEventListener('webglcontextlost', handleContextLost);
+      canvas.removeEventListener('webglcontextrestored', handleContextRestored);
+      if (canvas.parentNode === ctn) {
+        ctn.removeChild(canvas);
       }
       gl.getExtension('WEBGL_lose_context')?.loseContext();
     };
-  }, [amplitude]);
+  }, []);
 
   return <div ref={ctnDom} className="w-full h-full" />;
 }

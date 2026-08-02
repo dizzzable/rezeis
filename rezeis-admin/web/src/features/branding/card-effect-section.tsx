@@ -26,9 +26,10 @@ import {
   getCardEffectDefaults,
 } from './card-effect-registry'
 import {
-  buildCardEffectPreviewArtwork,
+  buildCardEffectThumbnailArtwork,
   resolveCardEffectPreviewColors,
 } from './card-effect-preview-utils'
+import './card-effect-preview-runtime.css'
 import type { ControlDef } from '@/features/appearance/background-controls'
 
 interface CardEffectSectionProps {
@@ -100,18 +101,17 @@ export function CardEffectPicker({
         >
           {t('brandingPage.cardEffects.NONE')}
           {effect === 'NONE' && (
-            <span className="absolute right-1 top-1 flex h-4 w-4 items-center justify-center rounded-full bg-primary text-primary-foreground">
-              <Check className="h-2.5 w-2.5" />
+            <span className="absolute right-1 top-1 flex size-4 items-center justify-center rounded-full bg-primary text-primary-foreground">
+              <Check className="size-2.5" />
             </span>
           )}
         </button>
         {CARD_EFFECT_REGISTRY.map((e) => {
           const isActive = effect === e.id
-          const thumbnailArtwork = isActive
-            ? buildCardEffectPreviewArtwork(
-                resolveCardEffectPreviewColors(e.id, mergedProps),
-              )
-            : null
+          const thumbnailProps = isActive ? mergedProps : getCardEffectDefaults(e.id)
+          const thumbnailArtwork = buildCardEffectThumbnailArtwork(
+            resolveCardEffectPreviewColors(e.id, thumbnailProps),
+          )
           return (
             <button
               key={e.id}
@@ -123,23 +123,25 @@ export function CardEffectPicker({
                 isActive ? 'border-primary ring-2 ring-primary/40' : 'border-border hover:border-primary/40'
               }`}
             >
-              {/* The phone preview owns the sole live GPU renderer. The picker
-                  uses a deterministic CSS swatch, so selecting an effect does
-                  not create a second WebGL context and evict the preview. */}
-              {thumbnailArtwork && (
-                <div
-                  aria-hidden="true"
-                  data-card-effect-thumbnail
-                  className="pointer-events-none absolute inset-0"
-                  style={{ backgroundImage: thumbnailArtwork }}
-                />
-              )}
+              {/* The phone preview owns the sole live GPU renderer. Every tile
+                  has a deterministic palette preview; only the selected tile
+                  animates, so hidden configurator sections cannot accumulate
+                  canvas/WebGL contexts. */}
+              <div
+                aria-hidden="true"
+                data-card-effect-thumbnail
+                data-card-effect-thumbnail-active={isActive ? 'true' : 'false'}
+                className={`pointer-events-none absolute inset-0 ${
+                  isActive ? 'card-effect-preview__picker-artwork' : ''
+                }`}
+                style={{ backgroundImage: thumbnailArtwork }}
+              />
               <span className="absolute inset-x-0 bottom-0 bg-black/55 px-1 py-0.5 text-center text-[9px] font-medium text-white">
                 {t(`brandingPage.cardEffects.${e.id}`, { defaultValue: e.name })}
               </span>
               {isActive && (
-                <span className="absolute right-1 top-1 flex h-4 w-4 items-center justify-center rounded-full bg-primary text-primary-foreground">
-                  <Check className="h-2.5 w-2.5" />
+                <span className="absolute right-1 top-1 flex size-4 items-center justify-center rounded-full bg-primary text-primary-foreground">
+                  <Check className="size-2.5" />
                 </span>
               )}
             </button>

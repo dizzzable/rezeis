@@ -15,6 +15,12 @@ import {
   type AdPlacementRequest,
 } from './advertising-api'
 
+vi.mock('qrcode', () => ({
+  default: {
+    toDataURL: vi.fn().mockResolvedValue('data:image/png;base64,dGVzdA=='),
+  },
+}))
+
 vi.mock('./advertising-api', async () => {
   const actual = await vi.importActual<typeof import('./advertising-api')>('./advertising-api')
   return {

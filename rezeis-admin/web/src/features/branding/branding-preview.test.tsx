@@ -1,7 +1,22 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { renderWithProviders } from '@/test/test-utils'
-import { waitFor } from '@testing-library/react'
+import { act, waitFor } from '@testing-library/react'
+
+const delayedPreviewRenderer = vi.hoisted(() => {
+  type DelayedModule = { default: () => null }
+  let resolveImport: ((module: DelayedModule) => void) | null = null
+  const importPromise = new Promise<DelayedModule>((resolve) => {
+    resolveImport = resolve
+  })
+
+  return {
+    importPromise,
+    resolve() {
+      resolveImport?.({ default: () => null })
+    },
+  }
+})
 
 vi.mock('@/features/plans/plans-api', () => ({
   usePlans: () => ({ data: [] }),
@@ -11,14 +26,19 @@ vi.mock('./card-effect-registry', async () => {
   const { lazy } = await import('react')
   return {
     CARD_EFFECT_COMPONENTS: {
-      aurora: () => <div data-testid="preview-effect-renderer" />,
-      liquidChrome: () => <div data-testid="preview-effect-renderer" />,
-      lineWaves: () => <div data-testid="preview-effect-renderer" />,
-      rippleGrid: () => <div data-testid="preview-effect-renderer" />,
-      paperWarp: () => <div data-testid="preview-effect-renderer" />,
-      paperGrain: () => <div data-testid="preview-effect-renderer" />,
-      paperMesh: () => <div data-testid="preview-effect-renderer" />,
-      paperSwirl: () => <div data-testid="preview-effect-renderer" />,
+      aurora: () => <canvas data-testid="preview-effect-renderer" />,
+      liquidChrome: () => <canvas data-testid="preview-effect-renderer" />,
+      lineWaves: () => <canvas data-testid="preview-effect-renderer" />,
+      rippleGrid: () => <canvas data-testid="preview-effect-renderer" />,
+      plasma: () => <canvas data-testid="preview-effect-renderer" />,
+      grainient: () => <canvas data-testid="preview-effect-renderer" />,
+      silk: () => <canvas data-testid="preview-effect-renderer" />,
+      beams: () => <canvas data-testid="preview-effect-renderer" />,
+      dither: () => <canvas data-testid="preview-effect-renderer" />,
+      paperWarp: () => <canvas data-testid="preview-effect-renderer" />,
+      paperGrain: () => <canvas data-testid="preview-effect-renderer" />,
+      paperMesh: () => <canvas data-testid="preview-effect-renderer" />,
+      paperSwirl: () => <canvas data-testid="preview-effect-renderer" />,
       radar: () => {
         throw new Error('preview renderer failed')
       },
@@ -27,12 +47,17 @@ vi.mock('./card-effect-registry', async () => {
       threads: lazy(
         () => new Promise<{ default: () => null }>(() => {}),
       ),
+      softAurora: lazy(() => delayedPreviewRenderer.importPromise),
     },
     getCardEffectDefaults: () => ({}),
   }
 })
 
 import { BrandingPreview } from './branding-preview'
+import {
+  observePreviewCardEffectCanvases,
+  requiresPreviewCardEffectWebGL2,
+} from './card-effect-preview-utils'
 import { THEME_PRESETS } from './theme-presets'
 
 type Rgb = readonly [number, number, number]
@@ -130,6 +155,7 @@ describe('BrandingPreview subscription card', () => {
   })
 
   afterEach(() => {
+    vi.useRealTimers()
     vi.unstubAllGlobals()
     vi.restoreAllMocks()
   })
@@ -172,7 +198,10 @@ describe('BrandingPreview subscription card', () => {
     ).not.toBeInTheDocument()
     expect(
       card?.querySelector('[data-preview-card-effect-renderer]'),
-    ).toHaveStyle({ opacity: '0.84', mixBlendMode: 'screen' })
+    ).toHaveStyle({ opacity: '0.84' })
+    expect(
+      card?.querySelector('[data-preview-card-layer="effect"]'),
+    ).toHaveStyle({ mixBlendMode: 'screen' })
   })
 
   it('mirrors the dashboard device area and the configured bottom-nav spacing', () => {
@@ -247,7 +276,8 @@ describe('BrandingPreview subscription card', () => {
       'transparent',
     )
     expect((effectLayer as HTMLElement | null)?.style.backgroundColor ?? '').toBe('')
-    expect(renderer).toHaveStyle({ opacity: String(opacity), mixBlendMode: 'screen' })
+    expect(renderer).toHaveStyle({ opacity: String(opacity) })
+    expect(effectLayer).toHaveStyle({ mixBlendMode: 'screen' })
     expect(
       renderer?.querySelector('[data-testid="preview-effect-renderer"]'),
     ).toBeInTheDocument()
@@ -325,11 +355,160 @@ describe('BrandingPreview subscription card', () => {
     expect(gradientLayer).toHaveStyle({ backgroundImage: gradient })
     expect(effect).toHaveAttribute('data-preview-card-effect-runtime', 'css-fallback')
     expect(effect).toHaveAttribute('data-preview-card-effect-foundation', 'transparent')
-    expect(artwork).toHaveStyle({ opacity: '1', mixBlendMode: 'screen' })
+    expect(artwork).toHaveStyle({ opacity: '1' })
+    expect(effect).toHaveStyle({ mixBlendMode: 'screen' })
     expect((artwork as HTMLElement | null)?.style.backgroundColor ?? '').toBe('')
     expect((artwork as HTMLElement | null)?.style.backgroundImage).not.toContain('linear-gradient')
     expect(card?.querySelector('[data-preview-card-effect-renderer]')).toBeNull()
   })
+
+  it('keeps Aurora native on a WebGL1-only preview', () => {
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(
+      ((contextId: string) =>
+        contextId === 'webgl'
+          ? ({ getExtension: vi.fn().mockReturnValue({ loseContext: vi.fn() }) } as unknown as WebGLRenderingContext)
+          : null) as unknown as typeof HTMLCanvasElement.prototype.getContext,
+    )
+    const { container } = renderWithProviders(
+      <BrandingPreview values={{ cardEffect: 'aurora', cardEffectProps: {} }} />,
+    )
+
+    expect(
+      container.querySelector('[data-preview-card-layer="effect"]'),
+    ).toHaveAttribute('data-preview-card-effect-runtime', 'native')
+    expect(
+      container.querySelector('[data-preview-card-effect-renderer]'),
+    ).toBeInTheDocument()
+  })
+
+  it.each([
+    {
+      effect: 'plasma',
+      props: { color: '#12ab34' },
+      expectedColor: 'rgb(18, 171, 52)',
+    },
+    {
+      effect: 'grainient',
+      props: { color1: '#123456', color2: '#abcdef', color3: '#fedcba' },
+      expectedColor: 'rgb(171, 205, 239)',
+    },
+    {
+      effect: 'silk',
+      props: { color: '#456789' },
+      expectedColor: 'rgb(69, 103, 137)',
+    },
+    {
+      effect: 'beams',
+      props: { lightColor: '#987654' },
+      expectedColor: 'rgb(152, 118, 84)',
+    },
+    {
+      effect: 'dither',
+      props: { waveColor: [0.2, 0.4, 0.6] },
+      expectedColor: 'rgb(51, 102, 153)',
+    },
+  ])(
+    'preserves the configured $effect palette with CSS on WebGL1 instead of substituting Aurora',
+    ({ effect, props, expectedColor }) => {
+      vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(
+        ((contextId: string) =>
+          contextId === 'webgl'
+            ? ({ getExtension: vi.fn().mockReturnValue({ loseContext: vi.fn() }) } as unknown as WebGLRenderingContext)
+            : null) as unknown as typeof HTMLCanvasElement.prototype.getContext,
+      )
+      const { container } = renderWithProviders(
+        <BrandingPreview
+          values={{ cardEffect: effect, cardEffectProps: props }}
+        />,
+      )
+
+      const layer = container.querySelector('[data-preview-card-layer="effect"]')
+      const artwork = layer?.querySelector('[data-preview-card-effect-artwork]')
+      expect(layer).toHaveAttribute('data-preview-card-effect-runtime', 'css-fallback')
+      expect(layer?.querySelector('[data-preview-card-effect-renderer]')).toBeNull()
+      expect((artwork as HTMLElement | null)?.style.backgroundImage).toContain(expectedColor)
+    },
+  )
+
+  it.each([
+    'plasma',
+    'grainient',
+    'silk',
+    'beams',
+    'dither',
+    'paperMesh',
+    'paperWarp',
+    'paperGrain',
+    'paperDither',
+    'paperSwirl',
+    'paperMetaballs',
+  ])('classifies %s as WebGL2-only', (effect) => {
+    expect(requiresPreviewCardEffectWebGL2(effect)).toBe(true)
+  })
+
+  it.each(['aurora', 'threads', 'softAurora', 'waves'])(
+    'does not misclassify %s as WebGL2-only',
+    (effect) => {
+      expect(requiresPreviewCardEffectWebGL2(effect)).toBe(false)
+    },
+  )
+
+  it('does not treat a cold lazy chunk as a GPU failure, then catches a committed blank renderer', async () => {
+    vi.useFakeTimers()
+    const { container } = renderWithProviders(
+      <BrandingPreview
+        values={{
+          cardEffect: 'softAurora',
+          cardEffectProps: { color1: '#123456', color2: '#abcdef' },
+        }}
+      />,
+    )
+
+    act(() => vi.advanceTimersByTime(5_000))
+    const layer = container.querySelector('[data-preview-card-layer="effect"]')
+    expect(layer).toHaveAttribute('data-preview-card-effect-runtime', 'native')
+    expect(layer).toHaveAttribute('data-preview-card-effect-ready', 'false')
+    expect(layer?.querySelector('[data-preview-card-effect-artwork]')).toBeNull()
+
+    await act(async () => {
+      delayedPreviewRenderer.resolve()
+      await Promise.resolve()
+    })
+    expect(layer).toHaveAttribute('data-preview-card-effect-ready', 'true')
+
+    act(() => vi.advanceTimersByTime(1_200))
+    expect(layer).toHaveAttribute('data-preview-card-effect-runtime', 'css-fallback')
+    expect(layer?.querySelector('[data-preview-card-effect-artwork]')).toBeInTheDocument()
+  })
+
+  it('reports a preview renderer that silently fails to create its canvas', () => {
+    vi.useFakeTimers()
+    const root = document.createElement('div')
+    const onFailure = vi.fn()
+    const stop = observePreviewCardEffectCanvases(root, onFailure, 25)
+
+    vi.advanceTimersByTime(25)
+    expect(onFailure).toHaveBeenCalledOnce()
+
+    stop()
+    vi.useRealTimers()
+  })
+
+  it.each(['webglcontextlost', 'webglcontextcreationerror'])(
+    'reports an explicit %s event after renderer commit',
+    (eventName) => {
+      const root = document.createElement('div')
+      const canvas = document.createElement('canvas')
+      root.append(canvas)
+      const onFailure = vi.fn()
+      const stop = observePreviewCardEffectCanvases(root, onFailure, 25)
+
+      canvas.dispatchEvent(new Event(eventName))
+      expect(onFailure).toHaveBeenCalledOnce()
+
+      stop()
+    },
+  )
 
   it('uses a native preview effect at the saved 100% intensity without replacing the gradient', () => {
     const { container } = renderWithProviders(
@@ -344,7 +523,10 @@ describe('BrandingPreview subscription card', () => {
 
     expect(
       container.querySelector('[data-preview-card-effect-renderer]'),
-    ).toHaveStyle({ opacity: '1', mixBlendMode: 'screen' })
+    ).toHaveStyle({ opacity: '1' })
+    expect(
+      container.querySelector('[data-preview-card-layer="effect"]'),
+    ).toHaveStyle({ mixBlendMode: 'screen' })
   })
 
   it('recovers to CSS artwork when a native preview renderer throws', async () => {
@@ -366,7 +548,10 @@ describe('BrandingPreview subscription card', () => {
     })
     expect(
       container.querySelector('[data-preview-card-effect-artwork]'),
-    ).toHaveStyle({ opacity: '0.8', mixBlendMode: 'screen' })
+    ).toHaveStyle({ opacity: '0.8' })
+    expect(
+      container.querySelector('[data-preview-card-layer="effect"]'),
+    ).toHaveStyle({ mixBlendMode: 'screen' })
   })
 
   it('uses one adaptive theme-derived readability veil across the full card', () => {
@@ -899,7 +1084,8 @@ describe('BrandingPreview subscription card', () => {
     )
     expect(
       effect?.querySelector('[data-preview-card-effect-renderer]'),
-    ).toHaveStyle({ opacity: '0.8', mixBlendMode: 'screen' })
+    ).toHaveStyle({ opacity: '0.8' })
+    expect(effect).toHaveStyle({ mixBlendMode: 'screen' })
     expect(
       container.querySelector('[data-preview-subscription-card]'),
     ).toHaveAttribute('data-preview-card-artwork', 'animated')

@@ -10,6 +10,10 @@ import { EffectsSettingsCard } from './effects-settings-card'
 describe('EffectsSettingsCard accessibility', () => {
   beforeEach(() => {
     vi.restoreAllMocks()
+    // These accessibility tests deliberately exercise the non-canvas fallback.
+    // Keep the mock local so unrelated QR/WebGL suites still see unexpected
+    // canvas access instead of having it hidden by global test setup.
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null)
     useEffectsStore.getState().reset()
   })
 

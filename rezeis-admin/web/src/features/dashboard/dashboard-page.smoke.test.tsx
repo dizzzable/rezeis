@@ -1,9 +1,36 @@
-import { describe, expect, it, vi, beforeAll } from 'vitest'
+import { cloneElement, isValidElement, type ReactElement, type ReactNode } from 'react'
+import { describe, expect, it, vi, beforeAll, beforeEach } from 'vitest'
 import { fireEvent, screen } from '@testing-library/react'
+
+vi.mock('@/features/dashboard/dashboard-online-trend', () => ({
+  DashboardOnlineTrend: () => <div>Users online</div>,
+}))
+
+vi.mock('@/features/dashboard/dashboard-subscription-chart', () => ({
+  DashboardSubscriptionChart: () => <div>Subscription distribution</div>,
+}))
+
 import DashboardPage from '@/features/dashboard/dashboard-page'
 import { dashboardApi } from '@/features/dashboard/dashboard-api'
 import { renderWithProviders } from '@/test/test-utils'
 import { loadFeatureBundle } from '@/i18n/i18n'
+
+// Preserve the real chart components and only replace Recharts' browser-size
+// adapter. jsdom has no layout engine, so give each chart the deterministic
+// dimensions it would receive from its explicitly sized production wrapper.
+vi.mock('recharts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('recharts')>()
+  return {
+    ...actual,
+    ResponsiveContainer: ({ children }: { children: ReactNode }) =>
+      isValidElement(children)
+        ? cloneElement(
+            children as ReactElement<{ width?: number; height?: number }>,
+            { width: 640, height: 240 },
+          )
+        : children,
+  }
+})
 
 describe('DashboardPage', () => {
   beforeAll(async () => {
@@ -11,6 +38,10 @@ describe('DashboardPage', () => {
     // `withFeatureBundle('dashboard', ...)`. Tests bypass the router so
     // we need to load it manually.
     await loadFeatureBundle('dashboard')
+  })
+
+  beforeEach(() => {
+    vi.spyOn(dashboardApi, 'getOnlineTrend').mockResolvedValue([])
   })
 
   it('uses generic bounded copy for dashboard summary load errors', async () => {
@@ -82,6 +113,8 @@ describe('DashboardPage', () => {
 
     expect((await screen.findAllByText('42')).length).toBeGreaterThan(0)
     expect(await screen.findByText('Active subscriptions')).toBeInTheDocument()
+    expect(await screen.findByText('Users online')).toBeInTheDocument()
+    expect(await screen.findByText('Subscription distribution')).toBeInTheDocument()
     expect(await screen.findByText('5 registered in 7d')).toBeInTheDocument()
     expect((await screen.findAllByText('11')).length).toBeGreaterThan(0)
     expect(await screen.findByText('2 limited subscriptions')).toBeInTheDocument()

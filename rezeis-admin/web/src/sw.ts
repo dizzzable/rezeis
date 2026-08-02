@@ -29,15 +29,24 @@ self.addEventListener('install', () => {
   void self.skipWaiting()
 })
 
+// Workbox installs its own `activate` listener here. Calling the helper from
+// inside our activate handler adds that listener too late and Chrome warns
+// that it was not registered during the worker's initial evaluation.
+cleanupOutdatedCaches()
+
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     (async () => {
-      await cleanupOutdatedCaches()
       const cacheNames = await caches.keys()
       const valid = [STATIC_CACHE, NAV_CACHE]
+      const ownedCachePrefixes = ['rezeis-static-', 'rezeis-navigations-']
       await Promise.all(
         cacheNames
-          .filter((name) => !valid.includes(name) && !name.startsWith('workbox-precache'))
+          .filter(
+            (name) =>
+              !valid.includes(name) &&
+              ownedCachePrefixes.some((prefix) => name.startsWith(prefix)),
+          )
           .map((name) => caches.delete(name)),
       )
       await self.clients.claim()

@@ -28,13 +28,16 @@ const badgeVariants = cva(
 )
 
 export interface BadgeProps
-  extends React.HTMLAttributes<HTMLDivElement>,
+  extends React.HTMLAttributes<HTMLSpanElement>,
     VariantProps<typeof badgeVariants> {}
 
 function Badge({ className, variant, ...props }: BadgeProps) {
   return (
-    <div className={cn(badgeVariants({ variant }), className)} {...props} />
+    <span className={cn(badgeVariants({ variant }), className)} {...props} />
   )
 }
 
+// This UI primitive intentionally exports its CVA helper as part of the
+// long-standing public API used by plan and add-on forms.
+// react-doctor-disable-next-line react-doctor/only-export-components
 export { Badge, badgeVariants } // eslint-disable-line react-refresh/only-export-components

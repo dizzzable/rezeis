@@ -8,6 +8,16 @@
   animation: card-effect-preview-drift 18s ease-in-out infinite;
 }
 
+/* Picker tiles intentionally stay GPU-free. The selected tile still gives an
+   immediate, clearly visible motion preview while the phone owns the single
+   native canvas/WebGL renderer. */
+.card-effect-preview__picker-artwork {
+  background-size: 170% 170%, 165% 165%, 190% 190%, 150% 150%;
+  animation: card-effect-preview-drift 5.5s ease-in-out infinite;
+  will-change: background-position;
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .card-effect-preview__css-artwork { animation: none; }
+  .card-effect-preview__css-artwork,
+  .card-effect-preview__picker-artwork { animation: none; }
 }

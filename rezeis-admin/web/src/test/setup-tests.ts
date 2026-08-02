@@ -55,4 +55,3 @@ Object.defineProperty(globalThis, 'ResizeObserver', {
   configurable: true,
   value: ResizeObserverMock,
 })
-

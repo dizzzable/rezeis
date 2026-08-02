@@ -14,6 +14,18 @@ export const PAPER_CARD_EFFECTS = new Set([
   'paperMetaballs',
 ])
 
+const WEBGL2_ONLY_CARD_EFFECTS = new Set([
+  ...PAPER_CARD_EFFECTS,
+  // Plasma and Grainient ship GLSL ES 3.00 shaders (`#version 300 es`). The
+  // Three/Fiber renderers below run on Three 0.184, whose renderer is WebGL2.
+  // Substituting Aurora would discard the operator's selected palette/shape.
+  'plasma',
+  'grainient',
+  'silk',
+  'beams',
+  'dither',
+])
+
 const CANVAS_2D_EFFECTS = new Set(['waves'])
 
 const DEFAULT_EFFECT_COLORS: Readonly<Record<string, readonly string[]>> = {
@@ -64,6 +76,10 @@ export function isPreviewCardEffect(effect: string): effect is CardEffectId {
 
 export function requiresPreviewCardEffectWebGL(effect: string): boolean {
   return effect !== 'NONE' && !CANVAS_2D_EFFECTS.has(effect)
+}
+
+export function requiresPreviewCardEffectWebGL2(effect: string): boolean {
+  return WEBGL2_ONLY_CARD_EFFECTS.has(effect)
 }
 
 export function resolveCardEffectPreviewColors(
@@ -132,6 +148,53 @@ export function buildCardEffectPreviewArtwork(colors: readonly string[]): string
   // gradient is the card foundation; a fallback must enhance it, never replace
   // it with a full-frame palette of its own.
   return `radial-gradient(70% 110% at 4% 100%, ${first} 0%, transparent 72%), radial-gradient(66% 100% at 100% 2%, ${last} 0%, transparent 72%), radial-gradient(54% 66% at 52% 50%, ${middle} 0%, transparent 82%)`
+}
+
+/** Opaque, palette-faithful artwork for the small effect picker thumbnails. */
+export function buildCardEffectThumbnailArtwork(colors: readonly string[]): string {
+  const visibleColors = colors.filter((color) => !/^#0{3,8}$/i.test(color))
+  const palette = visibleColors.length > 0 ? visibleColors : colors
+  const first = palette[0] ?? '#5227FF'
+  const middle = palette[Math.floor((palette.length - 1) / 2)] ?? first
+  const last = palette.at(-1) ?? middle
+
+  return `${buildCardEffectPreviewArtwork(colors)}, linear-gradient(135deg, ${first} 0%, ${middle} 52%, ${last} 100%)`
+}
+
+/** Detect explicit and silent canvas initialisation failures in live preview. */
+export function observePreviewCardEffectCanvases(
+  root: HTMLElement,
+  onFailure: () => void,
+  timeoutMs = 1_200,
+): () => void {
+  const listeners = new Map<HTMLCanvasElement, () => void>()
+  let sawCanvas = false
+
+  const observeCanvas = () => {
+    root.querySelectorAll('canvas').forEach((canvas) => {
+      sawCanvas = true
+      if (listeners.has(canvas)) return
+      canvas.addEventListener('webglcontextlost', onFailure)
+      canvas.addEventListener('webglcontextcreationerror', onFailure)
+      listeners.set(canvas, () => {
+        canvas.removeEventListener('webglcontextlost', onFailure)
+        canvas.removeEventListener('webglcontextcreationerror', onFailure)
+      })
+    })
+  }
+
+  const observer = new MutationObserver(observeCanvas)
+  observer.observe(root, { childList: true, subtree: true })
+  observeCanvas()
+  const readinessTimer = window.setTimeout(() => {
+    if (!sawCanvas) onFailure()
+  }, timeoutMs)
+
+  return () => {
+    window.clearTimeout(readinessTimer)
+    observer.disconnect()
+    listeners.forEach((remove) => remove())
+  }
 }
 
 function isSafeHexColor(value: unknown): value is string {

@@ -12,10 +12,11 @@ import {
 
 import { CARD_EFFECT_COMPONENTS, type CardEffectId } from './card-effect-registry'
 import {
-  PAPER_CARD_EFFECTS,
   buildCardEffectPreviewArtwork,
   isPreviewCardEffect,
+  observePreviewCardEffectCanvases,
   requiresPreviewCardEffectWebGL,
+  requiresPreviewCardEffectWebGL2,
   resolveCardEffectPreviewColors,
   resolveCardEffectPreviewOpacity,
 } from './card-effect-preview-utils'
@@ -37,21 +38,24 @@ class PreviewEffectErrorBoundary extends Component<{
   readonly children: ReactNode
   readonly resetKey: string
   readonly onError: () => void
-}, { hasError: boolean }> {
-  state = { hasError: false }
+}, { hasError: boolean; resetKey: string }> {
+  state = { hasError: false, resetKey: this.props.resetKey }
 
   static getDerivedStateFromError() {
     return { hasError: true }
   }
 
-  componentDidCatch() {
-    this.props.onError()
+  static getDerivedStateFromProps(
+    props: { readonly resetKey: string },
+    state: { readonly hasError: boolean; readonly resetKey: string },
+  ) {
+    return props.resetKey === state.resetKey
+      ? null
+      : { hasError: false, resetKey: props.resetKey }
   }
 
-  componentDidUpdate(previous: Readonly<{ resetKey: string }>) {
-    if (previous.resetKey !== this.props.resetKey && this.state.hasError) {
-      this.setState({ hasError: false })
-    }
+  componentDidCatch() {
+    this.props.onError()
   }
 
   render() {
@@ -169,7 +173,7 @@ export function CardEffectPreviewLayer({
           ? 'css-fallback'
           : !requiresPreviewCardEffectWebGL(effect)
             ? 'native'
-            : !capabilities.webgl || (PAPER_CARD_EFFECTS.has(effect) && !capabilities.webgl2)
+            : !capabilities.webgl || (requiresPreviewCardEffectWebGL2(effect) && !capabilities.webgl2)
               ? 'css-fallback'
               : !capabilities.webgl2 && effect !== 'aurora'
                 ? 'webgl1-fallback'
@@ -188,34 +192,20 @@ export function CardEffectPreviewLayer({
   const overlayOpacity = resolveCardEffectPreviewOpacity(opacity)
   const presentationKey = `${scope}:${runtime}`
   const isReady = runtime === 'css-fallback' || readyKey === presentationKey
+  const rendererCommitted = Effect !== null && readyKey === presentationKey
 
   useEffect(() => {
-    if (Effect === null) return
+    // A lazy component can stay suspended for arbitrarily long while its
+    // chunk downloads. Start the no-canvas watchdog only after a child inside
+    // that Suspense boundary has actually committed. From this point a blank
+    // renderer is a real initialisation failure, not network latency.
+    if (!rendererCommitted) return
     const root = rootRef.current
     if (root === null || typeof MutationObserver === 'undefined') return
 
-    const listeners = new Map<HTMLCanvasElement, () => void>()
     const markFailed = () => setFailedScope(scope)
-    const observeCanvas = () => {
-      root.querySelectorAll('canvas').forEach((canvas) => {
-        if (listeners.has(canvas)) return
-        canvas.addEventListener('webglcontextlost', markFailed)
-        canvas.addEventListener('webglcontextcreationerror', markFailed)
-        listeners.set(canvas, () => {
-          canvas.removeEventListener('webglcontextlost', markFailed)
-          canvas.removeEventListener('webglcontextcreationerror', markFailed)
-        })
-      })
-    }
-    const observer = new MutationObserver(observeCanvas)
-    observer.observe(root, { childList: true, subtree: true })
-    observeCanvas()
-
-    return () => {
-      observer.disconnect()
-      listeners.forEach((remove) => remove())
-    }
-  }, [Effect, presentationKey, scope])
+    return observePreviewCardEffectCanvases(root, markFailed)
+  }, [rendererCommitted, scope])
 
   if (!valid || runtime === null) return null
 
@@ -228,7 +218,12 @@ export function CardEffectPreviewLayer({
       data-preview-card-effect-ready={isReady ? 'true' : 'false'}
       data-preview-card-effect-foundation="transparent"
       className="absolute inset-0"
-      style={{ isolation: 'isolate', overflow: 'hidden', contain: 'paint' }}
+      style={{
+        overflow: 'hidden',
+        // The whole effect group is a sibling of the configured gradient.
+        // Blend here so opaque shader pixels cannot cover that gradient.
+        mixBlendMode: 'screen',
+      }}
     >
       {runtime === 'css-fallback' && (
         <div
@@ -239,7 +234,6 @@ export function CardEffectPreviewLayer({
               resolveCardEffectPreviewColors(effect, props),
             ),
             opacity: overlayOpacity,
-            mixBlendMode: 'screen',
           }}
         />
       )}
@@ -252,7 +246,7 @@ export function CardEffectPreviewLayer({
             <div
               data-preview-card-effect-renderer
               className="absolute inset-0"
-              style={{ opacity: overlayOpacity, mixBlendMode: 'screen' }}
+              style={{ opacity: overlayOpacity }}
             >
               <Effect {...runtimeProps} />
             </div>
