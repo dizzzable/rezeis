@@ -50,7 +50,9 @@ RUN addgroup -g 1001 -S rezeis && adduser -u 1001 -S rezeis -G rezeis
 WORKDIR /app
 ENV NODE_ENV=production
 # App metadata baked into the image so health endpoint reports the release.
-ARG APP_VERSION=0.9.6.62
+# A local image is a development build, not an older release. The release
+# workflow always supplies the exact package version as this build argument.
+ARG APP_VERSION=dev
 ARG GIT_SHA=unknown
 ARG GIT_BRANCH=unknown
 ENV APP_VERSION=${APP_VERSION} \
