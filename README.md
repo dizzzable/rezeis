@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/dizzzable/rezeis/releases/latest"><img src="https://img.shields.io/badge/version-0.9.6.86-blue" alt="Version" /></a>
+  <a href="https://github.com/dizzzable/rezeis/releases/latest"><img src="https://img.shields.io/badge/version-0.9.6.91-blue" alt="Version" /></a>
   <a href="https://github.com/dizzzable/rezeis/pkgs/container/rezeis"><img src="https://img.shields.io/badge/ghcr.io-rezeis-2496ED?logo=docker&logoColor=white" alt="GHCR" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="License" /></a>
   <a href="#"><img src="https://img.shields.io/badge/NestJS-11-red" alt="NestJS" /></a>
@@ -56,10 +56,10 @@ GitHub Container Registry публикует образ при каждом push
 docker pull ghcr.io/dizzzable/rezeis:latest
 
 # Pin to a specific release
-docker pull ghcr.io/dizzzable/rezeis:v0.9.5.45
+docker pull ghcr.io/dizzzable/rezeis:v0.9.6.91
 ```
 
-Доступные теги: `latest` (актуальный main), `v0.9.5.45` (тег релиза), плюс `sha-<short>` для каждого коммита в `main`. Прод-`docker-compose.yml` использует `latest`.
+Доступные теги: `latest` (актуальный main), `v0.9.6.91` (текущий тег релиза), плюс `sha-<short>` для каждого коммита в `main`. Для воспроизводимого развёртывания указывайте версию релиза, а не `latest`.
 
 ---
 
@@ -306,10 +306,22 @@ cd rezeis-admin/web && npm install && npm run dev
 - **FAQ Manager** с медиа-файлами
 - **Backup/Restore** базы данных
 - **Config Portability** — экспорт/импорт настроек
-- **Theme Studio** — Liquid Glass, custom CSS, тёмная/светлая темы, presets
+- **Theme Studio** — Liquid Glass, custom CSS, тёмная/светлая темы, восемь стандартных и 104 концептуальных пресета
 - **WebSocket real-time** обновления (Socket.IO)
 - **Swagger API** документация на `/api/docs`
 - Полная **i18n** (ru/en) с lazy-loading feature-bundles
+
+### 🎨 Брендинг WEB Reiwa
+
+Страница **WEB Reiwa** — источник истины для внешнего вида пользовательского кабинета. После сохранения Rezeis хранит не только id пресета, но и его разрешённые визуальные токены, поэтому Reiwa может стабильно отрисовать выбранную тему независимо от доступности каталога пресетов в панели.
+
+- **104 концепта + 8 стандартных тем:** концепт переносит палитру, фон/текстуру, поверхность, шрифт, радиусы, градиент, паттерн и параметры карточек. Оператор может донастроить любой из этих параметров.
+- **Режим яркости:** оператор фиксирует светлый или тёмный вариант либо разрешает пользователю выбирать только яркость выбранного концепта; сам концепт остаётся операторским решением.
+- **Карточки подписок:** глобальный эффект, градиент, паттерн, текст и стекло задаются для всех карт. До 20 позиций могут наследовать глобальный эффект или получить явный `override`; статический градиент позиции остаётся отдельной настройкой.
+- **Предсказуемый приоритет:** прямое изменение оператором глобального градиента, эффекта, паттерна или текста синхронизируется с вариантами яркости и не должно быть скрыто старыми настройками слотов.
+- **Живой предпросмотр:** применяет тот же безопасный runtime, что и Reiwa. При отсутствии нужного Canvas/WebGL вместо пустой карты показывается CSS-представление выбранного эффекта с операторскими цветами и прозрачностью.
+
+Подробный пользовательский контракт рендеринга находится в [README Reiwa](../reiwa/README.md#-контракт-брендинга-web-reiwa).
 
 ---
 

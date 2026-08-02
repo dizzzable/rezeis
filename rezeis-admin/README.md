@@ -2,7 +2,7 @@
 
 Rezeis Admin — NestJS backend + React/Vite frontend for the admin panel.
 
-- **Version:** `0.9.6.66`
+- **Version:** `0.9.6.91`
 - **Backend:** NestJS 11 · Prisma 7 · PostgreSQL · Redis · BullMQ
 - **Frontend:** React 19 · Vite 8 · TanStack Query 5 · shadcn/ui · Tailwind 4
 
@@ -57,7 +57,7 @@ cd web && npm run build # → dist/
 
 Both images are published to GHCR on every push to `main`:
 
-- `ghcr.io/dizzzable/rezeis:0.9.6.66`
+- `ghcr.io/dizzzable/rezeis:v0.9.6.91`
 - `ghcr.io/dizzzable/rezeis:0.9.6`
 - `ghcr.io/dizzzable/rezeis:sha-<short>`
 
@@ -78,6 +78,33 @@ variables.
 The compose stack runs the API container with `RUID_PROCESS_ROLE=api` and the
 worker container with `RUID_PROCESS_ROLE=worker` so scheduled jobs and worker
 side effects do not double-run in split mode.
+
+## WEB Reiwa branding contract
+
+`rezeis-admin` owns the user-facing branding configuration consumed by Reiwa.
+The **WEB Reiwa** page persists resolved design tokens rather than requiring
+the runtime to look up the admin preset catalog. That keeps the user cabinet
+stable across an admin-panel outage or a catalog update.
+
+- **Preset catalog:** eight legacy themes plus 104 conceptual presets. A
+  conceptual preset includes palette, app background, surfaces, typography,
+  corner radii, card gradient/pattern, and card-effect defaults.
+- **Brightness policy:** operators select the concept and a default `light` or
+  `dark` representation. `user-selectable` permits users to change only that
+  representation; it never grants selection of a different operator theme.
+- **Card precedence:** global card controls are the baseline. A positional
+  slot inherits those controls by default; an explicit `override` is required
+  to change an effect for that subscription position. A slot's static gradient
+  remains an independent, deliberate choice. Up to 20 slots are accepted.
+- **Contrast and glass:** text policy (`auto`, light, dark, custom) and the
+  optional glass composition are independent from effect colours, so a
+  contrast decision cannot silently rewrite an operator's gradient.
+- **Safe preview/runtime:** the admin preview and Reiwa use matching guarded
+  effect runtimes. If Canvas/WebGL is unavailable or fails at runtime, they
+  retain the configured gradient and display a CSS fallback of the selected
+  effect with the configured palette and opacity.
+
+See the public-runtime details in the [Reiwa README](../../reiwa/README.md#-контракт-брендинга-web-reiwa).
 
 ## Quality gates
 
