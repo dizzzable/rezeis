@@ -79,6 +79,26 @@ The compose stack runs the API container with `RUID_PROCESS_ROLE=api` and the
 worker container with `RUID_PROCESS_ROLE=worker` so scheduled jobs and worker
 side effects do not double-run in split mode.
 
+## Product surfaces
+
+The admin panel is more than a VPN subscription CRUD surface. Its major
+operator-facing areas are:
+
+- **Catalog and lifecycle:** plans, paid/free trials, multi-subscription
+  lifecycle, auto-renewal, device and traffic limits, add-ons, and promocodes.
+- **Revenue and growth:** 15 payment gateways, checkout/webhook/reconciliation
+  operations, payment analytics, referrals, multi-level partners and
+  withdrawals, quests, and advertising requests.
+- **Support and communications:** broadcasts, event-driven notifications,
+  FAQ with media, support tickets and document requests, AI-support controls,
+  Bot Studio, custom emoji packs, and Web Landing/Subpage configuration.
+- **Infrastructure and operations:** Remnawave provisioning and profile sync,
+  dashboard/system health, realtime updates, system events/logs, anti-fraud,
+  imports, backups/restores, and configuration portability.
+- **Security and governance:** RBAC, admin accounts, API tokens, 2FA,
+  passkeys, OAuth/external auth, IP allow/block lists, webhook controls, and
+  audit logs.
+
 ## WEB Reiwa branding contract
 
 `rezeis-admin` owns the user-facing branding configuration consumed by Reiwa.
