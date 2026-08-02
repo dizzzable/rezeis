@@ -3,6 +3,7 @@ import { Logger } from '@nestjs/common';
 import { Job } from 'bullmq';
 
 import { SystemEventsService, EVENT_TYPES } from '../../common/services/system-events.service';
+import { CustomEmojiService } from '../custom-emoji/services/custom-emoji.service';
 import { BACKUP_QUEUE, BACKUP_JOBS } from './backup.constants';
 import { BackupService } from './services/backup.service';
 
@@ -40,6 +41,7 @@ export class BackupProcessor extends WorkerHost {
   public constructor(
     private readonly backupService: BackupService,
     private readonly systemEventsService: SystemEventsService,
+    private readonly customEmojiService: CustomEmojiService,
   ) {
     super();
   }
@@ -77,7 +79,11 @@ export class BackupProcessor extends WorkerHost {
     return result;
   }
 
-  private async handleRestore(job: Job<BackupRestoreJobData>): Promise<{ success: boolean; migrationsApplied: boolean }> {
+  private async handleRestore(job: Job<BackupRestoreJobData>): Promise<{
+    success: boolean;
+    migrationsApplied: boolean;
+    customEmojiAssets: { recoveredEmojiCount: number; skippedPacks: number } | null;
+  }> {
     const { filename, initiatedBy } = job.data;
     this.logger.log(`Starting restore from: ${filename}`);
 
@@ -91,16 +97,29 @@ export class BackupProcessor extends WorkerHost {
     await job.updateProgress({ stage: 'migrating', percent: 70 });
     const migrationsApplied = await this.backupService.runMigrateDeploy();
 
+    // SQL backups intentionally don't include the uploads volume. Recreate
+    // custom emoji files from their Telegram source after the restored DB is
+    // current. A missing/deleted source must never invalidate the DB restore.
+    await job.updateProgress({ stage: 'recovering-custom-emoji-assets', percent: 85 });
+    const customEmojiAssets = await this.customEmojiService.rehydrateMissingAssets().catch((err: unknown) => {
+      this.logger.warn(
+        `Custom emoji asset recovery after restore failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return null;
+    });
+
     await job.updateProgress({ stage: 'completed', percent: 100 });
 
     this.systemEventsService.info(
       'system.restore_completed',
       'SYSTEM',
       `Database restored from ${filename}`,
-      { filename, initiatedBy, success, migrationsApplied },
+      { filename, initiatedBy, success, migrationsApplied, customEmojiAssets },
     );
 
-    return { success, migrationsApplied };
+    return { success, migrationsApplied, customEmojiAssets };
   }
 
   private async handleDeliverTelegram(job: Job<BackupDeliverTelegramJobData>): Promise<{ delivered: boolean }> {

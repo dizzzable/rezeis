@@ -6,7 +6,7 @@ import { CARD_EFFECT_REGISTRY } from './card-effect-registry'
 import { CardEffectPicker } from './card-effect-section'
 
 describe('CardEffectPicker thumbnails', () => {
-  it('shows every effect palette and animates exactly the selected GPU-free tile', () => {
+  it('shows every effect palette and mounts the real renderer only for the selected live tile', () => {
     const { container } = renderWithProviders(
       <CardEffectPicker
         effect="paperWarp"
@@ -15,6 +15,7 @@ describe('CardEffectPicker thumbnails', () => {
         onEffectChange={vi.fn()}
         onPropsChange={vi.fn()}
         onOpacityChange={vi.fn()}
+        livePreview
       />,
     )
 
@@ -33,6 +34,6 @@ describe('CardEffectPicker thumbnails', () => {
     for (const thumbnail of thumbnails) {
       expect(thumbnail.style.backgroundImage).not.toBe('')
     }
-    expect(container.querySelector('canvas')).not.toBeInTheDocument()
+    expect(container.querySelectorAll('[data-card-effect-thumbnail-renderer]')).toHaveLength(1)
   })
 })

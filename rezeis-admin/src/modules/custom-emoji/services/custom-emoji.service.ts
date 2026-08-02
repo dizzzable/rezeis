@@ -113,8 +113,32 @@ export class CustomEmojiService {
       throw new BadRequestException('The set has no stickers (or it is not accessible)');
     }
     const name = input.packName.trim() || set?.title?.trim() || setName;
+    const packs = await this.listPacks();
+    const existing = packs.find((pack) => matchesStickerSet(pack, setName, stickers));
+    if (existing) {
+      // `setName` was not retained by an older settings normalizer. Besides
+      // preventing a duplicate on the next import, backfilling it lets a
+      // database restore re-download the pack's files automatically.
+      const restored = await this.rehydratePackAssets(token, existing, stickers);
+      const recovered = {
+        ...restored.pack,
+        setName,
+        ...(input.builtin === true ? { builtin: true } : {}),
+      };
+      const changed =
+        restored.changed ||
+        recovered.setName !== existing.setName ||
+        recovered.builtin !== existing.builtin;
+      if (changed) {
+        await this.savePacks(packs.map((pack) => (pack.id === existing.id ? recovered : pack)));
+      }
+      this.logger.log(
+        `Reused emoji set "${recovered.name}" (${setName}); restored ${restored.recoveredEmojiCount} missing asset(s)`,
+      );
+      return recovered;
+    }
     const packSlug = slugify(name) || 'pack';
-    const usedSlugs = new Set(indexEmojisBySlug(await this.listPacks()).keys());
+    const usedSlugs = new Set(indexEmojisBySlug(packs).keys());
 
     // Pre-assign deterministic slugs (by set order) so downloads can run in
     // parallel without racing on slug uniqueness.
@@ -155,9 +179,77 @@ export class CustomEmojiService {
       builtin: input.builtin ?? false,
       emojis,
     };
-    await this.savePacks([...(await this.listPacks()), pack]);
+    await this.savePacks([...packs, pack]);
     this.logger.log(`Imported emoji set "${name}" (${setName}): ${emojis.length} emojis`);
     return pack;
+  }
+
+  /**
+   * Recreate custom-emoji files after restoring a database-only backup.
+   *
+   * The pack catalogue belongs to PostgreSQL but image/Lottie/video files are
+   * deliberately stored in the persistent uploads volume. When only the
+   * database is restored, every original URL points to a non-existent file.
+   * The Telegram set name retained on the pack gives us a safe source for
+   * rebuilding only those missing files. Individual pack errors are isolated:
+   * a restore remains successful even if a particular Telegram set disappeared.
+   */
+  public async rehydrateMissingAssets(): Promise<{
+    readonly recoveredEmojiCount: number;
+    readonly skippedPacks: number;
+  }> {
+    const packs = await this.listPacks();
+    const sourceCandidates = packs.filter(
+      (pack) => typeof pack.setName === 'string' && pack.setName.length > 0,
+    );
+    // This routine also runs during API boot to repair an older database-only
+    // restore. Avoid Telegram requests for every healthy pack on every start.
+    const candidates: CustomEmojiPackInterface[] = [];
+    for (const pack of sourceCandidates) {
+      if (await this.packHasMissingAssets(pack)) candidates.push(pack);
+    }
+    if (candidates.length === 0) {
+      return { recoveredEmojiCount: 0, skippedPacks: 0 };
+    }
+
+    const token = await this.settingsService.getDecryptedBotToken();
+    if (!token) {
+      this.logger.warn('Skipped custom emoji asset recovery: bot token is not configured');
+      return { recoveredEmojiCount: 0, skippedPacks: candidates.length };
+    }
+
+    let recoveredEmojiCount = 0;
+    let skippedPacks = 0;
+    let changed = false;
+    const next = [...packs];
+    for (let index = 0; index < next.length; index += 1) {
+      const pack = next[index]!;
+      if (!pack.setName) continue;
+      try {
+        const set = await tgApi<{ stickers?: TgSticker[] }>(token, 'getStickerSet', { name: pack.setName });
+        const stickers = (set?.stickers ?? []).slice(0, MAX_EMOJIS_PER_IMPORT);
+        if (stickers.length === 0) {
+          skippedPacks += 1;
+          this.logger.warn(`Skipped custom emoji recovery for "${pack.name}": empty Telegram set`);
+          continue;
+        }
+        const restored = await this.rehydratePackAssets(token, pack, stickers);
+        if (restored.changed) {
+          next[index] = restored.pack;
+          changed = true;
+          recoveredEmojiCount += restored.recoveredEmojiCount;
+        }
+      } catch (err: unknown) {
+        skippedPacks += 1;
+        this.logger.warn(
+          `Skipped custom emoji recovery for "${pack.name}": ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+    if (changed) await this.savePacks(next);
+    return { recoveredEmojiCount, skippedPacks };
   }
 
   /**
@@ -209,6 +301,73 @@ export class CustomEmojiService {
       imageUrl = await this.downloadThumb(token, sticker).catch(() => null);
     }
     return { imageUrl, lottieUrl, videoUrl };
+  }
+
+  /** Restore just the missing files for one pack from a fetched sticker set. */
+  private async rehydratePackAssets(
+    token: string,
+    pack: CustomEmojiPackInterface,
+    stickers: readonly TgSticker[],
+  ): Promise<{
+    readonly pack: CustomEmojiPackInterface;
+    readonly changed: boolean;
+    readonly recoveredEmojiCount: number;
+  }> {
+    const stickersByCustomEmojiId = new Map(
+      stickers
+        .filter((sticker): sticker is TgSticker & { readonly custom_emoji_id: string } =>
+          typeof sticker.custom_emoji_id === 'string',
+        )
+        .map((sticker) => [sticker.custom_emoji_id, sticker]),
+    );
+    let changed = false;
+    let recoveredEmojiCount = 0;
+    const emojis = await mapWithConcurrency(pack.emojis, 6, async (emoji, index) => {
+        const [hasImage, hasLottie, hasVideo] = await Promise.all([
+          this.assetUpload.exists(emoji.imageUrl),
+          this.assetUpload.exists(emoji.lottieUrl),
+          this.assetUpload.exists(emoji.videoUrl),
+        ]);
+        if (hasImage && hasLottie && hasVideo) return emoji;
+
+        const sticker =
+          (emoji.customEmojiId ? stickersByCustomEmojiId.get(emoji.customEmojiId) : undefined) ??
+          stickers[index];
+        if (!sticker) {
+          this.logger.warn(`Cannot recover emoji "${emoji.slug}": sticker is no longer in the Telegram set`);
+          return emoji;
+        }
+        const assets = await this.stickerAssets(token, sticker);
+        const next = {
+          ...emoji,
+          imageUrl: hasImage ? emoji.imageUrl : (assets.imageUrl ?? emoji.imageUrl),
+          lottieUrl: hasLottie ? emoji.lottieUrl : (assets.lottieUrl ?? emoji.lottieUrl),
+          videoUrl: hasVideo ? emoji.videoUrl : (assets.videoUrl ?? emoji.videoUrl),
+        };
+        if (
+          next.imageUrl === emoji.imageUrl &&
+          next.lottieUrl === emoji.lottieUrl &&
+          next.videoUrl === emoji.videoUrl
+        ) {
+          return emoji;
+        }
+        changed = true;
+        recoveredEmojiCount += 1;
+        return next;
+      });
+    return { pack: { ...pack, emojis }, changed, recoveredEmojiCount };
+  }
+
+  private async packHasMissingAssets(pack: CustomEmojiPackInterface): Promise<boolean> {
+    for (const emoji of pack.emojis) {
+      const [hasImage, hasLottie, hasVideo] = await Promise.all([
+        this.assetUpload.exists(emoji.imageUrl),
+        this.assetUpload.exists(emoji.lottieUrl),
+        this.assetUpload.exists(emoji.videoUrl),
+      ]);
+      if (!hasImage || !hasLottie || !hasVideo) return true;
+    }
+    return false;
   }
 
   /** Download a Telegram file by file_id; returns its raw bytes. */
@@ -295,6 +454,32 @@ export class CustomEmojiService {
     return true;
   }
 
+  /**
+   * Attach an authoritative Telegram source to a known existing pack. This
+   * repairs records created before `setName` survived settings normalization;
+   * it deliberately changes metadata only and never downloads files itself.
+   */
+  public async backfillPackSource(
+    packId: string,
+    input: { readonly setName: string; readonly builtin?: boolean },
+  ): Promise<boolean> {
+    const packs = await this.listPacks();
+    const target = packs.find((pack) => pack.id === packId);
+    if (!target) return false;
+    const setName = input.setName.trim();
+    if (setName.length === 0) return false;
+    const builtin = input.builtin === true ? true : target.builtin;
+    if (target.setName === setName && builtin === target.builtin) return true;
+    await this.savePacks(
+      packs.map((pack) =>
+        pack.id === packId
+          ? { ...pack, setName, ...(builtin === true ? { builtin: true } : {}) }
+          : pack,
+      ),
+    );
+    return true;
+  }
+
   /** Read the marker list of builtin pack ids already seeded on this instance. */
   public async readSeededDefaults(): Promise<string[]> {
     const settings = await this.getSettings();
@@ -346,6 +531,28 @@ function uniqueSlug(base: string, used: ReadonlySet<string>): string {
   let n = 2;
   while (used.has(`${base}_${n}`)) n += 1;
   return `${base}_${n}`;
+}
+
+/** True when a saved pack is known to represent this Telegram sticker set. */
+function matchesStickerSet(
+  pack: CustomEmojiPackInterface,
+  setName: string,
+  stickers: readonly TgSticker[],
+): boolean {
+  if (pack.setName?.trim().toLowerCase() === setName.trim().toLowerCase()) return true;
+
+  // Legacy saved records may have lost `setName` while being normalized. A
+  // complete custom-emoji-id match is still an unambiguous source identity and
+  // lets a user repair a restored pack simply by importing the same link again.
+  const remoteIds = stickers
+    .map((sticker) => sticker.custom_emoji_id)
+    .filter((id): id is string => typeof id === 'string');
+  const packIds = pack.emojis
+    .map((emoji) => emoji.customEmojiId)
+    .filter((id): id is string => typeof id === 'string');
+  if (remoteIds.length === 0 || remoteIds.length !== packIds.length) return false;
+  const remoteIdSet = new Set(remoteIds);
+  return new Set(packIds).size === packIds.length && packIds.every((id) => remoteIdSet.has(id));
 }
 
 /**

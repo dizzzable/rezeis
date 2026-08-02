@@ -29,6 +29,7 @@ import {
   buildCardEffectThumbnailArtwork,
   resolveCardEffectPreviewColors,
 } from './card-effect-preview-utils'
+import { CardEffectPreviewLayer } from './card-effect-preview-runtime'
 import './card-effect-preview-runtime.css'
 import type { ControlDef } from '@/features/appearance/background-controls'
 
@@ -39,6 +40,8 @@ interface CardEffectSectionProps {
   onEffectChange: (effect: string) => void
   onPropsChange: (props: Record<string, unknown>) => void
   onOpacityChange: (opacity: number) => void
+  /** Render the actual selected renderer in its tile, rather than only artwork. */
+  livePreview?: boolean
 }
 
 export function CardEffectSection(props: CardEffectSectionProps) {
@@ -50,7 +53,7 @@ export function CardEffectSection(props: CardEffectSectionProps) {
         <CardDescription>{t('brandingPage.sections.cardEffect.description')}</CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
-        <CardEffectPicker {...props} />
+        <CardEffectPicker {...props} livePreview={props.livePreview ?? true} />
       </CardContent>
     </Card>
   )
@@ -68,6 +71,7 @@ export function CardEffectPicker({
   onEffectChange,
   onPropsChange,
   onOpacityChange,
+  livePreview = false,
 }: CardEffectSectionProps) {
   const { t } = useTranslation()
   const def = effect !== 'NONE' ? getCardEffectDef(effect) : undefined
@@ -123,10 +127,10 @@ export function CardEffectPicker({
                 isActive ? 'border-primary ring-2 ring-primary/40' : 'border-border hover:border-primary/40'
               }`}
             >
-              {/* The phone preview owns the sole live GPU renderer. Every tile
-                  has a deterministic palette preview; only the selected tile
-                  animates, so hidden configurator sections cannot accumulate
-                  canvas/WebGL contexts. */}
+              {/* Every tile has a stable palette fallback. The actively edited
+                  card can additionally show its *actual* renderer, so the
+                  operator does not have to infer an animation from a generic
+                  gradient. All unselected tiles remain GPU-free. */}
               <div
                 aria-hidden="true"
                 data-card-effect-thumbnail
@@ -136,6 +140,18 @@ export function CardEffectPicker({
                 }`}
                 style={{ backgroundImage: thumbnailArtwork }}
               />
+              {isActive && livePreview && (
+                <div
+                  data-card-effect-thumbnail-renderer
+                  className="pointer-events-none absolute inset-0"
+                >
+                  <CardEffectPreviewLayer
+                    effect={e.id}
+                    props={thumbnailProps}
+                    opacity={opacity}
+                  />
+                </div>
+              )}
               <span className="absolute inset-x-0 bottom-0 bg-black/55 px-1 py-0.5 text-center text-[9px] font-medium text-white">
                 {t(`brandingPage.cardEffects.${e.id}`, { defaultValue: e.name })}
               </span>

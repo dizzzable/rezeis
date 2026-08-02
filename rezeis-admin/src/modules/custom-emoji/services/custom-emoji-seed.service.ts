@@ -63,6 +63,12 @@ export class CustomEmojiSeedService implements OnApplicationBootstrap {
     if (getProcessRole() === 'worker') return;
     try {
       await this.seedDefaults();
+      const recovery = await this.customEmojiService.rehydrateMissingAssets();
+      if (recovery.recoveredEmojiCount > 0 || recovery.skippedPacks > 0) {
+        this.logger.log(
+          `Custom emoji asset recovery: ${recovery.recoveredEmojiCount} repaired, ${recovery.skippedPacks} skipped`,
+        );
+      }
     } catch (err: unknown) {
       this.logger.warn(
         `Default emoji-pack seed failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -73,8 +79,6 @@ export class CustomEmojiSeedService implements OnApplicationBootstrap {
   private async seedDefaults(): Promise<void> {
     const seeded = new Set(await this.customEmojiService.readSeededDefaults());
     const pending = BUILTIN_PACKS.filter((p) => !seeded.has(p.id));
-    if (pending.length === 0) return;
-
     const packs = await this.customEmojiService.listPacks();
     const byTitle = new Map(packs.map((p) => [p.name, p] as const));
     const token = await this.settingsService.getDecryptedBotToken();
@@ -112,6 +116,20 @@ export class CustomEmojiSeedService implements OnApplicationBootstrap {
           }`,
         );
       }
+    }
+
+    // A restored database can keep every seed marker while the persisted packs
+    // predate `setName`. Reconcile known builtin metadata on every API boot so
+    // missing-file recovery has a trustworthy Telegram source.
+    const current = await this.customEmojiService.listPacks();
+    const currentByTitle = new Map(current.map((pack) => [pack.name, pack] as const));
+    for (const seed of BUILTIN_PACKS) {
+      const existing = currentByTitle.get(seed.title);
+      if (!existing) continue;
+      await this.customEmojiService.backfillPackSource(existing.id, {
+        setName: seed.setName,
+        builtin: true,
+      });
     }
   }
 }

@@ -6,7 +6,11 @@ import api from '@/lib/api'
 import { renderWithProviders } from '@/test/test-utils'
 import WebReiwaPage from './branding-page'
 import { CONCEPT_CARD_PRESETS } from './concept-card-presets'
-import { CONCEPT_THEME_PRESETS } from './theme-presets'
+import {
+  CARD_GRADIENT_PRESETS,
+  CONCEPT_THEME_PRESETS,
+  createConceptThemeModeVariants,
+} from './theme-presets'
 
 // WebReiwaPage mounts every tab's section tree at once (kept mounted so the
 // form/preview stay intact), so the first render is heavy — under the full
@@ -140,7 +144,7 @@ describe('WebReiwaPage branding settings', () => {
     )
   }, 20_000)
 
-  it('synchronizes existing positional card slots when applying a full theme', async () => {
+  it('makes existing positional card slots inherit the global gradient when applying a full theme', async () => {
     const user = userEvent.setup()
     vi.spyOn(api, 'get').mockResolvedValue({
       data: {
@@ -181,6 +185,7 @@ describe('WebReiwaPage branding settings', () => {
     await waitFor(() => expect(patchSpy).toHaveBeenCalledOnce())
     const payload = patchSpy.mock.calls[0]?.[1] as Record<string, unknown>
     const selectedTheme = CONCEPT_THEME_PRESETS[0]
+    const expectedVariants = createConceptThemeModeVariants(selectedTheme)
     expect(payload).toMatchObject({
       themePresetId: 'concept-a',
       themePresetVersion: 2,
@@ -189,26 +194,46 @@ describe('WebReiwaPage branding settings', () => {
           cardEffect: selectedTheme.cardEffect,
           cardEffectProps: selectedTheme.cardEffectProps,
           cardEffectOpacity: selectedTheme.cardEffectOpacity,
-          cardGradient: selectedTheme.cardGradient,
+          cardGradient: null,
         },
         {
           cardEffect: selectedTheme.cardEffect,
           cardEffectProps: selectedTheme.cardEffectProps,
           cardEffectOpacity: selectedTheme.cardEffectOpacity,
-          cardGradient: selectedTheme.cardGradient,
+          cardGradient: null,
         },
         {
           cardEffect: selectedTheme.cardEffect,
           cardEffectProps: selectedTheme.cardEffectProps,
           cardEffectOpacity: selectedTheme.cardEffectOpacity,
-          cardGradient: selectedTheme.cardGradient,
+          cardGradient: null,
         },
       ],
+      // Applying a concept keeps its intentional light/dark card artwork.
+      // A manual operator gradient is the only path that synchronizes both.
+      themeVariants: {
+        light: expect.objectContaining({
+          cardGradient: expectedVariants.light.cardGradient,
+          cardEffectsByIndex: [
+            expect.objectContaining({ cardGradient: null }),
+            expect.objectContaining({ cardGradient: null }),
+            expect.objectContaining({ cardGradient: null }),
+          ],
+        }),
+        dark: expect.objectContaining({
+          cardGradient: expectedVariants.dark.cardGradient,
+          cardEffectsByIndex: [
+            expect.objectContaining({ cardGradient: null }),
+            expect.objectContaining({ cardGradient: null }),
+            expect.objectContaining({ cardGradient: null }),
+          ],
+        }),
+      },
     })
     expect(payload).not.toHaveProperty('brandName')
   }, 20_000)
 
-  it('applies an independent concept card and synchronizes existing positional slots', async () => {
+  it('applies an independent concept card while clearing stale positional gradient overrides', async () => {
     const user = userEvent.setup()
     vi.spyOn(api, 'get').mockResolvedValue({
       data: {
@@ -267,21 +292,91 @@ describe('WebReiwaPage branding settings', () => {
           cardEffect: selectedCard.cardEffect,
           cardEffectProps: selectedCard.cardEffectProps,
           cardEffectOpacity: selectedCard.cardEffectOpacity,
-          cardGradient: selectedCard.cardGradient,
+          cardGradient: null,
         },
         {
           cardEffect: selectedCard.cardEffect,
           cardEffectProps: selectedCard.cardEffectProps,
           cardEffectOpacity: selectedCard.cardEffectOpacity,
-          cardGradient: selectedCard.cardGradient,
+          cardGradient: null,
         },
         {
           cardEffect: selectedCard.cardEffect,
           cardEffectProps: selectedCard.cardEffectProps,
           cardEffectOpacity: selectedCard.cardEffectOpacity,
-          cardGradient: selectedCard.cardGradient,
+          cardGradient: null,
         },
       ],
+    })
+  }, 20_000)
+
+  it('makes a gradient selected from the operator palette override legacy conceptual slot gradients', async () => {
+    const user = userEvent.setup()
+    const staleSlots = [
+      {
+        cardEffect: 'paperWarp',
+        cardEffectProps: { speed: 1 },
+        cardEffectOpacity: 0.84,
+        cardGradient: 'linear-gradient(135deg, #2d0a4d 0%, #8545f7 100%)',
+      },
+      {
+        cardEffect: 'grainient',
+        cardEffectProps: { noise: 0.25 },
+        cardEffectOpacity: 0.68,
+        cardGradient: 'linear-gradient(135deg, #0c4a6e 0%, #22d3ee 100%)',
+      },
+    ]
+    const variants = createConceptThemeModeVariants(CONCEPT_THEME_PRESETS[0])
+    vi.spyOn(api, 'get').mockResolvedValue({
+      data: {
+        ...createBrandingPayload(),
+        themePresetId: 'concept-cu',
+        cardEffectsByIndex: staleSlots,
+        themeVariants: {
+          light: { ...variants.light, cardEffectsByIndex: staleSlots },
+          dark: { ...variants.dark, cardEffectsByIndex: staleSlots },
+        },
+      },
+    })
+    const patchSpy = vi.spyOn(api, 'patch').mockResolvedValue({
+      data: createBrandingPayload(),
+    })
+
+    renderWithProviders(<WebReiwaPage />)
+
+    await screen.findByRole('heading', { name: /WEB Reiwa/ })
+    await user.click(screen.getByRole('tab', { name: 'Subscription card' }))
+    const indigoGradient = screen
+      .getAllByRole('button', { name: 'Indigo' })
+      .find((button) => button.className.includes('aspect-square'))
+    expect(indigoGradient).toBeDefined()
+    await user.click(indigoGradient!)
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(patchSpy).toHaveBeenCalledOnce())
+    const payload = patchSpy.mock.calls[0]?.[1] as Record<string, unknown>
+    expect(payload).toMatchObject({
+      cardGradient: CARD_GRADIENT_PRESETS.find((preset) => preset.id === 'indigo')?.value,
+      cardEffectsByIndex: [
+        expect.objectContaining({ cardGradient: null, cardEffect: 'paperWarp' }),
+        expect.objectContaining({ cardGradient: null, cardEffect: 'grainient' }),
+      ],
+      themeVariants: {
+        light: expect.objectContaining({
+          cardGradient: CARD_GRADIENT_PRESETS.find((preset) => preset.id === 'indigo')?.value,
+          cardEffectsByIndex: [
+            expect.objectContaining({ cardGradient: null, cardEffect: 'paperWarp' }),
+            expect.objectContaining({ cardGradient: null, cardEffect: 'grainient' }),
+          ],
+        }),
+        dark: expect.objectContaining({
+          cardGradient: CARD_GRADIENT_PRESETS.find((preset) => preset.id === 'indigo')?.value,
+          cardEffectsByIndex: [
+            expect.objectContaining({ cardGradient: null, cardEffect: 'paperWarp' }),
+            expect.objectContaining({ cardGradient: null, cardEffect: 'grainient' }),
+          ],
+        }),
+      },
     })
   }, 20_000)
 })

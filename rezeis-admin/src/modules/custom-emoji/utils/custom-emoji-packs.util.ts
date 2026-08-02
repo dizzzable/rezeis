@@ -31,7 +31,14 @@ function readPack(value: unknown): CustomEmojiPackInterface | null {
     const emoji = readEmoji(e);
     if (emoji !== null) emojis.push(emoji);
   }
-  return { id, name, emojis };
+  const setName = readString(obj.setName);
+  return {
+    id,
+    name,
+    ...(setName === null ? {} : { setName }),
+    ...(obj.builtin === true ? { builtin: true } : {}),
+    emojis,
+  };
 }
 
 function readEmoji(value: unknown): CustomEmojiInterface | null {

@@ -78,6 +78,26 @@ export class EmojiAssetUploadService implements OnModuleInit {
     await fs.rm(join(this.uploadsDir, fileName), { force: true }).catch((): void => undefined);
   }
 
+  /** Whether a public emoji URL still has a corresponding local asset.
+   *
+   * The pack catalogue lives in PostgreSQL while assets live in the persistent
+   * uploads volume. A database-only backup can therefore restore the catalogue
+   * without the files; callers use this check to rehydrate only missing items.
+   */
+  public async exists(url: string | null | undefined): Promise<boolean> {
+    if (!url) return true;
+    const match = /\/uploads\/emoji\/([A-Za-z0-9._-]+)$/.exec(url);
+    if (!match) return false;
+    const fileName = match[1]!;
+    if (fileName.includes('/') || fileName.includes('\\') || fileName.includes('..')) return false;
+    try {
+      await fs.access(join(this.uploadsDir, fileName));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   private resolveUploadsDir(): string {
     const fromEnv = process.env.EMOJI_UPLOADS_DIR;
     if (fromEnv && fromEnv.trim().length > 0) {

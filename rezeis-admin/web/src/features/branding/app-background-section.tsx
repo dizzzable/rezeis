@@ -228,6 +228,7 @@ export function AppBackgroundSection({
             effect={value.effect}
             props={value.props}
             opacity={value.opacity}
+            livePreview={false}
             onEffectChange={(e) => set({ effect: e, props: e === 'NONE' ? {} : value.props })}
             onPropsChange={(p) => set({ props: p })}
             onOpacityChange={(o) => set({ opacity: o })}

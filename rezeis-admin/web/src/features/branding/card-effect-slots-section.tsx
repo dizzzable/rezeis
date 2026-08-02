@@ -33,11 +33,17 @@ export interface CardEffectSlot {
 interface CardEffectSlotsSectionProps {
   slots: CardEffectSlot[]
   onChange: (slots: CardEffectSlot[]) => void
+  /** Avoid initialising effect renderers while this editor tab is hidden. */
+  livePreview?: boolean
 }
 
 const MAX_SLOTS = 20
 
-export function CardEffectSlotsSection({ slots, onChange }: CardEffectSlotsSectionProps) {
+export function CardEffectSlotsSection({
+  slots,
+  onChange,
+  livePreview = false,
+}: CardEffectSlotsSectionProps) {
   const { t } = useTranslation()
   const customGradients = useCustomGradients()
 
@@ -110,6 +116,7 @@ export function CardEffectSlotsSection({ slots, onChange }: CardEffectSlotsSecti
               effect={slot.cardEffect}
               props={slot.cardEffectProps ?? {}}
               opacity={slot.cardEffectOpacity ?? 1}
+              livePreview={livePreview}
               onEffectChange={(e) => updateSlot(index, { cardEffect: e })}
               onPropsChange={(p) => updateSlot(index, { cardEffectProps: p })}
               onOpacityChange={(o) => updateSlot(index, { cardEffectOpacity: o })}

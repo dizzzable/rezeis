@@ -241,9 +241,8 @@ export default function WebReiwaPage() {
     form.setValue("primaryFg", patch.primaryFg, { shouldDirty: true });
     form.setValue("bgPrimary", patch.bgPrimary, { shouldDirty: true });
     form.setValue("bgSecondary", patch.bgSecondary, { shouldDirty: true });
-    form.setValue("cardGradient", patch.cardGradient, { shouldDirty: true });
+    setGlobalCardGradient(patch.cardGradient);
     form.setValue("bgEffect", patch.bgEffect, { shouldDirty: true });
-    synchronizeCardSlotGradient(patch.cardGradient);
   }
 
   function applyConceptPreset(preset: ConceptThemePreset): void {
@@ -284,7 +283,11 @@ export default function WebReiwaPage() {
         cardEffect: variant.cardEffect,
         cardEffectProps: { ...(variant.cardEffectProps ?? {}) },
         cardEffectOpacity: variant.cardEffectOpacity,
-        cardGradient: variant.cardGradient,
+        // A slot only owns a gradient when the operator explicitly gives it
+        // one in the per-position editor. A theme/brightness preset owns the
+        // global gradient, so copying it here would permanently mask every
+        // later global gradient selection in Reiwa.
+        cardGradient: null,
       })),
     });
 
@@ -320,14 +323,16 @@ export default function WebReiwaPage() {
       form.setValue('subscriptionCardText', { ...patch.subscriptionCardText }, { shouldDirty: true });
     }
     if (applyCardArtwork) {
-      applyConceptCardPreset(cardPatch, synchronizeSlots);
+      // Applying a concept must retain its separate light/dark card artwork.
+      // Only an explicit card choice made afterwards becomes an operator
+      // override across both variants.
+      applyConceptCardPreset(cardPatch, synchronizeSlots, false);
     } else {
       // Changing only the default brightness must not replace the animation
       // selected by the operator. The gradient still follows the selected
       // brightness, including its lightweight per-position fallback.
-      form.setValue("cardGradient", cardPatch.cardGradient, { shouldDirty: true });
+      setGlobalCardGradient(cardPatch.cardGradient, { synchronizeThemeVariants: false });
       form.setValue("cardPattern", cardPatch.cardPattern, { shouldDirty: true });
-      if (synchronizeSlots) synchronizeCardSlotGradient(cardPatch.cardGradient);
     }
 
     form.setValue("bgEffect", patch.bgEffect, { shouldDirty: true });
@@ -340,16 +345,58 @@ export default function WebReiwaPage() {
 
   /**
    * A positional slot gradient wins over the global card visual in Reiwa, so a
-   * stale slot would make the applied standard theme invisible on the card.
-   * Only the gradient is synchronized — the slot animation stays operator-owned
-   * because a standard theme never had an opinion about it.
+   * stale slot would make the operator's selected global gradient invisible on
+   * the card. Clearing that field makes the slot inherit the global value.
    */
-  function synchronizeCardSlotGradient(cardGradient: string | null): void {
+  function setGlobalCardGradient(
+    cardGradient: string,
+    { synchronizeThemeVariants = true }: { readonly synchronizeThemeVariants?: boolean } = {},
+  ): void {
+    form.setValue("cardGradient", cardGradient, { shouldDirty: true });
+    synchronizeCardSlotGradient();
+    if (synchronizeThemeVariants) {
+      synchronizeThemeVariantCardGradients(cardGradient);
+    }
+  }
+
+  function synchronizeCardSlotGradient(): void {
     const existingSlots = form.getValues("cardEffectsByIndex") ?? [];
     if (existingSlots.length === 0) return;
     form.setValue(
       "cardEffectsByIndex",
-      existingSlots.map((slot) => ({ ...slot, cardGradient })),
+      // `null` means inherit the global value. This is deliberately different
+      // from copying the current CSS: copying turns the theme's starting card
+      // into a hidden per-slot override and makes the operator's next global
+      // gradient choice appear to have no effect.
+      existingSlots.map((slot) => ({ ...slot, cardGradient: null })),
+      { shouldDirty: true },
+    );
+  }
+
+  /**
+   * A manually selected card gradient is an operator override, not a
+   * brightness token. Reiwa resolves the selected light/dark variant after
+   * reading root settings, so both complete variant snapshots must receive
+   * the same override too. Page palettes remain per-mode; only stale
+   * positional gradient copies are cleared, while effects stay independent.
+   */
+  function synchronizeThemeVariantCardGradients(cardGradient: string): void {
+    const variants = form.getValues('themeVariants');
+    if (!variants) return;
+    const synchronizeVariant = (variant: BrandingThemeVariantsDraft['light']) => ({
+      ...variant,
+      cardGradient,
+      cardEffectsByIndex: (variant.cardEffectsByIndex ?? []).map((slot) => ({
+        ...slot,
+        cardGradient: null,
+      })),
+    });
+    form.setValue(
+      'themeVariants',
+      {
+        light: synchronizeVariant(variants.light),
+        dark: synchronizeVariant(variants.dark),
+      },
       { shouldDirty: true },
     );
   }
@@ -357,9 +404,10 @@ export default function WebReiwaPage() {
   function applyConceptCardPreset(
     patch: ConceptCardPresetVisualPatch,
     synchronizeSlots = false,
+    synchronizeThemeVariants = true,
   ): void {
     // Page colors/background, geometry and navigation stay untouched.
-    form.setValue("cardGradient", patch.cardGradient, { shouldDirty: true });
+    setGlobalCardGradient(patch.cardGradient, { synchronizeThemeVariants });
     form.setValue("cardPattern", patch.cardPattern, { shouldDirty: true });
     form.setValue("cardEffect", patch.cardEffect, { shouldDirty: true });
     form.setValue("cardEffectProps", { ...patch.cardEffectProps }, { shouldDirty: true });
@@ -379,7 +427,7 @@ export default function WebReiwaPage() {
         cardEffect: patch.cardEffect,
         cardEffectProps: { ...patch.cardEffectProps },
         cardEffectOpacity: patch.cardEffectOpacity,
-        cardGradient: patch.cardGradient,
+        cardGradient: null,
       })),
       { shouldDirty: true },
     );
@@ -387,7 +435,7 @@ export default function WebReiwaPage() {
 
   function generateGradient(): void {
     const primary = form.getValues("primary");
-    form.setValue("cardGradient", gradientFromPrimary(primary), { shouldDirty: true });
+    setGlobalCardGradient(gradientFromPrimary(primary));
   }
 
   /**
@@ -1104,7 +1152,7 @@ export default function WebReiwaPage() {
                               type="button"
                               aria-label={t(`brandingPage.cardGradients.${preset.id}`)}
                               title={t(`brandingPage.cardGradients.${preset.id}`)}
-                              onClick={() => field.onChange(preset.value)}
+                              onClick={() => setGlobalCardGradient(preset.value)}
                               className={`relative aspect-square rounded-md ring-1 transition-all hover:scale-[1.08] ${
                                 isActive ? "ring-2 ring-primary" : "ring-white/10 hover:ring-primary/40"
                               }`}
@@ -1130,7 +1178,7 @@ export default function WebReiwaPage() {
                                 type="button"
                                 aria-label={t('brandingPage.sections.card.customSwatch')}
                                 title={css}
-                                onClick={() => field.onChange(css)}
+                                onClick={() => setGlobalCardGradient(css)}
                                 className={`h-full w-full rounded-md ring-1 transition-all hover:scale-[1.08] ${
                                   isActive ? "ring-2 ring-primary" : "ring-white/10 hover:ring-primary/40"
                                 }`}
@@ -1173,7 +1221,7 @@ export default function WebReiwaPage() {
                     render={({ field }) => (
                       <GradientBuilder
                         value={field.value ?? ""}
-                        onChange={(css) => field.onChange(css)}
+                        onChange={setGlobalCardGradient}
                       />
                     )}
                   />
@@ -1186,7 +1234,7 @@ export default function WebReiwaPage() {
                       <Input
                         id="cardGradient"
                         value={field.value ?? ""}
-                        onChange={field.onChange}
+                        onChange={(event) => setGlobalCardGradient(event.target.value)}
                         onBlur={field.onBlur}
                         className="font-mono text-xs"
                         placeholder={t('brandingPage.sections.card.gradientPlaceholder')}
@@ -1433,6 +1481,7 @@ export default function WebReiwaPage() {
                   effect={field.value}
                   props={watchedValues.cardEffectProps ?? {}}
                   opacity={watchedValues.cardEffectOpacity ?? 1}
+                  livePreview={tab === 'card'}
                   onEffectChange={(e) => field.onChange(e)}
                   onPropsChange={(p) => form.setValue("cardEffectProps", p, { shouldDirty: true })}
                   onOpacityChange={(o) => form.setValue("cardEffectOpacity", o, { shouldDirty: true })}
@@ -1448,6 +1497,7 @@ export default function WebReiwaPage() {
                 <CardEffectSlotsSection
                   slots={(field.value ?? []) as CardEffectSlot[]}
                   onChange={(slots) => field.onChange(slots)}
+                  livePreview={tab === 'card'}
                 />
               )}
             />

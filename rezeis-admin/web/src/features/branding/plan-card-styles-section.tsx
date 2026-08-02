@@ -351,6 +351,7 @@ function PlanStyleRow({
               effect={style?.cardEffect ?? 'NONE'}
               props={style?.cardEffectProps ?? {}}
               opacity={style?.cardEffectOpacity ?? 1}
+              livePreview={false}
               onEffectChange={(e) =>
                 onPatch(
                   e === 'NONE'
