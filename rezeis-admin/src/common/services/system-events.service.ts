@@ -129,6 +129,29 @@ export const EVENT_TYPES = {
   PAYMENT_REFUNDED: 'payment.refunded',
   /** Refund smaller than the captured amount — needs an operator decision. */
   PAYMENT_REFUND_PARTIAL: 'payment.refund_partial',
+  /**
+   * Money arrived, but not the amount we invoiced — or it is frozen at the
+   * provider (Cryptomus/Heleket `wrong_amount` / `locked`, Pally `UNDERPAID`).
+   * Deliberately NOT `payment.failed` and NOT `payment.expired`: the buyer did
+   * pay and the funds are ours, so neither "платёж не прошёл" nor the routine
+   * abandoned-cart expiry describes it. Needs an operator decision.
+   */
+  PAYMENT_AMOUNT_MISMATCH: 'payment.amount_mismatch',
+  /**
+   * The provider's own figure for a payment that COMPLETED came in under what
+   * we booked. Nothing is held, nothing is withheld, the customer has what they
+   * paid for — somebody should still find out why the two records disagree.
+   *
+   * Its own type rather than `payment.amount_mismatch`, which was the first
+   * attempt and does not work: the Telegram card renders the PRESENTATION title
+   * for a type, not the per-call message, so an informational note and a payment
+   * that is actually held produced visually identical cards — «⚠️ Оплачена
+   * неверная сумма» on a payment that went through perfectly normally, with a
+   * `needsManualReview: false` line buried in the metadata as the only
+   * difference. An operator who cannot tell "this one needs me now" from "this
+   * one is a note" without opening it stops opening either.
+   */
+  PAYMENT_NOTIFIED_AMOUNT_SHORT: 'payment.notified_amount_short',
   PAYMENT_EXPIRED: 'payment.expired',
   PAYMENT_WEBHOOK_RECEIVED: 'payment.webhook_received',
   PAYMENT_FULFILLMENT_RECOVERED: 'payment.fulfillment_recovered',
@@ -1489,6 +1512,14 @@ const EVENT_PRESENTATION: Record<string, { emoji: string; title: string }> = {
   'payment.failed': { emoji: '❌', title: 'Платёж не прошёл' },
   'payment.refunded': { emoji: '↩️', title: 'Платёж возвращён' },
   'payment.refund_partial': { emoji: '⚠️', title: 'Частичный возврат платежа' },
+  'payment.amount_mismatch': { emoji: '⚠️', title: 'Оплачена неверная сумма' },
+  // Reads as a note, not as a task: ℹ️ against the ⚠️ above, and the outcome
+  // («Платёж проведён») before the discrepancy. The operator has to be able to
+  // skip this one and open the mismatch card without reading either.
+  'payment.notified_amount_short': {
+    emoji: 'ℹ️',
+    title: 'Платёж проведён, но сумма в уведомлении меньше',
+  },
   'payment.expired': { emoji: '⌛', title: 'Счёт на оплату истёк' },
   'payment.webhook_received': { emoji: '📩', title: 'Вебхук платёжки' },
   'payment.fulfillment_recovered': { emoji: '🛟', title: 'Восстановлено исполнение платежа' },

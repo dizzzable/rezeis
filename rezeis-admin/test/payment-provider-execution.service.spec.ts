@@ -1,5 +1,12 @@
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import {
+  createHash,
+  createHmac,
+  createPrivateKey,
+  createPublicKey,
+  createVerify,
+  generateKeyPairSync,
+} from 'node:crypto';
 import { describe, it } from 'node:test';
 
 import { BadRequestException, ServiceUnavailableException } from '@nestjs/common';
@@ -12,8 +19,10 @@ import {
 } from '@prisma/client';
 import { of, throwError } from 'rxjs';
 
+import { CHECKOUT_LIFETIME_SECONDS } from '../src/modules/payments/constants/checkout-lifetime.constant';
 import { PaymentProviderExecutionService } from '../src/modules/payments/services/payment-provider-execution.service';
 import { PaymentWebhookPayloadRedactionService } from '../src/modules/payments/services/payment-webhook-payload-redaction.service';
+import { encryptGatewaySettingsForStorage } from '../src/modules/payments/utils/payment-gateway-settings.util';
 
 describe('PaymentProviderExecutionService checkout execution', () => {
   it('creates YooKassa checkout requests with idempotence key and bounded result', async () => {
@@ -274,8 +283,14 @@ describe('PaymentProviderExecutionService checkout execution', () => {
       currency: Currency.USDT,
       order_id: 'payment-heleket-1',
       description: 'Crypto checkout',
+      // Key order matters here: the signature below is computed over this exact
+      // JSON, so it must mirror the payload the service builds.
+      lifetime: CHECKOUT_LIFETIME_SECONDS,
       url_success: 'https://user.example/payments/result?paymentId=payment-heleket-1',
       url_return: 'https://user.example/payments/result?paymentId=payment-heleket-1',
+      // Heleket has no documented merchant-level webhook address, so without a
+      // per-invoice one it would never notify us at all.
+      url_callback: 'https://user.example/api/v1/payments/webhooks/HELEKET',
     };
     const sign = createHash('md5')
       .update(`${Buffer.from(JSON.stringify(body), 'utf8').toString('base64')}secret-1`)
@@ -463,21 +478,25 @@ describe('PaymentProviderExecutionService checkout execution', () => {
   });
 });
 
-const TEST_RSA_PRIVATE_KEY_BASE64 = [
-  'MIICXAIBAAKBgQDHZVjF3+Ynt82VfZqoJx82KbJjIxZRv1CtjpPt4C3g6smP2y4u',
-  'g2TqluJq/YGDYgubfrJ7MBIKHfWMkwK8UEsq+ML5aWraJqTmQEMRA9+2u/x9K0qz',
-  'S2eBFS7CFANWrCTz4/jb4x0yF9atGqWxZizZCSZ4CQ6E+h9obEcWYvhMYwIDAQAB',
-  'AoGAPlEiF1IVbISb94r1CMye55XoMPgZFEGu83JGaKqQcfZqkgtL2/i+Fv/BUYH/',
-  'rECihfZdLssY2Hge5+X0ElhfE7y+Mlh8GuSDCi9u8uAg40gnza0HwZhrCF9dPJ8f',
-  '7kGGKllcBWbtHa6uJ9Fu+moHcjA1fV74EHZIVppBLZesN1ECQQD8Si+lQ3MUqvfn',
-  'h8dRSxyibqVAA5JaA3IaxmOmKJoNdtkAEsNCb8Vxpm19sU+rz0j/gkvbHL6HZOvG',
-  'yDCuIzElAkEAysdUTYFnfcZPE3a7paehRiOm5Ui0omtyf6pqGKMg1oACaFMSVZO6',
-  'HqOZdFkGP5a8PRwpXJrXuK9iK83ybQ7nowJBAIR4HRqR411B7YzHHhSWvfQXUJdc',
-  'We+9NFxdGd1N75lo7CNmEYENbrFcJb8WqTAQm6YgypM5XWzNBG8od4GGSsECQExL',
-  'ZWKWjuMXenPE7+7EJlG5TeN7yHK8ClZXS2mWprR6/6FcoLlIVnBbCf4N43VGhArq',
-  'jLpAV5p/Ef370QRtbA0CQC97t6U9Ml99VbgGhUbEJFX9ISNoLHEJb/2Vgj81pyPk',
-  'NnkIkW8rKC7abUzRYo5Hf5fME+0TegQdEGvHhPTgXkI=',
-].join('');
+/**
+ * A real RSA pair, generated once per run.
+ *
+ * The literal that stood here was not self-consistent: it parsed and it signed,
+ * but its signatures could never verify against its own modulus. That went
+ * unnoticed because no test ever verified one — and it silently defeats the
+ * only assertion that proves the Antilopay key normalization works, so the key
+ * has to be genuine rather than merely well-formed.
+ */
+const TEST_RSA_KEY_PAIR = generateKeyPairSync('rsa', {
+  modulusLength: 2048,
+  privateKeyEncoding: { type: 'pkcs1', format: 'pem' },
+  publicKeyEncoding: { type: 'spki', format: 'pem' },
+});
+
+/** The setting as an operator who pasted only the base64 body would store it. */
+const TEST_RSA_PRIVATE_KEY_BASE64 = TEST_RSA_KEY_PAIR.privateKey
+  .replace(/-----(?:BEGIN|END)[^-]*-----/g, '')
+  .replace(/\s+/g, '');
 
 function createService(httpService: { readonly post: (...args: never[]) => unknown }): PaymentProviderExecutionService {
   return new PaymentProviderExecutionService(httpService as never, {
@@ -572,6 +591,7 @@ describe('PaymentProviderExecutionService — CryptoPay', () => {
       amount: '12.5',
       description: 'Crypto checkout',
       payload: 'payment-cp-1',
+      expires_in: CHECKOUT_LIFETIME_SECONDS,
       paid_btn_name: 'callback',
       paid_btn_url: 'https://user.example/ok',
     });
@@ -617,5 +637,434 @@ describe('PaymentProviderExecutionService — CryptoPay', () => {
         return true;
       },
     );
+  });
+});
+
+describe('PaymentProviderExecutionService — RioPay/Valutix serviceId', () => {
+  const engines = [
+    {
+      type: PaymentGatewayType.RIOPAY,
+      url: 'https://api.riopay.online/v1/orders',
+    },
+    {
+      type: PaymentGatewayType.VALUTIX,
+      url: 'https://api.panel.valutix.kz/v1/orders',
+    },
+  ] as const;
+
+  for (const engine of engines) {
+    it(`sends ${engine.type} serviceId when the gateway is configured with one`, async () => {
+      const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+      const service = createService({
+        post: (url: string, body: Record<string, unknown>) => {
+          calls.push({ url, body });
+          return of({ data: { id: 'order-1', status: 'PENDING', paymentLink: 'https://pay.example/order-1' } });
+        },
+      });
+
+      const result = await service.createCheckout({
+        gateway: createGateway({ type: engine.type, settings: { apiToken: 'token-1', serviceId: 42 } }),
+        transaction: createTransaction({ paymentId: 'payment-svc-1', gatewayType: engine.type }),
+        description: 'Plan purchase',
+      });
+
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].url, engine.url);
+      assert.equal(calls[0].body.serviceId, 42);
+      assert.equal(calls[0].body.externalId, 'payment-svc-1');
+      assert.equal(result.checkoutUrl, 'https://pay.example/order-1');
+    });
+
+    it(`sends ${engine.type} serviceId stored as a numeric string`, async () => {
+      const calls: Array<Record<string, unknown>> = [];
+      const service = createService({
+        post: (_url: string, body: Record<string, unknown>) => {
+          calls.push(body);
+          return of({ data: { id: 'order-2', paymentLink: 'https://pay.example/order-2' } });
+        },
+      });
+
+      await service.createCheckout({
+        gateway: createGateway({ type: engine.type, settings: { apiToken: 'token-1', serviceId: ' 7 ' } }),
+        transaction: createTransaction({ gatewayType: engine.type }),
+        description: 'Plan purchase',
+      });
+
+      assert.equal(calls[0].serviceId, 7);
+    });
+
+    it(`omits ${engine.type} serviceId entirely on legacy accounts without one`, async () => {
+      const calls: Array<Record<string, unknown>> = [];
+      const service = createService({
+        post: (_url: string, body: Record<string, unknown>) => {
+          calls.push(body);
+          return of({ data: { id: 'order-3', paymentLink: 'https://pay.example/order-3' } });
+        },
+      });
+
+      await service.createCheckout({
+        gateway: createGateway({ type: engine.type, settings: { apiToken: 'token-1' } }),
+        transaction: createTransaction({ gatewayType: engine.type }),
+        description: 'Plan purchase',
+      });
+
+      assert.equal('serviceId' in calls[0], false);
+    });
+  }
+});
+
+// ── Antilopay ──────────────────────────────────────────────────────────────
+
+function wrapBase64At64Columns(value: string): string {
+  return (value.match(/.{1,64}/g) ?? []).join('\n');
+}
+
+/** The same key as a complete PEM — what pasting a `.pem` file produces. */
+const TEST_RSA_PRIVATE_KEY_PEM = TEST_RSA_KEY_PAIR.privateKey;
+
+/** Same key re-encoded as PKCS#8 — the form Antilopay actually issues. */
+const TEST_RSA_PRIVATE_KEY_PKCS8_PEM = createPrivateKey(TEST_RSA_PRIVATE_KEY_PEM)
+  .export({ type: 'pkcs8', format: 'pem' })
+  .toString();
+
+const TEST_RSA_PUBLIC_KEY = createPublicKey(TEST_RSA_KEY_PAIR.publicKey);
+
+/**
+ * Runs one Antilopay checkout and returns the exact bytes that were signed
+ * alongside the signature, so a test can prove the header actually verifies
+ * rather than merely that no exception escaped.
+ */
+async function createAntilopayCheckout(input: {
+  readonly privateKey: string;
+  readonly vat?: unknown;
+  readonly customerEmail?: string | null;
+  readonly customerIp?: string | null;
+}): Promise<{ readonly body: string; readonly signature: string; readonly payload: Record<string, unknown> }> {
+  const calls: Array<{ body: string; options: { headers: Record<string, string> } }> = [];
+  const service = createService({
+    post: (_url: string, body: string, options: { headers: Record<string, string> }) => {
+      calls.push({ body, options });
+      return of({ data: { code: 0, payment_id: 'apay-1', payment_url: 'https://lk.antilopay.com/pay/1' } });
+    },
+  });
+
+  await service.createCheckout({
+    gateway: createGateway({
+      type: PaymentGatewayType.ANTILOPAY,
+      settings: {
+        projectIdentificator: 'project-1',
+        secretId: 'secret-id-1',
+        privateKey: input.privateKey,
+        publicKey: 'MFwwDQYJKoZI',
+        ...(input.vat === undefined ? {} : { vat: input.vat }),
+      },
+    }),
+    transaction: createTransaction({ paymentId: 'payment-apay-1', gatewayType: PaymentGatewayType.ANTILOPAY }),
+    description: 'Plan purchase',
+    customerEmail: input.customerEmail,
+    customerIp: input.customerIp,
+  });
+
+  assert.equal(calls.length, 1);
+  return {
+    body: calls[0].body,
+    signature: calls[0].options.headers['X-Apay-Sign'],
+    payload: JSON.parse(calls[0].body) as Record<string, unknown>,
+  };
+}
+
+function verifyAntilopaySignature(body: string, signature: string): boolean {
+  const verifier = createVerify('RSA-SHA256');
+  verifier.update(body);
+  return verifier.verify(TEST_RSA_PUBLIC_KEY, signature, 'base64');
+}
+
+describe('PaymentProviderExecutionService — Antilopay signing key normalization', () => {
+  // Every one of these is a clipboard shape. Wrapping the setting in armor
+  // as-is signs correctly only for the first two; the rest threw
+  // ERR_OSSL_UNSUPPORTED on Node 24 / OpenSSL 3.5.5 and surfaced as a bare 503
+  // that named nothing, taking the gateway offline until someone guessed.
+  const pastedKeyShapes = [
+    { name: 'raw base64', key: TEST_RSA_PRIVATE_KEY_BASE64 },
+    { name: '64-column-wrapped base64', key: wrapBase64At64Columns(TEST_RSA_PRIVATE_KEY_BASE64) },
+    { name: 'a trailing newline', key: `${TEST_RSA_PRIVATE_KEY_BASE64}\n` },
+    { name: 'a trailing CRLF', key: `${TEST_RSA_PRIVATE_KEY_BASE64}\r\n` },
+    { name: 'full PEM armor', key: TEST_RSA_PRIVATE_KEY_PEM },
+    { name: 'full PEM armor and surrounding whitespace', key: `\n  ${TEST_RSA_PRIVATE_KEY_PEM}\n\n` },
+    // The armor label is not the defect: Antilopay issues a PKCS#8 key and
+    // OpenSSL 3 signs that body under `RSA PRIVATE KEY` just fine.
+    { name: 'PKCS#8 PEM armor', key: TEST_RSA_PRIVATE_KEY_PKCS8_PEM },
+  ] as const;
+
+  for (const shape of pastedKeyShapes) {
+    it(`produces a verifiable signature for a key pasted with ${shape.name}`, async () => {
+      const { body, signature } = await createAntilopayCheckout({ privateKey: shape.key });
+
+      assert.equal(typeof signature, 'string');
+      assert.ok(signature.length > 0);
+      assert.equal(verifyAntilopaySignature(body, signature), true);
+    });
+  }
+
+  it('signs the exact bytes it posts, so the body cannot drift from the signature', async () => {
+    const { body, signature, payload } = await createAntilopayCheckout({
+      privateKey: TEST_RSA_PRIVATE_KEY_PEM,
+    });
+
+    assert.equal(body, JSON.stringify(payload));
+    assert.equal(verifyAntilopaySignature(body, signature), true);
+    assert.equal(verifyAntilopaySignature(`${body} `, signature), false);
+  });
+});
+
+describe('PaymentProviderExecutionService — Antilopay vat', () => {
+  // «Поле обязательное, если сно Мерчанта - ОСНО» (Antilopay API, p.14).
+  // Without it such a merchant gets error 17 on every single checkout.
+  for (const vat of [10, 22, '10', '22'] as const) {
+    it(`sends vat ${JSON.stringify(vat)} as the number ${Number(vat)} when configured`, async () => {
+      const { payload } = await createAntilopayCheckout({
+        privateKey: TEST_RSA_PRIVATE_KEY_BASE64,
+        vat,
+      });
+
+      assert.equal(payload.vat, Number(vat));
+    });
+  }
+
+  it('omits vat entirely for a merchant that is not on ОСНО', async () => {
+    const { payload } = await createAntilopayCheckout({ privateKey: TEST_RSA_PRIVATE_KEY_BASE64 });
+
+    assert.equal('vat' in payload, false);
+  });
+
+  it('omits a legacy stored vat that is outside the documented enum', async () => {
+    const { payload } = await createAntilopayCheckout({
+      privateKey: TEST_RSA_PRIVATE_KEY_BASE64,
+      vat: 20,
+    });
+
+    assert.equal('vat' in payload, false);
+  });
+});
+
+describe('PaymentProviderExecutionService — Antilopay customer', () => {
+  it('sends the payer email supplied by the caller', async () => {
+    const { payload } = await createAntilopayCheckout({
+      privateKey: TEST_RSA_PRIVATE_KEY_BASE64,
+      customerEmail: 'payer@example.org',
+    });
+
+    assert.deepStrictEqual(payload.customer, { email: 'payer@example.org' });
+  });
+
+  it('falls back to a per-payment address on the public domain, never a .local literal', async () => {
+    const { payload } = await createAntilopayCheckout({ privateKey: TEST_RSA_PRIVATE_KEY_BASE64 });
+    const customer = payload.customer as Record<string, unknown>;
+
+    // The old constant was `customer@rezeis.local` for every buyer: `.local` is
+    // a reserved non-routable TLD (a plausible error 12), and one shared
+    // address discarded the payer↔dispute link the callback echoes back.
+    assert.equal(customer.email, 'payment-apay-1@user.example');
+    assert.equal(String(customer.email).endsWith('.local'), false);
+  });
+
+  it('sends customer.ip when the buyer address is known', async () => {
+    const { payload } = await createAntilopayCheckout({
+      privateKey: TEST_RSA_PRIVATE_KEY_BASE64,
+      customerIp: '203.0.113.7',
+    });
+
+    assert.equal((payload.customer as Record<string, unknown>).ip, '203.0.113.7');
+  });
+
+  it('unwraps the IPv4-mapped form dual-stack Node reports', async () => {
+    const { payload } = await createAntilopayCheckout({
+      privateKey: TEST_RSA_PRIVATE_KEY_BASE64,
+      customerIp: '::ffff:203.0.113.7',
+    });
+
+    assert.equal((payload.customer as Record<string, unknown>).ip, '203.0.113.7');
+  });
+
+  it('omits customer.ip rather than forwarding an unknown or malformed address', async () => {
+    for (const customerIp of [null, undefined, '   ', 'not-an-ip', '999.1.1.1']) {
+      const { payload } = await createAntilopayCheckout({
+        privateKey: TEST_RSA_PRIVATE_KEY_BASE64,
+        customerIp,
+      });
+
+      assert.equal(
+        'ip' in (payload.customer as Record<string, unknown>),
+        false,
+        `expected ${JSON.stringify(customerIp)} to be dropped`,
+      );
+    }
+  });
+});
+
+// ── SeverPay / Lava payer email ────────────────────────────────────────────
+
+const SEVERPAY_SECRET_TOKEN = 'severpay-secret-1';
+
+/**
+ * Runs one SeverPay checkout and returns the body it posted. The whole body is
+ * returned rather than the address alone because `client_email` sits inside
+ * the key-sorted object SeverPay signs.
+ */
+async function createSeverpayCheckout(
+  input: { readonly customerEmail?: string | null } = {},
+): Promise<Record<string, unknown>> {
+  const calls: Array<Record<string, unknown>> = [];
+  const service = createService({
+    post: (_url: string, body: Record<string, unknown>) => {
+      calls.push(body);
+      return of({ data: { status: true, data: { uid: 'sp-1', url: 'https://severpay.io/pay/1' } } });
+    },
+  });
+
+  await service.createCheckout({
+    gateway: createGateway({
+      type: PaymentGatewayType.SEVERPAY,
+      settings: { mid: '4242', secretToken: SEVERPAY_SECRET_TOKEN },
+    }),
+    transaction: createTransaction({
+      paymentId: 'payment-sp-1',
+      gatewayType: PaymentGatewayType.SEVERPAY,
+    }),
+    description: 'Plan purchase',
+    customerEmail: input.customerEmail,
+  });
+
+  assert.equal(calls.length, 1);
+  return calls[0];
+}
+
+/** Runs one Lava checkout and returns the invoice body it posted. */
+async function createLavaCheckout(
+  input: { readonly customerEmail?: string | null } = {},
+): Promise<Record<string, unknown>> {
+  const calls: Array<Record<string, unknown>> = [];
+  const service = createService({
+    post: (_url: string, body: Record<string, unknown>) => {
+      calls.push(body);
+      return of({ data: { id: 'lava-1', status: 'in-progress', paymentUrl: 'https://app.lava.top/pay/1' } });
+    },
+  });
+
+  await service.createCheckout({
+    gateway: createGateway({
+      type: PaymentGatewayType.LAVA,
+      settings: { apiKey: 'lava-key-1', offerId: 'offer-1' },
+    }),
+    transaction: createTransaction({
+      paymentId: 'payment-lava-1',
+      gatewayType: PaymentGatewayType.LAVA,
+    }),
+    description: 'Plan purchase',
+    customerEmail: input.customerEmail,
+  });
+
+  assert.equal(calls.length, 1);
+  return calls[0];
+}
+
+describe('PaymentProviderExecutionService — Lava payer email', () => {
+  it('sends the payer email supplied by the caller', async () => {
+    const body = await createLavaCheckout({ customerEmail: 'payer@example.org' });
+
+    assert.equal(body.email, 'payer@example.org');
+  });
+
+  it('falls back to a routable per-payment address, never a .local literal', async () => {
+    const body = await createLavaCheckout();
+
+    // Lava treats this as the buyer's own address and mails the invoice there,
+    // so the old `${userId}@rezeis.local` reached nobody: `.local` is reserved
+    // for multicast DNS and resolves nowhere off-LAN.
+    assert.equal(body.email, 'payment-lava-1@user.example');
+    assert.equal(String(body.email).endsWith('.local'), false);
+  });
+});
+
+describe('PaymentProviderExecutionService — SeverPay payer email', () => {
+  it('sends the payer email supplied by the caller', async () => {
+    const body = await createSeverpayCheckout({ customerEmail: 'payer@example.org' });
+
+    assert.equal(body.client_email, 'payer@example.org');
+  });
+
+  it('falls back to a routable per-payment address, never a .local literal', async () => {
+    const body = await createSeverpayCheckout();
+
+    assert.equal(body.client_email, 'payment-sp-1@user.example');
+    assert.equal(String(body.client_email).endsWith('.local'), false);
+  });
+
+  it('signs the body it posts, so the payer email cannot drift from the signature', async () => {
+    // The address is now computed rather than a literal, and it is covered by
+    // the HMAC — a change that signs one value and posts another would be
+    // rejected by SeverPay with nothing here to catch it.
+    const body = await createSeverpayCheckout({ customerEmail: 'payer@example.org' });
+    const { sign, ...signedFields } = body;
+    const expected = createHmac('sha256', SEVERPAY_SECRET_TOKEN)
+      .update(
+        JSON.stringify(
+          Object.fromEntries(Object.entries(signedFields).sort(([a], [b]) => a.localeCompare(b))),
+        ),
+      )
+      .digest('hex');
+
+    assert.equal(signedFields.client_email, 'payer@example.org');
+    assert.equal(sign, expected);
+  });
+});
+
+describe('PaymentProviderExecutionService reads encrypted gateway settings', () => {
+  it('authenticates with the decrypted credential, never the stored ciphertext', async () => {
+    process.env.REZEIS_CRYPT_KEY ??= 'provider-exec-spec-key-that-is-32plus!!';
+    const calls: unknown[] = [];
+    const service = createService({
+      post: (url: string, body: unknown, options: unknown) => {
+        calls.push({ url, body, options });
+        return of({
+          data: {
+            id: 'provider-payment-1',
+            status: 'pending',
+            confirmation: { confirmation_url: 'https://checkout.example/yookassa' },
+          },
+        });
+      },
+    });
+
+    // Exactly what the column holds once secrets are encrypted at rest: the
+    // credential is an envelope, the shop id is still readable.
+    const storedSettings = encryptGatewaySettingsForStorage(PaymentGatewayType.YOOKASSA, {
+      shopId: 'shop-1',
+      apiKey: 'live_sk_9f3a72be41d0c8e5',
+    });
+    assert.equal(String(storedSettings.apiKey).startsWith('PGENC1:'), true);
+
+    await service.createCheckout({
+      gateway: createGateway({
+        type: PaymentGatewayType.YOOKASSA,
+        settings: storedSettings as Record<string, unknown>,
+      }),
+      transaction: createTransaction({
+        paymentId: 'payment-1',
+        gatewayType: PaymentGatewayType.YOOKASSA,
+        amount: '12.50',
+        currency: Currency.RUB,
+      }),
+      description: 'Checkout against an encrypted gateway row',
+    });
+
+    const call = calls[0] as { options: { auth: { username: string; password: string } } };
+    // Every payment path reads settings through `readGatewaySettings`, so the
+    // provider gets the real key. Sending the envelope instead would fail auth
+    // on a live payment while the panel still showed the gateway as ready.
+    assert.deepStrictEqual(call.options.auth, {
+      username: 'shop-1',
+      password: 'live_sk_9f3a72be41d0c8e5',
+    });
   });
 });

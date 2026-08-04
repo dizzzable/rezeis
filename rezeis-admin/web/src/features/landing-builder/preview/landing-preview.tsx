@@ -2,12 +2,24 @@ import { useDeferredValue, useEffect, useRef, useState, type CSSProperties } fro
 import { createPortal } from 'react-dom'
 
 import type { LandingConfig, LandingSection } from '../landing-builder-api'
-import { PREVIEW_SECTIONS } from './preview-section-registry'
-// Raw CSS injected into the iframe <head> — the admin app's global CSS does
-// not reach the isolated preview document, so the landing visual system
-// (backgrounds / glass / reveal) must be shipped in explicitly. Kept in
-// lockstep with reiwa/web/src/features/landing/landing.css.
-import landingCss from './landing.css?raw'
+// The landing kit — the SAME renderer reiwa serves to visitors, vendored by
+// `scripts/sync-landing-kit.mjs` and byte-frozen by `live-kit-manifest.test.ts`.
+// The preview must never re-implement a section: the previous hand-written
+// preview drifted from production in twelve documented ways.
+import { LANDING_SECTIONS, themeToCssVars } from '../live/landing-renderer'
+import { LandingBg, LandingOverlay, Reveal } from '../live/landing-background'
+import { LandingKitProvider } from '../live/landing-kit-context'
+import type { LandingConfigPayload, LandingSection as KitSection } from '../live/landing-schema'
+import { PREVIEW_KIT_BINDINGS } from './preview-kit-bindings'
+// Raw CSS injected into the iframe <head> — the admin app's global CSS does not
+// reach the isolated preview document, so the landing visual system must be
+// shipped in explicitly. Sourced from the vendored kit, so it cannot drift.
+import landingCss from '../live/landing.css?raw'
+// Compiled Tailwind, scoped to the kit. `?inline` (not `?raw`) so Vite runs the
+// CSS pipeline and hands back the built text — `?raw` would return the literal
+// `@import "tailwindcss"` source line, which does nothing inside the iframe.
+// Without this the preview has the kit's colours but none of its layout.
+import previewTailwind from './preview-tailwind.css?inline'
 
 /**
  * LandingPreview — live preview of the DRAFT landing, rendered into an isolated
@@ -39,149 +51,6 @@ interface Props {
   onReorder: (from: number, to: number) => void
 }
 
-const RADIUS_PX: Record<NonNullable<LandingConfig['theme']['radius']>, string> = {
-  none: '0px',
-  sm: '8px',
-  md: '12px',
-  lg: '16px',
-  xl: '24px',
-}
-
-function themeVars(theme: LandingConfig['theme']): CSSProperties {
-  const style: Record<string, string> = {}
-  const custom = theme.inherit === false
-  const primary = custom ? theme.colors?.primary : undefined
-  const bg = custom ? theme.colors?.bg : undefined
-  style['--ls-primary'] = primary || '#22c55e'
-  style['--ls-bg'] = bg || '#0a0a0a'
-  if (custom && theme.radius) style['--ls-radius'] = RADIUS_PX[theme.radius]
-  if (custom && theme.font?.family) style['fontFamily'] = theme.font.family
-  return style as CSSProperties
-}
-
-/** Background layer — mirrors reiwa's LandingBg (CSS-only + network canvas). */
-function PreviewBg({ theme }: { theme: LandingConfig['theme'] }) {
-  const effect = theme.background
-  if (!effect || effect === 'none') return null
-  const animate = theme.animateBackground !== false
-  const colors =
-    theme.backgroundColors && theme.backgroundColors.length > 0
-      ? theme.backgroundColors
-      : theme.colors?.primary
-        ? [theme.colors.primary]
-        : []
-  if (effect === 'network') {
-    return <PreviewNetworkCanvas color={colors[0] ?? '#22c55e'} animate={animate} />
-  }
-  const style: Record<string, string> = {}
-  const [c1, c2, c3] = colors
-  if (c1) style['--ls-c1'] = c1
-  if (c2) style['--ls-c2'] = c2
-  if (c3) style['--ls-c3'] = c3
-  return (
-    <div
-      className={`ls-bg ls-bg--${effect}`}
-      data-animate={animate ? 'on' : 'off'}
-      style={style as CSSProperties}
-      aria-hidden="true"
-      data-ls-bg={effect}
-    />
-  )
-}
-
-/** Network-graph background for the preview (mirrors reiwa's NetworkCanvas). */
-function PreviewNetworkCanvas({ color, animate }: { color: string; animate: boolean }) {
-  const canvasRef = useRef<HTMLCanvasElement | null>(null)
-  const wrapRef = useRef<HTMLDivElement | null>(null)
-
-  useEffect(() => {
-    const canvas = canvasRef.current
-    const wrap = wrapRef.current
-    if (canvas === null || wrap === null) return undefined
-    const ctx = canvas.getContext('2d')
-    if (ctx === null) return undefined
-    const win = canvas.ownerDocument.defaultView ?? window
-    const reduced = win.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false
-    let width = 0
-    let height = 0
-    let nodes: Array<{ x: number; y: number; vx: number; vy: number }> = []
-    const seed = (): void => {
-      const count = Math.max(16, Math.min(60, Math.round((width * height) / 20000)))
-      nodes = Array.from({ length: count }, () => ({
-        x: Math.random() * width,
-        y: Math.random() * height,
-        vx: (Math.random() - 0.5) * 0.35,
-        vy: (Math.random() - 0.5) * 0.35,
-      }))
-    }
-    const resize = (): void => {
-      const dpr = Math.min(win.devicePixelRatio || 1, 2)
-      width = wrap.clientWidth || 1
-      height = wrap.clientHeight || 1
-      canvas.width = Math.round(width * dpr)
-      canvas.height = Math.round(height * dpr)
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-      seed()
-    }
-    const m = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(color.trim())
-    let hex = m ? m[1] : '22c55e'
-    if (hex.length === 3) hex = hex[0] + hex[0] + hex[1] + hex[1] + hex[2] + hex[2]
-    const int = parseInt(hex, 16)
-    const rgb = { r: (int >> 16) & 255, g: (int >> 8) & 255, b: int & 255 }
-    const linkDist = 130
-    const draw = (): void => {
-      ctx.clearRect(0, 0, width, height)
-      for (let i = 0; i < nodes.length; i += 1) {
-        const a = nodes[i]
-        if (animate && !reduced) {
-          a.x += a.vx
-          a.y += a.vy
-          if (a.x < 0 || a.x > width) a.vx *= -1
-          if (a.y < 0 || a.y > height) a.vy *= -1
-        }
-        for (let j = i + 1; j < nodes.length; j += 1) {
-          const b = nodes[j]
-          const dist = Math.hypot(a.x - b.x, a.y - b.y)
-          if (dist < linkDist) {
-            const alpha = (1 - dist / linkDist) * 0.5
-            ctx.strokeStyle = `rgba(${rgb.r},${rgb.g},${rgb.b},${alpha.toFixed(3)})`
-            ctx.lineWidth = 1
-            ctx.beginPath()
-            ctx.moveTo(a.x, a.y)
-            ctx.lineTo(b.x, b.y)
-            ctx.stroke()
-          }
-        }
-      }
-      ctx.fillStyle = `rgba(${rgb.r},${rgb.g},${rgb.b},0.85)`
-      for (const n of nodes) {
-        ctx.beginPath()
-        ctx.arc(n.x, n.y, 1.6, 0, Math.PI * 2)
-        ctx.fill()
-      }
-    }
-    let raf = 0
-    const loop = (): void => {
-      draw()
-      raf = win.requestAnimationFrame(loop)
-    }
-    resize()
-    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(resize) : null
-    ro?.observe(wrap)
-    if (animate && !reduced) loop()
-    else draw()
-    return () => {
-      if (raf !== 0) win.cancelAnimationFrame(raf)
-      ro?.disconnect()
-    }
-  }, [color, animate])
-
-  return (
-    <div ref={wrapRef} className="ls-bg" aria-hidden="true" data-ls-bg="network">
-      <canvas ref={canvasRef} style={{ width: '100%', height: '100%', display: 'block' }} />
-    </div>
-  )
-}
 interface ShellProps {
   section: LandingSection
   index: number
@@ -197,49 +66,11 @@ interface ShellProps {
 }
 
 /**
- * PreviewReveal — mirrors reiwa's `Reveal` so the per-section scroll-reveal
- * animation the operator picks is visible in the builder. One-shot
- * IntersectionObserver (root = the iframe viewport, since the node lives in the
- * iframe document) toggles `is-visible`. `none`/undefined renders immediately.
- * `key`-remounting on animation change (in PreviewBody) replays the reveal so
- * the operator sees the effect the moment they select it.
+ * SectionShell — builder chrome (select / reorder / hide / delete) wrapped
+ * around one section. This is the ONLY admin-specific layer in the preview:
+ * the section itself, its reveal animation and the background all come from the
+ * kit, so what sits inside the chrome is byte-for-byte what visitors get.
  */
-function PreviewReveal({ animation, children }: { animation?: string; children: React.ReactNode }) {
-  const ref = useRef<HTMLDivElement | null>(null)
-  const [visible, setVisible] = useState(false)
-
-  useEffect(() => {
-    if (!animation || animation === 'none') return undefined
-    const node = ref.current
-    if (node === null) return undefined
-    const win = node.ownerDocument.defaultView
-    if (!win || typeof win.IntersectionObserver === 'undefined') {
-      setVisible(true)
-      return undefined
-    }
-    const observer = new win.IntersectionObserver(
-      (entries) => {
-        for (const entry of entries) {
-          if (entry.isIntersecting) {
-            setVisible(true)
-            observer.disconnect()
-          }
-        }
-      },
-      { threshold: 0.12, rootMargin: '0px 0px -10% 0px' },
-    )
-    observer.observe(node)
-    return () => observer.disconnect()
-  }, [animation])
-
-  if (!animation || animation === 'none') return <>{children}</>
-  return (
-    <div ref={ref} className={`ls-reveal ls-reveal--${animation}${visible ? ' is-visible' : ''}`}>
-      {children}
-    </div>
-  )
-}
-
 function SectionShell({
   section,
   index,
@@ -280,9 +111,11 @@ function SectionShell({
         <button type="button" className="ls-pv-btn" title="Скрыть / Hide" onClick={(e) => { e.stopPropagation(); onToggleVisible(index) }}>{section.visible ? '👁' : '⃠'}</button>
         <button type="button" className="ls-pv-btn" title="Удалить / Delete" onClick={(e) => { e.stopPropagation(); onDelete(index) }}>✕</button>
       </div>
-      <PreviewReveal key={section.animation ?? 'none'} animation={section.animation}>
+      {/* Remount on animation change so the operator replays the reveal the
+          moment they pick it — the live page only ever plays it once. */}
+      <Reveal key={section.animation ?? 'none'} animation={section.animation}>
         {children}
-      </PreviewReveal>
+      </Reveal>
     </div>
   )
 }
@@ -310,10 +143,18 @@ function PreviewBody({
   onDelete: (index: number) => void
   onDragStart: (index: number, e: React.PointerEvent) => void
 }) {
-  const primaryColor =
-    config.theme.inherit === false && config.theme.colors?.primary ? config.theme.colors.primary : '#22c55e'
-  const surface = config.theme.surfaceStyle ?? 'solid'
-  const rootStyle: CSSProperties = { ...themeVars(config.theme), minHeight: '100%' }
+  // Theme resolution goes through the kit's own mapper, never a second copy —
+  // `radius`, `fg` and `accent` used to apply in production but not here
+  // precisely because the preview had its own reduced version of this function.
+  const theme = config.theme as LandingConfigPayload['theme']
+  const surface = theme?.surfaceStyle ?? 'solid'
+  const rootStyle: CSSProperties = { ...themeToCssVars(theme), minHeight: '100%' }
+  const bgColors =
+    theme?.backgroundColors && theme.backgroundColors.length > 0
+      ? theme.backgroundColors
+      : theme?.colors?.primary
+        ? [theme.colors.primary]
+        : undefined
 
   if (config.sections.length === 0) {
     return (
@@ -324,33 +165,54 @@ function PreviewBody({
   }
 
   return (
-    <div className="ls-root" data-surface={surface} style={rootStyle} lang={locale}>
-      <PreviewBg theme={config.theme} />
-      {config.sections.map((section, index) => {
-        const Component = PREVIEW_SECTIONS[section.type]
-        if (!Component) return null
-        return (
-          <div key={section.id}>
-            {dropIndex === index && dragIndex !== null && <div className="ls-pv-dropline" />}
-            <SectionShell
-              section={section}
-              index={index}
-              total={config.sections.length}
-              selected={selectedId === section.id}
-              dragging={dragIndex === index}
-              onSelect={onSelect}
-              onMove={onMove}
-              onToggleVisible={onToggleVisible}
-              onDelete={onDelete}
-              onDragStart={onDragStart}
-            >
-              <Component section={section} locale={locale} defaultLocale={config.defaultLocale} primaryColor={primaryColor} />
-            </SectionShell>
-          </div>
-        )
-      })}
-      {dropIndex === config.sections.length && dragIndex !== null && <div className="ls-pv-dropline" />}
-    </div>
+    <LandingKitProvider value={PREVIEW_KIT_BINDINGS}>
+      <div
+        className="ls-root"
+        data-surface={surface}
+        data-card-hover={theme?.cardHover ?? 'none'}
+        data-cta={theme?.ctaStyle ?? 'none'}
+        style={rootStyle}
+        lang={locale}
+      >
+        <LandingBg
+          effect={theme?.background}
+          colors={bgColors}
+          animate={theme?.animateBackground !== false}
+        />
+        <LandingOverlay
+          overlay={theme?.backgroundOverlay}
+          animate={theme?.animateBackground !== false}
+        />
+        {config.sections.map((section, index) => {
+          const Component = LANDING_SECTIONS[section.type]
+          if (!Component) return null
+          return (
+            <div key={section.id}>
+              {dropIndex === index && dragIndex !== null && <div className="ls-pv-dropline" />}
+              <SectionShell
+                section={section}
+                index={index}
+                total={config.sections.length}
+                selected={selectedId === section.id}
+                dragging={dragIndex === index}
+                onSelect={onSelect}
+                onMove={onMove}
+                onToggleVisible={onToggleVisible}
+                onDelete={onDelete}
+                onDragStart={onDragStart}
+              >
+                <Component
+                  section={section as unknown as KitSection}
+                  locale={locale}
+                  defaultLocale={config.defaultLocale}
+                />
+              </SectionShell>
+            </div>
+          )
+        })}
+        {dropIndex === config.sections.length && dragIndex !== null && <div className="ls-pv-dropline" />}
+      </div>
+    </LandingKitProvider>
   )
 }
 export function LandingPreview({
@@ -388,7 +250,10 @@ export function LandingPreview({
         if (!doc.getElementById('ls-preview-style')) {
           const styleEl = doc.createElement('style')
           styleEl.id = 'ls-preview-style'
-          styleEl.textContent = landingCss
+          // Tailwind first: `landing.css` overrides utilities in places
+          // (`.ls-title`, `.ls-surface`), and both live in the same cascade
+          // layer here, so source order is what decides.
+          styleEl.textContent = `${previewTailwind}\n${landingCss}`
           doc.head.appendChild(styleEl)
         }
         doc.documentElement.style.minHeight = '100%'

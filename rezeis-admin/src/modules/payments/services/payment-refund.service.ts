@@ -16,6 +16,11 @@ import { PaymentReconciliationService } from './payment-reconciliation.service';
 import { readGatewaySettings } from '../utils/payment-gateway-settings.util';
 import { redactPaymentDiagnosticMessage } from '../utils/payment-provider-error.util';
 import {
+  lockTransactionRefundLedger,
+  readRefundLedger,
+  readRefundedTotal,
+} from '../utils/payment-refund-ledger.util';
+import {
   readOptionalString,
   readRecord,
   requireSetting,
@@ -161,57 +166,73 @@ export class PaymentRefundService {
     }
     const providerStatus = readOptionalString(data, ['status']);
 
-    // Record the request. The authoritative reversal still happens when the
-    // `refund.succeeded` webhook lands; this stamp is what makes the panel show
-    // "refund issued" immediately and what caps further refunds.
-    //
-    // Re-read the row first: the provider call above is a network round-trip,
-    // and the refund webhook can land inside that window. Merging onto the
-    // stale in-memory snapshot would erase what reconciliation just wrote —
-    // `refundReversedAt`, the revoked-subscription audit and the manual-review
-    // flag, which are the only breadcrumbs for undoing a mistaken refund.
-    const current = await this.prismaService.transaction.findUnique({
-      where: { id: transaction.id },
-      select: { gatewayData: true },
-    });
-    const liveGatewayData = current?.gatewayData ?? transaction.gatewayData;
-    // Ledger keyed by the PROVIDER's refund id, not a running sum. A repeated
-    // click sends the same Idempotence-Key, so YooKassa replays the ORIGINAL
-    // refund rather than making a new one — adding the amount again would
-    // invent a refund that never happened and lock out the remaining balance.
-    // Recording each refund once makes the total derivable and self-correcting.
-    const ledger = readRefundLedger(liveGatewayData);
-    const previousTotal = readRefundedTotal(liveGatewayData);
     // A refund the provider accepted but has not settled (`pending`) must not
     // reduce the refundable balance: if it is later cancelled, the operator
     // would be locked out of re-issuing it with no way to correct the total.
     const countsTowardsBalance = providerStatus !== 'canceled' && providerStatus !== 'pending';
-    const isNewRefund = countsTowardsBalance && !ledger.some((e) => e.refundId === refundId);
-    if (isNewRefund) {
-      ledger.push({ refundId, amount: amountValue, at: new Date().toISOString() });
-    }
-    // The total only ever grows. It is NOT derived from the ledger alone,
-    // because refunds issued outside the panel (operator acting directly in the
-    // provider's dashboard) reach us as webhooks that record the total without
-    // a ledger entry — deriving purely from the ledger would forget them and
-    // hand back balance that is already gone.
-    const refundedTotal = Math.max(
-      previousTotal + (isNewRefund ? requestedAmount : 0),
-      ledger.reduce((sum, entry) => sum + Number(entry.amount), 0),
-    );
-    await this.prismaService.transaction.update({
-      where: { id: transaction.id },
-      data: {
-        gatewayData: mergeRefundAudit(liveGatewayData, {
-          refundRequestedAt: new Date().toISOString(),
-          refundRequestedBy: input.currentAdmin.id,
-          refundId,
-          refundProviderStatus: providerStatus,
-          refunds: ledger as unknown as Prisma.JsonValue,
-          refundedAmountTotal: refundedTotal.toFixed(2),
-          refundProviderResponse: this.redactionService.redact(data) as Prisma.JsonValue,
-        }) as Prisma.InputJsonValue,
-      },
+
+    // Record the request. The authoritative reversal still happens when the
+    // `refund.succeeded` webhook lands; this stamp is what makes the panel show
+    // "refund issued" immediately and what caps further refunds.
+    //
+    // Read-modify-write UNDER the row lock. Re-reading alone was not enough:
+    // the webhook path writes the same two keys, so a refund landing between
+    // this read and this write was simply overwritten — a real interleave (this
+    // refund concurrent with the `refund.succeeded` webhook for a DIFFERENT
+    // refund) dropped one of the two ledger entries. Reading inside the lock
+    // also keeps the original reason the re-read exists: the provider call
+    // above is a network round-trip and reconciliation can have written
+    // `refundReversedAt`, the revoked-subscription audit and the manual-review
+    // flag inside that window, which are the only breadcrumbs for undoing a
+    // mistaken refund.
+    //
+    // The lock spans a read and a write and nothing else — the provider POST is
+    // already done, and the full-refund reversal below runs after this
+    // transaction has committed.
+    const commit = await this.prismaService.$transaction(async (tx) => {
+      const liveGatewayData =
+        (await lockTransactionRefundLedger(tx, transaction.id)) ?? transaction.gatewayData;
+      // Ledger keyed by the PROVIDER's refund id, not a running sum. A repeated
+      // click sends the same Idempotence-Key, so YooKassa replays the ORIGINAL
+      // refund rather than making a new one — adding the amount again would
+      // invent a refund that never happened and lock out the remaining balance.
+      // Recording each refund once makes the total derivable and self-correcting.
+      //
+      // The `refund.succeeded` webhook writes into this SAME ledger, so when it
+      // lands before this call finishes, the refund we just issued is already
+      // recorded and `isNewRefund` below is false. That is what stops the two
+      // writers from counting one 500-of-1000 refund as 1000 and reversing a
+      // subscription, commission and tax income that were never fully refunded.
+      const ledger = readRefundLedger(liveGatewayData);
+      const previousTotal = readRefundedTotal(liveGatewayData);
+      const isNewRefund = countsTowardsBalance && !ledger.some((e) => e.refundId === refundId);
+      if (isNewRefund) {
+        ledger.push({ refundId, amount: amountValue, at: new Date().toISOString() });
+      }
+      // The total only ever grows. It is NOT derived from the ledger alone,
+      // because refunds issued outside the panel (operator acting directly in the
+      // provider's dashboard) reach us as webhooks that record the total without
+      // a ledger entry — deriving purely from the ledger would forget them and
+      // hand back balance that is already gone.
+      const refundedTotal = Math.max(
+        previousTotal + (isNewRefund ? requestedAmount : 0),
+        ledger.reduce((sum, entry) => sum + Number(entry.amount), 0),
+      );
+      await tx.transaction.update({
+        where: { id: transaction.id },
+        data: {
+          gatewayData: mergeRefundAudit(liveGatewayData, {
+            refundRequestedAt: new Date().toISOString(),
+            refundRequestedBy: input.currentAdmin.id,
+            refundId,
+            refundProviderStatus: providerStatus,
+            refunds: ledger as unknown as Prisma.JsonValue,
+            refundedAmountTotal: refundedTotal.toFixed(2),
+            refundProviderResponse: this.redactionService.redact(data) as Prisma.JsonValue,
+          }) as Prisma.InputJsonValue,
+        },
+      });
+      return { refundedTotal };
     });
 
     await this.prismaService.adminAuditLog.create({
@@ -250,12 +271,19 @@ export class PaymentRefundService {
     // webhook path applies. Idempotent, so a webhook arriving afterwards is a
     // no-op, and best-effort, so the refund itself is never reported as failed
     // after the money has already gone back.
+    //
+    // Decided from the total computed UNDER the lock, but run outside it. The
+    // fenced write means exactly one of the two writers can be the one whose
+    // entry takes the cumulative total to the captured amount, so the reversal
+    // still fires exactly once — while the partner debit, referral
+    // un-qualification, МойНалог cancellation and Remnawave revoke job (seconds
+    // of network work) stay out of the critical section.
     const paidAmount = Number(transaction.amount.toString());
     const fullyRefunded =
       countsTowardsBalance &&
       Number.isFinite(paidAmount) &&
       paidAmount > 0 &&
-      refundedTotal >= paidAmount - 0.000001;
+      commit.refundedTotal >= paidAmount - 0.000001;
     if (fullyRefunded) {
       try {
         const fresh = await this.prismaService.transaction.findUnique({
@@ -324,59 +352,6 @@ export class PaymentRefundService {
     }
     return { ...base, refundable: true, reason: null };
   }
-}
-
-/** One issued refund, keyed by the provider's own refund id. */
-interface RefundLedgerEntry {
-  readonly refundId: string;
-  readonly amount: string;
-  readonly at: string;
-}
-
-/**
- * Refunds already issued through the panel, newest last. Malformed entries are
- * skipped rather than throwing — this ledger caps further refunds, so a corrupt
- * blob must degrade to "assume nothing was refunded" and let the provider be
- * the final authority, not block the operator entirely.
- */
-function readRefundLedger(gatewayData: Prisma.JsonValue | null): RefundLedgerEntry[] {
-  const record =
-    typeof gatewayData === 'object' && gatewayData !== null && !Array.isArray(gatewayData)
-      ? (gatewayData as Record<string, unknown>)
-      : {};
-  const raw = record['refunds'];
-  if (!Array.isArray(raw)) return [];
-  const entries: RefundLedgerEntry[] = [];
-  for (const item of raw) {
-    if (typeof item !== 'object' || item === null || Array.isArray(item)) continue;
-    const candidate = item as Record<string, unknown>;
-    const refundId = candidate['refundId'];
-    const amount = candidate['amount'];
-    if (typeof refundId !== 'string' || refundId.length === 0) continue;
-    const parsedAmount = typeof amount === 'string' ? Number(amount) : Number.NaN;
-    if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) continue;
-    entries.push({
-      refundId,
-      amount: amount as string,
-      at: typeof candidate['at'] === 'string' ? (candidate['at'] as string) : '',
-    });
-  }
-  return entries;
-}
-
-/**
- * Running total already refunded against a transaction. Written by both this
- * service and the reconciliation webhook path under the same key, so the two
- * agree on how much is left; unreadable/absent values count as zero.
- */
-function readRefundedTotal(gatewayData: Prisma.JsonValue | null): number {
-  const record =
-    typeof gatewayData === 'object' && gatewayData !== null && !Array.isArray(gatewayData)
-      ? (gatewayData as Record<string, unknown>)
-      : {};
-  const raw = record['refundedAmountTotal'];
-  const parsed = typeof raw === 'string' ? Number(raw) : typeof raw === 'number' ? raw : Number.NaN;
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
 }
 
 /** Shallow-merges refund audit keys into `gatewayData` without dropping siblings. */

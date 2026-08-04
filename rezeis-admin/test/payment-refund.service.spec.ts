@@ -59,7 +59,11 @@ function createService(input: {
     refreshedCalls: 0,
   };
   const transaction = input.transaction === undefined ? createTransaction() : input.transaction;
-  const prisma = {
+  // The refund write is fenced with `SELECT ... FOR UPDATE` inside an
+  // interactive transaction. With no contender a pass-through is enough; the
+  // interleave tests below model the lock for real.
+  const transactionClient = {
+    $queryRaw: async () => [{ id: 'tx-1' }],
     transaction: {
       findUnique: async (args: { select?: Record<string, unknown> }) => {
         if (args.select !== undefined) {
@@ -73,6 +77,11 @@ function createService(input: {
         return null;
       },
     },
+  };
+  const prisma = {
+    ...transactionClient,
+    $transaction: async <T>(callback: (tx: typeof transactionClient) => Promise<T>): Promise<T> =>
+      callback(transactionClient),
     paymentGateway: {
       findUnique: async () =>
         input.gateway === undefined
@@ -113,6 +122,132 @@ function createService(input: {
     } as never,
   );
   return { service, state, reversals };
+}
+
+/**
+ * Both refund writers against ONE row, with a real lock.
+ *
+ * `$transaction` models `SELECT ... FOR UPDATE`: whoever is inside the callback
+ * holds the row and every other writer queues behind it. That is precisely what
+ * the fence buys — before it the panel opened no transaction at all, so a
+ * concurrent write landed between its read and its write and was then
+ * overwritten wholesale.
+ *
+ * The counterpart is `PaymentReconciliationService.handleRefundReversal`,
+ * modelled by `webhookRefund` with the merge it actually performs (id-keyed
+ * dedupe, running total, reverse iff this entry crosses the captured amount).
+ * `payment-reconciliation-notifications.service.spec.ts` pins that producing
+ * shape and drives the mirror-image race against the real service.
+ */
+function createRefundRace(input: {
+  readonly paidAmount: string;
+  /** Fires the instant the panel has read the ledger — the window at issue. */
+  readonly webhookRefund: { readonly refundId: string; readonly amount: string };
+}) {
+  const row = { gatewayData: null as Record<string, unknown> | null };
+  const paid = Number(input.paidAmount);
+  const reversals: string[] = [];
+  const commits: string[] = [];
+  const pending: Array<Promise<void>> = [];
+  let webhookArmed = true;
+
+  // FIFO row lock: each holder queues behind the one before it.
+  let rowTail: Promise<void> = Promise.resolve();
+  const withRowLock = async <T>(run: () => Promise<T> | T): Promise<T> => {
+    const previous = rowTail;
+    let release: () => void = () => undefined;
+    rowTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await run();
+    } finally {
+      release();
+    }
+  };
+
+  const webhookRefund = (refundId: string, amount: string): Promise<void> =>
+    withRowLock(() => {
+      const live = row.gatewayData ?? {};
+      const ledger = Array.isArray(live.refunds)
+        ? [...(live.refunds as ReadonlyArray<{ refundId: string; amount: string; at: string }>)]
+        : [];
+      const alreadyLedgered = ledger.some((entry) => entry.refundId === refundId);
+      if (!alreadyLedgered) {
+        ledger.push({ refundId, amount, at: '2026-04-19T12:30:00.000Z' });
+      }
+      const total =
+        Number(live.refundedAmountTotal ?? '0') + (alreadyLedgered ? 0 : Number(amount));
+      row.gatewayData = { ...live, refunds: ledger, refundedAmountTotal: total.toFixed(2) };
+      commits.push(`webhook:${refundId}`);
+      if (total >= paid - 0.000001) {
+        reversals.push(`webhook:${refundId}`);
+      }
+    });
+
+  const transaction = createTransaction({ amount: input.paidAmount });
+  const transactionClient = {
+    $queryRaw: async () => [{ id: 'tx-1' }],
+    transaction: {
+      findUnique: async (args: { select?: Record<string, unknown> }) => {
+        if (args.select === undefined) {
+          return transaction;
+        }
+        // Snapshot BEFORE releasing the counterpart, so the panel is holding
+        // exactly what a stale read would have handed it.
+        const snapshot = { gatewayData: row.gatewayData };
+        if (webhookArmed) {
+          webhookArmed = false;
+          pending.push(webhookRefund(input.webhookRefund.refundId, input.webhookRefund.amount));
+        }
+        return snapshot;
+      },
+      update: async (args: { where: { id: string }; data: Record<string, unknown> }) => {
+        row.gatewayData = args.data.gatewayData as Record<string, unknown>;
+        commits.push('panel');
+        return null;
+      },
+    },
+  };
+  const prisma = {
+    ...transactionClient,
+    $transaction: async <T>(callback: (tx: typeof transactionClient) => Promise<T>): Promise<T> =>
+      withRowLock(() => callback(transactionClient)),
+    paymentGateway: {
+      findUnique: async () => ({
+        type: PaymentGatewayType.YOOKASSA,
+        isActive: true,
+        settings: { shopId: 'shop-1', apiKey: 'key-1' },
+      }),
+    },
+    adminAuditLog: { create: async () => null },
+  };
+  const httpService = {
+    // A DIFFERENT refund from the webhook's, so neither side may deduplicate
+    // the other away — both entries have to end up in the ledger.
+    post: () => of({ status: 200, data: { id: 'refund-2', status: 'succeeded' } }),
+  };
+  const service = new PaymentRefundService(
+    prisma as never,
+    httpService as never,
+    new PaymentWebhookPayloadRedactionService(),
+    {
+      reverseFulfilledPayment: async (reversed: { id: string }) => {
+        reversals.push(`panel:${reversed.id}`);
+      },
+    } as never,
+  );
+  return {
+    service,
+    row,
+    reversals,
+    commits,
+    /** Waits for the counterpart writer to drain off the row lock. */
+    settle: async (): Promise<void> => {
+      await Promise.all(pending);
+    },
+  };
 }
 
 describe('PaymentRefundService.getEligibility', () => {
@@ -320,6 +455,101 @@ describe('PaymentRefundService.refundTransaction', () => {
     assert.equal(gatewayData.refundReversedAt, '2026-04-19T12:00:00.000Z');
     assert.equal(gatewayData.subscriptionRevoked, true);
     assert.equal(gatewayData.refundId, 'refund-1');
+  });
+
+  it('does not double-count when the refund webhook lands before the panel write', async () => {
+    // The race, from the panel's side. The operator refunds 500 of 1000; the
+    // `refund.succeeded` webhook for that same refund arrives while the provider
+    // call is still in flight and reconciliation records it. The re-read must
+    // recognise the refund by its provider id and not count it a second time —
+    // 1000 would read as a full refund and revoke a subscription the customer
+    // has only been given half their money back for.
+    //
+    // This is exactly what `PaymentReconciliationService` writes on a partial
+    // refund; `payment-reconciliation-notifications.service.spec.ts` pins the
+    // producing side of the same shape.
+    const { service, state, reversals } = createService();
+    state.refreshedGatewayData = {
+      refundedAmountTotal: '500.00',
+      refunds: [{ refundId: 'refund-1', amount: '500.00', at: '2026-04-19T12:00:00.000Z' }],
+      partialRefundAt: '2026-04-19T12:00:00.000Z',
+      refundNeedsManualReview: true,
+    };
+
+    await service.refundTransaction({
+      transactionId: 'tx-1',
+      amount: '500.00',
+      reason: null,
+      currentAdmin: ADMIN,
+      requestMetadata: REQUEST_META,
+    });
+
+    const gatewayData = state.updates[0].data.gatewayData as Record<string, unknown>;
+    assert.equal(gatewayData.refundedAmountTotal, '500.00');
+    assert.equal((gatewayData.refunds as unknown[]).length, 1);
+    assert.deepEqual(reversals, []);
+  });
+
+  // The genuine interleave, with both writers on ONE row and a real lock. Two
+  // DIFFERENT refunds: the panel issues refund-2 while the `refund.succeeded`
+  // webhook for refund-1 is being reconciled. Before the row lock the panel
+  // merged onto a snapshot it had already read, so the webhook's write landed in
+  // that gap and was overwritten — the ledger lost an entry and the total went
+  // backwards. Under-counting is safe by construction (it can only ever fall
+  // into the partial branch), which is why this was a latent hardening gap and
+  // not an active money leak, but the accounting was still wrong and the
+  // reversal that should have fired never did.
+  it('panel-then-webhook: both ledger entries survive and the reversal fires exactly once', async () => {
+    const race = createRefundRace({
+      paidAmount: '1000.00',
+      webhookRefund: { refundId: 'refund-1', amount: '500.00' },
+    });
+
+    await race.service.refundTransaction({
+      transactionId: 'tx-1',
+      amount: '500.00',
+      reason: null,
+      currentAdmin: ADMIN,
+      requestMetadata: REQUEST_META,
+    });
+    await race.settle();
+
+    // The panel committed first, the webhook merged onto what it committed.
+    assert.deepEqual(race.commits, ['panel', 'webhook:refund-1']);
+    assert.deepEqual(
+      (race.row.gatewayData?.refunds as ReadonlyArray<{ refundId: string }>).map(
+        (entry) => entry.refundId,
+      ),
+      ['refund-2', 'refund-1'],
+    );
+    assert.equal(race.row.gatewayData?.refundedAmountTotal, '1000.00');
+    // 500 + 500 of 1000 — the customer is whole, so exactly one of the two
+    // writers must reverse, and it is the one whose entry crossed.
+    assert.deepEqual(race.reversals, ['webhook:refund-1']);
+  });
+
+  it('panel-then-webhook: keeps both entries and reverses nothing when they fall short', async () => {
+    // Same interleave, amounts that do NOT add up to the captured 1000. The
+    // ledger still has to carry both, and the all-or-nothing reversal must stay
+    // out of it — a partial giveback leaves the commission, the tax income and
+    // the subscription exactly as they were.
+    const race = createRefundRace({
+      paidAmount: '1000.00',
+      webhookRefund: { refundId: 'refund-1', amount: '300.00' },
+    });
+
+    await race.service.refundTransaction({
+      transactionId: 'tx-1',
+      amount: '500.00',
+      reason: null,
+      currentAdmin: ADMIN,
+      requestMetadata: REQUEST_META,
+    });
+    await race.settle();
+
+    assert.equal((race.row.gatewayData?.refunds as unknown[]).length, 2);
+    assert.equal(race.row.gatewayData?.refundedAmountTotal, '800.00');
+    assert.deepEqual(race.reversals, []);
   });
 
   it('refuses an amount above the remaining balance before calling the provider', async () => {

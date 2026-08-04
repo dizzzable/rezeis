@@ -1,5 +1,6 @@
 import {
   Prisma,
+  TransactionStatus,
   TrialClaim,
   TrialClaimSource,
   TrialClaimStatus,
@@ -33,6 +34,44 @@ export async function countCommittedTrialClaimUnits(
     _sum: { units: true },
   });
   return result._sum.units ?? 0;
+}
+
+/**
+ * The user's own trial reservation that is still resolvable — a RESERVED claim
+ * whose transaction has not gone terminal.
+ *
+ * Such a reservation must not hide the trial plan from the very person holding
+ * it. Abandoning a checkout (closing the page, a blocked redirect, backing out
+ * of the card form) leaves the draft PENDING, and quoting counted its unit as
+ * spent — so the buyer was told the trial was already used while the attempt
+ * that "used" it had not been paid for and was still theirs to finish. The
+ * checkout path reuses that very draft when the terms match, so at most one
+ * trial can ever come of it.
+ *
+ * Only the quote may act on this. Capacity for an actual reservation is decided
+ * under `lockTrialClaimUser` with the plain count, so nothing here can mint a
+ * second live reservation.
+ */
+export async function findResumablePaidTrialClaim(
+  client: TrialClaimClient & Pick<Prisma.TransactionClient, 'transaction'>,
+  userId: string,
+): Promise<{ readonly transactionId: string } | null> {
+  const reserved = await client.trialClaim.findMany({
+    where: { userId, status: TrialClaimStatus.RESERVED, transactionId: { not: null } },
+    select: { transactionId: true },
+    orderBy: { reservedAt: 'desc' },
+  });
+  const transactionIds = reserved
+    .map((claim) => claim.transactionId)
+    .filter((id): id is string => id !== null);
+  if (transactionIds.length === 0) return null;
+
+  const pending = await client.transaction.findFirst({
+    where: { id: { in: transactionIds }, status: TransactionStatus.PENDING },
+    select: { id: true },
+    orderBy: { createdAt: 'desc' },
+  });
+  return pending === null ? null : { transactionId: pending.id };
 }
 
 /** Serialize free grants and paid reservations on the canonical user row. */

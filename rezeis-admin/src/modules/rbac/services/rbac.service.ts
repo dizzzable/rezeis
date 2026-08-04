@@ -91,10 +91,15 @@ const LEGACY_ADMIN_ALLOWED_RESOURCES: ReadonlySet<string> = new Set([
  * customer and cannot be undone — a legacy admin inherits every action of an
  * allowed resource, so without this entry the refund button would silently
  * appear for accounts that were never explicitly granted it.
+ * `payment_gateways:view_secrets` is the same trap: `payment_gateways` is an
+ * allowed resource, so adding the action to the catalog would have handed every
+ * pre-RBAC admin the plaintext API keys, signing secrets and RSA private keys
+ * of every gateway — the exact exposure that action exists to close.
  */
 const LEGACY_ADMIN_DENIED_TOKENS: ReadonlySet<string> = new Set([
   'users:export_registration',
   'payments:refund',
+  'payment_gateways:view_secrets',
 ]);
 
 interface PermissionCacheEntry {

@@ -36,6 +36,17 @@ const SAFE_PRODUCT_CODES = new Set<string>([
   'PARTNER_BALANCE_DISABLED',
   'PARTNER_BALANCE_NOT_AVAILABLE',
   'USER_DELETE_PROTECTED_HISTORY',
+  // The two paid-trial refusals ask the buyer for opposite things — one is
+  // final, the other is resolvable by abandoning their own unfinished
+  // checkout. Without both here the filter strips the code and the BFF can
+  // only report a generic failure, which is the very confusion these codes
+  // were split apart to end.
+  'TRIAL_ALREADY_USED',
+  'TRIAL_PENDING_CHECKOUT_STALE',
+  // Abandon refusals. Both mean "not now, and here is why" — collapsed into an
+  // untyped 400 the buyer would just see a cancel button that does nothing.
+  'PAYMENT_ALREADY_AT_PROVIDER',
+  'PAYMENT_PROVIDER_CREATE_IN_FLIGHT',
 ]);
 const SENSITIVE_HTTP_TEXT_PATTERNS = [
   /\b(?:postgres|mysql|mongodb|redis|amqp|http|https):\/\/\S+/iu,

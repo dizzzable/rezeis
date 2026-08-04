@@ -106,6 +106,11 @@ export function md5(value: string): string {
   return createHash('md5').update(value).digest('hex');
 }
 
+/** MulenPay signs requests with SHA-1 over a concatenation of four values. */
+export function sha1(value: string): string {
+  return createHash('sha1').update(value).digest('hex');
+}
+
 // ── URL builders ───────────────────────────────────────────────────────
 
 /**

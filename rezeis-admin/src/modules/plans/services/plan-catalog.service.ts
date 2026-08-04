@@ -18,7 +18,10 @@ import { isGatewayAvailableForChannel } from '../utils/purchase-gateway-policy.u
 import { PLAN_INCLUDE, PlanRecord } from '../utils/plan-record.util';
 import { getSupportedPaymentAssets } from '../utils/supported-payment-assets.util';
 import { readTrialSettings } from '../utils/trial-settings.util';
-import { countCommittedTrialClaimUnits } from '../../subscriptions/services/trial-claim-ledger.util';
+import {
+  countCommittedTrialClaimUnits,
+  findResumablePaidTrialClaim,
+} from '../../subscriptions/services/trial-claim-ledger.util';
 import { PricingService } from './pricing.service';
 
 interface CatalogUserContext {
@@ -104,7 +107,7 @@ export class PlanCatalogService {
         },
       }),
     ]);
-    const [partnerReferral, trialClaims] = await Promise.all([
+    const [partnerReferral, resumableTrialClaim] = await Promise.all([
       // Partner-invited users count as "invited" for trial scoping too;
       // the partner program keeps its own edge table separate from referrals.
       referral === null
@@ -113,8 +116,19 @@ export class PlanCatalogService {
             select: { id: true },
           })
         : Promise.resolve(null),
-      countCommittedTrialClaimUnits(this.prismaService, userId),
+      findResumablePaidTrialClaim(this.prismaService, userId),
     ]);
+    // Quoting already discounts the buyer's own unfinished attempt, but the
+    // catalog gates one layer above it: counting that reservation here drops
+    // the trial plan from the list entirely, so the buyer never reaches the
+    // quote that would have let them back in. Both layers must agree, and
+    // neither decides capacity — the reservation itself is taken under
+    // `lockTrialClaimUser` with the plain, unfiltered count.
+    const trialClaims = await countCommittedTrialClaimUnits(
+      this.prismaService,
+      userId,
+      resumableTrialClaim?.transactionId,
+    );
     return {
       user,
       hasAnySubscription: subscription !== null,

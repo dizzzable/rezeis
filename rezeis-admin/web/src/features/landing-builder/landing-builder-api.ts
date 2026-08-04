@@ -45,12 +45,24 @@ export const LANDING_BACKGROUNDS = [
 ] as const
 export type LandingBackground = (typeof LANDING_BACKGROUNDS)[number]
 
+/** Texture layer over the base effect — mirror backend `LANDING_BACKGROUND_OVERLAYS`. */
+export const LANDING_BACKGROUND_OVERLAYS = ['none', 'noise', 'grid', 'dots', 'vignette', 'scanline'] as const
+export type LandingBackgroundOverlay = (typeof LANDING_BACKGROUND_OVERLAYS)[number]
+
+/** Hover feedback presets — mirror backend `LANDING_CARD_HOVERS` / `LANDING_CTA_STYLES`. */
+export const LANDING_CARD_HOVERS = ['none', 'lift', 'glow', 'scale'] as const
+export type LandingCardHover = (typeof LANDING_CARD_HOVERS)[number]
+export const LANDING_CTA_STYLES = ['none', 'lift', 'shine'] as const
+export type LandingCtaStyle = (typeof LANDING_CTA_STYLES)[number]
+
 /** Card/section surface treatment — mirror backend `LANDING_SURFACE_STYLES`. */
 export const LANDING_SURFACE_STYLES = ['solid', 'glass', 'outline'] as const
 export type LandingSurfaceStyle = (typeof LANDING_SURFACE_STYLES)[number]
 
 /** Per-section scroll-reveal animation — mirror backend `LANDING_ANIMATIONS`. */
-export const LANDING_ANIMATIONS = ['none', 'fade', 'fadeUp', 'zoom'] as const
+export const LANDING_ANIMATIONS = [
+  'none', 'fade', 'fadeUp', 'fadeDown', 'slideLeft', 'slideRight', 'zoom', 'zoomOut', 'blurIn',
+] as const
 export type LandingAnimation = (typeof LANDING_ANIMATIONS)[number]
 
 export interface LandingSection {
@@ -64,12 +76,15 @@ export interface LandingSection {
 export interface LandingTheme {
   inherit: boolean
   colors?: { primary?: string; bg?: string; fg?: string; accent?: string }
-  font?: { family?: string; scale?: number }
+  font?: { family?: string }
   radius?: 'none' | 'sm' | 'md' | 'lg' | 'xl'
   background?: LandingBackground
+  backgroundOverlay?: LandingBackgroundOverlay
   backgroundColors?: string[]
   animateBackground?: boolean
   surfaceStyle?: LandingSurfaceStyle
+  cardHover?: LandingCardHover
+  ctaStyle?: LandingCtaStyle
 }
 
 export interface LandingConfig {
@@ -83,12 +98,24 @@ export interface LandingConfig {
   sections: LandingSection[]
 }
 
+export interface LandingCorruptedDraft {
+  issues: ReadonlyArray<{ path: string; message: string }>
+  raw: unknown
+}
+
 export interface LandingDraftResponse {
   draft: LandingConfig
   published: LandingConfig | { enabled: false } | null
   version: number
   stored: boolean
   hasDraftChanges: boolean
+  /**
+   * Present only when the STORED draft failed validation, in which case `draft`
+   * is the bundled default standing in for it. The builder must warn and must
+   * not autosave — an autosave here overwrites the operator's real content with
+   * a blank landing, which is how the old silent fallback destroyed work.
+   */
+  corrupted?: LandingCorruptedDraft
 }
 
 export interface LandingRevisionMeta {
@@ -123,6 +150,33 @@ export class LandingPublishIncompleteError extends Error {
   }
 }
 
+/**
+ * Thrown when a draft save is rejected (400) by schema validation.
+ *
+ * The server owns the schema — deliberately not mirrored on the client, which
+ * would make a fourth copy of the section catalog to keep in sync. Instead the
+ * server's own Zod issues are carried back so the operator sees WHICH field is
+ * wrong instead of a bare "save failed".
+ */
+export class LandingDraftInvalidError extends Error {
+  public readonly issues: LandingPublishStrictIssue[]
+  public constructor(issues: LandingPublishStrictIssue[]) {
+    super('LANDING_DRAFT_INVALID')
+    this.issues = issues
+  }
+}
+
+/** Normalises a Zod issue array from the API into `{path, message}` pairs. */
+function readIssues(body: unknown): LandingPublishStrictIssue[] {
+  if (!isRecord(body) || !Array.isArray(body['issues'])) return []
+  return body['issues'].flatMap((raw): LandingPublishStrictIssue[] => {
+    if (!isRecord(raw)) return []
+    const path = Array.isArray(raw['path']) ? raw['path'].join('.') : String(raw['path'] ?? '')
+    const message = typeof raw['message'] === 'string' ? raw['message'] : 'Invalid value'
+    return [{ path: path.length > 0 ? path : '<root>', message }]
+  })
+}
+
 export const LANDING_BUILDER_KEYS = {
   all: ['admin', 'landing-config'] as const,
   revisions: ['admin', 'landing-config', 'revisions'] as const,
@@ -144,11 +198,14 @@ export const landingBuilderApi = {
       return response.data as { config: LandingConfig; version: number }
     } catch (error) {
       const status = isRecord(error) && isRecord(error['response']) ? error['response']['status'] : null
+      const body = isRecord(error) && isRecord(error['response']) ? error['response']['data'] : null
       if (status === 409) {
-        const body = isRecord(error) && isRecord(error['response']) ? error['response']['data'] : null
         const currentVersion =
           isRecord(body) && typeof body['currentVersion'] === 'number' ? body['currentVersion'] : version
         throw new LandingDraftConflictError(currentVersion)
+      }
+      if (status === 400) {
+        throw new LandingDraftInvalidError(readIssues(body))
       }
       throw error
     }

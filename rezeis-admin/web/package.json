@@ -17,7 +17,10 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "doctor": "react-doctor"
+    "doctor": "react-doctor",
+    "sync:landing-kit": "node scripts/sync-landing-kit.mjs",
+    "sync:landing-kit:check": "node scripts/sync-landing-kit.mjs --check",
+    "gen:theme-presets": "node scripts/generate-theme-presets.mjs"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

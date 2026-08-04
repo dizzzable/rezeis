@@ -253,10 +253,24 @@ export const LANDING_BACKGROUNDS = [
   'spotlight',
   'network',
 ] as const;
+/**
+ * Texture layer drawn ON TOP of the background effect. `noise`, `grid` and
+ * `dots` are textures rather than scenes, so as base effects they competed with
+ * `aurora`/`mesh` instead of combining with them; as a second axis the same CSS
+ * yields roughly fifty combinations.
+ */
+export const LANDING_BACKGROUND_OVERLAYS = ['none', 'noise', 'grid', 'dots', 'vignette', 'scanline'] as const;
+
+/** Hover feedback on cards / CTA buttons (pointer devices only). */
+export const LANDING_CARD_HOVERS = ['none', 'lift', 'glow', 'scale'] as const;
+export const LANDING_CTA_STYLES = ['none', 'lift', 'shine'] as const;
+
 /** Section/card surface style — `glass` = liquid-glass (backdrop-blur). */
 export const LANDING_SURFACE_STYLES = ['solid', 'glass', 'outline'] as const;
 /** Per-section scroll-reveal animation. */
-export const LANDING_ANIMATIONS = ['none', 'fade', 'fadeUp', 'zoom'] as const;
+export const LANDING_ANIMATIONS = [
+  'none', 'fade', 'fadeUp', 'fadeDown', 'slideLeft', 'slideRight', 'zoom', 'zoomOut', 'blurIn',
+] as const;
 
 const hexColor = z.string().regex(/^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/);
 
@@ -308,7 +322,15 @@ const themeSchema = z.object({
       accent: hexColor.optional(),
     })
     .optional(),
-  font: z.object({ family: z.string().optional(), scale: z.number().optional() }).optional(),
+  /**
+   * `family` only. A `scale` multiplier used to be declared here and was never
+   * implemented in either renderer: section typography is Tailwind `text-*`,
+   * which is rem-based and resolves against the document root, so nothing short
+   * of a typography rework could honour it. Removing an optional field that no
+   * config could ever have depended on needs no migration — Zod strips it from
+   * any stored draft that still carries one.
+   */
+  font: z.object({ family: z.string().optional() }).optional(),
   radius: z.enum(['none', 'sm', 'md', 'lg', 'xl']).optional(),
   /// Background effect rendered behind all sections (CSS-only, reduced-motion aware).
   background: z.enum(LANDING_BACKGROUNDS).optional(),
@@ -316,8 +338,14 @@ const themeSchema = z.object({
   backgroundColors: z.array(hexColor).max(4).optional(),
   /// Animate the background (respects prefers-reduced-motion). Default true.
   animateBackground: z.boolean().optional(),
+  /// Texture layer over the background effect (independent of the base).
+  backgroundOverlay: z.enum(LANDING_BACKGROUND_OVERLAYS).optional(),
   /// Card/section surface treatment applied across the landing.
   surfaceStyle: z.enum(LANDING_SURFACE_STYLES).optional(),
+  /// Hover feedback on cards; ignored on touch input.
+  cardHover: z.enum(LANDING_CARD_HOVERS).optional(),
+  /// Hover feedback on CTA buttons; ignored on touch input.
+  ctaStyle: z.enum(LANDING_CTA_STYLES).optional(),
 });
 
 export const landingConfigSchema = z.object({

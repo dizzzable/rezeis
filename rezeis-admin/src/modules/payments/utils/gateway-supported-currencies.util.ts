@@ -34,7 +34,13 @@ export const GATEWAY_SUPPORTED_CURRENCIES: Readonly<
   ANTILOPAY: ['RUB'],
   AURAPAY: ['RUB'],
   ROLLYPAY: ['RUB'],
-  MULENPAY: ['RUB', 'USD'],
+  // Roubles only. MulenPay's `currency` is an enum of exactly `['rub']`, which
+  // is why `createMulenpayCheckout` hardcodes it in both the body and the
+  // `sha1(currency + amount + shopId + secretKey)` signature. Listing USD here
+  // let an operator enable the gateway on its seeded USD default: a $5 plan
+  // booked `amount = 5.00, currency = USD` and we posted `{currency: 'rub',
+  // amount: '5'}` — the buyer paid 5 ₽ while the row recorded USD.
+  MULENPAY: ['RUB'],
   SEVERPAY: ['RUB', 'USD'],
   WATA: ['RUB', 'USD'],
   LAVA: ['RUB', 'USD'],

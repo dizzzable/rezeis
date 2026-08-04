@@ -52,50 +52,102 @@ describe('AdminPaymentGatewaysController', () => {
   });
 
   it('delegates gateway calls unchanged', async () => {
-    const calls: unknown[] = [];
-    const controller = new AdminPaymentGatewaysController({
-      listGateways: async () => {
-        calls.push(['list']);
-        return [{ id: 'gateway-1' }];
-      },
-      getGateway: async (gatewayId: string) => {
-        calls.push(['get', gatewayId]);
-        return { id: gatewayId };
-      },
-      updateGateway: async (gatewayId: string, input: unknown) => {
-        calls.push(['update', gatewayId, input]);
-        return { id: gatewayId, ...((input as Record<string, unknown>) ?? {}) };
-      },
-      moveGateway: async (gatewayId: string, direction: string) => {
-        calls.push(['move', gatewayId, direction]);
-        return { id: gatewayId, direction };
-      },
-      createDefaults: async () => {
-        calls.push(['defaults']);
-        return [{ id: 'gateway-default' }];
-      },
-    } as never as PaymentGatewayRegistryService);
+    const { controller, calls } = createController(false);
 
-    assert.deepStrictEqual(await controller.listGateways(), [{ id: 'gateway-1' }]);
-    assert.deepStrictEqual(await controller.getGateway('gateway-1'), { id: 'gateway-1' });
+    assert.deepStrictEqual(await controller.listGateways(ADMIN), [{ id: 'gateway-1' }]);
+    assert.deepStrictEqual(await controller.getGateway(ADMIN, 'gateway-1'), { id: 'gateway-1' });
     assert.deepStrictEqual(
-      await controller.updateGateway('gateway-1', { isActive: false } as never),
+      await controller.updateGateway(ADMIN, 'gateway-1', { isActive: false } as never),
       { id: 'gateway-1', isActive: false },
     );
     assert.deepStrictEqual(
-      await controller.moveGateway('gateway-1', { direction: 'up' } as never),
+      await controller.moveGateway(ADMIN, 'gateway-1', { direction: 'up' } as never),
       { id: 'gateway-1', direction: 'up' },
     );
-    assert.deepStrictEqual(await controller.createDefaults(), [{ id: 'gateway-default' }]);
+    assert.deepStrictEqual(await controller.createDefaults(ADMIN), [{ id: 'gateway-default' }]);
     assert.deepStrictEqual(calls, [
-      ['list'],
-      ['get', 'gateway-1'],
-      ['update', 'gateway-1', { isActive: false }],
-      ['move', 'gateway-1', 'up'],
-      ['defaults'],
+      ['list', false],
+      ['get', 'gateway-1', false],
+      ['update', 'gateway-1', { isActive: false }, false],
+      ['move', 'gateway-1', 'up', false],
+      ['defaults', false],
     ]);
   });
+
+  it('asks for secrets only when the admin holds payment_gateways:view_secrets', async () => {
+    // The elevated permission is resolved per request and passed down rather
+    // than gating the route: an admin with plain `payment_gateways:view` must
+    // keep listing and configuring gateways, just with the secrets masked.
+    const withoutSecrets = createController(false);
+    const withSecrets = createController(true);
+
+    await withoutSecrets.controller.listGateways(ADMIN);
+    await withSecrets.controller.listGateways(ADMIN);
+
+    assert.deepStrictEqual(withoutSecrets.calls, [['list', false]]);
+    assert.deepStrictEqual(withSecrets.calls, [['list', true]]);
+    assert.deepStrictEqual(withSecrets.permissionChecks, [
+      ['payment_gateways', 'view_secrets'],
+    ]);
+  });
+
+  it('does not let an edit round-trip reveal a secret the caller cannot read', async () => {
+    // A save echoes the stored row back. Without the same permission check on
+    // the write path, `edit` alone would be a read primitive for credentials.
+    const { controller, calls } = createController(false);
+
+    await controller.updateGateway(ADMIN, 'gateway-1', { isActive: true } as never);
+    await controller.moveGateway(ADMIN, 'gateway-1', { direction: 'up' } as never);
+    await controller.createDefaults(ADMIN);
+
+    assert.deepStrictEqual(
+      calls.map((call) => (call as unknown[])[(call as unknown[]).length - 1]),
+      [false, false, false],
+    );
+  });
 });
+
+const ADMIN = { id: 'admin-1', role: 'ADMIN', rbacRoleId: 'role-1' } as never;
+
+function createController(canRevealSecrets: boolean): {
+  readonly controller: AdminPaymentGatewaysController;
+  readonly calls: unknown[];
+  readonly permissionChecks: unknown[];
+} {
+  const calls: unknown[] = [];
+  const permissionChecks: unknown[] = [];
+  const controller = new AdminPaymentGatewaysController(
+    {
+      listGateways: async (revealSecrets: boolean) => {
+        calls.push(['list', revealSecrets]);
+        return [{ id: 'gateway-1' }];
+      },
+      getGateway: async (gatewayId: string, revealSecrets: boolean) => {
+        calls.push(['get', gatewayId, revealSecrets]);
+        return { id: gatewayId };
+      },
+      updateGateway: async (gatewayId: string, input: unknown, revealSecrets: boolean) => {
+        calls.push(['update', gatewayId, input, revealSecrets]);
+        return { id: gatewayId, ...((input as Record<string, unknown>) ?? {}) };
+      },
+      moveGateway: async (gatewayId: string, direction: string, revealSecrets: boolean) => {
+        calls.push(['move', gatewayId, direction, revealSecrets]);
+        return { id: gatewayId, direction };
+      },
+      createDefaults: async (revealSecrets: boolean) => {
+        calls.push(['defaults', revealSecrets]);
+        return [{ id: 'gateway-default' }];
+      },
+    } as never as PaymentGatewayRegistryService,
+    {
+      hasPermission: async (_admin: unknown, resource: string, action: string) => {
+        permissionChecks.push([resource, action]);
+        return canRevealSecrets;
+      },
+    } as never,
+  );
+  return { controller, calls, permissionChecks };
+}
 
 function assertRoute(method: unknown, path: string | undefined, requestMethod: RequestMethod, action: string): void {
   assert.equal(Reflect.getMetadata(PATH_METADATA, method), path);

@@ -7,7 +7,10 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 import { MOY_NALOG_JOBS, MOY_NALOG_QUEUE } from '../constants/moy-nalog.constant';
 import { MoyNalogApiService, MoyNalogAuth } from '../services/moy-nalog-api.service';
 import { renderIncomeName } from '../utils/moy-nalog-income-name.util';
-import { readGatewaySettings } from '../utils/payment-gateway-settings.util';
+import {
+  encryptGatewaySettingsForStorage,
+  readGatewaySettings,
+} from '../utils/payment-gateway-settings.util';
 
 /**
  * Registers a COMPLETED YooKassa transaction as self-employed income in
@@ -157,6 +160,14 @@ export class MoyNalogProcessor extends WorkerHost {
    * Best-effort: a failure here is logged and swallowed (the income is already
    * registered; only the next refresh-auth would be affected). Merges into the
    * raw settings JSON so unrelated gateway fields are preserved.
+   *
+   * This is the one credential write that does not go through
+   * `PaymentGatewayRegistryService`, so it has to encrypt the rotated token
+   * itself — otherwise every token rotation would quietly drop a plaintext
+   * refresh token into an otherwise-encrypted row. Merging into the RAW stored
+   * settings (not the decrypted view) is deliberate: the surrounding envelopes
+   * are carried over verbatim, so a crypt-key problem cannot turn this
+   * best-effort write into a wipe of the other credentials.
    */
   private async persistRotatedRefreshToken(
     gatewayId: string,
@@ -166,7 +177,9 @@ export class MoyNalogProcessor extends WorkerHost {
     try {
       const merged = {
         ...readGatewayData(currentSettings),
-        moyNalogRefreshToken: rotatedRefreshToken,
+        ...encryptGatewaySettingsForStorage(PaymentGatewayType.YOOKASSA, {
+          moyNalogRefreshToken: rotatedRefreshToken,
+        }),
       };
       await this.prismaService.paymentGateway.update({
         where: { id: gatewayId },

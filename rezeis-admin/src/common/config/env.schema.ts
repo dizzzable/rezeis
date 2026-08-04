@@ -61,6 +61,33 @@ const environmentSchema = z
     REZEIS_LOCALES: z.string().min(1).default('ru,en'),
     REZEIS_DEFAULT_LOCALE: z.string().min(1).default('ru'),
     REZEIS_CRYPT_KEY: z.string().min(32, 'REZEIS_CRYPT_KEY must be at least 32 characters'),
+    /**
+     * Optional override for the key that encrypts payment gateway credentials
+     * at rest (API keys, signing secrets, RSA private keys in
+     * `PaymentGateway.settings`). Left unset — the normal case — those secrets
+     * are encrypted under `REZEIS_CRYPT_KEY` with a `payment-gateway` domain
+     * separator, exactly like the TOTP / OAuth / AI-config secrets.
+     *
+     * Optional rather than required on purpose. `REZEIS_CRYPT_KEY` above is
+     * already mandatory and fails the boot when absent, so key material always
+     * exists and encryption can never silently degrade to storing plaintext —
+     * `encryptSettingValue` throws instead of deriving a key from an empty
+     * string. Making THIS variable mandatory would add a second hard boot
+     * requirement that bricks every existing install on upgrade, which is not a
+     * trade worth making on a live payments path for zero security gain.
+     *
+     * Set it when payment credentials need a rotation schedule of their own.
+     * Rows written under the previous key stay readable (decryption tries both)
+     * and are rewritten under this one on their next save. Min 32 characters,
+     * matching the master key.
+     */
+    PAYMENT_GATEWAY_CRYPT_KEY: z.preprocess(
+      normalizeOptionalString,
+      z
+        .string()
+        .min(32, 'PAYMENT_GATEWAY_CRYPT_KEY must be at least 32 characters')
+        .optional(),
+    ),
 
     // ── Webhook ──────────────────────────────────────────────────────────────
     WEBHOOK_ENABLED: envBoolean(false),

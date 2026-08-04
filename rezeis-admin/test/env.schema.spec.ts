@@ -257,6 +257,45 @@ describe('validateEnvironment', () => {
       });
     });
   });
+
+  describe('PAYMENT_GATEWAY_CRYPT_KEY', () => {
+    it('is optional, because REZEIS_CRYPT_KEY already guarantees key material', () => {
+      // Making it required would brick every existing install on upgrade. Gateway
+      // secrets fall back to the master key, so nothing is ever stored in plaintext.
+      const environment = validateEnvironment(createRequiredEnvironment());
+      assert.equal(environment.PAYMENT_GATEWAY_CRYPT_KEY, undefined);
+    });
+
+    it('treats a blank value as unset rather than as an empty key', () => {
+      const environment = validateEnvironment({
+        ...createRequiredEnvironment(),
+        PAYMENT_GATEWAY_CRYPT_KEY: '   ',
+      });
+      assert.equal(environment.PAYMENT_GATEWAY_CRYPT_KEY, undefined);
+    });
+
+    it('accepts an override of at least 32 characters', () => {
+      const environment = validateEnvironment({
+        ...createRequiredEnvironment(),
+        PAYMENT_GATEWAY_CRYPT_KEY: 'payment-gateway-key-that-is-32plus-bytes!!',
+      });
+      assert.equal(
+        environment.PAYMENT_GATEWAY_CRYPT_KEY,
+        'payment-gateway-key-that-is-32plus-bytes!!',
+      );
+    });
+
+    it('fails the boot on a too-short override instead of silently ignoring it', () => {
+      // A half-applied crypt key leaves secrets unreadable at the moment a
+      // payment needs them, so this fails closed like the master key does.
+      assert.throws(() =>
+        validateEnvironment({
+          ...createRequiredEnvironment(),
+          PAYMENT_GATEWAY_CRYPT_KEY: 'too-short',
+        }),
+      );
+    });
+  });
 });
 
 function createRequiredEnvironment(): Record<string, unknown> {

@@ -157,6 +157,50 @@ describe('AdminSafeExceptionFilter', () => {
     );
   });
 
+  /**
+   * The two paid-trial refusals must arrive at the BFF as distinguishable
+   * codes. Stripped, both collapse into an untyped 400 that the BFF reports as
+   * a generic checkout failure — so the buyer whose own unfinished attempt is
+   * blocking them is told, once again, that their trial is simply used up.
+   *
+   * The messages are asserted verbatim because the filter also redacts any
+   * message matching its sensitive-text patterns; a reworded message that
+   * happens to trip one would leave the code correct but the explanation gone.
+   */
+  for (const { code, message } of [
+    {
+      code: 'TRIAL_ALREADY_USED',
+      message: 'User has reached the trial claim limit',
+    },
+    {
+      code: 'TRIAL_PENDING_CHECKOUT_STALE',
+      message:
+        'A paid-trial checkout is still pending for this user; finish or abandon it before starting another.',
+    },
+    {
+      code: 'PAYMENT_ALREADY_AT_PROVIDER',
+      message:
+        'This checkout already exists at the payment provider; finish it or let it expire.',
+    },
+    {
+      code: 'PAYMENT_PROVIDER_CREATE_IN_FLIGHT',
+      message: 'A provider request is still in flight for this payment; retry shortly.',
+    },
+  ]) {
+    it(`preserves the ${code} contract for BFF branching`, () => {
+      const captured = runFilter(new BadRequestException({ code, message }), {
+        originalUrl: '/api/internal/payments/transactions/draft',
+        headers: { 'x-request-id': `request.safe-${code}` },
+      });
+
+      assert.equal(captured.statusCode, 400);
+      const body = assertResponseBody(captured.body);
+      assert.equal(body.code, code);
+      assert.equal(body.errorCode, code);
+      assert.equal(body.message, message);
+    });
+  }
+
   it('does not forward non-allowlisted product codes from exception bodies', () => {
     const captured = runFilter(
       new BadRequestException({

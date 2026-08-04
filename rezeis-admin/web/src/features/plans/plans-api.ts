@@ -103,7 +103,7 @@ export const plansQueryKeys = {
 
 // ── Fetcher ─────────────────────────────────────────────────────────────────
 
-async function fetchPlans(signal?: AbortSignal): Promise<readonly Plan[]> {
+export async function fetchPlans(signal?: AbortSignal): Promise<readonly Plan[]> {
   const response = await api.get<Plan[]>('/admin/plans', { signal })
   return response.data
 }

@@ -83,11 +83,16 @@ describe('InternalPaymentsController', () => {
       {} as never,
       {} as never,
       {
+        // `isConfigured` is part of the admin payload every row carries, and
+        // the list now filters on it — an enabled gateway whose credentials
+        // are incomplete cannot issue a checkout, so it is not offered. These
+        // rows are all configured; that filter has its own coverage in
+        // `gateway-offering-safety.spec.ts`.
         listGateways: async () => [
-          { id: 'stars', type: PaymentGatewayType.TELEGRAM_STARS, currency: Currency.XTR, isActive: true, orderIndex: 1 },
-          { id: 'rub', type: PaymentGatewayType.YOOKASSA, currency: Currency.RUB, isActive: true, orderIndex: 2 },
-          { id: 'usd', type: PaymentGatewayType.HELEKET, currency: Currency.USD, isActive: true, orderIndex: 1 },
-          { id: 'off', type: PaymentGatewayType.PLATEGA, currency: Currency.RUB, isActive: false, orderIndex: 0 },
+          { id: 'stars', type: PaymentGatewayType.TELEGRAM_STARS, currency: Currency.XTR, isActive: true, isConfigured: true, orderIndex: 1 },
+          { id: 'rub', type: PaymentGatewayType.YOOKASSA, currency: Currency.RUB, isActive: true, isConfigured: true, orderIndex: 2 },
+          { id: 'usd', type: PaymentGatewayType.HELEKET, currency: Currency.USD, isActive: true, isConfigured: true, orderIndex: 1 },
+          { id: 'off', type: PaymentGatewayType.PLATEGA, currency: Currency.RUB, isActive: false, isConfigured: true, orderIndex: 0 },
         ],
       } as never,
       {} as never,

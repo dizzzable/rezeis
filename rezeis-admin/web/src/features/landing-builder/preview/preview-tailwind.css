@@ -1,0 +1,23 @@
+/*
+ * Tailwind for the preview iframe.
+ *
+ * The preview renders the vendored kit inside an isolated `about:blank`
+ * document, so the admin's own stylesheet never reaches it — that isolation is
+ * deliberate (admin styles must not leak in, and device media queries have to
+ * evaluate against the simulated width). But the kit's layout IS Tailwind:
+ * `landing.css` only defines the nine `.ls-*` classes that carry the visual
+ * system. Injecting `landing.css` alone gave colours, backgrounds and reveals
+ * over a completely unstyled single column — no grid, no spacing, no type
+ * scale, no responsive behaviour. The preview looked nothing like production,
+ * which is the one thing it exists to show.
+ *
+ * `source(none)` turns off automatic content detection so this entry compiles
+ * ONLY the utilities the kit actually uses, rather than the whole admin app —
+ * isolation is preserved and the injected sheet stays small.
+ *
+ * Imported with Vite's `?inline` so the compiled text is handed back as a
+ * string instead of being injected into the parent document.
+ */
+@import "tailwindcss" source(none);
+
+@source "../live";

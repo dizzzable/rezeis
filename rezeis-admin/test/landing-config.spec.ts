@@ -241,6 +241,63 @@ describe('LandingConfigService', () => {
     assert.equal(draft.config.sections.length, DEFAULT_LANDING_CONFIG.sections.length);
   });
 
+  it('getDraft flags a corrupted stored draft instead of silently serving the default', async () => {
+    // Regression: this used to fall back to DEFAULT_LANDING_CONFIG with no
+    // signal at all, so the builder opened a blank landing over the operator's
+    // real content and the first autosave destroyed it. The fallback stays
+    // (something must render), but it now announces itself and carries the raw
+    // row so the original can be recovered.
+    const state: PrismaMockState = {
+      configRow: {
+        key: 'default',
+        draft: { schemaVersion: 1, enabled: true, sections: 'not-an-array' },
+        version: 12,
+        publishedRevisionId: null,
+      },
+      revisions: [],
+      auditLogs: [],
+    };
+    const invalidator = createInvalidatorSpy();
+    const service = new LandingConfigService(
+      createPrismaMock(state) as never,
+      invalidator.service as never,
+    );
+
+    const draft = await service.getDraft();
+
+    assert.ok(draft.corrupted, 'expected the corrupted marker to be present');
+    assert.ok(draft.corrupted.issues.length > 0, 'expected at least one schema issue');
+    assert.ok(
+      draft.corrupted.issues.every(
+        (issue) => typeof issue.path === 'string' && typeof issue.message === 'string',
+      ),
+      'issues must be serialisable {path, message} pairs',
+    );
+    // The raw row travels back untouched so the operator can export it.
+    assert.deepEqual(draft.corrupted.raw, state.configRow?.draft);
+    // Version is preserved: a later save must still hit the optimistic-lock check.
+    assert.equal(draft.version, 12);
+    assert.equal(draft.stored, true);
+  });
+
+  it('getDraft reports no corruption for a valid stored draft', async () => {
+    const state: PrismaMockState = {
+      configRow: { key: 'default', draft: DEFAULT_LANDING_CONFIG, version: 3, publishedRevisionId: null },
+      revisions: [],
+      auditLogs: [],
+    };
+    const invalidator = createInvalidatorSpy();
+    const service = new LandingConfigService(
+      createPrismaMock(state) as never,
+      invalidator.service as never,
+    );
+
+    const draft = await service.getDraft();
+
+    assert.equal(draft.corrupted, undefined);
+    assert.equal(draft.version, 3);
+  });
+
   it('saveDraft rejects a stale version with 409 and does not invalidate', async () => {
     const state: PrismaMockState = {
       configRow: { key: 'default', draft: DEFAULT_LANDING_CONFIG, version: 5, publishedRevisionId: null },

@@ -48,6 +48,7 @@ import { PartnerBalancePaymentService } from './services/partner-balance-payment
 import { TelegramStarsWebhookService } from './services/telegram-stars-webhook.service';
 import { SavedPaymentMethodService } from './services/saved-payment-method.service';
 import { PaymentMethodSetupService } from './services/payment-method-setup.service';
+import { YookassaPaymentVerificationService } from './services/yookassa-payment-verification.service';
 
 @Module({
   imports: [
@@ -96,6 +97,7 @@ import { PaymentMethodSetupService } from './services/payment-method-setup.servi
     PaymentWebhookOpsService,
     TelegramStarsWebhookService,
     PaymentSubscriptionMutationService,
+    YookassaPaymentVerificationService,
     PaymentReconciliationService,
     PaymentReconciliationProcessor,
     MoyNalogApiService,

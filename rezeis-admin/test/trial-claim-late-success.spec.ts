@@ -382,6 +382,11 @@ function createLedgerWorld(input: { readonly maxClaims: number }) {
     { enqueueRegisterIncome: async () => undefined, enqueueCancelIncome: async () => undefined } as never,
     { recordFirstPurchase: async () => undefined, revertConversion: async () => undefined } as never,
     { upsertFromYookassaPayment: async () => undefined } as never,
+    // YooKassa completions are verified against the provider before they are
+    // applied; this suite is about the trial ledger once they are confirmed.
+    {
+      verifyCompletion: async () => ({ outcome: 'CONFIRMED', providerStatus: 'succeeded' }),
+    } as never,
   );
 
   return {

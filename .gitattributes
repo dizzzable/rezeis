@@ -7,3 +7,10 @@ Dockerfile  text eol=lf
 # Treat SVG and JSON deterministically so diffs stay tidy.
 *.svg       text eol=lf
 *.json      text eol=lf
+
+# The vendored landing kit is content-addressed: `landing-kit.manifest.json`
+# stores a sha256 per file and a test fails the build on any mismatch. Line
+# endings are content to a hash, so without this pin the manifest would be
+# valid only on the machine that generated it — red on CI and on every fresh
+# Windows clone, for files nobody edited.
+rezeis-admin/web/src/features/landing-builder/live/** text eol=lf

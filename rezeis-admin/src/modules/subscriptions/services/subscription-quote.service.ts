@@ -29,7 +29,7 @@ import {
   SubscriptionQuotePriceInterface,
   SubscriptionQuoteWarningInterface,
 } from '../interfaces/subscription-quote.interface';
-import { countCommittedTrialClaimUnits } from './trial-claim-ledger.util';
+import { countCommittedTrialClaimUnits, findResumablePaidTrialClaim } from './trial-claim-ledger.util';
 
 type UserRecord = Pick<User, 'id' | 'maxSubscriptions' | 'purchaseDiscount' | 'personalDiscount'>;
 type SubscriptionRecord = Pick<
@@ -500,11 +500,22 @@ export class SubscriptionQuoteService {
     const needsTelegramCheck = input.plans.some(
       (plan) => readTrialSettings(plan.trialSettings).requireTelegramLink === true,
     );
+    // A reservation the buyer can still resolve themselves must not hide the
+    // trial from them. Without this, abandoning a checkout (closed page,
+    // blocked redirect, backed out of the card form) reported the trial as
+    // already used — while the attempt that "used" it was unpaid and still
+    // theirs to finish. Quoting is display-only; the actual reservation is
+    // decided under a lock with the unfiltered count, so this cannot grant a
+    // second trial. An explicit exclude from the caller always wins.
+    const resumable =
+      input.excludeTrialTransactionId !== undefined
+        ? null
+        : await findResumablePaidTrialClaim(this.prismaService, input.userId);
     const [priorTrialClaims, invited, userRow] = await Promise.all([
       countCommittedTrialClaimUnits(
         this.prismaService,
         input.userId,
-        input.excludeTrialTransactionId,
+        input.excludeTrialTransactionId ?? resumable?.transactionId,
       ),
       needsInviteCheck ? isInvitedUser(this.prismaService, input.userId) : Promise.resolve(true),
       needsTelegramCheck

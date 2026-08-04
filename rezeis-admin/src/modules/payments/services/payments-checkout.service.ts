@@ -42,6 +42,23 @@ import { releasePaidTrialClaim } from '../../subscriptions/services/trial-claim-
 
 const PROVIDER_CREATION_CLAIM_PREFIX = '__CHECKOUT_PROVIDER_CREATE__:';
 
+/**
+ * A `gatewayId` that is a placeholder rather than a real provider handle.
+ *
+ * While one of these is set, a create request is in flight and may already have
+ * charged an off-session card. Nothing may cancel such a row on a local
+ * decision — the expiry sweep refuses them for the same reason.
+ */
+const PROVIDER_CREATION_CLAIM_PREFIXES = [
+  PROVIDER_CREATION_CLAIM_PREFIX,
+  '__RENEWAL_PROVIDER_CREATE__:',
+  'claim:',
+] as const;
+
+export function isProviderCreationClaim(gatewayId: string): boolean {
+  return PROVIDER_CREATION_CLAIM_PREFIXES.some((prefix) => gatewayId.startsWith(prefix));
+}
+
 @Injectable()
 export class PaymentsCheckoutService {
   public constructor(
@@ -398,6 +415,93 @@ export class PaymentsCheckoutService {
       // Preserve the original provider error; reconciliation can still resolve
       // an ambiguous external outcome through the transaction payment id.
     }
+  }
+
+  /**
+   * Abandons a pending checkout the buyer started and no longer wants.
+   *
+   * The escape hatch for the trial quota. A paid-trial draft holds a RESERVED
+   * claim, and the quota counter treats RESERVED as spent, so an abandoned
+   * attempt hides the trial plan from its own owner until the expiry sweep
+   * catches up (up to 30 minutes). This lets the buyer — or an operator acting
+   * for them — clear it at once instead of waiting or filing a ticket.
+   *
+   * Only PENDING rows of the calling user are touched, and the guard is in the
+   * `updateMany` predicate, so a webhook that completes the payment between the
+   * read and the write always wins. A late provider SUCCESS still fulfils:
+   * reconciliation revives the transaction and `consumePaidTrialClaim` revives
+   * the released claim with it, so cancelling here can never cost a buyer a
+   * subscription they paid for.
+   */
+  public async abandonPendingCheckout(input: {
+    readonly paymentId: string;
+    readonly userId?: string;
+    readonly telegramId?: string;
+  }): Promise<{ readonly abandoned: boolean; readonly status: TransactionStatus }> {
+    // Identity is REQUIRED here, unlike the read-only status sibling this was
+    // modelled on. Treating "no identity supplied" as "skip the ownership
+    // check" turns a cancel-any-payment-by-id primitive loose the moment a
+    // caller forgets a parameter — and callers do: reiwa derives identity from
+    // the session, which is empty for some session shapes.
+    const ownerId = await this.resolveUserId(input);
+    const transaction = await this.prismaService.transaction.findFirst({
+      where: { paymentId: input.paymentId, userId: ownerId },
+    });
+    if (transaction === null) {
+      // Deliberately indistinguishable from "no such payment": a caller must
+      // not be able to probe for other users' payment ids.
+      throw new NotFoundException('Payment transaction not found');
+    }
+    if (transaction.gatewayId !== null && isProviderCreationClaim(transaction.gatewayId)) {
+      // A provider-create placeholder means a create request is in flight and
+      // may already have charged an off-session card. The expiry sweep refuses
+      // these for the same reason; cancelling one locally would hide a payment
+      // that is still happening.
+      throw new ConflictException({
+        code: 'PAYMENT_PROVIDER_CREATE_IN_FLIGHT',
+        message: 'A provider request is still in flight for this payment; retry shortly.',
+      });
+    }
+    if (transaction.status !== TransactionStatus.PENDING) {
+      // Already terminal — report the real state rather than pretending to act.
+      return { abandoned: false, status: transaction.status };
+    }
+    if (transaction.gatewayId !== null) {
+      // A real provider handle means an invoice exists and is still payable —
+      // no gateway in this system exposes a cancel API, so we cannot kill it.
+      // Freeing the quota while it lives would let one buyer stack N payable
+      // trial invoices and pay them all: `consumePaidTrialClaim` revives a
+      // RELEASED claim, so every one of them would fulfil.
+      //
+      // The buyer is not stuck: the draft stays PENDING, so quoting and the
+      // catalog discount it (`findResumablePaidTrialClaim`) and they can finish
+      // this very attempt. Abandoning is for the case before the gateway was
+      // ever called — a closed page, a blocked redirect.
+      throw new ConflictException({
+        code: 'PAYMENT_ALREADY_AT_PROVIDER',
+        message:
+          'This checkout already exists at the payment provider; finish it or let it expire.',
+      });
+    }
+    const outcome = await this.prismaService.$transaction(async (tx) => {
+      const updated = await tx.transaction.updateMany({
+        where: { id: transaction.id, status: TransactionStatus.PENDING },
+        data: { status: TransactionStatus.CANCELED },
+      });
+      if (updated.count === 0) {
+        // A webhook won the race and moved the row on. Report where it actually
+        // landed: saying PENDING here would show a just-paid subscription as
+        // still awaiting payment.
+        const current = await tx.transaction.findUnique({
+          where: { id: transaction.id },
+          select: { status: true },
+        });
+        return { abandoned: false, status: current?.status ?? transaction.status };
+      }
+      await releasePaidTrialClaim(tx, transaction.id, 'ABANDONED_BY_USER');
+      return { abandoned: true, status: TransactionStatus.CANCELED };
+    });
+    return outcome;
   }
 
   public async getPaymentStatus(input: {

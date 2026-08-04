@@ -511,6 +511,70 @@ describe('SubscriptionQuoteService', () => {
     });
   });
 
+  it("keeps the trial offered while the buyer's own attempt is unpaid", async () => {
+    // The reported bug: an abandoned checkout holds a RESERVED claim, the quota
+    // counter treats RESERVED as spent, and the buyer was told the trial was
+    // already used — for an attempt they had not paid for and could still
+    // finish. That reservation is theirs to resolve, so it must not hide the plan.
+    const service = createService({
+      user: createUser({ maxSubscriptions: 2 }),
+      subscriptions: [],
+      trialClaimUnits: 1,
+      resumableTrialTransactionId: 'tx-pending',
+      plans: [
+        createPlan({
+          id: 'paid-trial-plan',
+          availability: PlanAvailability.TRIAL,
+          trialSettings: { free: false, maxClaims: 1 },
+        }),
+      ],
+    });
+
+    const actualQuote = await service.getQuote({
+      userId: 'user-1',
+      purchaseType: PurchaseType.ADDITIONAL,
+      planId: 'paid-trial-plan',
+      durationDays: 30,
+      channel: PurchaseChannel.WEB,
+    });
+
+    assert.equal(
+      actualQuote.warnings.some((warning) => warning.code === 'TRIAL_ALREADY_USED'),
+      false,
+      'the buyer must not be told the trial is used while their own draft is unpaid',
+    );
+    assert.equal(actualQuote.isEligible, true);
+  });
+
+  it('still blocks the trial once it was genuinely consumed', async () => {
+    // Same spent count, nothing resumable behind it — this one must keep blocking.
+    const service = createService({
+      user: createUser({ maxSubscriptions: 2 }),
+      subscriptions: [],
+      trialClaimUnits: 1,
+      plans: [
+        createPlan({
+          id: 'paid-trial-plan',
+          availability: PlanAvailability.TRIAL,
+          trialSettings: { free: false, maxClaims: 1 },
+        }),
+      ],
+    });
+
+    const actualQuote = await service.getQuote({
+      userId: 'user-1',
+      purchaseType: PurchaseType.ADDITIONAL,
+      planId: 'paid-trial-plan',
+      durationDays: 30,
+      channel: PurchaseChannel.WEB,
+    });
+
+    assert.equal(
+      actualQuote.warnings.some((warning) => warning.code === 'TRIAL_ALREADY_USED'),
+      true,
+    );
+  });
+
   it('returns a missing source plan warning for legacy subscription snapshots', async () => {
     const service = createService({
       user: createUser({ maxSubscriptions: 2 }),
@@ -538,6 +602,9 @@ function createService(input: {
   readonly subscriptions: readonly Record<string, unknown>[];
   readonly trialGrant?: Record<string, unknown> | null;
   readonly trialClaimUnits?: number;
+  /** A RESERVED claim on a still-PENDING draft — the buyer's own unfinished
+   *  attempt, which quoting must not count against them. */
+  readonly resumableTrialTransactionId?: string;
   readonly plans: readonly Record<string, unknown>[];
   readonly multiSubscriptionSettings?: Record<string, unknown> | null;
 }): SubscriptionQuoteService {
@@ -559,13 +626,27 @@ function createService(input: {
       findUnique: async () => input.trialGrant ?? null,
     },
     trialClaim: {
-      aggregate: async () => ({
-        _sum: {
-          units:
-            input.trialClaimUnits ??
-            input.subscriptions.filter((subscription) => subscription.isTrial === true).length,
-        },
-      }),
+      aggregate: async (args: { where?: { transactionId?: { not?: string } } }) => {
+        const base =
+          input.trialClaimUnits ??
+          input.subscriptions.filter((subscription) => subscription.isTrial === true).length;
+        // Mirror the real exclusion: skipping the buyer's own resumable draft
+        // removes exactly its one unit from the total.
+        const excluded = args?.where?.transactionId?.not;
+        const skips =
+          excluded !== undefined && excluded === input.resumableTrialTransactionId ? 1 : 0;
+        return { _sum: { units: Math.max(0, base - skips) } };
+      },
+      findMany: async () =>
+        input.resumableTrialTransactionId === undefined
+          ? []
+          : [{ transactionId: input.resumableTrialTransactionId }],
+    },
+    transaction: {
+      findFirst: async () =>
+        input.resumableTrialTransactionId === undefined
+          ? null
+          : { id: input.resumableTrialTransactionId },
     },
     paymentGateway: {
       findMany: async () => [

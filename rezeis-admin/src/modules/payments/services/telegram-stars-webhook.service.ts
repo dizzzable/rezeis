@@ -1,5 +1,5 @@
 import { Injectable, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
-import { PaymentGatewayType } from '@prisma/client';
+import { PaymentGatewayType, TransactionStatus } from '@prisma/client';
 import { firstValueFrom } from 'rxjs';
 import { HttpService } from '@nestjs/axios';
 
@@ -42,13 +42,29 @@ export class TelegramStarsWebhookService {
       if (transaction === null) {
         throw new NotFoundException('Payment transaction not found');
       }
+      // The pre-checkout query is the last moment we can refuse, and Telegram
+      // expects an answer within 10 seconds. Approving on "a row exists" alone
+      // lets an invoice link be paid a second time: on an already fulfilled
+      // transaction reconciliation exits early, so the stars are taken and
+      // nothing is delivered — and Stars refunds are a manual, out-of-band
+      // affair. Only a draft still awaiting payment may be approved.
+      const payable = transaction.status === TransactionStatus.PENDING;
       await firstValueFrom(
         this.httpService.post(
           `https://api.telegram.org/bot${input.botToken}/answerPreCheckoutQuery`,
-          {
-            pre_checkout_query_id: parsedPayload.preCheckoutQueryId,
-            ok: true,
-          },
+          payable
+            ? {
+                pre_checkout_query_id: parsedPayload.preCheckoutQueryId,
+                ok: true,
+              }
+            : {
+                pre_checkout_query_id: parsedPayload.preCheckoutQueryId,
+                ok: false,
+                // Shown to the buyer by Telegram, so it names the situation
+                // rather than an internal state.
+                error_message:
+                  'Этот счёт уже обработан. Оформите оплату заново, если она ещё нужна.',
+              },
         ),
       );
       return null;

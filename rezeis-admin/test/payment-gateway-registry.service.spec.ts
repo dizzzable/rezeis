@@ -6,6 +6,10 @@ import { Currency, PaymentGatewayType } from '@prisma/client';
 import { PaymentGatewayMoveDirection } from '../src/modules/payments/dto/move-payment-gateway.dto';
 import { PaymentGatewayRegistryService } from '../src/modules/payments/services/payment-gateway-registry.service';
 
+// The gateway secret cipher reads `process.env` at call time, so the at-rest
+// specs below need key material present regardless of the shell environment.
+process.env.REZEIS_CRYPT_KEY ??= 'registry-spec-crypt-key-that-is-32plus!!';
+
 describe('PaymentGatewayRegistryService', () => {
   it('creates default gateways idempotently', async () => {
     const { service } = createService([]);
@@ -50,11 +54,17 @@ describe('PaymentGatewayRegistryService', () => {
       }),
     ]);
 
-    const updatedGateway = await service.updateGateway('gateway-1', {
-      isActive: false,
-      currency: Currency.RUB,
-      settings: { shopId: 'shop-new', apiKey: 'key-new' },
-    });
+    // Reveal requested: this asserts what was PERSISTED, and the default
+    // response now masks secrets for callers without `view_secrets`.
+    const updatedGateway = await service.updateGateway(
+      'gateway-1',
+      {
+        isActive: false,
+        currency: Currency.RUB,
+        settings: { shopId: 'shop-new', apiKey: 'key-new' },
+      },
+      true,
+    );
 
     assert.equal(updatedGateway.isActive, false);
     assert.equal(updatedGateway.currency, Currency.RUB);
@@ -146,13 +156,17 @@ describe('PaymentGatewayRegistryService', () => {
       }),
     ]);
 
-    const updatedGateway = await service.updateGateway('gateway-1', {
-      settings: {
-        merchantId: 'merchant-1',
-        secret: 'secret-1',
-        paymentMethod: 'SBP',
+    const updatedGateway = await service.updateGateway(
+      'gateway-1',
+      {
+        settings: {
+          merchantId: 'merchant-1',
+          secret: 'secret-1',
+          paymentMethod: 'SBP',
+        },
       },
-    });
+      true,
+    );
 
     assert.deepStrictEqual(updatedGateway.settings, {
       merchantId: 'merchant-1',
@@ -160,10 +174,176 @@ describe('PaymentGatewayRegistryService', () => {
       paymentMethod: 2,
     });
   });
+
+  it('exposes the backend readiness verdict and the absolute webhook URL', async () => {
+    const { service } = createService([
+      createGateway({
+        id: 'gateway-1',
+        type: PaymentGatewayType.YOOKASSA,
+        currency: Currency.USD,
+        isActive: true,
+        orderIndex: 1,
+        settings: { shopId: 'shop-1', apiKey: 'key-1' },
+      }),
+      createGateway({
+        id: 'gateway-2',
+        type: PaymentGatewayType.WATA,
+        currency: Currency.RUB,
+        isActive: false,
+        orderIndex: 2,
+        // `publicKey` alone is not enough to issue a checkout — the panel's old
+        // "any non-empty field" rule would have shown this one as ready.
+        settings: { publicKey: 'MFwwDQYJKoZI' },
+      }),
+    ]);
+
+    const [yookassa, wata] = await service.listGateways();
+
+    assert.equal(yookassa.isConfigured, true);
+    assert.equal(
+      yookassa.webhookUrl,
+      'https://panel.example.com/api/v1/payments/webhooks/YOOKASSA',
+    );
+    assert.equal(wata.isConfigured, false);
+    assert.equal(wata.webhookUrl, 'https://panel.example.com/api/v1/payments/webhooks/WATA');
+  });
+
+  it('falls back to the relative webhook path when the public domain is unset', async () => {
+    const { service } = createService(
+      [
+        createGateway({
+          id: 'gateway-1',
+          type: PaymentGatewayType.WATA,
+          currency: Currency.RUB,
+          isActive: false,
+          orderIndex: 1,
+        }),
+      ],
+      null,
+    );
+
+    const gateway = await service.getGateway('gateway-1');
+
+    assert.equal(gateway.webhookUrl, '/api/v1/payments/webhooks/WATA');
+  });
+
+  it('refuses to enable a gateway whose stored settings are incomplete', async () => {
+    const { service } = createService([
+      createGateway({
+        id: 'gateway-1',
+        type: PaymentGatewayType.YOOKASSA,
+        currency: Currency.USD,
+        isActive: false,
+        orderIndex: 1,
+        settings: { shopId: 'shop-1' },
+      }),
+    ]);
+
+    await assert.rejects(
+      async () => {
+        await service.updateGateway('gateway-1', { isActive: true });
+      },
+      {
+        name: 'BadRequestException',
+        message: 'PAYMENT_GATEWAY_NOT_CONFIGURED',
+      },
+    );
+
+    const gateway = await service.getGateway('gateway-1');
+    assert.equal(gateway.isActive, false);
+  });
+
+  it('enables a gateway whose stored settings are complete', async () => {
+    const { service } = createService([
+      createGateway({
+        id: 'gateway-1',
+        type: PaymentGatewayType.YOOKASSA,
+        currency: Currency.USD,
+        isActive: false,
+        orderIndex: 1,
+        settings: { shopId: 'shop-1', apiKey: 'key-1' },
+      }),
+    ]);
+
+    const updatedGateway = await service.updateGateway('gateway-1', { isActive: true });
+
+    assert.equal(updatedGateway.isActive, true);
+    assert.equal(updatedGateway.isConfigured, true);
+  });
+
+  it('validates the merged result when one PATCH carries settings and isActive', async () => {
+    const { service } = createService([
+      createGateway({
+        id: 'gateway-1',
+        type: PaymentGatewayType.WATA,
+        currency: Currency.RUB,
+        isActive: false,
+        orderIndex: 1,
+      }),
+      createGateway({
+        id: 'gateway-2',
+        type: PaymentGatewayType.WATA,
+        currency: Currency.RUB,
+        isActive: false,
+        orderIndex: 2,
+        settings: { apiKey: 'wata-key' },
+      }),
+    ]);
+
+    // Credentials arriving in the same request count: judging the stored row
+    // would reject a save that is about to make the gateway valid.
+    const enabledGateway = await service.updateGateway('gateway-1', {
+      settings: { apiKey: 'wata-key', publicKey: 'MFwwDQYJKoZI' },
+      isActive: true,
+    });
+    assert.equal(enabledGateway.isActive, true);
+    assert.equal(enabledGateway.isConfigured, true);
+
+    // …and the reverse: settings are replaced, not merged, so a save that
+    // blanks the credential must not leave the gateway enabled.
+    await assert.rejects(
+      async () => {
+        await service.updateGateway('gateway-2', {
+          settings: { apiKey: '   ' },
+          isActive: true,
+        });
+      },
+      {
+        name: 'BadRequestException',
+        message: 'PAYMENT_GATEWAY_NOT_CONFIGURED',
+      },
+    );
+  });
+
+  it('always allows disabling a gateway, configured or not', async () => {
+    const { service } = createService([
+      createGateway({
+        id: 'gateway-1',
+        type: PaymentGatewayType.WATA,
+        currency: Currency.RUB,
+        isActive: true,
+        orderIndex: 1,
+      }),
+    ]);
+
+    const updatedGateway = await service.updateGateway('gateway-1', { isActive: false });
+
+    assert.equal(updatedGateway.isActive, false);
+    assert.equal(updatedGateway.isConfigured, false);
+  });
 });
 
-function createService(initialGateways: readonly GatewayRecord[]): {
+function createService(
+  initialGateways: readonly GatewayRecord[],
+  domain: string | null = 'https://panel.example.com',
+): {
   readonly service: PaymentGatewayRegistryService;
+  /**
+   * The backing rows, exposed so the at-rest specs can assert on what actually
+   * landed in the `settings` column — the service's own return value is always
+   * decrypted, so it cannot prove anything about encryption.
+   */
+  readonly rows: readonly GatewayRecord[];
 } {
   const gateways: GatewayRecord[] = initialGateways.map((gateway) => ({ ...gateway }));
   const paymentGatewayClient = {
@@ -260,7 +440,11 @@ function createService(initialGateways: readonly GatewayRecord[]): {
       }),
   };
   return {
-    service: new PaymentGatewayRegistryService(prismaService as never),
+    service: new PaymentGatewayRegistryService(prismaService as never, {
+      domain,
+      botToken: null,
+    }),
+    rows: gateways,
   };
 }
 
@@ -301,3 +485,252 @@ interface GatewayRecord {
   settings: Record<string, unknown>;
   updatedAt: Date;
 }
+
+describe('PaymentGatewayRegistryService secret handling', () => {
+  it('encrypts secret settings at rest while leaving configuration readable', async () => {
+    const { service, rows } = createService([
+      createGateway({
+        id: 'gateway-1',
+        type: PaymentGatewayType.PLATEGA,
+        currency: Currency.USD,
+        isActive: false,
+        orderIndex: 1,
+      }),
+    ]);
+
+    await service.updateGateway('gateway-1', {
+      settings: { merchantId: 'merchant-1', secret: 'platega-secret-value', paymentMethod: 'SBP' },
+    });
+
+    const stored = rows[0]!.settings;
+    // The credential is unreadable in the column…
+    assert.equal(String(stored.secret).startsWith('PGENC1:'), true);
+    assert.equal(String(stored.secret).includes('platega-secret-value'), false);
+    // …and the merchant id / payment method stay browsable, because they are
+    // configuration an operator reads back when a gateway misbehaves.
+    assert.equal(stored.merchantId, 'merchant-1');
+    assert.equal(stored.paymentMethod, 2);
+  });
+
+  it('returns decrypted settings to a caller holding payment_gateways:view_secrets', async () => {
+    const { service } = createService([
+      createGateway({
+        id: 'gateway-1',
+        type: PaymentGatewayType.YOOKASSA,
+        currency: Currency.USD,
+        isActive: false,
+        orderIndex: 1,
+      }),
+    ]);
+    await service.updateGateway('gateway-1', {
+      settings: { shopId: 'shop-1', apiKey: 'live_sk_9f3a72be41d0c8e5' },
+    });
+
+    const gateway = await service.getGateway('gateway-1', true);
+
+    assert.deepStrictEqual(gateway.settings, {
+      shopId: 'shop-1',
+      apiKey: 'live_sk_9f3a72be41d0c8e5',
+    });
+    assert.equal(gateway.secretsVisible, true);
+    assert.deepStrictEqual(gateway.configuredSecretKeys, ['apiKey']);
+  });
+
+  it('masks secrets for the ordinary gateway permission and reveals them for the elevated one', async () => {
+    const { service } = createService([
+      createGateway({
+        id: 'gateway-1',
+        type: PaymentGatewayType.YOOKASSA,
+        currency: Currency.USD,
+        isActive: false,
+        orderIndex: 1,
+      }),
+    ]);
+    await service.updateGateway('gateway-1', {
+      settings: { shopId: 'shop-1', apiKey: 'live_sk_9f3a72be41d0c8e5' },
+    });
+
+    const [masked] = await service.listGateways();
+    const [revealed] = await service.listGateways(true);
+
+    // `payment_gateways:view` keeps working — the gateway still lists, still
+    // shows its shop id and its readiness — but the credential is hidden.
+    assert.equal(masked!.settings.shopId, 'shop-1');
+    assert.equal(masked!.settings.apiKey, '********c8e5');
+    assert.equal(masked!.secretsVisible, false);
+    assert.equal(revealed!.settings.apiKey, 'live_sk_9f3a72be41d0c8e5');
+    assert.equal(revealed!.secretsVisible, true);
+    // Readiness and the "which secrets are set" list are identical for both
+    // audiences: the indicator must not depend on who is asking.
+    assert.equal(masked!.isConfigured, revealed!.isConfigured);
+    assert.equal(masked!.isConfigured, true);
+    assert.deepStrictEqual(masked!.configuredSecretKeys, revealed!.configuredSecretKeys);
+  });
+
+  it('distinguishes an unset secret from a set-but-masked one', async () => {
+    const { service } = createService([
+      createGateway({
+        id: 'gateway-1',
+        type: PaymentGatewayType.PAYPALYCH,
+        currency: Currency.RUB,
+        isActive: false,
+        orderIndex: 1,
+        // `apiKey` is stored, `secretKey` was never configured.
+        settings: { shopId: 'shop-1', apiKey: 'paypalych-api-key-1234' },
+      }),
+    ]);
+
+    const gateway = await service.getGateway('gateway-1');
+
+    // Present-with-a-mask means "set but hidden"; absent means "not set".
+    assert.equal(gateway.settings.apiKey, '********1234');
+    assert.equal('secretKey' in gateway.settings, false);
+    assert.deepStrictEqual(gateway.configuredSecretKeys, ['apiKey']);
+  });
+
+  it('reads a legacy plaintext row and upgrades it to encrypted on the next save', async () => {
+    const { service, rows } = createService([
+      createGateway({
+        id: 'gateway-1',
+        type: PaymentGatewayType.YOOKASSA,
+        currency: Currency.USD,
+        isActive: true,
+        orderIndex: 1,
+        // Written before at-rest encryption existed.
+        settings: { shopId: 'shop-1', apiKey: 'legacy-plaintext-key' },
+      }),
+    ]);
+
+    // Read side: the legacy row is understood as-is, so nothing an operator
+    // stored before the upgrade is lost or misreported.
+    const before = await service.getGateway('gateway-1', true);
+    assert.equal(before.settings.apiKey, 'legacy-plaintext-key');
+    assert.equal(before.isConfigured, true);
+    assert.equal(rows[0]!.settings.apiKey, 'legacy-plaintext-key');
+
+    // Any save rewrites the whole column, so the row comes back encrypted
+    // without a migration — even one that only touches an unrelated field.
+    const after = await service.updateGateway(
+      'gateway-1',
+      { settings: { shopId: 'shop-2', apiKey: '********-key' } },
+      true,
+    );
+
+    assert.equal(String(rows[0]!.settings.apiKey).startsWith('PGENC1:'), true);
+    // …and the legacy credential survived the upgrade untouched.
+    assert.equal(after.settings.apiKey, 'legacy-plaintext-key');
+    assert.equal(after.settings.shopId, 'shop-2');
+    assert.equal(after.isConfigured, true);
+  });
+
+  it('preserves the stored secret when an operator saves a form full of masks', async () => {
+    const { service, rows } = createService([
+      createGateway({
+        id: 'gateway-1',
+        type: PaymentGatewayType.AURAPAY,
+        currency: Currency.RUB,
+        isActive: false,
+        orderIndex: 1,
+      }),
+    ]);
+    await service.updateGateway('gateway-1', {
+      settings: { apiKey: 'aurapay-api-key-abcd', shopId: 'shop-1', secretKey: 'aurapay-hmac-wxyz' },
+    });
+
+    // What an operator holding only `payment_gateways:view` + `edit` sees.
+    const shown = await service.getGateway('gateway-1');
+    assert.equal(shown.settings.apiKey, '********abcd');
+    assert.equal(shown.settings.secretKey, '********wxyz');
+
+    // They change the shop id and submit the form back verbatim. Settings are
+    // REPLACED, not merged, so without mask resolution this save would store
+    // `********abcd` as the live API key and take the gateway down.
+    const saved = await service.updateGateway('gateway-1', {
+      settings: { ...shown.settings, shopId: 'shop-2' },
+    });
+
+    assert.equal(saved.settings.apiKey, '********abcd');
+    assert.equal(saved.settings.shopId, 'shop-2');
+    assert.equal(saved.isConfigured, true);
+
+    // The real credentials are still what they were — write-without-read works.
+    const revealed = await service.getGateway('gateway-1', true);
+    assert.equal(revealed.settings.apiKey, 'aurapay-api-key-abcd');
+    assert.equal(revealed.settings.secretKey, 'aurapay-hmac-wxyz');
+    assert.equal(String(rows[0]!.settings.apiKey).startsWith('PGENC1:'), true);
+  });
+
+  it('lets an operator who cannot read secrets still replace one', async () => {
+    const { service } = createService([
+      createGateway({
+        id: 'gateway-1',
+        type: PaymentGatewayType.YOOKASSA,
+        currency: Currency.USD,
+        isActive: false,
+        orderIndex: 1,
+        settings: { shopId: 'shop-1', apiKey: 'live_sk_9f3a72be41d0c8e5' },
+      }),
+    ]);
+
+    // Typing over the masked field is a genuine new value, not a mask.
+    await service.updateGateway('gateway-1', {
+      settings: { shopId: 'shop-1', apiKey: 'rotated_sk_0000111122223333' },
+    });
+
+    const revealed = await service.getGateway('gateway-1', true);
+    assert.equal(revealed.settings.apiKey, 'rotated_sk_0000111122223333');
+  });
+
+  it('keeps the enable guard working against encrypted settings', async () => {
+    const { service } = createService([
+      createGateway({
+        id: 'gateway-1',
+        type: PaymentGatewayType.WATA,
+        currency: Currency.RUB,
+        isActive: false,
+        orderIndex: 1,
+      }),
+    ]);
+    // Store the checkout credential only — Wata also needs `publicKey`.
+    await service.updateGateway('gateway-1', { settings: { apiKey: 'wata-api-key' } });
+
+    // `isGatewayConfigured` runs on the DECRYPTED settings, so an envelope is
+    // never mistaken for a satisfied requirement.
+    await assert.rejects(
+      async () => {
+        await service.updateGateway('gateway-1', { isActive: true });
+      },
+      { name: 'BadRequestException', message: 'PAYMENT_GATEWAY_NOT_CONFIGURED' },
+    );
+
+    const enabled = await service.updateGateway('gateway-1', {
+      settings: { apiKey: '********-key', publicKey: 'MFwwDQYJKoZI' },
+      isActive: true,
+    });
+    assert.equal(enabled.isActive, true);
+    assert.equal(enabled.isConfigured, true);
+  });
+
+  it('refuses a submitted value impersonating the storage envelope', async () => {
+    const { service } = createService([
+      createGateway({
+        id: 'gateway-1',
+        type: PaymentGatewayType.YOOKASSA,
+        currency: Currency.USD,
+        isActive: false,
+        orderIndex: 1,
+      }),
+    ]);
+
+    // Stored verbatim it could never be decrypted, so every later read would
+    // drop the field and the credential would vanish silently.
+    await assert.rejects(
+      async () => {
+        await service.updateGateway('gateway-1', {
+          settings: { shopId: 'shop-1', apiKey: 'PGENC1:aa:bb:cc' },
+        });
+      },
+      { name: 'BadRequestException', message: 'PAYMENT_GATEWAY_SETTINGS_INVALID' },
+    );
+  });
+});

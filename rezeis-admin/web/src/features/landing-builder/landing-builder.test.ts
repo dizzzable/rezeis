@@ -12,7 +12,8 @@ import {
   configMissingLocales,
   missingLocales,
 } from './section-defaults'
-import { PREVIEW_SECTIONS } from './preview/preview-section-registry'
+import { LANDING_SECTIONS } from './live/landing-renderer'
+import { KNOWN_SECTION_TYPES } from './live/landing-schema'
 
 const LOCALES = ['ru', 'en'] as const
 
@@ -80,11 +81,17 @@ describe('section-defaults', () => {
   })
 })
 
-describe('preview registry parity (Option B lockstep)', () => {
-  it('covers exactly the canonical catalog section types', () => {
-    const registryTypes = Object.keys(PREVIEW_SECTIONS).sort()
-    const catalogTypes = [...LANDING_SECTION_TYPES].sort()
-    expect(registryTypes).toEqual(catalogTypes)
+describe('section catalog parity across the three declaration sites', () => {
+  // There is no longer a preview-only registry to keep in lockstep — the
+  // preview renders the kit. What remains is the admin's own catalog literal,
+  // which must agree with the kit's list and with the kit's component registry.
+  // A type present in one and missing in another is the drift this catches.
+  it('the admin catalog matches the kit section registry', () => {
+    expect(Object.keys(LANDING_SECTIONS).sort()).toEqual([...LANDING_SECTION_TYPES].sort())
+  })
+
+  it('the admin catalog matches the kit schema list', () => {
+    expect([...KNOWN_SECTION_TYPES].sort()).toEqual([...LANDING_SECTION_TYPES].sort())
   })
 })
 

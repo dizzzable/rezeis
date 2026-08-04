@@ -16,29 +16,65 @@ export const en = {
     readOnlyEmpty: 'Gateway defaults are not configured yet, and your role cannot create them.',
     active: 'Active',
     disabled: 'Disabled',
-    webhookHint: 'Webhook URL:',
+    webhookHint: 'Webhook URL',
+    copyWebhookUrl: 'Copy',
+    webhookUrlCopied: 'Webhook URL copied',
+    webhookUrlCopyFailed: 'Could not copy the webhook URL',
     addDefaults: 'Add missing',
     defaultsCreated: 'Default gateways added',
     defaultsFailed: 'Could not add default gateways',
     saved: '{{name}} settings saved',
     saveFailed: 'Failed to save gateway settings',
     toggleFailed: 'Failed to toggle gateway state',
+    enableBlocked:
+      'This gateway cannot be enabled until its required credentials are filled in. Open the settings, enter them and save.',
     moveFailed: 'Failed to change order',
     moveUp: 'Move up',
     moveDown: 'Move down',
     openSettings: 'Open settings',
-    runTest: 'Test request',
     toggleActive: 'Toggle active',
-    testOk: '{{name}} test passed',
-    testFailed: 'Gateway test failed',
     defaultBadge: 'Default',
     notConfigured: 'Not configured',
-    settingsDescription: 'Webhook URL: {{url}}',
+    /**
+     * The gateway is switched on but the backend cannot charge through it
+     * (`isActive && !isConfigured`). Not a setup hint but an outage: the
+     * checkout guard reads the same `isConfigured`, so every attempt comes back
+     * as `PAYMENT_GATEWAY_NOT_CONFIGURED`. The wording says what is happening
+     * and what to do — "Not configured" read as "nobody got round to it yet".
+     */
+    faulted: {
+      badge: 'Not taking payments',
+      rowDetail:
+        'This gateway is switched on but cannot take a payment: its credentials are incomplete. Open the settings, fill in the missing fields and save.',
+      rowIsDefault:
+        'It also sits first in the list — this is the gateway a buyer is offered first.',
+      bannerTitle: 'Payments are failing',
+      bannerDescription:
+        'Not taking payments: {{names}}. These gateways are switched on but their credentials are incomplete — a buyer gets an error when they try to pay. Open the settings for each, fill in the missing fields and save. If there is nothing to fix them with right now, switch the gateway off so it stops being offered.',
+    },
+    settingsDescription:
+      'Gateway credentials. Point the provider dashboard at this webhook URL — payment notifications arrive there.',
     revert: 'Revert',
     cancel: 'Cancel',
     save: 'Save',
     showSecret: 'Show secret',
     hideSecret: 'Hide secret',
+    /**
+     * Credentials are encrypted at rest and, without
+     * `payment_gateways:view_secrets`, secret fields arrive masked: `********`
+     * plus the real last 4 characters. The form rendered that mask as-is — an
+     * operator opened the settings, met `********c8e5` in a field and had no
+     * way to tell a redaction from a corrupted value. This says exactly that:
+     * the key is there; leave the field alone and it stays; type a new value to
+     * replace it; clear the field to remove it.
+     */
+    secretsHidden: {
+      title: 'Credentials are hidden',
+      description:
+        'Your role does not include payment_gateways:view_secrets, so secret fields are shown as a mask: ******** plus the last characters of the key when it is long enough. Nothing is broken — the keys are still there and the form is safe to save. A field you leave untouched keeps its stored key, a value you type replaces it, and an empty field removes it.',
+      fieldHint:
+        'This key is stored and hidden from your role. Leave the field as it is and it stays unchanged.',
+    },
     fields: {
       providerToken: 'Provider token',
       webhookSecret: 'Webhook secret',
@@ -59,11 +95,14 @@ export const en = {
       merchantUuid: 'Merchant UUID',
       paymentApiKey: 'Payment API key',
       secret: 'Secret',
+      plategaPaymentMethod: 'Platega payment method',
       projectIdentificator: 'Project Identificator',
       secretId: 'Secret ID (X-Apay-Secret-Id)',
       privateKey: 'Private key (Base64)',
       publicKey: 'Public key (Base64)',
+      antilopayVat: 'Antilopay VAT rate',
       apiToken: 'API Token',
+      serviceId: 'Service ID',
       signingSecret: 'Signing Secret',
       lavaOfferId: 'Offer ID',
       defaultCurrency: 'Default currency',
@@ -71,8 +110,17 @@ export const en = {
     options: {
       enabled: 'Enabled',
       disabled: 'Disabled',
+      notSet: 'Not set',
       moyNalogAuthPassword: 'Password (INN + password)',
       moyNalogAuthRefresh: 'Refresh token',
+      plategaSbp: '2 — СБП / SBP (QR code)',
+      plategaErip: '3 — ЕРИП / ERIP',
+      plategaCard: '11 — Card acquiring',
+      plategaInternational: '12 — International payments',
+      plategaCrypto: '13 — Cryptocurrency',
+      plategaSberpay: '14 — SberPay',
+      antilopayVat10: '10% — reduced rate',
+      antilopayVat22: '22% — standard rate',
     },
     selectPlaceholder: 'Select a value',
     hints: {
@@ -82,14 +130,24 @@ export const en = {
         'RSA 2048-bit private key in Base64 (starts with MII). From Antilopay dashboard.',
       antilopayPublicKey:
         'RSA public key in Base64 (starts with MF). For callback signature verification.',
+      antilopayVat:
+        'The VAT rate Antilopay prints on the receipt. Required only when the merchant is on the ОСНО tax regime: without it Antilopay rejects every checkout with error 17 («Не предоставлена ставка НДС или недопустимое значение»). On УСН or НПД leave it empty — no rate is needed.',
       overpayPublicKey:
         'RSA public key from OverPay back office for Content-Signature verification.',
+      plategaPaymentMethod:
+        'The rail Platega opens at checkout. Falls back to СБП / SBP (2) when left unset. Platega has no method 1: if a gateway still holds the legacy value 1 the field shows up empty and payments keep failing until you pick a method and save.',
       riopayToken:
         'X-Api-Token provided by your RioPay manager.',
+      riopayServiceId:
+        'The service a payment is routed through. Your RioPay manager issues the number: required on newly provisioned merchant accounts, leave blank on older single-service ones.',
       valutixToken:
         'X-Api-Token provided by your Valutix manager.',
+      valutixServiceId:
+        'The service a payment is routed through. Your Valutix manager issues the number: required on newly provisioned merchant accounts, leave blank on older single-service ones.',
       wataApiKey:
         'JWT API key from the WATA dashboard. Sent as Authorization: Bearer …',
+      wataPublicKey:
+        'WATA RSA public key used to verify the webhook signature (SHA512withRSA). Served by GET /api/h2h/public-key. WATA has no shared secret.',
       aurapaySecret:
         'Secret key #2 from the AuraPay terminal settings. Used to verify the X-SIGNATURE webhook header.',
       rollypaySigningSecret:

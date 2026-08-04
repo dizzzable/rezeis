@@ -1,4 +1,15 @@
-import { BadRequestException, Controller, ParseEnumPipe, Post, RawBody, Param, Req, Inject } from '@nestjs/common';
+import {
+  BadRequestException,
+  Controller,
+  HttpCode,
+  HttpStatus,
+  Inject,
+  Param,
+  ParseEnumPipe,
+  Post,
+  RawBody,
+  Req,
+} from '@nestjs/common';
 import { ConfigType } from '@nestjs/config';
 import { PaymentGatewayType } from '@prisma/client';
 import type { Request } from 'express';
@@ -19,6 +30,13 @@ export class PublicPaymentWebhooksController {
     private readonly configuration: ConfigType<typeof paymentsConfig>,
   ) {}
 
+  /**
+   * 200, not Nest's default 201 for POST. Several providers treat anything
+   * other than a literal 200 as a failed delivery and retry: Platega 3 times,
+   * AuraPay 5, MulenPay likewise, and SeverPay up to **100**. Nothing was lost —
+   * the inbox is idempotent — but every single payment produced a retry storm.
+   */
+  @HttpCode(HttpStatus.OK)
   @Post(':gatewayType')
   public async ingest(
     @Param('gatewayType', new ParseEnumPipe(PaymentGatewayType)) gatewayType: PaymentGatewayType,

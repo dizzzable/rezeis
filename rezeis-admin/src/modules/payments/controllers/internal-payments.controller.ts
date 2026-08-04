@@ -31,11 +31,23 @@ export class InternalPaymentsController {
   ) {}
 
   /**
-   * Returns the list of *enabled* gateways the SPA / Mini App should
-   * render on the purchase screen. Sorted by `orderIndex` so operators
-   * control the visual layout from the admin panel without code
+   * Returns the list of *enabled and ready* gateways the SPA / Mini App
+   * should render on the purchase screen. Sorted by `orderIndex` so
+   * operators control the visual layout from the admin panel without code
    * changes. Disabled gateways are filtered out — there's no point in
    * leaking them to user-facing surfaces.
+   *
+   * `isConfigured` is filtered on for the same reason, and it is not
+   * redundant with `isActive`. Enabling a gateway checks readiness, but
+   * nothing re-checks a row that is already on: when the credential list
+   * `isGatewayConfigured` requires grows — as it did when the six
+   * webhook-verifying gateways started demanding their callback key — a
+   * gateway an operator switched on last month keeps `isActive: true` in
+   * the database while all three checkout paths now answer
+   * `PAYMENT_GATEWAY_NOT_CONFIGURED` (400). Offering it puts the buyer one
+   * click from an error they can do nothing about; a missing option is the
+   * better failure. The operator still sees the row, with an amber
+   * "not configured" badge — see `AdminPaymentGatewayInterface.isConfigured`.
    *
    * The optional `channel` query (defaults to `WEB`) additionally drops
    * gateways that can't operate in that context — most importantly
@@ -59,6 +71,7 @@ export class InternalPaymentsController {
     const defaultCurrency = policy.defaultCurrency;
     return all
       .filter((gateway) => gateway.isActive)
+      .filter((gateway) => gateway.isConfigured)
       .filter((gateway) => isGatewayAvailableForChannel(gateway.type, channel))
       .map((gateway): InternalPaymentGatewayInterface => ({
         id: gateway.id,
@@ -141,5 +154,22 @@ export class InternalPaymentsController {
     @Query('telegramId') telegramId?: string,
   ): Promise<InternalPaymentStatusInterface> {
     return this.paymentsCheckoutService.getPaymentStatus({ paymentId, userId, telegramId });
+  }
+
+  /**
+   * Abandon a checkout the buyer started and does not intend to finish.
+   *
+   * Nothing to do with refunds — no money has moved. It cancels an unpaid draft
+   * so its paid-trial reservation is freed immediately instead of after the
+   * 30-minute expiry sweep, which is what otherwise hides the trial plan from
+   * the buyer who just abandoned it.
+   */
+  @Post(':paymentId/abandon')
+  public async abandon(
+    @Param('paymentId') paymentId: string,
+    @Query('userId') userId?: string,
+    @Query('telegramId') telegramId?: string,
+  ): Promise<{ abandoned: boolean; status: string }> {
+    return this.paymentsCheckoutService.abandonPendingCheckout({ paymentId, userId, telegramId });
   }
 }

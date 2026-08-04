@@ -35,6 +35,20 @@ export function endAdminClientSession(queryClient: QueryClient): void {
   resetAdminClientState(queryClient)
 }
 
+/**
+ * True from the moment a hard auth failure has torn the session down until the
+ * next sign-in.
+ *
+ * Exposed for unsaved-changes guards. The navigation they would hold in that
+ * window is this module's own trip to the sign-in page — the session behind it
+ * is already destroyed, and `forceEndAdminSession` will not fire a second
+ * redirect — so a prompt there offers a "stay" that strands the operator on a
+ * page whose every request 401s.
+ */
+export function isForceLogoutInProgress(): boolean {
+  return forceLogoutInProgress
+}
+
 export function forceEndAdminSession(queryClient: QueryClient = defaultQueryClient): void {
   if (forceLogoutInProgress) return
   endAdminClientSession(queryClient)

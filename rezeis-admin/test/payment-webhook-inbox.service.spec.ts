@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { PaymentGatewayType } from '@prisma/client';
+import { PaymentGatewayType, Prisma } from '@prisma/client';
 
 import {
   PAYMENT_WEBHOOK_STATUS_ENQUEUED,
@@ -69,6 +69,79 @@ describe('PaymentWebhookInboxService', () => {
     assert.equal(state.events.length, 1);
   });
 
+  it('treats a CHANGED payload that loses the P2002 create race as NOT a duplicate so reconciliation is still enqueued', async () => {
+    // Race guard: two deliveries for one provider event id arrive together
+    // and neither row exists yet, so both `findFirst` miss and both insert.
+    // The `pending` one commits first; the `paid` one below loses on
+    // @@unique([gatewayType, providerEventId]). The recovery path used to
+    // assume any P2002 meant duplicate and discarded it without ever
+    // comparing hashes — the payment then hung PENDING until the expiry
+    // sweep cancelled it, after the user had already paid.
+    const { service, state } = createService([], {
+      failCreateWithP2002: true,
+      raceWinner: createStoredEvent({
+        providerEventId: 'event-1',
+        attempts: 1,
+        status: PAYMENT_WEBHOOK_STATUS_ENQUEUED,
+      }),
+    });
+
+    const result = await service.recordReceived({
+      envelope: {
+        gatewayType: PaymentGatewayType.YOOKASSA,
+        paymentId: 'payment-1',
+        providerEventId: 'event-1',
+        eventStatus: 'paid',
+        receivedAt: '2026-04-19T12:05:00.000Z',
+        // Differs from the winner's 'hash-1' — a genuinely new provider state.
+        payloadHash: 'hash-2-paid',
+        rawPayload: { object: { id: 'payment-1', status: 'paid' } },
+      },
+    });
+
+    assert.equal(result.duplicate, false);
+    assert.equal(result.event.eventStatus, 'paid');
+    assert.equal(result.event.payloadHash, 'hash-2-paid');
+    assert.equal(result.event.status, PAYMENT_WEBHOOK_STATUS_RECEIVED);
+    assert.equal(result.event.attempts, 2);
+    // Refreshed the winner in place — no second row.
+    assert.equal(state.events.length, 1);
+  });
+
+  it('still treats a byte-identical redelivery that loses the P2002 create race as a duplicate', async () => {
+    const { service, state } = createService([], {
+      failCreateWithP2002: true,
+      raceWinner: createStoredEvent({
+        providerEventId: 'event-1',
+        attempts: 1,
+        status: PAYMENT_WEBHOOK_STATUS_ENQUEUED,
+      }),
+    });
+
+    const result = await service.recordReceived({
+      // Same payloadHash ('hash-1') as the row that won the race.
+      envelope: createEnvelope({ providerEventId: 'event-1' }),
+    });
+
+    assert.equal(result.duplicate, true);
+    assert.equal(result.event.attempts, 2);
+    assert.equal(state.events.length, 1);
+  });
+
+  it('rethrows the P2002 when the winning row has vanished instead of retrying the insert', async () => {
+    // No race winner is left to read back. Re-entering recordReceived here is
+    // what would let the racing path recurse without bound, so the service
+    // surfaces the error and lets the gateway redeliver onto a clean insert.
+    const { service, state } = createService([], { failCreateWithP2002: true });
+
+    await assert.rejects(
+      service.recordReceived({ envelope: createEnvelope({ providerEventId: 'event-1' }) }),
+      (error: unknown) =>
+        error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002',
+    );
+    assert.equal(state.events.length, 0);
+  });
+
   it('marks a stored event as enqueued', async () => {
     const { service, state } = createService([
       createStoredEvent({ providerEventId: 'event-1', attempts: 1, status: PAYMENT_WEBHOOK_STATUS_RECEIVED }),
@@ -98,7 +171,16 @@ describe('PaymentWebhookInboxService', () => {
   });
 });
 
-function createService(initialEvents: readonly StoredEvent[] = []): {
+function createService(
+  initialEvents: readonly StoredEvent[] = [],
+  // `failCreateWithP2002` simulates losing the @@unique insert race; `raceWinner`
+  // is the row the concurrent transaction committed just before ours was
+  // rejected (omit it to simulate the row being gone by the time we re-read).
+  raceOptions: {
+    readonly failCreateWithP2002?: boolean;
+    readonly raceWinner?: StoredEvent;
+  } = {},
+): {
   readonly service: PaymentWebhookInboxService;
   readonly state: { readonly events: StoredEvent[] };
 } {
@@ -112,6 +194,17 @@ function createService(initialEvents: readonly StoredEvent[] = []): {
             event.providerEventId === args.where.providerEventId,
         ) ?? null,
       create: async (args: { readonly data: Record<string, unknown> }) => {
+        if (raceOptions.failCreateWithP2002 === true) {
+          if (raceOptions.raceWinner !== undefined) {
+            // The other delivery's transaction committed first, so its row is
+            // already readable by the time our insert is rejected.
+            events.push({ ...raceOptions.raceWinner });
+          }
+          throw new Prisma.PrismaClientKnownRequestError(
+            'Unique constraint failed on the fields: (`gateway_type`,`provider_event_id`)',
+            { code: 'P2002', clientVersion: 'test' },
+          );
+        }
         const nextEvent: StoredEvent = {
           id: `event-row-${events.length + 1}`,
           gatewayType: args.data.gatewayType as PaymentGatewayType,

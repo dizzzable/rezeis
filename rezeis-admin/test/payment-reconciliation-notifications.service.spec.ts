@@ -28,7 +28,10 @@ type TransactionFindFirstArgs = { where: { gatewayId: string } };
 type TransactionUpdateArgs = {
   where: { id: string };
   data: {
-    status: TransactionStatus;
+    // Optional: the fenced refund-ledger write touches `gatewayData` only, and
+    // leaves the status alone until the reversal decides the payment is fully
+    // given back.
+    status?: TransactionStatus;
     gatewayData: Record<string, unknown>;
   };
 };
@@ -76,6 +79,8 @@ type ReconciliationTransactionRecord = {
 };
 type ReconciliationPrismaDouble = {
   $transaction: <T>(callback: (tx: ReconciliationPrismaDouble) => Promise<T>) => Promise<T>;
+  /** `SELECT … FOR UPDATE` on the transaction row — the refund-ledger fence. */
+  $queryRaw: (...args: readonly unknown[]) => Promise<readonly { readonly id: string }[]>;
   paymentWebhookEvent: {
     findUnique: (args: PaymentWebhookFindUniqueArgs) => Promise<ReconciliationWebhookEventRecord | null>;
   };
@@ -462,7 +467,242 @@ describe('PaymentReconciliationService reconciliation side effects', () => {
     assert.deepStrictEqual(state.referralReversalCalls, ['tx-1']);
     assert.deepStrictEqual(state.moyNalogCancelCalls, ['tx-1']);
     assert.deepStrictEqual(state.adRevertCalls, ['tx-1']);
-    assert.equal(state.transactionUpdateCalls[0].data.status, TransactionStatus.CANCELED);
+    assert.equal(reversalWrites(state).length, 1);
+    // The refund that crossed is ledgered too, so a panel refund still in
+    // flight has something to deduplicate against.
+    const ledgerWrite = state.transactionUpdateCalls[0].data.gatewayData;
+    assert.equal(ledgerWrite.refundedAmountTotal, '8.00');
+    assert.equal((ledgerWrite.refunds as unknown[]).length, 1);
+  });
+
+  it('does NOT double-count a panel refund when its own webhook arrives', async () => {
+    // The normal flow, and the money-losing defect this pins. An operator
+    // refunds 4 of 8 in the panel; the panel ledgers it and writes the total;
+    // YooKassa then sends `refund.succeeded` for that SAME refund. Blindly
+    // adding the amount again read as 8-of-8: the customer's subscription was
+    // expired and revoked at Remnawave, the partner's whole commission debited
+    // and the full income cancelled at МойНалог — on revenue we kept.
+    const state = createState({
+      eventStatus: 'REFUNDED',
+      initialTransactionStatus: TransactionStatus.COMPLETED,
+      refreshedSubscriptionId: 'subscription-1',
+      refreshedFulfilledAt: new Date('2026-04-19T11:00:00.000Z'),
+      gatewayDataOverride: {
+        refundedAmountTotal: '4.00',
+        refunds: [{ refundId: 'refund-1', amount: '4.00', at: '2026-04-19T12:00:00.000Z' }],
+      },
+      rawPayload: {
+        event: 'refund.succeeded',
+        object: { id: 'refund-1', status: 'succeeded', amount: { value: '4.00', currency: 'RUB' } },
+      },
+    });
+    const service = createService(state);
+
+    await service.reconcileWebhookEvent('event-1');
+
+    assert.deepStrictEqual(state.partnerReversalCalls, []);
+    assert.deepStrictEqual(state.referralReversalCalls, []);
+    assert.deepStrictEqual(state.moyNalogCancelCalls, []);
+    assert.deepStrictEqual(state.adRevertCalls, []);
+    // The subscription the customer is still paying for stays exactly as it was.
+    assert.deepStrictEqual(state.subscriptionUpdateCalls, []);
+    assert.deepStrictEqual(state.syncJobCreateCalls, []);
+    const gatewayData = state.transactionUpdateCalls[0].data.gatewayData as Record<string, unknown>;
+    assert.equal(gatewayData.refundedAmountTotal, '4.00');
+    // Recorded once, not twice.
+    assert.equal((gatewayData.refunds as unknown[]).length, 1);
+    assert.equal(state.transactionUpdateCalls[0].data.status, undefined);
+    assert.deepStrictEqual(state.markProcessedCalls, ['event-1']);
+  });
+
+  it('reverses exactly once when a genuinely second refund completes the total', async () => {
+    // Same starting point as above — 4 already refunded through the panel — but
+    // this webhook is a DIFFERENT refund. Deduplication must not swallow it:
+    // the customer is now whole, so everything has to be reversed.
+    const state = createState({
+      eventStatus: 'REFUNDED',
+      initialTransactionStatus: TransactionStatus.COMPLETED,
+      refreshedSubscriptionId: 'subscription-1',
+      refreshedFulfilledAt: new Date('2026-04-19T11:00:00.000Z'),
+      gatewayDataOverride: {
+        refundedAmountTotal: '4.00',
+        refunds: [{ refundId: 'refund-1', amount: '4.00', at: '2026-04-19T12:00:00.000Z' }],
+      },
+      rawPayload: {
+        event: 'refund.succeeded',
+        object: { id: 'refund-2', status: 'succeeded', amount: { value: '4.00', currency: 'RUB' } },
+      },
+    });
+    const service = createService(state);
+
+    await service.reconcileWebhookEvent('event-1');
+
+    assert.deepStrictEqual(state.partnerReversalCalls, ['tx-1']);
+    assert.deepStrictEqual(state.referralReversalCalls, ['tx-1']);
+    assert.deepStrictEqual(state.moyNalogCancelCalls, ['tx-1']);
+    assert.deepStrictEqual(state.adRevertCalls, ['tx-1']);
+    // Exactly once: one reversal, one status write.
+    assert.equal(reversalWrites(state).length, 1);
+    assert.deepStrictEqual(state.subscriptionUpdateCalls.length, 1);
+    // Both refunds are in the ledger and the total is the captured amount.
+    const ledgerWrite = state.transactionUpdateCalls[0].data.gatewayData;
+    assert.deepStrictEqual(
+      (ledgerWrite.refunds as ReadonlyArray<{ refundId: string }>).map((entry) => entry.refundId),
+      ['refund-1', 'refund-2'],
+    );
+    assert.equal(ledgerWrite.refundedAmountTotal, '8.00');
+  });
+
+  // The genuine interleave, both writers on ONE row with a real lock. Two
+  // DIFFERENT refunds of 4 against a captured 8, so neither may deduplicate the
+  // other away and the pair is exactly a full refund. Under-counting is safe by
+  // construction — a lost entry falls into the partial branch, which flags for
+  // manual review rather than revoking anything — so this is hardening, not an
+  // active money leak. The accounting was still wrong and the reversal that
+  // should have fired did not.
+  it('panel-then-webhook: re-reads inside the lock instead of the snapshot it arrived with', async () => {
+    // The operator's refund commits the instant reconciliation has loaded the
+    // row. `handleRefundReversal` used to merge onto that snapshot, so the panel
+    // entry and its share of the total were erased by a write that never saw
+    // them, and the pair never added up to the captured amount.
+    const state = createState({
+      eventStatus: 'REFUNDED',
+      initialTransactionStatus: TransactionStatus.COMPLETED,
+      refreshedSubscriptionId: 'subscription-1',
+      refreshedFulfilledAt: new Date('2026-04-19T11:00:00.000Z'),
+      panelRefund: { refundId: 'refund-2', amount: '4.00', at: 'snapshot' },
+      rawPayload: {
+        event: 'refund.succeeded',
+        object: { id: 'refund-1', status: 'succeeded', amount: { value: '4.00', currency: 'RUB' } },
+      },
+    });
+    const service = createService(state);
+
+    await service.reconcileWebhookEvent('event-1');
+    await state.drain();
+
+    assert.deepStrictEqual(state.commitOrder, ['panel:refund-2', 'webhook', 'webhook']);
+    assert.deepStrictEqual(ledgerIds(state), ['refund-2', 'refund-1']);
+    assert.equal(state.gatewayDataOverride?.refundedAmountTotal, '8.00');
+    // Exactly one writer reverses, and it is the one whose entry crossed.
+    assert.deepStrictEqual(
+      [...state.partnerReversalCalls, ...state.panelReversalCalls],
+      ['tx-1'],
+    );
+    assert.equal(reversalWrites(state).length, 1);
+    assert.deepStrictEqual(state.subscriptionUpdateCalls.length, 1);
+  });
+
+  it('webhook-then-panel: holds the row so a panel refund cannot land inside the write', async () => {
+    // Mirror image: the operator's refund commits at the instant this path goes
+    // to persist. Without the fence it slipped between the read and the write
+    // and was overwritten wholesale; holding the row makes it queue and merge
+    // onto what this write committed, so its entry survives and IT is the one
+    // that crosses the captured amount.
+    const state = createState({
+      eventStatus: 'REFUNDED',
+      initialTransactionStatus: TransactionStatus.COMPLETED,
+      refreshedSubscriptionId: 'subscription-1',
+      refreshedFulfilledAt: new Date('2026-04-19T11:00:00.000Z'),
+      panelRefund: { refundId: 'refund-2', amount: '4.00', at: 'write' },
+      rawPayload: {
+        event: 'refund.succeeded',
+        object: { id: 'refund-1', status: 'succeeded', amount: { value: '4.00', currency: 'RUB' } },
+      },
+    });
+    const service = createService(state);
+
+    await service.reconcileWebhookEvent('event-1');
+    await state.drain();
+
+    assert.deepStrictEqual(state.commitOrder, ['webhook', 'panel:refund-2']);
+    assert.deepStrictEqual(ledgerIds(state), ['refund-1', 'refund-2']);
+    assert.equal(state.gatewayDataOverride?.refundedAmountTotal, '8.00');
+    // 4 of 8 is all this webhook knew about, so it correctly stayed in the
+    // partial branch — and the panel refund that completed the total is the one
+    // that reverses. Exactly one, either way.
+    assert.deepStrictEqual(
+      [...state.partnerReversalCalls, ...state.panelReversalCalls],
+      ['panel:refund-2'],
+    );
+    assert.deepStrictEqual(reversalWrites(state), []);
+  });
+
+  it('ledgers the refund id so a panel refund still in flight can dedupe on it', async () => {
+    // The other half of the race: when the webhook wins, the panel re-reads
+    // `gatewayData` before writing. It dedupes on `refunds[].refundId`, so the
+    // webhook has to record the entry — otherwise the panel finds nothing,
+    // counts the refund it just issued a second time and runs the full reversal
+    // itself. `payment-refund.service.spec.ts` consumes exactly this shape.
+    const state = createState({
+      eventStatus: 'REFUNDED',
+      initialTransactionStatus: TransactionStatus.COMPLETED,
+      refreshedSubscriptionId: 'subscription-1',
+      refreshedFulfilledAt: new Date('2026-04-19T11:00:00.000Z'),
+      rawPayload: {
+        event: 'refund.succeeded',
+        object: { id: 'refund-1', status: 'succeeded', amount: { value: '4.00', currency: 'RUB' } },
+      },
+    });
+    const service = createService(state);
+
+    await service.reconcileWebhookEvent('event-1');
+
+    const gatewayData = state.transactionUpdateCalls[0].data.gatewayData as Record<string, unknown>;
+    const ledger = gatewayData.refunds as ReadonlyArray<Record<string, unknown>>;
+    assert.equal(ledger.length, 1);
+    assert.equal(ledger[0].refundId, 'refund-1');
+    assert.equal(ledger[0].amount, '4.00');
+    assert.equal(typeof ledger[0].at, 'string');
+    assert.equal(gatewayData.refundedAmountTotal, '4.00');
+  });
+
+  it('never sums a refund the provider reports without an id', async () => {
+    // No id means no way to prove this is not the refund already recorded.
+    // Summing would risk revoking a paying customer, so the amount is taken as
+    // a floor (max) instead: it can only under-count, and an under-count lands
+    // in the partial branch, which leaves everything intact and asks for a human.
+    const state = createState({
+      eventStatus: 'REFUNDED',
+      initialTransactionStatus: TransactionStatus.COMPLETED,
+      refreshedSubscriptionId: 'subscription-1',
+      refreshedFulfilledAt: new Date('2026-04-19T11:00:00.000Z'),
+      gatewayDataOverride: { refundedAmountTotal: '4.00' },
+      rawPayload: {
+        event: 'refund.succeeded',
+        object: { status: 'succeeded', amount: { value: '4.00', currency: 'RUB' } },
+      },
+    });
+    const service = createService(state);
+
+    await service.reconcileWebhookEvent('event-1');
+
+    assert.deepStrictEqual(state.partnerReversalCalls, []);
+    assert.deepStrictEqual(state.subscriptionUpdateCalls, []);
+    const gatewayData = state.transactionUpdateCalls[0].data.gatewayData as Record<string, unknown>;
+    assert.equal(gatewayData.refundedAmountTotal, '4.00');
+    assert.equal(gatewayData.refundNeedsManualReview, true);
+  });
+
+  it('still reverses an id-less refund that covers the whole payment on its own', async () => {
+    // The flip side of the rule above: taking the amount as a floor must not
+    // lose a single full refund that nothing else has recorded yet.
+    const state = createState({
+      eventStatus: 'REFUNDED',
+      initialTransactionStatus: TransactionStatus.COMPLETED,
+      refreshedSubscriptionId: 'subscription-1',
+      refreshedFulfilledAt: new Date('2026-04-19T11:00:00.000Z'),
+      rawPayload: {
+        event: 'refund.succeeded',
+        object: { status: 'succeeded', amount: { value: '8.00', currency: 'RUB' } },
+      },
+    });
+    const service = createService(state);
+
+    await service.reconcileWebhookEvent('event-1');
+
+    assert.deepStrictEqual(state.partnerReversalCalls, ['tx-1']);
+    assert.equal(reversalWrites(state).length, 1);
   });
 
   it('reverses side-effects on a Heleket/Cryptomus refund_paid status', async () => {
@@ -550,7 +790,68 @@ describe('PaymentReconciliationService reconciliation side effects', () => {
 });
 
 function createService(state: ReturnType<typeof createState>): PaymentReconciliationService {
+  // The transaction row, and the lock over it. `$transaction` models
+  // `SELECT ... FOR UPDATE`: whoever is inside the callback holds the row, and
+  // every other writer queues behind them. That is the whole difference the
+  // refund fence makes — before it this path merged onto the snapshot
+  // `findTransactionForEvent` loaded at the top of reconciliation and wrote
+  // with a bare `update`, so a concurrent panel refund landing anywhere in
+  // between was silently overwritten.
+  let rowTail: Promise<void> = Promise.resolve();
+  const withRowLock = async <T>(run: () => Promise<T> | T): Promise<T> => {
+    const previous = rowTail;
+    let release: () => void = () => undefined;
+    rowTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await run();
+    } finally {
+      release();
+    }
+  };
+
+  /**
+   * An operator refund committing at the armed instant, written exactly as
+   * `PaymentRefundService.refundTransaction` writes it: id-keyed ledger, a
+   * total that only grows, and the all-or-nothing reversal iff this entry took
+   * it to the captured amount. `payment-refund.service.spec.ts` pins that
+   * producing shape and drives the mirror-image race against the real service.
+   */
+  const commitPanelRefund = (refund: { refundId: string; amount: string }): Promise<void> =>
+    withRowLock(() => {
+      const live = state.gatewayDataOverride ?? {};
+      const ledger = Array.isArray(live.refunds)
+        ? [...(live.refunds as ReadonlyArray<{ refundId: string; amount: string; at: string }>)]
+        : [];
+      const alreadyLedgered = ledger.some((entry) => entry.refundId === refund.refundId);
+      if (!alreadyLedgered) {
+        ledger.push({ ...refund, at: '2026-04-19T12:30:00.000Z' });
+      }
+      const total = Math.max(
+        Number(live.refundedAmountTotal ?? '0') + (alreadyLedgered ? 0 : Number(refund.amount)),
+        ledger.reduce((sum, entry) => sum + Number(entry.amount), 0),
+      );
+      state.gatewayDataOverride = {
+        ...live,
+        refunds: ledger,
+        refundedAmountTotal: total.toFixed(2),
+      };
+      state.commitOrder.push(`panel:${refund.refundId}`);
+      if (total >= CAPTURED_AMOUNT - 0.000001) {
+        state.panelReversalCalls.push(`panel:${refund.refundId}`);
+      }
+    });
+  const firePanelRefund = (moment: 'snapshot' | 'write'): void => {
+    const armed = state.panelRefund;
+    if (armed === null || armed.at !== moment) return;
+    state.panelRefund = null;
+    state.pendingWriters.push(commitPanelRefund(armed));
+  };
+
   const prismaService = {
+    $queryRaw: async (..._args: readonly unknown[]) => [{ id: 'tx-1' }],
     paymentWebhookEvent: {
       findUnique: async (_args: PaymentWebhookFindUniqueArgs) => state.event,
     },
@@ -565,13 +866,18 @@ function createService(state: ReturnType<typeof createState>): PaymentReconcilia
             gatewayData: state.gatewayDataOverride,
           });
         }
-        return createTransaction({
+        // `findTransactionForEvent`'s lookup. Snapshot the row BEFORE letting a
+        // writer armed for this instant through, so the reconciler is holding
+        // exactly what a stale read would have handed it.
+        const snapshot = createTransaction({
           id: 'tx-1',
           status: state.initialTransactionStatus,
           subscriptionId: 'subscription-original',
           fulfilledAt: state.refreshedFulfilledAt,
           gatewayData: state.gatewayDataOverride,
         });
+        firePanelRefund('snapshot');
+        return snapshot;
       },
       findFirst: async (_args: TransactionFindFirstArgs) => null,
       // Other completed payments against the same subscription. A refund must
@@ -592,11 +898,18 @@ function createService(state: ReturnType<typeof createState>): PaymentReconcilia
       },
       update: async (args: TransactionUpdateArgs) => {
         state.transactionUpdateCalls.push(args);
+        // Let a writer armed for this instant commit first. A real database
+        // only lets it through when the row is not locked — under the fence it
+        // queues and lands after this write instead of being erased by it.
+        firePanelRefund('write');
+        await Promise.resolve();
+        state.gatewayDataOverride = args.data.gatewayData;
         state.updatedStatus = args.data.status;
+        state.commitOrder.push('webhook');
         state.callOrder.push('update');
         return createTransaction({
           id: args.where.id,
-          status: args.data.status,
+          status: args.data.status ?? state.initialTransactionStatus,
           subscriptionId: state.refreshedSubscriptionId,
         });
       },
@@ -622,7 +935,7 @@ function createService(state: ReturnType<typeof createState>): PaymentReconcilia
   const transactionalPrisma: ReconciliationPrismaDouble = {
     ...prismaService,
     $transaction: async <T>(callback: (tx: ReconciliationPrismaDouble) => Promise<T>): Promise<T> =>
-      callback(transactionalPrisma),
+      withRowLock(() => callback(transactionalPrisma)),
   };
   const paymentWebhookInboxService: ReconciliationInboxDouble = {
     incrementReconciliationAttempts: async (eventId: string) => {
@@ -709,6 +1022,11 @@ function createService(state: ReturnType<typeof createState>): PaymentReconcilia
       },
     } as never,
     { upsertFromYookassaPayment: async () => undefined } as never,
+    // YooKassa completions are verified against the provider before they are
+    // applied; this suite is about what happens once they are confirmed.
+    {
+      verifyCompletion: async () => ({ outcome: 'CONFIRMED', providerStatus: 'succeeded' }),
+    } as never,
   );
 }
 
@@ -732,8 +1050,16 @@ function createState(input: {
   } | null;
   /** Completed payments on the same subscription besides the refunded one. */
   readonly otherCompletedPaymentsOnSubscription?: number;
+  /**
+   * An operator refund racing this webhook, committed at `at`: `'snapshot'` is
+   * the instant reconciliation has loaded the row (so the reconciler is holding
+   * a stale copy), `'write'` is the instant it goes to persist (so it is inside
+   * its own critical section, if it has one).
+   */
+  readonly panelRefund?: { refundId: string; amount: string; at: 'snapshot' | 'write' } | null;
 }) {
   const now = new Date('2026-04-19T12:00:00.000Z');
+  const pendingWriters: Array<Promise<void>> = [];
   return {
     event: {
       id: 'event-1',
@@ -791,7 +1117,44 @@ function createState(input: {
     otherCompletedPaymentsOnSubscription: input.otherCompletedPaymentsOnSubscription ?? 0,
     subscriptionUpdateCalls: [] as Array<{ where: { id: string }; data: Record<string, unknown> }>,
     syncJobCreateCalls: [] as Array<Record<string, unknown>>,
+    panelRefund: input.panelRefund ?? null,
+    /** Reversals the racing panel refund ran, if its entry crossed the total. */
+    panelReversalCalls: [] as string[],
+    /** Who committed to the row, in order. */
+    commitOrder: [] as string[],
+    pendingWriters,
+    /** Waits for the racing writer to drain off the row lock. */
+    drain: async (): Promise<void> => {
+      await Promise.all(pendingWriters);
+    },
   };
+}
+
+/** What `createTransaction` below charges — the full-refund threshold. */
+const CAPTURED_AMOUNT = 8;
+
+/**
+ * The writes that mark the payment reversed. Selected by predicate rather than
+ * by index: a refund that completes the total now writes TWICE — the ledger
+ * entry and running total go in first, under the row lock, and only then does
+ * the reversal commit CANCELED. The ledger write has to be inside the fence or
+ * the crossing refund leaves no entry for the other writer to deduplicate
+ * against, which is the race this pins.
+ */
+function reversalWrites(
+  state: ReturnType<typeof createState>,
+): readonly TransactionUpdateArgs[] {
+  return state.transactionUpdateCalls.filter(
+    (call) => call.data.status === TransactionStatus.CANCELED,
+  );
+}
+
+/** Provider refund ids on the row as it now stands, in ledger order. */
+function ledgerIds(state: ReturnType<typeof createState>): readonly string[] {
+  const refunds = state.gatewayDataOverride?.refunds;
+  return Array.isArray(refunds)
+    ? (refunds as ReadonlyArray<{ refundId: string }>).map((entry) => entry.refundId)
+    : [];
 }
 
 function createTransaction(input: {

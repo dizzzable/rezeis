@@ -89,7 +89,14 @@ describe('PlanCatalogService', () => {
         }),
       },
       subscription: { findFirst: async () => null, count: async () => 0 },
-      trialClaim: { aggregate: async () => ({ _sum: { units: 0 } }) },
+      trialClaim: {
+        aggregate: async () => ({ _sum: { units: 0 } }),
+        // The catalog discounts the buyer's own still-open trial attempt, the
+        // same way quoting does — otherwise a reservation the buyer could still
+        // finish removes the trial plan from the list they would finish it from.
+        findMany: async () => [],
+      },
+      transaction: { findFirst: async () => null },
       referral: { findFirst: async () => ({ id: 'ref-1' }) },
       partnerReferral: { findFirst: async () => null },
     };
@@ -126,6 +133,86 @@ describe('PlanCatalogService', () => {
     ]);
     assert.equal(actual[0]?.trafficLimitStrategy, 'NO_RESET');
   });
+
+  /**
+   * The reported bug, at the layer above quoting.
+   *
+   * A paid-trial draft holds a RESERVED claim and the quota counter treats
+   * RESERVED as spent, so a buyer who abandoned a checkout was told their trial
+   * was used up. Quoting was taught to discount the buyer's own still-open
+   * attempt — but the catalog gates first, and it still counted that
+   * reservation, so the trial plan never appeared in the list and the buyer
+   * never reached the quote that would have let them back in.
+   *
+   * A CONSUMED claim, by contrast, is a genuinely spent trial and must keep
+   * hiding the plan.
+   */
+  for (const scenario of [
+    {
+      name: 'keeps the trial plan visible while the buyer has an unfinished attempt of their own',
+      reservedUnits: 1,
+      pendingTransaction: { id: 'tx-1' } as { id: string } | null,
+      expectTrial: true,
+    },
+    {
+      name: 'still hides the trial plan once the quota is genuinely spent',
+      reservedUnits: 1,
+      pendingTransaction: null,
+      expectTrial: false,
+    },
+  ]) {
+    it(scenario.name, async () => {
+      const prismaService = {
+        paymentGateway: {
+          findMany: async () => [
+            {
+              id: 'gateway-1',
+              type: PaymentGatewayType.YOOKASSA,
+              currency: Currency.USD,
+              isActive: true,
+              orderIndex: 1,
+            },
+          ],
+        },
+        plan: {
+          findMany: async () => [
+            createPlanRecord({ id: 'plan-all', availability: PlanAvailability.ALL }),
+            createPlanRecord({ id: 'plan-trial', availability: PlanAvailability.TRIAL }),
+          ],
+        },
+        user: { findUnique: async () => ({ id: 'user-1', purchaseDiscount: 0, personalDiscount: 0 }) },
+        subscription: { findFirst: async () => null, count: async () => 0 },
+        trialClaim: {
+          // The exclusion is expressed as `transactionId: { not: <resumable> }`,
+          // so mirror the real semantics: the unit disappears from the sum only
+          // when the resumable draft is the one being excluded.
+          aggregate: async (args: { where?: { transactionId?: { not?: string } } }) => ({
+            _sum: {
+              units:
+                args.where?.transactionId?.not === 'tx-1' ? 0 : scenario.reservedUnits,
+            },
+          }),
+          findMany: async () => [{ transactionId: 'tx-1' }],
+        },
+        transaction: { findFirst: async () => scenario.pendingTransaction },
+        referral: { findFirst: async () => null },
+        partnerReferral: { findFirst: async () => null },
+      };
+
+      const service = new PlanCatalogService(prismaService as never, new PricingService());
+      const actual = await service.getCatalogPlans({
+        channel: PurchaseChannel.WEB,
+        userId: 'user-1',
+      });
+
+      assert.equal(
+        actual.some((plan) => plan.id === 'plan-trial'),
+        scenario.expectTrial,
+      );
+      // The rest of the catalog is unaffected either way.
+      assert.ok(actual.some((plan) => plan.id === 'plan-all'));
+    });
+  }
 });
 
 function createPlanRecord(input: {

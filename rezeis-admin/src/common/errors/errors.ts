@@ -31,7 +31,6 @@ export const ERRORS = {
   PAYMENT_NOT_FOUND:               { code: 'PAY001', message: 'Payment not found',                      httpCode: 404 },
   GATEWAY_NOT_FOUND:               { code: 'PAY002', message: 'Payment gateway not found',               httpCode: 404 },
   CHECKOUT_FAILED:                 { code: 'PAY003', message: 'Failed to create checkout',               httpCode: 500 },
-  WEBHOOK_DUPLICATE:               { code: 'PAY004', message: 'Duplicate webhook event',                 httpCode: 409 },
 
   // ── Promocodes ────────────────────────────────────────────────────────────
   PROMOCODE_NOT_FOUND:             { code: 'PR001', message: 'Promocode not found',                     httpCode: 404 },

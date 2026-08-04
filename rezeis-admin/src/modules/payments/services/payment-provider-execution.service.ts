@@ -1,4 +1,5 @@
 import { Buffer } from 'node:buffer';
+import { isIP } from 'node:net';
 import { BadRequestException, Inject, Injectable, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigType } from '@nestjs/config';
 import { Currency, PaymentGateway, PaymentGatewayType, Transaction } from '@prisma/client';
@@ -6,12 +7,18 @@ import { firstValueFrom } from 'rxjs';
 import { HttpService } from '@nestjs/axios';
 
 import { paymentsConfig } from '../../../common/config/payments.config';
+import {
+  CHECKOUT_LIFETIME_MINUTES,
+  CHECKOUT_LIFETIME_SECONDS,
+  checkoutExpiresAt,
+} from '../constants/checkout-lifetime.constant';
 import { readGatewaySettings } from '../utils/payment-gateway-settings.util';
 import { normalizePaymentProviderError, redactPaymentDiagnosticMessage } from '../utils/payment-provider-error.util';
 import {
   buildResultUrl,
   buildWebhookUrl,
   md5,
+  sha1,
   readBooleanSetting,
   readOptionalString,
   readRecord,
@@ -107,6 +114,27 @@ export class PaymentProviderExecutionService {
     readonly savePaymentMethod?: boolean | null;
     /** Explicit user consent to bind the card for future autopay. */
     readonly savePaymentMethodConsent?: boolean | null;
+    /**
+     * Payer identity for the providers that put a buyer on the invoice:
+     * Antilopay (`customer` is mandatory and must carry an email or a phone —
+     * error 11), SeverPay (`client_email` is required and signed over) and
+     * Lava (the address is the invoice recipient).
+     *
+     * Still optional, because it still does not reach this layer. `Transaction`
+     * carries `userId` but no email, this service has no Prisma access, and
+     * none of the three callers holds the user row: `PaymentsCheckoutService`,
+     * `PaymentsRenewalCheckoutService` and `AddOnPurchaseService` each resolve
+     * an id and stop (`select: { id: true }`, and only on the Telegram branch —
+     * a request that supplies `userId` reads no user at all). Filling this in
+     * therefore costs one extra query per checkout in all three, on the hot
+     * path, for a column that is nullable anyway; declared here so that can be
+     * done later without reshaping the gateway methods. Until then all three
+     * gateways fall back to a routable per-payment address — see
+     * {@link resolveCustomerEmail} — and none of them invents an `ip`.
+     */
+    readonly customerEmail?: string | null;
+    /** Buyer's request IP, forwarded verbatim to providers that ask for it. */
+    readonly customerIp?: string | null;
   }): Promise<ProviderCheckoutResult> {
     try {
       switch (input.gateway.type) {
@@ -349,8 +377,16 @@ export class PaymentProviderExecutionService {
       currency: input.transaction.currency === Currency.XTR ? Currency.USD : input.transaction.currency,
       order_id: input.transaction.paymentId,
       description: input.description.slice(0, 255),
+      // Was unset, so the invoice took Heleket's 1-hour default and outlived
+      // our 30-minute sweep. Heleket accepts 300–43200 seconds.
+      lifetime: CHECKOUT_LIFETIME_SECONDS,
       url_success: resultUrl,
       url_return: resultUrl,
+      // Heleket sends webhooks to this per-invoice address; a merchant-level
+      // fallback is not documented. Cryptomus already received one — omitting
+      // it here meant Heleket had no address to notify at all, and it also
+      // disables `/v1/payment/resend`, the manual replay for a lost webhook.
+      url_callback: this.buildWebhookUrl(PaymentGatewayType.HELEKET),
     };
     const serializedPayload = Buffer.from(JSON.stringify(payload), 'utf8');
     const sign = md5(`${serializedPayload.toString('base64')}${apiKey}`);
@@ -400,7 +436,10 @@ export class PaymentProviderExecutionService {
       url_return: resultUrl,
       url_success: resultUrl,
       is_payment_multiple: false,
-      lifetime: 3600,
+      // Was the provider default (3600). Aligned with our own pending sweep so
+      // the invoice cannot outlive the draft we cancel. Cryptomus accepts
+      // 300–43200 seconds.
+      lifetime: CHECKOUT_LIFETIME_SECONDS,
       url_callback: webhookUrl,
     };
     const serializedPayload = Buffer.from(JSON.stringify(payload), 'utf8');
@@ -454,6 +493,9 @@ export class PaymentProviderExecutionService {
       amount: input.transaction.amount.toString(),
       description: input.description.slice(0, 1024),
       payload: input.transaction.paymentId,
+      // Crypto Pay leaves the default undocumented when this is omitted, so an
+      // invoice could stay payable indefinitely. Accepts 1–2678400 seconds.
+      expires_in: CHECKOUT_LIFETIME_SECONDS,
     };
     // `paid_btn_url` must be an absolute http(s) URL; only attach the
     // post-payment "Return" button when we actually resolved one.
@@ -499,23 +541,60 @@ export class PaymentProviderExecutionService {
   }): Promise<ProviderCheckoutResult> {
     const settings = readGatewaySettings(input.gateway.settings);
     const apiKey = requireSetting(settings, 'apiKey');
-    const successResultUrl = this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
-    const failResultUrl = this.resolveFailUrl(input.transaction.paymentId, input.failUrl, input.successUrl);
-    const webhookUrl = this.buildWebhookUrl(input.gateway.type);
+    const shopId = requireSetting(settings, 'shopId');
+    const secretKey = requireSetting(settings, 'secretKey');
+    // MulenPay accepts roubles only — `currency` is an enum of exactly
+    // `['rub']`, lower-case — which is why the literal below is not derived
+    // from the transaction. That makes a non-RUB transaction a *silent*
+    // mispricing rather than a rejected request: a $5 plan books
+    // `amount = 5.00, currency = USD`, we would post `{currency: 'rub',
+    // amount: '5'}`, and the buyer pays 5 ₽ while the row still records USD.
+    // `GATEWAY_SUPPORTED_CURRENCIES.MULENPAY` now lists RUB alone, but a row
+    // seeded before that still carries its old currency and nothing
+    // re-validates it at checkout time, so refuse here as well: a ~100×
+    // under-charge is far worse than a visible failure.
+    if (input.transaction.currency !== Currency.RUB) {
+      throw new BadRequestException('PAYMENT_GATEWAY_CURRENCY_UNSUPPORTED');
+    }
+    // Amount as a decimal string in major units.
+    const amount = input.transaction.amount.toString();
+    const receiptDescription = input.description.slice(0, 128);
     const payload = {
-      amount: input.transaction.amount.toString(),
-      currency: input.transaction.currency,
+      currency: 'rub',
+      amount,
+      // Our own id. It comes back in the webhook as `uuid`, and is the only way
+      // to match a notification to a transaction — the previous `orderId` was
+      // not a documented field, so nothing we sent survived the round trip.
+      uuid: input.transaction.paymentId,
+      shopId,
       description: input.description.slice(0, 255),
-      successUrl: successResultUrl,
-      failUrl: failResultUrl,
-      callbackUrl: webhookUrl,
-      orderId: input.transaction.paymentId,
+      // `sign` = sha1(currency + amount + shopId + secretKey). Note it covers
+      // neither `uuid` nor `items`, so it authenticates the caller and the sum,
+      // not the basket.
+      sign: sha1(`rub${amount}${shopId}${secretKey}`),
+      // Fiscal receipt is required by the schema. Codes come from gateway
+      // settings because they follow the merchant's tax regime; the fallbacks
+      // are MulenPay's own «без НДС» (1), «услуга» (4) and «полный расчёт» (4),
+      // which match how this product sells subscriptions.
+      items: [
+        {
+          description: receiptDescription,
+          price: amount,
+          quantity: 1,
+          vat_code: Number(readOptionalString(settings, ['vatCode']) ?? '1'),
+          payment_subject: Number(readOptionalString(settings, ['paymentSubject']) ?? '4'),
+          payment_mode: Number(readOptionalString(settings, ['paymentMode']) ?? '4'),
+        },
+      ],
+      language: 'ru',
     };
     const response = await firstValueFrom(
-      this.httpService.post('https://mulenpay.ru/v2/payments', payload, {
+      // Base URL is `https://mulenpay.ru/api`; the previous path omitted `/api`
+      // entirely. Auth is a bearer token, not the `api-key` headers we sent.
+      this.httpService.post('https://mulenpay.ru/api/v2/payments', payload, {
         headers: {
-          'api-key': apiKey,
-          'X-API-Key': apiKey,
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
         },
       }),
     );
@@ -596,12 +675,16 @@ export class PaymentProviderExecutionService {
     readonly description: string;
     readonly successUrl?: string | null;
     readonly failUrl?: string | null;
+    readonly customerEmail?: string | null;
+    readonly customerIp?: string | null;
   }): Promise<ProviderCheckoutResult> {
     const crypto = await import('crypto');
     const settings = readGatewaySettings(input.gateway.settings);
     const projectIdentificator = requireSetting(settings, 'projectIdentificator');
     const secretId = requireSetting(settings, 'secretId');
-    const privateKeyBase64 = requireSetting(settings, 'privateKey');
+    const privateKeyPem = this.toAntilopayPrivateKeyPem(requireSetting(settings, 'privateKey'));
+    const vat = this.readAntilopayVat(settings);
+    const customerIp = this.readAntilopayCustomerIp(input.customerIp);
 
     const successUrl = this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
     const failUrl = this.resolveFailUrl(input.transaction.paymentId, input.failUrl, input.successUrl);
@@ -613,14 +696,29 @@ export class PaymentProviderExecutionService {
       currency: 'rub',
       product_name: input.description.slice(0, 128),
       product_type: 'services',
+      // Left out entirely unless the operator configured a rate — see
+      // `antilopayVatSetting`. Sending nothing is correct for УСН/НПД; for a
+      // merchant on ОСНО an absent rate is error 17 on every single checkout.
+      ...(vat === null ? {} : { vat }),
       description: input.description.slice(0, 255),
       success_url: successUrl,
       fail_url: failUrl,
-      customer: { email: 'customer@rezeis.local' },
+      customer: {
+        // `customer` is mandatory here and must carry an email or a phone —
+        // error 11. The callback echoes the block straight back to us, so this
+        // is also the only handle tying a payer to a dispute; the single shared
+        // literal that stood here («customer@rezeis.local») threw that away and
+        // was a plausible error 12 («Данные Покупателя содержат ошибку») besides.
+        email: this.resolveCustomerEmail(input),
+        // Documented as optional, yet error 32 («Данные Покупателя должны
+        // содержать ip») exists — some project configurations reject a buyer
+        // block without it. Sent when the caller knows the address; never
+        // invented, since a wrong IP is a worse answer than none.
+        ...(customerIp === null ? {} : { ip: customerIp }),
+      },
     };
 
     const bodyString = JSON.stringify(payload);
-    const privateKeyPem = `-----BEGIN RSA PRIVATE KEY-----\n${privateKeyBase64}\n-----END RSA PRIVATE KEY-----`;
     const sign = crypto.createSign('RSA-SHA256');
     sign.update(bodyString);
     const signature = sign.sign(privateKeyPem, 'base64');
@@ -651,8 +749,71 @@ export class PaymentProviderExecutionService {
     };
   }
 
+  /**
+   * Re-armors the stored Antilopay signing key before OpenSSL sees it.
+   *
+   * The value arrives through the admin form as whatever the operator had on
+   * the clipboard, and OpenSSL 3 is unforgiving about the difference. Measured
+   * on Node 24 / OpenSSL 3.5.5, wrapping the setting directly in armor signs
+   * correctly for raw base64, for 64-column-wrapped base64 and even with
+   * embedded spaces — but a value carrying a **trailing newline**, or one that
+   * is **already a complete PEM** with its own `-----BEGIN…` lines, throws
+   * `ERR_OSSL_UNSUPPORTED`. Both are precisely what copying a key out of a
+   * cabinet or a `.pem` file produces, and both were rethrown upstream as a
+   * bare 503: the gateway went dark with no diagnostic naming the key.
+   *
+   * So the setting is reduced to its base64 body and re-wrapped at 64 columns.
+   * The `RSA PRIVATE KEY` label is deliberately kept — Antilopay issues a
+   * PKCS#8 key (its own Java, Go and C# samples read it with
+   * `PKCS8EncodedKeySpec` / `ParsePKCS8PrivateKey` / `ImportPkcs8PrivateKey`),
+   * and OpenSSL 3 signs that body under this label exactly as the provider's
+   * own PHP and Node samples do. The armor was never the defect.
+   */
+  private toAntilopayPrivateKeyPem(privateKey: string): string {
+    const base64Body = privateKey
+      .replace(/-----(?:BEGIN|END)[^-]*-----/g, '')
+      .replace(/\s+/g, '');
+    const wrappedBody = base64Body.match(/.{1,64}/g)?.join('\n') ?? '';
+    return `-----BEGIN RSA PRIVATE KEY-----\n${wrappedBody}\n-----END RSA PRIVATE KEY-----\n`;
+  }
+
+  /**
+   * VAT rate for the invoice — «Поле обязательное, если сно Мерчанта - ОСНО»
+   * (Antilopay API, p.14), and its absence is error 17 for such a merchant.
+   * Settings normalization stores a number, but a hand-edited row can hold the
+   * numeric string an admin form posts. Anything else is treated as unset:
+   * the enum is enforced at save time, so a stray value here is a legacy row,
+   * and УСН/НПД merchants must send no rate at all.
+   */
+  private readAntilopayVat(settings: Record<string, unknown>): number | null {
+    const raw = settings.vat;
+    if (raw === 10 || raw === 22) {
+      return raw;
+    }
+    if (typeof raw === 'string' && (raw.trim() === '10' || raw.trim() === '22')) {
+      return Number(raw.trim());
+    }
+    return null;
+  }
+
+  /**
+   * Normalizes a buyer IP for `customer.ip`. Dual-stack Node hands out the
+   * IPv4-mapped form (`::ffff:203.0.113.7`) for an ordinary IPv4 client, which
+   * is not what a provider expects to store, so it is unwrapped. Anything that
+   * is not a valid address is dropped rather than forwarded — a malformed one
+   * risks error 12 on a field that is documented as optional.
+   */
+  private readAntilopayCustomerIp(rawIp: string | null | undefined): string | null {
+    const candidate = rawIp?.trim() ?? '';
+    if (candidate.length === 0) {
+      return null;
+    }
+    const unwrapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(candidate)?.[1] ?? candidate;
+    return isIP(unwrapped) === 0 ? null : unwrapped;
+  }
+
   // ═══════════════════════════════════════════════════════════════════════════
-  //  OVERPAY (beGateway) — https://checkout.begateway.com/ctp/api/checkouts
+  //  OVERPAY — https://checkout.overpay.io/ctp/api/checkouts
   //  Auth: Basic (shopId:secretKey)
   // ═══════════════════════════════════════════════════════════════════════════
 
@@ -680,6 +841,9 @@ export class PaymentProviderExecutionService {
           currency: 'RUB',
           description: input.description.slice(0, 255),
           tracking_id: input.transaction.paymentId,
+          // ISO-8601 timestamp. Overpay's default is 24 hours; this brings the
+          // token's life down to our own sweep window.
+          expired_at: checkoutExpiresAt(),
         },
         settings: {
           success_url: successUrl,
@@ -693,9 +857,15 @@ export class PaymentProviderExecutionService {
     };
 
     const response = await firstValueFrom(
-      this.httpService.post('https://checkout.begateway.com/ctp/api/checkouts', payload, {
+      this.httpService.post('https://checkout.overpay.io/ctp/api/checkouts', payload, {
         auth: { username: shopId, password: secretKey },
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          // Both are documented as required; the version header in particular
+          // is not optional — the checkout contract differs between versions.
+          Accept: 'application/json',
+          'X-API-Version': '2',
+        },
       }),
     );
 
@@ -736,6 +906,15 @@ export class PaymentProviderExecutionService {
       order_id: input.transaction.paymentId,
       description: input.description.slice(0, 255),
       type: 'normal',
+      // Seconds — not minutes, unlike AuraPay's and SeverPay's `lifetime`.
+      // Pally's own reference states it outright, in both the Bill model and
+      // the `bill/create` request table: «Время жизни счета на оплату в
+      // секундах», integer, with 600 as the illustrated value. Worth stating
+      // because reading it as minutes would make this a 30-HOUR bill, which is
+      // precisely the case the checkout-lifetime invariant exists to prevent.
+      // No minimum or maximum is documented, so an unset value left the bill's
+      // life entirely up to the provider.
+      ttl: CHECKOUT_LIFETIME_SECONDS,
       shop_id: shopId,
       currency_in: 'RUB',
       success_url: successUrl,
@@ -744,7 +923,9 @@ export class PaymentProviderExecutionService {
     };
 
     const response = await firstValueFrom(
-      this.httpService.post('https://paypalych.com/api/v1/bill/create', payload, {
+      // `paypalych.com` no longer resolves; the current documentation knows
+      // only `pal24.pro`. Pally / PayPalych / Pal24 are one service.
+      this.httpService.post('https://pal24.pro/api/v1/bill/create', payload, {
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
       }),
     );
@@ -752,10 +933,10 @@ export class PaymentProviderExecutionService {
     const data = response.data as Record<string, unknown>;
     return {
       gatewayId: readOptionalString(data, ['bill_id', 'id']),
-      checkoutUrl: readOptionalString(data, ['link_url', 'link_page_url', 'pay_url']),
+      checkoutUrl: readOptionalString(data, ['link_page_url', 'pay_url', 'link_url']),
       providerMode: 'REDIRECT',
       providerStatus: 'PENDING',
-      gatewayData: { provider: 'PAYPALYCH', providerResponse: this.redactProviderResponse(data), checkoutUrl: readOptionalString(data, ['link_url', 'link_page_url', 'pay_url']) },
+      gatewayData: { provider: 'PAYPALYCH', providerResponse: this.redactProviderResponse(data), checkoutUrl: readOptionalString(data, ['link_page_url', 'pay_url', 'link_url']) },
     };
   }
 
@@ -773,6 +954,7 @@ export class PaymentProviderExecutionService {
   }): Promise<ProviderCheckoutResult> {
     const settings = readGatewaySettings(input.gateway.settings);
     const apiToken = requireSetting(settings, 'apiToken');
+    const serviceId = this.readRiopayEngineServiceId(settings);
 
     const successUrl = this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
     const failUrl = this.resolveFailUrl(input.transaction.paymentId, input.failUrl, input.successUrl);
@@ -785,6 +967,7 @@ export class PaymentProviderExecutionService {
       successUrl,
       failUrl,
       callbackUrl: webhookUrl,
+      ...(serviceId === null ? {} : { serviceId }),
     };
 
     const response = await firstValueFrom(
@@ -818,6 +1001,7 @@ export class PaymentProviderExecutionService {
   }): Promise<ProviderCheckoutResult> {
     const settings = readGatewaySettings(input.gateway.settings);
     const apiToken = requireSetting(settings, 'apiToken');
+    const serviceId = this.readRiopayEngineServiceId(settings);
 
     const successUrl = this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
     const failUrl = this.resolveFailUrl(input.transaction.paymentId, input.failUrl, input.successUrl);
@@ -831,6 +1015,7 @@ export class PaymentProviderExecutionService {
       successUrl,
       failUrl,
       callbackUrl: webhookUrl,
+      ...(serviceId === null ? {} : { serviceId }),
     };
 
     const response = await firstValueFrom(
@@ -849,8 +1034,26 @@ export class PaymentProviderExecutionService {
     };
   }
 
+  /**
+   * RioPay/Valutix route each order through a `serviceId` — «сервис, через
+   * который провести платёж». Newer accounts require it; legacy single-service
+   * ones have nothing to pick, so an unset value is left out of the body
+   * entirely rather than sent as null. Settings normalization stores a number,
+   * but a hand-edited row can hold the numeric string an admin form posts.
+   */
+  private readRiopayEngineServiceId(settings: Record<string, unknown>): number | null {
+    const raw = settings.serviceId;
+    if (typeof raw === 'number' && Number.isSafeInteger(raw) && raw > 0) {
+      return raw;
+    }
+    if (typeof raw === 'string' && /^[1-9]\d*$/.test(raw.trim())) {
+      return Number(raw.trim());
+    }
+    return null;
+  }
+
   // ═══════════════════════════════════════════════════════════════════════════
-  //  WATA — https://api.wata.pro/api/v1/links
+  //  WATA — https://api.wata.pro/api/h2h/links
   //  Auth: Bearer JWT API key
   //  Docs: https://wata.pro/api
   // ═══════════════════════════════════════════════════════════════════════════
@@ -875,10 +1078,14 @@ export class PaymentProviderExecutionService {
       description: input.description.slice(0, 255),
       successRedirectUrl: successUrl,
       failRedirectUrl: failUrl,
+      // An absolute timestamp here, not a duration. Wata's default is THREE
+      // DAYS — by far the widest gap between a link we consider dead and one
+      // the buyer can still pay. Accepts 10 minutes to 30 days.
+      expirationDateTime: checkoutExpiresAt(),
     };
 
     const response = await firstValueFrom(
-      this.httpService.post('https://api.wata.pro/api/v1/links', payload, {
+      this.httpService.post('https://api.wata.pro/api/h2h/links', payload, {
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
       }),
     );
@@ -921,7 +1128,9 @@ export class PaymentProviderExecutionService {
       fail_url: failUrl,
       callback_url: callbackUrl,
       comment: input.description.slice(0, 255),
-      lifetime: 60,
+      // Minutes here, not seconds. Was the provider default (60); AuraPay
+      // accepts 1–43200.
+      lifetime: CHECKOUT_LIFETIME_MINUTES,
     };
 
     const response = await firstValueFrom(
@@ -1003,6 +1212,7 @@ export class PaymentProviderExecutionService {
     readonly description: string;
     readonly successUrl?: string | null;
     readonly failUrl?: string | null;
+    readonly customerEmail?: string | null;
   }): Promise<ProviderCheckoutResult> {
     const crypto = await import('crypto');
     const settings = readGatewaySettings(input.gateway.settings);
@@ -1010,7 +1220,13 @@ export class PaymentProviderExecutionService {
     const secretToken = requireSetting(settings, 'secretToken');
 
     const successUrl = this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
-    const customerEmail = `${input.transaction.userId ?? 'customer'}@rezeis.local`;
+    // `client_email` is required and is covered by the signature, so it cannot
+    // simply be dropped. SeverPay itself sanctions a synthetic address — the
+    // docs tell Telegram-authenticated services to derive one from the Telegram
+    // identity — but the domain still has to exist, and `${userId}@rezeis.local`
+    // did not. What the provider does with the address beyond identifying the
+    // buyer is not documented either way, so this stays routable on principle.
+    const customerEmail = this.resolveCustomerEmail(input);
     const salt = crypto.randomBytes(8).toString('hex');
 
     const baseBody: Record<string, unknown> = {
@@ -1022,7 +1238,9 @@ export class PaymentProviderExecutionService {
       client_email: customerEmail,
       client_id: input.transaction.userId ?? input.transaction.paymentId,
       url_return: successUrl,
-      lifetime: 1440,
+      // Minutes. Was the provider default (1440 = 24h); SeverPay accepts
+      // 30–4320, so 30 is its floor — we cannot go below the sweep window here.
+      lifetime: CHECKOUT_LIFETIME_MINUTES,
     };
 
     // SeverPay требует ksort + HMAC-SHA256(JSON, secretToken)
@@ -1066,22 +1284,37 @@ export class PaymentProviderExecutionService {
     readonly description: string;
     readonly successUrl?: string | null;
     readonly failUrl?: string | null;
+    readonly customerEmail?: string | null;
   }): Promise<ProviderCheckoutResult> {
     const settings = readGatewaySettings(input.gateway.settings);
     const apiKey = requireSetting(settings, 'apiKey');
     const offerId = requireSetting(settings, 'offerId');
 
-    const customerEmail = `${input.transaction.userId ?? 'customer'}@rezeis.local`;
+    // The one gateway here where the address is not bookkeeping: Lava treats
+    // it as the buyer's own, and it is the invoice recipient. Sending
+    // `${userId}@rezeis.local` therefore did not merely look wrong — `.local`
+    // is non-routable, so no Lava buyer could ever receive their invoice, for
+    // every payment, silently. Failing on an unconfigured public domain (the
+    // fallback's only new failure mode on this gateway) is the better answer
+    // than posting another address that provably goes nowhere.
+    const customerEmail = this.resolveCustomerEmail(input);
 
     const payload = {
       email: customerEmail,
       offerId,
       currency: input.transaction.currency === Currency.RUB ? 'RUB' : 'USD',
       periodicity: 'ONE_TIME',
+      // Without this Lava charges the offer's own price. `offerId` is a single
+      // per-gateway setting, so every plan would have been billed at one fixed
+      // amount while we recorded the real one — a systematic mismatch, not an
+      // edge case. Only honoured for products published with "Price on request
+      // via API"; for the rest Lava ignores it and the offer price still wins.
+      amount: Number(input.transaction.amount),
     };
 
     const response = await firstValueFrom(
-      this.httpService.post('https://gate.lava.top/api/v2/invoice', payload, {
+      // v3 is the current route; v1 and v2 are marked `deprecated` in the spec.
+      this.httpService.post('https://gate.lava.top/api/v3/invoice', payload, {
         headers: { 'Content-Type': 'application/json', 'X-Api-Key': apiKey },
       }),
     );
@@ -1095,6 +1328,52 @@ export class PaymentProviderExecutionService {
       providerStatus: readOptionalString(data, ['status']) ?? 'PENDING',
       gatewayData: { provider: 'LAVA', providerResponse: this.redactProviderResponse(data), checkoutUrl },
     };
+  }
+
+  // ── Payer identity ──────────────────────────────────────────────────────
+  // Antilopay, SeverPay and Lava each demand a buyer email on the invoice, so
+  // the rule for producing one lives here rather than three times over.
+
+  /**
+   * The payer address to put on the invoice: the caller's when it has one,
+   * otherwise a per-payment address under the operator's own public domain.
+   *
+   * The real account address does not reach this layer yet (see
+   * `createCheckout`), so the fallback carries the whole burden, and the one
+   * thing it must be is **routable**. What it replaced on all three gateways
+   * was a `@rezeis.local` literal — `.local` is reserved for multicast DNS
+   * (RFC 6762 §3) and resolves nowhere outside a LAN, so mail a provider sends
+   * there fails by construction, not by bad luck. Keyed on the payment rather
+   * than the user because a provider that echoes the buyer block back to us
+   * (Antilopay's callback does) then names one payment, not just an account.
+   */
+  private resolveCustomerEmail(input: {
+    readonly transaction: Transaction;
+    readonly customerEmail?: string | null;
+  }): string {
+    const providedEmail = input.customerEmail?.trim();
+    if (providedEmail !== undefined && providedEmail.length > 0) {
+      return providedEmail;
+    }
+    return `${input.transaction.paymentId}@${this.resolvePublicMailDomain()}`;
+  }
+
+  /**
+   * Bare host of the operator's configured public domain — the one routable
+   * name this service is sure of. Scheme, port and path are stripped so the
+   * setting can be the same `https://host` URL the URL builders take. Missing
+   * gives the same 503 those builders give, rather than a made-up address.
+   */
+  private resolvePublicMailDomain(): string {
+    const domain = this.configuration.domain;
+    const host =
+      domain === null
+        ? ''
+        : domain.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '').split('/')[0].split(':')[0].trim().toLowerCase();
+    if (host.length === 0) {
+      throw new ServiceUnavailableException('Admin public base URL is not configured');
+    }
+    return host;
   }
 
   // ── URL-resolution thin wrappers ────────────────────────────────────────

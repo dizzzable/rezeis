@@ -28,6 +28,19 @@ export interface LandingDraftResult {
   readonly config: LandingConfigPayload;
   readonly version: number;
   readonly stored: boolean;
+  /**
+   * Set when a STORED draft failed schema validation and `config` is therefore
+   * the bundled default rather than the operator's work. Without this the
+   * builder silently opened a blank landing over a corrupt row, and the first
+   * autosave overwrote the original — losing it for good. The admin surfaces a
+   * warning and refuses to autosave, publishing is refused server-side, and
+   * `raw` carries the original row so it can be inspected or exported before
+   * anything is overwritten.
+   */
+  readonly corrupted?: {
+    readonly issues: readonly { readonly path: string; readonly message: string }[];
+    readonly raw: unknown;
+  };
 }
 
 export interface LandingRevisionMeta {
@@ -69,8 +82,31 @@ export class LandingConfigService {
     }
     const migrated = migrateLandingConfig(row.draft);
     const parsed = landingConfigSchema.safeParse(migrated);
-    const config = parsed.success ? parsed.data : DEFAULT_LANDING_CONFIG;
-    return { config, version: row.version, stored: true };
+    if (parsed.success) {
+      return { config: parsed.data, version: row.version, stored: true };
+    }
+    // A stored draft that no longer parses is an incident, not a blank slate:
+    // report it instead of quietly handing back the default, which the next
+    // autosave would then write over the operator's real content.
+    this.logger.error(
+      `Stored landing draft failed validation (version ${row.version}); ` +
+        `serving the bundled default read-only. Issues: ${parsed.error.issues
+          .slice(0, 5)
+          .map((issue) => `${issue.path.join('.') || '<root>'}: ${issue.message}`)
+          .join('; ')}`,
+    );
+    return {
+      config: DEFAULT_LANDING_CONFIG,
+      version: row.version,
+      stored: true,
+      corrupted: {
+        issues: parsed.error.issues.slice(0, 10).map((issue) => ({
+          path: issue.path.join('.') || '<root>',
+          message: issue.message,
+        })),
+        raw: row.draft,
+      },
+    };
   }
 
   /** The published revision the operator currently has draft-vs-published diff against. */
@@ -141,7 +177,14 @@ export class LandingConfigService {
     currentAdmin: CurrentAdminInterface,
     metadata: RequestMetadataInterface,
   ): Promise<{ revisionId: string }> {
-    const { config } = await this.getDraft();
+    const { config, corrupted } = await this.getDraft();
+    // `getDraft` stands the bundled default in for a draft it could not parse
+    // so the builder still renders. Publishing that stand-in would push it over
+    // the live landing — and since the default ships `enabled: false`, the
+    // public site would go dark on the next cache invalidation. The default is
+    // fully localized, so `assertPublishable` sees nothing wrong with it and
+    // would wave it through. Refuse here instead.
+    this.assertDraftIntact(corrupted);
     this.assertPublishable(config);
 
     const revisionId = await this.prisma.$transaction(
@@ -281,6 +324,21 @@ export class LandingConfigService {
   }
 
   /** Throws a 400 with the missing-translation paths when publish-strict fails. */
+  /**
+   * Refuse any operation that would write the stand-in default back over the
+   * operator's stored work. The draft itself is never touched by publishing, so
+   * the original row stays recoverable — but the live landing would already
+   * have been replaced by then.
+   */
+  private assertDraftIntact(corrupted: LandingDraftResult['corrupted']): void {
+    if (corrupted !== undefined) {
+      throw new BadRequestException({
+        message: 'LANDING_DRAFT_CORRUPTED',
+        issues: corrupted.issues,
+      });
+    }
+  }
+
   private assertPublishable(config: LandingConfigPayload): void {
     const issues = collectPublishStrictIssues(config);
     if (issues.length > 0) {

@@ -43,6 +43,10 @@ export class AdminLandingConfigController {
     version: number;
     stored: boolean;
     hasDraftChanges: boolean;
+    corrupted?: {
+      issues: readonly { path: string; message: string }[];
+      raw: unknown;
+    };
   }> {
     const [draft, published] = await Promise.all([
       this.landingConfigService.getDraft(),
@@ -55,6 +59,10 @@ export class AdminLandingConfigController {
       published,
       version: draft.version,
       stored: draft.stored,
+      // Absent in the normal case. Present means `draft` is the bundled default
+      // standing in for an unparseable stored row — the admin must warn and
+      // must not autosave over it.
+      ...(draft.corrupted === undefined ? {} : { corrupted: draft.corrupted }),
       hasDraftChanges,
     };
   }

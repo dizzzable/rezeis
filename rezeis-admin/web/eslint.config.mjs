@@ -26,6 +26,12 @@ export default tseslint.config(
       '**/*.tsbuildinfo',
       'src/components/reactbits/**',
       'scripts/**',
+      // Vendored landing kit — copied verbatim from reiwa by
+      // scripts/sync-landing-kit.mjs and byte-frozen by its manifest test.
+      // It is authored (and linted) in reiwa; linting it here would only
+      // pressure someone into editing a file that must not be edited, and
+      // reiwa's ruleset differs (e.g. it has eslint-plugin-react, we do not).
+      'src/features/landing-builder/live/**',
     ],
   },
   js.configs.recommended,

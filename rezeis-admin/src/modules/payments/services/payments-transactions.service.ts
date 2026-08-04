@@ -15,6 +15,7 @@ import { SubscriptionQuoteService } from '../../subscriptions/services/subscript
 import {
   countCommittedTrialClaimUnits,
   lockTrialClaimUser,
+  findResumablePaidTrialClaim,
   reservePaidTrialClaim,
 } from '../../subscriptions/services/trial-claim-ledger.util';
 import { CreateTransactionDraftDto } from '../dto/create-transaction-draft.dto';
@@ -242,7 +243,12 @@ export class PaymentsTransactionsService {
         }
         const usedUnits = await countCommittedTrialClaimUnits(tx, input.userId);
         if (usedUnits >= quote.selectedPlan.trialSettings.maxClaims) {
-          throw trialClaimLimitReached();
+          // The draft could not be reused (different gateway, currency or
+          // amount), so a second reservation would be required — which the
+          // quota forbids. Name the real obstacle: if the block comes from the
+          // buyer's own unfinished attempt, that attempt is resolvable.
+          const resumable = await findResumablePaidTrialClaim(tx, input.userId);
+          throw resumable === null ? trialClaimLimitReached() : trialPendingCheckoutBlocks();
         }
         const created = await tx.transaction.create({
           data: {
@@ -461,6 +467,23 @@ function trialClaimLimitReached(): BadRequestException {
   return new BadRequestException({
     code: 'TRIAL_ALREADY_USED',
     message: 'User has reached the trial claim limit',
+  });
+}
+
+/**
+ * The quota is full only because of the buyer's OWN unfinished attempt.
+ *
+ * Reported apart from `TRIAL_ALREADY_USED` because the two demand opposite
+ * things of the buyer: one says the trial is spent and there is nothing to do,
+ * the other says an attempt is still open and can be finished or abandoned.
+ * Telling someone their trial is used up while it is sitting in their own
+ * unpaid draft is how the original report started.
+ */
+function trialPendingCheckoutBlocks(): BadRequestException {
+  return new BadRequestException({
+    code: 'TRIAL_PENDING_CHECKOUT_STALE',
+    message:
+      'A paid-trial checkout is still pending for this user; finish or abandon it before starting another.',
   });
 }
 

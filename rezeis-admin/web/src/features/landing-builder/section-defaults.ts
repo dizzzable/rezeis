@@ -35,13 +35,20 @@ export function buildDefaultSection(
       subheading: L(),
       primaryCta: cta('register'),
       secondaryCta: cta('login'),
+      media: image(),
       align: 'center',
     },
     featuresGrid: { heading: L(), columns: 3, items: [{ icon: 'zap', title: L(), body: L() }] },
-    howItWorks: { heading: L(), steps: [{ title: L(), body: L() }] },
-    pricing: { source: 'catalog', billingToggle: false, heading: L() },
+    howItWorks: { heading: L(), steps: [{ title: L(), body: L(), media: image() }] },
+    // `staticPlans` is seeded (empty) so switching `source` to 'static' reveals
+    // a usable list instead of nothing — the editor only renders keys that
+    // exist. It stays hidden while `source` is 'catalog'.
+    pricing: { source: 'catalog', billingToggle: false, heading: L(), staticPlans: [] },
     faq: { heading: L(), items: [{ question: L(), answer: L() }] },
-    testimonials: { heading: L(), items: [{ quote: L(), author: L(), rating: 5 }] },
+    testimonials: {
+      heading: L(),
+      items: [{ quote: L(), author: L(), role: L(), avatar: image(), rating: 5 }],
+    },
     stats: { heading: L(), items: [{ value: '', label: L() }] },
     trustLogos: { heading: L(), logos: [{ image: image(), href: '' }] },
     ctaBanner: { heading: L(), body: L(), cta: cta('register'), style: 'gradient' },
@@ -76,7 +83,18 @@ export function newArrayItem(
     case 'features':
       return L()
     case 'staticPlans':
-      return { name: L(), priceMonthly: '', currency: 'RUB', features: [], cta: { label: L(), action: 'register', url: '' } }
+      return {
+        name: L(),
+        priceMonthly: '',
+        priceYearly: '',
+        currency: 'RUB',
+        badge: L(),
+        highlighted: false,
+        features: [],
+        cta: { label: L(), action: 'register', url: '' },
+      }
+    case 'steps':
+      return { title: L(), body: L(), media: { src: '', alt: L() } }
     case 'columns':
       return { title: L(), links: [{ label: L(), href: '' }] }
     default: {

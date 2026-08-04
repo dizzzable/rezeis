@@ -3,15 +3,36 @@
  *
  * Layout per row:
  *   [status dot]  [icon]  [name]   [Default badge]   [Active switch]
- *                 [↑] [↓] reorder · [⚙] settings · [▶] test
+ *                 [↑] [↓] reorder · [⚙] settings
  *
  * The first row (orderIndex = 1) is implicitly the *default* gateway
  * shown to the user when picking a payment method. Reordering shifts
  * which one wins that slot — it's enough for the public-facing list.
  *
- * Configuration lives in a dialog opened by the gear icon. After saving
- * credentials the user can fire a single test transaction with the
- * “Test” button to verify the integration is healthy.
+ * Configuration lives in a dialog opened by the gear icon. Readiness comes
+ * from the backend (`isConfigured`) rather than being guessed here — there
+ * used to be a “Test” button next to the gear that only re-read the gateway
+ * row and always reported success, so it certified gateways that could not
+ * receive a single webhook. Removed rather than left as a false green; a
+ * real probe would have to call the provider from the server.
+ *
+ * That same `isConfigured` is now load-bearing rather than advisory: the
+ * checkout guard refuses on it, so `isActive && !isConfigured` is not a
+ * half-finished setup, it is a gateway turning buyers away. `isGatewayFaulted`
+ * is the only place that combination is named, and it drives a destructive row
+ * rail plus a page-level banner. Everything else on the page stays quiet on
+ * purpose — an unconfigured gateway that is switched off is the resting state
+ * of most of this list.
+ *
+ * Credentials are encrypted at rest and reads are permission-gated: without
+ * `payment_gateways:view_secrets` the API returns each stored secret as
+ * `********` plus its real last 4 characters, and says so via `secretsVisible`
+ * / `configuredSecretKeys`. The form renders what it is given, so that operator
+ * used to meet an unexplained `********c8e5` in a field with no way to tell a
+ * redaction from a corrupted value. `secretsHidden` in the settings dialog is
+ * the only place that state is named — and it is named nowhere at all for a
+ * caller who can read the real values, since for them there is nothing to
+ * explain.
  */
 
 import { useState, type JSX } from 'react'
@@ -22,15 +43,16 @@ import {
   ArrowUp,
   Bitcoin,
   Coins,
+  Copy,
   CreditCard,
   Loader2,
+  Lock,
   Plus,
   RotateCcw,
   Save,
   Settings as SettingsIcon,
-  ShieldAlert,
   Star,
-  TestTube,
+  TriangleAlert,
   Eye,
   EyeOff,
 } from 'lucide-react'
@@ -50,6 +72,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import { Badge } from '@/components/ui/badge'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Skeleton } from '@/components/ui/skeleton'
 import {
   Dialog,
@@ -92,6 +115,14 @@ interface GatewayField {
   /** Render as a Select / Switch instead of a text input. */
   type?: 'text' | 'select' | 'toggle'
   options?: ReadonlyArray<GatewayFieldOption>
+  /**
+   * Offer a «not set» entry above the options. For a setting whose correct
+   * value can genuinely be «none» — Antilopay's `vat` is required on ОСНО and
+   * must stay unset on УСН/НПД — a plain dropdown is a one-way door: Radix
+   * reserves `''` for «nothing selected» and refuses a `SelectItem` carrying
+   * it, so once the list is opened there is no way back to unset.
+   */
+  clearable?: boolean
   /**
    * Only render this field when the referenced boolean field's value is
    * `'true'`. Used to collapse the whole «Мой Налог» (self-employed) block
@@ -242,6 +273,28 @@ const GATEWAY_META: ReadonlyArray<GatewayMeta> = [
         placeholder: 'secret',
         secret: true,
       },
+      {
+        // Platega's own enum, verbatim — the numbers are part of every label
+        // because they are what the provider's dashboard and support speak in,
+        // and because the ambiguity is what caused the outage: the panel used
+        // to send `CARD` as method 1, which Platega does not have, so every
+        // card checkout came back without a link. A free-text box here would
+        // ask the operator to remember six magic numbers and would silently
+        // reroute the whole gateway to a different rail on a typo.
+        key: 'paymentMethod',
+        labelKey: 'paymentGateways.fields.plategaPaymentMethod',
+        placeholder: '',
+        type: 'select',
+        options: [
+          { value: '2', labelKey: 'paymentGateways.options.plategaSbp' },
+          { value: '3', labelKey: 'paymentGateways.options.plategaErip' },
+          { value: '11', labelKey: 'paymentGateways.options.plategaCard' },
+          { value: '12', labelKey: 'paymentGateways.options.plategaInternational' },
+          { value: '13', labelKey: 'paymentGateways.options.plategaCrypto' },
+          { value: '14', labelKey: 'paymentGateways.options.plategaSberpay' },
+        ],
+        hintKey: 'paymentGateways.hints.plategaPaymentMethod',
+      },
     ],
   },
   {
@@ -327,6 +380,25 @@ const GATEWAY_META: ReadonlyArray<GatewayMeta> = [
         placeholder: 'MFwwDQYJKoZI…',
         hintKey: 'paymentGateways.hints.antilopayPublicKey',
       },
+      {
+        // «Ставка ндс, возможные значения: 10, 22. Поле обязательное, если
+        // сно Мерчанта - ОСНО» — Antilopay's own wording. A merchant on ОСНО
+        // gets error 17 on every checkout until this is stored, so the whole
+        // gateway is dead for that tax regime; a merchant on УСН/НПД must
+        // leave it unset. Only two rates exist and neither can be guessed for
+        // the merchant, which is why it is a clearable select rather than a
+        // free-text box that would invite a third value the API rejects.
+        key: 'vat',
+        labelKey: 'paymentGateways.fields.antilopayVat',
+        placeholder: '',
+        type: 'select',
+        clearable: true,
+        options: [
+          { value: '10', labelKey: 'paymentGateways.options.antilopayVat10' },
+          { value: '22', labelKey: 'paymentGateways.options.antilopayVat22' },
+        ],
+        hintKey: 'paymentGateways.hints.antilopayVat',
+      },
     ],
   },
   {
@@ -392,6 +464,12 @@ const GATEWAY_META: ReadonlyArray<GatewayMeta> = [
         secret: true,
         hintKey: 'paymentGateways.hints.riopayToken',
       },
+      {
+        key: 'serviceId',
+        labelKey: 'paymentGateways.fields.serviceId',
+        placeholder: '1',
+        hintKey: 'paymentGateways.hints.riopayServiceId',
+      },
     ],
   },
   {
@@ -406,6 +484,13 @@ const GATEWAY_META: ReadonlyArray<GatewayMeta> = [
         placeholder: 'X-Api-Token',
         secret: true,
         hintKey: 'paymentGateways.hints.valutixToken',
+      },
+      {
+        // Same platform engine as RioPay, down to the field name.
+        key: 'serviceId',
+        labelKey: 'paymentGateways.fields.serviceId',
+        placeholder: '1',
+        hintKey: 'paymentGateways.hints.valutixServiceId',
       },
     ],
   },
@@ -423,10 +508,14 @@ const GATEWAY_META: ReadonlyArray<GatewayMeta> = [
         hintKey: 'paymentGateways.hints.wataApiKey',
       },
       {
-        key: 'webhookSecret',
-        labelKey: 'paymentGateways.fields.webhookSecret',
-        placeholder: 'webhook-secret',
-        secret: true,
+        // Wata signs webhooks with SHA512withRSA and has no shared secret, so
+        // the `webhookSecret` this form used to offer was dead — the verifier
+        // reads `publicKey`, and a save from here replaces the whole settings
+        // object, wiping any key inserted straight into the database.
+        key: 'publicKey',
+        labelKey: 'paymentGateways.fields.publicKey',
+        placeholder: '-----BEGIN RSA PUBLIC KEY-----…',
+        hintKey: 'paymentGateways.hints.wataPublicKey',
       },
     ],
   },
@@ -554,8 +643,54 @@ interface AdminGateway {
   isActive: boolean
   orderIndex: number
   settings: Record<string, unknown> | null
+  /**
+   * Backend verdict (`isGatewayConfigured`) — the same rule that decides
+   * whether a checkout may be issued. The page used to derive readiness on
+   * its own from "any non-empty field", which went green for gateways the
+   * backend would refuse.
+   */
+  isConfigured: boolean
+  /**
+   * Whether `settings` carries real secret values or their masks — the
+   * backend's verdict on the CALLER (`payment_gateways:view_secrets`), not on
+   * the row. Optional, and absence means "real values": the masked treatment
+   * must only ever appear because the backend actually masked something, never
+   * because a field was missing from the response.
+   */
+  secretsVisible?: boolean
+  /**
+   * Secret-bearing keys that hold a stored value. Reported the same way for
+   * both audiences, which is what makes it the only honest way to tell «set but
+   * hidden» from «not set» — the masked string itself is a redaction and says
+   * nothing about what is behind it.
+   */
+  configuredSecretKeys?: readonly string[]
+  /** Absolute callback URL, so the operator can paste it into the provider. */
+  webhookUrl: string
   isUsedInPricing?: boolean
   updatedAt: string
+}
+
+/**
+ * The one combination that is an outage rather than a state.
+ *
+ * `isConfigured` used to be advisory — a nudge to finish setting a gateway up.
+ * It is now load-bearing: the checkout guard reads the same verdict and answers
+ * `PAYMENT_GATEWAY_NOT_CONFIGURED` (400) on every attempt, and the credential
+ * set it demands grew to include the webhook key (Antilopay/OverPay/WATA
+ * `publicKey`, AuraPay `secretKey`, RollyPay `signingSecret`, Lava
+ * `webhookApiKey`). A gateway that has been taking money for months can
+ * therefore go dead on deploy, with the Switch still reading Active, the
+ * «Default» badge still showing, and the row still first in the buyer's picker
+ * — an operator has no reason to touch the toggle, which was the only place
+ * the panel ever said a word about it.
+ *
+ * Deliberately narrow. `!isActive && !isConfigured` is the resting state of
+ * the fifteen gateways nobody uses; alarming on that would put a warning on
+ * almost every row and bury the one that is losing money.
+ */
+function isGatewayFaulted(gateway: AdminGateway): boolean {
+  return gateway.isActive && !gateway.isConfigured
 }
 
 // ── Page ────────────────────────────────────────────────────────────────────
@@ -589,28 +724,6 @@ export default function GatewaySettingsPage() {
   })
 
   const [settingsTarget, setSettingsTarget] = useState<AdminGateway | null>(null)
-  const [testingId, setTestingId] = useState<string | null>(null)
-
-  const handleTest = async (gateway: AdminGateway): Promise<void> => {
-    if (!canEditGateways) return
-    setTestingId(gateway.id)
-    try {
-      // The backend currently does not expose a generic "test gateway"
-      // endpoint, so this kicks off a configuration-validity probe via
-      // the standard read endpoint. Once a dedicated probe lands we
-      // wire it up here.
-      await api.get(`/admin/payments/gateways/${gateway.id}`)
-      toast.success(
-        t('paymentGateways.testOk', { name: META_BY_TYPE[gateway.type]?.displayName ?? gateway.type }),
-      )
-    } catch (err: unknown) {
-      const message = (err as { response?: { data?: { message?: string } } })
-        ?.response?.data?.message
-      toast.error(message ?? t('paymentGateways.testFailed'))
-    } finally {
-      setTestingId(null)
-    }
-  }
 
   if (isLoading) {
     return (
@@ -640,6 +753,12 @@ export default function GatewaySettingsPage() {
     .slice()
     .sort((a, b) => a.orderIndex - b.orderIndex || a.id.localeCompare(b.id))
 
+  // Money is being lost right now on each of these. The row treatment alone
+  // relies on the operator scanning far enough down a seventeen-row list and
+  // reading a colour as an alarm; the banner states it once, at the top, in
+  // words, and names the gateways so it survives being skimmed.
+  const faultedGateways = sortedGateways.filter(isGatewayFaulted)
+
   return (
     <div className="space-y-6">
       <FadeIn>
@@ -667,6 +786,22 @@ export default function GatewaySettingsPage() {
           )}
         </div>
       </FadeIn>
+
+      {faultedGateways.length > 0 && (
+        <FadeIn>
+          <Alert variant="destructive" className="border-destructive/50 bg-destructive/5">
+            <TriangleAlert className="h-4 w-4" />
+            <AlertTitle>{t('paymentGateways.faulted.bannerTitle')}</AlertTitle>
+            <AlertDescription>
+              {t('paymentGateways.faulted.bannerDescription', {
+                names: faultedGateways
+                  .map((gateway) => META_BY_TYPE[gateway.type]?.displayName ?? gateway.type)
+                  .join(', '),
+              })}
+            </AlertDescription>
+          </Alert>
+        </FadeIn>
+      )}
 
       {isEmpty ? (
         <Card>
@@ -702,10 +837,8 @@ export default function GatewaySettingsPage() {
                     gateway={gateway}
                     isFirst={index === 0}
                     isLast={index === sortedGateways.length - 1}
-                    isTesting={testingId === gateway.id}
                     canEdit={canEditGateways}
                     onOpenSettings={() => setSettingsTarget(gateway)}
-                    onTest={() => handleTest(gateway)}
                   />
                 </StaggerItem>
               ))}
@@ -736,33 +869,20 @@ interface GatewayRowProps {
   readonly gateway: AdminGateway
   readonly isFirst: boolean
   readonly isLast: boolean
-  readonly isTesting: boolean
   readonly canEdit: boolean
   readonly onOpenSettings: () => void
-  readonly onTest: () => void
 }
 
 function GatewayRow({
   gateway,
   isFirst,
   isLast,
-  isTesting,
   canEdit,
   onOpenSettings,
-  onTest,
 }: GatewayRowProps) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const meta = META_BY_TYPE[gateway.type]
-
-  const settingsValues = (gateway.settings ?? {}) as Record<string, unknown>
-  const isConfigured =
-    meta !== undefined &&
-    meta.fields.some(
-      (field) =>
-        typeof settingsValues[field.key] === 'string' &&
-        (settingsValues[field.key] as string).trim().length > 0,
-    )
 
   const toggleActiveMutation = useMutation({
     mutationFn: (next: boolean) => {
@@ -771,7 +891,18 @@ function GatewayRow({
     },
     onSuccess: () =>
       queryClient.invalidateQueries({ queryKey: adminQueryKeys.payments.gateways.all }),
-    onError: () => toast.error(t('paymentGateways.toggleFailed')),
+    onError: (err: unknown) => {
+      const message = (err as { response?: { data?: { message?: string } } })
+        ?.response?.data?.message
+      // The backend refuses to activate a gateway that cannot issue a
+      // checkout; the bare product code would read as gibberish to an
+      // operator, so it gets its own sentence.
+      toast.error(
+        message === 'PAYMENT_GATEWAY_NOT_CONFIGURED'
+          ? t('paymentGateways.enableBlocked')
+          : t('paymentGateways.toggleFailed'),
+      )
+    },
   })
 
   const moveMutation = useMutation({
@@ -789,24 +920,31 @@ function GatewayRow({
   const FallbackIcon = meta.icon
 
   // Status semantics:
-  //   • inactive          → muted dot
-  //   • active + configured → green dot
-  //   • active but missing credentials → amber dot
-  const status = !gateway.isActive
-    ? 'inactive'
-    : isConfigured
-      ? 'ready'
-      : 'incomplete'
+  //   • inactive                       → muted dot (idle; the common resting
+  //                                      state, and nothing is wrong with it)
+  //   • active + configured            → green dot
+  //   • active + missing credentials   → destructive: live in the picker,
+  //                                      dead at the till (see isGatewayFaulted)
+  const isFaulted = isGatewayFaulted(gateway)
+  const status = !gateway.isActive ? 'inactive' : gateway.isConfigured ? 'ready' : 'faulted'
 
   const statusClass =
     status === 'ready'
       ? 'bg-emerald-500'
-      : status === 'incomplete'
-        ? 'bg-amber-500'
+      : status === 'faulted'
+        ? 'bg-destructive'
         : 'bg-muted-foreground/30'
 
   return (
-    <div className="flex items-center gap-4 px-4 py-3">
+    <div
+      className={cn(
+        'flex items-center gap-4 px-4 py-3',
+        // Left rail rather than a full tint: it survives being skimmed at the
+        // edge of vision, and the 2px it takes is given back out of the
+        // padding so the icons stay on the same column as every other row.
+        isFaulted && 'border-l-2 border-l-destructive bg-destructive/5 pl-[14px]',
+      )}
+    >
       <span
         className={cn('h-2.5 w-2.5 shrink-0 rounded-full', statusClass)}
         aria-hidden
@@ -822,26 +960,50 @@ function GatewayRow({
       </div>
 
       <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <p className="truncate text-sm font-medium">{meta.displayName}</p>
           {isFirst && gateway.isActive && (
-            <Badge variant="default" className="text-[10px]">
+            // The badge is kept on a faulted gateway on purpose — that the
+            // broken rail is the one buyers meet first is the worst part of
+            // this, not something to hide — but the solid primary fill reads
+            // as an endorsement, so it drops to a destructive outline.
+            <Badge
+              variant={isFaulted ? 'outline' : 'default'}
+              className={cn('text-[10px]', isFaulted && 'border-destructive/40 text-destructive')}
+            >
               {t('paymentGateways.defaultBadge')}
             </Badge>
           )}
-          {!isConfigured && (
-            <Badge variant="outline" className="text-[10px] text-amber-600 border-amber-600/40">
-              <ShieldAlert className="mr-1 h-3 w-3" />
+          {isFaulted ? (
+            <Badge variant="destructive" className="text-[10px]">
+              <TriangleAlert className="mr-1 h-3 w-3" />
+              {t('paymentGateways.faulted.badge')}
+            </Badge>
+          ) : !gateway.isConfigured ? (
+            // Switched off and unset: a to-do, not an incident. It used to be
+            // amber with an alarm glyph, which is the same visual weight the
+            // outage now needs — and with fifteen idle gateways wearing it,
+            // amber had stopped meaning anything.
+            <Badge variant="outline" className="text-[10px] text-muted-foreground">
               {t('paymentGateways.notConfigured')}
             </Badge>
-          )}
+          ) : null}
         </div>
         <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
           <span className="inline-flex items-center gap-1.5">
             <RowCurrencyBadge code={gateway.currency} />
           </span>
-          <span className="truncate">· /api/v1/payments/webhooks/{gateway.type}</span>
+          <span className="truncate">· {gateway.webhookUrl}</span>
         </div>
+        {isFaulted && (
+          // Says what is happening and what to do, in the operator's terms.
+          // A colour and a badge say "something is off"; only a sentence says
+          // "buyers are being turned away and here is the fix".
+          <p className="mt-1 text-xs font-medium text-destructive">
+            {t('paymentGateways.faulted.rowDetail')}
+            {isFirst ? ` ${t('paymentGateways.faulted.rowIsDefault')}` : ''}
+          </p>
+        )}
       </div>
 
       <div className="flex items-center gap-1.5">
@@ -879,20 +1041,6 @@ function GatewayRow({
             >
               <SettingsIcon className="h-4 w-4" />
             </Button>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-8 w-8"
-              onClick={onTest}
-              disabled={!isConfigured || !gateway.isActive || isTesting}
-              aria-label={t('paymentGateways.runTest')}
-            >
-              {isTesting ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <TestTube className="h-4 w-4" />
-              )}
-            </Button>
 
             <span className="mx-1 h-6 w-px bg-border" aria-hidden />
 
@@ -904,7 +1052,11 @@ function GatewayRow({
             />
           </>
         ) : (
-          <Badge variant={gateway.isActive ? 'success' : 'secondary'}>
+          // Read-only audiences see this column instead of the Switch. The
+          // word stays true — the gateway *is* active — but success-green on a
+          // gateway that cannot take a rouble was half of what made the fault
+          // invisible.
+          <Badge variant={isFaulted ? 'destructive' : gateway.isActive ? 'success' : 'secondary'}>
             {gateway.isActive ? t('paymentGateways.active') : t('paymentGateways.disabled')}
           </Badge>
         )}
@@ -914,6 +1066,60 @@ function GatewayRow({
 }
 
 // ── Settings dialog ─────────────────────────────────────────────────────────
+
+/**
+ * A blank field means «not configured», never «configured as empty» — every
+ * setting the backend accepts is non-empty, and the numeric ones (`serviceId`,
+ * Platega's `paymentMethod`) would not survive a `''` at all. The form posts
+ * every field of the gateway, so untouched optional ones have to leave as
+ * absent keys rather than empty strings. Clearing a value still works: the
+ * backend replaces the settings object instead of merging into it, so a key
+ * that stops being sent stops being stored.
+ */
+function withoutBlankEntries(values: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(values).filter(([, value]) => value.trim().length > 0),
+  )
+}
+
+/**
+ * Stand-in for the «not set» choice of a `clearable` select. Radix reserves
+ * `''` for «nothing selected» and throws on a `SelectItem` holding it, so the
+ * entry needs a value of its own; it is translated straight back to `''` on
+ * pick, and `withoutBlankEntries` then keeps the key out of the PATCH rather
+ * than sending a blank the backend enum would reject.
+ */
+const SELECT_UNSET_VALUE = '__unset__'
+
+/**
+ * What a masked field holds after the first edit lands on it.
+ *
+ * A mask is not text. `********c8e5` stands for a credential nobody on this
+ * screen may read, so an edit that lands *next* to it produces a value that is
+ * neither the old key nor the new one — and the damage is silent rather than
+ * cosmetic: the backend recognises a mask deliberately permissively (anything
+ * starting with `********` means «unchanged»), so it reads
+ * `********c8e5my-new-key` as "keep what is stored". The rotation is dropped,
+ * the save reports success, and the operator leaves believing the key was
+ * replaced while the old one is still live.
+ *
+ * So the mask behaves as a single atomic token: the first edit drops it whole
+ * and keeps only what the operator actually contributed. Focusing the field
+ * selects it, which already makes the ordinary click-and-type path do exactly
+ * this; this is what covers the rest — End-then-type, a paste behind the caret,
+ * and every browser that collapses the focus selection on mouse-up.
+ */
+function valueAfterMaskEdit(incoming: string, mask: string): string {
+  if (incoming.includes(mask)) {
+    return incoming.replace(mask, '')
+  }
+  // Backspacing into the mask leaves a fragment of it. No provider issues a
+  // credential beginning with an asterisk, so a leading run of them is always
+  // leftover mask — and a fragment that still starts with `********` would be
+  // read as «unchanged» again, swallowing the edit.
+  return incoming.startsWith('*') ? '' : incoming
+}
+
 interface GatewaySettingsFormProps {
   readonly gateway: AdminGateway
   readonly onClose: () => void
@@ -931,8 +1137,18 @@ function GatewaySettingsForm({ gateway, onClose }: GatewaySettingsFormProps) {
       if (field.key === 'savePaymentMethod' && (raw === undefined || raw === null || raw === '')) {
         return [field.key, 'true']
       }
+      // Numbers have to survive the round-trip: the backend normalizes
+      // Platega's `paymentMethod`, the RioPay/Valutix `serviceId` and
+      // Antilopay's `vat` to numbers on save, so reading them as "not a
+      // string, therefore blank" would empty the field every time the dialog
+      // is reopened — and the next save would drop a setting the operator
+      // never touched.
       const value =
-        typeof raw === 'string' ? raw : typeof raw === 'boolean' ? String(raw) : ''
+        typeof raw === 'string'
+          ? raw
+          : typeof raw === 'boolean' || typeof raw === 'number'
+            ? String(raw)
+            : ''
       return [field.key, value]
     }),
   )
@@ -966,10 +1182,24 @@ function GatewaySettingsForm({ gateway, onClose }: GatewaySettingsFormProps) {
   const supportedCurrencies = supportedMap?.[gateway.type] ?? [gateway.currency]
   const currencyChanged = currency !== gateway.currency
 
+  // Whether this caller was handed masks instead of credentials. Explicit
+  // `false` only: an older API that does not send the flag is treated as
+  // "these are the real values", so the extra wording can only ever appear
+  // because something was genuinely redacted.
+  const secretsHidden = gateway.secretsVisible === false
+  // Which fields the masks are actually behind. `configuredSecretKeys` is the
+  // backend's own list of secret-bearing keys that hold a value, so an empty
+  // field stays plainly empty rather than being described as hidden — sniffing
+  // the rendered string for asterisks would be guessing about a value we were
+  // deliberately not shown.
+  const hiddenSecretKeys = new Set<string>(
+    secretsHidden ? (gateway.configuredSecretKeys ?? []) : [],
+  )
+
   const saveMutation = useMutation({
     mutationFn: () =>
       api.patch(`/admin/payments/gateways/${gateway.id}`, {
-        settings: values,
+        settings: withoutBlankEntries(values),
         ...(currencyChanged ? { currency } : {}),
     }),
     onSuccess: () => {
@@ -985,6 +1215,19 @@ function GatewaySettingsForm({ gateway, onClose }: GatewaySettingsFormProps) {
       toast.error(message ?? t('paymentGateways.saveFailed'))
     },
   })
+
+  // Providers are configured by pasting this address into their dashboard,
+  // so it has to be the absolute URL they will actually call — the panel
+  // used to print the bare path, which is unusable outside our own origin.
+  function handleCopyWebhookUrl(): void {
+    void navigator.clipboard.writeText(gateway.webhookUrl)
+      .then((): void => {
+        toast.success(t('paymentGateways.webhookUrlCopied'))
+      })
+      .catch((): void => {
+        toast.error(t('paymentGateways.webhookUrlCopyFailed'))
+      })
+  }
 
   if (!meta) return null
   const BrandIcon = getPaymentGatewayIcon(gateway.type)
@@ -1002,12 +1245,37 @@ function GatewaySettingsForm({ gateway, onClose }: GatewaySettingsFormProps) {
           )}
           {meta.displayName}
         </DialogTitle>
-        <DialogDescription>
-          {t('paymentGateways.settingsDescription', {
-            url: `/api/v1/payments/webhooks/${gateway.type}`,
-          })}
-        </DialogDescription>
+        <DialogDescription>{t('paymentGateways.settingsDescription')}</DialogDescription>
       </DialogHeader>
+
+      {hiddenSecretKeys.size > 0 && (
+        // Stated once, at the top, before anything below it is read: the rule
+        // it carries (untouched keeps, typed replaces, empty removes) governs
+        // the whole form, and an operator meeting a field of asterisks needs it
+        // before deciding whether to re-paste a live key «just in case».
+        // Deliberately muted — nothing is wrong here, which is the entire
+        // message; the destructive palette belongs to the gateway that is
+        // actually losing payments.
+        <div className="flex items-start gap-2 rounded-md border border-border/60 bg-muted/20 p-3">
+          <Lock className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+          <div className="space-y-0.5">
+            <p className="text-sm font-medium">{t('paymentGateways.secretsHidden.title')}</p>
+            <p className="text-xs text-muted-foreground">
+              {t('paymentGateways.secretsHidden.description')}
+            </p>
+          </div>
+        </div>
+      )}
+
+      <div className="space-y-1.5">
+        <Label>{t('paymentGateways.webhookHint')}</Label>
+        <div className="flex items-center gap-2 rounded-md border border-border/60 bg-muted/20 p-2 font-mono text-xs">
+          <code className="flex-1 break-all">{gateway.webhookUrl}</code>
+          <Button size="sm" variant="outline" onClick={handleCopyWebhookUrl}>
+            <Copy className="mr-1 h-3 w-3" /> {t('paymentGateways.copyWebhookUrl')}
+          </Button>
+        </div>
+      </div>
 
       <div className="space-y-4">
         {/* Default currency selector — drives both the catalog row's display
@@ -1042,6 +1310,11 @@ function GatewaySettingsForm({ gateway, onClose }: GatewaySettingsFormProps) {
           const value = values[field.key] ?? ''
           const isSecret = field.secret === true
           const visible = showSecrets[field.key] === true
+          // A credential is stored here and this caller may not read it.
+          const isHiddenSecret = hiddenSecretKeys.has(field.key)
+          // …and nothing has been typed over it yet, so what the field holds is
+          // still the backend's mask rather than a value.
+          const isUntouchedMask = isHiddenSecret && value === initialValues[field.key]
           // Collapse dependent fields (the whole «Мой Налог» block) unless
           // their controlling toggle is on.
           if (field.dependsOn && values[field.dependsOn] !== 'true') {
@@ -1077,13 +1350,21 @@ function GatewaySettingsForm({ gateway, onClose }: GatewaySettingsFormProps) {
                 <Select
                   value={value}
                   onValueChange={(next): void =>
-                    setValues((prev) => ({ ...prev, [field.key]: next }))
+                    setValues((prev) => ({
+                      ...prev,
+                      [field.key]: next === SELECT_UNSET_VALUE ? '' : next,
+                    }))
                   }
                 >
                   <SelectTrigger className="h-10" aria-label={t(field.labelKey)}>
                     <SelectValue placeholder={t('paymentGateways.selectPlaceholder')} />
                   </SelectTrigger>
                   <SelectContent>
+                    {field.clearable === true && (
+                      <SelectItem value={SELECT_UNSET_VALUE}>
+                        {t('paymentGateways.options.notSet')}
+                      </SelectItem>
+                    )}
                     {field.options.map((option) => (
                       <SelectItem key={option.value} value={option.value}>
                         {t(option.labelKey)}
@@ -1099,18 +1380,47 @@ function GatewaySettingsForm({ gateway, onClose }: GatewaySettingsFormProps) {
           }
           return (
             <div key={field.key} className="space-y-1.5">
-              <Label>{t(field.labelKey)}</Label>
+              <Label className="flex items-center gap-1.5">
+                {t(field.labelKey)}
+                {isHiddenSecret && (
+                  <Lock className="h-3 w-3 text-muted-foreground" aria-hidden />
+                )}
+              </Label>
               <div className="relative">
                 <Input
-                  type={isSecret && !visible ? 'password' : 'text'}
+                  // A mask is the redaction of a secret, not a secret: the last
+                  // 4 characters it carries are there so the operator can tell
+                  // WHICH key is installed against the provider's dashboard.
+                  // Behind `type="password"` it degrades to twelve anonymous
+                  // bullets — which is precisely the state that reads as a
+                  // corrupted value. Once something has been typed over it the
+                  // field holds a real credential again and goes back to dots.
+                  type={isUntouchedMask ? 'text' : isSecret && !visible ? 'password' : 'text'}
                   placeholder={field.placeholder}
                   value={value}
+                  onFocus={(e): void => {
+                    // Selects the mask whole, so the ordinary click-and-type
+                    // replaces it rather than growing it. The guarantee lives
+                    // in `valueAfterMaskEdit`; this is the affordance that
+                    // makes the mask look like the single token it is.
+                    if (isUntouchedMask) {
+                      e.currentTarget.select()
+                    }
+                  }}
                   onChange={(e): void =>
-                    setValues((prev) => ({ ...prev, [field.key]: e.target.value }))
+                    setValues((prev) => ({
+                      ...prev,
+                      [field.key]: isUntouchedMask
+                        ? valueAfterMaskEdit(e.target.value, value)
+                        : e.target.value,
+                    }))
                   }
-                  className={isSecret ? 'pr-10' : undefined}
+                  className={isSecret && !isUntouchedMask ? 'pr-10' : undefined}
                 />
-                {isSecret && (
+                {isSecret && !isUntouchedMask && (
+                  // No reveal control over a mask: there is nothing behind it
+                  // to reveal, and offering one would promise this operator a
+                  // value the backend refused them.
                   <button
                     type="button"
                     className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
@@ -1126,6 +1436,11 @@ function GatewaySettingsForm({ gateway, onClose }: GatewaySettingsFormProps) {
                   </button>
                 )}
               </div>
+              {isHiddenSecret && (
+                <p className="text-xs text-muted-foreground">
+                  {t('paymentGateways.secretsHidden.fieldHint')}
+                </p>
+              )}
               {field.hintKey && (
                 <p className="text-xs text-muted-foreground">{t(field.hintKey)}</p>
               )}
