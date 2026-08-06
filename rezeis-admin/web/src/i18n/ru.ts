@@ -2601,6 +2601,17 @@
       severityPlaceholder: 'Критичность',
       allStatuses: 'Все статусы',
       allSeverities: 'Все уровни',
+      codePlaceholder: 'Код детектора',
+      allCodes: 'Все коды',
+      activeCodes: 'Активные детекторы',
+      retiredCodes: 'Выведены из плана — теперь системные события',
+      customCodeGroup: 'Введённый код',
+      otherCode: 'Другой код…',
+      customCodeLabel: 'Введите код детектора',
+      customCodePlaceholder: 'например, LEGACY_DETECTOR_CODE',
+      customCodeHint:
+        'Для кода, который больше не выдаёт ни один детектор. Выведенные коды уже перечислены выше.',
+      customCodeApply: 'Применить код',
     },
     table: {
       title: 'Сигналы',

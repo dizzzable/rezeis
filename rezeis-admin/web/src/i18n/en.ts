@@ -2558,6 +2558,17 @@ export const en = {
       severityPlaceholder: 'Severity',
       allStatuses: 'All statuses',
       allSeverities: 'All severities',
+      codePlaceholder: 'Detector code',
+      allCodes: 'All codes',
+      activeCodes: 'Active detectors',
+      retiredCodes: 'Retired — now operational alerts',
+      customCodeGroup: 'Entered code',
+      otherCode: 'Other code…',
+      customCodeLabel: 'Enter a detector code',
+      customCodePlaceholder: 'e.g. LEGACY_DETECTOR_CODE',
+      customCodeHint:
+        'For a code no longer raised by any detector. Retired codes are already listed above.',
+      customCodeApply: 'Apply code',
     },
     table: {
       title: 'Signals',

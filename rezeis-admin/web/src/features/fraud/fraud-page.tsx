@@ -48,6 +48,7 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
+import { Input } from '@/components/ui/input';
 import {
   Card,
   CardContent,
@@ -72,7 +73,10 @@ import { Label } from '@/components/ui/label';
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
+  SelectLabel,
+  SelectSeparator,
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
@@ -95,6 +99,7 @@ import {
   type FraudSeverity,
   type FraudSharingOffender,
   type ListFraudSignalsParams,
+  FRAUD_DETECTOR_CODES,
   enforceDropConnections,
   getFraudStats,
   getFraudTopOffenders,
@@ -105,6 +110,41 @@ import {
 } from './fraud-api';
 
 const STATS_KEY = ['admin', 'fraud', 'stats'] as const;
+
+/**
+ * Detector codes that no longer exist in `AntiFraudService.runDetectors`'s plan.
+ *
+ * They were reclassified as operational alerts — panel-wide Remnawave
+ * observations that name no customer — so they are absent from
+ * `FRAUD_DETECTOR_CODES` by design. But the reclassification deliberately left
+ * their historical rows alone (see the "WHAT THE SPLIT LEAVES BEHIND" note on
+ * `runDetectors`: auto-resolving them would stamp a false "no longer detected"
+ * onto an operator's audit trail), so OPEN rows carrying these codes still sit
+ * in the queue, and clearing them is an operator action the release notes ask
+ * for: filter to the code → select → Dismiss.
+ *
+ * They are therefore offered as first-class options rather than left to free
+ * text. A code picker limited to the live plan would hide precisely the rows
+ * the filter exists to reach, and an operator should not have to remember a
+ * retired string by heart to do what the release notes told them to do.
+ *
+ * Kept here rather than in `fraud-api.ts` on purpose. It is a UI affordance for
+ * legacy data, not part of the request contract — and because `fraud-api` is
+ * mocked wholesale in `fraud-page.test.tsx`, a copy living there would be
+ * replaced by a stub and the test would prove nothing about the real four.
+ */
+const RETIRED_FRAUD_DETECTOR_CODES = [
+  'NODES_OFFLINE',
+  'NODE_TRAFFIC_CRITICAL',
+  'GEO_CONCENTRATION_RISK',
+  'HWID_HIGH_AVERAGE_DEVICES',
+] as const;
+
+/**
+ * Sentinel `SelectItem` value for "let me type a code myself". Radix rejects an
+ * empty string as an item value, and no detector code can collide with this.
+ */
+const CUSTOM_CODE_OPTION = '__custom__';
 
 function severityVariant(s: FraudSeverity): 'destructive' | 'warning' | 'secondary' {
   if (s === 'HIGH') return 'destructive';
@@ -131,6 +171,12 @@ export default function FraudSignalsPage() {
 
   const [statusFilter, setStatusFilter] = useState<FraudStatus | ''>('');
   const [severityFilter, setSeverityFilter] = useState<FraudSeverity | ''>('');
+  // The applied code. Free-form on purpose — the backend takes any string
+  // (`ListFraudSignalsQueryDto.code`, 1–64 chars), and narrowing this to the
+  // live plan is exactly what would put the retired rows out of reach.
+  const [codeFilter, setCodeFilter] = useState('');
+  const [customCodeOpen, setCustomCodeOpen] = useState(false);
+  const [customCodeDraft, setCustomCodeDraft] = useState('');
   const [cursor, setCursor] = useState<string | undefined>(undefined);
   const [cursorStack, setCursorStack] = useState<string[]>([]);
   const [transitionTarget, setTransitionTarget] = useState<FraudSignal | null>(null);
@@ -140,7 +186,20 @@ export default function FraudSignalsPage() {
   const params: ListFraudSignalsParams = { limit: 50 };
   if (statusFilter) params.status = statusFilter;
   if (severityFilter) params.severity = severityFilter;
+  // Omitted entirely when empty, like the other two: an unfiltered page must
+  // keep sending exactly the request it sent before this filter existed.
+  if (codeFilter) params.code = codeFilter;
   if (cursor) params.cursor = cursor;
+
+  /**
+   * A code the operator typed that neither list offers. Shown back as its own
+   * `SelectItem` because Radix renders an empty trigger for a value it has no
+   * item for — without this the applied filter would be invisible.
+   */
+  const enteredCodeIsUnlisted =
+    codeFilter !== '' &&
+    !(FRAUD_DETECTOR_CODES as readonly string[]).includes(codeFilter) &&
+    !(RETIRED_FRAUD_DETECTOR_CODES as readonly string[]).includes(codeFilter);
 
   const signalsQuery = useQuery({
     queryKey: ['admin', 'fraud', 'signals', params],
@@ -202,6 +261,17 @@ export default function FraudSignalsPage() {
   function clearFilters(): void {
     setStatusFilter('');
     setSeverityFilter('');
+    setCodeFilter('');
+    setCustomCodeOpen(false);
+    setCustomCodeDraft('');
+    setCursor(undefined);
+    setCursorStack([]);
+    setSelected(new Set());
+  }
+
+  /** Every code change resets paging and selection, like the other filters. */
+  function applyCodeFilter(code: string): void {
+    setCodeFilter(code);
     setCursor(undefined);
     setCursorStack([]);
     setSelected(new Set());
@@ -282,17 +352,26 @@ export default function FraudSignalsPage() {
           <div className="flex items-center gap-2">
             <Filter className="h-4 w-4 text-muted-foreground" />
             <CardTitle className="text-base">{t('fraudPage.filters.title')}</CardTitle>
-            <SavedFiltersBar<{ status: FraudStatus | ''; severity: FraudSeverity | '' }>
+            <SavedFiltersBar<{
+              status: FraudStatus | '';
+              severity: FraudSeverity | '';
+              code?: string;
+            }>
               pageKey="fraud"
-              current={{ status: statusFilter, severity: severityFilter }}
+              current={{ status: statusFilter, severity: severityFilter, code: codeFilter }}
               onLoad={(value) => {
                 setStatusFilter(value.status ?? '');
                 setSeverityFilter(value.severity ?? '');
+                // Presets saved before this filter existed carry no `code`;
+                // they must load as "all codes", not leave a stale one applied.
+                setCodeFilter(value.code ?? '');
+                setCustomCodeOpen(false);
+                setCustomCodeDraft('');
                 setCursor(undefined);
                 setCursorStack([]);
               }}
             />
-            {(statusFilter || severityFilter) && (
+            {(statusFilter || severityFilter || codeFilter) && (
               <Button variant="ghost" size="sm" className="ml-auto h-7 gap-1 text-xs" onClick={clearFilters}>
                 <X className="h-3 w-3" />
                 {t('fraudPage.filters.clear')}
@@ -338,6 +417,95 @@ export default function FraudSignalsPage() {
               <SelectItem value="LOW">{t('fraudPage.severities.LOW')}</SelectItem>
             </SelectContent>
           </Select>
+          <Select
+            value={codeFilter || (customCodeOpen ? CUSTOM_CODE_OPTION : 'all')}
+            onValueChange={(v) => {
+              if (v === CUSTOM_CODE_OPTION) {
+                // Reveal the input, but do not touch the applied filter yet:
+                // nothing is filtered until an actual code is submitted, and a
+                // code already applied stays applied while it is edited.
+                setCustomCodeDraft(codeFilter);
+                setCustomCodeOpen(true);
+                return;
+              }
+              setCustomCodeOpen(false);
+              setCustomCodeDraft('');
+              applyCodeFilter(v === 'all' ? '' : v);
+            }}
+          >
+            <SelectTrigger aria-label={t('fraudPage.filters.codePlaceholder')}>
+              <SelectValue placeholder={t('fraudPage.filters.codePlaceholder')} />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">{t('fraudPage.filters.allCodes')}</SelectItem>
+              <SelectGroup>
+                <SelectLabel>{t('fraudPage.filters.activeCodes')}</SelectLabel>
+                {FRAUD_DETECTOR_CODES.map((code) => (
+                  <SelectItem key={code} value={code} className="font-mono text-xs">
+                    {code}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+              {/* Offered explicitly, not hidden behind free text — these are
+                  the rows the operator is being asked to clear. */}
+              <SelectGroup>
+                <SelectLabel>{t('fraudPage.filters.retiredCodes')}</SelectLabel>
+                {RETIRED_FRAUD_DETECTOR_CODES.map((code) => (
+                  <SelectItem key={code} value={code} className="font-mono text-xs">
+                    {code}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+              {enteredCodeIsUnlisted && (
+                <SelectGroup>
+                  <SelectLabel>{t('fraudPage.filters.customCodeGroup')}</SelectLabel>
+                  <SelectItem value={codeFilter} className="font-mono text-xs">
+                    {codeFilter}
+                  </SelectItem>
+                </SelectGroup>
+              )}
+              <SelectSeparator />
+              <SelectItem value={CUSTOM_CODE_OPTION}>
+                {t('fraudPage.filters.otherCode')}
+              </SelectItem>
+            </SelectContent>
+          </Select>
+          {customCodeOpen && (
+            <form
+              className="sm:col-span-3 space-y-1.5"
+              onSubmit={(e) => {
+                e.preventDefault();
+                // Upper-cased because every detector code is UPPER_SNAKE_CASE
+                // and the backend matches `code` exactly — a lower-case entry
+                // would silently return nothing. It also keeps a typed code
+                // from ever colliding with the lower-case `all` /
+                // `__custom__` sentinels this Select reserves.
+                applyCodeFilter(customCodeDraft.trim().toUpperCase());
+              }}
+            >
+              <Label htmlFor="fraud-custom-code" className="text-xs">
+                {t('fraudPage.filters.customCodeLabel')}
+              </Label>
+              <div className="flex items-center gap-2">
+                <Input
+                  id="fraud-custom-code"
+                  value={customCodeDraft}
+                  onChange={(e) => setCustomCodeDraft(e.target.value)}
+                  placeholder={t('fraudPage.filters.customCodePlaceholder')}
+                  // Matches `@Length(1, 64)` on the query DTO, so an over-long
+                  // code is impossible to submit rather than a 400 on send.
+                  maxLength={64}
+                  className="font-mono text-xs"
+                />
+                <Button type="submit" variant="outline" size="sm" className="shrink-0">
+                  {t('fraudPage.filters.customCodeApply')}
+                </Button>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                {t('fraudPage.filters.customCodeHint')}
+              </p>
+            </form>
+          )}
         </CardContent>
       </Card>
 

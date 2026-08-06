@@ -112,10 +112,17 @@ enum SubscriptionStatus {
   DELETED
 }
 
+/// REFUNDED is a real, reachable state — a provider `refund.succeeded` maps to
+/// it and reconciliation reverses the payment's side-effects from it. It was
+/// dropped from this block by accident in 3420598 (a diff hunk that mis-aligned
+/// this enum against a newly inserted `SyncJobStatus`); no migration ever
+/// removed it from the database, and both the runtime union in
+/// `src/common/types/prisma-enums.ts` and the en/ru status labels still name it.
 enum TransactionStatus {
   PENDING
   COMPLETED
   CANCELED
+  REFUNDED
   FAILED
 }
 
@@ -1238,6 +1245,12 @@ model User {
   @@index([lastSurface])
   @@index([lastSeenAt])
   @@index([acquisitionPlacementId])
+  /// Analytics "new users in window" reads newest-first. Created by
+  /// 20260522140000; declared here so `migrate dev` cannot silently drop it.
+  @@index([createdAt(sort: Desc)], map: "users_created_at_desc_idx")
+  /// Anti-bot lookups by registration IP. Created by 20260720180000; declared
+  /// here so `migrate dev` cannot silently drop it.
+  @@index([registrationIp])
   @@map("users")
 }
 
@@ -1496,6 +1509,12 @@ model Subscription {
   /// expiresAt<now`) and the profile-cleanup sweep — equality column first,
   /// range column last.
   @@index([status, expiresAt], map: "subscriptions_status_expires_at_idx")
+  /// Analytics funnel (status + isTrial). Created by 20260522140000; declared
+  /// here so `migrate dev` cannot silently drop it.
+  @@index([status, isTrial])
+  /// Churn computation over the eligible set (createdAt + status). Created by
+  /// 20260522140000; declared here so `migrate dev` cannot silently drop it.
+  @@index([createdAt, status], map: "subscriptions_created_status_idx")
   @@map("subscriptions")
 }
 
@@ -1885,6 +1904,9 @@ model Transaction {
   /// Backs the anti-fraud failed-payment groupBy + payment analytics
   /// (`status=… AND createdAt>=window`) — equality first, range last.
   @@index([status, createdAt])
+  /// Analytics always filter by status + time range. Created by 20260522140000;
+  /// declared here so `migrate dev` cannot silently drop it.
+  @@index([status, updatedAt(sort: Desc)])
   @@map("transactions")
 }
 
@@ -2819,7 +2841,7 @@ model AdPlacementRequest {
   partnerId            String          @map("partner_id")
   /// Platforms the partner intends to use; one placement is created per
   /// platform on approval.
-  platforms            AdPlatform[]    @map("platforms")
+  platforms            AdPlatform[]    @default([]) @map("platforms")
   channel              String?         @map("channel")
   notes                String?         @map("notes")
   proposedWindowDays   Int             @map("proposed_window_days")
@@ -3517,6 +3539,9 @@ model RemnawaveMetricSample {
   createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
 
   @@index([createdAt])
+  /// Trend queries always order by time, newest-first. Created by
+  /// 20260522140000; declared here so `migrate dev` cannot silently drop it.
+  @@index([createdAt(sort: Desc)], map: "remnawave_metric_samples_created_at_desc_idx")
   @@map("remnawave_metric_samples")
 }
 
