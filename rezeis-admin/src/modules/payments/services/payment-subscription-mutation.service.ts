@@ -3,6 +3,7 @@ import {
   AddOnLifetime,
   AddOnType,
   AddOnEntitlementActorType,
+  AddOnEntitlementState,
   DeviceType,
   Plan,
   PlanAvailability,
@@ -971,6 +972,140 @@ export class PaymentSubscriptionMutationService {
     return { id: created.id, startsAt, endsAt };
   }
 
+  /**
+   * Opens the durable term for a fulfilled PLAN CHANGE (`PurchaseType.UPGRADE`).
+   *
+   * A term's `baseTrafficLimitBytes` / `baseDeviceLimit` are "what the customer
+   * bought for THIS term": written once by
+   * {@link SubscriptionTermService.createScheduledInTransaction} and never
+   * mutated afterwards (every other `subscriptionTerm` write touches only
+   * `status`, `endedAt` or `resetAnchorAt`), with add-on entitlements layering
+   * on top in {@link EffectiveProjectionService}. So a plan change cannot edit
+   * the baseline in place; it ends the current term and starts a new one, the
+   * same move {@link scheduleRenewalTermInTransaction} makes for a renewal.
+   *
+   * It differs from renewal in WHEN the new term starts. A renewal buys time at
+   * the tail, so its term is SCHEDULED at `tail.endsAt`. An upgrade resets the
+   * window to `now` (the `UPGRADE_RESETS_EXPIRY` quote warning), so its term
+   * starts NOW and is activated immediately — `activateInTransaction` ends the
+   * outgoing ACTIVE term as part of the same claim.
+   *
+   * Returns `null` when the durable model does not apply (no ACTIVE term, i.e.
+   * no cutover has run), leaving the caller on the legacy column-only path.
+   */
+  private async startUpgradeTermInTransaction(
+    tx: Prisma.TransactionClient,
+    input: {
+      readonly subscriptionId: string;
+      readonly plan: Plan;
+      readonly durationDays: number;
+      readonly startsAt: Date;
+      readonly endsAt: Date | null;
+    },
+  ): Promise<{ readonly id: string } | null> {
+    const parent = await tx.$queryRaw<Array<{ id: string; status: SubscriptionStatus }>>(Prisma.sql`
+      SELECT "id", "status"::text AS "status"
+      FROM "subscriptions"
+      WHERE "id" = ${input.subscriptionId}
+      FOR UPDATE
+    `);
+    if (parent.length !== 1 || parent[0]!.status === SubscriptionStatus.DELETED) {
+      throw new ConflictException('Cannot start an upgrade term on a missing or deleted subscription');
+    }
+
+    const activeTerm = await tx.subscriptionTerm.findFirst({
+      where: { subscriptionId: input.subscriptionId, status: SubscriptionTermStatus.ACTIVE },
+      orderBy: { generation: 'desc' },
+      select: { id: true },
+    });
+    if (activeTerm === null) return null; // durable model not applicable (no cutover)
+
+    // A queued SCHEDULED tail was allocated inside the expiry window this
+    // upgrade has just discarded, so its window is already void — and it also
+    // blocks activation outright, because `activateInTransaction` only ever
+    // activates the LOWEST scheduled generation while the term minted below is
+    // always the highest. Left alone it would activate later and reinstate a
+    // superseded plan's baseline: the very reversion this method exists to
+    // stop, merely deferred. So cancel it.
+    //
+    // Never when it carries entitlements, though. Stranding goods the customer
+    // has already paid for is worse than a stale baseline, and the entitlement
+    // state machine has no CANCEL command to retire them with (`REVERSE` is a
+    // compensating financial reversal, not a cancellation). That case keeps
+    // today's behaviour and is reported rather than silently resolved.
+    const scheduled = await tx.subscriptionTerm.findMany({
+      where: { subscriptionId: input.subscriptionId, status: SubscriptionTermStatus.SCHEDULED },
+      select: { id: true },
+    });
+    if (scheduled.length > 0) {
+      const scheduledIds = scheduled.map((term) => term.id);
+      const boundEntitlements = await tx.addOnEntitlement.count({
+        where: {
+          termId: { in: scheduledIds },
+          state: {
+            in: [
+              AddOnEntitlementState.PENDING_ACTIVATION,
+              AddOnEntitlementState.ACTIVE,
+              AddOnEntitlementState.EXPIRING,
+            ],
+          },
+        },
+      });
+      if (boundEntitlements > 0) {
+        this.logger.warn(
+          `UPGRADE_TERM_DEFERRED_SCHEDULED_ENTITLEMENTS subscription=${input.subscriptionId} ` +
+            `scheduledTerms=${scheduledIds.length} entitlements=${boundEntitlements}`,
+        );
+        this.events.warn(
+          EVENT_TYPES.SYSTEM_ERROR,
+          'SYSTEM',
+          'Upgrade kept the previous term baseline: a scheduled term carries paid entitlements',
+          {
+            code: 'UPGRADE_TERM_DEFERRED_SCHEDULED_ENTITLEMENTS',
+            subscriptionId: input.subscriptionId,
+            planId: input.plan.id,
+            scheduledTermIds: scheduledIds,
+            boundEntitlements,
+          },
+        );
+        return null;
+      }
+      await tx.subscriptionTerm.updateMany({
+        where: { id: { in: scheduledIds }, status: SubscriptionTermStatus.SCHEDULED },
+        data: { status: SubscriptionTermStatus.CANCELED, endedAt: input.startsAt },
+      });
+    }
+
+    const created = await this.subscriptionTermService.createScheduledInTransaction(tx, {
+      subscriptionId: input.subscriptionId,
+      planId: input.plan.id,
+      planSnapshot: {
+        id: input.plan.id,
+        name: input.plan.name,
+        description: input.plan.description,
+        tag: input.plan.tag,
+        type: input.plan.type,
+        icon: input.plan.icon ?? null,
+        trafficLimit: input.plan.trafficLimit,
+        deviceLimit: input.plan.deviceLimit,
+        trafficLimitStrategy: input.plan.trafficLimitStrategy,
+        internalSquads: input.plan.internalSquads,
+        externalSquad: input.plan.externalSquad,
+        selectedDurationDays: input.durationDays,
+        snapshotSource: 'UPGRADE_TERM',
+      } as Prisma.InputJsonValue,
+      startsAt: input.startsAt,
+      endsAt: input.endsAt,
+      baseTrafficLimitBytes:
+        input.plan.trafficLimit === null ? null : BigInt(input.plan.trafficLimit) * GIB_BYTES,
+      baseDeviceLimit: input.plan.deviceLimit <= 0 ? null : input.plan.deviceLimit,
+      trafficResetStrategy: input.plan.trafficLimitStrategy,
+      resetAnchorAt: provisionalResetAnchor(input.plan.trafficLimitStrategy, input.startsAt),
+    });
+    await this.subscriptionTermService.activateInTransaction(tx, created.id, input.startsAt);
+    return { id: created.id };
+  }
+
   private async upgradeSubscriptionFromPayment(input: {
     readonly transaction: Transaction;
     readonly purchasedPlan: Plan;
@@ -987,6 +1122,36 @@ export class PaymentSubscriptionMutationService {
         throw new NotFoundException('Source subscription not found');
       }
       const now = new Date();
+      const expiresAt = calculateExpiry(now, input.selectedDurationDays);
+      // Move the term baseline onto the purchased plan BEFORE the column write.
+      // Without this the ACTIVE term keeps the superseded plan's baseline, and
+      // any later versioned job recomputes `old_base + active add-ons` and
+      // pushes it to the panel — silently undoing the plan change the customer
+      // just paid for. Same gate as the renewal path, so a deployment with the
+      // durable model off is untouched.
+      const term = resolveAddOnRolloutFlags().entitlementShadow
+        ? await this.startUpgradeTermInTransaction(transactionClient, {
+            subscriptionId: currentSubscription.id,
+            plan: input.purchasedPlan,
+            durationDays: input.selectedDurationDays,
+            startsAt: now,
+            endsAt: expiresAt,
+          })
+        : null;
+      // With a durable term the projection owns the effective limits, so the
+      // legacy columns mirror it instead of the raw plan — otherwise add-on
+      // entitlements still ACTIVE across the plan change would be dropped from
+      // the columns and taken back by the legacy sync path. Matches every other
+      // projection-aware writer (`applyAddOnViaLedger`, the boundary sweep,
+      // `forceReconcile`). Renewal defers instead because its term is SCHEDULED,
+      // not active yet; an upgrade's term starts now.
+      const projection =
+        term === null
+          ? null
+          : await this.effectiveProjectionService.recomputeInTransaction(transactionClient, {
+              subscriptionId: currentSubscription.id,
+              mode: 'ACTIVE',
+            });
       const upgradedSubscription = await transactionClient.subscription.update({
         where: { id: currentSubscription.id },
         data: {
@@ -1000,12 +1165,22 @@ export class PaymentSubscriptionMutationService {
             purchasedPlan: input.purchasedPlan,
             selectedDurationDays: input.selectedDurationDays,
           }) as Prisma.InputJsonValue,
-          trafficLimit: input.purchasedPlan.trafficLimit,
-          deviceLimit: input.purchasedPlan.deviceLimit,
+          trafficLimit:
+            projection === null
+              ? input.purchasedPlan.trafficLimit
+              : projection.desiredTrafficLimitBytes === null
+                ? null
+                : Number(projection.desiredTrafficLimitBytes / GIB_BYTES),
+          deviceLimit:
+            projection === null
+              ? input.purchasedPlan.deviceLimit
+              : projection.desiredDeviceLimit === null
+                ? 0
+                : projection.desiredDeviceLimit,
           internalSquads: input.purchasedPlan.internalSquads,
           externalSquad: input.purchasedPlan.externalSquad,
           startedAt: now,
-          expiresAt: calculateExpiry(now, input.selectedDurationDays),
+          expiresAt,
         },
       });
       const syncJob = await transactionClient.profileSyncJob.create({
@@ -1013,6 +1188,16 @@ export class PaymentSubscriptionMutationService {
           subscriptionId: upgradedSubscription.id,
           action: upgradedSubscription.remnawaveId === null ? SyncAction.CREATE : SyncAction.UPDATE,
           status: SyncJobStatus.PENDING,
+          // Versioned only when a projection backs it: `tryVersionedDesiredStateWrite`
+          // requires both `aggregateKey` and `desiredRevision`, and a job carrying
+          // neither stays on the legacy absolute update exactly as before.
+          ...(projection === null
+            ? {}
+            : {
+                aggregateKey: upgradedSubscription.id,
+                desiredRevision: projection.desiredRevision,
+                cause: 'PLAN_CHANGE',
+              }),
           payload: {
             source: 'PAYMENT_COMPLETION',
             paymentId: input.transaction.paymentId,

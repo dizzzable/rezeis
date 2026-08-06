@@ -308,24 +308,29 @@ async function getHealth(): Promise<RemnawaveHealth | null> {
   return res.data;
 }
 
-export interface RemnawaveSubRequestStats {
-  totalRequests: number
-  uniqueUsers: number
-  perClient: { clientType: string; count: number }[]
-  perDay: { date: string; count: number }[]
-}
+// `RemnawaveSubRequestStats` / `getSubscriptionRequestStats()` used to sit
+// here. The declared shape (`totalRequests`, `uniqueUsers`, `perClient`,
+// `perDay`) is sent by neither 2.7.4 nor 2.8.0 — the panel answers
+// `{ byParsedApp, hourlyRequestStats }` — and no screen ever called the
+// function. Deleted here and on the backend rather than retyped.
 
-async function getSubscriptionRequestStats(): Promise<RemnawaveSubRequestStats | null> {
-  const res = await api.get<RemnawaveSubRequestStats | null>("/admin/remnawave/subscription-request-history/stats");
-  return res.data;
-}
-
+/**
+ * One row of the panel's subscription-request log.
+ *
+ * The owner identifier is version-dependent and exactly one side is populated:
+ * Remnawave 2.7.4 records carry `userUuid`, 2.8.0 records carry the
+ * panel-internal integer instead. `username` used to be declared here and is
+ * sent by neither panel version, so it was always absent.
+ */
 export interface RemnawaveSubRequestEntry {
   id: string
+  /** 2.7.4 only. */
   userUuid: string | null
-  username: string | null
-  clientType: string | null
+  /** 2.8.0 only — panel-internal numeric id, NOT a uuid. */
+  panelUserId: number | null
   userAgent: string | null
+  /** Derived server-side from `userAgent`; the panel sends no client field. */
+  clientType: string | null
   ipAddress: string | null
   requestedAt: string
 }
@@ -339,14 +344,34 @@ async function getSubscriptionRequestHistory(params?: { userUuid?: string; limit
   return res.data
 }
 
+/** One node a provider bills for. `nodeUuid` is null for an orphaned 2.8.0 line. */
+export interface RemnawaveInfraBillingNode {
+  nodeUuid: string | null
+  name: string
+  countryCode: string | null
+}
+
+/**
+ * An infra-billing provider.
+ *
+ * `type`, `currency`, `monthlyCost` and `nodesCount` used to be declared here
+ * and are sent by neither 2.7.4 nor 2.8.0, so the Costs table rendered `—`,
+ * `0` and a blank cost for every provider. What the panel does send is a
+ * lifetime bill tally plus the nodes the provider bills for.
+ *
+ * `billedTotalAmount` HAS NO CURRENCY — neither spec mentions one anywhere —
+ * so it must never be rendered beside a currency symbol.
+ */
 export interface RemnawaveInfraProvider {
   uuid: string
   name: string
-  type: string | null
-  currency: string | null
-  nodesCount: number
-  monthlyCost: number | null
+  faviconLink: string | null
+  loginUrl: string | null
+  billedTotalAmount: number
+  billsCount: number
+  billingNodes: RemnawaveInfraBillingNode[]
   createdAt: string
+  updatedAt: string
 }
 
 async function getInfraProviders(): Promise<RemnawaveInfraProvider[]> {
@@ -354,13 +379,16 @@ async function getInfraProviders(): Promise<RemnawaveInfraProvider[]> {
   return res.data;
 }
 
+/**
+ * A snippet record is `{ name, snippet }` upstream and nothing else. `uuid`,
+ * `description`, `type` and the timestamps were declared and never sent —
+ * `uuid` in particular was `''` for every row and was used as the React key,
+ * so any two snippets collided. `name` is the record's only identity.
+ */
 export interface RemnawaveSnippet {
-  uuid: string
   name: string
-  description: string | null
-  type: string | null
-  createdAt: string
-  updatedAt: string
+  /** `snippet.length`; null when the panel sent a non-array. */
+  entriesCount: number | null
 }
 
 async function getSnippets(): Promise<RemnawaveSnippet[]> {
@@ -368,16 +396,17 @@ async function getSnippets(): Promise<RemnawaveSnippet[]> {
   return res.data;
 }
 
+/**
+ * Rows are `{ uuid, viewPosition, name, config }`. The branding fields that
+ * used to be declared (`title`, `description`, `logoUrl`, `faviconUrl`,
+ * `customCss`) live inside the opaque `config` blob the panel does not
+ * describe, so only its presence is reported.
+ */
 export interface RemnawaveSubpageConfig {
   uuid: string
   name: string
-  title: string | null
-  description: string | null
-  logoUrl: string | null
-  faviconUrl: string | null
-  customCss: string | null
-  createdAt: string
-  updatedAt: string
+  viewPosition: number
+  hasConfig: boolean
 }
 
 async function getSubscriptionPageConfigs(): Promise<RemnawaveSubpageConfig[]> {
@@ -385,14 +414,17 @@ async function getSubscriptionPageConfigs(): Promise<RemnawaveSubpageConfig[]> {
   return res.data;
 }
 
+/**
+ * Rows are `{ uuid, viewPosition, name, pluginConfig }`. `version`, `nodeUuid`
+ * and the timestamps were never sent — and neither was `enabled`, which meant
+ * the settings table showed EVERY plugin as disabled. There is no enablement
+ * flag upstream, so the column is gone rather than defaulted.
+ */
 export interface RemnawaveNodePlugin {
   uuid: string
   name: string
-  version: string | null
-  nodeUuid: string | null
-  enabled: boolean
-  createdAt: string
-  updatedAt: string
+  viewPosition: number
+  hasConfig: boolean
 }
 
 async function getNodePlugins(): Promise<RemnawaveNodePlugin[]> {
@@ -468,6 +500,17 @@ async function updateCleanupSettings(
 }
 
 // ── Panel version & capabilities (auto-detected; drives version-gated UI) ─────
+//
+// Hand-mirrored from `src/modules/remnawave/services/remnawave-version.service.ts`.
+// Keep the unions three-valued in both places: the backend really does send
+// `'unknown'` whenever version detection fails, and a two-valued mirror would
+// make every `=== 'uuid'` comparison here silently take a branch that talks to
+// a live panel the wrong way.
+
+/** Mirrors `RemnawaveUserAddressing`. `'unknown'` = detection failed. */
+export type RemnawaveUserAddressing = "uuid" | "id" | "unknown";
+/** Mirrors `RemnawaveConnectionsApi`. `'unknown'` = detection failed. */
+export type RemnawaveConnectionsApi = "ip-control" | "connections" | "unknown";
 
 export interface RemnawaveCapabilities {
   version: string | null;
@@ -477,16 +520,84 @@ export interface RemnawaveCapabilities {
   supported: boolean;
   reachable: boolean;
   liveIpControl: boolean;
-  hostsTagsArray: boolean;
-  usersStream: boolean;
-  hostsBulkUpdate: boolean;
-  tokenScopes: boolean;
   bandwidthNodesUsers: boolean;
+  userAddressing: RemnawaveUserAddressing;
+  connectionsApi: RemnawaveConnectionsApi;
+  userLookups: { byTelegramId: boolean; byEmail: boolean };
+}
+
+const USER_ADDRESSING_VALUES: readonly RemnawaveUserAddressing[] = ["uuid", "id", "unknown"];
+const CONNECTIONS_API_VALUES: readonly RemnawaveConnectionsApi[] = [
+  "ip-control",
+  "connections",
+  "unknown",
+];
+
+/** What an absent/malformed payload degrades to: nothing known, nothing enabled. */
+const UNKNOWN_CAPABILITIES: RemnawaveCapabilities = {
+  version: null,
+  major: null,
+  minor: null,
+  patch: null,
+  supported: false,
+  reachable: false,
+  liveIpControl: false,
+  bandwidthNodesUsers: false,
+  userAddressing: "unknown",
+  connectionsApi: "unknown",
+  userLookups: { byTelegramId: false, byEmail: false },
+};
+
+function pickUnion<T extends string>(value: unknown, allowed: readonly T[], fallback: T): T {
+  return typeof value === "string" && (allowed as readonly string[]).includes(value)
+    ? (value as T)
+    : fallback;
+}
+
+function pickNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * Narrow runtime guard over `/admin/remnawave/version`.
+ *
+ * This mirror is hand-maintained, so a bare `res.data as RemnawaveCapabilities`
+ * would let a backend/SPA drift (a renamed field, a union value the SPA has
+ * never heard of) through as a lie the type system then vouches for. Anything
+ * unrecognised degrades to the "unknown / disabled" value rather than being
+ * trusted — the safe direction for every current consumer.
+ */
+export function normalizeCapabilities(raw: unknown): RemnawaveCapabilities {
+  // A fresh copy, never the shared constant: callers hold on to this object.
+  if (raw === null || typeof raw !== "object") {
+    return { ...UNKNOWN_CAPABILITIES, userLookups: { ...UNKNOWN_CAPABILITIES.userLookups } };
+  }
+  const record = raw as Record<string, unknown>;
+  const lookups =
+    typeof record.userLookups === "object" && record.userLookups !== null
+      ? (record.userLookups as Record<string, unknown>)
+      : {};
+  return {
+    version: typeof record.version === "string" ? record.version : null,
+    major: pickNumber(record.major),
+    minor: pickNumber(record.minor),
+    patch: pickNumber(record.patch),
+    supported: record.supported === true,
+    reachable: record.reachable === true,
+    liveIpControl: record.liveIpControl === true,
+    bandwidthNodesUsers: record.bandwidthNodesUsers === true,
+    userAddressing: pickUnion(record.userAddressing, USER_ADDRESSING_VALUES, "unknown"),
+    connectionsApi: pickUnion(record.connectionsApi, CONNECTIONS_API_VALUES, "unknown"),
+    userLookups: {
+      byTelegramId: lookups.byTelegramId === true,
+      byEmail: lookups.byEmail === true,
+    },
+  };
 }
 
 async function getCapabilities(): Promise<RemnawaveCapabilities> {
-  const res = await api.get<RemnawaveCapabilities>("/admin/remnawave/version");
-  return res.data;
+  const res = await api.get<unknown>("/admin/remnawave/version");
+  return normalizeCapabilities(res.data);
 }
 
 // ── Live (ip-control: active sessions / source IPs) ───────────────────────────
@@ -545,7 +656,6 @@ export const remnawaveApi = {
   getSnippets,
   getHwidStats,
   getHwidTopUsers,
-  getSubscriptionRequestStats,
   getSubscriptionRequestHistory,
   getInfraProviders,
   getNodePlugins,

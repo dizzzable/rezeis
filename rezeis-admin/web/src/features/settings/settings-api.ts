@@ -86,6 +86,90 @@ const notificationProblemEventsSchema = z.object({ items: z.array(notificationPr
 const notificationEnqueueResultSchema = z.object({ eventId: z.string(), queueJobId: z.string().nullable(), enqueued: z.boolean(), alreadyQueued: z.boolean(), reason: z.string().nullable() })
 const notificationBotDeliveryResultSchema = z.object({ eventId: z.string().nullable(), status: z.enum(['NO_PENDING_EVENT', 'DELIVERED', 'BLOCKED', 'FAILED']), botMessageId: z.number().nullable(), reason: z.string().nullable(), checkedAt: z.string() })
 const notificationBotDeliveryBatchResultSchema = z.object({ attempted: z.number(), delivered: z.number(), blocked: z.number(), failed: z.number(), checkedAt: z.string() })
+// ── Anti-fraud detector tunables ───────────────────────────────────────────
+// Precedence, mirrored from the server: a stored panel value WINS; the
+// ANTIFRAUD_* environment variable is only the fallback. `fallback` carries what
+// the env (or the built-in default) says, so the form can show an operator who
+// set a variable why the number in front of them is different. `ranges` carries
+// the documented bounds — they are NOT restated on this side, because a second
+// copy is the one place they could drift from the server's validator.
+const sharingDetectionConfigSchema = z.object({
+  enableHwidOverage: z.boolean(),
+  enableIpSharing: z.boolean(),
+  ipWindowMinutes: z.number(),
+  ipConcurrencyWindowSeconds: z.number(),
+  maxNodesPerRun: z.number(),
+  maxIpsInMetadata: z.number(),
+  ipNetworkGrouping: z.boolean(),
+  ipV4PrefixLength: z.number(),
+  ipV6PrefixLength: z.number(),
+  ipOverageMargin: z.number(),
+})
+const trafficAbuseConfigSchema = z.object({
+  enabled: z.boolean(),
+  minGb: z.number(),
+  medianMultiplier: z.number(),
+  sharePercent: z.number(),
+  maxNodesPerRun: z.number(),
+})
+// The subscription-UA section has NO environment layer — these three knobs are
+// new, so no ANTIFRAUD_* variable has ever set them. Its `fallback` is the
+// built-in default and the form labels it "default", not "environment".
+const subscriptionUaConfigSchema = z.object({
+  enableSubscriptionUaTunnel: z.boolean(),
+  uaEvidenceWindowMinutes: z.number(),
+  uaRequestPageSize: z.number(),
+})
+const tunableRangeSchema = z.object({
+  default: z.number(),
+  min: z.number(),
+  max: z.number(),
+  integer: z.boolean(),
+})
+const antiFraudSettingsSchema = z.object({
+  effective: z.object({
+    sharing: sharingDetectionConfigSchema,
+    trafficAbuse: trafficAbuseConfigSchema,
+    subscriptionUa: subscriptionUaConfigSchema,
+  }),
+  fallback: z.object({
+    sharing: sharingDetectionConfigSchema,
+    trafficAbuse: trafficAbuseConfigSchema,
+    subscriptionUa: subscriptionUaConfigSchema,
+  }),
+  stored: z.object({
+    sharing: sharingDetectionConfigSchema.partial().optional(),
+    trafficAbuse: trafficAbuseConfigSchema.partial().optional(),
+    subscriptionUa: subscriptionUaConfigSchema.partial().optional(),
+  }),
+  overridden: z.object({
+    sharing: z.array(z.string()),
+    trafficAbuse: z.array(z.string()),
+    subscriptionUa: z.array(z.string()),
+  }),
+  ranges: z.object({
+    sharing: z.record(z.string(), tunableRangeSchema),
+    trafficAbuse: z.record(z.string(), tunableRangeSchema),
+    subscriptionUa: z.record(z.string(), tunableRangeSchema),
+  }),
+})
+
+export type AntiFraudSettings = z.infer<typeof antiFraudSettingsSchema>
+export type SharingDetectionConfig = z.infer<typeof sharingDetectionConfigSchema>
+export type TrafficAbuseConfig = z.infer<typeof trafficAbuseConfigSchema>
+export type SubscriptionUaConfig = z.infer<typeof subscriptionUaConfigSchema>
+export type TunableRange = z.infer<typeof tunableRangeSchema>
+
+/**
+ * `null` on a field clears the panel value and restores the env fallback — or,
+ * for `subscriptionUa`, the built-in default, which is the only layer under it.
+ */
+export interface AntiFraudSettingsPatch {
+  sharing?: { [K in keyof SharingDetectionConfig]?: SharingDetectionConfig[K] | null }
+  trafficAbuse?: { [K in keyof TrafficAbuseConfig]?: TrafficAbuseConfig[K] | null }
+  subscriptionUa?: { [K in keyof SubscriptionUaConfig]?: SubscriptionUaConfig[K] | null }
+}
+
 const referralExchangePolicySchema = z.object({ exchangeEnabled: z.boolean(), giftPromocodeEnabled: z.boolean(), allowedPlanIds: z.array(z.string()), allowedDurationDays: z.array(z.number()), codePrefix: z.string(), costPerDay: z.number() })
 const partnerWithdrawalPolicySchema = z.object({ enabled: z.boolean(), minimumAmount: z.number(), supportedMethods: z.array(z.string()), updatedAt: z.string() })
 
@@ -210,6 +294,14 @@ export const settingsApi = {
   async updatePartnerWithdrawalPolicy(payload: Partial<Omit<PartnerWithdrawalPolicy, 'updatedAt'>>): Promise<PartnerWithdrawalPolicy> {
     const response = await api.patch('/admin/settings/partner-withdrawal-policy', payload)
     return partnerWithdrawalPolicySchema.parse(unwrapPayload(response.data))
+  },
+  async getAntiFraudSettings(): Promise<AntiFraudSettings> {
+    const response = await api.get('/admin/settings/anti-fraud')
+    return antiFraudSettingsSchema.parse(unwrapPayload(response.data))
+  },
+  async updateAntiFraudSettings(payload: AntiFraudSettingsPatch): Promise<AntiFraudSettings> {
+    const response = await api.patch('/admin/settings/anti-fraud', payload)
+    return antiFraudSettingsSchema.parse(unwrapPayload(response.data))
   },
   async getQuestPartnerSecrets(): Promise<readonly QuestPartnerView[]> {
     const response = await api.get('/admin/settings/quest-partner-secrets')

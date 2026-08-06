@@ -286,6 +286,13 @@ const GATEWAY_META: ReadonlyArray<GatewayMeta> = [
         placeholder: '',
         type: 'select',
         options: [
+          // Deliberately NOT a number, and deliberately first: it is not one of
+          // Platega's rails, it is the choice to send no rail at all and let
+          // Platega ask the payer (`POST /v2/transaction/process`). It also has
+          // to stay distinct from leaving the field empty — an untouched field
+          // still means СБП (2) for every gateway already live on it, which is
+          // why «not set» is not reused for this and the hint spells it out.
+          { value: 'PROVIDER_CHOICE', labelKey: 'paymentGateways.options.plategaProviderChoice' },
           { value: '2', labelKey: 'paymentGateways.options.plategaSbp' },
           { value: '3', labelKey: 'paymentGateways.options.plategaErip' },
           { value: '11', labelKey: 'paymentGateways.options.plategaCard' },

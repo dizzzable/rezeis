@@ -12,7 +12,7 @@ import {
   CHECKOUT_LIFETIME_SECONDS,
   checkoutExpiresAt,
 } from '../constants/checkout-lifetime.constant';
-import { readGatewaySettings } from '../utils/payment-gateway-settings.util';
+import { readGatewaySettings, resolvePlategaPaymentMethod } from '../utils/payment-gateway-settings.util';
 import { normalizePaymentProviderError, redactPaymentDiagnosticMessage } from '../utils/payment-provider-error.util';
 import {
   buildResultUrl,
@@ -322,11 +322,11 @@ export class PaymentProviderExecutionService {
     const settings = readGatewaySettings(input.gateway.settings);
     const merchantId = requireSetting(settings, 'merchantId');
     const secret = requireSetting(settings, 'secret');
-    const paymentMethod = typeof settings.paymentMethod === 'number' ? settings.paymentMethod : 2;
+    const methodChoice = resolvePlategaPaymentMethod(settings);
+    const isProviderChoice = methodChoice.kind === 'PROVIDER_CHOICE';
     const successResultUrl = this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
     const failResultUrl = this.resolveFailUrl(input.transaction.paymentId, input.failUrl, input.successUrl);
-    const payload = {
-      paymentMethod,
+    const commonPayload = {
       paymentDetails: {
         amount: Number(input.transaction.amount.toString()),
         currency: input.transaction.currency,
@@ -336,17 +336,47 @@ export class PaymentProviderExecutionService {
       return: successResultUrl,
       failedUrl: failResultUrl,
     };
+    // Two endpoints, and the difference is the whole point of the setting:
+    // `/transaction/process` REQUIRES `paymentMethod` and pins the rail;
+    // `/v2/transaction/process` documents no such field and lets the payer pick
+    // on Platega's hosted page. Sending `paymentMethod` to v2 — or omitting it
+    // from v1 — is a 400 from the provider, so the endpoint and the body are
+    // chosen together and never independently.
+    const payload = isProviderChoice
+      ? commonPayload
+      : { paymentMethod: methodChoice.paymentMethod, ...commonPayload };
     const response = await firstValueFrom(
-      this.httpService.post('https://app.platega.io/transaction/process', payload, {
-        headers: {
-          'X-MerchantId': merchantId,
-          'X-Secret': secret,
+      this.httpService.post(
+        isProviderChoice
+          ? 'https://app.platega.io/v2/transaction/process'
+          : 'https://app.platega.io/transaction/process',
+        payload,
+        {
+          headers: {
+            'X-MerchantId': merchantId,
+            'X-Secret': secret,
+          },
         },
-      }),
+      ),
     );
     const data = response.data as Record<string, unknown>;
-    const checkoutUrl =
-      readOptionalString(data, ['redirect', 'paymentUrl', 'url']);
+    // The two responses name the link differently — v1 returns `redirect`, v2
+    // returns `url` — so each path reads its own documented field FIRST. The
+    // remaining spellings stay as tolerated fallbacks (they cost nothing and
+    // predate this change), but the documented one wins, so a provider that
+    // echoes both cannot hand v2 a v1 link or the reverse.
+    const checkoutUrl = isProviderChoice
+      ? readOptionalString(data, ['url', 'redirect', 'paymentUrl'])
+      : readOptionalString(data, ['redirect', 'paymentUrl', 'url']);
+    // A create response with no link is a provider refusal, not a checkout.
+    // Returning `checkoutUrl: null` under `providerMode: 'REDIRECT'` handed the
+    // client a dead checkout and left the row PENDING until the 30-minute sweep
+    // cancelled it as a LOCAL TIMEOUT — which is the wrong cause, and it is the
+    // trial-claim quota ledger that pays for the lie. The YooKassa path above
+    // has always thrown here; Platega now does the same, on both endpoints.
+    if (checkoutUrl === null) {
+      throw new ServiceUnavailableException('Platega create payment: missing checkout url');
+    }
     return {
       gatewayId: readOptionalString(data, ['transactionId', 'id']),
       checkoutUrl,

@@ -11,6 +11,10 @@ import {
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import {
+  REMNAWAVE_TAG_MAX_LENGTH,
+  REMNAWAVE_TAG_PATTERN,
+} from '../../plans/utils/remnawave-tag.util';
+import {
   AltshopPlan,
   AltshopPlanDuration,
   AltshopPlanPrice,
@@ -203,7 +207,10 @@ export class BackupPlanClonerService {
       return {
         sourcePlanId: plan.id,
         name: plan.name,
-        tag: plan.tag,
+        // Show what the clone would actually store, the same way `finalName`
+        // shows the name it would actually take — a preview that advertises a
+        // tag the write then drops is how the operator finds out too late.
+        tag: this.coerceDonorTag(plan.tag, plan.id) ?? null,
         type: plan.type,
         availability: plan.availability,
         trafficLimit: plan.trafficLimit,
@@ -296,7 +303,7 @@ export class BackupPlanClonerService {
           data: {
             name: finalName,
             description: plan.description ?? undefined,
-            tag: plan.tag ?? undefined,
+            tag: this.coerceDonorTag(plan.tag, plan.id),
             type: this.coercePlanType(plan.type),
             availability: this.coercePlanAvailability(plan.availability),
             trafficLimitStrategy: this.coerceStrategy(plan.trafficLimitStrategy),
@@ -612,6 +619,48 @@ export class BackupPlanClonerService {
       if (cuid) out.push(cuid);
     }
     return out;
+  }
+
+  /**
+   * Donor tags are arbitrary strings; `Plan.tag` is not.
+   *
+   * The panel declares `User.tag` as `^[A-Z0-9_]+$`, max 16 (see
+   * `remnawave-tag.util.ts`, restated from `@remnawave/backend-contract`), and
+   * a plan tag ends up on the panel profile. Copying the donor value verbatim
+   * — which this cloner did — let `'legacy tag from donor'` into the catalog,
+   * where nothing rejects it: the admin DTOs only validate a tag the operator
+   * TYPES, and a PATCH that omits `tag` deliberately carries the stored value
+   * through untouched. The bad value therefore surfaces hours later, in a
+   * background job, on somebody else's subscription: the strict sync path
+   * refuses the whole desired-state PATCH as `invalidContract`, and the legacy
+   * path forwards it and collects a 400.
+   *
+   * Case is the only thing we normalise. Upper-casing `premium` -> `PREMIUM`
+   * is a faithful reading of the donor's intent — the panel simply has no
+   * lowercase form of that same token. Anything beyond that (substituting `_`
+   * for spaces, truncating to 16) would be us INVENTING a tag: `'legacy tag
+   * from donor'` -> `'LEGACY_TAG_FROM'` is a different label that the panel
+   * would happily accept and group users under. A wrong-but-valid tag is worse
+   * than none, because nothing downstream can tell it was fabricated. So a tag
+   * we cannot read losslessly is dropped and logged, and the operator sets a
+   * real one through the validated form.
+   *
+   * This clone-time gate is the only place the value can still be refused
+   * cheaply. It does NOT touch tags already stored on a plan — those keep
+   * flowing through `normalizeUpdatePlanInput` unchanged.
+   */
+  private coerceDonorTag(raw: string | null, sourcePlanId: number): string | undefined {
+    if (raw === null) return undefined;
+    const normalized = raw.trim().toUpperCase();
+    if (normalized.length === 0) return undefined;
+    if (normalized.length <= REMNAWAVE_TAG_MAX_LENGTH && REMNAWAVE_TAG_PATTERN.test(normalized)) {
+      return normalized;
+    }
+    this.logger.warn(
+      `Plan #${sourcePlanId}: dropped donor tag ${JSON.stringify(raw)} — the Remnawave panel ` +
+        `only accepts A-Z, 0-9 and _ (max ${REMNAWAVE_TAG_MAX_LENGTH}); set one on the plan instead`,
+    );
+    return undefined;
   }
 
   private coercePlanType(raw: string): PlanType {

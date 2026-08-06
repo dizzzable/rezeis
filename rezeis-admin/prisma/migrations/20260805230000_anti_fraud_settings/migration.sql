@@ -1,0 +1,20 @@
+-- Panel-managed anti-fraud detector tunables.
+--
+-- Shape: `{ sharing?: {...}, trafficAbuse?: {...} }`, both objects SPARSE.
+-- A key absent from the JSON means "not set in the panel — fall back to the
+-- ANTIFRAUD_* environment variable, then to the built-in default". A key
+-- present WINS over the environment variable.
+--
+-- The default is `{}` rather than a fully-populated object on purpose: seeding
+-- the column with every default would make every field permanently "stored"
+-- and lock existing deployments out of the ANTIFRAUD_* variables they already
+-- set. An empty object is the only value that preserves current behaviour for
+-- every install.
+-- `IF NOT EXISTS` because `docker-entrypoint.sh` replays a migration when it
+-- recovers from a P3009, and this one is NOT on its auto-recoverable allowlist:
+-- a half-applied deploy therefore ends with an operator running
+-- `migrate resolve --rolled-back` by hand, and a bare ADD COLUMN dead-ends that
+-- with `column "anti_fraud_settings" of relation "settings" already exists`.
+-- Its three sibling migrations in this patch are all idempotent; this one was
+-- the odd file out.
+ALTER TABLE "settings" ADD COLUMN IF NOT EXISTS "anti_fraud_settings" JSONB NOT NULL DEFAULT '{}';

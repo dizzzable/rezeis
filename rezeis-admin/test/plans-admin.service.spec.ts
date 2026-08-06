@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 
 import { PlanAvailability, PlanType } from '@prisma/client';
 
+import { PlanSquadPropagationService } from '../src/modules/plans/services/plan-squad-propagation.service';
 import { PlansAdminService } from '../src/modules/plans/services/plans-admin.service';
 import { PlansAdminValidators } from '../src/modules/plans/services/plans-admin.validators';
 
@@ -508,11 +509,13 @@ function createService(
   prismaService: object,
   remnawaveApiService: object,
   planSnapshotSyncService: object = { syncPlanSnapshotMetadata: async () => 0 },
+  profileSyncQueueService: object = { enqueue: async () => undefined },
 ): PlansAdminService {
   return new PlansAdminService(
     prismaService as never,
     remnawaveApiService as never,
     planSnapshotSyncService as never,
     new PlansAdminValidators(prismaService as never, remnawaveApiService as never),
+    new PlanSquadPropagationService(prismaService as never, profileSyncQueueService as never),
   );
 }

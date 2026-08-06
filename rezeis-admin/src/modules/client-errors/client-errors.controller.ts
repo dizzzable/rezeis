@@ -6,7 +6,7 @@ import { IsIn, IsInt, IsISO8601, IsOptional, IsString, MaxLength } from 'class-v
 import { CurrentAdmin } from '../auth/decorators/current-admin.decorator';
 import { AdminJwtAuthGuard } from '../auth/guards/admin-jwt-auth.guard';
 import { CurrentAdminInterface } from '../auth/interfaces/current-admin.interface';
-import { SystemEventsService } from '../../common/services/system-events.service';
+import { EVENT_TYPES, SystemEventsService } from '../../common/services/system-events.service';
 
 class ClientErrorReportDto {
   @IsString()
@@ -70,7 +70,7 @@ export class ClientErrorsController {
     // but rarely require operator action. The bus persists them to
     // audit + ships through the realtime channel.
     this.systemEventsService.warn(
-      'client.error',
+      EVENT_TYPES.CLIENT_ERROR,
       'SYSTEM',
       truncate(dto.message, 200),
       {

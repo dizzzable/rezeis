@@ -19,8 +19,8 @@ const CONFIG = {
   cookie: null,
 } as const;
 
-function axiosError(status: number, headers: Record<string, string> = {}) {
-  return { isAxiosError: true, response: { status, headers }, message: `HTTP ${status}` };
+function axiosError(status: number, headers: Record<string, string> = {}, data?: unknown) {
+  return { isAxiosError: true, response: { status, headers, data }, message: `HTTP ${status}` };
 }
 
 /** Builds a service whose httpService.request resolves/rejects per call. */
@@ -81,6 +81,10 @@ describe('RemnawaveApiService strict adapter (T-010)', () => {
   });
 
   it('strictGetPanelUser maps 404 to notFound', async () => {
+    // Deliberately NOT envelope-guarded, unlike `strictGetPanelUserExpiry`
+    // below: the only consumer of this `notFound` (the profile-sync read-back)
+    // already fails closed, and softening the 404 into `unavailable` would turn
+    // a terminal job into a retrying one.
     const { service } = build(() => throwError(() => axiosError(404)));
     const outcome = await service.strictGetPanelUser('missing');
     assert.equal(outcome.kind, 'notFound');
@@ -218,8 +222,98 @@ describe('RemnawaveApiService strict adapter (T-010)', () => {
   });
 
   it('strictDeleteUserDevice maps 404 to notFound (idempotent-absent)', async () => {
+    // Also deliberately unguarded: a device 404 is not USER_NOT_FOUND, so
+    // demanding that envelope here would stop an already-absent HWID delete
+    // from being idempotent on a healthy 2.7.4/2.8.0 panel.
     const { service } = build(() => throwError(() => axiosError(404)));
     const outcome = await service.strictDeleteUserDevice('user-uuid', 'gone');
     assert.equal(outcome.kind, 'notFound');
+  });
+});
+
+/**
+ * `strictGetPanelUserExpiry` is the read that answers "is this profile still on
+ * the panel?", and EVERY caller acts on `notFound` by destroying state: the
+ * expired-profile sweep deletes the subscription outright (entitlements
+ * terminated, terms closed, `status = DELETED`, panel DELETE enqueued), and the
+ * three backup importers write EXPIRED over a live row.
+ *
+ * So the status code alone is not the signal. Remnawave answers a uuid it does
+ * not have with its own USER_NOT_FOUND envelope (`A025`); a reverse proxy
+ * mid-deploy answers EVERY request with a bare 404. Reading the second as the
+ * first retires a whole batch of live subscriptions per sweep, for the length of
+ * the outage.
+ */
+describe('strictGetPanelUserExpiry — only the PANEL may say a profile is gone', () => {
+  const GONE_BODIES: ReadonlyArray<readonly [string, unknown]> = [
+    ['the documented errorCode envelope', { errorCode: 'A025', message: 'User not found' }],
+    ['a build that names the field `code`', { code: 'A025' }],
+    ['an envelope with only the message', { message: 'User not found' }],
+  ];
+
+  for (const [label, data] of GONE_BODIES) {
+    it(`maps a 404 carrying ${label} to notFound`, async () => {
+      const { service } = build(() => throwError(() => axiosError(404, {}, data)));
+      const outcome = await service.strictGetPanelUserExpiry('missing');
+      assert.equal(outcome.kind, 'notFound');
+    });
+  }
+
+  const PROXY_BODIES: ReadonlyArray<readonly [string, unknown]> = [
+    ['an nginx HTML error page', '<html><head><title>404 Not Found</title></head></html>'],
+    ['an empty body', ''],
+    ['no body at all', undefined],
+    ['a gateway JSON body with no panel error code', { message: '404 page not found' }],
+  ];
+
+  for (const [label, data] of PROXY_BODIES) {
+    it(`maps a bare 404 (${label}) to unavailable, never notFound`, async () => {
+      const { service } = build(() => throwError(() => axiosError(404, {}, data)));
+      const outcome = await service.strictGetPanelUserExpiry('live-profile');
+      assert.notEqual(outcome.kind, 'notFound');
+      assert.equal(outcome.kind, 'unavailable');
+    });
+  }
+
+  it('carries a Retry-After through the bare-404 remapping', async () => {
+    const { service } = build(() =>
+      throwError(() => axiosError(404, { 'retry-after': '30' }, 'gateway')),
+    );
+    const outcome = await service.strictGetPanelUserExpiry('u');
+    assert.equal(outcome.kind, 'unavailable');
+    if (outcome.kind !== 'unavailable') return;
+    assert.equal(outcome.retryAfterMs, 30_000);
+  });
+
+  it('reads a healthy panel expiry unchanged', async () => {
+    const { service } = build(() =>
+      of({
+        data: {
+          response: { expireAt: '2030-01-01T00:00:00.000Z', subscriptionUrl: 'https://p/sub/1' },
+          version: '2.8.0',
+        },
+      }),
+    );
+    const outcome = await service.strictGetPanelUserExpiry('u');
+    assert.equal(outcome.kind, 'ok');
+    if (outcome.kind !== 'ok') return;
+    assert.equal(outcome.value.expireAtMs, Date.parse('2030-01-01T00:00:00.000Z'));
+    assert.equal(outcome.value.subscriptionUrl, 'https://p/sub/1');
+    assert.equal(outcome.detectedVersion, '2.8.0');
+  });
+
+  it('keeps every other status on its existing class', async () => {
+    for (const [status, expected] of [
+      [503, 'unavailable'],
+      [500, 'unavailable'],
+      [429, 'unavailable'],
+      [405, 'unsupported'],
+      [401, 'invalidContract'],
+      [400, 'invalidContract'],
+    ] as const) {
+      const { service } = build(() => throwError(() => axiosError(status)));
+      const outcome = await service.strictGetPanelUserExpiry('u');
+      assert.equal(outcome.kind, expected, `HTTP ${status} must stay ${expected}`);
+    }
   });
 });

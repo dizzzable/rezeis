@@ -3,8 +3,13 @@ import { ImportStatus, Prisma, SubscriptionStatus } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import {
+  describeStrictOutcome,
+  RemnawaveStrictOutcome,
+} from '../../remnawave/interfaces/remnawave-strict-outcome.interface';
+import {
   RemnawaveApiService,
   RemnawavePanelUser,
+  RemnawavePanelUserList,
 } from '../../remnawave/services/remnawave-api.service';
 
 export interface RemnawaveImportSummary {
@@ -67,13 +72,49 @@ export class RemnawaveImporterService {
   ) {}
 
   public async run(input: RunInput): Promise<RemnawaveImportSummary> {
-    let panelUsers: RemnawavePanelUser[];
+    // This importer WRITES for every row it is handed — it creates users,
+    // rebinds `Subscription.userId`, and records `createdUserIds` as the
+    // rollback set. A shortened list is therefore not a smaller import, it is a
+    // wrong one: the rollback set no longer describes the run, and a row whose
+    // uuid we could not decode would land on `remnawaveId: ''`, a key with no
+    // unique index that every other uuid-less row collapses onto. Unlike the
+    // backup importers (which fail soft to their donor values), there is no
+    // safe degraded mode here — anything short of a vouched-for read refuses.
+    let bulk: RemnawaveStrictOutcome<RemnawavePanelUserList>;
     try {
-      panelUsers = await this.remnawaveApiService.getAllPanelUsers();
+      bulk = await this.remnawaveApiService.strictGetAllPanelUsers();
     } catch (err) {
-      this.logger.error(`getAllPanelUsers failed: ${(err as Error).message}`);
+      this.logger.error(`strictGetAllPanelUsers threw: ${(err as Error).message}`);
       throw new ServiceUnavailableException('REMNAWAVE_INTEGRATION_UNAVAILABLE');
     }
+    if (bulk.kind !== 'ok') {
+      this.logger.error(
+        `Remnawave import refused: the panel user list is not trustworthy (${describeStrictOutcome(bulk)})`,
+      );
+      throw new ServiceUnavailableException('REMNAWAVE_INTEGRATION_UNAVAILABLE');
+    }
+    // `ok` is not the whole answer: the adapter also reports whether its page
+    // walk reached the END of the list, and it hands back `complete: false` when
+    // it stopped at the 25 000-row ceiling. Those rows are real, so the OVERLAY
+    // consumers keep the prefix and confirm each miss per-uuid — but this
+    // importer has no such second signal and never looks for one. For it a
+    // prefix is a wrong import, not a small one: a 30 000-user panel would
+    // finish COMMITTED with `errors: []` while 5 000 paying customers got no
+    // account, and `rollback.createdUserIds` would describe only the prefix. So
+    // the same refusal as every other untrustworthy read.
+    //
+    // `=== false` and not `!complete`, matching `remnawave-overlay.util.ts` and
+    // `sharing-detectors.ts`: the adapter is the only real producer and always
+    // sets the flag, so its ABSENCE is a hand-built list (a test double), which
+    // means "a normal, complete read" — never a silent refusal of every import.
+    if (bulk.value.complete === false) {
+      this.logger.error(
+        `Remnawave import refused: the panel user list is a PREFIX — the walk stopped at the page ceiling ` +
+          `holding ${bulk.value.users.length} of ${bulk.value.total} rows`,
+      );
+      throw new ServiceUnavailableException('REMNAWAVE_INTEGRATION_UNAVAILABLE');
+    }
+    const panelUsers: readonly RemnawavePanelUser[] = bulk.value.users;
 
     const errors: string[] = [];
     let created = 0;

@@ -1,8 +1,13 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
+import { ServiceUnavailableException } from '@nestjs/common';
 import { SubscriptionStatus, SyncAction, SyncJobStatus } from '@prisma/client';
 
+import {
+  strictOk,
+  strictUnavailable,
+} from '../src/modules/remnawave/interfaces/remnawave-strict-outcome.interface';
 import { AdminUserSubscriptionsController } from '../src/modules/users/controllers/admin-user-subscriptions.controller';
 
 describe('AdminUserSubscriptionsController', () => {
@@ -203,5 +208,76 @@ describe('AdminUserSubscriptionsController', () => {
       { message: 'Remnawave profile does not belong to this subscription user' },
     );
     assert.equal(updated, false);
+  });
+
+  // ── Device list: outage vs genuinely empty (operator audience) ───────────
+  //
+  // Both cases below hit the SAME method with the SAME subscription and differ
+  // only in the panel's answer. The operator triaging "the customer cannot add
+  // a device" must not read a confident `deviceCount: 0` off a panel that
+  // never answered — the admin SPA renders `devicesList.loadError` on a failed
+  // query and `devicesList.empty` on a successful empty one, so these two
+  // outcomes have to stay distinguishable at the HTTP boundary.
+
+  it('does not report "0 devices" to the operator when the panel is unreachable', async () => {
+    const panelReads: string[] = [];
+    const controller = new AdminUserSubscriptionsController(
+      {
+        subscription: {
+          findUnique: async () => ({ remnawaveId: 'rem-user-1' }),
+        },
+      } as never,
+      {
+        strictGetPanelUserDevices: async (uuid: string) => {
+          panelReads.push(uuid);
+          return strictUnavailable(null);
+        },
+      } as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+
+    let thrown: unknown = null;
+    try {
+      await controller.getDevices('subscription-1');
+      assert.fail('expected the device read to reject');
+    } catch (err: unknown) {
+      if (err instanceof assert.AssertionError) throw err;
+      thrown = err;
+    }
+
+    // Self-check: the panel really was consulted.
+    assert.deepStrictEqual(panelReads, ['rem-user-1']);
+    assert.equal(thrown instanceof ServiceUnavailableException, true);
+    assert.equal((thrown as ServiceUnavailableException).getStatus(), 503);
+  });
+
+  it('still reports a genuinely empty panel device list to the operator as an empty list', async () => {
+    const panelReads: string[] = [];
+    const controller = new AdminUserSubscriptionsController(
+      {
+        subscription: {
+          findUnique: async () => ({ remnawaveId: 'rem-user-1' }),
+        },
+      } as never,
+      {
+        strictGetPanelUserDevices: async (uuid: string) => {
+          panelReads.push(uuid);
+          return strictOk({ devices: [], total: 0 });
+        },
+      } as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+
+    assert.deepStrictEqual(await controller.getDevices('subscription-1'), {
+      devices: [],
+      deviceCount: 0,
+    });
+    assert.deepStrictEqual(panelReads, ['rem-user-1']);
   });
 });

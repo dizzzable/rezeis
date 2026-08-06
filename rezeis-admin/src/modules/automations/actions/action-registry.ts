@@ -112,7 +112,7 @@ export class AutomationActionRegistry {
   ): Promise<string> {
     const text = readString(action.params, 'text') ?? `Automation rule "${context.ruleName}" fired`;
     this.systemEventsService.warn(
-      'automation.telegram_notify',
+      EVENT_TYPES.AUTOMATION_TELEGRAM_NOTIFY,
       'SYSTEM',
       text,
       {
@@ -209,12 +209,22 @@ export class AutomationActionRegistry {
     return `blocked user ${userId}`;
   }
 
-  /** Emit a custom event into the SystemEventsService stream. */
+  /**
+   * Emit a custom event into the SystemEventsService stream.
+   *
+   * `type` stays free-form on purpose: rules emit domain-specific types that
+   * downstream webhooks and other rules match on, so narrowing this to a picker
+   * over `EVENT_TYPES` would break them. Such a type cannot be registered,
+   * presented or ticked — the operator's catch-all tick-box
+   * (`UNREGISTERED_EVENTS_SENTINEL`) is what makes it deliverable in `selected`
+   * mode. The DEFAULT, by contrast, is a fixed string, so it is a real
+   * registered constant with a card and a tick-box of its own.
+   */
   private async systemEvent(
     action: AutomationActionDefinition,
     context: AutomationActionContext,
   ): Promise<string> {
-    const type = readString(action.params, 'type') ?? 'automation.custom';
+    const type = readString(action.params, 'type') ?? EVENT_TYPES.AUTOMATION_CUSTOM;
     const message = readString(action.params, 'message') ?? `Automation "${context.ruleName}" fired`;
     const severity = readSeverity(action.params, 'severity');
     const category = readCategory(action.params, 'category');

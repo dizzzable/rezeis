@@ -520,6 +520,8 @@ model AdminUser {
   themePresets            AdminThemePreset[]            @relation("AdminThemePresetOwner")
   webPushSubscriptions    AdminWebPushSubscription[]    @relation("AdminUserWebPushSubscriptions")
   notificationPreferences AdminNotificationPreference[] @relation("AdminUserNotificationPreferences")
+  fraudExemptionsGranted  FraudExemption[]              @relation("FraudExemptionCreator")
+  fraudExemptionsRevoked  FraudExemption[]              @relation("FraudExemptionRevoker")
 
   @@index([role])
   @@index([isActive])
@@ -935,6 +937,102 @@ model FraudSignal {
   @@map("fraud_signals")
 }
 
+/// A condition a detector has produced but that has NOT been filed as a signal
+/// — the durable half of the two gates that sit in front of `upsertSignal`.
+///
+/// WHY A ROW AND NOT A MAP IN MEMORY. The API container and the BullMQ worker
+/// each run their own `AntiFraudService`, and either may serve the 5-minute
+/// cron or a manual `POST /admin/fraud/detectors/run`. An in-process counter
+/// would give them one streak each — two half-counts that never reach the
+/// threshold, or reach it twice — and a deploy would reset both. The existing
+/// notification cooldown in `anti-fraud.service.ts` already refuses to live in
+/// memory for exactly this reason; this is the same decision.
+///
+/// Identity is `(code, conditionKey)` where `conditionKey` is the detector
+/// fingerprint with its UTC-day / ISO-week bucket and any `#<millis>` re-file
+/// suffix removed — "this user, this rule". Keying on the raw fingerprint would
+/// reset every streak at midnight UTC, and it is also the key the dismissal
+/// suppression already uses, so both gates agree on what "the same condition"
+/// means.
+///
+/// Rows are short-lived by construction: the streak is deleted the moment its
+/// signal opens, and deleted when a run that COULD see the condition did not
+/// produce it. A row that outlives both (an exempted condition, or one whose
+/// detector went quiet) is aged out by `lastSeenAt`.
+model FraudCandidateStreak {
+  id              String              @id @default(cuid()) @map("id")
+  code            String              @map("code")
+  /// Fingerprint minus time bucket and re-file suffix. See the model doc.
+  conditionKey    String              @map("condition_key")
+  /// How many consecutive observing runs have produced this condition.
+  observations    Int                 @default(1) @map("observations")
+  /// Severity at the FIRST observation. Deliberately never updated: it is the
+  /// basis the "escalate immediately" bypass compares a later run against, and
+  /// a moving basis could never register a rise.
+  severity        FraudSignalSeverity @map("severity")
+  /// Latest observed severity/score — display only, so the pending list reads
+  /// without joining anything.
+  lastSeverity    FraudSignalSeverity @map("last_severity")
+  score           Int                 @default(0) @map("score")
+  title           String              @map("title")
+  affectedUserIds String[]            @default([]) @map("affected_user_ids")
+  /// Why the last run declined to open it: `streak` (not enough evidence yet)
+  /// or `exemption` (a live operator exemption covers this code for this user).
+  /// This column is the entire reason an exemption is not an invisible hole.
+  heldBy          String              @default("streak") @map("held_by")
+  /// The exemption that held it, when `heldBy = 'exemption'`. Intentionally NOT
+  /// a foreign key: this table is rewritten every five minutes and must not
+  /// take a lock on `fraud_exemptions` to do it. A dangling id here degrades to
+  /// "held by an exemption we can no longer name", which is still visible.
+  exemptionId     String?             @map("exemption_id")
+  firstSeenAt     DateTime            @default(now()) @map("first_seen_at") @db.Timestamptz(3)
+  lastSeenAt      DateTime            @default(now()) @map("last_seen_at") @db.Timestamptz(3)
+  createdAt       DateTime            @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt       DateTime            @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@unique([code, conditionKey])
+  @@index([lastSeenAt])
+  @@index([heldBy])
+  @@map("fraud_candidate_streaks")
+}
+
+/// An operator's standing decision that a specific user is not to be accused by
+/// specific detectors, until a specific date.
+///
+/// EXPIRY IS NOT NULLABLE, ON PURPOSE. A permanent exemption is a permanent
+/// blind spot that nobody ever revisits; forcing a date means the worst case is
+/// that the operator has to renew it. The column type is what enforces this —
+/// a service-level check could be loosened, `NOT NULL` cannot be by accident.
+///
+/// CODES, NOT A BLANKET FLAG. A power user whose device count is legitimately
+/// high is not thereby cleared of promocode abuse. `codes` is never empty.
+///
+/// Revoking sets `revokedAt`/`revokedBy` rather than deleting the row: an
+/// exemption is an audit-relevant act and so is taking one away.
+model FraudExemption {
+  id        String    @id @default(cuid()) @map("id")
+  userId    String    @map("user_id")
+  /// Detector codes covered (e.g. `SUBSCRIPTION_SHARING_HWID`). Never empty.
+  codes     String[]  @default([]) @map("codes")
+  /// Why this user is exempt. Required — an unexplained exemption is
+  /// indistinguishable from a mistake six months later.
+  reason    String    @map("reason")
+  expiresAt DateTime  @map("expires_at") @db.Timestamptz(3)
+  createdBy String?   @map("created_by")
+  revokedAt DateTime? @map("revoked_at") @db.Timestamptz(3)
+  revokedBy String?   @map("revoked_by")
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  user    User       @relation("UserFraudExemptions", fields: [userId], references: [id], onDelete: Cascade)
+  creator AdminUser? @relation("FraudExemptionCreator", fields: [createdBy], references: [id], onDelete: SetNull)
+  revoker AdminUser? @relation("FraudExemptionRevoker", fields: [revokedBy], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("fraud_exemptions")
+}
+
 // =============================================================================
 //  AUTOMATIONS — IFTTT-style rule engine
 // =============================================================================
@@ -1130,6 +1228,7 @@ model User {
   questCompletions        QuestCompletion[]        @relation("QuestCompletionUser")
   savedPaymentMethods     SavedPaymentMethod[]     @relation("UserSavedPaymentMethods")
   paymentMethodSetups     PaymentMethodSetup[]     @relation("UserPaymentMethodSetups")
+  fraudExemptions         FraudExemption[]         @relation("UserFraudExemptions")
 
   @@index([telegramId])
   @@index([role])
@@ -1309,31 +1408,70 @@ model UserOAuthLink {
 // =============================================================================
 
 model Subscription {
-  id             String             @id @default(cuid()) @map("id")
-  userId         String             @map("user_id")
-  status         SubscriptionStatus @default(ACTIVE) @map("status")
-  isTrial        Boolean            @default(false) @map("is_trial")
+  id                         String             @id @default(cuid()) @map("id")
+  userId                     String             @map("user_id")
+  status                     SubscriptionStatus @default(ACTIVE) @map("status")
+  isTrial                    Boolean            @default(false) @map("is_trial")
   /// Snapshot of the plan at purchase time (id, name, type, limits, ...).
-  planSnapshot   Json               @default("{}") @map("plan_snapshot")
-  trafficLimit   Int?               @map("traffic_limit")
-  deviceLimit    Int                @default(0) @map("device_limit")
-  internalSquads String[]           @default([]) @map("internal_squads")
-  externalSquad  String?            @map("external_squad")
+  planSnapshot               Json               @default("{}") @map("plan_snapshot")
+  trafficLimit               Int?               @map("traffic_limit")
+  deviceLimit                Int                @default(0) @map("device_limit")
+  /// When `deviceLimit` last became MORE restrictive — a plan downgrade, an
+  /// admin edit, an add-on expiry, a panel-side change mirrored back by the
+  /// webhook. `null` = never reduced (the overwhelming majority of rows).
+  ///
+  /// Written by the `subscriptions_stamp_device_limit_reduction` BEFORE UPDATE
+  /// trigger, NOT by application code — see the migration for why. Read by
+  /// `SharingDetectors.detectHwidOverage`, which must not accuse a customer of
+  /// sharing when their device overage is just a downgrade they chose: the
+  /// panel keeps HWID rows forever and nothing on the limit-change path deletes
+  /// them, so the surplus is our bookkeeping, not their behaviour.
+  ///
+  /// NEVER READ THIS WITHOUT `deviceLimitBeforeReduction`. On its own it says
+  /// only THAT a reduction happened, never how much of an overage it accounts
+  /// for, and a detector that suppresses on the timestamp alone hands a genuine
+  /// sharer 14 days of immunity for the price of a downgrade.
+  ///
+  /// "More restrictive" follows the product's `deviceLimit <= 0 ⇒ unlimited`
+  /// convention, so unlimited → 5 is a reduction and 5 → unlimited is not.
+  deviceLimitReducedAt       DateTime?          @map("device_limit_reduced_at") @db.Timestamptz(3)
+  /// What `deviceLimit` was immediately BEFORE the reduction that
+  /// `deviceLimitReducedAt` records — the ceiling that reduction explains.
+  ///
+  /// Stamped by the same trigger, in the same assignment block, so the pair can
+  /// never disagree about one event. Three distinct states, and the detector
+  /// treats them differently:
+  ///
+  ///   `null`  the limit was never reduced, and `deviceLimitReducedAt` is null
+  ///           too — the pair is written together or not at all. A stamp WITHOUT
+  ///           a ceiling is therefore unreachable; the detector treats it as an
+  ///           anomaly to judge and report, never as an excuse, because immunity
+  ///           granted on provenance we cannot explain is exactly what a sharer
+  ///           would buy with a downgrade.
+  ///   `0`     previously UNLIMITED (the `<= 0 ⇒ unlimited` convention). The
+  ///           customer was entitled to any number of devices, so no count of
+  ///           them is unexplained.
+  ///   `> 0`   the finite old limit. A registered-device count at or below it
+  ///           would not have been an overage before we moved the line; a count
+  ///           above it is not explained by the reduction at all.
+  deviceLimitBeforeReduction Int?               @map("device_limit_before_reduction")
+  internalSquads             String[]           @default([]) @map("internal_squads")
+  externalSquad              String?            @map("external_squad")
   /// Remnawave subscription user UUID. `null` until the profile sync job
   /// successfully creates the upstream record.
-  remnawaveId    String?            @map("remnawave_id")
+  remnawaveId                String?            @map("remnawave_id")
   /// User-facing connect URL.
-  configUrl      String?            @map("config_url")
-  startedAt      DateTime?          @map("started_at") @db.Timestamptz(3)
-  expiresAt      DateTime?          @map("expires_at") @db.Timestamptz(3)
-  deviceType     DeviceType?        @map("device_type")
+  configUrl                  String?            @map("config_url")
+  startedAt                  DateTime?          @map("started_at") @db.Timestamptz(3)
+  expiresAt                  DateTime?          @map("expires_at") @db.Timestamptz(3)
+  deviceType                 DeviceType?        @map("device_type")
   /// Optional per-subscription card-appearance override. Lets multi-sub
   /// users get a distinct animated background per card. Shape mirrors the
   /// branding card fields: `{ cardEffect, cardEffectProps, cardEffectOpacity,
   /// cardGradient }`. `null`/empty = inherit the global branding.
-  cardBranding   Json?              @map("card_branding")
-  createdAt      DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt      DateTime           @updatedAt @map("updated_at") @db.Timestamptz(3)
+  cardBranding               Json?              @map("card_branding")
+  createdAt                  DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt                  DateTime           @updatedAt @map("updated_at") @db.Timestamptz(3)
 
   user                    User                             @relation("UserSubscriptions", fields: [userId], references: [id], onDelete: Cascade)
   currentSubscriptionOf   User?                            @relation("UserCurrentSubscription")
@@ -2224,6 +2362,13 @@ model Settings {
   customIcons               Json       @default("[]") @map("custom_icons")
   /// AI-Support settings (baseUrl, apiKey, model, modelsEndpoint).
   aiSupportSettings         Json       @default("{}") @map("ai_support_settings")
+  /// Anti-fraud detector tunables (panel-managed, ANTIFRAUD_* env fallback).
+  /// Shape: `{ sharing?: {...}, trafficAbuse?: {...} }`, both sparse — a key
+  /// absent here means "use the environment variable", a key present WINS over
+  /// it. Never stores a whole config object: a filled-in default would freeze
+  /// the env fallback out permanently. Read by the three detectors through
+  /// `AntiFraudTunablesService`; ranges live in the anti-fraud config files.
+  antiFraudSettings         Json       @default("{}") @map("anti_fraud_settings")
   updatedAt                 DateTime   @updatedAt @map("updated_at") @db.Timestamptz(3)
 
   @@map("settings")
@@ -3384,13 +3529,18 @@ model RemnawaveWebhookEvent {
   /// Raw payload from the webhook (sanitized — no secrets).
   payload     Json     @default("{}") @map("payload")
   /// Whether this event has been processed/displayed.
+  ///
+  /// Never written as `true` by anything: `handleEvent` does all of its work
+  /// synchronously at insert time, so there is no second pass to record. Kept
+  /// (and still shipped in `WebhookEventSummary`) only because dropping a
+  /// column is not free; deliberately NOT indexed — see the
+  /// `20260806160000_drop_remnawave_webhook_is_processed_index` migration.
   isProcessed Boolean  @default(false) @map("is_processed")
   /// Source IP of the webhook request.
   sourceIp    String?  @map("source_ip")
   createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
 
   @@index([eventType])
-  @@index([isProcessed])
   @@index([createdAt])
   @@map("remnawave_webhook_events")
 }

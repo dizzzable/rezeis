@@ -24,14 +24,24 @@ import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.inter
 import { extractRequestMetadata } from '../../auth/utils/request-metadata.util';
 import { RequirePermission } from '../../rbac/decorators/require-permission.decorator';
 import { RbacGuard } from '../../rbac/guards/rbac.guard';
+import {
+  CreateFraudExemptionDto,
+  ListFraudExemptionsQueryDto,
+} from '../dto/create-fraud-exemption.dto';
 import { EnforceFraudSignalDto } from '../dto/enforce-fraud-signal.dto';
 import { ListFraudSignalsQueryDto } from '../dto/list-fraud-signals.dto';
 import { TransitionFraudSignalDto } from '../dto/transition-fraud-signal.dto';
+import { DetectorAccuracyReport } from '../interfaces/detector-accuracy.interface';
 import {
   FraudSignalInterface,
   ListFraudSignalsResult,
 } from '../interfaces/fraud-signal.interface';
-import { AntiFraudService } from '../services/anti-fraud.service';
+import {
+  AntiFraudService,
+  type FraudExemptionInterface,
+  type PendingFraudCandidateInterface,
+} from '../services/anti-fraud.service';
+import { DetectorAccuracyService } from '../services/detector-accuracy.service';
 
 interface FraudStatsResponse {
   readonly open: number;
@@ -46,7 +56,10 @@ interface FraudStatsResponse {
 @UseGuards(AdminJwtAuthGuard, RbacGuard)
 @Controller('admin/fraud')
 export class AdminFraudController {
-  public constructor(private readonly antiFraudService: AntiFraudService) {}
+  public constructor(
+    private readonly antiFraudService: AntiFraudService,
+    private readonly detectorAccuracyService: DetectorAccuracyService,
+  ) {}
 
   @Get('signals')
   @RequirePermission('fraud_signals', 'view')
@@ -85,6 +98,25 @@ export class AdminFraudController {
   public getTopOffenders(@Query('limit') limit?: string) {
     const parsed = Number.parseInt(limit ?? '10', 10);
     return this.antiFraudService.getTopOffenders(Number.isFinite(parsed) ? parsed : 10);
+  }
+
+  /**
+   * Per-detector-code accuracy over a window: opened, still open, resolved
+   * (split by whether a human or the detector run closed it) and dismissed as a
+   * false positive.
+   *
+   * `view`, matching every other read on this controller — checked against the
+   * neighbours and not guessed. It is strictly read-only: the service behind it
+   * issues nothing but `groupBy`, so an operator can look at their own
+   * dismissal rate without that being an action on any signal.
+   */
+  @Get('detector-accuracy')
+  @RequirePermission('fraud_signals', 'view')
+  @ApiOperation({ summary: 'Per-detector dismissal / resolution counts over a window' })
+  @ApiOkResponse({ description: 'Counts and false-positive rate per detector code' })
+  public getDetectorAccuracy(@Query('days') days?: string): Promise<DetectorAccuracyReport> {
+    const parsed = Number.parseInt(days ?? '30', 10);
+    return this.detectorAccuracyService.getReport(Number.isFinite(parsed) ? parsed : 30);
   }
 
   @Get('signals/:id')
@@ -140,6 +172,82 @@ export class AdminFraudController {
     return this.antiFraudService.enforceDropConnections({
       signalId: id,
       mode: dto.mode ?? 'user',
+      adminId: admin.id,
+      requestMetadata: extractRequestMetadata(req),
+    });
+  }
+
+  // ── Held candidates & exemptions ───────────────────────────────────────
+
+  /**
+   * Everything the detectors saw and declined to file — conditions still
+   * gathering evidence and conditions an exemption is swallowing.
+   *
+   * `view`, like every other read here: this surface only ever tells an
+   * operator what is NOT being reported, which is information a read-only role
+   * needs more than most.
+   */
+  @Get('pending')
+  @RequirePermission('fraud_signals', 'view')
+  @ApiOperation({ summary: 'Candidates held back for sustained evidence or by an exemption' })
+  public getPending(@Query('limit') limit?: string): Promise<readonly PendingFraudCandidateInterface[]> {
+    const parsed = Number.parseInt(limit ?? '50', 10);
+    return this.antiFraudService.listPendingCandidates(Number.isFinite(parsed) ? parsed : 50);
+  }
+
+  @Get('exemptions')
+  @RequirePermission('fraud_signals', 'view')
+  @ApiOperation({ summary: 'Lists anti-fraud exemptions (history included by default)' })
+  public listExemptions(
+    @Query() query: ListFraudExemptionsQueryDto,
+  ): Promise<readonly FraudExemptionInterface[]> {
+    return this.antiFraudService.listExemptions({
+      userId: query.userId,
+      activeOnly: query.activeOnly === true,
+      limit: 100,
+    });
+  }
+
+  /**
+   * `resolve`, not a new action and not `enforce`.
+   *
+   * Checked against the neighbours rather than guessed: reads on this
+   * controller take `view`, `enforce` is reserved for the one destructive panel
+   * call (`ip-control` drop), and `resolve` is what gates
+   * `POST /signals/:id/transition` — i.e. "Dismiss — false positive". An
+   * exemption is that same judgement made durable and forward-looking, so it
+   * belongs to whoever is already trusted to make it once.
+   */
+  @Post('exemptions')
+  @HttpCode(HttpStatus.CREATED)
+  @RequirePermission('fraud_signals', 'resolve')
+  @ApiOperation({ summary: 'Exempts a user from specific detector codes until a date' })
+  public createExemption(
+    @Body() dto: CreateFraudExemptionDto,
+    @CurrentAdmin() admin: CurrentAdminInterface,
+    @Req() req: Request,
+  ): Promise<FraudExemptionInterface> {
+    return this.antiFraudService.createExemption({
+      userId: dto.userId,
+      codes: dto.codes,
+      reason: dto.reason,
+      expiresAt: new Date(dto.expiresAt),
+      adminId: admin.id,
+      requestMetadata: extractRequestMetadata(req),
+    });
+  }
+
+  @Post('exemptions/:id/revoke')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('fraud_signals', 'resolve')
+  @ApiOperation({ summary: 'Revokes an exemption (the row is kept for the audit trail)' })
+  public revokeExemption(
+    @Param('id') id: string,
+    @CurrentAdmin() admin: CurrentAdminInterface,
+    @Req() req: Request,
+  ): Promise<FraudExemptionInterface> {
+    return this.antiFraudService.revokeExemption({
+      id,
       adminId: admin.id,
       requestMetadata: extractRequestMetadata(req),
     });

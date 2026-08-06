@@ -3,13 +3,18 @@ import 'reflect-metadata';
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { RequestMethod } from '@nestjs/common';
+import { BadGatewayException, RequestMethod, ServiceUnavailableException } from '@nestjs/common';
 import { GUARDS_METADATA, METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 import { SubscriptionStatus } from '@prisma/client';
 
 import { EVENT_TYPES, SystemEventsService } from '../src/common/services/system-events.service';
 import { InternalAdminAuthGuard } from '../src/modules/auth/guards/internal-admin-auth.guard';
 import { InternalUserDevicesController } from '../src/modules/internal-user/controllers/internal-user-devices.controller';
+import {
+  strictInvalidContract,
+  strictOk,
+  strictUnavailable,
+} from '../src/modules/remnawave/interfaces/remnawave-strict-outcome.interface';
 import { RemnawaveApiService } from '../src/modules/remnawave/services/remnawave-api.service';
 
 interface MockPrismaService {
@@ -56,9 +61,9 @@ describe('InternalUserDevicesController', () => {
     const controller = new InternalUserDevicesController(
       createMockPrismaService({ activeSubscription: createSubscription() }) as never,
       {
-        getPanelUserDevices: async (remnawaveId: string) => {
+        strictGetPanelUserDevices: async (remnawaveId: string) => {
           remnawaveCalls.push(remnawaveId);
-          return {
+          return strictOk({
             total: 1,
             devices: [
               {
@@ -71,9 +76,9 @@ describe('InternalUserDevicesController', () => {
                 lastSeenAt: '2026-04-20T11:30:00.000Z',
               },
             ],
-          };
+          });
         },
-      } as RemnawaveApiService,
+      } as unknown as RemnawaveApiService,
       createEventsMock() as unknown as SystemEventsService,
     );
 
@@ -101,16 +106,85 @@ describe('InternalUserDevicesController', () => {
     const controller = new InternalUserDevicesController(
       createMockPrismaService({ activeSubscription: null }) as never,
       {
-        getPanelUserDevices: async (remnawaveId: string) => {
+        strictGetPanelUserDevices: async (remnawaveId: string) => {
           remnawaveCalls.push(remnawaveId);
-          return { total: 0, devices: [] };
+          return strictOk({ total: 0, devices: [] });
         },
-      } as RemnawaveApiService,
+      } as unknown as RemnawaveApiService,
       createEventsMock() as unknown as SystemEventsService,
     );
 
     assert.deepStrictEqual(await controller.listDevices('123456789'), { devices: [], total: 0 });
     assert.deepStrictEqual(remnawaveCalls, []);
+  });
+
+  // ── Panel-outage vs genuinely-empty (customer cabinet) ──────────────────
+  //
+  // These two run the SAME controller method against the SAME subscription and
+  // differ only in what the panel answered. If the pair ever agrees, the
+  // distinction has been swallowed again.
+
+  it('does NOT report "0 devices" to the cabinet when the panel is unreachable', async () => {
+    const remnawaveCalls: string[] = [];
+    const controller = new InternalUserDevicesController(
+      createMockPrismaService({ activeSubscription: createSubscription() }) as never,
+      {
+        strictGetPanelUserDevices: async (remnawaveId: string) => {
+          remnawaveCalls.push(remnawaveId);
+          return strictUnavailable(null);
+        },
+      } as unknown as RemnawaveApiService,
+      createEventsMock() as unknown as SystemEventsService,
+    );
+
+    const failure = await captureRejection(async () => controller.listDevices('123456789'));
+
+    // Self-check: the controller must actually have consulted the panel — a
+    // test that passes because the read never happened proves nothing.
+    assert.deepStrictEqual(remnawaveCalls, ['rem-user-1']);
+    assert.equal(failure instanceof ServiceUnavailableException, true);
+    assert.equal((failure as ServiceUnavailableException).getStatus(), 503);
+    // The reason is in the RESPONSE body, not only in a log.
+    assert.match(String((failure as Error).message), /unavailable/i);
+  });
+
+  it('still reports a genuinely empty panel device list to the cabinet as an empty list', async () => {
+    const remnawaveCalls: string[] = [];
+    const controller = new InternalUserDevicesController(
+      createMockPrismaService({ activeSubscription: createSubscription() }) as never,
+      {
+        strictGetPanelUserDevices: async (remnawaveId: string) => {
+          remnawaveCalls.push(remnawaveId);
+          return strictOk({ total: 0, devices: [] });
+        },
+      } as unknown as RemnawaveApiService,
+      createEventsMock() as unknown as SystemEventsService,
+    );
+
+    assert.deepStrictEqual(await controller.listDevices('123456789'), { total: 0, devices: [] });
+    assert.deepStrictEqual(remnawaveCalls, ['rem-user-1']);
+  });
+
+  it('does NOT report "0 devices" for a selected subscription when the panel answers unusably', async () => {
+    const remnawaveCalls: string[] = [];
+    const controller = new InternalUserDevicesController(
+      createMockPrismaService({ ownedSubscription: createSubscription() }) as never,
+      {
+        strictGetPanelUserDevices: async (remnawaveId: string) => {
+          remnawaveCalls.push(remnawaveId);
+          return strictInvalidContract('device list "devices" is not an array');
+        },
+      } as unknown as RemnawaveApiService,
+      createEventsMock() as unknown as SystemEventsService,
+    );
+
+    const failure = await captureRejection(async () =>
+      controller.listSubscriptionDevices('123456789', 'subscription-1'),
+    );
+
+    assert.deepStrictEqual(remnawaveCalls, ['rem-user-1']);
+    assert.equal(failure instanceof BadGatewayException, true);
+    assert.equal((failure as BadGatewayException).getStatus(), 502);
   });
 
   it('deletes an explicit subscription device, emits the current event payload, and returns remaining count', async () => {
@@ -139,6 +213,7 @@ describe('InternalUserDevicesController', () => {
       {
         type: EVENT_TYPES.SUBSCRIPTION_DEVICE_REVOKED,
         entityType: 'DEVICE',
+        severity: 'INFO',
         message: 'Device revoked by user: hwid-to-delete',
         metadata: {
           userId: 'user-1',
@@ -154,33 +229,40 @@ describe('InternalUserDevicesController', () => {
     ]);
   });
 
-  it('regenerates a subscription link, clears devices, and persists the new config URL', async () => {
-    const remnawaveCalls: Array<{ method: string; remnawaveId: string }> = [];
+  it('regenerates a subscription link, persists the new config URL BEFORE clearing devices', async () => {
+    // One ordered trace for both the panel calls and the local write: the
+    // defect was purely an ordering one, so the assertion has to be on the
+    // order, not on the set of things that happened.
+    const trace: string[] = [];
     const persistedUpdates: unknown[] = [];
     const events = createEventsMock();
     const controller = new InternalUserDevicesController(
       createMockPrismaService({
         ownedSubscription: createSubscription(),
-        onSubscriptionUpdate: (input) => persistedUpdates.push(input),
+        onSubscriptionUpdate: (input) => {
+          trace.push('persist');
+          persistedUpdates.push(input);
+        },
       }) as never,
       {
         regeneratePanelUserSubscription: async (remnawaveId: string) => {
-          remnawaveCalls.push({ method: 'regenerate', remnawaveId });
+          trace.push(`regenerate:${remnawaveId}`);
           return { subscriptionUrl: 'https://remnawave.example/sub/new-link' };
         },
         deleteAllPanelUserDevices: async (remnawaveId: string) => {
-          remnawaveCalls.push({ method: 'delete-all', remnawaveId });
+          trace.push(`delete-all:${remnawaveId}`);
           return { total: 0 };
         },
-      } as RemnawaveApiService,
+      } as unknown as RemnawaveApiService,
       events as unknown as SystemEventsService,
     );
 
     const actualResponse = await controller.regenerateSubscription('123456789', 'subscription-1');
 
-    assert.deepStrictEqual(remnawaveCalls, [
-      { method: 'regenerate', remnawaveId: 'rem-user-1' },
-      { method: 'delete-all', remnawaveId: 'rem-user-1' },
+    assert.deepStrictEqual(trace, [
+      'regenerate:rem-user-1',
+      'persist',
+      'delete-all:rem-user-1',
     ]);
     assert.deepStrictEqual(persistedUpdates, [
       {
@@ -191,19 +273,147 @@ describe('InternalUserDevicesController', () => {
     assert.deepStrictEqual(actualResponse, {
       regenerated: true,
       url: 'https://remnawave.example/sub/new-link',
+      devicesCleared: true,
     });
     assert.deepStrictEqual(events.calls[0], {
       type: EVENT_TYPES.SUBSCRIPTION_DEVICE_REVOKED,
       entityType: 'DEVICE',
+      severity: 'INFO',
       message: 'Subscription link regenerated by user (all devices revoked)',
       metadata: {
         userId: 'user-1',
         subscriptionId: 'subscription-1',
         remnawaveId: 'rem-user-1',
+        devicesCleared: true,
       },
     });
   });
+
+  it('keeps the new link when the device wipe fails after the panel already rotated it', async () => {
+    // The exact production failure: the panel has rotated the short uuid (every
+    // old client link is dead) and the very next call blows up. If the new URL
+    // is not already written down, the cabinet serves the dead one forever.
+    const persistedUpdates: unknown[] = [];
+    const events = createEventsMock();
+    const controller = new InternalUserDevicesController(
+      createMockPrismaService({
+        ownedSubscription: createSubscription(),
+        onSubscriptionUpdate: (input) => persistedUpdates.push(input),
+      }) as never,
+      {
+        regeneratePanelUserSubscription: async () => ({
+          subscriptionUrl: 'https://remnawave.example/sub/new-link',
+        }),
+        deleteAllPanelUserDevices: async () => {
+          throw new ServiceUnavailableException('Remnawave integration is unavailable');
+        },
+      } as unknown as RemnawaveApiService,
+      events as unknown as SystemEventsService,
+    );
+
+    const actualResponse = await controller.regenerateSubscription('123456789', 'subscription-1');
+
+    // Self-check: assert the URL that was stored, not merely that a write ran —
+    // a persist of the OLD url would satisfy a bare "one update happened".
+    assert.deepStrictEqual(persistedUpdates, [
+      {
+        where: { id: 'subscription-1' },
+        data: { configUrl: 'https://remnawave.example/sub/new-link' },
+      },
+    ]);
+    // The link works, so the customer is not pushed into re-rotating it; the
+    // uncleared devices are reported rather than hidden.
+    assert.deepStrictEqual(actualResponse, {
+      regenerated: true,
+      url: 'https://remnawave.example/sub/new-link',
+      devicesCleared: false,
+    });
+    assert.equal(
+      events.calls[0]?.message,
+      'Subscription link regenerated by user (devices NOT cleared — panel refused)',
+    );
+  });
+
+  it('fails loudly instead of reporting success when the new link cannot be persisted', async () => {
+    const events = createEventsMock();
+    const controller = new InternalUserDevicesController(
+      createMockPrismaService({
+        ownedSubscription: createSubscription(),
+        onSubscriptionUpdate: () => {
+          throw new Error('database write failed');
+        },
+      }) as never,
+      {
+        regeneratePanelUserSubscription: async () => ({
+          subscriptionUrl: 'https://remnawave.example/sub/new-link',
+        }),
+        deleteAllPanelUserDevices: async () => {
+          throw new Error('the device wipe must never run once the persist has failed');
+        },
+      } as unknown as RemnawaveApiService,
+      events as unknown as SystemEventsService,
+    );
+
+    const failure = await captureRejection(async () =>
+      controller.regenerateSubscription('123456789', 'subscription-1'),
+    );
+
+    assert.equal((failure as Error).message, 'database write failed');
+    // An operator has to learn that our stored link is now dead — this is the
+    // one state the endpoint cannot repair by itself.
+    assert.deepStrictEqual(
+      events.calls.map((call) => ({
+        type: call.type,
+        entityType: call.entityType,
+        severity: call.severity,
+      })),
+      [{ type: EVENT_TYPES.SUBSCRIPTION_SYNCED, entityType: 'SUBSCRIPTION', severity: 'ERROR' }],
+    );
+    assert.match(String(events.calls[0]?.message), /NOT stored/);
+  });
+
+  it('refuses to report success when the panel rotates the link without returning the new one', async () => {
+    const persistedUpdates: unknown[] = [];
+    const events = createEventsMock();
+    const controller = new InternalUserDevicesController(
+      createMockPrismaService({
+        ownedSubscription: createSubscription(),
+        onSubscriptionUpdate: (input) => persistedUpdates.push(input),
+      }) as never,
+      {
+        regeneratePanelUserSubscription: async () => ({ subscriptionUrl: null }),
+        deleteAllPanelUserDevices: async () => ({ total: 0 }),
+      } as unknown as RemnawaveApiService,
+      events as unknown as SystemEventsService,
+    );
+
+    const failure = await captureRejection(async () =>
+      controller.regenerateSubscription('123456789', 'subscription-1'),
+    );
+
+    assert.equal(failure instanceof BadGatewayException, true);
+    assert.deepStrictEqual(persistedUpdates, []);
+    assert.deepStrictEqual(
+      events.calls.map((call) => ({ type: call.type, severity: call.severity })),
+      [{ type: EVENT_TYPES.SUBSCRIPTION_SYNCED, severity: 'ERROR' }],
+    );
+  });
 });
+
+/**
+ * Runs `action` and returns whatever it threw. Fails the test if it did NOT
+ * throw — otherwise every "must reject" assertion below could pass on a method
+ * that quietly returned a value.
+ */
+async function captureRejection(action: () => Promise<unknown>): Promise<unknown> {
+  try {
+    const resolved = await action();
+    assert.fail(`expected a rejection, got ${JSON.stringify(resolved)}`);
+  } catch (err: unknown) {
+    if (err instanceof assert.AssertionError) throw err;
+    return err;
+  }
+}
 
 function assertRoute(requestMethod: RequestMethod, path: string, target: unknown): void {
   assert.equal(Reflect.getMetadata(METHOD_METADATA, target), requestMethod);
@@ -266,19 +476,25 @@ function createEventsMock(): {
     readonly entityType: string;
     readonly message: string;
     readonly metadata: unknown;
+    readonly severity: 'INFO' | 'ERROR';
   }>;
   readonly info: (type: string, entityType: string, message: string, metadata: unknown) => void;
+  readonly error: (type: string, entityType: string, message: string, metadata: unknown) => void;
 } {
   const calls: Array<{
     readonly type: string;
     readonly entityType: string;
     readonly message: string;
     readonly metadata: unknown;
+    readonly severity: 'INFO' | 'ERROR';
   }> = [];
   return {
     calls,
     info: (type: string, entityType: string, message: string, metadata: unknown): void => {
-      calls.push({ type, entityType, message, metadata });
+      calls.push({ type, entityType, message, metadata, severity: 'INFO' });
+    },
+    error: (type: string, entityType: string, message: string, metadata: unknown): void => {
+      calls.push({ type, entityType, message, metadata, severity: 'ERROR' });
     },
   };
 }

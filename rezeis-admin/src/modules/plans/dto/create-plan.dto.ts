@@ -19,10 +19,24 @@ import {
 
 import { AdminPlanDurationDto } from './admin-plan-duration.dto';
 import { ArchivedPlanRenewModeValue } from '../utils/archived-plan-renew-mode.util';
+import {
+  REMNAWAVE_TAG_MAX_LENGTH,
+  REMNAWAVE_TAG_MESSAGE,
+  REMNAWAVE_TAG_PATTERN,
+} from '../utils/remnawave-tag.util';
 import { TrafficLimitStrategyValue } from './traffic-limit-strategy.dto';
 
-function trimString(value: unknown): unknown {
+export function trimString(value: unknown): unknown {
   return typeof value === 'string' ? value.trim() : value;
+}
+
+/**
+ * `null` clears the tag and `''` is the form's way of saying the same thing
+ * (`normalizeNullableString` collapses it), so neither is run through the panel
+ * rule — only a value the operator actually typed is.
+ */
+export function isTagValueProvided(_object: object, value: unknown): boolean {
+  return value !== null && value !== '';
 }
 
 /**
@@ -62,11 +76,16 @@ export class CreatePlanDto {
   @MaxLength(4096)
   public description?: string | null;
 
+  /**
+   * Restated from the panel contract — see `remnawave-tag.util.ts` for why the
+   * boundary is here and not only in the sync path.
+   */
   @Transform(({ value }: { readonly value: unknown }): unknown => trimString(value))
   @IsOptional()
-  @ValidateIf((_object: object, value: unknown): boolean => value !== null)
+  @ValidateIf(isTagValueProvided)
   @IsString()
-  @MaxLength(64)
+  @MaxLength(REMNAWAVE_TAG_MAX_LENGTH)
+  @Matches(REMNAWAVE_TAG_PATTERN, { message: REMNAWAVE_TAG_MESSAGE })
   public tag?: string | null;
 
   @Transform(({ value }: { readonly value: unknown }): unknown => trimString(value))

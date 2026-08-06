@@ -21,6 +21,7 @@ import {
   panelSubscriptionState,
   reconcileMissingPanelStatus,
   resolvePanelProfile,
+  type PanelAbsenceProbe,
   type PanelLookup,
 } from '../utils/remnawave-overlay.util';
 import {
@@ -136,7 +137,15 @@ export class StealthnetImporterService {
     // profiles the panel still has get refreshed from it (the truth), profiles
     // it no longer has become EXPIRED. Scales past the bulk ceiling via a
     // targeted per-UUID fallback; fail-soft to backup values if unreachable.
-    const panelLookup = await buildPanelLookup(() => this.remnawaveApiService.getAllPanelUsers());
+    //
+    // This importer passes a hardcoded ACTIVE to `reconcileMissingPanelStatus`,
+    // so an unverified miss expires UNCONDITIONALLY — it therefore depends on
+    // the bulk read refusing rather than shortening (see `buildPanelLookup`)
+    // AND on the per-UUID fallback proving a 404 before it calls a profile gone
+    // (see `panelAbsenceProbe`).
+    const panelLookup = await buildPanelLookup(() =>
+      this.remnawaveApiService.strictGetAllPanelUsers(),
+    );
 
     const errors: string[] = [];
     let created = 0;
@@ -448,6 +457,29 @@ export class StealthnetImporterService {
 
   // ── Subscription sync ─────────────────────────────────────────────────────
 
+  /**
+   * The strict half of a per-UUID miss confirmation (see
+   * {@link resolvePanelProfile}). This importer is the one that hands
+   * `reconcileMissingPanelStatus` a hardcoded ACTIVE, so an unproven miss
+   * expires unconditionally — it needs a read that can tell a 404 from a 502.
+   *
+   * `strictGetPanelUserExpiry` rather than `strictGetPanelUser`: all we need
+   * from it is 404-vs-everything-else, and the wide parser fails closed on nine
+   * fields this importer never reads (`tag` shape, squad encoding,
+   * `trafficLimitStrategy`), so one unrelated contract drift would turn EVERY
+   * confirmation into `invalidContract` and quietly switch off the expiry half
+   * of the overlay for whole runs.
+   */
+  private panelAbsenceProbe(): PanelAbsenceProbe {
+    return {
+      confirmAbsence: (uuid) => this.remnawaveApiService.strictGetPanelUserExpiry(uuid),
+      onUnconfirmed: (uuid, reason) =>
+        this.logger.warn(
+          `STEALTHNET import: panel state for ${uuid} is unconfirmed (${reason}) — keeping the subscription live instead of expiring it`,
+        ),
+    };
+  }
+
   private async syncSubscription(
     userId: string,
     sub: StealthnetSubscription,
@@ -500,13 +532,15 @@ export class StealthnetImporterService {
     };
 
     // Remnawave is the source of truth. If the panel still has this profile,
-    // overlay its FRESH state (active subscriptions become accurate). If it's
-    // gone from the panel, the subscription is no longer live → EXPIRED, kept
-    // locally so the user can re-buy through the bot.
+    // overlay its FRESH state (active subscriptions become accurate). If the
+    // panel PROVES it is gone (404), the subscription is no longer live →
+    // EXPIRED, kept locally so the user can re-buy through the bot. A panel
+    // that merely failed to answer proves nothing and keeps the row live.
     const { panel, known } = await resolvePanelProfile(
       sub.remnawave_uuid,
       panelLookup,
       (uuid) => this.remnawaveApiService.getPanelUser(uuid),
+      this.panelAbsenceProbe(),
     );
     const backupExpiresAt = parseOptionalDate(sub.expire_at);
     const dataShared = panel

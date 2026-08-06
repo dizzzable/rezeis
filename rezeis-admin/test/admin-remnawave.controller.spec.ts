@@ -55,4 +55,28 @@ describe('AdminRemnawaveController', () => {
     assert.equal(statusCallsCount, 1);
     assert.deepStrictEqual(actualStatus, expectedStatus);
   });
+
+  it('reads capabilities from cache — the route takes no cache-bypass argument', async () => {
+    const forcedFlags: unknown[] = [];
+    const controller = new AdminRemnawaveController(
+      {} as never,
+      {} as never,
+      {} as never,
+      {
+        getCapabilities: async (force?: boolean) => {
+          forcedFlags.push(force);
+          return { version: '2.8.0' } as never;
+        },
+      } as never,
+    );
+
+    await controller.getCapabilities();
+
+    // The route must never hand the service a truthy `force`: it inherits the
+    // read-only `remnawave:view` permission and has no throttle of its own, so
+    // a cache bypass here would let a viewer drive unbounded upstream panel
+    // calls and overwrite the shared capability cache. The 15s negative TTL is
+    // what bounds a bad cached state.
+    assert.deepStrictEqual(forcedFlags, [undefined]);
+  });
 });

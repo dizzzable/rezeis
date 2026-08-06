@@ -31,6 +31,7 @@ import {
   panelSubscriptionState,
   reconcileMissingPanelStatus,
   resolvePanelProfile,
+  type PanelAbsenceProbe,
   type PanelLookup,
 } from '../utils/remnawave-overlay.util';
 import type {
@@ -230,7 +231,9 @@ export class AltshopImporterService {
     const webAccountByTelegramId = firstByKey(input.webAccounts ?? [], (row) => row.user_telegram_id);
     const subscriptionsByTelegramId = groupBy(subscriptions, (row) => row.user_telegram_id);
     const transactionsByTelegramId = groupBy(transactions, (row) => row.user_telegram_id);
-    const panelLookup = await buildPanelLookup(() => this.remnawaveApiService.getAllPanelUsers());
+    const panelLookup = await buildPanelLookup(() =>
+      this.remnawaveApiService.strictGetAllPanelUsers(),
+    );
 
     const errors: string[] = [];
     const createdUserIds: string[] = [];
@@ -479,6 +482,25 @@ export class AltshopImporterService {
     }
   }
 
+  /**
+   * The strict half of a per-UUID miss confirmation (see
+   * {@link resolvePanelProfile}). `strictGetPanelUserExpiry` rather than
+   * `strictGetPanelUser`: all we need from it is 404-vs-everything-else, and
+   * the wide parser fails closed on nine fields this importer never reads
+   * (`tag` shape, squad encoding, `trafficLimitStrategy`), so one unrelated
+   * contract drift would turn EVERY confirmation into `invalidContract` and
+   * quietly switch off the expiry half of the overlay for whole runs.
+   */
+  private panelAbsenceProbe(): PanelAbsenceProbe {
+    return {
+      confirmAbsence: (uuid) => this.remnawaveApiService.strictGetPanelUserExpiry(uuid),
+      onUnconfirmed: (uuid, reason) =>
+        this.logger.warn(
+          `Altshop import: panel state for ${uuid} is unconfirmed (${reason}) — keeping the backup value instead of expiring it`,
+        ),
+    };
+  }
+
   private async syncSubscription(
     userId: string,
     expectedTelegramId: number,
@@ -492,8 +514,11 @@ export class AltshopImporterService {
       where: { remnawaveId },
       select: { id: true, userId: true, planSnapshot: true },
     });
-    const { panel, known } = await resolvePanelProfile(remnawaveId, panelLookup, (uuid) =>
-      this.remnawaveApiService.getPanelUser(uuid),
+    const { panel, known } = await resolvePanelProfile(
+      remnawaveId,
+      panelLookup,
+      (uuid) => this.remnawaveApiService.getPanelUser(uuid),
+      this.panelAbsenceProbe(),
     );
     if (
       panel &&

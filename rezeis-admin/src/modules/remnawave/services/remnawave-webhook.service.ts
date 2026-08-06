@@ -36,9 +36,27 @@ const REMNAWAVE_WEBHOOK_EVENT_MAP: Record<
   'user.enabled': { type: EVENT_TYPES.REMNAWAVE_USER_ENABLED, category: 'REMNAWAVE', severity: 'INFO' },
   'user.disabled': { type: EVENT_TYPES.REMNAWAVE_USER_DISABLED, category: 'REMNAWAVE', severity: 'WARNING' },
   'user.traffic_reset': { type: EVENT_TYPES.REMNAWAVE_USER_TRAFFIC_RESET, category: 'REMNAWAVE', severity: 'INFO' },
+  // Expiry warnings. ONE build serves both supported panel versions, so both
+  // spellings have to be here:
+  //   * 2.7.4 raises one of four discrete names. Three are mapped below; the
+  //     fourth, `user.expired_24_hours_ago`, is deliberately NOT mapped —
+  //     `user.expired` has already produced a card by then and a second one a
+  //     day later is duplicate noise. That predates this map and stays as is.
+  //   * 2.8.0 REMOVED all four from `RemnawaveWebhookUserEventsDto.event` and
+  //     replaced them with a single `user.expiration`, moving the
+  //     distinguishing number into the envelope's `meta.expiration`
+  //     (see `extractEventMetadata`). Without the key below, an expire-soon
+  //     event on a 2.8.0 panel produced no audit entry, no realtime card, no
+  //     Telegram message and no outbound webhook.
   'user.expires_in_24_hours': { type: EVENT_TYPES.REMNAWAVE_USER_EXPIRE_SOON, category: 'REMNAWAVE', severity: 'INFO' },
   'user.expires_in_48_hours': { type: EVENT_TYPES.REMNAWAVE_USER_EXPIRE_SOON, category: 'REMNAWAVE', severity: 'INFO' },
   'user.expires_in_72_hours': { type: EVENT_TYPES.REMNAWAVE_USER_EXPIRE_SOON, category: 'REMNAWAVE', severity: 'INFO' },
+  'user.expiration': { type: EVENT_TYPES.REMNAWAVE_USER_EXPIRE_SOON, category: 'REMNAWAVE', severity: 'INFO' },
+  // NOT in either version's `event` enum — no Remnawave panel raises this.
+  // Kept purely as a defensive alias for relays/proxies that normalize the
+  // name themselves: an unused key costs one property lookup, whereas deleting
+  // it would silently drop such events for zero benefit. Do not read it as
+  // evidence that some panel sends it.
   'user.expire_soon': { type: EVENT_TYPES.REMNAWAVE_USER_EXPIRE_SOON, category: 'REMNAWAVE', severity: 'INFO' },
   'user.bandwidth_usage_threshold_reached': { type: EVENT_TYPES.REMNAWAVE_BANDWIDTH_THRESHOLD, category: 'REMNAWAVE', severity: 'WARNING' },
   // Node / infrastructure
@@ -105,6 +123,142 @@ function normalizeRemnawaveEventName(eventType: string): string {
     return `${lower.slice(0, idx)}.${lower.slice(idx + 1)}`;
   }
   return lower;
+}
+
+/**
+ * Placeholder stored in place of any payload field that is not on the
+ * allow-list below. We keep the key and drop the value (rather than deleting
+ * the key) on purpose: an operator reading the Activity Feed then SEES that
+ * the panel sent something we refused to store, which is the only cheap signal
+ * that `WEBHOOK_PAYLOAD_ALLOWED_KEYS` has fallen behind the panel version.
+ */
+const REDACTED_VALUE = '[redacted]';
+
+/**
+ * Recursion guard for `redactToAllowedKeys`. Real panel payloads bottom out
+ * around depth 5 (`data.node.system.stats.interface.rxTotal`); anything deeper
+ * is malformed or hostile, so it is redacted rather than walked.
+ */
+const MAX_PAYLOAD_DEPTH = 12;
+
+/**
+ * Keys that MAY be persisted into `RemnawaveWebhookEvent.payload`.
+ *
+ * THE RULE. That column is not a private log: `getRecentEvents` ships the
+ * stored payload verbatim to `GET /admin/remnawave/metrics/activity-feed`, so
+ * whatever is in it is also in a browser response body, in devtools, and in
+ * any HAR file an operator mails to support. Three classes of data must
+ * therefore NEVER reach it:
+ *
+ *   1. Anything that authenticates a customer to the proxy — `vlessUuid`,
+ *      `trojanPassword`, `ssPassword`, the device-binding `hwid`.
+ *   2. Anything that IS a ready-made access path — `subscriptionUrl` and the
+ *      `shortUuid` it is built from (the panel hands the full config, keys
+ *      included, to whoever holds either), plus panel/provider secrets:
+ *      `password` (the admin's, on service login-attempt events), `apiToken`,
+ *      `proxyUrl`, `loginUrl`, `rawInbound` (Reality / TLS private material).
+ *   3. Anything that records where a customer was or what they reached — their
+ *      real `ip` / `requestIp` / xray `source`, and the traffic `destination`
+ *      / `originalTarget` / `routeTarget`. We sell a VPN; that is precisely
+ *      the record we must not be holding.
+ *
+ * This is an ALLOW-list, not a deny-list, and that is the whole point. A
+ * deny-list cannot strip a credential field Remnawave has not shipped yet, so
+ * every panel upgrade would silently start leaking until a human noticed.
+ * Here the default for an unknown key is `REDACTED_VALUE`: a new field is
+ * withheld until someone adds it below — which is the code review where the
+ * question "is this a secret?" actually gets asked. Adding a name here is a
+ * security decision, not a formality.
+ *
+ * Matching is by key NAME at ANY depth, because the same user object arrives
+ * at `data` (user events), at `data.user` (hwid-device and torrent-blocker
+ * events) and would arrive one level deeper again the moment the panel nests
+ * it further.
+ *
+ * Derived by walking every `RemnawaveWebhook*Dto` schema in the Remnawave API
+ * v3.2.1 OpenAPI document (7 schemas, 132 distinct property names) and keeping
+ * only the names below.
+ */
+const WEBHOOK_PAYLOAD_ALLOWED_KEYS: ReadonlySet<string> = new Set([
+  // Envelope. `type` is also the controller's event-name fallback.
+  'scope', 'event', 'type', 'timestamp', 'data', 'meta',
+  'notConnectedAfterHours', 'expiration',
+
+  // Panel identity. `id` (3.x numeric), `uuid` (2.x) and the legacy
+  // `userUuid` are what `reconcileSubscriptionFromEvent` matches
+  // `Subscription.remnawaveId` on — strip them and reconciliation silently
+  // stops. `vlessUuid` is deliberately NOT one of them: despite the name it
+  // is the customer's VLESS credential, not an identifier. Never relax this
+  // into a substring match on "uuid".
+  'id', 'uuid', 'userUuid', 'userId', 'user', 'username', 'telegramId', 'email',
+  'description', 'tag', 'externalSquadUuid', 'activeInternalSquads',
+
+  // Subscription runtime state — read by `reconcileSubscriptionFromEvent`
+  // and `extractEventMetadata`.
+  'status', 'expireAt', 'trafficLimitBytes', 'trafficLimitStrategy',
+  'hwidDeviceLimit', 'lastTriggeredThreshold', 'subRevokedAt',
+  'lastTrafficResetAt', 'createdAt', 'updatedAt', 'processedAt',
+  'userTraffic', 'usedTrafficBytes', 'usedTraffic', 'lifetimeUsedTrafficBytes',
+  'onlineAt', 'firstConnectedAt', 'lastConnectedNodeUuid',
+
+  // Node / infrastructure.
+  'node', 'name', 'nodeName', 'nodeUuid', 'address', 'port', 'countryCode',
+  'note', 'tags', 'isConnected', 'isDisabled', 'isConnecting',
+  'isTrafficTrackingActive', 'lastStatusChange', 'lastStatusMessage',
+  'trafficResetDay', 'trafficUsedBytes', 'notifyPercent', 'viewPosition',
+  'consumptionMultiplier', 'nodeConsumptionMultiplier', 'usersOnline',
+  'xrayUptime', 'versions', 'xray', 'activePluginUuid',
+  'providerUuid', 'provider', 'providerName', 'faviconLink', 'nextBillingAt',
+  'configProfile', 'activeConfigProfileUuid', 'activeInbounds', 'profileUuid',
+  'network', 'security',
+  'system', 'info', 'stats', 'arch', 'cpus', 'cpuModel', 'memoryTotal',
+  'hostname', 'release', 'version', 'memoryFree', 'memoryUsed', 'uptime',
+  'loadAvg', 'interface', 'rxBytesPerSec', 'txBytesPerSec', 'rxTotal', 'txTotal',
+
+  // Service scope. `loginAttempt` is kept as a container so a failed panel
+  // login still shows up in the feed — its `password`, `ip` and `userAgent`
+  // are absent from this list and get redacted inside it.
+  'panelVersion', 'subpageConfig', 'action', 'loginAttempt',
+
+  // Torrent-blocker enforcement record: what we did and to which panel user,
+  // without the customer's IP or the destination they were reaching.
+  'report', 'actionReport', 'blocked', 'blockDuration', 'willUnblockAt',
+  'xrayReport', 'level', 'protocol', 'inboundTag', 'inboundName', 'outboundTag',
+  'ts', 'hwidUserDevice',
+]);
+
+/**
+ * Returns a deep copy of `value` in which every object key absent from
+ * `WEBHOOK_PAYLOAD_ALLOWED_KEYS` is replaced by `REDACTED_VALUE`. A rejected
+ * key's subtree is never walked, so an unknown container cannot smuggle a
+ * credential through one of its children.
+ *
+ * Purely non-mutating, and that is load-bearing: `handleEvent` sanitizes
+ * BEFORE it reconciles the subscription and extracts card metadata, and both
+ * of those read the RAW payload — mutating the input here would blank the
+ * fields they need.
+ */
+function redactToAllowedKeys(value: unknown, depth = 0): unknown {
+  if (Array.isArray(value)) {
+    // Array entries carry no key of their own; they inherit the decision
+    // already taken for the array's key.
+    return depth >= MAX_PAYLOAD_DEPTH
+      ? REDACTED_VALUE
+      : value.map((entry) => redactToAllowedKeys(entry, depth + 1));
+  }
+  if (value === null || typeof value !== 'object') {
+    return value;
+  }
+  if (depth >= MAX_PAYLOAD_DEPTH) {
+    return REDACTED_VALUE;
+  }
+  const result: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    result[key] = WEBHOOK_PAYLOAD_ALLOWED_KEYS.has(key)
+      ? redactToAllowedKeys(entry, depth + 1)
+      : REDACTED_VALUE;
+  }
+  return result;
 }
 
 /**
@@ -360,13 +514,49 @@ export class RemnawaveWebhookService {
     return null;
   }
 
+  /**
+   * Reads the panel's *used* traffic counter (bytes) out of a webhook `data`
+   * object — NESTED SHAPE FIRST.
+   *
+   * `RemnawaveWebhookUserEventsDto.data` declares no top-level
+   * `usedTrafficBytes` in EITHER supported version: 2.7.4 and 2.8.0 both put
+   * the counter inside the required `userTraffic` container, as
+   * `data.userTraffic.usedTrafficBytes`. Probing only the flat spelling
+   * therefore read `undefined` out of every real payload and silently
+   * disabled both consumers of this value — `User.firstTrafficAt` (nothing
+   * else writes that column) was never claimed, and `meta.usedTrafficBytes`
+   * was never set, so the card formatter's `typeof … === 'number'` gate
+   * dropped the traffic line from every Remnawave card, including
+   * `user.bandwidth_usage_threshold_reached`, whose entire purpose is
+   * reporting consumption.
+   *
+   * Probe order mirrors the REST reader
+   * (`RemnawaveApiService.getPanelUserUsage`) rather than inventing a second
+   * convention. The flat spellings are kept as a trailing fallback —
+   * they match nothing either spec sends, but they cost nothing and keep any
+   * relayed/flattened payload working.
+   */
+  private readUsedTrafficBytes(data: Record<string, unknown>): number | null {
+    const nested = data['userTraffic'];
+    if (nested !== null && typeof nested === 'object') {
+      const parsed = this.coerceTrafficNumber(
+        (nested as Record<string, unknown>)['usedTrafficBytes'],
+      );
+      if (parsed !== null) return parsed;
+    }
+    return (
+      this.coerceTrafficNumber(data['usedTrafficBytes']) ??
+      this.coerceTrafficNumber(data['usedTraffic'])
+    );
+  }
+
   /** Returns whether a user webhook reports a positive traffic consumption value. */
   private hasPositiveTrafficUsage(payload: Record<string, unknown>): boolean {
     const data =
       payload['data'] !== null && typeof payload['data'] === 'object'
         ? (payload['data'] as Record<string, unknown>)
         : payload;
-    const usedTraffic = this.coerceTrafficNumber(data['usedTrafficBytes'] ?? data['usedTraffic']);
+    const usedTraffic = this.readUsedTrafficBytes(data);
     return usedTraffic !== null && usedTraffic > 0;
   }
 
@@ -445,7 +635,8 @@ export class RemnawaveWebhookService {
   /**
    * Maps a raw Remnawave webhook payload onto the card metadata keys the
    * formatter understands. Reads from `payload.data` (2.x) with a flat
-   * fallback. Only documented, non-sensitive fields are surfaced.
+   * fallback, plus the envelope `payload.meta`. Only documented,
+   * non-sensitive fields are surfaced.
    */
   private extractEventMetadata(
     eventType: string,
@@ -478,8 +669,32 @@ export class RemnawaveWebhookService {
     const trafficLimit =
       this.coerceTrafficNumber(data['trafficLimitBytes']) ?? num('trafficLimitBytes') ?? null;
     if (trafficLimit !== null) meta['trafficLimitBytes'] = trafficLimit;
-    const usedTraffic = this.coerceTrafficNumber(data['usedTrafficBytes'] ?? data['usedTraffic']);
+    const usedTraffic = this.readUsedTrafficBytes(data);
     if (usedTraffic !== null) meta['usedTrafficBytes'] = usedTraffic;
+
+    // Envelope `meta` — the ONLY part of the payload outside `data` that
+    // carries card detail, and the only reason this method looks at the root.
+    //
+    // 2.8.0 collapsed 2.7.4's four expiry-warning event names into a single
+    // `user.expiration` and moved the distinguishing number out of the event
+    // name into `meta.expiration` (`number | null`). Mapping the name alone
+    // would therefore drop the one field that says WHICH warning fired. The
+    // event still renders usefully without it — `data.expireAt` is required in
+    // both versions and already feeds the card's expiry line — so this is
+    // added detail, not the whole card.
+    //
+    // Surfaced under a prefixed key without a unit in the name: neither spec
+    // documents what the number counts, so naming it `…Hours` would be a
+    // guess. 2.7.4's `meta` has no `expiration` property at all, which makes
+    // this read a no-op on that version. Read-only, like the rest of this
+    // method — the raw payload must stay untouched for the reconcile path.
+    const envelopeMeta = payload['meta'];
+    if (envelopeMeta !== null && typeof envelopeMeta === 'object' && !Array.isArray(envelopeMeta)) {
+      const expiration = (envelopeMeta as Record<string, unknown>)['expiration'];
+      if (typeof expiration === 'number' && Number.isFinite(expiration)) {
+        meta['remnawaveExpiration'] = expiration;
+      }
+    }
 
     // Node-scoped fields
     const nodeName = str('name') ?? str('nodeName');
@@ -521,26 +736,19 @@ export class RemnawaveWebhookService {
   }
 
   /**
-   * Marks events as processed.
-   */
-  public async markProcessed(ids: string[]): Promise<void> {
-    await this.prismaService.remnawaveWebhookEvent.updateMany({
-      where: { id: { in: ids } },
-      data: { isProcessed: true },
-    });
-  }
-
-  /**
    * Removes sensitive fields from webhook payloads before storage.
+   *
+   * Allow-list based and applied at EVERY depth — `WEBHOOK_PAYLOAD_ALLOWED_KEYS`
+   * carries the rule and the reasoning, read it before adding a field.
+   *
+   * The previous version deleted four hard-coded ROOT keys, which stripped
+   * nothing whatsoever: Remnawave nests the user object under `data` (and
+   * under `data.user` for hwid-device and torrent-blocker events), so every
+   * credential sat one or two levels below the keys being deleted and went
+   * into the column, and out to the Activity Feed, in plaintext.
    */
   private sanitizePayload(payload: Record<string, unknown>): Record<string, unknown> {
-    const sanitized = { ...payload };
-    // Remove potential secrets
-    delete sanitized['subscriptionUrl'];
-    delete sanitized['subscription_url'];
-    delete sanitized['token'];
-    delete sanitized['api_token'];
-    return sanitized;
+    return redactToAllowedKeys(payload) as Record<string, unknown>;
   }
 }
 

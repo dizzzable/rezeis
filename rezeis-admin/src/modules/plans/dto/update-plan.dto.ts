@@ -1,4 +1,4 @@
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import { PlanAvailability, PlanType } from '@prisma/client';
 import {
   ArrayUnique,
@@ -16,8 +16,13 @@ import {
 } from 'class-validator';
 
 import { AdminPlanDurationDto } from './admin-plan-duration.dto';
-import { TrialSettingsDto } from './create-plan.dto';
+import { isTagValueProvided, trimString, TrialSettingsDto } from './create-plan.dto';
 import { ArchivedPlanRenewModeValue } from '../utils/archived-plan-renew-mode.util';
+import {
+  REMNAWAVE_TAG_MAX_LENGTH,
+  REMNAWAVE_TAG_MESSAGE,
+  REMNAWAVE_TAG_PATTERN,
+} from '../utils/remnawave-tag.util';
 import { TrafficLimitStrategyValue } from './traffic-limit-strategy.dto';
 
 export class UpdatePlanDto {
@@ -32,10 +37,17 @@ export class UpdatePlanDto {
   @MaxLength(4096)
   public description?: string | null;
 
+  /**
+   * Restated from the panel contract — see `remnawave-tag.util.ts`. A patch
+   * that OMITS `tag` is untouched by this rule, which is what keeps a plan
+   * cloned from a donor backup with a non-conforming tag editable.
+   */
+  @Transform(({ value }: { readonly value: unknown }): unknown => trimString(value))
   @IsOptional()
-  @ValidateIf((_object: object, value: unknown): boolean => value !== null)
+  @ValidateIf(isTagValueProvided)
   @IsString()
-  @MaxLength(64)
+  @MaxLength(REMNAWAVE_TAG_MAX_LENGTH)
+  @Matches(REMNAWAVE_TAG_PATTERN, { message: REMNAWAVE_TAG_MESSAGE })
   public tag?: string | null;
 
   @IsOptional()

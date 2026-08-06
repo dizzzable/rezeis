@@ -62,6 +62,16 @@ import {
 } from '../utils/remnawave-cleanup-settings.util';
 import { UpdateRemnawaveCleanupSettingsDto } from '../dto/update-remnawave-cleanup-settings.dto';
 import {
+  mergeAntiFraudSettings,
+  readStoredAntiFraudSettings,
+  resolveAntiFraudTunables,
+  toAntiFraudSettingsView,
+  type AntiFraudSettingsView,
+  type AntiFraudTunables,
+  type StoredAntiFraudSettings,
+} from '../utils/anti-fraud-settings.util';
+import { UpdateAntiFraudSettingsDto } from '../dto/update-anti-fraud-settings.dto';
+import {
   decryptQuestPartnerSecrets,
   mergeQuestPartnerSecrets,
   parseQuestPartnerEnv,
@@ -1208,6 +1218,79 @@ export class SettingsService {
     return toRemnawaveCleanupSettingsView(
       readJsonObject(settings.remnawaveCleanupSettings) as StoredRemnawaveCleanupSettings,
     );
+  }
+
+  // ── Anti-fraud detector tunables (panel-managed, env fallback) ──────────
+
+  private async readStoredAntiFraud(): Promise<StoredAntiFraudSettings> {
+    const settings = await this.getSettingsRecord(this.prismaService);
+    if (!settings) return {};
+    return readStoredAntiFraudSettings(settings.antiFraudSettings);
+  }
+
+  /**
+   * Admin-form view: the effective tunables, the env/built-in fallback they sit
+   * on, the raw stored patch, and which fields the panel currently owns.
+   */
+  public async getAntiFraudSettings(): Promise<AntiFraudSettingsView> {
+    return toAntiFraudSettingsView(await this.readStoredAntiFraud());
+  }
+
+  /**
+   * Effective detector tunables — a stored panel value wins, the `ANTIFRAUD_*`
+   * environment variable is the fallback, the built-in constant is the
+   * fallback's fallback.
+   *
+   * Read by `AntiFraudTunablesService` at the top of every detector run. It is
+   * a plain settings read, so it is served by the same short-TTL row cache
+   * (`SETTINGS_CACHE_TTL_MS`, 5 s) as branding/policy/cleanup: no second cache
+   * layer, no second staleness budget, and the API process and the worker can
+   * therefore only disagree for the 5 s it takes either one's cache to expire —
+   * two orders of magnitude below the detectors' 5-minute cadence.
+   *
+   * This method DOES NOT swallow failures. If the row cannot be read the caller
+   * must fail loudly: falling back to the env layer here would quietly re-enable
+   * a detector an operator had switched off in the panel.
+   */
+  public async getAntiFraudTunablesRuntime(): Promise<AntiFraudTunables> {
+    return resolveAntiFraudTunables(await this.readStoredAntiFraud());
+  }
+
+  /**
+   * Partial-update the `antiFraudSettings` JSON column (panel-managed).
+   * `null` on a field clears the panel value and restores the env fallback.
+   * Out-of-range numbers are rejected by `mergeAntiFraudSettings`, never clamped.
+   */
+  public async updateAntiFraudSettings(input: {
+    readonly currentAdmin: CurrentAdminInterface;
+    readonly requestMetadata: RequestMetadataInterface;
+    readonly patch: UpdateAntiFraudSettingsDto;
+  }): Promise<AntiFraudSettingsView> {
+    const settings = await this.prismaService.$transaction(async (tx) => {
+      const existing = await this.getOrCreateSettingsRecord(tx);
+      const previous = readStoredAntiFraudSettings(existing.antiFraudSettings);
+      const next = mergeAntiFraudSettings(previous, input.patch);
+      const updated = await tx.settings.update({
+        where: { id: existing.id },
+        data: { antiFraudSettings: next as unknown as Prisma.InputJsonValue },
+      });
+      await tx.adminAuditLog.create({
+        data: buildAdminAuditLogData({
+          action: 'settings.antiFraudSettings.update',
+          actorId: input.currentAdmin.id,
+          requestMetadata: input.requestMetadata,
+          metadata: {
+            requestId: input.requestMetadata.requestId,
+            patchKeys: [
+              ...Object.keys(input.patch.sharing ?? {}).map((k) => `sharing.${k}`),
+              ...Object.keys(input.patch.trafficAbuse ?? {}).map((k) => `trafficAbuse.${k}`),
+            ],
+          },
+        }),
+      });
+      return updated;
+    });
+    return toAntiFraudSettingsView(readStoredAntiFraudSettings(settings.antiFraudSettings));
   }
 
   // ── Quest partner HMAC secrets (panel-managed, env fallback) ────────────

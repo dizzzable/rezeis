@@ -1068,3 +1068,193 @@ describe('PaymentProviderExecutionService reads encrypted gateway settings', () 
     });
   });
 });
+
+/**
+ * Platega has TWO create endpoints and they are not interchangeable:
+ *
+ *   `POST /transaction/process`    — `paymentMethod` REQUIRED, answers `redirect` (+ `usdtRate`)
+ *   `POST /v2/transaction/process` — NO `paymentMethod`, answers `url` (+ `rate`)
+ *
+ * The gateway setting picks between them, and the third state is the dangerous
+ * one: an ABSENT `paymentMethod` has always meant 2 (СБП QR) and every install
+ * that never opened the field is live on it. So «provider's choice» is an
+ * explicitly-selected sentinel and never a reinterpretation of «unset» — these
+ * tests exist mostly to pin that separation down.
+ */
+describe('PaymentProviderExecutionService — Platega endpoint selection', () => {
+  const PLATEGA_SETTINGS = { merchantId: 'merchant-1', secret: 'secret-1' } as const;
+
+  function createPlategaService(data: Record<string, unknown>): {
+    readonly service: PaymentProviderExecutionService;
+    readonly calls: Array<{ url: string; body: Record<string, unknown>; options: unknown }>;
+  } {
+    const calls: Array<{ url: string; body: Record<string, unknown>; options: unknown }> = [];
+    const service = createService({
+      post: (url: string, body: unknown, options: unknown) => {
+        calls.push({ url, body: body as Record<string, unknown>, options });
+        return of({ data });
+      },
+    });
+    return { service, calls };
+  }
+
+  function plategaCheckout(
+    service: PaymentProviderExecutionService,
+    settings: Record<string, unknown>,
+  ): ReturnType<PaymentProviderExecutionService['createCheckout']> {
+    return service.createCheckout({
+      gateway: createGateway({ type: PaymentGatewayType.PLATEGA, settings }),
+      transaction: createTransaction({ gatewayType: PaymentGatewayType.PLATEGA }),
+      description: 'Platega checkout',
+      successUrl: 'https://reiwa.example/success',
+      failUrl: 'https://reiwa.example/fail',
+    });
+  }
+
+  const EXPECTED_COMMON_BODY = {
+    paymentDetails: { amount: 9.99, currency: Currency.USD },
+    description: 'Platega checkout',
+    payload: 'payment-1',
+    return: 'https://reiwa.example/success',
+    failedUrl: 'https://reiwa.example/fail',
+  } as const;
+
+  it('keeps a selected method on v1 with the request byte-for-byte unchanged', async () => {
+    const { service, calls } = createPlategaService({
+      transactionId: 'platega-v1',
+      redirect: 'https://checkout.example/platega-v1',
+      status: 'PENDING',
+      usdtRate: 92.5,
+    });
+
+    const result = await plategaCheckout(service, { ...PLATEGA_SETTINGS, paymentMethod: 11 });
+
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]?.url, 'https://app.platega.io/transaction/process');
+    assert.deepStrictEqual(calls[0]?.body, { paymentMethod: 11, ...EXPECTED_COMMON_BODY });
+    assert.deepStrictEqual(calls[0]?.options, {
+      headers: { 'X-MerchantId': 'merchant-1', 'X-Secret': 'secret-1' },
+    });
+    assert.equal(result.checkoutUrl, 'https://checkout.example/platega-v1');
+    assert.equal(result.gatewayId, 'platega-v1');
+    assert.equal(result.providerMode, 'REDIRECT');
+  });
+
+  it('still resolves an UNSET method to 2 on v1 — the behaviour live gateways run on', async () => {
+    const { service, calls } = createPlategaService({
+      transactionId: 'platega-default',
+      redirect: 'https://checkout.example/platega-default',
+      status: 'PENDING',
+    });
+
+    await plategaCheckout(service, { ...PLATEGA_SETTINGS });
+
+    // Not «provider's choice». An operator who never touched the field is on
+    // СБП QR today and must stay there; repurposing this state would silently
+    // move every such install onto a different checkout.
+    assert.equal(calls[0]?.url, 'https://app.platega.io/transaction/process');
+    assert.equal(calls[0]?.body['paymentMethod'], 2);
+  });
+
+  it('routes the provider-choice sentinel to v2 with NO paymentMethod in the body', async () => {
+    const { service, calls } = createPlategaService({
+      transactionId: 'platega-v2',
+      url: 'https://checkout.example/platega-v2',
+      status: 'PENDING',
+      expiresIn: '2026-04-19T12:30:00.000Z',
+      rate: 92.5,
+    });
+
+    const result = await plategaCheckout(service, {
+      ...PLATEGA_SETTINGS,
+      paymentMethod: 'PROVIDER_CHOICE',
+    });
+
+    assert.equal(calls[0]?.url, 'https://app.platega.io/v2/transaction/process');
+    // v2 documents no `paymentMethod`. A present-but-undefined key would be
+    // serialized away by axios anyway, but an absent KEY is what the contract
+    // says, so that is what is asserted.
+    assert.equal(Object.prototype.hasOwnProperty.call(calls[0]?.body ?? {}, 'paymentMethod'), false);
+    assert.deepStrictEqual(calls[0]?.body, { ...EXPECTED_COMMON_BODY });
+    assert.deepStrictEqual(calls[0]?.options, {
+      headers: { 'X-MerchantId': 'merchant-1', 'X-Secret': 'secret-1' },
+    });
+    assert.equal(result.checkoutUrl, 'https://checkout.example/platega-v2');
+    assert.equal(result.gatewayId, 'platega-v2');
+    assert.equal(result.providerMode, 'REDIRECT');
+  });
+
+  it('reads `redirect` on v1 and `url` on v2, even when the body carries both', async () => {
+    const v1 = createPlategaService({
+      transactionId: 'platega-v1',
+      redirect: 'https://checkout.example/correct-v1',
+      url: 'https://checkout.example/wrong-for-v1',
+      status: 'PENDING',
+    });
+    const v2 = createPlategaService({
+      transactionId: 'platega-v2',
+      url: 'https://checkout.example/correct-v2',
+      redirect: 'https://checkout.example/wrong-for-v2',
+      status: 'PENDING',
+    });
+
+    const v1Result = await plategaCheckout(v1.service, { ...PLATEGA_SETTINGS, paymentMethod: 11 });
+    const v2Result = await plategaCheckout(v2.service, {
+      ...PLATEGA_SETTINGS,
+      paymentMethod: 'PROVIDER_CHOICE',
+    });
+
+    assert.equal(v1Result.checkoutUrl, 'https://checkout.example/correct-v1');
+    assert.equal(v2Result.checkoutUrl, 'https://checkout.example/correct-v2');
+  });
+
+  it('refuses a create response with no link instead of returning a dead REDIRECT checkout', async () => {
+    // Was silent on both paths: `checkoutUrl: null` under `providerMode:
+    // 'REDIRECT'` shipped a dead link to the client and left the row PENDING
+    // until the 30-minute sweep cancelled it as a LOCAL timeout — a provider
+    // refusal mis-filed as our own expiry, which is what distorts the
+    // trial-claim quota ledger. YooKassa throws here; Platega now does too.
+    const linkless: ReadonlyArray<{
+      readonly paymentMethod: number | string;
+      readonly data: Record<string, unknown>;
+    }> = [
+      {
+        paymentMethod: 11,
+        data: { transactionId: 'platega-v1', status: 'PENDING', usdtRate: 92.5 },
+      },
+      {
+        paymentMethod: 'PROVIDER_CHOICE',
+        data: { transactionId: 'platega-v2', status: 'PENDING', rate: 92.5 },
+      },
+    ];
+
+    for (const { paymentMethod, data } of linkless) {
+      const { service } = createPlategaService(data);
+
+      await assert.rejects(
+        plategaCheckout(service, { ...PLATEGA_SETTINGS, paymentMethod }),
+        (error: unknown) => {
+          assert.equal(error instanceof ServiceUnavailableException, true);
+          return true;
+        },
+        `expected paymentMethod ${JSON.stringify(paymentMethod)} to refuse a linkless response`,
+      );
+    }
+  });
+
+  it('treats a blank link as no link, rather than handing it to the client', async () => {
+    const { service } = createPlategaService({
+      transactionId: 'platega-v2',
+      url: '   ',
+      status: 'PENDING',
+    });
+
+    await assert.rejects(
+      plategaCheckout(service, { ...PLATEGA_SETTINGS, paymentMethod: 'PROVIDER_CHOICE' }),
+      (error: unknown) => {
+        assert.equal(error instanceof ServiceUnavailableException, true);
+        return true;
+      },
+    );
+  });
+});

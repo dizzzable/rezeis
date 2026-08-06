@@ -77,23 +77,30 @@ describe('resolveTelegramDeliveryTarget', () => {
   });
 });
 
+/**
+ * The types the operator's page can draw a tick-box for. `payment.completed`
+ * and `user.blocked` are registered; anything else passed below is not, which
+ * is what routes it to the catch-all instead of the exact-match branch.
+ */
+const KNOWN = new Set(['payment.completed', 'user.blocked']);
+
 describe('isEventTelegramAllowed', () => {
   it('allows everything in "all" mode', () => {
-    assert.equal(isEventTelegramAllowed('payment.completed', { eventsMode: 'all', events: [] }), true);
-    assert.equal(isEventTelegramAllowed('user.blocked', { eventsMode: 'all', events: ['x'] }), true);
+    assert.equal(isEventTelegramAllowed('payment.completed', { eventsMode: 'all', events: [], knownTypes: KNOWN }), true);
+    assert.equal(isEventTelegramAllowed('user.blocked', { eventsMode: 'all', events: ['x'], knownTypes: KNOWN }), true);
   });
 
   it('in "selected" mode delivers only listed event types', () => {
-    const filter = { eventsMode: 'selected' as const, events: ['payment.completed'] };
+    const filter = { eventsMode: 'selected' as const, events: ['payment.completed'], knownTypes: KNOWN };
     assert.equal(isEventTelegramAllowed('payment.completed', filter), true);
     assert.equal(isEventTelegramAllowed('user.blocked', filter), false);
   });
 
   it('in "selected" mode with an empty list delivers nothing', () => {
-    assert.equal(isEventTelegramAllowed('payment.completed', { eventsMode: 'selected', events: [] }), false);
+    assert.equal(isEventTelegramAllowed('payment.completed', { eventsMode: 'selected', events: [], knownTypes: KNOWN }), false);
   });
 
   it('always allows the manual delivery test regardless of mode', () => {
-    assert.equal(isEventTelegramAllowed('settings.telegram.test', { eventsMode: 'selected', events: [] }), true);
+    assert.equal(isEventTelegramAllowed('settings.telegram.test', { eventsMode: 'selected', events: [], knownTypes: KNOWN }), true);
   });
 });

@@ -10,6 +10,7 @@ import {
   TrafficLimitStrategy,
 } from '@prisma/client';
 import { Job } from 'bullmq';
+import { createHash } from 'node:crypto';
 
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { SystemEventsService, EVENT_TYPES } from '../../common/services/system-events.service';
@@ -17,6 +18,7 @@ import { resolveAddOnRolloutFlags } from '../add-on-entitlements/add-on-rollout.
 import {
   RemnawaveApiService,
   RemnawaveProfileNotFoundError,
+  RemnawaveUpstreamRejectionError,
 } from '../remnawave/services/remnawave-api.service';
 import {
   PROFILE_SYNC_CONCURRENCY,
@@ -139,8 +141,8 @@ export class ProfileSyncProcessor extends WorkerHost {
       // the same aggregate so they never re-push a stale state upstream.
       await this.supersedeOlderSiblings(syncJob);
     } catch (err: unknown) {
-      const recorded = await this.recordFailure(this.prismaService, syncJob, err, leaseStartedAt);
-      this.reportFailure(syncJob, err, recorded);
+      const outcome = await this.recordFailure(this.prismaService, syncJob, err, leaseStartedAt);
+      this.reportFailure(syncJob, err, outcome);
       throw err; // Let BullMQ retry
     }
   }
@@ -174,9 +176,9 @@ export class ProfileSyncProcessor extends WorkerHost {
     syncJob: SyncJobRecord,
     error: unknown,
     leaseStartedAt: Date,
-  ): Promise<boolean> {
+  ): Promise<FailureOutcome> {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    const classification = classifyRecovery(error);
+    const classification = classifyRecovery(error, syncJob.createdAt);
     const failed = await client.profileSyncJob.updateMany({
       where: {
         id: syncJob.id,
@@ -190,22 +192,27 @@ export class ProfileSyncProcessor extends WorkerHost {
         recoveryData: { classification },
       },
     });
-    return failed.count === 1;
+    return { recorded: failed.count === 1, classification };
   }
 
-  private reportFailure(syncJob: SyncJobRecord, err: unknown, recorded: boolean): void {
+  private reportFailure(syncJob: SyncJobRecord, err: unknown, outcome: FailureOutcome): void {
     const errorMessage = err instanceof Error ? err.message : 'Unknown error';
     const attempt = syncJob.attempts + 1;
     this.logger.error(
       `Sync job ${syncJob.id} failed (attempt ${attempt}): ${errorMessage}`,
     );
-    if (!recorded) return;
+    if (!outcome.recorded) return;
 
     // Only surface a SYSTEM error to the operator for a GENUINE, non-transient
     // FINAL failure. A transient Remnawave outage is retryable and recoverable.
+    //
+    // Uses the classification that was actually PERSISTED rather than
+    // re-deriving it: schema drift flips TRANSIENT→TERMINAL as its grace window
+    // expires, and a second call can land on the far side of that boundary. A
+    // row written TERMINAL is dropped by the recovery sweep, so a disagreeing
+    // alert decision would make the failure both permanent and silent.
     const isFinalAttempt = attempt >= PROFILE_SYNC_MAX_ATTEMPTS;
-    const isTransient = classifyRecovery(err) === 'TRANSIENT';
-    if (isFinalAttempt && !isTransient) {
+    if (isFinalAttempt && outcome.classification === 'TERMINAL') {
       this.events.error(EVENT_TYPES.SYSTEM_ERROR, 'SYSTEM', `Profile sync failed: ${errorMessage}`, {
         syncJobId: syncJob.id,
         action: syncJob.action,
@@ -434,11 +441,21 @@ export class ProfileSyncProcessor extends WorkerHost {
       return;
     }
 
-    // Generate profile name using the naming service
+    // Generate profile name using the naming service.
+    //
+    // Clamped ONCE here, so the idempotency lookup below and the CREATE that
+    // follows are guaranteed to use the same string. Clamping at either call
+    // site alone would look up one name and create another.
     const naming = await this.namingService.generateProfileName(
       subscription.userId,
       subscription.id,
     );
+    const panelUsername = clampPanelUsername(naming.username);
+    if (panelUsername !== naming.username) {
+      this.logger.warn(
+        `Generated profile name '${naming.username}' exceeds Remnawave's ${PANEL_USERNAME_MAX_LENGTH}-character limit; using '${panelUsername}' for subscription ${subscription.id}`,
+      );
+    }
     const contacts = await this.namingService.getContactInfo(subscription.userId);
 
     // Read plan snapshot for squads/limits
@@ -453,8 +470,11 @@ export class ProfileSyncProcessor extends WorkerHost {
     // but failed to persist the link (e.g. crash between API call and DB
     // write, or a duplicate-name retry). Reuse the existing profile instead
     // of re-creating it — the panel rejects duplicate usernames with 400.
-    const existing = await this.remnawaveApiService.getPanelUserByUsername(naming.username);
+    const existing = await this.remnawaveApiService.getPanelUserByUsername(panelUsername);
     if (existing !== null && typeof existing.uuid === 'string' && existing.uuid.length > 0) {
+      // "A profile answers to this name" is not "this profile is mine" — see
+      // `assertPanelProfileOwnership`.
+      assertPanelProfileOwnership(panelUsername, existing.description, subscription.userId);
       const deleteScheduled = await this.persistProfileLink(
         subscription.id,
         existing.uuid,
@@ -469,20 +489,20 @@ export class ProfileSyncProcessor extends WorkerHost {
         return;
       }
       this.logger.log(
-        `Linked existing Remnawave profile '${existing.uuid}' (username: ${naming.username}) to subscription ${subscription.id}`,
+        `Linked existing Remnawave profile '${existing.uuid}' (username: ${panelUsername}) to subscription ${subscription.id}`,
       );
-      this.events.info(EVENT_TYPES.SUBSCRIPTION_CREATED, 'SUBSCRIPTION', `Remnawave profile linked: ${naming.username}`, {
+      this.events.info(EVENT_TYPES.SUBSCRIPTION_CREATED, 'SUBSCRIPTION', `Remnawave profile linked: ${panelUsername}`, {
         subscriptionId: subscription.id,
         userId: subscription.userId,
         remnawaveId: existing.uuid,
-        remnawaveUsername: naming.username,
+        remnawaveUsername: panelUsername,
       });
       return;
     }
 
     // Create user on Remnawave panel
     const panelUser = await this.remnawaveApiService.createPanelUser({
-      username: naming.username,
+      username: panelUsername,
       telegramId: contacts.telegramId ? Number(contacts.telegramId) : null,
       email: contacts.email,
       description: naming.description,
@@ -510,15 +530,15 @@ export class ProfileSyncProcessor extends WorkerHost {
     }
 
     this.logger.log(
-      `Created Remnawave profile '${panelUser.uuid}' (username: ${naming.username}) for subscription ${subscription.id}`,
+      `Created Remnawave profile '${panelUser.uuid}' (username: ${panelUsername}) for subscription ${subscription.id}`,
     );
 
     // Emit event
-    this.events.info(EVENT_TYPES.SUBSCRIPTION_CREATED, 'SUBSCRIPTION', `Remnawave profile created: ${naming.username}`, {
+    this.events.info(EVENT_TYPES.SUBSCRIPTION_CREATED, 'SUBSCRIPTION', `Remnawave profile created: ${panelUsername}`, {
       subscriptionId: subscription.id,
       userId: subscription.userId,
       remnawaveId: panelUser.uuid,
-      remnawaveUsername: naming.username,
+      remnawaveUsername: panelUsername,
     });
   }
 
@@ -598,18 +618,31 @@ export class ProfileSyncProcessor extends WorkerHost {
         subscription.id,
       );
 
+      // Status is a separate panel field. It is intentionally forwarded only
+      // for an explicit admin toggle; derived local states such as
+      // EXPIRED/LIMITED must not overwrite Remnawave during routine syncs.
+      //
+      // Even under an explicit toggle the value forwarded is the DB column as
+      // it reads NOW, not what the operator submitted — `AutoRenewService`
+      // flips rows to EXPIRED every minute, so the column can have moved to a
+      // value Remnawave's `enum: ["ACTIVE","DISABLED"]` rejects between the
+      // admin write and this job running. `toPanelStatus` returns null for
+      // exactly those, and null omits the field.
+      const propagateStatus = readBoolean(readRecord(current.payload), 'propagateStatus');
+      const panelStatus = propagateStatus ? toPanelStatus(subscription.status) : null;
+      if (propagateStatus && panelStatus === null) {
+        this.logger.warn(
+          `Not propagating status '${subscription.status}' for subscription ${subscription.id}: Remnawave accepts only ACTIVE/DISABLED (expiry is derived from expireAt)`,
+        );
+      }
+
       let panelUser: Awaited<ReturnType<RemnawaveApiService['updatePanelUser']>>;
       try {
         panelUser = await this.remnawaveApiService.updatePanelUser(subscription.remnawaveId, {
           telegramId: contacts.telegramId ? Number(contacts.telegramId) : null,
           email: contacts.email,
           description: naming.description,
-          // Status is a separate panel field. It is intentionally forwarded
-          // only for an explicit admin toggle; derived local states such as
-          // EXPIRED/LIMITED must not overwrite Remnawave during routine syncs.
-          ...(readBoolean(readRecord(current.payload), 'propagateStatus')
-            ? { status: subscription.status }
-            : {}),
+          ...(panelStatus !== null ? { status: panelStatus } : {}),
           tag,
           expireAt: subscription.expiresAt?.toISOString(),
           trafficLimitBytes: (subscription.trafficLimit ?? 0) * 1024 * 1024 * 1024,
@@ -869,8 +902,125 @@ function profileUpdateFingerprint(subscription: SyncJobRecord['subscription']): 
   });
 }
 
-function classifyRecovery(error: unknown): 'TRANSIENT' | 'TERMINAL' {
+type RecoveryClassification = 'TRANSIENT' | 'TERMINAL';
+
+/**
+ * What `recordFailure` actually committed. `recorded` is false when the lease
+ * had already been taken over (another worker won), in which case nothing was
+ * written and nothing should be reported.
+ */
+interface FailureOutcome {
+  readonly recorded: boolean;
+  readonly classification: RecoveryClassification;
+}
+
+/**
+ * Prisma codes meaning "the database was momentarily out of reach". These stay
+ * retryable however long the outage lasts: the database will come back, and the
+ * job still describes work that has not happened yet.
+ */
+const TRANSIENT_PRISMA_CONNECTIVITY_CODES: ReadonlySet<string> = new Set([
+  'P1001', // Can't reach database server
+  'P1002', // Database server was reached but timed out
+]);
+
+/**
+ * Prisma codes meaning "the generated Client names a table/column the database
+ * does not have". The SAME code covers two opposite situations:
+ *
+ *  - **A deploy window.** Migrations are applied by the API container only
+ *    (`docker-entrypoint.sh` gates them on `RUID_PROCESS_ROLE` and runs them
+ *    before `exec`). The worker runs the same image with an ALREADY regenerated
+ *    Client, so for the length of a deploy a write legitimately names a column
+ *    the database has not grown yet. The job would succeed a minute later, so
+ *    burning it strands a paid subscription at `remnawaveId = null`.
+ *  - **Permanent drift.** A migration that was never written, or a column
+ *    renamed without one. This never resolves on its own.
+ *
+ * Neither is distinguishable from the error itself, so they are separated by
+ * how long the job has been failing — see `SCHEMA_DRIFT_GRACE_MS`.
+ */
+const SCHEMA_DRIFT_PRISMA_CODES: ReadonlySet<string> = new Set([
+  'P2021', // Table does not exist in the current database
+  'P2022', // Column does not exist in the current database
+]);
+
+/**
+ * How long a job may keep blaming schema drift before we stop believing it is a
+ * deploy and let it fail loudly.
+ *
+ * Deliberately an order of magnitude beyond any deploy this stack performs (the
+ * API's own healthcheck gives up after ~2 minutes), because the two failure
+ * directions are not symmetric. Declaring a real deploy window TERMINAL too
+ * early abandons a paid job permanently: the recovery sweep only re-drives
+ * TRANSIENT rows, so nothing brings it back without a human. Declaring
+ * permanent drift TRANSIENT a few minutes too long only delays an alert.
+ *
+ * Measured from `ProfileSyncJob.createdAt`, the one timestamp on the row that
+ * survives recovery. `attempts` cannot serve: the 5-minute sweep resets it to 0
+ * every time it re-drives a TRANSIENT row, so it never grows past
+ * `PROFILE_SYNC_MAX_ATTEMPTS` no matter how long the drift has lasted.
+ * `startedAt` is rewritten per lease and `recoveryData` is cleared on claim.
+ *
+ * Exported so the tests pin behaviour either side of the boundary without
+ * re-hardcoding the number.
+ */
+export const SCHEMA_DRIFT_GRACE_MS = 30 * 60 * 1000;
+
+/** True while `driftAnchor` is recent enough that a deploy is still plausible. */
+function isWithinSchemaDriftGrace(driftAnchor: Date | null | undefined): boolean {
+  if (!(driftAnchor instanceof Date) || Number.isNaN(driftAnchor.getTime())) return false;
+  return Date.now() - driftAnchor.getTime() <= SCHEMA_DRIFT_GRACE_MS;
+}
+
+/**
+ * Matches on the STRUCTURED Prisma error code, never on message text — message
+ * matching is exactly the weakness this guards against. Follows the
+ * `PrismaClientKnownRequestError` idiom used throughout this repo.
+ *
+ * `driftAnchor` is the job's `createdAt`. Schema-drift codes are retryable only
+ * while it is inside `SCHEMA_DRIFT_GRACE_MS`; a missing anchor cannot prove we
+ * are in a deploy window, so drift is treated as permanent — the direction that
+ * tells an operator rather than the one that goes quiet.
+ */
+function isRetryablePrismaError(error: unknown, driftAnchor: Date | null | undefined): boolean {
+  if (error instanceof Prisma.PrismaClientKnownRequestError) {
+    if (SCHEMA_DRIFT_PRISMA_CODES.has(error.code)) {
+      return isWithinSchemaDriftGrace(driftAnchor);
+    }
+    return TRANSIENT_PRISMA_CONNECTIVITY_CODES.has(error.code);
+  }
+  // Connectivity failures raised while the pool is opening a connection arrive
+  // as an initialization error, which carries its code on `errorCode` rather
+  // than `code`. Consulting only the connectivity set here loses nothing:
+  // P2021/P2022 are raised by the query engine while executing a statement and
+  // always surface as `PrismaClientKnownRequestError`, so they can never reach
+  // this branch. (`PrismaClientKnownRequestError` has no `errorCode` property
+  // at all, and Prisma only constructs an initialization error with startup
+  // codes.) The grace window therefore needs no counterpart here.
+  if (error instanceof Prisma.PrismaClientInitializationError) {
+    return (
+      error.errorCode !== undefined && TRANSIENT_PRISMA_CONNECTIVITY_CODES.has(error.errorCode)
+    );
+  }
+  return false;
+}
+
+function classifyRecovery(
+  error: unknown,
+  driftAnchor: Date | null | undefined,
+): RecoveryClassification {
+  // The panel ANSWERED and refused (400/401/403/409/…, or an endpoint it does
+  // not serve). Re-sending identical bytes every 5 minutes forever cannot
+  // change that answer, and TRANSIENT would mean nobody is ever told: the
+  // recovery sweep resets the row to PENDING/attempts=0 indefinitely, the
+  // operator alert in `reportFailure` requires TERMINAL, and checkout keeps
+  // reporting PROFILE_PENDING instead of PROFILE_SYNC_FAILED. Checked before
+  // the `ServiceUnavailableException` arm because this error is an
+  // `HttpException` too — the arm order is the classification.
+  if (error instanceof RemnawaveUpstreamRejectionError) return 'TERMINAL';
   if (error instanceof ServiceUnavailableException) return 'TRANSIENT';
+  if (isRetryablePrismaError(error, driftAnchor)) return 'TRANSIENT';
   const message = error instanceof Error ? error.message.toLowerCase() : '';
   return /timeout|temporar|econn|429|502|503|504|unavailable/.test(message)
     ? 'TRANSIENT'
@@ -897,6 +1047,134 @@ function readBoolean(record: Record<string, unknown>, key: string): boolean {
 
 function readTargetRemnawaveId(value: unknown): string | null {
   return readOptionalString(readRecord(value), 'targetRemnawaveId');
+}
+
+/**
+ * Remnawave declares `username` as `minLength: 3, maxLength: 36` on both 2.7.4
+ * and 2.8.0. `RemnawaveProfileNamingService` joins prefix + identifier + suffix
+ * with no cap, and a web login may be 64 characters — so with the default
+ * config (`rz` + `_` + login + `_sub`) any login of 30+ characters produces a
+ * name the panel rejects with 400, forever.
+ */
+export const PANEL_USERNAME_MIN_LENGTH = 3;
+export const PANEL_USERNAME_MAX_LENGTH = 36;
+
+/** Width of the disambiguating digest appended when a name has to be cut. */
+const PANEL_USERNAME_DIGEST_LENGTH = 10;
+
+/**
+ * Fits a generated profile name inside Remnawave's 3–36 window.
+ *
+ * Two properties this function MUST keep, in order of how much they cost if
+ * broken:
+ *
+ *  1. **Identity for every name that already fits.** The name is the
+ *     crash-recovery idempotency key — `handleCreate` looks the panel profile
+ *     up by it (`getPanelUserByUsername`) before creating one. Rewriting a name
+ *     that was already legal would make every previously-provisioned profile
+ *     unfindable, and the CREATE that follows would collide with the profile
+ *     that is still sitting there under the old name.
+ *  2. **Determinism.** The same input must map to the same output on every run
+ *     and every process, for the same reason.
+ *
+ * Truncation alone would break a third property — injectivity. Two logins
+ * sharing a long prefix would collapse onto ONE panel profile, and because the
+ * CREATE path treats "a profile with this username exists" as "this is my
+ * profile", customer B would be handed customer A's subscription. So the cut
+ * name carries a digest of the WHOLE original: same input → same name, and two
+ * different originals share a name only on a 40-bit hash collision. See
+ * `assertPanelProfileOwnership` for the second half of that defence.
+ */
+export function clampPanelUsername(username: string): string {
+  if (username.length >= PANEL_USERNAME_MIN_LENGTH && username.length <= PANEL_USERNAME_MAX_LENGTH) {
+    return username;
+  }
+  if (username.length < PANEL_USERNAME_MIN_LENGTH) {
+    // Defensive only: the naming service always joins a non-empty prefix,
+    // identifier and suffix around two separators, so it cannot emit fewer
+    // than five characters. `_` is inside the panel's allowed alphabet.
+    return username.padEnd(PANEL_USERNAME_MIN_LENGTH, '_');
+  }
+  const digest = createHash('sha256')
+    .update(username)
+    .digest('hex')
+    .slice(0, PANEL_USERNAME_DIGEST_LENGTH);
+  const head = username.slice(0, PANEL_USERNAME_MAX_LENGTH - PANEL_USERNAME_DIGEST_LENGTH - 1);
+  return `${head}_${digest}`;
+}
+
+/**
+ * `reiwa_id: <id>` — the ownership marker this system writes into every profile
+ * description it creates, and the same marker the Remnawave importer
+ * (`remnawave-importer.service.ts`) resolves identity by.
+ *
+ * The character class is deliberately WIDER than the importer's `[a-z0-9]+`:
+ * that one only has to detect presence, while this one's capture is compared
+ * for equality. An id carrying a `-` or `_` would be captured short, and a
+ * short capture reads as "a different owner" — which would refuse to relink a
+ * profile that IS ours and turn crash recovery into a permanent failure.
+ */
+const PANEL_OWNER_MARKER = /reiwa_id:\s*([A-Za-z0-9_-]+)/;
+
+function readPanelOwnerId(description: string | null | undefined): string | null {
+  if (typeof description !== 'string') return null;
+  const match = PANEL_OWNER_MARKER.exec(description);
+  return match === null ? null : match[1];
+}
+
+/**
+ * Refuses to adopt a panel profile that provably belongs to someone else.
+ *
+ * `handleCreate` reuses an existing profile found by username so a crash
+ * between "created upstream" and "persisted the link" does not leave an orphan.
+ * That lookup keys on a name that is no longer guaranteed unique per user once
+ * it can be truncated, and the automated path — unlike the manual admin-link
+ * path — never checked whose profile it found. Linking customer A's profile to
+ * customer B's subscription hands over their traffic, their devices and their
+ * config URL.
+ *
+ * Deliberately only refuses on a PROVEN mismatch. A description with no marker
+ * (imported, or edited by an operator) keeps the previous behaviour — it is
+ * genuinely indeterminate, and failing those closed would strand every legacy
+ * profile. Throwing a plain `Error` classifies TERMINAL, so a real collision
+ * pages an operator instead of quietly cross-linking two paying customers.
+ */
+function assertPanelProfileOwnership(
+  panelUsername: string,
+  description: string | null | undefined,
+  expectedUserId: string,
+): void {
+  const owner = readPanelOwnerId(description);
+  if (owner !== null && owner !== expectedUserId) {
+    throw new Error(
+      `Remnawave profile '${panelUsername}' is owned by reiwa_id ${owner}, not ${expectedUserId} — refusing to link`,
+    );
+  }
+}
+
+/**
+ * Remnawave declares `status` as `enum: ["ACTIVE","DISABLED"]` on `PATCH
+ * /api/users` for both 2.7.4 and 2.8.0. rezeis' own column carries three more
+ * values, and the sync forwards the column as it reads at PROCESSING time —
+ * not the value the operator submitted — while `AutoRenewService` flips rows to
+ * EXPIRED every minute. So an admin edit could reach the panel carrying
+ * `EXPIRED` and 400 forever.
+ *
+ * EXPIRED / LIMITED / DELETED therefore propagate NOTHING rather than being
+ * translated:
+ *  - both are states Remnawave DERIVES itself, EXPIRED from the very `expireAt`
+ *    this same PATCH sends and LIMITED from the traffic counter, so there is
+ *    nothing for us to assert;
+ *  - mapping them onto `DISABLED` would be a write nothing ever undoes —
+ *    renewal deliberately does not propagate status
+ *    (`payment-reconciliation.service.ts`), so a renewed customer would stay
+ *    disabled on the panel;
+ *  - DELETED retires the profile through a DELETE job, not a status write.
+ */
+function toPanelStatus(status: SubscriptionStatus | null | undefined): 'ACTIVE' | 'DISABLED' | null {
+  if (status === SubscriptionStatus.ACTIVE) return 'ACTIVE';
+  if (status === SubscriptionStatus.DISABLED) return 'DISABLED';
+  return null;
 }
 
 /**

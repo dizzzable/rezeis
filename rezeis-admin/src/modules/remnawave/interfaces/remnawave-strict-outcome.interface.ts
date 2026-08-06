@@ -50,6 +50,30 @@ export function strictInvalidContract<T>(details: string): RemnawaveStrictOutcom
   return { kind: 'invalidContract', details };
 }
 
+/**
+ * One-line, log-safe rendering of an outcome.
+ *
+ * A caller that DEGRADES on a non-`ok` outcome (skips a detector run, falls
+ * back to backup values) has to say so out loud — a silent degrade is exactly
+ * the failure mode the strict outcomes exist to end.
+ */
+export function describeStrictOutcome(outcome: RemnawaveStrictOutcome<unknown>): string {
+  switch (outcome.kind) {
+    case 'ok':
+      return 'ok';
+    case 'notFound':
+      return 'notFound';
+    case 'unsupported':
+      return 'unsupported';
+    case 'unavailable':
+      return outcome.retryAfterMs === null
+        ? 'unavailable'
+        : `unavailable (retry after ${outcome.retryAfterMs}ms)`;
+    case 'invalidContract':
+      return `invalidContract: ${outcome.details}`;
+  }
+}
+
 /** A strict user snapshot with the canonical nullable-unlimited encoding. */
 export interface RemnawaveStrictUser {
   readonly uuid: string;
@@ -65,6 +89,20 @@ export interface RemnawaveStrictUser {
   readonly trafficLimitBytes: bigint | null;
   /** Canonical unlimited = `null` (upstream `0` is decoded to `null`). */
   readonly hwidDeviceLimit: number | null;
+}
+
+/**
+ * The two fields the expired-profile sweep reads from a panel profile.
+ *
+ * Deliberately NOT `RemnawaveStrictUser`: that parser fails closed on nine
+ * fields the sweep never looks at, so an unrelated contract drift (a `tag`
+ * shape, a squad encoding) would make the sweep defer every deletion forever.
+ * This one validates exactly what it uses.
+ */
+export interface RemnawavePanelExpirySnapshot {
+  /** Panel-canonical expiry, already proven parseable by the adapter. */
+  readonly expireAtMs: number;
+  readonly subscriptionUrl: string | null;
 }
 
 /** A strict, owner-agnostic device row (never trusts a row's own owner field). */

@@ -15,6 +15,7 @@ import { GenerateWebPushKeysDto } from '../dto/generate-web-push-keys.dto';
 import { UpdateNotificationsTogglesDto } from '../dto/update-notifications-toggles.dto';
 import { UpdatePlatformSettingsDto } from '../dto/update-platform-settings.dto';
 import { UpdateRemnawaveCleanupSettingsDto } from '../dto/update-remnawave-cleanup-settings.dto';
+import { UpdateAntiFraudSettingsDto } from '../dto/update-anti-fraud-settings.dto';
 import { UpdateQuestPartnerSecretsDto } from '../dto/update-quest-partner-secrets.dto';
 import type { QuestPartnerView } from '../utils/quest-partner-settings.util';
 import {
@@ -142,6 +143,39 @@ export class SettingsController {
     @Req() request: Request,
   ) {
     return this.settingsService.updateRemnawaveCleanupSettings({
+      currentAdmin,
+      requestMetadata: extractRequestMetadata(request),
+      patch: dto,
+    });
+  }
+
+  // ── Anti-fraud detector tunables ──────────────────────────────────────────
+
+  /**
+   * Effective anti-fraud tunables plus the env/built-in fallback they sit on
+   * and the list of fields the panel currently overrides. Inherits the
+   * controller-level `settings:view`.
+   */
+  @Get('anti-fraud')
+  @ApiOperation({ summary: 'Get anti-fraud detector tunables (panel value + env fallback)' })
+  public async getAntiFraudSettings() {
+    return this.settingsService.getAntiFraudSettings();
+  }
+
+  /**
+   * Update the anti-fraud tunables. `null` on a field clears the panel value
+   * and restores the environment fallback. Gated on `settings:edit`, the same
+   * permission as every other write on this controller.
+   */
+  @Patch('anti-fraud')
+  @RequirePermission('settings', 'edit')
+  @ApiOperation({ summary: 'Update anti-fraud detector tunables' })
+  public async updateAntiFraudSettings(
+    @Body() dto: UpdateAntiFraudSettingsDto,
+    @CurrentAdmin() currentAdmin: CurrentAdminInterface,
+    @Req() request: Request,
+  ) {
+    return this.settingsService.updateAntiFraudSettings({
       currentAdmin,
       requestMetadata: extractRequestMetadata(request),
       patch: dto,

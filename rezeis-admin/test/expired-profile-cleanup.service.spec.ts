@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
 import { afterEach, describe, it } from 'node:test';
+import { of, throwError } from 'rxjs';
 
 import { SubscriptionStatus, SyncAction, SyncJobStatus } from '@prisma/client';
 
 import { _resetProcessRoleCacheForTests } from '../src/common/runtime/process-role.util';
 import { EVENT_TYPES } from '../src/common/services/system-events.service';
 import { ExpiredProfileCleanupService } from '../src/modules/profile-sync/expired-profile-cleanup.service';
+import { RemnawaveApiService } from '../src/modules/remnawave/services/remnawave-api.service';
 
 /** Settings mock factory — defaults to deletion ON with a 3-day grace. */
 function settingsMock(policy: { deleteEnabled?: boolean; graceDays?: number } = {}) {
@@ -23,20 +25,33 @@ function eventsMock(sink: Array<readonly unknown[]> = []) {
 }
 
 /**
- * Remnawave API mock. `getPanelUser` returns a panel user whose `expireAt` is
- * `expireOffsetMs` from now (negative = past). Pass `null` to simulate a
- * missing panel profile, or `'throw'` to simulate an unreachable panel.
+ * Remnawave API mock, speaking the STRICT outcome union the sweep now reads.
+ *
+ * It deliberately does NOT stub `getPanelUser`: that method swallows every
+ * failure into `null`, so a stub that throws could exercise a branch the real
+ * adapter cannot reach. The sweep must consume outcome KINDS, and only a
+ * `notFound` may be read as "the profile is gone".
+ *
+ * A number is an `ok` whose `expireAt` is that many ms from now (negative =
+ * past). Otherwise pass the outcome kind to simulate.
  */
-function remnawaveMock(behaviour: number | null | 'throw') {
+function remnawaveMock(behaviour: number | 'notFound' | 'unavailable' | 'invalidContract') {
   return {
-    getPanelUser: async () => {
-      if (behaviour === 'throw') throw new Error('panel unreachable');
-      if (behaviour === null) return null;
+    strictGetPanelUserExpiry: async () => {
+      if (behaviour === 'notFound') return { kind: 'notFound' as const };
+      if (behaviour === 'unavailable') {
+        return { kind: 'unavailable' as const, retryAfterMs: null };
+      }
+      if (behaviour === 'invalidContract') {
+        return { kind: 'invalidContract' as const, details: 'user missing expireAt' };
+      }
       return {
-        uuid: 'rw-uuid',
-        expireAt: new Date(Date.now() + behaviour).toISOString(),
-        subscriptionUrl: 'https://panel.example/sub/xyz',
-        status: 'ACTIVE',
+        kind: 'ok' as const,
+        value: {
+          expireAtMs: Date.now() + behaviour,
+          subscriptionUrl: 'https://panel.example/sub/xyz',
+        },
+        detectedVersion: null,
       };
     },
   } as never;
@@ -222,7 +237,7 @@ describe('ExpiredProfileCleanupService', () => {
       } as never,
       eventsMock(),
       settingsMock({ deleteEnabled: true, graceDays: 3 }),
-      remnawaveMock('throw'),
+      remnawaveMock('unavailable'),
       deletionMock(deletions),
     );
 
@@ -233,7 +248,46 @@ describe('ExpiredProfileCleanupService', () => {
     assert.equal(updates.length, 0);
   });
 
-  it('deletes when the panel profile is already gone (getPanelUser returns null)', async () => {
+  it('defers instead of deleting when the panel answers 2xx with an unreadable expiry', async () => {
+    // `invalidContract` is the outcome for a 2xx whose `expireAt` is missing or
+    // unparseable, and for a terminal 400/401/403 — e.g. addressing a 3.x panel
+    // with a 2.x uuid. None of those prove the profile is gone, so none may
+    // delete. Distinct from `unavailable`: this one never retries itself.
+    const deletions: DeletionInput[] = [];
+    const updates: unknown[] = [];
+
+    const service = new ExpiredProfileCleanupService(
+      {
+        subscription: {
+          findMany: async (input: { where: Record<string, unknown> }) => {
+            if (input.where['remnawaveId'] === null) return [];
+            return [
+              {
+                id: 'sub-garbled',
+                userId: 'user-1',
+                isTrial: false,
+                remnawaveId: 'rw-garbled',
+                expiresAt: new Date(Date.now() - 30 * DAY_MS),
+              },
+            ];
+          },
+          update: async (input: unknown) => { updates.push(input); return {}; },
+        },
+      } as never,
+      eventsMock(),
+      settingsMock({ deleteEnabled: true, graceDays: 3 }),
+      remnawaveMock('invalidContract'),
+      deletionMock(deletions),
+    );
+
+    const count = await service.runSweep();
+
+    assert.equal(count, 0);
+    assert.equal(deletions.length, 0);
+    assert.equal(updates.length, 0);
+  });
+
+  it('deletes only when the panel confirms the profile is gone (notFound)', async () => {
     const deletions: DeletionInput[] = [];
 
     const service = new ExpiredProfileCleanupService(
@@ -256,7 +310,7 @@ describe('ExpiredProfileCleanupService', () => {
       } as never,
       eventsMock(),
       settingsMock({ deleteEnabled: true, graceDays: 3 }),
-      remnawaveMock(null),
+      remnawaveMock('notFound'),
       deletionMock(deletions),
     );
 
@@ -394,5 +448,156 @@ describe('ExpiredProfileCleanupService', () => {
     await service.sweepExpiredProfiles();
 
     assert.equal(findManyCalled, false);
+  });
+});
+
+/**
+ * `notFound` is the ONE non-`ok` outcome that deletes, so it is the branch a
+ * misread 404 turns into data loss — and the `remnawaveMock` above cannot see
+ * that, because the mapping from an HTTP answer to an outcome kind IS the thing
+ * at stake. Everything here is the production wiring instead: the REAL
+ * `RemnawaveApiService` over a panel that answers with real HTTP, handed to the
+ * REAL sweep.
+ *
+ * The scenario is a Traefik/nginx redeploy — for its duration every request gets
+ * a bare 404, from a process that has never heard of Remnawave. The sweep runs
+ * every 30 minutes over CLEANUP_BATCH = 100 candidates and routes each one into
+ * `deleteExpiredIfUnchanged`, which terminates entitlements, closes terms, sets
+ * `status = DELETED` and enqueues a panel DELETE. The population that destroys
+ * is exactly the one the panel re-check exists to protect: subscriptions renewed
+ * on the panel whose local `expiresAt` is stale.
+ */
+describe('ExpiredProfileCleanupService — a 404 deletes only when the PANEL sent it', () => {
+  const PANEL_CONFIG = {
+    host: 'remnawave',
+    port: 3000,
+    token: 'secret',
+    webhookSecret: null,
+    caddyToken: null,
+    cookie: null,
+  } as const;
+
+  /** The REAL adapter over a panel whose `/api/users/{uuid}` answers `reply`. */
+  function panelApi(reply: () => unknown) {
+    const reads: string[] = [];
+    const service = new RemnawaveApiService(
+      {
+        request: (input: { url: string }) => {
+          reads.push(input.url);
+          return reply();
+        },
+      } as never,
+      PANEL_CONFIG as never,
+    );
+    return { service, reads };
+  }
+
+  function httpError(status: number, data?: unknown) {
+    return throwError(() => ({
+      isAxiosError: true,
+      response: { status, headers: {}, data },
+      message: `HTTP ${status}`,
+    }));
+  }
+
+  /**
+   * The sweep over ONE candidate: expired 30 days ago by the local date, which
+   * is the stale side of the story the panel re-check exists to settle.
+   */
+  function sweepOver(api: RemnawaveApiService) {
+    const deletions: DeletionInput[] = [];
+    const updates: Array<{ where: unknown; data: Record<string, unknown> }> = [];
+    const service = new ExpiredProfileCleanupService(
+      {
+        subscription: {
+          findMany: async (input: { where: Record<string, unknown> }) => {
+            if (input.where['remnawaveId'] === null) return [];
+            return [
+              {
+                id: 'sub-renewed',
+                userId: 'user-1',
+                isTrial: false,
+                remnawaveId: 'rw-renewed',
+                expiresAt: new Date(Date.now() - 30 * DAY_MS),
+              },
+            ];
+          },
+          update: async (input: { where: unknown; data: Record<string, unknown> }) => {
+            updates.push(input);
+            return {};
+          },
+        },
+      } as never,
+      eventsMock(),
+      settingsMock({ deleteEnabled: true, graceDays: 3 }),
+      api as never,
+      deletionMock(deletions),
+    );
+    return { service, deletions, updates };
+  }
+
+  const PROXY_404: ReadonlyArray<readonly [string, unknown]> = [
+    ['an nginx HTML error page', '<html><head><title>404 Not Found</title></head></html>'],
+    ['an empty body', ''],
+    ['no body at all', undefined],
+    ['a gateway JSON body with no panel error code', { message: '404 page not found' }],
+  ];
+
+  for (const [label, data] of PROXY_404) {
+    it(`DEFERS on a bare 404 (${label}) — a host outage must not retire live subscriptions`, async () => {
+      const { service: api, reads } = panelApi(() => httpError(404, data));
+      const { service, deletions, updates } = sweepOver(api);
+
+      const count = await service.runSweep();
+
+      assert.equal(reads.length, 1, 'the panel re-check must actually have run');
+      assert.equal(count, 0);
+      assert.equal(
+        deletions.length,
+        0,
+        'a proxy answering 404 for everything is an outage, not a missing profile',
+      );
+      assert.equal(updates.length, 0, 'and nothing is self-healed off an answer we do not have');
+    });
+  }
+
+  it('still DELETES when the panel itself says the user is gone (404 + A025)', async () => {
+    const { service: api } = panelApi(() =>
+      httpError(404, { errorCode: 'A025', message: 'User not found' }),
+    );
+    const { service, deletions } = sweepOver(api);
+
+    const count = await service.runSweep();
+
+    assert.equal(count, 1, 'a genuine "the profile is gone" must still be cleaned up');
+    assert.equal(deletions.length, 1);
+    assert.equal(deletions[0]?.subscriptionId, 'sub-renewed');
+    assert.equal(deletions[0]?.expectedRemnawaveId, 'rw-renewed');
+  });
+
+  it('self-heals instead of deleting when the panel serves a live expiry (unchanged)', async () => {
+    // The other end of the same wiring: a real 2.8.0 answer still reaches the
+    // sweep as `ok`, so the guard cannot have turned the sweep into a no-op.
+    const renewedTo = new Date(Date.now() + 20 * DAY_MS);
+    const { service: api } = panelApi(() =>
+      of({
+        data: {
+          response: {
+            expireAt: renewedTo.toISOString(),
+            subscriptionUrl: 'https://panel.example/sub/xyz',
+          },
+          version: '2.8.0',
+        },
+      }),
+    );
+    const { service, deletions, updates } = sweepOver(api);
+
+    const count = await service.runSweep();
+
+    assert.equal(count, 0);
+    assert.equal(deletions.length, 0);
+    assert.equal(updates.length, 1);
+    assert.equal((updates[0]?.data['expiresAt'] as Date).getTime(), renewedTo.getTime());
+    assert.equal(updates[0]?.data['status'], SubscriptionStatus.ACTIVE);
   });
 });

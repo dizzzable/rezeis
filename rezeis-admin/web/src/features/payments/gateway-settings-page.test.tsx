@@ -375,6 +375,9 @@ describe('GatewaySettingsPage Platega payment method', () => {
     // is the bug that started this: `CARD` used to be sent as 1, a method
     // Platega does not have, with nothing in the UI to reveal it.
     expect(screen.getAllByRole('option').map((option) => option.textContent)).toEqual([
+      // Numberless on purpose: it is not one of Platega's rails, it is the
+      // choice to send no rail and let Platega ask the payer.
+      'Payer picks the method on Platega',
       '2 — СБП / SBP (QR code)',
       '3 — ЕРИП / ERIP',
       '11 — Card acquiring',
@@ -382,6 +385,48 @@ describe('GatewaySettingsPage Platega payment method', () => {
       '13 — Cryptocurrency',
       '14 — SberPay',
     ])
+  })
+
+  it('posts the provider-choice sentinel the backend enum accepts, not a blank', async () => {
+    mockGatewayList([createPlatega()])
+    const patchSpy = vi.spyOn(api, 'patch').mockResolvedValue({ data: {} })
+    grantPermissions([
+      { resource: 'payment_gateways', action: 'view' },
+      { resource: 'payment_gateways', action: 'edit' },
+    ])
+    const user = userEvent.setup()
+
+    renderWithProviders(<GatewaySettingsPage />)
+    await user.click(await screen.findByRole('button', { name: 'Open settings' }))
+    await user.click(await screen.findByRole('combobox', { name: 'Platega payment method' }))
+    await user.click(screen.getByRole('option', { name: 'Payer picks the method on Platega' }))
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(patchSpy).toHaveBeenCalled())
+    // An explicitly-stored value, NOT an omitted key: an absent `paymentMethod`
+    // still means СБП (2) at checkout, so «provider's choice» has to travel as
+    // a value of its own or it would be indistinguishable from never choosing.
+    expect(readSavedSettings(patchSpy)).toEqual({
+      merchantId: 'merchant-1',
+      secret: 'secret-1',
+      paymentMethod: 'PROVIDER_CHOICE',
+    })
+  })
+
+  it('keeps the provider-choice sentinel selected on reopen', async () => {
+    mockGatewayList([createPlatega({ paymentMethod: 'PROVIDER_CHOICE' })])
+    grantPermissions([
+      { resource: 'payment_gateways', action: 'view' },
+      { resource: 'payment_gateways', action: 'edit' },
+    ])
+    const user = userEvent.setup()
+
+    renderWithProviders(<GatewaySettingsPage />)
+    await user.click(await screen.findByRole('button', { name: 'Open settings' }))
+
+    expect(
+      await screen.findByRole('combobox', { name: 'Platega payment method' }),
+    ).toHaveTextContent('Payer picks the method on Platega')
   })
 
   it('sends the chosen payment method in a shape the backend enum accepts', async () => {

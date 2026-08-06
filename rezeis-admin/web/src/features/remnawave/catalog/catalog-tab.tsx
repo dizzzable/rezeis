@@ -198,22 +198,30 @@ export function CatalogTab() {
           empty={!pages || pages.length === 0}
           emptyText={t('remnaWavePage.catalog.pages.empty')}
         >
+          {/* The per-page subtitle used to render `page.title`, a field neither
+              2.7.4 nor 2.8.0 sends — so it never appeared on any panel. The
+              row's real content is its name, its view position and whether it
+              carries a (panel-opaque) config blob. */}
           <Table>
             <TableHeader>
               <TableRow>
+                <TableHead className="w-10 text-right">{t('remnaWavePage.catalog.columns.position')}</TableHead>
                 <TableHead>{t('remnaWavePage.catalog.columns.name')}</TableHead>
-                <TableHead className="text-right">{t('remnaWavePage.catalog.columns.id')}</TableHead>
+                <TableHead className="text-right">{t('remnaWavePage.catalog.columns.config')}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {pages?.map((page) => (
                 <TableRow key={page.uuid}>
+                  <TableCell className="text-right tabular-nums text-xs text-muted-foreground">
+                    {page.viewPosition}
+                  </TableCell>
                   <TableCell>
                     <p className="font-medium">{page.name}</p>
-                    {page.title ? <p className="text-xs text-muted-foreground">{page.title}</p> : null}
+                    <p className="font-mono text-[10px] text-muted-foreground/70">{page.uuid.slice(0, 8)}…</p>
                   </TableCell>
-                  <TableCell className="text-right font-mono text-[10px] text-muted-foreground/70">
-                    {page.uuid.slice(0, 8)}…
+                  <TableCell className="text-right">
+                    <ConfigBadge configured={page.hasConfig} />
                   </TableCell>
                 </TableRow>
               ))}
@@ -230,28 +238,25 @@ export function CatalogTab() {
           empty={!snippets || snippets.length === 0}
           emptyText={t('remnaWavePage.catalog.snippets.empty')}
         >
+          {/* A snippet is `{ name, snippet }` upstream — no uuid, no type, no
+              description. `key` was `snippet.uuid`, which mapped to `''` for
+              every row: two snippets were enough for React to see duplicate
+              keys. `name` is the record's only identity and is now the key. */}
           <Table>
             <TableHeader>
               <TableRow>
                 <TableHead>{t('remnaWavePage.catalog.columns.name')}</TableHead>
-                <TableHead>{t('remnaWavePage.catalog.snippets.type')}</TableHead>
+                <TableHead className="text-right">{t('remnaWavePage.catalog.snippets.entries')}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {snippets?.map((snippet) => (
-                <TableRow key={snippet.uuid}>
+                <TableRow key={snippet.name}>
                   <TableCell>
                     <p className="font-medium">{snippet.name}</p>
-                    {snippet.description ? (
-                      <p className="text-xs text-muted-foreground">{snippet.description}</p>
-                    ) : null}
                   </TableCell>
-                  <TableCell>
-                    {snippet.type ? (
-                      <Badge variant="outline" className="px-1.5 text-[10px] font-normal">{snippet.type}</Badge>
-                    ) : (
-                      <span className="text-xs text-muted-foreground">—</span>
-                    )}
+                  <TableCell className="text-right tabular-nums text-xs text-muted-foreground">
+                    {snippet.entriesCount ?? '—'}
                   </TableCell>
                 </TableRow>
               ))}
@@ -295,6 +300,22 @@ function SectionCard({ icon: Icon, title, description, loading, empty, emptyText
         )}
       </CardContent>
     </Card>
+  )
+}
+
+/**
+ * "Does this row carry a config blob" — the only thing either spec says about
+ * `config` / `pluginConfig`, both of which are declared `{"nullable": true}`
+ * with no type at all.
+ */
+function ConfigBadge({ configured }: { configured: boolean }) {
+  const { t } = useTranslation()
+  return (
+    <Badge variant={configured ? 'success' : 'outline'} className="px-1.5 text-[10px] font-normal">
+      {configured
+        ? t('remnaWavePage.catalog.columns.configured')
+        : t('remnaWavePage.catalog.columns.configEmpty')}
+    </Badge>
   )
 }
 

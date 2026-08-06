@@ -514,6 +514,20 @@ export const en = {
     reorderFailed: 'Failed to change plan order',
     orderHint:
       'The card order here sets how tariffs appear to users in their cabinet. Drag a card by the grip on the left to reorder.',
+    squadPropagation: {
+      queued_one: 'Squad change queued for {{count}} existing subscription',
+      queued_other: 'Squad change queued for {{count}} existing subscriptions',
+      running: 'Applying the squad change on the panel — {{done}} of {{total}} done',
+      remaining_one: '{{count}} subscription still waiting',
+      remaining_other: '{{count}} subscriptions still waiting',
+      finished_one: 'Squad change applied to {{count}} subscription',
+      finished_other: 'Squad change applied to {{count}} subscriptions',
+      finishedWithFailures_one:
+        'Squad change finished, but {{count}} subscription failed — check profile sync',
+      finishedWithFailures_other:
+        'Squad change finished, but {{count}} subscriptions failed — check profile sync',
+      dismiss: 'Dismiss',
+    },
     createTitle: 'Create plan',
     editTitle: 'Edit plan',
     tabs: {
@@ -1871,6 +1885,120 @@ export const en = {
       branding: 'Branding',
       icons: 'Icons',
       config: 'Config portability',
+      antiFraud: 'Anti-fraud',
+    },
+  },
+  antiFraudTab: {
+    title: 'Anti-fraud detector tunables',
+    precedence:
+      'A value saved here OVERRIDES the matching ANTIFRAUD_* environment variable. A field you have not saved falls back to the environment variable, and then to the built-in default.',
+    applyTiming:
+      'Changes apply on the next detector run (within 5 minutes) \u2014 no restart needed, in either the API or the worker container.',
+    accuracyLink:
+      'See how often each detector was dismissed as a false positive before changing a threshold \u2192 Fraud signals',
+    panelValue: 'panel',
+    envIs: 'Environment: {{value}}',
+    defaultIs: 'Built-in default: {{value}}',
+    envOn: 'on',
+    envOff: 'off',
+    allowedRange: 'Allowed: {{min}}\u2013{{max}}',
+    resetToEnv: 'Reset to environment',
+    resetToDefault: 'Reset to defaults',
+    save: 'Save',
+    saved: 'Anti-fraud settings saved',
+    saveFailed: 'Failed to save anti-fraud settings',
+    sharing: {
+      title: 'Subscription sharing',
+      description:
+        'Two detectors. Device overage (HWID) is the authoritative signal; concurrent-network detection is advisory and off by default.',
+      fields: {
+        enableHwidOverage: {
+          label: 'Device overage detector',
+          hint: 'Flags a user with more registered devices than their plan allows.',
+        },
+        enableIpSharing: {
+          label: 'Concurrent-network detector',
+          hint: 'Advisory only. Counts distinct networks, never emits HIGH severity.',
+        },
+        ipNetworkGrouping: {
+          label: 'Group IPs into networks',
+          hint: 'Collapses carrier/CGNAT churn and IPv6 privacy-address rotation. Strongly recommended.',
+        },
+        ipWindowMinutes: {
+          label: 'IP lookback window (minutes)',
+          hint: 'Samples older than this are discarded. A staleness bound, not a concurrency test.',
+        },
+        ipConcurrencyWindowSeconds: {
+          label: 'Concurrency window (seconds)',
+          hint: 'How close two sightings must be to count as simultaneous. Lower values make sequential network switching collapse to one network.',
+        },
+        ipOverageMargin: {
+          label: 'Network overage margin',
+          hint: 'Tolerance added to the device limit before flagging. Absorbs a single user on home Wi-Fi plus mobile.',
+        },
+        ipV4PrefixLength: {
+          label: 'IPv4 grouping prefix',
+          hint: 'For example 24 groups addresses by /24.',
+        },
+        ipV6PrefixLength: {
+          label: 'IPv6 grouping prefix',
+          hint: 'For example 48 collapses a delegated site into one network.',
+        },
+        maxNodesPerRun: {
+          label: 'Max nodes probed per run',
+          hint: 'Bounds the load the ip-control jobs put on your nodes.',
+        },
+        maxIpsInMetadata: {
+          label: 'Max IP samples stored per signal',
+          hint: 'Caps how many IP samples are kept in a signal\u2019s metadata.',
+        },
+      },
+    },
+    traffic: {
+      title: 'Per-user node traffic abuse',
+      description:
+        'Advisory detector for users whose bandwidth is a clear outlier. Requires Remnawave 2.8+ and activates automatically once the panel reports it.',
+      fields: {
+        enabled: {
+          label: 'Traffic abuse detector',
+          hint: 'Also gated by the Remnawave 2.8 capability \u2014 off on older panels regardless.',
+        },
+        minGb: {
+          label: 'Absolute floor (GB)',
+          hint: 'Anyone below this over the panel window is ignored, however far above the cohort they are.',
+        },
+        medianMultiplier: {
+          label: 'Median multiplier',
+          hint: 'Flag at this multiple of the cohort median.',
+        },
+        sharePercent: {
+          label: 'Share of total (%)',
+          hint: '\u2026or when one user holds at least this share of the top-users total.',
+        },
+        maxNodesPerRun: {
+          label: 'Max nodes aggregated per run',
+          hint: 'Bounds the panel call.',
+        },
+      },
+    },
+    subscriptionUa: {
+      title: 'Subscription re-hosting (User-Agent)',
+      description:
+        'Reads the panel’s subscription-request log and flags a fetch whose User-Agent carries a proxy config URI (vless://, trojan://, ss://). A real client sends a product name, not a node config, so a User-Agent carrying one means the subscription is being pulled through another panel, aggregator or tunnel. Evidence of pass-through, not proof of resale: it files LOW or MEDIUM, never HIGH. OFF by default — turn it on deliberately. These three knobs have no ANTIFRAUD_* environment variable; under a saved value there is only the built-in default.',
+      fields: {
+        enableSubscriptionUaTunnel: {
+          label: 'Subscription re-hosting detector',
+          hint: 'Off by default. Once on, a flagged subscription needs the condition to hold across three consecutive runs (~15 minutes) before a signal opens, and switching this back off never closes the signals it already raised.',
+        },
+        uaEvidenceWindowMinutes: {
+          label: 'Evidence window (minutes)',
+          hint: 'How far back a subscription fetch still counts. Widen it only together with the page size below — the panel log cannot be filtered by time, so a wider window that one page does not reach back over is a window only partly examined.',
+        },
+        uaRequestPageSize: {
+          label: 'Request-log rows read per run',
+          hint: 'The only lever over how much of the window one run actually covers. If signals report an incompletely covered window (or the log warns it can only under-detect), raise this or shorten the window.',
+        },
+      },
     },
   },
   pushNotifications: {
@@ -2019,6 +2147,16 @@ export const en = {
       WEEK: 'Weekly',
     },
     unlimitedHint: '0 = unlimited',
+    limitScope: {
+      title: 'Limit changes reach existing subscribers on renewal',
+      unlimited: 'unlimited',
+      trafficValue: '{{value}} GB',
+      trafficChange: 'Traffic limit: {{from}} → {{to}}',
+      deviceChange: 'Device limit: {{from}} → {{to}}',
+      cut: 'Subscribers who already bought this plan keep their current limits — nobody is reduced today. The new limits apply from their next renewal or upgrade.',
+      raise: 'Subscribers who already bought this plan do not get the higher limits today; those apply from their next renewal or upgrade. New purchases get them right away.',
+      mixed: 'Subscribers who already bought this plan keep their current limits until their next renewal or upgrade. New purchases get the new limits right away.',
+    },
     squads: 'Remnawave squads',
     internalSquads: 'Internal squads',
     internalSquadsPlaceholder: 'Select internal squads…',
@@ -2468,6 +2606,58 @@ export const en = {
       signalUpdated: 'Signal updated',
       updateFailed: 'Update failed: {{message}}',
     },
+    suppression: {
+      held: {
+        title: 'Held back',
+        subtitle:
+          'Conditions the detectors found but did not file — still gathering evidence, or covered by an exemption.',
+        empty: 'Nothing is being held back right now.',
+        byStreak: 'Seen {{seen}}/{{required}} runs',
+        byExemption: 'Exempt',
+        columns: {
+          signal: 'Condition',
+          reason: 'Held because',
+          lastSeen: 'Last seen',
+        },
+      },
+      exemptions: {
+        title: 'Exemptions',
+        subtitle:
+          'Users cleared of specific detectors until a date. Expiry is mandatory — a permanent exemption is a permanent blind spot.',
+        empty: 'No exemptions have been granted.',
+        add: 'New exemption',
+        revoke: 'Revoke',
+        revoked: 'Exemption revoked',
+        revokeFailed: 'Could not revoke: {{message}}',
+        created: 'Exemption granted',
+        createFailed: 'Could not grant the exemption: {{message}}',
+        grantedBy: 'granted by {{login}}',
+        statusRevoked: 'revoked',
+        statusExpired: 'expired',
+        columns: {
+          user: 'User',
+          codes: 'Detectors',
+          expires: 'Expires',
+          actions: 'Actions',
+        },
+        dialog: {
+          title: 'Exempt a user from specific detectors',
+          description:
+            'The detectors keep watching and the findings stay visible under "Held back" — they just stop opening signals for this user, for these codes, until the date you pick.',
+          userLabel: 'User ID',
+          userPlaceholder: 'The rezeis user id from the signal',
+          codesLabel: 'Detector codes',
+          codesHint:
+            'Pick only what you have actually verified. Clearing a high device count does not clear promocode abuse.',
+          expiresLabel: 'Expires on',
+          expiresHint: 'Required. The exemption stops applying at the end of this day (UTC).',
+          reasonLabel: 'Reason',
+          reasonPlaceholder: 'What did you verify, and how? Ticket number, call, manual check…',
+          cancel: 'Cancel',
+          submit: 'Grant exemption',
+        },
+      },
+    },
     enforce: {
       button: 'Drop connections',
       title: 'Drop active connections',
@@ -2503,6 +2693,38 @@ export const en = {
       open: 'Open',
       kindHwid: 'Devices',
       kindIp: 'IP',
+    },
+    confidence: {
+      title: 'Why this confidence',
+      formula:
+        '{{confidence}}% = {{ceiling}} (detector ceiling) × {{agreement}} (agreement) × {{quality}} (data quality)',
+      factor: '{{observed}} → {{strength}}',
+      note: 'Agreement is the mean strength of the factors above; data quality is how complete the underlying read was. Confidence never affects whether a signal is raised.',
+    },
+    accuracy: {
+      title: 'Detector accuracy',
+      subtitle:
+        'How often each detector was dismissed as a false positive by an operator. Read-only — check this before changing a threshold.',
+      window: 'Last {{count}} days',
+      empty: 'No detector raised a signal in the last {{count}} days.',
+      loadFailed: 'Could not load the detector accuracy report.',
+      columns: {
+        code: 'Detector',
+        opened: 'Opened',
+        stillOpen: 'Undecided',
+        resolved: 'Resolved',
+        dismissed: 'Dismissed',
+        falsePositiveRate: 'False positives',
+      },
+      resolvedHint:
+        'Resolved by an operator, and in brackets the ones the detector run closed on its own. Only the operator’s count is a verdict, so only it is used in the rate.',
+      rateHint:
+        '{{dismissed}} of {{adjudicated}} signals an operator ruled on were dismissed as false positives. Signals still open, and ones the system closed by itself, are not counted either way.',
+      notEnoughData: 'not enough data',
+      notEnoughDataHint:
+        'Only {{adjudicated}} operator verdict(s) so far; at least {{required}} are needed before a percentage means anything.',
+      footnote:
+        'Rate = operator dismissals ÷ signals an operator ruled on (dismissed + resolved by a person). Shown only from {{count}} verdicts up.',
     },
     bulk: {
       selected: '{{count}} selected',
@@ -3222,8 +3444,24 @@ export const en = {
       titleApplied: 'Import result',
       summary:
         'Strategy: {{strategy}} · created {{created}} · updated {{updated}} · skipped {{skipped}} · errors {{errors}}',
+      incomplete:
+        '{{total}} section(s) were not imported: {{sections}}. Zero counts below do not mean they succeeded.',
+      integrity: {
+        label: 'File integrity',
+        verified: 'checked against the manifest the export wrote',
+        unverifiable:
+          'no manifest in this file — its sections are taken at face value and an emptied section cannot be detected',
+        violated: 'the file contradicts its own manifest and is damaged',
+      },
+      statuses: {
+        imported: 'Imported',
+        missing: 'Not in file',
+        rejected: 'Refused',
+        failed: 'Failed',
+      },
       columns: {
         section: 'Section',
+        status: 'Status',
         created: 'Created',
         updated: 'Updated',
         skipped: 'Skipped',

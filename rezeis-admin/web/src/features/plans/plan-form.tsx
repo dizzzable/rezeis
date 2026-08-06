@@ -33,6 +33,11 @@ import { IconPicker } from '@/features/settings/icon-picker'
 import { EmojiTextInput } from '@/features/broadcast/emoji-text-input'
 import { usePlans, type Plan } from './plans-api'
 import {
+  describePlanLimitChanges,
+  summarizePlanLimitDirection,
+  type PlanLimitChange,
+} from './plan-limit-scope'
+import {
   PLAN_AVAILABILITIES,
   PLAN_CURRENCIES,
   PLAN_TRAFFIC_STRATEGIES,
@@ -218,6 +223,30 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
       setResolvingAllowedUser(false)
     }
   }
+
+  // Which limits this edit moves, and which way. Recomputed as the operator
+  // types so the notice below appears at the moment of the decision rather than
+  // after Save — unlike the squad propagation banner, there is no background
+  // work to follow here, only a rule to state while it can still be changed.
+  // `plan?.id` is the test for "this plan is saved, so it may have subscribers":
+  // the create dialog passes no id and stays silent.
+  const limitChanges = useMemo<readonly PlanLimitChange[]>(
+    () =>
+      describePlanLimitChanges({
+        isSavedPlan: plan?.id !== undefined,
+        savedType: initialDraft.type,
+        draftType: type,
+        savedTrafficLimitGB: initialDraft.trafficLimitGB,
+        draftTrafficLimitGB: trafficLimitGB,
+        savedDeviceLimit: initialDraft.deviceLimit,
+        draftDeviceLimit: deviceLimit,
+      }),
+    [plan?.id, initialDraft, type, trafficLimitGB, deviceLimit],
+  )
+  const limitDirection = useMemo(
+    () => summarizePlanLimitDirection(limitChanges),
+    [limitChanges],
+  )
 
   const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
     const draft: PlanFormDraft = {
@@ -488,6 +517,13 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
           </Select>
         </div>
       </div>
+      )}
+
+      {/* Sits OUTSIDE the block above on purpose: switching the plan type to
+          UNLIMITED hides both inputs while still changing the persisted limits,
+          and that is the largest limit change an operator can make. */}
+      {limitDirection !== null && (
+        <LimitScopeNotice changes={limitChanges} direction={limitDirection} />
       )}
 
       <Separator />
@@ -822,6 +858,56 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
 function FieldError({ message }: { readonly message?: string }) {
   if (!message) return null
   return <p className="text-xs font-medium text-destructive" role="alert">{message}</p>
+}
+
+/**
+ * States, at the moment a limit is edited, that the change does NOT reach the
+ * people already on this plan until they renew or upgrade.
+ *
+ * That is the product's rule, not an accident — `BulkPlanAssignmentService`
+ * defers the same reshape by default so an admin action never silently shrinks
+ * a paying customer, and `bulk-assign-plan-dialog` already says so for the bulk
+ * path. The plan editor was the one place that changed limits and said nothing,
+ * which is what made correct behaviour read as a bug.
+ *
+ * The rule is the same in both directions; the sentence is not. On a cut the
+ * operator needs to know nobody was reduced today, on a raise they need to know
+ * the gift has not been delivered yet — so support is not told otherwise.
+ */
+function LimitScopeNotice({
+  changes,
+  direction,
+}: {
+  readonly changes: readonly PlanLimitChange[]
+  readonly direction: 'raise' | 'cut' | 'mixed'
+}) {
+  const { t } = useTranslation()
+  const formatLimit = (field: PlanLimitChange['field'], value: number): string =>
+    value === 0
+      ? t('planForm.limitScope.unlimited')
+      : field === 'traffic'
+        ? t('planForm.limitScope.trafficValue', { value })
+        : String(value)
+
+  return (
+    <div className="flex gap-3 rounded-md border p-3" role="status">
+      <Info className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+      <div className="space-y-1">
+        <p className="text-sm font-medium">{t('planForm.limitScope.title')}</p>
+        <ul className="text-xs text-muted-foreground">
+          {changes.map((change) => (
+            <li key={change.field}>
+              {t(`planForm.limitScope.${change.field}Change`, {
+                from: formatLimit(change.field, change.from),
+                to: formatLimit(change.field, change.to),
+              })}
+            </li>
+          ))}
+        </ul>
+        <p className="text-xs text-muted-foreground">{t(`planForm.limitScope.${direction}`)}</p>
+      </div>
+    </div>
+  )
 }
 
 function createInitialPlanDraft(plan?: PlanInput): PlanFormDraft {

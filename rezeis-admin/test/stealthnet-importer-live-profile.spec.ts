@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { StealthnetImporterService } from '../src/modules/imports/services/stealthnet-importer.service';
+import { strictOk } from '../src/modules/remnawave/interfaces/remnawave-strict-outcome.interface';
 
 describe('StealthnetImporterService live panel overlay', () => {
   it('preserves a lifetime panel expiry instead of reviving an obsolete backup expiry', async () => {
@@ -23,12 +24,15 @@ describe('StealthnetImporterService live panel overlay', () => {
         importRecord: { create: async () => ({ id: 'import-1' }) },
       } as never,
       {
-        getAllPanelUsers: async () => [{
-          uuid: 'panel-user-1', username: 'legacy', status: 'ACTIVE', subscriptionUrl: 'https://example.test/sub',
-          telegramId: 123, panelId: 1, email: null, expireAt: '', createdAt: '2026-01-01T00:00:00.000Z',
-          lastTrafficResetAt: null, trafficLimitBytes: 0, hwidDeviceLimit: 1, trafficLimitStrategy: null,
-          tag: null, description: null, activeInternalSquads: [], externalSquadUuid: null,
-        }],
+        strictGetAllPanelUsers: async () => strictOk({
+          users: [{
+            uuid: 'panel-user-1', username: 'legacy', status: 'ACTIVE', subscriptionUrl: 'https://example.test/sub',
+            telegramId: 123, panelId: 1, email: null, expireAt: '', createdAt: '2026-01-01T00:00:00.000Z',
+            lastTrafficResetAt: null, trafficLimitBytes: 0, hwidDeviceLimit: 1, trafficLimitStrategy: null,
+            tag: null, description: null, activeInternalSquads: [], externalSquadUuid: null,
+          }],
+          total: 1,
+        }),
       } as never,
       { syncImport: async () => ({
         mappings: [], created: 0, existing: 0, skipped: 0,

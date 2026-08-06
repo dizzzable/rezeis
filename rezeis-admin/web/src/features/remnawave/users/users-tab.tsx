@@ -451,8 +451,13 @@ function SubscriptionRequestLogCard() {
                 <TableRow key={entry.id}>
                   <TableCell className="text-xs">
                     {entry.requestedAt ? new Date(entry.requestedAt).toLocaleString() : '—'}
+                    {/* 2.7.4 identifies the owner by uuid, 2.8.0 by a panel-internal
+                        integer. Rendering `userUuid.slice(0, 8)` for both used to
+                        display the integer as though it were a uuid prefix. */}
                     {entry.userUuid ? (
                       <p className="font-mono text-[10px] text-muted-foreground/70">{entry.userUuid.slice(0, 8)}…</p>
+                    ) : entry.panelUserId !== null && entry.panelUserId !== undefined ? (
+                      <p className="font-mono text-[10px] text-muted-foreground/70">#{entry.panelUserId}</p>
                     ) : null}
                   </TableCell>
                   <TableCell className="text-xs">

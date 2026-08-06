@@ -2,7 +2,7 @@ import { Processor, WorkerHost, OnWorkerEvent } from '@nestjs/bullmq';
 import { Logger } from '@nestjs/common';
 import { Job } from 'bullmq';
 
-import { SystemEventsService } from '../../common/services/system-events.service';
+import { EVENT_TYPES, SystemEventsService } from '../../common/services/system-events.service';
 import { BROADCAST_DELIVERY_QUEUE, BROADCAST_JOBS } from './broadcast.constants';
 import { BroadcastDeliveryService } from './services/broadcast-delivery.service';
 import {
@@ -77,7 +77,7 @@ export class BroadcastProcessor extends WorkerHost {
 
     // Emit progress event for admin realtime
     this.systemEventsService.info(
-      'broadcast.started',
+      EVENT_TYPES.BROADCAST_STARTED,
       'SYSTEM',
       `Broadcast delivery started: ${messageIds.length} recipients in ${batchCount} batches`,
       { broadcastId, totalMessages: messageIds.length, batches: batchCount },
@@ -93,7 +93,7 @@ export class BroadcastProcessor extends WorkerHost {
 
     // Emit progress for realtime dashboard
     this.systemEventsService.info(
-      'broadcast.batch_completed',
+      EVENT_TYPES.BROADCAST_BATCH_COMPLETED,
       'SYSTEM',
       `Batch: ${result.sent} sent, ${result.failed} failed`,
       { broadcastId, ...result, batchSize: messageIds.length },

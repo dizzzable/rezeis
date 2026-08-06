@@ -9,6 +9,7 @@ import { SystemEventsService } from '../src/common/services/system-events.servic
 import { FraudDetectors } from '../src/modules/anti-fraud/detectors/fraud-detectors';
 import { RemnawaveDetectors } from '../src/modules/anti-fraud/detectors/remnawave-detectors';
 import { SharingDetectors } from '../src/modules/anti-fraud/detectors/sharing-detectors';
+import { SubscriptionUaDetectors } from '../src/modules/anti-fraud/detectors/subscription-ua-detectors';
 import { RemnawaveApiService } from '../src/modules/remnawave/services/remnawave-api.service';
 
 interface SignalSeed {
@@ -68,6 +69,7 @@ function build(seed: SignalSeed | null) {
     {} as unknown as FraudDetectors,
     {} as unknown as RemnawaveDetectors,
     {} as unknown as SharingDetectors,
+    {} as unknown as SubscriptionUaDetectors,
     remna,
     sysEvents,
   );

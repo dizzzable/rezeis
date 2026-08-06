@@ -6,6 +6,7 @@ import { renderWithProviders } from '@/test/test-utils'
 import FraudSignalsPage from './fraud-page'
 import {
   enforceDropConnections,
+  getDetectorAccuracy,
   getFraudStats,
   getFraudTopOffenders,
   getFraudTrend,
@@ -23,6 +24,18 @@ vi.mock('./fraud-api', () => ({
   enforceDropConnections: vi.fn(),
   transitionFraudSignal: vi.fn(),
   runFraudDetectors: vi.fn(),
+  // The suppression panel the page now renders. Mocked here as well because the
+  // factory REPLACES the module: a missing export is `undefined` at call time,
+  // not a compile error, which is how a page-level mock silently breaks a child.
+  getPendingFraudCandidates: vi.fn(),
+  listFraudExemptions: vi.fn(),
+  createFraudExemption: vi.fn(),
+  revokeFraudExemption: vi.fn(),
+  // Same reason as the exemption calls above: the factory REPLACES the module,
+  // so a page-level child calling an export this list forgets gets `undefined`
+  // at runtime rather than a compile error.
+  getDetectorAccuracy: vi.fn(),
+  FRAUD_DETECTOR_CODES: ['SUBSCRIPTION_SHARING_HWID', 'PROMO_ABUSE'],
 }))
 
 const sharingSignal: FraudSignal = {
@@ -67,6 +80,13 @@ describe('FraudSignalsPage — enforcement', () => {
     vi.mocked(runFraudDetectors).mockResolvedValue({ ok: true, processed: 0 })
     vi.mocked(transitionFraudSignal).mockResolvedValue(sharingSignal)
     vi.mocked(enforceDropConnections).mockResolvedValue({ ok: true, dropped: { by: 'user', count: 1 } })
+    vi.mocked(getDetectorAccuracy).mockResolvedValue({
+      windowDays: 30,
+      since: '2026-05-19T12:00:00.000Z',
+      until: '2026-06-18T12:00:00.000Z',
+      minAdjudicatedForRate: 10,
+      rows: [],
+    })
   })
 
   afterEach(() => {

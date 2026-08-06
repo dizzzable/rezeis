@@ -2,7 +2,7 @@ import { Body, Controller, HttpCode, HttpStatus, Post, UseGuards } from '@nestjs
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 
 import { InternalAdminAuthGuard } from '../auth/guards/internal-admin-auth.guard';
-import { SystemEventsService } from '../../common/services/system-events.service';
+import { EVENT_TYPES, SystemEventsService } from '../../common/services/system-events.service';
 import { ReportReiwaErrorDto } from './dto/report-reiwa-error.dto';
 
 /**
@@ -30,9 +30,9 @@ export class InternalSystemEventsController {
     };
     const message = `[reiwa:${body.source}] ${body.message}`;
     if (body.level === 'warning') {
-      this.events.warn('reiwa.error', 'SYSTEM', message, metadata);
+      this.events.warn(EVENT_TYPES.REIWA_ERROR, 'SYSTEM', message, metadata);
     } else {
-      this.events.error('reiwa.error', 'SYSTEM', message, metadata);
+      this.events.error(EVENT_TYPES.REIWA_ERROR, 'SYSTEM', message, metadata);
     }
     return { ok: true };
   }

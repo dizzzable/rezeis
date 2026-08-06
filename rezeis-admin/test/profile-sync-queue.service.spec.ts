@@ -272,6 +272,59 @@ describe('ProfileSyncQueueService', () => {
     assert.equal(addedJobs.length, 2);
   });
 
+  it('leaves a contract-rejection row alone while still re-driving a real outage', async () => {
+    // The far end of the amplifier. `ProfileSyncProcessor` now writes
+    // `{classification:'TERMINAL'}` for a panel rejection (HTTP 400/401/…) and
+    // `{classification:'TRANSIENT'}` for an outage; this sweep is what decides
+    // whether the row comes back every 5 minutes forever. Rather than assert
+    // the shape of the `where` clause, the mock EVALUATES it against rows
+    // carrying both classifications — the filter has to do the excluding, not
+    // the assertion.
+    process.env['RUID_PROCESS_ROLE'] = 'worker';
+    _resetProcessRoleCacheForTests();
+
+    const rows = [
+      { id: 'outage-row', recoveryData: { classification: 'TRANSIENT' } },
+      { id: 'rejected-body-row', recoveryData: { classification: 'TERMINAL' } },
+    ];
+    /** Minimal stand-in for Prisma's `{ path, equals }` JSON filter. */
+    const matchesRecoveryFilter = (row: (typeof rows)[number], where: unknown): boolean => {
+      const filter = (where as { recoveryData?: { path?: string[]; equals?: unknown } }).recoveryData;
+      if (filter?.path === undefined) return true;
+      const [key] = filter.path;
+      return (row.recoveryData as Record<string, unknown>)[key] === filter.equals;
+    };
+
+    const addedJobs: unknown[] = [];
+    const resetIds: string[] = [];
+    const service = new ProfileSyncQueueService(
+      {
+        profileSyncJob: {
+          findMany: async (input: { where?: { status?: SyncJobStatus } }) => {
+            if (input.where?.status !== SyncJobStatus.FAILED) return [];
+            return rows.filter((row) => matchesRecoveryFilter(row, input.where)).map((row) => ({ id: row.id }));
+          },
+          updateMany: async (input: { where: { id: string } }) => {
+            const row = rows.find((candidate) => candidate.id === input.where.id);
+            if (row === undefined || !matchesRecoveryFilter(row, input.where)) return { count: 0 };
+            resetIds.push(input.where.id);
+            return { count: 1 };
+          },
+        },
+      } as never,
+      { remove: async () => undefined, add: async (...args: unknown[]) => { addedJobs.push(args); } } as never,
+    );
+
+    await service.sweepAndRecover();
+
+    assert.deepEqual(resetIds, ['outage-row'], 'a genuine outage must still be retried');
+    assert.deepEqual(
+      addedJobs.map((job) => (job as readonly unknown[])[1]),
+      [{ syncJobId: 'outage-row' }],
+      'a permanently-rejected row must NOT be re-enqueued every 5 minutes forever',
+    );
+  });
+
   it('does not recover superseded FAILED rows', async () => {
     process.env['RUID_PROCESS_ROLE'] = 'worker';
     _resetProcessRoleCacheForTests();

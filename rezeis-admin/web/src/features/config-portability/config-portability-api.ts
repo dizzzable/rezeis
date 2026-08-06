@@ -18,11 +18,28 @@ export interface ConfigExportPayload {
   version: number
   exportedAt: string
   source: 'rezeis-admin'
+  /**
+   * Row count the export observed per section. Absent on files written
+   * before the manifest existed — the import reports those as
+   * `unverifiable` rather than pretending it checked them.
+   */
+  manifest?: Partial<Record<ConfigSection, number>>
   sections: Partial<Record<ConfigSection, unknown[]>>
 }
 
+/**
+ * What happened to a section. `created: 0, updated: 0, errors: []` used
+ * to be the answer both for "this section imported cleanly and held no
+ * rows" and for "this section was never in the file", which is how a
+ * restore of a truncated backup read as ten green rows.
+ */
+export type SectionImportStatus = 'imported' | 'missing' | 'rejected' | 'failed'
+
+export type PayloadIntegrityStatus = 'verified' | 'unverifiable' | 'violated'
+
 export interface ConfigImportSummary {
   section: ConfigSection
+  status: SectionImportStatus
   created: number
   updated: number
   skipped: number
@@ -33,6 +50,7 @@ export interface ConfigImportResult {
   version: number
   strategy: ImportStrategy
   dryRun: boolean
+  integrity: PayloadIntegrityStatus
   summaries: readonly ConfigImportSummary[]
   startedAt: string
   finishedAt: string

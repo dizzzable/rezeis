@@ -19,7 +19,6 @@ export const KEYS = {
   configProfiles: ['remnawave', 'config-profiles'] as const,
   hwidStats: ['remnawave', 'hwid-stats'] as const,
   hwidTopUsers: ['remnawave', 'hwid-top-users'] as const,
-  subRequestStats: ['remnawave', 'sub-request-stats'] as const,
   subRequestHistory: ['remnawave', 'sub-request-history'] as const,
   subscriptionSettings: ['remnawave', 'subscription-settings'] as const,
   subscriptionTemplates: ['remnawave', 'subscription-templates'] as const,

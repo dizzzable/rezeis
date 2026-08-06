@@ -41,6 +41,9 @@ import {
 import { toast } from 'sonner';
 
 import { FraudVersionInfo } from './fraud-version-info';
+import { FraudSuppressionPanel } from './fraud-suppression';
+import { DetectorAccuracyPanel } from './detector-accuracy';
+import { ConfidenceExplainer } from './confidence-explainer';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -259,6 +262,19 @@ export default function FraudSignalsPage() {
         </div>
         <TopOffenders />
       </div>
+
+      {/* What the detectors saw and did not report, and why. Sits above the
+          signal table on purpose: a queue that is quiet because a detector was
+          silenced looks exactly like a queue that is quiet because nothing is
+          wrong, and only this panel tells them apart. */}
+      <FraudSuppressionPanel />
+
+      {/* How often each detector turned out to be wrong, per the operators'
+          own dismissals. Below the queue and above the filters on purpose: it
+          is a review of past work rather than part of triaging today's, and it
+          is the number to look at before touching a threshold in
+          Settings → Anti-fraud. Read-only. */}
+      <DetectorAccuracyPanel />
 
       {/* Filters */}
       <Card>
@@ -681,6 +697,13 @@ function SignalRow({
             </CollapsibleTrigger>
             <CollapsibleContent className="collapsible-animate overflow-hidden mt-2 ml-5 space-y-2">
               <p className="text-sm text-muted-foreground">{signal.description}</p>
+              {/* Above the metadata block and outside the `isSharing` branch on
+                  purpose: the sharing renderer below is a curated list of known
+                  keys and drops everything else, so the confidence derivation
+                  would be invisible on exactly the detectors whose confidence
+                  moves most. Renders nothing for a signal that carries no
+                  derivation. */}
+              <ConfidenceExplainer confidence={signal.confidence} metadata={signal.metadata} />
               {isSharing ? (
                 <SharingMetadata metadata={signal.metadata} />
               ) : (

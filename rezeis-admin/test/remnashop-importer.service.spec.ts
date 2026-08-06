@@ -4,6 +4,7 @@ import { describe, it } from 'node:test';
 import { ImportStatus } from '@prisma/client';
 
 import { RemnashopImporterService } from '../src/modules/imports/services/remnashop-importer.service';
+import { strictOk } from '../src/modules/remnawave/interfaces/remnawave-strict-outcome.interface';
 
 describe('RemnashopImporterService', () => {
   it('does not rebind a subscription already owned by another local user', async () => {
@@ -30,7 +31,7 @@ describe('RemnashopImporterService', () => {
           },
         },
       } as never,
-      { getAllPanelUsers: async () => [] } as never,
+      { strictGetAllPanelUsers: async () => strictOk({ users: [], total: 0 }) } as never,
     );
 
     await service.run({
@@ -72,7 +73,7 @@ describe('RemnashopImporterService', () => {
         transaction: { findUnique: async () => null },
         importRecord: { create: async () => ({ id: 'import-1' }) },
       } as never,
-      { getAllPanelUsers: async () => [] } as never,
+      { strictGetAllPanelUsers: async () => strictOk({ users: [], total: 0 }) } as never,
     );
 
     await service.run({
@@ -101,7 +102,13 @@ describe('RemnashopImporterService', () => {
           return { id: 'import-1' };
         } },
       } as never,
-      { getAllPanelUsers: async () => [{ uuid: subscription(100000001).user_remna_id, telegramId: 100000002 }] } as never,
+      {
+        strictGetAllPanelUsers: async () =>
+          strictOk({
+            users: [{ uuid: subscription(100000001).user_remna_id, telegramId: 100000002 }],
+            total: 1,
+          }),
+      } as never,
     );
     await service.run({ mode: 'import', createdBy: null, users: [user(100000001)], subscriptions: [subscription(100000001)] });
     assert.equal(
@@ -134,7 +141,7 @@ describe('RemnashopImporterService', () => {
             },
           }),
       } as never,
-      { getAllPanelUsers: async () => [] } as never,
+      { strictGetAllPanelUsers: async () => strictOk({ users: [], total: 0 }) } as never,
     );
 
     const input = {
@@ -174,7 +181,7 @@ describe('RemnashopImporterService', () => {
           return { id: 'import-1' };
         } },
       } as never,
-      { getAllPanelUsers: async () => [] } as never,
+      { strictGetAllPanelUsers: async () => strictOk({ users: [], total: 0 }) } as never,
     );
     await service.run({
       mode: 'import', createdBy: null, users: [user(100000001), user(100000002)], subscriptions: [],
@@ -232,7 +239,7 @@ describe('RemnashopImporterService', () => {
           },
         },
       } as never,
-      { getAllPanelUsers: async () => [] } as never,
+      { strictGetAllPanelUsers: async () => strictOk({ users: [], total: 0 }) } as never,
     );
 
     await service.run({

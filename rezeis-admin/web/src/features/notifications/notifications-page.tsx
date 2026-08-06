@@ -113,7 +113,7 @@ const EVENT_TYPE_CATALOG: Readonly<Record<string, readonly string[]>> = {
   USER: [
     'user.registered', 'user.web_registered', 'user.blocked', 'user.unblocked',
     'user.deleted', 'user.role_changed', 'user.telegram_linked', 'user.email_linked',
-    'user.first_traffic',
+    'user.first_traffic', 'user.accounts_merged',
   ],
   AUTH: ['auth.web_login', 'auth.password_changed', 'auth.password_recovery'],
   SUBSCRIPTION: [
@@ -125,34 +125,82 @@ const EVENT_TYPE_CATALOG: Readonly<Record<string, readonly string[]>> = {
   PAYMENT: [
     'payment.checkout_created', 'payment.completed', 'payment.failed',
     'payment.expired', 'payment.webhook_received',
+    // Money that came back, came short, or is stuck. Every one of these was
+    // registered on the backend by the feature that emits it and never
+    // reached this list, so in `selected` mode none of them was deliverable.
+    'payment.refunded', 'payment.refund_partial', 'payment.amount_mismatch',
+    'payment.notified_amount_short', 'payment.fulfillment_recovered',
+    'payment.method_saved', 'payment.method_unbound', 'payment.method_autopay_updated',
+    'payment.autopay_confirmation_required',
+    // Grouped here, not under SUBSCRIPTION, because its emit site passes
+    // category PAYMENT — which is what picks the Telegram topic it lands in.
+    'trial.claim_late_success_over_cap',
   ],
   REFERRAL: ['referral.attached', 'referral.qualified', 'referral.reward_issued', 'referral.manual_attached'],
   PARTNER: [
     'partner.created', 'partner.activated', 'partner.deactivated', 'partner.earning',
     'partner.withdrawal_requested', 'partner.withdrawal_approved',
     'partner.withdrawal_rejected', 'partner.balance_adjusted',
+    // Emitted with category PARTNER by PartnerBalancePaymentService when a
+    // debit could not be refunded — the partner is short until someone acts.
+    'partner.balance_refund_failed',
   ],
-  PROMOCODE: ['promocode.activated', 'promocode.created', 'promocode.depleted'],
+  PROMOCODE: ['promocode.activated', 'promocode.created', 'promocode.depleted', 'promocode.archived'],
   SUPPORT: ['support.ticket_created', 'support.ticket_user_reply'],
-  FRAUD: ['fraud.signal_opened', 'fraud.connections_dropped'],
+  FRAUD: [
+    'fraud.signal_opened', 'fraud.connections_dropped',
+    // The suppression side of anti-fraud. `candidate_exempted` is the one that
+    // matters most here: it is the only notice an operator gets that a detector
+    // has stopped reporting somebody, and it fires once per exemption, not per run.
+    'fraud.candidate_exempted', 'fraud.exemption_granted', 'fraud.exemption_revoked',
+    // The lifecycle of a signal after it opens. `fraud.signal_transitioned` is
+    // NOT here on purpose — it is emitted with category SYSTEM, so it lands in
+    // the System topic and is ticked from the System group below.
+    'fraud.signal_escalated', 'fraud.signal_severity_receded', 'fraud.signals_auto_resolved',
+  ],
   NODE: [
     'node.connection_lost', 'node.connection_restored', 'node.created',
     'node.modified', 'node.enabled', 'node.disabled', 'node.traffic_notify',
+    'node.geo_concentration',
   ],
   REMNAWAVE: [
     'remnawave.user.first_connected', 'remnawave.user.expired', 'remnawave.user.limited',
     'remnawave.user.expire_soon', 'remnawave.user.enabled', 'remnawave.user.disabled',
     'remnawave.user.traffic_reset', 'remnawave.user.bandwidth_threshold', 'remnawave.panel.started',
+    'remnawave.hwid_average_high',
   ],
   SYSTEM: [
     'system.startup', 'system.backup_completed', 'system.broadcast_sent', 'system.error',
     'system.remnawave_sync', 'settings.email.updated', 'notification.template.created',
     'notification.template.updated', 'notification.template.deleted', 'notification.template.seeded',
+    'system.restore_completed', 'system.bulk_users_executed',
+    'broadcast.started', 'broadcast.batch_completed',
+    'import.completed', 'import.failed', 'import.plan_assigned', 'import.sync_enqueued',
+    'automation.telegram_notify', 'automation.custom', 'client.error', 'reiwa.error',
+    // Category SYSTEM at its emit site despite the `fraud.` prefix — see FRAUD.
+    'fraud.signal_transitioned',
   ],
 }
 
 /** Flat list of every catalog event type. */
 const ALL_EVENT_TYPES: readonly string[] = EVENT_CATEGORIES.flatMap((c) => EVENT_TYPE_CATALOG[c] ?? [])
+
+/**
+ * Catch-all tick-box: "and everything not in the list above".
+ *
+ * Deliberately NOT part of EVENT_TYPE_CATALOG — it is not an event type, so it
+ * must not be swept up by "select all", by the default selection, or by the
+ * registry spec that holds the catalogue equal to the backend's EVENT_TYPES.
+ *
+ * Mirrors `UNREGISTERED_EVENTS_SENTINEL` in
+ * `src/common/services/telegram-delivery-target.util.ts`; the two are held
+ * equal by `test/unregistered-event-delivery.spec.ts`. Covers the producers
+ * that choose their type at runtime (the automations `system_event` action
+ * with an explicit `type`, and the reiwa `/internal/events` ingest), which can
+ * never appear as a tick-box of their own and were therefore undeliverable in
+ * `selected` mode. Absent from a saved selection = off.
+ */
+const UNREGISTERED_EVENTS_SENTINEL = '*unregistered'
 
 // ── Main Page ────────────────────────────────────────────────────────────────
 
@@ -636,6 +684,9 @@ function TelegramDeliveryForm({ settings }: TelegramDeliveryFormProps) {
   const eventsMode = form.watch('eventsMode')
   const selectedEvents = form.watch('events')
   const selectedSet = new Set(selectedEvents)
+  // The "n of m" counter is about the tick-boxes in the grid below, so the
+  // catch-all — which is not one of them and has no denominator — is excluded.
+  const selectedCatalogCount = ALL_EVENT_TYPES.filter((type) => selectedSet.has(type)).length
 
   const toggleEvent = (type: string, checked: boolean) => {
     const next = new Set(form.getValues('events'))
@@ -879,7 +930,7 @@ function TelegramDeliveryForm({ settings }: TelegramDeliveryFormProps) {
               {eventsMode === 'selected' && (
                 <div className="space-y-3 rounded-lg border p-3">
                   <p className="text-[11px] text-muted-foreground">
-                    {t('notificationsPage.delivery.eventsSelectHint', { count: selectedSet.size, total: ALL_EVENT_TYPES.length })}
+                    {t('notificationsPage.delivery.eventsSelectHint', { count: selectedCatalogCount, total: ALL_EVENT_TYPES.length })}
                   </p>
                   <div className="grid gap-3 sm:grid-cols-2">
                     {EVENT_CATEGORIES.map((cat) => {
@@ -920,6 +971,27 @@ function TelegramDeliveryForm({ settings }: TelegramDeliveryFormProps) {
                       )
                     })}
                   </div>
+
+                  {/* Catch-all. Off unless explicitly ticked: the types it
+                      covers are chosen at runtime, so there is no tick-box for
+                      any of them individually and no way to preview what it
+                      admits. */}
+                  <label className="flex cursor-pointer items-start gap-2 rounded-md border border-dashed bg-muted/20 p-2.5">
+                    <Checkbox
+                      className="mt-0.5"
+                      checked={selectedSet.has(UNREGISTERED_EVENTS_SENTINEL)}
+                      onCheckedChange={(c) => toggleEvent(UNREGISTERED_EVENTS_SENTINEL, c === true)}
+                      aria-label={t('notificationsPage.delivery.eventsCatchAllLabel')}
+                    />
+                    <span className="space-y-0.5">
+                      <span className="block text-[11px] font-medium">
+                        {t('notificationsPage.delivery.eventsCatchAllLabel')}
+                      </span>
+                      <span className="block text-[10px] text-muted-foreground">
+                        {t('notificationsPage.delivery.eventsCatchAllHint')}
+                      </span>
+                    </span>
+                  </label>
                 </div>
               )}
             </div>

@@ -94,6 +94,81 @@ describe('normalizeGatewaySettingsForStorage — Platega paymentMethod', () => {
       { merchantId: 'merchant-1', secret: 'secret-1' },
     );
   });
+
+  it('stores the provider-choice sentinel verbatim, so it survives the storage layer', () => {
+    const normalized = normalizeGatewaySettingsForStorage(PaymentGatewayType.PLATEGA, {
+      merchantId: 'merchant-1',
+      secret: 'secret-1',
+      paymentMethod: 'PROVIDER_CHOICE',
+    });
+
+    // A string, not a number: it cannot collide with a Platega method — now or
+    // when Platega adds one — and it is what checkout matches on to pick
+    // `POST /v2/transaction/process`.
+    assert.deepStrictEqual(normalized, {
+      merchantId: 'merchant-1',
+      secret: 'secret-1',
+      paymentMethod: 'PROVIDER_CHOICE',
+    });
+
+    // `paymentMethod` is deliberately not a secret key, so the sentinel is
+    // never enveloped and never masked — panel → validate → encrypt → read
+    // hands checkout back the same literal it was given.
+    const stored = encryptGatewaySettingsForStorage(PaymentGatewayType.PLATEGA, normalized);
+    assert.equal(stored.paymentMethod, 'PROVIDER_CHOICE');
+    const readBack = readGatewaySettings(stored as never);
+    assert.equal(readBack.paymentMethod, 'PROVIDER_CHOICE');
+    assert.equal(
+      maskGatewaySettings(PaymentGatewayType.PLATEGA, readBack).settings.paymentMethod,
+      'PROVIDER_CHOICE',
+    );
+    // …and the write-without-read path leaves it alone too, so an operator who
+    // only ever sees masks cannot lose the choice by saving the form.
+    assert.equal(
+      resolveMaskedGatewaySettings(PaymentGatewayType.PLATEGA, readBack, {
+        merchantId: 'merchant-1',
+        secret: 'secret-1',
+        paymentMethod: 'PROVIDER_CHOICE',
+      }).paymentMethod,
+      'PROVIDER_CHOICE',
+    );
+  });
+
+  it('keeps «provider choice» and «never chosen» as two different states on disk', () => {
+    // The whole reason the sentinel exists. An absent key still means СБП (2)
+    // at checkout for every gateway already live on it, so the two must not
+    // collapse into one another in the persisted JSON.
+    const chosen = normalizeGatewaySettingsForStorage(PaymentGatewayType.PLATEGA, {
+      merchantId: 'merchant-1',
+      secret: 'secret-1',
+      paymentMethod: 'PROVIDER_CHOICE',
+    });
+    const neverChosen = normalizeGatewaySettingsForStorage(PaymentGatewayType.PLATEGA, {
+      merchantId: 'merchant-1',
+      secret: 'secret-1',
+    });
+
+    assert.equal('paymentMethod' in chosen, true);
+    assert.equal('paymentMethod' in neverChosen, false);
+  });
+
+  it('rejects near-misses of the sentinel rather than reading them as a choice', () => {
+    for (const paymentMethod of ['provider_choice', 'PROVIDER-CHOICE', 'PROVIDER', 'CHOICE']) {
+      assert.throws(
+        () =>
+          normalizeGatewaySettingsForStorage(PaymentGatewayType.PLATEGA, {
+            merchantId: 'merchant-1',
+            secret: 'secret-1',
+            paymentMethod,
+          }),
+        (error: unknown) => {
+          assert.equal(error instanceof BadRequestException, true);
+          return true;
+        },
+        `expected ${JSON.stringify(paymentMethod)} to be rejected`,
+      );
+    }
+  });
 });
 
 describe('normalizeGatewaySettingsForStorage — RioPay/Valutix serviceId', () => {

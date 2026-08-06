@@ -172,8 +172,8 @@ export class BotNotifierClient {
     readonly caption: string;
     readonly chatId: string;
     readonly topicThreadId?: number;
-  }): Promise<void> {
-    await this.deliver('reiwa.backup.document', {
+  }): Promise<NotifyDeliveryResult> {
+    return this.deliver('reiwa.backup.document', {
       recordId: input.recordId,
       token: input.token,
       filename: input.filename,
@@ -191,11 +191,16 @@ export class BotNotifierClient {
   private async deliver(
     event: string,
     metadata: Record<string, unknown>,
-  ): Promise<{ messageId: number | null }> {
-    if (this.endpoint === null || this.secret === null) return { messageId: null };
-    if (this.endpoint === null || this.secret === null) return { messageId: null };
+  ): Promise<NotifyDeliveryResult> {
+    if (this.endpoint === null || this.secret === null) {
+      return { status: 'disabled', messageId: null, httpStatus: null, detail: null };
+    }
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), BotNotifierClient.TIMEOUT_MS);
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, BotNotifierClient.TIMEOUT_MS);
     try {
       const body = JSON.stringify({
         event,
@@ -216,28 +221,77 @@ export class BotNotifierClient {
         body,
         signal: controller.signal,
       });
-      if (!response.ok && response.status !== 204) {
+      if (!response.ok) {
         this.logger.warn(
           `Bot notify ${event} returned ${response.status} ${response.statusText}`,
         );
-        return { messageId: null };
+        return {
+          status: 'rejected',
+          messageId: null,
+          httpStatus: response.status,
+          detail: `HTTP ${response.status} ${response.statusText}`.trim(),
+        };
       }
-      if (response.status === 204) return { messageId: null };
+      // 204 carries no body, so it can never carry a message id: reiwa accepted
+      // the relay instruction and told us nothing about what the bot did with it.
+      if (response.status === 204) {
+        return { status: 'unconfirmed', messageId: null, httpStatus: 204, detail: null };
+      }
       const json = (await response.json().catch(() => null)) as
         | { messageId?: unknown }
         | null;
       const messageId =
         json !== null && typeof json.messageId === 'number' ? json.messageId : null;
-      return { messageId };
+      // A message id is Telegram's own, echoed back through reiwa — the only
+      // evidence in this exchange that anything actually reached Telegram.
+      // A 2xx without one means "instruction accepted", which is not the same claim.
+      return {
+        status: messageId === null ? 'unconfirmed' : 'confirmed',
+        messageId,
+        httpStatus: response.status,
+        detail: null,
+      };
     } catch (err: unknown) {
-      this.logger.warn(
-        `Bot notify ${event} threw: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      return { messageId: null };
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`Bot notify ${event} threw: ${message}`);
+      return {
+        status: timedOut ? 'timeout' : 'failed',
+        messageId: null,
+        httpStatus: null,
+        detail: timedOut ? `timed out after ${BotNotifierClient.TIMEOUT_MS}ms` : message,
+      };
     } finally {
       clearTimeout(timeout);
     }
   }
+}
+
+/**
+ * What a relay attempt actually proved.
+ *
+ * Only `confirmed` means the message reached Telegram. Everything else is a
+ * distinct event with a distinct remedy, which is why they are not collapsed
+ * into one boolean: `rejected` is terminal (the same payload will be rejected
+ * again), `timeout` and `failed` are transient (worth retrying), `unconfirmed`
+ * means the hop succeeded but told us nothing, and `disabled` means no attempt
+ * was made at all.
+ */
+export type NotifyDeliveryStatus =
+  | 'confirmed'
+  | 'unconfirmed'
+  | 'rejected'
+  | 'timeout'
+  | 'failed'
+  | 'disabled';
+
+export interface NotifyDeliveryResult {
+  readonly status: NotifyDeliveryStatus;
+  /** Telegram's message id when reiwa echoed one back; `null` otherwise. */
+  readonly messageId: number | null;
+  /** Response status for `rejected`/`unconfirmed`; `null` when no response arrived. */
+  readonly httpStatus: number | null;
+  /** Human-readable failure detail for `rejected`/`timeout`/`failed`. */
+  readonly detail: string | null;
 }
 
 export interface NotifyButton {

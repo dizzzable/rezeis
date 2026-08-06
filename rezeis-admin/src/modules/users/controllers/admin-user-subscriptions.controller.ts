@@ -42,6 +42,7 @@ import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.inter
 import { extractRequestMetadata } from '../../auth/utils/request-metadata.util';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
+import { requirePanelDeviceList } from '../../remnawave/utils/panel-device-read.util';
 import { SubscriptionDeletionService } from '../../subscriptions/services/subscription-deletion.service';
 import { SubscriptionMutationsService } from '../../subscriptions/services/subscription-mutations.service';
 import { SystemEventsService, EVENT_TYPES } from '../../../common/services/system-events.service';
@@ -336,6 +337,17 @@ export class AdminUserSubscriptionsController {
     return { synced: true };
   }
 
+  /**
+   * Device list for the operator's user panel.
+   *
+   * `deviceCount: 0` here means "this subscription has no Remnawave profile",
+   * a fact we hold locally. A PANEL read that did not answer is NOT allowed to
+   * produce the same payload — it used to, and an operator triaging "the
+   * customer says they can't add a device" read a confident 0 while the panel
+   * was down. `requirePanelDeviceList` turns that into a 5xx, which
+   * `DevicesSection` in the admin SPA already renders as its
+   * `devicesList.loadError` line instead of `devicesList.empty`.
+   */
   @Get('subscriptions/:subscriptionId/devices')
   public async getDevices(@Param('subscriptionId') subscriptionId: string) {
     const sub = await this.prismaService.subscription.findUnique({
@@ -343,7 +355,9 @@ export class AdminUserSubscriptionsController {
       select: { remnawaveId: true },
     });
     if (!sub?.remnawaveId) return { devices: [], deviceCount: 0 };
-    const result = await this.remnawaveApiService.getPanelUserDevices(sub.remnawaveId);
+    const result = requirePanelDeviceList(
+      await this.remnawaveApiService.strictGetPanelUserDevices(sub.remnawaveId),
+    );
     return { devices: result.devices, deviceCount: result.total };
   }
 

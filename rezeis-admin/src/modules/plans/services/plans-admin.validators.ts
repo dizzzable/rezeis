@@ -1,10 +1,16 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  Logger,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { Currency, PlanAvailability, Prisma, SubscriptionStatus } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
 import { AdminPlanDurationDto } from '../dto/admin-plan-duration.dto';
 import { ArchivedPlanRenewModeValue } from '../utils/archived-plan-renew-mode.util';
+import { sameSquadSelection } from '../utils/plan-squads.util';
 
 import { NormalizedPlanWriteInput } from './plans-admin.normalizers';
 
@@ -23,8 +29,19 @@ const ASSIGNABLE_TRANSITION_AVAILABILITIES: ReadonlySet<PlanAvailability> = new 
  * "what is a valid plan" rules live next to each other and are easy to
  * reason about in isolation.
  */
+/**
+ * The squads a plan already carries, as persisted. `null` on create — nothing
+ * is persisted yet, so every squad on the write is a new claim.
+ */
+export interface PersistedPlanSquads {
+  readonly internalSquads: readonly string[];
+  readonly externalSquad: string | null;
+}
+
 @Injectable()
 export class PlansAdminValidators {
+  private readonly logger = new Logger(PlansAdminValidators.name);
+
   public constructor(
     private readonly prismaService: PrismaService,
     private readonly remnawaveApiService: RemnawaveApiService,
@@ -33,6 +50,8 @@ export class PlansAdminValidators {
   public async assertPlanWriteIsValid(input: {
     readonly planId: string | null;
     readonly input: NormalizedPlanWriteInput;
+    /** Persisted squads for an update; `null` for a create. */
+    readonly persistedSquads?: PersistedPlanSquads | null;
   }): Promise<void> {
     await this.assertUniquePlanName(input.planId, input.input.name);
     this.assertDurationsAreValid(input.input.durations);
@@ -40,7 +59,7 @@ export class PlansAdminValidators {
     await this.assertTrialConstraints(input);
     await this.assertReferencedPlansExistAndAreAssignable(input.input);
     await this.assertAllowedUsersExist(input.input.allowedUserIds);
-    await this.assertSquadsAreValid(input.input);
+    await this.assertSquadsAreValid(input.input, input.persistedSquads ?? null);
   }
 
   public async assertPlanDeleteIsAllowed(
@@ -249,7 +268,29 @@ export class PlansAdminValidators {
 
   // ── Squads (Remnawave) ──────────────────────────────────────────────────
 
-  private async assertSquadsAreValid(input: NormalizedPlanWriteInput): Promise<void> {
+  /**
+   * Two failures wear the same clothes here and must not be treated alike:
+   *
+   *  - **"the panel says this squad does not exist"** — an answer. Reject, as
+   *    before: the operator typed a uuid nobody serves.
+   *  - **"we could not ask"** — a timeout, a 5xx, an unconfigured panel, or a
+   *    payload that failed the contract's own zod parse (`getInternalSquadOptions`
+   *    turns that into `ServiceUnavailableException` too). Not an answer.
+   *
+   * The previous `catch { return; }` collapsed the second into "valid" and
+   * persisted whatever was typed. Every subscriber then gets provisioned into a
+   * squad that may not exist, and nothing anywhere says so.
+   *
+   * Failing every plan write closed would be too strict — an operator fixing a
+   * price during a panel outage has nothing to do with squads. So the refusal is
+   * scoped to the write that actually needs the answer: one that CHANGES the
+   * squads (every create with squads counts, since nothing is persisted yet).
+   * A write that leaves the persisted squads alone proceeds, with a warning.
+   */
+  private async assertSquadsAreValid(
+    input: NormalizedPlanWriteInput,
+    persistedSquads: PersistedPlanSquads | null,
+  ): Promise<void> {
     if (input.internalSquads.length === 0 && input.externalSquad === null) {
       return;
     }
@@ -266,10 +307,20 @@ export class PlansAdminValidators {
           ? this.remnawaveApiService.getExternalSquadOptions()
           : Promise.resolve([]),
       ]);
-    } catch {
-      // Remnawave is unavailable — skip squad validation gracefully so an
-      // upstream outage doesn't block plan writes. Squads will be
-      // re-validated on the next edit.
+    } catch (error: unknown) {
+      const reason = error instanceof Error ? error.message : 'unknown error';
+      if (planSquadsChanged(input, persistedSquads)) {
+        this.logger.error(
+          `Refusing plan write: squads changed but the Remnawave panel could not be asked (${reason})`,
+        );
+        throw new ServiceUnavailableException(
+          'Squads were not saved: the Remnawave panel could not be reached to verify them. ' +
+            'Retry once the panel is back, or save the rest of the plan without changing squads.',
+        );
+      }
+      this.logger.warn(
+        `Squad validation skipped for an unchanged squad selection — the Remnawave panel could not be reached (${reason})`,
+      );
       return;
     }
 
@@ -287,4 +338,17 @@ export class PlansAdminValidators {
       throw new BadRequestException(`External squad not found: ${input.externalSquad}`);
     }
   }
+}
+
+/**
+ * True when this write asserts a squad selection that is not already persisted.
+ * A create (`persistedSquads === null`) always does — nothing is on record yet,
+ * so every squad it names is unverified.
+ */
+function planSquadsChanged(
+  input: NormalizedPlanWriteInput,
+  persistedSquads: PersistedPlanSquads | null,
+): boolean {
+  if (persistedSquads === null) return true;
+  return !sameSquadSelection(input, persistedSquads);
 }

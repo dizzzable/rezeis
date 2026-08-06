@@ -106,6 +106,41 @@ const PLATEGA_PAYMENT_METHOD_BY_NAME = {
 } as const;
 
 /**
+ * «Let Platega ask the payer» — stored as a string on purpose.
+ *
+ * Platega has two create endpoints. `POST /transaction/process` REQUIRES
+ * `paymentMethod` and pins the rail; `POST /v2/transaction/process` takes no
+ * method at all and the payer chooses on Platega's own hosted page. Selecting
+ * this value is what routes a gateway to the second one.
+ *
+ * Why a string and not a number:
+ *  - it cannot collide with the provider enum, now or later. Platega already
+ *    burned this project once by not having a method 1, and `0`/`15` are
+ *    explicitly rejected by the spec above — reusing either as a sentinel would
+ *    mean a future Platega method silently inheriting our meaning.
+ *  - it is distinguishable from ABSENT in the persisted JSON. That distinction
+ *    is the whole point: an unset `paymentMethod` still falls back to 2 (СБП)
+ *    for every install that never touched the field, so «not chosen» and
+ *    «chose provider's choice» must be two different states on disk, not one.
+ *  - it survives the storage layer untouched. `paymentMethod` is deliberately
+ *    NOT in `GATEWAY_SECRET_SETTING_KEYS`, so it is never enveloped, never
+ *    masked and never mask-resolved — it round-trips panel → validate →
+ *    encrypt → read as the same literal, and stays readable in the database
+ *    where a misrouted gateway gets diagnosed.
+ *
+ * The spelling matches the SCREAMING_SNAKE aliases of the table above so the
+ * admin form can post it exactly like `CARD` or `SBERPAY`.
+ */
+export const PLATEGA_PROVIDER_CHOICE = 'PROVIDER_CHOICE';
+
+/**
+ * What checkout sends when the operator never chose a rail. Long-standing
+ * behaviour that live installs run on — changing it would silently reroute
+ * every existing Platega gateway, so it is named here rather than inlined.
+ */
+export const PLATEGA_DEFAULT_PAYMENT_METHOD = 2;
+
+/**
  * A value outside the enum fails the union rather than falling back: the parse
  * error travels the normal settings-validation path and the save answers 400.
  * The old helper returned `undefined` for anything it did not recognize, which
@@ -115,6 +150,7 @@ const PLATEGA_PAYMENT_METHOD_BY_NAME = {
 const plategaPaymentMethodSetting = z
   .union([
     z.literal([2, 3, 11, 12, 13, 14]),
+    z.literal(PLATEGA_PROVIDER_CHOICE),
     z.enum([
       '2',
       '3',
@@ -132,7 +168,9 @@ const plategaPaymentMethodSetting = z
     ]),
   ])
   .transform((value) =>
-    typeof value === 'number' ? value : PLATEGA_PAYMENT_METHOD_BY_NAME[value],
+    typeof value === 'number' || value === PLATEGA_PROVIDER_CHOICE
+      ? value
+      : PLATEGA_PAYMENT_METHOD_BY_NAME[value],
   );
 
 const plategaSettingsSchema = z
@@ -142,6 +180,39 @@ const plategaSettingsSchema = z
     paymentMethod: plategaPaymentMethodSetting.optional(),
   })
   .strict();
+
+/**
+ * Which Platega create endpoint a gateway's settings select, and with what
+ * method. The three states are deliberately kept apart:
+ *
+ *   `{ paymentMethod: 11 }`                → v1, `paymentMethod: 11`
+ *   `{ paymentMethod: 'PROVIDER_CHOICE' }` → v2, no method in the body
+ *   absent / anything non-numeric          → v1, `paymentMethod: 2` (СБП)
+ *
+ * The third case is load-bearing compatibility, not a nicety: every install
+ * that never opened the field is live on СБП today, and it must stay there.
+ * That is also why the sentinel is checked BEFORE the numeric fallback —
+ * reading it as "not a number, therefore unset" is precisely the silent
+ * reroute this function exists to prevent.
+ */
+export type PlategaPaymentMethodChoice =
+  | { readonly kind: 'METHOD'; readonly paymentMethod: number }
+  | { readonly kind: 'PROVIDER_CHOICE' };
+
+export function resolvePlategaPaymentMethod(
+  settings: Record<string, unknown>,
+): PlategaPaymentMethodChoice {
+  if (settings.paymentMethod === PLATEGA_PROVIDER_CHOICE) {
+    return { kind: 'PROVIDER_CHOICE' };
+  }
+  return {
+    kind: 'METHOD',
+    paymentMethod:
+      typeof settings.paymentMethod === 'number'
+        ? settings.paymentMethod
+        : PLATEGA_DEFAULT_PAYMENT_METHOD,
+  };
+}
 
 /**
  * «Ставка ндс, возможные значения: 10, 22. Поле обязательное, если сно

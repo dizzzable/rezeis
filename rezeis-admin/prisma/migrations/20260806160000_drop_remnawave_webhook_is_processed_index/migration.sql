@@ -1,0 +1,42 @@
+-- Drops the index on `remnawave_webhook_events.is_processed`.
+--
+-- WHY THE INDEX IS WORTHLESS.
+-- `is_processed` has never been written as `true` on any deployment. The only
+-- code that could set it was `RemnawaveWebhookService.markProcessed`, which had
+-- zero callers repo-wide and is removed in the same change as this migration.
+-- Every row therefore carries the `false` default, and an index over a column
+-- with exactly one distinct value can never narrow a scan — the planner reads
+-- the whole table either way.
+--
+-- It is not merely unused, it is unusable: no query filters on the column. The
+-- single reader is `getRecentEvents`, which is
+-- `ORDER BY created_at DESC LIMIT n` with no WHERE clause and is already served
+-- by `remnawave_webhook_events_created_at_idx`.
+--
+-- So the index only ever cost: every webhook insert maintains a second btree
+-- for a value that is a constant, on the hottest write path this table has (one
+-- row per panel event).
+--
+-- WHY THE COLUMN STAYS.
+-- It is still projected into `WebhookEventSummary` and shipped to the admin
+-- Activity Feed's `ActivityFeedItem`, so dropping it is an API-contract change,
+-- not an index cleanup. It is left in place, always `false`, documented as such
+-- in `schema.prisma`. Nothing reads it in the UI.
+--
+-- NOT "wire `markProcessed` up instead". There is no second pass to record:
+-- `handleEvent` sanitises, stores and forwards the event synchronously at
+-- insert time, so "processed" would be true of every row the instant it is
+-- written. Marking it would be ceremony, not state.
+--
+-- SEPARATELY, AND NOT FIXED HERE: this table is never pruned. Nothing deletes
+-- from `remnawave_webhook_events` — no retention job, no cascade, no TTL — so
+-- it grows for the lifetime of the deployment at one row per panel webhook.
+-- Dropping this index slows that growth slightly; it does not bound it. A
+-- retention policy is a separate decision with an operator-visible tradeoff
+-- (the rows are the audit trail), so it is deliberately not smuggled in here.
+--
+-- `DROP INDEX IF EXISTS` is idempotent, which `prisma migrate deploy` needs on
+-- replay. No `CONCURRENTLY`: dropping an index takes a brief ACCESS EXCLUSIVE
+-- lock on the table and nothing else, and `CONCURRENTLY` cannot run inside the
+-- transaction Prisma wraps each migration in.
+DROP INDEX IF EXISTS "remnawave_webhook_events_is_processed_idx";

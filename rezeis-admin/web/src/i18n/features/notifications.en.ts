@@ -118,6 +118,8 @@ export const en = {
       eventsSelectHint: '{{count}} of {{total}} event types selected.',
       eventsSelectAll: 'Select all',
       eventsDeselectAll: 'Clear all',
+      eventsCatchAllLabel: 'Everything else not listed above',
+      eventsCatchAllHint: 'Automation rules and the reiwa service can emit events with a type of their own choosing, so no individual tick-box can exist for them. Without this, such events are not delivered to Telegram at all. Their text comes from outside this panel — enable deliberately.',
       mirrorLabel: 'Mirror user notifications',
       mirrorDescription: 'Send a copy of every user notification (expiry, referrals, partner payouts…) into this chat — routed to the USER topic when set. Does not change what users receive.',
       save: 'Save',

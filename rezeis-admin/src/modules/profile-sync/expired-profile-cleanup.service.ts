@@ -136,13 +136,31 @@ export class ExpiredProfileCleanupService {
    * no periodic pull-reconcile, the stale local date would delete a
    * still-valid subscription. So for every candidate we fetch the panel's
    * canonical `expireAt` first:
-   *   • panel expiry ≥ cutoff  → NOT actually cleanable. Self-heal the local
-   *     `expiresAt` (and revive status to ACTIVE when the panel expiry is in
-   *     the future) and SKIP the deletion.
-   *   • panel expiry < cutoff  → panel confirms expired past grace → delete.
-   *   • panel profile missing (`null`) → nothing to protect → delete/clean up.
-   *   • panel unreachable (throws) → DEFER; never delete on an unverifiable
-   *     date. Re-evaluated next sweep.
+   *   • `ok`, panel expiry ≥ cutoff → NOT actually cleanable. Self-heal the
+   *     local `expiresAt` (and revive status to ACTIVE when the panel expiry is
+   *     in the future) and SKIP the deletion.
+   *   • `ok`, panel expiry < cutoff → panel confirms expired past grace → delete.
+   *   • `notFound` → the profile really is gone from the panel → nothing to
+   *     protect → delete/clean up. Note what this outcome does and does not
+   *     mean: the adapter only produces it for a 404 carrying Remnawave's own
+   *     USER_NOT_FOUND envelope (`A025`). A BARE 404 is not a missing profile —
+   *     a reverse proxy mid-deploy answers every request that way, and this
+   *     branch is the one non-`ok` outcome that deletes, so reading a bare 404
+   *     as "gone" retired CLEANUP_BATCH live subscriptions per sweep for the
+   *     length of the outage. That distinction lives in
+   *     `RemnawaveApiService.mapStrictProfileTransport`, because the outcome
+   *     union carries no evidence a caller could re-derive; a bare 404 now
+   *     arrives here as `unavailable` and defers.
+   *   • ANY other outcome — `unavailable`, `unsupported`, `invalidContract` →
+   *     DEFER; never delete on an unverifiable date. Re-evaluated next sweep.
+   *
+   * The read MUST be the strict one. `getPanelUser` is best-effort: it
+   * collapses every failure — outage, expired token, 5xx, timeout — into
+   * `null`, and `null` here means "gone". Reading through it made the DEFER
+   * branch unreachable by construction, so one sweep during a panel outage
+   * deleted up to CLEANUP_BATCH live subscriptions while the log looked
+   * ordinary. The test that covered the DEFER branch fed the stub a `throw`,
+   * which the real method cannot produce.
    *
    * Returns the number of subscriptions enqueued for deletion.
    */
@@ -174,32 +192,33 @@ export class ExpiredProfileCleanupService {
 
     let enqueued = 0;
     let selfHealed = 0;
+    let deferred = 0;
+    const deferredKinds = new Set<string>();
     for (const subscription of candidates) {
       const remnawaveId = subscription.remnawaveId;
       const expectedExpiresAt = subscription.expiresAt;
       if (remnawaveId === null || expectedExpiresAt === null) continue;
 
       // ── Panel-authoritative expiry re-check ──────────────────────────────
+      const panelOutcome = await this.remnawaveApiService.strictGetPanelUserExpiry(remnawaveId);
       let panelExpiryMs: number | null = null;
       let panelSubscriptionUrl: string | null = null;
-      try {
-        const panelUser = await this.remnawaveApiService.getPanelUser(remnawaveId);
-        if (panelUser !== null) {
-          const parsed = new Date(panelUser.expireAt);
-          panelExpiryMs = Number.isNaN(parsed.getTime()) ? null : parsed.getTime();
-          panelSubscriptionUrl =
-            typeof panelUser.subscriptionUrl === 'string' && panelUser.subscriptionUrl.length > 0
-              ? panelUser.subscriptionUrl
-              : null;
-        }
-        // panelUser === null → profile already gone from the panel → fall
-        // through to enqueue the cleanup (nothing to protect).
-      } catch (err: unknown) {
-        // Panel unreachable — defer rather than delete an unverifiable sub.
-        const message = err instanceof Error ? err.message : 'Unknown error';
-        this.logger.warn(
-          `Expired-profile cleanup: panel check failed for ${subscription.id}, deferring: ${message}`,
-        );
+      if (panelOutcome.kind === 'ok') {
+        panelExpiryMs = panelOutcome.value.expireAtMs;
+        panelSubscriptionUrl = panelOutcome.value.subscriptionUrl;
+      } else if (panelOutcome.kind === 'notFound') {
+        // The panel itself says the profile is gone (404 + USER_NOT_FOUND
+        // envelope) → nothing left to protect → fall through to the cleanup.
+        // Named positively on purpose: deletion is the destructive branch, so
+        // it is entered by matching the one outcome that permits it, never by
+        // falling out of the bottom of a `!==` guard. Any outcome added to the
+        // union later defers by default rather than deleting by default.
+      } else {
+        // Could not verify the date — defer. Counted rather than logged per
+        // row: a panel outage would otherwise emit CLEANUP_BATCH warnings a
+        // tick, burying the one line that says the sweep is degraded.
+        deferred += 1;
+        deferredKinds.add(panelOutcome.kind);
         continue;
       }
 
@@ -272,6 +291,16 @@ export class ExpiredProfileCleanupService {
     if (selfHealed > 0) {
       this.logger.log(
         `Expired-profile cleanup: self-healed ${selfHealed} subscription(s) with stale local expiry`,
+      );
+    }
+    if (deferred > 0) {
+      // Deliberately `warn`, and deliberately unconditional on the count: a
+      // deferral means the panel could not confirm the expiry, so the sweep is
+      // running degraded. Silence here is what let the old unreachable-DEFER
+      // bug delete live subscriptions unnoticed.
+      this.logger.warn(
+        `Expired-profile cleanup: deferred ${deferred} of ${candidates.length} candidate(s) — ` +
+          `panel could not confirm expiry (${[...deferredKinds].sort().join(', ')})`,
       );
     }
     return enqueued;

@@ -33,7 +33,11 @@ import {
 } from '../../../common/services/system-events.service';
 import { BACKUP_QUEUE, BACKUP_JOBS } from '../backup.constants';
 import { SettingsService } from '../../settings/services/settings.service';
-import { BotNotifierClient } from '../../notifications/services/bot-notifier.client';
+import {
+  BotNotifierClient,
+  type NotifyDeliveryResult,
+} from '../../notifications/services/bot-notifier.client';
+import { isRetryableRelayOutcome } from '../backup-delivery-retry.util';
 import { signBackupDownloadToken } from '../utils/backup-download-token.util';
 import type { BackupCreateJobData, BackupDeliverTelegramJobData, BackupRestoreJobData } from '../backup.processor';
 
@@ -98,6 +102,28 @@ export interface BackupSettingsView {
   /** Whether an admin bot token is configured (encrypted) or available via env.
    *  Telegram delivery of the backup FILE only works when this is true. */
   readonly botTokenConfigured: boolean;
+}
+
+/** What one `backup.deliver-telegram` attempt achieved, and whether to try again. */
+export interface BackupDeliveryOutcome {
+  /**
+   * True only on proof of delivery — a Telegram message id via the relay, or a
+   * 2xx from the Bot API on the direct path. Same standard as before.
+   */
+  readonly delivered: boolean;
+  /**
+   * Whether another BullMQ attempt could plausibly change `delivered`. The
+   * processor throws on `true` (the only thing that makes BullMQ retry) and
+   * returns on `false`.
+   */
+  readonly retryable: boolean;
+  /** Names the outcome for the log line and the retry error; `null` on success. */
+  readonly reason: string | null;
+}
+
+/** A failure no further attempt can help with. */
+function terminalDelivery(reason: string): BackupDeliveryOutcome {
+  return { delivered: false, retryable: false, reason };
 }
 
 export interface UpdateBackupSettingsInput {
@@ -601,12 +627,38 @@ export class BackupService implements OnModuleInit {
 
   /**
    * Send a backup file to Telegram as a document.
+   *
+   * Kept as the boolean-returning entry point five years of callers expect;
+   * `attemptTelegramDelivery` is the same work with the retry decision attached.
    */
   public async deliverToTelegram(recordId: string, filename: string): Promise<boolean> {
+    const outcome = await this.attemptTelegramDelivery(recordId, filename);
+    return outcome.delivered;
+  }
+
+  /**
+   * Send a backup file to Telegram, reporting whether another attempt could
+   * plausibly change the answer.
+   *
+   * `options.isFinalAttempt` governs the OPERATOR ALERT only, never the record:
+   * a failure is written to the backup record every time, because "not
+   * delivered" is true on each attempt that has not delivered it. The alert is
+   * different — three attempts must produce one alert, not three — so on a
+   * retryable failure it is held back until the last attempt. A terminal
+   * failure alerts immediately whatever the flag says: nothing is coming after
+   * it to do the alerting. Defaults to `true` so a direct call still behaves
+   * exactly as it always has.
+   */
+  public async attemptTelegramDelivery(
+    recordId: string,
+    filename: string,
+    options: { readonly isFinalAttempt?: boolean } = {},
+  ): Promise<BackupDeliveryOutcome> {
+    const isFinalAttempt = options.isFinalAttempt ?? true;
     const tgConfig = await this.loadTelegramConfig();
     if (!tgConfig.enabled || !tgConfig.chatId) {
       this.logger.warn('Telegram delivery not configured — skipping');
-      return false;
+      return terminalDelivery('not_configured');
     }
 
     const fullPath = path.resolve(this.getBackupLocation(), filename);
@@ -614,7 +666,7 @@ export class BackupService implements OnModuleInit {
       await fsp.access(fullPath);
     } catch {
       this.logger.warn(`Backup file not found for Telegram delivery: ${filename}`);
-      return false;
+      return terminalDelivery('file_missing');
     }
 
     const stat = await fsp.stat(fullPath);
@@ -634,7 +686,8 @@ export class BackupService implements OnModuleInit {
         `Backup stored locally (too large for Telegram): ${filename} (${formatBytes(stat.size)})`,
         { backupId: recordId, filename, sizeBytes: stat.size, deliveredToTelegram: false },
       );
-      return false;
+      // Terminal: no number of retries shrinks the file.
+      return terminalDelivery('too_large_for_telegram');
     }
 
     const caption = `🗄 Backup: ${filename}\nSize: ${formatBytes(stat.size)}`;
@@ -665,14 +718,19 @@ export class BackupService implements OnModuleInit {
             },
           });
           this.logger.log(`Backup ${filename} delivered to Telegram`);
-          return true;
+          return { delivered: true, retryable: false, reason: null };
         }
         const errorBody = await response.text();
         this.logger.warn(`Telegram delivery failed: ${errorBody.slice(0, 300)}`);
-        return false;
+        // The direct path is left exactly as it was — no record write, no
+        // alert, no retry. Its failures carry none of the evidence the relay's
+        // `NotifyDeliveryResult` carries, so retrying here would mean inventing
+        // a classification AND an alert this path has never had. Out of scope
+        // for the relay defect; noted rather than half-fixed.
+        return terminalDelivery('telegram_api_rejected');
       } catch (err) {
         this.logger.warn(`Telegram delivery threw: ${(err as Error).message}`);
-        return false;
+        return terminalDelivery('telegram_api_threw');
       }
     }
 
@@ -682,16 +740,16 @@ export class BackupService implements OnModuleInit {
       this.logger.warn(
         'Backup Telegram delivery skipped: no local bot token and reiwa relay unavailable (set BOT_TOKEN or REIWA_URL + WEBHOOK_SECRET_HEADER)',
       );
-      return false;
+      return terminalDelivery('relay_unavailable');
     }
     const secret = process.env.REZEIS_CRYPT_KEY ?? '';
     if (secret.length === 0) {
       this.logger.warn('Backup Telegram relay skipped: REZEIS_CRYPT_KEY is not set');
-      return false;
+      return terminalDelivery('crypt_key_missing');
     }
     try {
       const token = signBackupDownloadToken(recordId, secret);
-      await this.botNotifier.relayBackupDocument({
+      const outcome = await this.botNotifier.relayBackupDocument({
         recordId,
         token,
         filename,
@@ -699,6 +757,22 @@ export class BackupService implements OnModuleInit {
         chatId: tgConfig.chatId,
         topicThreadId: tgConfig.topicId ?? undefined,
       });
+      // `relayBackupDocument` reports failure by return value, never by
+      // throwing — so this branch is the only thing standing between a failed
+      // relay and a record that claims the file is safely off-site. The direct
+      // path above gates on `response.ok` for the same reason; this is the
+      // relay's equivalent, and it demands the same strength of evidence: a
+      // Telegram message id, not merely a hop that accepted the instruction.
+      if (outcome.status !== 'confirmed') {
+        const retryable = isRetryableRelayOutcome(outcome);
+        // The record is corrected on every attempt — "not delivered" is true
+        // right now regardless of what attempt four might prove — but the
+        // operator only hears about it when nothing further is coming.
+        await this.recordRelayNotDelivered(recordId, filename, outcome, {
+          alert: !retryable || isFinalAttempt,
+        });
+        return { delivered: false, retryable, reason: `telegram_relay_${outcome.status}` };
+      }
       await this.prismaService.backupRecord.update({
         where: { id: recordId },
         data: {
@@ -708,11 +782,77 @@ export class BackupService implements OnModuleInit {
         },
       });
       this.logger.log(`Backup ${filename} relayed to Telegram via reiwa`);
-      return true;
+      return { delivered: true, retryable: false, reason: null };
     } catch (err) {
+      // Reachable for real: `signBackupDownloadToken` and the Prisma write can
+      // throw even though the relay call itself cannot.
+      //
+      // Terminal on purpose. A throwing `signBackupDownloadToken` is a bad key
+      // and is deterministic; a throwing Prisma write here happens only on the
+      // CONFIRMED branch above, meaning the file is already in Telegram and we
+      // merely failed to write that down. Retrying would upload a second copy
+      // of a backup that is already safely off-site, and most likely fail to
+      // record that one too.
       this.logger.warn(`Backup Telegram relay threw: ${(err as Error).message}`);
-      return false;
+      await this.recordRelayNotDelivered(
+        recordId,
+        filename,
+        { status: 'failed', messageId: null, httpStatus: null, detail: (err as Error).message },
+        { alert: true },
+      );
+      return terminalDelivery('telegram_relay_failed');
     }
+  }
+
+  /**
+   * A relay attempt that did not prove delivery leaves the record saying what
+   * is true: the file is still only local. Mirrors the "too large for Telegram"
+   * bookkeeping above — `deliveryChannel: 'local'` plus a recipient marker
+   * naming the reason — rather than setting `errorMessage`, which the operator
+   * UI reads as "the backup itself failed". The dump is fine; only its trip
+   * off-site is not.
+   *
+   * `alert` splits the two halves: the record is always corrected, the operator
+   * event is emitted only when this attempt is the last word on the subject.
+   */
+  private async recordRelayNotDelivered(
+    recordId: string,
+    filename: string,
+    outcome: NotifyDeliveryResult,
+    options: { readonly alert: boolean },
+  ): Promise<void> {
+    const reason = `telegram_relay_${outcome.status}`;
+    await this.prismaService.backupRecord
+      .update({
+        where: { id: recordId },
+        data: { deliveryChannel: 'local', deliveryRecipient: reason },
+      })
+      .catch((err: unknown): void => {
+        this.logger.warn(
+          `Could not record failed Telegram relay for ${filename}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      });
+    if (!options.alert) {
+      this.logger.warn(
+        `Backup Telegram relay ${outcome.status} for ${filename} — retrying; operator alert held for the final attempt`,
+      );
+      return;
+    }
+    this.systemEventsService.warn(
+      EVENT_TYPES.SYSTEM_BACKUP_COMPLETED,
+      'SYSTEM',
+      `Backup stored locally — Telegram relay did not confirm delivery (${outcome.status}): ${filename}`,
+      {
+        backupId: recordId,
+        filename,
+        deliveredToTelegram: false,
+        relayStatus: outcome.status,
+        httpStatus: outcome.httpStatus,
+        detail: outcome.detail,
+      },
+    );
   }
 
   /** Check if Telegram delivery is configured and enabled. */
@@ -853,17 +993,60 @@ export class BackupService implements OnModuleInit {
     });
   }
 
+  /**
+   * Prune down to `maxKeep` local files.
+   *
+   * Retention keys on count and recency alone — it has no idea whether a file
+   * it is about to delete exists anywhere else. When every backup is off-site
+   * (or none is), that is harmless. When only some are, deleting the local copy
+   * of one that never made it off-site destroys that backup outright, while a
+   * copy Telegram is still holding survives in its place.
+   *
+   * So: the same number of files is kept, and the newest is always among them
+   * (restoring the latest snapshot must not require a round trip to Telegram),
+   * but when the count forces a choice the duplicated copies are spent before
+   * the sole ones. Deleting a sole copy anyway is announced, because the
+   * alternative is the operator finding out at restore time.
+   */
   private async applyRetention(): Promise<void> {
-    const keep = (await this.readBackupConfig()).maxKeep;
+    const cfg = await this.readBackupConfig();
+    const keep = cfg.maxKeep;
     const all = await this.prismaService.backupRecord.findMany({
       orderBy: { createdAt: 'desc' },
-      select: { id: true, filename: true },
+      select: { id: true, filename: true, deliveryChannel: true },
     });
-    const stale = all.slice(keep);
+    if (all.length <= keep) return;
+
+    // `all` is newest-first and `filter` is order-preserving, so each group
+    // stays newest-first; the head keeps its place regardless of delivery.
+    const [newest, ...rest] = all;
+    const ordered = [
+      ...(newest === undefined ? [] : [newest]),
+      ...rest.filter((row) => !isDeliveredOffsite(row.deliveryChannel)),
+      ...rest.filter((row) => isDeliveredOffsite(row.deliveryChannel)),
+    ];
+    const stale = ordered.slice(keep);
+
     for (const row of stale) {
       const fullPath = path.resolve(this.getBackupLocation(), row.filename);
       await fsp.unlink(fullPath).catch((): void => undefined);
       await this.prismaService.backupRecord.delete({ where: { id: row.id } }).catch((): void => undefined);
+      if (cfg.telegram.enabled && !isDeliveredOffsite(row.deliveryChannel)) {
+        // The operator asked for off-site copies and this one never got there.
+        // Its local file was the whole backup, and it is now gone.
+        this.systemEventsService.warn(
+          EVENT_TYPES.SYSTEM_BACKUP_COMPLETED,
+          'SYSTEM',
+          `Retention deleted the only copy of ${row.filename} — it was never delivered off-site`,
+          {
+            backupId: row.id,
+            filename: row.filename,
+            deliveredToTelegram: false,
+            deliveryChannel: row.deliveryChannel,
+            maxKeep: keep,
+          },
+        );
+      }
     }
   }
 
@@ -885,6 +1068,17 @@ export class BackupService implements OnModuleInit {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
+
+/**
+ * Whether a record's channel means a copy of the file exists somewhere other
+ * than the local disk. `deliveredAt` deliberately plays no part: `runDump`
+ * stamps it the moment the dump finishes (the admin UI reads it as "ready"),
+ * long before any delivery is attempted, so it is true of every backup and
+ * proves nothing about where the bytes are.
+ */
+function isDeliveredOffsite(deliveryChannel: string | null): boolean {
+  return deliveryChannel === 'telegram' || deliveryChannel === 'telegram-relay';
+}
 
 function clampInt(value: number, min: number, max: number): number {
   if (!Number.isFinite(value)) return min;

@@ -13,7 +13,6 @@ import {
   RemnawaveSnippetInterface,
   RemnawaveSubpageConfigInterface,
   RemnawaveSubscriptionRequestEntryInterface,
-  RemnawaveSubscriptionRequestStatsInterface,
   RemnawaveSubscriptionSettingsInterface,
   RemnawaveSubscriptionTemplateInterface,
   RemnawaveUserSummaryInterface,
@@ -58,6 +57,26 @@ export class AdminRemnawaveController {
 
   // ── Version & capabilities ──────────────────────────────────────────────────
 
+  /**
+   * Detected panel version + capability facts.
+   *
+   * The service's cache-bypassing `force` flag is deliberately NOT exposed as a
+   * query parameter here. This route inherits the class-level
+   * `remnawave:view` — the plain read permission that gates merely *looking* at
+   * the tab — and carries no throttle beyond the global 600 req/min/IP, so a
+   * forced re-detect would let any read-only viewer drive an unbounded number
+   * of upstream panel calls (two per detect on a failing panel, which tries
+   * both `/api/system/stats/recap` and `/api/system/metadata`). Worse, a forced
+   * detect WRITES the shared in-process cache: a viewer forcing during a panel
+   * restart would replace good capabilities with the all-false result, flipping
+   * `liveIpControl` off and making `sharing-detectors.ts` skip the
+   * concurrent-IP detector for any run landing in that window. A read-scoped
+   * permission must not mutate shared server state.
+   *
+   * Nothing is lost by leaving it off: the 15s negative TTL
+   * (`CAPABILITIES_NEGATIVE_CACHE_TTL_MS`) already bounds how long a bad cached
+   * state survives, and no caller polls faster than the 5-minute positive TTL.
+   */
   @Get('version')
   public async getCapabilities(): Promise<RemnawaveCapabilities> {
     return this.versionService.getCapabilities();
@@ -203,10 +222,10 @@ export class AdminRemnawaveController {
 
   // ── Subscription request history ───────────────────────────────────────────
 
-  @Get('subscription-request-history/stats')
-  public async getSubscriptionRequestHistoryStats(): Promise<RemnawaveSubscriptionRequestStatsInterface | null> {
-    return this.remnawaveApiService.getSubscriptionRequestHistoryStats();
-  }
+  // `GET subscription-request-history/stats` used to sit here. It returned a
+  // declared shape the panel does not send, no SPA screen ever called it, and
+  // the service method behind it is gone — see the note in
+  // `remnawave-api.service.ts`.
 
   @Get('subscription-request-history')
   public async getSubscriptionRequestHistory(
@@ -284,9 +303,11 @@ export class AdminRemnawaveController {
 
   // ── Live (ip-control: active sessions / source IPs) ─────────────────────────
   //
-  // Matured on Remnawave 2.8+ (see RemnawaveVersionService.liveIpControl). The
-  // SPA only surfaces the Live tab when the capability is on, but the routes
-  // stay reachable so an operator can probe a single node/user on demand.
+  // Matured on Remnawave 2.8.x (see RemnawaveVersionService.liveIpControl —
+  // 3.x renamed the whole family to `connections/*`, which is not wired yet).
+  // The SPA only surfaces the Live tab when the capability is on, but the
+  // routes stay reachable so an operator can probe a single node/user on
+  // demand.
 
   @Get('live/node/:uuid')
   public async getNodeLiveSessions(

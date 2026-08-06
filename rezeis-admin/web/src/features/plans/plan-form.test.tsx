@@ -88,6 +88,100 @@ describe('PlanForm accessibility', () => {
   })
 })
 
+// A plan edit does NOT push new traffic/device limits to existing subscribers —
+// the panel only learns about them at the subscriber's next renewal or upgrade.
+// That deferral is deliberate (see `plan-limit-scope.ts`), but it was never
+// stated anywhere the operator could see it, so a correct product rule read as
+// a bug: you changed the limit, you were told "Plan updated", and the customers
+// kept the old numbers forever with no explanation.
+//
+// These pin the statement itself. Deleting the notice must break a test.
+describe('PlanForm limit-change scope notice', () => {
+  it('tells the operator a limit cut waits for renewal, and names both numbers', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(api, 'get').mockResolvedValue({ data: [] })
+
+    renderWithProviders(
+      <PlanForm plan={planOption()} onSubmit={vi.fn()} isLoading={false} />,
+    )
+
+    const trafficInput = screen.getByDisplayValue('50')
+    await user.clear(trafficInput)
+    await user.type(trafficInput, '20')
+
+    const notice = await screen.findByRole('status')
+    expect(notice).toHaveTextContent('Limit changes reach existing subscribers on renewal')
+    expect(notice).toHaveTextContent('Traffic limit: 50 GB → 20 GB')
+    expect(notice).toHaveTextContent(
+      'Subscribers who already bought this plan keep their current limits — nobody is reduced today. The new limits apply from their next renewal or upgrade.',
+    )
+  })
+
+  // A raise is not the same event as a cut: nothing is being taken away, but the
+  // operator still must not walk away believing the extra allowance is live.
+  it('warns that a limit raise is not delivered yet', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(api, 'get').mockResolvedValue({ data: [] })
+
+    renderWithProviders(
+      <PlanForm plan={planOption()} onSubmit={vi.fn()} isLoading={false} />,
+    )
+
+    const trafficInput = screen.getByDisplayValue('50')
+    await user.clear(trafficInput)
+    await user.type(trafficInput, '100')
+
+    const notice = await screen.findByRole('status')
+    expect(notice).toHaveTextContent('Traffic limit: 50 GB → 100 GB')
+    expect(notice).toHaveTextContent(
+      'Subscribers who already bought this plan do not get the higher limits today; those apply from their next renewal or upgrade. New purchases get them right away.',
+    )
+  })
+
+  // 0 is the unlimited sentinel, so this is a giveaway, not a reduction.
+  it('reads a drop to 0 as lifting the cap rather than cutting it', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(api, 'get').mockResolvedValue({ data: [] })
+
+    renderWithProviders(
+      <PlanForm plan={planOption()} onSubmit={vi.fn()} isLoading={false} />,
+    )
+
+    const trafficInput = screen.getByDisplayValue('50')
+    await user.clear(trafficInput)
+    await user.type(trafficInput, '0')
+
+    const notice = await screen.findByRole('status')
+    expect(notice).toHaveTextContent('Traffic limit: 50 GB → unlimited')
+    expect(notice).toHaveTextContent('do not get the higher limits today')
+  })
+
+  it('stays silent until a limit actually moves', async () => {
+    vi.spyOn(api, 'get').mockResolvedValue({ data: [] })
+
+    renderWithProviders(
+      <PlanForm plan={planOption()} onSubmit={vi.fn()} isLoading={false} />,
+    )
+
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+  })
+
+  // A plan being created has no subscribers, so there is nothing to defer and
+  // the notice would be pure noise on the busiest form in the module.
+  it('stays silent while creating a plan', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(api, 'get').mockResolvedValue({ data: [] })
+
+    renderWithProviders(<PlanForm onSubmit={vi.fn()} isLoading={false} />)
+
+    const trafficInput = screen.getByDisplayValue('50')
+    await user.clear(trafficInput)
+    await user.type(trafficInput, '20')
+
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+  })
+})
+
 function planOption(): Plan {
   return {
     id: 'plan-1',

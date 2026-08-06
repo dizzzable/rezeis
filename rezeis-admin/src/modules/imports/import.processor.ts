@@ -6,7 +6,7 @@ import { ImportStatus, Prisma, SubscriptionStatus, SyncAction, SyncJobStatus } f
 import { Job } from 'bullmq';
 
 import { PrismaService } from '../../common/prisma/prisma.service';
-import { SystemEventsService } from '../../common/services/system-events.service';
+import { EVENT_TYPES, SystemEventsService } from '../../common/services/system-events.service';
 import { ProfileSyncQueueService } from '../profile-sync/profile-sync-queue.service';
 import { IMPORT_QUEUE, IMPORT_JOBS } from './imports.constants';
 import { AltshopImporterService } from './services/altshop-importer.service';
@@ -210,7 +210,7 @@ export class ImportProcessor extends WorkerHost {
 
       // Emit realtime event
       this.systemEventsService.info(
-        'import.completed',
+        EVENT_TYPES.IMPORT_COMPLETED,
         'SYSTEM',
         `Import completed: ${sourceType} (${mode})`,
         { importRecordId, sourceType, mode, result },
@@ -247,7 +247,7 @@ export class ImportProcessor extends WorkerHost {
       });
 
       this.systemEventsService.error(
-        'import.failed',
+        EVENT_TYPES.IMPORT_FAILED,
         'SYSTEM',
         `Import failed: ${sourceType} — ${message}`,
         { importRecordId, sourceType, mode, error: message },
@@ -331,7 +331,7 @@ export class ImportProcessor extends WorkerHost {
         (skipped > 0 ? ` (${skipped} skipped — already had an in-flight sync job)` : ''),
     );
     this.systemEventsService.info(
-      'import.sync_enqueued',
+      EVENT_TYPES.IMPORT_SYNC_ENQUEUED,
       'SYSTEM',
       `Post-import Remnawave sync enqueued: ${enqueued} subscription(s)`,
       { importRecordId, sourceType, mode, enqueued, skipped, total: subscriptions.length },
@@ -357,7 +357,7 @@ export class ImportProcessor extends WorkerHost {
     await job.updateProgress({ stage: 'completed', percent: 100 });
 
     this.systemEventsService.info(
-      'import.plan_assigned',
+      EVENT_TYPES.IMPORT_PLAN_ASSIGNED,
       'SYSTEM',
       `Bulk plan assignment: ${result.updated} updated`,
       { importRecordId, planId, ...result },

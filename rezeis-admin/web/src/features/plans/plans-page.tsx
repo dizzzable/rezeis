@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, Pencil, Archive, ArchiveRestore, Package, BarChart3, List, GripVertical } from 'lucide-react'
+import { Plus, Pencil, Archive, ArchiveRestore, Package, BarChart3, List, GripVertical, AlertTriangle, CheckCircle2, Loader2 } from 'lucide-react'
 import { toast } from 'sonner'
 import {
   closestCenter,
@@ -33,7 +33,14 @@ import { Switch } from '@/components/ui/switch'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { FadeIn } from '@/lib/motion'
 import { PlanForm, type PlanFormData } from './plan-form'
-import { plansQueryKeys, reorderPlans, usePlans, type Plan } from './plans-api'
+import {
+  plansQueryKeys,
+  reorderPlans,
+  usePlanSquadPropagation,
+  usePlans,
+  type Plan,
+  type PlanUpdateResult,
+} from './plans-api'
 import { PlansStatsTab } from './plans-stats-tab'
 
 export default function PlansPage() {
@@ -41,6 +48,11 @@ export default function PlansPage() {
   const queryClient = useQueryClient()
   const [showCreate, setShowCreate] = useState(false)
   const [editingPlan, setEditingPlan] = useState<Plan | null>(null)
+  // Set when a save reports it queued a squad push, so the banner below can
+  // follow it to completion. Editing a plan's squads rewrites every existing
+  // subscriber in the background; without this the operator is told "saved" and
+  // has no way to know whether the panel ever heard about it.
+  const [watchedPropagationPlanId, setWatchedPropagationPlanId] = useState<string | null>(null)
 
   const { data: plans, isLoading } = usePlans()
 
@@ -56,11 +68,18 @@ export default function PlansPage() {
 
   const updateMutation = useMutation({
     mutationFn: ({ id, data }: { id: string; data: PlanFormData }) =>
-      api.patch(`/admin/plans/${id}`, data),
-    onSuccess: () => {
+      api.patch<PlanUpdateResult>(`/admin/plans/${id}`, data),
+    onSuccess: (response, variables) => {
       queryClient.invalidateQueries({ queryKey: plansQueryKeys.all })
       setEditingPlan(null)
       toast.success(t('plansPage.updated'))
+      const propagation = response.data?.squadPropagation
+      if (propagation && propagation.syncJobsCreated > 0) {
+        toast.info(
+          t('plansPage.squadPropagation.queued', { count: propagation.syncJobsCreated }),
+        )
+        setWatchedPropagationPlanId(variables.id)
+      }
     },
     onError: (err) => toast.error(getErrorMessage(err, t('plansPage.updateFailed'))),
   })
@@ -142,6 +161,11 @@ export default function PlansPage() {
           </Button>
         </div>
       </FadeIn>
+
+      <SquadPropagationBanner
+        planId={watchedPropagationPlanId}
+        onDismiss={() => setWatchedPropagationPlanId(null)}
+      />
 
       <Tabs defaultValue="list" className="space-y-4">
         <TabsList>
@@ -411,5 +435,68 @@ function SortablePlanCard({
         </div>
       </div>
     </div>
+  )
+}
+
+/**
+ * Follows a squad propagation started by the last plan save.
+ *
+ * A squad edit does not land the moment the operator clicks Save: every
+ * existing subscriber is rewritten and a Remnawave push is queued for each,
+ * drained by the profile-sync worker. Before this banner existed the operator
+ * saw "Plan updated" and nothing else — an edit that took an hour looked
+ * exactly like one that never happened. Polling stops by itself once the server
+ * reports the propagation complete.
+ */
+function SquadPropagationBanner({
+  planId,
+  onDismiss,
+}: {
+  readonly planId: string | null
+  readonly onDismiss: () => void
+}) {
+  const { t } = useTranslation()
+  const { data } = usePlanSquadPropagation(planId)
+
+  if (planId === null || !data || data.total === 0) return null
+
+  const remaining = data.pending + data.running
+  const hasFailures = data.failed > 0
+  const done = data.isComplete
+
+  return (
+    <FadeIn>
+      <Card className={cn(hasFailures && 'border-destructive/50')}>
+        <CardContent className="flex items-center gap-3 py-3 text-sm">
+          {done && !hasFailures ? (
+            <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-500" />
+          ) : hasFailures ? (
+            <AlertTriangle className="h-4 w-4 shrink-0 text-destructive" />
+          ) : (
+            <Loader2 className="h-4 w-4 shrink-0 animate-spin text-muted-foreground" />
+          )}
+          <div className="flex-1">
+            <p className="font-medium">
+              {done
+                ? hasFailures
+                  ? t('plansPage.squadPropagation.finishedWithFailures', { count: data.failed })
+                  : t('plansPage.squadPropagation.finished', { count: data.completed })
+                : t('plansPage.squadPropagation.running', {
+                    done: data.completed,
+                    total: data.total,
+                  })}
+            </p>
+            {!done && (
+              <p className="text-xs text-muted-foreground">
+                {t('plansPage.squadPropagation.remaining', { count: remaining })}
+              </p>
+            )}
+          </div>
+          <Button variant="ghost" size="sm" onClick={onDismiss}>
+            {t('plansPage.squadPropagation.dismiss')}
+          </Button>
+        </CardContent>
+      </Card>
+    </FadeIn>
   )
 }

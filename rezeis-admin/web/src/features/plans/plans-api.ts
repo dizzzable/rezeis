@@ -99,6 +99,37 @@ export const plansQueryKeys = {
   lists: () => [...plansQueryKeys.all, 'list'] as const,
   list: (filters: PlansListFilters | undefined) =>
     [...plansQueryKeys.lists(), filters ?? {}] as const,
+  squadPropagation: (planId: string) =>
+    [...plansQueryKeys.all, 'squad-propagation', planId] as const,
+}
+
+/**
+ * What a plan save set in motion. Editing a plan's squads rewrites every
+ * existing subscriber and queues a Remnawave push for each — this is the
+ * receipt for that, returned by `PATCH /admin/plans/:id`.
+ */
+export interface PlanSquadPropagationSummary {
+  /** `null` when the save did not change the plan's squads. */
+  readonly propagationId: string | null
+  readonly subscriptionsUpdated: number
+  readonly syncJobsCreated: number
+}
+
+/** Live progress of a plan's most recent squad propagation. */
+export interface PlanSquadPropagationStatus {
+  readonly planId: string
+  readonly propagationId: string | null
+  readonly queuedAt: string | null
+  readonly total: number
+  readonly pending: number
+  readonly running: number
+  readonly failed: number
+  readonly completed: number
+  readonly isComplete: boolean
+}
+
+export interface PlanUpdateResult extends Plan {
+  readonly squadPropagation: PlanSquadPropagationSummary
 }
 
 // ── Fetcher ─────────────────────────────────────────────────────────────────
@@ -150,5 +181,33 @@ export function usePlans(
   return useQuery({
     ...plansListOptions(filters),
     enabled: options?.enabled,
+  })
+}
+
+export async function fetchPlanSquadPropagation(
+  planId: string,
+  signal?: AbortSignal,
+): Promise<PlanSquadPropagationStatus> {
+  const response = await api.get<PlanSquadPropagationStatus>(
+    `/admin/plans/${planId}/squad-propagation`,
+    { signal },
+  )
+  return response.data
+}
+
+/**
+ * Follows a squad propagation until it finishes. Polling stops on its own the
+ * moment the server reports `isComplete`, so an idle plans page makes no
+ * requests — the query is only enabled while a propagation is being watched.
+ */
+export function usePlanSquadPropagation(
+  planId: string | null,
+): UseQueryResult<PlanSquadPropagationStatus> {
+  return useQuery({
+    queryKey: plansQueryKeys.squadPropagation(planId ?? ''),
+    queryFn: ({ signal }) => fetchPlanSquadPropagation(planId as string, signal),
+    enabled: planId !== null,
+    refetchInterval: (query) => (query.state.data?.isComplete === false ? 3_000 : false),
+    staleTime: 0,
   })
 }

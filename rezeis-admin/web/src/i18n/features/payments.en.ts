@@ -113,6 +113,7 @@ export const en = {
       notSet: 'Not set',
       moyNalogAuthPassword: 'Password (INN + password)',
       moyNalogAuthRefresh: 'Refresh token',
+      plategaProviderChoice: 'Payer picks the method on Platega',
       plategaSbp: '2 — СБП / SBP (QR code)',
       plategaErip: '3 — ЕРИП / ERIP',
       plategaCard: '11 — Card acquiring',
@@ -135,7 +136,7 @@ export const en = {
       overpayPublicKey:
         'RSA public key from OverPay back office for Content-Signature verification.',
       plategaPaymentMethod:
-        'The rail Platega opens at checkout. Falls back to СБП / SBP (2) when left unset. Platega has no method 1: if a gateway still holds the legacy value 1 the field shows up empty and payments keep failing until you pick a method and save.',
+        'The rail Platega opens at checkout. «Payer picks the method on Platega» sends no method at all — the payer chooses it on Platega\'s own page. Leaving the field empty still means СБП / SBP (2), not the payer\'s choice. Platega has no method 1: if a gateway still holds the legacy value 1 the field shows up empty and payments keep failing until you pick a method and save.',
       riopayToken:
         'X-Api-Token provided by your RioPay manager.',
       riopayServiceId:

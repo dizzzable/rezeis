@@ -28,6 +28,7 @@ import {
   panelSubscriptionState,
   reconcileMissingPanelStatus,
   resolvePanelProfile,
+  type PanelAbsenceProbe,
   type PanelLookup,
 } from '../utils/remnawave-overlay.util';
 import {
@@ -229,8 +230,12 @@ export class RemnashopImporterService {
     }
 
     // Live Remnawave snapshot for the read-only cross-check (scales past the
-    // bulk ceiling via per-UUID fallback; fail-soft to backup if unreachable).
-    const panelLookup = await buildPanelLookup(() => this.remnawaveApiService.getAllPanelUsers());
+    // bulk ceiling via per-UUID fallback; fail-soft to backup if unreachable —
+    // which now includes a read the adapter could not vouch for, so a lossy
+    // bulk read can no longer masquerade as "these profiles are gone").
+    const panelLookup = await buildPanelLookup(() =>
+      this.remnawaveApiService.strictGetAllPanelUsers(),
+    );
 
     const errors: string[] = [];
     let created = 0;
@@ -477,6 +482,25 @@ export class RemnashopImporterService {
 
   // ── Subscription sync ─────────────────────────────────────────────────────
 
+  /**
+   * The strict half of a per-UUID miss confirmation (see
+   * {@link resolvePanelProfile}). `strictGetPanelUserExpiry` rather than
+   * `strictGetPanelUser`: all we need from it is 404-vs-everything-else, and
+   * the wide parser fails closed on nine fields this importer never reads
+   * (`tag` shape, squad encoding, `trafficLimitStrategy`), so one unrelated
+   * contract drift would turn EVERY confirmation into `invalidContract` and
+   * quietly switch off the expiry half of the overlay for whole runs.
+   */
+  private panelAbsenceProbe(): PanelAbsenceProbe {
+    return {
+      confirmAbsence: (uuid) => this.remnawaveApiService.strictGetPanelUserExpiry(uuid),
+      onUnconfirmed: (uuid, reason) =>
+        this.logger.warn(
+          `Remnashop import: panel state for ${uuid} is unconfirmed (${reason}) — keeping the backup value instead of expiring it`,
+        ),
+    };
+  }
+
   private async syncSubscription(
     userId: string,
     expectedTelegramId: number,
@@ -494,8 +518,11 @@ export class RemnashopImporterService {
       // Remnawave is the truth: if the panel still has this profile, overlay
       // its FRESH state (active subscriptions become accurate). If it's gone,
       // keep the backup's own (stale) state as-is — the user re-buys via bot.
-      const { panel, known } = await resolvePanelProfile(sub.user_remna_id, panelLookup, (uuid) =>
-        this.remnawaveApiService.getPanelUser(uuid),
+      const { panel, known } = await resolvePanelProfile(
+        sub.user_remna_id,
+        panelLookup,
+        (uuid) => this.remnawaveApiService.getPanelUser(uuid),
+        this.panelAbsenceProbe(),
       );
       // A donor backup is only a snapshot. It cannot authorize a transfer of a
       // live profile or overwrite an existing local ownership relation.

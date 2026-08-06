@@ -12,7 +12,8 @@ import { MovePlanDto } from '../dto/move-plan.dto';
 import { ReorderPlansDto } from '../dto/reorder-plans.dto';
 import { UpdatePlanDto } from '../dto/update-plan.dto';
 import { AdminPlanInterface } from '../interfaces/admin-plan.interface';
-import { PlansAdminService } from '../services/plans-admin.service';
+import { PlanSquadPropagationStatus } from '../services/plan-squad-propagation.service';
+import { AdminPlanUpdateResultInterface, PlansAdminService } from '../services/plans-admin.service';
 import { RemnawaveSquadOptionInterface } from '../../remnawave/interfaces/remnawave-squad-option.interface';
 
 @Controller('admin/plans')
@@ -59,6 +60,19 @@ export class AdminPlansController {
     return this.plansAdminService.getPlan(planId);
   }
 
+  /**
+   * Progress of the plan's most recent squad propagation. Editing a plan's
+   * squads queues a background push to every existing subscriber; this is how
+   * the operator sees whether that push is still running, and whether any of it
+   * failed. `isComplete: true` with `total: 0` means nothing was ever queued.
+   */
+  @Get(':planId/squad-propagation')
+  public async getSquadPropagationStatus(
+    @Param('planId') planId: string,
+  ): Promise<PlanSquadPropagationStatus> {
+    return this.plansAdminService.getSquadPropagationStatus(planId);
+  }
+
   @Post()
   @RequirePermission('plans', 'create')
   public async createPlan(
@@ -79,7 +93,7 @@ export class AdminPlansController {
     @Body() input: UpdatePlanDto,
     @CurrentAdmin() currentAdmin: CurrentAdminInterface,
     @Req() request: Request,
-  ): Promise<AdminPlanInterface> {
+  ): Promise<AdminPlanUpdateResultInterface> {
     return this.plansAdminService.updatePlan(planId, input, {
       currentAdmin,
       requestMetadata: extractRequestMetadata(request),
@@ -106,7 +120,7 @@ export class AdminPlansController {
     @Param('planId') planId: string,
     @CurrentAdmin() currentAdmin: CurrentAdminInterface,
     @Req() request: Request,
-  ): Promise<AdminPlanInterface> {
+  ): Promise<AdminPlanUpdateResultInterface> {
     return this.plansAdminService.updatePlan(planId, { isArchived: true } as UpdatePlanDto, {
       currentAdmin,
       requestMetadata: extractRequestMetadata(request),
@@ -119,7 +133,7 @@ export class AdminPlansController {
     @Param('planId') planId: string,
     @CurrentAdmin() currentAdmin: CurrentAdminInterface,
     @Req() request: Request,
-  ): Promise<AdminPlanInterface> {
+  ): Promise<AdminPlanUpdateResultInterface> {
     return this.plansAdminService.updatePlan(planId, { isArchived: false } as UpdatePlanDto, {
       currentAdmin,
       requestMetadata: extractRequestMetadata(request),

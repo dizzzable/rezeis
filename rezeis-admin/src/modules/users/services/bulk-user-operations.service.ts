@@ -96,7 +96,7 @@ export class BulkUserOperationsService {
     }
 
     this.events.info(
-      'system.bulk_users_executed',
+      EVENT_TYPES.SYSTEM_BULK_USERS_EXECUTED,
       'SYSTEM',
       `Bulk user operation "${input.action}" executed (${succeeded}/${ids.length})`,
       {

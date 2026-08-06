@@ -14,6 +14,11 @@ import { AdminPlanInterface } from '../interfaces/admin-plan.interface';
 import { mapAdminPlan, PLAN_INCLUDE } from '../utils/plan-record.util';
 
 import {
+  PlanSquadPropagationService,
+  PlanSquadPropagationStatus,
+  PlanSquadPropagationSummary,
+} from './plan-squad-propagation.service';
+import {
   buildPlanDurationCreateInput,
   buildPlanWriteData,
   normalizeCreatePlanInput,
@@ -24,6 +29,16 @@ import { PlansAdminValidators } from './plans-admin.validators';
 interface AdminMutationContext {
   readonly currentAdmin: CurrentAdminInterface;
   readonly requestMetadata: RequestMetadataInterface;
+}
+
+/**
+ * A plan as saved, plus what the save set in motion. `squadPropagation` is how
+ * the operator learns that a squad edit is on its way to existing subscribers
+ * instead of having to trust that it is — `GET /admin/plans/:planId/squad-propagation`
+ * then answers whether it has finished.
+ */
+export interface AdminPlanUpdateResultInterface extends AdminPlanInterface {
+  readonly squadPropagation: PlanSquadPropagationSummary;
 }
 
 /**
@@ -41,7 +56,14 @@ export class PlansAdminService {
     private readonly remnawaveApiService: RemnawaveApiService,
     private readonly planSnapshotSyncService: PlanSnapshotSyncService,
     private readonly plansAdminValidators: PlansAdminValidators,
+    private readonly planSquadPropagationService: PlanSquadPropagationService,
   ) {}
+
+  /** Live progress of this plan's most recent squad propagation. */
+  public async getSquadPropagationStatus(planId: string): Promise<PlanSquadPropagationStatus> {
+    await this.getRequiredPlan(planId);
+    return this.planSquadPropagationService.getStatus(planId);
+  }
 
   public async listPlans(): Promise<readonly AdminPlanInterface[]> {
     const plans = await this.prismaService.plan.findMany({
@@ -103,48 +125,91 @@ export class PlansAdminService {
     planId: string,
     input: UpdatePlanDto,
     context: AdminMutationContext,
-  ): Promise<AdminPlanInterface> {
+  ): Promise<AdminPlanUpdateResultInterface> {
     const currentPlan = await this.getRequiredPlan(planId);
     const normalizedInput = normalizeUpdatePlanInput(input, currentPlan);
-    await this.plansAdminValidators.assertPlanWriteIsValid({ planId, input: normalizedInput });
-    const updatedPlan = await this.prismaService.$transaction(async (transactionClient) => {
-      const updated = await transactionClient.plan.update({
-        where: { id: planId },
-        data: {
-          ...buildPlanWriteData(normalizedInput),
-          durations:
-            normalizedInput.durations === undefined
-              ? undefined
-              : {
-                  deleteMany: {},
-                  create: buildPlanDurationCreateInput(normalizedInput.durations),
-                },
-        },
-        include: PLAN_INCLUDE,
-      });
-      await this.logAdminAction({
-        transactionClient,
-        action: 'plans.updated',
-        context,
-        metadata: {
-          planId: updated.id,
-          name: updated.name,
-        },
-      });
-      await this.planSnapshotSyncService.syncPlanSnapshotMetadata(transactionClient, {
-        id: updated.id,
-        name: updated.name,
-        tag: updated.tag,
-        type: updated.type,
-        trafficLimit: updated.trafficLimit,
-        deviceLimit: updated.deviceLimit,
-        trafficLimitStrategy: updated.trafficLimitStrategy,
-        internalSquads: updated.internalSquads,
-        externalSquad: updated.externalSquad,
-      });
-      return updated;
+    await this.plansAdminValidators.assertPlanWriteIsValid({
+      planId,
+      input: normalizedInput,
+      // The persisted selection, so a panel outage only blocks a write that
+      // actually CHANGES the squads (see `assertSquadsAreValid`).
+      persistedSquads: {
+        internalSquads: currentPlan.internalSquads,
+        externalSquad: currentPlan.externalSquad,
+      },
     });
-    return mapAdminPlan(updatedPlan);
+    const { updated, propagation } = await this.prismaService.$transaction(
+      async (transactionClient) => {
+        const updatedPlan = await transactionClient.plan.update({
+          where: { id: planId },
+          data: {
+            ...buildPlanWriteData(normalizedInput),
+            durations:
+              normalizedInput.durations === undefined
+                ? undefined
+                : {
+                    deleteMany: {},
+                    create: buildPlanDurationCreateInput(normalizedInput.durations),
+                  },
+          },
+          include: PLAN_INCLUDE,
+        });
+        await this.planSnapshotSyncService.syncPlanSnapshotMetadata(transactionClient, {
+          id: updatedPlan.id,
+          name: updatedPlan.name,
+          tag: updatedPlan.tag,
+          type: updatedPlan.type,
+          trafficLimit: updatedPlan.trafficLimit,
+          deviceLimit: updatedPlan.deviceLimit,
+          trafficLimitStrategy: updatedPlan.trafficLimitStrategy,
+          internalSquads: updatedPlan.internalSquads,
+          externalSquad: updatedPlan.externalSquad,
+        });
+        // The snapshot write above is NOT enough on its own: the sync processor
+        // reads squads from the subscription's columns, not from the snapshot,
+        // so without this fan-out an operator's squad edit never reaches anyone
+        // who already bought the plan.
+        //
+        // Squads fan out; `trafficLimit` / `deviceLimit` deliberately do NOT.
+        // A squad is the route to the service and a stale one is a broken
+        // service; a limit is the priced good, and pushing a smaller one would
+        // take back what a customer already paid for as a side effect of an
+        // admin edit — the same reason `BulkPlanAssignmentService.applyImmediately`
+        // defaults to false. Limit edits reach existing subscribers at their
+        // next renewal or upgrade, both of which re-read the live plan row; the
+        // plan editor states this to the operator while they are typing (see
+        // `web/src/features/plans/plan-limit-scope.ts`). Full reasoning, and what
+        // an opt-in propagation would have to write, is on
+        // `PlanSnapshotSyncService.syncPlanSnapshotMetadata`.
+        const squadPropagation = await this.planSquadPropagationService.propagateInTransaction(
+          transactionClient,
+          {
+            planId: updatedPlan.id,
+            previousInternalSquads: currentPlan.internalSquads,
+            previousExternalSquad: currentPlan.externalSquad,
+            nextInternalSquads: updatedPlan.internalSquads,
+            nextExternalSquad: updatedPlan.externalSquad,
+          },
+        );
+        // Logged after the fan-out so the audit row records what the edit
+        // actually set in motion, not just that it happened.
+        await this.logAdminAction({
+          transactionClient,
+          action: 'plans.updated',
+          context,
+          metadata: {
+            planId: updatedPlan.id,
+            name: updatedPlan.name,
+            squadPropagation: { ...squadPropagation.summary },
+          },
+        });
+        return { updated: updatedPlan, propagation: squadPropagation };
+      },
+    );
+    // Outside the transaction: enqueueing is a Redis write, and no worker may
+    // see a job id whose row has not committed.
+    await this.planSquadPropagationService.enqueueAfterCommit(propagation.syncJobIds);
+    return { ...mapAdminPlan(updated), squadPropagation: propagation.summary };
   }
 
   public async movePlan(

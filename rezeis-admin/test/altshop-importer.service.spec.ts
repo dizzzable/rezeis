@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { AltshopImporterService } from '../src/modules/imports/services/altshop-importer.service';
+import { strictOk } from '../src/modules/remnawave/interfaces/remnawave-strict-outcome.interface';
 
 describe('AltshopImporterService', () => {
   it('does not rebind an existing subscription owned by another user', async () => {
@@ -19,7 +20,7 @@ describe('AltshopImporterService', () => {
           return { id: 'import-1' };
         } },
       } as never,
-      { getAllPanelUsers: async () => [] } as never,
+      { strictGetAllPanelUsers: async () => strictOk({ users: [], total: 0 }) } as never,
     );
     await service.run({ mode: 'import', createdBy: null, users: [user(1)], subscriptions: [subscription(1)] });
     assert.deepEqual(updates, []);
@@ -37,7 +38,7 @@ describe('AltshopImporterService', () => {
         },
         importRecord: { create: async () => ({ id: 'import-1' }) },
       } as never,
-      { getAllPanelUsers: async () => [] } as never,
+      { strictGetAllPanelUsers: async () => strictOk({ users: [], total: 0 }) } as never,
     );
     await service.run({ mode: 'import', createdBy: null, users: [user(1)], subscriptions: [subscription(1)] });
     assert.equal(updates[0].data.planSnapshot.planId, 'target-plan');
@@ -54,7 +55,10 @@ describe('AltshopImporterService', () => {
           return { id: 'import-1' };
         } },
       } as never,
-      { getAllPanelUsers: async () => [{ uuid: subscription(1).user_remna_id, telegramId: 2 }] } as never,
+      {
+        strictGetAllPanelUsers: async () =>
+          strictOk({ users: [{ uuid: subscription(1).user_remna_id, telegramId: 2 }], total: 1 }),
+      } as never,
     );
     await service.run({ mode: 'import', createdBy: null, users: [user(1)], subscriptions: [subscription(1)] });
     assert.equal((result?.conflicts as Record<string, number>).panelOwnerMismatch, 1);
@@ -80,7 +84,7 @@ describe('AltshopImporterService', () => {
             },
           }),
       } as never,
-      { getAllPanelUsers: async () => [] } as never,
+      { strictGetAllPanelUsers: async () => strictOk({ users: [], total: 0 }) } as never,
     );
 
     const input = { mode: 'import' as const, createdBy: null, users: [user(1, false)], subscriptions: [] };
@@ -129,7 +133,7 @@ describe('AltshopImporterService', () => {
           return { id: 'import-2' };
         } },
       } as never,
-      { getAllPanelUsers: async () => [] } as never,
+      { strictGetAllPanelUsers: async () => strictOk({ users: [], total: 0 }) } as never,
     );
     await service.run({
       mode: 'import', createdBy: null, users: [user(1), user(2)], subscriptions: [],
@@ -162,7 +166,7 @@ describe('AltshopImporterService', () => {
           return { id: 'import-5' };
         } },
       } as never,
-      { getAllPanelUsers: async () => [] } as never,
+      { strictGetAllPanelUsers: async () => strictOk({ users: [], total: 0 }) } as never,
     );
     await service.run({
       mode: 'import', createdBy: null, users: [user(1), user(2)], subscriptions: [],
@@ -186,7 +190,7 @@ describe('AltshopImporterService', () => {
         },
         importRecord: { create: async () => ({ id: 'import-3' }) },
       } as never,
-      { getAllPanelUsers: async () => [] } as never,
+      { strictGetAllPanelUsers: async () => strictOk({ users: [], total: 0 }) } as never,
     );
     await service.run({
       mode: 'import', createdBy: null, users: [user(1), user(2)], subscriptions: [],
@@ -210,7 +214,7 @@ describe('AltshopImporterService', () => {
           return { id: 'import-4' };
         } },
       } as never,
-      { getAllPanelUsers: async () => [] } as never,
+      { strictGetAllPanelUsers: async () => strictOk({ users: [], total: 0 }) } as never,
     );
     await service.run({
       mode: 'import', createdBy: null, users: [user(1)], subscriptions: [],

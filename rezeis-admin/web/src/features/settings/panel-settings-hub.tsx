@@ -9,6 +9,8 @@
  *   4. Backups      — DB backup management
  *   5. Branding     — all Customization blocks stacked on one page: Brand · Icons
  *   6. Config       — config import/export portability
+ *   7. Anti-fraud   — detector thresholds that used to be ANTIFRAUD_* env vars
+ *                     (panel value wins; the env var is the fallback)
  *
  * AI-Support lives only under Конфигурация → AI-Support (`/ai-support`), not
  * as a hub tab (avoids a duplicate entry with the sidebar item).
@@ -20,7 +22,7 @@
 
 import { lazy, Suspense } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Archive, FileCog, Key, Paintbrush, Palette, Settings, Shield } from 'lucide-react'
+import { Archive, FileCog, Key, Paintbrush, Palette, Settings, Shield, ShieldAlert } from 'lucide-react'
 
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -48,6 +50,7 @@ const BackupTab = lazy(() => import('@/features/backup/backup-page'))
 const ConfigPortabilityTab = lazy(() => import('@/features/config-portability/config-portability-page'))
 const NotificationsTab = lazy(() => import('./panel-notifications-tab'))
 const QuestPartnersTab = lazy(() => import('./quest-partners-tab'))
+const AntiFraudTab = lazy(() => import('./anti-fraud-tab'))
 
 function TabFallback() {
   return (
@@ -107,6 +110,10 @@ export default function PanelSettingsHub() {
               {t('panelSettings.tabs.config')}
             </TabsTrigger>
           </PermissionGate>
+          <TabsTrigger value="anti-fraud" className="gap-1.5">
+            <ShieldAlert className="h-3.5 w-3.5" />
+            {t('panelSettings.tabs.antiFraud')}
+          </TabsTrigger>
         </TabsList>
 
         <PermissionGate resource="api_tokens" action="view" hideWhileLoading>
@@ -166,6 +173,14 @@ export default function PanelSettingsHub() {
             </Suspense>
           </TabsContent>
         </PermissionGate>
+
+        {/* Reads inherit the controller's `settings:view`; the tab itself
+            disables its write affordances without `settings:edit`. */}
+        <TabsContent value="anti-fraud">
+          <Suspense fallback={<TabFallback />}>
+            <AntiFraudTab />
+          </Suspense>
+        </TabsContent>
       </Tabs>
     </div>
   )

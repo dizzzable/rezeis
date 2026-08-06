@@ -222,7 +222,7 @@ export class SavedPaymentMethodService {
     readonly checkoutUrl: string;
   }): void {
     this.systemEvents.warn(
-      'payment.autopay_confirmation_required',
+      EVENT_TYPES.PAYMENT_AUTOPAY_CONFIRMATION_REQUIRED,
       'PAYMENT',
       'Автосписание ожидает подтверждения пользователя (3DS/redirect)',
       input,

@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 
 import { AltshopImporterService } from '../src/modules/imports/services/altshop-importer.service';
 import { parseAltshopBackup } from '../src/modules/imports/utils/altshop-backup-parser';
+import { strictOk } from '../src/modules/remnawave/interfaces/remnawave-strict-outcome.interface';
 
 describe('parseAltshopBackup — web_accounts', () => {
   it('extracts web account identities (login/email) and drops the bcrypt hash', async () => {
@@ -32,7 +33,7 @@ describe('AltshopImporterService — claim-pending web account', () => {
   it('creates a claim-pending web account for a migrated web-only user', async () => {
     const created: Array<Record<string, unknown>> = [];
     const prisma = buildPrisma({ created, existingWebAccount: null });
-    const service = new AltshopImporterService(prisma as never, { getAllPanelUsers: async () => [] } as never);
+    const service = new AltshopImporterService(prisma as never, { strictGetAllPanelUsers: async () => strictOk({ users: [], total: 0 }) } as never);
 
     await service.run({
       mode: 'import',
@@ -54,7 +55,7 @@ describe('AltshopImporterService — claim-pending web account', () => {
   it('skips when the user already has a web account', async () => {
     const created: Array<Record<string, unknown>> = [];
     const prisma = buildPrisma({ created, existingWebAccount: { id: 'wa-existing' } });
-    const service = new AltshopImporterService(prisma as never, { getAllPanelUsers: async () => [] } as never);
+    const service = new AltshopImporterService(prisma as never, { strictGetAllPanelUsers: async () => strictOk({ users: [], total: 0 }) } as never);
 
     await service.run({
       mode: 'import',
@@ -70,7 +71,7 @@ describe('AltshopImporterService — claim-pending web account', () => {
   it('creates no web account in sync mode', async () => {
     const created: Array<Record<string, unknown>> = [];
     const prisma = buildPrisma({ created, existingWebAccount: null, telegramMatch: true });
-    const service = new AltshopImporterService(prisma as never, { getAllPanelUsers: async () => [] } as never);
+    const service = new AltshopImporterService(prisma as never, { strictGetAllPanelUsers: async () => strictOk({ users: [], total: 0 }) } as never);
 
     await service.run({
       mode: 'sync',
@@ -92,7 +93,7 @@ describe('AltshopImporterService — claim-pending web account', () => {
       existingWebAccount: { id: 'wa-existing' },
       webAccountOwnerId: 'existing-web-user',
     });
-    const service = new AltshopImporterService(prisma as never, { getAllPanelUsers: async () => [] } as never);
+    const service = new AltshopImporterService(prisma as never, { strictGetAllPanelUsers: async () => strictOk({ users: [], total: 0 }) } as never);
     await service.run({
       mode: 'import', createdBy: null,
       users: [{ id: 1, telegram_id: -5, username: 'weblogin', name: 'Web', role: 1 } as never],
@@ -112,7 +113,7 @@ describe('AltshopImporterService — claim-pending web account', () => {
       existingWebAccount: null,
       webAccountOwners: { login: 'user-by-login', email: 'user-by-email' },
     });
-    const service = new AltshopImporterService(prisma as never, { getAllPanelUsers: async () => [] } as never);
+    const service = new AltshopImporterService(prisma as never, { strictGetAllPanelUsers: async () => strictOk({ users: [], total: 0 }) } as never);
     const result = await service.run({
       mode: 'import', createdBy: null,
       users: [{ id: 1, telegram_id: -5, username: 'weblogin', name: 'Web', role: 1 } as never],

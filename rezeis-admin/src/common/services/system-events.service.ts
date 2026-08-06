@@ -158,6 +158,13 @@ export const EVENT_TYPES = {
   PAYMENT_METHOD_SAVED: 'payment.method_saved',
   PAYMENT_METHOD_UNBOUND: 'payment.method_unbound',
   PAYMENT_METHOD_AUTOPAY_UPDATED: 'payment.method_autopay_updated',
+  /**
+   * An off-session autopay charge stopped for 3DS/redirect and is waiting on
+   * the customer. Nobody is at fault and nothing failed yet — but the money
+   * does not arrive until the customer acts, so an operator chasing a missing
+   * renewal needs to see this rather than infer it from silence.
+   */
+  PAYMENT_AUTOPAY_CONFIRMATION_REQUIRED: 'payment.autopay_confirmation_required',
 
   // Referral
   REFERRAL_ATTACHED: 'referral.attached',
@@ -174,6 +181,14 @@ export const EVENT_TYPES = {
   PARTNER_WITHDRAWAL_APPROVED: 'partner.withdrawal_approved',
   PARTNER_WITHDRAWAL_REJECTED: 'partner.withdrawal_rejected',
   PARTNER_BALANCE_ADJUSTED: 'partner.balance_adjusted',
+  /**
+   * A partner was debited for a purchase, fulfillment failed, and the refund
+   * to their balance ALSO failed. Deliberately not `partner.balance_adjusted`:
+   * nothing was adjusted — the money is gone and only a human can give it
+   * back. A retry sweep re-drives it, but the operator is told immediately
+   * because the sweep is not guaranteed to succeed either.
+   */
+  PARTNER_BALANCE_REFUND_FAILED: 'partner.balance_refund_failed',
 
   // Promocode
   PROMOCODE_ACTIVATED: 'promocode.activated',
@@ -188,6 +203,29 @@ export const EVENT_TYPES = {
   // Anti-fraud
   FRAUD_SIGNAL_OPENED: 'fraud.signal_opened',
   FRAUD_CONNECTIONS_DROPPED: 'fraud.connections_dropped',
+  /**
+   * A detector named a condition and an operator exemption stopped it becoming
+   * a signal. Edge-triggered — emitted when the exemption STARTS covering a
+   * condition, not on every one of the 288 daily runs that follow. Without it a
+   * whitelist is a detector switched off with nobody told.
+   */
+  FRAUD_CANDIDATE_EXEMPTED: 'fraud.candidate_exempted',
+  FRAUD_EXEMPTION_GRANTED: 'fraud.exemption_granted',
+  FRAUD_EXEMPTION_REVOKED: 'fraud.exemption_revoked',
+  /**
+   * A batch of OPEN signals closed themselves because the condition is no
+   * longer detected. One summary event per reconciliation run, not one per
+   * row — a first deployment can clear a large backlog at once.
+   */
+  FRAUD_SIGNALS_AUTO_RESOLVED: 'fraud.signals_auto_resolved',
+  /** An existing signal's severity was raised by a fresh detection. */
+  FRAUD_SIGNAL_ESCALATED: 'fraud.signal_escalated',
+  /**
+   * The condition still holds but measures lower than the recorded peak.
+   * Edge-triggered, so a signal parked at the lower level does not
+   * re-announce itself every run.
+   */
+  FRAUD_SIGNAL_SEVERITY_RECEDED: 'fraud.signal_severity_receded',
 
   // Remnawave panel (forwarded webhook events)
   REMNAWAVE_USER_FIRST_CONNECTED: 'remnawave.user.first_connected',
@@ -199,6 +237,12 @@ export const EVENT_TYPES = {
   REMNAWAVE_USER_TRAFFIC_RESET: 'remnawave.user.traffic_reset',
   REMNAWAVE_BANDWIDTH_THRESHOLD: 'remnawave.user.bandwidth_threshold',
   REMNAWAVE_PANEL_STARTED: 'remnawave.panel.started',
+  /**
+   * Panel-wide device average crossed a band (`RemnawaveDetectors`, polled —
+   * the panel has no webhook for it). An infrastructure fact about the whole
+   * panel, so it names no customer and is not a fraud signal.
+   */
+  REMNAWAVE_HWID_AVERAGE_HIGH: 'remnawave.hwid_average_high',
 
   // Node (forwarded webhook events)
   NODE_CONNECTION_LOST: 'node.connection_lost',
@@ -208,12 +252,58 @@ export const EVENT_TYPES = {
   NODE_ENABLED: 'node.enabled',
   NODE_DISABLED: 'node.disabled',
   NODE_TRAFFIC_NOTIFY: 'node.traffic_notify',
+  /**
+   * Too much of the online population sits behind one country's nodes
+   * (`RemnawaveDetectors`, polled). Same shape as the forwarded node events
+   * above — a fact about the fleet, not about anybody using it.
+   */
+  NODE_GEO_CONCENTRATION: 'node.geo_concentration',
 
   // System
   SYSTEM_STARTUP: 'system.startup',
   SYSTEM_BACKUP_COMPLETED: 'system.backup_completed',
+  /** A database restore finished — the counterpart of `system.backup_completed`. */
+  SYSTEM_RESTORE_COMPLETED: 'system.restore_completed',
   SYSTEM_BROADCAST_SENT: 'system.broadcast_sent',
+  /** One admin action that touched many users at once (block/unblock/delete/…). */
+  SYSTEM_BULK_USERS_EXECUTED: 'system.bulk_users_executed',
   SYSTEM_ERROR: 'system.error',
+  /**
+   * An admin moved a fraud signal between statuses.
+   *
+   * In the System block, NOT the anti-fraud one, because the block a constant
+   * sits in is how this file expresses category — and its only producer
+   * (`AntiFraudService.transitionSignal`) emits it with category `SYSTEM`,
+   * while its three `fraud.*` siblings above emit with `FRAUD`. That
+   * inconsistency predates this constant; it is recorded here rather than
+   * corrected because `category` picks the Telegram forum topic, so changing
+   * it would silently move an operator's cards to a different topic.
+   */
+  FRAUD_SIGNAL_TRANSITIONED: 'fraud.signal_transitioned',
+  /** Admin-panel (SPA) runtime error reported back by the browser. */
+  CLIENT_ERROR: 'client.error',
+  /** Runtime error forwarded from the reiwa bot over the internal channel. */
+  REIWA_ERROR: 'reiwa.error',
+  /** Broadcast fan-out began; `system.broadcast_sent` is the terminal one. */
+  BROADCAST_STARTED: 'broadcast.started',
+  BROADCAST_BATCH_COMPLETED: 'broadcast.batch_completed',
+  IMPORT_COMPLETED: 'import.completed',
+  IMPORT_FAILED: 'import.failed',
+  IMPORT_PLAN_ASSIGNED: 'import.plan_assigned',
+  IMPORT_SYNC_ENQUEUED: 'import.sync_enqueued',
+  /** An automation rule's "notify Telegram" action fired. */
+  AUTOMATION_TELEGRAM_NOTIFY: 'automation.telegram_notify',
+  /**
+   * Default type of the automations `system_event` action, used whenever the
+   * rule's params omit `type`. The action lets the operator write their OWN
+   * type string (a capability other rules and webhooks depend on), so most of
+   * that action's output stays unregisterable by construction and is covered
+   * by `UNREGISTERED_EVENTS_SENTINEL` instead — but the DEFAULT is a fixed,
+   * known string, so it gets a real constant, a card and a tick-box like any
+   * other producer. Category is whatever the rule passes (SYSTEM by default),
+   * which is what picks the forum topic.
+   */
+  AUTOMATION_CUSTOM: 'automation.custom',
   SETTINGS_EMAIL_UPDATED: 'settings.email.updated',
   NOTIFICATION_TEMPLATE_CREATED: 'notification.template.created',
   NOTIFICATION_TEMPLATE_UPDATED: 'notification.template.updated',
@@ -221,6 +311,19 @@ export const EVENT_TYPES = {
   NOTIFICATION_TEMPLATE_SEEDED: 'notification.template.seeded',
   SYSTEM_REMNAWAVE_SYNC: 'system.remnawave_sync',
 } as const;
+
+/**
+ * The registered types, as a set, for the Telegram delivery gate.
+ *
+ * This is precisely the set of types an operator can tick: the SPA catalogue in
+ * `notifications-page.tsx` is held equal to `Object.values(EVENT_TYPES)` in both
+ * directions by `test/system-event-registry.spec.ts`. The gate needs that
+ * distinction because the catch-all tick-box may only cover types the operator
+ * had no way to tick — a registered type stays exact-match.
+ */
+export const REGISTERED_EVENT_TYPES: ReadonlySet<string> = new Set<string>(
+  Object.values(EVENT_TYPES),
+);
 
 // ── Service ─────────────────────────────────────────────────────────────────
 
@@ -587,10 +690,15 @@ export class SystemEventsService {
     // applies to EVERY path (operator group, reiwa relay, AND the dev-DM
     // fallback). Unselected events go nowhere on Telegram. The panel still
     // has them (audit log + realtime already ran in emit()).
+    //
+    // `knownTypes` separates "the operator was offered this and said no" from
+    // "the operator was never offered this at all" — only the latter can be
+    // covered by the catch-all tick-box.
     if (
       !isEventTelegramAllowed(event.type, {
         eventsMode: tgConfig.eventsMode,
         events: tgConfig.events,
+        knownTypes: REGISTERED_EVENT_TYPES,
       })
     ) {
       return;
@@ -876,15 +984,30 @@ export class SystemEventsService {
     const meta = event.metadata ?? {};
     const present = EVENT_PRESENTATION[event.type];
     const emoji = present?.emoji ?? severityEmoji(event.severity);
-    const title = present?.title ?? event.message;
 
-    const lines: string[] = [
-      hashtag,
-      '',
-      present
-        ? `${emoji} <b>Событие: ${escapeHtml(present.title)}!</b>`
-        : `${emoji} <b>${escapeHtml(title)}</b>`,
-    ];
+    const lines: string[] = [hashtag, ''];
+    if (present) {
+      lines.push(`${emoji} <b>Событие: ${escapeHtml(present.title)}!</b>`);
+    } else {
+      // No EVENT_PRESENTATION entry — a type chosen at runtime by an
+      // automation rule or by the reiwa ingest, which by construction can
+      // never be in that map. Two things have to hold for the card to stay
+      // readable:
+      //
+      //   * the header is never empty. `message` is what the fallback header
+      //     has always shown, but nothing guarantees it is non-blank —
+      //     `ReceiveSystemEventDto.message` has no `@MinLength`, so an empty
+      //     string used to render as a bare `<b></b>`;
+      //   * the machine type is shown ONCE, in full and as `<code>`. Its only
+      //     other appearance is the hashtag, which mangles dots and drops
+      //     punctuation, so without this line an operator receiving a card for
+      //     a type they do not recognise has no way to find out what fired.
+      const message = event.message.trim();
+      const headline =
+        message.length > 0 ? message : `Событие без описания: ${clip(event.type, 120)}`;
+      lines.push(`${emoji} <b>${escapeHtml(clip(headline, 200))}</b>`);
+      lines.push(`🏷 Незарегистрированный тип: <code>${escapeHtml(clip(event.type, 120))}</code>`);
+    }
 
     // Fraud block — a dedicated, informative card for anti-fraud signals.
     // Uses `fraud*`-prefixed metadata so it never collides with the generic
@@ -1373,13 +1496,28 @@ export class SystemEventsService {
 
 function eventTypeToHashtag(type: string): string {
   // "payment.completed" → "EventPaymentCompleted"
+  //
+  // The result is interpolated into a `parse_mode: 'HTML'` message, and the
+  // event type is NOT always ours: the automations `system_event` action and
+  // the reiwa `/internal/events` ingest both choose it at runtime. Characters
+  // outside the hashtag alphabet are therefore DROPPED, not escaped — a
+  // Telegram hashtag has no use for them, and dropping them removes the only
+  // route by which a type string could open a tag and forge card structure
+  // (`<b>`, `<blockquote>`, `<a href>`). Every registered type is already
+  // `[a-z0-9_.]`, so this is a no-op for them.
   return (
     'Event' +
     type
       .split('.')
       .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
       .join('')
+      .replace(/[^A-Za-z0-9_]/g, '')
   );
+}
+
+/** Trims a value to `max` characters, marking the cut with an ellipsis. */
+function clip(value: string, max: number): string {
+  return value.length > max ? `${value.slice(0, max)}…` : value;
 }
 
 function severityEmoji(severity: SystemEventSeverity): string {
@@ -1480,7 +1618,7 @@ function formatFraudBlock(meta: Record<string, unknown>): string[] {
  * type gets its own identity instead of a generic severity icon. Falls back to
  * `severityEmoji` + the raw `event.message` when a type isn't mapped here.
  */
-const EVENT_PRESENTATION: Record<string, { emoji: string; title: string }> = {
+export const EVENT_PRESENTATION: Record<string, { emoji: string; title: string }> = {
   // User
   'user.registered': { emoji: '🆕', title: 'Новый пользователь' },
   'user.web_registered': { emoji: '🆕', title: 'Регистрация через сайт' },
@@ -1490,6 +1628,7 @@ const EVENT_PRESENTATION: Record<string, { emoji: string; title: string }> = {
   'user.role_changed': { emoji: '🛡', title: 'Изменена роль пользователя' },
   'user.telegram_linked': { emoji: '🔗', title: 'Привязан Telegram' },
   'user.email_linked': { emoji: '📧', title: 'Привязан Email' },
+  'user.accounts_merged': { emoji: '🧬', title: 'Аккаунты объединены' },
   user_hwid_revoked: { emoji: '📱', title: 'Сброшено устройство (HWID)' },
 
   // Auth
@@ -1505,6 +1644,13 @@ const EVENT_PRESENTATION: Record<string, { emoji: string; title: string }> = {
   'subscription.deleted': { emoji: '🗑', title: 'Подписка удалена' },
   'subscription.synced': { emoji: '🔄', title: 'Синхронизация подписки' },
   'subscription.trial_granted': { emoji: '🎁', title: 'Выдан триал' },
+  // Emitted with category PAYMENT (see the emit site in
+  // `PaymentSubscriptionMutationService`), which is why its tick-box lives
+  // under «Платежи» even though the constant sits in the Subscription block.
+  'trial.claim_late_success_over_cap': {
+    emoji: '⏳',
+    title: 'Поздняя оплата триала прошла сверх квоты',
+  },
 
   // Payment
   'payment.checkout_created': { emoji: '🧾', title: 'Создан счёт на оплату' },
@@ -1523,6 +1669,15 @@ const EVENT_PRESENTATION: Record<string, { emoji: string; title: string }> = {
   'payment.expired': { emoji: '⌛', title: 'Счёт на оплату истёк' },
   'payment.webhook_received': { emoji: '📩', title: 'Вебхук платёжки' },
   'payment.fulfillment_recovered': { emoji: '🛟', title: 'Восстановлено исполнение платежа' },
+  'payment.method_saved': { emoji: '💳', title: 'Сохранён способ оплаты' },
+  'payment.method_unbound': { emoji: '🚫', title: 'Отвязан способ оплаты' },
+  'payment.method_autopay_updated': { emoji: '🔁', title: 'Изменено автосписание' },
+  // Not an error and not a completion: the charge is parked until the customer
+  // passes 3DS. Titled as a wait, so it does not read like `payment.failed`.
+  'payment.autopay_confirmation_required': {
+    emoji: '🔐',
+    title: 'Автосписание ждёт подтверждения пользователя',
+  },
 
   // Referral
   'referral.attached': { emoji: '🔗', title: 'Реферал привязан' },
@@ -1539,11 +1694,16 @@ const EVENT_PRESENTATION: Record<string, { emoji: string; title: string }> = {
   'partner.withdrawal_approved': { emoji: '✅', title: 'Вывод средств одобрен' },
   'partner.withdrawal_rejected': { emoji: '❌', title: 'Вывод средств отклонён' },
   'partner.balance_adjusted': { emoji: '⚖️', title: 'Скорректирован баланс партнёра' },
+  'partner.balance_refund_failed': {
+    emoji: '🚨',
+    title: 'Партнёру не вернулся списанный баланс!',
+  },
 
   // Promocode
   'promocode.activated': { emoji: '🎟', title: 'Промокод активирован' },
   'promocode.created': { emoji: '🎟', title: 'Промокод создан' },
   'promocode.depleted': { emoji: '🚫', title: 'Промокод исчерпан' },
+  'promocode.archived': { emoji: '📦', title: 'Промокод архивирован' },
 
   // Support
   'support.ticket_created': { emoji: '🆘', title: 'Новое обращение в поддержку' },
@@ -1552,12 +1712,41 @@ const EVENT_PRESENTATION: Record<string, { emoji: string; title: string }> = {
   // Anti-fraud
   'fraud.signal_opened': { emoji: '🚨', title: 'Антифрод: новый сигнал' },
   'fraud.connections_dropped': { emoji: '✂️', title: 'Антифрод: соединения сброшены' },
+  'fraud.candidate_exempted': { emoji: '🙈', title: 'Антифрод: находка скрыта исключением' },
+  'fraud.exemption_granted': { emoji: '🛡️', title: 'Антифрод: выдано исключение' },
+  'fraud.exemption_revoked': { emoji: '↩️', title: 'Антифрод: исключение отозвано' },
+  'fraud.signal_escalated': { emoji: '⏫', title: 'Антифрод: сигнал усилился' },
+  'fraud.signal_severity_receded': { emoji: '⏬', title: 'Антифрод: сигнал ослаб' },
+  'fraud.signals_auto_resolved': { emoji: '🧹', title: 'Антифрод: сигналы закрылись сами' },
+  // Category SYSTEM at its emit site, unlike the four above — see the constant.
+  'fraud.signal_transitioned': { emoji: '🔁', title: 'Антифрод: изменён статус сигнала' },
 
   // System
   'system.startup': { emoji: '🚀', title: 'Запуск системы' },
   'system.backup_completed': { emoji: '🗄', title: 'Резервная копия создана' },
+  'system.restore_completed': { emoji: '♻️', title: 'База восстановлена из копии' },
   'system.broadcast_sent': { emoji: '📢', title: 'Рассылка отправлена' },
+  'system.bulk_users_executed': { emoji: '👥', title: 'Массовая операция над пользователями' },
   'system.error': { emoji: '🚨', title: 'Системная ошибка' },
+  'broadcast.started': { emoji: '📣', title: 'Рассылка запущена' },
+  'broadcast.batch_completed': { emoji: '📬', title: 'Партия рассылки отправлена' },
+  'import.completed': { emoji: '📥', title: 'Импорт завершён' },
+  'import.plan_assigned': { emoji: '🏷', title: 'Массовое назначение плана' },
+  'import.sync_enqueued': { emoji: '🔄', title: 'Синхронизация после импорта поставлена в очередь' },
+  'automation.telegram_notify': { emoji: '🤖', title: 'Автоматизация: уведомление' },
+  // The DEFAULT type of the `system_event` action. A rule that names its own
+  // type keeps doing so and lands under the catch-all tick-box instead — this
+  // entry exists so the common case (no `type` in the action params) reads
+  // like every other event rather than like an unregistered one.
+  'automation.custom': { emoji: '🤖', title: 'Автоматизация: своё событие' },
+  // These three never reach `formatTelegramMessage` today: `isErrorEvent`
+  // matches ERROR severity OR a kind ending in `.error`, and error events are
+  // rendered by `formatErrorEventCardHtml`, which has its own fixed header.
+  // Registered anyway so the card follows if the severity or the routing ever
+  // changes, and so no type is registered in two lists out of three.
+  'import.failed': { emoji: '🚨', title: 'Импорт не удался' },
+  'client.error': { emoji: '🖥', title: 'Ошибка в админ-панели' },
+  'reiwa.error': { emoji: '🚨', title: 'Ошибка в reiwa' },
   'system.remnawave_sync': { emoji: '🔄', title: 'Синхронизация с Remnawave' },
   'settings.email.updated': { emoji: '⚙️', title: 'Обновлены настройки почты' },
   'notification.template.created': { emoji: '📝', title: 'Создан шаблон уведомления' },
@@ -1578,6 +1767,10 @@ const EVENT_PRESENTATION: Record<string, { emoji: string; title: string }> = {
   'remnawave.user.traffic_reset': { emoji: '♻️', title: 'Сброшен трафик профиля' },
   'remnawave.user.bandwidth_threshold': { emoji: '📊', title: 'Порог трафика достигнут' },
   'remnawave.panel.started': { emoji: '🟢', title: 'Панель Remnawave запущена' },
+  'remnawave.hwid_average_high': {
+    emoji: '📈',
+    title: 'Среднее число устройств на пользователя выросло',
+  },
 
   // Node (forwarded webhook events)
   'node.connection_lost': { emoji: '🔌', title: 'Нода офлайн' },
@@ -1587,6 +1780,7 @@ const EVENT_PRESENTATION: Record<string, { emoji: string; title: string }> = {
   'node.enabled': { emoji: '🟢', title: 'Нода включена' },
   'node.disabled': { emoji: '🔴', title: 'Нода отключена' },
   'node.traffic_notify': { emoji: '📊', title: 'Уведомление о трафике ноды' },
+  'node.geo_concentration': { emoji: '🌍', title: 'Концентрация онлайна в одной стране' },
 };
 
 /** Human label for a payment/subscription purchase type. */

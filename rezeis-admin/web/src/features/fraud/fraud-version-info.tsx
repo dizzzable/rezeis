@@ -15,11 +15,14 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { remnawaveApi } from '@/features/remnawave/remnawave-api'
+import { KEYS } from '@/features/remnawave/remnawave-query-keys'
 
 export function FraudVersionInfo() {
   const { t } = useTranslation()
+  // Same key the Remnawave page uses, imported rather than retyped: a
+  // hand-copied tuple here silently forked the capability cache in two.
   const { data: caps } = useQuery({
-    queryKey: ['remnawave', 'version'],
+    queryKey: KEYS.version,
     queryFn: remnawaveApi.getCapabilities,
     staleTime: 5 * 60_000,
     retry: 1,
