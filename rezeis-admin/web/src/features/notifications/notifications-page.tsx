@@ -153,10 +153,12 @@ const EVENT_TYPE_CATALOG: Readonly<Record<string, readonly string[]>> = {
     // matters most here: it is the only notice an operator gets that a detector
     // has stopped reporting somebody, and it fires once per exemption, not per run.
     'fraud.candidate_exempted', 'fraud.exemption_granted', 'fraud.exemption_revoked',
-    // The lifecycle of a signal after it opens. `fraud.signal_transitioned` is
-    // NOT here on purpose — it is emitted with category SYSTEM, so it lands in
-    // the System topic and is ticked from the System group below.
+    // The lifecycle of a signal after it opens — including the status changes
+    // an operator makes by hand. `fraud.signal_transitioned` used to be ticked
+    // from the System group because its emit site passed category SYSTEM; both
+    // sides now say FRAUD, so the card and its tick-box live together.
     'fraud.signal_escalated', 'fraud.signal_severity_receded', 'fraud.signals_auto_resolved',
+    'fraud.signal_transitioned',
   ],
   NODE: [
     'node.connection_lost', 'node.connection_restored', 'node.created',
@@ -177,8 +179,6 @@ const EVENT_TYPE_CATALOG: Readonly<Record<string, readonly string[]>> = {
     'broadcast.started', 'broadcast.batch_completed',
     'import.completed', 'import.failed', 'import.plan_assigned', 'import.sync_enqueued',
     'automation.telegram_notify', 'automation.custom', 'client.error', 'reiwa.error',
-    // Category SYSTEM at its emit site despite the `fraud.` prefix — see FRAUD.
-    'fraud.signal_transitioned',
   ],
 }
 

@@ -20,7 +20,12 @@ function buildService(webhookSecret: string | null): RemnawaveWebhookService {
     subscription: { updateMany: async () => ({ count: 0 }) },
   };
   const systemEvents = { emit: () => undefined };
-  return new RemnawaveWebhookService(prisma as never, { webhookSecret } as never, systemEvents as never);
+  return new RemnawaveWebhookService(
+    prisma as never,
+    { webhookSecret } as never,
+    systemEvents as never,
+    { getPanelUserUsage: async () => null } as never,
+  );
 }
 
 describe('RemnawaveWebhookService.validateSignature', () => {

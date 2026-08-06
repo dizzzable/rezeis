@@ -24,8 +24,13 @@ function buildService(): {
     notifyDev: async (input: { text: string }) => {
       lastText = input.text;
     },
-    notifyDevDocument: async () => {
-      /* not used for non-error events */
+    // Error-report events take the OTHER branch: the `.txt` goes as a document
+    // and the very same rendered card rides along as its caption. Capturing it
+    // here rather than discarding it is what lets this suite assert the layout
+    // of an error card at all — `system.error` never reaches `notifyDev`, so a
+    // no-op double left every such assertion reading `null`.
+    notifyDevDocument: async (input: { caption?: string }) => {
+      lastText = input.caption ?? null;
     },
   };
 
@@ -277,5 +282,91 @@ describe('SystemEventsService card formatting (enriched)', () => {
     assert.ok(text.includes('🌐 <b>Профиль Remnawave:</b>'));
     assert.ok(!text.includes('📊 Трафик:') || text.indexOf('📊 Трафик:') === text.lastIndexOf('📊 Трафик:'));
     assert.ok(text.includes('Вебхук Remnawave'));
+  });
+
+  /**
+   * `code` is a generic metadata key. Three unrelated domains put a value in it
+   * — a promocode, an anti-fraud detector, a diagnostic from the upgrade path —
+   * and the promocode block used to claim all of them by asking "is this NOT
+   * fraud?". These four cases pin the allow-list that replaced it: exactly one
+   * category renders the block, and the other two say what they actually are.
+   */
+  it('renders a fraud signal transition as a signal block, not as a promocode', async () => {
+    const { service, getLastText } = buildService();
+    service.info('fraud.signal_transitioned', 'FRAUD', 'Fraud signal NODES_OFFLINE → DISMISSED', {
+      signalId: 'ckv1s2t3u4v5w6x7y8z9',
+      code: 'NODES_OFFLINE',
+      previousStatus: 'OPEN',
+      newStatus: 'DISMISSED',
+      adminId: 'admin-7',
+    });
+    await flush();
+    const text = getLastText()!;
+    assert.ok(text.includes('Событие: Антифрод: изменён статус сигнала!'));
+    assert.ok(text.includes('🔁 <b>Сигнал:</b>'), 'the status change needs a block of its own');
+    assert.ok(text.includes('NODES_OFFLINE'));
+    assert.ok(
+      text.includes('Статус: Открыт → Отклонён'),
+      `both statuses must be shown in Russian; got: ${text}`,
+    );
+    assert.ok(
+      !text.includes('Промокод'),
+      'a detector code captioned as a coupon is the defect this replaces',
+    );
+  });
+
+  it('gives no promocode block to a `code` from a category that does not own one', async () => {
+    // This pins the RULE, not a reproduction: with `fraud.signal_transitioned`
+    // emitting FRAUD again, no shipping emitter is mislabelled today, and the
+    // one diagnostic that carries a `code` under SYSTEM (`system.error` from the
+    // upgrade path) never reaches this renderer at all — error events are drawn
+    // by `formatErrorEventCardHtml`, which has no promocode block.
+    //
+    // The rule still needs a guard because `POST /api/internal/events` accepts a
+    // free-form type with any category and unconstrained metadata, which is
+    // exactly the shape below. Under the old deny-list this card came back
+    // captioned «🎟 Промокод».
+    const { service, getLastText } = buildService();
+    service.info('reiwa.device_limit_hit', 'USER', 'relayed from reiwa', {
+      code: 'DEVICE_LIMIT',
+      userId: 'user-1',
+    });
+    await flush();
+    const text = getLastText()!;
+    assert.ok(!text.includes('Промокод'), `a relayed code is not a coupon; got: ${text}`);
+    // …and the card is still delivered and still names its own event, so this
+    // cannot be satisfied by dropping the message on the floor.
+    assert.ok(text.includes('relayed from reiwa'));
+  });
+
+  it('still renders the promocode block for an actual promocode event', async () => {
+    // The other half of the allow-list: tightening the gate must not silence
+    // the one category that owns this block. Without this the fix could be
+    // "delete the block" and the two tests above would still pass.
+    const { service, getLastText } = buildService();
+    service.info('promocode.activated', 'PROMOCODE', 'activated', {
+      code: 'SUMMER25',
+      rewardType: 'DISCOUNT',
+      rewardValue: '25%',
+      userId: 'user-1',
+    });
+    await flush();
+    const text = getLastText()!;
+    assert.ok(text.includes('🎟 <b>Промокод:</b>'));
+    assert.ok(text.includes('SUMMER25'));
+    assert.ok(text.includes('25%'));
+  });
+
+  it('escapes a promocode that carries HTML, because the card is sent in HTML mode', async () => {
+    const { service, getLastText } = buildService();
+    service.info('promocode.activated', 'PROMOCODE', 'activated', {
+      code: '<b>OOPS</b>',
+      rewardType: 'DISCOUNT',
+    });
+    await flush();
+    const text = getLastText()!;
+    assert.ok(text.includes('&lt;b&gt;OOPS&lt;/b&gt;'), `promocode must be escaped; got: ${text}`);
+    // The `<code>` wrapper the renderer itself writes is still real markup.
+    assert.ok(text.includes('🎫 Код: <code>&lt;b&gt;OOPS&lt;/b&gt;</code>'));
   });
 });

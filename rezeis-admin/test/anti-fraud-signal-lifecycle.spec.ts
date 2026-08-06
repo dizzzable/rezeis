@@ -71,6 +71,13 @@ type DetectorOutput = readonly FraudSignalCandidate[] | Error;
 
 interface EmittedEvent {
   readonly type: string;
+  /**
+   * Captured, not discarded, because `category` is not decoration: it is what
+   * `resolveTelegramDeliveryTarget` reads to pick the forum topic an operator's
+   * card lands in. A recorder that dropped it let `fraud.signal_transitioned`
+   * ship for months announcing itself in the backups topic.
+   */
+  readonly category: string;
   readonly severity: 'INFO' | 'WARNING';
   readonly metadata: Record<string, unknown>;
   readonly message: string;
@@ -123,8 +130,8 @@ function build(input: {
 
   const record =
     (severity: 'INFO' | 'WARNING') =>
-    (type: string, _category: string, message: string, metadata?: Record<string, unknown>) => {
-      events.push({ type, severity, message, metadata: metadata ?? {} });
+    (type: string, category: string, message: string, metadata?: Record<string, unknown>) => {
+      events.push({ type, category, severity, message, metadata: metadata ?? {} });
     };
   const systemEvents = {
     info: record('INFO'),
@@ -813,5 +820,108 @@ describe('HIGH-severity notifications are throttled per affected user', () => {
     assert.ok(second, 'the second signal is still filed');
     assert.equal(second.lastAction, 'none', 'but the restart did not hand out a fresh allowance');
     assertNoInfrastructureFailure(first.warns);
+  });
+});
+
+// ── 8. A hand-made status change is an anti-fraud card, not a system one ─────
+
+/**
+ * `transitionStatus` is the one write in this service an operator performs by
+ * hand, and it is the one that shipped with the wrong `category`.
+ *
+ * That word is load-bearing twice over, which is why these assertions are about
+ * the emit and not about a rendered string:
+ *
+ *   * `resolveTelegramDeliveryTarget` reads `event.category` to choose the
+ *     forum topic, so `SYSTEM` sent the card wherever SYSTEM is mapped — the
+ *     backups topic on a real install — away from every sibling `fraud.*`;
+ *   * the card renderer declines its promocode block for FRAUD so a detector
+ *     code is not captioned as a coupon, and `SYSTEM` walked around that guard.
+ *
+ * Both defects are one word, so one assertion on that word retires both — and
+ * it fails loudly if somebody "simplifies" the emit back.
+ */
+describe('an operator moving a signal between statuses', () => {
+  it('emits with category FRAUD, so the card lands in the anti-fraud topic', async () => {
+    const h = build({
+      seed: [
+        {
+          id: 'sig-1',
+          code: 'NODES_OFFLINE',
+          fingerprint: `${TODAY}|nodes`,
+          status: FraudSignalStatus.OPEN,
+          severity: FraudSignalSeverity.HIGH,
+        },
+      ],
+    });
+
+    await h.service.transitionStatus({
+      id: 'sig-1',
+      status: FraudSignalStatus.DISMISSED,
+      note: 'infrastructure, not a customer',
+      adminId: 'admin-7',
+    });
+
+    const emitted = h.events.find((e) => e.type === 'fraud.signal_transitioned');
+    assert.ok(emitted, `expected a transition event; got ${JSON.stringify(h.events)}`);
+    assert.equal(
+      emitted.category,
+      'FRAUD',
+      'category picks the Telegram topic — SYSTEM files anti-fraud cards under backups',
+    );
+  });
+
+  it('carries the code and both statuses, which are all the card has to show', async () => {
+    const h = build({
+      seed: [
+        {
+          id: 'sig-2',
+          code: 'SUBSCRIPTION_SHARING_HWID',
+          fingerprint: `${TODAY}|hwid`,
+          status: FraudSignalStatus.OPEN,
+        },
+      ],
+    });
+
+    await h.service.transitionStatus({
+      id: 'sig-2',
+      status: FraudSignalStatus.RESOLVED,
+      note: null,
+      adminId: 'admin-7',
+    });
+
+    const emitted = h.events.find((e) => e.type === 'fraud.signal_transitioned');
+    assert.ok(emitted);
+    // The rendered block is keyed on the status PAIR and prints `code`; drop any
+    // of the three and the operator gets a card that says a signal changed and
+    // never says which one, or to what.
+    assert.equal(emitted.metadata['code'], 'SUBSCRIPTION_SHARING_HWID');
+    assert.equal(emitted.metadata['previousStatus'], FraudSignalStatus.OPEN);
+    assert.equal(emitted.metadata['newStatus'], FraudSignalStatus.RESOLVED);
+    assert.equal(emitted.metadata['signalId'], 'sig-2');
+  });
+
+  it('agrees with every other fraud.* emit in this service', async () => {
+    const h = build({
+      seed: [{ id: 'sig-3', code: 'PROMO_ABUSE', fingerprint: `${TODAY}|promo` }],
+      detectors: {
+        promoAbuse: [candidate({ fingerprint: `${TODAY}|fresh` })],
+      },
+    });
+
+    await h.service.runDetectors();
+    await h.service.transitionStatus({
+      id: 'sig-3',
+      status: FraudSignalStatus.ACKNOWLEDGED,
+      note: null,
+      adminId: 'admin-7',
+    });
+
+    // Whole-set assertion rather than one type: a future `fraud.*` emit that
+    // picks the wrong category is the same defect and fails here on arrival.
+    const strays = h.events
+      .filter((e) => e.type.startsWith('fraud.') && e.category !== 'FRAUD')
+      .map((e) => `${e.type}=${e.category}`);
+    assert.deepStrictEqual(strays, [], `fraud events emitted outside the FRAUD category: ${strays}`);
   });
 });

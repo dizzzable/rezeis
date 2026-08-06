@@ -71,6 +71,7 @@ function buildService(): {
     prisma as never,
     { webhookSecret: null } as never,
     systemEvents as never,
+    { getPanelUserUsage: async () => null } as never,
   );
   return { service, stored, reconciled, emitted };
 }

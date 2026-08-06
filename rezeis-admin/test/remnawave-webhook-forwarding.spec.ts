@@ -22,11 +22,22 @@ interface ReconcileCall {
   data: Record<string, unknown>;
 }
 
-function buildService(): {
+/** What `getPanelUserUsage` answers, shaped as the real reader returns it. */
+interface PanelUsage {
+  username: string | null;
+  usedTrafficBytes: number | null;
+  status: string | null;
+  expireAt: string | null;
+  trafficLimitBytes: number | null;
+  hwidDeviceLimit: number | null;
+}
+
+function buildService(panelUsage: PanelUsage | null = null): {
   service: RemnawaveWebhookService;
   stored: string[];
   emitted: EmittedEvent[];
   reconciled: ReconcileCall[];
+  usageCalls: string[];
 } {
   const stored: string[] = [];
   const emitted: EmittedEvent[] = [];
@@ -53,12 +64,24 @@ function buildService(): {
     },
   };
 
+  // The panel read `user.first_connected` falls back to when its payload
+  // carries no counter. Defaults to "the panel did not answer" so every test
+  // that is not about traffic keeps exercising the no-counter path.
+  const usageCalls: string[] = [];
+  const remnawaveApi = {
+    getPanelUserUsage: async (uuid: string) => {
+      usageCalls.push(uuid);
+      return panelUsage;
+    },
+  };
+
   const service = new RemnawaveWebhookService(
     prisma as never,
     config as never,
     systemEvents as never,
+    remnawaveApi as never,
   );
-  return { service, stored, emitted, reconciled };
+  return { service, stored, emitted, reconciled, usageCalls };
 }
 
 /**
@@ -258,7 +281,12 @@ describe('RemnawaveWebhookService first traffic usage', () => {
       },
     };
     return {
-      service: new RemnawaveWebhookService(prisma as never, { webhookSecret: null } as never, systemEvents as never),
+      service: new RemnawaveWebhookService(
+        prisma as never,
+        { webhookSecret: null } as never,
+        systemEvents as never,
+        { getPanelUserUsage: async () => null } as never,
+      ),
       emitted,
       getFirstTrafficUpdates: () => firstTrafficUpdates,
       claimWheres,
@@ -447,5 +475,159 @@ describe('RemnawaveWebhookService expiry warnings', () => {
     const card = emitted.find((event) => event.type === 'remnawave.user.expire_soon');
     assert.ok(card, 'expected an expire-soon card');
     assert.equal(card.metadata?.['remnawaveExpiration'], undefined);
+  });
+});
+
+/**
+ * The traffic counter on a first-connection card.
+ *
+ * The card gates its «📊 Трафик» line on `usedTrafficBytes`, and that line is
+ * the one an operator reads to tell "this customer is using the service" from
+ * "this customer is merely pointed at it". When a `user.first_connected`
+ * payload arrives without a counter the metadata had nothing to gate on, so the
+ * card showed the profile and said nothing at all about usage.
+ *
+ * These pin the fallback and, just as importantly, its boundaries: it must not
+ * override a number the webhook did carry, must not fail the webhook when the
+ * panel is down, and must not make a REST call it has no uuid for.
+ */
+describe('first-connection traffic counter', () => {
+  const usage = (over: Partial<PanelUsage> = {}): PanelUsage => ({
+    username: 'anna_vpn',
+    usedTrafficBytes: 0,
+    status: 'ACTIVE',
+    expireAt: '2026-09-03T18:40:21.000Z',
+    trafficLimitBytes: 107_374_182_400,
+    hwidDeviceLimit: 1,
+    ...over,
+  });
+
+  it('asks the panel when the payload carries no counter, and keeps a zero', async () => {
+    const { service, emitted, usageCalls } = buildService(usage({ usedTrafficBytes: 0 }));
+    await service.handleEvent(
+      'user.first_connected',
+      { event: 'user.first_connected', data: { uuid: 'uuid-9', username: 'anna_vpn' } },
+      null,
+    );
+
+    assert.deepEqual(usageCalls, ['uuid-9'], 'the panel is asked exactly once, for this uuid');
+    assert.equal(emitted.length, 1);
+    // Zero is the answer, not the absence of one: «0 Б / 100 ГБ» is what
+    // "connected, nothing used yet" looks like, and it is the common case here.
+    // A `?? fallback` or a truthiness check anywhere on this path drops it.
+    assert.equal(emitted[0]!.metadata?.['usedTrafficBytes'], 0);
+    assert.equal(emitted[0]!.metadata?.['trafficLimitBytes'], 107_374_182_400);
+  });
+
+  it('carries a non-zero counter through so the card can show real usage', async () => {
+    const { service, emitted } = buildService(usage({ usedTrafficBytes: 954_204 }));
+    await service.handleEvent(
+      'user.first_connected',
+      { event: 'user.first_connected', data: { uuid: 'uuid-9' } },
+      null,
+    );
+    assert.equal(emitted[0]!.metadata?.['usedTrafficBytes'], 954_204);
+  });
+
+  it('prefers the counter the webhook carried and does not call the panel', async () => {
+    // The payload's number is contemporaneous with the event; a REST read races
+    // it. A fallback that fired unconditionally would quietly replace the truth
+    // of the moment with the truth of a few milliseconds later.
+    const { service, emitted, usageCalls } = buildService(usage({ usedTrafficBytes: 999_999_999 }));
+    await service.handleEvent(
+      'user.first_connected',
+      userEventPayload({ event: 'user.first_connected', usedTrafficBytes: 4_096 }),
+      null,
+    );
+    assert.deepEqual(usageCalls, [], 'no panel read when the payload already answered');
+    assert.equal(emitted[0]!.metadata?.['usedTrafficBytes'], 4_096);
+  });
+
+  it('still delivers the card when the panel does not answer', async () => {
+    // `getPanelUserUsage` swallows its own errors and returns null. A card is
+    // not worth failing a webhook over, so the event must still be forwarded —
+    // just without the traffic line.
+    const { service, emitted, stored, usageCalls } = buildService(null);
+    await service.handleEvent(
+      'user.first_connected',
+      { event: 'user.first_connected', data: { uuid: 'uuid-9', username: 'anna_vpn' } },
+      null,
+    );
+    assert.deepEqual(usageCalls, ['uuid-9']);
+    assert.deepEqual(stored, ['user.first_connected']);
+    assert.equal(emitted.length, 1, 'the card is delivered anyway');
+    assert.equal(emitted[0]!.metadata?.['usedTrafficBytes'], undefined);
+    assert.equal(emitted[0]!.metadata?.['remnawaveUsername'], 'anna_vpn');
+  });
+
+  it('makes no panel call for a payload with no uuid to ask about', async () => {
+    const { service, emitted, usageCalls } = buildService(usage());
+    await service.handleEvent(
+      'user.first_connected',
+      { event: 'user.first_connected', data: { username: 'anna_vpn' } },
+      null,
+    );
+    assert.deepEqual(usageCalls, []);
+    assert.equal(emitted.length, 1);
+  });
+
+  it('leaves every other event alone — this is a first-connection affordance', async () => {
+    // `user.expired` and friends already get their counter from the payload;
+    // adding a REST read to each one would put a network call on the hot path
+    // of the whole webhook firehose.
+    const { service, usageCalls } = buildService(usage());
+    await service.handleEvent('user.expired', { data: { uuid: 'uuid-9' } }, null);
+    await service.handleEvent('user.disabled', { data: { uuid: 'uuid-9' } }, null);
+    assert.deepEqual(usageCalls, []);
+  });
+});
+
+describe('the first-connection panel read cannot hold the webhook open', () => {
+  it('gives up on a hung panel and still forwards the card', async () => {
+    // `handleEvent` is awaited inside the webhook request and the shared
+    // outbound timeout is 45s, which is long enough for Remnawave to give up
+    // and redeliver. A decorative traffic line must never buy a duplicated
+    // webhook, so the read carries a deadline of its own.
+    //
+    // Real timers on purpose: the deadline is armed several `await`s deep, so a
+    // mocked `tick()` fires before the `setTimeout` this test exists to check
+    // has been created, and the assertion passes without the deadline existing.
+    // Three seconds of wall clock is the honest price of proving it.
+    const stored: string[] = [];
+    const emitted: EmittedEvent[] = [];
+    const service = new RemnawaveWebhookService(
+      {
+        remnawaveWebhookEvent: {
+          create: async (args: { data: { eventType: string } }) => {
+            stored.push(args.data.eventType);
+            return {};
+          },
+        },
+        subscription: { updateMany: async () => ({ count: 0 }) },
+      } as never,
+      { webhookSecret: null } as never,
+      { emit: (event: EmittedEvent) => emitted.push(event) } as never,
+      // Never settles — the panel accepted the connection and went quiet.
+      { getPanelUserUsage: () => new Promise(() => {}) } as never,
+    );
+
+    const startedAt = Date.now();
+    await service.handleEvent(
+      'user.first_connected',
+      { event: 'user.first_connected', data: { uuid: 'uuid-hung', username: 'anna_vpn' } },
+      null,
+    );
+    const elapsed = Date.now() - startedAt;
+
+    assert.deepEqual(stored, ['user.first_connected']);
+    assert.equal(emitted.length, 1, 'the card is forwarded despite the panel never answering');
+    assert.equal(emitted[0]!.metadata?.['usedTrafficBytes'], undefined);
+    assert.equal(emitted[0]!.metadata?.['remnawaveUsername'], 'anna_vpn');
+    // The upper bound is what fails if the deadline is removed: without it this
+    // never returns at all. The lower bound is what fails if somebody "fixes"
+    // the slowness by not reading the panel — then the test would pass while
+    // proving nothing, which is the failure mode worth writing against.
+    assert.ok(elapsed >= 2_500, `expected the read to be waited on; returned in ${elapsed}ms`);
+    assert.ok(elapsed < 15_000, `expected the deadline to cut it short; took ${elapsed}ms`);
   });
 });

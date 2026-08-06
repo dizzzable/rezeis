@@ -12,6 +12,14 @@ import {
   type SystemEventCategory,
   type SystemEventSeverity,
 } from '../../../common/services/system-events.service';
+import { RemnawaveApiService } from './remnawave-api.service';
+
+/**
+ * How long a first-connection card may hold the webhook open waiting for the
+ * panel's traffic counter. See `readPanelUsageBounded` for why this is not the
+ * shared 45-second outbound timeout.
+ */
+const PANEL_USAGE_READ_TIMEOUT_MS = 3_000;
 
 /**
  * Curated map of Remnawave panel webhook event names → forwarded system events.
@@ -283,6 +291,10 @@ export class RemnawaveWebhookService {
     @Inject(remnawaveConfig.KEY)
     private readonly configuration: ConfigType<typeof remnawaveConfig>,
     private readonly systemEvents: SystemEventsService,
+    // Same module, already a provider — no new wiring, no cycle. Used by
+    // exactly one path: filling the traffic counter a first-connection payload
+    // does not carry (see `enrichConnectionTraffic`).
+    private readonly remnawaveApiService: RemnawaveApiService,
   ) {}
 
   /**
@@ -409,17 +421,99 @@ export class RemnawaveWebhookService {
     }
     const mapped = REMNAWAVE_WEBHOOK_EVENT_MAP[normalized];
     if (mapped) {
+      let metadata = this.extractEventMetadata(eventType, payload);
+      if (normalized === 'user.first_connected') {
+        metadata = this.enrichUserMetadata(metadata, userContext);
+        metadata = await this.enrichConnectionTraffic(metadata);
+      }
       this.systemEvents.emit({
         type: mapped.type,
         category: mapped.category,
         severity: mapped.severity,
         message: `Remnawave: ${eventType}`,
-        metadata:
-          normalized === 'user.first_connected'
-            ? this.enrichUserMetadata(this.extractEventMetadata(eventType, payload), userContext)
-            : this.extractEventMetadata(eventType, payload),
+        metadata,
       });
     }
+  }
+
+  /**
+   * Puts the traffic counter on a first-connection card.
+   *
+   * The card's traffic line is the one that answers the question an operator
+   * actually has when a connection lands — is this customer using the service
+   * or merely pointed at it — and on `user.first_connected` it was missing:
+   * the formatter gates that line on `usedTrafficBytes`, and no counter reached
+   * the metadata, so the card showed the profile and said nothing about usage.
+   *
+   * Deliberately conditional rather than an unconditional read, which makes it
+   * correct without having to settle what a given panel version puts in this
+   * particular payload: when the webhook carried a counter that number wins —
+   * it is contemporaneous with the event, while a REST read races it — and the
+   * panel is asked only when there is nothing to show otherwise.
+   *
+   * Best-effort throughout, because a card is not worth failing a webhook over:
+   * `getPanelUserUsage` swallows its own errors and answers `null`, a missing
+   * uuid skips the read entirely, and every failure leaves the metadata exactly
+   * as it arrived. Cost is one REST read per user per lifetime — the event
+   * fires once, by definition.
+   *
+   * The limit is taken too, but only to fill a gap: without it the line renders
+   * as a bare figure with nothing to compare against.
+   */
+  /**
+   * `getPanelUserUsage` under a deadline of its own.
+   *
+   * `handleEvent` is awaited inside the webhook request (see
+   * `AdminRemnawaveController`), so anything slow in here holds the panel's
+   * HTTP connection open — and the shared outbound timeout is 45 seconds, which
+   * is long enough for Remnawave to give up and redeliver the event. That would
+   * trade a decorative traffic line for duplicated webhooks, which is a bad
+   * trade at any price.
+   *
+   * Three seconds because this competes with nothing: the panel is answering
+   * from the same host that just called us, so a healthy read is milliseconds,
+   * and a read that is not healthy has already told us what we need to know.
+   * Losing the race costs the traffic line and nothing else.
+   */
+  private async readPanelUsageBounded(
+    uuid: string,
+  ): Promise<Awaited<ReturnType<RemnawaveApiService['getPanelUserUsage']>>> {
+    let timer: NodeJS.Timeout | undefined;
+    const read = Promise.resolve()
+      .then(() => this.remnawaveApiService.getPanelUserUsage(uuid))
+      .catch(() => null);
+    const deadline = new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), PANEL_USAGE_READ_TIMEOUT_MS);
+    });
+    try {
+      return await Promise.race([read, deadline]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  private async enrichConnectionTraffic(
+    metadata: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    if (typeof metadata['usedTrafficBytes'] === 'number') return metadata;
+    const uuid = typeof metadata['remnawaveId'] === 'string' ? metadata['remnawaveId'] : null;
+    if (uuid === null || uuid.length === 0) return metadata;
+
+    const usage = await this.readPanelUsageBounded(uuid);
+    if (usage === null) {
+      this.logger.warn(`First-connection traffic read failed for ${uuid}; card omits the counter`);
+      return metadata;
+    }
+    if (usage.usedTrafficBytes === null) return metadata;
+
+    const enriched = { ...metadata };
+    // Zero is a value, not an absence: «0 Б / 100 ГБ» is precisely the answer
+    // «connected, nothing used yet», and it is the common case for this event.
+    enriched['usedTrafficBytes'] = usage.usedTrafficBytes;
+    if (enriched['trafficLimitBytes'] === undefined && usage.trafficLimitBytes !== null) {
+      enriched['trafficLimitBytes'] = usage.trafficLimitBytes;
+    }
+    return enriched;
   }
 
   /**

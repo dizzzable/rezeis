@@ -226,6 +226,16 @@ export const EVENT_TYPES = {
    * re-announce itself every run.
    */
   FRAUD_SIGNAL_SEVERITY_RECEDED: 'fraud.signal_severity_receded',
+  /**
+   * An admin moved a fraud signal between statuses.
+   *
+   * Sits in the Anti-fraud block because the block a constant sits in is how
+   * this file expresses category, and its only producer
+   * (`AntiFraudService.transitionStatus`) now emits `FRAUD` like every sibling.
+   * It spent a while in the System block instead — see the note at that emit
+   * site for the two operator-visible defects that came of it.
+   */
+  FRAUD_SIGNAL_TRANSITIONED: 'fraud.signal_transitioned',
 
   // Remnawave panel (forwarded webhook events)
   REMNAWAVE_USER_FIRST_CONNECTED: 'remnawave.user.first_connected',
@@ -268,18 +278,6 @@ export const EVENT_TYPES = {
   /** One admin action that touched many users at once (block/unblock/delete/…). */
   SYSTEM_BULK_USERS_EXECUTED: 'system.bulk_users_executed',
   SYSTEM_ERROR: 'system.error',
-  /**
-   * An admin moved a fraud signal between statuses.
-   *
-   * In the System block, NOT the anti-fraud one, because the block a constant
-   * sits in is how this file expresses category — and its only producer
-   * (`AntiFraudService.transitionSignal`) emits it with category `SYSTEM`,
-   * while its three `fraud.*` siblings above emit with `FRAUD`. That
-   * inconsistency predates this constant; it is recorded here rather than
-   * corrected because `category` picks the Telegram forum topic, so changing
-   * it would silently move an operator's cards to a different topic.
-   */
-  FRAUD_SIGNAL_TRANSITIONED: 'fraud.signal_transitioned',
   /** Admin-panel (SPA) runtime error reported back by the browser. */
   CLIENT_ERROR: 'client.error',
   /** Runtime error forwarded from the reiwa bot over the internal channel. */
@@ -1016,6 +1014,33 @@ export class SystemEventsService {
       lines.push(...formatFraudBlock(meta));
     }
 
+    // Fraud signal lifecycle block — what an operator (or the reconciliation
+    // sweep) just did to a signal. `formatFraudBlock` above cannot carry this:
+    // it is offender-centric and keys off `fraudKind`, which a status change
+    // does not have.
+    //
+    // Keyed on the status PAIR rather than the event type because that pair has
+    // exactly one producer in the codebase (`AntiFraudService.transitionStatus`)
+    // and no other emitter puts `previousStatus`/`newStatus` in metadata — so
+    // the condition cannot quietly start matching somebody else's card.
+    //
+    // Not optional decoration: `code` and the two statuses belong to no other
+    // block, so without this the card would announce «изменён статус сигнала»
+    // and never say which signal, or to what.
+    if (meta['previousStatus'] && meta['newStatus']) {
+      lines.push('');
+      lines.push('🔁 <b>Сигнал:</b>');
+      const signalLines: string[] = [];
+      if (meta['code']) signalLines.push(`🚦 Код: <code>${escapeHtml(meta['code'])}</code>`);
+      signalLines.push(
+        `↔️ Статус: ${humanizeFraudSignalStatus(meta['previousStatus'])} → ` +
+          `${humanizeFraudSignalStatus(meta['newStatus'])}`,
+      );
+      if (meta['signalId'])
+        signalLines.push(`🆔 Сигнал: <code>${escapeHtml(String(meta['signalId']).slice(0, 12))}</code>`);
+      lines.push(`<blockquote>${signalLines.join('\n')}</blockquote>`);
+    }
+
     // User block
     if (meta['userId'] || meta['telegramId']) {
       lines.push('');
@@ -1227,14 +1252,37 @@ export class SystemEventsService {
       lines.push(`<blockquote>${refLines.join('\n')}</blockquote>`);
     }
 
-    // Promocode block
-    if ((meta['code'] || meta['promocodeId']) && event.category !== 'FRAUD') {
+    // Promocode block.
+    //
+    // Gated on the PROMOCODE category — an allow-list — rather than on "any
+    // category except FRAUD", which is what it used to say.
+    //
+    // The deny-list had exactly one victim, and it is already fixed at its
+    // source: `fraud.signal_transitioned` passed category SYSTEM, walked around
+    // the single FRAUD exception, and arrived titled «🎟 Промокод: 🎫 Код:
+    // NODES_OFFLINE». So this is hardening, not a second repair of that card —
+    // with the category corrected it would render right either way.
+    //
+    // It is worth doing anyway because `code` is a generic key and the deny-list
+    // decides by what an event is NOT. `POST /api/internal/events` takes a
+    // free-form `type` with any category from the enum and an unconstrained
+    // `metadata`, so the next service that names a field `code` is captioned as
+    // a coupon until somebody notices and adds a third exception. An allow-list
+    // fails the other way: an unknown producer gets no block rather than a wrong
+    // one, which is the direction to be wrong in.
+    //
+    // Nothing that belongs here loses its block: only `promocode.*` emits under
+    // PROMOCODE, and `promocode.activated` is the sole producer of
+    // `rewardType`/`rewardValue`.
+    if ((meta['code'] || meta['promocodeId']) && event.category === 'PROMOCODE') {
       lines.push('');
       lines.push('🎟 <b>Промокод:</b>');
       const promoLines: string[] = [];
-      if (meta['code']) promoLines.push(`🎫 Код: <code>${meta['code']}</code>`);
-      if (meta['rewardType']) promoLines.push(`💥 Тип награды: ${meta['rewardType']}`);
-      if (meta['rewardValue']) promoLines.push(`🎊 Значение: ${meta['rewardValue']}`);
+      // Escaped like every other interpolation on this card: a promocode is
+      // operator-authored free text and this message is sent in HTML mode.
+      if (meta['code']) promoLines.push(`🎫 Код: <code>${escapeHtml(meta['code'])}</code>`);
+      if (meta['rewardType']) promoLines.push(`💥 Тип награды: ${escapeHtml(meta['rewardType'])}`);
+      if (meta['rewardValue']) promoLines.push(`🎊 Значение: ${escapeHtml(meta['rewardValue'])}`);
       lines.push(`<blockquote>${promoLines.join('\n')}</blockquote>`);
     }
 
@@ -1718,7 +1766,6 @@ export const EVENT_PRESENTATION: Record<string, { emoji: string; title: string }
   'fraud.signal_escalated': { emoji: '⏫', title: 'Антифрод: сигнал усилился' },
   'fraud.signal_severity_receded': { emoji: '⏬', title: 'Антифрод: сигнал ослаб' },
   'fraud.signals_auto_resolved': { emoji: '🧹', title: 'Антифрод: сигналы закрылись сами' },
-  // Category SYSTEM at its emit site, unlike the four above — see the constant.
   'fraud.signal_transitioned': { emoji: '🔁', title: 'Антифрод: изменён статус сигнала' },
 
   // System
@@ -1782,6 +1829,28 @@ export const EVENT_PRESENTATION: Record<string, { emoji: string; title: string }
   'node.traffic_notify': { emoji: '📊', title: 'Уведомление о трафике ноды' },
   'node.geo_concentration': { emoji: '🌍', title: 'Концентрация онлайна в одной стране' },
 };
+
+/**
+ * Human label for a `FraudSignalStatus`. Unknown input is escaped and returned
+ * as-is rather than replaced by a placeholder: a status this function has not
+ * been taught is still the truth about the signal, and hiding it behind
+ * «неизвестно» would make a new enum value invisible instead of merely
+ * untranslated.
+ */
+function humanizeFraudSignalStatus(value: unknown): string {
+  switch (String(value).toUpperCase()) {
+    case 'OPEN':
+      return 'Открыт';
+    case 'ACKNOWLEDGED':
+      return 'Принят в работу';
+    case 'RESOLVED':
+      return 'Решён';
+    case 'DISMISSED':
+      return 'Отклонён';
+    default:
+      return escapeHtml(value);
+  }
+}
 
 /** Human label for a payment/subscription purchase type. */
 function humanizePurchaseType(value: unknown): string {

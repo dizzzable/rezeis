@@ -14,6 +14,15 @@ import {
 const CRYPTO_ADDRESS = 'TNmxGN8iL5p2yfreNF1DtCEzpQCLuVZjeR'
 
 /**
+ * Same destination as the reiwa bot's «Поддержать разработчика» button
+ * (`src/bot/lib/startup-notice.ts`). The two live in separate repositories and
+ * ship as separate images, so they can only be kept in step by being changed
+ * together — which is the whole reason this is a named constant rather than an
+ * address buried in the markup below.
+ */
+const DONATE_URL = 'https://dalink.to/dizzzable'
+
+/**
  * Topbar widget: opens a dropdown with project support links
  * (donation page, crypto wallet copy-to-clipboard).
  */
@@ -32,7 +41,7 @@ export function SupportDropdown() {
         <DropdownMenuSeparator />
         <DropdownMenuItem asChild>
           <a
-            href="https://www.donationalerts.com/r/dizzzable"
+            href={DONATE_URL}
             target="_blank"
             rel="noreferrer"
             className="flex items-center gap-2"

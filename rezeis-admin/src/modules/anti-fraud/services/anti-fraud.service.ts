@@ -527,9 +527,25 @@ export class AntiFraudService {
         resolutionNote: input.note,
       },
     });
+    // Category `FRAUD`, like every other `fraud.*` emit in this file. It used to
+    // pass `SYSTEM`, and that single word was two operator-visible defects:
+    //
+    //   * `resolveTelegramDeliveryTarget` picks the forum topic from
+    //     `event.category`, so a signal an operator had just resolved announced
+    //     itself in whatever topic SYSTEM maps to — for a real install, the
+    //     backups topic — while every sibling `fraud.*` card arrived in the
+    //     anti-fraud one;
+    //   * the card renderer suppresses its promocode block for FRAUD precisely
+    //     so a detector code is not read as a coupon. Emitting SYSTEM walked
+    //     around that guard, and `NODES_OFFLINE` was captioned «🎟 Промокод».
+    //
+    // It was previously left alone on the grounds that changing a category
+    // silently moves an operator's cards between topics. That is exactly the
+    // move being asked for here, so it is no longer silent — and the release
+    // notes name it.
     this.systemEventsService.info(
       EVENT_TYPES.FRAUD_SIGNAL_TRANSITIONED,
-      'SYSTEM',
+      'FRAUD',
       `Fraud signal ${row.code} → ${input.status}`,
       {
         signalId: row.id,
