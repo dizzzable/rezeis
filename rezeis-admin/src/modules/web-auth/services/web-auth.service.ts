@@ -18,6 +18,7 @@ import {
 } from '../../../common/services/system-events.service';
 import { PasswordHashService } from '../../auth/services/password-hash.service';
 import { EmailDeliveryService } from '../../email/services/email-delivery.service';
+import { LegalDocumentsService } from '../../legal-documents/services/legal-documents.service';
 import { loginPolicy } from '../../auth/utils/login-policy.util';
 import { readInviteBypassFlag } from '../../referrals/services/referral-invite-limits.service';
 import { ReferralManualAttachService } from '../../referrals/services/referral-manual-attach.service';
@@ -80,6 +81,7 @@ export class WebAuthService {
     private readonly systemEventsService: SystemEventsService,
     private readonly emailDeliveryService: EmailDeliveryService,
     private readonly registrationSnapshotService: RegistrationSnapshotService,
+    private readonly legalDocumentsService: LegalDocumentsService,
   ) {}
 
   public async register(input: WebAuthRegisterDto): Promise<WebAuthRegisterResultInterface> {
@@ -119,6 +121,25 @@ export class WebAuthService {
       this.logger.log(
         `INVITED registration accepted via referrer=${referrer.id} bypass=${referrer.bypass}`,
       );
+    }
+
+    // Legal documents the operator has switched on. Checked HERE — before any
+    // row is written — so a refusal costs nothing: there is no account to
+    // delete, no referral edge to unwind, no audit line claiming a
+    // registration that did not happen.
+    //
+    // Two-layer enforcement, same reasoning as the access-mode gate above: the
+    // sign-up form disables its button until every box is ticked, but a direct
+    // call to this internal API would sail straight past that.
+    const requiredDocuments = await this.legalDocumentsService.listRequiredKeys();
+    const acceptedDocuments = input.acceptedLegalDocuments ?? [];
+    const missingDocuments = requiredDocuments.filter((key) => !acceptedDocuments.includes(key));
+    if (missingDocuments.length > 0) {
+      throw new ForbiddenException({
+        code: 'LEGAL_CONSENT_REQUIRED',
+        message: 'Registration requires accepting the current legal documents',
+        documents: missingDocuments,
+      });
     }
 
     if (!loginPolicy.isValidLogin(input.login)) {
@@ -170,6 +191,13 @@ export class WebAuthService {
         },
         select: { id: true },
       });
+
+      // Phase 5 — record the consent inside the same transaction that created
+      // the account. Outside it, a rolled-back registration would leave a row
+      // claiming someone agreed to something before they existed; and an
+      // account could commit while the consent write failed, producing exactly
+      // the state the gate exists to prevent.
+      await this.legalDocumentsService.recordConsents(tx, user.id, requiredDocuments);
 
       return {
         userId: user.id,

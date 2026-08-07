@@ -29,6 +29,12 @@ const SAFE_PRODUCT_CODES = new Set<string>([
   'SUBSCRIPTION_LIMIT_REACHED',
   'REGISTRATION_DISABLED',
   'INVITE_REQUIRED',
+  // Sits with its two neighbours above for the same reason: all three are
+  // registration refusals at 403, and without the code the BFF cannot tell
+  // them apart. Collapsed into one message, "accept the terms" reaches the
+  // visitor as "registration is disabled" — false whenever registration is in
+  // fact enabled, and nothing they can act on.
+  'LEGAL_CONSENT_REQUIRED',
   'SERVICE_RESTRICTED',
   'PURCHASES_DISABLED',
   'PAYMENT_DRAFT_QUOTE_NOT_ELIGIBLE',

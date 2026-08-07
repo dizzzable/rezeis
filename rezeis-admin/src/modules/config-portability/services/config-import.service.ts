@@ -4,7 +4,12 @@ import {
   Logger,
 } from '@nestjs/common';
 
+import { LegalDocumentKey } from '@prisma/client';
+
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import {
+  LEGAL_DOCUMENT_KEYS,
+} from '../../legal-documents/services/legal-documents.service';
 import { isValidPermission } from '../../rbac/rbac.resources';
 import {
   ALL_SECTIONS,
@@ -296,6 +301,9 @@ export class ConfigImportService {
         case 'faqItems':
           ({ created, updated, skipped } = await this.upsertById(tx.faqItem, rows, strategy));
           break;
+        case 'legalDocuments':
+          ({ created, updated, skipped } = await this.upsertLegalDocuments(tx, rows, strategy));
+          break;
         default: {
           const exhaustive: never = section;
           throw new Error(`Unknown config section: ${String(exhaustive)}`);
@@ -347,6 +355,50 @@ export class ConfigImportService {
         updated += 1;
       } else {
         await delegate.create({ data });
+        created += 1;
+      }
+    }
+    return { created, updated, skipped };
+  }
+
+  /**
+   * Legal documents are keyed by `key`, not by `id`, so the generic
+   * `upsertById` would skip every row — it requires a string `id` and there is
+   * none. Keyed on the enum by design: there are exactly two documents and
+   * neither is created or deleted, only edited.
+   *
+   * An unknown key is skipped rather than created. A payload from a newer
+   * source may name a third document this instance has no enum value for, and
+   * inventing the row would fail on the foreign key from `user_legal_consents`
+   * anyway.
+   */
+  private async upsertLegalDocuments(
+    tx: PrismaTransactionClient,
+    rows: Array<Record<string, unknown>>,
+    strategy: ImportStrategy,
+  ): Promise<{ created: number; updated: number; skipped: number }> {
+    let created = 0;
+    let updated = 0;
+    let skipped = 0;
+
+    for (const row of rows) {
+      const key = row['key'];
+      if (typeof key !== 'string' || !LEGAL_DOCUMENT_KEYS.includes(key as LegalDocumentKey)) {
+        skipped += 1;
+        continue;
+      }
+      const documentKey = key as LegalDocumentKey;
+      const existing = await tx.legalDocument.findUnique({ where: { key: documentKey } });
+      const data = stripRelationFields(coerceTimestamps(row));
+      if (existing) {
+        if (strategy === 'skip') {
+          skipped += 1;
+          continue;
+        }
+        await tx.legalDocument.update({ where: { key: documentKey }, data });
+        updated += 1;
+      } else {
+        await tx.legalDocument.create({ data: data as never });
         created += 1;
       }
     }

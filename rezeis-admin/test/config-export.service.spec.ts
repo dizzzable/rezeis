@@ -39,6 +39,7 @@ const SECTION_DELEGATE: Readonly<Record<ConfigExportSection, string>> = {
   blockedIps: 'blockedIp',
   adminIpAllowlist: 'adminIpAllowlist',
   faqItems: 'faqItem',
+  legalDocuments: 'legalDocument',
 };
 
 /** Deliberately uneven so an all-zero manifest cannot pass by accident. */
@@ -53,6 +54,7 @@ const ROW_COUNTS: Readonly<Record<ConfigExportSection, number>> = {
   blockedIps: 0,
   adminIpAllowlist: 5,
   faqItems: 6,
+  legalDocuments: 2,
 };
 
 /**

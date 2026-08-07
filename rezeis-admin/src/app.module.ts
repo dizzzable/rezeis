@@ -51,6 +51,7 @@ import { FaqModule } from './modules/faq/faq.module';
 import { HealthModule } from './modules/health/health.module';
 import { ImportsModule } from './modules/imports/imports.module';
 import { InternalUserModule } from './modules/internal-user/internal-user.module';
+import { LegalDocumentsModule } from './modules/legal-documents/legal-documents.module';
 import { LinkingModule } from './modules/linking/linking.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
 import { OAuthModule } from './modules/oauth/oauth.module';
@@ -183,6 +184,7 @@ import { WebhooksModule } from './modules/webhooks/webhooks.module';
     PaymentsModule,
     PaymentAnalyticsModule,
     InternalUserModule,
+    LegalDocumentsModule,
     LinkingModule,
     LandingConfigModule,
     SettingsModule,

@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { ArgumentsHost, BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
+import {
+  ArgumentsHost,
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  NotFoundException,
+} from '@nestjs/common';
 
 import { AdminSafeExceptionFilter } from '../src/common/filters/admin-safe-exception.filter';
 
@@ -198,6 +204,40 @@ describe('AdminSafeExceptionFilter', () => {
       assert.equal(body.code, code);
       assert.equal(body.errorCode, code);
       assert.equal(body.message, message);
+    });
+  }
+
+  /**
+   * The registration refusals, checked at the seam rather than in isolation.
+   *
+   * This one was written after the failure it describes. `LEGAL_CONSENT_REQUIRED`
+   * was thrown by the register path and read by the reiwa BFF, but nobody added
+   * it here — so the filter silently dropped the code, the BFF found none, and
+   * "accept the terms" reached the visitor as "registration is disabled" while
+   * registration was in fact enabled. Every layer was individually correct and
+   * separately tested; the seam between them was not.
+   *
+   * So this asserts the whole contract each code carries: 403, the code
+   * surviving the filter, and the sibling `errorCode` the BFF also reads.
+   */
+  for (const code of [
+    'REGISTRATION_DISABLED',
+    'INVITE_REQUIRED',
+    'LEGAL_CONSENT_REQUIRED',
+  ]) {
+    it(`preserves the ${code} refusal so the BFF can tell registration failures apart`, () => {
+      const captured = runFilter(
+        new ForbiddenException({ code, message: 'Registration refused' }),
+        {
+          originalUrl: '/api/internal/web-auth/register',
+          headers: { 'x-request-id': `request.safe-${code}` },
+        },
+      );
+
+      assert.equal(captured.statusCode, 403);
+      const body = assertResponseBody(captured.body);
+      assert.equal(body.code, code, `${code} must survive the filter`);
+      assert.equal(body.errorCode, code);
     });
   }
 

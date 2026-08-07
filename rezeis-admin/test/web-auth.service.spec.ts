@@ -478,6 +478,140 @@ describe('WebAuthService', () => {
     assert.deepStrictEqual(result, { userId: 'user-1', webAccountId: 'web-account-1' });
   });
 
+  /**
+   * The consent gate.
+   *
+   * What these pin is not "a 403 is thrown" but the reason the gate sits where
+   * it sits: a refusal must leave NOTHING behind. The alternative shape —
+   * create the account, then ask, then delete on refusal — is why every
+   * rejection test below asserts on `createdUsers` / `createdWebAccounts`
+   * rather than only on the error. Move the check one line past the
+   * transaction and the error is identical while an orphan account survives;
+   * only these assertions notice.
+   */
+  it('refuses registration when a required document was not accepted, creating nothing', async () => {
+    const prisma = createPrismaMock();
+    const service = createService({ prisma, requiredLegalDocuments: ['USER_AGREEMENT'] });
+
+    await assert.rejects(
+      () => service.register({ login: 'newuser', password: 'plain-password' }),
+      (error: unknown) =>
+        error instanceof ForbiddenException &&
+        (error.getResponse() as { code?: string }).code === 'LEGAL_CONSENT_REQUIRED',
+    );
+
+    assert.equal(prisma.createdUsers.length, 0);
+    assert.equal(prisma.createdWebAccounts.length, 0);
+    assert.equal(prisma.transactionCallsCount, 0);
+  });
+
+  it('refuses when only one of two required documents was accepted and names the missing one', async () => {
+    const prisma = createPrismaMock();
+    const service = createService({
+      prisma,
+      requiredLegalDocuments: ['USER_AGREEMENT', 'OFFER'],
+    });
+
+    await assert.rejects(
+      () =>
+        service.register({
+          login: 'newuser',
+          password: 'plain-password',
+          acceptedLegalDocuments: ['USER_AGREEMENT'],
+        }),
+      (error: unknown) =>
+        error instanceof ForbiddenException &&
+        (error.getResponse() as { documents?: readonly string[] }).documents?.[0] === 'OFFER',
+    );
+
+    assert.equal(prisma.createdUsers.length, 0);
+  });
+
+  it('registers and records a consent row per required document once all are accepted', async () => {
+    const prisma = createPrismaMock();
+    const recordedConsents: Array<{ readonly userId: string; readonly keys: readonly string[] }> =
+      [];
+    const service = createService({
+      prisma,
+      requiredLegalDocuments: ['USER_AGREEMENT', 'OFFER'],
+      recordedConsents,
+    });
+
+    const result = await service.register({
+      login: 'newuser',
+      password: 'plain-password',
+      acceptedLegalDocuments: ['USER_AGREEMENT', 'OFFER'],
+    });
+
+    assert.equal(prisma.createdWebAccounts.length, 1);
+    assert.deepStrictEqual(recordedConsents, [
+      { userId: result.userId, keys: ['USER_AGREEMENT', 'OFFER'] },
+    ]);
+  });
+
+  /**
+   * The recorded set is what the operator REQUIRED, not what the client
+   * claimed. A client is free to send a key for a document that is switched
+   * off; honouring that would write a consent to a document nobody was shown.
+   */
+  it('records only the required documents, ignoring extra keys the client sent', async () => {
+    const recordedConsents: Array<{ readonly userId: string; readonly keys: readonly string[] }> =
+      [];
+    const service = createService({
+      requiredLegalDocuments: ['USER_AGREEMENT'],
+      recordedConsents,
+    });
+
+    await service.register({
+      login: 'newuser',
+      password: 'plain-password',
+      acceptedLegalDocuments: ['USER_AGREEMENT', 'OFFER'],
+    });
+
+    assert.deepStrictEqual(recordedConsents[0]?.keys, ['USER_AGREEMENT']);
+  });
+
+  /**
+   * The consent is written with the TRANSACTION client, not the root one.
+   *
+   * Written beside the transaction rather than inside it, the two can part
+   * ways: a rolled-back registration leaves a row saying someone agreed before
+   * they existed, and a failed consent write leaves an account with no consent
+   * — exactly the state the gate exists to prevent. Nothing about the returned
+   * value differs, so identity of the client is the only observable difference.
+   */
+  it('writes the consent with the same client that created the account', async () => {
+    const prisma = createPrismaMock();
+    const consentClients: unknown[] = [];
+    const service = createService({
+      prisma,
+      requiredLegalDocuments: ['USER_AGREEMENT'],
+      consentClients,
+    });
+
+    await service.register({
+      login: 'newuser',
+      password: 'plain-password',
+      acceptedLegalDocuments: ['USER_AGREEMENT'],
+    });
+
+    assert.equal(consentClients.length, 1);
+    assert.notEqual(consentClients[0], prisma);
+    assert.equal(consentClients[0], prisma.transactionClient);
+  });
+
+  it('registers without any consent when the operator has switched both documents off', async () => {
+    const prisma = createPrismaMock();
+    const recordedConsents: Array<{ readonly userId: string; readonly keys: readonly string[] }> =
+      [];
+    const service = createService({ prisma, recordedConsents });
+
+    await service.register({ login: 'newuser', password: 'plain-password' });
+
+    assert.equal(prisma.createdWebAccounts.length, 1);
+    assert.deepStrictEqual(recordedConsents, [{ userId: 'user-1', keys: [] }]);
+  });
+
   it('register rejects under REG_BLOCKED with 403 REGISTRATION_DISABLED', async () => {
     const service = createService({ accessMode: 'REG_BLOCKED' });
     await assert.rejects(
@@ -710,6 +844,9 @@ interface PrismaMock extends PrismaService {
   readonly referrerLookupCodes: string[];
   readonly inviteConsumeCalls: Array<{ readonly id: string; readonly consumedAt: unknown }>;
   readonly transactionCallsCount: number;
+  /** The client `$transaction` hands its callback. Identity matters: a
+   *  write made with the root client is a write outside the transaction. */
+  readonly transactionClient: unknown;
 }
 
 interface PasswordHashServiceMock extends PasswordHashService {
@@ -728,6 +865,18 @@ function createService(options: {
   readonly accessMode?: 'PUBLIC' | 'INVITED' | 'PURCHASE_BLOCKED' | 'REG_BLOCKED' | 'RESTRICTED';
   /** Optional cache stub to observe temp-password clearing on change. */
   readonly cacheService?: { set: (...a: unknown[]) => Promise<void>; get: (...a: unknown[]) => Promise<unknown>; del: (...a: unknown[]) => Promise<void> };
+  /**
+   * Legal documents the operator has switched on. Empty by default so the
+   * consent gate is a no-op for every test written before it existed.
+   */
+  readonly requiredLegalDocuments?: readonly string[];
+  /** Receives every consent the service records, in call order. */
+  readonly recordedConsents?: Array<{ readonly userId: string; readonly keys: readonly string[] }>;
+  /**
+   * Receives the Prisma client each `recordConsents` call was handed. Lets a
+   * test tell a write inside the account transaction from one beside it.
+   */
+  readonly consentClients?: unknown[];
 } = {}): WebAuthService {
   // Stub SettingsService → returns the requested mode (PUBLIC by default, so
   // the gate is a no-op for the existing unit tests). When `accessMode` is
@@ -745,6 +894,14 @@ function createService(options: {
   const registrationSnapshotService = {
     captureBestEffort: async () => undefined,
   };
+  const requiredLegalDocuments = options.requiredLegalDocuments ?? [];
+  const legalDocumentsService = {
+    listRequiredKeys: async () => requiredLegalDocuments,
+    recordConsents: async (tx: unknown, userId: string, keys: readonly string[]) => {
+      options.consentClients?.push(tx);
+      options.recordedConsents?.push({ userId, keys });
+    },
+  };
   return new WebAuthService(
     options.prisma ?? createPrismaMock(),
     options.passwordHashService ?? createPasswordHashServiceMock(),
@@ -755,6 +912,7 @@ function createService(options: {
     systemEventsService as never,
     emailDeliveryService as never,
     registrationSnapshotService as never,
+    legalDocumentsService as never,
   );
 }
 
@@ -828,6 +986,7 @@ function createPrismaMock(options: CreatePrismaMockOptions = {}): PrismaMock {
     get transactionCallsCount() {
       return transactionCallsCount;
     },
+    transactionClient: tx,
     $transaction: async <T>(callback: (transaction: typeof tx) => Promise<T>): Promise<T> => {
       transactionCallsCount += 1;
       return callback(tx);

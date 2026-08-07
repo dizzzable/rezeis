@@ -8,6 +8,13 @@ const migrationsDir = join(projectRoot, 'prisma', 'migrations');
 const schema = readFileSync(join(projectRoot, 'prisma', 'schema.prisma'), 'utf8');
 const entrypoint = readFileSync(join(projectRoot, 'docker-entrypoint.sh'), 'utf8');
 const reconcileMigrationName = '20260806170000_reconcile_prisma_schema_drift';
+/**
+ * The newest migration that existed when the reconciliation was written. It is
+ * the upper bound of the history the reconciliation corrects — everything up to
+ * and including it must sort before the reconciliation, and everything after it
+ * is ordinary later work with nothing to say about drift.
+ */
+const LAST_MIGRATION_BEFORE_RECONCILE = '20260806160000_drop_remnawave_webhook_is_processed_index';
 const reconcileSql = readFileSync(
   join(migrationsDir, reconcileMigrationName, 'migration.sql'),
   'utf8',
@@ -157,12 +164,38 @@ describe('prisma schema/migration drift', () => {
   it('reconciles the database side in one replay-safe forward migration', () => {
     // Newer than every migration it corrects, so it is a forward fix rather
     // than an edit to already-applied history.
+    //
+    // Bounded by the last migration that predates it, NOT by "every migration
+    // in the directory". The unbounded form asserted something the comment
+    // above never claimed — that no migration may ever be added after the
+    // reconciliation — so the first ordinary feature migration to land turned
+    // this red for a reason unrelated to drift.
+    //
+    // The bounded form has to be written carefully, because the obvious
+    // rewrite is vacuous: "every migration at or below the boundary sorts
+    // before the reconciliation" follows arithmetically from the boundary
+    // itself sorting before it, so the loop could never fail whatever the
+    // directory held. What IS falsifiable, and is the actual risk, is a
+    // migration wedged BETWEEN the boundary and the reconciliation — authored
+    // later but backdated into the history the reconciliation corrects, so it
+    // runs before a fix that was never written with it in mind.
     const migrations = readdirSync(migrationsDir).filter((entry) => /^\d{14}_/.test(entry));
-    for (const migration of migrations) {
-      if (migration !== reconcileMigrationName) {
-        assert.ok(migration < reconcileMigrationName, `${migration} sorts after the reconciliation`);
-      }
-    }
+    assert.ok(
+      migrations.includes(LAST_MIGRATION_BEFORE_RECONCILE),
+      'the recorded boundary migration no longer exists — the bound is stale',
+    );
+    assert.ok(
+      LAST_MIGRATION_BEFORE_RECONCILE < reconcileMigrationName,
+      'the reconciliation must sort after the history it corrects',
+    );
+    assert.deepEqual(
+      migrations.filter(
+        (migration) =>
+          migration > LAST_MIGRATION_BEFORE_RECONCILE && migration < reconcileMigrationName,
+      ),
+      [],
+      'a migration was backdated into the window the reconciliation corrects',
+    );
 
     // The three `updated_at` defaults the schema does not declare.
     for (const table of ['admin_theme_presets', 'auth_provider_configs', 'trial_claims']) {

@@ -22,7 +22,8 @@ export type ConfigExportSection =
   | 'settings'
   | 'blockedIps'
   | 'adminIpAllowlist'
-  | 'faqItems';
+  | 'faqItems'
+  | 'legalDocuments';
 
 export const ALL_SECTIONS: readonly ConfigExportSection[] = [
   'roles',
@@ -35,6 +36,7 @@ export const ALL_SECTIONS: readonly ConfigExportSection[] = [
   'blockedIps',
   'adminIpAllowlist',
   'faqItems',
+  'legalDocuments',
 ];
 
 /**
@@ -192,6 +194,15 @@ export class ConfigExportService {
 
       case 'faqItems':
         return this.prismaService.faqItem.findMany({});
+
+      // The agreement / offer texts and their on/off switches. Carried because
+      // a transfer that leaves them behind does not merely lose content: the
+      // destination keeps the two empty, inactive rows the migration seeds, so
+      // registration silently stops asking for consent. Consents themselves
+      // (`user_legal_consents`) are NOT exported — they belong to users, not to
+      // the configuration.
+      case 'legalDocuments':
+        return this.prismaService.legalDocument.findMany({});
 
       default: {
         const exhaustive: never = section;

@@ -129,6 +129,7 @@ export const en = {
       webReiwa: 'WEB Reiwa',
       subpageConfig: 'Subscription page',
       landingBuilder: 'Web landing',
+      legalDocuments: 'Legal documents',
       gateways: 'Payment gateways',
       externalAuth: 'External auth',
       panelSettings: 'Panel settings',
@@ -4150,7 +4151,7 @@ export const en = {
         invite:
           'Available placeholders: {{link}} — user referral link. System buttons «📤 Share» / «📋 Copy» / «◀️ Back to menu» are appended automatically.',
         rules:
-          'Available placeholder: {{rulesLink}} — service rules URL. When the URL is set in Platform Policy, the bot adds an «📜 Open rules» button. «◀️ Back to menu» is always appended. Add your own buttons via «Add button».',
+          'Available placeholder: {{rulesLink}} — service rules URL. The «📜 Open rules» button points at the legal documents when at least one is enabled on the «Legal documents» page, and at the Platform Policy URL otherwise. With neither set there is no button. «◀️ Back to menu» is always appended. Add your own buttons via «Add button».',
         help: 'Available placeholder: {{supportHandle}} — support @username. The main-menu «🆘 Help» button opens the support chat directly; this screen is shown only when no support handle is configured.',
       },
     },

@@ -1,6 +1,9 @@
+import { LegalDocumentKey } from '@prisma/client';
 import { Type } from 'class-transformer';
 import {
+  IsArray,
   IsEmail,
+  IsIn,
   IsObject,
   IsOptional,
   IsString,
@@ -9,6 +12,8 @@ import {
   MaxLength,
   ValidateNested,
 } from 'class-validator';
+
+import { LEGAL_DOCUMENT_KEYS } from '../../legal-documents/services/legal-documents.service';
 
 export class RegistrationUtmDto {
   @IsOptional()
@@ -125,4 +130,23 @@ export class WebAuthRegisterDto {
   @ValidateNested()
   @Type(() => RegistrationSnapshotDto)
   public readonly registrationSnapshot?: RegistrationSnapshotDto;
+
+  /**
+   * Legal documents the applicant ticked on the sign-up form.
+   *
+   * Carried in the registration request itself, not confirmed afterwards, and
+   * that is the whole design: an account is never created for someone who has
+   * not agreed, so there is nothing to roll back when they decline. The
+   * alternative — create, then ask, then delete on refusal — would need a
+   * destructive path that does not exist today, could be refused (a referral
+   * edge or a trial claim can already block a delete), and would leave an
+   * account behind forever if the applicant simply closed the tab.
+   *
+   * Unknown keys are rejected rather than ignored: silently dropping one would
+   * turn a client that mistypes a key into a client that appears to consent.
+   */
+  @IsOptional()
+  @IsArray()
+  @IsIn(LEGAL_DOCUMENT_KEYS as unknown as string[], { each: true })
+  public readonly acceptedLegalDocuments?: LegalDocumentKey[];
 }

@@ -162,6 +162,7 @@ const SECTION_DELEGATE: Readonly<Record<ConfigExportSection, string>> = {
   blockedIps: 'blockedIp',
   adminIpAllowlist: 'adminIpAllowlist',
   faqItems: 'faqItem',
+  legalDocuments: 'legalDocument',
 };
 
 /**
@@ -243,7 +244,7 @@ describe('ConfigImportService — an absent section is not an imported one', () 
 
   it('marks an absent section missing without crying error when the whole file was requested', async () => {
     // Exporting a subset on purpose and then importing "everything" is a
-    // normal workflow. Nine red rows would teach operators to ignore the
+    // normal workflow. Ten red rows would teach operators to ignore the
     // column that the case above depends on.
     const { prisma, writes } = buildRecordingStub();
     const service = new ConfigImportService(prisma as never);
@@ -257,7 +258,7 @@ describe('ConfigImportService — an absent section is not an imported one', () 
     const result = await service.importConfig(inputFor(payload, null));
 
     const missing = result.summaries.filter((s) => s.status === 'missing');
-    assert.equal(missing.length, 9, 'nine sections are absent from this file');
+    assert.equal(missing.length, 10, 'ten sections are absent from this file');
     for (const summary of missing) {
       assert.deepEqual(summary.errors, [], `${summary.section} should carry no error`);
       assert.notEqual(summary.status, 'imported');
@@ -554,13 +555,14 @@ describe('ConfigImportService — a healthy round-trip is unchanged', () => {
     assert.equal(writes.length, 4, `expected four writes, got ${writes.join(', ')}`);
 
     // The sections this subset export never covered are absent, so the
-    // import reports them as such rather than as six clean successes.
+    // import reports them as such rather than as seven clean successes.
     const missing = result.summaries.filter((s) => s.status === 'missing').map((s) => s.section);
     assert.deepEqual(missing.sort(), [
       'adminIpAllowlist',
       'automations',
       'blockedIps',
       'faqItems',
+      'legalDocuments',
       'notificationTemplates',
       'scopePolicies',
     ]);

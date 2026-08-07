@@ -1236,6 +1236,7 @@ model User {
   savedPaymentMethods     SavedPaymentMethod[]     @relation("UserSavedPaymentMethods")
   paymentMethodSetups     PaymentMethodSetup[]     @relation("UserPaymentMethodSetups")
   fraudExemptions         FraudExemption[]         @relation("UserFraudExemptions")
+  legalConsents           UserLegalConsent[]       @relation("UserLegalConsents")
 
   @@index([telegramId])
   @@index([role])
@@ -3137,6 +3138,80 @@ model SupportDocumentRequest {
   @@index([ticketId])
   @@index([status])
   @@map("support_document_requests")
+}
+
+// =============================================================================
+//  LEGAL DOCUMENTS (user agreement, public offer)
+// =============================================================================
+
+/// The documents an operator can require at sign-up. Deliberately an enum and
+/// not a free-form slug: there are exactly two documents, each with its own
+/// toggle, and the registration gate has to name them in a contract shared
+/// with reiwa. A slug would turn that contract into "whatever rows exist".
+enum LegalDocumentKey {
+  USER_AGREEMENT
+  OFFER
+}
+
+/// Operator-authored text of one legal document.
+///
+/// WHY A TABLE AND NOT A FIELD ON `Settings`: the neighbouring operator-edited
+/// texts (`platformPolicy`, `platformBranding`) live in JSON columns on the
+/// settings singleton, and that row is read on nearly every request behind a
+/// 5-second cache and is exported wholesale by `config-export`. A legal text
+/// is tens of kilobytes; carrying it there would put it on every one of those
+/// reads. FAQ items — the closest analogue in both size and edit cadence —
+/// are a table for the same reason.
+///
+/// `key` IS the primary key: two fixed rows, seeded by the migration. There is
+/// no create and no delete, only edit, so the admin surface cannot drift into
+/// a CRUD list where a document silently stops existing.
+///
+/// Bodies are PLAIN TEXT, never markup. The panel has no sanitizer at all, and
+/// reiwa's `sanitizeRichText` deliberately keeps DOMPurify out of the
+/// pre-login bundle — which is exactly the bundle the registration screen is.
+/// Rendering happens with `white-space: pre-wrap`, so line breaks survive and
+/// nothing is interpreted.
+model LegalDocument {
+  key       LegalDocumentKey @id @map("key")
+  /// Independently toggled. An inactive document is neither asked for at
+  /// sign-up nor listed in the cabinet.
+  isActive  Boolean          @default(false) @map("is_active")
+  titleRu   String           @default("") @map("title_ru")
+  titleEn   String           @default("") @map("title_en")
+  bodyRu    String           @default("") @map("body_ru")
+  bodyEn    String           @default("") @map("body_en")
+  updatedAt DateTime         @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  consents UserLegalConsent[] @relation("LegalDocumentConsents")
+
+  @@map("legal_documents")
+}
+
+/// One row per (user, document) the user has accepted.
+///
+/// WHY NOT A BOOLEAN ON `User`: `User.isRulesAccepted` already exists and
+/// defaults to TRUE, which declares every existing and every future user to
+/// have accepted. It also cannot express two independently toggled documents.
+/// A row is created only by an actual acceptance, so absence means "never
+/// accepted" rather than "defaulted to accepted".
+///
+/// No document revision is stored: the product decision is that a consent is
+/// given once and is not re-asked when the operator edits the text. The cost
+/// of that decision, stated plainly: after an edit there is no way to prove
+/// which wording a given user accepted. `acceptedAt` remains, the text does
+/// not.
+model UserLegalConsent {
+  userId      String           @map("user_id")
+  documentKey LegalDocumentKey @map("document_key")
+  acceptedAt  DateTime         @default(now()) @map("accepted_at") @db.Timestamptz(3)
+
+  user     User          @relation("UserLegalConsents", fields: [userId], references: [id], onDelete: Cascade)
+  document LegalDocument @relation("LegalDocumentConsents", fields: [documentKey], references: [key], onDelete: Cascade)
+
+  @@id([userId, documentKey])
+  @@index([documentKey])
+  @@map("user_legal_consents")
 }
 
 // =============================================================================

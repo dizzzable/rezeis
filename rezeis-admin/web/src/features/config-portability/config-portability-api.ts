@@ -11,6 +11,7 @@ export type ConfigSection =
   | 'blockedIps'
   | 'adminIpAllowlist'
   | 'faqItems'
+  | 'legalDocuments'
 
 export type ImportStrategy = 'skip' | 'overwrite'
 
