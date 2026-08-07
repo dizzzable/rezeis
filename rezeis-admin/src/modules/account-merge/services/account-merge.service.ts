@@ -142,6 +142,7 @@ export class AccountMergeService {
       // 3. Dedupe-then-repoint the userId-unique collections.
       await this.moveReferralPointsExchanges(tx, source.id, target.id);
       await this.movePromocodeActivations(tx, source.id, target.id);
+      await this.moveLegalConsents(tx, source.id, target.id);
       const partnerTransactions = await this.movePartnerTransactionsAsReferral(tx, source.id, target.id);
       await this.movePartnerReferralsAsReferral(tx, source.id, target.id);
       await this.moveAdConversion(tx, source.id, target.id);
@@ -340,6 +341,50 @@ export class AccountMergeService {
       where: { userId: sourceId },
       data: { userId: targetId },
     });
+  }
+
+  /**
+   * `(userId, documentKey)` is the primary key — drop source rows the target
+   * already holds, then move the rest.
+   *
+   * Without this the consents die with the source user on the CASCADE at the
+   * end of the merge, and the surviving account has no record of having
+   * accepted anything. Nothing stops working — consent is asked once, at
+   * sign-up, and is never re-checked — so the loss is silent and purely
+   * evidentiary, which is exactly the kind that is noticed far too late.
+   *
+   * The EARLIEST acceptance wins on a collision: the source row is dropped only
+   * when the target already has one for that document, and if the source
+   * accepted first its timestamp is the one worth keeping. So the collision is
+   * resolved by comparing dates rather than by blindly preferring the target.
+   */
+  private async moveLegalConsents(tx: Tx, sourceId: string, targetId: string): Promise<void> {
+    const [sourceRows, targetRows] = await Promise.all([
+      tx.userLegalConsent.findMany({ where: { userId: sourceId } }),
+      tx.userLegalConsent.findMany({ where: { userId: targetId } }),
+    ]);
+    if (sourceRows.length === 0) return;
+
+    const targetByKey = new Map(targetRows.map((row) => [row.documentKey, row]));
+    for (const row of sourceRows) {
+      const existing = targetByKey.get(row.documentKey);
+      if (existing === undefined) {
+        await tx.userLegalConsent.update({
+          where: { userId_documentKey: { userId: sourceId, documentKey: row.documentKey } },
+          data: { userId: targetId },
+        });
+        continue;
+      }
+      if (row.acceptedAt < existing.acceptedAt) {
+        await tx.userLegalConsent.update({
+          where: { userId_documentKey: { userId: targetId, documentKey: row.documentKey } },
+          data: { acceptedAt: row.acceptedAt },
+        });
+      }
+      await tx.userLegalConsent.delete({
+        where: { userId_documentKey: { userId: sourceId, documentKey: row.documentKey } },
+      });
+    }
   }
 
   /** `(promocodeId, userId)` unique — drop source rows that collide on target. */

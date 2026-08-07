@@ -28,6 +28,8 @@ interface MergeFixtures {
   readonly targetExchangeKeys?: string[];
   readonly targetQuestKeys?: Array<{ questId: string; periodKey: string }>;
   readonly sourceQuestRows?: Array<{ id: string; questId: string; periodKey: string }>;
+  readonly sourceConsents?: Array<{ userId: string; documentKey: string; acceptedAt: Date }>;
+  readonly targetConsents?: Array<{ userId: string; documentKey: string; acceptedAt: Date }>;
 }
 
 function createMergeMock(fx: MergeFixtures): { prisma: PrismaService; calls: Call[]; events: string[] } {
@@ -94,6 +96,14 @@ function createMergeMock(fx: MergeFixtures): { prisma: PrismaService; calls: Cal
       },
       deleteMany: async (a: Record<string, unknown>) => { rec('questCompletion', 'deleteMany', a); return { count: 0 }; },
       updateMany: async (a: Record<string, unknown>) => { rec('questCompletion', 'updateMany', a); return { count: 0 }; },
+    },
+    userLegalConsent: {
+      findMany: async (a: { where: { userId: string } }) =>
+        a.where.userId === (fx.source as { id?: string } | null)?.id
+          ? (fx.sourceConsents ?? [])
+          : (fx.targetConsents ?? []),
+      update: async (a: Record<string, unknown>) => { rec('userLegalConsent', 'update', a); return {}; },
+      delete: async (a: Record<string, unknown>) => { rec('userLegalConsent', 'delete', a); return {}; },
     },
     promocodeActivation: {
       findMany: async () => [],
@@ -216,6 +226,63 @@ describe('AccountMergeService', () => {
     await assert.rejects(
       () => service(prisma).merge({ sourceId: 'SRC', targetId: 'TGT', choices: {}, confirm: true, actorAdminId: 'a' }),
       NotFoundException,
+    );
+  });
+
+  /**
+   * Legal consents survive the merge.
+   *
+   * The source user is deleted at the end, and the consent rows cascade with
+   * them. Nothing stops working if they vanish — consent is asked once, at
+   * sign-up, and never re-checked — so the loss is silent and purely
+   * evidentiary: the surviving account simply has no record of having accepted
+   * anything. That is the kind of loss noticed far too late to reconstruct.
+   */
+  it('re-points legal consents onto the surviving account', async () => {
+    const { prisma, calls } = createMergeMock({
+      source: { ...baseSource },
+      target: { ...baseTarget },
+      sourceConsents: [
+        { userId: 'SRC', documentKey: 'USER_AGREEMENT', acceptedAt: new Date('2026-01-01T00:00:00Z') },
+      ],
+      targetConsents: [],
+    });
+
+    await service(prisma).merge({ sourceId: 'SRC', targetId: 'TGT', choices: {}, confirm: true, actorAdminId: 'a' });
+
+    const moved = calls.filter((c) => c.model === 'userLegalConsent' && c.op === 'update');
+    assert.equal(moved.length, 1);
+    assert.deepEqual((moved[0]?.args as { data?: unknown }).data, { userId: 'TGT' });
+  });
+
+  /**
+   * On a collision the EARLIER acceptance wins. Both accounts accepted the same
+   * document; the date that matters is when this person first agreed, not which
+   * of their two accounts happened to survive.
+   */
+  it('keeps the earlier acceptance date when both accounts accepted the same document', async () => {
+    const { prisma, calls } = createMergeMock({
+      source: { ...baseSource },
+      target: { ...baseTarget },
+      sourceConsents: [
+        { userId: 'SRC', documentKey: 'OFFER', acceptedAt: new Date('2026-01-01T00:00:00Z') },
+      ],
+      targetConsents: [
+        { userId: 'TGT', documentKey: 'OFFER', acceptedAt: new Date('2026-05-01T00:00:00Z') },
+      ],
+    });
+
+    await service(prisma).merge({ sourceId: 'SRC', targetId: 'TGT', choices: {}, confirm: true, actorAdminId: 'a' });
+
+    const updates = calls.filter((c) => c.model === 'userLegalConsent' && c.op === 'update');
+    assert.equal(updates.length, 1);
+    assert.deepEqual((updates[0]?.args as { data?: unknown }).data, {
+      acceptedAt: new Date('2026-01-01T00:00:00Z'),
+    });
+    // The colliding source row is dropped rather than moved onto a taken key.
+    assert.equal(
+      calls.filter((c) => c.model === 'userLegalConsent' && c.op === 'delete').length,
+      1,
     );
   });
 

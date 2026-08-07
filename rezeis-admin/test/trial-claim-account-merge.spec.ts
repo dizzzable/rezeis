@@ -221,6 +221,14 @@ function createMergeWorld() {
       findMany: async () => [],
       updateMany: noopUpdateMany('referralPointsExchange'),
     },
+    // Consents ride the same merge transaction; this spec is about the trial
+    // ledger, so an empty pair is enough — but the delegate has to exist, or
+    // the merge throws before it reaches anything this file asserts.
+    userLegalConsent: {
+      findMany: async () => [],
+      update: async () => ({}),
+      delete: async () => ({}),
+    },
     promocodeActivation: {
       findMany: async () => [],
       deleteMany: async () => ({ count: 0 }),
