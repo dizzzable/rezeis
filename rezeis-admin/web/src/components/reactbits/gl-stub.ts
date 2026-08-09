@@ -522,6 +522,24 @@ export function installGlStub(options: GlStubOptions = {}): GlStubHarness {
     vi.spyOn(HTMLElement.prototype, property, 'get').mockReturnValue(height)
   }
 
+  // Pin the machine, not just the viewport.
+  //
+  // `LightPillar` drops from its `high` tier to `medium` when
+  // `navigator.hardwareConcurrency <= 4`, and `medium` carries its own
+  // `pixelRatio: 0.65`. That is sound product behaviour — a 4-core device
+  // should not march 80 steps per fragment — but it makes every assertion about
+  // the DEVICE-PIXEL BUDGET depend on the core count of whatever machine ran
+  // the suite. It shipped green on a developer workstation and went red on a
+  // 2-core CI runner: `expected 286 to be 880`, where 286 is `440 * 0.65` and
+  // the budget itself had correctly returned a scale of exactly 1.
+  //
+  // A budget test must measure the budget. Fixing the core count here keeps the
+  // quality tier constant so the only thing that can move a buffer size is
+  // `resolveRenderScale`. 8 is chosen to sit above the `<= 4` threshold with
+  // room to spare; a component that wants to assert the low-end path should
+  // override this locally rather than depend on the host.
+  vi.spyOn(navigator, 'hardwareConcurrency', 'get').mockReturnValue(8)
+
   vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(function (
     this: HTMLCanvasElement,
     kind: string,
