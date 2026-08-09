@@ -44,6 +44,18 @@ export const BG_LOADERS: Record<Exclude<BackgroundId, 'none'>, BgLoader> = {
   rippleGrid: () => import('@/components/reactbits/RippleGrid'),
   lightning: () => import('@/components/reactbits/Lightning'),
   radar: () => import('@/components/reactbits/Radar'),
+  colorBends: () => import('@/components/reactbits/ColorBends'),
+  pixelBlast: () => import('@/components/reactbits/PixelBlast'),
+  plasmaWave: () => import('@/components/reactbits/PlasmaWave'),
+  evilEye: () => import('@/components/reactbits/EvilEye'),
+  lightPillar: () => import('@/components/reactbits/LightPillar'),
+  prismaticBurst: () => import('@/components/reactbits/PrismaticBurst'),
+  faultyTerminal: () => import('@/components/reactbits/FaultyTerminal'),
+  letterGlitch: () => import('@/components/reactbits/LetterGlitch'),
+  shapeGrid: () => import('@/components/reactbits/ShapeGrid'),
+  magicRings: () => import('@/components/reactbits/MagicRings'),
+  laserFlow: () => import('@/components/reactbits/LaserFlow'),
+  antigravity: () => import('@/components/reactbits/Antigravity'),
 }
 
 /** Lazy-loaded React Bits background components, keyed by BackgroundId. */

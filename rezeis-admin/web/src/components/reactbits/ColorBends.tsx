@@ -1,6 +1,8 @@
 import React, { useEffect, useRef } from 'react';
 import * as THREE from 'three';
 
+import { resolveBufferRatio } from './render-scale';
+
 type ColorBendsProps = {
   className?: string;
   style?: React.CSSProperties;
@@ -191,14 +193,27 @@ export default function ColorBends({
     const mesh = new THREE.Mesh(geometry, material);
     scene.add(mesh);
 
-    const renderer = new THREE.WebGLRenderer({
-      antialias: false,
-      powerPreference: 'high-performance',
-      alpha: true
-    });
+    let renderer: THREE.WebGLRenderer;
+    try {
+      renderer = new THREE.WebGLRenderer({
+        antialias: false,
+        powerPreference: 'high-performance',
+        alpha: true
+      });
+    } catch {
+      // three r184 throws from the constructor when it cannot get a WebGL2
+      // context. Nothing else here can recover from that.
+      materialRef.current = null;
+      geometry.dispose();
+      material.dispose();
+      return;
+    }
     rendererRef.current = renderer;
     (renderer as any).outputColorSpace = (THREE as any).SRGBColorSpace;
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    // The ratio BEFORE the device-pixel budget; `handleResize` reduces it when
+    // the box is large enough to need it.
+    const baseDpr = Math.min(window.devicePixelRatio || 1, 2);
+    renderer.setPixelRatio(baseDpr);
     renderer.setClearColor(0x000000, transparent ? 0 : 1);
     renderer.domElement.style.width = '100%';
     renderer.domElement.style.height = '100%';
@@ -210,6 +225,12 @@ export default function ColorBends({
     const handleResize = () => {
       const w = container.clientWidth || 1;
       const h = container.clientHeight || 1;
+      // Cap the DRAWING BUFFER, never the CSS box: the canvas is pinned to
+      // 100%×100% above and `setSize(w, h, false)` leaves `canvas.style`
+      // untouched, so only `canvas.width/height` moves with the ratio. The
+      // bands are derived from `vUv`, so the picture is the same one at a lower
+      // sampling density. See `render-scale.ts`.
+      renderer.setPixelRatio(resolveBufferRatio(w, h, baseDpr));
       renderer.setSize(w, h, false);
       (material.uniforms.uCanvas.value as THREE.Vector2).set(w, h);
     };
@@ -224,7 +245,10 @@ export default function ColorBends({
       (window as Window).addEventListener('resize', handleResize);
     }
 
+    let contextLost = false;
+
     const loop = () => {
+      if (contextLost) return;
       const dt = clock.getDelta();
       const elapsed = clock.elapsedTime;
       material.uniforms.uTime.value = elapsed;
@@ -243,16 +267,40 @@ export default function ColorBends({
       renderer.render(scene, camera);
       rafRef.current = requestAnimationFrame(loop);
     };
+    // three registers its own `webglcontextlost` handler and calls
+    // preventDefault there, and rebuilds every GL resource it owns on
+    // `webglcontextrestored` — so unlike the ogl components this one only has
+    // to stop drawing into a dead context and start again afterwards.
+    const canvas = renderer.domElement;
+    const handleContextLost = (event: Event) => {
+      event.preventDefault();
+      contextLost = true;
+      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
+    };
+    const handleContextRestored = () => {
+      contextLost = false;
+      handleResize();
+      rafRef.current = requestAnimationFrame(loop);
+    };
+    canvas.addEventListener('webglcontextlost', handleContextLost);
+    canvas.addEventListener('webglcontextrestored', handleContextRestored);
+
     rafRef.current = requestAnimationFrame(loop);
 
     return () => {
       if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
       if (resizeObserverRef.current) resizeObserverRef.current.disconnect();
       else (window as Window).removeEventListener('resize', handleResize);
+      canvas.removeEventListener('webglcontextlost', handleContextLost);
+      canvas.removeEventListener('webglcontextrestored', handleContextRestored);
       geometry.dispose();
       material.dispose();
+      // `dispose()` frees three's JS-side caches only; `forceContextLoss()` is
+      // the call that hands the context slot back.
       renderer.dispose();
       renderer.forceContextLoss();
+      rendererRef.current = null;
+      materialRef.current = null;
       if (renderer.domElement && renderer.domElement.parentElement === container) {
         container.removeChild(renderer.domElement);
       }
@@ -331,5 +379,14 @@ export default function ColorBends({
     };
   }, []);
 
-  return <div ref={containerRef} className={`w-full h-full relative overflow-hidden ${className}`} style={style} />;
+  // `${className}` unguarded put the literal string `undefined` in the class
+  // list whenever the prop was omitted — which is every mount from a registry
+  // that spreads a `Record<string, unknown>` of operator settings.
+  return (
+    <div
+      ref={containerRef}
+      className={`w-full h-full relative overflow-hidden ${className ?? ''}`.trim()}
+      style={style}
+    />
+  );
 }

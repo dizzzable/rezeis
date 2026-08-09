@@ -55,6 +55,18 @@ export type BackgroundId =
   | 'rippleGrid'
   | 'lightning'
   | 'radar'
+  | 'colorBends'
+  | 'pixelBlast'
+  | 'plasmaWave'
+  | 'evilEye'
+  | 'lightPillar'
+  | 'prismaticBurst'
+  | 'faultyTerminal'
+  | 'letterGlitch'
+  | 'shapeGrid'
+  | 'magicRings'
+  | 'laserFlow'
+  | 'antigravity'
 
 export interface BackgroundConfig {
   id: BackgroundId
@@ -164,14 +176,34 @@ const DEFAULTS = {
 
 const STORE_VERSION = 4
 
-/** All BackgroundIds we know about. New ids must be added to BOTH the union
- *  and to BG_COMPONENTS in components/glass/backgrounds.ts. */
-const VALID_BACKGROUND_IDS: ReadonlySet<BackgroundId> = new Set<BackgroundId>([
+/**
+ * All BackgroundIds we know about. New ids must be added to BOTH the union
+ * above and to this list, and to BG_LOADERS in components/glass/backgrounds.ts.
+ *
+ * The list is not decoration: `migrate` snaps any id that is NOT in it back to
+ * `none`. So an id added to the union and to the loaders — a background that
+ * selects, renders and persists perfectly — but forgotten here still LOOKS
+ * finished, and then vanishes on the operator's next page load, once persist
+ * runs the migration over the stored envelope. `new Set<BackgroundId>([…])`
+ * cannot catch that: it type-checks that every member IS an id, never that
+ * every id is a member. `_BackgroundIdListCheck` below is the half that was
+ * missing.
+ */
+const ALL_BACKGROUND_IDS = [
   'none', 'silk', 'aurora', 'threads', 'waves', 'iridescence', 'galaxy',
   'particles', 'dotGrid', 'liquidChrome', 'balatro', 'beams', 'plasma',
   'grainient', 'softAurora', 'dither', 'lineWaves', 'rippleGrid',
-  'lightning', 'radar',
-])
+  'lightning', 'radar', 'colorBends', 'pixelBlast', 'plasmaWave', 'evilEye',
+  'lightPillar', 'prismaticBurst', 'faultyTerminal', 'letterGlitch',
+  'shapeGrid', 'magicRings', 'laserFlow', 'antigravity',
+] as const satisfies ReadonlyArray<BackgroundId>
+
+const VALID_BACKGROUND_IDS: ReadonlySet<BackgroundId> = new Set<BackgroundId>(ALL_BACKGROUND_IDS)
+
+type ListedBackgroundId = (typeof ALL_BACKGROUND_IDS)[number]
+type _BackgroundIdListCheck = Exclude<BackgroundId, ListedBackgroundId> extends never
+  ? true
+  : `Missing ALL_BACKGROUND_IDS entry for: ${Exclude<BackgroundId, ListedBackgroundId>}`
 
 const ELEMENT_KEYS = [
   'sidebar', 'header', 'cards', 'modals', 'tabs', 'buttons', 'popover',

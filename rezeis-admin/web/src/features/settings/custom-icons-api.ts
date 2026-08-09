@@ -1,4 +1,5 @@
 import { api } from '@/lib/api'
+import { expectArray } from '@/lib/api-utils'
 
 /** One operator-uploaded custom icon. Mirrors the backend `CustomIconInterface`. */
 export interface CustomIcon {
@@ -20,13 +21,19 @@ interface IconUploadResponse {
 export const CUSTOM_ICONS_QUERY_KEY = ['admin', 'settings', 'icons'] as const
 
 export async function getCustomIcons(): Promise<CustomIcon[]> {
-  const { data } = await api.get<CustomIcon[]>('/admin/settings/icons')
-  return data
+  const { data } = await api.get('/admin/settings/icons')
+  return expectArray<CustomIcon>(data)
 }
 
+/**
+ * The save response is written straight into the query cache by
+ * `panel-icons-tab`, so a non-array here reaches `IconPicker` on a different
+ * route without ever passing through a `queryFn`. Validate the mutation
+ * result, not just the fetch.
+ */
 export async function saveCustomIcons(icons: CustomIcon[]): Promise<CustomIcon[]> {
-  const { data } = await api.put<CustomIcon[]>('/admin/settings/icons', { icons })
-  return data
+  const { data } = await api.put('/admin/settings/icons', { icons })
+  return expectArray<CustomIcon>(data)
 }
 
 export async function uploadCustomIconFile(file: File): Promise<string> {

@@ -40,8 +40,14 @@ const FILTER_IDS = {
 } as const
 
 /** True for Chromium-based browsers where `backdrop-filter: url(#svg)`
- *  works with `feDisplacementMap`. We mirror the runtime check used by
- *  `GlassSurface.tsx`. */
+ *  works with `feDisplacementMap`.
+ *
+ *  This check was originally kept in step with the vendored
+ *  `reactbits/GlassSurface.tsx`, which carried the same UA sniff. That
+ *  component was unreachable and has been deleted, so this is now the only
+ *  copy — there is nothing left to mirror it against. Safari and Firefox are
+ *  excluded because both render the displacement filter as an opaque smear
+ *  rather than refracting what is behind it. */
 function detectChromiumBackdropFilter(): boolean {
   if (typeof navigator === 'undefined') return false
   const ua = navigator.userAgent

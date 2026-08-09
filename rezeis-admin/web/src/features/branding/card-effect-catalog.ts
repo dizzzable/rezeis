@@ -109,6 +109,14 @@ export interface CardEffectEntry {
  *    look the split was made to allow.
  *  - `blackhole.pullSpeed` ships zero as its DEFAULT, which is the older and
  *    simpler reason: the shipped card is the proof that zero is a real setting.
+ *  - `laserFlow.wispIntensity` is not a rate at all and is here only because
+ *    `/speed|spin/i` matches the `spIn` inside "wi-spIn-tensity". It is the
+ *    amplitude class the test's own comment excludes (`twinkleIntensity`,
+ *    `swirl`): `return uWIntensity * sum * topF * bGain * span;` — zero removes
+ *    the wisps and leaves the beam and the fog running. It is also the ONLY way
+ *    to remove them, which is why the zero is kept rather than floored away:
+ *    `wispDensity` looks like the off switch and is not, because
+ *    `d = dRaw <= 0.0 ? 1.0 : dRaw` turns its zero back into 1.0.
  */
 export const ZERO_MINIMUM_MOTION_SLIDERS: Readonly<Record<string, string>> = {
   'stardust.particleSpeed': 'per-particle drift only; shared drift and flicker keep running',
@@ -117,6 +125,7 @@ export const ZERO_MINIMUM_MOTION_SLIDERS: Readonly<Record<string, string>> = {
   'starBurst.twinkleSpeed': 'brightness oscillation only; the pulses still travel on `speed`',
   'cosmicOrb.spin': 'sphere rotation only; the nebula runs on its own clock',
   'blackhole.pullSpeed': 'zero is the shipped default',
+  'laserFlow.wispIntensity': 'an amplitude matched only by the "spIn" inside its name; zero removes the wisps and is the only control that can',
 }
 
 export const CARD_EFFECT_CATALOG = {
@@ -1035,6 +1044,364 @@ export const CARD_EFFECT_CATALOG = {
       { prop: 'cursorRadius', label: 'Cursor Radius', type: 'slider', min: 20, max: 200, step: 5, default: 75 },
       { prop: 'cursorStrength', label: 'Cursor Strength', type: 'slider', min: 0, max: 10, step: 0.5, default: 10 },
       { prop: 'autoplay', label: 'Autoplay', type: 'toggle', default: true },
+    ]
+  },
+  // ── Repaired reactbits ──────────────────────────────────────────────────────
+  // Twelve components that sat in `components/reactbits/` for months without
+  // ever being mounted. Every range, default and palette below was read off the
+  // component as it stands after that repair, not off the props list it shipped
+  // with: `LetterGlitch` gained `backgroundColor` and `className` and had every
+  // prop made optional, `ShapeGrid` gained `vignetteColor`/`vignetteStrength`,
+  // and several defaults moved from a destructure into a module constant. A
+  // control naming a prop that no longer exists is a slider that does nothing,
+  // and that is only ever found by dragging it.
+  //
+  // These are NOT vendored from originkit, so they carry no `componentFile`;
+  // they are frozen by `card-effect-components-manifest.test.ts` instead.
+  colorBends: {
+    name: 'Color Bends',
+    renderer: 'webgl1',
+    // CHOSEN, not read. The component's own default is `colors: []`, which takes
+    // the shader's else-branch and writes each of R, G and B from a separate
+    // band — a procedural rainbow with no hex anywhere in the file. These three
+    // are the house palette used by its siblings (`LightPillar`, `Antigravity`).
+    palette: ['#5227FF', '#FF9FFC', '#B19EEF'],
+    // `col *= uIntensity` (up to 3) is not clamped unless `noise > 0.0001`.
+    fullOutputGamut: true,
+    controls: [
+      { prop: 'colors', label: 'Colors', type: 'colorArray', count: 3, default: ['#5227FF', '#FF9FFC', '#B19EEF'] },
+      // `float t = uTime * uSpeed;` is the shader's only clock. At zero the
+      // bands hold one frame forever while the loop keeps paying for them.
+      { prop: 'speed', label: 'Speed', type: 'slider', min: 0.02, max: 2, step: 0.02, default: 0.2 },
+      { prop: 'rotation', label: 'Rotation', type: 'slider', min: 0, max: 360, step: 1, default: 90 },
+      { prop: 'autoRotate', label: 'Auto Rotate', type: 'slider', min: -2, max: 2, step: 0.1, default: 0 },
+      { prop: 'scale', label: 'Scale', type: 'slider', min: 0.2, max: 4, step: 0.1, default: 1 },
+      { prop: 'frequency', label: 'Frequency', type: 'slider', min: 0.2, max: 4, step: 0.1, default: 1 },
+      { prop: 'warpStrength', label: 'Warp', type: 'slider', min: 0, max: 3, step: 0.1, default: 1 },
+      { prop: 'bandWidth', label: 'Band Width', type: 'slider', min: 1, max: 20, step: 0.5, default: 6 },
+      { prop: 'intensity', label: 'Intensity', type: 'slider', min: 0.1, max: 3, step: 0.1, default: 1.5 },
+      { prop: 'noise', label: 'Noise', type: 'slider', min: 0, max: 0.5, step: 0.01, default: 0.15 },
+      { prop: 'iterations', label: 'Iterations', type: 'slider', min: 1, max: 5, step: 1, default: 1 },
+      { prop: 'parallax', label: 'Parallax', type: 'slider', min: 0, max: 2, step: 0.1, default: 0.5 },
+      { prop: 'mouseInfluence', label: 'Mouse Influence', type: 'slider', min: 0, max: 2, step: 0.1, default: 1 },
+      { prop: 'transparent', label: 'Transparent', type: 'toggle', default: true },
+    ]
+  },
+  pixelBlast: {
+    name: 'Pixel Blast',
+    renderer: 'webgl2',
+    palette: ['#B497CF'],
+    fullOutputGamut: true,
+    controls: [
+      { prop: 'color', label: 'Color', type: 'color', default: '#B497CF' },
+      { prop: 'variant', label: 'Shape', type: 'select', options: ['square', 'circle', 'triangle', 'diamond'], default: 'square' },
+      { prop: 'pixelSize', label: 'Pixel Size', type: 'slider', min: 1, max: 12, step: 1, default: 3 },
+      // `uniforms.uTime.value = timeOffset + clock.getElapsedTime() * speedRef.current`
+      // — the only clock, so zero pins it at `timeOffset` for the mount's life.
+      { prop: 'speed', label: 'Speed', type: 'slider', min: 0.05, max: 3, step: 0.05, default: 0.5 },
+      { prop: 'patternScale', label: 'Pattern Scale', type: 'slider', min: 0.5, max: 6, step: 0.1, default: 2 },
+      { prop: 'patternDensity', label: 'Pattern Density', type: 'slider', min: 0.1, max: 3, step: 0.1, default: 1 },
+      { prop: 'pixelSizeJitter', label: 'Jitter', type: 'slider', min: 0, max: 1, step: 0.05, default: 0 },
+      { prop: 'edgeFade', label: 'Edge Fade', type: 'slider', min: 0, max: 1, step: 0.05, default: 0.5 },
+      { prop: 'noiseAmount', label: 'Noise', type: 'slider', min: 0, max: 0.5, step: 0.01, default: 0 },
+      { prop: 'enableRipples', label: 'Ripples', type: 'toggle', default: true },
+      { prop: 'rippleSpeed', label: 'Ripple Speed', type: 'slider', min: 0.05, max: 2, step: 0.05, default: 0.3 },
+      { prop: 'rippleThickness', label: 'Ripple Thickness', type: 'slider', min: 0.01, max: 0.5, step: 0.01, default: 0.1 },
+      { prop: 'rippleIntensityScale', label: 'Ripple Intensity', type: 'slider', min: 0, max: 3, step: 0.1, default: 1 },
+      { prop: 'liquid', label: 'Liquid', type: 'toggle', default: false },
+      { prop: 'liquidStrength', label: 'Liquid Strength', type: 'slider', min: 0, max: 1, step: 0.05, default: 0.1 },
+      { prop: 'liquidRadius', label: 'Liquid Radius', type: 'slider', min: 0.1, max: 3, step: 0.1, default: 1 },
+      { prop: 'liquidWobbleSpeed', label: 'Wobble Speed', type: 'slider', min: 0.5, max: 10, step: 0.5, default: 4.5 },
+      { prop: 'transparent', label: 'Transparent', type: 'toggle', default: true },
+    ]
+  },
+  plasmaWave: {
+    name: 'Plasma Wave',
+    renderer: 'webgl1',
+    palette: ['#A855F7', '#06B6D4'],
+    // `(uColor1*w1 + uColor2*w2)/wt * lum * 3.5` — a 3.5× gain with no clamp.
+    fullOutputGamut: true,
+    controls: [
+      { prop: 'colors', label: 'Colors', type: 'colorArray', count: 2, default: ['#A855F7', '#06B6D4'] },
+      // `float tSpeed1 = t * uSpeed1;` — wave one has no other clock.
+      { prop: 'speed1', label: 'Speed 1', type: 'slider', min: 0.005, max: 0.5, step: 0.005, default: 0.05 },
+      { prop: 'speed2', label: 'Speed 2', type: 'slider', min: 0.005, max: 0.5, step: 0.005, default: 0.05 },
+      { prop: 'dir2', label: 'Direction 2', type: 'slider', min: -1, max: 1, step: 0.1, default: 1 },
+      { prop: 'bend1', label: 'Bend 1', type: 'slider', min: 0, max: 3, step: 0.1, default: 1 },
+      { prop: 'bend2', label: 'Bend 2', type: 'slider', min: 0, max: 3, step: 0.1, default: 0.5 },
+      { prop: 'focalLength', label: 'Focal Length', type: 'slider', min: 0.2, max: 3, step: 0.1, default: 0.8 },
+      { prop: 'rotationDeg', label: 'Rotation', type: 'slider', min: -180, max: 180, step: 1, default: 0 },
+      { prop: 'xOffset', label: 'Offset X', type: 'slider', min: -500, max: 500, step: 10, default: 0 },
+      { prop: 'yOffset', label: 'Offset Y', type: 'slider', min: -500, max: 500, step: 10, default: 0 },
+    ]
+  },
+  evilEye: {
+    name: 'Evil Eye',
+    renderer: 'webgl1',
+    palette: ['#FF6F37', '#000000'],
+    // `uEyeColor * uIntensity * clamp(…, 0.0, 3.0)` — a 3× gain before the
+    // framebuffer clamps, which shifts the hue rather than dimming it.
+    fullOutputGamut: true,
+    controls: [
+      { prop: 'eyeColor', label: 'Color', type: 'color', default: '#FF6F37' },
+      { prop: 'backgroundColor', label: 'Background', type: 'color', default: '#000000' },
+      { prop: 'intensity', label: 'Intensity', type: 'slider', min: 0.1, max: 4, step: 0.1, default: 1.5 },
+      // `float ft = uTime * uFlameSpeed;` — `uTime` reaches the picture through
+      // `ft` and nowhere else, so zero freezes every part of it.
+      { prop: 'flameSpeed', label: 'Flame Speed', type: 'slider', min: 0.05, max: 4, step: 0.05, default: 1 },
+      { prop: 'pupilSize', label: 'Pupil Size', type: 'slider', min: 0.1, max: 1.5, step: 0.05, default: 0.6 },
+      { prop: 'irisWidth', label: 'Iris Width', type: 'slider', min: 0.05, max: 1, step: 0.05, default: 0.25 },
+      { prop: 'glowIntensity', label: 'Glow', type: 'slider', min: 0, max: 1.5, step: 0.05, default: 0.35 },
+      { prop: 'scale', label: 'Scale', type: 'slider', min: 0.2, max: 2, step: 0.05, default: 0.8 },
+      { prop: 'noiseScale', label: 'Noise Scale', type: 'slider', min: 0.2, max: 4, step: 0.1, default: 1 },
+      { prop: 'pupilFollow', label: 'Pupil Follow', type: 'slider', min: 0, max: 2, step: 0.1, default: 1 },
+    ]
+  },
+  lightPillar: {
+    name: 'Light Pillar',
+    renderer: 'webgl1',
+    palette: ['#5227FF', '#FF9FFC'],
+    // `tanh(...)` then `color * uIntensity` with no clamp, minus a noise term.
+    fullOutputGamut: true,
+    controls: [
+      { prop: 'topColor', label: 'Top Color', type: 'color', default: '#5227FF' },
+      { prop: 'bottomColor', label: 'Bottom Color', type: 'color', default: '#FF9FFC' },
+      { prop: 'intensity', label: 'Intensity', type: 'slider', min: 0.1, max: 3, step: 0.1, default: 1 },
+      // `timeRef.current += 0.016 * rotationSpeedRef.current` — this advances
+      // the CLOCK, not a term of it. At zero `uTime` never changes and neither
+      // does `rotAngle`, which reads the same ref: the whole pillar is a still.
+      { prop: 'rotationSpeed', label: 'Rotation Speed', type: 'slider', min: 0.02, max: 2, step: 0.02, default: 0.3 },
+      { prop: 'glowAmount', label: 'Glow', type: 'slider', min: 0.001, max: 0.05, step: 0.001, default: 0.005 },
+      { prop: 'pillarWidth', label: 'Width', type: 'slider', min: 0.5, max: 10, step: 0.1, default: 3 },
+      { prop: 'pillarHeight', label: 'Height', type: 'slider', min: 0.1, max: 2, step: 0.05, default: 0.4 },
+      { prop: 'pillarRotation', label: 'Tilt', type: 'slider', min: -180, max: 180, step: 1, default: 0 },
+      { prop: 'noiseIntensity', label: 'Noise Intensity', type: 'slider', min: 0, max: 2, step: 0.05, default: 0.5 },
+      { prop: 'quality', label: 'Quality', type: 'select', options: ['low', 'medium', 'high'], default: 'high' },
+      { prop: 'interactive', label: 'Follow Pointer', type: 'toggle', default: false },
+    ]
+  },
+  prismaticBurst: {
+    name: 'Prismatic Burst',
+    renderer: 'webgl2',
+    // CHOSEN, not read. `colors` has no default: with none set the shader takes
+    // `spectralDefault = 1.0 + vec3(cos(marchT*3.0 + 0/1/2))`, a full spectrum
+    // in [0,2] with no hex in the file. These stand in for that sweep.
+    palette: ['#FF3D9A', '#5227FF', '#7CFF67'],
+    // `col += base * rayPattern` accumulated over the march — additive, and the
+    // default spectrum already exceeds 1.0 before the final clamp.
+    fullOutputGamut: true,
+    controls: [
+      { prop: 'colors', label: 'Colors', type: 'colorArray', count: 3, default: ['#FF3D9A', '#5227FF', '#7CFF67'] },
+      { prop: 'intensity', label: 'Intensity', type: 'slider', min: 0.1, max: 5, step: 0.1, default: 2 },
+      // `float t = uTime * uSpeed;` drives the whole march. What survives zero
+      // is the blue-noise offset on line 61, i.e. dither shimmer over a still.
+      { prop: 'speed', label: 'Speed', type: 'slider', min: 0.05, max: 3, step: 0.05, default: 0.5 },
+      // `'hover'` is deliberately absent: it drives the burst from the pointer,
+      // and nothing hovers a subscription card.
+      { prop: 'animationType', label: 'Motion', type: 'select', options: ['rotate', 'rotate3d'], default: 'rotate3d' },
+      { prop: 'distort', label: 'Distort', type: 'slider', min: 0, max: 10, step: 0.1, default: 0 },
+      { prop: 'rayCount', label: 'Rays', type: 'slider', min: 0, max: 32, step: 1, default: 0 },
+      { prop: 'hoverDampness', label: 'Hover Damping', type: 'slider', min: 0, max: 1, step: 0.05, default: 0 },
+    ]
+  },
+  faultyTerminal: {
+    name: 'Faulty Terminal',
+    renderer: 'webgl1',
+    // `tint` is read; the black is the renderer's own `gl.clearColor(0,0,0,1)`,
+    // which this effect never leaves — see the note on opacity below.
+    palette: ['#ffffff', '#000000'],
+    // `col *= uTint; col *= uBrightness;` then a dither add, none of it clamped.
+    fullOutputGamut: true,
+    controls: [
+      { prop: 'tint', label: 'Tint', type: 'color', default: '#ffffff' },
+      { prop: 'brightness', label: 'Brightness', type: 'slider', min: 0.1, max: 3, step: 0.1, default: 1 },
+      // NOT `speed`-named, so `card-effect-motion-sliders.test.ts` will never
+      // look at it, and it is the strictest case in this batch:
+      // `const elapsed = (t * 0.001 + timeOffsetRef.current) * live.timeScale`
+      // is the only assignment `iTime` ever receives. Zero is a photograph the
+      // GPU redraws sixty times a second. `pause` is the control that means
+      // "stop", and it is a toggle for exactly that reason.
+      { prop: 'timeScale', label: 'Time Scale', type: 'slider', min: 0.05, max: 3, step: 0.05, default: 0.3 },
+      { prop: 'pause', label: 'Pause', type: 'toggle', default: false },
+      { prop: 'scale', label: 'Scale', type: 'slider', min: 0.5, max: 5, step: 0.1, default: 1 },
+      { prop: 'digitSize', label: 'Digit Size', type: 'slider', min: 0.5, max: 4, step: 0.1, default: 1.5 },
+      { prop: 'scanlineIntensity', label: 'Scanlines', type: 'slider', min: 0, max: 2, step: 0.05, default: 0.3 },
+      { prop: 'glitchAmount', label: 'Glitch', type: 'slider', min: 0, max: 5, step: 0.1, default: 1 },
+      { prop: 'flickerAmount', label: 'Flicker', type: 'slider', min: 0, max: 5, step: 0.1, default: 1 },
+      { prop: 'noiseAmp', label: 'Noise', type: 'slider', min: 0, max: 3, step: 0.1, default: 1 },
+      { prop: 'chromaticAberration', label: 'Chromatic Aberration', type: 'slider', min: 0, max: 10, step: 0.5, default: 0 },
+      { prop: 'dither', label: 'Dither', type: 'slider', min: 0, max: 5, step: 0.1, default: 0 },
+      { prop: 'curvature', label: 'Curvature', type: 'slider', min: 0, max: 1, step: 0.05, default: 0.2 },
+      { prop: 'mouseReact', label: 'Mouse React', type: 'toggle', default: true },
+      { prop: 'mouseStrength', label: 'Mouse Strength', type: 'slider', min: 0, max: 2, step: 0.1, default: 0.2 },
+      { prop: 'pageLoadAnimation', label: 'Intro Animation', type: 'toggle', default: true },
+      // `dpr` is deliberately absent. It is read once at construction and is a
+      // dependency of the build effect, so a slider on it would tear down and
+      // rebuild the GL context on every tick of the drag.
+    ]
+  },
+  letterGlitch: {
+    name: 'Letter Glitch',
+    renderer: 'canvas2d',
+    palette: ['#2b4539', '#61dca3', '#61b3dc'],
+    controls: [
+      { prop: 'glitchColors', label: 'Colors', type: 'colorArray', count: 3, default: ['#2b4539', '#61dca3', '#61b3dc'] },
+      // `speed`-named but an INTERVAL in milliseconds, read as
+      // `if (now - lastGlitchTime.current >= glitchSpeedRef.current)`. Its zero
+      // end is not a stop but the opposite — a full re-roll of every cell on
+      // every frame — so it is floored to keep that cost off a phone, not to
+      // keep the picture moving.
+      { prop: 'glitchSpeed', label: 'Glitch Interval', type: 'slider', min: 10, max: 500, step: 5, default: 50 },
+      { prop: 'backgroundColor', label: 'Background', type: 'color', default: '#000000' },
+      { prop: 'smooth', label: 'Smooth', type: 'toggle', default: true },
+      { prop: 'centerVignette', label: 'Center Vignette', type: 'toggle', default: false },
+      { prop: 'outerVignette', label: 'Outer Vignette', type: 'toggle', default: false },
+      { prop: 'characters', label: 'Glyph Ramp', type: 'text', maxLength: 96, default: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ!@#$&*()-_+=/[]{};:<>.,0123456789' },
+    ]
+  },
+  shapeGrid: {
+    name: 'Shape Grid',
+    renderer: 'canvas2d',
+    palette: ['#999999', '#222222', '#120F17'],
+    controls: [
+      { prop: 'borderColor', label: 'Border Color', type: 'color', default: '#999999' },
+      { prop: 'hoverFillColor', label: 'Fill Color', type: 'color', default: '#222222' },
+      { prop: 'shape', label: 'Shape', type: 'select', options: ['square', 'hexagon', 'circle', 'triangle'], default: 'square' },
+      { prop: 'direction', label: 'Direction', type: 'select', options: ['diagonal', 'up', 'right', 'down', 'left'], default: 'right' },
+      // The component already refuses zero itself —
+      // `const effectiveSpeed = Math.max(speed, 0.1);` — so the slider's floor
+      // is set to that same 0.1 rather than to something prettier. Below it the
+      // control would move and nothing would happen.
+      { prop: 'speed', label: 'Speed', type: 'slider', min: 0.1, max: 5, step: 0.1, default: 1 },
+      { prop: 'squareSize', label: 'Cell Size', type: 'slider', min: 10, max: 120, step: 5, default: 40 },
+      { prop: 'hoverTrailAmount', label: 'Trail', type: 'slider', min: 0, max: 20, step: 1, default: 0 },
+      { prop: 'vignetteColor', label: 'Vignette Color', type: 'color', default: '#120F17' },
+      // Zero is a real setting and a cheaper one: at exactly 0 the component
+      // SKIPS the full-canvas fill rather than compositing a transparent one.
+      { prop: 'vignetteStrength', label: 'Vignette', type: 'slider', min: 0, max: 1, step: 0.05, default: 1 },
+    ]
+  },
+  magicRings: {
+    name: 'Magic Rings',
+    renderer: 'webgl1',
+    palette: ['#fc42ff', '#42fcff'],
+    // `c *= 1.0 + uBurst * 2.0` and `c += (n - 0.5) * uNoiseAmount`, unclamped.
+    fullOutputGamut: true,
+    controls: [
+      { prop: 'color', label: 'Color', type: 'color', default: '#fc42ff' },
+      { prop: 'colorTwo', label: 'Second Color', type: 'color', default: '#42fcff' },
+      // `uniforms.uTime.value = t * 0.001 * p.speed` — the only clock, and the
+      // grain term reads the same `uTime`, so zero freezes that too.
+      { prop: 'speed', label: 'Speed', type: 'slider', min: 0.05, max: 3, step: 0.05, default: 1 },
+      // Not `speed`-named, and zero draws NOTHING: `if (i >= uRingCount) break;`
+      // exits the loop before the first ring, leaving `c` at vec3(0.0) — which
+      // the alpha term below then makes fully transparent.
+      { prop: 'ringCount', label: 'Rings', type: 'slider', min: 1, max: 10, step: 1, default: 6 },
+      // The `snowfall.opacityMax` class exactly:
+      // `gl_FragColor = vec4(c, max(c.r, max(c.g, c.b)) * uOpacity)`.
+      { prop: 'opacity', label: 'Opacity', type: 'slider', min: 0.05, max: 1, step: 0.05, default: 1 },
+      { prop: 'attenuation', label: 'Attenuation', type: 'slider', min: 1, max: 30, step: 0.5, default: 10 },
+      { prop: 'lineThickness', label: 'Line Thickness', type: 'slider', min: 0.5, max: 10, step: 0.5, default: 2 },
+      { prop: 'baseRadius', label: 'Base Radius', type: 'slider', min: 0.05, max: 1, step: 0.05, default: 0.35 },
+      { prop: 'radiusStep', label: 'Radius Step', type: 'slider', min: 0, max: 0.5, step: 0.01, default: 0.1 },
+      { prop: 'scaleRate', label: 'Growth', type: 'slider', min: 0, max: 1, step: 0.05, default: 0.1 },
+      { prop: 'ringGap', label: 'Ring Gap', type: 'slider', min: 0.5, max: 4, step: 0.1, default: 1.5 },
+      { prop: 'rotation', label: 'Rotation', type: 'slider', min: -180, max: 180, step: 1, default: 0 },
+      { prop: 'noiseAmount', label: 'Noise', type: 'slider', min: 0, max: 1, step: 0.05, default: 0.1 },
+      { prop: 'fadeIn', label: 'Fade In', type: 'slider', min: 0.05, max: 2, step: 0.05, default: 0.7 },
+      { prop: 'fadeOut', label: 'Fade Out', type: 'slider', min: 0.05, max: 3, step: 0.05, default: 0.5 },
+      { prop: 'parallax', label: 'Parallax', type: 'slider', min: 0, max: 1, step: 0.01, default: 0.05 },
+      { prop: 'followMouse', label: 'Follow Mouse', type: 'toggle', default: false },
+      { prop: 'mouseInfluence', label: 'Mouse Influence', type: 'slider', min: 0, max: 1, step: 0.05, default: 0.2 },
+    ]
+  },
+  laserFlow: {
+    name: 'Laser Flow',
+    renderer: 'webgl1',
+    // `color` is read; the black is the renderer's own — this effect is built
+    // `alpha: false` with `setClearColor(0x000000, 1)` and paints an opaque
+    // frame. See the opacity note above `faultyTerminal`: it is one of three
+    // opaque members of this batch, and `iridescence` and `dither` already ship
+    // that way, so the card's own opacity control is the compositing knob.
+    palette: ['#FF79C6', '#000000'],
+    // `float g(float x){… 1.055*pow(x,1.0/2.4)-0.055;}` is an sRGB encode, not a
+    // tone map: for `L + fog + w > 1` it returns above 1 and `tone * uColor`
+    // clips per channel, which shifts the hue toward white rather than dimming.
+    fullOutputGamut: true,
+    controls: [
+      { prop: 'color', label: 'Color', type: 'color', default: '#FF79C6' },
+      { prop: 'flowSpeed', label: 'Flow Speed', type: 'slider', min: 0.02, max: 2, step: 0.02, default: 0.35 },
+      // Not `speed`-named, and zero is a black frame:
+      // `float tauMin = basePhase - uDecay; float tauMax = basePhase;` collapses
+      // the sampled range to a point, and the envelope
+      // `pow(1.0 - abs(u*2.0 - 1.0), 0.8)` evaluates to 0 across it.
+      { prop: 'decay', label: 'Decay', type: 'slider', min: 0.2, max: 4, step: 0.1, default: 1.1 },
+      // Also not `speed`-named, also a black frame: `f = powr * uFalloffStart`
+      // and `r = (f*f)/(d*d + EPS)`, so every light contribution is zero.
+      { prop: 'falloffStart', label: 'Falloff Start', type: 'slider', min: 0.2, max: 4, step: 0.1, default: 1.2 },
+      // These two are divisors — `uvc.y / (R_V * uVLenFactor)` and
+      // `uvc.x / (R_H * uHLenFactor)`. At zero the division is 0/0 on the beam
+      // axis, which is NaN, and `clamp(NaN, -1, 1)` is driver-defined.
+      { prop: 'verticalSizing', label: 'Vertical Size', type: 'slider', min: 0.2, max: 6, step: 0.1, default: 2 },
+      { prop: 'horizontalSizing', label: 'Horizontal Size', type: 'slider', min: 0.1, max: 3, step: 0.1, default: 0.5 },
+      { prop: 'horizontalBeamOffset', label: 'Beam Offset X', type: 'slider', min: -1, max: 1, step: 0.05, default: 0.1 },
+      { prop: 'verticalBeamOffset', label: 'Beam Offset Y', type: 'slider', min: -1, max: 1, step: 0.05, default: 0 },
+      { prop: 'fogIntensity', label: 'Fog', type: 'slider', min: 0, max: 2, step: 0.05, default: 0.45 },
+      { prop: 'fogScale', label: 'Fog Scale', type: 'slider', min: 0.05, max: 2, step: 0.05, default: 0.3 },
+      { prop: 'fogFallSpeed', label: 'Fog Fall Speed', type: 'slider', min: 0.05, max: 3, step: 0.05, default: 0.6 },
+      // Floored at 0.1 because zero LIES: the shader reads
+      // `float dRaw = clamp(uWispDensity, 0.0, 2.0), d = dRaw <= 0.0 ? 1.0 : dRaw;`
+      // so a slider dragged to zero silently means "1.0" — the same picture as
+      // the middle of its own range, and no way for an operator to tell.
+      { prop: 'wispDensity', label: 'Wisp Density', type: 'slider', min: 0.1, max: 2, step: 0.1, default: 1 },
+      { prop: 'wispSpeed', label: 'Wisp Speed', type: 'slider', min: 0.5, max: 40, step: 0.5, default: 15 },
+      // Reaches zero deliberately; see `ZERO_MINIMUM_MOTION_SLIDERS`.
+      { prop: 'wispIntensity', label: 'Wisp Intensity', type: 'slider', min: 0, max: 15, step: 0.5, default: 5 },
+      { prop: 'flowStrength', label: 'Flow Strength', type: 'slider', min: 0, max: 1, step: 0.05, default: 0.25 },
+      { prop: 'mouseTiltStrength', label: 'Mouse Tilt', type: 'slider', min: 0, max: 0.2, step: 0.005, default: 0.01 },
+      // `dpr` is deliberately absent, for the same reason as on
+      // `faultyTerminal`: it is fixed at construction and moving it would
+      // rebuild the GL context once per animation frame of the drag.
+    ]
+  },
+  antigravity: {
+    name: 'Antigravity',
+    renderer: 'webgl1',
+    palette: ['#FF9FFC'],
+    controls: [
+      { prop: 'color', label: 'Color', type: 'color', default: '#FF9FFC' },
+      // Set here, NOT in the component. Its own default is `false`, and with it
+      // false `destX/destY` stay at r3f's resting pointer — (0,0) — so the ring
+      // pins to the middle of a card nobody will ever hover. The component
+      // default is left alone because the panel-background surface may want it.
+      { prop: 'autoAnimate', label: 'Auto Animate', type: 'toggle', default: true },
+      // `args={[undefined, undefined, count]}` on the instanced mesh: zero
+      // instances draw nothing at all.
+      { prop: 'count', label: 'Count', type: 'slider', min: 20, max: 800, step: 20, default: 300 },
+      // `dummy.scale.set(finalScale, …)` where
+      // `finalScale = scaleFactor * (…) * particleSize` — zero collapses every
+      // instance to a degenerate matrix, so the field is invisible while the
+      // per-frame loop still walks all `count` of them.
+      { prop: 'particleSize', label: 'Particle Size', type: 'slider', min: 0.2, max: 8, step: 0.2, default: 2 },
+      // `particle.cx += (targetPos.x - particle.cx) * lerpSpeed` is a pure
+      // no-op at zero: no particle ever leaves the random position it was born
+      // at and the ring the effect is named for never forms.
+      { prop: 'lerpSpeed', label: 'Follow Speed', type: 'slider', min: 0.02, max: 1, step: 0.02, default: 0.1 },
+      { prop: 'particleShape', label: 'Shape', type: 'select', options: ['capsule', 'sphere', 'box', 'tetrahedron'], default: 'capsule' },
+      { prop: 'ringRadius', label: 'Ring Radius', type: 'slider', min: 2, max: 30, step: 1, default: 10 },
+      { prop: 'magnetRadius', label: 'Magnet Radius', type: 'slider', min: 2, max: 40, step: 1, default: 10 },
+      { prop: 'fieldStrength', label: 'Field Strength', type: 'slider', min: 0.5, max: 30, step: 0.5, default: 10 },
+      { prop: 'waveAmplitude', label: 'Amplitude', type: 'slider', min: 0, max: 5, step: 0.1, default: 1 },
+      { prop: 'waveSpeed', label: 'Speed', type: 'slider', min: 0.05, max: 3, step: 0.05, default: 0.4 },
+      // The component ships this at 0, which is a look — the ring simply does
+      // not turn, while the wave, the pulse and the follow all keep running.
+      // It is `speed`-named, so a zero minimum would need an exemption; a small
+      // positive floor and a default just above it buys the same look without
+      // spending one.
+      { prop: 'rotationSpeed', label: 'Rotation Speed', type: 'slider', min: 0.02, max: 2, step: 0.02, default: 0.1 },
+      { prop: 'pulseSpeed', label: 'Pulse Speed', type: 'slider', min: 0.1, max: 10, step: 0.1, default: 3 },
+      { prop: 'particleVariance', label: 'Variance', type: 'slider', min: 0, max: 3, step: 0.1, default: 1 },
+      { prop: 'depthFactor', label: 'Depth', type: 'slider', min: 0, max: 3, step: 0.1, default: 1 },
     ]
   },
 } satisfies Record<string, CardEffectEntry>

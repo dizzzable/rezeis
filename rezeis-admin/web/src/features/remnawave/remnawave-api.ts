@@ -1,4 +1,6 @@
+import { z } from "zod";
 import { api } from "@/lib/api";
+import { expectArray } from '@/lib/api-utils';
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -216,8 +218,8 @@ async function getBandwidthStats(): Promise<RemnawaveBandwidthStats> {
 }
 
 async function getAllNodes(): Promise<RemnawaveNode[]> {
-  const res = await api.get<RemnawaveNode[]>("/admin/remnawave/nodes");
-  return res.data;
+  const res = await api.get("/admin/remnawave/nodes");
+  return expectArray<RemnawaveNode>(res.data);
 }
 
 async function enableNode(uuid: string): Promise<void> {
@@ -239,29 +241,23 @@ async function resetNodeTraffic(uuid: string): Promise<void> {
 }
 
 async function getAllHosts(): Promise<RemnawaveHost[]> {
-  const res = await api.get<RemnawaveHost[]>("/admin/remnawave/hosts");
-  return res.data;
+  const res = await api.get("/admin/remnawave/hosts");
+  return expectArray<RemnawaveHost>(res.data);
 }
 
 async function getInternalSquads(): Promise<RemnawaveInternalSquad[]> {
-  const res = await api.get<RemnawaveInternalSquad[]>(
-    "/admin/remnawave/internal-squads",
-  );
-  return res.data;
+  const res = await api.get("/admin/remnawave/internal-squads");
+  return expectArray<RemnawaveInternalSquad>(res.data);
 }
 
 async function getExternalSquads(): Promise<RemnawaveExternalSquad[]> {
-  const res = await api.get<RemnawaveExternalSquad[]>(
-    "/admin/remnawave/external-squads",
-  );
-  return res.data;
+  const res = await api.get("/admin/remnawave/external-squads");
+  return expectArray<RemnawaveExternalSquad>(res.data);
 }
 
 async function getConfigProfiles(): Promise<RemnawaveConfigProfile[]> {
-  const res = await api.get<RemnawaveConfigProfile[]>(
-    "/admin/remnawave/config-profiles",
-  );
-  return res.data;
+  const res = await api.get("/admin/remnawave/config-profiles");
+  return expectArray<RemnawaveConfigProfile>(res.data);
 }
 
 async function getSubscriptionSettings(): Promise<RemnawaveSubscriptionSettings | null> {
@@ -272,8 +268,8 @@ async function getSubscriptionSettings(): Promise<RemnawaveSubscriptionSettings 
 }
 
 async function getSubscriptionTemplates(): Promise<RemnawaveSubscriptionTemplate[]> {
-  const res = await api.get<RemnawaveSubscriptionTemplate[]>("/admin/remnawave/subscription-templates");
-  return res.data;
+  const res = await api.get("/admin/remnawave/subscription-templates");
+  return expectArray<RemnawaveSubscriptionTemplate>(res.data);
 }
 
 async function getHwidStats(): Promise<RemnawaveHwidStats | null> {
@@ -290,8 +286,8 @@ export interface RemnawaveHwidTopUser {
 }
 
 async function getHwidTopUsers(): Promise<RemnawaveHwidTopUser[]> {
-  const res = await api.get<RemnawaveHwidTopUser[]>("/admin/remnawave/hwid/top-users");
-  return res.data;
+  const res = await api.get("/admin/remnawave/hwid/top-users");
+  return expectArray<RemnawaveHwidTopUser>(res.data);
 }
 
 export interface RemnawaveHealth {
@@ -340,8 +336,8 @@ async function getSubscriptionRequestHistory(params?: { userUuid?: string; limit
   if (params?.userUuid) search.set('userUuid', params.userUuid)
   if (params?.limit !== undefined) search.set('limit', String(params.limit))
   const qs = search.toString()
-  const res = await api.get<RemnawaveSubRequestEntry[]>(`/admin/remnawave/subscription-request-history${qs.length > 0 ? `?${qs}` : ''}`)
-  return res.data
+  const res = await api.get(`/admin/remnawave/subscription-request-history${qs.length > 0 ? `?${qs}` : ''}`)
+  return expectArray<RemnawaveSubRequestEntry>(res.data)
 }
 
 /** One node a provider bills for. `nodeUuid` is null for an orphaned 2.8.0 line. */
@@ -375,8 +371,8 @@ export interface RemnawaveInfraProvider {
 }
 
 async function getInfraProviders(): Promise<RemnawaveInfraProvider[]> {
-  const res = await api.get<RemnawaveInfraProvider[]>("/admin/remnawave/infra/providers");
-  return res.data;
+  const res = await api.get("/admin/remnawave/infra/providers");
+  return expectArray<RemnawaveInfraProvider>(res.data);
 }
 
 /**
@@ -392,8 +388,8 @@ export interface RemnawaveSnippet {
 }
 
 async function getSnippets(): Promise<RemnawaveSnippet[]> {
-  const res = await api.get<RemnawaveSnippet[]>("/admin/remnawave/snippets");
-  return res.data;
+  const res = await api.get("/admin/remnawave/snippets");
+  return expectArray<RemnawaveSnippet>(res.data);
 }
 
 /**
@@ -410,8 +406,8 @@ export interface RemnawaveSubpageConfig {
 }
 
 async function getSubscriptionPageConfigs(): Promise<RemnawaveSubpageConfig[]> {
-  const res = await api.get<RemnawaveSubpageConfig[]>("/admin/remnawave/subscription-page-configs");
-  return res.data;
+  const res = await api.get("/admin/remnawave/subscription-page-configs");
+  return expectArray<RemnawaveSubpageConfig>(res.data);
 }
 
 /**
@@ -428,8 +424,8 @@ export interface RemnawaveNodePlugin {
 }
 
 async function getNodePlugins(): Promise<RemnawaveNodePlugin[]> {
-  const res = await api.get<RemnawaveNodePlugin[]>("/admin/remnawave/node-plugins");
-  return res.data;
+  const res = await api.get("/admin/remnawave/node-plugins");
+  return expectArray<RemnawaveNodePlugin>(res.data);
 }
 
 export interface RemnawaveUserSummary {
@@ -471,8 +467,8 @@ export interface RemnawaveGeoDistribution {
 }
 
 async function getGeoDistribution(): Promise<RemnawaveGeoDistribution[]> {
-  const res = await api.get<RemnawaveGeoDistribution[]>("/admin/remnawave/metrics/geo-distribution");
-  return res.data;
+  const res = await api.get("/admin/remnawave/metrics/geo-distribution");
+  return expectArray<RemnawaveGeoDistribution>(res.data);
 }
 
 // ── Expired-profile cleanup policy (panel-managed; stored in Settings) ────────
@@ -607,6 +603,38 @@ export interface RemnawaveIpSample {
   lastSeen: string;
 }
 
+/**
+ * Live-session payloads are the one place on this surface where proving the
+ * container is not enough: both views reduce over `session.ips.length`, so a
+ * well-formed array of malformed elements throws just as hard as a `{}` body.
+ * `lastSeen` / `countryCode` are declared by the contract but read by neither
+ * view, so they are tolerated rather than enforced — a panel build that omits
+ * one should not take the whole card down.
+ */
+const ipSampleSchema = z.object({
+  ip: z.string(),
+  lastSeen: z
+    .string()
+    .nullish()
+    .transform((v) => v ?? ''),
+});
+
+const nodeUserIpsListSchema = z.array(
+  z.object({ userId: z.string(), ips: z.array(ipSampleSchema) }),
+);
+
+const userNodeIpsListSchema = z.array(
+  z.object({
+    nodeUuid: z.string(),
+    nodeName: z.string(),
+    countryCode: z
+      .string()
+      .nullish()
+      .transform((v) => v ?? null),
+    ips: z.array(ipSampleSchema),
+  }),
+);
+
 export interface RemnawaveNodeUserIps {
   userId: string;
   ips: RemnawaveIpSample[];
@@ -620,17 +648,17 @@ export interface RemnawaveUserNodeIps {
 }
 
 async function getNodeLiveSessions(nodeUuid: string): Promise<RemnawaveNodeUserIps[]> {
-  const res = await api.get<RemnawaveNodeUserIps[]>(
+  const res = await api.get(
     `/admin/remnawave/live/node/${encodeURIComponent(nodeUuid)}`,
   );
-  return res.data;
+  return nodeUserIpsListSchema.parse(res.data);
 }
 
 async function getUserLiveSessions(userUuid: string): Promise<RemnawaveUserNodeIps[]> {
-  const res = await api.get<RemnawaveUserNodeIps[]>(
+  const res = await api.get(
     `/admin/remnawave/live/user/${encodeURIComponent(userUuid)}`,
   );
-  return res.data;
+  return userNodeIpsListSchema.parse(res.data);
 }
 
 export const remnawaveApi = {

@@ -22,6 +22,12 @@ import { describe, expect, it } from 'vitest'
  * component. `Ballpit.tsx` carried it too and was deleted instead — it had been
  * unreachable since the day the 131 React Bits components were vendored.
  *
+ * That unreachable set has since been swept: 80 components with no extension
+ * point, plus the `index.ts` barrel nothing imported, were deleted, taking the
+ * directory from 131 non-test components to 51. Seventeen unreachable
+ * components with a real extension point were deliberately KEPT to be wired up
+ * — so this rule still has to hold for files nothing imports yet.
+ *
  * WHY A FILE-SCANNING TEST AND NOT ANOTHER RUNTIME ONE. The runtime proof costs
  * a hand-written WebGL stub per component and only ever covers the component it
  * names. What actually reintroduces this defect is VENDORING: upstream
@@ -124,7 +130,15 @@ const componentFiles = readdirSync(HERE).filter(
 
 describe('reactbits canvas ownership', () => {
   it('finds components to check (a silent empty scan would prove nothing)', () => {
-    expect(componentFiles.length).toBeGreaterThan(100)
+    // A LIVENESS FLOOR, not an inventory count: it exists so that a `readdirSync`
+    // returning nothing — or a filter that stopped matching `.tsx` — fails here
+    // instead of letting the rule below report a clean [] against zero files.
+    //
+    // Re-pinned from 100 to 40 when the 80 unreachable components were deleted
+    // (131 → 51 non-test files). Repin it deliberately if the set shrinks again;
+    // do not delete it, and do not lower it to just under whatever the scan
+    // happens to return, which is how a floor stops being one.
+    expect(componentFiles.length).toBeGreaterThan(40)
   })
 
   it('no component opens a WebGL context on a canvas React owns', () => {
@@ -185,8 +199,9 @@ describe('reactbits canvas ownership', () => {
     })
 
     it('does not ban a React-owned canvas that never opens a GL context', () => {
-      // Fifteen files here draw 2D on a `<canvas ref>` and release nothing.
-      // They are correct, and a blanket "no `<canvas ref>`" rule would fail them.
+      // Six files here draw 2D on a `<canvas ref>` and release nothing (it was
+      // fifteen before the unreachable set was deleted). They are correct, and a
+      // blanket "no `<canvas ref>`" rule would fail them.
       const source = `
         const LetterGlitch = () => {
           const canvasRef = useRef<HTMLCanvasElement>(null);

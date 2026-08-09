@@ -35,10 +35,6 @@ export function HoverEffect({ children, className }: HoverEffectProps) {
       return <SpotlightCard className={className}>{children}</SpotlightCard>
     case 'glare':
       return <GlareHover className={className}>{children}</GlareHover>
-    case 'electricBorder':
-    case 'magnet':
-      // These require more complex integration — fallback to spotlight for now
-      return <SpotlightCard className={className}>{children}</SpotlightCard>
     default:
       return <div className={className}>{children}</div>
   }

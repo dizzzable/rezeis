@@ -30,6 +30,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { api } from '@/lib/api'
+import { expectArray } from '@/lib/api-utils'
 import { getErrorMessage } from '@/lib/http-errors'
 
 import {
@@ -494,8 +495,8 @@ function PasskeySection(): JSX.Element {
   const { data: passkeys, isLoading } = useQuery({
     queryKey: ['admin-passkeys'],
     queryFn: async () => {
-      const res = await api.get<PasskeyCredential[]>('/admin/passkey/credentials')
-      return res.data
+      const res = await api.get('/admin/passkey/credentials')
+      return expectArray<PasskeyCredential>(res.data)
     },
     staleTime: 30_000,
   })

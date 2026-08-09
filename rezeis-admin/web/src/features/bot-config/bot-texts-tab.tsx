@@ -15,6 +15,7 @@ import { toast } from 'sonner'
 import { EmojiPicker } from '@/features/broadcast/emoji-picker'
 import { EmojiPreview } from '@/features/custom-emoji/emoji-preview'
 import { api } from '@/lib/api'
+import { expectArray } from '@/lib/api-utils'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -212,7 +213,7 @@ function CustomEmojiPreview({ value }: { readonly value: string }): JSX.Element 
   const { data: packs } = useQuery<ReadonlyArray<CustomEmojiPackLite>>({
     queryKey: ['admin', 'custom-emoji', 'packs'],
     queryFn: async () =>
-      (await api.get<ReadonlyArray<CustomEmojiPackLite>>('/admin/custom-emoji/packs')).data,
+      expectArray<CustomEmojiPackLite>((await api.get('/admin/custom-emoji/packs')).data),
     staleTime: 60_000,
   })
   const slugMap = useMemo(() => {

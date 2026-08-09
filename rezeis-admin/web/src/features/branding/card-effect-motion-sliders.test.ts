@@ -98,13 +98,23 @@ describe('the exemption list itself', () => {
     expect(stale).toEqual([])
   })
 
-  it('still covers the four the sweep missed, and the two that were always fine', () => {
+  it('still covers the four the sweep missed, the two that were always fine, and the one the regex only thinks is a rate', () => {
     // Spelled out rather than derived, so that deleting one of these from the
     // catalogue's list and from its `min: 0` in the same edit — which the two
     // tests above would both accept — still has to be a deliberate act.
+    //
+    // `laserFlow.wispIntensity` is the seventh and is a different kind of entry
+    // from the other six: they are rate sliders argued to be safe at zero, it
+    // is not a rate at all. `RATE_PROP` is case-insensitive and finds the `spIn`
+    // inside "wi-spIn-tensity", which is the amplitude class the comment on
+    // `RATE_PROP` explicitly puts out of scope. It is exempted rather than
+    // floored because zero is the only way an operator can remove the wisps —
+    // `wispDensity` reads like the off switch and is not, since the shader turns
+    // its zero back into 1.0.
     expect(Object.keys(ZERO_MINIMUM_MOTION_SLIDERS).sort()).toEqual([
       'blackhole.pullSpeed',
       'cosmicOrb.spin',
+      'laserFlow.wispIntensity',
       'pulseLines.speed',
       'risingLines.riseSpeed',
       'starBurst.twinkleSpeed',

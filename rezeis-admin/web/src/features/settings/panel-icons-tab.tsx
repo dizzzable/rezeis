@@ -16,6 +16,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Loader2, Plus, Save, Trash2, Upload, X } from 'lucide-react'
 import { toast } from 'sonner'
 
+import { DataUnavailable } from '@/components/data-unavailable'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -53,6 +54,22 @@ export default function PanelIconsTab() {
     queryFn: getCustomIcons,
   })
 
+  /**
+   * Has the library been read back from the server at least once?
+   *
+   * This is the invariant that makes Save safe. Save `PUT`s `draft` as the
+   * WHOLE library, and `draft` starts as `[]`. On a failed load the old code
+   * still rendered the drop zone, so uploading one icon ran
+   * `setDraft(c => [...c, ...added]); setDirty(true)` over that `[]`, which
+   * enabled Save and replaced every stored icon with a one-element library.
+   * The operator's only signal that anything was wrong was the word "empty".
+   *
+   * `data` is only ever populated by a SUCCESSFUL fetch (no initialData /
+   * placeholderData here), so its presence — not `isError`, which flips back
+   * and forth on background refetches — is the honest test.
+   */
+  const libraryLoaded = iconsQuery.data !== undefined
+
   // Hydrate the local draft whenever the server list changes and we have no
   // unsaved edits (avoids clobbering in-progress work on background refetch).
   /* eslint-disable react-hooks/set-state-in-effect */
@@ -64,7 +81,14 @@ export default function PanelIconsTab() {
   /* eslint-enable react-hooks/set-state-in-effect */
 
   const saveMutation = useMutation({
-    mutationFn: () => saveCustomIcons(draft),
+    // Second lock on the same invariant. The button is disabled and the whole
+    // editor is replaced below when the library never loaded, so this is
+    // unreachable today — it is here so a future refactor of either of those
+    // cannot re-open a path that overwrites the library with `[]`.
+    mutationFn: () =>
+      libraryLoaded
+        ? saveCustomIcons(draft)
+        : Promise.reject(new Error('panelIcons.loadFailed')),
     onSuccess: (saved) => {
       queryClient.setQueryData(CUSTOM_ICONS_QUERY_KEY, saved)
       setDraft(saved)
@@ -139,6 +163,25 @@ export default function PanelIconsTab() {
     )
   }
 
+  // Never loaded. Say so, offer a retry, and render neither the drop zone nor
+  // the Save button — an operator cannot reach the destructive path at all.
+  if (!libraryLoaded) {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle>{t('panelIcons.title')}</CardTitle>
+          <CardDescription>{t('panelIcons.description')}</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <DataUnavailable
+            message={t('panelIcons.loadFailed')}
+            onRetry={() => void iconsQuery.refetch()}
+          />
+        </CardContent>
+      </Card>
+    )
+  }
+
   return (
     <Card>
       <CardHeader>
@@ -150,7 +193,7 @@ export default function PanelIconsTab() {
           <Button
             size="sm"
             onClick={() => saveMutation.mutate()}
-            disabled={!dirty || saveMutation.isPending}
+            disabled={!dirty || !libraryLoaded || saveMutation.isPending}
           >
             {saveMutation.isPending ? (
               <Loader2 className="mr-2 h-4 w-4 animate-spin" />

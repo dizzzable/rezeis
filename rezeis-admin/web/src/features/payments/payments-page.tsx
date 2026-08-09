@@ -2,6 +2,7 @@ import { lazy, Suspense, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { api } from '@/lib/api'
+import { expectArray } from '@/lib/api-utils'
 import { adminQueryKeys } from '@/lib/admin-query-keys'
 import { Card, CardContent } from '@/components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -302,7 +303,9 @@ function WebhooksTab() {
   const { data, isLoading } = useQuery<ReadonlyArray<WebhookEventRow>>({
     queryKey: adminQueryKeys.payments.webhooks.all,
     queryFn: async ({ signal }) =>
-      (await api.get<ReadonlyArray<WebhookEventRow>>('/admin/payments/webhooks/events?limit=30', { signal })).data,
+      expectArray<WebhookEventRow>(
+        (await api.get('/admin/payments/webhooks/events?limit=30', { signal })).data,
+      ),
   })
 
   if (isLoading) return <Skeleton className="h-48 w-full mt-4" />

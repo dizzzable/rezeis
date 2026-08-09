@@ -1,3 +1,4 @@
+import { z } from "zod"
 import { api } from '@/lib/api'
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -78,17 +79,21 @@ interface DeliveriesListResponse {
   nextCursor: string | null
 }
 
-interface EventCatalogResponse {
-  events: readonly string[]
-}
+/**
+ * `expectArray` on `response.data` would be the wrong check here — the array
+ * is nested one level down, so on a `{}` body the outer value passes and
+ * `.events` is `undefined`. The schema guards the value that is actually
+ * returned.
+ */
+const eventCatalogSchema = z.object({ events: z.array(z.string()) })
 
 const BASE = '/admin/webhooks'
 
 // ── Catalog ─────────────────────────────────────────────────────────────────
 
 export async function getWebhookEventCatalog(): Promise<readonly string[]> {
-  const response = await api.get<EventCatalogResponse>(`${BASE}/event-catalog`)
-  return response.data.events
+  const response = await api.get(`${BASE}/event-catalog`)
+  return eventCatalogSchema.parse(response.data).events
 }
 
 // ── Subscriptions ───────────────────────────────────────────────────────────

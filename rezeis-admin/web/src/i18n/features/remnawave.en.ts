@@ -158,6 +158,8 @@ export const en = {
       externalDescription: '{{count}} external squads',
       noInternal: 'No internal squads',
       noExternal: 'No external squads',
+      internalUnavailable: 'The internal squad list could not be loaded from the panel — this is not the same as having none.',
+      externalUnavailable: 'The external squad list could not be loaded from the panel — this is not the same as having none.',
       columns: {
         name: 'Name',
         members: 'Members',
@@ -188,6 +190,7 @@ export const en = {
     },
     catalog: {
       subtitle: 'Subscription delivery surface — profiles, templates, public landing pages and shared snippets.',
+      sectionUnavailable: 'This section could not be loaded from the panel. The list below is not empty — it is unknown.',
       settings: {
         title: 'Subscription delivery',
         untitled: 'Subscription configuration',
@@ -292,6 +295,7 @@ export const en = {
         title: 'Providers',
         description: '{{count}} providers registered',
         empty: 'No infrastructure providers configured.',
+        unavailable: 'The provider list could not be loaded from the panel — this is not the same as having none configured.',
         name: 'Provider',
         nodes: 'Billed nodes',
         bills: 'Bills',

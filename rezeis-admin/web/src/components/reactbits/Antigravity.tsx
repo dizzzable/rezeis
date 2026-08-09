@@ -1,6 +1,30 @@
-import { Canvas, useFrame, useThree } from '@react-three/fiber';
-import React, { useMemo, useRef } from 'react';
+import { Canvas, useFrame, useThree, type RootState } from '@react-three/fiber';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
+
+import { BudgetedDpr, type FiberDpr } from './fiber-render-scale';
+
+/**
+ * Delete the GPU objects hanging off a scene before the context that owns them
+ * goes away. Losing the context frees the driver allocations but leaves every
+ * three.js wrapper — geometry buffers, material programs — attached to the
+ * renderer's internal maps.
+ */
+const releaseSceneResources = (scene: THREE.Object3D): void => {
+  scene.traverse(object => {
+    const mesh = object as Partial<THREE.Mesh>;
+    mesh.geometry?.dispose();
+    const material = mesh.material;
+    if (Array.isArray(material)) {
+      for (const entry of material) entry.dispose();
+    } else {
+      material?.dispose();
+    }
+  });
+};
+
+/** The clamp fiber would use on its own, before the device-pixel budget. */
+const BASE_DPR: FiberDpr = [1, 2];
 
 interface AntigravityProps {
   count?: number;
@@ -186,8 +210,52 @@ const AntigravityInner: React.FC<AntigravityProps> = ({
 };
 
 const Antigravity: React.FC<AntigravityProps> = props => {
+  const rootRef = useRef<RootState | null>(null);
+  // Starts as the clamp fiber would have used on its own and becomes the
+  // budgeted number once `BudgetedDpr` has seen the measured box.
+  const [dpr, setDpr] = useState<FiberDpr>(BASE_DPR);
+  const handleResolve = useCallback((resolved: number) => {
+    setDpr(previous => (previous === resolved ? previous : resolved));
+  }, []);
+
+  // React Three Fiber does release the context on unmount, but from inside a
+  // 500 ms setTimeout and without ever calling gl.dispose(). Half a second is
+  // several slides of a carousel swipe, and WebKit allows only 16 live WebGL
+  // contexts per web-content process before it starts recycling the oldest and
+  // handing out an unrecoverable SyntheticLostContext. Release it here instead,
+  // synchronously, while unmounting.
+  useEffect(
+    () => () => {
+      const root = rootRef.current;
+      rootRef.current = null;
+      if (root === null) return;
+      releaseSceneResources(root.scene);
+      // dispose() detaches THREE.WebGLRenderer's own webglcontextlost /
+      // webglcontextrestored listeners, so the loss below cannot re-enter the
+      // restore path and rebuild what we are freeing.
+      root.gl.dispose();
+      root.gl.forceContextLoss();
+    },
+    []
+  );
+
   return (
-    <Canvas camera={{ position: [0, 0, 50], fov: 35 }}>
+    /**
+     * `dpr` is state rather than the literal `[1, 2]` so the device-pixel
+     * budget can lower it — see `fiber-render-scale.tsx`. `resize.offsetSize`
+     * matches the other three fiber-backed effects: it measures the LAYOUT box
+     * rather than the transformed painted one, so an ancestor `scale()` cannot
+     * make fiber write painted pixels into a layout property.
+     */
+    <Canvas
+      camera={{ position: [0, 0, 50], fov: 35 }}
+      dpr={dpr}
+      resize={{ offsetSize: true }}
+      onCreated={state => {
+        rootRef.current = state;
+      }}
+    >
+      <BudgetedDpr base={BASE_DPR} onResolve={handleResolve} />
       <AntigravityInner {...props} />
     </Canvas>
   );

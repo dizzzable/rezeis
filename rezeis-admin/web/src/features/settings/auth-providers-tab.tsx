@@ -26,6 +26,7 @@ import { Switch } from '@/components/ui/switch'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Badge } from '@/components/ui/badge'
 import { api } from '@/lib/api'
+import { expectArray } from '@/lib/api-utils'
 import { cn } from '@/lib/utils'
 import { useHasPermission } from '@/features/rbac'
 
@@ -75,8 +76,8 @@ export default function AuthProvidersTab({ embedded = false }: AuthProvidersTabP
   const { data: providers, isLoading } = useQuery({
     queryKey: ['oauth', 'config'],
     queryFn: async () => {
-      const res = await api.get<ProviderConfig[]>('/admin/oauth/config')
-      return res.data
+      const res = await api.get('/admin/oauth/config')
+      return expectArray<ProviderConfig>(res.data)
     },
     enabled: canViewAuthProviders,
   })

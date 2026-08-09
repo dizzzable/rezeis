@@ -6,6 +6,7 @@ import { useTranslation } from 'react-i18next'
 import { useQuery } from '@tanstack/react-query'
 import { Loader2, Users2 } from 'lucide-react'
 
+import { DataUnavailable } from '@/components/data-unavailable'
 import {
   Card,
   CardContent,
@@ -27,11 +28,21 @@ import { KEYS } from '../remnawave-query-keys'
 
 export function InfraSquadsSection() {
   const { t } = useTranslation()
-  const { data: internal, isLoading: iLoading } = useQuery({
+  const {
+    data: internal,
+    isLoading: iLoading,
+    isError: iError,
+    refetch: iRefetch,
+  } = useQuery({
     queryKey: KEYS.internalSquads,
     queryFn: remnawaveApi.getInternalSquads,
   })
-  const { data: external, isLoading: eLoading } = useQuery({
+  const {
+    data: external,
+    isLoading: eLoading,
+    isError: eError,
+    refetch: eRefetch,
+  } = useQuery({
     queryKey: KEYS.externalSquads,
     queryFn: remnawaveApi.getExternalSquads,
   })
@@ -60,7 +71,13 @@ export function InfraSquadsSection() {
           </CardDescription>
         </CardHeader>
         <CardContent className="px-0 pb-0">
-          {!internal || internal.length === 0 ? (
+          {iError || !internal ? (
+            <DataUnavailable
+              className="mx-6 mb-4"
+              message={t('remnaWavePage.squads.internalUnavailable')}
+              onRetry={() => void iRefetch()}
+            />
+          ) : internal.length === 0 ? (
             <p className="px-6 pb-4 text-sm text-muted-foreground">{t('remnaWavePage.squads.noInternal')}</p>
           ) : (
             <Table>
@@ -99,7 +116,13 @@ export function InfraSquadsSection() {
           </CardDescription>
         </CardHeader>
         <CardContent className="px-0 pb-0">
-          {!external || external.length === 0 ? (
+          {eError || !external ? (
+            <DataUnavailable
+              className="mx-6 mb-4"
+              message={t('remnaWavePage.squads.externalUnavailable')}
+              onRetry={() => void eRefetch()}
+            />
+          ) : external.length === 0 ? (
             <p className="px-6 pb-4 text-sm text-muted-foreground">{t('remnaWavePage.squads.noExternal')}</p>
           ) : (
             <Table>

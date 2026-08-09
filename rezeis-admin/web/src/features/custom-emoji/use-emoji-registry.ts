@@ -2,6 +2,7 @@ import { useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 
 import { api } from '@/lib/api'
+import { expectArray } from '@/lib/api-utils'
 
 /** A single emoji in the central custom-emoji registry. */
 export interface RegistryEmoji {
@@ -37,7 +38,8 @@ export const EMOJI_REGISTRY_KEY = ['admin', 'custom-emoji', 'packs'] as const
 export function useEmojiRegistry(options?: { readonly enabled?: boolean }) {
   const query = useQuery<ReadonlyArray<RegistryPack>>({
     queryKey: EMOJI_REGISTRY_KEY,
-    queryFn: async () => (await api.get<ReadonlyArray<RegistryPack>>('/admin/custom-emoji/packs')).data,
+    queryFn: async () =>
+      expectArray<RegistryPack>((await api.get('/admin/custom-emoji/packs')).data),
     staleTime: 60_000,
     enabled: options?.enabled ?? true,
   })

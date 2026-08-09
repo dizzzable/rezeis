@@ -1,4 +1,5 @@
 import { api } from '@/lib/api'
+import { expectArray, unwrapPayload } from '@/lib/api-utils'
 
 export type ConfigSection =
   | 'roles'
@@ -58,8 +59,10 @@ export interface ConfigImportResult {
 }
 
 export async function listConfigSections(): Promise<readonly ConfigSection[]> {
-  const response = await api.get<{ sections: readonly ConfigSection[] }>('/admin/config/sections')
-  return response.data.sections
+  const response = await api.get('/admin/config/sections')
+  // Nested: on a `{}` body the outer value is fine and `.sections` is
+  // `undefined`, so the check belongs on the value actually returned.
+  return expectArray<ConfigSection>(unwrapPayload(response.data).sections)
 }
 
 export async function exportConfig(

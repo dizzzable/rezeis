@@ -5,6 +5,7 @@ import { Bookmark, Check, Loader2, Plus, Save, Share2, Trash2, User } from 'luci
 import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
+import { expectArray } from '@/lib/api-utils'
 import { getErrorMessage } from '@/lib/http-errors'
 import {
   Card,
@@ -58,7 +59,7 @@ export function SavedThemesCard() {
   const { data: presets, isLoading } = useQuery({
     queryKey: ['admin', 'theme-presets'],
     queryFn: async () =>
-      (await api.get<readonly SavedThemePreset[]>('/admin/theme-presets')).data,
+      expectArray<SavedThemePreset>((await api.get('/admin/theme-presets')).data),
   })
 
   const deleteMutation = useMutation({

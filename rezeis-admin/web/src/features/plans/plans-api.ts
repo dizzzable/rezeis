@@ -33,6 +33,7 @@
 import { queryOptions, useQuery, type UseQueryResult } from '@tanstack/react-query'
 
 import { api } from '@/lib/api'
+import { expectArray } from '@/lib/api-utils'
 
 // ── Wire types ──────────────────────────────────────────────────────────────
 
@@ -135,8 +136,8 @@ export interface PlanUpdateResult extends Plan {
 // ── Fetcher ─────────────────────────────────────────────────────────────────
 
 export async function fetchPlans(signal?: AbortSignal): Promise<readonly Plan[]> {
-  const response = await api.get<Plan[]>('/admin/plans', { signal })
-  return response.data
+  const response = await api.get('/admin/plans', { signal })
+  return expectArray<Plan>(response.data)
 }
 
 /**
@@ -144,8 +145,8 @@ export async function fetchPlans(signal?: AbortSignal): Promise<readonly Plan[]>
  * `orderedIds` is the full list of plan ids in the desired order.
  */
 export async function reorderPlans(orderedIds: readonly string[]): Promise<readonly Plan[]> {
-  const response = await api.patch<Plan[]>('/admin/plans/reorder', { orderedIds })
-  return response.data
+  const response = await api.patch('/admin/plans/reorder', { orderedIds })
+  return expectArray<Plan>(response.data)
 }
 
 // ── queryOptions builder ────────────────────────────────────────────────────

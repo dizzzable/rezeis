@@ -1,5 +1,7 @@
 import { Renderer, Program, Mesh, Triangle, Texture } from 'ogl';
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
+
+import { resolveBufferRatio } from './render-scale';
 
 interface EvilEyeProps {
   eyeColor?: string;
@@ -71,6 +73,25 @@ function generateNoiseTexture(size = 256): Uint8Array {
   }
 
   return data;
+}
+
+/** The size the shader samples this at; changing it changes the picture. */
+const NOISE_SIZE = 256;
+
+/**
+ * 256 × 256 pixels × 8 octaves ≈ 524,000 noise evaluations, all of them
+ * synchronous and all of them on the MAIN THREAD — i.e. felt as a frozen tap,
+ * not as a dropped frame. It used to run inside an effect that depended on
+ * every prop, so it ran again on every tick of every slider.
+ *
+ * The function is pure and deterministic, so one result serves every mount for
+ * the life of the module. 256 KiB, built at most once, on first use rather than
+ * at import so a page that never shows this effect never pays for it.
+ */
+let noiseDataCache: Uint8Array | null = null;
+function sharedNoiseTexture(): Uint8Array {
+  if (!noiseDataCache) noiseDataCache = generateNoiseTexture(NOISE_SIZE);
+  return noiseDataCache;
 }
 
 const vertexShader = `
@@ -179,19 +200,36 @@ export default function EvilEye({
   backgroundColor = '#000000'
 }: EvilEyeProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const programRef = useRef<Program | null>(null);
+  // Bumped by `webglcontextrestored` to re-run the build effect. OGL keeps every
+  // GL handle inside Renderer/Program/Geometry/Texture and caches driver state
+  // on the Renderer, none of which survive a context loss and none of which it
+  // can reset — so the only honest recovery is to build the whole thing again.
+  const [glGeneration, setGlGeneration] = useState(0);
 
+  // Build effect: renderer, noise texture, program, mesh. Runs once per GL
+  // context, never on a prop change.
   useEffect(() => {
     if (!containerRef.current) return;
     const container = containerRef.current;
-    const renderer = new Renderer({ alpha: true, premultipliedAlpha: false });
+    // The ratio BEFORE the device-pixel budget; `resize` reduces it when the
+    // box is large enough to need it. ogl defaults to 1, which is already a
+    // 3.7M-pixel buffer on a 1440p viewport.
+    const baseDpr = Math.min(window.devicePixelRatio || 1, 2);
+    let renderer: Renderer;
+    try {
+      renderer = new Renderer({ alpha: true, premultipliedAlpha: false, dpr: baseDpr });
+    } catch {
+      return;
+    }
     const gl = renderer.gl;
     gl.clearColor(0, 0, 0, 0);
 
-    const noiseData = generateNoiseTexture(256);
+    const noiseData = sharedNoiseTexture();
     const noiseTexture = new Texture(gl, {
       image: noiseData,
-      width: 256,
-      height: 256,
+      width: NOISE_SIZE,
+      height: NOISE_SIZE,
       generateMipmaps: false,
       flipY: false,
     });
@@ -219,12 +257,24 @@ export default function EvilEye({
     let program: Program;
 
     function resize() {
-      renderer.setSize(container.offsetWidth, container.offsetHeight);
+      const w = container.offsetWidth;
+      const h = container.offsetHeight;
+      // Cap the DRAWING BUFFER, never the CSS box: `setSize` writes
+      // `canvas.style.width/height` from the width/height passed in and
+      // multiplies only `canvas.width/height` by `dpr`. The eye is sized from
+      // `uResolution`, so the picture is the same one at a lower sampling
+      // density. See `render-scale.ts`.
+      renderer.dpr = resolveBufferRatio(w, h, baseDpr);
+      renderer.setSize(w, h);
       if (program) {
         program.uniforms.uResolution.value = [gl.canvas.width, gl.canvas.height, gl.canvas.width / gl.canvas.height];
       }
     }
-    window.addEventListener('resize', resize);
+    // A window `resize` listener misses every reason this box actually changes
+    // size — a panel opening, a card reflowing, a drawer sliding — and fires
+    // for plenty that do not affect it.
+    const ro = new ResizeObserver(resize);
+    ro.observe(container);
     resize();
 
     const geometry = new Triangle(gl);
@@ -249,12 +299,16 @@ export default function EvilEye({
       }
     });
 
+    programRef.current = program;
+
     const mesh = new Mesh(gl, { geometry, program });
     container.appendChild(gl.canvas);
 
-    let animationFrameId: number;
+    let animationFrameId = 0;
+    let contextLost = false;
 
     function update(time: number) {
+      if (contextLost) return;
       animationFrameId = requestAnimationFrame(update);
       mouse.x += (mouse.tx - mouse.x) * 0.05;
       mouse.y += (mouse.ty - mouse.y) * 0.05;
@@ -262,17 +316,77 @@ export default function EvilEye({
       program.uniforms.uTime.value = time * 0.001;
       renderer.render({ scene: mesh });
     }
+
+    // Without preventDefault the browser never fires `webglcontextrestored`,
+    // so a recoverable loss becomes permanent.
+    const handleContextLost = (event: Event) => {
+      event.preventDefault();
+      contextLost = true;
+      cancelAnimationFrame(animationFrameId);
+    };
+    // Restarting the loop alone would draw with handles the loss detached.
+    // Re-running the effect tears this renderer down (freeing its slot) and
+    // builds a fresh one, so the count of live contexts stays flat.
+    const handleContextRestored = () => {
+      setGlGeneration(generation => generation + 1);
+    };
+    const canvas = gl.canvas as HTMLCanvasElement;
+    canvas.addEventListener('webglcontextlost', handleContextLost);
+    canvas.addEventListener('webglcontextrestored', handleContextRestored);
+
     animationFrameId = requestAnimationFrame(update);
 
     return () => {
       cancelAnimationFrame(animationFrameId);
-      window.removeEventListener('resize', resize);
+      ro.disconnect();
       container.removeEventListener('mousemove', onMouseMove);
       container.removeEventListener('mouseleave', onMouseLeave);
-      container.removeChild(gl.canvas);
+      // Listeners come off before loseContext, or handleContextRestored would
+      // fire during teardown and rebuild everything we are about to free.
+      canvas.removeEventListener('webglcontextlost', handleContextLost);
+      canvas.removeEventListener('webglcontextrestored', handleContextRestored);
+      programRef.current = null;
+      // Guarded: `removeChild` THROWS if the node is not a child, and it will
+      // not be one whenever React has already discarded the container subtree.
+      if (canvas.parentNode === container) container.removeChild(canvas);
+      // A dropped reference does not free the context: WebKit only returns the
+      // slot when the object is destroyed, and the page hits the 16-context cap
+      // long before GC gets there.
       gl.getExtension('WEBGL_lose_context')?.loseContext();
     };
-  }, [eyeColor, intensity, pupilSize, irisWidth, glowIntensity, scale, noiseScale, pupilFollow, flameSpeed, backgroundColor]);
+    // Construction only. Every prop is pushed to a uniform by the effect below.
+  }, [glGeneration]);
+
+  // Uniform pushes — zero GPU cost, no teardown.
+  useEffect(() => {
+    const program = programRef.current;
+    if (!program) return;
+    const u = program.uniforms;
+    u.uPupilSize.value = pupilSize;
+    u.uIrisWidth.value = irisWidth;
+    u.uGlowIntensity.value = glowIntensity;
+    u.uIntensity.value = intensity;
+    u.uScale.value = scale;
+    u.uNoiseScale.value = noiseScale;
+    u.uPupilFollow.value = pupilFollow;
+    u.uFlameSpeed.value = flameSpeed;
+    u.uEyeColor.value = hexToVec3(eyeColor);
+    u.uBgColor.value = hexToVec3(backgroundColor);
+  }, [
+    eyeColor,
+    intensity,
+    pupilSize,
+    irisWidth,
+    glowIntensity,
+    scale,
+    noiseScale,
+    pupilFollow,
+    flameSpeed,
+    backgroundColor,
+    // A rebuilt Program starts on the values baked into its constructor;
+    // without this a restored canvas would render the mount-time props.
+    glGeneration
+  ]);
 
   return <div ref={containerRef} className="w-full h-full" />;
 }

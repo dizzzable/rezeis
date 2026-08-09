@@ -5,6 +5,7 @@ import { Smile, Upload, Loader2, Trash2, Save, ChevronDown } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
+import { expectArray } from '@/lib/api-utils'
 import { cn } from '@/lib/utils'
 import { getErrorMessage } from '@/lib/http-errors'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
@@ -50,7 +51,8 @@ export default function CustomEmojiPage() {
   const { t } = useTranslation()
   const { data: packs, isLoading } = useQuery<ReadonlyArray<CustomEmojiPack>>({
     queryKey: PACKS_KEY,
-    queryFn: async () => (await api.get<ReadonlyArray<CustomEmojiPack>>('/admin/custom-emoji/packs')).data,
+    queryFn: async () =>
+      expectArray<CustomEmojiPack>((await api.get('/admin/custom-emoji/packs')).data),
   })
 
   return (

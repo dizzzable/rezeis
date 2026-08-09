@@ -8,14 +8,15 @@
  *   - Otherwise, if `children` is a string, it's used directly.
  *   - For React node children that aren't strings, animations that need
  *     a string ("decrypted", "blur", "glitch", "scrambled", "rotating",
- *     "trueFocus", "fuzzy") fall back to rendering the children plainly,
- *     because they cannot animate arbitrary JSX.
+ *     "trueFocus", "fuzzy", "shuffle", "typewriter", "proximity") fall back
+ *     to rendering the children plainly, because they cannot animate
+ *     arbitrary JSX. See STRING_ONLY_ANIMATIONS.
  *
  * Usage:
  *   <TitleEffect>{t('dashboardPage.title')}</TitleEffect>
  *   <TitleEffect text="Static text" />
  */
-import { lazy, Suspense, type ReactNode } from 'react'
+import { lazy, Suspense, useRef, type ReactNode } from 'react'
 import { motion } from 'motion/react'
 import { useAppearanceStore } from '@/lib/theme/appearance-store'
 import {
@@ -34,6 +35,9 @@ const FuzzyText = lazy(() => import('@/components/reactbits/FuzzyText'))
 const RotatingText = lazy(() => import('@/components/reactbits/RotatingText'))
 const TrueFocus = lazy(() => import('@/components/reactbits/TrueFocus'))
 const ScrambledText = lazy(() => import('@/components/reactbits/ScrambledText'))
+const Shuffle = lazy(() => import('@/components/reactbits/Shuffle'))
+const TextType = lazy(() => import('@/components/reactbits/TextType'))
+const VariableProximity = lazy(() => import('@/components/reactbits/VariableProximity'))
 
 // ── Props ────────────────────────────────────────────────────────────────────
 
@@ -47,9 +51,20 @@ interface TitleEffectProps {
   disabled?: boolean
 }
 
-/** Animations that need a plain string and cannot animate JSX. */
+/**
+ * Animations that need a plain string and cannot animate JSX.
+ *
+ * This set is also the empty-string guard. `TextType` reads
+ * `textArray[currentTextIndex].length` with no guard of its own, which throws
+ * on `''`; `Shuffle` takes `text: string` and `VariableProximity` takes
+ * `label: string`. Membership here routes all three through the
+ * `hasUsableString` check in `TitleEffect` below, which returns plain markup
+ * BEFORE the `<Suspense>` boundary — so those components are never constructed
+ * with an empty string.
+ */
 const STRING_ONLY_ANIMATIONS: ReadonlySet<TextAnimationId> = new Set<TextAnimationId>([
   'decrypted', 'blur', 'glitch', 'scrambled', 'rotating', 'trueFocus', 'fuzzy',
+  'shuffle', 'typewriter', 'proximity',
 ])
 
 // ── Component ────────────────────────────────────────────────────────────────
@@ -177,6 +192,15 @@ function TextAnimationRenderer({ animation, text, className, children }: Rendere
         </span>
       )
 
+    case 'shuffle':
+      return <ShuffleInline text={text} className={className} />
+
+    case 'typewriter':
+      return <TypewriterInline text={text} className={className} />
+
+    case 'proximity':
+      return <VariableProximityInline text={text} className={className} />
+
     case 'none':
     default:
       return <span className={className}>{children ?? text}</span>
@@ -200,6 +224,125 @@ function ShinyTextInline({ children, className }: { children: ReactNode; classNa
       }}
     >
       {children}
+    </span>
+  )
+}
+
+// ── Shuffle (reactbits/Shuffle) ──────────────────────────────────────────────
+
+/**
+ * Every token below is load-bearing; none of it is decoration.
+ *
+ * `tag="span"` — the component defaults to `<p>`, which is a block element and
+ * is invalid inside the `<h1>` both call sites render.
+ *
+ * `font-[inherit]!` — twice. It restores the theme font (the component stamps
+ * `fontFamily: computedFont` onto every split char), and it satisfies the
+ * component's own `userHasFont = /font[-[]/i.test(className)` test, which is
+ * the only thing suppressing its `'Press Start 2P'` fallback. That face is not
+ * a dependency of this app, so without the token every heading using this
+ * effect would fall through to the generic `sans-serif`.
+ *
+ * The `!` on all four is not cargo cult. The component bakes
+ * `uppercase text-2xl leading-none` into its own class list, and utilities at
+ * equal specificity are resolved by STYLESHEET order, not class-attribute
+ * order. In the emitted `@layer utilities` block, `.uppercase` is written
+ * AFTER `.normal-case` — so an unprefixed `normal-case` loses and the heading
+ * renders in caps. Same reasoning as the `glitch` case above.
+ *
+ * `visible!` — the component renders itself `invisible` until its ScrollTrigger
+ * fires `onEnter`. Under `prefers-reduced-motion: reduce` that callback is
+ * never scheduled at all (the `useGSAP` body returns before `setReady(true)`),
+ * so the heading would stay `visibility: hidden` permanently for exactly the
+ * users least able to work around it.
+ */
+function ShuffleInline({ text, className }: { text: string; className?: string }) {
+  return (
+    <Shuffle
+      text={text}
+      tag="span"
+      textAlign="inherit"
+      className={cn(
+        'font-[inherit]! text-[length:inherit]! leading-[inherit]! normal-case! visible!',
+        className,
+      )}
+      shuffleDirection="right"
+      duration={0.35}
+      stagger={0.03}
+      shuffleTimes={1}
+      animationMode="evenodd"
+      triggerOnHover
+    />
+  )
+}
+
+// ── Typewriter (reactbits/TextType) ──────────────────────────────────────────
+
+/**
+ * `as="span"` — the component defaults to `'div'`, a block element inside an
+ * `<h1>`.
+ *
+ * `loop={false}` — the component's default is `true`. Left alone it types the
+ * page title, pauses, deletes it character by character and retypes it, for as
+ * long as the page is open.
+ *
+ * The two-cell grid is the layout-shift fix. The component starts from
+ * `displayedText === ''`, so the heading has no width until the first character
+ * lands. The `opacity-0` copy occupies the same grid cell and reserves the
+ * final line box from the first frame; it also stays in the accessibility tree
+ * while the animated copy is `aria-hidden`, so assistive tech gets one stable
+ * string instead of one announcement per keystroke. `inline-grid` keeps this
+ * inline-level — a `grid` here would be the block element the contract forbids.
+ */
+function TypewriterInline({ text, className }: { text: string; className?: string }) {
+  return (
+    <span className={cn('inline-grid', className)}>
+      <span className="col-start-1 row-start-1 opacity-0">{text}</span>
+      <span aria-hidden="true" className="col-start-1 row-start-1">
+        <TextType
+          as="span"
+          text={text}
+          loop={false}
+          typingSpeed={50}
+          initialDelay={0}
+          showCursor
+          cursorBlinkDuration={0.5}
+          hideCursorWhileTyping={false}
+        />
+      </span>
+    </span>
+  )
+}
+
+// ── Variable Proximity (reactbits/VariableProximity) ─────────────────────────
+
+/**
+ * The component measures the pointer against a `containerRef` it does not own.
+ * `TitleEffect` has no such element, so one is rendered here — an inline
+ * `<span>`, because the contract is that this renders inside a heading that
+ * already sets size and weight.
+ *
+ * The two font-variation strings are wiring constants, not operator controls:
+ * they are raw CSS axis syntax, and `'wght' 400` → `'wght' 900` is the only
+ * axis every installed face carries. The nine `@fontsource-variable/*` families
+ * are all imported through their `wght.css` entry (`font-weight: 100 900`,
+ * `woff2-variations`). `@fontsource/ibm-plex-mono` is static — a variation
+ * setting it has no axis for is simply not applied, which is a no-op, not an
+ * error.
+ */
+function VariableProximityInline({ text, className }: { text: string; className?: string }) {
+  const boxRef = useRef<HTMLSpanElement | null>(null)
+
+  return (
+    <span ref={boxRef} className={cn('inline', className)}>
+      <VariableProximity
+        label={text}
+        containerRef={boxRef}
+        fromFontVariationSettings="'wght' 400"
+        toFontVariationSettings="'wght' 900"
+        radius={80}
+        falloff="gaussian"
+      />
     </span>
   )
 }

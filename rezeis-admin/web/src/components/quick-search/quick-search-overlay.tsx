@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 import { useQuery } from '@tanstack/react-query';
 import { Search, User, CreditCard, Tag, Handshake, Compass, Loader2, X } from 'lucide-react';
 import { api } from '@/lib/api';
+import { expectArray } from '@/lib/api-utils';
 import { cn } from '@/lib/utils';
 import { Dialog, DialogContent } from '@/components/ui/dialog';
 import { Badge } from '@/components/ui/badge';
@@ -39,8 +40,8 @@ const TYPE_META: Record<
 
 async function fetchSearch(q: string): Promise<SearchResult[]> {
   if (q.length < 2) return [];
-  const res = await api.get<SearchResult[]>('/admin/quick-search', { params: { q, limit: 12 } });
-  return res.data;
+  const res = await api.get('/admin/quick-search', { params: { q, limit: 12 } });
+  return expectArray<SearchResult>(res.data);
 }
 
 /** Module-level constant so its identity is stable across renders. */

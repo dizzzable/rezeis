@@ -1,5 +1,7 @@
-import { useRef, useEffect } from 'react';
+import { useRef, useEffect, useState } from 'react';
 import { Renderer, Camera, Transform, Program, Mesh, Geometry } from 'ogl';
+
+import { resolveBufferRatio } from './render-scale';
 
 function hexToRgb(hex: string): [number, number, number] {
   const r = parseInt(hex.slice(1, 3), 16) / 255;
@@ -133,14 +135,22 @@ export default function PlasmaWave(props: PlasmaWaveProps) {
   propsRef.current = props;
 
   const containerRef = useRef<HTMLDivElement>(null);
+  // Bumped by `webglcontextrestored` to re-run the effect below. OGL keeps every
+  // GL handle inside Renderer/Program/Geometry and caches driver state on the
+  // Renderer, none of which survive a context loss and none of which it can
+  // reset — so the only honest recovery is to build the whole thing again.
+  const [glGeneration, setGlGeneration] = useState(0);
 
   useEffect(() => {
     const ctn = containerRef.current;
     if (!ctn) return;
 
+    // The ratio BEFORE the device-pixel budget; `resize` reduces it when the
+    // box is large enough to need it.
+    const baseDpr = Math.min(window.devicePixelRatio || 1, 1.5);
     const renderer = new Renderer({
       alpha: true,
-      dpr: Math.min(window.devicePixelRatio, 1.5),
+      dpr: baseDpr,
       antialias: false,
       depth: false,
       stencil: false,
@@ -189,6 +199,12 @@ export default function PlasmaWave(props: PlasmaWaveProps) {
     function resize() {
       if (!ctn) return;
       const { width, height } = ctn.getBoundingClientRect();
+      // Cap the DRAWING BUFFER, never the CSS box: `setSize` writes
+      // `canvas.style.width/height` from the width/height passed in and
+      // multiplies only `canvas.width/height` by `dpr`. Every feature this
+      // shader draws is a fraction of `iResolution`, so the picture is the same
+      // one at a lower sampling density. See `render-scale.ts`.
+      renderer.dpr = resolveBufferRatio(width, height, baseDpr);
       renderer.setSize(width, height);
       uniformResolution[0] = width * renderer.dpr;
       uniformResolution[1] = height * renderer.dpr;
@@ -200,9 +216,11 @@ export default function PlasmaWave(props: PlasmaWaveProps) {
     resize();
 
     const startTime = performance.now();
-    let animateId: number;
+    let animateId = 0;
+    let contextLost = false;
 
     const update = (now: number) => {
+      if (contextLost) return;
       const {
         xOffset: xOff = 0,
         yOffset: yOff = 0,
@@ -233,17 +251,40 @@ export default function PlasmaWave(props: PlasmaWaveProps) {
       animateId = requestAnimationFrame(update);
     };
 
+    // Without preventDefault the browser never fires `webglcontextrestored`,
+    // so a recoverable loss becomes permanent.
+    const handleContextLost = (event: Event) => {
+      event.preventDefault();
+      contextLost = true;
+      cancelAnimationFrame(animateId);
+    };
+    // Restarting the loop alone would draw with handles the loss detached.
+    // Re-running the effect tears this renderer down (freeing its slot) and
+    // builds a fresh one, so the count of live contexts stays flat.
+    const handleContextRestored = () => {
+      setGlGeneration(generation => generation + 1);
+    };
+    const canvas = gl.canvas as HTMLCanvasElement;
+    canvas.addEventListener('webglcontextlost', handleContextLost);
+    canvas.addEventListener('webglcontextrestored', handleContextRestored);
+
     animateId = requestAnimationFrame(update);
 
     return () => {
       cancelAnimationFrame(animateId);
       ro.disconnect();
+      // Listeners come off before loseContext, or handleContextRestored would
+      // fire during teardown and rebuild everything we are about to free.
+      canvas.removeEventListener('webglcontextlost', handleContextLost);
+      canvas.removeEventListener('webglcontextrestored', handleContextRestored);
       if (ctn && gl.canvas.parentNode === ctn) {
         ctn.removeChild(gl.canvas);
       }
       gl.getExtension('WEBGL_lose_context')?.loseContext();
     };
-  }, []);
+    // Every prop is read through `propsRef` inside the render loop, so nothing
+    // but a replaced GL context may rebuild this renderer.
+  }, [glGeneration]);
 
   return <div ref={containerRef} className="w-full h-full" />;
 }

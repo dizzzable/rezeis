@@ -5,6 +5,7 @@ import { toast } from 'sonner'
 import { Save, Loader2, Plus, Pencil, Trash2, Eye, EyeOff, Bot } from 'lucide-react'
 
 import { api } from '@/lib/api'
+import { expectArray } from '@/lib/api-utils'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -134,7 +135,8 @@ export default function AiSupportPage() {
 
   const { data: instructions, isLoading: instructionsLoading } = useQuery<AiInstruction[]>({
     queryKey: ['admin', 'ai-instructions'],
-    queryFn: async () => (await api.get<AiInstruction[]>('/admin/ai-instructions')).data,
+    queryFn: async () =>
+      expectArray<AiInstruction>((await api.get('/admin/ai-instructions')).data),
   })
 
   const updateSettingsMutation = useMutation({

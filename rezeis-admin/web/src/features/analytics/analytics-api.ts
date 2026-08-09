@@ -1,4 +1,5 @@
 import { api } from '@/lib/api'
+import { expectArray, unwrapPayload } from '@/lib/api-utils'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -88,22 +89,18 @@ export async function getAnalyticsOverview(days: number): Promise<AdvancedAnalyt
 }
 
 export async function getAnalyticsCohorts(): Promise<readonly CohortRow[]> {
-  const response = await api.get<{ cohorts: readonly CohortRow[] }>('/admin/analytics/cohorts')
-  return response.data.cohorts
+  const response = await api.get('/admin/analytics/cohorts')
+  return expectArray<CohortRow>(unwrapPayload(response.data).cohorts)
 }
 
 export async function getTopPayers(limit = 20): Promise<readonly TopPayer[]> {
-  const response = await api.get<{ payers: readonly TopPayer[] }>(
-    `/admin/analytics/top-payers?limit=${limit}`,
-  )
-  return response.data.payers
+  const response = await api.get(`/admin/analytics/top-payers?limit=${limit}`)
+  return expectArray<TopPayer>(unwrapPayload(response.data).payers)
 }
 
 export async function getLtvDistribution(): Promise<readonly LtvBucket[]> {
-  const response = await api.get<{ buckets: readonly LtvBucket[] }>(
-    '/admin/analytics/ltv-distribution',
-  )
-  return response.data.buckets
+  const response = await api.get('/admin/analytics/ltv-distribution')
+  return expectArray<LtvBucket>(unwrapPayload(response.data).buckets)
 }
 
 // ── Phase 8 — New endpoints ──────────────────────────────────────────────────
@@ -139,13 +136,13 @@ export async function getTrialConversion(days: number): Promise<TrialConversionR
 }
 
 export async function getRevenueByCurrency(days: number): Promise<readonly RevenueByCurrency[]> {
-  const response = await api.get<readonly RevenueByCurrency[]>(`/admin/analytics/revenue-by-currency?days=${days}`)
-  return response.data
+  const response = await api.get(`/admin/analytics/revenue-by-currency?days=${days}`)
+  return expectArray<RevenueByCurrency>(response.data)
 }
 
 export async function getSubscriptionsByPlan(): Promise<readonly SubscriptionByPlan[]> {
-  const response = await api.get<readonly SubscriptionByPlan[]>('/admin/analytics/subscriptions-by-plan')
-  return response.data
+  const response = await api.get('/admin/analytics/subscriptions-by-plan')
+  return expectArray<SubscriptionByPlan>(response.data)
 }
 
 // ── Usage surfaces ───────────────────────────────────────────────────────────

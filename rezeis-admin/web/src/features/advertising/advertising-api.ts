@@ -1,4 +1,5 @@
 import { api } from '@/lib/api'
+import { expectArray } from '@/lib/api-utils'
 
 export type AdPlatform =
   | 'TELEGRAM'
@@ -202,7 +203,7 @@ export const getAdOverview = () =>
   api.get<AdOverview>('/admin/advertising/overview').then((r) => r.data)
 
 export const listAdCampaigns = () =>
-  api.get<AdCampaign[]>('/admin/advertising/campaigns').then((r) => r.data)
+  api.get('/admin/advertising/campaigns').then((r) => expectArray<AdCampaign>(r.data))
 
 export const createAdCampaign = (input: CreateCampaignInput) =>
   api.post<AdCampaign>('/admin/advertising/campaigns', input).then((r) => r.data)
@@ -234,13 +235,13 @@ export const getPlacementMetrics = (id: string) =>
 
 export const getPlacementChartData = (id: string, days = 14) =>
   api
-    .get<AdChartPoint[]>(`/admin/advertising/placements/${id}/chart-data`, { params: { days } })
-    .then((r) => r.data)
+    .get(`/admin/advertising/placements/${id}/chart-data`, { params: { days } })
+    .then((r) => expectArray<AdChartPoint>(r.data))
 
 export const listAdRequests = (status?: string) =>
   api
-    .get<AdPlacementRequest[]>('/admin/advertising/requests', { params: status ? { status } : {} })
-    .then((r) => r.data)
+    .get('/admin/advertising/requests', { params: status ? { status } : {} })
+    .then((r) => expectArray<AdPlacementRequest>(r.data))
 
 export interface ModerateRequestResult {
   request: AdPlacementRequest

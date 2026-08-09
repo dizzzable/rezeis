@@ -22,6 +22,40 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { BG_COMPONENTS, BG_LOADERS } from './backgrounds'
 
+/**
+ * The one background whose module DOES schedule a frame when it is merely
+ * imported — found the moment this sweep stopped testing four hand-picked ids
+ * and started testing every id in `BG_LOADERS`.
+ *
+ * `DotGrid.tsx` is the only background that imports gsap, and THE IMPORT IS THE
+ * PROBLEM, not anything the component does with it. gsap-core ends with
+ *
+ *     _coreReady = 1;
+ *     _windowExists() && _wake();          // gsap-core.js, v3.15.0
+ *
+ * — a top-level statement that starts gsap's global ticker, i.e. a
+ * `requestAnimationFrame` loop it owns for the whole page, the moment the
+ * module is evaluated in anything with a `window`. So an operator whose
+ * background is Dot Grid gets a rAF loop started on the LOGIN SCREEN by the
+ * idle prefetch, which is exactly what the prefetch was designed not to do. It
+ * is a small loop that gsap puts back to sleep when no tween is running, and it
+ * is still the invariant broken.
+ *
+ * Read this before proposing the obvious fix: moving the top-level
+ * `gsap.registerPlugin(InertiaPlugin)` into the component DOES NOT HELP.
+ * Measured, not assumed — a bare `await import('gsap')` with `registerPlugin`
+ * never called schedules a frame on its own. The only fix that makes the module
+ * inert is to make the gsap import itself dynamic (inside the mount effect),
+ * which means null-guarding the six `gsap.*` call sites in DotGrid's pointer
+ * handlers and accepting that inertia is dead for the first few frames after
+ * mount. That is a behaviour change in a component that is otherwise frozen, so
+ * it is named here rather than done in passing.
+ *
+ * No GL context is created either way — that half holds for every module, with
+ * no exemptions.
+ */
+const SCHEDULES_A_FRAME_ON_IMPORT: ReadonlySet<string> = new Set(['dotGrid'])
+
 let contexts: string[]
 let frames: number
 
@@ -53,17 +87,47 @@ describe('BG_LOADERS', () => {
     expect(componentIds.length).toBeGreaterThan(15)
   })
 
-  it.each(['liquidChrome', 'silk', 'beams', 'dither'] as const)(
+  it('still covers the modules that made this test necessary', () => {
+    // The sweep below is derived from BG_LOADERS, so it can never miss a newly
+    // added background — but a derived list can also quietly shrink. These four
+    // are the ones with a documented reason to be here: `dither` for its
+    // top-level `wrapEffect(...)` call, `silk`/`beams` for the ~950 KB three
+    // stack they pull, `liquidChrome` because it is the default and therefore
+    // the one the login screen actually prefetches.
+    expect(Object.keys(BG_LOADERS)).toEqual(
+      expect.arrayContaining(['liquidChrome', 'silk', 'beams', 'dither']),
+    )
+  })
+
+  it.each(Object.keys(BG_LOADERS) as (keyof typeof BG_LOADERS)[])(
     'importing %s creates no GL context and schedules no frame',
     async (id) => {
       const mod = await BG_LOADERS[id]()
 
       // The module really did evaluate — otherwise this test proves nothing.
       expect(typeof mod.default).toBe('function')
-      // …and evaluating it touched neither the GPU nor the frame loop.
+      // …and evaluating it touched neither the GPU…
       expect(contexts).toEqual([])
-      expect(frames).toBe(0)
+      // …nor the frame loop. One module does, and is named rather than
+      // excused: see SCHEDULES_A_FRAME_ON_IMPORT.
+      if (SCHEDULES_A_FRAME_ON_IMPORT.has(id)) {
+        // Pinned in the other direction too. The day the import goes quiet —
+        // a gsap version that no longer wakes on `registerPlugin`, or the call
+        // moving inside the component — this fails and the exemption has to be
+        // deleted rather than left behind describing a problem that is gone.
+        expect(frames).toBeGreaterThan(0)
+      } else {
+        expect(frames).toBe(0)
+      }
     },
     30_000,
   )
+
+  it('exempts exactly one module, and only one', () => {
+    expect([...SCHEDULES_A_FRAME_ON_IMPORT]).toEqual(['dotGrid'])
+    // …and it is a background that still exists.
+    for (const id of SCHEDULES_A_FRAME_ON_IMPORT) {
+      expect(Object.keys(BG_LOADERS)).toContain(id)
+    }
+  })
 })

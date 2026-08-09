@@ -1,4 +1,5 @@
 import { api } from '@/lib/api';
+import { expectArray } from '@/lib/api-utils';
 
 export type AutomationTriggerKind = 'REALTIME' | 'CRON' | 'MANUAL';
 export type AutomationExecutionStatus = 'PENDING' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'SKIPPED';
@@ -71,8 +72,8 @@ export async function getCatalog(): Promise<{ actionTypes: AutomationActionType[
 }
 
 export async function listRules(): Promise<AutomationRule[]> {
-  const res = await api.get<AutomationRule[]>(`${BASE}/rules`);
-  return res.data;
+  const res = await api.get(`${BASE}/rules`);
+  return expectArray<AutomationRule>(res.data);
 }
 
 export async function getRule(id: string): Promise<AutomationRule> {

@@ -17,6 +17,7 @@ import {
 import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
+import { expectArray, isRecord } from '@/lib/api-utils'
 import { getErrorMessage } from '@/lib/http-errors'
 import { Card, CardContent } from '@/components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -197,10 +198,16 @@ interface RewardRow {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+/**
+ * The `{ items }` envelope is a real shape this endpoint uses; a bare list is
+ * the other. Anything else — `{}`, an HTML error page served with HTTP 200 —
+ * used to fall through to `[]`, which reads to the operator as "you have no
+ * referrals". `expectArray` makes that case say so out loud instead.
+ */
 function unwrap<T>(raw: ReadonlyArray<T> | { items?: ReadonlyArray<T> } | undefined): readonly T[] {
   if (Array.isArray(raw)) return raw
-  if (raw && typeof raw === 'object' && 'items' in raw) return raw.items ?? []
-  return []
+  if (isRecord(raw) && 'items' in raw) return expectArray<T>(raw.items ?? [])
+  return expectArray<T>(raw)
 }
 
 function deriveInviteStatus(inv: InviteRow): InviteStatus {

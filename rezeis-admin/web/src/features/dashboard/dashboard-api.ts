@@ -1,4 +1,5 @@
 import { api } from '@/lib/api'
+import { expectArray } from '@/lib/api-utils'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -194,13 +195,13 @@ export const dashboardApi = {
   },
 
   async getOnlineTrend(hours = 24): Promise<OnlineTrendPoint[]> {
-    const response = await api.get<OnlineTrendPoint[]>(`/admin/remnawave/metrics/online-trend?hours=${hours}`)
-    return response.data
+    const response = await api.get(`/admin/remnawave/metrics/online-trend?hours=${hours}`)
+    return expectArray<OnlineTrendPoint>(response.data)
   },
 
   async getActivityFeed(limit = 30): Promise<ActivityFeedItem[]> {
-    const response = await api.get<ActivityFeedItem[]>(`/admin/remnawave/metrics/activity-feed?limit=${limit}`)
-    return response.data
+    const response = await api.get(`/admin/remnawave/metrics/activity-feed?limit=${limit}`)
+    return expectArray<ActivityFeedItem>(response.data)
   },
 }
 

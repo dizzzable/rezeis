@@ -123,6 +123,19 @@ export const CARD_EFFECTS = [
   'cube',
   'wordGlobe',
   'particleSphere',
+  // Repaired reactbits — see web/src/features/branding/card-effect-catalog.ts.
+  'colorBends',
+  'pixelBlast',
+  'plasmaWave',
+  'evilEye',
+  'lightPillar',
+  'prismaticBurst',
+  'faultyTerminal',
+  'letterGlitch',
+  'shapeGrid',
+  'magicRings',
+  'laserFlow',
+  'antigravity',
 ] as const;
 export type CardEffect = (typeof CARD_EFFECTS)[number];
 

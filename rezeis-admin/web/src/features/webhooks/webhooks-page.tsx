@@ -14,6 +14,7 @@ import {
   Hourglass,
 } from 'lucide-react'
 
+import { DataUnavailable } from '@/components/data-unavailable'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -65,11 +66,12 @@ export default function WebhooksPage({ embedded = false }: { readonly embedded?:
     staleTime: 10_000,
   })
 
-  const { data: catalog } = useQuery({
+  const catalogQuery = useQuery({
     queryKey: ['webhook-event-catalog'],
     queryFn: getWebhookEventCatalog,
     staleTime: 60_000,
   })
+  const catalog = catalogQuery.data
 
   const { data: deliveries, isLoading: deliveriesLoading } = useQuery({
     queryKey: ['webhook-deliveries', statusFilter],
@@ -102,6 +104,13 @@ export default function WebhooksPage({ embedded = false }: { readonly embedded?:
         subscriptions={subscriptions?.items ?? []}
         loading={subsLoading}
         catalog={catalog ?? []}
+        // An empty catalogue and an unreachable catalogue look identical in
+        // the create form (the "N event types" disclosure simply vanishes),
+        // so the difference is stated instead of implied.
+        catalogUnavailable={
+          catalogQuery.isError || (!catalogQuery.isPending && catalog === undefined)
+        }
+        onCatalogRetry={() => void catalogQuery.refetch()}
         onChanged={invalidateAll}
       />
 
@@ -124,6 +133,8 @@ function SubscriptionsSection(props: {
   subscriptions: readonly WebhookSubscription[]
   loading: boolean
   catalog: readonly string[]
+  catalogUnavailable: boolean
+  onCatalogRetry: () => void
   onChanged: () => void
 }) {
   const { t } = useTranslation()
@@ -135,7 +146,12 @@ function SubscriptionsSection(props: {
         </h2>
       </div>
 
-      <CreateSubscriptionCard catalog={props.catalog} onCreated={props.onChanged} />
+      <CreateSubscriptionCard
+        catalog={props.catalog}
+        catalogUnavailable={props.catalogUnavailable}
+        onCatalogRetry={props.onCatalogRetry}
+        onCreated={props.onChanged}
+      />
 
       {props.loading ? (
         <Skeleton className="h-32 w-full" />
@@ -158,9 +174,13 @@ function SubscriptionsSection(props: {
 
 function CreateSubscriptionCard({
   catalog,
+  catalogUnavailable,
+  onCatalogRetry,
   onCreated,
 }: {
   catalog: readonly string[]
+  catalogUnavailable: boolean
+  onCatalogRetry: () => void
   onCreated: () => void
 }) {
   const { t } = useTranslation()
@@ -232,6 +252,12 @@ function CreateSubscriptionCard({
               value={eventsRaw}
               onChange={(e) => setEventsRaw(e.target.value)}
             />
+            {catalogUnavailable && (
+              <DataUnavailable
+                message={t('webhooksPage.subscriptions.catalogUnavailable')}
+                onRetry={onCatalogRetry}
+              />
+            )}
             {catalog.length > 0 && (
               <details className="text-xs text-muted-foreground">
                 <summary className="cursor-pointer">

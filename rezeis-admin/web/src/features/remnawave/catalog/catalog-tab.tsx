@@ -22,6 +22,7 @@ import {
 } from 'lucide-react'
 
 import { Badge } from '@/components/ui/badge'
+import { DataUnavailable } from '@/components/data-unavailable'
 import {
   Card,
   CardContent,
@@ -45,22 +46,26 @@ import { TabHeader } from '../shared/tab-header'
 
 export function CatalogTab() {
   const { t } = useTranslation()
-  const { data: profiles, isLoading: loadingProfiles } = useQuery({
+  const profilesQuery = useQuery({
     queryKey: KEYS.configProfiles,
     queryFn: remnawaveApi.getConfigProfiles,
   })
-  const { data: templates, isLoading: loadingTemplates } = useQuery({
+  const templatesQuery = useQuery({
     queryKey: KEYS.subscriptionTemplates,
     queryFn: remnawaveApi.getSubscriptionTemplates,
   })
-  const { data: pages, isLoading: loadingPages } = useQuery({
+  const pagesQuery = useQuery({
     queryKey: KEYS.subscriptionPageConfigs,
     queryFn: remnawaveApi.getSubscriptionPageConfigs,
   })
-  const { data: snippets, isLoading: loadingSnippets } = useQuery({
+  const snippetsQuery = useQuery({
     queryKey: KEYS.snippets,
     queryFn: remnawaveApi.getSnippets,
   })
+  const { data: profiles, isLoading: loadingProfiles } = profilesQuery
+  const { data: templates, isLoading: loadingTemplates } = templatesQuery
+  const { data: pages, isLoading: loadingPages } = pagesQuery
+  const { data: snippets, isLoading: loadingSnippets } = snippetsQuery
   const { data: settings } = useQuery({
     queryKey: KEYS.subscriptionSettings,
     queryFn: remnawaveApi.getSubscriptionSettings,
@@ -109,6 +114,8 @@ export function CatalogTab() {
           title={t('remnaWavePage.catalog.profiles.title')}
           description={t('remnaWavePage.catalog.profiles.description', { count: profiles?.length ?? 0 })}
           loading={loadingProfiles}
+          unavailable={profilesQuery.isError || !profiles}
+          onRetry={() => void profilesQuery.refetch()}
           empty={!profiles || profiles.length === 0}
           emptyText={t('remnaWavePage.catalog.profiles.empty')}
         >
@@ -152,6 +159,8 @@ export function CatalogTab() {
           title={t('remnaWavePage.catalog.templates.title')}
           description={t('remnaWavePage.catalog.templates.description', { count: templates?.length ?? 0 })}
           loading={loadingTemplates}
+          unavailable={templatesQuery.isError || !templates}
+          onRetry={() => void templatesQuery.refetch()}
           empty={!templates || templates.length === 0}
           emptyText={t('remnaWavePage.catalog.templates.empty')}
         >
@@ -195,6 +204,8 @@ export function CatalogTab() {
           title={t('remnaWavePage.catalog.pages.title')}
           description={t('remnaWavePage.catalog.pages.description', { count: pages?.length ?? 0 })}
           loading={loadingPages}
+          unavailable={pagesQuery.isError || !pages}
+          onRetry={() => void pagesQuery.refetch()}
           empty={!pages || pages.length === 0}
           emptyText={t('remnaWavePage.catalog.pages.empty')}
         >
@@ -235,6 +246,8 @@ export function CatalogTab() {
           title={t('remnaWavePage.catalog.snippets.title')}
           description={t('remnaWavePage.catalog.snippets.description', { count: snippets?.length ?? 0 })}
           loading={loadingSnippets}
+          unavailable={snippetsQuery.isError || !snippets}
+          onRetry={() => void snippetsQuery.refetch()}
           empty={!snippets || snippets.length === 0}
           emptyText={t('remnaWavePage.catalog.snippets.empty')}
         >
@@ -273,12 +286,31 @@ interface SectionCardProps {
   readonly title: string
   readonly description: string
   readonly loading: boolean
+  /**
+   * The section never got an answer. Takes priority over `empty`: the four
+   * counts in the card headers all read `data?.length ?? 0`, so without this
+   * a failed request renders "0 profiles / No config profiles" — a confident
+   * claim about the operator's panel that nobody actually verified.
+   */
+  readonly unavailable?: boolean
+  readonly onRetry?: () => void
   readonly empty: boolean
   readonly emptyText: string
   readonly children: React.ReactNode
 }
 
-function SectionCard({ icon: Icon, title, description, loading, empty, emptyText, children }: SectionCardProps) {
+function SectionCard({
+  icon: Icon,
+  title,
+  description,
+  loading,
+  unavailable = false,
+  onRetry,
+  empty,
+  emptyText,
+  children,
+}: SectionCardProps) {
+  const { t } = useTranslation()
   return (
     <Card>
       <CardHeader className="pb-2">
@@ -293,6 +325,12 @@ function SectionCard({ icon: Icon, title, description, loading, empty, emptyText
           <div className="flex h-24 items-center justify-center">
             <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" aria-hidden />
           </div>
+        ) : unavailable ? (
+          <DataUnavailable
+            className="mx-6 mb-4"
+            message={t('remnaWavePage.catalog.sectionUnavailable')}
+            onRetry={onRetry}
+          />
         ) : empty ? (
           <p className="px-6 pb-4 text-sm text-muted-foreground">{emptyText}</p>
         ) : (

@@ -1,6 +1,8 @@
 import React, { useRef, useEffect, useState } from 'react';
 import * as THREE from 'three';
 
+import { resolveBufferRatio } from './render-scale';
+
 interface LightPillarProps {
   topColor?: string;
   bottomColor?: string;
@@ -42,16 +44,12 @@ const LightPillar: React.FC<LightPillarProps> = ({
   const mouseRef = useRef<THREE.Vector2>(new THREE.Vector2(0, 0));
   const timeRef = useRef(0);
   const rotationSpeedRef = useRef(rotationSpeed);
+  // Assumed true and disproved by the `try` below rather than by a probe. The
+  // probe that used to stand here opened a SECOND WebGL context on a throwaway
+  // canvas, never released it and never returned it, so every mount of this
+  // component ate two of WebKit's sixteen per-process slots to answer a
+  // question the renderer's own constructor answers by throwing.
   const [webGLSupported, setWebGLSupported] = useState<boolean>(true);
-
-  // Check WebGL support
-  useEffect(() => {
-    const canvas = document.createElement('canvas');
-    const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
-    if (!gl) {
-      setWebGLSupported(false);
-    }
-  }, []);
 
   useEffect(() => {
     if (!containerRef.current || !webGLSupported) return;
@@ -103,8 +101,17 @@ const LightPillar: React.FC<LightPillarProps> = ({
       return;
     }
 
+    // The ratio BEFORE the device-pixel budget; the quality tier picks it, the
+    // budget only ever lowers it.
+    const baseDpr = settings.pixelRatio;
     renderer.setSize(width, height);
-    renderer.setPixelRatio(settings.pixelRatio);
+    // Cap the DRAWING BUFFER, never the CSS box: `setSize` writes
+    // `canvas.style.width/height` from `width`/`height` and multiplies only
+    // `canvas.width/height` by the ratio. This shader marches up to 80 steps
+    // per fragment and everything it draws is derived from `uResolution`, so
+    // the picture is the same one at a lower sampling density. See
+    // `render-scale.ts`.
+    renderer.setPixelRatio(resolveBufferRatio(width, height, baseDpr));
     container.appendChild(renderer.domElement);
     rendererRef.current = renderer;
 
@@ -320,7 +327,10 @@ const LightPillar: React.FC<LightPillarProps> = ({
     const targetFPS = effectiveQuality === 'low' ? 30 : 60;
     const frameTime = 1000 / targetFPS;
 
+    let contextLost = false;
+
     const animate = (currentTime: number) => {
+      if (contextLost) return;
       if (!materialRef.current || !rendererRef.current || !sceneRef.current || !cameraRef.current) return;
 
       const deltaTime = currentTime - lastTime;
@@ -353,16 +363,42 @@ const LightPillar: React.FC<LightPillarProps> = ({
         if (!rendererRef.current || !materialRef.current || !containerRef.current) return;
         const newWidth = containerRef.current.clientWidth;
         const newHeight = containerRef.current.clientHeight;
+        rendererRef.current.setPixelRatio(resolveBufferRatio(newWidth, newHeight, baseDpr));
         rendererRef.current.setSize(newWidth, newHeight);
         materialRef.current.uniforms.uResolution.value.set(newWidth, newHeight);
       }, 150);
     };
 
     window.addEventListener('resize', handleResize, { passive: true });
+    const ro = new ResizeObserver(handleResize);
+    ro.observe(container);
+
+    // three registers its own `webglcontextlost` handler and calls
+    // preventDefault there, and rebuilds every GL resource it owns on
+    // `webglcontextrestored` — so this only has to stop drawing into a dead
+    // context and start again afterwards.
+    const canvas = renderer.domElement;
+    const handleContextLost = (event: Event) => {
+      event.preventDefault();
+      contextLost = true;
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    };
+    const handleContextRestored = () => {
+      contextLost = false;
+      lastTime = performance.now();
+      rafRef.current = requestAnimationFrame(animate);
+    };
+    canvas.addEventListener('webglcontextlost', handleContextLost);
+    canvas.addEventListener('webglcontextrestored', handleContextRestored);
 
     // Cleanup
     return () => {
       window.removeEventListener('resize', handleResize);
+      ro.disconnect();
+      if (resizeTimeout) clearTimeout(resizeTimeout);
+      if (mouseMoveTimeout) clearTimeout(mouseMoveTimeout);
+      canvas.removeEventListener('webglcontextlost', handleContextLost);
+      canvas.removeEventListener('webglcontextrestored', handleContextRestored);
       if (interactive) {
         container.removeEventListener('mousemove', handleMouseMove);
       }

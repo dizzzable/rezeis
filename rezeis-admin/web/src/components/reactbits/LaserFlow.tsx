@@ -1,6 +1,8 @@
 import React, { useEffect, useRef } from 'react';
 import * as THREE from 'three';
 
+import { resolveBufferRatio } from './render-scale';
+
 type Props = {
   className?: string;
   style?: React.CSSProperties;
@@ -300,6 +302,15 @@ export const LaserFlow: React.FC<Props> = ({
   const hasFadedRef = useRef(false);
   const rectRef = useRef<DOMRect | null>(null);
   const baseDprRef = useRef<number>(1);
+  /**
+   * `baseDprRef` reduced by the device-pixel budget for the box currently
+   * measured. It is a SEPARATE ref because `baseDprRef` is fixed at mount,
+   * before any size is known, while the budget can only be resolved once there
+   * is a box to resolve it against — and because the FPS governor below clamps
+   * its recovery to a ceiling, which has to be this one and not the raw ratio,
+   * or a good-frame-rate tick would quietly undo the cap.
+   */
+  const budgetedDprRef = useRef<number>(1);
   const currentDprRef = useRef<number>(1);
   const lastSizeRef = useRef({ width: 0, height: 0, dpr: 0 });
   const fpsSamplesRef = useRef<number[]>([]);
@@ -329,6 +340,7 @@ export const LaserFlow: React.FC<Props> = ({
     rendererRef.current = renderer;
 
     baseDprRef.current = Math.min(dpr ?? (window.devicePixelRatio || 1), 2);
+    budgetedDprRef.current = baseDprRef.current;
     currentDprRef.current = baseDprRef.current;
 
     renderer.setPixelRatio(currentDprRef.current);
@@ -397,6 +409,23 @@ export const LaserFlow: React.FC<Props> = ({
     const setSizeNow = () => {
       const w = mount.clientWidth || 1;
       const h = mount.clientHeight || 1;
+
+      // Cap the DRAWING BUFFER, never the CSS box: the canvas is pinned to
+      // 100%×100% above and `setSize(w, h, false)` leaves `canvas.style`
+      // alone, so only `canvas.width/height` moves with the ratio. The beam is
+      // positioned and sized in fractions of `iResolution`, so the picture is
+      // the same one at a lower sampling density. See `render-scale.ts`.
+      //
+      // This is the A PRIORI half. The governor below is REACTIVE — it only
+      // learns the box was too big after the frame rate has already fallen
+      // over, which on a full-screen mount means seconds of stutter and a
+      // needlessly hot phone before it settles. The budget removes the
+      // overshoot before the first frame; the governor still handles what a
+      // pixel count cannot predict, which is how fast this particular GPU is.
+      budgetedDprRef.current = resolveBufferRatio(w, h, baseDprRef.current);
+      if (currentDprRef.current > budgetedDprRef.current) {
+        currentDprRef.current = budgetedDprRef.current;
+      }
       const pr = currentDprRef.current;
 
       const last = lastSizeRef.current;
@@ -486,12 +515,18 @@ export const LaserFlow: React.FC<Props> = ({
       const avgFps = samples.reduce((a, b) => a + b, 0) / samples.length;
 
       let next = currentDprRef.current;
-      const base = baseDprRef.current;
+      // The BUDGETED ceiling, not the raw one: recovering to `baseDprRef` after
+      // a good stretch would undo the a-priori cap on exactly the oversized
+      // mounts it exists for.
+      const base = budgetedDprRef.current;
+      // `clamp(v, lo, hi)` is `max(lo, min(hi, v))`, so a floor above the
+      // ceiling would win and RAISE the ratio past the budget.
+      const floor = Math.min(dprFloor, base);
 
       if (avgFps < lowerThresh) {
-        next = clamp(currentDprRef.current * 0.85, dprFloor, base);
+        next = clamp(currentDprRef.current * 0.85, floor, base);
       } else if (avgFps > upperThresh && currentDprRef.current < base) {
-        next = clamp(currentDprRef.current * 1.1, dprFloor, base);
+        next = clamp(currentDprRef.current * 1.1, floor, base);
       }
 
       if (Math.abs(next - currentDprRef.current) > 0.01 && now - lastDprChange > dprChangeCooldown) {

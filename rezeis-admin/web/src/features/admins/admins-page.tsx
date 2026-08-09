@@ -8,6 +8,7 @@ import { toast } from 'sonner'
 import { z } from 'zod'
 
 import { api } from '@/lib/api'
+import { expectArray } from '@/lib/api-utils'
 import { formatDateTime } from '@/lib/utils'
 import { useTabSync } from '@/lib/use-tab-sync'
 import { listRoles, type RbacRoleListItem } from '@/features/rbac'
@@ -143,7 +144,7 @@ type EditAdminFormValues = z.infer<typeof editAdminSchema>
 // ─── API helpers ─────────────────────────────────────────────────────────────
 
 async function fetchAdmins(): Promise<readonly Admin[]> {
-  return (await api.get<readonly Admin[]>('/admin/admins')).data
+  return expectArray<Admin>((await api.get('/admin/admins')).data)
 }
 
 interface CreateAdminPayload {

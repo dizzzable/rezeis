@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next'
 import { ChevronDown, ChevronRight, Smile } from 'lucide-react'
 
 import { api } from '@/lib/api'
+import { expectArray } from '@/lib/api-utils'
 import { EmojiPreview } from '@/features/custom-emoji/emoji-preview'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -393,7 +394,7 @@ export function EmojiPicker({
   const { data: packs } = useQuery<ReadonlyArray<CustomEmojiPackLite>>({
     queryKey: ['admin', 'custom-emoji', 'packs'],
     queryFn: async () =>
-      (await api.get<ReadonlyArray<CustomEmojiPackLite>>('/admin/custom-emoji/packs')).data,
+      expectArray<CustomEmojiPackLite>((await api.get('/admin/custom-emoji/packs')).data),
     enabled: open,
     staleTime: 60_000,
   })

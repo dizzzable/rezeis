@@ -1,4 +1,5 @@
 import { api } from '@/lib/api';
+import { expectArray } from '@/lib/api-utils';
 
 export type FraudSeverity = 'LOW' | 'MEDIUM' | 'HIGH';
 export type FraudStatus = 'OPEN' | 'ACKNOWLEDGED' | 'RESOLVED' | 'DISMISSED';
@@ -66,8 +67,8 @@ export interface FraudTrendPoint {
 }
 
 export async function getFraudTrend(days = 14): Promise<FraudTrendPoint[]> {
-  const res = await api.get<FraudTrendPoint[]>(`${BASE}/trend`, { params: { days } });
-  return res.data;
+  const res = await api.get(`${BASE}/trend`, { params: { days } });
+  return expectArray<FraudTrendPoint>(res.data);
 }
 
 export interface FraudSharingOffender {
@@ -84,8 +85,8 @@ export interface FraudSharingOffender {
 }
 
 export async function getFraudTopOffenders(limit = 10): Promise<FraudSharingOffender[]> {
-  const res = await api.get<FraudSharingOffender[]>(`${BASE}/top-offenders`, { params: { limit } });
-  return res.data;
+  const res = await api.get(`${BASE}/top-offenders`, { params: { limit } });
+  return expectArray<FraudSharingOffender>(res.data);
 }
 
 export async function transitionFraudSignal(
@@ -155,15 +156,15 @@ export interface FraudExemption {
 }
 
 export async function getPendingFraudCandidates(limit = 50): Promise<PendingFraudCandidate[]> {
-  const res = await api.get<PendingFraudCandidate[]>(`${BASE}/pending`, { params: { limit } });
-  return res.data;
+  const res = await api.get(`${BASE}/pending`, { params: { limit } });
+  return expectArray<PendingFraudCandidate>(res.data);
 }
 
 export async function listFraudExemptions(
   params: { userId?: string; activeOnly?: boolean } = {},
 ): Promise<FraudExemption[]> {
-  const res = await api.get<FraudExemption[]>(`${BASE}/exemptions`, { params });
-  return res.data;
+  const res = await api.get(`${BASE}/exemptions`, { params });
+  return expectArray<FraudExemption>(res.data);
 }
 
 /** `expiresAt` is an ISO date — the API rejects a missing or past one. */
@@ -257,6 +258,6 @@ export interface SignalLiveIpNode {
 
 /** Live per-node source IPs for a signal's user (ip-control drilldown). */
 export async function getSignalLiveIps(signalId: string): Promise<SignalLiveIpNode[]> {
-  const res = await api.get<SignalLiveIpNode[]>(`${BASE}/signals/${signalId}/live-ips`);
-  return res.data;
+  const res = await api.get(`${BASE}/signals/${signalId}/live-ips`);
+  return expectArray<SignalLiveIpNode>(res.data);
 }

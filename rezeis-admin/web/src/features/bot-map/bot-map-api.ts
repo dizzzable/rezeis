@@ -8,6 +8,7 @@
  * already-shipped CRUD endpoints.
  */
 import { api } from '@/lib/api'
+import { expectArray } from '@/lib/api-utils'
 import type { BotMapPayload, UpdateNotificationTemplatePatch } from './types'
 
 export const BOT_MAP_QUERY_KEY = ['bot-map'] as const
@@ -25,8 +26,8 @@ export interface BotBannerView {
 
 /** Fetch the reusable banner library. */
 export async function fetchBanners(): Promise<readonly BotBannerView[]> {
-  const res = await api.get<readonly BotBannerView[]>('/admin/bot-config/banners')
-  return res.data
+  const res = await api.get('/admin/bot-config/banners')
+  return expectArray<BotBannerView>(res.data)
 }
 
 /** Upload a banner into the library and return the created entry. */

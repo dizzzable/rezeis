@@ -6,6 +6,7 @@ import { HelpCircle, Plus, Pencil, Trash2, Loader2, Save, ImageIcon, Video } fro
 import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
+import { expectArray } from '@/lib/api-utils'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -90,7 +91,7 @@ export default function FaqPage(): JSX.Element {
 
   const { data: items, isLoading } = useQuery({
     queryKey: ['admin', 'faq'],
-    queryFn: async () => (await api.get<readonly FaqItem[]>('/admin/faq')).data,
+    queryFn: async () => expectArray<FaqItem>((await api.get('/admin/faq')).data),
   })
 
   const createMutation = useMutation({

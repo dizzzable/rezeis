@@ -21,6 +21,7 @@ import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, type JSX }
 import { useQuery } from '@tanstack/react-query'
 
 import { api } from '@/lib/api'
+import { expectArray } from '@/lib/api-utils'
 import { cn } from '@/lib/utils'
 import { parseTokens, type TokenSegment } from './emoji-token-text'
 
@@ -61,12 +62,15 @@ export const EmojiTextEditor = forwardRef<EmojiTextEditorHandle, EmojiTextEditor
     const { data: packs } = useQuery<ReadonlyArray<{ emojis: readonly PackEmojiLite[] }>>({
       queryKey: PACKS_KEY,
       queryFn: async () =>
-        (await api.get<ReadonlyArray<{ emojis: readonly PackEmojiLite[] }>>('/admin/custom-emoji/packs')).data,
+        expectArray<{ emojis: readonly PackEmojiLite[] }>(
+          (await api.get('/admin/custom-emoji/packs')).data,
+        ),
       staleTime: 60_000,
     })
     const { data: emojis } = useQuery<ReadonlyArray<BotEmojiLite>>({
       queryKey: EMOJIS_KEY,
-      queryFn: async () => (await api.get<ReadonlyArray<BotEmojiLite>>('/admin/bot-config/emojis')).data,
+      queryFn: async () =>
+        expectArray<BotEmojiLite>((await api.get('/admin/bot-config/emojis')).data),
       staleTime: 60_000,
     })
 

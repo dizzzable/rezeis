@@ -1,4 +1,5 @@
 import { api } from '@/lib/api'
+import { expectArray } from '@/lib/api-utils'
 
 export type QuestType =
   | 'LINK_TELEGRAM'
@@ -76,7 +77,8 @@ export interface QuestPayload {
   readonly enabled?: boolean
 }
 
-export const listQuests = () => api.get<Quest[]>('/admin/quests').then((r) => r.data)
+export const listQuests = () =>
+  api.get('/admin/quests').then((r) => expectArray<Quest>(r.data))
 
 export const createQuest = (payload: QuestPayload) =>
   api.post<Quest>('/admin/quests', payload).then((r) => r.data)
@@ -88,10 +90,10 @@ export const deleteQuest = (id: string) =>
   api.delete(`/admin/quests/${encodeURIComponent(id)}`).then((r) => r.data)
 
 export const reorderQuests = (orderedIds: string[]) =>
-  api.post<Quest[]>('/admin/quests/reorder', { orderedIds }).then((r) => r.data)
+  api.post('/admin/quests/reorder', { orderedIds }).then((r) => expectArray<Quest>(r.data))
 
 export const listQuestIcons = () =>
-  api.get<QuestIconAsset[]>('/admin/quests/icons/list').then((r) => r.data)
+  api.get('/admin/quests/icons/list').then((r) => expectArray<QuestIconAsset>(r.data))
 
 export const uploadQuestIcon = (file: File) => {
   const form = new FormData()

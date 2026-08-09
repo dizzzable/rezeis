@@ -25,6 +25,8 @@ const BlobCursor = lazy(() => import('@/components/reactbits/BlobCursor'))
 const GhostCursor = lazy(() => import('@/components/reactbits/GhostCursor'))
 const Crosshair = lazy(() => import('@/components/reactbits/Crosshair'))
 const PixelTrail = lazy(() => import('@/components/reactbits/PixelTrail'))
+const TargetCursor = lazy(() => import('@/components/reactbits/TargetCursor'))
+const TextCursor = lazy(() => import('@/components/reactbits/TextCursor'))
 
 // ── Provider ─────────────────────────────────────────────────────────────────
 
@@ -115,6 +117,53 @@ function CursorEffectRenderer({ effect }: { effect: CursorEffectId }) {
         </FixedOverlay>
       )
 
+    // TargetCursor renders its OWN `fixed top-0 left-0 pointer-events-none
+    // z-[9999]` root and binds every listener to `window`, exactly like
+    // Crosshair — so it mounts bare. Wrapping it in FixedOverlay would nest a
+    // fixed root inside a fixed root for no benefit.
+    //
+    // It hides the system cursor (`document.body.style.cursor = 'none'`) and
+    // restores the previous value from its effect cleanup, and it returns
+    // `null` outright on touch/small screens, so it never strands a
+    // touch-device operator without a pointer.
+    //
+    // `.cursor-target` is a wiring constant, not an operator control — the
+    // snap-to-element half of the effect only engages for elements carrying
+    // that class. See the note in the report: nothing in `src/` carries it yet.
+    case 'target':
+      return (
+        <div aria-hidden="true">
+          <TargetCursor
+            targetSelector=".cursor-target"
+            spinDuration={2}
+            hideDefaultCursor={true}
+            hoverDuration={0.2}
+            parallaxOn={true}
+          />
+        </div>
+      )
+
+    // TextCursor's root is `w-full h-full relative` — it has no positioning of
+    // its own and needs the overlay to be viewport-sized. That also makes the
+    // container rect origin (0,0), which is what its `e.clientX - rect.left`
+    // arithmetic assumes. Its pointer listener is bound to `window` (it used
+    // to be bound to the container, which `pointer-events: none` made
+    // unreachable — see TextCursor.tsx).
+    case 'textTrail':
+      return (
+        <FixedOverlay>
+          <TextCursor
+            text="⚛️"
+            spacing={100}
+            followMouseDirection={true}
+            randomFloat={true}
+            exitDuration={0.5}
+            removalInterval={30}
+            maxPoints={5}
+          />
+        </FixedOverlay>
+      )
+
     default:
       return null
   }
@@ -128,10 +177,6 @@ function ClickEffectRenderer({ effect }: { effect: ClickEffectId }) {
       return null
     case 'spark':
       return <ClickSparkOverlay color="#aa1d8b" count={10} radius={25} duration={500} />
-    case 'starBorder':
-      // Star Border requires per-element integration, not a global overlay.
-      // Reserved for future implementation.
-      return null
     default:
       return null
   }

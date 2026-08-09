@@ -1,6 +1,8 @@
 import { useEffect, useRef } from 'react';
 import * as THREE from 'three';
 
+import { resolveBufferRatio } from './render-scale';
+
 const vertexShader = `
 void main() {
   gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
@@ -127,15 +129,15 @@ export default function MagicRings({
     const mount = mountRef.current;
     if (!mount) return;
 
+    // The `try` is the WebGL2 check. three r184 asks for a `webgl2` context
+    // and THROWS from the constructor when it cannot get one; the
+    // `capabilities.isWebGL2` guard that used to stand here was dead code —
+    // r184 hardcodes that field to `true` "for backwards compatibility"
+    // (`three.module.js`), so the branch could never be taken.
     let renderer: THREE.WebGLRenderer;
     try {
       renderer = new THREE.WebGLRenderer({ alpha: true });
     } catch {
-      return;
-    }
-
-    if (!renderer.capabilities.isWebGL2) {
-      renderer.dispose();
       return;
     }
 
@@ -175,16 +177,23 @@ export default function MagicRings({
     const quad = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), material);
     scene.add(quad);
 
+    // The ratio BEFORE the device-pixel budget.
+    const baseDpr = Math.min(window.devicePixelRatio || 1, 2);
+
     const resize = () => {
       const w = mount.clientWidth;
       const h = mount.clientHeight;
-      const dpr = Math.min(window.devicePixelRatio, 2);
+      // Cap the DRAWING BUFFER, never the CSS box: `setSize` writes
+      // `canvas.style.width/height` from `w`/`h` and multiplies only
+      // `canvas.width/height` by the ratio. Ring radii are fractions of the
+      // shorter axis of `uResolution`, so the picture is the same one at a
+      // lower sampling density. See `render-scale.ts`.
+      const dpr = resolveBufferRatio(w, h, baseDpr);
       renderer.setSize(w, h);
       renderer.setPixelRatio(dpr);
       uniforms.uResolution.value.set(w * dpr, h * dpr);
     };
     resize();
-    window.addEventListener('resize', resize);
 
     const ro = new ResizeObserver(resize);
     ro.observe(mount);
@@ -207,8 +216,10 @@ export default function MagicRings({
     mount.addEventListener('mouseleave', onMouseLeave);
     mount.addEventListener('click', onClick);
 
-    let frameId: number;
+    let frameId = 0;
+    let contextLost = false;
     const animate = (t: number) => {
+      if (contextLost) return;
       frameId = requestAnimationFrame(animate);
       const p = propsRef.current!;
 
@@ -242,19 +253,46 @@ export default function MagicRings({
 
       renderer.render(scene, camera);
     };
+    // three registers its own `webglcontextlost` handler and calls
+    // preventDefault there, and rebuilds every GL resource it owns on
+    // `webglcontextrestored` — so this only has to stop drawing into a dead
+    // context and start again afterwards.
+    const canvas = renderer.domElement;
+    const handleContextLost = (event: Event) => {
+      event.preventDefault();
+      contextLost = true;
+      cancelAnimationFrame(frameId);
+    };
+    const handleContextRestored = () => {
+      contextLost = false;
+      resize();
+      frameId = requestAnimationFrame(animate);
+    };
+    canvas.addEventListener('webglcontextlost', handleContextLost);
+    canvas.addEventListener('webglcontextrestored', handleContextRestored);
+
     frameId = requestAnimationFrame(animate);
 
     return () => {
       cancelAnimationFrame(frameId);
-      window.removeEventListener('resize', resize);
       ro.disconnect();
       mount.removeEventListener('mousemove', onMouseMove);
       mount.removeEventListener('mouseenter', onMouseEnter);
       mount.removeEventListener('mouseleave', onMouseLeave);
       mount.removeEventListener('click', onClick);
-      mount.removeChild(renderer.domElement);
-      renderer.dispose();
+      canvas.removeEventListener('webglcontextlost', handleContextLost);
+      canvas.removeEventListener('webglcontextrestored', handleContextRestored);
+      // Guarded: `removeChild` THROWS if the node is not a child, and it will
+      // not be one whenever React has already discarded the subtree.
+      if (canvas.parentNode === mount) mount.removeChild(canvas);
       material.dispose();
+      quad.geometry.dispose();
+      // `dispose()` frees three's JS-SIDE caches (programs, geometries,
+      // textures) and nothing else — the WebGL context stays alive and keeps
+      // one of WebKit's sixteen per-process slots until the object is
+      // destroyed. `forceContextLoss()` is the call that hands it back.
+      renderer.dispose();
+      renderer.forceContextLoss();
     };
   }, []);
 

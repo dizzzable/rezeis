@@ -76,6 +76,21 @@ export const CARD_EFFECT_COMPONENTS: Record<CardEffectId, EffectComponent> = {
   cube: lazy(() => import('@/components/reactbits/originkit/Cube')),
   wordGlobe: lazy(() => import('@/components/reactbits/originkit/WordGlobe')),
   particleSphere: lazy(() => import('@/components/reactbits/originkit/Particlesphere')),
+  // Repaired reactbits — see the catalog. Not vendored from originkit, so these
+  // sit directly under `reactbits/` and are frozen by
+  // `card-effect-components-manifest.test.ts` rather than by the originkit one.
+  colorBends: lazy(() => import('@/components/reactbits/ColorBends')),
+  pixelBlast: lazy(() => import('@/components/reactbits/PixelBlast')),
+  plasmaWave: lazy(() => import('@/components/reactbits/PlasmaWave')),
+  evilEye: lazy(() => import('@/components/reactbits/EvilEye')),
+  lightPillar: lazy(() => import('@/components/reactbits/LightPillar')),
+  prismaticBurst: lazy(() => import('@/components/reactbits/PrismaticBurst')),
+  faultyTerminal: lazy(() => import('@/components/reactbits/FaultyTerminal')),
+  letterGlitch: lazy(() => import('@/components/reactbits/LetterGlitch')),
+  shapeGrid: lazy(() => import('@/components/reactbits/ShapeGrid')),
+  magicRings: lazy(() => import('@/components/reactbits/MagicRings')),
+  laserFlow: lazy(() => import('@/components/reactbits/LaserFlow')),
+  antigravity: lazy(() => import('@/components/reactbits/Antigravity')),
 }
 
 export {

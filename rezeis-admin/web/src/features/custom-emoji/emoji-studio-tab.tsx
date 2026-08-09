@@ -16,6 +16,7 @@ import { toast } from 'sonner'
 import { Loader2, Sparkles, X } from 'lucide-react'
 
 import { api } from '@/lib/api'
+import { expectArray } from '@/lib/api-utils'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
@@ -261,7 +262,8 @@ function PremiumPicker({
   const [open, setOpen] = useState(false)
   const { data: packs } = useQuery<ReadonlyArray<PackLite>>({
     queryKey: PACKS_KEY,
-    queryFn: async () => (await api.get<ReadonlyArray<PackLite>>('/admin/custom-emoji/packs')).data,
+    queryFn: async () =>
+      expectArray<PackLite>((await api.get('/admin/custom-emoji/packs')).data),
     enabled: open,
     staleTime: 60_000,
   })

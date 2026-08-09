@@ -2,6 +2,8 @@ import { Effect, EffectComposer, EffectPass, RenderPass } from 'postprocessing';
 import React, { useEffect, useRef } from 'react';
 import * as THREE from 'three';
 
+import { resolveBufferRatio } from './render-scale';
+
 type PixelBlastVariant = 'square' | 'circle' | 'triangle' | 'diamond';
 
 interface TouchPoint {
@@ -403,6 +405,7 @@ const PixelBlast: React.FC<PixelBlastProps> = ({
       uEdgeFade: { value: number };
     };
     resizeObserver?: ResizeObserver;
+    intersectionObserver?: IntersectionObserver;
     raf?: number;
     quad?: THREE.Mesh<THREE.PlaneGeometry, THREE.ShaderMaterial>;
     timeOffset?: number;
@@ -411,6 +414,24 @@ const PixelBlast: React.FC<PixelBlastProps> = ({
     liquidEffect?: Effect;
   } | null>(null);
   const prevConfigRef = useRef<ReinitConfig | null>(null);
+  /**
+   * The context-loss listeners of whichever renderer is currently live. They
+   * are registered inside the build branch but have to come off in BOTH
+   * teardown paths — the in-effect rebuild and the unmount cleanup — and
+   * neither of those can see the build branch's local closures.
+   */
+  const contextListenersRef = useRef<{
+    canvas: HTMLCanvasElement;
+    onContextLost: (event: Event) => void;
+    onContextRestored: () => void;
+  } | null>(null);
+  const detachContextListeners = () => {
+    const attached = contextListenersRef.current;
+    if (!attached) return;
+    attached.canvas.removeEventListener('webglcontextlost', attached.onContextLost);
+    attached.canvas.removeEventListener('webglcontextrestored', attached.onContextRestored);
+    contextListenersRef.current = null;
+  };
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -430,6 +451,8 @@ const PixelBlast: React.FC<PixelBlastProps> = ({
       if (threeRef.current) {
         const t = threeRef.current;
         t.resizeObserver?.disconnect();
+        t.intersectionObserver?.disconnect();
+        detachContextListeners();
         cancelAnimationFrame(t.raf!);
         t.quad?.geometry.dispose();
         t.material.dispose();
@@ -440,15 +463,25 @@ const PixelBlast: React.FC<PixelBlastProps> = ({
         threeRef.current = null;
       }
       const canvas = document.createElement('canvas');
-      const renderer = new THREE.WebGLRenderer({
-        canvas,
-        antialias,
-        alpha: true,
-        powerPreference: 'high-performance'
-      });
+      let renderer: THREE.WebGLRenderer;
+      try {
+        renderer = new THREE.WebGLRenderer({
+          canvas,
+          antialias,
+          alpha: true,
+          powerPreference: 'high-performance'
+        });
+      } catch {
+        // three r184 throws from the constructor when it cannot get a WebGL2
+        // context, and this component's shaders are `GLSL3`.
+        return;
+      }
       renderer.domElement.style.width = '100%';
       renderer.domElement.style.height = '100%';
-      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+      // The ratio BEFORE the device-pixel budget; `setSize` reduces it when the
+      // box is large enough to need it.
+      const baseDpr = Math.min(window.devicePixelRatio || 1, 2);
+      renderer.setPixelRatio(baseDpr);
       container.appendChild(renderer.domElement);
       if (transparent) renderer.setClearAlpha(0);
       else renderer.setClearColor(0x000000, 1);
@@ -489,6 +522,13 @@ const PixelBlast: React.FC<PixelBlastProps> = ({
       const setSize = () => {
         const w = container.clientWidth || 1;
         const h = container.clientHeight || 1;
+        // Cap the DRAWING BUFFER, never the CSS box: the canvas is pinned to
+        // 100%×100% above and `setSize(w, h, false)` leaves `canvas.style`
+        // alone, so only `canvas.width/height` moves with the ratio.
+        // `uPixelSize` is denominated in BUFFER pixels and is recomputed from
+        // `getPixelRatio()` two lines down, so a pixel keeps exactly the size
+        // on screen the operator set. See `render-scale.ts`.
+        renderer.setPixelRatio(resolveBufferRatio(w, h, baseDpr));
         renderer.setSize(w, h, false);
         uniforms.uResolution.value.set(renderer.domElement.width, renderer.domElement.height);
         if (threeRef.current?.composer)
@@ -498,6 +538,31 @@ const PixelBlast: React.FC<PixelBlastProps> = ({
       setSize();
       const ro = new ResizeObserver(setSize);
       ro.observe(container);
+
+      /**
+       * The thing that makes `autoPauseOffscreen` mean anything.
+       *
+       * `visibilityRef` was READ by the render loop and WRITTEN BY NOTHING —
+       * declared `{ visible: true }` and never touched again, with no observer
+       * anywhere in the file. So the pause branch was unreachable, and a prop
+       * that DEFAULTS TO TRUE promised to stop when scrolled away and never
+       * did. That is not a missed optimisation, it is a control that lies: the
+       * operator switches it on (or leaves it on) and the effect keeps shading
+       * the full viewport behind whatever they scrolled to.
+       *
+       * `threshold: 0` — pause only when NO part of the box is on screen.
+       * Anything higher would stop an effect that is still partly visible,
+       * which reads as a frozen background rather than a saved frame.
+       */
+      const io = new IntersectionObserver(
+        entries => {
+          const entry = entries[entries.length - 1];
+          if (entry) visibilityRef.current.visible = entry.isIntersecting;
+        },
+        { root: null, threshold: 0 }
+      );
+      io.observe(container);
+
       const randomFloat = (): number => {
         if (typeof window !== 'undefined' && window.crypto?.getRandomValues) {
           const u32 = new Uint32Array(1);
@@ -582,8 +647,21 @@ const PixelBlast: React.FC<PixelBlastProps> = ({
         passive: true
       });
       let raf = 0;
+      let contextLost = false;
       const animate = () => {
-        if (autoPauseOffscreen && !visibilityRef.current.visible) {
+        if (contextLost) return;
+        // A backgrounded tab is off screen too. Read inline rather than through
+        // a `visibilitychange` listener, exactly as `PrismaticBurst` does:
+        // browsers already suspend rAF entirely for a hidden document, so a
+        // listener would be registering for an event that cannot reach a
+        // rAF-driven loop while it matters. This covers the residual window
+        // where a browser keeps servicing frames after `hidden` flips, and
+        // costs one boolean read.
+        if (autoPauseOffscreen && (!visibilityRef.current.visible || document.hidden)) {
+          // Keep the frame scheduled and skip the WORK, rather than cancelling
+          // and restarting. The loop already has one owner of `raf` that stops
+          // and restarts it — the context-loss path above — and a second,
+          // independent one is where the "it never came back" bugs live.
           raf = requestAnimationFrame(animate);
           return;
         }
@@ -608,6 +686,25 @@ const PixelBlast: React.FC<PixelBlastProps> = ({
         } else renderer.render(scene, camera);
         raf = requestAnimationFrame(animate);
       };
+      // three registers its own `webglcontextlost` handler and calls
+      // preventDefault there, and rebuilds every GL resource it owns on
+      // `webglcontextrestored` — so this only has to stop drawing into a dead
+      // context and start again afterwards.
+      const onContextLost = (event: Event) => {
+        event.preventDefault();
+        contextLost = true;
+        cancelAnimationFrame(raf);
+      };
+      const onContextRestored = () => {
+        contextLost = false;
+        setSize();
+        raf = requestAnimationFrame(animate);
+        if (threeRef.current) threeRef.current.raf = raf;
+      };
+      renderer.domElement.addEventListener('webglcontextlost', onContextLost);
+      renderer.domElement.addEventListener('webglcontextrestored', onContextRestored);
+      contextListenersRef.current = { canvas: renderer.domElement, onContextLost, onContextRestored };
+
       raf = requestAnimationFrame(animate);
       threeRef.current = {
         renderer,
@@ -618,6 +715,7 @@ const PixelBlast: React.FC<PixelBlastProps> = ({
         clickIx: 0,
         uniforms,
         resizeObserver: ro,
+        intersectionObserver: io,
         raf,
         quad,
         timeOffset,
@@ -650,20 +748,22 @@ const PixelBlast: React.FC<PixelBlastProps> = ({
       if (t.touch) t.touch.radiusScale = liquidRadius;
     }
     prevConfigRef.current = cfg;
-    return () => {
-      if (threeRef.current && mustReinit) return;
-      if (!threeRef.current) return;
-      const t = threeRef.current;
-      t.resizeObserver?.disconnect();
-      cancelAnimationFrame(t.raf!);
-      t.quad?.geometry.dispose();
-      t.material.dispose();
-      t.composer?.dispose();
-      t.renderer.dispose();
-      t.renderer.forceContextLoss();
-      if (t.renderer.domElement.parentElement === container) container.removeChild(t.renderer.domElement);
-      threeRef.current = null;
-    };
+    // NO CLEANUP HERE, deliberately. This effect depends on twenty props, and
+    // its body already tears the previous instance down itself in the
+    // `mustReinit` branch — so a cleanup would either duplicate that or, as the
+    // one that used to stand here did, guess.
+    //
+    // WHAT THAT GUESS COST. It opened `if (threeRef.current && mustReinit)
+    // return`, meaning "another run is about to rebuild me, leave it alone".
+    // But `mustReinit` is captured from the run that CREATED the cleanup, and
+    // it is true for the very first run — the one that builds. So after a plain
+    // mount the cleanup always took that branch, and UNMOUNT released nothing
+    // at all: no dispose, no `forceContextLoss`, the render loop still
+    // scheduled, and the canvas still in the DOM. One of WebKit's sixteen
+    // context slots per mount, and a rAF loop drawing into a detached canvas
+    // for the rest of the session. React gives a cleanup no way to tell
+    // "re-running" from "unmounting", so the teardown is moved to an effect
+    // that only ever runs on unmount.
   }, [
     antialias,
     liquid,
@@ -687,10 +787,37 @@ const PixelBlast: React.FC<PixelBlastProps> = ({
     speed
   ]);
 
+  // Unmount only — see the note in the effect above. Declared after it, so on
+  // unmount React runs that one's (absent) cleanup first and this one second,
+  // against whatever instance is live at that moment.
+  useEffect(
+    () => () => {
+      const t = threeRef.current;
+      if (!t) return;
+      threeRef.current = null;
+      t.resizeObserver?.disconnect();
+      t.intersectionObserver?.disconnect();
+      detachContextListeners();
+      cancelAnimationFrame(t.raf!);
+      t.quad?.geometry.dispose();
+      t.material.dispose();
+      t.composer?.dispose();
+      // `dispose()` frees three's JS-side caches only, and detaches three's own
+      // context-loss listeners so the release below cannot re-enter the restore
+      // path. `forceContextLoss()` is the call that hands the slot back.
+      t.renderer.dispose();
+      t.renderer.forceContextLoss();
+      // Read from the canvas rather than from `containerRef`, which React may
+      // already have detached by the time this runs.
+      t.renderer.domElement.parentElement?.removeChild(t.renderer.domElement);
+    },
+    []
+  );
+
   return (
     <div
       ref={containerRef}
-      className={`w-full h-full relative overflow-hidden ${className ?? ''}`}
+      className={`w-full h-full relative overflow-hidden ${className ?? ''}`.trim()}
       style={style}
       aria-label="PixelBlast interactive background"
     />

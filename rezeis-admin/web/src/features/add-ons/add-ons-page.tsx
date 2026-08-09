@@ -5,6 +5,7 @@ import { Plus, Pencil, Trash2, Puzzle, Loader2, BarChart3, List, Activity } from
 import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
+import { expectArray } from '@/lib/api-utils'
 import { getErrorMessage } from '@/lib/http-errors'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -82,7 +83,7 @@ export default function AddOnsPage() {
 
   const { data: addOns, isLoading } = useQuery({
     queryKey: ['admin', 'add-ons'],
-    queryFn: async () => (await api.get<AddOn[]>('/admin/add-ons')).data,
+    queryFn: async () => expectArray<AddOn>((await api.get('/admin/add-ons')).data),
   })
 
   const deleteMutation = useMutation({

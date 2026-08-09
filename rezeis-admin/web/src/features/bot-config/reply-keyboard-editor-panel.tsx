@@ -53,6 +53,7 @@ import {
 import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
 import { api } from '@/lib/api'
+import { expectArray } from '@/lib/api-utils'
 import { cn } from '@/lib/utils'
 import { EmojiPicker } from '@/features/broadcast/emoji-picker'
 import { insertAtCaret } from '@/features/bot-map/utils/insert-at-caret'
@@ -110,8 +111,8 @@ export function ReplyKeyboardEditorPanel(): JSX.Element {
   const { data: botTexts } = useQuery({
     queryKey: BOT_TEXTS_QUERY_KEY,
     queryFn: async (): Promise<readonly BotTextRow[]> => {
-      const { data } = await api.get<readonly BotTextRow[]>('/admin/bot-config/texts')
-      return data
+      const { data } = await api.get('/admin/bot-config/texts')
+      return expectArray<BotTextRow>(data)
     },
   })
   const bannerRow = botTexts?.find((r) => r.key === BANNER_URL_KEY) ?? null

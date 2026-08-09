@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 
 interface TextCursorProps {
@@ -35,7 +35,7 @@ const TextCursor: React.FC<TextCursorProps> = ({
   const lastMoveTimeRef = useRef<number>(Date.now());
   const idCounter = useRef<number>(0);
 
-  const handleMouseMove = (e: MouseEvent) => {
+  const handleMouseMove = useCallback((e: MouseEvent) => {
     if (!containerRef.current) return;
     const rect = containerRef.current.getBoundingClientRect();
     const mouseX = e.clientX - rect.left;
@@ -91,17 +91,29 @@ const TextCursor: React.FC<TextCursorProps> = ({
       return newTrail;
     });
     lastMoveTimeRef.current = Date.now();
-  };
+  }, [spacing, followMouseDirection, randomFloat, maxPoints]);
 
+  // Listen on `window`, not on the container.
+  //
+  // EffectsProvider mounts this inside FixedOverlay, which is
+  // `pointer-events: none` — the container can never become the target of a
+  // pointer event, so a listener bound to it never fires and the whole effect
+  // is dead. `window` gets the event regardless of what the overlay does with
+  // hit-testing, and the handler already works in viewport coordinates minus
+  // the container rect (0/0 for a viewport-sized overlay), so the arithmetic
+  // is unchanged.
+  //
+  // The dependency was `[containerRef.current]` — a ref value in a dep array
+  // is never a valid dependency (mutating `.current` does not re-run the
+  // effect, and reading it during render is what the deps array is meant to
+  // avoid). `handleMouseMove` is memoised above, so this now re-subscribes
+  // exactly when the handler's own inputs change.
   useEffect(() => {
-    const container = containerRef.current;
-    if (!container) return;
-
-    container.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mousemove', handleMouseMove);
     return () => {
-      container.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mousemove', handleMouseMove);
     };
-  }, [containerRef.current]);
+  }, [handleMouseMove]);
 
   useEffect(() => {
     const interval = setInterval(() => {

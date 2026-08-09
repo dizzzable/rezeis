@@ -50,6 +50,7 @@ import { Workflow, Plus, Check, Save, Type, Upload, RefreshCw, Image as ImageIco
 import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
+import { expectArray } from '@/lib/api-utils'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import {
@@ -162,10 +163,8 @@ export default function BotFlowPage() {
   const { data: botTexts } = useQuery({
     queryKey: ['bot-texts'] as const,
     queryFn: async (): Promise<readonly { key: string; value: string }[]> => {
-      const { data } = await api.get<readonly { key: string; value: string }[]>(
-        '/admin/bot-config/texts',
-      )
-      return data
+      const { data } = await api.get('/admin/bot-config/texts')
+      return expectArray<{ key: string; value: string }>(data)
     },
   })
   const bannerUrl = useMemo<string | null>(() => {

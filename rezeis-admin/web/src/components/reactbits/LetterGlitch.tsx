@@ -1,20 +1,40 @@
 import { useRef, useEffect } from 'react';
 
+import { resolveRenderScale } from './render-scale';
+
+export interface LetterGlitchProps {
+  glitchColors?: string[];
+  glitchSpeed?: number;
+  centerVignette?: boolean;
+  outerVignette?: boolean;
+  smooth?: boolean;
+  characters?: string;
+  /**
+   * Painted under the glyphs. Defaults to nothing at all: this effect is
+   * mounted OVER an operator's surface — a card, a gradient, a themed page —
+   * and a hardcoded `bg-black` wrapper (which is what stood here) paints that
+   * surface out on every theme.
+   */
+  backgroundColor?: string;
+  className?: string;
+}
+
+const DEFAULT_GLITCH_COLORS = ['#2b4539', '#61dca3', '#61b3dc'];
+const DEFAULT_CHARACTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ!@#$&*()-_+=/[]{};:<>.,0123456789';
+
 const LetterGlitch = ({
-  glitchColors = ['#2b4539', '#61dca3', '#61b3dc'],
+  glitchColors = DEFAULT_GLITCH_COLORS,
   glitchSpeed = 50,
   centerVignette = false,
-  outerVignette = true,
+  // Defaults OFF. It is a black radial overlay, so leaving it on by default
+  // makes every mount darken whatever is beneath it whether the operator asked
+  // for that or not.
+  outerVignette = false,
   smooth = true,
-  characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ!@#$&*()-_+=/[]{};:<>.,0123456789'
-}: {
-  glitchColors: string[];
-  glitchSpeed: number;
-  centerVignette: boolean;
-  outerVignette: boolean;
-  smooth: boolean;
-  characters: string;
-}) => {
+  characters = DEFAULT_CHARACTERS,
+  backgroundColor,
+  className = ''
+}: LetterGlitchProps) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const animationRef = useRef<number | null>(null);
   const letters = useRef<
@@ -29,18 +49,39 @@ const LetterGlitch = ({
   const context = useRef<CanvasRenderingContext2D | null>(null);
   const lastGlitchTime = useRef(Date.now());
 
-  const lettersAndSymbols = Array.from(characters);
+  /**
+   * The alphabet and the palette live in refs because the render loop is
+   * started ONCE from the mount effect and re-schedules itself, so it keeps the
+   * closure it was created with for its whole life. Reading these two from that
+   * closure made them dead controls: `glitchColors` and `characters` are not in
+   * the effect's dependency array, so changing either used to change nothing at
+   * all until something unrelated happened to remount the component.
+   *
+   * Assigning during render is what keeps them current — an effect would land a
+   * frame late, and a frame late here is a visibly stale palette on the first
+   * repaint after a colour change.
+   */
+  const charactersRef = useRef<string[]>(Array.from(characters));
+  charactersRef.current = Array.from(characters);
+  const glitchColorsRef = useRef<string[]>(glitchColors);
+  glitchColorsRef.current = glitchColors.length > 0 ? glitchColors : DEFAULT_GLITCH_COLORS;
+  const smoothRef = useRef(smooth);
+  smoothRef.current = smooth;
+  const glitchSpeedRef = useRef(glitchSpeed);
+  glitchSpeedRef.current = glitchSpeed;
 
   const fontSize = 16;
   const charWidth = 10;
   const charHeight = 20;
 
   const getRandomChar = () => {
-    return lettersAndSymbols[Math.floor(Math.random() * lettersAndSymbols.length)];
+    const pool = charactersRef.current;
+    return pool[Math.floor(Math.random() * pool.length)] ?? ' ';
   };
 
   const getRandomColor = () => {
-    return glitchColors[Math.floor(Math.random() * glitchColors.length)];
+    const pool = glitchColorsRef.current;
+    return pool[Math.floor(Math.random() * pool.length)] ?? '#ffffff';
   };
 
   const hexToRgb = (hex: string) => {
@@ -89,26 +130,43 @@ const LetterGlitch = ({
     }));
   };
 
+  /** The CSS box, in CSS pixels — what the glyph lattice is laid out in. */
+  const cssSize = useRef({ width: 0, height: 0 });
+
   const resizeCanvas = () => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const parent = canvas.parentElement;
     if (!parent) return;
 
-    const dpr = window.devicePixelRatio || 1;
     const rect = parent.getBoundingClientRect();
+    const width = rect.width;
+    const height = rect.height;
+    cssSize.current = { width, height };
 
-    canvas.width = rect.width * dpr;
-    canvas.height = rect.height * dpr;
+    // Cap the BITMAP, never the CSS box. This effect clears and fills text on
+    // the MAIN THREAD every frame, so a full-viewport bitmap is felt as input
+    // latency rather than as dropped shader frames. The glyph lattice below
+    // stays in CSS pixels — `charWidth`/`charHeight` and therefore the COUNT of
+    // letters are computed from `rect`, not from the bitmap — and the context
+    // transform maps them into it, so the type is the same size on screen at
+    // every ratio. The canvas element itself is `w-full h-full`; nothing here
+    // touches its presentation size. See `render-scale.ts`.
+    const baseDpr = Math.min(window.devicePixelRatio || 1, 2);
+    const ratio = resolveRenderScale(width, height, baseDpr) * baseDpr;
 
-    canvas.style.width = `${rect.width}px`;
-    canvas.style.height = `${rect.height}px`;
+    canvas.width = Math.max(1, Math.floor(width * ratio));
+    canvas.height = Math.max(1, Math.floor(height * ratio));
+
+    canvas.style.width = `${width}px`;
+    canvas.style.height = `${height}px`;
 
     if (context.current) {
-      context.current.setTransform(dpr, 0, 0, dpr, 0, 0);
+      // After the assignments above, which reset every context property.
+      context.current.setTransform(ratio, 0, 0, ratio, 0, 0);
     }
 
-    const { columns, rows } = calculateGrid(rect.width, rect.height);
+    const { columns, rows } = calculateGrid(width, height);
     initializeLetters(columns, rows);
     drawLetters();
   };
@@ -116,7 +174,7 @@ const LetterGlitch = ({
   const drawLetters = () => {
     if (!context.current || letters.current.length === 0) return;
     const ctx = context.current;
-    const { width, height } = canvasRef.current!.getBoundingClientRect();
+    const { width, height } = cssSize.current;
     ctx.clearRect(0, 0, width, height);
     ctx.font = `${fontSize}px monospace`;
     ctx.textBaseline = 'top';
@@ -141,7 +199,7 @@ const LetterGlitch = ({
       letters.current[index].char = getRandomChar();
       letters.current[index].targetColor = getRandomColor();
 
-      if (!smooth) {
+      if (!smoothRef.current) {
         letters.current[index].color = letters.current[index].targetColor;
         letters.current[index].colorProgress = 1;
       } else {
@@ -173,13 +231,13 @@ const LetterGlitch = ({
 
   const animate = () => {
     const now = Date.now();
-    if (now - lastGlitchTime.current >= glitchSpeed) {
+    if (now - lastGlitchTime.current >= glitchSpeedRef.current) {
       updateLetters();
       drawLetters();
       lastGlitchTime.current = now;
     }
 
-    if (smooth) {
+    if (smoothRef.current) {
       handleSmoothTransitions();
     }
 
@@ -199,23 +257,39 @@ const LetterGlitch = ({
     const handleResize = () => {
       clearTimeout(resizeTimeout);
       resizeTimeout = setTimeout(() => {
-        cancelAnimationFrame(animationRef.current as number);
+        if (animationRef.current !== null) cancelAnimationFrame(animationRef.current);
         resizeCanvas();
         animate();
       }, 100);
     };
 
     window.addEventListener('resize', handleResize);
+    // A window `resize` alone misses every reason this box actually changes
+    // size — a panel opening, a card reflowing — which leaves the letter grid
+    // sized for a box that is no longer there.
+    const ro = new ResizeObserver(handleResize);
+    if (canvas.parentElement) ro.observe(canvas.parentElement);
 
     return () => {
-      cancelAnimationFrame(animationRef.current!);
+      if (animationRef.current !== null) cancelAnimationFrame(animationRef.current);
+      animationRef.current = null;
+      clearTimeout(resizeTimeout);
       window.removeEventListener('resize', handleResize);
+      ro.disconnect();
+      context.current = null;
     };
+    // Every prop is read through a ref by the loop above, so nothing here needs
+    // to restart it. There is no GL context on this canvas — it is 2D — so
+    // nothing is released on teardown and the React-owned `<canvas ref>` below
+    // stays inside `reactbits-canvas-ownership.test.ts`.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [glitchSpeed, smooth]);
+  }, []);
 
   return (
-    <div className="relative w-full h-full bg-black overflow-hidden">
+    <div
+      className={`relative w-full h-full overflow-hidden ${className}`.trim()}
+      style={backgroundColor ? { backgroundColor } : undefined}
+    >
       <canvas ref={canvasRef} className="block w-full h-full" />
       {outerVignette && (
         <div className="absolute top-0 left-0 w-full h-full pointer-events-none bg-[radial-gradient(circle,_rgba(0,0,0,0)_60%,_rgba(0,0,0,1)_100%)]"></div>

@@ -7,6 +7,7 @@ import { consumeReturnTo } from '@/lib/return-to'
 import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/separator'
 import { api } from '@/lib/api'
+import { expectArray } from '@/lib/api-utils'
 
 import {
   type AuthProviderIconType,
@@ -33,8 +34,8 @@ export function OAuthButtons() {
   const { data: providers, isLoading } = useQuery({
     queryKey: ['oauth', 'providers'],
     queryFn: async () => {
-      const res = await api.get<PublicProvider[]>('/admin/oauth/providers')
-      return res.data
+      const res = await api.get('/admin/oauth/providers')
+      return expectArray<PublicProvider>(res.data)
     },
     staleTime: 60_000,
   })

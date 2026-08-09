@@ -15,6 +15,7 @@ import { useTranslation } from 'react-i18next'
 import { useQuery } from '@tanstack/react-query'
 import { CircleDollarSign, ExternalLink, Loader2 } from 'lucide-react'
 
+import { DataUnavailable } from '@/components/data-unavailable'
 import {
   Card,
   CardContent,
@@ -39,7 +40,7 @@ import { TabHeader } from '../shared/tab-header'
 
 export function CostsTab() {
   const { t } = useTranslation()
-  const { data: providers, isLoading } = useQuery({
+  const { data: providers, isLoading, isError, refetch } = useQuery({
     queryKey: KEYS.infraProviders,
     queryFn: remnawaveApi.getInfraProviders,
   })
@@ -66,7 +67,13 @@ export function CostsTab() {
             <div className="flex h-24 items-center justify-center">
               <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" aria-hidden />
             </div>
-          ) : !providers || providers.length === 0 ? (
+          ) : isError || !providers ? (
+            <DataUnavailable
+              className="mx-6 mb-4"
+              message={t('remnaWavePage.costs.providers.unavailable')}
+              onRetry={() => void refetch()}
+            />
+          ) : providers.length === 0 ? (
             <p className="px-6 pb-4 text-sm text-muted-foreground">{t('remnaWavePage.costs.providers.empty')}</p>
           ) : (
             <Table>

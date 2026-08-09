@@ -129,6 +129,17 @@ const Shuffle: React.FC<ShuffleProps> = ({
 
         splitRef.current = new GSAPSplitText(el, {
           type: 'chars',
+          // GSAP's SplitText creates a `<div>` per character by default (and
+          // then patches `position: relative; display: inline-block` onto each
+          // one to make it lay out inline again). Inside the `<h1>` that
+          // TitleEffect targets that is flow content in a phrasing-only
+          // container — invalid markup, and it makes the heading's subtree
+          // block-level for anything that inspects tags rather than computed
+          // display. `tag: 'span'` is the documented opt-out and also skips the
+          // inline style patch, since a span already lays out inline; the
+          // per-char classes this component assigns below supply the
+          // `inline-block` it actually needs.
+          tag: 'span',
           charsClass: 'shuffle-char',
           wordsClass: 'shuffle-word',
           linesClass: 'shuffle-line',

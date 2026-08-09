@@ -11,6 +11,7 @@
 import { z } from 'zod'
 
 import { api } from '@/lib/api'
+import { expectArray } from '@/lib/api-utils'
 
 export const localizedTextSchema = z.record(z.string(), z.string())
 export type LocalizedText = z.infer<typeof localizedTextSchema>
@@ -233,6 +234,6 @@ export const landingBuilderApi = {
 
   async listRevisions(): Promise<LandingRevisionMeta[]> {
     const response = await api.get('/admin/landing-config/revisions')
-    return response.data as LandingRevisionMeta[]
+    return expectArray<LandingRevisionMeta>(response.data)
   },
 }

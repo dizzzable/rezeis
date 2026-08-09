@@ -1,4 +1,5 @@
 import { api } from '@/lib/api';
+import { expectArray } from '@/lib/api-utils';
 import type {
   RbacEffectivePermissionsResponse,
   RbacResourceCatalog,
@@ -17,8 +18,8 @@ export async function getResourceCatalog(): Promise<RbacResourceCatalog> {
 
 /** Lists every role (lightweight payload — no permission matrix). */
 export async function listRoles(): Promise<RbacRoleListItem[]> {
-  const res = await api.get<RbacRoleListItem[]>(`${RBAC_BASE}/roles`);
-  return res.data;
+  const res = await api.get(`${RBAC_BASE}/roles`);
+  return expectArray<RbacRoleListItem>(res.data);
 }
 
 /** Fetches a single role with its full permission matrix. */

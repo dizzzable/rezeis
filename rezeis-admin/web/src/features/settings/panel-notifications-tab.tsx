@@ -12,6 +12,7 @@ import { Bell, Loader2 } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
+import { expectArray, unwrapPayload } from '@/lib/api-utils'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Switch } from '@/components/ui/switch'
 import {
@@ -35,18 +36,15 @@ interface CategoryPreference {
 }
 
 async function getPreferences(): Promise<CategoryPreference[]> {
-  const { data } = await api.get<{ categories: CategoryPreference[] }>(
-    '/admin/notifications/preferences',
-  )
-  return data.categories ?? []
+  const { data } = await api.get('/admin/notifications/preferences')
+  return expectArray<CategoryPreference>(unwrapPayload(data).categories ?? [])
 }
 
 async function setPreference(category: string, enabled: boolean): Promise<CategoryPreference[]> {
-  const { data } = await api.put<{ categories: CategoryPreference[] }>(
-    '/admin/notifications/preferences',
-    { category, enabled },
-  )
-  return data.categories ?? []
+  const { data } = await api.put('/admin/notifications/preferences', { category, enabled })
+  // Written into the query cache by the caller's `onSuccess`, so it needs the
+  // same guard the read path has.
+  return expectArray<CategoryPreference>(unwrapPayload(data).categories ?? [])
 }
 
 export default function PanelNotificationsTab() {

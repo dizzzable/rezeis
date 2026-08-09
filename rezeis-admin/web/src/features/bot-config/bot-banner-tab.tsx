@@ -27,6 +27,7 @@ import { Image as ImageIcon, Loader2, Trash2, Upload } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
+import { expectArray } from '@/lib/api-utils'
 import { Button } from '@/components/ui/button'
 
 const BOT_TEXTS_QUERY_KEY = ['bot-texts'] as const
@@ -53,8 +54,8 @@ export default function BotBannerTab() {
   const { data: texts } = useQuery({
     queryKey: BOT_TEXTS_QUERY_KEY,
     queryFn: async (): Promise<BotTextRow[]> => {
-      const { data } = await api.get<BotTextRow[]>('/admin/bot-config/texts')
-      return data
+      const { data } = await api.get('/admin/bot-config/texts')
+      return expectArray<BotTextRow>(data)
     },
   })
 

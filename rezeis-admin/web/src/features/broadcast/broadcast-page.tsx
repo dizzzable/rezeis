@@ -7,6 +7,7 @@ import { zodResolver } from '@hookform/resolvers/zod'
 import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
+import { expectArray } from '@/lib/api-utils'
 import { adminQueryKeys } from '@/lib/admin-query-keys'
 import { getErrorMessage } from '@/lib/http-errors'
 import { Card, CardContent } from '@/components/ui/card'
@@ -196,7 +197,7 @@ export default function BroadcastPage() {
   const { data, isLoading, refetch } = useQuery<ReadonlyArray<BroadcastRow>>({
     queryKey: adminQueryKeys.broadcast.all,
     queryFn: async ({ signal }) =>
-      (await api.get<ReadonlyArray<BroadcastRow>>('/admin/broadcast/drafts', { signal })).data,
+      expectArray<BroadcastRow>((await api.get('/admin/broadcast/drafts', { signal })).data),
     refetchInterval: 10_000,
     refetchIntervalInBackground: false,
   })

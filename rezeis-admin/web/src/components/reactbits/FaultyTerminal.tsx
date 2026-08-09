@@ -1,7 +1,19 @@
 import { Renderer, Program, Mesh, Color, Triangle } from 'ogl';
-import React, { useEffect, useRef, useMemo, useCallback } from 'react';
+import React, { useEffect, useRef, useMemo, useState } from 'react';
+
+import { resolveBufferRatio } from './render-scale';
 
 type Vec2 = [number, number];
+
+/**
+ * Hoisted out of the parameter list because a default written inline is a FRESH
+ * ARRAY on every render, and this one used to sit in the build effect's
+ * dependency array — so the WebGL context was destroyed and rebuilt on every
+ * render of the parent, including every tick of every unrelated slider on the
+ * page. It is a `[number, number]` with no representable control, so it never
+ * varies at runtime; the identity is what mattered.
+ */
+const DEFAULT_GRID_MUL: Vec2 = [2, 1];
 
 export interface FaultyTerminalProps extends React.HTMLAttributes<HTMLDivElement> {
   scale?: number;
@@ -243,7 +255,7 @@ function hexToRgb(hex: string): [number, number, number] {
 
 export default function FaultyTerminal({
   scale = 1,
-  gridMul = [2, 1],
+  gridMul = DEFAULT_GRID_MUL,
   digitSize = 1.5,
   timeScale = 0.3,
   pause = false,
@@ -274,24 +286,36 @@ export default function FaultyTerminal({
   const loadAnimationStartRef = useRef<number>(0);
   const timeOffsetRef = useRef<number>(Math.random() * 100);
 
+  // Bumped by `webglcontextrestored` to re-run the build effect. OGL keeps
+  // every GL handle inside Renderer/Program/Geometry and caches driver state on
+  // the Renderer, none of which survive a context loss and none of which it can
+  // reset — so the only honest recovery is to build the whole thing again.
+  const [glGeneration, setGlGeneration] = useState(0);
+
   const tintVec = useMemo(() => hexToRgb(tint), [tint]);
 
   const ditherValue = useMemo(() => (typeof dither === 'boolean' ? (dither ? 1 : 0) : dither), [dither]);
 
-  const handleMouseMove = useCallback((e: MouseEvent) => {
-    const ctn = containerRef.current;
-    if (!ctn) return;
-    const rect = ctn.getBoundingClientRect();
-    const x = (e.clientX - rect.left) / rect.width;
-    const y = 1 - (e.clientY - rect.top) / rect.height;
-    mouseRef.current = { x, y };
-  }, []);
+  // What the render loop reads every frame. Kept in a ref rather than in the
+  // build effect's dependency array: these are operator controls, and a
+  // dependency on any of them would tear the WebGL context down on every tick
+  // of the slider that drives it.
+  const loopRef = useRef({ pause, timeScale, pageLoadAnimation, mouseReact });
+  loopRef.current = { pause, timeScale, pageLoadAnimation, mouseReact };
 
   useEffect(() => {
     const ctn = containerRef.current;
     if (!ctn) return;
 
-    const renderer = new Renderer({ dpr });
+    // The ratio BEFORE the device-pixel budget; `resize` reduces it when the
+    // box is large enough to need it.
+    const baseDpr = dpr;
+    let renderer: Renderer;
+    try {
+      renderer = new Renderer({ dpr: baseDpr });
+    } catch {
+      return;
+    }
     rendererRef.current = renderer;
     const gl = renderer.gl;
     gl.clearColor(0, 0, 0, 1);
@@ -334,7 +358,15 @@ export default function FaultyTerminal({
 
     function resize() {
       if (!ctn || !renderer) return;
-      renderer.setSize(ctn.offsetWidth, ctn.offsetHeight);
+      const w = ctn.offsetWidth;
+      const h = ctn.offsetHeight;
+      // Cap the DRAWING BUFFER, never the CSS box: `setSize` writes
+      // `canvas.style.width/height` from the width/height passed in and
+      // multiplies only `canvas.width/height` by `dpr`. The digit lattice is
+      // derived from `vUv`, not from pixels, so the picture is the same one at
+      // a lower sampling density. See `render-scale.ts`.
+      renderer.dpr = resolveBufferRatio(w, h, baseDpr);
+      renderer.setSize(w, h);
       program.uniforms.iResolution.value = new Color(
         gl.canvas.width,
         gl.canvas.height,
@@ -346,29 +378,33 @@ export default function FaultyTerminal({
     resizeObserver.observe(ctn);
     resize();
 
-    const update = (t: number) => {
-      rafRef.current = requestAnimationFrame(update);
+    let contextLost = false;
 
-      if (pageLoadAnimation && loadAnimationStartRef.current === 0) {
+    const update = (t: number) => {
+      if (contextLost) return;
+      rafRef.current = requestAnimationFrame(update);
+      const live = loopRef.current;
+
+      if (live.pageLoadAnimation && loadAnimationStartRef.current === 0) {
         loadAnimationStartRef.current = t;
       }
 
-      if (!pause) {
-        const elapsed = (t * 0.001 + timeOffsetRef.current) * timeScale;
+      if (!live.pause) {
+        const elapsed = (t * 0.001 + timeOffsetRef.current) * live.timeScale;
         program.uniforms.iTime.value = elapsed;
         frozenTimeRef.current = elapsed;
       } else {
         program.uniforms.iTime.value = frozenTimeRef.current;
       }
 
-      if (pageLoadAnimation && loadAnimationStartRef.current > 0) {
+      if (live.pageLoadAnimation && loadAnimationStartRef.current > 0) {
         const animationDuration = 2000;
         const animationElapsed = t - loadAnimationStartRef.current;
         const progress = Math.min(animationElapsed / animationDuration, 1);
         program.uniforms.uPageLoadProgress.value = progress;
       }
 
-      if (mouseReact) {
+      if (live.mouseReact) {
         const dampingFactor = 0.08;
         const smoothMouse = smoothMouseRef.current;
         const mouse = mouseRef.current;
@@ -382,24 +418,85 @@ export default function FaultyTerminal({
 
       renderer.render({ scene: mesh });
     };
-    rafRef.current = requestAnimationFrame(update);
     ctn.appendChild(gl.canvas);
 
-    if (mouseReact) ctn.addEventListener('mousemove', handleMouseMove);
+    // Attached unconditionally and gated inside, so `mouseReact` is a uniform
+    // rather than a reason to rebuild the renderer.
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!loopRef.current.mouseReact) return;
+      const rect = ctn.getBoundingClientRect();
+      mouseRef.current = {
+        x: (e.clientX - rect.left) / rect.width,
+        y: 1 - (e.clientY - rect.top) / rect.height
+      };
+    };
+    ctn.addEventListener('mousemove', handleMouseMove);
+
+    // Without preventDefault the browser never fires `webglcontextrestored`,
+    // so a recoverable loss becomes permanent.
+    const handleContextLost = (event: Event) => {
+      event.preventDefault();
+      contextLost = true;
+      cancelAnimationFrame(rafRef.current);
+    };
+    // Restarting the loop alone would draw with handles the loss detached.
+    // Re-running the effect tears this renderer down (freeing its slot) and
+    // builds a fresh one, so the count of live contexts stays flat.
+    const handleContextRestored = () => {
+      setGlGeneration(generation => generation + 1);
+    };
+    const canvas = gl.canvas as HTMLCanvasElement;
+    canvas.addEventListener('webglcontextlost', handleContextLost);
+    canvas.addEventListener('webglcontextrestored', handleContextRestored);
+
+    rafRef.current = requestAnimationFrame(update);
 
     return () => {
       cancelAnimationFrame(rafRef.current);
       resizeObserver.disconnect();
-      if (mouseReact) ctn.removeEventListener('mousemove', handleMouseMove);
+      ctn.removeEventListener('mousemove', handleMouseMove);
+      // Listeners come off before loseContext, or handleContextRestored would
+      // fire during teardown and rebuild everything we are about to free.
+      canvas.removeEventListener('webglcontextlost', handleContextLost);
+      canvas.removeEventListener('webglcontextrestored', handleContextRestored);
       if (gl.canvas.parentElement === ctn) ctn.removeChild(gl.canvas);
+      programRef.current = null;
+      rendererRef.current = null;
+      // A dropped reference does not free the context: WebKit only returns the
+      // slot when the object is destroyed, and the page hits the 16-context cap
+      // long before GC gets there.
       gl.getExtension('WEBGL_lose_context')?.loseContext();
       loadAnimationStartRef.current = 0;
       timeOffsetRef.current = Math.random() * 100;
     };
+    // Construction only. `dpr` is the ratio the buffer is allocated at, which
+    // ogl fixes on the Renderer; everything else is pushed to a uniform by the
+    // effect below or read from `loopRef` inside the render loop.
+  }, [dpr, glGeneration]);
+
+  // Uniform pushes — zero GPU cost, no teardown.
+  useEffect(() => {
+    const program = programRef.current;
+    if (!program) return;
+    const u = program.uniforms;
+
+    u.uScale.value = scale;
+    (u.uGridMul.value as Float32Array).set(gridMul);
+    u.uDigitSize.value = digitSize;
+    u.uScanlineIntensity.value = scanlineIntensity;
+    u.uGlitchAmount.value = glitchAmount;
+    u.uFlickerAmount.value = flickerAmount;
+    u.uNoiseAmp.value = noiseAmp;
+    u.uChromaticAberration.value = chromaticAberration;
+    u.uDither.value = ditherValue;
+    u.uCurvature.value = curvature;
+    u.uTint.value = new Color(tintVec[0], tintVec[1], tintVec[2]);
+    u.uMouseStrength.value = mouseStrength;
+    u.uUseMouse.value = mouseReact ? 1 : 0;
+    u.uUsePageLoadAnimation.value = pageLoadAnimation ? 1 : 0;
+    if (!pageLoadAnimation) u.uPageLoadProgress.value = 1;
+    u.uBrightness.value = brightness;
   }, [
-    dpr,
-    pause,
-    timeScale,
     scale,
     gridMul,
     digitSize,
@@ -411,14 +508,21 @@ export default function FaultyTerminal({
     ditherValue,
     curvature,
     tintVec,
-    mouseReact,
     mouseStrength,
+    mouseReact,
     pageLoadAnimation,
     brightness,
-    handleMouseMove
+    // A rebuilt Program starts on the values baked into its constructor;
+    // without this a restored canvas would render the mount-time props.
+    glGeneration
   ]);
 
   return (
-    <div ref={containerRef} className={`w-full h-full relative overflow-hidden ${className}`} style={style} {...rest} />
+    <div
+      ref={containerRef}
+      className={`w-full h-full relative overflow-hidden ${className ?? ''}`.trim()}
+      style={style}
+      {...rest}
+    />
   );
 }

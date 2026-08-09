@@ -25,6 +25,7 @@ import {
 import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
+import { expectArray } from '@/lib/api-utils'
 import { adminQueryKeys } from '@/lib/admin-query-keys'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -304,7 +305,8 @@ function UserNotificationsTab() {
 
   const { data: templates } = useQuery({
     queryKey: adminQueryKeys.notifications.templates,
-    queryFn: async () => (await api.get<NotificationTemplate[]>('/admin/notifications/templates')).data,
+    queryFn: async () =>
+      expectArray<NotificationTemplate>((await api.get('/admin/notifications/templates')).data),
   })
 
   const notifSettings = (settings?.userNotifications ?? {}) as Record<string, boolean>

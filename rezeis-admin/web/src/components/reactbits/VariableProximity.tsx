@@ -162,7 +162,14 @@ const VariableProximity = forwardRef<HTMLSpanElement, VariableProximityProps>((p
       onClick={onClick}
       style={{
         display: 'inline',
-        fontFamily: '"Roboto Flex", sans-serif',
+        // No `fontFamily` here on purpose. Upstream hard-codes
+        // `'"Roboto Flex", sans-serif'`; that face is not a dependency of this
+        // app (see package.json — the installed variable faces are the
+        // @fontsource-variable/* set), so the declaration never resolved and
+        // every heading using this effect fell through to the generic
+        // `sans-serif`, overriding the operator's theme font. The `wght` axis
+        // this component animates is carried by all nine installed variable
+        // faces, so inheriting is both correct and sufficient.
         ...style
       }}
       className={className}

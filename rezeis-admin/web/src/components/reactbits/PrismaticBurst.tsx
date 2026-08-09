@@ -1,5 +1,7 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Renderer, Program, Mesh, Triangle, Texture } from 'ogl';
+
+import { resolveBufferRatio } from './render-scale';
 
 type Offset = { x?: number | string; y?: number | string };
 type AnimationType = 'rotate' | 'rotate3d' | 'hover';
@@ -238,6 +240,11 @@ const PrismaticBurst = ({
   const isVisibleRef = useRef<boolean>(true);
   const meshRef = useRef<Mesh | null>(null);
   const triRef = useRef<Triangle | null>(null);
+  // Bumped by `webglcontextrestored` to re-run the build effect. OGL keeps every
+  // GL handle inside Renderer/Program/Geometry/Texture and caches driver state
+  // on the Renderer, none of which survive a context loss and none of which it
+  // can reset — so the only honest recovery is to build the whole thing again.
+  const [glGeneration, setGlGeneration] = useState(0);
 
   useEffect(() => {
     pausedRef.current = paused;
@@ -250,8 +257,26 @@ const PrismaticBurst = ({
     const container = containerRef.current;
     if (!container) return;
 
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const renderer = new Renderer({ dpr, alpha: false, antialias: false });
+    // The ratio BEFORE the device-pixel budget; `resize` reduces it when the
+    // box is large enough to need it.
+    const baseDpr = Math.min(window.devicePixelRatio || 1, 2);
+    // Both shaders are `#version 300 es`, so this is HARD WebGL2. `webgl: 2` on
+    // its own does not make it so: ogl asks for a `webgl2` context and, when it
+    // does not get one, falls through to `webgl` SILENTLY (`Renderer.js`, "if
+    // not supported fallback to WebGL1"). That leaves a shader that cannot
+    // compile, a black canvas, and nothing thrown for an error boundary to see
+    // — so `isWebgl2` is checked, and the WebGL1 context ogl just opened is
+    // handed straight back rather than left holding one of the sixteen slots.
+    let renderer: Renderer;
+    try {
+      renderer = new Renderer({ webgl: 2, dpr: baseDpr, alpha: false, antialias: false });
+    } catch {
+      return;
+    }
+    if (!renderer.isWebgl2) {
+      renderer.gl.getExtension('WEBGL_lose_context')?.loseContext();
+      return;
+    }
     rendererRef.current = renderer;
 
     const gl = renderer.gl;
@@ -307,6 +332,12 @@ const PrismaticBurst = ({
     const resize = () => {
       const w = container.clientWidth || 1;
       const h = container.clientHeight || 1;
+      // Cap the DRAWING BUFFER, never the CSS box: the canvas is pinned to
+      // 100%×100% above and `setSize` multiplies only `canvas.width/height` by
+      // `dpr`. This shader marches 44 steps per fragment; everything it draws
+      // is a fraction of `uResolution`, so the picture is the same one at a
+      // lower sampling density. See `render-scale.ts`.
+      renderer.dpr = resolveBufferRatio(w, h, baseDpr);
       renderer.setSize(w, h);
       program.uniforms.uResolution.value = [gl.drawingBufferWidth, gl.drawingBufferHeight];
     };
@@ -344,8 +375,10 @@ const PrismaticBurst = ({
     let raf = 0;
     let last = performance.now();
     let accumTime = 0;
+    let contextLost = false;
 
     const update = (now: number) => {
+      if (contextLost) return;
       const dt = Math.max(0, now - last) * 0.001;
       last = now;
       const visible = isVisibleRef.current && !document.hidden;
@@ -365,6 +398,23 @@ const PrismaticBurst = ({
       renderer.render({ scene: meshRef.current! });
       raf = requestAnimationFrame(update);
     };
+    // Without preventDefault the browser never fires `webglcontextrestored`,
+    // so a recoverable loss becomes permanent.
+    const handleContextLost = (event: Event) => {
+      event.preventDefault();
+      contextLost = true;
+      cancelAnimationFrame(raf);
+    };
+    // Restarting the loop alone would draw with handles the loss detached.
+    // Re-running the effect tears this renderer down (freeing its slot) and
+    // builds a fresh one, so the count of live contexts stays flat.
+    const handleContextRestored = () => {
+      setGlGeneration(generation => generation + 1);
+    };
+    const canvas = gl.canvas as HTMLCanvasElement;
+    canvas.addEventListener('webglcontextlost', handleContextLost);
+    canvas.addEventListener('webglcontextrestored', handleContextRestored);
+
     raf = requestAnimationFrame(update);
 
     return () => {
@@ -374,6 +424,10 @@ const PrismaticBurst = ({
       if (!ro) window.removeEventListener('resize', resize);
       io?.disconnect();
       document.removeEventListener('visibilitychange', onVis);
+      // Listeners come off before loseContext, or handleContextRestored would
+      // fire during teardown and rebuild everything we are about to free.
+      canvas.removeEventListener('webglcontextlost', handleContextLost);
+      canvas.removeEventListener('webglcontextrestored', handleContextRestored);
       try {
         container.removeChild(gl.canvas);
       } catch (e) {
@@ -388,17 +442,23 @@ const PrismaticBurst = ({
       } catch (e) {
         void e;
       }
+      // A dropped reference does not free the context: WebKit only returns the
+      // slot when the object is destroyed, and the page hits the 16-context cap
+      // long before GC gets there. Deleting the gradient texture above frees
+      // one allocation inside the context; it does not free the context.
+      gl.getExtension('WEBGL_lose_context')?.loseContext();
       rendererRef.current = null;
       gradTexRef.current = null;
     };
-  }, []);
+    // Construction only. Every prop is pushed to a uniform by the effect below.
+  }, [glGeneration]);
 
   useEffect(() => {
     const canvas = rendererRef.current?.gl?.canvas as HTMLCanvasElement | undefined;
     if (canvas) {
       canvas.style.mixBlendMode = mixBlendMode && mixBlendMode !== 'none' ? mixBlendMode : '';
     }
-  }, [mixBlendMode]);
+  }, [mixBlendMode, glGeneration]);
 
   useEffect(() => {
     const program = programRef.current;
@@ -452,7 +512,18 @@ const PrismaticBurst = ({
       count = 0;
     }
     program.uniforms.uColorCount.value = count;
-  }, [intensity, speed, animationType, colors, distort, offset, rayCount]);
+  }, [
+    intensity,
+    speed,
+    animationType,
+    colors,
+    distort,
+    offset,
+    rayCount,
+    // A rebuilt Program starts on the placeholder uniform values baked into its
+    // constructor; without this a restored canvas would render the defaults.
+    glGeneration
+  ]);
 
   return <div className="w-full h-full relative overflow-hidden" ref={containerRef} />;
 };

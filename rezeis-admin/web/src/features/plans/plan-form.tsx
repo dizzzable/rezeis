@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next'
 import { useForm, type FieldErrors, type Resolver } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 
+import { DataUnavailable } from '@/components/data-unavailable'
 import { Badge, badgeVariants } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -146,16 +147,26 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
     prices: d.prices.map((p) => ({ currency: p.currency, price: p.price })),
   })))
 
-  const { data: internalSquads } = useQuery({
+  const internalSquadsQuery = useQuery({
     queryKey: ['remnawave', 'internal-squads'],
     queryFn: remnawaveApi.getInternalSquads,
     retry: 1,
   })
-  const { data: externalSquads } = useQuery({
+  const externalSquadsQuery = useQuery({
     queryKey: ['remnawave', 'external-squads'],
     queryFn: remnawaveApi.getExternalSquads,
     retry: 1,
   })
+  const { data: internalSquads } = internalSquadsQuery
+  const { data: externalSquads } = externalSquadsQuery
+  // "No squads available" on a disabled control is a claim about the
+  // operator's Remnawave panel. It is only true once the panel has answered.
+  const internalSquadsUnavailable =
+    internalSquadsQuery.isError ||
+    (!internalSquadsQuery.isPending && internalSquads === undefined)
+  const externalSquadsUnavailable =
+    externalSquadsQuery.isError ||
+    (!externalSquadsQuery.isPending && externalSquads === undefined)
 
   // All plans for upgrade/replacement picker (exclude current plan)
   const { data: allPlans } = usePlans()
@@ -536,6 +547,8 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
             <Label className="text-sm">{t('planForm.internalSquads')}</Label>
             <InternalSquadsPicker
               squads={internalSquads ?? []}
+              unavailable={internalSquadsUnavailable}
+              onRetry={() => void internalSquadsQuery.refetch()}
               value={selectedInternalSquads}
               onChange={setSelectedInternalSquads}
             />
@@ -555,6 +568,12 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
                 ))}
               </SelectContent>
             </Select>
+            {externalSquadsUnavailable && (
+              <DataUnavailable
+                message={t('planForm.squadsUnavailable')}
+                onRetry={() => void externalSquadsQuery.refetch()}
+              />
+            )}
           </div>
         </div>
       </div>
@@ -985,10 +1004,20 @@ interface InternalSquadOption {
  */
 function InternalSquadsPicker({
   squads,
+  unavailable = false,
+  onRetry,
   value,
   onChange,
 }: {
   readonly squads: ReadonlyArray<InternalSquadOption>
+  /**
+   * The squad list never arrived. Without this the empty `squads` array is
+   * indistinguishable from a panel with no squads, and the control says
+   * "No squads available" on a disabled trigger — a confident false claim
+   * about the operator's infrastructure, made while creating a plan.
+   */
+  readonly unavailable?: boolean
+  readonly onRetry?: () => void
   readonly value: ReadonlyArray<string>
   readonly onChange: (next: string[]) => void
 }) {
@@ -1012,6 +1041,10 @@ function InternalSquadsPicker({
         ? value.filter((id) => id !== uuid)
         : [...value, uuid],
     )
+  }
+
+  if (unavailable) {
+    return <DataUnavailable message={t('planForm.squadsUnavailable')} onRetry={onRetry} />
   }
 
   return (

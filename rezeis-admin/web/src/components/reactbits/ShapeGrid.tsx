@@ -1,5 +1,7 @@
 import React, { useRef, useEffect } from 'react';
 
+import { resolveRenderScale } from './render-scale';
+
 type CanvasStrokeStyle = string | CanvasGradient | CanvasPattern;
 
 interface GridOffset {
@@ -15,6 +17,23 @@ interface ShapeGridProps {
   hoverFillColor?: CanvasStrokeStyle;
   shape?: 'square' | 'hexagon' | 'circle' | 'triangle';
   hoverTrailAmount?: number;
+  /**
+   * The colour the radial vignette fades OUT to at the corners — transparent at
+   * the centre, this at the edge.
+   *
+   * It used to be the literal `'#120F17'`, filled over the whole canvas every
+   * frame with nothing controlling it. That is a fixed dark-purple wash: right
+   * for one dark theme, wrong over a light one and wrong over any gradient the
+   * operator picked, and invisible in the props so nobody could tell it was
+   * there. The default preserves the appearance the component has always had.
+   */
+  vignetteColor?: string;
+  /**
+   * How opaque that vignette gets at the corners, 0–1. At exactly 0 the fill is
+   * SKIPPED rather than drawn transparent, so switching it off also removes a
+   * full-canvas composite from every frame.
+   */
+  vignetteStrength?: number;
 }
 
 const ShapeGrid: React.FC<ShapeGridProps> = ({
@@ -24,7 +43,9 @@ const ShapeGrid: React.FC<ShapeGridProps> = ({
   squareSize = 40,
   hoverFillColor = '#222',
   shape = 'square',
-  hoverTrailAmount = 0
+  hoverTrailAmount = 0,
+  vignetteColor = '#120F17',
+  vignetteStrength = 1
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const requestRef = useRef<number | null>(null);
@@ -34,6 +55,8 @@ const ShapeGrid: React.FC<ShapeGridProps> = ({
   const hoveredSquareRef = useRef<GridOffset | null>(null);
   const trailCells = useRef<GridOffset[]>([]);
   const cellOpacities = useRef<Map<string, number>>(new Map());
+  /** The CSS box, in CSS pixels — what the shape lattice is laid out in. */
+  const cssSize = useRef({ width: 0, height: 0 });
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -46,13 +69,36 @@ const ShapeGrid: React.FC<ShapeGridProps> = ({
     const hexVert = squareSize * Math.sqrt(3);
 
     const resizeCanvas = () => {
-      canvas.width = canvas.offsetWidth;
-      canvas.height = canvas.offsetHeight;
-      numSquaresX.current = Math.ceil(canvas.width / squareSize) + 1;
-      numSquaresY.current = Math.ceil(canvas.height / squareSize) + 1;
+      const width = canvas.offsetWidth;
+      const height = canvas.offsetHeight;
+      cssSize.current = { width, height };
+
+      // Cap the BITMAP, never the CSS box. Every cell here is stroked
+      // individually on the MAIN THREAD, so a full-viewport bitmap is felt as
+      // input latency: a 2560×1440 grid at `squareSize: 40` is ~2,300 stroked
+      // paths sixty times a second on the thread that handles taps. Everything
+      // below — the lattice pitch, the cell counts, `clearRect`, the pointer
+      // hit test — stays in CSS pixels, and the context transform maps them
+      // into the bitmap, so `squareSize` keeps exactly the pitch the operator
+      // set at whatever ratio this resolves to. The canvas element is
+      // `w-full h-full`; nothing here touches its presentation size. See
+      // `render-scale.ts`.
+      const ratio = resolveRenderScale(width, height, 1);
+      // `Math.floor`, because that is what assigning a fractional value to
+      // `canvas.width` has always done here, and this must be bit-identical at
+      // ratio 1.
+      canvas.width = Math.max(1, Math.floor(width * ratio));
+      canvas.height = Math.max(1, Math.floor(height * ratio));
+      // After the assignments above, which reset every context property.
+      ctx?.setTransform(ratio, 0, 0, ratio, 0, 0);
+
+      numSquaresX.current = Math.ceil(width / squareSize) + 1;
+      numSquaresY.current = Math.ceil(height / squareSize) + 1;
     };
 
     window.addEventListener('resize', resizeCanvas);
+    const ro = new ResizeObserver(resizeCanvas);
+    ro.observe(canvas);
     resizeCanvas();
 
     const drawHex = (cx: number, cy: number, size: number) => {
@@ -92,15 +138,19 @@ const ShapeGrid: React.FC<ShapeGridProps> = ({
 
     const drawGrid = () => {
       if (!ctx) return;
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      // CSS pixels throughout: the context transform set in `resizeCanvas`
+      // maps them onto the bitmap, so every measurement below is in the units
+      // the operator's `squareSize` is denominated in.
+      const { width: cssWidth, height: cssHeight } = cssSize.current;
+      ctx.clearRect(0, 0, cssWidth, cssHeight);
 
       if (isHex) {
         const colShift = Math.floor(gridOffset.current.x / hexHoriz);
         const offsetX = ((gridOffset.current.x % hexHoriz) + hexHoriz) % hexHoriz;
         const offsetY = ((gridOffset.current.y % hexVert) + hexVert) % hexVert;
 
-        const cols = Math.ceil(canvas.width / hexHoriz) + 3;
-        const rows = Math.ceil(canvas.height / hexVert) + 3;
+        const cols = Math.ceil(cssWidth / hexHoriz) + 3;
+        const rows = Math.ceil(cssHeight / hexVert) + 3;
 
         for (let col = -2; col < cols; col++) {
           for (let row = -2; row < rows; row++) {
@@ -129,8 +179,8 @@ const ShapeGrid: React.FC<ShapeGridProps> = ({
         const offsetX = ((gridOffset.current.x % halfW) + halfW) % halfW;
         const offsetY = ((gridOffset.current.y % squareSize) + squareSize) % squareSize;
 
-        const cols = Math.ceil(canvas.width / halfW) + 4;
-        const rows = Math.ceil(canvas.height / squareSize) + 4;
+        const cols = Math.ceil(cssWidth / halfW) + 4;
+        const rows = Math.ceil(cssHeight / squareSize) + 4;
 
         for (let col = -2; col < cols; col++) {
           for (let row = -2; row < rows; row++) {
@@ -157,8 +207,8 @@ const ShapeGrid: React.FC<ShapeGridProps> = ({
         const offsetX = ((gridOffset.current.x % squareSize) + squareSize) % squareSize;
         const offsetY = ((gridOffset.current.y % squareSize) + squareSize) % squareSize;
 
-        const cols = Math.ceil(canvas.width / squareSize) + 3;
-        const rows = Math.ceil(canvas.height / squareSize) + 3;
+        const cols = Math.ceil(cssWidth / squareSize) + 3;
+        const rows = Math.ceil(cssHeight / squareSize) + 3;
 
         for (let col = -2; col < cols; col++) {
           for (let row = -2; row < rows; row++) {
@@ -184,8 +234,8 @@ const ShapeGrid: React.FC<ShapeGridProps> = ({
         const offsetX = ((gridOffset.current.x % squareSize) + squareSize) % squareSize;
         const offsetY = ((gridOffset.current.y % squareSize) + squareSize) % squareSize;
 
-        const cols = Math.ceil(canvas.width / squareSize) + 3;
-        const rows = Math.ceil(canvas.height / squareSize) + 3;
+        const cols = Math.ceil(cssWidth / squareSize) + 3;
+        const rows = Math.ceil(cssHeight / squareSize) + 3;
 
         for (let col = -2; col < cols; col++) {
           for (let row = -2; row < rows; row++) {
@@ -207,19 +257,24 @@ const ShapeGrid: React.FC<ShapeGridProps> = ({
         }
       }
 
+      const strength = Math.max(0, Math.min(1, vignetteStrength));
+      if (strength <= 0) return;
+
       const gradient = ctx.createRadialGradient(
-        canvas.width / 2,
-        canvas.height / 2,
+        cssWidth / 2,
+        cssHeight / 2,
         0,
-        canvas.width / 2,
-        canvas.height / 2,
-        Math.sqrt(canvas.width ** 2 + canvas.height ** 2) / 2
+        cssWidth / 2,
+        cssHeight / 2,
+        Math.sqrt(cssWidth ** 2 + cssHeight ** 2) / 2
       );
       gradient.addColorStop(0, 'rgba(0, 0, 0, 0)');
-      gradient.addColorStop(1, '#120F17');
+      gradient.addColorStop(1, vignetteColor);
 
+      ctx.globalAlpha = strength;
       ctx.fillStyle = gradient;
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillRect(0, 0, cssWidth, cssHeight);
+      ctx.globalAlpha = 1;
     };
 
     const updateAnimation = () => {
@@ -395,11 +450,23 @@ const ShapeGrid: React.FC<ShapeGridProps> = ({
 
     return () => {
       window.removeEventListener('resize', resizeCanvas);
+      ro.disconnect();
       if (requestRef.current) cancelAnimationFrame(requestRef.current);
+      requestRef.current = null;
       canvas.removeEventListener('mousemove', handleMouseMove);
       canvas.removeEventListener('mouseleave', handleMouseLeave);
     };
-  }, [direction, speed, borderColor, hoverFillColor, squareSize, shape, hoverTrailAmount]);
+  }, [
+    direction,
+    speed,
+    borderColor,
+    hoverFillColor,
+    squareSize,
+    shape,
+    hoverTrailAmount,
+    vignetteColor,
+    vignetteStrength
+  ]);
 
   return <canvas ref={canvasRef} className="w-full h-full border-none block"></canvas>;
 };
