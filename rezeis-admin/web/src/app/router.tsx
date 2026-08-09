@@ -95,7 +95,9 @@ const ApiTokensPage = lazy(
   ),
 );
 const PanelSettingsHub = lazy(() => import('@/features/settings/panel-settings-hub'));
-const WebReiwaPage = lazy(() => import('@/features/branding/branding-page'));
+const WebReiwaPage = lazy(
+  withFeatureBundle('branding', () => import('@/features/branding/branding-page')),
+);
 const AnalyticsPage = lazy(
   withFeatureBundle('analytics', () => import('@/features/analytics/analytics-page')),
 );

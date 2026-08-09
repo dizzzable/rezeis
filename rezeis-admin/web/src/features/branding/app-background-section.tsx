@@ -10,6 +10,7 @@
  * `appBackground` branding draft.
  */
 
+import { useEffect, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Check } from 'lucide-react'
 
@@ -42,7 +43,25 @@ export function AppBackgroundSection({
   onChange,
 }: AppBackgroundSectionProps) {
   const { t } = useTranslation()
-  const set = (patch: Partial<BrandingAppBackgroundDraft>) => onChange({ ...value, ...patch })
+
+  // Track the latest value in a ref so several patches dispatched in the same
+  // tick compound instead of clobbering each other. The picker fires
+  // `onEffectChange` AND `onPropsChange` synchronously when a tile is clicked;
+  // recomputing the second from the `value` closure discards the first, so the
+  // committed draft kept the OLD effect id with the NEW effect's props — the
+  // tile snapped back and the old effect started rendering with whatever prop
+  // names the two happened to share. The slots and plan-card sections already
+  // carry this guard; this one was missed.
+  const valueRef = useRef(value)
+  useEffect(() => {
+    valueRef.current = value
+  }, [value])
+
+  const set = (patch: Partial<BrandingAppBackgroundDraft>) => {
+    const next = { ...valueRef.current, ...patch }
+    valueRef.current = next
+    onChange(next)
+  }
 
   return (
     <Card>

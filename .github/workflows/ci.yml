@@ -50,6 +50,25 @@ jobs:
       - run: npm test
       - run: npm run lint
       - run: npm run build
+      # Assert facts about the EMITTED graph in `dist/`, which only exists
+      # after the step above — hence a separate step and not part of
+      # `npm test`.
+      #
+      # `src/vite-manual-chunks.test.ts` (which DOES run under `npm test`
+      # above) pins the `manualChunks` decision function and cannot catch
+      # what this catches. The 449 KB charts bundle that shipped as a
+      # `modulepreload` on /sign-in got there while that function returned
+      # the correct group for React: rolldown copied React's CJS entry into
+      # `vendor-charts` anyway and the entry chunk bound to it. A right
+      # answer and a wrong bundle. Only the build output shows that.
+      #
+      # Reads dist/index.html, walks the entry's static-import closure plus
+      # the locale chunk main.tsx awaits before first paint, and fails if a
+      # chunk on it contains three.js or recharts/d3 (matched by
+      # library-internal content and sourcemap attribution, never by chunk
+      # name) or if the render-blocking payload exceeds its byte/chunk
+      # ceiling.
+      - run: npm run check:build-graph
 
   backend-tests:
     name: Backend tests

@@ -996,9 +996,10 @@ export default function LandingBuilderPage() {
  * is already gone and will never see why. So the choice is theirs to make.
  *
  * A forced sign-out is the exception, and it reaches here as well as through
- * `beforeunload`: clearing the session re-renders `AuthGuard`, which answers
- * with `<Navigate to="/login">` — an in-app navigation this blocker would hold
- * with a dialog offering to stay on a page that can no longer talk to the API.
+ * `beforeunload`: clearing the session re-renders `ProtectedRoute`, which
+ * answers with `<Navigate to="/sign-in">` — an in-app navigation this blocker
+ * would hold with a dialog offering to stay on a page that can no longer talk
+ * to the API.
  * The check is inside the blocker function so it is read when the navigation
  * happens, not when the guard last rendered.
  *

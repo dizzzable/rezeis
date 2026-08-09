@@ -18,7 +18,20 @@ import type { BackgroundId } from '@/lib/theme/glass-store'
 
 export type RegistrableBackgroundId = Exclude<BackgroundId, 'none'>
 
-export type ControlType = 'slider' | 'color' | 'toggle' | 'select' | 'colorArray' | 'rgbColor'
+export type ControlType =
+  | 'slider'
+  | 'color'
+  | 'toggle'
+  | 'select'
+  | 'colorArray'
+  | 'rgbColor'
+  /**
+   * Free text. Rendered only by the card-effect section, because only card
+   * effects have a prop where the text IS the effect — the word a globe spells,
+   * the glyphs a rain falls in. Offering those as a fixed dropdown would ship an
+   * animation that permanently says someone else's brand name.
+   */
+  | 'text'
 
 export interface ControlDef {
   prop: string
@@ -31,6 +44,7 @@ export interface ControlDef {
   default: unknown
   options?: string[] // for select type
   count?: number // for colorArray — how many colors
+  maxLength?: number // for text — keeps a stray paste out of a per-frame loop
 }
 
 export interface BackgroundDef {

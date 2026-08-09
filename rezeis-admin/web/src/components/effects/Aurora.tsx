@@ -1,6 +1,12 @@
 /**
  * Aurora — animated gradient background with flowing color blobs.
  * Inspired by React Bits Aurora component.
+ *
+ * The blobs are pre-blurred radial gradients moved with translate-only
+ * transforms (see `.aurora-blob` in index.css). The previous version
+ * animated `scale` on `blur(80–100px)` divs, which forced iOS to
+ * re-rasterize a viewport-sized Gaussian blur every frame — one of the
+ * main reasons /sign-in dropped frames and heated up iPhones.
  */
 import { useAppearanceStore } from '@/lib/theme/appearance-store'
 import { cn } from '@/lib/utils'
@@ -22,9 +28,9 @@ export function Aurora({ className }: AuroraProps) {
       )}
       aria-hidden="true"
     >
-      <div className="absolute inset-[-10%] animate-aurora-1 rounded-full bg-[oklch(0.7_0.2_260/30%)] blur-[80px]" />
-      <div className="absolute inset-[-10%] animate-aurora-2 rounded-full bg-[oklch(0.6_0.18_300/25%)] blur-[100px]" />
-      <div className="absolute inset-[-10%] animate-aurora-3 rounded-full bg-[oklch(0.65_0.15_200/20%)] blur-[90px]" />
+      <div className="aurora-blob aurora-blob--1 animate-aurora-1" />
+      <div className="aurora-blob aurora-blob--2 animate-aurora-2" />
+      <div className="aurora-blob aurora-blob--3 animate-aurora-3" />
     </div>
   )
 }

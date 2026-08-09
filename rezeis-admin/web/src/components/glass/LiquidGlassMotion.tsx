@@ -33,8 +33,19 @@
  * OS or by the user toggle), this component still mounts but pins the
  * highlight statically and skips the pointer/idle/scroll handlers
  * entirely.
+ *
+ * Consumability guard
+ * -------------------
+ * Every CSS rule that reads `--lg-light-x/y` or `data-glass-scrolling`
+ * is gated on `:root[data-glass-refraction="on"]`, and
+ * LiquidGlassFilters pins that attribute to "off" on non-Chromium
+ * engines (iOS/WebKit, Firefox). Driving a permanent rAF loop that
+ * writes documentElement styles nobody can consume is pure battery
+ * drain — worst on iPhones, where it invalidates whole-document style
+ * every frame. So this component watches the attribute and only runs
+ * its handlers while it is "on".
  */
-import { useEffect } from 'react'
+import { useEffect, useSyncExternalStore } from 'react'
 import { useGlassStore } from '@/lib/theme/glass-store'
 
 /** How long after the last `pointermove` we consider the cursor idle. */
@@ -50,12 +61,49 @@ const IDLE_RADIUS_Y = 18
 /** Scroll-burst window after which the refraction layer is re-enabled. */
 const SCROLL_IDLE_MS = 200
 
+/** Reads whether the refraction layer (the only consumer of this
+ *  component's output) is currently attached by CSS. */
+function isRefractionOn(): boolean {
+  return document.documentElement.dataset.glassRefraction === 'on'
+}
+
+/**
+ * `<html data-glass-refraction>` is an external store: LiquidGlassFilters owns
+ * it (browser-support × glassEnabled) and we only read it.
+ *
+ * `useSyncExternalStore` rather than useState + a syncing effect. Two reasons
+ * beyond the lint rule (`react-hooks/set-state-in-effect`): the snapshot is
+ * read during render, so the very first render already knows the attribute is
+ * `on` instead of reporting `off` and correcting itself a commit later; and a
+ * later flip reaches the driver in the same commit rather than one render
+ * behind. Nothing else in this file needs the value earlier than that, but the
+ * driver effect below keys off it, and "one render behind" is how a toggle
+ * ends up looking like it did nothing.
+ */
+function subscribeToRefraction(onStoreChange: () => void): () => void {
+  const observer = new MutationObserver(onStoreChange)
+  observer.observe(document.documentElement, {
+    attributes: true,
+    attributeFilter: ['data-glass-refraction'],
+  })
+  return (): void => observer.disconnect()
+}
+
 export function LiquidGlassMotion() {
   const glassEnabled = useGlassStore((s) => s.glassEnabled)
   const respectReducedMotion = useGlassStore((s) => s.respectReducedMotion)
+  // Written by LiquidGlassFilters (browser-support × glassEnabled). Observed
+  // rather than read once, so a later flip (e.g. the master toggle) starts or
+  // stops the driver. The server snapshot is `false`: there is no document to
+  // read, and no driver to run.
+  const refractionOn = useSyncExternalStore(subscribeToRefraction, isRefractionOn, () => false)
 
   useEffect(() => {
     if (!glassEnabled) return
+    // No consumer → no work. On iOS/WebKit and Firefox the refraction
+    // rules never match, so the pointer/idle rAF loop below would only
+    // invalidate document-level style 60×/s for nothing.
+    if (!refractionOn) return
 
     const root = document.documentElement
     const reduced =
@@ -141,7 +189,7 @@ export function LiquidGlassMotion() {
       if (scrollTimer) clearTimeout(scrollTimer)
       root.dataset.glassScrolling = 'no'
     }
-  }, [glassEnabled, respectReducedMotion])
+  }, [glassEnabled, respectReducedMotion, refractionOn])
 
   return null
 }

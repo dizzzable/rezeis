@@ -1,89 +1,54 @@
 /** Pure card-preview helpers shared by the live renderer and configurator UI. */
 
 import {
-  CARD_EFFECT_COMPONENTS,
+  CARD_EFFECT_CATALOG,
+  cardEffectPalette,
+  cardEffectRenderer,
+  hasFullOutputGamut,
+  isKnownCardEffect,
   type CardEffectId,
-} from './card-effect-registry'
+} from './card-effect-catalog'
 
-export const PAPER_CARD_EFFECTS = new Set([
-  'paperMesh',
-  'paperWarp',
-  'paperGrain',
-  'paperDither',
-  'paperSwirl',
-  'paperMetaballs',
-])
+// Re-exported so the big phone preview reads the catalog through the same
+// module the tile preview does, rather than keeping its own copy — which is
+// exactly how the stale gamut set got there in the first place.
+export { hasFullOutputGamut }
 
-const WEBGL2_ONLY_CARD_EFFECTS = new Set([
-  ...PAPER_CARD_EFFECTS,
-  // Plasma and Grainient ship GLSL ES 3.00 shaders (`#version 300 es`). The
-  // Three/Fiber renderers below run on Three 0.184, whose renderer is WebGL2.
-  // Substituting Aurora would discard the operator's selected palette/shape.
-  'plasma',
-  'grainient',
-  'silk',
-  'beams',
-  'dither',
-])
+// Which effects need WebGL2, which draw on a plain canvas, which palette each
+// falls back to, and which escape their input gamut: all of it now comes from
+// the catalog, stated once beside the effect it describes. The four hand-kept
+// sets that used to sit here are precisely what this file existed to keep in
+// step with the cabinet, and precisely what kept slipping.
 
-const CANVAS_2D_EFFECTS = new Set(['waves'])
-
-const DEFAULT_EFFECT_COLORS: Readonly<Record<string, readonly string[]>> = {
-  aurora: ['#5227FF', '#7CFF67', '#5227FF'],
-  threads: ['#ffffff'],
-  softAurora: ['#f7f7f7', '#e100ff'],
-  rippleGrid: ['#ffffff'],
-  radar: ['#9f29ff', '#000000'],
-  plasma: ['#ffffff', '#000000'],
-  particles: ['#ffffff'],
-  liquidChrome: ['#1a1a1a', '#000000', '#ffffff'],
-  lineWaves: ['#ffffff'],
-  iridescence: ['#ffffff', '#000000'],
-  grainient: ['#ff9ffc', '#5227ff', '#b497cf'],
-  galaxy: ['#ffffff', '#000000'],
-  balatro: ['#de443b', '#006bb4', '#162325'],
-  waves: ['#ffffff', '#00000000'],
-  silk: ['#7b7481'],
-  beams: ['#ffffff', '#000000'],
-  dither: ['#808080', '#000000'],
-  paperMesh: ['#e0eaff', '#241d9a', '#f75092', '#9f50d3'],
-  paperWarp: ['#121212', '#9470ff', '#8838ff'],
-  paperGrain: ['#000000', '#7300ff', '#eba8ff', '#00bfff', '#2a00ff'],
-  paperDither: ['#000000', '#00b2ff'],
-  paperSwirl: ['#000000', '#ffd1d1', '#ff8a8a', '#660000'],
-  paperMetaballs: ['#000000', '#6e33cc', '#ff5500', '#ffc105', '#f585ff'],
-}
-
-const FULL_OUTPUT_GAMUT_EFFECTS = new Set([
-  'softAurora',
-  'rippleGrid',
-  'radar',
-  'particles',
-  'liquidChrome',
-  'lineWaves',
-  'grainient',
-  'galaxy',
-  'balatro',
-])
+/**
+ * The Paper Shaders family, still named as a group because the preview arranges
+ * them together. Derived from the catalog so the membership cannot drift.
+ */
+export const PAPER_CARD_EFFECTS = new Set(
+  Object.keys(CARD_EFFECT_CATALOG).filter((id) => id.startsWith('paper')),
+)
 
 export function resolveCardEffectPreviewOpacity(opacity: number): number {
   return Math.min(Math.max(Number.isFinite(opacity) ? opacity : 1, 0.05), 1)
 }
 
 export function isPreviewCardEffect(effect: string): effect is CardEffectId {
-  return effect !== 'NONE' && effect in CARD_EFFECT_COMPONENTS
+  return effect !== 'NONE' && isKnownCardEffect(effect)
 }
 
 export function requiresPreviewCardEffectWebGL(effect: string): boolean {
-  return effect !== 'NONE' && !CANVAS_2D_EFFECTS.has(effect)
+  const renderer = cardEffectRenderer(effect)
+  // `'NONE'` and anything the panel does not have draw nothing, so they ask
+  // nothing of the GPU.
+  return renderer !== null && renderer !== 'canvas2d'
 }
 
 export function requiresPreviewCardEffectCanvas2d(effect: string): boolean {
-  return CANVAS_2D_EFFECTS.has(effect)
+  return cardEffectRenderer(effect) === 'canvas2d'
 }
 
 export function requiresPreviewCardEffectWebGL2(effect: string): boolean {
-  return WEBGL2_ONLY_CARD_EFFECTS.has(effect)
+  return cardEffectRenderer(effect) === 'webgl2'
 }
 
 export function resolveCardEffectPreviewColors(
@@ -97,28 +62,27 @@ export function resolveCardEffectPreviewColors(
   const asHex = (value: unknown): string | null =>
     isSafeHexColor(value) ? value : null
 
-  const colors = [
-    ...fromArray(props['colors']),
-    ...fromArray(props['colorStops']),
-    ...fromArray(props['particleColors']),
-    ...[
-      'color1',
-      'color2',
-      'color3',
-      'color',
-      'colorBack',
-      'colorFront',
-      'gridColor',
-      'lineColor',
-      'backgroundColor',
-      'lightColor',
-    ]
-      .map((key) => asHex(props[key]))
-      .filter((value): value is string => value !== null),
-    ...['baseColor', 'waveColor', 'color']
-      .map((key) => rgbVectorColor(props[key]))
-      .filter((value): value is string => value !== null),
-  ]
+  /**
+   * Every prop is inspected, rather than a fixed list of prop names.
+   *
+   * The list was thirteen hand-written keys, and the effects that arrived since
+   * do not use those names — `background`, `bgColor`, `voidColor`,
+   * `strokeColor`, `particleColor`, `anchor`, `colorA`… A missing name is not a
+   * harmless omission, because a PARTIAL match is worse than none: the caller
+   * treats any non-empty result as authoritative and stops falling back to the
+   * effect's palette, so whatever was recognised becomes the whole picture.
+   * Black Hole showed it: three white marks recognised, its black field not, so
+   * contrast concluded the card was white.
+   *
+   * Kept in step with `resolveCardEffectColors` in the cabinet, which does the
+   * same. A difference between the two IS the divergence between what the
+   * operator previews and what the subscriber gets.
+   */
+  const colors = Object.values(props).flatMap((value) => {
+    const single = asHex(value) ?? rgbVectorColor(value)
+    if (single !== null) return [single]
+    return fromArray(value)
+  })
 
   if (effect === 'rippleGrid' && props['enableRainbow'] === true) {
     colors.push('#ff0000', '#ffff00', '#00ff00', '#00ffff', '#0000ff', '#ff00ff')
@@ -128,9 +92,7 @@ export function resolveCardEffectPreviewColors(
   }
   if (['liquidChrome', 'galaxy'].includes(effect)) colors.push('#ffffff')
 
-  return colors.length > 0
-    ? [...new Set(colors)]
-    : (DEFAULT_EFFECT_COLORS[effect] ?? DEFAULT_EFFECT_COLORS.aurora)
+  return colors.length > 0 ? [...new Set(colors)] : cardEffectPalette(effect)
 }
 
 export function resolveCardEffectPreviewOutputColors(
@@ -138,7 +100,7 @@ export function resolveCardEffectPreviewOutputColors(
   props: Readonly<Record<string, unknown>>,
 ): readonly string[] {
   const colors = [...resolveCardEffectPreviewColors(effect, props)]
-  if (FULL_OUTPUT_GAMUT_EFFECTS.has(effect)) {
+  if (hasFullOutputGamut(effect)) {
     colors.push('#000000', '#ffffff')
   }
   return [...new Set(colors)]
@@ -215,8 +177,24 @@ export function observePreviewCardEffectCanvases(
   }
 }
 
+/**
+ * Recognisable CSS colour forms, matching `asColor` in the cabinet's
+ * `card-effect-runtime.ts` exactly.
+ *
+ * Hex alone is not enough now that every prop is inspected: several effects
+ * ship `rgba(…)` or `transparent` defaults, and a preview that ignored them
+ * while the cabinet read them would put the two contrast decisions on different
+ * evidence — the divergence this file is supposed to prevent. Anchored, so a
+ * value like `checks` or the word a globe spells is not mistaken for a colour
+ * and cannot reach the gradient string built below.
+ */
 function isSafeHexColor(value: unknown): value is string {
-  return typeof value === 'string' && /^#[\da-f]{3,8}$/i.test(value)
+  return (
+    typeof value === 'string' &&
+    /^(#(?:[\da-f]{3,4}|[\da-f]{6}|[\da-f]{8})|(?:rgb|hsl)a?\([^()]*\)|transparent)$/i.test(
+      value.trim(),
+    )
+  )
 }
 
 function rgbVectorColor(value: unknown): string | null {

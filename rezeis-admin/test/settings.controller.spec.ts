@@ -263,6 +263,7 @@ describe('SettingsController', () => {
       bgPrimary: '#111111',
       bgSecondary: '#222222',
       cardGradient: 'linear-gradient(#000,#111)',
+      cardGradientSource: 'concept',
       cardPattern: null,
       subscriptionCardText: { mode: 'auto', color: null },
       subscriptionCardGlass: {

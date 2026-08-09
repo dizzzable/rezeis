@@ -34,8 +34,6 @@ export interface CardEffectSlot {
 interface CardEffectSlotsSectionProps {
   slots: CardEffectSlot[]
   onChange: (slots: CardEffectSlot[]) => void
-  /** Avoid initialising effect renderers while this editor tab is hidden. */
-  livePreview?: boolean
 }
 
 const MAX_SLOTS = 20
@@ -43,7 +41,6 @@ const MAX_SLOTS = 20
 export function CardEffectSlotsSection({
   slots,
   onChange,
-  livePreview = false,
 }: CardEffectSlotsSectionProps) {
   const { t } = useTranslation()
   const customGradients = useCustomGradients()
@@ -151,7 +148,21 @@ export function CardEffectSlotsSection({
                 effect={slot.cardEffect ?? 'aurora'}
                 props={slot.cardEffectProps ?? {}}
                 opacity={slot.cardEffectOpacity ?? 1}
-                livePreview={livePreview}
+                /* Every override slot renders its own picker, and this section
+                   allows up to MAX_SLOTS of them at once. A live preview here
+                   was therefore not "one renderer" but one PER SLOT: with the
+                   always-mounted phone preview and its app-background layer on
+                   top, thirteen override slots already exceeded WebKit's
+                   sixteen-context ceiling, and iOS answers that by discarding
+                   the OLDEST contexts — a loss the discarded canvases never
+                   recover from, so those cards stay black for the rest of the
+                   session. The prop that let a caller switch this on is gone
+                   rather than merely set to false, so the count cannot be
+                   raised above one from any call site. `plan-card-styles-section`
+                   and `app-background-section` pass `livePreview={false}` for
+                   the same reason; the effect grid's static gradients already
+                   tell the operator which effect is which. */
+                livePreview={false}
                 onEffectChange={(e) => updateSlot(index, { mode: 'override', cardEffect: e })}
                 onPropsChange={(p) => updateSlot(index, { mode: 'override', cardEffectProps: p })}
                 onOpacityChange={(o) => updateSlot(index, { mode: 'override', cardEffectOpacity: o })}

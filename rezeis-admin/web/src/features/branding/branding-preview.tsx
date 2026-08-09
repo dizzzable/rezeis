@@ -39,6 +39,7 @@ import {
   CardEffectPreviewLayer,
 } from './card-effect-preview-runtime'
 import {
+  hasFullOutputGamut,
   isPreviewCardEffect,
   resolveCardEffectPreviewOpacity,
 } from './card-effect-preview-utils'
@@ -195,20 +196,115 @@ interface PreviewAppVeilCandidate {
 const PREVIEW_BLACK: PreviewRgb = [0, 0, 0]
 const PREVIEW_WHITE: PreviewRgb = [255, 255, 255]
 
-// Mirrors reiwa's conservative fragment-output policy. These shaders can
-// amplify, add or post-process their input uniforms into display extremes, so
-// preview contrast must sample the output gamut rather than only input colours.
-const FULL_OUTPUT_GAMUT_EFFECTS = new Set([
-  'softAurora',
-  'rippleGrid',
-  'radar',
-  'particles',
-  'liquidChrome',
-  'lineWaves',
-  'grainient',
-  'galaxy',
-  'balatro',
-])
+// Which effects amplify, add or post-process their uniforms into display
+// extremes now comes from the catalog, beside the effect it describes. It used
+// to be a hand-written set here, and it went stale the moment the catalogue
+// grew: ten effects that widen their gamut were missing from it, so the
+// operator tuned against a preview that judged text readable on evidence the
+// cabinet did not accept. That divergence is the exact failure the catalog
+// exists to end — see `hasFullOutputGamut`.
+
+/**
+ * The colour forms an effect prop may be written in.
+ *
+ * This is the THIRD reader of effect props, and until now the only one still
+ * testing `/^#[\da-f]{3,8}$/`: `card-effect-preview-utils.isSafeHexColor` (the
+ * tile preview) and the cabinet's `card-effect-runtime.asColor` (the live card)
+ * were both widened to `rgb()`, `rgba()`, `hsl()` and `transparent` when the
+ * catalogue started shipping `rgba()` defaults and the colour codec began
+ * writing `rgba()` back to keep an operator's alpha. Hex-only here meant Pixel
+ * Card — three `rgba(255,255,255,…)` marks over `#000000` — read as an entirely
+ * black card, so the phone preview promised light text while the cabinet, which
+ * saw the three whites, shipped dark. `pixelCard` carries no `fullOutputGamut`,
+ * so nothing papered over the disagreement.
+ *
+ * Kept as a local pattern rather than hoisted into `card-effect-preview-utils`:
+ * that module is being edited alongside this change, and the two agree by test
+ * (`branding-preview-effect-colors.test.tsx` runs one table of values through
+ * both and fails on the first value they disagree about) rather than by hope.
+ * Hoisting it is the right follow-up once both files are still again.
+ *
+ * Anchored for a prop value, unanchored for scanning artwork; one source so the
+ * two cannot drift. Bare keywords beyond `transparent` are deliberately absent,
+ * exactly as in the other two: telling `white` from `checks` needs the full
+ * keyword table, and no effect default uses one.
+ */
+const PREVIEW_COLOR_SOURCE =
+  '#(?:[\\da-f]{3,4}|[\\da-f]{6}|[\\da-f]{8})(?![\\da-f])|(?:rgb|hsl)a?\\([^()]*\\)|transparent'
+const PREVIEW_COLOR_VALUE = new RegExp(`^(?:${PREVIEW_COLOR_SOURCE})$`, 'i')
+const PREVIEW_COLOR_TOKEN = new RegExp(PREVIEW_COLOR_SOURCE, 'gi')
+
+function isPreviewColorValue(value: unknown): value is string {
+  return typeof value === 'string' && PREVIEW_COLOR_VALUE.test(value.trim())
+}
+
+/** `50%` and bare numbers both appear in the wild; both resolve to 0–255. */
+function parsePreviewChannel(raw: string, full: number): number | null {
+  const text = raw.trim()
+  const percent = text.endsWith('%')
+  const value = Number.parseFloat(percent ? text.slice(0, -1) : text)
+  if (!Number.isFinite(value)) return null
+  return percent ? (value / 100) * full : value
+}
+
+function previewHslChannel(hue: number, saturation: number, lightness: number, offset: number): number {
+  const k = (offset + hue / 30) % 12
+  const a = saturation * Math.min(lightness, 1 - lightness)
+  return Math.round(
+    (lightness - a * Math.max(-1, Math.min(k - 3, Math.min(9 - k, 1)))) * 255,
+  )
+}
+
+/**
+ * Any form `PREVIEW_COLOR_VALUE` accepts, flattened onto `backdrop`.
+ *
+ * `transparent` yields `null` on purpose: it is a colour form the props may
+ * legitimately carry, and it contributes nothing to contrast. Compositing it
+ * would silently add the backdrop as a sample and tilt the verdict toward
+ * whatever is behind the card.
+ */
+function parsePreviewCssColor(
+  value: string,
+  backdrop: PreviewRgb = PREVIEW_BLACK,
+): PreviewRgb | null {
+  const text = value.trim()
+  if (text.startsWith('#')) return parsePreviewHex(text, backdrop)
+  const fn = /^(rgb|hsl)a?\(([^()]*)\)$/i.exec(text)
+  if (!fn) return null
+  const [channelsPart, slashAlpha] = fn[2].split('/').map((part) => part.trim())
+  const parts = channelsPart
+    .replace(/,/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean)
+  if (parts.length < 3) return null
+  const alphaRaw = slashAlpha ?? parts[3]
+  const alpha =
+    alphaRaw === undefined
+      ? 1
+      : Math.min(1, Math.max(0, parsePreviewChannel(alphaRaw, 1) ?? 1))
+  let rgb: PreviewRgb
+  if (fn[1].toLowerCase() === 'rgb') {
+    const channels = parts.slice(0, 3).map((part) => parsePreviewChannel(part, 255))
+    if (channels.some((channel) => channel === null)) return null
+    rgb = channels.map((channel) =>
+      Math.round(Math.min(255, Math.max(0, channel ?? 0))),
+    ) as unknown as PreviewRgb
+  } else {
+    const hue = Number.parseFloat(parts[0].replace(/deg$/i, ''))
+    const saturation = parsePreviewChannel(parts[1], 1)
+    const lightness = parsePreviewChannel(parts[2], 1)
+    if (!Number.isFinite(hue) || saturation === null || lightness === null) return null
+    const s = Math.min(1, Math.max(0, saturation))
+    const l = Math.min(1, Math.max(0, lightness))
+    const h = ((hue % 360) + 360) % 360
+    rgb = [
+      previewHslChannel(h, s, l, 0),
+      previewHslChannel(h, s, l, 8),
+      previewHslChannel(h, s, l, 4),
+    ]
+  }
+  return alpha >= 1 ? rgb : previewComposite(rgb, backdrop, alpha)
+}
 
 function previewRgbVectorColor(value: unknown): string | null {
   if (
@@ -238,17 +334,12 @@ function resolvePreviewEffectInputColors(
 ): readonly string[] {
   const colors: string[] = []
   for (const value of Object.values(props)) {
-    if (typeof value === 'string' && /^#[\da-f]{3,8}$/i.test(value)) {
+    if (isPreviewColorValue(value)) {
       colors.push(value)
       continue
     }
     if (!Array.isArray(value)) continue
-    colors.push(
-      ...value.filter(
-        (entry): entry is string =>
-          typeof entry === 'string' && /^#[\da-f]{3,8}$/i.test(entry),
-      ),
-    )
+    colors.push(...value.filter((entry): entry is string => isPreviewColorValue(entry)))
     const vector = previewRgbVectorColor(value)
     if (vector) colors.push(vector)
   }
@@ -276,7 +367,7 @@ function resolvePreviewEffectColors(
   props: Readonly<Record<string, unknown>>,
 ): string {
   const colors = [...resolvePreviewEffectInputColors(effect, props)]
-  if (FULL_OUTPUT_GAMUT_EFFECTS.has(effect)) {
+  if (hasFullOutputGamut(effect)) {
     colors.push('#000000', '#ffffff')
   }
   return [...new Set(colors)].join(' ')
@@ -302,10 +393,13 @@ function resolvePreviewCardContrast(
   const baseSamples = Array.from(gradient.matchAll(/#[\da-f]{3,8}(?![\da-f])/gi))
     .map((match) => parsePreviewHex(match[0], foundationRgb ?? PREVIEW_BLACK))
     .filter((sample): sample is PreviewRgb => sample !== null)
-  const effectSamples = Array.from(
-    effectArtwork.matchAll(/#[\da-f]{3,8}(?![\da-f])/gi),
-  )
-    .map((match) => parsePreviewHex(match[0]))
+  // The effect artwork is OUR string — the extractor's output, joined — so it
+  // is scanned for every form the extractor accepts. Widening the extractor
+  // without widening this would have changed nothing: an `rgba()` mark would be
+  // recognised as a colour and then dropped on the floor one line later. The
+  // operator gradient above stays hex-only; it is authored by colour inputs.
+  const effectSamples = Array.from(effectArtwork.matchAll(PREVIEW_COLOR_TOKEN))
+    .map((match) => parsePreviewCssColor(match[0]))
     .filter((sample): sample is PreviewRgb => sample !== null)
   const clampedEffectOpacity = Math.min(1, Math.max(0, effectOpacity))
   const samples =

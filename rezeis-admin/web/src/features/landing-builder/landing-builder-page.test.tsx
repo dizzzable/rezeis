@@ -616,7 +616,7 @@ describe('LandingBuilderPage — draft persistence', () => {
     fireEvent.click(enabledSwitch())
     await settle()
 
-    // Clearing the session re-renders `AuthGuard`, which answers with a
+    // Clearing the session re-renders `ProtectedRoute`, which answers with a
     // `<Navigate>` — an in-app navigation, and therefore this blocker's
     // business. Holding it puts a "stay" in front of an operator whose session
     // is already gone.

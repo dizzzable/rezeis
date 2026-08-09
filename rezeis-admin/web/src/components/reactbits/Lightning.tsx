@@ -1,5 +1,7 @@
 import React, { useRef, useEffect } from 'react';
 
+import { resolveBufferRatio } from './render-scale';
+
 interface LightningProps {
   hue?: number;
   xOffset?: number;
@@ -15,9 +17,32 @@ const Lightning: React.FC<LightningProps> = ({ hue = 230, xOffset = 0, speed = 1
     const canvas = canvasRef.current;
     if (!canvas) return;
 
+    /**
+     * Size the drawing buffer, and ONLY when it actually changes.
+     *
+     * WHAT WENT WRONG: `render()` called this on EVERY frame. Assigning
+     * `canvas.width` reallocates the WebGL drawing buffer even when the value
+     * is identical, so a full-viewport buffer was being thrown away and
+     * rebuilt sixty times a second, forever. The guard makes the per-frame
+     * call free, and it is kept there rather than removed because a canvas
+     * sized by CSS has no other way to learn it grew.
+     *
+     * `clientWidth/clientHeight` is the CSS box and stays untouched — this
+     * canvas is `w-full h-full`. Only the buffer is capped, by the same
+     * device-pixel budget the rest of the catalog uses; this shader runs a
+     * ten-octave fbm per fragment, which is among the most expensive in the
+     * catalog full-screen. Everything it draws is a fraction of `iResolution`,
+     * so the picture is the same one at a lower sampling density.
+     */
     const resizeCanvas = () => {
-      canvas.width = canvas.clientWidth;
-      canvas.height = canvas.clientHeight;
+      const cssWidth = canvas.clientWidth;
+      const cssHeight = canvas.clientHeight;
+      const ratio = resolveBufferRatio(cssWidth, cssHeight, 1);
+      const width = Math.max(1, Math.floor(cssWidth * ratio));
+      const height = Math.max(1, Math.floor(cssHeight * ratio));
+      if (canvas.width === width && canvas.height === height) return;
+      canvas.width = width;
+      canvas.height = height;
     };
     resizeCanvas();
     window.addEventListener('resize', resizeCanvas);
@@ -25,7 +50,9 @@ const Lightning: React.FC<LightningProps> = ({ hue = 230, xOffset = 0, speed = 1
     const gl = canvas.getContext('webgl', { alpha: true, premultipliedAlpha: false });
     if (!gl) {
       console.error('WebGL not supported');
-      return;
+      // The listener above is already attached; without this it outlives the
+      // component on every device that cannot give us a context at all.
+      return () => window.removeEventListener('resize', resizeCanvas);
     }
 
     const vertexShaderSource = `
@@ -129,18 +156,27 @@ const Lightning: React.FC<LightningProps> = ({ hue = 230, xOffset = 0, speed = 1
       return shader;
     };
 
+    // Every bail-out below happens AFTER the context exists and after the
+    // resize listener is attached, so an unguarded `return` leaves both behind
+    // — and a failure here is exactly the situation (a driver under pressure,
+    // a recycled context) where leaking one more is least affordable.
+    const abandon = () => {
+      window.removeEventListener('resize', resizeCanvas);
+      gl.getExtension('WEBGL_lose_context')?.loseContext();
+    };
+
     const vertexShader = compileShader(vertexShaderSource, gl.VERTEX_SHADER);
     const fragmentShader = compileShader(fragmentShaderSource, gl.FRAGMENT_SHADER);
-    if (!vertexShader || !fragmentShader) return;
+    if (!vertexShader || !fragmentShader) return abandon;
 
     const program = gl.createProgram();
-    if (!program) return;
+    if (!program) return abandon;
     gl.attachShader(program, vertexShader);
     gl.attachShader(program, fragmentShader);
     gl.linkProgram(program);
     if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
       console.error('Program linking error:', gl.getProgramInfoLog(program));
-      return;
+      return abandon;
     }
     gl.useProgram(program);
 
@@ -162,6 +198,15 @@ const Lightning: React.FC<LightningProps> = ({ hue = 230, xOffset = 0, speed = 1
     const uSizeLocation = gl.getUniformLocation(program, 'uSize');
 
     const startTime = performance.now();
+    // The frame id has to be kept: an unstored requestAnimationFrame cannot be
+    // cancelled, so this loop outlived every unmount, held the context and its
+    // canvas alive against GC, and went on drawing into a canvas that was no
+    // longer in the document. Dormant while the panel background never
+    // unmounted; the auth gate now unmounts it on every logout, so it leaked a
+    // live full-screen shader per logout — and WebKit allows a web-content
+    // process only 16 contexts before it starts recycling the oldest and
+    // handing out an unrecoverable SyntheticLostContext.
+    let animationFrameId = 0;
     const render = () => {
       resizeCanvas();
       gl.viewport(0, 0, canvas.width, canvas.height);
@@ -174,12 +219,21 @@ const Lightning: React.FC<LightningProps> = ({ hue = 230, xOffset = 0, speed = 1
       gl.uniform1f(uIntensityLocation, intensity);
       gl.uniform1f(uSizeLocation, size);
       gl.drawArrays(gl.TRIANGLES, 0, 6);
-      requestAnimationFrame(render);
+      animationFrameId = requestAnimationFrame(render);
     };
-    requestAnimationFrame(render);
+    animationFrameId = requestAnimationFrame(render);
 
     return () => {
+      cancelAnimationFrame(animationFrameId);
       window.removeEventListener('resize', resizeCanvas);
+      gl.deleteProgram(program);
+      gl.deleteShader(vertexShader);
+      gl.deleteShader(fragmentShader);
+      gl.deleteBuffer(vertexBuffer);
+      // A dropped reference does not free the context: WebKit only returns the
+      // slot when the object is destroyed, and the page hits the 16-context cap
+      // long before GC gets there. Modelled on `LiquidChrome.tsx`'s cleanup.
+      gl.getExtension('WEBGL_lose_context')?.loseContext();
     };
   }, [hue, xOffset, speed, intensity, size]);
 

@@ -11,6 +11,7 @@
     "dev": "vite",
     "prebuild": "node scripts/sync-flags.mjs",
     "build": "tsc -b && vite build",
+    "check:build-graph": "node scripts/check-build-graph.mjs",
     "lint": "eslint .",
     "lint:strict": "eslint . --max-warnings=0",
     "lint:fix": "eslint . --fix",

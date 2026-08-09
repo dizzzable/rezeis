@@ -42,6 +42,8 @@ import {
   NavDestinationId,
   SubscriptionCardTextMode,
   SUBSCRIPTION_CARD_TEXT_MODES,
+  CARD_GRADIENT_SOURCES,
+  CardGradientSource,
 } from '../interfaces/branding-settings.interface';
 import {
   isSafeBrandingGradient,
@@ -661,6 +663,16 @@ export class UpdateBrandingSettingsDto {
   @MaxLength(512)
   @IsBrandingGradient()
   public cardGradient?: string;
+
+  /**
+   * Set by the panel alongside the gradient itself: `custom` on a manual edit,
+   * `concept` when a preset supplies it. Sending the gradient without the
+   * source leaves whatever was stored, so a client that predates this control
+   * cannot silently detach an operator's concept.
+   */
+  @IsOptional()
+  @IsIn(CARD_GRADIENT_SOURCES)
+  public cardGradientSource?: CardGradientSource;
 
   @IsOptional()
   @ValidateIf((_, value: unknown) => typeof value === 'string' && value.length > 0)

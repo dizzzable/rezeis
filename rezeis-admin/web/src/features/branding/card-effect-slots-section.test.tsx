@@ -48,4 +48,27 @@ describe('CardEffectSlotsSection', () => {
       }),
     ])
   })
+
+  it('mounts no live effect renderer, however many slots override the effect', () => {
+    // One picker per slot × a live tile renderer each is how this tab reached
+    // ~23 live WebGL contexts and blew past WebKit's sixteen-context ceiling,
+    // after which iOS discards the oldest contexts permanently.
+    const { container } = renderWithProviders(
+      <CardEffectSlotsSection
+        slots={Array.from({ length: 20 }, () => ({
+          mode: 'override' as const,
+          cardEffect: 'aurora',
+          cardEffectOpacity: 1,
+          cardGradient: null,
+        }))}
+        onChange={vi.fn()}
+      />,
+    )
+
+    expect(container.querySelectorAll('[data-card-effect-thumbnail-renderer]')).toHaveLength(0)
+    // The static palette stand-ins are still there, so the grid stays readable.
+    expect(
+      container.querySelectorAll('[data-card-effect-thumbnail-active="true"]').length,
+    ).toBe(20)
+  })
 })

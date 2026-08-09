@@ -69,7 +69,20 @@ export default function ForcePasswordChangePage() {
   }
 
   return (
-    <div className="min-h-screen grid place-items-center bg-muted/20 p-4">
+    // Reached directly from /sign-in, so it inherits the same phone problems
+    // and gets the same treatment as the sign-in shell:
+    //   • min-h-dvh, not -screen — 100vh is iOS's LARGE viewport, so with the
+    //     address bar expanded the shell overflows and the centred card sits
+    //     low, half under the bar.
+    //   • safe-area padding — index.html ships `viewport-fit=cover` with a
+    //     black-translucent status bar, so without it this card renders under
+    //     the notch and the home indicator.
+    //   • data-auth-surface — scopes the coarse-pointer 16px form floor (see
+    //     index.css) to the auth screens, where iOS zoom-on-focus bites.
+    <div
+      className="grid min-h-dvh place-items-center bg-muted/20 pt-[max(1rem,env(safe-area-inset-top))] pb-[max(1rem,env(safe-area-inset-bottom))] pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))]"
+      data-auth-surface
+    >
       <Card className="w-full max-w-md">
         <CardHeader>
           <div className="flex items-center gap-2">

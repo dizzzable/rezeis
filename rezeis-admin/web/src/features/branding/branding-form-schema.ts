@@ -1,6 +1,7 @@
 import { z } from 'zod'
 
 import { CARD_LOGO_PRESETS, type CardLogoPreset } from './branding-options'
+import { CARD_EFFECT_CATALOG, type CardEffectId } from './card-effect-catalog'
 
 export const BRANDING_BG_EFFECTS = ['NONE', 'MESH', 'PARTICLES', 'NOISE', 'AURORA'] as const
 export const BRANDING_ICON_COLOR_MODES = ['default', 'theme', 'custom'] as const
@@ -18,32 +19,30 @@ export const BRANDING_APP_BG_TEXTURES = [
   'triangles',
   'noise',
 ] as const
-export const BRANDING_CARD_EFFECTS = [
+/**
+ * What the card-effect fields accept, derived from the catalog.
+ *
+ * This used to be a hand-written copy of the effect names, and it was one of
+ * the six places that had to be edited in lockstep to add a single effect. A
+ * name missing here made the panel reject a value its own picker had offered,
+ * with a validation error that named no field.
+ *
+ * `z.custom` rather than `z.enum` because a `z.enum` needs a literal tuple, and
+ * a literal tuple is exactly the hand-written copy being removed. The type is
+ * still the precise union — it comes from the catalog's keys.
+ */
+export type BrandingCardEffect = 'NONE' | CardEffectId
+
+const BRANDING_CARD_EFFECT_SET: ReadonlySet<string> = new Set<string>([
   'NONE',
-  'aurora',
-  'threads',
-  'softAurora',
-  'rippleGrid',
-  'radar',
-  'plasma',
-  'particles',
-  'liquidChrome',
-  'lineWaves',
-  'iridescence',
-  'grainient',
-  'galaxy',
-  'balatro',
-  'waves',
-  'silk',
-  'beams',
-  'dither',
-  'paperMesh',
-  'paperWarp',
-  'paperGrain',
-  'paperDither',
-  'paperSwirl',
-  'paperMetaballs',
-] as const
+  ...Object.keys(CARD_EFFECT_CATALOG),
+])
+
+export function isBrandingCardEffect(value: unknown): value is BrandingCardEffect {
+  return typeof value === 'string' && BRANDING_CARD_EFFECT_SET.has(value)
+}
+
+const cardEffectField = () => z.custom<BrandingCardEffect>(isBrandingCardEffect)
 
 /** Cabinet nav destinations (mirrors backend `NAV_DESTINATIONS`). */
 export const BRANDING_NAV_DESTINATIONS = [
@@ -97,6 +96,13 @@ export interface BrandingFormDraft {
   readonly bgPrimary: string
   readonly bgSecondary: string
   readonly cardGradient: string
+  /**
+   * Who owns the gradient. `concept` while a preset supplies it, `custom` from
+   * the first manual edit onwards — that edit is what detaches the concept, so
+   * the operator's own gradient stops being overwritten by the preset's
+   * per-brightness copy on every read in the cabinet.
+   */
+  readonly cardGradientSource: 'concept' | 'custom'
   readonly cardPattern: string | null
   readonly subscriptionCardText: BrandingSubscriptionCardTextDraft
   readonly subscriptionCardGlass: BrandingSubscriptionCardGlassDraft
@@ -310,6 +316,7 @@ const DEFAULT_BRANDING_DRAFT: BrandingFormDraft = {
   bgPrimary: '#0a0a0a',
   bgSecondary: '#171717',
   cardGradient: 'linear-gradient(135deg, #064e3b 0%, #22c55e 100%)',
+  cardGradientSource: 'concept',
   cardPattern: null,
   subscriptionCardText: { mode: 'auto', color: null },
   subscriptionCardGlass: DEFAULT_SUBSCRIPTION_CARD_GLASS_DRAFT,
@@ -342,14 +349,14 @@ const DEFAULT_BRANDING_DRAFT: BrandingFormDraft = {
 export function createBrandingFormSchema(messages: BrandingFormValidationMessages) {
   const cardEffectSlotSchema = z.object({
     mode: z.enum(['inherit', 'override']).optional(),
-    cardEffect: z.enum(BRANDING_CARD_EFFECTS).optional(),
+    cardEffect: cardEffectField().optional(),
     cardEffectProps: z.record(z.string(), z.unknown()).optional(),
     cardEffectOpacity: z.number().min(0.05).max(1).optional(),
     cardGradient: optionalGradientSchema(messages.gradientInvalid),
   })
   const appBackgroundSchema = z.object({
     kind: z.enum(BRANDING_APP_BG_KINDS),
-    effect: z.enum(BRANDING_CARD_EFFECTS),
+    effect: cardEffectField(),
     props: z.record(z.string(), z.unknown()),
     opacity: z.number().min(0.05).max(1),
     gradient: safeGradientSchema(messages.gradientInvalid),
@@ -403,7 +410,7 @@ export function createBrandingFormSchema(messages: BrandingFormValidationMessage
     cardGradient: safeGradientSchema(messages.gradientInvalid),
     cardPattern: optionalGradientSchema(messages.gradientInvalid, true),
     subscriptionCardText: subscriptionCardTextSchema,
-    cardEffect: z.enum(BRANDING_CARD_EFFECTS),
+    cardEffect: cardEffectField(),
     cardEffectProps: z.record(z.string(), z.unknown()),
     cardEffectOpacity: z.number().min(0.05).max(1),
     cardEffectsByIndex: z.array(cardEffectSlotSchema).max(20),
@@ -437,12 +444,13 @@ export function createBrandingFormSchema(messages: BrandingFormValidationMessage
       bgPrimary: z.string().regex(HEX_PATTERN, messages.hexInvalid),
       bgSecondary: z.string().regex(HEX_PATTERN, messages.hexInvalid),
       cardGradient: safeGradientSchema(messages.gradientInvalid),
+      cardGradientSource: z.enum(['concept', 'custom']),
       cardPattern: optionalGradientSchema(messages.gradientInvalid, true),
       subscriptionCardText: subscriptionCardTextSchema,
       subscriptionCardGlass: subscriptionCardGlassSchema,
       cardLogo: z.enum(CARD_LOGO_PRESETS),
       cardLogoUrl: optionalImageUrl(messages.imageUrlInvalid),
-      cardEffect: z.enum(BRANDING_CARD_EFFECTS),
+      cardEffect: cardEffectField(),
       cardEffectProps: z.record(z.string(), z.unknown()).optional(),
       cardEffectOpacity: z.number().min(0.05).max(1),
       cardEffectsByIndex: z
@@ -474,7 +482,7 @@ export function createBrandingFormSchema(messages: BrandingFormValidationMessage
               .nullish(),
             texturePreset: z.enum(BRANDING_APP_BG_TEXTURES).nullish(),
             textureUrl: optionalImageUrl(messages.imageUrlInvalid),
-            cardEffect: z.enum(BRANDING_CARD_EFFECTS).nullish(),
+            cardEffect: cardEffectField().nullish(),
             cardEffectProps: z.record(z.string(), z.unknown()).optional(),
             cardEffectOpacity: z.number().min(0.05).max(1).nullish(),
           }),
@@ -830,7 +838,7 @@ function normalizeAppBackgroundDraft(
     kind,
     effect:
       typeof value.effect === 'string' &&
-      (BRANDING_CARD_EFFECTS as readonly string[]).includes(value.effect)
+      isBrandingCardEffect(value.effect)
         ? value.effect
         : 'NONE',
     props: isPlainRecordUnknown(value.props) ? value.props : {},

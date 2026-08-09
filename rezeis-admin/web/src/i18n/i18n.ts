@@ -43,7 +43,12 @@ i18n.on('languageChanged', (lng: string): void => {
     // previous language so the user sees translated keys immediately
     // after switching the UI language.
     for (const feature of loadedFeatureBundles) {
-      void loadFeatureBundle(feature);
+      void loadFeatureBundle(feature).catch((error: unknown) => {
+        // Fire-and-forget: a failed re-hydration leaves the previous
+        // language's strings on screen, which is survivable. An unhandled
+        // rejection here would not be.
+        console.warn(`[i18n] re-hydrating "${feature}" for "${lng}" failed:`, error);
+      });
     }
   }
 });
@@ -66,6 +71,7 @@ export { i18n };
 
 export type I18nFeature =
   | 'appearance'
+  | 'branding'
   | 'userDetail'
   | 'platformSettings'
   | 'notifications'
@@ -95,6 +101,10 @@ async function fetchFeatureBundle(
       return locale === 'ru'
         ? (await import('@/i18n/features/appearance.ru')).ru
         : (await import('@/i18n/features/appearance.en')).en;
+    case 'branding':
+      return locale === 'ru'
+        ? (await import('@/i18n/features/branding.ru')).ru
+        : (await import('@/i18n/features/branding.en')).en;
     case 'userDetail':
       return locale === 'ru'
         ? (await import('@/i18n/features/userDetail.ru')).ru
@@ -174,6 +184,18 @@ export async function loadFeatureBundle(feature: I18nFeature): Promise<void> {
     loadedFeatureBundles.add(feature);
   })();
   featureLoadPromises.set(cacheKey, promise);
+  // Cache the SUCCESS, never the failure. A bundle fetch is a network request
+  // for a hashed chunk, and it fails for ordinary reasons: a flaky connection,
+  // or a deploy that replaced the chunk while the tab was open. Leaving the
+  // rejected promise in the map made that permanent for the life of the tab —
+  // every later navigation to the route re-awaited the same rejection, so the
+  // page stayed broken until a full reload. Evicting it makes the next
+  // navigation a real retry.
+  void promise.catch(() => {
+    if (featureLoadPromises.get(cacheKey) === promise) {
+      featureLoadPromises.delete(cacheKey);
+    }
+  });
   return promise;
 }
 
@@ -181,6 +203,15 @@ export async function loadFeatureBundle(feature: I18nFeature): Promise<void> {
  * `lazy()`-compatible loader that ensures the i18n feature bundle is
  * loaded BEFORE the dynamic page chunk resolves. Translation keys for
  * the feature are guaranteed to be present on first render of the page.
+ *
+ * The bundle load is best-effort. `Promise.all` rejects on the FIRST
+ * rejection and discards the other result, so an unhandled bundle failure
+ * threw away a perfectly good page module and handed `React.lazy` a
+ * rejection — the route rendered as a blank page. Missing translations are
+ * a cosmetic failure (i18next falls back to `fallbackLng`, and past that to
+ * the key itself); a route that will not render is not. So the page always
+ * wins, and the failure is logged rather than propagated. `loadFeatureBundle`
+ * drops the rejected promise from its cache, so the next navigation retries.
  *
  * Usage:
  *   const UsersPage = lazy(withFeatureBundle('users', () => import('@/features/users/users-page')))
@@ -190,7 +221,12 @@ export function withFeatureBundle<T>(
   importer: () => Promise<T>,
 ): () => Promise<T> {
   return async () => {
-    const [mod] = await Promise.all([importer(), loadFeatureBundle(feature)]);
+    const [mod] = await Promise.all([
+      importer(),
+      loadFeatureBundle(feature).catch((error: unknown) => {
+        console.warn(`[i18n] feature bundle "${feature}" failed to load:`, error);
+      }),
+    ]);
     return mod;
   };
 }

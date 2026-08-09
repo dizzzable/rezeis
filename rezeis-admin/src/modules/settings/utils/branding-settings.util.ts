@@ -24,6 +24,7 @@ import {
   CARD_EFFECTS,
   CARD_LOGO_PRESETS,
   CardEffect,
+  CardGradientSource,
   CardEffectSlot,
   CardLogoPreset,
   CornerRadiiSettings,
@@ -57,6 +58,18 @@ const THEME_PRESET_VERSION_MAX = 2_147_483_647;
 const IMAGE_URL_PATTERN =
   /^(?:data:image\/[a-z0-9+.-]+;base64,[A-Za-z0-9+/=]+|https?:\/\/(?![^/\s]+@)[^\s]+|\/uploads\/branding\/(?![A-Za-z0-9._-]*\.\.)[A-Za-z0-9][A-Za-z0-9._-]*)$/i;
 
+/**
+ * Anything that is not an explicit `custom` reads as `concept`.
+ *
+ * The default has to be `concept` rather than `custom`: every install that
+ * predates this field stored a gradient with no source, and those installs
+ * were being served the variant's value. Defaulting to `custom` would change
+ * how every one of their cards looks the moment they upgrade.
+ */
+function readCardGradientSource(value: unknown): CardGradientSource {
+  return value === 'custom' ? 'custom' : 'concept';
+}
+
 export function readBrandingSettings(value: unknown): BrandingSettingsInterface {
   const record = readRecord(value);
   return {
@@ -75,6 +88,7 @@ export function readBrandingSettings(value: unknown): BrandingSettingsInterface 
     bgPrimary: readHex(record, 'bgPrimary', DEFAULT_BRANDING.bgPrimary),
     bgSecondary: readHex(record, 'bgSecondary', DEFAULT_BRANDING.bgSecondary),
     cardGradient: readGradient(record, 'cardGradient', DEFAULT_BRANDING.cardGradient),
+    cardGradientSource: readCardGradientSource(record['cardGradientSource']),
     cardPattern: readNullableGradient(record, 'cardPattern'),
     subscriptionCardText: readSubscriptionCardText(record),
     subscriptionCardGlass: readSubscriptionCardGlass(record),

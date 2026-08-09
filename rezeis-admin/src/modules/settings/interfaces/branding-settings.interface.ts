@@ -47,15 +47,22 @@ export const CARD_LOGO_PRESETS = [
 export type CardLogoPreset = (typeof CARD_LOGO_PRESETS)[number];
 
 /**
- * Animated ReactBits effects that can render BEHIND the subscription card.
- * `NONE` keeps the plain gradient. The rest map to lazy-loaded ogl/canvas
- * components in the reiwa SPA (`components/reactbits/registry.ts`). Only the
- * dependency-light effects are exposed (reiwa ships `ogl`, not three.js).
+ * Animated effects that can render BEHIND the subscription card. `NONE` keeps
+ * the plain gradient; the rest map to lazy-loaded components in both front
+ * ends.
  *
- * Adding an effect requires updates in three places:
- *   1. `CARD_EFFECTS` here,
- *   2. the SPA effect registry + renderer,
- *   3. the admin configurator effect grid.
+ * This list exists to validate what the admin API accepts. It is not the source
+ * of truth for what an effect IS — that is
+ * `web/src/features/branding/card-effect-catalog.ts`, which also carries each
+ * effect's controls, palette and renderer, and from which the panel's form
+ * schema and preview are derived. `test/card-effect-catalog-contract.spec.ts`
+ * holds the two together; adding an effect to the catalog without adding it
+ * here fails that test rather than surfacing as a save the panel's own picker
+ * caused the API to refuse.
+ *
+ * The cabinet keeps its own catalog and deliberately does NOT validate against
+ * a copy of this list, so that a panel released ahead of it cannot freeze a
+ * live configuration. See `isEffectId` in reiwa's public-config guard.
  */
 export const CARD_EFFECTS = [
   'NONE',
@@ -84,8 +91,44 @@ export const CARD_EFFECTS = [
   'paperDither',
   'paperSwirl',
   'paperMetaballs',
+  // Originkit — see web/src/features/branding/card-effect-catalog.ts.
+  'snowfall',
+  'stardust',
+  'asciiRain',
+  'asciiFlame',
+  'characterWaves',
+  'blinkingSquares',
+  'lineRipple',
+  'pulseLines',
+  'textWave',
+  'pixelCard',
+  'glitterWrap',
+  'chromaticWaves',
+  'dotMatrix',
+  'pixelTetris',
+  'risingLines',
+  'starBurst',
+  'particleTunnel',
+  'floatingIcons',
+  'snakeGrid',
+  'gridHole',
+  'waveArcs',
+  'reactiveGrid',
+  'reactiveLines',
+  'prismGrid',
+  'thunderstrike',
+  'blackhole',
+  'cosmicOrb',
+  'tornado',
+  'cube',
+  'wordGlobe',
+  'particleSphere',
 ] as const;
 export type CardEffect = (typeof CARD_EFFECTS)[number];
+
+/** See `BrandingSettingsInterface.cardGradientSource`. */
+export const CARD_GRADIENT_SOURCES = ['concept', 'custom'] as const;
+export type CardGradientSource = (typeof CARD_GRADIENT_SOURCES)[number];
 
 /**
  * Foreground strategy for the subscription card itself. `auto` preserves the
@@ -455,6 +498,22 @@ export interface BrandingSettingsInterface {
 
   /** CSS background string for the subscription card. */
   readonly cardGradient: string;
+  /**
+   * Who owns `cardGradient`, and therefore who wins when the root value and a
+   * per-brightness theme variant disagree.
+   *
+   *   - `concept` — a concept preset supplies it, and its light/dark palettes
+   *     apply. Generating a different gradient per brightness is what a
+   *     concept is FOR.
+   *   - `custom` — the operator wrote it. The root value wins everywhere and
+   *     no variant may override it.
+   *
+   * One field used to carry both meanings with no way to tell them apart, so
+   * the variant always won: an operator saved a gradient, the cabinet went on
+   * drawing the concept's, on every read. Legacy payloads have no source and
+   * resolve as `concept`, which is exactly the previous behaviour.
+   */
+  readonly cardGradientSource: CardGradientSource;
   /** Optional CSS background-image (pattern overlay) for the card. */
   readonly cardPattern: string | null;
   /**
@@ -588,6 +647,7 @@ export const DEFAULT_BRANDING: BrandingSettingsInterface = {
   bgPrimary: '#0a0a0a',
   bgSecondary: '#171717',
   cardGradient: 'linear-gradient(135deg, #064e3b 0%, #22c55e 100%)',
+  cardGradientSource: 'concept',
   cardPattern: null,
   subscriptionCardText: {
     mode: 'auto',

@@ -351,6 +351,11 @@ export default function WebReiwaPage() {
     { synchronizeThemeVariants = true }: { readonly synchronizeThemeVariants?: boolean } = {},
   ): void {
     form.setValue("cardGradient", cardGradient, { shouldDirty: true });
+    // A hand-written gradient detaches the concept. Without this the value
+    // lands on the root, the concept's per-brightness copy keeps winning in
+    // the cabinet, and the operator sees their choice in the panel preview and
+    // nowhere else. Concept appliers set it back to `concept` explicitly.
+    form.setValue("cardGradientSource", "custom", { shouldDirty: true });
     if (synchronizeThemeVariants) {
       synchronizeThemeVariantCardGradients(cardGradient);
     }
@@ -415,6 +420,11 @@ export default function WebReiwaPage() {
     // Page colors/background, geometry and navigation stay untouched.
     setGlobalCardGradient(patch.cardGradient, { synchronizeThemeVariants });
     setGlobalCardPattern(patch.cardPattern, { synchronizeThemeVariants });
+    // Re-attach: `setGlobalCardGradient` marks every write as a manual edit,
+    // which is right for the swatches and the constructor and wrong here — a
+    // preset IS the concept, so its per-brightness palettes must go on
+    // applying. This line must follow the setter, not precede it.
+    form.setValue("cardGradientSource", "concept", { shouldDirty: true });
     form.setValue("cardEffect", patch.cardEffect, { shouldDirty: true });
     form.setValue("cardEffectProps", { ...patch.cardEffectProps }, { shouldDirty: true });
     form.setValue("cardEffectOpacity", patch.cardEffectOpacity, { shouldDirty: true });
@@ -1484,7 +1494,13 @@ export default function WebReiwaPage() {
               </CardContent>
             </Card>
 
-            {/* Animated card background effect */}
+            {/* Animated card background effect.
+                This is the ONE place a live tile renderer is allowed: the
+                global effect exists once, so `livePreview` here costs a single
+                context. The per-position slots below deliberately take no such
+                prop — passing the same flag to a section that renders one
+                picker per slot is what put ~23 live WebGL contexts on this tab
+                and pushed iOS past its ceiling. */}
             <Controller
               name="cardEffect"
               control={form.control}
@@ -1509,7 +1525,6 @@ export default function WebReiwaPage() {
                 <CardEffectSlotsSection
                   slots={(field.value ?? []) as CardEffectSlot[]}
                   onChange={(slots) => field.onChange(slots)}
-                  livePreview={tab === 'card'}
                 />
               )}
             />

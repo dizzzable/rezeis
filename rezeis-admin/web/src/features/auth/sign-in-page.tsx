@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useNavigate } from 'react-router'
 import { consumeReturnTo } from '@/lib/return-to'
 import { useTranslation } from 'react-i18next'
@@ -49,6 +49,22 @@ function useRegisterSchema() {
 type LoginFormData = { username: string; password: string }
 type RegisterFormData = { username: string; password: string; confirmPassword: string }
 
+/**
+ * autoFocus is a desktop nicety: on touch devices (iOS in particular) it
+ * raises the software keyboard over the just-rendered card and scroll-jumps
+ * the page before the operator has even seen it. Gate it on a fine pointer
+ * so desktop keeps the type-immediately behavior and phones stay calm.
+ */
+function useAutoFocusOnFinePointer(): boolean {
+  return useMemo(
+    () =>
+      typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(pointer: fine)').matches,
+    [],
+  )
+}
+
 // ── Page ─────────────────────────────────────────────────────────────────────
 
 export default function SignInPage() {
@@ -81,9 +97,22 @@ export default function SignInPage() {
 function PageShell({ children }: { children: React.ReactNode }) {
   const { t } = useTranslation()
   return (
-    <div className="relative min-h-screen overflow-hidden">
+    // min-h-dvh (not -screen): 100vh on iOS is the LARGE viewport, so with
+    // the address bar expanded the shell overflowed and centered content
+    // sat low. dvh tracks the visible viewport. The safe-area paddings keep
+    // the card off the notch/home-indicator (index.html ships
+    // viewport-fit=cover + black-translucent, so content extends under
+    // them by default).
+    //
+    // `data-auth-surface` scopes the `@media (pointer: coarse)` 16px form
+    // floor in index.css to this shell. It is deliberately NOT panel-wide:
+    // coarse pointer includes iPads, where forcing 16px with !important
+    // clips the text out of the panel's h-7 inputs. Auth is where iOS's
+    // zoom-on-focus actually costs something — it fires on the first field
+    // an operator touches and never unwinds.
+    <div className="relative min-h-dvh overflow-hidden" data-auth-surface>
       <Aurora />
-      <div className="relative z-10 flex min-h-screen items-center justify-center p-4">
+      <div className="relative z-10 flex min-h-dvh items-center justify-center pt-[max(1rem,env(safe-area-inset-top))] pb-[max(1rem,env(safe-area-inset-bottom))] pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))]">
         <div className="w-full max-w-md space-y-6">
           <div className="flex flex-col items-center gap-2">
             <div className="flex h-14 w-14 items-center justify-center">
@@ -106,6 +135,7 @@ function LoginForm() {
   const { t } = useTranslation()
   const navigate = useNavigate()
   const { login } = useAuth()
+  const autoFocusField = useAutoFocusOnFinePointer()
   const [error, setError] = useState<string | null>(null)
   const [totpRequired, setTotpRequired] = useState(false)
   const [totpCode, setTotpCode] = useState('')
@@ -174,7 +204,7 @@ function LoginForm() {
                 inputMode="numeric"
                 autoComplete="one-time-code"
                 // eslint-disable-next-line jsx-a11y/no-autofocus
-                autoFocus
+                autoFocus={autoFocusField}
                 maxLength={20}
                 placeholder="123456"
                 value={totpCode}
@@ -222,7 +252,7 @@ function LoginForm() {
               id="username"
               autoComplete="username"
               // eslint-disable-next-line jsx-a11y/no-autofocus
-              autoFocus
+              autoFocus={autoFocusField}
               {...form.register('username')}
             />
             {form.formState.errors.username && (
@@ -265,6 +295,7 @@ function RegisterForm() {
   const { t } = useTranslation()
   const navigate = useNavigate()
   const { login } = useAuth()
+  const autoFocusField = useAutoFocusOnFinePointer()
   const [error, setError] = useState<string | null>(null)
 
   const registerSchema = useRegisterSchema()
@@ -303,7 +334,7 @@ function RegisterForm() {
               id="reg-username"
               autoComplete="username"
               // eslint-disable-next-line jsx-a11y/no-autofocus
-              autoFocus
+              autoFocus={autoFocusField}
               placeholder={t('signInPage.register.usernamePlaceholder')}
               {...form.register('username')}
             />

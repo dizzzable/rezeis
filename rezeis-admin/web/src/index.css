@@ -325,47 +325,119 @@
 }
 
 /* Disable visual effects (React Bits animations, spotlight, aurora, etc.) */
+/* Disable visual effects (React Bits animations, spotlight, aurora, etc.)
+ *
+ * `will-change: auto` is part of stopping an animation, not a detail:
+ * `.aurora-blob` declares `will-change: transform`, which promotes each of
+ * three viewport-sized elements to its own compositor layer and KEEPS it
+ * there — the promotion is not released when the animation is switched off,
+ * only when the declaration stops applying. Three full-viewport layers held
+ * for the lifetime of the page is exactly the memory an operator who turned
+ * effects off was trying not to spend.
+ *
+ * Note this half of the gate is currently belt-and-braces: `Aurora.tsx`
+ * returns null when `visualEffects` is false, so the blobs are not in the
+ * DOM to gate. The reduced-motion block below is the one that carries load —
+ * there the elements ARE rendered. Keep both in step anyway; the component
+ * has been both ways. */
 :root[data-effects="off"] .spotlight-effect,
 :root[data-effects="off"] .shiny-text-effect,
 :root[data-effects="off"] .aurora-bg,
+:root[data-effects="off"] .aurora-blob,
 :root[data-effects="off"] .glare-hover-effect,
 :root[data-effects="off"] .animated-content-effect {
   animation: none !important;
   backdrop-filter: none !important;
   filter: none !important;
+  will-change: auto !important;
 }
 
-/* Respect prefers-reduced-motion at OS level */
+/* Respect prefers-reduced-motion at OS level.
+ * `.aurora-blob` is listed explicitly: the wrapper `.aurora-bg` never
+ * carried the animation itself — the blob children do — so gating only
+ * the wrapper left them animating.
+ *
+ * This is the load-bearing gate for the compositor-layer release above: the
+ * blobs really are rendered here (the component only checks `visualEffects`),
+ * so without `will-change: auto` a phone with reduced motion on holds three
+ * viewport-sized layers forever to animate nothing. */
 @media (prefers-reduced-motion: reduce) {
   .spotlight-effect,
   .shiny-text-effect,
   .aurora-bg,
+  .aurora-blob,
   .glare-hover-effect,
   .animated-content-effect {
     animation: none !important;
     backdrop-filter: none !important;
     filter: none !important;
+    will-change: auto !important;
   }
 }
 
-/* ── Aurora keyframes ─────────────────────────────────────────────────────── */
+/* ── Aurora blobs ───────────────────────────────────────────────────────────
+ * The blur is baked into the radial gradient instead of `filter: blur()`:
+ * a filter forces the browser to re-rasterize a viewport-sized Gaussian
+ * every animation frame (the old keyframes also animated `scale`, which
+ * invalidates the filter cache) — on iOS that pegged the GPU on the
+ * sign-in screen. A soft gradient + translate-only keyframes composite on
+ * the GPU without any per-frame re-blur; newer Safari even runs the whole
+ * animation off the main thread.
+ */
+.aurora-blob {
+  position: absolute;
+  inset: -10%;
+  border-radius: 9999px;
+  will-change: transform;
+}
+/* Same palette/alpha as the former solid-fill + blur(80–100px) blobs; the
+ * wider the outer fade band, the softer the former blur radius was. */
+.aurora-blob--1 {
+  background: radial-gradient(
+    50% 50% at 50% 50%,
+    oklch(0.7 0.2 260 / 30%) 0%,
+    oklch(0.7 0.2 260 / 28%) 62%,
+    oklch(0.7 0.2 260 / 12%) 84%,
+    transparent 98%
+  );
+}
+.aurora-blob--2 {
+  background: radial-gradient(
+    50% 50% at 50% 50%,
+    oklch(0.6 0.18 300 / 25%) 0%,
+    oklch(0.6 0.18 300 / 23%) 56%,
+    oklch(0.6 0.18 300 / 10%) 82%,
+    transparent 98%
+  );
+}
+.aurora-blob--3 {
+  background: radial-gradient(
+    50% 50% at 50% 50%,
+    oklch(0.65 0.15 200 / 20%) 0%,
+    oklch(0.65 0.15 200 / 18%) 60%,
+    oklch(0.65 0.15 200 / 8%) 83%,
+    transparent 98%
+  );
+}
+
+/* ── Aurora keyframes (translate-only — see .aurora-blob above) ──────────── */
 @keyframes aurora-1 {
-  0%, 100% { transform: translate(0%, 0%) scale(1); }
-  25% { transform: translate(10%, -15%) scale(1.1); }
-  50% { transform: translate(-5%, 10%) scale(0.95); }
-  75% { transform: translate(-10%, -5%) scale(1.05); }
+  0%, 100% { transform: translate(0%, 0%); }
+  25% { transform: translate(10%, -15%); }
+  50% { transform: translate(-5%, 10%); }
+  75% { transform: translate(-10%, -5%); }
 }
 @keyframes aurora-2 {
-  0%, 100% { transform: translate(0%, 0%) scale(1); }
-  25% { transform: translate(-15%, 10%) scale(1.05); }
-  50% { transform: translate(10%, -10%) scale(1.1); }
-  75% { transform: translate(5%, 15%) scale(0.9); }
+  0%, 100% { transform: translate(0%, 0%); }
+  25% { transform: translate(-15%, 10%); }
+  50% { transform: translate(10%, -10%); }
+  75% { transform: translate(5%, 15%); }
 }
 @keyframes aurora-3 {
-  0%, 100% { transform: translate(0%, 0%) scale(1); }
-  25% { transform: translate(5%, 15%) scale(0.95); }
-  50% { transform: translate(-10%, -5%) scale(1.1); }
-  75% { transform: translate(15%, -10%) scale(1); }
+  0%, 100% { transform: translate(0%, 0%); }
+  25% { transform: translate(5%, 15%); }
+  50% { transform: translate(-10%, -5%); }
+  75% { transform: translate(15%, -10%); }
 }
 
 /* ── Shiny text sweep ─────────────────────────────────────────────────────── */
@@ -401,6 +473,92 @@ input[type="number"]::-webkit-inner-spin-button {
   -webkit-appearance: none;
   appearance: none;
   margin: 0;
+}
+
+/* ── Touch-device form-control text size (AUTH SURFACES ONLY) ───────────────
+ * Mobile Safari zooms the whole page when a focused control renders text
+ * below 16px, and never zooms back out — on the sign-in card (14px inputs)
+ * every tap on the username field left the panel half-zoomed.
+ *
+ * The value is `16px`, NOT `1rem`. Safari's threshold is 16 CSS pixels, an
+ * absolute device fact, while `rem` is relative to a root this stylesheet
+ * moves: `:root[data-font-size="small"]` sets `font-size: 14px` (see the
+ * appearance rules above). An operator on that setting would get a 14px
+ * "floor" and the zoom-on-focus bug straight back — silently, because the
+ * rule still looks correct. `!important` is needed to beat Tailwind's
+ * `text-sm` on the element itself.
+ *
+ * SCOPE IS THE WHOLE POINT — do not widen this back to a bare
+ * `input, select, textarea`.
+ *
+ * `pointer: coarse` is not "iPhone". It is every touch-primary device,
+ * which includes the iPads and Android tablets operators run the panel on,
+ * and `!important` there outranks every Tailwind text utility in the app.
+ * The dense operator screens are built out of `h-7` (28px) inputs with
+ * `py-2` + a 1px border: 28 − 16 − 2 = 10px of content box, against the
+ * ~19px line box a 16px font needs. The text does not shrink to fit, it
+ * clips. That is ~61 controls across 18 files — the user-detail panel's
+ * discount / traffic / device-limit / referral-level fields, the
+ * custom-emoji and bot-flow size boxes, the notifications rows, the
+ * branding hex-colour inputs, and most filter bars.
+ *
+ * The zoom-on-focus trap only actually costs anything on the auth screens:
+ * it fires on the first control an operator touches in a session and never
+ * unwinds. Inside the panel they have already sized the page themselves.
+ * So the floor is applied to the auth surfaces and nowhere else — the
+ * marker is `data-auth-surface`, set by the sign-in shell and the forced
+ * password-change page.
+ *
+ * (The previous version used `max(1rem, 1em)` and claimed it "preserves
+ * controls that are already larger". It does not: in `font-size`, `em`
+ * resolves against the PARENT, never the element, so the expression was
+ * `max(16px, parentFontSize)` and the input's own `text-xs` / `text-lg`
+ * never entered into it. Every auth field is the shared 14px `Input`, so a
+ * plain `1rem` is both simpler and exactly what was meant.)
+ */
+@media (pointer: coarse) {
+  [data-auth-surface] input,
+  [data-auth-surface] select,
+  [data-auth-surface] textarea {
+    font-size: 16px !important;
+  }
+}
+
+/* ── Glass background host sizing ───────────────────────────────────────────
+ * The animated background (GlassBackground) fills the viewport. It is sized
+ * to the LARGE viewport (`lvw`/`lvh`) on purpose: on iOS the address-bar
+ * collapse fires `resize` mid-scroll-gesture, and any dimension change here
+ * makes the WebGL components reallocate their drawing buffer mid-gesture
+ * (renderer.setSize → canvas.width reset), which stutters the scroll.
+ * `100lvh` never changes while the browser chrome collapses/expands — the
+ * element simply already covers the area the bar reveals — so the storm of
+ * mid-gesture resizes never reaches the GL canvas. Rotation and real window
+ * resizes still update `lvh`, so backgrounds keep adapting to those.
+ * `100vw/100vh` fallback keeps pre-`lvh` engines (< iOS 15.4) working.
+ */
+#glass-background {
+  width: 100vw;
+  height: 100vh;
+}
+@supports (height: 100lvh) {
+  #glass-background {
+    width: 100lvw;
+    height: 100lvh;
+  }
+}
+
+/* The shader layer fades onto the static gradient underneath it instead of
+ * appearing in one frame. Opacity-only, so it composites without layout or
+ * paint work, and it runs exactly once per mount (`both` holds the end
+ * state) — no `will-change`, nothing to release afterwards. */
+@keyframes glass-background-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-glass-background-animated] {
+    animation: none !important;
+  }
 }
 
 /* ── Liquid Glass — per-element glass effects ──────────────────────────────

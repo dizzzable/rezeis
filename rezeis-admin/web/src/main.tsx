@@ -6,7 +6,9 @@ import { registerServiceWorker } from '@/lib/register-sw'
 import { i18nReady } from '@/i18n/i18n'
 import '@/index.css'
 
-// Register the service worker for installable PWA + offline shell.
+// Service worker for installable PWA + offline shell. The helper defers the
+// actual registration until after window load + idle so the ~7 MiB precache
+// never races the login-critical requests on first visit.
 void registerServiceWorker()
 
 // Wait for the initial locale bundle to load before the first paint so the

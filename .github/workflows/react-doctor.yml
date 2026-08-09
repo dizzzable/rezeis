@@ -1,0 +1,73 @@
+name: React Doctor
+
+# Ported from `rezeis-admin/.github/workflows/react-doctor.yml`, which sat at a
+# NESTED path and therefore never ran: GitHub only discovers workflows at
+# `<repo-root>/.github/workflows/`. `rezeis-admin/.git` is a stray directory
+# holding a single `COMMIT_EDITMSG_T003` file, not a repository — `git
+# rev-parse --show-toplevel` from inside `rezeis-admin` returns this repo. The
+# nested `ci.yml` and `docker-publish.yml` were deleted for the same reason;
+# nothing may be added under `rezeis-admin/.github/` again.
+#
+# The nested file also invoked `--fail-on error --annotations`. Neither flag
+# exists in react-doctor's current CLI (it is `--blocking <level>`), so the
+# workflow was stale as well as dead.
+
+on:
+  pull_request:
+    paths:
+      - 'rezeis-admin/web/**'
+      - '.github/workflows/react-doctor.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  react-doctor:
+    name: React Doctor
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rezeis-admin/web
+    steps:
+      # Full history: `--scope changed` diffs against the base commit.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: rezeis-admin/web/package-lock.json
+
+      - run: npm ci
+
+      # `--scope changed` gates on issues this pull request INTRODUCES, not on
+      # the standing backlog. A full scan on 2026-08-08 reported 78 errors and
+      # 841 warnings over 319 files, 463 of the findings inside
+      # `src/components/reactbits/**` (vendored effect components, which
+      # `eslint.config.mjs` likewise ignores). Blocking on that total would
+      # wall every web pull request on debt this workflow did not create;
+      # blocking on the delta makes the check enforceable from day one.
+      #
+      # The backlog is worth clearing — it includes 26 "effect subscription or
+      # timer never cleaned up" and 8 "observer created in an effect never
+      # disconnected". That is the exact defect class that let `Lightning.tsx`
+      # leak an uncancellable full-screen rAF and its WebGL context on every
+      # logout. Once it reaches zero, drop `--scope changed`/`--base` and let
+      # the full scan block.
+      #
+      # `--no-telemetry` suppresses the score API call and the public
+      # react.doctor share URL: this is a private product and CI should not
+      # publish its health metrics to a third party. Drop the flag if that
+      # trade is ever wanted. `--no-supply-chain` skips the Socket.dev
+      # dependency lookup — image and dependency CVEs are covered by the Trivy
+      # scan in `docker-publish.yml`, and this job is about React code health.
+      - name: Run react-doctor on the changed surface
+        run: >-
+          npx react-doctor@latest
+          --scope changed
+          --base ${{ github.event.pull_request.base.sha }}
+          --blocking error
+          --no-telemetry
+          --no-supply-chain
