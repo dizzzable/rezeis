@@ -146,9 +146,41 @@ function ServerHealth({
   )
 }
 
+/**
+ * One absent metrics block must not take the dashboard down.
+ *
+ * `SystemHealthResponse` types `vps` and `process` as required, but nothing
+ * enforces that at runtime: `dashboard-api.ts` reads the response with a bare
+ * `api.get<SystemHealthResponse>` cast and no schema parse, so the type is a
+ * promise about the contract rather than a fact about the payload. The panel
+ * renders this same component for its OWN health and for reiwa's, fetched from
+ * a separate service over the network (`getReiwaSystemHealth`), where a version
+ * skew or a partial reply is an ordinary event rather than a bug.
+ *
+ * Dereferencing a missing block threw inside render with no error boundary
+ * above it, so React unmounted the whole DashboardPage — the operator lost
+ * every widget on the page because one metrics section was unavailable.
+ */
+function MetricsUnavailable(): JSX.Element {
+  const { t } = useTranslation()
+  return (
+    <p className="py-6 text-center text-sm text-muted-foreground">
+      {t('dashboardPage.systemHealth.sectionUnavailable')}
+    </p>
+  )
+}
+
 function VpsMetrics({ health }: { readonly health: SystemHealthResponse }): JSX.Element {
   const { t } = useTranslation()
   const { vps } = health
+
+  if (!vps) return <MetricsUnavailable />
+
+  // `loadAverage` and `network` are arrays in the contract; a partial payload
+  // can still carry the block without them, and `[0]` on undefined throws just
+  // as hard as the missing block did.
+  const load = vps.loadAverage ?? []
+  const network = vps.network ?? []
 
   return (
     <>
@@ -177,7 +209,7 @@ function VpsMetrics({ health }: { readonly health: SystemHealthResponse }): JSX.
           <span>{t('dashboardPage.systemHealth.loadAverage')}</span>
         </div>
         <span className="font-mono text-xs">
-          {vps.loadAverage[0]} / {vps.loadAverage[1]} / {vps.loadAverage[2]}
+          {load[0] ?? '—'} / {load[1] ?? '—'} / {load[2] ?? '—'}
         </span>
       </div>
       <div className="flex items-center justify-between text-sm">
@@ -186,13 +218,13 @@ function VpsMetrics({ health }: { readonly health: SystemHealthResponse }): JSX.
         </span>
         <span className="font-mono text-xs">{formatUptime(vps.uptimeSeconds)}</span>
       </div>
-      {vps.network.length > 0 && (
+      {network.length > 0 && (
         <div className="flex items-center justify-between text-sm">
           <span className="text-muted-foreground">
             {t('dashboardPage.systemHealth.network')}
           </span>
           <span className="font-mono text-xs">
-            ↓{formatBytes(vps.network[0].rxBytes)} ↑{formatBytes(vps.network[0].txBytes)}
+            ↓{formatBytes(network[0]!.rxBytes)} ↑{formatBytes(network[0]!.txBytes)}
           </span>
         </div>
       )}
@@ -203,6 +235,14 @@ function VpsMetrics({ health }: { readonly health: SystemHealthResponse }): JSX.
 function ProcessMetrics({ health }: { readonly health: SystemHealthResponse }): JSX.Element {
   const { t } = useTranslation()
   const { process: proc } = health
+
+  if (!proc) return <MetricsUnavailable />
+
+  // This tab reads the VPS block too, for "share of total RAM". A payload
+  // carrying `process` without `vps` is exactly the partial reply the guard
+  // above exists for, so the share degrades to the bare figure rather than
+  // taking a second tab down with the first.
+  const ramTotalBytes = health.vps?.ramTotalBytes
 
   return (
     <>
@@ -216,8 +256,12 @@ function ProcessMetrics({ health }: { readonly health: SystemHealthResponse }): 
         icon={MemoryStick}
         label={t('dashboardPage.systemHealth.rss')}
         value={formatBytes(proc.rssBytes)}
-        percent={(proc.rssBytes / health.vps.ramTotalBytes) * 100}
-        sublabel={t('dashboardPage.systemHealth.ofTotal', { total: formatBytes(health.vps.ramTotalBytes) })}
+        percent={ramTotalBytes ? (proc.rssBytes / ramTotalBytes) * 100 : undefined}
+        sublabel={
+          ramTotalBytes
+            ? t('dashboardPage.systemHealth.ofTotal', { total: formatBytes(ramTotalBytes) })
+            : undefined
+        }
       />
       <div className="flex items-center justify-between text-sm">
         <span className="text-muted-foreground">
@@ -274,14 +318,20 @@ function MetricRow({
   readonly icon: React.ComponentType<{ className?: string }>
   readonly label: string
   readonly value: string
-  readonly percent: number
+  /** Omitted when the share is not derivable — the bar is then left out
+   *  rather than drawn at zero, which would read as "idle" instead of
+   *  "unknown". Happens when a partial payload carries this metric but not
+   *  the VPS total it is a share of. */
+  readonly percent?: number
   readonly sublabel?: string
 }): JSX.Element {
-  const colorClass = percent > 90
-    ? '[&>div]:bg-red-500'
-    : percent > 75
-      ? '[&>div]:bg-yellow-500'
-      : '[&>div]:bg-emerald-500'
+  const colorClass = percent === undefined
+    ? '[&>div]:bg-emerald-500'
+    : percent > 90
+      ? '[&>div]:bg-red-500'
+      : percent > 75
+        ? '[&>div]:bg-yellow-500'
+        : '[&>div]:bg-emerald-500'
 
   return (
     <div className="space-y-1.5">
@@ -292,7 +342,9 @@ function MetricRow({
         </div>
         <span className="font-mono text-xs font-medium">{value}</span>
       </div>
-      <Progress value={Math.min(percent, 100)} className={`h-2 ${colorClass}`} />
+      {percent !== undefined && (
+        <Progress value={Math.min(percent, 100)} className={`h-2 ${colorClass}`} />
+      )}
       {sublabel && (
         <p className="text-xs text-muted-foreground">{sublabel}</p>
       )}

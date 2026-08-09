@@ -58,6 +58,7 @@ vi.mock('./card-effect-registry', async () => {
 
 import { BrandingPreview } from './branding-preview'
 import {
+  PREVIEW_CONTEXT_RESTORE_GRACE_MS,
   observePreviewCardEffectCanvases,
   requiresPreviewCardEffectWebGL2,
 } from './card-effect-preview-utils'
@@ -585,21 +586,43 @@ describe('BrandingPreview subscription card', () => {
     vi.useRealTimers()
   })
 
-  it.each(['webglcontextlost', 'webglcontextcreationerror'])(
-    'reports an explicit %s event after renderer commit',
-    (eventName) => {
-      const root = document.createElement('div')
-      const canvas = document.createElement('canvas')
-      root.append(canvas)
-      const onFailure = vi.fn()
-      const stop = observePreviewCardEffectCanvases(root, onFailure, 25)
+  it('reports an explicit webglcontextcreationerror after renderer commit', () => {
+    const root = document.createElement('div')
+    document.body.append(root)
+    const canvas = document.createElement('canvas')
+    root.append(canvas)
+    const onFailure = vi.fn()
+    const stop = observePreviewCardEffectCanvases(root, onFailure, 25)
 
-      canvas.dispatchEvent(new Event(eventName))
-      expect(onFailure).toHaveBeenCalledOnce()
+    // A context that was never created has nothing to restore, so this one is
+    // still immediate. `webglcontextlost` is not — see
+    // `card-effect-preview-context-restore.test.tsx`.
+    canvas.dispatchEvent(new Event('webglcontextcreationerror'))
+    expect(onFailure).toHaveBeenCalledOnce()
 
-      stop()
-    },
-  )
+    stop()
+    root.remove()
+  })
+
+  it('reports an explicit webglcontextlost once the restore window has passed', () => {
+    vi.useFakeTimers()
+    const root = document.createElement('div')
+    document.body.append(root)
+    const canvas = document.createElement('canvas')
+    root.append(canvas)
+    const onFailure = vi.fn()
+    const stop = observePreviewCardEffectCanvases(root, onFailure, 25)
+
+    canvas.dispatchEvent(new Event('webglcontextlost', { cancelable: true }))
+    expect(onFailure).not.toHaveBeenCalled()
+
+    vi.advanceTimersByTime(PREVIEW_CONTEXT_RESTORE_GRACE_MS)
+    expect(onFailure).toHaveBeenCalledOnce()
+
+    stop()
+    root.remove()
+    vi.useRealTimers()
+  })
 
   it('uses a native preview effect at the saved 100% intensity without replacing the gradient', () => {
     const { container } = renderWithProviders(
@@ -1171,8 +1194,10 @@ describe('BrandingPreview subscription card', () => {
     expect(
       container.querySelector('[data-preview-card-layer="readability"]'),
     ).not.toBeInTheDocument()
+    // Two slots plus the global-fallback page every subscription past the last
+    // slot gets — see `branding-preview-card-pages.test.tsx` for the page model.
     const dots = container.querySelectorAll('button[aria-current]')
-    expect(dots).toHaveLength(2)
+    expect(dots).toHaveLength(3)
     dots.forEach((dot) => {
       expect(dot).toHaveClass('h-6', 'w-6', 'focus-visible:ring-2')
       expect(dot.firstElementChild).toHaveAttribute('aria-hidden', 'true')

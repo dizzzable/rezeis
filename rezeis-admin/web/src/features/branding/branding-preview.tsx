@@ -161,7 +161,18 @@ const NAV_ICONS: Record<NavDestinationId, LucideIcon> = {
   settings: Settings,
 }
 
+/**
+ * Which subscriptions a preview page stands for.
+ *
+ * `slot` is the Nth configured per-position card. `fallback` is the global
+ * card background, which the section's own description promises to every
+ * subscription BEYOND the configured slots — a design that always exists and
+ * that the operator could previously never see next to their slot artwork.
+ */
+type PreviewCardRole = 'slot' | 'fallback'
+
 interface PreviewCardVisual {
+  readonly role: PreviewCardRole
   readonly gradient: string
   readonly effect: string
   readonly effectProps: Record<string, unknown>
@@ -169,6 +180,15 @@ interface PreviewCardVisual {
   readonly subscriptionCardText: BrandingSubscriptionCardTextDraft
   readonly subscriptionCardGlass: BrandingSubscriptionCardGlassDraft
 }
+
+/**
+ * How many per-position slots the strip will page through. Slots beyond this
+ * stay unpreviewable (the cabinet still renders them); the cap only bounds the
+ * dot row. It counts SLOTS, not pages: the trailing fallback page describes
+ * every subscription past the last slot, i.e. usually most of them, so it is
+ * the one page that must never be squeezed out by the cap.
+ */
+const MAX_PREVIEW_SLOT_PAGES = 6
 
 type PreviewRgb = readonly [number, number, number]
 
@@ -896,6 +916,7 @@ function SubscriptionCardsPreview({
   cardLogo,
   cardLogoUrl,
   radius,
+  captionColor,
 }: {
   cards: readonly PreviewCardVisual[]
   primary: string
@@ -906,6 +927,7 @@ function SubscriptionCardsPreview({
   cardLogo: CardLogoPreset
   cardLogoUrl?: string | null
   radius: string
+  captionColor: string
 }) {
   const { t } = useTranslation()
   const [page, setPage] = useState(0)
@@ -918,10 +940,25 @@ function SubscriptionCardsPreview({
     else if (info.offset.x > 40) setPage((p) => Math.max(p - 1, 0))
   }
 
+  /**
+   * A page name the operator can act on. "Card 7" would say nothing about the
+   * one page that is not a slot — the global card background every
+   * subscription past the last slot gets — so that page is named for what it
+   * covers instead of for its position in the strip.
+   */
+  function pageLabel(index: number): string {
+    return cards[index]?.role === 'fallback'
+      ? t('brandingPage.sections.preview.cardPageRest')
+      : t('brandingPage.sections.preview.cardDot', { index: index + 1 })
+  }
+
+  const activeCard = cards[active] ?? cards[0]!
+
   return (
     <div className="relative">
       <motion.div
         key={active}
+        data-preview-card-page={activeCard.role}
         drag={multi ? 'x' : false}
         dragConstraints={{ left: 0, right: 0 }}
         dragElastic={0.18}
@@ -929,7 +966,7 @@ function SubscriptionCardsPreview({
         className={multi ? 'cursor-grab active:cursor-grabbing' : ''}
       >
         <PreviewSubscriptionCard
-          visual={cards[active] ?? cards[0]!}
+          visual={activeCard}
           primary={primary}
           primaryFg={primaryFg}
           foundation={foundation}
@@ -941,24 +978,34 @@ function SubscriptionCardsPreview({
         />
       </motion.div>
       {multi && (
-        <div className="mt-2 flex items-center justify-center gap-1.5">
-          {cards.map((_, i) => (
-            <button
-              key={i}
-              type="button"
-              aria-label={t('brandingPage.sections.preview.cardDot', { index: i + 1 })}
-              aria-current={i === active}
-              onClick={() => setPage(i)}
-              className="flex h-6 w-6 items-center justify-center rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-black/70"
-            >
-              <span
-                aria-hidden="true"
-                className={`h-1.5 rounded-full transition-all ${
-                  i === active ? 'w-4 bg-white/80' : 'w-1.5 bg-white/30'
-                }`}
-              />
-            </button>
-          ))}
+        <div className="mt-2 flex flex-col items-center gap-1">
+          <p
+            data-preview-card-page-label={activeCard.role}
+            className="text-[9px] font-medium"
+            style={{ color: captionColor }}
+          >
+            {pageLabel(active)}
+          </p>
+          <div className="flex items-center justify-center gap-1.5">
+            {cards.map((card, i) => (
+              <button
+                key={i}
+                type="button"
+                data-preview-card-dot={card.role}
+                aria-label={pageLabel(i)}
+                aria-current={i === active}
+                onClick={() => setPage(i)}
+                className="flex h-6 w-6 items-center justify-center rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-black/70"
+              >
+                <span
+                  aria-hidden="true"
+                  className={`h-1.5 rounded-full transition-all ${
+                    i === active ? 'w-4 bg-white/80' : 'w-1.5 bg-white/30'
+                  }`}
+                />
+              </button>
+            ))}
+          </div>
         </div>
       )}
     </div>
@@ -1140,18 +1187,30 @@ export function BrandingPreview({ values, focus }: BrandingPreviewProps) {
   const visibleNav = navSource.filter((i) => i.visible).slice(0, 5)
 
   // Build the list of subscription cards to preview. Each configured
-  // per-position slot (cardEffectsByIndex) becomes its own card with its own
-  // effect + gradient (falling back to the global values); with no slots we
-  // show a single card driven by the global gradient/effect. Capped for the
-  // preview strip. Swipe/dots switch between them.
+  // per-position slot (cardEffectsByIndex) becomes its own page with its own
+  // effect + gradient (falling back to the global values), and ONE trailing
+  // page always shows the global card background.
+  //
+  // That trailing page is not decoration. The slots section states its own
+  // contract — "slot 1 → the first subscription, slot 2 → the second, and so
+  // on; subscriptions beyond the configured slots use the global card
+  // background above" — so the moment a single slot exists the operator has
+  // TWO designs in production and could previously see only the first. Passing
+  // `undefined` for the slot resolves every field to the global value, which is
+  // exactly what the cabinet renders past the last slot.
+  //
+  // With zero slots this collapses to the single global card it always was
+  // (no dots, no drag: only one design exists).
   const previewCards = useMemo<PreviewCardVisual[]>(() => {
     const slots = cardEffectsByIndex ?? []
-    const count = Math.min(Math.max(slots.length, 1), 6)
-    return Array.from({ length: count }, (_, i) => {
-      const slot = slots[i]
+    const toVisual = (
+      slot: (typeof slots)[number] | undefined,
+      role: PreviewCardRole,
+    ): PreviewCardVisual => {
       const slotGradient = (slot?.cardGradient ?? '').trim()
       const slotOverridesEffect = slot?.mode === 'override'
       return {
+        role,
         gradient: slotGradient.length > 0 ? slotGradient : cardGradient,
         effect: slotOverridesEffect ? slot?.cardEffect ?? cardEffect : cardEffect,
         effectProps: slotOverridesEffect ? slot?.cardEffectProps ?? cardEffectProps : cardEffectProps,
@@ -1159,7 +1218,13 @@ export function BrandingPreview({ values, focus }: BrandingPreviewProps) {
         subscriptionCardText,
         subscriptionCardGlass,
       }
-    })
+    }
+    return [
+      ...slots
+        .slice(0, MAX_PREVIEW_SLOT_PAGES)
+        .map((slot) => toVisual(slot, 'slot')),
+      toVisual(undefined, 'fallback'),
+    ]
   }, [
     cardEffectsByIndex,
     cardGradient,
@@ -1321,6 +1386,7 @@ export function BrandingPreview({ values, focus }: BrandingPreviewProps) {
             cardLogo={cardLogo}
             cardLogoUrl={cardLogoUrl}
             radius={radius}
+            captionColor={surfaceTheme.mutedForeground}
           />
 
           {/* Action buttons */}

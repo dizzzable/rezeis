@@ -186,6 +186,7 @@ export const en = {
       reiwaUnavailable: 'Reiwa is unavailable or not configured (check REIWA_URL and WEBHOOK_SECRET_HEADER)',
       vpsTab: 'VPS',
       processTab: 'Process',
+      sectionUnavailable: 'These metrics are unavailable right now',
       cpu: 'CPU',
       cores: 'cores',
       ram: 'RAM',

@@ -144,32 +144,51 @@ describe('WebReiwaPage branding settings', () => {
     )
   }, 20_000)
 
-  it('makes existing positional card slots inherit the global gradient when applying a full theme', async () => {
+  it('leaves legacy positional card slots alone when applying a full theme', async () => {
+    // Legacy slots: an effect and no `mode`. Every reader — this section, the
+    // preview and the API's `readCardEffectSlots` — gates slot artwork on
+    // `mode === 'override'`, so these carry nothing that can render and they
+    // already follow the preset. Rewriting them was the blanket reset that
+    // also erased the slots an operator HAD overridden.
     const user = userEvent.setup()
+    const legacySlots = [
+      {
+        cardEffect: 'aurora',
+        cardEffectProps: {},
+        cardEffectOpacity: 1,
+        cardGradient: 'url(https://legacy.example/card.png)',
+      },
+      {
+        cardEffect: 'waves',
+        cardEffectProps: { speed: 2 },
+        cardEffectOpacity: 0.4,
+        cardGradient: null,
+      },
+      {
+        cardEffect: 'threads',
+        cardEffectProps: { amplitude: 3 },
+        cardEffectOpacity: 0.75,
+        cardGradient: 'linear-gradient(135deg, #111827 0%, #2563eb 100%)',
+      },
+    ]
+    // A brightness snapshot is always sent whole and always revalidated, so
+    // the copy that goes into it is sanitized the way the API's own
+    // `readCardEffectSlots` sanitizes on read: `url(...)` is not a gradient
+    // this build accepts and becomes "use the global one", and a legacy effect
+    // with no `mode` was never an override to begin with. Slot 3's hand-picked
+    // gradient is real operator work and survives.
+    const sanitizedLegacySlots = [
+      { mode: 'inherit', cardGradient: null },
+      { mode: 'inherit', cardGradient: null },
+      {
+        mode: 'inherit',
+        cardGradient: 'linear-gradient(135deg, #111827 0%, #2563eb 100%)',
+      },
+    ]
     vi.spyOn(api, 'get').mockResolvedValue({
       data: {
         ...createBrandingPayload(),
-        cardEffectsByIndex: [
-          {
-            cardEffect: 'aurora',
-            cardEffectProps: {},
-            cardEffectOpacity: 1,
-            cardGradient: 'url(https://legacy.example/card.png)',
-          },
-          {
-            cardEffect: 'waves',
-            cardEffectProps: { speed: 2 },
-            cardEffectOpacity: 0.4,
-            cardGradient: null,
-          },
-          {
-            cardEffect: 'threads',
-            cardEffectProps: { amplitude: 3 },
-            cardEffectOpacity: 0.75,
-            cardGradient:
-              'linear-gradient(135deg, #111827 0%, #2563eb 100%)',
-          },
-        ],
+        cardEffectsByIndex: legacySlots,
       },
     })
     const patchSpy = vi.spyOn(api, 'patch').mockResolvedValue({
@@ -186,54 +205,46 @@ describe('WebReiwaPage branding settings', () => {
     const payload = patchSpy.mock.calls[0]?.[1] as Record<string, unknown>
     const selectedTheme = CONCEPT_THEME_PRESETS[0]
     const expectedVariants = createConceptThemeModeVariants(selectedTheme)
+    expect(
+      payload,
+      'the theme preset rewrote the slot array, so the PATCH ships slot ' +
+        'values the operator never chose',
+    ).not.toHaveProperty('cardEffectsByIndex')
     expect(payload).toMatchObject({
       themePresetId: 'concept-a',
       themePresetVersion: 2,
-      cardEffectsByIndex: [
-        {
-          mode: 'inherit',
-          cardGradient: null,
-        },
-        {
-          mode: 'inherit',
-          cardGradient: null,
-        },
-        {
-          mode: 'inherit',
-          cardGradient: null,
-        },
-      ],
       // Applying a concept keeps its intentional light/dark card artwork.
       // A manual operator gradient is the only path that synchronizes both.
       themeVariants: {
         light: expect.objectContaining({
           cardGradient: expectedVariants.light.cardGradient,
-          cardEffectsByIndex: [
-            expect.objectContaining({ cardGradient: null }),
-            expect.objectContaining({ cardGradient: null }),
-            expect.objectContaining({ cardGradient: null }),
-          ],
         }),
         dark: expect.objectContaining({
           cardGradient: expectedVariants.dark.cardGradient,
-          cardEffectsByIndex: [
-            expect.objectContaining({ cardGradient: null }),
-            expect.objectContaining({ cardGradient: null }),
-            expect.objectContaining({ cardGradient: null }),
-          ],
         }),
       },
     })
+    const variants = payload['themeVariants'] as Record<
+      'light' | 'dark',
+      Record<string, unknown>
+    >
+    expect(
+      [variants.light['cardEffectsByIndex'], variants.dark['cardEffectsByIndex']],
+      'a brightness snapshot dropped the slot list — a variant is what the ' +
+        'cabinet resolves for the selected mode, so slot 3\'s hand-picked ' +
+        'gradient vanishes the moment the brightness changes',
+    ).toEqual([sanitizedLegacySlots, sanitizedLegacySlots])
     expect(payload).not.toHaveProperty('brandName')
   }, 20_000)
 
-  it('applies an independent concept card while clearing stale positional gradient overrides', async () => {
+  it('applies an independent concept card without touching positional slots', async () => {
     const user = userEvent.setup()
     vi.spyOn(api, 'get').mockResolvedValue({
       data: {
         ...createBrandingPayload(),
         cardEffectsByIndex: [
           {
+            mode: 'override',
             cardEffect: 'aurora',
             cardEffectProps: { speed: 0.3 },
             cardEffectOpacity: 0.7,
@@ -275,29 +286,35 @@ describe('WebReiwaPage branding settings', () => {
 
     await waitFor(() => expect(patchSpy).toHaveBeenCalledOnce())
     const selectedCard = CONCEPT_CARD_PRESETS[0]
+    // A card preset is a GLOBAL card decision. The per-position section is not
+    // part of it: slot 1 is an explicit override and slot 3 an explicit
+    // gradient, so neither may appear in this patch at all.
     expect(patchSpy).toHaveBeenCalledWith('/admin/settings/branding', {
       cardGradient: selectedCard.cardGradient,
       cardPattern: selectedCard.cardPattern,
       cardEffect: selectedCard.cardEffect,
       cardEffectProps: selectedCard.cardEffectProps,
       cardEffectOpacity: selectedCard.cardEffectOpacity,
-      cardEffectsByIndex: [
-        {
-          mode: 'inherit',
-          cardGradient: null,
-        },
-        {
-          mode: 'inherit',
-          cardGradient: null,
-        },
-        {
-          mode: 'inherit',
-          cardGradient: null,
-        },
-      ],
     })
   }, 20_000)
 
+  /**
+   * The operator's own per-position gradients must survive a GLOBAL gradient
+   * change, all the way to what is on screen after the save — not merely up to
+   * the request body.
+   *
+   * The stop-at-the-request version of this test passed while the API nulled
+   * exactly these gradients on any PATCH carrying `cardGradient` without
+   * `cardEffectsByIndex` (removed from `mergeBrandingSettings`; pinned there by
+   * "leaves every stored slot gradient alone when a PATCH carries only
+   * cardGradient"). So the PATCH double below is a FAITHFUL one — it echoes the
+   * stored branding with the request body merged over it, which is what the
+   * server now does for these fields and nothing more — and the assertions run
+   * again after `form.reset(response)`. A rule that clears slot gradients
+   * cannot then hide in either layer: implemented here it lands in the body and
+   * comes back through the double, and implemented in the API it changes the
+   * double away from the server contract the backend spec pins by name.
+   */
   it('keeps explicit slot gradients when the global palette changes', async () => {
     const user = userEvent.setup()
     const slotOverrides = [
@@ -313,21 +330,25 @@ describe('WebReiwaPage branding settings', () => {
         cardGradient: 'linear-gradient(135deg, #0c4a6e 0%, #22d3ee 100%)',
       },
     ]
+    const slotGradients = slotOverrides.map((slot) => slot.cardGradient)
+    const indigo = CARD_GRADIENT_PRESETS.find((preset) => preset.id === 'indigo')
+      ?.value
     const variants = createConceptThemeModeVariants(CONCEPT_THEME_PRESETS[0])
-    vi.spyOn(api, 'get').mockResolvedValue({
-      data: {
-        ...createBrandingPayload(),
-        themePresetId: 'concept-cu',
-        cardEffectsByIndex: slotOverrides,
-        themeVariants: {
-          light: { ...variants.light, cardEffectsByIndex: slotOverrides },
-          dark: { ...variants.dark, cardEffectsByIndex: slotOverrides },
-        },
+    const stored = {
+      ...createBrandingPayload(),
+      themePresetId: 'concept-cu',
+      cardEffectsByIndex: slotOverrides,
+      themeVariants: {
+        light: { ...variants.light, cardEffectsByIndex: slotOverrides },
+        dark: { ...variants.dark, cardEffectsByIndex: slotOverrides },
       },
-    })
-    const patchSpy = vi.spyOn(api, 'patch').mockResolvedValue({
-      data: createBrandingPayload(),
-    })
+    }
+    vi.spyOn(api, 'get').mockResolvedValue({ data: stored })
+    const patchSpy = vi
+      .spyOn(api, 'patch')
+      .mockImplementation(async (_url: string, body?: unknown) => ({
+        data: { ...stored, ...(body as Record<string, unknown>) },
+      }))
 
     renderWithProviders(<WebReiwaPage />)
 
@@ -336,30 +357,66 @@ describe('WebReiwaPage branding settings', () => {
     expect(
       screen.getByPlaceholderText('repeating-linear-gradient(…) or none'),
     ).toBeInTheDocument()
+    const slotGradientValues = () =>
+      screen
+        .getAllByPlaceholderText('linear-gradient(...) or empty = global')
+        .map((input) => (input as HTMLInputElement).value)
+    expect(
+      slotGradientValues(),
+      'the seeded per-position gradients never reached the slot editor, so ' +
+        'nothing below is actually being preserved',
+    ).toEqual(slotGradients)
+
     const indigoGradient = screen
       .getAllByRole('button', { name: 'Indigo' })
       .find((button) => button.className.includes('aspect-square'))
     expect(indigoGradient).toBeDefined()
     await user.click(indigoGradient!)
+    expect(
+      slotGradientValues(),
+      'picking a global gradient cleared the per-position gradients in the ' +
+        'editor — a global choice is not a request to delete slot artwork',
+    ).toEqual(slotGradients)
     await user.click(screen.getByRole('button', { name: 'Save' }))
 
     await waitFor(() => expect(patchSpy).toHaveBeenCalledOnce())
     const payload = patchSpy.mock.calls[0]?.[1] as Record<string, unknown>
-    expect(payload).not.toHaveProperty('cardEffectsByIndex')
-    expect(payload).toMatchObject({
-      cardGradient: CARD_GRADIENT_PRESETS.find((preset) => preset.id === 'indigo')?.value,
-      themeVariants: {
-        light: expect.objectContaining({
-          cardGradient: CARD_GRADIENT_PRESETS.find((preset) => preset.id === 'indigo')?.value,
-          cardEffectsByIndex: slotOverrides,
-        }),
-        dark: expect.objectContaining({
-          cardGradient: CARD_GRADIENT_PRESETS.find((preset) => preset.id === 'indigo')?.value,
-          cardEffectsByIndex: slotOverrides,
-        }),
-      },
-    })
+    expect(
+      payload,
+      'the untouched slot array turned dirty, so the PATCH now dictates ' +
+        'per-position artwork the operator did not change',
+    ).not.toHaveProperty('cardEffectsByIndex')
+    expect(payload.cardGradient).toBe(indigo)
+    const patched = payload.themeVariants as Record<
+      'light' | 'dark',
+      Record<string, unknown>
+    >
+    for (const mode of ['light', 'dark'] as const) {
+      expect(patched[mode].cardGradient, `${mode} snapshot gradient`).toBe(indigo)
+      expect(
+        (patched[mode].cardEffectsByIndex as typeof slotOverrides).map(
+          (slot) => slot.cardGradient,
+        ),
+        `the ${mode} brightness snapshot in the PATCH dropped the operator's ` +
+          'per-position gradients while carrying the new global one',
+      ).toEqual(slotGradients)
+    }
+
+    // The operator watches the save land. `form.reset(response)` runs on
+    // success, which is also what makes the form clean and Save disabled
+    // again — so that is the signal to wait for. The assertion itself stays
+    // OUTSIDE `waitFor`: inside, a failure retries until the test times out
+    // and the message below never reaches the report.
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled(),
+    )
+    expect(
+      slotGradientValues(),
+      'the saved branding came back without the per-position gradients, so ' +
+        'they vanish from the editor a moment after the save lands',
+    ).toEqual(slotGradients)
   }, 20_000)
+
 })
 
 function createBrandingPayload() {

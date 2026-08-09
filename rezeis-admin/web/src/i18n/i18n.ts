@@ -26,6 +26,35 @@ void i18n.use(initReactI18next).init({
   interpolation: {
     escapeValue: false,
   },
+  react: {
+    // Every dictionary in this app arrives AFTER init: `resources` is empty
+    // and both the core locale chunk (`loadLocale`) and each lazy feature
+    // bundle (`loadFeatureBundle`) reach i18next through
+    // `addResourceBundle`. react-i18next's default `bindI18nStore` is '',
+    // so it re-renders subscribers on `languageChanged` and on nothing else.
+    //
+    // That default assumes a backend: normally `changeLanguage` does not
+    // resolve until the new language's resources are in the store. Here no
+    // backend is configured, so `changeLanguage` resolves immediately and
+    // `languageChanged` fires BEFORE the dynamic import lands. Every mounted
+    // component re-renders against a language that has no bundle yet — it
+    // renders the fallback language, or the raw key when the target IS the
+    // fallback — and nothing re-renders it when the bundle finally arrives.
+    // Verified in a browser: after switching the panel language, the whole
+    // page stayed frozen (`signInPage.login.title` on screen while
+    // `i18n.t('signInPage.login.title')` already returned "Sign In"), and
+    // values memoised on `[t]` — e.g. `conceptCardGalleryLabels` in
+    // branding-page.tsx — never recovered at all, because `t`'s identity
+    // only changes on the next `languageChanged`.
+    //
+    // Subscribing to the store's `added` event closes the window. It costs
+    // one extra render pass per bundle load; measured worst case is the core
+    // chunk plus the previously-visited feature bundles re-hydrating on a
+    // language switch (8 events inside 6.4 ms after visiting 10 pages,
+    // ceiling 19), which is a bounded one-off on a rare operator action.
+    // Do not "simplify" this away.
+    bindI18nStore: 'added',
+  },
 });
 
 // Pre-load the initial language before first paint. Exposed as a promise so

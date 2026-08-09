@@ -11,11 +11,61 @@ interface LightningProps {
 }
 
 const Lightning: React.FC<LightningProps> = ({ hue = 230, xOffset = 0, speed = 1, intensity = 1, size = 1 }) => {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  /**
+   * Live prop bag: the render loop reads THIS, never the closure.
+   *
+   * WHAT WENT WRONG. The effect below used to depend on
+   * `[hue, xOffset, speed, intensity, size]`. Four of those five are operator
+   * sliders (`background-controls.ts` → `lightning`: hue, speed, intensity,
+   * size; `xOffset` is a prop with no control), and `LivePreview` in
+   * `glass-settings-card.tsx` renders this component with the DRAFT props and
+   * no debounce — so a Radix slider drag pushed one full renderer teardown and
+   * rebuild per pointer move. Not one of the five reaches anything structural:
+   * every one is a `uniform1f` uploaded in `render()` below, the shader source
+   * is a constant, and no prop touches the buffer layout or the context
+   * attributes. So NONE of them justifies a rebuild, and the dependency array
+   * is now empty.
+   *
+   * Committed in an effect, not written during render: React may replay or
+   * discard a render, and a discarded one must not leave the loop reading props
+   * from a commit that never happened. No dependency array — every commit,
+   * ahead of the effect below. Same idiom as `originkit/Thunderstrike.tsx`.
+   */
+  const propsRef = useRef({ hue, xOffset, speed, intensity, size });
+  useEffect(() => {
+    propsRef.current = { hue, xOffset, speed, intensity, size };
+  });
 
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+    const container = containerRef.current;
+    if (!container) return;
+
+    /**
+     * THE CANVAS IS THIS EFFECT'S, NOT REACT'S.
+     *
+     * WHAT WENT WRONG. This rendered a `<canvas ref={canvasRef}>` and opened the
+     * context on that element. React owns such an element, so it SURVIVES this
+     * effect's cleanup — while the cleanup ends by destroying the context living
+     * on it. A canvas hands the SAME context object back to every later
+     * `getContext` call, lost or not, so a second setup on the same element got
+     * the already-lost one: `createShader` returns null on a lost context, the
+     * compile bailed with a null info log, and the component returned early to a
+     * permanently dead canvas — silently, with nothing thrown for
+     * `GlassErrorBoundary` to catch. React StrictMode's double-invoke reproduced
+     * it on every dev mount; in production the old dependency array did, on the
+     * first slider the operator touched.
+     *
+     * Allocating the element here makes a second setup impossible to poison by
+     * construction: a new element cannot be holding an old context. The
+     * `loseContext()` in the cleanup therefore STAYS — WebKit frees a context
+     * slot only when the context object is destroyed, and this project is under
+     * a 16-per-web-content-process ceiling. Same shape as `Plasma.tsx` and
+     * `Grainient.tsx`, the siblings in this directory.
+     */
+    const canvas = document.createElement('canvas');
+    canvas.className = 'block w-full h-full';
 
     /**
      * Size the drawing buffer, and ONLY when it actually changes.
@@ -28,11 +78,16 @@ const Lightning: React.FC<LightningProps> = ({ hue = 230, xOffset = 0, speed = 1
      * sized by CSS has no other way to learn it grew.
      *
      * `clientWidth/clientHeight` is the CSS box and stays untouched — this
-     * canvas is `w-full h-full`. Only the buffer is capped, by the same
-     * device-pixel budget the rest of the catalog uses; this shader runs a
-     * ten-octave fbm per fragment, which is among the most expensive in the
-     * catalog full-screen. Everything it draws is a fraction of `iResolution`,
-     * so the picture is the same one at a lower sampling density.
+     * canvas is `w-full h-full` inside the container. Only the buffer is
+     * capped, by the same device-pixel budget the rest of the catalog uses;
+     * this shader runs a ten-octave fbm per fragment, which is among the most
+     * expensive in the catalog full-screen. Everything it draws is a fraction
+     * of `iResolution`, so the picture is the same one at a lower sampling
+     * density.
+     *
+     * It is only ever called with the canvas already in the container: a
+     * detached element measures 0×0, which would pin the buffer at 1×1 until
+     * something else moved.
      */
     const resizeCanvas = () => {
       const cssWidth = canvas.clientWidth;
@@ -44,15 +99,12 @@ const Lightning: React.FC<LightningProps> = ({ hue = 230, xOffset = 0, speed = 1
       canvas.width = width;
       canvas.height = height;
     };
-    resizeCanvas();
-    window.addEventListener('resize', resizeCanvas);
 
     const gl = canvas.getContext('webgl', { alpha: true, premultipliedAlpha: false });
     if (!gl) {
       console.error('WebGL not supported');
-      // The listener above is already attached; without this it outlives the
-      // component on every device that cannot give us a context at all.
-      return () => window.removeEventListener('resize', resizeCanvas);
+      // Nothing has been attached or appended yet, so there is nothing to undo.
+      return;
     }
 
     const vertexShaderSource = `
@@ -68,10 +120,9 @@ const Lightning: React.FC<LightningProps> = ({ hue = 230, xOffset = 0, speed = 1
       uniform float iTime;
       uniform float uHue;
       uniform float uXOffset;
-      uniform float uSpeed;
       uniform float uIntensity;
       uniform float uSize;
-      
+
       #define OCTAVE_COUNT 10
 
       vec3 hsv2rgb(vec3 c) {
@@ -128,11 +179,11 @@ const Lightning: React.FC<LightningProps> = ({ hue = 230, xOffset = 0, speed = 1
           uv.x *= iResolution.x / iResolution.y;
           uv.x += uXOffset;
           
-          uv += 2.0 * fbm(uv * uSize + 0.8 * iTime * uSpeed) - 1.0;
-          
+          uv += 2.0 * fbm(uv * uSize + 0.8 * iTime) - 1.0;
+
           float dist = abs(uv.x);
           vec3 baseColor = hsv2rgb(vec3(uHue / 360.0, 0.7, 0.8));
-          vec3 col = baseColor * pow(mix(0.0, 0.07, hash11(iTime * uSpeed)) / dist, 1.0) * uIntensity;
+          vec3 col = baseColor * pow(mix(0.0, 0.07, hash11(iTime)) / dist, 1.0) * uIntensity;
           col = pow(col, vec3(1.0));
           float a = clamp(max(col.r, max(col.g, col.b)), 0.0, 1.0);
           fragColor = vec4(col, a);
@@ -156,12 +207,13 @@ const Lightning: React.FC<LightningProps> = ({ hue = 230, xOffset = 0, speed = 1
       return shader;
     };
 
-    // Every bail-out below happens AFTER the context exists and after the
-    // resize listener is attached, so an unguarded `return` leaves both behind
-    // — and a failure here is exactly the situation (a driver under pressure,
-    // a recycled context) where leaking one more is least affordable.
+    // Every bail-out below happens AFTER the context exists, so an unguarded
+    // `return` leaves it behind — and a failure here is exactly the situation
+    // (a driver under pressure, a recycled context) where leaking one more is
+    // least affordable. The canvas is not in the container yet at any of these
+    // points, so a failed start also leaves no blank canvas behind for the
+    // error boundary or the operator to mistake for a live renderer.
     const abandon = () => {
-      window.removeEventListener('resize', resizeCanvas);
       gl.getExtension('WEBGL_lose_context')?.loseContext();
     };
 
@@ -193,11 +245,35 @@ const Lightning: React.FC<LightningProps> = ({ hue = 230, xOffset = 0, speed = 1
     const iTimeLocation = gl.getUniformLocation(program, 'iTime');
     const uHueLocation = gl.getUniformLocation(program, 'uHue');
     const uXOffsetLocation = gl.getUniformLocation(program, 'uXOffset');
-    const uSpeedLocation = gl.getUniformLocation(program, 'uSpeed');
     const uIntensityLocation = gl.getUniformLocation(program, 'uIntensity');
     const uSizeLocation = gl.getUniformLocation(program, 'uSize');
 
-    const startTime = performance.now();
+    // The canvas enters the document only now, with a linked program behind it,
+    // and is sized only once it is in — `resizeCanvas` measures a CSS box.
+    container.appendChild(canvas);
+    resizeCanvas();
+    window.addEventListener('resize', resizeCanvas);
+
+    /**
+     * The shader clock is INTEGRATED, not multiplied.
+     *
+     * The shader used to take `iTime` and `uSpeed` and compute `iTime * uSpeed`
+     * in two places. That was equivalent while `speed` was fixed for the life of
+     * a renderer, which it was — every change rebuilt the renderer and reset
+     * `startTime` to zero. Now that speed is live, `t * speed` would jump the
+     * whole noise field on every tick of the slider: at t = 60 s a step from 1.0
+     * to 1.1 moves the phase by six units, which reads as a hard cut, ~49 of
+     * them across the control's range. Accumulating `speed * dt` instead gives
+     * the identical picture for any constant speed and a continuous one across a
+     * change, so the two uses collapse into a single `iTime` and `uSpeed` is
+     * gone from the shader.
+     *
+     * `dt` is clamped: rAF does not fire in a background tab, so a tab returning
+     * after ten minutes would otherwise deliver one enormous step.
+     */
+    let phase = 0;
+    let lastFrameTime = performance.now();
+    let destroyed = false;
     // The frame id has to be kept: an unstored requestAnimationFrame cannot be
     // cancelled, so this loop outlived every unmount, held the context and its
     // canvas alive against GC, and went on drawing into a canvas that was no
@@ -208,36 +284,53 @@ const Lightning: React.FC<LightningProps> = ({ hue = 230, xOffset = 0, speed = 1
     // handing out an unrecoverable SyntheticLostContext.
     let animationFrameId = 0;
     const render = () => {
+      if (destroyed) return;
       resizeCanvas();
       gl.viewport(0, 0, canvas.width, canvas.height);
       gl.uniform2f(iResolutionLocation, canvas.width, canvas.height);
+
       const currentTime = performance.now();
-      gl.uniform1f(iTimeLocation, (currentTime - startTime) / 1000.0);
-      gl.uniform1f(uHueLocation, hue);
-      gl.uniform1f(uXOffsetLocation, xOffset);
-      gl.uniform1f(uSpeedLocation, speed);
-      gl.uniform1f(uIntensityLocation, intensity);
-      gl.uniform1f(uSizeLocation, size);
+      const live = propsRef.current;
+      phase += Math.min(Math.max(currentTime - lastFrameTime, 0) / 1000, 0.1) * live.speed;
+      lastFrameTime = currentTime;
+
+      gl.uniform1f(iTimeLocation, phase);
+      gl.uniform1f(uHueLocation, live.hue);
+      gl.uniform1f(uXOffsetLocation, live.xOffset);
+      gl.uniform1f(uIntensityLocation, live.intensity);
+      gl.uniform1f(uSizeLocation, live.size);
       gl.drawArrays(gl.TRIANGLES, 0, 6);
       animationFrameId = requestAnimationFrame(render);
     };
     animationFrameId = requestAnimationFrame(render);
 
     return () => {
+      destroyed = true;
       cancelAnimationFrame(animationFrameId);
       window.removeEventListener('resize', resizeCanvas);
       gl.deleteProgram(program);
       gl.deleteShader(vertexShader);
       gl.deleteShader(fragmentShader);
       gl.deleteBuffer(vertexBuffer);
+      // The element goes before the context does. A detached canvas is not a
+      // presentation, and the panel's canvas observer reads exactly that: a
+      // `webglcontextlost` on a canvas still in the document is a fault, one on
+      // a canvas that has left it is this teardown.
+      try {
+        container.removeChild(canvas);
+      } catch {
+        /* already gone */
+      }
       // A dropped reference does not free the context: WebKit only returns the
       // slot when the object is destroyed, and the page hits the 16-context cap
       // long before GC gets there. Modelled on `LiquidChrome.tsx`'s cleanup.
       gl.getExtension('WEBGL_lose_context')?.loseContext();
     };
-  }, [hue, xOffset, speed, intensity, size]);
+    // Empty on purpose — see `propsRef` above. Every prop this component takes
+    // is a uniform, so nothing here is structural.
+  }, []);
 
-  return <canvas ref={canvasRef} className="w-full h-full relative" />;
+  return <div ref={containerRef} className="w-full h-full relative overflow-hidden" />;
 };
 
 export default Lightning;

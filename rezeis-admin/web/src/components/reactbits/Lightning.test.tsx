@@ -19,6 +19,17 @@
  * so what is pinned is that the component ISSUES the calls — cancel, the guard,
  * `loseContext` — which is the part the component controls. Whether the driver
  * honours `WEBGL_lose_context` is the platform's contract.
+ *
+ * AND WHAT THIS FILE STRUCTURALLY CANNOT SEE — read this before adding a
+ * context-lifetime test here. `getContext` below is stubbed as `() => stubGl()`:
+ * a FRESH happy-path context on every call. A real canvas hands the SAME
+ * context object to every caller, lost or not, and the difference is an entire
+ * class of defect — a component that destroys its context in cleanup and then
+ * reopens one on the same element gets the dead one back. All six tests here
+ * were verified green against exactly that broken component. Anything about
+ * WHICH element owns the context, how many are allocated, or what a second setup
+ * receives belongs in `Lightning.context-ownership.test.tsx`, whose stub models
+ * the real contract.
  */
 import { render } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'

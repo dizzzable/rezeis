@@ -45,8 +45,11 @@ import {
   createBrandingDirtyPatch,
   createInitialBrandingDraft,
   getBrandingChangedFields,
+  isBrandingCardEffect,
+  isSafeBrandingGradient,
   CORNER_RADII_BY_LEGACY_CLASS,
   DEFAULT_APP_BACKGROUND_DRAFT,
+  type BrandingCardEffectSlotDraft,
   type BrandingCornerRadiiDraft,
   type BrandingSurfaceThemeDraft,
   type BrandingFormData,
@@ -94,6 +97,46 @@ const BORDER_RADIUS_VALUES = [
 /** Configurator tabs (category grouping). */
 const BRANDING_TABS = ['brand', 'colors', 'card', 'appbg', 'icons', 'planCards', 'nav'] as const;
 type BrandingTab = (typeof BRANDING_TABS)[number];
+
+/**
+ * The per-position slot list a brightness snapshot may carry.
+ *
+ * Slots belong in a variant for the same reason `subscriptionCardText` does: a
+ * variant is a COMPLETE renderable snapshot, so an override the operator
+ * configured has to be in both of them or a brightness switch silently drops
+ * it. What a variant may NOT do is carry a value this client cannot validate.
+ * Unlike the root array — which a PATCH omits while it is unchanged, so a
+ * legacy value can never block applying a theme (see `createBrandingDirtyPatch`)
+ * — a variant is always sent whole and always revalidated, and one unusable
+ * legacy slot gradient would fail the whole submit.
+ *
+ * So the copy is sanitized exactly the way the API's own `readCardEffectSlots`
+ * sanitizes it on read: a gradient this build cannot parse becomes "use the
+ * global one", and an override naming an effect outside the catalog demotes to
+ * inherit rather than becoming an invisible stale winner. Everything the
+ * operator actually chose and this build understands survives verbatim.
+ */
+function toThemeVariantCardSlots(
+  slots: readonly BrandingCardEffectSlotDraft[],
+): BrandingCardEffectSlotDraft[] {
+  return slots.map((slot) => {
+    const cardGradient = isSafeBrandingGradient(slot.cardGradient)
+      ? slot.cardGradient.trim()
+      : null;
+    if (slot.mode !== "override" || !isBrandingCardEffect(slot.cardEffect)) {
+      return { mode: "inherit" as const, cardGradient };
+    }
+    const opacity = slot.cardEffectOpacity;
+    return {
+      mode: "override" as const,
+      cardEffect: slot.cardEffect,
+      cardEffectProps: { ...(slot.cardEffectProps ?? {}) },
+      cardEffectOpacity:
+        typeof opacity === "number" && opacity >= 0.05 && opacity <= 1 ? opacity : 1,
+      cardGradient,
+    };
+  });
+}
 
 function tabForBrandingField(field: string): BrandingTab {
   if (['brandName', 'tagline', 'logoUrl', 'pwaIconUrl', 'themePresetId', 'themePresetVersion', 'themeModePolicy', 'themeDefaultMode', 'themeVariants'].includes(field)) {
@@ -243,6 +286,10 @@ export default function WebReiwaPage() {
     form.setValue("bgSecondary", patch.bgSecondary, { shouldDirty: true });
     setGlobalCardGradient(patch.cardGradient);
     form.setValue("bgEffect", patch.bgEffect, { shouldDirty: true });
+    // A standard theme never touched the slots, so nothing here needed fixing
+    // — but it repaints the global card just the same, and the operator is owed
+    // the same explanation for why position 1 did not change with it.
+    notifyPreservedCardSlots();
   }
 
   function applyConceptPreset(preset: ConceptThemePreset): void {
@@ -257,20 +304,28 @@ export default function WebReiwaPage() {
       createThemeVariantsWithSlots(preset),
       { shouldDirty: true },
     );
-    applyConceptVisualPatch(patch, true);
+    applyConceptVisualPatch(patch);
   }
 
   /**
    * The public variant must be a complete renderable snapshot, including each
    * configured subscription-card position.  The operator still picks only one
    * concept: these are its two brightness representations, never a user theme
-   * catalogue.  We keep the existing number of slots and resolve every slot
-   * from the corresponding mode so an old slot cannot leak the opposite mode.
+   * catalogue.
+   *
+   * Slots are copied from the live form (see `toThemeVariantCardSlots` for
+   * what a snapshot may carry), for the same reason `subscriptionCardText` is:
+   * a variant is a SNAPSHOT, and anything the operator owns that is missing
+   * from it comes back wrong the moment the cabinet resolves the other
+   * brightness.  Copying costs an inherit slot nothing — it holds no artwork of
+   * its own, so it goes on resolving to whichever global artwork the variant
+   * carries.  Rebuilding the array as all-inherit placeholders from a bare
+   * COUNT is what silently emptied an overridden slot in both snapshots.
    */
   function createThemeVariantsWithSlots(
     preset: ConceptThemePreset,
   ): BrandingThemeVariantsDraft {
-    const slotCount = (form.getValues("cardEffectsByIndex") ?? []).length;
+    const slots = form.getValues("cardEffectsByIndex") ?? [];
     const subscriptionCardText = form.getValues('subscriptionCardText');
     const variants = createConceptThemeModeVariants(preset, subscriptionCardText);
     const withSlots = (
@@ -279,13 +334,7 @@ export default function WebReiwaPage() {
       ...variant,
       subscriptionCardText: { ...subscriptionCardText },
       cardEffectProps: { ...(variant.cardEffectProps ?? {}) },
-      cardEffectsByIndex: Array.from({ length: slotCount }, () => ({
-        // A concept establishes the global artwork. Slots are placeholders,
-        // not hidden copies of that artwork, so later operator changes keep
-        // taking effect until a slot is explicitly switched to override.
-        mode: "inherit" as const,
-        cardGradient: null,
-      })),
+      cardEffectsByIndex: toThemeVariantCardSlots(slots),
     });
 
     return {
@@ -298,7 +347,6 @@ export default function WebReiwaPage() {
     patch:
       | ReturnType<typeof createConceptThemePresetVisualPatch>
       | BrandingThemeVariantsDraft['light'],
-    synchronizeSlots: boolean,
     applyCardArtwork = true,
   ): void {
     const cardPatch: ConceptCardPresetVisualPatch = {
@@ -323,7 +371,7 @@ export default function WebReiwaPage() {
       // Applying a concept must retain its separate light/dark card artwork.
       // Only an explicit card choice made afterwards becomes an operator
       // override across both variants.
-      applyConceptCardPreset(cardPatch, synchronizeSlots, false);
+      applyConceptCardPreset(cardPatch, false);
     } else {
       // Changing only the default brightness must not replace the animation
       // selected by the operator. The gradient still follows the selected
@@ -342,9 +390,25 @@ export default function WebReiwaPage() {
 
   /**
    * Reiwa resolves a slot gradient independently from its effect mode. A
-   * global gradient edit must therefore leave explicit slot gradients alone:
+   * global gradient edit therefore leaves explicit slot gradients alone HERE:
    * those cards intentionally remain on their own artwork until the operator
    * resets the slot itself.
+   *
+   * The API used to do the opposite, and this comment used to warn that the
+   * preservation stopped at the request body: a PATCH carrying `cardGradient`
+   * without `cardEffectsByIndex` nulled every slot gradient, in the root array
+   * and in both brightness snapshots. That rule is gone
+   * (`rezeis-admin/src/modules/settings/utils/branding-settings.util.ts`), so
+   * the gradients now survive the round trip. Its stated premise — "a root
+   * gradient has no slot mode discriminator" — was false twice over:
+   * `readCardEffectSlots` stamps a `mode` on every slot including legacy ones,
+   * and reiwa resolves a slot gradient AHEAD of the global one without
+   * consulting `mode` at all, so the rule was not clearing dead data, it was
+   * deleting artwork the operator had picked by hand and could still see.
+   *
+   * `branding-page.test.tsx` covers the round trip with a PATCH double, so
+   * reinstating the server rule turns that test red rather than silently
+   * undoing this function again.
    */
   function setGlobalCardGradient(
     cardGradient: string,
@@ -414,7 +478,6 @@ export default function WebReiwaPage() {
 
   function applyConceptCardPreset(
     patch: ConceptCardPresetVisualPatch,
-    synchronizeSlots = false,
     synchronizeThemeVariants = true,
   ): void {
     // Page colors/background, geometry and navigation stay untouched.
@@ -429,19 +492,52 @@ export default function WebReiwaPage() {
     form.setValue("cardEffectProps", { ...patch.cardEffectProps }, { shouldDirty: true });
     form.setValue("cardEffectOpacity", patch.cardEffectOpacity, { shouldDirty: true });
 
-    // Preserve the configured slot count, but reset their artwork to inherit
-    // when the operator applies a full theme/card preset. Otherwise stale
-    // hidden slot values would keep rendering after the selected preset.
-    if (!synchronizeSlots) return;
-    const existingSlots = form.getValues("cardEffectsByIndex") ?? [];
-    if (existingSlots.length === 0) return;
-    form.setValue(
-      "cardEffectsByIndex",
-      existingSlots.map(() => ({
-        mode: "inherit" as const,
-        cardGradient: null,
-      })),
-      { shouldDirty: true },
+    // `cardEffectsByIndex` is deliberately NOT written here.
+    //
+    // A slot has two independent axes, and each already has an "inherit"
+    // state: the effect axis (`mode`) and the gradient axis (`cardGradient ===
+    // null`). Anything left on inherit holds no artwork of its own and so
+    // resolves through the globals this function just replaced — it follows
+    // the preset for free, with nothing to rewrite. Anything else is an
+    // explicit operator decision, and applying a preset is not a request to
+    // delete it.
+    //
+    // The blanket reset that used to live here was justified by "stale hidden
+    // slot values would keep rendering after the selected preset". Nothing can
+    // render them: this section (`slot.mode === 'override'`), the preview
+    // (`slot?.mode === 'override'`) and the API's `readCardEffectSlots`, which
+    // rewrites every non-override slot to `{ mode, cardGradient }` and drops
+    // its effect/props/opacity outright, all gate the artwork on the same
+    // discriminator. Legacy slots carrying an effect with no `mode` are
+    // therefore already inert everywhere and already follow the preset.
+    //
+    // Nor can a surviving override hold a value a preset invalidates: the slot
+    // effect is validated against the fixed `BRANDING_CARD_EFFECT_SET`
+    // catalog, props are per-effect, opacity is clamped to 0.05..1 and the
+    // gradient is checked as CSS. None of the four is preset-scoped, so there
+    // is no such thing as "invalid under this theme" — only "the operator may
+    // not like it next to the new palette", which is their call to make and
+    // which the per-slot preview page now shows them.
+    notifyPreservedCardSlots();
+  }
+
+  /**
+   * A preset repaints the global card; slots holding their own artwork stay
+   * put. That is the intended contract, but it is invisible — the operator
+   * clicks a preset, swipes to card 1, sees the old artwork and concludes the
+   * preset did not apply. Say it once, with the count, and point at the block
+   * that can reset it. Silent when nothing was held back.
+   */
+  function notifyPreservedCardSlots(): void {
+    const preserved = (form.getValues("cardEffectsByIndex") ?? []).filter(
+      (slot) =>
+        slot.mode === "override" || (slot.cardGradient ?? "").trim().length > 0,
+    ).length;
+    if (preserved === 0) return;
+    toast.info(
+      t('brandingPage.sections.cardEffectSlots.presetKeptSlots', {
+        count: preserved,
+      }),
     );
   }
 
@@ -742,7 +838,7 @@ export default function WebReiwaPage() {
                               const variant = watchedValues.themeVariants?.[mode];
                               if (!variant) return;
                               form.setValue('themeDefaultMode', mode, { shouldDirty: true });
-                              applyConceptVisualPatch(variant, true, false);
+                              applyConceptVisualPatch(variant, false);
                             }}
                           >
                             <SelectTrigger id="themeDefaultMode">
@@ -1100,9 +1196,7 @@ export default function WebReiwaPage() {
                 {tab === 'card' ? (
                   <ConceptCardPresetGallery
                     selectedPresetId={selectedConceptCardPresetId}
-                    onApply={(_preset, patch) =>
-                      applyConceptCardPreset(patch, true)
-                    }
+                    onApply={(_preset, patch) => applyConceptCardPreset(patch)}
                     labels={conceptCardGalleryLabels}
                   />
                 ) : null}

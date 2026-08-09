@@ -3,6 +3,7 @@
 import {
   Component,
   Suspense,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -34,6 +35,21 @@ type CardEffectPreviewRuntime =
   | 'probing'
   | 'native'
   | 'css-fallback'
+
+/**
+ * How many times one preview may be rebuilt after a restorable context loss
+ * before the loss is treated as the permanent kind.
+ *
+ * A restored context is a real recovery, so the honest response is to rebuild:
+ * only a handful of catalog components can heal themselves, and the rest come
+ * back to a canvas whose GL handles the loss detached. But "the browser restored
+ * it" is not a promise that it will stay, and a GPU that keeps losing and
+ * restoring would otherwise drive an unbounded rebuild loop, each turn of it
+ * allocating another context under WebKit's sixteen. Budget is per `scope`, so
+ * anything the operator changes starts again. Kept in step with
+ * `MAX_CONTEXT_RESTORES` in the cabinet's `card-effect-layer.tsx`.
+ */
+const MAX_CONTEXT_RESTORES = 2
 
 class PreviewEffectErrorBoundary extends Component<{
   readonly children: ReactNode
@@ -135,6 +151,31 @@ export function CardEffectPreviewLayer({
   const scope = `${effect}:${propsKey}`
   const valid = isPreviewCardEffect(effect)
 
+  /**
+   * Rebuild the renderer after a context came back.
+   *
+   * A restored context is not the one the effect was drawing with: every GL
+   * handle it holds was detached by the loss, and almost no component in the
+   * catalog rebuilds itself. Bumping the generation changes the renderer's
+   * `key`, so React unmounts the effect and mounts a fresh one on a fresh
+   * context.
+   *
+   * Returns whether the rebuild was taken. `false` hands the loss back to the
+   * observer as an ordinary failure, which is what keeps the budget from being a
+   * suggestion. The budget lives in a ref rather than in state because the
+   * observer needs the answer synchronously, inside the DOM event.
+   */
+  const restoreBudgetRef = useRef<{ scope: string; used: number } | null>(null)
+  const [rendererGeneration, setRendererGeneration] = useState(0)
+  const requestRendererRebuild = useCallback(() => {
+    const budget = restoreBudgetRef.current
+    const used = budget?.scope === scope ? budget.used : 0
+    if (used >= MAX_CONTEXT_RESTORES) return false
+    restoreBudgetRef.current = { scope, used: used + 1 }
+    setRendererGeneration((generation) => generation + 1)
+    return true
+  }, [scope])
+
   // The probe allocates a temporary canvas, so schedule it after React has
   // committed the unchanging gradient/pattern baseline instead of performing
   // browser work during render. The one-frame probing state intentionally has
@@ -181,7 +222,10 @@ export function CardEffectPreviewLayer({
     : CARD_EFFECT_COMPONENTS[runtimeEffect]
   const runtimeProps = props
   const overlayOpacity = resolveCardEffectPreviewOpacity(opacity)
-  const presentationKey = `${scope}:${runtime}`
+  // `gen-` is what makes a rebuild after a restored context a NEW presentation:
+  // readiness has to be handshaken again and the canvas observer is rebuilt
+  // around the new canvas.
+  const presentationKey = `${scope}:${runtime}:gen-${rendererGeneration}`
   const isReady = runtime === 'css-fallback' || readyKey === presentationKey
   const rendererCommitted = Effect !== null && readyKey === presentationKey
 
@@ -200,8 +244,9 @@ export function CardEffectPreviewLayer({
       markFailed,
       1_200,
       requiresPreviewCardEffectCanvas2d(effect) ? '2d' : 'any',
+      requestRendererRebuild,
     )
-  }, [effect, rendererCommitted, scope])
+  }, [effect, rendererCommitted, requestRendererRebuild, scope])
 
   if (!valid || runtime === null) return null
 
@@ -245,7 +290,11 @@ export function CardEffectPreviewLayer({
               className="absolute inset-0"
               style={{ opacity: overlayOpacity }}
             >
-              <Effect {...runtimeProps} />
+              {/* The generation is part of the key, not decoration: a restored
+                  context needs a NEW component instance on a NEW canvas, and
+                  re-rendering the same one would keep the GL handles the loss
+                  detached. */}
+              <Effect key={`${runtimeEffect}:${rendererGeneration}`} {...runtimeProps} />
             </div>
             <EffectReadySignal
               presentationKey={presentationKey}

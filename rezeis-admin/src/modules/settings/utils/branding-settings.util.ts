@@ -182,6 +182,11 @@ export function mergeBrandingSettings(input: {
   // light/dark mode. A theme-only PATCH intentionally does not enter this
   // branch: concepts are still allowed to define different starting visuals
   // per brightness.
+  //
+  // This block only ever writes the GLOBAL fields of a snapshot. The
+  // per-position array is never rewritten from a sibling field, and the root
+  // `cardEffectsByIndex` is never touched here at all — see the note on
+  // `cardEffectsByIndex` below for why.
   const hasDirectVisualPatch =
     input.patch.cardGradient !== undefined ||
     input.patch.cardPattern !== undefined ||
@@ -226,33 +231,35 @@ export function mergeBrandingSettings(input: {
               // must survive a combined root-gradient + slot PATCH.
               cardEffectsByIndex: rootVisuals.cardEffectsByIndex,
             }
-          : input.patch.cardGradient !== undefined
-            ? {
-                // A root gradient has no slot mode discriminator. Clear old
-                // per-slot copies in both root and variant snapshots so they
-                // cannot mask the new global choice.
-                cardEffectsByIndex: variant.cardEffectsByIndex.map((slot) => ({
-                  ...slot,
-                  cardGradient: null,
-                })),
-              }
-            : {}),
+          : // A PATCH that does not carry the array leaves every slot exactly
+            // as stored, in this snapshot and in the root array — including a
+            // PATCH that changes `cardGradient`.
+            //
+            // This branch used to null every slot's `cardGradient` on a
+            // gradient-only PATCH, justified by "a root gradient has no slot
+            // mode discriminator, so a stale per-slot copy would mask the new
+            // global choice". Both halves are false. `readCardEffectSlots`
+            // stamps `mode` on every slot it returns, legacy entries that
+            // never had one included, so the discriminator always exists. And
+            // a slot gradient is not a stale copy: Reiwa resolves it ahead of
+            // the global gradient WITHOUT consulting `mode` (reiwa
+            // `subscription-card-visual.ts`), and the only writer of one is
+            // the operator's own per-position control — a concept/card preset
+            // never touches `cardEffectsByIndex`. So the rule deleted operator
+            // work on the next Save after any preset click, because a preset
+            // PATCHes `cardGradient` while the untouched slot array stays out
+            // of the request.
+            //
+            // Nothing unusable survives instead: `readCardEffectSlots` has
+            // already replaced any gradient `isSafeBrandingGradient` rejects
+            // (`url(...)`, `image-set(...)`, a declaration break) with `null`
+            // in both `rootVisuals` and `variant` before this runs.
+            {}),
       });
       merged.themeVariants = {
         light: synchronizeVariant(variants.light),
         dark: synchronizeVariant(variants.dark),
       };
-    }
-    if (
-      input.patch.cardGradient !== undefined &&
-      input.patch.cardEffectsByIndex === undefined
-    ) {
-      // The root array is read before a theme variant, so it needs the same
-      // stale-gradient cleanup as the two snapshots above.
-      merged.cardEffectsByIndex = rootVisuals.cardEffectsByIndex.map((slot) => ({
-        ...slot,
-        cardGradient: null,
-      }));
     }
   }
   // `subscriptionCardText` is a global operator decision.  Newer variants

@@ -6,7 +6,7 @@
  * - Text Animations (23)
  * - Animations (29)
  * - Components (36)
- * - Backgrounds (43)
+ * - Backgrounds (41)
  *
  * Usage: import { SplitText } from '@/components/reactbits'
  * Or:    import SplitText from '@/components/reactbits/SplitText'
@@ -106,10 +106,9 @@ export { default as StaggeredMenu } from './StaggeredMenu'
 export { default as Stepper } from './Stepper'
 export { default as TiltedCard } from './TiltedCard'
 
-// ── Backgrounds (43) ─────────────────────────────────────────────────────────
+// ── Backgrounds (41) ─────────────────────────────────────────────────────────
 export { default as Aurora } from './Aurora'
 export { default as Balatro } from './Balatro'
-export { default as Ballpit } from './Ballpit'
 export { default as Beams } from './Beams'
 export { default as ColorBends } from './ColorBends'
 export { default as DarkVeil } from './DarkVeil'

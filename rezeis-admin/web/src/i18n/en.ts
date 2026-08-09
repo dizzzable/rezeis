@@ -3691,6 +3691,10 @@ export const en = {
         gradientSwatch: 'Pick slot gradient',
         gradientPlaceholder: 'linear-gradient(...) or empty = global',
         addSlot: 'Add slot',
+        presetKeptSlots_one:
+          'Preset applied. {{count}} card position keeps its own background — reset it in “Background by card position” to follow the preset.',
+        presetKeptSlots_other:
+          'Preset applied. {{count}} card positions keep their own background — reset them in “Background by card position” to follow the preset.',
       },
       appBackground: {
         title: 'App Background',
@@ -3783,6 +3787,7 @@ export const en = {
         statusLabel: 'Active',
         cardTextContrastWarning: 'Check text contrast',
         cardDot: 'Card {{index}}',
+        cardPageRest: 'All other subscriptions',
         remaining: 'Remaining',
         daysMock: '90 days',
         until: 'until {{date}}',

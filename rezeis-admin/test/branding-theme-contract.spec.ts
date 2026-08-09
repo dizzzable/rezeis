@@ -359,7 +359,7 @@ describe('WEB Reiwa preset and surface theme contract', () => {
     assert.equal(reread.appBackground.texture.opacity, 0.25);
   });
 
-  it('keeps a direct operator card artwork patch ahead of both theme variants and stale slots', () => {
+  it('keeps a direct operator card artwork patch ahead of both theme variants', () => {
     const variant = {
       primary: DEFAULT_BRANDING.primary,
       primaryFg: DEFAULT_BRANDING.primaryFg,
@@ -389,8 +389,8 @@ describe('WEB Reiwa preset and surface theme contract', () => {
     const merged = readBrandingSettings(
       mergeBrandingSettings({
         existing: {
-          // Imported and pre-variant rows can carry the same stale slot at
-          // the root as in the light/dark snapshots.
+          // Imported and pre-variant rows can carry the same slot at the root
+          // as in the light/dark snapshots.
           cardEffectsByIndex: variant.cardEffectsByIndex,
           themeVariants: { light: variant, dark: variant },
         },
@@ -403,16 +403,31 @@ describe('WEB Reiwa preset and surface theme contract', () => {
 
     assert.equal(merged.cardGradient, 'linear-gradient(135deg, #001122, #334455)');
     assert.equal(merged.cardPattern, 'linear-gradient(#22d3ee22 1px, transparent 1px)');
-    assert.equal(merged.cardEffectsByIndex[0]?.cardGradient, null);
     for (const mode of ['light', 'dark'] as const) {
       const resolved = merged.themeVariants?.[mode];
       assert.equal(resolved?.cardGradient, merged.cardGradient);
       assert.equal(resolved?.cardPattern, merged.cardPattern);
-      assert.equal(resolved?.cardEffectsByIndex[0]?.cardGradient, null);
       assert.equal(resolved?.cardEffectsByIndex[0]?.mode, 'override');
       assert.equal(resolved?.cardEffectsByIndex[0]?.cardEffect, 'aurora');
     }
+  });
 
+  it('lets a slot array sent in the same request replace the stored one', () => {
+    const variant = {
+      ...DEFAULT_BRANDING,
+      appBackground: { ...DEFAULT_BRANDING.appBackground },
+      cornerRadii: { ...DEFAULT_BRANDING.cornerRadii },
+      surfaceTheme: { ...DEFAULT_BRANDING.surfaceTheme },
+      cardEffectsByIndex: [
+        {
+          mode: 'override',
+          cardEffect: 'aurora',
+          cardEffectProps: { speed: 2 },
+          cardEffectOpacity: 0.4,
+          cardGradient: 'linear-gradient(135deg, #450a0a, #ef4444)',
+        },
+      ],
+    };
     const combined = readBrandingSettings(
       mergeBrandingSettings({
         existing: {
@@ -434,16 +449,159 @@ describe('WEB Reiwa preset and surface theme contract', () => {
       }),
     );
 
-    // A same-request slot payload is a deliberate override, not stale data
-    // to clear while applying the new root gradient.
+    // A same-request slot payload is the deliberate new configuration, and it
+    // has to reach the root array AND both brightness snapshots.
     assert.equal(
       combined.cardEffectsByIndex[0]?.cardGradient,
       'linear-gradient(135deg, #0f172a, #1e3a8a)',
+      'the root slot array ignored the array sent in the same PATCH',
     );
+    assert.equal(combined.cardEffectsByIndex[0]?.cardEffectOpacity, 0.6);
     for (const mode of ['light', 'dark'] as const) {
       assert.equal(
         combined.themeVariants?.[mode].cardEffectsByIndex[0]?.cardGradient,
         'linear-gradient(135deg, #0f172a, #1e3a8a)',
+        `the ${mode} snapshot kept the stored slot array instead of the one ` +
+          'sent in the same PATCH',
+      );
+    }
+  });
+
+  /**
+   * Regression: applying a theme/card preset PATCHes `cardGradient` and leaves
+   * the untouched `cardEffectsByIndex` out of the request. The merge used to
+   * answer that by nulling `cardGradient` on every slot, in the root array and
+   * in both brightness snapshots, so the operator's per-position artwork was
+   * deleted on the next Save and vanished from the panel a moment later when
+   * the form reset onto the response.
+   */
+  it('leaves every stored slot gradient alone when a PATCH carries only cardGradient', () => {
+    const storedSlots = [
+      // Inherits the global effect, owns its gradient. Reiwa resolves a slot
+      // gradient WITHOUT consulting `mode`, so this one renders.
+      {
+        mode: 'inherit',
+        cardGradient: 'linear-gradient(135deg, #2d0a4d, #8545f7)',
+      },
+      // Explicit override of both axes.
+      {
+        mode: 'override',
+        cardEffect: 'waves',
+        cardEffectProps: { waveSpeedX: 0.0125 },
+        cardEffectOpacity: 0.68,
+        cardGradient: 'linear-gradient(135deg, #0c4a6e, #22d3ee)',
+      },
+      // Pre-`mode` row: still an explicit operator gradient.
+      { cardGradient: 'linear-gradient(135deg, #111827, #2563eb)' },
+    ];
+    const expectedGradients = [
+      'linear-gradient(135deg, #2d0a4d, #8545f7)',
+      'linear-gradient(135deg, #0c4a6e, #22d3ee)',
+      'linear-gradient(135deg, #111827, #2563eb)',
+    ];
+    const variant = {
+      ...DEFAULT_BRANDING,
+      appBackground: { ...DEFAULT_BRANDING.appBackground },
+      cornerRadii: { ...DEFAULT_BRANDING.cornerRadii },
+      surfaceTheme: { ...DEFAULT_BRANDING.surfaceTheme },
+      cardGradient: 'linear-gradient(135deg, #052e16, #16a34a)',
+      cardEffectsByIndex: storedSlots,
+    };
+    const merged = readBrandingSettings(
+      mergeBrandingSettings({
+        existing: {
+          cardEffectsByIndex: storedSlots,
+          themeVariants: { light: variant, dark: variant },
+        },
+        patch: { cardGradient: 'linear-gradient(135deg, #1e1b4b, #6366f1)' },
+      }),
+    );
+
+    assert.equal(merged.cardGradient, 'linear-gradient(135deg, #1e1b4b, #6366f1)');
+    assert.deepEqual(
+      merged.cardEffectsByIndex.map((slot) => slot.cardGradient),
+      expectedGradients,
+      'the root slot array lost per-position gradients to a PATCH that only ' +
+        'changed the global cardGradient — that is the preset-click data loss',
+    );
+    for (const mode of ['light', 'dark'] as const) {
+      const resolved = merged.themeVariants?.[mode];
+      assert.equal(resolved?.cardGradient, 'linear-gradient(135deg, #1e1b4b, #6366f1)');
+      assert.deepEqual(
+        resolved?.cardEffectsByIndex.map((slot) => slot.cardGradient),
+        expectedGradients,
+        `the ${mode} snapshot lost per-position gradients to a PATCH that ` +
+          'only changed the global cardGradient — that is the preset-click ' +
+          'data loss',
+      );
+    }
+    // The effect axis is untouched too: only the global gradient was patched.
+    const effectAxis = 'slot 2 lost its explicit effect override to a PATCH ' +
+      'that only changed the global cardGradient';
+    assert.equal(merged.cardEffectsByIndex[1]?.mode, 'override', effectAxis);
+    assert.equal(merged.cardEffectsByIndex[1]?.cardEffect, 'waves', effectAxis);
+    assert.equal(merged.cardEffectsByIndex[1]?.cardEffectOpacity, 0.68, effectAxis);
+  });
+
+  it('still normalises unusable slot values on a gradient-only PATCH', () => {
+    const storedSlots = [
+      // Not a gradient this build will render or persist.
+      { mode: 'inherit', cardGradient: 'url("https://attacker.invalid/a.png")' },
+      // Pre-`mode` row carrying an effect: never an override, so the effect
+      // fields go and only the safe gradient stays.
+      {
+        cardEffect: 'aurora',
+        cardEffectProps: { speed: 9 },
+        cardEffectOpacity: 0.5,
+        cardGradient: 'linear-gradient(135deg, #111827, #2563eb)',
+      },
+      // An override naming an effect outside the catalog demotes to inherit
+      // rather than becoming an invisible stale winner.
+      {
+        mode: 'override',
+        cardEffect: 'not-a-real-effect',
+        cardEffectOpacity: 0.9,
+        cardGradient: 'linear-gradient(135deg, #450a0a, #ef4444)',
+      },
+    ];
+    const variant = {
+      ...DEFAULT_BRANDING,
+      appBackground: { ...DEFAULT_BRANDING.appBackground },
+      cornerRadii: { ...DEFAULT_BRANDING.cornerRadii },
+      surfaceTheme: { ...DEFAULT_BRANDING.surfaceTheme },
+      cardEffectsByIndex: storedSlots,
+    };
+    const merged = readBrandingSettings(
+      mergeBrandingSettings({
+        existing: {
+          cardEffectsByIndex: storedSlots,
+          themeVariants: { light: variant, dark: variant },
+        },
+        patch: { cardGradient: 'linear-gradient(135deg, #1e1b4b, #6366f1)' },
+      }),
+    );
+
+    for (const [label, slots] of [
+      ['root', merged.cardEffectsByIndex],
+      ['light', merged.themeVariants?.light.cardEffectsByIndex ?? []],
+      ['dark', merged.themeVariants?.dark.cardEffectsByIndex ?? []],
+    ] as const) {
+      assert.deepEqual(
+        slots.map((slot) => ({ ...slot })),
+        [
+          { mode: 'inherit', cardGradient: null },
+          {
+            mode: 'inherit',
+            cardGradient: 'linear-gradient(135deg, #111827, #2563eb)',
+          },
+          {
+            mode: 'inherit',
+            cardGradient: 'linear-gradient(135deg, #450a0a, #ef4444)',
+          },
+        ],
+        `${label}: slot normalisation changed — an unsafe gradient must ` +
+          'become null, a legacy slot must read as inherit and keep its own ' +
+          'safe gradient, and a malformed override must demote to inherit',
       );
     }
   });

@@ -186,6 +186,7 @@ export const ru = {
       reiwaUnavailable: 'Reiwa недоступна или не настроена (проверьте REIWA_URL и WEBHOOK_SECRET_HEADER)',
       vpsTab: 'VPS',
       processTab: 'Процесс',
+      sectionUnavailable: 'Эти показатели сейчас недоступны',
       cpu: 'CPU',
       cores: 'ядер',
       ram: 'RAM',
