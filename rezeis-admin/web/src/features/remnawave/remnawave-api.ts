@@ -278,7 +278,8 @@ async function getHwidStats(): Promise<RemnawaveHwidStats | null> {
 }
 
 export interface RemnawaveHwidTopUser {
-  userUuid: string
+  userId: number | null
+  userUuid: string | null
   username: string
   telegramId: string | null
   devicesCount: number

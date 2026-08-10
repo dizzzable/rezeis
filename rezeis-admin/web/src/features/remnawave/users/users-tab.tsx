@@ -390,10 +390,14 @@ function HwidTopUsersCard() {
             </TableHeader>
             <TableBody>
               {data.map((row) => (
-                <TableRow key={row.userUuid}>
+                <TableRow key={row.userUuid ?? row.userId ?? row.username}>
                   <TableCell>
                     <p className="font-medium">{row.username}</p>
-                    <p className="font-mono text-[10px] text-muted-foreground/70">{row.userUuid.slice(0, 8)}…</p>
+                    {row.userUuid ? (
+                      <p className="font-mono text-[10px] text-muted-foreground/70">{row.userUuid.slice(0, 8)}…</p>
+                    ) : row.userId !== null && row.userId !== undefined ? (
+                      <p className="font-mono text-[10px] text-muted-foreground/70">#{row.userId}</p>
+                    ) : null}
                   </TableCell>
                   <TableCell className="text-right">
                     <Badge variant={row.devicesCount >= 10 ? 'destructive' : row.devicesCount >= 5 ? 'outline' : 'secondary'} className="px-2 text-[11px] tabular-nums">
