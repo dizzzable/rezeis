@@ -84,8 +84,8 @@ import {
  * connected panel.
  */
 export class RemnawaveProfileNotFoundError extends Error {
-  public constructor(public readonly uuid: string) {
-    super(`Remnawave profile ${uuid} not found`);
+  public constructor(public readonly uuid: string | number) {
+    super(`Remnawave profile ${String(uuid)} not found`);
     this.name = 'RemnawaveProfileNotFoundError';
   }
 }
@@ -707,8 +707,8 @@ export class RemnawaveApiService {
       // — otherwise a host outage would mass-detach valid remnawaveIds. Those
       // fall through to ServiceUnavailableException and retry harmlessly.
       if (isAxiosError(err) && err.response?.status === 404 && isPanelUserNotFound(err.response.data)) {
-        this.logger.warn(`Remnawave PATCH /api/users: profile ${uuid} not found (404 A025)`);
-        throw new RemnawaveProfileNotFoundError(uuid);
+        this.logger.warn(`Remnawave PATCH /api/users: profile ${String(userId)} not found (404 A025)`);
+        throw new RemnawaveProfileNotFoundError(userId);
       }
       this.logger.error(`Remnawave PATCH /api/users failed: ${(err as Error).message}`);
       // A 400 here is a rejected body (a status the panel does not accept, a
