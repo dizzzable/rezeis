@@ -433,10 +433,12 @@ function extractShortUuid(configUrl: string | null): string | null {
   if (configUrl === null || configUrl.trim().length === 0) return null;
   try {
     const url = new URL(configUrl);
-    const lastSegment = url.pathname.split('/').filter(Boolean).at(-1);
+    const segments = url.pathname.split('/').filter(Boolean);
+    const lastSegment = segments[segments.length - 1];
     return lastSegment && lastSegment.length > 0 ? lastSegment : null;
   } catch {
-    const lastSegment = configUrl.split('?')[0]?.split('/').filter(Boolean).at(-1);
+    const segments = configUrl.split('?')[0]?.split('/').filter(Boolean) ?? [];
+    const lastSegment = segments[segments.length - 1];
     return lastSegment && lastSegment.length > 0 ? lastSegment : null;
   }
 }
