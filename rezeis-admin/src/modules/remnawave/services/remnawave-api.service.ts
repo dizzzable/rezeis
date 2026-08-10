@@ -1852,20 +1852,19 @@ export class RemnawaveApiService {
       return null;
     }
     try {
-      if (input.username) {
-        const user = await this.getPanelUserByUsername(input.username);
-        return user === null ? null : mapUserSummary(user);
-      }
+      let user: RemnawavePanelUser | null = null;
       if (input.subscriptionUuid) {
-        const result = await this.requestJson<unknown>({
+        const response = await this.requestJson<unknown>({
           method: 'get',
           url: `/api/users/by-short-uuid/${encodeURIComponent(input.subscriptionUuid)}`,
         });
-        const user = normalizePanelUser(result);
-        return user === null ? null : mapUserSummary(user);
+        user = normalizePanelUser(response);
+      } else if (input.username) {
+        user = await this.getPanelUserByUsername(input.username);
+      } else if (input.email || input.telegramId) {
+        const users = await this.streamPanelUsers({ email: input.email, telegramId: input.telegramId });
+        user = users[0] ?? null;
       }
-      const users = await this.streamPanelUsers({ telegramId: input.telegramId, email: input.email });
-      const user = users[0] ?? null;
       if (user === null || user === undefined || typeof user !== 'object') return null;
       return mapUserSummary(user);
     } catch {

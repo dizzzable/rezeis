@@ -638,13 +638,13 @@ describe('RemnawaveApiService', () => {
     assert.equal(users[0]?.id, 123);
   });
 
-  it('uses Remnawave 3 stream lookup for username idempotency search', async () => {
+  it('uses Remnawave username lookup for idempotency search', async () => {
     const capturedPaths: string[] = [];
     const service = new RemnawaveApiService(
       {
         request: (input: { readonly url: string }) => {
           capturedPaths.push(input.url);
-          return of({ data: { response: { users: [{ id: 321, username: 'rezeis-existing' }] } } });
+          return of({ data: { response: { id: 321, username: 'rezeis-existing' } } });
         },
       } as never,
       { host: 'remnawave', port: 3000, token: 'secret', webhookSecret: null, caddyToken: null, cookie: null },
@@ -652,7 +652,7 @@ describe('RemnawaveApiService', () => {
 
     const user = await service.getPanelUserByUsername('rezeis-existing');
 
-    assert.deepStrictEqual(capturedPaths, ['/api/users/stream?username=rezeis-existing&size=1000']);
+    assert.deepStrictEqual(capturedPaths, ['/api/users/by-username/rezeis-existing']);
     assert.equal(user?.id, 321);
     assert.equal(user?.username, 'rezeis-existing');
   });
