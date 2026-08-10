@@ -185,7 +185,7 @@ type StrictTransportFailure =
  * Remnawave panel user — shape returned by the panel API.
  */
 export interface RemnawavePanelUser {
-  id: number;
+  id: number | null;
   uuid: string | null;
   username: string;
   status: string;
@@ -352,10 +352,11 @@ function normalizePanelUser(raw: unknown): RemnawavePanelUser | null {
   if (root === null || typeof root !== 'object') return null;
   const value = root as Record<string, unknown>;
   const id = readPanelUserId(value);
-  if (id === null) return null;
+  const uuid = typeof value['uuid'] === 'string' && value['uuid'].length > 0 ? value['uuid'] : null;
+  if (id === null && uuid === null) return null;
   return {
     id,
-    uuid: typeof value['uuid'] === 'string' && value['uuid'].length > 0 ? value['uuid'] : null,
+    uuid,
     username: typeof value['username'] === 'string' ? value['username'] : '',
     status: typeof value['status'] === 'string' ? value['status'] : 'UNKNOWN',
     subscriptionUrl: typeof value['subscriptionUrl'] === 'string' ? value['subscriptionUrl'] : '',
@@ -1087,10 +1088,11 @@ export class RemnawaveApiService {
     if (typeof candidate !== 'object' || candidate === null) return null;
     const value = candidate as Record<string, unknown>;
     const id = readPanelUserId(value);
-    if (id === null) return null;
+    const uuid = typeof value.uuid === 'string' && value.uuid.length > 0 ? value.uuid : null;
+    if (id === null && uuid === null) return null;
     return {
       id,
-      uuid: typeof value.uuid === 'string' && value.uuid.length > 0 ? value.uuid : null,
+      uuid,
       username: typeof value.username === 'string' ? value.username : '',
       status: typeof value.status === 'string' ? value.status : 'UNKNOWN',
       subscriptionUrl: typeof value.subscriptionUrl === 'string' ? value.subscriptionUrl : '',
@@ -2054,9 +2056,9 @@ export class RemnawaveApiService {
    * `unavailable` and the caller defers instead of destroying.
    */
   public async strictGetPanelUserExpiry(
-    uuid: string,
+    userId: RemnawaveUserIdentifier,
   ): Promise<RemnawaveStrictOutcome<RemnawavePanelExpirySnapshot>> {
-    const transport = await this.strictHttp('get', `/api/users/${uuid}`);
+    const transport = await this.strictHttp('get', `/api/users/${userIdentifierPathPart(userId)}`);
     if (transport.kind !== 'ok') return this.mapStrictProfileTransport(transport);
     const root = (transport.data as { response?: unknown })?.response ?? transport.data;
     if (root === null || typeof root !== 'object') {
@@ -2102,7 +2104,7 @@ export class RemnawaveApiService {
     const preflight = validateStrictUserWrite(desired);
     if (preflight !== null) return strictInvalidContract(preflight);
     const body: Record<string, unknown> = {
-      ...hwidUserIdentifierBody(userId),
+      ...userIdentifierBody(userId),
       trafficLimitBytes:
         desired.trafficLimitBytes === null ? 0 : Number(desired.trafficLimitBytes),
       hwidDeviceLimit: desired.hwidDeviceLimit === null ? 0 : desired.hwidDeviceLimit,

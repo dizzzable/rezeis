@@ -473,7 +473,7 @@ export class ProfileSyncProcessor extends WorkerHost {
     // write, or a duplicate-name retry). Reuse the existing profile instead
     // of re-creating it — the panel rejects duplicate usernames with 400.
     const existing = await this.remnawaveApiService.getPanelUserByUsername(panelUsername);
-    if (existing !== null && typeof existing.uuid === 'string' && existing.uuid.length > 0) {
+    if (existing !== null && (existing.id !== null || (typeof existing.uuid === 'string' && existing.uuid.length > 0))) {
       // "A profile answers to this name" is not "this profile is mine" — see
       // `assertPanelProfileOwnership`.
       assertPanelProfileOwnership(panelUsername, existing.description, subscription.userId);
@@ -551,7 +551,7 @@ export class ProfileSyncProcessor extends WorkerHost {
   private async persistProfileLink(
     subscriptionId: string,
     remnawaveId: string | null,
-    remnawaveUserId: number,
+    remnawaveUserId: number | null,
     configUrl: string | null | undefined,
     panelCreatedAt: string | null | undefined,
   ): Promise<string | null> {
@@ -569,11 +569,16 @@ export class ProfileSyncProcessor extends WorkerHost {
 
       await tx.subscription.update({
         where: { id: subscriptionId },
-        data: { remnawaveId, remnawaveUserId, configUrl },
+        data: {
+          remnawaveId,
+          ...(remnawaveUserId !== null ? { remnawaveUserId } : {}),
+          configUrl,
+        },
       });
       await this.stampMonthRollingAnchor(tx, subscriptionId, panelCreatedAt, current.status);
       if (current.status !== SubscriptionStatus.ACTIVE) {
-        const deleteJobId = await this.createDeleteJobIfMissing(tx, subscriptionId, String(remnawaveUserId));
+        const deleteTarget = remnawaveUserId !== null ? String(remnawaveUserId) : remnawaveId;
+        const deleteJobId = deleteTarget === null ? null : await this.createDeleteJobIfMissing(tx, subscriptionId, deleteTarget);
         if (deleteJobId !== null) {
           return deleteJobId;
         }
