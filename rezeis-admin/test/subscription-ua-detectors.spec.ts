@@ -48,6 +48,8 @@ function record(
     clientType: 'v2rayNG',
     ipAddress: '203.0.113.1',
     requestedAt: ago(5),
+    srrResponseType: null,
+    srrRuleName: null,
     ...over,
   };
 }

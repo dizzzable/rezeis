@@ -434,6 +434,7 @@ describe('mapUserSummary', () => {
 
   it('maps the rest of the record the panel really sends', () => {
     assert.deepStrictEqual(mapUserSummary(USER_RECORD), {
+      id: 4211,
       uuid: 'dddddddd-0000-4000-8000-000000000001',
       shortUuid: 'aB3xY9zQ',
       username: 'durov',

@@ -321,7 +321,7 @@ interface TopUser {
 }
 
 interface IpRow {
-  userId: string;
+  userId: number;
   ips: Array<{ ip: string; lastSeen: string }>;
 }
 
@@ -514,7 +514,7 @@ async function ipCandidate(
     panelUsers,
     panelTotal: extra.panelTotal,
     panelComplete: extra.panelComplete,
-    ipsByNode: { n1: [{ userId: '1', ips }] },
+    ipsByNode: { n1: [{ userId: 1, ips }] },
     stored: IP_ON,
   }).detectConcurrentIpSharing(NOW);
   return candidate;

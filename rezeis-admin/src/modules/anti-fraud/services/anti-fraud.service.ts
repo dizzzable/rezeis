@@ -560,10 +560,9 @@ export class AntiFraudService {
 
   /**
    * Drops a flagged user's (or specific IPs') live connections across all
-   * nodes via Remnawave `ip-control`. Resolves the Remnawave subscription
-   * UUIDs from the signal (`metadata.remnawaveUuid` first, then the affected
-   * rezeis users' subscriptions). Writes an audit entry + FRAUD event; does
-   * not change the signal status (the operator still acknowledges/resolves).
+   * nodes via Remnawave connections API. Resolves numeric Remnawave user ids
+   * from signal metadata first, then affected rezeis users' subscriptions.
+   * Writes an audit entry + FRAUD event; does not change the signal status.
    */
   public async enforceDropConnections(input: {
     readonly signalId: string;
@@ -588,12 +587,12 @@ export class AntiFraudService {
       dropBy = { by: 'ipAddresses', ipAddresses: [...ips] };
       auditTargets = ips;
     } else {
-      const uuids = await this.resolveSignalUserUuids(signal.affectedUserIds, metadata);
-      if (uuids.length === 0) {
+      const userIds = await this.resolveSignalRemnawaveUserIds(signal.affectedUserIds, metadata);
+      if (userIds.length === 0) {
         throw new BadRequestException('Signal has no resolvable Remnawave users to drop');
       }
-      dropBy = { by: 'userUuids', userUuids: [...uuids] };
-      auditTargets = uuids;
+      dropBy = { by: 'userIds', userIds: [...userIds] };
+      auditTargets = userIds.map(String);
     }
 
     let outcome: { ok: boolean };
@@ -650,31 +649,30 @@ export class AntiFraudService {
     });
     if (!signal) throw new NotFoundException('Fraud signal not found');
     const metadata = (signal.metadata as Record<string, unknown>) ?? {};
-    const uuids = await this.resolveSignalUserUuids(signal.affectedUserIds, metadata);
-    if (uuids.length === 0) return [];
-    return this.remnawaveApiService.fetchUserIps(uuids[0]);
+    const userIds = await this.resolveSignalRemnawaveUserIds(signal.affectedUserIds, metadata);
+    if (userIds.length === 0) return [];
+    return this.remnawaveApiService.fetchUserIps(userIds[0]);
   }
 
-  /**
-   * Resolves a signal's affected users to Remnawave subscription UUIDs.
-   * Prefers `metadata.remnawaveUuid` (sharing signals carry it) and falls
-   * back to the affected rezeis users' subscriptions.
-   */
-  private async resolveSignalUserUuids(
+  private async resolveSignalRemnawaveUserIds(
     affectedUserIds: readonly string[],
     metadata: Record<string, unknown>,
-  ): Promise<readonly string[]> {
-    const fromMeta = typeof metadata.remnawaveUuid === 'string' ? [metadata.remnawaveUuid] : [];
+  ): Promise<readonly number[]> {
+    const fromMeta = typeof metadata.remnawaveUserId === 'number' ? [metadata.remnawaveUserId] : [];
     if (fromMeta.length > 0) return fromMeta;
+    if (typeof metadata.remnawaveUuid === 'string' && metadata.remnawaveUuid.length > 0) {
+      const subs = await this.prismaService.subscription.findMany({
+        where: { remnawaveId: metadata.remnawaveUuid, remnawaveUserId: { not: null } },
+        select: { remnawaveUserId: true },
+      });
+      return uniqueNumericRemnawaveUserIds(subs);
+    }
     if (affectedUserIds.length === 0) return [];
     const subs = await this.prismaService.subscription.findMany({
-      where: { userId: { in: [...affectedUserIds] }, remnawaveId: { not: null } },
-      select: { remnawaveId: true },
+      where: { userId: { in: [...affectedUserIds] }, remnawaveUserId: { not: null } },
+      select: { remnawaveUserId: true },
     });
-    const uuids = subs
-      .map((s) => s.remnawaveId)
-      .filter((id): id is string => typeof id === 'string' && id.length > 0);
-    return [...new Set(uuids)];
+    return uniqueNumericRemnawaveUserIds(subs);
   }
 
   /**
@@ -2128,6 +2126,13 @@ function extractIps(metadata: Record<string, unknown>): readonly string[] {
     })
     .filter((ip): ip is string => ip !== null && ip.length > 0);
   return [...new Set(ips)];
+}
+
+function uniqueNumericRemnawaveUserIds(rows: readonly { remnawaveUserId: number | null }[]): readonly number[] {
+  const ids = rows
+    .map((row) => row.remnawaveUserId)
+    .filter((id): id is number => typeof id === 'number' && Number.isInteger(id));
+  return [...new Set(ids)];
 }
 
 function mapSignal(row: FraudSignal): FraudSignalInterface {

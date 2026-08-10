@@ -58,11 +58,12 @@ export class InternalUserDevicesController {
   @Get(':userRef/devices')
   public async listDevices(@Param('userRef') userRef: string) {
     const subscription = await this.findActiveSubscription(userRef);
-    if (!subscription?.remnawaveId) {
+    const panelIdentifier = await this.resolvePanelIdentifier(subscription);
+    if (panelIdentifier === null) {
       return { devices: [], total: 0 };
     }
     const outcome = await this.remnawaveApiService.strictGetPanelUserDevices(
-      subscription.remnawaveId,
+      panelIdentifier,
     );
     return requirePanelDeviceList(outcome);
   }
@@ -80,13 +81,14 @@ export class InternalUserDevicesController {
     @Param('hwid') hwid: string,
   ) {
     const subscription = await this.findActiveSubscription(userRef);
-    if (!subscription?.remnawaveId) {
+    const panelIdentifier = await this.resolvePanelIdentifier(subscription);
+    if (panelIdentifier === null) {
       throw new NotFoundException('No active subscription with a Remnawave profile');
     }
     const userId = subscription.userId;
 
     const result = await this.remnawaveApiService.deletePanelUserDevice(
-      subscription.remnawaveId,
+      panelIdentifier,
       hwid,
     );
 
@@ -132,11 +134,12 @@ export class InternalUserDevicesController {
     @Param('subscriptionId') subscriptionId: string,
   ) {
     const subscription = await this.findOwnedSubscription(userRef, subscriptionId);
-    if (!subscription?.remnawaveId) {
+    const panelIdentifier = await this.resolvePanelIdentifier(subscription);
+    if (panelIdentifier === null) {
       return { devices: [], total: 0 };
     }
     const outcome = await this.remnawaveApiService.strictGetPanelUserDevices(
-      subscription.remnawaveId,
+      panelIdentifier,
     );
     return requirePanelDeviceList(outcome);
   }
@@ -154,11 +157,12 @@ export class InternalUserDevicesController {
     @Param('hwid') hwid: string,
   ) {
     const subscription = await this.findOwnedSubscription(userRef, subscriptionId);
-    if (!subscription?.remnawaveId) {
+    const panelIdentifier = await this.resolvePanelIdentifier(subscription);
+    if (panelIdentifier === null) {
       throw new NotFoundException('No subscription with a Remnawave profile');
     }
     const result = await this.remnawaveApiService.deletePanelUserDevice(
-      subscription.remnawaveId,
+      panelIdentifier,
       hwid,
     );
     await this.emitDeviceRevoked(subscription, hwid, result.total);
@@ -216,14 +220,15 @@ export class InternalUserDevicesController {
     @Param('subscriptionId') subscriptionId: string,
   ) {
     const subscription = await this.findOwnedSubscription(userRef, subscriptionId);
-    if (!subscription?.remnawaveId) {
+    const panelIdentifier = await this.resolvePanelIdentifier(subscription);
+    if (panelIdentifier === null) {
       throw new NotFoundException('No subscription with a Remnawave profile');
     }
 
     // 1. Rotate the subscription link (revoke old short UUID). Every existing
     //    client link is dead from here on.
     const { subscriptionUrl } = await this.remnawaveApiService.regeneratePanelUserSubscription(
-      subscription.remnawaveId,
+      panelIdentifier,
     );
 
     // 2. Persist the new URL — FIRST, before anything else that can fail.
@@ -265,7 +270,7 @@ export class InternalUserDevicesController {
     //    leftover devices are now honestly visible in the device list.
     let devicesCleared = true;
     try {
-      await this.remnawaveApiService.deleteAllPanelUserDevices(subscription.remnawaveId);
+      await this.remnawaveApiService.deleteAllPanelUserDevices(panelIdentifier);
     } catch (err: unknown) {
       devicesCleared = false;
       const message = err instanceof Error ? err.message : 'Unknown error';
@@ -323,7 +328,7 @@ export class InternalUserDevicesController {
 
   /** Emits the user-facing device-revoked event for the notification feed. */
   private async emitDeviceRevoked(
-    subscription: { id: string; userId: string; remnawaveId: string | null },
+    subscription: { id: string; userId: string; remnawaveId: string | null; remnawaveUserId: number | null },
     hwid: string,
     remainingDevices: number,
   ): Promise<void> {
@@ -362,7 +367,7 @@ export class InternalUserDevicesController {
     }
     const subscription = await this.prismaService.subscription.findFirst({
       where: { id: subscriptionId, userId: user.id },
-      select: { id: true, userId: true, remnawaveId: true },
+      select: { id: true, userId: true, remnawaveId: true, remnawaveUserId: true, configUrl: true },
     });
     return subscription;
   }
@@ -381,15 +386,59 @@ export class InternalUserDevicesController {
       where: {
         userId: user.id,
         status: { in: [SubscriptionStatus.ACTIVE, SubscriptionStatus.LIMITED] },
-        remnawaveId: { not: null },
+        OR: [{ remnawaveUserId: { not: null } }, { remnawaveId: { not: null } }],
       },
       orderBy: { createdAt: 'desc' },
       select: {
         id: true,
         userId: true,
         remnawaveId: true,
+        remnawaveUserId: true,
+        configUrl: true,
       },
     });
     return subscription;
+  }
+
+  private async resolvePanelIdentifier(subscription: DeviceSubscription | null): Promise<number | string | null> {
+    if (subscription?.remnawaveUserId !== null && subscription?.remnawaveUserId !== undefined) {
+      return subscription.remnawaveUserId;
+    }
+    if (subscription === null) return null;
+
+    const shortUuid = extractShortUuid(subscription.configUrl);
+    if (shortUuid !== null) {
+      const panelUser = await this.remnawaveApiService.resolveRemnawaveUser({ subscriptionUuid: shortUuid });
+      if (panelUser?.id !== null && panelUser?.id !== undefined) {
+        await this.prismaService.subscription.update({
+          where: { id: subscription.id },
+          data: { remnawaveUserId: panelUser.id },
+        });
+        return panelUser.id;
+      }
+    }
+
+    return subscription.remnawaveId;
+  }
+}
+
+type DeviceSubscription = {
+  readonly id: string;
+  readonly remnawaveId: string | null;
+  readonly remnawaveUserId: number | null;
+  readonly configUrl: string | null;
+};
+
+function extractShortUuid(configUrl: string | null | undefined): string | null {
+  if (configUrl === null || configUrl === undefined || configUrl.trim().length === 0) return null;
+  try {
+    const url = new URL(configUrl);
+    const segments = url.pathname.split('/').filter(Boolean);
+    const lastSegment = segments[segments.length - 1];
+    return lastSegment && lastSegment.length > 0 ? lastSegment : null;
+  } catch {
+    const segments = configUrl.split('?')[0]?.split('/').filter(Boolean) ?? [];
+    const lastSegment = segments[segments.length - 1];
+    return lastSegment && lastSegment.length > 0 ? lastSegment : null;
   }
 }

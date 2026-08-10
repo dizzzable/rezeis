@@ -183,7 +183,7 @@ export class ExpiredProfileCleanupService {
           },
         },
       },
-      select: { id: true, userId: true, isTrial: true, remnawaveId: true, expiresAt: true },
+      select: { id: true, userId: true, isTrial: true, remnawaveId: true, remnawaveUserId: true, expiresAt: true },
       take: CLEANUP_BATCH,
       orderBy: { expiresAt: 'asc' },
     });
@@ -196,11 +196,12 @@ export class ExpiredProfileCleanupService {
     const deferredKinds = new Set<string>();
     for (const subscription of candidates) {
       const remnawaveId = subscription.remnawaveId;
+      const panelIdentifier = remnawaveUserIdentifier(subscription);
       const expectedExpiresAt = subscription.expiresAt;
-      if (remnawaveId === null || expectedExpiresAt === null) continue;
+      if (remnawaveId === null || panelIdentifier === null || expectedExpiresAt === null) continue;
 
       // ── Panel-authoritative expiry re-check ──────────────────────────────
-      const panelOutcome = await this.remnawaveApiService.strictGetPanelUserExpiry(remnawaveId);
+      const panelOutcome = await this.remnawaveApiService.strictGetPanelUserExpiry(panelIdentifier);
       let panelExpiryMs: number | null = null;
       let panelSubscriptionUrl: string | null = null;
       if (panelOutcome.kind === 'ok') {
@@ -305,4 +306,8 @@ export class ExpiredProfileCleanupService {
     }
     return enqueued;
   }
+}
+
+function remnawaveUserIdentifier(subscription: { remnawaveUserId: number | null; remnawaveId: string | null }): number | string | null {
+  return subscription.remnawaveUserId ?? subscription.remnawaveId;
 }

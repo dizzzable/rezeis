@@ -47,7 +47,7 @@ interface RemnaMock {
   nodes?: NodeMock[];
   /** `RemnawaveMetricSample.nodesSnapshot` rows inside the stability window. */
   snapshots?: SnapshotNode[][];
-  usersIpsByNode?: Record<string, Array<{ userId: string; ips: Array<{ ip: string; lastSeen: string }> }>>;
+  usersIpsByNode?: Record<string, Array<{ userId: number; ips: Array<{ ip: string; lastSeen: string }> }>>;
 }
 
 interface Harness {
@@ -901,7 +901,7 @@ describe('SharingDetectors — concurrent IP (network-grouped)', () => {
       panelUsers: [{ uuid: 'u1', panelId: 10, hwidDeviceLimit: 1 }],
       nodes: [{ uuid: 'n1', name: 'N1', countryCode: 'DE', isConnected: true, isDisabled: false }],
       usersIpsByNode: {
-        n1: [{ userId: '10', ips: [
+        n1: [{ userId: 10, ips: [
           { ip: '1.1.1.1', lastSeen: recent },
           { ip: '2.2.2.2', lastSeen: recent },
           { ip: '3.3.3.3', lastSeen: recent },
@@ -920,7 +920,7 @@ describe('SharingDetectors — concurrent IP (network-grouped)', () => {
         usersIpsByNode: {
           n1: [
             {
-              userId: '10',
+            userId: 10,
               ips: [
                 // 4 distinct /24 networks; limit 2 + margin 1 → tolerated 3 → flagged.
                 { ip: '1.1.1.1', lastSeen: recent },
@@ -951,7 +951,7 @@ describe('SharingDetectors — concurrent IP (network-grouped)', () => {
       usersIpsByNode: {
         n1: [
           {
-            userId: '10',
+              userId: 10,
             ips: [
               // 4 raw IPs but all in one carrier /24 → 1 network → not flagged.
               { ip: '100.64.10.1', lastSeen: recent },
@@ -974,7 +974,7 @@ describe('SharingDetectors — concurrent IP (network-grouped)', () => {
       usersIpsByNode: {
         n1: [
           {
-            userId: '10',
+            userId: 10,
             // 2 networks; limit 1 + margin 1 → tolerated 2 → 2 is NOT > 2.
             ips: [
               { ip: '85.10.20.5', lastSeen: recent },
@@ -996,7 +996,7 @@ describe('SharingDetectors — concurrent IP (network-grouped)', () => {
       usersIpsByNode: {
         n1: [
           {
-            userId: '10',
+            userId: 10,
             ips: [
               { ip: '1.1.1.1', lastSeen: recent },
               { ip: '9.9.9.9', lastSeen: old }, // stale → excluded
@@ -1054,7 +1054,7 @@ describe('SharingDetectors — a lookback is not simultaneity', () => {
       {
         panelUsers: [{ uuid: 'u1', panelId: 10, hwidDeviceLimit: 1 }],
         nodes: ONE_NODE,
-        usersIpsByNode: { n1: [{ userId: '10', ips }] },
+        usersIpsByNode: { n1: [{ userId: 10, ips }] },
       },
       [{ remnawaveId: 'u1', userId: 'user-1' }],
     );
@@ -1148,7 +1148,7 @@ describe('SharingDetectors — a dual-stack device is one device', () => {
       usersIpsByNode: {
         n1: [
           {
-            userId: '10',
+            userId: 10,
             ips: [
               { ip: '203.0.113.10', lastSeen: ago(3) },
               { ip: '2001:db8:1:2::5', lastSeen: ago(3) },
@@ -1169,7 +1169,7 @@ describe('SharingDetectors — a dual-stack device is one device', () => {
       usersIpsByNode: {
         n1: [
           {
-            userId: '10',
+            userId: 10,
             ips: [
               { ip: '203.0.113.10', lastSeen: ago(3) },
               { ip: '2001:db8:1::5', lastSeen: ago(3) },
@@ -1209,7 +1209,7 @@ describe('SharingDetectors — a node flap is not a customer', () => {
       usersIpsByNode: {
         n1: [
           {
-            userId: '10',
+            userId: 10,
             ips: [
               { ip: '1.1.1.1', lastSeen: ago(2) },
               { ip: '2.2.2.2', lastSeen: ago(4) },
@@ -1325,7 +1325,7 @@ describe('SharingDetectors — an unreadable panel id is skipped, never guessed'
    * `Number.parseInt('3f2a-…', 10)` is 3 — so somebody else's four networks
    * were filed under #3's name.
    */
-  function panelWith(userId: string): SharingDetectors {
+  function panelWith(userId: number | string): SharingDetectors {
     return makeDetectors(
       {
         panelUsers: [{ uuid: 'u3', panelId: 3, hwidDeviceLimit: 1 }],
@@ -1333,7 +1333,7 @@ describe('SharingDetectors — an unreadable panel id is skipped, never guessed'
         usersIpsByNode: {
           n1: [
             {
-              userId,
+              userId: userId as never,
               ips: [
                 { ip: '1.1.1.1', lastSeen: ago(2) },
                 { ip: '2.2.2.2', lastSeen: ago(4) },
@@ -1353,7 +1353,7 @@ describe('SharingDetectors — an unreadable panel id is skipped, never guessed'
   });
 
   it('still attributes a genuine integer userId', async () => {
-    const candidates = await panelWith('3').detectConcurrentIpSharing(NOW);
+    const candidates = await panelWith(3).detectConcurrentIpSharing(NOW);
     assert.equal(candidates.length, 1);
     assert.deepEqual(candidates[0].affectedUserIds, ['user-3']);
   });

@@ -18,6 +18,7 @@ import { RemnawaveNodeInterface } from '../interfaces/remnawave-node.interface';
  */
 
 interface RawNode {
+  readonly id?: unknown;
   readonly uuid?: unknown;
   readonly name?: unknown;
   readonly address?: unknown;
@@ -49,6 +50,7 @@ interface RawNode {
 export function mapNode(raw: unknown): RemnawaveNodeInterface {
   const r = (raw ?? {}) as RawNode;
   return {
+    id: toNullableNumber(r.id),
     uuid: toString(r.uuid),
     name: toString(r.name),
     address: toString(r.address),

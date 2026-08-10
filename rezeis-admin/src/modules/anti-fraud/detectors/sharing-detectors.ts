@@ -13,7 +13,6 @@ import { AntiFraudTunablesService } from '../services/anti-fraud-tunables.servic
 import {
   countDistinctNetworks,
   isNetworkSharingOffender,
-  parsePanelId,
   selectConcurrentSamples,
 } from '../sharing-detection.util';
 import type { NodeFlapEvidence } from './remnawave-detectors';
@@ -482,7 +481,7 @@ export class SharingDetectors {
       const nowMs = now.getTime();
       const staleBefore = nowMs - config.ipWindowMinutes * 60_000;
       // panelId → ip → sample
-      const byUser = new Map<string, Map<string, IpAggregate>>();
+      const byUser = new Map<number, Map<string, IpAggregate>>();
       let undatedSamples = 0;
 
       for (const node of connected) {
@@ -538,13 +537,7 @@ export class SharingDetectors {
         observedIpCount: number;
         distinctNetworks: number;
       }> = [];
-      let unreadablePanelIds = 0;
-      for (const [panelIdStr, ipMap] of byUser) {
-        const panelId = parsePanelId(panelIdStr);
-        if (panelId === null) {
-          unreadablePanelIds += 1;
-          continue;
-        }
+      for (const [panelId, ipMap] of byUser) {
         const meta = byPanelId.get(panelId);
         if (!meta || meta.limit <= 0) continue;
         const observed = [...ipMap.values()];
@@ -576,14 +569,6 @@ export class SharingDetectors {
           observedIpCount: observed.length,
           distinctNetworks,
         });
-      }
-      if (unreadablePanelIds > 0) {
-        // Never silent: the old code turned `3f2a-…` into panel user #3 and
-        // filed those IPs against whoever that was.
-        this.logger.warn(
-          `Concurrent-IP detection skipped ${unreadablePanelIds} ip-control row(s) whose ` +
-            'userId is not an integer panel id — they cannot be attributed to a user without guessing',
-        );
       }
       if (offenders.length === 0) return [];
 

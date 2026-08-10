@@ -76,7 +76,8 @@ export function describeStrictOutcome(outcome: RemnawaveStrictOutcome<unknown>):
 
 /** A strict user snapshot with the canonical nullable-unlimited encoding. */
 export interface RemnawaveStrictUser {
-  readonly uuid: string;
+  readonly id: number;
+  readonly uuid: string | null;
   readonly status: string;
   /** Authoritative anchor used by Remnawave MONTH_ROLLING. */
   readonly createdAt: string;

@@ -17,6 +17,7 @@ interface SignalSeed {
   readonly code?: string;
   readonly metadata?: Record<string, unknown>;
   readonly affectedUserIds?: string[];
+  readonly subscriptions?: Array<{ remnawaveUserId: number | null }>;
 }
 
 function build(seed: SignalSeed | null) {
@@ -41,7 +42,7 @@ function build(seed: SignalSeed | null) {
         ),
     },
     subscription: {
-      findMany: () => Promise.resolve([] as Array<{ remnawaveId: string | null }>),
+      findMany: () => Promise.resolve(seed?.subscriptions ?? []),
     },
     adminAuditLog: {
       create: (args: unknown) => {
@@ -80,10 +81,10 @@ function build(seed: SignalSeed | null) {
 const META = { requestId: 'r1', remoteAddress: '10.0.0.1', userAgent: 'jest' };
 
 describe('AntiFraudService.enforceDropConnections', () => {
-  it('drops by user UUID from metadata and writes audit + event', async () => {
+  it('drops by numeric user id from metadata and writes audit + event', async () => {
     const { service, auditCreates, dropCalls, events } = build({
       code: 'SUBSCRIPTION_SHARING_HWID',
-      metadata: { remnawaveUuid: 'uuid-1' },
+      metadata: { remnawaveUserId: 123 },
     });
     const res = await service.enforceDropConnections({
       signalId: 'sig-1',
@@ -95,12 +96,35 @@ describe('AntiFraudService.enforceDropConnections', () => {
     assert.equal(res.dropped.count, 1);
     assert.deepEqual(dropCalls, [
       {
-        dropBy: { by: 'userUuids', userUuids: ['uuid-1'] },
+        dropBy: { by: 'userIds', userIds: [123] },
         targetNodes: { target: 'allNodes' },
       },
     ]);
     assert.equal(auditCreates.length, 1);
     assert.equal(events.length, 1);
+  });
+
+  it('resolves legacy user UUID metadata through stored numeric Remnawave user id', async () => {
+    const { service, dropCalls } = build({
+      code: 'SUBSCRIPTION_SHARING_HWID',
+      metadata: { remnawaveUuid: 'uuid-1' },
+      subscriptions: [{ remnawaveUserId: 123 }],
+    });
+
+    const res = await service.enforceDropConnections({
+      signalId: 'sig-1',
+      mode: 'user',
+      adminId: 'admin-1',
+      requestMetadata: META,
+    });
+
+    assert.equal(res.ok, true);
+    assert.deepEqual(dropCalls, [
+      {
+        dropBy: { by: 'userIds', userIds: [123] },
+        targetNodes: { target: 'allNodes' },
+      },
+    ]);
   });
 
   it('drops by IP addresses when mode is ip', async () => {

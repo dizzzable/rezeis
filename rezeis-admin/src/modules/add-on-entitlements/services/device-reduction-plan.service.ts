@@ -103,16 +103,17 @@ export class DeviceReductionPlanService {
 
     const subscription = await this.prismaService.subscription.findUnique({
       where: { id: subscriptionId },
-      select: { remnawaveId: true, status: true },
+      select: { remnawaveId: true, remnawaveUserId: true, status: true },
     });
-    if (subscription === null || subscription.remnawaveId === null) {
+    const panelIdentifier = remnawaveUserIdentifier(subscription);
+    if (panelIdentifier === null) {
       return { status: 'NOT_APPLICABLE', reason: 'NO_PANEL_PROFILE' };
     }
     if (subscription.status === SubscriptionStatus.DELETED) {
       return { status: 'NOT_APPLICABLE', reason: 'SUBSCRIPTION_DELETED' };
     }
 
-    const listing = await this.remnawaveApiService.strictListUserDevices(subscription.remnawaveId);
+    const listing = await this.remnawaveApiService.strictListUserDevices(panelIdentifier);
     switch (listing.kind) {
       case 'unavailable':
         return { status: 'DEFERRED', reason: 'PANEL_UNAVAILABLE' };
@@ -171,4 +172,8 @@ export class DeviceReductionPlanService {
 
     return { status: 'PLANNED', planId: plan.id, targetCount: selection.targets.length };
   }
+}
+
+function remnawaveUserIdentifier(subscription: { remnawaveUserId: number | null; remnawaveId: string | null } | null): number | string | null {
+  return subscription?.remnawaveUserId ?? subscription?.remnawaveId ?? null;
 }

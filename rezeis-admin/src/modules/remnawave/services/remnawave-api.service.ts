@@ -84,8 +84,8 @@ import {
  * connected panel.
  */
 export class RemnawaveProfileNotFoundError extends Error {
-  public constructor(public readonly uuid: string) {
-    super(`Remnawave profile ${uuid} not found`);
+  public constructor(public readonly uuid: string | number) {
+    super(`Remnawave profile ${String(uuid)} not found`);
     this.name = 'RemnawaveProfileNotFoundError';
   }
 }
@@ -185,12 +185,13 @@ type StrictTransportFailure =
  * Remnawave panel user — shape returned by the panel API.
  */
 export interface RemnawavePanelUser {
-  uuid: string;
+  id: number | null;
+  uuid: string | null;
   username: string;
   status: string;
   subscriptionUrl: string;
   telegramId: number | null;
-  /** Panel-internal numeric id (BigInt). `ip-control` keys users by this. */
+  /** Panel-internal numeric id (BigInt). Remnawave 3.x uses this as the user identifier. */
   panelId: number | null;
   email: string | null;
   expireAt: string;
@@ -328,9 +329,66 @@ export function buildNodeUsersBandwidthPath(now = new Date()): string {
  * are read correctly (otherwise the profile link is silently lost — the
  * sync job "completes" but `remnawaveId` is never persisted).
  */
-function unwrapPanelUser(raw: unknown): RemnawavePanelUser {
+type RemnawaveUserIdentifier = number | string;
+
+function userIdentifierPathPart(identifier: RemnawaveUserIdentifier): string {
+  return typeof identifier === 'number' ? String(identifier) : encodeURIComponent(identifier);
+}
+
+function userIdentifierBody(identifier: RemnawaveUserIdentifier): Record<string, number | string> {
+  return typeof identifier === 'number' ? { id: identifier } : { uuid: identifier };
+}
+
+function hwidUserIdentifierBody(identifier: RemnawaveUserIdentifier): Record<string, number | string> {
+  return typeof identifier === 'number' ? { userId: identifier } : { userUuid: identifier };
+}
+
+function readPanelUserId(record: Record<string, unknown>): number | null {
+  return typeof record['id'] === 'number' && Number.isInteger(record['id']) ? record['id'] : null;
+}
+
+function normalizePanelUser(raw: unknown): RemnawavePanelUser | null {
   const root = (raw as { response?: unknown } | null)?.response ?? raw;
-  return root as RemnawavePanelUser;
+  if (root === null || typeof root !== 'object') return null;
+  const value = root as Record<string, unknown>;
+  const id = readPanelUserId(value);
+  const uuid = typeof value['uuid'] === 'string' && value['uuid'].length > 0 ? value['uuid'] : null;
+  if (id === null && uuid === null) return null;
+  return {
+    id,
+    uuid,
+    username: typeof value['username'] === 'string' ? value['username'] : '',
+    status: typeof value['status'] === 'string' ? value['status'] : 'UNKNOWN',
+    subscriptionUrl: typeof value['subscriptionUrl'] === 'string' ? value['subscriptionUrl'] : '',
+    telegramId: typeof value['telegramId'] === 'number' ? value['telegramId'] : null,
+    panelId: id,
+    email: typeof value['email'] === 'string' ? value['email'] : null,
+    expireAt: typeof value['expireAt'] === 'string' ? value['expireAt'] : '',
+    createdAt: typeof value['createdAt'] === 'string' ? value['createdAt'] : '',
+    lastTrafficResetAt: typeof value['lastTrafficResetAt'] === 'string' ? value['lastTrafficResetAt'] : null,
+    trafficLimitBytes: typeof value['trafficLimitBytes'] === 'number' ? value['trafficLimitBytes'] : 0,
+    hwidDeviceLimit: typeof value['hwidDeviceLimit'] === 'number' ? value['hwidDeviceLimit'] : 0,
+    trafficLimitStrategy: typeof value['trafficLimitStrategy'] === 'string' ? value['trafficLimitStrategy'] : null,
+    tag: typeof value['tag'] === 'string' ? value['tag'] : null,
+    description: typeof value['description'] === 'string' ? value['description'] : null,
+    activeInternalSquads: Array.isArray(value['activeInternalSquads'])
+      ? (value['activeInternalSquads'] as Array<{ uuid?: unknown; name?: unknown }>).filter(
+          (squad): squad is { uuid: string; name: string } =>
+            typeof squad?.uuid === 'string' && typeof squad?.name === 'string',
+        )
+      : [],
+    externalSquadUuid: typeof value['externalSquadUuid'] === 'string' ? value['externalSquadUuid'] : null,
+  };
+}
+
+function isPanelUser(user: RemnawavePanelUser | null): user is RemnawavePanelUser {
+  return user !== null;
+}
+
+function unwrapPanelUser(raw: unknown): RemnawavePanelUser {
+  const user = normalizePanelUser(raw);
+  if (user === null) throw new ServiceUnavailableException('Remnawave user response is invalid');
+  return user;
 }
 
 export interface RemnawaveHwidDevice {
@@ -393,7 +451,7 @@ export interface RemnawaveIpSample {
 
 /** Online users + their source IPs on a single node (fetch-users-ips result). */
 export interface RemnawaveNodeUserIps {
-  userId: string;
+  userId: number;
   ips: RemnawaveIpSample[];
 }
 
@@ -408,7 +466,7 @@ export interface RemnawaveUserNodeIps {
 /** Discriminated input for `drop-connections` mirroring `DropConnectionsRequestDto`. */
 export type RemnawaveDropConnectionsInput = {
   dropBy:
-    | { by: 'userUuids'; userUuids: string[] }
+    | { by: 'userIds'; userIds: number[] }
     | { by: 'ipAddresses'; ipAddresses: string[] };
   targetNodes:
     | { target: 'allNodes' }
@@ -433,7 +491,7 @@ function mapNodeUsersIps(result: unknown): RemnawaveNodeUserIps[] {
   const out: RemnawaveNodeUserIps[] = [];
   for (const entry of users) {
     const r = (entry ?? {}) as Record<string, unknown>;
-    const userId = typeof r['userId'] === 'string' ? r['userId'] : null;
+    const userId = typeof r['userId'] === 'number' ? r['userId'] : null;
     if (userId === null) continue;
     out.push({ userId, ips: mapIpSamples(r['ips']) });
   }
@@ -576,7 +634,7 @@ export class RemnawaveApiService {
    * Donor: `remnawave_sync_crud.updated_user`.
    */
   public async updatePanelUser(
-    uuid: string,
+    userId: RemnawaveUserIdentifier,
     input: {
       status?: string;
       telegramId?: number | null;
@@ -597,7 +655,7 @@ export class RemnawaveApiService {
     // a 200 OK with the description applied but every other field
     // silently ignored, which is why writeBackReiwaId silently no-op'd
     // for every imported user.
-    const body: Record<string, unknown> = { uuid };
+    const body: Record<string, unknown> = { ...userIdentifierBody(userId) };
     if (input.status !== undefined) body['status'] = input.status;
     if (input.telegramId !== undefined) body['telegramId'] = input.telegramId;
     if (input.email !== undefined) body['email'] = input.email;
@@ -650,8 +708,8 @@ export class RemnawaveApiService {
       // — otherwise a host outage would mass-detach valid remnawaveIds. Those
       // fall through to ServiceUnavailableException and retry harmlessly.
       if (isAxiosError(err) && err.response?.status === 404 && isPanelUserNotFound(err.response.data)) {
-        this.logger.warn(`Remnawave PATCH /api/users: profile ${uuid} not found (404 A025)`);
-        throw new RemnawaveProfileNotFoundError(uuid);
+        this.logger.warn(`Remnawave PATCH /api/users: profile ${String(userId)} not found (404 A025)`);
+        throw new RemnawaveProfileNotFoundError(userId);
       }
       this.logger.error(`Remnawave PATCH /api/users failed: ${(err as Error).message}`);
       // A 400 here is a rejected body (a status the panel does not accept, a
@@ -670,7 +728,7 @@ export class RemnawaveApiService {
    * Any other upstream failure throws so BullMQ retries. See
    * `.kiro/specs/trial-aware-profile-cleanup`.
    */
-  public async deletePanelUser(uuid: string): Promise<{ isDeleted: boolean }> {
+  public async deletePanelUser(userId: RemnawaveUserIdentifier): Promise<{ isDeleted: boolean }> {
     const baseUrl = this.getBaseUrl();
     const token = this.configuration.token;
     if (baseUrl === null || token === null) {
@@ -680,7 +738,7 @@ export class RemnawaveApiService {
       const response = await firstValueFrom(
         this.httpService.request<{ response?: { isDeleted?: boolean }; isDeleted?: boolean }>({
           method: 'delete',
-          url: `/api/users/${uuid}`,
+          url: `/api/users/${userIdentifierPathPart(userId)}`,
           baseURL: baseUrl,
           headers: {
             Authorization: `Bearer ${token}`,
@@ -694,19 +752,19 @@ export class RemnawaveApiService {
       return { isDeleted };
     } catch (err: unknown) {
       if (isAxiosError(err) && err.response?.status === 404) {
-        this.logger.warn(`Remnawave profile ${uuid} already absent (404) — treating delete as success`);
+        this.logger.warn(`Remnawave profile ${String(userId)} already absent (404) — treating delete as success`);
         return { isDeleted: true };
       }
-      this.logger.error(`Remnawave DELETE /api/users/${uuid} failed: ${(err as Error).message}`);
-      throw this.upstreamFailure(err, 'delete', `/api/users/${uuid}`);
+      this.logger.error(`Remnawave DELETE /api/users/${String(userId)} failed: ${(err as Error).message}`);
+      throw this.upstreamFailure(err, 'delete', `/api/users/${String(userId)}`);
     }
   }
 
   /**
    * Resets traffic counter for a user on the panel.
    */
-  public async resetPanelUserTraffic(uuid: string): Promise<void> {
-    await this.requestJson({ method: 'post', url: `/api/users/${uuid}/actions/reset-traffic` });
+  public async resetPanelUserTraffic(userId: RemnawaveUserIdentifier): Promise<void> {
+    await this.requestJson({ method: 'post', url: `/api/users/${userIdentifierPathPart(userId)}/actions/reset-traffic` });
   }
 
   /**
@@ -716,12 +774,10 @@ export class RemnawaveApiService {
    * the older flat layout. Falls through to `null` on any upstream error
    * so the caller can render a graceful placeholder rather than crash.
    */
-  public async getPanelUser(uuid: string): Promise<RemnawavePanelUser | null> {
+  public async getPanelUser(userId: RemnawaveUserIdentifier): Promise<RemnawavePanelUser | null> {
     try {
-      const result = await this.requestJson<unknown>({ method: 'get', url: `/api/users/${uuid}` });
-      const root = (result as { response?: unknown })?.response ?? result;
-      if (root === null || typeof root !== 'object') return null;
-      return root as RemnawavePanelUser;
+      const result = await this.requestJson<unknown>({ method: 'get', url: `/api/users/${userIdentifierPathPart(userId)}` });
+      return normalizePanelUser(result);
     } catch {
       return null;
     }
@@ -741,11 +797,38 @@ export class RemnawaveApiService {
         method: 'get',
         url: `/api/users/by-username/${encodeURIComponent(username)}`,
       });
+      return normalizePanelUser(result);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Best-effort read of a user's *used* traffic (bytes) by UUID.
+   *
+   * Remnawave moved the counter around between versions: newer panels
+   * nest it under `userTraffic.usedTrafficBytes`, older flat layouts
+   * exposed `usedTrafficBytes` / `trafficUsedBytes` at the top level.
+   * We probe all known shapes and return `null` on any miss or upstream
+   * error so callers can render a graceful placeholder rather than
+   * crash a hot read path.
+   */
+  public async getPanelUserUsedTrafficBytes(userId: RemnawaveUserIdentifier): Promise<number | null> {
+    try {
+      const result = await this.requestJson<unknown>({ method: 'get', url: `/api/users/${userIdentifierPathPart(userId)}` });
       const root = (result as { response?: unknown })?.response ?? result;
       if (root === null || typeof root !== 'object') return null;
       const record = root as Record<string, unknown>;
-      if (typeof record['uuid'] !== 'string') return null;
-      return record as unknown as RemnawavePanelUser;
+      const nested = record['userTraffic'];
+      if (nested !== null && typeof nested === 'object') {
+        const used = (nested as Record<string, unknown>)['usedTrafficBytes'];
+        const parsed = this.coerceTrafficNumber(used);
+        if (parsed !== null) return parsed;
+      }
+      return (
+        this.coerceTrafficNumber(record['usedTrafficBytes']) ??
+        this.coerceTrafficNumber(record['trafficUsedBytes'])
+      );
     } catch {
       return null;
     }
@@ -762,7 +845,7 @@ export class RemnawaveApiService {
    * so callers fall back to the local data (UUID hidden, bar hidden).
    */
   public async getPanelUserUsage(
-    uuid: string,
+    userId: RemnawaveUserIdentifier,
   ): Promise<{
     username: string | null;
     usedTrafficBytes: number | null;
@@ -772,7 +855,7 @@ export class RemnawaveApiService {
     hwidDeviceLimit: number | null;
   } | null> {
     try {
-      const result = await this.requestJson<unknown>({ method: 'get', url: `/api/users/${uuid}` });
+      const result = await this.requestJson<unknown>({ method: 'get', url: `/api/users/${userIdentifierPathPart(userId)}` });
       const root = (result as { response?: unknown })?.response ?? result;
       if (root === null || typeof root !== 'object') return null;
       const record = root as Record<string, unknown>;
@@ -827,6 +910,37 @@ export class RemnawaveApiService {
   }
 
   /**
+   * Gets all users by telegram_id from the panel.
+   */
+  public async getPanelUsersByTelegramId(telegramId: string): Promise<RemnawavePanelUser[]> {
+    try {
+      return this.streamPanelUsers({ telegramId });
+    } catch {
+      return [];
+    }
+  }
+
+  private async streamPanelUsers(filters: {
+    readonly telegramId?: string;
+    readonly email?: string;
+  }): Promise<RemnawavePanelUser[]> {
+    const params = new URLSearchParams();
+    if (filters.telegramId) params.set('telegramId', filters.telegramId);
+    if (filters.email) params.set('email', filters.email);
+    params.set('size', '1000');
+
+    const result = await this.requestJson<unknown>({
+      method: 'get',
+      url: `/api/users/stream?${params.toString()}`,
+    });
+    const root = (result as { response?: unknown })?.response ?? result;
+    if (Array.isArray(root)) return root.map(normalizePanelUser).filter(isPanelUser);
+    const wrapped =
+      (root as { users?: unknown })?.users ?? (root as { root?: unknown })?.root;
+    return Array.isArray(wrapped) ? wrapped.map(normalizePanelUser).filter(isPanelUser) : [];
+  }
+
+  /**
    * Gets the HWID devices bound to a user's panel profile, for DISPLAY (the
    * customer cabinet and the admin user panel).
    *
@@ -853,9 +967,9 @@ export class RemnawaveApiService {
    * read here (the user is addressed by URL UUID, never by a row field).
    */
   public async strictGetPanelUserDevices(
-    uuid: string,
+    userId: RemnawaveUserIdentifier,
   ): Promise<RemnawaveStrictOutcome<RemnawaveHwidDeviceList>> {
-    const transport = await this.strictHttp('get', `/api/hwid/devices/${uuid}`);
+    const transport = await this.strictHttp('get', `/api/hwid/devices/${userIdentifierPathPart(userId)}`);
     if (transport.kind !== 'ok') return this.mapStrictTransport(transport);
 
     // Remnawave wraps payloads in `{ response: ... }`. Unwrap it (every other
@@ -894,9 +1008,9 @@ export class RemnawaveApiService {
    * `/api/hwid/user` path (both 404 now). Returns `{ total }` (remaining
    * device count) inside the usual `{ response: ... }` envelope.
    */
-  public async deletePanelUserDevice(userUuid: string, hwid: string): Promise<{ total: number }> {
+  public async deletePanelUserDevice(userId: RemnawaveUserIdentifier, hwid: string): Promise<{ total: number }> {
     const result = await this.requestJsonWithBody<unknown>('post', '/api/hwid/devices/delete', {
-      userUuid,
+      ...hwidUserIdentifierBody(userId),
       hwid,
     });
     const root = (result as { response?: unknown })?.response ?? result;
@@ -919,9 +1033,9 @@ export class RemnawaveApiService {
    * envelope. Used when regenerating a subscription so stale clients can't
    * keep a slot.
    */
-  public async deleteAllPanelUserDevices(userUuid: string): Promise<{ total: number }> {
+  public async deleteAllPanelUserDevices(userId: RemnawaveUserIdentifier): Promise<{ total: number }> {
     const result = await this.requestJsonWithBody<unknown>('post', '/api/hwid/devices/delete-all', {
-      userUuid,
+      ...hwidUserIdentifierBody(userId),
     });
     const root = (result as { response?: unknown })?.response ?? result;
     const record = (root ?? {}) as { total?: number; devices?: unknown };
@@ -945,10 +1059,10 @@ export class RemnawaveApiService {
    * fresh `subscriptionUrl`. Returns the new URL (or `null` if the panel
    * omitted it).
    */
-  public async regeneratePanelUserSubscription(uuid: string): Promise<{ subscriptionUrl: string | null }> {
+  public async regeneratePanelUserSubscription(userId: RemnawaveUserIdentifier): Promise<{ subscriptionUrl: string | null }> {
     const result = await this.requestJsonWithBody<unknown>(
       'post',
-      `/api/users/${uuid}/actions/revoke`,
+      `/api/users/${userIdentifierPathPart(userId)}/actions/revoke`,
       {},
     );
     const root = (result as { response?: unknown })?.response ?? result;
@@ -973,9 +1087,11 @@ export class RemnawaveApiService {
   private parsePanelUserRow(candidate: unknown): RemnawavePanelUser | null {
     if (typeof candidate !== 'object' || candidate === null) return null;
     const value = candidate as Record<string, unknown>;
-    const uuid = typeof value.uuid === 'string' ? value.uuid : '';
-    if (uuid.length === 0) return null;
+    const id = readPanelUserId(value);
+    const uuid = typeof value.uuid === 'string' && value.uuid.length > 0 ? value.uuid : null;
+    if (uuid === null) return null;
     return {
+      id,
       uuid,
       username: typeof value.username === 'string' ? value.username : '',
       status: typeof value.status === 'string' ? value.status : 'UNKNOWN',
@@ -986,7 +1102,7 @@ export class RemnawaveApiService {
           : typeof value.telegram_id === 'number'
             ? (value.telegram_id as number)
             : null,
-      panelId: typeof value.id === 'number' ? value.id : null,
+      panelId: id,
       email: typeof value.email === 'string' ? value.email : null,
       expireAt:
         typeof value.expireAt === 'string'
@@ -1024,6 +1140,44 @@ export class RemnawaveApiService {
       externalSquadUuid:
         typeof value.externalSquadUuid === 'string' ? value.externalSquadUuid : null,
     };
+  }
+
+  public async getAllPanelUsers(): Promise<RemnawavePanelUser[]> {
+    const pageSize = 500;
+    const maxPages = 50;
+    const collected: RemnawavePanelUser[] = [];
+
+    for (let pageIndex = 0; pageIndex < maxPages; pageIndex += 1) {
+      const start = pageIndex * pageSize;
+      let response: { response?: { users?: unknown[]; total?: number }; users?: unknown[]; total?: number } | null = null;
+      try {
+        response = await this.requestJson<typeof response>({
+          method: 'get',
+          url: `/api/users/?start=${start}&size=${pageSize}`,
+        });
+      } catch (err) {
+        this.logger.warn(`getAllPanelUsers page ${pageIndex} failed: ${(err as Error).message}`);
+        break;
+      }
+      if (response === null) break;
+
+      const usersPayload = response.response?.users ?? response.users ?? [];
+      if (!Array.isArray(usersPayload) || usersPayload.length === 0) break;
+
+      for (const candidate of usersPayload) {
+        if (typeof candidate !== 'object' || candidate === null) continue;
+        const user = normalizePanelUser(candidate);
+        if (user === null) continue;
+        collected.push(user);
+      }
+
+
+      const totalReported = response.response?.total ?? response.total ?? null;
+      if (typeof totalReported === 'number' && collected.length >= totalReported) break;
+      if (usersPayload.length < pageSize) break;
+    }
+
+    return collected;
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -1300,20 +1454,20 @@ export class RemnawaveApiService {
   /**
    * Fetches online users and their source IPs for a single node — the data
    * behind the panel's "Active sessions" view. Async on the panel side:
-   * `POST fetch-users-ips/{nodeUuid}` returns a `jobId` we then poll.
+   * `POST by-node/{nodeUuid}` returns a `jobId` we then poll.
    * Returns `[]` on any failure/timeout (fail-soft for the detector).
    */
   public async fetchUsersIpsForNode(nodeUuid: string): Promise<readonly RemnawaveNodeUserIps[]> {
     try {
       const started = await this.requestJsonWithBody<{ response?: { jobId?: string } }>(
         'post',
-        `/api/ip-control/fetch-users-ips/${nodeUuid}`,
+        `/api/connections/by-node/${nodeUuid}`,
         {},
       );
       const jobId = started?.response?.jobId;
       if (typeof jobId !== 'string' || jobId.length === 0) return [];
       const users = await this.pollIpControlJob(
-        (id) => `/api/ip-control/fetch-users-ips/result/${id}`,
+        (id) => `/api/connections/by-node/${id}`,
         jobId,
         mapNodeUsersIps,
       );
@@ -1324,20 +1478,20 @@ export class RemnawaveApiService {
   }
 
   /**
-   * Per-user IP drilldown across nodes (`POST fetch-ips/{uuid}` → poll).
+   * Per-user IP drilldown across nodes (`POST by-user/{userId}` → poll).
    * Used for on-demand inspection of one flagged user. Fail-soft → `[]`.
    */
-  public async fetchUserIps(userUuid: string): Promise<readonly RemnawaveUserNodeIps[]> {
+  public async fetchUserIps(userId: RemnawaveUserIdentifier): Promise<readonly RemnawaveUserNodeIps[]> {
     try {
       const started = await this.requestJsonWithBody<{ response?: { jobId?: string } }>(
         'post',
-        `/api/ip-control/fetch-ips/${userUuid}`,
+        `/api/connections/by-user/${userIdentifierPathPart(userId)}`,
         {},
       );
       const jobId = started?.response?.jobId;
       if (typeof jobId !== 'string' || jobId.length === 0) return [];
       const nodes = await this.pollIpControlJob(
-        (id) => `/api/ip-control/fetch-ips/result/${id}`,
+        (id) => `/api/connections/by-user/${id}`,
         jobId,
         mapUserNodeIps,
       );
@@ -1354,14 +1508,14 @@ export class RemnawaveApiService {
   public async dropConnections(input: RemnawaveDropConnectionsInput): Promise<{ ok: boolean }> {
     await this.requestJsonWithBody(
       'post',
-      '/api/ip-control/drop-connections',
+      '/api/connections/drop',
       input as unknown as Record<string, unknown>,
     );
     return { ok: true };
   }
 
   /**
-   * Polls an `ip-control` result endpoint until the job is completed or
+   * Polls a Remnawave connections result endpoint until the job is completed or
    * failed, or a bounded number of attempts elapse. Returns the extracted
    * payload on completion, or `null` on failure/timeout.
    */
@@ -1699,30 +1853,20 @@ export class RemnawaveApiService {
     if (!input.telegramId && !input.username && !input.email && !input.subscriptionUuid) {
       return null;
     }
-    // Remnawave 2.8 dropped the catch-all `GET /api/users/resolve` in favour of
-    // dedicated by-selector lookups (the POST /resolve only accepts uuid/
-    // username/shortUuid). We branch to the matching `by-*` endpoint so all
-    // four admin selectors keep working on 2.7.4 and 2.8.0.
     try {
-      let url: string | null = null;
+      let user: RemnawavePanelUser | null = null;
       if (input.subscriptionUuid) {
-        url = `/api/users/by-short-uuid/${encodeURIComponent(input.subscriptionUuid)}`;
+        const response = await this.requestJson<unknown>({
+          method: 'get',
+          url: `/api/users/by-short-uuid/${encodeURIComponent(input.subscriptionUuid)}`,
+        });
+        user = normalizePanelUser(response);
       } else if (input.username) {
-        url = `/api/users/by-username/${encodeURIComponent(input.username)}`;
-      } else if (input.email) {
-        url = `/api/users/by-email/${encodeURIComponent(input.email)}`;
-      } else if (input.telegramId) {
-        url = `/api/users/by-telegram-id/${encodeURIComponent(input.telegramId)}`;
+        user = await this.getPanelUserByUsername(input.username);
+      } else if (input.email || input.telegramId) {
+        const users = await this.streamPanelUsers({ email: input.email, telegramId: input.telegramId });
+        user = users[0] ?? null;
       }
-      if (url === null) return null;
-      const response = await this.requestJson<unknown>({ method: 'get', url });
-      const root = (response as { response?: unknown })?.response ?? response;
-      if (root === null || typeof root !== 'object') return null;
-      // by-telegram-id returns a collection (a Telegram id can map to several
-      // profiles); the rest return a single user. Take the first match.
-      const collection =
-        (root as { users?: unknown }).users ?? (Array.isArray(root) ? root : null);
-      const user = Array.isArray(collection) ? collection[0] : root;
       if (user === null || user === undefined || typeof user !== 'object') return null;
       return mapUserSummary(user);
     } catch {
@@ -1884,8 +2028,8 @@ export class RemnawaveApiService {
    * (`0` upstream → `null`). 404 → `notFound`; malformed 2xx →
    * `invalidContract`; transport/5xx → `unavailable`.
    */
-  public async strictGetPanelUser(uuid: string): Promise<RemnawaveStrictOutcome<RemnawaveStrictUser>> {
-    const transport = await this.strictHttp('get', `/api/users/${uuid}`);
+  public async strictGetPanelUser(userId: RemnawaveUserIdentifier): Promise<RemnawaveStrictOutcome<RemnawaveStrictUser>> {
+    const transport = await this.strictHttp('get', `/api/users/${userIdentifierPathPart(userId)}`);
     if (transport.kind !== 'ok') return this.mapStrictTransport(transport);
     return this.parseStrictUser(transport.data);
   }
@@ -1912,9 +2056,9 @@ export class RemnawaveApiService {
    * `unavailable` and the caller defers instead of destroying.
    */
   public async strictGetPanelUserExpiry(
-    uuid: string,
+    userId: RemnawaveUserIdentifier,
   ): Promise<RemnawaveStrictOutcome<RemnawavePanelExpirySnapshot>> {
-    const transport = await this.strictHttp('get', `/api/users/${uuid}`);
+    const transport = await this.strictHttp('get', `/api/users/${userIdentifierPathPart(userId)}`);
     if (transport.kind !== 'ok') return this.mapStrictProfileTransport(transport);
     const root = (transport.data as { response?: unknown })?.response ?? transport.data;
     if (root === null || typeof root !== 'object') {
@@ -1947,7 +2091,7 @@ export class RemnawaveApiService {
    * the applied revision.
    */
   public async strictSetUserLimits(
-    uuid: string,
+    userId: RemnawaveUserIdentifier,
     desired: {
       readonly trafficLimitBytes: bigint | null;
       readonly hwidDeviceLimit: number | null;
@@ -1960,7 +2104,7 @@ export class RemnawaveApiService {
     const preflight = validateStrictUserWrite(desired);
     if (preflight !== null) return strictInvalidContract(preflight);
     const body: Record<string, unknown> = {
-      uuid,
+      ...userIdentifierBody(userId),
       trafficLimitBytes:
         desired.trafficLimitBytes === null ? 0 : Number(desired.trafficLimitBytes),
       hwidDeviceLimit: desired.hwidDeviceLimit === null ? 0 : desired.hwidDeviceLimit,
@@ -1990,9 +2134,9 @@ export class RemnawaveApiService {
    * ignored (the user is addressed by URL UUID, never by a trusted row field).
    */
   public async strictListUserDevices(
-    uuid: string,
+    userId: RemnawaveUserIdentifier,
   ): Promise<RemnawaveStrictOutcome<RemnawaveStrictDeviceList>> {
-    const transport = await this.strictHttp('get', `/api/hwid/devices/${uuid}`);
+    const transport = await this.strictHttp('get', `/api/hwid/devices/${userIdentifierPathPart(userId)}`);
     if (transport.kind !== 'ok') return this.mapStrictTransport(transport);
 
     const root = (transport.data as { response?: unknown })?.response ?? transport.data;
@@ -2216,10 +2360,10 @@ export class RemnawaveApiService {
    * success only after a strict read-back.
    */
   public async strictDeleteUserDevice(
-    userUuid: string,
+    userId: RemnawaveUserIdentifier,
     hwid: string,
   ): Promise<RemnawaveStrictOutcome<{ readonly total: number }>> {
-    const transport = await this.strictHttp('post', '/api/hwid/devices/delete', { userUuid, hwid });
+    const transport = await this.strictHttp('post', '/api/hwid/devices/delete', { ...hwidUserIdentifierBody(userId), hwid });
     if (transport.kind !== 'ok') return this.mapStrictTransport(transport);
     const root = (transport.data as { response?: unknown })?.response ?? transport.data;
     const record = (root ?? {}) as { total?: unknown; devices?: unknown };
@@ -2242,6 +2386,7 @@ export class RemnawaveApiService {
       return strictInvalidContract('user envelope is not an object');
     }
     const r = root as Record<string, unknown>;
+    const id = r['id'];
     const uuid = r['uuid'];
     const status = r['status'];
     const createdAt = r['createdAt'];
@@ -2251,8 +2396,11 @@ export class RemnawaveApiService {
     const trafficLimitStrategy = r['trafficLimitStrategy'];
     const activeInternalSquads = r['activeInternalSquads'];
     const externalSquadUuid = r['externalSquadUuid'];
-    if (typeof uuid !== 'string' || uuid.length === 0) {
-      return strictInvalidContract('user missing uuid');
+    if (typeof id !== 'number' || !Number.isInteger(id)) {
+      return strictInvalidContract('user missing numeric id');
+    }
+    if (uuid !== undefined && uuid !== null && (typeof uuid !== 'string' || uuid.length === 0)) {
+      return strictInvalidContract('user uuid is not a string or null');
     }
     if (typeof status !== 'string' || status.length === 0) {
       return strictInvalidContract('user missing status');
@@ -2307,7 +2455,8 @@ export class RemnawaveApiService {
     const normalizedDeviceLimit = devices === null ? null : devices as number;
     return strictOk(
       {
-        uuid,
+        id,
+        uuid: typeof uuid === 'string' ? uuid : null,
         status,
         createdAt,
         tag: normalizedTag,

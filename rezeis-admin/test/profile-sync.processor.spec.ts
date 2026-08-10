@@ -483,6 +483,7 @@ describe('ProfileSyncProcessor', () => {
         createPanelUser: async (input: unknown) => {
           remnawaveCreates.push(input);
           return {
+            id: 123,
             uuid: 'rem-user-created',
             subscriptionUrl: 'https://sub.example/created',
             createdAt: '2026-01-15T12:30:00.000Z',
@@ -517,6 +518,7 @@ describe('ProfileSyncProcessor', () => {
       where: { id: 'subscription-1' },
       data: {
         remnawaveId: 'rem-user-created',
+        remnawaveUserId: 123,
         configUrl: 'https://sub.example/created',
       },
     }]);
@@ -624,7 +626,7 @@ describe('ProfileSyncProcessor', () => {
       {
         getPanelUserByUsername: async (username: string) => {
           assert.equal(username, 'rz_subscription_1');
-          return { uuid: 'rem-user-existing', subscriptionUrl: 'https://sub.example/existing' };
+          return { id: 321, uuid: 'rem-user-existing', subscriptionUrl: 'https://sub.example/existing' };
         },
         createPanelUser: async () => { createCalled = true; },
       } as never,
@@ -642,6 +644,7 @@ describe('ProfileSyncProcessor', () => {
       where: { id: 'subscription-1' },
       data: {
         remnawaveId: 'rem-user-existing',
+        remnawaveUserId: 321,
         configUrl: 'https://sub.example/existing',
       },
     }]);
@@ -692,8 +695,8 @@ describe('ProfileSyncProcessor', () => {
 
     assert.deepEqual(deletedTargets, ['rem-user-old']);
     assert.deepEqual(subscriptionUpdates, [{
-      where: { id: 'subscription-1', remnawaveId: 'rem-user-old' },
-      data: { remnawaveId: null, status: SubscriptionStatus.DELETED },
+      where: { id: 'subscription-1' },
+      data: { remnawaveId: null, remnawaveUserId: null, status: SubscriptionStatus.DELETED },
     }]);
   });
 
@@ -749,8 +752,8 @@ describe('ProfileSyncProcessor', () => {
     await processor.process({ data: { syncJobId: 'sync-job-1' } } as never);
 
     assert.deepEqual(subscriptionUpdates, [{
-      where: { id: 'subscription-1', remnawaveId: 'rem-user-1' },
-      data: { remnawaveId: null, status: SubscriptionStatus.DELETED },
+      where: { id: 'subscription-1' },
+      data: { remnawaveId: null, remnawaveUserId: null, status: SubscriptionStatus.DELETED },
     }]);
   });
 
@@ -1290,7 +1293,7 @@ describe('ProfileSyncProcessor', () => {
     // The stale id was detached (fenced on the old uuid) before CREATE...
     assert.deepStrictEqual(subscriptionUpdates[0], {
       where: { id: 'subscription-imported', remnawaveId: 'rem-stale-uuid' },
-      data: { remnawaveId: null, configUrl: null },
+      data: { remnawaveId: null, remnawaveUserId: null, configUrl: null },
     });
     // ...and the fresh profile was linked back.
     assert.deepStrictEqual(subscriptionUpdates[1], {

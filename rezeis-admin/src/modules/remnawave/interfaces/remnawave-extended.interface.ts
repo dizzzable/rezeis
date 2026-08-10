@@ -16,7 +16,8 @@ export interface RemnawaveHealthInterface {
 }
 
 export interface RemnawaveHwidTopUserInterface {
-  readonly userUuid: string;
+  readonly userId: number | null;
+  readonly userUuid: string | null;
   readonly username: string;
   readonly telegramId: string | null;
   readonly devicesCount: number;
@@ -61,6 +62,8 @@ export interface RemnawaveSubscriptionRequestEntryInterface {
   readonly clientType: string | null;
   readonly ipAddress: string | null;
   readonly requestedAt: string;
+  readonly srrResponseType: string | null;
+  readonly srrRuleName: string | null;
 }
 
 /** One node a provider bills for. See {@link RemnawaveInfraProviderInterface}. */
@@ -196,7 +199,8 @@ export interface RemnawaveUserResolveQuery {
  *     converted from the number the panel actually sends.
  */
 export interface RemnawaveUserSummaryInterface {
-  readonly uuid: string;
+  readonly id: number | null;
+  readonly uuid: string | null;
   readonly shortUuid: string | null;
   readonly username: string;
   readonly status: string | null;

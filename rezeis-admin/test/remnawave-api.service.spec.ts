@@ -188,7 +188,7 @@ describe('RemnawaveApiService', () => {
     );
   });
 
-  it('lists panel HWID devices by user UUID and maps the payload', async () => {
+  it('lists panel HWID devices by numeric Remnawave user id and maps the payload', async () => {
     const capturedRequests: Array<{
       readonly method?: string;
       readonly url: string;
@@ -229,10 +229,10 @@ describe('RemnawaveApiService', () => {
       },
     );
 
-    const outcome = await service.strictGetPanelUserDevices('33333333-3333-4333-8333-333333333333');
+    const outcome = await service.strictGetPanelUserDevices(123);
 
     assert.deepStrictEqual(capturedRequests.map(projectRequestContractShape), [
-      { method: 'get', url: '/api/hwid/devices/33333333-3333-4333-8333-333333333333' },
+      { method: 'get', url: '/api/hwid/devices/123' },
     ]);
     assert.equal(outcome.kind, 'ok');
     assert.deepStrictEqual(outcome.kind === 'ok' ? outcome.value : null, {
@@ -268,7 +268,7 @@ describe('RemnawaveApiService', () => {
       },
     );
 
-    const outcome = await service.strictGetPanelUserDevices('33333333-3333-4333-8333-333333333333');
+    const outcome = await service.strictGetPanelUserDevices(123);
 
     // The whole point of the type: the caller can tell this apart from a real
     // empty list. Asserting the kind AND that no list is reachable on it.
@@ -291,7 +291,7 @@ describe('RemnawaveApiService', () => {
       },
     );
 
-    const outcome = await service.strictGetPanelUserDevices('33333333-3333-4333-8333-333333333333');
+    const outcome = await service.strictGetPanelUserDevices(123);
 
     assert.equal(outcome.kind, 'invalidContract');
     assert.equal('value' in outcome, false);
@@ -312,7 +312,7 @@ describe('RemnawaveApiService', () => {
       },
     );
 
-    const outcome = await service.strictGetPanelUserDevices('33333333-3333-4333-8333-333333333333');
+    const outcome = await service.strictGetPanelUserDevices(123);
 
     assert.equal(outcome.kind, 'ok');
     assert.deepStrictEqual(outcome.kind === 'ok' ? outcome.value : null, {
@@ -321,7 +321,7 @@ describe('RemnawaveApiService', () => {
     });
   });
 
-  it('deletes one panel HWID device by user UUID and hwid', async () => {
+  it('deletes one panel HWID device by numeric Remnawave user id and hwid', async () => {
     const capturedRequests: Array<{
       readonly method?: string;
       readonly url: string;
@@ -352,7 +352,7 @@ describe('RemnawaveApiService', () => {
     );
 
     const result = await service.deletePanelUserDevice(
-      '33333333-3333-4333-8333-333333333333',
+      123,
       'hwid-to-delete',
     );
 
@@ -361,7 +361,7 @@ describe('RemnawaveApiService', () => {
         method: 'post',
         url: '/api/hwid/devices/delete',
         data: {
-          userUuid: '33333333-3333-4333-8333-333333333333',
+          userId: 123,
           hwid: 'hwid-to-delete',
         },
       },
@@ -369,7 +369,7 @@ describe('RemnawaveApiService', () => {
     assert.deepStrictEqual(result, { total: 0 });
   });
 
-  it('updates a panel user through the current Remnawave PATCH /api/users contract', async () => {
+  it('updates a panel user through the Remnawave 3 PATCH /api/users contract', async () => {
     const capturedRequests: Array<{ readonly method?: string; readonly url: string; readonly data?: unknown }> = [];
     const service = new RemnawaveApiService(
       {
@@ -378,7 +378,7 @@ describe('RemnawaveApiService', () => {
           return of({
             data: {
               response: {
-                uuid: '33333333-3333-4333-8333-333333333333',
+                id: 123,
                 username: 'rezeis-user',
                 status: 'ACTIVE',
                 subscriptionUrl: 'https://example.com/subscription',
@@ -407,7 +407,7 @@ describe('RemnawaveApiService', () => {
       },
     );
 
-    const updatedUser = await service.updatePanelUser('33333333-3333-4333-8333-333333333333', {
+    const updatedUser = await service.updatePanelUser(123, {
       expireAt: '2026-06-01T00:00:00.000Z',
       status: 'ACTIVE',
       trafficLimitBytes: 1073741824,
@@ -419,7 +419,7 @@ describe('RemnawaveApiService', () => {
         method: 'patch',
         url: '/api/users',
         data: {
-          uuid: '33333333-3333-4333-8333-333333333333',
+          id: 123,
           status: 'ACTIVE',
           expireAt: '2026-06-01T00:00:00.000Z',
           trafficLimitBytes: 1073741824,
@@ -427,7 +427,8 @@ describe('RemnawaveApiService', () => {
         },
       },
     ]);
-    assert.equal(updatedUser.uuid, '33333333-3333-4333-8333-333333333333');
+    assert.equal(updatedUser.id, 123);
+    assert.equal(updatedUser.uuid, null);
     assert.equal(updatedUser.status, 'ACTIVE');
   });
 
@@ -612,10 +613,73 @@ describe('RemnawaveApiService', () => {
       { host: 'remnawave', port: 3000, token: 'secret', webhookSecret: null, caddyToken: null, cookie: null },
     );
 
-    await service.resetPanelUserTraffic('33333333-3333-4333-8333-333333333333');
+    await service.resetPanelUserTraffic(123);
 
     assert.deepStrictEqual(capturedRequests, [
-      { method: 'post', url: '/api/users/33333333-3333-4333-8333-333333333333/actions/reset-traffic' },
+      { method: 'post', url: '/api/users/123/actions/reset-traffic' },
+    ]);
+  });
+
+  it('uses Remnawave 3 stream lookup for telegram id search', async () => {
+    const capturedPaths: string[] = [];
+    const service = new RemnawaveApiService(
+      {
+        request: (input: { readonly url: string }) => {
+          capturedPaths.push(input.url);
+          return of({ data: { response: { users: [{ id: 123, username: 'rezeis-user' }] } } });
+        },
+      } as never,
+      { host: 'remnawave', port: 3000, token: 'secret', webhookSecret: null, caddyToken: null, cookie: null },
+    );
+
+    const users = await service.getPanelUsersByTelegramId('987654321');
+
+    assert.deepStrictEqual(capturedPaths, ['/api/users/stream?telegramId=987654321&size=1000']);
+    assert.equal(users[0]?.id, 123);
+  });
+
+  it('uses Remnawave username lookup for idempotency search', async () => {
+    const capturedPaths: string[] = [];
+    const service = new RemnawaveApiService(
+      {
+        request: (input: { readonly url: string }) => {
+          capturedPaths.push(input.url);
+          return of({ data: { response: { id: 321, username: 'rezeis-existing' } } });
+        },
+      } as never,
+      { host: 'remnawave', port: 3000, token: 'secret', webhookSecret: null, caddyToken: null, cookie: null },
+    );
+
+    const user = await service.getPanelUserByUsername('rezeis-existing');
+
+    assert.deepStrictEqual(capturedPaths, ['/api/users/by-username/rezeis-existing']);
+    assert.equal(user?.id, 321);
+    assert.equal(user?.username, 'rezeis-existing');
+  });
+
+  it('uses Remnawave 3 connections endpoints and userIds payloads', async () => {
+    const capturedRequests: Array<{ readonly method?: string; readonly url: string; readonly data?: unknown }> = [];
+    const service = new RemnawaveApiService(
+      {
+        request: (input: { readonly method?: string; readonly url: string; readonly data?: unknown }) => {
+          capturedRequests.push(projectRequestContractShape(input));
+          return of({ data: { response: { ok: true } } });
+        },
+      } as never,
+      { host: 'remnawave', port: 3000, token: 'secret', webhookSecret: null, caddyToken: null, cookie: null },
+    );
+
+    await service.dropConnections({
+      dropBy: { by: 'userIds', userIds: [123] },
+      targetNodes: { target: 'allNodes' },
+    });
+
+    assert.deepStrictEqual(capturedRequests, [
+      {
+        method: 'post',
+        url: '/api/connections/drop',
+        data: { dropBy: { by: 'userIds', userIds: [123] }, targetNodes: { target: 'allNodes' } },
+      },
     ]);
   });
 
@@ -866,6 +930,7 @@ function createNodePayload(input: {
   readonly lastStatusMessage: string;
 }): Record<string, unknown> {
   return {
+    id: 1,
     uuid: input.uuid,
     name: input.name,
     address: '203.0.113.10',

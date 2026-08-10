@@ -55,6 +55,7 @@ process.env.ANTIFRAUD_NODE_TRAFFIC_MAX_NODES = '25';
 
 function node(overrides: Partial<RemnawaveNodeInterface> & { uuid: string }): RemnawaveNodeInterface {
   return {
+    id: null,
     name: overrides.uuid,
     address: '10.0.0.1',
     port: 443,
