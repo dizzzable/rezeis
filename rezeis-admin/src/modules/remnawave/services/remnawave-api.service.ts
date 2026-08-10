@@ -2103,7 +2103,7 @@ export class RemnawaveApiService {
     const preflight = validateStrictUserWrite(desired);
     if (preflight !== null) return strictInvalidContract(preflight);
     const body: Record<string, unknown> = {
-      ...userIdentifierBody(userId),
+      ...hwidUserIdentifierBody(userId),
       trafficLimitBytes:
         desired.trafficLimitBytes === null ? 0 : Number(desired.trafficLimitBytes),
       hwidDeviceLimit: desired.hwidDeviceLimit === null ? 0 : desired.hwidDeviceLimit,

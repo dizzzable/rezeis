@@ -80,10 +80,10 @@ function build(seed: SignalSeed | null) {
 const META = { requestId: 'r1', remoteAddress: '10.0.0.1', userAgent: 'jest' };
 
 describe('AntiFraudService.enforceDropConnections', () => {
-  it('drops by user UUID from metadata and writes audit + event', async () => {
+  it('drops by numeric user id from metadata and writes audit + event', async () => {
     const { service, auditCreates, dropCalls, events } = build({
       code: 'SUBSCRIPTION_SHARING_HWID',
-      metadata: { remnawaveUuid: 'uuid-1' },
+      metadata: { remnawaveUserId: 123 },
     });
     const res = await service.enforceDropConnections({
       signalId: 'sig-1',
@@ -95,7 +95,7 @@ describe('AntiFraudService.enforceDropConnections', () => {
     assert.equal(res.dropped.count, 1);
     assert.deepEqual(dropCalls, [
       {
-        dropBy: { by: 'userUuids', userUuids: ['uuid-1'] },
+        dropBy: { by: 'userIds', userIds: [123] },
         targetNodes: { target: 'allNodes' },
       },
     ]);

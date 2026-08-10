@@ -110,9 +110,9 @@ describe('RemnawaveApiService strict adapter (T-010)', () => {
     assert.equal(outcome.kind, 'invalidContract');
   });
 
-  it('strictSetUserLimits PATCHes absolute limits with the uuid in the body and null→0 encoding', async () => {
+  it('strictSetUserLimits PATCHes absolute limits with the numeric id in the body and null→0 encoding', async () => {
     const { service, captured } = build(() => of({ data: fixture('2.8.0/user.json') }));
-    const outcome = await service.strictSetUserLimits('22222222-2222-4222-8222-222222222222', {
+    const outcome = await service.strictSetUserLimits(222, {
       trafficLimitBytes: null,
       hwidDeviceLimit: null,
     });
@@ -121,7 +121,7 @@ describe('RemnawaveApiService strict adapter (T-010)', () => {
     assert.equal(call.method, 'patch');
     assert.equal(call.url, '/api/users');
     assert.deepEqual(call.data, {
-      uuid: '22222222-2222-4222-8222-222222222222',
+      id: 222,
       trafficLimitBytes: 0,
       hwidDeviceLimit: 0,
     });
@@ -130,7 +130,7 @@ describe('RemnawaveApiService strict adapter (T-010)', () => {
   it('strictSetUserLimits propagates the deferred full plan identity when supplied', async () => {
     const { service, captured } = build(() => of({ data: fixture('2.8.0/user.json') }));
 
-    const outcome = await service.strictSetUserLimits('22222222-2222-4222-8222-222222222222', {
+    const outcome = await service.strictSetUserLimits(222, {
       trafficLimitBytes: 20n * 1024n ** 3n,
       hwidDeviceLimit: 4,
       tag: 'DEFERRED_PREMIUM',
@@ -141,7 +141,7 @@ describe('RemnawaveApiService strict adapter (T-010)', () => {
 
     assert.equal(outcome.kind, 'ok');
     assert.deepEqual(captured[0]!.data, {
-      uuid: '22222222-2222-4222-8222-222222222222',
+      id: 222,
       trafficLimitBytes: 20 * 1024 ** 3,
       hwidDeviceLimit: 4,
       tag: 'DEFERRED_PREMIUM',
@@ -209,16 +209,16 @@ describe('RemnawaveApiService strict adapter (T-010)', () => {
     assert.equal(outcome.kind, 'invalidContract');
   });
 
-  it('strictDeleteUserDevice sends a stable {userUuid,hwid} body and returns the remaining total', async () => {
+  it('strictDeleteUserDevice sends a stable {userId,hwid} body and returns the remaining total', async () => {
     const { service, captured } = build(() => of({ data: { response: { total: 1 } } }));
-    const outcome = await service.strictDeleteUserDevice('user-uuid', 'hwid-x');
+    const outcome = await service.strictDeleteUserDevice(222, 'hwid-x');
     assert.equal(outcome.kind, 'ok');
     if (outcome.kind !== 'ok') return;
     assert.equal(outcome.value.total, 1);
     const call = captured[0]!;
     assert.equal(call.method, 'post');
     assert.equal(call.url, '/api/hwid/devices/delete');
-    assert.deepEqual(call.data, { userUuid: 'user-uuid', hwid: 'hwid-x' });
+    assert.deepEqual(call.data, { userId: 222, hwid: 'hwid-x' });
   });
 
   it('strictDeleteUserDevice maps 404 to notFound (idempotent-absent)', async () => {

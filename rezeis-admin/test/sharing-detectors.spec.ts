@@ -47,7 +47,7 @@ interface RemnaMock {
   nodes?: NodeMock[];
   /** `RemnawaveMetricSample.nodesSnapshot` rows inside the stability window. */
   snapshots?: SnapshotNode[][];
-  usersIpsByNode?: Record<string, Array<{ userId: string; ips: Array<{ ip: string; lastSeen: string }> }>>;
+  usersIpsByNode?: Record<string, Array<{ userId: number; ips: Array<{ ip: string; lastSeen: string }> }>>;
 }
 
 interface Harness {
@@ -901,7 +901,7 @@ describe('SharingDetectors — concurrent IP (network-grouped)', () => {
       panelUsers: [{ uuid: 'u1', panelId: 10, hwidDeviceLimit: 1 }],
       nodes: [{ uuid: 'n1', name: 'N1', countryCode: 'DE', isConnected: true, isDisabled: false }],
       usersIpsByNode: {
-        n1: [{ userId: '10', ips: [
+        n1: [{ userId: 10, ips: [
           { ip: '1.1.1.1', lastSeen: recent },
           { ip: '2.2.2.2', lastSeen: recent },
           { ip: '3.3.3.3', lastSeen: recent },
@@ -920,7 +920,7 @@ describe('SharingDetectors — concurrent IP (network-grouped)', () => {
         usersIpsByNode: {
           n1: [
             {
-              userId: '10',
+            userId: 10,
               ips: [
                 // 4 distinct /24 networks; limit 2 + margin 1 → tolerated 3 → flagged.
                 { ip: '1.1.1.1', lastSeen: recent },
@@ -951,7 +951,7 @@ describe('SharingDetectors — concurrent IP (network-grouped)', () => {
       usersIpsByNode: {
         n1: [
           {
-            userId: '10',
+              userId: 10,
             ips: [
               // 4 raw IPs but all in one carrier /24 → 1 network → not flagged.
               { ip: '100.64.10.1', lastSeen: recent },
@@ -974,7 +974,7 @@ describe('SharingDetectors — concurrent IP (network-grouped)', () => {
       usersIpsByNode: {
         n1: [
           {
-            userId: '10',
+            userId: 10,
             // 2 networks; limit 1 + margin 1 → tolerated 2 → 2 is NOT > 2.
             ips: [
               { ip: '85.10.20.5', lastSeen: recent },
@@ -996,7 +996,7 @@ describe('SharingDetectors — concurrent IP (network-grouped)', () => {
       usersIpsByNode: {
         n1: [
           {
-            userId: '10',
+            userId: 10,
             ips: [
               { ip: '1.1.1.1', lastSeen: recent },
               { ip: '9.9.9.9', lastSeen: old }, // stale → excluded
@@ -1054,7 +1054,7 @@ describe('SharingDetectors — a lookback is not simultaneity', () => {
       {
         panelUsers: [{ uuid: 'u1', panelId: 10, hwidDeviceLimit: 1 }],
         nodes: ONE_NODE,
-        usersIpsByNode: { n1: [{ userId: '10', ips }] },
+        usersIpsByNode: { n1: [{ userId: 10, ips }] },
       },
       [{ remnawaveId: 'u1', userId: 'user-1' }],
     );
@@ -1148,7 +1148,7 @@ describe('SharingDetectors — a dual-stack device is one device', () => {
       usersIpsByNode: {
         n1: [
           {
-            userId: '10',
+            userId: 10,
             ips: [
               { ip: '203.0.113.10', lastSeen: ago(3) },
               { ip: '2001:db8:1:2::5', lastSeen: ago(3) },
@@ -1169,7 +1169,7 @@ describe('SharingDetectors — a dual-stack device is one device', () => {
       usersIpsByNode: {
         n1: [
           {
-            userId: '10',
+            userId: 10,
             ips: [
               { ip: '203.0.113.10', lastSeen: ago(3) },
               { ip: '2001:db8:1::5', lastSeen: ago(3) },
@@ -1209,7 +1209,7 @@ describe('SharingDetectors — a node flap is not a customer', () => {
       usersIpsByNode: {
         n1: [
           {
-            userId: '10',
+            userId: 10,
             ips: [
               { ip: '1.1.1.1', lastSeen: ago(2) },
               { ip: '2.2.2.2', lastSeen: ago(4) },
