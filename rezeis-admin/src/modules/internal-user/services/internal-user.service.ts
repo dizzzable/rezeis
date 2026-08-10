@@ -555,7 +555,7 @@ export class InternalUserService {
     // UUID) and a populated traffic bar — matching the single-subscription
     // path. Best-effort: failures resolve to nulls and the card degrades.
     const usages = await Promise.all(
-      subscriptions.map((sub) => this.resolvePanelUsage(sub.remnawaveId)),
+      subscriptions.map((sub) => this.resolvePanelUsage(remnawaveUserIdentifier(sub))),
     );
     return {
       subscriptions: subscriptions.map((sub, i) => {
@@ -613,7 +613,7 @@ export class InternalUserService {
     if (subscription === null) {
       return null;
     }
-    const usage = await this.resolvePanelUsage(subscription.remnawaveId);
+    const usage = await this.resolvePanelUsage(remnawaveUserIdentifier(subscription));
     const o = usage.overlay;
     return {
       id: subscription.id,
@@ -645,16 +645,16 @@ export class InternalUserService {
    * and hides the bar instead of rendering a misleading 0%.
    */
   private async resolvePanelUsage(
-    remnawaveId: string | null,
+    panelIdentifier: number | string | null,
   ): Promise<{
     profileName: string | null;
     trafficUsedGb: number | null;
     overlay: PanelSubscriptionOverlay | null;
   }> {
-    if (this.remnawaveApiService === undefined || remnawaveId === null) {
+    if (this.remnawaveApiService === undefined || panelIdentifier === null) {
       return { profileName: null, trafficUsedGb: null, overlay: null };
     }
-    const usage = await this.remnawaveApiService.getPanelUserUsage(remnawaveId);
+    const usage = await this.remnawaveApiService.getPanelUserUsage(panelIdentifier);
     if (usage === null) {
       return { profileName: null, trafficUsedGb: null, overlay: null };
     }
@@ -785,4 +785,8 @@ export class InternalUserService {
       include: INTERNAL_USER_INCLUDE,
     });
   }
+}
+
+function remnawaveUserIdentifier(subscription: { remnawaveUserId: number | null; remnawaveId: string | null }): number | string | null {
+  return subscription.remnawaveUserId ?? subscription.remnawaveId;
 }

@@ -588,12 +588,12 @@ export class AntiFraudService {
       dropBy = { by: 'ipAddresses', ipAddresses: [...ips] };
       auditTargets = ips;
     } else {
-      const uuids = await this.resolveSignalUserUuids(signal.affectedUserIds, metadata);
-      if (uuids.length === 0) {
+      const userIds = await this.resolveSignalRemnawaveUserIds(signal.affectedUserIds, metadata);
+      if (userIds.length === 0) {
         throw new BadRequestException('Signal has no resolvable Remnawave users to drop');
       }
-      dropBy = { by: 'userUuids', userUuids: [...uuids] };
-      auditTargets = uuids;
+      dropBy = { by: 'userIds', userIds: [...userIds] };
+      auditTargets = userIds.map(String);
     }
 
     let outcome: { ok: boolean };
@@ -650,9 +650,9 @@ export class AntiFraudService {
     });
     if (!signal) throw new NotFoundException('Fraud signal not found');
     const metadata = (signal.metadata as Record<string, unknown>) ?? {};
-    const uuids = await this.resolveSignalUserUuids(signal.affectedUserIds, metadata);
-    if (uuids.length === 0) return [];
-    return this.remnawaveApiService.fetchUserIps(uuids[0]);
+    const userIds = await this.resolveSignalRemnawaveUserIds(signal.affectedUserIds, metadata);
+    if (userIds.length === 0) return [];
+    return this.remnawaveApiService.fetchUserIps(userIds[0]);
   }
 
   /**
@@ -675,6 +675,23 @@ export class AntiFraudService {
       .map((s) => s.remnawaveId)
       .filter((id): id is string => typeof id === 'string' && id.length > 0);
     return [...new Set(uuids)];
+  }
+
+  private async resolveSignalRemnawaveUserIds(
+    affectedUserIds: readonly string[],
+    metadata: Record<string, unknown>,
+  ): Promise<readonly number[]> {
+    const fromMeta = typeof metadata.remnawaveUserId === 'number' ? [metadata.remnawaveUserId] : [];
+    if (fromMeta.length > 0) return fromMeta;
+    if (affectedUserIds.length === 0) return [];
+    const subs = await this.prismaService.subscription.findMany({
+      where: { userId: { in: [...affectedUserIds] }, remnawaveUserId: { not: null } },
+      select: { remnawaveUserId: true },
+    });
+    const ids = subs
+      .map((s) => s.remnawaveUserId)
+      .filter((id): id is number => typeof id === 'number' && Number.isInteger(id));
+    return [...new Set(ids)];
   }
 
   /**

@@ -21,9 +21,10 @@ export function mapHwidTopUser(raw: unknown): RemnawaveHwidTopUserInterface {
   // 2.7.x ships `{ userUuid, id, username, devicesCount }` flat at the row
   // level, no nested `user` block. We still tolerate the older nested shape.
   const user = (r['user'] ?? r) as Record<string, unknown>;
+  const userId = toNullableNumber(r['id'] ?? r['userId'] ?? user['id']);
   return {
-    // 2.8 renamed the row id `userUuid` → `userId`; accept both.
-    userUuid: toString(r['userUuid'] ?? r['userId'] ?? user['uuid']),
+    userId,
+    userUuid: toNullableString(r['userUuid'] ?? user['uuid']),
     username: toString(r['username'] ?? user['username']),
     telegramId: toNullableString(r['telegramId'] ?? user['telegramId']),
     devicesCount: toNumber(r['devicesCount'] ?? r['count'] ?? r['hwidDevicesCount']),
@@ -88,6 +89,8 @@ export function mapSubscriptionRequestEntry(raw: unknown): RemnawaveSubscription
     clientType: deriveClientType(userAgent),
     ipAddress: toNullableString(r['requestIp']),
     requestedAt: toString(r['requestAt']),
+    srrResponseType: toNullableString(r['srrResponseType']),
+    srrRuleName: toNullableString(r['srrRuleName']),
   };
 }
 

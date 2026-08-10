@@ -1,4 +1,5 @@
 export interface RemnawaveNodeInterface {
+  readonly id: number | null;
   readonly uuid: string;
   readonly name: string;
   readonly address: string;

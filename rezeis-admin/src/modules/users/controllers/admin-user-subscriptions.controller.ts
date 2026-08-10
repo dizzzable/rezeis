@@ -309,10 +309,11 @@ export class AdminUserSubscriptionsController {
   public async resetTraffic(@Param('subscriptionId') subscriptionId: string) {
     const sub = await this.prismaService.subscription.findUnique({
       where: { id: subscriptionId },
-      select: { remnawaveId: true },
+      select: { remnawaveId: true, remnawaveUserId: true },
     });
-    if (!sub?.remnawaveId) return { reset: false, message: 'No Remnawave profile linked' };
-    await this.remnawaveApiService.resetPanelUserTraffic(sub.remnawaveId);
+    const panelIdentifier = remnawaveUserIdentifier(sub);
+    if (panelIdentifier === null) return { reset: false, message: 'No Remnawave profile linked' };
+    await this.remnawaveApiService.resetPanelUserTraffic(panelIdentifier);
     return { reset: true };
   }
 
@@ -322,10 +323,11 @@ export class AdminUserSubscriptionsController {
   public async syncSubscription(@Param('subscriptionId') subscriptionId: string) {
     const sub = await this.prismaService.subscription.findUnique({
       where: { id: subscriptionId },
-      select: { remnawaveId: true, userId: true },
+      select: { remnawaveId: true, remnawaveUserId: true, userId: true },
     });
-    if (!sub?.remnawaveId) return { synced: false, message: 'No Remnawave profile linked' };
-    const panelUser = await this.remnawaveApiService.getPanelUser(sub.remnawaveId);
+    const panelIdentifier = remnawaveUserIdentifier(sub);
+    if (panelIdentifier === null) return { synced: false, message: 'No Remnawave profile linked' };
+    const panelUser = await this.remnawaveApiService.getPanelUser(panelIdentifier);
     if (!panelUser) return { synced: false, message: 'Profile not found on panel' };
     await this.prismaService.subscription.update({
       where: { id: subscriptionId },
@@ -352,11 +354,12 @@ export class AdminUserSubscriptionsController {
   public async getDevices(@Param('subscriptionId') subscriptionId: string) {
     const sub = await this.prismaService.subscription.findUnique({
       where: { id: subscriptionId },
-      select: { remnawaveId: true },
+      select: { remnawaveId: true, remnawaveUserId: true },
     });
-    if (!sub?.remnawaveId) return { devices: [], deviceCount: 0 };
+    const panelIdentifier = remnawaveUserIdentifier(sub);
+    if (panelIdentifier === null) return { devices: [], deviceCount: 0 };
     const result = requirePanelDeviceList(
-      await this.remnawaveApiService.strictGetPanelUserDevices(sub.remnawaveId),
+      await this.remnawaveApiService.strictGetPanelUserDevices(panelIdentifier),
     );
     return { devices: result.devices, deviceCount: result.total };
   }
@@ -373,12 +376,14 @@ export class AdminUserSubscriptionsController {
       where: { id: subscriptionId },
       select: {
         remnawaveId: true,
+        remnawaveUserId: true,
         userId: true,
         user: { select: { telegramId: true, username: true, name: true } },
       },
     });
-    if (!sub?.remnawaveId) throw new NotFoundException('No Remnawave profile linked');
-    const result = await this.remnawaveApiService.deletePanelUserDevice(sub.remnawaveId, hwid);
+    const panelIdentifier = remnawaveUserIdentifier(sub);
+    if (panelIdentifier === null) throw new NotFoundException('No Remnawave profile linked');
+    const result = await this.remnawaveApiService.deletePanelUserDevice(panelIdentifier, hwid);
 
     this.systemEvents.info(
       EVENT_TYPES.SUBSCRIPTION_DEVICE_REVOKED,
@@ -592,4 +597,8 @@ export class AdminUserSubscriptionsController {
       },
     });
   }
+}
+
+function remnawaveUserIdentifier(subscription: { remnawaveUserId: number | null; remnawaveId: string | null } | null): number | string | null {
+  return subscription?.remnawaveUserId ?? subscription?.remnawaveId ?? null;
 }

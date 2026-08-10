@@ -825,13 +825,13 @@ export class AdminUserManagementController {
    * panel-user `username` and `description` so the admin "User → Subscription"
    * card can display the live profile name instead of the bare UUID.
    *
-   * - Skips subscriptions that have no `remnawaveId` yet (e.g. provisioning).
+   * - Skips subscriptions that have no panel identifier yet (e.g. provisioning).
    * - Tolerates upstream errors per-row: a single missing/404 panel user
    *   never breaks the whole user-detail response.
    * - Done in parallel via `Promise.allSettled` to keep the user-detail
    *   endpoint snappy even when the panel is slow.
    */
-  private async enrichSubscriptionsWithRemnawave<T extends { readonly remnawaveId: string | null }>(
+  private async enrichSubscriptionsWithRemnawave<T extends { readonly remnawaveId: string | null; readonly remnawaveUserId: number | null }>(
     subscriptions: readonly T[],
   ): Promise<Array<T & {
     readonly remnawaveProfileName: string | null;
@@ -839,14 +839,15 @@ export class AdminUserManagementController {
   }>> {
     const enriched = await Promise.allSettled(
       subscriptions.map(async (sub): Promise<T & { remnawaveProfileName: string | null; remnawaveProfileDescription: string | null }> => {
-        if (!sub.remnawaveId) {
+        const panelIdentifier = remnawaveUserIdentifier(sub);
+        if (panelIdentifier === null) {
           return {
             ...sub,
             remnawaveProfileName: null,
             remnawaveProfileDescription: null,
           };
         }
-        const panelUser = await this.remnawaveApiService.getPanelUser(sub.remnawaveId);
+        const panelUser = await this.remnawaveApiService.getPanelUser(panelIdentifier);
         return {
           ...sub,
           remnawaveProfileName: panelUser?.username ?? null,
@@ -946,6 +947,10 @@ export class AdminUserManagementController {
       },
     });
   }
+}
+
+function remnawaveUserIdentifier(subscription: { remnawaveUserId: number | null; remnawaveId: string | null }): number | string | null {
+  return subscription.remnawaveUserId ?? subscription.remnawaveId;
 }
 
 /**

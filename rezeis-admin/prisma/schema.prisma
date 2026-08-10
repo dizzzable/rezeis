@@ -1471,9 +1471,12 @@ model Subscription {
   deviceLimitBeforeReduction Int?               @map("device_limit_before_reduction")
   internalSquads             String[]           @default([]) @map("internal_squads")
   externalSquad              String?            @map("external_squad")
-  /// Remnawave subscription user UUID. `null` until the profile sync job
-  /// successfully creates the upstream record.
+  /// Legacy Remnawave subscription user UUID. Remnawave 3.x no longer exposes
+  /// this; keep it only for historical rows and cheap fallback compatibility.
   remnawaveId                String?            @map("remnawave_id")
+  /// Remnawave 3.x numeric user id. New user-scoped panel calls must prefer
+  /// this field over the legacy UUID.
+  remnawaveUserId             Int?               @map("remnawave_user_id")
   /// User-facing connect URL.
   configUrl                  String?            @map("config_url")
   startedAt                  DateTime?          @map("started_at") @db.Timestamptz(3)
@@ -1505,6 +1508,7 @@ model Subscription {
   @@index([status])
   @@index([expiresAt])
   @@index([isTrial])
+  @@index([remnawaveUserId])
   @@index([createdAt])
   /// Backs the per-minute expiry sweep + warnings (`status=ACTIVE AND
   /// expiresAt<now`) and the profile-cleanup sweep — equality column first,

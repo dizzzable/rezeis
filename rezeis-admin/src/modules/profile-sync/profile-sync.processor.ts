@@ -159,6 +159,7 @@ export class ProfileSyncProcessor extends WorkerHost {
             id: true,
             userId: true,
             remnawaveId: true,
+            remnawaveUserId: true,
             trafficLimit: true,
             deviceLimit: true,
             internalSquads: true,
@@ -239,7 +240,8 @@ export class ProfileSyncProcessor extends WorkerHost {
     if (!resolveAddOnRolloutFlags().projectionSync) return false;
     if (syncJob.aggregateKey === null || syncJob.desiredRevision === null) return false;
     const subscription = syncJob.subscription;
-    if (subscription.remnawaveId === null) return false;
+    const panelIdentifier = remnawaveUserIdentifier(subscription);
+    if (panelIdentifier === null) return false;
 
     const projection = await client.subscriptionEffectiveProjection.findUnique({
       where: { subscriptionId: subscription.id },
@@ -248,7 +250,7 @@ export class ProfileSyncProcessor extends WorkerHost {
     if (projection === null) return false;
 
     const planSnapshot = readRecord(subscription.planSnapshot);
-    const setOutcome = await this.remnawaveApiService.strictSetUserLimits(subscription.remnawaveId, {
+    const setOutcome = await this.remnawaveApiService.strictSetUserLimits(panelIdentifier, {
       trafficLimitBytes: projection.desiredTrafficLimitBytes,
       hwidDeviceLimit: projection.desiredDeviceLimit,
       tag: readOptionalString(planSnapshot, 'tag'),
@@ -263,7 +265,7 @@ export class ProfileSyncProcessor extends WorkerHost {
       throw new Error(`Strict desired-state PATCH failed: ${setOutcome.kind}`);
     }
 
-    const readOutcome = await this.remnawaveApiService.strictGetPanelUser(subscription.remnawaveId);
+    const readOutcome = await this.remnawaveApiService.strictGetPanelUser(panelIdentifier);
     if (readOutcome.kind === 'unavailable') {
       throw new ServiceUnavailableException('Remnawave unavailable during desired-state read-back');
     }
@@ -296,7 +298,7 @@ export class ProfileSyncProcessor extends WorkerHost {
       });
       const deleteJobId = await this.ensureDeleteJobIfDeleted(
         subscription.id,
-        subscription.remnawaveId,
+        panelIdentifier,
         readOutcome.value.createdAt,
         client,
       );
@@ -435,7 +437,7 @@ export class ProfileSyncProcessor extends WorkerHost {
 
   private async handleCreate(syncJob: SyncJobRecord): Promise<void> {
     const subscription = syncJob.subscription;
-    if (subscription.remnawaveId !== null) {
+    if (remnawaveUserIdentifier(subscription) !== null) {
       // Already provisioned — treat as update instead
       await this.handleUpdate(syncJob);
       return;
@@ -478,23 +480,25 @@ export class ProfileSyncProcessor extends WorkerHost {
       const deleteScheduled = await this.persistProfileLink(
         subscription.id,
         existing.uuid,
+        existing.id,
         existing.subscriptionUrl,
         existing.createdAt,
       );
       if (deleteScheduled) {
         await this.enqueueCompensatingDelete(deleteScheduled);
         this.logger.warn(
-          `Subscription ${subscription.id} was deleted while CREATE ran; scheduled deletion of linked profile '${existing.uuid}'`,
+          `Subscription ${subscription.id} was deleted while CREATE ran; scheduled deletion of linked profile '${existing.id}'`,
         );
         return;
       }
       this.logger.log(
-        `Linked existing Remnawave profile '${existing.uuid}' (username: ${panelUsername}) to subscription ${subscription.id}`,
+        `Linked existing Remnawave profile '${existing.id}' (username: ${panelUsername}) to subscription ${subscription.id}`,
       );
       this.events.info(EVENT_TYPES.SUBSCRIPTION_CREATED, 'SUBSCRIPTION', `Remnawave profile linked: ${panelUsername}`, {
         subscriptionId: subscription.id,
         userId: subscription.userId,
         remnawaveId: existing.uuid,
+        remnawaveUserId: existing.id,
         remnawaveUsername: panelUsername,
       });
       return;
@@ -518,19 +522,20 @@ export class ProfileSyncProcessor extends WorkerHost {
     const deleteScheduled = await this.persistProfileLink(
       subscription.id,
       panelUser.uuid,
+      panelUser.id,
       panelUser.subscriptionUrl,
       panelUser.createdAt,
     );
     if (deleteScheduled) {
       await this.enqueueCompensatingDelete(deleteScheduled);
       this.logger.warn(
-        `Subscription ${subscription.id} was deleted while CREATE ran; scheduled deletion of new profile '${panelUser.uuid}'`,
+        `Subscription ${subscription.id} was deleted while CREATE ran; scheduled deletion of new profile '${panelUser.id}'`,
       );
       return;
     }
 
     this.logger.log(
-      `Created Remnawave profile '${panelUser.uuid}' (username: ${panelUsername}) for subscription ${subscription.id}`,
+      `Created Remnawave profile '${panelUser.id}' (username: ${panelUsername}) for subscription ${subscription.id}`,
     );
 
     // Emit event
@@ -538,13 +543,15 @@ export class ProfileSyncProcessor extends WorkerHost {
       subscriptionId: subscription.id,
       userId: subscription.userId,
       remnawaveId: panelUser.uuid,
+      remnawaveUserId: panelUser.id,
       remnawaveUsername: panelUsername,
     });
   }
 
   private async persistProfileLink(
     subscriptionId: string,
-    remnawaveId: string,
+    remnawaveId: string | null,
+    remnawaveUserId: number,
     configUrl: string | null | undefined,
     panelCreatedAt: string | null | undefined,
   ): Promise<string | null> {
@@ -562,11 +569,11 @@ export class ProfileSyncProcessor extends WorkerHost {
 
       await tx.subscription.update({
         where: { id: subscriptionId },
-        data: { remnawaveId, configUrl },
+        data: { remnawaveId, remnawaveUserId, configUrl },
       });
       await this.stampMonthRollingAnchor(tx, subscriptionId, panelCreatedAt, current.status);
       if (current.status !== SubscriptionStatus.ACTIVE) {
-        const deleteJobId = await this.createDeleteJobIfMissing(tx, subscriptionId, remnawaveId);
+        const deleteJobId = await this.createDeleteJobIfMissing(tx, subscriptionId, String(remnawaveUserId));
         if (deleteJobId !== null) {
           return deleteJobId;
         }
@@ -593,7 +600,8 @@ export class ProfileSyncProcessor extends WorkerHost {
     // a database lock across HTTP or silently leaving stale panel state.
     for (let convergenceAttempt = 0; convergenceAttempt < 3; convergenceAttempt += 1) {
       const subscription = current.subscription;
-      if (subscription.remnawaveId === null) {
+      const panelIdentifier = remnawaveUserIdentifier(subscription);
+      if (panelIdentifier === null) {
         // No panel link to update. This is reachable when a prior re-provision
         // detached a stale id (404) but its follow-up CREATE then failed
         // transiently: the job stays action=UPDATE and retries here. Silently
@@ -638,7 +646,7 @@ export class ProfileSyncProcessor extends WorkerHost {
 
       let panelUser: Awaited<ReturnType<RemnawaveApiService['updatePanelUser']>>;
       try {
-        panelUser = await this.remnawaveApiService.updatePanelUser(subscription.remnawaveId, {
+        panelUser = await this.remnawaveApiService.updatePanelUser(panelIdentifier, {
           telegramId: contacts.telegramId ? Number(contacts.telegramId) : null,
           email: contacts.email,
           description: naming.description,
@@ -659,7 +667,7 @@ export class ProfileSyncProcessor extends WorkerHost {
         // the stale id and fall through to CREATE, which idempotently reuses an
         // existing profile by username or creates a fresh one and re-links it.
         if (err instanceof RemnawaveProfileNotFoundError) {
-          await this.reprovisionMissingProfile(subscription.id, subscription.remnawaveId);
+          await this.reprovisionMissingProfile(subscription.id, panelIdentifier);
           const refreshed = await this.loadSyncJob(this.prismaService, syncJob.id);
           if (refreshed === null) {
             const missing = new Error(
@@ -688,14 +696,14 @@ export class ProfileSyncProcessor extends WorkerHost {
 
       const deleteJobId = await this.ensureDeleteJobIfDeleted(
         subscription.id,
-        subscription.remnawaveId,
+        panelIdentifier,
         panelUser?.createdAt,
       );
       if (deleteJobId !== null) {
         await this.enqueueCompensatingDelete(deleteJobId);
       }
       this.logger.log(
-        `Updated Remnawave profile '${subscription.remnawaveId}' for subscription ${subscription.id}`,
+        `Updated Remnawave profile '${String(panelIdentifier)}' for subscription ${subscription.id}`,
       );
       return;
     }
@@ -714,11 +722,14 @@ export class ProfileSyncProcessor extends WorkerHost {
    */
   private async reprovisionMissingProfile(
     subscriptionId: string,
-    staleRemnawaveId: string,
+    staleRemnawaveId: number | string,
   ): Promise<void> {
     await this.prismaService.subscription.updateMany({
-      where: { id: subscriptionId, remnawaveId: staleRemnawaveId },
-      data: { remnawaveId: null, configUrl: null },
+      where:
+        typeof staleRemnawaveId === 'number'
+          ? { id: subscriptionId, remnawaveUserId: staleRemnawaveId }
+          : { id: subscriptionId, remnawaveId: staleRemnawaveId },
+      data: { remnawaveId: null, remnawaveUserId: null, configUrl: null },
     });
   }
 
@@ -731,7 +742,7 @@ export class ProfileSyncProcessor extends WorkerHost {
 
   private async ensureDeleteJobIfDeleted(
     subscriptionId: string,
-    targetRemnawaveId: string | null,
+    targetRemnawaveId: number | string | null,
     panelCreatedAt?: string | null,
     client: Prisma.TransactionClient | PrismaService = this.prismaService,
   ): Promise<string | null> {
@@ -746,7 +757,7 @@ export class ProfileSyncProcessor extends WorkerHost {
         FOR UPDATE
       `);
       if (rows[0]?.status === SubscriptionStatus.DELETED) {
-        return this.createDeleteJobIfMissing(tx, subscriptionId, targetRemnawaveId);
+        return this.createDeleteJobIfMissing(tx, subscriptionId, String(targetRemnawaveId));
       }
       await this.stampMonthRollingAnchor(
         tx,
@@ -816,7 +827,7 @@ export class ProfileSyncProcessor extends WorkerHost {
   private async handleDelete(syncJob: SyncJobRecord): Promise<void> {
     const subscription = syncJob.subscription;
     const targetRemnawaveId =
-      readTargetRemnawaveId(syncJob.payload) ?? subscription.remnawaveId;
+      readTargetRemnawaveId(syncJob.payload) ?? remnawaveUserIdentifier(subscription);
     if (targetRemnawaveId === null) {
       return;
     }
@@ -838,8 +849,8 @@ export class ProfileSyncProcessor extends WorkerHost {
       // before enqueuing, so this is idempotent for them.
       // See `.kiro/specs/trial-aware-profile-cleanup`.
       await this.prismaService.subscription.updateMany({
-        where: { id: subscription.id, remnawaveId: targetRemnawaveId },
-        data: { remnawaveId: null, status: SubscriptionStatus.DELETED },
+        where: { id: subscription.id },
+        data: { remnawaveId: null, remnawaveUserId: null, status: SubscriptionStatus.DELETED },
       });
     } else {
       throw new Error(
@@ -850,20 +861,21 @@ export class ProfileSyncProcessor extends WorkerHost {
 
   private async handleTrafficReset(syncJob: SyncJobRecord): Promise<void> {
     const subscription = syncJob.subscription;
-    if (subscription.remnawaveId === null) {
+    const panelIdentifier = remnawaveUserIdentifier(subscription);
+    if (panelIdentifier === null) {
       return;
     }
 
-    await this.remnawaveApiService.resetPanelUserTraffic(subscription.remnawaveId);
+    await this.remnawaveApiService.resetPanelUserTraffic(panelIdentifier);
     const deleteJobId = await this.ensureDeleteJobIfDeleted(
       subscription.id,
-      subscription.remnawaveId,
+      panelIdentifier,
     );
     if (deleteJobId !== null) {
       await this.enqueueCompensatingDelete(deleteJobId);
     }
     this.logger.log(
-      `Reset traffic for Remnawave profile '${subscription.remnawaveId}'`,
+      `Reset traffic for Remnawave profile '${String(panelIdentifier)}'`,
     );
   }
 }
@@ -877,6 +889,7 @@ type SyncJobRecord = NonNullable<
     id: string;
     userId: string;
     remnawaveId: string | null;
+    remnawaveUserId: number | null;
     trafficLimit: number | null;
     deviceLimit: number;
     internalSquads: string[];
@@ -1047,6 +1060,10 @@ function readBoolean(record: Record<string, unknown>, key: string): boolean {
 
 function readTargetRemnawaveId(value: unknown): string | null {
   return readOptionalString(readRecord(value), 'targetRemnawaveId');
+}
+
+function remnawaveUserIdentifier(subscription: { remnawaveUserId?: number | null; remnawaveId: string | null }): number | string | null {
+  return subscription.remnawaveUserId ?? subscription.remnawaveId;
 }
 
 /**

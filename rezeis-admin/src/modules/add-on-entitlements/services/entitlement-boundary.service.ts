@@ -296,16 +296,17 @@ export class EntitlementBoundaryService {
       orderBy: { generation: 'asc' },
       select: {
         id: true,
-        subscription: { select: { remnawaveId: true } },
+        subscription: { select: { remnawaveId: true, remnawaveUserId: true } },
       },
     });
     if (due === null) return undefined;
-    if (due.subscription.remnawaveId === null || this.remnawaveApiService === undefined) {
+    const panelIdentifier = remnawaveUserIdentifier(due.subscription);
+    if (panelIdentifier === null || this.remnawaveApiService === undefined) {
       return { termId: due.id, anchorAt: null };
     }
 
     try {
-      const panelUser = await this.remnawaveApiService.getPanelUser(due.subscription.remnawaveId);
+      const panelUser = await this.remnawaveApiService.getPanelUser(panelIdentifier);
       const timestamp = panelUser?.createdAt;
       const parsed = typeof timestamp === 'string' ? Date.parse(timestamp) : Number.NaN;
       return {
@@ -514,4 +515,8 @@ export class EntitlementBoundaryService {
       return { began, expired, changed: true, desiredRevision, syncJobIds, deviceExpiryTriggered };
     });
   }
+}
+
+function remnawaveUserIdentifier(subscription: { remnawaveUserId: number | null; remnawaveId: string | null }): number | string | null {
+  return subscription.remnawaveUserId ?? subscription.remnawaveId;
 }

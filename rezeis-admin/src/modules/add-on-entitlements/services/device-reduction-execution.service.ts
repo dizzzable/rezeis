@@ -27,7 +27,7 @@ interface PlanTarget {
 }
 
 type Guard =
-  | { readonly kind: 'ok'; readonly remnawaveId: string; readonly desiredLimit: number }
+  | { readonly kind: 'ok'; readonly panelIdentifier: number | string; readonly desiredLimit: number }
   | { readonly kind: 'superseded'; readonly reason: string };
 
 /**
@@ -93,7 +93,7 @@ export class DeviceReductionExecutionService {
     });
 
     const targets = readTargets(plan.selectedDevices);
-    const { remnawaveId } = guard;
+    const { panelIdentifier } = guard;
     let deleted = 0;
 
     for (const target of targets) {
@@ -106,7 +106,7 @@ export class DeviceReductionExecutionService {
       }
       const desiredLimit = reguard.desiredLimit;
 
-      const listing = await this.remnawaveApiService.strictListUserDevices(remnawaveId);
+      const listing = await this.remnawaveApiService.strictListUserDevices(panelIdentifier);
       if (listing.kind === 'unavailable') {
         return { status: 'DEFERRED', reason: 'PANEL_UNAVAILABLE' };
       }
@@ -129,7 +129,7 @@ export class DeviceReductionExecutionService {
         continue;
       }
 
-      const del = await this.remnawaveApiService.strictDeleteUserDevice(remnawaveId, target.hwid);
+      const del = await this.remnawaveApiService.strictDeleteUserDevice(panelIdentifier, target.hwid);
       if (del.kind === 'unavailable') {
         return { status: 'DEFERRED', reason: 'PANEL_UNAVAILABLE' };
       }
@@ -144,7 +144,7 @@ export class DeviceReductionExecutionService {
     }
 
     // Final strict read-back proves the post-condition.
-    const final = await this.remnawaveApiService.strictListUserDevices(remnawaveId);
+    const final = await this.remnawaveApiService.strictListUserDevices(panelIdentifier);
     if (final.kind === 'unavailable') {
       return { status: 'DEFERRED', reason: 'PANEL_UNAVAILABLE' };
     }
@@ -207,15 +207,16 @@ export class DeviceReductionExecutionService {
     }
     const subscription = await this.prismaService.subscription.findUnique({
       where: { id: subscriptionId },
-      select: { remnawaveId: true, status: true },
+      select: { remnawaveId: true, remnawaveUserId: true, status: true },
     });
-    if (subscription === null || subscription.remnawaveId === null) {
+    const panelIdentifier = remnawaveUserIdentifier(subscription);
+    if (panelIdentifier === null) {
       return { kind: 'superseded', reason: 'NO_PANEL_PROFILE' };
     }
     if (subscription.status === SubscriptionStatus.DELETED) {
       return { kind: 'superseded', reason: 'SUBSCRIPTION_DELETED' };
     }
-    return { kind: 'ok', remnawaveId: subscription.remnawaveId, desiredLimit: projection.desiredDeviceLimit };
+    return { kind: 'ok', panelIdentifier, desiredLimit: projection.desiredDeviceLimit };
   }
 
   private async markState(
@@ -259,6 +260,10 @@ export class DeviceReductionExecutionService {
       },
     });
   }
+}
+
+function remnawaveUserIdentifier(subscription: { remnawaveUserId: number | null; remnawaveId: string | null } | null): number | string | null {
+  return subscription?.remnawaveUserId ?? subscription?.remnawaveId ?? null;
 }
 
 function readTargets(selectedDevices: unknown): PlanTarget[] {
