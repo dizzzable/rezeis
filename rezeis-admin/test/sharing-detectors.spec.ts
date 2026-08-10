@@ -1325,7 +1325,7 @@ describe('SharingDetectors — an unreadable panel id is skipped, never guessed'
    * `Number.parseInt('3f2a-…', 10)` is 3 — so somebody else's four networks
    * were filed under #3's name.
    */
-  function panelWith(userId: string): SharingDetectors {
+  function panelWith(userId: number | string): SharingDetectors {
     return makeDetectors(
       {
         panelUsers: [{ uuid: 'u3', panelId: 3, hwidDeviceLimit: 1 }],
@@ -1333,7 +1333,7 @@ describe('SharingDetectors — an unreadable panel id is skipped, never guessed'
         usersIpsByNode: {
           n1: [
             {
-              userId,
+              userId: userId as never,
               ips: [
                 { ip: '1.1.1.1', lastSeen: ago(2) },
                 { ip: '2.2.2.2', lastSeen: ago(4) },
@@ -1353,7 +1353,7 @@ describe('SharingDetectors — an unreadable panel id is skipped, never guessed'
   });
 
   it('still attributes a genuine integer userId', async () => {
-    const candidates = await panelWith('3').detectConcurrentIpSharing(NOW);
+    const candidates = await panelWith(3).detectConcurrentIpSharing(NOW);
     assert.equal(candidates.length, 1);
     assert.deepEqual(candidates[0].affectedUserIds, ['user-3']);
   });
