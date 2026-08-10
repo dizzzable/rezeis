@@ -224,7 +224,12 @@ describe('AdminUserSubscriptionsController', () => {
     const controller = new AdminUserSubscriptionsController(
       {
         subscription: {
-          findUnique: async () => ({ remnawaveId: 'rem-user-1' }),
+          findUnique: async () => ({
+            id: 'subscription-1',
+            remnawaveId: 'rem-user-1',
+            remnawaveUserId: 101,
+            configUrl: 'https://panel.example.test/sub/legacy-uuid',
+          }),
         },
       } as never,
       {
@@ -249,7 +254,7 @@ describe('AdminUserSubscriptionsController', () => {
     }
 
     // Self-check: the panel really was consulted.
-    assert.deepStrictEqual(panelReads, ['rem-user-1']);
+    assert.deepStrictEqual(panelReads, [101]);
     assert.equal(thrown instanceof ServiceUnavailableException, true);
     assert.equal((thrown as ServiceUnavailableException).getStatus(), 503);
   });
@@ -259,7 +264,12 @@ describe('AdminUserSubscriptionsController', () => {
     const controller = new AdminUserSubscriptionsController(
       {
         subscription: {
-          findUnique: async () => ({ remnawaveId: 'rem-user-1' }),
+          findUnique: async () => ({
+            id: 'subscription-1',
+            remnawaveId: 'rem-user-1',
+            remnawaveUserId: 101,
+            configUrl: 'https://panel.example.test/sub/legacy-uuid',
+          }),
         },
       } as never,
       {
@@ -278,6 +288,89 @@ describe('AdminUserSubscriptionsController', () => {
       devices: [],
       deviceCount: 0,
     });
-    assert.deepStrictEqual(panelReads, ['rem-user-1']);
+    assert.deepStrictEqual(panelReads, [101]);
+  });
+
+  it('resolves a legacy subscription UUID, persists its numeric id, then reads devices by that id', async () => {
+    const panelReads: Array<number | string> = [];
+    const updates: unknown[] = [];
+    const controller = new AdminUserSubscriptionsController(
+      {
+        subscription: {
+          findUnique: async () => ({
+            id: 'legacy-subscription',
+            remnawaveId: 'legacy-profile-uuid',
+            remnawaveUserId: null,
+            configUrl: 'https://panel.example.test/subscriptions/short-subscription-uuid',
+          }),
+          update: async (input: unknown) => {
+            updates.push(input);
+            return {};
+          },
+        },
+      } as never,
+      {
+        resolveRemnawaveUser: async (input: unknown) => {
+          assert.deepStrictEqual(input, { subscriptionUuid: 'short-subscription-uuid' });
+          return { id: 101 };
+        },
+        strictGetPanelUserDevices: async (identifier: number | string) => {
+          panelReads.push(identifier);
+          return strictOk({ devices: [], total: 0 });
+        },
+      } as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+
+    assert.deepStrictEqual(await controller.getDevices('legacy-subscription'), {
+      devices: [],
+      deviceCount: 0,
+    });
+    assert.deepStrictEqual(updates, [{
+      where: { id: 'legacy-subscription' },
+      data: { remnawaveUserId: 101 },
+    }]);
+    assert.deepStrictEqual(panelReads, [101]);
+  });
+
+  it('resolves a legacy subscription before resetting traffic through the numeric panel id', async () => {
+    const resetCalls: Array<number | string> = [];
+    const updates: unknown[] = [];
+    const controller = new AdminUserSubscriptionsController(
+      {
+        subscription: {
+          findUnique: async () => ({
+            id: 'legacy-subscription',
+            remnawaveId: 'legacy-profile-uuid',
+            remnawaveUserId: null,
+            configUrl: 'https://panel.example.test/subscriptions/short-subscription-uuid',
+          }),
+          update: async (input: unknown) => {
+            updates.push(input);
+            return {};
+          },
+        },
+      } as never,
+      {
+        resolveRemnawaveUser: async () => ({ id: 101 }),
+        resetPanelUserTraffic: async (identifier: number | string) => {
+          resetCalls.push(identifier);
+        },
+      } as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+
+    assert.deepStrictEqual(await controller.resetTraffic('legacy-subscription'), { reset: true });
+    assert.deepStrictEqual(updates, [{
+      where: { id: 'legacy-subscription' },
+      data: { remnawaveUserId: 101 },
+    }]);
+    assert.deepStrictEqual(resetCalls, [101]);
   });
 });

@@ -429,8 +429,8 @@ type DeviceSubscription = {
   readonly configUrl: string | null;
 };
 
-function extractShortUuid(configUrl: string | null): string | null {
-  if (configUrl === null || configUrl.trim().length === 0) return null;
+function extractShortUuid(configUrl: string | null | undefined): string | null {
+  if (configUrl === null || configUrl === undefined || configUrl.trim().length === 0) return null;
   try {
     const url = new URL(configUrl);
     const segments = url.pathname.split('/').filter(Boolean);
