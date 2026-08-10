@@ -309,9 +309,9 @@ export class AdminUserSubscriptionsController {
   public async resetTraffic(@Param('subscriptionId') subscriptionId: string) {
     const sub = await this.prismaService.subscription.findUnique({
       where: { id: subscriptionId },
-      select: { remnawaveId: true, remnawaveUserId: true },
+      select: { id: true, remnawaveId: true, remnawaveUserId: true, configUrl: true },
     });
-    const panelIdentifier = remnawaveUserIdentifier(sub);
+    const panelIdentifier = await this.resolveDevicePanelIdentifier(sub);
     if (panelIdentifier === null) return { reset: false, message: 'No Remnawave profile linked' };
     await this.remnawaveApiService.resetPanelUserTraffic(panelIdentifier);
     return { reset: true };
@@ -354,9 +354,9 @@ export class AdminUserSubscriptionsController {
   public async getDevices(@Param('subscriptionId') subscriptionId: string) {
     const sub = await this.prismaService.subscription.findUnique({
       where: { id: subscriptionId },
-      select: { remnawaveId: true, remnawaveUserId: true },
+      select: { id: true, remnawaveId: true, remnawaveUserId: true, configUrl: true },
     });
-    const panelIdentifier = remnawaveUserIdentifier(sub);
+    const panelIdentifier = await this.resolveDevicePanelIdentifier(sub);
     if (panelIdentifier === null) return { devices: [], deviceCount: 0 };
     const result = requirePanelDeviceList(
       await this.remnawaveApiService.strictGetPanelUserDevices(panelIdentifier),
@@ -375,13 +375,15 @@ export class AdminUserSubscriptionsController {
     const sub = await this.prismaService.subscription.findUnique({
       where: { id: subscriptionId },
       select: {
+        id: true,
         remnawaveId: true,
         remnawaveUserId: true,
+        configUrl: true,
         userId: true,
         user: { select: { telegramId: true, username: true, name: true } },
       },
     });
-    const panelIdentifier = remnawaveUserIdentifier(sub);
+    const panelIdentifier = await this.resolveDevicePanelIdentifier(sub);
     if (panelIdentifier === null) throw new NotFoundException('No Remnawave profile linked');
     const result = await this.remnawaveApiService.deletePanelUserDevice(panelIdentifier, hwid);
 
@@ -404,6 +406,27 @@ export class AdminUserSubscriptionsController {
     );
 
     return { revoked: true, remainingDevices: result.total };
+  }
+
+  private async resolveDevicePanelIdentifier(subscription: DeviceSubscription | null): Promise<number | string | null> {
+    if (subscription?.remnawaveUserId !== null && subscription?.remnawaveUserId !== undefined) {
+      return subscription.remnawaveUserId;
+    }
+    if (subscription === null) return null;
+
+    const shortUuid = extractShortUuid(subscription.configUrl);
+    if (shortUuid !== null) {
+      const panelUser = await this.remnawaveApiService.resolveRemnawaveUser({ subscriptionUuid: shortUuid });
+      if (panelUser?.id !== null && panelUser?.id !== undefined) {
+        await this.prismaService.subscription.update({
+          where: { id: subscription.id },
+          data: { remnawaveUserId: panelUser.id },
+        });
+        return panelUser.id;
+      }
+    }
+
+    return subscription.remnawaveId;
   }
 
   // ── Give Subscription / Grant Trial ────────────────────────────────────
@@ -601,4 +624,23 @@ export class AdminUserSubscriptionsController {
 
 function remnawaveUserIdentifier(subscription: { remnawaveUserId: number | null; remnawaveId: string | null } | null): number | string | null {
   return subscription?.remnawaveUserId ?? subscription?.remnawaveId ?? null;
+}
+
+type DeviceSubscription = {
+  readonly id: string;
+  readonly remnawaveId: string | null;
+  readonly remnawaveUserId: number | null;
+  readonly configUrl: string | null;
+};
+
+function extractShortUuid(configUrl: string | null): string | null {
+  if (configUrl === null || configUrl.trim().length === 0) return null;
+  try {
+    const url = new URL(configUrl);
+    const lastSegment = url.pathname.split('/').filter(Boolean).at(-1);
+    return lastSegment && lastSegment.length > 0 ? lastSegment : null;
+  } catch {
+    const lastSegment = configUrl.split('?')[0]?.split('/').filter(Boolean).at(-1);
+    return lastSegment && lastSegment.length > 0 ? lastSegment : null;
+  }
 }

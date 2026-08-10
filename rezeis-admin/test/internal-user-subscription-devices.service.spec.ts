@@ -57,11 +57,11 @@ describe('InternalUserDevicesController', () => {
   });
 
   it('lists active-subscription devices through the current Remnawave panel profile API', async () => {
-    const remnawaveCalls: string[] = [];
+    const remnawaveCalls: Array<number | string> = [];
     const controller = new InternalUserDevicesController(
       createMockPrismaService({ activeSubscription: createSubscription() }) as never,
       {
-        strictGetPanelUserDevices: async (remnawaveId: string) => {
+        strictGetPanelUserDevices: async (remnawaveId: number | string) => {
           remnawaveCalls.push(remnawaveId);
           return strictOk({
             total: 1,
@@ -84,7 +84,7 @@ describe('InternalUserDevicesController', () => {
 
     const actualDevices = await controller.listDevices('123456789');
 
-    assert.deepStrictEqual(remnawaveCalls, ['rem-user-1']);
+    assert.deepStrictEqual(remnawaveCalls, [123]);
     assert.deepStrictEqual(actualDevices, {
       total: 1,
       devices: [
@@ -101,12 +101,40 @@ describe('InternalUserDevicesController', () => {
     });
   });
 
+  it('backfills a legacy subscription numeric Remnawave id from its config URL before listing devices', async () => {
+    const remnawaveCalls: Array<number | string> = [];
+    const persistedUpdates: unknown[] = [];
+    const controller = new InternalUserDevicesController(
+      createMockPrismaService({
+        activeSubscription: createSubscription({ remnawaveUserId: null }),
+        onSubscriptionUpdate: (input) => persistedUpdates.push(input),
+      }) as never,
+      {
+        resolveRemnawaveUser: async (input: unknown) => {
+          assert.deepStrictEqual(input, { subscriptionUuid: 'short-uuid-1' });
+          return { id: 456 };
+        },
+        strictGetPanelUserDevices: async (remnawaveId: number | string) => {
+          remnawaveCalls.push(remnawaveId);
+          return strictOk({ total: 0, devices: [] });
+        },
+      } as unknown as RemnawaveApiService,
+      createEventsMock() as unknown as SystemEventsService,
+    );
+
+    assert.deepStrictEqual(await controller.listDevices('123456789'), { total: 0, devices: [] });
+    assert.deepStrictEqual(remnawaveCalls, [456]);
+    assert.deepStrictEqual(persistedUpdates, [
+      { where: { id: 'subscription-1' }, data: { remnawaveUserId: 456 } },
+    ]);
+  });
+
   it('returns an empty device list when the user has no active Remnawave-backed subscription', async () => {
-    const remnawaveCalls: string[] = [];
+    const remnawaveCalls: Array<number | string> = [];
     const controller = new InternalUserDevicesController(
       createMockPrismaService({ activeSubscription: null }) as never,
       {
-        strictGetPanelUserDevices: async (remnawaveId: string) => {
+        strictGetPanelUserDevices: async (remnawaveId: number | string) => {
           remnawaveCalls.push(remnawaveId);
           return strictOk({ total: 0, devices: [] });
         },
@@ -125,11 +153,11 @@ describe('InternalUserDevicesController', () => {
   // distinction has been swallowed again.
 
   it('does NOT report "0 devices" to the cabinet when the panel is unreachable', async () => {
-    const remnawaveCalls: string[] = [];
+    const remnawaveCalls: Array<number | string> = [];
     const controller = new InternalUserDevicesController(
       createMockPrismaService({ activeSubscription: createSubscription() }) as never,
       {
-        strictGetPanelUserDevices: async (remnawaveId: string) => {
+        strictGetPanelUserDevices: async (remnawaveId: number | string) => {
           remnawaveCalls.push(remnawaveId);
           return strictUnavailable(null);
         },
@@ -141,7 +169,7 @@ describe('InternalUserDevicesController', () => {
 
     // Self-check: the controller must actually have consulted the panel — a
     // test that passes because the read never happened proves nothing.
-    assert.deepStrictEqual(remnawaveCalls, ['rem-user-1']);
+    assert.deepStrictEqual(remnawaveCalls, [123]);
     assert.equal(failure instanceof ServiceUnavailableException, true);
     assert.equal((failure as ServiceUnavailableException).getStatus(), 503);
     // The reason is in the RESPONSE body, not only in a log.
@@ -149,11 +177,11 @@ describe('InternalUserDevicesController', () => {
   });
 
   it('still reports a genuinely empty panel device list to the cabinet as an empty list', async () => {
-    const remnawaveCalls: string[] = [];
+    const remnawaveCalls: Array<number | string> = [];
     const controller = new InternalUserDevicesController(
       createMockPrismaService({ activeSubscription: createSubscription() }) as never,
       {
-        strictGetPanelUserDevices: async (remnawaveId: string) => {
+        strictGetPanelUserDevices: async (remnawaveId: number | string) => {
           remnawaveCalls.push(remnawaveId);
           return strictOk({ total: 0, devices: [] });
         },
@@ -162,15 +190,15 @@ describe('InternalUserDevicesController', () => {
     );
 
     assert.deepStrictEqual(await controller.listDevices('123456789'), { total: 0, devices: [] });
-    assert.deepStrictEqual(remnawaveCalls, ['rem-user-1']);
+    assert.deepStrictEqual(remnawaveCalls, [123]);
   });
 
   it('does NOT report "0 devices" for a selected subscription when the panel answers unusably', async () => {
-    const remnawaveCalls: string[] = [];
+    const remnawaveCalls: Array<number | string> = [];
     const controller = new InternalUserDevicesController(
       createMockPrismaService({ ownedSubscription: createSubscription() }) as never,
       {
-        strictGetPanelUserDevices: async (remnawaveId: string) => {
+        strictGetPanelUserDevices: async (remnawaveId: number | string) => {
           remnawaveCalls.push(remnawaveId);
           return strictInvalidContract('device list "devices" is not an array');
         },
@@ -182,18 +210,18 @@ describe('InternalUserDevicesController', () => {
       controller.listSubscriptionDevices('123456789', 'subscription-1'),
     );
 
-    assert.deepStrictEqual(remnawaveCalls, ['rem-user-1']);
+    assert.deepStrictEqual(remnawaveCalls, [123]);
     assert.equal(failure instanceof BadGatewayException, true);
     assert.equal((failure as BadGatewayException).getStatus(), 502);
   });
 
   it('deletes an explicit subscription device, emits the current event payload, and returns remaining count', async () => {
-    const deleted: Array<{ remnawaveId: string; hwid: string }> = [];
+    const deleted: Array<{ remnawaveId: number | string; hwid: string }> = [];
     const events = createEventsMock();
     const controller = new InternalUserDevicesController(
       createMockPrismaService({ ownedSubscription: createSubscription() }) as never,
       {
-        deletePanelUserDevice: async (remnawaveId: string, hwid: string) => {
+        deletePanelUserDevice: async (remnawaveId: number | string, hwid: string) => {
           deleted.push({ remnawaveId, hwid });
           return { total: 2 };
         },
@@ -207,7 +235,7 @@ describe('InternalUserDevicesController', () => {
       'hwid-to-delete',
     );
 
-    assert.deepStrictEqual(deleted, [{ remnawaveId: 'rem-user-1', hwid: 'hwid-to-delete' }]);
+    assert.deepStrictEqual(deleted, [{ remnawaveId: 123, hwid: 'hwid-to-delete' }]);
     assert.deepStrictEqual(actualResponse, { revoked: true, remainingDevices: 2 });
     assert.deepStrictEqual(events.calls, [
       {
@@ -245,11 +273,11 @@ describe('InternalUserDevicesController', () => {
         },
       }) as never,
       {
-        regeneratePanelUserSubscription: async (remnawaveId: string) => {
+        regeneratePanelUserSubscription: async (remnawaveId: number | string) => {
           trace.push(`regenerate:${remnawaveId}`);
           return { subscriptionUrl: 'https://remnawave.example/sub/new-link' };
         },
-        deleteAllPanelUserDevices: async (remnawaveId: string) => {
+        deleteAllPanelUserDevices: async (remnawaveId: number | string) => {
           trace.push(`delete-all:${remnawaveId}`);
           return { total: 0 };
         },
@@ -260,9 +288,9 @@ describe('InternalUserDevicesController', () => {
     const actualResponse = await controller.regenerateSubscription('123456789', 'subscription-1');
 
     assert.deepStrictEqual(trace, [
-      'regenerate:rem-user-1',
+      'regenerate:123',
       'persist',
-      'delete-all:rem-user-1',
+      'delete-all:123',
     ]);
     assert.deepStrictEqual(persistedUpdates, [
       {
@@ -420,15 +448,19 @@ function assertRoute(requestMethod: RequestMethod, path: string, target: unknown
   assert.equal(Reflect.getMetadata(PATH_METADATA, target), path);
 }
 
-function createSubscription(): {
+function createSubscription(input: { readonly remnawaveUserId?: number | null } = {}): {
   readonly id: string;
   readonly userId: string;
   readonly remnawaveId: string;
+  readonly remnawaveUserId: number | null;
+  readonly configUrl: string;
 } {
   return {
     id: 'subscription-1',
     userId: 'user-1',
     remnawaveId: 'rem-user-1',
+    remnawaveUserId: 'remnawaveUserId' in input ? input.remnawaveUserId ?? null : 123,
+    configUrl: 'https://remnawave.example/sub/short-uuid-1',
   };
 }
 
