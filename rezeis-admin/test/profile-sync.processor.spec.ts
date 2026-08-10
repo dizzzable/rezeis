@@ -1293,7 +1293,7 @@ describe('ProfileSyncProcessor', () => {
     // The stale id was detached (fenced on the old uuid) before CREATE...
     assert.deepStrictEqual(subscriptionUpdates[0], {
       where: { id: 'subscription-imported', remnawaveId: 'rem-stale-uuid' },
-      data: { remnawaveId: null, configUrl: null },
+      data: { remnawaveId: null, remnawaveUserId: null, configUrl: null },
     });
     // ...and the fresh profile was linked back.
     assert.deepStrictEqual(subscriptionUpdates[1], {

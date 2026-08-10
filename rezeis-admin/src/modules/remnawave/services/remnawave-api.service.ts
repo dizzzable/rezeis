@@ -1089,7 +1089,7 @@ export class RemnawaveApiService {
     const value = candidate as Record<string, unknown>;
     const id = readPanelUserId(value);
     const uuid = typeof value.uuid === 'string' && value.uuid.length > 0 ? value.uuid : null;
-    if (id === null && uuid === null) return null;
+    if (uuid === null) return null;
     return {
       id,
       uuid,

@@ -571,13 +571,13 @@ export class ProfileSyncProcessor extends WorkerHost {
         where: { id: subscriptionId },
         data: {
           remnawaveId,
-          ...(remnawaveUserId !== null ? { remnawaveUserId } : {}),
+          ...(remnawaveUserId != null ? { remnawaveUserId } : {}),
           configUrl,
         },
       });
       await this.stampMonthRollingAnchor(tx, subscriptionId, panelCreatedAt, current.status);
       if (current.status !== SubscriptionStatus.ACTIVE) {
-        const deleteTarget = remnawaveUserId !== null ? String(remnawaveUserId) : remnawaveId;
+        const deleteTarget = remnawaveUserId != null ? String(remnawaveUserId) : remnawaveId;
         const deleteJobId = deleteTarget === null ? null : await this.createDeleteJobIfMissing(tx, subscriptionId, deleteTarget);
         if (deleteJobId !== null) {
           return deleteJobId;
