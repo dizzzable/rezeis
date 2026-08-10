@@ -196,6 +196,7 @@ export function mapUserSummary(raw: unknown): RemnawaveUserSummaryInterface {
   // of the four user lookups that feed this mapper — see the interface note.
   const userTraffic = (r['userTraffic'] ?? {}) as Record<string, unknown>;
   return {
+    id: toNullableNumber(r['id']),
     uuid: toString(r['uuid']),
     shortUuid: toNullableString(r['shortUuid']),
     username: toString(r['username']),
