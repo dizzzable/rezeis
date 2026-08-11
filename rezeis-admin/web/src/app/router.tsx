@@ -177,6 +177,7 @@ export const router = createBrowserRouter([
   },
   {
     element: <ProtectedRoute />,
+    errorElement: <RouteErrorBoundary><PageFallback /></RouteErrorBoundary>,
     children: [
       {
         path: 'change-password',
