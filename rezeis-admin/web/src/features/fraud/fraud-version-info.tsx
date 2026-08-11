@@ -1,8 +1,15 @@
 /**
  * Info hover that explains which anti-fraud detectors are active on the
  * currently-detected Remnawave panel version. Some detectors (IP-sharing,
- * per-user node traffic) rely on panel APIs that only matured on 2.8+, so they
- * self-activate once the panel upgrades — this surfaces that to the operator.
+ * per-user node traffic) rely on panel APIs the panel itself only grew later,
+ * so they self-activate once it upgrades — this surfaces that to the operator.
+ *
+ * Both rows are rendered from the capability the backend reports, never from a
+ * version comparison here. That matters for IP-sharing: it reads live
+ * connections, which are `ip-control/*` on 2.8 and `connections/*` on 3.x
+ * after the panel deleted the older family. The adapter speaks both, so
+ * `liveIpControl` is true on either, and the floor stated to the operator when
+ * it is false — 2.8 — is the same floor for both rows.
  */
 import { useTranslation } from 'react-i18next'
 import { useQuery } from '@tanstack/react-query'

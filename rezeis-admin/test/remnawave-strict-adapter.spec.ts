@@ -15,8 +15,6 @@ const CONFIG = {
   port: 3000,
   token: 'secret',
   webhookSecret: null,
-  caddyToken: null,
-  cookie: null,
 } as const;
 
 function axiosError(status: number, headers: Record<string, string> = {}, data?: unknown) {
@@ -36,6 +34,19 @@ function build(handler: (input: { method: string; url: string; data?: unknown })
     CONFIG as never,
   );
   return { service, captured };
+}
+
+/**
+ * Drops the panel-version probe (`/api/system/...`). Every user-scoped call
+ * makes one before it can decide whether this panel wants a uuid or a numeric
+ * id, so `captured[0]` is the probe, not the request under test. Filtering by
+ * path keeps these assertions about the request being made rather than about
+ * how many round-trips addressing happens to cost.
+ */
+function panelCalls(
+  captured: ReadonlyArray<{ method: string; url: string; data?: unknown }>,
+): Array<{ method: string; url: string; data?: unknown }> {
+  return captured.filter((call) => !call.url.startsWith('/api/system/'));
 }
 
 describe('RemnawaveApiService strict adapter (T-010)', () => {
@@ -117,7 +128,7 @@ describe('RemnawaveApiService strict adapter (T-010)', () => {
       hwidDeviceLimit: null,
     });
     assert.equal(outcome.kind, 'ok');
-    const call = captured[0]!;
+    const call = panelCalls(captured)[0]!;
     assert.equal(call.method, 'patch');
     assert.equal(call.url, '/api/users');
     assert.deepEqual(call.data, {
@@ -140,7 +151,7 @@ describe('RemnawaveApiService strict adapter (T-010)', () => {
     });
 
     assert.equal(outcome.kind, 'ok');
-    assert.deepEqual(captured[0]!.data, {
+    assert.deepEqual(panelCalls(captured)[0]!.data, {
       uuid: '22222222-2222-4222-8222-222222222222',
       trafficLimitBytes: 20 * 1024 ** 3,
       hwidDeviceLimit: 4,
@@ -215,9 +226,13 @@ describe('RemnawaveApiService strict adapter (T-010)', () => {
     assert.equal(outcome.kind, 'ok');
     if (outcome.kind !== 'ok') return;
     assert.equal(outcome.value.total, 1);
-    const call = captured[0]!;
+    // `captured[0]` is now the panel-version read that decides whether the owner
+    // key is `userUuid` (2.x) or `userId` (3.x) — the delete is the request
+    // AFTER it. Asserting on index 0 would silently start asserting about the
+    // version probe.
+    const call = captured.find((c) => c.url === '/api/hwid/devices/delete');
+    assert.ok(call !== undefined, 'the delete request was never issued');
     assert.equal(call.method, 'post');
-    assert.equal(call.url, '/api/hwid/devices/delete');
     assert.deepEqual(call.data, { userUuid: 'user-uuid', hwid: 'hwid-x' });
   });
 

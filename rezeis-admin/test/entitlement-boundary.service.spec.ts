@@ -2,6 +2,10 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { EntitlementBoundaryService } from '../src/modules/add-on-entitlements/services/entitlement-boundary.service';
+import {
+  panelUserAddress,
+  type StoredPanelIdentity,
+} from '../src/modules/remnawave/services/panel-user-address';
 
 function build(options: {
   due?: Array<{ id: string; type: string; state?: string }>;
@@ -442,11 +446,19 @@ describe('EntitlementBoundaryService (T-008)', () => {
       },
       addOnEntitlement: { findMany: async () => [] },
     };
+    const panelRefs: unknown[] = [];
     const prisma = {
       subscriptionTerm: {
         findFirst: async () => ({
           id: 'term-rolling',
-          subscription: { remnawaveId: 'panel-user-1' },
+          // The row carries both supplementary identity columns, as every real
+          // one does: 2.x and 3.x alike expose a numeric id and a username on
+          // every user, so both are recorded when the profile is linked.
+          subscription: {
+            remnawaveId: 'panel-user-1',
+            remnawavePanelId: 4711,
+            remnawavePanelUsername: 'rz_alice_sub',
+          },
         }),
       },
       $transaction: async (cb: (t: unknown) => Promise<unknown>) => cb(tx),
@@ -456,7 +468,10 @@ describe('EntitlementBoundaryService (T-008)', () => {
       recomputeInTransaction: async () => ({ desiredRevision: 1n, changed: false }),
     };
     const panel = {
-      getPanelUser: async () => ({ createdAt: panelCreatedAt.toISOString() }),
+      getPanelUser: async (ref: unknown) => {
+        panelRefs.push(ref);
+        return { createdAt: panelCreatedAt.toISOString() };
+      },
     };
     const service = new EntitlementBoundaryService(
       prisma as never,
@@ -473,6 +488,9 @@ describe('EntitlementBoundaryService (T-008)', () => {
         where: { id: 'term-rolling' },
         data: { resetAnchorAt: panelCreatedAt },
       }]);
+      assert.deepStrictEqual(panelRefs, [
+        { remnawaveId: 'panel-user-1', panelId: 4711, panelUsername: 'rz_alice_sub' },
+      ]);
     } finally {
       if (previous === undefined) delete process.env.ADDON_RESET_EXPIRY_MONTH_ROLLING;
       else process.env.ADDON_RESET_EXPIRY_MONTH_ROLLING = previous;
@@ -503,7 +521,11 @@ describe('EntitlementBoundaryService (T-008)', () => {
       subscriptionTerm: {
         findFirst: async () => ({
           id: 'term-rolling',
-          subscription: { remnawaveId: 'panel-user-1' },
+          subscription: {
+            remnawaveId: 'panel-user-1',
+            remnawavePanelId: 4711,
+            remnawavePanelUsername: 'rz_alice_sub',
+          },
         }),
       },
       $transaction: async (cb: (t: unknown) => Promise<unknown>) => cb(tx),
@@ -524,6 +546,82 @@ describe('EntitlementBoundaryService (T-008)', () => {
         data: { resetAnchorAt: null },
       }]);
       assert.equal(epochReads, 0);
+    } finally {
+      if (previous === undefined) delete process.env.ADDON_RESET_EXPIRY_MONTH_ROLLING;
+      else process.env.ADDON_RESET_EXPIRY_MONTH_ROLLING = previous;
+    }
+  });
+
+  it('reads the MONTH_ROLLING anchor by the recorded numeric id when the stored id is a stale 2.x uuid', async () => {
+    // The upgraded-panel case. It matters more here than it looks: `getPanelUser`
+    // returns null for a profile it cannot address, which this service reads as
+    // "no createdAt" and turns into a null anchor — the same value a genuinely
+    // unreachable panel produces. The term would then anchor its reset window to
+    // nothing, silently, for a profile that is alive and answering.
+    const previous = process.env.ADDON_RESET_EXPIRY_MONTH_ROLLING;
+    process.env.ADDON_RESET_EXPIRY_MONTH_ROLLING = 'true';
+    const staleUuid = '330f2b38-1362-46ab-b5c0-dea32167eff9';
+    const panelCreatedAt = new Date('2025-01-31T08:00:00.000Z');
+    const panelRefs: unknown[] = [];
+    const termUpdates: unknown[] = [];
+    const tx = {
+      subscriptionTerm: {
+        findFirst: async () => ({
+          id: 'term-upgraded',
+          startsAt: new Date('2026-07-31T08:00:00.000Z'),
+          trafficResetStrategy: 'MONTH_ROLLING',
+          resetAnchorAt: null,
+        }),
+        update: async (input: unknown) => { termUpdates.push(input); },
+      },
+      subscriptionResetEpoch: {
+        findUnique: async () => ({
+          id: 'epoch-existing',
+          startsAt: new Date('2026-06-30T08:00:00.000Z'),
+          plannedEndsAt: new Date('2026-07-31T08:00:00.000Z'),
+        }),
+      },
+      addOnEntitlement: { findMany: async () => [] },
+    };
+    const service = new EntitlementBoundaryService(
+      {
+        subscriptionTerm: {
+          findFirst: async () => ({
+            id: 'term-upgraded',
+            subscription: {
+              remnawaveId: staleUuid,
+              remnawavePanelId: 8123,
+              remnawavePanelUsername: 'rz_alice_sub',
+            },
+          }),
+        },
+        $transaction: async (cb: (t: unknown) => Promise<unknown>) => cb(tx),
+      } as never,
+      { transitionInTransaction: async () => ({ changed: false }) } as never,
+      { activateInTransaction: async () => ({ id: 'term-upgraded', status: 'ACTIVE', changed: true }) } as never,
+      { recomputeInTransaction: async () => ({ desiredRevision: 1n, changed: false }) } as never,
+      {
+        getPanelUser: async (ref: unknown) => {
+          panelRefs.push(ref);
+          return { createdAt: panelCreatedAt.toISOString() };
+        },
+      } as never,
+    );
+
+    try {
+      await service.activateDueScheduledTerm('sub-1', new Date('2026-07-31T08:00:00.000Z'));
+
+      assert.deepStrictEqual(panelRefs, [
+        { remnawaveId: staleUuid, panelId: 8123, panelUsername: 'rz_alice_sub' },
+      ]);
+      assert.deepStrictEqual(panelUserAddress(panelRefs[0] as StoredPanelIdentity, 'id'), {
+        kind: 'ready',
+        segment: '8123',
+      });
+      assert.deepEqual(termUpdates, [{
+        where: { id: 'term-upgraded' },
+        data: { resetAnchorAt: panelCreatedAt },
+      }]);
     } finally {
       if (previous === undefined) delete process.env.ADDON_RESET_EXPIRY_MONTH_ROLLING;
       else process.env.ADDON_RESET_EXPIRY_MONTH_ROLLING = previous;

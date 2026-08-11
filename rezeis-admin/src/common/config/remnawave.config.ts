@@ -5,8 +5,6 @@ interface RemnawaveConfiguration {
   readonly port: number | null;
   readonly token: string | null;
   readonly webhookSecret: string | null;
-  readonly caddyToken: string | null;
-  readonly cookie: string | null;
 }
 
 export const remnawaveConfig = registerAs(
@@ -16,8 +14,6 @@ export const remnawaveConfig = registerAs(
     port: normalizeOptionalNumber(process.env.REMNAWAVE_PORT),
     token: normalizeOptional(process.env.REMNAWAVE_TOKEN),
     webhookSecret: normalizeOptional(process.env.REMNAWAVE_WEBHOOK_SECRET),
-    caddyToken: normalizeOptional(process.env.REMNAWAVE_CADDY_TOKEN),
-    cookie: normalizeOptional(process.env.REMNAWAVE_COOKIE),
   }),
 );
 

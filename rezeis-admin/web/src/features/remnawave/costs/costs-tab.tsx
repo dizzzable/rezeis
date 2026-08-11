@@ -4,7 +4,7 @@
  * WHAT THIS TABLE CAN HONESTLY SHOW. The panel sends, per provider, a lifetime
  * bill tally (`billingHistory.totalAmount` / `.totalBills`) and the list of
  * nodes it bills for (`billingNodes`). It sends NO provider type, NO monthly
- * figure and — checked against both 2.7.4 and 2.8.0 — NO currency anywhere.
+ * figure and — checked against 2.7.4, 2.8.0 and 3.2.1 — NO currency anywhere.
  * The table used to have a Type column, a Nodes column and a Monthly-cost
  * column reading fields that exist in neither spec, so every row read
  * `— / 0 / (blank)`. Those three are replaced by the three the panel does
@@ -37,6 +37,7 @@ import { NodeFlag } from '../remnawave-flags'
 import { KEYS } from '../remnawave-query-keys'
 import { EndpointDegraded } from '../shared/endpoint-degraded'
 import { TabHeader } from '../shared/tab-header'
+import { truncate } from '@/lib/utils'
 
 export function CostsTab() {
   const { t } = useTranslation()
@@ -102,7 +103,7 @@ export function CostsTab() {
                       ) : (
                         <p className="font-medium">{p.name}</p>
                       )}
-                      <p className="font-mono text-[10px] text-muted-foreground/70">{p.uuid.slice(0, 8)}…</p>
+                      <p className="font-mono text-[10px] text-muted-foreground/70">{truncate(p.uuid, 8)}</p>
                     </TableCell>
                     <TableCell className="text-right">
                       <div className="ml-auto flex max-w-fit items-center gap-1">
@@ -110,8 +111,9 @@ export function CostsTab() {
                         {p.billingNodes.length > 0 ? (
                           <div className="flex items-center -space-x-1">
                             {p.billingNodes.slice(0, 4).map((n, i) => (
-                              // `nodeUuid` is null on an orphaned 2.8.0 billing
-                              // line, so it cannot carry the key on its own.
+                              // `nodeUuid` is null on an orphaned billing line
+                              // — first seen on 2.8.0, not fixed since — so it
+                              // cannot carry the key on its own.
                               <NodeFlag
                                 key={n.nodeUuid ?? `${p.uuid}:${i}`}
                                 code={n.countryCode}
@@ -124,7 +126,7 @@ export function CostsTab() {
                       </div>
                     </TableCell>
                     <TableCell className="text-right tabular-nums">{p.billsCount}</TableCell>
-                    {/* No currency: the panel reports none on either version. */}
+                    {/* No currency: none of the three panels sends one — header. */}
                     <TableCell className="text-right tabular-nums">{p.billedTotalAmount.toFixed(2)}</TableCell>
                   </TableRow>
                 ))}

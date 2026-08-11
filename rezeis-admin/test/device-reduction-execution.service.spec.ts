@@ -2,6 +2,10 @@ import assert from 'node:assert/strict';
 import { afterEach, describe, it } from 'node:test';
 
 import { DeviceReductionExecutionService } from '../src/modules/add-on-entitlements/services/device-reduction-execution.service';
+import {
+  panelUserAddress,
+  type StoredPanelIdentity,
+} from '../src/modules/remnawave/services/panel-user-address';
 
 const ORIGINAL_FLAG = process.env['ADDON_DEVICE_CLEANUP_AUTO'];
 afterEach(() => {
@@ -20,10 +24,31 @@ function okList(...hwids: string[]) {
   };
 }
 
+/**
+ * A subscription row as Prisma returns it once the guard's select asks for the
+ * panel identity.
+ *
+ * Both supplementary columns are populated by DEFAULT: every supported panel
+ * version carries a numeric `id` and a `username` on every user row, so both
+ * are recorded when the profile is linked. Omitting them from the fake would
+ * hide the case this saga is most exposed to — it deletes, and an identity it
+ * cannot name is an identity it cannot verify a delete against.
+ */
+function subscriptionRow(patch: Record<string, unknown> = {}) {
+  return {
+    remnawaveId: 'rem-1',
+    remnawavePanelId: 4711,
+    remnawavePanelUsername: 'rz_alice_sub',
+    status: 'ACTIVE',
+    ...patch,
+  };
+}
+
 interface Opts {
   plan?: Record<string, unknown> | null;
   projection?: { desiredRevision: bigint; desiredDeviceLimit: number | null } | null;
-  subscription?: { remnawaveId: string | null; status: string } | null;
+  subscription?: Record<string, unknown> | null;
+  subscriptionQueue?: Array<Record<string, unknown> | null>;
   listQueue?: unknown[];
   deleteResults?: unknown[];
   completionOutcome?: { readonly status: 'COMPLETED' | 'SUPERSEDED'; readonly completed: number };
@@ -33,6 +58,7 @@ function build(opts: Opts = {}) {
   const planUpdates: Array<Record<string, unknown>> = [];
   const incidents: Array<Record<string, unknown>> = [];
   const deleteCalls: string[] = [];
+  const panelRefs: unknown[] = [];
   const completedSubscriptions: string[] = [];
   const completionRevisions: bigint[] = [];
   const listQueue = [...(opts.listQueue ?? [])];
@@ -65,8 +91,16 @@ function build(opts: Opts = {}) {
           : opts.projection,
     },
     subscription: {
-      findUnique: async () =>
-        opts.subscription === undefined ? { remnawaveId: 'rem-1', status: 'ACTIVE' } : opts.subscription,
+      // A queue when a test needs the row to CHANGE between the guard taken
+      // before the loop and the re-guard taken inside it — the only way to
+      // express a concurrent relink, which is a different event from a delete
+      // or a revision bump and has its own supersede reason.
+      findUnique: async () => {
+        if (opts.subscriptionQueue !== undefined) {
+          return opts.subscriptionQueue.shift() ?? subscriptionRow();
+        }
+        return opts.subscription === undefined ? subscriptionRow() : opts.subscription;
+      },
     },
     entitlementIncident: {
       upsert: async (args: { create: Record<string, unknown> }) => {
@@ -77,8 +111,12 @@ function build(opts: Opts = {}) {
   };
 
   const remnawave = {
-    strictListUserDevices: async () => (listQueue.length > 0 ? listQueue.shift() : okList('old')),
-    strictDeleteUserDevice: async (_uuid: string, hwid: string) => {
+    strictListUserDevices: async (ref: unknown) => {
+      panelRefs.push(ref);
+      return listQueue.length > 0 ? listQueue.shift() : okList('old');
+    },
+    strictDeleteUserDevice: async (ref: unknown, hwid: string) => {
+      panelRefs.push(ref);
       deleteCalls.push(hwid);
       return deleteResults.length > 0 ? deleteResults.shift() : { kind: 'ok', value: { total: 1 }, detectedVersion: '2.8.0' };
     },
@@ -105,6 +143,7 @@ function build(opts: Opts = {}) {
     planUpdates,
     incidents,
     deleteCalls,
+    panelRefs,
     completedSubscriptions,
     completionRevisions,
   };
@@ -161,12 +200,73 @@ describe('DeviceReductionExecutionService (T-011c)', () => {
     assert.equal(planUpdates.some((d) => d.state === 'SUPERSEDED'), true);
   });
 
+  it('marks SUPERSEDED when the profile is RELINKED mid-saga, without touching the old one', async () => {
+    // The gap the other supersede checks leave open. `loadGuard` reports a
+    // relinked subscription as a perfectly healthy `ok` — it only refuses a
+    // DELETED subscription, an advanced revision, a relaxed limit and a
+    // DETACHED (null) profile. So the loop used to keep addressing the profile
+    // the plan was built against: the wrong profile loses devices, and the
+    // read-back then blesses a limit that was never applied to the live one.
+    enableAuto();
+    const { service, planUpdates, deleteCalls } = build({
+      subscriptionQueue: [
+        subscriptionRow(),
+        // A relink between the guard and the first delete: same subscription,
+        // different panel profile.
+        subscriptionRow({ remnawaveId: 'rem-2', remnawavePanelId: 5122, remnawavePanelUsername: 'rz_alice_sub_2' }),
+      ],
+    });
+
+    const outcome = await service.executePlan('plan-1');
+
+    assert.equal(outcome.status, 'SUPERSEDED');
+    assert.deepEqual(deleteCalls, [], 'not one device may be removed from either profile');
+    const superseded = planUpdates.find((d) => d.state === 'SUPERSEDED');
+    assert.notEqual(superseded, undefined);
+    // A distinct reason, not folded into the generic one: an operator reading
+    // the plan has to be able to tell a relink from a revision bump.
+    assert.equal(superseded?.lastErrorCode, 'PANEL_PROFILE_RELINKED');
+  });
+
   it('marks SUPERSEDED when the subscription was deleted (profile DELETE priority)', async () => {
     enableAuto();
-    const { service, deleteCalls } = build({ subscription: { remnawaveId: 'rem-1', status: 'DELETED' } });
+    const { service, deleteCalls } = build({ subscription: subscriptionRow({ status: 'DELETED' }) });
     const outcome = await service.executePlan('plan-1');
     assert.equal(outcome.status, 'SUPERSEDED');
     assert.deepEqual(deleteCalls, []);
+  });
+
+  it('addresses every panel call with the recorded numeric id when the stored id is a stale 2.x uuid', async () => {
+    // The upgraded-panel case: created on 2.x, panel now 3.x, uuid destroyed by
+    // the panel's own migration. Each pass re-reads the row, so the identity has
+    // to survive the guard — a delete addressed by the dead uuid would fail
+    // validation and strand the saga short of the limit it was built to restore.
+    enableAuto();
+    const staleUuid = '330f2b38-1362-46ab-b5c0-dea32167eff9';
+    const { service, deleteCalls, panelRefs } = build({
+      subscription: subscriptionRow({ remnawaveId: staleUuid, remnawavePanelId: 8123 }),
+      listQueue: [okList('old', 'new'), okList('old')],
+      deleteResults: [{ kind: 'ok', value: { total: 1 }, detectedVersion: '3.2.1' }],
+    });
+
+    const outcome = await service.executePlan('plan-1');
+
+    assert.equal(outcome.status, 'APPLIED');
+    assert.deepEqual(deleteCalls, ['new']);
+    // List, delete and the final read-back all carry the full identity — the
+    // delete included, which is the one that destroys something.
+    assert.equal(panelRefs.length, 3);
+    for (const ref of panelRefs) {
+      assert.deepStrictEqual(ref, {
+        remnawaveId: staleUuid,
+        panelId: 8123,
+        panelUsername: 'rz_alice_sub',
+      });
+      assert.deepStrictEqual(panelUserAddress(ref as StoredPanelIdentity, 'id'), {
+        kind: 'ready',
+        segment: '8123',
+      });
+    }
   });
 
   it('DEFERS without deleting when the panel is unavailable', async () => {

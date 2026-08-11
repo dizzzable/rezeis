@@ -6,6 +6,7 @@ import { Prisma, SubscriptionStatus } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { remnawaveConfig } from '../../../common/config/remnawave.config';
+import { isNumericPanelIdentity } from './panel-user-address';
 import {
   EVENT_TYPES,
   SystemEventsService,
@@ -131,6 +132,110 @@ function normalizeRemnawaveEventName(eventType: string): string {
     return `${lower.slice(0, idx)}.${lower.slice(idx + 1)}`;
   }
   return lower;
+}
+
+/**
+ * A panel id as it may appear in webhook JSON: decimal digits and nothing else.
+ * No sign, no separators, no exponent — the very shape `isNumericPanelIdentity`
+ * (`panel-user-address.ts`) uses to tell a stored 3.x id from a 2.x uuid. The
+ * identity minted below is later classified by THAT predicate, so a string this
+ * one accepted but that one would not (`-5`, `1e3`, `12.0`) would be addressed
+ * to a 3.x panel as though it were a uuid.
+ */
+const DECIMAL_PANEL_ID = /^\d+$/;
+
+/**
+ * Coerces a numeric panel id out of untrusted webhook JSON.
+ *
+ * A number OR a decimal string, because a webhook body is whatever the sender
+ * serialized: a 3.x panel sends `id` as a JSON number, but a relay or queue hop
+ * that round-trips the body through a string-typed store hands it back quoted,
+ * and refusing those would take the identity away again for no reason.
+ *
+ * The digits-only test is doing the real work here.
+ * `Number.parseInt('330f2b38-9c41-…')` answers `330` — a valid-LOOKING id that
+ * belongs to a different customer — so a uuid-shaped string in the id slot has
+ * to be REFUSED, never parsed. Testing the whole trimmed string first and only
+ * then converting makes that impossible; it also rejects `''`, which `Number()`
+ * would otherwise turn into `0`, i.e. into somebody's id.
+ */
+function readNumericPanelId(value: unknown): number | null {
+  if (typeof value === 'number') {
+    return Number.isSafeInteger(value) && value >= 0 ? value : null;
+  }
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!DECIMAL_PANEL_ID.test(trimmed)) return null;
+  const parsed = Number(trimmed);
+  // Past 2^53 the decimal text and the number stop agreeing, so the id we would
+  // mint is not the id the panel sent.
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+/**
+ * Reads the panel user's identity out of a webhook payload, in EXACTLY the form
+ * `Subscription.remnawaveId` holds it — a 2.x UUID, or a 3.x numeric id in
+ * decimal. Every consumer in this file compares the result against that column
+ * (`reconcileSubscriptionFromEvent`'s `updateMany`, `resolveLocalUserContext`'s
+ * `findFirst`, and through it the first-connection panel read), so a value in
+ * any other shape names nobody and each of them silently does nothing.
+ *
+ * WHICH KEY IS THE IDENTITY depends on the panel era, and the payload itself
+ * says which — the same rule, for the same reason, as `parsePanelUserRow` and
+ * `parseStrictUser` in `remnawave-api.service.ts`:
+ *   • `uuid` present → 2.7.4 / 2.8.x. That is the identity.
+ *   • `uuid` ABSENT  → 3.x, which deleted the column outright and re-keyed every
+ *                      user on the numeric `id`; no payload from such a panel
+ *                      carries a uuid anywhere. The identity is `String(id)`.
+ *
+ * The test is ABSENCE (`=== undefined`), never emptiness, and collapsing the two
+ * costs a customer: a 2.x payload whose `uuid` came back `''` (or null, or a
+ * number) is DAMAGED, and falling back to its numeric id there would mint a key
+ * that matches no `remnawaveId` stored in that era — turning "we could not read
+ * this event" into "this event is about 4821", who is somebody else. Damaged
+ * stays unidentified.
+ *
+ * Before this the read was `str('uuid') ?? str('userUuid')`, which a 3.x payload
+ * satisfies neither half of, so the identity was simply never set and all three
+ * consumers no-opped with no error and no log — an Activity Feed that filled
+ * while nothing reconciled.
+ */
+/**
+ * The `where` that finds the local row a panel event is about.
+ *
+ * `remnawaveId` alone is not enough, and the gap is the mirror image of the one
+ * `panelUserAddress` closes outbound. A profile created on 2.x keeps its uuid in
+ * `remnawaveId` after the operator upgrades to 3.x — the panel's migration drops
+ * the uuid, we do not — but from then on the panel's events carry only the
+ * numeric `id`. Matching on `remnawaveId` alone would miss that row on every
+ * event, silently, for the rest of its life.
+ *
+ * `remnawavePanelId` is the second recorded angle on the SAME identity, so
+ * adding it widens the match without loosening it — this is not a fuzzy search.
+ * The numeric arm is added only when the identity is entirely digits: without
+ * that test `Number.parseInt('330f2b38-…')` yields `330`, a valid-looking id
+ * belonging to somebody else.
+ */
+export function panelIdentityWhere(identity: string): Prisma.SubscriptionWhereInput {
+  if (!isNumericPanelIdentity(identity)) return { remnawaveId: identity };
+  const panelId = Number.parseInt(identity, 10);
+  if (!Number.isSafeInteger(panelId)) return { remnawaveId: identity };
+  return { OR: [{ remnawaveId: identity }, { remnawavePanelId: panelId }] };
+}
+
+function readWebhookPanelIdentity(payload: Record<string, unknown>): string | null {
+  const data =
+    payload['data'] !== null && typeof payload['data'] === 'object'
+      ? (payload['data'] as Record<string, unknown>)
+      : payload;
+  // `userUuid` is the legacy spelling and stands in only when `uuid` is not a
+  // key at all, so a damaged `uuid` cannot be rescued by it either.
+  const uuidSlot = data['uuid'] !== undefined ? data['uuid'] : data['userUuid'];
+  if (uuidSlot !== undefined) {
+    return typeof uuidSlot === 'string' && uuidSlot.length > 0 ? uuidSlot : null;
+  }
+  const numericId = readNumericPanelId(data['id']) ?? readNumericPanelId(data['userId']);
+  return numericId === null ? null : String(numericId);
 }
 
 /**
@@ -384,6 +489,22 @@ export class RemnawaveWebhookService {
     // source of truth for runtime state; rezeis still owns commercial fields
     // (plan snapshot, price, isTrial), which this never touches.
     if (normalized.startsWith('user.')) {
+      // Attribution first, and out loud. Everything below keys the local
+      // profile off the panel identity, and when that cannot be read they ALL
+      // do nothing: reconcile returns, the reverse lookup finds no
+      // subscription, the first-connection card omits its traffic counter —
+      // three no-ops with no error and no log between them. That silence is
+      // precisely what hid a whole panel version (3.x sends no `uuid`, and the
+      // extractor only looked for one) until someone noticed by hand. One warn
+      // naming the event is what makes the next such gap visible on day one.
+      // Emitted once per webhook, here rather than in each consumer, so a
+      // damaged payload costs one line and not three.
+      if (readWebhookPanelIdentity(payload) === null) {
+        this.logger.warn(
+          `Remnawave webhook ${eventType}: no panel user identity in the payload ` +
+            '(no uuid key, and no usable numeric id) — reconcile and the local user lookup are skipped',
+        );
+      }
       try {
         await this.reconcileSubscriptionFromEvent(normalized, payload);
       } catch (err: unknown) {
@@ -452,10 +573,10 @@ export class RemnawaveWebhookService {
    * panel is asked only when there is nothing to show otherwise.
    *
    * Best-effort throughout, because a card is not worth failing a webhook over:
-   * `getPanelUserUsage` swallows its own errors and answers `null`, a missing
-   * uuid skips the read entirely, and every failure leaves the metadata exactly
-   * as it arrived. Cost is one REST read per user per lifetime — the event
-   * fires once, by definition.
+   * `getPanelUserUsage` swallows its own errors and answers `null`, an
+   * unidentified payload skips the read entirely, and every failure leaves the
+   * metadata exactly as it arrived. Cost is one REST read per user per lifetime
+   * — the event fires once, by definition.
    *
    * The limit is taken too, but only to fill a gap: without it the line renders
    * as a bare figure with nothing to compare against.
@@ -476,11 +597,11 @@ export class RemnawaveWebhookService {
    * Losing the race costs the traffic line and nothing else.
    */
   private async readPanelUsageBounded(
-    uuid: string,
+    remnawaveId: string,
   ): Promise<Awaited<ReturnType<RemnawaveApiService['getPanelUserUsage']>>> {
     let timer: NodeJS.Timeout | undefined;
     const read = Promise.resolve()
-      .then(() => this.remnawaveApiService.getPanelUserUsage(uuid))
+      .then(() => this.remnawaveApiService.getPanelUserUsage(remnawaveId))
       .catch(() => null);
     const deadline = new Promise<null>((resolve) => {
       timer = setTimeout(() => resolve(null), PANEL_USAGE_READ_TIMEOUT_MS);
@@ -496,12 +617,18 @@ export class RemnawaveWebhookService {
     metadata: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
     if (typeof metadata['usedTrafficBytes'] === 'number') return metadata;
-    const uuid = typeof metadata['remnawaveId'] === 'string' ? metadata['remnawaveId'] : null;
-    if (uuid === null || uuid.length === 0) return metadata;
+    // Whatever `extractEventMetadata` could name the profile by — a 2.x uuid or
+    // a 3.x numeric id. `getPanelUserUsage` takes a stored `remnawaveId` and
+    // builds the address for the panel's own era, so both forms are routable.
+    const remnawaveId =
+      typeof metadata['remnawaveId'] === 'string' ? metadata['remnawaveId'] : null;
+    if (remnawaveId === null || remnawaveId.length === 0) return metadata;
 
-    const usage = await this.readPanelUsageBounded(uuid);
+    const usage = await this.readPanelUsageBounded(remnawaveId);
     if (usage === null) {
-      this.logger.warn(`First-connection traffic read failed for ${uuid}; card omits the counter`);
+      this.logger.warn(
+        `First-connection traffic read failed for ${remnawaveId}; card omits the counter`,
+      );
       return metadata;
     }
     if (usage.usedTrafficBytes === null) return metadata;
@@ -540,8 +667,11 @@ export class RemnawaveWebhookService {
       return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
     };
 
-    const uuid = str('uuid') ?? str('userUuid');
-    if (uuid === undefined) return;
+    // 2.x uuid or 3.x numeric id, whichever this payload's era provides — see
+    // `readWebhookPanelIdentity`. This is matched against `remnawaveId` below,
+    // so it must be the string that column holds and nothing else.
+    const remnawaveId = readWebhookPanelIdentity(payload);
+    if (remnawaveId === null) return;
 
     const update: Prisma.SubscriptionUpdateManyMutationInput = {};
 
@@ -576,12 +706,12 @@ export class RemnawaveWebhookService {
     if (Object.keys(update).length === 0) return;
 
     const result = await this.prismaService.subscription.updateMany({
-      where: { remnawaveId: uuid, status: { not: SubscriptionStatus.DELETED } },
+      where: { ...panelIdentityWhere(remnawaveId), status: { not: SubscriptionStatus.DELETED } },
       data: update,
     });
     if (result.count > 0) {
       this.logger.log(
-        `Reconciled ${result.count} subscription(s) from panel event ${normalizedEvent} (uuid=${uuid})`,
+        `Reconciled ${result.count} subscription(s) from panel event ${normalizedEvent} (remnawaveId=${remnawaveId})`,
       );
     }
   }
@@ -661,7 +791,7 @@ export class RemnawaveWebhookService {
 
     if (remnawaveId !== null) {
       const subscription = await this.prismaService.subscription.findFirst({
-        where: { remnawaveId, status: { not: SubscriptionStatus.DELETED } },
+        where: { ...panelIdentityWhere(remnawaveId), status: { not: SubscriptionStatus.DELETED } },
         orderBy: { updatedAt: 'desc' },
         select: {
           id: true,
@@ -755,7 +885,20 @@ export class RemnawaveWebhookService {
     const username = str('username');
     if (username) meta['remnawaveUsername'] = username;
     const uuid = str('uuid') ?? str('userUuid');
-    if (uuid) meta['remnawaveId'] = uuid;
+    // Panel identity, in the shape `Subscription.remnawaveId` holds — on a 3.x
+    // panel that is the numeric `id`, because there is no uuid to be had (see
+    // `readWebhookPanelIdentity`).
+    //
+    // Node-scoped events deliberately keep the OLD, uuid-only read. A node row
+    // still carries a `uuid` in every supported version (3.2.x `NodesSchema`
+    // declares one next to its `id`), so the numeric fallback has nothing to do
+    // there — and it must not fire: this key is compared against
+    // `Subscription.remnawaveId`, where node `id: 12` and customer `id: 12` are
+    // the same string, and a malformed node event would otherwise name a
+    // customer chosen by coincidence.
+    const isNodeEvent = eventType.toLowerCase().includes('node');
+    const identity = isNodeEvent ? uuid ?? null : readWebhookPanelIdentity(payload);
+    if (identity !== null) meta['remnawaveId'] = identity;
     const telegramId = str('telegramId') ?? (num('telegramId') !== undefined ? String(num('telegramId')) : undefined);
     if (telegramId) meta['telegramId'] = telegramId;
     const expireAt = str('expireAt');
@@ -792,14 +935,14 @@ export class RemnawaveWebhookService {
 
     // Node-scoped fields
     const nodeName = str('name') ?? str('nodeName');
-    if (nodeName && eventType.toLowerCase().includes('node')) meta['nodeName'] = nodeName;
+    if (nodeName && isNodeEvent) meta['nodeName'] = nodeName;
     const nodeUuid = str('nodeUuid');
     if (nodeUuid) meta['nodeUuid'] = nodeUuid;
-    else if (eventType.toLowerCase().includes('node') && uuid) meta['nodeUuid'] = uuid;
+    else if (isNodeEvent && uuid) meta['nodeUuid'] = uuid;
     const countryCode = str('countryCode');
     if (countryCode) meta['countryCode'] = countryCode;
     const address = str('address');
-    if (address && eventType.toLowerCase().includes('node')) meta['nodeAddress'] = address;
+    if (address && isNodeEvent) meta['nodeAddress'] = address;
 
     return meta;
   }

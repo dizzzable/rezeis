@@ -1948,7 +1948,7 @@ export const en = {
         },
         maxNodesPerRun: {
           label: 'Max nodes probed per run',
-          hint: 'Bounds the load the ip-control jobs put on your nodes.',
+          hint: 'Bounds the load the live-connection probes put on your nodes.',
         },
         maxIpsInMetadata: {
           label: 'Max IP samples stored per signal',
@@ -1959,11 +1959,14 @@ export const en = {
     traffic: {
       title: 'Per-user node traffic abuse',
       description:
-        'Advisory detector for users whose bandwidth is a clear outlier. Requires Remnawave 2.8+ and activates automatically once the panel reports it.',
+        'Advisory detector for users whose bandwidth is a clear outlier. Requires Remnawave 2.8 or newer, 3.x included, and activates automatically once the panel reports the capability.',
       fields: {
         enabled: {
           label: 'Traffic abuse detector',
-          hint: 'Also gated by the Remnawave 2.8 capability \u2014 off on older panels regardless.',
+          // A field hint is read on its own, with the section description
+          // scrolled off or never read, so it cannot point at "that panel
+          // capability" — both halves have to name their own subject.
+          hint: 'Also needs the panel’s per-node bandwidth endpoint, added in 2.8 — on panels older than that the detector stays off whatever this switch says.',
         },
         minGb: {
           label: 'Absolute floor (GB)',
@@ -2531,12 +2534,12 @@ export const en = {
       detected: 'Panel version: {{version}}',
       unknown: 'Panel version unknown',
       allVersions: 'works on all versions',
-      needs28: 'needs 2.8+',
+      needs28: 'needs 2.8 or newer (3.x included)',
       active: 'active',
       hwid: 'Device over-limit (HWID)',
       ipSharing: 'IP / network sharing',
       perUserTraffic: 'Per-user traffic',
-      note: '2.8+ detectors activate automatically once the panel upgrades.',
+      note: 'Detectors that depend on the panel switch themselves on as soon as it starts serving the API they read.',
     },
     stats: {
       open: 'Open',

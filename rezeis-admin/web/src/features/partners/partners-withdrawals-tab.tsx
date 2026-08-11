@@ -12,7 +12,7 @@ import {
 } from 'lucide-react'
 import { toast } from 'sonner'
 
-import { formatDateTime } from '@/lib/utils'
+import { formatDateTime, truncate } from '@/lib/utils'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -290,7 +290,7 @@ export default function PartnersWithdrawalsTab() {
                   const partnerName =
                     row.partner?.user?.name ??
                     row.partner?.user?.username ??
-                    `partner ${row.partnerId.slice(0, 8)}`
+                    `partner ${truncate(row.partnerId, 8)}`
                   return (
                     <TableRow key={row.id}>
                       <TableCell>

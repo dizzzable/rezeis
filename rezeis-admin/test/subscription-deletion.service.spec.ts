@@ -7,16 +7,45 @@ import fc from 'fast-check';
 
 import { EVENT_TYPES } from '../src/common/services/system-events.service';
 import { USER_EVENT_WHITELIST } from '../src/modules/realtime/interfaces/user-realtime-event.interface';
+import {
+  panelUserAddress,
+  type StoredPanelIdentity,
+} from '../src/modules/remnawave/services/panel-user-address';
 import { SubscriptionDeletionService } from '../src/modules/subscriptions/services/subscription-deletion.service';
 
+/** The subscription row as the `FOR UPDATE` read returns it. */
+interface LockedRow {
+  id: string;
+  userId: string;
+  status: SubscriptionStatus;
+  remnawaveId: string | null;
+  remnawavePanelId: number | null;
+  remnawavePanelUsername: string | null;
+  expiresAt?: Date | null;
+}
+
+type LockedRowSeed = Partial<LockedRow> &
+  Pick<LockedRow, 'id' | 'userId' | 'status' | 'remnawaveId'>;
+
+/**
+ * Fills the two supplementary identity columns unless a test overrides them.
+ *
+ * They default to present because a real row HAS them: both 2.x and 3.x return
+ * a numeric id and a username on every user read, so they accumulate long
+ * before anyone upgrades. A fake row carrying only `remnawaveId` would let a
+ * DELETE payload that drops them keep passing while leaving the doomed profile
+ * unnameable on an upgraded panel — which is exactly the leak under test.
+ */
+function lockedRow(seed: LockedRowSeed): LockedRow {
+  return {
+    remnawavePanelId: 4471,
+    remnawavePanelUsername: 'rz_bob_1',
+    ...seed,
+  };
+}
+
 interface FakeState {
-  subscription: {
-    id: string;
-    userId: string;
-    status: SubscriptionStatus;
-    remnawaveId: string | null;
-    expiresAt?: Date | null;
-  } | null;
+  subscription: LockedRow | null;
   createdJobs: Array<{
     subscriptionId: string;
     action: SyncAction;
@@ -35,7 +64,7 @@ interface FakeState {
   loggedErrors: string[];
   lifecycleCalls: Array<{ kind: 'entitlements' | 'terms'; subscriptionId: string; tx: unknown }>;
   deletionWork: string[];
-  lockedSubscription?: FakeState['subscription'];
+  lockedSubscription?: LockedRow | null;
 }
 
 function buildService(state: FakeState) {
@@ -144,10 +173,10 @@ function buildService(state: FakeState) {
 }
 
 function freshState(
-  sub: FakeState['subscription'],
+  sub: LockedRowSeed | null,
 ): FakeState {
   return {
-    subscription: sub,
+    subscription: sub === null ? null : lockedRow(sub),
     createdJobs: [],
     updatedStatus: null,
     enqueued: [],
@@ -174,6 +203,15 @@ describe('SubscriptionDeletionService', () => {
     assert.equal(state.updatedStatus, SubscriptionStatus.DELETED);
     assert.equal(state.createdJobs.length, 1);
     assert.equal(state.createdJobs[0]?.action, SyncAction.DELETE);
+    // The whole identity travels in the payload. It has to: the job outlives
+    // the row, which may be re-provisioned onto a different profile — or have
+    // its identity columns cleared — long before the worker reads it.
+    assert.deepStrictEqual(state.createdJobs[0]?.payload, {
+      source: 'SELF_SERVICE_DELETE',
+      targetRemnawaveId: 'rw-1',
+      targetRemnawavePanelId: 4471,
+      targetRemnawavePanelUsername: 'rz_bob_1',
+    });
     assert.deepStrictEqual(state.enqueued, ['job-1']);
     assert.deepStrictEqual(state.emittedEvents, [
       {
@@ -234,12 +272,12 @@ describe('SubscriptionDeletionService', () => {
       status: SubscriptionStatus.ACTIVE,
       remnawaveId: 'rw-1',
     });
-    state.lockedSubscription = {
+    state.lockedSubscription = lockedRow({
       id: 'sub-race',
       userId: 'user-1',
       status: SubscriptionStatus.DELETED,
       remnawaveId: 'rw-1',
-    };
+    });
     const service = buildService(state);
 
     assert.deepEqual(await service.deleteByOperator('sub-race'), {
@@ -252,6 +290,45 @@ describe('SubscriptionDeletionService', () => {
     assert.deepEqual(state.deletionWork, []);
     assert.deepEqual(state.enqueued, []);
     assert.deepEqual(state.emittedEvents, []);
+  });
+
+  it('carries the recorded numeric id in the DELETE payload when remnawaveId is a stale 2.x uuid', async () => {
+    // Created on 2.x, panel since upgraded to 3.x, nothing re-synced. The
+    // stored string names nothing on that panel, and by the time the worker
+    // runs the row it came from may be gone — so if the numeric id does not
+    // travel WITH the job, the profile is never deleted and never noticed.
+    const staleUuid = 'f47ac10b-58cc-4372-a567-0e02b2c3d479';
+    const state = freshState({
+      id: 'sub-upgraded',
+      userId: 'user-1',
+      status: SubscriptionStatus.ACTIVE,
+      remnawaveId: staleUuid,
+      remnawavePanelId: 4471,
+      remnawavePanelUsername: 'rz_bob_1',
+    });
+    const service = buildService(state);
+
+    await service.delete({ userId: 'user-1', subscriptionId: 'sub-upgraded' });
+
+    assert.equal(state.createdJobs.length, 1);
+    const payload = state.createdJobs[0]?.payload as Record<string, unknown>;
+    assert.equal(payload['targetRemnawaveId'], staleUuid);
+    assert.equal(payload['targetRemnawavePanelId'], 4471);
+    assert.equal(payload['targetRemnawavePanelUsername'], 'rz_bob_1');
+    // Asserted through the real addressing function: what the payload carries
+    // must be enough to BUILD a 3.x path, not merely enough to look complete.
+    const fromPayload: StoredPanelIdentity = {
+      remnawaveId: payload['targetRemnawaveId'] as string,
+      panelId: payload['targetRemnawavePanelId'] as number | null,
+      panelUsername: payload['targetRemnawavePanelUsername'] as string | null,
+    };
+    assert.deepStrictEqual(panelUserAddress(fromPayload, 'id'), { kind: 'ready', segment: '4471' });
+    // Counter-check: `targetRemnawaveId` alone — all the payload used to carry
+    // — names nothing on that panel.
+    assert.equal(
+      panelUserAddress({ remnawaveId: staleUuid, panelId: null, panelUsername: null }, 'id').kind,
+      'impossible',
+    );
   });
 
   it('is idempotent: deleting an already-DELETED subscription is a no-op success', async () => {

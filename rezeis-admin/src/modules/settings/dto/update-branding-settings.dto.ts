@@ -42,6 +42,8 @@ import {
   NavDestinationId,
   SubscriptionCardTextMode,
   SUBSCRIPTION_CARD_TEXT_MODES,
+  BRAND_PALETTE_SOURCES,
+  BrandPaletteSource,
   CARD_GRADIENT_SOURCES,
   CardGradientSource,
 } from '../interfaces/branding-settings.interface';
@@ -656,6 +658,16 @@ export class UpdateBrandingSettingsDto {
   @IsOptional()
   @IsHexColor()
   public bgSecondary?: string;
+
+  /**
+   * Set by the panel alongside the four colours above: `custom` on a manual
+   * edit, `concept` when a preset supplies them. Sending a colour without the
+   * source leaves whatever was stored, so a client that predates this control
+   * cannot silently detach an operator's concept.
+   */
+  @IsOptional()
+  @IsIn(BRAND_PALETTE_SOURCES)
+  public brandPaletteSource?: BrandPaletteSource;
 
   @IsOptional()
   @IsString()

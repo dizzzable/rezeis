@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
+import { Logger } from '@nestjs/common';
+
 import { RemnawaveWebhookService } from '../src/modules/remnawave/services/remnawave-webhook.service';
 
 /**
@@ -235,6 +237,331 @@ describe('RemnawaveWebhookService reconcile (panel → rezeis)', () => {
     const { service, reconciled } = buildService();
     await service.handleEvent('user.modified', { data: { status: 'ACTIVE' } }, null);
     assert.equal(reconciled.length, 0);
+  });
+});
+
+/**
+ * WHO the webhook is about, across all three supported panel versions.
+ *
+ * 2.7.4 and 2.8.x key a user by `uuid`. 3.x DELETED that column and keys every
+ * user by the numeric `id`, so a 3.x panel sends no uuid anywhere — and the
+ * extractor only ever looked for one. `meta.remnawaveId` was therefore never
+ * set on a 3.x panel and the three consumers that key off it all did nothing,
+ * with no error and no log: reconcile returned, the reverse lookup never ran,
+ * and the first-connection card omitted its counter.
+ *
+ * The value has to be what `Subscription.remnawaveId` HOLDS — a 2.x uuid or a
+ * 3.x id in decimal — because that is the column every one of those consumers
+ * compares against. These pin the rule and, just as importantly, its two edges:
+ * a damaged 2.x payload must stay unidentified rather than fall through to a
+ * numeric id that names somebody else, and a uuid-shaped string must never be
+ * parsed into a number.
+ */
+describe('panel user identity across panel versions', () => {
+  /**
+   * A real Remnawave 3.2.x `RemnawaveWebhookUserEvents` envelope.
+   *
+   * Shaped from `ExtendedUsersSchema` in the vendor's own 3.2.2 contract
+   * (`@remnawave/contract-v3`, a devDependency): `id` is a number and the
+   * schema has NO `uuid` property at all. That absence is the whole point of
+   * this fixture — nothing here may add a uuid "for completeness", or the test
+   * stops being about a 3.x panel.
+   */
+  function userEventPayloadV3(options: {
+    readonly event: string;
+    readonly id?: unknown;
+    readonly usedTrafficBytes?: number;
+  }): Record<string, unknown> {
+    return {
+      scope: 'user',
+      event: options.event,
+      timestamp: '2026-08-05T09:14:22.000Z',
+      data: {
+        id: options.id === undefined ? 4821 : options.id,
+        shortUuid: 'aH3kQ9zR2mVt',
+        username: 'anna_vpn',
+        status: 'ACTIVE',
+        trafficLimitBytes: 53_687_091_200,
+        trafficLimitStrategy: 'MONTH',
+        expireAt: '2026-08-08T09:00:00.000Z',
+        telegramId: 858568447,
+        email: 'anna@example.com',
+        description: null,
+        tag: 'RETAIL',
+        hwidDeviceLimit: 3,
+        externalSquadUuid: null,
+        trojanPassword: 'Tr0jan-l1ve-s3cret',
+        vlessUuid: '7c4e1b90-5d62-4a3f-8e19-4b7d0c2a6f85',
+        ssPassword: 'Sh4d0wS0cks-l1ve-s3cret',
+        lastTriggeredThreshold: 0,
+        subRevokedAt: null,
+        lastTrafficResetAt: null,
+        createdAt: '2026-01-14T11:02:41.000Z',
+        updatedAt: '2026-08-05T09:14:22.000Z',
+        subscriptionUrl: 'https://sub.example.com/aH3kQ9zR2mVt',
+        activeInternalSquads: [],
+        userTraffic: {
+          usedTrafficBytes: options.usedTrafficBytes ?? 0,
+          lifetimeUsedTrafficBytes: 0,
+          onlineAt: null,
+          firstConnectedAt: null,
+          lastConnectedNodeUuid: null,
+        },
+      },
+      meta: { notConnectedAfterHours: null, expiration: null },
+    };
+  }
+
+  /**
+   * Records every place an identity leaves this service: the reconcile
+   * `updateMany`, the reverse `findFirst`, the card metadata and the panel
+   * read. All four have to agree, so all four are watched at once.
+   */
+  function buildIdentityProbe(): {
+    service: RemnawaveWebhookService;
+    emitted: EmittedEvent[];
+    reconciled: ReconcileCall[];
+    lookups: Array<Record<string, unknown>>;
+    usageCalls: string[];
+  } {
+    const emitted: EmittedEvent[] = [];
+    const reconciled: ReconcileCall[] = [];
+    const lookups: Array<Record<string, unknown>> = [];
+    const usageCalls: string[] = [];
+
+    const prisma = {
+      remnawaveWebhookEvent: { create: async () => ({}) },
+      subscription: {
+        updateMany: async (args: ReconcileCall) => {
+          reconciled.push(args);
+          return { count: 1 };
+        },
+        findFirst: async (args: { where: Record<string, unknown> }) => {
+          lookups.push(args.where);
+          return {
+            id: 'sub-1',
+            status: 'ACTIVE',
+            trafficLimit: 50,
+            deviceLimit: 3,
+            expiresAt: new Date('2027-01-01T00:00:00.000Z'),
+            user: { id: 'user-1', telegramId: 858568447n, name: 'Anna', username: 'anna' },
+          };
+        },
+      },
+      user: { updateMany: async () => ({ count: 0 }), findUnique: async () => null },
+    };
+    const systemEvents = {
+      emit: (event: EmittedEvent) => emitted.push(event),
+      info: (type: string, category: string, _message: string, metadata?: Record<string, unknown>) => {
+        emitted.push({ type, category, severity: 'INFO', metadata });
+      },
+    };
+    const remnawaveApi = {
+      getPanelUserUsage: async (ref: string) => {
+        usageCalls.push(ref);
+        return null;
+      },
+    };
+
+    return {
+      service: new RemnawaveWebhookService(
+        prisma as never,
+        { webhookSecret: null } as never,
+        systemEvents as never,
+        remnawaveApi as never,
+      ),
+      emitted,
+      reconciled,
+      lookups,
+      usageCalls,
+    };
+  }
+
+  /** Collects `logger.warn` lines for the duration of one test. */
+  function captureWarns(): { readonly warns: string[]; restore(): void } {
+    const warns: string[] = [];
+    const originalWarn = Logger.prototype.warn;
+    Logger.prototype.warn = function patched(message: unknown): void {
+      warns.push(String(message));
+    } as typeof Logger.prototype.warn;
+    return {
+      warns,
+      restore(): void {
+        Logger.prototype.warn = originalWarn;
+      },
+    };
+  }
+
+  it('names a 2.x profile by its uuid — reconcile, reverse lookup and card agree', async () => {
+    const { service, emitted, reconciled, lookups } = buildIdentityProbe();
+    await service.handleEvent(
+      'user.first_connected',
+      userEventPayload({ event: 'user.first_connected', usedTrafficBytes: 0 }),
+      null,
+    );
+
+    const uuid = '9d2f4c1e-7b3a-4f6d-9c58-2e1a7b4c9d30';
+    assert.equal(reconciled[0]?.where['remnawaveId'], uuid);
+    assert.equal(lookups[0]?.['remnawaveId'], uuid);
+    assert.equal(emitted[0]?.metadata?.['remnawaveId'], uuid);
+  });
+
+  it('names a 3.x profile by its numeric id, which is what remnawaveId holds', async () => {
+    // The panel row has no uuid to offer, so `String(id)` IS the identity —
+    // the same string `parsePanelUserRow` stores when it reads that row over
+    // REST, which is why the reverse lookups still match.
+    const { service, emitted, reconciled, lookups } = buildIdentityProbe();
+    await service.handleEvent(
+      'user.first_connected',
+      userEventPayloadV3({ event: 'user.first_connected' }),
+      null,
+    );
+
+    assert.equal(reconciled.length, 1, 'a 3.x event must still reconcile');
+    // A numeric identity is matched on BOTH recorded angles: the string in
+    // `remnawaveId` (a profile created on 3.x) and the number in
+    // `remnawavePanelId` (one created on 2.x before the panel was upgraded,
+    // whose `remnawaveId` still holds the now-dead uuid and would never match).
+    const expectedWhere = [{ remnawaveId: '4821' }, { remnawavePanelId: 4821 }];
+    assert.deepEqual(reconciled[0]?.where['OR'], expectedWhere);
+    assert.deepEqual(lookups[0]?.['OR'], expectedWhere);
+    assert.equal(emitted[0]?.metadata?.['remnawaveId'], '4821');
+    // Attribution succeeded, so the card carries the local profile too.
+    assert.equal(emitted[0]?.metadata?.['userId'], 'user-1');
+  });
+
+  it('accepts a numeric id that arrived as a string', async () => {
+    // A webhook body is whatever the sender serialized: a relay that
+    // round-trips it through a string-typed store quotes the number.
+    const { service, emitted, reconciled } = buildIdentityProbe();
+    await service.handleEvent(
+      'user.expired',
+      userEventPayloadV3({ event: 'user.expired', id: '4821' }),
+      null,
+    );
+
+    assert.deepEqual(reconciled[0]?.where['OR'], [
+      { remnawaveId: '4821' },
+      { remnawavePanelId: 4821 },
+    ]);
+    assert.equal(emitted[0]?.metadata?.['remnawaveId'], '4821');
+  });
+
+  it('leaves a damaged 2.x payload unidentified instead of naming user 4821', async () => {
+    // The test in the service is ABSENCE of `uuid`, never emptiness of it. A
+    // 2.x payload whose uuid arrived unusable is DAMAGED, and keying it by the
+    // numeric id sitting next to it would mint an identity that matches no
+    // `remnawaveId` stored in that era — "we could not read this" would become
+    // "this is about 4821", who is a different customer.
+    for (const damaged of ['', null, 42]) {
+      const { service, emitted, reconciled, lookups } = buildIdentityProbe();
+      await service.handleEvent(
+        'user.first_connected',
+        {
+          scope: 'user',
+          event: 'user.first_connected',
+          data: { uuid: damaged, id: 4821, username: 'anna_vpn' },
+        },
+        null,
+      );
+
+      assert.equal(reconciled.length, 0, `uuid ${JSON.stringify(damaged)} must not reconcile`);
+      assert.equal(lookups.length, 0, `uuid ${JSON.stringify(damaged)} must not be looked up`);
+      assert.equal(emitted[0]?.metadata?.['remnawaveId'], undefined);
+    }
+  });
+
+  it('refuses a uuid-shaped string in the id slot rather than parsing it to 330', async () => {
+    // `Number.parseInt('330f2b38-…')` answers 330 — a valid-looking id owned by
+    // somebody else. Anything but a whole decimal string is not an id.
+    const { service, emitted, reconciled, lookups } = buildIdentityProbe();
+    await service.handleEvent(
+      'user.expired',
+      userEventPayloadV3({ event: 'user.expired', id: '330f2b38-9c41-4c7e-9c50-6bd0c1f2a7e4' }),
+      null,
+    );
+
+    assert.equal(emitted[0]?.metadata?.['remnawaveId'], undefined);
+    assert.notEqual(emitted[0]?.metadata?.['remnawaveId'], '330');
+    assert.equal(reconciled.length, 0);
+    assert.equal(lookups.length, 0);
+  });
+
+  it('refuses ids that are not whole non-negative decimals', async () => {
+    // Every one of these would stringify into something
+    // `isNumericPanelIdentity` (panel-user-address.ts) reads as a 2.x uuid, so
+    // the address built from it would be sent to a 3.x panel in the wrong shape.
+    for (const id of ['1e3', '12.0', '-5', ' ', '0x10', 9_007_199_254_740_993n.toString(), -5, 12.5]) {
+      const { service, reconciled } = buildIdentityProbe();
+      await service.handleEvent('user.expired', userEventPayloadV3({ event: 'user.expired', id }), null);
+      assert.equal(reconciled.length, 0, `id ${String(id)} must not name a profile`);
+    }
+  });
+
+  it('asks the panel with the 3.x numeric id when the payload carries no counter', async () => {
+    // The first-connection traffic read goes through `getPanelUserUsage`, which
+    // takes a stored `remnawaveId` and builds the address for the panel's own
+    // era — so the numeric form is routable, and this is the path that read
+    // `null` and skipped the call entirely before.
+    const { service, usageCalls } = buildIdentityProbe();
+    await service.handleEvent(
+      'user.first_connected',
+      { scope: 'user', event: 'user.first_connected', data: { id: 4821, username: 'anna_vpn' } },
+      null,
+    );
+    assert.deepEqual(usageCalls, ['4821']);
+  });
+
+  it('warns once, naming the event, when the payload names nobody', async () => {
+    // Silence is what made the 3.x defect invisible for a whole panel version:
+    // three consumers doing nothing, none of them saying so.
+    const captured = captureWarns();
+    try {
+      const { service } = buildIdentityProbe();
+      await service.handleEvent(
+        'user.expired',
+        { scope: 'user', event: 'user.expired', data: { username: 'anna_vpn' } },
+        null,
+      );
+      const identityWarns = captured.warns.filter((line) => line.includes('no panel user identity'));
+      assert.equal(identityWarns.length, 1, 'one line per webhook, not one per consumer');
+      assert.ok(
+        identityWarns[0]?.includes('user.expired'),
+        `expected the event type in the warn, got: ${identityWarns[0]}`,
+      );
+    } finally {
+      captured.restore();
+    }
+  });
+
+  it('stays quiet when the identity was read', async () => {
+    const captured = captureWarns();
+    try {
+      const { service } = buildIdentityProbe();
+      await service.handleEvent('user.expired', userEventPayloadV3({ event: 'user.expired' }), null);
+      assert.deepEqual(
+        captured.warns.filter((line) => line.includes('no panel user identity')),
+        [],
+      );
+    } finally {
+      captured.restore();
+    }
+  });
+
+  it('never mints a user identity from a node id', async () => {
+    // A node row keeps its `uuid` in every supported version, so the numeric
+    // fallback has nothing to do on node events — and must not fire: a node
+    // `id: 12` and a customer `id: 12` are the same string in `remnawaveId`.
+    const { service, emitted } = buildIdentityProbe();
+    await service.handleEvent(
+      'node.connection_lost',
+      { scope: 'node', event: 'node.connection_lost', data: { id: 12, name: 'DE-1' } },
+      null,
+    );
+    assert.equal(emitted.length, 1);
+    assert.equal(emitted[0]?.metadata?.['remnawaveId'], undefined);
+    assert.equal(emitted[0]?.metadata?.['nodeUuid'], undefined);
+    assert.equal(emitted[0]?.metadata?.['nodeName'], 'DE-1');
   });
 });
 describe('RemnawaveWebhookService first traffic usage', () => {

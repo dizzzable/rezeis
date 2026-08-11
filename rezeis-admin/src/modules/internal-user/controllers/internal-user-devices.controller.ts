@@ -29,6 +29,7 @@ import { SubscriptionStatus } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { EVENT_TYPES, SystemEventsService } from '../../../common/services/system-events.service';
 import { InternalAdminAuthGuard } from '../../auth/guards/internal-admin-auth.guard';
+import { storedIdentityOf } from '../../remnawave/services/panel-user-address';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
 import { requirePanelDeviceList } from '../../remnawave/utils/panel-device-read.util';
 import { buildUserReferenceWhere } from '../utils/user-reference.util';
@@ -58,12 +59,15 @@ export class InternalUserDevicesController {
   @Get(':userRef/devices')
   public async listDevices(@Param('userRef') userRef: string) {
     const subscription = await this.findActiveSubscription(userRef);
-    if (!subscription?.remnawaveId) {
+    // `null` is the same condition the bare `remnawaveId` check tested — no
+    // panel profile — with the two supplementary columns carried along when
+    // there IS one, so a profile created on 2.x stays addressable after the
+    // panel is upgraded to 3.x and its uuid stops naming anything.
+    const identity = storedIdentityOf(subscription);
+    if (identity === null) {
       return { devices: [], total: 0 };
     }
-    const outcome = await this.remnawaveApiService.strictGetPanelUserDevices(
-      subscription.remnawaveId,
-    );
+    const outcome = await this.remnawaveApiService.strictGetPanelUserDevices(identity);
     return requirePanelDeviceList(outcome);
   }
 
@@ -80,15 +84,13 @@ export class InternalUserDevicesController {
     @Param('hwid') hwid: string,
   ) {
     const subscription = await this.findActiveSubscription(userRef);
-    if (!subscription?.remnawaveId) {
+    const identity = storedIdentityOf(subscription);
+    if (identity === null) {
       throw new NotFoundException('No active subscription with a Remnawave profile');
     }
     const userId = subscription.userId;
 
-    const result = await this.remnawaveApiService.deletePanelUserDevice(
-      subscription.remnawaveId,
-      hwid,
-    );
+    const result = await this.remnawaveApiService.deletePanelUserDevice(identity, hwid);
 
     // Resolve user info for rich Telegram notification
     const user = await this.prismaService.user.findUnique({
@@ -132,12 +134,11 @@ export class InternalUserDevicesController {
     @Param('subscriptionId') subscriptionId: string,
   ) {
     const subscription = await this.findOwnedSubscription(userRef, subscriptionId);
-    if (!subscription?.remnawaveId) {
+    const identity = storedIdentityOf(subscription);
+    if (identity === null) {
       return { devices: [], total: 0 };
     }
-    const outcome = await this.remnawaveApiService.strictGetPanelUserDevices(
-      subscription.remnawaveId,
-    );
+    const outcome = await this.remnawaveApiService.strictGetPanelUserDevices(identity);
     return requirePanelDeviceList(outcome);
   }
 
@@ -154,13 +155,11 @@ export class InternalUserDevicesController {
     @Param('hwid') hwid: string,
   ) {
     const subscription = await this.findOwnedSubscription(userRef, subscriptionId);
-    if (!subscription?.remnawaveId) {
+    const identity = storedIdentityOf(subscription);
+    if (identity === null) {
       throw new NotFoundException('No subscription with a Remnawave profile');
     }
-    const result = await this.remnawaveApiService.deletePanelUserDevice(
-      subscription.remnawaveId,
-      hwid,
-    );
+    const result = await this.remnawaveApiService.deletePanelUserDevice(identity, hwid);
     await this.emitDeviceRevoked(subscription, hwid, result.total);
     return { revoked: true, remainingDevices: result.total };
   }
@@ -216,15 +215,15 @@ export class InternalUserDevicesController {
     @Param('subscriptionId') subscriptionId: string,
   ) {
     const subscription = await this.findOwnedSubscription(userRef, subscriptionId);
-    if (!subscription?.remnawaveId) {
+    const identity = storedIdentityOf(subscription);
+    if (identity === null) {
       throw new NotFoundException('No subscription with a Remnawave profile');
     }
 
     // 1. Rotate the subscription link (revoke old short UUID). Every existing
     //    client link is dead from here on.
-    const { subscriptionUrl } = await this.remnawaveApiService.regeneratePanelUserSubscription(
-      subscription.remnawaveId,
-    );
+    const { subscriptionUrl } =
+      await this.remnawaveApiService.regeneratePanelUserSubscription(identity);
 
     // 2. Persist the new URL — FIRST, before anything else that can fail.
     if (subscriptionUrl === null) {
@@ -265,7 +264,7 @@ export class InternalUserDevicesController {
     //    leftover devices are now honestly visible in the device list.
     let devicesCleared = true;
     try {
-      await this.remnawaveApiService.deleteAllPanelUserDevices(subscription.remnawaveId);
+      await this.remnawaveApiService.deleteAllPanelUserDevices(identity);
     } catch (err: unknown) {
       devicesCleared = false;
       const message = err instanceof Error ? err.message : 'Unknown error';
@@ -362,7 +361,17 @@ export class InternalUserDevicesController {
     }
     const subscription = await this.prismaService.subscription.findFirst({
       where: { id: subscriptionId, userId: user.id },
-      select: { id: true, userId: true, remnawaveId: true },
+      select: {
+        id: true,
+        userId: true,
+        remnawaveId: true,
+        // Selected because this row is addressed on the panel. A `select` that
+        // omits them hands `storedIdentityOf` `undefined` for both, which is
+        // indistinguishable from "never recorded" — and on a 3.x panel that is
+        // the difference between finding the profile and refusing to name it.
+        remnawavePanelId: true,
+        remnawavePanelUsername: true,
+      },
     });
     return subscription;
   }
@@ -388,6 +397,8 @@ export class InternalUserDevicesController {
         id: true,
         userId: true,
         remnawaveId: true,
+        remnawavePanelId: true,
+        remnawavePanelUsername: true,
       },
     });
     return subscription;

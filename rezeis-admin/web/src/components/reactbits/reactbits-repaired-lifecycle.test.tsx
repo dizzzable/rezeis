@@ -44,17 +44,27 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import Antigravity from './Antigravity'
+import Aurora from './Aurora'
+import Balatro from './Balatro'
 import ColorBends from './ColorBends'
 import EvilEye from './EvilEye'
 import FaultyTerminal from './FaultyTerminal'
+import Galaxy from './Galaxy'
+import Iridescence from './Iridescence'
 import LaserFlow from './LaserFlow'
 import LetterGlitch from './LetterGlitch'
 import LightPillar from './LightPillar'
+import LineWaves from './LineWaves'
+import LiquidChrome from './LiquidChrome'
 import MagicRings from './MagicRings'
 import PixelBlast from './PixelBlast'
 import PlasmaWave from './PlasmaWave'
 import PrismaticBurst from './PrismaticBurst'
+import Radar from './Radar'
+import RippleGrid from './RippleGrid'
 import ShapeGrid from './ShapeGrid'
+import SoftAurora from './SoftAurora'
+import Threads from './Threads'
 import { installGlStub, type GlStubHarness } from './gl-stub'
 import { RENDER_PIXEL_BUDGET } from './render-scale'
 
@@ -111,7 +121,14 @@ function unmountRoot(root: Root): void {
  * moves" assertion has to be denominated in each component's own number or it
  * would only ever be testing that they all picked 2.
  */
-const WEBGL_COMPONENTS = [
+/**
+ * The components whose device-pixel behaviour has been measured, and which the
+ * budget suite below may therefore make assertions about. Kept separate from
+ * the lifecycle list on purpose: the ratio in the third slot is a MEASURED
+ * property of each component, not a default, and a guessed one would assert
+ * something nobody checked.
+ */
+const PIXEL_BUDGET_COMPONENTS = [
   ['ColorBends', <ColorBends key="c" />, 2],
   ['EvilEye', <EvilEye key="c" />, 2],
   ['FaultyTerminal', <FaultyTerminal key="c" />, 2],
@@ -121,6 +138,45 @@ const WEBGL_COMPONENTS = [
   ['PixelBlast', <PixelBlast key="c" />, 2],
   ['PlasmaWave', <PlasmaWave key="c" />, 1.5],
   ['PrismaticBurst', <PrismaticBurst key="c" />, 2],
+] as const
+
+/**
+ * Repaired later, and guarded for LIFECYCLE ONLY.
+ *
+ * Every one of them was shipped with its repair unguarded — the list above is
+ * what this suite covered, and none of these were on it. They handled a context
+ * loss by drawing into dead GL handles, or did not handle it at all, which on a
+ * phone is the ordinary outcome of backgrounding the tab: context alive, canvas
+ * blank, and only a page reload brings the animation back.
+ *
+ * They are deliberately NOT in the device-pixel budget suite. That suite
+ * asserts a measured per-component ratio, and these were repaired for context
+ * loss, not measured for pixel budget — putting them there would assert a
+ * property nobody checked. (It also caught the author of this list guessing
+ * `2` for nine components that render at `1`.)
+ *
+ * `Aurora` is the default card effect, so it is the one that matters most — and
+ * note this guards the PANEL's copy. The cabinet renders its own
+ * `components/ui/aurora`, eagerly; the freeze script records that divergence on
+ * purpose and reiwa guards its copy separately.
+ */
+const RESTORED_COMPONENTS = [
+  ['Aurora', <Aurora key="c" />],
+  ['Balatro', <Balatro key="c" />],
+  ['Galaxy', <Galaxy key="c" />],
+  ['Iridescence', <Iridescence key="c" />],
+  ['LineWaves', <LineWaves key="c" />],
+  ['LiquidChrome', <LiquidChrome key="c" />],
+  ['Radar', <Radar key="c" />],
+  ['RippleGrid', <RippleGrid key="c" />],
+  ['SoftAurora', <SoftAurora key="c" />],
+  ['Threads', <Threads key="c" />],
+] as const
+
+/** Everything that must survive a mount, a remount and a context loss. */
+const WEBGL_COMPONENTS = [
+  ...PIXEL_BUDGET_COMPONENTS.map(([name, element]) => [name, element] as const),
+  ...RESTORED_COMPONENTS,
 ] as const
 
 describe.each(WEBGL_COMPONENTS)('%s lifecycle', (name, element) => {
@@ -246,7 +302,7 @@ describe.each(WEBGL_COMPONENTS)('%s lifecycle', (name, element) => {
   })
 })
 
-describe.each(WEBGL_COMPONENTS)('%s device-pixel budget', (name, element, baseRatio) => {
+describe.each(PIXEL_BUDGET_COMPONENTS)('%s device-pixel budget', (name, element, baseRatio) => {
   beforeEach(() => {
     gl = installGlStub(OVERSIZED)
   })

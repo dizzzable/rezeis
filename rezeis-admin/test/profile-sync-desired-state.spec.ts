@@ -120,7 +120,10 @@ describe('ProfileSyncProcessor versioned desired-state write (T-009/T-010)', () 
     assert.equal(h.setCalled(), true);
     assert.equal(h.legacyUpdateCalled(), false, 'strict path replaces the legacy absolute update');
     assert.deepStrictEqual(h.strictSetInputs, [[
-      'rem-1',
+      // The full stored identity, not a bare string: on a 3.x panel the uuid
+      // alone names nothing, and the recorded numeric id / panel username are
+      // the only route back to the profile.
+      { remnawaveId: 'rem-1', panelId: null, panelUsername: null },
       {
         trafficLimitBytes: 20n * 1024n ** 3n,
         hwidDeviceLimit: 5,

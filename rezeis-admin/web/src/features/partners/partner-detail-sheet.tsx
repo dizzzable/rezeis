@@ -17,7 +17,7 @@ import {
 import { toast } from 'sonner'
 
 import { getErrorMessage } from '@/lib/http-errors'
-import { formatDateTime } from '@/lib/utils'
+import { formatDateTime, truncate } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -93,7 +93,7 @@ export default function PartnerDetailSheet({ partner, open, onOpenChange }: Part
                   : partner?.user.username
                     ? `@${partner.user.username}`
                     : ''}
-                {partner ? ` · ${partner.id.slice(0, 8)}…` : ''}
+                {partner ? ` · ${truncate(partner.id, 8)}` : ''}
               </SheetDescription>
             </div>
             {partner && (

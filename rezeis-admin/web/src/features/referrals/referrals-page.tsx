@@ -31,7 +31,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Skeleton } from '@/components/ui/skeleton'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { FadeIn, StaggerList, StaggerItem } from '@/lib/motion'
-import { cn } from '@/lib/utils'
+import { cn, truncate } from '@/lib/utils'
 
 import ReferralSettingsPage from '@/features/settings/referral-settings-page'
 import ReferralsAnalyticsTab from './referrals-analytics-tab'
@@ -445,7 +445,7 @@ function InvitesTab() {
                       <TableCell><UserCell user={inv.inviter} telegramId={inv.inviterTelegramId} /></TableCell>
                       <TableCell>
                         <span className="font-mono text-xs text-muted-foreground">
-                          {inv.token.slice(0, 16)}…
+                          {truncate(inv.token, 16)}
                         </span>
                       </TableCell>
                       <TableCell className="text-xs">

@@ -1,27 +1,26 @@
 import { Injectable, Logger } from '@nestjs/common';
 
+import {
+  CAPABILITIES_CACHE_TTL_MS,
+  CAPABILITIES_NEGATIVE_CACHE_TTL_MS,
+  connectionsApiFor,
+  parseSemver,
+  readPanelVersionFrom,
+  userAddressingFor,
+  type RemnawaveConnectionsApi,
+  type RemnawaveUserAddressing,
+} from './panel-version.util';
 import { RemnawaveApiService } from './remnawave-api.service';
 
-/**
- * How the panel addresses a user inside its REST paths. Remnawave 2.x takes
- * the profile UUID (`/api/users/{uuid}`); 3.x renamed the parameter and takes
- * the user id (`/api/users/{userId}`).
- *
- * `'unknown'` is not padding — it is the value the failure branch returns.
- * Version detection collapses every failure (401, timeout, DNS, unconfigured
- * token) into "no version", and a two-valued union would force a default that
- * addresses a live panel the wrong way for the whole cache window. Callers
- * must branch on `'unknown'` explicitly instead of guessing.
- */
-export type RemnawaveUserAddressing = 'uuid' | 'id' | 'unknown';
-
-/**
- * Which live-connection endpoint family the panel serves. 2.x exposes
- * `/api/ip-control/*`; 3.x dropped that family wholesale and replaced it with
- * `/api/connections/*`. `'unknown'` carries the same meaning as on
- * {@link RemnawaveUserAddressing} — detection failed, do not guess.
- */
-export type RemnawaveConnectionsApi = 'ip-control' | 'connections' | 'unknown';
+// The two shape unions and the version→shape derivation live in
+// `panel-version.util.ts`, with no dependencies of their own, because
+// `RemnawaveApiService` needs the same answer to build its paths and cannot
+// inject this service back without a cycle. Re-exported here so every existing
+// importer keeps working.
+export type {
+  RemnawaveConnectionsApi,
+  RemnawaveUserAddressing,
+} from './panel-version.util';
 
 /**
  * Direct user-lookup shortcuts (`/api/users/by-telegram-id/{id}`,
@@ -75,26 +74,29 @@ export interface RemnawaveCapabilities {
  * anybody has run; the banner is the only signal an operator gets before an
  * untested panel starts returning shapes rezeis does not parse.
  *
- * `'3.2'` is intentionally absent: it joins this set only when the whole
- * three-version (2.7.4 / 2.8.0 / 3.2.1) effort lands, not when the groundwork
- * does. Whatever this set says has to stay true of the operator-facing prose
- * in `web/src/i18n/features/remnawave.{en,ru}.ts` →
+ * All three entries are measured against live panels: 2.7.4 (paying
+ * production), 2.8 (testers) and 3.2.1. Being in this set means "the operator
+ * gets no banner", not "every screen is equally capable" — 2.7.4 still reports
+ * `liveIpControl: false`, because its `ip-control/*` family had not matured
+ * enough to drive the Live tab. 3.x reports true: it replaced that family with
+ * `connections/*`, and the adapter speaks it.
+ *
+ * Membership is keyed on `major.minor`, so this set cannot tell 2.8.0 from
+ * 2.8.1 and never has: both are the single `'2.8'` entry, and a patch-level
+ * difference is not something this gate is able to warn about.
+ *
+ * Whatever this set says has to stay true of the operator-facing prose in
+ * `web/src/i18n/features/remnawave.{en,ru}.ts` →
  * `remnaWavePage.versionWarning.description`, which spells the range out.
  */
-const TESTED_VERSIONS: ReadonlySet<string> = new Set(['2.7', '2.8']);
+const TESTED_VERSIONS: ReadonlySet<string> = new Set(['2.7', '2.8', '3.2']);
 
-/** How long a successful detection is trusted before the panel is re-read. */
-export const CAPABILITIES_CACHE_TTL_MS = 5 * 60_000;
-
-/**
- * How long a *failed* detection is trusted. Every failure mode — 401, request
- * timeout, DNS, an unconfigured token, a panel mid-restart — collapses into
- * the same all-false / `'unknown'` result, so caching it for the full five
- * minutes turns a one-second auth blip into a five-minute blackout of every
- * version-gated feature. Short enough to self-heal on the next page load, long
- * enough that a hard-down panel is not hammered.
- */
-export const CAPABILITIES_NEGATIVE_CACHE_TTL_MS = 15_000;
+// Both windows live in the util so the adapter's own shape cache uses the same
+// two numbers rather than a second opinion about how long a panel blip lasts.
+export {
+  CAPABILITIES_CACHE_TTL_MS,
+  CAPABILITIES_NEGATIVE_CACHE_TTL_MS,
+} from './panel-version.util';
 
 @Injectable()
 export class RemnawaveVersionService {
@@ -148,12 +150,23 @@ export class RemnawaveVersionService {
       patch,
       supported: TESTED_VERSIONS.has(`${major}.${minor}`),
       reachable: true,
-      // 2.8.x ONLY, not "2.8 or newer": 3.x deleted the whole `ip-control/*`
-      // family (it became `connections/*`), so a `>= 2.8` test would point the
-      // IP-sharing detector and the Live tab at endpoints a 3.x panel answers
-      // with 404. Widen this again — to `connectionsApi !== 'unknown'` — once
-      // the `connections/*` family is actually wired up.
-      liveIpControl: major === 2 && minor >= 8,
+      // "This build can read live connections from this panel" — which is the
+      // question every consumer actually asks, despite the historical name.
+      //
+      // It is NOT `connectionsApi !== 'unknown'`. That would light up on 2.7.4,
+      // which serves `ip-control/*` but not maturely enough to drive the Live
+      // tab or the IP-sharing detector. The two eras qualify for different
+      // reasons and both have to be stated:
+      //   2.x  — only 2.8 and newer, where `ip-control/*` matured;
+      //   3.x  — `connections/*`, now that the adapter speaks it. Before that
+      //          reader existed this had to stay false, or the detector would
+      //          have walked every node for guaranteed 404s and reported a
+      //          clean panel. The two changes were required to land together.
+      // `major === 3`, not `major > 2`: a 4.x or calver build has an UNKNOWN
+      // connections family, and claiming we can read live data from a panel
+      // whose shape we cannot name is the same guess this file refuses to make
+      // everywhere else.
+      liveIpControl: major === 3 || (major === 2 && minor >= 8),
       // `POST /api/bandwidth-stats/nodes/users` is absent on 2.7.4 and present
       // on both 2.8.0 and 3.2.1, so this one really is "2.8 or newer".
       bandwidthNodesUsers: major > 2 || (major === 2 && minor >= 8),
@@ -173,23 +186,14 @@ export class RemnawaveVersionService {
    * unreachable or omits the field.
    */
   private async readVersion(): Promise<string | null> {
-    try {
-      const recap = await this.api.getSystemRecap();
-      if (recap !== null && typeof recap.version === 'string' && recap.version.length > 0) {
-        return recap.version;
-      }
-    } catch (err) {
-      this.logger.debug(`recap version read failed: ${(err as Error).message}`);
-    }
-    try {
-      const metadata = await this.api.getSystemMetadata();
-      if (metadata !== null && typeof metadata.version === 'string' && metadata.version.length > 0) {
-        return metadata.version;
-      }
-    } catch (err) {
-      this.logger.debug(`metadata version read failed: ${(err as Error).message}`);
-    }
-    return null;
+    // The order — recap, then metadata — is shared with the adapter's own shape
+    // cache through `readPanelVersionFrom`, so the two cannot disagree about
+    // which source wins on a build where only one of them carries the field.
+    return readPanelVersionFrom(
+      () => this.api.getSystemRecap(),
+      () => this.api.getSystemMetadata(),
+      (source, error) => this.logger.debug(`${source} version read failed: ${error.message}`),
+    );
   }
 }
 
@@ -201,30 +205,3 @@ function cacheTtlFor(value: RemnawaveCapabilities): number {
   return value.major === null ? CAPABILITIES_NEGATIVE_CACHE_TTL_MS : CAPABILITIES_CACHE_TTL_MS;
 }
 
-/** Only 2.x and 3.x path shapes are known; anything else stays unknown. */
-function userAddressingFor(major: number): RemnawaveUserAddressing {
-  if (major === 2) return 'uuid';
-  if (major === 3) return 'id';
-  return 'unknown';
-}
-
-/** Only 2.x and 3.x endpoint families are known; anything else stays unknown. */
-function connectionsApiFor(major: number): RemnawaveConnectionsApi {
-  if (major === 2) return 'ip-control';
-  if (major === 3) return 'connections';
-  return 'unknown';
-}
-
-/** Parses a `major.minor.patch` prefix from a version string. */
-function parseSemver(
-  value: string | null,
-): { major: number; minor: number; patch: number } | null {
-  if (value === null) return null;
-  const match = /(\d+)\.(\d+)\.(\d+)/.exec(value);
-  if (match === null) return null;
-  return {
-    major: Number.parseInt(match[1], 10),
-    minor: Number.parseInt(match[2], 10),
-    patch: Number.parseInt(match[3], 10),
-  };
-}

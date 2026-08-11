@@ -50,8 +50,6 @@ describe('RemnawaveApiService', () => {
         port: 3000,
         token: 'secret',
         webhookSecret: null,
-        caddyToken: null,
-        cookie: null,
       },
     );
 
@@ -83,8 +81,6 @@ describe('RemnawaveApiService', () => {
         port: null,
         token: null,
         webhookSecret: null,
-        caddyToken: null,
-        cookie: null,
       },
     );
 
@@ -129,8 +125,6 @@ describe('RemnawaveApiService', () => {
         port: 3000,
         token: 'secret',
         webhookSecret: null,
-        caddyToken: null,
-        cookie: null,
       },
     );
 
@@ -150,8 +144,6 @@ describe('RemnawaveApiService', () => {
         port: null,
         token: null,
         webhookSecret: null,
-        caddyToken: null,
-        cookie: null,
       },
     );
 
@@ -172,8 +164,6 @@ describe('RemnawaveApiService', () => {
         port: 3000,
         token: 'secret',
         webhookSecret: null,
-        caddyToken: null,
-        cookie: null,
       },
     );
 
@@ -197,6 +187,10 @@ describe('RemnawaveApiService', () => {
     const service = new RemnawaveApiService(
       {
         request: (input: { readonly method?: string; readonly url: string; readonly data?: unknown }) => {
+          // The adapter reads the panel's own version before building any
+          // user-scoped path — 2.x addresses users by uuid, 3.x by numeric id.
+          // Those probes are not part of the operation under test.
+          if (input.url.startsWith('/api/system/')) return of({ data: { response: {} } });
           capturedRequests.push(input);
           return of({
             data: {
@@ -224,8 +218,6 @@ describe('RemnawaveApiService', () => {
         port: 3000,
         token: 'secret',
         webhookSecret: null,
-        caddyToken: null,
-        cookie: null,
       },
     );
 
@@ -263,8 +255,6 @@ describe('RemnawaveApiService', () => {
         port: 3000,
         token: 'secret',
         webhookSecret: null,
-        caddyToken: null,
-        cookie: null,
       },
     );
 
@@ -286,8 +276,6 @@ describe('RemnawaveApiService', () => {
         port: 3000,
         token: 'secret',
         webhookSecret: null,
-        caddyToken: null,
-        cookie: null,
       },
     );
 
@@ -307,8 +295,6 @@ describe('RemnawaveApiService', () => {
         port: 3000,
         token: 'secret',
         webhookSecret: null,
-        caddyToken: null,
-        cookie: null,
       },
     );
 
@@ -330,6 +316,10 @@ describe('RemnawaveApiService', () => {
     const service = new RemnawaveApiService(
       {
         request: (input: { readonly method?: string; readonly url: string; readonly data?: unknown }) => {
+          // The adapter reads the panel's own version before building any
+          // user-scoped path — 2.x addresses users by uuid, 3.x by numeric id.
+          // Those probes are not part of the operation under test.
+          if (input.url.startsWith('/api/system/')) return of({ data: { response: {} } });
           capturedRequests.push(input);
           return of({
             data: {
@@ -346,8 +336,6 @@ describe('RemnawaveApiService', () => {
         port: 3000,
         token: 'secret',
         webhookSecret: null,
-        caddyToken: null,
-        cookie: null,
       },
     );
 
@@ -374,6 +362,10 @@ describe('RemnawaveApiService', () => {
     const service = new RemnawaveApiService(
       {
         request: (input: { readonly method?: string; readonly url: string; readonly data?: unknown }) => {
+          // The adapter reads the panel's own version before building any
+          // user-scoped path — 2.x addresses users by uuid, 3.x by numeric id.
+          // Those probes are not part of the operation under test.
+          if (input.url.startsWith('/api/system/')) return of({ data: { response: {} } });
           capturedRequests.push(projectRequestContractShape(input));
           return of({
             data: {
@@ -402,8 +394,6 @@ describe('RemnawaveApiService', () => {
         port: 3000,
         token: 'secret',
         webhookSecret: null,
-        caddyToken: null,
-        cookie: null,
       },
     );
 
@@ -467,7 +457,7 @@ describe('RemnawaveApiService', () => {
           },
         }),
       } as never,
-      { host: 'remnawave', port: 3000, token: 'secret', webhookSecret: null, caddyToken: null, cookie: null },
+      { host: 'remnawave', port: 3000, token: 'secret', webhookSecret: null },
     );
 
     const actualNodes = await service.getAllNodes();
@@ -521,7 +511,7 @@ describe('RemnawaveApiService', () => {
           },
         }),
       } as never,
-      { host: 'remnawave', port: 3000, token: 'secret', webhookSecret: null, caddyToken: null, cookie: null },
+      { host: 'remnawave', port: 3000, token: 'secret', webhookSecret: null },
     );
 
     const settings = await service.getSubscriptionSettings();
@@ -548,7 +538,7 @@ describe('RemnawaveApiService', () => {
             message: 'Request failed with status code 404',
           })),
       } as never,
-      { host: 'remnawave', port: 3000, token: 'secret', webhookSecret: null, caddyToken: null, cookie: null },
+      { host: 'remnawave', port: 3000, token: 'secret', webhookSecret: null },
     );
 
     await assert.rejects(
@@ -572,7 +562,7 @@ describe('RemnawaveApiService', () => {
             message: 'Request failed with status code 404',
           })),
       } as never,
-      { host: 'remnawave', port: 3000, token: 'secret', webhookSecret: null, caddyToken: null, cookie: null },
+      { host: 'remnawave', port: 3000, token: 'secret', webhookSecret: null },
     );
 
     await assert.rejects(
@@ -591,7 +581,7 @@ describe('RemnawaveApiService', () => {
             message: 'Request failed with status code 500',
           })),
       } as never,
-      { host: 'remnawave', port: 3000, token: 'secret', webhookSecret: null, caddyToken: null, cookie: null },
+      { host: 'remnawave', port: 3000, token: 'secret', webhookSecret: null },
     );
 
     await assert.rejects(
@@ -605,11 +595,15 @@ describe('RemnawaveApiService', () => {
     const service = new RemnawaveApiService(
       {
         request: (input: { readonly method?: string; readonly url: string; readonly data?: unknown }) => {
+          // The adapter reads the panel's own version before building any
+          // user-scoped path — 2.x addresses users by uuid, 3.x by numeric id.
+          // Those probes are not part of the operation under test.
+          if (input.url.startsWith('/api/system/')) return of({ data: { response: {} } });
           capturedRequests.push(projectRequestContractShape(input));
           return of({ data: { response: { uuid: '33333333-3333-4333-8333-333333333333' } } });
         },
       } as never,
-      { host: 'remnawave', port: 3000, token: 'secret', webhookSecret: null, caddyToken: null, cookie: null },
+      { host: 'remnawave', port: 3000, token: 'secret', webhookSecret: null },
     );
 
     await service.resetPanelUserTraffic('33333333-3333-4333-8333-333333333333');
@@ -648,7 +642,7 @@ describe('RemnawaveApiService', () => {
                 },
           ),
       } as never,
-      { host: 'remnawave', port: 3000, token: 'secret', webhookSecret: null, caddyToken: null, cookie: null },
+      { host: 'remnawave', port: 3000, token: 'secret', webhookSecret: null },
     );
   }
 
@@ -769,12 +763,16 @@ describe('RemnawaveApiService', () => {
   function capturingService(captured: unknown[]): RemnawaveApiService {
     return new RemnawaveApiService(
       {
-        request: (input: { readonly data?: unknown }) => {
-          captured.push(input.data);
+        request: (input: { readonly url?: string; readonly data?: unknown }) => {
+          // The panel-version probe is not a body under test. Any user-scoped
+          // call makes one first — it is how the adapter learns whether this
+          // panel wants a uuid or a numeric id — and capturing it would shift
+          // every `captured[0]` in this file by one.
+          if (input.url?.startsWith('/api/system/') !== true) captured.push(input.data);
           return of({ data: { response: { uuid: '33333333-3333-4333-8333-333333333333' } } });
         },
       } as never,
-      { host: 'remnawave', port: 3000, token: 'secret', webhookSecret: null, caddyToken: null, cookie: null },
+      { host: 'remnawave', port: 3000, token: 'secret', webhookSecret: null },
     );
   }
 

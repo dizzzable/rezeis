@@ -31,6 +31,33 @@ const PANEL_274 = {
   userLookups: { byTelegramId: true, byEmail: true },
 }
 
+/**
+ * The other end of the supported range. Every union value differs from the
+ * 2.7.4 payload above — `id` addressing, the `connections` family, neither
+ * lookup shortcut — so a normalizer that quietly substituted 2.x defaults
+ * would still pass the case above and fail here.
+ */
+const PANEL_321 = {
+  version: '3.2.1',
+  major: 3,
+  minor: 2,
+  patch: 1,
+  supported: true,
+  reachable: true,
+  // ON, and this fixture has to say so: the backend computes
+  // `liveIpControl: major === 3 || (major === 2 && minor >= 8)`, so 3.2.1 is
+  // true and no payload the service can emit carries `false` here. 3.x did
+  // remove `ip-control/*`, but it replaced the family with `connections/*` —
+  // which is what `connectionsApi` below names and what the adapter reads.
+  // A fixture asserting the opposite pins a shape the producer cannot
+  // produce, and would have gone green over a real 3.x regression.
+  liveIpControl: true,
+  bandwidthNodesUsers: true,
+  userAddressing: 'id',
+  connectionsApi: 'connections',
+  userLookups: { byTelegramId: false, byEmail: false },
+}
+
 const ALL_UNKNOWN = {
   version: null,
   major: null,
@@ -48,6 +75,17 @@ const ALL_UNKNOWN = {
 describe('normalizeCapabilities', () => {
   it('passes a well-formed 2.7.4 payload through unchanged', () => {
     expect(normalizeCapabilities(PANEL_274)).toEqual(PANEL_274)
+  })
+
+  it('passes a well-formed 3.2.1 payload through unchanged', () => {
+    expect(normalizeCapabilities(PANEL_321)).toEqual(PANEL_321)
+  })
+
+  it('keeps 3.2.1 supported — the SPA must not re-derive the tested set', () => {
+    // `supported` is the backend's answer (`TESTED_VERSIONS`), mirrored, not
+    // recomputed. A guard that only knew about 2.x would flip this to false
+    // and put an untested-version banner over a panel that is tested.
+    expect(normalizeCapabilities(PANEL_321).supported).toBe(true)
   })
 
   it("keeps the backend's 'unknown' instead of defaulting it to a real value", () => {

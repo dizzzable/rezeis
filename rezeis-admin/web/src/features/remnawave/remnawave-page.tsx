@@ -51,9 +51,13 @@ export default function RemnaWavePage() {
     refetchInterval: 60_000,
   })
 
-  // Detected panel version + capability flags. The Live tab (ip-control) only
-  // matured on 2.8+, so it auto-appears once the panel reports a 2.8 version —
-  // no manual toggle, no redeploy.
+  // Detected panel version + capability flags. The Live tab is gated on
+  // `liveIpControl`, which answers "can this build read live sessions from
+  // this panel" across BOTH endpoint families — `ip-control/*` once it matured
+  // on 2.8, `connections/*` on 3.x. Deliberately not a version comparison
+  // here: a `>= 2.8` test would have shown the tab on 3.x while every request
+  // 404'd, and a `major === 2` test would hide a tab that works. No manual
+  // toggle, no redeploy.
   const { data: capabilities } = useQuery({
     queryKey: KEYS.version,
     queryFn: remnawaveApi.getCapabilities,
@@ -108,7 +112,10 @@ export default function RemnaWavePage() {
       </div>
 
       {/* Untested-version notice: the panel responded with a version outside
-          the range rezeis has been verified against (currently 2.7–2.8). */}
+          the SET rezeis has been verified against — 2.7, 2.8 and 3.2, which is
+          not a range (2.9 through 3.1 are untested too). Membership is decided
+          backend-side by `supported`, so nothing here needs editing when the
+          set grows; only the warning's own prose names the versions. */}
       {capabilities && capabilities.reachable && !capabilities.supported ? (
         <Alert>
           <AlertCircle className="h-4 w-4" />

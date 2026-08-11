@@ -209,6 +209,33 @@ describe('ProfileSyncQueueService', () => {
     );
   });
 
+  it('clears the retained BullMQ job before re-adding a stuck PENDING row', async () => {
+    // A row can be PENDING while a BullMQ job with the SAME `jobId` sits in the
+    // retained failed set (`removeOnFail: 200`) — that is exactly what a worker
+    // that throws before it claims the row leaves behind. A plain `add` is then
+    // silently deduplicated against the retained job, so the sweep whose whole
+    // purpose is to rescue stuck PENDING rows was the one path that could never
+    // rescue them: the row stayed unreachable long after the cause was gone.
+    const removedJobs: string[] = [];
+    const addedJobs: unknown[] = [];
+    const service = new ProfileSyncQueueService(
+      {
+        profileSyncJob: {
+          findMany: async () => [{ id: 'sync-job-wedged' }],
+        },
+      } as never,
+      {
+        remove: async (jobId: string) => { removedJobs.push(jobId); },
+        add: async (...args: unknown[]) => { addedJobs.push(args); },
+      } as never,
+    );
+
+    await service.sweepPending();
+
+    assert.deepStrictEqual(removedJobs, ['sync_sync-job-wedged']);
+    assert.equal(addedJobs.length, 1);
+  });
+
   it('worker recovery resets only transient non-superseded FAILED rows, including DELETE and UPDATE', async () => {
     process.env['RUID_PROCESS_ROLE'] = 'worker';
     _resetProcessRoleCacheForTests();

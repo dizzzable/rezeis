@@ -40,18 +40,33 @@ function build(plan: Record<string, unknown>, listQueue: unknown[]) {
     subscriptionEffectiveProjection: {
       findUnique: async () => ({ desiredRevision: 4n, desiredDeviceLimit: 1 }),
     },
-    subscription: { findUnique: async () => ({ remnawaveId: 'rem-1', status: 'ACTIVE' }) },
+    subscription: {
+      // Both supplementary identity columns present, as every real row has
+      // them: 2.x and 3.x alike put a numeric id and a username on every user.
+      findUnique: async () => ({
+        remnawaveId: 'rem-1',
+        remnawavePanelId: 4711,
+        remnawavePanelUsername: 'rz_alice_sub',
+        status: 'ACTIVE',
+      }),
+    },
     entitlementIncident: { upsert: async () => ({ id: 'inc' }) },
   };
   const remnawave = {
     strictListUserDevices: async () => (queue.length > 0 ? queue.shift() : okList('old')),
-    strictDeleteUserDevice: async (_u: string, hwid: string) => {
+    strictDeleteUserDevice: async (_ref: unknown, hwid: string) => {
       deleteCalls.push(hwid);
       return { kind: 'ok', value: { total: 1 }, detectedVersion: '2.8.0' };
     },
   };
   const completion = {
-    completeVerifiedDeviceExpiryInTransaction: async () => ({ completed: 0 }),
+    // `status` is not optional on the real result — the caller branches on it,
+    // and a fake without it reaches that branch as `undefined`, which passes the
+    // `!== 'SUPERSEDED'` test for the wrong reason.
+    completeVerifiedDeviceExpiryInTransaction: async () => ({
+      status: 'COMPLETED' as const,
+      completed: 0,
+    }),
   };
   const service = new DeviceReductionExecutionService(
     prisma as never,

@@ -95,6 +95,13 @@ export interface BrandingFormDraft {
   readonly primaryFg: string
   readonly bgPrimary: string
   readonly bgSecondary: string
+  /**
+   * Who owns the four colours above. `concept` while a preset supplies them,
+   * `custom` from the first manual edit onwards — that edit is what detaches
+   * the concept, so the operator's own palette stops being overwritten by the
+   * preset's per-brightness copy on every read in the cabinet.
+   */
+  readonly brandPaletteSource: 'concept' | 'custom'
   readonly cardGradient: string
   /**
    * Who owns the gradient. `concept` while a preset supplies it, `custom` from
@@ -315,6 +322,7 @@ const DEFAULT_BRANDING_DRAFT: BrandingFormDraft = {
   primaryFg: '#0a0a0a',
   bgPrimary: '#0a0a0a',
   bgSecondary: '#171717',
+  brandPaletteSource: 'concept',
   cardGradient: 'linear-gradient(135deg, #064e3b 0%, #22c55e 100%)',
   cardGradientSource: 'concept',
   cardPattern: null,
@@ -443,6 +451,7 @@ export function createBrandingFormSchema(messages: BrandingFormValidationMessage
       primaryFg: z.string().regex(HEX_PATTERN, messages.hexInvalid),
       bgPrimary: z.string().regex(HEX_PATTERN, messages.hexInvalid),
       bgSecondary: z.string().regex(HEX_PATTERN, messages.hexInvalid),
+      brandPaletteSource: z.enum(['concept', 'custom']),
       cardGradient: safeGradientSchema(messages.gradientInvalid),
       cardGradientSource: z.enum(['concept', 'custom']),
       cardPattern: optionalGradientSchema(messages.gradientInvalid, true),

@@ -1,0 +1,41 @@
+{
+  "version": "3.2.1",
+  "source": "the SAME 3.2.1 user after it connected, captured verbatim from the panel's own `user.first_connected` webhook body (data); this is the only real payload in which userTraffic and activeInternalSquads are populated. Credential fields and the subscriptionUrl host are placeholders of the same shape.",
+  "response": {
+    "id": 2,
+    "shortUuid": "PyTr7C5568QuLhup",
+    "username": "labuser1",
+    "status": "ACTIVE",
+    "trafficLimitBytes": 0,
+    "trafficLimitStrategy": "NO_RESET",
+    "expireAt": "2026-09-09T12:34:05.228Z",
+    "telegramId": null,
+    "email": null,
+    "description": "probe",
+    "tag": null,
+    "hwidDeviceLimit": null,
+    "externalSquadUuid": null,
+    "trojanPassword": "REDACTED-trojan-password-32chars",
+    "vlessUuid": "65bca3df-0000-4000-8000-000000000001",
+    "ssPassword": "REDACTED-ss-password-00000000000",
+    "lastTriggeredThreshold": 0,
+    "subRevokedAt": null,
+    "lastTrafficResetAt": "2026-08-10T12:36:17.670Z",
+    "createdAt": "2026-08-10T12:34:05.233Z",
+    "updatedAt": "2026-08-10T12:36:17.671Z",
+    "subscriptionUrl": "https://panel.example/api/sub/PyTr7C5568QuLhup",
+    "activeInternalSquads": [
+      {
+        "uuid": "f82c9323-b09a-4406-865a-e3e47fa75c5f",
+        "name": "Default-Squad"
+      }
+    ],
+    "userTraffic": {
+      "usedTrafficBytes": 119,
+      "lifetimeUsedTrafficBytes": 119,
+      "onlineAt": "2026-08-10T12:56:15.010Z",
+      "lastConnectedNodeUuid": "7aa64e53-f5da-4366-9760-0fdad1497a28",
+      "firstConnectedAt": "2026-08-10T12:56:15.010Z"
+    }
+  }
+}

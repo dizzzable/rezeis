@@ -21,6 +21,7 @@ import {
   BrandingThemeVariant,
   BrandingThemeVariants,
   BrandingSettingsInterface,
+  BrandPaletteSource,
   CARD_EFFECTS,
   CARD_LOGO_PRESETS,
   CardEffect,
@@ -70,6 +71,18 @@ function readCardGradientSource(value: unknown): CardGradientSource {
   return value === 'custom' ? 'custom' : 'concept';
 }
 
+/**
+ * Anything that is not an explicit `custom` reads as `concept`.
+ *
+ * Same reasoning as `readCardGradientSource` above, and the same default for
+ * the same reason: every install predating this field stored a palette with no
+ * source and was being served the concept variant's colours. Defaulting to
+ * `custom` would repaint every one of those cabinets on upgrade.
+ */
+function readBrandPaletteSource(value: unknown): BrandPaletteSource {
+  return value === 'custom' ? 'custom' : 'concept';
+}
+
 export function readBrandingSettings(value: unknown): BrandingSettingsInterface {
   const record = readRecord(value);
   return {
@@ -87,6 +100,7 @@ export function readBrandingSettings(value: unknown): BrandingSettingsInterface 
     primaryFg: readHex(record, 'primaryFg', DEFAULT_BRANDING.primaryFg),
     bgPrimary: readHex(record, 'bgPrimary', DEFAULT_BRANDING.bgPrimary),
     bgSecondary: readHex(record, 'bgSecondary', DEFAULT_BRANDING.bgSecondary),
+    brandPaletteSource: readBrandPaletteSource(record['brandPaletteSource']),
     cardGradient: readGradient(record, 'cardGradient', DEFAULT_BRANDING.cardGradient),
     cardGradientSource: readCardGradientSource(record['cardGradientSource']),
     cardPattern: readNullableGradient(record, 'cardPattern'),

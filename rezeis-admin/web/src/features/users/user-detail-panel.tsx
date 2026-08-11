@@ -42,7 +42,7 @@ import {
 import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
-import { cn } from '@/lib/utils'
+import { cn, truncate } from '@/lib/utils'
 import { usePlans } from '@/features/plans/plans-api'
 import { getErrorMessage } from '@/lib/http-errors'
 import { RemnawaveIcon } from '@/features/remnawave/remnawave-icon'
@@ -686,11 +686,46 @@ function InfoRow({ label, value, mono, icon }: { label: string; value: string | 
   )
 }
 
+// ── Panel identity: two shapes, one per panel era ────────────────────────────
+//
+// Remnawave 2.7.x/2.8.x key a user by UUID. Remnawave 3.x dropped that column
+// entirely and names a user by its numeric `id` (e.g. `4471`). `remnawaveId`
+// carries whichever form the panel gave, so nothing here may assume 36 hex
+// characters — not the preview, and not the link dialog's gate.
+
+/**
+ * How much of a panel identity the collapsed row shows before it cuts.
+ * The full value is always on the `title` attribute and on the Copy button.
+ */
+const REMNAWAVE_ID_PREVIEW_LENGTH = 8
+
+/** Mirrors `REMNAWAVE_UUID_PATTERN` in `admin-user-subscriptions.controller.ts`. */
+const REMNAWAVE_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+/** A decimal integer, no sign, no separators — a 3.x panel id. */
+const REMNAWAVE_NUMERIC_ID_PATTERN = /^\d+$/
+/** A UUID's 36 characters; the widest either form ever needs. */
+const REMNAWAVE_ID_MAX_LENGTH = 36
+
+/**
+ * The same accept-rule the backend applies in `linkRemnawaveProfile`, restated
+ * here rather than shared — nothing crosses the SPA/Nest boundary but JSON.
+ *
+ * The server stays the authority and re-checks; this exists only so a typo
+ * comes back as a sentence next to the field instead of a bare 400 toast that
+ * does not say what the field wanted. Keep the two in step: if the backend
+ * widens, this must widen too, or the dialog will refuse an identifier the
+ * panel would have accepted.
+ */
+function isLinkableRemnawaveId(value: string): boolean {
+  if (value.length === 0 || value.length > REMNAWAVE_ID_MAX_LENGTH) return false
+  return REMNAWAVE_UUID_PATTERN.test(value) || REMNAWAVE_NUMERIC_ID_PATTERN.test(value)
+}
+
 /**
  * One-row Remnawave profile reveal for the subscription card. Shows:
  *   • the live `username` from Remnawave (e.g. `rz_user_sub`),
- *   • a Copy button that yanks the panel UUID to the clipboard,
- *   • a tiny tooltip-like underline with the truncated UUID below.
+ *   • a Copy button that yanks the panel identity to the clipboard,
+ *   • a tiny tooltip-like underline with the (possibly cut) identity below.
  *
  * If we don't yet know the profile (no remnawaveId or upstream errored),
  * we render an "—" placeholder rather than hiding the row, because the
@@ -713,6 +748,11 @@ function RemnawaveProfileRow({
   const remnawaveId = sub.remnawaveId
   const [linkDialogOpen, setLinkDialogOpen] = useState(false)
   const [candidateId, setCandidateId] = useState('')
+  const candidate = candidateId.trim()
+  const candidateIsLinkable = isLinkableRemnawaveId(candidate)
+  // Only complain about something the operator has actually typed: an empty
+  // field is "not started", not "wrong".
+  const showCandidateError = candidate.length > 0 && !candidateIsLinkable
 
   function handleCopy(): void {
     if (!remnawaveId) return
@@ -739,7 +779,7 @@ function RemnawaveProfileRow({
             className="truncate font-mono text-[11px] text-pink-500/70 dark:text-pink-400/70"
             title={remnawaveId}
           >
-            {remnawaveId.slice(0, 8)}…
+            {truncate(remnawaveId, REMNAWAVE_ID_PREVIEW_LENGTH)}
           </span>
         ) : (
           <span className="text-muted-foreground/70">—</span>
@@ -778,19 +818,33 @@ function RemnawaveProfileRow({
                     value={candidateId}
                     onChange={(event) => setCandidateId(event.target.value)}
                     placeholder={t('userDetailPanel.subscriptions.remnawaveProfile.linkPlaceholder')}
-                    aria-describedby={`remnawave-profile-hint-${sub.id}`}
+                    aria-describedby={
+                      showCandidateError
+                        ? `remnawave-profile-hint-${sub.id} remnawave-profile-error-${sub.id}`
+                        : `remnawave-profile-hint-${sub.id}`
+                    }
+                    aria-invalid={showCandidateError}
                     autoComplete="off"
                   />
+                  {showCandidateError ? (
+                    <p
+                      id={`remnawave-profile-error-${sub.id}`}
+                      className="text-sm text-destructive"
+                      role="alert"
+                    >
+                      {t('userDetailPanel.subscriptions.remnawaveProfile.linkInvalid')}
+                    </p>
+                  ) : null}
                   <div className="flex justify-end gap-2">
                     <Button variant="outline" onClick={() => setLinkDialogOpen(false)}>
                       {t('userDetailPanel.subscriptions.cancel')}
                     </Button>
                     <Button
                       onClick={() => {
-                        onLinkProfile(candidateId.trim())
+                        onLinkProfile(candidate)
                         setLinkDialogOpen(false)
                       }}
-                      disabled={candidateId.trim().length === 0 || isLinkingProfile}
+                      disabled={!candidateIsLinkable || isLinkingProfile}
                     >
                       {isLinkingProfile ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : null}
                       {t('userDetailPanel.subscriptions.remnawaveProfile.linkAction')}
@@ -1458,7 +1512,7 @@ function SubscriptionCard({
       <div className="flex items-center justify-between gap-2 px-3 pt-2.5 pb-1.5">
         <div className="flex min-w-0 items-center gap-1.5">
           <span className={`inline-block h-2 w-2 shrink-0 rounded-full ${statusDot}`} />
-          <span className="truncate text-xs font-medium">{sub.plan?.name ?? `#${sub.id.slice(0, 8)}`}</span>
+          <span className="truncate text-xs font-medium">{sub.plan?.name ?? `#${truncate(sub.id, 8)}`}</span>
           <span className={`text-[10px] font-medium ${statusColor}`}>{statusLabel}</span>
           {sub.isTrial && <span className="rounded border border-pink-500/50 px-1 py-px text-[9px] uppercase text-pink-400">Trial</span>}
           {isSyncing ? (
@@ -1884,7 +1938,7 @@ function PartnerTab({ user, telegramId, queryKey }: { user: UserDetail; telegram
                   <div key={ref.id} className="flex items-center justify-between gap-2 rounded-md border px-2 py-1">
                     <div className="flex items-center gap-1.5 min-w-0">
                       <UserCheck className="h-3 w-3 shrink-0 text-muted-foreground/60" />
-                      <span className="truncate text-[11px]">{ref.referral?.name || ref.referral?.username || ref.referralUserId?.slice(0, 8)}</span>
+                      <span className="truncate text-[11px]">{ref.referral?.name || ref.referral?.username || truncate(ref.referralUserId, 8)}</span>
                     </div>
                     <span className="shrink-0 text-[10px] text-muted-foreground">L{ref.level}</span>
                   </div>
@@ -2581,7 +2635,9 @@ function TransactionsTab({ user }: { user: UserDetail }) {
             <tbody>
               {txs.map((tx) => (
                 <tr key={tx.id} className="border-b last:border-0">
-                  <td className="px-3 py-2 font-mono text-xs">{tx.paymentId?.slice(0, 10)}…</td>
+                  <td className="px-3 py-2 font-mono text-xs">
+                    {truncate(tx.paymentId, 10)}
+                  </td>
                   <td className="px-3 py-2"><Badge variant={tx.status === 'COMPLETED' ? 'success' : 'secondary'} className="text-[10px]">{tx.status}</Badge></td>
                   <td className="px-3 py-2 font-mono">{tx.amount} {tx.currency}</td>
                   <td className="px-3 py-2 text-xs uppercase">{tx.gatewayType}</td>

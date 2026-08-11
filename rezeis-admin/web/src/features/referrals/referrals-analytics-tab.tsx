@@ -30,6 +30,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Badge } from '@/components/ui/badge'
+import { truncate } from '@/lib/utils'
 
 /** Granularity supported by the time-series endpoint. */
 type Granularity = 'day' | 'week'
@@ -433,7 +434,7 @@ function TopReferrersCard({ from, to }: { readonly from: string; readonly to: st
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-medium truncate">{row.name ?? row.username ?? '—'}</p>
                   <p className="text-xs text-muted-foreground font-mono truncate">
-                    {row.telegramId ?? row.userId.slice(0, 8)}
+                    {row.telegramId ?? truncate(row.userId, 8)}
                   </p>
                 </div>
                 <div className="text-right">

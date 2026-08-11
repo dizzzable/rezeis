@@ -5,7 +5,10 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 import { RemnawaveNodeInterface } from '../../remnawave/interfaces/remnawave-node.interface';
 import { describeStrictOutcome } from '../../remnawave/interfaces/remnawave-strict-outcome.interface';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
-import { RemnawaveVersionService } from '../../remnawave/services/remnawave-version.service';
+import {
+  RemnawaveVersionService,
+  type RemnawaveCapabilities,
+} from '../../remnawave/services/remnawave-version.service';
 import { computeConfidence, ratioStrength } from '../confidence.util';
 import { FraudSignalCandidate } from '../interfaces/fraud-signal.interface';
 import { SharingDetectionConfig } from '../sharing-detection.config';
@@ -62,6 +65,25 @@ export class SharingDetectors {
 
   /** True while the concurrent-IP detector is suppressed by node instability. */
   private nodeFlapSuppressionActive = false;
+
+  /**
+   * True once the HWID device endpoint has answered "nobody" for a panel that
+   * demonstrably has users, and until it answers with rows again — the latch
+   * behind the transition-only WARN in {@link detectHwidOverage}.
+   *
+   * Same shape and same reason as `RemnawaveDetectors.perUserTrafficBlind`:
+   * process-local, deliberately not persisted, and a restart re-announcing a
+   * still-blind detector once is the useful direction to be wrong in.
+   */
+  private hwidTopUsersBlind = false;
+
+  /**
+   * Which blindness the concurrent-IP detector last announced, or `null` while
+   * it can actually see. Keyed by REASON rather than a bare boolean so a panel
+   * that moves between states (2.7 → 3.x, reachable → unreachable) re-announces
+   * once per state instead of staying quiet under a stale latch.
+   */
+  private concurrentIpBlindReason: LiveConnectionBlindness['reason'] | null = null;
 
   public constructor(
     private readonly prismaService: PrismaService,
@@ -170,7 +192,29 @@ export class SharingDetectors {
         return [];
       }
       const { limitByUuid, coverage } = panelLimits;
-      if (topUsers.length === 0) return [];
+      if (topUsers.length === 0) {
+        // "NOBODY HAS A DEVICE" AND "WE COULD NOT READ THE DEVICE LIST" ARRIVE
+        // AS THE SAME EMPTY ARRAY, and until this branch existed the second one
+        // returned in silence — a detector reporting a clean panel forever.
+        //
+        // The distinction is destroyed one layer down: `getHwidTopUsers` wraps
+        // its request in `try { … } catch { return [] }`, so a 404, a 401 and a
+        // panel that genuinely has no registered devices are one value by the
+        // time they get here. Restoring it properly means teaching the adapter
+        // to report the failure — `src/modules/remnawave/**`, which this change
+        // does not own. What IS available here is the contradiction: the strict
+        // panel-user read above just vouched for a list of users, and an
+        // endpoint that answers "not one of them has ever registered a device"
+        // about a populated panel is far more likely to be a read we cannot
+        // make than a fact. Remnawave 3.x moved the `/api/hwid/*` family, which
+        // is exactly how a live panel arrives in this state.
+        //
+        // An empty panel is NOT this: no users means no devices, consistently,
+        // so it stays silent.
+        await this.reportHwidBlind(limitByUuid.size);
+        return [];
+      }
+      this.clearHwidBlind();
 
       const offenders = topUsers
         .map((u) => ({
@@ -417,15 +461,41 @@ export class SharingDetectors {
   public async detectConcurrentIpSharing(now: Date): Promise<readonly FraudSignalCandidate[]> {
     const config = await this.resolveConfig();
     if (!config.enableIpSharing) return [];
-    // ip-control matured on Remnawave 2.8+. On older panels the active-session
-    // data is unreliable/empty, so we skip the detector entirely there rather
-    // than hammer the nodes for nothing — it lights up automatically once the
-    // panel upgrades and the capability flips on.
+    // WHY THIS IS NOT `if (!caps.liveIpControl) return []` ANY MORE.
+    //
+    // That test has one true answer and three different meanings, and it
+    // reported the same silent nothing for all of them. `liveIpControl` is
+    // `major === 2 && minor >= 8`, so a Remnawave 3.2.1 panel — which serves
+    // live-connection data perfectly well, under `/api/connections/*` — read as
+    // "no live data at all" and logged, at debug, that the panel "lacks mature
+    // ip-control (need 2.8+)". That sentence is false about a 3.x panel: it is
+    // NEWER than 2.8 and it is not missing the capability. What is missing is a
+    // reader on our side, because `fetchUsersIpsForNode` is hard-wired to the
+    // `/api/ip-control/*` family 3.x deleted, and every call to it comes back
+    // 404 → `[]`.
+    //
+    // The capability that actually answers "does this panel have live
+    // connections to look at?" is `connectionsApi !== 'unknown'` — the version
+    // service's own comment says to widen the gate to it once the connections
+    // family is wired up, and the branching lives HERE because that file is not
+    // this change's to edit. So the two questions are asked separately:
+    //
+    //   • does the panel HAVE live-connection data?  `connectionsApi`
+    //   • can this detector READ it?                 `liveIpControl`
+    //
+    // A "no" to the second is a blind detector whatever the first says, and it
+    // now says so out loud instead of returning a clean-looking empty list.
+    // Returning `[]` is still the only safe output — see the class header and
+    // `AntiFraudService`'s `observational` evidence class: an empty run from a
+    // panel-backed detector is no information at all and must never auto-resolve
+    // anybody's open signal.
     const caps = await this.versionService.getCapabilities();
-    if (!caps.liveIpControl) {
-      this.logger.debug('Concurrent-IP detection skipped: panel lacks mature ip-control (need 2.8+)');
+    const blindness = classifyLiveConnectionBlindness(caps);
+    if (blindness !== null) {
+      this.reportConcurrentIpBlind(blindness);
       return [];
     }
+    this.clearConcurrentIpBlind();
     try {
       // Degrade, never guess: this detector writes a fraud signal keyed by
       // `day|uuid`, and a uuid-less row would collide every such user onto one
@@ -485,8 +555,17 @@ export class SharingDetectors {
       const byUser = new Map<string, Map<string, IpAggregate>>();
       let undatedSamples = 0;
 
+      let unreadableNodes = 0;
       for (const node of connected) {
         const rows = await this.remnawaveApiService.fetchUsersIpsForNode(node.uuid);
+        // `null` is "this node could not be read", not "this node was quiet".
+        // Counting it is the whole point: a node whose collection job failed or
+        // timed out contributes nobody, and without this the run would report a
+        // clean panel having looked at a fraction of it.
+        if (rows === null) {
+          unreadableNodes += 1;
+          continue;
+        }
         for (const row of rows) {
           for (const sample of row.ips) {
             const lastSeenMs = Date.parse(sample.lastSeen);
@@ -584,6 +663,21 @@ export class SharingDetectors {
           `Concurrent-IP detection skipped ${unreadablePanelIds} ip-control row(s) whose ` +
             'userId is not an integer panel id — they cannot be attributed to a user without guessing',
         );
+      }
+      // A node that could not be read contributes nobody, and nobody is what a
+      // clean panel also contributes. Said out loud, at a level proportional to
+      // how much of the panel went unseen: the run is still worth completing on
+      // the nodes that answered, but its silence is not evidence.
+      if (unreadableNodes > 0) {
+        const total = connected.length;
+        const message =
+          `Concurrent-IP detection could not read ${unreadableNodes} of ${total} connected node(s) — ` +
+          'their live connections were NOT examined, so a clean result covers only the rest';
+        if (unreadableNodes === total) {
+          this.logger.warn(`${message}. This run saw nothing at all and proves nothing.`);
+        } else {
+          this.logger.warn(message);
+        }
       }
       if (offenders.length === 0) return [];
 
@@ -690,6 +784,95 @@ export class SharingDetectors {
     } catch (error) {
       this.logger.warn(`Concurrent-IP detection failed: ${(error as Error).message}`);
       return [];
+    }
+  }
+
+  // ── Blindness reporting ─────────────────────────────────────────────────
+
+  /**
+   * The HWID device endpoint returned nothing for a panel holding
+   * `panelUserCount` users.
+   *
+   * WARN on the transition into blindness, debug on every run after it. This
+   * runs every 5 minutes and the condition, once true, stays true until somebody
+   * fixes the panel or the adapter — a line per run would be 288 copies a day of
+   * the same text and would be tuned out exactly like the failure it exists to
+   * surface. One WARN when the detector goes blind, one LOG when it recovers.
+   * Once per RUN, never per user: the blindness is a property of the read, not
+   * of anybody's account.
+   */
+  private async reportHwidBlind(panelUserCount: number): Promise<void> {
+    // No users, no devices — a consistent, unremarkable empty panel.
+    if (panelUserCount <= 0) return;
+    if (this.hwidTopUsersBlind) {
+      this.logger.debug('HWID overage detection still blind');
+      return;
+    }
+    this.hwidTopUsersBlind = true;
+    this.logger.warn(
+      `HWID overage detection is BLIND: the panel user list vouches for ${panelUserCount} ` +
+        'user(s), and the HWID device endpoint reports that not one of them has a ' +
+        `registered device (${await this.describePanel()}). The adapter collapses a 404, ` +
+        'a rejected request and a genuinely empty list into the same empty array, so ' +
+        'this run cannot tell "nobody is over their limit" from "we could not look" — ' +
+        'and Remnawave 3.x moved the `/api/hwid/*` family this reads. This detector ' +
+        'will report zero offenders until that is resolved; it is not evidence of a ' +
+        'clean panel.',
+    );
+  }
+
+  /** The endpoint answered with rows again. Announced once, at the edge. */
+  private clearHwidBlind(): void {
+    if (!this.hwidTopUsersBlind) return;
+    this.hwidTopUsersBlind = false;
+    this.logger.log('HWID overage detection recovered: the panel returned device rows again');
+  }
+
+  /**
+   * This run could not look at who is connected, and why. Same one-shot shape as
+   * {@link reportHwidBlind}, latched on the REASON so a panel that changes state
+   * announces the new one.
+   */
+  private reportConcurrentIpBlind(blindness: LiveConnectionBlindness): void {
+    if (this.concurrentIpBlindReason === blindness.reason) {
+      this.logger.debug(`Concurrent-IP detection still blind (${blindness.reason})`);
+      return;
+    }
+    this.concurrentIpBlindReason = blindness.reason;
+    this.logger.warn(
+      `Concurrent-IP detection is BLIND: ${blindness.message} This detector will report ` +
+        'zero offenders until that is resolved — which is not the same fact as a panel ' +
+        'on which nobody is sharing.',
+    );
+  }
+
+  /** The detector can read the panel again. Announced once, at the edge. */
+  private clearConcurrentIpBlind(): void {
+    if (this.concurrentIpBlindReason === null) return;
+    this.concurrentIpBlindReason = null;
+    this.logger.log(
+      'Concurrent-IP detection recovered: the panel serves a live-connection family this ' +
+        'detector can read',
+    );
+  }
+
+  /**
+   * The panel's self-reported version, for a log line and never for a decision.
+   *
+   * Swallows its own failure twice over: a message that cannot name the panel is
+   * still worth sending, and a capability read that throws must not turn a blind
+   * detector into a *failed* one — the caller sits inside the detector's
+   * try/catch, where a throw would be reported as "HWID overage detection
+   * failed" and lose the blindness it was trying to announce.
+   */
+  private async describePanel(): Promise<string> {
+    try {
+      const caps = await this.versionService.getCapabilities();
+      return typeof caps.version === 'string' && caps.version.length > 0
+        ? `panel version ${caps.version}`
+        : 'the panel version could not be read';
+    } catch {
+      return 'the panel version could not be read';
     }
   }
 
@@ -908,6 +1091,73 @@ export class SharingDetectors {
     }
     return map;
   }
+}
+
+/**
+ * Why the concurrent-IP detector cannot see who is connected this run.
+ *
+ * `reason` is the latch key and the stable token a test can assert on; `message`
+ * is the operator-facing half. Two states, and they are two different operator
+ * actions — which is the whole reason the old single `liveIpControl` test was
+ * not good enough:
+ *
+ *   `immature_ip_control` — a 2.x panel below 2.8, where the active-session data
+ *      exists but is not trustworthy. Fixed by upgrading the panel, and the
+ *      detector lights up on its own when that happens.
+ *   `panel_shape_unknown` — we do not know what the panel is. Version detection
+ *      collapses 401 / timeout / DNS / unconfigured token into one "no version",
+ *      so this is a rezeis-side configuration or connectivity problem.
+ */
+interface LiveConnectionBlindness {
+  readonly reason: 'immature_ip_control' | 'panel_shape_unknown';
+  readonly message: string;
+}
+
+/**
+ * Can {@link SharingDetectors.detectConcurrentIpSharing} observe this panel?
+ * `null` = yes; anything else is why not.
+ *
+ * Reads `connectionsApi` — the field the version service already exposes and its
+ * own comment nominates as the eventual gate — for "does live-connection data
+ * exist?", and `liveIpControl` for "can this detector read it?". Deliberately a
+ * pure function of the capability record and nothing else, so the classification
+ * is testable without a panel and cannot acquire a side effect later.
+ */
+function classifyLiveConnectionBlindness(
+  caps: Pick<RemnawaveCapabilities, 'liveIpControl' | 'connectionsApi' | 'version'>,
+): LiveConnectionBlindness | null {
+  // The only family the adapter can currently read is `ip-control`, and only
+  // from 2.8 up. Everything else is blind, in one of three distinguishable ways.
+  if (caps.liveIpControl) return null;
+  const panel =
+    typeof caps.version === 'string' && caps.version.length > 0
+      ? `panel version ${caps.version}`
+      : 'a panel version rezeis could not read';
+  // There is deliberately no `connectionsApi === 'connections'` branch. It used
+  // to exist, for the window in which a 3.x panel served live-connection data
+  // the adapter could not read. That window closed: `connectionsApiFor` only
+  // ever answers 'connections' for major 3, and `liveIpControl` is true for
+  // major 3, so the branch became unreachable the moment the reader landed.
+  // Keeping it would have left an operator-facing message asserting something
+  // false ("rezeis cannot, until the adapter learns the connections family")
+  // behind a condition no panel can satisfy.
+  if (caps.connectionsApi === 'ip-control') {
+    return {
+      reason: 'immature_ip_control',
+      message:
+        `the panel reports ${panel}: \`/api/ip-control/*\` exists but did not mature ` +
+        'until 2.8, and the active-session data older builds return is not reliable ' +
+        'enough to accuse anybody with.',
+    };
+  }
+  return {
+    reason: 'panel_shape_unknown',
+    message:
+      `rezeis is running against ${panel}, so it cannot tell which live-connection ` +
+      'family the panel serves. Every version-detection failure — 401, request ' +
+      'timeout, DNS, an unconfigured token, a panel mid-restart — collapses into this ' +
+      'one state, so the panel may well be fine and unreachable.',
+  };
 }
 
 /** Local facts about the subscription behind a Remnawave profile. */
@@ -1134,3 +1384,8 @@ function clampScore(value: number): number {
 
 // Re-exported for tests that want to assert on the resolved config shape.
 export type { SharingDetectionConfig };
+
+// Exported so the observability classification can be asserted directly, on
+// every capability shape, without standing up a panel double per case.
+export { classifyLiveConnectionBlindness };
+export type { LiveConnectionBlindness };

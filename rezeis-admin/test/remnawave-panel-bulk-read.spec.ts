@@ -42,8 +42,6 @@ const CONFIG = {
   port: 3000,
   token: 'secret',
   webhookSecret: null,
-  caddyToken: null,
-  cookie: null,
 } as const;
 
 function axiosError(status: number, headers: Record<string, string> = {}, data?: unknown) {
@@ -69,7 +67,15 @@ function build(handler: (start: number) => unknown) {
           new URL(input.url, 'http://x').searchParams.get('start') ?? '0',
           10,
         );
-        requestedStarts.push(start);
+        // Only the page walk is recorded. The panel-version probe
+        // (`/api/system/...`) carries no `start`, so it would otherwise be
+        // logged as a page-0 request and make every "which offsets were asked
+        // for" assertion in this file read two phantom pages.
+        //
+        // The probe deliberately gets no version here: these tests are about
+        // the OFFSET walk, and a fake that answered `3.2.1` would silently move
+        // them onto the keyset path where `start` does not exist at all.
+        if (!input.url.startsWith('/api/system/')) requestedStarts.push(start);
         return handler(start);
       },
     } as never,
@@ -133,6 +139,13 @@ function buildPanel(
     {
       request: (input: { url: string }) => {
         const url = new URL(input.url, 'http://x');
+        // The panel-version probe, answered with no version on purpose. These
+        // tests are about the OFFSET walk; letting the probe report 2.8 would
+        // move them onto the keyset path, where `start` does not exist and
+        // every assertion below would be measuring a walk that never ran.
+        if (url.pathname.startsWith('/api/system/')) {
+          return of({ data: { response: {} } });
+        }
         const single = /^\/api\/users\/(.+)$/.exec(url.pathname);
         if (single !== null) {
           const uuid = single[1];
@@ -720,5 +733,65 @@ describe('what a MISS in a blessed list actually proves', () => {
     // complete-map path is deliberately left out of this change.
     const confirmation = await service.getPanelUser('u-500');
     assert.equal(confirmation?.uuid, 'u-500');
+  });
+});
+
+describe('a panel keyed differently from what we stored — the upgrade-day trap', () => {
+  /**
+   * After a 2.x → 3.x upgrade the panel's rows decode to their numeric id while
+   * `Subscription.remnawaveId` still holds the 2.x uuid it was created with.
+   * Every lookup then misses, and a COMPLETE list used to turn that into "the
+   * panel proves this profile is gone" — for the entire customer base at once,
+   * on the first import after the upgrade, writing EXPIRED over live paying
+   * subscriptions. A namespace mismatch is not evidence of absence.
+   */
+  function idKeyedPanel() {
+    return buildPanelLookup(async () =>
+      strictOk({
+        users: [row('4821'), row('4822')] as never,
+        total: 2,
+        complete: true,
+      }),
+    );
+  }
+
+  it('refuses to read a miss as "gone" when the list is keyed by numeric id', async () => {
+    const lookup = await idKeyedPanel();
+    assert.equal(lookup.keyKind, 'id');
+
+    const degrades: string[] = [];
+    const resolved = await resolvePanelProfile(
+      '330f2b38-1362-46ab-b5c0-dea32167eff9',
+      lookup,
+      async () => assert.fail('a namespace mismatch must not cost a per-profile read'),
+      {
+        confirmAbsence: async () => assert.fail('nothing may be confirmed absent here'),
+        onUnconfirmed: (_uuid, reason) => degrades.push(reason),
+      },
+    );
+
+    assert.deepEqual(resolved, { panel: null, known: false });
+    assert.equal(degrades.length, 1, 'the gap must be visible, not silent');
+    assert.match(degrades[0], /keyed by id/);
+  });
+
+  it('still resolves an identifier that IS in the list namespace', async () => {
+    const lookup = await idKeyedPanel();
+    const resolved = await resolvePanelProfile('4821', lookup, async () => null, NEVER_CONFIRMED);
+    assert.equal(resolved.known, true);
+    assert.equal(resolved.panel?.uuid, '4821');
+  });
+
+  it('a uuid-keyed list still proves absence for a uuid — the 2.x path is untouched', async () => {
+    const lookup = await buildPanelLookup(async () =>
+      strictOk({
+        users: [row('11111111-1111-4111-8111-111111111111')] as never,
+        total: 1,
+        complete: true,
+      }),
+    );
+    assert.equal(lookup.keyKind, 'uuid');
+    const resolved = await resolvePanelProfile('22222222-2222-4222-8222-222222222222', lookup, async () => null, NEVER_CONFIRMED);
+    assert.deepEqual(resolved, { panel: null, known: true });
   });
 });

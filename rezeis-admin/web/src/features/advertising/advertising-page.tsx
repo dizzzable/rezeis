@@ -52,6 +52,7 @@ import {
   Tooltip as ChartTooltip,
   XAxis,
 } from 'recharts'
+import { truncate } from '@/lib/utils'
 
 import {
   approveAdRequest,
@@ -784,12 +785,12 @@ function RequestRow({ request, moderation }: { request: AdPlacementRequest; mode
     >
       <div className="min-w-0 flex-1 space-y-1">
         <div className="flex flex-wrap items-center gap-2">
-          <span className="font-medium">{request.channel ?? request.partnerId.slice(0, 8)}</span>
+          <span className="font-medium">{request.channel ?? truncate(request.partnerId, 8)}</span>
           <Badge variant="outline" className="font-normal" data-testid="request-status">
             {t(`advertisingPage.requestStatus.${statusKey}`)}
           </Badge>
           <span className="text-xs text-muted-foreground" title={request.partnerId}>
-            {t('advertisingPage.requests.partnerId', { id: request.partnerId.slice(0, 10) })}
+            {t('advertisingPage.requests.partnerId', { id: truncate(request.partnerId, 10) })}
           </span>
         </div>
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">

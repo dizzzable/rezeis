@@ -22,8 +22,37 @@ export function mapHwidTopUser(raw: unknown): RemnawaveHwidTopUserInterface {
   // level, no nested `user` block. We still tolerate the older nested shape.
   const user = (r['user'] ?? r) as Record<string, unknown>;
   return {
-    // 2.8 renamed the row id `userUuid` → `userId`; accept both.
-    userUuid: toString(r['userUuid'] ?? r['userId'] ?? user['uuid']),
+    // The identity, under whichever name this panel gives it.
+    //
+    // 2.7.4 and 2.8.x both send `userUuid` beside a numeric `id` (verified in
+    // the vendored contracts — the older comment here claimed 2.8 renamed it to
+    // `userId`, and no supported version declares that field on this row). 3.x
+    // sends NEITHER uuid form: its row is `{ id, username, devicesCount }` and
+    // the identity is the numeric `id`. `userId` is still accepted below in case
+    // a build does spell it that way; it costs nothing to read.
+    //
+    // The 3.x branch has to be here, and it has to render the id as its decimal
+    // string, because the ONLY consumer — the HWID-overage detector — looks the
+    // row up in a map keyed by what rezeis stored in `remnawaveId`, which on 3.x
+    // is exactly that decimal string. Without it every 3.x row mapped to `''`,
+    // missed the map, took the `?? 0` limit and was filtered out: the detector
+    // returned "nobody is over their device limit" for every panel, and logged
+    // nothing on the way.
+    // Absence means 3.x; EMPTINESS means a damaged 2.x row. Tested with
+    // `in`, not with `??`: 2.7.4 and 2.8.x both send `userUuid` alongside a
+    // numeric `id`, so a row whose uuid came back empty would otherwise decode
+    // to the id and be silently attributed, when the honest answer is "this row
+    // cannot be read". The overage detector then drops it from its join instead
+    // of reporting an unreadable row — the same collapse this codebase has
+    // fixed twice elsewhere.
+    userUuid:
+      'userUuid' in r
+        ? toString(r['userUuid'])
+        : 'userId' in r
+          ? toString(r['userId'])
+          : 'uuid' in user
+            ? toString(user['uuid'])
+            : (toNullableIdString(r['id'] ?? user['id']) ?? ''),
     username: toString(r['username'] ?? user['username']),
     telegramId: toNullableString(r['telegramId'] ?? user['telegramId']),
     devicesCount: toNumber(r['devicesCount'] ?? r['count'] ?? r['hwidDevicesCount']),
@@ -192,8 +221,30 @@ export function mapUserSummary(raw: unknown): RemnawaveUserSummaryInterface {
   // `trafficUsedBytes` this used to read belongs to the node dtos, not to any
   // of the four user lookups that feed this mapper — see the interface note.
   const userTraffic = (r['userTraffic'] ?? {}) as Record<string, unknown>;
+  // A 3.x row has no `uuid` field at all, and `toString` yields `''` for a
+  // missing one — so every 3.x user came out of here with the SAME empty
+  // identity. Downstream that is a React key collision in the search results and
+  // an identifier the operator cannot act on. The row's own numeric `id` is the
+  // identity on that era; it is carried as its decimal string here for the same
+  // reason `RemnawavePanelUser.uuid` does — so the value can be compared with a
+  // stored `remnawaveId` without a translation step.
+  //
+  // Keyed on ABSENCE of the field, not on emptiness. A 2.x row whose `uuid`
+  // came back as `''` is DAMAGED, and falling through to its numeric id would
+  // attribute it anyway — the same collapse `parsePanelUserRow` and
+  // `parseStrictUser` refuse. An empty identity is the honest answer there.
+  const identity =
+    r['uuid'] === undefined
+      ? typeof r['id'] === 'number' && Number.isSafeInteger(r['id'])
+        ? String(r['id'])
+        : ''
+      : typeof r['uuid'] === 'string'
+        ? r['uuid']
+        : '';
   return {
-    uuid: toString(r['uuid']),
+    uuid: identity,
+    /** The panel's numeric id when it has one — what every 3.x route addresses by. */
+    panelId: typeof r['id'] === 'number' && Number.isSafeInteger(r['id']) ? r['id'] : null,
     shortUuid: toNullableString(r['shortUuid']),
     username: toString(r['username']),
     status: toNullableString(r['status']),
@@ -242,6 +293,45 @@ function toNumber(value: unknown): number {
     return Number.isFinite(parsed) ? parsed : 0;
   }
   return 0;
+}
+
+/**
+ * Remnawave 3.x's `customResponseHeaders`: a flat `name -> value` map, or null
+ * when the operator set none. Values that are not strings are dropped rather
+ * than coerced — a header is a string by definition, and a number here would
+ * mean we are reading something else.
+ */
+function readResponseHeaders(value: unknown): Record<string, string> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return {};
+  const out: Record<string, string> = {};
+  for (const [name, raw] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof raw === 'string') out[name.toLowerCase()] = raw;
+  }
+  return out;
+}
+
+/**
+ * Undoes the panel's `rwEncodeBase64:` marker, which it puts on header values
+ * that must reach the client base64'd (`profile-title` carries it by default).
+ * A value that claims the prefix but does not decode to valid UTF-8 is returned
+ * as-is: showing the operator the raw string beats showing them mojibake.
+ */
+function decodePanelHeaderValue(value: string | null): string | null {
+  if (value === null) return null;
+  const marker = 'rwEncodeBase64:';
+  if (!value.startsWith(marker)) return value;
+  const encoded = value.slice(marker.length);
+  try {
+    const decoded = Buffer.from(encoded, 'base64').toString('utf8');
+    return decoded.length > 0 ? decoded : value;
+  } catch {
+    return value;
+  }
+}
+
+/** True when a panel field carries actual text rather than null / '' / a non-string. */
+function hasPanelText(value: unknown): boolean {
+  return typeof value === 'string' && value.length > 0;
 }
 
 function toNullableNumber(value: unknown): number | null {
@@ -294,17 +384,38 @@ export function mapSubscriptionSettings(raw: unknown): {
   readonly hasCustomRemarks: boolean;
 } {
   const r = (raw ?? {}) as Record<string, unknown>;
+  // Remnawave 3.x removed six top-level fields from this object and moved the
+  // same information into `customResponseHeaders`, a free-form header map:
+  //
+  //   profileTitle               -> "profile-title"          (may be prefixed
+  //                                 `rwEncodeBase64:` when the panel wants the
+  //                                 value base64'd on the wire)
+  //   supportLink                -> "support-url"
+  //   profileUpdateInterval      -> "profile-update-interval" (a STRING now)
+  //   isProfileWebpageUrlEnabled -> presence of "profile-web-page-url"
+  //   happAnnounce / happRouting -> "announce" / "routing"
+  //
+  // Nothing here throws when a field is missing, so on a 3.x panel the six
+  // readouts silently became "", null, 0 and off — a Settings screen that looks
+  // configured-but-empty rather than one that reports a problem. Reading the
+  // header map as a fallback is what keeps both shapes honest; the 2.x fields
+  // still win when present, so no 2.x behaviour moves.
+  const headers = readResponseHeaders(r['customResponseHeaders']);
+  const header = (name: string): string | null => headers[name] ?? null;
   return {
     uuid: toString(r['uuid']),
-    profileTitle: toString(r['profileTitle']),
-    supportLink: toNullableString(r['supportLink']),
-    profileUpdateInterval: toNumber(r['profileUpdateInterval']),
+    profileTitle: toString(r['profileTitle'] ?? decodePanelHeaderValue(header('profile-title'))),
+    supportLink: toNullableString(r['supportLink'] ?? header('support-url')),
+    profileUpdateInterval: toNumber(r['profileUpdateInterval'] ?? header('profile-update-interval')),
     serveJsonAtBaseSubscription: Boolean(r['serveJsonAtBaseSubscription']),
-    isProfileWebpageUrlEnabled: Boolean(r['isProfileWebpageUrlEnabled']),
+    isProfileWebpageUrlEnabled:
+      r['isProfileWebpageUrlEnabled'] === undefined
+        ? header('profile-web-page-url') !== null
+        : Boolean(r['isProfileWebpageUrlEnabled']),
     isShowCustomRemarks: Boolean(r['isShowCustomRemarks']),
     randomizeHosts: Boolean(r['randomizeHosts']),
-    hasHappAnnounce: typeof r['happAnnounce'] === 'string' && (r['happAnnounce'] as string).length > 0,
-    hasHappRouting: typeof r['happRouting'] === 'string' && (r['happRouting'] as string).length > 0,
+    hasHappAnnounce: hasPanelText(r['happAnnounce']) || hasPanelText(header('announce')),
+    hasHappRouting: hasPanelText(r['happRouting']) || hasPanelText(header('routing')),
     hasResponseRules:
       typeof r['responseRules'] === 'object' && r['responseRules'] !== null,
     hasCustomRemarks:

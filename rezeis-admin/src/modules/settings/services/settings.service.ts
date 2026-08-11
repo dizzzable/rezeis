@@ -1608,7 +1608,15 @@ function extractUpdatedBrandingFields(dto: UpdateBrandingSettingsDto): readonly 
     'primaryFg',
     'bgPrimary',
     'bgSecondary',
+    // The two ownership discriminators belong in this list even though no
+    // control shows them: it is both the audit record AND the gate that turns
+    // an update into a no-op when nothing here matched. Re-applying the concept
+    // an operator had detached from changes the source and nothing else, and
+    // without these entries that save would be silently discarded, leaving the
+    // cabinet on the detached colours.
+    'brandPaletteSource',
     'cardGradient',
+    'cardGradientSource',
     'cardPattern',
     'subscriptionCardText',
     'subscriptionCardGlass',

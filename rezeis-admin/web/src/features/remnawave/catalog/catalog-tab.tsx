@@ -43,6 +43,7 @@ import { remnawaveApi } from '../remnawave-api'
 import { NodeFlag } from '../remnawave-flags'
 import { KEYS } from '../remnawave-query-keys'
 import { TabHeader } from '../shared/tab-header'
+import { truncate } from '@/lib/utils'
 
 export function CatalogTab() {
   const { t } = useTranslation()
@@ -132,7 +133,7 @@ export function CatalogTab() {
                 <TableRow key={profile.uuid}>
                   <TableCell>
                     <p className="truncate font-medium">{profile.name}</p>
-                    <p className="font-mono text-[10px] text-muted-foreground/70">{profile.uuid.slice(0, 8)}…</p>
+                    <p className="font-mono text-[10px] text-muted-foreground/70">{truncate(profile.uuid, 8)}</p>
                   </TableCell>
                   <TableCell className="text-right tabular-nums">{profile.inbounds.length}</TableCell>
                   <TableCell className="text-right">
@@ -229,7 +230,7 @@ export function CatalogTab() {
                   </TableCell>
                   <TableCell>
                     <p className="font-medium">{page.name}</p>
-                    <p className="font-mono text-[10px] text-muted-foreground/70">{page.uuid.slice(0, 8)}…</p>
+                    <p className="font-mono text-[10px] text-muted-foreground/70">{truncate(page.uuid, 8)}</p>
                   </TableCell>
                   <TableCell className="text-right">
                     <ConfigBadge configured={page.hasConfig} />

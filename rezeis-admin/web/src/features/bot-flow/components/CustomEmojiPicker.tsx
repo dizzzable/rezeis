@@ -6,7 +6,7 @@ import { Input } from '@/components/ui/input'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Button } from '@/components/ui/button'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { cn } from '@/lib/utils'
+import { cn, truncate } from '@/lib/utils'
 
 import { EmojiPreview } from '../../custom-emoji/emoji-preview'
 import { useEmojiRegistry } from '../../custom-emoji/use-emoji-registry'
@@ -65,7 +65,7 @@ export function CustomEmojiPicker({ value, onChange }: CustomEmojiPickerProps) {
                 <span className="text-sm">🔹</span>
               )}
               <span className="truncate font-mono text-[10px] text-muted-foreground">
-                {selected ? selected.name : `${value.slice(0, 10)}…`}
+                {selected ? selected.name : truncate(value, 10)}
               </span>
             </>
           ) : (

@@ -89,6 +89,20 @@ export class ProfileSyncQueueService {
   /**
    * Sweeps for PENDING sync jobs that haven't been picked up yet and
    * enqueues them. Designed to be called from a cron interval.
+   *
+   * `force`, like the other two recovery passes, and for a reason this sweep
+   * alone could not survive without: a row can be PENDING while a BullMQ job
+   * carrying the same `jobId` sits in the RETAINED failed set
+   * (`removeOnFail: 200`). That happens whenever the worker throws before it
+   * claims the row — the row is never moved off PENDING, but BullMQ still burns
+   * its attempts and keeps the exhausted job. A plain `add` is then silently
+   * deduplicated against that retained job, so the very sweep that exists to
+   * rescue stuck PENDING rows was the one path that could never rescue them:
+   * the row stayed unreachable forever, long after the cause had gone.
+   *
+   * Safe for rows that are genuinely in flight: `enqueue(force)` removes the
+   * retained job first, and BullMQ refuses to remove a LOCKED (active) one —
+   * the removal is swallowed and the `add` deduplicates exactly as before.
    */
   public async sweepPending(): Promise<number> {
     const pendingJobs = await this.prismaService.profileSyncJob.findMany({
@@ -98,7 +112,7 @@ export class ProfileSyncQueueService {
       orderBy: { createdAt: 'asc' },
     });
     for (const job of pendingJobs) {
-      await this.enqueue(job.id);
+      await this.enqueue(job.id, /* force */ true);
     }
     return pendingJobs.length;
   }

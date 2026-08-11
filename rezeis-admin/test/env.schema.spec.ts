@@ -91,8 +91,6 @@ describe('validateEnvironment', () => {
       REMNAWAVE_PORT: '3001',
       REMNAWAVE_TOKEN: 'remnawave-token-v2',
       REMNAWAVE_WEBHOOK_SECRET: 'remnawave-webhook-secret-v2',
-      REMNAWAVE_CADDY_TOKEN: 'remnawave-caddy-token-v2',
-      REMNAWAVE_COOKIE: 'remnawave-cookie-v2',
       REZEIS_UPDATE_REPO: 'owner/rezeis',
       REZEIS_REIWA_UPDATE_REPO: 'owner/reiwa',
     });

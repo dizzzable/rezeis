@@ -111,6 +111,28 @@ export interface PanelLookup {
    * miss says nothing until it is confirmed per-UUID.
    */
   readonly complete: boolean;
+  /**
+   * Which NAMESPACE the map's keys live in, read off the rows themselves.
+   *
+   * This exists because a miss only means "gone" when the key we looked up
+   * COULD have been in the map. Remnawave 3.x dropped the user uuid, so its
+   * rows decode to their numeric id, while `Subscription.remnawaveId` keeps the
+   * 2.x uuid it was created with — deliberately, it is the design invariant.
+   * Look a uuid up in an id-keyed map and it misses every time, for every
+   * subscription, and a `complete` list turns that into "the panel proves this
+   * profile is gone" → EXPIRED written over every live paying customer on the
+   * first import after an upgrade.
+   *
+   * `'mixed'` when the rows disagree and `'unknown'` when there are none; both
+   * are treated as "cannot rule out a namespace mismatch", which costs a
+   * per-profile confirmation and nothing else.
+   */
+  readonly keyKind: 'id' | 'uuid' | 'mixed' | 'unknown';
+}
+
+/** Whole-string digits — the shape a 3.x identity decodes to. */
+function looksNumeric(key: string): boolean {
+  return /^\d+$/.test(key);
 }
 
 /**
@@ -144,19 +166,27 @@ export async function buildPanelLookup(
   try {
     outcome = await fetchAll();
   } catch {
-    return { map: new Map(), reachable: false, complete: false };
+    return { map: new Map(), reachable: false, complete: false, keyKind: 'unknown' };
   }
-  if (outcome.kind !== 'ok') return { map: new Map(), reachable: false, complete: false };
+  if (outcome.kind !== 'ok') {
+    return { map: new Map(), reachable: false, complete: false, keyKind: 'unknown' };
+  }
 
   const map = new Map<string, RemnawavePanelUser>();
+  let numeric = 0;
   for (const user of outcome.value.users) {
-    if (typeof user.uuid === 'string' && user.uuid.length > 0) map.set(user.uuid, user);
+    if (typeof user.uuid === 'string' && user.uuid.length > 0) {
+      map.set(user.uuid, user);
+      if (looksNumeric(user.uuid)) numeric += 1;
+    }
   }
+  const keyKind: PanelLookup['keyKind'] =
+    map.size === 0 ? 'unknown' : numeric === map.size ? 'id' : numeric === 0 ? 'uuid' : 'mixed';
   // `!== false` rather than a bare read: a hand-built list (a test double, a
   // producer written before the flag existed) carries no `complete`, and the
   // adapter — the only real producer — always sets it, so absence means "not
   // truncated" and never silently switches the whole overlay into per-UUID mode.
-  return { map, reachable: true, complete: outcome.value.complete !== false };
+  return { map, reachable: true, complete: outcome.value.complete !== false, keyKind };
 }
 
 /**
@@ -229,6 +259,26 @@ export async function resolvePanelProfile(
   if (!lookup.reachable) return { panel: null, known: false };
   const hit = lookup.map.get(uuid);
   if (hit !== undefined) return { panel: hit, known: true };
+
+  // A miss only means "gone" if this key could have been in the map at all.
+  // After a 2.x → 3.x panel upgrade the rows are keyed by numeric id while the
+  // stored identifiers are still 2.x uuids, so EVERY lookup misses — and a
+  // `complete` list would turn that into "the panel proves it is gone" for the
+  // whole customer base at once. Namespace mismatch is not evidence; fall
+  // through to the per-profile confirmation, which addresses the profile
+  // properly and can actually prove absence.
+  const keysCouldMatch =
+    lookup.keyKind === 'mixed' ||
+    lookup.keyKind === 'unknown' ||
+    (lookup.keyKind === 'id') === looksNumeric(uuid);
+  if (!keysCouldMatch) {
+    probe.onUnconfirmed(
+      uuid,
+      `panel list is keyed by ${lookup.keyKind}, this identifier is not — a miss proves nothing`,
+    );
+    return { panel: null, known: false };
+  }
+
   if (lookup.complete) return { panel: null, known: true };
 
   let profile: RemnawavePanelUser | null;

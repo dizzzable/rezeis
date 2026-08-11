@@ -16,6 +16,10 @@ import { PasswordHashService } from '../../auth/services/password-hash.service';
 import { loginPolicy } from '../../auth/utils/login-policy.util';
 import { EmailService } from '../../email/services/email.service';
 import { PlanCatalogService } from '../../plans/services/plan-catalog.service';
+import {
+  storedIdentityOf,
+  type PanelIdentityColumns,
+} from '../../remnawave/services/panel-user-address';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
 import { AcceptInternalUserRulesDto } from '../dto/accept-internal-user-rules.dto';
 import { CompleteWebAccountEmailVerificationDto } from '../dto/complete-web-account-email-verification.dto';
@@ -555,7 +559,7 @@ export class InternalUserService {
     // UUID) and a populated traffic bar — matching the single-subscription
     // path. Best-effort: failures resolve to nulls and the card degrades.
     const usages = await Promise.all(
-      subscriptions.map((sub) => this.resolvePanelUsage(sub.remnawaveId)),
+      subscriptions.map((sub) => this.resolvePanelUsage(sub)),
     );
     return {
       subscriptions: subscriptions.map((sub, i) => {
@@ -613,7 +617,7 @@ export class InternalUserService {
     if (subscription === null) {
       return null;
     }
-    const usage = await this.resolvePanelUsage(subscription.remnawaveId);
+    const usage = await this.resolvePanelUsage(subscription);
     const o = usage.overlay;
     return {
       id: subscription.id,
@@ -645,16 +649,22 @@ export class InternalUserService {
    * and hides the bar instead of rendering a misleading 0%.
    */
   private async resolvePanelUsage(
-    remnawaveId: string | null,
+    subscription: PanelIdentityColumns | null,
   ): Promise<{
     profileName: string | null;
     trafficUsedGb: number | null;
     overlay: PanelSubscriptionOverlay | null;
   }> {
-    if (this.remnawaveApiService === undefined || remnawaveId === null) {
+    // Takes the ROW, not the bare id: the numeric panel id and the panel
+    // username travel with it, and on a 3.x panel they are the only way to name
+    // a profile that was created on 2.x — the upgrade drops the uuid this
+    // column still holds. `null` is the same "no panel profile" condition the
+    // bare `remnawaveId === null` check tested.
+    const identity = storedIdentityOf(subscription);
+    if (this.remnawaveApiService === undefined || identity === null) {
       return { profileName: null, trafficUsedGb: null, overlay: null };
     }
-    const usage = await this.remnawaveApiService.getPanelUserUsage(remnawaveId);
+    const usage = await this.remnawaveApiService.getPanelUserUsage(identity);
     if (usage === null) {
       return { profileName: null, trafficUsedGb: null, overlay: null };
     }

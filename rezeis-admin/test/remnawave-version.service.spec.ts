@@ -11,10 +11,10 @@ import {
 
 /**
  * Capability detection decides, on a live paying panel, whether rezeis calls
- * endpoints that exist. Two production versions are in play (2.7.4 for paying
- * customers, 2.8.0 for testers) and a third is coming (3.2.1), so every field
- * is asserted in full for every pinned version — an extra or renamed field
- * fails these tests rather than shipping as a silent shape change.
+ * endpoints that exist. Three panel versions are in play — 2.7.4 for paying
+ * customers, 2.8.x for testers and 3.2.1 — so every field is asserted in full
+ * for every pinned version: an extra or renamed field fails these tests rather
+ * than shipping as a silent shape change.
  */
 
 interface PanelMock {
@@ -121,15 +121,17 @@ describe('RemnawaveVersionService — pinned panel versions', () => {
     });
   });
 
-  it('3.1.0 turns ip-control off — the endpoint family does not exist there', async () => {
+  it('3.1.0 gets the 3.x shape but not the tested-version badge', async () => {
     assert.deepEqual(await capabilitiesOf('3.1.0'), {
       version: '3.1.0',
       major: 3,
       minor: 1,
       patch: 0,
+      // Not a stale leftover of the 3.x work: the tested set is exact, and
+      // 3.1 has never been run. Only 3.2 earned its way in.
       supported: false,
       reachable: true,
-      liveIpControl: false,
+      liveIpControl: true,
       bandwidthNodesUsers: true,
       userAddressing: 'id',
       connectionsApi: 'connections',
@@ -137,16 +139,26 @@ describe('RemnawaveVersionService — pinned panel versions', () => {
     });
   });
 
-  it('3.2.1 is described but not yet declared supported', async () => {
+  it('3.2.1 is supported, with the 3.x shape rather than the 2.x one', async () => {
     assert.deepEqual(await capabilitiesOf('3.2.1'), {
       version: '3.2.1',
       major: 3,
       minor: 2,
       patch: 1,
-      // 3.2 joins the tested set only when the three-version effort lands.
-      supported: false,
+      // 3.2 is in the tested set: it has been run against a live panel, so the
+      // operator gets no untested-version banner.
+      //
+      // `liveIpControl: true` below is not a contradiction, though the comment
+      // that used to sit here said it was — it claimed the flag "stays off
+      // because 3.x deleted `ip-control/*`". That was true while nothing read
+      // the replacement. The adapter now speaks `connections/*`, so live
+      // connection data IS available on 3.x, and the flag means exactly that:
+      // whether the data can be had, not which route family serves it. A
+      // comment describing the opposite of its own assertion is worse than no
+      // comment — the next reader "fixes" the assertion in the wrong direction.
+      supported: true,
       reachable: true,
-      liveIpControl: false,
+      liveIpControl: true,
       bandwidthNodesUsers: true,
       userAddressing: 'id',
       connectionsApi: 'connections',

@@ -6,6 +6,7 @@ import { Save, Loader2, Plus, Pencil, Trash2, Eye, EyeOff, Bot } from 'lucide-re
 
 import { api } from '@/lib/api'
 import { expectArray } from '@/lib/api-utils'
+import { truncate } from '@/lib/utils'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -446,7 +447,7 @@ export default function AiSupportPage() {
                       <span className="font-medium">{instruction.title}</span>
                       <span className="text-xs text-muted-foreground bg-muted px-2 py-0.5 rounded">{instruction.category}</span>
                     </div>
-                    <p className="text-sm text-muted-foreground truncate mt-1">{instruction.content.slice(0, 100)}...</p>
+                    <p className="text-sm text-muted-foreground truncate mt-1">{truncate(instruction.content, 100)}</p>
                   </div>
                   <div className="flex items-center gap-2 ml-4">
                     <Switch

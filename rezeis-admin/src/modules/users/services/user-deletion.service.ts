@@ -7,6 +7,7 @@ import {
 import { Prisma } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { storedIdentityOf } from '../../remnawave/services/panel-user-address';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
 
 export const USER_DELETE_PROTECTED_HISTORY_CODE = 'USER_DELETE_PROTECTED_HISTORY';
@@ -18,6 +19,14 @@ const MAX_TRANSACTION_ATTEMPTS = 3;
 interface RemnawaveProfileSnapshot {
   readonly id: string;
   readonly remnawaveId: string | null;
+  /**
+   * The two supplementary identity columns, snapshotted inside the same
+   * transaction as `remnawaveId`. They cannot be re-read afterwards: the user
+   * row (and with it every subscription) is gone by the time the panel is
+   * called.
+   */
+  readonly remnawavePanelId: number | null;
+  readonly remnawavePanelUsername: string | null;
 }
 
 /**
@@ -44,9 +53,20 @@ export class UserDeletionService {
     const profileSnapshots = await this.deleteDatabaseUser(userId);
 
     for (const subscription of profileSnapshots) {
-      if (subscription.remnawaveId === null) continue;
+      const identity = storedIdentityOf(subscription);
+      if (identity === null) {
+        // Genuinely nothing to delete — but no longer silently. The local rows
+        // are already committed away, so if a profile does exist upstream it
+        // now belongs to no user, no sweep will ever look for it again, and
+        // this log line is the only trace an operator will ever get.
+        this.logger.warn(
+          `deleteUser: subscription ${subscription.id} was snapshotted with no Remnawave id; ` +
+            'any panel profile it still had is now unreachable from rezeis',
+        );
+        continue;
+      }
       try {
-        await this.remnawaveApiService.deletePanelUser(subscription.remnawaveId);
+        await this.remnawaveApiService.deletePanelUser(identity);
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : 'Unknown error';
         this.logger.warn(
@@ -92,7 +112,12 @@ export class UserDeletionService {
 
             const profileSnapshots = await tx.subscription.findMany({
               where: { userId, remnawaveId: { not: null } },
-              select: { id: true, remnawaveId: true },
+              select: {
+                id: true,
+                remnawaveId: true,
+                remnawavePanelId: true,
+                remnawavePanelUsername: true,
+              },
             });
 
             await tx.user.delete({ where: { id: userId } });

@@ -196,7 +196,15 @@ export interface RemnawaveUserResolveQuery {
  *     converted from the number the panel actually sends.
  */
 export interface RemnawaveUserSummaryInterface {
+  /**
+   * The panel's identity for this row, as a string: the UUID on 2.x, the
+   * numeric id in decimal on 3.x — which has no uuid at all. Same dual meaning
+   * as `RemnawavePanelUser.uuid` and `Subscription.remnawaveId`, so the three
+   * compare without translation. It is an identity string, not a UUID.
+   */
   readonly uuid: string;
+  /** The panel's numeric id, when it exposes one. What 3.x routes address by. */
+  readonly panelId: number | null;
   readonly shortUuid: string | null;
   readonly username: string;
   readonly status: string | null;

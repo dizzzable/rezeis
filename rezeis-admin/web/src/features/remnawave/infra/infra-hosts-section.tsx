@@ -33,7 +33,7 @@ import { toast } from 'sonner'
 
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent } from '@/components/ui/card'
-import { cn } from '@/lib/utils'
+import { cn, truncate } from '@/lib/utils'
 
 import { remnawaveApi, type RemnawaveHost, type RemnawaveNode } from '../remnawave-api'
 import { NodeFlag } from '../remnawave-flags'
@@ -221,7 +221,7 @@ function SortableHostRow({ host, countryCode }: SortableHostRowProps) {
       <StatusDot status={status} label={statusLabel} className="shrink-0" />
 
       <span className="ml-2 hidden font-mono text-[10px] text-muted-foreground/70 md:inline">
-        {host.uuid.slice(0, 8)}…
+        {truncate(host.uuid, 8)}
       </span>
     </li>
   )

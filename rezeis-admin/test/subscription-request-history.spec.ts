@@ -46,8 +46,6 @@ function makeService(
       port: 3000,
       token: 'secret',
       webhookSecret: null,
-      caddyToken: null,
-      cookie: null,
     },
   );
 }
@@ -96,6 +94,15 @@ describe('mapSubscriptionRequestEntry — the owner field is version-dependent',
   });
 });
 
+/**
+ * Drops the panel-version probe (`/api/system/...`) that any user-scoped call
+ * makes before it can build a path. Filtering it keeps these assertions about
+ * routing rather than about how many round-trips addressing happens to cost.
+ */
+function userPaths(paths: readonly string[]): string[] {
+  return paths.filter((path) => !path.startsWith('/api/system/'));
+}
+
 describe('getSubscriptionRequestHistory — routing and parameter names', () => {
   it('asks the PER-USER endpoint when a uuid is given', async () => {
     // The whole-log endpoint accepts no user filter on either version, so a
@@ -107,9 +114,11 @@ describe('getSubscriptionRequestHistory — routing and parameter names', () => 
       return of({ data: { response: { records: [RECORD_274], total: 1 } } });
     });
 
-    const entries = await service.getSubscriptionRequestHistory({ userUuid: 'user-uuid-1' });
+    const entries = await service.getSubscriptionRequestHistory({ user: 'user-uuid-1' });
 
-    assert.deepEqual(paths, ['/api/users/user-uuid-1/subscription-request-history']);
+    // Addressing a profile costs a version probe first; it is not part of what
+    // this test is about, so it is filtered rather than asserted around.
+    assert.deepEqual(userPaths(paths), ['/api/users/user-uuid-1/subscription-request-history']);
     assert.equal(entries.length, 1);
     assert.equal(entries[0].userUuid, 'b7f1e0c2-1111-2222-3333-444455556666');
   });
@@ -136,9 +145,11 @@ describe('getSubscriptionRequestHistory — routing and parameter names', () => 
       return of({ data: { response: { records: [], total: 0 } } });
     });
 
-    await service.getSubscriptionRequestHistory({ userUuid: 'u-1', limit: 5 });
+    await service.getSubscriptionRequestHistory({ user: 'u-1', limit: 5 });
 
-    assert.ok(!paths[0].includes('?'), `expected no query string, got ${paths[0]}`);
+    const [requested] = userPaths(paths);
+    assert.ok(requested !== undefined, 'expected a user-scoped request');
+    assert.ok(!requested.includes('?'), `expected no query string, got ${requested}`);
   });
 });
 

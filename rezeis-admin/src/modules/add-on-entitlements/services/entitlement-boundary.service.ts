@@ -11,6 +11,7 @@ import {
 } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { storedIdentityOf } from '../../remnawave/services/panel-user-address';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
 import { resolveResetCapabilities } from '../add-on-rollout.config';
 import { GIB_BYTES } from '../domain/cutover-baseline';
@@ -296,16 +297,25 @@ export class EntitlementBoundaryService {
       orderBy: { generation: 'asc' },
       select: {
         id: true,
-        subscription: { select: { remnawaveId: true } },
+        // The supplementary identity columns come along because this row is
+        // read to ADDRESS the profile. A 2.x-created profile on an upgraded 3.x
+        // panel has no live uuid left, and `getPanelUser` collapses "cannot be
+        // addressed" into `null` — indistinguishable here from a panel that
+        // answered without a `createdAt`, so the anchor would silently go null
+        // and MONTH_ROLLING would mint its window from the wrong instant.
+        subscription: {
+          select: { remnawaveId: true, remnawavePanelId: true, remnawavePanelUsername: true },
+        },
       },
     });
     if (due === null) return undefined;
-    if (due.subscription.remnawaveId === null || this.remnawaveApiService === undefined) {
+    const identity = storedIdentityOf(due.subscription);
+    if (identity === null || this.remnawaveApiService === undefined) {
       return { termId: due.id, anchorAt: null };
     }
 
     try {
-      const panelUser = await this.remnawaveApiService.getPanelUser(due.subscription.remnawaveId);
+      const panelUser = await this.remnawaveApiService.getPanelUser(identity);
       const timestamp = panelUser?.createdAt;
       const parsed = typeof timestamp === 'string' ? Date.parse(timestamp) : Number.NaN;
       return {

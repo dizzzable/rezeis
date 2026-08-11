@@ -7,9 +7,30 @@ import { Prisma } from '@prisma/client';
 import { EVENT_TYPES } from '../src/common/services/system-events.service';
 import { USER_EVENT_WHITELIST } from '../src/modules/realtime/interfaces/user-realtime-event.interface';
 import {
+  panelUserAddress,
+  type StoredPanelIdentity,
+} from '../src/modules/remnawave/services/panel-user-address';
+import {
   USER_DELETE_PROTECTED_HISTORY_CODE,
   UserDeletionService,
 } from '../src/modules/users/services/user-deletion.service';
+
+/**
+ * A subscription row as the deletion snapshot selects it. Both supplementary
+ * identity columns are present because a real row carries them on every
+ * supported panel version — omitting them here would let a snapshot that drops
+ * them look complete while leaving the panel profile unnameable on 3.x.
+ */
+interface ProfileSnapshotRow {
+  readonly id: string;
+  readonly remnawaveId: string | null;
+  readonly remnawavePanelId: number | null;
+  readonly remnawavePanelUsername: string | null;
+}
+
+const DEFAULT_PROFILE_SNAPSHOT: readonly ProfileSnapshotRow[] = [
+  { id: 'sub-1', remnawaveId: 'rw-1', remnawavePanelId: 4471, remnawavePanelUsername: 'rz_bob_1' },
+];
 
 interface FakeState {
   readonly order: string[];
@@ -23,6 +44,9 @@ interface FakeState {
   deleteError: unknown;
   panelError: unknown;
   transactionError: unknown;
+  profileSnapshot: readonly ProfileSnapshotRow[];
+  readonly panelRefs: unknown[];
+  readonly loggedWarnings: string[];
 }
 
 function buildService(overrides: Partial<FakeState> = {}) {
@@ -38,6 +62,9 @@ function buildService(overrides: Partial<FakeState> = {}) {
     deleteError: null,
     panelError: null,
     transactionError: null,
+    profileSnapshot: DEFAULT_PROFILE_SNAPSHOT,
+    panelRefs: [],
+    loggedWarnings: [],
     ...overrides,
   };
 
@@ -87,7 +114,7 @@ function buildService(overrides: Partial<FakeState> = {}) {
     subscription: {
       findMany: async () => {
         state.order.push('snapshot:profiles');
-        return [{ id: 'sub-1', remnawaveId: 'rw-1' }];
+        return state.profileSnapshot;
       },
     },
     user: {
@@ -115,16 +142,19 @@ function buildService(overrides: Partial<FakeState> = {}) {
   };
 
   const remnawave = {
-    deletePanelUser: async (id: string) => {
-      state.order.push(`delete:panel:${id}`);
+    deletePanelUser: async (ref: StoredPanelIdentity) => {
+      state.panelRefs.push(ref);
+      state.order.push(`delete:panel:${ref.remnawaveId}`);
       if (state.panelError) throw state.panelError;
     },
   };
 
-  return {
-    state,
-    service: new UserDeletionService(prisma as never, remnawave as never),
+  const service = new UserDeletionService(prisma as never, remnawave as never);
+  const logger = (service as unknown as { logger: { warn: (message: string) => void } }).logger;
+  logger.warn = (message: string) => {
+    state.loggedWarnings.push(message);
   };
+  return { state, service };
 }
 
 function prismaError(code: string): { readonly name: string; readonly code: string } {
@@ -211,6 +241,63 @@ describe('UserDeletionService', () => {
       'delete:user',
       'delete:panel:rw-1',
     ]);
+  });
+
+  it('addresses the panel by the recorded numeric id when remnawaveId is a stale 2.x uuid', async () => {
+    // Created on 2.x, panel since upgraded to 3.x, nothing re-synced. The
+    // stored string names nothing there; the recorded id is the only route to
+    // the profile, and this is the last chance to use it — the local rows are
+    // already gone.
+    const staleUuid = 'f47ac10b-58cc-4372-a567-0e02b2c3d479';
+    const { service, state } = buildService({
+      profileSnapshot: [
+        {
+          id: 'sub-upgraded',
+          remnawaveId: staleUuid,
+          remnawavePanelId: 4471,
+          remnawavePanelUsername: 'rz_bob_1',
+        },
+      ],
+    });
+
+    await service.deleteUser('user-1');
+
+    assert.equal(state.panelRefs.length, 1);
+    // Through the real addressing function: what matters is that a 3.x path can
+    // be BUILT from what the service handed over.
+    assert.deepStrictEqual(panelUserAddress(state.panelRefs[0] as StoredPanelIdentity, 'id'), {
+      kind: 'ready',
+      segment: '4471',
+    });
+    // Counter-check: the stored string alone — what this call site used to pass
+    // — names nothing on that panel, so the assertion above is not free.
+    assert.equal(
+      panelUserAddress({ remnawaveId: staleUuid, panelId: null, panelUsername: null }, 'id').kind,
+      'impossible',
+    );
+  });
+
+  it('warns instead of silently skipping a snapshot with no panel identity', async () => {
+    // The local account is already committed away, so a profile skipped here is
+    // orphaned upstream: no row points at it and no sweep will look for it. The
+    // skip is correct — there is nothing to address — but it must be visible.
+    const { service, state } = buildService({
+      profileSnapshot: [
+        { id: 'sub-unlinked', remnawaveId: null, remnawavePanelId: null, remnawavePanelUsername: null },
+      ],
+    });
+
+    await service.deleteUser('user-1');
+
+    assert.equal(state.order.includes('delete:user'), true);
+    assert.equal(
+      state.order.some((entry) => entry.startsWith('delete:panel:')),
+      false,
+    );
+    assert.equal(state.loggedWarnings.length, 1);
+    // The subscription id is the whole point of the line — without it an
+    // operator cannot tell which profile to go and look for.
+    assert.match(state.loggedWarnings[0] ?? '', /sub-unlinked/);
   });
 
   it('keeps a committed local deletion successful when Remnawave cleanup is temporarily unavailable', async () => {

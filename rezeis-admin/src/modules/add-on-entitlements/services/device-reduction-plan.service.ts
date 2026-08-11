@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { DeviceReductionPlanState, Prisma, SubscriptionStatus } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { storedIdentityOf } from '../../remnawave/services/panel-user-address';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
 import {
   DeviceReductionSourceError,
@@ -103,16 +104,27 @@ export class DeviceReductionPlanService {
 
     const subscription = await this.prismaService.subscription.findUnique({
       where: { id: subscriptionId },
-      select: { remnawaveId: true, status: true },
+      // The two supplementary identity columns travel with `remnawaveId`
+      // because the row is about to name a profile to the panel. Without them a
+      // profile created on 2.x is unaddressable once the operator upgrades to
+      // 3.x, and `strictListUserDevices` would answer `unavailable` for a
+      // subscription whose devices are sitting right there.
+      select: {
+        remnawaveId: true,
+        remnawavePanelId: true,
+        remnawavePanelUsername: true,
+        status: true,
+      },
     });
-    if (subscription === null || subscription.remnawaveId === null) {
+    const identity = storedIdentityOf(subscription);
+    if (subscription === null || identity === null) {
       return { status: 'NOT_APPLICABLE', reason: 'NO_PANEL_PROFILE' };
     }
     if (subscription.status === SubscriptionStatus.DELETED) {
       return { status: 'NOT_APPLICABLE', reason: 'SUBSCRIPTION_DELETED' };
     }
 
-    const listing = await this.remnawaveApiService.strictListUserDevices(subscription.remnawaveId);
+    const listing = await this.remnawaveApiService.strictListUserDevices(identity);
     switch (listing.kind) {
       case 'unavailable':
         return { status: 'DEFERRED', reason: 'PANEL_UNAVAILABLE' };

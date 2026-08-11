@@ -2,6 +2,7 @@ import { lazy, Suspense, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { api } from '@/lib/api'
+import { truncate } from '@/lib/utils'
 import { expectArray } from '@/lib/api-utils'
 import { adminQueryKeys } from '@/lib/admin-query-keys'
 import { Card, CardContent } from '@/components/ui/card'
@@ -252,10 +253,14 @@ function TransactionsTab() {
                   </TableRow>
                 ) : items.map((tx) => (
                   <TableRow key={tx.id}>
-                    <TableCell className="font-mono text-xs">{tx.paymentId?.slice(0, 8)}…</TableCell>
+                    <TableCell className="font-mono text-xs">{truncate(tx.paymentId, 8)}</TableCell>
                     <TableCell className="text-xs">
                       <div>{tx.userUsername ? `@${tx.userUsername}` : tx.userName ?? '—'}</div>
-                      <div className="text-muted-foreground">{tx.userTelegramId ?? tx.userId?.slice(0, 8)}</div>
+                      {/* A transaction can carry neither identity (a gateway
+                          row imported before the customer was linked), and the
+                          bare optional chain rendered that as a blank cell —
+                          indistinguishable from a rendering bug. */}
+                      <div className="text-muted-foreground">{tx.userTelegramId ?? truncate(tx.userId, 8)}</div>
                     </TableCell>
                     <TableCell><Badge variant={statusColor(tx.status)}>{String(t(`paymentsPage.statuses.${tx.status}`, tx.status))}</Badge></TableCell>
                     <TableCell className="text-xs uppercase">{tx.gatewayType}</TableCell>
@@ -326,7 +331,7 @@ function WebhooksTab() {
             {(data ?? []).map((ev) => (
               <TableRow key={ev.id}>
                 <TableCell className="text-xs uppercase">{ev.gatewayType}</TableCell>
-                <TableCell className="font-mono text-xs">{ev.providerEventId?.slice(0, 16)}…</TableCell>
+                <TableCell className="font-mono text-xs">{truncate(ev.providerEventId, 16)}</TableCell>
                 <TableCell><Badge variant="outline">{ev.status}</Badge></TableCell>
                 <TableCell className="text-xs text-muted-foreground">{new Date(ev.receivedAt).toLocaleString()}</TableCell>
               </TableRow>

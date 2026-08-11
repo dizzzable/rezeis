@@ -1471,9 +1471,28 @@ model Subscription {
   deviceLimitBeforeReduction Int?               @map("device_limit_before_reduction")
   internalSquads             String[]           @default([]) @map("internal_squads")
   externalSquad              String?            @map("external_squad")
-  /// Remnawave subscription user UUID. `null` until the profile sync job
-  /// successfully creates the upstream record.
+  /// The panel's own identity for this profile, as a string. `null` until the
+  /// profile sync job successfully creates the upstream record — and ~14 call
+  /// sites read exactly that null-ness as "no profile yet, CREATE one", so it
+  /// must be non-null on EVERY panel version the moment a profile exists.
+  ///
+  /// Which string depends on the panel that created the profile: Remnawave 2.x
+  /// keys users by a UUID, 3.x dropped the uuid column outright and keys them
+  /// by a numeric id (stored here as its decimal string). Do not parse this to
+  /// decide the version — ask `RemnawaveVersionService`; a 2.x-created profile
+  /// keeps its UUID here after the operator upgrades the panel to 3.x.
   remnawaveId                String?            @map("remnawave_id")
+  /// The panel's numeric user id, which BOTH 2.x and 3.x expose on every user
+  /// row. On 3.x it is what every user-scoped path segment must carry; on 2.x
+  /// it is only an extra fact we record so the value is already here when the
+  /// operator upgrades. Written opportunistically whenever a panel row is read.
+  remnawavePanelId           Int?               @map("remnawave_panel_id")
+  /// The exact username the profile was created (or linked) under. Not
+  /// derivable after the fact: `RemnawaveProfileNamingService` builds names
+  /// from operator-editable prefix/separator settings, so recomputing the name
+  /// for an old profile can produce a DIFFERENT string — and on 3.x that string
+  /// is the only way back to a profile whose numeric id we never recorded.
+  remnawavePanelUsername     String?            @map("remnawave_panel_username")
   /// User-facing connect URL.
   configUrl                  String?            @map("config_url")
   startedAt                  DateTime?          @map("started_at") @db.Timestamptz(3)
@@ -1516,6 +1535,20 @@ model Subscription {
   /// Churn computation over the eligible set (createdAt + status). Created by
   /// 20260522140000; declared here so `migrate dev` cannot silently drop it.
   @@index([createdAt, status], map: "subscriptions_created_status_idx")
+  /// Resolving a subscription FROM a panel identity, which is what every
+  /// inbound webhook does (`panelIdentityWhere`), what the DELETE guard does
+  /// before removing a profile, and what the four importers do to decide
+  /// create-vs-update. Also serves the cleanup sweep's `remnawave_id IS NULL`.
+  /// Created by 20260810160000; not unique — see that migration for why.
+  @@index([remnawaveId])
+  /// The 3.x half of the same lookup: a numeric panel identity has to match
+  /// both spellings, because a profile created on 2.x still stores its uuid in
+  /// `remnawaveId` while its numeric id lives here.
+  @@index([remnawavePanelId])
+  /// Asked before every profile deletion — "has this panel username come to
+  /// belong to a LIVE subscription since the DELETE was enqueued?" — and
+  /// deletions arrive in batches from the expired-profile sweep.
+  @@index([remnawavePanelUsername])
   @@map("subscriptions")
 }
 

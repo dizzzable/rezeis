@@ -7,7 +7,34 @@ import { SubscriptionStatus, SyncAction, SyncJobStatus } from '@prisma/client';
 import { _resetProcessRoleCacheForTests } from '../src/common/runtime/process-role.util';
 import { EVENT_TYPES } from '../src/common/services/system-events.service';
 import { ExpiredProfileCleanupService } from '../src/modules/profile-sync/expired-profile-cleanup.service';
+import {
+  panelUserAddress,
+  type StoredPanelIdentity,
+} from '../src/modules/remnawave/services/panel-user-address';
 import { RemnawaveApiService } from '../src/modules/remnawave/services/remnawave-api.service';
+
+/**
+ * A candidate row as Prisma returns it once the sweep's select asks for the
+ * panel identity.
+ *
+ * `remnawavePanelId` and `remnawavePanelUsername` are populated by DEFAULT
+ * because that is the production shape — 2.x and 3.x alike carry a numeric id
+ * and a username on every user row, so both are recorded when a profile is
+ * linked. A fake that omitted them would make an unaddressable profile look
+ * identical to an addressable one, in the one sweep that deletes.
+ */
+function candidate(patch: Record<string, unknown> = {}) {
+  return {
+    id: 'sub-1',
+    userId: 'user-1',
+    isTrial: false,
+    remnawaveId: 'rw-1',
+    remnawavePanelId: 4711,
+    remnawavePanelUsername: 'rz_alice_sub',
+    expiresAt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
+    ...patch,
+  };
+}
 
 /** Settings mock factory — defaults to deletion ON with a 3-day grace. */
 function settingsMock(policy: { deleteEnabled?: boolean; graceDays?: number } = {}) {
@@ -35,9 +62,13 @@ function eventsMock(sink: Array<readonly unknown[]> = []) {
  * A number is an `ok` whose `expireAt` is that many ms from now (negative =
  * past). Otherwise pass the outcome kind to simulate.
  */
-function remnawaveMock(behaviour: number | 'notFound' | 'unavailable' | 'invalidContract') {
+function remnawaveMock(
+  behaviour: number | 'notFound' | 'unavailable' | 'invalidContract',
+  refs: unknown[] = [],
+) {
   return {
-    strictGetPanelUserExpiry: async () => {
+    strictGetPanelUserExpiry: async (ref: unknown) => {
+      refs.push(ref);
       if (behaviour === 'notFound') return { kind: 'notFound' as const };
       if (behaviour === 'unavailable') {
         return { kind: 'unavailable' as const, retryAfterMs: null };
@@ -98,7 +129,11 @@ describe('ExpiredProfileCleanupService', () => {
   });
 
   it('selects profile-bearing subs expired past the grace cutoff with no in-flight DELETE job and deletes a bounded batch (panel confirms expired)', async () => {
-    const findManyCalls: Array<{ readonly where: Record<string, unknown>; readonly take?: number }> = [];
+    const findManyCalls: Array<{
+      readonly where: Record<string, unknown>;
+      readonly select?: Record<string, unknown>;
+      readonly take?: number;
+    }> = [];
     const deletions: DeletionInput[] = [];
     const events: Array<readonly unknown[]> = [];
 
@@ -108,14 +143,24 @@ describe('ExpiredProfileCleanupService', () => {
     const service = new ExpiredProfileCleanupService(
       {
         subscription: {
-          findMany: async (input: { where: Record<string, unknown>; take?: number }) => {
+          findMany: async (input: {
+            where: Record<string, unknown>;
+            select?: Record<string, unknown>;
+            take?: number;
+          }) => {
             findManyCalls.push(input);
             // Profile-bearing selection (`remnawaveId: { not: null }`); the
             // detached selection (`remnawaveId: null`) returns nothing here.
             if (input.where['remnawaveId'] === null) return [];
             return [
-              { id: 'sub-1', userId: 'user-1', isTrial: false, remnawaveId: 'rw-1', expiresAt: expiresAt1 },
-              { id: 'sub-2', userId: 'user-2', isTrial: true, remnawaveId: 'rw-2', expiresAt: expiresAt2 },
+              candidate({ id: 'sub-1', remnawaveId: 'rw-1', expiresAt: expiresAt1 }),
+              candidate({
+                id: 'sub-2',
+                userId: 'user-2',
+                isTrial: true,
+                remnawaveId: 'rw-2',
+                expiresAt: expiresAt2,
+              }),
             ];
           },
         },
@@ -131,7 +176,11 @@ describe('ExpiredProfileCleanupService', () => {
     assert.equal(count, 2);
     // Selection guard: profile present, expired before the grace cutoff, no
     // live DELETE job, bounded.
-    const where = findManyCalls[0] as { readonly where: Record<string, unknown>; readonly take?: number };
+    const where = findManyCalls[0] as {
+      readonly where: Record<string, unknown>;
+      readonly select?: Record<string, unknown>;
+      readonly take?: number;
+    };
     assert.deepStrictEqual(where.where['remnawaveId'], { not: null });
     const expiresClause = where.where['expiresAt'] as { not: null; lt: Date };
     assert.equal(expiresClause.not, null);
@@ -145,6 +194,11 @@ describe('ExpiredProfileCleanupService', () => {
       },
     });
     assert.equal(where.take, 100);
+    // The identity columns are selected, not just `remnawaveId`. Omitting them
+    // leaves a 2.x-created profile on an upgraded 3.x panel unaddressable, and
+    // an unaddressable profile defers every sweep and is never retired.
+    assert.equal(where.select?.['remnawavePanelId'], true);
+    assert.equal(where.select?.['remnawavePanelUsername'], true);
     // Every candidate is retired through the single lifecycle-closing path,
     // pinned to its own panel profile + guarded by its expected expiry.
     assert.equal(deletions.length, 2);
@@ -173,15 +227,7 @@ describe('ExpiredProfileCleanupService', () => {
         subscription: {
           findMany: async (input: { where: Record<string, unknown> }) => {
             if (input.where['remnawaveId'] === null) return [];
-            return [
-              {
-                id: 'sub-live',
-                userId: 'user-1',
-                isTrial: false,
-                remnawaveId: 'rw-live',
-                expiresAt: new Date(Date.now() - 30 * DAY_MS),
-              },
-            ];
+            return [candidate({ id: 'sub-live', remnawaveId: 'rw-live' })];
           },
           update: async (input: { where: unknown; data: Record<string, unknown> }) => {
             updates.push(input);
@@ -222,15 +268,7 @@ describe('ExpiredProfileCleanupService', () => {
         subscription: {
           findMany: async (input: { where: Record<string, unknown> }) => {
             if (input.where['remnawaveId'] === null) return [];
-            return [
-              {
-                id: 'sub-x',
-                userId: 'user-1',
-                isTrial: false,
-                remnawaveId: 'rw-x',
-                expiresAt: new Date(Date.now() - 30 * DAY_MS),
-              },
-            ];
+            return [candidate({ id: 'sub-x', remnawaveId: 'rw-x' })];
           },
           update: async (input: unknown) => { updates.push(input); return {}; },
         },
@@ -261,15 +299,7 @@ describe('ExpiredProfileCleanupService', () => {
         subscription: {
           findMany: async (input: { where: Record<string, unknown> }) => {
             if (input.where['remnawaveId'] === null) return [];
-            return [
-              {
-                id: 'sub-garbled',
-                userId: 'user-1',
-                isTrial: false,
-                remnawaveId: 'rw-garbled',
-                expiresAt: new Date(Date.now() - 30 * DAY_MS),
-              },
-            ];
+            return [candidate({ id: 'sub-garbled', remnawaveId: 'rw-garbled' })];
           },
           update: async (input: unknown) => { updates.push(input); return {}; },
         },
@@ -295,15 +325,7 @@ describe('ExpiredProfileCleanupService', () => {
         subscription: {
           findMany: async (input: { where: Record<string, unknown> }) => {
             if (input.where['remnawaveId'] === null) return [];
-            return [
-              {
-                id: 'sub-gone',
-                userId: 'user-1',
-                isTrial: false,
-                remnawaveId: 'rw-gone',
-                expiresAt: new Date(Date.now() - 30 * DAY_MS),
-              },
-            ];
+            return [candidate({ id: 'sub-gone', remnawaveId: 'rw-gone' })];
           },
           update: async () => ({}),
         },
@@ -320,6 +342,52 @@ describe('ExpiredProfileCleanupService', () => {
     assert.equal(deletions.length, 1);
     assert.equal(deletions[0]?.subscriptionId, 'sub-gone');
     assert.equal(deletions[0]?.expectedRemnawaveId, 'rw-gone');
+  });
+
+  it('re-checks by the recorded numeric id when the stored id is a stale 2.x uuid, but fences the delete on the column', async () => {
+    // The upgraded-panel case, and the one where getting it wrong is worst: an
+    // unaddressable profile answers `unavailable`, so this subscription would
+    // defer every sweep and never be retired. The numeric id is what finds it.
+    //
+    // The second half is the invariant that must NOT move with it.
+    // `expectedRemnawaveId` is a compare-and-swap against the COLUMN, not an
+    // address — it is what refuses the delete when a re-provision relinked the
+    // row between the panel read and now. So it stays the stale uuid even
+    // though the panel was asked at 8123.
+    const staleUuid = '330f2b38-1362-46ab-b5c0-dea32167eff9';
+    const deletions: DeletionInput[] = [];
+    const panelRefs: unknown[] = [];
+
+    const service = new ExpiredProfileCleanupService(
+      {
+        subscription: {
+          findMany: async (input: { where: Record<string, unknown> }) => {
+            if (input.where['remnawaveId'] === null) return [];
+            return [
+              candidate({ id: 'sub-upgraded', remnawaveId: staleUuid, remnawavePanelId: 8123 }),
+            ];
+          },
+          update: async () => ({}),
+        },
+      } as never,
+      eventsMock(),
+      settingsMock({ deleteEnabled: true, graceDays: 3 }),
+      remnawaveMock(-30 * DAY_MS, panelRefs),
+      deletionMock(deletions),
+    );
+
+    const count = await service.runSweep();
+
+    assert.equal(count, 1);
+    assert.deepStrictEqual(panelRefs, [
+      { remnawaveId: staleUuid, panelId: 8123, panelUsername: 'rz_alice_sub' },
+    ]);
+    assert.deepStrictEqual(panelUserAddress(panelRefs[0] as StoredPanelIdentity, 'id'), {
+      kind: 'ready',
+      segment: '8123',
+    });
+    assert.equal(deletions.length, 1);
+    assert.equal(deletions[0]?.expectedRemnawaveId, staleUuid);
   });
 
   it('soft-deletes already-detached expired rows (remnawaveId null, not DELETED) via the lifecycle service', async () => {
@@ -473,23 +541,33 @@ describe('ExpiredProfileCleanupService — a 404 deletes only when the PANEL sen
     port: 3000,
     token: 'secret',
     webhookSecret: null,
-    caddyToken: null,
-    cookie: null,
   } as const;
 
   /** The REAL adapter over a panel whose `/api/users/{uuid}` answers `reply`. */
+  /**
+   * `reads` counts PROFILE reads only.
+   *
+   * The adapter now asks the panel for its own version before it builds any
+   * user-scoped path — Remnawave 2.x addresses users by uuid and 3.x by numeric
+   * id, and the path cannot be built without knowing which. Those probes
+   * (`/api/system/stats/recap`, `/api/system/metadata`) are cached per adapter
+   * instance, but they still show up here, and counting them would turn "the
+   * re-check ran exactly once" into an assertion about the version probe.
+   */
   function panelApi(reply: () => unknown) {
     const reads: string[] = [];
+    const allRequests: string[] = [];
     const service = new RemnawaveApiService(
       {
         request: (input: { url: string }) => {
-          reads.push(input.url);
+          allRequests.push(input.url);
+          if (!input.url.startsWith('/api/system/')) reads.push(input.url);
           return reply();
         },
       } as never,
       PANEL_CONFIG as never,
     );
-    return { service, reads };
+    return { service, reads, allRequests };
   }
 
   function httpError(status: number, data?: unknown) {
@@ -512,15 +590,7 @@ describe('ExpiredProfileCleanupService — a 404 deletes only when the PANEL sen
         subscription: {
           findMany: async (input: { where: Record<string, unknown> }) => {
             if (input.where['remnawaveId'] === null) return [];
-            return [
-              {
-                id: 'sub-renewed',
-                userId: 'user-1',
-                isTrial: false,
-                remnawaveId: 'rw-renewed',
-                expiresAt: new Date(Date.now() - 30 * DAY_MS),
-              },
-            ];
+            return [candidate({ id: 'sub-renewed', remnawaveId: 'rw-renewed' })];
           },
           update: async (input: { where: unknown; data: Record<string, unknown> }) => {
             updates.push(input);

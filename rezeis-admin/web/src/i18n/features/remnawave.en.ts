@@ -15,10 +15,15 @@ export const en = {
     unreachable: 'Unreachable',
     versionWarning: {
       title: 'Untested panel version',
-      description: 'Detected panel version {{version}}. This integration is tested against 2.7–2.8. Some features may misbehave — update rezeis or the panel.',
+      // The list here must match `TESTED_VERSIONS` in
+      // `src/modules/remnawave/services/remnawave-version.service.ts` — it is
+      // the only place an operator is told which panels are covered. Written
+      // out rather than as a range: 2.9 through 3.1 are not tested, so
+      // "2.7–3.2" would be a lie.
+      description: 'Detected panel version {{version}}. This integration is tested against 2.7, 2.8 and 3.2. Some features may misbehave — update rezeis or the panel.',
     },
     live: {
-      subtitle: 'Active sessions and source IPs per node (panel ip-control).',
+      subtitle: 'Active sessions and source IPs per node, read live from the panel.',
       pickNode: 'Pick a node',
       pickNodeHint: 'Choose a node to query its online users and their IPs.',
       pickNodePlaceholder: 'Select a node…',
@@ -262,7 +267,9 @@ export const en = {
         expiresAt: 'Expires at',
         hwidLimit: 'HWID limit',
         tag: 'Tag',
-        uuid: 'UUID',
+        // The panel identity, which is a UUID only on 2.x — 3.x names the user
+        // by its numeric id and has no uuid to show here.
+        uuid: 'Profile identifier',
       },
       hwid: {
         platforms: 'Platforms',
@@ -300,7 +307,11 @@ export const en = {
         nodes: 'Billed nodes',
         bills: 'Bills',
         billedTotal: 'Billed to date',
-        amountNote: 'Lifetime totals as reported by the panel. Remnawave sends no currency for these amounts on 2.7.4 or 2.8.0, so they are shown unlabelled.',
+        // Deliberately not a version list: it used to name 2.7.4 and 2.8.0,
+        // which read as "and nothing else" on a third supported panel. No
+        // panel rezeis reads sends a currency here, and the SPA does not model
+        // one, so the plain statement is both shorter and harder to outdate.
+        amountNote: 'Lifetime totals as reported by the panel. Remnawave sends no currency with these amounts, so they are shown unlabelled.',
       },
       detail: {
         title: 'Per-node billing',

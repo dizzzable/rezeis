@@ -22,9 +22,20 @@ APP_USER="rezeis"
 APP_UID="1001"
 PRISMA="./node_modules/.bin/prisma"
 
+# Migrations whose every statement is guarded by IF NOT EXISTS / IF EXISTS, so a
+# half-applied one can simply be re-run. Membership is what decides between "the
+# next start retries it" and "the API refuses to boot until a human runs
+# `prisma migrate resolve`" — and Prisma migrations are NOT atomic: an
+# interrupted file leaves its earlier statements committed and the row marked
+# `finished=false`. Verified by interrupting one on purpose.
+#
+# ADDING TO THIS LIST IS NOT AUTOMATIC. A migration belongs here only if running
+# it twice is provably harmless. The two panel-identity entries were checked that
+# way — applied, then applied again on the same database, second run clean with
+# nothing but `NOTICE ... already exists, skipping`.
 is_auto_recoverable_migration() {
   case "$1" in
-    20260708120000_perf_composite_indexes|20260724120000_reconcile_subscription_expiry_index|20260724120500_drop_conflicting_subscription_expiry_index|20260724121000_swap_subscription_expiry_index)
+    20260708120000_perf_composite_indexes|20260724120000_reconcile_subscription_expiry_index|20260724120500_drop_conflicting_subscription_expiry_index|20260724121000_swap_subscription_expiry_index|20260810120000_remnawave_panel_identity|20260810160000_index_subscription_panel_identity)
       return 0
       ;;
     *)

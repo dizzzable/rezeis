@@ -42,7 +42,7 @@ import {
 } from './broadcast-form-schema'
 import { EmojiPicker } from './emoji-picker'
 import { RenderedCopyPreview } from '@/features/custom-emoji/rendered-copy-preview'
-import { cn } from '@/lib/utils'
+import { cn, truncate } from '@/lib/utils'
 
 const AUDIENCES = [
   { value: 'ALL', labelKey: 'broadcastPage.audiences.ALL' },
@@ -870,7 +870,7 @@ function CreateBroadcastForm({ onClose }: { onClose: () => void }) {
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-sm font-medium">{uploaded.fileName}</p>
                       <p className="text-xs text-muted-foreground">
-                        {formatBytes(uploaded.sizeBytes)} · file_id: <span className="font-mono">{uploaded.fileId.slice(0, 16)}…</span>
+                        {formatBytes(uploaded.sizeBytes)} · file_id: <span className="font-mono">{truncate(uploaded.fileId, 16)}</span>
                       </p>
                     </div>
                     <Button

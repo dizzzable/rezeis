@@ -37,6 +37,19 @@ type DeletableSubscription = {
   readonly expiresAt: Date | null;
 };
 
+/**
+ * The row as read under `FOR UPDATE`, which carries two columns the callers'
+ * own snapshots do not.
+ *
+ * They are read here, in the same locked read that decides whether a DELETE job
+ * is created at all, because this is the last moment they can be trusted — see
+ * the payload note in {@link SubscriptionDeletionService.deleteSubscription}.
+ */
+type LockedSubscription = DeletableSubscription & {
+  readonly remnawavePanelId: number | null;
+  readonly remnawavePanelUsername: string | null;
+};
+
 export interface ExpiredSubscriptionDeleteInput {
   readonly subscriptionId: string;
   readonly expectedExpiresAt: Date;
@@ -172,12 +185,14 @@ export class SubscriptionDeletionService {
     }
 
     const outcome = await this.prismaService.$transaction(async (tx) => {
-      const locked = await tx.$queryRaw<DeletableSubscription[]>(Prisma.sql`
+      const locked = await tx.$queryRaw<LockedSubscription[]>(Prisma.sql`
         SELECT
           "id",
           "user_id" AS "userId",
           "status"::text AS "status",
           "remnawave_id" AS "remnawaveId",
+          "remnawave_panel_id" AS "remnawavePanelId",
+          "remnawave_panel_username" AS "remnawavePanelUsername",
           "expires_at" AS "expiresAt"
         FROM "subscriptions"
         WHERE "id" = ${subscription.id}
@@ -251,9 +266,22 @@ export class SubscriptionDeletionService {
             subscriptionId: subscription.id,
             action: SyncAction.DELETE,
             status: SyncJobStatus.PENDING,
+            // The WHOLE panel identity travels in the payload, not just the id.
+            //
+            // This job outlives the row it was built from. By the time the
+            // worker runs, the subscription may have been retired and its
+            // identity columns cleared, or re-provisioned onto a DIFFERENT
+            // panel profile — so a worker that re-read the row would either
+            // find nothing to address the doomed profile with, or address the
+            // live replacement and delete that instead. The three fields are
+            // captured together, under the same `FOR UPDATE`, so they can only
+            // ever describe one profile: the one that existed when the operator
+            // (or the sweep) asked for it to go.
             payload: {
               source: options.source,
               targetRemnawaveId: current.remnawaveId,
+              targetRemnawavePanelId: current.remnawavePanelId ?? null,
+              targetRemnawavePanelUsername: current.remnawavePanelUsername ?? null,
             } as Prisma.InputJsonObject,
           },
           select: { id: true },

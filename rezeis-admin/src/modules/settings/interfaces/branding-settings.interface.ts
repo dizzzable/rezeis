@@ -143,6 +143,10 @@ export type CardEffect = (typeof CARD_EFFECTS)[number];
 export const CARD_GRADIENT_SOURCES = ['concept', 'custom'] as const;
 export type CardGradientSource = (typeof CARD_GRADIENT_SOURCES)[number];
 
+/** See `BrandingSettingsInterface.brandPaletteSource`. */
+export const BRAND_PALETTE_SOURCES = ['concept', 'custom'] as const;
+export type BrandPaletteSource = (typeof BRAND_PALETTE_SOURCES)[number];
+
 /**
  * Foreground strategy for the subscription card itself. `auto` preserves the
  * cabinet's contrast resolver; the remaining choices deliberately keep the
@@ -508,6 +512,29 @@ export interface BrandingSettingsInterface {
   readonly bgPrimary: string;
   /** Surface background colour (hex). */
   readonly bgSecondary: string;
+  /**
+   * Who owns the four colours above, and therefore who wins when the root
+   * values and a per-brightness theme variant disagree.
+   *
+   *   - `concept` — a concept preset supplies them, and its light/dark
+   *     palettes apply. Generating a different palette per brightness is what
+   *     a concept is FOR.
+   *   - `custom` — the operator picked a colour by hand. The root quartet wins
+   *     everywhere and no variant may override it.
+   *
+   * Same defect, same shape as `cardGradientSource` below: the panel wrote the
+   * colour to the root only, the concept's snapshot overwrote it on every read
+   * in the cabinet, and the operator saw their colour in the panel preview and
+   * nowhere else. It cannot be fixed the way the font and the corner radii
+   * were ("root always wins") — those have no per-brightness meaning at all,
+   * while a palette has one exactly when a concept supplies it.
+   *
+   * The four colours share ONE flag on purpose: they are one palette, and
+   * taking two of them from the operator and two from the concept produces a
+   * combination neither designed. Legacy payloads have no source and resolve
+   * as `concept`, which is exactly the previous behaviour.
+   */
+  readonly brandPaletteSource: BrandPaletteSource;
 
   /** CSS background string for the subscription card. */
   readonly cardGradient: string;
@@ -659,6 +686,7 @@ export const DEFAULT_BRANDING: BrandingSettingsInterface = {
   primaryFg: '#0a0a0a',
   bgPrimary: '#0a0a0a',
   bgSecondary: '#171717',
+  brandPaletteSource: 'concept',
   cardGradient: 'linear-gradient(135deg, #064e3b 0%, #22c55e 100%)',
   cardGradientSource: 'concept',
   cardPattern: null,

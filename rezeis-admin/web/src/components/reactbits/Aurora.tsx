@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Renderer, Program, Mesh, Color, Triangle } from 'ogl';
 
 // GLSL ES 1.00 compiles on WebGL1 and WebGL2. OGL can silently fall back to
@@ -116,6 +116,11 @@ export default function Aurora(props: AuroraProps) {
   propsRef.current = resolvedProps;
 
   const ctnDom = useRef<HTMLDivElement>(null);
+  // Bumped by `webglcontextrestored` to re-run the effect below. OGL keeps every
+  // GL handle inside Renderer/Program/Geometry and caches driver state on the
+  // Renderer, none of which survive a context loss and none of which it can
+  // reset — so the only honest recovery is to build the whole thing again.
+  const [glGeneration, setGlGeneration] = useState(0);
 
   useEffect(() => {
     const ctn = ctnDom.current;
@@ -200,15 +205,21 @@ export default function Aurora(props: AuroraProps) {
       }
     };
 
+    // Without preventDefault the browser never fires `webglcontextrestored`,
+    // so a recoverable loss becomes permanent.
     const handleContextLost = (event: Event) => {
       event.preventDefault();
       contextLost = true;
       cancelAnimationFrame(animateId);
     };
+    // Restarting the loop alone would draw with handles the loss detached: the
+    // program, the mesh and the renderer's cached driver state all belong to
+    // the context that went away, so the frames would land nowhere and the card
+    // would stay blank until a reload. Re-running the effect tears this
+    // renderer down (freeing its slot) and builds a fresh one, so the count of
+    // live contexts stays flat.
     const handleContextRestored = () => {
-      contextLost = false;
-      cancelAnimationFrame(animateId);
-      animateId = requestAnimationFrame(update);
+      setGlGeneration(generation => generation + 1);
     };
     canvas.addEventListener('webglcontextlost', handleContextLost);
     canvas.addEventListener('webglcontextrestored', handleContextRestored);
@@ -219,6 +230,8 @@ export default function Aurora(props: AuroraProps) {
     return () => {
       cancelAnimationFrame(animateId);
       resizeObserver.disconnect();
+      // Listeners come off before loseContext, or handleContextRestored would
+      // fire during teardown and rebuild everything we are about to free.
       canvas.removeEventListener('webglcontextlost', handleContextLost);
       canvas.removeEventListener('webglcontextrestored', handleContextRestored);
       if (canvas.parentNode === ctn) {
@@ -226,7 +239,9 @@ export default function Aurora(props: AuroraProps) {
       }
       gl.getExtension('WEBGL_lose_context')?.loseContext();
     };
-  }, []);
+    // Every animated prop is read live from `propsRef` inside the frame loop,
+    // so nothing but a replaced GL context may rebuild this renderer.
+  }, [glGeneration]);
 
   return <div ref={ctnDom} className="w-full h-full" />;
 }

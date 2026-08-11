@@ -44,6 +44,13 @@ import {
 } from '../services/remnawave-webhook.service';
 import { Public } from '../../../common/decorators/public.decorator';
 
+/**
+ * Rows in the "top abusers" card. Five is what the panel's own `default(5)` used
+ * to hand this endpoint by accident; it is kept as the card's deliberate size so
+ * the widget looks the same, and is now stated instead of inherited.
+ */
+const HWID_TOP_USERS_CARD_ROWS = 5;
+
 @Controller('admin/remnawave')
 @UseGuards(AdminJwtAuthGuard, RbacGuard)
 @RequirePermission('remnawave', 'view')
@@ -208,9 +215,16 @@ export class AdminRemnawaveController {
     return this.remnawaveApiService.getHwidStats();
   }
 
+  /**
+   * The "top abusers" card on the users tab, which renders every row it is given
+   * inside a half-width card. The size is stated here rather than left to the
+   * panel's own `default(5)`: the adapter now walks the whole list for the fraud
+   * detector, and a card that silently inherited that walk would render a
+   * thousand rows.
+   */
   @Get('hwid/top-users')
   public async getHwidTopUsers(): Promise<readonly RemnawaveHwidTopUserInterface[]> {
-    return this.remnawaveApiService.getHwidTopUsers();
+    return this.remnawaveApiService.getHwidTopUsers(HWID_TOP_USERS_CARD_ROWS);
   }
 
   // ── Health ─────────────────────────────────────────────────────────────────
@@ -233,8 +247,11 @@ export class AdminRemnawaveController {
     @Query('limit') limit?: string,
   ): Promise<readonly RemnawaveSubscriptionRequestEntryInterface[]> {
     const parsedLimit = typeof limit === 'string' ? Math.min(parseInt(limit, 10) || 100, 500) : undefined;
+    // The query parameter keeps its historical name so the SPA contract does not
+    // move, but the value is whatever identity the panel row carried — a uuid on
+    // 2.x, a numeric id on 3.x. The adapter addresses it per version.
     return this.remnawaveApiService.getSubscriptionRequestHistory({
-      userUuid,
+      user: typeof userUuid === 'string' && userUuid.length > 0 ? userUuid : undefined,
       limit: parsedLimit,
     });
   }
@@ -313,7 +330,13 @@ export class AdminRemnawaveController {
   public async getNodeLiveSessions(
     @Param('uuid') uuid: string,
   ): Promise<readonly RemnawaveNodeUserIps[]> {
-    return this.remnawaveApiService.fetchUsersIpsForNode(uuid);
+    // `null` means the node could not be read. The operator is looking at ONE
+    // node on demand here, so an empty list is the honest rendering — the
+    // adapter has already logged why. The distinction matters to the detector,
+    // which is a different caller. (`?? []` is not decoration: `strictNullChecks`
+    // is off in this project, so nothing would have flagged the null leaking
+    // into a declared array return.)
+    return (await this.remnawaveApiService.fetchUsersIpsForNode(uuid)) ?? [];
   }
 
   @Get('live/user/:uuid')

@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { ClipboardList, AlertCircle, ChevronDown, Filter, ScrollText, X, Activity, Bell, Download } from 'lucide-react';
 import { api } from '@/lib/api';
-import { formatDateTime, cn } from '@/lib/utils';
+import { formatDateTime, cn, truncate } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -416,7 +416,7 @@ function AuditLogTab() {
                           <span>
                             <span className="text-muted-foreground">{event.targetType}</span>
                             {event.targetId && (
-                              <span className="font-mono ml-1">#{event.targetId.slice(0, 8)}</span>
+                              <span className="font-mono ml-1">#{truncate(event.targetId, 8)}</span>
                             )}
                           </span>
                         ) : (

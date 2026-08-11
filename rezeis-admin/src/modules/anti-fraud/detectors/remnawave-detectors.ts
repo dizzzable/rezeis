@@ -59,6 +59,13 @@ export class RemnawaveDetectors {
   private perUserTrafficBlind = false;
 
   /**
+   * True once every HWID-stats path the adapter knows has failed, and until one
+   * answers again — the same latch, for the same reason, as
+   * {@link perUserTrafficBlind}. See {@link collectHwidAverageAlerts}.
+   */
+  private hwidStatsBlind = false;
+
+  /**
    * Edge-trigger state for the operational alerts.
    *
    * A fraud signal is a row keyed by `(code, fingerprint)`, so re-detecting the
@@ -108,7 +115,45 @@ export class RemnawaveDetectors {
   public async collectHwidAverageAlerts(_now: Date): Promise<readonly OperationalAlert[]> {
     try {
       const hwidStats = await this.remnawaveApiService.getHwidStats();
-      if (!hwidStats) return [];
+      if (!hwidStats) {
+        // `null` HERE IS UNAMBIGUOUS, AND IT IS NOT "THE AVERAGE IS FINE".
+        //
+        // `getHwidStats` walks `/api/hwid/devices/stats` and then the legacy
+        // `/api/hwid/stats`, returning the first that answers; `null` is
+        // reachable only when BOTH threw. So unlike the empty-list cases
+        // elsewhere in this module there is nothing to disambiguate — this run
+        // could not look, full stop. Remnawave 3.x answers `/api/hwid/stats`
+        // with 404 and moved the family the modern path belongs to, which is
+        // exactly how a live panel arrives here.
+        //
+        // It used to return in silence, so a panel-wide device average that
+        // could not be read for weeks was indistinguishable from one that never
+        // crossed a band. Transition-only, like `perUserTrafficBlind` above:
+        // this collector runs every 5 minutes and a broken endpoint stays
+        // broken, so one WARN going blind and one LOG recovering is the whole
+        // of it.
+        //
+        // `lastHwidBand` is deliberately NOT reset. A band we cannot observe
+        // keeps its last value, so the average coming back into view does not
+        // re-announce a band it never left — the same rule the node-traffic
+        // collector states for a node that stops being observable.
+        if (!this.hwidStatsBlind) {
+          this.hwidStatsBlind = true;
+          this.logger.warn(
+            'Panel-wide HWID average is BLIND: every HWID stats path the adapter knows ' +
+              '(`/api/hwid/devices/stats`, then the legacy `/api/hwid/stats`) failed, so ' +
+              'this run has no reading at all — not a healthy one. Remnawave 3.x moved ' +
+              'that family. No device-average alert can be raised until it is fixed.',
+          );
+        } else {
+          this.logger.debug('Panel-wide HWID average still blind');
+        }
+        return [];
+      }
+      if (this.hwidStatsBlind) {
+        this.hwidStatsBlind = false;
+        this.logger.log('Panel-wide HWID average recovered: the panel answered again');
+      }
 
       const avgDevices = hwidStats.stats.averageHwidDevicesPerUser;
       const totalDevices = hwidStats.stats.totalHwidDevices;

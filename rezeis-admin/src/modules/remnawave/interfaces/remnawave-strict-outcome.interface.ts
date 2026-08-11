@@ -76,7 +76,20 @@ export function describeStrictOutcome(outcome: RemnawaveStrictOutcome<unknown>):
 
 /** A strict user snapshot with the canonical nullable-unlimited encoding. */
 export interface RemnawaveStrictUser {
+  /**
+   * How this panel names the profile: a 2.x uuid, or a 3.x numeric id rendered
+   * in decimal. It is the identity as the ROW gave it, not a value converted
+   * from one era to the other.
+   */
   readonly uuid: string;
+  /**
+   * The panel's numeric id, present on every supported version. Carried so a
+   * caller can back-fill `Subscription.remnawavePanelId` from a read it was
+   * making anyway — which is what keeps a 2.x-created profile addressable after
+   * the operator upgrades to 3.x and the panel drops the uuid column.
+   * `null` only when the panel omitted the field entirely.
+   */
+  readonly panelId: number | null;
   readonly status: string;
   /** Authoritative anchor used by Remnawave MONTH_ROLLING. */
   readonly createdAt: string;

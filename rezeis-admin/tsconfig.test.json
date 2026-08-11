@@ -1,0 +1,22 @@
+{
+  // The ONLY project that type-checks `test/`.
+  //
+  // The root `tsconfig.json` excludes `**/*.spec.ts`, so `npm run typecheck`
+  // returns exit 0 with the entire suite hard-broken — a removed interface
+  // field, a changed method signature, a renamed export all pass it. The specs
+  // do get checked, but only at RUN time: they load through `ts-node/register`
+  // without `transpileOnly`, so the first sign of a type error is a spec file
+  // that refuses to start. That is a slow, noisy way to learn something a
+  // compiler can say in two seconds, and it is invisible to any check that only
+  // runs the "maintained" subset of specs.
+  //
+  // `rootDir` is widened to the package root because the specs live beside
+  // `src/`, not under it. `noEmit` keeps this a checker and nothing else.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "noEmit": true
+  },
+  "include": ["src/**/*", "test/**/*"],
+  "exclude": ["node_modules", "dist", "web"]
+}

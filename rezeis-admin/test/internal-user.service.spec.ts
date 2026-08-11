@@ -10,6 +10,10 @@ import { PasswordHashService } from '../src/modules/auth/services/password-hash.
 import { EmailDeliveryException } from '../src/modules/email/errors/email-delivery.exception';
 import { EmailService } from '../src/modules/email/services/email.service';
 import { InternalUserService } from '../src/modules/internal-user/services/internal-user.service';
+import {
+  panelUserAddress,
+  type StoredPanelIdentity,
+} from '../src/modules/remnawave/services/panel-user-address';
 
 interface MockPrismaService {
   readonly $transaction?: <T>(
@@ -4154,6 +4158,84 @@ describe('InternalUserService', () => {
       },
     );
     assert.equal(authChallengeFindFirstCallsCount, 0);
+  });
+
+  // ── The one row a bare `remnawaveId` cannot name ─────────────────────────
+  //
+  // Created on 2.x, panel since upgraded to 3.x, nothing re-synced. The stored
+  // string is a uuid the panel no longer has a column for, so the card's panel
+  // read must go out carrying the recorded numeric id or it addresses nobody.
+
+  it('reads panel usage by the recorded numeric id when remnawaveId is a stale 2.x uuid', async () => {
+    const staleUuid = 'f47ac10b-58cc-4372-a567-0e02b2c3d479';
+    const panelReads: unknown[] = [];
+    const now = Date.now();
+    const prismaService: MockPrismaService = {
+      authChallenge: {
+        findFirst: async (): Promise<unknown> => null,
+        create: async (): Promise<unknown> => null,
+        update: async (): Promise<unknown> => null,
+      },
+      plan: { findMany: async (): Promise<readonly unknown[]> => [] },
+      webAccount: { updateMany: async (): Promise<unknown> => ({ count: 0 }) },
+      user: {
+        findUnique: async (): Promise<unknown> => createInternalUserRecord({}),
+        findFirst: async (): Promise<unknown> => createInternalUserRecord({}),
+        updateMany: async (): Promise<unknown> => ({ count: 0 }),
+      },
+      subscription: {
+        // A full row, as `findMany` with no `select` returns it — the two
+        // supplementary identity columns included, because a real row has them.
+        findMany: async (): Promise<readonly unknown[]> => [
+          {
+            id: 'subscription-upgraded',
+            userId: 'user-1',
+            status: SubscriptionStatus.ACTIVE,
+            isTrial: false,
+            planSnapshot: { name: 'Current', type: 'UNLIMITED' },
+            trafficLimit: null,
+            deviceLimit: 3,
+            remnawaveId: staleUuid,
+            remnawavePanelId: 4471,
+            remnawavePanelUsername: 'rz_bob_1',
+            configUrl: 'https://current.example.com',
+            startedAt: new Date(now - 60_000),
+            expiresAt: new Date(now + 60_000),
+            createdAt: new Date(now - 60_000),
+            updatedAt: new Date(now - 1_000),
+          },
+        ],
+      },
+    };
+    const service = new InternalUserService(
+      prismaService as never,
+      createPasswordHashServiceMock(),
+      createEmailServiceMock(),
+      undefined,
+      {
+        getPanelUserUsage: async (ref: unknown): Promise<unknown> => {
+          panelReads.push(ref);
+          return null;
+        },
+      } as never,
+    );
+
+    await service.getSubscription({ email: 'user@example.com' });
+
+    assert.equal(panelReads.length, 1);
+    // Asserted through the real addressing function rather than by inspecting
+    // the object: the property that matters is that a 3.x path can be BUILT
+    // from what the service handed over.
+    assert.deepStrictEqual(panelUserAddress(panelReads[0] as StoredPanelIdentity, 'id'), {
+      kind: 'ready',
+      segment: '4471',
+    });
+    // Counter-check: the stored string alone — what this call site used to pass
+    // — names nothing on that panel.
+    assert.equal(
+      panelUserAddress({ remnawaveId: staleUuid, panelId: null, panelUsername: null }, 'id').kind,
+      'impossible',
+    );
   });
 });
 

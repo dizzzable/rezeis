@@ -28,7 +28,7 @@ import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
 import { getErrorMessage } from '@/lib/http-errors'
-import { cn } from '@/lib/utils'
+import { cn, truncate } from '@/lib/utils'
 import { remnawaveApi } from '@/features/remnawave/remnawave-api'
 import { IconPicker } from '@/features/settings/icon-picker'
 import { EmojiTextInput } from '@/features/broadcast/emoji-text-input'
@@ -830,7 +830,7 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
                   aria-label={t('planForm.allowedUsers.removeAria', { userId: uid })}
                   onClick={() => setAllowedUserIds((prev) => prev.filter((x) => x !== uid))}
                 >
-                  {allowedUserLabels[uid] ?? `${uid.slice(0, 12)}…`}
+                  {allowedUserLabels[uid] ?? truncate(uid, 12)}
                   <Trash2 className="h-3 w-3" aria-hidden />
                 </button>
               ))}
@@ -1104,7 +1104,7 @@ function InternalSquadsPicker({
         <div className="flex flex-wrap gap-1.5">
           {value.map((uuid) => (
             <Badge key={uuid} variant="secondary" className="font-normal">
-              {byUuid.get(uuid) ?? uuid.slice(0, 8)}
+              {byUuid.get(uuid) ?? truncate(uuid, 8)}
             </Badge>
           ))}
         </div>

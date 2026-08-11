@@ -44,8 +44,6 @@ const CONFIG = {
   port: 3000,
   token: 'secret',
   webhookSecret: null,
-  caddyToken: null,
-  cookie: null,
 } as const;
 
 /** The uuid every test asks about: a live customer the prefix does not cover. */

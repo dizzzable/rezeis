@@ -43,6 +43,7 @@ import { remnawaveApi, type RemnawaveCleanupSettings } from '../remnawave-api'
 import { KEYS } from '../remnawave-query-keys'
 import { TabHeader } from '../shared/tab-header'
 import { getCleanupSettingsFormKey } from './cleanup-settings-form-key'
+import { truncate } from '@/lib/utils'
 
 export function SettingsTab() {
   const { t } = useTranslation()
@@ -130,7 +131,7 @@ export function SettingsTab() {
                     </TableCell>
                     <TableCell>
                       <p className="font-medium">{p.name}</p>
-                      <p className="font-mono text-[10px] text-muted-foreground/70">{p.uuid.slice(0, 8)}…</p>
+                      <p className="font-mono text-[10px] text-muted-foreground/70">{truncate(p.uuid, 8)}</p>
                     </TableCell>
                     <TableCell className="text-right">
                       <Badge variant={p.hasConfig ? 'success' : 'outline'} className="px-2 text-[10px]">

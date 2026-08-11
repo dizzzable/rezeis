@@ -203,6 +203,18 @@ const ALL_EVENT_TYPES: readonly string[] = EVENT_CATEGORIES.flatMap((c) => EVENT
  */
 const UNREGISTERED_EVENTS_SENTINEL = '*unregistered'
 
+/**
+ * One-line plain-text preview of a template body.
+ *
+ * The ellipsis is appended only when the cut actually removed something — it
+ * used to be unconditional, and most bodies are shorter than the cut, so they
+ * read as truncated when nothing had been dropped.
+ */
+function bodyPreview(body: string, max: number): string {
+  const text = body.replace(/<[^>]+>/g, '')
+  return text.length > max ? `${text.slice(0, max)}…` : text
+}
+
 // ── Main Page ────────────────────────────────────────────────────────────────
 
 export default function NotificationsPage() {
@@ -407,7 +419,7 @@ function UserNotificationsTab() {
                       <span className="text-sm font-medium truncate">{tpl.title}</span>
                     </div>
                     <p className="text-xs text-muted-foreground mt-0.5 truncate max-w-lg">
-                      {tpl.body.replace(/<[^>]+>/g, '').slice(0, 80)}…
+                      {bodyPreview(tpl.body, 80)}
                     </p>
                   </div>
                   <Button variant="ghost" size="sm" onClick={() => { setEditTemplate(tpl); setEditTitle(tpl.title); setEditBody(tpl.body) }}>

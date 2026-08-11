@@ -15,6 +15,10 @@ import {
   strictOk,
   strictUnavailable,
 } from '../src/modules/remnawave/interfaces/remnawave-strict-outcome.interface';
+import {
+  panelUserAddress,
+  type StoredPanelIdentity,
+} from '../src/modules/remnawave/services/panel-user-address';
 import { RemnawaveApiService } from '../src/modules/remnawave/services/remnawave-api.service';
 
 interface MockPrismaService {
@@ -57,12 +61,12 @@ describe('InternalUserDevicesController', () => {
   });
 
   it('lists active-subscription devices through the current Remnawave panel profile API', async () => {
-    const remnawaveCalls: string[] = [];
+    const remnawaveCalls: unknown[] = [];
     const controller = new InternalUserDevicesController(
       createMockPrismaService({ activeSubscription: createSubscription() }) as never,
       {
-        strictGetPanelUserDevices: async (remnawaveId: string) => {
-          remnawaveCalls.push(remnawaveId);
+        strictGetPanelUserDevices: async (ref: StoredPanelIdentity) => {
+          remnawaveCalls.push(ref);
           return strictOk({
             total: 1,
             devices: [
@@ -84,7 +88,7 @@ describe('InternalUserDevicesController', () => {
 
     const actualDevices = await controller.listDevices('123456789');
 
-    assert.deepStrictEqual(remnawaveCalls, ['rem-user-1']);
+    assert.deepStrictEqual(remnawaveCalls, [EXPECTED_IDENTITY]);
     assert.deepStrictEqual(actualDevices, {
       total: 1,
       devices: [
@@ -102,12 +106,12 @@ describe('InternalUserDevicesController', () => {
   });
 
   it('returns an empty device list when the user has no active Remnawave-backed subscription', async () => {
-    const remnawaveCalls: string[] = [];
+    const remnawaveCalls: unknown[] = [];
     const controller = new InternalUserDevicesController(
       createMockPrismaService({ activeSubscription: null }) as never,
       {
-        strictGetPanelUserDevices: async (remnawaveId: string) => {
-          remnawaveCalls.push(remnawaveId);
+        strictGetPanelUserDevices: async (ref: StoredPanelIdentity) => {
+          remnawaveCalls.push(ref);
           return strictOk({ total: 0, devices: [] });
         },
       } as unknown as RemnawaveApiService,
@@ -125,12 +129,12 @@ describe('InternalUserDevicesController', () => {
   // distinction has been swallowed again.
 
   it('does NOT report "0 devices" to the cabinet when the panel is unreachable', async () => {
-    const remnawaveCalls: string[] = [];
+    const remnawaveCalls: unknown[] = [];
     const controller = new InternalUserDevicesController(
       createMockPrismaService({ activeSubscription: createSubscription() }) as never,
       {
-        strictGetPanelUserDevices: async (remnawaveId: string) => {
-          remnawaveCalls.push(remnawaveId);
+        strictGetPanelUserDevices: async (ref: StoredPanelIdentity) => {
+          remnawaveCalls.push(ref);
           return strictUnavailable(null);
         },
       } as unknown as RemnawaveApiService,
@@ -141,7 +145,7 @@ describe('InternalUserDevicesController', () => {
 
     // Self-check: the controller must actually have consulted the panel — a
     // test that passes because the read never happened proves nothing.
-    assert.deepStrictEqual(remnawaveCalls, ['rem-user-1']);
+    assert.deepStrictEqual(remnawaveCalls, [EXPECTED_IDENTITY]);
     assert.equal(failure instanceof ServiceUnavailableException, true);
     assert.equal((failure as ServiceUnavailableException).getStatus(), 503);
     // The reason is in the RESPONSE body, not only in a log.
@@ -149,12 +153,12 @@ describe('InternalUserDevicesController', () => {
   });
 
   it('still reports a genuinely empty panel device list to the cabinet as an empty list', async () => {
-    const remnawaveCalls: string[] = [];
+    const remnawaveCalls: unknown[] = [];
     const controller = new InternalUserDevicesController(
       createMockPrismaService({ activeSubscription: createSubscription() }) as never,
       {
-        strictGetPanelUserDevices: async (remnawaveId: string) => {
-          remnawaveCalls.push(remnawaveId);
+        strictGetPanelUserDevices: async (ref: StoredPanelIdentity) => {
+          remnawaveCalls.push(ref);
           return strictOk({ total: 0, devices: [] });
         },
       } as unknown as RemnawaveApiService,
@@ -162,16 +166,16 @@ describe('InternalUserDevicesController', () => {
     );
 
     assert.deepStrictEqual(await controller.listDevices('123456789'), { total: 0, devices: [] });
-    assert.deepStrictEqual(remnawaveCalls, ['rem-user-1']);
+    assert.deepStrictEqual(remnawaveCalls, [EXPECTED_IDENTITY]);
   });
 
   it('does NOT report "0 devices" for a selected subscription when the panel answers unusably', async () => {
-    const remnawaveCalls: string[] = [];
+    const remnawaveCalls: unknown[] = [];
     const controller = new InternalUserDevicesController(
       createMockPrismaService({ ownedSubscription: createSubscription() }) as never,
       {
-        strictGetPanelUserDevices: async (remnawaveId: string) => {
-          remnawaveCalls.push(remnawaveId);
+        strictGetPanelUserDevices: async (ref: StoredPanelIdentity) => {
+          remnawaveCalls.push(ref);
           return strictInvalidContract('device list "devices" is not an array');
         },
       } as unknown as RemnawaveApiService,
@@ -182,19 +186,19 @@ describe('InternalUserDevicesController', () => {
       controller.listSubscriptionDevices('123456789', 'subscription-1'),
     );
 
-    assert.deepStrictEqual(remnawaveCalls, ['rem-user-1']);
+    assert.deepStrictEqual(remnawaveCalls, [EXPECTED_IDENTITY]);
     assert.equal(failure instanceof BadGatewayException, true);
     assert.equal((failure as BadGatewayException).getStatus(), 502);
   });
 
   it('deletes an explicit subscription device, emits the current event payload, and returns remaining count', async () => {
-    const deleted: Array<{ remnawaveId: string; hwid: string }> = [];
+    const deleted: Array<{ ref: unknown; hwid: string }> = [];
     const events = createEventsMock();
     const controller = new InternalUserDevicesController(
       createMockPrismaService({ ownedSubscription: createSubscription() }) as never,
       {
-        deletePanelUserDevice: async (remnawaveId: string, hwid: string) => {
-          deleted.push({ remnawaveId, hwid });
+        deletePanelUserDevice: async (ref: StoredPanelIdentity, hwid: string) => {
+          deleted.push({ ref, hwid });
           return { total: 2 };
         },
       } as RemnawaveApiService,
@@ -207,7 +211,7 @@ describe('InternalUserDevicesController', () => {
       'hwid-to-delete',
     );
 
-    assert.deepStrictEqual(deleted, [{ remnawaveId: 'rem-user-1', hwid: 'hwid-to-delete' }]);
+    assert.deepStrictEqual(deleted, [{ ref: EXPECTED_IDENTITY, hwid: 'hwid-to-delete' }]);
     assert.deepStrictEqual(actualResponse, { revoked: true, remainingDevices: 2 });
     assert.deepStrictEqual(events.calls, [
       {
@@ -245,12 +249,12 @@ describe('InternalUserDevicesController', () => {
         },
       }) as never,
       {
-        regeneratePanelUserSubscription: async (remnawaveId: string) => {
-          trace.push(`regenerate:${remnawaveId}`);
+        regeneratePanelUserSubscription: async (ref: StoredPanelIdentity) => {
+          trace.push(`regenerate:${ref.remnawaveId}`);
           return { subscriptionUrl: 'https://remnawave.example/sub/new-link' };
         },
-        deleteAllPanelUserDevices: async (remnawaveId: string) => {
-          trace.push(`delete-all:${remnawaveId}`);
+        deleteAllPanelUserDevices: async (ref: StoredPanelIdentity) => {
+          trace.push(`delete-all:${ref.remnawaveId}`);
           return { total: 0 };
         },
       } as unknown as RemnawaveApiService,
@@ -398,6 +402,50 @@ describe('InternalUserDevicesController', () => {
       [{ type: EVENT_TYPES.SUBSCRIPTION_SYNCED, severity: 'ERROR' }],
     );
   });
+
+  // ── The one row a bare `remnawaveId` cannot name ────────────────────────
+  //
+  // Created on 2.x, panel since upgraded to 3.x, nothing re-synced since. The
+  // stored string is a uuid the panel no longer has a column for. Only the
+  // recorded numeric id can still find the profile, so the assertion is on what
+  // the adapter can BUILD from what it was handed, not merely on the fact that
+  // some object arrived.
+
+  it('hands the panel adapter the recorded numeric id when remnawaveId is a stale 2.x uuid', async () => {
+    const remnawaveCalls: unknown[] = [];
+    const staleUuidRow = createSubscription({
+      remnawaveId: 'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+      remnawavePanelId: 4471,
+    });
+    const controller = new InternalUserDevicesController(
+      createMockPrismaService({ activeSubscription: staleUuidRow }) as never,
+      {
+        strictGetPanelUserDevices: async (ref: StoredPanelIdentity) => {
+          remnawaveCalls.push(ref);
+          return strictOk({ total: 0, devices: [] });
+        },
+      } as unknown as RemnawaveApiService,
+      createEventsMock() as unknown as SystemEventsService,
+    );
+
+    await controller.listDevices('123456789');
+
+    assert.equal(remnawaveCalls.length, 1);
+    assert.deepStrictEqual(panelUserAddress(remnawaveCalls[0] as StoredPanelIdentity, 'id'), {
+      kind: 'ready',
+      segment: '4471',
+    });
+    // Counter-check: the stored string ALONE — what this call site used to pass
+    // — names nothing on that panel. Without this line the assertion above
+    // would still pass if the numeric id were being invented from the uuid.
+    assert.equal(
+      panelUserAddress(
+        { remnawaveId: staleUuidRow.remnawaveId as string, panelId: null, panelUsername: null },
+        'id',
+      ).kind,
+      'impossible',
+    );
+  });
 });
 
 /**
@@ -420,17 +468,42 @@ function assertRoute(requestMethod: RequestMethod, path: string, target: unknown
   assert.equal(Reflect.getMetadata(PATH_METADATA, target), path);
 }
 
-function createSubscription(): {
-  readonly id: string;
-  readonly userId: string;
-  readonly remnawaveId: string;
-} {
+/**
+ * A subscription row shaped the way the controller's own `select` reads it.
+ *
+ * The two supplementary columns are present because a REAL row has them: both
+ * 2.x and 3.x hand back a numeric id and a username on every user read, so they
+ * accumulate long before anyone upgrades. A fake that omitted them would let a
+ * caller which drops them on the floor look perfectly correct here and be
+ * unable to name the profile on an upgraded panel.
+ */
+function createSubscription(
+  overrides: Partial<SubscriptionRow> = {},
+): SubscriptionRow {
   return {
     id: 'subscription-1',
     userId: 'user-1',
     remnawaveId: 'rem-user-1',
+    remnawavePanelId: 4471,
+    remnawavePanelUsername: 'rz_bob_1',
+    ...overrides,
   };
 }
+
+interface SubscriptionRow {
+  readonly id: string;
+  readonly userId: string;
+  readonly remnawaveId: string | null;
+  readonly remnawavePanelId: number | null;
+  readonly remnawavePanelUsername: string | null;
+}
+
+/** What {@link createSubscription} must reach the panel adapter as. */
+const EXPECTED_IDENTITY: StoredPanelIdentity = {
+  remnawaveId: 'rem-user-1',
+  panelId: 4471,
+  panelUsername: 'rz_bob_1',
+};
 
 function createMockPrismaService(input: {
   readonly activeSubscription?: unknown;

@@ -9,6 +9,10 @@ import {
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { resolveAddOnRolloutFlags } from '../add-on-rollout.config';
+import {
+  storedIdentityOf,
+  type StoredPanelIdentity,
+} from '../../remnawave/services/panel-user-address';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
 import { EntitlementBoundaryService } from './entitlement-boundary.service';
 
@@ -27,7 +31,7 @@ interface PlanTarget {
 }
 
 type Guard =
-  | { readonly kind: 'ok'; readonly remnawaveId: string; readonly desiredLimit: number }
+  | { readonly kind: 'ok'; readonly identity: StoredPanelIdentity; readonly desiredLimit: number }
   | { readonly kind: 'superseded'; readonly reason: string };
 
 /**
@@ -93,7 +97,7 @@ export class DeviceReductionExecutionService {
     });
 
     const targets = readTargets(plan.selectedDevices);
-    const { remnawaveId } = guard;
+    const { identity } = guard;
     let deleted = 0;
 
     for (const target of targets) {
@@ -104,9 +108,22 @@ export class DeviceReductionExecutionService {
         await this.markState(planId, DeviceReductionPlanState.SUPERSEDED, reguard.reason);
         return { status: 'SUPERSEDED' };
       }
+      // The re-guard catches a deleted subscription, an advanced revision, a
+      // relaxed limit and a DETACHED profile — but not a profile RELINKED to a
+      // different one, which `loadGuard` reports as a perfectly healthy `ok`
+      // carrying a new identity. Without this check the loop would keep
+      // deleting devices off the profile the plan was built against while the
+      // subscription points somewhere else: the wrong profile loses devices,
+      // and the read-back then blesses a limit that was never applied to the
+      // live one. Comparing the stored id is enough — that is the field a
+      // relink writes; the two supplementary columns only describe it.
+      if (reguard.identity.remnawaveId !== identity.remnawaveId) {
+        await this.markState(planId, DeviceReductionPlanState.SUPERSEDED, 'PANEL_PROFILE_RELINKED');
+        return { status: 'SUPERSEDED' };
+      }
       const desiredLimit = reguard.desiredLimit;
 
-      const listing = await this.remnawaveApiService.strictListUserDevices(remnawaveId);
+      const listing = await this.remnawaveApiService.strictListUserDevices(identity);
       if (listing.kind === 'unavailable') {
         return { status: 'DEFERRED', reason: 'PANEL_UNAVAILABLE' };
       }
@@ -129,7 +146,7 @@ export class DeviceReductionExecutionService {
         continue;
       }
 
-      const del = await this.remnawaveApiService.strictDeleteUserDevice(remnawaveId, target.hwid);
+      const del = await this.remnawaveApiService.strictDeleteUserDevice(identity, target.hwid);
       if (del.kind === 'unavailable') {
         return { status: 'DEFERRED', reason: 'PANEL_UNAVAILABLE' };
       }
@@ -144,7 +161,7 @@ export class DeviceReductionExecutionService {
     }
 
     // Final strict read-back proves the post-condition.
-    const final = await this.remnawaveApiService.strictListUserDevices(remnawaveId);
+    const final = await this.remnawaveApiService.strictListUserDevices(identity);
     if (final.kind === 'unavailable') {
       return { status: 'DEFERRED', reason: 'PANEL_UNAVAILABLE' };
     }
@@ -207,15 +224,27 @@ export class DeviceReductionExecutionService {
     }
     const subscription = await this.prismaService.subscription.findUnique({
       where: { id: subscriptionId },
-      select: { remnawaveId: true, status: true },
+      // Re-read per guard pass, supplementary columns included: every delete in
+      // the loop below is addressed from this row, and a profile created on 2.x
+      // on a panel since upgraded to 3.x can only be named by the recorded
+      // numeric id or panel username. Without them the strict calls answer
+      // `unavailable`, which defers the saga forever instead of reclaiming the
+      // slots the customer stopped paying for.
+      select: {
+        remnawaveId: true,
+        remnawavePanelId: true,
+        remnawavePanelUsername: true,
+        status: true,
+      },
     });
-    if (subscription === null || subscription.remnawaveId === null) {
+    const identity = storedIdentityOf(subscription);
+    if (subscription === null || identity === null) {
       return { kind: 'superseded', reason: 'NO_PANEL_PROFILE' };
     }
     if (subscription.status === SubscriptionStatus.DELETED) {
       return { kind: 'superseded', reason: 'SUBSCRIPTION_DELETED' };
     }
-    return { kind: 'ok', remnawaveId: subscription.remnawaveId, desiredLimit: projection.desiredDeviceLimit };
+    return { kind: 'ok', identity, desiredLimit: projection.desiredDeviceLimit };
   }
 
   private async markState(

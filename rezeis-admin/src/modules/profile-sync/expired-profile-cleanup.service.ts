@@ -5,6 +5,7 @@ import { SubscriptionStatus, SyncAction, SyncJobStatus } from '@prisma/client';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { shouldRunSchedules } from '../../common/runtime/process-role.util';
 import { EVENT_TYPES, SystemEventsService } from '../../common/services/system-events.service';
+import { storedIdentityOf } from '../remnawave/services/panel-user-address';
 import { RemnawaveApiService } from '../remnawave/services/remnawave-api.service';
 import { SettingsService } from '../settings/services/settings.service';
 import { SubscriptionDeletionService } from '../subscriptions/services/subscription-deletion.service';
@@ -183,7 +184,20 @@ export class ExpiredProfileCleanupService {
           },
         },
       },
-      select: { id: true, userId: true, isTrial: true, remnawaveId: true, expiresAt: true },
+      // The supplementary identity columns are selected because the re-check
+      // below ADDRESSES the profile on the panel. A 2.x-created profile whose
+      // panel has since been upgraded to 3.x cannot be named by `remnawaveId`
+      // alone, and an unaddressable profile reads as `unavailable` — a deferral
+      // every sweep, forever, for a subscription that will never be retired.
+      select: {
+        id: true,
+        userId: true,
+        isTrial: true,
+        remnawaveId: true,
+        remnawavePanelId: true,
+        remnawavePanelUsername: true,
+        expiresAt: true,
+      },
       take: CLEANUP_BATCH,
       orderBy: { expiresAt: 'asc' },
     });
@@ -195,12 +209,12 @@ export class ExpiredProfileCleanupService {
     let deferred = 0;
     const deferredKinds = new Set<string>();
     for (const subscription of candidates) {
-      const remnawaveId = subscription.remnawaveId;
+      const identity = storedIdentityOf(subscription);
       const expectedExpiresAt = subscription.expiresAt;
-      if (remnawaveId === null || expectedExpiresAt === null) continue;
+      if (identity === null || expectedExpiresAt === null) continue;
 
       // ── Panel-authoritative expiry re-check ──────────────────────────────
-      const panelOutcome = await this.remnawaveApiService.strictGetPanelUserExpiry(remnawaveId);
+      const panelOutcome = await this.remnawaveApiService.strictGetPanelUserExpiry(identity);
       let panelExpiryMs: number | null = null;
       let panelSubscriptionUrl: string | null = null;
       if (panelOutcome.kind === 'ok') {
@@ -270,7 +284,13 @@ export class ExpiredProfileCleanupService {
         const result = await this.subscriptionDeletionService.deleteExpiredIfUnchanged({
           subscriptionId: subscription.id,
           expectedExpiresAt,
-          expectedRemnawaveId: remnawaveId,
+          // The stored COLUMN, not the address the panel was asked at. This
+          // fence is a compare-and-swap: it refuses the delete if `remnawaveId`
+          // moved between the re-check and now, which is exactly what a
+          // re-provision does. Widening it to the resolved identity would let a
+          // subscription that has since been re-linked to a live profile be
+          // retired on the strength of a read against the dead one.
+          expectedRemnawaveId: identity.remnawaveId,
           cutoff,
         });
         if (!result.deleted) {

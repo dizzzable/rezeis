@@ -21,18 +21,16 @@ import { afterAll, describe, expect, it, vi } from 'vitest'
 import { en as coreEn } from '@/i18n/en'
 import { ru as coreRu } from '@/i18n/ru'
 import { i18n, i18nReady, loadFeatureBundle, withFeatureBundle } from '@/i18n/i18n'
+// Shared with `i18n/bundle-parity.test.ts`. Extracted rather than copied: a
+// second traversal that drifted would let one of the two suites stop comparing
+// what it says it compares, and importing one test file from another
+// re-registers its `describe` blocks into the importer.
+import { keyPaths } from '@/test/i18n-key-paths'
 
 import { en } from './branding.en'
 import { ru } from './branding.ru'
 
 type Dict = Record<string, unknown>
-
-function keyPaths(node: unknown, prefix = ''): string[] {
-  if (typeof node !== 'object' || node === null || Array.isArray(node)) return [prefix]
-  return Object.entries(node as Dict).flatMap(([key, value]) =>
-    keyPaths(value, prefix ? `${prefix}.${key}` : key),
-  )
-}
 
 /** Blocks that must exist ONLY in the lazy bundle. */
 const BUNDLE_ONLY_BLOCKS = [

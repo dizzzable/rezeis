@@ -16,6 +16,7 @@ import { EmojiPicker } from '@/features/broadcast/emoji-picker'
 import { EmojiPreview } from '@/features/custom-emoji/emoji-preview'
 import { api } from '@/lib/api'
 import { expectArray } from '@/lib/api-utils'
+import { truncate } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -182,11 +183,6 @@ export function BotTextsTab(): JSX.Element {
       <TextCreateDialog open={creating} onOpenChange={setCreating} />
     </div>
   )
-}
-
-function truncate(value: string, max: number): string {
-  if (value.length <= max) return value
-  return `${value.slice(0, max)}…`
 }
 
 interface CustomEmojiLite {

@@ -1,10 +1,13 @@
 /**
- * Live tab — active sessions / source IPs per node (Remnawave ip-control).
+ * Live tab — active sessions / source IPs per node.
  *
- * Matured on Remnawave 2.8+. The operator picks a node; we ask the panel for
- * the online users + their source IPs (an async ip-control job the backend
- * polls) and render them. Read-only inspection — the drop-connections
- * enforcement lives in the anti-fraud module, not here.
+ * The operator picks a node; we ask the panel for the online users + their
+ * source IPs (an async job the backend starts and polls) and render them.
+ * Which endpoint family that job runs on is the backend's problem and changes
+ * with the panel — `ip-control/*` once it matured on 2.8, `connections/*` on
+ * 3.x — so nothing here names one, and the tab is shown or hidden by the
+ * `liveIpControl` capability rather than by a version comparison. Read-only
+ * inspection: the drop-connections enforcement lives in the anti-fraud module.
  */
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'

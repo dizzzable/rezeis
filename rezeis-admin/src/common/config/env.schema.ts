@@ -117,8 +117,6 @@ const environmentSchema = z
     ),
     REMNAWAVE_TOKEN: z.preprocess(normalizeOptionalString, z.string().min(1).optional()),
     REMNAWAVE_WEBHOOK_SECRET: z.preprocess(normalizeOptionalString, z.string().min(1).optional()),
-    REMNAWAVE_CADDY_TOKEN: z.preprocess(normalizeOptionalString, z.string().min(1).optional()),
-    REMNAWAVE_COOKIE: z.preprocess(normalizeOptionalString, z.string().min(1).optional()),
 
     // ── Database ─────────────────────────────────────────────────────────────
     DATABASE_HOST: z.string().min(1).default('localhost'),

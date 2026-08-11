@@ -48,6 +48,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
+import { truncate } from '@/lib/utils'
 
 import { remnawaveApi, type RemnawaveUserSummary } from '../remnawave-api'
 import { KEYS } from '../remnawave-query-keys'
@@ -88,6 +89,18 @@ function UserSearchCard() {
   const [username, setUsername] = useState('')
   const [email, setEmail] = useState('')
   const [subscriptionUuid, setSubscriptionUuid] = useState('')
+
+  // All four selectors are offered on every panel version, deliberately.
+  //
+  // `capabilities.userLookups` describes which `/api/users/by-telegram-id` /
+  // `by-email` SHORTCUTS the panel still serves — 3.x deleted both — and its
+  // docblock spells out that `false` means "route through the generic resolve
+  // path", not "this lookup is impossible". The adapter does exactly that: on
+  // 3.x `resolveRemnawaveUser` asks `GET /api/users/stream?size=1&email=…` /
+  // `&telegramId=…` instead, pinned by a backend test against a live 3.2.1.
+  // Greying these two fields out took a lookup that works and told the operator
+  // it does not exist, which is the same dead end the branch was written to
+  // avoid — one step earlier.
 
   const resolveMutation = useMutation({
     mutationFn: remnawaveApi.resolveUser,
@@ -175,7 +188,13 @@ function SearchField({ icon: Icon, id, label, value, onChange, placeholder }: Se
       <Label htmlFor={id} className="text-xs text-muted-foreground">{label}</Label>
       <div className="relative">
         <Icon className="absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground/60" aria-hidden />
-        <Input id={id} value={value} placeholder={placeholder} onChange={(e) => onChange(e.target.value)} className="pl-7" />
+        <Input
+          id={id}
+          value={value}
+          placeholder={placeholder}
+          onChange={(e) => onChange(e.target.value)}
+          className="pl-7"
+        />
       </div>
     </div>
   )
@@ -270,9 +289,9 @@ function UserLiveSessions({ uuid }: { uuid: string }) {
           <p className="text-[11px] text-muted-foreground">
             {t('remnaWavePage.users.live.summary', { nodes: sessions.length, ips: totalIps })}
           </p>
-          {sessions.map((n) => (
-            <div key={n.nodeUuid} className="rounded-md border border-border/50 p-2">
-              <p className="text-xs font-medium">{n.nodeName || n.nodeUuid.slice(0, 8)}</p>
+          {sessions.map((n, index) => (
+            <div key={rowKey('node', n.nodeUuid, index)} className="rounded-md border border-border/50 p-2">
+              <p className="text-xs font-medium">{n.nodeName || truncate(n.nodeUuid, 8)}</p>
               <div className="mt-1 flex flex-wrap gap-1.5">
                 {n.ips.map((sample) => (
                   <Badge key={sample.ip} variant="secondary" className="font-mono text-[10px]">
@@ -389,11 +408,19 @@ function HwidTopUsersCard() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {data.map((row) => (
-                <TableRow key={row.userUuid}>
+              {data.map((row, index) => (
+                <TableRow key={rowKey('hwid', row.userUuid, index)}>
                   <TableCell>
                     <p className="font-medium">{row.username}</p>
-                    <p className="font-mono text-[10px] text-muted-foreground/70">{row.userUuid.slice(0, 8)}…</p>
+                    {/* The panel identity, which is a uuid only on 2.x — 3.x has
+                        no uuid column and sends its numeric id, and the mapper
+                        leaves the field empty when the row carries neither. Cut
+                        and ellipsise only when there is something to cut. */}
+                    {row.userUuid ? (
+                      <p className="font-mono text-[10px] text-muted-foreground/70">
+                        {truncate(row.userUuid, 8)}
+                      </p>
+                    ) : null}
                   </TableCell>
                   <TableCell className="text-right">
                     <Badge variant={row.devicesCount >= 10 ? 'destructive' : row.devicesCount >= 5 ? 'outline' : 'secondary'} className="px-2 text-[11px] tabular-nums">
@@ -455,7 +482,7 @@ function SubscriptionRequestLogCard() {
                         integer. Rendering `userUuid.slice(0, 8)` for both used to
                         display the integer as though it were a uuid prefix. */}
                     {entry.userUuid ? (
-                      <p className="font-mono text-[10px] text-muted-foreground/70">{entry.userUuid.slice(0, 8)}…</p>
+                      <p className="font-mono text-[10px] text-muted-foreground/70">{truncate(entry.userUuid, 8)}</p>
                     ) : entry.panelUserId !== null && entry.panelUserId !== undefined ? (
                       <p className="font-mono text-[10px] text-muted-foreground/70">#{entry.panelUserId}</p>
                     ) : null}
@@ -478,6 +505,21 @@ function SubscriptionRequestLogCard() {
       </CardContent>
     </Card>
   )
+}
+
+/**
+ * A React key for a row whose panel identifier is allowed to be empty.
+ *
+ * Both mappers behind this tab fall back to `''` — `mapHwidTopUser` for a 2.x
+ * row whose uuid came back damaged, `mapUserNodeIps` for a node the panel named
+ * with something other than a string — and React treats two `''` keys as the
+ * same element, so it reuses one customer's row DOM for another's. Falling back
+ * to the index instead keeps them distinct; the `#` prefix keeps the fallback
+ * out of the identity namespace, since a panel identity is a uuid or a decimal
+ * id and neither can start with one.
+ */
+function rowKey(prefix: string, id: string, index: number): string {
+  return id === '' ? `${prefix}:#${index}` : `${prefix}:${id}`
 }
 
 // User-Agents Remnawave logs are like `Happ/4.10.2/ios/2605221402666` —

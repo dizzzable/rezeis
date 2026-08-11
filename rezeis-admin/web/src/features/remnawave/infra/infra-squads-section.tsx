@@ -25,6 +25,7 @@ import {
 
 import { remnawaveApi } from '../remnawave-api'
 import { KEYS } from '../remnawave-query-keys'
+import { truncate } from '@/lib/utils'
 
 export function InfraSquadsSection() {
   const { t } = useTranslation()
@@ -93,7 +94,7 @@ export function InfraSquadsSection() {
                   <TableRow key={squad.uuid}>
                     <TableCell>
                       <p className="font-medium">{squad.name}</p>
-                      <p className="font-mono text-[10px] text-muted-foreground/70">{squad.uuid.slice(0, 8)}…</p>
+                      <p className="font-mono text-[10px] text-muted-foreground/70">{truncate(squad.uuid, 8)}</p>
                     </TableCell>
                     <TableCell className="text-right tabular-nums">{squad.membersCount}</TableCell>
                     <TableCell className="text-right tabular-nums">{squad.inboundsCount}</TableCell>
@@ -137,7 +138,7 @@ export function InfraSquadsSection() {
                   <TableRow key={squad.uuid}>
                     <TableCell>
                       <p className="font-medium">{squad.name}</p>
-                      <p className="font-mono text-[10px] text-muted-foreground/70">{squad.uuid.slice(0, 8)}…</p>
+                      <p className="font-mono text-[10px] text-muted-foreground/70">{truncate(squad.uuid, 8)}</p>
                     </TableCell>
                     <TableCell className="text-right tabular-nums">{squad.membersCount}</TableCell>
                   </TableRow>

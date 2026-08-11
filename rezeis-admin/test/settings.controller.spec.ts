@@ -262,6 +262,7 @@ describe('SettingsController', () => {
       primaryFg: '#000000',
       bgPrimary: '#111111',
       bgSecondary: '#222222',
+      brandPaletteSource: 'concept',
       cardGradient: 'linear-gradient(#000,#111)',
       cardGradientSource: 'concept',
       cardPattern: null,

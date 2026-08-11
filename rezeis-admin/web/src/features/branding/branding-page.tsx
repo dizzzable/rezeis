@@ -49,6 +49,7 @@ import {
   isSafeBrandingGradient,
   CORNER_RADII_BY_LEGACY_CLASS,
   DEFAULT_APP_BACKGROUND_DRAFT,
+  type BrandingAppBackgroundDraft,
   type BrandingCardEffectSlotDraft,
   type BrandingCornerRadiiDraft,
   type BrandingSurfaceThemeDraft,
@@ -138,11 +139,18 @@ function toThemeVariantCardSlots(
   });
 }
 
+/**
+ * The four colours of the palette section. They are edited one at a time but
+ * saved as one unit — see `BrandingFormDraft.brandPaletteSource`.
+ */
+type BrandPaletteField = 'primary' | 'primaryFg' | 'bgPrimary' | 'bgSecondary';
+type BrandPalette = Record<BrandPaletteField, string>;
+
 function tabForBrandingField(field: string): BrandingTab {
   if (['brandName', 'tagline', 'logoUrl', 'pwaIconUrl', 'themePresetId', 'themePresetVersion', 'themeModePolicy', 'themeDefaultMode', 'themeVariants'].includes(field)) {
     return 'brand';
   }
-  if (['primary', 'primaryFg', 'bgPrimary', 'bgSecondary', 'borderRadius', 'cornerRadii', 'fontFamily', 'surfaceTheme'].includes(field)) {
+  if (['primary', 'primaryFg', 'bgPrimary', 'bgSecondary', 'brandPaletteSource', 'borderRadius', 'cornerRadii', 'fontFamily', 'surfaceTheme'].includes(field)) {
     return 'colors';
   }
   if (field.startsWith('card') || field === 'subscriptionCardText' || field === 'subscriptionCardGlass') return 'card';
@@ -280,10 +288,19 @@ export default function WebReiwaPage() {
     form.setValue("themeModePolicy", "fixed", { shouldDirty: true });
     form.setValue("themeDefaultMode", "dark", { shouldDirty: true });
     form.setValue("themeVariants", null, { shouldDirty: true });
-    form.setValue("primary", patch.primary, { shouldDirty: true });
-    form.setValue("primaryFg", patch.primaryFg, { shouldDirty: true });
-    form.setValue("bgPrimary", patch.bgPrimary, { shouldDirty: true });
-    form.setValue("bgSecondary", patch.bgSecondary, { shouldDirty: true });
+    setGlobalBrandPalette(
+      {
+        primary: patch.primary,
+        primaryFg: patch.primaryFg,
+        bgPrimary: patch.bgPrimary,
+        bgSecondary: patch.bgSecondary,
+      },
+      { detachFromConcept: false },
+    );
+    // Re-attach. A theme IS the palette's owner, so applying one must clear a
+    // detachment left by an earlier hand-picked colour — otherwise the cabinet
+    // keeps serving the old colours over the theme just selected.
+    form.setValue("brandPaletteSource", "concept", { shouldDirty: true });
     setGlobalCardGradient(patch.cardGradient);
     form.setValue("bgEffect", patch.bgEffect, { shouldDirty: true });
     // A standard theme never touched the slots, so nothing here needed fixing
@@ -347,7 +364,21 @@ export default function WebReiwaPage() {
     patch:
       | ReturnType<typeof createConceptThemePresetVisualPatch>
       | BrandingThemeVariantsDraft['light'],
-    applyCardArtwork = true,
+    /**
+     * `true` while a concept is being applied, `false` while one of its two
+     * brightness snapshots is being selected. Everything this function does
+     * that a mere brightness change must NOT do keys off this flag.
+     *
+     * It is a parameter and not something sniffed off the payload, because the
+     * payload cannot answer it. A variant built by `createThemeVariantsWithSlots`
+     * still carries `themePresetId` — `createConceptThemePresetVisualPatch`
+     * puts it there — and only stops carrying it once the API has stored and
+     * re-read it (`readThemeVariant` rebuilds a canonical variant without it).
+     * So `'themePresetId' in patch` answers "has this been saved yet", which is
+     * not the question, and answers it differently for the same operator action
+     * depending on whether a save happened in between.
+     */
+    isConceptApplication = true,
   ): void {
     const cardPatch: ConceptCardPresetVisualPatch = {
       cardGradient: patch.cardGradient,
@@ -356,18 +387,34 @@ export default function WebReiwaPage() {
       cardEffectProps: patch.cardEffectProps ?? {},
       cardEffectOpacity: patch.cardEffectOpacity,
     };
-    if ('themePresetId' in patch) {
+    if (isConceptApplication && 'themePresetId' in patch) {
       form.setValue("themePresetId", patch.themePresetId, { shouldDirty: true });
       form.setValue("themePresetVersion", patch.themePresetVersion, { shouldDirty: true });
+      // Re-attach. A concept owns the palette, so applying one must clear a
+      // detachment left by an earlier hand-picked colour — otherwise the
+      // cabinet keeps serving those colours over the concept just selected.
+      //
+      // Deliberately gated: the other caller is the brightness selector.
+      // Switching the default brightness is not a change of ownership, and
+      // re-attaching there would silently discard the operator's palette.
+      form.setValue("brandPaletteSource", "concept", { shouldDirty: true });
     }
-    form.setValue("primary", patch.primary, { shouldDirty: true });
-    form.setValue("primaryFg", patch.primaryFg, { shouldDirty: true });
-    form.setValue("bgPrimary", patch.bgPrimary, { shouldDirty: true });
-    form.setValue("bgSecondary", patch.bgSecondary, { shouldDirty: true });
+    // Never detaching here is the point: this function only ever applies a
+    // palette the concept itself supplied, whether from the preset or from one
+    // of its two brightness snapshots.
+    setGlobalBrandPalette(
+      {
+        primary: patch.primary,
+        primaryFg: patch.primaryFg,
+        bgPrimary: patch.bgPrimary,
+        bgSecondary: patch.bgSecondary,
+      },
+      { detachFromConcept: false },
+    );
     if ('subscriptionCardText' in patch) {
       form.setValue('subscriptionCardText', { ...patch.subscriptionCardText }, { shouldDirty: true });
     }
-    if (applyCardArtwork) {
+    if (isConceptApplication) {
       // Applying a concept must retain its separate light/dark card artwork.
       // Only an explicit card choice made afterwards becomes an operator
       // override across both variants.
@@ -376,16 +423,96 @@ export default function WebReiwaPage() {
       // Changing only the default brightness must not replace the animation
       // selected by the operator. The gradient still follows the selected
       // brightness, including its lightweight per-position fallback.
-      setGlobalCardGradient(cardPatch.cardGradient, { synchronizeThemeVariants: false });
+      //
+      // `detachFromConcept: false` because selecting a brightness is not a
+      // gradient decision, and the setter's default marks every write as one.
+      // Left on, it pointed the SAME defect the other way: the operator touched
+      // the mode dropdown, the gradient silently became "theirs", and a cabinet
+      // user allowed to switch brightness then got the operator's default-mode
+      // gradient in BOTH renderings — the concept's second gradient stopped
+      // arriving. Whatever the marker already says is still true here: a
+      // hand-written gradient was mirrored into both snapshots when it was
+      // written, so the value arriving from either one is that same gradient.
+      setGlobalCardGradient(cardPatch.cardGradient, {
+        synchronizeThemeVariants: false,
+        detachFromConcept: false,
+      });
       setGlobalCardPattern(cardPatch.cardPattern, { synchronizeThemeVariants: false });
     }
 
     form.setValue("bgEffect", patch.bgEffect, { shouldDirty: true });
+    // The app background and the semantic surfaces genuinely differ between the
+    // two renderings of one concept, so a brightness change must repaint them.
+    // Both are safe to copy from a snapshot because an operator edit is
+    // mirrored INTO both snapshots first — surfaces by
+    // `detachSurfaceThemeFromConcept`, the app background by
+    // `setGlobalAppBackground` — so what comes back here is the operator's own
+    // value, not the concept's stale one.
     form.setValue("appBackground", patch.appBackground, { shouldDirty: true });
-    form.setValue("borderRadius", patch.borderRadius, { shouldDirty: true });
-    form.setValue("cornerRadii", patch.cornerRadii, { shouldDirty: true });
-    form.setValue("fontFamily", patch.fontFamily, { shouldDirty: true });
     form.setValue("surfaceTheme", patch.surfaceTheme, { shouldDirty: true });
+    // Typeface and geometry are NOT brightness tokens, and only applying a
+    // concept may write them.
+    //
+    // SIXTH appearance of the defect this file keeps producing, and the first
+    // one on the WRITE side. Reiwa already refuses to read these three from a
+    // variant — `resolveBrandingThemeMode` pins `borderRadius`, `cornerRadii`
+    // and `fontFamily` to the root because there is nothing per-mode about
+    // them: the panel offers ONE font dropdown and ONE set of radius sliders,
+    // not one per brightness, and `createOppositeConceptReiwaPreset` copies all
+    // three unchanged into the opposite rendering. That fix repaired the read.
+    // This line went on performing the identical overwrite one step earlier, in
+    // the form: the operator set their font, saved it, later switched the
+    // default brightness for an unrelated reason, and the concept's original
+    // font was copied back over the root and saved on the next click. The
+    // cabinet then served it faithfully — the value was genuinely gone, so
+    // "root always wins" could not save it.
+    //
+    // Gating rather than deleting: applying a concept IS the concept taking
+    // ownership of typography and geometry, and that path must keep writing
+    // them. A brightness snapshot never has anything new to say here, so
+    // skipping the write costs nothing and is what stops it from having
+    // something OLD to say.
+    if (isConceptApplication) {
+      form.setValue("borderRadius", patch.borderRadius, { shouldDirty: true });
+      form.setValue("cornerRadii", patch.cornerRadii, { shouldDirty: true });
+      form.setValue("fontFamily", patch.fontFamily, { shouldDirty: true });
+    }
+  }
+
+  /**
+   * The site-wide app background belongs to the operator from the first manual
+   * edit, and it needs a mirror rather than an ownership marker.
+   *
+   * It is a real per-brightness token — `buildAppBackground` composes it from
+   * the mode's own background colour, so a concept ships a visibly different
+   * one for each rendering, and `resolveBrandingThemeMode` reads it from the
+   * variant. That is exactly the situation `cardGradientSource` exists for, and
+   * the reason a marker is not needed on top: the API already resolves the
+   * disagreement by mirroring a direct root edit into both snapshots on save
+   * (`mergeBrandingSettings`, `hasDirectVisualPatch`). What was missing is the
+   * same mirror HERE, and its absence was visible without saving anything —
+   * the panel's own brightness selector copies a whole variant back onto the
+   * root, so an operator who chose a background and then switched the default
+   * mode watched the concept's background replace it in the form they were
+   * looking at, and then saved that. Same reason
+   * `synchronizeThemeVariantPalette` and `detachSurfaceThemeFromConcept` exist.
+   */
+  function setGlobalAppBackground(appBackground: BrandingAppBackgroundDraft): void {
+    form.setValue("appBackground", appBackground, { shouldDirty: true });
+    const variants = form.getValues("themeVariants");
+    if (!variants) return;
+    const synchronizeVariant = (variant: BrandingThemeVariantsDraft["light"]) => ({
+      ...variant,
+      appBackground,
+    });
+    form.setValue(
+      "themeVariants",
+      {
+        light: synchronizeVariant(variants.light),
+        dark: synchronizeVariant(variants.dark),
+      },
+      { shouldDirty: true },
+    );
   }
 
   /**
@@ -412,17 +539,92 @@ export default function WebReiwaPage() {
    */
   function setGlobalCardGradient(
     cardGradient: string,
-    { synchronizeThemeVariants = true }: { readonly synchronizeThemeVariants?: boolean } = {},
+    {
+      synchronizeThemeVariants = true,
+      detachFromConcept = true,
+    }: {
+      readonly synchronizeThemeVariants?: boolean
+      readonly detachFromConcept?: boolean
+    } = {},
   ): void {
     form.setValue("cardGradient", cardGradient, { shouldDirty: true });
     // A hand-written gradient detaches the concept. Without this the value
     // lands on the root, the concept's per-brightness copy keeps winning in
     // the cabinet, and the operator sees their choice in the panel preview and
-    // nowhere else. Concept appliers set it back to `concept` explicitly.
-    form.setValue("cardGradientSource", "custom", { shouldDirty: true });
+    // nowhere else. Concept appliers set it back to `concept` explicitly; the
+    // brightness selector, which writes a gradient the concept supplied and is
+    // not a gradient decision at all, opts out with `detachFromConcept: false`.
+    if (detachFromConcept) {
+      form.setValue("cardGradientSource", "custom", { shouldDirty: true });
+    }
     if (synchronizeThemeVariants) {
       synchronizeThemeVariantCardGradients(cardGradient);
     }
+  }
+
+  function readBrandPalette(): BrandPalette {
+    return {
+      primary: form.getValues("primary"),
+      primaryFg: form.getValues("primaryFg"),
+      bgPrimary: form.getValues("bgPrimary"),
+      bgSecondary: form.getValues("bgSecondary"),
+    };
+  }
+
+  /**
+   * One colour changed by hand, but the whole quartet is written back.
+   *
+   * The palette is one design decision: `primary`/`primaryFg` is a contrast
+   * pair and `bgPrimary`/`bgSecondary` a surface pair. Detaching only the
+   * colour that was touched would leave the cabinet compositing two of the
+   * operator's colours with two of the concept's — a palette nobody chose.
+   */
+  function setBrandPaletteColor(field: BrandPaletteField, value: string): void {
+    setGlobalBrandPalette({ ...readBrandPalette(), [field]: value });
+  }
+
+  /**
+   * A hand-picked colour detaches the concept, exactly as a hand-written card
+   * gradient does. Without the marker the value lands on the root, the
+   * concept's per-brightness copy keeps winning in the cabinet, and the
+   * operator sees their colour in the panel preview and nowhere else. Preset
+   * appliers pass `detachFromConcept: false` and re-attach explicitly.
+   */
+  function setGlobalBrandPalette(
+    palette: BrandPalette,
+    { detachFromConcept = true }: { readonly detachFromConcept?: boolean } = {},
+  ): void {
+    form.setValue("primary", palette.primary, { shouldDirty: true });
+    form.setValue("primaryFg", palette.primaryFg, { shouldDirty: true });
+    form.setValue("bgPrimary", palette.bgPrimary, { shouldDirty: true });
+    form.setValue("bgSecondary", palette.bgSecondary, { shouldDirty: true });
+    if (!detachFromConcept) return;
+    form.setValue("brandPaletteSource", "custom", { shouldDirty: true });
+    synchronizeThemeVariantPalette(palette);
+  }
+
+  /**
+   * The marker alone already makes the cabinet serve the root palette. This
+   * mirror exists for the panel's own brightness selector, which copies a
+   * whole variant back onto the root: without it, an operator who picks their
+   * colours and then switches the default brightness watches the concept's
+   * palette overwrite their own, in the very form they just edited.
+   */
+  function synchronizeThemeVariantPalette(palette: BrandPalette): void {
+    const variants = form.getValues("themeVariants");
+    if (!variants) return;
+    const synchronizeVariant = (variant: BrandingThemeVariantsDraft["light"]) => ({
+      ...variant,
+      ...palette,
+    });
+    form.setValue(
+      "themeVariants",
+      {
+        light: synchronizeVariant(variants.light),
+        dark: synchronizeVariant(variants.dark),
+      },
+      { shouldDirty: true },
+    );
   }
 
   /**
@@ -987,10 +1189,30 @@ export default function WebReiwaPage() {
               </CardHeader>
               <CardContent className="space-y-4">
                 <div className="grid grid-cols-2 gap-4">
-                  <ColorField label={t('brandingPage.sections.colors.primary')} name="primary" form={form} />
-                  <ColorField label={t('brandingPage.sections.colors.primaryFg')} name="primaryFg" form={form} />
-                  <ColorField label={t('brandingPage.sections.colors.background')} name="bgPrimary" form={form} />
-                  <ColorField label={t('brandingPage.sections.colors.surface')} name="bgSecondary" form={form} />
+                  <ColorField
+                    label={t('brandingPage.sections.colors.primary')}
+                    name="primary"
+                    form={form}
+                    onChange={(value) => setBrandPaletteColor('primary', value)}
+                  />
+                  <ColorField
+                    label={t('brandingPage.sections.colors.primaryFg')}
+                    name="primaryFg"
+                    form={form}
+                    onChange={(value) => setBrandPaletteColor('primaryFg', value)}
+                  />
+                  <ColorField
+                    label={t('brandingPage.sections.colors.background')}
+                    name="bgPrimary"
+                    form={form}
+                    onChange={(value) => setBrandPaletteColor('bgPrimary', value)}
+                  />
+                  <ColorField
+                    label={t('brandingPage.sections.colors.surface')}
+                    name="bgSecondary"
+                    form={form}
+                    onChange={(value) => setBrandPaletteColor('bgSecondary', value)}
+                  />
                 </div>
               </CardContent>
             </Card>
@@ -1003,7 +1225,9 @@ export default function WebReiwaPage() {
               <CardContent className="space-y-4">
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-2">
-                    <Label>{t('brandingPage.sections.effects.borderRadius')}</Label>
+                    <Label htmlFor="borderRadius">
+                      {t('brandingPage.sections.effects.borderRadius')}
+                    </Label>
                     <Controller
                       name="borderRadius"
                       control={form.control}
@@ -1018,7 +1242,7 @@ export default function WebReiwaPage() {
                             }
                           }}
                         >
-                          <SelectTrigger>
+                          <SelectTrigger id="borderRadius">
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
@@ -1033,13 +1257,15 @@ export default function WebReiwaPage() {
                     />
                   </div>
                   <div className="space-y-2">
-                    <Label>{t('brandingPage.sections.effects.fontFamily')}</Label>
+                    <Label htmlFor="fontFamily">
+                      {t('brandingPage.sections.effects.fontFamily')}
+                    </Label>
                     <Controller
                       name="fontFamily"
                       control={form.control}
                       render={({ field }) => (
                         <Select value={field.value} onValueChange={field.onChange}>
-                          <SelectTrigger>
+                          <SelectTrigger id="fontFamily">
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
@@ -1634,7 +1860,9 @@ export default function WebReiwaPage() {
                   value={field.value ?? DEFAULT_APP_BACKGROUND_DRAFT}
                   primary={watchedValues.primary}
                   bgPrimary={watchedValues.bgPrimary}
-                  onChange={(v) => field.onChange(v)}
+                  // Not `field.onChange`: the write has to reach both brightness
+                  // snapshots as well as the root — see `setGlobalAppBackground`.
+                  onChange={setGlobalAppBackground}
                 />
               )}
             />
@@ -1772,14 +2000,26 @@ function AssetUploadButton({
   );
 }
 
+/**
+ * Both inputs report through `onChange` rather than writing the field.
+ *
+ * The hex box used to be a bare `form.register(name)`, which writes straight to
+ * the root field and to nothing else. That is the whole reported defect: the
+ * colour never got marked as the operator's, so the concept's brightness
+ * snapshot overwrote it on every read in the cabinet. Overriding `onChange`
+ * after the spread keeps register's `name`/`onBlur`/`ref` — the value still
+ * reaches the form, just through the setter that also records who owns it.
+ */
 function ColorField({
   label,
   name,
   form,
+  onChange,
 }: {
   label: string;
-  name: keyof BrandingFormDraft;
+  name: BrandPaletteField;
   form: UseFormReturn<BrandingFormDraft, unknown, BrandingFormData>;
+  onChange: (value: string) => void;
 }) {
   const { t } = useTranslation();
   const value = form.watch(name) as string;
@@ -1793,7 +2033,7 @@ function ColorField({
           <input
             type="color"
             value={value || "#000000"}
-            onChange={(e) => form.setValue(name, e.target.value, { shouldDirty: true })}
+            onChange={(e) => onChange(e.target.value)}
             className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
             aria-label={t('brandingPage.sections.colors.colorPickerAria', { name: label })}
           />
@@ -1801,6 +2041,7 @@ function ColorField({
         <Input
           id={textInputId}
           {...form.register(name)}
+          onChange={(e) => onChange(e.target.value)}
           className="font-mono text-xs"
           placeholder="#22c55e"
         />
@@ -1871,6 +2112,50 @@ function ThemePresetButton({
   )
 }
 
+/**
+ * A hand-edited surface value detaches the concept, through the SAME marker a
+ * hand-picked brand colour uses — `brandPaletteSource`, not a marker of its own.
+ *
+ * `surfaceTheme` carries the FOREGROUND colours; the background behind them is
+ * `bgPrimary`/`bgSecondary`, which that marker already governs. Two markers
+ * would let the halves disagree about ownership, and a detached palette would
+ * then compose the operator's background with the concept's text — the
+ * operator's dark surface under the light concept's dark foreground. Not a
+ * degraded result, an unreadable one. The reasoning is written out in full on
+ * `Branding.brandPaletteSource` in reiwa's `types/branding.ts`, next to the
+ * resolver that acts on it.
+ *
+ * Written as a free function taking the form rather than a prop threaded
+ * through eleven call sites: the two field components already own the write, so
+ * the detachment belongs beside it and cannot be forgotten at a call site.
+ */
+function detachSurfaceThemeFromConcept(
+  form: UseFormReturn<BrandingFormDraft, unknown, BrandingFormData>,
+): void {
+  form.setValue('brandPaletteSource', 'custom', { shouldDirty: true })
+  // The marker alone already makes the cabinet serve the root surfaces. This
+  // mirror is for the panel's own brightness selector, which copies a whole
+  // variant back onto the root: without it an operator who edits a surface and
+  // then switches the default brightness watches the concept overwrite the edit
+  // in the very form they are looking at. Same reason `synchronizeThemeVariantPalette`
+  // exists for the four colours.
+  const variants = form.getValues('themeVariants')
+  if (!variants) return
+  const surfaceTheme = form.getValues('surfaceTheme')
+  const synchronizeVariant = (variant: BrandingThemeVariantsDraft['light']) => ({
+    ...variant,
+    surfaceTheme,
+  })
+  form.setValue(
+    'themeVariants',
+    {
+      light: synchronizeVariant(variants.light),
+      dark: synchronizeVariant(variants.dark),
+    },
+    { shouldDirty: true },
+  )
+}
+
 function SurfaceColorField({
   label,
   name,
@@ -1886,6 +2171,7 @@ function SurfaceColorField({
   const path = `surfaceTheme.${name}` as FieldPath<BrandingFormDraft>;
   const value = form.watch(path) as string;
   const inputId = `branding-surface-${name}`;
+  const registration = form.register(path);
 
   return (
     <div className="space-y-2">
@@ -1896,16 +2182,26 @@ function SurfaceColorField({
           <input
             type="color"
             value={value || '#000000'}
-            onChange={(event) =>
+            onChange={(event) => {
               form.setValue(path, event.target.value, { shouldDirty: true })
-            }
+              detachSurfaceThemeFromConcept(form)
+            }}
             className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
             aria-label={label}
           />
         </label>
         <Input
           id={inputId}
-          {...form.register(path)}
+          {...registration}
+          // `register` writes straight to the field, past any setter — so the
+          // hex box needs its own detachment or it stays the one control whose
+          // edits never reach the cabinet. `onChange` comes AFTER the spread on
+          // purpose; before it, the registration's own handler wins and this
+          // never runs.
+          onChange={(event) => {
+            void registration.onChange(event)
+            detachSurfaceThemeFromConcept(form)
+          }}
           className="font-mono text-xs"
           placeholder="#18181b"
         />
@@ -1953,9 +2249,13 @@ function SurfaceSliderField({
         min={min}
         max={max}
         step={step}
-        onValueChange={(next) =>
+        onValueChange={(next) => {
           form.setValue(path, next[0] ?? value, { shouldDirty: true })
-        }
+          // The opacities and the blur ride with the surface colours rather
+          // than staying attached: they are one object, and a half-owned
+          // `surfaceTheme` is the same split this fix exists to remove.
+          detachSurfaceThemeFromConcept(form)
+        }}
       />
     </div>
   );

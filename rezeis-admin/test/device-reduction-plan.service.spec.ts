@@ -2,17 +2,44 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { DeviceReductionPlanService } from '../src/modules/add-on-entitlements/services/device-reduction-plan.service';
+import {
+  panelUserAddress,
+  type StoredPanelIdentity,
+} from '../src/modules/remnawave/services/panel-user-address';
 
 function devices(...rows: Array<[string, string]>) {
   return { kind: 'ok' as const, value: { devices: rows.map(([hwid, createdAt]) => ({ hwid, createdAt })), total: rows.length }, detectedVersion: '2.8.0' };
 }
 
+/**
+ * A subscription row as Prisma actually returns it once the select asks for the
+ * panel identity.
+ *
+ * The two supplementary columns are populated by DEFAULT, because that is the
+ * production shape: every supported panel version puts a numeric `id` and a
+ * `username` on every user row, so both are recorded the moment a profile is
+ * linked. A fake that left them out would let a service which never reads them
+ * pass every test here and then be unable to name a profile on an upgraded
+ * panel.
+ */
+function subscriptionRow(patch: Record<string, unknown> = {}) {
+  return {
+    remnawaveId: 'rem-1',
+    remnawavePanelId: 4711,
+    remnawavePanelUsername: 'rz_alice_sub',
+    status: 'ACTIVE',
+    ...patch,
+  };
+}
+
 function build(options: {
   projection?: { id: string; desiredRevision: bigint; desiredDeviceLimit: number | null } | null;
-  subscription?: { remnawaveId: string | null; status: string } | null;
+  subscription?: Record<string, unknown> | null;
   strictList?: unknown;
 } = {}) {
   const created: Array<Record<string, unknown>> = [];
+  const selects: unknown[] = [];
+  const listRefs: unknown[] = [];
   const prisma = {
     subscriptionEffectiveProjection: {
       findUnique: async () =>
@@ -21,10 +48,10 @@ function build(options: {
           : options.projection,
     },
     subscription: {
-      findUnique: async () =>
-        options.subscription === undefined
-          ? { remnawaveId: 'rem-1', status: 'ACTIVE' }
-          : options.subscription,
+      findUnique: async (args: { select: unknown }) => {
+        selects.push(args.select);
+        return options.subscription === undefined ? subscriptionRow() : options.subscription;
+      },
     },
     deviceReductionPlan: {
       upsert: async (args: { create: Record<string, unknown> }) => {
@@ -34,11 +61,13 @@ function build(options: {
     },
   };
   const remnawave = {
-    strictListUserDevices: async () =>
-      options.strictList ?? devices(['old', '2026-01-01T00:00:00Z'], ['new', '2026-06-01T00:00:00Z']),
+    strictListUserDevices: async (ref: unknown) => {
+      listRefs.push(ref);
+      return options.strictList ?? devices(['old', '2026-01-01T00:00:00Z'], ['new', '2026-06-01T00:00:00Z']);
+    },
   };
   const service = new DeviceReductionPlanService(prisma as never, remnawave as never);
-  return { service, created };
+  return { service, created, selects, listRefs };
 }
 
 describe('DeviceReductionPlanService (T-011b)', () => {
@@ -69,9 +98,54 @@ describe('DeviceReductionPlanService (T-011b)', () => {
   });
 
   it('is NOT_APPLICABLE when the subscription has no panel profile', async () => {
-    const { service } = build({ subscription: { remnawaveId: null, status: 'ACTIVE' } });
+    const { service, listRefs } = build({
+      subscription: subscriptionRow({
+        remnawaveId: null,
+        remnawavePanelId: null,
+        remnawavePanelUsername: null,
+      }),
+    });
     const outcome = await service.planForSubscription('sub-1');
     assert.equal(outcome.status, 'NOT_APPLICABLE');
+    assert.deepStrictEqual(listRefs, [], 'no profile ⇒ the panel is never asked');
+  });
+
+  it('addresses the panel with the recorded numeric id when the stored id is a stale 2.x uuid', async () => {
+    // The upgraded-panel case: the profile was created on 2.x, the operator has
+    // since moved to 3.x, and the panel's own migration dropped the uuid column
+    // — so `remnawaveId` names nobody. Only the recorded numeric id can find it.
+    const staleUuid = '330f2b38-1362-46ab-b5c0-dea32167eff9';
+    const { service, listRefs } = build({
+      subscription: subscriptionRow({ remnawaveId: staleUuid, remnawavePanelId: 8123 }),
+    });
+
+    await service.planForSubscription('sub-1');
+
+    assert.deepStrictEqual(listRefs, [
+      { remnawaveId: staleUuid, panelId: 8123, panelUsername: 'rz_alice_sub' },
+    ]);
+    // What the adapter does with it on a 3.x panel: the numeric id, never the
+    // dead uuid and never a resolve-by-name round trip.
+    assert.deepStrictEqual(panelUserAddress(listRefs[0] as StoredPanelIdentity, 'id'), {
+      kind: 'ready',
+      segment: '8123',
+    });
+  });
+
+  it('selects the supplementary identity columns alongside remnawaveId', async () => {
+    // Without them `storedIdentityOf` hands over `undefined` for both, which is
+    // indistinguishable from a profile that never recorded either — the very
+    // state that makes an upgraded panel unreachable.
+    const { service, selects } = build();
+    await service.planForSubscription('sub-1');
+    assert.deepStrictEqual(selects, [
+      {
+        remnawaveId: true,
+        remnawavePanelId: true,
+        remnawavePanelUsername: true,
+        status: true,
+      },
+    ]);
   });
 
   it('DEFERS when the strict device list is unavailable (retry later)', async () => {

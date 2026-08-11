@@ -133,11 +133,37 @@ reorderHosts(uuids[])                 → POST /api/hosts/reorder
 getSquadAccessibleNodes(uuid)         → /api/internal-squads/<uuid>/accessible-nodes
 getComputedConfigProfile(uuid)        → /api/config-profiles/<uuid>/computed
 
-# Live (degrades gracefully on 2.7.4 — backend returns null + status flag)
-getLiveIps()                          → /api/ip-control/fetch-ips
-getLiveUserIps(uuid)                  → /api/ip-control/fetch-users-ips
-dropConnections(targets)              → /api/ip-control/drop-connections
+# Live — TWO INCOMPATIBLE FAMILIES, one per panel era. 3.0 deleted the whole
+# ip-control family; there is no release serving both, so the client must
+# branch on the panel version. Grouped by operation, 3.x first.
+
+# IPs of one user
+  3.x  POST /api/connections/by-user/{userId}         → 201 {jobId}
+       GET  /api/connections/by-user/{jobId}          → result
+  2.x  POST /api/ip-control/fetch-ips/{userUuid}
+       GET  /api/ip-control/fetch-ips/result/{jobId}
+
+# IPs of every user on one node
+  3.x  POST /api/connections/by-node/{nodeUuid}       → 201 {jobId}
+       GET  /api/connections/by-node/{jobId}          → result
+  2.x  POST /api/ip-control/fetch-users-ips/{nodeUuid}
+       GET  /api/ip-control/fetch-users-ips/result/{jobId}
+
+# Drop connections
+  3.x  POST /api/connections/drop                     → 202, EMPTY body
+         { dropBy:      { by: 'userIds' | 'ipAddresses', ... },
+           targetNodes: { target: 'allNodes' | 'specificNodes', ... } }
+  2.x  POST /api/ip-control/drop-connections
 ```
+
+Note the addressing change as well as the path change: 3.x keys the per-user
+read by the panel's numeric `userId`, where 2.x used a `userUuid` string.
+
+Both eras are async job-based for the two reads — the POST enqueues and returns
+a `jobId`, the GET polls for the result — but on 3.x the poll reuses the same
+path with the job id in place of the subject id, instead of 2.x's separate
+`/result/` segment. Only `drop` is fire-and-forget, and on 3.x it answers `202`
+with **no body**: do not parse one.
 
 All new admin-facing controller routes live under `/admin/remnawave/...`.
 

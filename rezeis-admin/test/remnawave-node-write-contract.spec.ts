@@ -37,8 +37,6 @@ const CONFIG = {
   port: 3000,
   token: 'secret',
   webhookSecret: null,
-  caddyToken: null,
-  cookie: null,
 } as const;
 
 interface CapturedRequest {

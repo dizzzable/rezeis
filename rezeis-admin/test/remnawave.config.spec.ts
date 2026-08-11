@@ -17,8 +17,6 @@ describe('remnawaveConfig', () => {
       REMNAWAVE_PORT: '3001',
       REMNAWAVE_TOKEN: '  remnawave-runtime-token-v2  ',
       REMNAWAVE_WEBHOOK_SECRET: '  remnawave-webhook-runtime-v2  ',
-      REMNAWAVE_CADDY_TOKEN: '  remnawave-caddy-runtime-v2  ',
-      REMNAWAVE_COOKIE: '  remnawave-cookie-runtime-v2  ',
     } as NodeJS.ProcessEnv;
 
     assert.deepStrictEqual(remnawaveConfig(), {
@@ -26,8 +24,6 @@ describe('remnawaveConfig', () => {
       port: 3001,
       token: 'remnawave-runtime-token-v2',
       webhookSecret: 'remnawave-webhook-runtime-v2',
-      caddyToken: 'remnawave-caddy-runtime-v2',
-      cookie: 'remnawave-cookie-runtime-v2',
     });
   });
 
@@ -39,8 +35,6 @@ describe('remnawaveConfig', () => {
       port: null,
       token: null,
       webhookSecret: null,
-      caddyToken: null,
-      cookie: null,
     });
   });
 });
