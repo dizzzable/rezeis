@@ -25,6 +25,7 @@ import { mapHwidTopUser } from '../src/modules/remnawave/services/remnawave-exte
  */
 
 const UUID = '330f2b38-1362-46ab-b5c0-dea32167eff9';
+const SHORT_UUID = 'PyTr7C5568QuLhup';
 
 function stored(patch: Partial<StoredPanelIdentity> = {}): StoredPanelIdentity {
   return { remnawaveId: UUID, panelId: null, panelUsername: null, ...patch };
@@ -43,7 +44,7 @@ describe('panelUserAddress — 2.x panels (uuid-addressed)', () => {
       stored({ remnawaveId: '42', panelUsername: 'rz_bob_1' }),
       'uuid',
     );
-    assert.deepEqual(address, { kind: 'needsResolve', username: 'rz_bob_1' });
+    assert.deepEqual(address, { kind: 'needsResolve', selector: { username: 'rz_bob_1' } });
   });
 
   it('a numeric identity with no name recorded is honestly impossible', () => {
@@ -63,9 +64,14 @@ describe('panelUserAddress — 3.x panels (id-addressed)', () => {
     assert.deepEqual(address, { kind: 'ready', segment: '7' });
   });
 
-  it('falls back to the name when the panel was upgraded before we saw the id', () => {
+  it('falls back to the short uuid when the panel was upgraded before we saw the id', () => {
+    const address = panelUserAddress(stored({ panelShortUuid: SHORT_UUID, panelUsername: 'rz_bob_1' }), 'id');
+    assert.deepEqual(address, { kind: 'needsResolve', selector: { shortUuid: SHORT_UUID } });
+  });
+
+  it('uses the name when no saved subscription short uuid exists', () => {
     const address = panelUserAddress(stored({ panelUsername: 'rz_bob_1' }), 'id');
-    assert.deepEqual(address, { kind: 'needsResolve', username: 'rz_bob_1' });
+    assert.deepEqual(address, { kind: 'needsResolve', selector: { username: 'rz_bob_1' } });
   });
 
   it('refuses when neither the id nor the name was ever recorded', () => {
@@ -667,6 +673,21 @@ describe('RemnawaveApiService.resolvePanelSegment', () => {
     assert.deepEqual(call.data, { username: 'rz_bob_1' });
   });
 
+  it('resolves by saved subscription short uuid before falling back to username', async () => {
+    const { service, captured } = build(({ url }) =>
+      url.includes('recap')
+        ? recap('3.2.3')
+        : of({ data: { response: { id: 77, shortUuid: SHORT_UUID, username: 'rz_bob_1' } } }),
+    );
+    const resolved = await service.resolvePanelSegment(
+      stored({ panelShortUuid: SHORT_UUID, panelUsername: 'rz_bob_1' }),
+    );
+    assert.deepEqual(resolved, { segment: '77', panelId: 77 });
+    const call = captured.find((c) => c.url.includes('resolve'));
+    assert.ok(call !== undefined);
+    assert.deepEqual(call.data, { shortUuid: SHORT_UUID });
+  });
+
   it('returns null — not a guess — when the profile cannot be named', async () => {
     const { service } = build(() => recap('3.2.1'));
     assert.equal(await service.resolvePanelSegment(stored()), null);
@@ -829,6 +850,31 @@ describe('strictSetUserLimits — same key, and an unaddressable profile DEFERS'
       hwidDeviceLimit: null,
     });
     assert.equal(outcome.kind, 'unavailable');
+  });
+});
+
+describe('strictGetPanelUserDevices — legacy profile recovery on Remnawave 3.2.3', () => {
+  it('resolves a 2.x uuid-backed subscription through its saved shortUuid before reading HWID rows', async () => {
+    const { service, captured } = build((input) => {
+      if (input.url.startsWith('/api/system/')) return recap('3.2.3');
+      if (input.url === '/api/users/resolve') {
+        return of({ data: { response: { id: 4471, shortUuid: SHORT_UUID, username: 'rz_bob_1' } } });
+      }
+      if (input.url === '/api/hwid/devices/4471') {
+        return of({ data: { response: { total: 0, devices: [] } } });
+      }
+      throw new Error(`unexpected panel call ${input.url}`);
+    });
+
+    const outcome = await service.strictGetPanelUserDevices(stored({ panelShortUuid: SHORT_UUID }));
+
+    assert.equal(outcome.kind, 'ok');
+    assert.deepEqual(
+      captured.filter((c) => c.url === '/api/users/resolve').map((c) => c.data),
+      [{ shortUuid: SHORT_UUID }],
+    );
+    assert.equal(captured.some((c) => c.url === `/api/hwid/devices/${UUID}`), false);
+    assert.equal(captured.some((c) => c.url === '/api/hwid/devices/4471'), true);
   });
 });
 

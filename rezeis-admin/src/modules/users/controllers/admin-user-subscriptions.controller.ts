@@ -471,7 +471,7 @@ export class AdminUserSubscriptionsController {
       // handed to the panel adapter. Without them a profile created on 2.x is
       // unnameable once the panel is upgraded to 3.x, which drops the uuid this
       // row still stores.
-      select: { remnawaveId: true, remnawavePanelId: true, remnawavePanelUsername: true },
+      select: { remnawaveId: true, remnawavePanelId: true, remnawavePanelUsername: true, configUrl: true },
     });
     const identity = storedIdentityOf(sub);
     if (identity === null) return { reset: false, message: 'No Remnawave profile linked' };
@@ -487,6 +487,7 @@ export class AdminUserSubscriptionsController {
       where: { id: subscriptionId },
       select: {
         remnawaveId: true,
+        configUrl: true,
         remnawavePanelId: true,
         remnawavePanelUsername: true,
         userId: true,
@@ -533,7 +534,7 @@ export class AdminUserSubscriptionsController {
   public async getDevices(@Param('subscriptionId') subscriptionId: string) {
     const sub = await this.prismaService.subscription.findUnique({
       where: { id: subscriptionId },
-      select: { remnawaveId: true, remnawavePanelId: true, remnawavePanelUsername: true },
+      select: { remnawaveId: true, remnawavePanelId: true, remnawavePanelUsername: true, configUrl: true },
     });
     const identity = storedIdentityOf(sub);
     if (identity === null) return { devices: [], deviceCount: 0 };
@@ -555,6 +556,7 @@ export class AdminUserSubscriptionsController {
       where: { id: subscriptionId },
       select: {
         remnawaveId: true,
+        configUrl: true,
         remnawavePanelId: true,
         remnawavePanelUsername: true,
         userId: true,

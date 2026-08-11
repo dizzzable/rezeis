@@ -26,6 +26,11 @@ import type { RemnawaveUserAddressing } from './panel-version.util';
  *   • `panelUsername`   — the name the profile was created under. The last
  *                         resort, and the only one that survives an upgrade
  *                         performed before we ever recorded the numeric id.
+ *   • `panelShortUuid`  — the stable subscription short UUID, recovered from
+ *                         our saved subscription URL. On 3.x it is a safer
+ *                         resolver than username because customer-facing links
+ *                         are unique panel material, while usernames are
+ *                         deterministic and can be reused after reprovisioning.
  */
 export interface StoredPanelIdentity {
   /**
@@ -36,6 +41,7 @@ export interface StoredPanelIdentity {
   readonly remnawaveId: string;
   readonly panelId: number | null;
   readonly panelUsername: string | null;
+  readonly panelShortUuid?: string | null;
 }
 
 /**
@@ -53,8 +59,12 @@ export interface StoredPanelIdentity {
  */
 export type PanelAddress =
   | { readonly kind: 'ready'; readonly segment: string }
-  | { readonly kind: 'needsResolve'; readonly username: string }
+  | { readonly kind: 'needsResolve'; readonly selector: PanelResolveSelector }
   | { readonly kind: 'impossible'; readonly reason: string };
+
+export type PanelResolveSelector =
+  | { readonly shortUuid: string }
+  | { readonly username: string };
 
 /**
  * How a caller names a profile to the adapter.
@@ -90,6 +100,7 @@ export interface PanelIdentityColumns {
   readonly remnawaveId: string | null;
   readonly remnawavePanelId?: number | null;
   readonly remnawavePanelUsername?: string | null;
+  readonly configUrl?: string | null;
 }
 
 /**
@@ -110,11 +121,27 @@ export interface PanelIdentityColumns {
  */
 export function storedIdentityOf(row: PanelIdentityColumns | null): StoredPanelIdentity | null {
   if (row === null || row.remnawaveId === null) return null;
+  const panelShortUuid = panelShortUuidFromConfigUrl(row.configUrl ?? null);
   return {
     remnawaveId: row.remnawaveId,
     panelId: row.remnawavePanelId ?? null,
     panelUsername: row.remnawavePanelUsername ?? null,
+    ...(panelShortUuid === null ? {} : { panelShortUuid }),
   };
+}
+
+export function panelShortUuidFromConfigUrl(value: string | null): string | null {
+  if (typeof value !== 'string' || value.length === 0) return null;
+  try {
+    const parsed = new URL(value);
+    const match = parsed.pathname.match(/(?:^|\/)api\/sub\/([^/?#]+)$|(?:^|\/)sub\/([^/?#]+)$/);
+    const raw = match?.[1] ?? match?.[2];
+    return raw !== undefined && raw.length > 0 ? decodeURIComponent(raw) : null;
+  } catch {
+    const match = value.match(/(?:^|\/)api\/sub\/([^/?#]+)$|(?:^|\/)sub\/([^/?#]+)$/);
+    const raw = match?.[1] ?? match?.[2];
+    return raw !== undefined && raw.length > 0 ? decodeURIComponent(raw) : null;
+  }
 }
 
 /** A decimal integer with no sign, no separators, no leading `+`. */
@@ -164,18 +191,25 @@ export function panelUserAddress(
       if (Number.isSafeInteger(identity.panelId)) {
         return { kind: 'ready', segment: String(identity.panelId) };
       }
-      // Never touched since the upgrade. The name is the only way back: the
-      // panel's 3.x migration drops the uuid without preserving it anywhere.
+      // Never touched since the upgrade. The saved subscription link carries
+      // the shortUuid, which the 3.x resolver still accepts and which is safer
+      // than username: usernames are deterministic and can be reused after a
+      // reprovision, while a stale shortUuid names the right profile or nobody.
+      if (typeof identity.panelShortUuid === 'string' && identity.panelShortUuid.length > 0) {
+        return { kind: 'needsResolve', selector: { shortUuid: identity.panelShortUuid } };
+      }
+      // The name is the last way back: the panel's 3.x migration drops the uuid
+      // without preserving it anywhere.
       // An empty string is not a name — resolving by it would ask the panel
       // "which user is called nothing?" and act on whatever came back.
       if (typeof identity.panelUsername === 'string' && identity.panelUsername.length > 0) {
-        return { kind: 'needsResolve', username: identity.panelUsername };
+        return { kind: 'needsResolve', selector: { username: identity.panelUsername } };
       }
       return {
         kind: 'impossible',
         reason:
-          `profile "${stored}" is a 2.x uuid, the panel is 3.x, and neither a numeric id ` +
-          'nor the panel username was ever recorded for it',
+          `profile "${stored}" is a 2.x uuid, the panel is 3.x, and neither a numeric id, ` +
+          'subscription short UUID nor panel username was ever recorded for it',
       };
     }
     case 'uuid': {
@@ -184,8 +218,11 @@ export function panelUserAddress(
       // A numeric identity on a uuid-addressed panel means the profile was made
       // on 3.x and the operator has since rolled back. We never stored a uuid
       // for it — 3.x had none to give — so only the name can recover it.
+      if (typeof identity.panelShortUuid === 'string' && identity.panelShortUuid.length > 0) {
+        return { kind: 'needsResolve', selector: { shortUuid: identity.panelShortUuid } };
+      }
       if (typeof identity.panelUsername === 'string' && identity.panelUsername.length > 0) {
-        return { kind: 'needsResolve', username: identity.panelUsername };
+        return { kind: 'needsResolve', selector: { username: identity.panelUsername } };
       }
       return {
         kind: 'impossible',
@@ -253,7 +290,10 @@ export function panelUserPatchKey(
       ? { id: Number.parseInt(address.segment, 10) }
       : { uuid: address.segment };
   }
-  if (address.kind === 'needsResolve') return { username: address.username };
+  if (address.kind === 'needsResolve') {
+    if ('username' in address.selector) return { username: address.selector.username };
+    return null;
+  }
   if (typeof identity.panelUsername === 'string' && identity.panelUsername.length > 0) {
     return { username: identity.panelUsername };
   }

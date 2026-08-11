@@ -891,11 +891,13 @@ export class RemnawaveApiService {
       this.logger.warn(`Remnawave: cannot address panel profile — ${address.reason}`);
       return null;
     }
-    const resolved = await this.resolvePanelIdentity({ username: address.username });
+    const resolved = await this.resolvePanelIdentity(address.selector);
     if (resolved === null) {
+      const selectorLabel = 'username' in address.selector
+        ? `username "${address.selector.username}"`
+        : `shortUuid "${address.selector.shortUuid}"`;
       this.logger.warn(
-        `Remnawave: profile "${identity.remnawaveId}" could not be resolved by username ` +
-          `"${address.username}" on this panel`,
+        `Remnawave: profile "${identity.remnawaveId}" could not be resolved by ${selectorLabel} on this panel`,
       );
       return null;
     }

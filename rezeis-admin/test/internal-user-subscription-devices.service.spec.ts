@@ -169,6 +169,40 @@ describe('InternalUserDevicesController', () => {
     assert.deepStrictEqual(remnawaveCalls, [EXPECTED_IDENTITY]);
   });
 
+  it('carries the saved short uuid so 3.2.3 can resolve legacy 2.x profile ids before listing devices', async () => {
+    const remnawaveCalls: unknown[] = [];
+    const controller = new InternalUserDevicesController(
+      createMockPrismaService({
+        ownedSubscription: createSubscription({
+          remnawaveId: '330f2b38-1362-46ab-b5c0-dea32167eff9',
+          remnawavePanelId: null,
+          remnawavePanelUsername: null,
+          configUrl: 'https://sub.nodeaccess.cc/api/sub/PyTr7C5568QuLhup',
+        }),
+      }) as never,
+      {
+        strictGetPanelUserDevices: async (ref: StoredPanelIdentity) => {
+          remnawaveCalls.push(ref);
+          return strictOk({ total: 0, devices: [] });
+        },
+      } as unknown as RemnawaveApiService,
+      createEventsMock() as unknown as SystemEventsService,
+    );
+
+    assert.deepStrictEqual(
+      await controller.listSubscriptionDevices('123456789', 'subscription-1'),
+      { total: 0, devices: [] },
+    );
+    assert.deepStrictEqual(remnawaveCalls, [
+      {
+        remnawaveId: '330f2b38-1362-46ab-b5c0-dea32167eff9',
+        panelId: null,
+        panelUsername: null,
+        panelShortUuid: 'PyTr7C5568QuLhup',
+      },
+    ]);
+  });
+
   it('does NOT report "0 devices" for a selected subscription when the panel answers unusably', async () => {
     const remnawaveCalls: unknown[] = [];
     const controller = new InternalUserDevicesController(
@@ -496,6 +530,7 @@ interface SubscriptionRow {
   readonly remnawaveId: string | null;
   readonly remnawavePanelId: number | null;
   readonly remnawavePanelUsername: string | null;
+  readonly configUrl?: string | null;
 }
 
 /** What {@link createSubscription} must reach the panel adapter as. */
