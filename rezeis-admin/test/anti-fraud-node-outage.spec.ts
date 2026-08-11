@@ -77,6 +77,7 @@ function node(overrides: Partial<RemnawaveNodeInterface> & { uuid: string }): Re
     xrayUptime: 1000,
     usersOnline: 0,
     activeConfigProfileUuid: null,
+    ips: [],
     ...overrides,
   };
 }
