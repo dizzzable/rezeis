@@ -5,6 +5,7 @@ import { of, throwError } from 'rxjs';
 import {
   isNumericPanelIdentity,
   panelDeviceOwnerKey,
+  panelShortUuidFromConfigUrl,
   panelUserAddress,
   panelUserPatchKey,
   type StoredPanelIdentity,
@@ -30,6 +31,33 @@ const SHORT_UUID = 'PyTr7C5568QuLhup';
 function stored(patch: Partial<StoredPanelIdentity> = {}): StoredPanelIdentity {
   return { remnawaveId: UUID, panelId: null, panelUsername: null, ...patch };
 }
+
+describe('panelShortUuidFromConfigUrl', () => {
+  it('extracts the 3.2.3 root-path subscription short uuid', () => {
+    assert.equal(panelShortUuidFromConfigUrl(`https://sub.nodeaccess.cc/${SHORT_UUID}`), SHORT_UUID);
+    assert.equal(
+      panelShortUuidFromConfigUrl(`https://sub.nodeaccess.cc/${SHORT_UUID}?format=sing-box#devices`),
+      SHORT_UUID,
+    );
+  });
+
+  it('keeps the older explicit subscription path formats', () => {
+    assert.equal(panelShortUuidFromConfigUrl(`https://sub.nodeaccess.cc/api/sub/${SHORT_UUID}`), SHORT_UUID);
+    assert.equal(panelShortUuidFromConfigUrl(`https://sub.nodeaccess.cc/sub/${SHORT_UUID}`), SHORT_UUID);
+  });
+
+  it('does not confuse service routes with profile material', () => {
+    for (const value of [
+      'https://sub.nodeaccess.cc/api',
+      'https://sub.nodeaccess.cc/subscription',
+      'https://sub.nodeaccess.cc/subscriptions',
+      'https://sub.nodeaccess.cc/favicon.ico',
+      'https://sub.nodeaccess.cc/assets/app.js',
+    ]) {
+      assert.equal(panelShortUuidFromConfigUrl(value), null, value);
+    }
+  });
+});
 
 describe('panelUserAddress — 2.x panels (uuid-addressed)', () => {
   it('uses the stored uuid as-is', () => {
@@ -778,6 +806,12 @@ function bodyOf(captured: ReadonlyArray<{ url: string; data?: unknown }>): Recor
   return call.data as Record<string, unknown>;
 }
 
+function patchBodyOf(captured: ReadonlyArray<{ method: string; url: string; data?: unknown }>): Record<string, unknown> {
+  const call = captured.find((c) => c.method === 'patch' && c.url === '/api/users');
+  assert.ok(call !== undefined, 'expected a panel PATCH /api/users request');
+  return call.data as Record<string, unknown>;
+}
+
 function pathOf(captured: ReadonlyArray<{ url: string }>): string {
   const call = captured.find((c) => !c.url.startsWith('/api/system/'));
   assert.ok(call !== undefined, 'expected a panel request');
@@ -803,6 +837,29 @@ describe('updatePanelUser — the identifier travels in the body, keyed per era'
     const { service, captured } = panelOn('3.2.1', USER_3X);
     await service.updatePanelUser(stored({ panelId: 4471 }), { description: 'x' });
     assert.equal(bodyOf(captured)['id'], 4471);
+  });
+
+  it('resolves a saved subscription short uuid to the numeric id before PATCH on 3.2.3', async () => {
+    const { service, captured } = build((input) => {
+      if (input.url.startsWith('/api/system/')) return recap('3.2.3');
+      if (input.url === '/api/users/resolve') {
+        return of({ data: { response: { id: 4471, shortUuid: SHORT_UUID, username: 'rz_bob_1' } } });
+      }
+      if (input.method === 'patch' && input.url === '/api/users') return of({ data: USER_3X });
+      throw new Error(`unexpected panel call ${input.method} ${input.url}`);
+    });
+
+    await service.updatePanelUser(stored({ panelShortUuid: SHORT_UUID, panelUsername: 'rz_bob_1' }), {
+      description: 'x',
+    });
+
+    assert.deepEqual(
+      captured.filter((c) => c.url === '/api/users/resolve').map((c) => c.data),
+      [{ shortUuid: SHORT_UUID }],
+    );
+    assert.equal(patchBodyOf(captured)['id'], 4471);
+    assert.equal('shortUuid' in patchBodyOf(captured), false);
+    assert.equal('uuid' in patchBodyOf(captured), false);
   });
 
   it('an unidentifiable panel is STILL keyed by the stored identifier, not the name', async () => {
@@ -838,6 +895,34 @@ describe('strictSetUserLimits — same key, and an unaddressable profile DEFERS'
     });
     assert.equal(outcome.kind, 'ok');
     assert.equal(bodyOf(captured)['id'], 4471);
+  });
+
+  it('resolves a saved subscription short uuid to the numeric id before PATCH on 3.2.3', async () => {
+    const { service, captured } = build((input) => {
+      if (input.url.startsWith('/api/system/')) return recap('3.2.3');
+      if (input.url === '/api/users/resolve') {
+        return of({ data: { response: { id: 4471, shortUuid: SHORT_UUID, username: 'rz_bob_1' } } });
+      }
+      if (input.method === 'patch' && input.url === '/api/users') return of({ data: USER_3X });
+      throw new Error(`unexpected panel call ${input.method} ${input.url}`);
+    });
+
+    const outcome = await service.strictSetUserLimits(
+      stored({ panelShortUuid: SHORT_UUID, panelUsername: 'rz_bob_1' }),
+      {
+        trafficLimitBytes: null,
+        hwidDeviceLimit: null,
+      },
+    );
+
+    assert.equal(outcome.kind, 'ok');
+    assert.deepEqual(
+      captured.filter((c) => c.url === '/api/users/resolve').map((c) => c.data),
+      [{ shortUuid: SHORT_UUID }],
+    );
+    assert.equal(patchBodyOf(captured)['id'], 4471);
+    assert.equal('shortUuid' in patchBodyOf(captured), false);
+    assert.equal('uuid' in patchBodyOf(captured), false);
   });
 
   it('reports unavailable, NOT invalidContract, when the profile cannot be named', async () => {

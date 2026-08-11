@@ -196,6 +196,7 @@ export class ExpiredProfileCleanupService {
         remnawaveId: true,
         remnawavePanelId: true,
         remnawavePanelUsername: true,
+        configUrl: true,
         expiresAt: true,
       },
       take: CLEANUP_BATCH,

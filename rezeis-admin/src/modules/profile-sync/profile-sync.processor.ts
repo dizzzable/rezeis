@@ -16,6 +16,7 @@ import { PrismaService } from '../../common/prisma/prisma.service';
 import { SystemEventsService, EVENT_TYPES } from '../../common/services/system-events.service';
 import { resolveAddOnRolloutFlags } from '../add-on-entitlements/add-on-rollout.config';
 import {
+  panelShortUuidFromConfigUrl,
   storedIdentityOf as panelIdentityOf,
   type StoredPanelIdentity,
 } from '../remnawave/services/panel-user-address';
@@ -273,6 +274,7 @@ export class ProfileSyncProcessor extends WorkerHost {
             // between a lazy re-resolve and a permanently unreachable profile.
             remnawavePanelId: true,
             remnawavePanelUsername: true,
+            configUrl: true,
             trafficLimit: true,
             deviceLimit: true,
             internalSquads: true,
@@ -1366,6 +1368,7 @@ type SyncJobRecord = NonNullable<
     remnawaveId: string | null;
     remnawavePanelId: number | null;
     remnawavePanelUsername: string | null;
+    configUrl: string | null;
     trafficLimit: number | null;
     deviceLimit: number;
     internalSquads: string[];
@@ -1390,7 +1393,7 @@ type SyncJobRecord = NonNullable<
 function deleteTargetIdentity(
   subscription: Pick<
     SyncJobRecord['subscription'],
-    'remnawaveId' | 'remnawavePanelId' | 'remnawavePanelUsername'
+    'remnawaveId' | 'remnawavePanelId' | 'remnawavePanelUsername' | 'configUrl'
   >,
   target: string,
 ): StoredPanelIdentity {
@@ -1399,6 +1402,7 @@ function deleteTargetIdentity(
         remnawaveId: target,
         panelId: subscription.remnawavePanelId ?? null,
         panelUsername: subscription.remnawavePanelUsername ?? null,
+        panelShortUuid: panelShortUuidFromConfigUrl(subscription.configUrl),
       }
     : { remnawaveId: target, panelId: null, panelUsername: null };
 }

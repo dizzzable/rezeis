@@ -113,6 +113,7 @@ export class DeviceReductionPlanService {
         remnawaveId: true,
         remnawavePanelId: true,
         remnawavePanelUsername: true,
+        configUrl: true,
         status: true,
       },
     });

@@ -929,6 +929,26 @@ export class RemnawaveApiService {
     return resolved.segment;
   }
 
+  private async patchKeyFor(
+    ref: PanelUserRef,
+  ): Promise<{ readonly uuid: string } | { readonly id: number } | { readonly username: string } | null> {
+    const identity = asStoredIdentity(ref);
+    const { addressing } = await this.getPanelShape();
+    const key = panelUserPatchKey(identity, addressing);
+    if (key !== null) return key;
+
+    const address = panelUserAddress(identity, addressing);
+    if (address.kind !== 'needsResolve' || !('shortUuid' in address.selector)) return null;
+    const resolved = await this.resolvePanelIdentity(address.selector);
+    if (resolved === null) {
+      this.logger.warn(
+        `Remnawave PATCH /api/users: profile "${identity.remnawaveId}" could not be resolved by shortUuid "${address.selector.shortUuid}"`,
+      );
+      return null;
+    }
+    return { id: resolved.id };
+  }
+
   /**
    * `POST /api/users/resolve` — maps any ONE of id / shortUuid / username onto
    * the others. Present on 2.7.x, 2.8.x and 3.2.x alike; 2.x additionally
@@ -1043,8 +1063,7 @@ export class RemnawaveApiService {
     // the `username` fallback, which every supported version honours and which
     // is the only key that works when version detection is down.
     const identity = asStoredIdentity(ref);
-    const { addressing } = await this.getPanelShape();
-    const key = panelUserPatchKey(identity, addressing);
+    const key = await this.patchKeyFor(identity);
     if (key === null) {
       // NOT a silent return: the caller advances an applied revision on success,
       // so a quiet no-op would record limits the panel never received.
@@ -2776,7 +2795,7 @@ export class RemnawaveApiService {
     // name this profile right now. The saga defers on the former and gives up on
     // the latter, and a profile we could address after a version re-detect must
     // not be given up on.
-    const key = panelUserPatchKey(asStoredIdentity(ref), (await this.getPanelShape()).addressing);
+    const key = await this.patchKeyFor(ref);
     if (key === null) return strictUnavailable();
     const body: Record<string, unknown> = {
       ...key,

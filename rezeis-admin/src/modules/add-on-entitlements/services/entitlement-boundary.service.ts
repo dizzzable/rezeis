@@ -304,7 +304,12 @@ export class EntitlementBoundaryService {
         // answered without a `createdAt`, so the anchor would silently go null
         // and MONTH_ROLLING would mint its window from the wrong instant.
         subscription: {
-          select: { remnawaveId: true, remnawavePanelId: true, remnawavePanelUsername: true },
+          select: {
+            remnawaveId: true,
+            remnawavePanelId: true,
+            remnawavePanelUsername: true,
+            configUrl: true,
+          },
         },
       },
     });

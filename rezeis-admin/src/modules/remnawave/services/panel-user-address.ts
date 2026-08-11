@@ -134,14 +134,28 @@ export function panelShortUuidFromConfigUrl(value: string | null): string | null
   if (typeof value !== 'string' || value.length === 0) return null;
   try {
     const parsed = new URL(value);
-    const match = parsed.pathname.match(/(?:^|\/)api\/sub\/([^/?#]+)$|(?:^|\/)sub\/([^/?#]+)$/);
-    const raw = match?.[1] ?? match?.[2];
-    return raw !== undefined && raw.length > 0 ? decodeURIComponent(raw) : null;
+    return panelShortUuidFromPath(parsed.pathname);
   } catch {
-    const match = value.match(/(?:^|\/)api\/sub\/([^/?#]+)$|(?:^|\/)sub\/([^/?#]+)$/);
-    const raw = match?.[1] ?? match?.[2];
-    return raw !== undefined && raw.length > 0 ? decodeURIComponent(raw) : null;
+    const path = value.split(/[?#]/, 1)[0] ?? '';
+    return panelShortUuidFromPath(path);
   }
+}
+
+function panelShortUuidFromPath(pathname: string): string | null {
+  const match = pathname.match(/(?:^|\/)api\/sub\/([^/?#]+)$|(?:^|\/)sub\/([^/?#]+)$/);
+  const explicit = match?.[1] ?? match?.[2];
+  if (explicit !== undefined && explicit.length > 0) return decodeURIComponent(explicit);
+
+  // Remnawave 3.2.x renders subscription links as `https://sub-domain/<shortUuid>`.
+  // Accept only one plain path segment so dashboard/API routes are never mistaken
+  // for profile material.
+  const segments = pathname.split('/').filter((segment) => segment.length > 0);
+  if (segments.length !== 1) return null;
+  const raw = segments[0];
+  if (/^(api|admin|assets?|favicon\.ico|health|metrics|subscription|subscriptions)$/i.test(raw)) {
+    return null;
+  }
+  return decodeURIComponent(raw);
 }
 
 /** A decimal integer with no sign, no separators, no leading `+`. */
