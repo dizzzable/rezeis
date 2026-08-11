@@ -754,7 +754,13 @@ export class ProfileSyncProcessor extends WorkerHost {
       // transaction-scoped — released by COMMIT or ROLLBACK, never leaked — and
       // is taken BEFORE the row lock below so two writers of the same identity
       // always queue in the same order.
-      await tx.$queryRaw(Prisma.sql`
+      // `$executeRaw`, not `$queryRaw`. `pg_advisory_xact_lock` returns `void`,
+      // and Prisma's query path tries to DESERIALIZE every returned column —
+      // it has no mapping for `void` and throws "Failed to deserialize column
+      // of type 'void'". The lock is taken either way; the failure is purely in
+      // reading the result back, which is why it never showed up in the unit
+      // suite (no database) and only surfaced in the PostgreSQL-backed CI job.
+      await tx.$executeRaw(Prisma.sql`
         SELECT pg_advisory_xact_lock(hashtext(${`remnawave-profile:${remnawaveId}`})::bigint)
       `);
       const rows = await tx.$queryRaw<Array<{ status: SubscriptionStatus }>>(Prisma.sql`

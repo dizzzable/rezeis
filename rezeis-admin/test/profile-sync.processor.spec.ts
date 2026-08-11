@@ -53,6 +53,8 @@ function deleteJobPrismaMock(attempts: number, onUpdate: (input: unknown) => voi
     },
     subscription: { update: async () => undefined },
     $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
+      // The advisory lock the exclusivity guard takes before the row lock.
+      $executeRaw: async () => 1,
       $queryRaw: async () => [{ status: SubscriptionStatus.ACTIVE }],
       subscription: { update: async () => undefined },
       profileSyncJob: { findMany: async () => [], create: async () => ({ id: 'x' }) },
@@ -134,6 +136,8 @@ describe('ProfileSyncProcessor', () => {
           update: async () => undefined,
         },
         $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
+          // The advisory lock the exclusivity guard takes before the row lock.
+          $executeRaw: async () => 1,
           $queryRaw: async () => [{ status: SubscriptionStatus.ACTIVE }],
           profileSyncJob: {
             findMany: async () => [],
@@ -198,6 +202,7 @@ describe('ProfileSyncProcessor', () => {
         },
       });
       const tx = {
+        // The advisory lock the exclusivity guard takes before the row lock.
         $executeRaw: async () => 1,
         $queryRaw: async () => [{ status: SubscriptionStatus.ACTIVE }],
         profileSyncJob: {
@@ -294,6 +299,8 @@ describe('ProfileSyncProcessor', () => {
           update: async (input: unknown) => { profileSyncUpdates.push(input); },
         },
         $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
+          // The advisory lock the exclusivity guard takes before the row lock.
+          $executeRaw: async () => 1,
           $queryRaw: async () => [{ status: SubscriptionStatus.ACTIVE }],
           subscriptionTerm: {
             updateMany: async (input: unknown) => {
@@ -370,6 +377,8 @@ describe('ProfileSyncProcessor', () => {
           updateMany: async () => ({ count: 1 }),
         },
         $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
+          // The advisory lock the exclusivity guard takes before the row lock.
+          $executeRaw: async () => 1,
           $queryRaw: async () => [{ status: SubscriptionStatus.DELETED }],
           profileSyncJob: {
             findMany: async () => [],
@@ -410,6 +419,8 @@ describe('ProfileSyncProcessor', () => {
           update: async () => undefined,
         },
         $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
+          // The advisory lock the exclusivity guard takes before the row lock.
+          $executeRaw: async () => 1,
           $queryRaw: async () => [{ status: SubscriptionStatus.DELETED }],
           profileSyncJob: {
             findMany: async () => [],
@@ -465,6 +476,8 @@ describe('ProfileSyncProcessor', () => {
           update: async (input: unknown) => { subscriptionUpdates.push(input); },
         },
         $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
+          // The advisory lock the exclusivity guard takes before the row lock.
+          $executeRaw: async () => 1,
           $queryRaw: async () => [{ status: SubscriptionStatus.ACTIVE }],
           subscription: {
             update: async (input: unknown) => { subscriptionUpdates.push(input); },
@@ -566,6 +579,8 @@ describe('ProfileSyncProcessor', () => {
           update: async () => undefined,
         },
         $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
+          // The advisory lock the exclusivity guard takes before the row lock.
+          $executeRaw: async () => 1,
           $queryRaw: async () => [{ id: 'subscription-deleted', status: SubscriptionStatus.DELETED, remnawaveId: null }],
           subscription: { update: async () => undefined },
           profileSyncJob: {
@@ -628,6 +643,8 @@ describe('ProfileSyncProcessor', () => {
           findFirst: async () => null,
         },
         $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
+          // The advisory lock the exclusivity guard takes before the row lock.
+          $executeRaw: async () => 1,
           $queryRaw: async () => [{ status: SubscriptionStatus.ACTIVE }],
           subscription: {
             update: async (input: unknown) => { subscriptionUpdates.push(input); },
@@ -909,6 +926,8 @@ describe('ProfileSyncProcessor', () => {
           updateMany: async (input: unknown) => { subscriptionUpdates.push(input); },
         },
         $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
+          // The advisory lock the exclusivity guard takes before the row lock.
+          $executeRaw: async () => 1,
           $queryRaw: async () => [{ status: SubscriptionStatus.ACTIVE }],
           subscription: {
             update: async (input: unknown) => { subscriptionUpdates.push(input); },
@@ -985,6 +1004,8 @@ describe('ProfileSyncProcessor', () => {
           update: async (input: unknown) => { subscriptionUpdates.push(input); },
         },
         $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
+          // The advisory lock the exclusivity guard takes before the row lock.
+          $executeRaw: async () => 1,
           $queryRaw: async () => [{ status: SubscriptionStatus.ACTIVE }],
           subscription: {
             update: async (input: unknown) => { subscriptionUpdates.push(input); },
@@ -1165,6 +1186,8 @@ describe('ProfileSyncProcessor', () => {
           },
         },
         $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
+          // The advisory lock the exclusivity guard takes before the row lock.
+          $executeRaw: async () => 1,
           $queryRaw: async () => [{ status: SubscriptionStatus.ACTIVE }],
           subscription: { update: async () => { throw schemaDrift; } },
           profileSyncJob: { findMany: async () => [], create: async () => ({ id: 'unused-delete-job' }) },
@@ -1431,6 +1454,8 @@ describe('ProfileSyncProcessor', () => {
           },
         },
         $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
+          // The advisory lock the exclusivity guard takes before the row lock.
+          $executeRaw: async () => 1,
           $queryRaw: async () => [{ status: SubscriptionStatus.ACTIVE }],
           profileSyncJob: { findMany: async () => [], create: async () => ({ id: 'unused-delete' }) },
         }),
@@ -1533,6 +1558,8 @@ describe('ProfileSyncProcessor', () => {
           update: async (input: unknown) => { subscriptionUpdates.push(input); },
         },
         $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
+          // The advisory lock the exclusivity guard takes before the row lock.
+          $executeRaw: async () => 1,
           $queryRaw: async () => [{ status: SubscriptionStatus.ACTIVE }],
           subscription: { update: async (input: unknown) => { subscriptionUpdates.push(input); } },
           subscriptionTerm: { updateMany: async () => ({ count: 0 }) },
@@ -1671,6 +1698,8 @@ describe('ProfileSyncProcessor', () => {
           update: async (input: unknown) => { subscriptionUpdates.push(input); },
         },
         $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
+          // The advisory lock the exclusivity guard takes before the row lock.
+          $executeRaw: async () => 1,
           $queryRaw: async () => [{ status: SubscriptionStatus.ACTIVE }],
           subscription: { update: async (input: unknown) => { subscriptionUpdates.push(input); } },
           subscriptionTerm: { updateMany: async () => ({ count: 0 }) },
@@ -1856,6 +1885,8 @@ describe('ProfileSyncProcessor', () => {
           findFirst: async () => options.profileHolder ?? null,
         },
         $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
+          // The advisory lock the exclusivity guard takes before the row lock.
+          $executeRaw: async () => 1,
           $queryRaw: async () => [{ status: SubscriptionStatus.ACTIVE }],
           subscription: { update: async (input: unknown) => { linkWrites.push(input); } },
           subscriptionTerm: { updateMany: async () => ({ count: 0 }) },
@@ -2293,6 +2324,8 @@ describe('ProfileSyncProcessor', () => {
           },
         },
         $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
+          // The advisory lock the exclusivity guard takes before the row lock.
+          $executeRaw: async () => 1,
           $queryRaw: async () => [{ status: SubscriptionStatus.ACTIVE }],
           subscription: { update: async () => undefined },
           subscriptionTerm: { updateMany: async () => ({ count: 0 }) },
@@ -2390,6 +2423,8 @@ describe('ProfileSyncProcessor — recording the panel identity of rows that alr
           },
         },
         $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
+          // The advisory lock the exclusivity guard takes before the row lock.
+          $executeRaw: async () => 1,
           $queryRaw: async () => [{ status: SubscriptionStatus.ACTIVE }],
           subscriptionTerm: { updateMany: async () => ({ count: 1 }) },
           profileSyncJob: { findMany: async () => [], create: async () => ({ id: 'x' }) },
@@ -2526,7 +2561,6 @@ describe('ProfileSyncProcessor — live state must survive the safeguards', () =
     const deleteJobPayloads: unknown[] = [];
     const linkWrites: unknown[] = [];
     let creates = 0;
-    let queryRawCalls = 0;
     const row: StoredRow = {
       id: 'subscription-1',
       userId: 'user-1',
@@ -2570,13 +2604,25 @@ describe('ProfileSyncProcessor — live state must survive the safeguards', () =
           update: async () => undefined,
         },
         $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
-          $queryRaw: async () => {
-            queryRawCalls += 1;
-            // 1 = advisory lock, 2 = FOR UPDATE status read, 3 = conflict probe.
-            if (queryRawCalls === 3 && options.conflictOnProbe !== undefined) {
-              return [{ conflictId: options.conflictOnProbe }];
+          // The advisory lock the exclusivity guard takes before the row lock.
+          $executeRaw: async () => 1,
+          $queryRaw: async (query: { readonly strings?: readonly string[] }) => {
+            // Discriminated by WHAT THE STATEMENT ASKS FOR, not by how many ran
+            // before it. The previous version counted calls — "1 = advisory
+            // lock, 2 = status read, 3 = conflict probe" — so moving the
+            // advisory lock to `$executeRaw` (it returns `void`, which Prisma's
+            // query path cannot deserialize) shifted the probe from third to
+            // second, and the fake answered a status row to a conflict probe.
+            // The test went green while asserting nothing. Content matching
+            // cannot be knocked out of step by reordering.
+            const text = (query?.strings ?? []).join('');
+            if (text.includes('FOR UPDATE')) {
+              return [{ status: options.lockedStatus ?? row.status }];
             }
-            return [{ status: options.lockedStatus ?? row.status }];
+            // The exclusivity probe. No rows = nobody else holds this identity.
+            return options.conflictOnProbe === undefined
+              ? []
+              : [{ conflictId: options.conflictOnProbe }];
           },
           subscription: {
             update: async (input: unknown) => {
