@@ -34,25 +34,25 @@ function stored(patch: Partial<StoredPanelIdentity> = {}): StoredPanelIdentity {
 
 describe('panelShortUuidFromConfigUrl', () => {
   it('extracts the 3.2.3 root-path subscription short uuid', () => {
-    assert.equal(panelShortUuidFromConfigUrl(`https://sub.nodeaccess.cc/${SHORT_UUID}`), SHORT_UUID);
+    assert.equal(panelShortUuidFromConfigUrl(`https://subscription.example.test/${SHORT_UUID}`), SHORT_UUID);
     assert.equal(
-      panelShortUuidFromConfigUrl(`https://sub.nodeaccess.cc/${SHORT_UUID}?format=sing-box#devices`),
+      panelShortUuidFromConfigUrl(`https://subscription.example.test/${SHORT_UUID}?format=sing-box#devices`),
       SHORT_UUID,
     );
   });
 
   it('keeps the older explicit subscription path formats', () => {
-    assert.equal(panelShortUuidFromConfigUrl(`https://sub.nodeaccess.cc/api/sub/${SHORT_UUID}`), SHORT_UUID);
-    assert.equal(panelShortUuidFromConfigUrl(`https://sub.nodeaccess.cc/sub/${SHORT_UUID}`), SHORT_UUID);
+    assert.equal(panelShortUuidFromConfigUrl(`https://subscription.example.test/api/sub/${SHORT_UUID}`), SHORT_UUID);
+    assert.equal(panelShortUuidFromConfigUrl(`https://subscription.example.test/sub/${SHORT_UUID}`), SHORT_UUID);
   });
 
   it('does not confuse service routes with profile material', () => {
     for (const value of [
-      'https://sub.nodeaccess.cc/api',
-      'https://sub.nodeaccess.cc/subscription',
-      'https://sub.nodeaccess.cc/subscriptions',
-      'https://sub.nodeaccess.cc/favicon.ico',
-      'https://sub.nodeaccess.cc/assets/app.js',
+      'https://subscription.example.test/api',
+      'https://subscription.example.test/subscription',
+      'https://subscription.example.test/subscriptions',
+      'https://subscription.example.test/favicon.ico',
+      'https://subscription.example.test/assets/app.js',
     ]) {
       assert.equal(panelShortUuidFromConfigUrl(value), null, value);
     }

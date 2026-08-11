@@ -177,7 +177,7 @@ describe('InternalUserDevicesController', () => {
           remnawaveId: '330f2b38-1362-46ab-b5c0-dea32167eff9',
           remnawavePanelId: null,
           remnawavePanelUsername: null,
-          configUrl: 'https://sub.nodeaccess.cc/PyTr7C5568QuLhup',
+          configUrl: 'https://subscription.example.test/PyTr7C5568QuLhup',
         }),
       }) as never,
       {
