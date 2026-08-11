@@ -299,6 +299,48 @@ enum EntitlementIncidentState {
   RESOLVED
 }
 
+enum OlcProvider {
+  TELEMOST
+  WBSTREAM
+  JITSI
+}
+
+enum OlcTransport {
+  VP8CHANNEL
+  DATACHANNEL
+  SEICHANNEL
+  VIDEOCHANNEL
+}
+
+enum OlcRoomStatus {
+  CREATING
+  READY
+  IN_USE
+  EXPIRED
+  INVALID
+  DELETING
+  DELETED
+}
+
+enum OlcGatewayStatus {
+  ACTIVE
+  DRAINING
+  DISABLED
+  UNHEALTHY
+}
+
+enum OlcSessionStatus {
+  PROVISIONING
+  PENDING_AGENT
+  STARTING
+  ACTIVE
+  IDLE
+  STOPPING
+  STOPPED
+  FAILED
+  EXPIRED
+}
+
 enum BroadcastStatus {
   DRAFT
   PROCESSING
@@ -1237,6 +1279,7 @@ model User {
   paymentMethodSetups     PaymentMethodSetup[]     @relation("UserPaymentMethodSetups")
   fraudExemptions         FraudExemption[]         @relation("UserFraudExemptions")
   legalConsents           UserLegalConsent[]       @relation("UserLegalConsents")
+  olcSessions             OlcSession[]             @relation("UserOlcSessions")
 
   @@index([telegramId])
   @@index([role])
@@ -1519,6 +1562,7 @@ model Subscription {
   deviceReductionPlans    DeviceReductionPlan[]            @relation("SubscriptionDeviceReductionPlans")
   entitlementIncidents    EntitlementIncident[]            @relation("SubscriptionEntitlementIncidents")
   trialClaim              TrialClaim?                      @relation("SubscriptionTrialClaim")
+  olcSessions             OlcSession[]                     @relation("SubscriptionOlcSessions")
 
   @@index([userId])
   @@index([status])
@@ -1583,6 +1627,153 @@ model ProfileSyncJob {
   @@index([aggregateKey, desiredRevision])
   @@index([status, scheduledAt])
   @@map("profile_sync_jobs")
+}
+
+// =============================================================================
+//  OLCRTC — restricted-network auxiliary access
+// =============================================================================
+
+model OlcProviderAccount {
+  id                  String      @id @default(cuid()) @map("id")
+  provider            OlcProvider @map("provider")
+  name                String      @map("name")
+  credentialsEnc      String?     @map("credentials_enc")
+  credentialHint      String?     @map("credential_hint")
+  isEnabled           Boolean     @default(true) @map("is_enabled")
+  lastValidatedAt     DateTime?   @map("last_validated_at") @db.Timestamptz(3)
+  lastValidationError String?     @map("last_validation_error")
+  metadata            Json        @default("{}") @map("metadata")
+  createdAt           DateTime    @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt           DateTime    @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  profiles OlcProfile[] @relation("OlcProfileProviderAccount")
+  rooms    OlcRoom[]    @relation("OlcRoomProviderAccount")
+
+  @@index([provider, isEnabled])
+  @@map("olc_provider_accounts")
+}
+
+model OlcProfile {
+  id                String       @id @default(cuid()) @map("id")
+  name              String       @map("name")
+  provider          OlcProvider  @map("provider")
+  transport         OlcTransport @map("transport")
+  providerAccountId String?      @map("provider_account_id")
+  roomTemplate      String?      @map("room_template")
+  transportOptions  Json         @default("{}") @map("transport_options")
+  priority          Int          @default(100) @map("priority")
+  isEnabled         Boolean      @default(true) @map("is_enabled")
+  metadata          Json         @default("{}") @map("metadata")
+  createdAt         DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime     @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  providerAccount OlcProviderAccount? @relation("OlcProfileProviderAccount", fields: [providerAccountId], references: [id], onDelete: SetNull)
+  rooms           OlcRoom[]           @relation("OlcProfileRooms")
+  sessions        OlcSession[]        @relation("OlcProfileSessions")
+
+  @@index([isEnabled, priority])
+  @@index([provider, transport])
+  @@map("olc_profiles")
+}
+
+model OlcGateway {
+  id             String           @id @default(cuid()) @map("id")
+  name           String           @unique @map("name")
+  managementUrl  String           @map("management_url")
+  status         OlcGatewayStatus @default(DISABLED) @map("status")
+  capacity       Int              @default(0) @map("capacity")
+  activeSessions Int              @default(0) @map("active_sessions")
+  version        String?          @map("version")
+  lastSeenAt     DateTime?        @map("last_seen_at") @db.Timestamptz(3)
+  health         Json             @default("{}") @map("health")
+  metadata       Json             @default("{}") @map("metadata")
+  createdAt      DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime         @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  sessions OlcSession[] @relation("OlcGatewaySessions")
+
+  @@index([status])
+  @@index([lastSeenAt])
+  @@map("olc_gateways")
+}
+
+model OlcRoom {
+  id                String        @id @default(cuid()) @map("id")
+  provider          OlcProvider   @map("provider")
+  externalRoomId    String        @map("external_room_id")
+  externalUrl       String?       @map("external_url")
+  status            OlcRoomStatus @default(CREATING) @map("status")
+  providerAccountId String?       @map("provider_account_id")
+  profileId         String?       @map("profile_id")
+  leaseSessionId    String?       @unique @map("lease_session_id")
+  createdForUserId  String?       @map("created_for_user_id")
+  expiresAt         DateTime?     @map("expires_at") @db.Timestamptz(3)
+  lastVerifiedAt    DateTime?     @map("last_verified_at") @db.Timestamptz(3)
+  metadata          Json          @default("{}") @map("metadata")
+  createdAt         DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime      @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  providerAccount OlcProviderAccount? @relation("OlcRoomProviderAccount", fields: [providerAccountId], references: [id], onDelete: SetNull)
+  profile         OlcProfile?         @relation("OlcProfileRooms", fields: [profileId], references: [id], onDelete: SetNull)
+  leaseSession    OlcSession?         @relation("OlcRoomLease", fields: [leaseSessionId], references: [id], onDelete: SetNull)
+
+  @@index([provider, status])
+  @@index([status, expiresAt])
+  @@index([profileId, status])
+  @@map("olc_rooms")
+}
+
+model OlcSession {
+  id                   String           @id @default(cuid()) @map("id")
+  userId               String           @map("user_id")
+  subscriptionId       String           @map("subscription_id")
+  profileId            String           @map("profile_id")
+  gatewayId            String?          @map("gateway_id")
+  status               OlcSessionStatus @default(PROVISIONING) @map("status")
+  provider             OlcProvider      @map("provider")
+  transport            OlcTransport     @map("transport")
+  cryptoKeyEnc         String           @map("crypto_key_enc")
+  cryptoKeyFingerprint String           @map("crypto_key_fingerprint")
+  subscriptionUri      String?          @map("subscription_uri")
+  agentSessionId       String?          @map("agent_session_id")
+  lastError            String?          @map("last_error")
+  startedAt            DateTime?        @map("started_at") @db.Timestamptz(3)
+  expiresAt            DateTime?        @map("expires_at") @db.Timestamptz(3)
+  lastSeenAt           DateTime?        @map("last_seen_at") @db.Timestamptz(3)
+  stoppedAt            DateTime?        @map("stopped_at") @db.Timestamptz(3)
+  metadata             Json             @default("{}") @map("metadata")
+  createdAt            DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt            DateTime         @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  user         User               @relation("UserOlcSessions", fields: [userId], references: [id], onDelete: Cascade)
+  subscription Subscription       @relation("SubscriptionOlcSessions", fields: [subscriptionId], references: [id], onDelete: Cascade)
+  profile      OlcProfile         @relation("OlcProfileSessions", fields: [profileId], references: [id], onDelete: Restrict)
+  gateway      OlcGateway?        @relation("OlcGatewaySessions", fields: [gatewayId], references: [id], onDelete: SetNull)
+  leasedRoom   OlcRoom?           @relation("OlcRoomLease")
+  traffic      OlcTrafficLedger[] @relation("OlcSessionTraffic")
+
+  @@index([userId, status])
+  @@index([subscriptionId, status])
+  @@index([gatewayId, status])
+  @@index([status, expiresAt])
+  @@map("olc_sessions")
+}
+
+model OlcTrafficLedger {
+  id             String   @id @default(cuid()) @map("id")
+  sessionId      String   @map("session_id")
+  rxBytes        BigInt   @default(0) @map("rx_bytes")
+  txBytes        BigInt   @default(0) @map("tx_bytes")
+  source         String   @map("source")
+  observedAt     DateTime @default(now()) @map("observed_at") @db.Timestamptz(3)
+  idempotencyKey String?  @unique @map("idempotency_key")
+  metadata       Json     @default("{}") @map("metadata")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  session OlcSession @relation("OlcSessionTraffic", fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId, observedAt])
+  @@map("olc_traffic_ledger")
 }
 
 model SubscriptionTerm {

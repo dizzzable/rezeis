@@ -118,6 +118,17 @@ const environmentSchema = z
     REMNAWAVE_TOKEN: z.preprocess(normalizeOptionalString, z.string().min(1).optional()),
     REMNAWAVE_WEBHOOK_SECRET: z.preprocess(normalizeOptionalString, z.string().min(1).optional()),
 
+    // ── OLCRTC ───────────────────────────────────────────────────────────────
+    OLCRTC_ENABLED: envBoolean(false),
+    OLCRTC_SUBSCRIPTION_NAME: z.preprocess(
+      normalizeOptionalString,
+      z.string().min(1).max(80).optional(),
+    ),
+    OLCRTC_DEFAULT_REFRESH_SECONDS: z.preprocess(
+      normalizeOptionalString,
+      z.coerce.number().int().min(60).max(86_400).optional(),
+    ),
+
     // ── Database ─────────────────────────────────────────────────────────────
     DATABASE_HOST: z.string().min(1).default('localhost'),
     DATABASE_PORT: z.coerce.number().int().min(1).max(65535).default(5432),

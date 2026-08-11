@@ -1,6 +1,6 @@
 # Next Session Handoff — Rezeis Remediation
 
-Updated: 2026-08-01
+Updated: 2026-08-11
 
 ## User Context
 
@@ -11,6 +11,61 @@ The user clarified the intended architecture:
 - The two services communicate on the same Docker network through API calls.
 
 Do not re-litigate that boundary. The remediation work should preserve it.
+
+## OLCRTC Feature Handoff
+
+Current OLCRTC work is in progress across Rezeis and Reiwa. Preserve the service boundary: Rezeis is the source of truth/control plane; Reiwa remains a thin user-facing BFF and must not receive provider credentials.
+
+Implemented Rezeis backend:
+
+- Prisma OLCRTC foundation: provider accounts, profiles, gateways, rooms, sessions, traffic ledger and migration `20260811170000_olcrtc_foundation`.
+- `OlcrtcModule`, config/env entries and RBAC resource `olcrtc` with `view/create/edit/run`.
+- Internal user/BFF endpoints: `GET /api/internal/olcrtc/subscription`, `POST /api/internal/olcrtc/subscription/provision`.
+- Agent endpoints: gateway heartbeat, session claim, session report and traffic report under `/api/internal/olcrtc/*`, using existing internal API-token auth plus optional HMAC signing.
+- Admin endpoints: overview, lifecycle run, provider-account create/update, profile create/update, gateway update, room update, session update and traffic list under `/api/admin/olcrtc/*`.
+- Lifecycle cron for stale gateways, expired/stuck sessions and expired rooms.
+- `rezeis-olc-agent` Node daemon entrypoint with heartbeat, non-overlapping multi-session claim loop, status reports, traffic baseline reports, optional command-written traffic counter file snapshots, lease expiry cleanup, command kill escalation, structured JSON logs and optional `OLCRTC_AGENT_SESSION_COMMAND` hook.
+- Docker Compose `olcrtc` profile for optional `rezeis-olcrtc-agent` service.
+
+Implemented Rezeis admin web:
+
+- `/olcrtc` route and sidebar item gated by `olcrtc:view`.
+- Overview metrics and tables for provider accounts, profiles, gateways and recent sessions.
+- Provider-account creation form with write-only JSON credentials.
+- Provider-account edit form with write-only credential rotation and metadata update.
+- Profile create/edit forms with provider-account binding, transport options and metadata JSON.
+- Inline enable/disable controls for provider accounts and profiles gated by `olcrtc:edit`.
+- Gateway operator-state select (`ACTIVE`, `DRAINING`, `DISABLED`, `UNHEALTHY`) gated by `olcrtc:edit`.
+- Session `Stop`/`Fail` actions for non-terminal sessions gated by `olcrtc:edit`.
+- Room `Release`/`Invalidate` actions and latest traffic ledger table with `sessionId`/row-limit filtering.
+
+Implemented Reiwa user surface:
+
+- AdminClient OLCRTC namespace.
+- `/api/v1/olcrtc/subscription` and `/api/v1/olcrtc/subscription/provision` routes.
+- Dashboard OLCRTC card with open/copy flow and EN/RU strings.
+
+Current OLCRTC verification:
+
+- Rezeis `npm.cmd run typecheck`: pass.
+- Rezeis `npm.cmd run typecheck:test`: pass.
+- Rezeis focused OLCRTC tests: pass, 39 tests.
+- Rezeis admin web `npx.cmd tsc -p tsconfig.app.json --noEmit --incremental false`: pass.
+- Rezeis admin web `npm.cmd run build`: pass with existing Tailwind sourcemap warning.
+- Reiwa `npm.cmd run check`: pass.
+- Reiwa `npx.cmd tsc -p tsconfig.test.json --noEmit`: pass.
+- Reiwa focused OLCRTC/admin-client tests: pass, 9 tests.
+
+Current OLCRTC gaps:
+
+- Telemost and WB Stream provider adapters are still not implemented; only the safe Jitsi-first path and generic agent command hook exist.
+- Native per-transport traffic counters remain open. Command-written traffic counter file snapshots, structured logs, backoff/jitter, command kill escalation and session-expiry watcher are implemented in the Node agent.
+- Full live E2E has not been run: Reiwa dashboard -> Rezeis provision -> agent claim/report -> Reiwa ready state.
+- Migration should be exercised on a real dev database before production rollout.
+
+Primary OLCRTC reference doc:
+
+- `NA-Service/OLCRTC_ARCHITECTURE_RESEARCH.md` contains the research, implementation snapshot, runbook notes and phase status.
 
 ## Files Created For Handoff
 

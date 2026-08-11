@@ -137,6 +137,53 @@ services:
       - rezeis-private
       - remnawave-network
 
+  rezeis-olcrtc-agent:
+    # Optional OLCRTC gateway daemon. Disabled by default; enable explicitly:
+    #   docker compose --profile olcrtc up -d rezeis-olcrtc-agent
+    # It uses the same unified image as API/worker and talks to rezeis only over
+    # the internal Docker network through /api/internal/olcrtc/*.
+    image: ghcr.io/dizzzable/rezeis:latest
+    container_name: rezeis-olcrtc-agent
+    hostname: rezeis-olcrtc-agent
+    profiles: ['olcrtc']
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      RUID_PROCESS_ROLE: olcrtc-agent
+      REZEIS_ADMIN_BASE_URL: http://rezeis:8000
+      REZEIS_INTERNAL_API_TOKEN: ${OLCRTC_AGENT_API_TOKEN:-}
+      REZEIS_INTERNAL_SHARED_SECRET: ${REZEIS_INTERNAL_SHARED_SECRET:-}
+      OLCRTC_AGENT_NAME: ${OLCRTC_AGENT_NAME:-rezeis-olcrtc-agent}
+      OLCRTC_AGENT_MANAGEMENT_URL: ${OLCRTC_AGENT_MANAGEMENT_URL:-http://rezeis-olcrtc-agent:9090}
+      OLCRTC_AGENT_CAPACITY: ${OLCRTC_AGENT_CAPACITY:-32}
+      OLCRTC_AGENT_SESSION_COMMAND: ${OLCRTC_AGENT_SESSION_COMMAND:-}
+    command: ["node", "dist/olcrtc-agent.js"]
+    depends_on:
+      rezeis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '1.0'
+        reservations:
+          memory: 128M
+    networks:
+      - remnawave-network
+
   rezeis-db:
     # ВАЖНО: при апгрейде сюда (например `postgres:18-alpine`) обязательно
     # синхронно обновить `postgresql<major>-client` в Dockerfile rezeis-admin —

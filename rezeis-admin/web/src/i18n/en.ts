@@ -136,6 +136,7 @@ export const en = {
       botConfig: 'Bot config',
       botMap: 'Bot map',
       remnawave: 'Remnawave',
+      olcrtc: 'OLCRTC',
       notifications: 'Notifications',
       faq: 'FAQ',
       aiSupport: 'AI-Support',

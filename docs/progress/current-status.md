@@ -1,6 +1,6 @@
 # Current Status
 
-Updated: 2026-05-10 — Full rebuild complete.
+Updated: 2026-08-11 — OLCRTC control-plane/user-surface slice in progress.
 
 ---
 
@@ -34,6 +34,12 @@ Updated: 2026-05-10 — Full rebuild complete.
 ---
 
 ## Architecture
+
+Current service boundary remains unchanged:
+
+- `rezeis-admin` is the admin/control-plane source of truth.
+- `reiwa` is the user-facing runtime/BFF and calls Rezeis over internal APIs.
+- OLCRTC follows the same boundary: provider credentials, room leases, sessions, gateways and traffic ledger live in Rezeis; Reiwa only receives user-safe subscription payloads.
 
 ```
 rezeis/
@@ -98,6 +104,18 @@ rezeis/
 | Module | Description |
 |---|---|
 | remnawave | Full typed API via @remnawave/backend-contract (15+ endpoints) |
+
+### OLCRTC Integration
+
+Current OLCRTC implementation status:
+
+- Backend: `OlcrtcModule`, Prisma models/migration, config, RBAC, internal Reiwa API, agent API, lifecycle cron and admin API are implemented.
+- Rezeis admin web: `/olcrtc` page shows overview/tables and supports provider-account creation/edit/credential rotation, profile creation/edit, provider/profile enable toggles, gateway state changes, room release/invalidate, session stop/fail actions and latest traffic ledger display/filtering.
+- Agent: `rezeis-olc-agent` Node daemon supports heartbeat, non-overlapping multi-session claim loop with backoff/jitter, status reports, traffic baseline reports plus optional command-written traffic counter snapshots, session-expiry cleanup, SIGTERM/SIGKILL command shutdown, structured JSON logs with secret redaction and optional per-session command hook. Docker Compose runs it through profile `olcrtc`.
+- Reiwa: OLCRTC BFF routes, admin-client namespace and dashboard card are implemented.
+- Open: Telemost/WB Stream provider adapters, native per-transport counters, full live E2E and migration exercise on a real dev DB.
+
+Latest focused verification for OLCRTC passed: Rezeis backend typecheck/test-typecheck, Rezeis focused OLCRTC tests (39), Rezeis admin-web typecheck/build, Reiwa app/test typechecks and Reiwa focused OLCRTC tests (9).
 
 ### Advanced Features (from remnawave panel + STEALTHNET)
 | Module | Description |

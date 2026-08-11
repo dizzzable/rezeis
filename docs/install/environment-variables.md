@@ -72,6 +72,22 @@
 
 `REZEIS_ADMIN_API_PORT` задает внешний host port для `rezeis-admin-api` в `docker-compose.external.admin.yml`. Это отделяет admin API от admin web и устраняет конфликт двух сервисов на порту `3000`.
 
+### `OLCRTC_*`
+
+`OLCRTC_ENABLED`, `OLCRTC_SUBSCRIPTION_NAME` и `OLCRTC_DEFAULT_REFRESH_SECONDS` управляют OLCRTC user-facing provisioning в `rezeis-admin`. OLCRTC остается admin/control-plane функцией: Reiwa запрашивает готовый subscription payload через internal API и не хранит provider credentials.
+
+`OLCRTC_AGENT_API_TOKEN`, `OLCRTC_AGENT_NAME`, `OLCRTC_AGENT_MANAGEMENT_URL`, `OLCRTC_AGENT_CAPACITY`, `OLCRTC_AGENT_SESSION_KILL_TIMEOUT_MS`, `OLCRTC_AGENT_TRAFFIC_COUNTER_FILE_TEMPLATE` и `OLCRTC_AGENT_SESSION_COMMAND` нужны только если включается отдельный gateway daemon `rezeis-olcrtc-agent`. В production compose он выключен по умолчанию и запускается явно:
+
+```bash
+docker compose --profile olcrtc up -d rezeis-olcrtc-agent
+```
+
+`OLCRTC_AGENT_API_TOKEN` должен быть internal API token, созданный оператором для agent. Это не admin JWT и не provider credential. Если `REZEIS_INTERNAL_SIGNATURE_MODE=require`, agent также должен получать тот же `REZEIS_INTERNAL_SHARED_SECRET`, что и остальные internal clients.
+
+`OLCRTC_AGENT_SESSION_KILL_TIMEOUT_MS` задает задержку между `SIGTERM` и принудительным `SIGKILL` для per-session команды при остановке/истечении lease. `OLCRTC_AGENT_SESSION_COMMAND` опционален. Если он пустой, agent работает в control-plane-only режиме: heartbeat, claim, status report и traffic ledger baseline. Если задан, команда запускается для каждой claimed session и может использовать placeholders `{sessionId}`, `{agentSessionId}`, `{provider}`, `{transport}`, `{roomUrl}`, `{subscriptionUri}`.
+
+`OLCRTC_AGENT_TRAFFIC_COUNTER_FILE_TEMPLATE` опционален и использует те же placeholders. Если задан, agent читает JSON snapshot per session с cumulative counters `{ "rxBytes": "123", "txBytes": "456" }` перед traffic report. Если файл отсутствует, baseline counters сохраняются; некорректный файл игнорируется с warning log.
+
 ### `REMNAWAVE_*`
 
 Блок `REMNAWAVE_HOST`, `REMNAWAVE_PORT`, `REMNAWAVE_TOKEN`, `REMNAWAVE_WEBHOOK_SECRET`, `REMNAWAVE_CADDY_TOKEN`, `REMNAWAVE_COOKIE` описывает интеграцию с Remnawave API и webhook-проверкой. Этот блок присутствует во всех четырех шаблонах.

@@ -133,6 +133,10 @@ export const RBAC_RESOURCES: Readonly<Record<string, readonly RbacAction[]>> = {
   settings: ['view', 'edit'],
   bot_config: ['view', 'edit'],
   remnawave: ['view', 'edit'],
+  /// OLCRTC restricted-network access control plane: profiles/gateways/sessions
+  /// visibility plus lifecycle sweeps. Provider credential editing is added
+  /// separately once the agent runtime is present.
+  olcrtc: ['view', 'create', 'edit', 'run'],
   notifications: ['view', 'edit'],
   /// Subscription-page config (branding / app catalog / baseSettings /
   /// translations) consumed by rezeis-subpage.

@@ -136,6 +136,7 @@
       botConfig: 'Бот',
       botMap: 'Карта бота',
       remnawave: 'Remnawave',
+      olcrtc: 'OLCRTC',
       notifications: 'Уведомления',
       faq: 'FAQ',
       aiSupport: 'AI-Support',
