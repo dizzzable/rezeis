@@ -5,6 +5,7 @@ import { of, throwError } from 'rxjs';
 import {
   isNumericPanelIdentity,
   panelDeviceOwnerKey,
+  panelShortUuidFromConfigUrl,
   panelUserAddress,
   panelUserPatchKey,
   type StoredPanelIdentity,
@@ -25,10 +26,38 @@ import { mapHwidTopUser } from '../src/modules/remnawave/services/remnawave-exte
  */
 
 const UUID = '330f2b38-1362-46ab-b5c0-dea32167eff9';
+const SHORT_UUID = 'PyTr7C5568QuLhup';
 
 function stored(patch: Partial<StoredPanelIdentity> = {}): StoredPanelIdentity {
   return { remnawaveId: UUID, panelId: null, panelUsername: null, ...patch };
 }
+
+describe('panelShortUuidFromConfigUrl', () => {
+  it('extracts the 3.2.3 root-path subscription short uuid', () => {
+    assert.equal(panelShortUuidFromConfigUrl(`https://subscription.example.test/${SHORT_UUID}`), SHORT_UUID);
+    assert.equal(
+      panelShortUuidFromConfigUrl(`https://subscription.example.test/${SHORT_UUID}?format=sing-box#devices`),
+      SHORT_UUID,
+    );
+  });
+
+  it('keeps the older explicit subscription path formats', () => {
+    assert.equal(panelShortUuidFromConfigUrl(`https://subscription.example.test/api/sub/${SHORT_UUID}`), SHORT_UUID);
+    assert.equal(panelShortUuidFromConfigUrl(`https://subscription.example.test/sub/${SHORT_UUID}`), SHORT_UUID);
+  });
+
+  it('does not confuse service routes with profile material', () => {
+    for (const value of [
+      'https://subscription.example.test/api',
+      'https://subscription.example.test/subscription',
+      'https://subscription.example.test/subscriptions',
+      'https://subscription.example.test/favicon.ico',
+      'https://subscription.example.test/assets/app.js',
+    ]) {
+      assert.equal(panelShortUuidFromConfigUrl(value), null, value);
+    }
+  });
+});
 
 describe('panelUserAddress — 2.x panels (uuid-addressed)', () => {
   it('uses the stored uuid as-is', () => {
@@ -43,7 +72,7 @@ describe('panelUserAddress — 2.x panels (uuid-addressed)', () => {
       stored({ remnawaveId: '42', panelUsername: 'rz_bob_1' }),
       'uuid',
     );
-    assert.deepEqual(address, { kind: 'needsResolve', username: 'rz_bob_1' });
+    assert.deepEqual(address, { kind: 'needsResolve', selector: { username: 'rz_bob_1' } });
   });
 
   it('a numeric identity with no name recorded is honestly impossible', () => {
@@ -63,9 +92,14 @@ describe('panelUserAddress — 3.x panels (id-addressed)', () => {
     assert.deepEqual(address, { kind: 'ready', segment: '7' });
   });
 
-  it('falls back to the name when the panel was upgraded before we saw the id', () => {
+  it('falls back to the short uuid when the panel was upgraded before we saw the id', () => {
+    const address = panelUserAddress(stored({ panelShortUuid: SHORT_UUID, panelUsername: 'rz_bob_1' }), 'id');
+    assert.deepEqual(address, { kind: 'needsResolve', selector: { shortUuid: SHORT_UUID } });
+  });
+
+  it('uses the name when no saved subscription short uuid exists', () => {
     const address = panelUserAddress(stored({ panelUsername: 'rz_bob_1' }), 'id');
-    assert.deepEqual(address, { kind: 'needsResolve', username: 'rz_bob_1' });
+    assert.deepEqual(address, { kind: 'needsResolve', selector: { username: 'rz_bob_1' } });
   });
 
   it('refuses when neither the id nor the name was ever recorded', () => {
@@ -667,6 +701,21 @@ describe('RemnawaveApiService.resolvePanelSegment', () => {
     assert.deepEqual(call.data, { username: 'rz_bob_1' });
   });
 
+  it('resolves by saved subscription short uuid before falling back to username', async () => {
+    const { service, captured } = build(({ url }) =>
+      url.includes('recap')
+        ? recap('3.2.3')
+        : of({ data: { response: { id: 77, shortUuid: SHORT_UUID, username: 'rz_bob_1' } } }),
+    );
+    const resolved = await service.resolvePanelSegment(
+      stored({ panelShortUuid: SHORT_UUID, panelUsername: 'rz_bob_1' }),
+    );
+    assert.deepEqual(resolved, { segment: '77', panelId: 77 });
+    const call = captured.find((c) => c.url.includes('resolve'));
+    assert.ok(call !== undefined);
+    assert.deepEqual(call.data, { shortUuid: SHORT_UUID });
+  });
+
   it('returns null — not a guess — when the profile cannot be named', async () => {
     const { service } = build(() => recap('3.2.1'));
     assert.equal(await service.resolvePanelSegment(stored()), null);
@@ -757,6 +806,12 @@ function bodyOf(captured: ReadonlyArray<{ url: string; data?: unknown }>): Recor
   return call.data as Record<string, unknown>;
 }
 
+function patchBodyOf(captured: ReadonlyArray<{ method: string; url: string; data?: unknown }>): Record<string, unknown> {
+  const call = captured.find((c) => c.method === 'patch' && c.url === '/api/users');
+  assert.ok(call !== undefined, 'expected a panel PATCH /api/users request');
+  return call.data as Record<string, unknown>;
+}
+
 function pathOf(captured: ReadonlyArray<{ url: string }>): string {
   const call = captured.find((c) => !c.url.startsWith('/api/system/'));
   assert.ok(call !== undefined, 'expected a panel request');
@@ -782,6 +837,29 @@ describe('updatePanelUser — the identifier travels in the body, keyed per era'
     const { service, captured } = panelOn('3.2.1', USER_3X);
     await service.updatePanelUser(stored({ panelId: 4471 }), { description: 'x' });
     assert.equal(bodyOf(captured)['id'], 4471);
+  });
+
+  it('resolves a saved subscription short uuid to the numeric id before PATCH on 3.2.3', async () => {
+    const { service, captured } = build((input) => {
+      if (input.url.startsWith('/api/system/')) return recap('3.2.3');
+      if (input.url === '/api/users/resolve') {
+        return of({ data: { response: { id: 4471, shortUuid: SHORT_UUID, username: 'rz_bob_1' } } });
+      }
+      if (input.method === 'patch' && input.url === '/api/users') return of({ data: USER_3X });
+      throw new Error(`unexpected panel call ${input.method} ${input.url}`);
+    });
+
+    await service.updatePanelUser(stored({ panelShortUuid: SHORT_UUID, panelUsername: 'rz_bob_1' }), {
+      description: 'x',
+    });
+
+    assert.deepEqual(
+      captured.filter((c) => c.url === '/api/users/resolve').map((c) => c.data),
+      [{ shortUuid: SHORT_UUID }],
+    );
+    assert.equal(patchBodyOf(captured)['id'], 4471);
+    assert.equal('shortUuid' in patchBodyOf(captured), false);
+    assert.equal('uuid' in patchBodyOf(captured), false);
   });
 
   it('an unidentifiable panel is STILL keyed by the stored identifier, not the name', async () => {
@@ -819,6 +897,34 @@ describe('strictSetUserLimits — same key, and an unaddressable profile DEFERS'
     assert.equal(bodyOf(captured)['id'], 4471);
   });
 
+  it('resolves a saved subscription short uuid to the numeric id before PATCH on 3.2.3', async () => {
+    const { service, captured } = build((input) => {
+      if (input.url.startsWith('/api/system/')) return recap('3.2.3');
+      if (input.url === '/api/users/resolve') {
+        return of({ data: { response: { id: 4471, shortUuid: SHORT_UUID, username: 'rz_bob_1' } } });
+      }
+      if (input.method === 'patch' && input.url === '/api/users') return of({ data: USER_3X });
+      throw new Error(`unexpected panel call ${input.method} ${input.url}`);
+    });
+
+    const outcome = await service.strictSetUserLimits(
+      stored({ panelShortUuid: SHORT_UUID, panelUsername: 'rz_bob_1' }),
+      {
+        trafficLimitBytes: null,
+        hwidDeviceLimit: null,
+      },
+    );
+
+    assert.equal(outcome.kind, 'ok');
+    assert.deepEqual(
+      captured.filter((c) => c.url === '/api/users/resolve').map((c) => c.data),
+      [{ shortUuid: SHORT_UUID }],
+    );
+    assert.equal(patchBodyOf(captured)['id'], 4471);
+    assert.equal('shortUuid' in patchBodyOf(captured), false);
+    assert.equal('uuid' in patchBodyOf(captured), false);
+  });
+
   it('reports unavailable, NOT invalidContract, when the profile cannot be named', async () => {
     // The distinction decides whether the saga retries or gives up. The
     // contract is fine here; only our ability to name the profile is missing,
@@ -829,6 +935,31 @@ describe('strictSetUserLimits — same key, and an unaddressable profile DEFERS'
       hwidDeviceLimit: null,
     });
     assert.equal(outcome.kind, 'unavailable');
+  });
+});
+
+describe('strictGetPanelUserDevices — legacy profile recovery on Remnawave 3.2.3', () => {
+  it('resolves a 2.x uuid-backed subscription through its saved shortUuid before reading HWID rows', async () => {
+    const { service, captured } = build((input) => {
+      if (input.url.startsWith('/api/system/')) return recap('3.2.3');
+      if (input.url === '/api/users/resolve') {
+        return of({ data: { response: { id: 4471, shortUuid: SHORT_UUID, username: 'rz_bob_1' } } });
+      }
+      if (input.url === '/api/hwid/devices/4471') {
+        return of({ data: { response: { total: 0, devices: [] } } });
+      }
+      throw new Error(`unexpected panel call ${input.url}`);
+    });
+
+    const outcome = await service.strictGetPanelUserDevices(stored({ panelShortUuid: SHORT_UUID }));
+
+    assert.equal(outcome.kind, 'ok');
+    assert.deepEqual(
+      captured.filter((c) => c.url === '/api/users/resolve').map((c) => c.data),
+      [{ shortUuid: SHORT_UUID }],
+    );
+    assert.equal(captured.some((c) => c.url === `/api/hwid/devices/${UUID}`), false);
+    assert.equal(captured.some((c) => c.url === '/api/hwid/devices/4471'), true);
   });
 });
 

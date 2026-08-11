@@ -52,6 +52,23 @@ describe('mapNode', () => {
   it('returns null for activeConfigProfileUuid when neither layout has it', () => {
     const result = mapNode({ uuid: 'node-3' });
     assert.equal(result.activeConfigProfileUuid, null);
+    assert.deepEqual(result.ips, []);
+  });
+
+  it('maps Remnawave 3.2.3 node IP status rows', () => {
+    const result = mapNode({
+      uuid: 'node-323',
+      ips: [
+        { ip: '203.0.113.10', status: 'ACTIVE' },
+        { ip: '2001:db8::10', status: 'DISABLED' },
+        { ip: 123, status: 'BROKEN' },
+      ],
+    });
+
+    assert.deepEqual(result.ips, [
+      { ip: '203.0.113.10', status: 'ACTIVE' },
+      { ip: '2001:db8::10', status: 'DISABLED' },
+    ]);
   });
 
   it('coerces malformed types without throwing', () => {

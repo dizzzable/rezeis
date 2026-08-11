@@ -947,6 +947,7 @@ describe('ProfileSyncProcessor', () => {
             remnawaveId: 'rem-user-1',
             panelId: null,
             panelUsername: null,
+            panelShortUuid: null,
           });
           return { isDeleted: true };
         },

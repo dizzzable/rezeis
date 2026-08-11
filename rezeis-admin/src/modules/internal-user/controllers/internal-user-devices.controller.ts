@@ -365,6 +365,7 @@ export class InternalUserDevicesController {
         id: true,
         userId: true,
         remnawaveId: true,
+        configUrl: true,
         // Selected because this row is addressed on the panel. A `select` that
         // omits them hands `storedIdentityOf` `undefined` for both, which is
         // indistinguishable from "never recorded" — and on a 3.x panel that is
@@ -397,6 +398,7 @@ export class InternalUserDevicesController {
         id: true,
         userId: true,
         remnawaveId: true,
+        configUrl: true,
         remnawavePanelId: true,
         remnawavePanelUsername: true,
       },

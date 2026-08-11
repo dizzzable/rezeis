@@ -117,6 +117,7 @@ export class UserDeletionService {
                 remnawaveId: true,
                 remnawavePanelId: true,
                 remnawavePanelUsername: true,
+                configUrl: true,
               },
             });
 
