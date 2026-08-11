@@ -70,6 +70,7 @@ const DashboardPage = lazy(
 const RemnaWavePage = lazy(
   withFeatureBundle('remnawave', () => import('@/features/remnawave/remnawave-page')),
 );
+const OlcrtcPage = lazy(() => import('@/features/olcrtc/olcrtc-page'));
 const AdminsPage = lazy(() => import('@/features/admins/admins-page'));
 const UsersPage = lazy(() => import('@/features/users/users-page'));
 const UserDetailPage = lazy(
@@ -201,6 +202,7 @@ export const router = createBrowserRouter([
           { path: 'broadcast', element: withSuspense(<BroadcastPage />) },
           { path: 'emoji-packs', element: withSuspense(<CustomEmojiPage />) },
           { path: 'remnawave', element: withSuspense(<RemnaWavePage />) },
+          { path: 'olcrtc', element: withSuspense(<OlcrtcPage />) },
           { path: 'settings', element: withSuspense(<SettingsPage />) },
           { path: 'web-reiwa', element: withSuspense(<WebReiwaPage />) },
           { path: 'subpage-config', element: withSuspense(<SubpageConfigPage />) },

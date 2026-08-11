@@ -14,6 +14,7 @@ import { databaseConfig } from './common/config/database.config';
 import { emailConfig } from './common/config/email.config';
 import { validateEnvironment } from './common/config/env.schema';
 import { advertisingConfig } from './common/config/advertising.config';
+import { olcrtcConfig } from './common/config/olcrtc.config';
 import { paymentsConfig } from './common/config/payments.config';
 import { remnawaveConfig } from './common/config/remnawave.config';
 import { redisConfig } from './common/config/redis.config';
@@ -55,6 +56,7 @@ import { LegalDocumentsModule } from './modules/legal-documents/legal-documents.
 import { LinkingModule } from './modules/linking/linking.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
 import { OAuthModule } from './modules/oauth/oauth.module';
+import { OlcrtcModule } from './modules/olcrtc/olcrtc.module';
 import { ExternalAuthModule } from './modules/external-auth/external-auth.module';
 import { EmailDeliveryModule } from './modules/email/email.module';
 import { PartnersModule } from './modules/partners/partners.module';
@@ -101,6 +103,7 @@ import { WebhooksModule } from './modules/webhooks/webhooks.module';
         authConfig,
         databaseConfig,
         emailConfig,
+        olcrtcConfig,
         paymentsConfig,
         redisConfig,
         remnawaveConfig,
@@ -165,6 +168,7 @@ import { WebhooksModule } from './modules/webhooks/webhooks.module';
     ImportsModule,
     NotificationsModule,
     OAuthModule,
+    OlcrtcModule,
     ExternalAuthModule,
     EmailDeliveryModule,
     PartnersModule,

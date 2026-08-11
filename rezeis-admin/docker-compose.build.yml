@@ -18,3 +18,5 @@ services:
     build: .
   rezeis-worker:
     build: .
+  rezeis-olcrtc-agent:
+    build: .

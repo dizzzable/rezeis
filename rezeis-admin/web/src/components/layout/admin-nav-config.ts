@@ -34,6 +34,7 @@ import {
   LayoutTemplate,
   Bot,
   FileText,
+  RadioTower,
 } from 'lucide-react';
 
 import type { SidebarGroupOrder } from '@/stores/sidebar-store';
@@ -147,6 +148,12 @@ export const navGroups: ReadonlyArray<NavGroup> = [
       },
       { key: 'botMap', path: '/bot-map', icon: MapIcon },
       { key: 'remnawave', path: '/remnawave', icon: RemnawaveIcon },
+      {
+        key: 'olcrtc',
+        path: '/olcrtc',
+        icon: RadioTower,
+        requiredPermission: { resource: 'olcrtc', action: 'view' },
+      },
       { key: 'notifications', path: '/notifications', icon: Bell },
       {
         key: 'legalDocuments',
