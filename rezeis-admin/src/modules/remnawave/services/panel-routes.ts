@@ -6,7 +6,7 @@
  * version decision at seventeen call sites instead of one. Collecting them also
  * makes them checkable — `test/remnawave-3x-contract-guard.spec.ts` asserts every
  * builder below against the vendor's own URL builders in
- * `@remnawave/backend-contract@3.2.2`, so a path that drifts in a future panel
+ * `@remnawave/backend-contract@3.2.3`, so a path that drifts in a future panel
  * release fails a test here instead of failing silently against a live panel.
  *
  * WHY THE VENDOR PACKAGE IS NOT IMPORTED HERE: it is a devDependency. Importing
@@ -56,6 +56,9 @@ export const PANEL_ROUTES = {
 
   /** `GET`/`POST` — the whole-panel user list and the profile write. */
   users: '/api/users',
+
+  /** `POST` — push one reusable snippet into all config profiles that reference it. */
+  snippetSync: '/api/snippets/actions/sync',
 
   /** `POST` — map any one of id / shortUuid / username onto the others. */
   resolveUser: '/api/users/resolve',

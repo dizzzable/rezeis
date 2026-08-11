@@ -48,7 +48,7 @@ export interface RemnawaveUserLookups {
  *
  * The three latter fields are descriptive only: nothing consumes them yet, and
  * adding them does not enable any 3.x behaviour. They exist so the eventual
- * one-build-drives-2.7.4/2.8.0/3.2.1 work has a single place to read the panel
+ * one-build-drives-2.7.4/2.8.0/3.2.x work has a single place to read the panel
  * shape from, with an explicit "we do not know" state.
  */
 export interface RemnawaveCapabilities {
@@ -75,7 +75,7 @@ export interface RemnawaveCapabilities {
  * untested panel starts returning shapes rezeis does not parse.
  *
  * All three entries are measured against live panels: 2.7.4 (paying
- * production), 2.8 (testers) and 3.2.1. Being in this set means "the operator
+ * production), 2.8 (testers) and 3.2.x. Being in this set means "the operator
  * gets no banner", not "every screen is equally capable" — 2.7.4 still reports
  * `liveIpControl: false`, because its `ip-control/*` family had not matured
  * enough to drive the Live tab. 3.x reports true: it replaced that family with

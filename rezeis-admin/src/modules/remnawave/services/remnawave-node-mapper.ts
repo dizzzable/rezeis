@@ -10,7 +10,8 @@ import { RemnawaveNodeInterface } from '../interfaces/remnawave-node.interface';
  *     are not exposed on `/api/nodes` at all (the Remnawave UI fetches them
  *     from a separate realtime endpoint).
  *
- *   • 2.8+ (newer panels): the same fields surface at the top level.
+ *   • 2.8+ (newer panels): the same fields surface at the top level; 3.2.3
+ *     also includes per-node `ips` status rows.
  *
  * Everything that's missing falls back to neutral defaults (0 for counters,
  * null for ids), so the admin SPA always sees a uniform shape regardless of
@@ -41,6 +42,7 @@ interface RawNode {
   readonly xrayUptime?: unknown;
   readonly usersOnline?: unknown;
   readonly activeConfigProfileUuid?: unknown;
+  readonly ips?: unknown;
   readonly configProfile?: {
     readonly activeConfigProfileUuid?: unknown;
   };
@@ -74,7 +76,21 @@ export function mapNode(raw: unknown): RemnawaveNodeInterface {
     activeConfigProfileUuid:
       toNullableString(r.activeConfigProfileUuid) ??
       toNullableString(r.configProfile?.activeConfigProfileUuid),
+    ips: mapNodeIps(r.ips),
   };
+}
+
+function mapNodeIps(value: unknown): Array<{ ip: string; status: string }> {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((entry) => {
+      const row = (entry ?? {}) as Record<string, unknown>;
+      return {
+        ip: toString(row['ip']),
+        status: toString(row['status']),
+      };
+    })
+    .filter((entry) => entry.ip.length > 0);
 }
 
 function toString(value: unknown): string {

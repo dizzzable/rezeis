@@ -22,4 +22,10 @@ export interface RemnawaveNodeInterface {
   readonly xrayUptime: number;
   readonly usersOnline: number;
   readonly activeConfigProfileUuid: string | null;
+  readonly ips: readonly RemnawaveNodeIpInterface[];
+}
+
+export interface RemnawaveNodeIpInterface {
+  readonly ip: string;
+  readonly status: string;
 }

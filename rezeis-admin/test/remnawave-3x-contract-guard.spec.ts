@@ -19,6 +19,7 @@ import {
   ResetUserTrafficCommand,
   ResolveUserCommand,
   RevokeUserSubscriptionCommand,
+  SyncSnippetCommand,
   UpdateUserCommand,
 } from '@remnawave/contract-v3';
 
@@ -35,7 +36,7 @@ import {
 
 /**
  * Pins every Remnawave 3.x route and error code rezeis builds against the
- * vendor's own published contract (`@remnawave/backend-contract@3.2.2`,
+ * vendor's own published contract (`@remnawave/backend-contract@3.2.3`,
  * installed as the devDependency alias `@remnawave/contract-v3`).
  *
  * WHY THIS EXISTS. Everything in `panel-routes.ts` was originally transcribed by
@@ -55,7 +56,7 @@ import {
  * extra at runtime.
  *
  * SCOPE. Both eras. The 3.x half is pinned against `@remnawave/contract-v3`
- * (3.2.2); the 2.x half against `@remnawave/contract-v28` (2.8.35), because the
+ * (3.2.3); the 2.x half against `@remnawave/contract-v28` (2.8.35), because the
  * production dependency is pinned at `~2.7.3` — the 2.7 LINE — while the
  * operator's panels are 2.7.4 and 2.8.0. That pin turns out to be harmless (the
  * two contract lines declare ZERO differing paths across 185/186 commands, and
@@ -185,6 +186,7 @@ describe('Remnawave 3.x routes match the vendor contract', () => {
       vendorUrl(ConnectionsByNodeResultCommand, JOB_ID),
     ],
     ['drop connections', route(PANEL_ROUTES.connectionsDrop), vendorUrl(DropConnectionsCommand)],
+    ['sync snippet', route(PANEL_ROUTES.snippetSync), vendorUrl(SyncSnippetCommand)],
   ];
 
   for (const [label, ours, theirs] of CASES) {
@@ -196,9 +198,9 @@ describe('Remnawave 3.x routes match the vendor contract', () => {
   it('checks every route family, so a bad import cannot pass by checking nothing', () => {
     // A liveness floor. If the vendor package stops exporting these, the loop
     // above would simply run fewer cases and still be green.
-    assert.ok(CASES.length >= 17, `only ${CASES.length} routes checked`);
+    assert.ok(CASES.length >= 18, `only ${CASES.length} routes checked`);
     const families = new Set(CASES.map(([, ours]) => ours.split('/')[2]));
-    assert.deepEqual([...families].sort(), ['connections', 'hwid', 'users']);
+    assert.deepEqual([...families].sort(), ['connections', 'hwid', 'snippets', 'users']);
   });
 
   it('the comparison can actually fail', () => {

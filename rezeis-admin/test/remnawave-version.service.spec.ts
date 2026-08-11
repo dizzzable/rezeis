@@ -11,8 +11,8 @@ import {
 
 /**
  * Capability detection decides, on a live paying panel, whether rezeis calls
- * endpoints that exist. Three panel versions are in play — 2.7.4 for paying
- * customers, 2.8.x for testers and 3.2.1 — so every field is asserted in full
+ * endpoints that exist. Three panel lines are in play — 2.7.4 for paying
+ * customers, 2.8.x for testers and 3.2.x — so every field is asserted in full
  * for every pinned version: an extra or renamed field fails these tests rather
  * than shipping as a silent shape change.
  */
@@ -156,6 +156,22 @@ describe('RemnawaveVersionService — pinned panel versions', () => {
       // whether the data can be had, not which route family serves it. A
       // comment describing the opposite of its own assertion is worse than no
       // comment — the next reader "fixes" the assertion in the wrong direction.
+      supported: true,
+      reachable: true,
+      liveIpControl: true,
+      bandwidthNodesUsers: true,
+      userAddressing: 'id',
+      connectionsApi: 'connections',
+      userLookups: { byTelegramId: false, byEmail: false },
+    });
+  });
+
+  it('3.2.3 remains supported on the same tested 3.2 capability line', async () => {
+    assert.deepEqual(await capabilitiesOf('3.2.3'), {
+      version: '3.2.3',
+      major: 3,
+      minor: 2,
+      patch: 3,
       supported: true,
       reachable: true,
       liveIpControl: true,
