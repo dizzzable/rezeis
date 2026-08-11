@@ -143,6 +143,7 @@ describe('DeviceReductionPlanService (T-011b)', () => {
         remnawaveId: true,
         remnawavePanelId: true,
         remnawavePanelUsername: true,
+        configUrl: true,
         status: true,
       },
     ]);
