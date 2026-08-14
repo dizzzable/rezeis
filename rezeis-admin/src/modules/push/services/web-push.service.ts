@@ -133,6 +133,39 @@ export class WebPushService implements OnModuleInit {
     return { subject: config.subject, publicKey: config.publicKey, privateKey: config.privateKey };
   }
 
+  /**
+   * Bind a subscriber's browser to a push subscription row.
+   *
+   * This is deliberately an `upsert` keyed on the endpoint, and its update
+   * branch deliberately rewrites `userId` — the same shape that was a real
+   * defect on the admin side and had to be split apart there
+   * (`subscribeAdmin` below). The two are not the same situation, and the
+   * difference is worth stating because the code looks identical:
+   *
+   *   - Nobody reaches this from the outside. `POST internal/push/subscribe`
+   *     sits behind `InternalAdminAuthGuard`; the cabinet's BFF is the only
+   *     caller and it fills `userId` from a session it has already verified.
+   *     A subscriber cannot name another subscriber's id. If the internal
+   *     token leaks, the subscriptions are not what has been lost.
+   *   - There is no channel to learn someone else's endpoint. What made the
+   *     admin case exploitable was that an endpoint reaches any log recording
+   *     request bodies, and admins read logs. Subscribers do not.
+   *   - So the only way one account offers up another's endpoint is that it is
+   *     literally the same browser — and there, re-pointing the row is the
+   *     correct answer, not a leak. Two people share a computer; whoever is
+   *     signed in is who that browser's push belongs to.
+   *
+   * And it self-corrects, which the admin side did not: the cabinet calls
+   * `ensurePushSubscription()` once per session on every sign-in
+   * (`reiwa/web/src/components/layout/stealth-layout.tsx:164`), so the row
+   * follows whoever signed in last. Refusing here — the admin fix — would
+   * instead leave the second person on a shared machine with no push at all
+   * until the first one's row is removed. That is a regression in the only
+   * scenario this branch exists for.
+   *
+   * The condition that would change this answer: a route that lets a caller
+   * supply `userId` without an already-verified session behind it.
+   */
   public async subscribe(input: SubscribeInput): Promise<{ id: string }> {
     const persisted = await this.prismaService.webPushSubscription.upsert({
       where: { endpoint: input.endpoint },
@@ -144,9 +177,9 @@ export class WebPushService implements OnModuleInit {
         userAgent: input.userAgent ?? null,
       },
       update: {
-        // Endpoint already known — refresh the user binding (handles
-        // a device shared between two accounts) and the keys (the
-        // service worker may rotate them on re-subscribe).
+        // Endpoint already known — hand the browser to the account that is
+        // signed in now, and refresh the keys the service worker may have
+        // rotated on re-subscribe.
         userId: input.userId,
         p256dhKey: input.p256dhKey,
         authKey: input.authKey,

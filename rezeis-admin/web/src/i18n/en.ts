@@ -2037,6 +2037,8 @@ export const en = {
     disabledServer: 'Push is disabled on the server (VAPID keys not configured).',
     subscribeFailed:
       'Could not create the push subscription (check the server VAPID keys and the browser push service).',
+    endpointTaken:
+      'This browser is already registered to another admin account. The local subscription has been cleared — press the toggle again to register it to yours.',
     unsupported: 'This browser does not support push notifications.',
     iosInstall: 'On iOS, add the panel to your Home Screen to enable push.',
     error: 'Failed to change the push setting.',

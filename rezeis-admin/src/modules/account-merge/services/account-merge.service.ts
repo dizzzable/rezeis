@@ -445,13 +445,13 @@ export class AccountMergeService {
       where: { userId: targetId },
       select: { questId: true, periodKey: true },
     });
-    const taken = new Set(targetRows.map((r) => `${r.questId} ${r.periodKey}`));
+    const taken = new Set(targetRows.map((r) => `${r.questId}\u0000${r.periodKey}`));
     const sourceRows = await tx.questCompletion.findMany({
       where: { userId: sourceId },
       select: { id: true, questId: true, periodKey: true },
     });
     const dupes = sourceRows
-      .filter((r) => taken.has(`${r.questId} ${r.periodKey}`))
+      .filter((r) => taken.has(`${r.questId}\u0000${r.periodKey}`))
       .map((r) => r.id);
     if (dupes.length > 0) {
       await tx.questCompletion.deleteMany({ where: { id: { in: dupes } } });

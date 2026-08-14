@@ -177,6 +177,60 @@ describe('WebPushService', () => {
     assert.equal(state.upsertCalls[0]?.update.lastSeenAt instanceof Date, true);
   });
 
+  it('hands a shared browser to whoever signed in last, unlike the admin path', async () => {
+    // This is the decision, not an accident of the query shape. The same
+    // `upsert({ where: { endpoint } })` on the admin side let one admin take
+    // another's row and had to be split into an ownership-scoped `updateMany`
+    // plus a `create` that 409s (see the ownership suite below). Here it stays,
+    // for reasons that live in the doc comment on `subscribe()`:
+    //
+    //   - `internal/push/subscribe` is behind `InternalAdminAuthGuard` and the
+    //     cabinet's BFF fills `userId` from a session it already verified, so
+    //     no subscriber can name another subscriber;
+    //   - an endpoint reaches logs that admins read, and subscribers do not,
+    //     so there is no channel to learn one;
+    //   - a shared browser is the only remaining case, and there the newest
+    //     sign-in SHOULD own it. The cabinet re-registers once per session, so
+    //     the row follows the account that is actually signed in.
+    //
+    // Refusing here instead would leave the second person on a shared computer
+    // with no push until the first one's row is deleted.
+    const { service, state } = createService({ upsertResult: { id: 'subscription-1' } });
+    const endpoint = 'https://push.example.test/shared-browser';
+
+    await service.subscribe({
+      userId: 'user-a',
+      endpoint,
+      p256dhKey: 'p256dh-a',
+      authKey: 'auth-a',
+      userAgent: 'Mozilla/5.0',
+    });
+    await service.subscribe({
+      userId: 'user-b',
+      endpoint,
+      p256dhKey: 'p256dh-b',
+      authKey: 'auth-b',
+      userAgent: 'Mozilla/5.0',
+    });
+
+    assert.equal(state.upsertCalls.length, 2, 'both sign-ins reach the database');
+    assert.equal(
+      state.upsertCalls[1]?.where.endpoint,
+      endpoint,
+      'the second sign-in addresses the same row rather than creating a second one',
+    );
+    assert.equal(
+      state.upsertCalls[1]?.update.userId,
+      'user-b',
+      'the browser follows the account signed in now — removing this line is the change that needs a decision, not a fix',
+    );
+    assert.equal(
+      state.upsertCalls[1]?.update.failureCount,
+      0,
+      'a live re-subscribe clears failure state so a pruned-looking row comes back',
+    );
+  });
+
   it('deletes only the current user subscription endpoint on unsubscribe', async () => {
     const { service, state } = createService();
 

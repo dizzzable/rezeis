@@ -11,6 +11,24 @@
  */
 import { api } from './api'
 
+/**
+ * Set when the operator turned push OFF on this device with the toggle. It is
+ * the difference between "never asked" and "asked and declined", and every
+ * automatic path has to honour it — otherwise the next silent heal quietly
+ * turns push back on for someone who deliberately turned it off.
+ */
+export const PUSH_OPTOUT_KEY = 'rezeis_admin_push_optout'
+
+export function hasPushOptOut(): boolean {
+  try {
+    return localStorage.getItem(PUSH_OPTOUT_KEY) === '1'
+  } catch {
+    // Private mode / storage disabled: treat as "no explicit opt-out". The
+    // failure mode of guessing the other way is push that can never be healed.
+    return false
+  }
+}
+
 export type PushSupport =
   | 'ready'
   | 'unsupported-browser'
@@ -48,7 +66,20 @@ export type EnablePushResult =
   | 'permission-denied'
   | 'push-disabled'
   | 'subscribe-failed'
+  | 'endpoint-taken'
   | 'unsupported'
+
+/**
+ * True when `/admin/push/subscribe` refused because another admin already owns
+ * this browser's endpoint. The backend answers 409 for exactly that case and
+ * for nothing else on this route — an insert race lost to the SAME admin is
+ * treated as a re-subscribe and succeeds
+ * (`src/modules/push/services/web-push.service.ts` `subscribeAdmin`).
+ */
+function isEndpointTaken(err: unknown): boolean {
+  const status = (err as { response?: { status?: number } } | null)?.response?.status
+  return status === 409
+}
 
 export async function enablePush(): Promise<EnablePushResult> {
   if (detectPushSupport() !== 'ready') return 'unsupported'
@@ -92,6 +123,12 @@ export async function enablePush(): Promise<EnablePushResult> {
     } catch {
       // best-effort
     }
+    // Dropping the local subscription above is what makes this recoverable:
+    // the next `pushManager.subscribe()` mints a FRESH endpoint, which is not
+    // the one another admin holds, so the operator can simply press the toggle
+    // again. Saying so beats the generic error, which reads as "push is
+    // broken" for a state the operator can clear themselves.
+    if (isEndpointTaken(err)) return 'endpoint-taken'
     throw err
   }
   return 'subscribed'
@@ -102,13 +139,29 @@ export async function enablePush(): Promise<EnablePushResult> {
  * "on by default" once the operator has granted notification permission. No-op
  * when push isn't ready, permission isn't granted, or the server has no VAPID
  * key. Re-subscribes when the browser dropped the subscription and registers
- * it. Returns true when a subscription is in place afterwards.
+ * it.
+ *
+ * Known gap, deliberately left open: this re-registers the subscription the
+ * browser currently holds, but does not notice one minted with a SUPERSEDED
+ * VAPID key — after an operator rotates keys the old endpoint is dead and gets
+ * re-registered as-is. The cabinet's twin compares
+ * `subscription.options.applicationServerKey` and drops a mismatch
+ * (`reiwa/web/src/lib/push.ts`), which is the right idea but rests on a field
+ * some browsers do not expose; where it is missing the comparison fails open
+ * and every sign-in mints a fresh endpoint, orphaning the previous row.
+ * Copying that here would duplicate an unproven behaviour rather than heal
+ * anything, so key rotation stays a separate question — with the cabinet's
+ * version to re-examine at the same time.
  */
-export async function ensurePushSubscription(): Promise<boolean> {
-  if (detectPushSupport() !== 'ready') return false
-  if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return false
+export type EnsurePushResult = 'subscribed' | 'endpoint-taken' | 'unavailable'
+
+export async function ensurePushSubscription(): Promise<EnsurePushResult> {
+  if (detectPushSupport() !== 'ready') return 'unavailable'
+  if (typeof Notification === 'undefined' || Notification.permission !== 'granted') {
+    return 'unavailable'
+  }
   const publicKey = await getPublicKey()
-  if (publicKey.length === 0) return false
+  if (publicKey.length === 0) return 'unavailable'
   const reg = await navigator.serviceWorker.ready
   let subscription = await reg.pushManager.getSubscription()
   if (subscription === null) {
@@ -118,7 +171,7 @@ export async function ensurePushSubscription(): Promise<boolean> {
         applicationServerKey: urlBase64ToUint8Array(publicKey),
       })
     } catch {
-      return false
+      return 'unavailable'
     }
   }
   const json = subscription.toJSON()
@@ -129,10 +182,14 @@ export async function ensurePushSubscription(): Promise<boolean> {
         keys: { p256dh: json.keys?.p256dh ?? '', auth: json.keys?.auth ?? '' },
       },
     })
-  } catch {
-    return false
+  } catch (err) {
+    // Distinguished rather than folded into `unavailable`: this one is not a
+    // transport hiccup, it is a lasting state that will still be there on the
+    // next attempt, and only the operator can clear it.
+    if (isEndpointTaken(err)) return 'endpoint-taken'
+    return 'unavailable'
   }
-  return true
+  return 'subscribed'
 }
 
 export async function disablePush(): Promise<boolean> {

@@ -33,6 +33,7 @@ import { cn } from '@/lib/utils'
 import { useRealtimeUpdates } from '@/lib/realtime/use-realtime-updates'
 import { useSwNavigation } from '@/lib/use-sw-navigation'
 import { applyAdminPwaIcon } from '@/lib/admin-pwa-icon'
+import { ensurePushSubscription, hasPushOptOut } from '@/lib/push'
 import { useAdminBranding } from '@/features/settings/use-admin-branding'
 
 import { AdminSidebar } from './admin-sidebar/admin-sidebar'
@@ -41,6 +42,9 @@ import { AdminTopbar } from './admin-topbar/admin-topbar'
 import { AnimatedOutlet } from './animated-outlet'
 
 const MAIN_CONTENT_ID = 'admin-main-content'
+
+/** Session-scoped so the push heal below runs once per sign-in, not per mount. */
+const PUSH_HEAL_KEY = 'rezeis_admin_push_resync'
 
 export default function AdminShell() {
   const { t } = useTranslation()
@@ -67,6 +71,38 @@ export default function AdminShell() {
     document.title = branding.brandName
     applyAdminPwaIcon(branding.adminPwaIconUrl)
   }, [branding.adminPwaIconUrl, branding.brandName])
+
+  // Re-register this browser's push subscription once per session. Until this
+  // existed, `ensurePushSubscription` had exactly one caller — the notification
+  // settings tab — so an admin whose row the fanout pruned after a 410, or
+  // whose endpoint another admin had claimed before that was refused
+  // server-side, simply stopped receiving push and stayed that way until they
+  // happened to open that tab. The cabinet has healed itself on sign-in all
+  // along (`reiwa/web/src/components/layout/stealth-layout.tsx`); the panel
+  // never did.
+  //
+  // Rendering this shell IS the authenticated signal, and the three guards are
+  // load-bearing: the session key keeps it to one attempt per sign-in, the
+  // opt-out keeps it from re-enabling push someone deliberately turned off,
+  // and `ensurePushSubscription` itself returns early unless notification
+  // permission is already granted, so nothing here can raise a prompt.
+  useEffect(() => {
+    if (hasPushOptOut()) return
+    try {
+      if (sessionStorage.getItem(PUSH_HEAL_KEY) === '1') return
+      sessionStorage.setItem(PUSH_HEAL_KEY, '1')
+    } catch {
+      // sessionStorage unavailable — fall through; the call is idempotent.
+    }
+    void ensurePushSubscription().then((outcome) => {
+      if (outcome === 'endpoint-taken') {
+        // Silent on purpose: a toast on every sign-in for a state the operator
+        // clears with one toggle would be noise. The settings tab shows the
+        // toggle off and says why when they press it.
+        console.warn('[push] this browser is registered to another admin account')
+      }
+    })
+  }, [])
 
   // Cmd+K / Ctrl+K shortcut to toggle the quick-search palette.
   useEffect(() => {

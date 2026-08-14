@@ -30,6 +30,13 @@ vi.mock('@/features/auth/auth-provider', () => ({
   }),
 }))
 
+const pushMocks = vi.hoisted(() => ({
+  ensurePushSubscription: vi.fn().mockResolvedValue('subscribed'),
+  hasPushOptOut: vi.fn().mockReturnValue(false),
+}))
+
+vi.mock('@/lib/push', () => pushMocks)
+
 describe('AdminShell accessibility baseline', () => {
   afterEach(() => {
     cleanup()
@@ -61,6 +68,49 @@ describe('AdminShell accessibility baseline', () => {
 
     expect(screen.getByRole('button', { name: 'Collapse sidebar' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Admin account menu' })).toBeInTheDocument()
+  })
+})
+
+/**
+ * Rendering this shell is the panel's "an admin is signed in" signal, and it is
+ * where the push subscription now re-registers itself. Before that, the only
+ * caller was the notification settings tab, so an admin whose row the fanout
+ * pruned after a 410 — or whose endpoint another admin had claimed — stopped
+ * receiving push and stayed that way until they happened to open that tab.
+ *
+ * The two guards are what these tests are really about. Healing on every mount
+ * would re-register on each route change, and healing past an explicit opt-out
+ * would switch push back on for someone who deliberately switched it off. Both
+ * are the kind of mistake that is invisible in a browser and obvious here.
+ */
+describe('AdminShell push healing', () => {
+  afterEach(() => {
+    cleanup()
+    window.sessionStorage.clear()
+    pushMocks.ensurePushSubscription.mockClear()
+    pushMocks.hasPushOptOut.mockReturnValue(false)
+  })
+
+  it('re-registers the subscription once when the shell first renders', () => {
+    renderShell()
+
+    expect(pushMocks.ensurePushSubscription).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not re-register again in the same session', () => {
+    renderShell()
+    cleanup()
+    renderShell()
+
+    expect(pushMocks.ensurePushSubscription).toHaveBeenCalledTimes(1)
+  })
+
+  it('leaves push alone when the operator turned it off on this device', () => {
+    pushMocks.hasPushOptOut.mockReturnValue(true)
+
+    renderShell()
+
+    expect(pushMocks.ensurePushSubscription).not.toHaveBeenCalled()
   })
 })
 

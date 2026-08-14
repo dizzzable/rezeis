@@ -105,14 +105,29 @@ export class PasskeyService {
       throw new UnauthorizedException('Registration challenge expired');
     }
 
-    const verification = await verifyRegistrationResponse({
-      response,
-      expectedChallenge,
-      expectedOrigin: origin,
-      expectedRPID: rpId,
-    });
+    // Same throwing behaviour as the authentication path — see the note there.
+    // Registration is the supervised half (the admin already holds a session),
+    // so the failure is recoverable, but it used to be a 500 as well.
+    let verification: Awaited<ReturnType<typeof verifyRegistrationResponse>>;
+    try {
+      verification = await verifyRegistrationResponse({
+        response,
+        expectedChallenge,
+        expectedOrigin: origin,
+        expectedRPID: rpId,
+      });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      this.logger.warn(
+        `Passkey registration rejected for admin ${adminId} (rpId=${rpId}, origin=${origin}): ${reason}`,
+      );
+      throw new UnauthorizedException('Passkey registration verification failed');
+    }
 
     if (!verification.verified || !verification.registrationInfo) {
+      this.logger.warn(
+        `Passkey registration unverified for admin ${adminId} (rpId=${rpId}, origin=${origin})`,
+      );
       throw new UnauthorizedException('Passkey registration verification failed');
     }
 
@@ -212,20 +227,42 @@ export class PasskeyService {
       throw new UnauthorizedException('Authentication challenge expired or invalid');
     }
 
-    const verification = await verifyAuthenticationResponse({
-      response,
-      expectedChallenge: storedChallenge,
-      expectedOrigin: origin,
-      expectedRPID: rpId,
-      credential: {
-        id: passkey.credentialId,
-        publicKey: Buffer.from(passkey.publicKey, 'base64url'),
-        counter: Number(passkey.counter),
-        transports: passkey.transports as AuthenticatorTransport[],
-      },
-    });
+    // `verifyAuthenticationResponse` THROWS on an rpId/origin mismatch rather
+    // than returning `verified: false` — so without this catch the commonest
+    // real failure (a passkey registered while reaching the panel by a
+    // different hostname than the one being used now) surfaced as a 500 with
+    // nothing in the log. The two values it compared are precisely the ones an
+    // operator cannot see from the browser, so they are recorded here; the
+    // response stays generic on purpose, since this route is public and must
+    // not narrate why a login attempt failed.
+    let verification: Awaited<ReturnType<typeof verifyAuthenticationResponse>>;
+    try {
+      verification = await verifyAuthenticationResponse({
+        response,
+        expectedChallenge: storedChallenge,
+        expectedOrigin: origin,
+        expectedRPID: rpId,
+        credential: {
+          id: passkey.credentialId,
+          publicKey: Buffer.from(passkey.publicKey, 'base64url'),
+          counter: Number(passkey.counter),
+          transports: passkey.transports as AuthenticatorTransport[],
+        },
+      });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      this.logger.warn(
+        `Passkey authentication rejected for credential ${credentialId} ` +
+          `(rpId=${rpId}, origin=${origin}): ${reason}`,
+      );
+      throw new UnauthorizedException('Passkey authentication failed');
+    }
 
     if (!verification.verified) {
+      this.logger.warn(
+        `Passkey authentication unverified for credential ${credentialId} ` +
+          `(rpId=${rpId}, origin=${origin})`,
+      );
       throw new UnauthorizedException('Passkey authentication failed');
     }
 

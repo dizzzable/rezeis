@@ -16,19 +16,17 @@ import { expectArray, unwrapPayload } from '@/lib/api-utils'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Switch } from '@/components/ui/switch'
 import {
+  PUSH_OPTOUT_KEY,
   detectPushSupport,
   disablePush,
   enablePush,
   ensurePushSubscription,
   getCurrentSubscription,
+  hasPushOptOut,
   isPushConfigured,
 } from '@/lib/push'
 
 type NotificationCategory = 'support' | 'payment' | 'fraud' | 'withdrawal' | 'system'
-
-/** Per-device flag: the admin explicitly turned push OFF here — suppress the
- *  default-on auto-subscribe so we never re-enable against their wish. */
-const PUSH_OPTOUT_KEY = 'rezeis_admin_push_optout'
 
 interface CategoryPreference {
   category: NotificationCategory
@@ -71,21 +69,22 @@ export default function PanelNotificationsTab() {
       // sure a subscription exists — unless they explicitly turned push off on
       // this device. Saves the "I granted permission but forgot the toggle"
       // footgun.
-      const optedOut = (() => {
-        try {
-          return localStorage.getItem(PUSH_OPTOUT_KEY) === '1'
-        } catch {
-          return false
-        }
-      })()
+      const optedOut = hasPushOptOut()
       if (
         support === 'ready' &&
         typeof Notification !== 'undefined' &&
         Notification.permission === 'granted' &&
         !optedOut
       ) {
-        const subscribed = await ensurePushSubscription()
-        if (!cancelled && subscribed) setEnabled(true)
+        const outcome = await ensurePushSubscription()
+        if (cancelled) return
+        if (outcome === 'subscribed') setEnabled(true)
+        // `endpoint-taken` deliberately leaves the toggle off: the browser is
+        // bound to another admin's row, so push genuinely is not on for this
+        // account. Pressing the toggle mints a fresh endpoint and clears it —
+        // that path reports the reason (see `onToggle`); this one is a silent
+        // page load and must not open with an error toast.
+        else if (outcome === 'endpoint-taken') setEnabled(false)
       }
     })()
     return () => {
@@ -108,6 +107,11 @@ export default function PanelNotificationsTab() {
           toast.error(t('pushNotifications.disabledServer'))
         } else if (result === 'subscribe-failed') {
           toast.error(t('pushNotifications.subscribeFailed'))
+        } else if (result === 'endpoint-taken') {
+          // Recoverable and self-inflicted-looking, so it gets its own line:
+          // the local subscription was already dropped, and pressing the
+          // toggle again mints an endpoint nobody else holds.
+          toast.error(t('pushNotifications.endpointTaken'))
         } else {
           toast.error(t('pushNotifications.unsupported'))
         }

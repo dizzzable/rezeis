@@ -32,7 +32,15 @@
  * The field's value is never touched: this component takes `value` read-only
  * and renders. What is typed is what is stored.
  */
-import { useMemo, useState, type FocusEvent, type JSX, type ReactNode } from 'react'
+import {
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FocusEvent,
+  type JSX,
+  type ReactNode,
+} from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { cn } from '@/lib/utils'
@@ -100,6 +108,8 @@ export function EmojiFieldOverlay({
 }: EmojiFieldOverlayProps): JSX.Element {
   const catalog = useEmojiCatalog()
   const [editing, setEditing] = useState(false)
+  const boxRef = useRef<HTMLDivElement>(null)
+  const layerRef = useRef<HTMLDivElement>(null)
 
   const render = useMemo<EmojiFieldRender>(
     () =>
@@ -163,15 +173,49 @@ export function EmojiFieldOverlay({
     setEditing(false)
   }
 
+  // The layer starts at the top of the content; the field underneath does not
+  // have to. Leaving a long caption scrolled halfway down and clicking away put
+  // the layer's first line where the field's tenth had been — the text appeared
+  // to jump on blur, on exactly the fields long enough to scroll.
+  //
+  // Copying the offset rather than fighting it: same padding, same wrapping,
+  // same font, so the field's `scrollTop` means the same distance on the layer.
+  // `useLayoutEffect` so it lands before the browser paints the layer — in a
+  // plain effect the jump still happens, just for one frame.
+  //
+  // The listener matters as much as the initial copy, and for a case that is
+  // easy to miss: the layer is `pointer-events-none`, so a wheel over it
+  // reaches the FIELD and scrolls it while the layer stays put. Without this
+  // the two drift apart under the operator's own scrolling.
+  useLayoutEffect(() => {
+    if (!showsEmoji || editing) return
+    const box = boxRef.current
+    const layer = layerRef.current
+    if (box === null || layer === null) return
+    const field = box.querySelector<HTMLInputElement | HTMLTextAreaElement>('input, textarea')
+    if (field === null) return
+
+    const sync = (): void => {
+      layer.scrollTop = field.scrollTop
+      layer.scrollLeft = field.scrollLeft
+    }
+    sync()
+    field.addEventListener('scroll', sync, { passive: true })
+    return () => field.removeEventListener('scroll', sync)
+    // `render` is in here because a value change re-lays-out the layer, which
+    // resets its scroll offset while the field keeps its own.
+  }, [showsEmoji, editing, render])
+
   return (
     <div className={cn('space-y-1', className)} onFocus={() => setEditing(true)} onBlur={handleBlur}>
       {shownIcon !== null && <ButtonIconRow icon={shownIcon} />}
 
-      <div className="relative">
+      <div className="relative" ref={boxRef}>
         {children}
         {showsEmoji && !editing && (
           <div
             aria-hidden
+            ref={layerRef}
             data-testid="emoji-field-overlay"
             className={cn(
               // `inset-px` keeps the field's own 1px border visible around it.

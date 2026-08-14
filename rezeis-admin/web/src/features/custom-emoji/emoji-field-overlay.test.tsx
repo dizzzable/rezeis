@@ -849,3 +849,69 @@ describe('a disabled field dims together with the layer over it', () => {
     expect(screen.getByTestId('emoji-field-overlay')).toHaveClass('opacity-50')
   })
 })
+
+/**
+ * The layer draws from the top of the content. The field underneath does not
+ * have to be there.
+ *
+ * Leave a long caption scrolled halfway down, click away, and the layer went up
+ * showing line one where the field had been showing line ten — the text
+ * appeared to jump on blur, on precisely the fields long enough to scroll and
+ * therefore on precisely the copy worth reading before sending.
+ *
+ * The second spec is the one that is easy to miss: the layer is
+ * `pointer-events-none`, so a wheel over it reaches the FIELD. The field
+ * scrolls, and without a listener the layer stays where it was — the two drift
+ * apart under the operator's own scrolling, with no blur involved at all.
+ */
+describe('the layer follows the field it covers', () => {
+  const LONG = Array.from({ length: 40 }, (_, i) => `line ${i + 1}`).join('\n')
+
+  it('takes the offset the field was left at, instead of snapping to the top', async () => {
+    mockScreenApi([LIVE])
+    renderWithProviders(
+      <LocaleTextarea
+        labelRu="Body (RU)"
+        labelEn="Body (EN)"
+        valueRu={`:tg_ios_macos_icons_25: ${LONG}`}
+        valueEn=""
+        onSave={() => {}}
+      />,
+    )
+
+    await screen.findByAltText(':tg_ios_macos_icons_25:')
+    const textarea = screen.getAllByRole('textbox')[0] as HTMLTextAreaElement
+
+    await userEvent.click(textarea)
+    textarea.scrollTop = 96
+    await userEvent.tab()
+
+    await waitFor(() => {
+      const layer = screen.getAllByTestId('emoji-field-overlay')[0]
+      expect(layer.scrollTop).toBe(96)
+    })
+  })
+
+  it('keeps up when the field is scrolled underneath the layer', async () => {
+    mockScreenApi([LIVE])
+    renderWithProviders(
+      <LocaleTextarea
+        labelRu="Body (RU)"
+        labelEn="Body (EN)"
+        valueRu={`:tg_ios_macos_icons_25: ${LONG}`}
+        valueEn=""
+        onSave={() => {}}
+      />,
+    )
+
+    await screen.findByAltText(':tg_ios_macos_icons_25:')
+    const textarea = screen.getAllByRole('textbox')[0] as HTMLTextAreaElement
+    const layer = screen.getAllByTestId('emoji-field-overlay')[0]
+
+    // No focus anywhere: this is the wheel-over-an-idle-field case.
+    textarea.scrollTop = 144
+    textarea.dispatchEvent(new Event('scroll'))
+
+    await waitFor(() => expect(layer.scrollTop).toBe(144))
+  })
+})
