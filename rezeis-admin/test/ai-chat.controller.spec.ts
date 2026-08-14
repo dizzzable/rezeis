@@ -5,9 +5,13 @@ import { describe, it } from 'node:test';
 
 import { RequestMethod } from '@nestjs/common';
 import { GUARDS_METADATA, PATH_METADATA } from '@nestjs/common/constants';
+import { Test } from '@nestjs/testing';
+import { UserRole } from '@prisma/client';
 
 import { AdminJwtAuthGuard } from '../src/modules/auth/guards/admin-jwt-auth.guard';
+import { CurrentAdminInterface } from '../src/modules/auth/interfaces/current-admin.interface';
 import { AiChatController } from '../src/modules/ai-chat/controllers/ai-chat.controller';
+import { AiChatService } from '../src/modules/ai-chat/services/ai-chat.service';
 import { RbacGuard } from '../src/modules/rbac/guards/rbac.guard';
 import { SYSTEM_ROLES, isValidPermission } from '../src/modules/rbac/rbac.resources';
 import {
@@ -36,11 +40,17 @@ const BASE_PATH = 'ai-chat';
  *   - `POST message` spends the operator's money. It calls the OpenAI-compatible
  *     endpoint configured in AI-Support settings with the stored API key, in a
  *     tool-calling loop that can issue several completions per request.
- *   - `GET conversations/:conversationId/messages` reads back a conversation by
- *     id with no ownership check, and ids are minted as
- *     `conv_${Date.now()}_${counter}` (`ai-chat.service.ts:261`) — guessable by
- *     construction, so any authenticated admin could enumerate another
- *     caller's transcript.
+ *   - the transcript routes read and write stored conversations, and this gate
+ *     is what decides which admins reach them at all.
+ *
+ * The gate is not the whole answer and never was. `GET
+ * conversations/:conversationId/messages` used to return any transcript to any
+ * holder of `settings:edit` who named its id — ids minted as
+ * `conv_${Date.now()}_${counter}`, guessable by construction — and `POST
+ * message` took the conversation's owner from the request body. Who owns a
+ * conversation is now the signed-in admin, enforced in the service and pinned
+ * by `ai-chat.service.spec.ts`; this spec covers the gate, which is the
+ * question of who may use the feature rather than whose rows they see.
  */
 const SETTINGS_EDIT: RoutePermission = { resource: 'settings', action: 'edit' };
 
@@ -89,7 +99,13 @@ describe('AiChatController', () => {
       {
         handler: AiChatController.prototype.listConversations,
         method: RequestMethod.GET,
-        path: 'conversations/:userId',
+        // Was `conversations/:userId`. The parameter is gone, not validated —
+        // the owner comes from the JWT, so there is nothing left for a caller
+        // to name. Worth stating here because the two `conversations/:*` routes
+        // never did shadow each other (Express matches `:userId` against a
+        // single segment, so `/conversations/x/messages` reached only the
+        // messages route) — the leak was the missing owner check, not routing.
+        path: 'conversations',
       },
       {
         handler: AiChatController.prototype.getConversationMessages,
@@ -140,51 +156,103 @@ describe('AiChatController', () => {
     );
   });
 
-  it('delegates each route to AiChatService', async () => {
+  it('delegates each route to AiChatService, naming the subject from the JWT', async () => {
     const calls: unknown[] = [];
-    const controller = new AiChatController({
-      generateResponse: async (userId: string, message: string, conversationId?: string) => {
-        calls.push(['generateResponse', userId, message, conversationId]);
+    const stub = {
+      generateResponse: async (ownerAdminId: string, message: string, conversationId?: string) => {
+        calls.push(['generateResponse', ownerAdminId, message, conversationId]);
         return { reply: 'hi', conversationId: 'conv_1' };
       },
-      createConversation: (userId: string) => {
-        calls.push(['createConversation', userId]);
-        return { id: 'conv_1', userId, createdAt: new Date(0), updatedAt: new Date(0) };
+      createConversation: (ownerAdminId: string) => {
+        calls.push(['createConversation', ownerAdminId]);
+        return {
+          id: 'conv_1',
+          ownerAdminId,
+          createdAt: new Date(0),
+          updatedAt: new Date(0),
+        };
       },
-      listConversations: (userId: string) => {
-        calls.push(['listConversations', userId]);
+      listConversations: (ownerAdminId: string) => {
+        calls.push(['listConversations', ownerAdminId]);
         return [];
       },
-      getHistory: (conversationId: string) => {
-        calls.push(['getHistory', conversationId]);
+      getHistory: (ownerAdminId: string, conversationId: string) => {
+        calls.push(['getHistory', ownerAdminId, conversationId]);
         return [];
       },
       searchKnowledge: async (query: string) => {
         calls.push(['searchKnowledge', query]);
         return 'nothing yet';
       },
-    } as never);
+    } satisfies Pick<
+      AiChatService,
+      | 'createConversation'
+      | 'generateResponse'
+      | 'getHistory'
+      | 'listConversations'
+      | 'searchKnowledge'
+    >;
+
+    // Built through the DI container. The previous spelling constructed the
+    // controller directly and widened the stub to `never` to make it compile,
+    // which switched off the only check that ties these arguments to the real
+    // service signature — and the argument that matters here is the one that
+    // changed: each handler now passes the ADMIN's id.
+    // The guards are overridden rather than wired: Nest instantiates the
+    // enhancers of anything it loads, and the real `RbacGuard` drags in
+    // `RbacService`, `PrismaService` and most of a real container for a test
+    // that calls five methods directly. Nothing is lost — which guards are
+    // attached is asserted from metadata in the first test, and no request
+    // passes through them here.
+    const moduleRef = await Test.createTestingModule({
+      providers: [AiChatController, { provide: AiChatService, useValue: stub }],
+    })
+      .overrideGuard(AdminJwtAuthGuard)
+      .useValue({ canActivate: () => true })
+      .overrideGuard(RbacGuard)
+      .useValue({ canActivate: () => true })
+      .compile();
+    const controller = moduleRef.get(AiChatController);
+    const admin = buildAdmin('admin-7');
 
     assert.deepStrictEqual(
-      await controller.sendMessage({ userId: 'u-1', message: 'hello', conversationId: 'conv_1' }),
+      await controller.sendMessage(admin, { message: 'hello', conversationId: 'conv_1' }),
       { reply: 'hi', conversationId: 'conv_1' },
     );
-    assert.deepStrictEqual(controller.createConversation({ userId: 'u-1' }), {
-      id: 'conv_1',
-      userId: 'u-1',
-    });
-    assert.deepStrictEqual(controller.listConversations('u-1'), []);
-    assert.deepStrictEqual(controller.getConversationMessages('conv_1'), []);
+    assert.deepStrictEqual(controller.createConversation(admin), { id: 'conv_1' });
+    assert.deepStrictEqual(controller.listConversations(admin), []);
+    assert.deepStrictEqual(controller.getConversationMessages(admin, 'conv_1'), []);
     assert.deepStrictEqual(await controller.searchKnowledge({ query: 'vpn' }), {
       result: 'nothing yet',
     });
 
+    // Every subject below is `admin-7` — the id from the token — and none of it
+    // came off the wire. The four routes that used to accept a `userId` in the
+    // body or the path have nowhere left to read one from.
     assert.deepStrictEqual(calls, [
-      ['generateResponse', 'u-1', 'hello', 'conv_1'],
-      ['createConversation', 'u-1'],
-      ['listConversations', 'u-1'],
-      ['getHistory', 'conv_1'],
+      ['generateResponse', 'admin-7', 'hello', 'conv_1'],
+      ['createConversation', 'admin-7'],
+      ['listConversations', 'admin-7'],
+      ['getHistory', 'admin-7', 'conv_1'],
       ['searchKnowledge', 'vpn'],
     ]);
   });
 });
+
+/** The shape `@CurrentAdmin()` hands a handler, with only the id varying. */
+function buildAdmin(id: string): CurrentAdminInterface {
+  return {
+    id,
+    login: 'root',
+    email: null,
+    name: null,
+    role: UserRole.ADMIN,
+    isActive: true,
+    tokenVersion: 1,
+    createdAt: new Date(0),
+    lastLoginAt: null,
+    lastLoginIp: null,
+    rbacRoleId: null,
+    mustChangePassword: false,
+  };
+}
