@@ -212,6 +212,36 @@ function describeRoute(route: RegisteredRoute): string {
   return `${RequestMethod[route.method] ?? route.method} /${route.path} -> ${route.controllerName}.${route.handler} (${route.file})`;
 }
 
+/**
+ * Satisfy the environment schema BEFORE the tree is walked, and not because
+ * this file has any opinion about configuration.
+ *
+ * `buildRouteTable()` below `require`s every `*.controller.ts` and every
+ * `*.module.ts` under `src/`. That is the point of the sweep — a route table
+ * assembled from anything less than the real tree would miss exactly the
+ * controller somebody forgot to register. But it also drags in the config
+ * layer, and `validateEnvironment` (`src/common/config/env.schema.ts`) refuses
+ * an absent `REZEIS_CRYPT_KEY` / `DATABASE_PASSWORD`.
+ *
+ * The refusal arrives as a REJECTED PROMISE, so it does not fail the require.
+ * It settles whenever the loop gets to it, which on a fast machine is after
+ * the process has already exited — and on a slow CI runner is after the last
+ * test in this file finished. Node's runner then reports "a resource generated
+ * asynchronous activity after the test ended", attributes the unhandled
+ * rejection to whichever test was still open, and fails the FILE while every
+ * assertion in it passed. That is precisely how this arrived: green locally,
+ * red on CI, with no failing test named.
+ *
+ * Setting the two values here makes the validation resolve instead of reject.
+ * It changes nothing this file asserts — the sweep reads route metadata off
+ * decorators and never reads config — and it is deliberately the smallest set
+ * that satisfies the schema rather than a copy of `.env.example`: if this list
+ * has to grow, that is a signal a new module started validating at import
+ * time, which is worth noticing rather than papering over.
+ */
+process.env.REZEIS_CRYPT_KEY ??= 'route-shadowing-spec-crypt-key-0123456789';
+process.env.DATABASE_PASSWORD ??= 'route-shadowing-spec-db-password';
+
 const table = buildRouteTable();
 
 /**
