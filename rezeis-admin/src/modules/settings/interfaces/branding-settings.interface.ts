@@ -171,6 +171,37 @@ export interface SubscriptionCardTextSettings {
   readonly color: string | null;
 }
 
+/**
+ * Foreground strategy for ONE tariff card. The four subscription-card modes
+ * mean exactly the same thing here, plus `inherit`, which follows the global
+ * `subscriptionCardText` decision.
+ *
+ * `inherit` and `auto` are deliberately different values. `auto` is an explicit
+ * per-plan instruction to compute contrast from that card's own artwork, which
+ * is the only way to exempt a single plan while the global policy is `light`,
+ * `dark` or `custom`. Collapsing the two would make that impossible to express.
+ */
+export const PLAN_CARD_TEXT_MODES = [
+  'inherit',
+  'auto',
+  'light',
+  'dark',
+  'custom',
+] as const;
+export type PlanCardTextMode = (typeof PLAN_CARD_TEXT_MODES)[number];
+
+/**
+ * One per-plan tariff-card text decision. Same shape as
+ * `SubscriptionCardTextSettings` so the two controls stay interchangeable; a
+ * custom colour is retained only in `custom` mode and is always an opaque hex,
+ * because an alpha-bearing foreground would make the rendered colour depend on
+ * the artwork underneath it and break parity with the admin preview.
+ */
+export interface PlanCardTextSettings {
+  readonly mode: PlanCardTextMode;
+  readonly color: string | null;
+}
+
 /** A composited glass film above card artwork; independent from the effect itself. */
 export interface SubscriptionCardGlassSettings {
   readonly enabled: boolean;
@@ -320,6 +351,25 @@ export interface PlanCardStyle {
   readonly cardEffectProps?: Record<string, unknown>;
   /** Per-plan effect layer opacity (0.05–1). */
   readonly cardEffectOpacity?: number | null;
+  /**
+   * Per-plan tariff-card text policy.
+   *
+   * ABSENT MEANS INHERIT, and that is load-bearing rather than incidental. Every
+   * installation that predates this control has no `text` key on any entry, and
+   * every one of them must keep rendering exactly as it does today: absent →
+   * inherit → the global `subscriptionCardText` → `auto` (its default) → the
+   * cabinet's existing automatic contrast computation. Materialising a default
+   * here — writing `{ mode: 'inherit' }` onto entries nobody edited, or reading
+   * absence as `auto` — would either bloat every stored entry or silently detach
+   * these cards from a global policy an operator had already chosen.
+   *
+   * Same rule the positional card slots follow (`CardEffectSlot.mode`): the
+   * global control is the baseline, an explicit override changes one position.
+   * `readPlanCardStyles` therefore also DROPS a stored `inherit`, so the
+   * persisted payload of an operator who selected inherit is byte-identical to
+   * one who never opened the control.
+   */
+  readonly text?: PlanCardTextSettings;
 }
 
 /**

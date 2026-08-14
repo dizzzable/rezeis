@@ -73,6 +73,65 @@ test('planCardStyles keeps orphan plan ids (harmless; readers ignore unknowns)',
   assert.deepEqual(branding.planCardStyles['deleted_plan_id'], { accent: '#123456' });
 });
 
+/*
+ * The per-plan `text` policy.
+ *
+ * Absence means inherit, so the normalizer's job is mostly deciding what NOT to
+ * store: the values below all mean "no per-plan decision" and must leave the
+ * entry indistinguishable from one an operator never opened. The panel's Zod
+ * schema refuses most of them before they reach an API, so these cases are the
+ * only guard on the paths a hand-edited payload, an older client or a future
+ * one can still take.
+ */
+test('planCardStyles keeps a per-plan text policy, including a text-only entry', () => {
+  const branding = readBrandingSettings({
+    planCardStyles: {
+      both: { accent: '#abcdef', text: { mode: 'dark', color: null } },
+      // The entry that "no usable field → skip" would silently delete. A plan
+      // whose only decision is its text colour is a configured plan.
+      textOnly: { text: { mode: 'custom', color: '  #22C55E  ' } },
+    },
+  });
+  assert.deepEqual(branding.planCardStyles['both'], {
+    accent: '#abcdef',
+    text: { mode: 'dark', color: null },
+  });
+  assert.deepEqual(branding.planCardStyles['textOnly'], {
+    text: { mode: 'custom', color: '#22C55E' },
+  });
+});
+
+test('planCardStyles stores nothing for a text that carries no decision', () => {
+  const branding = readBrandingSettings({
+    planCardStyles: {
+      // Inherit is what an absent key already does — storing it would make an
+      // install that chose inherit differ from one that never opened the
+      // control.
+      inherit: { accent: '#abcdef', text: { mode: 'inherit', color: null } },
+      // `custom` with nothing usable: dropping the whole field returns the card
+      // to the global policy rather than to an arbitrary foreground.
+      noColour: { accent: '#abcdef', text: { mode: 'custom', color: null } },
+      // Alpha is refused for the same reason as on the global control: a
+      // translucent foreground renders differently over every gradient.
+      alpha: { accent: '#abcdef', text: { mode: 'custom', color: '#22c55eff' } },
+      unknownMode: { accent: '#abcdef', text: { mode: 'gradient-aware', color: null } },
+      notAnObject: { accent: '#abcdef', text: 'light' },
+    },
+  });
+  for (const planId of ['inherit', 'noColour', 'alpha', 'unknownMode', 'notAnObject']) {
+    assert.deepEqual(branding.planCardStyles[planId], { accent: '#abcdef' }, planId);
+  }
+});
+
+test('planCardStyles skips an entry whose only field is an inherited text', () => {
+  // The combination of the two rules above: nothing usable is left, so the
+  // whole entry goes, and the plan reads as unconfigured again.
+  const branding = readBrandingSettings({
+    planCardStyles: { p1: { text: { mode: 'inherit', color: null } } },
+  });
+  assert.equal(branding.planCardStyles['p1'], undefined);
+});
+
 test('planCardStyles survives a merge patch round-trip', () => {
   const existing = { brandName: 'Acme', planCardStyles: { p1: { accent: '#111111' } } };
   const merged = mergeBrandingSettings({

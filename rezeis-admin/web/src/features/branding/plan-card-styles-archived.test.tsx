@@ -72,7 +72,12 @@ describe('PlanCardStylesSection plan list', () => {
     mockPlansEndpoint([BASE_PLAN, ARCHIVED_PLAN])
 
     renderWithProviders(
-      <PlanCardStylesSection value={{}} onChange={vi.fn()} primary="#7c3aed" />,
+      <PlanCardStylesSection
+        value={{}}
+        onChange={vi.fn()}
+        primary="#7c3aed"
+        subscriptionCardText={{ mode: 'auto', color: null }}
+      />,
     )
 
     // Each row prints the name twice — once inside the mini card preview, once
@@ -90,7 +95,12 @@ describe('PlanCardStylesSection plan list', () => {
     mockPlansEndpoint([ARCHIVED_PLAN])
 
     renderWithProviders(
-      <PlanCardStylesSection value={{}} onChange={vi.fn()} primary="#7c3aed" />,
+      <PlanCardStylesSection
+        value={{}}
+        onChange={vi.fn()}
+        primary="#7c3aed"
+        subscriptionCardText={{ mode: 'auto', color: null }}
+      />,
     )
 
     expect(await screen.findAllByText('Legacy Retired')).not.toHaveLength(0)

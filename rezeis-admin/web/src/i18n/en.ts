@@ -3853,6 +3853,10 @@ export const en = {
         gradient: 'Gradient',
         fromPrimary: 'From primary',
         accent: 'Accent',
+        text: 'Card text',
+        textHint:
+          'A tariff card follows the subscription card’s text setting by default. Pick another mode to change it for this plan only.',
+        textInherit: 'Same as the subscription card',
         texture: 'Texture',
         effect: 'Animated background',
         textureNone: 'None',

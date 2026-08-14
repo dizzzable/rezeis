@@ -780,7 +780,22 @@ export class UpdateBrandingSettingsDto {
   /**
    * Per-plan tariff-card styles, keyed by `planId`. Loosely validated here
    * (dynamic keys); strictly normalized in `readPlanCardStyles` (gradient/url
-   * caps, hex accent, texture-preset allowlist, orphan-tolerant).
+   * caps, hex accent, texture-preset allowlist, per-plan `text` policy,
+   * orphan-tolerant).
+   *
+   * The two validators below are the exceptions, and they are here for a
+   * property no normalizer can restore afterwards: a `textureUrl` decides
+   * whether the cabinet issues an outbound request, and a `gradient` decides
+   * whether a value can escape its CSS declaration. Both must be refused at the
+   * door rather than repaired.
+   *
+   * `text` deliberately gets no validator of its own. A refusal here is a 400
+   * for the WHOLE branding PATCH — every colour, logo and text in the same
+   * submit — and the worst an unreadable text policy can do is be dropped by
+   * `readPlanCardStyles`, leaving that one card on the global policy. The panel
+   * schema already refuses a malformed colour where the operator can see which
+   * control produced it; making the API refuse it a second time would only
+   * convert a survivable mistake into an unexplained failed save.
    */
   @IsOptional()
   @IsObject()

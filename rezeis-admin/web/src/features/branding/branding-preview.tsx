@@ -44,7 +44,7 @@ import {
   resolveCardEffectPreviewOpacity,
 } from './card-effect-preview-utils'
 import { usePlans, type Plan } from '@/features/plans/plans-api'
-import { autoPlanGradient } from './plan-card-style-utils'
+import { autoPlanGradient, resolvePlanCardText } from './plan-card-style-utils'
 import { buildTextureCss } from './app-texture'
 import { PlanIconView } from '@/features/plans/plan-icon-view'
 import {
@@ -1366,6 +1366,9 @@ export function BrandingPreview({ values, focus }: BrandingPreviewProps) {
               plans={(plans ?? []).slice(0, 3)}
               planCardStyles={planCardStyles}
               primary={primary}
+              primaryFg={primaryFg}
+              foundation={bgSecondary}
+              subscriptionCardText={subscriptionCardText}
               cardLogo={cardLogo}
               cardLogoUrl={cardLogoUrl}
               radius={radius}
@@ -1514,6 +1517,11 @@ interface TariffListPreviewProps {
   readonly plans: ReadonlyArray<Plan>
   readonly planCardStyles: Record<string, PlanCardStyleDraft>
   readonly primary: string
+  readonly primaryFg: string
+  /** Colour behind the card, used when the gradient carries no sampleable stops. */
+  readonly foundation: string
+  /** The global decision an unconfigured tariff card inherits. */
+  readonly subscriptionCardText: BrandingSubscriptionCardTextDraft
   readonly cardLogo: CardLogoPreset
   readonly cardLogoUrl?: string | null
   readonly radius: string
@@ -1525,6 +1533,9 @@ function TariffListPreview({
   plans,
   planCardStyles,
   primary,
+  primaryFg,
+  foundation,
+  subscriptionCardText,
   cardLogo,
   cardLogoUrl,
   radius,
@@ -1547,6 +1558,9 @@ function TariffListPreview({
           plan={plan}
           style={planCardStyles[plan.id]}
           primary={primary}
+          primaryFg={primaryFg}
+          foundation={foundation}
+          subscriptionCardText={subscriptionCardText}
           cardLogo={cardLogo}
           cardLogoUrl={cardLogoUrl}
           radius={radius}
@@ -1561,6 +1575,9 @@ function TariffPreviewCard({
   plan,
   style,
   primary,
+  primaryFg,
+  foundation,
+  subscriptionCardText,
   cardLogo,
   cardLogoUrl,
   radius,
@@ -1569,6 +1586,9 @@ function TariffPreviewCard({
   readonly plan: Plan
   readonly style: PlanCardStyleDraft | undefined
   readonly primary: string
+  readonly primaryFg: string
+  readonly foundation: string
+  readonly subscriptionCardText: BrandingSubscriptionCardTextDraft
   readonly cardLogo: CardLogoPreset
   readonly cardLogoUrl?: string | null
   readonly radius: string
@@ -1602,11 +1622,49 @@ function TariffPreviewCard({
   // glyph, `custom:<id>` → uploaded icon, `:slug:`/unicode → emoji, else
   // a Sparkles fallback. Centralised in PlanIconView (no local regex).
 
+  /**
+   * Card copy colour, resolved exactly as the cabinet resolves it: the per-plan
+   * override if there is one, otherwise the global subscription-card policy,
+   * and `auto` runs the same contrast computation the subscription-card mock
+   * above uses. Without this the operator picks a text colour and the preview
+   * goes on drawing white — which is choosing blind, and the only place the
+   * mistake would surface is a subscriber's screen.
+   *
+   * The effect artwork is fed in for the same reason the cabinet feeds it in:
+   * an opaque animation over a dark gradient changes what is readable. It is
+   * suppressed when a `textureUrl` is set, because the image wins and the
+   * effect layer is not mounted (the condition above renders it identically).
+   */
+  const drawsOverlay = isPreviewCardEffect(effect) && !textureUrl
+  const contrast = useMemo(
+    () =>
+      resolvePreviewCardContrast(
+        gradient,
+        foundation,
+        primaryFg,
+        drawsOverlay ? resolvePreviewEffectColors(effect, effectProps) : '',
+        drawsOverlay ? effectOpacity : 0,
+        resolvePlanCardText(style, subscriptionCardText),
+      ),
+    [
+      gradient,
+      foundation,
+      primaryFg,
+      drawsOverlay,
+      effect,
+      effectProps,
+      effectOpacity,
+      style,
+      subscriptionCardText,
+    ],
+  )
+
   return (
     <div
       data-preview-tariff-card
+      data-preview-tariff-card-foreground={contrast.foreground}
       className="relative overflow-hidden p-3 ring-1 ring-white/10"
-      style={{ borderRadius: radius, backgroundImage: gradient }}
+      style={{ borderRadius: radius, backgroundImage: gradient, color: contrast.foreground }}
     >
       {isPreviewCardEffect(effect) && !textureUrl && (
         <CardEffectPreviewLayer
@@ -1626,20 +1684,31 @@ function TariffPreviewCard({
           style={{ backgroundImage: textureCss.backgroundImage, backgroundSize: textureCss.backgroundSize }}
         />
       ) : null}
-      <div className="absolute inset-0 bg-linear-to-br from-black/30 via-transparent to-black/55" />
+      {/* Same diagonal veil at the same two opacities as before; only its TONE
+          now follows the contrast result. On every card that resolves to light
+          copy the channels are `0 0 0` and this is byte-identical to the
+          `from-black/30 … to-black/55` classes it replaces — but a card the
+          operator switched to dark text used to get dark copy over a black
+          veil, which is the one combination nobody can read. */}
+      <div
+        className="absolute inset-0"
+        style={{
+          backgroundImage: `linear-gradient(to bottom right, rgb(${contrast.veilChannels} / 0.3) 0%, transparent 50%, rgb(${contrast.veilChannels} / 0.55) 100%)`,
+        }}
+      />
       <CardLogoMark
         preset={cardLogo}
         customUrl={cardLogoUrl}
         className="pointer-events-none absolute -right-3 -bottom-4 h-20 w-20"
-        style={{ color: '#ffffff', opacity: 0.12 }}
+        style={{ color: contrast.foreground, opacity: 0.12 }}
       />
-      <div className="relative flex items-center gap-2.5 text-white">
+      <div className="relative flex items-center gap-2.5">
         <span className="shrink-0 leading-none drop-shadow" style={{ color: accent }}>
           <PlanIconView value={plan.icon} className="h-5 w-5 text-xl" />
         </span>
         <div className="min-w-0 flex-1">
           <p className="truncate text-[12px] font-semibold drop-shadow">{plan.name}</p>
-          <p className="text-[9px] font-medium text-white/80">
+          <p className="text-[9px] font-medium opacity-80">
             {plan.trafficLimit > 0 ? `${plan.trafficLimit} GB` : unlimitedLabel}
             {plan.deviceLimit > 0 ? ` · ${plan.deviceLimit}` : ''}
           </p>

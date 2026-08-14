@@ -38,6 +38,9 @@ import {
   NavDestinationId,
   NavItemSetting,
   PlanCardStyle,
+  PlanCardTextMode,
+  PlanCardTextSettings,
+  PLAN_CARD_TEXT_MODES,
   ProfileNamingSettings,
   SubscriptionCardTextMode,
   SubscriptionCardTextSettings,
@@ -824,10 +827,15 @@ function readClampedNumber(
 /**
  * Reads the per-plan tariff-card styles map (`planCardStyles`), keyed by
  * `planId`. Each entry is normalized: gradient (string, capped), accent (hex),
- * texturePreset (allowlisted pattern), textureUrl (data:/http(s)/uploads).
- * Empty/invalid sub-values are dropped; an entry with no usable field is
- * skipped. Orphaned plan ids are kept as-is (harmless; readers ignore unknown
- * ids). Capped at 500 entries to bound the persisted payload.
+ * texturePreset (allowlisted pattern), textureUrl (data:/http(s)/uploads),
+ * text (per-plan foreground policy). Empty/invalid sub-values are dropped; an
+ * entry with no usable field is skipped. Orphaned plan ids are kept as-is
+ * (harmless; readers ignore unknown ids). Capped at 500 entries to bound the
+ * persisted payload.
+ *
+ * `text` counts as a usable field on its own: a plan whose only per-plan
+ * decision is "this card gets light text" is a fully configured plan, and
+ * skipping it would throw that decision away on the very save that made it.
  */
 function readPlanCardStyles(record: Record<string, unknown>): Record<string, PlanCardStyle> {
   const value = record['planCardStyles'];
@@ -878,6 +886,10 @@ function readPlanCardStyles(record: Record<string, unknown>): Record<string, Pla
       style.cardEffectProps = readJsonRecord(slot, 'cardEffectProps');
       style.cardEffectOpacity = readClampedNumber(slot, 'cardEffectOpacity', 0.05, 1, 1);
     }
+    const text = readPlanCardText(slot['text']);
+    if (text) {
+      style.text = text;
+    }
 
     // Skip entries that carry no usable styling at all.
     if (Object.keys(style).length === 0) continue;
@@ -885,6 +897,52 @@ function readPlanCardStyles(record: Record<string, unknown>): Record<string, Pla
     count += 1;
   }
   return out;
+}
+
+/**
+ * Normalizes one per-plan text policy, or returns `undefined` for anything that
+ * carries no decision.
+ *
+ * `undefined` is returned for three different inputs on purpose, because all
+ * three mean the same thing downstream and storing them apart would be a
+ * distinction without a difference:
+ *
+ *   - an absent/garbled value — nothing was ever chosen;
+ *   - `inherit` — the operator chose to follow the global
+ *     `subscriptionCardText`, which is precisely what an absent key already
+ *     does, so persisting it would make an inherit-selecting install's payload
+ *     differ from an untouched one for no behavioural reason;
+ *   - `custom` without a usable opaque hex — the same defect
+ *     `readSubscriptionCardText` guards: a `custom` mode with no colour would
+ *     otherwise resolve to an arbitrary or invisible foreground. Dropping the
+ *     whole field (rather than just the colour) returns the card to the global
+ *     policy, which is the operator's own most recent explicit decision.
+ *
+ * Alpha hex is rejected for the same reason it is on the global control: a
+ * translucent foreground renders differently over every gradient, so the
+ * cabinet and the admin preview could not agree on the result.
+ */
+function readPlanCardText(value: unknown): PlanCardTextSettings | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  const mode = record['mode'];
+  if (
+    typeof mode !== 'string' ||
+    !(PLAN_CARD_TEXT_MODES as readonly string[]).includes(mode) ||
+    mode === 'inherit'
+  ) {
+    return undefined;
+  }
+  if (mode !== 'custom') {
+    return { mode: mode as PlanCardTextMode, color: null };
+  }
+  const color = record['color'];
+  if (typeof color !== 'string' || !OPAQUE_HEX_PATTERN.test(color.trim())) {
+    return undefined;
+  }
+  return { mode: 'custom', color: color.trim() };
 }
 
 function readGradient(

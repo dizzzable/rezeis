@@ -27,8 +27,16 @@ import { CardEffectPicker } from './card-effect-section'
 import { getCardEffectDefaults } from './card-effect-registry'
 import { CARD_GRADIENT_PRESETS, gradientFromPrimary } from './theme-presets'
 import { APP_BG_TEXTURE_PATTERNS, buildTextureCss } from './app-texture'
-import { resolvePlanCardTextureCss } from './plan-card-style-utils'
-import type { PlanCardStyleDraft } from './branding-form-schema'
+import {
+  resolveCardTextForeground,
+  resolvePlanCardText,
+  resolvePlanCardTextureCss,
+} from './plan-card-style-utils'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import type {
+  BrandingSubscriptionCardTextDraft,
+  PlanCardStyleDraft,
+} from './branding-form-schema'
 import { PlanIconView } from '@/features/plans/plan-icon-view'
 
 type PlanCardStyleMap = Record<string, PlanCardStyleDraft>
@@ -38,6 +46,13 @@ interface PlanCardStylesSectionProps {
   readonly onChange: (next: PlanCardStyleMap) => void
   /** Brand primary — seeds new gradients + accent default. */
   readonly primary: string
+  /**
+   * The global card-text decision every tariff card inherits until one is
+   * given its own. Required rather than defaulted: a wrong baseline here shows
+   * the operator a text colour no subscriber will ever see, and a default would
+   * hide that from the compiler.
+   */
+  readonly subscriptionCardText: BrandingSubscriptionCardTextDraft
 }
 
 /** Deterministic auto gradient from a plan id — mirrors reiwa `autoPlanStyle`. */
@@ -50,7 +65,12 @@ function autoPlanGradient(planId: string): string {
   return `linear-gradient(135deg, hsl(${hue} 70% 22%), hsl(${(hue + 40) % 360} 65% 32%))`
 }
 
-export function PlanCardStylesSection({ value, onChange, primary }: PlanCardStylesSectionProps) {
+export function PlanCardStylesSection({
+  value,
+  onChange,
+  primary,
+  subscriptionCardText,
+}: PlanCardStylesSectionProps) {
   const { t } = useTranslation()
   const { data: plans, isLoading } = usePlans()
 
@@ -70,12 +90,19 @@ export function PlanCardStylesSection({ value, onChange, primary }: PlanCardStyl
     } else {
       const merged = { ...(next[planId] ?? {}), ...patch }
       // Drop empty entry entirely so an "all-cleared" plan reverts to auto.
+      //
+      // `text` counts only when it is an actual override. `inherit` is what an
+      // absent entry already does, so a plan switched back to inherit must
+      // leave NO entry behind — otherwise the row would keep reading "custom"
+      // with nothing to show for it, and the stored payload of an operator who
+      // chose inherit would differ from one who never opened the control.
       const hasAny =
         (merged.gradient && merged.gradient.length > 0) ||
         (merged.accent && merged.accent.length > 0) ||
         (merged.texturePreset && merged.texturePreset.length > 0) ||
         (merged.textureUrl && merged.textureUrl.length > 0) ||
-        (merged.cardEffect && merged.cardEffect !== 'NONE')
+        (merged.cardEffect && merged.cardEffect !== 'NONE') ||
+        (merged.text != null && merged.text.mode !== 'inherit')
       if (hasAny) next[planId] = merged
       else delete next[planId]
     }
@@ -125,6 +152,7 @@ export function PlanCardStylesSection({ value, onChange, primary }: PlanCardStyl
               deviceLimit={plan.deviceLimit}
               style={value[plan.id]}
               primary={primary}
+              subscriptionCardText={subscriptionCardText}
               onPatch={(patch) => setStyle(plan.id, patch)}
               onReset={() => setStyle(plan.id, null)}
             />
@@ -144,6 +172,7 @@ interface PlanStyleRowProps {
   readonly deviceLimit: number
   readonly style: PlanCardStyleDraft | undefined
   readonly primary: string
+  readonly subscriptionCardText: BrandingSubscriptionCardTextDraft
   readonly onPatch: (patch: Partial<PlanCardStyleDraft>) => void
   readonly onReset: () => void
 }
@@ -157,6 +186,7 @@ function PlanStyleRow({
   deviceLimit,
   style,
   primary,
+  subscriptionCardText,
   onPatch,
   onReset,
 }: PlanStyleRowProps) {
@@ -178,6 +208,7 @@ function PlanStyleRow({
           trafficLimit={trafficLimit}
           deviceLimit={deviceLimit}
           style={style}
+          subscriptionCardText={subscriptionCardText}
           className="h-14 w-24 shrink-0"
         />
         <div className="min-w-0 flex-1">
@@ -276,6 +307,81 @@ function PlanStyleRow({
                 className="h-8 font-mono text-xs"
               />
             </div>
+          </div>
+
+          {/* Card text — same four policies as the subscription card, plus the
+              inherit default. Deliberately worded and shaped like the global
+              control (`brandingPage.sections.card.textMode*`), because it is
+              the same decision taken one level down. */}
+          <div className="space-y-1.5 rounded-md border border-dashed bg-muted/20 p-2">
+            <Label className="text-xs" htmlFor={`planCardText-${planId}`}>
+              {t('brandingPage.sections.planCards.text')}
+            </Label>
+            <p className="text-[11px] text-muted-foreground">
+              {t('brandingPage.sections.planCards.textHint')}
+            </p>
+            <Select
+              value={style?.text?.mode ?? 'inherit'}
+              onValueChange={(mode) =>
+                onPatch({
+                  text: {
+                    mode: mode as NonNullable<PlanCardStyleDraft['text']>['mode'],
+                    // A colour belongs to `custom` alone. Clearing it on every
+                    // other mode is what keeps the persisted entry identical to
+                    // an untouched one when the operator returns to inherit.
+                    color: mode === 'custom' ? (style?.text?.color ?? primary) : null,
+                  },
+                })
+              }
+            >
+              <SelectTrigger id={`planCardText-${planId}`} className="h-8 text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="inherit">
+                  {t('brandingPage.sections.planCards.textInherit')}
+                </SelectItem>
+                <SelectItem value="auto">
+                  {t('brandingPage.sections.card.textModes.auto')}
+                </SelectItem>
+                <SelectItem value="light">
+                  {t('brandingPage.sections.card.textModes.light')}
+                </SelectItem>
+                <SelectItem value="dark">
+                  {t('brandingPage.sections.card.textModes.dark')}
+                </SelectItem>
+                <SelectItem value="custom">
+                  {t('brandingPage.sections.card.textModes.custom')}
+                </SelectItem>
+              </SelectContent>
+            </Select>
+            {style?.text?.mode === 'custom' && (
+              <div className="flex items-center gap-2">
+                {/* A swatch beside the text box, exactly like the accent
+                    control above. It matters more here than there: a validation
+                    error on this value lands at path
+                    `planCardStyles.<planId>.text.color`, which react-hook-form
+                    cannot attach to any input, so a half-typed colour would
+                    read as a Save button that does nothing. The swatch can only
+                    emit `#rrggbb`, so there is always a way to set this that
+                    cannot fail. */}
+                <input
+                  type="color"
+                  aria-label={t('brandingPage.sections.card.textColor')}
+                  value={isOpaqueHex(style.text.color) ? style.text.color : '#ffffff'}
+                  onChange={(e) => onPatch({ text: { mode: 'custom', color: e.target.value } })}
+                  className="h-8 w-12 cursor-pointer rounded border bg-transparent"
+                />
+                <Input
+                  value={style.text.color ?? ''}
+                  onChange={(e) =>
+                    onPatch({ text: { mode: 'custom', color: e.target.value || null } })
+                  }
+                  placeholder="#ffffff"
+                  className="h-8 font-mono text-xs"
+                />
+              </div>
+            )}
           </div>
 
           {/* Texture: preset grid + upload */}
@@ -386,6 +492,7 @@ function PlanStyleRow({
               trafficLimit={trafficLimit}
               deviceLimit={deviceLimit}
               style={style}
+              subscriptionCardText={subscriptionCardText}
               className="h-20 w-32"
             />
           </div>
@@ -403,6 +510,7 @@ function TariffCardThumb({
   trafficLimit,
   deviceLimit,
   style,
+  subscriptionCardText,
   className,
 }: {
   readonly planId: string
@@ -411,15 +519,31 @@ function TariffCardThumb({
   readonly trafficLimit: number
   readonly deviceLimit: number
   readonly style: PlanCardStyleDraft | undefined
+  readonly subscriptionCardText: BrandingSubscriptionCardTextDraft
   readonly className?: string
 }) {
   const gradient = style?.gradient && style.gradient.length > 0 ? style.gradient : autoPlanGradient(planId)
   const textureCss = resolvePlanCardTextureCss(style)
+  /**
+   * The forced foreground for this card, resolved through the same precedence
+   * the cabinet uses (per-plan override → global → auto).
+   *
+   * `null` means `auto`, and this thumb keeps drawing white for that — it has no
+   * contrast engine and is 24px tall. That is the pre-existing behaviour and it
+   * is left alone deliberately: the phone-frame preview beside this section
+   * runs the real computation and shows the accurate automatic colour. What the
+   * thumb must never do is ignore an EXPLICIT choice, because then the operator
+   * would pick "dark text" and see white here.
+   */
+  const forcedForeground = resolveCardTextForeground(
+    resolvePlanCardText(style, subscriptionCardText),
+  )
 
   return (
     <div
       className={cn('relative overflow-hidden rounded-lg ring-1 ring-white/10', className)}
       style={{ backgroundImage: gradient }}
+      data-plan-card-thumb-foreground={forcedForeground ?? 'auto'}
     >
       <div className="absolute inset-0 bg-linear-to-b from-black/30 via-transparent to-black/60" />
       {style?.textureUrl ? (
@@ -433,7 +557,10 @@ function TariffCardThumb({
           style={{ backgroundImage: textureCss.backgroundImage, backgroundSize: textureCss.backgroundSize }}
         />
       ) : null}
-      <div className="relative flex h-full flex-col justify-between p-1.5 text-white">
+      <div
+        className="relative flex h-full flex-col justify-between p-1.5"
+        style={{ color: forcedForeground ?? '#ffffff' }}
+      >
         <div className="flex items-center gap-1">
           {planIcon ? (
             <PlanIconView value={planIcon} className="h-3.5 w-3.5 text-xs" />
@@ -442,7 +569,13 @@ function TariffCardThumb({
         </div>
         <span
           className="text-[8px] font-medium"
-          style={{ color: isHex(style?.accent) ? (style?.accent as string) : 'rgba(255,255,255,0.85)' }}
+          // No accent → follow the resolved card foreground rather than a
+          // hard-coded white, or a dark-text card would print a white sub-line.
+          style={
+            isHex(style?.accent)
+              ? { color: style?.accent as string }
+              : { opacity: 0.85 }
+          }
         >
           {trafficLimit > 0 ? `${trafficLimit} GB` : '∞'}
           {deviceLimit > 0 ? ` · ${deviceLimit}` : ''}
@@ -494,4 +627,9 @@ function TextureUploadButton({ onUploaded }: { readonly onUploaded: (url: string
 
 function isHex(value: string | null | undefined): boolean {
   return typeof value === 'string' && /^#([0-9a-fA-F]{3,8})$/.test(value.trim())
+}
+
+/** The colour swatch can only round-trip opaque hex, which is also all the schema accepts. */
+function isOpaqueHex(value: string | null | undefined): value is string {
+  return typeof value === 'string' && /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(value.trim())
 }

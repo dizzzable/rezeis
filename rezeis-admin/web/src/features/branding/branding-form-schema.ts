@@ -8,6 +8,22 @@ export const BRANDING_ICON_COLOR_MODES = ['default', 'theme', 'custom'] as const
 export const BRANDING_THEME_MODE_POLICIES = ['fixed', 'user-selectable'] as const
 export const BRANDING_THEME_MODES = ['light', 'dark'] as const
 export const BRANDING_SUBSCRIPTION_CARD_TEXT_MODES = ['auto', 'light', 'dark', 'custom'] as const
+/**
+ * Per-plan tariff-card text modes: the four global ones plus `inherit`.
+ *
+ * `inherit` is the default and means "follow `subscriptionCardText`", the same
+ * baseline/override rule the positional card slots use. It is a separate value
+ * from `auto` because `auto` is an explicit per-plan instruction to compute
+ * contrast from that card's own artwork — the only way to exempt one plan while
+ * the global policy is light, dark or custom.
+ */
+export const BRANDING_PLAN_CARD_TEXT_MODES = [
+  'inherit',
+  'auto',
+  'light',
+  'dark',
+  'custom',
+] as const
 export const BRANDING_APP_BG_KINDS = ['none', 'gradient', 'texture', 'effect'] as const
 export const BRANDING_APP_BG_TEXTURES = [
   'dots',
@@ -197,6 +213,12 @@ export interface BrandingCornerRadiiDraft {
   readonly pillPx: number
 }
 
+/** One per-plan tariff-card text decision (mirrors backend `PlanCardTextSettings`). */
+export interface PlanCardTextDraft {
+  readonly mode: (typeof BRANDING_PLAN_CARD_TEXT_MODES)[number]
+  readonly color: string | null
+}
+
 /** Per-plan tariff-card style draft (mirrors backend `PlanCardStyle`). */
 export interface PlanCardStyleDraft {
   readonly gradient?: string | null
@@ -206,6 +228,11 @@ export interface PlanCardStyleDraft {
   readonly cardEffect?: string | null
   readonly cardEffectProps?: Record<string, unknown>
   readonly cardEffectOpacity?: number | null
+  /**
+   * Absent means inherit — every entry written before this control existed has
+   * no `text` key, and those cards must keep following `subscriptionCardText`.
+   */
+  readonly text?: PlanCardTextDraft | null
 }
 
 export interface BrandingAppBackgroundDraft {
@@ -403,6 +430,51 @@ export function createBrandingFormSchema(messages: BrandingFormValidationMessage
       path: ['color'],
       message: messages.hexInvalid,
     })
+  /**
+   * Per-plan text policy, as it appears INSIDE a `z.record` value object.
+   *
+   * The trailing `.nullish()` is the whole reason this is a named schema rather
+   * than an inline object, and removing it breaks every branding save in the
+   * panel — the exact defect this release fixed for `textureUrl`. Under Zod 4 a
+   * property whose own schema does not declare optionality FAILS on an ABSENT
+   * key, and almost no `planCardStyles` entry carries this key: every entry
+   * written before this control existed lacks it, and every control except this
+   * one patches an object that never mentions it. The failure surfaces as a
+   * validation error at path `planCardStyles.<planId>.text`, which react-hook-
+   * form cannot attach to any rendered input — so no field lights up and the
+   * operator is left with a Save button that silently does nothing. Every
+   * sibling above ends in `.optional()`/`.nullish()` for the same reason.
+   *
+   * `.nullish()` (not just `.optional()`) because an explicit `null` is what a
+   * "clear this" patch would send, and a value that is legitimately clearable
+   * must not be the one thing that refuses the submit.
+   *
+   * The refine mirrors the global control: `custom` without a colour is not a
+   * decision. It is placed BEFORE `.nullish()` so an absent value never reaches
+   * it.
+   */
+  const planCardTextSchema = z
+    .object({
+      mode: z.enum(BRANDING_PLAN_CARD_TEXT_MODES),
+      // Opaque hex only, exactly like `subscriptionCardText.color`: an
+      // alpha-bearing foreground renders differently over every gradient, so
+      // the cabinet and this preview could not agree on the result.
+      //
+      // `.nullish()` here as well. The panel always writes both keys, but a
+      // stored entry from a hand-edited payload or a future writer might carry
+      // only `mode`, and an absent `color` must not be able to refuse the whole
+      // branding submit for a plan the operator is not even editing.
+      color: z
+        .string()
+        .regex(OPAQUE_HEX_PATTERN, messages.hexInvalid)
+        .nullish()
+        .transform((value) => value ?? null),
+    })
+    .refine((value) => value.mode !== 'custom' || value.color !== null, {
+      path: ['color'],
+      message: messages.hexInvalid,
+    })
+    .nullish()
   const subscriptionCardGlassSchema = z.object({
     enabled: z.boolean(),
     tint: z.string().regex(OPAQUE_HEX_PATTERN, messages.hexInvalid),
@@ -491,6 +563,7 @@ export function createBrandingFormSchema(messages: BrandingFormValidationMessage
             cardEffect: cardEffectField().nullish(),
             cardEffectProps: z.record(z.string(), z.unknown()).optional(),
             cardEffectOpacity: z.number().min(0.05).max(1).nullish(),
+            text: planCardTextSchema,
           }),
         )
         .refine((value) => Object.keys(value).length <= 500)

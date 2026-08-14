@@ -1942,6 +1942,10 @@ export default function WebReiwaPage() {
                   value={(field.value ?? {}) as Record<string, PlanCardStyleDraft>}
                   onChange={(next) => field.onChange(next)}
                   primary={watchedValues.primary}
+                  // The baseline every tariff card inherits. Watched, not read
+                  // once: changing the global card text must move every
+                  // inheriting tariff thumb in the same render.
+                  subscriptionCardText={watchedValues.subscriptionCardText}
                 />
               )}
             />
