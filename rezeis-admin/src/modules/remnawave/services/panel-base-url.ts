@@ -25,6 +25,36 @@
  * deployment that works today would be a worse answer than the one it has.
  */
 
+/**
+ * A scheme the operator wrote into the host field, and the trailing slashes
+ * they left behind. `REMNAWAVE_HOST` is documented as bare — "without HTTP/HTTPS
+ * and without trailing slash", the same wording the upstream project this
+ * convention came from uses — but documentation is not a parser. Both forms are
+ * written, and before this the resolver mangled them instead of refusing them:
+ * a scheme survived `splitEmbeddedPort` (two parts, second not digits), reached
+ * the IPv6 branch on its `:` and came out bracketed as
+ * `https://[https://panel.example.com]`, which is not a URL at all, so every
+ * request failed at the transport with nothing naming the cause. A trailing
+ * slash rode through into `https://panel.example.com/` and doubled up against
+ * the request paths.
+ *
+ * So: strip both, and let an explicit scheme mean what it says — with the one
+ * exception the rest of this file exists to enforce.
+ */
+const SCHEME = /^(https?):\/\//i;
+
+function splitScheme(host: string): {
+  readonly scheme: 'http' | 'https' | null;
+  readonly host: string;
+} {
+  const matched = SCHEME.exec(host);
+  if (matched === null) return { scheme: null, host };
+  return {
+    scheme: matched[1].toLowerCase() === 'https' ? 'https' : 'http',
+    host: host.slice(matched[0].length),
+  };
+}
+
 /** Four dot-separated decimal octets, each 0-255. Nothing else. */
 const IPV4 = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
 
@@ -131,23 +161,39 @@ export function resolvePanelBaseUrl(
   if (host === null || host.trim().length === 0) {
     return { url: null, warning: null };
   }
-  const trimmed = host.trim();
+  const declared = splitScheme(host.trim());
+  // Trailing slashes go before anything else looks at the value: they are not
+  // part of a host under any of the three readings below, and left in place
+  // they reach the request paths as `//`.
+  const trimmed = declared.host.replace(/\/+$/, '');
+  if (trimmed.length === 0) {
+    return { url: null, warning: null };
+  }
   const kind = classifyPanelHost(trimmed);
   const embedded = splitEmbeddedPort(trimmed);
+
+  // An explicit `http://` on a routable host is the one thing a declared scheme
+  // does NOT get to decide. It is the same refusal the discarded port below is,
+  // for the same reason — REMNAWAVE_TOKEN on the wire in clear — and saying it
+  // once here keeps the two branches from drifting apart.
+  const downgraded = declared.scheme === 'http' && kind === 'public';
+  const refusedDowngrade = downgraded
+    ? `Remnawave: REMNAWAVE_HOST "${host.trim()}" asks for plain HTTP to a host reachable from ` +
+      'the public internet, which would put REMNAWAVE_TOKEN on the wire in clear, so HTTPS is ' +
+      'used instead.'
+    : null;
 
   if (embedded !== null) {
     // The host already says where to knock. Use it verbatim — no bracketing, no
     // appended port — and pick the scheme from what the NAME is: a private
-    // target speaks plain HTTP, anything routable keeps TLS.
-    const scheme = kind === 'public' ? 'https' : 'http';
-    return {
-      url: `${scheme}://${trimmed}`,
-      warning:
-        port === null || port === embedded.port
-          ? null
-          : `Remnawave: REMNAWAVE_HOST "${trimmed}" already carries port ${embedded.port}, so ` +
-            `REMNAWAVE_PORT ${port} is ignored and the panel is addressed at ${scheme}://${trimmed}.`,
-    };
+    // target speaks plain HTTP unless told otherwise, anything routable keeps TLS.
+    const scheme = kind === 'public' ? 'https' : (declared.scheme ?? 'http');
+    const discarded =
+      port === null || port === embedded.port
+        ? null
+        : `Remnawave: REMNAWAVE_HOST "${trimmed}" already carries port ${embedded.port}, so ` +
+          `REMNAWAVE_PORT ${port} is ignored and the panel is addressed at ${scheme}://${trimmed}.`;
+    return { url: `${scheme}://${trimmed}`, warning: joinWarnings(refusedDowngrade, discarded) };
   }
 
   if (kind === 'public') {
@@ -156,22 +202,25 @@ export function resolvePanelBaseUrl(
     // it would be a NEW hole, because such a host resolved to `https://` before
     // and merely failed to connect. "Does not connect" is a better failure than
     // "connects in the clear", so the port is refused and said out loud.
+    const discarded =
+      port === null
+        ? null
+        : `Remnawave: REMNAWAVE_HOST "${trimmed}" is reachable from the public internet, so ` +
+          `REMNAWAVE_PORT ${port} is ignored and the panel is addressed at ` +
+          `https://${forUrl(trimmed)} (port 443). Plain HTTP is only used for a private ` +
+          'address; put the panel behind a domain or a reverse proxy on 443.';
     return {
       url: `https://${forUrl(trimmed)}`,
-      warning:
-        port === null
-          ? null
-          : `Remnawave: REMNAWAVE_HOST "${trimmed}" is reachable from the public internet, so ` +
-            `REMNAWAVE_PORT ${port} is ignored and the panel is addressed at ` +
-            `https://${forUrl(trimmed)} (port 443). Plain HTTP is only used for a private ` +
-            'address; put the panel behind a domain or a reverse proxy on 443.',
+      warning: joinWarnings(refusedDowngrade, discarded),
     };
   }
 
   if (port !== null) {
     // Private target: the operator named a port, and plain HTTP here never
-    // leaves the host or the private network.
-    return { url: `http://${forUrl(trimmed)}:${port}`, warning: null };
+    // leaves the host or the private network. An explicit `https://` is
+    // honoured — a private panel terminating its own TLS is theirs to declare.
+    const scheme = declared.scheme ?? 'http';
+    return { url: `${scheme}://${forUrl(trimmed)}:${port}`, warning: null };
   }
 
   // No port. A service name cannot be reached without one, which is what
@@ -187,7 +236,11 @@ export function resolvePanelBaseUrl(
 
   // A literal address with no port. Kept on HTTPS because that is what this
   // resolved to before, and a deployment terminating TLS at an IP would
-  // otherwise go dark on an upgrade.
+  // otherwise go dark on an upgrade — unless the operator wrote the scheme
+  // themselves, which is exactly the statement this branch was guessing at.
+  if (declared.scheme !== null) {
+    return { url: `${declared.scheme}://${forUrl(trimmed)}`, warning: null };
+  }
   return {
     url: `https://${forUrl(trimmed)}`,
     warning:
@@ -195,4 +248,16 @@ export function resolvePanelBaseUrl(
       `set, so the panel is addressed at https://${forUrl(trimmed)} (port 443). Set the port ` +
       'if the panel is served over plain HTTP.',
   };
+}
+
+/**
+ * Two things can be worth saying about one host — a refused `http://` and a
+ * discarded port arrive together whenever the operator wrote both. Joined into
+ * a single line because the caller latches on the FIRST warning per service
+ * instance: returning only one of them would silence the other for the life of
+ * the process.
+ */
+function joinWarnings(...parts: ReadonlyArray<string | null>): string | null {
+  const present = parts.filter((part): part is string => part !== null);
+  return present.length === 0 ? null : present.join(' ');
 }

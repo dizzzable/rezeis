@@ -259,6 +259,77 @@ describe('resolvePanelBaseUrl — a dot does not make an address a domain', () =
   });
 });
 
+/**
+ * `REMNAWAVE_HOST` is documented as bare — "without HTTP/HTTPS and without
+ * trailing slash", the wording the upstream project this convention came from
+ * uses too. Operators write both anyway, and before this the resolver did not
+ * refuse them, it MANGLED them: a scheme survived the embedded-port split (two
+ * parts, the second not digits), fell into the IPv6 branch on its `:` and came
+ * back bracketed as `https://[https://panel.example.com]`. That is not a URL,
+ * so every request died at the transport with nothing in the log naming why.
+ *
+ * The security rule is unchanged and is what the last two cases are for: a
+ * declared scheme may say anything except "plain HTTP to a routable host".
+ */
+describe('resolvePanelBaseUrl — a scheme or a slash in the host field', () => {
+  it('accepts a host that carries its own scheme instead of bracketing it', () => {
+    // Was `https://[https://2get.pro]` — an address no request could reach.
+    assert.deepEqual(resolvePanelBaseUrl('https://2get.pro', null), {
+      url: 'https://2get.pro',
+      warning: null,
+    });
+  });
+
+  it('keeps a scheme together with an embedded port', () => {
+    assert.deepEqual(resolvePanelBaseUrl('https://panel.example.com:8443', null), {
+      url: 'https://panel.example.com:8443',
+      warning: null,
+    });
+  });
+
+  it('strips trailing slashes so they cannot double up against request paths', () => {
+    assert.deepEqual(resolvePanelBaseUrl('2get.pro/', null), {
+      url: 'https://2get.pro',
+      warning: null,
+    });
+    assert.deepEqual(resolvePanelBaseUrl('https://2get.pro///', null), {
+      url: 'https://2get.pro',
+      warning: null,
+    });
+  });
+
+  it('treats a scheme with nothing after it as unconfigured rather than as a host', () => {
+    assert.deepEqual(resolvePanelBaseUrl('https://', 3000), { url: null, warning: null });
+  });
+
+  it('honours an explicit scheme on a private target, in both directions', () => {
+    // A private panel terminating its own TLS is the operator's to declare, and
+    // `http://` there is the default this branch already had.
+    assert.equal(resolvePanelBaseUrl('https://10.0.0.5', 8080).url, 'https://10.0.0.5:8080');
+    assert.equal(resolvePanelBaseUrl('http://10.0.0.5', 8080).url, 'http://10.0.0.5:8080');
+    assert.equal(resolvePanelBaseUrl('http://10.0.0.5', null).url, 'http://10.0.0.5');
+  });
+
+  it('REFUSES plain HTTP to a routable host even when the operator wrote it', () => {
+    // The same refusal as the discarded port, for the same reason: the token
+    // would cross the internet in clear. A declared scheme does not get a vote
+    // on this one.
+    const resolved = resolvePanelBaseUrl('http://2get.pro', null);
+    assert.equal(resolved.url, 'https://2get.pro');
+    assert.match(resolved.warning ?? '', /plain HTTP .* in clear|in clear/);
+  });
+
+  it('says BOTH things when the operator wrote a downgrade and a port', () => {
+    // The caller latches on the first warning per service instance, so a branch
+    // that returned only one of these would silence the other for the life of
+    // the process.
+    const resolved = resolvePanelBaseUrl('http://2get.pro', 3000);
+    assert.equal(resolved.url, 'https://2get.pro');
+    assert.match(resolved.warning ?? '', /in clear/);
+    assert.match(resolved.warning ?? '', /REMNAWAVE_PORT 3000 is ignored/);
+  });
+});
+
 describe('RemnawaveApiService — the discarded port is said out loud, once', () => {
   function capture() {
     const warns: string[] = [];
