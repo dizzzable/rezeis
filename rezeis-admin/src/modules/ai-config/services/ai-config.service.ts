@@ -1,9 +1,9 @@
 import { Injectable, Logger, BadRequestException } from '@nestjs/common';
-import { PrismaService } from '../../../common/prisma/prisma.service.js';
+import { PrismaService } from '../../../common/prisma/prisma.service';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
-import type { AiConfigSettings } from '../interfaces/ai-config.interface.js';
-import { decryptApiKey, encryptApiKey } from '../utils/ai-secret-cipher.js';
+import type { AiConfigSettings } from '../interfaces/ai-config.interface';
+import { decryptApiKey, encryptApiKey } from '../utils/ai-secret-cipher';
 
 /**
  * Manages the AI-support configuration stored in the singleton Settings row.

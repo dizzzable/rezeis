@@ -281,12 +281,19 @@ export class BroadcastDeliveryService {
     // Telegram-bound text. Custom-emoji `:slug:` shortcodes become Telegram
     // premium custom-emoji via `<tg-emoji>` HTML tags when sent with parse_mode
     // HTML (text broadcasts always are; media captions only when the operator
-    // chose HTML) — Telegram shows the fallback glyph for bots without the
-    // capability. Otherwise we fall back to the plain glyph. The cabinet feed
-    // keeps the raw `:slug:` text (rendered as inline images). The operator
-    // title (when set) leads the message as a bold headline — rendered through
-    // the same custom-emoji substitution so premium emoji in the title show up
-    // in Telegram too (not just the cabinet).
+    // chose HTML). Otherwise we fall back to the plain glyph.
+    //
+    // `useHtmlEmoji` decides the FORMAT only. Whether a tag is built at all is
+    // decided inside `CustomEmojiService.substituteTelegramHtml`, which reads
+    // the operator's owner-premium switch from settings: Telegram rejects a bot
+    // message carrying custom-emoji entities when the owner has no Premium — it
+    // does not degrade to the glyph — so a non-premium operator gets the plain
+    // carrier glyph here and keeps the broadcast.
+    //
+    // The cabinet feed keeps the raw `:slug:` text (rendered as inline images).
+    // The operator title (when set) leads the message as a bold headline —
+    // rendered through the same custom-emoji substitution so premium emoji in
+    // the title show up in Telegram too (not just the cabinet).
     const useHtmlEmoji = hasMedia ? parseMode === 'HTML' : true;
     const telegramText = await this.composeTelegram(title, text, useHtmlEmoji);
 
@@ -465,8 +472,9 @@ export class BroadcastDeliveryService {
     const isMedia = payload?.mediaType === 'photo' || payload?.mediaType === 'video';
 
     // Telegram can't render our custom-emoji images — substitute `:slug:` just
-    // like the initial delivery: premium `<tg-emoji>` tags under parse_mode
-    // HTML, otherwise the plain fallback glyph.
+    // like the initial delivery: `<tg-emoji>` tags under parse_mode HTML,
+    // otherwise the plain fallback glyph. The premium gate that decides whether
+    // a tag may be built at all lives inside the substitution, not here.
     const telegramText = this.customEmojiService
       ? parseMode === 'HTML'
         ? await this.customEmojiService.substituteTelegramHtml(newText)
@@ -707,10 +715,13 @@ export class BroadcastDeliveryService {
   /**
    * Compose the Telegram-bound message/caption from an optional operator title
    * and the body, substituting `:slug:` custom-emoji shortcodes:
-   *   • `useHtmlEmoji` → premium `<tg-emoji>` tags; the title becomes a bold
-   *     headline (`<b>…</b>`) above the body. The title is HTML-escaped first
-   *     (it's plain text) before substitution; the body may carry operator HTML
-   *     so it is substituted raw.
+   *   • `useHtmlEmoji` → `<tg-emoji>` tags for a Premium owner, the plain
+   *     carrier glyph otherwise (the gate lives in
+   *     `CustomEmojiService.substituteTelegramHtml`, which reads the switch
+   *     from settings — Telegram rejects the message rather than degrading it);
+   *     the title becomes a bold headline (`<b>…</b>`) above the body. The
+   *     title is HTML-escaped first (it's plain text) before substitution; the
+   *     body may carry operator HTML so it is substituted raw.
    *   • otherwise (plain-text media caption) → plain fallback glyphs and a
    *     plain (non-bold) title line, since HTML tags wouldn't be parsed.
    */

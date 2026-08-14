@@ -4,16 +4,21 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { RequestMethod } from '@nestjs/common';
-import { GUARDS_METADATA, METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
+import { GUARDS_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 import { UserRole } from '@prisma/client';
 
 import { AdminJwtAuthGuard } from '../src/modules/auth/guards/admin-jwt-auth.guard';
 import { CurrentAdminInterface } from '../src/modules/auth/interfaces/current-admin.interface';
 import { AdminApiTokensController } from '../src/modules/api-tokens/controllers/admin-api-tokens.controller';
 import { RbacGuard } from '../src/modules/rbac/guards/rbac.guard';
-import { REQUIRE_PERMISSION_KEY } from '../src/modules/rbac/decorators/require-permission.decorator';
 import { RBAC_RESOURCES, isValidPermission } from '../src/modules/rbac/rbac.resources';
 import { API_TOKEN_JWT_AUDIENCE } from '../src/modules/auth/constants/api-token-auth.constants';
+import {
+  assertEveryRouteGuarded,
+  assertRoute,
+  assertRouteHandlers,
+  assertRoutePermission,
+} from './helpers/controller-routes';
 
 describe('AdminApiTokensController', () => {
   it('is guarded by admin JWT and RBAC guards', () => {
@@ -25,9 +30,57 @@ describe('AdminApiTokensController', () => {
 
   it('maps API token routes to explicit RBAC permissions', () => {
     assert.equal(Reflect.getMetadata(PATH_METADATA, AdminApiTokensController), 'admin/api-tokens');
-    assertRoute(AdminApiTokensController.prototype.list, '/', RequestMethod.GET, 'view');
-    assertRoute(AdminApiTokensController.prototype.create, '/', RequestMethod.POST, 'create');
-    assertRoute(AdminApiTokensController.prototype.delete, ':tokenId', RequestMethod.DELETE, 'delete');
+    // The route set is read off the class, not remembered here. Without this a
+    // fourth endpoint — an unrevoke, a rotate, a usage report — passes this
+    // spec untouched, `@RequirePermission` or not, and the test that exists to
+    // prove every API-token route is gated proves it only of the three routes
+    // someone typed out in 2026.
+    assertRouteHandlers(AdminApiTokensController, ['list', 'create', 'delete']);
+    // …and enumerating them forces the fourth endpoint to be NOTICED, not to be
+    // gated. Those are different guarantees. `RbacGuard` returns `true` for a
+    // route carrying no `@RequirePermission` at any level
+    // (`src/modules/rbac/guards/rbac.guard.ts:41`), so a forgotten decorator on
+    // a token-issuing route is not a 403 — it is an endpoint that mints
+    // long-lived API credentials for every authenticated admin, silently. The
+    // list is empty because nothing here is deliberately ungated; an entry
+    // appearing in it is a decision someone has to write down.
+    assertEveryRouteGuarded(AdminApiTokensController, []);
+
+    const listRoute = 'GET admin/api-tokens (list tokens)';
+    assertRoute(
+      AdminApiTokensController.prototype.list,
+      { method: RequestMethod.GET, path: '/' },
+      listRoute,
+    );
+    assertRoutePermission(
+      AdminApiTokensController.prototype.list,
+      { resource: 'api_tokens', action: 'view' },
+      listRoute,
+    );
+
+    const createRoute = 'POST admin/api-tokens (issue token)';
+    assertRoute(
+      AdminApiTokensController.prototype.create,
+      { method: RequestMethod.POST, path: '/' },
+      createRoute,
+    );
+    assertRoutePermission(
+      AdminApiTokensController.prototype.create,
+      { resource: 'api_tokens', action: 'create' },
+      createRoute,
+    );
+
+    const deleteRoute = 'DELETE admin/api-tokens/:tokenId (revoke token)';
+    assertRoute(
+      AdminApiTokensController.prototype.delete,
+      { method: RequestMethod.DELETE, path: ':tokenId' },
+      deleteRoute,
+    );
+    assertRoutePermission(
+      AdminApiTokensController.prototype.delete,
+      { resource: 'api_tokens', action: 'delete' },
+      deleteRoute,
+    );
   });
 
   it('declares api_tokens permissions in the catalog without granting default non-superadmin roles', () => {
@@ -74,14 +127,6 @@ describe('AdminApiTokensController', () => {
     ]);
   });
 });
-
-function assertRoute(method: unknown, path: string | undefined, requestMethod: RequestMethod, action: string): void {
-  assert.equal(Reflect.getMetadata(PATH_METADATA, method), path);
-  assert.equal(Reflect.getMetadata(METHOD_METADATA, method), requestMethod);
-  assert.deepStrictEqual(Reflect.getMetadata(REQUIRE_PERMISSION_KEY, method), [
-    { resource: 'api_tokens', action },
-  ]);
-}
 
 function currentAdmin(): CurrentAdminInterface {
   return {

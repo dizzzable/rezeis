@@ -563,6 +563,13 @@ export class AdminUserSubscriptionsController {
         user: { select: { telegramId: true, username: true, name: true } },
       },
     });
+    // Split out of the `identity === null` test below rather than folded into
+    // it. `storedIdentityOf` answers `null` for a missing row and for a row with
+    // no panel profile alike, so one test did cover both — but the event payload
+    // further down reads the row field by field, and nothing there could see
+    // which of the two cases had been ruled out. Same exception, same message:
+    // the two were never distinguishable to the operator and still are not.
+    if (sub === null) throw new NotFoundException('No Remnawave profile linked');
     const identity = storedIdentityOf(sub);
     if (identity === null) throw new NotFoundException('No Remnawave profile linked');
     const result = await this.remnawaveApiService.deletePanelUserDevice(identity, hwid);

@@ -62,7 +62,10 @@ describe('PaymentProviderExecutionService checkout execution', () => {
       options: { auth: unknown; headers: unknown; validateStatus?: (status: number) => boolean };
     };
     assert.equal(call.url, 'https://api.yookassa.ru/v3/payments');
-    assert.deepStrictEqual(call.body, {
+    // Typed as the request body rather than as its own literal: `deepStrictEqual`
+    // asserts the actual value INTO the expected type, and a bare literal here
+    // would leave `call.body` unable to name the key checked on the next line.
+    const expectedBody: Record<string, unknown> = {
       amount: { value: '12.50', currency: Currency.RUB },
       capture: true,
       confirmation: {
@@ -76,7 +79,8 @@ describe('PaymentProviderExecutionService checkout execution', () => {
         userId: 'user-1',
         savePaymentMethod: false,
       },
-    });
+    };
+    assert.deepStrictEqual(call.body, expectedBody);
     assert.equal(call.body['save_payment_method'], undefined);
     assert.deepStrictEqual(call.options.auth, { username: 'shop-1', password: 'secret-1' });
     assert.deepStrictEqual(call.options.headers, { 'Idempotence-Key': 'payment-1' });

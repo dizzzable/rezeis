@@ -22,6 +22,9 @@ import { Label } from '@/components/ui/label'
 import { Separator } from '@/components/ui/separator'
 import { EmojiPicker } from '@/features/broadcast/emoji-picker'
 import { insertAtCaret } from '@/features/bot-map/utils/insert-at-caret'
+import { EmojiFieldOverlay } from '@/features/custom-emoji/emoji-field-overlay'
+import { botTextKeyMode } from '@/features/bot-config/bot-text-key-mode'
+import { getErrorMessage } from '@/lib/http-errors'
 import {
   BOT_CONFIG_KEYS,
   botConfigApi,
@@ -84,6 +87,15 @@ export function SystemScreenTexts({ screenName }: SystemScreenTextsProps) {
             {t('botFlow.screenTexts.hint')}
           </p>
         </div>
+        {/*
+          `layout` stays at its default here on purpose. Eight of these keys ARE
+          button captions and must be DRAWN as captions — but that is the
+          overlay's mode, which `TextKeyEditor` now derives from the key itself,
+          not the shape of the card. The compact card is a different decision:
+          it caps input at 64 characters and drops the key name, and this
+          section lists eighteen keys for `invite` alone, where the key name is
+          the only thing telling them apart.
+        */}
         {keys.map((key) => (
           <TextKeyEditor key={key} textKey={key} />
         ))}
@@ -112,6 +124,14 @@ interface TextKeyEditorProps {
 export function TextKeyEditor({ textKey, layout = 'text' }: TextKeyEditorProps) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
+
+  // How the value is DRAWN, which is not the same question as how the card is
+  // SHAPED. A caption is a different medium — reiwa lifts a leading `:slug:`
+  // out of it into `icon_custom_emoji_id` and draws it before the label — and
+  // that is true of the key wherever it is edited. `layout` stays the caller's
+  // choice of card, so the system-screen section keeps the roomy card with the
+  // key name on it and still draws its eight caption keys correctly.
+  const fieldMode = botTextKeyMode(textKey)
 
   const { data: texts } = useQuery({
     queryKey: BOT_CONFIG_KEYS.texts,
@@ -153,7 +173,11 @@ export function TextKeyEditor({ textKey, layout = 'text' }: TextKeyEditorProps) 
       void queryClient.invalidateQueries({ queryKey: ['bot-texts'] })
       toast.success(t('botFlow.screenTexts.saved'))
     },
-    onError: () => toast.error(t('botFlow.screenTexts.saveFailed')),
+    // The write path refuses specific things and says why — a duplicate key, a
+    // key that is not alphanumeric. Collapsing all of that into one generic
+    // "could not save" left the operator with nothing to act on, so the
+    // server's own sentence is shown when it sent one.
+    onError: (error) => toast.error(getErrorMessage(error, t('botFlow.screenTexts.saveFailed'))),
   })
 
   const insertRu = (emoji: string) => {
@@ -191,31 +215,38 @@ export function TextKeyEditor({ textKey, layout = 'text' }: TextKeyEditorProps) 
               <Label className="text-[11px]">{t('botFlow.systemButtons.labelRu')}</Label>
               <EmojiPicker onSelect={insertRu} ariaLabel={t('emojiPicker.trigger')} />
             </div>
-            <Input
-              ref={ruRef as RefObject<HTMLInputElement>}
-              value={value}
-              onChange={(e) => setValue(e.target.value)}
-              maxLength={64}
-              placeholder={t('botFlow.screenTexts.placeholder')}
-              className="text-xs"
-            />
+            {/* `buttonLabel`: this key IS a button caption, so a leading
+                shortcode never stays in it — reiwa lifts it into
+                `icon_custom_emoji_id` and it is drawn as a separate row. */}
+            <EmojiFieldOverlay value={value} mode={fieldMode} overlayClassName="text-xs">
+              <Input
+                ref={ruRef as RefObject<HTMLInputElement>}
+                value={value}
+                onChange={(e) => setValue(e.target.value)}
+                maxLength={64}
+                placeholder={t('botFlow.screenTexts.placeholder')}
+                className="text-xs"
+              />
+            </EmojiFieldOverlay>
           </div>
           <div className="space-y-1">
             <div className="flex items-center justify-between">
               <Label className="text-[11px]">{t('botFlow.systemButtons.labelEn')}</Label>
               <EmojiPicker onSelect={insertEn} ariaLabel={t('emojiPicker.trigger')} />
             </div>
-            <Input
-              ref={enRef as RefObject<HTMLInputElement>}
-              value={valueEn}
-              onChange={(e) => {
-                setValueEn(e.target.value)
-                setEnOpen(true)
-              }}
-              maxLength={64}
-              placeholder={t('botFlow.screenTexts.placeholder')}
-              className="text-xs"
-            />
+            <EmojiFieldOverlay value={valueEn} mode={fieldMode} overlayClassName="text-xs">
+              <Input
+                ref={enRef as RefObject<HTMLInputElement>}
+                value={valueEn}
+                onChange={(e) => {
+                  setValueEn(e.target.value)
+                  setEnOpen(true)
+                }}
+                maxLength={64}
+                placeholder={t('botFlow.screenTexts.placeholder')}
+                className="text-xs"
+              />
+            </EmojiFieldOverlay>
           </div>
         </div>
         <div className="flex justify-end">
@@ -243,15 +274,20 @@ export function TextKeyEditor({ textKey, layout = 'text' }: TextKeyEditorProps) 
           <Label className="text-[10px]">{t('botFlow.screenTexts.ru')}</Label>
           <EmojiPicker onSelect={insertRu} ariaLabel={t('emojiPicker.trigger')} />
         </div>
-        <textarea
-          ref={ruRef as RefObject<HTMLTextAreaElement>}
-          value={value}
-          onChange={(e) => setValue(e.target.value)}
-          rows={2}
-          maxLength={8000}
-          placeholder={t('botFlow.screenTexts.placeholder')}
-          className="w-full resize-y rounded-md border bg-background px-2 py-1.5 text-[11px] focus:outline-none focus:ring-1 focus:ring-ring"
-        />
+        {/* Raw `<textarea>`, not the shadcn one, so the layer cannot inherit
+            the field's typography — it is repeated here by hand and must keep
+            matching the `className` below. */}
+        <EmojiFieldOverlay value={value} mode={fieldMode} multiline overlayClassName="px-2 py-1.5 text-[11px]">
+          <textarea
+            ref={ruRef as RefObject<HTMLTextAreaElement>}
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            rows={2}
+            maxLength={8000}
+            placeholder={t('botFlow.screenTexts.placeholder')}
+            className="w-full resize-y rounded-md border bg-background px-2 py-1.5 text-[11px] focus:outline-none focus:ring-1 focus:ring-ring"
+          />
+        </EmojiFieldOverlay>
       </div>
 
       <button
@@ -269,15 +305,17 @@ export function TextKeyEditor({ textKey, layout = 'text' }: TextKeyEditorProps) 
             <Label className="text-[10px]">{t('botFlow.screenTexts.en')}</Label>
             <EmojiPicker onSelect={insertEn} ariaLabel={t('emojiPicker.trigger')} />
           </div>
-          <textarea
-            ref={enRef as RefObject<HTMLTextAreaElement>}
-            value={valueEn}
-            onChange={(e) => setValueEn(e.target.value)}
-            rows={2}
-            maxLength={8000}
-            placeholder={t('botFlow.screenTexts.placeholder')}
-            className="w-full resize-y rounded-md border bg-background px-2 py-1.5 text-[11px] focus:outline-none focus:ring-1 focus:ring-ring"
-          />
+          <EmojiFieldOverlay value={valueEn} mode={fieldMode} multiline overlayClassName="px-2 py-1.5 text-[11px]">
+            <textarea
+              ref={enRef as RefObject<HTMLTextAreaElement>}
+              value={valueEn}
+              onChange={(e) => setValueEn(e.target.value)}
+              rows={2}
+              maxLength={8000}
+              placeholder={t('botFlow.screenTexts.placeholder')}
+              className="w-full resize-y rounded-md border bg-background px-2 py-1.5 text-[11px] focus:outline-none focus:ring-1 focus:ring-ring"
+            />
+          </EmojiFieldOverlay>
         </div>
       )}
 

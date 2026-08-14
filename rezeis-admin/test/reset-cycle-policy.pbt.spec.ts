@@ -31,6 +31,10 @@ describe('reset cycle policy properties', () => {
           referenceAt,
         });
 
+        // `planResetEpoch` returns null for exactly one strategy — NO_RESET —
+        // and that one is deliberately outside the generated domain. Anything
+        // else planning no epoch is a failure of the property, not a skip.
+        assert.ok(result, `${strategy} must plan an epoch`);
         assert.deepEqual(result, repeated);
         assert.ok(result.startsAt.getTime() <= referenceAt.getTime());
         assert.ok(referenceAt.getTime() < result.plannedEndsAt.getTime());

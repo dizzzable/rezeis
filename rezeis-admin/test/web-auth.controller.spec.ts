@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { RequestMethod } from '@nestjs/common';
-import { GUARDS_METADATA, METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
+import { GUARDS_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 
 import { InternalAdminAuthGuard } from '../src/modules/auth/guards/internal-admin-auth.guard';
 import { InternalWebAuthController } from '../src/modules/web-auth/controllers/internal-web-auth.controller';
@@ -17,17 +17,51 @@ import { WebAuthRecoverDto } from '../src/modules/web-auth/dto/web-auth-recover.
 import { WebAuthRegisterDto } from '../src/modules/web-auth/dto/web-auth-register.dto';
 import { BotSigninTokenService } from '../src/modules/web-auth/services/bot-signin-token.service';
 import { WebAuthService } from '../src/modules/web-auth/services/web-auth.service';
+import {
+  assertRoute,
+  assertRouteHandlers,
+  assertRouteUngated,
+  routeLabel,
+  type RouteHandler,
+} from './helpers/controller-routes';
+
+/** Where the controller answers — stated once, checked below and used in labels. */
+const BASE_PATH = 'internal/web-auth';
 
 describe('InternalWebAuthController', () => {
   it('exposes the current internal web-auth route contract', () => {
-    assert.equal(Reflect.getMetadata(PATH_METADATA, InternalWebAuthController), 'internal/web-auth');
-    assertPostRoute('register', InternalWebAuthController.prototype.register);
-    assertPostRoute('check-login', InternalWebAuthController.prototype.checkLogin);
-    assertPostRoute('login', InternalWebAuthController.prototype.login);
-    assertPostRoute('recover', InternalWebAuthController.prototype.recover);
-    assertPostRoute('change-password', InternalWebAuthController.prototype.changePassword);
-    assertPostRoute('bot-signin/issue', InternalWebAuthController.prototype.issueBotSigninToken);
-    assertPostRoute('bot-signin/consume', InternalWebAuthController.prototype.consumeBotSigninToken);
+    assert.equal(Reflect.getMetadata(PATH_METADATA, InternalWebAuthController), BASE_PATH);
+    // The set of routes is read off the class rather than remembered here. The
+    // hand-written list this replaces named 7 of the 9 that exist — `claim` and
+    // `telegram-claim`, both of which hand out credentials, had been added
+    // since and were described by nothing. These routes carry no
+    // `@RequirePermission` by design: they are what a signed-out visitor calls
+    // through the edge, so the enumeration is the only thing standing between
+    // this file and a tenth credential endpoint nobody wrote down. That the
+    // permission is absent is asserted per route in the loop below.
+    assertRouteHandlers(InternalWebAuthController, [
+      'register',
+      'claim',
+      'telegramClaim',
+      'checkLogin',
+      'login',
+      'recover',
+      'changePassword',
+      'issueBotSigninToken',
+      'consumeBotSigninToken',
+    ]);
+
+    for (const route of WEB_AUTH_ROUTES) {
+      const label = routeLabel(BASE_PATH, route.method, route.path);
+      assertRoute(route.handler, { method: route.method, path: route.path }, label);
+      // Carrying no permission is the CONTRACT here, not an omission, and
+      // saying so is not decoration: `RbacGuard` is not among this
+      // controller's guards, so a `@RequirePermission` hung on one of these
+      // routes tomorrow would be read by nothing. On endpoints that mint and
+      // reset credentials, a decorator that restricts no one while reading as
+      // a restriction is the worst of both.
+      assertRouteUngated(InternalWebAuthController, route.handler, label);
+    }
   });
 
   it('requires internal admin API-token auth at controller level', () => {
@@ -130,10 +164,27 @@ describe('InternalWebAuthController', () => {
   });
 });
 
-function assertPostRoute(expectedPath: string, handler: unknown): void {
-  assert.equal(Reflect.getMetadata(PATH_METADATA, handler), expectedPath);
-  assert.equal(Reflect.getMetadata(METHOD_METADATA, handler), RequestMethod.POST);
+/** One web-auth endpoint as this spec states it. No RBAC gate exists to state. */
+interface WebAuthRoute {
+  readonly handler: RouteHandler;
+  readonly method: RequestMethod;
+  readonly path: string;
 }
+
+/** The routes themselves, so a row names a handler the compiler has to find. */
+const handlers = InternalWebAuthController.prototype;
+
+const WEB_AUTH_ROUTES: readonly WebAuthRoute[] = [
+  { handler: handlers.register, method: RequestMethod.POST, path: 'register' },
+  { handler: handlers.claim, method: RequestMethod.POST, path: 'claim' },
+  { handler: handlers.telegramClaim, method: RequestMethod.POST, path: 'telegram-claim' },
+  { handler: handlers.checkLogin, method: RequestMethod.POST, path: 'check-login' },
+  { handler: handlers.login, method: RequestMethod.POST, path: 'login' },
+  { handler: handlers.recover, method: RequestMethod.POST, path: 'recover' },
+  { handler: handlers.changePassword, method: RequestMethod.POST, path: 'change-password' },
+  { handler: handlers.issueBotSigninToken, method: RequestMethod.POST, path: 'bot-signin/issue' },
+  { handler: handlers.consumeBotSigninToken, method: RequestMethod.POST, path: 'bot-signin/consume' },
+];
 
 function createWebAuthServiceMock(
   calls: Array<{ method: string; payload: unknown }>,

@@ -2,10 +2,10 @@ import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
 
-import { PrismaService } from '../../../common/prisma/prisma.service.js';
-import { AiConfigService } from './ai-config.service.js';
-import { AiInstructionService } from './ai-instruction.service.js';
-import { anonymizeTranscript } from '../utils/anonymize.js';
+import { PrismaService } from '../../../common/prisma/prisma.service';
+import { AiConfigService } from './ai-config.service';
+import { AiInstructionService } from './ai-instruction.service';
+import { anonymizeTranscript } from '../utils/anonymize';
 
 export interface LearnFromTicketsResult {
   readonly scanned: number;

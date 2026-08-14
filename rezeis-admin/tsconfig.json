@@ -1,4 +1,19 @@
 {
+  // `strictNullChecks` and `noImplicitAny` are ON here, in the BASE config, and
+  // there is deliberately no strict variant beside it.
+  //
+  // There used to be one — `tsconfig.strict.json`, added 2026-06-07. It was
+  // never wired into a script or a CI step, so for two months it read as a
+  // strictness policy while guarding nothing, and the 111 errors it would have
+  // reported accumulated unseen. One of them was a live defect: a zero-price
+  // add-on whose row had vanished answered 500 instead of 409, because `?.` in
+  // the condition made the null case take the branch that dereferences it.
+  //
+  // A separate strict project would not have fixed that. It gives two sources
+  // of truth: the editor and `ts-node` read THIS file and stay quiet, so new
+  // code is written against the relaxed rules and only the extra CI step
+  // objects — the ratchet slips by default. With the flags here, the editor,
+  // the build, the test runner and CI all ask the same question.
   "compilerOptions": {
     "module": "commonjs",
     "declaration": true,
@@ -13,8 +28,8 @@
     "baseUrl": "./",
     "incremental": true,
     "skipLibCheck": true,
-    "strictNullChecks": false,
-    "noImplicitAny": false,
+    "strictNullChecks": true,
+    "noImplicitAny": true,
     "strictBindCallApply": false,
     "forceConsistentCasingInFileNames": false,
     "noFallthroughCasesInSwitch": false,
@@ -25,6 +40,23 @@
       "@/*": ["src/*"]
     }
   },
+  // `ts-node` builds its program by FOLLOWING IMPORTS from the entry file and
+  // ignores `include` unless told otherwise. Ambient declarations that nothing
+  // imports are therefore invisible to it — `src/types/express.d.ts`, which
+  // augments `Express.Request` with `correlationId`, is the one we have.
+  //
+  // Until `noImplicitAny` was turned on this cost nothing visible: under the
+  // test runner `req['correlationId']` silently resolved to `any`, so the two
+  // correlation middlewares were checked against a DIFFERENT program than the
+  // one `npm run typecheck` compiles. That divergence is the same shape as the
+  // gap this whole change closes, so it is fixed here rather than papered over
+  // with a triple-slash reference in each affected file — which would have to
+  // be remembered for every future declaration.
+  //
+  // The cost is real and measured, not waved away: every spec process loads the
+  // whole `src` program, and the full suite went from 138s to 213s on a warm
+  // local run. That is the price of the runner and the compiler agreeing.
+  "ts-node": { "files": true },
   "include": ["src/**/*"],
   "exclude": [
     "node_modules",

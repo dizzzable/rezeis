@@ -55,6 +55,7 @@ import { Switch } from '@/components/ui/switch'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Textarea } from '@/components/ui/textarea'
 import { EmojiPicker } from '@/features/broadcast/emoji-picker'
+import { EmojiFieldOverlay } from '@/features/custom-emoji/emoji-field-overlay'
 import { FadeIn } from '@/lib/motion'
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -439,33 +440,50 @@ function UserNotificationsTab() {
             <DialogTitle>{t('notificationsPage.templates.editDialogTitle', { type: editTemplate?.type })}</DialogTitle>
           </DialogHeader>
           <div className="space-y-4">
+            {/* Both fields hold `:slug:` shortcodes, and the operator has to be
+                able to read what the notification will look like. The layer
+                draws them and steps aside on focus; the value it renders is the
+                one that goes to the server, untouched. The picker moves into
+                `adornment` because it is positioned against the FIELD — left
+                outside, it would sit against the wrapper instead. */}
             <div className="space-y-1.5">
               <Label>{t('notificationsPage.templates.titleLabel')}</Label>
-              <div className="relative">
+              <EmojiFieldOverlay
+                value={editTitle}
+                overlayClassName="pr-9"
+                adornment={
+                  <div className="absolute right-1 top-1/2 -translate-y-1/2">
+                    <EmojiPicker onSelect={insertIntoTitle} ariaLabel={t('notificationsPage.templates.titleLabel')} />
+                  </div>
+                }
+              >
                 <Input
                   ref={titleRef}
                   value={editTitle}
                   onChange={(e) => setEditTitle(e.target.value)}
                   className="pr-9"
                 />
-                <div className="absolute right-1 top-1/2 -translate-y-1/2">
-                  <EmojiPicker onSelect={insertIntoTitle} ariaLabel={t('notificationsPage.templates.titleLabel')} />
-                </div>
-              </div>
+              </EmojiFieldOverlay>
             </div>
             <div className="space-y-1.5">
               <Label>{t('notificationsPage.templates.bodyLabel')}</Label>
-              <div className="relative">
+              <EmojiFieldOverlay
+                value={editBody}
+                multiline
+                overlayClassName="font-mono text-xs pr-9"
+                adornment={
+                  <div className="absolute right-1.5 top-1.5">
+                    <EmojiPicker onSelect={insertIntoBody} ariaLabel={t('notificationsPage.templates.bodyLabel')} />
+                  </div>
+                }
+              >
                 <Textarea
                   ref={bodyRef}
                   value={editBody}
                   onChange={(e) => setEditBody(e.target.value)}
                   className="font-mono text-xs min-h-32 pr-9"
                 />
-                <div className="absolute right-1.5 top-1.5">
-                  <EmojiPicker onSelect={insertIntoBody} ariaLabel={t('notificationsPage.templates.bodyLabel')} />
-                </div>
-              </div>
+              </EmojiFieldOverlay>
               <p className="text-[10px] text-muted-foreground">
                 {t('notificationsPage.templates.bodyHint')}
               </p>

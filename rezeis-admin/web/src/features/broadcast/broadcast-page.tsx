@@ -41,6 +41,7 @@ import {
   type BroadcastFormValidationMessages,
 } from './broadcast-form-schema'
 import { EmojiPicker } from './emoji-picker'
+import { EmojiFieldOverlay } from '@/features/custom-emoji/emoji-field-overlay'
 import { RenderedCopyPreview } from '@/features/custom-emoji/rendered-copy-preview'
 import { cn, truncate } from '@/lib/utils'
 
@@ -749,7 +750,21 @@ function CreateBroadcastForm({ onClose }: { onClose: () => void }) {
 
       <div className="space-y-2">
         <Label htmlFor="broadcast-title">{t('broadcastPage.form.titleLabel')}</Label>
-        <div className="relative">
+        {/* The picker moves into `adornment` so it stays inside the field's own
+            box: the overlay is absolutely positioned against that box, and a
+            trigger left outside it would drift the moment the layer appears. */}
+        <EmojiFieldOverlay
+          value={title}
+          overlayClassName="pr-10"
+          // `RenderedCopyPreview` right below already carries the rendered line
+          // while this field is focused, so a second strip would say it twice.
+          liveStrip={false}
+          adornment={
+            <div className="absolute right-1 top-1/2 -translate-y-1/2">
+              <EmojiPicker onSelect={insertTitleAtCaret} ariaLabel={t('broadcastPage.emoji.trigger')} />
+            </div>
+          }
+        >
           <Input
             id="broadcast-title"
             ref={titleRef}
@@ -760,10 +775,7 @@ function CreateBroadcastForm({ onClose }: { onClose: () => void }) {
             className="pr-10"
             aria-invalid={!!formErrors.title}
           />
-          <div className="absolute right-1 top-1/2 -translate-y-1/2">
-            <EmojiPicker onSelect={insertTitleAtCaret} ariaLabel={t('broadcastPage.emoji.trigger')} />
-          </div>
-        </div>
+        </EmojiFieldOverlay>
         <p className="text-xs text-muted-foreground">{t('broadcastPage.form.titleHint')}</p>
         {title.trim().length > 0 && (
           <div className="space-y-1">
@@ -776,7 +788,17 @@ function CreateBroadcastForm({ onClose }: { onClose: () => void }) {
 
       <div className="space-y-2">
         <Label htmlFor="broadcast-message-text">{t('broadcastPage.form.text')}</Label>
-        <div className="relative">
+        <EmojiFieldOverlay
+          value={text}
+          multiline
+          liveStrip={false}
+          overlayClassName="pr-10"
+          adornment={
+            <div className="absolute right-1.5 top-1.5">
+              <EmojiPicker onSelect={insertAtCaret} ariaLabel={t('broadcastPage.emoji.trigger')} />
+            </div>
+          }
+        >
           <Textarea
             id="broadcast-message-text"
             ref={textRef}
@@ -787,10 +809,7 @@ function CreateBroadcastForm({ onClose }: { onClose: () => void }) {
             className="resize-none pr-10"
             aria-invalid={!!formErrors.text}
           />
-          <div className="absolute right-1.5 top-1.5">
-            <EmojiPicker onSelect={insertAtCaret} ariaLabel={t('broadcastPage.emoji.trigger')} />
-          </div>
-        </div>
+        </EmojiFieldOverlay>
         <p className="text-xs text-muted-foreground">
           {t('broadcastPage.form.charCount', { count: text.length })}
         </p>
@@ -1160,7 +1179,17 @@ function EditBroadcastForm({ broadcastId, onClose }: { broadcastId: string; onCl
         {isLoading ? (
           <Skeleton className="h-28 w-full" />
         ) : (
-          <div className="relative">
+          <EmojiFieldOverlay
+            value={text}
+            multiline
+            liveStrip={false}
+            overlayClassName="pr-10"
+            adornment={
+              <div className="absolute right-1.5 top-1.5">
+                <EmojiPicker onSelect={insertAtCaret} ariaLabel={t('broadcastPage.emoji.trigger')} />
+              </div>
+            }
+          >
             <Textarea
               id="broadcast-edit-text"
               ref={textRef}
@@ -1170,10 +1199,7 @@ function EditBroadcastForm({ broadcastId, onClose }: { broadcastId: string; onCl
               className="resize-none pr-10"
               placeholder={t('broadcastPage.form.textPlaceholder')}
             />
-            <div className="absolute right-1.5 top-1.5">
-              <EmojiPicker onSelect={insertAtCaret} ariaLabel={t('broadcastPage.emoji.trigger')} />
-            </div>
-          </div>
+          </EmojiFieldOverlay>
         )}
         <p className="text-xs text-muted-foreground">{t('broadcastPage.edit.hint')}</p>
         {text.trim().length > 0 && (

@@ -2,8 +2,8 @@ import { Controller, Get, Post, Patch, Delete, Body, Param, UseGuards } from '@n
 import { AdminJwtAuthGuard } from '../../auth/guards/admin-jwt-auth.guard';
 import { RbacGuard } from '../../rbac/guards/rbac.guard';
 import { RequirePermission } from '../../rbac/decorators/require-permission.decorator';
-import { AiInstructionService } from '../services/ai-instruction.service.js';
-import { CreateAiInstructionDto, UpdateAiInstructionDto } from '../dto/ai-instruction.dto.js';
+import { AiInstructionService } from '../services/ai-instruction.service';
+import { CreateAiInstructionDto, UpdateAiInstructionDto } from '../dto/ai-instruction.dto';
 
 @Controller('admin/ai-instructions')
 @UseGuards(AdminJwtAuthGuard, RbacGuard)

@@ -2,10 +2,10 @@ import { Controller, Get, Patch, Post, Body, UseGuards, HttpCode, HttpStatus } f
 import { AdminJwtAuthGuard } from '../../auth/guards/admin-jwt-auth.guard';
 import { RbacGuard } from '../../rbac/guards/rbac.guard';
 import { RequirePermission } from '../../rbac/decorators/require-permission.decorator';
-import { AiConfigService } from '../services/ai-config.service.js';
-import { AiLearningService } from '../services/ai-learning.service.js';
-import { UpdateAiConfigDto } from '../dto/update-ai-config.dto.js';
-import { LearnFromTicketsDto } from '../dto/learn-from-tickets.dto.js';
+import { AiConfigService } from '../services/ai-config.service';
+import { AiLearningService } from '../services/ai-learning.service';
+import { UpdateAiConfigDto } from '../dto/update-ai-config.dto';
+import { LearnFromTicketsDto } from '../dto/learn-from-tickets.dto';
 
 @Controller('admin/ai-config')
 @UseGuards(AdminJwtAuthGuard, RbacGuard)

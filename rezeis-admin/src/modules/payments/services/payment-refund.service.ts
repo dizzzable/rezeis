@@ -10,6 +10,7 @@ import { PaymentGatewayType, Prisma, Transaction, TransactionStatus } from '@pri
 import { firstValueFrom } from 'rxjs';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { buildAdminAuditLogData } from '../../../common/utils/admin-audit-log.util';
 import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.interface';
 import { RequestMetadataInterface } from '../../auth/interfaces/request-metadata.interface';
 import { PaymentReconciliationService } from './payment-reconciliation.service';
@@ -226,7 +227,7 @@ export class PaymentRefundService {
             refundRequestedBy: input.currentAdmin.id,
             refundId,
             refundProviderStatus: providerStatus,
-            refunds: ledger as unknown as Prisma.JsonValue,
+            refunds: ledger,
             refundedAmountTotal: refundedTotal.toFixed(2),
             refundProviderResponse: this.redactionService.redact(data) as Prisma.JsonValue,
           }) as Prisma.InputJsonValue,
@@ -236,10 +237,10 @@ export class PaymentRefundService {
     });
 
     await this.prismaService.adminAuditLog.create({
-      data: {
+      data: buildAdminAuditLogData({
         action: 'payments.transaction.refund',
-        ipAddress: input.requestMetadata.remoteAddress,
-        userAgent: input.requestMetadata.userAgent,
+        actorId: input.currentAdmin.id,
+        requestMetadata: input.requestMetadata,
         metadata: {
           requestId: input.requestMetadata.requestId,
           transactionId: transaction.id,
@@ -253,8 +254,7 @@ export class PaymentRefundService {
           reason: input.reason ?? null,
           partial: requestedAmount < Number(transaction.amount.toString()) - 0.000001,
         },
-        adminUser: { connect: { id: input.currentAdmin.id } },
-      } as never,
+      }),
     });
 
     this.logger.warn(

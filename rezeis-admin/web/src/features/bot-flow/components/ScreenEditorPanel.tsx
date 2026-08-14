@@ -13,6 +13,7 @@ import { Separator } from '@/components/ui/separator'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { EmojiPicker } from '@/features/broadcast/emoji-picker'
 import { insertAtCaret } from '@/features/bot-map/utils/insert-at-caret'
+import { EmojiFieldOverlay } from '@/features/custom-emoji/emoji-field-overlay'
 import { CustomEmojiPicker } from './CustomEmojiPicker'
 import { SystemScreenTexts, TextKeyEditor } from './SystemScreenTexts'
 import { SystemButtonIconPicker } from './SystemButtonIconPicker'
@@ -268,15 +269,19 @@ export function ScreenEditorPanel({ screen, flowName }: ScreenEditorPanelProps) 
           <Label className="text-xs">{t('botFlow.fields.textRu')}</Label>
           <EmojiPicker onSelect={insertEmojiRu} ariaLabel={t('emojiPicker.trigger')} />
         </div>
-        <textarea
-          ref={textRuRef}
-          value={textRu}
-          onChange={(e) => setTextRu(e.target.value)}
-          onBlur={handleScreenBlur}
-          rows={3}
-          className="w-full rounded-md border bg-background px-3 py-2 text-xs resize-y min-h-[60px] focus:outline-none focus:ring-1 focus:ring-ring"
-          placeholder={t('botFlow.fields.textRuPlaceholder')}
-        />
+        {/* Raw `<textarea>`: the layer repeats its `text-xs` by hand. The
+            padding already matches the layer's own default. */}
+        <EmojiFieldOverlay value={textRu} mode="text" multiline overlayClassName="text-xs">
+          <textarea
+            ref={textRuRef}
+            value={textRu}
+            onChange={(e) => setTextRu(e.target.value)}
+            onBlur={handleScreenBlur}
+            rows={3}
+            className="w-full rounded-md border bg-background px-3 py-2 text-xs resize-y min-h-[60px] focus:outline-none focus:ring-1 focus:ring-ring"
+            placeholder={t('botFlow.fields.textRuPlaceholder')}
+          />
+        </EmojiFieldOverlay>
         {placeholderHintKey !== null ? (
           <p className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1.5 text-[10px] leading-snug text-amber-700 dark:text-amber-400">
             {t(placeholderHintKey)}
@@ -290,15 +295,17 @@ export function ScreenEditorPanel({ screen, flowName }: ScreenEditorPanelProps) 
           <Label className="text-xs">{t('botFlow.fields.textEn')}</Label>
           <EmojiPicker onSelect={insertEmojiEn} ariaLabel={t('emojiPicker.trigger')} />
         </div>
-        <textarea
-          ref={textEnRef}
-          value={textEn}
-          onChange={(e) => setTextEn(e.target.value)}
-          onBlur={handleScreenBlur}
-          rows={3}
-          className="w-full rounded-md border bg-background px-3 py-2 text-xs resize-y min-h-[60px] focus:outline-none focus:ring-1 focus:ring-ring"
-          placeholder={t('botFlow.fields.textEnPlaceholder')}
-        />
+        <EmojiFieldOverlay value={textEn} mode="text" multiline overlayClassName="text-xs">
+          <textarea
+            ref={textEnRef}
+            value={textEn}
+            onChange={(e) => setTextEn(e.target.value)}
+            onBlur={handleScreenBlur}
+            rows={3}
+            className="w-full rounded-md border bg-background px-3 py-2 text-xs resize-y min-h-[60px] focus:outline-none focus:ring-1 focus:ring-ring"
+            placeholder={t('botFlow.fields.textEnPlaceholder')}
+          />
+        </EmojiFieldOverlay>
       </div>
 
       <Separator />
@@ -499,25 +506,42 @@ function ButtonEditor({ button, onUpdate, onDelete }: ButtonEditorProps) {
       {/* Label RU/EN */}
       <div className="grid grid-cols-2 gap-1.5">
         <div className="flex items-center gap-1">
-          <Input
-            ref={labelRuRef}
+          {/* `buttonLabel`: a leading shortcode is lifted out of this caption
+              into `icon_custom_emoji_id`, so the layer shows it as the
+              button's own icon above the field instead of inline. */}
+          <EmojiFieldOverlay
             value={labelRu}
-            onChange={(e) => setLabelRu(e.target.value)}
-            onBlur={handleLabelBlur}
-            placeholder={t('botFlow.button.labelRuPlaceholder')}
-            className="h-7 text-[11px]"
-          />
+            mode="buttonLabel"
+            overlayClassName="text-[11px]"
+            className="min-w-0 flex-1"
+          >
+            <Input
+              ref={labelRuRef}
+              value={labelRu}
+              onChange={(e) => setLabelRu(e.target.value)}
+              onBlur={handleLabelBlur}
+              placeholder={t('botFlow.button.labelRuPlaceholder')}
+              className="h-7 text-[11px]"
+            />
+          </EmojiFieldOverlay>
           <EmojiPicker onSelect={insertLabelRu} ariaLabel={t('emojiPicker.trigger')} />
         </div>
         <div className="flex items-center gap-1">
-          <Input
-            ref={labelEnRef}
+          <EmojiFieldOverlay
             value={labelEn}
-            onChange={(e) => setLabelEn(e.target.value)}
-            onBlur={handleLabelBlur}
-            placeholder={t('botFlow.button.labelEnPlaceholder')}
-            className="h-7 text-[11px]"
-          />
+            mode="buttonLabel"
+            overlayClassName="text-[11px]"
+            className="min-w-0 flex-1"
+          >
+            <Input
+              ref={labelEnRef}
+              value={labelEn}
+              onChange={(e) => setLabelEn(e.target.value)}
+              onBlur={handleLabelBlur}
+              placeholder={t('botFlow.button.labelEnPlaceholder')}
+              className="h-7 text-[11px]"
+            />
+          </EmojiFieldOverlay>
           <EmojiPicker onSelect={insertLabelEn} ariaLabel={t('emojiPicker.trigger')} />
         </div>
       </div>

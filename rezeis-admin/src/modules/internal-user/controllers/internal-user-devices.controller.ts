@@ -84,6 +84,15 @@ export class InternalUserDevicesController {
     @Param('hwid') hwid: string,
   ) {
     const subscription = await this.findActiveSubscription(userRef);
+    // Split out of the `identity === null` test below rather than folded into
+    // it. `storedIdentityOf` answers `null` for "no row at all" and for "row
+    // without a panel profile" alike, so one test did cover both — but it
+    // covered the first case in a way no later reader of `subscription` could
+    // see, and the row IS read again below. Same exception, same message: the
+    // two cases were never distinguishable to the caller and still are not.
+    if (subscription === null) {
+      throw new NotFoundException('No active subscription with a Remnawave profile');
+    }
     const identity = storedIdentityOf(subscription);
     if (identity === null) {
       throw new NotFoundException('No active subscription with a Remnawave profile');
@@ -155,6 +164,12 @@ export class InternalUserDevicesController {
     @Param('hwid') hwid: string,
   ) {
     const subscription = await this.findOwnedSubscription(userRef, subscriptionId);
+    // Same split as `deleteDevice`, for the same reason: `emitDeviceRevoked`
+    // reads the row afterwards, so "there is no row" has to be ruled out where
+    // that read can rest on it.
+    if (subscription === null) {
+      throw new NotFoundException('No subscription with a Remnawave profile');
+    }
     const identity = storedIdentityOf(subscription);
     if (identity === null) {
       throw new NotFoundException('No subscription with a Remnawave profile');
@@ -215,6 +230,13 @@ export class InternalUserDevicesController {
     @Param('subscriptionId') subscriptionId: string,
   ) {
     const subscription = await this.findOwnedSubscription(userRef, subscriptionId);
+    // Same split as `deleteDevice`. It matters most here: the row is read at
+    // four points AFTER the panel has already rotated the link — the persist and
+    // both link-lost reports among them — and those are exactly the reads that
+    // must not be resting on a null check nothing downstream can name.
+    if (subscription === null) {
+      throw new NotFoundException('No subscription with a Remnawave profile');
+    }
     const identity = storedIdentityOf(subscription);
     if (identity === null) {
       throw new NotFoundException('No subscription with a Remnawave profile');

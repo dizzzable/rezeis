@@ -170,8 +170,12 @@ export class PaymentsTransactionsService {
       channel,
       gatewayType: input.gatewayType,
       currencyOverride: input.currencyOverride,
-      ...(replayAvailability === PlanAvailability.TRIAL
-        ? { excludeTrialTransactionId: replay!.id }
+      // `replayAvailability` is only non-null when `replay` is, so the added
+      // `replay !== null` selects the same branch — it is there so the compiler
+      // can see the link the reader already knows, instead of a bare `!`. Same
+      // shape as the paid-trial guard below.
+      ...(replay !== null && replayAvailability === PlanAvailability.TRIAL
+        ? { excludeTrialTransactionId: replay.id }
         : {}),
     });
     if (
@@ -186,15 +190,18 @@ export class PaymentsTransactionsService {
         warnings: quote.warnings,
       });
     }
-    if (
-      quote.selectedPlan.availability === PlanAvailability.TRIAL &&
-      !allowPaidTrialReservation
-    ) {
+    // Bind the values the guard above just proved non-null. The paid-trial path
+    // does its work inside a `$transaction` callback, and narrowing on a
+    // property does not cross that function boundary — the compiler must be able
+    // to see the proof at the point of use, not only where it was made.
+    const selectedPlan = quote.selectedPlan;
+    const price = quote.price;
+    if (selectedPlan.availability === PlanAvailability.TRIAL && !allowPaidTrialReservation) {
       throw trialDraftRequiresCheckout();
     }
     const draftPlanSnapshot = buildTransactionDraftSnapshot({
       purchaseType: input.purchaseType,
-      selectedPlan: quote.selectedPlan,
+      selectedPlan,
       selectedDurationDays: quote.selectedDuration.days,
     });
     const draftMatch = {
@@ -203,8 +210,8 @@ export class PaymentsTransactionsService {
       purchaseType: input.purchaseType,
       channel,
       gatewayType: input.gatewayType,
-      currency: quote.price.currency,
-      amount: quote.price.price,
+      currency: price.currency,
+      amount: price.price,
       planSnapshot: draftPlanSnapshot,
     } as const;
 
@@ -216,11 +223,11 @@ export class PaymentsTransactionsService {
             'The pending paid-trial checkout no longer matches current terms and must be resolved before starting another.',
         });
       }
-      await this.ensureExistingTrialReservation(replay, quote.selectedPlan.trialSettings);
+      await this.ensureExistingTrialReservation(replay, selectedPlan.trialSettings);
       return mapAdminPaymentTransaction(replay);
     }
 
-    if (quote.selectedPlan.availability === PlanAvailability.TRIAL) {
+    if (selectedPlan.availability === PlanAvailability.TRIAL) {
       const transaction = await this.prismaService.$transaction(async (tx) => {
         await lockTrialClaimUser(tx, input.userId);
         const existingPendingDraft = await this.findExistingPendingDraft(draftMatch, tx);
@@ -230,19 +237,19 @@ export class PaymentsTransactionsService {
           });
           if (existingClaim === null || existingClaim.status === 'RELEASED') {
             const usedUnits = await countCommittedTrialClaimUnits(tx, input.userId);
-            if (usedUnits >= quote.selectedPlan.trialSettings.maxClaims) {
+            if (usedUnits >= selectedPlan.trialSettings.maxClaims) {
               throw trialClaimLimitReached();
             }
           }
           await reservePaidTrialClaim(tx, {
             userId: input.userId,
-            planId: quote.selectedPlan.id,
+            planId: selectedPlan.id,
             transactionId: existingPendingDraft.id,
           });
           return existingPendingDraft;
         }
         const usedUnits = await countCommittedTrialClaimUnits(tx, input.userId);
-        if (usedUnits >= quote.selectedPlan.trialSettings.maxClaims) {
+        if (usedUnits >= selectedPlan.trialSettings.maxClaims) {
           // The draft could not be reused (different gateway, currency or
           // amount), so a second reservation would be required — which the
           // quota forbids. Name the real obstacle: if the block comes from the
@@ -258,15 +265,15 @@ export class PaymentsTransactionsService {
             purchaseType: input.purchaseType,
             channel,
             gatewayType: input.gatewayType,
-            currency: quote.price.currency,
-            amount: quote.price.price,
+            currency: price.currency,
+            amount: price.price,
             planSnapshot: draftPlanSnapshot as Prisma.InputJsonValue,
             deviceTypes: input.deviceType ? [input.deviceType] : [],
           },
         });
         await reservePaidTrialClaim(tx, {
           userId: input.userId,
-          planId: quote.selectedPlan.id,
+          planId: selectedPlan.id,
           transactionId: created.id,
         });
         return created;
@@ -286,8 +293,8 @@ export class PaymentsTransactionsService {
         purchaseType: input.purchaseType,
         channel,
         gatewayType: input.gatewayType,
-        currency: quote.price.currency,
-        amount: quote.price.price,
+        currency: price.currency,
+        amount: price.price,
         planSnapshot: draftPlanSnapshot as Prisma.InputJsonValue,
         deviceTypes: input.deviceType ? [input.deviceType] : [],
       },

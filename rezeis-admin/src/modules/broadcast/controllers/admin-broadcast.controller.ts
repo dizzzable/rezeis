@@ -18,6 +18,7 @@ import { CurrentAdmin } from '../../auth/decorators/current-admin.decorator';
 import { AdminJwtAuthGuard } from '../../auth/guards/admin-jwt-auth.guard';
 import { RequirePermission } from '../../rbac/decorators/require-permission.decorator';
 import { RbacGuard } from '../../rbac/guards/rbac.guard';
+import { RbacService } from '../../rbac/services/rbac.service';
 import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.interface';
 import {
   CreateBroadcastDraftDto,
@@ -48,7 +49,27 @@ export class AdminBroadcastController {
     private readonly broadcastMediaUploadService: BroadcastMediaUploadService,
     private readonly broadcastQueueService: BroadcastQueueService,
     private readonly broadcastDeliveryService: BroadcastDeliveryService,
+    private readonly rbacService: RbacService,
   ) {}
+
+  /**
+   * Whether this caller may destroy a broadcast.
+   *
+   * Asked here rather than with a second `@RequirePermission` because the
+   * elevated permission must not gate the ENDPOINT: test-sending a preview is
+   * `broadcasts:run` and must stay available to a role that holds run and not
+   * delete — the default `operator` is exactly that shape. `@RequirePermission`
+   * can only allow or refuse the whole route, so the distinction lives in what
+   * the handler does afterwards. Same reasoning, same shape as
+   * `AdminPaymentGatewaysController.canRevealSecrets`.
+   */
+  private async canDeleteBroadcasts(admin: CurrentAdminInterface): Promise<boolean> {
+    return this.rbacService.hasPermission(
+      { id: admin.id, role: admin.role, rbacRoleId: admin.rbacRoleId ?? null },
+      'broadcasts',
+      'delete',
+    );
+  }
 
   // ── CRUD ────────────────────────────────────────────────────────────────
 
@@ -136,7 +157,7 @@ export class AdminBroadcastController {
   @ApiOperation({ summary: 'Send a preview of a draft to the bot developer (BOT_DEV_ID) only' })
   public async sendTestBroadcast(
     @Param('broadcastId') broadcastId: string,
-    @CurrentAdmin() _currentAdmin: CurrentAdminInterface,
+    @CurrentAdmin() currentAdmin: CurrentAdminInterface,
   ): Promise<{ ok: true; message: string }> {
     const broadcast = await this.broadcastService.getBroadcast(broadcastId);
     if (broadcast.status !== 'DRAFT') {
@@ -152,13 +173,35 @@ export class AdminBroadcastController {
             : 'Test send failed',
       );
     }
-    // The test draft is a throwaway preview shell (no recipients/messages) — the
-    // real "send" creates its own fresh draft. Clean it up so test runs don't
-    // accumulate orphan DRAFT rows in the broadcast list. Best-effort.
-    try {
-      await this.broadcastService.deleteBroadcast(broadcastId);
-    } catch {
-      // Non-fatal: the preview already reached the developer.
+    // Clean up the preview shell so test runs do not accumulate orphan DRAFT
+    // rows in the broadcast list — but ONLY for a caller who could have deleted
+    // it through the front door.
+    //
+    // This used to run unconditionally, justified by a comment saying the row
+    // is "a throwaway preview shell (no recipients/messages)". That describes
+    // the panel's own flow, which creates a shell and immediately test-sends
+    // it. Nothing here enforced it: `broadcastId` is caller-supplied and the
+    // only precondition is DRAFT, so the endpoint deleted ANY draft it was
+    // pointed at. And "no messages" cannot tell the two apart — `messages` are
+    // written at dispatch, so EVERY draft has none, including one somebody
+    // spent an afternoon writing.
+    //
+    // That made `broadcasts:run` a way to destroy drafts without holding
+    // `broadcasts:delete`, which this catalog deliberately separates: the
+    // default `operator` role holds view/create/edit/run and no delete, and
+    // `DELETE :broadcastId` is gated on delete precisely so destruction is its
+    // own privilege. The invariant restored here is that a side effect must
+    // never reach further than the caller's own hands.
+    //
+    // A run-only caller therefore leaves the shell behind. That is a stray row
+    // in a list, undone by anyone with delete — the failure it replaces was
+    // silent, permanent loss of somebody else's work.
+    if (await this.canDeleteBroadcasts(currentAdmin)) {
+      try {
+        await this.broadcastService.deleteBroadcast(broadcastId);
+      } catch {
+        // Non-fatal: the preview already reached the developer.
+      }
     }
     return { ok: true, message: 'Test preview sent to developer' };
   }

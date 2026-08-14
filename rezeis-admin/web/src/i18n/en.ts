@@ -774,6 +774,12 @@ export const en = {
       save: 'Save emoji',
       saved: 'Emoji saved',
       saveFailed: 'Failed to save',
+      problemIdNotNumeric:
+        'custom_emoji_id must be digits only — anything else is dropped before the message is sent.',
+      problemNothingToDeliver:
+        'No glyph and no custom_emoji_id — the bot sends the raw :shortcode: as text instead of an emoji.',
+      glyphOnlyNote:
+        'No custom_emoji_id — the bot sends the fallback glyph, not this animation. The image stays panel/cabinet-only.',
     },
     tabs: {
       packs: 'Packs',
@@ -808,6 +814,20 @@ export const en = {
     empty: 'Nothing found',
     standard: 'Standard',
     custom: 'Custom',
+    undeliverable:
+      '{{token}} cannot be inserted: this entry has neither a fallback glyph nor a custom_emoji_id, so the bot would send the shortcode as text. Fix it on the "Emoji packs" page.',
+  },
+  emojiField: {
+    buttonIconLabel: 'Button icon — not part of the caption',
+    buttonIconHint:
+      '{{token}} leads the caption, so the bot moves it into the button\'s own icon (icon_custom_emoji_id). Telegram draws it BEFORE the caption, not inside it.',
+    tokenImage: '{{token}} → custom emoji',
+    tokenGlyph: '{{token}} → fallback glyph (this entry has no custom_emoji_id, or the bot owner has no Premium)',
+    tokenGlyphButton:
+      '{{token}} → glyph: an inline button caption cannot carry a custom emoji anywhere but its leading icon',
+    tokenUnknown: '{{token}} → unknown shortcode, sent as raw text',
+    tokenDead:
+      '{{token}} → sent as raw text: this pack entry has neither a glyph nor a custom_emoji_id',
   },
   realtime: {
     categories: {
@@ -4493,6 +4513,16 @@ export const en = {
           'Add an English translation — users with English locale will see it. Paste the already-translated text.',
         enValue: 'Value (EN)',
         preview: 'Preview',
+        previewTokenGlyph: '{{token}} → fallback glyph (this entry has no custom_emoji_id)',
+        previewTokenDead:
+          '{{token}} → sent as raw text: this pack entry has neither a glyph nor a custom_emoji_id',
+        previewTokenUnknown: '{{token}} → unknown shortcode, sent as raw text',
+        previewDeadNote:
+          'Highlighted shortcodes reach the user as raw text. Fix or remove them on the "Emoji packs" page.',
+        previewGlyphNote:
+          'Shortcodes without a custom_emoji_id are delivered as their fallback glyph — the pack animation never leaves the panel.',
+        previewPremiumNote:
+          'Animated emoji render only while the bot owner has Telegram Premium; otherwise everyone sees the glyph.',
       },
       toasts: {
         created: 'Text created',

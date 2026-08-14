@@ -3,6 +3,20 @@
  * editors. Captures the same blur-save flow used by the legacy graph
  * editor so an operator never has to press a save button to persist a
  * copy edit. Empty EN value is allowed (server falls back to RU).
+ *
+ * Both halves draw their `:slug:` tokens through `EmojiFieldOverlay`, so the
+ * operator reads the copy the way Telegram will draw it instead of
+ * `:tg_ios_macos_icons_25:`. The layer is a view only — what is typed is what
+ * `onSave` hands upstream, byte for byte; see that module for why it steps
+ * aside while the field has focus.
+ *
+ * Every caller of this component edits BOT COPY, not a button caption
+ * (`GraphScreenEditor` → screen text, `NotificationEditor` → notification
+ * title and body), so `mode` stays the default `text` and is not a prop. A
+ * caller that ever feeds an inline-button caption in here needs
+ * `mode="buttonLabel"` instead — a caption's leading token is lifted into
+ * `icon_custom_emoji_id` and never stays in the string — and that is the point
+ * to lift the mode into a prop rather than let this one lie.
  */
 import { useEffect, useId, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -10,6 +24,7 @@ import { useTranslation } from 'react-i18next'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { EmojiPicker } from '@/features/broadcast/emoji-picker'
+import { EmojiFieldOverlay } from '@/features/custom-emoji/emoji-field-overlay'
 
 import { insertAtCaret } from '../../utils/insert-at-caret'
 
@@ -108,17 +123,33 @@ export function LocaleTextarea({
           </Label>
           <EmojiPicker onSelect={insertRu} ariaLabel={t('botMapPage.inspector.emojiAria')} />
         </div>
-        <Textarea
-          id={ruId}
-          ref={ruRef}
-          rows={rows}
+        {/* The picker sits in the label row above, not over the field, so it
+            needs no `adornment` slot — nothing is positioned against the box
+            the layer covers.
+
+            `disabled` goes to the layer as well as to the field: the layer
+            paints an opaque background over the control, so a field left to dim
+            alone through `disabled:opacity-50` is dimmed underneath something
+            at full strength. Every caller here disables mid-save, and this pair
+            saves ON BLUR — the exact moment the layer is back up. */}
+        <EmojiFieldOverlay
           value={localRu}
-          onChange={(e) => setLocalRu(e.target.value)}
-          onBlur={handleBlurRu}
-          placeholder={placeholderRu}
+          multiline
+          overlayClassName="font-mono text-sm"
           disabled={disabled}
-          className="font-mono text-sm"
-        />
+        >
+          <Textarea
+            id={ruId}
+            ref={ruRef}
+            rows={rows}
+            value={localRu}
+            onChange={(e) => setLocalRu(e.target.value)}
+            onBlur={handleBlurRu}
+            placeholder={placeholderRu}
+            disabled={disabled}
+            className="font-mono text-sm"
+          />
+        </EmojiFieldOverlay>
       </div>
       <div className="space-y-1.5">
         <div className="flex items-center justify-between">
@@ -127,17 +158,24 @@ export function LocaleTextarea({
           </Label>
           <EmojiPicker onSelect={insertEn} ariaLabel={t('botMapPage.inspector.emojiAria')} />
         </div>
-        <Textarea
-          id={enId}
-          ref={enRef}
-          rows={rows}
+        <EmojiFieldOverlay
           value={localEn}
-          onChange={(e) => setLocalEn(e.target.value)}
-          onBlur={handleBlurEn}
-          placeholder={placeholderEn}
+          multiline
+          overlayClassName="font-mono text-sm"
           disabled={disabled}
-          className="font-mono text-sm"
-        />
+        >
+          <Textarea
+            id={enId}
+            ref={enRef}
+            rows={rows}
+            value={localEn}
+            onChange={(e) => setLocalEn(e.target.value)}
+            onBlur={handleBlurEn}
+            placeholder={placeholderEn}
+            disabled={disabled}
+            className="font-mono text-sm"
+          />
+        </EmojiFieldOverlay>
         {localEn.length === 0 && (
           <p className="text-[10px] leading-snug text-muted-foreground">
             {t('botMapPage.inspector.enFallback')}

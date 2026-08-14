@@ -1,4 +1,4 @@
-﻿export const ru = {
+export const ru = {
   adminShell: {
     headerSubtitle: 'Администрирование Rezeis VPN',
     openMenu: 'Открыть меню навигации',
@@ -791,6 +791,12 @@
       save: 'Сохранить эмодзи',
       saved: 'Эмодзи сохранён',
       saveFailed: 'Не удалось сохранить',
+      problemIdNotNumeric:
+        'custom_emoji_id — только цифры: всё остальное отбрасывается перед отправкой сообщения.',
+      problemNothingToDeliver:
+        'Нет ни символа, ни custom_emoji_id — бот отправит сам :шорткод: текстом, а не эмодзи.',
+      glyphOnlyNote:
+        'Без custom_emoji_id бот отправит fallback-символ, а не эту анимацию. Картинка остаётся только в панели и кабинете.',
     },
     tabs: {
       packs: 'Паки',
@@ -825,6 +831,20 @@
     empty: 'Ничего не найдено',
     standard: 'Стандартные',
     custom: 'Кастомные',
+    undeliverable:
+      '{{token}} нельзя вставить: у записи нет ни fallback-символа, ни custom_emoji_id, поэтому бот отправит шорткод текстом. Почините на странице «Паки эмодзи».',
+  },
+  emojiField: {
+    buttonIconLabel: 'Иконка кнопки — в подпись не попадёт',
+    buttonIconHint:
+      '{{token}} стоит первым, поэтому бот переносит его в собственную иконку кнопки (icon_custom_emoji_id). Telegram рисует её ПЕРЕД подписью, а не внутри неё.',
+    tokenImage: '{{token}} → кастомное эмодзи',
+    tokenGlyph:
+      '{{token}} → fallback-символ (у записи нет custom_emoji_id либо у владельца бота нет Premium)',
+    tokenGlyphButton:
+      '{{token}} → символ: подпись инлайн-кнопки не может нести кастомное эмодзи нигде, кроме ведущей иконки',
+    tokenUnknown: '{{token}} → неизвестный шорткод, уйдёт текстом',
+    tokenDead: '{{token}} → уйдёт текстом: у записи в паке нет ни символа, ни custom_emoji_id',
   },
   realtime: {
     categories: {
@@ -4552,6 +4572,16 @@
           'Добавить перевод на английский — пользователям с английским языком бот покажет его. Вставьте уже переведённый текст.',
         enValue: 'Значение (EN)',
         preview: 'Предпросмотр',
+        previewTokenGlyph: '{{token}} → fallback-символ (у записи нет custom_emoji_id)',
+        previewTokenDead:
+          '{{token}} → уйдёт текстом: у записи в паке нет ни символа, ни custom_emoji_id',
+        previewTokenUnknown: '{{token}} → неизвестный шорткод, уйдёт текстом',
+        previewDeadNote:
+          'Подсвеченные шорткоды дойдут до пользователя текстом. Почините или уберите их на странице «Паки эмодзи».',
+        previewGlyphNote:
+          'Шорткоды без custom_emoji_id уходят fallback-символом — анимация из пака не покидает панель.',
+        previewPremiumNote:
+          'Анимированные эмодзи рисуются, только пока у владельца бота есть Telegram Premium; иначе все увидят символ.',
       },
       toasts: {
         created: 'Текст создан',

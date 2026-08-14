@@ -50,7 +50,52 @@ const EXPECTED_REQUEST_FP = fingerprint({
 });
 
 
-function draftRow(data: Record<string, unknown> = {}) {
+/**
+ * The persisted renewal draft as the service reads it back.
+ *
+ * Spelled out rather than inferred from the seed literal: inferred, `gatewayId`
+ * is typed `null` — the one thing the durable provider-creation claim exists to
+ * change. A double whose claim column cannot hold a claim cannot guard the
+ * claim. `checkoutUrl` and `checkoutFingerprint` are nullable columns for the
+ * same reason.
+ */
+type DraftRow = {
+  [column: string]: unknown;
+  id: string;
+  paymentId: string;
+  userId: string;
+  status: string;
+  purchaseType: string;
+  channel: string;
+  gatewayType: string;
+  gatewayId: string | null;
+  currency: string;
+  amount: { toString(): string };
+  planSnapshot: Record<string, unknown>;
+  gatewayData: Record<string, unknown>;
+  checkoutUrl: string | null;
+  checkoutFingerprint: string | null;
+  items: Array<{
+    subscriptionId: string;
+    planId: string;
+    durationDays: number;
+    addOnLines: unknown;
+  }>;
+  createdAt: Date;
+};
+
+/**
+ * The claim writes a payment-id-bound token into `gatewayId`; the column is
+ * `string | null` in Postgres. Checking it here keeps the double from storing
+ * something the real column could not hold and then comparing against it.
+ */
+function claimedGatewayId(data: Record<string, unknown>): string {
+  const claim = data.gatewayId;
+  assert.ok(typeof claim === 'string', 'a provider-creation claim must write a string gatewayId');
+  return claim;
+}
+
+function draftRow(data: Record<string, unknown> = {}): DraftRow {
   return {
     id: 'tx-1',
     paymentId: 'pay-1',
@@ -90,7 +135,11 @@ function build(options: {
   paymentGatewayFindUnique?: () => Promise<Record<string, unknown> | null>;
   userFindUnique?: () => Promise<{ id: string } | null>;
   getInternalPlatformPolicy?: () => Promise<{ accessMode: string }>;
-  providerCreateCheckout?: () => Promise<Record<string, unknown>>;
+  // Nullable on purpose: one test simulates a gateway that answered with no
+  // checkout at all, and the service must fail closed rather than pass the
+  // absence downstream. Declaring that here is what lets the test say `null`
+  // plainly instead of casting one through `unknown`.
+  providerCreateCheckout?: () => Promise<Record<string, unknown> | null>;
   findFirst?: () => Promise<Record<string, unknown> | null>;
   transactionError?: unknown;
   updateMany?: (args: { where: Record<string, unknown>; data: Record<string, unknown> }) => Promise<{ count: number }>;
@@ -184,10 +233,10 @@ describe('PaymentsRenewalCheckoutService idempotency (T-007)', () => {
     const result = await service.renewalCheckout(baseInput);
     assert.equal(result.checkoutUrl, 'https://pay/1');
     const draft = created.find((d) => d.idempotencyKey === 'renew-key-1');
-    assert.notEqual(draft, undefined);
-    assert.equal(draft!.checkoutFingerprint, EXPECTED_FP);
+    assert.ok(draft, 'the keyed renewal persisted no draft carrying idempotencyKey "renew-key-1"');
+    assert.equal(draft.checkoutFingerprint, EXPECTED_FP);
     assert.equal(
-      (draft!.planSnapshot as { renewalRequestFingerprint?: string }).renewalRequestFingerprint,
+      (draft.planSnapshot as { renewalRequestFingerprint?: string }).renewalRequestFingerprint,
       EXPECTED_REQUEST_FP,
     );
   });
@@ -385,16 +434,17 @@ describe('PaymentsRenewalCheckoutService idempotency (T-007)', () => {
 
   it('atomically claims provider creation so concurrent requests for one PENDING draft call the provider once', async () => {
     const pending = draftRow({ checkoutFingerprint: EXPECTED_FP });
-    let releaseFirstProvider!: () => void;
+    let releaseFirstProvider: (() => void) | undefined;
     const firstProviderMayFinish = new Promise<void>((resolve) => {
       releaseFirstProvider = resolve;
     });
+    assert.ok(releaseFirstProvider, 'the promise executor did not publish its resolver synchronously');
     let providerAttempt = 0;
     const { service, providerCalls } = build({
       candidates: [pending],
       updateMany: async (args) => {
         if (args.where.gatewayId === null && pending.gatewayId === null) {
-          pending.gatewayId = args.data.gatewayId;
+          pending.gatewayId = claimedGatewayId(args.data);
           return { count: 1 };
         }
         if (args.where.gatewayId === pending.gatewayId) {
@@ -433,10 +483,14 @@ describe('PaymentsRenewalCheckoutService idempotency (T-007)', () => {
     const firstOutcome = await Promise.allSettled([first]);
 
     assert.equal(providerCalls(), 1, 'only the durable claim owner may call createCheckout');
-    assert.equal(firstOutcome[0]!.status, 'fulfilled');
-    assert.equal(secondOutcome[0]!.status, 'rejected');
-    if (secondOutcome[0]!.status === 'rejected') {
-      assert.equal(secondOutcome[0]!.reason instanceof ServiceUnavailableException, true);
+    const firstSettled = firstOutcome[0];
+    const secondSettled = secondOutcome[0];
+    assert.ok(firstSettled, 'the claim owner\'s renewalCheckout never settled');
+    assert.ok(secondSettled, 'the concurrent renewalCheckout never settled');
+    assert.equal(firstSettled.status, 'fulfilled');
+    assert.equal(secondSettled.status, 'rejected');
+    if (secondSettled.status === 'rejected') {
+      assert.equal(secondSettled.reason instanceof ServiceUnavailableException, true);
     }
   });
 
@@ -446,7 +500,7 @@ describe('PaymentsRenewalCheckoutService idempotency (T-007)', () => {
       candidates: [pending],
       updateMany: async (args) => {
         if (pending.gatewayId !== null) return { count: 0 };
-        pending.gatewayId = args.data.gatewayId;
+        pending.gatewayId = claimedGatewayId(args.data);
         return { count: 1 };
       },
       findUnique: async () => pending,
@@ -472,7 +526,8 @@ describe('PaymentsRenewalCheckoutService idempotency (T-007)', () => {
     const { service, created } = build({ existing: null });
     const result = await service.renewalCheckout({ userId: 'user-1', subscriptionIds: ['sub-1'], gatewayType: 'YOOKASSA' as never });
     assert.equal(result.checkoutUrl, 'https://pay/1');
-    const draft = created[0]!;
+    const draft = created[0];
+    assert.ok(draft, 'a keyless renewal created no draft to persist the checkout fingerprint on');
     assert.equal(draft.idempotencyKey, null);
     assert.equal(draft.checkoutFingerprint, EXPECTED_FP);
   });
@@ -514,7 +569,7 @@ describe('PaymentsRenewalCheckoutService idempotency (T-007)', () => {
   it('fails closed when the provider returns a nullable checkout result', async () => {
     const { service } = build({
       existing: null,
-      providerCreateCheckout: async () => null as unknown as Record<string, unknown>,
+      providerCreateCheckout: async () => null,
     });
 
     await assert.rejects(

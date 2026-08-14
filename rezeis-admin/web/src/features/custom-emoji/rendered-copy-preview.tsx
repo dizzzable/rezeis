@@ -1,37 +1,59 @@
 /**
  * RenderedCopyPreview
  * ───────────────────
- * Renders bot copy the way users will see it: `:slug:` tokens become the pack
- * glyph (image/Lottie/webm), `{{KEY}}` tokens become their unicode fallback,
- * everything else is plain text. A read-only companion to a token text field
- * so the operator sees emoji rendered instead of raw `:slug:` codes.
+ * Read-only preview of broadcast copy, showing it the way the RECIPIENT will
+ * read it rather than as `:slug:` shortcodes.
  *
- * Uses the shared, unit-tested tokenizer (`emoji-token-text`) so the preview
- * splits copy exactly like the delivery-time renderer.
+ * WHY IT NO LONGER DRAWS THE PACK PICTURE FOR EVERY KNOWN SLUG
+ *
+ * The pack artwork is a panel asset — it never leaves the panel. What travels
+ * to Telegram is a `<tg-emoji>` tag, and the animated emoji only appears when
+ * the entry has a `custom_emoji_id` AND the bot owner has Premium. Without
+ * either, the recipient gets the plain carrier glyph:
+ *
+ *     carrier = the entry's own fallback glyph, else '⭐' when it has an id,
+ *               else nothing — the token is undeliverable
+ *
+ * This preview used to draw the downloaded picture for every slug it
+ * recognised, without asking either question. So an entry with a fallback
+ * glyph but NO `custom_emoji_id` — exactly the state importing an ordinary
+ * sticker pack leaves behind — looked animated here while every recipient got
+ * a bare glyph. A broadcast goes to thousands of people and this preview is
+ * the only thing the operator checks before pressing send, so a preview that
+ * flatters is worse than no preview at all: it manufactures confidence
+ * precisely where a mistake is most expensive.
+ *
+ * WHERE THE DECISION LIVES NOW
+ *
+ * Not here. Each token is resolved by `renderEmojiField` — the same call the
+ * copy FIELDS make through `EmojiFieldOverlay`, over the same
+ * `resolveEmojiDelivery` rules the backend renderer mirrors. The field and the
+ * preview sitting under it therefore cannot drift apart: there is one rule set,
+ * not three. This file only draws the parts it is handed.
+ *
+ * Its one addition is animation. `renderEmojiField` decides THAT a token
+ * arrives as a custom emoji and hands back the still image; a preview has room
+ * to play the Lottie / `.webm` where an input's overlay does not, so the
+ * animated forms are looked back up by token and handed to `EmojiPreview`.
+ * That is presentation only — never a second opinion about deliverability.
+ *
+ * `mode: 'text'` throughout: this previews message bodies, which may carry
+ * `custom_emoji` entities. Inline-button captions cannot, and are previewed by
+ * `EmojiFieldOverlay` in `buttonLabel` mode instead.
  */
-import { Fragment, useMemo, type JSX } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useMemo, type JSX } from 'react'
+import { useTranslation } from 'react-i18next'
 
-import { api } from '@/lib/api'
-import { expectArray } from '@/lib/api-utils'
 import { cn } from '@/lib/utils'
+
+import { useEmojiCatalog, type EmojiArt } from './emoji-catalog'
 import { EmojiPreview } from './emoji-preview'
-import { parseTokens } from './emoji-token-text'
+import { renderEmojiField, type EmojiFieldPart } from './emoji-field-render'
 
-interface PackEmojiLite {
-  readonly slug: string
-  readonly name: string
-  readonly imageUrl: string
-  readonly lottieUrl: string | null
-  readonly videoUrl: string | null
-}
-interface BotEmojiLite {
-  readonly key: string
-  readonly unicode: string
-}
-
-const PACKS_KEY = ['admin', 'custom-emoji', 'packs'] as const
-const EMOJIS_KEY = ['admin', 'bot-config', 'emojis'] as const
+// The catalog — the three queries, their schemas and the Premium fallback —
+// lives in `./emoji-catalog`, shared with the in-field layer. It was declared
+// here and again there, and that is precisely how this preview came to miss the
+// `ready` gate the layer had already grown: one rule, two wirings.
 
 export function RenderedCopyPreview({
   value,
@@ -40,59 +62,92 @@ export function RenderedCopyPreview({
   readonly value: string
   readonly className?: string
 }): JSX.Element | null {
-  const { data: packs } = useQuery<ReadonlyArray<{ emojis: readonly PackEmojiLite[] }>>({
-    queryKey: PACKS_KEY,
-    queryFn: async () =>
-      expectArray<{ emojis: readonly PackEmojiLite[] }>(
-        (await api.get('/admin/custom-emoji/packs')).data,
-      ),
-    staleTime: 60_000,
-  })
-  const { data: emojis } = useQuery<ReadonlyArray<BotEmojiLite>>({
-    queryKey: EMOJIS_KEY,
-    queryFn: async () =>
-      expectArray<BotEmojiLite>((await api.get('/admin/bot-config/emojis')).data),
-    staleTime: 60_000,
-  })
+  const catalog = useEmojiCatalog()
 
-  const slugMap = useMemo(() => {
-    const map = new Map<string, PackEmojiLite>()
-    for (const pack of Array.isArray(packs) ? packs : []) for (const e of pack.emojis) map.set(e.slug, e)
-    return map
-  }, [packs])
-  const keyMap = useMemo(() => {
-    const map = new Map<string, string>()
-    for (const e of Array.isArray(emojis) ? emojis : []) map.set(e.key, e.unicode)
-    return map
-  }, [emojis])
+  const parts = useMemo<readonly EmojiFieldPart[]>(
+    () =>
+      renderEmojiField(value, {
+        slugs: catalog.slugs,
+        slots: catalog.slots,
+        mode: 'text',
+        ownerHasPremium: catalog.ownerHasPremium,
+      }).parts,
+    [value, catalog],
+  )
 
   if (value.trim().length === 0) return null
 
-  const segments = parseTokens(value)
+  return (
+    <div
+      data-testid="rendered-copy-preview"
+      className={cn(
+        'whitespace-pre-wrap break-words rounded-md border bg-muted/30 p-2 text-sm leading-6',
+        className,
+      )}
+    >
+      {/*
+        Until the catalog lands, the value is shown as the plain text it is.
+        Rendering `parts` here instead would mark every token "sent as raw
+        text" — an empty catalog is indistinguishable from "no pack defines
+        this" — so the preview would accuse correct copy of being broken for
+        the length of the fetch, in the same destructive styling it uses for a
+        genuinely dead token. The box itself stays: `broadcast-page.tsx` places
+        it as a permanent line under each field and a disappearing one would
+        shift the layout on every load.
+      */}
+      {catalog.ready
+        ? parts.map((part, index) => (
+            <PreviewPart key={`${index}-${partKey(part)}`} part={part} art={catalog.art} />
+          ))
+        : value}
+    </div>
+  )
+}
+
+function partKey(part: EmojiFieldPart): string {
+  return part.kind === 'text' ? part.text : part.token
+}
+
+function PreviewPart({
+  part,
+  art,
+}: {
+  readonly part: EmojiFieldPart
+  readonly art: ReadonlyMap<string, EmojiArt>
+}): JSX.Element {
+  const { t } = useTranslation()
+
+  if (part.kind === 'text') return <>{part.text}</>
+
+  if (part.kind === 'image') {
+    // Deliverability was already settled by `renderEmojiField`; the lookup here
+    // only upgrades the still it handed back to the animation the panel holds.
+    const animated = art.get(part.token)
+    return (
+      <EmojiPreview
+        imageUrl={part.imageUrl}
+        lottieUrl={animated?.lottieUrl ?? null}
+        videoUrl={animated?.videoUrl ?? null}
+        alt={part.token}
+        className="mx-0.5 inline-block h-5 w-5 align-middle"
+      />
+    )
+  }
+
+  if (part.kind === 'glyph') {
+    // The carrier — the entry's own glyph, or the star an id-only entry rides
+    // on. This is the character that actually arrives, so it is what is shown.
+    return <span title={t('emojiField.tokenGlyph', { token: part.token })}>{part.glyph}</span>
+  }
 
   return (
-    <div className={cn('whitespace-pre-wrap break-words rounded-md border bg-muted/30 p-2 text-sm leading-6', className)}>
-      {segments.map((seg, i) => {
-        if (seg.type === 'text') return <Fragment key={i}>{seg.text}</Fragment>
-        if (seg.kind === 'slug') {
-          const hit = slugMap.get(seg.name)
-          if (hit) {
-            return (
-              <EmojiPreview
-                key={i}
-                imageUrl={hit.imageUrl}
-                lottieUrl={hit.lottieUrl}
-                videoUrl={hit.videoUrl}
-                alt={seg.raw}
-                className="mx-0.5 inline-block h-5 w-5 align-middle"
-              />
-            )
-          }
-          return <Fragment key={i}>{seg.raw}</Fragment>
-        }
-        const unicode = keyMap.get(seg.name)
-        return <Fragment key={i}>{unicode ?? seg.raw}</Fragment>
+    <span
+      title={t(part.reason === 'unknown' ? 'emojiField.tokenUnknown' : 'emojiField.tokenDead', {
+        token: part.token,
       })}
-    </div>
+      className="rounded bg-destructive/10 px-1 font-mono text-xs text-destructive"
+    >
+      {part.token}
+    </span>
   )
 }

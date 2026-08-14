@@ -297,7 +297,11 @@ export class AddOnPurchaseService {
       });
       if (claim.count !== 1) {
         const current = await this.prismaService.transaction.findUnique({ where: { id: transaction.id } });
-        if (current?.fulfilledAt !== null) {
+        // Only a row we actually read can be replayed as completed. A vanished
+        // draft (swept / rolled back) is not a fulfilled purchase, so absence
+        // must refuse exactly like a live race instead of reporting success —
+        // same shape the plan and renewal zero-value paths use.
+        if (current !== null && current.fulfilledAt !== null) {
           return { paymentId: current.paymentId, transactionStatus: current.status, gatewayType: current.gatewayType, purchaseType: current.purchaseType, amount: current.amount.toString(), currency: current.currency, checkoutUrl: null, providerMode: 'NONE', createdAt: current.createdAt.toISOString() };
         }
         throw new ConflictException('Zero-value add-on checkout is already being fulfilled');

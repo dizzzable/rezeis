@@ -1,5 +1,5 @@
 import { Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
-import { PrismaService } from '../../../common/prisma/prisma.service.js';
+import { PrismaService } from '../../../common/prisma/prisma.service';
 import { readFileSync, existsSync } from 'fs';
 import { join } from 'path';
 

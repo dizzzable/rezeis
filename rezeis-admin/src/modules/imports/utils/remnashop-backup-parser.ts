@@ -557,7 +557,10 @@ function ensureArchiveEntrySize(name: string, size: number | undefined): void {
   }
 }
 
-function normalizeTarEntryType(type: string | undefined): 'file' | 'ignore' {
+// Typed off the tar-stream header instead of a bare `string`: the library also
+// reports `null` for an entry with no type byte, and that case must land on the
+// same "plain file" default as a missing one.
+function normalizeTarEntryType(type: Headers['type']): 'file' | 'ignore' {
   const normalized = type ?? 'file';
   if (!ALLOWED_TAR_ENTRY_TYPES.has(normalized)) {
     throw new BadRequestException(`Archive entry type '${normalized}' is not allowed`);

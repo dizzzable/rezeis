@@ -145,7 +145,13 @@ export class EntitlementBoundaryService {
         return { activated: false, termId: null, activatedEntitlements: 0, desiredRevision: null, syncJobIds: [] };
       }
 
-      let resetAnchorAt = due.resetAnchorAt ?? due.startsAt;
+      // Nullable on purpose: the MONTH_ROLLING branch below CLEARS the anchor
+      // when the panel instant cannot be read, and `startsAt` is not a legal
+      // stand-in for it — a window minted from the wrong moment would hand out
+      // paid traffic against the wrong cycle. A null anchor makes
+      // `ensureLiveResetEpoch` return no epoch, which is what keeps
+      // reset-scoped commerce fail-closed (see the ConflictException below).
+      let resetAnchorAt: Date | null = due.resetAnchorAt ?? due.startsAt;
       if (
         due.trafficResetStrategy === 'MONTH_ROLLING' &&
         (resolveResetCapabilities().MONTH_ROLLING ?? 'DISABLED') === 'ENABLED'

@@ -73,7 +73,10 @@ describe('PaymentSubscriptionMutationService renewal term queue', () => {
     // this assertion flip after that date, even though the service correctly
     // starts an already-expired subscription from the current instant.
     const expiry = new Date(Date.now() + 86_400_000);
-    let updateData: Record<string, unknown> | null = null;
+    // The update payload is captured from inside the double, where the
+    // surrounding flow analysis cannot see the write; holding it on an object
+    // keeps it typed as the payload rather than as the initial null.
+    const captured: { updateData: Record<string, unknown> | null } = { updateData: null };
     let lockQueries = 0;
     const tx = {
       $queryRaw: async (query: unknown) => {
@@ -90,7 +93,7 @@ describe('PaymentSubscriptionMutationService renewal term queue', () => {
           remnawaveId: 'rw-1',
         }),
         update: async ({ data }: { data: Record<string, unknown> }) => {
-          updateData = data;
+          captured.updateData = data;
           return { id: 'sub-1', remnawaveId: 'rw-1', expiresAt: data.expiresAt };
         },
       },
@@ -144,9 +147,9 @@ describe('PaymentSubscriptionMutationService renewal term queue', () => {
     });
 
     assert.equal(lockQueries, 1);
-    assert.ok(updateData);
+    assert.ok(captured.updateData);
     assert.equal(
-      (updateData.expiresAt as Date).getTime(),
+      (captured.updateData.expiresAt as Date).getTime(),
       expiry.getTime() + 30 * 86_400_000,
     );
   });
@@ -220,7 +223,8 @@ describe('PaymentSubscriptionMutationService renewal term queue', () => {
     const previous = process.env.ADDON_ENTITLEMENT_SHADOW;
     process.env.ADDON_ENTITLEMENT_SHADOW = 'true';
     const currentExpiry = new Date(Date.now() + 30 * 86_400_000);
-    let updateData: Record<string, unknown> | null = null;
+    // Captured inside the double — see the note on the first such holder above.
+    const captured: { updateData: Record<string, unknown> | null } = { updateData: null };
     const termCreates: Array<Record<string, unknown>> = [];
     const tx = {
       $queryRaw: async () => [{ id: 'sub-1', status: 'ACTIVE' }],
@@ -242,7 +246,7 @@ describe('PaymentSubscriptionMutationService renewal term queue', () => {
           externalSquad: 'current-external',
         }),
         update: async ({ data }: { data: Record<string, unknown> }) => {
-          updateData = data;
+          captured.updateData = data;
           return { id: 'sub-1', remnawaveId: 'rw-1', expiresAt: data.expiresAt };
         },
       },
@@ -291,7 +295,8 @@ describe('PaymentSubscriptionMutationService renewal term queue', () => {
         selectedDurationDays: 30,
       });
       assert.equal(termCreates.length, 1);
-      assert.ok(updateData);
+      assert.ok(captured.updateData);
+      const updateData = captured.updateData;
       assert.equal(Object.prototype.hasOwnProperty.call(updateData, 'trafficLimit'), false);
       assert.equal(Object.prototype.hasOwnProperty.call(updateData, 'deviceLimit'), false);
       assert.equal(Object.prototype.hasOwnProperty.call(updateData, 'planSnapshot'), false);
@@ -308,7 +313,8 @@ describe('PaymentSubscriptionMutationService renewal term queue', () => {
     const staleExpiry = new Date('2026-01-01T00:00:00.000Z');
     const lockedExpiry = new Date('2040-06-15T00:00:00.000Z');
     let findUniqueCalls = 0;
-    let updateData: Record<string, unknown> | null = null;
+    // Captured inside the double — see the note on the first such holder above.
+    const captured: { updateData: Record<string, unknown> | null } = { updateData: null };
     const tx = {
       $queryRaw: async () => [{ id: 'sub-1', status: 'ACTIVE' }],
       subscriptionTerm: {
@@ -323,7 +329,7 @@ describe('PaymentSubscriptionMutationService renewal term queue', () => {
           return { id: 'sub-1', expiresAt: findUniqueCalls === 1 ? staleExpiry : lockedExpiry, remnawaveId: 'rw-1' };
         },
         update: async ({ data }: { data: Record<string, unknown> }) => {
-          updateData = data;
+          captured.updateData = data;
           return { id: 'sub-1', remnawaveId: 'rw-1', expiresAt: data.expiresAt };
         },
       },
@@ -341,8 +347,8 @@ describe('PaymentSubscriptionMutationService renewal term queue', () => {
         selectedDurationDays: 30,
       });
       assert.equal(findUniqueCalls, 2);
-      assert.ok(updateData);
-      assert.equal((updateData.expiresAt as Date).getTime(), lockedExpiry.getTime() + 30 * 86_400_000);
+      assert.ok(captured.updateData);
+      assert.equal((captured.updateData.expiresAt as Date).getTime(), lockedExpiry.getTime() + 30 * 86_400_000);
     } finally {
       if (previous === undefined) delete process.env.ADDON_ENTITLEMENT_SHADOW;
       else process.env.ADDON_ENTITLEMENT_SHADOW = previous;

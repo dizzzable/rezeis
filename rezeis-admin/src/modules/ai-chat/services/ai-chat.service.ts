@@ -184,11 +184,18 @@ export class AiChatService {
 
       // ── Tool-calling loop ──────────────────────────────────────────
       // Keep resolving tool calls until the model returns a plain-text reply.
-      while (choice.finish_reason === 'tool_calls' && choice.message.tool_calls) {
+      while (choice.finish_reason === 'tool_calls') {
         const assistantMsg = choice.message;
+        // `finish_reason` and `tool_calls` arrive as independent fields, and a
+        // custom OpenAI-compatible endpoint (the AI-Support settings allow one)
+        // can report the first without the second. Bind the array once so the
+        // check that ends the loop and the iteration below read the same value.
+        const toolCalls = assistantMsg.tool_calls;
+        if (!toolCalls) break;
+
         messages.push(assistantMsg);
 
-        for (const toolCall of assistantMsg.tool_calls) {
+        for (const toolCall of toolCalls) {
           const args: Record<string, unknown> = JSON.parse(toolCall.function.arguments);
           let result: string;
 

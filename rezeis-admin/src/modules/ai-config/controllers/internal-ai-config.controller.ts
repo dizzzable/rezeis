@@ -1,7 +1,7 @@
 import { Controller, Get, UseGuards } from '@nestjs/common';
-import { InternalAdminAuthGuard } from '../../auth/guards/internal-admin-auth.guard.js';
-import { AiConfigService } from '../services/ai-config.service.js';
-import { AiInstructionService } from '../services/ai-instruction.service.js';
+import { InternalAdminAuthGuard } from '../../auth/guards/internal-admin-auth.guard';
+import { AiConfigService } from '../services/ai-config.service';
+import { AiInstructionService } from '../services/ai-instruction.service';
 
 @Controller('internal/ai-config')
 @UseGuards(InternalAdminAuthGuard)

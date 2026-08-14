@@ -481,7 +481,10 @@ export class UserNotificationsService {
     // notification editor's emoji picker — same premium treatment broadcasts
     // already get, so pack emoji render consistently everywhere:
     //   • Telegram (HTML): `<tg-emoji>` tags for premium-owner bots, else the
-    //     fallback glyph;
+    //     fallback glyph as plain text — the gate is inside
+    //     `substituteTelegramHtml`, which reads the operator's owner-premium
+    //     switch from settings, because Telegram REJECTS a bot message carrying
+    //     custom-emoji entities when the owner has no Premium;
     //   • cabinet feed / web-push (plain): the fallback glyph, never a raw
     //     `:slug:`.
     // Both helpers no-op when the text has no `:` so the common (token-less)

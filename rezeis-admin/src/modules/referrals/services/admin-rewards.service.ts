@@ -380,7 +380,11 @@ async function resolveActiveFiniteSubscription(
       subscription.status === SubscriptionStatus.ACTIVE &&
       subscription.expiresAt !== null
     ) {
-      return subscription;
+      // A finite end date IS the eligibility rule for EXTRA_DAYS — a perpetual
+      // subscription has nothing to extend. Re-attaching the checked value
+      // carries that fact into the return type, so the caller cannot reach the
+      // date arithmetic without it.
+      return { ...subscription, expiresAt: subscription.expiresAt };
     }
   }
   return null;

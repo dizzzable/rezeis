@@ -3,9 +3,11 @@ import 'reflect-metadata';
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { PaymentGatewayType, TransactionStatus } from '@prisma/client';
+import { PaymentGatewayType, Prisma, TransactionStatus, UserRole } from '@prisma/client';
 import { of } from 'rxjs';
 
+import { CurrentAdminInterface } from '../src/modules/auth/interfaces/current-admin.interface';
+import { RequestMetadataInterface } from '../src/modules/auth/interfaces/request-metadata.interface';
 import { PaymentRefundService } from '../src/modules/payments/services/payment-refund.service';
 import { PaymentWebhookPayloadRedactionService } from '../src/modules/payments/services/payment-webhook-payload-redaction.service';
 
@@ -15,8 +17,30 @@ import { PaymentWebhookPayloadRedactionService } from '../src/modules/payments/s
  * refuses a legitimate refund, so each branch is pinned.
  */
 
-const ADMIN = { id: 'admin-1' } as never;
-const REQUEST_META = { requestId: 'req-1', remoteAddress: '203.0.113.5', userAgent: 'jest' };
+/**
+ * Typed rather than cast: the audit assertions below claim the row names THIS
+ * admin and carries THIS request address, and a cast would let the field the
+ * service actually reads drift away from the one the spec pins.
+ */
+const ADMIN: CurrentAdminInterface = {
+  id: 'admin-1',
+  login: 'operator',
+  email: 'operator@example.com',
+  name: 'Operator',
+  role: UserRole.ADMIN,
+  isActive: true,
+  tokenVersion: 1,
+  createdAt: new Date('2026-04-01T00:00:00.000Z'),
+  lastLoginAt: null,
+  lastLoginIp: null,
+  rbacRoleId: null,
+  mustChangePassword: false,
+};
+const REQUEST_META: RequestMetadataInterface = {
+  requestId: 'req-1',
+  remoteAddress: '203.0.113.5',
+  userAgent: 'rezeis-admin-panel/1.0',
+};
 
 interface TransactionOverrides {
   readonly status?: TransactionStatus;
@@ -51,7 +75,10 @@ function createService(input: {
 } = {}) {
   const state = {
     updates: [] as Array<{ where: { id: string }; data: Record<string, unknown> }>,
-    audits: [] as Array<Record<string, unknown>>,
+    // Captured as the Prisma input rather than a bare record: the audit row is
+    // the proof of WHO refunded and from WHERE, so a renamed or dropped column
+    // has to break this spec at compile time instead of going quietly.
+    audits: [] as Prisma.AdminAuditLogCreateInput[],
     posts: [] as Array<{ url: string; body: Record<string, unknown>; config: Record<string, unknown> }>,
     // Emulates the refund webhook landing between the provider call and our
     // write: the row re-read afterwards already carries reconciliation stamps.
@@ -93,7 +120,7 @@ function createService(input: {
           : input.gateway,
     },
     adminAuditLog: {
-      create: async (args: { data: Record<string, unknown> }) => {
+      create: async (args: { data: Prisma.AdminAuditLogCreateInput }) => {
         state.audits.push(args.data);
         return null;
       },
@@ -365,6 +392,113 @@ describe('PaymentRefundService.refundTransaction', () => {
     assert.equal(gatewayData.refundId, 'refund-1');
     assert.equal(state.audits.length, 1);
     assert.equal(state.audits[0].action, 'payments.transaction.refund');
+  });
+
+  // The audit row is the only record of WHO moved the money and from WHERE.
+  // It used to be written through a cast that switched off checking of the
+  // whole payload, so neither the compiler nor any spec looked at a single
+  // field of it — a renamed column would have compiled and written nothing.
+  it('writes an audit row naming the admin, the request address and the refund', async () => {
+    const { service, state } = createService();
+
+    await service.refundTransaction({
+      transactionId: 'tx-1',
+      amount: null,
+      reason: 'duplicate charge',
+      currentAdmin: ADMIN,
+      requestMetadata: REQUEST_META,
+    });
+
+    assert.equal(state.audits.length, 1, 'a refund must leave exactly one audit row');
+    const audit = state.audits[0];
+    assert.equal(audit.action, 'payments.transaction.refund', 'audit row lost its action name');
+    assert.equal(
+      audit.ipAddress,
+      '203.0.113.5',
+      'audit row lost the operator address (req.ip) that proves where the refund came from',
+    );
+    assert.equal(
+      audit.userAgent,
+      'rezeis-admin-panel/1.0',
+      'audit row lost the operator user agent',
+    );
+    assert.equal(
+      audit.adminUser?.connect?.id,
+      'admin-1',
+      'audit row lost the id of the admin who issued the refund',
+    );
+    assert.deepStrictEqual(
+      audit.metadata,
+      {
+        requestId: 'req-1',
+        transactionId: 'tx-1',
+        paymentId: 'payment-1',
+        userId: 'user-1',
+        gatewayType: PaymentGatewayType.YOOKASSA,
+        amount: '1000.00',
+        currency: 'RUB',
+        refundId: 'refund-1',
+        providerStatus: 'succeeded',
+        reason: 'duplicate charge',
+        // The whole captured amount went back.
+        partial: false,
+      },
+      'audit metadata no longer describes the refund it recorded',
+    );
+  });
+
+  it('marks a partial refund as partial in the audit row', async () => {
+    const { service, state } = createService();
+
+    await service.refundTransaction({
+      transactionId: 'tx-1',
+      amount: '250.00',
+      reason: null,
+      currentAdmin: ADMIN,
+      requestMetadata: REQUEST_META,
+    });
+
+    assert.deepStrictEqual(
+      state.audits[0].metadata,
+      {
+        requestId: 'req-1',
+        transactionId: 'tx-1',
+        paymentId: 'payment-1',
+        userId: 'user-1',
+        gatewayType: PaymentGatewayType.YOOKASSA,
+        amount: '250.00',
+        currency: 'RUB',
+        refundId: 'refund-1',
+        providerStatus: 'succeeded',
+        reason: null,
+        // 250 of the captured 1000 — the row must not read as a full refund.
+        partial: true,
+      },
+      'audit metadata no longer describes the refund it recorded',
+    );
+  });
+
+  it('records an unknown address and user agent as null instead of inventing one', async () => {
+    // Both columns are nullable; a request that arrived without them must leave
+    // an honest blank rather than a placeholder that reads like evidence.
+    const { service, state } = createService();
+
+    await service.refundTransaction({
+      transactionId: 'tx-1',
+      amount: '100.00',
+      reason: null,
+      currentAdmin: ADMIN,
+      requestMetadata: { requestId: null, remoteAddress: null, userAgent: null },
+    });
+
+    const audit = state.audits[0];
+    assert.equal(audit.ipAddress, null, 'a missing address must be stored as null');
+    assert.equal(audit.userAgent, null, 'a missing user agent must be stored as null');
+    assert.equal(
+      audit.adminUser?.connect?.id,
+      'admin-1',
+      'audit row lost the id of the admin who issued the refund',
+    );
   });
 
   it('does not double-count when the provider replays the same refund', async () => {

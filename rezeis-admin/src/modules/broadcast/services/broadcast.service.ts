@@ -331,9 +331,20 @@ function payloadDtoToJson(
   };
 }
 
+/**
+ * Patch accepted by {@link mergePayload}. Wider than {@link BroadcastPayloadDto}
+ * in exactly one place: the post-send edit flow sends `parseMode: null` to strip
+ * the formatting of an already-delivered broadcast, and only `undefined` (an
+ * absent key) may leave the stored value untouched — so "clear it" needs a value
+ * of its own, the same `null` the stored payload and `readParseMode` already use.
+ */
+type BroadcastPayloadPatch = Omit<BroadcastPayloadDto, 'parseMode'> & {
+  readonly parseMode?: 'HTML' | 'MarkdownV2' | null;
+};
+
 function mergePayload(
   existing: Prisma.JsonValue,
-  patch: BroadcastPayloadDto,
+  patch: BroadcastPayloadPatch,
 ): Prisma.InputJsonObject {
   const base: Record<string, unknown> =
     existing !== null && typeof existing === 'object' && !Array.isArray(existing)

@@ -61,6 +61,15 @@ const OTHER_GATED_CODE = 'SUBSCRIPTION_SHARING_IP';
 /** Counts immutable local rows, therefore NOT gated. */
 const UNGATED_CODE = 'PROMO_ABUSE';
 
+/**
+ * "The store filed nothing", as the expected side of a deep comparison.
+ *
+ * `assert.deepStrictEqual` asserts the actual value INTO the type of the
+ * expected one, so a bare `[]` would retype `store.rows` as `never[]` for the
+ * remainder of the test and quietly disarm every later assertion about a row.
+ */
+const NO_SIGNALS: readonly SignalRow[] = [];
+
 // ── Harness ──────────────────────────────────────────────────────────────────
 
 type DetectorName =
@@ -253,7 +262,7 @@ describe('a panel-backed condition must be sustained before it accuses anyone', 
 
     await h.service.runDetectors();
 
-    assert.deepStrictEqual(h.store.rows, [], 'one sighting is a reading, not an accusation');
+    assert.deepStrictEqual(h.store.rows, NO_SIGNALS, 'one sighting is a reading, not an accusation');
     const streak = h.store.streakFor(GATED_CODE, 'uuid-1');
     assert.ok(streak, 'but the sighting is remembered');
     assert.equal(streak.observations, 1);
@@ -308,7 +317,7 @@ describe('a panel-backed condition must be sustained before it accuses anyone', 
 
     await h.service.runDetectors();
     await h.service.runDetectors();
-    assert.deepStrictEqual(h.store.rows, [], 'a UA heuristic does not accuse on one reading');
+    assert.deepStrictEqual(h.store.rows, NO_SIGNALS, 'a UA heuristic does not accuse on one reading');
     assert.equal(h.store.streakFor('SUBSCRIPTION_UA_TUNNEL', 'uuid-ua')?.observations, 2);
 
     await h.service.runDetectors();

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { BadGatewayException, RequestMethod, ServiceUnavailableException } from '@nestjs/common';
-import { GUARDS_METADATA, METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
+import { GUARDS_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 import { SubscriptionStatus } from '@prisma/client';
 
 import { EVENT_TYPES, SystemEventsService } from '../src/common/services/system-events.service';
@@ -20,6 +20,16 @@ import {
   type StoredPanelIdentity,
 } from '../src/modules/remnawave/services/panel-user-address';
 import { RemnawaveApiService } from '../src/modules/remnawave/services/remnawave-api.service';
+import {
+  assertRoute,
+  assertRouteHandlers,
+  assertRouteUngated,
+  routeLabel,
+  type RouteHandler,
+} from './helpers/controller-routes';
+
+/** Where the controller answers — stated once, checked below and used in labels. */
+const BASE_PATH = 'internal/user';
 
 interface MockPrismaService {
   readonly user: {
@@ -33,31 +43,35 @@ interface MockPrismaService {
 
 describe('InternalUserDevicesController', () => {
   it('exposes the current internal devices route contract', () => {
-    assert.equal(Reflect.getMetadata(PATH_METADATA, InternalUserDevicesController), 'internal/user');
+    assert.equal(Reflect.getMetadata(PATH_METADATA, InternalUserDevicesController), BASE_PATH);
     assert.deepStrictEqual(Reflect.getMetadata(GUARDS_METADATA, InternalUserDevicesController), [
       InternalAdminAuthGuard,
     ]);
-    assertRoute(RequestMethod.GET, ':userRef/devices', InternalUserDevicesController.prototype.listDevices);
-    assertRoute(
-      RequestMethod.DELETE,
-      ':userRef/devices/:hwid',
-      InternalUserDevicesController.prototype.deleteDevice,
-    );
-    assertRoute(
-      RequestMethod.GET,
-      ':userRef/subscriptions/:subscriptionId/devices',
-      InternalUserDevicesController.prototype.listSubscriptionDevices,
-    );
-    assertRoute(
-      RequestMethod.DELETE,
-      ':userRef/subscriptions/:subscriptionId/devices/:hwid',
-      InternalUserDevicesController.prototype.deleteSubscriptionDevice,
-    );
-    assertRoute(
-      RequestMethod.POST,
-      ':userRef/subscriptions/:subscriptionId/regenerate',
-      InternalUserDevicesController.prototype.regenerateSubscription,
-    );
+    // The set of routes is read off the class, not remembered here. Every route
+    // on this controller destroys or rotates something a paying customer is
+    // holding — a sixth added without a line below would be described by
+    // nothing at all. There is no `@RequirePermission` to assert a value for
+    // either: the controller is gated as a whole by `InternalAdminAuthGuard`.
+    // Its ABSENCE is asserted instead, per route, in the loop below.
+    assertRouteHandlers(InternalUserDevicesController, [
+      'listDevices',
+      'deleteDevice',
+      'listSubscriptionDevices',
+      'deleteSubscriptionDevice',
+      'regenerateSubscription',
+    ]);
+
+    for (const route of DEVICE_ROUTES) {
+      const label = routeLabel(BASE_PATH, route.method, route.path);
+      assertRoute(route.handler, { method: route.method, path: route.path }, label);
+      // Carrying no permission is the CONTRACT here, not an omission, and
+      // saying so is not decoration: `RbacGuard` is not among this
+      // controller's guards, so a `@RequirePermission` hung on one of these
+      // routes tomorrow would be read by nothing. On endpoints that wipe a
+      // customer's devices and rotate their link, a decorator that restricts
+      // no one while reading as a restriction is the worst of both.
+      assertRouteUngated(InternalUserDevicesController, route.handler, label);
+    }
   });
 
   it('lists active-subscription devices through the current Remnawave panel profile API', async () => {
@@ -497,10 +511,35 @@ async function captureRejection(action: () => Promise<unknown>): Promise<unknown
   }
 }
 
-function assertRoute(requestMethod: RequestMethod, path: string, target: unknown): void {
-  assert.equal(Reflect.getMetadata(METHOD_METADATA, target), requestMethod);
-  assert.equal(Reflect.getMetadata(PATH_METADATA, target), path);
+/** One device endpoint as this spec states it. No RBAC gate exists to state. */
+interface DeviceRoute {
+  readonly handler: RouteHandler;
+  readonly method: RequestMethod;
+  readonly path: string;
 }
+
+/** The routes themselves, so a row names a handler the compiler has to find. */
+const handlers = InternalUserDevicesController.prototype;
+
+const DEVICE_ROUTES: readonly DeviceRoute[] = [
+  { handler: handlers.listDevices, method: RequestMethod.GET, path: ':userRef/devices' },
+  { handler: handlers.deleteDevice, method: RequestMethod.DELETE, path: ':userRef/devices/:hwid' },
+  {
+    handler: handlers.listSubscriptionDevices,
+    method: RequestMethod.GET,
+    path: ':userRef/subscriptions/:subscriptionId/devices',
+  },
+  {
+    handler: handlers.deleteSubscriptionDevice,
+    method: RequestMethod.DELETE,
+    path: ':userRef/subscriptions/:subscriptionId/devices/:hwid',
+  },
+  {
+    handler: handlers.regenerateSubscription,
+    method: RequestMethod.POST,
+    path: ':userRef/subscriptions/:subscriptionId/regenerate',
+  },
+];
 
 /**
  * A subscription row shaped the way the controller's own `select` reads it.

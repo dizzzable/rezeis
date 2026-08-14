@@ -21,6 +21,7 @@ import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
 import { EmojiPicker } from '@/features/broadcast/emoji-picker'
+import { EmojiFieldOverlay } from '@/features/custom-emoji/emoji-field-overlay'
 import { insertAtCaret } from '@/features/bot-map/utils/insert-at-caret'
 import { Button } from '@/components/ui/button'
 import {
@@ -333,13 +334,18 @@ export function BotButtonEditDialog({
               <Label htmlFor="bbd-edit-label">{t('botConfigPage.buttons.fields.label')}</Label>
               <EmojiPicker onSelect={insertLabelEmoji} ariaLabel={t('emojiPicker.trigger')} />
             </div>
-            <Input
-              id="bbd-edit-label"
-              ref={labelRef}
-              value={label}
-              onChange={(e) => setLabel(e.target.value)}
-              maxLength={120}
-            />
+            {/* `buttonLabel`: a leading shortcode never reaches this caption —
+                reiwa lifts it into `icon_custom_emoji_id`, so the layer shows
+                it as the button's separate icon instead of inline. */}
+            <EmojiFieldOverlay value={label} mode="buttonLabel">
+              <Input
+                id="bbd-edit-label"
+                ref={labelRef}
+                value={label}
+                onChange={(e) => setLabel(e.target.value)}
+                maxLength={120}
+              />
+            </EmojiFieldOverlay>
           </div>
 
           <div className="space-y-1.5">
@@ -551,13 +557,15 @@ export function BotButtonCreateDialog({
               <Label htmlFor="bbd-new-label">{t('botConfigPage.buttons.fields.label')}</Label>
               <EmojiPicker onSelect={insertLabelEmoji} ariaLabel={t('emojiPicker.trigger')} />
             </div>
-            <Input
-              id="bbd-new-label"
-              ref={labelRef}
-              value={label}
-              onChange={(e) => setLabel(e.target.value)}
-              maxLength={120}
-            />
+            <EmojiFieldOverlay value={label} mode="buttonLabel">
+              <Input
+                id="bbd-new-label"
+                ref={labelRef}
+                value={label}
+                onChange={(e) => setLabel(e.target.value)}
+                maxLength={120}
+              />
+            </EmojiFieldOverlay>
           </div>
 
           <div className="space-y-1.5">

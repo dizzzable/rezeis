@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { Readable } from 'node:stream';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
@@ -6,6 +7,34 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 import { AdminPartnerAnalyticsService } from './admin-partner-analytics.service';
 import { PartnerDetailService } from './partner-detail.service';
 import { PartnersService } from './partners.service';
+
+/*
+ * Row shapes of the cursor-paginated `findMany` calls in the streaming
+ * exporters. They are spelled out rather than inferred because each loop feeds
+ * its own result back into the cursor of the next call — a circle TypeScript
+ * cannot resolve, so it gives up and types the rows `any` (TS7022), silently
+ * un-checking every column name that ends up in the CSV.
+ */
+type StreamedPartnerRow = Prisma.PartnerGetPayload<{
+  include: {
+    user: { select: { id: true; name: true; username: true; telegramId: true } };
+    _count: { select: { referrals: true } };
+  };
+}>;
+
+type StreamedWithdrawalRow = Prisma.PartnerWithdrawalGetPayload<{
+  include: {
+    partner: {
+      select: {
+        user: { select: { id: true; name: true; username: true; telegramId: true } };
+      };
+    };
+  };
+}>;
+
+type StreamedEarningRow = Prisma.PartnerTransactionGetPayload<{
+  include: { referral: { select: { id: true; username: true } } };
+}>;
 
 /**
  * Render-only service that turns existing analytics/list payloads into
@@ -89,7 +118,7 @@ export class PartnerCsvExportService {
       const pageSize = 200;
       let cursor: string | null = null;
       while (true) {
-        const rows = await prismaService.partner.findMany({
+        const rows: StreamedPartnerRow[] = await prismaService.partner.findMany({
           take: pageSize,
           ...(cursor !== null ? { cursor: { id: cursor }, skip: 1 } : {}),
           orderBy: { id: 'asc' },
@@ -153,7 +182,7 @@ export class PartnerCsvExportService {
       const pageSize = 200;
       let cursor: string | null = null;
       while (true) {
-        const rows = await prismaService.partnerWithdrawal.findMany({
+        const rows: StreamedWithdrawalRow[] = await prismaService.partnerWithdrawal.findMany({
           where: { createdAt: { gte: range.from, lte: range.to } },
           take: pageSize,
           ...(cursor !== null ? { cursor: { id: cursor }, skip: 1 } : {}),
@@ -214,7 +243,7 @@ export class PartnerCsvExportService {
       const pageSize = 500;
       let cursor: string | null = null;
       while (true) {
-        const rows = await prismaService.partnerTransaction.findMany({
+        const rows: StreamedEarningRow[] = await prismaService.partnerTransaction.findMany({
           where: { partnerId },
           take: pageSize,
           ...(cursor !== null ? { cursor: { id: cursor }, skip: 1 } : {}),

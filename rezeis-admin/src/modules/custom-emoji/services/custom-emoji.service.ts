@@ -12,6 +12,7 @@ import {
 } from '../interfaces/custom-emoji-pack.interface';
 import {
   indexEmojisBySlug,
+  readBotEmojiOwnerHasPremium,
   readCustomEmojiPacks,
   slugify,
 } from '../utils/custom-emoji-packs.util';
@@ -19,6 +20,47 @@ import { EmojiAssetUploadService } from './emoji-asset-upload.service';
 
 /** Hard cap so a careless multi-hundred-sticker zip can't blow up settings. */
 const MAX_EMOJIS_PER_IMPORT = 400;
+
+/**
+ * A Telegram `custom_emoji_id` is a decimal 64-bit id — digits only.
+ * `substituteTelegramHtml` strips everything else before emitting the tag, so
+ * a value that fails this test contributes nothing and does so silently.
+ */
+const CUSTOM_EMOJI_ID_PATTERN = /^[0-9]{1,32}$/;
+
+/**
+ * Carrier glyph for an entry that has a `custom_emoji_id` but no fallback of
+ * its own. Telegram draws a custom emoji only *over* a glyph, so something has
+ * to sit inside the `<tg-emoji>` tag — but "no glyph" is not the same as "not
+ * deliverable": the operator's artwork is still what the user ends up seeing,
+ * and the star is only what it is painted on.
+ *
+ * This is reiwa's rule, applied identically by all three of its renderers
+ * (`applyCustomEmojiTokens`, `renderBotCopyHtml` and `renderButtonLabel` in
+ * `src/infrastructure/bot-config/emoji-utils.ts`). The panel used to drop such
+ * an entry instead, so one pack entry delivered the emoji in bot copy and an
+ * empty string in a broadcast. One rule, both sides.
+ */
+const ID_ONLY_CARRIER = '⭐';
+
+// THE ONE PLACE THE PANEL DELIBERATELY DOES NOT FOLLOW REIWA — written down so
+// it is not rediscovered as a bug for a third time.
+//
+// When an entry has NEITHER field, all three reiwa renderers return the raw
+// `:slug:` unchanged (`emoji-utils.ts:199`, `:313`, `:396`); both panel
+// renderers below drop the token instead. Everything else about the two sides
+// is now identical — see `ID_ONLY_CARRIER` above.
+//
+// Kept divergent on purpose. A visible `:tg_ios_macos_icons_25: Перейти в
+// канал` is the exact defect this whole area was opened for, and a broadcast
+// reaching thousands of people is the worst place to display it. The argument
+// for following reiwa was that dropping it hides a dead record from the
+// operator — true until the panel began flagging the state where the operator
+// actually works: the field overlay draws such a token in destructive styling
+// with a "will not be delivered" tooltip
+// (`web/src/features/custom-emoji/emoji-field-overlay.tsx`), and
+// `assertEmojiIsDeliverable` refuses to create the state at all. The signal
+// now lives in the panel, so the message no longer has to carry it.
 
 export interface UpdateEmojiPatch {
   readonly name?: string;
@@ -42,10 +84,29 @@ export class CustomEmojiService {
   }
 
   /**
-   * Replace `:slug:` custom-emoji shortcodes with their fallback glyph (or drop
-   * them when no fallback is set). Used to sanitize broadcast text before it
-   * goes to Telegram, where the custom images can't render. Cheap no-op when
-   * the text has no `:` at all.
+   * Replace `:slug:` custom-emoji shortcodes for delivery as **plain text** —
+   * media captions, a non-HTML broadcast edit, and the web-push title/body.
+   *
+   * No entity and no `<tg-emoji>` tag can travel on this path, so the carrier
+   * is not a placeholder sitting behind the artwork: it is the whole of what
+   * the recipient sees. That is precisely why it may not be dropped — and why
+   * this method is deliberately NOT gated on the owner-premium flag that
+   * {@link CustomEmojiService.substituteTelegramHtml} honours: there is nothing
+   * here for Telegram to reject, so the gate would only delete a glyph.
+   *
+   * The carrier rule is the same one
+   * {@link CustomEmojiService.substituteTelegramHtml} applies,
+   * and the same one reiwa's own text renderer applies (`renderButtonLabel`,
+   * `src/infrastructure/bot-config/emoji-utils.ts:391-397`):
+   *
+   *   carrier = trimmed fallback glyph, else {@link ID_ONLY_CARRIER} when the
+   *   entry carries a `customEmojiId`, else nothing.
+   *
+   * An entry holding only an id used to substitute an empty string here, so a
+   * single pack entry arrived through the bot and through an HTML broadcast
+   * and silently vanished from a photo caption and a browser push. Unknown
+   * slugs are left untouched (operators may type `:foo:` literally). Cheap
+   * no-op when the text has no `:` at all.
    */
   public async substituteFallbacks(text: string): Promise<string> {
     if (!text.includes(':')) return text;
@@ -54,35 +115,75 @@ export class CustomEmojiService {
     return text.replace(/:([a-z0-9_]+):/g, (whole, slug: string) => {
       const emoji = index.get(slug);
       if (!emoji) return whole;
-      return emoji.fallback ?? '';
+      const glyph = emoji.fallback?.trim() ?? '';
+      if (glyph.length > 0) return glyph;
+      const rawId = emoji.customEmojiId?.trim() ?? '';
+      return rawId.length > 0 ? ID_ONLY_CARRIER : '';
     });
   }
 
   /**
    * Replace `:slug:` shortcodes for delivery as Telegram **HTML** (`parse_mode:
-   * HTML`). When the emoji has both a `customEmojiId` and a fallback glyph, it
-   * is emitted as a `<tg-emoji emoji-id="…">glyph</tg-emoji>` tag — Telegram
-   * renders the premium custom emoji for capable bots (Fragment username) and
-   * silently shows the fallback glyph for everyone else. Without a premium id
-   * it degrades to the plain glyph; unknown slugs are left untouched.
+   * HTML`). The emoji is emitted as a `<tg-emoji emoji-id="…">carrier</tg-emoji>`
+   * tag, but ONLY when the bot's owner has Telegram Premium. Without a usable
+   * id it degrades to the plain glyph; unknown slugs are left untouched.
+   *
+   * ## Why the premium gate is not optional
+   *
+   * A `<tg-emoji>` tag under `parse_mode: HTML` *is* a custom-emoji entity, and
+   * Telegram **rejects the whole message** when the bot's owner has no Premium
+   * — it does not quietly fall back to the glyph inside the tag. reiwa has
+   * always gated on this: `renderBotCopy` strips the entities and
+   * `renderBotCopyHtml` builds no tag at all
+   * (`src/infrastructure/bot-config/emoji-utils.ts:256-264`, `:303`, `:314`,
+   * and `tgEmojiTag` is marked "premium owners only" at `:274`).
+   *
+   * The panel is not a separate sender: broadcasts and user notifications go
+   * out through the SAME bot token
+   * (`broadcast-delivery.service.ts:472,724,731`,
+   * `user-notifications.service.ts:489-491`). An ungated tag therefore does not
+   * cost a non-premium operator their artwork — it can cost them the broadcast.
+   *
+   * The flag is read HERE rather than passed in by the four callers: it lives
+   * in the same `Settings.systemNotifications` blob as the packs
+   * (`readBotEmojiOwnerHasPremium`), so the row this method already fetches for
+   * the packs answers both questions in one read, and no present or future
+   * caller can forget to gate. Unset means `true`, so nothing changes for an
+   * instance whose operator never touched the switch.
+   *
+   * The carrier is the operator's fallback glyph when there is one, and
+   * {@link ID_ONLY_CARRIER} when the entry carries only a `customEmojiId` —
+   * the tag needs *a* glyph to wrap, not necessarily a configured one. When the
+   * gate closes that carrier is delivered as plain text, exactly as
+   * `renderBotCopyHtml` does: the operator loses the emoji, never the message.
+   * The rule mirrors reiwa's, so the same pack entry cannot deliver an emoji
+   * through the bot and an empty string through a broadcast.
    *
    * NOTE: only safe to send with `parse_mode: HTML`. The glyph is a literal
    * emoji (no HTML-escaping needed); the numeric id is digits-only by origin
-   * but we still strip anything non-numeric defensively.
+   * but we still strip anything non-numeric defensively — an id that does not
+   * survive that leaves the carrier behind as plain text, exactly as reiwa's
+   * `tgEmojiTag` does.
    */
   public async substituteTelegramHtml(text: string): Promise<string> {
     if (!text.includes(':')) return text;
-    const index = indexEmojisBySlug(await this.listPacks());
+    const settings = await this.getSettings();
+    const index = indexEmojisBySlug(readCustomEmojiPacks(settings?.systemNotifications));
     if (index.size === 0) return text;
+    const ownerHasPremium = readBotEmojiOwnerHasPremium(settings?.systemNotifications);
     return text.replace(/:([a-z0-9_]+):/g, (whole, slug: string) => {
       const emoji = index.get(slug);
       if (!emoji) return whole;
-      const glyph = emoji.fallback ?? '';
-      const id = emoji.customEmojiId !== null ? emoji.customEmojiId.replace(/[^0-9]/g, '') : '';
-      if (id.length > 0 && glyph.length > 0) {
-        return `<tg-emoji emoji-id="${id}">${glyph}</tg-emoji>`;
+      const glyph = emoji.fallback?.trim() ?? '';
+      const rawId = emoji.customEmojiId?.trim() ?? '';
+      const carrier = glyph.length > 0 ? glyph : rawId.length > 0 ? ID_ONLY_CARRIER : '';
+      if (carrier.length === 0) return '';
+      if (!ownerHasPremium) return carrier;
+      const id = rawId.replace(/[^0-9]/g, '');
+      if (id.length > 0) {
+        return `<tg-emoji emoji-id="${id}">${carrier}</tg-emoji>`;
       }
-      return glyph;
+      return carrier;
     });
   }
 
@@ -119,6 +220,11 @@ export class CustomEmojiService {
       // `setName` was not retained by an older settings normalizer. Besides
       // preventing a duplicate on the next import, backfilling it lets a
       // database restore re-download the pack's files automatically.
+      //
+      // Re-importing the same link is also the operator's only repair tool for
+      // a pack already on record, so this must mend the delivery fields as well
+      // as the files — otherwise a pack imported without `custom_emoji_id` /
+      // `fallback` can only be fixed by retyping every emoji by hand.
       const restored = await this.rehydratePackAssets(token, existing, stickers);
       const recovered = {
         ...restored.pack,
@@ -133,7 +239,7 @@ export class CustomEmojiService {
         await this.savePacks(packs.map((pack) => (pack.id === existing.id ? recovered : pack)));
       }
       this.logger.log(
-        `Reused emoji set "${recovered.name}" (${setName}); restored ${restored.recoveredEmojiCount} missing asset(s)`,
+        `Reused emoji set "${recovered.name}" (${setName}); restored ${restored.recoveredEmojiCount} missing asset(s), repaired ${restored.repairedEmojiCount} emoji id/fallback record(s)`,
       );
       return recovered;
     }
@@ -303,7 +409,17 @@ export class CustomEmojiService {
     return { imageUrl, lottieUrl, videoUrl };
   }
 
-  /** Restore just the missing files for one pack from a fetched sticker set. */
+  /**
+   * Restore one pack from a fetched sticker set: the missing files, and the two
+   * delivery fields a record may be missing.
+   *
+   * Files and identity are repaired independently. Only `customEmojiId` and
+   * `fallback` ever reach Telegram — a record holding neither makes the bot
+   * emit the raw `:slug:` token — and a re-import is the one route an operator
+   * has to repair a pack that was stored without them. Their recovery must
+   * therefore not sit behind the "some file is missing" test: a pack whose
+   * images are all present is exactly the pack that lost only its ids.
+   */
   private async rehydratePackAssets(
     token: string,
     pack: CustomEmojiPackInterface,
@@ -312,50 +428,65 @@ export class CustomEmojiService {
     readonly pack: CustomEmojiPackInterface;
     readonly changed: boolean;
     readonly recoveredEmojiCount: number;
+    readonly repairedEmojiCount: number;
   }> {
-    const stickersByCustomEmojiId = new Map(
-      stickers
-        .filter((sticker): sticker is TgSticker & { readonly custom_emoji_id: string } =>
-          typeof sticker.custom_emoji_id === 'string',
-        )
-        .map((sticker) => [sticker.custom_emoji_id, sticker]),
-    );
+    // Pairing is one decision over the whole pack, taken before any record is
+    // touched — a per-record lookup cannot see that the sticker a record wants
+    // to take by position already belongs to a different record.
+    const pairs = pairStickers(pack.emojis, stickers);
     let changed = false;
     let recoveredEmojiCount = 0;
+    let repairedEmojiCount = 0;
     const emojis = await mapWithConcurrency(pack.emojis, 6, async (emoji, index) => {
-        const [hasImage, hasLottie, hasVideo] = await Promise.all([
-          this.assetUpload.exists(emoji.imageUrl),
-          this.assetUpload.exists(emoji.lottieUrl),
-          this.assetUpload.exists(emoji.videoUrl),
-        ]);
-        if (hasImage && hasLottie && hasVideo) return emoji;
-
-        const sticker =
-          (emoji.customEmojiId ? stickersByCustomEmojiId.get(emoji.customEmojiId) : undefined) ??
-          stickers[index];
-        if (!sticker) {
-          this.logger.warn(`Cannot recover emoji "${emoji.slug}": sticker is no longer in the Telegram set`);
-          return emoji;
-        }
-        const assets = await this.stickerAssets(token, sticker);
-        const next = {
-          ...emoji,
-          imageUrl: hasImage ? emoji.imageUrl : (assets.imageUrl ?? emoji.imageUrl),
-          lottieUrl: hasLottie ? emoji.lottieUrl : (assets.lottieUrl ?? emoji.lottieUrl),
-          videoUrl: hasVideo ? emoji.videoUrl : (assets.videoUrl ?? emoji.videoUrl),
-        };
-        if (
-          next.imageUrl === emoji.imageUrl &&
-          next.lottieUrl === emoji.lottieUrl &&
-          next.videoUrl === emoji.videoUrl
-        ) {
-          return emoji;
-        }
+      const sticker = pairs[index];
+      if (sticker === undefined && index < stickers.length) {
+        // A position WAS available and was refused. Saying nothing here is the
+        // silence the id swap used to hide behind — and the existing "cannot
+        // recover" warning below only fires when a file is missing too.
+        this.logger.warn(
+          `Left emoji "${emoji.slug}" of pack "${pack.name}" as it is: its sticker is gone from the Telegram set and position ${
+            index + 1
+          } now belongs to another record`,
+        );
+      }
+      const current = sticker === undefined ? emoji : applyStickerIdentity(emoji, sticker);
+      if (current !== emoji) {
         changed = true;
-        recoveredEmojiCount += 1;
-        return next;
-      });
-    return { pack: { ...pack, emojis }, changed, recoveredEmojiCount };
+        repairedEmojiCount += 1;
+      }
+
+      const [hasImage, hasLottie, hasVideo] = await Promise.all([
+        this.assetUpload.exists(emoji.imageUrl),
+        this.assetUpload.exists(emoji.lottieUrl),
+        this.assetUpload.exists(emoji.videoUrl),
+      ]);
+      if (hasImage && hasLottie && hasVideo) return current;
+
+      if (sticker === undefined) {
+        this.logger.warn(
+          `Cannot recover emoji "${emoji.slug}": sticker is no longer in the Telegram set`,
+        );
+        return current;
+      }
+      const assets = await this.stickerAssets(token, sticker);
+      const next = {
+        ...current,
+        imageUrl: hasImage ? current.imageUrl : (assets.imageUrl ?? current.imageUrl),
+        lottieUrl: hasLottie ? current.lottieUrl : (assets.lottieUrl ?? current.lottieUrl),
+        videoUrl: hasVideo ? current.videoUrl : (assets.videoUrl ?? current.videoUrl),
+      };
+      if (
+        next.imageUrl === current.imageUrl &&
+        next.lottieUrl === current.lottieUrl &&
+        next.videoUrl === current.videoUrl
+      ) {
+        return current;
+      }
+      changed = true;
+      recoveredEmojiCount += 1;
+      return next;
+    });
+    return { pack: { ...pack, emojis }, changed, recoveredEmojiCount, repairedEmojiCount };
   }
 
   private async packHasMissingAssets(pack: CustomEmojiPackInterface): Promise<boolean> {
@@ -413,6 +544,16 @@ export class CustomEmojiService {
     );
   }
 
+  /**
+   * Edit the two delivery fields of one emoji (plus its display name).
+   *
+   * This endpoint can only touch `name` / `fallback` / `customEmojiId` — never
+   * the stored image — so `assertEmojiIsDeliverable` refuses the combinations
+   * that provably deliver nothing to Telegram. Records that already sit in a
+   * dead state (imported that way) are left alone: the guard only inspects the
+   * result of a patch that actually touches those fields, so a rename never
+   * fails and repairing a broken record is always possible.
+   */
   public async updateEmoji(input: {
     readonly packId: string;
     readonly slug: string;
@@ -423,20 +564,15 @@ export class CustomEmojiService {
     if (!pack) {
       throw new NotFoundException('Pack not found');
     }
-    const emojis = pack.emojis.map((e) =>
-      e.slug === input.slug
-        ? {
-            ...e,
-            name: input.patch.name?.trim() || e.name,
-            fallback:
-              input.patch.fallback === undefined ? e.fallback : normalize(input.patch.fallback),
-            customEmojiId:
-              input.patch.customEmojiId === undefined
-                ? e.customEmojiId
-                : normalize(input.patch.customEmojiId),
-          }
-        : e,
-    );
+    const target = pack.emojis.find((e) => e.slug === input.slug);
+    if (!target) {
+      // Previously a typo in the slug saved the pack unchanged and answered
+      // 200, so the operator was told an edit landed that never existed.
+      throw new NotFoundException('Emoji not found in this pack');
+    }
+    const patched = applyEmojiPatch(target, input.patch);
+    assertEmojiIsDeliverable(patched, input.patch);
+    const emojis = pack.emojis.map((e) => (e.slug === input.slug ? patched : e));
     const next = packs.map((p) => (p.id === input.packId ? { ...pack, emojis } : p));
     await this.savePacks(next);
     return { ...pack, emojis };
@@ -556,6 +692,119 @@ function matchesStickerSet(
 }
 
 /**
+ * Pair every saved record of a pack with the sticker it was made from — one
+ * decision over the whole pack, shared by every repair path (re-import, the
+ * boot seeder, and a backup restore).
+ *
+ * Two passes, and the order is the point:
+ *
+ *   1. **Identity.** A record whose stored `custom_emoji_id` is still in the
+ *      set takes that sticker, wherever it now sits. The id is what the record
+ *      *is*; its slot is only where it happened to be.
+ *   2. **Position.** Whatever is left falls back to `stickers[index]` — but
+ *      only onto a sticker whose id no pass-1 record already claimed.
+ *
+ * Position stays because it is the only handle a record whose id was never
+ * stored has left, and that is precisely the record a re-import exists to
+ * repair (the first import numbered slugs `pack_1`, `pack_2`, … in set order).
+ * What it may no longer do is *reassign* an id.
+ *
+ * When the set's author deletes a sticker, everything below it moves up a slot,
+ * so the position of a record whose own sticker is gone points at its
+ * NEIGHBOUR. Following it stamped the record with the neighbour's id while it
+ * kept its own image and glyph: the panel showed one emoji, Telegram delivered
+ * a different one, and the pack came out holding the same `customEmojiId`
+ * twice — silently, on a path a database restore reaches on its own.
+ *
+ * Reserving the claimed ids makes that impossible by construction rather than
+ * by an after-the-fact duplicate sweep: an id can only be handed to a record if
+ * no other record already owns it, so no re-import can create a duplicate.
+ * A record left unpaired keeps every field it has — nothing is swapped for a
+ * neighbour's, and {@link CustomEmojiService.rehydratePackAssets} logs the
+ * records it had to leave alone.
+ */
+function pairStickers(
+  emojis: readonly CustomEmojiInterface[],
+  stickers: readonly TgSticker[],
+): ReadonlyArray<TgSticker | undefined> {
+  const byId = new Map<string, TgSticker>();
+  for (const sticker of stickers) {
+    const id = readStickerId(sticker);
+    // First wins: a set that repeats an id must not let the copy be handed out
+    // a second time below.
+    if (id !== null && !byId.has(id)) byId.set(id, sticker);
+  }
+
+  const paired: Array<TgSticker | undefined> = emojis.map(() => undefined);
+  const claimedIds = new Set<string>();
+
+  emojis.forEach((emoji, index) => {
+    if (emoji.customEmojiId === null) return;
+    const match = byId.get(emoji.customEmojiId);
+    if (match === undefined) return;
+    paired[index] = match;
+    claimedIds.add(emoji.customEmojiId);
+  });
+
+  emojis.forEach((_emoji, index) => {
+    if (paired[index] !== undefined) return;
+    const candidate: TgSticker | undefined = stickers[index];
+    if (candidate === undefined) return;
+    const id = readStickerId(candidate);
+    if (id !== null && claimedIds.has(id)) return;
+    paired[index] = candidate;
+    if (id !== null) claimedIds.add(id);
+  });
+
+  return paired;
+}
+
+/** A sticker's `custom_emoji_id`, or `null` for a plain (non-emoji) sticker. */
+function readStickerId(sticker: TgSticker): string | null {
+  return typeof sticker.custom_emoji_id === 'string' && sticker.custom_emoji_id.length > 0
+    ? sticker.custom_emoji_id
+    : null;
+}
+
+/**
+ * Carry the delivery fields of a freshly fetched sticker into a saved record.
+ * Returns the record unchanged (same reference) when nothing moves, so callers
+ * can decide on a write with an identity check.
+ *
+ * The two fields are treated differently on purpose:
+ *
+ *   - `customEmojiId` follows the source. The record *is* that sticker, so an
+ *     id the set no longer contains is stale rather than a preference, and
+ *     leaving it would mean the operator has to retype ids one by one — the
+ *     very chore this import is supposed to end. That only holds because
+ *     {@link pairStickers} hands over the record's OWN sticker or one no other
+ *     record claims; called with a neighbour's sticker, this line is exactly
+ *     how a pack ends up with one id on two records.
+ *   - `fallback` is only filled when absent. Any glyph is deliverable, so a
+ *     glyph differing from `sticker.emoji` is a deliberate `updateEmoji` edit,
+ *     and a routine re-import must not quietly revert the operator's choice.
+ *
+ * Neither field is ever replaced by an empty one: a set answering without
+ * `custom_emoji_id` (a plain sticker set, or a trimmed API response) must not
+ * blank an id that already works.
+ */
+function applyStickerIdentity(
+  emoji: CustomEmojiInterface,
+  sticker: TgSticker,
+): CustomEmojiInterface {
+  const freshId =
+    typeof sticker.custom_emoji_id === 'string' && sticker.custom_emoji_id.length > 0
+      ? sticker.custom_emoji_id
+      : null;
+  const freshFallback =
+    typeof sticker.emoji === 'string' && sticker.emoji.length > 0 ? sticker.emoji : null;
+  const customEmojiId = freshId ?? emoji.customEmojiId;
+  const fallback = emoji.fallback ?? freshFallback;
+  if (customEmojiId === emoji.customEmojiId && fallback === emoji.fallback) return emoji;
+  return { ...emoji, customEmojiId, fallback };
+}
+
+/**
  * Map over `items` running at most `limit` async tasks at once, preserving
  * input order in the result. Keeps large set imports fast without flooding the
  * Telegram API with hundreds of simultaneous downloads.
@@ -614,6 +863,56 @@ function normalize(value: string | null): string | null {
   if (value === null) return null;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+/** Apply an operator patch to one emoji; absent fields keep their value. */
+function applyEmojiPatch(
+  emoji: CustomEmojiInterface,
+  patch: UpdateEmojiPatch,
+): CustomEmojiInterface {
+  return {
+    ...emoji,
+    name: patch.name?.trim() || emoji.name,
+    fallback: patch.fallback === undefined ? emoji.fallback : normalize(patch.fallback),
+    customEmojiId:
+      patch.customEmojiId === undefined ? emoji.customEmojiId : normalize(patch.customEmojiId),
+  };
+}
+
+/**
+ * Refuse a save whose result cannot reach a Telegram user.
+ *
+ * The rules are read straight off {@link CustomEmojiService.substituteTelegramHtml}
+ * — the only renderer the panel controls — and off the `slug → { id, fallback }`
+ * projection handed to reiwa for bot copy, which carries the same two fields:
+ *
+ *   - a `customEmojiId` that is not digits-only is stripped to nothing before
+ *     the `<tg-emoji>` tag is built, so the operator silently gets the glyph
+ *     (or nothing) instead of the emoji they pasted an id for;
+ *   - with neither field set there is nothing left to send at all — the stored
+ *     image is a panel/cabinet asset that never travels to Telegram.
+ *
+ * An id with no fallback glyph is deliberately NOT refused: both renderers put
+ * {@link ID_ONLY_CARRIER} inside the tag for it, so the user receives the
+ * custom emoji. Refusing it here rejected a setting that demonstrably works in
+ * the bot.
+ *
+ * Only checked when the patch touches the delivery fields, so renaming a
+ * legacy record keeps working and a dead record can always be repaired.
+ */
+function assertEmojiIsDeliverable(emoji: CustomEmojiInterface, patch: UpdateEmojiPatch): void {
+  if (patch.fallback === undefined && patch.customEmojiId === undefined) return;
+  const { customEmojiId, fallback } = emoji;
+  if (customEmojiId !== null && !CUSTOM_EMOJI_ID_PATTERN.test(customEmojiId)) {
+    throw new BadRequestException(
+      'custom_emoji_id must be the numeric Telegram id (digits only) — a non-numeric value is dropped before the message is sent',
+    );
+  }
+  if (customEmojiId === null && fallback === null) {
+    throw new BadRequestException(
+      'Set a fallback glyph or a custom_emoji_id: with neither, the :slug: shortcode delivers nothing to the bot (the stored image is only used inside the panel and the web cabinet)',
+    );
+  }
 }
 
 function asObject(value: unknown): Record<string, unknown> {

@@ -4,61 +4,101 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { RequestMethod } from '@nestjs/common';
-import { GUARDS_METADATA, METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
+import { GUARDS_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 
 import { AdminJwtAuthGuard } from '../src/modules/auth/guards/admin-jwt-auth.guard';
-import { REQUIRE_PERMISSION_KEY } from '../src/modules/rbac/decorators/require-permission.decorator';
 import { RbacGuard } from '../src/modules/rbac/guards/rbac.guard';
 import { AdminSubscriptionsController } from '../src/modules/subscriptions/controllers/admin-subscriptions.controller';
 import { AdminSubscriptionsListService } from '../src/modules/subscriptions/services/admin-subscriptions-list.service';
 import { SubscriptionQuoteService } from '../src/modules/subscriptions/services/subscription-quote.service';
+import {
+  assertEveryRouteGuarded,
+  assertRoute,
+  assertRouteHandlers,
+  assertRoutePermission,
+  routeLabel,
+} from './helpers/controller-routes';
+
+/** Where the controller answers — stated once, checked below and used in labels. */
+const BASE_PATH = 'admin/subscriptions';
 
 describe('AdminSubscriptionsController', () => {
   it('exposes list, stats, action-policy and quote admin routes', () => {
-    assert.equal(Reflect.getMetadata(PATH_METADATA, AdminSubscriptionsController), 'admin/subscriptions');
+    assert.equal(Reflect.getMetadata(PATH_METADATA, AdminSubscriptionsController), BASE_PATH);
     assert.deepStrictEqual(
       Reflect.getMetadata(GUARDS_METADATA, AdminSubscriptionsController),
       [AdminJwtAuthGuard, RbacGuard],
     );
-    assert.equal(
-      Reflect.getMetadata(PATH_METADATA, AdminSubscriptionsController.prototype.list),
-      '/',
+    // Read off the class instead of remembered here. MEDIUM #16 below was
+    // exactly this failure once already: two endpoints reached production with
+    // no `@RequirePermission`, and the spec that lists the routes by hand had
+    // nothing to say about them because they were never listed. A fifth route
+    // added tomorrow lands in the same blind spot without this line.
+    assertRouteHandlers(AdminSubscriptionsController, [
+      'list',
+      'getStats',
+      'getActionPolicy',
+      'getQuote',
+    ]);
+
+    const listRoute = `${routeLabel(BASE_PATH, RequestMethod.GET, '/')} (list subscriptions)`;
+    assertRoute(
+      AdminSubscriptionsController.prototype.list,
+      { method: RequestMethod.GET, path: '/' },
+      listRoute,
     );
-    assert.equal(
-      Reflect.getMetadata(METHOD_METADATA, AdminSubscriptionsController.prototype.list),
-      RequestMethod.GET,
+    assertRoutePermission(
+      AdminSubscriptionsController.prototype.list,
+      { resource: 'subscriptions', action: 'view' },
+      listRoute,
     );
-    assertSubscriptionsViewRoute(AdminSubscriptionsController.prototype.list);
-    assert.equal(
-      Reflect.getMetadata(PATH_METADATA, AdminSubscriptionsController.prototype.getStats),
-      'stats',
+
+    const statsRoute = `${routeLabel(BASE_PATH, RequestMethod.GET, 'stats')} (subscription stats)`;
+    assertRoute(
+      AdminSubscriptionsController.prototype.getStats,
+      { method: RequestMethod.GET, path: 'stats' },
+      statsRoute,
     );
-    assert.equal(
-      Reflect.getMetadata(METHOD_METADATA, AdminSubscriptionsController.prototype.getStats),
-      RequestMethod.GET,
+    assertRoutePermission(
+      AdminSubscriptionsController.prototype.getStats,
+      { resource: 'subscriptions', action: 'view' },
+      statsRoute,
     );
-    assertSubscriptionsViewRoute(AdminSubscriptionsController.prototype.getStats);
-    assert.equal(
-      Reflect.getMetadata(PATH_METADATA, AdminSubscriptionsController.prototype.getActionPolicy),
-      'action-policy',
-    );
-    assert.equal(
-      Reflect.getMetadata(METHOD_METADATA, AdminSubscriptionsController.prototype.getActionPolicy),
-      RequestMethod.POST,
-    );
+
     // MEDIUM #16: action-policy + quote must require subscriptions:view — an
     // endpoint with no @RequirePermission is allowed for any authenticated
     // admin by the RbacGuard.
-    assertSubscriptionsViewRoute(AdminSubscriptionsController.prototype.getActionPolicy);
-    assert.equal(
-      Reflect.getMetadata(PATH_METADATA, AdminSubscriptionsController.prototype.getQuote),
-      'quote',
+    const actionPolicyRoute = `${routeLabel(BASE_PATH, RequestMethod.POST, 'action-policy')} (allowed actions)`;
+    assertRoute(
+      AdminSubscriptionsController.prototype.getActionPolicy,
+      { method: RequestMethod.POST, path: 'action-policy' },
+      actionPolicyRoute,
     );
-    assert.equal(
-      Reflect.getMetadata(METHOD_METADATA, AdminSubscriptionsController.prototype.getQuote),
-      RequestMethod.POST,
+    assertRoutePermission(
+      AdminSubscriptionsController.prototype.getActionPolicy,
+      { resource: 'subscriptions', action: 'view' },
+      actionPolicyRoute,
     );
-    assertSubscriptionsViewRoute(AdminSubscriptionsController.prototype.getQuote);
+
+    const quoteRoute = `${routeLabel(BASE_PATH, RequestMethod.POST, 'quote')} (price quote)`;
+    assertRoute(
+      AdminSubscriptionsController.prototype.getQuote,
+      { method: RequestMethod.POST, path: 'quote' },
+      quoteRoute,
+    );
+    assertRoutePermission(
+      AdminSubscriptionsController.prototype.getQuote,
+      { resource: 'subscriptions', action: 'view' },
+      quoteRoute,
+    );
+    // The rows above say what each LISTED route costs; this says no route
+    // escaped having a cost at all. The two are not the same check, and this
+    // controller is where the difference already cost something: MEDIUM #16 was
+    // two routes carrying no `@RequirePermission`, which `RbacGuard` does not
+    // refuse but waves through (`rbac.guard.ts:41`). An enumeration alone is
+    // satisfied by adding the new name to the list; only this line insists the
+    // route also be gated. No route here is exempt, hence no list.
+    assertEveryRouteGuarded(AdminSubscriptionsController);
   });
 
   it('delegates list, stats, action-policy and quote calls unchanged', async () => {
@@ -108,9 +148,3 @@ describe('AdminSubscriptionsController', () => {
     ]);
   });
 });
-
-function assertSubscriptionsViewRoute(method: unknown): void {
-  assert.deepStrictEqual(Reflect.getMetadata(REQUIRE_PERMISSION_KEY, method), [
-    { resource: 'subscriptions', action: 'view' },
-  ]);
-}

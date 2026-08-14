@@ -187,6 +187,29 @@ export class AdminBackupController {
     return this.backupService.getSettings();
   }
 
+  /**
+   * `backups:create` covers TWO powers, and the operator has decided to keep it
+   * that way — recorded here so it is not re-opened as a discovery.
+   *
+   * The permission reads as "may take a backup". This route also writes the
+   * Telegram chat id that finished `.sql.gz` dumps are delivered to
+   * (`backup.service.ts`, `formData.append('chat_id', tgConfig.chatId)`), so a
+   * holder can point deliveries at a chat of their own and then trigger a dump
+   * with the same permission — the whole database, by design of the gate rather
+   * than by any bug.
+   *
+   * Splitting them needs a new action in `RBAC_RESOURCES.backups` (there is no
+   * `edit`, and an undeclared pair is rejected when a role is saved), plus the
+   * superadmin seed and the frontend gate moved together. Not done, because no
+   * default role holds ANY `backups:*` permission and the operator does not
+   * intend to grant one: today the only holders are DEV and superadmin, who can
+   * read the database directly anyway.
+   *
+   * What would change that: the first custom role granted `backups:create` so
+   * somebody can run backups without full access. At that moment this stops
+   * being a naming wart and becomes an exfiltration path, and the split above
+   * is the fix.
+   */
   @Patch('settings')
   @RequirePermission('backups', 'create')
   @ApiOperation({ summary: 'Updates the operator backup settings' })

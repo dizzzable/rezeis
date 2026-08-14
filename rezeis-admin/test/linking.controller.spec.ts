@@ -95,7 +95,7 @@ function route(methodName: keyof InternalLinkingController): {
   readonly path: string | undefined;
   readonly method: RequestMethod | undefined;
 } {
-  const handler = InternalLinkingController.prototype[methodName] as unknown;
+  const handler = InternalLinkingController.prototype[methodName];
   return {
     path: Reflect.getMetadata(PATH_METADATA, handler) as string | undefined,
     method: Reflect.getMetadata(METHOD_METADATA, handler) as RequestMethod | undefined,

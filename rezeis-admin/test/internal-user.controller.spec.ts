@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { RequestMethod } from '@nestjs/common';
-import { GUARDS_METADATA, METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
+import { GUARDS_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 import { Currency, Locale, PaymentGatewayType, PlanType, PurchaseChannel, PurchaseType, SubscriptionStatus, TransactionStatus, UserRole } from '@prisma/client';
 
 import { InternalAdminAuthGuard } from '../src/modules/auth/guards/internal-admin-auth.guard';
@@ -25,33 +25,66 @@ import { InternalUserNotificationInterface, InternalUserTransactionInterface } f
 import { InternalUserPlanInterface } from '../src/modules/internal-user/interfaces/internal-user-plan.interface';
 import { InternalUserSessionInterface } from '../src/modules/internal-user/interfaces/internal-user-session.interface';
 import { InternalUserSubscriptionInterface } from '../src/modules/internal-user/interfaces/internal-user-subscription.interface';
+import {
+  assertRoute,
+  assertRouteHandlers,
+  assertRouteUngated,
+  routeLabel,
+  type RouteHandler,
+} from './helpers/controller-routes';
+
+/** Where the controller answers — stated once, checked below and used in labels. */
+const BASE_PATH = 'internal/user';
 
 describe('InternalUserController', () => {
   it('exposes the current guarded internal user route contract', () => {
-    assert.equal(Reflect.getMetadata(PATH_METADATA, InternalUserController), 'internal/user');
+    assert.equal(Reflect.getMetadata(PATH_METADATA, InternalUserController), BASE_PATH);
     assert.deepStrictEqual(Reflect.getMetadata(GUARDS_METADATA, InternalUserController), [InternalAdminAuthGuard]);
-    assertRoute(RequestMethod.GET, 'session', InternalUserController.prototype.getSession);
-    assertRoute(RequestMethod.POST, 'web-account/sign-in', InternalUserController.prototype.signInLinkedWebAccount);
-    assertRoute(RequestMethod.PATCH, 'session/rules-acceptance', InternalUserController.prototype.acceptRules);
-    assertRoute(RequestMethod.PATCH, 'session/onboarding', InternalUserController.prototype.setOnboarding);
-    assertRoute(RequestMethod.PATCH, 'session/web-account-link-prompt-snooze', InternalUserController.prototype.snoozeWebAccountLinkPrompt);
-    assertRoute(RequestMethod.PATCH, 'session/web-account-password', InternalUserController.prototype.setWebAccountPassword);
-    assertRoute(RequestMethod.PATCH, 'session/web-account-email-verification-challenge', InternalUserController.prototype.issueWebAccountEmailVerificationChallenge);
-    assertRoute(RequestMethod.PATCH, 'session/web-account-email-verification-completion', InternalUserController.prototype.completeWebAccountEmailVerification);
-    assertRoute(RequestMethod.GET, 'plans', InternalUserController.prototype.getPlans);
-    assertRoute(RequestMethod.GET, 'subscription', InternalUserController.prototype.getSubscription);
-    assertRoute(RequestMethod.GET, 'subscriptions', InternalUserController.prototype.getAllSubscriptions);
-    assertRoute(RequestMethod.GET, 'partner-status', InternalUserController.prototype.getPartnerStatus);
-    assertRoute(RequestMethod.POST, 'bootstrap', InternalUserController.prototype.bootstrap);
-    assertRoute(RequestMethod.PATCH, 'language', InternalUserController.prototype.updateLanguage);
-    assertRoute(RequestMethod.GET, 'notifications', InternalUserController.prototype.listNotifications);
-    assertRoute(RequestMethod.GET, 'notifications/unread-count', InternalUserController.prototype.unreadCount);
-    assertRoute(RequestMethod.POST, 'notifications/read-all', InternalUserController.prototype.readAll);
-    assertRoute(RequestMethod.POST, 'notifications/:notificationId/read', InternalUserController.prototype.readOne);
-    assertRoute(RequestMethod.GET, 'transactions', InternalUserController.prototype.listTransactions);
-    assertRoute(RequestMethod.GET, 'trial/eligibility', InternalUserController.prototype.trialEligibility);
-    assertRoute(RequestMethod.POST, 'trial', InternalUserController.prototype.trialActivate);
-    assertRoute(RequestMethod.POST, 'bot-blocked', InternalUserController.prototype.markBotBlocked);
+    // The set of routes is read off the class rather than remembered here. The
+    // hand-written list this replaces named 22 of the 25 that exist: `exists`,
+    // `add-on-entitlements`, and `surface-seen` had been added to the cabinet's
+    // API since, and nothing in this file noticed. Unlike the admin
+    // controllers there is no `@RequirePermission` to assert a value for — the
+    // whole controller sits behind `InternalAdminAuthGuard` and nothing finer.
+    // Its ABSENCE is asserted instead, per route, in the loop below.
+    assertRouteHandlers(InternalUserController, [
+      'getSession',
+      'signInLinkedWebAccount',
+      'acceptRules',
+      'setOnboarding',
+      'snoozeWebAccountLinkPrompt',
+      'setWebAccountPassword',
+      'issueWebAccountEmailVerificationChallenge',
+      'completeWebAccountEmailVerification',
+      'getPlans',
+      'getSubscription',
+      'getAllSubscriptions',
+      'getPartnerStatus',
+      'bootstrap',
+      'userExists',
+      'updateLanguage',
+      'listNotifications',
+      'unreadCount',
+      'readAll',
+      'readOne',
+      'listTransactions',
+      'listAddOnEntitlements',
+      'trialEligibility',
+      'trialActivate',
+      'markBotBlocked',
+      'recordSurfaceSeen',
+    ]);
+
+    for (const route of INTERNAL_USER_ROUTES) {
+      const label = routeLabel(BASE_PATH, route.method, route.path);
+      assertRoute(route.handler, { method: route.method, path: route.path }, label);
+      // Carrying no permission is the CONTRACT here, not an omission, and
+      // saying so is not decoration: `RbacGuard` is not among this
+      // controller's guards, so a `@RequirePermission` hung on one of these
+      // routes tomorrow would be read by nothing. It would restrict no one
+      // while reading, to the next person, as a restriction.
+      assertRouteUngated(InternalUserController, route.handler, label);
+    }
   });
 
   it('delegates session and linked web-account operations to InternalUserService', async () => {
@@ -281,10 +314,43 @@ function createController(input: {
   );
 }
 
-function assertRoute(requestMethod: RequestMethod, path: string, target: unknown): void {
-  assert.equal(Reflect.getMetadata(METHOD_METADATA, target), requestMethod);
-  assert.equal(Reflect.getMetadata(PATH_METADATA, target), path);
+/** One cabinet-facing endpoint as this spec states it. No RBAC gate exists to state. */
+interface InternalUserRoute {
+  readonly handler: RouteHandler;
+  readonly method: RequestMethod;
+  readonly path: string;
 }
+
+/** The routes themselves, so a row names a handler the compiler has to find. */
+const handlers = InternalUserController.prototype;
+
+const INTERNAL_USER_ROUTES: readonly InternalUserRoute[] = [
+  { handler: handlers.getSession, method: RequestMethod.GET, path: 'session' },
+  { handler: handlers.signInLinkedWebAccount, method: RequestMethod.POST, path: 'web-account/sign-in' },
+  { handler: handlers.acceptRules, method: RequestMethod.PATCH, path: 'session/rules-acceptance' },
+  { handler: handlers.setOnboarding, method: RequestMethod.PATCH, path: 'session/onboarding' },
+  { handler: handlers.snoozeWebAccountLinkPrompt, method: RequestMethod.PATCH, path: 'session/web-account-link-prompt-snooze' },
+  { handler: handlers.setWebAccountPassword, method: RequestMethod.PATCH, path: 'session/web-account-password' },
+  { handler: handlers.issueWebAccountEmailVerificationChallenge, method: RequestMethod.PATCH, path: 'session/web-account-email-verification-challenge' },
+  { handler: handlers.completeWebAccountEmailVerification, method: RequestMethod.PATCH, path: 'session/web-account-email-verification-completion' },
+  { handler: handlers.getPlans, method: RequestMethod.GET, path: 'plans' },
+  { handler: handlers.getSubscription, method: RequestMethod.GET, path: 'subscription' },
+  { handler: handlers.getAllSubscriptions, method: RequestMethod.GET, path: 'subscriptions' },
+  { handler: handlers.getPartnerStatus, method: RequestMethod.GET, path: 'partner-status' },
+  { handler: handlers.bootstrap, method: RequestMethod.POST, path: 'bootstrap' },
+  { handler: handlers.userExists, method: RequestMethod.GET, path: 'exists' },
+  { handler: handlers.updateLanguage, method: RequestMethod.PATCH, path: 'language' },
+  { handler: handlers.listNotifications, method: RequestMethod.GET, path: 'notifications' },
+  { handler: handlers.unreadCount, method: RequestMethod.GET, path: 'notifications/unread-count' },
+  { handler: handlers.readAll, method: RequestMethod.POST, path: 'notifications/read-all' },
+  { handler: handlers.readOne, method: RequestMethod.POST, path: 'notifications/:notificationId/read' },
+  { handler: handlers.listTransactions, method: RequestMethod.GET, path: 'transactions' },
+  { handler: handlers.listAddOnEntitlements, method: RequestMethod.GET, path: 'add-on-entitlements' },
+  { handler: handlers.trialEligibility, method: RequestMethod.GET, path: 'trial/eligibility' },
+  { handler: handlers.trialActivate, method: RequestMethod.POST, path: 'trial' },
+  { handler: handlers.markBotBlocked, method: RequestMethod.POST, path: 'bot-blocked' },
+  { handler: handlers.recordSurfaceSeen, method: RequestMethod.POST, path: 'surface-seen' },
+];
 
 function createSession(): InternalUserSessionInterface {
   return {

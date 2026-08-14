@@ -261,8 +261,11 @@ function ensureBufferWithinLimit(buffer: Buffer, limit: number, label: string): 
   }
 }
 
-function ensureArchiveEntrySize(name: string, size: number): void {
-  if (!Number.isSafeInteger(size) || size < 0) {
+// `size` is optional in the tar header, and an entry that does not declare one
+// is rejected exactly like a malformed one — we refuse to read a payload whose
+// length we cannot bound in advance.
+function ensureArchiveEntrySize(name: string, size: number | undefined): void {
+  if (size === undefined || !Number.isSafeInteger(size) || size < 0) {
     throw new BadRequestException(`Archive entry '${name}' has an invalid size`);
   }
   if (size > MAX_ARCHIVE_ENTRY_BYTES) {
@@ -289,7 +292,10 @@ function normalizeTarEntryName(name: string): string {
   return parts.join('/');
 }
 
-function normalizeTarEntryType(type: string | undefined): 'file' | 'ignore' {
+// Typed off the tar-stream header instead of a bare `string`: the library also
+// reports `null` for an entry with no type byte, and that case must land on the
+// same "plain file" default as a missing one.
+function normalizeTarEntryType(type: Headers['type']): 'file' | 'ignore' {
   const normalized = type ?? 'file';
   if (!ALLOWED_TAR_ENTRY_TYPES.has(normalized)) {
     throw new BadRequestException(`Archive contains unsafe entry type '${normalized}'`);

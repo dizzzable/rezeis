@@ -4,39 +4,86 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { RequestMethod } from '@nestjs/common';
-import { GUARDS_METADATA, METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
+import { GUARDS_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 import { Locale, UserRole } from '@prisma/client';
 
 import { AdminJwtAuthGuard } from '../src/modules/auth/guards/admin-jwt-auth.guard';
-import { REQUIRE_PERMISSION_KEY } from '../src/modules/rbac/decorators/require-permission.decorator';
 import { RbacGuard } from '../src/modules/rbac/guards/rbac.guard';
 import { AdminUserListQueryDto } from '../src/modules/users/dto/admin-user-list-query.dto';
 import { AdminUserSearchQueryDto } from '../src/modules/users/dto/admin-user-search-query.dto';
 import { AdminUsersController } from '../src/modules/users/controllers/admin-users.controller';
+import {
+  assertEveryRouteGuarded,
+  assertRoute,
+  assertRouteHandlers,
+  assertRoutePermission,
+  routeLabel,
+} from './helpers/controller-routes';
+
+/** Where the controller answers — stated once, checked below and used in labels. */
+const BASE_PATH = 'admin/users';
 
 describe('AdminUsersController', () => {
   it('exposes the current read-only admin users route contract', () => {
-    assert.equal(Reflect.getMetadata(PATH_METADATA, AdminUsersController), 'admin/users');
+    assert.equal(Reflect.getMetadata(PATH_METADATA, AdminUsersController), BASE_PATH);
     assert.deepStrictEqual(Reflect.getMetadata(GUARDS_METADATA, AdminUsersController), [
       AdminJwtAuthGuard,
       RbacGuard,
     ]);
 
-    assert.equal(Reflect.getMetadata(PATH_METADATA, AdminUsersController.prototype.listUsers), '/');
-    assert.equal(Reflect.getMetadata(METHOD_METADATA, AdminUsersController.prototype.listUsers), RequestMethod.GET);
-    assertUsersViewRoute(AdminUsersController.prototype.listUsers);
+    // Read off the class instead of remembered here. The two routes described
+    // below are not the whole controller: `resolveUser` and, more sharply,
+    // `exportRegistrationCsv` — a bulk dump of registration IP/UA/UTM — are
+    // also mounted on `admin/users`, and this spec never noticed either being
+    // added. Pinning the set does not describe them, but it does mean the next
+    // route cannot arrive in silence.
+    assertRouteHandlers(AdminUsersController, [
+      'listUsers',
+      'exportRegistrationCsv',
+      'searchUser',
+      'resolveUser',
+    ]);
+
+    const listRoute = `${routeLabel(BASE_PATH, RequestMethod.GET, '/')} (list users)`;
+    assertRoute(
+      AdminUsersController.prototype.listUsers,
+      { method: RequestMethod.GET, path: '/' },
+      listRoute,
+    );
+    assertRoutePermission(
+      AdminUsersController.prototype.listUsers,
+      { resource: 'users', action: 'view' },
+      listRoute,
+    );
     assert.deepStrictEqual(
       Reflect.getMetadata('design:paramtypes', AdminUsersController.prototype, 'listUsers'),
       [AdminUserListQueryDto],
     );
 
-    assert.equal(Reflect.getMetadata(PATH_METADATA, AdminUsersController.prototype.searchUser), 'search');
-    assert.equal(Reflect.getMetadata(METHOD_METADATA, AdminUsersController.prototype.searchUser), RequestMethod.GET);
-    assertUsersViewRoute(AdminUsersController.prototype.searchUser);
+    const searchRoute = `${routeLabel(BASE_PATH, RequestMethod.GET, 'search')} (single-user lookup)`;
+    assertRoute(
+      AdminUsersController.prototype.searchUser,
+      { method: RequestMethod.GET, path: 'search' },
+      searchRoute,
+    );
+    assertRoutePermission(
+      AdminUsersController.prototype.searchUser,
+      { resource: 'users', action: 'view' },
+      searchRoute,
+    );
     assert.deepStrictEqual(
       Reflect.getMetadata('design:paramtypes', AdminUsersController.prototype, 'searchUser'),
       [AdminUserSearchQueryDto],
     );
+
+    // The rows above describe two of the four routes; this says all four are
+    // gated on something. The two checks are not interchangeable: the
+    // enumeration forces a new route to be noticed, but it is satisfied by
+    // adding a name to the list — and a route that never gets a row here is one
+    // `RbacGuard` waves through (`rbac.guard.ts:41`), open to any signed-in
+    // admin rather than refused. On this controller that would be the bulk
+    // registration IP/UA/UTM dump. No route here is exempt, hence no list.
+    assertEveryRouteGuarded(AdminUsersController);
   });
 
   it('delegates list and search reads to AdminUsersService unchanged', async () => {
@@ -108,9 +155,3 @@ describe('AdminUsersController', () => {
     ]);
   });
 });
-
-function assertUsersViewRoute(method: unknown): void {
-  assert.deepStrictEqual(Reflect.getMetadata(REQUIRE_PERMISSION_KEY, method), [
-    { resource: 'users', action: 'view' },
-  ]);
-}

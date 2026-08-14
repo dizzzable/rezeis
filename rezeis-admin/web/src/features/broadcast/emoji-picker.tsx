@@ -5,6 +5,8 @@ import { ChevronDown, ChevronRight, Smile } from 'lucide-react'
 
 import { api } from '@/lib/api'
 import { expectArray } from '@/lib/api-utils'
+import { cn } from '@/lib/utils'
+import { resolveEmojiDelivery } from '@/features/custom-emoji/emoji-delivery'
 import { EmojiPreview } from '@/features/custom-emoji/emoji-preview'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -361,6 +363,9 @@ interface CustomEmojiLite {
   readonly imageUrl: string
   readonly lottieUrl: string | null
   readonly videoUrl: string | null
+  /** The two fields that decide whether the inserted `:slug:` renders at all. */
+  readonly fallback: string | null
+  readonly customEmojiId: string | null
 }
 interface CustomEmojiPackLite {
   readonly id: string
@@ -504,17 +509,32 @@ export function EmojiPicker({
                   </button>
                   {isExpanded ? (
                     <div className="grid grid-cols-8 gap-1">
-                      {pack.emojis.map((emoji) => (
+                      {pack.emojis.map((emoji) => {
+                        // Inserting `:slug:` for an entry with neither a glyph
+                        // nor a custom_emoji_id hands the operator a token that
+                        // every renderer leaves in the message as literal text.
+                        // Offer it disabled and say why, instead of silently
+                        // producing copy that ships a raw `:shortcode:`.
+                        const undeliverable = resolveEmojiDelivery(emoji) === 'nothing'
+                        return (
                         <button
                           type="button"
                           key={emoji.slug}
-                          title={`:${emoji.slug}:`}
+                          disabled={undeliverable}
+                          title={
+                            undeliverable
+                              ? t('emojiPicker.undeliverable', { token: `:${emoji.slug}:` })
+                              : `:${emoji.slug}:`
+                          }
                           aria-label={emoji.name}
                           onClick={() => {
                             onSelect(`:${emoji.slug}:`)
                             setOpen(false)
                           }}
-                          className="flex aspect-square w-full items-center justify-center rounded hover:bg-muted"
+                          className={cn(
+                            'flex aspect-square w-full items-center justify-center rounded hover:bg-muted',
+                            undeliverable && 'cursor-not-allowed opacity-40 hover:bg-transparent',
+                          )}
                         >
                           {/* Static thumbnail by default; the Lottie/video player
                               mounts only on hover/focus (or selection) so a big
@@ -528,7 +548,8 @@ export function EmojiPicker({
                             className="h-6 w-6 bg-transparent"
                           />
                         </button>
-                      ))}
+                        )
+                      })}
                     </div>
                   ) : null}
                 </div>

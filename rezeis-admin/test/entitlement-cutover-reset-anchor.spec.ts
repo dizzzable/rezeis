@@ -7,7 +7,10 @@ import { EntitlementCutoverService } from '../src/modules/add-on-entitlements/se
 
 describe('EntitlementCutoverService reset anchor', () => {
   it('leaves MONTH_ROLLING unanchored until panel createdAt is available', async () => {
-    let scheduledInput: { resetAnchorAt: Date | null } | null = null;
+    // Written from inside the double, where the surrounding flow analysis
+    // cannot see the write; held on an object so the captured input keeps its
+    // declared type instead of collapsing to the initial null.
+    const scheduled: { input: { resetAnchorAt: Date | null } | null } = { input: null };
     const currentSubscription = {
       id: 'sub-1',
       status: SubscriptionStatus.ACTIVE,
@@ -28,7 +31,7 @@ describe('EntitlementCutoverService reset anchor', () => {
     };
     const terms = {
       createScheduledInTransaction: async (_tx: unknown, input: { resetAnchorAt: Date | null }) => {
-        scheduledInput = input;
+        scheduled.input = input;
         return { id: 'term-1' };
       },
       activateInTransaction: async () => ({ id: 'term-1', changed: true }),
@@ -48,7 +51,8 @@ describe('EntitlementCutoverService reset anchor', () => {
       expiresAt: new Date('2027-01-15T12:30:00.000Z'),
     });
 
-    assert.equal(scheduledInput?.resetAnchorAt, null);
+    assert.ok(scheduled.input, 'the cutover must schedule a term');
+    assert.equal(scheduled.input.resetAnchorAt, null);
   });
 
   it('locks and re-reads the subscription before cutover, skipping a stale candidate deleted meanwhile', async () => {

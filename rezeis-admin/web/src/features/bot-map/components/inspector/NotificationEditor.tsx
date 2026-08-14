@@ -26,6 +26,7 @@ import {
 } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { EmojiPicker } from '@/features/broadcast/emoji-picker'
+import { EmojiFieldOverlay } from '@/features/custom-emoji/emoji-field-overlay'
 import { insertAtCaret } from '../../utils/insert-at-caret'
 
 import {
@@ -354,26 +355,34 @@ function NotificationButtonRow({
             <Label className="text-[11px]">{t('botMapPage.notification.labelRu')}</Label>
             <EmojiPicker onSelect={insertRu} ariaLabel={t('emojiPicker.trigger')} />
           </div>
-          <Input
-            ref={labelRuRef}
-            value={button.labelRu}
-            onChange={(e) => onUpdate({ labelRu: e.target.value })}
-            maxLength={64}
-            className="text-xs"
-          />
+          {/* `buttonLabel`, not `text`: a leading token does not stay in the
+              caption — reiwa lifts it into `icon_custom_emoji_id` and Telegram
+              draws it BEFORE the caption. Drawing it inline here would swap one
+              lie for another. Stored value is untouched either way. */}
+          <EmojiFieldOverlay value={button.labelRu} mode="buttonLabel" overlayClassName="text-xs">
+            <Input
+              ref={labelRuRef}
+              value={button.labelRu}
+              onChange={(e) => onUpdate({ labelRu: e.target.value })}
+              maxLength={64}
+              className="text-xs"
+            />
+          </EmojiFieldOverlay>
         </div>
         <div className="space-y-1">
           <div className="flex items-center justify-between">
             <Label className="text-[11px]">{t('botMapPage.notification.labelEn')}</Label>
             <EmojiPicker onSelect={insertEn} ariaLabel={t('emojiPicker.trigger')} />
           </div>
-          <Input
-            ref={labelEnRef}
-            value={button.labelEn}
-            onChange={(e) => onUpdate({ labelEn: e.target.value })}
-            maxLength={64}
-            className="text-xs"
-          />
+          <EmojiFieldOverlay value={button.labelEn} mode="buttonLabel" overlayClassName="text-xs">
+            <Input
+              ref={labelEnRef}
+              value={button.labelEn}
+              onChange={(e) => onUpdate({ labelEn: e.target.value })}
+              maxLength={64}
+              className="text-xs"
+            />
+          </EmojiFieldOverlay>
         </div>
       </div>
       <div className="grid grid-cols-3 gap-2">

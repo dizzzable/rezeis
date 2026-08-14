@@ -28,6 +28,16 @@ jobs:
       - run: npm ci
       - run: npm run prisma:generate
       - run: npm run typecheck
+
+      # `typecheck` above compiles `tsconfig.json`, which EXCLUDES `**/*.spec.ts`
+      # — so it returns exit 0 with the whole suite hard-broken. The specs are
+      # type-checked at RUN time by `ts-node/register` in the tests job, which
+      # means the first sign of a type error is a spec that refuses to start,
+      # and files under `test/` that no spec imports are never checked at all.
+      # This step is the compiler saying in seconds what that job says in
+      # minutes, and it is the only thing that covers those unimported files.
+      - run: npm run typecheck:test
+
       - run: npm run lint
 
   web-quality:

@@ -441,6 +441,10 @@ describe('live connections across the two endpoint families', () => {
       users: [{ userId: 42, ips: [{ ip: '203.0.113.9', lastSeen: '2026-08-10T13:13:02.000Z' }] }],
     });
     const rows = await service.fetchUsersIpsForNode('node-uuid');
+    // `null` is the separate "could not read this node" answer, not an empty
+    // snapshot — see the test below. Naming it here keeps a read failure from
+    // arriving as a property-access crash on the next line.
+    assert.ok(rows !== null, 'the node was not read at all');
     assert.equal(rows.length, 1);
     assert.equal(rows[0].userId, '42');
     assert.equal(rows[0].ips.length, 1);

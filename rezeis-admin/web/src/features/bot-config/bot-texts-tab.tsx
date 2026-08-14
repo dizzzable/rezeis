@@ -13,9 +13,9 @@ import { Eye, EyeOff, Pencil, Plus, Search, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { EmojiPicker } from '@/features/broadcast/emoji-picker'
-import { EmojiPreview } from '@/features/custom-emoji/emoji-preview'
-import { api } from '@/lib/api'
-import { expectArray } from '@/lib/api-utils'
+import { EmojiFieldOverlay } from '@/features/custom-emoji/emoji-field-overlay'
+import { RenderedCopyPreview } from '@/features/custom-emoji/rendered-copy-preview'
+import { getErrorMessage } from '@/lib/http-errors'
 import { truncate } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -49,6 +49,7 @@ import {
   type UpdateBotTextPayload,
   botConfigApi,
 } from './bot-config-api'
+import { botTextKeyMode } from './bot-text-key-mode'
 
 export function BotTextsTab(): JSX.Element {
   const { t } = useTranslation()
@@ -185,69 +186,34 @@ export function BotTextsTab(): JSX.Element {
   )
 }
 
-interface CustomEmojiLite {
-  readonly slug: string
-  readonly imageUrl: string
-  readonly lottieUrl: string | null
-  readonly videoUrl: string | null
-}
-interface CustomEmojiPackLite {
-  readonly id: string
-  readonly emojis: readonly CustomEmojiLite[]
-}
-
-const CUSTOM_EMOJI_TOKEN = /(:[a-z0-9_]+:)/g
-
 /**
- * Live preview that renders `:slug:` custom-emoji tokens as the real emoji —
- * animated (Lottie / VP9 webm) when available, otherwise the static image — so
- * operators see the actual emoji, not the shortcode. Shown only when the value
- * contains a token. Plain text / unicode renders as-is.
+ * How a key's fields draw their value, and what sits under them.
+ *
+ * `mode` is the whole of defect 2: this tab edits ANY key, and a handful of them
+ * are read back as inline-button captions, where reiwa cuts a leading token out
+ * of the string and ships it as `icon_custom_emoji_id`. `botTextKeyMode` decides
+ * which renderer the key feeds; see that module for why the rule is what it is.
+ *
+ * The two follow from it and are not free choices:
+ *
+ *   • `RenderedCopyPreview` previews MESSAGE BODIES. It renders `mode: 'text'`
+ *     by design — a caption is previewed by the field layer in `buttonLabel`
+ *     mode instead, because only the layer has somewhere to put the promoted
+ *     icon (its own row, above the field). Showing it under a caption key would
+ *     put a second, text-mode answer on screen directly beneath the layer's
+ *     caption-mode one, which is the shape of defect 1 all over again.
+ *   • `liveStrip` therefore covers the gap it leaves: the layer steps aside for
+ *     a focused field, so without the preview below, a caption key would show
+ *     nothing at all while being typed into. For body copy the preview is
+ *     already there and a strip as well would just be a second copy of it.
  */
-function CustomEmojiPreview({ value }: { readonly value: string }): JSX.Element | null {
-  const { t } = useTranslation()
-  const { data: packs } = useQuery<ReadonlyArray<CustomEmojiPackLite>>({
-    queryKey: ['admin', 'custom-emoji', 'packs'],
-    queryFn: async () =>
-      expectArray<CustomEmojiPackLite>((await api.get('/admin/custom-emoji/packs')).data),
-    staleTime: 60_000,
-  })
-  const slugMap = useMemo(() => {
-    const map = new Map<string, CustomEmojiLite>()
-    for (const pack of packs ?? []) {
-      for (const emoji of pack.emojis) map.set(emoji.slug, emoji)
-    }
-    return map
-  }, [packs])
-
-  if (!/:[a-z0-9_]+:/.test(value)) return null
-  const parts = value.split(CUSTOM_EMOJI_TOKEN)
-  return (
-    <div className="rounded-lg border bg-muted/30 p-2 text-sm whitespace-pre-wrap">
-      <p className="mb-1 text-[11px] text-muted-foreground">
-        {t('botConfigPage.texts.fields.preview')}
-      </p>
-      <span>
-        {parts.map((part, i) => {
-          const match = /^:([a-z0-9_]+):$/.exec(part)
-          const emoji = match ? slugMap.get(match[1]) : undefined
-          if (match && emoji !== undefined) {
-            return (
-              <EmojiPreview
-                key={`${i}-${part}`}
-                imageUrl={emoji.imageUrl}
-                lottieUrl={emoji.lottieUrl}
-                videoUrl={emoji.videoUrl}
-                alt={part}
-                className="inline-flex h-5 w-5 align-text-bottom"
-              />
-            )
-          }
-          return <span key={`${i}-${part}`}>{part}</span>
-        })}
-      </span>
-    </div>
-  )
+function fieldModeFor(key: string): {
+  readonly mode: ReturnType<typeof botTextKeyMode>
+  readonly liveStrip: boolean
+  readonly showsCopyPreview: boolean
+} {
+  const mode = botTextKeyMode(key)
+  return { mode, liveStrip: mode === 'buttonLabel', showsCopyPreview: mode === 'text' }
 }
 
 interface TextEditDialogProps {
@@ -266,6 +232,10 @@ function TextEditDialog({ text, open, onOpenChange }: TextEditDialogProps): JSX.
   const [valueEn, setValueEn] = useState('')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const enTextareaRef = useRef<HTMLTextAreaElement>(null)
+
+  // RU and EN are two values of ONE key, so they feed the same renderer and are
+  // drawn the same way.
+  const field = fieldModeFor(text?.key ?? '')
 
   function insertAtCaret(emoji: string): void {
     const el = textareaRef.current
@@ -321,7 +291,12 @@ function TextEditDialog({ text, open, onOpenChange }: TextEditDialogProps): JSX.
       toast.success(t('botConfigPage.texts.toasts.updated'))
       onOpenChange(false)
     },
-    onError: () => toast.error(t('botConfigPage.texts.toasts.updateFailed')),
+    // Surface the server's reason. The write path refuses specific things and
+    // names them — a duplicate key, a key that is not alphanumeric — and a bare
+    // "Не удалось сохранить" sends the operator back to the same value with
+    // nothing to change.
+    onError: (error) =>
+      toast.error(getErrorMessage(error, t('botConfigPage.texts.toasts.updateFailed'))),
   })
 
   const deleteMutation = useMutation({
@@ -357,7 +332,21 @@ function TextEditDialog({ text, open, onOpenChange }: TextEditDialogProps): JSX.
         <div className="space-y-4">
           <div className="space-y-1.5">
             <Label htmlFor="bc-text-value">{t('botConfigPage.texts.fields.value')}</Label>
-            <div className="relative">
+            <EmojiFieldOverlay
+              value={value}
+              mode={field.mode}
+              multiline
+              // For body copy the delivery preview below already carries the
+              // rendered line while this field is focused, so no second strip.
+              // A caption has no preview below it and needs one.
+              liveStrip={field.liveStrip}
+              overlayClassName="font-mono text-sm pr-10"
+              adornment={
+                <div className="absolute right-1.5 top-1.5">
+                  <EmojiPicker onSelect={insertAtCaret} ariaLabel={t('emojiPicker.trigger')} />
+                </div>
+              }
+            >
               <Textarea
                 id="bc-text-value"
                 ref={textareaRef}
@@ -367,14 +356,11 @@ function TextEditDialog({ text, open, onOpenChange }: TextEditDialogProps): JSX.
                 rows={10}
                 className="font-mono text-sm pr-10"
               />
-              <div className="absolute right-1.5 top-1.5">
-                <EmojiPicker onSelect={insertAtCaret} ariaLabel={t('emojiPicker.trigger')} />
-              </div>
-            </div>
+            </EmojiFieldOverlay>
             <p className="text-xs text-muted-foreground">
               {value.length}/8000
             </p>
-            <CustomEmojiPreview value={value} />
+            {field.showsCopyPreview && <RenderedCopyPreview value={value} />}
           </div>
 
           <div className="space-y-3 rounded-lg border p-3">
@@ -398,7 +384,21 @@ function TextEditDialog({ text, open, onOpenChange }: TextEditDialogProps): JSX.
                 <Label htmlFor="bc-text-value-en">
                   {t('botConfigPage.texts.fields.enValue')}
                 </Label>
-                <div className="relative">
+                <EmojiFieldOverlay
+                  value={valueEn}
+                  mode={field.mode}
+                  multiline
+                  liveStrip={field.liveStrip}
+                  overlayClassName="font-mono text-sm pr-10"
+                  adornment={
+                    <div className="absolute right-1.5 top-1.5">
+                      <EmojiPicker
+                        onSelect={insertAtCaretEn}
+                        ariaLabel={t('emojiPicker.trigger')}
+                      />
+                    </div>
+                  }
+                >
                   <Textarea
                     id="bc-text-value-en"
                     ref={enTextareaRef}
@@ -408,15 +408,9 @@ function TextEditDialog({ text, open, onOpenChange }: TextEditDialogProps): JSX.
                     rows={8}
                     className="font-mono text-sm pr-10"
                   />
-                  <div className="absolute right-1.5 top-1.5">
-                    <EmojiPicker
-                      onSelect={insertAtCaretEn}
-                      ariaLabel={t('emojiPicker.trigger')}
-                    />
-                  </div>
-                </div>
+                </EmojiFieldOverlay>
                 <p className="text-xs text-muted-foreground">{valueEn.length}/8000</p>
-                <CustomEmojiPreview value={valueEn} />
+                {field.showsCopyPreview && <RenderedCopyPreview value={valueEn} />}
               </div>
             )}
           </div>
@@ -474,6 +468,10 @@ function TextCreateDialog({ open, onOpenChange }: TextCreateDialogProps): JSX.El
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const enTextareaRef = useRef<HTMLTextAreaElement>(null)
 
+  // Follows the key field as it is typed: the row does not exist yet, so the key
+  // above is the only thing that says which renderer this copy will feed.
+  const field = fieldModeFor(key)
+
   function insertAtCaret(emoji: string): void {
     const el = textareaRef.current
     if (!el) {
@@ -527,7 +525,8 @@ function TextCreateDialog({ open, onOpenChange }: TextCreateDialogProps): JSX.El
       toast.success(t('botConfigPage.texts.toasts.created'))
       onOpenChange(false)
     },
-    onError: () => toast.error(t('botConfigPage.texts.toasts.createFailed')),
+    onError: (error) =>
+      toast.error(getErrorMessage(error, t('botConfigPage.texts.toasts.createFailed'))),
   })
 
   function submit(): void {
@@ -569,7 +568,18 @@ function TextCreateDialog({ open, onOpenChange }: TextCreateDialogProps): JSX.El
 
           <div className="space-y-1.5">
             <Label htmlFor="bc-new-text-value">{t('botConfigPage.texts.fields.value')}</Label>
-            <div className="relative">
+            <EmojiFieldOverlay
+              value={value}
+              mode={field.mode}
+              multiline
+              liveStrip={field.liveStrip}
+              overlayClassName="font-mono text-sm pr-10"
+              adornment={
+                <div className="absolute right-1.5 top-1.5">
+                  <EmojiPicker onSelect={insertAtCaret} ariaLabel={t('emojiPicker.trigger')} />
+                </div>
+              }
+            >
               <Textarea
                 id="bc-new-text-value"
                 ref={textareaRef}
@@ -579,12 +589,9 @@ function TextCreateDialog({ open, onOpenChange }: TextCreateDialogProps): JSX.El
                 rows={10}
                 className="font-mono text-sm pr-10"
               />
-              <div className="absolute right-1.5 top-1.5">
-                <EmojiPicker onSelect={insertAtCaret} ariaLabel={t('emojiPicker.trigger')} />
-              </div>
-            </div>
+            </EmojiFieldOverlay>
             <p className="text-xs text-muted-foreground">{value.length}/8000</p>
-            <CustomEmojiPreview value={value} />
+            {field.showsCopyPreview && <RenderedCopyPreview value={value} />}
           </div>
 
           <div className="space-y-3 rounded-lg border p-3">
@@ -608,7 +615,21 @@ function TextCreateDialog({ open, onOpenChange }: TextCreateDialogProps): JSX.El
                 <Label htmlFor="bc-new-text-value-en">
                   {t('botConfigPage.texts.fields.enValue')}
                 </Label>
-                <div className="relative">
+                <EmojiFieldOverlay
+                  value={valueEn}
+                  mode={field.mode}
+                  multiline
+                  liveStrip={field.liveStrip}
+                  overlayClassName="font-mono text-sm pr-10"
+                  adornment={
+                    <div className="absolute right-1.5 top-1.5">
+                      <EmojiPicker
+                        onSelect={insertAtCaretEn}
+                        ariaLabel={t('emojiPicker.trigger')}
+                      />
+                    </div>
+                  }
+                >
                   <Textarea
                     id="bc-new-text-value-en"
                     ref={enTextareaRef}
@@ -618,15 +639,9 @@ function TextCreateDialog({ open, onOpenChange }: TextCreateDialogProps): JSX.El
                     rows={8}
                     className="font-mono text-sm pr-10"
                   />
-                  <div className="absolute right-1.5 top-1.5">
-                    <EmojiPicker
-                      onSelect={insertAtCaretEn}
-                      ariaLabel={t('emojiPicker.trigger')}
-                    />
-                  </div>
-                </div>
+                </EmojiFieldOverlay>
                 <p className="text-xs text-muted-foreground">{valueEn.length}/8000</p>
-                <CustomEmojiPreview value={valueEn} />
+                {field.showsCopyPreview && <RenderedCopyPreview value={valueEn} />}
               </div>
             )}
           </div>

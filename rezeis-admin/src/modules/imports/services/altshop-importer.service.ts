@@ -475,8 +475,13 @@ export class AltshopImporterService {
   /** Existing accounts retain financial, access and subscription settings. */
   private async updateSafeUserIdentity(userId: string, source: AltshopUser): Promise<void> {
     const data: Prisma.UserUpdateInput = {};
-    if (nonEmpty(source.username)) data.username = source.username.trim();
-    if (nonEmpty(source.name)) data.name = source.name.trim();
+    // `nonEmpty` already trims and collapses blank/absent donor values to null,
+    // so its result is what we want to store — re-reading `source` afterwards
+    // only re-opens the question of whether the field was there at all.
+    const username = nonEmpty(source.username);
+    const name = nonEmpty(source.name);
+    if (username !== null) data.username = username;
+    if (name !== null) data.name = name;
     if (Object.keys(data).length > 0) {
       await this.prismaService.user.update({ where: { id: userId }, data });
     }
