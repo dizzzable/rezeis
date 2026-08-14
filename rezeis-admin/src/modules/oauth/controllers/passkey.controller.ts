@@ -162,6 +162,17 @@ export class PasskeyProtectedController {
  * RP ID on the credential at registration and verify each assertion against
  * its own row; that needs a column, so it is a decision with a migration
  * attached rather than something to slip into a login path.
+ *
+ * That decision was put to the owner on 2026-08-14 and declined: the residual
+ * exposure needs an attacker who can already set the `Host` reaching this
+ * process — i.e. control of the reverse proxy — and the column plus migration
+ * was judged not worth buying that. So this is a settled position, not an
+ * unfinished one. Do not "fix" it in passing.
+ *
+ * What would reopen it: a deployment where more than one hostname legitimately
+ * reaches the panel, or a proxy that forwards `Host` unvalidated. Either turns
+ * the header from a description of the deployment into an attacker-supplied
+ * value, and then the credential has to carry its own RP ID.
  */
 function extractRpId(req: Request): string {
   const host = req.get('host') ?? 'localhost';
