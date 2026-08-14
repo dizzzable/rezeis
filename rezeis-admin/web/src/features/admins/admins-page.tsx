@@ -11,6 +11,7 @@ import { api } from '@/lib/api'
 import { expectArray } from '@/lib/api-utils'
 import { formatDateTime } from '@/lib/utils'
 import { useTabSync } from '@/lib/use-tab-sync'
+import { HUB_TABS } from '@/components/layout/admin-nav-config'
 import { listRoles, type RbacRoleListItem } from '@/features/rbac'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
@@ -76,7 +77,7 @@ const IpAllowlistTab = lazy(() => import('@/features/two-factor/admin-ip-allowli
 const WebhooksTab = lazy(() => import('@/features/webhooks/webhooks-page'))
 const BlockedIpsTab = lazy(() => import('@/features/blocked-ips/blocked-ips-page'))
 
-const ALLOWED_TABS = ['admins', 'roles', 'ip-allowlist', 'webhooks', 'blocked-ips'] as const
+const ALLOWED_TABS = HUB_TABS['/admins']
 type AdminsTab = (typeof ALLOWED_TABS)[number]
 
 // ─── Types ───────────────────────────────────────────────────────────────────

@@ -10,7 +10,12 @@ import { cn } from '@/lib/utils';
 import { Dialog, DialogContent } from '@/components/ui/dialog';
 import { Badge } from '@/components/ui/badge';
 import { motion, AnimatePresence } from '@/lib/motion';
-import { canShowNavItem, navGroups, type NavItem } from '@/components/layout/admin-nav-config';
+import {
+  canShowNavItem,
+  deepLinkNavItems,
+  navGroups,
+  type NavItem,
+} from '@/components/layout/admin-nav-config';
 import { usePermissionStore } from '@/features/rbac';
 
 interface SearchResult {
@@ -52,14 +57,23 @@ const EMPTY_RESULTS: SearchResult[] = [];
  * alongside data hits. Group key is included as a hint shown in the
  * row subtitle so two pages with the same English label (rare) are
  * still distinguishable.
+ *
+ * Two sources, on purpose. `navGroups` is the sidebar. `deepLinkNavItems` is
+ * everything routable that the sidebar does NOT show — surfaces folded into a
+ * tab of another page (`/admins#roles`, `/partners#withdrawals`,
+ * `/settings/panel#backups`, …) whose standalone routes survive only as
+ * redirects in `router.tsx`. Those were reachable only by an operator who
+ * already knew the URL, which is the definition of not findable; indexing them
+ * here fixes that without adding eleven rows to the sidebar rail.
  */
 interface NavIndexEntry {
   readonly item: NavItem;
   readonly groupKey: string;
 }
-const NAV_INDEX: ReadonlyArray<NavIndexEntry> = navGroups.flatMap((group) =>
-  group.items.map((item) => ({ item, groupKey: group.key })),
-);
+const NAV_INDEX: ReadonlyArray<NavIndexEntry> = [
+  ...navGroups.flatMap((group) => group.items.map((item) => ({ item, groupKey: group.key }))),
+  ...deepLinkNavItems.map(({ groupKey, ...item }) => ({ item, groupKey })),
+];
 /** Hard cap on navigation hits so they never crowd out data results. */
 const NAV_HITS_CAP = 6;
 
@@ -77,10 +91,17 @@ export function QuickSearchOverlay({ open, onClose }: QuickSearchOverlayProps) {
   const permissionsLoaded = usePermissionStore((s) => s.loaded);
   const hasPermission = usePermissionStore((s) => s.hasPermission);
 
+  // Everything downstream gates on the TRIMMED query, never on the raw input.
+  // Gating on `query.length` meant two spaces counted as a two-character query:
+  // it fired a request, the backend trimmed it back to nothing and answered
+  // `[]`, and the overlay rendered "No results for '  '" — an operator reading
+  // that concludes search is broken. Keying the cache on the trimmed value also
+  // collapses "ada" and "ada " into one entry instead of two round-trips.
+  const trimmedQuery = query.trim();
   const { data, isFetching } = useQuery({
-    queryKey: ['quick-search', query],
-    queryFn: () => fetchSearch(query),
-    enabled: query.length >= 2,
+    queryKey: ['quick-search', trimmedQuery],
+    queryFn: () => fetchSearch(trimmedQuery),
+    enabled: trimmedQuery.length >= 2,
     staleTime: 10_000,
   });
   // Stable empty-array reference: TanStack returns `undefined` while
@@ -94,7 +115,7 @@ export function QuickSearchOverlay({ open, onClose }: QuickSearchOverlayProps) {
   // against the localised label (`adminNav.items.<key>`), the path, and
   // the raw key. Resolved labels go through `t()` so RU and EN both work.
   const navResults = useMemo<SearchResult[]>(() => {
-    const trimmed = query.trim().toLowerCase();
+    const trimmed = trimmedQuery.toLowerCase();
     if (trimmed.length < 2) return EMPTY_RESULTS;
     const hits: SearchResult[] = [];
     for (const { item, groupKey } of NAV_INDEX) {
@@ -115,7 +136,7 @@ export function QuickSearchOverlay({ open, onClose }: QuickSearchOverlayProps) {
       if (hits.length >= NAV_HITS_CAP) break;
     }
     return hits;
-  }, [hasPermission, permissionsLoaded, query, t]);
+  }, [hasPermission, permissionsLoaded, trimmedQuery, t]);
 
   // Navigation always wins the top of the list — Cmd+K should feel like
   // Linear/Spotlight: type the page name, hit Enter, and you're there.
@@ -208,9 +229,20 @@ export function QuickSearchOverlay({ open, onClose }: QuickSearchOverlayProps) {
         </div>
 
         {/* Results */}
+        {/*
+          Three empty-looking states, three distinct renders. They used to
+          collapse into two: while the first request was in flight
+          `results.length === 0 && !isFetching` was false, so the branch below
+          rendered an EMPTY `<ul>` — a blank panel with no message at all. The
+          operator saw nothing for "too short", nothing for "loading" and a
+          sentence only for "no results", and read all three as a dead feature.
+          Each state now says which one it is, and the order matters: too-short
+          wins over loading (the query is disabled, so nothing is loading),
+          loading wins over empty (no answer yet is not the same as no rows).
+        */}
         <div className="max-h-80 overflow-y-auto">
           <AnimatePresence mode="wait">
-            {query.length < 2 ? (
+            {trimmedQuery.length < 2 ? (
               <motion.div
                 key="hint"
                 initial={{ opacity: 0 }}
@@ -221,7 +253,18 @@ export function QuickSearchOverlay({ open, onClose }: QuickSearchOverlayProps) {
                 <Search className="h-8 w-8 opacity-20" />
                 <p>{t('quickSearchOverlay.typeMore')}</p>
               </motion.div>
-            ) : results.length === 0 && !isFetching ? (
+            ) : results.length === 0 && isFetching ? (
+              <motion.div
+                key="loading"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                className="flex flex-col items-center gap-2 py-10 text-muted-foreground text-sm"
+              >
+                <Loader2 className="h-8 w-8 opacity-20 animate-spin" />
+                <p>{t('quickSearchOverlay.searching')}</p>
+              </motion.div>
+            ) : results.length === 0 ? (
               <motion.div
                 key="empty"
                 initial={{ opacity: 0 }}
@@ -229,7 +272,7 @@ export function QuickSearchOverlay({ open, onClose }: QuickSearchOverlayProps) {
                 exit={{ opacity: 0 }}
                 className="flex flex-col items-center gap-2 py-10 text-muted-foreground text-sm"
               >
-                <p>{t('quickSearchOverlay.noResults', { query })}</p>
+                <p>{t('quickSearchOverlay.noResults', { query: trimmedQuery })}</p>
               </motion.div>
             ) : (
               <motion.ul

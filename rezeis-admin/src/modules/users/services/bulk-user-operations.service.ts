@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { parseTelegramId } from '../../../common/utils/postgres-bigint.util';
 import {
   EVENT_TYPES,
   SystemEventsService,
@@ -142,14 +143,22 @@ export class BulkUserOperationsService {
     const trimmed = token.trim();
     if (trimmed.length === 0) return null;
 
-    const numeric = /^\d{1,19}$/.test(trimmed);
+    // The old gate was `^\d{1,19}$`, which reads like a range check and is not
+    // one: `9999999999999999999` is nineteen digits and still larger than
+    // Postgres `int8`. It was bound anyway and Postgres answered `22003 numeric
+    // field value out of range`, failing the WHOLE bulk run on one bad row in a
+    // pasted list — the opposite of the per-row `skipped` this method promises.
+    // Dropping the branch is not a narrowing: no row's `telegramId` can equal a
+    // value the column cannot store, and the id / email / login branches below
+    // still run.
+    const telegramId = parseTelegramId(trimmed);
     const handle = trimmed.replace(/^@+/, '');
 
     return this.prismaService.user.findFirst({
       where: {
         OR: [
           { id: trimmed },
-          ...(numeric ? [{ telegramId: BigInt(trimmed) }] : []),
+          ...(telegramId !== null ? [{ telegramId }] : []),
           { email: { equals: trimmed, mode: 'insensitive' as const } },
           ...(handle.length > 0
             ? [{ webAccount: { login: { equals: handle, mode: 'insensitive' as const } } }]

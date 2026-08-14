@@ -183,6 +183,7 @@ export const en = {
       linkCopied: 'Subscription link copied',
       copyLink: 'Copy link',
       saveBtn: 'Save',
+      noChanges: 'No changes to save',
       status: {
         ACTIVE: 'Active',
         DISABLED: 'Disabled',

@@ -141,6 +141,9 @@ export const en = {
       aiSupport: 'AI-Support',
       admins: 'Admins',
       roles: 'Roles',
+      // Same wording as `panelSettings.tabs.apiTokens` — the Cmd+K row and the
+      // tab it lands on must read as the same thing, not as near-duplicates.
+      apiTokens: 'API tokens',
       twoFactor: 'Two-factor',
       ipAllowlist: 'IP allowlist',
       webhooks: 'Webhooks',
@@ -1448,6 +1451,7 @@ export const en = {
     clearAria: 'Clear',
     placeholder: 'Search users, transactions, promo codes…',
     typeMore: 'Type at least 2 characters to search',
+    searching: 'Searching…',
     noResults: 'No results for "{{query}}"',
     types: {
       navigation: 'page',
@@ -2146,6 +2150,9 @@ export const en = {
     iconNone: 'By plan type',
     iconHint:
       'Shown on the plan card in the cabinet. "Auto" uses an icon derived from the plan type. You can also pick an emoji (including custom animated ones).',
+    cardAppearanceHint:
+      'The card colour is not set here: gradient, accent, texture and animation are configured per plan under WEB Reiwa, on the "Tariff cards" tab.',
+    cardAppearanceLink: 'Open Tariff cards',
     description: 'Description',
     descriptionPlaceholder: 'Best value for heavy users',
     planType: 'Plan type',
@@ -3520,6 +3527,7 @@ export const en = {
     saved: 'Branding saved successfully',
     saveFailed: 'Failed to save branding',
     validationFailed: 'Check the highlighted setting',
+    noChanges: 'No changes to save',
     invalidHex: 'Must be a valid hex color',
     invalidImageUrl: 'Enter an HTTPS URL, data:image URL, or a branding upload path.',
     invalidGradient: 'Use CSS gradient layers only (linear, radial, or conic).',
@@ -3648,6 +3656,7 @@ export const en = {
         generate: 'From primary',
         saveToPalette: 'To palette',
         saveExists: 'This gradient is already in the palette',
+        saveEmpty: 'Set a gradient first — there is nothing to save',
         saved: 'Gradient saved to palette',
         customSwatch: 'Your saved gradient',
         removeSwatch: 'Remove from palette',

@@ -183,6 +183,7 @@ export const ru = {
       linkCopied: 'Ссылка подписки скопирована',
       copyLink: 'Скопировать ссылку',
       saveBtn: 'Сохранить',
+      noChanges: 'Нет изменений для сохранения',
       status: {
         ACTIVE: 'Активна',
         DISABLED: 'Отключена',

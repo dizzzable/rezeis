@@ -1500,10 +1500,29 @@ function SubscriptionCard({
         data.expiresAt = expiresAt.toISOString()
       }
     }
-    if (Object.keys(data).length > 0) {
-      onUpdate(data)
+    // The same silent no-op as `brandingPage.noChanges`, spelled as a `> 0`
+    // wrapper instead of an early return, and worse in one specific way: with
+    // `setDirty(false)` trapped inside the guard, a save that produced nothing
+    // left the button ENABLED and the card still reading "unsaved". The
+    // operator got no request, no toast and no state change, and the one
+    // visible signal still said their edit was pending.
+    //
+    // Unlike the branding page this is genuinely reachable, and cheaply:
+    // `setDirty(true)` fires on every keystroke in the traffic/device inputs,
+    // and `parseInt('', 10)` is NaN, so simply CLEARING a limit field fails
+    // `Number.isFinite` and contributes nothing to `data`. Type a digit and
+    // erase it — Save lights up, does nothing, and stays lit.
+    //
+    // `setDirty(false)` now runs on both paths: once the operator has been told
+    // the edits amount to no change, the control must stop advertising work
+    // that will never be sent.
+    if (Object.keys(data).length === 0) {
+      toast.info(t('userDetailPanel.subscriptions.noChanges'))
       setDirty(false)
+      return
     }
+    onUpdate(data)
+    setDirty(false)
   }
 
   return (

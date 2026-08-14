@@ -31,6 +31,74 @@ function buildService(deleteUser: (userId: string) => Promise<void>) {
   };
 }
 
+/** Captures the where-clause `resolveUser` builds for a pasted token. */
+async function captureResolveWhere(token: string): Promise<Record<string, unknown>> {
+  const calls: Array<{ readonly where: Record<string, unknown> }> = [];
+  const service = new BulkUserOperationsService(
+    {
+      user: {
+        findFirst: async (args: { readonly where: Record<string, unknown> }) => {
+          calls.push(args);
+          return null;
+        },
+      },
+    } as never,
+    { warn: () => undefined, info: () => undefined } as never,
+    { deleteUser: async () => undefined } as never,
+  );
+
+  await service.execute({ userIds: [token], action: 'block', adminId: 'admin-1' });
+  assert.equal(calls.length, 1, 'expected exactly one resolve lookup');
+  return calls[0].where;
+}
+
+function telegramIdBranches(where: Record<string, unknown>): ReadonlyArray<Record<string, unknown>> {
+  const clauses = (where as { readonly OR: ReadonlyArray<Record<string, unknown>> }).OR;
+  return clauses.filter((clause) => 'telegramId' in clause);
+}
+
+describe('BulkUserOperationsService token resolution', () => {
+  it('keeps the telegramId branch for the largest id Postgres int8 can hold', async () => {
+    assert.deepStrictEqual(
+      telegramIdBranches(await captureResolveWhere('9223372036854775807')),
+      [{ telegramId: 9223372036854775807n }],
+    );
+  });
+
+  it('drops the telegramId branch one past the bound, though it is still 19 digits', async () => {
+    // The old `^\d{1,19}$` gate admitted this: nineteen digits, out of range.
+    assert.equal('9999999999999999999'.length, 19);
+    assert.deepStrictEqual(telegramIdBranches(await captureResolveWhere('9999999999999999999')), []);
+    assert.deepStrictEqual(telegramIdBranches(await captureResolveWhere('9223372036854775808')), []);
+  });
+
+  it('still looks the overflowing token up by id / email / login', async () => {
+    const overflowing = '9999999999999999999';
+    assert.deepStrictEqual((await captureResolveWhere(overflowing)).OR, [
+      { id: overflowing },
+      { email: { equals: overflowing, mode: 'insensitive' } },
+      { webAccount: { login: { equals: overflowing, mode: 'insensitive' } } },
+    ]);
+  });
+
+  it('reports an unresolvable overflowing token as skipped, not as a failed run', async () => {
+    const service = new BulkUserOperationsService(
+      { user: { findFirst: async () => null } } as never,
+      { warn: () => undefined, info: () => undefined } as never,
+      { deleteUser: async () => undefined } as never,
+    );
+
+    const result = await service.execute({
+      userIds: ['99999999999999999999999999'],
+      action: 'block',
+      adminId: 'admin-1',
+    });
+
+    assert.equal(result.failed, 0);
+    assert.equal(result.skipped, 1);
+  });
+});
+
 describe('BulkUserOperationsService user deletion', () => {
   it('uses the shared deletion boundary and emits user.deleted only after success', async () => {
     const deleted: string[] = [];

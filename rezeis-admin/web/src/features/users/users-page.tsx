@@ -47,6 +47,7 @@ import { cn } from '@/lib/utils'
 import { getErrorMessage } from '@/lib/http-errors'
 import { FadeIn } from '@/lib/motion'
 import { useTabSync } from '@/lib/use-tab-sync'
+import { HUB_TABS } from '@/components/layout/admin-nav-config'
 import { useIsMobile } from '@/lib/use-is-mobile'
 import { withFeatureBundle } from '@/i18n/i18n'
 
@@ -56,7 +57,7 @@ const UserDetailPanel = lazy(
 
 const BulkUsersTab = lazy(() => import('@/features/users/bulk-users-page'))
 
-const ALLOWED_TABS = ['list', 'bulk'] as const
+const ALLOWED_TABS = HUB_TABS['/users']
 type UsersTab = (typeof ALLOWED_TABS)[number]
 
 function getUserStatusClass(user: { isBlocked: boolean; lastSeenAt?: string | null }): string {

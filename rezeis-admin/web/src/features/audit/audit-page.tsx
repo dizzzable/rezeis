@@ -11,6 +11,8 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Input } from '@/components/ui/input';
+import { useTabSync } from '@/lib/use-tab-sync';
+import { HUB_TABS } from '@/components/layout/admin-nav-config';
 import { SavedFiltersBar } from '@/components/SavedFiltersBar';
 import { ExportDropdown } from '@/components/ExportDropdown';
 import {
@@ -120,6 +122,15 @@ function PayloadViewer({ payload }: { payload: Record<string, unknown> | null })
 
 const SystemLogsTab = lazy(() => import('@/features/system-logs/system-logs-page'))
 
+/**
+ * Tab values that `#hash` deep links may address. Kept in sync with the
+ * `TabsTrigger`/`TabsContent` values below — `useTabSync` falls back to the
+ * default for anything not listed, so an unknown hash lands on Audit rather
+ * than on a blank panel.
+ */
+const ALLOWED_TABS = HUB_TABS['/audit']
+type AuditTab = (typeof ALLOWED_TABS)[number]
+
 interface UserEvent {
   id: string;
   type: string;
@@ -146,6 +157,12 @@ async function fetchUserEvents(
 
 export default function AuditPage() {
   const { t } = useTranslation()
+  // `router.tsx` redirects `/system/logs` to `/audit#system-logs`, and the
+  // Cmd+K page index offers the same target. Both were dead: `Tabs` was
+  // uncontrolled (`defaultValue="audit"`), so the hash was parsed by nobody and
+  // every one of those links dropped the operator on the Audit tab with no
+  // indication that the thing they asked for was one click away.
+  const { activeTab, setTab } = useTabSync<AuditTab>(ALLOWED_TABS, 'audit')
   return (
     <div className="space-y-6">
       <div>
@@ -158,7 +175,7 @@ export default function AuditPage() {
         </p>
       </div>
 
-      <Tabs defaultValue="audit">
+      <Tabs value={activeTab} onValueChange={setTab}>
         <TabsList>
           <TabsTrigger value="audit" className="gap-1.5">
             <ClipboardList className="h-3.5 w-3.5" />

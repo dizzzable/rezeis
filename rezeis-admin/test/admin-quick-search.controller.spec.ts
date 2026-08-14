@@ -6,10 +6,13 @@ import { describe, it } from 'node:test';
 import { RequestMethod } from '@nestjs/common';
 import { GUARDS_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 import { UserRole } from '@prisma/client';
+import { plainToInstance } from 'class-transformer';
+import { validate } from 'class-validator';
 
 import { AdminJwtAuthGuard } from '../src/modules/auth/guards/admin-jwt-auth.guard';
 import { CurrentAdminInterface } from '../src/modules/auth/interfaces/current-admin.interface';
 import { AdminQuickSearchController } from '../src/modules/dashboard/controllers/admin-quick-search.controller';
+import { QuickSearchQueryDto } from '../src/modules/dashboard/dto/quick-search-query.dto';
 import { RbacGuard } from '../src/modules/rbac/guards/rbac.guard';
 import { SYSTEM_ROLES, isValidPermission } from '../src/modules/rbac/rbac.resources';
 import {
@@ -122,6 +125,51 @@ describe('AdminQuickSearchController', () => {
     // permission filtering is resolved against. Dropping it would not fail a
     // type check — `search` would just filter against a different admin.
     assert.deepStrictEqual(calls, [{ rawQuery: 'ada', limit: 5, currentAdmin: admin }]);
+  });
+});
+
+/**
+ * The overlay tells the operator "type at least 2 characters", and three
+ * independent places have to agree on that number: the SPA's own gate, this
+ * DTO, and `QuickSearchService.search`. An off-by-one in any of them turns an
+ * advertised minimum into a lie — either a two-character query 400s while the
+ * hint says it should work, or a one-character query reaches the database and
+ * every domain runs an unbounded `LIKE` scan.
+ */
+describe('QuickSearchQueryDto', () => {
+  it('accepts the advertised two-character minimum', async () => {
+    const dto = plainToInstance(QuickSearchQueryDto, { q: 'vp' });
+
+    assert.deepStrictEqual(await validate(dto), []);
+  });
+
+  it('rejects a one-character query with the message the operator was promised', async () => {
+    const dto = plainToInstance(QuickSearchQueryDto, { q: 'v' });
+    const errors = await validate(dto);
+
+    assert.equal(errors.length, 1);
+    assert.equal(errors[0]?.constraints?.minLength, 'Query must be at least 2 characters');
+  });
+
+  /**
+   * Query strings arrive as strings; `@Type(() => Number)` is what makes `@Max`
+   * compare a number rather than pass a string through. Without the transform
+   * `limit=999` is not "too large", it is not a number at all.
+   */
+  it('coerces limit from its query-string form and holds the 25 ceiling', async () => {
+    const accepted = plainToInstance(QuickSearchQueryDto, { q: 'ada', limit: '25' });
+    assert.deepStrictEqual(await validate(accepted), []);
+    assert.strictEqual(accepted.limit, 25);
+
+    const rejected = plainToInstance(QuickSearchQueryDto, { q: 'ada', limit: '26' });
+    assert.equal((await validate(rejected)).length, 1);
+  });
+
+  it('leaves limit optional so the service applies its own default', async () => {
+    const dto = plainToInstance(QuickSearchQueryDto, { q: 'ada' });
+
+    assert.deepStrictEqual(await validate(dto), []);
+    assert.strictEqual(dto.limit, undefined);
   });
 });
 

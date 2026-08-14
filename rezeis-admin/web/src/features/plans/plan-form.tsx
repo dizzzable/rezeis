@@ -4,6 +4,7 @@ import { Plus, Trash2, Archive, ArrowUpRight, Users, Check, ChevronDown, Info } 
 import { useTranslation } from 'react-i18next'
 import { useForm, type FieldErrors, type Resolver } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
+import { Link } from 'react-router'
 
 import { DataUnavailable } from '@/components/data-unavailable'
 import { Badge, badgeVariants } from '@/components/ui/badge'
@@ -348,6 +349,32 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
           <Label>{t('planForm.icon')}</Label>
           <IconPicker value={icon} onChange={setIcon} autoLabel={t('planForm.iconNone')} />
           <p className="text-xs text-muted-foreground">{t('planForm.iconHint')}</p>
+          {/* Where the colour lives. A `Plan` row carries an icon and nothing
+              else about how its card looks — gradient, accent, texture and
+              effect are stored per plan in `brandingSettings.planCardStyles`
+              and edited in WEB Reiwa → Tariff cards. The icon picker is the
+              only appearance control on this form, so the form reads as "looks
+              are configured here" and an operator searched it for a colour
+              picker that has never been in it, with nothing on screen pointing
+              anywhere else.
+
+              Opens in a new tab deliberately: this form renders inside a
+              dialog on the plans page, so an in-place navigation would unmount
+              it and discard a half-filled plan without warning. It lands on the
+              page's default tab, not on Tariff cards — `WebReiwaPage` keeps its
+              tab in `useState` with no URL binding, so there is nothing to deep
+              link to yet. */}
+          <p className="text-xs text-muted-foreground">
+            {t('planForm.cardAppearanceHint')}{' '}
+            <Link
+              to="/web-reiwa"
+              target="_blank"
+              rel="noreferrer"
+              className="font-medium text-primary underline-offset-4 hover:underline"
+            >
+              {t('planForm.cardAppearanceLink')}
+            </Link>
+          </p>
         </div>
       </div>
 

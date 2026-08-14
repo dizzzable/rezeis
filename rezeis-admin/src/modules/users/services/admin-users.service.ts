@@ -2,6 +2,7 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { parseTelegramId } from '../../../common/utils/postgres-bigint.util';
 import { InternalUserService } from '../../internal-user/services/internal-user.service';
 import { AdminUserListQueryDto } from '../dto/admin-user-list-query.dto';
 import { AdminUserResolveQueryDto } from '../dto/admin-user-resolve-query.dto';
@@ -136,8 +137,13 @@ export class AdminUsersService {
  * Builds the `User.findMany` where clause for the admin list endpoint.
  *
  * The search fragment is matched case-insensitively against the obvious
- * lookup columns and the linked `WebAccount.login`. Numeric fragments
- * are also matched against `telegramId` (BigInt) when they fit.
+ * lookup columns and the linked `WebAccount.login`. A numeric fragment adds a
+ * `telegramId` branch only when Postgres `int8` could hold it — a longer digit
+ * string (an invoice number, a payment reference) is not a Telegram id and,
+ * bound anyway, would fail the query with `22003 numeric field value out of
+ * range` and take the whole list endpoint down with it. Dropping the branch is
+ * not a narrowing: no row's `telegramId` can equal a value the column cannot
+ * store, so the clause could never have matched.
  */
 function buildUserListWhere(search: string | undefined): Prisma.UserWhereInput {
   const trimmed = search?.trim();
@@ -175,13 +181,9 @@ function buildUserListWhere(search: string | undefined): Prisma.UserWhereInput {
     },
   ];
 
-  if (/^\d+$/.test(trimmed)) {
-    try {
-      const telegramId = BigInt(trimmed);
-      conditions.push({ telegramId });
-    } catch {
-      // Overflow — silently skip the numeric branch.
-    }
+  const telegramId = parseTelegramId(trimmed);
+  if (telegramId !== null) {
+    conditions.push({ telegramId });
   }
 
   return { OR: conditions };
@@ -206,6 +208,10 @@ type ResolvedUserRow = Prisma.UserGetPayload<{ select: typeof RESOLVE_USER_SELEC
  * Telegram id, login (raw/normalized) or email (raw/normalized on both the
  * `User` and its `WebAccount`) resolves the user. Returns `null` when the
  * identifier is empty (nothing to look up).
+ *
+ * A numeric identifier only contributes a `telegramId` branch when `int8` can
+ * hold it; see `parseTelegramId`. The remaining branches still run, so an
+ * over-long digit string is looked up everywhere it could legitimately match.
  */
 function buildResolveWhere(identifier: string): Prisma.UserWhereInput | null {
   const trimmed = identifier.trim();
@@ -248,22 +254,6 @@ function buildResolveWhere(identifier: string): Prisma.UserWhereInput | null {
   );
 
   return { OR: conditions };
-}
-
-/**
- * Parses a decimal Telegram id, guarding against overflow. Returns `null` for
- * non-numeric or out-of-range input.
- */
-function parseTelegramId(value: string): bigint | null {
-  if (!/^\d+$/.test(value)) {
-    return null;
-  }
-
-  try {
-    return BigInt(value);
-  } catch {
-    return null;
-  }
 }
 
 /**

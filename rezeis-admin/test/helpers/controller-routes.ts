@@ -70,6 +70,66 @@ export function routeHandlerNames(controller: new (...args: never[]) => object):
   return [...names].sort();
 }
 
+/** One declared route: which handler, which verb, which sub-path. */
+export interface DeclaredRoute {
+  readonly handler: string;
+  readonly method: RequestMethod;
+  /** As `@Get(...)` recorded it: `'/'` for a bare decorator. */
+  readonly path: string | undefined;
+}
+
+/**
+ * Every route the controller declares, IN DECLARATION ORDER — deliberately not
+ * sorted.
+ *
+ * Its neighbour `routeHandlerNames` sorts, and says why: declaration order is
+ * not part of any contract, and a test that fails when a method moves within a
+ * class trains people to stop reading its failures. That is true of every
+ * question those assertions ask — and false of exactly one.
+ *
+ * Express answers from the FIRST route registered for a method, and Nest
+ * registers a controller's routes in the order `MetadataScanner` walks the
+ * prototype (`metadata-scanner.js:21` — `Object.getOwnPropertyNames`, i.e.
+ * declaration order). So for the question "can a parameterised route swallow a
+ * literal sibling", position IS the contract: `@Get(':planId')` above
+ * `@Get('stats')` makes the second unreachable, and moving one line fixes or
+ * breaks a production endpoint with no other visible change.
+ * `admin-plans.controller.ts` hoists `@Patch('reorder')` above `:planId` for
+ * this reason and says so in a comment.
+ *
+ * Sorting this list would therefore not make it more robust; it would make it
+ * blind. `test/route-shadowing.spec.ts` is the caller that needs it.
+ *
+ * Accessors are skipped rather than read, matching `MetadataScanner` — reading
+ * a getter to see whether it is a route would RUN it.
+ */
+export function declaredRoutesInOrder(
+  controller: new (...args: never[]) => object,
+): DeclaredRoute[] {
+  const routes: DeclaredRoute[] = [];
+  const seen = new Set<string>();
+  let proto: object | null = controller.prototype as object;
+  while (proto !== null && proto !== Object.prototype) {
+    for (const name of Object.getOwnPropertyNames(proto)) {
+      if (name === 'constructor' || seen.has(name)) continue;
+      seen.add(name);
+      const descriptor = Object.getOwnPropertyDescriptor(proto, name);
+      if (descriptor === undefined || descriptor.get || descriptor.set) continue;
+      const fn = descriptor.value as unknown;
+      if (typeof fn !== 'function') continue;
+      const method = Reflect.getMetadata(METHOD_METADATA, fn) as RequestMethod | undefined;
+      if (method === undefined) continue;
+      routes.push({
+        handler: name,
+        method,
+        path: Reflect.getMetadata(PATH_METADATA, fn) as string | undefined,
+      });
+    }
+    proto = Object.getPrototypeOf(proto) as object | null;
+  }
+  return routes;
+}
+
 /**
  * The permissions a route is ACTUALLY gated on, resolved the way the guard
  * resolves them.

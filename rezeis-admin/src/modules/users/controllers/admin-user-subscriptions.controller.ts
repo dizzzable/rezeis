@@ -35,6 +35,7 @@ import { Prisma, SubscriptionStatus, SyncAction, SyncJobStatus } from '@prisma/c
 import { Request } from 'express';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { parseTelegramId } from '../../../common/utils/postgres-bigint.util';
 import { CurrentAdmin } from '../../auth/decorators/current-admin.decorator';
 import { AdminJwtAuthGuard } from '../../auth/guards/admin-jwt-auth.guard';
 import { RequirePermission } from '../../rbac/decorators/require-permission.decorator';
@@ -756,11 +757,22 @@ export class AdminUserSubscriptionsController {
     await this.profileSyncQueueService.enqueue(job.id);
   }
 
+  /**
+   * The route param accepts either a numeric Telegram id or a CUID (internal
+   * user id); numeric is tried first.
+   *
+   * Digits that overflow Postgres `int8` have no second branch to fall through
+   * to — no row can hold that value, and an all-digit string is not a CUID
+   * either — so 404 is the truthful answer. Binding it anyway reached Postgres
+   * and came back as `22003 numeric field value out of range`, i.e. a 500.
+   */
   private async findUserByTelegramId(telegramId: string) {
     const isNumeric = /^\d+$/.test(telegramId);
-    const user = isNumeric
+    const numericId = isNumeric ? parseTelegramId(telegramId) : null;
+    if (isNumeric && numericId === null) throw new NotFoundException('User not found');
+    const user = numericId !== null
       ? await this.prismaService.user.findFirst({
-          where: { telegramId: BigInt(telegramId) },
+          where: { telegramId: numericId },
         })
       : await this.prismaService.user.findUnique({
           where: { id: telegramId },

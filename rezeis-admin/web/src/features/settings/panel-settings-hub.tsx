@@ -27,8 +27,32 @@ import { Archive, FileCog, Key, Paintbrush, Palette, Settings, Shield, ShieldAle
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Skeleton } from '@/components/ui/skeleton'
 import { FadeIn } from '@/lib/motion'
+import { useTabSync } from '@/lib/use-tab-sync'
+import { HUB_TABS } from '@/components/layout/admin-nav-config'
 import { withFeatureBundle } from '@/i18n/i18n'
 import { PermissionGate } from '@/features/rbac'
+
+/**
+ * Tab values addressable by `#hash`. Every one of them is a documented deep
+ * link: `router.tsx` redirects `/appearance`, `/branding`, `/backup`,
+ * `/security/2fa` and `/system/config-portability` here, and the Cmd+K page
+ * index offers the same targets.
+ *
+ * All five were dead. `Tabs` was uncontrolled (`defaultValue="appearance"`), so
+ * nothing read the hash and every link landed on Appearance — including
+ * `/backup`, which silently showed theme settings to an operator who asked for
+ * database backups. `#appearance` "worked" only because it happens to be the
+ * default.
+ *
+ * Three of these tabs are permission-gated below, and their value stays listed
+ * here on purpose: `useTabSync` only falls back for values it does not
+ * recognise, so removing them would send a legitimate deep link to Appearance
+ * again — the exact bug being fixed. An operator who lacks the permission and
+ * types the URL by hand gets the tab bar with no panel, which is visibly "not
+ * for you" rather than silently the wrong page.
+ */
+const ALLOWED_TABS = HUB_TABS['/settings/panel']
+type PanelSettingsTab = (typeof ALLOWED_TABS)[number]
 
 const ApiTokensTab = lazy(
   withFeatureBundle('platformSettings', () =>
@@ -63,6 +87,7 @@ function TabFallback() {
 
 export default function PanelSettingsHub() {
   const { t } = useTranslation()
+  const { activeTab, setTab } = useTabSync<PanelSettingsTab>(ALLOWED_TABS, 'appearance')
 
   return (
     <div className="space-y-6">
@@ -78,7 +103,7 @@ export default function PanelSettingsHub() {
         </div>
       </FadeIn>
 
-      <Tabs defaultValue="appearance" className="space-y-4">
+      <Tabs value={activeTab} onValueChange={setTab} className="space-y-4">
         <TabsList className="flex-wrap">
           <PermissionGate resource="api_tokens" action="view" hideWhileLoading>
             <TabsTrigger value="api-tokens" className="gap-1.5">

@@ -34,6 +34,16 @@ import {
   LayoutTemplate,
   Bot,
   FileText,
+  Archive,
+  Banknote,
+  FileCog,
+  Key,
+  Network,
+  ScrollText,
+  ShieldBan,
+  ShieldCheck,
+  UsersRound,
+  Webhook,
 } from 'lucide-react';
 
 import type { SidebarGroupOrder } from '@/stores/sidebar-store';
@@ -171,6 +181,153 @@ export const navGroups: ReadonlyArray<NavGroup> = [
       },
       { key: 'audit', path: '/audit', icon: ClipboardList },
     ],
+  },
+];
+
+/**
+ * Tab values each hub page will accept in a `#hash`, keyed by pathname.
+ *
+ * This lives here, in a pure module, rather than in the five page components,
+ * because it is the ONLY thing that makes a deep link like
+ * `/settings/panel#backups` more than a hopeful string. The pages feed these
+ * arrays straight into `useTabSync`, and `deepLinkNavItems` below is checked
+ * against them — so renaming a tab value breaks the page and the link together,
+ * at compile time, instead of leaving a Cmd+K row that silently lands on the
+ * wrong tab.
+ *
+ * Keep each array identical to that page's `TabsTrigger` / `TabsContent`
+ * values. A value listed here that the page does not render shows an empty
+ * panel; a value the page renders but omits here is unreachable by deep link.
+ */
+export const HUB_TABS = {
+  '/users': ['list', 'bulk'],
+  '/partners': ['partners', 'withdrawals', 'analytics', 'settings'],
+  '/admins': ['admins', 'roles', 'ip-allowlist', 'webhooks', 'blocked-ips'],
+  '/audit': ['audit', 'system-events', 'user-events', 'system-logs'],
+  '/settings/panel': [
+    'api-tokens',
+    'appearance',
+    'security',
+    'backups',
+    'branding',
+    'config',
+    'anti-fraud',
+  ],
+} as const;
+
+/**
+ * Surfaces that exist and are routable but have NO sidebar entry, because they
+ * were folded into a tab of another page (`/admins#roles`, `/partners#withdrawals`,
+ * `/settings/panel#backups`, …) and `router.tsx` keeps the old standalone path
+ * alive only as a redirect.
+ *
+ * They are deliberately NOT in `navGroups`. That array is the SIDEBAR: anything
+ * added there shows up in the rail and in the drag-to-reorder editor, which is a
+ * product decision about the sidebar's shape, not about findability. These
+ * eleven are the other half of the problem — reachable by URL, invisible to
+ * anyone who does not already know the URL. The Cmd+K overlay indexes both
+ * lists, so they become findable without the sidebar growing by eleven rows.
+ *
+ * Every entry carries `requiredPermission`. That is not optional here even
+ * though `canShowNavItem` treats it as optional: a page-jump row that lands an
+ * operator on a surface their role cannot open converts "I cannot find it" into
+ * "the panel is broken", and unlike a sidebar rail — which an operator learns
+ * once and then ignores — a search result is something they act on immediately.
+ *
+ * Every `path` here is verified to actually land on its section: the three
+ * hash-consuming pages read it through `useTabSync` (`admins-page.tsx`,
+ * `partners-page.tsx`, `users-page.tsx`), and `panel-settings-hub.tsx` /
+ * `audit-page.tsx` were converted to it for exactly this reason. A path whose
+ * anchor is ignored belongs in neither list — it is a row that lies.
+ */
+export const deepLinkNavItems: ReadonlyArray<NavItem & { readonly groupKey: string }> = [
+  // ── Growth ────────────────────────────────────────────────────────────────
+  {
+    key: 'withdrawals',
+    path: '/partners#withdrawals',
+    icon: Banknote,
+    groupKey: 'growth',
+    requiredPermission: { resource: 'withdrawals', action: 'view' },
+  },
+  // ── Operations ────────────────────────────────────────────────────────────
+  {
+    key: 'bulkUsers',
+    path: '/users#bulk',
+    icon: UsersRound,
+    groupKey: 'operations',
+    requiredPermission: { resource: 'users', action: 'bulk_operations' },
+  },
+  // ── System ────────────────────────────────────────────────────────────────
+  {
+    key: 'roles',
+    path: '/admins#roles',
+    icon: ShieldCheck,
+    groupKey: 'system',
+    requiredPermission: { resource: 'rbac_roles', action: 'view' },
+  },
+  {
+    // No `ip_allowlist` resource exists in the RBAC catalog; the tab lives
+    // inside the Admins page, so that is the permission that governs it.
+    key: 'ipAllowlist',
+    path: '/admins#ip-allowlist',
+    icon: Network,
+    groupKey: 'system',
+    requiredPermission: { resource: 'admins', action: 'view' },
+  },
+  {
+    key: 'webhooks',
+    path: '/admins#webhooks',
+    icon: Webhook,
+    groupKey: 'system',
+    requiredPermission: { resource: 'webhooks', action: 'view' },
+  },
+  {
+    key: 'blockedIps',
+    path: '/admins#blocked-ips',
+    icon: ShieldBan,
+    groupKey: 'system',
+    requiredPermission: { resource: 'blocked_ips', action: 'view' },
+  },
+  {
+    key: 'apiTokens',
+    // The one entry here that is a real route rather than a hash anchor, so
+    // there is no anchor to get wrong.
+    path: '/settings/api-tokens',
+    icon: Key,
+    groupKey: 'system',
+    requiredPermission: { resource: 'api_tokens', action: 'view' },
+  },
+  {
+    key: 'backup',
+    path: '/settings/panel#backups',
+    icon: Archive,
+    groupKey: 'system',
+    requiredPermission: { resource: 'backups', action: 'view' },
+  },
+  {
+    key: 'configPortability',
+    path: '/settings/panel#config',
+    icon: FileCog,
+    groupKey: 'system',
+    requiredPermission: { resource: 'config_portability', action: 'view' },
+  },
+  {
+    key: 'systemLogs',
+    path: '/audit#system-logs',
+    icon: ScrollText,
+    groupKey: 'system',
+    requiredPermission: { resource: 'system_logs', action: 'view' },
+  },
+  {
+    // Left ungated ON PURPOSE. The Security tab's trigger carries no
+    // `PermissionGate` in `panel-settings-hub.tsx` — its headline block is the
+    // admin's OWN TOTP enrolment, which every signed-in admin may reach.
+    // Inventing a permission here would hide a row for a page the operator can
+    // open, which is the same failure as showing one they cannot.
+    key: 'twoFactor',
+    path: '/settings/panel#security',
+    icon: Shield,
+    groupKey: 'system',
   },
 ];
 

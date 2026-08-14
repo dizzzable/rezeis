@@ -19,6 +19,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { FadeIn, StaggerList } from '@/lib/motion'
 import { useTabSync } from '@/lib/use-tab-sync'
+import { HUB_TABS } from '@/components/layout/admin-nav-config'
 import { useRealtimeUpdates } from '@/lib/realtime/use-realtime-updates'
 
 import {
@@ -34,7 +35,7 @@ import PartnersWithdrawalsTab from './partners-withdrawals-tab'
 import { downloadCsv } from './csv-download'
 import { usePartnerStats, useTimeseries } from './partners-queries'
 
-const ALLOWED_TABS = ['partners', 'withdrawals', 'analytics', 'settings'] as const
+const ALLOWED_TABS = HUB_TABS['/partners']
 type PartnersTab = (typeof ALLOWED_TABS)[number]
 
 export default function PartnersPage() {

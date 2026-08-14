@@ -182,6 +182,38 @@ describe('PlanForm limit-change scope notice', () => {
   })
 })
 
+// A `Plan` row has an `icon` and no colour of any kind — the card's gradient,
+// accent, texture and effect live in `brandingSettings.planCardStyles`, edited
+// in WEB Reiwa → Tariff cards. The icon picker being the only appearance
+// control here made this form read as the place appearance is configured, and
+// an operator spent real time hunting it for a colour picker that has never
+// been in it. These pin the signpost: deleting it must break a test.
+describe('PlanForm card-appearance signpost', () => {
+  it('says the card colour is configured in WEB Reiwa rather than on the plan', async () => {
+    vi.spyOn(api, 'get').mockResolvedValue({ data: [] })
+
+    renderWithProviders(<PlanForm onSubmit={vi.fn()} isLoading={false} />)
+
+    expect(
+      await screen.findByText(
+        /gradient, accent, texture and animation are configured per plan under WEB Reiwa/i,
+      ),
+    ).toBeInTheDocument()
+  })
+
+  it('links to WEB Reiwa in a new tab so the open plan dialog survives', async () => {
+    vi.spyOn(api, 'get').mockResolvedValue({ data: [] })
+
+    renderWithProviders(<PlanForm onSubmit={vi.fn()} isLoading={false} />)
+
+    const link = await screen.findByRole('link', { name: 'Open Tariff cards' })
+    expect(link).toHaveAttribute('href', '/web-reiwa')
+    // Same-tab navigation would unmount the dialog this form lives in and drop
+    // a half-filled plan with no warning, so the target is load-bearing.
+    expect(link).toHaveAttribute('target', '_blank')
+  })
+})
+
 function planOption(): Plan {
   return {
     id: 'plan-1',

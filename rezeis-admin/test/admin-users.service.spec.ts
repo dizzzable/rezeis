@@ -218,6 +218,119 @@ describe('AdminUsersService', () => {
     ]);
   });
 
+  it('drops the telegramId branch from list search when the digits overflow Postgres int8', async () => {
+    const service = buildListSearchService();
+
+    await service.listUsers({ search: '99999999999999999999999999' });
+
+    assert.deepStrictEqual(
+      listSearchOrClauses(service).filter((clause) => 'telegramId' in clause),
+      [],
+      'a 26-digit fragment cannot be an int8 telegramId, so the clause must never reach Prisma',
+    );
+  });
+
+  it('keeps the telegramId branch for the largest id Postgres int8 can hold', async () => {
+    const service = buildListSearchService();
+
+    await service.listUsers({ search: '9223372036854775807' });
+
+    assert.deepStrictEqual(
+      listSearchOrClauses(service).filter((clause) => 'telegramId' in clause),
+      [{ telegramId: 9223372036854775807n }],
+    );
+  });
+
+  it('drops the telegramId branch one past the largest id Postgres int8 can hold', async () => {
+    const service = buildListSearchService();
+
+    await service.listUsers({ search: '9223372036854775808' });
+
+    assert.deepStrictEqual(
+      listSearchOrClauses(service).filter((clause) => 'telegramId' in clause),
+      [],
+    );
+  });
+
+  it('keeps every non-telegramId branch of list search when the digits overflow', async () => {
+    const service = buildListSearchService();
+    const overflowing = '99999999999999999999999999';
+
+    await service.listUsers({ search: overflowing });
+
+    assert.deepStrictEqual(listSearchOrClauses(service), [
+      { id: { contains: overflowing, mode: 'insensitive' } },
+      { username: { contains: overflowing, mode: 'insensitive' } },
+      { email: { contains: overflowing, mode: 'insensitive' } },
+      { name: { contains: overflowing, mode: 'insensitive' } },
+      { referralCode: { contains: overflowing, mode: 'insensitive' } },
+      {
+        webAccount: {
+          is: {
+            OR: [
+              { login: { contains: overflowing, mode: 'insensitive' } },
+              { email: { contains: overflowing, mode: 'insensitive' } },
+            ],
+          },
+        },
+      },
+      { subscriptions: { some: { id: { contains: overflowing, mode: 'insensitive' } } } },
+    ]);
+  });
+
+  it('drops the telegramId branch when resolving an identifier that overflows int8', async () => {
+    let capturedWhere: unknown;
+    const service = new AdminUsersService(
+      {
+        user: {
+          findFirst: (args: { where: unknown }) => {
+            capturedWhere = args.where;
+            return null;
+          },
+        },
+      } as never,
+      {} as never,
+    );
+
+    await assert.rejects(
+      () => service.resolveUser({ identifier: '99999999999999999999999999' }),
+      /User not found/,
+    );
+    const clauses = (capturedWhere as { readonly OR: ReadonlyArray<Record<string, unknown>> }).OR;
+    assert.deepStrictEqual(
+      clauses.filter((clause) => 'telegramId' in clause),
+      [],
+    );
+    // The e-mail / login branches are untouched: the identifier is still looked
+    // up everywhere it could legitimately match.
+    assert.equal(clauses.length, 2);
+  });
+
+  it('resolves the largest id int8 can hold but not the one above it', async () => {
+    const captured: unknown[] = [];
+    const service = new AdminUsersService(
+      {
+        user: {
+          findFirst: (args: { where: unknown }) => {
+            captured.push(args.where);
+            return null;
+          },
+        },
+      } as never,
+      {} as never,
+    );
+
+    await assert.rejects(() => service.resolveUser({ identifier: '9223372036854775807' }), /User not found/);
+    await assert.rejects(() => service.resolveUser({ identifier: '9223372036854775808' }), /User not found/);
+
+    const branchesFor = (index: number) =>
+      (captured[index] as { readonly OR: ReadonlyArray<Record<string, unknown>> }).OR.filter(
+        (clause) => 'telegramId' in clause,
+      );
+    assert.deepStrictEqual(branchesFor(0), [{ telegramId: 9223372036854775807n }]);
+    assert.deepStrictEqual(branchesFor(1), []);
+  });
+
   it('resolves an identifier to a single user with an OR of id / telegram / login / email branches', async () => {
     const findFirstCalls: unknown[] = [];
     const service = new AdminUsersService(
@@ -330,6 +443,38 @@ describe('AdminUsersService', () => {
     await assert.rejects(() => service.resolveUser({ identifier: 'nobody@example.com' }), /User not found/);
   });
 });
+
+/** Captured `user.findMany` args, keyed by the service instance that produced them. */
+const listSearchCalls = new WeakMap<AdminUsersService, unknown[]>();
+
+/** A service whose only job is to record the where-clause `listUsers` builds. */
+function buildListSearchService(): AdminUsersService {
+  const calls: unknown[] = [];
+  const service = new AdminUsersService(
+    {
+      $transaction: async () => [[], 0],
+      user: {
+        findMany: (args: unknown) => {
+          calls.push(args);
+          return { query: 'findMany' };
+        },
+        count: () => ({ query: 'count' }),
+      },
+    } as never,
+    {} as never,
+  );
+  listSearchCalls.set(service, calls);
+  return service;
+}
+
+function listSearchOrClauses(service: AdminUsersService): ReadonlyArray<Record<string, unknown>> {
+  const calls = listSearchCalls.get(service) ?? [];
+  assert.equal(calls.length, 1, 'expected exactly one findMany call');
+  const where = (calls[0] as { readonly where: { readonly OR?: ReadonlyArray<Record<string, unknown>> } })
+    .where;
+  assert.ok(where.OR, 'expected a search where-clause with an OR array');
+  return where.OR;
+}
 
 function buildSearchResult() {
   return {

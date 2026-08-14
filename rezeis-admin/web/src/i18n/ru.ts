@@ -141,6 +141,9 @@ export const ru = {
       aiSupport: 'AI-Support',
       admins: 'Администраторы',
       roles: 'Роли',
+      // Формулировка совпадает с `panelSettings.tabs.apiTokens`: строка в Cmd+K
+      // и вкладка, на которую она ведёт, должны читаться как одно и то же.
+      apiTokens: 'API токены',
       twoFactor: 'Двухфакторка',
       ipAllowlist: 'IP allowlist',
       webhooks: 'Webhooks',
@@ -1474,6 +1477,7 @@ export const ru = {
     clearAria: 'Очистить',
     placeholder: 'Поиск пользователей, транзакций, промокодов…',
     typeMore: 'Введите минимум 2 символа для поиска',
+    searching: 'Идёт поиск…',
     noResults: 'Нет результатов по «{{query}}»',
     types: {
       navigation: 'страница',
@@ -2181,6 +2185,9 @@ export const ru = {
     iconNone: 'По типу тарифа',
     iconHint:
       'Иконка показывается на карточке тарифа в кабинете. «Авто» — иконка по типу тарифа. Можно выбрать эмодзи (в т.ч. кастомные анимированные).',
+    cardAppearanceHint:
+      'Цвет карточки задаётся не здесь: градиент, акцент, текстура и анимация настраиваются отдельно для каждого тарифа в разделе «WEB Reiwa», на вкладке «Тарифные карточки».',
+    cardAppearanceLink: 'Открыть «Тарифные карточки»',
     description: 'Описание',
     descriptionPlaceholder: 'Лучшее предложение для активных пользователей',
     planType: 'Тип тарифа',
@@ -3574,6 +3581,7 @@ export const ru = {
     saved: 'Брендинг сохранён',
     saveFailed: 'Не удалось сохранить брендинг',
     validationFailed: 'Проверьте выделенную настройку',
+    noChanges: 'Нет изменений для сохранения',
     invalidHex: 'Должен быть валидный hex-цвет',
     invalidImageUrl: 'Введите HTTPS URL, data:image URL или путь загруженного брендинга.',
     invalidGradient: 'Используйте только CSS-градиенты: linear, radial или conic.',
@@ -3701,6 +3709,7 @@ export const ru = {
         generate: 'Из основного цвета',
         saveToPalette: 'В палитру',
         saveExists: 'Этот градиент уже есть в палитре',
+        saveEmpty: 'Сначала задайте градиент — сохранять нечего',
         saved: 'Градиент сохранён в палитру',
         customSwatch: 'Свой сохранённый градиент',
         removeSwatch: 'Удалить из палитры',

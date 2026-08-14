@@ -37,6 +37,7 @@ import { Request } from 'express';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { SystemEventsService, EVENT_TYPES } from '../../../common/services/system-events.service';
+import { parsePostgresBigInt, parseTelegramId } from '../../../common/utils/postgres-bigint.util';
 import { CurrentAdmin } from '../../auth/decorators/current-admin.decorator';
 import { AdminJwtAuthGuard } from '../../auth/guards/admin-jwt-auth.guard';
 import { RequirePermission } from '../../rbac/decorators/require-permission.decorator';
@@ -89,15 +90,27 @@ export class AdminUserManagementController {
     @CurrentAdmin() admin: CurrentAdminInterface,
     @Req() req: Request,
   ) {
+    // This body has no DTO, so nothing validates `telegramId` before it reaches
+    // here: `BigInt('abc')` threw a raw 500, and a digit string past `int8`
+    // parsed fine and then died in Postgres with `22003 numeric field value out
+    // of range` — also a 500, and only after the duplicate check had run. Both
+    // are operator input errors, so answer them as one. `parsePostgresBigInt`
+    // and not `parseTelegramId`: this endpoint accepts (and stores) a negative
+    // id today, and tightening that here would be a behaviour change, not a fix.
+    let newTelegramId: bigint | null = null;
     if (body.telegramId) {
+      newTelegramId = parsePostgresBigInt(body.telegramId);
+      if (newTelegramId === null) {
+        throw new BadRequestException('telegramId must be a 64-bit integer in decimal notation');
+      }
       const existing = await this.prismaService.user.findFirst({
-        where: { telegramId: BigInt(body.telegramId) },
+        where: { telegramId: newTelegramId },
       });
       if (existing) throw new BadRequestException('User with this Telegram ID already exists');
     }
     const user = await this.prismaService.user.create({
       data: {
-        telegramId: body.telegramId ? BigInt(body.telegramId) : null,
+        telegramId: newTelegramId,
         username: body.username || null,
         name: body.name || '',
         email: body.email || null,
@@ -870,9 +883,15 @@ export class AdminUserManagementController {
     // may pass either a numeric Telegram ID or a CUID (internal user id).
     // Try numeric first; fall back to CUID lookup.
     const isNumeric = /^\d+$/.test(telegramId);
-    const user = isNumeric
+    const numericId = isNumeric ? parseTelegramId(telegramId) : null;
+    // Digits that overflow `int8` have no second branch to fall through to:
+    // no row can hold that value, and an all-digit string is not a CUID either.
+    // Binding it anyway reached Postgres and came back as `22003 numeric field
+    // value out of range` — a 500 where 404 is the truthful answer.
+    if (isNumeric && numericId === null) throw new NotFoundException('User not found');
+    const user = numericId !== null
       ? await this.prismaService.user.findFirst({
-          where: { telegramId: BigInt(telegramId) },
+          where: { telegramId: numericId },
         })
       : await this.prismaService.user.findUnique({
           where: { id: telegramId },
@@ -889,10 +908,14 @@ export class AdminUserManagementController {
     const trimmed = identifier.trim();
     if (!trimmed) return null;
 
-    // 1. Numeric → telegramId
-    if (/^\d+$/.test(trimmed)) {
+    // 1. Numeric → telegramId. A digit string `int8` cannot hold skips straight
+    // to the next branch: no row can match it, so this is exactly what the
+    // lookup would have done had it run and returned null — except it used to
+    // fail the request with `22003 numeric field value out of range` instead.
+    const numericId = parseTelegramId(trimmed);
+    if (numericId !== null) {
       const user = await this.prismaService.user.findFirst({
-        where: { telegramId: BigInt(trimmed) },
+        where: { telegramId: numericId },
       });
       if (user) return user;
     }

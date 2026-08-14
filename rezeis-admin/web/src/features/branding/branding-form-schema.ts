@@ -485,10 +485,7 @@ export function createBrandingFormSchema(messages: BrandingFormValidationMessage
           z.string().min(1).max(64),
           z.object({
             gradient: optionalGradientSchema(messages.gradientInvalid),
-            accent: z
-              .string()
-              .regex(HEX_PATTERN, messages.hexInvalid)
-              .nullish(),
+            accent: optionalHexColour(messages.hexInvalid),
             texturePreset: z.enum(BRANDING_APP_BG_TEXTURES).nullish(),
             textureUrl: optionalImageUrl(messages.imageUrlInvalid),
             cardEffect: cardEffectField().nullish(),
@@ -871,9 +868,74 @@ function normalizeAppBackgroundDraft(
   }
 }
 
+/**
+ * An image field that may be absent, null, or empty — all three meaning "no
+ * image", all three normalized to `null`.
+ *
+ * The `.optional()` on the end is load-bearing and was missing, which is what
+ * made per-plan tariff-card styles refuse to save. `optionalNullableString`
+ * accepts `undefined` as one arm of its union, so this reads as optional and
+ * behaved that way everywhere it had been used before: `logoUrl`, `pwaIconUrl`
+ * and `cardLogoUrl` are top-level fields, and `createBrandingDirtyPatch` builds
+ * its candidate from `DEFAULT_BRANDING_DRAFT`, so those keys are ALWAYS present
+ * (as `null`) and the union arm was the only thing ever consulted.
+ *
+ * `planCardStyles` is the first place this schema sits under a `z.record`, and
+ * a record's values are non-optional in Zod 4: a property whose schema does not
+ * itself declare `.optional()` fails an ABSENT key with `expected nonoptional`,
+ * even though it accepts a key explicitly set to `undefined`. Every plan-style
+ * control except the texture picker patches an entry that has no `textureUrl`
+ * key at all — a gradient, an accent, a card effect — so the whole branding
+ * submit was rejected client-side before any request left the browser. The
+ * error names `planCardStyles.<planId>.textureUrl`, which react-hook-form
+ * cannot attach to any rendered input, so the operator saw a save that did
+ * nothing and no field marked wrong.
+ *
+ * Nothing else in the chain ever wanted it: `PlanCardStyleDraft.textureUrl` is
+ * declared optional, the backend DTO's `hasOnlyAllowedPlanTextureUrls` returns
+ * true for an absent value, `readPlanCardStyles` simply omits it, and reiwa's
+ * `hasOptionalImageUrlOrNull` accepts `undefined`. This helper was the only
+ * side demanding the key, and it is now shaped exactly like its sibling
+ * `optionalGradientSchema`, which has always carried the same tail.
+ */
 function optionalImageUrl(message: string) {
   return optionalNullableString(IMAGE_URL_MAX)
     .refine((value) => value === null || isAllowedImageUrl(value), { message })
+    .optional()
+    .transform((value) => value ?? null)
+}
+
+/**
+ * A hex colour the operator may also clear, spelled the way a free-text input
+ * actually hands it over.
+ *
+ * Written as a bare `z.string().regex(...)` this rejected TWO things nothing
+ * downstream objects to, and both blocked the whole branding submit rather
+ * than the one field:
+ *
+ *  - the empty string. Clearing the per-plan accent box is how an operator
+ *    removes an accent, and the box emits `''`, not `null`. `setStyle` only
+ *    deletes the entry when EVERY field is empty, so a plan that also has a
+ *    gradient kept `accent: ''` and the save was refused client-side;
+ *  - a value with surrounding whitespace, which is what pasting a colour
+ *    usually produces.
+ *
+ * The backend accepts both — `readPlanCardStyles` tests `accent.trim()` and
+ * simply omits an accent it cannot read — and so does reiwa's `isHex`, which
+ * trims before matching. The panel was the only side treating "no accent" as a
+ * validation failure, and its own sibling field `gradient` has always gone
+ * through `optionalGradientSchema`, which trims and maps empty to `null`.
+ *
+ * A genuinely malformed colour (`#2`, `22c55e`) still fails, deliberately: that
+ * is an operator mistake worth naming rather than silently discarding.
+ */
+function optionalHexColour(message: string) {
+  // Generous cap so the message below is what an over-long value gets, rather
+  // than a length complaint about a field whose real problem is its shape.
+  return optionalNullableString(64)
+    .refine((value) => value === null || HEX_PATTERN.test(value), { message })
+    .optional()
+    .transform((value) => value ?? null)
 }
 
 function safeGradientSchema(message: string) {

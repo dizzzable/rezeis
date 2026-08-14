@@ -37,6 +37,7 @@ import { createHash, randomBytes } from 'node:crypto';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { RawCacheService } from '../../../common/cache/raw-cache.service';
+import { parseTelegramId } from '../../../common/utils/postgres-bigint.util';
 import { CurrentAdmin } from '../../auth/decorators/current-admin.decorator';
 import { AdminJwtAuthGuard } from '../../auth/guards/admin-jwt-auth.guard';
 import { RequirePermission } from '../../rbac/decorators/require-permission.decorator';
@@ -233,11 +234,16 @@ export class AdminUserWebController {
     @Req() req: Request,
   ) {
     const user = await this.findUserByTelegramId(telegramId);
-    let nextTelegramId: bigint;
-    try {
-      nextTelegramId = BigInt(body.telegramId);
-    } catch {
-      throw new BadRequestException('telegramId must be a numeric string');
+    // `BindTelegramIdDto` already enforces `^\d{1,19}$`, which is why the
+    // `try { BigInt(...) } catch` that used to stand here never fired: `BigInt`
+    // throws on non-numeric strings, and the DTO admits none. What the DTO does
+    // NOT rule out is the top of the 19-digit range — `9999999999999999999` is
+    // valid by that pattern and larger than `int8` can hold, so it sailed
+    // through to the `findUnique` below and returned `22003 numeric field value
+    // out of range`: a 500 on an operator typo. The range check is the guard.
+    const nextTelegramId = parseTelegramId(body.telegramId);
+    if (nextTelegramId === null) {
+      throw new BadRequestException('telegramId is out of range for a Telegram account id');
     }
     if (nextTelegramId <= 0n) {
       throw new BadRequestException('telegramId must be positive');
@@ -268,11 +274,22 @@ export class AdminUserWebController {
 
   // ── Helpers ──────────────────────────────────────────────────────────
 
+  /**
+   * The route param accepts either a numeric Telegram id or a CUID (internal
+   * user id); numeric is tried first.
+   *
+   * Digits that overflow Postgres `int8` have no second branch to fall through
+   * to — no row can hold that value, and an all-digit string is not a CUID
+   * either — so 404 is the truthful answer. Binding it anyway reached Postgres
+   * and came back as `22003 numeric field value out of range`, i.e. a 500.
+   */
   private async findUserByTelegramId(telegramId: string) {
     const isNumeric = /^\d+$/.test(telegramId);
-    const user = isNumeric
+    const numericId = isNumeric ? parseTelegramId(telegramId) : null;
+    if (isNumeric && numericId === null) throw new NotFoundException('User not found');
+    const user = numericId !== null
       ? await this.prismaService.user.findFirst({
-          where: { telegramId: BigInt(telegramId) },
+          where: { telegramId: numericId },
         })
       : await this.prismaService.user.findUnique({
           where: { id: telegramId },

@@ -261,7 +261,28 @@ export default function WebReiwaPage() {
       );
       return;
     }
-    if (result.fields.length === 0) return;
+    // Say so out loud. This was the ONE silent exit from a handler where every
+    // other outcome speaks: the validation branch above toasts, `onSuccess`
+    // toasts `saved`, `onError` toasts `saveFailed`. Returning here sent no
+    // request, showed no message and moved nothing on screen, and an operator
+    // who has just spent real effort in the configurator cannot tell that apart
+    // from a save that failed — which is how it gets reported ("settings do not
+    // save"). `info`, not `error`: an empty patch is a legitimate outcome, so
+    // this reports a no-op rather than blaming one. Same shape and same call as
+    // `adminsPage.toast.noChanges` in `admins-page.tsx`, which already had it.
+    //
+    // Reaching this today takes a disagreement between two different notions of
+    // "changed": the Save button is gated on react-hook-form's `isDirty`
+    // (structural, against `defaultValues`) while the patch comes from
+    // `getBrandingChangedFields` (semantic, against the loaded server draft).
+    // While the two agree the button is disabled and this branch is dead —
+    // which is exactly why it must not be a bare `return`: the day they diverge,
+    // the symptom is a Save button that responds to nothing, with no clue left
+    // behind for whoever has to reproduce it.
+    if (result.fields.length === 0) {
+      toast.info(t('brandingPage.noChanges'));
+      return;
+    }
     mutation.mutate(result.data);
   };
 
@@ -1445,7 +1466,18 @@ export default function WebReiwaPage() {
                         size="sm"
                         onClick={() => {
                           const css = (form.getValues("cardGradient") ?? "").trim();
-                          if (css.length === 0) return;
+                          // Third silent exit of the same shape, and the odd
+                          // one out in its own handler: the other two ways out
+                          // below both toast (`saveExists`, `saved`). An empty
+                          // gradient box is visible on screen, so this is the
+                          // mildest of the three — but "I pressed the button
+                          // and nothing happened" reads identically whatever
+                          // the reason, and staying silent here is what makes
+                          // the operator doubt the button rather than the box.
+                          if (css.length === 0) {
+                            toast.info(t('brandingPage.sections.card.saveEmpty'));
+                            return;
+                          }
                           const isPreset = CARD_GRADIENT_PRESETS.some(
                             (p) => p.value.toLowerCase() === css.toLowerCase(),
                           );
@@ -1886,21 +1918,32 @@ export default function WebReiwaPage() {
           </div>
 
           {/* ── Tariff cards tab ──────────────────────────────────────── */}
+          {/* Kept mounted like the rest of this tab — `gate()` hides it with a
+              class. Unmounting it discarded every expanded row on each tab
+              visit, so a plan the operator was midway through configuring
+              collapsed the moment they glanced at another tab and came back;
+              the accordion state lives inside `PlanStyleRow`, so lifting it
+              would not have helped while the section above it still died.
+
+              Nothing here pays for that unmount. The thumbs are CSS-only, and
+              `PlanCardStylesSection` passes `livePreview={false}` to every
+              `CardEffectPicker` — `card-effect-section.tsx` gates the WebGL
+              layer on `isActive && livePreview`, so no context is ever created
+              whether a row is open or shut. The plan list costs nothing extra
+              either: `BrandingPreview` already holds the `usePlans()`
+              subscription on every tab. Compare the `card` tab above, which
+              keeps its stateful section mounted and gates only the renderer. */}
           <div className={gate('planCards')}>
             <Controller
               name="planCardStyles"
               control={form.control}
-              render={({ field }) =>
-                tab === 'planCards' ? (
-                  <PlanCardStylesSection
-                    value={(field.value ?? {}) as Record<string, PlanCardStyleDraft>}
-                    onChange={(next) => field.onChange(next)}
-                    primary={watchedValues.primary}
-                  />
-                ) : (
-                  <></>
-                )
-              }
+              render={({ field }) => (
+                <PlanCardStylesSection
+                  value={(field.value ?? {}) as Record<string, PlanCardStyleDraft>}
+                  onChange={(next) => field.onChange(next)}
+                  primary={watchedValues.primary}
+                />
+              )}
             />
           </div>
 
