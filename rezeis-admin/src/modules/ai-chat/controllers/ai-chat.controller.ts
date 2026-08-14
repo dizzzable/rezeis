@@ -9,6 +9,8 @@ import {
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 
 import { AdminJwtAuthGuard } from '../../auth/guards/admin-jwt-auth.guard';
+import { RequirePermission } from '../../rbac/decorators/require-permission.decorator';
+import { RbacGuard } from '../../rbac/guards/rbac.guard';
 
 import { SendMessageDto } from '../dto/send-message.dto';
 import { CreateConversationDto } from '../dto/create-conversation.dto';
@@ -18,16 +20,28 @@ import { AiChatService } from '../services/ai-chat.service';
  * AI Chat controller — exposes REST endpoints for conversational AI
  * support. All routes are prefixed with `ai-chat`.
  *
- * NOTE: Authentication is intentionally omitted for now. In production
- * this controller should be gated by `AdminJwtAuthGuard` or a dedicated
- * user token guard.
+ * Permission model
+ *   `settings:edit`, declared on the class so every route inherits it. That is
+ *   the gate `AdminAiConfigController` and `AdminAiInstructionController`
+ *   already carry: configuring the assistant and driving it are one feature and
+ *   share one permission rather than drifting apart.
+ *
+ *   Admin JWT alone was not enough here for two reasons that outlive the
+ *   current lack of a frontend caller:
+ *     - `POST message` spends the operator's money — it calls the configured
+ *       OpenAI-compatible endpoint with the stored API key, in a tool-calling
+ *       loop that can issue several completions per request.
+ *     - `GET conversations/:conversationId/messages` reads a transcript by id
+ *       with no ownership check, and ids are minted as
+ *       `conv_${Date.now()}_${counter}`, which is guessable by construction.
  *
  * The `getTariffs` and `getFaq` tool calls are exercised through
  * the AiChatService function-calling loop and do not need direct
  * controller-level wiring.
  */
 @ApiTags('ai-chat')
-@UseGuards(AdminJwtAuthGuard)
+@UseGuards(AdminJwtAuthGuard, RbacGuard)
+@RequirePermission('settings', 'edit')
 @Controller('ai-chat')
 export class AiChatController {
   public constructor(private readonly aiChatService: AiChatService) {}

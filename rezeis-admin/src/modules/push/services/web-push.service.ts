@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { ConflictException, Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { AdminWebPushSubscription, WebPushSubscription } from '@prisma/client';
 import * as webpush from 'web-push';
 
@@ -89,6 +89,15 @@ export class WebPushService implements OnModuleInit {
    * higher rates indicate a permanent failure (lost user, blocked
    * notifications, dropped service worker). */
   private static readonly MAX_FAILURES = 3;
+
+  /**
+   * Refusal returned when the endpoint a browser presents is already bound to
+   * a DIFFERENT admin's row. Deliberately names nobody — who holds the row is
+   * an operator question and belongs in the log, not in a response any admin
+   * can trigger at will.
+   */
+  private static readonly ENDPOINT_HELD_BY_ANOTHER_ADMIN =
+    'This browser subscription is already registered to another administrator';
 
   public constructor(
     private readonly prismaService: PrismaService,
@@ -183,24 +192,121 @@ export class WebPushService implements OnModuleInit {
 
   // ── Admin-scoped push (panel operators) ───────────────────────────────────
 
+  /**
+   * Bind the calling admin's own browser to a push subscription row.
+   *
+   * Every write here is scoped to the caller, and that is the whole point.
+   * The previous `upsert({ where: { endpoint } })` was not: `endpoint` is
+   * globally `@unique` (`prisma/schema.prisma:2343`), so its update branch
+   * re-pointed whichever row already held the endpoint at the caller. An
+   * endpoint is not a secret — it sits in the table in plaintext next to
+   * `userAgent` and reaches any log that records request bodies — so an admin
+   * who had seen another admin's endpoint could POST it here and take the row
+   * over. The victim stopped receiving push with nothing to show for it, the
+   * caller's own notifications started arriving in the victim's browser (the
+   * endpoint never changed, only the row's owner did), and `failureCount: 0`
+   * resurrected rows the fanout had already written off as dead.
+   *
+   * Split in two so that neither half can reach a row the caller does not own:
+   *
+   *   1. `updateMany` scoped by `{ adminId, endpoint }` — the re-subscribe
+   *      path. Same browser, same admin: refresh the keys the service worker
+   *      may have rotated and clear the failure state. It cannot change
+   *      `adminId`, so it cannot move a row between admins.
+   *   2. `create` when the caller owns no such row. The global `@unique` on
+   *      `endpoint` is what makes this safe rather than merely tidy: a row
+   *      belonging to somebody else turns the INSERT into a unique violation
+   *      instead of a second row aimed at the same browser. That is also why
+   *      this fix needs no migration — the constraint that caused the damage
+   *      through `upsert` is the constraint that now enforces ownership.
+   *
+   * A unique violation is therefore one of two things, and the row itself —
+   * never the caller's claim — decides which: our own concurrent request won
+   * the insert (two tabs re-subscribing at once, which is not a conflict), or
+   * another admin holds the endpoint (refused, 409, and logged with both ids).
+   * Refusing is the deliberate choice over silently replacing: replacing keeps
+   * the victim's loss of push, only with a log line next to it, whereas a
+   * refusal leaves their row exactly as it was. The one honest subscription it
+   * turns away is a browser genuinely handed from one admin to another with
+   * the old row still live. That operator is not stuck: the SPA's opt-in path
+   * (`web/src/lib/push.ts` `enablePush`) drops the local subscription when this
+   * POST fails, and the next `pushManager.subscribe()` issues a fresh endpoint
+   * — which also revokes the old one, so the abandoned row starts taking 410s
+   * and the fanout prunes it. The silent on-load path
+   * (`ensurePushSubscription`) swallows the failure instead, so until the
+   * operator uses the toggle their only evidence is the warn logged below.
+   */
   public async subscribeAdmin(input: AdminSubscribeInput): Promise<{ id: string }> {
-    return this.prismaService.adminWebPushSubscription.upsert({
-      where: { endpoint: input.endpoint },
-      create: {
-        adminId: input.adminId,
-        endpoint: input.endpoint,
-        p256dhKey: input.p256dhKey,
-        authKey: input.authKey,
-        userAgent: input.userAgent ?? null,
-      },
-      update: {
-        adminId: input.adminId,
+    const refreshed = await this.refreshOwnAdminSubscription(input);
+    if (refreshed !== null) return refreshed;
+
+    try {
+      return await this.prismaService.adminWebPushSubscription.create({
+        data: {
+          adminId: input.adminId,
+          endpoint: input.endpoint,
+          p256dhKey: input.p256dhKey,
+          authKey: input.authKey,
+          userAgent: input.userAgent ?? null,
+        },
+        select: { id: true },
+      });
+    } catch (err: unknown) {
+      // `id` is a client-generated cuid, so `endpoint` is the only unique this
+      // INSERT can violate — no need to read the constraint name back out.
+      if (!isUniqueConstraintViolation(err)) throw err;
+      const incumbent = await this.prismaService.adminWebPushSubscription.findUnique({
+        where: { endpoint: input.endpoint },
+        select: { id: true, adminId: true },
+      });
+      if (incumbent !== null && incumbent.adminId === input.adminId) {
+        // Our own row, inserted by a concurrent request in the window between
+        // the scoped `updateMany` above and this `create`. Re-subscribing the
+        // same browser twice is not a conflict: refresh and report success.
+        return (await this.refreshOwnAdminSubscription(input)) ?? { id: incumbent.id };
+      }
+      if (incumbent === null) {
+        // The blocking row disappeared between our failed INSERT and this read
+        // (an unsubscribe, or the fanout pruning it). Refuse rather than
+        // looping back to `create`: the browser retries on its next load and
+        // lands on a clean insert, whereas retrying in place is how this path
+        // would start recursing.
+        this.logger.warn(
+          `WebPush(admin): subscribe for admin ${input.adminId} lost an insert race to a row that no longer exists`,
+        );
+      } else {
+        this.logger.warn(
+          `WebPush(admin): refused subscribe for admin ${input.adminId} — endpoint is bound to ` +
+            `admin ${incumbent.adminId} (subscription ${incumbent.id})`,
+        );
+      }
+      throw new ConflictException(WebPushService.ENDPOINT_HELD_BY_ANOTHER_ADMIN);
+    }
+  }
+
+  /**
+   * Refresh the caller's OWN row for this endpoint, when they have one.
+   * Scoped by `adminId` in the `where`, and it never writes `adminId`, so no
+   * call can move a row from one admin to another. Returns null when the
+   * caller owns no row for the endpoint — the signal to insert one.
+   */
+  private async refreshOwnAdminSubscription(
+    input: AdminSubscribeInput,
+  ): Promise<{ id: string } | null> {
+    const owned = { adminId: input.adminId, endpoint: input.endpoint };
+    const { count } = await this.prismaService.adminWebPushSubscription.updateMany({
+      where: owned,
+      data: {
         p256dhKey: input.p256dhKey,
         authKey: input.authKey,
         userAgent: input.userAgent ?? null,
         failureCount: 0,
         lastSeenAt: new Date(),
       },
+    });
+    if (count === 0) return null;
+    return this.prismaService.adminWebPushSubscription.findFirst({
+      where: owned,
       select: { id: true },
     });
   }
@@ -327,4 +433,19 @@ export class WebPushService implements OnModuleInit {
       );
     }
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Prisma unique-constraint violation, matched on the error code rather than
+ * `instanceof Prisma.PrismaClientKnownRequestError`. The code is the
+ * contractual part; the class identity is not, and it survives neither a
+ * driver adapter re-wrapping the error nor a second copy of `@prisma/client`
+ * in the module graph.
+ */
+function isUniqueConstraintViolation(error: unknown): boolean {
+  return isRecord(error) && error.code === 'P2002';
 }
