@@ -60,6 +60,15 @@ const Crosshair: React.FC<CrosshairProps> = ({ color = 'white', containerRef = n
 
     gsap.set([lineHorizontalRef.current, lineVerticalRef.current].filter(Boolean), { opacity: 0 });
 
+    // The frame id has to be kept: an unstored requestAnimationFrame cannot be
+    // cancelled, and `render` below ends by requesting the next one. The loop
+    // therefore outlived every unmount and went on calling `gsap.set` at 60 Hz
+    // against the elements React had already removed. This is a GLOBAL cursor
+    // effect an operator switches from a settings page, so each visit to that
+    // page could leave another permanent loop behind. Same repair, same reason
+    // as `Lightning.tsx`.
+    let frameId = 0;
+
     const onMouseMove = (_ev: Event) => {
       renderedStyles.tx.previous = renderedStyles.tx.current = mouse.x;
       renderedStyles.ty.previous = renderedStyles.ty.current = mouse.y;
@@ -70,7 +79,7 @@ const Crosshair: React.FC<CrosshairProps> = ({ color = 'white', containerRef = n
         opacity: 1
       });
 
-      requestAnimationFrame(render);
+      frameId = requestAnimationFrame(render);
 
       target.removeEventListener('mousemove', onMouseMove);
     };
@@ -129,7 +138,7 @@ const Crosshair: React.FC<CrosshairProps> = ({ color = 'white', containerRef = n
         gsap.set(lineHorizontalRef.current, { y: renderedStyles.ty.previous });
       }
 
-      requestAnimationFrame(render);
+      frameId = requestAnimationFrame(render);
     };
 
     const links: NodeListOf<HTMLAnchorElement> = containerRef?.current
@@ -142,6 +151,10 @@ const Crosshair: React.FC<CrosshairProps> = ({ color = 'white', containerRef = n
     });
 
     return () => {
+      // Harmless before the loop has ever started: `frameId` is 0 then, and 0
+      // is not a handle any browser hands out, so this is a no-op rather than a
+      // cancellation of somebody else's frame.
+      cancelAnimationFrame(frameId);
       target.removeEventListener('mousemove', handleMouseMove);
       target.removeEventListener('mousemove', onMouseMove);
       links.forEach(link => {

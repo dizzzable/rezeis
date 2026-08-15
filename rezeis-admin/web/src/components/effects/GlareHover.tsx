@@ -3,10 +3,13 @@
  * Inspired by React Bits GlareHover component.
  *
  * Uses refs + rAF-throttled DOM writes to avoid layout thrash with many
- * cards on screen. Mouse handlers are skipped when visualEffects is off.
+ * cards on screen. Mouse handlers are skipped when effects are off — gated on
+ * `useEffectsActive()`, not on the appearance flag alone, which nothing in the
+ * UI ever clears and which therefore let the quick actions keep glinting after
+ * the operator turned effects off. See lib/theme/effects-active.ts.
  */
 import { useEffect, useRef, useCallback, type ReactNode, type MouseEvent } from 'react'
-import { useAppearanceStore } from '@/lib/theme/appearance-store'
+import { useEffectsActive } from '@/lib/theme/effects-active'
 import { cn } from '@/lib/utils'
 
 interface GlareHoverProps {
@@ -25,8 +28,10 @@ export function GlareHover({
   const glareRef = useRef<HTMLDivElement>(null)
   const rafRef = useRef<number | null>(null)
   const pendingPosRef = useRef<{ x: number; y: number } | null>(null)
-  const visualEffects = useAppearanceStore((s) => s.visualEffects)
+  const effectsActive = useEffectsActive()
 
+  // Also runs on the on→off transition, so a frame queued by the last mousemove
+  // before the switch flipped never lands.
   useEffect(() => {
     return () => {
       if (rafRef.current !== null) {
@@ -34,7 +39,7 @@ export function GlareHover({
         rafRef.current = null
       }
     }
-  }, [])
+  }, [effectsActive])
 
   const flushPending = useCallback(() => {
     rafRef.current = null
@@ -72,12 +77,12 @@ export function GlareHover({
     <div
       ref={containerRef}
       className={cn('glare-hover-effect relative overflow-hidden', className)}
-      onMouseMove={visualEffects ? handleMouseMove : undefined}
-      onMouseEnter={visualEffects ? handleMouseEnter : undefined}
-      onMouseLeave={visualEffects ? handleMouseLeave : undefined}
+      onMouseMove={effectsActive ? handleMouseMove : undefined}
+      onMouseEnter={effectsActive ? handleMouseEnter : undefined}
+      onMouseLeave={effectsActive ? handleMouseLeave : undefined}
     >
       {children}
-      {visualEffects && (
+      {effectsActive && (
         <div
           ref={glareRef}
           className="pointer-events-none absolute inset-0 z-10 opacity-0 transition-opacity duration-200"

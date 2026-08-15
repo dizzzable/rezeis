@@ -8,7 +8,7 @@
  */
 import { type ReactNode, isValidElement } from 'react'
 import { motion, AnimatePresence } from 'motion/react'
-import { useAppearanceStore } from '@/lib/theme/appearance-store'
+import { useEffectsActive } from '@/lib/theme/effects-active'
 
 interface AnimatedListProps {
   children: ReactNode[]
@@ -22,9 +22,12 @@ export function AnimatedList({
   stagger = 0.05,
   className,
 }: AnimatedListProps) {
-  const visualEffects = useAppearanceStore((s) => s.visualEffects)
+  const effectsActive = useEffectsActive()
 
-  if (!visualEffects) {
+  // Bare children, no `AnimatePresence` and no per-item `motion.div`: skipping
+  // only the transition props would still mount one animation driver per row
+  // and keep the exit-animation bookkeeping alive on every list update.
+  if (!effectsActive) {
     return <div className={className}>{children}</div>
   }
 

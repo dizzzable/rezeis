@@ -1,5 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { useAppearanceStore } from '@/lib/theme/appearance-store'
+import { useEffectsActive } from '@/lib/theme/effects-active'
 import { useGlassStore } from '@/lib/theme/glass-store'
 import { glassBlurPx } from '@/lib/theme/glass-utils'
 
@@ -17,7 +18,13 @@ export function AppearanceProvider({ children }: { children: ReactNode }) {
   const density = useAppearanceStore((s) => s.density)
   const fontSize = useAppearanceStore((s) => s.fontSize)
   const animationsEnabled = useAppearanceStore((s) => s.animationsEnabled)
-  const visualEffects = useAppearanceStore((s) => s.visualEffects)
+  // `data-effects` must answer the same question every effect component asks —
+  // see `lib/theme/effects-active.ts`. Reading `appearance-store.visualEffects`
+  // alone left it permanently "on": nothing in the UI calls `setVisualEffects`,
+  // so the `:root[data-effects="off"]` block in index.css could never match and
+  // the switch the operator actually has (`effects-store.effectsEnabled`)
+  // released no animation, no backdrop-filter and no compositor layer.
+  const effectsActive = useEffectsActive()
   const glassBlur = useAppearanceStore((s) => s.glassBlur)
   const blurIntensity = useAppearanceStore((s) => s.blurIntensity)
   const glassOpacity = useAppearanceStore((s) => s.glassOpacity)
@@ -90,11 +97,11 @@ export function AppearanceProvider({ children }: { children: ReactNode }) {
     root.dataset.density = density
     root.dataset.fontSize = fontSize
     root.dataset.animations = animationsEnabled ? 'on' : 'off'
-    root.dataset.effects = visualEffects ? 'on' : 'off'
+    root.dataset.effects = effectsActive ? 'on' : 'off'
     root.dataset.glassBlur = glassBlur ? 'on' : 'off'
     root.style.setProperty('--glass-blur', `${blurIntensity}px`)
     root.style.setProperty('--glass-opacity', `${glassOpacity}%`)
-  }, [density, fontSize, animationsEnabled, visualEffects, glassBlur, blurIntensity, glassOpacity])
+  }, [density, fontSize, animationsEnabled, effectsActive, glassBlur, blurIntensity, glassOpacity])
 
   // Liquid Glass — set data-attrs and CSS variables in a single effect
   useEffect(() => {

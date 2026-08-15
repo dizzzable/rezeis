@@ -72,11 +72,38 @@ export default function SplashCursor({
   RAINBOW_MODE = true,
   COLOR = '#ff0000'
 }: SplashCursorProps) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+    const container = containerRef.current;
+    if (!container) return;
+
+    /**
+     * THE CANVAS IS THIS EFFECT'S, NOT REACT'S.
+     *
+     * WHAT WENT WRONG. This rendered a `<canvas ref={canvasRef}>` and opened the
+     * context on that element. React owns such an element, so it SURVIVES this
+     * effect's cleanup — while the cleanup below ends by destroying the context
+     * living on it. A canvas hands the SAME context object back to every later
+     * `getContext` call, lost or not, so a second setup on the same element got
+     * the already-lost one: `createShader`/`createProgram` return null on a lost
+     * context, the compile bailed with a null info log, and the operator was
+     * left with a permanently dead full-screen canvas — silently, with nothing
+     * thrown for an error boundary to catch. StrictMode's double-invoke
+     * reproduces it on every dev mount; in production it is the second time the
+     * operator switches this cursor on.
+     *
+     * Allocating the element here makes a poisoned second setup impossible by
+     * construction: a new element cannot be holding an old context. The
+     * `loseContext()` in the cleanup therefore STAYS — WebKit frees a context
+     * slot only when the context object is destroyed, and this project runs
+     * under a 16-per-web-content-process ceiling. Same shape as `Lightning.tsx`,
+     * `Plasma.tsx` and `Grainient.tsx`, and the rule that stands over it is
+     * `reactbits-canvas-ownership.test.ts`.
+     */
+    const canvas = document.createElement('canvas');
+    canvas.id = 'fluid';
+    canvas.className = 'w-screen h-screen block';
 
     let pointers: Pointer[] = [pointerPrototype()];
 
@@ -100,8 +127,38 @@ export default function SplashCursor({
       COLOR
     };
 
-    const { gl, ext } = getWebGLContext(canvas);
-    if (!gl || !ext) return;
+    // GIVE UP QUIETLY WHEN THE MACHINE CANNOT SUPPLY A CONTEXT.
+    //
+    // `getWebGLContext` throws for the two ways that can happen — no context at
+    // all, and a driver with no usable render-texture format. Both are reachable
+    // in the field: a browser with WebGL turned off hits the first, and so does
+    // any tab that has already spent WebKit's 16 contexts per web-content
+    // process, which is the same ceiling the cleanup below exists for.
+    //
+    // Uncaught, that exception leaves a React effect body and unmounts the whole
+    // admin panel — a white screen because a decorative cursor trail could not
+    // draw. A cursor trail's failure budget is "no cursor trail".
+    //
+    // CAUGHT HERE RATHER THAN TURNED INTO A NULLABLE RESULT, and that is the
+    // whole reason this is a try/catch. Returning `{ gl: null, ext: null }` is
+    // the tidier shape, but `gl` is then nullable for the rest of the effect,
+    // and an early-return guard does NOT narrow it inside the thirty-odd nested
+    // FUNCTION DECLARATIONS below (`compileShader`, `initFramebuffers`, …):
+    // declarations hoist, so TypeScript cannot know the guard ran before they
+    // are called. That shape cost 117 `TS18047` errors and broke `tsc -b`.
+    // Keeping the throw keeps every one of those call sites non-null.
+    let context: ReturnType<typeof getWebGLContext>;
+    try {
+      context = getWebGLContext(canvas);
+    } catch {
+      return;
+    }
+    const { gl, ext } = context;
+
+    // The element enters the document only now, with a context behind it:
+    // `resizeCanvas()` measures a CSS box, so the canvas has to be laid out
+    // before the first frame reads it.
+    container.appendChild(canvas);
 
     if (!ext.supportLinearFiltering) {
       config.DYE_RESOLUTION = 256;
@@ -124,6 +181,8 @@ export default function SplashCursor({
           canvas.getContext('experimental-webgl', params)) as WebGL2RenderingContext | null;
       }
 
+      // Door one to "this machine cannot run the effect". Caught at the call
+      // site, which is where the reasoning lives.
       if (!gl) {
         throw new Error('Unable to initialize WebGL.');
       }
@@ -169,6 +228,16 @@ export default function SplashCursor({
         formatRGBA = getSupportedFormat(gl, gl.RGBA, gl.RGBA, halfFloatTexType);
         formatRG = getSupportedFormat(gl, gl.RGBA, gl.RGBA, halfFloatTexType);
         formatR = getSupportedFormat(gl, gl.RGBA, gl.RGBA, halfFloatTexType);
+      }
+
+      // Door two, and the one nobody had noticed. `getSupportedFormat` returns
+      // null BY DESIGN once its fallback chain is exhausted, and
+      // `initFramebuffers` reads `.internalFormat` off all three without asking
+      // — so a driver that supports no render-texture format reached the same
+      // white screen as door one, by way of a TypeError instead of this Error.
+      // Refusing here keeps the three below non-null for every later reader.
+      if (!formatRGBA || !formatRG || !formatR) {
+        throw new Error('No supported render-texture format.');
       }
 
       return {
@@ -859,14 +928,33 @@ export default function SplashCursor({
     let lastUpdateTime = Date.now();
     let colorUpdateTimer = 0.0;
 
+    // The frame id has to be kept: an unstored requestAnimationFrame cannot be
+    // cancelled, so this simulation outlived every unmount — still stepping the
+    // fluid and still drawing into a canvas React had already taken out of the
+    // document — and held its WebGL context alive against GC with it. WebKit
+    // gives a web-content process 16 live contexts before it starts recycling
+    // the oldest into an unrecoverable SyntheticLostContext, and this is a
+    // GLOBAL cursor effect an operator picks from a settings page while trying
+    // the other seven.
+    //
+    // `destroyed` is not redundant with the cancel. `updateFrame` is kicked off
+    // from BOTH `handleFirstMouseMove` and `handleFirstTouchStart`, so a device
+    // that reports a mouse move and a touch start runs two independent rAF
+    // chains, and only the id requested last can be stored. Cancelling reaches
+    // one of them; the flag is what stops the other from asking for the frame
+    // after it. Same repair, same reason as `Lightning.tsx`.
+    let destroyed = false;
+    let frameId = 0;
+
     function updateFrame() {
+      if (destroyed) return;
       const dt = calcDeltaTime();
       if (resizeCanvas()) initFramebuffers();
       updateColors(dt);
       applyInputs();
       step(dt);
       render(null);
-      requestAnimationFrame(updateFrame);
+      frameId = requestAnimationFrame(updateFrame);
     }
 
     function calcDeltaTime() {
@@ -1206,13 +1294,17 @@ export default function SplashCursor({
       return ((value - min) % range) + min;
     }
 
-    window.addEventListener('mousedown', e => {
+    // Every listener below is named rather than inline. `removeEventListener`
+    // matches on function IDENTITY, so a cleanup that passed a freshly written
+    // arrow would take nothing off while looking exactly like a cleanup.
+    const handleMouseDown = (e: MouseEvent) => {
       const pointer = pointers[0];
       const posX = scaleByPixelRatio(e.clientX);
       const posY = scaleByPixelRatio(e.clientY);
       updatePointerDownData(pointer, -1, posX, posY);
       clickSplat(pointer);
-    });
+    };
+    window.addEventListener('mousedown', handleMouseDown);
 
     function handleFirstMouseMove(e: MouseEvent) {
       const pointer = pointers[0];
@@ -1225,13 +1317,14 @@ export default function SplashCursor({
     }
     document.body.addEventListener('mousemove', handleFirstMouseMove);
 
-    window.addEventListener('mousemove', e => {
+    const handleMouseMove = (e: MouseEvent) => {
       const pointer = pointers[0];
       const posX = scaleByPixelRatio(e.clientX);
       const posY = scaleByPixelRatio(e.clientY);
       const color = pointer.color;
       updatePointerMoveData(pointer, posX, posY, color);
-    });
+    };
+    window.addEventListener('mousemove', handleMouseMove);
 
     function handleFirstTouchStart(e: TouchEvent) {
       const touches = e.targetTouches;
@@ -1246,41 +1339,75 @@ export default function SplashCursor({
     }
     document.body.addEventListener('touchstart', handleFirstTouchStart);
 
-    window.addEventListener(
-      'touchstart',
-      e => {
-        const touches = e.targetTouches;
-        const pointer = pointers[0];
-        for (let i = 0; i < touches.length; i++) {
-          const posX = scaleByPixelRatio(touches[i].clientX);
-          const posY = scaleByPixelRatio(touches[i].clientY);
-          updatePointerDownData(pointer, touches[i].identifier, posX, posY);
-        }
-      },
-      false
-    );
+    const handleTouchStart = (e: TouchEvent) => {
+      const touches = e.targetTouches;
+      const pointer = pointers[0];
+      for (let i = 0; i < touches.length; i++) {
+        const posX = scaleByPixelRatio(touches[i].clientX);
+        const posY = scaleByPixelRatio(touches[i].clientY);
+        updatePointerDownData(pointer, touches[i].identifier, posX, posY);
+      }
+    };
+    window.addEventListener('touchstart', handleTouchStart, false);
 
-    window.addEventListener(
-      'touchmove',
-      e => {
-        const touches = e.targetTouches;
-        const pointer = pointers[0];
-        for (let i = 0; i < touches.length; i++) {
-          const posX = scaleByPixelRatio(touches[i].clientX);
-          const posY = scaleByPixelRatio(touches[i].clientY);
-          updatePointerMoveData(pointer, posX, posY, pointer.color);
-        }
-      },
-      false
-    );
+    const handleTouchMove = (e: TouchEvent) => {
+      const touches = e.targetTouches;
+      const pointer = pointers[0];
+      for (let i = 0; i < touches.length; i++) {
+        const posX = scaleByPixelRatio(touches[i].clientX);
+        const posY = scaleByPixelRatio(touches[i].clientY);
+        updatePointerMoveData(pointer, posX, posY, pointer.color);
+      }
+    };
+    window.addEventListener('touchmove', handleTouchMove, false);
 
-    window.addEventListener('touchend', e => {
+    const handleTouchEnd = (e: TouchEvent) => {
       const touches = e.changedTouches;
       const pointer = pointers[0];
       for (let i = 0; i < touches.length; i++) {
         updatePointerUpData(pointer);
       }
-    });
+    };
+    window.addEventListener('touchend', handleTouchEnd);
+
+    /**
+     * The effect had no cleanup at all — the body ended on the dependency array.
+     * Everything this component owns is released here, and every step is
+     * idempotent and independent: `removeEventListener` for a listener that
+     * already took itself off is a no-op, `cancelAnimationFrame` on a stale or
+     * zero handle is a no-op, and losing an already-lost context is a no-op.
+     * Nothing here reads state another line has just cleared, so running it
+     * twice cannot throw and cannot undo half of itself.
+     */
+    return () => {
+      destroyed = true;
+      cancelAnimationFrame(frameId);
+      window.removeEventListener('mousedown', handleMouseDown);
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('touchstart', handleTouchStart);
+      window.removeEventListener('touchmove', handleTouchMove);
+      window.removeEventListener('touchend', handleTouchEnd);
+      // These two take themselves off once they have fired, so they are still
+      // bound exactly when the operator switched the effect without ever moving
+      // the pointer over the page.
+      document.body.removeEventListener('mousemove', handleFirstMouseMove);
+      document.body.removeEventListener('touchstart', handleFirstTouchStart);
+      // The element goes before the context does, and both go before anything
+      // can observe a half-torn-down state: a detached canvas is not a
+      // presentation, so a `webglcontextlost` fired on it reads as this teardown
+      // rather than as a fault on something the operator is looking at.
+      try {
+        container.removeChild(canvas);
+      } catch {
+        /* already gone */
+      }
+      // A dropped reference does not free the context: WebKit returns the slot
+      // only when the context object is destroyed, and the page hits the
+      // 16-context ceiling long before GC gets there. This component drives raw
+      // WebGL rather than three.js, so the release is the extension rather than
+      // `forceContextLoss()` — same act, same reason as `Lightning.tsx`.
+      gl.getExtension('WEBGL_lose_context')?.loseContext();
+    };
   }, [
     SIM_RESOLUTION,
     DYE_RESOLUTION,
@@ -1300,9 +1427,7 @@ export default function SplashCursor({
     COLOR
   ]);
 
-  return (
-    <div className="fixed top-0 left-0 z-50 pointer-events-none w-full h-full">
-      <canvas ref={canvasRef} id="fluid" className="w-screen h-screen block"></canvas>
-    </div>
-  );
+  // The canvas is not here: the effect allocates it and appends it to this
+  // container. See the note at the top of the effect.
+  return <div ref={containerRef} className="fixed top-0 left-0 z-50 pointer-events-none w-full h-full" />;
 }

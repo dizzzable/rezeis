@@ -1,7 +1,26 @@
 import { shaderMaterial, useTrailTexture } from '@react-three/drei';
-import { Canvas, CanvasProps, ThreeEvent, useThree } from '@react-three/fiber';
-import React, { useEffect, useMemo } from 'react';
+import { Canvas, CanvasProps, RootState, ThreeEvent, useThree } from '@react-three/fiber';
+import React, { useEffect, useMemo, useRef } from 'react';
 import * as THREE from 'three';
+
+/**
+ * Delete the GPU objects hanging off a scene before the context that owns them
+ * goes away. Losing the context frees the driver allocations but leaves every
+ * three.js wrapper — geometry buffers, material programs — attached to the
+ * renderer's internal maps.
+ */
+const releaseSceneResources = (scene: THREE.Object3D): void => {
+  scene.traverse(object => {
+    const mesh = object as Partial<THREE.Mesh>;
+    mesh.geometry?.dispose();
+    const material = mesh.material;
+    if (Array.isArray(material)) {
+      for (const entry of material) entry.dispose();
+    } else {
+      material?.dispose();
+    }
+  });
+};
 
 interface GooeyFilterProps {
   id?: string;
@@ -158,6 +177,31 @@ export default function PixelTrail({
   color = '#ffffff',
   className = ''
 }: PixelTrailProps) {
+  const rootRef = useRef<RootState | null>(null);
+
+  // React Three Fiber does release the context on unmount, but from inside a
+  // 500 ms setTimeout and without ever calling gl.dispose(). WebKit allows only
+  // 16 live WebGL contexts per web-content process before it starts recycling
+  // the oldest and handing out an unrecoverable SyntheticLostContext, and this
+  // is a GLOBAL cursor effect an operator toggles from a settings page while
+  // trying the other seven — so the half-second overlaps itself. Release it
+  // here instead, synchronously, while unmounting. Same repair, same reason as
+  // Antigravity / Beams / Dither / Silk.
+  useEffect(
+    () => () => {
+      const root = rootRef.current;
+      rootRef.current = null;
+      if (root === null) return;
+      releaseSceneResources(root.scene);
+      // dispose() detaches THREE.WebGLRenderer's own webglcontextlost /
+      // webglcontextrestored listeners, so the loss below cannot re-enter the
+      // restore path and rebuild what we are freeing.
+      root.gl.dispose();
+      root.gl.forceContextLoss();
+    },
+    []
+  );
+
   return (
     <>
       {gooeyFilter && <GooeyFilter id={gooeyFilter.id} strength={gooeyFilter.strength} />}
@@ -166,6 +210,10 @@ export default function PixelTrail({
         gl={glProps}
         className={`absolute z-1 ${className}`}
         style={gooeyFilter ? { filter: `url(#${gooeyFilter.id})` } : undefined}
+        onCreated={state => {
+          rootRef.current = state;
+          canvasProps.onCreated?.(state);
+        }}
       >
         <Scene
           gridSize={gridSize}

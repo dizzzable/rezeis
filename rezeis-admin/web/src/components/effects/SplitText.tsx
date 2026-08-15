@@ -4,7 +4,7 @@
  * Uses Motion (framer-motion) instead of GSAP to avoid extra deps.
  */
 import { motion } from 'motion/react'
-import { useAppearanceStore } from '@/lib/theme/appearance-store'
+import { useEffectsActive } from '@/lib/theme/effects-active'
 import { cn } from '@/lib/utils'
 
 interface SplitTextProps {
@@ -22,9 +22,13 @@ export function SplitText({
   stagger = 0.03,
   variant = 'slide',
 }: SplitTextProps) {
-  const visualEffects = useAppearanceStore((s) => s.visualEffects)
+  const effectsActive = useEffectsActive()
 
-  if (!visualEffects) {
+  // Returning before the split, not merely skipping the transition: each
+  // character is its own `motion.span` with its own animation driver, so the
+  // only way for the switch to actually cost nothing is for them never to
+  // exist. This is the wordmark on /sign-in.
+  if (!effectsActive) {
     return <span className={className}>{text}</span>
   }
 

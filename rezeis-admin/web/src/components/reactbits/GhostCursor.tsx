@@ -5,6 +5,15 @@ import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 
+/**
+ * How long the pointer stays "live" after its last move. A browser delivers
+ * `pointermove` at frame rate for as long as the pointer is moving, so a gap
+ * wider than a few frames means it stopped, left the window, or was never
+ * there — see the note on the listeners below for why that question replaced
+ * `pointerenter`/`pointerleave`.
+ */
+const POINTER_IDLE_MS = 100;
+
 type GhostCursorProps = {
   className?: string;
   style?: React.CSSProperties;
@@ -238,15 +247,22 @@ const GhostCursor: React.FC<GhostCursorProps> = ({
 
   useEffect(() => {
     const host = containerRef.current;
-    const parent = host?.parentElement;
-    if (!host || !parent) return;
+    if (!host) return;
+
+    // The wrapper belongs to whoever mounted this, and is left exactly as found.
+    //
+    // This used to force `position: relative` onto it, so that the host's
+    // `absolute inset-0` would have something to anchor to. Under
+    // EffectsProvider that wrapper is FixedOverlay, whose `fixed` comes from a
+    // CLASS — and an inline declaration beats a class, so the write turned a
+    // full-screen layer into an ordinary in-flow block with no size of its own
+    // (`inset-0` alone gives it none), taking the effect down with it. The
+    // "previous value" it saved was always the empty string, because there had
+    // never been an inline value to save, so the restore on unmount could not
+    // undo the damage either. The parent is only read from here on.
+    const parent = host.parentElement;
 
     let active = true;
-
-    const prevParentPos = parent.style.position;
-    if (!prevParentPos || prevParentPos === 'static') {
-      parent.style.position = 'relative';
-    }
 
     const renderer = new THREE.WebGLRenderer({
       antialias: !isTouch,
@@ -363,8 +379,11 @@ const GhostCursor: React.FC<GhostCursorProps> = ({
     resize();
     const ro = new ResizeObserver(resize);
     resizeObsRef.current = ro;
-    ro.observe(parent);
     ro.observe(host);
+    // The host is `absolute inset-0`, so it already resizes with the wrapper —
+    // but observing the wrapper too costs nothing and covers a parent that
+    // changes size without the browser re-laying-out the child in the same tick.
+    if (parent) ro.observe(parent);
 
     const start = typeof performance !== 'undefined' ? performance.now() : Date.now();
     const animate = () => {
@@ -380,6 +399,13 @@ const GhostCursor: React.FC<GhostCursorProps> = ({
 
       const mat = materialRef.current!;
       const comp = composerRef.current!;
+
+      // Liveness is derived from the last move rather than from an enter/leave
+      // pair, because there is no longer a box to enter or leave (see the
+      // listeners below). It has to be derived from something: with a pointer
+      // that is permanently "present" the branch below never runs, so the trail
+      // never fades and the rAF loop never shuts itself down.
+      pointerActiveRef.current = now - lastMoveTimeRef.current <= POINTER_IDLE_MS;
 
       if (pointerActiveRef.current) {
         velocityRef.current.set(
@@ -434,28 +460,39 @@ const GhostCursor: React.FC<GhostCursorProps> = ({
       }
     };
 
+    // Listen on `window`, not on the parent element.
+    //
+    // EffectsProvider mounts this inside FixedOverlay — `pointer-events: none`
+    // — and that declaration is inherited by the whole subtree, so neither the
+    // overlay nor anything under it can ever be the TARGET of a pointer event.
+    // All three listeners below were bound to `host.parentElement`, which IS
+    // that overlay, and not one of them ever fired: the effect mounted, held a
+    // WebGL context and a render loop, and followed nothing. Same defect and
+    // same repair as TextCursor.
+    //
+    // Coordinates are measured against the HOST, the element the canvas fills
+    // and is sized from — not the wrapper, which this component does not own.
+    // Under a `fixed inset-0` overlay that rect starts at (0,0), so client
+    // coordinates pass through unscaled; measuring keeps it correct anywhere
+    // else.
+    //
+    // `pointerenter`/`pointerleave` are dropped rather than moved. They are
+    // enter/leave events for a BOX, and `window` has none — but more to the
+    // point, neither does this effect any more: its box is the viewport, so
+    // "the pointer entered the effect" is true whenever the page has a pointer
+    // at all. What the fade actually needs is the opposite question — has the
+    // pointer stopped feeding us positions — and the timestamp written here
+    // already answers it, so the render loop ages the pointer out itself.
     const onPointerMove = (e: PointerEvent) => {
-      const rect = parent.getBoundingClientRect();
+      const rect = host.getBoundingClientRect();
       const x = THREE.MathUtils.clamp((e.clientX - rect.left) / Math.max(1, rect.width), 0, 1);
       const y = THREE.MathUtils.clamp(1 - (e.clientY - rect.top) / Math.max(1, rect.height), 0, 1);
       currentMouseRef.current.set(x, y);
-      pointerActiveRef.current = true;
-      lastMoveTimeRef.current = performance.now();
-      ensureLoop();
-    };
-    const onPointerEnter = () => {
-      pointerActiveRef.current = true;
-      ensureLoop();
-    };
-    const onPointerLeave = () => {
-      pointerActiveRef.current = false;
       lastMoveTimeRef.current = performance.now();
       ensureLoop();
     };
 
-    parent.addEventListener('pointermove', onPointerMove, { passive: true });
-    parent.addEventListener('pointerenter', onPointerEnter, { passive: true });
-    parent.addEventListener('pointerleave', onPointerLeave, { passive: true });
+    window.addEventListener('pointermove', onPointerMove, { passive: true });
 
     ensureLoop();
 
@@ -467,9 +504,7 @@ const GhostCursor: React.FC<GhostCursorProps> = ({
       runningRef.current = false;
       rafRef.current = null;
 
-      parent.removeEventListener('pointermove', onPointerMove);
-      parent.removeEventListener('pointerenter', onPointerEnter);
-      parent.removeEventListener('pointerleave', onPointerLeave);
+      window.removeEventListener('pointermove', onPointerMove);
       resizeObsRef.current?.disconnect();
 
       scene.clear();
@@ -484,9 +519,6 @@ const GhostCursor: React.FC<GhostCursorProps> = ({
 
       if (renderer.domElement && renderer.domElement.parentElement) {
         renderer.domElement.parentElement.removeChild(renderer.domElement);
-      }
-      if (!prevParentPos || prevParentPos === 'static') {
-        parent.style.position = prevParentPos;
       }
     };
   }, [

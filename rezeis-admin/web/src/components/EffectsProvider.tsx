@@ -16,6 +16,7 @@ import {
   type ClickEffectId,
 } from '@/lib/theme/effects-store'
 import { useAppearanceStore } from '@/lib/theme/appearance-store'
+import { usePrefersReducedMotion } from '@/lib/theme/effects-active'
 import { ClickSparkOverlay } from './effects/ClickSparkOverlay'
 
 // ── Lazy-loaded cursor effects ───────────────────────────────────────────────
@@ -35,8 +36,22 @@ export function EffectsProvider({ children }: { children: ReactNode }) {
   const effectsEnabled = useEffectsStore((s) => s.effectsEnabled)
   const cursorEffect = useEffectsStore((s) => s.cursorEffect)
   const clickEffect = useEffectsStore((s) => s.clickEffect)
+  const prefersReducedMotion = usePrefersReducedMotion()
 
-  const isActive = visualEffects && effectsEnabled
+  // The preference outranks the operator's pick, which is the stance the app
+  // already takes everywhere else — `MotionRoot` passes `reducedMotion="user"`
+  // to motion/react, and `index.css` names the CSS animations in a media block.
+  // Neither of those can reach what is rendered below: every cursor effect here
+  // is `requestAnimationFrame` or WebGL, and `animation: none` has nothing to
+  // switch off in a shader. So without this line someone who asked their system
+  // for less movement gets a full-screen fluid simulation for a dropdown they
+  // never touched.
+  //
+  // Gating here rather than inside each effect is deliberate and matches the
+  // note in `Tornado.tsx` / `WordGlobe.tsx`: the per-component gates those were
+  // vendored with are gone precisely because this belongs in one place — and
+  // because they froze on a held frame rather than not rendering at all.
+  const isActive = visualEffects && effectsEnabled && !prefersReducedMotion
 
   return (
     <>
@@ -109,11 +124,35 @@ function CursorEffectRenderer({ effect }: { effect: CursorEffectId }) {
         </FixedOverlay>
       )
 
-    // PixelTrail mounts a Canvas with absolute z-1 — needs fixed parent
+    // PixelTrail mounts a Canvas with absolute z-1 — needs fixed parent.
+    //
+    // It is the only cursor effect built on a react-three-fiber `<Canvas>`, and
+    // fiber owns that canvas's pointer transparency: with no `eventSource` it
+    // writes an INLINE `pointer-events: auto` on its container, which beats
+    // FixedOverlay's `pointer-events: none` CLASS, because a child that
+    // redeclares an inherited property wins for itself. Full-bleed at z-9999,
+    // that is a sheet over the whole panel that eats every click — reported by
+    // an operator as "the page is completely broken, only switching it off
+    // helps".
+    //
+    // Handing fiber an `eventSource` is its own documented answer, and the only
+    // repair that keeps the effect alive: the trail is drawn from
+    // `onPointerMove` on the mesh, so forcing `pointer-events: none` onto the
+    // canvas instead would give the page back and leave a dead effect behind.
+    // fiber then sets the canvas to `none` itself and listens on the body.
+    //
+    // `client` is required with an external event source and is correct only
+    // because of FixedOverlay: fiber divides the raw coordinate by the canvas
+    // size WITHOUT subtracting the canvas rect, so it needs a canvas whose
+    // origin is the viewport origin — which `fixed inset-0` is exactly what
+    // guarantees. Mount this anywhere else and the trail lands off the pointer.
     case 'pixelTrail':
       return (
         <FixedOverlay>
-          <PixelTrail color="#aa1d8b" />
+          <PixelTrail
+            color="#aa1d8b"
+            canvasProps={{ eventSource: document.body, eventPrefix: 'client' }}
+          />
         </FixedOverlay>
       )
 

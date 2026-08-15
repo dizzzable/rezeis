@@ -13,7 +13,7 @@ import {
 
 import { Card } from '@/components/ui/card'
 import { CountUp } from '@/components/CountUp'
-import { SpotlightCard } from '@/components/effects/SpotlightCard'
+import { HoverEffect } from '@/components/effects/HoverEffect'
 import { Noise } from '@/components/effects/Noise'
 
 import type { DashboardSummaryInterface } from './dashboard-api'
@@ -99,7 +99,12 @@ interface KpiItem {
 
 function KpiCard({ title, value, description, icon: Icon, trend }: KpiItem): JSX.Element {
   return (
-    <SpotlightCard className="h-full rounded-lg">
+    // `HoverEffect`, not `SpotlightCard` directly: the hover category has a
+    // <Select> in Settings → Appearance whose value nothing read while this
+    // call site hard-coded one of the three options. Picking "Блик" or "Нет"
+    // changed nothing here. The wrapper keeps the same className, so the
+    // default (`spotlight`) renders exactly the markup this used to.
+    <HoverEffect className="h-full rounded-lg">
       <Card className="relative flex h-full flex-col overflow-hidden p-3">
         <Noise opacity={0.03} />
         <div className="flex items-center justify-between gap-2">
@@ -119,6 +124,6 @@ function KpiCard({ title, value, description, icon: Icon, trend }: KpiItem): JSX
           {description ?? '\u00A0'}
         </p>
       </Card>
-    </SpotlightCard>
+    </HoverEffect>
   )
 }

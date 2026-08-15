@@ -522,6 +522,10 @@ export const en = {
       select: 'Cursor effect',
       previewHint: 'Move cursor here to preview',
       previewAction: 'Preview cursor effect',
+      // Drawn onto the canvas, one glyph per trail point, for the Text Trail
+      // preview only. Keep it short and uppercase — the marks are 14px and a
+      // long word simply repeats less often, it does not read better.
+      previewGlyphs: 'TEXT',
     },
     clickEffect: {
       title: 'Click Effect',

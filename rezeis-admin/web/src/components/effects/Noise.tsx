@@ -6,7 +6,7 @@
  * collisions when multiple Noise components are rendered on the same page.
  */
 import { useId } from 'react'
-import { useAppearanceStore } from '@/lib/theme/appearance-store'
+import { useEffectsActive } from '@/lib/theme/effects-active'
 import { cn } from '@/lib/utils'
 
 interface NoiseProps {
@@ -16,10 +16,13 @@ interface NoiseProps {
 }
 
 export function Noise({ className, opacity = 0.03 }: NoiseProps) {
-  const visualEffects = useAppearanceStore((s) => s.visualEffects)
+  const effectsActive = useEffectsActive()
   const filterId = useId()
 
-  if (!visualEffects) return null
+  // Returning null drops the whole `<feTurbulence>` subtree, not just its
+  // opacity: the filter is re-evaluated by the compositor for every repaint of
+  // the surface underneath, which is the cost the operator's switch is for.
+  if (!effectsActive) return null
 
   return (
     <div

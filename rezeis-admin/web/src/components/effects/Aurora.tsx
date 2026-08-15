@@ -8,7 +8,7 @@
  * re-rasterize a viewport-sized Gaussian blur every frame — one of the
  * main reasons /sign-in dropped frames and heated up iPhones.
  */
-import { useAppearanceStore } from '@/lib/theme/appearance-store'
+import { useEffectsActive } from '@/lib/theme/effects-active'
 import { cn } from '@/lib/utils'
 
 interface AuroraProps {
@@ -16,9 +16,13 @@ interface AuroraProps {
 }
 
 export function Aurora({ className }: AuroraProps) {
-  const visualEffects = useAppearanceStore((s) => s.visualEffects)
+  const effectsActive = useEffectsActive()
 
-  if (!visualEffects) return null
+  // Unmounting is the only real "off" here. The blobs are driven by CSS
+  // keyframes, which keep compositing on their own timeline no matter what the
+  // component stops doing — hiding the layer would leave them running behind
+  // the sign-in form, which is the screen this effect cost the most on.
+  if (!effectsActive) return null
 
   return (
     <div

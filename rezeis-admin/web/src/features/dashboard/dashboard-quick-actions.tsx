@@ -17,7 +17,7 @@ import {
   CardHeader,
   CardTitle,
 } from '@/components/ui/card'
-import { GlareHover } from '@/components/effects/GlareHover'
+import { HoverEffect } from '@/components/effects/HoverEffect'
 
 export function DashboardQuickActions(): JSX.Element {
   const { t } = useTranslation()
@@ -66,7 +66,12 @@ export function DashboardQuickActions(): JSX.Element {
       <CardContent>
         <div className="flex flex-wrap gap-2">
           {actions.map((action) => (
-            <GlareHover key={action.path + action.label} className="rounded-md">
+            // Was a hard-coded `<GlareHover>`, which is why this row looked the
+            // same under all three menu choices — and why the KPI tiles above
+            // and these buttons could never match. Both now ask the store the
+            // same question. Note the visible consequence: with the shipped
+            // default (`spotlight`) these buttons glow rather than glint.
+            <HoverEffect key={action.path + action.label} className="rounded-md">
               <Button
                 variant="outline"
                 size="sm"
@@ -77,7 +82,7 @@ export function DashboardQuickActions(): JSX.Element {
                 <action.icon className="h-4 w-4" />
                 {action.label}
               </Button>
-            </GlareHover>
+            </HoverEffect>
           ))}
         </div>
       </CardContent>

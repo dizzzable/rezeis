@@ -6,11 +6,14 @@
  * - Uses refs + direct DOM manipulation (no re-renders on mousemove)
  * - rAF-throttled gradient updates so we never write more than once per frame,
  *   even with many cards on screen.
- * - Mouse handlers are skipped when visualEffects is disabled to avoid
- *   running rect math for nothing.
+ * - Mouse handlers are skipped when effects are disabled to avoid running rect
+ *   math for nothing. That gate reads `useEffectsActive()` — the appearance
+ *   flag alone was never enough, because nothing in the UI sets it, so the
+ *   operator's switch on the "Визуальные эффекты" card left every KPI tile
+ *   still measuring and still lighting up. See lib/theme/effects-active.ts.
  */
 import { useEffect, useRef, useCallback, type ReactNode, type MouseEvent } from 'react'
-import { useAppearanceStore } from '@/lib/theme/appearance-store'
+import { useEffectsActive } from '@/lib/theme/effects-active'
 import { cn } from '@/lib/utils'
 
 interface SpotlightCardProps {
@@ -32,9 +35,11 @@ export function SpotlightCard({
   const overlayRef = useRef<HTMLDivElement>(null)
   const rafRef = useRef<number | null>(null)
   const pendingPosRef = useRef<{ x: number; y: number } | null>(null)
-  const visualEffects = useAppearanceStore((s) => s.visualEffects)
+  const effectsActive = useEffectsActive()
 
-  // Cancel any pending rAF on unmount.
+  // Cancel any pending rAF on unmount — and on the on→off transition, since a
+  // frame scheduled by the last mousemove before the operator flipped the
+  // switch would otherwise still run and paint one more gradient.
   useEffect(() => {
     return () => {
       if (rafRef.current !== null) {
@@ -42,7 +47,7 @@ export function SpotlightCard({
         rafRef.current = null
       }
     }
-  }, [])
+  }, [effectsActive])
 
   const flushPending = useCallback(() => {
     rafRef.current = null
@@ -80,11 +85,11 @@ export function SpotlightCard({
     <div
       ref={containerRef}
       className={cn('spotlight-effect relative overflow-hidden', className)}
-      onMouseMove={visualEffects ? handleMouseMove : undefined}
-      onMouseEnter={visualEffects ? handleMouseEnter : undefined}
-      onMouseLeave={visualEffects ? handleMouseLeave : undefined}
+      onMouseMove={effectsActive ? handleMouseMove : undefined}
+      onMouseEnter={effectsActive ? handleMouseEnter : undefined}
+      onMouseLeave={effectsActive ? handleMouseLeave : undefined}
     >
-      {visualEffects && (
+      {effectsActive && (
         <div
           ref={overlayRef}
           className="pointer-events-none absolute inset-0 z-0 opacity-0 transition-opacity duration-300"
