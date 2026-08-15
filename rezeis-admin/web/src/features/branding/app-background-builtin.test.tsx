@@ -32,7 +32,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import { renderWithProviders } from '@/test/test-utils'
 
-import { NETWORK_BG_GEOMETRY } from './app-background-builtin'
+import { NETWORK_BG_GEOMETRY } from './app-background-builtin-geometry'
 import {
   DEFAULT_APP_BACKGROUND_DRAFT,
   type BrandingAppBackgroundDraft,

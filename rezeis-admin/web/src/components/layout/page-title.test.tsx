@@ -100,7 +100,7 @@ const PAGES: readonly PageCase[] = [
 const BLOCK_LEVEL =
   'div,p,h2,h3,h4,h5,h6,section,article,ul,ol,li,table,form,blockquote,pre,hr,figure'
 
-function useAnimation(animation: TextAnimationId): void {
+function setAnimation(animation: TextAnimationId): void {
   useEffectsStore.setState({ textAnimation: animation, effectsEnabled: true })
   useAppearanceStore.setState({ visualEffects: true })
 }
@@ -116,7 +116,7 @@ async function mountAndFindHeading(page: PageCase): Promise<HTMLElement> {
 
 /** NBSP is how every split animation spells the space it keeps from collapsing. */
 function readable(node: HTMLElement | null): string {
-  return (node?.textContent ?? '').replace(/ /g, ' ').trim()
+  return (node?.textContent ?? '').replace(/\u00A0/g, ' ').trim()
 }
 
 beforeEach(() => {
@@ -136,14 +136,14 @@ describe.each(PAGES)('$key — the text-animation setting reaches this section',
   })
 
   it('renders a different heading once the operator picks an animation', async () => {
-    useAnimation('none')
+    setAnimation('none')
     const plain = (await mountAndFindHeading(page)).innerHTML
     cleanup()
 
     // `split` is the honest probe: it is the one animation `TitleEffect`
     // renders synchronously and without gsap/WebGL, so a difference here is
     // the setting arriving, not a lazy chunk landing at a lucky moment.
-    useAnimation('split')
+    setAnimation('split')
     const heading = await mountAndFindHeading(page)
 
     expect(heading.innerHTML).not.toBe(plain)
@@ -156,7 +156,7 @@ describe.each(PAGES)('$key — the text-animation setting reaches this section',
   })
 
   it('puts the heading back to plain text on "None"', async () => {
-    useAnimation('none')
+    setAnimation('none')
     const heading = await mountAndFindHeading(page)
 
     expect(heading.querySelectorAll('span span')).toHaveLength(0)
@@ -166,7 +166,7 @@ describe.each(PAGES)('$key — the text-animation setting reaches this section',
   it('puts the heading back to plain text when the effects switch is off', async () => {
     // `visualEffects` stays ON so a gate that reads the wrong flag cannot pass:
     // the switch the operator actually sees is `effectsEnabled`.
-    useAnimation('split')
+    setAnimation('split')
     useEffectsStore.setState({ effectsEnabled: false })
 
     const heading = await mountAndFindHeading(page)
@@ -176,7 +176,7 @@ describe.each(PAGES)('$key — the text-animation setting reaches this section',
   })
 
   it('keeps the section announceable to a screen reader while animating', async () => {
-    useAnimation('split')
+    setAnimation('split')
     await mountAndFindHeading(page)
 
     expect(
@@ -192,7 +192,7 @@ describe('PageTitle — the shared seam every section header goes through', () =
    * `<p>` or 7vw margin inside the `<h1>` pushes the button off the row.
    */
   function renderHeaderRow(animation: TextAnimationId) {
-    useAnimation(animation)
+    setAnimation(animation)
     return render(
       <div className="flex flex-wrap items-start justify-between gap-3">
         <PageTitle title="Plans" icon={Package} />
