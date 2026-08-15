@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
 
-import { createBrandingFormSchema, createInitialBrandingDraft } from './branding-form-schema'
+import {
+  BORDER_RADIUS_CLASSES,
+  CORNER_RADII_BY_LEGACY_CLASS,
+  createBrandingFormSchema,
+  createInitialBrandingDraft,
+} from './branding-form-schema'
 
 const messages = {
   hexInvalid: 'hex invalid',
@@ -330,5 +335,137 @@ describe('branding form schema', () => {
         'planCardStyles.starter.cardEffect',
       ]),
     )
+  })
+})
+
+/**
+ * The radius vocabulary the Reiwa cabinet guard accepts, pinned here on
+ * purpose. The cabinet copy lives in
+ * `reiwa/src/application/ports/public-config-persistence.port.ts`
+ * (`BORDER_RADII`), a different repository this build cannot import. A value
+ * the panel writes but the cabinet refuses does not surface as an error: the
+ * cabinet keeps serving its previous snapshot and its appearance freezes
+ * there indefinitely. A seventh member has to reach the cabinet FIRST.
+ */
+const CABINET_BORDER_RADII = [
+  'rounded-none',
+  'rounded-lg',
+  'rounded-xl',
+  'rounded-2xl',
+  'rounded-3xl',
+  'rounded-full',
+] as const
+
+function themeVariantDraft(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  const base = createInitialBrandingDraft()
+  return {
+    primary: base.primary,
+    primaryFg: base.primaryFg,
+    bgPrimary: base.bgPrimary,
+    bgSecondary: base.bgSecondary,
+    cardGradient: base.cardGradient,
+    cardPattern: base.cardPattern,
+    subscriptionCardText: base.subscriptionCardText,
+    cardEffect: base.cardEffect,
+    cardEffectProps: base.cardEffectProps,
+    cardEffectOpacity: base.cardEffectOpacity,
+    cardEffectsByIndex: [],
+    bgEffect: base.bgEffect,
+    appBackground: base.appBackground,
+    borderRadius: base.borderRadius,
+    cornerRadii: base.cornerRadii,
+    fontFamily: base.fontFamily,
+    surfaceTheme: base.surfaceTheme,
+    ...overrides,
+  }
+}
+
+describe('branding form schema — border radius vocabulary', () => {
+  it('matches the vocabulary the cabinet accepts, from the one list the panel keeps', () => {
+    expect([...BORDER_RADIUS_CLASSES]).toEqual([...CABINET_BORDER_RADII])
+    // The list is the key set of the corner-radii map, not a second copy of it.
+    expect([...BORDER_RADIUS_CLASSES]).toEqual(
+      Object.keys(CORNER_RADII_BY_LEGACY_CLASS),
+    )
+  })
+
+  it('accepts every radius class the cabinet accepts', () => {
+    for (const borderRadius of CABINET_BORDER_RADII) {
+      expect(
+        createBrandingFormSchema(messages).safeParse({
+          ...createInitialBrandingDraft(),
+          borderRadius,
+        }).success,
+      ).toBe(true)
+      expect(
+        createBrandingFormSchema(messages).safeParse({
+          ...createInitialBrandingDraft(),
+          themeVariants: {
+            light: themeVariantDraft({ borderRadius }),
+            dark: themeVariantDraft({ borderRadius }),
+          },
+        }).success,
+      ).toBe(true)
+    }
+  })
+
+  it('still trims a padded radius rather than refusing it', () => {
+    const result = createBrandingFormSchema(messages).safeParse({
+      ...createInitialBrandingDraft(),
+      borderRadius: '  rounded-3xl  ',
+    })
+
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.data.borderRadius).toBe('rounded-3xl')
+  })
+
+  it('refuses a radius the cabinet would reject, naming the value and the allowed set', () => {
+    for (const borderRadius of ['squircle', 'rounded-4xl', 'Rounded-2xl', 'rounded']) {
+      const result = createBrandingFormSchema(messages).safeParse({
+        ...createInitialBrandingDraft(),
+        borderRadius,
+      })
+
+      expect(result.success).toBe(false)
+      if (result.success) continue
+      const issue = result.error.issues.find(
+        (candidate) => candidate.path.join('.') === 'borderRadius',
+      )
+      expect(issue).toBeDefined()
+      expect(issue?.message).toContain(borderRadius)
+      for (const allowed of CABINET_BORDER_RADII) {
+        expect(issue?.message).toContain(allowed)
+      }
+    }
+  })
+
+  it('refuses the same radius inside a brightness variant', () => {
+    const result = createBrandingFormSchema(messages).safeParse({
+      ...createInitialBrandingDraft(),
+      themeVariants: {
+        light: themeVariantDraft({ borderRadius: 'squircle' }),
+        dark: themeVariantDraft(),
+      },
+    })
+
+    expect(result.success).toBe(false)
+    if (result.success) return
+    expect(result.error.issues.map((issue) => issue.path.join('.'))).toEqual(
+      expect.arrayContaining(['themeVariants.light.borderRadius']),
+    )
+  })
+
+  it('keeps every hex spelling the operator can already type', () => {
+    for (const primary of ['#abc', '#abcd', '#a1b2c3', '#a1b2c3d4']) {
+      expect(
+        createBrandingFormSchema(messages).safeParse({
+          ...createInitialBrandingDraft(),
+          primary,
+        }).success,
+      ).toBe(true)
+    }
   })
 })

@@ -50,6 +50,7 @@ import { useTabSync } from '@/lib/use-tab-sync'
 import { HUB_TABS } from '@/components/layout/admin-nav-config'
 import { useIsMobile } from '@/lib/use-is-mobile'
 import { withFeatureBundle } from '@/i18n/i18n'
+import { PageTitle } from '@/components/layout/page-title'
 
 const UserDetailPanel = lazy(
   withFeatureBundle('userDetail', () => import('./user-detail-panel')),
@@ -124,10 +125,7 @@ export default function UsersPage() {
     <div className="space-y-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h1 className="flex items-center gap-2 text-2xl font-bold tracking-tight">
-            <UsersIcon className="h-6 w-6" />
-            {t('usersPage.title')}
-          </h1>
+          <PageTitle icon={UsersIcon} title={t('usersPage.title')} />
           <p className="text-muted-foreground">
             {t('usersPage.subtitle')}
           </p>

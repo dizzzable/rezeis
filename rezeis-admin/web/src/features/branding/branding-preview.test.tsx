@@ -56,6 +56,7 @@ vi.mock('./card-effect-registry', async () => {
   }
 })
 
+import { resolveAppBackgroundReadability } from './app-background-contrast'
 import { BrandingPreview } from './branding-preview'
 import {
   PREVIEW_CONTEXT_RESTORE_GRACE_MS,
@@ -895,6 +896,22 @@ describe('BrandingPreview subscription card', () => {
     ).toBeNull()
   })
 
+  // 104 concept presets — and deliberately NOT 104 mounted previews.
+  //
+  // This swept the real component and exhausted the 4 GB worker heap partway
+  // through, which is the worst possible failure shape: the run printed
+  // "40 passed" and then died, so it read as progress while never reaching a
+  // single assertion in this test.
+  //
+  // Mounting was never what the sweep is about. The veil is decided entirely by
+  // `resolveAppBackgroundReadability`; the preview does nothing but print that
+  // answer into the three `data-preview-app-readability-*` attributes
+  // (`branding-preview.tsx` ~1044-1173). That printing is pinned separately —
+  // for every row of the recorded table — by
+  // `app-background-contrast.parity.test.tsx` ("the preview renders the cabinet
+  // answer, not one of its own"). Calling the resolver here and trusting that
+  // test for the binding covers exactly what the 104 mounts covered, minus the
+  // heap. Do not "restore" the renders.
   it('keeps direct shell copy AA-safe across all 104 concept backgrounds', () => {
     const failures: string[] = []
     const conceptPresets = THEME_PRESETS.filter(
@@ -903,24 +920,27 @@ describe('BrandingPreview subscription card', () => {
     )
 
     for (const preset of conceptPresets) {
-      const { container, unmount } = renderWithProviders(
-        <BrandingPreview
-          values={{ ...preset, themePresetId: preset.id }}
-        />,
-      )
-      const readability = container.querySelector(
-        '[data-preview-app-readability="wcag-direct-copy-zones"]',
-      )
-      const veilOpacity = readability
-        ? Number(
-            readability.getAttribute(
-              'data-preview-app-readability-opacity',
-            ),
-          )
-        : 0
+      const readability = resolveAppBackgroundReadability({
+        appBackground: preset.appBackground,
+        // `BrandingPreview` applies this default at its own destructure, so the
+        // sweep has to ask the resolver exactly what the component would ask.
+        bgPrimary: preset.bgPrimary ?? '#0a0a0a',
+        surfaceTheme: preset.surfaceTheme,
+        themePresetId: preset.id,
+      })
+      // The component renders the veil element only when the resolver returns
+      // one with a positive opacity, so a null-or-zero answer has to read as
+      // "no veil" here too — that is the `: 0` the querySelector used to give.
+      const rendered =
+        readability && readability.veilOpacity > 0 ? readability : null
+      const veilName = rendered
+        ? rendered.veilRgb === '0 0 0'
+          ? 'dark'
+          : 'light'
+        : 'none'
+      const veilOpacity = rendered?.veilOpacity ?? 0
       const veil =
-        readability?.getAttribute('data-preview-app-readability-veil') ===
-        'light'
+        veilName === 'light'
           ? ([255, 255, 255] as Rgb)
           : ([0, 0, 0] as Rgb)
       const foundation = themeHexRgb(preset.bgPrimary)
@@ -956,12 +976,11 @@ describe('BrandingPreview subscription card', () => {
           const ratio = contrast(text, supported)
           if (ratio < 4.5) {
             failures.push(
-              `${preset.id}:sample-${sampleIndex}:text-${textIndex}:${ratio.toFixed(3)}:veil-${readability?.getAttribute('data-preview-app-readability-veil') ?? 'none'}-${veilOpacity}`,
+              `${preset.id}:sample-${sampleIndex}:text-${textIndex}:${ratio.toFixed(3)}:veil-${veilName}-${veilOpacity}`,
             )
           }
         }
       }
-      unmount()
     }
 
     expect(conceptPresets).toHaveLength(104)

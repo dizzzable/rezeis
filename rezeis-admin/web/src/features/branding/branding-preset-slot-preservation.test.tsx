@@ -76,9 +76,23 @@ vi.mock('./concept-card-preset-gallery', async () => {
 
 import WebReiwaPage from './branding-page'
 import { CONCEPT_CARD_PRESETS } from './concept-card-presets'
-import { CONCEPT_THEME_PRESETS, createConceptThemeModeVariants } from './theme-presets'
+import {
+  CONCEPT_THEME_PRESETS,
+  createConceptThemeModeVariants,
+  createConceptThemePresetVisualPatch,
+} from './theme-presets'
+import { CONCEPT_PRESETS, getConceptSourceMode } from '@/lib/theme/concept-presets'
 import { en } from '@/i18n/en'
 import { ru } from '@/i18n/ru'
+
+// The API's own merge and read, not a re-implementation of them. Asserting the
+// PATCH body proves the panel sent two renderings; only this proves storage
+// kept them.
+import type { BrandingSettingsInterface } from '../../../../src/modules/settings/interfaces/branding-settings.interface'
+import {
+  mergeBrandingSettings,
+  readBrandingSettings,
+} from '../../../../src/modules/settings/utils/branding-settings.util'
 
 // The page mounts every tab's section tree plus the live preview, so the first
 // render is heavy under the parallel suite. Same allowance as branding-page.
@@ -462,6 +476,156 @@ describe('applying a preset over configured card positions', () => {
       'a preset that changed nothing about the slots still nagged the operator',
     ).not.toHaveBeenCalled()
   }, 30_000)
+})
+
+/**
+ * What is left in the database after Save — not what the PATCH carried.
+ *
+ * Everything above asserts the request body, and the request body was never
+ * wrong: the panel has been sending both renderings of a concept all along. The
+ * second one died one layer lower, in `mergeBrandingSettings`, which copied the
+ * root values into BOTH snapshots on any request that touched a visual field —
+ * and applying a concept touches several. The test that came closest (`keeps
+ * the overridden slot when a theme preset is applied`) asserts light and dark
+ * gradients differ IN THE PAYLOAD and stayed green through the whole defect.
+ *
+ * So these run the captured payload through the real merge, across a JSON
+ * boundary (Prisma stores a JSON column), and back through the real read.
+ */
+function saveThroughApi(
+  existing: unknown,
+  patch: Record<string, unknown>,
+): BrandingSettingsInterface {
+  return readBrandingSettings(
+    JSON.parse(
+      JSON.stringify(
+        mergeBrandingSettings({
+          existing,
+          patch: patch as Partial<Record<keyof BrandingSettingsInterface, unknown>>,
+        }),
+      ),
+    ),
+  )
+}
+
+/** The row the mocked GET was served from. */
+const storedRow = () => createBrandingPayload({ cardEffectsByIndex: OPERATOR_SLOTS })
+
+describe('what a concept leaves in storage after Save', () => {
+  it('keeps both brightness renderings of the concept the operator clicked', async () => {
+    const { user, patchSpy } = await renderPage()
+
+    await user.click(screen.getByRole('button', { name: 'A Vital Link' }))
+    const payload = await submitPatch(user, patchSpy)
+    const sent = payload['themeVariants'] as Record<
+      'light' | 'dark',
+      Record<string, unknown>
+    >
+
+    // Precondition: this concept really does render differently per brightness.
+    // Without it the assertions below would hold for a concept that ships one
+    // picture twice, which is exactly the state the defect produces.
+    expect(
+      sent.light['cardGradient'],
+      'the payload itself carries one gradient twice — the panel stopped ' +
+        'sending two renderings, so this test can no longer see the defect',
+    ).not.toBe(sent.dark['cardGradient'])
+    expect(sent.light['appBackground']).not.toEqual(sent.dark['appBackground'])
+
+    const stored = saveThroughApi(storedRow(), payload)
+
+    expect(
+      stored.themeVariants?.light.cardGradient,
+      'the stored light snapshot holds the DARK card gradient: saving ' +
+        'collapsed the concept into a single rendering, and the operator ' +
+        'cannot get the second one back without re-applying the concept',
+    ).toBe(sent.light['cardGradient'])
+    expect(stored.themeVariants?.dark.cardGradient).toBe(sent.dark['cardGradient'])
+    expect(
+      stored.themeVariants?.light.appBackground,
+      'the stored light snapshot holds the dark app background',
+    ).toEqual(readBrandingSettings(sent.light).appBackground)
+    expect(stored.themeVariants?.dark.appBackground).toEqual(
+      readBrandingSettings(sent.dark).appBackground,
+    )
+    // The root keeps the concept's default brightness, as the cabinet's
+    // non-variant fallback and the panel's own preview both read it.
+    expect(stored.cardGradient).toBe(payload['cardGradient'])
+  }, 30_000)
+
+  it('keeps them for every concept in the catalogue, not one hand-picked example', () => {
+    // Driving the page 104 times is not affordable, so this rebuilds the same
+    // request `applyConceptPreset` builds — the concept's visual patch on the
+    // root, its default brightness, and both snapshots — from the same
+    // builders the page calls, and checks what storage keeps.
+    const perBrightness: string[] = []
+    const droppedPair: string[] = []
+    const collapsedGradient: string[] = []
+    const collapsedBackground: string[] = []
+
+    for (const preset of CONCEPT_THEME_PRESETS) {
+      const descriptor = CONCEPT_PRESETS.find((candidate) => candidate.id === preset.id)
+      expect(descriptor, `${preset.id} is missing from the concept catalogue`).toBeDefined()
+      const built = createConceptThemeModeVariants(preset)
+      // `createThemeVariantsWithSlots` completes each snapshot with the live
+      // slot array before it leaves the page, and `readThemeVariant` drops a
+      // pair that is missing any field — including this one.
+      const variants = {
+        light: { ...built.light, cardEffectsByIndex: [] },
+        dark: { ...built.dark, cardEffectsByIndex: [] },
+      }
+      const differs =
+        variants.light.cardGradient !== variants.dark.cardGradient ||
+        JSON.stringify(variants.light.appBackground) !==
+          JSON.stringify(variants.dark.appBackground)
+      if (!differs) continue
+      perBrightness.push(preset.id)
+
+      const stored = saveThroughApi(createBrandingPayload(), {
+        ...createConceptThemePresetVisualPatch(preset),
+        themeModePolicy: 'fixed',
+        themeDefaultMode: getConceptSourceMode(descriptor!),
+        themeVariants: variants,
+      })
+      if (!stored.themeVariants) {
+        droppedPair.push(preset.id)
+        continue
+      }
+
+      for (const mode of ['light', 'dark'] as const) {
+        if (stored.themeVariants?.[mode].cardGradient !== variants[mode].cardGradient) {
+          collapsedGradient.push(`${preset.id}/${mode}`)
+        }
+        const expected = readBrandingSettings(variants[mode]).appBackground
+        if (
+          JSON.stringify(stored.themeVariants?.[mode].appBackground) !==
+          JSON.stringify(expected)
+        ) {
+          collapsedBackground.push(`${preset.id}/${mode}`)
+        }
+      }
+    }
+
+    expect(
+      perBrightness.length,
+      'almost the whole catalogue renders differently per brightness; a ' +
+        'handful of concepts here means the catalogue, not the merge, changed',
+    ).toBeGreaterThan(100)
+    expect(
+      droppedPair,
+      'storage refused the whole snapshot pair for these concepts, which is a ' +
+        'different defect from collapsing it and would make the two lists ' +
+        'below meaningless',
+    ).toEqual([])
+    expect(
+      collapsedGradient,
+      'these concepts lost their second card gradient on Save',
+    ).toEqual([])
+    expect(
+      collapsedBackground,
+      'these concepts lost their second app background on Save',
+    ).toEqual([])
+  }, 60_000)
 })
 
 describe('preserved-slot notice copy', () => {

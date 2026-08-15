@@ -7,6 +7,8 @@
  * row was migrated.
  */
 
+import { isDeepStrictEqual } from 'node:util';
+
 import {
   AppBackgroundKind,
   APP_BACKGROUND_KINDS,
@@ -16,6 +18,7 @@ import {
   AppBackgroundTextureSettings,
   BG_EFFECTS,
   BgEffect,
+  BORDER_RADIUS_CLASSES,
   BrandingThemeMode,
   BrandingThemeModePolicy,
   BrandingThemeVariant,
@@ -125,7 +128,7 @@ export function readBrandingSettings(value: unknown): BrandingSettingsInterface 
     appBackground: readAppBackground(record),
     iconColorMode: readIconColorMode(record, DEFAULT_BRANDING.iconColorMode),
     iconColors: readHexMap(record, 'iconColors'),
-    borderRadius: readString(record, 'borderRadius', DEFAULT_BRANDING.borderRadius),
+    borderRadius: readBorderRadius(record),
     cornerRadii: readCornerRadii(record),
     fontFamily: readString(record, 'fontFamily', DEFAULT_BRANDING.fontFamily),
     surfaceTheme: readSurfaceTheme(record),
@@ -135,6 +138,13 @@ export function readBrandingSettings(value: unknown): BrandingSettingsInterface 
     profileNaming: readProfileNaming(record),
   };
 }
+
+/**
+ * The fields a brightness snapshot and the root both carry, and therefore the
+ * only ones the merge below can ever copy from one to the other.
+ */
+type SynchronizedVisualField = keyof BrandingThemeVariant &
+  keyof BrandingSettingsInterface;
 
 /**
  * Merges a partial branding patch over the existing JSON value, returning a
@@ -193,12 +203,79 @@ export function mergeBrandingSettings(input: {
       }
     }
   }
+  // A card effect and its parameters are ONE decision, and only `cardEffect`
+  // says which parameters mean anything. They travel as two sibling patch
+  // fields, so the documented partial-patch rule — whatever is absent is
+  // preserved — carried the replaced effect's tuning onto the new one:
+  // `{ cardEffect: 'NONE' }` kept aurora's colour stops, amplitude, blend and
+  // speed, and the next `{ cardEffect: 'threads' }` drew threads with them.
+  //
+  // `readCardEffectSlots` and `readPlanCardStyles` need no equivalent rule
+  // because they cannot have the defect, not because they were written more
+  // carefully: a slot and a plan style each arrive as ONE object, so an absent
+  // `cardEffectProps` is an empty one, and their `NONE` guards only have to drop
+  // what the request itself carried. The global effect is the only one whose two
+  // halves can be updated apart, which is why the repair belongs here and not in
+  // `readBrandingSettings`: at read time there is no request to compare against,
+  // so a stored `threads` + aurora parameters is indistinguishable from a
+  // deliberate configuration, and a `NONE`-only guard would still let
+  // aurora → threads through.
+  //
+  // Only a real change resets. The panel resends every dirty field, so a save
+  // about something else repeats the current effect, and the parameters the
+  // operator tuned have to survive that. The panel also sends fresh defaults on
+  // every effect change of its own — that is what has been hiding this — so this
+  // rule is what any OTHER client of the API gets.
+  const cardEffectPropsReset =
+    input.patch.cardEffect !== undefined &&
+    input.patch.cardEffectProps === undefined &&
+    readCardEffect(merged, current.cardEffect) !== current.cardEffect;
+  if (cardEffectPropsReset) {
+    merged.cardEffectProps = {};
+  }
   // A direct root visual edit is an explicit operator override. Theme
   // variants are complete snapshots, so leaving an old value in either
   // snapshot would make the cabinet revive it whenever the user changes
-  // light/dark mode. A theme-only PATCH intentionally does not enter this
-  // branch: concepts are still allowed to define different starting visuals
-  // per brightness.
+  // light/dark mode.
+  //
+  // What this block must NOT do is read a concept as an override. A concept
+  // ships two genuinely different renderings, the panel sends both, and it also
+  // copies the DEFAULT brightness one onto the root — the root is the cabinet's
+  // non-variant fallback and the panel's own preview source, so it cannot be
+  // left behind. The comment here used to assert that "a theme-only PATCH
+  // intentionally does not enter this branch". No such request exists:
+  // `applyConceptVisualPatch` writes `cardGradient`, `cardEffectProps`,
+  // `bgEffect` and `appBackground` to the root every time, so every concept
+  // application entered the branch the comment excused it from, and the second
+  // rendering of all 104 concepts died here on the first Save. The brightness
+  // selector copies a snapshot onto the root for the same reason and lost the
+  // other one the same way.
+  //
+  // The question is therefore asked per field: does the root carry something
+  // this payload's snapshots do not describe?
+  //
+  //   - root ≠ the snapshot for the default brightness — nothing here put that
+  //     value there, so it is an operator override and both snapshots take it.
+  //   - root = that snapshot — the root is a COPY of a rendering the payload
+  //     already contains, so the other brightness keeps its own.
+  //
+  // Two alternatives were weighed and rejected. An ownership marker in the
+  // shape of `cardGradientSource` / `brandPaletteSource` answers a question that
+  // OUTLIVES the request — which of two stored values the cabinet resolves,
+  // forever — and pays for it with a persisted field whose value must be guessed
+  // for every install predating it. Here the question is asked once, at save
+  // time, and the request already contains the answer; a marker would be durable
+  // state maintained for a decision that never leaves this function. The bare
+  // presence of `themeVariants` is not enough either: one request can carry a
+  // concept's snapshots AND an operator decision the snapshots know nothing
+  // about — apply a concept, change the animation, save — and "snapshots always
+  // win" would silently drop the second half.
+  //
+  // Comparing against the DEFAULT brightness specifically, rather than "either
+  // snapshot", is what makes the equality mean "copy" instead of coincidence:
+  // `applyConceptPreset` writes `themeDefaultMode` and the root in one go, and
+  // the brightness selector copies the newly selected snapshot onto the root
+  // while setting the same field.
   //
   // This block only ever writes the GLOBAL fields of a snapshot. The
   // per-position array is never rewritten from a sibling field, and the root
@@ -217,61 +294,74 @@ export function mergeBrandingSettings(input: {
     const rootVisuals = readBrandingSettings(merged);
     const variants = readThemeVariants({ themeVariants: merged.themeVariants });
     if (variants) {
+      // The DEFAULT brightness, read from the payload being saved — not a fixed
+      // `light`. `themeDefaultMode` defaults to `dark`, and the whole test above
+      // is "is the root a copy of the rendering the panel just put there": the
+      // panel copies the DEFAULT brightness onto the root, so comparing against
+      // the other one reports every concept application as an operator override
+      // and destroys the second rendering — the exact defect this block is here
+      // to stop.
+      const defaultVariant = variants[readThemeDefaultMode(merged)];
+      const overrides: Partial<Record<SynchronizedVisualField, unknown>> = {};
+      /**
+       * Copies one root value into both snapshots, but only when the request
+       * changed it AND it is not simply the default-brightness rendering
+       * copied onto the root.
+       */
+      const synchronizeField = (
+        key: SynchronizedVisualField,
+        patched: boolean,
+      ): void => {
+        if (patched && !isDeepStrictEqual(rootVisuals[key], defaultVariant[key])) {
+          overrides[key] = rootVisuals[key];
+        }
+      };
+      synchronizeField('cardGradient', input.patch.cardGradient !== undefined);
+      synchronizeField('cardPattern', input.patch.cardPattern !== undefined);
+      synchronizeField('cardEffect', input.patch.cardEffect !== undefined);
+      // A reset counts as a change: the snapshots must not go on rendering the
+      // new effect with the parameters of the one it replaced.
+      synchronizeField(
+        'cardEffectProps',
+        input.patch.cardEffectProps !== undefined || cardEffectPropsReset,
+      );
+      synchronizeField(
+        'cardEffectOpacity',
+        input.patch.cardEffectOpacity !== undefined,
+      );
+      synchronizeField('bgEffect', input.patch.bgEffect !== undefined);
+      synchronizeField('appBackground', input.patch.appBackground !== undefined);
+      // A supplied array is a deliberate new slot configuration and must
+      // survive a combined root-gradient + slot PATCH.
+      //
+      // A PATCH that does NOT carry the array leaves every slot exactly as
+      // stored, in this snapshot and in the root array — including a PATCH that
+      // changes `cardGradient`.
+      //
+      // This used to null every slot's `cardGradient` on a gradient-only PATCH,
+      // justified by "a root gradient has no slot mode discriminator, so a stale
+      // per-slot copy would mask the new global choice". Both halves are false.
+      // `readCardEffectSlots` stamps `mode` on every slot it returns, legacy
+      // entries that never had one included, so the discriminator always exists.
+      // And a slot gradient is not a stale copy: Reiwa resolves it ahead of the
+      // global gradient WITHOUT consulting `mode` (reiwa
+      // `subscription-card-visual.ts`), and the only writer of one is the
+      // operator's own per-position control — a concept/card preset never
+      // touches `cardEffectsByIndex`. So the rule deleted operator work on the
+      // next Save after any preset click, because a preset PATCHes
+      // `cardGradient` while the untouched slot array stays out of the request.
+      //
+      // Nothing unusable survives instead: `readCardEffectSlots` has already
+      // replaced any gradient `isSafeBrandingGradient` rejects (`url(...)`,
+      // `image-set(...)`, a declaration break) with `null` in both
+      // `rootVisuals` and `variant` before this runs.
+      synchronizeField(
+        'cardEffectsByIndex',
+        input.patch.cardEffectsByIndex !== undefined,
+      );
       const synchronizeVariant = (variant: BrandingThemeVariant) => ({
         ...variant,
-        ...(input.patch.cardGradient !== undefined
-          ? {
-              cardGradient: rootVisuals.cardGradient,
-            }
-          : {}),
-        ...(input.patch.cardPattern !== undefined
-          ? { cardPattern: rootVisuals.cardPattern }
-          : {}),
-        ...(input.patch.cardEffect !== undefined
-          ? { cardEffect: rootVisuals.cardEffect }
-          : {}),
-        ...(input.patch.cardEffectProps !== undefined
-          ? { cardEffectProps: rootVisuals.cardEffectProps }
-          : {}),
-        ...(input.patch.cardEffectOpacity !== undefined
-          ? { cardEffectOpacity: rootVisuals.cardEffectOpacity }
-          : {}),
-        ...(input.patch.bgEffect !== undefined
-          ? { bgEffect: rootVisuals.bgEffect }
-          : {}),
-        ...(input.patch.appBackground !== undefined
-          ? { appBackground: rootVisuals.appBackground }
-          : {}),
-        ...(input.patch.cardEffectsByIndex !== undefined
-          ? {
-              // A supplied array is a deliberate new slot configuration and
-              // must survive a combined root-gradient + slot PATCH.
-              cardEffectsByIndex: rootVisuals.cardEffectsByIndex,
-            }
-          : // A PATCH that does not carry the array leaves every slot exactly
-            // as stored, in this snapshot and in the root array — including a
-            // PATCH that changes `cardGradient`.
-            //
-            // This branch used to null every slot's `cardGradient` on a
-            // gradient-only PATCH, justified by "a root gradient has no slot
-            // mode discriminator, so a stale per-slot copy would mask the new
-            // global choice". Both halves are false. `readCardEffectSlots`
-            // stamps `mode` on every slot it returns, legacy entries that
-            // never had one included, so the discriminator always exists. And
-            // a slot gradient is not a stale copy: Reiwa resolves it ahead of
-            // the global gradient WITHOUT consulting `mode` (reiwa
-            // `subscription-card-visual.ts`), and the only writer of one is
-            // the operator's own per-position control — a concept/card preset
-            // never touches `cardEffectsByIndex`. So the rule deleted operator
-            // work on the next Save after any preset click, because a preset
-            // PATCHes `cardGradient` while the untouched slot array stays out
-            // of the request.
-            //
-            // Nothing unusable survives instead: `readCardEffectSlots` has
-            // already replaced any gradient `isSafeBrandingGradient` rejects
-            // (`url(...)`, `image-set(...)`, a declaration break) with `null`
-            // in both `rootVisuals` and `variant` before this runs.
-            {}),
+        ...overrides,
       });
       merged.themeVariants = {
         light: synchronizeVariant(variants.light),
@@ -469,11 +559,59 @@ function readThemeVariant(
     cardEffectsByIndex: readCardEffectSlots(record, 'cardEffectsByIndex'),
     bgEffect: readBgEffect(record, DEFAULT_BRANDING.bgEffect),
     appBackground: readAppBackground(record),
-    borderRadius: readString(record, 'borderRadius', DEFAULT_BRANDING.borderRadius),
+    borderRadius: readBorderRadius(record),
     cornerRadii: readCornerRadii(record),
     fontFamily: readString(record, 'fontFamily', DEFAULT_BRANDING.fontFamily),
     surfaceTheme: readSurfaceTheme(record),
   };
+}
+
+/**
+ * Reads `borderRadius` — at the root and inside each brightness snapshot, which
+ * is why it takes the containing record rather than the whole settings object.
+ *
+ * WHY THIS EXISTS. `borderRadius` used to be the only branding vocabulary
+ * checked on the way IN (`@IsBorderRadiusClass()` on the DTO) but not on the way
+ * OUT: a bare `readString` passed any non-empty string through. Every other
+ * vocabulary in this file — `bgEffect`, `cardEffect`, `cardLogo`,
+ * `iconColorMode`, `appBackground.kind`, `texturePreset`, `navItems[].id` — is
+ * enforced twice, and the DTO is not the only way a value gets into the column:
+ * a legacy row, a restored backup, a seed, a direct DB edit or a future
+ * migration all arrive here having never seen a validator.
+ *
+ * WHAT AN UNKNOWN VALUE COSTS. The cabinet checks this token in two places
+ * (`public-config-persistence.port.ts`: at the branding root, and inside
+ * `isThemeVariant` for each snapshot) and reacts to either failure by refusing
+ * the ENTIRE public config — it then keeps serving whatever snapshot it last
+ * accepted, silently and indefinitely. One unrenderable token therefore costs
+ * every colour, logo, font and nav decision the operator has.
+ *
+ * WHY REJECT MEANS SUBSTITUTE, NOT PROPAGATE. Merely refusing to emit the value
+ * — throwing, or returning nothing and letting the caller drop branding —
+ * reproduces the cabinet's own all-or-nothing reaction one layer earlier and
+ * leaves the cabinet just as dark. Substituting `DEFAULT_BRANDING.borderRadius`
+ * (`rounded-2xl`) costs exactly one wrong corner radius on a configuration that
+ * was already unrenderable, and keeps every other branding value alive. The
+ * default is itself a member of `BORDER_RADIUS_CLASSES`, so the reader's output
+ * is always something the cabinet accepts. It is the same trade `readCardLogo`,
+ * `readBgEffect` and `readAppBackground` already make for their own
+ * vocabularies; this field was the outlier.
+ *
+ * A VALID VALUE IS UNCHANGED, trimming included — `'  rounded-3xl  '` still
+ * reads as `'rounded-3xl'`, exactly as `readString` has always returned it and
+ * exactly what the DTO's `@Transform` produces on the write path.
+ *
+ * NOT CHANGED HERE: the presence gate in `readThemeVariant` above, which drops
+ * an entire variant pair when `borderRadius` is absent, non-string or blank.
+ * That gate asks "is this snapshot complete", and widening it to a membership
+ * test would make one unknown token destroy both snapshots — the opposite of
+ * the trade above.
+ */
+function readBorderRadius(record: Record<string, unknown>): string {
+  const value = readString(record, 'borderRadius', DEFAULT_BRANDING.borderRadius);
+  return (BORDER_RADIUS_CLASSES as readonly string[]).includes(value)
+    ? value
+    : DEFAULT_BRANDING.borderRadius;
 }
 
 function readHex(record: Record<string, unknown>, key: string, fallback: string): string {
@@ -672,6 +810,15 @@ function readCardEffectSlots(record: Record<string, unknown>, key: string): Card
  * (unknown → `NONE`), gradient string, and texture sub-block. Backward-compat:
  * a payload with only `effect`/`props`/`opacity` (no `kind`) infers
  * `kind = effect !== 'NONE' ? 'effect' : 'none'`. Absent/invalid → default.
+ *
+ * THE `none` FALLBACK IS LOAD-BEARING and must never become `plain`. `none` is
+ * the cabinet's built-in `<NetworkBg>` pattern, `plain` is the flat colour, and
+ * every stored payload that has no `kind` — plus every one that has `kind:
+ * 'none'` — has been rendering the pattern since the day it was written.
+ * Redirecting either of them to `plain` would strip the background off every
+ * installation that never opened this control, which is exactly the change this
+ * rework exists to avoid: the operator-visible text was wrong, the picture was
+ * not.
  */
 function readAppBackground(record: Record<string, unknown>): AppBackgroundSettings {
   const value = record['appBackground'];
@@ -967,8 +1114,30 @@ function readNullableGradient(
  * (deduped, preserving operator order), defaults `visible` to true, appends
  * any not-yet-listed destinations (hidden) so the admin always sees the full
  * set, forces essentials (`subscriptions`/`settings`) visible, and caps the
- * visible count to `NAV_MAX_VISIBLE` (overflow → hidden, essentials exempt).
+ * OPTIONAL visible destinations at `NAV_MAX_VISIBLE` minus the essentials
+ * (overflow → hidden, operator order decides which survive).
  * Absent/non-array → the built-in default nav.
+ *
+ * THE CAP IS ON THE OPTIONAL DESTINATIONS, and that distinction is what the
+ * cabinet actually draws. `normalizeNavItems`
+ * (`reiwa/web/src/components/layout/nav-config.ts`) shows the two essentials
+ * unconditionally and keeps `.slice(0, 3)` of the visible optional ones: two
+ * plus three, five tabs — which is what `NAV_MAX_VISIBLE` has always meant.
+ *
+ * This used to count the essentials toward the budget AND exempt them from it,
+ * so the real optional budget was `NAV_MAX_VISIBLE` minus however many
+ * essentials happened to sort before the overflow point: order-dependent, and
+ * FOUR with the usual layout (`subscriptions` first, `settings` last). The
+ * panel then persisted four optional destinations and reported them all
+ * enabled while the cabinet drew three, with nothing anywhere naming the one it
+ * dropped. The panel's own picker (`web/.../nav-config-section.tsx`) blocks the
+ * fourth, so this was only reachable through a payload the picker did not
+ * build — an API client, a legacy row, a restored backup, a seed — which is
+ * exactly the class of input this reader exists to normalize.
+ *
+ * The budget is DERIVED from the two constants rather than written as `3`, so
+ * that a third essential keeps the two sides agreeing instead of silently
+ * moving the panel's answer only.
  */
 function readNavItems(record: Record<string, unknown>): NavItemSetting[] {
   const value = record['navItems'];
@@ -992,16 +1161,23 @@ function readNavItems(record: Record<string, unknown>): NavItemSetting[] {
   for (const id of NAV_DESTINATIONS) {
     if (!seen.has(id)) out.push({ id, visible: false });
   }
-  // Force essentials visible + cap the visible count (essentials exempt).
-  let visibleCount = 0;
+  // Force essentials visible, then spend the optional budget in operator order.
+  // The essentials are subtracted from the budget ONCE, here, instead of each
+  // consuming a slot wherever it happens to sit in the list.
+  const optionalBudget = Math.max(
+    0,
+    NAV_MAX_VISIBLE - NAV_ESSENTIAL_DESTINATIONS.length,
+  );
+  let visibleOptional = 0;
   return out.map((item) => {
-    const essential = (NAV_ESSENTIAL_DESTINATIONS as readonly string[]).includes(item.id);
-    let visible = essential ? true : item.visible;
-    if (visible) {
-      visibleCount += 1;
-      if (visibleCount > NAV_MAX_VISIBLE && !essential) visible = false;
+    if ((NAV_ESSENTIAL_DESTINATIONS as readonly string[]).includes(item.id)) {
+      return { id: item.id, visible: true };
     }
-    return { id: item.id, visible };
+    if (!item.visible) {
+      return { id: item.id, visible: false };
+    }
+    visibleOptional += 1;
+    return { id: item.id, visible: visibleOptional <= optionalBudget };
   });
 }
 

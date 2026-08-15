@@ -22,6 +22,7 @@ import {
 import { Switch } from '@/components/ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { FadeIn } from '@/lib/motion';
+import { PageTitle } from '@/components/layout/page-title';
 import { PromocodeForm, type PromocodeFormData } from './promocode-form';
 import { PromocodesStatsTab } from './promocodes-stats-tab';
 
@@ -89,9 +90,7 @@ export default function PromocodesPage() {
       <FadeIn>
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
-              <Tag className="h-6 w-6" /> {t('promocodesIndex.title')}
-            </h1>
+            <PageTitle icon={Tag} title={t('promocodesIndex.title')} />
             <p className="text-muted-foreground">{t('promocodesIndex.subtitle')}</p>
           </div>
           <Button onClick={() => setShowCreate(true)}>

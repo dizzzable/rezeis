@@ -18,6 +18,7 @@ import {
   ValidateIf,
   ValidateBy,
   ValidateNested,
+  type ValidationArguments,
   type ValidationOptions,
 } from 'class-validator';
 import { Transform, Type } from 'class-transformer';
@@ -29,6 +30,7 @@ import {
   AppBackgroundTexture,
   BG_EFFECTS,
   BgEffect,
+  BORDER_RADIUS_CLASSES,
   CARD_EFFECTS,
   CARD_EFFECT_SLOT_MODES,
   CARD_LOGO_PRESETS,
@@ -66,6 +68,83 @@ const BRANDING_UPLOAD_PATH_PATTERN =
 // contrast depend on the underlying animated artwork and let the admin
 // preview disagree with the runtime compositor.
 const OPAQUE_HEX_COLOR_PATTERN = /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i;
+/**
+ * Every hex spelling the settings reader accepts, character for character the
+ * same as `HEX_PATTERN` in `branding-settings.util.ts` and in the panel form
+ * schema.
+ *
+ * It exists because `@IsHexColor()` (validator.js) treats the leading `#` as
+ * OPTIONAL: `ff4081`, `abc` and `a1b2c3d4` all pass it. The reader requires
+ * the `#` and falls back to the DEFAULT colour when it is missing, so a client
+ * that omits it gets `200 OK` and a palette it never asked for. That is not a
+ * rejected request the caller can react to — it is a silent substitution.
+ * Every `@IsHexColor()` in this file is therefore paired with this pattern.
+ */
+const HEX_COLOR_PATTERN = /^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
+const HEX_COLOR_MESSAGE =
+  '$property must be a hexadecimal colour with a leading # (#rgb, #rgba, #rrggbb or #rrggbbaa)';
+
+/**
+ * Bounded, echo-safe rendering of a rejected value for an error message.
+ *
+ * `$`-signs are stripped because class-validator interpolates `$value` (and
+ * friends) into the finished message: an attacker-chosen value containing that
+ * token would otherwise expand back into the full, unbounded input.
+ */
+function describeRejectedValue(value: unknown): string {
+  if (typeof value !== 'string') return typeof value;
+  const snippet = value.slice(0, 40).replace(/\$/g, '');
+  return value.length > 40
+    ? `"${snippet}…" (${value.length} chars)`
+    : `"${snippet}"`;
+}
+
+/**
+ * Refuses a radius the Reiwa cabinet cannot render, naming the allowed set.
+ *
+ * The vocabulary itself lives in `branding-settings.interface.ts` and is shared
+ * with `readBorderRadius` on the read path, so a request refused here and a
+ * persisted row repaired there can never be judged by two lists that have
+ * drifted apart. See the comment on `BORDER_RADIUS_CLASSES` for why a value the
+ * cabinet rejects costs it every other branding field too.
+ */
+function IsBorderRadiusClass(
+  validationOptions?: ValidationOptions,
+): PropertyDecorator {
+  return ValidateBy(
+    {
+      name: 'isBorderRadiusClass',
+      validator: {
+        validate: (value: unknown): boolean =>
+          typeof value === 'string' &&
+          (BORDER_RADIUS_CLASSES as readonly string[]).includes(value),
+        defaultMessage: (args?: ValidationArguments): string =>
+          `$property must be one of ${BORDER_RADIUS_CLASSES.join(
+            ', ',
+          )}; received ${describeRejectedValue(args?.value)}`,
+      },
+    },
+    validationOptions,
+  );
+}
+
+/**
+ * `@IsHexColor()` plus the leading `#` the reader insists on. Applied as one
+ * decorator so no colour field can pick up half of the pair.
+ */
+function IsBrandingHexColour(
+  validationOptions?: ValidationOptions,
+): PropertyDecorator {
+  const isHexShape = IsHexColor(validationOptions);
+  const hasLeadingHash = Matches(HEX_COLOR_PATTERN, {
+    message: HEX_COLOR_MESSAGE,
+    ...validationOptions,
+  });
+  return (target: object, propertyKey: string | symbol): void => {
+    isHexShape(target, propertyKey);
+    hasLeadingHash(target, propertyKey);
+  };
+}
 
 function isAllowedBrandingImageUrl(value: string): boolean {
   if (
@@ -123,7 +202,16 @@ function IsBrandingGradient(
   );
 }
 
-function hasOnlyAllowedPlanTextureUrls(value: unknown): boolean {
+/**
+ * Runs `predicate` over every well-shaped per-plan style in a `planCardStyles`
+ * map. A map or an entry of the wrong SHAPE is tolerated here — `@IsObject()`
+ * and the orphan-tolerant reader own that — so each validator below judges
+ * only the single property it is named for.
+ */
+function everyPlanCardStyle(
+  value: unknown,
+  predicate: (style: Record<string, unknown>) => boolean,
+): boolean {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     return true;
   }
@@ -131,7 +219,13 @@ function hasOnlyAllowedPlanTextureUrls(value: unknown): boolean {
     if (typeof style !== 'object' || style === null || Array.isArray(style)) {
       return true;
     }
-    const textureUrl = (style as Record<string, unknown>)['textureUrl'];
+    return predicate(style as Record<string, unknown>);
+  });
+}
+
+function hasOnlyAllowedPlanTextureUrls(value: unknown): boolean {
+  return everyPlanCardStyle(value, (style) => {
+    const textureUrl = style['textureUrl'];
     if (textureUrl === undefined || textureUrl === null) return true;
     if (typeof textureUrl !== 'string') return false;
     const normalized = textureUrl.trim();
@@ -162,6 +256,97 @@ function HasSafePlanGradients(
     {
       name: 'hasSafePlanGradients',
       validator: {
+        validate: (value: unknown): boolean =>
+          everyPlanCardStyle(value, (style) => {
+            const gradient = style['gradient'];
+            return (
+              gradient === undefined ||
+              gradient === null ||
+              isSafeBrandingGradient(gradient)
+            );
+          }),
+        defaultMessage: (): string =>
+          'planCardStyles gradient values must contain only valid CSS gradient layers',
+      },
+    },
+    validationOptions,
+  );
+}
+
+function HasHexPlanAccents(
+  validationOptions?: ValidationOptions,
+): PropertyDecorator {
+  return ValidateBy(
+    {
+      name: 'hasHexPlanAccents',
+      validator: {
+        validate: (value: unknown): boolean =>
+          everyPlanCardStyle(value, (style) => {
+            const accent = style['accent'];
+            if (accent === undefined || accent === null) return true;
+            if (typeof accent !== 'string') return false;
+            // The reader trims before testing, so a padded colour survives the
+            // round trip; an empty string is the "no accent" spelling.
+            const normalized = accent.trim();
+            return (
+              normalized.length === 0 || HEX_COLOR_PATTERN.test(normalized)
+            );
+          }),
+        defaultMessage: (): string =>
+          'planCardStyles accent values must be hexadecimal colours with a leading # (#rgb, #rgba, #rrggbb or #rrggbbaa)',
+      },
+    },
+    validationOptions,
+  );
+}
+
+function HasAllowedPlanTexturePresets(
+  validationOptions?: ValidationOptions,
+): PropertyDecorator {
+  return ValidateBy(
+    {
+      name: 'hasAllowedPlanTexturePresets',
+      validator: {
+        validate: (value: unknown): boolean =>
+          everyPlanCardStyle(value, (style) => {
+            const texturePreset = style['texturePreset'];
+            if (texturePreset === undefined || texturePreset === null) {
+              return true;
+            }
+            if (typeof texturePreset !== 'string') return false;
+            // No trim: the reader compares the raw string against the
+            // allowlist, so ` dots ` would be dropped just like `plaid`.
+            return (
+              texturePreset.length === 0 ||
+              (APP_BACKGROUND_TEXTURES as readonly string[]).includes(
+                texturePreset,
+              )
+            );
+          }),
+        defaultMessage: (): string =>
+          `planCardStyles texturePreset values must be one of ${APP_BACKGROUND_TEXTURES.join(
+            ', ',
+          )}`,
+      },
+    },
+    validationOptions,
+  );
+}
+
+/**
+ * `iconColors` is a dynamic-key map, so the reader (`readHexMap`) is what
+ * normally shapes it: it keeps the first 100 entries whose key is 1–64 chars
+ * and whose value is a hex colour, and drops everything else. Dropping is the
+ * problem — a caller that sends `ff4081` or a number is told `200 OK` and then
+ * finds the icon still wearing its old colour, with nothing to point at.
+ */
+function IsBrandingHexColourMap(
+  validationOptions?: ValidationOptions,
+): PropertyDecorator {
+  return ValidateBy(
+    {
+      name: 'isBrandingHexColourMap',
+      validator: {
         validate: (value: unknown): boolean => {
           if (
             typeof value !== 'object' ||
@@ -170,26 +355,18 @@ function HasSafePlanGradients(
           ) {
             return true;
           }
-          return Object.values(value as Record<string, unknown>).every(
-            (style) => {
-              if (
-                typeof style !== 'object' ||
-                style === null ||
-                Array.isArray(style)
-              ) {
-                return true;
-              }
-              const gradient = (style as Record<string, unknown>)['gradient'];
-              return (
-                gradient === undefined ||
-                gradient === null ||
-                isSafeBrandingGradient(gradient)
-              );
-            },
+          const entries = Object.entries(value as Record<string, unknown>);
+          if (entries.length > 100) return false;
+          return entries.every(
+            ([key, colour]) =>
+              key.length > 0 &&
+              key.length <= 64 &&
+              typeof colour === 'string' &&
+              HEX_COLOR_PATTERN.test(colour.trim()),
           );
         },
         defaultMessage: (): string =>
-          'planCardStyles gradient values must contain only valid CSS gradient layers',
+          '$property must map at most 100 keys of 1-64 characters to hexadecimal colours with a leading # (#rgb, #rgba, #rrggbb or #rrggbbaa)',
       },
     },
     validationOptions,
@@ -235,11 +412,11 @@ export class AppBackgroundTextureDto {
   public pattern!: AppBackgroundTexture;
 
   @IsOptional()
-  @IsHexColor()
+  @IsBrandingHexColour()
   public color?: string;
 
   @IsOptional()
-  @IsHexColor()
+  @IsBrandingHexColour()
   public background?: string;
 
   @IsOptional()
@@ -257,9 +434,15 @@ export class AppBackgroundTextureDto {
 
 /**
  * Site-wide app background block (`appBackground`). A `kind` discriminator
- * selects a plain colour (`none`), a static gradient, a static texture, or an
+ * selects the cabinet's built-in pattern (`none` — the default, NOT a blank
+ * colour), a flat colour (`plain`), a static gradient, a static texture, or an
  * animated effect (reuses the card-effect registry). All sub-fields optional
  * so partial patches work; only the fields for the chosen `kind` matter.
+ *
+ * `kind` validates against `APP_BACKGROUND_KINDS`, which is right here: this
+ * is the panel refusing a request it wrote itself. It is deliberately NOT the
+ * rule the cabinet follows on the way out — see `isAppBackgroundKind` in
+ * reiwa's public-config guard.
  */
 export class AppBackgroundDto {
   @IsOptional()
@@ -371,32 +554,32 @@ export class NavItemDto {
 export class SurfaceThemeDto {
   @IsOptional()
   @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
-  @IsHexColor()
+  @IsBrandingHexColour()
   public foreground?: string;
 
   @IsOptional()
   @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
-  @IsHexColor()
+  @IsBrandingHexColour()
   public mutedForeground?: string;
 
   @IsOptional()
   @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
-  @IsHexColor()
+  @IsBrandingHexColour()
   public surface?: string;
 
   @IsOptional()
   @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
-  @IsHexColor()
+  @IsBrandingHexColour()
   public surfaceHigh?: string;
 
   @IsOptional()
   @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
-  @IsHexColor()
+  @IsBrandingHexColour()
   public borderSoft?: string;
 
   @IsOptional()
   @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
-  @IsHexColor()
+  @IsBrandingHexColour()
   public borderStrong?: string;
 
   @IsOptional()
@@ -489,16 +672,16 @@ export class SubscriptionCardGlassDto {
 
 /** One fully resolved light/dark representation of an operator concept. */
 export class BrandingThemeVariantDto {
-  @IsHexColor()
+  @IsBrandingHexColour()
   public primary!: string;
 
-  @IsHexColor()
+  @IsBrandingHexColour()
   public primaryFg!: string;
 
-  @IsHexColor()
+  @IsBrandingHexColour()
   public bgPrimary!: string;
 
-  @IsHexColor()
+  @IsBrandingHexColour()
   public bgSecondary!: string;
 
   @IsString()
@@ -543,8 +726,10 @@ export class BrandingThemeVariantDto {
   @Type(() => AppBackgroundDto)
   public appBackground!: AppBackgroundDto;
 
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @IsString()
   @Length(1, 64)
+  @IsBorderRadiusClass()
   public borderRadius!: string;
 
   @IsObject()
@@ -644,19 +829,19 @@ export class UpdateBrandingSettingsDto {
   public adminPwaIconUrl?: string | null;
 
   @IsOptional()
-  @IsHexColor()
+  @IsBrandingHexColour()
   public primary?: string;
 
   @IsOptional()
-  @IsHexColor()
+  @IsBrandingHexColour()
   public primaryFg?: string;
 
   @IsOptional()
-  @IsHexColor()
+  @IsBrandingHexColour()
   public bgPrimary?: string;
 
   @IsOptional()
-  @IsHexColor()
+  @IsBrandingHexColour()
   public bgSecondary?: string;
 
   /**
@@ -753,11 +938,14 @@ export class UpdateBrandingSettingsDto {
 
   @IsOptional()
   @IsObject()
+  @IsBrandingHexColourMap()
   public iconColors?: Record<string, string>;
 
   @IsOptional()
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @IsString()
   @Length(1, 64)
+  @IsBorderRadiusClass()
   public borderRadius?: string;
 
   @IsOptional()
@@ -783,11 +971,20 @@ export class UpdateBrandingSettingsDto {
    * caps, hex accent, texture-preset allowlist, per-plan `text` policy,
    * orphan-tolerant).
    *
-   * The two validators below are the exceptions, and they are here for a
-   * property no normalizer can restore afterwards: a `textureUrl` decides
-   * whether the cabinet issues an outbound request, and a `gradient` decides
-   * whether a value can escape its CSS declaration. Both must be refused at the
-   * door rather than repaired.
+   * `textureUrl` and `gradient` are validated for a property no normalizer can
+   * restore afterwards: a `textureUrl` decides whether the cabinet issues an
+   * outbound request, and a `gradient` decides whether a value can escape its
+   * CSS declaration. Both must be refused at the door rather than repaired.
+   *
+   * `accent` and `texturePreset` are validated for the opposite reason — they
+   * ARE repaired, and that is the defect. `readPlanCardStyles` simply omits an
+   * accent that is not a hex colour and a texture preset that is not on the
+   * allowlist, so `accent: 'red'` or `texturePreset: 'plaid'` is stored as a
+   * card with no accent and no texture and answered with `200 OK`. There is
+   * nothing for the caller to react to and nothing in the response that says a
+   * property was dropped. Neither field can be produced by the panel, whose
+   * schema offers a colour picker and a fixed preset list, so refusing them
+   * cannot cost an operator a save.
    *
    * `text` deliberately gets no validator of its own. A refusal here is a 400
    * for the WHOLE branding PATCH — every colour, logo and text in the same
@@ -801,6 +998,8 @@ export class UpdateBrandingSettingsDto {
   @IsObject()
   @HasAllowedPlanTextureUrls()
   @HasSafePlanGradients()
+  @HasHexPlanAccents()
+  @HasAllowedPlanTexturePresets()
   public planCardStyles?: Record<string, unknown>;
 
   /**

@@ -18,7 +18,10 @@
  *   • `isContextLost()` reports it;
  *   • `createShader`/`createProgram`/`createBuffer`/`createTexture` return null
  *     on a lost context, which is how the failure stays SILENT rather than
- *     thrown — the caller gets null and bails.
+ *     thrown — the caller gets null and bails;
+ *   • a draw call into a lost context is a SILENT NO-OP, not a throw — and it
+ *     is still counted. See `recordDraw` below for why that distinction is the
+ *     difference between a suite that can go red and one that cannot.
  *
  * WHY IT IS A PROXY AND NOT A HAND-WRITTEN CLASS. `Lightning.tsx` drives raw
  * WebGL and touches perhaps thirty entry points, which is worth writing out.
@@ -122,8 +125,20 @@ export interface StubWebGLContext {
   lost: boolean
   /** How many times this context was handed back to the driver. */
   loseCalls: number
-  /** Frames actually drawn (`drawArrays`/`drawElements` on a live context). */
+  /**
+   * Every `drawArrays`/`drawElements`/`*Instanced` call this context executed,
+   * LOST OR NOT — what the component actually did, not what it should have.
+   */
   draws: number
+  /**
+   * The subset of `draws` issued while `isContextLost()` was true, summed over
+   * every loss window (a restore ends a window; a later loss opens a new one).
+   *
+   * This is the number that says "the render loop kept going against a dead
+   * context". Asserting `toBe(0)` on it is capable of failing; asserting that
+   * `draws` did not move across a loss used to be capable of nothing.
+   */
+  drawsWhileLost: number
   /** The element this context lives on. */
   readonly canvas: HTMLCanvasElement
   /** Which kind was asked for — `webgl2` or `webgl`. */
@@ -140,14 +155,37 @@ function createContext(canvas: HTMLCanvasElement, contextKind: string): StubWebG
     lost: false,
     loseCalls: 0,
     draws: 0,
+    drawsWhileLost: 0,
     canvas,
     contextKind,
-    drawingBufferWidth: 1,
-    drawingBufferHeight: 1,
   }
 
   const handle = (kind: string): GlHandle | null =>
     state.lost ? null : { kind, id: nextHandleId++ }
+
+  /**
+   * RECORD WHAT HAPPENED, NOT WHAT SHOULD HAVE.
+   *
+   * This counter used to read `if (!state.lost) state.draws++`, which sounds
+   * like modelling a lost context's no-op and is in fact a hole in the harness.
+   * Real WebGL does not throw or refuse when you draw into a lost context — the
+   * call is issued and silently does nothing — so suppressing the COUNT is not
+   * no-op semantics, it is refusing to see the call. Everything a test could
+   * learn about a loop that keeps running against a dead context was thrown
+   * away here, and `expect(context.draws).toBe(drewAtLoss)` after a loss was
+   * true by construction of the stub, for every implementation, forever.
+   *
+   * Measured: removing the render-loop stop from `ChromaticWaves`, `DotMatrix`
+   * and `Thunderstrike` — so all three drew every frame into a dead context —
+   * produced ZERO failures across the whole reactbits suite.
+   *
+   * So the call is counted unconditionally, the RETURN stays a no-op (there is
+   * nothing to return), and the loss is recorded alongside rather than instead.
+   */
+  const recordDraw = () => {
+    state.draws++
+    if (state.lost) state.drawsWhileLost++
+  }
 
   const own: Record<string, unknown> = {
     isContextLost: () => state.lost,
@@ -178,7 +216,24 @@ function createContext(canvas: HTMLCanvasElement, contextKind: string): StubWebG
     getActiveUniform: () => null,
     getActiveAttrib: () => null,
     getAttribLocation: () => 0,
-    getUniformLocation: (_program: unknown, name: string) => ({ name }),
+    // Null on a lost context, exactly as the platform does.
+    //
+    // This used to hand back a usable-looking location whatever the state,
+    // which made the stub MORE FORGIVING THAN THE PLATFORM — the mirror image
+    // of the blind draw counter above. Instead of an assertion that cannot
+    // fail, a crash that cannot surface: a component with no null check throws
+    // on a real device and passes here. The path is not hypothetical on what we
+    // ship to — WebKit recycles the oldest of its sixteen per-process contexts,
+    // so a card effect on iOS can be handed a loss it never asked for.
+    //
+    // MEASURED, so it is not over-claimed: across the 510 tests in this
+    // directory this branch is reached ZERO times. Every component here either
+    // never builds on a dead context or stops its loop before touching one
+    // (`drawsWhileLost` holds that second half). So this is a fidelity fix with
+    // no component behaviour behind it yet — the harness self-test in
+    // `reactbits-context-release.test.tsx` is the only thing keeping it from
+    // rotting back, which is why that assertion exists.
+    getUniformLocation: (_program: unknown, name: string) => (state.lost ? null : { name }),
     getUniformBlockIndex: () => 0,
 
     getParameter: (pname: number) => {
@@ -216,28 +271,24 @@ function createContext(canvas: HTMLCanvasElement, contextKind: string): StubWebG
       }
     },
 
-    drawArrays: () => {
-      if (!state.lost) state.draws++
-    },
-    drawElements: () => {
-      if (!state.lost) state.draws++
-    },
-    drawArraysInstanced: () => {
-      if (!state.lost) state.draws++
-    },
-    drawElementsInstanced: () => {
-      if (!state.lost) state.draws++
-    },
-
-    viewport: (_x: number, _y: number, width: number, height: number) => {
-      state.drawingBufferWidth = width
-      state.drawingBufferHeight = height
-    },
+    drawArrays: recordDraw,
+    drawElements: recordDraw,
+    drawArraysInstanced: recordDraw,
+    drawElementsInstanced: recordDraw,
   }
 
   // `canvas.width/height` are the truth about the drawing buffer, and both
   // libraries write them through `setSize`, so reading them here rather than
   // caching a number is what makes the device-pixel budget observable.
+  //
+  // AND THERE IS NO `viewport` RECORDER, deliberately. There used to be one: it
+  // wrote a cached `drawingBufferWidth/Height` pair onto `state` that these two
+  // getters then shadowed, so every device-pixel assertion in the suite read
+  // the canvas while the pair sat there looking authoritative and being read by
+  // nothing. It was also wrong about the platform — `gl.viewport()` sets the
+  // clip rectangle, it does not resize the backing store, in real WebGL any
+  // more than here. So `viewport` falls through to the Proxy's inert default
+  // along with every other command whose return value carries no meaning.
   Object.defineProperty(own, 'drawingBufferWidth', {
     get: () => canvas.width,
     enumerable: true,
@@ -607,11 +658,22 @@ export function installGlStub(options: GlStubOptions = {}): GlStubHarness {
       clock += ms
     },
     loseContext(canvas: HTMLCanvasElement) {
+      // THROUGH THE EXTENSION, not by assigning `context.lost`.
+      //
+      // The context is a Proxy whose live state lives in a closure, and the set
+      // trap routes any unknown property into `extras` — so `context.lost = true`
+      // used to create a SHADOW property that read back as `true` while
+      // `isContextLost()` went on answering `false`, `drawsWhileLost` went on
+      // sitting at zero, and `liveContexts()` went on counting the context as
+      // live. Every assertion of the form `expect(…isContextLost()).toBe(false)`
+      // after a loss was therefore unfailable, which is the one thing a stub
+      // must never be. Measured: after `loseContext`, `lost=true
+      // isContextLost=false live=1` and a draw counted as a live one.
       const context = contextOf.get(canvas)
-      if (context) {
-        context.lost = true
-        context.loseCalls++
-      }
+      const extension = context?.getExtension('WEBGL_lose_context') as
+        | { loseContext(): void }
+        | undefined
+      extension?.loseContext()
       // `cancelable`, or `preventDefault()` cannot be observed — and observing
       // it is the point: without it a browser never fires `webglcontextrestored`
       // and a recoverable loss becomes permanent.
@@ -621,7 +683,10 @@ export function installGlStub(options: GlStubOptions = {}): GlStubHarness {
     },
     restoreContext(canvas: HTMLCanvasElement) {
       const context = contextOf.get(canvas)
-      if (context) context.lost = false
+      const extension = context?.getExtension('WEBGL_lose_context') as
+        | { restoreContext(): void }
+        | undefined
+      extension?.restoreContext()
       canvas.dispatchEvent(new Event('webglcontextrestored'))
     },
     teardown() {

@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
 
+import {
+  resolveAppBackgroundPaintedSamples,
+  resolveAppBackgroundReadability,
+} from './app-background-contrast'
 import { CARD_EFFECT_REGISTRY } from './card-effect-registry'
 import {
   CONCEPT_PRESETS,
@@ -344,6 +348,78 @@ describe('WEB Reiwa theme catalog', () => {
     }
   })
 
+  /**
+   * The veil the cabinet paints under the direct copy is CHOSEN from a subset of
+   * the colours the app background can produce: `resolveSoftLightTextureSamples`
+   * stopped enumerating the blends between textured colours taken from different
+   * points of the gradient, because a pixel never carries two gradient positions
+   * at once and enumerating them cost 40x the whole resolver (`concept-cu`:
+   * 1,346 ms down to 26 ms). That subset moved 12 of these 104 presets, every one
+   * DOWNWARD and by at most 0.008 of veil opacity — it spends readability
+   * headroom to buy the speed.
+   *
+   * This is the guard on what it spent. It asserts the veil AS CHOSEN against the
+   * FULL painted model — `resolveAppBackgroundPaintedSamples`, cross-position
+   * blends included — so the margin is measured against the background the
+   * subscriber actually sees, not against the samples the chooser walked. Presets
+   * that resolve to no veil are checked unveiled, which is what proves "no veil"
+   * means "no veil needed" rather than "no veil helped".
+   *
+   * The worst margin is RECORDED, not merely bounded. It sits 0.028 above the 4.5
+   * threshold — thin enough that a future change eating another 0.02 has to show
+   * up as this number moving rather than as a test that still happens to pass.
+   */
+  const WORST_VEILED_CONTRAST = { code: 'F', margin: 4.5281 }
+
+  it('keeps every concept veil AA-safe against the full painted app background', () => {
+    let worst = { code: '', margin: Number.POSITIVE_INFINITY, detail: 'no sample examined' }
+
+    for (const preset of CONCEPT_THEME_PRESETS) {
+      const branding = {
+        appBackground: preset.appBackground,
+        bgPrimary: preset.bgPrimary,
+        surfaceTheme: preset.surfaceTheme,
+        themePresetId: preset.id,
+      }
+      const veil = resolveAppBackgroundReadability(branding)
+      const painted = resolveAppBackgroundPaintedSamples(branding)
+      expect(painted.length, `${preset.code} painted samples`).toBeGreaterThan(0)
+
+      const veilHex = veil ? rgbHex(veil.veilRgb.split(' ').map(Number)) : '#000000'
+      const veilOpacity = veil?.veilOpacity ?? 0
+
+      for (const sample of painted) {
+        const behindCopy = mix(veilHex, rgbHex(sample), veilOpacity)
+        for (const text of [
+          preset.surfaceTheme.foreground,
+          preset.surfaceTheme.mutedForeground,
+        ]) {
+          const margin = contrast(text, behindCopy)
+          if (margin >= worst.margin) continue
+          worst = {
+            code: preset.code,
+            margin,
+            detail:
+              `${preset.code} (${preset.id}): ${text} on ${behindCopy} — ` +
+              `sample ${rgbHex(sample)} under veil ${veilHex} at ${veilOpacity}`,
+          }
+        }
+      }
+    }
+
+    expect(
+      worst.margin,
+      `a concept veil no longer keeps the direct copy AA-readable — ${worst.detail}`,
+    ).toBeGreaterThanOrEqual(4.5)
+    expect(
+      { code: worst.code, margin: Number(worst.margin.toFixed(4)) },
+      `the worst AA margin moved; re-measure and update WORST_VEILED_CONTRAST — ${worst.detail}`,
+    ).toEqual(WORST_VEILED_CONTRAST)
+    // Building the full painted model for all 104 presets is ~3.5s of real
+    // arithmetic — the cross-position blends this guard restores are exactly the
+    // ones the resolver stopped computing because they are expensive.
+  }, 30_000)
+
   it('carries source semantics and exact angular geometry into Reiwa', () => {
     for (const [index, preset] of CONCEPT_THEME_PRESETS.entries()) {
       const descriptor = CONCEPT_PRESETS[index]
@@ -459,6 +535,10 @@ function mix(left: string, right: string, leftWeight: number): string {
       .padStart(2, '0')
 
   return `#${channel(1)}${channel(3)}${channel(5)}`
+}
+
+function rgbHex(rgb: readonly number[]): string {
+  return `#${rgb.map((channel) => channel.toString(16).padStart(2, '0')).join('')}`
 }
 
 function luminance(hex: string): number {

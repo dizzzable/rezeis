@@ -260,12 +260,48 @@ export interface CardEffectSlot {
 
 /**
  * App-background rendering modes (site-wide background behind the cabinet):
- *   - `none`     — plain `bgPrimary` colour (default; current behaviour).
+ *   - `none`     — the cabinet's BUILT-IN background: reiwa's `<NetworkBg>`,
+ *     i.e. three soft `--brand-primary` glows, a dot grid and four diagonals.
+ *     Default, and the behaviour of every installation that predates this list.
+ *   - `plain`    — the flat `bgPrimary` colour and nothing else.
  *   - `gradient` — a static CSS gradient (operator-built / preset / generated).
  *   - `texture`  — a static, tileable SVG pattern tinted over a base colour.
  *   - `effect`   — an animated ReactBits effect (reuses the card-effect registry).
+ *
+ * `none` USED TO BE DOCUMENTED HERE AS THE PLAIN COLOUR, in this comment, in
+ * `AppBackgroundSettings` below and in the panel's own hint text. The cabinet
+ * never did that: `StealthLayout` renders `<NetworkBg>` whenever the kind is
+ * `none`, and always has. The panel preview drew the promise (nothing) while
+ * the cabinet drew the code (a pattern), and the two therefore disagreed
+ * precisely in the state an operator selects to check that they had turned the
+ * background OFF.
+ *
+ * The code won. Renaming the stored value would have silently restyled every
+ * installation that never touched this setting, so `none` still means what it
+ * has always drawn and `plain` is the new value for what the text promised.
+ *
+ * ADDING A KIND TOUCHES SIX PLACES, and the cabinet's is the one with teeth:
+ *   1. this list,
+ *   2. `AppBackgroundDto` (validation of the admin API request),
+ *   3. `readAppBackground` in `branding-settings.util.ts` (the reader),
+ *   4. reiwa's snapshot guard — `isAppBackgroundKind` in
+ *      `src/application/ports/public-config-persistence.port.ts`,
+ *   5. reiwa's renderers (`StealthLayout` + `AppBackground`), which funnel
+ *      through `resolveAppBackgroundKind`,
+ *   6. the panel picker (`BRANDING_APP_BG_KINDS`), its preview and its i18n.
+ *
+ * Number 4 no longer validates against a copy of this list, deliberately — see
+ * the note on `CARD_EFFECTS` above for the outage that made every such copy a
+ * liability. A cabinet released before this panel resolves an unknown kind to
+ * `none` instead of discarding the whole branding snapshot.
  */
-export const APP_BACKGROUND_KINDS = ['none', 'gradient', 'texture', 'effect'] as const;
+export const APP_BACKGROUND_KINDS = [
+  'none',
+  'plain',
+  'gradient',
+  'texture',
+  'effect',
+] as const;
 export type AppBackgroundKind = (typeof APP_BACKGROUND_KINDS)[number];
 
 /**
@@ -302,13 +338,16 @@ export interface AppBackgroundTextureSettings {
 
 /**
  * Site-wide app background — rendered BEHIND the whole cabinet. A `kind`
- * discriminator selects between a plain colour, a static gradient, a static
- * texture, or an animated effect. Reuses the shared card-effect registry for
- * `effect`. Mounted once at the cabinet shell (a single WebGL context max for
- * the animated mode; the static modes cost nothing).
+ * discriminator selects between the cabinet's built-in pattern (`none`), a flat
+ * colour (`plain`), a static gradient, a static texture, or an animated effect.
+ * Reuses the shared card-effect registry for `effect`. Mounted once at the
+ * cabinet shell (a single WebGL context max for the animated mode; the static
+ * modes cost nothing).
  *
  * Backward-compat: payloads written before `kind` existed carry only
- * `effect`/`props`/`opacity`; the reader infers `kind` from the effect id.
+ * `effect`/`props`/`opacity`; the reader infers `kind` from the effect id, and
+ * resolves the no-effect case to `none` — the built-in pattern those payloads
+ * have always rendered, never `plain`.
  */
 export interface AppBackgroundSettings {
   readonly kind: AppBackgroundKind;
@@ -455,6 +494,47 @@ export interface SurfaceThemeSettings {
   /** Backdrop blur radius in px (0–40). */
   readonly glassBlurPx: number;
 }
+
+/**
+ * The border-radius vocabulary the Reiwa cabinet accepts, and therefore the
+ * only one the panel may write OR read back.
+ *
+ * The cabinet guard (`reiwa/src/application/ports/public-config-persistence.port.ts`,
+ * `BORDER_RADII`) refuses a snapshot carrying anything else, and a refusal
+ * there is not an error anyone sees: the cabinet keeps serving its PREVIOUS
+ * snapshot, so its appearance freezes on that snapshot indefinitely. The same
+ * class of divergence already cost an outage on `navItems` and on
+ * `cardEffect`; both are commented in that file. The value is checked twice
+ * over there — once at the root, once inside each brightness snapshot
+ * (`isThemeVariant`) — and either failure discards the WHOLE public config,
+ * not just the radius.
+ *
+ * THIS LIST IS THE ONLY COPY IN THE BACKEND, deliberately. It lives here
+ * rather than in `update-branding-settings.dto.ts` because both stages need
+ * it and two lists that must agree is exactly the defect this guards:
+ *   1. `@IsBorderRadiusClass()` in the DTO refuses the write,
+ *   2. `readBorderRadius` in `branding-settings.util.ts` refuses the read, so
+ *      a row that never came through the DTO — a legacy row, a restored
+ *      backup, a seed, a direct DB edit, a future migration — cannot reach the
+ *      cabinet either.
+ *
+ * `DEFAULT_BRANDING.borderRadius` must stay a member of this list: it is what
+ * the reader substitutes for an unrenderable persisted value.
+ *
+ * A seventh member has to reach the cabinet FIRST — see the note on
+ * `CARD_EFFECTS` above for why a panel released ahead of the cabinet freezes a
+ * live configuration.
+ */
+export const BORDER_RADIUS_CLASSES = [
+  'rounded-none',
+  'rounded-lg',
+  'rounded-xl',
+  'rounded-2xl',
+  'rounded-3xl',
+  'rounded-full',
+] as const;
+
+export type BorderRadiusClass = (typeof BORDER_RADIUS_CLASSES)[number];
 
 /**
  * Exact cabinet corner geometry. Unlike the legacy Tailwind class, these
@@ -657,10 +737,13 @@ export interface BrandingSettingsInterface {
   readonly bgEffect: BgEffect;
 
   /**
-   * Site-wide app background (`none` / `gradient` / `texture` / `effect`).
-   * `none` → plain `bgPrimary` colour. Takes precedence over the legacy preset
-   * `bgEffect` when not `none`. Additive: an older reiwa build that doesn't
-   * know this field renders the existing background.
+   * Site-wide app background (`none` / `plain` / `gradient` / `texture` /
+   * `effect`). `none` → the cabinet's built-in `<NetworkBg>` pattern, which is
+   * the default; `plain` → the flat `bgPrimary` colour and nothing else. Takes
+   * precedence over the legacy preset `bgEffect` when not `none`. Additive: an
+   * older reiwa build that doesn't know this field renders the existing
+   * background, and one that doesn't know a newer `kind` falls back to `none`
+   * rather than refusing the snapshot.
    */
   readonly appBackground: AppBackgroundSettings;
 

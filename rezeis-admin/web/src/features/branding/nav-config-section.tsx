@@ -41,6 +41,27 @@ import {
   type NavItemDraft,
 } from './branding-form-schema'
 
+/**
+ * TOTAL visible tabs, essentials INCLUDED — which is why `visibleCount` below
+ * counts them. Same number as `NAV_MAX_VISIBLE` in the backend's
+ * `branding-settings.interface.ts`, and the same picture the cabinet draws:
+ * `normalizeNavItems` (`reiwa/web/src/components/layout/nav-config.ts`) shows
+ * both essentials unconditionally and keeps `.slice(0, 3)` of the visible
+ * optional ones. Two plus three.
+ *
+ * This is the third copy of that number, and it stays a copy: the backend
+ * interface is not importable from a bundled component — `web/tsconfig.app.json`
+ * includes only `web/src` and maps only `@/*`, and the sole web→backend-src
+ * imports in the repo are in a test file, never in shipped code. If it earns a
+ * shared home, that home is `branding-form-schema.ts`, which already holds this
+ * feature's other vocabularies (`BRANDING_NAV_DESTINATIONS`,
+ * `BRANDING_NAV_ESSENTIALS`) and which the cross-repo parity guard already
+ * reads.
+ *
+ * The guard here only blocks TICKING a further destination; it does not untick
+ * an over-cap payload it is handed. `readNavItems` on the backend is what makes
+ * that unreachable, by hiding the overflow before the form ever sees it.
+ */
 const NAV_MAX_VISIBLE = 5
 
 function isEssential(id: NavDestinationId): boolean {

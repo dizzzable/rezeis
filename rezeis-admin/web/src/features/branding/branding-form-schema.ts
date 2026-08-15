@@ -24,7 +24,24 @@ export const BRANDING_PLAN_CARD_TEXT_MODES = [
   'dark',
   'custom',
 ] as const
-export const BRANDING_APP_BG_KINDS = ['none', 'gradient', 'texture', 'effect'] as const
+/**
+ * Site-wide app-background modes offered by the picker, in display order.
+ *
+ * `none` is the cabinet's BUILT-IN background — reiwa's `<NetworkBg>`: brand
+ * glows, a dot grid and diagonals. It is the default and it draws a picture.
+ * `plain` is the flat `bgPrimary` colour, which is what the panel used to
+ * promise under the name "None" while the cabinet drew the pattern.
+ *
+ * Order matters only for the tab strip; the stored value of the default mode
+ * stays `none` so no existing installation changes appearance.
+ */
+export const BRANDING_APP_BG_KINDS = [
+  'none',
+  'plain',
+  'gradient',
+  'texture',
+  'effect',
+] as const
 export const BRANDING_APP_BG_TEXTURES = [
   'dots',
   'grid',
@@ -301,6 +318,25 @@ export const CORNER_RADII_BY_LEGACY_CLASS: Readonly<
   'rounded-full': { cardPx: 40, itemPx: 24, pillPx: 9999 },
 }
 
+/**
+ * The one border-radius vocabulary the panel may write.
+ *
+ * Derived from the map above rather than restated, so the panel cannot grow a
+ * seventh class with no radii behind it — and so the form, the request DTO and
+ * the radius dropdown all answer to a single list.
+ *
+ * The Reiwa cabinet guard accepts exactly these six
+ * (`reiwa/src/application/ports/public-config-persistence.port.ts`,
+ * `BORDER_RADII`). Its refusal is invisible: the cabinet keeps serving its
+ * PREVIOUS snapshot, so a value this form lets through and the cabinet does
+ * not freezes the cabinet's appearance indefinitely. `navItems` and
+ * `cardEffect` already cost an outage this way; both are commented in that
+ * file. A seventh class has to reach the cabinet FIRST.
+ */
+export const BORDER_RADIUS_CLASSES: readonly string[] = Object.keys(
+  CORNER_RADII_BY_LEGACY_CLASS,
+)
+
 export interface BrandingCardEffectSlotDraft {
   readonly mode?: 'inherit' | 'override'
   readonly cardEffect?: string
@@ -496,7 +532,7 @@ export function createBrandingFormSchema(messages: BrandingFormValidationMessage
     cardEffectsByIndex: z.array(cardEffectSlotSchema).max(20),
     bgEffect: z.enum(BRANDING_BG_EFFECTS),
     appBackground: appBackgroundSchema,
-    borderRadius: z.string().trim().min(1).max(64),
+    borderRadius: borderRadiusSchema(),
     cornerRadii: cornerRadiiSchema,
     fontFamily: z.string().trim().min(1).max(256),
     surfaceTheme: surfaceThemeSchema,
@@ -548,7 +584,7 @@ export function createBrandingFormSchema(messages: BrandingFormValidationMessage
         )
         .refine((value) => Object.keys(value).length <= 100)
         .optional(),
-      borderRadius: z.string().trim().min(1).max(64),
+      borderRadius: borderRadiusSchema(),
       cornerRadii: cornerRadiiSchema,
       fontFamily: z.string().trim().min(1).max(256),
       surfaceTheme: surfaceThemeSchema,
@@ -1009,6 +1045,38 @@ function optionalHexColour(message: string) {
     .refine((value) => value === null || HEX_PATTERN.test(value), { message })
     .optional()
     .transform((value) => value ?? null)
+}
+
+/**
+ * `borderRadius`, constrained to `BORDER_RADIUS_CLASSES`.
+ *
+ * Kept as a trimmed `z.string()` with a refinement rather than a `z.enum` so
+ * the parsed type stays `string`: the dropdown, the presets and the persisted
+ * draft all hand this field a plain string, and narrowing the output type
+ * would ripple into every caller for no validation gain.
+ *
+ * The message is composed rather than taken from `messages` because the
+ * dropdown cannot produce a rejected value — only an API client, a hand-edited
+ * database row or a future control can — and whoever hits it needs the two
+ * facts an i18n string would not carry: what was sent and what is allowed.
+ */
+function borderRadiusSchema() {
+  return z
+    .string()
+    .trim()
+    .min(1)
+    .max(64)
+    .superRefine((value, ctx) => {
+      if (BORDER_RADIUS_CLASSES.includes(value)) return
+      // Bounded: `.max(64)` above does not stop this refinement from running.
+      const received = value.length > 40 ? `${value.slice(0, 40)}…` : value
+      ctx.addIssue({
+        code: 'custom',
+        message: `borderRadius must be one of ${BORDER_RADIUS_CLASSES.join(
+          ', ',
+        )}; received "${received}"`,
+      })
+    })
 }
 
 function safeGradientSchema(message: string) {

@@ -354,9 +354,28 @@ function SplitTextInline({ text, className }: { text: string; className?: string
 
   return (
     <span className={cn('inline-flex', className)}>
+      {/*
+        The accessible copy, and the only thing assistive tech reads here.
+
+        Every character sits in its own element, and an accessible name is built
+        by trimming each element's contribution and joining what is left \u2014 so the
+        element holding the space between two words trims to nothing and
+        disappears. An `<h1>` reading "Promo codes" was announced as
+        "Promocodes". Measured, not deduced: `computeAccessibleName` on the
+        heading returned exactly that, with no space of any kind in it.
+        `aria-label` on the wrapper is not the fix \u2014 that span has no role, so it
+        is `generic`, and a generic element takes no name from the author.
+
+        Roughly half the section headings in this panel are two words, and this
+        animation now reaches all of them. `TypewriterInline` above already
+        solves it the same way: one stable string in the tree, the animated copy
+        hidden from it.
+      */}
+      <span className="sr-only">{text}</span>
       {chars.map((char: string, i: number) => (
         <motion.span
           key={`${char}-${i}`}
+          aria-hidden="true"
           initial={{ opacity: 0, y: 10 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: i * 0.03, duration: 0.3 }}

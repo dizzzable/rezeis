@@ -46,6 +46,8 @@ import {
 import { usePlans, type Plan } from '@/features/plans/plans-api'
 import { autoPlanGradient, resolvePlanCardText } from './plan-card-style-utils'
 import { buildTextureCss } from './app-texture'
+import { AppBackgroundBuiltin } from './app-background-builtin'
+import { resolveAppBackgroundReadability } from './app-background-contrast'
 import { PlanIconView } from '@/features/plans/plan-icon-view'
 import {
   DEFAULT_SUBSCRIPTION_CARD_GLASS_DRAFT,
@@ -198,19 +200,6 @@ interface PreviewCardContrast {
   readonly veilChannels: string
   readonly veilOpacity: number
   readonly weakManualContrast: boolean
-}
-
-interface PreviewAppReadability {
-  readonly veil: 'dark' | 'light'
-  readonly veilChannels: string
-  readonly veilOpacity: number
-}
-
-interface PreviewAppVeilCandidate {
-  readonly veil: 'dark' | 'light'
-  readonly veilRgb: PreviewRgb
-  readonly rawOpacity: number
-  readonly veilOpacity: number
 }
 
 const PREVIEW_BLACK: PreviewRgb = [0, 0, 0]
@@ -550,43 +539,6 @@ function previewRequiredVeil(
   return required
 }
 
-function previewSupportsContrast(
-  samples: readonly PreviewRgb[],
-  textColors: readonly PreviewRgb[],
-  veil: PreviewRgb,
-  opacity: number,
-): boolean {
-  return samples.every((sample) => {
-    const supported = previewComposite(veil, sample, opacity)
-    return textColors.every(
-      (text) => previewContrast(text, supported) >= 4.5,
-    )
-  })
-}
-
-function resolvePreviewAppVeilCandidate(
-  samples: readonly PreviewRgb[],
-  textColors: readonly PreviewRgb[],
-  veil: 'dark' | 'light',
-  veilRgb: PreviewRgb,
-): PreviewAppVeilCandidate | null {
-  const rawOpacity = Math.max(
-    ...textColors.map((text) =>
-      previewRequiredVeil(samples, text, veilRgb),
-    ),
-  )
-  if (rawOpacity <= 0) return null
-
-  const veilOpacity =
-    Math.round(Math.min(0.88, Math.max(0, rawOpacity + 0.03)) * 1000) /
-    1000
-  if (!previewSupportsContrast(samples, textColors, veilRgb, veilOpacity)) {
-    return null
-  }
-
-  return { veil, veilRgb, rawOpacity, veilOpacity }
-}
-
 function previewComposite(
   foreground: PreviewRgb,
   background: PreviewRgb,
@@ -619,88 +571,6 @@ function previewLuminance(rgb: PreviewRgb): number {
 function isPreviewLight(value: string): boolean {
   const color = parsePreviewHex(value)
   return color ? previewLuminance(color) >= 0.5 : true
-}
-
-function resolvePreviewAppReadability(
-  gradient: string,
-  foundation: string,
-  foreground: string,
-  mutedForeground: string,
-  texture:
-    | {
-        readonly background: string
-        readonly color: string
-        readonly opacity: number
-      }
-    | undefined,
-  textureMode: 'none' | 'texture' | 'concept',
-): PreviewAppReadability | null {
-  const foundationRgb = parsePreviewHex(foundation) ?? PREVIEW_BLACK
-  const gradientSamples = Array.from(
-    gradient.matchAll(/#[\da-f]{3,8}(?![\da-f])/gi),
-  )
-    .map((match) => parsePreviewHex(match[0], foundationRgb))
-    .filter((sample): sample is PreviewRgb => sample !== null)
-  const textureBackground = texture
-    ? parsePreviewHex(texture.background)
-    : null
-  const textureColor = texture ? parsePreviewHex(texture.color) : null
-  const textureSamples: PreviewRgb[] =
-    textureMode === 'texture'
-      ? [textureBackground, textureColor].filter(
-          (sample): sample is PreviewRgb => sample !== null,
-        )
-      : textureMode === 'concept' && textureBackground && textureColor
-        ? [
-            textureBackground,
-            previewComposite(
-              textureColor,
-              textureBackground,
-              Math.min(1, Math.max(0, texture?.opacity ?? 0)),
-            ),
-          ]
-        : []
-  const samples = [...gradientSamples, ...textureSamples]
-  if (samples.length === 0) return null
-  const textColors = [foreground, mutedForeground]
-    .map((value) => parsePreviewHex(value))
-    .filter((sample): sample is PreviewRgb => sample !== null)
-  const resolvedTextColors = textColors.length > 0 ? textColors : [PREVIEW_WHITE]
-  const candidates = [
-    resolvePreviewAppVeilCandidate(
-      samples,
-      resolvedTextColors,
-      'dark',
-      PREVIEW_BLACK,
-    ),
-    resolvePreviewAppVeilCandidate(
-      samples,
-      resolvedTextColors,
-      'light',
-      PREVIEW_WHITE,
-    ),
-  ].filter(
-    (candidate): candidate is PreviewAppVeilCandidate => candidate !== null,
-  )
-  if (candidates.length === 0) return null
-
-  candidates.sort((left, right) => left.rawOpacity - right.rawOpacity)
-  const selected = candidates[0]!
-
-  return {
-    veil: selected.veil,
-    veilChannels: selected.veilRgb.join(' '),
-    veilOpacity: selected.veilOpacity,
-  }
-}
-
-function previewAppReadabilityZones(
-  readability: PreviewAppReadability,
-): string {
-  const channels = readability.veilChannels
-  const veil = readability.veilOpacity
-  const edge = Math.min(0.88, veil + 0.12)
-  return `linear-gradient(180deg, rgb(${channels} / ${edge}) 0%, rgb(${channels} / ${veil}) 16%, rgb(${channels} / ${veil}) 28%, rgb(${channels} / ${veil}) 40%, rgb(${channels} / ${veil}) 60%, rgb(${channels} / ${veil}) 72%, rgb(${channels} / ${veil}) 84%, rgb(${channels} / ${edge}) 100%)`
 }
 
 /** One subscription-card mock in the preview, with its own effect + gradient. */
@@ -1143,6 +1013,19 @@ export function BrandingPreview({ values, focus }: BrandingPreviewProps) {
     }
     return base
   }, [appBackground, primary])
+  // Which of the cabinet's two background renderers this preview mirrors.
+  //
+  // `StealthLayout` mounts `<NetworkBg>` — the built-in pattern — whenever the
+  // resolved kind is `none`, INCLUDING when the branding carries no
+  // `appBackground` block at all, which is every installation older than the
+  // field. It mounts `<AppBackground>` for every other kind, and that component
+  // paints nothing for `plain`. So the preview has three cases, not two, and
+  // `none` is the one that draws the most rather than the least.
+  //
+  // The draft's `kind` is already narrowed to a known value by
+  // `normalizeAppBackgroundDraft`, so there is no unknown-kind case to resolve
+  // here; the cabinet resolves those with `resolveAppBackgroundKind`.
+  const builtinBackground = !appBackground || appBackground.kind === 'none'
   const overlaysConceptTexture =
     appBackground?.kind === 'gradient' &&
     typeof themePresetId === 'string' &&
@@ -1151,36 +1034,27 @@ export function BrandingPreview({ values, focus }: BrandingPreviewProps) {
     appBackground?.kind === 'texture' || overlaysConceptTexture
       ? buildTextureCss(appBackground.texture)
       : null
+  // The readability veil is NOT computed here. `app-background-contrast.ts` is
+  // the cabinet's own resolver, vendored verbatim, and it is handed the same
+  // four branding fields the cabinet reads — including `themePresetId`, which
+  // is what decides whether the concept texture is blended in. Deciding the
+  // `kind === 'none' | 'effect'` exclusion, the sample set and the overlay CSS
+  // all belong to it: every one of those was a place the preview's own version
+  // answered differently from the cabinet.
   const appReadability = useMemo(
     () =>
-      appBackground &&
-      appBackground.kind !== 'none' &&
-      appBackground.kind !== 'effect'
-        ? resolvePreviewAppReadability(
-            appBackground.kind === 'gradient'
-              ? appBackground.gradient
-              : '',
-            appBackground.kind === 'texture'
-              ? appBackground.texture.background
-              : bgPrimary,
-            surfaceTheme.foreground,
-            surfaceTheme.mutedForeground,
-            appBackground.texture,
-            appBackground.kind === 'texture'
-              ? 'texture'
-              : overlaysConceptTexture
-                ? 'concept'
-                : 'none',
-          )
-        : null,
-    [
-      appBackground,
-      bgPrimary,
-      overlaysConceptTexture,
-      surfaceTheme.foreground,
-      surfaceTheme.mutedForeground,
-    ],
+      resolveAppBackgroundReadability({
+        appBackground,
+        bgPrimary,
+        surfaceTheme,
+        themePresetId,
+      }),
+    [appBackground, bgPrimary, surfaceTheme, themePresetId],
   )
+  // The resolver only ever picks pure black or pure white for the veil (it
+  // considers no other candidate), so this is a total mapping and not a guess.
+  const appReadabilityVeil =
+    appReadability?.veilRgb === '0 0 0' ? 'dark' : 'light'
 
   // Configured bottom navigation (Навигация tab) → live preview pill.
   const navSource = navItems && navItems.length > 0 ? navItems : DEFAULT_NAV_ITEMS
@@ -1248,16 +1122,22 @@ export function BrandingPreview({ values, focus }: BrandingPreviewProps) {
           fontFamily,
         }}
       >
-        {/* Ambient brand glow */}
-        <div
-          className="pointer-events-none absolute -top-16 -left-16 h-48 w-48 rounded-full blur-3xl"
-          style={{ background: primary, opacity: 0.18 }}
-        />
+        {/* The cabinet's BUILT-IN background (`kind === 'none'`, the default).
+            This slot used to hold a preview-only "ambient brand glow" — one
+            blurred disc in the top-left corner that the cabinet does not draw
+            in any mode. It was there because the preview had nothing to show
+            for `none`, and it was actively misleading twice over: it made the
+            state the operator selects to turn the background OFF look like a
+            faint wash instead of the full `<NetworkBg>` pattern the cabinet
+            actually renders, and it would have leaked through the new `plain`
+            mode, whose entire promise is that nothing is drawn. */}
+        {builtinBackground && <AppBackgroundBuiltin primary={primary} />}
 
         {/* Live site-wide app background layer (App background tab). */}
-        {appBackground && appBackground.kind !== 'none' && (
+        {appBackground && !builtinBackground && appBackground.kind !== 'plain' && (
           <div
             aria-hidden="true"
+            data-preview-app-background={appBackground.kind}
             className="pointer-events-none absolute inset-0 overflow-hidden"
           >
             {appBackground.kind === 'gradient' && (
@@ -1284,13 +1164,13 @@ export function BrandingPreview({ values, focus }: BrandingPreviewProps) {
             {appReadability && appReadability.veilOpacity > 0 && (
               <div
                 data-preview-app-readability="wcag-direct-copy-zones"
-                data-preview-app-readability-veil={appReadability.veil}
+                data-preview-app-readability-veil={appReadabilityVeil}
                 data-preview-app-readability-opacity={
                   appReadability.veilOpacity
                 }
                 className="absolute inset-0"
                 style={{
-                  background: previewAppReadabilityZones(appReadability),
+                  background: appReadability.overlayBackground,
                 }}
               />
             )}

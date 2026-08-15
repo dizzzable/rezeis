@@ -1,10 +1,14 @@
 /**
  * AppBackgroundSection — configurator for the site-wide reiwa cabinet
- * background. Four modes:
- *   - none     — plain colour (the brand background).
+ * background. Five modes:
+ *   - none     — the cabinet's built-in pattern (`<NetworkBg>`), the default.
+ *   - plain    — the flat brand background colour, nothing else.
  *   - gradient — static CSS gradient (presets + visual builder + generate).
  *   - texture  — static tiled SVG pattern (picker + colours + scale + opacity).
  *   - effect   — animated ReactBits effect (reuses the card-effect picker).
+ *
+ * `none` and `plain` are two different pictures, and this section used to offer
+ * only the first while describing it as the second. See `BRANDING_APP_BG_KINDS`.
  *
  * Fully controlled via a single `value`/`onChange` pair mirroring the
  * `appBackground` branding draft.
@@ -71,7 +75,7 @@ export function AppBackgroundSection({
       </CardHeader>
       <CardContent className="space-y-4">
         {/* Mode tabs */}
-        <div className="grid grid-cols-4 gap-2">
+        <div className="grid grid-cols-3 gap-2 sm:grid-cols-5">
           {BRANDING_APP_BG_KINDS.map((kind) => {
             const active = value.kind === kind
             return (
@@ -96,7 +100,13 @@ export function AppBackgroundSection({
 
         {value.kind === 'none' && (
           <p className="text-[11px] text-muted-foreground">
-            {t('brandingPage.sections.appBackground.noneHint')}
+            {t('brandingPage.sections.appBackground.builtinHint')}
+          </p>
+        )}
+
+        {value.kind === 'plain' && (
+          <p className="text-[11px] text-muted-foreground">
+            {t('brandingPage.sections.appBackground.plainHint')}
           </p>
         )}
 

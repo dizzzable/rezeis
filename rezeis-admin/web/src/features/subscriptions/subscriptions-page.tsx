@@ -15,6 +15,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Switch } from '@/components/ui/switch'
 import { Label } from '@/components/ui/label'
 import { FadeIn } from '@/lib/motion'
+import { PageTitle } from '@/components/layout/page-title'
 
 const STATUSES = ['ACTIVE', 'DISABLED', 'LIMITED', 'EXPIRED', 'DELETED']
 
@@ -84,9 +85,7 @@ export default function SubscriptionsPage() {
       <FadeIn>
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
-              <CreditCard className="h-6 w-6" /> {t('subscriptionsPage.title')}
-            </h1>
+            <PageTitle icon={CreditCard} title={t('subscriptionsPage.title')} />
             <p className="text-muted-foreground">{t('subscriptionsPage.subtitle')}</p>
           </div>
           <Button

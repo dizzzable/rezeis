@@ -3737,14 +3737,18 @@ export const en = {
       appBackground: {
         title: 'App Background',
         description:
-          'The background behind the whole cabinet: plain colour, static gradient, texture, or animation. Rendered once, so it stays light on the device.',
+          'The background behind the whole cabinet: the built-in pattern, a plain colour, a static gradient, a texture, or an animation. Rendered once, so it stays light on the device.',
         kinds: {
-          none: 'None',
+          none: 'Built-in',
+          plain: 'Plain colour',
           gradient: 'Gradient',
           texture: 'Texture',
           effect: 'Animation',
         },
-        noneHint: 'Uses the plain background colour (configured in the "Colors" section).',
+        builtinHint:
+          'The cabinet\'s own pattern: soft glows, a dot grid and diagonals in the primary colour. This is the default — how the cabinet looks until a background is configured. For the colour alone, pick "Plain colour".',
+        plainHint:
+          'Just the plain background colour, with no pattern or animation (the colour is configured in the "Colors" section).',
         gradient: 'Gradient',
         generateFromPrimary: 'Generate from primary colour',
         autoPick: 'Auto-pick colours',

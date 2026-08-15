@@ -34,6 +34,7 @@ import { FadeIn } from '@/lib/motion'
 import { usePlans } from '@/features/plans/plans-api'
 import { IconPicker } from '@/features/settings/icon-picker'
 import { EmojiTextInput } from '@/features/broadcast/emoji-text-input'
+import { PageTitle } from '@/components/layout/page-title'
 import { AddOnsStatsTab } from './add-ons-stats-tab'
 import { AddOnEntitlementsTab } from './add-on-entitlements-tab'
 
@@ -123,9 +124,7 @@ export default function AddOnsPage() {
       <FadeIn>
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
-              <Puzzle className="h-6 w-6" /> {t('addOnsPage.title')}
-            </h1>
+            <PageTitle icon={Puzzle} title={t('addOnsPage.title')} />
             <p className="text-muted-foreground">{t('addOnsPage.subtitle')}</p>
           </div>
           <Button

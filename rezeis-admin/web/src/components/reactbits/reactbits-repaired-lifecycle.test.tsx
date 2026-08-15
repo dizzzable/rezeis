@@ -65,6 +65,9 @@ import RippleGrid from './RippleGrid'
 import ShapeGrid from './ShapeGrid'
 import SoftAurora from './SoftAurora'
 import Threads from './Threads'
+import ChromaticWaves from './originkit/ChromaticWaves'
+import DotMatrix from './originkit/DotMatrix'
+import Thunderstrike from './originkit/Thunderstrike'
 import { installGlStub, type GlStubHarness } from './gl-stub'
 import { RENDER_PIXEL_BUDGET } from './render-scale'
 
@@ -171,6 +174,21 @@ const RESTORED_COMPONENTS = [
   ['RippleGrid', <RippleGrid key="c" />],
   ['SoftAurora', <SoftAurora key="c" />],
   ['Threads', <Threads key="c" />],
+  // The three that had NO `webglcontextlost` listener at all. three.js gets
+  // one from `WebGLRenderer`; every other OGL component here registers its
+  // own; OGL itself does not (`ogl/src/core/Renderer.js`: "TODO: Handle
+  // context loss"). Measured before the repair: the event arrived with
+  // `defaultPrevented === false` and the loop kept drawing afterwards, so
+  // the browser never sent `webglcontextrestored` and WebKit's recycling of
+  // the oldest of its 16 contexts left a blank card for the session.
+  //
+  // They live in `originkit/`, which is byte-frozen and vendored the OTHER
+  // way — reiwa is the source, `scripts/sync-originkit.mjs` copies it here.
+  // So the repair was made there and synced; `originkit-manifest.test.ts`
+  // holds the two copies identical.
+  ['ChromaticWaves', <ChromaticWaves key="c" />],
+  ['DotMatrix', <DotMatrix key="c" />],
+  ['Thunderstrike', <Thunderstrike key="c" />],
 ] as const
 
 /** Everything that must survive a mount, a remount and a context loss. */
@@ -235,7 +253,13 @@ describe.each(WEBGL_COMPONENTS)('%s lifecycle', (name, element) => {
     const view = render(element)
     gl.runFrames(2)
     const drewBefore = gl.contexts[0].draws
+    expect(drewBefore, `${name} never drew, so it has no loop to stop`).toBeGreaterThan(0)
 
+    // Unmount RELEASES the context (the spec above pins that), so under the old
+    // draw counter — which stopped counting the moment a context went lost —
+    // this assertion could not move either, for any of these components. It is
+    // live again only because the counter now records the call rather than
+    // judging it.
     view.unmount()
     gl.runFrames(3)
 
@@ -383,23 +407,43 @@ describe.each(WEBGL_COMPONENTS)('%s context loss', (name, element) => {
     ).toBe(true)
   })
 
+  /**
+   * WHAT THIS USED TO BE, because the shape is worth recognising elsewhere.
+   *
+   * It read `const drewAtLoss = context.draws` after the loss and asserted the
+   * count had not moved — against a stub whose draw counter was
+   * `if (!state.lost) state.draws++`. The count could not move. The assertion
+   * held for every possible implementation, including one that calls
+   * `drawArrays` every frame forever, and it was measured doing exactly that:
+   * the render-loop stop was removed from all three originkit components and
+   * the suite produced zero failures.
+   *
+   * `drawsWhileLost` is the repaired accounting — the draw is counted, and the
+   * fact that it went into a dead context is recorded next to it — so this now
+   * fails, once per component, when the loop does not stop.
+   */
   it('stops drawing into a context that is gone', () => {
     const view = render(element)
     gl.runFrames(2)
     const canvas = view.container.querySelector('canvas')!
     const context = gl.contextOf(canvas)!
+    // The premise. Without it this is green against a component that never
+    // reached its render loop at all, which is a different defect wearing the
+    // same colour.
+    expect(context.draws, `${name} never drew, so it has no loop to stop`).toBeGreaterThan(0)
 
     act(() => {
       gl.loseContext(canvas)
     })
-    const drewAtLoss = context.draws
     gl.runFrames(3)
 
     expect(
-      context.draws,
-      'the render loop kept going against a dead context — every call it makes ' +
-        'now returns null or is a no-op, and it burns a frame slot doing it',
-    ).toBe(drewAtLoss)
+      context.drawsWhileLost,
+      `${name} issued ${context.drawsWhileLost} draw calls against a dead ` +
+        'context — every one of them returns null or is a no-op, and it burns a ' +
+        'frame slot doing it. On the phone this is the ordinary outcome of ' +
+        'backgrounding the tab',
+    ).toBe(0)
   })
 
   it('comes back on restore, still holding exactly one context', () => {
@@ -414,7 +458,6 @@ describe.each(WEBGL_COMPONENTS)('%s context loss', (name, element) => {
     act(() => {
       gl.restoreContext(canvas)
     })
-    gl.runFrames(3)
 
     // Two shapes are correct here and the library decides which. three's
     // WebGLRenderer rebuilds every GL resource it owns on restore, so the
@@ -428,9 +471,20 @@ describe.each(WEBGL_COMPONENTS)('%s context loss', (name, element) => {
     expect(presented!.isContextLost(), 'the restored canvas is backed by a dead context').toBe(
       false,
     )
-    expect(presented!.draws, `${name} never resumed drawing after the restore`).toBeGreaterThan(
-      0,
-    )
+
+    // BASELINED AT THE RESTORE, not measured from zero. On the three.js shape
+    // the presented context is the one that was already drawing before the
+    // loss, so `draws > 0` says nothing about whether the loop came back — it
+    // was satisfied by frames issued minutes of test-clock earlier. Only the
+    // frames drawn AFTER the restore answer the question this spec asks.
+    const drewAtRestore = presented!.draws
+    gl.runFrames(3)
+    expect(
+      presented!.draws,
+      `${name} never resumed drawing after the restore — the canvas is live and ` +
+        'permanently blank, which is what an operator sees when a backgrounded ' +
+        'tab comes forward',
+    ).toBeGreaterThan(drewAtRestore)
     expect(
       gl.liveContexts().length,
       'the restore left more than one live context — a rebuilt renderer that ' +

@@ -29,6 +29,16 @@ import { EffectsProvider } from './EffectsProvider'
 /** The overlay `FixedOverlay` renders — the thing that kills container listeners. */
 const OVERLAY = '.pointer-events-none.fixed.inset-0'
 
+/**
+ * The box `installGlStub` lays every element out at, passed explicitly so the
+ * arithmetic in the `pixelTrail` specs cannot drift away from the stub's own
+ * defaults.
+ */
+const VIEWPORT = { width: 1280, height: 800 }
+
+/** The trail texture `PixelTrail` asks `useTrailTexture` for, in pixels. */
+const TRAIL_TEXTURE_SIZE = 512
+
 function renderProvider(effect: CursorEffectId) {
   useEffectsStore.setState({ cursorEffect: effect, clickEffect: 'none' })
   return render(
@@ -288,10 +298,26 @@ describe('EffectsProvider — newly wired cursor effects', () => {
       // jsdom lays every element out at 0×0, and fiber refuses to build a
       // renderer — and therefore to connect its event listeners — while the box
       // it measures is zero. The stub supplies a real box and a GL context.
-      gl = installGlStub()
+      gl = installGlStub(VIEWPORT)
     })
 
     afterEach(() => {
+      // Unmount, then let the loop notice, and only then take the stub away.
+      //
+      // fiber drives every root from ONE module-level loop, and that loop
+      // reschedules itself only from inside a frame:
+      //
+      //     if (!running) { running = true; requestAnimationFrame(loop) }
+      //
+      // A frame still queued when `installGlStub`'s `requestAnimationFrame`
+      // disappears is a frame nobody ever runs, so `running` stays `true` for
+      // the rest of the FILE and every later `invalidate()` takes the early
+      // exit. The next spec then mounts a canvas that is never drawn once —
+      // measured: both specs below saw zero draw calls and an unpainted trail,
+      // while passing in isolation. Draining after `cleanup()` lets the loop
+      // find `_roots` empty, clear its own flag and cancel its frame.
+      cleanup()
+      gl.runFrames(2)
       gl.teardown()
     })
 
@@ -305,9 +331,19 @@ describe('EffectsProvider — newly wired cursor effects', () => {
      */
     async function mountPixelTrail() {
       const view = renderProvider('pixelTrail')
-      await waitFor(() => {
-        expect(view.container.querySelector(`${OVERLAY} canvas`)).not.toBeNull()
-      })
+      // A generous budget, and not an arbitrary one: this waits on a DYNAMIC
+      // IMPORT — `PixelTrail` is `lazy()`, and it pulls in three.js and fiber.
+      // Testing Library's default is one second, which the whole 164-file suite
+      // running in parallel workers exceeds often enough to make these three
+      // specs red roughly every other run. A guard that is red half the time is
+      // not a guard, and the failure it produced ("no canvas yet") says nothing
+      // about the property under test.
+      await waitFor(
+        () => {
+          expect(view.container.querySelector(`${OVERLAY} canvas`)).not.toBeNull()
+        },
+        { timeout: 15_000 },
+      )
       await act(async () => {
         window.dispatchEvent(new Event('resize'))
       })
@@ -358,6 +394,222 @@ describe('EffectsProvider — newly wired cursor effects', () => {
       // reference frees nothing. An operator toggling this effect while trying
       // out the others is exactly the sequence that would exhaust them.
       expect(context!.isContextLost()).toBe(true)
+    })
+
+    /**
+     * The GL state every draw call was issued under.
+     *
+     * Wrapping `getContext` rather than reaching for the context through the
+     * harness after mounting, and that is the whole reason this helper exists:
+     * `WebGLState` CACHES every capability it sets, so `gl.enable(gl.BLEND)` is
+     * issued at most once, during the first `setMaterial`, and a recorder
+     * installed after `render()` sees nothing and reports "no blending calls"
+     * for a material that blends perfectly well. Getting between `getContext`
+     * and the renderer's constructor is the only place the sequence is whole.
+     *
+     * The stub's context is a Proxy that routes unknown properties into a spare
+     * map, so assigning over `enable`/`disable`/`blendFuncSeparate` replaces the
+     * inert defaults; `drawArrays`/`drawElements` are real (they count draws),
+     * so those are wrapped and called through.
+     */
+    function recordDrawState() {
+      const original = HTMLCanvasElement.prototype.getContext
+      const draws: Array<{ blending: boolean; func: string[] }> = []
+      const wired = new WeakSet<object>()
+      let blending = false
+      let func: string[] = []
+
+      HTMLCanvasElement.prototype.getContext = function (this: HTMLCanvasElement, kind: string) {
+        const context = (original as (kind: string) => unknown).call(this, kind) as Record<
+          string,
+          unknown
+        > | null
+        if (context === null || kind === '2d' || wired.has(context)) return context
+        wired.add(context)
+        const nameOf = (value: number) =>
+          ['BLEND', 'SRC_ALPHA', 'ONE_MINUS_SRC_ALPHA', 'ONE', 'ZERO'].find(
+            (name) => context[name] === value,
+          ) ?? String(value)
+
+        context.enable = (cap: number) => {
+          if (nameOf(cap) === 'BLEND') blending = true
+        }
+        context.disable = (cap: number) => {
+          if (nameOf(cap) === 'BLEND') blending = false
+        }
+        context.blendFuncSeparate = (...args: number[]) => {
+          func = args.map(nameOf)
+        }
+        for (const call of ['drawArrays', 'drawElements'] as const) {
+          const inner = context[call] as (...args: unknown[]) => void
+          context[call] = (...args: unknown[]) => {
+            draws.push({ blending, func })
+            inner(...args)
+          }
+        }
+        return context
+      } as never
+
+      return {
+        draws,
+        restore: () => {
+          HTMLCanvasElement.prototype.getContext = original
+        },
+      }
+    }
+
+    /**
+     * Where the trail texture was painted, in its own 512x512 pixels.
+     *
+     * `useTrailTexture` keeps its trail on a 2D canvas (`id="touchTexture"`) and
+     * draws every live point as a radial gradient centred on that point. jsdom
+     * has no 2D backend either, but `gl-stub` hands out a recording context, so
+     * the centre of each gradient is the one thing in this environment that says
+     * where the effect thinks the pointer is.
+     */
+    function trailPainter() {
+      const trail = gl.contexts2d.find((context) => context.canvas.id === 'touchTexture')
+      expect(trail, 'drei never built the trail texture, so nothing is under test').toBeDefined()
+      const painted: Array<[number, number]> = []
+      const inner = trail!.createRadialGradient as (...args: number[]) => unknown
+      trail!.createRadialGradient = (...args: number[]) => {
+        painted.push([args[0], args[1]])
+        return inner(...args)
+      }
+      return painted
+    }
+
+    /**
+     * The trail pixel a viewport coordinate should land on.
+     *
+     * The quad is SQUARE and sized to the viewport's larger side, and the shader
+     * maps the screen onto it with the same `coverUv` - so the horizontal axis
+     * is 1:1 and the vertical one is compressed by the aspect ratio, and the
+     * texture's Y runs the other way (`drawTouch` uses `1 - uv.y`).
+     */
+    const trailPixel = (clientX: number, clientY: number): [number, number] => {
+      const u = clientX / VIEWPORT.width
+      const v = 0.5 + (0.5 - clientY / VIEWPORT.height) * (VIEWPORT.height / VIEWPORT.width)
+      return [u * TRAIL_TEXTURE_SIZE, (1 - v) * TRAIL_TEXTURE_SIZE]
+    }
+
+    /**
+     * The full-screen wash - the third way this effect went wrong, and the one
+     * an operator hit last: the whole panel under a flat magenta veil, readable
+     * and unusable.
+     *
+     * The shader writes the trail sample as the ALPHA of every pixel
+     * (`gl_FragColor = vec4(pixelColor, trail)`) and drei's `shaderMaterial()`
+     * passes no `transparent`, so three left the material OPAQUE - `NoBlending`,
+     * `gl.enable(gl.BLEND)` never called, alpha discarded. `pixelColor` was
+     * therefore written to every pixel of the drawing buffer, and the browser
+     * composites that buffer as PREMULTIPLIED (`alpha: true` plus three's own
+     * default `premultipliedAlpha: true`, i.e. `src + dst * (1 - srcAlpha)`), so
+     * a buffer holding `(pixelColor, 0)` everywhere ADDS `#aa1d8b` to the entire
+     * page.
+     *
+     * WHAT THIS CANNOT SAY. jsdom shades no fragment, so neither the veil nor
+     * the trail itself is observable here, and neither is the compositing step -
+     * that half is the platform's contract, quoted above, not something this
+     * spec measures. What it does measure is the GL state each draw was issued
+     * under, which is what decides whether the alpha the shader computes reaches
+     * the framebuffer at all. Blending off is the wash; blending on with
+     * src-over is a trail.
+     */
+    it('draws with blending on, so the alpha it computes is not discarded', async () => {
+      const recorder = recordDrawState()
+      try {
+        await mountPixelTrail()
+        await act(async () => {
+          gl.runFrames(2)
+        })
+
+        expect(
+          recorder.draws.length,
+          'nothing was drawn, so nothing is under test',
+        ).toBeGreaterThan(0)
+        for (const draw of recorder.draws) {
+          expect(draw.blending, 'drawn with GL_BLEND off, which paints the page').toBe(true)
+          // `SRC_ALPHA, ONE_MINUS_SRC_ALPHA` and not `ONE, ONE_MINUS_SRC_ALPHA`:
+          // three picks the second when `material.premultipliedAlpha` is set,
+          // and this shader's colour is NOT premultiplied - under that func an
+          // empty trail would write full `pixelColor` at alpha 0 and the wash
+          // would come straight back, blending enabled or not.
+          expect(draw.func).toEqual([
+            'SRC_ALPHA',
+            'ONE_MINUS_SRC_ALPHA',
+            'ONE',
+            'ONE_MINUS_SRC_ALPHA',
+          ])
+        }
+      } finally {
+        recorder.restore()
+      }
+    })
+
+    /**
+     * The other half, and the one a repair to the wash could destroy in silence:
+     * the trail has to be PAINTED, under the pointer, from an event that arrives
+     * at `document.body` - which is where fiber listens now that its own canvas
+     * is `pointer-events: none`.
+     *
+     * `useTrailTexture`'s `onMove` hangs off `onPointerMove` on the mesh, so it
+     * runs only if fiber's raycast still reaches the quad after being handed an
+     * external event source and told to read `clientX`/`clientY`. If it does
+     * not, the texture stays black, every pixel's alpha stays 0, and the setting
+     * becomes a no-op that no screenshot tells apart from a working one.
+     */
+    it('paints the trail under a pointer event delivered to the event source', async () => {
+      await mountPixelTrail()
+      const painted = trailPainter()
+
+      // Frames with no pointer at all first. The texture is cleared every frame
+      // and nothing is drawn onto it - which is what makes each assertion below
+      // a statement about the pointer event, and not about a component that
+      // paints somewhere regardless.
+      await act(async () => {
+        gl.runFrames(2)
+      })
+      expect(painted, 'the trail was painted with no pointer event').toEqual([])
+
+      await act(async () => {
+        document.body.dispatchEvent(
+          new MouseEvent('pointermove', { clientX: 640, clientY: 400, bubbles: true }),
+        )
+      })
+      await act(async () => {
+        gl.runFrames(1)
+      })
+      // The centre of the viewport is the centre of the texture.
+      expect(painted, 'onPointerMove never fired, so the effect is a silent no-op').toEqual([
+        trailPixel(640, 400),
+      ])
+
+      // And it TRACKS, at the right place. A handler that fired once, or a quad
+      // that no longer covers the viewport it is sampled against, cannot follow
+      // this — measured: making the quad the SHORT side of the viewport instead
+      // of the long one leaves the centre right and lands this point at 51 px
+      // instead of 128.
+      //
+      // What it cannot catch is `eventPrefix`. fiber divides the raw coordinate
+      // by the canvas size WITHOUT subtracting the canvas rect, so `client` is
+      // right only because `FixedOverlay` puts the canvas at the viewport
+      // origin — but jsdom does no layout and hands back `offsetX === clientX`
+      // on every event it builds, so the two prefixes are indistinguishable
+      // here. Measured: with `eventPrefix: 'offset'` this whole file stays
+      // green. That one is held by the comment in `EffectsProvider.tsx`.
+      await act(async () => {
+        document.body.dispatchEvent(
+          new MouseEvent('pointermove', { clientX: 320, clientY: 200, bubbles: true }),
+        )
+      })
+      await act(async () => {
+        gl.runFrames(1)
+      })
+      const [x, y] = painted[painted.length - 1]
+      const [expectedX, expectedY] = trailPixel(320, 200)
+      expect(x).toBeCloseTo(expectedX, 6)
+      expect(y).toBeCloseTo(expectedY, 6)
     })
   })
 

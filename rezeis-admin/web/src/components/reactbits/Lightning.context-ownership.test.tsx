@@ -56,7 +56,13 @@ class FakeGl {
   /** Once true, never false again — the whole point. */
   lost = false
   loseCalls = 0
+  /**
+   * Every `drawArrays` this context executed, LOST OR NOT — what the component
+   * actually did, not what it should have. See the note on `drawArrays`.
+   */
   draws = 0
+  /** The subset of `draws` issued while `isContextLost()` was true. */
+  drawsWhileLost = 0
   /** Last value uploaded, by uniform name. */
   uniforms: Record<string, number> = {}
 
@@ -120,8 +126,26 @@ class FakeGl {
     if (location) this.uniforms[location.name] = value
   }
   uniform2f(): void {}
+  // COUNTED UNCONDITIONALLY. Do not simplify this back to
+  // `if (!this.lost) this.draws++`.
+  //
+  // That line reads like modelling a lost context's no-op and is in fact a hole
+  // in the harness. Real WebGL does not throw or refuse a draw into a lost
+  // context — it issues the call and silently does nothing — so suppressing the
+  // COUNT is not no-op semantics, it is declining to see the call. Every
+  // assertion of the shape "it stopped drawing after the loss" then holds by
+  // construction of this class, for every implementation, including one that
+  // draws every frame forever.
+  //
+  // `gl-stub.ts` next door carried the identical line and was measured doing
+  // exactly that: the render-loop stop was removed from three components and
+  // the suite produced ZERO failures. Nothing in THIS file drives a context
+  // loss today, so nothing here was unfailable — the accounting is aligned so
+  // that the loss test somebody writes next is able to fail on the first try
+  // rather than after the same three days of measurement.
   drawArrays(): void {
-    if (!this.lost) this.draws++
+    this.draws++
+    if (this.lost) this.drawsWhileLost++
   }
   getExtension(name: string): { loseContext: () => void } | null {
     if (name !== 'WEBGL_lose_context') return null
