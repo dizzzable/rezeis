@@ -11,6 +11,8 @@
     "dev": "vite",
     "prebuild": "node scripts/sync-flags.mjs",
     "build": "tsc -b && vite build",
+    "typecheck": "tsc -p tsconfig.app.json --noEmit --incremental false",
+    "typecheck:test": "tsc -p tsconfig.test.json --noEmit",
     "check:build-graph": "node scripts/check-build-graph.mjs",
     "lint": "eslint .",
     "lint:strict": "eslint . --max-warnings=0",

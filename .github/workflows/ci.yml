@@ -56,7 +56,15 @@ jobs:
           cache-dependency-path: rezeis-admin/web/package-lock.json
 
       - run: npm ci
-      - run: npx tsc -p tsconfig.app.json --noEmit --incremental false
+      # `typecheck` compiles `tsconfig.app.json`, the PRODUCTION project. It
+      # excludes tests on purpose: the Docker frontend stage is `COPY web/ .`
+      # and nothing else, so anything this project compiles must live under
+      # `web/`. A test that reaches into the backend is legitimate and is
+      # covered by `typecheck:test` below, which runs where the whole
+      # repository exists. Keeping them separate is what stops a green local
+      # run from shipping an image that cannot build.
+      - run: npm run typecheck
+      - run: npm run typecheck:test
       - run: npm test
       - run: npm run lint
       - run: npm run build

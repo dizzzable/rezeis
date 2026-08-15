@@ -21,5 +21,21 @@
       "@/*": ["./src/*"]
     }
   },
-  "include": ["src"]
+  "include": ["src"],
+  // The PRODUCTION build, and it must be buildable from `web/` ALONE.
+  //
+  // The Docker frontend stage is `COPY web/ .` and nothing else (Dockerfile
+  // stage 3), so anything this project compiles has to live under `web/`.
+  // Tests do not: `branding-preset-slot-preservation.test.tsx` deliberately
+  // drives the backend's real `mergeBrandingSettings`/`readBrandingSettings`
+  // to prove storage kept what the panel sent, which means importing across
+  // the package boundary. Type-checking that here made `npm run build` depend
+  // on a directory the image does not carry — green locally, and a failed
+  // image build on the release tag.
+  //
+  // Tests are type-checked by `tsconfig.test.json` instead (`npm run
+  // typecheck:test`), which has the whole repository around it. Do not delete
+  // this exclude to "get type coverage back": `src/build-isolation.test.ts`
+  // pins the arrangement and explains it.
+  "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx", "src/**/*.spec.ts", "src/**/*.spec.tsx"]
 }

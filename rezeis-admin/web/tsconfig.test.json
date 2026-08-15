@@ -1,0 +1,18 @@
+{
+  // Type-checking for the SPA's tests.
+  //
+  // `tsconfig.app.json` is the production build and excludes tests, because
+  // the Docker frontend stage copies `web/` and nothing else — see the note
+  // there. This project is the other half: it compiles everything, tests
+  // included, and is allowed to reach across the package boundary because it
+  // only ever runs where the whole repository is checked out (a developer's
+  // machine, or CI's `web-quality` job).
+  //
+  // Mirrors the backend's own `typecheck` / `typecheck:test` split.
+  "extends": "./tsconfig.app.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": ["src"],
+  "exclude": []
+}
