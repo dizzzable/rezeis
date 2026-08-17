@@ -96,13 +96,32 @@ const environmentSchema = z
       const normalized = normalizeOptionalString(value);
       // WEBHOOK_SECRET_HEADER is an OPTIONAL integration secret (signs the
       // reiwa push channel + outbound webhooks). A malformed value must NOT
-      // crash the whole panel — disable webhook signing and warn loudly so the
-      // operator fixes it. Core secrets like REZEIS_CRYPT_KEY still fail closed.
+      // crash the whole panel — warn loudly so the operator fixes it. Core
+      // secrets like REZEIS_CRYPT_KEY still fail closed.
+      //
+      // What dropping it here does and does NOT do: this schema's output is
+      // consumed via ConfigService, and NOTHING reads this key that way. All
+      // four consumers — webhook.config.ts, BotNotifierClient,
+      // ReiwaCacheInvalidatorService and SystemHealthService — read
+      // `process.env.WEBHOOK_SECRET_HEADER` directly, and Nest's
+      // `assignVariablesToProcess` only fills in keys ABSENT from process.env,
+      // so it never overwrites the raw malformed value. Signing therefore
+      // continues with the value as typed. The warning below says exactly that
+      // instead of the older text, which claimed signing was "DISABLED" — a
+      // claim this preprocess step has no power to make good on. Making it true
+      // by routing those reads through the config would silently kill the relay
+      // of every install whose non-conforming secret currently matches reiwa's
+      // (reiwa validates nothing), which is an outage traded for tidiness.
       if (typeof normalized === 'string' && !webhookSecretPattern.test(normalized)) {
         console.warn(
-          '[env] WEBHOOK_SECRET_HEADER is set but is not 64–256 alphanumeric characters — ' +
-            'webhook signing (reiwa push / outbound webhooks) is DISABLED. ' +
-            'Set a valid value (e.g. `openssl rand -hex 32`) or leave it empty.',
+          '[env] WEBHOOK_SECRET_HEADER is set but is not 64–256 alphanumeric characters. ' +
+            'It is NOT ignored: the reiwa push channel, outbound webhooks and the reiwa ' +
+            'metrics panel all read it straight from the environment, so this exact value ' +
+            'is still used for signing. Delivery keeps working only while reiwa\'s ' +
+            'REZEIS_WEBHOOK_SECRET holds the byte-identical string, and every delivery ' +
+            'fails signature verification the moment it does not. Replace it on BOTH sides ' +
+            'with a conforming secret (`openssl rand -hex 32`), or leave it empty to ' +
+            'disable signing.',
         );
         return undefined;
       }

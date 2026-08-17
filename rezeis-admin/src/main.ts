@@ -18,6 +18,7 @@ import { configureHttpRuntimeMiddleware } from './common/http/configure-http-run
 import { RequestTimeoutMiddleware } from './common/middleware/request-timeout.middleware';
 import { AdminIoAdapter } from './common/realtime/admin-io.adapter';
 import { configureBigIntJsonSerialization } from './common/runtime/bigint-json';
+import { warnOnUnreachableCrossHostUrls } from './common/runtime/cross-host-url-check';
 import { printRezeisBanner } from './common/runtime/startup-banner';
 import { SystemLogsService } from './modules/system-logs/services/system-logs.service';
 
@@ -94,6 +95,12 @@ async function bootstrap(): Promise<void> {
   await app.listen(port, host);
   // Success banner — printed only once the HTTP listener is actually bound.
   printRezeisBanner('api');
+  // Split-VPS guard: warn (never fail) when a cross-host URL still names a
+  // docker service that does not resolve from this host. Runs on the api
+  // container only — the worker shares the same .env, so a second copy of the
+  // same warning would add noise, not information. Returns immediately; the
+  // probes themselves run on unref'd timers over the next five minutes.
+  warnOnUnreachableCrossHostUrls();
 }
 
 function resolveUploadsRoot(): string {

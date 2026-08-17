@@ -10,11 +10,79 @@
 	# Disable the automatic HTTP->HTTPS redirect vhost on :80 — we don't
 	# bind :80 at all.
 	auto_https disable_redirects
+
+	# Real client IP — not needed today, REQUIRED if you ever put a CDN
+	# (Cloudflare) in front of this VPS.
+	#
+	# Today this box terminates TLS directly, so the peer address IS the
+	# client. Behind a CDN, every request arrives from an edge address; if
+	# Caddy has not been told which peers to trust, the app treats that
+	# edge as the client and:
+	#   - this panel auto-blocks for 30 MINUTES on repeated failed logins,
+	#     so one attacker behind a Cloudflare datacentre locks out every
+	#     operator routed through it;
+	#   - the reiwa cabinet bans an offending IP for 24 HOURS — same blast
+	#     radius, far longer fuse.
+	# Rate limiting, abuse heuristics and audit logs all go wrong the same
+	# way, invisibly, until users complain.
+	#
+	# To enable: fetch the CURRENT ranges from Cloudflare's published list
+	# at https://www.cloudflare.com/ips/ (IPv4 and IPv6 — they change) and
+	# list them after `static`. Never use 0.0.0.0/0: that trusts every peer
+	# and lets any client forge its own address.
+	#
+	# servers {
+	# 	trusted_proxies static <cloudflare-cidr> <cloudflare-cidr> ...
+	# 	client_ip_headers CF-Connecting-IP
+	# }
+	#
+	# The sibling stacks need their own equivalent:
+	#   nginx/angie — `set_real_ip_from` + `real_ip_header CF-Connecting-IP`
+	#   traefik     — `entryPoints.https.forwardedHeaders.trustedIPs`
+	# Traefik is the worst of the four here: when the peer is NOT trusted it
+	# STRIPS every X-Forwarded-* header instead of shifting/appending, so the
+	# client address is destroyed outright rather than merely wrong. Caddy
+	# and nginx/angie leave a wrong-but-present value; Traefik leaves none.
 }
 
 https://REPLACE_WITH_YOUR_DOMAIN {
 	tls /etc/caddy/certs/fullchain.pem /etc/caddy/certs/privkey.key
-	reverse_proxy * http://rezeis:8000
+
+	# HSTS — one year. After one visit, browsers refuse plaintext HTTP to
+	# this host until the max-age expires.
+	#
+	# `includeSubDomains` is a commitment, not just a hardening flag: it
+	# pins HTTPS for EVERY name under this one. If this host ever shares an
+	# apex with another (e.g. panel.example.com and app.example.com both
+	# under example.com), the header served from either one applies to the
+	# whole example.com tree — including subdomains that have no cert yet,
+	# which then become unreachable in any browser that saw the header, for
+	# a year. If your DNS layout makes that risky, drop `includeSubDomains`;
+	# the max-age alone still protects this host.
+	#
+	# Deliberately NOT `preload`. Preload is a one-way submission to browser
+	# vendors — removal takes months and rides browser release trains. Add
+	# it only as a separate, conscious decision.
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+
+	# No request-body limit is set here, and Caddy imposes none of its own.
+	# The panel's per-route application limits are therefore the ONLY
+	# ceiling on this stack: broadcast video 50 MB, FAQ media 25 MB,
+	# imports 100 MB, backup restore 1 GiB (2 GiB hard cap). The nginx and
+	# angie templates, by contrast, cap at 64m at the edge — so they 413
+	# imports and backup restores that this stack passes through fine.
+	# If you want an edge ceiling, add a site-level directive here (site
+	# level, NOT inside the reverse_proxy block):
+	#   request_body {
+	# 	max_size 64MB
+	#   }
+	reverse_proxy * http://rezeis:8000 {
+		# Keep the internal SSE stream (/api/internal/user/:userRef/stream,
+		# which reiwa consumes for its realtime feed) flowing. Caddy already
+		# force-flushes text/event-stream, this makes it explicit and matches
+		# the reiwa Caddyfile.
+		flush_interval -1
+	}
 }
 
 # Stealth default: any TLS connection that hits the IP without the right

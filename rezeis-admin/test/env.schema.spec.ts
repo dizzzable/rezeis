@@ -186,10 +186,17 @@ describe('validateEnvironment', () => {
     }
   });
 
-  it('disables (does not crash on) a malformed WEBHOOK_SECRET_HEADER', () => {
+  it('drops a malformed WEBHOOK_SECRET_HEADER from the parsed config without crashing', () => {
     // An optional integration secret must not take down the whole panel.
-    // A malformed value is coerced to undefined (signing disabled) + a warning.
+    // A malformed value is coerced to undefined here + a warning.
     // Valid range is 64–256 alphanumeric characters.
+    //
+    // NB: "dropped from the parsed config" is NOT "signing disabled". Nothing
+    // reads this key through ConfigService — webhook.config.ts,
+    // BotNotifierClient, ReiwaCacheInvalidatorService and SystemHealthService
+    // all read `process.env.WEBHOOK_SECRET_HEADER` directly, and Nest only
+    // writes validated values back for keys absent from process.env. So the raw
+    // value keeps being used for signing; see the warning text in env.schema.ts.
     for (const bad of ['short', 'has-dashes-' + 'a'.repeat(54), 'a'.repeat(63), 'a'.repeat(257)]) {
       const env = validateEnvironment({
         ...createRequiredEnvironment(),
