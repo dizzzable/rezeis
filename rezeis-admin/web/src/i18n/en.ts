@@ -3569,7 +3569,7 @@ export const en = {
       presets: {
         title: 'Theme Presets',
         description:
-          '8 standard themes and 104 concepts. A standard theme only changes the palette, card gradient and background effect; a concept applies a full visual system. Identity and navigation are preserved.',
+          '8 standard themes and 104 concepts. A standard theme changes the palette, the card gradient and the cabinet surfaces, and returns the app background to the built-in one; a concept applies a full visual system. Identity, typography, corner geometry, card artwork and navigation are preserved.',
         searchPlaceholder: 'Search by code, name, or style…',
         searchLabel: 'Search WEB Reiwa themes',
         count: '{{visible}} of {{total}} themes',
@@ -3853,6 +3853,9 @@ export const en = {
         archived: 'archived',
         custom: 'custom',
         auto: 'auto',
+        catalogHidden: 'not in catalog',
+        catalogHiddenHint:
+          'Subscribers will not see this plan in the buy catalog. It is shown here so you can style it ahead of time.',
         unlimited: 'Unlimited',
         gradient: 'Gradient',
         fromPrimary: 'From primary',

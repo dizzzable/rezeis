@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 
 import { buildWebhookSignature } from '../../../common/http/webhook-signature.util';
+import type { ReiwaRelayEvent } from '../reiwa-relay.constants';
 
 /**
  * BotNotifierClient
@@ -26,14 +27,105 @@ import { buildWebhookSignature } from '../../../common/http/webhook-signature.ut
  *
  * Enabled only when BOTH `REIWA_URL` and `WEBHOOK_SECRET_HEADER` are set.
  */
+
+/**
+ * The panel's deadline has to OUTLAST the cabinet's, route by route
+ * ═════════════════════════════════════════════════════════════════
+ * This request is not a leaf. The cabinet answers it only after its own call
+ * to the bot settles, and it gives that call a budget per route
+ * (`reiwa/src/api/routes/webhooks.ts` -> `relayToBot`). The two deadlines are
+ * therefore nested, and the rule the outer one must obey is:
+ *
+ *     panel deadline  >  cabinet deadline for the SAME route  +  network slack
+ *
+ * Break it and the panel walks away while the cabinet is still working. It
+ * reads its own abort as `timeout`, `isRetryableRelayOutcome` calls that
+ * transient, and the queue retries a delivery that never failed — while the
+ * bot, which did finish, posts the message a second time. The panel's
+ * impatience is the whole cause of the duplicate.
+ *
+ * One flat 10s budget used to cover every route while the cabinet allowed the
+ * INLINE DOCUMENT routes 30s, so any dev/operator document that took more than
+ * ten seconds to upload was guaranteed — not merely likely — to be read as a
+ * timeout and sent again. Documents are precisely the payloads that take long.
+ *
+ * The slack covers what the cabinet's own clock never starts: TLS and the
+ * panel -> cabinet hop in both directions, plus the cabinet's HMAC check and
+ * zod parse, all of which run before its `AbortSignal.timeout` is armed.
+ */
+
+/**
+ * Message routes: cabinet `BOT_RELAY_TIMEOUT_MS` = 8s, plus 2s of slack.
+ *
+ * Unchanged. It was already on the right side of the invariant, and the 4s ->
+ * 10s move that produced it is still the reason it is not smaller: nothing on
+ * these paths is inline with an operator request (`UserNotificationsService`
+ * fires its fanout with `void`, broadcast delivery runs inside a BullMQ
+ * processor, the durable relay runs in `ReiwaRelayProcessor`), so a longer
+ * wait costs nothing an operator can see and buys back deliveries a short
+ * abort was throwing away.
+ */
+const RELAY_MESSAGE_TIMEOUT_MS = 10_000;
+
+/**
+ * Inline-document routes: cabinet `BOT_RELAY_DOCUMENT_TIMEOUT_MS` = 30s, plus
+ * 5s of slack.
+ *
+ * More slack than the message routes get, because the body is bigger: the
+ * cabinet caps `documentContentSchema` at 1 MB, and that megabyte has to cross
+ * the panel -> cabinet hop before the cabinet's own 30s clock even starts. 35s
+ * is the smallest round number that clears 30s by more than the message
+ * route's margin. The cost of the larger number is bounded — at worst
+ * `RELAY_WORKER_CONCURRENCY` worker slots sitting on a wedged cabinet for 35s
+ * instead of 10s, on the rarest events on the queue. The cost of a smaller one
+ * is a duplicate document every single time an upload runs long.
+ */
+const RELAY_DOCUMENT_TIMEOUT_MS = 35_000;
+
+/** Routes that carry the document bytes INLINE in the webhook body. */
+const RELAY_DOCUMENT_EVENTS: ReadonlySet<string> = new Set([
+  'reiwa.channel.broadcast.document',
+  'reiwa.dev.notify.document',
+]);
+
+/**
+ * Routes that get NO total deadline — today exactly one.
+ *
+ * `reiwa.backup.document` hands the bot a download token; the bot then streams
+ * the backup out of rezeis and up to Telegram, and only then answers. That
+ * file can be gigabytes, so the cabinet deliberately passes `null` instead of
+ * a deadline and says why at the call site: a total deadline small enough to
+ * be useful against a wedged bot is also small enough to cut a legitimate
+ * upload, and the cut surfaces as the one status `BackupService` retries.
+ *
+ * A 10s cap on THIS side recreated exactly that harm one hop further out. The
+ * panel aborts, records `timeout`, `isRetryableRelayOutcome` says retry, the
+ * backup queue has `attempts: 3` — and one slow backup becomes two or three
+ * multi-gigabyte copies in the operator's topic. Matching the cabinet's `null`
+ * is what keeps the panel from causing the duplicate the cabinet refused to.
+ *
+ * `null` is not "unbounded": undici still applies its 300s headers/body IDLE
+ * defaults, the same ceiling the cabinet is left with. An idle timeout is the
+ * shape this call actually wants, and global `fetch` cannot express one.
+ */
+const RELAY_UNBOUNDED_EVENTS: ReadonlySet<string> = new Set(['reiwa.backup.document']);
+
+/**
+ * Total request deadline for one relay event, or `null` for "no total
+ * deadline". Exported so the invariant above can be asserted against the
+ * cabinet's own numbers instead of restated as prose.
+ */
+export function relayRequestTimeoutMs(event: string): number | null {
+  if (RELAY_UNBOUNDED_EVENTS.has(event)) return null;
+  if (RELAY_DOCUMENT_EVENTS.has(event)) return RELAY_DOCUMENT_TIMEOUT_MS;
+  return RELAY_MESSAGE_TIMEOUT_MS;
+}
+
 @Injectable()
 export class BotNotifierClient {
   private readonly logger = new Logger(BotNotifierClient.name);
   private readonly endpoint: string | null;
   private readonly secret: string | null;
-
-  /** Per-call HTTP timeout — push paths run inline with admin requests. */
-  private static readonly TIMEOUT_MS = 4_000;
 
   public constructor() {
     const baseUrl = (process.env.REIWA_URL ?? '').trim().replace(/\/+$/, '');
@@ -49,6 +141,16 @@ export class BotNotifierClient {
   /**
    * Deliver a per-user message to Telegram. `eventId` MUST be stable across
    * retries; reuse the source `UserNotificationEvent.id` CUID for free dedup.
+   *
+   * Returns the full outcome, not the message id. It used to return
+   * `number | null`, which collapsed six distinct results into one value — a
+   * bot that proved a delivery, a recipient who blocked the bot, a payload the
+   * bot refused, a four-second timeout and a relay that was never configured
+   * all arrived as `null`. Both callers that survive need to tell those apart:
+   * the relay processor decides retry-vs-give-up from the status, and
+   * broadcast delivery decides SENT-vs-FAILED from it. A convenience wrapper
+   * back to `number | null` is deliberately not provided — it is the shape
+   * that made `SENT` mean "we wrote a row in our own database".
    */
   public async notifyUser(input: {
     readonly eventId: string;
@@ -62,8 +164,8 @@ export class BotNotifierClient {
      * `/uploads/...` URLs are fetched from rezeis. Omitted → text-only message.
      */
     readonly bannerUrl?: string;
-  }): Promise<number | null> {
-    const { messageId } = await this.deliver('reiwa.user.notify', {
+  }): Promise<NotifyDeliveryResult> {
+    return this.deliver('reiwa.user.notify', {
       eventId: input.eventId,
       telegramId: input.telegramId,
       text: input.text,
@@ -71,7 +173,6 @@ export class BotNotifierClient {
       buttons: input.buttons,
       bannerUrl: input.bannerUrl,
     });
-    return messageId;
   }
 
   /**
@@ -188,6 +289,21 @@ export class BotNotifierClient {
     return this.endpoint !== null && this.secret !== null;
   }
 
+  /**
+   * One attempt at an arbitrary relay event, reporting exactly what it proved.
+   *
+   * The entry point `ReiwaRelayProcessor` uses: the event kind travels in the
+   * job payload, so the processor cannot pick a typed method per event without
+   * a nine-arm switch that adds nothing. Metadata shaping stays with the
+   * producer, which is where the caller's own types are.
+   */
+  public async deliverRelayEvent(
+    event: ReiwaRelayEvent,
+    metadata: Record<string, unknown>,
+  ): Promise<NotifyDeliveryResult> {
+    return this.deliver(event, metadata);
+  }
+
   private async deliver(
     event: string,
     metadata: Record<string, unknown>,
@@ -195,12 +311,19 @@ export class BotNotifierClient {
     if (this.endpoint === null || this.secret === null) {
       return { status: 'disabled', messageId: null, httpStatus: null, detail: null };
     }
-    const controller = new AbortController();
+    // Per route, and always longer than the cabinet's budget for that same
+    // route — see `relayRequestTimeoutMs`. `null` means "no total deadline",
+    // which is not "no ceiling": undici's 300s idle defaults still apply.
+    const timeoutMs = relayRequestTimeoutMs(event);
+    const controller = timeoutMs === null ? null : new AbortController();
     let timedOut = false;
-    const timeout = setTimeout(() => {
-      timedOut = true;
-      controller.abort();
-    }, BotNotifierClient.TIMEOUT_MS);
+    const timeout =
+      controller === null || timeoutMs === null
+        ? null
+        : setTimeout(() => {
+            timedOut = true;
+            controller.abort();
+          }, timeoutMs);
     try {
       const body = JSON.stringify({
         event,
@@ -219,7 +342,7 @@ export class BotNotifierClient {
           'X-Rezeis-Signature': header,
         },
         body,
-        signal: controller.signal,
+        ...(controller === null ? {} : { signal: controller.signal }),
       });
       if (!response.ok) {
         this.logger.warn(
@@ -258,10 +381,10 @@ export class BotNotifierClient {
         status: timedOut ? 'timeout' : 'failed',
         messageId: null,
         httpStatus: null,
-        detail: timedOut ? `timed out after ${BotNotifierClient.TIMEOUT_MS}ms` : message,
+        detail: timedOut ? `timed out after ${timeoutMs}ms` : message,
       };
     } finally {
-      clearTimeout(timeout);
+      if (timeout !== null) clearTimeout(timeout);
     }
   }
 }

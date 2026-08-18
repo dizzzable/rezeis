@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { renderWithProviders } from '@/test/test-utils'
+import { installIntersectionObserver, renderWithProviders } from '@/test/test-utils'
 import { act, waitFor } from '@testing-library/react'
 
 const delayedPreviewRenderer = vi.hoisted(() => {
@@ -448,6 +448,10 @@ describe('BrandingPreview subscription card', () => {
         deviceLimit: 2,
       },
     ]
+    // A tariff card only mounts its renderer once it holds a slot from the
+    // context budget, and a slot needs the card to be ON SCREEN. The suite-wide
+    // stub never reports, so without a driveable observer this asserts nothing.
+    const viewport = installIntersectionObserver()
     const { container } = renderWithProviders(
       <BrandingPreview
         focus="planCards"
@@ -472,6 +476,7 @@ describe('BrandingPreview subscription card', () => {
     expect(
       effect?.querySelector('[data-preview-card-effect-renderer]'),
     ).toHaveStyle({ opacity: '0.68' })
+    viewport.restore()
   })
 
   it.each([
@@ -784,12 +789,16 @@ describe('BrandingPreview subscription card', () => {
       'data-preview-app-readability-veil',
       'dark',
     )
+    // ONE opacity over the whole layer. These two used to pin the 40% and 84%
+    // stops of a gradient that also carried `veilOpacity + 0.12` at 0% and
+    // 100%; the bottom ramp of that gradient painted a full-bleed band across
+    // the bottom 16% of the shell, which is where the floating nav pill sits.
+    // The veil is flat now, so the assertion is that no position appears in it
+    // at all — a stop position coming back is the band coming back.
     expect(readability?.getAttribute('style')).toContain(
-      `rgba(0, 0, 0, ${veilOpacity}) 40%`,
+      `rgba(0, 0, 0, ${veilOpacity})`,
     )
-    expect(readability?.getAttribute('style')).toContain(
-      `rgba(0, 0, 0, ${veilOpacity}) 84%`,
-    )
+    expect(readability?.getAttribute('style')).not.toMatch(/\d+%/)
     expect(
       container.querySelector(
         '[data-preview-app-background-texture="noise"]',

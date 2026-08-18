@@ -52,6 +52,12 @@ describe('UserNotificationsService', () => {
     assert.deepStrictEqual(state.webPushCalls, [
       { userId: 'user-1', title: 'Reiwa', body: 'Manual message', url: '/dashboard' },
     ]);
+    // The Telegram leg went to the durable queue, not to the one-shot client.
+    // Asserting the payload alone would pass either way — both stubs record
+    // into `notifyUserCalls` on purpose, so only these two lines tell them
+    // apart.
+    assert.deepStrictEqual(state.relayEvents, ['reiwa.user.notify']);
+    assert.deepStrictEqual(state.directNotifierCalls, []);
   });
 
   it('honours operator user-notification toggles while keeping the feed row', async () => {
@@ -170,12 +176,25 @@ function createService(
       return input.template ?? null;
     },
   };
+  // The direct relay client. After the durable-queue change nothing in this
+  // service may reach it: a call here is a call that gets one attempt and
+  // drops the outcome, which is the defect this replaced. Recorded rather than
+  // thrown from, so a regression reports "used the direct client" instead of
+  // an unhandled rejection the fanout's own catch would swallow.
   const botNotifier = {
     notifyUser: async (call: unknown) => {
-      state.notifyUserCalls.push(call);
+      state.directNotifierCalls.push({ method: 'notifyUser', call });
     },
     notifyBroadcast: async (call: unknown) => {
-      state.notifyBroadcastCalls.push(call);
+      state.directNotifierCalls.push({ method: 'notifyBroadcast', call });
+    },
+  };
+  const relayQueue = {
+    enqueue: async (event: string, metadata: Record<string, unknown>) => {
+      state.relayEvents.push(event);
+      if (event === 'reiwa.user.notify') state.notifyUserCalls.push(metadata);
+      else if (event === 'reiwa.channel.broadcast') state.notifyBroadcastCalls.push(metadata);
+      return true;
     },
   };
   const webPush = {
@@ -196,6 +215,7 @@ function createService(
     botNotifier as never,
     webPush as never,
     customEmoji as never,
+    relayQueue as never,
   );
 }
 
@@ -212,6 +232,8 @@ function createState(input: {
     templateLookups: [] as string[],
     notifyUserCalls: [] as unknown[],
     notifyBroadcastCalls: [] as unknown[],
+    relayEvents: [] as string[],
+    directNotifierCalls: [] as unknown[],
     webPushCalls: [] as unknown[],
   };
 }

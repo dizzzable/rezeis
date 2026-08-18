@@ -113,6 +113,68 @@ describe('BroadcastPage create form validation', () => {
     expect(postSpy).toHaveBeenCalledWith('/admin/broadcast/broadcast-1/send', {})
   })
 
+  it('shows the recipients that are neither delivered nor failed yet', async () => {
+    // `SENT` now means a delivery the reiwa relay proved, so a broadcast in
+    // flight has three populations, not two: delivered, given up on, and still
+    // being retried after a transport failure. Showing only the first two
+    // renders the third as "not delivered" — an unknown displayed as one of
+    // the extremes, which is the same kind of claim the status change removed
+    // from the backend.
+    vi.spyOn(api, 'get').mockImplementation(async (path: string) => {
+      if (path === '/admin/broadcast/drafts') {
+        return {
+          data: [
+            {
+              id: 'broadcast-1',
+              audience: 'ALL',
+              status: 'PROCESSING',
+              successCount: 5,
+              totalCount: 9,
+              failedCount: 1,
+              createdAt: '2026-06-04T10:00:00.000Z',
+            },
+          ],
+        }
+      }
+      return { data: {} }
+    })
+    await loadFeatureBundle('broadcast')
+
+    renderWithProviders(<BroadcastPage />)
+
+    expect(await screen.findByText('(1 failed)')).toBeInTheDocument()
+    expect(screen.getByText('(3 still delivering)')).toBeInTheDocument()
+  })
+
+  it('shows no in-flight count once every recipient is accounted for', async () => {
+    // The counterpart: a finished broadcast must not grow a permanent
+    // "still delivering" that never resolves.
+    vi.spyOn(api, 'get').mockImplementation(async (path: string) => {
+      if (path === '/admin/broadcast/drafts') {
+        return {
+          data: [
+            {
+              id: 'broadcast-1',
+              audience: 'ALL',
+              status: 'COMPLETED',
+              successCount: 6,
+              totalCount: 9,
+              failedCount: 3,
+              createdAt: '2026-06-04T10:00:00.000Z',
+            },
+          ],
+        }
+      }
+      return { data: {} }
+    })
+    await loadFeatureBundle('broadcast')
+
+    renderWithProviders(<BroadcastPage />)
+
+    expect(await screen.findByText('(3 failed)')).toBeInTheDocument()
+    expect(screen.queryByText(/still delivering/)).not.toBeInTheDocument()
+  })
+
   it('confirms before deleting a completed broadcast draft', async () => {
     const user = userEvent.setup()
     vi.spyOn(api, 'get').mockImplementation(async (path: string) => {

@@ -3,23 +3,88 @@ import { describe, it } from 'node:test';
 
 import { BroadcastAudience, BroadcastMessageStatus, BroadcastStatus } from '@prisma/client';
 
+import { EVENT_TYPES } from '../src/common/services/system-events.service';
 import { BroadcastDeliveryService } from '../src/modules/broadcast/services/broadcast-delivery.service';
 
-/** Minimal BotNotifierClient stub. `messageId` is the value notifyUser resolves to. */
+/**
+ * Minimal BotNotifierClient stub.
+ *
+ * `messageId` is what the reiwa bot echoed back, and it now decides the relay
+ * STATUS as well: an id is the only evidence a Telegram message exists, so
+ * `messageId !== null` is `confirmed` and a bare 2xx is `unconfirmed`. Pass
+ * `relayStatus` to model the outcomes an id cannot express — a timeout, a
+ * refused connection, a relay that was never configured.
+ */
 function botNotifier(
   messageId: number | null,
   calls?: unknown[],
-  options?: { readonly isEnabled?: boolean; readonly broadcastCalls?: unknown[] },
+  options?: {
+    readonly isEnabled?: boolean;
+    /**
+     * Calls to the fire-and-forget `notifyBroadcast`. The channel post is a
+     * `durable` relay event and must go through the queue, so on the paths
+     * below this list staying EMPTY is the assertion, not a recording.
+     */
+    readonly broadcastCalls?: unknown[];
+    readonly relayStatus?: string;
+    /** Calls to `notifyDev`, which returns `Promise<void>` and drops its outcome. */
+    readonly devNotifyCalls?: unknown[];
+    /** Calls to `deliverRelayEvent`, the one entry point that reports an outcome. */
+    readonly relayEventCalls?: Array<{ event: string; metadata: Record<string, unknown> }>;
+    /** Status `deliverRelayEvent` answers with (default: a bodiless 204). */
+    readonly devRelayStatus?: string;
+  },
 ): never {
+  const status = options?.relayStatus ?? (messageId !== null ? 'confirmed' : 'unconfirmed');
   return {
     notifyUser: async (input: unknown) => {
       calls?.push(input);
-      return messageId;
+      return {
+        status,
+        messageId,
+        httpStatus: status === 'confirmed' ? 200 : status === 'unconfirmed' ? 204 : null,
+        detail: null,
+      };
     },
     notifyBroadcast: async (input: unknown) => {
       options?.broadcastCalls?.push(input);
     },
+    notifyDev: async (input: unknown) => {
+      options?.devNotifyCalls?.push(input);
+    },
+    deliverRelayEvent: async (event: string, metadata: Record<string, unknown>) => {
+      options?.relayEventCalls?.push({ event, metadata });
+      const devStatus = options?.devRelayStatus ?? 'unconfirmed';
+      return {
+        status: devStatus,
+        messageId: null,
+        httpStatus: devStatus === 'unconfirmed' ? 204 : devStatus === 'confirmed' ? 200 : null,
+        detail: devStatus === 'rejected' ? 'HTTP 400 Bad Request' : null,
+      };
+    },
     isEnabled: options?.isEnabled ?? true,
+  } as never;
+}
+
+/**
+ * Minimal ReiwaRelayQueueService stub.
+ *
+ * `enqueue` answers a boolean that means "accepted for durable delivery" and
+ * never "delivered" — `false` is a job that Redis refused (the client's direct
+ * fallback ran) or a relay that is not configured. Both are states the caller
+ * has to be able to see, so the stub can produce either.
+ */
+function relayQueue(options?: {
+  readonly enqueued?: Array<{ event: string; metadata: Record<string, unknown> }>;
+  readonly isEnabled?: boolean;
+  readonly accepted?: boolean;
+}): never {
+  return {
+    isEnabled: options?.isEnabled ?? true,
+    enqueue: async (event: string, metadata: Record<string, unknown>) => {
+      options?.enqueued?.push({ event, metadata });
+      return options?.accepted ?? true;
+    },
   } as never;
 }
 
@@ -91,6 +156,7 @@ describe('BroadcastDeliveryService', () => {
       { create: async () => 'evt' } as never,
       { getDecryptedBotToken: async () => null } as never,
       botNotifier(null),
+      relayQueue(),
     );
 
     assert.deepStrictEqual(await service.stageRecipients('broadcast-1'), ['message-1', 'message-2']);
@@ -104,10 +170,23 @@ describe('BroadcastDeliveryService', () => {
     ]);
     assert.equal(JSON.stringify(broadcastUpdates).includes(BroadcastStatus.PROCESSING), true);
     assert.equal(JSON.stringify(eventCalls).includes('recipientCount'), true);
+    // The staging progress event keeps `system.broadcast_sent`: splitting the
+    // undelivered channel post off into its own type must not quietly move
+    // this one too, or every subscriber to "broadcast sent" goes silent.
+    const staging = eventCalls.find((args) =>
+      JSON.stringify(args).includes('recipientCount'),
+    ) as readonly unknown[] | undefined;
+    assert.equal(staging?.[0], EVENT_TYPES.SYSTEM_BROADCAST_SENT);
   });
 
-  it('posts once to the configured Telegram channel when staging, independent of recipient fanout', async () => {
+  it('hands the channel post to the durable relay queue, never to a one-shot notifier call', async () => {
+    // The operator-channel copy used to go out through
+    // `BotNotifierClient.notifyBroadcast`, which made it the only producer of
+    // `reiwa.channel.broadcast` — a `durable`, four-attempt event — that got
+    // exactly one attempt, and the only one whose failure was unobservable
+    // (the method returns `Promise<void>`; `deliver()` never throws).
     const broadcastCalls: unknown[] = [];
+    const enqueued: Array<{ event: string; metadata: Record<string, unknown> }> = [];
     const service = new BroadcastDeliveryService(
       {
         broadcast: {
@@ -135,18 +214,34 @@ describe('BroadcastDeliveryService', () => {
       { create: async () => 'evt' } as never,
       { getDecryptedBotToken: async () => null } as never,
       botNotifier(null, undefined, { isEnabled: true, broadcastCalls }),
+      relayQueue({ enqueued }),
     );
 
     await service.stageRecipients('broadcast-1');
 
-    assert.equal(broadcastCalls.length, 1);
-    const call = broadcastCalls[0] as { readonly chatId: string; readonly text: string };
-    assert.equal(call.chatId, '-100123');
-    assert.equal(call.text.includes('Channel news'), true);
+    assert.deepStrictEqual(
+      broadcastCalls,
+      [],
+      'the channel post must not bypass the queue with a direct notifier call',
+    );
+    assert.equal(enqueued.length, 1, 'exactly one channel post per staged broadcast');
+    const job = enqueued[0];
+    assert.equal(job?.event, 'reiwa.channel.broadcast');
+    assert.equal(job?.metadata['chatId'], '-100123');
+    assert.equal(String(job?.metadata['text']).includes('Channel news'), true);
+    // The stable key is what makes the retries safe: the queue derives its
+    // `jobId` from it and the bot dedups replays on it, so no attempt of this
+    // job can become a second post in the channel.
+    assert.equal(job?.metadata['eventId'], 'broadcast-channel:broadcast-1');
   });
 
-  it('skips the channel post silently when the reiwa relay is disabled', async () => {
-    const broadcastCalls: unknown[] = [];
+  it('records a channel post the queue would not accept, instead of losing it', async () => {
+    // `enqueue` answers `false` when Redis refused the job (the client's single
+    // direct fallback ran) or the relay is unconfigured. Nothing durable is
+    // holding the post at that point, and the operator asked for it — so it
+    // has to reach a surface they can see. The old code could not report this
+    // at all: its `catch` was unreachable on a delivery failure.
+    const events: Array<{ type: string; severity: string; message: string; metadata?: unknown }> = [];
     const service = new BroadcastDeliveryService(
       {
         broadcast: {
@@ -165,19 +260,101 @@ describe('BroadcastDeliveryService', () => {
         broadcastMessage: { createMany: async () => undefined, findMany: async () => [] },
       } as never,
       configService('bot-token'),
-      { info: () => undefined } as never,
+      {
+        info: (type: string, _c: string, message: string, metadata?: unknown) =>
+          events.push({ type, severity: 'INFO', message, metadata }),
+        warn: (type: string, _c: string, message: string, metadata?: unknown) =>
+          events.push({ type, severity: 'WARNING', message, metadata }),
+      } as never,
       { create: async () => 'evt' } as never,
       { getDecryptedBotToken: async () => null } as never,
-      botNotifier(null, undefined, { isEnabled: false, broadcastCalls }),
+      botNotifier(null, undefined, { isEnabled: true }),
+      relayQueue({ accepted: false }),
     );
 
     await service.stageRecipients('broadcast-1');
 
-    assert.equal(broadcastCalls.length, 0);
+    const warning = events.find((e) => e.severity === 'WARNING');
+    assert.ok(
+      warning,
+      'a channel post that never entered durable delivery must raise an operator-visible event',
+    );
+    assert.equal(
+      JSON.stringify(warning.metadata).includes('dropped'),
+      true,
+      `the event must say what happened; got ${JSON.stringify(warning)}`,
+    );
+
+    // …and under its own name. This warning used to be emitted as
+    // `system.broadcast_sent`, whose card is presented as 📢 «Рассылка
+    // отправлена» — a headline claiming the exact thing the body denies. Worse
+    // than cosmetic: every tick-box, filter and automation rule watching for
+    // "broadcast sent" fired here, in the middle of staging, on a failure.
+    assert.equal(
+      warning.type,
+      EVENT_TYPES.BROADCAST_CHANNEL_POST_UNDELIVERED,
+      'an undelivered channel post needs a type that says so',
+    );
+    assert.notEqual(
+      warning.type,
+      EVENT_TYPES.SYSTEM_BROADCAST_SENT,
+      'a failure must not be filed under the success everyone subscribes to',
+    );
+  });
+
+  it('never queues a channel post when the reiwa relay is disabled, and says so', async () => {
+    const broadcastCalls: unknown[] = [];
+    const enqueued: Array<{ event: string; metadata: Record<string, unknown> }> = [];
+    const events: Array<{ type: string; severity: string; metadata?: unknown }> = [];
+    const service = new BroadcastDeliveryService(
+      {
+        broadcast: {
+          findUnique: async () => ({
+            id: 'broadcast-1',
+            status: BroadcastStatus.DRAFT,
+            audience: BroadcastAudience.ALL,
+            audienceFilter: null,
+            payload: { text: 'Channel news', telegramChannelChatId: '-100123' },
+            promoCode: null,
+          }),
+          updateMany: async () => ({ count: 1 }),
+          update: async () => undefined,
+        },
+        user: { findMany: async () => [] },
+        broadcastMessage: { createMany: async () => undefined, findMany: async () => [] },
+      } as never,
+      configService('bot-token'),
+      {
+        info: (type: string, _c: string, _m: string, metadata?: unknown) =>
+          events.push({ type, severity: 'INFO', metadata }),
+        warn: (type: string, _c: string, _m: string, metadata?: unknown) =>
+          events.push({ type, severity: 'WARNING', metadata }),
+      } as never,
+      { create: async () => 'evt' } as never,
+      { getDecryptedBotToken: async () => null } as never,
+      botNotifier(null, undefined, { isEnabled: false, broadcastCalls }),
+      relayQueue({ enqueued, isEnabled: false }),
+    );
+
+    await service.stageRecipients('broadcast-1');
+
+    assert.deepStrictEqual(broadcastCalls, []);
+    assert.deepStrictEqual(
+      enqueued,
+      [],
+      'queuing against an unconfigured relay banks jobs that can only fail',
+    );
+    // Silent about the network, not about the operator: they set a channel id
+    // on this broadcast and it is never going to be posted.
+    const warning = events.find((e) => e.severity === 'WARNING');
+    assert.ok(warning, 'a configured channel that cannot be reached must be reported');
+    assert.equal(JSON.stringify(warning.metadata).includes('disabled'), true);
+    assert.equal(warning.type, EVENT_TYPES.BROADCAST_CHANNEL_POST_UNDELIVERED);
   });
 
   it('no-ops staging (no channel post, no rows) when the atomic claim is lost to a retry', async () => {
     const broadcastCalls: unknown[] = [];
+    const enqueued: Array<{ event: string; metadata: Record<string, unknown> }> = [];
     const createManyCalls: unknown[] = [];
     const service = new BroadcastDeliveryService(
       {
@@ -207,11 +384,15 @@ describe('BroadcastDeliveryService', () => {
       { create: async () => 'evt' } as never,
       { getDecryptedBotToken: async () => null } as never,
       botNotifier(null, undefined, { isEnabled: true, broadcastCalls }),
+      relayQueue({ enqueued }),
     );
 
     assert.deepStrictEqual(await service.stageRecipients('broadcast-1'), []);
-    // Neither a channel post nor recipient rows on a lost claim.
+    // Neither a channel post nor recipient rows on a lost claim. The claim is
+    // what makes queuing the post safe: it is the guarantee that exactly one
+    // job is ever enqueued for this broadcast.
     assert.equal(broadcastCalls.length, 0);
+    assert.deepStrictEqual(enqueued, []);
     assert.equal(createManyCalls.length, 0);
   });
 
@@ -249,6 +430,7 @@ describe('BroadcastDeliveryService', () => {
       { create: async () => 'evt' } as never,
       { getDecryptedBotToken: async () => null } as never,
       botNotifier(null, undefined, { isEnabled: false }),
+      relayQueue(),
     );
 
     assert.deepStrictEqual(await service.stageRecipients('broadcast-1'), []);
@@ -294,6 +476,9 @@ describe('BroadcastDeliveryService', () => {
             return 0;
           },
         },
+        // `deliverBatch` asks the feed which recipients already have their row
+        // for this broadcast; nobody does on a first pass.
+        userNotificationEvent: { findMany: async () => [] },
         user: {
           findUnique: async () => ({ telegramId: 12345n }),
         },
@@ -308,6 +493,7 @@ describe('BroadcastDeliveryService', () => {
       } as never,
       { getDecryptedBotToken: async () => null } as never,
       botNotifier(777, notifyCalls),
+      relayQueue(),
     );
 
     await withFetch(async (input, init) => {
@@ -317,6 +503,7 @@ describe('BroadcastDeliveryService', () => {
       assert.deepStrictEqual(await service.deliverBatch('broadcast-1', ['message-1']), {
         sent: 1,
         failed: 0,
+        unresolved: 0,
       });
     });
 
@@ -364,6 +551,9 @@ describe('BroadcastDeliveryService', () => {
             return 0;
           },
         },
+        // `deliverBatch` asks the feed which recipients already have their row
+        // for this broadcast; nobody does on a first pass.
+        userNotificationEvent: { findMany: async () => [] },
         user: {
           findUnique: async () => ({ telegramId: 12345n }),
         },
@@ -378,6 +568,7 @@ describe('BroadcastDeliveryService', () => {
       } as never,
       { getDecryptedBotToken: async () => null } as never,
       botNotifier(888),
+      relayQueue(),
     );
 
     await withFetch(async (input, init) => {
@@ -387,6 +578,7 @@ describe('BroadcastDeliveryService', () => {
       assert.deepStrictEqual(await service.deliverBatch('broadcast-1', ['message-1']), {
         sent: 1,
         failed: 0,
+        unresolved: 0,
       });
     });
 
@@ -426,6 +618,9 @@ describe('BroadcastDeliveryService', () => {
             return 0;
           },
         },
+        // `deliverBatch` asks the feed which recipients already have their row
+        // for this broadcast; nobody does on a first pass.
+        userNotificationEvent: { findMany: async () => [] },
         user: {
           findUnique: async () => ({ telegramId: null, email: '[email protected]' }),
         },
@@ -435,6 +630,7 @@ describe('BroadcastDeliveryService', () => {
       { create: async () => 'evt' } as never,
       { getDecryptedBotToken: async () => null } as never,
       botNotifier(null),
+      relayQueue(),
       undefined,
       {
         send: async (input: unknown) => {
@@ -446,6 +642,7 @@ describe('BroadcastDeliveryService', () => {
     assert.deepStrictEqual(await service.deliverBatch('broadcast-1', ['message-1']), {
       sent: 1,
       failed: 0,
+      unresolved: 0,
     });
     assert.equal(emailCalls.length, 1);
     const email = emailCalls[0] as { readonly to: string; readonly subject: string };
@@ -477,6 +674,9 @@ describe('BroadcastDeliveryService', () => {
           update: async () => undefined,
           count: async () => 0,
         },
+        // `deliverBatch` asks the feed which recipients already have their row
+        // for this broadcast; nobody does on a first pass.
+        userNotificationEvent: { findMany: async () => [] },
         user: {
           findUnique: async () => ({ telegramId: null, email: '[email protected]' }),
         },
@@ -486,6 +686,7 @@ describe('BroadcastDeliveryService', () => {
       { create: async () => 'evt' } as never,
       { getDecryptedBotToken: async () => null } as never,
       botNotifier(null),
+      relayQueue(),
       undefined,
       {
         send: async (input: unknown) => {
@@ -522,6 +723,9 @@ describe('BroadcastDeliveryService', () => {
           },
           count: async () => 0,
         },
+        // `deliverBatch` asks the feed which recipients already have their row
+        // for this broadcast; nobody does on a first pass.
+        userNotificationEvent: { findMany: async () => [] },
         user: {
           findUnique: async () => ({ telegramId: 12345n }),
         },
@@ -533,6 +737,7 @@ describe('BroadcastDeliveryService', () => {
       { create: async () => { throw new Error('feed down'); } } as never,
       { getDecryptedBotToken: async () => null } as never,
       botNotifier(null),
+      relayQueue(),
     );
 
     await withFetch(async () => {
@@ -541,6 +746,7 @@ describe('BroadcastDeliveryService', () => {
       assert.deepStrictEqual(await service.deliverBatch('broadcast-1', ['message-1']), {
         sent: 0,
         failed: 1,
+        unresolved: 0,
       });
     });
 
@@ -552,7 +758,7 @@ describe('BroadcastDeliveryService', () => {
     assert.equal(persisted.includes('[chat-id hidden]'), true);
   });
 
-  it('marks SENT via the feed but persists the media error when the media Telegram send fails (MEDIUM #2)', async () => {
+  it('marks FAILED when the media Telegram send fails, even though the feed row landed', async () => {
     const messageUpdates: Array<{ data: Record<string, unknown> }> = [];
     const service = new BroadcastDeliveryService(
       {
@@ -576,6 +782,9 @@ describe('BroadcastDeliveryService', () => {
           },
           count: async () => 0,
         },
+        // `deliverBatch` asks the feed which recipients already have their row
+        // for this broadcast; nobody does on a first pass.
+        userNotificationEvent: { findMany: async () => [] },
         user: {
           findUnique: async () => ({ telegramId: 12345n }),
         },
@@ -586,24 +795,35 @@ describe('BroadcastDeliveryService', () => {
       { create: async () => 'event-1' } as never,
       { getDecryptedBotToken: async () => null } as never,
       botNotifier(null),
+      relayQueue(),
     );
 
     // Media Telegram send fails.
+    //
+    // This used to be SENT-with-an-errorMessage: the cabinet feed row counted
+    // as delivery, and the photo that never arrived was a footnote on a green
+    // row. It is now FAILED. A Telegram delivery WAS attempted for this
+    // recipient and did not happen, and an operator counting a media
+    // broadcast's reach must not be handed a success for it. The feed row
+    // still exists either way — what changed is which number they are given.
     await withFetch(async () => {
       throw new Error('telegram outage');
     }, async () => {
       assert.deepStrictEqual(await service.deliverBatch('broadcast-1', ['message-1']), {
-        sent: 1,
-        failed: 0,
+        sent: 0,
+        failed: 1,
+        unresolved: 0,
       });
     });
 
-    const update = messageUpdates.find((u) => u.data.status === BroadcastMessageStatus.SENT);
-    assert.ok(update, 'must be marked SENT (feed delivered)');
-    // The media failure is not swallowed — it is recorded on the row.
+    const sentRow = messageUpdates.find((u) => u.data.status === BroadcastMessageStatus.SENT);
+    assert.equal(sentRow, undefined, 'an unproven Telegram attempt must not read as SENT');
+    const failed = messageUpdates.find((u) => u.data.status === BroadcastMessageStatus.FAILED);
+    assert.ok(failed, 'the attempted-and-unproven delivery is recorded as failed');
     assert.ok(
-      typeof update.data.errorMessage === 'string' && (update.data.errorMessage as string).length > 0,
-      'media failure must be persisted on the SENT row',
+      typeof failed.data.errorMessage === 'string' &&
+        (failed.data.errorMessage as string).length > 0,
+      'with the media failure as the reason',
     );
   });
 
@@ -638,6 +858,9 @@ describe('BroadcastDeliveryService', () => {
             return 0;
           },
         },
+        // `deliverBatch` asks the feed which recipients already have their row
+        // for this broadcast; nobody does on a first pass.
+        userNotificationEvent: { findMany: async () => [] },
         user: {
           // Web-only user: no Telegram.
           findUnique: async () => ({ telegramId: null }),
@@ -653,6 +876,7 @@ describe('BroadcastDeliveryService', () => {
       } as never,
       { getDecryptedBotToken: async () => null } as never,
       botNotifier(999, notifyCalls),
+      relayQueue(),
     );
 
     await withFetch(
@@ -664,6 +888,7 @@ describe('BroadcastDeliveryService', () => {
         assert.deepStrictEqual(await service.deliverBatch('broadcast-1', ['message-1']), {
           sent: 1,
           failed: 0,
+          unresolved: 0,
         });
       },
     );
@@ -679,7 +904,114 @@ describe('BroadcastDeliveryService', () => {
     const update = messageUpdates[0] as { readonly data: { readonly status: BroadcastMessageStatus } };
     assert.equal(update.data.status, BroadcastMessageStatus.SENT);
   });
+
+  // ═══════════════════════════════════════════════════════════════════════
+  //  TEST SEND — the button reports what its attempts proved
+  // ═══════════════════════════════════════════════════════════════════════
+
+  it('reports the dev preview through the entry point that returns an outcome', async () => {
+    const devNotifyCalls: unknown[] = [];
+    const relayEventCalls: Array<{ event: string; metadata: Record<string, unknown> }> = [];
+    const service = testSendService({
+      devUsers: [],
+      notifier: { devNotifyCalls, relayEventCalls, devRelayStatus: 'unconfirmed' },
+    });
+
+    assert.deepStrictEqual(await service.sendTestToDev('broadcast-1'), { ok: true });
+    assert.deepStrictEqual(
+      devNotifyCalls,
+      [],
+      '`notifyDev` returns Promise<void> — a button cannot report an outcome it never receives',
+    );
+    assert.equal(relayEventCalls.length, 1);
+    assert.equal(relayEventCalls[0]?.event, 'reiwa.dev.notify');
+    assert.equal(String(relayEventCalls[0]?.metadata['text']).includes('Preview body'), true);
+  });
+
+  it('does not report a test preview as sent when the dev relay refused it', async () => {
+    // No DEV users, so the cabinet leg cannot rescue the answer: the relay is
+    // the only surface, and it said no. `relayed = true` used to be set
+    // unconditionally right after the call, so the operator saw `{ ok: true }`.
+    const service = testSendService({
+      devUsers: [],
+      notifier: { devRelayStatus: 'rejected' },
+    });
+
+    assert.deepStrictEqual(await service.sendTestToDev('broadcast-1'), {
+      ok: false,
+      reason: 'relay-rejected',
+    });
+  });
+
+  it('does not report a test preview as sent when every dev cabinet write failed', async () => {
+    // The same lie on the other leg: the count that decided success was the
+    // number of DEV rows FOUND, while each `create()` sits in a `catch` that
+    // logs and moves on. Two DEV users and zero deliveries used to read as ok.
+    const service = testSendService({
+      devUsers: ['dev-1', 'dev-2'],
+      relayEnabled: false,
+      cabinetThrows: true,
+    });
+
+    assert.deepStrictEqual(await service.sendTestToDev('broadcast-1'), {
+      ok: false,
+      reason: 'cabinet-failed',
+    });
+  });
+
+  it('still reports success when one surface delivered', async () => {
+    // The point is not to make the button pessimistic. A refused relay with a
+    // cabinet row that landed is a preview the dev can actually read.
+    const service = testSendService({
+      devUsers: ['dev-1'],
+      notifier: { devRelayStatus: 'timeout' },
+    });
+
+    assert.deepStrictEqual(await service.sendTestToDev('broadcast-1'), { ok: true });
+  });
 });
+
+/**
+ * `sendTestToDev` harness. The draft has content, so the only things that vary
+ * are what the two delivery surfaces answer.
+ */
+function testSendService(input: {
+  readonly devUsers: readonly string[];
+  readonly relayEnabled?: boolean;
+  readonly cabinetThrows?: boolean;
+  readonly notifier?: {
+    readonly devNotifyCalls?: unknown[];
+    readonly relayEventCalls?: Array<{ event: string; metadata: Record<string, unknown> }>;
+    readonly devRelayStatus?: string;
+  };
+}): BroadcastDeliveryService {
+  return new BroadcastDeliveryService(
+    {
+      broadcast: {
+        findUnique: async () => ({ payload: { title: 'Preview', text: 'Preview body' } }),
+      },
+      user: {
+        findMany: async () => input.devUsers.map((id) => ({ id })),
+      },
+    } as never,
+    configService(null),
+    { info: () => undefined, warn: () => undefined } as never,
+    {
+      create: async () => {
+        if (input.cabinetThrows === true) throw new Error('cabinet down');
+        return 'evt';
+      },
+    } as never,
+    { getDecryptedBotToken: async () => null } as never,
+    botNotifier(null, undefined, {
+      isEnabled: input.relayEnabled ?? true,
+      devNotifyCalls: input.notifier?.devNotifyCalls,
+      relayEventCalls: input.notifier?.relayEventCalls,
+      devRelayStatus: input.notifier?.devRelayStatus,
+    }),
+    relayQueue(),
+  );
+}
 
 function configService(botToken: string | null): never {
   return {

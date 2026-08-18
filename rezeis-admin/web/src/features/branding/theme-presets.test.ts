@@ -12,6 +12,8 @@ import {
   getConceptSourceStyle,
 } from '@/lib/theme/concept-presets'
 import {
+  DEFAULT_APP_BACKGROUND_DRAFT,
+  DEFAULT_SURFACE_THEME_DRAFT,
   createBrandingDirtyPatch,
   createBrandingFormSchema,
   createInitialBrandingDraft,
@@ -63,7 +65,44 @@ describe('WEB Reiwa theme catalog', () => {
     )
   })
 
-  it('keeps a standard theme patch from stomping concept-owned fields', () => {
+  /**
+   * REVERSES A DELIBERATE DECISION — read this before loosening it again.
+   *
+   * This test used to assert the OPPOSITE for `surfaceTheme` and
+   * `appBackground`: that a standard theme leaves both to the operator, on the
+   * reasoning that the eight standard themes predate the concept catalog and
+   * never owned semantic surfaces. That reasoning was sound about what these
+   * themes DECLARE and wrong about what they NEED, and the two fields are not
+   * the same case as the seven this test still guards:
+   *
+   *   • `surfaceTheme` holds the FOREGROUND colours. The background under them
+   *     is `bgPrimary`/`bgSecondary`, which a standard theme does write, and
+   *     all eight are dark. Preserving a light concept's `surfaceTheme` across
+   *     the switch composed that theme's dark background with the concept's
+   *     dark text: 352 of the 832 standard × concept combinations landed below
+   *     the 4.5 AA requirement, the worst at 1.00:1 (measured by reverting this
+   *     fix and running the outcome test below).
+   *     `branding-page.tsx`'s `detachSurfaceThemeFromConcept`
+   *     already names this exact split — "not a degraded result, an unreadable
+   *     one" — and the applier was performing it. Treated as a bug fix.
+   *   • `appBackground` is reset to the built-in default rather than
+   *     preserved, because a leftover CONCEPT background is already rendering
+   *     broken under a standard preset id: reiwa gates the texture overlay and
+   *     the concept-texture contribution to the readability veil on
+   *     `themePresetId.startsWith("concept-")`, so the concept's gradient goes
+   *     on painting while the layers meant to sit on it stop. Preserving it
+   *     preserves a fault, not a choice.
+   *
+   * The seven fields below are still preserved, and for the reason the old
+   * test gave: a standard theme has no typography, geometry or card artwork of
+   * its own, so writing them would erase operator choices without applying
+   * anything, and each of them has a dedicated control.
+   *
+   * The assertion that actually protects the operator is not this key set —
+   * see 'keeps cabinet text readable when a standard theme replaces a concept',
+   * which checks the rendered outcome instead.
+   */
+  it('applies theme-owned surfaces and preserves operator-owned artwork', () => {
     const base = createInitialBrandingDraft({
       cardEffect: 'aurora',
       cardEffectProps: { speed: 1.2 },
@@ -76,9 +115,15 @@ describe('WEB Reiwa theme catalog', () => {
         pillPx: 0,
       },
       fontFamily: '"Newsreader Variable", Georgia, serif',
+      // A LIGHT concept's surfaces: dark ink meant for a pale page. The old
+      // fixture put `#fafafa` here, which is the default value, so the
+      // preserve-vs-replace assertions below could not tell the two apart.
       surfaceTheme: {
         ...createInitialBrandingDraft().surfaceTheme,
-        foreground: '#fafafa',
+        foreground: '#241c14',
+        mutedForeground: '#5b4a3a',
+        surface: '#f7f1e8',
+        surfaceHigh: '#efe6d8',
       },
       appBackground: {
         ...createInitialBrandingDraft().appBackground!,
@@ -91,17 +136,37 @@ describe('WEB Reiwa theme catalog', () => {
 
     expect(Object.keys(patch).sort()).toEqual(
       [
+        'appBackground',
         'bgEffect',
         'bgPrimary',
         'bgSecondary',
         'cardGradient',
         'primary',
         'primaryFg',
+        'surfaceTheme',
         'themePresetId',
         'themePresetVersion',
       ].sort(),
     )
     expect(patch.themePresetId).toBe('royal')
+
+    // Theme-owned: written on every application, whatever was there before.
+    expect(resolved.surfaceTheme).toEqual(DEFAULT_SURFACE_THEME_DRAFT)
+    expect(resolved.surfaceTheme).not.toEqual(base.surfaceTheme)
+    expect(resolved.appBackground).toEqual(DEFAULT_APP_BACKGROUND_DRAFT)
+    expect(resolved.appBackground?.kind).toBe('none')
+    expect(resolved.appBackground).not.toEqual(base.appBackground)
+
+    // Copied, not aliased. This object is handed to `form.setValue` and then
+    // edited through nested paths, and the constants it copies are what
+    // `createInitialBrandingDraft()` seeds every draft from — so a shared
+    // reference would put a module-wide default inside a mutable form. Pinned
+    // here so nobody collapses the spreads back into an alias.
+    expect(patch.surfaceTheme).not.toBe(DEFAULT_SURFACE_THEME_DRAFT)
+    expect(patch.appBackground).not.toBe(DEFAULT_APP_BACKGROUND_DRAFT)
+    expect(patch.appBackground.texture).not.toBe(DEFAULT_APP_BACKGROUND_DRAFT.texture)
+
+    // Operator-owned: a standard theme has nothing of its own to put here.
     expect(resolved.cardEffect).toBe(base.cardEffect)
     expect(resolved.cardEffectProps).toEqual(base.cardEffectProps)
     expect(resolved.cardEffectOpacity).toBe(base.cardEffectOpacity)
@@ -109,8 +174,103 @@ describe('WEB Reiwa theme catalog', () => {
     expect(resolved.borderRadius).toBe(base.borderRadius)
     expect(resolved.cornerRadii).toEqual(base.cornerRadii)
     expect(resolved.fontFamily).toBe(base.fontFamily)
-    expect(resolved.surfaceTheme).toEqual(base.surfaceTheme)
-    expect(resolved.appBackground).toEqual(base.appBackground)
+  })
+
+  /**
+   * The guard that matters. Not "the patch has N keys" — a key set can be
+   * argued about — but the outcome an operator and a subscriber can see.
+   *
+   * The scenario is the one that broke: an operator has a concept applied, then
+   * picks one of the eight standard themes. The backend merge preserves absent
+   * keys by design and reiwa applies whatever is stored with no per-preset
+   * defaulting, so every field the standard patch omits is inherited from the
+   * concept — which is why this composes the two the way a save does, rather
+   * than testing the standard patch on a clean draft where nothing can leak.
+   *
+   * Both foreground colours are checked against WCAG AA for normal text. The
+   * light-sourced concepts are the ones that produced 1.18:1, so the sample is
+   * asserted to still contain them: a future change that stops resolving light
+   * concepts must fail loudly here rather than quietly narrow the guard.
+   */
+  it('keeps cabinet text readable when a standard theme replaces a concept', () => {
+    const lightSourced = CONCEPT_THEME_PRESETS.filter(
+      (preset) =>
+        getConceptSourceMode(
+          CONCEPT_PRESETS.find((descriptor) => descriptor.id === preset.id)!,
+        ) === 'light',
+    )
+    expect(
+      lightSourced.length,
+      'the light concepts are the case that measured 1.18:1',
+    ).toBeGreaterThan(0)
+
+    const failures: string[] = []
+    let worst = { label: '', ratio: Number.POSITIVE_INFINITY }
+
+    for (const concept of CONCEPT_THEME_PRESETS) {
+      const operatorDraft = {
+        ...createInitialBrandingDraft(),
+        ...createConceptThemePresetVisualPatch(concept),
+      }
+      for (const standard of LEGACY_THEME_PRESETS) {
+        const resolved = {
+          ...operatorDraft,
+          ...createLegacyThemePresetVisualPatch(standard),
+        }
+        const body = contrast(resolved.bgPrimary, resolved.surfaceTheme.foreground)
+        const muted = contrast(
+          resolved.bgPrimary,
+          resolved.surfaceTheme.mutedForeground,
+        )
+        const label = `${standard.id} over ${concept.code} ${concept.name}`
+        if (Math.min(body, muted) < worst.ratio) {
+          worst = { label, ratio: Math.min(body, muted) }
+        }
+        if (body < 4.5 || muted < 4.5) {
+          failures.push(
+            `${label}: body ${body.toFixed(2)}:1, muted ${muted.toFixed(2)}:1`,
+          )
+        }
+      }
+    }
+
+    expect(
+      failures,
+      `worst pair overall: ${worst.label} at ${worst.ratio.toFixed(2)}:1`,
+    ).toEqual([])
+  })
+
+  /**
+   * The same switch, one layer out. A concept's app background must not survive
+   * into a standard theme, because reiwa gates the texture overlay
+   * (`components/layout/app-background.tsx`) and the concept-texture
+   * contribution to the readability veil (`lib/app-background-contrast.ts`) on
+   * `themePresetId.startsWith("concept-")`. Left in place, the concept's
+   * gradient keeps painting under a standard preset id while the layers meant
+   * to sit on top of it stop — a composition neither theme designed, and one
+   * whose veil is now computed from a different sample set than the pixels
+   * actually drawn.
+   */
+  it('returns the app background to the built-in one, leaving no concept gradient behind', () => {
+    for (const concept of CONCEPT_THEME_PRESETS) {
+      const operatorDraft = {
+        ...createInitialBrandingDraft(),
+        ...createConceptThemePresetVisualPatch(concept),
+      }
+      // The premise: a concept really does leave a painted background behind.
+      expect(operatorDraft.appBackground.kind, concept.code).not.toBe('none')
+
+      for (const standard of LEGACY_THEME_PRESETS) {
+        const resolved = {
+          ...operatorDraft,
+          ...createLegacyThemePresetVisualPatch(standard),
+        }
+        expect(
+          resolved.appBackground,
+          `${standard.id} over ${concept.code}`,
+        ).toEqual(DEFAULT_APP_BACKGROUND_DRAFT)
+      }
+    }
   })
 
   it('produces only supported effects and schema-valid resolved payloads', () => {

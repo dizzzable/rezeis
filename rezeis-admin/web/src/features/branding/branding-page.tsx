@@ -295,10 +295,19 @@ export default function WebReiwaPage() {
   }
 
   /**
-   * A standard theme repaints the palette, the card gradient and the legacy
-   * background effect — nothing else. Corner radii, typography, semantic
-   * surfaces, card artwork and the app background stay as the operator left
-   * them, exactly as these themes behaved before the concept catalog arrived.
+   * A standard theme repaints the palette, the card gradient, the semantic
+   * surfaces and the app background — nothing else. Corner radii, typography
+   * and card artwork stay as the operator left them, because these eight themes
+   * have none of their own and applying one is not a request to erase choices
+   * that have their own controls.
+   *
+   * Surfaces and the app background are in that list because they have to be,
+   * not because these themes grew: see `createLegacyThemePresetVisualPatch`.
+   * The short version is that this function asserts `brandPaletteSource:
+   * 'concept'` below — it claims the theme owns the palette — and a palette
+   * without `surfaceTheme` is background without text colour. Leaving the
+   * foreground to the concept the operator just replaced put 352 of the 832
+   * standard × concept combinations below 4.5:1, the worst at 1.00:1.
    */
   function applyLegacyPreset(preset: LegacyThemePreset): void {
     const patch = createLegacyThemePresetVisualPatch(preset);
@@ -323,7 +332,23 @@ export default function WebReiwaPage() {
     // keeps serving the old colours over the theme just selected.
     form.setValue("brandPaletteSource", "concept", { shouldDirty: true });
     setGlobalCardGradient(patch.cardGradient);
+    // Re-attach, for the same reason and by the same rule as the palette line
+    // above and as `applyConceptCardPreset`: `setGlobalCardGradient` marks
+    // every write as a manual edit, which is right for the swatches and the
+    // constructor and wrong for a preset — the preset IS the gradient's owner.
+    // Leaving it on `custom` while asserting `brandPaletteSource: 'concept'`
+    // had the applier claiming ownership of half the theme and disclaiming the
+    // other half. Inert today only because `themeVariants` is null by this
+    // point and reiwa consults the marker only to choose between root and
+    // variant; that is a coincidence of the current data, not the rule. This
+    // line must follow the setter, not precede it.
+    form.setValue("cardGradientSource", "concept", { shouldDirty: true });
+    // Stored but inert end to end — see `ThemePresetBgEffect`. Written because
+    // the field still round-trips through the API, not because anything paints
+    // it; `appBackground` below is what actually draws a background.
     form.setValue("bgEffect", patch.bgEffect, { shouldDirty: true });
+    form.setValue("surfaceTheme", patch.surfaceTheme, { shouldDirty: true });
+    form.setValue("appBackground", patch.appBackground, { shouldDirty: true });
     // A standard theme never touched the slots, so nothing here needed fixing
     // — but it repaints the global card just the same, and the operator is owed
     // the same explanation for why position 1 did not change with it.

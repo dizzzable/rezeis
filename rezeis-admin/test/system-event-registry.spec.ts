@@ -14,6 +14,7 @@ import {
 } from '../src/common/services/system-events.service';
 import { OPERATIONAL_EVENT_TYPES } from '../src/modules/anti-fraud/detectors/remnawave-detectors';
 import { BotNotifierClient } from '../src/modules/notifications/services/bot-notifier.client';
+import { ReiwaRelayQueueService } from '../src/modules/notifications/services/reiwa-relay-queue.service';
 
 /**
  * An emitted event type that nobody registered
@@ -80,6 +81,7 @@ const SRC_DIR = join(__dirname, '..', 'src');
 const NEWLY_CATALOGUED: readonly string[] = [
   'automation.telegram_notify',
   'broadcast.batch_completed',
+  'broadcast.channel_post_undelivered',
   'broadcast.started',
   'client.error',
   'fraud.signal_escalated',
@@ -525,11 +527,24 @@ async function renderOperatorCard(
   eventsMode: 'all' | 'selected' = 'selected',
 ): Promise<string | null> {
   let cardText: string | null = null;
+  // The dev firehose goes through the durable relay queue now. What this
+  // suite is about is the SELECTION gate — whether an event reaches Telegram
+  // at all — so the stub captures the card off whichever road carries it and
+  // leaves the routing itself to `system-events-dev-fallback.spec.ts`.
+  const capture = (event: string, meta: Record<string, unknown>): void => {
+    if (event === 'reiwa.dev.notify') cardText = meta['text'] as string;
+  };
   const notifier = {
-    notifyDev: async (input: { text: string }) => {
-      cardText = input.text;
+    deliverRelayEvent: async (event: string, meta: Record<string, unknown>) => {
+      capture(event, meta);
+      return { status: 'unconfirmed', messageId: null, httpStatus: 204, detail: null };
     },
-    notifyDevDocument: async () => undefined,
+  };
+  const relayQueue = {
+    enqueue: async (event: string, meta: Record<string, unknown>) => {
+      capture(event, meta);
+      return true;
+    },
   };
 
   const service = new SystemEventsService(
@@ -558,6 +573,7 @@ async function renderOperatorCard(
     {
       get: (token: unknown) => {
         if (token === BotNotifierClient) return notifier;
+        if (token === ReiwaRelayQueueService) return relayQueue;
         throw new Error('not registered');
       },
     } as never,

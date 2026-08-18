@@ -17,6 +17,7 @@ import {
   isEventTelegramAllowed,
 } from '../src/common/services/telegram-delivery-target.util';
 import { BotNotifierClient } from '../src/modules/notifications/services/bot-notifier.client';
+import { ReiwaRelayQueueService } from '../src/modules/notifications/services/reiwa-relay-queue.service';
 
 /**
  * The two producers that choose their event type at RUNTIME
@@ -459,11 +460,23 @@ async function renderCard(
   settingsRow: unknown,
 ): Promise<string | null> {
   let cardText: string | null = null;
+  // The dev firehose rides the durable relay queue now; this suite is about
+  // WHICH events get through the selection gate, not which road they take, so
+  // capture the card off either one.
+  const capture = (event: string, meta: Record<string, unknown>): void => {
+    if (event === 'reiwa.dev.notify') cardText = meta['text'] as string;
+  };
   const notifier = {
-    notifyDev: async (input: { text: string }) => {
-      cardText = input.text;
+    deliverRelayEvent: async (event: string, meta: Record<string, unknown>) => {
+      capture(event, meta);
+      return { status: 'unconfirmed', messageId: null, httpStatus: 204, detail: null };
     },
-    notifyDevDocument: async () => undefined,
+  };
+  const relayQueue = {
+    enqueue: async (event: string, meta: Record<string, unknown>) => {
+      capture(event, meta);
+      return true;
+    },
   };
 
   const service = new SystemEventsService(
@@ -480,6 +493,7 @@ async function renderCard(
     {
       get: (token: unknown) => {
         if (token === BotNotifierClient) return notifier;
+        if (token === ReiwaRelayQueueService) return relayQueue;
         throw new Error('not registered');
       },
     } as never,

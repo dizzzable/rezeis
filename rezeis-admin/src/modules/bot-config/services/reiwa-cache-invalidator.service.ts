@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 
 import { buildWebhookSignature } from '../../../common/http/webhook-signature.util';
+import { ReiwaRelayQueueService } from '../../notifications/services/reiwa-relay-queue.service';
 
 /**
  * ReiwaCacheInvalidatorService
@@ -29,9 +30,15 @@ export class ReiwaCacheInvalidatorService {
   private readonly logger = new Logger(ReiwaCacheInvalidatorService.name);
   private readonly endpoint: string | null;
   private readonly secret: string | null;
-  private readonly timeoutMs = 3_000;
+  /**
+   * Budget for the ONE path that is still synchronous: the operator pressing
+   * "refresh bot" and waiting for a true/false. Raised from 3s because that is
+   * the only caller left holding the answer — every automatic invalidation now
+   * goes to the queue, where `BotNotifierClient`'s own 10s budget applies.
+   */
+  private readonly timeoutMs = 5_000;
 
-  public constructor() {
+  public constructor(private readonly relayQueue: ReiwaRelayQueueService) {
     const baseUrl = (process.env.REIWA_URL ?? '').trim().replace(/\/+$/, '');
     this.secret = (process.env.WEBHOOK_SECRET_HEADER ?? '').trim() || null;
     this.endpoint = baseUrl.length > 0 ? `${baseUrl}/api/v1/webhooks/rezeis` : null;
@@ -43,42 +50,61 @@ export class ReiwaCacheInvalidatorService {
   }
 
   /**
-   * Notify reiwa that the cached bot-config is stale. Returns `true` when
-   * the webhook was accepted (HTTP 2xx), `false` otherwise. Never throws.
+   * Notify reiwa that the cached bot-config is stale. Queued: this is called
+   * from mutation interceptors that discard the result, so a single dropped
+   * `fetch` used to mean the bot served stale config for up to five minutes
+   * with nothing recorded anywhere.
+   *
+   * Bounded retries — see `RELAY_EVENT_POLICY`. The bot's own 5-minute refresh
+   * heals this anyway, so the queue's job is to win the race, not to win it
+   * eventually.
    */
-  public async invalidate(reason: string): Promise<boolean> {
+  public async invalidate(reason: string): Promise<void> {
+    await this.relayQueue.enqueue('reiwa.bot.invalidate', { reason });
+  }
+
+  /**
+   * The one invalidation that stays synchronous: the operator's manual
+   * "refresh bot" button, which shows them `{ ok }`.
+   *
+   * Routing it through the queue would turn that answer into "we wrote it
+   * down" — the same species of lie this whole change is removing from the
+   * broadcast status. A button that reports what an actual attempt proved has
+   * to make an actual attempt.
+   */
+  public async invalidateNow(reason: string): Promise<boolean> {
     return this.dispatch('reiwa.bot.invalidate', { reason });
   }
 
   /**
    * Notify reiwa that the cached platform policy (incl. `accessMode`)
    * has changed. The reiwa edge drops its cached value so the next
-   * gated request refetches the current mode immediately. Returns
-   * `true` when the webhook was accepted (HTTP 2xx), `false` otherwise.
-   * Never throws.
+   * gated request refetches the current mode immediately. Queued;
+   * every caller `void`s this, and the policy cache TTL is 60s.
    */
-  public async invalidatePolicy(reason: string): Promise<boolean> {
-    return this.dispatch('reiwa.platform.policy_invalidated', { reason });
+  public async invalidatePolicy(reason: string): Promise<void> {
+    await this.relayQueue.enqueue('reiwa.platform.policy_invalidated', { reason });
   }
 
   /**
    * Notify reiwa that branding / appearance settings changed so the reiwa
    * edge drops its cached `public-config` (palette, backgrounds, card +
    * app effects, icons). The next cabinet fetch then returns the fresh
-   * theme without waiting for the HTTP cache TTL (~60s). Best-effort.
+   * theme without waiting for the HTTP cache TTL (~60s). Queued, bounded.
    */
-  public async invalidateBranding(reason: string): Promise<boolean> {
-    return this.dispatch('reiwa.branding.invalidate', { reason });
+  public async invalidateBranding(reason: string): Promise<void> {
+    await this.relayQueue.enqueue('reiwa.branding.invalidate', { reason });
   }
 
   /**
    * Notify reiwa that the published web-landing config changed so the reiwa
    * edge drops its cached `/api/v1/landing` payload and the next visitor sees
    * the freshly-published landing without waiting for the HTTP cache TTL.
-   * Called explicitly on publish/rollback (never on draft save). Best-effort.
+   * Called explicitly on publish/rollback (never on draft save). Queued,
+   * bounded.
    */
-  public async invalidateLanding(reason: string): Promise<boolean> {
-    return this.dispatch('reiwa.landing.invalidate', { reason });
+  public async invalidateLanding(reason: string): Promise<void> {
+    await this.relayQueue.enqueue('reiwa.landing.invalidate', { reason });
   }
 
   private async dispatch(

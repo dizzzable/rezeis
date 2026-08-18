@@ -3,8 +3,49 @@
 
 http:
   routers:
+    # ── The ONE route that must never be cut ─────────────────
+    #
+    # `GET /api/internal/user/<userRef>/stream` is the panel's SSE feed
+    # (`text/event-stream`, held open for hours). Its consumer is the reiwa
+    # cabinet, and in the split-VPS layout it opens this stream ACROSS THE
+    # INTERNET, so the deadlines on the way there are real.
+    #
+    # It is split off the catch-all so the ordinary route can carry a FINITE
+    # backend deadline (see `serversTransport` in ../traefik.yml) without that
+    # deadline ever applying to the stream.
+    #
+    # `PathRegexp` because `:userRef` is a path parameter -- a numeric
+    # telegramId OR a CUID reiwa_id, so `[^/]+` and not `\d+`.
+    #
+    # Traefik already orders routers by RULE LENGTH, and this rule is longer
+    # than the bare `Host()` below, so it would win unprompted. Both
+    # priorities are pinned anyway: length-based ordering quietly depends on
+    # how long the operator's domain happens to be, which is not something
+    # anyone should have to reason about when two rules overlap.
+    rezeis-stream:
+      rule: "Host(`REPLACE_WITH_YOUR_DOMAIN`) && PathRegexp(`^/api/internal/user/[^/]+/stream/?$`)"
+      priority: 100
+      entrypoints:
+        - https
+      tls: {}
+      # `hsts` is repeated here ON PURPOSE. Traefik middlewares attach per
+      # router and are inherited from nowhere -- omit it and this one path
+      # becomes the single hole in the HSTS coverage.
+      middlewares:
+        - hsts
+      service: rezeis-stream
+
+    # No separate router for `/api/socket.io`, and that is a decision rather
+    # than an omission. The Socket.IO gateway is long-lived, but nothing on
+    # the default transport can cut it: a WebSocket upgrade answers `101`
+    # immediately, so `responseHeaderTimeout` is satisfied at once and Traefik
+    # then hands the hijacked connection through untouched; the long-polling
+    # fallback answers within engine.io's own ~25s ping window, far inside the
+    # 120s default. Only `writeTimeout` could kill either, and it is
+    # deliberately unset (see ../traefik.yml).
     rezeis:
       rule: "Host(`REPLACE_WITH_YOUR_DOMAIN`)"
+      priority: 1
       entrypoints:
         - https
       tls: {}
@@ -53,8 +94,57 @@ http:
     # Note buffering makes Traefik spool the body to disk before
     # forwarding, which breaks streaming uploads — size it deliberately.
 
+  serversTransports:
+    # Backend deadlines for the stream ONLY. Everything else uses the default
+    # transport configured in ../traefik.yml.
+    #
+    # `responseHeaderTimeout: 0s` (0 means no timeout) is the field that
+    # matters: the controller does a database lookup BEFORE it writes the SSE
+    # headers (internal-user-realtime.controller.ts looks the user up to decide
+    # whether to reject a blocked one), so headers genuinely are something this
+    # stream can wait on, and a slow database must not turn into a dropped
+    # subscription.
+    #
+    # `dialTimeout` and `idleConnTimeout` are repeated because a named
+    # transport inherits NOTHING from the static default: omit a field here
+    # and you get Traefik's own value, not the one configured next door.
+    #
+    # Note what is absent. Traefik has no backend read/body deadline at all,
+    # which is why an SSE response survives here without the
+    # `proxy_read_timeout 3600s` that the nginx and angie templates need.
+    rezeis-stream:
+      forwardingTimeouts:
+        dialTimeout: 5s
+        responseHeaderTimeout: 0s
+        idleConnTimeout: 90s
+
   services:
+    rezeis-stream:
+      loadBalancer:
+        serversTransport: rezeis-stream
+        # The stream must not be buffered on its way to the consumer. Traefik
+        # already gets this right unprompted: it detects a streaming response
+        # (Content-Type text/event-stream) and flushes every write
+        # immediately, IGNORING flushInterval for exactly those responses.
+        # 100ms is Traefik's own default, pinned here only so this template
+        # says out loud what the other three in this folder say -- caddy
+        # `flush_interval -1`, nginx and angie `proxy_buffering off`. Silence
+        # was the only difference.
+        #
+        # Do NOT set a negative value to "align" this with Caddy. It buys SSE
+        # nothing it does not already have, and copied onto the `rezeis`
+        # service below it would cost a flush per write on every SPA bundle,
+        # image and JSON response.
+        responseForwarding:
+          flushInterval: 100ms
+        servers:
+          - url: "http://rezeis:8000"
+
     rezeis:
       loadBalancer:
+        # No `serversTransport` here on purpose: this service takes the
+        # DEFAULT transport from ../traefik.yml, whose `forwardingTimeouts`
+        # are bounded. Anything added to this file later inherits those
+        # bounds unless it deliberately opts out the way rezeis-stream does.
         servers:
           - url: "http://rezeis:8000"

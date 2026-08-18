@@ -3,15 +3,20 @@ import { afterEach, beforeEach, describe, it } from 'node:test';
 
 import { SystemEventsService } from '../src/common/services/system-events.service';
 import { BotNotifierClient } from '../src/modules/notifications/services/bot-notifier.client';
+import { ReiwaRelayQueueService } from '../src/modules/notifications/services/reiwa-relay-queue.service';
 
 /**
  * Event-card enrichment
  * ─────────────────────
  * `formatTelegramMessage` is private, but every non-error event on the
  * token-less dev-fallback path is rendered to HTML and handed to the reiwa
- * relay via `BotNotifierClient.notifyDev({ text })`. We capture that text to
- * assert the enriched, per-type card layout (header, payment, plan, backup,
- * and the unknown-type fallback).
+ * relay as `reiwa.dev.notify`. We capture that text to assert the enriched,
+ * per-type card layout (header, payment, plan, backup, and the unknown-type
+ * fallback).
+ *
+ * The firehose rides the durable relay queue now. Which road it takes is
+ * `system-events-dev-fallback.spec.ts`'s subject; this suite only wants the
+ * rendered card, so the stub captures it off either one.
  */
 
 function buildService(): {
@@ -20,17 +25,27 @@ function buildService(): {
 } {
   let lastText: string | null = null;
 
+  // Error-report events take the OTHER branch: the `.txt` goes as a document
+  // and the very same rendered card rides along as its caption. Capturing it
+  // rather than discarding it is what lets this suite assert the layout of an
+  // error card at all — `system.error` never reaches the inline-card path, so
+  // a no-op double left every such assertion reading `null`.
+  const capture = (event: string, meta: Record<string, unknown>): void => {
+    if (event === 'reiwa.dev.notify') lastText = (meta['text'] as string | undefined) ?? null;
+    else if (event === 'reiwa.dev.notify.document') {
+      lastText = (meta['caption'] as string | undefined) ?? null;
+    }
+  };
   const notifier = {
-    notifyDev: async (input: { text: string }) => {
-      lastText = input.text;
+    deliverRelayEvent: async (event: string, meta: Record<string, unknown>) => {
+      capture(event, meta);
+      return { status: 'unconfirmed', messageId: null, httpStatus: 204, detail: null };
     },
-    // Error-report events take the OTHER branch: the `.txt` goes as a document
-    // and the very same rendered card rides along as its caption. Capturing it
-    // here rather than discarding it is what lets this suite assert the layout
-    // of an error card at all — `system.error` never reaches `notifyDev`, so a
-    // no-op double left every such assertion reading `null`.
-    notifyDevDocument: async (input: { caption?: string }) => {
-      lastText = input.caption ?? null;
+  };
+  const relayQueue = {
+    enqueue: async (event: string, meta: Record<string, unknown>) => {
+      capture(event, meta);
+      return true;
     },
   };
 
@@ -54,6 +69,7 @@ function buildService(): {
   const moduleRef = {
     get: (token: unknown) => {
       if (token === BotNotifierClient) return notifier;
+      if (token === ReiwaRelayQueueService) return relayQueue;
       throw new Error('not registered');
     },
   };

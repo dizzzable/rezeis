@@ -15,20 +15,55 @@ https://PANEL_DOMAIN {
     tls /etc/caddy/certs/fullchain.pem /etc/caddy/certs/privkey.key
     encode zstd gzip
 
-    # SSE realtime в админке: отключаем буферизацию.
+    # Долгоживущие маршруты панели — их ровно два.
+    #
+    # Здесь БЫЛО `path /api/admin/events/*
+    # /api/internal/user/*/realtime/*`. Ни один из этих двух путей НЕ
+    # СУЩЕСТВУЕТ: SSE панели живёт на
+    # `/api/internal/user/<userRef>/stream` (setGlobalPrefix('api') +
+    # @Controller('internal/user') + @Get(':userRef/stream')), а
+    # `/api/admin/events` — обычный постраничный JSON аудита.
+    # Блок не матчил ничего и только выглядел работающим.
+    #
+    # `/api/socket.io*` — шлюз Socket.IO админки (realtime.gateway.ts,
+    # `path: '/api/socket.io'`): websocket с откатом на polling. Звёздочка
+    # без слэша перед ней намеренно: engine.io запрашивает
+    # `/api/socket.io/?EIO=4&...`, но голый `/api/socket.io` тоже законен.
     @sse {
-        path /api/admin/events/* /api/internal/user/*/realtime/*
+        path /api/internal/user/*/stream /api/socket.io*
     }
     handle @sse {
         reverse_proxy rezeis:8000 {
+            # Здесь БЫЛО `transport http { read_timeout 24h }`. Такой
+            # поддирективы у `transport http` НЕТ — `read_timeout` и
+            # `write_timeout` принадлежат `transport fastcgi`. Caddy
+            # отказывается стартовать на неизвестной поддирективе, так
+            # что этот стек не поднимался вообще, а не «медленно работал».
+            #
+            # Потоку он и не нужен: у Caddy нет таймаута на чтение тела
+            # ответа от апстрима, поэтому SSE живёт без каких-либо
+            # указаний — в отличие от nginx/angie с их `proxy_read_timeout`.
             flush_interval -1
-            transport http {
-                read_timeout 24h
-            }
         }
     }
 
-    reverse_proxy rezeis:8000
+    # КОНЕЧНОЕ ожидание для всего остального.
+    #
+    # `response_header_timeout` здесь НЕ БЫЛО вообще, а умолчание Caddy —
+    # БЕЗ ТАЙМАУТА. Апстрим, который принял соединение и замолчал,
+    # держал вкладку открытой бесконечно, не пиша ничего ни в один
+    # лог. Тот же дефект в конфиге кабинета уронил его в бою.
+    #
+    # 120s — собственный потолок приложения для самых долгих
+    # маршрутов под этим блоком (загрузка медиа рассылки, медиа FAQ,
+    # скачивание бэкапа — по 120s в `RequestTimeoutMiddleware`, остальное
+    # 30s). Меньше — резали бы законные запросы, больше — вернули бы
+    # границу к ожиданию мёртвого апстрима.
+    reverse_proxy rezeis:8000 {
+        transport http {
+            response_header_timeout 120s
+        }
+    }
 
     header {
         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
@@ -44,8 +79,32 @@ https://APP_DOMAIN {
     tls /etc/caddy/certs/fullchain.pem /etc/caddy/certs/privkey.key
     encode zstd gzip
 
-    reverse_proxy reiwa:5000 {
-        flush_interval -1
+    # ЕДИНСТВЕННЫЙ долгоживущий маршрут кабинета — SSE.
+    # `flush_interval -1` СТОЯЛ НА `reverse_proxy` БЕЗ МАТЧЕРА, то есть на
+    # ВСЁМ, и никакого `response_header_timeout` здесь не было вообще —
+    # а умолчание Caddy это БЕЗ ТАЙМАУТА. Зависший апстрим держал
+    # вкладку открытой бесконечно, не пиша ничего ни в один лог.
+    # Тот же дефект в собственном конфиге кабинета уронил его в бою.
+    #
+    # Caddy сортирует `handle` по точности матчера и ставит блок без
+    # матчера ПОСЛЕДНИМ, так что порядок ниже не случаен лишь на вид.
+    handle /api/v1/realtime/stream {
+        reverse_proxy reiwa:5000 {
+            flush_interval -1
+        }
+    }
+
+    handle {
+        reverse_proxy reiwa:5000 {
+            transport http {
+                # То, чего не было. Щедро, но КОНЕЧНО.
+                #
+                # Здесь НЕТ `read_timeout` и `write_timeout` — не выдумывайте их.
+                # Это опции `transport fastcgi`; на неизвестной поддирективе
+                # Caddy отказывается стартовать вообще.
+                response_header_timeout 60s
+            }
+        }
     }
 
     header {

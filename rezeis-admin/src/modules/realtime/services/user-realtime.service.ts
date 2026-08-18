@@ -25,6 +25,17 @@ import { RealtimeGateway } from '../realtime.gateway';
  * Cap: each user can hold at most `MAX_STREAMS_PER_USER` concurrent
  * streams. New streams beyond the cap evict the oldest — protects the
  * server from pathological clients that don't close streams.
+ *
+ * Eviction has to CLOSE the stream, not just forget it. This registry holds
+ * only the handler; the `Response` and its 25s heartbeat live in
+ * `InternalUserRealtimeController`, whose cleanup runs on request/response
+ * close and on nothing else. Dropping the map entry therefore used to leave a
+ * stream that wrote `: keepalive` forever and delivered zero events — and it
+ * looked healthy from both ends: the subscriber's `EventSource` stayed OPEN,
+ * `onerror` never fired, so nothing ever prompted a reconnect. The cabinet's
+ * idle watchdog does not catch it either, because the keepalives keep arriving
+ * and keep rearming it. Hence `onEvict`: the controller hands us the way to
+ * actually end its response.
  */
 const MAX_STREAMS_PER_USER = 4;
 
@@ -33,6 +44,8 @@ interface UserSubscriber {
   readonly telegramId: string | null;
   readonly handler: (event: UserRealtimeEventInterface) => void;
   readonly registeredAt: number;
+  /** Ends the underlying response. `null` for callers that hold no stream. */
+  readonly onEvict: (() => void) | null;
 }
 
 @Injectable()
@@ -51,6 +64,12 @@ export class UserRealtimeService {
     readonly userId: string | null;
     readonly telegramId: string | null;
     readonly handler: (event: UserRealtimeEventInterface) => void;
+    /**
+     * Called when the per-user cap evicts this subscriber. The caller MUST use
+     * it to end its response and clear its heartbeat — this registry cannot,
+     * it never sees either. Omitting it recreates the zombie-stream defect.
+     */
+    readonly onEvict?: () => void;
   }): () => void {
     this.installHookOnce();
     const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
@@ -59,6 +78,7 @@ export class UserRealtimeService {
       telegramId: input.telegramId,
       handler: input.handler,
       registeredAt: Date.now(),
+      onEvict: input.onEvict ?? null,
     };
     this.subscribersById.set(id, subscriber);
     this.enforcePerUserCap(input.userId, input.telegramId);
@@ -139,7 +159,21 @@ export class UserRealtimeService {
     matching.sort((a, b) => a.subscriber.registeredAt - b.subscriber.registeredAt);
     const overflow = matching.length - MAX_STREAMS_PER_USER;
     for (let i = 0; i < overflow; i++) {
-      this.subscribersById.delete(matching[i].id);
+      const evicted = matching[i];
+      // Delete first: `onEvict` runs the controller's cleanup, which calls the
+      // unsubscribe closure, and a re-entrant delete of an id already gone is
+      // a no-op rather than a surprise.
+      this.subscribersById.delete(evicted.id);
+      try {
+        evicted.subscriber.onEvict?.();
+      } catch (err) {
+        // One controller failing to close must not strand the rest.
+        this.logger.warn(`User SSE eviction handler threw: ${(err as Error).message}`);
+      }
     }
+    this.logger.log(
+      `Evicted ${overflow} stream(s) over the ${MAX_STREAMS_PER_USER}-stream cap ` +
+        `for user ${userId ?? telegramId ?? 'unknown'}`,
+    );
   }
 }

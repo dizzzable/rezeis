@@ -76,12 +76,85 @@ https://REPLACE_WITH_YOUR_DOMAIN {
 	#   request_body {
 	# 	max_size 64MB
 	#   }
-	reverse_proxy * http://rezeis:8000 {
-		# Keep the internal SSE stream (/api/internal/user/:userRef/stream,
-		# which reiwa consumes for its realtime feed) flowing. Caddy already
-		# force-flushes text/event-stream, this makes it explicit and matches
-		# the reiwa Caddyfile.
-		flush_interval -1
+
+	# ── The long-lived routes ────────────────────────────────────────────
+	#
+	# This panel has TWO routes that are supposed to stay open, and they are
+	# the ONLY ones:
+	#
+	#   1. GET /api/internal/user/<userRef>/stream -- Server-Sent Events,
+	#      text/event-stream, held open for hours. The consumer is the reiwa
+	#      cabinet, and in the split-VPS layout it opens this stream ACROSS
+	#      THE INTERNET.
+	#   2. /api/socket.io -- the admin SPA's Socket.IO gateway (websocket,
+	#      falling back to polling).
+	#
+	# `flush_interval -1` used to sit on `reverse_proxy *`, i.e. on
+	# EVERYTHING. Splitting it out is what lets the catch-all below carry a
+	# FINITE wait, which is the defect that actually mattered: with no
+	# `response_header_timeout` anywhere, an upstream that accepts the
+	# connection and then never answers holds the request -- and the browser
+	# tab -- open forever, logging nothing on either side. The same mistake
+	# in the cabinet's own config took the cabinet down in production.
+	#
+	# Ordering is not left to chance: Caddy sorts `handle` blocks by matcher
+	# specificity and sorts the matcher-less block LAST, so these two stay
+	# ahead of the catch-all whatever order they are written in.
+	handle /api/internal/user/*/stream {
+		reverse_proxy http://rezeis:8000 {
+			# Low-latency mode: every write reaches the consumer as it
+			# arrives. Caddy already force-flushes text/event-stream; this
+			# says so out loud and does not depend on the content type.
+			#
+			# Deliberately no `transport http` block: this is one of the two
+			# routes allowed to wait indefinitely.
+			flush_interval -1
+		}
+	}
+
+	# Trailing `*` with no slash before it on purpose: engine.io requests
+	# `/api/socket.io/?EIO=4&transport=...`, but a bare `/api/socket.io` is
+	# legal too and must land here as well.
+	handle /api/socket.io* {
+		reverse_proxy http://rezeis:8000 {
+			# WebSocket upgrades are hijacked by Caddy and bypass buffering
+			# entirely; this covers the long-polling fallback, which is an
+			# ordinary HTTP response held open until an event arrives.
+			flush_interval -1
+		}
+	}
+
+	# Everything else: ordinary buffered proxying, bounded wait.
+	handle {
+		reverse_proxy http://rezeis:8000 {
+			transport http {
+				# The directive that was missing. Caddy's default is NO
+				# TIMEOUT. 120s is not arbitrary -- it is the app's own
+				# ceiling for the slowest routes under this handle
+				# (broadcast media upload, FAQ uploads, backup download are
+				# each granted 120s by `RequestTimeoutMiddleware`,
+				# everything else 30s). Lower would 504 requests the app was
+				# still lawfully serving; higher would put the edge back to
+				# waiting on a dead upstream. It is FINITE either way.
+				#
+				# `dial_timeout` is deliberately left alone: Caddy already
+				# defaults to 3s, tighter than the 5s the nginx and angie
+				# templates have to set by hand.
+				#
+				# There is no `read_timeout` or `write_timeout` in
+				# `transport http` -- do not invent them, Caddy refuses to
+				# start on an unrecognised sub-directive. (They exist in
+				# `transport fastcgi`, which is where the confusion comes
+				# from; the legacy Caddyfiles under
+				# rezeis-admin/deploy/proxies still carry that mistake.) The
+				# client-side write deadline exists only as the global
+				# `servers { timeouts { write } }`, and it is deliberately
+				# NOT set: that block is server-wide with no per-route
+				# override, so any value there would also apply to the two
+				# streams above.
+				response_header_timeout 120s
+			}
+		}
 	}
 }
 

@@ -73,9 +73,33 @@ describe('cross-host-url-check', () => {
    * not event-loop turns: `setTimeout(fn, 0)` is clamped to 1ms, so draining
    * `setImmediate` never advances it. Three attempts cost ~3ms; 60ms is ample.
    */
+  /**
+   * Waiting for the probe chain, not for a fixed 60ms.
+   *
+   * `scheduleProbe` walks `delaysMs` as a chain of `setTimeout` callbacks, each
+   * resolving a name through a stub that answers on `setImmediate`. Three
+   * attempts is therefore at least six macrotask hops, and a flat 60ms wall
+   * clock only covers that on an idle machine — under the full suite, with a
+   * few hundred node processes competing, the chain regularly had not reached
+   * its last attempt when the assertion ran. That produced exactly two failures
+   * in `npm test` and none in isolation, which reads like a broken feature and
+   * is a broken wait.
+   *
+   * The silence cases keep a fixed wait because there is nothing to poll for —
+   * but a fixed wait is inherently weak there: it passes if the chain has
+   * merely not started yet, so the number wants to be comfortably longer than
+   * the chain, not merely long enough on a good day.
+   */
+  const settleUntilWarned = async (warnings: readonly string[]): Promise<void> => {
+    const deadline = Date.now() + 2_000;
+    while (warnings.length === 0 && Date.now() < deadline) {
+      await new Promise((done) => setTimeout(done, 10));
+    }
+  };
+
   const settle = (): Promise<void> =>
     new Promise((done) => {
-      setTimeout(done, 60);
+      setTimeout(done, 300);
     });
 
   it('stays silent on a correct single-host install (the docker name resolves)', async () => {
@@ -93,7 +117,7 @@ describe('cross-host-url-check', () => {
     // Not set at all — which is exactly the dangerous case, because the schema
     // default and every consumer fallback land on http://reiwa:5000 anyway.
     warnOnUnreachableCrossHostUrls(logger, { lookup: nxdomain, delaysMs: immediate });
-    await settle();
+    await settleUntilWarned(warnings);
 
     assert.equal(warnings.length, 1);
     assert.ok(warnings[0].includes('REIWA_URL'));
@@ -163,7 +187,7 @@ describe('cross-host-url-check', () => {
     process.env.REZEIS_SUBPAGE_WEBHOOK_SECRET = 'b'.repeat(32);
     const on = recordingLogger();
     warnOnUnreachableCrossHostUrls(on.logger, { lookup: nxdomain, delaysMs: immediate });
-    await settle();
+    await settleUntilWarned(on.warnings);
 
     assert.equal(on.warnings.length, 1);
     assert.ok(on.warnings[0].includes('REZEIS_SUBPAGE_URL'));

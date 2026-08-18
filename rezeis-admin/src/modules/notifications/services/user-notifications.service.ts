@@ -6,6 +6,7 @@ import { WebPushService } from '../../push/services/web-push.service';
 import { CustomEmojiService } from '../../custom-emoji/services/custom-emoji.service';
 
 import { BotNotifierClient, NotifyButton } from './bot-notifier.client';
+import { ReiwaRelayQueueService } from './reiwa-relay-queue.service';
 import { NotificationTemplatesService } from './notification-templates.service';
 import { isNotificationDeliveryEnabled, resolveToggleKey } from '../utils/notification-toggle.util';
 import {
@@ -80,6 +81,7 @@ export class UserNotificationsService {
     private readonly botNotifier: BotNotifierClient,
     private readonly webPushService: WebPushService,
     private readonly customEmojiService: CustomEmojiService,
+    private readonly relayQueue: ReiwaRelayQueueService,
   ) {}
 
   /**
@@ -192,7 +194,11 @@ export class UserNotificationsService {
         rendered !== null &&
         input.skipTelegram !== true
       ) {
-        await this.botNotifier.notifyUser({
+        // Durable: the fanout drops whatever comes back, so before the queue a
+        // 4s timeout on a busy cabinet meant a subscriber silently never heard
+        // about their expiring subscription. Retries are safe here — the bot
+        // dedups on this same `eventId`.
+        await this.relayQueue.enqueue('reiwa.user.notify', {
           eventId: input.eventId,
           telegramId: user.telegramId.toString(),
           text: rendered.html,
@@ -254,7 +260,7 @@ export class UserNotificationsService {
     if (!config.enabled || !config.mirror || config.chatId === null) return;
     const topicThreadId =
       config.topics[USER_NOTIFICATION_CATEGORY] ?? config.defaultTopicId ?? undefined;
-    await this.botNotifier.notifyBroadcast({
+    await this.relayQueue.enqueue('reiwa.channel.broadcast', {
       // Suffix so the bot's idempotency LRU treats the operator-mirror
       // copy as distinct from the per-user delivery of the same event.
       eventId: `${eventId}:operator-mirror`,

@@ -22,10 +22,21 @@ const LONG_TIMEOUT_PATTERNS = [
   /\/admin\/broadcast\/upload-media/,
   /\/admin\/faq\/uploads(?:[/?]|$)/,
   /\/admin\/backup\/download\//,
-  /\/admin\/backup\/restore\//,
+  // Both restore routes, and the reason the shapes differ: `restore/:filename`
+  // ends in a slash, `restore-upload` ends at the path end. The pattern used to
+  // be `restore\/` alone, so POST /admin/backup/restore-upload fell through to
+  // the 30s default -- while the edge proxies advertise `client_max_body_size
+  // 2g` for that exact path. A restore large enough to need the raised ceiling
+  // was killed by the app three seconds into the minute it needed.
+  /\/admin\/backup\/restore(?:-upload)?(?:[/?]|$)/,
 ];
 
-const INFINITE_TIMEOUT_PATTERNS = [/\/internal\/user\/\d+\/stream/, /\/realtime/];
+// `:userRef` on the SSE stream is EITHER a numeric telegramId OR a CUID
+// reiwa_id — the cabinet prefers the WebSession reiwa_id (see reiwa's
+// `resolveUserIdentity`), so most real streams carry a CUID. A `\d+` class
+// here would let those fall through to the 30s default instead of the
+// no-timeout branch.
+const INFINITE_TIMEOUT_PATTERNS = [/\/internal\/user\/[^/]+\/stream(?:[/?]|$)/, /\/realtime/];
 
 @Injectable()
 export class RequestTimeoutMiddleware implements NestMiddleware {

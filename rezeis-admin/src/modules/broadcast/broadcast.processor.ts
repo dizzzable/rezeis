@@ -3,6 +3,7 @@ import { Logger } from '@nestjs/common';
 import { Job } from 'bullmq';
 
 import { EVENT_TYPES, SystemEventsService } from '../../common/services/system-events.service';
+import { isFinalProcessorAttempt } from '../backup/backup-delivery-retry.util';
 import { BROADCAST_DELIVERY_QUEUE, BROADCAST_JOBS } from './broadcast.constants';
 import { BroadcastDeliveryService } from './services/broadcast-delivery.service';
 import {
@@ -86,9 +87,25 @@ export class BroadcastProcessor extends WorkerHost {
     return { batches: batchCount };
   }
 
-  private async handleBatch(job: Job<BroadcastBatchJobData>): Promise<{ sent: number; failed: number }> {
+  /**
+   * `attempts: 3` on this job had never once fired, for the same reason the
+   * backup relay's had not: BullMQ retries a processor that THROWS, and this
+   * one returned a tally for every outcome. Now that a message is only `SENT`
+   * on proven delivery, the rows a transient relay failure leaves `PENDING`
+   * are exactly what a retry is for — so an unresolved count throws, and the
+   * re-run picks up only those rows (`deliverBatch` reads `PENDING` ones).
+   *
+   * `isFinalAttempt` tells the service no re-run is coming, so it writes the
+   * stragglers down as failed rather than leaving a broadcast that can never
+   * finalize.
+   */
+  private async handleBatch(
+    job: Job<BroadcastBatchJobData>,
+  ): Promise<{ sent: number; failed: number; unresolved: number }> {
     const { broadcastId, messageIds } = job.data;
-    const result = await this.broadcastDeliveryService.deliverBatch(broadcastId, messageIds);
+    const result = await this.broadcastDeliveryService.deliverBatch(broadcastId, messageIds, {
+      isFinalAttempt: isFinalProcessorAttempt(job),
+    });
     await job.updateProgress({ sent: result.sent, failed: result.failed, total: messageIds.length });
 
     // Emit progress for realtime dashboard
@@ -99,6 +116,12 @@ export class BroadcastProcessor extends WorkerHost {
       { broadcastId, ...result, batchSize: messageIds.length },
     );
 
+    if (result.unresolved > 0) {
+      throw new Error(
+        `Broadcast ${broadcastId}: ${result.unresolved} message(s) unresolved after a relay ` +
+          'transport failure; retrying the batch',
+      );
+    }
     return result;
   }
 
@@ -116,10 +139,19 @@ export class BroadcastProcessor extends WorkerHost {
     return result;
   }
 
-  private async handleRetry(job: Job<BroadcastRetryJobData>): Promise<{ sent: number; failed: number }> {
+  private async handleRetry(
+    job: Job<BroadcastRetryJobData>,
+  ): Promise<{ sent: number; failed: number; unresolved: number }> {
     const { broadcastId, messageIds } = job.data;
-    const result = await this.broadcastDeliveryService.retryBatch(broadcastId, messageIds);
+    const result = await this.broadcastDeliveryService.retryBatch(broadcastId, messageIds, {
+      isFinalAttempt: isFinalProcessorAttempt(job),
+    });
     await job.updateProgress({ sent: result.sent, failed: result.failed, total: messageIds.length });
+    if (result.unresolved > 0) {
+      throw new Error(
+        `Broadcast ${broadcastId}: ${result.unresolved} message(s) unresolved on retry`,
+      );
+    }
     return result;
   }
 

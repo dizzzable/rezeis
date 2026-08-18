@@ -18,6 +18,8 @@ export const en = {
     deleteDialogTitle: 'Delete broadcast?',
     deleteConfirm: 'Delete this broadcast?',
     deleteDialogAction: 'Delete',
+    pendingCount_one: '{{count}} still delivering',
+    pendingCount_other: '{{count}} still delivering',
     failedCount_one: '{{count}} failed',
     failedCount_other: '{{count}} failed',
     columns: {

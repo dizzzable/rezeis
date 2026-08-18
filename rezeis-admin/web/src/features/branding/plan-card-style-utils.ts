@@ -18,6 +18,72 @@ export function autoPlanGradient(planId: string): string {
   return `linear-gradient(135deg, hsl(${hue} 70% 22%), hsl(${(hue + 40) % 360} 65% 32%))`
 }
 
+/**
+ * The fields the catalogue decision reads. A structural subset of the admin
+ * `Plan`, so `plans-api`'s type is assignable with no conversion — and so the
+ * tests can state a case in four fields instead of twenty.
+ */
+export interface PlanCatalogVisibility {
+  readonly isActive: boolean
+  readonly isArchived: boolean
+  readonly availability: string
+  readonly trialSettings?: { readonly free: boolean } | undefined
+}
+
+/**
+ * Whether the cabinet's buy catalogue hides this plan from EVERY subscriber.
+ *
+ * ── why this is not "isArchived" ────────────────────────────────────────────
+ * The obvious version of this check — reading the panel's own idea of archived
+ * — is wrong twice over, and both misses are silent. The cabinet's `/plans`
+ * list is the product of three filters in three different places, and archived
+ * is one clause of one of them:
+ *
+ *   1. SQL, always applied: `isActive: true, isArchived: false`
+ *      (`rezeis-admin/src/modules/plans/services/plan-catalog.service.ts:55-69`)
+ *   2. availability, evaluated in memory against the CALLER
+ *      (same file, ~140-178)
+ *   3. the cabinet's own last filter, `!(p.isTrial && p.trialFree)`
+ *      (`reiwa/web/src/features/plans/plans-page.tsx:37`) — a FREE trial is
+ *      claimed from the dashboard, never bought from the catalogue.
+ *
+ * So an inactive plan and a free-trial plan are both invisible to every
+ * subscriber while being neither archived nor, in the free trial's case,
+ * anything the panel's list would flag.
+ *
+ * ── why it cannot literally reuse the cabinet's expression ──────────────────
+ * `isTrial` and `trialFree` do not exist on the admin wire. They are not
+ * columns; they are DERIVED in the catalogue mapper for the cabinet's
+ * projection alone (`plan-catalog.service.ts:206-207`):
+ *
+ *     isTrial:   plan.availability === PlanAvailability.TRIAL
+ *     trialFree: readTrialSettings(plan.trialSettings).free
+ *
+ * The admin endpoint runs a different mapper over the same table and emits
+ * `availability` + `trialSettings` instead. Reusing the cabinet's LOGIC
+ * therefore means reusing that derivation, which is what the last clause below
+ * is — not calling the cabinet's field names, which the panel never receives.
+ *
+ * `readTrialSettings` defaults `free` to TRUE for the empty `{}` every plan
+ * carries by default (`utils/trial-settings.util.ts:37-42`), so `?? true`
+ * matches the backend rather than guessing. The `availability === 'TRIAL'`
+ * conjunct is load-bearing for the same reason the cabinet writes it as a
+ * conjunction: `trialFree` reads true for ordinary paid plans too, and testing
+ * it alone would mark the entire catalogue hidden.
+ *
+ * ── what this deliberately does NOT claim ───────────────────────────────────
+ * Filter 2 is undecidable here and must stay that way. `NEW`, `EXISTING`,
+ * `INVITED` and `ALLOWED` are answered against a user the panel does not have,
+ * and a paid `TRIAL` additionally depends on that user's claim count. Those
+ * plans ARE in the catalogue for the audience they target, so marking them
+ * would be a louder lie than the one this fixes. Only the three
+ * subscriber-independent cases are reported.
+ */
+export function isHiddenFromCabinetCatalog(plan: PlanCatalogVisibility): boolean {
+  if (!plan.isActive || plan.isArchived) return true
+  return plan.availability === 'TRIAL' && (plan.trialSettings?.free ?? true)
+}
+
 /** Builds the optional static texture layer for compact tariff-card previews. */
 export function resolvePlanCardTextureCss(style: PlanCardStyleDraft | undefined): TextureCss | null {
   if (style?.textureUrl || !style?.texturePreset) return null

@@ -6,6 +6,7 @@ import { Currency, PaymentGatewayType, Prisma, PurchaseType, TransactionStatus }
 
 import { EVENT_TYPES, SystemEventsService } from '../src/common/services/system-events.service';
 import { BotNotifierClient } from '../src/modules/notifications/services/bot-notifier.client';
+import { ReiwaRelayQueueService } from '../src/modules/notifications/services/reiwa-relay-queue.service';
 import { PaymentPendingExpiryService } from '../src/modules/payments/services/payment-pending-expiry.service';
 import { PaymentReconciliationService } from '../src/modules/payments/services/payment-reconciliation.service';
 
@@ -201,11 +202,23 @@ describe('payment.amount_mismatch operator card', () => {
     // from the presentation registry falls through to `severityEmoji` + the raw
     // message, and the operator gets an untitled card.
     let cardText: string | null = null;
+    // The dev firehose rides the durable relay queue now. This suite only wants
+    // the rendered card, so capture it off whichever road carries it — the
+    // routing itself is `system-events-dev-fallback.spec.ts`'s subject.
+    const capture = (event: string, meta: Record<string, unknown>): void => {
+      if (event === 'reiwa.dev.notify') cardText = meta['text'] as string;
+    };
     const notifier = {
-      notifyDev: async (input: { text: string }) => {
-        cardText = input.text;
+      deliverRelayEvent: async (event: string, meta: Record<string, unknown>) => {
+        capture(event, meta);
+        return { status: 'unconfirmed', messageId: null, httpStatus: 204, detail: null };
       },
-      notifyDevDocument: async () => undefined,
+    };
+    const relayQueue = {
+      enqueue: async (event: string, meta: Record<string, unknown>) => {
+        capture(event, meta);
+        return true;
+      },
     };
     const service = new SystemEventsService(
       {
@@ -225,6 +238,7 @@ describe('payment.amount_mismatch operator card', () => {
       {
         get: (token: unknown) => {
           if (token === BotNotifierClient) return notifier;
+          if (token === ReiwaRelayQueueService) return relayQueue;
           throw new Error('not registered');
         },
       } as never,

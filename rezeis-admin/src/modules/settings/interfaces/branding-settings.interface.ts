@@ -733,14 +733,33 @@ export interface BrandingSettingsInterface {
    */
   readonly cardEffectsByIndex: readonly CardEffectSlot[];
 
-  /** Site-wide background-effect preset. */
+  /**
+   * Site-wide background-effect preset.
+   *
+   * @deprecated Superseded by `appBackground` with `kind: 'effect'`, which
+   * carries the same NONE/MESH/PARTICLES/NOISE/AURORA vocabulary and is the
+   * one the cabinet actually renders (a WebGL layer in
+   * `reiwa/web/src/components/layout/app-background.tsx`).
+   *
+   * This field paints nothing, at any value. Reiwa copies it to
+   * `root.dataset["bgEffect"]` in `lib/branding-document.ts` and no CSS
+   * selector, component or preview reads that attribute; the admin panel has
+   * no control for it either, so only theme presets ever write it. It is NOT
+   * the fallback that applies while `appBackground.kind === 'none'` — that
+   * case draws the cabinet's built-in `<NetworkBg>`, which does not consult
+   * this value.
+   *
+   * Kept as a stored field: removing it needs a settings migration and buys
+   * nothing. Do not wire it up.
+   */
   readonly bgEffect: BgEffect;
 
   /**
    * Site-wide app background (`none` / `plain` / `gradient` / `texture` /
    * `effect`). `none` → the cabinet's built-in `<NetworkBg>` pattern, which is
-   * the default; `plain` → the flat `bgPrimary` colour and nothing else. Takes
-   * precedence over the legacy preset `bgEffect` when not `none`. Additive: an
+   * the default; `plain` → the flat `bgPrimary` colour and nothing else. This
+   * is the only field that selects a site-wide background; the deprecated
+   * `bgEffect` above does not compete with it at any value. Additive: an
    * older reiwa build that doesn't know this field renders the existing
    * background, and one that doesn't know a newer `kind` falls back to `none`
    * rather than refusing the snapshot.

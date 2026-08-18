@@ -152,6 +152,17 @@ export interface BrandingFormDraft {
   readonly cardEffectProps?: Record<string, unknown>
   readonly cardEffectOpacity: number
   readonly cardEffectsByIndex?: readonly BrandingCardEffectSlotDraft[]
+  /**
+   * @deprecated Superseded by `appBackground` with `kind: 'effect'`, which
+   * carries the same NONE/MESH/PARTICLES/NOISE/AURORA vocabulary and is the one
+   * the cabinet renders. `bgEffect` is inert end to end: reiwa writes it to
+   * `root.dataset["bgEffect"]` (`lib/branding-document.ts`) and nothing reads
+   * that attribute, and this panel has no control for it — only theme presets
+   * write it, and the i18n strings that once labelled a control for it
+   * (`brandingPage.sections.effects.bgEffect`, `brandingPage.bgEffects.*`) are
+   * referenced by no component. Kept as a stored field because dropping it
+   * needs a settings migration for no gain; do not wire it up.
+   */
   readonly bgEffect: (typeof BRANDING_BG_EFFECTS)[number]
   readonly appBackground?: BrandingAppBackgroundDraft
   readonly iconColorMode: (typeof BRANDING_ICON_COLOR_MODES)[number]

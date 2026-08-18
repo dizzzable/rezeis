@@ -9,6 +9,20 @@ upstream rezeis_upstream {
     keepalive 32;
 }
 
+# Connection — hop-by-hop заголовок: пересылать наверх тот, что прислал клиент,
+# нельзя. Раньше здесь стоял `proxy_set_header Connection $http_connection`, и
+# из-за него объявленный выше `keepalive 32` не работал НИ РАЗУ: клиентский
+# `Connection: keep-alive` уходил в апстрим, а nginx для повторного
+# использования соединения требует, чтобы заголовка не было вовсе.
+#
+# Пустая строка для НЕ-upgrade запросов — не `close`, как в 443-only стеках без
+# апстрим-keepalive. Там `close` правилен, потому что переиспользовать нечего;
+# здесь он гасил бы ровно то соединение, которое keepalive пытается сохранить.
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      "";
+}
+
 # Обычный server-блок для нашего домена
 server {
     server_name REPLACE_WITH_YOUR_DOMAIN;
@@ -16,13 +30,39 @@ server {
     listen [::]:443 ssl reuseport;
     http2 on;
 
-    # Загрузки в админке (баннер бота до 8 МБ, импорт бэкапов и т.п.). Дефолт
-    # nginx — 1 МБ, из-за чего загрузка баннера падала с 413 Request Entity
-    # Too Large ещё до того, как запрос доходил до приложения.
-    client_max_body_size 16m;
+    # Потолок размера тела запроса на границе. Заменяет умолчание в 1 МБ.
+    #
+    # Рассчитан по МЕДИА-загрузкам панели: видео в рассылке 50 МБ, медиа в FAQ
+    # 25 МБ, медиа в сценариях бота 20 МБ, баннеры в настройках бота 8 МБ.
+    # 64m перекрывает самую крупную из них с запасом на обвязку
+    # multipart/form-data. Прежние 16m молча резали 413-й ошибкой законную
+    # 50-мегабайтную рассылку прямо здесь, на границе, до того как приложение
+    # успевало вернуть собственное сообщение об ошибке.
+    #
+    # Два семейства маршрутов законно превышают и 64m — восстановление из
+    # бэкапа и четыре файловых импортёра. Они решаются НЕ поднятием этого
+    # числа: у них свои location-блоки ниже, так что поднятый потолок
+    # действует только на них.
+    client_max_body_size 64m;
 
     # SSE — отключаем буферизацию и держим долгие соединения
-    location ~ ^/api/(admin/events/|internal/user/[^/]+/realtime/) {
+    # Долгоживущие маршруты панели — их ровно два.
+    #
+    # Здесь БЫЛО `^/api/(admin/events/|internal/user/[^/]+/realtime/)`.
+    # Ни один из этих двух путей НЕ СУЩЕСТВУЕТ: SSE панели живёт
+    # на `/api/internal/user/<userRef>/stream` (setGlobalPrefix('api') +
+    # @Controller('internal/user') + @Get(':userRef/stream')), а
+    # `/api/admin/events` — обычный постраничный JSON аудита. Блок
+    # не матчил ничего и только выглядел работающим; поток уцелел
+    # лишь потому, что приложение шлёт `X-Accel-Buffering: no` и бьёт
+    # heartbeat каждые 25s — короче умолчания `proxy_read_timeout` в 60s.
+    # Опираться на это нельзя: любое изменение шага heartbeat тихо
+    # оборвёт поток.
+    #
+    # `:userRef` — числовой telegramId ИЛИ CUID reiwa_id, поэтому `[^/]+`,
+    # а не `\d+`. Второй долгоживущий маршрут — шлюз Socket.IO админки
+    # на `/api/socket.io` (realtime.gateway.ts) — покрыт тем же блоком.
+    location ~ ^/api/internal/user/[^/]+/stream/?$ {
         proxy_http_version 1.1;
         proxy_pass http://rezeis_upstream;
         proxy_set_header Host              $host;
@@ -35,6 +75,93 @@ server {
         proxy_read_timeout 24h;
         chunked_transfer_encoding off;
     }
+
+    # Второй долгоживущий маршрут — шлюз Socket.IO админки
+    # (realtime.gateway.ts, `path: '/api/socket.io'`): websocket с откатом
+    # на polling.
+    #
+    # ОТДЕЛЬНЫЙ блок, а не ветка в регулярке выше, по двум причинам:
+    # блок SSE НЕ передаёт `Upgrade`/`Connection` — без них рукопожатие
+    # WebSocket не состоится и клиент МОЛЧА навсегда скатится в polling;
+    # и `chunked_transfer_encoding off` там не к месту для polling-ответов.
+    #
+    # `^~` — чтобы префикс выигрывал у регулярок. Без слэша на конце:
+    # engine.io запрашивает `/api/socket.io/?EIO=4&...`, но голый
+    # `/api/socket.io` тоже законен.
+    location ^~ /api/socket.io {
+        proxy_http_version 1.1;
+        proxy_pass http://rezeis_upstream;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade           $http_upgrade;
+        proxy_set_header Connection        $connection_upgrade;
+
+        proxy_buffering    off;
+        proxy_read_timeout 24h;
+    }
+
+    # ==== Пер-путевые пределы размера тела ==============================
+    # 64m выше — умолчание для всего остального. Два семейства маршрутов
+    # законно его превышают и получают собственный потолок, чтобы прокси
+    # перестал быть тем, кто говорит «нет»: оба эндпоинта заново проверяют
+    # настоящий предел в приложении и возвращают внятную ошибку вместо
+    # голого 413 от прокси.
+    #
+    # Это СОСЕДНИЕ location-блоки. proxy_pass и proxy_set_header НЕ
+    # наследуются из `location /` — они повторены здесь дословно. Меняете
+    # набор в `location /` — меняйте и тут, они не должны разойтись.
+    #
+    # Регулярка с необязательным слэшем на конце, а не префикс: префикс
+    # `/api/admin/imports/` был бы недостаточно узким — на том же контроллере
+    # висят GET /, GET /:importId, POST /remnawave, POST /remnawave/sync,
+    # POST /assign-plan, POST /:importId/cancel, POST /:importId/rollback,
+    # GET /:importId/plan-preview и POST /:importId/clone-plans: девять
+    # маршрутов с крошечным JSON, которые молча унаследовали бы потолок.
+
+    # POST /api/admin/backup/restore-upload — предел приложения 1 ГиБ по
+    # умолчанию и 2 ГиБ жёстко (DEFAULT/HARD_MAX_UPLOAD_BYTES, переопределяется
+    # через BACKUP_MAX_UPLOAD_BYTES). 2g здесь совпадает с жёстким, чтобы
+    # политику определяло приложение, а не прокси. Соседние маршруты бэкапа
+    # (GET /, POST /, settings, :id, restore/:filename, download/:filename)
+    # остаются на умолчании 64m.
+    location ~ ^/api/admin/backup/restore-upload/?$ {
+        client_max_body_size 2g;
+
+        # Тело запроса целиком складывается на диск перед отправкой в
+        # приложение (proxy_request_buffering по умолчанию on), поэтому под
+        # восстановление на 2 ГиБ нужно 2 ГиБ свободных в client_body_temp_path
+        # контейнера. Раскомментируйте, чтобы лить сразу в приложение — диск
+        # больше не нужен, но загрузку нельзя будет повторить на другой
+        # апстрим (здесь он всё равно один):
+        # proxy_request_buffering off;
+
+        proxy_http_version 1.1;
+        proxy_pass http://rezeis_upstream;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 3600s;
+    }
+
+    # POST /api/admin/imports/{3xui,remnashop,altshop,stealthnet} — каждый
+    # принимает 100 МБ (FileInterceptor fileSize 100 * 1024 * 1024). 128m
+    # оставляет запас на обвязку multipart/form-data. Перечислены поимённо,
+    # чтобы ни один соседний маршрут того же контроллера не был расширен.
+    location ~ ^/api/admin/imports/(3xui|remnashop|altshop|stealthnet)/?$ {
+        client_max_body_size 128m;
+
+        proxy_http_version 1.1;
+        proxy_pass http://rezeis_upstream;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 3600s;
+    }
+    # ====================================================================
 
     # Простой health для healthcheck докера
     location = /nginx-health {
@@ -52,7 +179,7 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
 
         proxy_set_header Upgrade           $http_upgrade;
-        proxy_set_header Connection        $http_connection;
+        proxy_set_header Connection        $connection_upgrade;
     }
 
     # ── SSL (Mozilla Intermediate Guidelines) ────────────────────────────────
@@ -72,7 +199,17 @@ server {
     resolver_timeout       2s;
 
     # ── Безопасные заголовки ─────────────────────────────────────────────────
-    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+    # HSTS — один год. Намеренно БЕЗ `preload`: попадание в preload-списки
+    # браузеров — билет в один конец, снятие занимает месяцы и едет вагонами
+    # релизов браузеров. Добавляйте его отдельным осознанным решением, а не
+    # потому что так было в примере.
+    #
+    # `includeSubDomains` — тоже обязательство, а не просто галочка: он
+    # закрепляет HTTPS за КАЖДЫМ именем под этим. Если домены панели и
+    # кабинета делят общий апекс, заголовок с любого из них действует на всё
+    # дерево — включая поддомены, у которых сертификата ещё нет: они станут
+    # недоступны в любом видевшем заголовок браузере, на год.
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
     add_header X-Content-Type-Options    "nosniff" always;
     add_header X-Frame-Options           "SAMEORIGIN" always;
     add_header Referrer-Policy           "strict-origin-when-cross-origin" always;

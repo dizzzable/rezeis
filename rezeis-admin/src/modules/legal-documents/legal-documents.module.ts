@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 
 import { AuthModule } from '../auth/auth.module';
 import { ReiwaCacheInvalidatorService } from '../bot-config/services/reiwa-cache-invalidator.service';
+import { ReiwaRelayModule } from '../notifications/reiwa-relay.module';
 import { AdminLegalDocumentsController } from './controllers/admin-legal-documents.controller';
 import { InternalLegalDocumentsController } from './controllers/internal-legal-documents.controller';
 import { LegalDocumentsService } from './services/legal-documents.service';
@@ -15,9 +16,14 @@ import { LegalDocumentsService } from './services/legal-documents.service';
  * reason; `LandingConfigModule` imports `BotConfigModule` instead. Declaring it
  * avoids pulling the whole bot editor into the dependency graph of a two-table
  * content module.
+ *
+ * That still costs the service's own dependencies: it enqueues invalidations
+ * now rather than firing a single `fetch`, so a module that declares it must
+ * also import `ReiwaRelayModule`. `ReiwaRelayModule` is deliberately tiny (one
+ * queue, one producer, one processor), so this does not undo the point above.
  */
 @Module({
-  imports: [AuthModule],
+  imports: [AuthModule, ReiwaRelayModule],
   controllers: [AdminLegalDocumentsController, InternalLegalDocumentsController],
   providers: [LegalDocumentsService, ReiwaCacheInvalidatorService],
   exports: [LegalDocumentsService],

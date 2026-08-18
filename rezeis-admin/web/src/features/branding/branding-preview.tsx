@@ -27,6 +27,7 @@ import {
   Info,
   RefreshCw,
   Trash2,
+  EyeOff,
   type LucideIcon,
 } from 'lucide-react'
 
@@ -43,8 +44,13 @@ import {
   isPreviewCardEffect,
   resolveCardEffectPreviewOpacity,
 } from './card-effect-preview-utils'
+import { usePreviewCardEffectSlot } from './card-effect-preview-budget'
 import { usePlans, type Plan } from '@/features/plans/plans-api'
-import { autoPlanGradient, resolvePlanCardText } from './plan-card-style-utils'
+import {
+  autoPlanGradient,
+  isHiddenFromCabinetCatalog,
+  resolvePlanCardText,
+} from './plan-card-style-utils'
 import { buildTextureCss } from './app-texture'
 import { AppBackgroundBuiltin } from './app-background-builtin'
 import { resolveAppBackgroundReadability } from './app-background-contrast'
@@ -1242,18 +1248,38 @@ export function BrandingPreview({ values, focus }: BrandingPreviewProps) {
           {/* Context-aware body: tariff cards on the planCards tab, else the
               dashboard mock (subscription card + actions + nav). */}
           {focus === 'planCards' ? (
+            /* EVERY plan, unfiltered — and that is the decision, not an
+               oversight waiting for a one-line `.filter()`.
+
+               The cabinet's catalogue shows a strict subset of this list (see
+               `isHiddenFromCabinetCatalog`), so filtering to match it is the
+               obvious "make the preview honest" change. It is the wrong one.
+               This list is what the operator STYLES, and the settings section
+               beside it deliberately offers every plan including archived ones
+               — that is a decision with its own guard,
+               `plan-card-styles-archived.test.tsx`. Hiding a plan here would
+               leave a row in that section whose result cannot be seen, which is
+               the defect this preview was just fixed for, reintroduced from the
+               other end.
+
+               The honest answer is to show every card and MARK the ones no
+               subscriber reaches, which is what `TariffPreviewCard` does. If
+               you are here to add the filter: the marker is the feature. */
             <TariffListPreview
-              plans={(plans ?? []).slice(0, 3)}
+              plans={plans ?? []}
               planCardStyles={planCardStyles}
               primary={primary}
               primaryFg={primaryFg}
               foundation={bgSecondary}
+              surfaceTheme={surfaceTheme}
               subscriptionCardText={subscriptionCardText}
               cardLogo={cardLogo}
               cardLogoUrl={cardLogoUrl}
               radius={radius}
               unlimitedLabel={t('brandingPage.sections.planCards.unlimited')}
               emptyLabel={t('brandingPage.sections.planCards.empty')}
+              catalogHiddenLabel={t('brandingPage.sections.planCards.catalogHidden')}
+              catalogHiddenHint={t('brandingPage.sections.planCards.catalogHiddenHint')}
             />
           ) : (
             <>
@@ -1388,10 +1414,27 @@ export function BrandingPreview({ values, focus }: BrandingPreviewProps) {
 }
 
 /**
- * Context-aware tariff preview shown on the "Тарифные карточки" tab. Renders up
- * to three plans as cabinet-style cards (gradient + texture + accent + clean
- * icon) using the SAME resolution rules as the reiwa `/plans` page, so the
- * operator sees per-plan edits live in the phone frame.
+ * Context-aware tariff preview shown on the "Тарифные карточки" tab. Renders
+ * EVERY plan as a cabinet-style card (gradient + texture + accent + clean icon)
+ * using the SAME resolution rules as the reiwa `/plans` page, so the operator
+ * sees per-plan edits live in the phone frame.
+ *
+ * ── why this scrolls, and why it used to show three ─────────────────────────
+ * This component was introduced rendering `plans.slice(0, 3)`. Nothing about
+ * the cabinet justified the three: `/plans` is a plain vertical list with no
+ * cap and no pagination (`reiwa/web/src/features/plans/plans-page.tsx`), so the
+ * fourth plan onward was invisible to the operator and perfectly visible to the
+ * subscriber. Worse, the cut was POSITIONAL, which made it look like a rule
+ * about the cards themselves — an operator who had styled the top three read it
+ * as "only configured plans preview", when a plan on an auto gradient is
+ * exactly the case that most needs looking at, because the subscriber sees that
+ * auto gradient too.
+ *
+ * So the list is the whole catalogue and it scrolls inside the phone frame,
+ * which is the interaction the subscriber has. What the operator is scrolling
+ * through is also honest about motion: the animated cards are rationed against
+ * the same six-context ceiling the cabinet rations against, so a card that
+ * would sit still on a phone sits still here. See `card-effect-preview-budget`.
  */
 interface TariffListPreviewProps {
   readonly plans: ReadonlyArray<Plan>
@@ -1407,6 +1450,10 @@ interface TariffListPreviewProps {
   readonly radius: string
   readonly unlimitedLabel: string
   readonly emptyLabel: string
+  /** Chrome the marker is drawn from — never the card's own artwork. */
+  readonly surfaceTheme: BrandingSurfaceThemeDraft
+  readonly catalogHiddenLabel: string
+  readonly catalogHiddenHint: string
 }
 
 function TariffListPreview({
@@ -1415,12 +1462,15 @@ function TariffListPreview({
   primary,
   primaryFg,
   foundation,
+  surfaceTheme,
   subscriptionCardText,
   cardLogo,
   cardLogoUrl,
   radius,
   unlimitedLabel,
   emptyLabel,
+  catalogHiddenLabel,
+  catalogHiddenHint,
 }: TariffListPreviewProps) {
   if (plans.length === 0) {
     return (
@@ -1431,7 +1481,14 @@ function TariffListPreview({
     )
   }
   return (
-    <div className="mt-2 space-y-2.5">
+    // `min-h-0` is load-bearing next to `flex-1`: without it a flex child sizes
+    // to its content instead of to the space left in the phone frame, so the
+    // list would grow past the frame and never scroll.
+    <div
+      data-preview-tariff-list
+      data-preview-tariff-count={plans.length}
+      className="mt-2 min-h-0 flex-1 space-y-2.5 overflow-y-auto overscroll-contain pb-3"
+    >
       {plans.map((plan) => (
         <TariffPreviewCard
           key={plan.id}
@@ -1445,6 +1502,10 @@ function TariffListPreview({
           cardLogoUrl={cardLogoUrl}
           radius={radius}
           unlimitedLabel={unlimitedLabel}
+          surfaceTheme={surfaceTheme}
+          hiddenFromCatalog={isHiddenFromCabinetCatalog(plan)}
+          catalogHiddenLabel={catalogHiddenLabel}
+          catalogHiddenHint={catalogHiddenHint}
         />
       ))}
     </div>
@@ -1462,6 +1523,10 @@ function TariffPreviewCard({
   cardLogoUrl,
   radius,
   unlimitedLabel,
+  surfaceTheme,
+  hiddenFromCatalog,
+  catalogHiddenLabel,
+  catalogHiddenHint,
 }: {
   readonly plan: Plan
   readonly style: PlanCardStyleDraft | undefined
@@ -1473,6 +1538,10 @@ function TariffPreviewCard({
   readonly cardLogoUrl?: string | null
   readonly radius: string
   readonly unlimitedLabel: string
+  readonly surfaceTheme: BrandingSurfaceThemeDraft
+  readonly hiddenFromCatalog: boolean
+  readonly catalogHiddenLabel: string
+  readonly catalogHiddenHint: string
 }) {
   const gradient = style?.gradient && style.gradient.length > 0 ? style.gradient : autoPlanGradient(plan.id)
   const accent = style?.accent && style.accent.length > 0 ? style.accent : primary
@@ -1516,6 +1585,26 @@ function TariffPreviewCard({
    * effect layer is not mounted (the condition above renders it identically).
    */
   const drawsOverlay = isPreviewCardEffect(effect) && !textureUrl
+  /**
+   * This card's claim on the shared GPU-context budget.
+   *
+   * The tariff list is a LIST, not the swipeable subscription strip above it:
+   * several cards are on screen at once and every WebGL effect is its own
+   * context. Before the list scrolled, three cards was its own ceiling; now the
+   * ceiling has to be stated. The slot mirrors the cabinet's `useCardEffectSlot`
+   * exactly — same six, same `threshold: 0.01`, same first-come-first-served
+   * with no revocation — so the set of cards that animate here is the set that
+   * animates there.
+   *
+   * Note what is NOT rationed by this, deliberately: `contrast` above is
+   * computed from `drawsOverlay`, i.e. from the effect the operator CONFIGURED,
+   * not from whether this card won a slot. The cabinet does the same
+   * (`resolvePlanCardStyle` runs before its slot is asked), and it is the right
+   * way round — the operator is choosing a text colour for the card's designed
+   * appearance, and that choice must not flicker as cards scroll in and out.
+   */
+  const { attach: attachEffectSlot, active: effectActive } =
+    usePreviewCardEffectSlot(drawsOverlay ? effect : 'NONE')
   const contrast = useMemo(
     () =>
       resolvePreviewCardContrast(
@@ -1540,60 +1629,116 @@ function TariffPreviewCard({
   )
 
   return (
-    <div
-      data-preview-tariff-card
-      data-preview-tariff-card-foreground={contrast.foreground}
-      className="relative overflow-hidden p-3 ring-1 ring-white/10"
-      style={{ borderRadius: radius, backgroundImage: gradient, color: contrast.foreground }}
-    >
-      {isPreviewCardEffect(effect) && !textureUrl && (
-        <CardEffectPreviewLayer
-          effect={effect}
-          props={effectProps}
-          opacity={effectOpacity}
-        />
-      )}
-      {textureUrl ? (
-        <div
-          className="absolute inset-0 opacity-25"
-          style={{ backgroundImage: `url("${textureUrl}")`, backgroundSize: 'cover', backgroundPosition: 'center' }}
-        />
-      ) : textureCss ? (
+    <div data-preview-tariff-item>
+      <div
+        ref={attachEffectSlot}
+        data-preview-tariff-card
+        data-preview-tariff-card-foreground={contrast.foreground}
+        data-preview-tariff-card-animated={
+          drawsOverlay ? (effectActive === false ? 'false' : 'true') : undefined
+        }
+        className="relative overflow-hidden p-3 ring-1 ring-white/10"
+        style={{ borderRadius: radius, backgroundImage: gradient, color: contrast.foreground }}
+      >
+        {drawsOverlay && (
+          <CardEffectPreviewLayer
+            effect={effect}
+            props={effectProps}
+            opacity={effectOpacity}
+            active={effectActive}
+          />
+        )}
+        {textureUrl ? (
+          <div
+            className="absolute inset-0 opacity-25"
+            style={{ backgroundImage: `url("${textureUrl}")`, backgroundSize: 'cover', backgroundPosition: 'center' }}
+          />
+        ) : textureCss ? (
+          <div
+            className="absolute inset-0"
+            style={{ backgroundImage: textureCss.backgroundImage, backgroundSize: textureCss.backgroundSize }}
+          />
+        ) : null}
+        {/* Same diagonal veil at the same two opacities as before; only its TONE
+            now follows the contrast result. On every card that resolves to light
+            copy the channels are `0 0 0` and this is byte-identical to the
+            `from-black/30 … to-black/55` classes it replaces — but a card the
+            operator switched to dark text used to get dark copy over a black
+            veil, which is the one combination nobody can read. */}
         <div
           className="absolute inset-0"
-          style={{ backgroundImage: textureCss.backgroundImage, backgroundSize: textureCss.backgroundSize }}
+          style={{
+            backgroundImage: `linear-gradient(to bottom right, rgb(${contrast.veilChannels} / 0.3) 0%, transparent 50%, rgb(${contrast.veilChannels} / 0.55) 100%)`,
+          }}
         />
-      ) : null}
-      {/* Same diagonal veil at the same two opacities as before; only its TONE
-          now follows the contrast result. On every card that resolves to light
-          copy the channels are `0 0 0` and this is byte-identical to the
-          `from-black/30 … to-black/55` classes it replaces — but a card the
-          operator switched to dark text used to get dark copy over a black
-          veil, which is the one combination nobody can read. */}
-      <div
-        className="absolute inset-0"
-        style={{
-          backgroundImage: `linear-gradient(to bottom right, rgb(${contrast.veilChannels} / 0.3) 0%, transparent 50%, rgb(${contrast.veilChannels} / 0.55) 100%)`,
-        }}
-      />
-      <CardLogoMark
-        preset={cardLogo}
-        customUrl={cardLogoUrl}
-        className="pointer-events-none absolute -right-3 -bottom-4 h-20 w-20"
-        style={{ color: contrast.foreground, opacity: 0.12 }}
-      />
-      <div className="relative flex items-center gap-2.5">
-        <span className="shrink-0 leading-none drop-shadow" style={{ color: accent }}>
-          <PlanIconView value={plan.icon} className="h-5 w-5 text-xl" />
-        </span>
-        <div className="min-w-0 flex-1">
-          <p className="truncate text-[12px] font-semibold drop-shadow">{plan.name}</p>
-          <p className="text-[9px] font-medium opacity-80">
-            {plan.trafficLimit > 0 ? `${plan.trafficLimit} GB` : unlimitedLabel}
-            {plan.deviceLimit > 0 ? ` · ${plan.deviceLimit}` : ''}
-          </p>
+        <CardLogoMark
+          preset={cardLogo}
+          customUrl={cardLogoUrl}
+          className="pointer-events-none absolute -right-3 -bottom-4 h-20 w-20"
+          style={{ color: contrast.foreground, opacity: 0.12 }}
+        />
+        <div className="relative flex items-center gap-2.5">
+          <span className="shrink-0 leading-none drop-shadow" style={{ color: accent }}>
+            <PlanIconView value={plan.icon} className="h-5 w-5 text-xl" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-[12px] font-semibold drop-shadow">{plan.name}</p>
+            <p className="text-[9px] font-medium opacity-80">
+              {plan.trafficLimit > 0 ? `${plan.trafficLimit} GB` : unlimitedLabel}
+              {plan.deviceLimit > 0 ? ` · ${plan.deviceLimit}` : ''}
+            </p>
+          </div>
         </div>
       </div>
+      {/* The "no subscriber reaches this" marker.
+       *
+       * OUTSIDE the card element, deliberately. The card above is the artwork
+       * the operator is judging, and every honest-looking alternative — a tint,
+       * a reduced opacity, a badge drawn into the corner — changes the thing
+       * being previewed, so the operator would be styling against a card the
+       * subscriber never gets. This annotates; it does not participate.
+       *
+       * ── why it grounds itself instead of trusting the app background ───────
+       * The obvious colour source is `resolveAppBackgroundReadability`, which is
+       * what keeps the preview's other chrome legible over the operator's
+       * background. It cannot serve here: it returns `null` outright for
+       * `kind === 'none' | 'plain' | 'effect'`, so it offers no guarantee in
+       * exactly the case that worries most — an animated shader in an arbitrary
+       * colour, which is the one background this label can end up sitting on top
+       * of. Relying on it would mean an unreadable marker precisely where the
+       * background is busiest.
+       *
+       * So the chip supplies its own ground, from the pair the surface theme
+       * exists to guarantee: `surfaceHigh` behind `foreground`, at the
+       * operator's own opacity and blur. That is the same construction the
+       * floating nav pill and the action buttons in this preview already use,
+       * and it is legible over a gradient, a texture and a shader alike because
+       * what is behind it stops deciding.
+       */}
+      {hiddenFromCatalog && (
+        <div className="mt-1 flex justify-end">
+          <span
+            data-preview-tariff-card-catalog-hidden
+            title={catalogHiddenHint}
+            className="inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[8px] font-medium leading-none"
+            style={{
+              color: surfaceTheme.foreground,
+              backgroundColor: toRgba(
+                surfaceTheme.surfaceHigh,
+                surfaceTheme.surfaceHighOpacity,
+              ),
+              borderColor: toRgba(
+                surfaceTheme.borderStrong,
+                surfaceTheme.borderStrongOpacity,
+              ),
+              backdropFilter: `blur(${surfaceTheme.glassBlurPx}px)`,
+            }}
+          >
+            <EyeOff className="h-2.5 w-2.5 shrink-0" aria-hidden="true" />
+            {catalogHiddenLabel}
+          </span>
+        </div>
+      )}
     </div>
   )
 }

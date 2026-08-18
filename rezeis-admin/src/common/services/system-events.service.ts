@@ -24,6 +24,8 @@
  * rezeis-admin has no bot — the admin panel shows events in real-time.
  */
 
+import { createHash } from 'node:crypto';
+
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigType } from '@nestjs/config';
 import { HttpService } from '@nestjs/axios';
@@ -48,6 +50,9 @@ import {
 } from './error-report.util';
 import { resolveErrorReportsDir, writeErrorReport } from './error-report-archive.util';
 import { BotNotifierClient } from '../../modules/notifications/services/bot-notifier.client';
+import { ReiwaRelayQueueService } from '../../modules/notifications/services/reiwa-relay-queue.service';
+import type { ReiwaRelayEvent } from '../../modules/notifications/reiwa-relay.constants';
+import { isRelayLoopGuardedEvent } from '../../modules/notifications/reiwa-relay.policy';
 
 // ── Event Types ─────────────────────────────────────────────────────────────
 
@@ -282,9 +287,29 @@ export const EVENT_TYPES = {
   CLIENT_ERROR: 'client.error',
   /** Runtime error forwarded from the reiwa bot over the internal channel. */
   REIWA_ERROR: 'reiwa.error',
+  /**
+   * A signed webhook to reiwa did not deliver and nothing further is coming —
+   * the queue exhausted its attempts, or the failure was never transient.
+   * Until this existed the only record was a `logger.warn` in an in-memory
+   * ring buffer, so a cabinet that stopped accepting relays was invisible.
+   */
+  REIWA_RELAY_UNDELIVERED: 'reiwa.relay_undelivered',
   /** Broadcast fan-out began; `system.broadcast_sent` is the terminal one. */
   BROADCAST_STARTED: 'broadcast.started',
   BROADCAST_BATCH_COMPLETED: 'broadcast.batch_completed',
+  /**
+   * The operator asked for a one-shot copy of a broadcast in a Telegram
+   * channel and it never entered durable delivery — the relay is not
+   * configured, or the queue refused the job.
+   *
+   * Its own type rather than `system.broadcast_sent`, which it used to borrow.
+   * That type's card reads 📢 «Рассылка отправлена», so the operator got a
+   * headline claiming a send above a body saying a send did not happen — and
+   * every rule, filter and tick-box watching for "broadcast sent" fired in the
+   * middle of staging, on a failure. A warning has to be able to say so in its
+   * own name.
+   */
+  BROADCAST_CHANNEL_POST_UNDELIVERED: 'broadcast.channel_post_undelivered',
   IMPORT_COMPLETED: 'import.completed',
   IMPORT_FAILED: 'import.failed',
   IMPORT_PLAN_ASSIGNED: 'import.plan_assigned',
@@ -370,6 +395,14 @@ export class SystemEventsService {
    */
   private botNotifier: BotNotifierClient | null = null;
   private botNotifierResolved = false;
+
+  /**
+   * Lazily-resolved durable relay producer — same `ModuleRef` escape hatch.
+   * `null` in runtimes where `ReiwaRelayModule` is not registered, in which
+   * case delivery falls back to the direct single-attempt client.
+   */
+  private relayQueue: ReiwaRelayQueueService | null = null;
+  private relayQueueResolved = false;
 
   public constructor(
     private readonly prismaService: PrismaService,
@@ -864,6 +897,51 @@ export class SystemEventsService {
     return this.botNotifier;
   }
 
+  /** Same lazy `ModuleRef` lookup for the durable relay queue producer. */
+  private resolveRelayQueue(): ReiwaRelayQueueService | null {
+    if (this.relayQueueResolved) return this.relayQueue;
+    this.relayQueueResolved = true;
+    try {
+      this.relayQueue = this.moduleRef?.get(ReiwaRelayQueueService, { strict: false }) ?? null;
+    } catch {
+      this.relayQueue = null;
+    }
+    return this.relayQueue;
+  }
+
+  /**
+   * Hand one relay event to the durable queue — except for the one system
+   * event that must never enter it.
+   *
+   * `emit()` fans every event out to Telegram, and the relay processor reports
+   * an exhausted job by emitting a system event. Queue that and the failure
+   * feeds itself for as long as the cabinet is down: exhausted job -> alert ->
+   * new relay job -> exhausted -> alert. So `reiwa.relay_undelivered` keeps
+   * the delivery model relays used to have — one direct attempt, outcome
+   * logged — which terminates the chain after a single hop. It loses nothing:
+   * that event is already in `AdminAuditLog` and on the realtime socket before
+   * Telegram is tried at all. See `isRelayLoopGuardedEvent`.
+   */
+  private async relaySystemEvent(
+    systemEventType: string,
+    relayEvent: ReiwaRelayEvent,
+    metadata: Record<string, unknown>,
+  ): Promise<void> {
+    const queue = this.resolveRelayQueue();
+    if (queue !== null && !isRelayLoopGuardedEvent(systemEventType)) {
+      await queue.enqueue(relayEvent, metadata);
+      return;
+    }
+    const notifier = this.resolveBotNotifier();
+    if (notifier === null) return;
+    const outcome = await notifier.deliverRelayEvent(relayEvent, metadata);
+    if (outcome.status !== 'confirmed' && outcome.status !== 'unconfirmed') {
+      this.logger.warn(
+        `Direct relay ${relayEvent} for ${systemEventType} did not deliver: ${outcome.status}`,
+      );
+    }
+  }
+
   /**
    * Automatic dev-fallback: deliver the event card to the reiwa bot's
    * `BOT_DEV_ID` over the internal channel. Best-effort and a no-op when the
@@ -878,8 +956,6 @@ export class SystemEventsService {
       readonly reportEvent: ErrorReportEvent;
     },
   ): Promise<void> {
-    const notifier = this.resolveBotNotifier();
-    if (notifier === null) return;
     const html = opts.errorEvent
       ? formatErrorEventCardHtml(opts.reportEvent, getRezeisBuildInfo(), opts.attachTxt)
       : this.formatTelegramMessage(event);
@@ -890,7 +966,8 @@ export class SystemEventsService {
         // its caption, and a Close button (attached bot-side). The stack
         // trace + raw payload live in the attached .txt, one tap away.
         const txt = formatErrorReportTxt(opts.reportEvent, getRezeisBuildInfo());
-        await notifier.notifyDevDocument({
+        await this.relaySystemEvent(event.type, 'reiwa.dev.notify.document', {
+          eventId: buildDevRelayEventId(event, 'dev-document'),
           filename: buildErrorReportFilename(opts.reportEvent),
           content: txt,
           caption: html,
@@ -898,7 +975,11 @@ export class SystemEventsService {
         });
       } else {
         // Non-error events (or txt attachment disabled): inline card only.
-        await notifier.notifyDev({ text: html, parseMode: 'HTML' });
+        await this.relaySystemEvent(event.type, 'reiwa.dev.notify', {
+          eventId: buildDevRelayEventId(event, 'dev'),
+          text: html,
+          parseMode: 'HTML',
+        });
       }
     } catch (err) {
       this.logger.warn(`Dev-fallback notify failed: ${(err as Error).message}`);
@@ -920,8 +1001,7 @@ export class SystemEventsService {
       readonly reportEvent: ErrorReportEvent;
     },
   ): Promise<void> {
-    const notifier = this.resolveBotNotifier();
-    if (notifier === null) {
+    if (this.resolveRelayQueue() === null && this.resolveBotNotifier() === null) {
       this.logger.warn(
         `Telegram delivery skipped for ${event.type}: no local bot token and reiwa relay unavailable`,
       );
@@ -929,8 +1009,43 @@ export class SystemEventsService {
     }
     try {
       if (opts.attachTxt) {
-        await notifier.notifyBroadcastDocument({
-          eventId: `sysevt:${event.type}:${event.timestamp}:error-report`,
+        // `eventId` is built from the event's own emit timestamp, not the send
+        // time, so every retry of this job carries the same key and the bot's
+        // idempotency cache collapses the duplicates.
+        //
+        // Both parts are clipped for the same reason `buildDevRelayEventId`
+        // clips them: the cabinet validates this field with a REQUIRED
+        // `.max(128)` and no soft fallback (unlike the dev routes, which use
+        // `.catch(undefined)`). An over-long key is a 400, the relay reads a
+        // 4xx as non-transient, `ReiwaRelayProcessor` throws
+        // `UnrecoverableError` — so the operator card is LOST OUTRIGHT rather
+        // than merely undeduplicated, and `reiwa.relay_undelivered` fires in
+        // its place. `type` is not a closed set: `ReceiveSystemEventDto`
+        // accepts 200 characters and automation rules mint types at runtime,
+        // so `7 + 200 + 1 + 24` overflows 128 with room to spare.
+        //
+        // CLIPPED UNCONDITIONALLY, not only when the key would overflow. The
+        // conditional form is tempting because it preserves every key that
+        // works today — the budget is 83 characters, so types of 49..83 do
+        // currently produce a valid key and this DOES change theirs. Two
+        // reasons it is still the wrong trade:
+        //
+        //   1. A length-conditional branch puts a SECOND key shape in
+        //      production and reaches it only on the rare long input — the
+        //      branch nobody exercises until the day it matters. That failure
+        //      shape has shipped here repeatedly; a single always-taken path
+        //      is worth more than the keys it renames.
+        //   2. Renaming those keys costs nothing. The key is frozen into the
+        //      BullMQ payload at enqueue and replayed verbatim on every
+        //      attempt, so a job already queued when this deploys keeps
+        //      deduping against itself. Only events emitted AFTER the deploy
+        //      get the new shape, and those have nothing to collide with.
+        //
+        // 48/32 keeps the worst case at 103 characters including the
+        // `:error-report` suffix, and matches `buildDevRelayEventId` so this
+        // file has one rule rather than two.
+        await this.relaySystemEvent(event.type, 'reiwa.channel.broadcast.document', {
+          eventId: `sysevt:${clip(event.type, 48)}:${clip(event.timestamp, 32)}:error-report`,
           chatId: opts.chatId,
           topicThreadId: opts.topicId ?? undefined,
           filename: buildErrorReportFilename(opts.reportEvent),
@@ -939,8 +1054,9 @@ export class SystemEventsService {
           parseMode: 'HTML',
         });
       } else {
-        await notifier.notifyBroadcast({
-          eventId: `sysevt:${event.type}:${event.timestamp}`,
+        // Clipped for the reason spelt out on the document branch above.
+        await this.relaySystemEvent(event.type, 'reiwa.channel.broadcast', {
+          eventId: `sysevt:${clip(event.type, 48)}:${clip(event.timestamp, 32)}`,
           chatId: opts.chatId,
           topicThreadId: opts.topicId ?? undefined,
           text: opts.html,
@@ -1568,6 +1684,72 @@ function clip(value: string, max: number): string {
   return value.length > max ? `${value.slice(0, max)}…` : value;
 }
 
+/**
+ * The dedup key for the two dev-fallback relays
+ * ═════════════════════════════════════════════
+ * `reiwa.dev.notify` / `reiwa.dev.notify.document` are `durable`: the queue
+ * gives them four attempts because the dev firehose going quiet during an
+ * incident is the worst outcome on the list. Retrying an unconfirmed delivery
+ * is only safe if the far end can recognise the replay, and the cabinet can —
+ * `claimDevEvent(scope, eventId)` in `bot/listeners/internal-http-listener.ts`,
+ * scoped per endpoint. It just had nothing to key on, because the panel sent
+ * no key. This mints one.
+ *
+ * Two properties matter, and they pull in opposite directions.
+ *
+ * MINTED ONCE, IDENTICAL ON EVERY ATTEMPT. This runs at the producer, before
+ * `ReiwaRelayQueueService.enqueue`, so the value is frozen into the BullMQ job
+ * payload and every retry replays that same payload byte for byte. Nothing in
+ * the key reads the clock at SEND time: the timestamp is `event.timestamp`,
+ * stamped once by `emit()`. Compute it per attempt instead — the obvious
+ * shortcut of `new Date().toISOString()` right here — and every retry would
+ * arrive under a fresh key, the cabinet would claim each one as new, and the
+ * protection would be decoration.
+ *
+ * DISTINCT EVENTS MUST NOT COLLIDE. `sysevt:${type}:${timestamp}`, the shape
+ * the operator-channel relays next door use, is not enough here. Its whole
+ * discriminator is an ISO millisecond, and the firehose's characteristic
+ * traffic is a burst of same-type ERROR events from one failing loop — which
+ * really can land inside one millisecond. A collision is not a harmless
+ * duplicate: `enqueue` derives the BullMQ `jobId` from this key, so the second
+ * card would never even be queued, and the bot would swallow it too. The
+ * digest closes that: it covers everything that makes the event itself, so two
+ * different cards in the same millisecond get different keys, while a genuinely
+ * identical card collapses — which is the behaviour you want anyway.
+ *
+ * Length is bounded ON PURPOSE. The cabinet parses this with
+ * `z.string().trim().min(1).max(128)` and `.catch(undefined)`, so an over-long
+ * key does not fail loudly — it is silently dropped and the event degrades to
+ * exactly the undeduped state this function exists to end. `event.type` is
+ * caller-supplied (automation rules and the reiwa ingest both mint types at
+ * runtime), so it is clipped; the digest still covers it in full. Worst case:
+ * 7 + 49 + 1 + 33 + 1 + 12 + 1 + 16 = 120 characters.
+ */
+function buildDevRelayEventId(
+  event: SystemEventPayload & { timestamp: string },
+  route: 'dev' | 'dev-document',
+): string {
+  let payload: string;
+  try {
+    payload = JSON.stringify(event.metadata ?? {}) ?? '';
+  } catch {
+    // A cyclic or BigInt-bearing payload. Falling back to no payload in the
+    // digest weakens the discriminator to type+timestamp+card-kind for that
+    // one event; throwing here would take down a delivery to protect a key.
+    payload = '';
+  }
+  const digest = createHash('sha256')
+    .update(
+      [route, event.type, event.timestamp, event.severity, event.category, event.message, payload]
+        // NUL cannot occur in any of these, so no combination of field values
+        // can be reassembled into a different one with the same joined string.
+        .join('\u0000'),
+    )
+    .digest('hex')
+    .slice(0, 16);
+  return `sysevt:${clip(event.type, 48)}:${clip(event.timestamp, 32)}:${route}-${digest}`;
+}
+
 function severityEmoji(severity: SystemEventSeverity): string {
   switch (severity) {
     case 'ERROR':
@@ -1777,6 +1959,7 @@ export const EVENT_PRESENTATION: Record<string, { emoji: string; title: string }
   'system.error': { emoji: '🚨', title: 'Системная ошибка' },
   'broadcast.started': { emoji: '📣', title: 'Рассылка запущена' },
   'broadcast.batch_completed': { emoji: '📬', title: 'Партия рассылки отправлена' },
+  'broadcast.channel_post_undelivered': { emoji: '📭', title: 'Пост в канал не доставлен' },
   'import.completed': { emoji: '📥', title: 'Импорт завершён' },
   'import.plan_assigned': { emoji: '🏷', title: 'Массовое назначение плана' },
   'import.sync_enqueued': { emoji: '🔄', title: 'Синхронизация после импорта поставлена в очередь' },
@@ -1794,6 +1977,7 @@ export const EVENT_PRESENTATION: Record<string, { emoji: string; title: string }
   'import.failed': { emoji: '🚨', title: 'Импорт не удался' },
   'client.error': { emoji: '🖥', title: 'Ошибка в админ-панели' },
   'reiwa.error': { emoji: '🚨', title: 'Ошибка в reiwa' },
+  'reiwa.relay_undelivered': { emoji: '📡', title: 'Вебхук в reiwa не доставлен' },
   'system.remnawave_sync': { emoji: '🔄', title: 'Синхронизация с Remnawave' },
   'settings.email.updated': { emoji: '⚙️', title: 'Обновлены настройки почты' },
   'notification.template.created': { emoji: '📝', title: 'Создан шаблон уведомления' },

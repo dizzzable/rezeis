@@ -113,11 +113,10 @@ export class InternalUserRealtimeController {
       timestamp: new Date().toISOString(),
     });
 
-    const unsubscribe = this.userRealtimeService.subscribe({
-      userId,
-      telegramId,
-      handler: send,
-    });
+    // Declared before `subscribe()` because the per-user cap evicts
+    // synchronously inside it, and an evicted stream's `onEvict` has to be able
+    // to reach its own heartbeat and unsubscribe closure.
+    let unsubscribe: () => void = () => undefined;
 
     const heartbeat = setInterval(() => {
       if (closed || response.writableEnded) return;
@@ -134,6 +133,43 @@ export class InternalUserRealtimeController {
       clearInterval(heartbeat);
       unsubscribe();
     };
+
+    /**
+     * The cap dropped this stream. Ending the response is the entire point:
+     * without it the heartbeat keeps writing every 25s to a stream that will
+     * never carry another event, the subscriber's `EventSource` stays OPEN, and
+     * the cabinet's idle watchdog stays rearmed by those very keepalives — so
+     * nothing on either side ever notices. Ending it makes the client's
+     * `onerror` fire and its `retry:` backoff take over.
+     *
+     * The farewell frame is sent BEFORE `cleanup()` flips `closed`, and lets a
+     * client tell a deliberate server-side close from a dropped connection.
+     */
+    const evict = (): void => {
+      send({
+        type: 'realtime.evicted',
+        category: 'NOTIFICATION',
+        severity: 'INFO',
+        message: 'Stream closed: too many concurrent streams for this user',
+        metadata: {},
+        timestamp: new Date().toISOString(),
+      });
+      cleanup();
+      if (!response.writableEnded) {
+        try {
+          response.end();
+        } catch {
+          /* socket already gone */
+        }
+      }
+    };
+
+    unsubscribe = this.userRealtimeService.subscribe({
+      userId,
+      telegramId,
+      handler: send,
+      onEvict: evict,
+    });
 
     request.on('close', cleanup);
     response.on('close', cleanup);

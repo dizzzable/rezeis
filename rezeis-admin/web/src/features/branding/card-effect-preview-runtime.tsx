@@ -135,10 +135,28 @@ export function CardEffectPreviewLayer({
   effect,
   props,
   opacity,
+  active,
 }: {
   readonly effect: string
   readonly props: Readonly<Record<string, unknown>>
   readonly opacity: number
+  /**
+   * Whether this layer is allowed to hold a live GPU context right now.
+   *
+   * `undefined` means "not rationed" and is the behaviour every caller had
+   * before the tariff list started scrolling: mount whenever the effect is
+   * valid. The phone frame's app background keeps it — it is one layer, it is
+   * always on screen, and the budget's arithmetic already counts it.
+   *
+   * `false` means a rationed card was refused a slot or has scrolled out of
+   * view. Nothing is drawn: no renderer, no CSS artwork, and — the part that is
+   * easy to miss — no capability probe either, because the probe opens a real
+   * `webgl2` context of its own and a refused card that still probes spends the
+   * context it was just refused. What the card shows instead is its gradient
+   * alone, which is the `NONE` appearance the cabinet falls back to for exactly
+   * the same reason. See `card-effect-preview-budget.ts`.
+   */
+  readonly active?: boolean
 }) {
   const rootRef = useRef<HTMLDivElement>(null)
   const [capabilitySnapshot, setCapabilitySnapshot] = useState<{
@@ -182,6 +200,12 @@ export function CardEffectPreviewLayer({
   // no effect layer and therefore cannot flash a foreign colour.
   useEffect(() => {
     if (typeof window === 'undefined') return undefined
+    // A refused or off-screen card must not probe. `detectCapabilities` opens a
+    // real `webgl2` context and WebKit frees it asynchronously, so probing is
+    // itself a claim on the pool the budget is rationing — a twenty-card list
+    // whose cards all probed at first paint would exhaust the process limit
+    // without a single renderer having mounted.
+    if (active === false) return undefined
     const frame = window.requestAnimationFrame(() => {
       setCapabilitySnapshot({
         scope: effect,
@@ -194,7 +218,7 @@ export function CardEffectPreviewLayer({
       })
     })
     return () => window.cancelAnimationFrame(frame)
-  }, [effect, valid])
+  }, [active, effect, valid])
 
   const capabilities = capabilitySnapshot?.scope === effect
     ? capabilitySnapshot.capabilities
@@ -248,7 +272,11 @@ export function CardEffectPreviewLayer({
     )
   }, [effect, rendererCommitted, requestRendererRebuild, scope])
 
-  if (!valid || runtime === null) return null
+  // A rationed card that holds no slot draws nothing at all — not even the CSS
+  // artwork. The cabinet's refused card keeps its gradient (its layer reveals to
+  // opacity 0), and a preview that painted a stand-in here would show the
+  // operator movement on a card the subscriber sees static.
+  if (!valid || runtime === null || active === false) return null
 
   return (
     <div

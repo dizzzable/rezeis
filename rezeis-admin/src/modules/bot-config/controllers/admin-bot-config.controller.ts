@@ -225,7 +225,7 @@ export class AdminBotConfigController {
       '`{ ok: false }` when reiwa-bot is unreachable / misconfigured.',
   })
   public async refreshBot(): Promise<{ readonly ok: boolean }> {
-    const ok = await this.cacheInvalidator.invalidate('admin-manual');
+    const ok = await this.cacheInvalidator.invalidateNow('admin-manual');
     return { ok };
   }
 

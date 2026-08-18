@@ -529,9 +529,12 @@ describe('vendored resolver against the recorded cabinet answers', () => {
       expect(result?.veilOpacity ?? null).toBe(row.cabinet)
       if (row.cabinet !== null) {
         expect(result?.veilRgb).toBe('0 0 0')
-        expect(result?.overlayBackground).toContain(
-          `rgb(0 0 0 / ${row.cabinet}) 40%`,
-        )
+        // A flat colour, not a gradient: the veil carries ONE opacity from the
+        // top of the shell to the bottom. It used to end with
+        // `veilOpacity + 0.12` at 0% and 100%, and that bottom ramp painted a
+        // full-bleed band across the bottom 16% of the viewport — behind and
+        // around the cabinet's floating bottom-nav pill.
+        expect(result?.overlayBackground).toBe(`rgb(0 0 0 / ${row.cabinet})`)
       }
     },
   )
@@ -548,7 +551,9 @@ describe('the preview renders the cabinet answer, not one of its own', () => {
       if (row.cabinet !== null) {
         expect(rendered.veil).toBe('dark')
         // jsdom re-serialises `rgb(r g b / a)` into the legacy comma form.
-        expect(rendered.style).toContain(`rgba(0, 0, 0, ${row.cabinet}) 40%`)
+        expect(rendered.style).toContain(`rgba(0, 0, 0, ${row.cabinet})`)
+        // …and nothing position-dependent, per the flat veil above.
+        expect(rendered.style).not.toMatch(/\d+%/)
       }
     },
   )

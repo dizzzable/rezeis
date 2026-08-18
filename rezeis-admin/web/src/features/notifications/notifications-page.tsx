@@ -178,9 +178,10 @@ const EVENT_TYPE_CATALOG: Readonly<Record<string, readonly string[]>> = {
     'system.remnawave_sync', 'settings.email.updated', 'notification.template.created',
     'notification.template.updated', 'notification.template.deleted', 'notification.template.seeded',
     'system.restore_completed', 'system.bulk_users_executed',
-    'broadcast.started', 'broadcast.batch_completed',
+    'broadcast.started', 'broadcast.batch_completed', 'broadcast.channel_post_undelivered',
     'import.completed', 'import.failed', 'import.plan_assigned', 'import.sync_enqueued',
     'automation.telegram_notify', 'automation.custom', 'client.error', 'reiwa.error',
+    'reiwa.relay_undelivered',
   ],
 }
 

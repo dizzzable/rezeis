@@ -21,8 +21,8 @@ import { BotNotifierClient } from '../src/modules/notifications/services/bot-not
  * `backup.deliver-telegram` is queued with `attempts: 3` and an exponential
  * backoff. BullMQ retries only a processor that THROWS, and this one returned
  * `{ delivered: false }` for every failure — so the retry configuration had
- * never fired for a delivery failure in its life. A four-second timeout or a
- * passing 502 left the backup local-only for good.
+ * never fired for a delivery failure in its life. A transport that gave up or
+ * a passing 502 left the backup local-only for good.
  *
  * These tests drive the REAL processor over the REAL service over the REAL
  * `BotNotifierClient`, stubbing only `fetch`, and step the attempt loop the way
@@ -75,23 +75,27 @@ const UNCONFIRMED_200: FetchStub = async () => ({
 const TRANSPORT_ERROR: FetchStub = async () => {
   throw new Error('ECONNREFUSED 10.0.0.5:443');
 };
-const TIMES_OUT: FetchStub = (_url, init) =>
-  new Promise((_resolve, reject) => {
-    init.signal?.addEventListener('abort', () => {
-      const err = new Error('The operation was aborted');
-      err.name = 'AbortError';
-      reject(err);
-    });
-  });
+/**
+ * The backup relay arms no `AbortSignal` of its own — `relayRequestTimeoutMs`
+ * gives this route no total deadline, because the bot answers only after
+ * streaming a file that can be gigabytes and a cut upload is retried into a
+ * second copy. What ends a wedged call is the transport, undici's idle
+ * defaults, which arrives as a plain rejection: `failed`, not `timeout`.
+ * `isRetryableRelayOutcome` retries both identically, so the retry behaviour
+ * this file is about is unchanged.
+ */
+const TRANSPORT_GAVE_UP: FetchStub = async () => {
+  const err = new Error('Headers Timeout Error');
+  err.name = 'HeadersTimeoutError';
+  throw err;
+};
 
 let tempDirs: string[] = [];
 let realFetch: typeof globalThis.fetch;
-let realTimeoutMs = 0;
 let savedEnv: Record<string, string | undefined> = {};
 
 beforeEach(() => {
   realFetch = globalThis.fetch;
-  realTimeoutMs = (BotNotifierClient as unknown as { TIMEOUT_MS: number }).TIMEOUT_MS;
   savedEnv = {
     REIWA_URL: process.env.REIWA_URL,
     WEBHOOK_SECRET_HEADER: process.env.WEBHOOK_SECRET_HEADER,
@@ -105,13 +109,10 @@ beforeEach(() => {
   // A local token would send delivery down the DIRECT path and none of this
   // would exercise the relay.
   delete process.env.BOT_TOKEN;
-  // The client's real 4s budget would stall the suite three times over.
-  (BotNotifierClient as unknown as { TIMEOUT_MS: number }).TIMEOUT_MS = 5;
 });
 
 afterEach(() => {
   globalThis.fetch = realFetch;
-  (BotNotifierClient as unknown as { TIMEOUT_MS: number }).TIMEOUT_MS = realTimeoutMs;
   for (const [key, value] of Object.entries(savedEnv)) {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
@@ -190,7 +191,7 @@ describe('which attempt is the last one, according to bullmq itself', () => {
 
 describe('a delivery failure worth repeating is repeated', () => {
   const retryable: readonly { label: string; fetch: FetchStub; status: string }[] = [
-    { label: 'a request that times out', fetch: TIMES_OUT, status: 'timeout' },
+    { label: 'a transport that gave up mid-request', fetch: TRANSPORT_GAVE_UP, status: 'failed' },
     { label: 'a transport error', fetch: TRANSPORT_ERROR, status: 'failed' },
     { label: 'a 502 from the relay', fetch: REJECTED_502, status: 'rejected' },
   ];
@@ -259,13 +260,13 @@ describe('a delivery failure nothing can fix is not repeated', () => {
 });
 
 describe('the retry is what the change is for', () => {
-  it('rescues a backup whose first attempt timed out, and alarms nobody', async () => {
+  it('rescues a backup whose first attempt died in transit, and alarms nobody', async () => {
     // The payoff: a transient failure now ends with the file off-site instead
     // of a record saying "local" forever.
     let call = 0;
     const run = await runJob((url, init) => {
       call += 1;
-      return call === 1 ? TIMES_OUT(url, init) : CONFIRMED(url, init);
+      return call === 1 ? TRANSPORT_GAVE_UP(url, init) : CONFIRMED(url, init);
     });
 
     assert.equal(run.attempts, 2, 'the second attempt never happened');
@@ -306,7 +307,7 @@ describe('the retry is what the change is for', () => {
 
 describe('the failed-job handler does not repeat what delivery already said', () => {
   it('adds no SYSTEM_ERROR when an exhausted delivery has alerted for itself', async () => {
-    const run = await runJob(TIMES_OUT);
+    const run = await runJob(TRANSPORT_GAVE_UP);
 
     assert.equal(run.attempts, JOB_ATTEMPTS);
     assert.equal(run.onFailedCalls, JOB_ATTEMPTS, 'bullmq emits `failed` on every attempt, not just the last');

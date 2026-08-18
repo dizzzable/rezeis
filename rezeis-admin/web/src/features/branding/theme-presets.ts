@@ -4,9 +4,18 @@
  * Two families live here behind a `kind` discriminant:
  *
  *   • `legacy` — the eight standard themes shipped before the concept catalog.
- *     They only ever owned a palette, a card gradient and a background effect,
- *     so they stay that narrow: geometry, typography, semantic surfaces and the
- *     app background remain operator-owned.
+ *     They own a palette, a card gradient, the semantic surfaces and the app
+ *     background, and stop there: geometry, typography and card artwork remain
+ *     operator-owned.
+ *
+ *     The surfaces and the app background are not an expansion of what these
+ *     themes "do" — they are the cabinet they were drawn against. All eight are
+ *     dark (`bgPrimary` #08090a…#0c0a09) and each carries only a background;
+ *     the text colours painted on it live in `surfaceTheme`. Leaving that field
+ *     to whatever a previously selected concept stored composed a dark standard
+ *     background with a LIGHT concept's foreground: measured over all 8 × 104
+ *     combinations, 352 of 832 fell below the 4.5 AA requirement, the worst at
+ *     1.00:1. `theme-presets.test.ts` guards that outcome directly.
  *   • `concept` — resolved from the canonical 104-concept catalog. The source
  *     book and audited Pencil boards expose palettes, semantic surfaces,
  *     typography and geometry. This adapter persists their fully resolved Reiwa
@@ -24,6 +33,11 @@ import {
   type ConceptPresetDescriptor,
   type HexColor,
 } from '../../lib/theme/concept-presets'
+
+import {
+  DEFAULT_APP_BACKGROUND_DRAFT,
+  DEFAULT_SURFACE_THEME_DRAFT,
+} from './branding-form-schema'
 
 import type {
   BrandingAppBackgroundDraft,
@@ -58,6 +72,17 @@ const FONT_STACK_BY_SOURCE: Readonly<Record<string, string>> = {
   'IBM Plex Mono': '"IBM Plex Mono", ui-monospace, SFMono-Regular, monospace',
 }
 
+/**
+ * @deprecated Superseded by `appBackground.kind === 'effect'`, which carries
+ * the same NONE/MESH/PARTICLES/NOISE/AURORA vocabulary and is the one the
+ * cabinet actually renders (`reiwa/web/src/components/layout/app-background.tsx`,
+ * the `kind === "effect"` branch). `bgEffect` itself is inert end to end: the
+ * cabinet writes it to `root.dataset["bgEffect"]`
+ * (`reiwa/web/src/lib/branding-document.ts`) and nothing reads that attribute —
+ * no CSS selector, no component, no preview — and the panel has no operator
+ * control for it either, only presets write it. Kept as a stored field because
+ * removing it needs a settings migration and buys nothing; do not wire it up.
+ */
 export type ThemePresetBgEffect =
   | 'NONE'
   | 'MESH'
@@ -75,13 +100,17 @@ interface ThemePresetBase {
   readonly bgPrimary: HexColor
   readonly bgSecondary: HexColor
   readonly cardGradient: string
+  /** @deprecated Dead everywhere; see `ThemePresetBgEffect`. */
   readonly bgEffect: ThemePresetBgEffect
 }
 
 /**
  * One of the eight standard themes that predate the concept catalog. It has no
  * source page, no audited composition and no typography of its own, so it does
- * not pretend to: the fields above are exactly what it ever owned.
+ * not pretend to: the fields above are exactly what it declares.
+ *
+ * What it APPLIES is wider than what it declares, by exactly two fields — see
+ * `createLegacyThemePresetVisualPatch`.
  */
 export interface LegacyThemePreset extends ThemePresetBase {
   readonly kind: 'legacy'
@@ -226,8 +255,8 @@ export function isConceptThemePresetId(id: unknown): boolean {
   return typeof id === 'string' && id.startsWith('concept-')
 }
 
-/** The exact fields a standard theme has always owned. */
-export type LegacyThemePresetVisualPatch = Pick<
+/** The fields BOTH families resolve from their own declared data. */
+type SharedThemePresetVisualPatch = Pick<
   BrandingFormDraft,
   | 'themePresetId'
   | 'themePresetVersion'
@@ -239,17 +268,30 @@ export type LegacyThemePresetVisualPatch = Pick<
   | 'bgEffect'
 >
 
-/** A concept additionally owns card artwork, geometry, typography, surfaces. */
+/**
+ * What a standard theme writes: the six visual fields it declares, plus the
+ * two that decide whether they are legible.
+ *
+ * `surfaceTheme` and `appBackground` are REQUIRED here rather than optional
+ * (`BrandingFormDraft.appBackground` is optional) because omitting them is the
+ * defect: the backend merge preserves absent keys and the cabinet applies
+ * whatever is stored with no per-preset defaulting, so an omitted key is not
+ * "unchanged", it is "whatever the last concept left behind".
+ */
+export type LegacyThemePresetVisualPatch = SharedThemePresetVisualPatch & {
+  readonly surfaceTheme: BrandingSurfaceThemeDraft
+  readonly appBackground: BrandingAppBackgroundDraft
+}
+
+/** A concept additionally owns card artwork, geometry and typography. */
 export type ConceptThemePresetVisualPatch = LegacyThemePresetVisualPatch & {
   readonly cardPattern: string | null
   readonly cardEffect: string
   readonly cardEffectProps: Record<string, unknown>
   readonly cardEffectOpacity: number
-  readonly appBackground: BrandingAppBackgroundDraft
   readonly borderRadius: string
   readonly cornerRadii: BrandingCornerRadiiDraft
   readonly fontFamily: string
-  readonly surfaceTheme: BrandingSurfaceThemeDraft
 }
 
 export type ThemePresetVisualPatch =
@@ -281,7 +323,7 @@ const DEFAULT_VARIANT_SUBSCRIPTION_CARD_TEXT: BrandingSubscriptionCardTextDraft 
 
 function createSharedThemePresetVisualPatch(
   preset: ThemePresetBase,
-): LegacyThemePresetVisualPatch {
+): SharedThemePresetVisualPatch {
   return {
     themePresetId: preset.id,
     themePresetVersion: preset.version,
@@ -294,10 +336,59 @@ function createSharedThemePresetVisualPatch(
   }
 }
 
+/**
+ * A standard theme supplies two fields it does not declare, and both are bug
+ * fixes rather than new capabilities.
+ *
+ * `surfaceTheme` — `DEFAULT_SURFACE_THEME_DRAFT` is the pre-concept cabinet
+ * these eight themes were designed against, and it is dark, matching all eight
+ * of their backgrounds. It is not a choice made here: the identical object is
+ * the default in `branding-form-schema.ts`, in reiwa's `types/branding.ts`
+ * (`DEFAULT_SURFACE_THEME`) and in the API's `DEFAULT_BRANDING_SETTINGS`.
+ * Omitting it left the FOREGROUND colours owned by the concept the operator
+ * had just replaced while their BACKGROUND came from the theme they just
+ * picked — the exact split `detachSurfaceThemeFromConcept` in `branding-page`
+ * exists to prevent, and it is unreadable, not merely mismatched.
+ *
+ * `appBackground` — reset to the default built-in (`kind: 'none'`). A leftover
+ * concept background is not an operator choice worth preserving because it is
+ * already rendering broken: the cabinet gates both the texture overlay
+ * (`app-background.tsx`) and the concept-texture contribution to the
+ * readability veil (`app-background-contrast.ts`) on
+ * `themePresetId.startsWith("concept-")`, so under a standard preset id the
+ * concept's gradient keeps painting while the layers drawn on top of it stop.
+ * That composition is one neither theme designed.
+ *
+ * Deliberately NOT written: `fontFamily`, `borderRadius`, `cornerRadii`,
+ * `cardPattern`, `cardEffect`, `cardEffectProps`, `cardEffectOpacity`. The
+ * eight standard themes have no typography, geometry or card artwork of their
+ * own, so writing them would not apply anything — it would only erase operator
+ * choices that have dedicated controls.
+ *
+ * Both defaults are COPIED, not aliased, and the test pins that. The value
+ * returned here is handed straight to `form.setValue('surfaceTheme', …)` and
+ * then edited field-by-field through nested paths
+ * (`form.setValue('surfaceTheme.foreground', …)` in `SurfaceColorField`). An
+ * alias would put a shared module constant — the same object
+ * `createInitialBrandingDraft()` seeds every draft from — inside a mutable
+ * form. Whether react-hook-form writes through that alias was not established
+ * either way; the copy costs one spread and removes the question. Note that
+ * `createConceptThemePresetVisualPatch` does alias its `preset.surfaceTheme`
+ * and `preset.appBackground`, so if the answer ever turns out to be "yes",
+ * that is where to look — not here.
+ */
 export function createLegacyThemePresetVisualPatch(
   preset: LegacyThemePreset,
 ): LegacyThemePresetVisualPatch {
-  return createSharedThemePresetVisualPatch(preset)
+  return {
+    ...createSharedThemePresetVisualPatch(preset),
+    surfaceTheme: { ...DEFAULT_SURFACE_THEME_DRAFT },
+    appBackground: {
+      ...DEFAULT_APP_BACKGROUND_DRAFT,
+      texture: { ...DEFAULT_APP_BACKGROUND_DRAFT.texture },
+      props: { ...DEFAULT_APP_BACKGROUND_DRAFT.props },
+    },
+  }
 }
 
 export function createConceptThemePresetVisualPatch(

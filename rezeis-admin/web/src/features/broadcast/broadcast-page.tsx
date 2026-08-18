@@ -179,6 +179,23 @@ const STATUS_VARIANT: Record<string, 'default' | 'secondary' | 'destructive' | '
   DELETED: 'outline',
 }
 
+/**
+ * Recipients this broadcast has neither delivered to nor given up on.
+ *
+ * Clamped at zero rather than trusted: the three counters are written by
+ * different code paths at different times (`checkAndFinalize` sets success and
+ * failure; the total is stamped at staging), so a transient read can show more
+ * settled than staged. A negative "still delivering" would be worse than not
+ * showing it.
+ */
+function pendingOf(row: {
+  readonly totalCount: number
+  readonly successCount: number
+  readonly failedCount: number
+}): number {
+  return Math.max(0, row.totalCount - row.successCount - row.failedCount)
+}
+
 interface BroadcastRow {
   readonly id: string
   readonly audience: string
@@ -310,6 +327,20 @@ export default function BroadcastPage() {
                       <span className="text-emerald-600">{b.successCount}</span>
                       <span className="text-muted-foreground">/{b.totalCount}</span>
                       {b.failedCount > 0 && <span className="text-destructive ml-1">({t('broadcastPage.failedCount', { count: b.failedCount })})</span>}
+                      {/*
+                        The third number. `SENT` now means a delivery the relay
+                        proved, so between the two counters there is a real
+                        population: recipients whose relay attempt timed out and
+                        whose batch will be retried. Rendering only success and
+                        failure silently folds those into "not delivered", which
+                        is the same class of claim the status change removed —
+                        an unknown shown as one of the extremes.
+                      */}
+                      {pendingOf(b) > 0 && (
+                        <span className="text-muted-foreground ml-1">
+                          ({t('broadcastPage.pendingCount', { count: pendingOf(b) })})
+                        </span>
+                      )}
                     </TableCell>
                     <TableCell className="text-xs text-muted-foreground">
                       {new Date(b.createdAt).toLocaleString('ru-RU')}

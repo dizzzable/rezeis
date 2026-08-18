@@ -12,23 +12,56 @@ REPLACE_WITH_YOUR_DOMAIN {
     # Сжатие
     encode zstd gzip
 
-    # SSE для realtime-обновлений в админке.
-    # flush_interval -1 отключает буферизацию ответа, иначе события
-    # «копятся» и доходят до браузера пачкой раз в несколько минут.
+    # Долгоживущие маршруты панели — их ровно два.
+    #
+    # Здесь БЫЛО `path /api/admin/events/*
+    # /api/internal/user/*/realtime/*`. Ни один из этих двух путей НЕ
+    # СУЩЕСТВУЕТ: SSE панели живёт на
+    # `/api/internal/user/<userRef>/stream` (setGlobalPrefix('api') +
+    # @Controller('internal/user') + @Get(':userRef/stream')), а
+    # `/api/admin/events` — обычный постраничный JSON аудита.
+    # Блок не матчил ничего и только выглядел работающим.
+    #
+    # `/api/socket.io*` — шлюз Socket.IO админки (realtime.gateway.ts,
+    # `path: '/api/socket.io'`): websocket с откатом на polling. Звёздочка
+    # без слэша перед ней намеренно: engine.io запрашивает
+    # `/api/socket.io/?EIO=4&...`, но голый `/api/socket.io` тоже законен.
     @sse {
-        path /api/admin/events/* /api/internal/user/*/realtime/*
+        path /api/internal/user/*/stream /api/socket.io*
     }
     handle @sse {
         reverse_proxy rezeis:8000 {
+            # Здесь БЫЛО `transport http { read_timeout 24h }`. Такой
+            # поддирективы у `transport http` НЕТ — `read_timeout` и
+            # `write_timeout` принадлежат `transport fastcgi`. Caddy
+            # отказывается стартовать на неизвестной поддирективе, так
+            # что этот стек не поднимался вообще, а не «медленно работал».
+            #
+            # Потоку он и не нужен: у Caddy нет таймаута на чтение тела
+            # ответа от апстрима, поэтому SSE живёт без каких-либо
+            # указаний — в отличие от nginx/angie с их `proxy_read_timeout`.
             flush_interval -1
-            transport http {
-                read_timeout 24h
-            }
         }
     }
 
     # Всё остальное — обычный reverse proxy.
-    reverse_proxy rezeis:8000
+    # КОНЕЧНОЕ ожидание для всего остального.
+    #
+    # `response_header_timeout` здесь НЕ БЫЛО вообще, а умолчание Caddy —
+    # БЕЗ ТАЙМАУТА. Апстрим, который принял соединение и замолчал,
+    # держал вкладку открытой бесконечно, не пиша ничего ни в один
+    # лог. Тот же дефект в конфиге кабинета уронил его в бою.
+    #
+    # 120s — собственный потолок приложения для самых долгих
+    # маршрутов под этим блоком (загрузка медиа рассылки, медиа FAQ,
+    # скачивание бэкапа — по 120s в `RequestTimeoutMiddleware`, остальное
+    # 30s). Меньше — резали бы законные запросы, больше — вернули бы
+    # границу к ожиданию мёртвого апстрима.
+    reverse_proxy rezeis:8000 {
+        transport http {
+            response_header_timeout 120s
+        }
+    }
 
     # Безопасные заголовки, как у Remnawave-гайдов.
     header {

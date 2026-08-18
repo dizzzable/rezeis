@@ -12,8 +12,8 @@ import { BotNotifierClient } from '../src/modules/notifications/services/bot-not
  * ───────────────────────────────────────────────────────
  * The relay path hands reiwa a signed download token and lets the bot fetch
  * and upload the file. `BotNotifierClient.deliver` reports every outcome —
- * a 502, an empty 204, a 4-second timeout, a socket error — by RETURNING,
- * never by throwing. `deliverToTelegram` used to wrap that call in a `try`
+ * a 502, an empty 204, a transport that gave up, a socket error — by
+ * RETURNING, never by throwing. `deliverToTelegram` used to wrap that call in a `try`
  * and stamp `deliveryChannel: 'telegram-relay'` + `deliveredAt` on the path
  * after it, which is taken unconditionally; the `catch` could not run. Every
  * failed relay was therefore recorded as a successful off-site delivery, and
@@ -38,6 +38,14 @@ interface Harness {
   readonly updates: { readonly where: unknown; readonly data: Record<string, unknown> }[];
   readonly warnings: { readonly message: string; readonly meta: Record<string, unknown> }[];
   readonly fetchCalls: string[];
+  /**
+   * The `AbortSignal` (if any) the client armed for each call. This route must
+   * see `undefined`: `relayRequestTimeoutMs` gives `reiwa.backup.document` no
+   * total deadline, because the bot answers only after streaming a file that
+   * can be gigabytes, and an abort would surface as an outcome this very
+   * service retries — turning one slow backup into three copies in the topic.
+   */
+  readonly fetchSignals: (AbortSignal | undefined)[];
   readonly backupDir: string;
   readonly filename: string;
 }
@@ -46,12 +54,10 @@ type FetchStub = (url: unknown, init: { signal?: AbortSignal }) => Promise<unkno
 
 let tempDirs: string[] = [];
 let realFetch: typeof globalThis.fetch;
-let realTimeoutMs = 0;
 let savedEnv: Record<string, string | undefined> = {};
 
 beforeEach(() => {
   realFetch = globalThis.fetch;
-  realTimeoutMs = (BotNotifierClient as unknown as { TIMEOUT_MS: number }).TIMEOUT_MS;
   savedEnv = {
     REIWA_URL: process.env.REIWA_URL,
     WEBHOOK_SECRET_HEADER: process.env.WEBHOOK_SECRET_HEADER,
@@ -69,7 +75,6 @@ beforeEach(() => {
 
 afterEach(() => {
   globalThis.fetch = realFetch;
-  (BotNotifierClient as unknown as { TIMEOUT_MS: number }).TIMEOUT_MS = realTimeoutMs;
   for (const [key, value] of Object.entries(savedEnv)) {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
@@ -88,7 +93,6 @@ describe('a failed Telegram relay is not recorded as an off-site delivery', () =
     readonly label: string;
     readonly expectedStatus: string;
     readonly fetch: FetchStub;
-    readonly shortTimeout?: boolean;
   }[] = [
     {
       label: 'a non-2xx response',
@@ -113,18 +117,21 @@ describe('a failed Telegram relay is not recorded as an off-site delivery', () =
       fetch: async () => ({ ok: true, status: 200, statusText: 'OK', json: async () => ({}) }),
     },
     {
-      label: 'a request that times out',
-      expectedStatus: 'timeout',
-      shortTimeout: true,
-      fetch: (_url, init) =>
-        new Promise((_resolve, reject) => {
-          // Behave like fetch: stay pending until the client's own AbortController fires.
-          init.signal?.addEventListener('abort', () => {
-            const err = new Error('The operation was aborted');
-            err.name = 'AbortError';
-            reject(err);
-          });
-        }),
+      // Not the client's own abort: this route arms none, deliberately. What
+      // ends a wedged backup relay is the TRANSPORT giving up — undici's idle
+      // defaults — which arrives as a rejection with no `timedOut` flag set,
+      // so the client reports `failed`. `isRetryableRelayOutcome` treats that
+      // exactly as it treated `timeout`, so nothing about the retry decision
+      // moved; only the name of the thing that fired did. The client's own
+      // deadline, on the routes that have one, is held up by
+      // `test/reiwa-relay-timeout-budget.spec.ts`.
+      label: 'a transport that gave up on a request nobody deadlined',
+      expectedStatus: 'failed',
+      fetch: async () => {
+        const err = new Error('Headers Timeout Error');
+        err.name = 'HeadersTimeoutError';
+        throw err;
+      },
     },
     {
       label: 'a transport error thrown before any response',
@@ -137,7 +144,7 @@ describe('a failed Telegram relay is not recorded as an off-site delivery', () =
 
   for (const mode of failureModes) {
     it(`refuses to mark the backup delivered after ${mode.label}`, async () => {
-      const h = buildHarness(mode.fetch, mode.shortTimeout === true);
+      const h = buildHarness(mode.fetch);
 
       const delivered = await h.service.deliverToTelegram('backup-1', h.filename);
 
@@ -149,6 +156,13 @@ describe('a failed Telegram relay is not recorded as an off-site delivery', () =
         'the relay was never attempted — this test proved nothing about relay failure handling',
       );
       assert.match(h.fetchCalls[0] ?? '', /reiwa\.example\.test/);
+      assert.equal(
+        h.fetchSignals[0],
+        undefined,
+        'a total deadline on this route cuts a legitimate multi-gigabyte upload, and the ' +
+          'cut is retried into a second copy — the cabinet passes `null` here for the ' +
+          'same reason (`relayToBot(..., null)`)',
+      );
 
       assert.equal(delivered, false, 'a relay that proved nothing must not report success');
 
@@ -299,22 +313,18 @@ function makeBackupDir(): string {
   return dir;
 }
 
-function buildHarness(fetchStub: FetchStub, shortTimeout = false): Harness {
+function buildHarness(fetchStub: FetchStub): Harness {
   const dir = makeBackupDir();
   const filename = 'rezeis-db-2026-06-01.sql.gz';
   writeFileSync(join(dir, filename), 'not-a-real-dump');
 
   const fetchCalls: string[] = [];
+  const fetchSignals: (AbortSignal | undefined)[] = [];
   globalThis.fetch = ((url: unknown, init: { signal?: AbortSignal }) => {
     fetchCalls.push(String(url));
+    fetchSignals.push(init?.signal);
     return fetchStub(url, init ?? {});
   }) as unknown as typeof globalThis.fetch;
-
-  if (shortTimeout) {
-    // The client's real 4s budget would stall the suite; the branch under test
-    // is the same one either way. Restored in afterEach.
-    (BotNotifierClient as unknown as { TIMEOUT_MS: number }).TIMEOUT_MS = 5;
-  }
 
   const updates: { where: unknown; data: Record<string, unknown> }[] = [];
   const warnings: { message: string; meta: Record<string, unknown> }[] = [];
@@ -348,7 +358,7 @@ function buildHarness(fetchStub: FetchStub, shortTimeout = false): Harness {
     new BotNotifierClient(),
   );
 
-  return { service, updates, warnings, fetchCalls, backupDir: dir, filename };
+  return { service, updates, warnings, fetchCalls, fetchSignals, backupDir: dir, filename };
 }
 
 function buildRetentionHarness(input: {
