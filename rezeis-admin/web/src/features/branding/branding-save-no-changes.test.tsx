@@ -103,7 +103,7 @@ describe('WEB Reiwa save with an empty patch', () => {
     // A real edit, so react-hook-form marks the form dirty and Save is live.
     // The semantic diff is what will come back empty.
     await user.type(
-      screen.getByLabelText('Logo URL (optional)'),
+      screen.getByLabelText('Logo'),
       'https://cdn.example.com/logo.png',
     )
     diffControl.reportNoChanges = true
@@ -139,7 +139,7 @@ describe('WEB Reiwa save with an empty patch', () => {
     await screen.findByRole('heading', { name: /WEB Reiwa/ })
 
     await user.type(
-      screen.getByLabelText('Logo URL (optional)'),
+      screen.getByLabelText('Logo'),
       'https://cdn.example.com/logo.png',
     )
     await user.click(screen.getByRole('button', { name: 'Save' }))

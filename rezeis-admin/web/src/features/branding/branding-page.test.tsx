@@ -73,7 +73,7 @@ describe('WebReiwaPage branding settings', () => {
     renderWithProviders(<WebReiwaPage />)
 
     await screen.findByRole('heading', { name: /WEB Reiwa/ })
-    await user.type(screen.getByLabelText('Logo URL (optional)'), 'ftp://example.com/logo.png')
+    await user.type(screen.getByLabelText('Logo'), 'ftp://example.com/logo.png')
     await user.click(screen.getByRole('button', { name: 'Save' }))
 
     expect(
@@ -92,7 +92,7 @@ describe('WebReiwaPage branding settings', () => {
     renderWithProviders(<WebReiwaPage />)
 
     await screen.findByRole('heading', { name: /WEB Reiwa/ })
-    await user.type(screen.getByLabelText('Logo URL (optional)'), ' https://cdn.example.com/logo.png ')
+    await user.type(screen.getByLabelText('Logo'), ' https://cdn.example.com/logo.png ')
     await user.click(screen.getByRole('button', { name: 'Save' }))
 
     await waitFor(() => expect(patchSpy).toHaveBeenCalledOnce())

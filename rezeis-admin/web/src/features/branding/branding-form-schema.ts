@@ -124,6 +124,7 @@ export interface BrandingFormDraft {
   readonly tagline: string | null
   readonly logoUrl: string | null
   readonly pwaIconUrl: string | null
+  readonly brandLogo: BrandingBrandLogoDraft
   readonly primary: string
   readonly primaryFg: string
   readonly bgPrimary: string
@@ -148,6 +149,7 @@ export interface BrandingFormDraft {
   readonly subscriptionCardGlass: BrandingSubscriptionCardGlassDraft
   readonly cardLogo: CardLogoPreset
   readonly cardLogoUrl: string | null
+  readonly cardLogoStyle: BrandingCardLogoStyleDraft
   readonly cardEffect: string
   readonly cardEffectProps?: Record<string, unknown>
   readonly cardEffectOpacity: number
@@ -219,6 +221,25 @@ export interface BrandingSubscriptionCardGlassDraft {
   readonly opacity: number
   readonly blurPx: number
   readonly borderOpacity: number
+}
+
+export const BRAND_LOGO_FRAMES = ['glass', 'solid', 'outline', 'none'] as const
+export type BrandLogoFrame = (typeof BRAND_LOGO_FRAMES)[number]
+
+/** How the brand mark is presented on the cabinet's entry screens. */
+export interface BrandingBrandLogoDraft {
+  readonly size: number
+  readonly fill: number
+  readonly frame: BrandLogoFrame
+  /** Percentage of the tile's width, or `null` to follow the theme's item radius. */
+  readonly radius: number | null
+  readonly glow: number
+}
+
+/** Size and weight of the subscription-card watermark. */
+export interface BrandingCardLogoStyleDraft {
+  readonly scale: number
+  readonly opacity: number
 }
 
 export interface BrandingSurfaceThemeDraft {
@@ -318,6 +339,39 @@ export const DEFAULT_SUBSCRIPTION_CARD_GLASS_DRAFT: BrandingSubscriptionCardGlas
   borderOpacity: 0.18,
 }
 
+/**
+ * Mirrors `DEFAULT_BRANDING.brandLogo` on the backend, and reproduces the
+ * rendering that preceded the setting. Kept in sync by
+ * `branding-logo-contract.spec.ts`, which reads both sides — the two copies of
+ * one constant are exactly the shape that has bitten this project before.
+ */
+export const DEFAULT_BRAND_LOGO_DRAFT: BrandingBrandLogoDraft = {
+  size: 1,
+  fill: 0.58,
+  frame: 'glass',
+  radius: null,
+  glow: 1,
+}
+
+/** Mirrors `DEFAULT_BRANDING.cardLogoStyle`; same contract test guards it. */
+export const DEFAULT_CARD_LOGO_STYLE_DRAFT: BrandingCardLogoStyleDraft = {
+  scale: 1,
+  opacity: 0.1,
+}
+
+/** Inclusive bounds, mirrored by the backend DTO and reader. */
+export const BRAND_LOGO_BOUNDS = {
+  size: { min: 1, max: 1.75 },
+  fill: { min: 0.4, max: 1 },
+  radius: { min: 0, max: 50 },
+  glow: { min: 0, max: 1 },
+} as const
+
+export const CARD_LOGO_STYLE_BOUNDS = {
+  scale: { min: 0.5, max: 2 },
+  opacity: { min: 0.02, max: 0.4 },
+} as const
+
 export const CORNER_RADII_BY_LEGACY_CLASS: Readonly<
   Record<string, BrandingCornerRadiiDraft>
 > = {
@@ -392,6 +446,7 @@ const DEFAULT_BRANDING_DRAFT: BrandingFormDraft = {
   tagline: null,
   logoUrl: null,
   pwaIconUrl: null,
+  brandLogo: DEFAULT_BRAND_LOGO_DRAFT,
   primary: '#22c55e',
   primaryFg: '#0a0a0a',
   bgPrimary: '#0a0a0a',
@@ -404,6 +459,7 @@ const DEFAULT_BRANDING_DRAFT: BrandingFormDraft = {
   subscriptionCardGlass: DEFAULT_SUBSCRIPTION_CARD_GLASS_DRAFT,
   cardLogo: 'DEFAULT',
   cardLogoUrl: null,
+  cardLogoStyle: DEFAULT_CARD_LOGO_STYLE_DRAFT,
   cardEffect: 'aurora',
   cardEffectProps: {},
   cardEffectOpacity: 1,
@@ -529,6 +585,27 @@ export function createBrandingFormSchema(messages: BrandingFormValidationMessage
     blurPx: z.number().min(0).max(40),
     borderOpacity: z.number().min(0).max(1),
   })
+  const brandLogoSchema = z.object({
+    size: z.number().min(BRAND_LOGO_BOUNDS.size.min).max(BRAND_LOGO_BOUNDS.size.max),
+    fill: z.number().min(BRAND_LOGO_BOUNDS.fill.min).max(BRAND_LOGO_BOUNDS.fill.max),
+    frame: z.enum(BRAND_LOGO_FRAMES),
+    radius: z
+      .number()
+      .min(BRAND_LOGO_BOUNDS.radius.min)
+      .max(BRAND_LOGO_BOUNDS.radius.max)
+      .nullable(),
+    glow: z.number().min(BRAND_LOGO_BOUNDS.glow.min).max(BRAND_LOGO_BOUNDS.glow.max),
+  })
+  const cardLogoStyleSchema = z.object({
+    scale: z
+      .number()
+      .min(CARD_LOGO_STYLE_BOUNDS.scale.min)
+      .max(CARD_LOGO_STYLE_BOUNDS.scale.max),
+    opacity: z
+      .number()
+      .min(CARD_LOGO_STYLE_BOUNDS.opacity.min)
+      .max(CARD_LOGO_STYLE_BOUNDS.opacity.max),
+  })
   const themeVariantSchema = z.object({
     primary: z.string().regex(HEX_PATTERN, messages.hexInvalid),
     primaryFg: z.string().regex(HEX_PATTERN, messages.hexInvalid),
@@ -576,8 +653,10 @@ export function createBrandingFormSchema(messages: BrandingFormValidationMessage
       cardPattern: optionalGradientSchema(messages.gradientInvalid, true),
       subscriptionCardText: subscriptionCardTextSchema,
       subscriptionCardGlass: subscriptionCardGlassSchema,
+      brandLogo: brandLogoSchema,
       cardLogo: z.enum(CARD_LOGO_PRESETS),
       cardLogoUrl: optionalImageUrl(messages.imageUrlInvalid),
+      cardLogoStyle: cardLogoStyleSchema,
       cardEffect: cardEffectField(),
       cardEffectProps: z.record(z.string(), z.unknown()).optional(),
       cardEffectOpacity: z.number().min(0.05).max(1),
@@ -707,6 +786,8 @@ export function createInitialBrandingDraft(input?: Partial<BrandingFormDraft> | 
   const subscriptionCardGlass = normalizeSubscriptionCardGlassDraft(
     input?.subscriptionCardGlass,
   )
+  const brandLogo = normalizeBrandLogoDraft(input?.brandLogo)
+  const cardLogoStyle = normalizeCardLogoStyleDraft(input?.cardLogoStyle)
   return {
     ...DEFAULT_BRANDING_DRAFT,
     ...(input ?? {}),
@@ -734,6 +815,8 @@ export function createInitialBrandingDraft(input?: Partial<BrandingFormDraft> | 
     cardPattern: normalizeDraftNullableString(input?.cardPattern),
     subscriptionCardText,
     subscriptionCardGlass,
+    brandLogo,
+    cardLogoStyle,
     cardLogoUrl: normalizeDraftNullableString(input?.cardLogoUrl),
     cardEffectProps: isPlainRecord(input?.cardEffectProps) ? input.cardEffectProps : {},
     cardEffectsByIndex: Array.isArray(input?.cardEffectsByIndex) ? input.cardEffectsByIndex : [],
@@ -796,6 +879,47 @@ function normalizeSubscriptionCardGlassDraft(
     blurPx: boundedNumber('blurPx', 40),
     borderOpacity: boundedNumber('borderOpacity', 1),
   }
+}
+
+function normalizeBrandLogoDraft(value: unknown): BrandingBrandLogoDraft {
+  const fallback = DEFAULT_BRAND_LOGO_DRAFT
+  if (!isPlainRecordUnknown(value)) return { ...fallback }
+  const bounded = (key: 'size' | 'fill' | 'glow'): number => {
+    const raw = value[key]
+    const { min, max } = BRAND_LOGO_BOUNDS[key]
+    return typeof raw === 'number' && Number.isFinite(raw)
+      ? Math.min(max, Math.max(min, raw))
+      : fallback[key]
+  }
+  return {
+    size: bounded('size'),
+    fill: bounded('fill'),
+    frame:
+      typeof value.frame === 'string' &&
+      (BRAND_LOGO_FRAMES as readonly string[]).includes(value.frame)
+        ? (value.frame as BrandLogoFrame)
+        : fallback.frame,
+    // `null` is a value, not an absence: it is the operator saying "follow the
+    // theme", and it is where a legacy row and an explicit reset both land.
+    radius:
+      typeof value.radius === 'number' && Number.isFinite(value.radius)
+        ? Math.min(BRAND_LOGO_BOUNDS.radius.max, Math.max(BRAND_LOGO_BOUNDS.radius.min, value.radius))
+        : null,
+    glow: bounded('glow'),
+  }
+}
+
+function normalizeCardLogoStyleDraft(value: unknown): BrandingCardLogoStyleDraft {
+  const fallback = DEFAULT_CARD_LOGO_STYLE_DRAFT
+  if (!isPlainRecordUnknown(value)) return { ...fallback }
+  const bounded = (key: keyof typeof CARD_LOGO_STYLE_BOUNDS): number => {
+    const raw = value[key]
+    const { min, max } = CARD_LOGO_STYLE_BOUNDS[key]
+    return typeof raw === 'number' && Number.isFinite(raw)
+      ? Math.min(max, Math.max(min, raw))
+      : fallback[key]
+  }
+  return { scale: bounded('scale'), opacity: bounded('opacity') }
 }
 
 function isThemeVariantsDraft(

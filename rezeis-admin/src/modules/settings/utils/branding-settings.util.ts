@@ -19,6 +19,9 @@ import {
   BG_EFFECTS,
   BgEffect,
   BORDER_RADIUS_CLASSES,
+  BRAND_LOGO_FRAMES,
+  BrandLogoFrame,
+  BrandLogoSettings,
   BrandingThemeMode,
   BrandingThemeModePolicy,
   BrandingThemeVariant,
@@ -31,6 +34,7 @@ import {
   CardGradientSource,
   CardEffectSlot,
   CardLogoPreset,
+  CardLogoStyleSettings,
   CornerRadiiSettings,
   DEFAULT_BRANDING,
   ICON_COLOR_MODES,
@@ -101,6 +105,7 @@ export function readBrandingSettings(value: unknown): BrandingSettingsInterface 
     tagline: readNullableString(record, 'tagline'),
     logoUrl: readNullableImageUrl(record, 'logoUrl'),
     pwaIconUrl: readNullableImageUrl(record, 'pwaIconUrl'),
+    brandLogo: readBrandLogo(record),
     adminPwaIconUrl: readNullableImageUrl(record, 'adminPwaIconUrl'),
     primary: readHex(record, 'primary', DEFAULT_BRANDING.primary),
     primaryFg: readHex(record, 'primaryFg', DEFAULT_BRANDING.primaryFg),
@@ -114,6 +119,7 @@ export function readBrandingSettings(value: unknown): BrandingSettingsInterface 
     subscriptionCardGlass: readSubscriptionCardGlass(record),
     cardLogo: readCardLogo(record, DEFAULT_BRANDING.cardLogo),
     cardLogoUrl: readNullableImageUrl(record, 'cardLogoUrl'),
+    cardLogoStyle: readCardLogoStyle(record),
     cardEffect: readCardEffect(record, DEFAULT_BRANDING.cardEffect),
     cardEffectProps: readJsonRecord(record, 'cardEffectProps'),
     cardEffectOpacity: readClampedNumber(
@@ -172,6 +178,20 @@ export function mergeBrandingSettings(input: {
         merged[key] = readSubscriptionCardGlass({
           subscriptionCardGlass: {
             ...current.subscriptionCardGlass,
+            ...readRecord(value),
+          },
+        });
+      } else if (key === 'brandLogo') {
+        merged[key] = readBrandLogo({
+          brandLogo: {
+            ...current.brandLogo,
+            ...readRecord(value),
+          },
+        });
+      } else if (key === 'cardLogoStyle') {
+        merged[key] = readCardLogoStyle({
+          cardLogoStyle: {
+            ...current.cardLogoStyle,
             ...readRecord(value),
           },
         });
@@ -671,6 +691,41 @@ function readSubscriptionCardGlass(
       1,
       fallback.borderOpacity,
     ),
+  };
+}
+
+function readBrandLogo(record: Record<string, unknown>): BrandLogoSettings {
+  const value = readRecord(record['brandLogo']);
+  const fallback = DEFAULT_BRANDING.brandLogo;
+  const frame = value['frame'];
+  return {
+    size: readClampedNumber(value, 'size', 1, 1.75, fallback.size),
+    fill: readClampedNumber(value, 'fill', 0.4, 1, fallback.fill),
+    frame:
+      typeof frame === 'string' && (BRAND_LOGO_FRAMES as readonly string[]).includes(frame)
+        ? (frame as BrandLogoFrame)
+        : fallback.frame,
+    // `null` is a value here, not an absence: it is the operator saying
+    // "follow the theme". Only a usable number overrides it, so a legacy row
+    // and an explicit reset land in the same place.
+    radius:
+      typeof value['radius'] === 'number' && Number.isFinite(value['radius'])
+        ? Math.min(50, Math.max(0, value['radius']))
+        : null,
+    glow: readClampedNumber(value, 'glow', 0, 1, fallback.glow),
+  };
+}
+
+function readCardLogoStyle(record: Record<string, unknown>): CardLogoStyleSettings {
+  const value = readRecord(record['cardLogoStyle']);
+  const fallback = DEFAULT_BRANDING.cardLogoStyle;
+  return {
+    scale: readClampedNumber(value, 'scale', 0.5, 2, fallback.scale),
+    // The floor is 0.02, not 0. A watermark the operator cannot see is what
+    // `cardLogo: 'NONE'` is for, and it says so in the picker; an opacity of
+    // zero would be the same outcome reached by a control that still claims a
+    // mark is selected.
+    opacity: readClampedNumber(value, 'opacity', 0.02, 0.4, fallback.opacity),
   };
 }
 

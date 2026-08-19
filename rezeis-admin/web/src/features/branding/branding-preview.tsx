@@ -33,6 +33,18 @@ import {
 
 import { ReiwaMark } from './reiwa-mark'
 import { CardLogoMark, type CardLogoPreset } from './card-logo-mark'
+
+/**
+ * The watermark boxes the preview drew before the operator could size them:
+ * `h-28 w-28` on the subscription card, `h-20 w-20` on a tariff card. They are
+ * the preview's own numbers, not the cabinet's — the phone frame is a scaled
+ * mock, and its two surfaces sit at 112/80 = 1.4 where the cabinet's sit at
+ * 160/128 = 1.25. `scale` multiplies each in place, so each surface keeps the
+ * proportion it already had; it does not make the mock proportional to the
+ * cabinet, and nothing here claims it does.
+ */
+const PREVIEW_CARD_WATERMARK_BASE_PX = 112
+const PREVIEW_TARIFF_WATERMARK_BASE_PX = 80
 import {
   getCardEffectDefaults,
 } from './card-effect-registry'
@@ -57,6 +69,8 @@ import { resolveAppBackgroundReadability } from './app-background-contrast'
 import { PlanIconView } from '@/features/plans/plan-icon-view'
 import {
   DEFAULT_SUBSCRIPTION_CARD_GLASS_DRAFT,
+  DEFAULT_CARD_LOGO_STYLE_DRAFT,
+  type BrandingCardLogoStyleDraft,
   DEFAULT_NAV_ITEMS,
   type PlanCardStyleDraft,
   type BrandingAppBackgroundDraft,
@@ -84,6 +98,7 @@ interface BrandingPreviewProps {
     subscriptionCardGlass?: BrandingSubscriptionCardGlassDraft
     cardLogo?: CardLogoPreset
     cardLogoUrl?: string | null
+    cardLogoStyle?: BrandingCardLogoStyleDraft
     cardEffect?: string
     cardEffectProps?: Record<string, unknown>
     cardEffectOpacity?: number
@@ -589,6 +604,7 @@ function PreviewSubscriptionCard({
   cardPattern,
   cardLogo,
   cardLogoUrl,
+  cardLogoStyle,
   radius,
 }: {
   visual: PreviewCardVisual
@@ -599,6 +615,7 @@ function PreviewSubscriptionCard({
   cardPattern?: string | null
   cardLogo: CardLogoPreset
   cardLogoUrl?: string | null
+  cardLogoStyle: BrandingCardLogoStyleDraft
   radius: string
 }) {
   const { t } = useTranslation()
@@ -712,8 +729,15 @@ function PreviewSubscriptionCard({
       <CardLogoMark
         preset={cardLogo}
         customUrl={cardLogoUrl}
-        className="pointer-events-none absolute -right-4 -bottom-6 h-28 w-28"
-        style={{ color: contrast.foreground, opacity: 0.12 }}
+        className="pointer-events-none absolute -right-4 -bottom-6"
+        style={{
+          color: contrast.foreground,
+          opacity: cardLogoStyle.opacity,
+          // 112 px is the `h-28 w-28` this used to carry; the operator's scale
+          // multiplies it, exactly as it multiplies the cabinet's own box.
+          width: `${PREVIEW_CARD_WATERMARK_BASE_PX * cardLogoStyle.scale}px`,
+          height: `${PREVIEW_CARD_WATERMARK_BASE_PX * cardLogoStyle.scale}px`,
+        }}
       />
       {contrast.weakManualContrast && (
         <span
@@ -791,6 +815,7 @@ function SubscriptionCardsPreview({
   cardPattern,
   cardLogo,
   cardLogoUrl,
+  cardLogoStyle,
   radius,
   captionColor,
 }: {
@@ -802,6 +827,7 @@ function SubscriptionCardsPreview({
   cardPattern?: string | null
   cardLogo: CardLogoPreset
   cardLogoUrl?: string | null
+  cardLogoStyle: BrandingCardLogoStyleDraft
   radius: string
   captionColor: string
 }) {
@@ -850,6 +876,7 @@ function SubscriptionCardsPreview({
           cardPattern={cardPattern}
           cardLogo={cardLogo}
           cardLogoUrl={cardLogoUrl}
+          cardLogoStyle={cardLogoStyle}
           radius={radius}
         />
       </motion.div>
@@ -971,6 +998,7 @@ export function BrandingPreview({ values, focus }: BrandingPreviewProps) {
     subscriptionCardGlass = DEFAULT_SUBSCRIPTION_CARD_GLASS_DRAFT,
     cardLogo = 'DEFAULT',
     cardLogoUrl,
+    cardLogoStyle = DEFAULT_CARD_LOGO_STYLE_DRAFT,
     cardEffect = 'aurora',
     cardEffectProps = {},
     cardEffectOpacity = 1,
@@ -1275,6 +1303,7 @@ export function BrandingPreview({ values, focus }: BrandingPreviewProps) {
               subscriptionCardText={subscriptionCardText}
               cardLogo={cardLogo}
               cardLogoUrl={cardLogoUrl}
+              cardLogoStyle={cardLogoStyle}
               radius={radius}
               unlimitedLabel={t('brandingPage.sections.planCards.unlimited')}
               emptyLabel={t('brandingPage.sections.planCards.empty')}
@@ -1294,6 +1323,7 @@ export function BrandingPreview({ values, focus }: BrandingPreviewProps) {
             cardPattern={cardPattern}
             cardLogo={cardLogo}
             cardLogoUrl={cardLogoUrl}
+            cardLogoStyle={cardLogoStyle}
             radius={radius}
             captionColor={surfaceTheme.mutedForeground}
           />
@@ -1447,6 +1477,7 @@ interface TariffListPreviewProps {
   readonly subscriptionCardText: BrandingSubscriptionCardTextDraft
   readonly cardLogo: CardLogoPreset
   readonly cardLogoUrl?: string | null
+  readonly cardLogoStyle: BrandingCardLogoStyleDraft
   readonly radius: string
   readonly unlimitedLabel: string
   readonly emptyLabel: string
@@ -1466,6 +1497,7 @@ function TariffListPreview({
   subscriptionCardText,
   cardLogo,
   cardLogoUrl,
+  cardLogoStyle,
   radius,
   unlimitedLabel,
   emptyLabel,
@@ -1500,6 +1532,7 @@ function TariffListPreview({
           subscriptionCardText={subscriptionCardText}
           cardLogo={cardLogo}
           cardLogoUrl={cardLogoUrl}
+          cardLogoStyle={cardLogoStyle}
           radius={radius}
           unlimitedLabel={unlimitedLabel}
           surfaceTheme={surfaceTheme}
@@ -1521,6 +1554,7 @@ function TariffPreviewCard({
   subscriptionCardText,
   cardLogo,
   cardLogoUrl,
+  cardLogoStyle,
   radius,
   unlimitedLabel,
   surfaceTheme,
@@ -1536,6 +1570,7 @@ function TariffPreviewCard({
   readonly subscriptionCardText: BrandingSubscriptionCardTextDraft
   readonly cardLogo: CardLogoPreset
   readonly cardLogoUrl?: string | null
+  readonly cardLogoStyle: BrandingCardLogoStyleDraft
   readonly radius: string
   readonly unlimitedLabel: string
   readonly surfaceTheme: BrandingSurfaceThemeDraft
@@ -1674,8 +1709,13 @@ function TariffPreviewCard({
         <CardLogoMark
           preset={cardLogo}
           customUrl={cardLogoUrl}
-          className="pointer-events-none absolute -right-3 -bottom-4 h-20 w-20"
-          style={{ color: contrast.foreground, opacity: 0.12 }}
+          className="pointer-events-none absolute -right-3 -bottom-4"
+          style={{
+            color: contrast.foreground,
+            opacity: cardLogoStyle.opacity,
+            width: `${PREVIEW_TARIFF_WATERMARK_BASE_PX * cardLogoStyle.scale}px`,
+            height: `${PREVIEW_TARIFF_WATERMARK_BASE_PX * cardLogoStyle.scale}px`,
+          }}
         />
         <div className="relative flex items-center gap-2.5">
           <span className="shrink-0 leading-none drop-shadow" style={{ color: accent }}>

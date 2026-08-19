@@ -3603,14 +3603,41 @@ export const en = {
         tagline: 'Tagline (optional)',
         taglinePlaceholder: 'Your private VPN',
         taglineHint: 'Short subtitle shown on the launch splash and the in-app loader.',
-        logoUrl: 'Logo URL (optional)',
+        logoUrl: 'Logo',
         logoUrlPlaceholder: 'https://… or data:image/…',
-        logoHint: 'Leave empty to use the default Reiwa logo.',
+        logoHint:
+          'SVG, PNG or WebP up to 2 MB. Square, 256 px or larger, and trim the padding around the mark: the cabinet treats space inside the file as part of the image, which makes the mark look smaller.',
         logoPreview: 'Logo',
         logoDefault: 'Default',
-        upload: 'Upload',
+        uploading: 'Uploading…',
+        dropHere: 'Drop a file here or click to choose',
+        remove: 'Remove',
+        measured: 'File: {{width}} × {{height}} px',
+        measuredVector: 'Vector file — scales without loss',
+        warnNotSquare:
+          'The file is not square ({{width}} × {{height}}). A square frame will leave empty margins.',
+        warnTooSmall:
+          'Shortest side is {{actual}} px; for a raster file {{min}} px or more is recommended, otherwise the mark looks soft on dense screens.',
         uploadSuccess: 'File uploaded',
         uploadFailed: 'Failed to upload the file',
+      },
+      brandLogo: {
+        title: 'How the logo is shown',
+        description:
+          "Size and framing of the mark on the cabinet's entry screens. The tile beside the upload field above renders the result at the size the cabinet really draws it.",
+        frame: 'Frame',
+        frameHint:
+          'The tile keeps its place in either case, so turning the frame off does not shift the layout.',
+        size: 'Tile size',
+        fill: 'Fill',
+        fillHint:
+          'Fill sets how much of the tile the mark occupies. If it still looks small at 100% size, the margin is inside the file itself — it scales up along with the mark, and only the fill or a trimmed file recovers that space.',
+        radius: 'Corner rounding',
+        radiusCircle: 'circle',
+        radiusInherit: 'from theme',
+        radiusFromTheme: 'theme',
+        glow: 'Glow',
+        reset: 'Restore defaults',
       },
       pwaIcon: {
         title: 'App icon (PWA)',
@@ -3619,7 +3646,6 @@ export const en = {
         urlPlaceholder: 'URL or upload a file',
         hint: 'Square PNG 512×512 (1024 ok), opaque background, logo with ~10% safe padding from the edges. Used as the home-screen icon (Android/iOS) and launch splash. If empty, the brand logo is used, otherwise the Reiwa icon.',
         previewEmpty: 'No icon',
-        remove: 'Remove icon',
       },
       colors: {
         title: 'Colors',
@@ -3697,11 +3723,14 @@ export const en = {
         title: 'Card Logo',
         description:
           'Watermark glyph in the corner of the subscription card. Pick a built-in icon or upload your own.',
-        customUrl: 'Custom logo (URL or data:image)',
+        customUrl: 'Custom mark',
         customUrlPlaceholder: 'https://… or data:image/svg+xml;base64,…',
         customHint:
-          'When a custom logo is set it replaces the glyph. SVG or PNG with a transparent background works best.',
-        clearCustom: 'Clear',
+          'SVG, PNG or WebP with a transparent background, square, 256 px or larger. Replaces the selected glyph. The mark is drawn semi-transparent, so fine detail and text on it will not read.',
+        scale: 'Watermark size',
+        opacity: 'Presence',
+        styleHint:
+          "Size and presence apply to the built-in glyphs and to a custom file alike. To remove the mark entirely, pick 'None' in the list above; picking any glyph also clears the uploaded file.",
       },
       cardEffect: {
         title: 'Animated Card Background',
@@ -3883,6 +3912,12 @@ export const en = {
       violet: 'Violet',
       amber: 'Amber',
       mono: 'Mono',
+    },
+    brandLogoFrames: {
+      glass: 'Glass',
+      solid: 'Plate',
+      outline: 'Outline',
+      none: 'No frame',
     },
     cardLogos: {
       DEFAULT: 'Reiwa',

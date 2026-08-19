@@ -212,6 +212,67 @@ export interface SubscriptionCardGlassSettings {
 }
 
 /**
+ * The plate the brand mark sits on across the cabinet's entry screens
+ * (sign-in, splash, change-password, mini-app bootstrap).
+ *
+ *   - `glass`   — translucent surface + hairline + backdrop blur (the look
+ *                 every deployment had before this setting existed).
+ *   - `solid`   — the same surface, opaque, no backdrop blur. Cheaper on iOS,
+ *                 where a backdrop-filtered layer is re-sampled per frame.
+ *   - `outline` — hairline only, no fill.
+ *   - `none`    — no plate at all; the mark sits directly on the background.
+ */
+export const BRAND_LOGO_FRAMES = ['glass', 'solid', 'outline', 'none'] as const;
+export type BrandLogoFrame = (typeof BRAND_LOGO_FRAMES)[number];
+
+/**
+ * How the uploaded `logoUrl` is PRESENTED on the entry screens — distinct from
+ * which file it is.
+ *
+ * `size` and `fill` are two knobs because they answer two different questions
+ * and one cannot substitute for the other. `size` grows the whole tile on
+ * screen; `fill` decides how much of that tile the mark occupies. An operator
+ * whose SVG carries its own internal padding — the common case for a 1024×1024
+ * app-icon export, whose artboard reserves a safe area around the mark — sees a
+ * mark that looks small no matter how large the tile is, because `object-fit`
+ * fits the artboard, padding included. Only `fill` recovers that space.
+ */
+export interface BrandLogoSettings {
+  /** Whole-tile size multiplier on the entry screens, 1–1.75. */
+  readonly size: number;
+  /** Fraction of the tile the mark fills, 0.4–1. */
+  readonly fill: number;
+  /** The plate behind the mark. `none` removes it. */
+  readonly frame: BrandLogoFrame;
+  /**
+   * Corner rounding of the tile as a percentage of its width (0–50; 50 is a
+   * circle) — or `null`, meaning "follow the cabinet theme's item radius".
+   *
+   * `null` is the default because it is what the tile did before this setting:
+   * its class was `rounded-3xl`, i.e. `calc(var(--radius) * 2.2)`, and
+   * `--radius` is the operator's `cornerRadii.itemPx`. A fixed percentage
+   * default would have rounded off a theme configured with sharp corners and
+   * flattened one configured round — on the first screen every subscriber
+   * sees, for every deployment that changed nothing.
+   */
+  readonly radius: number | null;
+  /** Brand glow behind the tile, 0–1. `0` removes it. */
+  readonly glow: number;
+}
+
+/**
+ * Size and weight of the watermark on subscription and tariff cards. Separate
+ * from `cardLogo`/`cardLogoUrl`, which choose WHICH mark; these decide how big
+ * and how present it is.
+ */
+export interface CardLogoStyleSettings {
+  /** Size multiplier relative to the card's default watermark box, 0.5–2. */
+  readonly scale: number;
+  /** Watermark opacity, 0.02–0.4. */
+  readonly opacity: number;
+}
+
+/**
  * How the menu/section icons in the reiwa cabinet are coloured:
  *   - `default` — each icon keeps its own distinct accent (current look).
  *   - `theme`   — every icon uses the brand `primary` colour.
@@ -628,6 +689,13 @@ export interface BrandingSettingsInterface {
   readonly pwaIconUrl: string | null;
 
   /**
+   * How `logoUrl` is presented on the cabinet's entry screens (tile size, how
+   * much of it the mark fills, the plate behind it, its rounding and glow).
+   * Defaults reproduce the pre-setting rendering exactly.
+   */
+  readonly brandLogo: BrandLogoSettings;
+
+  /**
    * Optional square icon for installing the ADMIN PANEL itself as a PWA
    * (distinct from `pwaIconUrl`, which is the reiwa cabinet's install icon).
    * Applied at runtime to the admin `apple-touch-icon` + web manifest.
@@ -708,6 +776,11 @@ export interface BrandingSettingsInterface {
    * card just like the built-in glyphs.
    */
   readonly cardLogoUrl: string | null;
+  /**
+   * How big and how present that watermark is. Applies to both the built-in
+   * glyphs and a custom `cardLogoUrl`, so the two cannot drift apart.
+   */
+  readonly cardLogoStyle: CardLogoStyleSettings;
 
   /**
    * Animated effect rendered behind the subscription card. `NONE` keeps the
@@ -833,6 +906,21 @@ export const DEFAULT_BRANDING: BrandingSettingsInterface = {
   tagline: null,
   logoUrl: null,
   pwaIconUrl: null,
+  // Reproduces the rendering that preceded this setting. The cabinet's entry
+  // tile was `h-20 w-20 rounded-3xl` holding an `h-11 w-11` mark — 44/80 =
+  // 0.55 — and its splash tile `h-24 w-24 rounded-[28px]` holding `h-14 w-14`
+  // — 56/96 = 0.583. One fill ratio now serves both, so one of the two moves:
+  // 0.58 keeps the splash within a third of a pixel (56 → 55.68) and grows the
+  // sign-in mark by 2.4 px (44 → 46.4), which is the direction an operator
+  // complaining about a small mark wants anyway. `radius: null` keeps the
+  // corners following the theme, as `rounded-3xl` did.
+  brandLogo: {
+    size: 1,
+    fill: 0.58,
+    frame: 'glass',
+    radius: null,
+    glow: 1,
+  },
   adminPwaIconUrl: null,
   primary: '#22c55e',
   primaryFg: '#0a0a0a',
@@ -855,6 +943,15 @@ export const DEFAULT_BRANDING: BrandingSettingsInterface = {
   },
   cardLogo: 'DEFAULT',
   cardLogoUrl: null,
+  // 0.1 is what every card drew before the setting existed. The custom-image
+  // branch of the cabinet's watermark carried 0.12 in its own class while two
+  // of its three call sites overrode it back to 0.10 and the third did not, so
+  // a custom mark was fainter on the dashboard than on the picker. One value
+  // now feeds both branches and all three call sites.
+  cardLogoStyle: {
+    scale: 1,
+    opacity: 0.1,
+  },
   cardEffect: 'aurora',
   cardEffectProps: {},
   cardEffectOpacity: 1,

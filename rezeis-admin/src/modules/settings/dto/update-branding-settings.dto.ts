@@ -31,6 +31,8 @@ import {
   BG_EFFECTS,
   BgEffect,
   BORDER_RADIUS_CLASSES,
+  BRAND_LOGO_FRAMES,
+  BrandLogoFrame,
   CARD_EFFECTS,
   CARD_EFFECT_SLOT_MODES,
   CARD_LOGO_PRESETS,
@@ -618,6 +620,68 @@ export class SurfaceThemeDto {
   public glassBlurPx?: number;
 }
 
+/**
+ * Presentation of the brand mark on the cabinet's entry screens. Every member
+ * is optional: the panel sends only the knob the operator moved, and the
+ * reader merges it over the stored object.
+ */
+export class BrandLogoDto {
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ allowInfinity: false, allowNaN: false })
+  @Min(1)
+  @Max(1.75)
+  public size?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ allowInfinity: false, allowNaN: false })
+  @Min(0.4)
+  @Max(1)
+  public fill?: number;
+
+  @IsOptional()
+  @IsIn(BRAND_LOGO_FRAMES as readonly string[])
+  public frame?: BrandLogoFrame;
+
+  /**
+   * `null` is meaningful — it returns the tile to following the cabinet theme's
+   * item radius — so it must reach the reader rather than be skipped as
+   * "absent". `@ValidateIf` lets it through and bounds every real number.
+   */
+  @IsOptional()
+  @ValidateIf((_, value: unknown) => value !== null)
+  @Type(() => Number)
+  @IsNumber({ allowInfinity: false, allowNaN: false })
+  @Min(0)
+  @Max(50)
+  public radius?: number | null;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ allowInfinity: false, allowNaN: false })
+  @Min(0)
+  @Max(1)
+  public glow?: number;
+}
+
+/** Size and weight of the subscription-card watermark. */
+export class CardLogoStyleDto {
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ allowInfinity: false, allowNaN: false })
+  @Min(0.5)
+  @Max(2)
+  public scale?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ allowInfinity: false, allowNaN: false })
+  @Min(0.02)
+  @Max(0.4)
+  public opacity?: number;
+}
+
 /** Explicit subscription-card foreground policy, separate from primary UI text. */
 export class SubscriptionCardTextDto {
   @IsIn(SUBSCRIPTION_CARD_TEXT_MODES as readonly string[])
@@ -821,6 +885,12 @@ export class UpdateBrandingSettingsDto {
   public pwaIconUrl?: string | null;
 
   @IsOptional()
+  @IsObject()
+  @ValidateNested()
+  @Type(() => BrandLogoDto)
+  public brandLogo?: BrandLogoDto;
+
+  @IsOptional()
   @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @ValidateIf((_, value: unknown) => typeof value === 'string' && value.length > 0)
   @IsString()
@@ -889,6 +959,12 @@ export class UpdateBrandingSettingsDto {
   @ValidateNested()
   @Type(() => SubscriptionCardGlassDto)
   public subscriptionCardGlass?: SubscriptionCardGlassDto;
+
+  @IsOptional()
+  @IsObject()
+  @ValidateNested()
+  @Type(() => CardLogoStyleDto)
+  public cardLogoStyle?: CardLogoStyleDto;
 
   @IsOptional()
   @IsIn(CARD_LOGO_PRESETS as readonly string[])
