@@ -22,7 +22,7 @@ import {
   type PanelUserRef,
 } from './panel-user-address';
 import { resolvePanelBaseUrl } from './panel-base-url';
-import { PANEL_ROUTES } from './panel-routes';
+import { PANEL_ROUTES, PANEL_USER_NOT_FOUND_ERROR_CODES } from './panel-routes';
 import {
   addressingForVersion,
   CAPABILITIES_CACHE_TTL_MS,
@@ -195,8 +195,29 @@ function classifyUpstreamStatus(status: number): UpstreamStatusClass {
  * confirmation retried forever. This is a defect on 2.8.x today, not a 3.x
  * regression: `A063` is `GET_USER_BY_UNIQUE_FIELDS_NOT_FOUND` in the vendored
  * `@remnawave/backend-contract@2.7.3`.
+ *
+ * WHAT THIS PREDICATE MAY BE ASKED, AND WHAT IT MAY NOT. Both codes confirm
+ * absence only for a request that named the profile BY ITS OWN IDENTITY (the
+ * uuid on 2.x, the numeric id on 3.x) — which is every call site below, because
+ * `segmentFor` / `patchKeyFor` resolve an identity BEFORE the request and answer
+ * `null` ("cannot act", never "gone") when they cannot. It must NOT be asked of
+ * a body produced by an ATTRIBUTE lookup — `/api/users/by-username/…`,
+ * `by-short-uuid`, `by-email`, `by-telegram-id`, `POST /api/users/resolve` —
+ * because A063 there says "no user carries that attribute RIGHT NOW", which an
+ * operator renaming a live profile in the panel satisfies; reading it as "the
+ * profile is gone" would retire a running subscription. Those lookups all fail
+ * soft to `null` on purpose (`resolvePanelIdentity`, `getPanelUserByUsername`,
+ * `readUserSummary`) and none of them consults this function. Keeping it that
+ * way is the invariant, not an accident — see the attribute-lookup case in
+ * `test/remnawave-user-absence-codes.spec.ts`.
+ *
+ * THE RECOGNISED SET IS THE PINNED ONE, not a literal restated here. It used to
+ * be a second copy, and the copy is exactly what made the guard spec's "rezeis
+ * recognises exactly those two" assertion vacuous: that spec pins
+ * `PANEL_USER_NOT_FOUND_ERROR_CODES` in `panel-routes.ts`, which no production
+ * code read, so deleting `A063` from THIS set left all 336 tests green.
  */
-const PANEL_USER_NOT_FOUND_CODES: ReadonlySet<string> = new Set(['A025', 'A063']);
+const PANEL_USER_NOT_FOUND_CODES: ReadonlySet<string> = new Set(PANEL_USER_NOT_FOUND_ERROR_CODES);
 
 function isPanelUserNotFound(data: unknown): boolean {
   if (data === null || typeof data !== 'object') return false;
@@ -488,15 +509,139 @@ export function buildNodeUsersBandwidthPath(now = new Date()): string {
 }
 
 /**
- * Unwraps the Remnawave `{ response: {...} }` envelope returned by the
- * create/update user endpoints. The panel wraps the user object under
- * `response`; callers need the inner object so `uuid` / `subscriptionUrl`
- * are read correctly (otherwise the profile link is silently lost — the
- * sync job "completes" but `remnawaveId` is never persisted).
+ * Decodes one `/api/users` row into a {@link RemnawavePanelUser}.
+ *
+ * Returns `null` for a row we cannot key — the identity is the row's handle
+ * everywhere downstream (`Subscription.remnawaveId`, the sharing-detector
+ * fingerprint, the overlay map key), and an empty one collapses every such
+ * row onto a single bucket. Callers MUST NOT quietly shorten a list by the
+ * nulls: {@link strictGetAllPanelUsers} counts them and refuses instead.
+ *
+ * WHICH FIELD IS THE IDENTITY depends on the panel era, and the row itself
+ * says which: 2.x rows carry `uuid`, 3.x rows have no such field and are keyed
+ * by the numeric `id`. Reading the row rather than asking `getPanelShape()`
+ * keeps this decoder synchronous and — more importantly — correct even when
+ * version detection is momentarily unavailable, because a row that HAS a uuid
+ * came from a panel that uses them.
+ *
+ * Before this, a 3.x row decoded to `null` for want of a `uuid`, and
+ * `strictGetAllPanelUsers` escalated a page of them to "none carried a usable
+ * uuid" — a whole-read refusal. Safe, but it took the bulk list, the import
+ * overlay and both anti-fraud bridges dark at once.
+ *
+ * MODULE-LEVEL, NOT A METHOD, because the WRITE path needs it too. It reads
+ * nothing off `this`, and `unwrapPanelUser` — the create/update response
+ * decoder — is a module function that used to cast instead of decode. Lifting
+ * this one out is what lets both directions share a single answer to "which
+ * field is the identity on this row".
  */
-function unwrapPanelUser(raw: unknown): RemnawavePanelUser {
+function parsePanelUserRow(candidate: unknown): RemnawavePanelUser | null {
+  if (typeof candidate !== 'object' || candidate === null) return null;
+  const value = candidate as Record<string, unknown>;
+  const panelId =
+    typeof value.id === 'number' && Number.isSafeInteger(value.id) ? value.id : null;
+  // The test is ABSENCE of the field, not emptiness of it, and the difference
+  // matters:
+  //   • no `uuid` key at all  → a 3.x row. Key it by the numeric id.
+  //   • `uuid` present but unusable (empty, wrong type) → a 2.x row that
+  //     arrived damaged. It must stay UNDECODABLE. Keying it by its numeric id
+  //     would mint a key that matches no `remnawaveId` stored from that era,
+  //     quietly turning "we could not read this row" into "this user is
+  //     unknown to us" — and the callers that act on absence would act.
+  const uuid =
+    value.uuid === undefined
+      ? panelId !== null
+        ? String(panelId)
+        : ''
+      : typeof value.uuid === 'string'
+        ? value.uuid
+        : '';
+  if (uuid.length === 0) return null;
+  return {
+    uuid,
+    username: typeof value.username === 'string' ? value.username : '',
+    status: typeof value.status === 'string' ? value.status : 'UNKNOWN',
+    subscriptionUrl: typeof value.subscriptionUrl === 'string' ? value.subscriptionUrl : '',
+    telegramId:
+      typeof value.telegramId === 'number'
+        ? value.telegramId
+        : typeof value.telegram_id === 'number'
+          ? (value.telegram_id as number)
+          : null,
+    panelId,
+    email: typeof value.email === 'string' ? value.email : null,
+    expireAt:
+      typeof value.expireAt === 'string'
+        ? value.expireAt
+        : value.expireAt instanceof Date
+          ? value.expireAt.toISOString()
+          : '',
+    createdAt:
+      typeof value.createdAt === 'string'
+        ? value.createdAt
+        : value.createdAt instanceof Date
+          ? value.createdAt.toISOString()
+          : '',
+    lastTrafficResetAt:
+      typeof value.lastTrafficResetAt === 'string'
+        ? value.lastTrafficResetAt
+        : value.lastTrafficResetAt instanceof Date
+          ? value.lastTrafficResetAt.toISOString()
+          : null,
+    trafficLimitBytes:
+      typeof value.trafficLimitBytes === 'number' ? value.trafficLimitBytes : 0,
+    hwidDeviceLimit:
+      typeof value.hwidDeviceLimit === 'number' ? value.hwidDeviceLimit : 0,
+    trafficLimitStrategy:
+      typeof value.trafficLimitStrategy === 'string'
+        ? value.trafficLimitStrategy
+        : null,
+    tag: typeof value.tag === 'string' ? value.tag : null,
+    description: typeof value.description === 'string' ? value.description : null,
+    activeInternalSquads: Array.isArray(value.activeInternalSquads)
+      ? (value.activeInternalSquads as Array<{ uuid: string; name: string }>).filter(
+          (squad) => typeof squad?.uuid === 'string' && typeof squad?.name === 'string',
+        )
+      : [],
+    externalSquadUuid:
+      typeof value.externalSquadUuid === 'string' ? value.externalSquadUuid : null,
+  };
+}
+
+/**
+ * Decodes the body of a create/update user write into a {@link RemnawavePanelUser}.
+ *
+ * A DECODER, NOT A CAST — and that distinction is the whole defect. The panel
+ * wraps the user object under `response`; unwrapping that envelope and then
+ * ASSERTING the inner object into the type is what this used to do, and on a
+ * 3.x panel it handed back an object whose `uuid` was `undefined` while its
+ * type said `string`. `persistProfileLink` wrote that `undefined` into
+ * `remnawaveId`, Prisma reads `undefined` as "leave this column alone", and the
+ * sync job COMPLETED having recorded no link at all: the profile existed on the
+ * panel, `remnawave_id` stayed NULL forever, and nothing retried because
+ * nothing had failed. Every READING path already went through
+ * {@link parsePanelUserRow}, which keys a 3.x row by its numeric `id` precisely
+ * because 3.x rows carry no `uuid` at all. Only the write path did not.
+ *
+ * THROWS rather than returning a half-decoded object. A 2xx whose body cannot
+ * be keyed is a contract problem, and the caller's very next act is to persist
+ * an identity — so "we could not read the answer" has to arrive there as a
+ * failure, not as an object full of `undefined`. The error is deliberately
+ * plain and unclassified, which `ProfileSyncProcessor.classifyRecovery` reads
+ * as TERMINAL: the same bytes will not decode on the next attempt either, and
+ * TERMINAL is the outcome that alerts an operator instead of being reset to
+ * PENDING every five minutes in silence.
+ */
+function unwrapPanelUser(raw: unknown, route: string): RemnawavePanelUser {
   const root = (raw as { response?: unknown } | null)?.response ?? raw;
-  return root as RemnawavePanelUser;
+  const user = parsePanelUserRow(root);
+  if (user === null) {
+    throw new Error(
+      `Remnawave ${route} answered with a user body carrying no usable identity ` +
+        '(neither a 2.x `uuid` nor a numeric 3.x `id`); refusing to record a profile link from it',
+    );
+  }
+  return user;
 }
 
 export interface RemnawaveHwidDevice {
@@ -1028,7 +1173,7 @@ export class RemnawaveApiService {
       activeInternalSquads: input.activeInternalSquads,
       externalSquadUuid: input.externalSquadUuid,
     });
-    return unwrapPanelUser(raw);
+    return unwrapPanelUser(raw, 'POST /api/users');
   }
 
   /**
@@ -1098,6 +1243,7 @@ export class RemnawaveApiService {
     if (baseUrl === null || token === null) {
       throw new ServiceUnavailableException('Remnawave integration is not configured');
     }
+    let raw: unknown;
     try {
       const response = await firstValueFrom(
         this.httpService.request<unknown>({
@@ -1113,7 +1259,7 @@ export class RemnawaveApiService {
           },
         }),
       );
-      return unwrapPanelUser(response.data);
+      raw = response.data;
     } catch (err: unknown) {
       // Only a 404 that carries Remnawave's own USER_NOT_FOUND envelope (code
       // A025 / "User not found") means the profile is genuinely gone. A bare 404
@@ -1137,6 +1283,14 @@ export class RemnawaveApiService {
       // rejected field is the KEY and the next attempt will send the other one.
       throw this.upstreamFailure(err, 'patch', '/api/users', await this.shapeMovedFor(err));
     }
+    // DECODED OUTSIDE THE CATCH, deliberately. Inside it, the "body carries no
+    // identity" error would be swallowed by the transport handler above and
+    // re-thrown as `upstreamFailure` — a ServiceUnavailableException, which
+    // `classifyRecovery` calls TRANSIENT — and would additionally fire a version
+    // re-probe (`shapeMovedFor`) for a panel that answered perfectly well. The
+    // transport succeeded; only our reading of it failed, and the two must not
+    // be reported as the same thing.
+    return unwrapPanelUser(raw, 'PATCH /api/users');
   }
 
   /**
@@ -1289,7 +1443,7 @@ export class RemnawaveApiService {
     // Through the row decoder, not a bare cast: a 3.x row has no `uuid`, and
     // the cast used to hand callers an object whose `uuid` was `undefined`
     // while its type said `string`.
-    const user = this.parsePanelUserRow(root);
+    const user = parsePanelUserRow(root);
     // A 200 whose body we cannot decode is a contract problem, not a missing
     // profile. Answering `missing` here would let a shape change read as
     // "every profile disappeared".
@@ -1319,7 +1473,7 @@ export class RemnawaveApiService {
       // profile" for a profile that exists and the sync would try to create a
       // duplicate, which the panel refuses with `400 username already exists`.
       // A stuck create loop, from one field name.
-      return this.parsePanelUserRow(root);
+      return parsePanelUserRow(root);
     } catch {
       return null;
     }
@@ -1553,100 +1707,6 @@ export class RemnawaveApiService {
         typeof record.subscriptionUrl === 'string' && record.subscriptionUrl.length > 0
           ? record.subscriptionUrl
           : null,
-    };
-  }
-
-  /**
-   * Decodes one `/api/users` row into a {@link RemnawavePanelUser}.
-   *
-   * Returns `null` for a row we cannot key — the identity is the row's handle
-   * everywhere downstream (`Subscription.remnawaveId`, the sharing-detector
-   * fingerprint, the overlay map key), and an empty one collapses every such
-   * row onto a single bucket. Callers MUST NOT quietly shorten a list by the
-   * nulls: {@link strictGetAllPanelUsers} counts them and refuses instead.
-   *
-   * WHICH FIELD IS THE IDENTITY depends on the panel era, and the row itself
-   * says which: 2.x rows carry `uuid`, 3.x rows have no such field and are keyed
-   * by the numeric `id`. Reading the row rather than asking `getPanelShape()`
-   * keeps this decoder synchronous and — more importantly — correct even when
-   * version detection is momentarily unavailable, because a row that HAS a uuid
-   * came from a panel that uses them.
-   *
-   * Before this, a 3.x row decoded to `null` for want of a `uuid`, and
-   * `strictGetAllPanelUsers` escalated a page of them to "none carried a usable
-   * uuid" — a whole-read refusal. Safe, but it took the bulk list, the import
-   * overlay and both anti-fraud bridges dark at once.
-   */
-  private parsePanelUserRow(candidate: unknown): RemnawavePanelUser | null {
-    if (typeof candidate !== 'object' || candidate === null) return null;
-    const value = candidate as Record<string, unknown>;
-    const panelId =
-      typeof value.id === 'number' && Number.isSafeInteger(value.id) ? value.id : null;
-    // The test is ABSENCE of the field, not emptiness of it, and the difference
-    // matters:
-    //   • no `uuid` key at all  → a 3.x row. Key it by the numeric id.
-    //   • `uuid` present but unusable (empty, wrong type) → a 2.x row that
-    //     arrived damaged. It must stay UNDECODABLE. Keying it by its numeric id
-    //     would mint a key that matches no `remnawaveId` stored from that era,
-    //     quietly turning "we could not read this row" into "this user is
-    //     unknown to us" — and the callers that act on absence would act.
-    const uuid =
-      value.uuid === undefined
-        ? panelId !== null
-          ? String(panelId)
-          : ''
-        : typeof value.uuid === 'string'
-          ? value.uuid
-          : '';
-    if (uuid.length === 0) return null;
-    return {
-      uuid,
-      username: typeof value.username === 'string' ? value.username : '',
-      status: typeof value.status === 'string' ? value.status : 'UNKNOWN',
-      subscriptionUrl: typeof value.subscriptionUrl === 'string' ? value.subscriptionUrl : '',
-      telegramId:
-        typeof value.telegramId === 'number'
-          ? value.telegramId
-          : typeof value.telegram_id === 'number'
-            ? (value.telegram_id as number)
-            : null,
-      panelId,
-      email: typeof value.email === 'string' ? value.email : null,
-      expireAt:
-        typeof value.expireAt === 'string'
-          ? value.expireAt
-          : value.expireAt instanceof Date
-            ? value.expireAt.toISOString()
-            : '',
-      createdAt:
-        typeof value.createdAt === 'string'
-          ? value.createdAt
-          : value.createdAt instanceof Date
-            ? value.createdAt.toISOString()
-            : '',
-      lastTrafficResetAt:
-        typeof value.lastTrafficResetAt === 'string'
-          ? value.lastTrafficResetAt
-          : value.lastTrafficResetAt instanceof Date
-            ? value.lastTrafficResetAt.toISOString()
-            : null,
-      trafficLimitBytes:
-        typeof value.trafficLimitBytes === 'number' ? value.trafficLimitBytes : 0,
-      hwidDeviceLimit:
-        typeof value.hwidDeviceLimit === 'number' ? value.hwidDeviceLimit : 0,
-      trafficLimitStrategy:
-        typeof value.trafficLimitStrategy === 'string'
-          ? value.trafficLimitStrategy
-          : null,
-      tag: typeof value.tag === 'string' ? value.tag : null,
-      description: typeof value.description === 'string' ? value.description : null,
-      activeInternalSquads: Array.isArray(value.activeInternalSquads)
-        ? (value.activeInternalSquads as Array<{ uuid: string; name: string }>).filter(
-            (squad) => typeof squad?.uuid === 'string' && typeof squad?.name === 'string',
-          )
-        : [],
-      externalSquadUuid:
-        typeof value.externalSquadUuid === 'string' ? value.externalSquadUuid : null,
     };
   }
 
@@ -2994,7 +3054,7 @@ export class RemnawaveApiService {
       longestPage = Math.max(longestPage, usersPayload.length);
 
       for (const candidate of usersPayload) {
-        const user = this.parsePanelUserRow(candidate);
+        const user = parsePanelUserRow(candidate);
         if (user !== null) decoded.push(user);
       }
 
@@ -3262,8 +3322,9 @@ export class RemnawaveApiService {
    * (terminates entitlements, closes terms, `status = DELETED`, enqueues a panel
    * DELETE), and the backup importers write EXPIRED over a live row. So here a
    * 404 only means "gone" when the PANEL said so: Remnawave answers a missing
-   * user with its own USER_NOT_FOUND envelope (`A025` / "User not found" — see
-   * the vendored `@remnawave/backend-contract`). A bare 404 carries no envelope
+   * user with its own no-such-user envelope — and on THIS route that envelope is
+   * `A063` / "User with specified params not found", not the `A025` the write
+   * endpoints answer with; both are pinned in `PANEL_USER_NOT_FOUND_ERROR_CODES`. A bare 404 carries no envelope
    * — a reverse proxy mid-deploy, a wrong host, an upstream with no healthy
    * backend — and during one of those EVERY request 404s, so reading it as
    * "gone" deletes a whole batch of live subscriptions per sweep: precisely the

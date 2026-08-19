@@ -364,6 +364,57 @@ describe('PaymentReconciliationService reconciliation side effects', () => {
     assert.equal(gatewayData.refundRevokedFromStatus, 'ACTIVE');
   });
 
+  it('records that a refund could not reach the panel when the link is missing', async () => {
+    // HALF A REVOCATION, PREVIOUSLY REPORTED AS A WHOLE ONE.
+    //
+    // The row below is expired locally with `expiresAt = now`, so rezeis
+    // believes the refunded customer has no access. The panel is never told,
+    // because there is no id to tell it with — the create/update decoder used
+    // to cast an undecoded 3.x body, leaving `uuid` and `id` undefined while
+    // the panel username landed — so the profile keeps serving traffic on
+    // whatever expiry it last received. Nothing retries: the revocation is
+    // one-shot best-effort and no sweep revisits it.
+    //
+    // The old code just did not enter the `remnawaveId !== null` branch, and
+    // the transaction's audit blob came out identical to a refund whose panel
+    // push succeeded.
+    const state = createState({
+      eventStatus: 'REFUNDED',
+      initialTransactionStatus: TransactionStatus.COMPLETED,
+      refreshedSubscriptionId: 'subscription-1',
+      refreshedFulfilledAt: new Date('2026-04-19T11:00:00.000Z'),
+      subscriptionRow: {
+        id: 'subscription-1',
+        remnawaveId: null,
+        remnawavePanelUsername: 'rz_frank_1',
+        status: SubscriptionStatus.ACTIVE,
+        expiresAt: new Date('2026-05-19T12:00:00.000Z'),
+      },
+    });
+    const service = createService(state);
+
+    await service.reconcileWebhookEvent('event-1');
+
+    // Local access is still cut — that half is unchanged and must stay.
+    assert.equal(state.subscriptionUpdateCalls.length, 1);
+    assert.equal(state.subscriptionUpdateCalls[0].data.status, 'EXPIRED');
+    // And still no job, because there is nothing to address.
+    assert.deepStrictEqual(state.syncJobCreateCalls, []);
+
+    // The audit now says so, and names the profile still running.
+    const gatewayData = state.transactionUpdateCalls[0].data.gatewayData as Record<string, unknown>;
+    assert.equal(gatewayData.subscriptionRevoked, true);
+    assert.equal(gatewayData.refundRevocationPanelPushSkipped, true);
+    assert.equal(
+      gatewayData.refundRevocationPanelPushSkippedReason,
+      'SUBSCRIPTION_HAS_NO_PANEL_LINK',
+    );
+    assert.equal(gatewayData.refundRevocationStrandedPanelUsername, 'rz_frank_1');
+    // The pre-refund state is still captured, so the earlier audit keys are not
+    // clobbered by the new ones.
+    assert.equal(gatewayData.refundRevokedFromStatus, 'ACTIVE');
+  });
+
   it('does NOT revoke a subscription that later payments extended', async () => {
     // RENEW updates the same subscription row, and the original NEW transaction
     // keeps pointing at it. A chargeback months later must not burn access the
@@ -1045,6 +1096,7 @@ function createState(input: {
   readonly subscriptionRow?: {
     readonly id: string;
     readonly remnawaveId: string | null;
+    readonly remnawavePanelUsername?: string | null;
     readonly status: SubscriptionStatus;
     readonly expiresAt: Date | null;
   } | null;
@@ -1110,6 +1162,7 @@ function createState(input: {
         ? {
             id: 'subscription-1',
             remnawaveId: 'rw-1',
+            remnawavePanelUsername: 'rz_default_1',
             status: SubscriptionStatus.ACTIVE,
             expiresAt: new Date('2026-05-19T12:00:00.000Z'),
           }

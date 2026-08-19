@@ -21,6 +21,7 @@ interface LockedRow {
   remnawaveId: string | null;
   remnawavePanelId: number | null;
   remnawavePanelUsername: string | null;
+  configUrl?: string | null;
   expiresAt?: Date | null;
 }
 
@@ -40,6 +41,11 @@ function lockedRow(seed: LockedRowSeed): LockedRow {
   return {
     remnawavePanelId: 4471,
     remnawavePanelUsername: 'rz_bob_1',
+    // NOT defaulted to a URL. `configUrl` is only ever read together with a
+    // NULL `remnawaveId`, where the pair is the fingerprint of a row whose
+    // panel link was lost — so filling it by default would silently mark every
+    // unlinked fixture as damaged goods.
+    configUrl: null,
     ...seed,
   };
 }
@@ -62,6 +68,13 @@ interface FakeState {
     metadata: Readonly<Record<string, unknown>>;
   }>;
   loggedErrors: string[];
+  loggedWarnings: string[];
+  warnedEvents: Array<{
+    type: string;
+    category: string;
+    message: string;
+    metadata: Readonly<Record<string, unknown>>;
+  }>;
   lifecycleCalls: Array<{ kind: 'entitlements' | 'terms'; subscriptionId: string; tx: unknown }>;
   deletionWork: string[];
   lockedSubscription?: LockedRow | null;
@@ -140,6 +153,14 @@ function buildService(state: FakeState) {
     ) => {
       state.emittedEvents.push({ type, category, message, metadata });
     },
+    warn: (
+      type: string,
+      category: string,
+      message: string,
+      metadata: Readonly<Record<string, unknown>>,
+    ) => {
+      state.warnedEvents.push({ type, category, message, metadata });
+    },
   };
   const entitlements = {
     terminateForSubscriptionDeletion: async (
@@ -163,11 +184,14 @@ function buildService(state: FakeState) {
   );
   const logger = (
     service as unknown as {
-      logger: { error: (message: string) => void };
+      logger: { error: (message: string) => void; warn: (message: string) => void };
     }
   ).logger;
   logger.error = (message: string) => {
     state.loggedErrors.push(message);
+  };
+  logger.warn = (message: string) => {
+    state.loggedWarnings.push(message);
   };
   return service;
 }
@@ -182,6 +206,8 @@ function freshState(
     enqueued: [],
     emittedEvents: [],
     loggedErrors: [],
+    loggedWarnings: [],
+    warnedEvents: [],
     lifecycleCalls: [],
     deletionWork: [],
   };
@@ -351,11 +377,18 @@ describe('SubscriptionDeletionService', () => {
   });
 
   it('skips revocation when there is no Remnawave profile, still flips status', async () => {
+    // A row that was NEVER provisioned: no id, no panel username, no config
+    // URL. Spelled out rather than left to the fixture defaults, because the
+    // silence here is the correct one and the test below turns on the contrast
+    // between this row and one that merely LOST its id.
     const state = freshState({
       id: 'sub-1',
       userId: 'user-1',
       status: SubscriptionStatus.ACTIVE,
       remnawaveId: null,
+      remnawavePanelId: null,
+      remnawavePanelUsername: null,
+      configUrl: null,
     });
     const service = buildService(state);
 
@@ -366,6 +399,54 @@ describe('SubscriptionDeletionService', () => {
     assert.equal(state.createdJobs.length, 0);
     assert.deepStrictEqual(state.enqueued, []);
     assert.equal(state.emittedEvents.length, 1);
+    // Nothing was left behind, so nothing is said. An alert that also fires for
+    // the ordinary case is an alert operators stop reading.
+    assert.deepStrictEqual(state.warnedEvents, []);
+    assert.deepStrictEqual(state.loggedWarnings, []);
+  });
+
+  it('reports the orphaned panel profile when a row with a lost link is retired', async () => {
+    // THE ROW THE DECODER DEFECT LEFT BEHIND. The create/update response used to
+    // be cast rather than decoded, so on 3.x `uuid` and `id` arrived undefined
+    // — Prisma skips undefined columns — while the panel username and the
+    // subscription URL, which came from arguments, landed. The panel profile is
+    // LIVE; the row simply cannot name it.
+    //
+    // Retiring it takes the last thing that pointed at that profile out of
+    // reach: the row is now DELETED, so it leaves the cabinet, leaves every
+    // sweep, and leaves the reconciliation repair (which skips DELETED rows).
+    // The customer keeps their service and stops being billed for it, and the
+    // old code reported this exactly as it reports deleting a row that never
+    // had a profile — `syncJobId: null`, one INFO event, nothing else.
+    const state = freshState({
+      id: 'sub-damaged',
+      userId: 'user-7',
+      status: SubscriptionStatus.ACTIVE,
+      remnawaveId: null,
+      remnawavePanelId: null,
+      remnawavePanelUsername: 'rz_dana_1',
+      configUrl: 'https://sub.example.test/api/sub/ddd',
+    });
+    const service = buildService(state);
+
+    const result = await service.delete({ userId: 'user-7', subscriptionId: 'sub-damaged' });
+
+    // The deletion itself is unchanged: still final, still no revocation job —
+    // there is no identity to build one from.
+    assert.deepStrictEqual(result, { deleted: true });
+    assert.equal(state.updatedStatus, SubscriptionStatus.DELETED);
+    assert.equal(state.createdJobs.length, 0);
+    assert.deepStrictEqual(state.enqueued, []);
+
+    // What changed is that an operator is told, and told the one fact that lets
+    // them act: the name the profile still answers to in the panel.
+    assert.equal(state.warnedEvents.length, 1);
+    assert.equal(state.warnedEvents[0]?.category, 'SYSTEM');
+    assert.equal(state.warnedEvents[0]?.metadata.panelUsername, 'rz_dana_1');
+    assert.equal(state.warnedEvents[0]?.metadata.subscriptionId, 'sub-damaged');
+    assert.equal(state.warnedEvents[0]?.metadata.source, 'SELF_SERVICE_DELETE');
+    assert.equal(state.loggedWarnings.length, 1);
+    assert.match(state.loggedWarnings[0] ?? '', /rz_dana_1/);
   });
 
   it('keeps the committed PENDING delete job recoverable when the immediate queue push fails', async () => {

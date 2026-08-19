@@ -50,6 +50,10 @@ import { PartnerEarningsService } from '../../partners/services/partner-earnings
 import { ReferralInviteLimitsService } from '../../referrals/services/referral-invite-limits.service';
 import { ReferralManualAttachService } from '../../referrals/services/referral-manual-attach.service';
 import { ReferralQualificationService } from '../../referrals/services/referral-qualification.service';
+import {
+  storedIdentityOf,
+  type PanelIdentityColumns,
+} from '../../remnawave/services/panel-user-address';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
 import { StealthnetReferralSyncService } from '../../imports/services/stealthnet-referral-sync.service';
 import { AdjustUserPartnerBalanceDto } from '../dto/adjust-user-partner-balance.dto';
@@ -843,8 +847,18 @@ export class AdminUserManagementController {
    *   never breaks the whole user-detail response.
    * - Done in parallel via `Promise.allSettled` to keep the user-detail
    *   endpoint snappy even when the panel is slow.
+   *
+   * THE FULL IDENTITY IS PASSED, not the bare `remnawaveId` string, and on a
+   * 3.x panel that is the difference between a name and a blank. A profile
+   * created on 2.x still stores its uuid here after the operator upgrades —
+   * the panel's own migration drops the column, we do not — and a uuid in a
+   * 3.x id slot earns `400 expected number, received NaN`, which this method
+   * swallows into `null`. `storedIdentityOf` hands the adapter the numeric id
+   * and the panel username as well, which is what every other caller already
+   * does; the columns it reads are already in the row (the `findMany` behind
+   * this list runs without a `select`).
    */
-  private async enrichSubscriptionsWithRemnawave<T extends { readonly remnawaveId: string | null }>(
+  private async enrichSubscriptionsWithRemnawave<T extends PanelIdentityColumns>(
     subscriptions: readonly T[],
   ): Promise<Array<T & {
     readonly remnawaveProfileName: string | null;
@@ -852,14 +866,15 @@ export class AdminUserManagementController {
   }>> {
     const enriched = await Promise.allSettled(
       subscriptions.map(async (sub): Promise<T & { remnawaveProfileName: string | null; remnawaveProfileDescription: string | null }> => {
-        if (!sub.remnawaveId) {
+        const identity = storedIdentityOf(sub);
+        if (identity === null) {
           return {
             ...sub,
             remnawaveProfileName: null,
             remnawaveProfileDescription: null,
           };
         }
-        const panelUser = await this.remnawaveApiService.getPanelUser(sub.remnawaveId);
+        const panelUser = await this.remnawaveApiService.getPanelUser(identity);
         return {
           ...sub,
           remnawaveProfileName: panelUser?.username ?? null,

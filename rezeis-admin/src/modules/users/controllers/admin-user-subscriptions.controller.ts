@@ -252,6 +252,31 @@ export class AdminUserSubscriptionsController {
       }
     }
 
+    if (outcome.remnawaveLinkRequired) {
+      // The operator already sees this: the response flag drives a toast on the
+      // user detail panel. What was missing is a DURABLE trace — the toast is
+      // gone the moment the screen is closed, and the divergence it announced
+      // is not: the row now holds limits, squads or an expiry that its panel
+      // profile does not, with no job queued and nothing that will ever
+      // reconcile the two. Weeks later, "why is this customer on the old
+      // device limit" has no record to answer it.
+      //
+      // WARNING and not ERROR, and no refusal: refusing to save would leave an
+      // operator no way to correct a row at all, and provisioning a profile
+      // from a generic edit is exactly what this branch exists to prevent —
+      // creation stays the explicit "give subscription" flow.
+      this.systemEvents.warn(
+        EVENT_TYPES.SYSTEM_REMNAWAVE_SYNC,
+        'SYSTEM',
+        'Admin subscription update saved locally only — no Remnawave link to push it through',
+        {
+          subscriptionId,
+          userId: outcome.updated.userId,
+          remnawavePanelUsername: outcome.updated.remnawavePanelUsername,
+        },
+      );
+    }
+
     return {
       ...outcome.updated,
       syncPending: outcome.syncJobId !== null,

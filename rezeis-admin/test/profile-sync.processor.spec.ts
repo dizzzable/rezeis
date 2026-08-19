@@ -731,7 +731,7 @@ describe('ProfileSyncProcessor', () => {
         },
         subscription: {
           findMany: async (input: unknown) => { queries.push(input); return claimants; },
-          updateMany: async () => undefined,
+          updateMany: async () => ({ count: 1 }),
         },
       } as never,
       {
@@ -861,7 +861,10 @@ describe('ProfileSyncProcessor', () => {
           update: async (input: unknown) => { subscriptionUpdates.push(input); },
         },
         subscription: {
-          updateMany: async (input: unknown) => { subscriptionUpdates.push(input); },
+          // ZERO, faithfully: the row points at `rem-user-new` and the fence
+          // names `rem-user-old`, so nothing matches — which is the CORRECT
+          // outcome here and must not be reported as a divergence.
+          updateMany: async (input: unknown) => { subscriptionUpdates.push(input); return { count: 0 }; },
         },
       } as never,
       {
@@ -884,7 +887,10 @@ describe('ProfileSyncProcessor', () => {
       { remnawaveId: 'rem-user-old', panelId: null, panelUsername: null },
     ]);
     assert.deepEqual(subscriptionUpdates, [{
-      where: { id: 'subscription-1', remnawaveId: 'rem-user-old' },
+      // Two-angled, and with only ONE arm: no numeric id was ever recorded for
+      // the stale target, and `remnawavePanelId: null` would match every row
+      // that has none.
+      where: { id: 'subscription-1', OR: [{ remnawaveId: 'rem-user-old' }] },
       // The supplementary columns detach with the id they describe: a numeric
       // id left behind would let a later re-provision inherit the DELETED
       // profile's identity and address the corpse.
@@ -923,7 +929,7 @@ describe('ProfileSyncProcessor', () => {
           update: async () => undefined,
         },
         subscription: {
-          updateMany: async (input: unknown) => { subscriptionUpdates.push(input); },
+          updateMany: async (input: unknown) => { subscriptionUpdates.push(input); return { count: 1 }; },
         },
         $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
           // The advisory lock the exclusivity guard takes before the row lock.
@@ -959,7 +965,10 @@ describe('ProfileSyncProcessor', () => {
     await processor.process({ data: { syncJobId: 'sync-job-1' } } as never);
 
     assert.deepEqual(subscriptionUpdates, [{
-      where: { id: 'subscription-1', remnawaveId: 'rem-user-1' },
+      // One profile answers to two names across the eras, so the fence asks
+      // about both. This fixture row never recorded a numeric id, so the
+      // numeric arm is OMITTED rather than compared against null.
+      where: { id: 'subscription-1', OR: [{ remnawaveId: 'rem-user-1' }] },
       // The supplementary columns detach with the id they describe: a numeric
       // id left behind would let a later re-provision inherit the DELETED
       // profile's identity and address the corpse.
@@ -2820,7 +2829,7 @@ describe('ProfileSyncProcessor — live state must survive the safeguards', () =
         },
         subscription: {
           findMany: async () => options.claimants,
-          updateMany: async () => undefined,
+          updateMany: async () => ({ count: 1 }),
         },
       } as never,
       {
@@ -3017,5 +3026,259 @@ describe('ProfileSyncProcessor — a failure before the claim is still a failure
 
     await assert.rejects(attempt.run(), /remnawave_panel_id/);
     assert.deepEqual(attempt.writes, []);
+  });
+});
+
+/**
+ * The two writes that used to lose a panel profile without failing.
+ *
+ * Both are the same shape of bug: a statement whose result nobody read. The
+ * CREATE path handed Prisma an `undefined` identity, which Prisma treats as
+ * "leave this column alone", and the job COMPLETED with `remnawave_id` still
+ * NULL. The DELETE path fenced its retirement on ONE of the profile's two
+ * lawful names, matched zero rows on an upgraded panel, and left the
+ * subscription non-DELETED with no service behind it. Neither raised anything.
+ */
+describe('ProfileSyncProcessor — a panel identity that will not decode fails the job', () => {
+  function createWithPanelUser(panelUser: Record<string, unknown>) {
+    const jobWrites: Array<{ readonly data: Record<string, unknown> }> = [];
+    const subscriptionWrites: unknown[] = [];
+    const transactionsOpened: unknown[] = [];
+    const processor = new ProfileSyncProcessor(
+      {
+        profileSyncJob: {
+          findUnique: async () => ({
+            id: 'sync-job-1',
+            action: SyncAction.CREATE,
+            status: SyncJobStatus.PENDING,
+            attempts: 0,
+            createdAt: new Date(),
+            supersededAt: null,
+            subscription: {
+              id: 'subscription-1',
+              userId: 'user-1',
+              remnawaveId: null,
+              trafficLimit: null,
+              deviceLimit: 0,
+              internalSquads: [],
+              externalSquad: null,
+              expiresAt: new Date('2099-02-01T00:00:00.000Z'),
+              planSnapshot: {},
+            },
+          }),
+          updateMany: async (input: { readonly data: Record<string, unknown> }) => {
+            jobWrites.push(input);
+            return { count: 1 };
+          },
+          update: async () => undefined,
+        },
+        subscription: {
+          updateMany: async (input: unknown) => { subscriptionWrites.push(input); return { count: 1 }; },
+        },
+        // Opening it at all is already the bug: the guard must refuse BEFORE a
+        // transaction is started, so the advisory lock is never taken under a
+        // key built from an unusable identity.
+        $transaction: async () => {
+          transactionsOpened.push(true);
+          throw new Error('persistProfileLink opened a transaction for an unusable identity');
+        },
+      } as never,
+      {
+        getPanelUserByUsername: async () => null,
+        createPanelUser: async () => panelUser,
+      } as never,
+      {
+        generateProfileName: async () => ({ username: 'rz_subscription_1', description: 'd' }),
+        getContactInfo: async () => ({ email: null, telegramId: null }),
+      } as never,
+      { error: () => undefined, info: () => undefined, warn: () => undefined } as never,
+    );
+    return {
+      go: () => processor.process({ data: { syncJobId: 'sync-job-1' } } as never),
+      jobWrites,
+      subscriptionWrites,
+      transactionsOpened,
+    };
+  }
+
+  it('refuses a created profile whose identity did not decode, instead of completing empty', async () => {
+    // EXACTLY the object the pre-fix `unwrapPanelUser` produced on a 3.x panel:
+    // the declared type promises `uuid: string`, and the panel never sent that
+    // field at all. This is the shape that reached Prisma in production.
+    const attempt = createWithPanelUser({
+      uuid: undefined,
+      panelId: undefined,
+      username: 'rz_subscription_1',
+      subscriptionUrl: 'https://sub.example/created',
+      createdAt: '2026-01-15T12:30:00.000Z',
+    });
+
+    await assert.rejects(attempt.go(), /empty Remnawave identity/);
+
+    assert.deepEqual(attempt.transactionsOpened, [], 'no transaction, hence no advisory lock');
+    assert.deepEqual(attempt.subscriptionWrites, [], 'nothing may be written');
+    // …and the job is FAILED, never COMPLETED. That is the whole difference:
+    // before, this exact input produced a COMPLETED job and a NULL column.
+    const statuses = attempt.jobWrites.map((write) => write.data['status']);
+    assert.ok(statuses.includes(SyncJobStatus.FAILED), `expected a FAILED write, got ${statuses.join(', ')}`);
+    assert.equal(statuses.includes(SyncJobStatus.COMPLETED), false);
+  });
+
+  it('refuses an empty-string identity for the same reason', async () => {
+    const attempt = createWithPanelUser({
+      uuid: '',
+      panelId: 4471,
+      username: 'rz_subscription_1',
+      subscriptionUrl: 'https://sub.example/created',
+      createdAt: '2026-01-15T12:30:00.000Z',
+    });
+
+    await assert.rejects(attempt.go(), /empty Remnawave identity/);
+    assert.deepEqual(attempt.transactionsOpened, []);
+    assert.deepEqual(attempt.subscriptionWrites, []);
+  });
+});
+
+describe('ProfileSyncProcessor — retiring the row is fenced on BOTH era names', () => {
+  const UUID = '330f2b38-1362-46ab-b5c0-dea32167eff9';
+
+  function run(options: {
+    readonly rowRemnawaveId: string | null;
+    readonly rowPanelId: number | null;
+    readonly payload: Record<string, unknown>;
+    /** What the fenced `updateMany` reports it touched. */
+    readonly retiredCount?: number;
+  }) {
+    const retireWheres: unknown[] = [];
+    const errorEvents: unknown[][] = [];
+    const processor = new ProfileSyncProcessor(
+      {
+        profileSyncJob: {
+          findUnique: async () => ({
+            id: 'sync-job-delete',
+            action: SyncAction.DELETE,
+            status: SyncJobStatus.PENDING,
+            attempts: 0,
+            supersededAt: null,
+            createdAt: new Date(),
+            payload: options.payload,
+            subscription: {
+              id: 'subscription-1',
+              userId: 'user-1',
+              // Retired at enqueue time, as every producer of a DELETE job does.
+              status: SubscriptionStatus.DELETED,
+              remnawaveId: options.rowRemnawaveId,
+              remnawavePanelId: options.rowPanelId,
+              remnawavePanelUsername: 'rz_john_sub',
+              trafficLimit: null,
+              deviceLimit: 0,
+              internalSquads: [],
+              externalSquad: null,
+              expiresAt: new Date('2020-01-01T00:00:00.000Z'),
+              planSnapshot: {},
+            },
+          }),
+          updateMany: async () => ({ count: 1 }),
+          update: async () => undefined,
+        },
+        subscription: {
+          findMany: async () => [],
+          updateMany: async (input: { readonly where: unknown }) => {
+            retireWheres.push(input.where);
+            return { count: options.retiredCount ?? 1 };
+          },
+        },
+      } as never,
+      { deletePanelUser: async () => ({ isDeleted: true }) } as never,
+      {} as never,
+      {
+        error: (...args: unknown[]) => { errorEvents.push(args); },
+        info: () => undefined,
+        warn: () => undefined,
+      } as never,
+    );
+    return {
+      go: () => processor.process({ data: { syncJobId: 'sync-job-delete' } } as never),
+      retireWheres,
+      errorEvents,
+    };
+  }
+
+  it('asks about the NUMERIC id too, so a job targeting the 2.x uuid still retires the row', async () => {
+    // The subscription was provisioned on 2.x and its DELETE was enqueued under
+    // the uuid. The operator then upgraded, the profile was re-linked under its
+    // 3.x name, and the row now stores the decimal. Both strings name ONE panel
+    // profile, so comparing only `remnawave_id` finds them unequal, touches no
+    // rows, and leaves the subscription live over a profile that is gone.
+    const attempt = run({
+      rowRemnawaveId: '4471',
+      rowPanelId: 4471,
+      payload: {
+        targetRemnawaveId: UUID,
+        targetRemnawavePanelId: 4471,
+        targetRemnawavePanelUsername: 'rz_john_sub',
+      },
+    });
+
+    await attempt.go();
+
+    assert.deepEqual(attempt.retireWheres, [
+      { id: 'subscription-1', OR: [{ remnawaveId: UUID }, { remnawavePanelId: 4471 }] },
+    ]);
+    assert.deepEqual(attempt.errorEvents, [], 'a matched fence is not a divergence');
+  });
+
+  it('OMITS the numeric arm when no panel id is known — null would match every such row', async () => {
+    // `remnawave_panel_id` carries no unique constraint, and the only other
+    // predicate here is the row's own id. A `remnawavePanelId: null` arm would
+    // therefore turn "this row, if it still holds the target" into "this row,
+    // unconditionally", and retire it on a genuine mismatch.
+    const attempt = run({
+      rowRemnawaveId: 'rem-user-1',
+      rowPanelId: null,
+      payload: { targetRemnawaveId: 'rem-user-1' },
+    });
+
+    await attempt.go();
+
+    assert.deepEqual(attempt.retireWheres, [
+      { id: 'subscription-1', OR: [{ remnawaveId: 'rem-user-1' }] },
+    ]);
+  });
+
+  it('reports a fence that matched nothing while the row still names the deleted profile', async () => {
+    // The panel profile is gone and the row still points at it, so the row is
+    // live with no service behind it. `count` is the only place that shows.
+    const attempt = run({
+      rowRemnawaveId: '4471',
+      rowPanelId: 4471,
+      payload: {
+        targetRemnawaveId: '4471',
+        targetRemnawavePanelId: 4471,
+        targetRemnawavePanelUsername: 'rz_john_sub',
+      },
+      retiredCount: 0,
+    });
+
+    await attempt.go();
+
+    assert.equal(attempt.errorEvents.length, 1);
+    assert.match(String(attempt.errorEvents[0]![2]), /still names the profile that was just deleted/);
+  });
+
+  it('stays quiet when the row simply moved on to another profile', async () => {
+    // Zero rows here is CORRECT — the row was re-provisioned while the DELETE
+    // was in flight and must keep its live link. Paging for it would page on a
+    // documented, healthy path.
+    const attempt = run({
+      rowRemnawaveId: 'rem-user-new',
+      rowPanelId: null,
+      payload: { targetRemnawaveId: 'rem-user-old' },
+      retiredCount: 0,
+    });
+
+    await attempt.go();
+
+    assert.deepEqual(attempt.errorEvents, []);
   });
 });

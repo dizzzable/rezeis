@@ -40,7 +40,18 @@ api.interceptors.response.use(
       // Do not redirect if the failed request was the auth probe itself —
       // the auth provider is already going to clear the session in that case.
       const isAuthProbe = typeof original?.url === "string" && original.url.includes("/admin/auth/me");
-      if (!isAuthProbe) {
+      // Nor if it was the sign-in request itself. A 401 there is the login
+      // form's own answer — "wrong password", or the `totp_required` pivot to
+      // the second factor — never an expired session, because there is no
+      // session yet. The redirect below is already a no-op on this route (the
+      // path matches), but `forceEndAdminSession` still runs
+      // `queryClient.clear()`, which removes the sign-in page's own
+      // `auth-status` query. Nothing changes at that instant; the next
+      // re-render of the page rebuilds that query as pending, shows the
+      // loading skeleton, and unmounts the form mid-login — throwing the
+      // operator back to step one just as the code field should appear.
+      const isSignIn = typeof original?.url === "string" && original.url.includes("/admin/auth/login");
+      if (!isAuthProbe && !isSignIn) {
         forceEndAdminSession();
       }
     }

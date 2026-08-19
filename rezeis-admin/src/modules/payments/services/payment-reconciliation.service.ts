@@ -1110,7 +1110,15 @@ export class PaymentReconciliationService {
 
       const subscription = await this.prismaService.subscription.findUnique({
         where: { id: transaction.subscriptionId },
-        select: { id: true, remnawaveId: true, status: true, expiresAt: true },
+        // The panel username is selected only so the warning below can name
+        // the profile an operator has to go and cut off by hand.
+        select: {
+          id: true,
+          remnawaveId: true,
+          remnawavePanelUsername: true,
+          status: true,
+          expiresAt: true,
+        },
       });
       if (subscription === null || subscription.status === SubscriptionStatus.DELETED) {
         return { revoked: false, needsManualReview: false, audit: {} };
@@ -1157,6 +1165,41 @@ export class PaymentReconciliationService {
           select: { id: true },
         });
         jobId = job.id;
+      } else {
+        // THE LOCAL HALF OF THE REVOCATION LANDED AND THE PANEL HALF DID NOT,
+        // and until now that was reported as a complete revocation.
+        //
+        // The row above is already EXPIRED with `expiresAt = now`, so rezeis
+        // believes the refunded customer has no access. The panel was never
+        // told, because there is no identity to tell it with — so the profile
+        // keeps serving traffic on whatever `expireAt` it was last given, for a
+        // purchase that has been refunded. Nothing retries: the revocation is a
+        // one-shot best-effort, and no sweep revisits it.
+        //
+        // Recorded in the audit blob rather than only logged, because the audit
+        // travels with the transaction: an operator looking at the refund later
+        // sees why the customer still had service, without correlating logs.
+        // `needsManualReview` is deliberately NOT flipped — the money-side
+        // reversal succeeded and re-routing it into the manual queue would
+        // change how refunds are settled, which is a decision for the payments
+        // owner, not a side effect of adding a warning.
+        audit = {
+          ...audit,
+          refundRevocationPanelPushSkipped: true,
+          refundRevocationPanelPushSkippedReason: 'SUBSCRIPTION_HAS_NO_PANEL_LINK',
+          refundRevocationStrandedPanelUsername: subscription.remnawavePanelUsername,
+        };
+        const message =
+          `Refunded transaction ${transaction.id}: subscription ${subscription.id} was expired ` +
+          'locally but carries no Remnawave id, so the panel was never told. The profile ' +
+          `(panel username '${subscription.remnawavePanelUsername ?? 'unknown'}') is still live ` +
+          'for a refunded purchase — cut it off by hand.';
+        this.logger.warn(message);
+        this.systemEvents.warn(EVENT_TYPES.SYSTEM_REMNAWAVE_SYNC, 'SYSTEM', message, {
+          transactionId: transaction.id,
+          subscriptionId: subscription.id,
+          panelUsername: subscription.remnawavePanelUsername,
+        });
       }
     } catch (error: unknown) {
       this.logger.error(

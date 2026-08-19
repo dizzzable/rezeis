@@ -46,9 +46,19 @@ function settingsMock(policy: { deleteEnabled?: boolean; graceDays?: number } = 
   } as never;
 }
 
-/** SystemEventsService mock — records `info` calls. */
-function eventsMock(sink: Array<readonly unknown[]> = []) {
-  return { info: (...args: unknown[]) => { sink.push(args); } } as never;
+/**
+ * SystemEventsService mock — records `info` calls, and `warn` calls into a
+ * SEPARATE sink so a test that asserts on the info stream cannot be satisfied
+ * by a warning, or vice versa.
+ */
+function eventsMock(
+  sink: Array<readonly unknown[]> = [],
+  warnSink: Array<readonly unknown[]> = [],
+) {
+  return {
+    info: (...args: unknown[]) => { sink.push(args); },
+    warn: (...args: unknown[]) => { warnSink.push(args); },
+  } as never;
 }
 
 /**
@@ -437,6 +447,74 @@ describe('ExpiredProfileCleanupService', () => {
     const expiresClause = where['expiresAt'] as { not: null; lt: Date };
     assert.equal(expiresClause.not, null);
     assert.ok(expiresClause.lt.getTime() >= before && expiresClause.lt.getTime() <= after);
+  });
+
+  it('refuses to soft-delete an expired row whose panel link was LOST, and says so', async () => {
+    // "Detached" and "link lost" look identical from `remnawaveId` alone, and
+    // they are opposites. A detached row has no panel profile; a link-lost row
+    // has a LIVE one it can no longer name — the decoder used to cast an
+    // undecoded panel body, so on 3.x `uuid` and `id` arrived undefined (Prisma
+    // leaves undefined columns alone) while the panel username and the
+    // subscription URL, passed as arguments, landed.
+    //
+    // Soft-deleting the second kind wrote `status = DELETED` with no revocation
+    // at all: the profile kept serving a customer who had stopped paying, and
+    // the row left the cabinet, this sweep AND the panel-link repair (which
+    // selects `status <> DELETED`) in one step. Nothing downstream could
+    // notice, and the sweep counted it as a success.
+    const deletions: DeletionInput[] = [];
+    const warned: Array<readonly unknown[]> = [];
+    const expiresAt = new Date(Date.now() - 10 * DAY_MS);
+
+    const service = new ExpiredProfileCleanupService(
+      {
+        subscription: {
+          findMany: async (input: { where: Record<string, unknown> }) => {
+            if (input.where['remnawaveId'] !== null) return [];
+            return [
+              // Genuinely detached: nothing upstream, safe to retire.
+              {
+                id: 'detached-1',
+                expiresAt,
+                remnawavePanelUsername: null,
+                configUrl: null,
+              },
+              // Link lost: the profile is alive under this exact username.
+              {
+                id: 'lost-link-1',
+                expiresAt,
+                remnawavePanelUsername: 'rz_erin_1',
+                configUrl: 'https://sub.example.test/api/sub/eee',
+              },
+              {
+                id: 'lost-link-2',
+                expiresAt,
+                remnawavePanelUsername: 'rz_erin_2',
+                configUrl: 'https://sub.example.test/api/sub/fff',
+              },
+            ];
+          },
+          update: async () => ({}),
+        },
+      } as never,
+      eventsMock([], warned),
+      settingsMock({ deleteEnabled: true, graceDays: 3 }),
+      remnawaveMock(-30 * DAY_MS),
+      deletionMock(deletions),
+    );
+
+    const count = await service.runSweep();
+
+    // The observable outcome: which rows reached the destructive service at
+    // all. Asserted as the exact list, not as a count — a count of 1 would also
+    // pass if the sweep retired a link-lost row and skipped the detached one.
+    assert.deepStrictEqual(deletions.map((d) => d.subscriptionId), ['detached-1']);
+    assert.equal(count, 1);
+
+    // And the two survivors are reported, with a number an operator can act on.
+    assert.equal(warned.length, 1);
+    assert.equal(warned[0]?.[0], EVENT_TYPES.SYSTEM_REMNAWAVE_SYNC);
+    assert.deepStrictEqual(warned[0]?.[3], { subscriptions: 2 });
   });
 
   it('honours a wider grace window in the cutoff (graceDays=7)', async () => {

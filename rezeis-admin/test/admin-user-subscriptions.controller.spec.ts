@@ -223,19 +223,27 @@ describe('AdminUserSubscriptionsController', () => {
 
   it('keeps a legacy subscription local when its Remnawave link is absent instead of creating a duplicate profile', async () => {
     let jobCreated = false;
+    const warned: Array<readonly unknown[]> = [];
     const controller = new AdminUserSubscriptionsController(
       {
         subscription: {
           findUnique: async () => ({ id: 'unlinked-subscription', expiresAt: null }),
         },
         $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
-          subscription: { update: async () => ({ id: 'unlinked-subscription', remnawaveId: null }) },
+          subscription: {
+            update: async () => ({
+              id: 'unlinked-subscription',
+              userId: 'user-9',
+              remnawaveId: null,
+              remnawavePanelUsername: 'rz_gina_1',
+            }),
+          },
           profileSyncJob: { create: async () => { jobCreated = true; return { id: 'must-not-exist' }; } },
         }),
       } as never,
       {} as never,
       { enqueue: async () => undefined } as never,
-      { warn: () => undefined } as never,
+      { warn: (...args: unknown[]) => { warned.push(args); } } as never,
       {} as never,
       {} as never,
     );
@@ -246,11 +254,63 @@ describe('AdminUserSubscriptionsController', () => {
 
     assert.deepStrictEqual(result, {
       id: 'unlinked-subscription',
+      userId: 'user-9',
       remnawaveId: null,
+      remnawavePanelUsername: 'rz_gina_1',
       syncPending: false,
       remnawaveLinkRequired: true,
     });
     assert.equal(jobCreated, false);
+
+    // THE DIVERGENCE OUTLIVES THE SCREEN THAT ANNOUNCED IT. The response flag
+    // above drives a toast, and a toast is gone the moment the panel closes —
+    // while the row now holds a status its panel profile does not, with no job
+    // queued and nothing that will ever reconcile them. Without a durable
+    // event, "why is this customer still enabled upstream" has no record to
+    // answer it.
+    assert.equal(warned.length, 1);
+    assert.equal(warned[0]?.[1], 'SYSTEM');
+    assert.deepStrictEqual(warned[0]?.[3], {
+      subscriptionId: 'unlinked-subscription',
+      userId: 'user-9',
+      remnawavePanelUsername: 'rz_gina_1',
+    });
+  });
+
+  it('says nothing extra when the admin edit did reach the panel', async () => {
+    // The counter-check: this event must fire on the divergence and not on the
+    // ordinary edit, or it is noise in the same feed operators watch for the
+    // real thing.
+    const warned: Array<readonly unknown[]> = [];
+    const controller = new AdminUserSubscriptionsController(
+      {
+        subscription: {
+          findUnique: async () => ({ id: 'linked-subscription', expiresAt: null }),
+        },
+        $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
+          subscription: {
+            update: async () => ({
+              id: 'linked-subscription',
+              userId: 'user-9',
+              remnawaveId: 'panel-user-1',
+              remnawavePanelUsername: 'rz_gina_1',
+            }),
+          },
+          profileSyncJob: { create: async () => ({ id: 'sync-1' }) },
+        }),
+      } as never,
+      {} as never,
+      { enqueue: async () => undefined } as never,
+      { warn: (...args: unknown[]) => { warned.push(args); } } as never,
+      {} as never,
+      {} as never,
+    );
+
+    await controller.updateSubscription('linked-subscription', {
+      status: SubscriptionStatus.DISABLED,
+    });
+
+    assert.deepStrictEqual(warned, []);
   });
 
   it('repairs an unlinked legacy subscription only after verifying a unique panel UUID', async () => {

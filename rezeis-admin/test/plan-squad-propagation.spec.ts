@@ -124,6 +124,7 @@ describe('a plan squad edit reaches existing subscriptions', () => {
       propagationId: null,
       subscriptionsUpdated: 0,
       syncJobsCreated: 0,
+      syncJobsSkippedUnlinked: 0,
     });
   });
 
@@ -188,6 +189,18 @@ describe('a plan squad edit reaches existing subscriptions', () => {
     );
     assert.equal(result.squadPropagation.subscriptionsUpdated, 3);
     assert.equal(result.squadPropagation.syncJobsCreated, 1);
+    // THE TWO SKIPS ARE REPORTED APART, because only one of them ends.
+    //
+    // `sub-expired` is a deferral: it is not live, and whatever makes it live
+    // again — a renewal, a re-enable — pushes the columns that were just
+    // corrected. `sub-unprovisioned` is ACTIVE and carries no panel identity,
+    // so nothing is queued and nothing ever will be: its panel profile keeps
+    // serving the squads the plan used to have, indefinitely.
+    //
+    // Both used to disappear into the same gap between 3 and 1, which is the
+    // whole reason the second was invisible — the report looked exactly the
+    // same as the harmless case.
+    assert.equal(result.squadPropagation.syncJobsSkippedUnlinked, 1);
   });
 
   it('persists every job but only nudges the queue up to the enqueue cap', async () => {

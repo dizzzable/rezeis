@@ -734,6 +734,18 @@ export class ProfileSyncProcessor extends WorkerHost {
    * on every user row, so recording it now is free; recording it only after the
    * operator upgrades would be too late, because the upgrade itself is what
    * destroys the uuid that would let us find the profile again.
+   *
+   * THE IDENTITY IS CHECKED BEFORE THE TRANSACTION IS OPENED, and the check is
+   * not defensive decoration — it is the guard whose absence turned a decoding
+   * bug into permanent data loss. The parameter is typed `string`, so an
+   * `undefined` reaching it is a lie the type system has already been told
+   * (`unwrapPanelUser` used to cast an undecoded body into `RemnawavePanelUser`,
+   * and a 3.x row has no `uuid` to give). Prisma then reads `undefined` in an
+   * `update` payload as "leave this column alone", so the write below SUCCEEDED
+   * while recording no link, the advisory-lock key collapsed to the literal
+   * `remnawave-profile:undefined` — serialising every concurrent CREATE on one
+   * lock — and the job completed. Refusing here converts all of that into one
+   * failed job an operator can see and a retry can fix.
    */
   private async persistProfileLink(
     subscriptionId: string,
@@ -743,6 +755,13 @@ export class ProfileSyncProcessor extends WorkerHost {
     configUrl: string | null | undefined,
     panelCreatedAt: string | null | undefined,
   ): Promise<string | null> {
+    if (typeof remnawaveId !== 'string' || remnawaveId.length === 0) {
+      throw new Error(
+        `Refusing to link subscription ${subscriptionId} to an empty Remnawave identity ` +
+          `(got ${typeof remnawaveId}): the panel response could not be decoded, and writing ` +
+          'it would leave remnawave_id NULL on a job that reported success.',
+      );
+    }
     return this.prismaService.$transaction(async (tx) => {
       // Serialize every writer that is about to link THIS panel identity.
       //
@@ -1182,6 +1201,47 @@ export class ProfileSyncProcessor extends WorkerHost {
     const fromPayload = readTargetRemnawaveId(syncJob.payload);
     const targetRemnawaveId = fromPayload ?? subscription.remnawaveId;
     if (targetRemnawaveId === null) {
+      // A DELETE that cannot name its target. It is still reported COMPLETED —
+      // throwing would hand the recovery sweep a job that can never succeed, and
+      // this codebase has paid for forever-retry-with-no-alert before — but
+      // "completed" must no longer mean "silent".
+      //
+      // The two ways to get here are not equally serious and are not reported
+      // as one:
+      //  • The row never had a profile and the job predates the payload keys.
+      //    Nothing to delete; a log line is the whole of it.
+      //  • The row still carries a panel username and a subscription URL with
+      //    no id. That is the decoder defect's fingerprint: the panel profile is
+      //    LIVE, this job was the last thing that would ever have removed it,
+      //    and after this the row is retired out of reach of the panel-link
+      //    repair. That is an operator event, because nothing downstream will
+      //    ever look again.
+      const strandedUsername =
+        typeof subscription.remnawavePanelUsername === 'string' &&
+        subscription.remnawavePanelUsername.length > 0 &&
+        typeof subscription.configUrl === 'string' &&
+        subscription.configUrl.length > 0
+          ? subscription.remnawavePanelUsername
+          : null;
+      if (strandedUsername === null) {
+        this.logger.warn(
+          `DELETE job ${syncJob.id} for subscription ${subscription.id} named no Remnawave ` +
+            'profile (neither the payload nor the row carries one); nothing was deleted',
+        );
+        return;
+      }
+      const message =
+        `DELETE job ${syncJob.id} could not name a Remnawave profile for subscription ` +
+        `${subscription.id}, but the row still carries panel username '${strandedUsername}' — ` +
+        'its panel link was lost, so the profile is probably still live and nothing will come ' +
+        'back for it. Delete it by hand, or relink the row first.';
+      this.logger.error(message);
+      this.events.error(EVENT_TYPES.SYSTEM_ERROR, 'SYSTEM', message, {
+        subscriptionId: subscription.id,
+        userId: subscription.userId,
+        syncJobId: syncJob.id,
+        panelUsername: strandedUsername,
+      });
       return;
     }
 
@@ -1258,8 +1318,32 @@ export class ProfileSyncProcessor extends WorkerHost {
       // sweep cleans it here. Self-service/admin deletes already set DELETED
       // before enqueuing, so this is idempotent for them.
       // See `.kiro/specs/trial-aware-profile-cleanup`.
-      await this.prismaService.subscription.updateMany({
-        where: { id: subscription.id, remnawaveId: targetRemnawaveId },
+      //
+      // THE FENCE IS TWO-ANGLED, not one string comparison, and the difference
+      // is a subscription that never gets retired. One profile has two lawful
+      // names across the two eras — a uuid on 2.x, a decimal on 3.x — and the
+      // job's target is whichever one was current when it was enqueued. On an
+      // upgraded panel `remnawave_id = <2.x uuid>` therefore compares the two
+      // spellings of the same profile and finds them unequal: `updateMany`
+      // touched 0 rows, the panel profile was gone, and the subscription stayed
+      // non-DELETED forever — visible in the cabinet, renewable, backed by
+      // nothing. Silently, because nobody read `count`. Same two-angled form as
+      // `panelIdentityWhere` and the exclusivity check in `handleCreate`.
+      //
+      // The numeric arm is OMITTED, not compared against null, when the column
+      // was never filled: `remnawave_panel_id` carries no unique constraint, so
+      // `remnawavePanelId: null` would match every row that has none — and this
+      // statement's other predicate is the row's own id, so a null arm would
+      // turn "this row, if it still holds the target" into "this row,
+      // unconditionally" and retire it on a mismatch instead of reporting one.
+      const retired = await this.prismaService.subscription.updateMany({
+        where: {
+          id: subscription.id,
+          OR: [
+            { remnawaveId: targetRemnawaveId },
+            ...(identity.panelId !== null ? [{ remnawavePanelId: identity.panelId }] : []),
+          ],
+        },
         // The two supplementary columns are detached together with the id they
         // describe. Leaving them behind would let a later re-provision inherit
         // the DELETED profile's numeric id and panel username, and the adapter
@@ -1271,6 +1355,43 @@ export class ProfileSyncProcessor extends WorkerHost {
           status: SubscriptionStatus.DELETED,
         },
       });
+      // `count` is READ, not discarded — that is half the defect. Two different
+      // events reach zero here and they must not be reported as one:
+      //
+      //  • The row no longer names this profile under EITHER spelling. It was
+      //    re-provisioned onto a different one, or already detached, while this
+      //    DELETE was in flight — and leaving it alone is the CORRECT outcome
+      //    (see `does not clear a newer profile link when an older DELETE target
+      //    completes`). Said once at warn, because a profile was destroyed for a
+      //    row that survived it and an operator may want to know.
+      //  • The row still names it. Then the fence should have matched and
+      //    something rewrote the row between the panel round-trip and this
+      //    statement. The subscription is now live with nothing behind it, and
+      //    nothing downstream notices on its own — so this one pages.
+      if (retired.count === 0) {
+        const stillHoldsTarget =
+          subscription.remnawaveId === targetRemnawaveId ||
+          (identity.panelId !== null && subscription.remnawavePanelId === identity.panelId);
+        const detail =
+          `Deleted Remnawave profile '${targetRemnawaveId}' but subscription ${subscription.id} ` +
+          `was not retired (it holds '${subscription.remnawaveId ?? 'none'}', panel id ` +
+          `${subscription.remnawavePanelId ?? 'none'})`;
+        if (stillHoldsTarget) {
+          const divergence =
+            `${detail}: the row still names the profile that was just deleted, so it is live ` +
+            'with no service behind it. Something wrote the row mid-flight.';
+          this.logger.error(divergence);
+          this.events.error(EVENT_TYPES.SYSTEM_ERROR, 'SYSTEM', divergence, {
+            subscriptionId: subscription.id,
+            userId: subscription.userId,
+            remnawaveId: targetRemnawaveId,
+          });
+        } else {
+          this.logger.warn(
+            `${detail}: it points at another profile now, so the live link is left alone.`,
+          );
+        }
+      }
     } else {
       throw new Error(
         `Panel did not confirm deletion of Remnawave profile '${targetRemnawaveId}'`,
@@ -1307,10 +1428,31 @@ export class ProfileSyncProcessor extends WorkerHost {
   ): Promise<{ readonly id: string; readonly remnawaveId: string | null } | null> {
     const username = identity.panelUsername;
     if (username === null || username.length === 0) return null;
+    // ASKED AS "WHO STILL ANSWERS TO THIS NAME", NOT "WHO HOLDS AN ID".
+    //
+    // The question this check exists to answer is what a resolve BY USERNAME
+    // would land on, and a resolve lands on a panel profile, not on a column.
+    // The `remnawaveId: { not: null }` predicate that used to be here read
+    // "this row is live on a profile" off the id — and that reading is false
+    // for exactly one population, the one this build has to protect.
+    //
+    // The create/update decoder used to CAST an undecoded panel body into the
+    // typed shape; on 3.x that made `uuid` and `id` undefined, which Prisma
+    // skips, while `remnawavePanelUsername` and `configUrl` came from arguments
+    // and landed. Such a row IS live on a profile — under this very name — and
+    // merely cannot say which one. Excluding it meant a DELETE that resolves by
+    // username saw an empty claimant list and destroyed the live profile of a
+    // paying customer, with no refusal and no warning.
+    //
+    // Dropping the predicate cannot mis-excuse anybody, because there is no
+    // third state: every path that clears `remnawaveId` — `handleDelete`'s
+    // retirement, `reprovisionMissingProfile`, the manual re-link — clears
+    // `remnawavePanelUsername` in the same statement, and the only writer that
+    // fills the username without an id was the defect. So a non-DELETED row
+    // carrying this name is a row a resolve can hit, full stop.
     const claimants = await this.prismaService.subscription.findMany({
       where: {
         remnawavePanelUsername: username,
-        remnawaveId: { not: null },
         status: { not: SubscriptionStatus.DELETED },
       },
       select: { id: true, remnawaveId: true },
@@ -1741,7 +1883,7 @@ function readPanelOwnerId(description: string | null | undefined): string | null
  * profile. Throwing a plain `Error` classifies TERMINAL, so a real collision
  * pages an operator instead of quietly cross-linking two paying customers.
  */
-function assertPanelProfileOwnership(
+export function assertPanelProfileOwnership(
   panelUsername: string,
   description: string | null | undefined,
   expectedUserId: string,

@@ -32,6 +32,47 @@ const DEFAULT_PROFILE_SNAPSHOT: readonly ProfileSnapshotRow[] = [
   { id: 'sub-1', remnawaveId: 'rw-1', remnawavePanelId: 4471, remnawavePanelUsername: 'rz_bob_1' },
 ];
 
+/** A stored row, as opposed to the projection the snapshot selects out of it. */
+interface SubscriptionTableRow extends ProfileSnapshotRow {
+  readonly userId: string;
+  readonly configUrl: string | null;
+}
+
+type WhereNode = Record<string, unknown>;
+
+/**
+ * Evaluates the snapshot's `where` against a row.
+ *
+ * Deliberately a real filter and not a canned answer. Every other fake in this
+ * file returns a fixed list, which means the SELECTION is unobservable: a test
+ * can hand back a row the production query would never return, and the
+ * assertion about what happens to that row proves nothing about production.
+ * The one thing under test here is which rows survive the `where`, so the
+ * `where` has to run.
+ *
+ * Supports only what the query under test uses — equality, `not`, and `OR`.
+ * Anything else throws rather than silently matching, so a future widening of
+ * the query cannot quietly turn this fake back into a canned answer.
+ */
+function matchesWhere(row: Record<string, unknown>, where: WhereNode): boolean {
+  return Object.entries(where).every(([key, condition]) => {
+    if (key === 'OR') {
+      return (condition as WhereNode[]).some((branch) => matchesWhere(row, branch));
+    }
+    if (key === 'AND') {
+      return (condition as WhereNode[]).every((branch) => matchesWhere(row, branch));
+    }
+    const value = row[key];
+    if (condition !== null && typeof condition === 'object') {
+      if ('not' in (condition as Record<string, unknown>)) {
+        return value !== (condition as { not: unknown }).not;
+      }
+      throw new Error(`unsupported filter on ${key}: ${JSON.stringify(condition)}`);
+    }
+    return value === condition;
+  });
+}
+
 interface FakeState {
   readonly order: string[];
   transactionCount: number;
@@ -45,6 +86,12 @@ interface FakeState {
   panelError: unknown;
   transactionError: unknown;
   profileSnapshot: readonly ProfileSnapshotRow[];
+  /**
+   * When set, `findMany` FILTERS this table with the real `where` instead of
+   * returning `profileSnapshot` unread. Opt-in so the existing tests, which are
+   * about what happens AFTER the selection, keep their canned rows.
+   */
+  subscriptionTable: readonly SubscriptionTableRow[] | null;
   readonly panelRefs: unknown[];
   readonly loggedWarnings: string[];
 }
@@ -63,6 +110,7 @@ function buildService(overrides: Partial<FakeState> = {}) {
     panelError: null,
     transactionError: null,
     profileSnapshot: DEFAULT_PROFILE_SNAPSHOT,
+    subscriptionTable: null,
     panelRefs: [],
     loggedWarnings: [],
     ...overrides,
@@ -112,9 +160,12 @@ function buildService(overrides: Partial<FakeState> = {}) {
       },
     },
     subscription: {
-      findMany: async () => {
+      findMany: async (args: { where: WhereNode }) => {
         state.order.push('snapshot:profiles');
-        return state.profileSnapshot;
+        if (state.subscriptionTable === null) return state.profileSnapshot;
+        return state.subscriptionTable
+          .filter((row) => matchesWhere(row as unknown as Record<string, unknown>, args.where))
+          .map(({ userId: _userId, ...selected }) => selected);
       },
     },
     user: {
@@ -277,10 +328,86 @@ describe('UserDeletionService', () => {
     );
   });
 
+  it('snapshots a damaged panel link so the orphaned profile is reported, not lost', async () => {
+    // THE SELECTION IS THE SUBJECT, which is why this test filters for real
+    // while the rest of the file hands back canned rows.
+    //
+    // The create/update decoder used to cast an undecoded panel body into the
+    // typed shape. On 3.x that left `uuid` and `id` undefined — Prisma skips
+    // undefined columns — while the panel username and the subscription URL,
+    // which came from arguments, landed. `sub-damaged` is that exact row: a
+    // LIVE panel profile whose only surviving evidence is two columns.
+    //
+    // With the snapshot keyed on `remnawaveId IS NOT NULL` such a row never
+    // entered the snapshot at all, so deleting the user destroyed the local
+    // rows and left the profile running with nothing pointing at it — not
+    // billed, not swept, and no longer repairable, because the repair selects
+    // on the row that has just been deleted.
+    const { service, state } = buildService({
+      subscriptionTable: [
+        {
+          userId: 'user-1',
+          id: 'sub-healthy',
+          remnawaveId: 'rw-1',
+          remnawavePanelId: 4471,
+          remnawavePanelUsername: 'rz_bob_1',
+          configUrl: 'https://sub.example.test/api/sub/aaa',
+        },
+        {
+          userId: 'user-1',
+          id: 'sub-damaged',
+          remnawaveId: null,
+          remnawavePanelId: null,
+          remnawavePanelUsername: 'rz_bob_2',
+          configUrl: 'https://sub.example.test/api/sub/bbb',
+        },
+        // Never provisioned: the ordinary unlinked row. It must stay OUT, or
+        // every user deletion emits a warning nobody can act on and operators
+        // learn to ignore the one that matters.
+        {
+          userId: 'user-1',
+          id: 'sub-never-provisioned',
+          remnawaveId: null,
+          remnawavePanelId: null,
+          remnawavePanelUsername: null,
+          configUrl: null,
+        },
+        // Another user's live profile: the `userId` predicate still holds.
+        {
+          userId: 'user-2',
+          id: 'sub-someone-else',
+          remnawaveId: 'rw-2',
+          remnawavePanelId: 5150,
+          remnawavePanelUsername: 'rz_carol_1',
+          configUrl: 'https://sub.example.test/api/sub/ccc',
+        },
+      ],
+    });
+
+    await service.deleteUser('user-1');
+
+    // The addressable profile is still deleted, and only that one.
+    assert.deepStrictEqual(
+      state.panelRefs.map((ref) => (ref as StoredPanelIdentity).remnawaveId),
+      ['rw-1'],
+    );
+    // The damaged one is reported — by id, and by the panel username, which is
+    // the only handle an operator has left for finding it in the panel.
+    assert.equal(state.loggedWarnings.length, 1);
+    assert.match(state.loggedWarnings[0] ?? '', /sub-damaged/);
+    assert.match(state.loggedWarnings[0] ?? '', /rz_bob_2/);
+    assert.doesNotMatch(state.loggedWarnings[0] ?? '', /sub-never-provisioned/);
+  });
+
   it('warns instead of silently skipping a snapshot with no panel identity', async () => {
     // The local account is already committed away, so a profile skipped here is
     // orphaned upstream: no row points at it and no sweep will look for it. The
     // skip is correct — there is nothing to address — but it must be visible.
+    //
+    // The row here is CANNED: this test is about what the loop does with a
+    // null-identity snapshot, not about whether such a row can reach it. That
+    // second question — which the snapshot's `where` answers, and answered
+    // "never" until it was widened — is pinned by the test above.
     const { service, state } = buildService({
       profileSnapshot: [
         { id: 'sub-unlinked', remnawaveId: null, remnawavePanelId: null, remnawavePanelUsername: null },

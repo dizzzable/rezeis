@@ -38,6 +38,17 @@ export interface PlanSquadPropagationSummary {
   readonly propagationId: string | null;
   readonly subscriptionsUpdated: number;
   readonly syncJobsCreated: number;
+  /**
+   * Subscriptions whose columns WERE rewritten but which got no push, because
+   * they carry no panel identity to push with.
+   *
+   * Reported rather than implied by the gap between the two counts above: that
+   * gap also contains the EXPIRED/DISABLED rows, which are a deliberate and
+   * harmless deferral. This number is the other thing hiding in it — rows whose
+   * panel profile is live and now disagrees with the database about which
+   * squads the customer is in, with nothing scheduled to reconcile them.
+   */
+  readonly syncJobsSkippedUnlinked: number;
 }
 
 export interface PlanSquadPropagationStatus {
@@ -182,9 +193,25 @@ export class PlanSquadPropagationService {
     // Only a live profile can be pushed to. An EXPIRED / DISABLED subscription
     // still gets its columns corrected above, so whatever syncs it next (a
     // renewal, a re-enable) already carries the new squads.
-    const pushable = tracking.filter(
-      (candidate) => candidate.remnawaveId !== null && PUSHABLE_STATUSES.has(candidate.status),
-    );
+    //
+    // THE TWO REASONS FOR SKIPPING ARE NOT THE SAME REASON, which is why they
+    // are no longer one `filter`. A non-pushable status is a deferral with a
+    // definite end: the row is not live, and the next thing that makes it live
+    // syncs it. A missing `remnawaveId` on a LIVE row is not a deferral at all
+    // — nothing is scheduled, nothing will notice, and the panel profile keeps
+    // serving the squads the plan used to have. Collapsed into one number, that
+    // second population was invisible: `syncJobsCreated` simply came out lower
+    // than `subscriptionsUpdated` and so did the ordinary case.
+    const pushable: PropagationCandidate[] = [];
+    let skippedUnlinked = 0;
+    for (const candidate of tracking) {
+      if (!PUSHABLE_STATUSES.has(candidate.status)) continue;
+      if (candidate.remnawaveId === null) {
+        skippedUnlinked += 1;
+        continue;
+      }
+      pushable.push(candidate);
+    }
     const syncJobIds: string[] = [];
     for (const chunk of chunked(pushable)) {
       const created = await transactionClient.profileSyncJob.createManyAndReturn({
@@ -206,11 +233,23 @@ export class PlanSquadPropagationService {
       }
     }
 
+    if (skippedUnlinked > 0) {
+      // Inside the transaction on purpose: if the propagation rolls back, this
+      // line is a lie about work that never happened — but a Nest logger cannot
+      // be rolled back, so it is written where the number is known and kept
+      // deliberately factual ("were not pushed"), never a claim about state.
+      this.logger.warn(
+        `Plan ${input.planId} squad propagation: ${skippedUnlinked} live subscription(s) had ` +
+          'their squads rewritten locally but carry no Remnawave id, so nothing was queued for ' +
+          'them — their panel profiles still hold the previous squads.',
+      );
+    }
     return {
       summary: {
         propagationId,
         subscriptionsUpdated: tracking.length,
         syncJobsCreated: syncJobIds.length,
+        syncJobsSkippedUnlinked: skippedUnlinked,
       },
       syncJobIds,
     };
@@ -317,6 +356,7 @@ const EMPTY_SUMMARY: PlanSquadPropagationSummary = {
   propagationId: null,
   subscriptionsUpdated: 0,
   syncJobsCreated: 0,
+  syncJobsSkippedUnlinked: 0,
 };
 
 const EMPTY_STATUS: PlanSquadPropagationStatus = {

@@ -53,6 +53,37 @@ const SAFE_PRODUCT_CODES = new Set<string>([
   // untyped 400 the buyer would just see a cancel button that does nothing.
   'PAYMENT_ALREADY_AT_PROVIDER',
   'PAYMENT_PROVIDER_CREATE_IN_FLIGHT',
+  // The three renewal-checkout outcomes the reiwa BFF maps in
+  // `api/routes/payments-errors.ts` (`RENEWAL_ERROR_MESSAGES`). It reads the
+  // `code` field off the upstream body and nothing else, so a stripped code
+  // is not a degraded message — it is a different one, or none at all.
+  //
+  // `QUOTE_CHANGED` and `IDEMPOTENCY_KEY_CONFLICT` are both 409, and the BFF
+  // falls back to QUOTE_CHANGED for *any* untyped 409. So the key conflict
+  // did not go missing; it arrived wearing the other one's name and told the
+  // buyer to refresh a quote that was never the problem, while the retry key
+  // that actually blocked them stayed bound to someone else's renewal.
+  //
+  // `PROVIDER_CHECKOUT_CREATION_UNRESOLVED` is worse, because it is 503: no
+  // fallback catches it, the BFF finds no contract and reports a generic
+  // "failed to create renewal checkout". The one thing that warning exists to
+  // say — the payment may already exist at the provider, check before
+  // retrying — never reached the buyer at all, and a blind retry can charge
+  // them twice. The filter reads the code independently of status, so 503
+  // carries it exactly as 401 and 409 do; the allowlist was the only gate.
+  'QUOTE_CHANGED',
+  'IDEMPOTENCY_KEY_CONFLICT',
+  'PROVIDER_CHECKOUT_CREATION_UNRESOLVED',
+  // The panel's own second-factor pivot, and the only entry here that is not
+  // SCREAMING_SNAKE: the label is the wire value the sign-in form compares
+  // against, so it is spelled the way the client reads it, not the way the
+  // neighbours are spelled. Do not 'tidy' the case.
+  //
+  // Without it the filter strips the code from the 401 the login endpoint
+  // returns when 2FA is on and no code was supplied. The form then never
+  // reaches its second step, and every operator who enabled 2FA is locked
+  // out of the panel with no way in.
+  'totp_required',
 ]);
 const SENSITIVE_HTTP_TEXT_PATTERNS = [
   /\b(?:postgres|mysql|mongodb|redis|amqp|http|https):\/\/\S+/iu,

@@ -1134,6 +1134,107 @@ describe('SharingDetectors — a lookback is not simultaneity', () => {
   });
 });
 
+describe('SharingDetectors — an unreadable panel id names nobody, out loud', () => {
+  withIpDetectorEnabled();
+
+  // `ip-control` keys its rows by the panel's own `userId`, and on a panel that
+  // was upgraded from 2.x that string can still be a UUID. `Number.parseInt`
+  // turns `'3f2a-1111-2222'` into `3` — a perfectly valid-looking panel id
+  // belonging to a DIFFERENT customer — so the detector refuses anything that
+  // is not wholly an integer.
+  //
+  // The refusal itself is guarded by the first assertion below. The COUNT and
+  // the warning were guarded by nothing at all: deleting `unreadablePanelIds`
+  // and the block that reports it left every test in this file green, and the
+  // detector would then have gone back to what it did before it was silent —
+  // covering only part of the panel while reporting a clean result, which is
+  // the shape of every "the sweep saw nothing, so nothing is wrong" bug this
+  // module has already paid for.
+  const RECENT_FOUR = ['1.1.1.1', '2.2.2.2', '3.3.3.3', '4.4.4.4'];
+
+  function ipsAt(now: Date): Array<{ ip: string; lastSeen: string }> {
+    return RECENT_FOUR.map((ip) => ({ ip, lastSeen: now.toISOString() }));
+  }
+
+  it('attributes nothing to the misparsed id and reports how much it skipped', async () => {
+    const captured = captureSharingLogs();
+    try {
+      const detectors = makeDetectors(
+        {
+          panelUsers: [
+            // The customer `parseInt('3f2a-…')` would have accused: id 3, and a
+            // limit of 1 so four networks would certainly have flagged them.
+            { uuid: 'u3', panelId: 3, hwidDeviceLimit: 1 },
+            // The genuine offender, addressed by a real integer.
+            { uuid: 'u10', panelId: 10, hwidDeviceLimit: 2 },
+          ],
+          nodes: ONE_NODE,
+          usersIpsByNode: {
+            n1: [
+              { userId: '3f2a-1111-2222', ips: ipsAt(NOW) },
+              { userId: '10', ips: ipsAt(NOW) },
+            ],
+          },
+        },
+        [
+          { remnawaveId: 'u3', userId: 'user-3' },
+          { remnawaveId: 'u10', userId: 'user-10' },
+        ],
+      );
+
+      const candidates = await detectors.detectConcurrentIpSharing(NOW);
+
+      // Attribution: exactly one accusation, and it is not the misparse's
+      // victim. Asserted as the affected user, not as a count — a count of one
+      // would also pass if the detector had accused `user-3` and dropped the
+      // real offender.
+      assert.deepEqual(
+        candidates.map((candidate) => candidate.affectedUserIds),
+        [['user-10']],
+      );
+
+      // Visibility: the skipped row is counted and named. Without this the run
+      // above is indistinguishable from one where the panel sent nothing odd,
+      // and an operator reading "one offender" would not know that a second
+      // row's connections were never examined at all.
+      const line = captured.warns.find((warn) => /is not an integer panel id/.test(warn));
+      assert.notEqual(
+        line,
+        undefined,
+        `no warning reports the skipped ip-control row; saw ${JSON.stringify(captured.warns)}`,
+      );
+      assert.match(line ?? '', /skipped 1 ip-control row\(s\)/);
+    } finally {
+      captured.restore();
+    }
+  });
+
+  it('says nothing when every ip-control row carries a readable id', async () => {
+    // The other half of the contract: a warning that also fires on a clean run
+    // is a warning operators filter out, and then the real one is invisible too.
+    const captured = captureSharingLogs();
+    try {
+      const detectors = makeDetectors(
+        {
+          panelUsers: [{ uuid: 'u10', panelId: 10, hwidDeviceLimit: 2 }],
+          nodes: ONE_NODE,
+          usersIpsByNode: { n1: [{ userId: '10', ips: ipsAt(NOW) }] },
+        },
+        [{ remnawaveId: 'u10', userId: 'user-10' }],
+      );
+
+      await detectors.detectConcurrentIpSharing(NOW);
+
+      assert.deepEqual(
+        captured.warns.filter((warn) => /is not an integer panel id/.test(warn)),
+        [],
+      );
+    } finally {
+      captured.restore();
+    }
+  });
+});
+
 describe('SharingDetectors — a dual-stack device is one device', () => {
   withIpDetectorEnabled();
 

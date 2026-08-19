@@ -60,7 +60,8 @@ export class UserDeletionService {
         // now belongs to no user, no sweep will ever look for it again, and
         // this log line is the only trace an operator will ever get.
         this.logger.warn(
-          `deleteUser: subscription ${subscription.id} was snapshotted with no Remnawave id; ` +
+          `deleteUser: subscription ${subscription.id} was snapshotted with no Remnawave id ` +
+            `(panel username '${subscription.remnawavePanelUsername ?? 'none'}'); ` +
             'any panel profile it still had is now unreachable from rezeis',
         );
         continue;
@@ -110,8 +111,38 @@ export class UserDeletionService {
               throw protectedHistoryConflict();
             }
 
+            // ASKED AS "does this row carry ANY trace of a panel profile", not
+            // as "does it carry an id". `remnawaveId: { not: null }` alone made
+            // the null-identity warn below UNREACHABLE — a row it would fire
+            // for could never enter the snapshot — and the rows it excluded are
+            // exactly the ones the warn exists for.
+            //
+            // Those rows are real and they are the expensive case. The
+            // create/update decoder used to CAST an undecoded panel body into
+            // `RemnawavePanelUser`; on 3.x that produced `uuid === undefined`
+            // and `panelId === undefined`, both of which Prisma reads as "leave
+            // the column alone", while `remnawavePanelUsername` and `configUrl`
+            // came from arguments and DID land. So a live panel profile can be
+            // owned by a row whose only surviving evidence of it is those two
+            // columns — see `PanelLinkReconciliationService`, which selects on
+            // exactly that signature.
+            //
+            // Deleting such a user with the narrow filter destroyed the local
+            // rows and left the panel profile running with nothing pointing at
+            // it: no sweep looks for it, the reconciliation repair can no
+            // longer find it (its row is gone), and nobody is billed for it.
+            // Widening does not make it deletable — there is still no id to
+            // address — but it makes the loss VISIBLE at the one moment an
+            // operator can still act on it.
             const profileSnapshots = await tx.subscription.findMany({
-              where: { userId, remnawaveId: { not: null } },
+              where: {
+                userId,
+                OR: [
+                  { remnawaveId: { not: null } },
+                  { remnawavePanelId: { not: null } },
+                  { remnawavePanelUsername: { not: null } },
+                ],
+              },
               select: {
                 id: true,
                 remnawaveId: true,

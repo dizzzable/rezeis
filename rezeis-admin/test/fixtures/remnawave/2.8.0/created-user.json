@@ -1,0 +1,37 @@
+{
+  "version": "2.8.0",
+  "source": "built from `CreateUserResponseDto` / `UpdateUserResponseDto` in `icon/Remnawave API v280.json` — the key set is the DTO's own declared property list, not a shape invented to satisfy our decoder; `remnawave-panel-user-write-decode.spec.ts` asserts that pin. The two DTOs are byte-identical in both specs, so one fixture answers POST and PATCH alike. Credential fields are placeholders of the same shape.",
+  "response": {
+    "uuid": "22222222-2222-4222-8222-222222222222",
+    "id": 8123,
+    "shortUuid": "def",
+    "username": "rz_sub_2",
+    "status": "ACTIVE",
+    "trafficLimitBytes": 0,
+    "trafficLimitStrategy": "NO_RESET",
+    "expireAt": "2099-01-01T00:00:00.000Z",
+    "telegramId": null,
+    "email": null,
+    "description": "reiwa_id: user-1",
+    "tag": null,
+    "hwidDeviceLimit": 0,
+    "externalSquadUuid": null,
+    "trojanPassword": "REDACTED-trojan-password-32chars",
+    "vlessUuid": "65bca3df-0000-4000-8000-000000000002",
+    "ssPassword": "REDACTED-ss-password-00000000000",
+    "lastTriggeredThreshold": 0,
+    "subRevokedAt": null,
+    "lastTrafficResetAt": null,
+    "createdAt": "2025-02-28T23:59:59.000Z",
+    "updatedAt": "2025-02-28T23:59:59.000Z",
+    "subscriptionUrl": "https://panel.example/sub/def",
+    "activeInternalSquads": [],
+    "userTraffic": {
+      "usedTrafficBytes": 0,
+      "lifetimeUsedTrafficBytes": 0,
+      "onlineAt": null,
+      "firstConnectedAt": null,
+      "lastConnectedNodeUuid": null
+    }
+  }
+}
