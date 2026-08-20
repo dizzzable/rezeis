@@ -1,6 +1,16 @@
 # Current Status
 
-Updated: 2026-05-10 — Full rebuild complete.
+Updated: 2026-08-20 — Remnawave sync-state PR submitted upstream.
+
+## Current Remnawave Status
+
+- Upstream PR: https://github.com/dizzzable/rezeis/pull/40
+- Baseline: Rezeis Admin `v0.9.7.17`
+- Target: Remnawave Backend `v3.3.2`
+- Rezeis sync-state slice is implemented and limited to six files.
+- Reiwa changes are not required because the user-facing API/runtime contract is unchanged.
+- Fork backend/web quality checks passed; the fork-only React Doctor failure was a base-branch mismatch and is not a finding in the changed frontend files when compared with `v0.9.7.17`.
+- Do not merge or deploy until upstream review and CI are complete.
 
 ---
 
