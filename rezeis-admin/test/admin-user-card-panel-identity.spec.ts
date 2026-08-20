@@ -46,9 +46,9 @@ function buildController(subscriptions: ReadonlyArray<Record<string, unknown>>) 
     {} as never,
     { getEffectiveLimitsForUser: async () => ({}) } as never,
     {
-      getPanelUser: async (ref: unknown) => {
+      getPanelUserOutcome: async (ref: unknown) => {
         panelLookups.push(ref);
-        return { username: 'rz_sub_1', description: 'reiwa_id: user-1' };
+        return { kind: 'ok', user: { username: 'rz_sub_1', description: 'reiwa_id: user-1' } };
       },
     } as never,
     {} as never,
