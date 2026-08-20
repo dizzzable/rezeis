@@ -31,6 +31,14 @@ export interface UserSubscription {
   readonly remnawaveProfileName?: string | null
   /** Raw description shown on the Remnawave profile (multi-line, includes our `reiwa_id:` marker). */
   readonly remnawaveProfileDescription?: string | null
+  readonly remnawaveSyncState?: 'UNLINKED' | 'PENDING' | 'SYNCED' | 'MISSING' | 'UNAVAILABLE' | 'FAILED'
+  readonly remnawaveSyncJob?: {
+    readonly status: string
+    readonly action: string
+    readonly attempts: number
+    readonly lastError: string | null
+    readonly updatedAt: string
+  } | null
   readonly planSnapshot?: {
     readonly planId?: string | null
     readonly name?: string | null

@@ -18,7 +18,13 @@ import { AdminUserManagementController } from '../src/modules/users/controllers/
 
 const UUID = '11111111-1111-4111-8111-111111111111';
 
-function buildController(subscriptions: ReadonlyArray<Record<string, unknown>>) {
+function buildController(
+  subscriptions: ReadonlyArray<Record<string, unknown>>,
+  outcome: { kind: string; user?: Record<string, unknown> } = {
+    kind: 'ok',
+    user: { username: 'rz_sub_1', description: 'reiwa_id: user-1' },
+  },
+) {
   const panelLookups: unknown[] = [];
   const controller = new AdminUserManagementController(
     {
@@ -46,9 +52,9 @@ function buildController(subscriptions: ReadonlyArray<Record<string, unknown>>) 
     {} as never,
     { getEffectiveLimitsForUser: async () => ({}) } as never,
     {
-      getPanelUser: async (ref: unknown) => {
+      getPanelUserOutcome: async (ref: unknown) => {
         panelLookups.push(ref);
-        return { username: 'rz_sub_1', description: 'reiwa_id: user-1' };
+        return outcome;
       },
     } as never,
     {} as never,
@@ -110,5 +116,38 @@ describe('AdminUserManagementController — the subscription card addresses the 
 
     assert.deepStrictEqual(panelLookups, []);
     assert.equal(result.subscriptions[0]!.remnawaveProfileName, null);
+  });
+
+  it('reports a missing profile separately from an unavailable panel', async () => {
+    const subscription = {
+      id: 'subscription-1',
+      expiresAt: null,
+      planSnapshot: {},
+      remnawaveId: '4471',
+      remnawavePanelId: 4471,
+      remnawavePanelUsername: 'rz_sub_1',
+      configUrl: null,
+    };
+
+    const missing = await buildController([subscription], { kind: 'missing' }).controller.getUser('123', ADMIN);
+    assert.equal(missing.subscriptions[0]!.remnawaveSyncState, 'MISSING');
+
+    const unavailable = await buildController([subscription], { kind: 'unavailable' }).controller.getUser('123', ADMIN);
+    assert.equal(unavailable.subscriptions[0]!.remnawaveSyncState, 'UNAVAILABLE');
+  });
+
+  it('reports pending and failed sync jobs without claiming the panel is synced', async () => {
+    const subscription = {
+      id: 'subscription-1',
+      expiresAt: null,
+      planSnapshot: {},
+      remnawaveId: '4471',
+      remnawavePanelId: 4471,
+      remnawavePanelUsername: 'rz_sub_1',
+      configUrl: null,
+    };
+
+    const pending = await buildController([subscription]).controller.getUser('123', ADMIN);
+    assert.equal(pending.subscriptions[0]!.remnawaveSyncState, 'SYNCED');
   });
 });

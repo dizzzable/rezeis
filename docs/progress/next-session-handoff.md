@@ -1,6 +1,17 @@
 # Next Session Handoff — Rezeis Remediation
 
-Updated: 2026-08-01
+Updated: 2026-08-20
+
+## Current Remnawave Status
+
+- Upstream PR: https://github.com/dizzzable/rezeis/pull/40
+- Branch: `FaloonAI:audit/remnawave-332-sync-state-clean`
+- Baseline: exact Rezeis Admin `v0.9.7.17`
+- Target: Remnawave Backend `v3.3.2`
+- Rezeis sync-state slice is implemented in six scoped files.
+- Reiwa changes are not required because the user-facing runtime contract is unchanged.
+- Fork backend/web quality checks passed. The fork-only React Doctor failure was caused by its audit-commit base; a focused run against `v0.9.7.17` found no issues in the changed frontend files.
+- Do not merge or deploy until upstream review and CI are complete.
 
 ## User Context
 

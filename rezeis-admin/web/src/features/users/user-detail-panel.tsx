@@ -746,6 +746,7 @@ function RemnawaveProfileRow({
   const { t } = useTranslation()
   const profileName = sub.remnawaveProfileName?.trim()
   const remnawaveId = sub.remnawaveId
+  const syncState = sub.remnawaveSyncState ?? (remnawaveId ? 'SYNCED' : 'UNLINKED')
   const [linkDialogOpen, setLinkDialogOpen] = useState(false)
   const [candidateId, setCandidateId] = useState('')
   const candidate = candidateId.trim()
@@ -784,6 +785,9 @@ function RemnawaveProfileRow({
         ) : (
           <span className="text-muted-foreground/70">—</span>
         )}
+        <span className="text-[10px] text-muted-foreground" title={sub.remnawaveSyncJob?.lastError ?? undefined}>
+          {t(`userDetailPanel.subscriptions.remnawaveProfile.syncState.${syncState}`)}
+        </span>
         {remnawaveId ? (
           <button
             type="button"
@@ -1064,7 +1068,10 @@ function SubscriptionsTab({ user, telegramId, queryKey }: { user: UserDetail; te
 
   const syncMutation = useMutation({
     mutationFn: (id: string) => api.post(`/admin/users/subscriptions/${id}/sync`),
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey }); toast.success(t('userDetailPanel.toasts.synced')) },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey })
+      toast.success(t('userDetailPanel.toasts.synced'))
+    },
     onError: () => toast.error(t('userDetailPanel.toasts.syncFailed')),
   })
 

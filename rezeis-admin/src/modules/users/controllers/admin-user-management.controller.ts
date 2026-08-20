@@ -32,7 +32,7 @@ import {
   Req,
   UseGuards,
 } from '@nestjs/common';
-import { Currency, Prisma, SubscriptionStatus, UserRole } from '@prisma/client';
+import { Currency, Prisma, SubscriptionStatus, SyncJobStatus, UserRole } from '@prisma/client';
 import { Request } from 'express';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
@@ -858,37 +858,108 @@ export class AdminUserManagementController {
    * does; the columns it reads are already in the row (the `findMany` behind
    * this list runs without a `select`).
    */
-  private async enrichSubscriptionsWithRemnawave<T extends PanelIdentityColumns>(
+  private async enrichSubscriptionsWithRemnawave<T extends PanelIdentityColumns & { id: string }>(
     subscriptions: readonly T[],
   ): Promise<Array<T & {
     readonly remnawaveProfileName: string | null;
     readonly remnawaveProfileDescription: string | null;
+    readonly remnawaveSyncState: 'UNLINKED' | 'PENDING' | 'SYNCED' | 'MISSING' | 'UNAVAILABLE' | 'FAILED';
+    readonly remnawaveSyncJob: {
+      readonly status: string;
+      readonly action: string;
+      readonly attempts: number;
+      readonly lastError: string | null;
+      readonly updatedAt: string;
+    } | null;
   }>> {
+    const profileSyncJobDelegate = this.prismaService.profileSyncJob;
+    const latestJobs = profileSyncJobDelegate === undefined
+      ? []
+      : await profileSyncJobDelegate.findMany({
+          where: { subscriptionId: { in: subscriptions.map((sub) => sub.id) }, supersededAt: null },
+          orderBy: [{ updatedAt: 'desc' }, { createdAt: 'desc' }],
+          select: { subscriptionId: true, status: true, action: true, attempts: true, lastError: true, updatedAt: true },
+        });
+    const jobBySubscription = new Map<string, (typeof latestJobs)[number]>();
+    for (const job of latestJobs) {
+      if (!jobBySubscription.has(job.subscriptionId)) jobBySubscription.set(job.subscriptionId, job);
+    }
+
     const enriched = await Promise.allSettled(
-      subscriptions.map(async (sub): Promise<T & { remnawaveProfileName: string | null; remnawaveProfileDescription: string | null }> => {
+      subscriptions.map(async (sub): Promise<T & {
+        remnawaveProfileName: string | null;
+        remnawaveProfileDescription: string | null;
+        remnawaveSyncState: 'UNLINKED' | 'PENDING' | 'SYNCED' | 'MISSING' | 'UNAVAILABLE' | 'FAILED';
+        remnawaveSyncJob: {
+          status: string;
+          action: string;
+          attempts: number;
+          lastError: string | null;
+          updatedAt: string;
+        } | null;
+      }> => {
+        const job = jobBySubscription.get(sub.id) ?? null;
+        const syncJob = job === null ? null : {
+          status: job.status,
+          action: job.action,
+          attempts: job.attempts,
+          lastError: job.lastError,
+          updatedAt: job.updatedAt.toISOString(),
+        };
         const identity = storedIdentityOf(sub);
         if (identity === null) {
           return {
             ...sub,
             remnawaveProfileName: null,
             remnawaveProfileDescription: null,
+            remnawaveSyncState: job?.status === SyncJobStatus.PENDING || job?.status === SyncJobStatus.RUNNING
+              ? 'PENDING'
+              : job?.status === SyncJobStatus.FAILED ? 'FAILED' : 'UNLINKED',
+            remnawaveSyncJob: syncJob,
           };
         }
-        const panelUser = await this.remnawaveApiService.getPanelUser(identity);
+        const outcome = await this.remnawaveApiService.getPanelUserOutcome(identity);
+        const panelUser = outcome.kind === 'ok' ? outcome.user : null;
         return {
           ...sub,
           remnawaveProfileName: panelUser?.username ?? null,
           remnawaveProfileDescription: panelUser?.description ?? null,
+          remnawaveSyncState: outcome.kind === 'ok'
+            ? job?.status === SyncJobStatus.PENDING || job?.status === SyncJobStatus.RUNNING
+              ? 'PENDING'
+              : job?.status === SyncJobStatus.FAILED ? 'FAILED' : 'SYNCED'
+            : outcome.kind === 'missing' ? 'MISSING' : 'UNAVAILABLE',
+          remnawaveSyncJob: syncJob,
         };
       }),
     );
-    return enriched.map((result, index): T & { remnawaveProfileName: string | null; remnawaveProfileDescription: string | null } => {
+    return enriched.map((result, index): T & {
+      remnawaveProfileName: string | null;
+      remnawaveProfileDescription: string | null;
+      remnawaveSyncState: 'UNLINKED' | 'PENDING' | 'SYNCED' | 'MISSING' | 'UNAVAILABLE' | 'FAILED';
+      remnawaveSyncJob: {
+        status: string;
+        action: string;
+        attempts: number;
+        lastError: string | null;
+        updatedAt: string;
+      } | null;
+    } => {
       if (result.status === 'fulfilled') return result.value;
       const fallback = subscriptions[index];
+      const job = jobBySubscription.get(fallback.id) ?? null;
       return {
         ...fallback,
         remnawaveProfileName: null,
         remnawaveProfileDescription: null,
+        remnawaveSyncState: storedIdentityOf(fallback) === null ? 'UNLINKED' : 'UNAVAILABLE',
+        remnawaveSyncJob: job === null ? null : {
+          status: job.status,
+          action: job.action,
+          attempts: job.attempts,
+          lastError: job.lastError,
+          updatedAt: job.updatedAt.toISOString(),
+        },
       };
     });
   }
