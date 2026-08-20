@@ -1068,7 +1068,10 @@ function SubscriptionsTab({ user, telegramId, queryKey }: { user: UserDetail; te
 
   const syncMutation = useMutation({
     mutationFn: (id: string) => api.post(`/admin/users/subscriptions/${id}/sync`),
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey }); toast.success(t('userDetailPanel.toasts.synced')) },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey })
+      toast.success(t('userDetailPanel.toasts.synced'))
+    },
     onError: () => toast.error(t('userDetailPanel.toasts.syncFailed')),
   })
 
