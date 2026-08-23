@@ -88,16 +88,26 @@ const MAX_BATCH = 1_000;
  * already precedented in this file, which emits one system event per affected
  * user for exactly the same reason.
  *
- * `set_language` and `set_max_subscriptions` are deliberately absent. Their
- * single-user counterpart is `user.profile.updated`, which carries a `changes`
- * array rather than a per-field action, and for `language` there is no
- * single-user route at all; converging those is a decision about THAT action's
- * shape, not about this gap.
+ * `set_language` and `set_max_subscriptions` were left out of the first pass
+ * because their single-user counterpart is `user.profile.updated`, which keys
+ * on a `changes` array rather than on a per-field action name. That is now
+ * resolved the only way that keeps ONE query answering "who changed this user":
+ * both bulk actions write `user.profile.updated` with the same `changes` array
+ * the user card writes, so a search by action and `metadata.userId` finds the
+ * card edit and the toolbar edit together. The new value is carried alongside,
+ * which the card does not do — an audit row that names the field but not what
+ * it became answers half the question, and there was no reason to copy that.
+ *
+ * `language` still has no single-user route. The action name is chosen to be
+ * the one that route WOULD use, so adding it later needs no migration of rows
+ * already written.
  */
 const BULK_AUDIT_ACTION = {
   block: 'user.blocked',
   unblock: 'user.unblocked',
   delete: 'user.deleted',
+  set_language: 'user.profile.updated',
+  set_max_subscriptions: 'user.profile.updated',
 } as const;
 
 /** Which surface performed the mutation — see {@link BULK_AUDIT_ACTION}. */
@@ -316,6 +326,12 @@ export class BulkUserOperationsService {
             where: { id: user.id },
             data: { language: lang as never },
           });
+          // AFTER the update, like every other branch here: the log records
+          // what was done, so a throw above leaves nothing behind.
+          await this.recordOperatorRow(BULK_AUDIT_ACTION.set_language, input, batchId, user, {
+            changes: ['language'],
+            language: lang,
+          });
           return { userId, status: 'ok' };
         } catch (err) {
           return { userId, status: 'error', message: (err as Error).message };
@@ -327,10 +343,18 @@ export class BulkUserOperationsService {
         if (!Number.isFinite(value) || value < 1 || value > 50) {
           return { userId, status: 'skipped', message: 'maxSubscriptions must be 1..50' };
         }
+        const maxSubscriptions = Math.floor(value);
         await this.prismaService.user.update({
           where: { id: user.id },
-          data: { maxSubscriptions: Math.floor(value) },
+          data: { maxSubscriptions },
         });
+        await this.recordOperatorRow(
+          BULK_AUDIT_ACTION.set_max_subscriptions,
+          input,
+          batchId,
+          user,
+          { changes: ['maxSubscriptions'], maxSubscriptions },
+        );
         return { userId, status: 'ok' };
       }
 
@@ -354,6 +378,14 @@ export class BulkUserOperationsService {
     input: BulkUserOperationInputInterface,
     batchId: string,
     user: { readonly id: string; readonly telegramId: bigint | null },
+    /**
+     * Extra metadata for actions whose single-user counterpart carries more
+     * than the subject id — `user.profile.updated` and its `changes` array.
+     * Spread LAST would let a caller overwrite `userId` or `source` and break
+     * the one query this whole block exists to answer, so it is spread FIRST
+     * and the fixed keys win.
+     */
+    extraMetadata: Readonly<Record<string, unknown>> = {},
   ): Promise<void> {
     await this.prismaService.adminAuditLog.create({
       data: buildAdminAuditLogData({
@@ -361,6 +393,7 @@ export class BulkUserOperationsService {
         actorId: input.currentAdmin.id,
         requestMetadata: input.requestMetadata,
         metadata: {
+          ...extraMetadata,
           requestId: input.requestMetadata.requestId,
           source: BULK_AUDIT_SOURCE,
           batchId,

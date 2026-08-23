@@ -68,6 +68,9 @@ interface UserRow {
   email: string | null;
   isBlocked: boolean;
   createdAt: Date;
+  /** Absent until a run sets it, so "unchanged" and "set to X" stay distinguishable. */
+  language?: string;
+  maxSubscriptions?: number;
 }
 
 interface EmittedEvent {
@@ -120,10 +123,17 @@ function makeDb(seed: UserRow[]) {
         users.find((u) => matches(u, args.where)) ?? null,
       findUnique: async (args: { where: Record<string, unknown> }) =>
         users.find((u) => matches(u, args.where)) ?? null,
-      update: async (args: { where: { id: string }; data: { isBlocked?: boolean } }) => {
+      update: async (args: {
+        where: { id: string };
+        data: { isBlocked?: boolean; language?: string; maxSubscriptions?: number };
+      }) => {
         const row = users.find((u) => u.id === args.where.id);
         if (!row) throw new Error('fake prisma: user.update on a missing row');
         if (args.data.isBlocked !== undefined) row.isBlocked = args.data.isBlocked;
+        if (args.data.language !== undefined) row.language = args.data.language;
+        if (args.data.maxSubscriptions !== undefined) {
+          row.maxSubscriptions = args.data.maxSubscriptions;
+        }
         return row;
       },
     },
@@ -461,5 +471,107 @@ describe('a partially failing run records what it did, and only that', () => {
     assert.equal(result.total, 0);
     assert.deepEqual(db.state.auditLogs, []);
     assert.deepEqual(db.state.users.length, 3);
+  });
+});
+
+/**
+ * The two parametric actions. They wrote NO audit row at all until 2026-08-23:
+ * an operator could change the language or the subscription cap of a hundred
+ * accounts from the toolbar and leave nothing behind, while the same change
+ * made from the user card was logged. The control block at the top proves this
+ * fake is capable of recording rows, so the zero these specs replace was real.
+ *
+ * They share the action name `user.profile.updated` with the card deliberately
+ * — see the BULK_AUDIT_ACTION docblock. What follows pins the SHAPE that makes
+ * one query answer "who changed this user", not merely that some row exists.
+ */
+describe('a bulk profile edit leaves the same trail as the card does', () => {
+  it('writes one user.profile.updated per user, with the changes array and the new value', async () => {
+    const db = seedThree();
+
+    const result = await runBulk(db, 'set_language', ['u-1', 'u-2'], { language: 'en' });
+
+    assert.equal(result.succeeded, 2);
+    assert.deepEqual(
+      db.state.users.map((u) => u.language ?? null),
+      ['EN', 'EN', null],
+      'the two selected rows really changed, and the unselected one did not',
+    );
+
+    const rows = auditRows(db, 'user.profile.updated');
+    assert.equal(rows.length, 2, 'one row per user, not one per click');
+    assert.deepEqual(
+      rows.map((row) => metadataOf(row)['userId']),
+      ['u-1', 'u-2'],
+      'and each row names the user it changed',
+    );
+    assert.deepEqual(
+      metadataOf(rows[0])['changes'],
+      ['language'],
+      'the same key the user card writes',
+    );
+    assert.equal(
+      metadataOf(rows[0])['language'],
+      'EN',
+      'and the value it became: a row naming only the field answers half the question',
+    );
+    assert.equal(metadataOf(rows[0])['source'], 'bulk');
+  });
+
+  it('writes the same action name for a subscription-cap change, naming the new cap', async () => {
+    const db = seedThree();
+
+    const result = await runBulk(db, 'set_max_subscriptions', ['u-2'], { maxSubscriptions: 7 });
+
+    assert.equal(result.succeeded, 1);
+    assert.deepEqual(
+      db.state.users.map((u) => u.maxSubscriptions ?? null),
+      [null, 7, null],
+      'only the selected row moved',
+    );
+
+    const rows = auditRows(db, 'user.profile.updated');
+    assert.equal(rows.length, 1);
+    assert.equal(metadataOf(rows[0])['userId'], 'u-2');
+    assert.deepEqual(metadataOf(rows[0])['changes'], ['maxSubscriptions']);
+    assert.equal(metadataOf(rows[0])['maxSubscriptions'], 7);
+  });
+
+  it('answers the per-user question from the same query shape the card answers', async () => {
+    const db = seedThree();
+
+    await runBulk(db, 'set_language', ['u-3'], { language: 'ru' });
+
+    assert.deepEqual(
+      whoDid(db.state.auditLogs, 'user.profile.updated', 'u-3'),
+      [{ actor: 'admin-7', source: 'bulk' }],
+      'action name plus metadata.userId, with no knowledge of which screen did it',
+    );
+  });
+
+  it('writes nothing for a row the run refused on an invalid payload', async () => {
+    const db = seedThree();
+
+    const result = await runBulk(db, 'set_language', ['u-1'], { language: 'x' });
+
+    assert.equal(result.succeeded, 0);
+    assert.equal(db.state.users[0].language, undefined, 'and the row is untouched');
+    assert.equal(
+      db.state.auditLogs.length,
+      0,
+      'the log records what was DONE, and a refused row did nothing',
+    );
+  });
+
+  it('groups one click under one batch id, as every other bulk action does', async () => {
+    const db = seedThree();
+
+    await runBulk(db, 'set_max_subscriptions', ['u-1', 'u-2', 'u-3'], { maxSubscriptions: 3 });
+
+    const batches = new Set(
+      auditRows(db, 'user.profile.updated').map((row) => metadataOf(row)['batchId']),
+    );
+    assert.equal(batches.size, 1, 'three rows, one batch');
+    assert.ok([...batches][0], 'and the batch id is not empty');
   });
 });
