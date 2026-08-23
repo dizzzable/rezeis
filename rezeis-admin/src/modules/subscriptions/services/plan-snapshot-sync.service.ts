@@ -23,34 +23,46 @@ type SubscriptionSnapshotRow = {
 @Injectable()
 export class PlanSnapshotSyncService {
   /**
-   * Mirrors the edited plan's fields into every subscriber's `plan_snapshot`.
+   * Mirrors the edited plan's DISPLAY fields into every subscriber's
+   * `plan_snapshot`.
    *
-   * ── `trafficLimit` / `deviceLimit` do NOT reach the panel from here ───────
+   * ── What this writes, and what it deliberately does not ──────────────────
    *
-   * DECISION (deliberate, do not "fix" by adding a fan-out here): a plan's
-   * traffic and device limits are written into the snapshot JSON below, and
-   * that is as far as an operator's edit travels. Existing subscribers keep
-   * their current panel limits until their next renewal or upgrade.
+   * Mirrored: `name`, `tag`, `type`, `trafficLimitStrategy`.
+   * Frozen:   `icon`, and `trafficLimit` / `deviceLimit` / `internalSquads` /
+   *           `externalSquad`.
    *
-   * The snapshot is not what anything pushes. Every path to Remnawave reads a
-   * different place, and a plan edit writes none of them:
+   * The four limit keys USED to be mirrored here. They are not any more,
+   * because they are the baseline `resolveInheritedPlanLimitUpdate`
+   * (`plan-inherited-limits.util.ts`) compares a subscription's columns against
+   * to decide whether an operator individually adjusted it. While they tracked
+   * the live plan, a single plan edit moved that baseline out from under every
+   * subscriber at once: their columns still held the old value, so all of them
+   * read as "individually overridden" and their limits were pinned for good.
+   * Freezing the four restores the snapshot's actual meaning — what the plan
+   * gave THIS subscription when it was assigned.
    *
-   *  - legacy `ProfileSyncProcessor` reads the subscription's own COLUMNS
-   *    (`profile-sync.processor.ts` :511-512 on CREATE, :648-649 on UPDATE);
+   * ── Limit edits still reach existing subscribers, at renewal ─────────────
+   *
+   * Nothing here pushes a limit to Remnawave, and nothing else re-derives one
+   * on a plan edit either. Every path to the panel reads somewhere this write
+   * does not touch:
+   *
+   *  - legacy `ProfileSyncProcessor` reads the subscription's own COLUMNS;
    *  - the versioned/strict path reads `SubscriptionEffectiveProjection`, whose
    *    base is `subscription_terms.base_traffic_limit_bytes` / `base_device_limit`
    *    — frozen when the term was created and never mutated afterwards;
    *  - the entitlement boundary sweep is event-driven (due add-on expiry, due
-   *    SCHEDULED term). It never scans the plan table, and a subscriber with no
-   *    add-ons is never even visited.
+   *    SCHEDULED term) and never scans the plan table.
    *
-   * So the deferral is real, and so is the "until renewal": renewal re-reads the
-   * live plan row — onto the columns on the legacy branch
-   * (`payment-subscription-mutation.service.ts` :264-265, :836-841), or into a
-   * fresh term's baseline under the entitlement model (:965-967) — and upgrade
-   * re-copies them unconditionally (:998-1002).
+   * The edit lands at the subscriber's next renewal or upgrade. Upgrade
+   * re-copies the plan unconditionally; renewal re-applies it to exactly those
+   * fields whose columns still match this snapshot — which, now that the four
+   * are frozen, is everyone who was never individually adjusted. That is the
+   * rule the plan editor states to the operator while they are typing
+   * (`web/src/i18n/en.ts` → `plans.form.limitScope`).
    *
-   * ── Why this is the rule, and not an oversight ────────────────────────────
+   * ── Why deferral is the rule, and not an oversight ───────────────────────
    *
    * Squads propagate (`PlanSquadPropagationService`) because a squad is the
    * ROUTE, not the goods: leaving a customer on a squad the operator just
@@ -71,13 +83,13 @@ export class PlanSnapshotSyncService {
    *
    * An opt-in propagation cannot follow the squad-propagation shape, because
    * limits have two owners and squads have one. It would have to write the
-   * subscription columns AND the ACTIVE term's baseline AND rerun
-   * `EffectiveProjectionService.recomputeInTransaction` to advance
-   * `desiredRevision`. Miss any one and you reproduce, at fan-out scale, the
-   * split-brain `upgradeSubscriptionFromPayment` already has: it moves the
-   * columns and leaves the term stale, so with `projectionSync` on the next
-   * versioned job pushes the OLD baseline back. Build it after the entitlement
-   * cutover picks a single owner, not before.
+   * subscription columns AND these four snapshot keys AND the ACTIVE term's
+   * baseline AND rerun `EffectiveProjectionService.recomputeInTransaction` to
+   * advance `desiredRevision`. Miss any one and you reproduce, at fan-out
+   * scale, the split-brain `upgradeSubscriptionFromPayment` already has: it
+   * moves the columns and leaves the term stale, so with `projectionSync` on
+   * the next versioned job pushes the OLD baseline back. Build it after the
+   * entitlement cutover picks a single owner, not before.
    */
   public async syncPlanSnapshotMetadata(
     prismaClient: Prisma.TransactionClient | PrismaClient,
@@ -95,23 +107,33 @@ export class PlanSnapshotSyncService {
     for (const subscription of subscriptions) {
       const planSnapshot =
         isJsonObject(subscription.planSnapshot) ? { ...subscription.planSnapshot } : {};
-      // NOTE: `icon` is deliberately NOT re-synced here. Every other mirrored
-      // field tracks the live plan IN THIS JSON, but the icon is frozen at
-      // purchase time — a customer's card must not change its glyph because the
-      // operator restyled the plan. Do not add `planSnapshot.icon = plan.icon`
-      // "for consistency".
-      //
-      // "Tracks the live plan" means the snapshot, and only the snapshot. The
-      // limits written below do not reach the panel from here, by design — see
-      // the method doc above before concluding that is a bug.
+      // MIRRORED — display facts. A renamed or re-tagged plan must not keep
+      // showing its old label on the cabinet card, in the bot, or on an invoice.
       planSnapshot.name = plan.name;
       planSnapshot.tag = plan.tag;
       planSnapshot.type = plan.type;
-      planSnapshot.trafficLimit = plan.trafficLimit;
-      planSnapshot.deviceLimit = plan.deviceLimit;
+      // Mirrored too, and NOT display-only: `ProfileSyncProcessor` reads
+      // `trafficLimitStrategy` out of this JSON and pushes it to the panel. It
+      // is not one of the four the override rule compares, and the subscription
+      // editor exposes no per-subscription field for it, so the plan row stays
+      // its single owner and mirroring it cannot erase an operator's choice.
       planSnapshot.trafficLimitStrategy = plan.trafficLimitStrategy;
-      planSnapshot.internalSquads = [...plan.internalSquads];
-      planSnapshot.externalSquad = plan.externalSquad;
+
+      // FROZEN — `icon`, and the four inherited-limit keys. Do not add them
+      // back "for consistency"; both omissions are load-bearing.
+      //
+      // `icon` is frozen at purchase time: a customer's card must not change
+      // its glyph because the operator restyled the plan.
+      //
+      // `trafficLimit` / `deviceLimit` / `internalSquads` / `externalSquad` are
+      // frozen because they are the BASELINE for override detection —
+      // `resolveInheritedPlanLimitUpdate` decides whether an operator
+      // individually adjusted a subscription by comparing its columns against
+      // exactly these keys. Mirroring them made the snapshot track the live
+      // plan rather than what the plan gave THIS subscription, so one plan edit
+      // made every never-adjusted subscriber read as overridden and pinned
+      // their limits forever. They stay on `SnapshotSyncPlanInput` above so the
+      // call site can keep handing over a whole plan row.
       await prismaClient.subscription.update({
         where: {
           id: subscription.id,

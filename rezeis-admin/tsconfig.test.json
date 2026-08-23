@@ -1,5 +1,5 @@
 {
-  // The ONLY project that type-checks `test/`.
+  // The ONLY project that type-checks `test/` and `scripts/`.
   //
   // The root `tsconfig.json` excludes `**/*.spec.ts`, so `npm run typecheck`
   // returns exit 0 with the entire suite hard-broken — a removed interface
@@ -10,6 +10,28 @@
   // compiler can say in two seconds, and it is invisible to any check that only
   // runs the "maintained" subset of specs.
   //
+  // `scripts/` was in exactly the same hole, and worse, because nothing ran
+  // it either. `tsconfig.json` includes `src/**` only, so `admin-cli.ts` —
+  // which mints the `scrypt$N$r$p$salt$hash` password hash the sign-in path
+  // has to parse — was compiled by no project at all. Its only check was an
+  // operator running it against a live database during a lockout, which is
+  // the worst possible moment to discover a type error, and a drift that
+  // silently minted a hash the login path cannot verify would not even be a
+  // type error there. It belongs here rather than in `tsconfig.json`: the root
+  // project sets `rootDir: "./src"` and is what `tsconfig.build.json` extends,
+  // so widening THAT include makes `nest build` try to emit `scripts/` into
+  // `dist/` and fail on `rootDir`. This project already has `rootDir: "."`,
+  // already has `noEmit`, already runs in CI (`npm run typecheck:test`), and
+  // is already the place where "everything the build excludes" is checked.
+  // Nothing else reads this file, so nothing else changes.
+  //
+  // ESLint does not follow: `eslint.config.mjs` ignores `scripts/**`, and the
+  // per-file `languageOptions.parserOptions.project` block is scoped to
+  // `src/**/*.ts`. So this adds the compiler and no lint rules — which is the
+  // right split for a standalone `#!/usr/bin/env node` tool that deliberately
+  // uses `console.log` as its user interface and would trip `no-console` on
+  // nearly every line.
+  //
   // `rootDir` is widened to the package root because the specs live beside
   // `src/`, not under it. `noEmit` keeps this a checker and nothing else.
   "extends": "./tsconfig.json",
@@ -17,6 +39,6 @@
     "rootDir": ".",
     "noEmit": true
   },
-  "include": ["src/**/*", "test/**/*"],
+  "include": ["src/**/*", "test/**/*", "scripts/**/*"],
   "exclude": ["node_modules", "dist", "web"]
 }

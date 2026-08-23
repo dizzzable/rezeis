@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
-import { Save, Handshake, Loader2, CreditCard } from 'lucide-react'
+import { Save, Handshake, Info, Loader2, CreditCard } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
@@ -13,6 +13,12 @@ import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip'
 import {
   Form,
   FormControl,
@@ -77,12 +83,90 @@ interface PartnerSettings {
   autoCalculateCommission?: boolean
   taxPercent?: number | string
   accrualStrategy?: AccrualStrategy
+  /**
+   * Per-level accrual mode, read by the backend BEFORE the flat
+   * `levelNAccrualStrategy` keys and before the legacy flat `accrualStrategy`.
+   * A level that is absent, null, empty or unrecognised is not an error — it
+   * falls through to the next source, which is what "inherit" is made of.
+   */
+  accrualStrategies?: Record<string, unknown>
   gatewayCommissions?: Record<string, number>
   [k: string]: unknown
 }
 
+/**
+ * The empty state of a per-level accrual control.
+ *
+ * An explicit option, never a blank: a level with no stored value FOLLOWS the
+ * strategy above, and a blank would read as "nothing set". (A Radix
+ * `SelectItem` cannot carry an empty string as its value either.)
+ */
+const INHERIT_LEVEL_ACCRUAL = 'INHERIT'
+
+const ACCRUAL_LEVELS = [1, 2, 3] as const
+
+const levelAccrualField = z.enum([
+  INHERIT_LEVEL_ACCRUAL,
+  'ON_EACH_PAYMENT',
+  'ON_FIRST_PAYMENT',
+])
+
+/**
+ * Mirrors the backend's `readAccrualMode`: anything that is not one of the
+ * recognised spellings — absent, null, empty, junk — is not a mode and falls
+ * through. `ONCE_PER_USER` is the per-partner enum spelling of the same thing.
+ */
+function normaliseAccrualMode(value: unknown): AccrualStrategy | null {
+  if (typeof value !== 'string') return null
+  const upper = value.trim().toUpperCase()
+  if (upper === 'ON_FIRST_PAYMENT' || upper === 'ONCE_PER_USER') return 'ON_FIRST_PAYMENT'
+  if (upper === 'ON_EACH_PAYMENT') return 'ON_EACH_PAYMENT'
+  return null
+}
+
+/**
+ * What the form should show for one level, in the order the backend resolves
+ * it: `accrualStrategies.LEVEL_N` → flat `levelNAccrualStrategy` → inherit.
+ *
+ * It deliberately does NOT fall back to `partner.accrualStrategy`. That is the
+ * value the level inherits, and pre-filling the control with it would turn an
+ * inherited level into a stored one on the very next save — the level would
+ * stop following the strategy above without the operator ever choosing that.
+ */
+function readGlobalLevelAccrual(
+  partner: PartnerSettings,
+  level: (typeof ACCRUAL_LEVELS)[number],
+): AccrualStrategy | typeof INHERIT_LEVEL_ACCRUAL {
+  const fromMap = normaliseAccrualMode(partner.accrualStrategies?.[`LEVEL_${level}`])
+  if (fromMap !== null) return fromMap
+  const fromFlat = normaliseAccrualMode(partner[`level${level}AccrualStrategy`])
+  if (fromFlat !== null) return fromFlat
+  return INHERIT_LEVEL_ACCRUAL
+}
+
+/** Info icon whose explanation appears on hover and on keyboard focus. */
+function SettingHint({ label, text }: { readonly label: string; readonly text: string }) {
+  return (
+    <TooltipProvider delayDuration={150}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            aria-label={label}
+            className="inline-flex text-muted-foreground transition-colors hover:text-foreground"
+          >
+            <Info className="h-3.5 w-3.5" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent className="max-w-xs text-xs leading-snug">{text}</TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  )
+}
+
 export default function PartnerSettingsPage() {
-  const { data: settings, isLoading } = useQuery({
+  const { t } = useTranslation()
+  const { data: settings, isError, isLoading } = useQuery({
     queryKey: ['admin', 'settings'],
     queryFn: async () => (await api.get('/admin/settings')).data,
   })
@@ -93,6 +177,31 @@ export default function PartnerSettingsPage() {
         <Skeleton className="h-8 w-48" />
         <Skeleton className="h-64 w-full" />
       </div>
+    )
+  }
+
+  // A FAILED LOAD IS NOT AN EMPTY FORM.
+  //
+  // Every control below is a statement about `Settings.partnerSettings`, and
+  // the per-level accrual selects are the loudest of them: "Inherit (On each
+  // payment)" claims that three levels are following the strategy above. Built
+  // from a request that never arrived that claim is invented — and the Save
+  // button beside it would write the invention back over whatever is really
+  // stored, clearing every per-level mode in one click.
+  //
+  // An ABSENT `partnerSettings` on a response that DID arrive is a different
+  // thing: a real, empty install, which still gets the form and its defaults.
+  // The guard is on the request failing, not on the object being missing.
+  if (isError || settings === undefined) {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Handshake className="h-5 w-5" /> {t('partnerSettingsPage.title')}
+          </CardTitle>
+          <CardDescription>{t('partnerSettingsPage.loadFailed')}</CardDescription>
+        </CardHeader>
+      </Card>
     )
   }
 
@@ -138,6 +247,11 @@ function PartnerSettingsForm({ partner }: PartnerSettingsFormProps) {
     allowBalancePayment: z.boolean(),
     autoCalculate: z.boolean(),
     accrualStrategy: z.enum(['ON_EACH_PAYMENT', 'ON_FIRST_PAYMENT']),
+    accrualStrategies: z.object({
+      LEVEL_1: levelAccrualField,
+      LEVEL_2: levelAccrualField,
+      LEVEL_3: levelAccrualField,
+    }),
     level1Percent: percent,
     level2Percent: percent,
     level3Percent: percent,
@@ -164,6 +278,11 @@ function PartnerSettingsForm({ partner }: PartnerSettingsFormProps) {
       allowBalancePayment: partner.allowBalancePayment ?? false,
       autoCalculate: partner.autoCalculateCommission ?? false,
       accrualStrategy: (partner.accrualStrategy as AccrualStrategy | undefined) ?? 'ON_EACH_PAYMENT',
+      accrualStrategies: {
+        LEVEL_1: readGlobalLevelAccrual(partner, 1),
+        LEVEL_2: readGlobalLevelAccrual(partner, 2),
+        LEVEL_3: readGlobalLevelAccrual(partner, 3),
+      },
       level1Percent: partner.level1Percent != null ? String(partner.level1Percent) : '',
       level2Percent: partner.level2Percent != null ? String(partner.level2Percent) : '',
       level3Percent: partner.level3Percent != null ? String(partner.level3Percent) : '',
@@ -176,6 +295,10 @@ function PartnerSettingsForm({ partner }: PartnerSettingsFormProps) {
   // react-hook-form's `form.watch()` integration is not yet recognised by react-doctor.
   // eslint-disable-next-line react-hooks/incompatible-library
   const accrualStrategy = form.watch('accrualStrategy')
+  const inheritedAccrualLabel =
+    accrualStrategy === 'ON_FIRST_PAYMENT'
+      ? t('partnerSettingsPage.general.onFirstPayment')
+      : t('partnerSettingsPage.general.onEachPayment')
   const minWithdrawalRaw = form.watch('minWithdrawal')
 
   const saveMutation = useMutation({
@@ -193,6 +316,25 @@ function PartnerSettingsForm({ partner }: PartnerSettingsFormProps) {
         taxPercent: values.taxPercent ? parseFloat(values.taxPercent) : undefined,
         accrualStrategy: values.accrualStrategy,
       }
+      // ALL THREE LEVELS, ALWAYS — even the ones the operator did not touch.
+      // `accrualStrategies` is NOT in `mergePartnerSettings`'s deep-merge list
+      // (only `levels`, `gatewayCommissions` and `withdrawals` are), so the
+      // settings PATCH replaces this object wholesale. A submit carrying only
+      // the changed level would silently drop the other two.
+      //
+      // "Inherit" goes out as `null` in BOTH shapes. The backend resolves a
+      // level as map → flat `levelNAccrualStrategy` → legacy flat
+      // `accrualStrategy`, and `null` is not a recognised mode in either of the
+      // first two, so it reaches the legacy key — today's behaviour. Writing
+      // only the map would leave a stale flat key still pinning the level.
+      const accrualStrategies: Record<string, string | null> = {}
+      for (const level of ACCRUAL_LEVELS) {
+        const chosen = values.accrualStrategies[`LEVEL_${level}`]
+        const wire = chosen === INHERIT_LEVEL_ACCRUAL ? null : chosen
+        accrualStrategies[`LEVEL_${level}`] = wire
+        payload[`level${level}AccrualStrategy`] = wire
+      }
+      payload.accrualStrategies = accrualStrategies
       for (const gc of GATEWAY_COMMISSIONS) {
         const v = values.commissions[gc.key]
         if (!v) continue
@@ -350,6 +492,61 @@ function PartnerSettingsForm({ partner }: PartnerSettingsFormProps) {
                   </FormItem>
                 )}
               />
+
+              <div className="space-y-1.5">
+                <div className="flex items-center gap-1">
+                  <FormLabel className="text-xs">
+                    {t('partnerSettingsPage.general.levelAccrual.title')}
+                  </FormLabel>
+                </div>
+                <FormDescription className="text-[11px]">
+                  {t('partnerSettingsPage.general.levelAccrual.description')}
+                </FormDescription>
+                <div className="grid grid-cols-3 gap-2">
+                  {ACCRUAL_LEVELS.map((level) => (
+                    <FormField
+                      key={level}
+                      control={form.control}
+                      name={`accrualStrategies.LEVEL_${level}` as const}
+                      render={({ field }) => (
+                        <FormItem className="space-y-1">
+                          <div className="flex items-center gap-1">
+                            <FormLabel className="text-[10px] uppercase">L{level}</FormLabel>
+                            <SettingHint
+                              label={t('partnerSettingsPage.general.levelAccrual.hintAria', {
+                                level,
+                              })}
+                              text={t('partnerSettingsPage.general.levelAccrual.hint', {
+                                level,
+                              })}
+                            />
+                          </div>
+                          <Select value={field.value} onValueChange={field.onChange}>
+                            <FormControl>
+                              <SelectTrigger className="h-8 text-xs">
+                                <SelectValue />
+                              </SelectTrigger>
+                            </FormControl>
+                            <SelectContent>
+                              <SelectItem value={INHERIT_LEVEL_ACCRUAL}>
+                                {t('partnerSettingsPage.general.levelAccrual.inherit', {
+                                  value: inheritedAccrualLabel,
+                                })}
+                              </SelectItem>
+                              <SelectItem value="ON_EACH_PAYMENT">
+                                {t('partnerSettingsPage.general.onEachPayment')}
+                              </SelectItem>
+                              <SelectItem value="ON_FIRST_PAYMENT">
+                                {t('partnerSettingsPage.general.onFirstPayment')}
+                              </SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </FormItem>
+                      )}
+                    />
+                  ))}
+                </div>
+              </div>
             </CardContent>
           </Card>
 

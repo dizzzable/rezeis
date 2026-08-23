@@ -2,6 +2,10 @@
 // service is constructed WITH the adapter, and importing it here would put a
 // cycle between the adapter and the thing that tells it which shape to build.
 import type { RemnawaveUserAddressing } from './panel-version.util';
+// Type-only, and it stays that way: `panelIdentityLookup` below hands back a
+// `where` for callers to run, it never runs one itself, so this module remains
+// reasonable (and testable) without a database.
+import type { Prisma } from '@prisma/client';
 
 /**
  * How rezeis names ONE panel profile when talking to a panel, across all three
@@ -164,6 +168,97 @@ const DECIMAL_ID = /^\d+$/;
 /** True when the stored identity is a numeric panel id rather than a 2.x UUID. */
 export function isNumericPanelIdentity(remnawaveId: string): boolean {
   return DECIMAL_ID.test(remnawaveId);
+}
+
+/**
+ * Both angles a BATCH of panel identities has to be matched on locally, plus
+ * the map back from a fetched row to the identity the caller asked about.
+ *
+ * The plural sibling of `panelIdentityWhere` (`remnawave-webhook.service.ts`),
+ * and it exists for the same reason: a profile created on 2.x keeps its uuid in
+ * `Subscription.remnawaveId` after the operator upgrades to 3.x — the panel's
+ * own migration drops the uuid, we do not — but from then on the panel names
+ * that profile by its numeric id alone. Asking `remnawaveId IN (…)` with a
+ * batch of 3.x decimals therefore misses that entire population, silently, and
+ * the miss is not a blank field: the caller loses the rezeis user id AND the
+ * device-limit-reduction stamp that excuses a legitimate downgrade. It fails in
+ * the ACCUSING direction, against customers who did nothing.
+ *
+ * `remnawavePanelId` is a second recorded angle on the SAME identity, so adding
+ * it widens the match without loosening it — this is not a fuzzy search.
+ *
+ * TWO BOUNDS, both load-bearing:
+ *   • the numeric list is built only from identities that are ENTIRELY digits
+ *     AND parse to a safe integer. Without the first test
+ *     `Number.parseInt('330f2b38-…')` yields `330` — a valid-looking id
+ *     belonging to somebody else; without the second, a 30-digit string rounds
+ *     to a neighbour's id.
+ *   • when that list comes out EMPTY the numeric arm is OMITTED, never emitted
+ *     as `remnawavePanelId: null` and never as an `in` carrying a null.
+ *     `remnawave_panel_id` has no unique constraint and is null on most rows
+ *     (migration `20260810160000` records why one could not be added to live
+ *     data), so either of those spellings matches every row that has no panel
+ *     id — turning "which subscriptions are these" into "all of them" inside an
+ *     anti-fraud detector.
+ */
+export interface PanelIdentityLookup {
+  /** Finds every local row named by one of the requested identities. */
+  readonly where: Prisma.SubscriptionWhereInput;
+  /**
+   * Which requested identities a fetched row answers to: normally one, two when
+   * the row is named by both angles at once, and NONE for a row that arrived
+   * for a reason the caller never asked about.
+   *
+   * Callers key their result map by THESE, never by `row.remnawaveId`. On a 3.x
+   * panel the caller asks about `"4471"` while the row that answers is stamped
+   * `"330f2b38-…"`, so keying by the row would re-lose the match the widened
+   * `where` just recovered.
+   */
+  keysFor(row: PanelIdentityColumns): readonly string[];
+}
+
+/** `null` when there is nothing to look up; callers already return early. */
+export function panelIdentityLookup(identities: readonly string[]): PanelIdentityLookup | null {
+  const requested = new Set(identities.filter((v) => typeof v === 'string' && v.length > 0));
+  if (requested.size === 0) return null;
+  // A list rather than a single string: two spellings can share one numeric
+  // angle (`'42'` and `'042'`), and attributing such a row to only one of them
+  // would drop the other's grace silently — the same class of quiet miss this
+  // helper exists to stop.
+  const identitiesByPanelId = new Map<number, string[]>();
+  for (const identity of requested) {
+    if (!isNumericPanelIdentity(identity)) continue;
+    const panelId = Number.parseInt(identity, 10);
+    if (!Number.isSafeInteger(panelId)) continue;
+    const existing = identitiesByPanelId.get(panelId);
+    if (existing === undefined) identitiesByPanelId.set(panelId, [identity]);
+    else if (!existing.includes(identity)) existing.push(identity);
+  }
+  const storedIds = [...requested];
+  const panelIds = [...identitiesByPanelId.keys()];
+  const where: Prisma.SubscriptionWhereInput =
+    panelIds.length === 0
+      ? { remnawaveId: { in: storedIds } }
+      : { OR: [{ remnawaveId: { in: storedIds } }, { remnawavePanelId: { in: panelIds } }] };
+  return {
+    where,
+    keysFor(row: PanelIdentityColumns): readonly string[] {
+      const keys: string[] = [];
+      if (typeof row.remnawaveId === 'string' && requested.has(row.remnawaveId)) {
+        keys.push(row.remnawaveId);
+      }
+      const panelId = row.remnawavePanelId;
+      // Tested as a safe integer, not as `!= null`: a caller whose `select`
+      // omitted the column hands over `undefined`, and `undefined` must answer
+      // for nobody rather than for whoever `Map.get(undefined)` finds.
+      if (typeof panelId === 'number' && Number.isSafeInteger(panelId)) {
+        for (const identity of identitiesByPanelId.get(panelId) ?? []) {
+          if (!keys.includes(identity)) keys.push(identity);
+        }
+      }
+      return keys;
+    },
+  };
 }
 
 /**

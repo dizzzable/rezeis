@@ -1,4 +1,4 @@
-import { Injectable, Logger, NotFoundException, Optional } from '@nestjs/common';
+import { ConflictException, Injectable, Logger, NotFoundException, Optional } from '@nestjs/common';
 import {
   DeviceReductionPlanState,
   EffectiveProjectionState,
@@ -13,6 +13,12 @@ import { EVENT_TYPES, SystemEventsService } from '../../../common/services/syste
 import { AddOnEntitlementService } from '../../add-on-entitlements/services/add-on-entitlement.service';
 import { SubscriptionTermService } from '../../add-on-entitlements/services/subscription-term.service';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
+import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
+import {
+  assessStoredPanelLink,
+  SUBSCRIPTION_DELETE_STALE_PANEL_LINK_CODE,
+  SUBSCRIPTION_DELETE_STALE_PANEL_LINK_MESSAGE,
+} from '../../remnawave/services/stale-panel-link';
 
 export interface SubscriptionDeleteInput {
   readonly userId?: string;
@@ -97,6 +103,13 @@ export interface ExpiredSubscriptionDeleteInput {
 export interface ExpiredSubscriptionDeleteResult {
   readonly deleted: boolean;
   readonly syncJobId: string | null;
+  /**
+   * Separates the ONE deferral the sweep cannot fix by waiting from the several
+   * it can. A compare-and-swap that lost is a race the next sweep wins; a stale
+   * panel link stays refused until a human runs the reconciliation, so it is
+   * counted and named rather than folded into "nothing to do".
+   */
+  readonly refusedStalePanelLink: boolean;
 }
 
 interface LifecycleDeleteOptions {
@@ -116,6 +129,27 @@ interface LifecycleDeleteOutcome {
    * later aborts.
    */
   readonly orphanedPanelUsername?: string | null;
+  /**
+   * Set only when the panel-side deletion was REFUSED because the row's stored
+   * identity cannot be trusted to name the right panel profile. Nothing was
+   * written: the row is still live, still linked, and still repairable by the
+   * panel-link reconciliation the refusal names.
+   */
+  readonly stalePanelLinkRefused?: boolean;
+}
+
+/**
+ * The refusal, as the operator's client sees it.
+ *
+ * 409, matching `USER_DELETE_PROTECTED_HISTORY` — the other deletion this panel
+ * refuses on the state of the data rather than on the request. Not 400: the
+ * request is well formed and will succeed unchanged once the link is repaired.
+ */
+function stalePanelLinkConflict(): ConflictException {
+  return new ConflictException({
+    code: SUBSCRIPTION_DELETE_STALE_PANEL_LINK_CODE,
+    message: SUBSCRIPTION_DELETE_STALE_PANEL_LINK_MESSAGE,
+  });
 }
 
 /**
@@ -147,6 +181,13 @@ export class SubscriptionDeletionService {
     private readonly profileSyncQueueService: ProfileSyncQueueService,
     private readonly addOnEntitlementService: AddOnEntitlementService,
     private readonly subscriptionTermService: SubscriptionTermService,
+    // REQUIRED, deliberately, and placed before the optional events service so
+    // that omitting it is a compile error rather than a guard that quietly is
+    // not there. Only ONE method is called on it — the cached
+    // `getPanelShape()` — and a throw from that call is already the "era
+    // unknown" answer, so a degraded panel cannot turn this dependency into a
+    // second way for a deletion to fail.
+    private readonly remnawaveApiService: RemnawaveApiService,
     @Optional()
     private readonly systemEventsService?: SystemEventsService,
   ) {}
@@ -212,7 +253,11 @@ export class SubscriptionDeletionService {
       },
       input,
     );
-    return { deleted: outcome.committed, syncJobId: outcome.syncJobId };
+    return {
+      deleted: outcome.committed,
+      syncJobId: outcome.syncJobId,
+      refusedStalePanelLink: outcome.stalePanelLinkRefused === true,
+    };
   }
 
   private async deleteSubscription(
@@ -226,6 +271,52 @@ export class SubscriptionDeletionService {
         committed: false,
         syncJobId: null,
         userId: subscription.userId || null,
+      };
+    }
+
+    // ── THE STALE-LINK REFUSAL ───────────────────────────────────────────────
+    //
+    // BEFORE THE TRANSACTION, for two reasons. The era read is a network call
+    // and this file's own contract is that external calls stay outside a
+    // database transaction; and refusing here means not one statement runs, so
+    // there is nothing to roll back and no window in which the row is retired.
+    //
+    // CHECKED ON THE SNAPSHOT, NOT ON THE LOCKED ROW, and that is exact rather
+    // than merely close enough. The only value the guard would read
+    // differently is `remnawaveId`, and on the era where the guard is armed —
+    // a PROVEN 3.x panel — the panel has no uuid left to hand out, so nothing
+    // can write one. The value can therefore only move decimal → decimal,
+    // → null, or uuid → decimal (a reconciliation repair landing mid-flight).
+    // The last one makes this refuse a delete that would have been safe; the
+    // operator presses again and it goes through. It cannot drift the other
+    // way, which is the direction that would cost a live profile.
+    //
+    // WHY THE WHOLE OPERATION IS REFUSED RATHER THAN "RETIRE LOCALLY, SKIP THE
+    // PANEL DELETE". The local retirement is not the harmless half. Writing
+    // `status = DELETED` takes the row out of `PanelLinkReconciliationService`,
+    // which selects `status <> DELETED` and is the ONLY thing that can put a
+    // trustworthy identity back — so the "safe" variant permanently destroys
+    // the repair this refusal exists to send the operator to, and leaves an
+    // unbilled panel profile with nothing pointing at it. Refusing loses
+    // nothing at all: the row keeps its history, keeps its link, stays
+    // repairable, and the same delete succeeds the moment the link is fixed.
+    // The cost is one extra step for an operator who wanted the row gone; the
+    // alternative charges that step to a customer who is still paying.
+    if (await this.panelLinkIsStale(subscription, options)) {
+      // The SWEEP DEFERS, the operator is TOLD. Same decision, two deliveries.
+      // A cron has no one to answer to and cannot act on a remedy, so throwing
+      // there would only convert a refusal into an unhandled rejection the
+      // caller logs as "failed to schedule cleanup" — the row is left exactly
+      // as a deferral leaves it either way, and it re-enters the next sweep as
+      // soon as the link is repaired.
+      if (options.source !== 'EXPIRED_PROFILE_CLEANUP') {
+        throw stalePanelLinkConflict();
+      }
+      return {
+        committed: false,
+        syncJobId: null,
+        userId: subscription.userId || null,
+        stalePanelLinkRefused: true,
       };
     }
 
@@ -369,6 +460,92 @@ export class SubscriptionDeletionService {
       }
     }
     return outcome;
+  }
+
+  /**
+   * True when this row's stored identity cannot be trusted to name the right
+   * panel profile, so the panel-side deletion must not be armed.
+   *
+   * ASKED ONLY OF A ROW THAT NAMES A PROFILE. A null `remnawaveId` never
+   * reaches the `SyncAction.DELETE` branch below, so there is no deletion to
+   * refuse — and skipping the era read for those rows keeps the ordinary
+   * never-provisioned delete free of any panel round-trip at all.
+   *
+   * The three answers, and the fact that only one of them refuses, live in
+   * {@link assessStoredPanelLink}. Reading them here as a bare boolean is
+   * deliberate: this method decides ONE thing, and the reason is carried into
+   * the alert rather than branched on.
+   */
+  private async panelLinkIsStale(
+    subscription: DeletableSubscription,
+    options: LifecycleDeleteOptions,
+  ): Promise<boolean> {
+    const remnawaveId = subscription.remnawaveId;
+    if (remnawaveId === null) {
+      return false;
+    }
+    const trust = await assessStoredPanelLink(
+      () => this.remnawaveApiService.getPanelShape(),
+      remnawaveId,
+    );
+    if (trust.trusted) {
+      return false;
+    }
+    this.publishStalePanelLinkRefusal(subscription, remnawaveId, options.source);
+    return true;
+  }
+
+  /**
+   * Says out loud that a delete was refused, and why.
+   *
+   * THE LOG LINE IS UNCONDITIONAL; THE SYSTEM EVENT IS NOT. An event is
+   * delivered onward (audit log, and Telegram when the operator has wired it
+   * up), and the expired-profile sweep runs every thirty minutes over a
+   * population that stays refused until somebody repairs it — so emitting one
+   * per row per sweep would page the operator forty-eight times a day about a
+   * row they already know about, which is how an alert stops being read. The
+   * same trade is already made, for the same reason, by
+   * `ExpiredProfileCleanupService.softDeleteDetachedExpired`, which reports its
+   * skipped population once per sweep with a count instead of once per row.
+   *
+   * An OPERATOR-driven refusal is the opposite case: it happens because a human
+   * just pressed delete, it is rare, and the event is what puts the incident
+   * beside the reconciliation report they are about to run.
+   */
+  private publishStalePanelLinkRefusal(
+    subscription: DeletableSubscription,
+    remnawaveId: string,
+    source: LifecycleDeleteOptions['source'],
+  ): void {
+    const message =
+      `Refused the Remnawave deletion for subscription ${subscription.id}: its stored identity ` +
+      `'${remnawaveId}' is a 2.x uuid and the panel is 3.x, so it no longer names the profile ` +
+      'it was written for — deleting would remove whatever the address fallback resolves to, ' +
+      'which on an unrepaired duplicate pair is a live customer. Nothing was written. Run the ' +
+      'panel-link reconciliation, then delete again.';
+    this.logger.warn(message);
+    if (source === 'EXPIRED_PROFILE_CLEANUP' || this.systemEventsService === undefined) {
+      return;
+    }
+    try {
+      this.systemEventsService.warn(
+        EVENT_TYPES.SYSTEM_REMNAWAVE_SYNC,
+        'SYSTEM',
+        'Subscription deletion refused: the stored panel link is stale',
+        {
+          subscriptionId: subscription.id,
+          userId: subscription.userId || null,
+          remnawaveId,
+          source,
+          code: SUBSCRIPTION_DELETE_STALE_PANEL_LINK_CODE,
+        },
+      );
+    } catch (error: unknown) {
+      const detail = error instanceof Error ? error.message : 'Unknown error';
+      this.logger.error(
+        `Could not publish the stale-panel-link refusal for subscription ${subscription.id}: ${detail}`,
+      );
+    }
   }
 
   /**

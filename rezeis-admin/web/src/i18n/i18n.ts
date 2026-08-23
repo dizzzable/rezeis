@@ -116,7 +116,8 @@ export type I18nFeature =
   | 'advertising'
   | 'subpageConfig'
   | 'landingBuilder'
-  | 'legalDocuments';
+  | 'legalDocuments'
+  | 'panelLinkReconciliation';
 
 const loadedFeatureBundles = new Set<I18nFeature>();
 const featureLoadPromises = new Map<string, Promise<void>>();
@@ -198,6 +199,10 @@ async function fetchFeatureBundle(
       return locale === 'ru'
         ? (await import('@/i18n/features/legalDocuments.ru')).ru
         : (await import('@/i18n/features/legalDocuments.en')).en;
+    case 'panelLinkReconciliation':
+      return locale === 'ru'
+        ? (await import('@/i18n/features/panelLinkReconciliation.ru')).ru
+        : (await import('@/i18n/features/panelLinkReconciliation.en')).en;
   }
 }
 

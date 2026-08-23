@@ -74,11 +74,18 @@ Files:
 
 ### Remnawave Integration Note
 
-- `rezeis-admin` currently uses `@remnawave/backend-contract` for typed command
-  schemas and route metadata.
+- **Superseded 2026-08-23.** `rezeis-admin` no longer uses `@remnawave/backend-contract`
+  at runtime. Every `@remnawave/*` package is a **devDependency** and serves only as
+  the CI oracle the guard specs execute; `grep -rn "@remnawave/" rezeis-admin/src/`
+  returns no imports.
+- Live panel responses are decoded by local tolerant decoders over plain HTTP, so
+  one build serves every panel era its operators are still running. Pinning a
+  vendor schema is what caused the outage that removed it — see
+  `rezeis-admin/README.md` § Remnawave compatibility.
 - Server-side HTTP orchestration still runs through the NestJS admin facade,
   specifically `RemnawaveApiService` with `HttpService`.
-- Do not describe `@remnawave/backend-contract` as an HTTP client.
+- Do not describe `@remnawave/backend-contract` as an HTTP client, and do not
+  reintroduce it as a runtime dependency.
 - Do not move Remnawave contract usage into `ruid` or `ruid/web`.
 
 File:

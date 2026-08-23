@@ -7,7 +7,9 @@ import {
   SyncJobStatus,
 } from '@prisma/client';
 
+import { patchSnapshotNumeric } from '../../subscriptions/services/plan-inherited-limits.util';
 import { PromocodeInterface } from '../interfaces/promocode.interface';
+import { isUnmintableSnapshotTrafficLimit } from '../utils/promocode-mappers.util';
 
 /**
  * Donor: `src/services/promocode_rewards.py`.
@@ -289,7 +291,11 @@ export class PromocodeRewardsService {
       return { applied: false, rewardValue: 0 };
     }
     const nextLimit = subscription.trafficLimit + input.additionalGigabytes;
-    const nextSnapshot = patchSnapshotNumeric(subscription.planSnapshot, 'trafficLimit', nextLimit);
+    const nextSnapshot = patchSnapshotNumeric(
+      subscription.planSnapshot,
+      'trafficLimit',
+      nextLimit,
+    ) as Prisma.InputJsonValue;
     await input.transactionClient.subscription.update({
       where: { id: input.targetSubscriptionId },
       data: {
@@ -339,7 +345,11 @@ export class PromocodeRewardsService {
       return { applied: false, rewardValue: 0 };
     }
     const nextLimit = subscription.deviceLimit + input.additionalDevices;
-    const nextSnapshot = patchSnapshotNumeric(subscription.planSnapshot, 'deviceLimit', nextLimit);
+    const nextSnapshot = patchSnapshotNumeric(
+      subscription.planSnapshot,
+      'deviceLimit',
+      nextLimit,
+    ) as Prisma.InputJsonValue;
     await input.transactionClient.subscription.update({
       where: { id: input.targetSubscriptionId },
       data: {
@@ -413,6 +423,42 @@ export class PromocodeRewardsService {
       return { applied: true, rewardValue: days, syncJobId };
     }
 
+    // THE PRODUCT DECISION, taken deliberately and reversible in one line —
+    // read `isUnmintableSnapshotTrafficLimit` in `promocode-mappers.util.ts`
+    // for the full reasoning before changing it.
+    //
+    // The stored snapshot is copied VERBATIM into `Subscription.trafficLimit`
+    // three lines below; nothing between here and the column clamps, converts
+    // or re-derives it. `@Min(1)` on the snapshot DTO only closed the write
+    // side, and only as of now — it was `@Min(0)` and the create/update path
+    // writes `dto.plan` into the JSON column unchanged, so promocodes authored
+    // earlier can still be carrying a `0`. There is no migration to sweep them.
+    //
+    // A `0` here is not a small cap. Remnawave spells unlimited traffic as `0`
+    // bytes and cannot express "zero bytes allowed" at all, so minting it hands
+    // the customer UNLIMITED upstream while the row says the opposite, and the
+    // sync job then reports drift on every sweep for the life of the row.
+    //
+    // Refusing rather than rewriting, because both rewrites are guesses that
+    // succeed silently: `0 → null` gives away unlimited, `0 → 1` invents a cap
+    // nobody chose. This refusal is soft and NON-DESTRUCTIVE — `applied: false`
+    // makes the lifecycle service roll the activation row back, so the customer
+    // keeps the promocode and it works the moment an operator fixes the
+    // snapshot — and it is loud, because the log line below is the only thing
+    // that distinguishes it from the half-dozen ordinary `REWARD_NOT_APPLICABLE`
+    // outcomes.
+    if (isUnmintableSnapshotTrafficLimit(plan.trafficLimit)) {
+      this.logger.error(
+        `Promocode ${input.promocode.code} refused: plan snapshot ${plan.id} carries ` +
+          `trafficLimit=${String(plan.trafficLimit)}, which Remnawave cannot express — its 0 is ` +
+          'UNLIMITED, so minting this would uncap the customer upstream and report drift on ' +
+          'every sync forever. The activation was rolled back and the promocode is still ' +
+          'redeemable; edit the snapshot to a whole number of gigabytes >= 1, or to null for ' +
+          'unlimited.',
+      );
+      return { applied: false, rewardValue: 0 };
+    }
+
     // Create a brand-new subscription from the plan snapshot, then enqueue a
     // Remnawave CREATE so the user actually gets a working profile. Both the
     // local row and the sync job are written in the same transaction; the
@@ -464,15 +510,7 @@ function clampDiscount(value: number): number {
   return Math.max(0, Math.min(100, Math.trunc(value)));
 }
 
-function patchSnapshotNumeric(
-  snapshot: Prisma.JsonValue,
-  key: 'trafficLimit' | 'deviceLimit',
-  value: number,
-): Prisma.InputJsonValue {
-  if (snapshot === null || typeof snapshot !== 'object' || Array.isArray(snapshot)) {
-    return { [key]: value } as Prisma.InputJsonValue;
-  }
-  const next = { ...(snapshot as Record<string, unknown>) };
-  next[key] = value;
-  return next as Prisma.InputJsonValue;
-}
+// `patchSnapshotNumeric` used to be defined here. It now lives beside the
+// reader that gives it meaning — `resolveInheritedPlanLimitUpdate` in
+// `plan-inherited-limits.util.ts` — so every caller that moves a limit column
+// makes the same explicit choice about whether the change outlives a renewal.

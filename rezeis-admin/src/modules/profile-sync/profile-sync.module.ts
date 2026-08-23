@@ -4,6 +4,8 @@ import { Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
 import { RemnawaveModule } from '../remnawave/remnawave.module';
 import { SettingsModule } from '../settings/settings.module';
+import { AdminDuplicateSubscriptionMergeController } from './duplicate-subscription-merge.controller';
+import { DuplicateSubscriptionMergeService } from './duplicate-subscription-merge.service';
 import { AdminPanelLinkReconciliationController } from './panel-link-reconciliation.controller';
 import { PanelLinkReconciliationService } from './panel-link-reconciliation.service';
 import { PROFILE_SYNC_QUEUE } from './profile-sync.constants';
@@ -23,13 +25,19 @@ import { RemnawaveProfileNamingService } from './remnawave-profile-naming.servic
     SettingsModule,
     BullModule.registerQueue({ name: PROFILE_SYNC_QUEUE }),
   ],
-  controllers: [AdminPanelLinkReconciliationController],
+  controllers: [AdminPanelLinkReconciliationController, AdminDuplicateSubscriptionMergeController],
   providers: [
+    DuplicateSubscriptionMergeService,
     PanelLinkReconciliationService,
     ProfileSyncProcessor,
     ProfileSyncQueueService,
     RemnawaveProfileNamingService,
   ],
-  exports: [PanelLinkReconciliationService, ProfileSyncQueueService, RemnawaveProfileNamingService],
+  exports: [
+    DuplicateSubscriptionMergeService,
+    PanelLinkReconciliationService,
+    ProfileSyncQueueService,
+    RemnawaveProfileNamingService,
+  ],
 })
 export class ProfileSyncModule {}

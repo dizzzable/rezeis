@@ -16,6 +16,10 @@ import {
 import { RemnawaveApiService } from '../src/modules/remnawave/services/remnawave-api.service';
 import type { StoredAntiFraudSettings } from '../src/modules/settings/utils/anti-fraud-settings.util';
 import { tunablesFromEnv, tunablesThatFail } from './fixtures/anti-fraud-tunables';
+import {
+  subscriptionFindManyDouble,
+  type SubscriptionQuery,
+} from './fixtures/subscription-where';
 
 const NOW = new Date('2026-08-06T12:00:00.000Z');
 
@@ -61,9 +65,21 @@ interface Mock {
   readonly requestedSize?: number;
   readonly panelUsers?: ReadonlyArray<{ uuid: string; panelId: number | null }>;
   readonly panelBulkOutcome?: RemnawaveStrictOutcome<unknown>;
-  readonly subs?: ReadonlyArray<{ remnawaveId: string; userId: string }>;
+  /**
+   * `remnawavePanelId` absent === the column is NULL, which is what most rows
+   * look like — and why a lookup that ever asks for `remnawavePanelId: null`
+   * selects the whole table rather than one customer.
+   */
+  readonly subs?: readonly SubRow[];
   /** Stored anti-fraud settings; defaults to "the operator switched it on". */
   readonly stored?: StoredAntiFraudSettings;
+}
+
+/** A `subscriptions` row as the detector selects it. */
+interface SubRow {
+  remnawaveId: string;
+  remnawavePanelId?: number | null;
+  userId: string;
 }
 
 interface Harness {
@@ -72,15 +88,19 @@ interface Harness {
   readonly panelUserCalls: () => number;
   /** The `size` every subscription-request-log read asked the panel for. */
   readonly pageSizesRequested: () => readonly number[];
+  /** Every `subscription.findMany`: the `where` sent and the rows it selected. */
+  readonly subscriptionQueries: readonly SubscriptionQuery<SubRow>[];
 }
 
 function makeHarness(mock: Mock): Harness {
   let panelUserCalls = 0;
   const pageSizes: number[] = [];
   const records = mock.records ?? [];
+  // The `where` is HONOURED, not ignored — see `test/fixtures/subscription-where.ts`.
+  const subscriptions = subscriptionFindManyDouble(mock.subs ?? []);
 
   const prismaMock = {
-    subscription: { findMany: () => Promise.resolve(mock.subs ?? []) },
+    subscription: { findMany: subscriptions.findMany },
   } as unknown as PrismaService;
 
   const remnaMock = {
@@ -115,6 +135,7 @@ function makeHarness(mock: Mock): Harness {
     ),
     panelUserCalls: () => panelUserCalls,
     pageSizesRequested: () => pageSizes,
+    subscriptionQueries: subscriptions.queries,
   };
 }
 
@@ -154,6 +175,76 @@ describe('SubscriptionUaDetectors — the signal', () => {
     assert.deepEqual(candidates[0].affectedUserIds, ['user-1']);
     assert.equal(candidates[0].fingerprint, '2026-08-06|uuid-1');
     assert.deepEqual((candidates[0].metadata as { schemes: string[] }).schemes, ['vless']);
+  });
+
+  it('deep-links a 3.x identity to the uuid-era row it belongs to', async () => {
+    // On a 3.x panel the log row identifies its owner by the numeric `id`, and
+    // the user list resolves that to the same decimal — there is no uuid left
+    // anywhere on the panel. The subscription was linked during the 2.x era, so
+    // `remnawaveId` still holds the uuid and always will. Matching on that one
+    // column alone finds nothing, `affectedUserIds` comes back empty, and the
+    // operator gets a signal that opens onto nobody.
+    const { detectors } = makeHarness({
+      records: [record({ userUuid: null, panelUserId: 4471, userAgent: CONFIG_UA })],
+      panelUsers: [{ uuid: '4471', panelId: 4471 }],
+      subs: [
+        { remnawaveId: '9e7c1a54-0000-4000-8000-000000000001', userId: 'stranger-1' },
+        { remnawaveId: '330f2b38-1362-46ab-b5c0-dea32167eff9', remnawavePanelId: 4471, userId: 'user-42' },
+      ],
+    });
+
+    const candidates = await detectors.detectSubscriptionUaTunnel(NOW);
+
+    assert.equal(candidates.length, 1);
+    assert.deepEqual(candidates[0].affectedUserIds, ['user-42']);
+    // The signal is still filed under the identity the PANEL used, which is
+    // what the fingerprint dedupes on across runs.
+    assert.equal(candidates[0].fingerprint, '2026-08-06|4471');
+  });
+
+  it('selects that row and no other — a null panel id must never be asked for', async () => {
+    // `remnawave_panel_id` has no unique constraint and is null on most rows
+    // (migration `20260810160000`), so asking `remnawavePanelId: null`, or
+    // putting a null in the `in` list, would sweep up every one of these
+    // strangers and file one customer's evidence against another.
+    const { detectors, subscriptionQueries } = makeHarness({
+      records: [record({ userUuid: null, panelUserId: 4471, userAgent: CONFIG_UA })],
+      panelUsers: [{ uuid: '4471', panelId: 4471 }],
+      subs: [
+        { remnawaveId: '9e7c1a54-0000-4000-8000-000000000001', userId: 'stranger-1' },
+        { remnawaveId: '9e7c1a54-0000-4000-8000-000000000002', userId: 'stranger-2' },
+        { remnawaveId: '330f2b38-1362-46ab-b5c0-dea32167eff9', remnawavePanelId: 4471, userId: 'user-42' },
+      ],
+    });
+
+    await detectors.detectSubscriptionUaTunnel(NOW);
+
+    assert.equal(subscriptionQueries.length, 1, 'the detector did not query subscriptions at all');
+    assert.deepEqual(
+      subscriptionQueries[0].matched.map((row) => row.userId),
+      ['user-42'],
+    );
+  });
+
+  it('asks one column only when the batch holds no numeric identity', async () => {
+    // A 2.x panel: no numeric angle exists to ask about, so the arm is OMITTED
+    // rather than emitted empty or null.
+    const { detectors, subscriptionQueries } = makeHarness({
+      records: [record({ userAgent: CONFIG_UA })],
+      subs: [
+        { remnawaveId: '9e7c1a54-0000-4000-8000-000000000001', userId: 'stranger-1' },
+        { remnawaveId: 'uuid-1', userId: 'user-1' },
+      ],
+    });
+
+    await detectors.detectSubscriptionUaTunnel(NOW);
+
+    assert.equal(subscriptionQueries.length, 1);
+    assert.deepEqual(subscriptionQueries[0].where, { remnawaveId: { in: ['uuid-1'] } });
+    assert.deepEqual(
+      subscriptionQueries[0].matched.map((row) => row.userId),
+      ['user-1'],
+    );
   });
 
   it('files a single sighting at LOW and never above MEDIUM when it repeats', async () => {

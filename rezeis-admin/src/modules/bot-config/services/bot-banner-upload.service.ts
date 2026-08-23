@@ -1,15 +1,17 @@
 import { promises as fs } from 'node:fs';
-import { extname, join, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
 import { BadRequestException, Injectable, Logger, OnModuleInit } from '@nestjs/common';
+
+import { verifyImageContent } from '../../settings/services/icon-upload.service';
 
 export interface BotBannerUploadedInterface {
   /** Public URL relative to the admin host (`/uploads/bot-banners/<file>`). */
   readonly url: string;
   /** Original file name as supplied by the client (best-effort sanitised). */
   readonly originalName: string;
-  /** MIME type. */
+  /** MIME type verified from the file content (never the client's claim). */
   readonly mimeType: string;
   /** Stored size in bytes. */
   readonly size: number;
@@ -59,6 +61,15 @@ const EXT_BY_MIME: Record<string, string> = {
  * Telegram pulls the image from there, and the banner appears on
  * `/start`.
  *
+ * Security: this directory is under the unauthenticated `/uploads` static
+ * root, so the declared MIME type is never trusted — `verifyImageContent`
+ * sniffs the file signature, requires it to agree with the declared type, and
+ * the stored extension is derived from the SNIFFED type. Without that, an
+ * operator could store arbitrary bytes (an HTML document, a script) under an
+ * `.png` name. SVG is not in the allowlist here at all: Telegram cannot render
+ * it as a photo, so accepting it would buy nothing and cost an active-content
+ * surface.
+ *
  * Files are never reaped — orphaned banners (operator uploads a new
  * one and overwrites the BotText URL) just sit on disk. Acceptable:
  * each banner is at most ~5MB and this is a once-in-a-while op.
@@ -92,15 +103,16 @@ export class BotBannerUploadService implements OnModuleInit {
         `File exceeds ${Math.round(MAX_FILE_SIZE / 1024 / 1024)} MB limit`,
       );
     }
-    const ext = EXT_BY_MIME[input.mimeType] ?? extname(input.originalName) ?? '.bin';
+    const verified = verifyImageContent(input.buffer, input.mimeType, ALLOWED_TYPES);
+    const ext = EXT_BY_MIME[verified.mimeType];
     const fileName = `${createId()}${ext}`;
     const fullPath = join(this.uploadsDir, fileName);
-    await fs.writeFile(fullPath, input.buffer, { mode: 0o644 });
+    await fs.writeFile(fullPath, verified.buffer, { mode: 0o644 });
     return {
       url: `/uploads/bot-banners/${fileName}`,
       originalName: sanitiseName(input.originalName),
-      mimeType: input.mimeType,
-      size: input.buffer.length,
+      mimeType: verified.mimeType,
+      size: verified.buffer.length,
     };
   }
 

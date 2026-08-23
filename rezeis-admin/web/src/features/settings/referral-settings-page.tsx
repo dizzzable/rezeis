@@ -17,7 +17,7 @@ import {
 import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
-import { usePlans } from '@/features/plans/plans-api'
+import { usePlans, type Plan } from '@/features/plans/plans-api'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -93,7 +93,12 @@ interface ReferralSettingsFormProps {
 function ReferralSettingsForm({ referral }: ReferralSettingsFormProps) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
-  const { data: plans } = usePlans({ active: true })
+  // The FULL catalog. `/admin/plans` returns every row including archived ones
+  // (`PlansAdminService.listPlans` issues no `where`), and `plansListOptions`
+  // only filters when `active` is passed. This page has two pickers asking two
+  // different questions, so neither policy lives on the shared query any more
+  // — see `eligiblePlanOptions` / `giftPlanOptions` below.
+  const { data: plans } = usePlans()
 
   const numString = z.string().trim()
 
@@ -184,6 +189,127 @@ function ReferralSettingsForm({ referral }: ReferralSettingsFormProps) {
   const giftEnabled = form.watch('giftEnabled')
   const discountEnabled = form.watch('discountEnabled')
   const trafficEnabled = form.watch('trafficEnabled')
+  const inviteLinkTtlDays = form.watch('inviteLinkTtlDays')
+  const inviteSlots = form.watch('inviteSlots')
+  const giftPlanId = form.watch('giftPlanId')
+
+  // ── Two pickers, two questions, two filters ───────────────────────────────
+  //
+  // Both were fed one `usePlans({ active: true })`, which gave them the same
+  // answer to different questions and was wrong for each in its own way.
+
+  /** What the platform can actually sell — mirror of `PlanCatalogService`. */
+  const sellable = (plan: Plan): boolean => plan.isActive && !plan.isArchived
+  const allPlans = plans ?? []
+
+  /**
+   * QUALIFYING plans — "which purchases count a referral".
+   *
+   * Offers only what is on sale, because a NEW qualification on a plan nobody
+   * can buy is an outage in disguise: an empty selection means "every plan
+   * qualifies", so a selection containing only retired plans means no purchase
+   * ever qualifies again, and nothing says so.
+   *
+   * It also keeps every plan ALREADY selected, whatever its state. Archiving
+   * or deactivating a plan used to make its chip vanish while its id stayed in
+   * the saved configuration: the operator saw "N plans selected" with fewer
+   * than N chips lit, could not tell which were missing, and had no way to
+   * drop one short of "Clear", which drops all of them. Archiving is
+   * reversible, so the setting was still live — it had just gone invisible.
+   */
+  const eligiblePlanOptions = allPlans.filter(
+    (plan) => sellable(plan) || eligiblePlanIds.includes(plan.id),
+  )
+
+  /**
+   * Selected ids with no plan behind them any more. Plans can be hard-deleted
+   * (`DELETE /admin/plans/:planId`) and the id survives in
+   * `referralSettings.eligiblePlanIds` forever, submitted by every save.
+   * Rendered so it can be seen and removed; nothing else would ever show it.
+   */
+  // Only once the catalog has actually landed. `plans` is `undefined` while the
+  // query is in flight, and computing this against an empty list made EVERY
+  // selected plan flash up as deleted on a slow connection.
+  const orphanEligiblePlanIds =
+    plans === undefined
+      ? []
+      : eligiblePlanIds.filter((id) => !allPlans.some((plan) => plan.id === id))
+
+  /**
+   * GIFT plan — the subscription a user receives NOW for their points.
+   *
+   * Strictly what is on sale: this mints a NEW subscription, so a retired plan
+   * should not be handed out. That is a real tightening — `active: true` let
+   * archived-but-active plans through, and the deployment that prompted this
+   * has three of them. The stored choice is kept in the list regardless: a
+   * value the form submits has to be a value the operator can see.
+   */
+  const giftPlanOptions = allPlans.filter(
+    (plan) => sellable(plan) || plan.id === giftPlanId,
+  )
+
+  // ── Invite-limit bounds ───────────────────────────────────────────────────
+  //
+  // Mirrors of the SERVER's floors, which stay the authority:
+  // `ReferralInviteLimitsService` exports `MIN_LINK_TTL_SECONDS = 60` and
+  // `MIN_INVITE_COUNT_SETTING = 0`, and clamps whatever is already stored
+  // (with a warning) on every read. These copies exist only so the boxes can
+  // say the bound out loud before a bad number is written at all — this page
+  // is where the bad numbers came from, because `PATCH /admin/settings/referral`
+  // takes a bare `Record<string, unknown>` and has no DTO to refuse them.
+  //
+  // ONE day, not sixty seconds: this box is denominated in whole days, so the
+  // smallest value it can express that clears the server's 60s floor is 1.
+  // "No expiry" is an EMPTY box, not a zero one — see `parseBoundedInt`.
+  const MIN_LINK_TTL_DAYS = 1
+  // ZERO, not one, and the `min="1"` that used to sit on this input was a bug
+  // in its own right: `initialSlots: 0` is a documented, legitimate setting
+  // ("this user gets no invite slots"), and the input refused to save it. The
+  // broken value is a NEGATIVE — `getCapacity` floors `remainingSlots` at 0,
+  // so it locks the operator's users out of inviting with no error anywhere.
+  const MIN_INITIAL_SLOTS = 0
+
+  /**
+   * One operator-typed box → the number that actually goes out.
+   *
+   * Replaces `parseInt`, which is lenient in the worst possible direction: it
+   * stops at the first character it cannot read and returns what it has, so a
+   * junk box yields a PLAUSIBLE WRONG NUMBER rather than a rejection.
+   * `parseInt('1e3', 10)` is 1 — and `1e3` is a valid value for
+   * `<input type="number">`, so an operator asking for a 1000-day link got a
+   * 1-day one with nothing on screen to say so. `Number('1e3')` is 1000.
+   *
+   * Empty → `null`, which is the real setting "no expiry" / "unlimited slots"
+   * and must stay reachable. Anything that is not a finite number → `null`
+   * too: better the safe unbounded setting than a number nobody typed.
+   * `Math.trunc` then `Math.max(floor, …)` is exactly what the server's
+   * `normalizeSetting` does to a stored value.
+   */
+  const parseBoundedInt = (raw: string, floor: number): number | null => {
+    if (raw.trim() === '') return null
+    const parsed = Number(raw)
+    if (!Number.isFinite(parsed)) return null
+    return Math.max(floor, Math.trunc(parsed))
+  }
+
+  // Named on the field and held at Save, rather than left to the native
+  // bubble: `min` is enforced by the browser only while the input is MOUNTED,
+  // and both of these live behind a toggle. Typing a negative and then
+  // switching the section off unmounted the constraint with the field and let
+  // the value through — `linkTtlSeconds` and `initialSlots` are written
+  // regardless of their enable flags, and the server's reader deliberately
+  // leaves values behind a disabled toggle unclamped. `parseBoundedInt` is
+  // what closes that path; these two only drive what the operator SEES, so
+  // they follow the toggle — a held Save with no visible field to explain it
+  // would be its own dead end.
+  const linkTtlBelowFloor =
+    linkTtlEnabled &&
+    inviteLinkTtlDays.trim() !== '' &&
+    Number(inviteLinkTtlDays) < MIN_LINK_TTL_DAYS
+  const initialSlotsBelowFloor =
+    inviteSlotsEnabled &&
+    inviteSlots.trim() !== '' &&
+    Number(inviteSlots) < MIN_INITIAL_SLOTS
 
   const saveMutation = useMutation({
     mutationFn: (values: FormValues) =>
@@ -201,9 +327,18 @@ function ReferralSettingsForm({ referral }: ReferralSettingsFormProps) {
         eligiblePlanIds,
         inviteLimits: {
           linkTtlEnabled: values.linkTtlEnabled,
-          linkTtlSeconds: values.inviteLinkTtlDays ? parseInt(values.inviteLinkTtlDays, 10) * 86400 : null,
+          // "No expiry" is an EMPTY box, and ONLY an empty box: `parseBoundedInt`
+          // maps `''` to `null` and everything else to a clamped number. A ZERO
+          // box is not no-expiry — `'0'` is a non-empty string, so the old `? :`
+          // here sent `0`, an invite already expired the instant it is minted.
+          // It now clamps up to `MIN_LINK_TTL_DAYS` instead, which is why the
+          // server's floor never has to reject anything this form can produce.
+          linkTtlSeconds: (() => {
+            const days = parseBoundedInt(values.inviteLinkTtlDays, MIN_LINK_TTL_DAYS)
+            return days === null ? null : days * 86400
+          })(),
           slotsEnabled: values.inviteSlotsEnabled,
-          initialSlots: values.inviteSlots ? parseInt(values.inviteSlots, 10) : null,
+          initialSlots: parseBoundedInt(values.inviteSlots, MIN_INITIAL_SLOTS),
         },
         pointsExchange: {
           exchangeEnabled: values.exchangeEnabled,
@@ -250,7 +385,10 @@ function ReferralSettingsForm({ referral }: ReferralSettingsFormProps) {
               </h1>
               <p className="text-muted-foreground">{t('referralSettingsPage.subtitle')}</p>
             </div>
-            <Button type="submit" disabled={saveMutation.isPending}>
+            <Button
+              type="submit"
+              disabled={saveMutation.isPending || linkTtlBelowFloor || initialSlotsBelowFloor}
+            >
               {saveMutation.isPending ? (
                 <Loader2 className="h-4 w-4 mr-2 animate-spin" />
               ) : (
@@ -425,24 +563,47 @@ function ReferralSettingsForm({ referral }: ReferralSettingsFormProps) {
                   ) : null}
                 </div>
                 <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-                  {(plans ?? [])
-                    .filter((p) => !p.isArchived)
-                    .map((p) => {
-                      const selected = eligiblePlanIds.includes(p.id)
-                      return (
-                        <Button
-                          key={p.id}
-                          type="button"
-                          variant={selected ? 'default' : 'outline'}
-                          size="sm"
-                          className="h-auto min-h-9 justify-start whitespace-normal py-1.5 text-left text-xs"
-                          onClick={() => toggleEligiblePlan(p.id)}
-                          aria-pressed={selected}
-                        >
-                          {p.name}
-                        </Button>
-                      )
-                    })}
+                  {eligiblePlanOptions.map((p) => {
+                    const selected = eligiblePlanIds.includes(p.id)
+                    // Shown only because it is already selected. Marked so the
+                    // operator knows why it is here and what state it is in.
+                    const retired = !sellable(p)
+                    return (
+                      <Button
+                        key={p.id}
+                        type="button"
+                        variant={selected ? 'default' : 'outline'}
+                        size="sm"
+                        className="h-auto min-h-9 justify-start whitespace-normal py-1.5 text-left text-xs"
+                        onClick={() => toggleEligiblePlan(p.id)}
+                        aria-pressed={selected}
+                      >
+                        {p.name}
+                        {retired ? (
+                          <span className="ml-1 text-[10px] uppercase tracking-wide opacity-70">
+                            {p.isArchived
+                              ? t('referralSettingsPage.rewards.eligiblePlanArchived')
+                              : t('referralSettingsPage.rewards.eligiblePlanInactive')}
+                          </span>
+                        ) : null}
+                      </Button>
+                    )
+                  })}
+                  {orphanEligiblePlanIds.map((id) => (
+                    <Button
+                      key={id}
+                      type="button"
+                      variant="default"
+                      size="sm"
+                      className="h-auto min-h-9 justify-start whitespace-normal py-1.5 text-left text-xs"
+                      onClick={() => toggleEligiblePlan(id)}
+                      aria-pressed={true}
+                    >
+                      {t('referralSettingsPage.rewards.eligiblePlanMissing', {
+                        id: id.slice(0, 8),
+                      })}
+                    </Button>
+                  ))}
                 </div>
                 <p className="text-xs text-muted-foreground">
                   {eligiblePlanIds.length === 0
@@ -491,8 +652,29 @@ function ReferralSettingsForm({ referral }: ReferralSettingsFormProps) {
                         {t('referralSettingsPage.inviteLimits.linkTtlDays')}
                       </FormLabel>
                       <FormControl>
-                        <Input type="number" min="1" className="h-8 text-sm" {...field} />
+                        <Input
+                          type="number"
+                          min={MIN_LINK_TTL_DAYS}
+                          className="h-8 text-sm"
+                          aria-invalid={linkTtlBelowFloor}
+                          {...field}
+                        />
                       </FormControl>
+                      {/* `FormDescription` rather than a bare <p>: it carries the
+                          id `FormControl` already points `aria-describedby` at, so
+                          the bound is announced with the field instead of only
+                          being visible next to it. */}
+                      <FormDescription
+                        className={
+                          linkTtlBelowFloor
+                            ? 'text-xs text-destructive'
+                            : 'text-xs text-muted-foreground'
+                        }
+                      >
+                        {t('referralSettingsPage.inviteLimits.linkTtlMin', {
+                          min: MIN_LINK_TTL_DAYS,
+                        })}
+                      </FormDescription>
                     </FormItem>
                   )}
                 />
@@ -525,8 +707,25 @@ function ReferralSettingsForm({ referral }: ReferralSettingsFormProps) {
                         {t('referralSettingsPage.inviteLimits.initialSlots')}
                       </FormLabel>
                       <FormControl>
-                        <Input type="number" min="1" className="h-8 text-sm" {...field} />
+                        <Input
+                          type="number"
+                          min={MIN_INITIAL_SLOTS}
+                          className="h-8 text-sm"
+                          aria-invalid={initialSlotsBelowFloor}
+                          {...field}
+                        />
                       </FormControl>
+                      <FormDescription
+                        className={
+                          initialSlotsBelowFloor
+                            ? 'text-xs text-destructive'
+                            : 'text-xs text-muted-foreground'
+                        }
+                      >
+                        {t('referralSettingsPage.inviteLimits.initialSlotsMin', {
+                          min: MIN_INITIAL_SLOTS,
+                        })}
+                      </FormDescription>
                     </FormItem>
                   )}
                 />
@@ -648,7 +847,7 @@ function ReferralSettingsForm({ referral }: ReferralSettingsFormProps) {
                             </SelectTrigger>
                           </FormControl>
                           <SelectContent>
-                            {(plans ?? []).map((plan) => (
+                            {giftPlanOptions.map((plan) => (
                               <SelectItem key={plan.id} value={plan.id}>
                                 {plan.name}
                               </SelectItem>

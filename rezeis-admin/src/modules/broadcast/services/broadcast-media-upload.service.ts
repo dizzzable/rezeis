@@ -11,6 +11,7 @@ import { ConfigType } from '@nestjs/config';
 
 import { paymentsConfig } from '../../../common/config/payments.config';
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { readPaymentOpsAlertSettings } from '../../../common/utils/payment-ops-alert-settings.util';
 import { SettingsService } from '../../settings/services/settings.service';
 
 /**
@@ -29,7 +30,10 @@ import { SettingsService } from '../../settings/services/settings.service';
  *   1. `Settings.systemNotifications.telegram.chatId` (the chat where
  *      operator events are routed) — preferred so files don't leak to
  *      end users.
- *   2. `Settings.paymentOpsAlerts.chatId` (payment ops chat) — fallback.
+ *   2. `Settings.systemNotifications.paymentOps.chatId` (payment ops chat)
+ *      — fallback. NOT `Settings.paymentOpsAlerts`: that Json column exists
+ *      in the schema but nothing has ever written to it, so the fallback that
+ *      read it resolved to `{}` on every request since it was added.
  *
  * Limits (Telegram Bot API):
  *   - Photo: 10 MB max, JPEG/PNG/WEBP/GIF
@@ -171,7 +175,7 @@ export class BroadcastMediaUploadService {
 
   private async resolveStashChatId(): Promise<string | null> {
     const settings = await this.prismaService.settings.findFirst({
-      select: { systemNotifications: true, paymentOpsAlerts: true },
+      select: { systemNotifications: true },
     })
     if (!settings) return null
 
@@ -181,13 +185,15 @@ export class BroadcastMediaUploadService {
       return tgConfig.chatId.trim()
     }
 
-    const paymentJson = (settings.paymentOpsAlerts ?? {}) as Record<string, unknown>
-    const paymentOps = (paymentJson.paymentOps ?? {}) as Record<string, unknown>
-    if (typeof paymentOps.chatId === 'string' && paymentOps.chatId.trim().length > 0) {
-      return paymentOps.chatId.trim()
-    }
-
-    return null
+    // Payment-ops chat, read through the same accessor the payments module and
+    // the settings service use. `SettingsService.updatePaymentOpsAlertSettings`
+    // persists this config into `systemNotifications.paymentOps` — the
+    // `Settings.paymentOpsAlerts` column this used to read has no writer at
+    // all, so the fallback never fired and an operator who had configured ONLY
+    // the payment-ops chat got a 503 telling them to configure a chat.
+    // `enabled` is deliberately not consulted: it gates whether payment ALERTS
+    // are delivered, not whether the chat is a usable place to stash a file.
+    return readPaymentOpsAlertSettings(settings.systemNotifications).chatId
   }
 
   private extractFileId(

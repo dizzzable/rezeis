@@ -472,3 +472,81 @@ describe('ReferralQualificationService', () => {
     assert.equal(events.length, 1);
   });
 });
+
+/**
+ * THE DELETION GUARD.
+ *
+ * `ReferralQualificationService.issueReward` was a second, DIVERGED copy of
+ * `AdminRewardsService.issue` + `applyRewardEffect`, with no caller anywhere in
+ * `src/`, `test/` or `scripts/` — and it was strictly worse on every point that
+ * matters for an `EXTRA_DAYS` reward:
+ *
+ *   • it only ever looked at `user.currentSubscriptionId`, where the live one
+ *     falls back to the newest ACTIVE finite subscription under
+ *     `SELECT … FOR UPDATE` and verifies owner and status;
+ *   • finding no eligible subscription it marked the reward ISSUED and granted
+ *     nothing, where the live one throws `BadRequestException`;
+ *   • it created no `ProfileSyncJob`, so the extra days would have lived in the
+ *     local database and never reached the customer's real VPN profile.
+ *
+ * Dead code that LOOKS supported is the hazard: the live service used to cite
+ * this method as the model to copy. The guard is a runtime property check
+ * rather than a compile-time one on purpose — a type-level assertion on a
+ * method that no longer exists is a COMPILE error, and a spec that fails to
+ * compile reports zero tests instead of one named failure.
+ */
+describe('ReferralQualificationService no longer carries a second reward issuer', () => {
+  it('exposes no issueReward, on the instance or the prototype', () => {
+    const service = new ReferralQualificationService(
+      withTx({}) as never,
+      { info: () => undefined } as never,
+    );
+    const holder = service as unknown as Record<string, unknown>;
+
+    assert.equal(
+      typeof holder.issueReward,
+      'undefined',
+      'ReferralQualificationService.issueReward is back: it silently marks an ' +
+        'EXTRA_DAYS reward issued when the user has no eligible subscription, ' +
+        'and it enqueues no ProfileSyncJob, so the days never reach the panel. ' +
+        'Reward issuance belongs to AdminRewardsService.issue.',
+    );
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(
+        ReferralQualificationService.prototype as object,
+        'issueReward',
+      ),
+      false,
+      'issueReward is on the prototype of ReferralQualificationService',
+    );
+  });
+
+  it('still exposes the methods that DO have callers', () => {
+    // The anti-vacuity control. A renamed class, a broken import or a
+    // constructor that threw would make the assertion above pass against
+    // nothing at all.
+    //
+    // Every name here is reachable from production code — `payment-reconciliation`
+    // and `referral-manual-attach` for the purchase path, `payment-reconciliation`
+    // for the reversal, `admin-user-management` for the manual one. A method that
+    // is merely PRESENT would make a weaker control, which is why this list is
+    // caller-reachable names only: `listRewardsByUser` used to sit on this class
+    // with no caller in `src/`, `test/` or `scripts/` — the admin surface reads
+    // rewards through `AdminRewardsService.list` — so listing it here would have
+    // guarded the very state this spec exists to reject. It has since been
+    // deleted; do not add a name here without checking it has a caller first.
+    for (const method of [
+      'qualifyReferralAfterPurchase',
+      'qualifyReferralManually',
+      'reverseQualificationForTransaction',
+    ]) {
+      assert.equal(
+        typeof (ReferralQualificationService.prototype as unknown as Record<string, unknown>)[
+          method
+        ],
+        'function',
+        `expected ${method} to still be a method on ReferralQualificationService`,
+      );
+    }
+  });
+});

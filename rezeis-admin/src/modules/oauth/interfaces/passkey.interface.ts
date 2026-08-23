@@ -42,3 +42,40 @@ export interface PasskeyCredentialInfo {
   readonly registeredAt: string;
   readonly lastUsedAt: string | null;
 }
+
+/**
+ * Which second proof a passkey enrolment has to carry, on top of the bearer
+ * token that got the request past `AdminJwtAuthGuard`.
+ *
+ * `'totp'` when the admin has 2FA on — the same proof `TwoFactorService.disable`
+ * demands, TOTP or a recovery code. `'password'` when they do not, because then
+ * the password is the only factor left that a stolen session does not already
+ * hold.
+ */
+export type PasskeyReauthFactor = 'totp' | 'password';
+
+/**
+ * The proof itself, as it arrives on `POST admin/passkey/register/options`.
+ *
+ * Both fields are optional on the wire and exactly one is read, chosen by the
+ * account's 2FA state rather than by the caller — a caller that could pick
+ * would pick the one it has.
+ */
+export interface PasskeyReauthInput {
+  readonly code?: string | null;
+  readonly password?: string | null;
+}
+
+/**
+ * What removing a passkey returns.
+ *
+ * `accessToken` is non-null exactly when a credential was actually removed:
+ * removal bumps `tokenVersion`, which invalidates every outstanding JWT for
+ * that admin INCLUDING the one that made this call. The replacement is minted
+ * here so the caller can stay signed in; a client that ignores it is signed
+ * out on its next request, which is the safe direction to fail.
+ */
+export interface PasskeyRemovalResult {
+  readonly removed: boolean;
+  readonly accessToken: string | null;
+}

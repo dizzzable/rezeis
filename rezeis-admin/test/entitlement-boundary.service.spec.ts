@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
+import { EffectiveProjectionService } from '../src/modules/add-on-entitlements/services/effective-projection.service';
 import { EntitlementBoundaryService } from '../src/modules/add-on-entitlements/services/entitlement-boundary.service';
 import {
   panelUserAddress,
@@ -156,6 +157,13 @@ describe('EntitlementBoundaryService (T-008)', () => {
       },
       addOnEntitlement: { findMany: async () => [] },
       subscription: {
+        // Squads that still match the stored snapshot: INHERITED, so the
+        // deferred term plan's list is the one that lands.
+        findUnique: async () => ({
+          internalSquads: ['old-squad'],
+          externalSquad: null,
+          planSnapshot: { internalSquads: ['old-squad'], externalSquad: null },
+        }),
         update: async ({ data }: { data: Record<string, unknown> }) => {
           subscriptionUpdates.push(data);
           return { remnawaveId: 'rem-1' };
@@ -626,5 +634,294 @@ describe('EntitlementBoundaryService (T-008)', () => {
       if (previous === undefined) delete process.env.ADDON_RESET_EXPIRY_MONTH_ROLLING;
       else process.env.ADDON_RESET_EXPIRY_MONTH_ROLLING = previous;
     }
+  });
+});
+
+/**
+ * Term activation, end to end, with the REAL {@link EffectiveProjectionService}
+ * wired in rather than stubbed.
+ *
+ * A stubbed projection would assert this file's own fixture back at itself and
+ * stay green against the defect, because the defect IS what the projection
+ * derives. And stopping at the subscription row would miss the harm entirely:
+ * the versioned sync worker reads the desired limits off
+ * `SubscriptionEffectiveProjection` by the `desiredRevision` the job carries
+ * (`ProfileSyncProcessor.tryVersionedDesiredStateWrite`), so the number the
+ * customer actually loses is the one on THAT row, reached through THAT job.
+ * Every assertion below follows the job to the row it names.
+ *
+ * Numbers: plan 3, operator 12, add-on 5. The correct answer is 17; the
+ * plan-wins defect reads 8, an unapplied add-on reads 12, and the "plan raised
+ * to 4" control reads 9 — four values, no collisions.
+ */
+describe('EntitlementBoundaryService term activation preserves operator configuration', () => {
+  const PLAN_DEVICES = 3;
+  const OPERATOR_DEVICES = 12;
+
+  interface ActivationOptions {
+    readonly subscription?: Partial<{
+      trafficLimit: number | null;
+      deviceLimit: number;
+      internalSquads: string[];
+      externalSquad: string | null;
+      planSnapshot: Record<string, unknown>;
+    }>;
+    readonly scheduledBaseDeviceLimit?: number;
+    readonly scheduledPlanSnapshot?: Record<string, unknown>;
+    readonly addOnDevices?: bigint | null;
+  }
+
+  function createStore(options: ActivationOptions = {}) {
+    const subscription: Record<string, unknown> = {
+      id: 'sub-1',
+      status: 'ACTIVE',
+      remnawaveId: 'rw-1',
+      trafficLimit: null,
+      deviceLimit: OPERATOR_DEVICES,
+      internalSquads: ['old-squad'],
+      externalSquad: null,
+      planSnapshot: {
+        id: 'plan-1',
+        trafficLimit: null,
+        deviceLimit: PLAN_DEVICES,
+        internalSquads: ['old-squad'],
+        externalSquad: null,
+      },
+      ...options.subscription,
+    };
+    const terms = [
+      { id: 'term-old', status: 'ACTIVE', baseTrafficLimitBytes: null, baseDeviceLimit: PLAN_DEVICES },
+      {
+        id: 'term-next',
+        status: 'SCHEDULED',
+        baseTrafficLimitBytes: null,
+        baseDeviceLimit: options.scheduledBaseDeviceLimit ?? PLAN_DEVICES,
+        startsAt: new Date('2026-08-01T00:00:00.000Z'),
+        trafficResetStrategy: 'NO_RESET',
+        resetAnchorAt: null,
+        planSnapshot: options.scheduledPlanSnapshot ?? {
+          id: 'plan-1',
+          trafficLimit: null,
+          deviceLimit: PLAN_DEVICES,
+          internalSquads: ['plan-squad'],
+          externalSquad: 'plan-external',
+        },
+      },
+    ];
+    const entitlements =
+      options.addOnDevices === null
+        ? []
+        : [
+            {
+              id: 'ent-devices',
+              termId: 'term-next',
+              lifetime: 'UNTIL_SUBSCRIPTION_END',
+              type: 'EXTRA_DEVICES',
+              state: 'PENDING_ACTIVATION',
+              totalValue: options.addOnDevices ?? 5n,
+            },
+          ];
+    const projections: Record<string, Record<string, unknown>> = {};
+    const syncJobs: Array<Record<string, unknown>> = [];
+    const stats = { subscriptionReads: 0 };
+
+    const tx = {
+      $queryRaw: async (query: { readonly sql?: string }) => {
+        const sql = String(query?.sql ?? query).replace(/\s+/g, ' ');
+        if (sql.includes('base_traffic_limit_bytes')) {
+          return terms
+            .filter((term) => term.status === 'ACTIVE')
+            .map((term) => ({
+              id: term.id,
+              baseTrafficLimitBytes: term.baseTrafficLimitBytes,
+              baseDeviceLimit: term.baseDeviceLimit,
+            }));
+        }
+        assert.match(sql, /FROM "subscriptions"/, 'unexpected raw query');
+        assert.match(sql, /\bFOR\s+UPDATE\b/i, 'subscription reads must lock');
+        return [{ id: subscription.id, status: subscription.status }];
+      },
+      subscriptionTerm: {
+        findFirst: async (input: { where: Record<string, unknown> }) => {
+          const wanted = String(input.where.status ?? 'ACTIVE');
+          const found = terms.find((term) => term.status === wanted);
+          return found === undefined ? null : { ...found };
+        },
+        update: async () => ({}),
+      },
+      subscription: {
+        findUnique: async () => {
+          stats.subscriptionReads += 1;
+          return { ...subscription };
+        },
+        update: async ({ data }: { data: Record<string, unknown> }) => {
+          Object.assign(subscription, data);
+          return { remnawaveId: subscription.remnawaveId };
+        },
+      },
+      addOnEntitlement: {
+        findMany: async (input: { where: Record<string, unknown> }) => {
+          const wanted = String(input.where.state ?? '');
+          return entitlements
+            .filter((row) => row.state === wanted)
+            .map((row) => ({ ...row }));
+        },
+        updateMany: async () => ({ count: 0 }),
+      },
+      subscriptionEffectiveProjection: {
+        findUnique: async () =>
+          projections['sub-1'] === undefined ? null : { ...projections['sub-1'], id: 'proj-1' },
+        create: async ({ data }: { data: Record<string, unknown> }) => {
+          projections['sub-1'] = { ...data };
+          return { ...data };
+        },
+        update: async ({ data }: { data: Record<string, unknown> }) => {
+          projections['sub-1'] = { ...projections['sub-1'], ...data };
+          return { ...projections['sub-1'] };
+        },
+      },
+      profileSyncJob: {
+        create: async ({ data }: { data: Record<string, unknown> }) => {
+          syncJobs.push(data);
+          return { id: `job-${syncJobs.length}` };
+        },
+      },
+    };
+
+    const service = new EntitlementBoundaryService(
+      { $transaction: async (cb: (t: unknown) => Promise<unknown>) => cb(tx) } as never,
+      {
+        transitionInTransaction: async (_t: unknown, input: { entitlementId: string; command: string }) => {
+          const row = entitlements.find((entry) => entry.id === input.entitlementId);
+          if (row === undefined || input.command !== 'ACTIVATE') return { changed: false };
+          row.state = 'ACTIVE';
+          return { changed: true };
+        },
+      } as never,
+      {
+        activateInTransaction: async (_t: unknown, termId: string) => {
+          for (const term of terms) {
+            if (term.status === 'ACTIVE') term.status = 'ENDED';
+          }
+          const claimed = terms.find((term) => term.id === termId)!;
+          claimed.status = 'ACTIVE';
+          return { id: termId, status: 'ACTIVE', changed: true };
+        },
+      } as never,
+      new EffectiveProjectionService() as never,
+    );
+
+    return { service, subscription, projections, syncJobs, stats };
+  }
+
+  /** The desired limits the panel push would read, reached through the job. */
+  function pushedDesiredState(store: ReturnType<typeof createStore>) {
+    assert.equal(store.syncJobs.length, 1, 'activation must enqueue exactly one versioned job');
+    const job = store.syncJobs[0]!;
+    assert.equal(job.aggregateKey, 'sub-1');
+    assert.equal(job.cause, 'TERM_ACTIVATION');
+    const row = store.projections['sub-1'];
+    assert.notEqual(row, undefined, 'the job names a projection row that must exist');
+    assert.equal(
+      job.desiredRevision,
+      row!.desiredRevision,
+      'the job must name the revision the projection row now carries',
+    );
+    return {
+      desiredDeviceLimit: row!.desiredDeviceLimit as number | null,
+      desiredTrafficLimitBytes: row!.desiredTrafficLimitBytes as bigint | null,
+      baseDeviceLimit: row!.baseDeviceLimit as number | null,
+    };
+  }
+
+  it('an operator-raised device limit survives activation and is what the sync job pushes (12 + 5 = 17)', async () => {
+    const store = createStore();
+
+    const result = await store.service.activateDueScheduledTerm(
+      'sub-1',
+      new Date('2026-08-01T00:00:00.000Z'),
+    );
+
+    assert.equal(result.activated, true);
+    assert.equal(result.termId, 'term-next');
+    assert.equal(store.stats.subscriptionReads > 0, true, 'the recompute must read the subscription');
+
+    // The compatibility column first, so that the two assertions below are
+    // visibly NOT the same claim: a right column with a wrong projection row is
+    // a reachable state, and it is the state in which the customer still loses
+    // the devices, because the versioned worker never reads this column.
+    assert.equal(store.subscription.deviceLimit, 17, 'the mirrored column must keep the operator value');
+
+    const pushed = pushedDesiredState(store);
+    assert.equal(pushed.baseDeviceLimit, OPERATOR_DEVICES, 'the row the push reads must carry the operator baseline');
+    assert.equal(pushed.desiredDeviceLimit, 17, 'the pushed desired state must keep the operator value');
+    assert.notEqual(pushed.desiredDeviceLimit, 8, 'pushing 8 is the plan taking the devices back');
+    assert.notEqual(pushed.desiredDeviceLimit, OPERATOR_DEVICES, 'pushing 12 means the paid add-on never landed');
+  });
+
+  it('a subscription that was never individually adjusted still takes the plan at activation', async () => {
+    const store = createStore({
+      subscription: { deviceLimit: PLAN_DEVICES },
+      // The plan was raised to 4 and this term was minted from it.
+      scheduledBaseDeviceLimit: 4,
+    });
+
+    await store.service.activateDueScheduledTerm('sub-1', new Date('2026-08-01T00:00:00.000Z'));
+
+    const pushed = pushedDesiredState(store);
+    assert.equal(pushed.baseDeviceLimit, 4, 'an untouched column must not freeze the plan out');
+    assert.equal(pushed.desiredDeviceLimit, 9);
+    assert.notEqual(pushed.desiredDeviceLimit, 8, 'deriving 8 means the column was mistaken for an override');
+  });
+
+  it('the deferred term plan squads land when the subscription still holds the plan list', async () => {
+    const store = createStore();
+
+    await store.service.activateDueScheduledTerm('sub-1', new Date('2026-08-01T00:00:00.000Z'));
+
+    assert.deepStrictEqual(store.subscription.internalSquads, ['plan-squad']);
+    assert.equal(store.subscription.externalSquad, 'plan-external');
+  });
+
+  it('an operator-assigned squad list survives activation whole, and is not merged with the plan list', async () => {
+    // Squads are membership, not a quantity: nothing grants a squad the way an
+    // add-on grants devices, so there is no second value to add. The two
+    // candidate answers are the plan's list and the operator's, and a union
+    // would hand out access nobody sold.
+    const store = createStore({
+      subscription: { internalSquads: ['operator-squad'], externalSquad: 'operator-external' },
+    });
+
+    await store.service.activateDueScheduledTerm('sub-1', new Date('2026-08-01T00:00:00.000Z'));
+
+    assert.deepStrictEqual(store.subscription.internalSquads, ['operator-squad']);
+    assert.equal(store.subscription.externalSquad, 'operator-external');
+    assert.notDeepStrictEqual(
+      store.subscription.internalSquads,
+      ['plan-squad'],
+      'the plan list replacing the operator list is the defect',
+    );
+    assert.notDeepStrictEqual(
+      [...(store.subscription.internalSquads as string[])].sort(),
+      ['operator-squad', 'plan-squad'],
+      'a union invents squad access nobody bought',
+    );
+    // The deferred plan identity still lands — only the two membership fields
+    // are held back.
+    assert.equal((store.subscription.planSnapshot as { id: string }).id, 'plan-1');
+  });
+
+  it('an operator squad override does not hold back the numeric baseline, or vice versa', async () => {
+    // The two field groups are decided independently, so a subscription can
+    // own its squads while inheriting its limits.
+    const store = createStore({
+      subscription: { deviceLimit: PLAN_DEVICES, internalSquads: ['operator-squad'] },
+      scheduledBaseDeviceLimit: 4,
+    });
+
+    await store.service.activateDueScheduledTerm('sub-1', new Date('2026-08-01T00:00:00.000Z'));
+
+    assert.deepStrictEqual(store.subscription.internalSquads, ['operator-squad']);
+    assert.equal(pushedDesiredState(store).desiredDeviceLimit, 9);
   });
 });

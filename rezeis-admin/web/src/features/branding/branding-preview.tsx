@@ -1724,7 +1724,16 @@ function TariffPreviewCard({
           <div className="min-w-0 flex-1">
             <p className="truncate text-[12px] font-semibold drop-shadow">{plan.name}</p>
             <p className="text-[9px] font-medium opacity-80">
-              {plan.trafficLimit > 0 ? `${plan.trafficLimit} GB` : unlimitedLabel}
+              {/* Mirrors the cabinet's `tariff-card`, which reads this field
+                  as a truthy test and shows `unlimited` for BOTH `null` (the
+                  server's unlimited) and `0` (a legacy zero cap). Preserved
+                  exactly: this card exists to show the operator what the
+                  subscriber sees, so it must not be more truthful than
+                  production. `null` is now spelled out because the wire type
+                  admits it — the runtime always did. */}
+              {plan.trafficLimit !== null && plan.trafficLimit > 0
+                ? `${plan.trafficLimit} GB`
+                : unlimitedLabel}
               {plan.deviceLimit > 0 ? ` · ${plan.deviceLimit}` : ''}
             </p>
           </div>

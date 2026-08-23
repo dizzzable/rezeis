@@ -26,6 +26,15 @@ export interface PartnerInterface {
   readonly level1FixedAmount: number | null;
   readonly level2FixedAmount: number | null;
   readonly level3FixedAmount: number | null;
+  /**
+   * Per-level accrual mode override. `null` means the level inherits
+   * `accrualStrategy` above - which is what every partner does until an
+   * operator sets a level explicitly. The panel renders `null` as an empty
+   * "inherit" option, not as a value.
+   */
+  readonly level1AccrualStrategy: PartnerAccrualStrategy | null;
+  readonly level2AccrualStrategy: PartnerAccrualStrategy | null;
+  readonly level3AccrualStrategy: PartnerAccrualStrategy | null;
   readonly createdAt: string;
   readonly updatedAt: string;
 }

@@ -32,5 +32,5 @@ AltShop subscription devices / HWID Phase 1, built on the existing admin-owned c
 ## Open Risks To Carry Forward
 
 - The current subscription seam is passive snapshot only, so Phase 1 must not turn into a broad lifecycle rewrite.
-- `@remnawave/backend-contract` remains a typed schema and route-metadata dependency inside `rezeis-admin`; server-side HTTP orchestration must stay in the admin facade.
+- **Superseded 2026-08-23:** `@remnawave/backend-contract` is no longer a runtime dependency of `rezeis-admin`. Every `@remnawave/*` package is a **devDependency** and is only the CI oracle for the guard specs; `rezeis-admin` decodes live panel responses with its own tolerant decoders over plain HTTP. Server-side HTTP orchestration must still stay in the admin facade, and a runtime contract import must not be reintroduced — see `rezeis-admin/README.md` § Remnawave compatibility for the outage that removed it.
 - Quote or payment behavior, assignment changes, and config-link regeneration stay out of scope until a later, separately approved slice.

@@ -32,7 +32,7 @@ import {
   Req,
   UseGuards,
 } from '@nestjs/common';
-import { Currency, Prisma, SubscriptionStatus, UserRole } from '@prisma/client';
+import { Currency, Prisma, ReferralInviteSource, SubscriptionStatus, SyncJobStatus, UserRole } from '@prisma/client';
 import { Request } from 'express';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
@@ -45,8 +45,17 @@ import { RbacGuard } from '../../rbac/guards/rbac.guard';
 import { RbacService } from '../../rbac/services/rbac.service';
 import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.interface';
 import { extractRequestMetadata } from '../../auth/utils/request-metadata.util';
-import { UserNotificationsService } from '../../notifications/services/user-notifications.service';
+import {
+  isNotificationDeliveryChannel,
+  NOTIFICATION_DELIVERY_CHANNELS,
+  UserNotificationsService,
+  type ChannelAvailability,
+  type NotificationDeliveryChannel,
+  type OperatorMessageResult,
+} from '../../notifications/services/user-notifications.service';
 import { PartnerEarningsService } from '../../partners/services/partner-earnings.service';
+import { PartnersService } from '../../partners/services/partners.service';
+import { PlansAdminService } from '../../plans/services/plans-admin.service';
 import { ReferralInviteLimitsService } from '../../referrals/services/referral-invite-limits.service';
 import { ReferralManualAttachService } from '../../referrals/services/referral-manual-attach.service';
 import { ReferralQualificationService } from '../../referrals/services/referral-qualification.service';
@@ -81,6 +90,8 @@ export class AdminUserManagementController {
     private readonly userNotifications: UserNotificationsService,
     private readonly rbacService: RbacService,
     private readonly userDeletionService: UserDeletionService,
+    private readonly partnersService: PartnersService,
+    private readonly plansAdminService: PlansAdminService,
   ) {}
 
   // ── User Profile ────────────────────────────────────────────────────────────
@@ -510,30 +521,133 @@ export class AdminUserManagementController {
     };
   }
 
-  /** Add/subtract points */
+  /**
+   * Add/subtract points — the only operator-facing write to `User.points`.
+   *
+   * ── THE FLOOR RIDES IN THE `WHERE` OF THE WRITE ─────────────────────────────
+   *
+   * This used to read the row, compute `(user.points ?? 0) + delta` in JS,
+   * refuse a negative result, and then issue an UNCONDITIONAL
+   * `{ points: { increment: delta } }`. `points` is a SHARED wallet — the
+   * referral points exchange spends it and quests credit it — so between the
+   * read and the write a subscriber could spend the balance this check was
+   * evaluated against, and the debit then drove the column negative. The guard
+   * was real and its subject was a number from the past.
+   *
+   * `points >= -delta` is "the resulting balance must not be negative"
+   * rearranged so the only column in it is the one the database is already
+   * locking. Postgres evaluates it against the row it locks, so `count === 0`
+   * IS the refusal and no read-then-check window exists. It is the shape
+   * `referral-points-exchange.service.ts` (`spendPoints`) and
+   * `partners.service.ts` (`applyBalanceAdjustment`) already use for the same
+   * invariant; three writers of one wallet disagreeing about how to guard it is
+   * how a wallet goes negative.
+   *
+   * `gte`, not `gt`: a debit landing exactly on zero still matches, the same
+   * boundary the replaced `newPoints < 0` had. The floor cannot block a credit —
+   * for a positive `delta` the predicate is `points >= -delta`, which every
+   * non-negative balance clears. `delta` is validated non-zero by the DTO.
+   *
+   * ── AND IT LEAVES A TRAIL ───────────────────────────────────────────────────
+   *
+   * It wrote no audit row and emitted no system event, while its money sibling
+   * four routes away is transactional, audited and evented. One action name
+   * carrying the amounts before and after, following `partner.balance.adjusted`.
+   * `previousPoints` is derived by SUBTRACTING the delta from the value read
+   * back after the write — this transaction holds the row lock until it commits,
+   * so the row it reads back is this adjustment's own result. Pre-reading would
+   * put the stale number back into the audit row after taking it out of the
+   * arithmetic.
+   *
+   * The response body is unchanged: `{ points }`.
+   */
   @Post(':telegramId/points')
   @HttpCode(HttpStatus.OK)
   @RequirePermission('users', 'edit')
   public async adjustPoints(
     @Param('telegramId') telegramId: string,
     @Body() body: AdjustUserPointsDto,
+    @CurrentAdmin() admin: CurrentAdminInterface,
+    @Req() req: Request,
   ) {
     const user = await this.findUserByTelegramId(telegramId);
-    const newPoints = (user.points ?? 0) + body.delta;
-    if (newPoints < 0) {
-      throw new BadRequestException(
-        `Resulting points would be ${newPoints}. Cannot go below zero.`,
-      );
-    }
-    const updated = await this.prismaService.user.update({
-      where: { id: user.id },
-      data: { points: { increment: body.delta } },
-      select: { points: true },
+    const requestMetadata = extractRequestMetadata(req);
+    const result = await this.prismaService.$transaction(async (tx) => {
+      const written = await tx.user.updateMany({
+        where: { id: user.id, points: { gte: -body.delta } },
+        data: { points: { increment: body.delta } },
+      });
+      if (written.count === 0) {
+        // Zero rows is either "no such user" or "the floor refused it", and the
+        // count cannot say which. Only this branch pays for telling them apart;
+        // the path that succeeds never reads the balance before writing it.
+        const existing = await tx.user.findUnique({
+          where: { id: user.id },
+          select: { id: true },
+        });
+        if (existing === null) throw new NotFoundException('User not found');
+        throw new BadRequestException('Resulting points would be below zero. Cannot go below zero.');
+      }
+      const updated = await tx.user.findUnique({
+        where: { id: user.id },
+        select: { points: true },
+      });
+      if (updated === null) {
+        // Unreachable: this transaction holds the lock on the row it has just
+        // written. Kept so the type stays honest without a non-null assertion.
+        throw new NotFoundException('User not found');
+      }
+      const newPoints = updated.points;
+      const previousPoints = newPoints - body.delta;
+      await tx.adminAuditLog.create({
+        data: {
+          action: 'user.points.adjusted',
+          ipAddress: requestMetadata.remoteAddress,
+          userAgent: requestMetadata.userAgent,
+          metadata: {
+            requestId: requestMetadata.requestId,
+            userId: user.id,
+            adjustment: body.delta,
+            previousPoints,
+            newPoints,
+          } as Prisma.InputJsonObject,
+          adminUser: { connect: { id: admin.id } },
+        },
+      });
+      return { previousPoints, newPoints };
     });
-    return updated;
+    this.events.info(
+      EVENT_TYPES.USER_POINTS_ADJUSTED,
+      'USER',
+      `User points adjusted by ${body.delta}`,
+      {
+        userId: user.id,
+        telegramId,
+        adjustment: body.delta,
+        previousPoints: result.previousPoints,
+        newPoints: result.newPoints,
+        adminId: admin.id,
+      },
+    );
+    return { points: result.newPoints };
   }
 
   // ── Block/Unblock ───────────────────────────────────────────────────────────
+
+  /**
+   * These three and their bulk-toolbar counterparts are the same three acts,
+   * so they write the same three action names and are told apart by
+   * `metadata.source` — `'user_detail'` here, `'bulk'` in
+   * `bulk-user-operations.service.ts`, which wrote NO audit row at all until
+   * now. "Who deleted this account" is asked about one user, so it has to be
+   * one query over one action name whichever screen performed it.
+   *
+   * `telegramId` in the row is the STORED value, not the path parameter. The
+   * parameter is named `telegramId` but `findUserByTelegramId` also accepts a
+   * cuid, so `user.deleted` rows could carry a cuid under a key naming a
+   * Telegram id — and the bulk rows, which resolve from four identifier kinds,
+   * could not have matched a raw token anyway.
+   */
 
   @Post(':telegramId/block')
   @HttpCode(HttpStatus.OK)
@@ -541,7 +655,11 @@ export class AdminUserManagementController {
   public async blockUser(@Param('telegramId') telegramId: string, @CurrentAdmin() admin: CurrentAdminInterface, @Req() req: Request) {
     const user = await this.findUserByTelegramId(telegramId);
     await this.prismaService.user.update({ where: { id: user.id }, data: { isBlocked: true } });
-    await this.auditLog(admin, req, 'user.blocked', { userId: user.id });
+    await this.auditLog(admin, req, 'user.blocked', {
+      userId: user.id,
+      telegramId: user.telegramId?.toString() ?? null,
+      source: 'user_detail',
+    });
     this.events.warn(EVENT_TYPES.USER_BLOCKED, 'USER', `User blocked: ${telegramId}`, { userId: user.id, telegramId, adminId: admin.id });
     return { blocked: true };
   }
@@ -552,7 +670,11 @@ export class AdminUserManagementController {
   public async unblockUser(@Param('telegramId') telegramId: string, @CurrentAdmin() admin: CurrentAdminInterface, @Req() req: Request) {
     const user = await this.findUserByTelegramId(telegramId);
     await this.prismaService.user.update({ where: { id: user.id }, data: { isBlocked: false } });
-    await this.auditLog(admin, req, 'user.unblocked', { userId: user.id });
+    await this.auditLog(admin, req, 'user.unblocked', {
+      userId: user.id,
+      telegramId: user.telegramId?.toString() ?? null,
+      source: 'user_detail',
+    });
     this.events.info(EVENT_TYPES.USER_UNBLOCKED, 'USER', `User unblocked: ${telegramId}`, { userId: user.id, telegramId, adminId: admin.id });
     return { blocked: false };
   }
@@ -565,45 +687,74 @@ export class AdminUserManagementController {
   public async deleteUser(@Param('telegramId') telegramId: string, @CurrentAdmin() admin: CurrentAdminInterface, @Req() req: Request) {
     const user = await this.findUserByTelegramId(telegramId);
     await this.userDeletionService.deleteUser(user.id);
-    await this.auditLog(admin, req, 'user.deleted', { userId: user.id, telegramId });
+    await this.auditLog(admin, req, 'user.deleted', {
+      userId: user.id,
+      telegramId: user.telegramId?.toString() ?? null,
+      source: 'user_detail',
+    });
     this.events.warn(EVENT_TYPES.USER_DELETED, 'USER', 'User account deleted', { userId: user.id, telegramId, adminId: admin.id });
     return { deleted: true };
   }
 
   // ── Partner Lifecycle ───────────────────────────────────────────────────────
 
+  /**
+   * These routes sit under `/admin/users/:telegramId/...` but every one of
+   * them writes a `Partner` row - create it, flip `isActive`, move `balance`,
+   * rewrite the per-level commission settings, attach a referral into a
+   * partner chain. They are gated on `partners:edit`, not on `users:edit`,
+   * because the blast radius is the partner ledger rather than the user
+   * profile.
+   *
+   * Three places already agreed on that and this one did not: the SPA hides
+   * all five behind `<PermissionGate resource="partners" action="edit">`
+   * (`web/src/features/users/user-detail-panel.tsx`), and the duplicate
+   * toggle / adjust-balance endpoints on `admin-partners.controller.ts`
+   * require `partners:edit`. Only these copies were on `users:edit` - which
+   * the shipped `operator` role holds while holding merely `partners:view`,
+   * so the button operator cannot see answered anyway and let it move a
+   * partner's balance.
+   */
+
+  /**
+   * Partner lifecycle from this panel goes through `PartnersService`, which is
+   * the same code path the Partners tab uses
+   * (`POST /admin/partners/:partnerId/toggle`). These two endpoints used to
+   * write the `Partner` row inline: no `PARTNER_ACTIVATED` event from either,
+   * while the Partners tab emitted one. The same operator act therefore left a
+   * different audit trail depending on which screen it was performed from.
+   *
+   * `partner/adjust-balance` was the last one still inline, and the worst of
+   * them: a non-transactional read-then-update writing its own
+   * `user.partner.balance.adjusted` with no before/after amounts in it and no
+   * system event at all. It now shares `PartnersService.adjustBalanceForUser`
+   * with the Partners tab — one transaction, one audit action, the origin in
+   * `metadata.source`.
+   *
+   * The response bodies stay what they always were — the bare `Partner` row,
+   * not the mapped `PartnerInterface` — because the SPA is pinned to them.
+   */
   @Post(':telegramId/create-partner')
   @HttpCode(HttpStatus.OK)
-  @RequirePermission('users', 'edit')
+  @RequirePermission('partners', 'edit')
   public async createPartner(@Param('telegramId') telegramId: string, @CurrentAdmin() admin: CurrentAdminInterface, @Req() req: Request) {
     const user = await this.findUserByTelegramId(telegramId);
-    const existing = await this.prismaService.partner.findUnique({ where: { userId: user.id } });
-    if (existing) throw new BadRequestException('Partner already exists for this user');
-    const partner = await this.prismaService.partner.create({
-      data: { userId: user.id, isActive: true },
-    });
+    const partner = await this.partnersService.createPartnerForUser({ userId: user.id, telegramId });
     await this.auditLog(admin, req, 'user.partner.created', { userId: user.id, partnerId: partner.id });
-    this.events.info(EVENT_TYPES.PARTNER_CREATED, 'PARTNER', `Partner created for user ${telegramId}`, { userId: user.id, partnerId: partner.id, telegramId });
     return partner;
   }
 
   @Post(':telegramId/partner/toggle')
   @HttpCode(HttpStatus.OK)
-  @RequirePermission('users', 'edit')
+  @RequirePermission('partners', 'edit')
   public async togglePartner(@Param('telegramId') telegramId: string) {
     const user = await this.findUserByTelegramId(telegramId);
-    const partner = await this.prismaService.partner.findUnique({ where: { userId: user.id } });
-    if (!partner) throw new NotFoundException('Partner not found');
-    const updated = await this.prismaService.partner.update({
-      where: { id: partner.id },
-      data: { isActive: !partner.isActive },
-    });
-    return updated;
+    return this.partnersService.togglePartnerStatusForUser(user.id);
   }
 
   @Post(':telegramId/partner/adjust-balance')
   @HttpCode(HttpStatus.OK)
-  @RequirePermission('users', 'edit')
+  @RequirePermission('partners', 'edit')
   public async adjustPartnerBalance(
     @Param('telegramId') telegramId: string,
     @Body() body: AdjustUserPartnerBalanceDto,
@@ -611,23 +762,18 @@ export class AdminUserManagementController {
     @Req() req: Request,
   ) {
     const user = await this.findUserByTelegramId(telegramId);
-    const partner = await this.prismaService.partner.findUnique({ where: { userId: user.id } });
-    if (!partner) throw new NotFoundException('Partner not found');
-    const newBalance = partner.balance + body.amount;
-    if (newBalance < 0) throw new BadRequestException('Resulting balance would be negative');
-    const updated = await this.prismaService.partner.update({
-      where: { id: partner.id },
-      data: { balance: newBalance },
+    return this.partnersService.adjustBalanceForUser({
+      userId: user.id,
+      amount: body.amount,
+      reason: body.reason ?? null,
+      currentAdmin: admin,
+      requestMetadata: extractRequestMetadata(req),
     });
-    await this.auditLog(admin, req, 'user.partner.balance.adjusted', {
-      partnerId: partner.id, amount: body.amount, reason: body.reason ?? null,
-    });
-    return updated;
   }
 
   /** Update partner individual settings (percent per level, reward type, accrual strategy). */
   @Patch(':telegramId/partner/settings')
-  @RequirePermission('users', 'edit')
+  @RequirePermission('partners', 'edit')
   public async updatePartnerSettings(
     @Param('telegramId') telegramId: string,
     @Body() body: UpdatePartnerSettingsDto,
@@ -648,6 +794,24 @@ export class AdminUserManagementController {
     if (body.level1FixedAmount !== undefined) data.level1FixedAmount = body.level1FixedAmount;
     if (body.level2FixedAmount !== undefined) data.level2FixedAmount = body.level2FixedAmount;
     if (body.level3FixedAmount !== undefined) data.level3FixedAmount = body.level3FixedAmount;
+    // Per-level accrual mode — the three nullable columns that sit beside the
+    // partner-wide `accrualStrategy`. They were absent from this builder, so a
+    // PATCH carrying them validated, answered 200 with a `Partner` body, and
+    // wrote nothing at all.
+    //
+    // The guard MUST stay `!== undefined`. `null` is not "no value" on these
+    // columns, it is the value that MEANS "inherit `accrualStrategy` above" —
+    // so omitting a field leaves the column alone, and sending an explicit
+    // `null` clears the override. A truthiness check collapses those two
+    // different operator intentions into one and makes the second impossible
+    // to express. `resolveAccrualStrategy` in `partner-earnings.service.ts` is
+    // the consumer that reads `null` as inherit on every accrual.
+    if (body.level1AccrualStrategy !== undefined)
+      data.level1AccrualStrategy = body.level1AccrualStrategy;
+    if (body.level2AccrualStrategy !== undefined)
+      data.level2AccrualStrategy = body.level2AccrualStrategy;
+    if (body.level3AccrualStrategy !== undefined)
+      data.level3AccrualStrategy = body.level3AccrualStrategy;
 
     const updated = await this.prismaService.partner.update({
       where: { id: partner.id },
@@ -662,9 +826,23 @@ export class AdminUserManagementController {
 
   // ── Referral Attach ─────────────────────────────────────────────────────────
 
+  /**
+   * `referrals:edit`, matching its two siblings below - `referral/sync-stealthnet`
+   * and `referral/qualify`. Attaching a referrer rewrites the referral graph and
+   * replays historical payments through it, so it needs the same authority they
+   * do; it was the only one of the three still on `users:edit`.
+   *
+   * The audit row and the system event are NOT written here any more. Four
+   * routes reach `attachReferrerManually` with an operator behind them and this
+   * one was the only one that recorded both; its partner-panel sibling recorded
+   * a different action name and no event, and the two Referrals-page routes
+   * recorded nothing. The service owns them now, so the trail cannot depend on
+   * which screen was used — the same move `partner.balance.adjusted` made.
+   */
+
   @Post(':telegramId/referral/attach')
   @HttpCode(HttpStatus.OK)
-  @RequirePermission('users', 'edit')
+  @RequirePermission('referrals', 'edit')
   public async attachReferrer(
     @Param('telegramId') telegramId: string,
     @Body() body: { referrerTelegramId: string },
@@ -673,19 +851,18 @@ export class AdminUserManagementController {
   ) {
     const user = await this.findUserByTelegramId(telegramId);
     const referrer = await this.findUserByTelegramId(body.referrerTelegramId);
-    const result = await this.referralManualAttachService.attachReferrerManually({
+    return this.referralManualAttachService.attachReferrerManually({
       userId: user.id,
       referrerId: referrer.id,
+      // Admin attaching after the fact: no invite link was observed, and the
+      // enum has no MANUAL member, so UNKNOWN is the honest answer here.
+      inviteSource: ReferralInviteSource.UNKNOWN,
+      operator: {
+        currentAdmin: admin,
+        requestMetadata: extractRequestMetadata(req),
+        source: 'user_detail',
+      },
     });
-    await this.auditLog(admin, req, 'user.referral.attached', {
-      userId: user.id, referrerId: referrer.id, ...result,
-    });
-    this.events.info(EVENT_TYPES.REFERRAL_MANUAL_ATTACHED, 'REFERRAL', `Referrer manually attached`, {
-      userId: user.id, referrerId: referrer.id, referredUserId: user.id, telegramId,
-      historicalPaymentsProcessed: result.historicalPaymentsProcessed,
-      partnerChainAttached: result.partnerChainAttached,
-    });
-    return result;
   }
 
   /** Retry this user's source referral edge from a completed STEALTHNET import. */
@@ -745,10 +922,22 @@ export class AdminUserManagementController {
    * The identifier can be: reiwa id (CUID), telegram id (numeric),
    * email, or web login. We resolve it the same way as `findUserByTelegramId`
    * but with extended lookup.
+   *
+   * SAME ACT as `attachReferrer` above, addressed from the other end: there the
+   * path names the referred user, here it names the referrer. One `Referral`
+   * edge is created either way and nothing in the resulting rows can tell the
+   * two apart afterwards, so they write ONE audit action and are told apart by
+   * `metadata.source` — `user_detail_partner` here, which also happens to be
+   * the only one of the four gated on `partners:edit`.
+   *
+   * It used to write its own `user.partner.referral.attached` and no system
+   * event, and the `partnerId` in that row held a USER id, not a `Partner.id`.
+   * Both go away: the row now names `userId` (referred) and `referrerId` the
+   * same way every other surface does.
    */
   @Post(':telegramId/partner/attach-referral')
   @HttpCode(HttpStatus.OK)
-  @RequirePermission('users', 'edit')
+  @RequirePermission('partners', 'edit')
   public async attachPartnerReferral(
     @Param('telegramId') telegramId: string,
     @Body() body: { referralIdentifier: string },
@@ -764,75 +953,129 @@ export class AdminUserManagementController {
       throw new BadRequestException('Cannot attach user as their own referral');
     }
     // Use the same service — partnerUser is the referrer, referralUser is the referred
-    const result = await this.referralManualAttachService.attachReferrerManually({
+    return this.referralManualAttachService.attachReferrerManually({
       userId: referralUser.id,
       referrerId: partnerUser.id,
+      // Admin attaching after the fact — see `attachReferrer` above.
+      inviteSource: ReferralInviteSource.UNKNOWN,
+      operator: {
+        currentAdmin: admin,
+        requestMetadata: extractRequestMetadata(req),
+        source: 'user_detail_partner',
+      },
     });
-    await this.auditLog(admin, req, 'user.partner.referral.attached', {
-      partnerId: partnerUser.id,
-      referralUserId: referralUser.id,
-      identifier: body.referralIdentifier,
-      ...result,
-    });
-    return result;
   }
 
+  /**
+   * Add this user to a restricted plan's allow-list.
+   *
+   * `plans:edit`, NOT `users:edit`. The row this writes is `Plan.allowedUserIds`
+   * — the same column the plan editor writes under `plans:edit`, and the one
+   * that decides who may buy an `ALLOWED` plan. Gated on `users:edit` it was
+   * open to the shipped `operator` role, which holds `users:edit` and only
+   * `plans:view`: a role DELIBERATELY denied plan editing could hand out (or
+   * take away) access to any restricted tariff. Identical reasoning to the five
+   * partner routes above, which moved to `partners:edit` for the same reason.
+   *
+   * The subject of the write is a plan, so the permission follows the plan.
+   * That the row is addressed through a user id is a property of the screen,
+   * not of the data.
+   *
+   * The body shape `{ granted: true }` is unchanged; the SPA ignores it and
+   * refetches.
+   */
   @Post(':telegramId/plan-access/:planId')
   @HttpCode(HttpStatus.OK)
-  @RequirePermission('users', 'edit')
+  @RequirePermission('plans', 'edit')
   public async grantPlanAccess(
     @Param('telegramId') telegramId: string,
     @Param('planId') planId: string,
+    @CurrentAdmin() admin: CurrentAdminInterface,
+    @Req() req: Request,
   ) {
     const user = await this.findUserByTelegramId(telegramId);
-    const plan = await this.prismaService.plan.findUnique({ where: { id: planId } });
-    if (!plan) throw new NotFoundException('Plan not found');
-    if (plan.allowedUserIds.includes(user.id)) return { granted: true };
-    await this.prismaService.plan.update({
-      where: { id: planId },
-      data: { allowedUserIds: { push: user.id } },
+    await this.plansAdminService.setUserPlanAccess({
+      planId,
+      userId: user.id,
+      granted: true,
+      context: { currentAdmin: admin, requestMetadata: extractRequestMetadata(req) },
     });
     return { granted: true };
   }
 
+  /**
+   * Remove this user from a restricted plan's allow-list. See
+   * {@link grantPlanAccess} for why this is `plans:edit`.
+   *
+   * This used to read the array, filter it in this process and write the whole
+   * thing back — a lost update that silently discarded any grant, from either
+   * screen, that landed in between. `PlansAdminService.setUserPlanAccess` sends
+   * the removal of one element instead, and the audit row it writes is the
+   * first trace this route has ever left.
+   */
   @Delete(':telegramId/plan-access/:planId')
   @HttpCode(HttpStatus.OK)
-  @RequirePermission('users', 'edit')
+  @RequirePermission('plans', 'edit')
   public async revokePlanAccess(
     @Param('telegramId') telegramId: string,
     @Param('planId') planId: string,
+    @CurrentAdmin() admin: CurrentAdminInterface,
+    @Req() req: Request,
   ) {
     const user = await this.findUserByTelegramId(telegramId);
-    const plan = await this.prismaService.plan.findUnique({ where: { id: planId } });
-    if (!plan) throw new NotFoundException('Plan not found');
-    const filtered = plan.allowedUserIds.filter((id) => id !== user.id);
-    await this.prismaService.plan.update({
-      where: { id: planId },
-      data: { allowedUserIds: filtered },
+    await this.plansAdminService.setUserPlanAccess({
+      planId,
+      userId: user.id,
+      granted: false,
+      context: { currentAdmin: admin, requestMetadata: extractRequestMetadata(req) },
     });
     return { revoked: true };
   }
 
   // ── Send Notification ───────────────────────────────────────────────────────
 
+  /**
+   * Which channels this particular user can be reached on. Drives the send
+   * dialog so the operator is never offered a channel that cannot work —
+   * `telegram` needs a linked, positive `telegramId` and an unblocked bot,
+   * `webpush` needs deployment VAPID keys AND a browser this user registered.
+   */
+  @Get(':telegramId/notify/channels')
+  @RequirePermission('users', 'edit')
+  public async getNotifyChannels(
+    @Param('telegramId') telegramId: string,
+  ): Promise<{ channels: readonly ChannelAvailability[] }> {
+    const user = await this.findUserByTelegramId(telegramId);
+    return { channels: await this.userNotifications.getChannelAvailability(user.id) };
+  }
+
   @Post(':telegramId/notify')
   @HttpCode(HttpStatus.OK)
   @RequirePermission('users', 'edit')
   public async sendNotification(
     @Param('telegramId') telegramId: string,
-    @Body() body: { message: string },
-  ) {
-    // Create a notification event for the user — UserNotificationsService
-    // writes the cabinet-feed row and (best-effort) pushes the rendered
-    // text to the bot for Telegram delivery in one call.
+    @Body() body: { message: string; channels?: unknown },
+  ): Promise<OperatorMessageResult & { sent: boolean }> {
     const user = await this.findUserByTelegramId(telegramId);
-    await this.userNotifications.create({
+    // The cabinet-feed row is written unconditionally — it is the durable
+    // record. `channels` selects only the DELIVERY surfaces, and the send is
+    // awaited so the response can say what each one actually did. Omitting the
+    // field keeps the pre-channel-selector behaviour (try every channel),
+    // which is what an older SPA build still posts.
+    const result = await this.userNotifications.sendOperatorMessage({
       userId: user.id,
-      type: 'ADMIN_MESSAGE',
-      payload: { text: body.message },
-      preRenderedText: body.message,
+      text: body.message,
+      channels: parseRequestedChannels(body.channels),
     });
-    return { sent: true };
+    // `sent` is no longer a constant: it is false when the operator asked for
+    // delivery and none of it got through. A 2xx with `sent: false` is the
+    // honest answer to "the row is stored but nobody was told", and it is what
+    // the SPA now renders instead of a green toast.
+    const attempted = result.outcomes.filter((o) => o.status !== 'notSelected');
+    return {
+      ...result,
+      sent: attempted.length === 0 || attempted.some((o) => o.status === 'delivered'),
+    };
   }
 
   // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -858,37 +1101,112 @@ export class AdminUserManagementController {
    * does; the columns it reads are already in the row (the `findMany` behind
    * this list runs without a `select`).
    */
-  private async enrichSubscriptionsWithRemnawave<T extends PanelIdentityColumns>(
+  private async enrichSubscriptionsWithRemnawave<T extends PanelIdentityColumns & { id: string }>(
     subscriptions: readonly T[],
   ): Promise<Array<T & {
     readonly remnawaveProfileName: string | null;
     readonly remnawaveProfileDescription: string | null;
+    readonly remnawaveSyncState: 'UNLINKED' | 'PENDING' | 'SYNCED' | 'MISSING' | 'UNAVAILABLE' | 'FAILED';
+    readonly remnawaveSyncJob: {
+      readonly status: string;
+      readonly action: string;
+      readonly attempts: number;
+      readonly lastError: string | null;
+      readonly updatedAt: string;
+    } | null;
   }>> {
+    const profileSyncJobDelegate = this.prismaService.profileSyncJob;
+    // No subscriptions means no `subscriptionId` to ask about, and `in: []` is
+    // a round trip that can only answer nothing. This runs on every user-card
+    // open, which an operator hits constantly, so the empty case is skipped
+    // rather than sent.
+    const latestJobs = profileSyncJobDelegate === undefined || subscriptions.length === 0
+      ? []
+      : await profileSyncJobDelegate.findMany({
+          where: { subscriptionId: { in: subscriptions.map((sub) => sub.id) }, supersededAt: null },
+          orderBy: [{ updatedAt: 'desc' }, { createdAt: 'desc' }],
+          select: { subscriptionId: true, status: true, action: true, attempts: true, lastError: true, updatedAt: true },
+        });
+    const jobBySubscription = new Map<string, (typeof latestJobs)[number]>();
+    for (const job of latestJobs) {
+      if (!jobBySubscription.has(job.subscriptionId)) jobBySubscription.set(job.subscriptionId, job);
+    }
+
     const enriched = await Promise.allSettled(
-      subscriptions.map(async (sub): Promise<T & { remnawaveProfileName: string | null; remnawaveProfileDescription: string | null }> => {
+      subscriptions.map(async (sub): Promise<T & {
+        remnawaveProfileName: string | null;
+        remnawaveProfileDescription: string | null;
+        remnawaveSyncState: 'UNLINKED' | 'PENDING' | 'SYNCED' | 'MISSING' | 'UNAVAILABLE' | 'FAILED';
+        remnawaveSyncJob: {
+          status: string;
+          action: string;
+          attempts: number;
+          lastError: string | null;
+          updatedAt: string;
+        } | null;
+      }> => {
+        const job = jobBySubscription.get(sub.id) ?? null;
+        const syncJob = job === null ? null : {
+          status: job.status,
+          action: job.action,
+          attempts: job.attempts,
+          lastError: job.lastError,
+          updatedAt: job.updatedAt.toISOString(),
+        };
         const identity = storedIdentityOf(sub);
         if (identity === null) {
           return {
             ...sub,
             remnawaveProfileName: null,
             remnawaveProfileDescription: null,
+            remnawaveSyncState: job?.status === SyncJobStatus.PENDING || job?.status === SyncJobStatus.RUNNING
+              ? 'PENDING'
+              : job?.status === SyncJobStatus.FAILED ? 'FAILED' : 'UNLINKED',
+            remnawaveSyncJob: syncJob,
           };
         }
-        const panelUser = await this.remnawaveApiService.getPanelUser(identity);
+        const outcome = await this.remnawaveApiService.getPanelUserOutcome(identity);
+        const panelUser = outcome.kind === 'ok' ? outcome.user : null;
         return {
           ...sub,
           remnawaveProfileName: panelUser?.username ?? null,
           remnawaveProfileDescription: panelUser?.description ?? null,
+          remnawaveSyncState: outcome.kind === 'ok'
+            ? job?.status === SyncJobStatus.PENDING || job?.status === SyncJobStatus.RUNNING
+              ? 'PENDING'
+              : job?.status === SyncJobStatus.FAILED ? 'FAILED' : 'SYNCED'
+            : outcome.kind === 'missing' ? 'MISSING' : 'UNAVAILABLE',
+          remnawaveSyncJob: syncJob,
         };
       }),
     );
-    return enriched.map((result, index): T & { remnawaveProfileName: string | null; remnawaveProfileDescription: string | null } => {
+    return enriched.map((result, index): T & {
+      remnawaveProfileName: string | null;
+      remnawaveProfileDescription: string | null;
+      remnawaveSyncState: 'UNLINKED' | 'PENDING' | 'SYNCED' | 'MISSING' | 'UNAVAILABLE' | 'FAILED';
+      remnawaveSyncJob: {
+        status: string;
+        action: string;
+        attempts: number;
+        lastError: string | null;
+        updatedAt: string;
+      } | null;
+    } => {
       if (result.status === 'fulfilled') return result.value;
       const fallback = subscriptions[index];
+      const job = jobBySubscription.get(fallback.id) ?? null;
       return {
         ...fallback,
         remnawaveProfileName: null,
         remnawaveProfileDescription: null,
+        remnawaveSyncState: storedIdentityOf(fallback) === null ? 'UNLINKED' : 'UNAVAILABLE',
+        remnawaveSyncJob: job === null ? null : {
+          status: job.status,
+          action: job.action,
+          attempts: job.attempts,
+          lastError: job.lastError,
+          updatedAt: job.updatedAt.toISOString(),
+        },
       };
     });
   }
@@ -1068,4 +1386,18 @@ function readOperationPlanLabel(snapshot: Record<string, unknown>): string | nul
     if (typeof name === 'string' && name.trim().length > 0) return name.trim();
   }
   return null;
+}
+
+/**
+ * Normalise the operator's channel selection off the wire.
+ *
+ * Absent field ⇒ every channel, which is what the pre-selector SPA build
+ * posts; an explicit empty array ⇒ nothing, which is the operator deliberately
+ * choosing "record it, tell nobody". Those two must not collapse into each
+ * other, so `undefined` is checked before the array is read.
+ */
+function parseRequestedChannels(raw: unknown): readonly NotificationDeliveryChannel[] {
+  if (raw === undefined || raw === null) return NOTIFICATION_DELIVERY_CHANNELS;
+  if (!Array.isArray(raw)) return NOTIFICATION_DELIVERY_CHANNELS;
+  return raw.filter(isNotificationDeliveryChannel);
 }

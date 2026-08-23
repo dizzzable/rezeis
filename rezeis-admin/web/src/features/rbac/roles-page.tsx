@@ -493,6 +493,33 @@ function PermissionMatrix({
   const { t } = useTranslation();
   const ordered = useMemo(() => Object.entries(catalog.resources), [catalog]);
 
+  /**
+   * What the ACTOR holds — not what the role being edited holds.
+   *
+   * The server refuses any save whose resulting permission set contains a
+   * token the actor does not hold (`assertGrantsWithinActor`). Without this the
+   * editor rendered the whole catalogue and let an admin tick a box the save
+   * would then refuse, naming a permission they had never heard of.
+   */
+  const actorHolds = usePermissionStore((s) => s.hasPermission);
+
+  /**
+   * Permissions the role already carries that the actor cannot grant. Any save
+   * is refused while these remain, so they are named rather than left for the
+   * server to discover — and they stay un-disabled above, because REMOVING one
+   * is exactly what makes the save legal again.
+   */
+  const beyondActor = useMemo(() => {
+    const out: string[] = [];
+    for (const [resource, actions] of ordered) {
+      for (const action of actions as readonly RbacAction[]) {
+        const token = `${resource}:${action}`;
+        if (permissions.has(token) && !actorHolds(resource, action)) out.push(token);
+      }
+    }
+    return out.sort();
+  }, [ordered, permissions, actorHolds]);
+
   function toggle(resource: string, action: RbacAction) {
     if (readOnly) return;
     const token = `${resource}:${action}`;
@@ -517,6 +544,15 @@ function PermissionMatrix({
   return (
     <div className="space-y-3">
       <h3 className="text-sm font-semibold">{t('rolesPage.editor.permissions')}</h3>
+      {!readOnly && beyondActor.length > 0 && (
+        <Alert variant="destructive" data-role-editor-beyond-actor>
+          <AlertTitle>{t('rolesPage.editor.beyondActorTitle')}</AlertTitle>
+          <AlertDescription>
+            {t('rolesPage.editor.beyondActorBody')}
+            <span className="mt-1 block font-mono text-xs">{beyondActor.join(', ')}</span>
+          </AlertDescription>
+        </Alert>
+      )}
       <div className="rounded-md border overflow-x-auto">
         <table className="w-full min-w-[600px] text-sm">
           <thead className="bg-muted/50">
@@ -558,14 +594,24 @@ function PermissionMatrix({
                         </td>
                       );
                     }
-                    const checked = effective.has(`${resource}:${action}`);
+                    const token = `${resource}:${action}`;
+                    const checked = effective.has(token);
+                    // The server refuses a save whose RESULTING set contains a
+                    // permission the actor does not hold — not merely one they
+                    // just added. So ticking a box outside your own grants can
+                    // never succeed, while UNticking one always can: removing it
+                    // is what makes the save legal. Disable the first, allow the
+                    // second, and say why in the title.
+                    const grantable = actorHolds(resource, action as RbacAction);
+                    const blocked = !grantable && !checked;
                     return (
                       <td key={action} className="px-2 py-2 text-center">
                         <Checkbox
                           checked={checked}
                           onCheckedChange={() => toggle(resource, action as RbacAction)}
-                          disabled={readOnly}
-                          aria-label={`${resource}:${action}`}
+                          disabled={readOnly || blocked}
+                          aria-label={token}
+                          title={blocked ? t('rolesPage.editor.cannotGrant') : undefined}
                         />
                       </td>
                     );

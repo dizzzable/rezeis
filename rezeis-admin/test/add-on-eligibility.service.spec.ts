@@ -43,15 +43,46 @@ class EnabledMonthEligibilityService extends AddOnEligibilityService {
   }
 }
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The end of a term window that is still OPEN, expressed relative to the wall
+ * clock rather than as a literal.
+ *
+ * `resolveAddOnLifetimeGrant` refuses an `UNTIL_SUBSCRIPTION_END` add-on whose
+ * window has already closed — the intake
+ * (`PaymentSubscriptionMutationService.applyAddOnViaLedger`) requires
+ * `endsAt > now` before it will bind the entitlement to that window and
+ * otherwise falls through to the PERMANENT legacy increment, so an offer made
+ * on a closed window sells a bounded good and delivers an unbounded one.
+ *
+ * These fixtures used to carry a literal `2026-03-01`, which described a live
+ * subscription on the day they were written and a two-months-expired one
+ * afterwards. Every "is it offered" assertion below therefore drifted into
+ * asserting that an EXPIRED term still sells, without anyone editing them.
+ * Anchoring the window to `Date.now()` is what stops that happening again.
+ */
+const LIVE_TERM_ENDS_AT = new Date(Date.now() + 60 * DAY_MS);
+
 // Default fallback columns: a finite subscription with a plan snapshot that
 // carries the plan id + a NO_RESET strategy (so only UNTIL_SUBSCRIPTION_END
 // add-ons can be offered from the fallback baseline).
 const defaultSubColumns: SubColumns = {
   trafficLimit: 100,
   deviceLimit: 3,
-  expiresAt: new Date('2026-03-01T00:00:00.000Z'),
+  expiresAt: LIVE_TERM_ENDS_AT,
   createdAt: new Date('2026-01-01T00:00:00.000Z'),
   planSnapshot: { id: 'plan-a', trafficLimitStrategy: 'NO_RESET' },
+};
+
+/**
+ * The projection row the previous recompute left behind. Its recorded
+ * contribution is the only quantity that may be subtracted back out of the
+ * mirrored limit columns before they are compared with the stored snapshot.
+ */
+type Projection = {
+  activeTrafficContributionBytes: bigint;
+  activeDeviceContribution: number;
 };
 
 function build(options: {
@@ -60,11 +91,13 @@ function build(options: {
   catalog?: CatalogAddOn[];
   enabledMonth?: boolean;
   sub?: Partial<SubColumns>;
+  projection?: Projection | null; // null → no projection row yet
   ownerUserId?: string; // the subscription's owner (default 'user-1')
   telegramUser?: { id: string } | null; // user.findFirst(byTelegramId) result
 }) {
   const columns: SubColumns = { ...defaultSubColumns, ...options.sub };
   const ownerUserId = options.ownerUserId ?? 'user-1';
+  const stats = { projectionReads: 0 };
   const prisma = {
     subscription: {
       findUnique: async () =>
@@ -75,6 +108,12 @@ function build(options: {
     subscriptionTerm: {
       findFirst: async () => options.term ?? null,
     },
+    subscriptionEffectiveProjection: {
+      findUnique: async () => {
+        stats.projectionReads += 1;
+        return options.projection ?? null;
+      },
+    },
     user: {
       findFirst: async () =>
         options.telegramUser === undefined ? { id: ownerUserId } : options.telegramUser,
@@ -84,13 +123,13 @@ function build(options: {
     },
   };
   const Service = options.enabledMonth ? EnabledMonthEligibilityService : AddOnEligibilityService;
-  return { service: new Service(prisma as never) };
+  return { service: new Service(prisma as never), stats };
 }
 
 const financeTerm: Term = {
   id: 'term-1',
   planId: 'plan-a',
-  endsAt: new Date('2026-03-01T00:00:00.000Z'),
+  endsAt: LIVE_TERM_ENDS_AT,
   baseTrafficLimitBytes: 100n * 1024n * 1024n * 1024n,
   baseDeviceLimit: 3,
   trafficResetStrategy: 'MONTH',
@@ -147,7 +186,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
     const traffic = result.addOns.find((a) => a.id === 'a-traffic');
     assert.ok(traffic);
     // Fallback expiry = subscription.expiresAt (mirrors the term the cutover would create).
-    assert.equal(traffic.eligibility.expiresAt, '2026-03-01T00:00:00.000Z');
+    assert.equal(traffic.eligibility.expiresAt, LIVE_TERM_ENDS_AT.toISOString());
     assert.equal(traffic.eligibility.explanationCode, 'ELIGIBLE_UNTIL_SUBSCRIPTION_END');
   });
 
@@ -230,7 +269,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
     assert.equal(traffic.revision, 2);
     assert.equal(traffic.icon, '📶');
     assert.equal(traffic.eligibility.activation, 'NOW');
-    assert.equal(traffic.eligibility.expiresAt, '2026-03-01T00:00:00.000Z');
+    assert.equal(traffic.eligibility.expiresAt, LIVE_TERM_ENDS_AT.toISOString());
     assert.equal(traffic.eligibility.explanationCode, 'ELIGIBLE_UNTIL_SUBSCRIPTION_END');
     assert.deepEqual(traffic.prices, [{ currency: 'USD', price: '2.00' }]);
   });
@@ -430,5 +469,206 @@ describe('AddOnEligibilityService.listForSubscription', () => {
       () => service.listForSubscription('sub-1', { telegramId: 'not-a-number' }),
       (e: unknown) => e instanceof NotFoundException,
     );
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  The offer and the fulfillment must agree about what "unlimited" means
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// A term is minted from the plan and never mutated, while an operator can
+// configure ONE customer from the admin Users page afterwards and that value is
+// preserved rather than reset. Judging the offer against the term alone
+// therefore sells an add-on that changes nothing: unlimited is ABSORBING, so the
+// projection's `addDeviceLimit(null, …)` / `addTrafficLimit(null, …)` swallow
+// the whole contribution while the term's finite number still reads as
+// extendable.
+//
+// Both directions are pinned deliberately. Refusing every overridden field would
+// be just as wrong — it would freeze a paid upgrade out — so each "withholds"
+// test has a matching "still offers" test that fails if the override test is
+// inverted, and an unreadable snapshot gets its own, because UNDECIDABLE
+// resolves toward the PLAN and not toward the column.
+describe('AddOnEligibilityService — an individually-configured limit decides the offer', () => {
+  /** A stored snapshot carrying all four inherited keys, i.e. a DECIDABLE one. */
+  function decidableSnapshot(patch: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      id: 'plan-a',
+      trafficLimitStrategy: 'NO_RESET',
+      trafficLimit: 100,
+      deviceLimit: 3,
+      internalSquads: [],
+      externalSquad: null,
+      ...patch,
+    };
+  }
+
+  /** A snapshot an import left behind: readable, but carrying no limit keys. */
+  const unreadableLimits = { id: 'plan-a', trafficLimitStrategy: 'NO_RESET' };
+
+  const ids = (result: { readonly addOns: readonly { readonly id: string }[] }): string[] =>
+    result.addOns.map((addOn) => addOn.id);
+
+  // ── OVERRIDDEN toward unlimited → the add-on is refused ────────────────────
+
+  it('withholds EXTRA_DEVICES when the operator granted unlimited devices while the term still says 3', async () => {
+    const { service, stats } = build({
+      status: 'ACTIVE',
+      term: financeTerm, // baseDeviceLimit 3 — what the customer BOUGHT
+      catalog: [trafficAddOn, deviceAddOn],
+      sub: { deviceLimit: 0, planSnapshot: decidableSnapshot() },
+    });
+
+    const result = await service.listForSubscription('sub-1');
+
+    // Only the DEVICE add-on is withheld. Asserting the surviving traffic offer
+    // keeps this from passing for the wrong reason — a blanket EMPTY would
+    // satisfy a bare length check just as well.
+    assert.deepEqual(ids(result), ['a-traffic']);
+    assert.equal(result.availability, 'AVAILABLE');
+    assert.equal(stats.projectionReads, 1, 'the recorded add-on contribution must actually be read');
+  });
+
+  it('withholds EXTRA_TRAFFIC when the operator granted unlimited traffic while the term still says 100 GiB', async () => {
+    const { service } = build({
+      status: 'ACTIVE',
+      term: financeTerm, // baseTrafficLimitBytes 100 GiB
+      catalog: [trafficAddOn, deviceAddOn],
+      sub: { trafficLimit: null, planSnapshot: decidableSnapshot() },
+    });
+
+    const result = await service.listForSubscription('sub-1');
+
+    assert.deepEqual(ids(result), ['a-device']);
+  });
+
+  // ── INHERITED → the term the customer paid for still governs ───────────────
+
+  it('still offers EXTRA_DEVICES when an unlimited column is merely what the plan gave (INHERITED)', async () => {
+    // Column 0 AND snapshot 0: nobody adjusted this row, so the term governs and
+    // the add-on really does land on top of it. Reading this as an override
+    // would refuse an upgrade the customer is already paying for.
+    const { service } = build({
+      status: 'ACTIVE',
+      term: financeTerm,
+      catalog: [deviceAddOn],
+      sub: { deviceLimit: 0, planSnapshot: decidableSnapshot({ deviceLimit: 0 }) },
+    });
+
+    const result = await service.listForSubscription('sub-1');
+
+    assert.deepEqual(ids(result), ['a-device']);
+  });
+
+  it('still offers EXTRA_TRAFFIC when an unlimited column is merely what the plan gave (INHERITED)', async () => {
+    const { service } = build({
+      status: 'ACTIVE',
+      term: financeTerm,
+      catalog: [trafficAddOn],
+      sub: { trafficLimit: null, planSnapshot: decidableSnapshot({ trafficLimit: null }) },
+    });
+
+    const result = await service.listForSubscription('sub-1');
+
+    assert.deepEqual(ids(result), ['a-traffic']);
+  });
+
+  it('still offers EXTRA_DEVICES when the operator RAISED a finite limit (an override is not a refusal)', async () => {
+    const { service } = build({
+      status: 'ACTIVE',
+      term: financeTerm,
+      catalog: [deviceAddOn],
+      sub: { deviceLimit: 12, planSnapshot: decidableSnapshot() },
+    });
+
+    const result = await service.listForSubscription('sub-1');
+
+    assert.deepEqual(ids(result), ['a-device']);
+  });
+
+  it('still offers EXTRA_TRAFFIC when the operator RAISED a finite limit (an override is not a refusal)', async () => {
+    const { service } = build({
+      status: 'ACTIVE',
+      term: financeTerm,
+      catalog: [trafficAddOn],
+      sub: { trafficLimit: 250, planSnapshot: decidableSnapshot() },
+    });
+
+    const result = await service.listForSubscription('sub-1');
+
+    assert.deepEqual(ids(result), ['a-traffic']);
+  });
+
+  // ── UNDECIDABLE is not OVERRIDDEN ──────────────────────────────────────────
+
+  it('leaves the term baseline in force for an unreadable snapshot, so an imported row is still offered devices', async () => {
+    // Imported/legacy rows carry a snapshot with none of the four limit keys.
+    // That is UNDECIDABLE and it resolves toward the PLAN; collapsing it into
+    // OVERRIDDEN would refuse a paid upgrade on the strength of a column nobody
+    // can attribute to an operator.
+    const { service } = build({
+      status: 'ACTIVE',
+      term: financeTerm,
+      catalog: [deviceAddOn],
+      sub: { deviceLimit: 0, planSnapshot: unreadableLimits },
+    });
+
+    const result = await service.listForSubscription('sub-1');
+
+    assert.deepEqual(ids(result), ['a-device']);
+  });
+
+  it('leaves the term baseline in force for an unreadable snapshot, so an imported row is still offered traffic', async () => {
+    const { service } = build({
+      status: 'ACTIVE',
+      term: financeTerm,
+      catalog: [trafficAddOn],
+      sub: { trafficLimit: null, planSnapshot: unreadableLimits },
+    });
+
+    const result = await service.listForSubscription('sub-1');
+
+    assert.deepEqual(ids(result), ['a-traffic']);
+  });
+
+  // ── The inputs are the projection's, not a convenient stand-in ─────────────
+
+  it('reads the projection’s recorded contribution instead of assuming zero', async () => {
+    // Column 8 = plan 3 + a live +5 device add-on; the columns were mirrored
+    // from that projection row, so its 5 is the only quantity that may be taken
+    // back out before the comparison. It cannot change TODAY's answer —
+    // unlimited-ness survives no subtraction, and this offer is the only thing
+    // eligibility derives from the baseline — so what is pinned here is the READ
+    // itself: substituting a hard 0 would be a second, divergent derivation of a
+    // baseline the projection also computes, and the two would part company the
+    // day eligibility starts using the number.
+    const { service, stats } = build({
+      status: 'ACTIVE',
+      term: financeTerm,
+      catalog: [deviceAddOn],
+      sub: { deviceLimit: 8, planSnapshot: decidableSnapshot() },
+      projection: { activeTrafficContributionBytes: 0n, activeDeviceContribution: 5 },
+    });
+
+    const result = await service.listForSubscription('sub-1');
+
+    assert.deepEqual(ids(result), ['a-device']);
+    assert.equal(stats.projectionReads, 1, 'a hard 0 in place of the row is a second derivation');
+  });
+
+  // ── The fallback path already reads the operator's own columns ─────────────
+
+  it('reads no projection row on the no-term fallback, where the columns ARE the baseline', async () => {
+    const { service, stats } = build({
+      status: 'ACTIVE',
+      term: null,
+      catalog: [deviceAddOn],
+      sub: { deviceLimit: 0, planSnapshot: decidableSnapshot() },
+    });
+
+    const result = await service.listForSubscription('sub-1');
+
+    assert.deepEqual(ids(result), []);
+    assert.equal(stats.projectionReads, 0, 'the pre-cutover path must not pay for a query it cannot use');
   });
 });

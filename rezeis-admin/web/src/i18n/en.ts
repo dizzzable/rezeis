@@ -481,6 +481,15 @@ export const en = {
       percents: 'Percent per level',
       fixedAmounts: 'Fixed amounts per level, ₽',
       globalPlaceholder: 'global',
+      levelAccrual: {
+        title: 'Accrual mode per level',
+        inherit: 'Inherit ({{value}})',
+        hintAria: 'What the level {{level}} accrual mode does',
+        hint:
+          'Decides when level {{level}} pays this partner: on every payment a referral makes, or only on their first. Setting a level to the same value the accrual strategy above already has is not a no-op — a stored value stops following that strategy, an inherited one keeps following it. When the strategy is changed later, only the inherited levels move with it.',
+        globalDisabled:
+          'Ignored while this partner is on global settings — the levels come from the Partner Program settings. Turn off "Use global settings" to set them here.',
+      },
       save: 'Save settings',
     },
     validation: {
@@ -702,10 +711,9 @@ export const en = {
       title: 'Web-push (browser notifications)',
       description:
         'VAPID keys for sending push notifications to the browser and installed PWA. The private key is stored encrypted. Keys live in rezeis (no need to set them in reiwa).',
-      statusConfigured: 'Web-push is configured (source: {{source}}). You can send a test.',
+      statusConfigured: 'Web-push is configured. You can send a test.',
       statusMissing:
-        'Web-push is not configured — generate keys below or set the VAPID_* environment variables.',
-      source: { settings: 'panel', env: 'environment' },
+        'Web-push is NOT configured: no keys, so every push notification is a no-op. Generate keys below. The VAPID_* environment variables are no longer read.',
       publicKeyLabel: 'VAPID public key',
       emailLabel: 'Contact email (VAPID subject)',
       emailPlaceholder: 'admin@example.com',
@@ -1118,6 +1126,9 @@ export const en = {
       eligiblePlansAllHint:
         'Nothing selected — buying any plan qualifies the referral. Pick plans to stop paying out for trials or the cheapest tier.',
       eligiblePlansHint: '{{count}} plan(s) selected. Buying any other plan does not qualify.',
+      eligiblePlanArchived: 'archived',
+      eligiblePlanInactive: 'inactive',
+      eligiblePlanMissing: 'Deleted plan {{id}}',
     },
     inviteLimits: {
       title: 'Invite Link Limits',
@@ -1128,6 +1139,10 @@ export const en = {
       enableSlots: 'Enable Invite Slots',
       enableSlotsHint: 'Limit how many active invite links each user can have',
       initialSlots: 'Initial Slots per User',
+      linkTtlMin:
+        'Minimum {{min}} day. Leave the box empty for no expiry — a TTL of 0 or less mints links that are already dead.',
+      initialSlotsMin:
+        'Minimum {{min}}. Leave the box empty for unlimited; {{min}} means nobody gets a slot, and a negative locks users out of inviting with no error.',
     },
     pointsExchange: {
       title: 'Points Exchange',
@@ -1156,6 +1171,8 @@ export const en = {
     save: 'Save',
     saved: 'Partner settings saved',
     saveFailed: 'Failed to save partner settings',
+    loadFailed:
+      'The partner program settings could not be loaded. Nothing is shown and nothing can be saved until they arrive — saving now would replace every stored setting with an empty form.',
     general: {
       title: 'General',
       enable: 'Enable Partner Program',
@@ -1174,6 +1191,15 @@ export const en = {
       onFirstPayment: 'On first payment only',
       onFirstPaymentHint: 'Partner earns only from the first payment of each referral',
       onEachPaymentHint: 'Partner earns from every payment of their referrals',
+      levelAccrual: {
+        title: 'Accrual mode per level',
+        description:
+          'Applies to every partner on global settings. A level left on Inherit follows the strategy above.',
+        inherit: 'Inherit ({{value}})',
+        hintAria: 'What the level {{level}} accrual mode does',
+        hint:
+          'Decides when level {{level}} pays: on every payment a referral makes, or only on their first. Setting a level to the same value the accrual strategy above already has is not a no-op — a stored value stops following that strategy, an inherited one keeps following it. When the strategy is changed later, only the inherited levels move with it.',
+      },
     },
     commissionRates: {
       title: 'Commission Rates',
@@ -1397,6 +1423,15 @@ export const en = {
       or: 'or continue with',
       continueWith: 'Continue with {{provider}}',
       passkey: 'Sign in with Passkey',
+      error: {
+        title: 'Sign-in through the provider was not completed',
+        totpRequired:
+          'Two-factor authentication is enabled on this account, so a provider sign-in cannot finish on its own — there is nowhere to type the code during the redirect. Sign in with your email and password below, then enter the code from your authenticator app.',
+        unknown:
+          'The provider returned "{{code}}" instead of completing the sign-in. Try again, or sign in with your email and password below.',
+        unknownNoCode:
+          'The provider did not complete the sign-in and gave no reason. Try again, or sign in with your email and password below.',
+      },
     },
   },
   forcePasswordChangePage: {
@@ -1506,6 +1541,10 @@ export const en = {
     accessTokenMissing: 'Access token was not returned by the API',
     unexpectedSettingsPayload: 'Unexpected settings response payload',
     unexpectedUsersPayload: 'Unexpected users response payload',
+    serverUnreachable:
+      'Cannot reach the server — check your connection, or whether the panel backend and its reverse proxy are running.',
+    serverTimeout:
+      'The server did not answer in time — it is reachable but not responding. Check its load, or the upstream timeout on the reverse proxy.',
     'Invalid login or password': 'Invalid login or password',
     'Admin user is inactive': 'Admin user is inactive',
     'User not found': 'User not found',
@@ -2191,6 +2230,7 @@ export const en = {
       cut: 'Subscribers who already bought this plan keep their current limits — nobody is reduced today. The new limits apply from their next renewal or upgrade.',
       raise: 'Subscribers who already bought this plan do not get the higher limits today; those apply from their next renewal or upgrade. New purchases get them right away.',
       mixed: 'Subscribers who already bought this plan keep their current limits until their next renewal or upgrade. New purchases get the new limits right away.',
+      individuallyAdjusted: 'Subscribers whose limits an operator set by hand are exempt — renewal leaves an individual adjustment alone.',
     },
     squads: 'Remnawave squads',
     internalSquads: 'Internal squads',
@@ -2230,6 +2270,23 @@ export const en = {
       title: 'Available upgrades',
       hint: 'Users on this plan will see an "Upgrade" button leading to the selected plans.',
       noPlans: 'No plans available',
+    },
+    transitions: {
+      strandedHint:
+        'These plans are still selected but can no longer be used as targets. Click one to take it off.',
+      strandedRemoveAria: 'Remove {{plan}} — {{reason}}',
+      strandedUpgradeError:
+        'These upgrade targets can no longer be used: {{plans}}. Take them off above, then save.',
+      strandedReplacementError:
+        'These replacement plans can no longer be used: {{plans}}. Take them off above, then save.',
+      strandedReason: {
+        self: 'this plan itself',
+        missing: 'deleted',
+        trial: 'trial plan',
+        unassignable: 'not available for transitions',
+        archived: 'archived',
+        inactive: 'inactive',
+      },
     },
     allowedUsers: {
       title: 'Allowed users',
@@ -2288,6 +2345,46 @@ export const en = {
     },
     create: 'Create plan',
     update: 'Update plan',
+  },
+  // The seventeen ways a plan write can be refused, one key per code in
+  // `PLAN_WRITE_REFUSAL_I18N_KEYS` (plan-write-refusals.ts). Each says what to
+  // DO, not just what is wrong: the sentence these replace was the server's own
+  // English diagnostic naming a raw cuid, which an operator could read and
+  // still not act on.
+  planWriteRefusal: {
+    nameTaken: 'A plan with this name already exists. Give this one a different name and save again.',
+    durationDuplicate:
+      'Two durations are set to the same number of days. Remove or change one of them, then save again.',
+    currencyDuplicate:
+      'A currency is listed twice inside one duration. Leave one price per currency, then save again.',
+    transitionSelfReference:
+      'A plan cannot be its own upgrade or replacement target. Remove this plan from those lists and save again.',
+    transitionReplacementRequired:
+      '"Replace on renewal" needs at least one replacement plan. Pick one, or switch the renewal mode back to "Self-renew".',
+    transitionRenewModeNotArchived:
+      'A renewal mode can only be set on an archived plan. Turn "Archived plan" on, or leave the renewal mode alone.',
+    transitionTargetNotFound:
+      'One of the selected upgrade or replacement plans no longer exists. Remove the plans marked in red, then save again.',
+    transitionTargetNotAssignable:
+      'An upgrade or replacement target must be an active, non-archived, non-trial plan. Remove the plans marked in red, then save again.',
+    trialConversionForbidden:
+      'An existing plan cannot be switched to "TRIAL" availability. Create a separate trial plan instead.',
+    trialAlreadyExists:
+      'There is already an active trial plan. Archive or switch that one off before making this plan a trial.',
+    trialDurationCount:
+      'A trial plan must have exactly one duration. Remove the extra durations, then save again.',
+    trialPriceRequired:
+      'A paid trial needs a price above zero in at least one currency. Set a price, or mark the trial as free.',
+    allowedUsersNotFound:
+      'Some of the allowed users no longer exist. Remove them from the list, then save again.',
+    internalSquadsNotFound:
+      'Some of the selected internal squads are no longer in Remnawave. Reopen the squad picker, choose current ones and save again.',
+    externalSquadNotFound:
+      'The selected external squad is no longer in Remnawave. Choose another one, or clear the field, then save again.',
+    squadValidationUnavailable:
+      'Remnawave did not answer, so the squads could not be checked. Check the panel connection and save again.',
+    deleteReferenced:
+      'Subscriptions or other plans still reference this plan, so it cannot be deleted. Archive it instead.',
   },
   promocodeForm: {
     code: 'Promocode',
@@ -2661,6 +2758,11 @@ export const en = {
         empty: 'Nothing is being held back right now.',
         byStreak: 'Seen {{seen}}/{{required}} runs',
         byExemption: 'Exempt',
+        byVerdict: 'Operator verdict',
+        byVerdictHint:
+          'Dismissed or resolved recently, so no signal will open until that mute lapses. Nothing on this page can lift it; a more severe finding breaks through at once.',
+        loadFailed:
+          'Could not load what is being held back. That is not the same as nothing being held — reload before reading the signal queue as complete.',
         columns: {
           signal: 'Condition',
           reason: 'Held because',
@@ -3023,6 +3125,7 @@ export const en = {
     empty: 'No subscriptions found',
     trialBadge: 'Trial',
     trafficGb: '{{value}} GB',
+    unlimitedExpiry: 'Unlimited',
   },
   errorBoundary: {
     title: 'Something went wrong',
@@ -3103,6 +3206,10 @@ export const en = {
       systemReadOnlyDescription:
         'System roles receive their grants from the application\'s resource catalog. Use the "Sync system roles" button at the top to refresh.',
       permissions: 'Permissions',
+      cannotGrant: 'You cannot grant a permission you do not hold yourself',
+      beyondActorTitle: 'This role holds permissions you do not',
+      beyondActorBody:
+        'Saving is refused while they remain ticked. You may remove them; you may not grant them.',
       resourceColumn: 'Resource',
       meta_one: 'name: {{name}} · {{adminsCount}} admin · {{permsCount}} permissions',
       meta_other: 'name: {{name}} · {{adminsCount}} admins · {{permsCount}} permissions',
@@ -3212,6 +3319,20 @@ export const en = {
       cancel: 'Cancel',
       confirm: 'Restore',
     },
+    foreignArchiveDialog: {
+      title: 'This archive was not produced by this deployment',
+      intro:
+        'The restore was refused because the server cannot prove it created this archive.',
+      consequence:
+        'Restoring it anyway runs whatever SQL the file contains, as the database owner. It can create or replace admin accounts, roles, permissions and the IP allowlist — including accounts you do not control. Only continue if you know where this file came from.',
+      legitimate:
+        'This is expected when you are moving to a new server, or restoring a dump taken before this deployment started stamping its backups.',
+      reuploadNote: 'Continuing sends "{{filename}}" again — the file is uploaded a second time.',
+      needsPermission:
+        'Restoring an unverified archive also requires the admins:edit permission, which this account does not have. Ask an administrator who holds it to run the restore.',
+      cancel: 'Cancel',
+      confirm: 'Restore anyway',
+    },
     settings: {
       title: 'Backup settings',
       subtitle: 'Automatic creation and delivery of backups',
@@ -3295,6 +3416,76 @@ export const en = {
       plansByState: 'Device-reduction plans',
       incidentsByKind: 'Open incidents',
       noIncidents: 'No open incidents',
+      drillDown: {
+        hint: 'These counters are totals. Every remediation command is scoped to one subscription, incident, entitlement or plan — open the inspector below and name the subscription to act on one.',
+        open: 'Open the subscription inspector',
+        incidentAria: 'Remediate {{kind}} incidents',
+      },
+      inspect: {
+        title: 'Subscription inspector',
+        subtitle: 'The ledger, projection, incidents and device-reduction plans of one subscription, with the remediation commands that act on them.',
+        subscriptionLabel: 'Subscription ID',
+        subscriptionPlaceholder: 'Paste a subscription ID',
+        load: 'Inspect',
+        reasonLabel: 'Reason',
+        reasonPlaceholder: 'Why this remediation is being run',
+        reasonHint: 'Recorded in the audit log with every command. At least 3 characters.',
+        emptyHint: 'Name a subscription above to see its entitlements and act on them.',
+        loadError: 'Failed to load the subscription. Check the ID.',
+        commandFailed: 'Remediation command failed',
+        projection: {
+          title: 'Effective projection',
+          none: 'No projection for this subscription yet.',
+          state: 'State',
+          desiredRevision: 'Desired',
+          appliedRevision: 'Applied',
+          never: 'never',
+        },
+        actions: {
+          retrySync: 'Retry failed syncs',
+          reconcile: 'Force reconcile',
+        },
+        incidents: {
+          title: 'Incidents',
+          empty: 'No incidents for this subscription.',
+          acknowledge: 'Acknowledge',
+          acknowledgeAria: 'Acknowledge incident {{id}}',
+        },
+        ledger: {
+          title: 'Entitlement ledger',
+          empty: 'No add-on entitlements for this subscription.',
+          reverse: 'Reverse',
+          reverseAria: 'Reverse entitlement {{id}}',
+        },
+        plans: {
+          title: 'Device-reduction plans',
+          empty: 'No device-reduction plans for this subscription.',
+          approve: 'Approve',
+          approveAria: 'Approve device-reduction plan {{id}}',
+          targets: '{{count}} targets',
+          desiredLimit: 'limit {{count}}',
+          lastError: 'last error {{code}}',
+        },
+        confirm: {
+          reverseTitle: 'Reverse this entitlement?',
+          reverseBody: 'This walks the {{type}} entitlement {{id}} ({{amount}}) to REVERSED and re-pushes the subscription limits. It is a compensating action and cannot be undone from this panel.',
+          reverseConfirm: 'Reverse',
+          approveTitle: 'Approve this device-reduction plan?',
+          approveBody: 'Plan {{id}} will be force-executed: up to {{count}} of the customer\'s devices are deleted from the panel to reach a limit of {{limit}}. Deleted devices cannot be restored.',
+          approveConfirm: 'Approve and execute',
+          cancel: 'Cancel',
+        },
+        outcome: {
+          retried: 'Re-enqueued {{count}} failed sync jobs',
+          reconciled: 'Projection recomputed and pushed',
+          reconcileNoop: 'Projection already up to date — nothing to push',
+          acknowledged: 'Incident acknowledged',
+          acknowledgeNoop: 'Incident was already out of the OPEN state',
+          reversed: 'Entitlement reversed ({{state}})',
+          reverseNoop: 'Entitlement was already {{state}}',
+          approved: 'Device-reduction plan executed ({{status}})',
+        },
+      },
     },
     stats: {
       empty: 'No data for the selected period',
@@ -3468,6 +3659,15 @@ export const en = {
       description: 'Downloads a JSON file you can apply on another deployment.',
       download: 'Download JSON',
       failed: 'Export failed',
+      webhookSecrets: {
+        label: 'Include webhook signing secrets',
+        why:
+          'Off by default, because the export normally leaves signing secrets out. That also means a webhook the file carries cannot be created on a fresh deployment — its secret column is required — and the destination reports the webhooks section as failed. Turn this on when you are migrating to another deployment and its receivers must keep validating the signatures they already trust.',
+        armed:
+          'The downloaded file will contain live signing secrets in plain text. Treat it as a credential: move it directly to the destination and delete it once the import is done. Anyone holding a secret can forge events your receivers will accept.',
+        locked:
+          'Webhook signing secrets are left out of the export. Including them needs webhooks:edit on top of config_portability:export — the same grant that lets you rotate a secret from the webhooks screen.',
+      },
     },
     import: {
       title: 'Import',
@@ -3482,6 +3682,10 @@ export const en = {
       apply: 'Apply import',
       failed: 'Import failed',
       loadedFile: 'Loaded {{name}} · version {{version}} · sections {{count}}',
+      webhookSecretsMissing_one:
+        '{{count}} webhook in this file has no signing secret. It will import only if that subscription already exists here — otherwise the webhooks section fails, because the secret column is required. To bring it across, re-export from the source with "Include webhook signing secrets" turned on.',
+      webhookSecretsMissing_other:
+        '{{count}} webhooks in this file have no signing secret. They will import only if those subscriptions already exist here — otherwise the webhooks section fails, because the secret column is required. To bring them across, re-export from the source with "Include webhook signing secrets" turned on.',
       strategies: {
         skip: 'skip',
         overwrite: 'overwrite',
@@ -3620,6 +3824,12 @@ export const en = {
           'Shortest side is {{actual}} px; for a raster file {{min}} px or more is recommended, otherwise the mark looks soft on dense screens.',
         uploadSuccess: 'File uploaded',
         uploadFailed: 'Failed to upload the file',
+        sizeLimits:
+          'PNG or WebP up to {{raster}}; SVG up to {{svg}} — it is markup the panel parses and inlines, so its limit is tighter.',
+        sizeLimitsRaster: 'PNG or WebP up to {{raster}}.',
+        tooLargeSvg:
+          'This SVG is {{actual}} — over the {{limit}} limit for SVG. Simplify the export (fewer paths, no embedded bitmaps) or save it as PNG instead.',
+        tooLargeRaster: 'This file is {{actual}} — over the {{limit}} limit.',
       },
       brandLogo: {
         title: 'How the logo is shown',
@@ -4019,6 +4229,7 @@ export const en = {
     },
     referralsTab: {
       empty: 'No referrals yet',
+      loadFailed: 'Failed to load referrals',
       searchPlaceholder: 'Search by name or Telegram ID',
       filters: {
         level: 'Level',
@@ -4035,9 +4246,30 @@ export const en = {
         qualified: 'Qualified',
         created: 'Created',
       },
+      sources: {
+        bot: 'Via Telegram bot',
+        web: 'Via the website',
+        unknown: 'Unknown',
+      },
+      levels: {
+        direct: 'Level 1 — the direct referrer. This row is the invite record itself.',
+        derived:
+          'Level 2 — derived at payout time. The referrer’s own referrer earns from this same sign-up, and there is no separate record for it.',
+      },
+      payoutBlockers: {
+        partnerProgramme: {
+          label: 'Partner pays',
+          hint: 'The referral programme pays this referrer nothing — they are an active partner, so the partner programme pays them instead.',
+        },
+        rewardNotConfigured: {
+          label: 'No reward',
+          hint: 'The referral programme pays nothing at this level: it is switched off, or the level 1 reward is 0.',
+        },
+      },
     },
     invitesTab: {
       empty: 'No invites yet',
+      loadFailed: 'Failed to load invites',
       searchPlaceholder: 'Search by inviter or token',
       filters: {
         all: 'All statuses',
@@ -4063,6 +4295,7 @@ export const en = {
     },
     rewardsTab: {
       empty: 'No rewards yet',
+      loadFailed: 'Failed to load rewards',
       searchPlaceholder: 'Search by user or referral ID',
       filters: {
         allTypes: 'All types',
@@ -4709,5 +4942,32 @@ export const en = {
       example: 'Example:',
     },
     save: 'Save',
+  },
+  autoRenewPanel: {
+    title: 'Auto-renewal',
+    hint: 'Marks subscriptions expired, sends the 3-day and 1-day expiry warnings, and charges saved payment methods.',
+    refresh: 'Refresh auto-renewal status',
+    schedule: 'Runs {{cron}}',
+    cronEveryMinute: 'every minute',
+    never: 'No cycle has been recorded yet — the result appears here after the next tick.',
+    lastRun: 'Last cycle {{time}}, took {{duration}} ms',
+    unavailable: 'Auto-renewal status is unavailable right now.',
+    metrics: {
+      expired: 'Marked expired',
+      warnings3d: 'Warned (3 days)',
+      warnings1d: 'Warned (1 day)',
+      autopayAttempted: 'Autopay attempted',
+      autopaySucceeded: 'Autopay charged',
+      autopayFailed: 'Autopay failed',
+      autopaySkipped: 'Autopay skipped',
+    },
+    run: 'Run now',
+    running: 'Running…',
+    confirmTitle: 'Run an auto-renewal cycle now?',
+    confirmBody:
+      'This does the same work as the scheduled cycle: it charges saved payment methods for subscriptions that are due, marks expired subscriptions, and sends expiry warnings. It runs immediately, takes as long as it takes, and cannot be undone.',
+    confirmAction: 'Run cycle',
+    ranOk: 'Cycle finished: {{expired}} expired, {{charged}} charged',
+    runFailed: 'Auto-renewal cycle failed',
   },
 } as const;

@@ -44,7 +44,24 @@ export interface PlanDuration {
   readonly prices: ReadonlyArray<{
     readonly id: string
     readonly currency: string
-    readonly price: number
+    /**
+     * MAJOR units as a DECIMAL STRING, which is what the server actually
+     * sends: the column is `Decimal(20, 8)` and `plan-record.util.ts` puts it
+     * through `.toString()`. `"199"` is 199 whole units of `currency` — not
+     * 199 minor units, and not a `number`.
+     *
+     * Declared `string` because `fetchPlans` CASTS the response (`expectArray`)
+     * and transforms nothing, so `number` here was a claim tsc could never
+     * check. It hid a `<` between two strings in the landing preview, where
+     * `"100" < "20"` is true and the "cheapest" duration was whichever one
+     * sorted first as text.
+     *
+     * PARSE AT THE POINT OF USE, and decide there what an unparseable price
+     * means. No boundary-level default is right for every caller: a free plan
+     * and a price this build cannot read are different facts, and
+     * `Number(...) || 0` spells them the same.
+     */
+    readonly price: string
   }>
 }
 
@@ -56,7 +73,28 @@ export interface Plan {
   readonly icon: string | null
   readonly type: string
   readonly availability: string
-  readonly trafficLimit: number
+  /**
+   * Whole gigabytes, or `null` for UNLIMITED.
+   *
+   * Not a theoretical absence: `plans-admin.normalizers.ts` WRITES `null` for
+   * every `DEVICES` and every `UNLIMITED` plan, and the server's own
+   * `AdminPlanInterface` has always declared it `number | null`. While this
+   * side said `number`, the list page's `gb === 0` unlimited branch was
+   * unreachable for exactly the two plan types that ARE unlimited, and every
+   * one of their cards printed the literal text `null GB`.
+   *
+   * `null` and `0` are OPPOSITE encodings and must never be folded together
+   * at the boundary: `null` is unlimited, `0` is a cap of zero gigabytes — no
+   * traffic at all. `?? 0` turns unlimited into its opposite. WHICH of the two
+   * a screen should show is a per-screen decision (the operator list keeps
+   * them apart so a legacy zero is visible; the customer-facing card mirrors
+   * the cabinet, which folds both into unlimited) — make it in the consumer.
+   *
+   * `deviceLimit` below is the OPPOSITE convention on purpose: there `<= 0` IS
+   * the canonical unlimited, matching the panel's own `hwidDeviceLimit: 0`.
+   * Do not harmonise the two.
+   */
+  readonly trafficLimit: number | null
   readonly deviceLimit: number
   readonly trafficLimitStrategy: string
   readonly isActive: boolean

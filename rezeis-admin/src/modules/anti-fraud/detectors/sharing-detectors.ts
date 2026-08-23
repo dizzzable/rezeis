@@ -5,6 +5,7 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 import { RemnawaveNodeInterface } from '../../remnawave/interfaces/remnawave-node.interface';
 import { describeStrictOutcome } from '../../remnawave/interfaces/remnawave-strict-outcome.interface';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
+import { panelIdentityLookup } from '../../remnawave/services/panel-user-address';
 import {
   RemnawaveVersionService,
   type RemnawaveCapabilities,
@@ -28,8 +29,10 @@ import type { NodeFlapEvidence } from './remnawave-detectors';
  *   - HWID over-limit: a user has more *registered devices* than their plan's
  *     `hwidDeviceLimit` (cheap, uses the top-users endpoint).
  *   - Concurrent-IP: a user is connected from more *distinct networks* than
- *     their device limit, at the same time (uses the `ip-control` API that
- *     powers the panel's "Active sessions" view).
+ *     their device limit, at the same time (uses whichever live-connection
+ *     family the panel serves behind its "Active sessions" view —
+ *     `/api/ip-control/*` on 2.8+, `/api/connections/*` on 3.x, picked by the
+ *     adapter from the detected panel shape).
  *
  * Both resolve the Remnawave user to a rezeis user id (via
  * `Subscription.remnawaveId`) for deep-linking, and fail soft so a panel
@@ -463,32 +466,39 @@ export class SharingDetectors {
     if (!config.enableIpSharing) return [];
     // WHY THIS IS NOT `if (!caps.liveIpControl) return []` ANY MORE.
     //
-    // That test has one true answer and three different meanings, and it
-    // reported the same silent nothing for all of them. `liveIpControl` is
-    // `major === 2 && minor >= 8`, so a Remnawave 3.2.1 panel — which serves
-    // live-connection data perfectly well, under `/api/connections/*` — read as
-    // "no live data at all" and logged, at debug, that the panel "lacks mature
-    // ip-control (need 2.8+)". That sentence is false about a 3.x panel: it is
-    // NEWER than 2.8 and it is not missing the capability. What is missing is a
-    // reader on our side, because `fetchUsersIpsForNode` is hard-wired to the
-    // `/api/ip-control/*` family 3.x deleted, and every call to it comes back
-    // 404 → `[]`.
-    //
-    // The capability that actually answers "does this panel have live
-    // connections to look at?" is `connectionsApi !== 'unknown'` — the version
-    // service's own comment says to widen the gate to it once the connections
-    // family is wired up, and the branching lives HERE because that file is not
-    // this change's to edit. So the two questions are asked separately:
+    // That test had one true answer and three different meanings, and it
+    // reported the same silent nothing for all of them. Two questions are
+    // asked separately instead:
     //
     //   • does the panel HAVE live-connection data?  `connectionsApi`
     //   • can this detector READ it?                 `liveIpControl`
     //
     // A "no" to the second is a blind detector whatever the first says, and it
     // now says so out loud instead of returning a clean-looking empty list.
-    // Returning `[]` is still the only safe output — see the class header and
-    // `AntiFraudService`'s `observational` evidence class: an empty run from a
-    // panel-backed detector is no information at all and must never auto-resolve
-    // anybody's open signal.
+    //
+    // WHAT IS TRUE OF A 3.x PANEL TODAY, because this comment used to say the
+    // opposite and read as a live defect report rather than as history. It
+    // stated that `liveIpControl` is `major === 2 && minor >= 8` and that
+    // `fetchUsersIpsForNode` "is hard-wired to the `/api/ip-control/*` family
+    // 3.x deleted", so every call 404s. Both halves are now false, and a reader
+    // who believes them concludes this detector is dead on the operator's 3.3.2
+    // panel — which would mean either "fixing" working code or discounting a
+    // real signal:
+    //
+    //   • `liveIpControl` is `major === 3 || (major === 2 && minor >= 8)`, so a
+    //     3.x panel reports TRUE;
+    //   • the adapter reads both families and picks by the DETECTED PANEL
+    //     SHAPE — `fetchUsersIpsForNode`, `fetchUserIps` and `dropConnections`
+    //     each branch on `connectionsApi`, taking `/api/connections/*` on 3.x
+    //     and `/api/ip-control/*` on 2.8+.
+    //
+    // So on 3.x this detector runs, and the blindness classifier below has no
+    // `connections` branch left to take — see the note there.
+    //
+    // Returning `[]` is still the only safe output when it IS blind — see the
+    // class header and `AntiFraudService`'s `observational` evidence class: an
+    // empty run from a panel-backed detector is no information at all and must
+    // never auto-resolve anybody's open signal.
     const caps = await this.versionService.getCapabilities();
     const blindness = classifyLiveConnectionBlindness(caps);
     if (blindness !== null) {
@@ -1041,53 +1051,69 @@ export class SharingDetectors {
   }
 
   /**
-   * Resolve Remnawave subscription UUIDs to the local subscription facts both
+   * Resolve the panel's own identities to the local subscription facts both
    * detectors need: the rezeis user id (for the deep link) and the
    * limit-reduction pair `deviceLimitReducedAt` / `deviceLimitBeforeReduction`
    * (for the downgrade grace in
    * {@link SharingDetectors.detectHwidOverage}). Returns only the ones we can
-   * map — an unmapped uuid is judged exactly as before, with no grace, because
-   * "we have no row for this panel user" is not evidence of a downgrade.
+   * map — an unmapped identity is judged exactly as before, with no grace,
+   * because "we have no row for this panel user" is not evidence of a
+   * downgrade.
    *
-   * `remnawaveId` is not unique in the schema, so a uuid can in principle match
-   * more than one row. The LATEST reduction wins: the grace exists to stop a
-   * false accusation, and between two rows that disagree the one that would
-   * suppress is the safe answer. The winning row is taken WHOLE — timestamp and
-   * ceiling together — because a ceiling read off a different row than the
-   * timestamp gating it describes a reduction that never happened.
+   * MATCHED ON BOTH ANGLES, via {@link panelIdentityLookup}. The identities
+   * arriving here are whatever the panel calls its users: 2.x uuids, or 3.x
+   * decimals. A subscription linked during the 2.x era stores the uuid in
+   * `remnawaveId` and keeps it after the operator upgrades, so on a 3.x panel
+   * `remnawaveId IN (…)` misses that whole population — and the miss does not
+   * merely blank the deep link, it withholds the downgrade grace and flags a
+   * customer who legitimately reduced their plan. The helper carries the two
+   * bounds that keep the numeric angle safe (digits-only, safe integer, and no
+   * arm at all when the numeric list is empty).
+   *
+   * Neither column is unique in the schema, so an identity can in principle
+   * match more than one row. The LATEST reduction wins: the grace exists to
+   * stop a false accusation, and between two rows that disagree the one that
+   * would suppress is the safe answer. The winning row is taken WHOLE —
+   * timestamp and ceiling together — because a ceiling read off a different row
+   * than the timestamp gating it describes a reduction that never happened.
    */
   private async resolveSubscriptions(
-    uuids: readonly string[],
+    identities: readonly string[],
   ): Promise<Map<string, SubscriptionFacts>> {
-    const unique = [...new Set(uuids)].filter((u) => u.length > 0);
     const map = new Map<string, SubscriptionFacts>();
-    if (unique.length === 0) return map;
+    const lookup = panelIdentityLookup(identities);
+    if (lookup === null) return map;
     const rows = await this.prismaService.subscription.findMany({
-      where: { remnawaveId: { in: unique } },
+      where: lookup.where,
       select: {
         remnawaveId: true,
+        remnawavePanelId: true,
         userId: true,
         deviceLimitReducedAt: true,
         deviceLimitBeforeReduction: true,
       },
     });
     for (const row of rows) {
-      if (!row.remnawaveId) continue;
-      const existing = map.get(row.remnawaveId);
       const candidate: SubscriptionFacts = {
         userId: row.userId,
         deviceLimitReducedAt: row.deviceLimitReducedAt ?? null,
         deviceLimitBeforeReduction: row.deviceLimitBeforeReduction ?? null,
       };
-      if (
-        existing !== undefined &&
-        existing.deviceLimitReducedAt !== null &&
-        (candidate.deviceLimitReducedAt === null ||
-          candidate.deviceLimitReducedAt <= existing.deviceLimitReducedAt)
-      ) {
-        continue;
+      // Keyed by the identity the CALLER asked about, not by `row.remnawaveId`:
+      // on a 3.x panel those are different strings for the same profile, and
+      // keying by the row would re-lose the match the widened `where` recovered.
+      for (const key of lookup.keysFor(row)) {
+        const existing = map.get(key);
+        if (
+          existing !== undefined &&
+          existing.deviceLimitReducedAt !== null &&
+          (candidate.deviceLimitReducedAt === null ||
+            candidate.deviceLimitReducedAt <= existing.deviceLimitReducedAt)
+        ) {
+          continue;
+        }
+        map.set(key, candidate);
       }
-      map.set(row.remnawaveId, candidate);
     }
     return map;
   }
@@ -1126,8 +1152,13 @@ interface LiveConnectionBlindness {
 function classifyLiveConnectionBlindness(
   caps: Pick<RemnawaveCapabilities, 'liveIpControl' | 'connectionsApi' | 'version'>,
 ): LiveConnectionBlindness | null {
-  // The only family the adapter can currently read is `ip-control`, and only
-  // from 2.8 up. Everything else is blind, in one of three distinguishable ways.
+  // `liveIpControl` is "this build can read live connections from this panel",
+  // and the adapter backs that with BOTH families — `ip-control/*` from 2.8 up,
+  // `connections/*` on 3.x — chosen by the detected panel shape. This line used
+  // to read "the only family the adapter can currently read is `ip-control`,
+  // and only from 2.8 up", which the note a dozen lines below already
+  // contradicts: that window closed when the connections reader landed.
+  // Everything else is blind, in one of the two ways the union above names.
   if (caps.liveIpControl) return null;
   const panel =
     typeof caps.version === 'string' && caps.version.length > 0

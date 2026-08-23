@@ -1,9 +1,31 @@
-import { ConflictException, Injectable, Logger, OnModuleInit } from '@nestjs/common';
-import { AdminWebPushSubscription, WebPushSubscription } from '@prisma/client';
+import { ConflictException, Inject, Injectable, Logger, OnModuleInit, Optional } from '@nestjs/common';
+import { ConfigType } from '@nestjs/config';
+import { AdminWebPushSubscription, Prisma, WebPushSubscription } from '@prisma/client';
 import * as webpush from 'web-push';
 
+import { appConfig } from '../../../common/config/app.config';
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import {
+  EVENT_TYPES,
+  SystemEventsService,
+} from '../../../common/services/system-events.service';
+import { readJsonObject } from '../../../common/utils/read-json-object.util';
 import { SettingsService } from '../../settings/services/settings.service';
+import { encryptTotpSecret } from '../../two-factor/utils/secret-cipher';
+
+/**
+ * Outcome of the one-time `VAPID_*` env→panel migration.
+ *
+ * `absent` and `already-migrated` are both "nothing to do", but they are not
+ * the same state to an operator and must not be collapsed: `already-migrated`
+ * means the `VAPID_*` variables are still sitting in `.env` and are now inert,
+ * and telling them to delete those is the last step of the migration.
+ */
+type LegacyEnvAdoption =
+  | { readonly outcome: 'adopted' }
+  | { readonly outcome: 'absent' }
+  | { readonly outcome: 'already-migrated' }
+  | { readonly outcome: 'failed'; readonly reason: string };
 
 interface SubscribeInput {
   readonly userId: string;
@@ -27,6 +49,24 @@ interface AdminSendInput {
   readonly body: string;
   /** URL the SPA navigates to when the admin taps the notification. */
   readonly url?: string;
+}
+
+/**
+ * What one user-scoped fanout actually did. `sendToUser` used to return
+ * `void`, which is why "push doesn't work" could not be answered from the
+ * operator's seat: a disabled deployment, a user with no browser registered,
+ * and a push service rejecting every endpoint were all the same silence.
+ * Each is a different thing to tell the operator, so each gets a field.
+ */
+export interface WebPushSendResult {
+  /** Subscriptions this fanout tried. Zero ⇒ the user has no browser bound. */
+  readonly attempted: number;
+  /** Subscriptions the push service accepted. */
+  readonly delivered: number;
+  /** Subscriptions that failed — transient, or pruned as permanently gone. */
+  readonly failed: number;
+  /** True when no VAPID keypair is configured, so nothing was attempted. */
+  readonly disabled: boolean;
 }
 
 interface SendInput {
@@ -68,11 +108,32 @@ interface PushSubscriptionPayload {
  * notifications out to them via the standardised Web Push protocol
  * (RFC 8030 + VAPID RFC 8292).
  *
- * VAPID keys (`VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`,
- * `VAPID_CONTACT_EMAIL`) are generated once with
- * `npx web-push generate-vapid-keys` and pinned to the deployment;
- * rotating them invalidates every existing subscription, so we
- * intentionally don't auto-rotate.
+ * VAPID keys are generated and stored IN THE PANEL — Settings → Web-push —
+ * and nowhere else. The private half is encrypted at rest
+ * (`systemNotifications.webPush.privateKeyEnc`). Rotating the pair
+ * invalidates every existing subscription, so nothing auto-rotates.
+ *
+ * `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` / `VAPID_CONTACT_EMAIL` are a
+ * MIGRATION SOURCE, not a configuration surface, and `adoptLegacyEnvKeys`
+ * below is the only place in the product that reads them. Nothing serves from
+ * them: `SettingsService.getDecryptedWebPushConfig` resolves the panel store
+ * and returns `null` when it is empty. Adoption copies the key material
+ * verbatim rather than generating a fresh pair, which is the whole point:
+ * every browser subscription out there is bound to the old public key, and a
+ * new pair would silently strand all of them. The panel can only GENERATE a
+ * pair (`SettingsService.generateWebPushKeys`) — there is no paste path — so
+ * adoption is the only migration that keeps subscribers.
+ *
+ * Because there is no fallback left, adoption failing is now the difference
+ * between a deployment that delivers push and one that does not. It is never
+ * allowed to fail QUIETLY: `onModuleInit` emits
+ * `EVENT_TYPES.SYSTEM_WEB_PUSH_UNCONFIGURED` through `SystemEventsService`, at
+ * ERROR when legacy keys are sitting in the environment unadopted (the
+ * operator believes push is configured and it is not) and at WARNING when
+ * nothing is configured anywhere. That reaches the audit log, the realtime
+ * admin stream and the operator's Telegram card — not just a container log
+ * line nobody reads, which is what "silently" meant the last time this
+ * removal was attempted and deferred.
  *
  * iOS 16.4+ note: web-push delivery on Safari only works for PWAs
  * that the user added to the Home Screen. Reiwa is already a PWA
@@ -99,27 +160,255 @@ export class WebPushService implements OnModuleInit {
   private static readonly ENDPOINT_HELD_BY_ANOTHER_ADMIN =
     'This browser subscription is already registered to another administrator';
 
+  /**
+   * The OTHER 409 this route can answer with, and the reason it needs a name.
+   *
+   * `subscribeAdmin` refuses twice at the same status, for opposite reasons.
+   * One is lasting — another admin holds the row and no retry clears it. This
+   * one is a race that did not settle: every INSERT collided with a row that
+   * had already been deleted by the time it was read back. Nothing is wrong
+   * with the caller's browser and the next attempt normally succeeds.
+   *
+   * Collapsed into one untyped 409 the client can only report the lasting one,
+   * because that is the only one it can name — which is exactly what happened:
+   * `isEndpointTaken` in `web/src/lib/push.ts` mapped every 409 here to
+   * "registered to another administrator", the toggle stayed off, and the
+   * operator was sent looking for an administrator who held nothing.
+   *
+   * PUBLIC because two other files have to agree with it by name: the
+   * allowlist in `admin-safe-exception.filter.ts` (which restates it as a
+   * literal, so that adding a code here can never widen the allowlist by
+   * itself) and the SPA branch that reads it off the wire.
+   */
+  public static readonly ENDPOINT_RACE_UNSETTLED_CODE = 'PUSH_SUBSCRIBE_ENDPOINT_RACE_UNSETTLED';
+
+  /**
+   * The sentence that rides beside the code, for a client build that does not
+   * know the code yet.
+   *
+   * Every word is checked against the scrub in `admin-safe-exception.filter.ts`
+   * (`SENSITIVE_HTTP_TEXT_PATTERNS`): one occurrence of `profile`, `token`,
+   * `secret`, a URL, an address or a uuid and the whole message is replaced
+   * with "Request failed", which tells the operator nothing and hides the one
+   * instruction that matters — that trying again is worth doing.
+   */
+  public static readonly ENDPOINT_RACE_UNSETTLED_MESSAGE =
+    'This browser could not be registered because a competing change landed mid-request. Try again.';
+
+  /**
+   * How many times `subscribeAdmin` will play its two-step write out before it
+   * gives up on a race.
+   *
+   * THREE, and the number matters less than what it is a bound ON. The retry
+   * is reachable from ONE branch: the unique violation was read back and there
+   * was NO ROW AT ALL. A genuinely held endpoint is a row that is present and
+   * foreign, which leaves the loop on the spot — so no amount of retrying can
+   * be spent pressing a refusal that will not move. What remains is the
+   * pathological case where something takes and releases the endpoint around
+   * every attempt, and a constant is what keeps that from becoming a request
+   * that never returns.
+   */
+  public static readonly ADMIN_SUBSCRIBE_ATTEMPTS = 3;
+
   public constructor(
     private readonly prismaService: PrismaService,
     private readonly settingsService: SettingsService,
+    /**
+     * Supplies `cryptKey` for the one-time env→panel adoption below. Last and
+     * `@Optional()` so every positional construction in the specs keeps
+     * working; absent, adoption cannot encrypt the private half and the
+     * deployment is reported as unconfigured rather than quietly half-migrated.
+     */
+    @Optional()
+    @Inject(appConfig.KEY)
+    private readonly applicationConfiguration?: ConfigType<typeof appConfig>,
+    /**
+     * The loud half. `@Optional()` for the same positional-construction
+     * reason, but a deployment that resolves it gets the unconfigured state in
+     * the audit log, the realtime stream and the operator's Telegram card
+     * instead of one `logger.warn` in a container nobody is tailing.
+     */
+    @Optional()
+    private readonly systemEvents?: SystemEventsService,
   ) {}
 
   public async onModuleInit(): Promise<void> {
-    const config = await this.settingsService.getDecryptedWebPushConfig();
-    if (config === null) {
-      this.logger.warn(
-        'WebPushService disabled — generate VAPID keys in the admin panel (Settings → Web-push) or set VAPID_PUBLIC_KEY/VAPID_PRIVATE_KEY/VAPID_CONTACT_EMAIL',
+    if ((await this.settingsService.getDecryptedWebPushConfig()) !== null) {
+      this.logger.log('WebPushService VAPID configured (source: panel)');
+      return;
+    }
+    const adoption = await this.adoptLegacyEnvKeys();
+    if (adoption.outcome === 'adopted') {
+      this.logger.log(
+        'WebPushService adopted VAPID_PUBLIC_KEY/VAPID_PRIVATE_KEY from the environment into the panel ' +
+          '(Settings → Web-push). The same keypair was kept, so every existing browser subscription still ' +
+          'works. You can now remove VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY and VAPID_CONTACT_EMAIL from .env.',
       );
       return;
     }
-    this.logger.log(`WebPushService VAPID configured (source: ${config.source})`);
+    this.announceUnconfigured(adoption);
+  }
+
+  /**
+   * One-time migration of `VAPID_*` environment keys into the panel store, and
+   * THE ONLY READER of those three variables left in the product.
+   *
+   * Deliberately copies the key material instead of generating a new pair.
+   * Every `WebPushSubscription` row out there was created by a browser against
+   * the OLD public key; a new pair does not re-bind them, it strands them, and
+   * they only come back when each subscriber's browser re-subscribes. Copying
+   * keeps every one of them working across the upgrade, which is the whole
+   * reason this runs at all rather than just refusing the env path.
+   *
+   * Runs at most once per deployment, not once per boot. `webPushEnvAdoptedAt`
+   * records that the migration happened, and it is checked BEFORE the keys are
+   * read, because the panel store being empty is not proof the migration is
+   * still owed: an operator who clicks "Remove keys" empties it deliberately.
+   * Without the marker the next container restart would re-adopt the `.env`
+   * pair and turn push back on behind them — an operator action silently
+   * undone by a restart, which is worse than the fallback this replaced.
+   *
+   * Both containers run this (`worker.ts` loads the full `AppModule`), so two
+   * processes can race here on the same boot. The re-read inside the
+   * transaction is what makes that safe, and the loser reports `adopted`
+   * because the panel does now hold keys — which is the only thing the caller
+   * is asking about.
+   */
+  private async adoptLegacyEnvKeys(): Promise<LegacyEnvAdoption> {
+    // Environment first, deliberately: on a deployment that never used the
+    // `.env` route — which is now every new one — this returns without going
+    // near the database, so the migration costs nothing on every boot forever.
+    const publicKey = (process.env.VAPID_PUBLIC_KEY ?? '').trim();
+    const privateKey = (process.env.VAPID_PRIVATE_KEY ?? '').trim();
+    const contactEmail = (process.env.VAPID_CONTACT_EMAIL ?? '').trim();
+    if (publicKey.length === 0 || privateKey.length === 0) {
+      return { outcome: 'absent' };
+    }
+    const settings = await this.prismaService.settings.findFirst({ orderBy: { id: 'asc' } });
+    if (settings !== null && readJsonObject(settings.systemNotifications).webPushEnvAdoptedAt) {
+      return { outcome: 'already-migrated' };
+    }
+    const cryptKey = this.applicationConfiguration?.cryptKey;
+    if (cryptKey === undefined || cryptKey === null || cryptKey.length === 0) {
+      return {
+        outcome: 'failed',
+        reason:
+          'REZEIS_CRYPT_KEY is unset, so the private key cannot be encrypted at rest. ' +
+          'Set REZEIS_CRYPT_KEY and restart to complete the migration.',
+      };
+    }
+    if (settings === null) {
+      return {
+        outcome: 'failed',
+        reason:
+          'no settings row exists yet to move them into. Restart once the panel has been ' +
+          'initialised, or generate a fresh keypair in Settings → Web-push.',
+      };
+    }
+    try {
+      return await this.prismaService.$transaction(async (tx): Promise<LegacyEnvAdoption> => {
+        // Re-read inside the transaction. Settings is a singleton JSON column
+        // that several features share (`botTokenEnc`, telegram delivery, the
+        // notification toggles); a stale copy written back wholesale would
+        // drop whichever of them changed since. Spreading the row we just read
+        // preserves every sibling key — the same shape `persistWebPush` uses.
+        const existing = await tx.settings.findFirst({ orderBy: { id: 'asc' } });
+        if (existing === null) {
+          return { outcome: 'failed', reason: 'the settings row disappeared mid-migration' };
+        }
+        const nextSystemNotifications = readJsonObject(existing.systemNotifications);
+        if (nextSystemNotifications.webPushEnvAdoptedAt) {
+          return { outcome: 'already-migrated' };
+        }
+        if (readJsonObject(nextSystemNotifications.webPush).publicKey !== undefined) {
+          // Someone configured the panel between our read and this write.
+          // Theirs wins: it is the newer intent, and overwriting it would
+          // strand the subscriptions their key already has. Push is on, which
+          // is what the caller needs to know.
+          return { outcome: 'adopted' };
+        }
+        nextSystemNotifications.webPush = {
+          publicKey,
+          privateKeyEnc: encryptTotpSecret(privateKey, cryptKey),
+          contactEmail: contactEmail.replace(/^mailto:/i, ''),
+        };
+        nextSystemNotifications.webPushEnvAdoptedAt = new Date().toISOString();
+        await tx.settings.update({
+          where: { id: existing.id },
+          data: { systemNotifications: nextSystemNotifications as Prisma.InputJsonValue },
+        });
+        return { outcome: 'adopted' };
+      });
+    } catch (err: unknown) {
+      return {
+        outcome: 'failed',
+        reason: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  /**
+   * Say — everywhere an operator actually looks — that web-push cannot deliver.
+   *
+   * Two severities, because the two states need different reactions:
+   *
+   *   - `failed` — the three `VAPID_*` variables ARE set and could not be
+   *     moved into the panel. Until the `.env` fallback was removed this state
+   *     still delivered push, so an operator upgrading into it sees push stop
+   *     while every sign they have (the variables are right there in `.env`)
+   *     says it should work. ERROR.
+   *   - anything else — no keys anywhere, or the migration already ran and the
+   *     operator has since cleared the panel entry on purpose. Push being off
+   *     is a legitimate configuration. WARNING.
+   *
+   * Emitted on every boot, from both the api and the worker container, and
+   * that duplication is deliberate: this is the one signal standing between a
+   * dead push channel and nobody noticing, and a boot is a rare enough event
+   * that two audit rows cost nothing. Do not "de-duplicate" it into silence.
+   */
+  private announceUnconfigured(adoption: LegacyEnvAdoption): void {
+    const stranded = adoption.outcome === 'failed';
+    const reason = stranded ? adoption.reason.replace(/\.?$/, '.') : '';
+    const message = stranded
+      ? `Web-push is DISABLED: VAPID keys are set in the environment but could not be migrated ` +
+        `into the panel — ${reason} The environment variables are no longer read at ` +
+        `send time, so every push is a no-op until this succeeds or you generate a keypair in ` +
+        `Settings → Web-push (which invalidates existing browser subscriptions).`
+      : 'Web-push is DISABLED: no VAPID keypair is configured. Generate one in the admin panel ' +
+        '(Settings → Web-push). Until then every web-push send is a no-op.';
+    if (stranded) this.logger.error(message);
+    else this.logger.warn(message);
+    this.systemEvents?.emit({
+      type: EVENT_TYPES.SYSTEM_WEB_PUSH_UNCONFIGURED,
+      category: 'SYSTEM',
+      severity: stranded ? 'ERROR' : 'WARNING',
+      message,
+      metadata: {
+        legacyEnvKeysStranded: stranded,
+        adoption: adoption.outcome,
+        ...(adoption.outcome === 'failed' ? { reason: adoption.reason } : {}),
+      },
+    });
+  }
+
+  /** True when a VAPID keypair resolves, i.e. web-push can deliver at all. */
+  public async isConfigured(): Promise<boolean> {
+    return (await this.settingsService.getDecryptedWebPushConfig()) !== null;
+  }
+
+  /**
+   * How many browsers this user has bound. Zero means a web-push send is a
+   * guaranteed no-op — the fact an operator needs BEFORE choosing the channel,
+   * not after the send silently did nothing.
+   */
+  public async countSubscriptions(userId: string): Promise<number> {
+    return this.prismaService.webPushSubscription.count({ where: { userId } });
   }
 
   /**
    * Returns the active VAPID public key for the SPA to use during
    * subscription. Empty string when push is disabled — the SPA must hide
-   * its push opt-in UI in that case. Resolves panel-managed keys first,
-   * then the environment fallback.
+   * its push opt-in UI in that case. Panel-managed keys are the only source.
    */
   public async getPublicKey(): Promise<string> {
     const config = await this.settingsService.getDecryptedWebPushConfig();
@@ -156,8 +445,8 @@ export class WebPushService implements OnModuleInit {
    *     signed in is who that browser's push belongs to.
    *
    * And it self-corrects, which the admin side did not: the cabinet calls
-   * `ensurePushSubscription()` once per session on every sign-in
-   * (`reiwa/web/src/components/layout/stealth-layout.tsx:164`), so the row
+   * `ensurePushSubscription()` once per session on every sign-in (the call in
+   * `reiwa/web/src/components/layout/stealth-layout.tsx`), so the row
    * follows whoever signed in last. Refusing here — the admin fix — would
    * instead leave the second person on a shared machine with no push at all
    * until the first one's row is removed. That is a regression in the only
@@ -208,19 +497,32 @@ export class WebPushService implements OnModuleInit {
    * 404 Not Found responses delete the subscription immediately
    * (those endpoints will never recover).
    */
-  public async sendToUser(input: SendInput): Promise<void> {
+  public async sendToUser(input: SendInput): Promise<WebPushSendResult> {
     const vapidDetails = await this.resolveVapidDetails();
-    if (vapidDetails === null) return;
+    if (vapidDetails === null) {
+      return { attempted: 0, delivered: 0, failed: 0, disabled: true };
+    }
     const subs = await this.prismaService.webPushSubscription.findMany({
       where: { userId: input.userId },
     });
-    if (subs.length === 0) return;
+    if (subs.length === 0) {
+      return { attempted: 0, delivered: 0, failed: 0, disabled: false };
+    }
     const payload = JSON.stringify({
       title: input.title,
       body: input.body,
       url: input.url ?? '/dashboard',
     });
-    await Promise.all(subs.map((sub) => this.deliverOne(sub, payload, vapidDetails)));
+    const outcomes = await Promise.all(
+      subs.map((sub) => this.deliverOne(sub, payload, vapidDetails)),
+    );
+    const delivered = outcomes.filter((ok) => ok).length;
+    return {
+      attempted: subs.length,
+      delivered,
+      failed: subs.length - delivered,
+      disabled: false,
+    };
   }
 
   // ── Admin-scoped push (panel operators) ───────────────────────────────────
@@ -230,7 +532,9 @@ export class WebPushService implements OnModuleInit {
    *
    * Every write here is scoped to the caller, and that is the whole point.
    * The previous `upsert({ where: { endpoint } })` was not: `endpoint` is
-   * globally `@unique` (`prisma/schema.prisma:2343`), so its update branch
+   * globally `@unique` on `AdminWebPushSubscription` in `prisma/schema.prisma`
+   * (the ADMIN table — `WebPushSubscription` is the subscriber one and carries
+   * its own separate `endpoint @unique`), so its update branch
    * re-pointed whichever row already held the endpoint at the caller. An
    * endpoint is not a secret — it sits in the table in plaintext next to
    * `userAgent` and reaches any log that records request bodies — so an admin
@@ -253,10 +557,39 @@ export class WebPushService implements OnModuleInit {
    *      this fix needs no migration — the constraint that caused the damage
    *      through `upsert` is the constraint that now enforces ownership.
    *
-   * A unique violation is therefore one of two things, and the row itself —
-   * never the caller's claim — decides which: our own concurrent request won
-   * the insert (two tabs re-subscribing at once, which is not a conflict), or
-   * another admin holds the endpoint (refused, 409, and logged with both ids).
+   * A unique violation is one of THREE things, and the row itself — never the
+   * caller's claim — decides which:
+   *
+   *   a. our own concurrent request won the insert (two tabs re-subscribing at
+   *      once). Not a conflict: refresh and report success.
+   *   b. another admin holds the endpoint. Refused, 409, logged with both ids,
+   *      and refused ONCE — see the bound below.
+   *   c. the blocking row has already gone by the time we read it back (an
+   *      unsubscribe or a fanout prune landing in the same window). Nothing is
+   *      wrong and nothing is held: the write is simply played again.
+   *
+   * (c) used to be refused with the SAME 409 as (b), and the two were told
+   * apart in the log but not on the wire. The SPA reads 409 on this route as
+   * "another admin holds this browser" (`web/src/lib/push.ts` — and it could
+   * read it no other way), so a transient race told the operator their own
+   * browser belonged to somebody else, left the toggle off, and hid the one
+   * fact that mattered: a retry would have worked.
+   *
+   * So (c) retries, HERE, bounded by {@link ADMIN_SUBSCRIBE_ATTEMPTS}, and
+   * normally succeeds on the next pass with no error reaching anybody. Two
+   * separate things keep that from becoming a loop, and the second is the one
+   * worth stating:
+   *
+   *   - the attempt budget is a constant, so even endless churn terminates;
+   *   - the retry is reachable from ONE branch — the read-back found NO ROW AT
+   *     ALL. A genuinely held endpoint is a row that is present and foreign,
+   *     and that leaves the loop on the spot. No retry can ever be spent
+   *     pressing a refusal that will not move.
+   *
+   * Only a budget exhausted entirely on (c) refuses, and then with
+   * {@link ENDPOINT_RACE_UNSETTLED_CODE} rather than (b)'s sentence, so the
+   * client can say "try again" instead of naming an owner that does not exist.
+   *
    * Refusing is the deliberate choice over silently replacing: replacing keeps
    * the victim's loss of push, only with a log line next to it, whereas a
    * refusal leaves their row exactly as it was. The one honest subscription it
@@ -270,51 +603,74 @@ export class WebPushService implements OnModuleInit {
    * operator uses the toggle their only evidence is the warn logged below.
    */
   public async subscribeAdmin(input: AdminSubscribeInput): Promise<{ id: string }> {
-    const refreshed = await this.refreshOwnAdminSubscription(input);
-    if (refreshed !== null) return refreshed;
+    for (let attempt = 1; attempt <= WebPushService.ADMIN_SUBSCRIBE_ATTEMPTS; attempt += 1) {
+      // Re-read on every pass, not just the first. A retry follows a window in
+      // which rows appeared and vanished, and one of the things that may have
+      // appeared is the caller's OWN row — inserted by their second tab while
+      // this request was losing its race.
+      const refreshed = await this.refreshOwnAdminSubscription(input);
+      if (refreshed !== null) return refreshed;
 
-    try {
-      return await this.prismaService.adminWebPushSubscription.create({
-        data: {
-          adminId: input.adminId,
-          endpoint: input.endpoint,
-          p256dhKey: input.p256dhKey,
-          authKey: input.authKey,
-          userAgent: input.userAgent ?? null,
-        },
-        select: { id: true },
-      });
-    } catch (err: unknown) {
-      // `id` is a client-generated cuid, so `endpoint` is the only unique this
-      // INSERT can violate — no need to read the constraint name back out.
-      if (!isUniqueConstraintViolation(err)) throw err;
-      const incumbent = await this.prismaService.adminWebPushSubscription.findUnique({
-        where: { endpoint: input.endpoint },
-        select: { id: true, adminId: true },
-      });
-      if (incumbent !== null && incumbent.adminId === input.adminId) {
-        // Our own row, inserted by a concurrent request in the window between
-        // the scoped `updateMany` above and this `create`. Re-subscribing the
-        // same browser twice is not a conflict: refresh and report success.
-        return (await this.refreshOwnAdminSubscription(input)) ?? { id: incumbent.id };
-      }
-      if (incumbent === null) {
-        // The blocking row disappeared between our failed INSERT and this read
-        // (an unsubscribe, or the fanout pruning it). Refuse rather than
-        // looping back to `create`: the browser retries on its next load and
-        // lands on a clean insert, whereas retrying in place is how this path
-        // would start recursing.
-        this.logger.warn(
-          `WebPush(admin): subscribe for admin ${input.adminId} lost an insert race to a row that no longer exists`,
-        );
-      } else {
+      try {
+        return await this.prismaService.adminWebPushSubscription.create({
+          data: {
+            adminId: input.adminId,
+            endpoint: input.endpoint,
+            p256dhKey: input.p256dhKey,
+            authKey: input.authKey,
+            userAgent: input.userAgent ?? null,
+          },
+          select: { id: true },
+        });
+      } catch (err: unknown) {
+        // `id` is a client-generated cuid, so `endpoint` is the only unique this
+        // INSERT can violate — no need to read the constraint name back out.
+        if (!isUniqueConstraintViolation(err)) throw err;
+        const incumbent = await this.prismaService.adminWebPushSubscription.findUnique({
+          where: { endpoint: input.endpoint },
+          select: { id: true, adminId: true },
+        });
+        if (incumbent === null) {
+          // The blocking row disappeared between our failed INSERT and this
+          // read (an unsubscribe, or the fanout pruning it). Nobody holds this
+          // endpoint, so there is nothing to refuse: play the write again.
+          // This is the ONLY branch that continues the loop, which is what
+          // makes the bound safe — see the note above the method.
+          this.logger.warn(
+            `WebPush(admin): subscribe for admin ${input.adminId} lost an insert race to a row ` +
+              `that no longer exists (attempt ${attempt} of ${WebPushService.ADMIN_SUBSCRIBE_ATTEMPTS})`,
+          );
+          continue;
+        }
+        if (incumbent.adminId === input.adminId) {
+          // Our own row, inserted by a concurrent request in the window between
+          // the scoped `updateMany` above and this `create`. Re-subscribing the
+          // same browser twice is not a conflict: refresh and report success.
+          return (await this.refreshOwnAdminSubscription(input)) ?? { id: incumbent.id };
+        }
+        // Present, and somebody else's. Refused on the first sight of it: this
+        // is the state no retry can improve, and pressing it again would only
+        // spend the budget saying the same thing three times.
         this.logger.warn(
           `WebPush(admin): refused subscribe for admin ${input.adminId} — endpoint is bound to ` +
             `admin ${incumbent.adminId} (subscription ${incumbent.id})`,
         );
+        throw new ConflictException(WebPushService.ENDPOINT_HELD_BY_ANOTHER_ADMIN);
       }
-      throw new ConflictException(WebPushService.ENDPOINT_HELD_BY_ANOTHER_ADMIN);
     }
+
+    // Every attempt collided, and every read-back found the collision already
+    // gone. Refused with its own code so the client says "try again" instead of
+    // naming an owner that, on the evidence, does not exist.
+    this.logger.warn(
+      `WebPush(admin): subscribe for admin ${input.adminId} gave up after ` +
+        `${WebPushService.ADMIN_SUBSCRIBE_ATTEMPTS} attempts — every insert race was lost to a ` +
+        `row that had already gone`,
+    );
+    throw new ConflictException({
+      code: WebPushService.ENDPOINT_RACE_UNSETTLED_CODE,
+      message: WebPushService.ENDPOINT_RACE_UNSETTLED_MESSAGE,
+    });
   }
 
   /**
@@ -426,7 +782,7 @@ export class WebPushService implements OnModuleInit {
     sub: WebPushSubscription,
     payload: string,
     vapidDetails: webpush.RequestOptions['vapidDetails'],
-  ): Promise<void> {
+  ): Promise<boolean> {
     const target: PushSubscriptionPayload = {
       endpoint: sub.endpoint,
       keys: { p256dh: sub.p256dhKey, auth: sub.authKey },
@@ -438,6 +794,7 @@ export class WebPushService implements OnModuleInit {
         where: { id: sub.id },
         data: { failureCount: 0, lastSeenAt: new Date() },
       });
+      return true;
     } catch (err: unknown) {
       const status =
         err !== null && typeof err === 'object' && 'statusCode' in err
@@ -448,14 +805,14 @@ export class WebPushService implements OnModuleInit {
         // uninstalled, push service rotated identifiers). Drop it.
         await this.prismaService.webPushSubscription.delete({ where: { id: sub.id } });
         this.logger.log(`WebPush: deleted dead subscription ${sub.id} (${status})`);
-        return;
+        return false;
       }
       // Transient — bump counter, evict if we hit the threshold.
       const next = sub.failureCount + 1;
       if (next >= WebPushService.MAX_FAILURES) {
         await this.prismaService.webPushSubscription.delete({ where: { id: sub.id } });
         this.logger.warn(`WebPush: evicted ${sub.id} after ${next} consecutive failures`);
-        return;
+        return false;
       }
       await this.prismaService.webPushSubscription.update({
         where: { id: sub.id },
@@ -464,6 +821,7 @@ export class WebPushService implements OnModuleInit {
       this.logger.warn(
         `WebPush: send failed for ${sub.id} (${status ?? 'unknown'}), failureCount=${next}`,
       );
+      return false;
     }
   }
 }

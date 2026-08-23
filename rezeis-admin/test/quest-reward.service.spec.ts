@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { QuestRewardService } from '../src/modules/quests/services/quest-reward.service';
+import { resolveInheritedPlanLimitUpdate } from '../src/modules/subscriptions/services/plan-inherited-limits.util';
 
 /** Build a QuestRewardService over a configurable in-memory prisma double. */
 function makeService(cfg: {
@@ -27,6 +28,7 @@ function makeService(cfg: {
     completionUpdateMany: [],
     questUpdateMany: [],
     syncEnqueue: [],
+    subLock: [],
   };
 
   const tx = {
@@ -71,6 +73,13 @@ function makeService(cfg: {
         calls.questUpdateMany.push(a);
         return { count: cfg.budgetCount ?? 1 };
       },
+    },
+    // The TRAFFIC payout writes an ABSOLUTE traffic limit (the snapshot beside
+    // it is JSON and cannot be incremented), so it takes the same `FOR UPDATE`
+    // row lock the promocode and referral top-ups take.
+    $queryRaw: async (a: unknown) => {
+      calls.subLock.push(a);
+      return [];
     },
   };
 
@@ -258,6 +267,82 @@ describe('QuestRewardService', () => {
     assert.equal(result.subscriptionId, 'sub-1');
     assert.equal(calls.subUpdate.length, 1);
     assert.equal(calls.syncEnqueue.length, 1);
+  });
+
+  // ── TRAFFIC: a bonus for THIS period, not a permanent limit raise ────────
+  //
+  // The payout used to be a bare `trafficLimit: { increment }` with no snapshot
+  // write. `resolveInheritedPlanLimitUpdate`
+  // (`subscriptions/services/plan-inherited-limits.util.ts`) reads a column that
+  // disagrees with `plan_snapshot` as an OPERATOR OVERRIDE and preserves it, so
+  // a quest top-up survived every renewal for the rest of the subscription's
+  // life — a permanent extra granted by a raw column bump that routes around
+  // `SubscriptionEffectiveProjection`, which is where a genuinely PURCHASED
+  // permanent extra belongs. The owner ruled on this class for the promocode
+  // and referral paths; this is the same rule.
+  it('grants a TRAFFIC top-up that the next renewal resets to the plan', async () => {
+    const planSnapshot = {
+      id: 'plan-1',
+      name: 'Plan',
+      tag: null,
+      type: 'STANDARD',
+      icon: null,
+      trafficLimit: 100,
+      deviceLimit: 3,
+      trafficLimitStrategy: 'NO_RESET',
+      internalSquads: [],
+      externalSquad: null,
+    };
+    const { service, calls } = makeService({
+      quest: pointsQuest({ rewardType: 'TRAFFIC', rewardAmount: 25 }),
+      completion: { id: 'c1', status: 'COMPLETED', rewardIssuedAt: null, rewardSnapshot: null },
+      activeSubId: 'sub-1',
+      subscription: { trafficLimit: 100, planSnapshot },
+    });
+
+    const result = await service.claim({ userId: 'u1', questId: 'q1' });
+
+    assert.equal(result.trafficGb, 25);
+    assert.equal(result.subscriptionId, 'sub-1');
+    // The read-modify-write is serialised, or two concurrent quest payouts
+    // would each write 125 over a column that should have reached 150 — and,
+    // worse, leave the snapshot disagreeing with it.
+    assert.equal(calls.subLock.length, 1);
+    assert.equal(calls.subUpdate.length, 1);
+    const write = calls.subUpdate[0] as {
+      data: { trafficLimit: number; planSnapshot: Record<string, unknown> };
+    };
+    assert.equal(write.data.trafficLimit, 125);
+    // THE SNAPSHOT MOVED WITH THE COLUMN, and only the one key.
+    assert.deepStrictEqual(write.data.planSnapshot, { ...planSnapshot, trafficLimit: 125 });
+    assert.equal(calls.syncEnqueue.length, 1);
+
+    // The outcome, through the reader the payment renewal actually uses: the
+    // row still tracks its plan, so renewal resets traffic to the plan's 100.
+    const decision = resolveInheritedPlanLimitUpdate({
+      current: { trafficLimit: 125, deviceLimit: 3, internalSquads: [], externalSquad: null },
+      planSnapshot: write.data.planSnapshot,
+      plan: { trafficLimit: 100, deviceLimit: 3, internalSquads: [], externalSquad: null },
+    });
+    assert.equal(decision.trafficLimit, 100);
+  });
+
+  it('leaves an unlimited subscription unlimited rather than making it finite', async () => {
+    // `trafficLimit: null` is "no cap". `null + 25` would turn a customer's
+    // unlimited plan into a 25 GB one; the guard predates this change and must
+    // outlive it, snapshot write included.
+    const { service, calls } = makeService({
+      quest: pointsQuest({ rewardType: 'TRAFFIC', rewardAmount: 25 }),
+      completion: { id: 'c1', status: 'COMPLETED', rewardIssuedAt: null, rewardSnapshot: null },
+      activeSubId: 'sub-1',
+      subscription: { trafficLimit: null, planSnapshot: { id: 'plan-1', trafficLimit: null } },
+    });
+
+    const result = await service.claim({ userId: 'u1', questId: 'q1' });
+
+    assert.equal(result.trafficGb, 25);
+    assert.equal(calls.subUpdate.length, 0);
+    assert.equal(calls.syncEnqueue.length, 0);
   });
 
   it('mints a promocode for a DAYS reward when the user has no bounded subscription', async () => {

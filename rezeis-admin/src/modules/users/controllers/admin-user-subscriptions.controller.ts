@@ -18,6 +18,7 @@
 import {
   BadRequestException,
   Body,
+  ConflictException,
   Controller,
   Delete,
   Get,
@@ -43,16 +44,29 @@ import { RbacGuard } from '../../rbac/guards/rbac.guard';
 import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.interface';
 import { extractRequestMetadata } from '../../auth/utils/request-metadata.util';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
+import { sameSquadSet } from '../../plans/utils/plan-squads.util';
+import {
+  panelRefreshWrites,
+  panelReportedRezeisOwnedFields,
+} from '../../remnawave/services/panel-field-ownership';
 import {
   isNumericPanelIdentity,
   storedIdentityOf,
 } from '../../remnawave/services/panel-user-address';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
+import {
+  assessObservedPanelLink,
+  observePanelEra,
+  staleDeviceDeleteRefusalBody,
+} from '../../remnawave/services/stale-panel-link';
 import { requirePanelDeviceList } from '../../remnawave/utils/panel-device-read.util';
+import { selectGrantableTrialPlan } from '../../subscriptions/services/grantable-trial-plan.util';
+import type { PlanInheritedLimitKey } from '../../subscriptions/services/plan-inherited-limits.util';
 import { SubscriptionDeletionService } from '../../subscriptions/services/subscription-deletion.service';
 import { SubscriptionMutationsService } from '../../subscriptions/services/subscription-mutations.service';
 import { SystemEventsService, EVENT_TYPES } from '../../../common/services/system-events.service';
 import { buildPlanSnapshot } from '../utils/plan-snapshot.util';
+import { SUBSCRIPTION_SYNC_REFUSAL_CODES } from './subscription-sync-refusals';
 
 /** A v1–v8 UUID: the identity a Remnawave 2.7.x/2.8.x panel issues. */
 const REMNAWAVE_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -124,6 +138,291 @@ function panelProfileNumericId(panelId: number | null, pastedIdentity: string): 
   return Number.isSafeInteger(parsed) ? parsed : null;
 }
 
+/**
+ * The audit action both subscription editors write when one of the four
+ * plan-inherited limit columns actually moves.
+ *
+ * ── Why this exists ───────────────────────────────────────────────────────
+ *
+ * `resolveInheritedPlanLimitUpdate`
+ * (`subscriptions/services/plan-inherited-limits.util.ts`) decides at renewal
+ * whether a limit column was individually adjusted by comparing it against
+ * `plan_snapshot`. That derivation is sound going forward, but it cannot look
+ * backwards: for a row whose column and snapshot already disagree it cannot say
+ * whether an operator set the value on purpose or whether the row simply
+ * drifted (an import, a half-finished migration, a mirrored snapshot from
+ * before the freeze). A one-off repair of existing rows is therefore not
+ * derivable, and this is the gap that makes it so — the subscription editor
+ * changed limits for years and recorded nothing.
+ *
+ * ── How a repair job reads it ─────────────────────────────────────────────
+ *
+ *   SELECT metadata->>'subscriptionId', metadata->>'source',
+ *          metadata->'changes', created_at
+ *   FROM   admin_audit_log
+ *   WHERE  action = 'user.subscription.limits_changed'
+ *   ORDER  BY created_at
+ *
+ * Replay per subscription, in order. `source = 'plan_assignment'` RESETS every
+ * field back to inherited — assigning a plan legitimately re-copies all four
+ * and rewrites the snapshot with them. `source = 'operator_edit'` marks each
+ * key present under `changes` as individually overridden from that moment on.
+ * Whatever is still marked overridden at the end is an operator's deliberate
+ * value; a column that disagrees with its snapshot and appears nowhere in this
+ * log drifted, and is a repair candidate.
+ *
+ * ONE action for both kinds, discriminated by `source`, rather than two: a
+ * replay that has to remember to union a second action name is a replay that
+ * will one day be written with only the first, and it would then read every
+ * plan assignment's reset as an override.
+ *
+ * `AdminAuditLog` carries no `entityType`/`entityId` columns — only `action`,
+ * `adminUserId`, `ipAddress`, `userAgent` and `metadata` — so the subject goes
+ * in `metadata`, exactly as `user.subscription.deleted` already does.
+ */
+const SUBSCRIPTION_LIMITS_CHANGED_ACTION = 'user.subscription.limits_changed';
+
+/** What produced the change — see {@link SUBSCRIPTION_LIMITS_CHANGED_ACTION}. */
+type SubscriptionLimitChangeSource = 'operator_edit' | 'plan_assignment';
+
+/** The four values as a `Subscription` row holds them. */
+interface SubscriptionLimitValues {
+  readonly trafficLimit: number | null;
+  readonly deviceLimit: number;
+  readonly internalSquads: readonly string[];
+  readonly externalSquad: string | null;
+}
+
+/** Only the fields a request actually writes; an absent key was not touched. */
+type SubscriptionLimitWrite = Partial<SubscriptionLimitValues>;
+
+/**
+ * Per-field before/after, keyed by field name so a reader can ask about ONE
+ * limit (`metadata->'changes'->'deviceLimit'`) without unpacking an array.
+ */
+type SubscriptionLimitChanges = Partial<
+  Record<PlanInheritedLimitKey, { readonly from: unknown; readonly to: unknown }>
+>;
+
+/**
+ * The limit fields this request actually MOVED.
+ *
+ * A field the request did not write is absent from `after` and never appears. A
+ * field written to the value it already held is absent too: a PATCH that sets
+ * `deviceLimit` to the same number it has must not manufacture evidence that an
+ * operator overrode it, or the repair above would read every idle save of the
+ * subscription form as a deliberate override of everything on it.
+ *
+ * `internalSquads` is compared with `sameSquadSet` — the same order-insensitive
+ * comparison the renewal reader and the plan squad fan-out use — so re-saving a
+ * reordered but identical squad list is correctly not a change. Comparing
+ * positionally here would record an override that pins the column forever.
+ */
+function diffSubscriptionLimits(
+  before: SubscriptionLimitValues,
+  after: SubscriptionLimitWrite,
+): SubscriptionLimitChanges {
+  const changes: {
+    -readonly [K in keyof SubscriptionLimitChanges]: SubscriptionLimitChanges[K];
+  } = {};
+  if (after.trafficLimit !== undefined && after.trafficLimit !== before.trafficLimit) {
+    changes.trafficLimit = { from: before.trafficLimit, to: after.trafficLimit };
+  }
+  if (after.deviceLimit !== undefined && after.deviceLimit !== before.deviceLimit) {
+    changes.deviceLimit = { from: before.deviceLimit, to: after.deviceLimit };
+  }
+  if (
+    after.internalSquads !== undefined &&
+    !sameSquadSet(before.internalSquads, after.internalSquads)
+  ) {
+    changes.internalSquads = {
+      from: [...before.internalSquads],
+      to: [...after.internalSquads],
+    };
+  }
+  if (after.externalSquad !== undefined && after.externalSquad !== before.externalSquad) {
+    changes.externalSquad = { from: before.externalSquad, to: after.externalSquad };
+  }
+  return changes;
+}
+
+/**
+ * The operator's hand-typed traffic cap, as whole gigabytes or `null` for
+ * unlimited.
+ *
+ * ── Why this is a function and not `Number(body.trafficLimit)` ─────────────
+ *
+ * `updateSubscription` takes `@Body() body: Record<string, unknown>`. Its
+ * metatype is `Object`, so the global `ValidationPipe` (`main.ts`, with
+ * `whitelist`/`forbidNonWhitelisted`) skips the route entirely: NO
+ * class-validator decorator runs on this endpoint, and there is no DTO to hang
+ * one on. Every other writer of this column is gated by a `@Min(1)` somewhere.
+ * This one was gated by nothing at all, and `Number()` is a generous coercer —
+ * `0`, `"0"`, `null`, `""`, `false` and `[]` ALL land as `0`, and a typed `-5`
+ * lands as `-5`.
+ *
+ * ── Why `0` is the value worth refusing ───────────────────────────────────
+ *
+ * Remnawave has no encoding for "zero bytes allowed": its `0` IS unlimited. So
+ * a locally-stored `trafficLimit: 0` is a value the other side cannot express,
+ * and it fails in both directions at once —
+ *
+ *   • OUTBOUND, `profile-sync.processor.ts` and the desired-state PATCH both
+ *     send `(trafficLimit ?? 0) * 1024 ** 3`, so the `0` goes up as `0` bytes
+ *     and the panel reads UNLIMITED. The customer we recorded as capped at
+ *     nothing is uncapped upstream — the exact opposite of the row.
+ *   • INBOUND, the panel answers `0`/`null`, which decodes back to `null`.
+ *     `bigintEq(null, 0n)` is false, the projection is never stamped APPLIED,
+ *     and the sync job records drift FOREVER. Not once — on every sweep, for
+ *     the life of the subscription.
+ *
+ * So this refuses rather than silently rewriting: an operator who typed `0`
+ * meant something, and quietly storing `null` (unlimited) or `1` would hand
+ * them a different product without saying so.
+ *
+ * `null` IS accepted, and deliberately — it is how this endpoint says
+ * unlimited, and before this function there was no way to say it at all
+ * (`Number(null)` is `0`, so the payload that most obviously means "no cap"
+ * was the very one that minted the unrepresentable value).
+ *
+ * NOTE the neighbouring `deviceLimit` is validated too — see
+ * `readOperatorDeviceLimit` below — but to a DIFFERENT rule, and that is not an
+ * oversight: `deviceLimit <= 0` is the product's canonical UNLIMITED and
+ * matches the panel's own `hwidDeviceLimit: 0`, so `0` is legal there and
+ * refused here. Same digit, opposite meaning, one line apart. See
+ * `remnawave/utils/panel-traffic-limit.util.ts`.
+ */
+function readOperatorTrafficLimitGb(raw: unknown): number | null {
+  if (raw === null) return null;
+  const value = Number(raw);
+  // `Number.isInteger` rejects NaN, ±Infinity and fractions in one check —
+  // `Number('abc')` used to reach Prisma as NaN and fail at the driver, which
+  // is a 500 for what is plainly a bad request.
+  if (!Number.isInteger(value) || value < 1) {
+    throw new BadRequestException(
+      'trafficLimit must be a whole number of gigabytes, at least 1 — or null for unlimited. ' +
+        'Zero is not a cap Remnawave can express: it spells unlimited traffic as 0 bytes, so a ' +
+        'zero-gigabyte cap is pushed to the panel as no cap at all and the subscription then ' +
+        'reports drift on every sync forever.',
+    );
+  }
+  return value;
+}
+
+/**
+ * The widest value `Subscription.deviceLimit` can hold: it is `Int` in
+ * `schema.prisma`, i.e. a 32-bit signed Postgres `integer`. Not a product
+ * opinion about how many phones a person owns — a ceiling so that a payload
+ * outside the COLUMN's range is answered with a 400 here instead of blowing up
+ * at the driver as a 500. `expireDays` borrows the same pair.
+ */
+const INT32_MAX = 2_147_483_647;
+const INT32_MIN = -2_147_483_648;
+
+/**
+ * The operator's hand-typed device cap, as the column stores it.
+ *
+ * ── The same hole as traffic, and it was still open ────────────────────────
+ *
+ * `updateSubscription` has NO DTO — its `@Body()` is `Record<string, unknown>`,
+ * whose metatype is `Object`, so the global `ValidationPipe` skips the route
+ * and not one class-validator decorator anywhere runs on it. `deviceLimit` was
+ * therefore `Number(body.deviceLimit)` and nothing else: `deviceLimit: 'abc'`
+ * became `NaN`, reached Prisma, and the operator got a 500 for what is plainly
+ * a bad request.
+ *
+ * ── Why this rule is NOT the traffic rule ─────────────────────────────────
+ *
+ * Read `readOperatorTrafficLimitGb` above before touching this, because the
+ * two conventions are deliberately OPPOSITE and a "consistency" pass across
+ * them is a data-loss bug:
+ *
+ *   • TRAFFIC   `null` is unlimited, so `0` is free to mean "no traffic at
+ *               all" — a state Remnawave cannot express. Hence `@Min(1)`.
+ *   • DEVICES   `deviceLimit <= 0` IS the product's canonical unlimited, and
+ *               it matches the panel's own `hwidDeviceLimit: 0`. `0` here is
+ *               not a broken cap, it is the answer "as many as you like", and
+ *               it is also the column's `@default(0)`.
+ *
+ * So `0` must stay accepted. Refusing it — copying the traffic gate across —
+ * would take away the only way this endpoint has of clearing a device cap.
+ *
+ * ── What IS refused ───────────────────────────────────────────────────────
+ *
+ * Everything that cannot be read as a count at all. `Number()` is a generous
+ * coercer and every one of its generosities lands on `0`, which here is not an
+ * error value but UNLIMITED — so `deviceLimit: ''`, `false` or `[]` would each
+ * quietly hand the customer an uncapped subscription. Those are refused rather
+ * than coerced, and only two non-numeric inputs survive:
+ *
+ *   • `null`, which is normalised to the canonical `0`. It is the plain way to
+ *     say "no limit", it is what the traffic sibling accepts for the same
+ *     purpose, and the column is NOT nullable — passing it through would fail
+ *     at the driver as a 500.
+ *   • a numeric string, which is what an HTML number input produces.
+ *
+ * Negatives below zero are accepted as written, not normalised: `<= 0` is the
+ * convention every reader in the product implements (`sharing-detection.util`,
+ * `entitlement-baseline`, `addon-purchase.service`, `toPanelDeviceLimit`), and
+ * plan fixtures already spell unlimited `-1`. Rewriting them to `0` here would
+ * make this one endpoint disagree with all of them.
+ */
+function readOperatorDeviceLimit(raw: unknown): number {
+  // The one non-numeric spelling of "no limit" this endpoint accepts. It has
+  // to become `0` rather than pass through: the column is `Int`, not `Int?`.
+  if (raw === null) return 0;
+  const refuse = (): never => {
+    throw new BadRequestException(
+      'deviceLimit must be a whole number of devices — a positive count, or 0 (or null) for ' +
+        'unlimited. Note that 0 means UNLIMITED here and is accepted, unlike trafficLimit: ' +
+        'Remnawave spells an uncapped device count `hwidDeviceLimit: 0` and this column follows ' +
+        'it. Blank, boolean and array payloads are refused rather than coerced, because ' +
+        'Number() turns every one of them into 0 and would silently uncap the subscription.',
+    );
+  };
+  // Guarded BEFORE `Number()`, which is the whole point: `Number(false)`,
+  // `Number([])` and `Number('')` are all `0`, and `0` is a legitimate value
+  // on this field, so a coercion here is indistinguishable from a decision.
+  if (typeof raw !== 'number' && typeof raw !== 'string') refuse();
+  if (typeof raw === 'string' && raw.trim().length === 0) refuse();
+  const value = Number(raw);
+  // `Number.isInteger` rejects NaN, ±Infinity and fractions in one check.
+  if (!Number.isInteger(value) || value < INT32_MIN || value > INT32_MAX) refuse();
+  return value;
+}
+
+/**
+ * The operator's relative expiry nudge, in days.
+ *
+ * Same missing-DTO hole, and its failure was quieter than the others because
+ * the guard that follows it LOOKS like it covers the case and does not:
+ * `Number('abc')` is `NaN`, `base.getTime() + NaN` is `NaN`, `new Date(NaN)` is
+ * an Invalid Date, and `NaN < Date.now()` is **false** — so the "expiry would
+ * be in the past" refusal waves it straight through and the Invalid Date lands
+ * on Prisma as a 500. A merely enormous value does the same thing without any
+ * NaN in the payload: ECMAScript caps a Date at ±8.64e15 ms, so
+ * `expireDays: 1e15` overflows into an Invalid Date by arithmetic alone.
+ *
+ * Fractions are allowed on purpose — half a day is a coherent extension — but
+ * blanks, booleans and arrays are not, for the same reason as `deviceLimit`:
+ * `Number('')` is `0`, and a `0`-day nudge still rewrites `expiresAt` to
+ * `max(expiresAt, now)`, which for an already-expired row silently moves the
+ * expiry to this instant.
+ */
+function readOperatorExpireDays(raw: unknown): number {
+  if (typeof raw !== 'number' && typeof raw !== 'string') {
+    throw new BadRequestException('expireDays must be a number of days.');
+  }
+  if (typeof raw === 'string' && raw.trim().length === 0) {
+    throw new BadRequestException('expireDays must be a number of days.');
+  }
+  const value = Number(raw);
+  if (!Number.isFinite(value)) {
+    throw new BadRequestException('expireDays must be a number of days.');
+  }
+  return value;
+}
+
 @Controller('admin/users')
 @UseGuards(AdminJwtAuthGuard, RbacGuard)
 @RequirePermission('subscriptions', 'view')
@@ -144,12 +443,23 @@ export class AdminUserSubscriptionsController {
   public async updateSubscription(
     @Param('subscriptionId') subscriptionId: string,
     @Body() body: Record<string, unknown>,
+    @CurrentAdmin() admin: CurrentAdminInterface,
+    @Req() req: Request,
   ) {
     const sub = await this.prismaService.subscription.findUnique({ where: { id: subscriptionId } });
     if (!sub) throw new NotFoundException('Subscription not found');
 
     const data: Prisma.SubscriptionUpdateInput = {};
     let assignedPlanId: string | null = null;
+    // The limit values this request WRITES, collected beside `data` so the
+    // audit entry below describes the same numbers that reach the row rather
+    // than re-deriving them from the body and drifting.
+    const writtenLimits: {
+      trafficLimit?: number | null;
+      deviceLimit?: number;
+      internalSquads?: readonly string[];
+      externalSquad?: string | null;
+    } = {};
 
     if (body.status !== undefined) {
       if (body.status !== SubscriptionStatus.ACTIVE && body.status !== SubscriptionStatus.DISABLED) {
@@ -159,29 +469,61 @@ export class AdminUserSubscriptionsController {
     }
 
     if (body.planId !== undefined && body.planId !== null) {
-      const planId = String(body.planId);
+      // `String()` never throws on a JSON value, so this branch could not 500 —
+      // but `String({})` is `'[object Object]'` and `String(['a','b'])` is
+      // `'a,b'`, and both go on to answer "Plan not found". A 404 is the wrong
+      // account of a malformed field: it says the plan is missing when what is
+      // actually wrong is the request. `Plan.id` is a cuid string, so requiring
+      // a string costs no caller anything.
+      if (typeof body.planId !== 'string' || body.planId.length === 0) {
+        throw new BadRequestException('planId must be a non-empty plan id string.');
+      }
+      const planId = body.planId;
       const plan = await this.prismaService.plan.findUnique({ where: { id: planId } });
       if (!plan) throw new NotFoundException('Plan not found');
       data.planSnapshot = buildPlanSnapshot(plan);
       // Plans dictate the limits/squads at the moment of assignment.
+      const planInternalSquads = Array.isArray(plan.internalSquads) ? [...plan.internalSquads] : [];
       data.trafficLimit = plan.trafficLimit;
       data.deviceLimit = plan.deviceLimit;
-      data.internalSquads = Array.isArray(plan.internalSquads) ? [...plan.internalSquads] : [];
+      data.internalSquads = planInternalSquads;
       data.externalSquad = plan.externalSquad ?? null;
+      writtenLimits.trafficLimit = plan.trafficLimit;
+      writtenLimits.deviceLimit = plan.deviceLimit;
+      writtenLimits.internalSquads = planInternalSquads;
+      writtenLimits.externalSquad = plan.externalSquad ?? null;
       assignedPlanId = plan.id;
     }
     if (body.trafficLimit !== undefined && assignedPlanId === null) {
-      data.trafficLimit = Number(body.trafficLimit);
+      // Validated, not coerced — this route has no DTO, so the gate every other
+      // writer of this column gets from `@Min(1)` has to live here.
+      const trafficLimit = readOperatorTrafficLimitGb(body.trafficLimit);
+      data.trafficLimit = trafficLimit;
+      writtenLimits.trafficLimit = trafficLimit;
     }
     if (body.deviceLimit !== undefined && assignedPlanId === null) {
-      data.deviceLimit = Number(body.deviceLimit);
+      // Validated, not coerced — same missing-DTO hole as traffic above, but to
+      // the OPPOSITE rule: `0` is unlimited here and stays legal.
+      const deviceLimit = readOperatorDeviceLimit(body.deviceLimit);
+      data.deviceLimit = deviceLimit;
+      writtenLimits.deviceLimit = deviceLimit;
     }
     if (body.expireDays !== undefined) {
-      const days = Number(body.expireDays);
+      const days = readOperatorExpireDays(body.expireDays);
       const base = sub.expiresAt === null
         ? new Date()
         : new Date(Math.max(sub.expiresAt.getTime(), Date.now()));
       const newExpiry = new Date(base.getTime() + days * 24 * 60 * 60 * 1000);
+      // `Number.isNaN` FIRST, and not folded into the comparison below: an
+      // Invalid Date has a `NaN` timestamp, and `NaN < Date.now()` is false, so
+      // the "in the past" refusal waves it through and Prisma gets the Invalid
+      // Date as a 500. A finite `days` can still land here — the Date range
+      // stops at ±8.64e15 ms, so a big enough nudge overflows by arithmetic.
+      if (Number.isNaN(newExpiry.getTime())) {
+        throw new BadRequestException(
+          'expireDays moves the expiry outside the range a date can represent.',
+        );
+      }
       if (newExpiry.getTime() < Date.now()) {
         throw new BadRequestException(
           'Resulting expiry date would be in the past. Use a larger positive value or a smaller negative value.',
@@ -190,7 +532,14 @@ export class AdminUserSubscriptionsController {
       data.expiresAt = newExpiry;
     }
     if (body.expiresAt !== undefined && body.expiresAt !== null) {
-      data.expiresAt = new Date(String(body.expiresAt));
+      // `new Date('abc')` is an Invalid Date, not a throw, and Prisma rejects it
+      // at the driver — a 500 for a typo. There is no `Number()` in this branch
+      // to blame; `String()` is just as generous.
+      const parsedExpiresAt = new Date(String(body.expiresAt));
+      if (Number.isNaN(parsedExpiresAt.getTime())) {
+        throw new BadRequestException('expiresAt must be a valid date.');
+      }
+      data.expiresAt = parsedExpiresAt;
     }
 
     // Anything that changes the underlying profile shape must be propagated
@@ -235,6 +584,23 @@ export class AdminUserSubscriptionsController {
         select: { id: true },
       });
       return { updated, syncJobId: syncJob.id, remnawaveLinkRequired: false };
+    });
+
+    // Written after the commit, like every other `auditLog` call in this file,
+    // and BEFORE the panel push so the evidence exists even if the push path
+    // throws. `assignedPlanId` is the discriminator rather than a guess from
+    // the shape of the change set: a plan assignment sets all four limits AND
+    // rewrites `plan_snapshot` with them, so it leaves the row inherited, while
+    // an individual edit moves a column away from its snapshot on purpose.
+    // Read backwards they are opposites, and only the controller knows which
+    // one happened.
+    await this.auditLimitChange({
+      admin,
+      req,
+      subscription: sub,
+      after: writtenLimits,
+      source: assignedPlanId === null ? 'operator_edit' : 'plan_assignment',
+      assignedPlanId,
     });
 
     if (outcome.syncJobId !== null) {
@@ -289,6 +655,8 @@ export class AdminUserSubscriptionsController {
   public async updateSquads(
     @Param('subscriptionId') subscriptionId: string,
     @Body() body: { internalSquads?: string[]; externalSquad?: string | null },
+    @CurrentAdmin() admin: CurrentAdminInterface,
+    @Req() req: Request,
   ) {
     const sub = await this.prismaService.subscription.findUnique({ where: { id: subscriptionId } });
     if (!sub) throw new NotFoundException('Subscription not found');
@@ -298,6 +666,20 @@ export class AdminUserSubscriptionsController {
     const updated = await this.prismaService.subscription.update({
       where: { id: subscriptionId },
       data,
+    });
+    // Squads are two of the same four plan-inherited columns, and this endpoint
+    // can only ever set them by hand — there is no plan assignment on this
+    // route — so every change it records is an individual override.
+    await this.auditLimitChange({
+      admin,
+      req,
+      subscription: sub,
+      after: {
+        internalSquads: body.internalSquads,
+        externalSquad: body.externalSquad,
+      },
+      source: 'operator_edit',
+      assignedPlanId: null,
     });
     await this.enqueueSubscriptionSync(updated.id, updated.remnawaveId);
     return updated;
@@ -520,7 +902,16 @@ export class AdminUserSubscriptionsController {
       },
     });
     const identity = storedIdentityOf(sub);
-    if (identity === null) return { synced: false, message: 'No Remnawave profile linked' };
+    // Each refusal carries a stable `code` BESIDE its sentence — see
+    // `subscription-sync-refusals.ts` for why the sentence alone was not
+    // enough. The wording is unchanged and stays the human-readable half.
+    if (identity === null) {
+      return {
+        synced: false,
+        code: SUBSCRIPTION_SYNC_REFUSAL_CODES.notLinked,
+        message: 'No Remnawave profile linked',
+      };
+    }
     // Same distinction the link-repair endpoint makes, and for the same reason:
     // this answer goes straight to an operator. `getPanelUser` reports an
     // outage, an expired token, a 5xx and a timeout with the identical `null`
@@ -529,20 +920,54 @@ export class AdminUserSubscriptionsController {
     // "gone" is what makes someone start repairing a link that was never broken.
     const outcome = await this.remnawaveApiService.getPanelUserOutcome(identity);
     if (outcome.kind === 'unavailable') {
-      return { synced: false, message: 'Remnawave panel could not be reached — try again' };
+      return {
+        synced: false,
+        code: SUBSCRIPTION_SYNC_REFUSAL_CODES.panelUnavailable,
+        message: 'Remnawave panel could not be reached — try again',
+      };
     }
     if (outcome.kind === 'missing') {
-      return { synced: false, message: 'Profile not found on panel' };
+      return {
+        synced: false,
+        code: SUBSCRIPTION_SYNC_REFUSAL_CODES.profileMissing,
+        message: 'Profile not found on panel',
+      };
     }
     const panelUser = outcome.user;
-    await this.prismaService.subscription.update({
-      where: { id: subscriptionId },
-      data: {
-        expiresAt: new Date(panelUser.expireAt),
-        configUrl: panelUser.subscriptionUrl,
-      },
-    });
-    return { synced: true };
+    // WHAT THIS BUTTON IS ALLOWED TO WRITE, and why it is not the importer's
+    // write set — the full derivation, from what `ProfileSyncProcessor`
+    // actually pushes, lives in `panel-field-ownership.ts`.
+    //
+    // This subscription is one rezeis PROVISIONS: the sync processor pushes the
+    // plan's traffic limit, device limit, squads and expiry INTO the panel on
+    // every mutation. Pulling those columns back out of a panel answer would
+    // let panel drift silently replace the plan an operator assigned, and the
+    // next push would then fight the pull. `parsePanelUserRow` makes it worse
+    // than a race: it defaults an absent `trafficLimitBytes`/`hwidDeviceLimit`
+    // to `0` and an absent squad list to `[]`, so a thin panel answer would
+    // read as "unlimited traffic, no devices, no squads" and write exactly
+    // that over the operator's settings.
+    //
+    // So the refresh adopts ONLY what the panel alone can know, and adopts
+    // nothing the panel did not positively state — see `panelRefreshWrites`.
+    const refreshed = panelRefreshWrites(panelUser);
+    if (Object.keys(refreshed).length > 0) {
+      await this.prismaService.subscription.update({
+        where: { id: subscriptionId },
+        data: refreshed,
+      });
+    }
+    return {
+      synced: true,
+      // What actually changed, so the operator is not told "synced" and left to
+      // guess. Keys are present only when the panel stated the field.
+      refreshed,
+      // And what the panel says about the columns rezeis owns. Echoed so the
+      // drift is VISIBLE, never written — an operator who sees the panel
+      // reporting a different device limit has a real problem to act on, and
+      // the act is to fix the plan, not to let the panel rewrite it.
+      panelReports: panelReportedRezeisOwnedFields(panelUser),
+    };
   }
 
   /**
@@ -598,7 +1023,30 @@ export class AdminUserSubscriptionsController {
     if (sub === null) throw new NotFoundException('No Remnawave profile linked');
     const identity = storedIdentityOf(sub);
     if (identity === null) throw new NotFoundException('No Remnawave profile linked');
-    const result = await this.remnawaveApiService.deletePanelUserDevice(identity, hwid);
+
+    // ── THE STALE-LINK REFUSAL, ON THE DEVICE VERB ─────────────────────────
+    //
+    // The same hazard as the subscription delete this controller already
+    // refuses, reached through a different verb: `deletePanelUserDevice` names
+    // its owner through the SAME `panelUserAddress` fallback, so a uuid-shaped
+    // stored identity on a 3.x panel resolves through the recorded panel id,
+    // the saved subscription short uuid or the panel username to whatever
+    // account is LIVE at that address — on an unrepaired duplicate pair, a
+    // paying customer, whose device this would then unbind.
+    //
+    // ONE OBSERVATION, USED TWICE: the era judged here is the era the adapter
+    // builds the request from, because `deletePanelUserDevice` takes it as a
+    // required argument and never re-reads the shape.
+    //
+    // OPERATOR WORDING, unlike the two reiwa-facing sites, which get the same
+    // code with a sentence that does not name a screen a customer cannot open.
+    // This reader CAN run the reconciliation, so the refusal says so.
+    const era = await observePanelEra(() => this.remnawaveApiService.getPanelShape());
+    if (!assessObservedPanelLink(era, identity.remnawaveId).trusted) {
+      throw new ConflictException(staleDeviceDeleteRefusalBody('operator'));
+    }
+
+    const result = await this.remnawaveApiService.deletePanelUserDevice(identity, hwid, era);
 
     this.systemEvents.info(
       EVENT_TYPES.SUBSCRIPTION_DEVICE_REVOKED,
@@ -695,18 +1143,31 @@ export class AdminUserSubscriptionsController {
     @Req() req: Request,
   ) {
     const user = await this.findUserByTelegramId(telegramId);
-    const trialPlan = await this.prismaService.plan.findFirst({
-      where: { availability: 'TRIAL', isActive: true, isArchived: false },
-      include: { durations: true },
-    });
+    // The same selection the cabinet's trial button makes, from the same
+    // function — see `selectGrantableTrialPlan`. What stood here was a local
+    // `findFirst` with no `orderBy` on the plan and none on `durations`, then
+    // `durations[0]`: with two active trial plans (a remnashop import can create
+    // them) or one plan carrying several durations, this button and the
+    // cabinet's handed out DIFFERENT products, picked by whatever order the
+    // database happened to return.
+    //
+    // Still deliberately absent: `computeTrialEligibility`. The invited-only
+    // scope and the "no active subscription" guard are user-facing rules an
+    // operator overrides on purpose from this screen. WHICH plan gets granted is
+    // not one of those rules — it is the same question the cabinet asks, and two
+    // answers to it is only ever a defect.
+    const trialPlan = await selectGrantableTrialPlan(this.prismaService);
     if (!trialPlan) throw new BadRequestException('No active trial plan configured');
-    const duration = trialPlan.durations[0];
-    if (!duration) throw new BadRequestException('Trial plan has no duration configured');
+    // Both refusals keep their exact condition and their exact wording; only
+    // WHICH row is examined changed.
+    if (trialPlan.durationDays === null) {
+      throw new BadRequestException('Trial plan has no duration configured');
+    }
 
     const granted = await this.subscriptionMutationsService.grantTrial({
       userId: user.id,
       planId: trialPlan.id,
-      durationDays: duration.days,
+      durationDays: trialPlan.durationDays,
     });
     const subscription = await this.prismaService.subscription.findUniqueOrThrow({
       where: { id: granted.subscriptionId },
@@ -804,6 +1265,38 @@ export class AdminUserSubscriptionsController {
         });
     if (!user) throw new NotFoundException('User not found');
     return user;
+  }
+
+  /**
+   * Records that an operator moved one or more of the four plan-inherited
+   * limit columns — and NOTHING when the request moved none of them.
+   *
+   * The empty-change guard is the point, not a saving: this log is the evidence
+   * a repair job reads to tell a deliberate override from drift
+   * ({@link SUBSCRIPTION_LIMITS_CHANGED_ACTION}), and an entry for a PATCH that
+   * re-sent the values a row already held would be a false positive that pins
+   * that row's limits for the rest of its life.
+   */
+  private async auditLimitChange(input: {
+    readonly admin: CurrentAdminInterface;
+    readonly req: Request;
+    readonly subscription: SubscriptionLimitValues & {
+      readonly id: string;
+      readonly userId: string;
+    };
+    readonly after: SubscriptionLimitWrite;
+    readonly source: SubscriptionLimitChangeSource;
+    readonly assignedPlanId: string | null;
+  }) {
+    const changes = diffSubscriptionLimits(input.subscription, input.after);
+    if (Object.keys(changes).length === 0) return;
+    await this.auditLog(input.admin, input.req, SUBSCRIPTION_LIMITS_CHANGED_ACTION, {
+      userId: input.subscription.userId,
+      subscriptionId: input.subscription.id,
+      source: input.source,
+      assignedPlanId: input.assignedPlanId,
+      changes,
+    });
   }
 
   private async auditLog(

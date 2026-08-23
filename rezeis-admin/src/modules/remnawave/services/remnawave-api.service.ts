@@ -5,14 +5,18 @@ import {
   Inject,
   Injectable,
   Logger,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigType } from '@nestjs/config';
-import { GetExternalSquadsCommand, GetInternalSquadsCommand, GetStatusCommand } from '@remnawave/backend-contract';
 import { isAxiosError } from 'axios';
 import { firstValueFrom } from 'rxjs';
 
 import { remnawaveConfig } from '../../../common/config/remnawave.config';
+import {
+  EVENT_TYPES,
+  SystemEventsService,
+} from '../../../common/services/system-events.service';
 import {
   asStoredIdentity,
   isNumericPanelIdentity,
@@ -22,6 +26,11 @@ import {
   type PanelUserRef,
 } from './panel-user-address';
 import { resolvePanelBaseUrl } from './panel-base-url';
+import {
+  decodePanelAuthStatus,
+  decodeSquadOptionList,
+  type PanelSquadListKey,
+} from './panel-response-decoders';
 import { PANEL_ROUTES, PANEL_USER_NOT_FOUND_ERROR_CODES } from './panel-routes';
 import {
   addressingForVersion,
@@ -30,6 +39,7 @@ import {
   connectionsApiForVersion,
   parseSemver,
   readPanelVersionFrom,
+  type PanelEraObservation,
   type RemnawaveConnectionsApi,
   type RemnawaveUserAddressing,
 } from './panel-version.util';
@@ -276,8 +286,12 @@ export interface RemnawavePanelShape {
    * as filters.
    *
    * `false` therefore means "take the stream route", not "this lookup is
-   * impossible". An unknown panel reads false-on-3.x-terms — see
-   * {@link lookupsForVersion}.
+   * impossible". An unknown panel reads TRUE here — i.e. on 2.x terms — which is
+   * the opposite of how the rest of this file treats "unknown"; the reason for
+   * the asymmetry is stated on {@link lookupsForVersion}, which is the function
+   * that decides it. (This sentence used to claim the opposite. Both branches
+   * here are pure reads, so a wrong guess costs one 404 rather than a wrong
+   * answer — but a cleanup driven by the wrong sentence would have flipped it.)
    */
   readonly userLookups: { readonly byTelegramId: boolean; readonly byEmail: boolean };
   /**
@@ -509,6 +523,119 @@ export function buildNodeUsersBandwidthPath(now = new Date()): string {
 }
 
 /**
+ * WHAT A PANEL 3.3.2 USER ROW CONTAINS, per the vendor's own OpenAPI document
+ * for that exact build (`icon/Remnawave API v3.3.2.json`, `UserResponseDto`).
+ * All 24 are declared REQUIRED there; none of them is `uuid`.
+ *
+ * This list is the single source of truth for BOTH the runtime drift detector
+ * below and `test/remnawave-user-row-era-conformance.spec.ts`, which pins it
+ * against the vendor SDK (`@remnawave/contract-v34` → 3.4.2) and against the
+ * OpenAPI document itself. Sharing the constant is deliberate: if the test and
+ * the detector each kept their own copy, the detector would eventually report
+ * drift that was only our own staleness, and the operator would learn to ignore
+ * it — which is the failure mode this whole mechanism exists to prevent.
+ */
+export const PANEL_USER_SPEC_REQUIRED_KEYS_3X: readonly string[] = [
+  'activeInternalSquads',
+  'createdAt',
+  'description',
+  'email',
+  'expireAt',
+  'externalSquadUuid',
+  'hwidDeviceLimit',
+  'id',
+  'lastTrafficResetAt',
+  'lastTriggeredThreshold',
+  'shortUuid',
+  'ssPassword',
+  'status',
+  'subRevokedAt',
+  'subscriptionUrl',
+  'tag',
+  'telegramId',
+  'trafficLimitBytes',
+  'trafficLimitStrategy',
+  'trojanPassword',
+  'updatedAt',
+  'userTraffic',
+  'username',
+  'vlessUuid',
+];
+
+/**
+ * Fields the decoder RECOGNISES that panel 3.x does not declare.
+ *
+ *   uuid         the 2.x identity spelling. Remnawave 3.0 dropped the column
+ *                outright, but our own database still stores uuids recorded in
+ *                that era, and rows carrying one must keep decoding until the
+ *                reconciliation sweep reports zero stranded rows in production.
+ *                Seeing `uuid` on a row is therefore NOT drift.
+ *   telegram_id  the snake_case spelling {@link parsePanelUserRow} accepts as a
+ *                fallback when `telegramId` is absent or not a number.
+ */
+export const PANEL_USER_LEGACY_ROW_KEYS: readonly string[] = ['uuid', 'telegram_id'];
+
+/** Every key the decoder knows about, from either era. */
+export const PANEL_USER_KNOWN_ROW_KEYS: readonly string[] = [
+  ...PANEL_USER_SPEC_REQUIRED_KEYS_3X,
+  ...PANEL_USER_LEGACY_ROW_KEYS,
+];
+
+/** One panel row whose key set does not match what we know about. */
+export interface PanelUserShapeDrift {
+  /** Keys the panel sent that no era of our decoder recognises. */
+  readonly unknownFields: readonly string[];
+  /** Keys panel 3.3.2 declares REQUIRED that this row did not carry. */
+  readonly missingFields: readonly string[];
+  /**
+   * Stable identity of this drift. Every row of a drifted panel produces the
+   * SAME signature, which is what lets the reporter emit one operator-visible
+   * event per distinct drift instead of one per row.
+   */
+  readonly signature: string;
+}
+
+/**
+ * Compares one raw panel row's key set against what we know, in BOTH directions.
+ *
+ * WHY THIS EXISTS AND WHY IT ONLY REPORTS. The defect this file is scarred by
+ * was not a wrong decision — it was a panel that changed shape in production
+ * and a codebase that could not tell. CI was green throughout, because CI only
+ * ever sees the shapes we thought to write down. A conformance test catches
+ * drift when WE bump a pin; this catches it when the OPERATOR upgrades a panel.
+ *
+ * It DETECTS, it does NOT reject. A panel patch release that adds a field is a
+ * routine, harmless event, and a decoder that refused unknown keys would turn
+ * it into a total outage — trading a silent defect for a loud one is not an
+ * improvement when the loud one takes the product down. So this returns a
+ * description and changes nothing about what {@link parsePanelUserRow} returns.
+ *
+ * Returns `null` for a row that matches exactly, which is the common case and
+ * costs one `Object.keys` and two membership scans over ~26 strings.
+ */
+export function describePanelUserShapeDrift(candidate: object): PanelUserShapeDrift | null {
+  const present = Object.keys(candidate);
+  const unknownFields: string[] = [];
+  for (const key of present) {
+    if (!PANEL_USER_KNOWN_ROW_KEYS.includes(key)) unknownFields.push(key);
+  }
+  const missingFields: string[] = [];
+  for (const key of PANEL_USER_SPEC_REQUIRED_KEYS_3X) {
+    if (!present.includes(key)) missingFields.push(key);
+  }
+  if (unknownFields.length === 0 && missingFields.length === 0) return null;
+  // Sorted, so that a panel which merely reorders its JSON keys does not mint a
+  // second signature for the same drift and defeat the deduplication.
+  const sortedUnknown = [...unknownFields].sort();
+  const sortedMissing = [...missingFields].sort();
+  return {
+    unknownFields: sortedUnknown,
+    missingFields: sortedMissing,
+    signature: `unknown=${sortedUnknown.join(',')}|missing=${sortedMissing.join(',')}`,
+  };
+}
+
+/**
  * Decodes one `/api/users` row into a {@link RemnawavePanelUser}.
  *
  * Returns `null` for a row we cannot key — the identity is the row's handle
@@ -535,8 +662,21 @@ export function buildNodeUsersBandwidthPath(now = new Date()): string {
  * this one out is what lets both directions share a single answer to "which
  * field is the identity on this row".
  */
-function parsePanelUserRow(candidate: unknown): RemnawavePanelUser | null {
+function parsePanelUserRow(
+  candidate: unknown,
+  onShapeDrift?: (drift: PanelUserShapeDrift) => void,
+): RemnawavePanelUser | null {
   if (typeof candidate !== 'object' || candidate === null) return null;
+  // Observed BEFORE decoding and independently of whether decoding succeeds: a
+  // row we cannot key is exactly the row whose shape an operator most needs to
+  // see. Deliberately NOT wrapped in a try/catch — the comparison is a pure key
+  // scan that cannot throw, and a swallow here would make "the detector broke"
+  // indistinguishable from "the panel matches", which is the same blindness
+  // this mechanism was added to remove.
+  if (onShapeDrift !== undefined) {
+    const drift = describePanelUserShapeDrift(candidate);
+    if (drift !== null) onShapeDrift(drift);
+  }
   const value = candidate as Record<string, unknown>;
   const panelId =
     typeof value.id === 'number' && Number.isSafeInteger(value.id) ? value.id : null;
@@ -632,9 +772,13 @@ function parsePanelUserRow(candidate: unknown): RemnawavePanelUser | null {
  * TERMINAL is the outcome that alerts an operator instead of being reset to
  * PENDING every five minutes in silence.
  */
-function unwrapPanelUser(raw: unknown, route: string): RemnawavePanelUser {
+function unwrapPanelUser(
+  raw: unknown,
+  route: string,
+  onShapeDrift?: (drift: PanelUserShapeDrift) => void,
+): RemnawavePanelUser {
   const root = (raw as { response?: unknown } | null)?.response ?? raw;
-  const user = parsePanelUserRow(root);
+  const user = parsePanelUserRow(root, onShapeDrift);
   if (user === null) {
     throw new Error(
       `Remnawave ${route} answered with a user body carrying no usable identity ` +
@@ -852,7 +996,139 @@ export class RemnawaveApiService {
     private readonly httpService: HttpService,
     @Inject(remnawaveConfig.KEY)
     private readonly configuration: ConfigType<typeof remnawaveConfig>,
+    // OPTIONAL on purpose. `SystemEventsModule` is @Global so the running app
+    // always supplies it, but ~a dozen specs construct this adapter directly
+    // with two arguments, and a drift REPORTER that made the adapter
+    // unconstructable would be a poor trade for a diagnostic.
+    @Optional()
+    private readonly systemEvents?: SystemEventsService,
   ) {}
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  //  PANEL USER ROW SHAPE DRIFT (detect and report — never reject)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * One entry per distinct drift signature seen since the process started.
+   *
+   * WHY THIS IS BOUNDED AND WHY THAT MATTERS. The detector runs on EVERY decoded
+   * row, and `strictGetAllPanelUsers` walks the entire panel — 5000 rows on a
+   * real deployment. A drifted panel produces the same signature on every one of
+   * those rows, so without a gate the operator's event feed would receive 5000
+   * identical events at precisely the moment it needs to be readable. The feed
+   * going unusable when it matters most is the same class of failure as the feed
+   * being silent, so this is part of the mechanism, not an optimisation.
+   */
+  private readonly shapeDriftSeen = new Map<
+    string,
+    { lastReportedAt: number; suppressed: number }
+  >();
+
+  /** One operator-visible event per distinct signature per hour. */
+  private static readonly SHAPE_DRIFT_REPEAT_MS = 60 * 60 * 1000;
+
+  /**
+   * Ceiling on DISTINCT signatures tracked at once. Realistically a panel emits
+   * one shape, so this is never approached; it exists so that a panel returning
+   * garbage of ever-changing shape cannot grow this map without limit.
+   */
+  private static readonly SHAPE_DRIFT_MAX_SIGNATURES = 64;
+
+  /**
+   * Reports one row's shape drift, at most once per signature per hour.
+   *
+   * An arrow property rather than a method because it is handed to
+   * {@link parsePanelUserRow} as a callback and must keep its `this`.
+   */
+  /**
+   * Which panel era this adapter believes it is talking to, read from the SHAPE
+   * CACHE rather than probed.
+   *
+   * SYNCHRONOUS ON PURPOSE. The detector runs inside the row decoder, which is
+   * sync and must stay sync; awaiting `getPanelShape()` here would put a network
+   * read in the middle of decoding 5000 rows. The cache is populated by the
+   * ordinary request path, so by the time any row is decoded it is warm.
+   *
+   * `unknown` is a real, expected answer and is NOT treated as a problem — the
+   * version read fails for the same reasons requests fail, and this is a
+   * diagnostic, not a gate. It is reported as-is so an operator can tell "2.x
+   * panel drifted" from "3.x panel drifted" from "we could not tell".
+   */
+  private detectedPanelEra(): string {
+    const cached = this.panelShapeCache?.value;
+    if (cached === undefined) return 'unprobed';
+    if (cached.version === null) return 'unknown';
+    const parsed = parseSemver(cached.version);
+    return parsed === null ? 'unknown' : `${parsed.major}.x`;
+  }
+
+  private readonly reportPanelUserShapeDrift = (drift: PanelUserShapeDrift): void => {
+    const now = Date.now();
+    // The era is part of the identity of a drift. rezeis ships to deployments on
+    // 2.x panels and to deployments on 3.x panels; the SAME missing field means
+    // different things on each, and two operators reporting it must not produce
+    // indistinguishable events.
+    const signature = `era=${this.detectedPanelEra()}|${drift.signature}`;
+    const seen = this.shapeDriftSeen.get(signature);
+    if (seen !== undefined) {
+      if (now - seen.lastReportedAt < RemnawaveApiService.SHAPE_DRIFT_REPEAT_MS) {
+        seen.suppressed += 1;
+        return;
+      }
+      this.emitPanelUserShapeDrift(drift, signature, seen.suppressed);
+      seen.lastReportedAt = now;
+      seen.suppressed = 0;
+      return;
+    }
+    if (this.shapeDriftSeen.size >= RemnawaveApiService.SHAPE_DRIFT_MAX_SIGNATURES) {
+      // Evict the least recently reported so the map stays bounded. Reached only
+      // by a panel emitting 64+ distinct shapes, which is itself the story.
+      let oldestKey: string | null = null;
+      let oldestAt = Number.POSITIVE_INFINITY;
+      for (const [key, entry] of this.shapeDriftSeen) {
+        if (entry.lastReportedAt < oldestAt) {
+          oldestAt = entry.lastReportedAt;
+          oldestKey = key;
+        }
+      }
+      if (oldestKey !== null) this.shapeDriftSeen.delete(oldestKey);
+    }
+    this.shapeDriftSeen.set(signature, { lastReportedAt: now, suppressed: 0 });
+    this.emitPanelUserShapeDrift(drift, signature, 0);
+  };
+
+  private emitPanelUserShapeDrift(
+    drift: PanelUserShapeDrift,
+    signature: string,
+    suppressed: number,
+  ): void {
+    const parts: string[] = [];
+    if (drift.unknownFields.length > 0) {
+      parts.push(`${drift.unknownFields.length} unrecognised field(s): ${drift.unknownFields.join(', ')}`);
+    }
+    if (drift.missingFields.length > 0) {
+      parts.push(`${drift.missingFields.length} declared field(s) absent: ${drift.missingFields.join(', ')}`);
+    }
+    const era = this.detectedPanelEra();
+    const message = `Remnawave user row shape drift on a ${era} panel — ${parts.join('; ')}`;
+    this.logger.warn(message);
+    // A log line alone is not enough. The whole lesson of the identity defect is
+    // that silence in the logs is indistinguishable from health, so this has to
+    // reach the surface an operator actually watches.
+    this.systemEvents?.warn(EVENT_TYPES.SYSTEM_REMNAWAVE_SYNC, 'SYSTEM', message, {
+      unknownFields: drift.unknownFields,
+      missingFields: drift.missingFields,
+      // Which era the panel was detected as, and the exact build string it
+      // reported. Without these, an operator on 2.8 and an operator on 3.3
+      // filing the same drift are indistinguishable in the feed.
+      panelEra: era,
+      panelVersion: this.panelShapeCache?.value.version ?? null,
+      signature,
+      // How many further rows carried this same drift while the signal was
+      // deduplicated — so "one event" never reads as "one row".
+      suppressedSinceLastReport: suppressed,
+    });
+  }
 
   // ═══════════════════════════════════════════════════════════════════════════
   //  PANEL SHAPE (which era of the API are we talking to?)
@@ -1019,12 +1295,21 @@ export class RemnawaveApiService {
    *
    * Returns `null` when the profile cannot be named on this panel at all.
    * Callers must treat that as "cannot act", never as "the profile is gone".
+   *
+   * `era` IS THE CALLER'S ALREADY-TAKEN OBSERVATION, and passing one is how a
+   * guarded path proves the era it decided on is the era the address is built
+   * from. Omitting it keeps the old behaviour — this method reads the shape for
+   * itself — which is correct for the reads and the non-destructive writes that
+   * have nothing to agree with. The DESTRUCTIVE methods below do not offer that
+   * choice: they require an observation, so it is not possible to build a
+   * deletion address from a second, independent reading of the era.
    */
   public async resolvePanelSegment(
     ref: PanelUserRef,
+    era?: PanelEraObservation,
   ): Promise<{ readonly segment: string; readonly panelId: number | null } | null> {
     const identity = asStoredIdentity(ref);
-    const { addressing } = await this.getPanelShape();
+    const { addressing } = era ?? (await this.getPanelShape());
     const address = panelUserAddress(identity, addressing);
     if (address.kind === 'ready') {
       return {
@@ -1061,8 +1346,12 @@ export class RemnawaveApiService {
    * subscription. The refusal is logged here once, with the operation name, so
    * an operator reading the log can see which feature went quiet and why.
    */
-  private async segmentFor(ref: PanelUserRef, operation: string): Promise<string | null> {
-    const resolved = await this.resolvePanelSegment(ref);
+  private async segmentFor(
+    ref: PanelUserRef,
+    operation: string,
+    era?: PanelEraObservation,
+  ): Promise<string | null> {
+    const resolved = await this.resolvePanelSegment(ref, era);
     if (resolved === null) {
       const identity = asStoredIdentity(ref);
       this.logger.warn(
@@ -1173,7 +1462,7 @@ export class RemnawaveApiService {
       activeInternalSquads: input.activeInternalSquads,
       externalSquadUuid: input.externalSquadUuid,
     });
-    return unwrapPanelUser(raw, 'POST /api/users');
+    return unwrapPanelUser(raw, 'POST /api/users', this.reportPanelUserShapeDrift);
   }
 
   /**
@@ -1290,7 +1579,7 @@ export class RemnawaveApiService {
     // re-probe (`shapeMovedFor`) for a panel that answered perfectly well. The
     // transport succeeded; only our reading of it failed, and the two must not
     // be reported as the same thing.
-    return unwrapPanelUser(raw, 'PATCH /api/users');
+    return unwrapPanelUser(raw, 'PATCH /api/users', this.reportPanelUserShapeDrift);
   }
 
   /**
@@ -1302,14 +1591,28 @@ export class RemnawaveApiService {
    * the `DELETE` sync job loop forever (the profile can never be re-found).
    * Any other upstream failure throws so BullMQ retries. See
    * `.kiro/specs/trial-aware-profile-cleanup`.
+   *
+   * `era` IS REQUIRED, AND THAT IS THE POINT. Every caller of this method is
+   * guarded by `assessObservedPanelLink`, and the guard's answer is only worth
+   * anything if the address is built from the SAME reading of the panel era —
+   * `getPanelShape()` is cached for fifteen seconds on a failure, so two
+   * adjacent reads can legitimately disagree, and the disagreement that matters
+   * runs "guard saw `'unknown'`, so proceed" straight into "builder saw `'id'`,
+   * so fall back through `panelId` to whatever is live at that address". Taking
+   * the observation as an argument makes it impossible to write that call: the
+   * era cannot be re-read here, and a caller cannot produce one without going
+   * through `observePanelEra`.
    */
-  public async deletePanelUser(ref: PanelUserRef): Promise<{ isDeleted: boolean }> {
+  public async deletePanelUser(
+    ref: PanelUserRef,
+    era: PanelEraObservation,
+  ): Promise<{ isDeleted: boolean }> {
     const baseUrl = this.getBaseUrl();
     const token = this.configuration.token;
     if (baseUrl === null || token === null) {
       throw new ServiceUnavailableException('Remnawave integration is not configured');
     }
-    const segment = await this.segmentFor(ref, 'DELETE user');
+    const segment = await this.segmentFor(ref, 'DELETE user', era);
     if (segment === null) {
       // NOT `{isDeleted: true}`. The caller writes status DELETED and clears the
       // profile link on a true, so answering true here would detach a live
@@ -1443,7 +1746,7 @@ export class RemnawaveApiService {
     // Through the row decoder, not a bare cast: a 3.x row has no `uuid`, and
     // the cast used to hand callers an object whose `uuid` was `undefined`
     // while its type said `string`.
-    const user = parsePanelUserRow(root);
+    const user = parsePanelUserRow(root, this.reportPanelUserShapeDrift);
     // A 200 whose body we cannot decode is a contract problem, not a missing
     // profile. Answering `missing` here would let a shape change read as
     // "every profile disappeared".
@@ -1473,7 +1776,7 @@ export class RemnawaveApiService {
       // profile" for a profile that exists and the sync would try to create a
       // duplicate, which the panel refuses with `400 username already exists`.
       // A stuck create loop, from one field name.
-      return parsePanelUserRow(root);
+      return parsePanelUserRow(root, this.reportPanelUserShapeDrift);
     } catch {
       return null;
     }
@@ -1625,10 +1928,24 @@ export class RemnawaveApiService {
    * body `{ userUuid, hwid }` — NOT a `DELETE` verb and NOT the old
    * `/api/hwid/user` path (both 404 now). Returns `{ total }` (remaining
    * device count) inside the usual `{ response: ... }` envelope.
+   *
+   * `era` IS REQUIRED for the reason {@link deletePanelUser} states, and this
+   * method had the defect TWICE OVER: it read the shape for the body's owner
+   * key and `segmentFor` read it again for the path, so even the owner key and
+   * the segment inside one request were built from two readings. One
+   * observation now serves the guard, the key and the segment alike.
+   *
+   * Different verb, same address mechanism, same loss: on an unrepaired
+   * duplicate pair the fallback resolves the stale row's identity to the LIVE
+   * customer, and this revokes a device they are using.
    */
-  public async deletePanelUserDevice(ref: PanelUserRef, hwid: string): Promise<{ total: number }> {
-    const { addressing } = await this.getPanelShape();
-    const segment = await this.segmentFor(ref, 'delete device');
+  public async deletePanelUserDevice(
+    ref: PanelUserRef,
+    hwid: string,
+    era: PanelEraObservation,
+  ): Promise<{ total: number }> {
+    const { addressing } = era;
+    const segment = await this.segmentFor(ref, 'delete device', era);
     if (segment === null) {
       throw new ServiceUnavailableException('Remnawave profile cannot be addressed on this panel');
     }
@@ -1656,10 +1973,16 @@ export class RemnawaveApiService {
    * `{ userUuid }`. Returns `{ total }` (should be 0) in the `{ response }`
    * envelope. Used when regenerating a subscription so stale clients can't
    * keep a slot.
+   *
+   * `era` IS REQUIRED for the reason {@link deletePanelUser} states, and this
+   * method carried the same double read as its single-device sibling.
    */
-  public async deleteAllPanelUserDevices(ref: PanelUserRef): Promise<{ total: number }> {
-    const { addressing } = await this.getPanelShape();
-    const segment = await this.segmentFor(ref, 'delete all devices');
+  public async deleteAllPanelUserDevices(
+    ref: PanelUserRef,
+    era: PanelEraObservation,
+  ): Promise<{ total: number }> {
+    const { addressing } = era;
+    const segment = await this.segmentFor(ref, 'delete all devices', era);
     if (segment === null) {
       throw new ServiceUnavailableException('Remnawave profile cannot be addressed on this panel');
     }
@@ -1689,9 +2012,27 @@ export class RemnawaveApiService {
    * no body (or an empty one) rotates the short UUID; the response carries the
    * fresh `subscriptionUrl`. Returns the new URL (or `null` if the panel
    * omitted it).
+   *
+   * `era` IS REQUIRED, for the reason {@link deletePanelUser} states and with
+   * more at stake here than on any of the three deletions. This call is
+   * DESTRUCTIVE and its effect is IRREVERSIBLE: the panel discards the old
+   * short uuid, so every client link already in the customer's hands dies the
+   * instant it returns and no later call can put the old value back.
+   *
+   * It used to read the shape for itself inside {@link segmentFor}, one await
+   * after its caller's guard had read it — and the fifteen-second negative
+   * cache ({@link CAPABILITIES_NEGATIVE_CACHE_TTL_MS}) lets two such reads
+   * legitimately disagree, so "the guard saw `'unknown'`, therefore proceed"
+   * ran straight into "the builder saw `'id'`, therefore fall back through
+   * `panelId` — or the short uuid, or the username — to whatever is live at
+   * that address", and rotated a paying customer's link. Taking the observation
+   * as an argument makes that call impossible to write.
    */
-  public async regeneratePanelUserSubscription(ref: PanelUserRef): Promise<{ subscriptionUrl: string | null }> {
-    const segment = await this.segmentFor(ref, 'revoke subscription');
+  public async regeneratePanelUserSubscription(
+    ref: PanelUserRef,
+    era: PanelEraObservation,
+  ): Promise<{ subscriptionUrl: string | null }> {
+    const segment = await this.segmentFor(ref, 'revoke subscription', era);
     if (segment === null) {
       throw new ServiceUnavailableException('Remnawave profile cannot be addressed on this panel');
     }
@@ -2661,48 +3002,91 @@ export class RemnawaveApiService {
   //  SQUADS & STATUS (existing)
   // ═══════════════════════════════════════════════════════════════════════════
 
-  public async getInternalSquadOptions(): Promise<readonly RemnawaveSquadOptionInterface[]> {
-    const payload = await this.requestJson<GetInternalSquadsCommand.Response>({
-      method: GetInternalSquadsCommand.endpointDetails.REQUEST_METHOD,
-      url: GetInternalSquadsCommand.url,
-    });
-    const parsedPayload = GetInternalSquadsCommand.ResponseSchema.safeParse(payload);
-    if (!parsedPayload.success) {
-      throw new ServiceUnavailableException('Remnawave internal squads are unavailable');
+  /**
+   * Shared tail of both `*Options` reads: decode, or refuse OUT LOUD.
+   *
+   * The refusal is deliberately not an empty list, because the caller can tell
+   * the difference and acts on it. `PlansAdminValidators.assertSquadsAreValid`
+   * catches a throw as "the panel could not be asked" and blocks a squad change;
+   * it reads `[]` as "the panel serves no such squad" and answers the operator
+   * `External squad not found: <uuid>`. A decoder that returned `[]` when it
+   * could not read the panel would produce that confident wrong answer about a
+   * squad that exists — the exact conflation this adapter keeps being bitten by.
+   *
+   * The operator-facing message is unchanged. The REASON goes to the log, where
+   * it names the field that actually failed, so "squads are unavailable" stops
+   * being the end of the investigation.
+   */
+  private readSquadOptions(
+    payload: unknown,
+    listKey: PanelSquadListKey,
+    label: 'internal' | 'external',
+  ): readonly RemnawaveSquadOptionInterface[] {
+    const decoded = decodeSquadOptionList(payload, listKey);
+    if (!decoded.ok) {
+      this.logger.error(`Remnawave ${label} squads could not be read — ${decoded.reason}`);
+      throw new ServiceUnavailableException(`Remnawave ${label} squads are unavailable`);
     }
-    return parsedPayload.data.response.internalSquads.map((squad) => ({
-      uuid: squad.uuid,
-      name: squad.name,
-    }));
+    return decoded.value;
+  }
+
+  /**
+   * `{ uuid, name }` for every internal squad, for the plan squad selectors.
+   *
+   * Decoded by our own {@link decodeSquadOptionList}, never by a vendor zod
+   * schema. `getInternalSquadDetails` below already read this same endpoint
+   * tolerantly and never broke; the option read did not, and its external-squad
+   * twin took every 3.x installation down. See `panel-response-decoders.ts`.
+   */
+  public async getInternalSquadOptions(): Promise<readonly RemnawaveSquadOptionInterface[]> {
+    const payload = await this.requestJson<unknown>({
+      method: 'get',
+      url: PANEL_ROUTES.internalSquads,
+    });
+    return this.readSquadOptions(payload, 'internalSquads', 'internal');
   }
 
   /**
    * Returns full-shape internal squads with `membersCount` / `inboundsCount`
-   * counters, used by the admin "Remnawave → Squads" tab. Falls back to the
-   * Zod-validated option payload when the upstream omits the `info` block
-   * (older panels), so the call always returns sane numbers.
+   * counters, used by the admin "Remnawave → Squads" tab.
+   *
+   * Older panels omit the `info` block that carries the counters, so
+   * `mapInternalSquadDetails` falls back to the length of the row's own
+   * `inbounds` array (and zero members) rather than handing `undefined` to the
+   * table. That mapper never executed a vendor zod schema, which is exactly why
+   * this read survived the 3.x field rename that broke the external-squad
+   * OPTION read — same endpoint, same panel, opposite outcome.
    */
   public async getInternalSquadDetails(): Promise<readonly RemnawaveInternalSquadDetailInterface[]> {
     const payload = await this.requestJson<unknown>({
-      method: GetInternalSquadsCommand.endpointDetails.REQUEST_METHOD,
-      url: GetInternalSquadsCommand.url,
+      method: 'get',
+      url: PANEL_ROUTES.internalSquads,
     });
     return mapInternalSquadDetails(payload);
   }
 
+  /**
+   * `{ uuid, name }` for every external squad, for the plan squad selectors.
+   *
+   * THE LIVE DEFECT THIS REPLACED. This method used to `safeParse` the response
+   * with `GetExternalSquadsCommand` from `@remnawave/backend-contract@2.7.3`.
+   * That schema requires `responseHeaders` on every row; panel 3.x renamed the
+   * field to `responseHeadersAdd` + `responseHeadersRemove` and stopped sending
+   * `responseHeaders` at all, so the parse failed DETERMINISTICALLY and this
+   * threw `ServiceUnavailableException` against a perfectly healthy 3.x panel —
+   * but only once that panel had at least one external squad, since an empty
+   * list satisfies the schema trivially. Hence "intermittent".
+   *
+   * `getExternalSquadDetails`, four lines below, reads the SAME endpoint and
+   * never broke, because it decodes through our own tolerant mapper. That
+   * asymmetry was the shape of the fix.
+   */
   public async getExternalSquadOptions(): Promise<readonly RemnawaveSquadOptionInterface[]> {
-    const payload = await this.requestJson<GetExternalSquadsCommand.Response>({
-      method: GetExternalSquadsCommand.endpointDetails.REQUEST_METHOD,
-      url: GetExternalSquadsCommand.url,
+    const payload = await this.requestJson<unknown>({
+      method: 'get',
+      url: PANEL_ROUTES.externalSquads,
     });
-    const parsedPayload = GetExternalSquadsCommand.ResponseSchema.safeParse(payload);
-    if (!parsedPayload.success) {
-      throw new ServiceUnavailableException('Remnawave external squads are unavailable');
-    }
-    return parsedPayload.data.response.externalSquads.map((squad) => ({
-      uuid: squad.uuid,
-      name: squad.name,
-    }));
+    return this.readSquadOptions(payload, 'externalSquads', 'external');
   }
 
   /**
@@ -2711,8 +3095,8 @@ export class RemnawaveApiService {
    */
   public async getExternalSquadDetails(): Promise<readonly RemnawaveExternalSquadDetailInterface[]> {
     const payload = await this.requestJson<unknown>({
-      method: GetExternalSquadsCommand.endpointDetails.REQUEST_METHOD,
-      url: GetExternalSquadsCommand.url,
+      method: 'get',
+      url: PANEL_ROUTES.externalSquads,
     });
     return mapExternalSquadDetails(payload);
   }
@@ -2729,28 +3113,22 @@ export class RemnawaveApiService {
       };
     }
     try {
-      const payload = await this.requestJson<GetStatusCommand.Response>({
-        method: GetStatusCommand.endpointDetails.REQUEST_METHOD,
-        url: GetStatusCommand.url,
+      const payload = await this.requestJson<unknown>({
+        method: 'get',
+        url: PANEL_ROUTES.authStatus,
       });
-      const parsedPayload = GetStatusCommand.ResponseSchema.safeParse(payload);
-      if (!parsedPayload.success) {
+      const decoded = decodePanelAuthStatus(payload);
+      if (!decoded.ok) {
+        this.logger.error(`Remnawave auth status could not be read — ${decoded.reason}`);
         throw new ServiceUnavailableException('Remnawave auth status is unavailable');
       }
-      const { response } = parsedPayload.data;
       return {
         isConfigured: true,
         isReachable: true,
-        isLoginAllowed: response.isLoginAllowed,
-        isRegisterAllowed: response.isRegisterAllowed,
-        authentication: response.authentication === null
-          ? null
-          : {
-              passwordEnabled: response.authentication.password.enabled,
-              passkeyEnabled: response.authentication.passkey.enabled,
-              oauth2Providers: response.authentication.oauth2.providers,
-            },
-        branding: response.branding,
+        isLoginAllowed: decoded.value.isLoginAllowed,
+        isRegisterAllowed: decoded.value.isRegisterAllowed,
+        authentication: decoded.value.authentication,
+        branding: decoded.value.branding,
       };
     } catch (error) {
       if (error instanceof ServiceUnavailableException) {
@@ -2886,11 +3264,24 @@ export class RemnawaveApiService {
    * `hwid` is unique + non-empty and every `createdAt` is present — a device
    * plan must never be built on an inconsistent list. Row owner fields are
    * ignored (the user is addressed by URL UUID, never by a trusted row field).
+   *
+   * `era` IS OPTIONAL HERE AND REQUIRED ON THE DELETE, and the split is the one
+   * {@link resolvePanelSegment} already draws: a destructive verb may not build
+   * its address from a second, independent reading of the era, while a read has
+   * nothing to agree with and keeps its old behaviour when nothing is passed.
+   *
+   * A GUARDED CALLER SHOULD STILL PASS ONE. This read is not destructive, but
+   * both of its callers act on it: the planner turns it into the persisted
+   * target list, and the executor turns the final one into the post-condition
+   * written to `postconditionMetadata` before a plan certifies itself APPLIED.
+   * Read off a profile the guard did not clear, that certificate describes
+   * somebody else's device list.
    */
   public async strictListUserDevices(
     ref: PanelUserRef,
+    era?: PanelEraObservation,
   ): Promise<RemnawaveStrictOutcome<RemnawaveStrictDeviceList>> {
-    const segment = await this.segmentFor(ref, 'strict list devices');
+    const segment = await this.segmentFor(ref, 'strict list devices', era);
     if (segment === null) return strictUnavailable();
     const transport = await this.strictHttp('get', PANEL_ROUTES.userHwidDevices(segment));
     if (transport.kind !== 'ok') return this.mapStrictTransport(transport);
@@ -2909,11 +3300,26 @@ export class RemnawaveApiService {
       const r = (raw ?? {}) as Record<string, unknown>;
       const hwid = typeof r['hwid'] === 'string' ? r['hwid'] : '';
       const createdAt = typeof r['createdAt'] === 'string' ? r['createdAt'] : '';
+      // Last activity, read the SAME way `mapHwidDevice` reads it for the
+      // cabinet: Remnawave 2.7.x names the field `updatedAt`, later shapes name
+      // it `lastSeenAt`, and both mean "when this registration was last used".
+      // It was already on the wire and was being dropped here, which is what
+      // left the reduction saga choosing a victim by registration date alone.
+      //
+      // NOT fail-closed, unlike `hwid` and `createdAt` above, and deliberately:
+      // a panel that reports no activity for a row is not a panel we
+      // misunderstood, and refusing the whole list over it would strand every
+      // reduction on a version that never sends the field. Absent reads as
+      // `null` - "we do not know" - which the consumer treats as no evidence in
+      // either direction rather than as evidence of disuse.
+      const rawLastSeen = r['lastSeenAt'] ?? r['updatedAt'];
+      const lastSeenAt =
+        typeof rawLastSeen === 'string' && rawLastSeen.length > 0 ? rawLastSeen : null;
       if (hwid.length === 0) return strictInvalidContract('device row has an empty hwid');
       if (createdAt.length === 0) return strictInvalidContract(`device ${hwid} has no createdAt`);
       if (seen.has(hwid)) return strictInvalidContract(`duplicate hwid ${hwid} in device list`);
       seen.add(hwid);
-      devices.push({ hwid, createdAt });
+      devices.push({ hwid, createdAt, lastSeenAt });
     }
     if (typeof record.total !== 'number' || !Number.isInteger(record.total)) {
       return strictInvalidContract('device list "total" is not an integer');
@@ -3054,7 +3460,7 @@ export class RemnawaveApiService {
       longestPage = Math.max(longestPage, usersPayload.length);
 
       for (const candidate of usersPayload) {
-        const user = parsePanelUserRow(candidate);
+        const user = parsePanelUserRow(candidate, this.reportPanelUserShapeDrift);
         if (user !== null) decoded.push(user);
       }
 
@@ -3184,9 +3590,27 @@ export class RemnawaveApiService {
   public async strictDeleteUserDevice(
     ref: PanelUserRef,
     hwid: string,
+    era: PanelEraObservation,
   ): Promise<RemnawaveStrictOutcome<{ readonly total: number }>> {
-    const { addressing } = await this.getPanelShape();
-    const segment = await this.segmentFor(ref, 'strict delete device');
+    // THE CALLER'S OBSERVATION, REQUIRED — the last destructive method that
+    // took its own. It already collapsed the two readings INSIDE this method
+    // into one (the owner key in the body and the segment in the path must at
+    // minimum describe the same panel), but that left the reading its GUARD
+    // decided on and the reading this address is built from as two separate
+    // reads of a value that caches failure for fifteen seconds. The guard
+    // seeing `'unknown'` — the deliberate fail-open, which stays — while this
+    // method saw `'id'` a moment later is the whole hazard: the `'id'` branch
+    // falls back through `remnawavePanelId` → the short uuid from `config_url`
+    // → `remnawavePanelUsername` and unbinds a device from whatever profile is
+    // LIVE at that address.
+    //
+    // REQUIRED rather than optional, matching `deletePanelUser`,
+    // `deletePanelUserDevice`, `deleteAllPanelUserDevices` and
+    // `regeneratePanelUserSubscription`: with exactly one caller the ripple is
+    // contained, and required is what makes "this cannot re-read the era" a
+    // property of the type rather than of a convention.
+    const { addressing } = era;
+    const segment = await this.segmentFor(ref, 'strict delete device', era);
     if (segment === null) return strictUnavailable();
     const transport = await this.strictHttp('post', PANEL_ROUTES.deleteHwidDevice, {
       ...panelDeviceOwnerKey(segment, addressing),

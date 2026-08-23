@@ -97,6 +97,12 @@ describe('PaymentSubscriptionMutationService renewal term queue', () => {
           return { id: 'sub-1', remnawaveId: 'rw-1', expiresAt: data.expiresAt };
         },
       },
+      // No projection row: this subscription holds no add-on, so the recorded
+      // contribution the renewal subtracts before comparing a column with the
+      // stored snapshot is zero. Reading it is not optional — the renewal asks
+      // every time, because a hard zero where a row might exist is a second,
+      // divergent derivation of the baseline.
+      subscriptionEffectiveProjection: { findUnique: async () => null },
       profileSyncJob: { create: async () => ({ id: 'job-1', subscriptionId: 'sub-1' }) },
       transaction: { update: async () => undefined },
     };
@@ -155,8 +161,16 @@ describe('PaymentSubscriptionMutationService renewal term queue', () => {
   });
 
   it('appends a distinct term after the latest scheduled tail instead of reusing it', async () => {
-    const activeEndsAt = new Date('2026-08-01T00:00:00.000Z');
-    const scheduledEndsAt = new Date('2026-08-31T00:00:00.000Z');
+    // ANCHORED TO `now`, not to a literal. `scheduleRenewalTermInTransaction`
+    // picks the tail's `endsAt` as the new term's start only while that instant
+    // is still in the FUTURE (`tail.endsAt.getTime() > now.getTime()`), and the
+    // double below returns a tail with no `status`, so that clock comparison is
+    // the only thing keeping this case on the branch it exists to pin. Written
+    // as `2026-08-31` it stopped meaning "a scheduled tail ahead of us" on
+    // 2026-09-01 — the same way two other specs in this repo silently became
+    // assertions that an expired term still sells.
+    const activeEndsAt = new Date(Date.now() - 21 * 86_400_000);
+    const scheduledEndsAt = new Date(Date.now() + 9 * 86_400_000);
     const creates: Array<Record<string, unknown>> = [];
     const tx = {
       $queryRaw: async () => [{ id: 'sub-1', status: 'ACTIVE' }],
@@ -250,6 +264,12 @@ describe('PaymentSubscriptionMutationService renewal term queue', () => {
           return { id: 'sub-1', remnawaveId: 'rw-1', expiresAt: data.expiresAt };
         },
       },
+      // No projection row: this subscription holds no add-on, so the recorded
+      // contribution the renewal subtracts before comparing a column with the
+      // stored snapshot is zero. Reading it is not optional — the renewal asks
+      // every time, because a hard zero where a row might exist is a second,
+      // divergent derivation of the baseline.
+      subscriptionEffectiveProjection: { findUnique: async () => null },
       profileSyncJob: {
         create: async () => ({ id: 'job-1', subscriptionId: 'sub-1', targetRemnawaveId: 'rw-1' }),
       },
@@ -333,6 +353,12 @@ describe('PaymentSubscriptionMutationService renewal term queue', () => {
           return { id: 'sub-1', remnawaveId: 'rw-1', expiresAt: data.expiresAt };
         },
       },
+      // No projection row: this subscription holds no add-on, so the recorded
+      // contribution the renewal subtracts before comparing a column with the
+      // stored snapshot is zero. Reading it is not optional — the renewal asks
+      // every time, because a hard zero where a row might exist is a second,
+      // divergent derivation of the baseline.
+      subscriptionEffectiveProjection: { findUnique: async () => null },
       profileSyncJob: { create: async () => ({ id: 'job-1', subscriptionId: 'sub-1' }) },
       transaction: { update: async () => undefined },
     };

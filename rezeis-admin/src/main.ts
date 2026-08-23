@@ -56,16 +56,20 @@ async function bootstrap(): Promise<void> {
   // endpoint isn't open to all origins while HTTP CORS is locked down.
   app.useWebSocketAdapter(new AdminIoAdapter(app, appConfiguration.corsOrigins));
   app.setGlobalPrefix('api');
-  // Serve admin-side uploads (currently FAQ photos/videos) under
-  // `/uploads/*`. Files live on disk in `data/uploads/<feature>/...`
-  // and are referenced by the corresponding entity (e.g. `FaqItem.mediaUrls`).
-  // The path is intentionally OUTSIDE the `/api` prefix so the SPA
-  // can render `<img src="/uploads/faq/...">` directly without auth.
+  // Serve admin-side uploads (FAQ photos/videos, custom icons, branding assets,
+  // bot banners) under `/uploads/*`. Files live on disk in
+  // `data/uploads/<feature>/...` and are referenced by the corresponding entity
+  // (e.g. `FaqItem.mediaUrls`). The path is intentionally OUTSIDE the `/api`
+  // prefix so the SPA can render `<img src="/uploads/faq/...">` directly
+  // without auth — which also puts it outside every Nest guard, interceptor and
+  // filter. `setHeaders` is the only place a response header can be attached to
+  // these files.
   const uploadsRoot = resolveUploadsRoot();
   app.useStaticAssets(uploadsRoot, {
     prefix: '/uploads',
     maxAge: '1y',
     immutable: true,
+    setHeaders: applyUploadResponseHeaders,
   });
   app.useGlobalPipes(
     new ValidationPipe({
@@ -103,6 +107,62 @@ async function bootstrap(): Promise<void> {
   warnOnUnreachableCrossHostUrls();
 }
 
+/**
+ * Response headers for everything under `/uploads`.
+ *
+ * This is the SECOND layer under the upload validators, and it is deliberately
+ * independent of them: `assertSafeSvg` decides what may be written, this
+ * decides what a browser may do with what was written. A future gap in the
+ * reject-list then costs an upload, not an execution.
+ *
+ * It has to live here because `/uploads` is `express.static`, outside
+ * `setGlobalPrefix('api')` and therefore outside every guard and interceptor,
+ * and because the app-wide helmet CSP is `reportOnly` in production and `false`
+ * everywhere else (`buildHelmetOptions`) — so nothing was enforcing anything on
+ * these paths.
+ *
+ *   - `Content-Security-Policy: default-src 'none'; sandbox` — an SVG opened as
+ *     a top-level document gets no script, no network, and an opaque origin, so
+ *     it cannot reach the admin session even if it carries active content.
+ *     Set on EVERY upload, not only markup: it costs nothing on a PNG.
+ *   - `Content-Disposition: attachment` for markup extensions — navigating to
+ *     the file downloads it instead of rendering it in the admin origin.
+ *     Subresource loads are unaffected, so `<img src="/uploads/branding/x.svg">`
+ *     and the PWA manifest icon still render.
+ *   - `X-Content-Type-Options: nosniff` — stops a mislabelled file from being
+ *     re-typed into something executable.
+ *
+ * reiwa proxies these same directories onto the subscriber-facing origin, so
+ * every header here protects two origins.
+ *
+ * Exported for the guarding spec ONLY. It is the single origin of this list:
+ * reiwa keeps a hand-copy of it (see the mirror note above), and a spec that
+ * re-typed the literals here would go green on a one-sided edit that changed
+ * them. Importing this file costs nothing at test time — the bootstrap is
+ * behind the `require.main` check at the bottom.
+ */
+export const MARKUP_UPLOAD_EXTENSIONS: readonly string[] = [
+  '.svg',
+  '.svgz',
+  '.xml',
+  '.xhtml',
+  '.html',
+  '.htm',
+  '.xht',
+];
+
+export function applyUploadResponseHeaders(
+  res: { setHeader(name: string, value: string): void },
+  filePath: string,
+): void {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
+  const lower = filePath.toLowerCase();
+  if (MARKUP_UPLOAD_EXTENSIONS.some((extension) => lower.endsWith(extension))) {
+    res.setHeader('Content-Disposition', 'attachment');
+  }
+}
+
 function resolveUploadsRoot(): string {
   const fromEnv = process.env.ADMIN_UPLOADS_DIR;
   if (fromEnv && fromEnv.trim().length > 0) {
@@ -111,4 +171,12 @@ function resolveUploadsRoot(): string {
   return resolve(process.cwd(), 'data', 'uploads');
 }
 
-void bootstrap();
+// Start the server only when this file IS the process entrypoint
+// (`node dist/main.js`, `nest start app`). Importing it — which the guarding
+// test for `applyUploadResponseHeaders` has to do, because `/uploads` is
+// configured here and nowhere else — must not stand up a Nest app and open
+// database connections. CommonJS output, so `require.main` is the standard
+// check; the Dockerfile's `CMD ["node", "dist/main.js"]` satisfies it.
+if (require.main === module) {
+  void bootstrap();
+}

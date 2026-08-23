@@ -206,7 +206,32 @@ function inputFor(
     sections,
     strategy: 'overwrite',
     dryRun: false,
-    importerPermissions: new Set(['rbac_roles:edit', 'payments:view']),
+    // These cases are about the section PLAN (absent / rejected /
+    // round-tripped), so the importer has to be allowed to write every section
+    // they exercise, or each one fails on the gate instead of on the thing it
+    // means to describe.
+    //
+    // This list shadows `SECTION_REQUIRED_PERMISSIONS` in the service and goes
+    // stale every time a gate is added — it has now done so twice. It is
+    // spelled out rather than derived because deriving it from the map would
+    // make these cases agree with whatever the map happens to say, and the map
+    // is not what they are testing. If a section here starts reporting
+    // `failed` with a permission error, the token it names is the one to add.
+    importerPermissions: new Set([
+      'rbac_roles:edit',
+      'payments:view',
+      'settings:edit',
+      'webhooks:create',
+      'webhooks:edit',
+      'automations:create',
+      'automations:edit',
+      'admins:edit',
+      'blocked_ips:create',
+      'blocked_ips:delete',
+      'notifications:edit',
+      'faq:create',
+      'faq:edit',
+    ]),
   };
 }
 

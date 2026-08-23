@@ -10,12 +10,14 @@ import {
 } from '@nestjs/common';
 import { Prisma, Settings } from '@prisma/client';
 import { ConfigType } from '@nestjs/config';
+import { ModuleRef } from '@nestjs/core';
 import * as webpush from 'web-push';
 
 import { appConfig } from '../../../common/config/app.config';
 import { paymentsConfig } from '../../../common/config/payments.config';
 import { decryptTotpSecret, encryptTotpSecret } from '../../two-factor/utils/secret-cipher';
 import { ReiwaCacheInvalidatorService } from '../../bot-config/services/reiwa-cache-invalidator.service';
+import { ReiwaRelayQueueService } from '../../notifications/services/reiwa-relay-queue.service';
 import { PaymentOpsAlertSettingsInterface } from '../../../common/interfaces/payment-ops-alert-settings.interface';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import {
@@ -204,6 +206,10 @@ export class SettingsService {
   private static readonly SETTINGS_CACHE_TTL_MS = 5_000;
   private settingsCache: { record: Settings; at: number } | null = null;
 
+  /** Lazily resolved reiwa relay producer; see `resolveRelayQueue`. */
+  private relayQueue: ReiwaRelayQueueService | null = null;
+  private relayQueueResolved = false;
+
   public constructor(
     private readonly prismaService: PrismaService,
     private readonly iconUploadService: IconUploadService,
@@ -218,6 +224,12 @@ export class SettingsService {
     private readonly reiwaCacheInvalidator?: ReiwaCacheInvalidatorService,
     @Optional()
     private readonly systemEvents?: SystemEventsService,
+    /**
+     * Container handle for the lazy reiwa-relay lookup. Last and `@Optional()`
+     * so every positional construction in the specs keeps working.
+     */
+    @Optional()
+    private readonly moduleRef?: ModuleRef,
   ) {}
 
   /**
@@ -274,29 +286,43 @@ export class SettingsService {
     if (settings.chatId === null) {
       throw new BadRequestException('PAYMENT_OPS_ALERT_CHAT_NOT_CONFIGURED');
     }
-    const botToken = this.paymentConfiguration?.botToken ?? null;
-    if (botToken === null) {
-      throw new ServiceUnavailableException('BOT_TOKEN is not configured');
-    }
-    if (this.httpService === undefined) {
-      throw new ServiceUnavailableException('HTTP client is not configured');
-    }
     const message = buildPaymentOpsAlertTestMessage({
       settings,
       note: input.sendPaymentOpsAlertTestDto.note ?? null,
       adminId: input.currentAdmin.id,
     });
-    const payload: Record<string, unknown> = {
-      chat_id: settings.chatId,
-      text: message,
-      disable_web_page_preview: true,
-    };
-    if (settings.threadId !== null) {
-      payload.message_thread_id = Number(settings.threadId);
+    // Direct first, relay second - the SAME order `PaymentOpsAlertService`
+    // takes for a real alert. A test button that reaches Telegram by a route
+    // the alert does not use is testing the wrong thing: on the split
+    // deployment this product ships, the token lives in reiwa, and this used
+    // to answer 503 while real alerts would have relayed perfectly well.
+    const botToken = await this.resolveTelegramBotToken();
+    let via: 'direct' | 'relay';
+    if (botToken !== null) {
+      if (this.httpService === undefined) {
+        throw new ServiceUnavailableException('HTTP client is not configured');
+      }
+      const payload: Record<string, unknown> = {
+        chat_id: settings.chatId,
+        text: message,
+        disable_web_page_preview: true,
+      };
+      if (settings.threadId !== null) {
+        payload.message_thread_id = Number(settings.threadId);
+      }
+      await firstValueFrom(
+        this.httpService.post(`https://api.telegram.org/bot${botToken}/sendMessage`, payload),
+      );
+      via = 'direct';
+    } else if (await this.relayPaymentOpsAlertTest({ settings, message, input })) {
+      via = 'relay';
+    } else {
+      // Its own code, not the generic one: the panel maps this to copy that
+      // names the remedy (Settings -> Bot Token). Saying `BOT_TOKEN` here
+      // would send the operator to an environment variable this product
+      // deliberately does not use.
+      throw new ServiceUnavailableException('PAYMENT_OPS_ALERT_BOT_TOKEN_NOT_CONFIGURED');
     }
-    await firstValueFrom(
-      this.httpService.post(`https://api.telegram.org/bot${botToken}/sendMessage`, payload),
-    );
     await this.prismaService.adminAuditLog.create({
       data: buildAdminAuditLogData({
         action: 'payments.alert.test.sent',
@@ -306,9 +332,56 @@ export class SettingsService {
           requestId: input.requestMetadata.requestId,
           chatId: settings.chatId,
           threadId: settings.threadId,
+          via,
         },
       }),
     });
+  }
+
+  /**
+   * Hand the test alert to the durable reiwa relay when this host holds no
+   * bot token. Answers whether the relay took it.
+   *
+   * Through `ReiwaRelayQueueService`, never `BotNotifierClient`:
+   * `RELAY_DIRECT_DELIVERY_EXCEPTIONS` names the files allowed to bypass the
+   * queue and `test/reiwa-relay-bypass-invariant.spec.ts` fails on any caller
+   * that is not on it. No `parseMode` for the same reason as the alert path:
+   * the direct branch above posts with no `parse_mode`, and an operator note
+   * carrying `<` or `&` must not start being read as markup.
+   */
+  private async relayPaymentOpsAlertTest(args: {
+    readonly settings: PaymentOpsAlertSettingsInterface;
+    readonly message: string;
+    readonly input: SendPaymentOpsAlertTestInput;
+  }): Promise<boolean> {
+    const queue = this.resolveRelayQueue();
+    if (queue === null || !queue.isEnabled || args.settings.chatId === null) {
+      return false;
+    }
+    // Keyed on the request id: one press of the button is one message, and a
+    // queue retry of that press dedups against itself.
+    await queue.enqueue('reiwa.channel.broadcast', {
+      eventId: `payops-test:${args.input.requestMetadata.requestId}`.slice(0, 128),
+      chatId: args.settings.chatId,
+      ...(args.settings.threadId === null
+        ? {}
+        : { topicThreadId: Number(args.settings.threadId) }),
+      text: args.message,
+    });
+    return true;
+  }
+
+  /** Lazy container lookup; `null` when `ReiwaRelayModule` is not registered. */
+  private resolveRelayQueue(): ReiwaRelayQueueService | null {
+    if (this.relayQueueResolved) return this.relayQueue;
+    this.relayQueueResolved = true;
+    try {
+      this.relayQueue =
+        this.moduleRef?.get(ReiwaRelayQueueService, { strict: false }) ?? null;
+    } catch {
+      this.relayQueue = null;
+    }
+    return this.relayQueue;
   }
 
   /**
@@ -481,6 +554,13 @@ export class SettingsService {
    * page. It folds the singleton `settings` row into a single JSON object so
    * the frontend can hydrate every panel from one request without making the
    * UI aware of the DB shape.
+   *
+   * `systemNotifications` goes out through `maskSystemNotifications`. It used
+   * to go out verbatim, which shipped `email.password` — a PLAINTEXT string in
+   * that blob — to anyone holding `settings:view`, eleven lines above the
+   * comment promising that only a presence flag is sent. The dedicated
+   * `GET /admin/email/settings` masks the same value and demands `email:view`;
+   * this endpoint was a way around both.
    */
   public async getOverview(): Promise<{
     readonly accessMode: PlatformSettingsInterface['accessMode'];
@@ -500,15 +580,16 @@ export class SettingsService {
     readonly referralSettings: Record<string, unknown>;
     readonly partnerSettings: Record<string, unknown>;
     readonly botTokenConfigured: boolean;
+    readonly emailConfigured: boolean;
+    readonly emailPasswordSet: boolean;
     readonly webPush: {
       readonly configured: boolean;
       readonly publicKey: string;
-      readonly source: 'settings' | 'env' | null;
     };
   }> {
     const settings = await this.getOrCreateSettingsRecord(this.prismaService);
     const platform = mapPlatformSettings(settings);
-    const systemNotifications = readJsonObject(settings.systemNotifications);
+    const secretFlags = readSystemNotificationSecretFlags(settings.systemNotifications);
     return {
       // Flat platform fields — consumed directly by the settings SPA tabs.
       accessMode: platform.accessMode,
@@ -519,7 +600,7 @@ export class SettingsService {
       channelLink: platform.channelLink,
       channelId: platform.channelId,
       userNotifications: readJsonObject(settings.userNotifications),
-      systemNotifications,
+      systemNotifications: maskSystemNotifications(settings.systemNotifications),
       platform,
       branding: readBrandingSettings(settings.brandingSettings),
       platformBranding: readPlatformBranding(settings.platformPolicy),
@@ -531,10 +612,11 @@ export class SettingsService {
       // save (the PATCH persists fine), which reads as "settings don't save".
       referralSettings: readJsonObject(settings.referralSettings),
       partnerSettings: readJsonObject(settings.partnerSettings),
-      // Only a presence flag — the encrypted token is never sent to the SPA.
-      botTokenConfigured:
-        typeof systemNotifications.botTokenEnc === 'string' &&
-        systemNotifications.botTokenEnc.length > 0,
+      // Presence flags only — the masked secrets never reach the SPA, so the
+      // UI still gets to render "configured" without holding the value.
+      botTokenConfigured: secretFlags.botTokenConfigured,
+      emailConfigured: secretFlags.emailConfigured,
+      emailPasswordSet: secretFlags.emailPasswordSet,
       // Web-push VAPID status (public key is safe to expose; private never is).
       webPush: await this.getWebPushStatus(),
     };
@@ -564,19 +646,56 @@ export class SettingsService {
     }
   }
 
-  // ── Web-push VAPID (panel-managed, env fallback) ──────────────────────────
+  /**
+   * The Telegram bot token to send with: the panel-managed (encrypted)
+   * token first, the `BOT_TOKEN` environment variable second.
+   *
+   * Same order as `BroadcastDeliveryService.getBotToken`,
+   * `BroadcastMediaUploadService.resolveBotToken` and
+   * `BackupService.resolveBotToken`, and the order the panel's own Bot Token
+   * card already promises the operator ("No token set — the BOT_TOKEN
+   * environment variable is used if present").
+   *
+   * Both Telegram test endpoints below used to read ONLY the environment
+   * value. On a deployment that keeps every setting in the panel — the rule
+   * this product is built around — that is always null, so the test button
+   * answered 503 no matter what the operator had configured.
+   */
+  private async resolveTelegramBotToken(): Promise<string | null> {
+    const stored = await this.getDecryptedBotToken();
+    if (stored !== null && stored.length > 0) {
+      return stored;
+    }
+    return this.paymentConfiguration?.botToken ?? null;
+  }
+
+  // ── Web-push VAPID (panel-managed, the only source) ───────────────────────
 
   /**
-   * Resolve the active VAPID keypair for web-push: the panel-managed keys
-   * stored (encrypted) in `systemNotifications.webPush` take precedence, with
-   * the `VAPID_*` environment variables as a fallback. Returns `null` when
-   * neither source is configured. Consumed by `WebPushService` at send time.
+   * Resolve the active VAPID keypair for web-push from the panel-managed keys
+   * stored (encrypted) in `systemNotifications.webPush`. Returns `null` when
+   * the panel holds none. Consumed by `WebPushService` at send time.
+   *
+   * This used to fall back to `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` /
+   * `VAPID_CONTACT_EMAIL`. That branch is gone: every setting on this product
+   * lives in the panel, and a second place to configure the same thing is a
+   * second place for it to disagree — an operator who rotates the keypair in
+   * Settings → Web-push while a stale `.env` still holds the old pair got
+   * whichever one this function happened to reach first.
+   *
+   * The environment variables are now a MIGRATION SOURCE ONLY, read in exactly
+   * one place — `WebPushService.adoptLegacyEnvKeys` — which copies them into
+   * the panel once and never serves from them. Nothing else may read them; a
+   * resolver that does re-creates the two-sources-of-truth this removed.
+   *
+   * A decryption failure returns `null` rather than degrading to some other
+   * source, because there is no other source: push is off, and
+   * `WebPushService.onModuleInit` says so loudly (see there).
    */
   public async getDecryptedWebPushConfig(): Promise<{
     readonly publicKey: string;
     readonly privateKey: string;
     readonly subject: string;
-    readonly source: 'settings' | 'env';
   } | null> {
     const settings = await this.getSettingsRecord(this.prismaService);
     const webPush =
@@ -589,38 +708,32 @@ export class SettingsService {
     if (publicKey.length > 0 && privateKeyEnc.length > 0 && cryptKey) {
       try {
         const privateKey = decryptTotpSecret(privateKeyEnc, cryptKey);
-        return { publicKey, privateKey, subject: toMailto(contactEmail), source: 'settings' };
+        return { publicKey, privateKey, subject: toMailto(contactEmail) };
       } catch (err: unknown) {
-        this.logger.warn(
-          `Failed to decrypt stored VAPID key, falling back to env: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
+        this.logger.error(
+          `Stored VAPID private key could not be decrypted, so web-push is DISABLED — ` +
+            `regenerate the keypair in Settings → Web-push (this invalidates existing ` +
+            `subscriptions): ${err instanceof Error ? err.message : String(err)}`,
         );
       }
-    }
-    const envPublic = (process.env.VAPID_PUBLIC_KEY ?? '').trim();
-    const envPrivate = (process.env.VAPID_PRIVATE_KEY ?? '').trim();
-    const envContact = (process.env.VAPID_CONTACT_EMAIL ?? '').trim();
-    if (envPublic.length > 0 && envPrivate.length > 0) {
-      return {
-        publicKey: envPublic,
-        privateKey: envPrivate,
-        subject: toMailto(envContact),
-        source: 'env',
-      };
     }
     return null;
   }
 
-  /** Public VAPID key + source for the SPA + the public-key endpoints. */
+  /**
+   * Public VAPID key for the SPA + the public-key endpoints.
+   *
+   * No `source` field: there is one source. It used to say `settings` or `env`
+   * and the settings card rendered it, which is exactly how a deployment could
+   * show "configured" while the operator's panel entry was empty.
+   */
   public async getWebPushStatus(): Promise<{
     readonly configured: boolean;
     readonly publicKey: string;
-    readonly source: 'settings' | 'env' | null;
   }> {
     const config = await this.getDecryptedWebPushConfig();
-    if (config === null) return { configured: false, publicKey: '', source: null };
-    return { configured: true, publicKey: config.publicKey, source: config.source };
+    if (config === null) return { configured: false, publicKey: '' };
+    return { configured: true, publicKey: config.publicKey };
   }
 
   /**
@@ -658,7 +771,13 @@ export class SettingsService {
     return { publicKey };
   }
 
-  /** Clear panel-managed VAPID keys (web-push then falls back to env, if any). */
+  /**
+   * Clear the panel-managed VAPID keys, which now disables web-push outright —
+   * there is no environment fallback left to catch it. The clear is permanent
+   * across restarts: `WebPushService.adoptLegacyEnvKeys` checks the
+   * `webPushEnvAdoptedAt` marker before it looks at `VAPID_*`, so a leftover
+   * `.env` pair is not re-adopted behind the operator on the next boot.
+   */
   public async clearWebPushKeys(input: {
     readonly currentAdmin: CurrentAdminInterface;
     readonly requestMetadata: RequestMetadataInterface;
@@ -708,6 +827,10 @@ export class SettingsService {
    * Merge-updates the boolean toggles for end-user and/or operator
    * notifications. Either branch may be partially supplied — keys absent
    * from the patch keep their previous values.
+   *
+   * Both exits mask `systemNotifications` for the same reason `getOverview`
+   * does: this response echoed the whole blob back, plaintext SMTP password
+   * included, and the SPA's toggle handler re-reads it.
    */
   public async updateNotificationToggles(input: UpdateNotificationsTogglesInput): Promise<{
     readonly userNotifications: Record<string, unknown>;
@@ -717,7 +840,7 @@ export class SettingsService {
       const current = await this.getOrCreateSettingsRecord(this.prismaService);
       return {
         userNotifications: readJsonObject(current.userNotifications),
-        systemNotifications: readJsonObject(current.systemNotifications),
+        systemNotifications: maskSystemNotifications(current.systemNotifications),
       };
     }
     const settings = await this.prismaService.$transaction(
@@ -755,7 +878,7 @@ export class SettingsService {
     );
     return {
       userNotifications: readJsonObject(settings.userNotifications),
-      systemNotifications: readJsonObject(settings.systemNotifications),
+      systemNotifications: maskSystemNotifications(settings.systemNotifications),
     };
   }
 
@@ -928,7 +1051,7 @@ export class SettingsService {
     if (!config.enabled || config.chatId === null) {
       throw new BadRequestException('TELEGRAM_DELIVERY_NOT_CONFIGURED');
     }
-    const botToken = this.paymentConfiguration?.botToken ?? null;
+    const botToken = await this.resolveTelegramBotToken();
     if (botToken === null) {
       throw new ServiceUnavailableException('BOT_TOKEN is not configured');
     }
@@ -1740,6 +1863,56 @@ function mergeJsonObject(
 ): Record<string, unknown> {
   const base = readJsonObject(existing);
   return { ...base, ...patch };
+}
+
+/**
+ * Top-level keys of `Settings.systemNotifications` that carry a credential and
+ * must never be serialised to a client:
+ *
+ *   • `email`      — SMTP config whose `password` is stored in PLAINTEXT.
+ *                    `GET /admin/email/settings` masks it and requires
+ *                    `email:view`; the settings overview did neither.
+ *   • `botTokenEnc`— the admin bot token ciphertext. Encrypted at rest, but
+ *                    ciphertext is still the secret's material and there has
+ *                    never been a reason to hand it out; the whole point of
+ *                    `botTokenConfigured` was to avoid doing so.
+ *   • `webPush`    — holds `privateKeyEnc`, the VAPID private key.
+ *
+ * They are DROPPED rather than blanked, and that is deliberate. The SPA's
+ * system-notification toggle handler PATCHes back the whole object it last
+ * read (`{ ...notifSettings, [key]: !current }`), and `mergeJsonObject`
+ * replaces top-level keys wholesale. Returning `email` with `password`
+ * nulled-out would therefore make the next toggle click ERASE the stored SMTP
+ * password. A key that is absent from the patch is left untouched by the
+ * merge, so dropping is the only masking that survives the round trip.
+ */
+const SECRET_SYSTEM_NOTIFICATION_KEYS: readonly string[] = ['email', 'botTokenEnc', 'webPush'];
+
+/** Copy of `systemNotifications` with every credential-bearing key removed. */
+function maskSystemNotifications(raw: unknown): Record<string, unknown> {
+  const source = readJsonObject(raw);
+  const masked: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (SECRET_SYSTEM_NOTIFICATION_KEYS.includes(key)) continue;
+    masked[key] = value;
+  }
+  return masked;
+}
+
+/** Presence flags standing in for what `maskSystemNotifications` removed. */
+function readSystemNotificationSecretFlags(raw: unknown): {
+  readonly botTokenConfigured: boolean;
+  readonly emailConfigured: boolean;
+  readonly emailPasswordSet: boolean;
+} {
+  const systemNotifications = readJsonObject(raw);
+  const email = readJsonObject(systemNotifications.email);
+  const botTokenEnc = systemNotifications.botTokenEnc;
+  return {
+    botTokenConfigured: typeof botTokenEnc === 'string' && botTokenEnc.length > 0,
+    emailConfigured: typeof email.host === 'string' && email.host.trim().length > 0,
+    emailPasswordSet: typeof email.password === 'string' && email.password.length > 0,
+  };
 }
 
 function readTelegramDeliveryConfig(systemNotifications: unknown): TelegramDeliveryConfig {

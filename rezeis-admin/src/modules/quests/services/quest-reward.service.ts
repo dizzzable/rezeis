@@ -16,6 +16,7 @@ import {
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
+import { patchSnapshotNumeric } from '../../subscriptions/services/plan-inherited-limits.util';
 import { SubscriptionMutationsService } from '../../subscriptions/services/subscription-mutations.service';
 import { buildPlanSnapshot } from '../../users/utils/plan-snapshot.util';
 import { QuestClaimResult } from '../interfaces/quest-claim.interface';
@@ -211,14 +212,50 @@ export class QuestRewardService {
         case 'TRAFFIC': {
           const subId = await this.resolveActiveSubscriptionId(userId);
           if (subId !== null) {
+            // The row lock is what lets the increment below be written as an
+            // absolute value. It has to be absolute: `planSnapshot` is JSON and
+            // cannot be incremented, so the column and the snapshot would drift
+            // apart under two concurrent quest payouts — and a column that no
+            // longer matches its snapshot is exactly the "operator override"
+            // signal this write exists to avoid raising. Same lock, same
+            // reason, as `PromocodeRewardsService.applyTrafficReward` and
+            // `ReferralPointsExchangeService`'s TRAFFIC branch.
+            await tx.$queryRaw(
+              Prisma.sql`SELECT "id" FROM "subscriptions" WHERE "id" = ${subId} FOR UPDATE`,
+            );
             const sub = await tx.subscription.findUnique({
               where: { id: subId },
-              select: { trafficLimit: true },
+              // `planSnapshot` is read so the top-up can re-declare the raised
+              // value as plan-given; see `patchSnapshotNumeric` just below.
+              select: { trafficLimit: true, planSnapshot: true },
             });
             if (sub?.trafficLimit != null) {
+              const trafficLimitAfter = sub.trafficLimit + quest.rewardAmount;
+              // The snapshot moves with the column, exactly as the promocode
+              // EXTRA_TRAFFIC reward and the referral points exchange do. That
+              // leaves the two in step, so `resolveInheritedPlanLimitUpdate`
+              // still reads the subscription as tracking its plan and the
+              // customer's next renewal resets the traffic to the plan's own
+              // limit.
+              //
+              // Deliberate, and the same rule for every reward path: a quest
+              // top-up is a bonus for the CURRENT period, not a permanent
+              // change to the priced good. Omitting this write would silently
+              // declare an operator override and make the bonus outlive every
+              // renewal for the rest of the subscription's life — as a raw
+              // column bump that routes around `SubscriptionEffectiveProjection`,
+              // which is where a genuinely PURCHASED permanent extra belongs
+              // (the durable add-on entitlement model), not here.
               await tx.subscription.update({
                 where: { id: subId },
-                data: { trafficLimit: { increment: quest.rewardAmount } },
+                data: {
+                  trafficLimit: trafficLimitAfter,
+                  planSnapshot: patchSnapshotNumeric(
+                    sub.planSnapshot,
+                    'trafficLimit',
+                    trafficLimitAfter,
+                  ) as Prisma.InputJsonValue,
+                },
               });
               syncSubscriptionId = subId;
             }

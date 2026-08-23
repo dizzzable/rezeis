@@ -7,6 +7,7 @@ import { BadRequestException, ConflictException, ForbiddenException, Unauthorize
 import { UserRole } from '@prisma/client';
 
 import { AdminAuthService } from '../src/modules/auth/services/admin-auth.service';
+import { PasswordHashService } from '../src/modules/auth/services/password-hash.service';
 
 interface MockAdminUserAuthRecord {
   readonly id: string;
@@ -89,11 +90,26 @@ interface MockJwtService {
 }
 
 interface MockPasswordHashService {
-  readonly hashPassword: (input: { readonly plainTextPassword: string }) => Promise<string>;
+  readonly hashPassword: (input: {
+    readonly plainTextPassword: string;
+    readonly audience: 'admin' | 'subscriber';
+  }) => Promise<string>;
   readonly verifyPassword: (input: {
     readonly plainTextPassword: string;
     readonly passwordHash: string;
   }) => Promise<boolean>;
+  /**
+   * NOT a stub. `loginAdmin()` asks this after a successful sign-in so it can
+   * re-hash a password stored below the current scrypt work factor, and a fake
+   * that answered a constant would decide the outcome of that branch for every
+   * case in this file. The real predicate answers `false` for the placeholder
+   * hashes these fixtures use ("stored-hash" parses as nothing), which is the
+   * correct answer and leaves every assertion below about something else.
+   *
+   * The upgrade itself is proved end to end against the real hasher in
+   * `test/password-hash-upgrade-on-login.spec.ts`.
+   */
+  readonly needsRehash: (passwordHash: string) => boolean;
 }
 
 interface MockAuthConfiguration {
@@ -126,6 +142,7 @@ function createAdminAuthService(input: {
   readonly findUniqueCalls: unknown[];
   readonly hashCalls: Array<{
     readonly plainTextPassword: string;
+    readonly audience: 'admin' | 'subscriber';
   }>;
   readonly jwtPayloads: object[];
   readonly updateCalls: unknown[];
@@ -140,6 +157,7 @@ function createAdminAuthService(input: {
   const findUniqueCalls: unknown[] = [];
   const hashCalls: Array<{
     readonly plainTextPassword: string;
+    readonly audience: 'admin' | 'subscriber';
   }> = [];
   const jwtPayloads: object[] = [];
   const updateCalls: unknown[] = [];
@@ -227,6 +245,8 @@ function createAdminAuthService(input: {
       verifyCalls.push(verifyInput);
       return input.verifyPasswordResult ?? true;
     },
+    needsRehash: (passwordHash: string): boolean =>
+      new PasswordHashService().needsRehash(passwordHash, 'admin'),
   };
   const service = new AdminAuthService(
     {
@@ -339,7 +359,11 @@ describe('AdminAuthService', () => {
       requestMetadata: REQUEST_METADATA,
     });
     assert.deepStrictEqual(countCalls, [1]);
-    assert.deepStrictEqual(hashCalls, [{ plainTextPassword: 'strong-password' }]);
+    // The bootstrap DEV account is an OPERATOR credential: it lands in
+    // `AdminUser` and is verified by `loginAdmin`, so it mints at the admin row.
+    assert.deepStrictEqual(hashCalls, [
+      { plainTextPassword: 'strong-password', audience: 'admin' },
+    ]);
     assert.equal(createCalls.length, 1);
     assert.deepStrictEqual(createCalls[0], {
       data: {

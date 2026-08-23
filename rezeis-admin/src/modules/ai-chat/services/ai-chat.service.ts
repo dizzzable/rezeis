@@ -192,9 +192,22 @@ export class AiChatService {
    * The properties a reader should not have to discover: this survives
    * requests, not restarts; the API and worker containers each hold their own
    * copy and never see each other's; and a second API replica would answer
-   * "no such conversation" for a thread its sibling is holding. All three are
-   * acceptable only because this surface has no UI and no callers — see the
-   * eviction ceilings above for what keeps it bounded meanwhile.
+   * "no such conversation" for a thread its sibling is holding.
+   *
+   * What makes that tolerable is NOT "no callers". `AiChatController` is
+   * `@Controller('ai-chat')` with five live routes, `AiChatModule` is
+   * registered in `src/app.module.ts`, and `POST ai-chat/message` spends the
+   * operator's own OpenAI key for any admin holding `settings:edit`.
+   *
+   * What is true is that no UI calls it: nothing under `rezeis-admin/web`
+   * references `ai-chat`, and the cabinet's AI chat is a SEPARATE
+   * implementation in `reiwa` (`src/api/routes/ai-chat.ts`, with its own
+   * Redis-backed `ConversationMemory`) that never touches these Maps. So the
+   * only party who can lose anything here is an admin driving the routes
+   * directly, and what they lose to a restart or a second replica is a thread,
+   * not money already spent or customer data. See the eviction ceilings above
+   * for what keeps it bounded meanwhile. Ship a UI, or run more than one API
+   * replica, and this has to become a real store.
    */
   private readonly conversations = new Map<string, ConversationRecord>();
   private readonly messages = new Map<string, MessageRecord[]>();

@@ -24,7 +24,7 @@ export const PLAN_SQUAD_PROPAGATION_CAUSE = 'PLAN_SQUAD_UPDATE';
  */
 export const PLAN_SQUAD_PROPAGATION_ENQUEUE_LIMIT = 100;
 
-/** `updateMany`/`createMany` chunk size — keeps bind-parameter counts sane. */
+/** `createMany` chunk size — keeps bind-parameter counts sane. */
 const PROPAGATION_CHUNK_SIZE = 500;
 
 /** Statuses whose panel profile is live enough to be worth pushing to now. */
@@ -70,6 +70,11 @@ interface PropagationCandidate {
   readonly remnawaveId: string | null;
   readonly internalSquads: readonly string[];
   readonly externalSquad: string | null;
+  /**
+   * Read so the propagation can re-declare the squads it is about to write as
+   * plan-given; see {@link patchSnapshotSquads}.
+   */
+  readonly planSnapshot: Prisma.JsonValue;
 }
 
 /**
@@ -167,6 +172,7 @@ export class PlanSquadPropagationService {
         remnawaveId: true,
         internalSquads: true,
         externalSquad: true,
+        planSnapshot: true,
       },
     })) as readonly PropagationCandidate[];
 
@@ -180,12 +186,46 @@ export class PlanSquadPropagationService {
     }
 
     const propagationId = randomUUID();
-    for (const chunk of chunked(tracking.map((candidate) => candidate.id))) {
+    // ROW BY ROW, AND THE SNAPSHOT IN THE SAME WRITE.
+    //
+    // The columns used to move in chunked `updateMany` calls with the snapshot
+    // left behind. That was survivable only while `PlanSnapshotSyncService`
+    // mirrored the plan's squads into every subscriber's `plan_snapshot`: the
+    // two ended up agreeing anyway, so `resolveInheritedPlanLimitUpdate`
+    // (`subscriptions/services/plan-inherited-limits.util.ts`) still read the
+    // row as INHERITED and a renewal would re-apply the plan's squads. That
+    // mirroring is gone — deliberately, because it destroyed the override
+    // baseline for the two LIMIT columns — and with it went the safety net:
+    // a propagated row whose snapshot still named the OLD squads read as
+    // individually OVERRIDDEN, so no renewal would ever correct its squads
+    // again, for the rest of its life.
+    //
+    // A plan edit that writes a subscription's squad columns IS the plan
+    // giving that subscription those squads, so the snapshot must say so. It
+    // is per-row because `plan_snapshot` is JSON and every row's is different:
+    // a merge cannot be expressed as one `updateMany` payload. The cost is not
+    // new — `syncPlanSnapshotMetadata` already walks the SAME population one
+    // row at a time earlier in this very transaction — and the alternative
+    // (moving the columns in one statement and the snapshots in another) is
+    // strictly more work for the same result.
+    //
+    // `updateMany` on a single id rather than `update`: a subscription deleted
+    // between the scan above and this write makes `update` throw P2025 and
+    // roll the operator's whole plan edit back. `updateMany` matches zero rows
+    // and moves on, which is the correct handling of a row that no longer
+    // exists.
+    for (const candidate of tracking) {
+      const planSnapshot = patchSnapshotSquads(
+        candidate.planSnapshot,
+        input.nextInternalSquads,
+        input.nextExternalSquad,
+      );
       await transactionClient.subscription.updateMany({
-        where: { id: { in: chunk } },
+        where: { id: candidate.id },
         data: {
           internalSquads: [...input.nextInternalSquads],
           externalSquad: input.nextExternalSquad,
+          ...(planSnapshot === undefined ? {} : { planSnapshot }),
         },
       });
     }
@@ -370,6 +410,55 @@ const EMPTY_STATUS: PlanSquadPropagationStatus = {
   completed: 0,
   isComplete: true,
 };
+
+/**
+ * Re-declares a stored `plan_snapshot`'s squad keys as what the PLAN now gives
+ * this subscription, leaving every other key untouched.
+ *
+ * The numeric sibling of this is `patchSnapshotNumeric`
+ * (`subscriptions/services/plan-inherited-limits.util.ts`); squads need their
+ * own because the two keys move together and one of them is an array.
+ *
+ * Returns `undefined` when the snapshot already records exactly this
+ * selection, so the write leaves the JSON alone instead of rewriting it to an
+ * equal value. `sameSquadSet` — the same order-insensitive comparison the
+ * tracking filter above and the renewal reader use — is what makes "already
+ * records this selection" mean the same thing in all three places; comparing
+ * positionally here would rewrite the snapshot on a harmless reordering.
+ *
+ * Both keys must be PRESENT and well-typed to count as already recorded. An
+ * absent `externalSquad` reads as UNDECIDABLE at renewal, not as `null`, so
+ * treating a missing key as a match would leave the very rows this exists to
+ * repair — imported ones, whose snapshot carries no squad keys at all —
+ * exactly as unreadable as before.
+ */
+function patchSnapshotSquads(
+  snapshot: Prisma.JsonValue,
+  internalSquads: readonly string[],
+  externalSquad: string | null,
+): Prisma.InputJsonObject | undefined {
+  const stored =
+    typeof snapshot === 'object' && snapshot !== null && !Array.isArray(snapshot)
+      ? (snapshot as Prisma.JsonObject)
+      : null;
+  if (stored !== null) {
+    const storedInternal = stored['internalSquads'];
+    const storedExternal = stored['externalSquad'];
+    const externalAlreadyRecorded =
+      (storedExternal === null || typeof storedExternal === 'string') &&
+      storedExternal === externalSquad;
+    const internalAlreadyRecorded =
+      Array.isArray(storedInternal) &&
+      storedInternal.every((entry): entry is string => typeof entry === 'string') &&
+      sameSquadSet(storedInternal, internalSquads);
+    if (externalAlreadyRecorded && internalAlreadyRecorded) return undefined;
+  }
+  return {
+    ...(stored ?? {}),
+    internalSquads: [...internalSquads],
+    externalSquad,
+  } as Prisma.InputJsonObject;
+}
 
 function readPropagationId(payload: unknown): string | null {
   if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return null;

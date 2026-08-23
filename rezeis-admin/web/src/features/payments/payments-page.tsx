@@ -14,7 +14,12 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { DatePicker } from '@/components/ui/date-picker'
-import { PermissionGate } from '@/features/rbac'
+import { PermissionGate } from '@/features/rbac'
+import { useTabSync } from '@/lib/use-tab-sync'
+import { ReconciliationHealthCard } from './reconciliation-health-card'
+import { WebhookReplayControl } from './webhook-replay-control'
+import { PermissionRequiredNotice } from './permission-required-notice'
+import { paymentsRoutePermissions, useRouteAccess } from './payments-route-permissions'
 
 const PaymentsAnalyticsTab = lazy(() => import('./payments-analytics-tab'))
 
@@ -45,10 +50,55 @@ interface WebhookEventRow {
   readonly providerEventId: string | null
   readonly status: string
   readonly receivedAt: string
+  /** Why the last reconciliation attempt gave up; shown before a replay. */
+  readonly lastError?: string | null
 }
+
+/**
+ * Tab values addressable by `#hash`, and the fifth page to join the pattern
+ * `useTabSync` already serves for `/admins`, `/audit`, `/partners` and
+ * `/settings/panel`.
+ *
+ * Before this, `Tabs` was uncontrolled (`defaultValue="transactions"`) and
+ * nothing read the URL — the same defect `hub-tab-anchors.test.tsx` was written
+ * about, where "both hubs shipped with an uncontrolled `<Tabs defaultValue=…>`"
+ * and every link into them was decorative. The one artefact that tried was
+ * `features/payments/webhooks-page.tsx`, which redirected to
+ * `/payments?tab=webhooks`: a query param this page never read, from a
+ * component `router.tsx` never routed. It has been deleted rather than wired
+ * up — a component whose whole job is to redirect to another spelling of the
+ * same page is a second place for this list to go stale.
+ *
+ * PERMISSION-INDEPENDENT, deliberately. `webhooks` stays addressable for an
+ * admin without `payment_webhooks:view`, so the deep link lands on the tab and
+ * the tab says which token is missing. Dropping it from this list for such an
+ * admin would silently land them on Transactions — "my link was wrong" and "I
+ * am not allowed" rendering identically, which is the defect the refusal card
+ * inside the tab exists to end.
+ *
+ * NOT yet in `HUB_TABS` (`components/layout/admin-nav-config.ts`), which is
+ * where the other four pages keep their lists: that file is not this change's
+ * to edit. Nothing breaks — `useTabSync` takes the array directly and
+ * `HUB_TABS` only exists so `deepLinkNavItems` rows can be validated against
+ * it, and Payments has no such row. Whoever owns the nav config should add:
+ *
+ *     '/payments': ['transactions', 'webhooks', 'analytics'],
+ *
+ * and then this constant becomes `HUB_TABS['/payments']`. Until then a Cmd+K
+ * row pointing at `/payments#webhooks` would fail `admin-nav-config.test.ts`
+ * with "no HUB_TABS entry for /payments" — a named failure that leads here.
+ */
+const ALLOWED_TABS = ['transactions', 'webhooks', 'analytics'] as const
+type PaymentsTab = (typeof ALLOWED_TABS)[number]
 
 export default function PaymentsPage() {
   const { t } = useTranslation()
+  // An unknown or misspelt hash (`#wehbooks`) falls back to `transactions`
+  // rather than rendering nothing, and `setTab` navigates with `replace`, so
+  // Back leaves the page instead of walking the tabs the operator clicked.
+  // Both are `useTabSync`'s behaviour, not this page's.
+  const { activeTab, setTab } = useTabSync<PaymentsTab>(ALLOWED_TABS, 'transactions')
+
   return (
     <PermissionGate
       resource="payments"
@@ -62,7 +112,7 @@ export default function PaymentsPage() {
         <p className="text-muted-foreground">{t('paymentsPage.subtitle')}</p>
       </div>
 
-      <Tabs defaultValue="transactions">
+      <Tabs value={activeTab} onValueChange={setTab}>
         <TabsList>
           <TabsTrigger value="transactions">{t('paymentsPage.tabs.transactions')}</TabsTrigger>
           <TabsTrigger value="webhooks">{t('paymentsPage.tabs.webhooks')}</TabsTrigger>
@@ -305,40 +355,93 @@ function TransactionsTab() {
 
 function WebhooksTab() {
   const { t } = useTranslation()
-  const { data, isLoading } = useQuery<ReadonlyArray<WebhookEventRow>>({
+  // The tab renders behind the page's `payments:view` gate, but the list route
+  // is guarded by `payment_webhooks:view`
+  // (admin-payment-webhooks.controller.ts:30). Holding only the first got the
+  // operator through to a table whose body was empty because the request 403'd
+  // — indistinguishable from an inbox with nothing in it.
+  const canListEvents = useRouteAccess(paymentsRoutePermissions.webhookEvents)
+
+  const { data, isLoading, isError } = useQuery<ReadonlyArray<WebhookEventRow>>({
     queryKey: adminQueryKeys.payments.webhooks.all,
     queryFn: async ({ signal }) =>
       expectArray<WebhookEventRow>(
         (await api.get('/admin/payments/webhooks/events?limit=30', { signal })).data,
       ),
+    enabled: canListEvents,
   })
 
-  if (isLoading) return <Skeleton className="h-48 w-full mt-4" />
+  const events = data ?? []
+  // Three outcomes, three sentences. The permission refusal is handled above;
+  // down here a request that WENT OUT either came back with rows, came back
+  // empty, or did not come back. Collapsing the last two is the convention
+  // `array-endpoint-unavailable.test.tsx` exists to enforce, and the
+  // empty-state row added below would otherwise have made it worse: before it,
+  // a failed load drew a bare header; with it, a failed load would state
+  // outright that no webhooks arrived.
+  const unavailable = isError || data === undefined
 
   return (
-    <Card className="mt-4">
-      <CardContent className="p-0">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>{t('paymentsPage.webhooks.gateway')}</TableHead>
-              <TableHead>{t('paymentsPage.webhooks.providerEvent')}</TableHead>
-              <TableHead>{t('paymentsPage.webhooks.status')}</TableHead>
-              <TableHead>{t('paymentsPage.webhooks.date')}</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {(data ?? []).map((ev) => (
-              <TableRow key={ev.id}>
-                <TableCell className="text-xs uppercase">{ev.gatewayType}</TableCell>
-                <TableCell className="font-mono text-xs">{truncate(ev.providerEventId, 16)}</TableCell>
-                <TableCell><Badge variant="outline">{ev.status}</Badge></TableCell>
-                <TableCell className="text-xs text-muted-foreground">{new Date(ev.receivedAt).toLocaleString()}</TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      </CardContent>
-    </Card>
+    <div className="mt-4 space-y-4">
+      {/* Aggregate health of the very rows listed below: what came in, and
+          whether any of it is stuck unapplied. Served by
+          `/admin/payments/reconciliation/health`, which needs `payments:view`
+          — so it survives when the per-event list below does not, and the
+          refusal below explains that split rather than leaving the operator to
+          reconcile a populated card with an absent table. */}
+      <ReconciliationHealthCard />
+      {!canListEvents ? (
+        <PermissionRequiredNotice
+          permission={paymentsRoutePermissions.webhookEvents}
+          title={t('paymentsAccess.webhookEvents.title')}
+          description={t('paymentsAccess.webhookEvents.description')}
+        />
+      ) : isLoading ? (
+        <Skeleton className="h-48 w-full" />
+      ) : (
+        <Card>
+          <CardContent className="p-0">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>{t('paymentsPage.webhooks.gateway')}</TableHead>
+                  <TableHead>{t('paymentsPage.webhooks.providerEvent')}</TableHead>
+                  <TableHead>{t('paymentsPage.webhooks.status')}</TableHead>
+                  <TableHead>{t('paymentsPage.webhooks.date')}</TableHead>
+                  <TableHead className="text-right">
+                    {t('paymentsReconciliation.replay.columnActions')}
+                  </TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {unavailable ? (
+                  <TableRow>
+                    <TableCell colSpan={5} className="py-8 text-center text-muted-foreground">
+                      {t('paymentsReconciliation.events.unavailable')}
+                    </TableCell>
+                  </TableRow>
+                ) : events.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={5} className="py-8 text-center text-muted-foreground">
+                      {t('paymentsReconciliation.events.empty')}
+                    </TableCell>
+                  </TableRow>
+                ) : events.map((ev) => (
+                  <TableRow key={ev.id}>
+                    <TableCell className="text-xs uppercase">{ev.gatewayType}</TableCell>
+                    <TableCell className="font-mono text-xs">{truncate(ev.providerEventId, 16)}</TableCell>
+                    <TableCell><Badge variant="outline">{ev.status}</Badge></TableCell>
+                    <TableCell className="text-xs text-muted-foreground">{new Date(ev.receivedAt).toLocaleString()}</TableCell>
+                    <TableCell className="text-right">
+                      <WebhookReplayControl event={ev} />
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
+      )}
+    </div>
   )
 }

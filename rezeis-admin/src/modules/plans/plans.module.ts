@@ -48,6 +48,10 @@ import { PricingService } from './services/pricing.service';
     PlanSnapshotSyncService,
     PlansStatsService,
   ],
-  exports: [PlanCatalogService, PricingService, PlanSnapshotSyncService],
+  // `PlansAdminService` is exported for ONE consumer: the plan-access toggle on
+  // the user card (`AdminUserManagementController`), which used to write
+  // `Plan.allowedUserIds` itself — untransacted, unvalidated and unaudited,
+  // behind the wrong permission. Both writers of that column now live here.
+  exports: [PlanCatalogService, PlansAdminService, PricingService, PlanSnapshotSyncService],
 })
 export class PlansModule {}

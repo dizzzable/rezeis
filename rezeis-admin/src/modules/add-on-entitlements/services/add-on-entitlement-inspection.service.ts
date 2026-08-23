@@ -45,6 +45,24 @@ export interface DevicePlanInspection {
   /** Bounded target COUNT only — raw HWIDs are never returned in the inspect view. */
   readonly targetCount: number;
   readonly attempts: number;
+  /**
+   * WHY the plan is in the state it is in — the reason `markState` persisted on
+   * the last terminal transition, `null` on a plan that has never failed.
+   *
+   * It was written correctly from the day the saga landed and read by nobody.
+   * `state` alone says a plan is BLOCKED and never says what blocked it, and
+   * this payload is the ONLY per-plan surface an operator has: every mutating
+   * remediation route is keyed by an id that comes from this read. Without the
+   * reason the operator's next move is a guess, and the move they are being
+   * offered — approve, which re-drives the plan through the override — is
+   * exactly the one that repeats the failure when the cause is still live.
+   *
+   * NOT a substitute for the incident. The incident is the unit of operator
+   * WORK (acknowledged by whom, resolved with what code) and there may be more
+   * than one per plan; this is the plan's own current answer, and the two are
+   * asserted to agree.
+   */
+  readonly lastErrorCode: string | null;
 }
 
 export interface SubscriptionEntitlementInspection {
@@ -112,7 +130,15 @@ export class AddOnEntitlementInspectionService {
         where: { subscriptionId },
         orderBy: { createdAt: 'desc' },
         take: 50,
-        select: { id: true, state: true, desiredLimit: true, projectionRevision: true, selectedDevices: true, attempts: true },
+        select: {
+          id: true,
+          state: true,
+          desiredLimit: true,
+          projectionRevision: true,
+          selectedDevices: true,
+          attempts: true,
+          lastErrorCode: true,
+        },
       }),
     ]);
 
@@ -164,6 +190,7 @@ export class AddOnEntitlementInspectionService {
         projectionRevision: row.projectionRevision.toString(),
         targetCount: Array.isArray(row.selectedDevices) ? row.selectedDevices.length : 0,
         attempts: row.attempts,
+        lastErrorCode: row.lastErrorCode,
       })),
     };
   }

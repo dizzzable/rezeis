@@ -26,6 +26,7 @@ import {
   describeStrictOutcome,
   type RemnawaveStrictOutcome,
 } from '../../remnawave/interfaces/remnawave-strict-outcome.interface';
+import { panelTrafficLimitToGb } from '../../remnawave/utils/panel-traffic-limit.util';
 
 /** Fresh subscription fields projected from a live Remnawave panel profile. */
 export interface PanelSubscriptionState {
@@ -78,18 +79,12 @@ export function reconcileMissingPanelStatus(
   return isLivePanelStatus(backupStatus) ? SubscriptionStatus.EXPIRED : backupStatus;
 }
 
-/** Convert the panel's byte cap to our GB cap (0/negative → unlimited). */
-export function panelTrafficGb(trafficLimitBytes: number | null | undefined): number | null {
-  if (typeof trafficLimitBytes !== 'number' || !Number.isFinite(trafficLimitBytes)) return null;
-  return trafficLimitBytes > 0 ? Math.max(1, Math.round(trafficLimitBytes / 1024 ** 3)) : null;
-}
-
 /** Project a live panel profile into our subscription fields (panel = truth). */
 export function panelSubscriptionState(panel: RemnawavePanelUser): PanelSubscriptionState {
   return {
     status: mapPanelStatus(panel.status),
     expiresAt: panel.expireAt ? new Date(panel.expireAt) : null,
-    trafficLimit: panelTrafficGb(panel.trafficLimitBytes),
+    trafficLimit: panelTrafficLimitToGb(panel.trafficLimitBytes),
     deviceLimit:
       typeof panel.hwidDeviceLimit === 'number' && panel.hwidDeviceLimit >= 0
         ? panel.hwidDeviceLimit

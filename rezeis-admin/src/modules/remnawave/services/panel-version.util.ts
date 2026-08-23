@@ -87,6 +87,51 @@ export const CAPABILITIES_CACHE_TTL_MS = 5 * 60_000;
  */
 export const CAPABILITIES_NEGATIVE_CACHE_TTL_MS = 15_000;
 
+/**
+ * ONE reading of which era the panel is, taken at a single point in time and
+ * then carried BY VALUE through every step that depends on it.
+ *
+ * WHY A VALUE AND NOT A SECOND CALL. `getPanelShape()` is cached, and the
+ * failure cache is fifteen seconds ({@link CAPABILITIES_NEGATIVE_CACHE_TTL_MS}),
+ * so two reads taken microseconds apart can legitimately disagree: the first
+ * can be served from a negative entry that expires before the second, and the
+ * second can come back with a real version. Two consumers that each read for
+ * themselves therefore "usually agree" — which on a delete path is the whole
+ * defect, because the consumer that decides WHETHER to delete and the consumer
+ * that decides WHAT ADDRESS to delete are then answering about different
+ * panels. A stored 2.x uuid assessed against `'unknown'` (proceed: the address
+ * builder will emit the stored string and the panel will answer 400) and then
+ * addressed against `'id'` (fall back through `panelId`/short uuid/username)
+ * resolves to a LIVE profile and deletes it.
+ *
+ * So the era stops being something callers ask for and becomes something they
+ * HOLD. It is threaded into the destructive adapter methods as a required
+ * argument, which is what makes "the same value" a compile-time property
+ * rather than a convention.
+ */
+export interface PanelEraObservation {
+  readonly addressing: RemnawaveUserAddressing;
+}
+
+/**
+ * Takes that one reading.
+ *
+ * A THROW IS THE UNKNOWN ERA, not an error to propagate — the same rule
+ * `getPanelShape()` already applies internally, restated here because this is
+ * the entry point a caller wired without a working adapter reaches. The job of
+ * this function is to answer which era the panel is; it must never become a
+ * second way for a deletion to fail.
+ */
+export async function observePanelEra(
+  readPanelShape: () => Promise<{ readonly addressing: RemnawaveUserAddressing }>,
+): Promise<PanelEraObservation> {
+  try {
+    return { addressing: (await readPanelShape()).addressing };
+  } catch {
+    return { addressing: 'unknown' };
+  }
+}
+
 /** A source of the panel's self-reported version. Both readers are optional. */
 type VersionSource = () => Promise<{ readonly version?: unknown } | null>;
 

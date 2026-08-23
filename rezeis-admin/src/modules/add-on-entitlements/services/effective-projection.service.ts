@@ -7,16 +7,22 @@ import {
   SubscriptionStatus,
 } from '@prisma/client';
 
+import { resolveEntitlementBaseline } from '../domain/entitlement-baseline';
 import { addDeviceLimit, addTrafficLimit } from '../domain/subscription-limit';
 
 /**
  * Recompute the desired effective limits for a subscription from its
  * authoritative baseline term plus the sum of its ACTIVE add-on entitlements.
  *
- * Source of truth is `plan baseline + active entitlements`, NOT the mutable
- * `Subscription.trafficLimit/deviceLimit` columns (those are compatibility
- * mirrors during rollout). Unlimited is the canonical `null` and is absorbing:
- * an unlimited baseline stays unlimited regardless of contributions.
+ * Source of truth is `baseline + active entitlements`. The baseline is the
+ * term's, EXCEPT for a field an operator has individually configured, which the
+ * plan does not get to take back — see
+ * `../domain/entitlement-baseline.ts` for the rule and its reasoning. The
+ * mutable `Subscription.trafficLimit/deviceLimit` columns remain compatibility
+ * mirrors and are never the source of the desired value; they are read only to
+ * decide, against the stored `planSnapshot`, which fields the operator owns.
+ * Unlimited is the canonical `null` and is absorbing: an unlimited baseline
+ * stays unlimited regardless of contributions.
  */
 export interface RecomputeProjectionInput {
   readonly subscriptionId: string;
@@ -125,11 +131,6 @@ export class EffectiveProjectionService {
     const activeTrafficContributionBytes = addTrafficLimit(0n, trafficContribs) as bigint;
     const activeDeviceContribution = addDeviceLimit(0, deviceContribs) as number;
 
-    const baseTraffic = term.baseTrafficLimitBytes;
-    const baseDevice = term.baseDeviceLimit;
-    const desiredTrafficLimitBytes = addTrafficLimit(baseTraffic, trafficContribs);
-    const desiredDeviceLimit = addDeviceLimit(baseDevice, deviceContribs);
-
     const existing = await tx.subscriptionEffectiveProjection.findUnique({
       where: { subscriptionId: input.subscriptionId },
       select: {
@@ -145,6 +146,50 @@ export class EffectiveProjectionService {
         state: true,
       },
     });
+
+    // The term baseline is what the customer BOUGHT; it is not automatically
+    // what this ONE subscription is entitled to. An operator can configure a
+    // single customer from the Users page while that customer keeps being
+    // billed for the plan, and the term is minted from the plan, so activating
+    // it would otherwise hand the plan's number back and — because the
+    // versioned sync worker reads `desired*` off the projection row, not the
+    // mirrored columns — push it into the panel.
+    //
+    // This is the one place the correction can live: every writer that mirrors
+    // a projection (term activation, boundary expiry, `forceReconcile`,
+    // `reverseEntitlement`, add-on fulfillment, plan change) reads the desired
+    // state from here. Correcting it at those call sites instead would be five
+    // copies of one rule, which is how they drift.
+    //
+    // The row is already locked FOR UPDATE above, so this re-read is
+    // consistent. A missing row is not reachable behind that lock; the term
+    // baseline stands if it ever is.
+    const configured = await tx.subscription.findUnique({
+      where: { id: input.subscriptionId },
+      select: { trafficLimit: true, deviceLimit: true, planSnapshot: true },
+    });
+    const baseline =
+      configured === null
+        ? {
+            baseTrafficLimitBytes: term.baseTrafficLimitBytes,
+            baseDeviceLimit: term.baseDeviceLimit,
+          }
+        : resolveEntitlementBaseline({
+            term,
+            subscription: configured,
+            // The contribution the PREVIOUS row recorded — the one the columns
+            // were mirrored from, and therefore the only quantity that can be
+            // subtracted back out of them.
+            recorded: {
+              activeTrafficContributionBytes: existing?.activeTrafficContributionBytes ?? 0n,
+              activeDeviceContribution: existing?.activeDeviceContribution ?? 0,
+            },
+          });
+
+    const baseTraffic = baseline.baseTrafficLimitBytes;
+    const baseDevice = baseline.baseDeviceLimit;
+    const desiredTrafficLimitBytes = addTrafficLimit(baseTraffic, trafficContribs);
+    const desiredDeviceLimit = addDeviceLimit(baseDevice, deviceContribs);
 
     const desiredState =
       mode === 'SHADOW' ? EffectiveProjectionState.SHADOW : EffectiveProjectionState.PENDING;

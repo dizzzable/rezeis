@@ -4,13 +4,16 @@ import {
   HttpCode,
   HttpStatus,
   Post,
+  Req,
   UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { Request } from 'express';
 
 import { CurrentAdmin } from '../../auth/decorators/current-admin.decorator';
 import { AdminJwtAuthGuard } from '../../auth/guards/admin-jwt-auth.guard';
 import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.interface';
+import { extractRequestMetadata } from '../../auth/utils/request-metadata.util';
 import { RequirePermission } from '../../rbac/decorators/require-permission.decorator';
 import { RbacGuard } from '../../rbac/guards/rbac.guard';
 import { BulkUserOperationsDto } from '../dto/bulk-user-operations.dto';
@@ -40,12 +43,17 @@ export class AdminBulkUsersController {
   public bulk(
     @Body() dto: BulkUserOperationsDto,
     @CurrentAdmin() admin: CurrentAdminInterface,
+    @Req() req: Request,
   ) {
+    // `@Req` is here for the same reason every other mutating admin route has
+    // it: an audit row wants the ip and user-agent behind the act. This one
+    // wrote no audit row at all, so it never needed the request.
     return this.bulkService.execute({
       userIds: dto.userIds,
       action: dto.action,
       payload: dto.payload,
-      adminId: admin.id,
+      currentAdmin: admin,
+      requestMetadata: extractRequestMetadata(req),
     });
   }
 }

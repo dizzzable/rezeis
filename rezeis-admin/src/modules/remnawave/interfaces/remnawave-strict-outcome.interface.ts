@@ -122,6 +122,21 @@ export interface RemnawavePanelExpirySnapshot {
 export interface RemnawaveStrictDevice {
   readonly hwid: string;
   readonly createdAt: string;
+  /**
+   * Panel-reported last activity, or `null` when the panel reported none.
+   *
+   * REQUIRED, not optional, and that is the point. This projection used to stop
+   * at `{ hwid, createdAt }`, which left the device-reduction saga unable to
+   * distinguish a registration in daily use from one abandoned six months ago
+   * and choosing its victim by registration date alone. A required field forces
+   * the producer to DECIDE, every time; an optional one lets the same omission
+   * come back silently the next time a row shape is touched.
+   *
+   * `null` is a real answer and must never be softened into `createdAt`: see
+   * `classifyDeviceActivity` in the add-on-entitlements domain, which treats an
+   * unknown last-seen as unknown and refuses to infer activity from it.
+   */
+  readonly lastSeenAt: string | null;
 }
 
 export interface RemnawaveStrictDeviceList {

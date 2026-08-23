@@ -17,7 +17,6 @@ import {
 import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
-import { expectArray, isRecord } from '@/lib/api-utils'
 import { getErrorMessage } from '@/lib/http-errors'
 import { Card, CardContent } from '@/components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -36,9 +35,16 @@ import { cn, truncate } from '@/lib/utils'
 import ReferralSettingsPage from '@/features/settings/referral-settings-page'
 import ReferralsAnalyticsTab from './referrals-analytics-tab'
 import {
+  referralsAdminApi,
+  type AdminReferralInvite,
+  type AdminReferralReward,
+  type ReferralListItem,
+  type ReferralUserSummary,
+} from './referrals-api'
+import {
   INVITE_STATUS_META,
-  REFERRAL_SOURCE_META,
   getLevelMeta,
+  getPayoutBlockerMeta,
   getRewardTypeMeta,
   getSourceMeta,
   type InviteStatus,
@@ -155,62 +161,33 @@ export default function ReferralsPage() {
 
 // ── Shared types ─────────────────────────────────────────────────────────────
 
-interface ReferralUserSummary {
-  readonly id?: string
-  readonly name?: string | null
-  readonly username?: string | null
-}
-
-interface ReferralRow {
-  readonly id: string
-  readonly referrer?: ReferralUserSummary | null
-  readonly referrerTelegramId?: string | null
-  readonly referred?: ReferralUserSummary | null
-  readonly referredTelegramId?: string | null
-  readonly level: number
-  readonly inviteSource?: string | null
-  readonly qualifiedAt?: string | null
-  readonly createdAt: string
-}
-
-interface InviteRow {
-  readonly id: string
-  readonly inviter?: ReferralUserSummary | null
-  readonly inviterTelegramId?: string | null
-  readonly token: string
-  readonly expiresAt?: string | null
-  readonly revokedAt?: string | null
-  readonly consumedAt?: string | null
-}
-
-interface RewardRow {
-  readonly id: string
-  readonly referralId: string
-  readonly user?: ReferralUserSummary | null
-  readonly userTelegramId?: string | null
-  readonly type: string
-  readonly amount: number | string
-  readonly isIssued: boolean
-  readonly issuedAt?: string | null
-  readonly issuedBy?: string | null
-  readonly createdAt: string
-}
+// Every row type on this page is a PARSED shape from `referrals-api.ts`:
+// `ReferralListItem`, `AdminReferralInvite`, `AdminReferralReward`, and the
+// `ReferralUserSummary` nested inside all three.
+//
+// Three hand-written row types used to stand here. `ReferralRow` declared
+// `level: number`, `referrerTelegramId` and `referredTelegramId` - three
+// fields `GET /admin/referrals` has never sent - and `InviteRow` declared
+// `inviterTelegramId`, which `ReferralInviteInterface` has never had.
+// Nothing objected, because nothing validated the response: the level badge
+// rendered as a bare `L`, the telegram cells as an em dash, and the search
+// boxes fed `undefined` into every telegram-id comparison.
+//
+// The local `unwrap()` helper that stood below them went the same way. It
+// proved the value was an array and - in its own words - nothing about what
+// was inside it, which is exactly the hole the row types fell through.
+//
+// A `ReferralListItem` is ONE EARNER, not one sign-up. The server sends up to
+// two per registration - the direct referrer at level 1, and, when the payout
+// engine would actually pay them, that referrer's own referrer at level 2 -
+// so `filtered.length` counts payouts and must never be shown where a count
+// of referrals belongs. The stat cards on the page above take their numbers
+// from `GET /admin/referrals/stats`, which counts table rows, and that is
+// what keeps them counting registrations. See `referralListItemSchema`.
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-/**
- * The `{ items }` envelope is a real shape this endpoint uses; a bare list is
- * the other. Anything else — `{}`, an HTML error page served with HTTP 200 —
- * used to fall through to `[]`, which reads to the operator as "you have no
- * referrals". `expectArray` makes that case say so out loud instead.
- */
-function unwrap<T>(raw: ReadonlyArray<T> | { items?: ReadonlyArray<T> } | undefined): readonly T[] {
-  if (Array.isArray(raw)) return raw
-  if (isRecord(raw) && 'items' in raw) return expectArray<T>(raw.items ?? [])
-  return expectArray<T>(raw)
-}
-
-function deriveInviteStatus(inv: InviteRow): InviteStatus {
+function deriveInviteStatus(inv: AdminReferralInvite): InviteStatus {
   if (inv.revokedAt) return 'revoked'
   if (inv.consumedAt) return 'consumed'
   if (inv.expiresAt && new Date(inv.expiresAt) < new Date()) return 'expired'
@@ -231,35 +208,47 @@ function ReferralsTab() {
   const [levelFilter, setLevelFilter] = useState<string>('all')
   const [statusFilter, setStatusFilter] = useState<'all' | 'qualified' | 'pending'>('all')
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError } = useQuery({
     queryKey: ['admin', 'referrals', 'list'],
-    queryFn: async () => {
-      const raw = (await api.get('/admin/referrals?limit=200')).data as
-        | ReadonlyArray<ReferralRow>
-        | { items?: ReadonlyArray<ReferralRow> }
-      return unwrap(raw)
-    },
+    queryFn: () => referralsAdminApi.listReferrals(),
   })
 
   const filtered = useMemo(() => {
-    if (!data) return [] as readonly ReferralRow[]
+    if (!data) return [] as readonly ReferralListItem[]
     return data.filter((r) => {
       if (levelFilter !== 'all' && String(r.level) !== levelFilter) return false
       if (statusFilter === 'qualified' && !r.qualifiedAt) return false
       if (statusFilter === 'pending' && r.qualifiedAt) return false
+      // The telegram ids are NESTED on the user summary. Read from a sibling
+      // top-level field they were `undefined` on every row, so a search by
+      // telegram id could never match one. `displayName` is searched rather
+      // than `name` because it is the string the cell actually shows.
       return matchesQuery(
         query,
-        r.referrer?.name,
-        r.referrer?.username,
-        r.referrerTelegramId?.toString(),
-        r.referred?.name,
-        r.referred?.username,
-        r.referredTelegramId?.toString(),
+        r.referrer.displayName,
+        r.referrer.username,
+        r.referrer.telegramId,
+        r.referred.displayName,
+        r.referred.username,
+        r.referred.telegramId,
       )
     })
   }, [data, query, levelFilter, statusFilter])
 
   if (isLoading) return <Skeleton className="h-48 w-full mt-4" />
+
+  // A rejected fetch - transport error, or a response that failed validation -
+  // must not reuse the "no referrals yet" copy. That sentence states a fact
+  // about the operator's data that nobody established.
+  if (isError) {
+    return (
+      <Card className="mt-4">
+        <CardContent className="py-12 text-center text-sm text-destructive">
+          {t('referralsActions.referralsTab.loadFailed')}
+        </CardContent>
+      </Card>
+    )
+  }
 
   return (
     <div className="space-y-3 mt-4">
@@ -309,21 +298,41 @@ function ReferralsTab() {
                 {filtered.map((r) => {
                   const levelMeta = getLevelMeta(r.level)
                   const sourceMeta = getSourceMeta(r.inviteSource)
+                  // Null on every row the referral programme actually pays,
+                  // which is most of them - and on every level-2 row by
+                  // construction, since the server omits a blocked one.
+                  const blockerMeta = getPayoutBlockerMeta(r.payoutBlockedBy)
                   const LevelIcon = levelMeta.icon
                   const SourceIcon = sourceMeta.icon
+                  const BlockerIcon = blockerMeta?.icon
                   return (
                     <TableRow key={r.id}>
-                      <TableCell><UserCell user={r.referrer} telegramId={r.referrerTelegramId} /></TableCell>
-                      <TableCell><UserCell user={r.referred} telegramId={r.referredTelegramId} /></TableCell>
+                      <TableCell><UserCell user={r.referrer} /></TableCell>
+                      <TableCell><UserCell user={r.referred} /></TableCell>
                       <TableCell>
-                        <Badge variant="outline" className="gap-1">
-                          <LevelIcon className={cn('h-3 w-3', levelMeta.className)} /> L{r.level}
-                        </Badge>
+                        <div className="flex items-center gap-1.5">
+                          <Badge
+                            variant="outline"
+                            className="gap-1"
+                            title={levelMeta.hintKey === null ? undefined : t(levelMeta.hintKey)}
+                          >
+                            <LevelIcon className={cn('h-3 w-3', levelMeta.className)} /> {`L${r.level}`}
+                          </Badge>
+                          {blockerMeta && BlockerIcon && (
+                            <span
+                              className="inline-flex items-center gap-1 text-xs text-muted-foreground"
+                              title={t(blockerMeta.hintKey)}
+                            >
+                              <BlockerIcon className={cn('h-3.5 w-3.5', blockerMeta.className)} />
+                              {t(blockerMeta.labelKey)}
+                            </span>
+                          )}
+                        </div>
                       </TableCell>
                       <TableCell>
                         <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
                           <SourceIcon className={cn('h-3.5 w-3.5', sourceMeta.className)} />
-                          {r.inviteSource ?? '—'}
+                          {t(sourceMeta.labelKey)}
                         </span>
                       </TableCell>
                       <TableCell>
@@ -359,26 +368,24 @@ function InvitesTab() {
   const [query, setQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState<'all' | InviteStatus>('all')
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError } = useQuery({
     queryKey: ['admin', 'referrals', 'invites'],
-    queryFn: async () => {
-      const raw = (await api.get('/admin/referrals/invites?limit=200')).data as
-        | ReadonlyArray<InviteRow>
-        | { items?: ReadonlyArray<InviteRow> }
-      return unwrap(raw)
-    },
+    queryFn: () => referralsAdminApi.listAdminInvites(),
   })
 
   const filtered = useMemo(() => {
-    if (!data) return [] as readonly InviteRow[]
+    if (!data) return [] as readonly AdminReferralInvite[]
     return data.filter((inv) => {
       const status = deriveInviteStatus(inv)
       if (statusFilter !== 'all' && status !== statusFilter) return false
+      // The inviter is nested, and required. Searched through the sibling
+      // `inviterTelegramId` this tab used to declare, every comparison ran
+      // against `undefined`, so no search by telegram id could ever match.
       return matchesQuery(
         query,
-        inv.inviter?.name,
-        inv.inviter?.username,
-        inv.inviterTelegramId?.toString(),
+        inv.inviter.displayName,
+        inv.inviter.username,
+        inv.inviter.telegramId,
         inv.token,
       )
     })
@@ -402,6 +409,20 @@ function InvitesTab() {
   }
 
   if (isLoading) return <Skeleton className="h-48 w-full mt-4" />
+
+  // Same reason as the referrals tab. A rejected fetch - transport error, or
+  // a response that failed validation - leaves `data` undefined, and without
+  // this branch the empty state answers for it: "No invites yet" is a claim
+  // about the operator's own data that nobody established.
+  if (isError) {
+    return (
+      <Card className="mt-4">
+        <CardContent className="py-12 text-center text-sm text-destructive">
+          {t('referralsActions.invitesTab.loadFailed')}
+        </CardContent>
+      </Card>
+    )
+  }
 
   return (
     <div className="space-y-3 mt-4">
@@ -442,7 +463,7 @@ function InvitesTab() {
                   const StatusIcon = meta.icon
                   return (
                     <TableRow key={inv.id}>
-                      <TableCell><UserCell user={inv.inviter} telegramId={inv.inviterTelegramId} /></TableCell>
+                      <TableCell><UserCell user={inv.inviter} /></TableCell>
                       <TableCell>
                         <span className="font-mono text-xs text-muted-foreground">
                           {truncate(inv.token, 16)}
@@ -504,27 +525,26 @@ function RewardsTab() {
   const [statusFilter, setStatusFilter] = useState<'all' | 'issued' | 'pending'>('all')
   const [selected, setSelected] = useState<readonly string[]>([])
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError } = useQuery({
     queryKey: ['admin', 'referrals', 'rewards'],
-    queryFn: async () => {
-      const raw = (await api.get('/admin/referrals/rewards?limit=200')).data as
-        | ReadonlyArray<RewardRow>
-        | { items?: ReadonlyArray<RewardRow> }
-      return unwrap(raw)
-    },
+    queryFn: () => referralsAdminApi.listAdminRewards(),
   })
 
   const filtered = useMemo(() => {
-    if (!data) return [] as readonly RewardRow[]
+    if (!data) return [] as readonly AdminReferralReward[]
     return data.filter((rw) => {
       if (typeFilter !== 'all' && rw.type !== typeFilter) return false
       if (statusFilter === 'issued' && !rw.isIssued) return false
       if (statusFilter === 'pending' && rw.isIssued) return false
+      // `displayName`, not `name`: a web sign-up has neither `name` nor
+      // `username`, so the old chain could not match the string its own cell
+      // prints. `userTelegramId` IS sent at the top level here - this is the
+      // one place in the feature where that read is the right one.
       return matchesQuery(
         query,
-        rw.user?.name,
-        rw.user?.username,
-        rw.userTelegramId?.toString(),
+        rw.user.displayName,
+        rw.user.username,
+        rw.userTelegramId,
         rw.referralId,
       )
     })
@@ -569,6 +589,18 @@ function RewardsTab() {
   const allChecked = togglePending.length > 0 && selected.length === togglePending.length
 
   if (isLoading) return <Skeleton className="h-48 w-full mt-4" />
+
+  // Without this branch a rejected parse renders "No rewards yet", and the
+  // operator reads that as "nothing pending to issue" and stops looking.
+  if (isError) {
+    return (
+      <Card className="mt-4">
+        <CardContent className="py-12 text-center text-sm text-destructive">
+          {t('referralsActions.rewardsTab.loadFailed')}
+        </CardContent>
+      </Card>
+    )
+  }
 
   return (
     <div className="space-y-3 mt-4">
@@ -654,7 +686,7 @@ function RewardsTab() {
                           />
                         )}
                       </TableCell>
-                      <TableCell><UserCell user={rw.user} telegramId={rw.userTelegramId} /></TableCell>
+                      <TableCell><UserCell user={rw.user} /></TableCell>
                       <TableCell>
                         <Badge variant="outline" className="gap-1">
                           <Icon className={cn('h-3 w-3', meta.className)} /> {rw.type}
@@ -727,14 +759,27 @@ function FilterBar({ query, onQueryChange, placeholder, children }: FilterBarPro
 
 interface UserCellProps {
   readonly user?: ReferralUserSummary | null
-  readonly telegramId?: string | null
 }
 
-function UserCell({ user, telegramId }: UserCellProps) {
+/**
+ * `displayName`, not `name ?? username`.
+ *
+ * A web sign-up is stored as `{ name: '', email }` with no `username`, so the
+ * old chain printed an em dash for a referrer that is really there - and the
+ * referral edge behind it is NOT NULL, so the dash was never "no referrer".
+ * The server resolves the whole chain and guarantees a non-empty
+ * `displayName` for a user that exists, which leaves the dash meaning what it
+ * should: no user object at all.
+ *
+ * The telegram id comes off that same summary. Read from a sibling top-level
+ * field - `referrerTelegramId`, `inviterTelegramId` - it was `undefined` on
+ * every row, because the server has never sent one.
+ */
+function UserCell({ user }: UserCellProps) {
   return (
     <div>
-      <p className="text-sm font-medium">{user?.name ?? user?.username ?? '—'}</p>
-      <p className="text-xs text-muted-foreground font-mono">{telegramId ?? '—'}</p>
+      <p className="text-sm font-medium">{user?.displayName || '—'}</p>
+      <p className="text-xs text-muted-foreground font-mono">{user?.telegramId ?? '—'}</p>
     </div>
   )
 }
@@ -868,6 +913,3 @@ function CreateRewardForm({ onClose }: { onClose: () => void }) {
     </div>
   )
 }
-
-// Suppress unused-import warning when REFERRAL_SOURCE_META is referenced only via the helper.
-void REFERRAL_SOURCE_META

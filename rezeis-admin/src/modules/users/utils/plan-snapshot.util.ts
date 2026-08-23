@@ -29,6 +29,19 @@ export interface PlanSnapshotInput {
  * Mirrors the shape produced by `give-subscription` and the payment-side
  * mutation services so all subscription rows look identical regardless of
  * how they were created.
+ *
+ * There is a SECOND function of this name — `buildPlanSnapshot` in
+ * `src/modules/payments/services/payment-subscription-mutation.service.ts`,
+ * plus `buildItemPlanSnapshot` beside it. They legitimately differ (the
+ * payment ones also freeze duration/amount/currency/gateway) and are
+ * deliberately not merged, but all three MUST keep writing `trafficLimit`,
+ * `deviceLimit`, `internalSquads` and `externalSquad`:
+ * `resolveInheritedPlanLimitUpdate`
+ * (`src/modules/subscriptions/services/plan-inherited-limits.util.ts`) decides
+ * whether an operator individually overrode a column by comparing it against
+ * exactly those keys. Drop one and that column silently stops tracking the
+ * plan forever. `test/subscription-plan-inherited-limits.spec.ts` fails if any
+ * of the three stops writing any of them.
  */
 export function buildPlanSnapshot(plan: PlanSnapshotInput): Prisma.InputJsonValue {
   return {

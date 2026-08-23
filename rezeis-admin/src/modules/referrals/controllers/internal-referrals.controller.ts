@@ -168,7 +168,11 @@ export class InternalReferralsController {
     const result = await this.referralsService.createInvite({
       inviterId: user.id,
       // `null` (not `undefined`) so "TTL disabled" / VIP bypass really means no
-      // expiry — an absent field would fall back to the default 30-day window.
+      // expiry. An ABSENT field is no longer a 30-day default: `createInvite`
+      // now resolves it from this same limits service. So passing the value
+      // explicitly is not what makes this correct any more — it is what stops
+      // the same question being answered twice, and guarantees the row carries
+      // the instant this handler already computed.
       expiresAt: expiresAt === null ? null : expiresAt.toISOString(),
     });
 

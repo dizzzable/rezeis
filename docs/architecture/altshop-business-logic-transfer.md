@@ -304,7 +304,7 @@ Transfer target:
 - Implement an adapter module around Remnawave first.
 - Separate raw client, SDK client, sync orchestration, and webhook handling.
 - Store local sync state and tolerate Remnawave outages.
-- `@remnawave/backend-contract` is useful for typed command schemas and route metadata, but `rezeis-admin` must keep server-side HTTP orchestration in its own admin facade. The contract package is not the HTTP client.
+- **Superseded 2026-08-23:** `@remnawave/backend-contract` is no longer used at runtime in `rezeis-admin`. Every `@remnawave/*` package is a **devDependency** and only the guard specs execute them. The adapter decodes live responses with its own tolerant decoders over plain HTTP, because a vendor schema describes ONE panel era and pinning one produced a deterministic outage against healthy 3.x panels (`rezeis-admin/README.md` § Remnawave compatibility). Server-side HTTP orchestration stays in the admin facade either way; the contract package is not the HTTP client, and it is not a runtime dependency.
 - Do not move Remnawave contract usage into `ruid` or `ruid/web`.
 
 ### 10. Notifications, Broadcasts, And Ops

@@ -15,12 +15,32 @@ import { BlockedIpService } from '../../blocked-ips/services/blocked-ip.service'
  *     IP within the past `WINDOW_MINUTES`. If the count exceeds
  *     `MAX_FAILURES_PER_WINDOW`, the IP is auto-added to `blocked_ips`
  *     for `BLOCK_DURATION_MINUTES`.
- *   - Successful authentications reset the per-IP failure counter
- *     (handled implicitly: the lookup is "failures since the last
- *     success", not all failures ever).
  *   - We also rate-limit per-(login, ip): a single IP can fail at most
  *     `MAX_FAILURES_PER_LOGIN` times against a given login before getting
  *     blocked, regardless of the global per-IP threshold.
+ *
+ * What the window is, exactly
+ *   Both lookups count EVERY failure inside `WINDOW_MINUTES`. A successful
+ *   authentication does not reset, shorten, or otherwise affect them: no
+ *   query in this file reads a `success: true` row.
+ *
+ *   This paragraph used to say the opposite — "successful authentications
+ *   reset the per-IP failure counter (handled implicitly: the lookup is
+ *   'failures since the last success', not all failures ever)". No such
+ *   lookup was ever written. `test/login-guard-window-semantics.spec.ts`
+ *   now holds the prose and the code together: the claim cannot come back
+ *   into this comment without a success lookup arriving with it.
+ *
+ *   Before changing that, know what a reset would and would not buy. It
+ *   would NOT fix the case operators actually hit, because the password step
+ *   and the TOTP step draw on one shared per-(login, ip) budget:
+ *   `AdminAuthService.loginAdmin()` records `reason: 'totp_required'` and
+ *   `reason: 'totp_invalid'` as failures, and records `success: true` only
+ *   after BOTH factors pass. So three mistyped passwords followed by two
+ *   fumbled codes is five failures and a lockout for the rest of the window
+ *   — even though the password was correct for the last two attempts, there
+ *   is no success row in between to reset from. Separating the two budgets
+ *   is a change in `AdminAuthService`, not here.
  *
  * Cleanup
  *   The `cleanupOldAttempts()` cron runs daily and trims rows older than
@@ -75,6 +95,10 @@ export class LoginGuardService {
    * Returns `true` when the IP has too many recent failures and should be
    * rejected before we even consult the password store. The HTTP layer
    * surfaces this as `429 Too Many Requests`.
+   *
+   * Both counts are "failures in the last `WINDOW_MINUTES`" — not "failures
+   * since the last success". See the class header for why the difference is
+   * spelled out rather than assumed.
    */
   public async isRateLimited(ipAddress: string, loginNormalized: string): Promise<boolean> {
     const since = new Date(Date.now() - this.WINDOW_MINUTES * 60 * 1000);

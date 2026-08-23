@@ -49,6 +49,8 @@ interface Opts {
   projection?: { desiredRevision: bigint; desiredDeviceLimit: number | null } | null;
   subscription?: Record<string, unknown> | null;
   subscriptionQueue?: Array<Record<string, unknown> | null>;
+  /** A second non-deleted subscription sharing this panel profile, or none. */
+  sibling?: Record<string, unknown> | null;
   listQueue?: unknown[];
   deleteResults?: unknown[];
   completionOutcome?: { readonly status: 'COMPLETED' | 'SUPERSEDED'; readonly completed: number };
@@ -101,6 +103,11 @@ function build(opts: Opts = {}) {
         }
         return opts.subscription === undefined ? subscriptionRow() : opts.subscription;
       },
+      // A SIBLING lookup: `loadGuard` asks, on every pass, whether a second
+      // non-deleted subscription points at the same panel profile. `null` is
+      // "no twin", the ordinary case these tests are about; the shared-profile
+      // case is driven explicitly in drs-device-reduction-invariants.spec.ts.
+      findFirst: async () => opts.sibling ?? null,
     },
     entitlementIncident: {
       upsert: async (args: { create: Record<string, unknown> }) => {

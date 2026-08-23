@@ -1,13 +1,21 @@
 /**
  * What the panel does when the server refuses this browser's push endpoint.
  *
- * `POST /admin/push/subscribe` answers 409 for exactly one case: another admin
- * already owns the endpoint. It is not a transport hiccup — it will still be
- * there on the next attempt, and no amount of retrying clears it. Both callers
- * used to fold it into "something went wrong": `enablePush` rethrew into a
- * generic toast, and `ensurePushSubscription` returned `false` and said
- * nothing, so an admin could sit with push silently off and no way to find out
- * why.
+ * `POST /admin/push/subscribe` answers 409 for TWO opposite cases and tells
+ * them apart with a product code:
+ *
+ *   • no code → another admin already owns the endpoint. Not a transport
+ *     hiccup — it will still be there on the next attempt, and no amount of
+ *     retrying clears it. Both callers used to fold it into "something went
+ *     wrong": `enablePush` rethrew into a generic toast, and
+ *     `ensurePushSubscription` returned `false` and said nothing, so an admin
+ *     could sit with push silently off and no way to find out why.
+ *   • `PUSH_SUBSCRIBE_ENDPOINT_RACE_UNSETTLED` → the server's INSERT collided
+ *     with a row that had already been deleted, and its own bounded retry did
+ *     not settle it. NOBODY holds this endpoint. Reading it as "taken" — which
+ *     is all a status-only check could do — told the operator their own browser
+ *     belonged to another administrator and left the toggle off, for a state a
+ *     retry would have cleared.
  *
  * The recoverability claim is the part worth pinning: the local subscription is
  * dropped on failure, so the NEXT `pushManager.subscribe()` mints a fresh
@@ -42,9 +50,28 @@ function fakeSubscription(): unknown {
   }
 }
 
-/** 409 in the shape axios rejects with. */
+/** 409 in the shape axios rejects with. No code: the cross-admin refusal. */
 function conflict(): unknown {
   return { response: { status: 409 } }
+}
+
+/**
+ * The same status carrying the race code, in the shape the safe exception
+ * filter emits it — `code` sits at the top level of the response body beside
+ * `message` and `errorCode`.
+ */
+function unsettledRace(): unknown {
+  return {
+    response: {
+      status: 409,
+      data: {
+        statusCode: 409,
+        code: 'PUSH_SUBSCRIBE_ENDPOINT_RACE_UNSETTLED',
+        errorCode: 'PUSH_SUBSCRIBE_ENDPOINT_RACE_UNSETTLED',
+        message: 'This browser could not be registered because a competing change landed mid-request. Try again.',
+      },
+    },
+  }
 }
 
 beforeEach(() => {
@@ -88,6 +115,16 @@ describe('ensurePushSubscription — the silent heal', () => {
     await expect(ensurePushSubscription()).resolves.toBe('unavailable')
   })
 
+  it('does NOT report an unsettled race as a taken endpoint', async () => {
+    apiMock.post.mockRejectedValue(unsettledRace())
+
+    // `unavailable`, with the transport failures, because that is what it is:
+    // the heal runs again on the next load and normally succeeds. Reported as
+    // `endpoint-taken` it would pin the toggle off and log that this browser
+    // belongs to another admin — for a row that had already gone.
+    await expect(ensurePushSubscription()).resolves.toBe('unavailable')
+  })
+
   it('reports success when the endpoint is registered', async () => {
     apiMock.post.mockResolvedValue({ data: {} })
 
@@ -124,6 +161,30 @@ describe('enablePush — the explicit toggle', () => {
 
     await expect(enablePush()).rejects.toBeTruthy()
     expect(unsubscribeMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('does NOT report an unsettled race as a taken endpoint', async () => {
+    apiMock.post.mockRejectedValue(unsettledRace())
+
+    // Throws into the caller's generic "try again" path instead of claiming
+    // another administrator owns this browser. Same status as the test above
+    // it, opposite meaning — the code is the whole difference.
+    await expect(enablePush()).rejects.toBeTruthy()
+    expect(unsubscribeMock).toHaveBeenCalledTimes(1)
+  })
+
+  // ── Control ───────────────────────────────────────────────────────────────
+  //
+  // Both assertions above are "it did NOT take the endpoint-taken branch". This
+  // proves the branch is reachable at all from the same fake, with the same
+  // status, differing only in the product code — otherwise a mistyped constant
+  // would make every one of them pass for the wrong reason.
+  it('a 409 carrying an UNRELATED product code is still a taken endpoint', async () => {
+    apiMock.post.mockRejectedValue({
+      response: { status: 409, data: { code: 'SOME_OTHER_CONFLICT' } },
+    })
+
+    await expect(enablePush()).resolves.toBe('endpoint-taken')
   })
 })
 

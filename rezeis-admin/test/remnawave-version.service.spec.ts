@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 
 import { RemnawaveApiService } from '../src/modules/remnawave/services/remnawave-api.service';
@@ -172,6 +174,27 @@ describe('RemnawaveVersionService — pinned panel versions', () => {
       major: 3,
       minor: 2,
       patch: 3,
+      supported: true,
+      reachable: true,
+      liveIpControl: true,
+      bandwidthNodesUsers: true,
+      userAddressing: 'id',
+      connectionsApi: 'connections',
+      userLookups: { byTelegramId: false, byEmail: false },
+    });
+  });
+
+  it("3.3.2 — the operator's own panel — is supported and gets no banner", async () => {
+    // This build ran for weeks reporting `supported: false` for 3.3.x, so the
+    // Remnawave page showed an untested-version warning on every visit about
+    // the panel this integration is exercised against daily. A false warning is
+    // not a harmless extra: it is what teaches an operator to ignore the true
+    // one.
+    assert.deepEqual(await capabilitiesOf('3.3.2'), {
+      version: '3.3.2',
+      major: 3,
+      minor: 3,
+      patch: 2,
       supported: true,
       reachable: true,
       liveIpControl: true,
@@ -443,5 +466,91 @@ describe('RemnawaveVersionService — cache windows', () => {
     const afterForce = await harness.service.getCapabilities();
     assert.equal(afterForce.version, '2.8.0');
     assert.equal(harness.counts.recap, 2);
+  });
+});
+
+/**
+ * The constant and the sentence that describes it, held together.
+ *
+ * `TESTED_VERSIONS` decides `supported`; `remnaWavePage.versionWarning.description`
+ * is the only place an operator is ever TOLD which panels are covered. They are
+ * in different languages, in different build systems, in different halves of
+ * the repository — and they drifted: 3.3 was added to neither for the whole
+ * time the owner's 3.3.2 panel was in production, and when the constant was
+ * eventually corrected there was nothing to make the sentence follow.
+ *
+ * THE LINK IS GENUINE, not a pair of literals sitting next to each other. The
+ * set is not exported and does not need to be: `supported` IS the set, observed
+ * through the public surface, so the probe below rediscovers it by asking the
+ * real service about every `major.minor` in a generous box and keeping the ones
+ * it vouches for. Adding a version to the code without the prose fails here;
+ * adding it to the prose without the code fails here; changing either
+ * language's list alone fails here.
+ *
+ * ITS ONE LIMIT, stated rather than implied: the probe is bounded to majors
+ * {@link PROBE_MAJORS} and minors 0…{@link PROBE_MAX_MINOR}. A tested version
+ * outside that box would be invisible to it. Widen the box when Remnawave 7
+ * ships.
+ */
+describe('the tested set and the banner that names it', () => {
+  const PROBE_MAJORS = [1, 2, 3, 4, 5, 6] as const;
+  const PROBE_MAX_MINOR = 24;
+
+  const I18N_DIR = join(__dirname, '..', 'web', 'src', 'i18n', 'features');
+
+  /** The `major.minor` versions one language's warning actually names. */
+  function proseVersions(file: string): readonly string[] {
+    const source = readFileSync(join(I18N_DIR, file), 'utf8');
+    const blockAt = source.indexOf('versionWarning:');
+    assert.notEqual(blockAt, -1, `${file}: no versionWarning block — was the key renamed?`);
+    // From the block onwards, so the surrounding comments (which mention
+    // untested neighbours on purpose) cannot be mistaken for the sentence, and
+    // one line of it, so a neighbouring key cannot contribute a number either.
+    const line = source
+      .slice(blockAt)
+      .split('\n')
+      .find((candidate) => candidate.trimStart().startsWith('description:'));
+    if (line === undefined) assert.fail(`${file}: versionWarning has no description`);
+    const named = [...line.matchAll(/\d+\.\d+/g)].map((m) => m[0]);
+    assert.ok(named.length > 0, `${file}: the warning names no version at all`);
+    return [...new Set(named)].sort();
+  }
+
+  /** The versions the CODE vouches for, discovered rather than declared. */
+  async function supportedByProbe(): Promise<readonly string[]> {
+    const found: string[] = [];
+    for (const major of PROBE_MAJORS) {
+      for (let minor = 0; minor <= PROBE_MAX_MINOR; minor += 1) {
+        const caps = await capabilitiesOf(`${major}.${minor}.0`);
+        if (caps.supported) found.push(`${major}.${minor}`);
+      }
+    }
+    return found.sort();
+  }
+
+  it('says the same thing in the code and in both languages', async () => {
+    const supported = await supportedByProbe();
+    // Anchor first: an empty probe would make every comparison below vacuous,
+    // and it would mean the probe is broken rather than the code.
+    assert.ok(supported.length > 0, 'the probe found no supported version at all');
+
+    assert.deepEqual(
+      proseVersions('remnawave.en.ts'),
+      supported,
+      'the English untested-version warning names a different set than the code supports',
+    );
+    assert.deepEqual(
+      proseVersions('remnawave.ru.ts'),
+      supported,
+      'the Russian untested-version warning names a different set than the code supports',
+    );
+  });
+
+  it('still warns about the neighbours nobody has run', async () => {
+    // The set is deliberately not an ordered range: `>= 2.7` would silently
+    // stop warning on the versions between the tested ones.
+    for (const version of ['2.9.0', '3.0.0', '3.1.0', '3.4.0']) {
+      assert.equal((await capabilitiesOf(version)).supported, false, version);
+    }
   });
 });

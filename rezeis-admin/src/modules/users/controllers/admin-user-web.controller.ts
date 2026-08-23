@@ -96,8 +96,17 @@ export class AdminUserWebController {
     const temporaryPassword = generateTemporaryPassword();
     // The cabinet SHA-256s the password client-side, so we must store the
     // scrypt of that SHA-256 digest — not of the raw temp string.
+    // SUBSCRIBER, despite this being an admin-only endpoint on an admin
+    // controller. The audience is decided by the credential, not the caller:
+    // the row written is `WebAccount.passwordHash`, the person who will type
+    // this password is the subscriber, and the path that will verify it is
+    // `WebAuthService.login`. Minting it at the admin cost would strand one
+    // subscriber row at 196 ms on the customer-facing login for as long as the
+    // temporary password lives, and `needsRehash` would never bring it back
+    // down — it only ever moves work UP.
     const passwordHash = await this.passwordHashService.hashPassword({
       plainTextPassword: sha256Hex(temporaryPassword),
+      audience: 'subscriber',
     });
     const expiresAt = new Date(Date.now() + TEMPORARY_PASSWORD_TTL_HOURS * 60 * 60 * 1000);
 
@@ -137,11 +146,20 @@ export class AdminUserWebController {
   /**
    * Returns the currently-active temporary password for the user's web
    * account, if one was issued and is still valid (within TTL and not yet
-   * changed by the user). `null` when none is active. Admin-JWT gated; the
-   * value is never logged.
+   * changed by the user). `null` when none is active. The value is never
+   * logged.
+   *
+   * `users:edit`, deliberately not the class-level `users:view` this
+   * inherited. This route hands back a LIVE credential for a customer's
+   * cabinet in plaintext - the same string the sibling above issues, and
+   * that sibling correctly requires `users:edit`. Reading the password back
+   * is the same authority as setting it; the shipped `support` role holds
+   * `users:view` and nothing more, and was able to sign in as any customer
+   * whose password an operator had just reset.
    */
   @Get(':telegramId/web/temp-password')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('users', 'edit')
   public async getTemporaryPassword(
     @Param('telegramId') telegramId: string,
   ): Promise<{ temporaryPassword: string | null; expiresAt: string | null }> {

@@ -9,6 +9,11 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { storedIdentityOf } from '../../remnawave/services/panel-user-address';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
+import {
+  assessObservedPanelLink,
+  observePanelEra,
+  SUBSCRIPTION_DELETE_STALE_PANEL_LINK_CODE,
+} from '../../remnawave/services/stale-panel-link';
 
 export const USER_DELETE_PROTECTED_HISTORY_CODE = 'USER_DELETE_PROTECTED_HISTORY';
 export const USER_DELETE_PROTECTED_HISTORY_MESSAGE =
@@ -66,8 +71,46 @@ export class UserDeletionService {
         );
         continue;
       }
+      // ── THE STALE-LINK REFUSAL, ON THE ONE PATH THAT MUST NEVER BLOCK ──────
+      //
+      // THE CUSTOMER IS ALREADY DELETED. `deleteDatabaseUser` committed above,
+      // by design — a protected-history conflict must not remove a live panel
+      // profile while leaving the account behind — so by the time this loop
+      // runs there is no local deletion left to refuse and nothing here can
+      // make deleting a customer impossible. What IS still refusable is the
+      // upstream call, and it is refused for exactly the reason
+      // `SubscriptionDeletionService` refuses the operator's: on a 3.x panel a
+      // uuid-shaped identity does not name the profile it was written for, and
+      // `panelUserAddress` resolves it through the stored subscription link to
+      // whatever profile is live at that address — on an unmerged duplicate
+      // pair, somebody else's.
+      //
+      // SKIPPING LEAVES AN ORPHAN, AND THAT IS THE CHEAPER LOSS. An unbilled
+      // profile keeps serving until an operator removes it by hand, which the
+      // line below tells them to do, by name. Deleting on a guess removes a
+      // paying customer's service and cannot be undone at all.
+      //
+      // ONE OBSERVATION OF THE PANEL ERA, TAKEN HERE AND USED TWICE — by the
+      // refusal below and by the address `deletePanelUser` builds. Two
+      // independent `getPanelShape()` reads could disagree across the
+      // fifteen-second negative cache boundary and let a "proceed" decided on
+      // `'unknown'` be carried out against `'id'`, which is the reading that
+      // resolves this dead uuid to somebody else's live account.
+      const era = await observePanelEra(() => this.remnawaveApiService.getPanelShape());
+      const trust = assessObservedPanelLink(era, identity.remnawaveId);
+      if (!trust.trusted) {
+        this.logger.error(
+          `deleteUser: ${SUBSCRIPTION_DELETE_STALE_PANEL_LINK_CODE} — subscription ` +
+            `${subscription.id} stores the 2.x identity '${subscription.remnawaveId ?? 'none'}' ` +
+            'and the panel is 3.x, so it no longer names the profile it was written for. The ' +
+            'user has been deleted locally and the panel deletion was SKIPPED: the profile ' +
+            `'${subscription.remnawavePanelUsername ?? 'unknown'}' is still live and must be ` +
+            'removed by hand.',
+        );
+        continue;
+      }
       try {
-        await this.remnawaveApiService.deletePanelUser(identity);
+        await this.remnawaveApiService.deletePanelUser(identity, era);
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : 'Unknown error';
         this.logger.warn(

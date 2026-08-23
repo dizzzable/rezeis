@@ -6,7 +6,7 @@ import {
   NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
-import { Locale, Prisma } from '@prisma/client';
+import { Locale, Prisma, ReferralInviteSource } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import {
@@ -26,6 +26,7 @@ import { InternalUserSessionInterface } from '../interfaces/internal-user-sessio
 import { buildUserReferenceWhere } from '../utils/user-reference.util';
 import { mapInternalUserSession, INTERNAL_USER_INCLUDE } from './internal-user.mappers';
 import { evaluateTrialClaim, readTrialSettings, TRIAL_CLAIM_LIMIT_MESSAGE } from '../../plans/utils/trial-settings.util';
+import { selectGrantableTrialPlan } from '../../subscriptions/services/grantable-trial-plan.util';
 import { countCommittedTrialClaimUnits } from '../../subscriptions/services/trial-claim-ledger.util';
 import { isInvitedUser } from '../../plans/utils/trial-invite.util';
 
@@ -226,6 +227,13 @@ export class InternalUserEdgeService {
         await this.referralManualAttachService.attachReferrerManually({
           userId: newUserId,
           referrerId: referrer.id,
+          // This path is reached only from a `t.me/<bot>?start=ref_<token>`
+          // deep-link, so the source is known here and nowhere downstream.
+          inviteSource: ReferralInviteSource.BOT,
+          // A customer redeemed their own invite link. Nobody performed this,
+          // so there is no operator to record and `null` says so explicitly —
+          // the field is required precisely so this is a decision.
+          operator: null,
         });
       } catch (attachError: unknown) {
         if (inviteId !== undefined) {
@@ -548,14 +556,14 @@ export class InternalUserEdgeService {
       );
       return { activated: false, reason: eligibility.reason ?? 'INELIGIBLE' };
     }
-    const trialPlan = await this.prismaService.plan.findFirst({
-      where: { availability: 'TRIAL', isActive: true, isArchived: false },
-      // Must match the ordering eligibility uses, or the two can answer about
-      // different plans when several TRIAL plans are active.
-      orderBy: [{ orderIndex: 'asc' }, { id: 'asc' }],
-      include: { durations: { take: 1, orderBy: { days: 'asc' } } },
-    });
-    if (trialPlan === null || (trialPlan.durations[0]?.days ?? 0) <= 0) {
+    // One shared selection for every trial-granting path, the admin panel's
+    // button included — see `selectGrantableTrialPlan`. The ordering used to be
+    // restated at each site under a comment saying it must match the others;
+    // the panel's site got neither the comment nor the ordering, and handed out
+    // a different plan.
+    const trialPlan = await selectGrantableTrialPlan(this.prismaService);
+    const durationDays = trialPlan?.durationDays ?? 0;
+    if (trialPlan === null || durationDays <= 0) {
       this.logger.warn(`trial activation refused for user ${userId}: TRIAL_NOT_CONFIGURED`);
       return { activated: false, reason: 'TRIAL_NOT_CONFIGURED' };
     }
@@ -563,7 +571,7 @@ export class InternalUserEdgeService {
       const result = await grantTrial({
         userId,
         planId: trialPlan.id,
-        durationDays: trialPlan.durations[0].days,
+        durationDays,
       });
       return { activated: true, subscriptionId: result.subscriptionId };
     } catch (error: unknown) {
@@ -611,28 +619,23 @@ export class InternalUserEdgeService {
     // configured. Checking it only on activation meant eligibility could answer
     // "yes", the cabinet showed the offer, and the button then failed every
     // single time with no way for the user to make progress.
-    // Deliberately the same `orderBy` and the same duration row that activation
-    // reads. Both lookups used to be unordered `findFirst`s with different
-    // shapes, so with more than one active TRIAL plan (a remnashop import can
-    // create them; the admin API's uniqueness check is a raced `findFirst`) they
-    // could resolve to different rows — eligibility saying yes about one plan
-    // while activation refused about another, which is the same "offer shown,
-    // button always fails" divergence this method exists to prevent.
+    // The SAME selection activation makes, because it is now literally the same
+    // function — `selectGrantableTrialPlan`. Both lookups used to be unordered
+    // `findFirst`s with different shapes, so with more than one active TRIAL
+    // plan (a remnashop import can create them; the admin API's uniqueness check
+    // is a raced `findFirst`) they could resolve to different rows — eligibility
+    // saying yes about one plan while activation refused about another, which is
+    // the same "offer shown, button always fails" divergence this method exists
+    // to prevent. Converging them on a RESTATED `orderBy` plus a comment fixed
+    // these two and left the admin panel's copy behind; sharing the query is
+    // what fixed that.
     //
     // `days` is checked, not just the row's existence: the grant copies it
     // straight into the expiry, and imported durations are not validated, so a
     // `days: 0` row would burn the user's one lifetime claim on a subscription
     // that expires the instant it is created.
-    const trialPlan = await this.prismaService.plan.findFirst({
-      where: { availability: 'TRIAL', isActive: true, isArchived: false },
-      orderBy: [{ orderIndex: 'asc' }, { id: 'asc' }],
-      select: {
-        id: true,
-        trialSettings: true,
-        durations: { take: 1, orderBy: { days: 'asc' }, select: { days: true } },
-      },
-    });
-    if (trialPlan === null || (trialPlan.durations[0]?.days ?? 0) <= 0) {
+    const trialPlan = await selectGrantableTrialPlan(this.prismaService);
+    if (trialPlan === null || (trialPlan.durationDays ?? 0) <= 0) {
       return { eligible: false, reason: 'TRIAL_NOT_CONFIGURED' };
     }
     const settings = readTrialSettings(trialPlan.trialSettings);

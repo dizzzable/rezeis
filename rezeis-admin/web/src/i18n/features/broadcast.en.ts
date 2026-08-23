@@ -48,6 +48,16 @@ export const en = {
       contact: 'Has contact',
       inactiveDays: 'Inactive for ≥ days',
       inactiveDaysPlaceholder: 'e.g. 30',
+      plan: 'Plan',
+      planLoading: 'Loading plans…',
+      planEmpty: 'No plans in the catalog yet',
+      preview: {
+        check: 'Check audience',
+        result: '{{total}} recipients match',
+        stale: 'Filters changed — check again',
+        hint: 'Checking saves this broadcast as a draft and counts it on the server. The same draft is the one that gets sent, so the number and the recipients cannot drift apart.',
+        failed: 'Could not count the audience',
+      },
       sub: {
         ACTIVE: 'Active',
         EXPIRED: 'Expired',

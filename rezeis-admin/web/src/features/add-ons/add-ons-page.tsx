@@ -44,7 +44,18 @@ const ADD_ON_TYPES = ['EXTRA_TRAFFIC', 'EXTRA_DEVICES'] as const
 interface AddOnPrice {
   id?: string
   currency: string
-  price: number
+  /**
+   * MAJOR units as a decimal STRING, same as plan prices: the column is a
+   * Prisma `Decimal` and `add-ons.service.ts` sends `p.price.toString()`.
+   *
+   * This said `number` and both readers survived it by accident — the badge
+   * interpolates the value into JSX (a string renders as itself) and the
+   * edit dialog calls `.toString()` (a no-op on a string). Nothing rendered
+   * wrong, unlike the plan-price twin of this lie, which reached a `<` and
+   * compared lexicographically. Corrected before someone reaches for
+   * `.toFixed()` or arithmetic and gets the runtime, not the compiler.
+   */
+  price: string
 }
 
 type AddOnLifetime = 'UNTIL_SUBSCRIPTION_END' | 'UNTIL_NEXT_RESET'

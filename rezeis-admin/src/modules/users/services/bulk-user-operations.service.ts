@@ -1,11 +1,16 @@
+import { randomUUID } from 'node:crypto';
+
 import { Injectable, Logger } from '@nestjs/common';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { buildAdminAuditLogData } from '../../../common/utils/admin-audit-log.util';
 import { parseTelegramId } from '../../../common/utils/postgres-bigint.util';
 import {
   EVENT_TYPES,
   SystemEventsService,
 } from '../../../common/services/system-events.service';
+import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.interface';
+import { RequestMetadataInterface } from '../../auth/interfaces/request-metadata.interface';
 import { UserDeletionService } from './user-deletion.service';
 
 export type BulkUserAction = 'block' | 'unblock' | 'delete' | 'set_language' | 'set_max_subscriptions';
@@ -15,7 +20,16 @@ export interface BulkUserOperationInputInterface {
   readonly action: BulkUserAction;
   /** Optional payload for parametric actions (e.g. set_language:'EN'). */
   readonly payload?: Record<string, unknown>;
-  readonly adminId: string | null;
+  /**
+   * The operator, not merely their id. `adminId: string | null` used to sit
+   * here; the null was never reachable — the one caller is behind
+   * `AdminJwtAuthGuard` — but a nullable actor makes an audit write carry a
+   * branch for a case that cannot happen, and an unreachable branch on an audit
+   * path is how an audit path stops being written.
+   */
+  readonly currentAdmin: CurrentAdminInterface;
+  /** ip / user-agent / request id, for the audit rows this run writes. */
+  readonly requestMetadata: RequestMetadataInterface;
 }
 
 export interface BulkUserOperationItemResultInterface {
@@ -36,6 +50,58 @@ export interface BulkUserOperationResultInterface {
 }
 
 const MAX_BATCH = 1_000;
+
+/**
+ * A bulk run leaves ONE AUDIT ROW PER AFFECTED USER, under the SAME action name
+ * the single-user route writes, with the origin in `metadata.source`.
+ *
+ * There was no `adminAuditLog` write in this file at all. Deleting one account
+ * from the user card wrote `user.deleted`; deleting a thousand from the bulk
+ * toolbar wrote zero rows — only system events, tagged `source: 'bulk'`. The
+ * deletion itself was already converged (both call
+ * `UserDeletionService.deleteUser`); only the operator record diverged, and the
+ * shipped `operator` role holds `users:bulk_operations`.
+ *
+ * ── Why per user, and not one row naming the set ─────────────────────────────
+ *
+ * The question this log is asked is "who deleted THIS account", and it is asked
+ * about ONE user. `AdminAuditLog` has no entity columns — the subject lives in
+ * `metadata` — so the per-user answer is
+ *
+ *   SELECT ... WHERE action = 'user.deleted' AND metadata->>'userId' = $1
+ *
+ * and that query has to find the bulk deletion too, or it answers "nobody"
+ * about an account a bulk click removed. One row naming the whole set answers
+ * "which click did this" cheaply and the per-user question not at all without a
+ * second, differently-shaped query (`metadata->'userIds' @> '["X"]'`) unioned
+ * in — and a reader that has to remember to union a second shape is a reader
+ * that will eventually forget. Same reasoning that put the origin of
+ * `partner.balance.adjusted` in `metadata.source` rather than in a second
+ * action name.
+ *
+ * `metadata.batchId` recovers the grouping the single-row shape would have
+ * given, without the second shape: every row of one run carries it, and so does
+ * the run's summary event. It is generated here rather than taken from
+ * `requestId`, which is a client header and is null more often than not.
+ *
+ * The cost is real and bounded — at most `MAX_BATCH` rows per click — and it is
+ * already precedented in this file, which emits one system event per affected
+ * user for exactly the same reason.
+ *
+ * `set_language` and `set_max_subscriptions` are deliberately absent. Their
+ * single-user counterpart is `user.profile.updated`, which carries a `changes`
+ * array rather than a per-field action, and for `language` there is no
+ * single-user route at all; converging those is a decision about THAT action's
+ * shape, not about this gap.
+ */
+const BULK_AUDIT_ACTION = {
+  block: 'user.blocked',
+  unblock: 'user.unblocked',
+  delete: 'user.deleted',
+} as const;
+
+/** Which surface performed the mutation — see {@link BULK_AUDIT_ACTION}. */
+const BULK_AUDIT_SOURCE = 'bulk';
 
 /**
  * Executes admin-driven bulk operations against the `users` table.
@@ -74,6 +140,11 @@ export class BulkUserOperationsService {
       throw new Error(`Bulk operation exceeds the ${MAX_BATCH}-row limit`);
     }
 
+    // Groups every row and every event this one click produces. See the note on
+    // {@link BULK_AUDIT_ACTION} for why the grouping lives here and not in a
+    // single set-shaped audit row.
+    const batchId = randomUUID();
+
     const items: BulkUserOperationItemResultInterface[] = [];
     let succeeded = 0;
     let failed = 0;
@@ -81,7 +152,7 @@ export class BulkUserOperationsService {
 
     for (const userId of ids) {
       try {
-        const outcome = await this.dispatchOne(userId, input);
+        const outcome = await this.dispatchOne(userId, input, batchId);
         items.push(outcome);
         if (outcome.status === 'ok') succeeded += 1;
         else if (outcome.status === 'skipped') skipped += 1;
@@ -102,7 +173,8 @@ export class BulkUserOperationsService {
       `Bulk user operation "${input.action}" executed (${succeeded}/${ids.length})`,
       {
         action: input.action,
-        adminId: input.adminId,
+        adminId: input.currentAdmin.id,
+        batchId,
         total: ids.length,
         succeeded,
         failed,
@@ -174,6 +246,7 @@ export class BulkUserOperationsService {
   private async dispatchOne(
     token: string,
     input: BulkUserOperationInputInterface,
+    batchId: string,
   ): Promise<BulkUserOperationItemResultInterface> {
     // The result item always reports the ORIGINAL token so operators can map
     // outcomes back to the exact list they pasted (CUID / TG ID / email / login).
@@ -190,11 +263,13 @@ export class BulkUserOperationsService {
           where: { id: user.id },
           data: { isBlocked: true },
         });
+        await this.recordOperatorRow(BULK_AUDIT_ACTION.block, input, batchId, user);
         this.events.warn(EVENT_TYPES.USER_BLOCKED, 'USER', `User bulk-blocked: ${user.id}`, {
           userId: user.id,
           telegramId: user.telegramId?.toString() ?? null,
-          adminId: input.adminId,
-          source: 'bulk',
+          adminId: input.currentAdmin.id,
+          batchId,
+          source: BULK_AUDIT_SOURCE,
         });
         return { userId, status: 'ok' };
 
@@ -204,21 +279,30 @@ export class BulkUserOperationsService {
           where: { id: user.id },
           data: { isBlocked: false },
         });
+        await this.recordOperatorRow(BULK_AUDIT_ACTION.unblock, input, batchId, user);
         this.events.info(EVENT_TYPES.USER_UNBLOCKED, 'USER', `User bulk-unblocked: ${user.id}`, {
           userId: user.id,
           telegramId: user.telegramId?.toString() ?? null,
-          adminId: input.adminId,
-          source: 'bulk',
+          adminId: input.currentAdmin.id,
+          batchId,
+          source: BULK_AUDIT_SOURCE,
         });
         return { userId, status: 'ok' };
 
       case 'delete':
+        // The audit row goes AFTER the deletion boundary returns, never before:
+        // a row for a deletion that threw would answer "who deleted this" about
+        // an account that is still there. A row that is never written for a
+        // deletion that landed is the defect this whole block exists to fix, so
+        // the ordering is one way round only.
         await this.userDeletionService.deleteUser(user.id);
+        await this.recordOperatorRow(BULK_AUDIT_ACTION.delete, input, batchId, user);
         this.events.warn(EVENT_TYPES.USER_DELETED, 'USER', 'User account deleted', {
           userId: user.id,
           telegramId: user.telegramId?.toString() ?? null,
-          adminId: input.adminId,
-          source: 'bulk',
+          adminId: input.currentAdmin.id,
+          batchId,
+          source: BULK_AUDIT_SOURCE,
         });
         return { userId, status: 'ok' };
 
@@ -255,6 +339,36 @@ export class BulkUserOperationsService {
         return { userId, status: 'error', message: `Unknown action: ${String(exhaustive)}` };
       }
     }
+  }
+
+  /**
+   * The operator record for ONE user this run actually changed.
+   *
+   * Called only from a branch that has already mutated the row, so a skipped
+   * row (already blocked, nothing resolved) and a failed row leave nothing
+   * behind: the log records what was DONE. What was attempted is in the
+   * response body and in the run's summary event.
+   */
+  private async recordOperatorRow(
+    action: string,
+    input: BulkUserOperationInputInterface,
+    batchId: string,
+    user: { readonly id: string; readonly telegramId: bigint | null },
+  ): Promise<void> {
+    await this.prismaService.adminAuditLog.create({
+      data: buildAdminAuditLogData({
+        action,
+        actorId: input.currentAdmin.id,
+        requestMetadata: input.requestMetadata,
+        metadata: {
+          requestId: input.requestMetadata.requestId,
+          source: BULK_AUDIT_SOURCE,
+          batchId,
+          userId: user.id,
+          telegramId: user.telegramId?.toString() ?? null,
+        },
+      }),
+    });
   }
 }
 

@@ -285,6 +285,14 @@ export class ExpiredProfileCleanupService {
     let enqueued = 0;
     let selfHealed = 0;
     let deferred = 0;
+    // Counted apart from `deferred`, because waiting does not fix it. A row
+    // whose stored identity is a 2.x uuid on a 3.x panel is refused by
+    // `SubscriptionDeletionService` — the identity would delete whatever the
+    // address fallback resolves to rather than the profile it was written for —
+    // and it stays refused, every sweep, until an operator runs the panel-link
+    // reconciliation. Folding it into the transient count would hide a standing
+    // repair behind a number that is supposed to drain on its own.
+    let refusedStaleLink = 0;
     const deferredKinds = new Set<string>();
     for (const subscription of candidates) {
       const identity = storedIdentityOf(subscription);
@@ -372,6 +380,9 @@ export class ExpiredProfileCleanupService {
           cutoff,
         });
         if (!result.deleted) {
+          if (result.refusedStalePanelLink) {
+            refusedStaleLink += 1;
+          }
           continue;
         }
         enqueued += 1;
@@ -390,6 +401,22 @@ export class ExpiredProfileCleanupService {
       this.logger.log(
         `Expired-profile cleanup: self-healed ${selfHealed} subscription(s) with stale local expiry`,
       );
+    }
+    if (refusedStaleLink > 0) {
+      // Once per sweep with a count, not once per row — the same shape
+      // `softDeleteDetachedExpired` uses for its own standing population, and
+      // for the same reason: a line per row every thirty minutes buries the
+      // one sentence that says what to do about it.
+      const message =
+        `Expired-profile cleanup: refused ${refusedStaleLink} of ${candidates.length} ` +
+        'candidate(s) — their stored Remnawave identity is a 2.x uuid and the panel is 3.x, so ' +
+        'deleting would remove whatever the address fallback resolves to instead of the profile ' +
+        'the row was written for. Run the panel-link reconciliation; they retire normally once ' +
+        'the identity is repaired.';
+      this.logger.warn(message);
+      this.events.warn(EVENT_TYPES.SYSTEM_REMNAWAVE_SYNC, 'SYSTEM', message, {
+        subscriptions: refusedStaleLink,
+      });
     }
     if (deferred > 0) {
       // Deliberately `warn`, and deliberately unconditional on the count: a

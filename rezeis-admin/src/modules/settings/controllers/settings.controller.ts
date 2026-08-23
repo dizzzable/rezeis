@@ -14,6 +14,7 @@ import { UpdateCustomIconsDto } from '../dto/custom-icons.dto';
 import { GenerateWebPushKeysDto } from '../dto/generate-web-push-keys.dto';
 import { UpdateNotificationsTogglesDto } from '../dto/update-notifications-toggles.dto';
 import { UpdatePlatformSettingsDto } from '../dto/update-platform-settings.dto';
+import { UpdateReferralSettingsDto } from '../dto/update-referral-settings.dto';
 import { UpdateRemnawaveCleanupSettingsDto } from '../dto/update-remnawave-cleanup-settings.dto';
 import { UpdateAntiFraudSettingsDto } from '../dto/update-anti-fraud-settings.dto';
 import { UpdateQuestPartnerSecretsDto } from '../dto/update-quest-partner-secrets.dto';
@@ -108,7 +109,7 @@ export class SettingsController {
     });
   }
 
-  /** Clear panel-managed web-push VAPID keys (falls back to env, if any). */
+  /** Clear the panel-managed web-push VAPID keys — this disables push outright. */
   @Post('web-push/clear')
   @HttpCode(HttpStatus.OK)
   @RequirePermission('settings', 'edit')
@@ -309,18 +310,32 @@ export class SettingsController {
    * Partial-update of `referralSettings`. Top-level keys are replaced;
    * `pointsExchange` and `inviteLimits` are merged one level deeper so a
    * subsection patch does not blow away unrelated knobs.
+   *
+   * The body is a DTO and not a `Record<string, unknown>` for a reason that is
+   * easy to miss: a body metatype of `Object` makes the global `ValidationPipe`
+   * SKIP THE HANDLER ENTIRELY. Not one decorator ran here, and
+   * `forbidNonWhitelisted` never saw the body, so any field of any type — a
+   * negative slot count, a key nobody reads — was written verbatim into the
+   * JSON column. See `update-referral-settings.dto.ts` for how the accepted
+   * field list was derived and why omitted / `null` / `0` have to stay three
+   * different requests.
    */
   @Patch('referral')
   @RequirePermission('settings', 'edit')
   public async updateReferralSettings(
-    @Body() body: Record<string, unknown>,
+    @Body() body: UpdateReferralSettingsDto,
     @CurrentAdmin() currentAdmin: CurrentAdminInterface,
     @Req() request: Request,
   ): Promise<Record<string, unknown>> {
     return this.settingsService.updateReferralSettings({
       currentAdmin,
       requestMetadata: extractRequestMetadata(request),
-      patch: body,
+      // Spread, not the instance: `mergeReferralSettings` iterates
+      // `Object.entries`, so what it sees is the DTO's own enumerable keys —
+      // which is precisely the omitted/`null` distinction the pipe preserved.
+      // An omitted field has no own property and is therefore invisible to the
+      // merge; an explicit `null` has one and is written.
+      patch: toPlainPatch(body),
     });
   }
 
@@ -474,4 +489,23 @@ export class SettingsController {
       mimeType: file.mimetype,
     });
   }
+}
+
+/**
+ * A validated DTO tree rendered as the plain JSON it describes.
+ *
+ * `SettingsService.updateReferralSettings` merges the two sections it knows
+ * about one level deep and stores every other value wholesale, so a nested DTO
+ * INSTANCE — `pointsExchange.subscriptionDays` is two levels down — would reach
+ * the `referralSettings` JSON column as a class. It serialises to the same
+ * bytes, which is exactly why nobody would notice, and why the column would
+ * then hold a shape none of its readers ever produce.
+ *
+ * The round trip cannot lose the omitted/`null` distinction the pipe preserved:
+ * an omitted field has NO OWN PROPERTY on the instance (these classes declare
+ * no initialisers), so there is nothing for `JSON.stringify` to drop, and an
+ * explicit `null` is an own property with a JSON value.
+ */
+function toPlainPatch(body: object): Record<string, unknown> {
+  return JSON.parse(JSON.stringify(body)) as Record<string, unknown>;
 }

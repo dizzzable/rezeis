@@ -14,6 +14,10 @@ import {
 } from '../src/modules/remnawave/interfaces/remnawave-strict-outcome.interface';
 import { resolveSharingDetectionConfig } from '../src/modules/anti-fraud/sharing-detection.config';
 import { tunablesFromEnv } from './fixtures/anti-fraud-tunables';
+import {
+  subscriptionFindManyDouble,
+  type SubscriptionQuery,
+} from './fixtures/subscription-where';
 
 const NOW = new Date('2026-06-18T12:00:00.000Z');
 /** Older than any stability window, so a node carrying it is quiet by default. */
@@ -54,6 +58,8 @@ interface Harness {
   readonly detectors: SharingDetectors;
   /** Node uuids passed to `fetchUsersIpsForNode`, in call order. */
   readonly scannedNodeUuids: string[];
+  /** Every `subscription.findMany`: the `where` sent and the rows it selected. */
+  readonly subscriptionQueries: readonly SubscriptionQuery<SubRow>[];
 }
 
 /**
@@ -68,6 +74,14 @@ interface Harness {
  */
 interface SubRow {
   remnawaveId: string;
+  /**
+   * The SECOND angle on the same panel profile, and the one a 3.x panel names
+   * users by. Absent === the column is NULL, which is what a row linked on 2.x
+   * and never re-read looks like — and what most rows look like, which is why
+   * a lookup that ever asks for `remnawavePanelId: null` matches the entire
+   * table.
+   */
+  remnawavePanelId?: number | null;
   userId: string;
   deviceLimitReducedAt?: Date | null;
   deviceLimitBeforeReduction?: number | null;
@@ -75,10 +89,12 @@ interface SubRow {
 
 function makeHarness(remna: RemnaMock, subs: SubRow[] = []): Harness {
   const scannedNodeUuids: string[] = [];
+  // The `where` is HONOURED, not ignored — see `test/fixtures/subscription-where.ts`.
+  const subscriptions = subscriptionFindManyDouble(subs);
 
   const prismaMock = {
     subscription: {
-      findMany: () => Promise.resolve(subs),
+      findMany: subscriptions.findMany,
     },
     remnawaveMetricSample: {
       findMany: () =>
@@ -114,7 +130,11 @@ function makeHarness(remna: RemnaMock, subs: SubRow[] = []): Harness {
     getCapabilities: () => Promise.resolve({ liveIpControl: true, bandwidthNodesUsers: true }),
   } as unknown as import('../src/modules/remnawave/services/remnawave-version.service').RemnawaveVersionService;
 
-  return { detectors: new SharingDetectors(prismaMock, remnaMock, versionMock, tunablesFromEnv()), scannedNodeUuids };
+  return {
+    detectors: new SharingDetectors(prismaMock, remnaMock, versionMock, tunablesFromEnv()),
+    scannedNodeUuids,
+    subscriptionQueries: subscriptions.queries,
+  };
 }
 
 function makeDetectors(remna: RemnaMock, subs: SubRow[] = []): SharingDetectors {
@@ -291,6 +311,151 @@ describe('SharingDetectors — HWID overage', () => {
  * genuinely explains is bounded by `Subscription.deviceLimitBeforeReduction`:
  * the devices the customer already held, and not one more.
  */
+/**
+ * The panel upgraded; the subscription row did not.
+ *
+ * On a 3.x panel every identity the detectors receive is a decimal `id` — the
+ * `uuid` column is gone from the user model. A subscription linked during the
+ * 2.x era still stores its uuid in `remnawaveId` and always will, because the
+ * panel's own migration drops the uuid and we never had anywhere else to put
+ * it. So `remnawaveId IN (<decimals>)` matches NOTHING for that population, and
+ * on this operator's 3.3.2 panel that is most of the paying base.
+ *
+ * The consequence is not a blank field. `rezeisUserId` comes back null AND the
+ * device-limit-reduction stamp never reaches the grace, so a customer who
+ * legitimately downgraded their plan is accused of sharing. It fails silently,
+ * in the accusing direction, against people who did nothing.
+ *
+ * `remnawavePanelId` is the second recorded angle on the same profile and is
+ * what closes it — under the two bounds the last two cases here pin, because
+ * the careless version of this fix (`remnawavePanelId: null`, or an `in` list
+ * carrying a null) matches every row that has no panel id, which in an
+ * anti-fraud detector means every customer at once.
+ */
+describe('SharingDetectors — a 3.x panel identity against a 2.x-era row', () => {
+  const UUID_2X = '330f2b38-1362-46ab-b5c0-dea32167eff9';
+  /** The identity a 3.x panel sends: the numeric id, rendered decimal. */
+  const PANEL_ID = 4471;
+  const IDENTITY_3X = String(PANEL_ID);
+
+  /** Rows that belong to other customers and have no panel id recorded. */
+  const STRANGERS: SubRow[] = [
+    { remnawaveId: '9e7c1a54-0000-4000-8000-000000000001', userId: 'stranger-1' },
+    { remnawaveId: '9e7c1a54-0000-4000-8000-000000000002', userId: 'stranger-2' },
+    { remnawaveId: 'not-a-panel-identity', userId: 'stranger-3' },
+  ];
+
+  function harnessFor(subs: SubRow[]) {
+    return makeHarness(
+      {
+        hwidTopUsers: [
+          {
+            userUuid: IDENTITY_3X,
+            username: 'alice',
+            telegramId: null,
+            devicesCount: 5,
+            lastSeenAt: null,
+          },
+        ],
+        panelUsers: [{ uuid: IDENTITY_3X, panelId: PANEL_ID, hwidDeviceLimit: 2 }],
+      },
+      subs,
+    );
+  }
+
+  /** The 2.x-era row: uuid in `remnawaveId`, numeric id in the second column. */
+  function upgradedRow(over: Partial<SubRow> = {}): SubRow {
+    return { remnawaveId: UUID_2X, remnawavePanelId: PANEL_ID, userId: 'user-42', ...over };
+  }
+
+  it('deep-links the signal through the numeric angle', async () => {
+    const { detectors } = harnessFor([...STRANGERS, upgradedRow()]);
+
+    const candidates = await detectors.detectHwidOverage(NOW);
+
+    assert.equal(candidates.length, 1);
+    // The whole point: without the numeric arm this is `[]` and the operator
+    // gets a signal that opens onto nobody.
+    assert.deepEqual(candidates[0].affectedUserIds, ['user-42']);
+  });
+
+  it('lets the downgrade grace reach that row, so the customer is not accused', async () => {
+    const { detectors } = harnessFor([
+      ...STRANGERS,
+      upgradedRow({
+        deviceLimitReducedAt: new Date(NOW.getTime() - 60_000),
+        deviceLimitBeforeReduction: 5,
+      }),
+    ]);
+
+    assert.deepEqual(
+      await detectors.detectHwidOverage(NOW),
+      [],
+      'a customer who downgraded moments ago was accused because their row was never found',
+    );
+  });
+
+  it('accuses the same customer when nothing records the second angle — the control', async () => {
+    // Same downgrade, same instant, but the row carries no `remnawavePanelId`,
+    // so there is genuinely no way back to it from a 3.x identity. This is what
+    // makes the case above evidence: the excuse travelled through the numeric
+    // angle and not through some accident of the harness.
+    const { detectors } = harnessFor([
+      ...STRANGERS,
+      upgradedRow({
+        remnawavePanelId: null,
+        deviceLimitReducedAt: new Date(NOW.getTime() - 60_000),
+        deviceLimitBeforeReduction: 5,
+      }),
+    ]);
+
+    const candidates = await detectors.detectHwidOverage(NOW);
+    assert.equal(candidates.length, 1);
+    assert.deepEqual(candidates[0].affectedUserIds, []);
+  });
+
+  it('selects that one row and no other — a null panel id must never be asked for', async () => {
+    // THE MUTATION THIS EXISTS FOR. `remnawave_panel_id` has no unique
+    // constraint and is null on most rows (migration `20260810160000`), so
+    // asking `remnawavePanelId: null` — or putting a null in the `in` list —
+    // turns "which subscriptions are these" into "all of them" inside an
+    // anti-fraud detector. The stranger rows above all have no panel id, so
+    // they are exactly what such a query would sweep up.
+    const { detectors, subscriptionQueries } = harnessFor([...STRANGERS, upgradedRow()]);
+
+    await detectors.detectHwidOverage(NOW);
+
+    assert.equal(subscriptionQueries.length, 1, 'the detector did not query subscriptions at all');
+    assert.deepEqual(
+      subscriptionQueries[0].matched.map((row) => row.userId),
+      ['user-42'],
+    );
+  });
+
+  it('asks one column only when the batch holds no numeric identity', async () => {
+    // A 2.x panel, or any batch of uuids: there is no numeric angle to ask
+    // about, and the arm is OMITTED rather than emitted empty or null.
+    const { detectors, subscriptionQueries } = makeHarness(
+      {
+        hwidTopUsers: [
+          { userUuid: UUID_2X, username: 'alice', telegramId: null, devicesCount: 5, lastSeenAt: null },
+        ],
+        panelUsers: [{ uuid: UUID_2X, panelId: PANEL_ID, hwidDeviceLimit: 2 }],
+      },
+      [...STRANGERS, { remnawaveId: UUID_2X, userId: 'user-42' }],
+    );
+
+    await detectors.detectHwidOverage(NOW);
+
+    assert.equal(subscriptionQueries.length, 1);
+    assert.deepEqual(subscriptionQueries[0].where, { remnawaveId: { in: [UUID_2X] } });
+    assert.deepEqual(
+      subscriptionQueries[0].matched.map((row) => row.userId),
+      ['user-42'],
+    );
+  });
+});
+
 describe('SharingDetectors — a downgrade is not sharing', () => {
   const GRACE_DAYS = 14;
   const days = (n: number): number => n * 24 * 60 * 60 * 1000;

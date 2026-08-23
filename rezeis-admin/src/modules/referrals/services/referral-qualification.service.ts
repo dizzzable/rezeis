@@ -7,7 +7,7 @@ import { SystemEventsService, EVENT_TYPES } from '../../../common/services/syste
 /**
  * Shape of `Settings.referralSettings` JSON (donor: altshop referral_settings).
  */
-interface ReferralSettingsJson {
+export interface ReferralSettingsJson {
   enabled?: boolean;
   accrual_strategy?: 'ON_FIRST_PAYMENT' | 'ON_EVERY_PAYMENT';
   reward?: {
@@ -330,94 +330,6 @@ export class ReferralQualificationService {
     }
   }
 
-  /**
-   * Marks a reward as issued and applies the effect (points or extra days).
-   */
-  public async issueReward(rewardId: string): Promise<void> {
-    const reward = await this.prismaService.referralReward.findUnique({
-      where: { id: rewardId },
-      select: {
-        id: true,
-        referralId: true,
-        userId: true,
-        type: true,
-        amount: true,
-        isIssued: true,
-      },
-    });
-
-    if (!reward) {
-      throw new NotFoundException(`ReferralReward not found: ${rewardId}`);
-    }
-
-    if (reward.isIssued) {
-      this.logger.debug(`Reward ${rewardId} already issued`);
-      return;
-    }
-
-    const now = new Date();
-
-    await this.prismaService.$transaction(async (tx) => {
-      // Mark reward as issued
-      await tx.referralReward.update({
-        where: { id: rewardId },
-        data: { isIssued: true, issuedAt: now },
-      });
-
-      if (reward.type === ReferralRewardType.POINTS) {
-        // Increment user points
-        await tx.user.update({
-          where: { id: reward.userId },
-          data: { points: { increment: reward.amount } },
-        });
-      } else if (reward.type === ReferralRewardType.EXTRA_DAYS) {
-        // Extend the user's current subscription expiresAt
-        const user = await tx.user.findUnique({
-          where: { id: reward.userId },
-          select: { currentSubscriptionId: true },
-        });
-
-        if (user?.currentSubscriptionId) {
-          const subscription = await tx.subscription.findUnique({
-            where: { id: user.currentSubscriptionId },
-            select: { id: true, expiresAt: true },
-          });
-
-          if (subscription !== null && subscription.expiresAt !== null) {
-            const baseDate = new Date(Math.max(subscription.expiresAt.getTime(), now.getTime()));
-            const newExpiresAt = new Date(baseDate);
-            newExpiresAt.setUTCDate(newExpiresAt.getUTCDate() + reward.amount);
-
-            await tx.subscription.update({
-              where: { id: subscription.id },
-              data: { expiresAt: newExpiresAt },
-            });
-          }
-        }
-      }
-    });
-
-    // Notify the dev that a referral reward landed (points or extra days).
-    // `issueReward` previously applied the effect silently.
-    this.events.info(EVENT_TYPES.REFERRAL_REWARD_ISSUED, 'REFERRAL', 'Referral reward issued', {
-      referralId: reward.referralId,
-      referrerId: reward.userId,
-      userId: reward.userId,
-      rewardType: reward.type,
-      rewardValue: reward.amount,
-    });
-  }
-
-  /**
-   * Returns all referral rewards for a given user.
-   */
-  public async listRewardsByUser(userId: string) {
-    return this.prismaService.referralReward.findMany({
-      where: { userId },
-      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-    });
-  }
-
   // ---------------------------------------------------------------------------
   // Private helpers
   // ---------------------------------------------------------------------------
@@ -532,8 +444,16 @@ function readOptionalNumber(
  * drives referral rewards — previously it was silently ignored and NO reward
  * rows were created) and falls back to the legacy shape for backward
  * compatibility with older data and existing tests.
+ *
+ * EXPORTED because it now has a SECOND reader. `ReferralsService.listReferrals`
+ * decides whether a level-2 payout row exists at all, and that decision is the
+ * same `reward.config.SECOND` this function assembles. Reading the raw JSON
+ * there instead would have re-implemented the camelCase/legacy bridge and
+ * disagreed with the engine the moment an install used the shape the copy did
+ * not handle - the panel would then promise a payout `createConfiguredRewards`
+ * never makes, or hide one it does.
  */
-function normalizeReferralSettings(raw: unknown): ReferralSettingsJson {
+export function normalizeReferralSettings(raw: unknown): ReferralSettingsJson {
   const record = readRecord(raw);
   const result: ReferralSettingsJson = {};
 

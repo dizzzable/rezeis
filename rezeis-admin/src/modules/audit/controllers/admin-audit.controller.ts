@@ -59,8 +59,20 @@ export class AdminAuditController {
 
   // ── Export ───────────────────────────────────────────────────────────────
 
+  /**
+   * `audit:export`, not `audit:view`. The action exists in the catalog
+   * (`rbac.resources.ts`, `audit: ['view', 'export']`) and, until this line,
+   * appeared in no decorator anywhere - so the only two roles that ship with
+   * `audit:view` (`operator` and `finance`) could download the whole log as a
+   * file while the operator who granted them read access had, on the role
+   * editor screen, deliberately left the export box unticked. A permission
+   * nothing enforces is not a permission.
+   *
+   * `users:export_registration` and `config_portability:export` are the two
+   * routes in this tree that already got this right; this one now matches.
+   */
   @Get('export')
-  @RequirePermission('audit', 'view')
+  @RequirePermission('audit', 'export')
   @ApiOperation({ summary: 'Download events as a plain-text (.txt) file' })
   public async export(
     @Query() query: ListAuditEventsV2QueryDto,

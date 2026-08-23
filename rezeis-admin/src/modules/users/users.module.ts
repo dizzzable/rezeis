@@ -5,6 +5,7 @@ import { InternalUserModule } from '../internal-user/internal-user.module';
 import { ImportsModule } from '../imports/imports.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { PartnersModule } from '../partners/partners.module';
+import { PlansModule } from '../plans/plans.module';
 import { ProfileSyncModule } from '../profile-sync/profile-sync.module';
 import { RbacModule } from '../rbac/rbac.module';
 import { ReferralsModule } from '../referrals/referrals.module';
@@ -34,6 +35,11 @@ import { UserDeletionService } from './services/user-deletion.service';
     ImportsModule,
     NotificationsModule,
     PartnersModule,
+    // Supplies `PlansAdminService` to the plan-access toggle on the user card,
+    // the same way `PartnersModule` supplies `PartnersService` to the balance
+    // adjustment beside it: the write belongs to the module that owns the
+    // column, not to whichever screen happens to reach it.
+    PlansModule,
     ProfileSyncModule,
     RbacModule,
     ReferralsModule,

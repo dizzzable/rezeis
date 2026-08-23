@@ -14,6 +14,7 @@ import {
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
+import { panelTrafficLimitToGb } from '../../remnawave/utils/panel-traffic-limit.util';
 import { ImportSummary } from '../interfaces/import-summary.interface';
 import { StealthnetReferralSyncService } from './stealthnet-referral-sync.service';
 import {
@@ -570,10 +571,7 @@ export class StealthnetImporterService {
       : {
           status: reconcileMissingPanelStatus(known, SubscriptionStatus.ACTIVE),
           isTrial: false,
-          trafficLimit:
-            tariff?.traffic_limit_bytes && tariff.traffic_limit_bytes > 0
-              ? Math.max(1, Math.round(Number(tariff.traffic_limit_bytes) / 1024 ** 3))
-              : null,
+          trafficLimit: panelTrafficLimitToGb(tariff?.traffic_limit_bytes),
           deviceLimit: backupDeviceLimit,
           internalSquads: tariffSquads,
           expiresAt: backupExpiresAt,
@@ -893,7 +891,13 @@ function deriveExtraDeviceAddOns(
   }));
 }
 
-function mapTariffToPlanRow(
+/**
+ * One STEALTHNET tariff, as the donor-catalog PLAN row `BackupPlanClonerService`
+ * knows how to read. Exported so `stealthnet-plan-traffic-unit.spec.ts` can feed
+ * the real producer into the real consumer — the unit mismatch this function
+ * used to carry is invisible to either side alone.
+ */
+export function mapTariffToPlanRow(
   tariff: StealthnetTariff,
   categories: readonly StealthnetTariffCategory[],
 ): Record<string, unknown> {
@@ -922,10 +926,27 @@ function mapTariffToPlanRow(
     included_devices: tariff.included_devices,
     max_extra_devices: tariff.max_extra_devices,
     price_per_extra_device: tariff.price_per_extra_device,
-    traffic_limit:
-      tariff.traffic_limit_bytes && tariff.traffic_limit_bytes > 0
-        ? Number(tariff.traffic_limit_bytes)
-        : 0,
+    // GIGABYTES, not bytes. `backup-plan-cloner.service.ts` reads this key as
+    // `NormalizedSourcePlan.trafficLimit` (`Number(row.traffic_limit ?? 0)`)
+    // and writes it straight to `Plan.trafficLimit`, which counts whole
+    // gigabytes — altshop and remnashop both feed it from a donor column
+    // already denominated that way. STEALTHNET is the only donor whose tariff
+    // states BYTES, and it used to hand them over unconverted: a 50 GB tariff
+    // cloned into a plan capped at 5.4e10 GB, which is "unlimited" with extra
+    // steps and silently un-editable in the plan form.
+    //
+    // `panelTrafficLimitToGb` is the same converter the subscription half of
+    // this importer already calls, so the two halves of one STEALTHNET import
+    // cannot disagree about the same tariff. Its 1 GB floor matters here too:
+    // a sub-gigabyte tariff must not round down, because...
+    //
+    // ...`?? 0` — and note the UNIT CONVENTION DIFFERS from `Subscription`.
+    // The cloner spells unlimited `plan.trafficLimit > 0 ? … : null`, so `0`
+    // in this donor-catalog row means UNLIMITED and is what an absent or
+    // non-positive byte cap must become. That is a `Plan` rule; it is NOT the
+    // `Subscription` rule, where `0` means genuinely zero gigabytes. Do not
+    // copy this `?? 0` onto a subscription write.
+    traffic_limit: panelTrafficLimitToGb(tariff.traffic_limit_bytes) ?? 0,
     traffic_limit_strategy: mapResetMode(tariff.traffic_reset_mode),
     replacement_plan_ids: [],
     upgrade_to_plan_ids: [],

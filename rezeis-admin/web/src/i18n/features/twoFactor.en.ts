@@ -31,6 +31,12 @@ export const en = {
       disableButton: 'Disable',
       codePlaceholder: 'Verification code',
     },
+    legacy: {
+      title: 'Recovery codes from the old format',
+      some: 'Recovery codes still in the old, weak format: {{count}}. A leaked database gives those away.',
+      unknown: 'This server does not report how many of your recovery codes use the old, weak format, so treat that number as unknown.',
+      action: 'Regenerate below to replace every code with the current format. You will need your authenticator app, or one of the codes you still hold.',
+    },
     recovery: {
       title: 'Save your recovery codes',
       description: 'Each code can be used once if you lose access to your authenticator app. They are shown only this once.',
@@ -40,6 +46,8 @@ export const en = {
       enabled: '2FA enabled. Keep your recovery codes safe.',
       disabled: '2FA disabled.',
       scanQr: 'Scan the QR code in your authenticator app, then enter the first code.',
+      enrollPassword:
+        'Enter your current password to confirm it is you, then start the enrollment again.',
       newCodes: 'New recovery codes — save them now.',
     },
     errors: {
@@ -78,6 +86,12 @@ export const en = {
         nameLabel: 'Name',
         namePlaceholder: 'e.g. MacBook Pro or YubiKey 5',
         nameHint: '2 to 30 characters: letters, digits, space, dash, underscore.',
+        codeLabel: 'Confirm with a 2FA code',
+        codeHint:
+          'A passkey outlives a password change, so adding one asks you to prove it is you. A recovery code works too.',
+        passwordLabel: 'Confirm with your current password',
+        passwordHint:
+          'A passkey outlives a password change, so adding one asks you to prove it is you.',
         confirm: 'Register',
       },
       toasts: {

@@ -311,6 +311,9 @@ function mapPartnerDetail(
     level1FixedAmount: record.level1FixedAmount,
     level2FixedAmount: record.level2FixedAmount,
     level3FixedAmount: record.level3FixedAmount,
+    level1AccrualStrategy: record.level1AccrualStrategy,
+    level2AccrualStrategy: record.level2AccrualStrategy,
+    level3AccrualStrategy: record.level3AccrualStrategy,
     createdAt: record.createdAt.toISOString(),
     updatedAt: record.updatedAt.toISOString(),
   };

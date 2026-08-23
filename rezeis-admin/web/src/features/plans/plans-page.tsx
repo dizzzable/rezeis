@@ -22,7 +22,6 @@ import {
 import { CSS } from '@dnd-kit/utilities'
 
 import { api } from '@/lib/api'
-import { getErrorMessage } from '@/lib/http-errors'
 import { cn } from '@/lib/utils'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -41,11 +40,42 @@ import {
   type Plan,
   type PlanUpdateResult,
 } from './plans-api'
+import { resolvePlanWriteRefusal } from './plan-write-refusals'
 import { PlansStatsTab } from './plans-stats-tab'
 
 export default function PlansPage() {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
+
+  /**
+   * What a refused plan write says to the operator.
+   *
+   * THREE OUTCOMES, AND THE MIDDLE ONE IS THE POINT.
+   *
+   *   • A code this build knows → its translated sentence, which names the
+   *     field to fix. The panel used to print the server's English diagnostic
+   *     verbatim, so an operator running the panel in Russian was told
+   *     "Replacement and upgrade plans must be active non-trial public plans:
+   *     cmsxo98e8006r01jgn33gtpbe" — the wrong language, naming a cuid that
+   *     appears on no screen.
+   *   • A code this build does NOT know → the server's own `message`, in
+   *     English. A rolling deploy WILL put a newer backend behind this panel,
+   *     and folding its new code into the generic sentence below would throw
+   *     away the one line that says which of seventeen refusals happened.
+   *     English prose the operator has to puzzle over beats a confident lie.
+   *   • No message at all — a dead host, a refused connection → the
+   *     per-mutation fallback, which is at least translated.
+   *
+   * Replaces `getErrorMessage`, which is not the same three-way split: it
+   * falls through to `error.message`, and on a network failure that is axios'
+   * own untranslated "Network Error" rather than "Failed to archive plan".
+   */
+  const refusalMessage = (error: unknown, fallback: string): string => {
+    const resolution = resolvePlanWriteRefusal(error)
+    if (resolution.recognised) return t(resolution.i18nKey)
+    return resolution.serverMessage ?? fallback
+  }
+
   const [showCreate, setShowCreate] = useState(false)
   const [editingPlan, setEditingPlan] = useState<Plan | null>(null)
   // Set when a save reports it queued a squad push, so the banner below can
@@ -63,7 +93,7 @@ export default function PlansPage() {
       setShowCreate(false)
       toast.success(t('plansPage.created'))
     },
-    onError: (err) => toast.error(getErrorMessage(err, t('plansPage.createFailed'))),
+    onError: (err) => toast.error(refusalMessage(err, t('plansPage.createFailed'))),
   })
 
   const updateMutation = useMutation({
@@ -81,7 +111,7 @@ export default function PlansPage() {
         setWatchedPropagationPlanId(variables.id)
       }
     },
-    onError: (err) => toast.error(getErrorMessage(err, t('plansPage.updateFailed'))),
+    onError: (err) => toast.error(refusalMessage(err, t('plansPage.updateFailed'))),
   })
 
   const archiveMutation = useMutation({
@@ -90,7 +120,7 @@ export default function PlansPage() {
       queryClient.invalidateQueries({ queryKey: plansQueryKeys.all })
       toast.success(t('plansPage.archived'))
     },
-    onError: (err) => toast.error(getErrorMessage(err, t('plansPage.archiveFailed'))),
+    onError: (err) => toast.error(refusalMessage(err, t('plansPage.archiveFailed'))),
   })
 
   const unarchiveMutation = useMutation({
@@ -99,20 +129,20 @@ export default function PlansPage() {
       queryClient.invalidateQueries({ queryKey: plansQueryKeys.all })
       toast.success(t('plansPage.unarchived'))
     },
-    onError: (err) => toast.error(getErrorMessage(err, t('plansPage.unarchiveFailed'))),
+    onError: (err) => toast.error(refusalMessage(err, t('plansPage.unarchiveFailed'))),
   })
 
   const toggleActiveMutation = useMutation({
     mutationFn: ({ id, isActive }: { id: string; isActive: boolean }) =>
       api.patch(`/admin/plans/${id}`, { isActive }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: plansQueryKeys.all }),
-    onError: (err) => toast.error(getErrorMessage(err, t('plansPage.toggleActiveFailed'))),
+    onError: (err) => toast.error(refusalMessage(err, t('plansPage.toggleActiveFailed'))),
   })
 
   const moveMutation = useMutation({
     mutationFn: (orderedIds: string[]) => reorderPlans(orderedIds),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: plansQueryKeys.all }),
-    onError: (err) => toast.error(getErrorMessage(err, t('plansPage.reorderFailed'))),
+    onError: (err) => toast.error(refusalMessage(err, t('plansPage.reorderFailed'))),
     onSettled: () => setLocalOrder(null),
   })
 
@@ -143,8 +173,33 @@ export default function PlansPage() {
     moveMutation.mutate(next.map((p) => p.id))
   }
 
-  const formatTraffic = (gb: number) =>
-    gb === 0 ? t('plansPage.unlimited') : `${gb} GB`
+  /**
+   * A plan's traffic cap, as the OPERATOR has to read it.
+   *
+   * `null` is the server's UNLIMITED, and it is not a rare edge:
+   * `plans-admin.normalizers` writes it for every DEVICES and every
+   * UNLIMITED plan. The old test was `gb === 0`, which `null` never
+   * satisfies, so the unlimited branch was unreachable for exactly the two
+   * plan types that ARE unlimited and their cards printed the literal text
+   * `null GB`.
+   *
+   * `0` deliberately does NOT come back here as unlimited. It is a cap of
+   * ZERO gigabytes — no traffic at all — the opposite product fact, and
+   * folding the two together is a defect this codebase has already paid
+   * for: see `plan-picker-traffic-cap.test.tsx`, where a legacy zero
+   * rendered exactly like an uncapped plan and an operator handed a
+   * customer a subscription carrying nothing. Rows authored before the DTO
+   * was raised to `@Min(1)` still hold that zero, and this list is where an
+   * operator would go looking for one. `0 GB` says what it is.
+   *
+   * The customer-facing card previews (`branding-preview`,
+   * `plan-card-styles-section`) answer differently on purpose: they mirror
+   * the cabinet's `tariff-card`, which folds both spellings into unlimited.
+   * Showing the operator what the customer sees is their job; showing the
+   * operator what the row actually holds is this one's.
+   */
+  const formatTraffic = (gb: number | null) =>
+    gb === null ? t('plansPage.unlimited') : `${gb} GB`
 
   return (
     <div className="space-y-6">
@@ -287,7 +342,7 @@ export default function PlansPage() {
 
 interface SortablePlanCardProps {
   readonly plan: Plan
-  readonly formatTraffic: (gb: number) => string
+  readonly formatTraffic: (gb: number | null) => string
   readonly onEdit: () => void
   readonly onToggleActive: (isActive: boolean) => void
   readonly onArchive: () => void

@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import { api } from '@/lib/api';
 import { expectArray } from '@/lib/api-utils';
 
@@ -119,27 +120,67 @@ export async function enforceDropConnections(
 // ── Held candidates & exemptions ─────────────────────────────────────────
 
 /**
- * A condition a detector produced that did NOT become a signal — either still
- * gathering the consecutive observations the gate requires, or covered by an
- * operator exemption. The point of surfacing it is that a suppression which
- * leaves no trace is indistinguishable from a detector that quietly stopped.
+ * Why a run declined to open a candidate — the `held_by` column, verbatim.
+ *
+ * MUST mirror `CandidateHold` in
+ * `src/modules/anti-fraud/services/anti-fraud.service.ts`. It did not: this
+ * module carried `'streak' | 'exemption'` for as long as `'verdict'` has been
+ * produced, and the panel's binary ternary sent every verdict-held row down
+ * the streak branch. Because `listPendingCandidates` clamps `observations` to
+ * `requiredObservations`, such a row read as "Seen 3/3 runs" — evidence
+ * complete, about to fire — when the truth was the exact opposite.
+ *
+ *   `'streak'`    — still gathering the consecutive observations the gate
+ *                   requires. The ONLY kind for which "seen N of M" is true.
+ *   `'exemption'` — an operator cleared this user of this code until a date.
+ *                   Ends when the exemption is revoked or expires.
+ *   `'verdict'`   — an operator RESOLVED or DISMISSED this exact condition
+ *                   inside its suppression window (7 days for a dismissal,
+ *                   6 hours for a resolution). The detector keeps observing
+ *                   underneath, but no signal opens; nothing in this panel can
+ *                   lift it — it ends when the window lapses, or immediately
+ *                   if the finding gets strictly more severe.
+ *
+ * A tuple rather than a bare union so the render can be driven from it
+ * exhaustively and a fourth kind cannot be absorbed by an else branch twice.
  */
-export interface PendingFraudCandidate {
-  id: string;
-  code: string;
-  conditionKey: string;
-  observations: number;
-  requiredObservations: number;
-  severity: FraudSeverity;
-  lastSeverity: FraudSeverity;
-  score: number;
-  title: string;
-  affectedUserIds: string[];
-  heldBy: 'streak' | 'exemption';
-  exemptionId: string | null;
-  firstSeenAt: string;
-  lastSeenAt: string;
-}
+export const CANDIDATE_HOLD_KINDS = ['streak', 'exemption', 'verdict'] as const;
+
+export type CandidateHold = (typeof CANDIDATE_HOLD_KINDS)[number];
+
+const fraudSeveritySchema = z.enum(['LOW', 'MEDIUM', 'HIGH']);
+
+/**
+ * A condition a detector produced that did NOT become a signal — still
+ * gathering the consecutive observations the gate requires, covered by an
+ * operator exemption, or muted by an operator verdict. The point of surfacing
+ * it is that a suppression which leaves no trace is indistinguishable from a
+ * detector that quietly stopped.
+ *
+ * VALIDATED, not asserted, and the field that drifted is why: `expectArray`
+ * proves the container and nothing about what is inside it, so a `heldBy` the
+ * SPA had never heard of reached render with nothing in between. A parse turns
+ * the next such drift into an error the operator is told about, instead of a
+ * badge that confidently says the wrong thing.
+ */
+const pendingFraudCandidateSchema = z.object({
+  id: z.string(),
+  code: z.string(),
+  conditionKey: z.string(),
+  observations: z.number(),
+  requiredObservations: z.number(),
+  severity: fraudSeveritySchema,
+  lastSeverity: fraudSeveritySchema,
+  score: z.number(),
+  title: z.string(),
+  affectedUserIds: z.array(z.string()),
+  heldBy: z.enum(CANDIDATE_HOLD_KINDS),
+  exemptionId: z.string().nullable(),
+  firstSeenAt: z.string(),
+  lastSeenAt: z.string(),
+});
+
+export type PendingFraudCandidate = z.infer<typeof pendingFraudCandidateSchema>;
 
 export interface FraudExemption {
   id: string;
@@ -157,7 +198,7 @@ export interface FraudExemption {
 
 export async function getPendingFraudCandidates(limit = 50): Promise<PendingFraudCandidate[]> {
   const res = await api.get(`${BASE}/pending`, { params: { limit } });
-  return expectArray<PendingFraudCandidate>(res.data);
+  return z.array(pendingFraudCandidateSchema).parse(res.data);
 }
 
 export async function listFraudExemptions(

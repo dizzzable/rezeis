@@ -10,9 +10,10 @@
  *   • Referral attach
  */
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
+import { Link } from 'react-router'
 import {
   AtSign,
   Apple,
@@ -22,6 +23,7 @@ import {
   Copy,
   Globe,
   Hash,
+  Infinity as InfinityIcon,
   Link2,
   Loader2,
   Monitor,
@@ -37,13 +39,15 @@ import {
   UserX,
   Wallet,
   Wifi,
+  Wrench,
   ClipboardList,
 } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
+import { expectArray, isRecord } from '@/lib/api-utils'
 import { cn, truncate } from '@/lib/utils'
-import { usePlans } from '@/features/plans/plans-api'
+import { plansQueryKeys, usePlans } from '@/features/plans/plans-api'
 import { getErrorMessage } from '@/lib/http-errors'
 import { RemnawaveIcon } from '@/features/remnawave/remnawave-icon'
 import type {
@@ -96,6 +100,24 @@ import {
 } from '@/components/ui/dialog'
 import { PermissionGate, useHasPermission } from '@/features/rbac'
 import { usersApi, type AccountMergePreview, type AccountMergeChoices, type UserOperation } from './users-api'
+import {
+  SYNC_REFUSAL_BY_CODE,
+  SYNC_REFUSAL_BY_MESSAGE,
+} from './subscription-sync-refusals'
+import {
+  readSubscriptionDeleteRefusal,
+  type SubscriptionDeleteRefusal,
+} from './subscription-delete-refusals'
+import { panelTrafficLimitToGb } from './panel-traffic-limit'
+import {
+  useCreateReferralInviteMutation,
+  useIssueReferralRewardMutation,
+  useReferralInviteCapacityQuery,
+  useReferralInvitesQuery,
+  useReferralRewardsQuery,
+  useRevokeReferralInviteMutation,
+  type ReferralInviteCapacity,
+} from '@/features/referrals/referrals-queries'
 
 interface UserDetailPanelProps {
   readonly telegramId: string
@@ -487,7 +509,15 @@ function ProfileTab({
                 <InfoRow
                   icon={<Calendar className="h-3 w-3" />}
                   label={t('userDetailPanel.profile.expiresAt')}
-                  value={currentSub.expireAt ? new Date(currentSub.expireAt).toLocaleDateString(locale) : '—'}
+                  value={
+                    // Absent means UNLIMITED, not unknown — the long note on the
+                    // subscription card below has the wire detail. `null` folds in
+                    // as the other spelling of the same state; an empty string does
+                    // NOT, because it is broken rather than unlimited.
+                    currentSub.expireAt === undefined || currentSub.expireAt === null
+                      ? t('userDetailPanel.profile.unlimitedExpiry')
+                      : new Date(currentSub.expireAt).toLocaleDateString(locale)
+                  }
                 />
                 <InfoRow icon={<Hash className="h-3 w-3" />} label={t('userDetailPanel.profile.subsCount')} value={String(user.subscriptions?.length ?? 0)} />
               </div>
@@ -629,7 +659,33 @@ function ProfileTab({
             />
           </div>
 
-          {/* Partner toggle */}
+          {/*
+            PARTNER LIFECYCLE, AND NOT A `users:edit` CONTROL.
+
+            `POST /admin/users/:telegramId/create-partner` and
+            `.../partner/toggle` are both `@RequirePermission('partners',
+            'edit')` (`admin-user-management.controller.ts`), because what they
+            write is a `Partner` row — the partner ledger, not the user profile.
+            The Actions card around this block is gated on `users:edit`, and the
+            shipped `operator` role holds `users:edit` while holding merely
+            `partners:view` (`rbac.resources.ts`). That role was therefore shown
+            a live "Activate" button whose only possible answer is a 403.
+
+            HIDDEN RATHER THAN DELETED. A control that vanishes can read as a
+            bug, so the choice needs a reason: this is the only create-partner
+            control the panel can actually reach, and now the only one it has at
+            all. `PartnerTab` used to carry a second copy in a `!user.partner`
+            early return that never rendered — the Partner tab exists only
+            `{user.partner && …}` — and that dead branch has since been deleted,
+            so removing this block would take partner creation off the panel
+            entirely, for the roles that ARE entitled to it as much as for the
+            ones that are not. Nesting the gate is the same idiom the
+            subscription card and `PartnerTab` already use, and it makes true
+            the claim `admin-user-management.controller.ts` makes about this
+            file: all five partner routes sit behind
+            `<PermissionGate resource="partners" action="edit">`.
+          */}
+          <PermissionGate resource="partners" action="edit">
           <div className="flex items-center justify-between gap-3">
             <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
               <UserCheck className="h-3 w-3 text-muted-foreground/60" />
@@ -657,6 +713,7 @@ function ProfileTab({
               </Button>
             )}
           </div>
+          </PermissionGate>
 
           {/* Save */}
           {dirty && (
@@ -722,6 +779,443 @@ function isLinkableRemnawaveId(value: string): boolean {
 }
 
 /**
+ * `remnawaveSyncState` answers TWO independent questions with one enum, and that
+ * is why a single chip beside the profile name and id could not be honest:
+ *
+ *   • "is the profile there?"  — UNLINKED / MISSING / UNAVAILABLE, decided by
+ *     the panel lookup (`getPanelUserOutcome`);
+ *   • "did the last job land?" — PENDING / FAILED / SYNCED, decided by the
+ *     newest live `ProfileSyncJob` row.
+ *
+ * A chip sitting next to an identity can only be read as answering the first, so
+ * a failed UPDATE — stale limits or expiry on a profile that is present and
+ * reachable — rendered as "Sync failed" next to the profile id, which reads as
+ * "this link is broken". 16 of the 21 places that enqueue a job enqueue exactly
+ * that kind of update.
+ *
+ * The wire field is upstream's contract and is untouched. These two readers
+ * split it back apart for RENDERING only, so each statement can sit where its
+ * subject is. The split is lossless rather than a guess because the job answer
+ * is on the wire in its own right, as `remnawaveSyncJob`.
+ */
+type RemnawaveProfilePresence = 'LINKED' | 'UNLINKED' | 'MISSING' | 'UNAVAILABLE'
+
+function remnawaveProfilePresence(sub: UserSubscription): RemnawaveProfilePresence {
+  // The only two states that are statements about the profile itself.
+  if (sub.remnawaveSyncState === 'MISSING') return 'MISSING'
+  if (sub.remnawaveSyncState === 'UNAVAILABLE') return 'UNAVAILABLE'
+  // Everything else means either the lookup answered ok — SYNCED, PENDING and
+  // FAILED on a linked row all imply `outcome.kind === 'ok'` — or there was no
+  // identity to look up at all. `remnawaveId` is what separates those two, and
+  // it is the same column the backend branches on.
+  return sub.remnawaveId ? 'LINKED' : 'UNLINKED'
+}
+
+type SubscriptionSyncActivity = 'IDLE' | 'PENDING' | 'FAILED'
+
+function subscriptionSyncActivity(sub: UserSubscription): SubscriptionSyncActivity {
+  const status = sub.remnawaveSyncJob?.status
+  if (status === 'PENDING' || status === 'RUNNING') return 'PENDING'
+  if (status === 'FAILED') return 'FAILED'
+  // `null` is a definite "no live job for this subscription". `undefined` is a
+  // backend older than the field, where the conflated enum is the only signal
+  // there is — and losing the failure entirely would be the one outcome this
+  // whole change is not allowed to produce.
+  if (sub.remnawaveSyncJob === undefined) {
+    if (sub.remnawaveSyncState === 'PENDING') return 'PENDING'
+    if (sub.remnawaveSyncState === 'FAILED') return 'FAILED'
+  }
+  return 'IDLE'
+}
+
+// ── What `POST …/sync` actually said ───────────────────────────────────────
+//
+// The endpoint answers HTTP 200 for its REFUSALS as well as its successes, and
+// this panel used to fire `toast.success` on the status code alone. An operator
+// pressed sync, saw green, and nothing had been written: the mental model
+// "press sync and the panel is current" was being CONFIRMED by the UI at
+// exactly the moments it was false.
+//
+// The backend goes out of its way to keep three refusals apart, and says why in
+// its own comment: conflating "the panel merely blinked" with "the profile is
+// genuinely gone" is what makes an operator start repairing a link that was
+// never broken. Reading only the status code threw that distinction away.
+// Reading the body and then collapsing the three into one sentence would throw
+// it away one level up. So each refusal is its own member, because the
+// operator's NEXT ACTION differs for each one.
+
+const PANEL_REFRESH_KEYS = [
+  'configUrl',
+  'remnawavePanelId',
+  'remnawavePanelUsername',
+  'expiresAt',
+] as const
+
+type PanelRefreshKey = (typeof PANEL_REFRESH_KEYS)[number]
+
+/**
+ * The panel's own reading of the two columns rezeis OWNS and the sync
+ * deliberately refuses to adopt.
+ *
+ * Echoed by the backend so the drift is visible; shown here for the same
+ * reason. Only the two limits an operator ASSIGNED are read: `status`
+ * duplicates the card's own status dot, and `internalSquads` is a list of
+ * uuids that means nothing to a human without a name lookup this card has no
+ * business performing.
+ */
+interface PanelReportedLimits {
+  readonly trafficLimitBytes: number | null
+  readonly hwidDeviceLimit: number | null
+}
+
+type SubscriptionSyncOutcome =
+  | {
+      readonly kind: 'synced'
+      /** Only the keys the panel positively stated and the backend wrote. */
+      readonly refreshed: readonly PanelRefreshKey[]
+      readonly panelReports: PanelReportedLimits | null
+    }
+  /** No panel profile is linked. Nothing to sync — NOT an error condition. */
+  | { readonly kind: 'notLinked' }
+  /** Transient. Retry. Nothing here says any link is broken. */
+  | { readonly kind: 'panelUnavailable' }
+  /** The link IS broken. Repairing it is the right next step. */
+  | { readonly kind: 'profileMissing' }
+  /** A refusal this build does not recognise; the server's own words are shown. */
+  | { readonly kind: 'refused'; readonly message: string }
+
+function readReportedLimit(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+/** Reads the BODY, never the status code. */
+function readSyncOutcome(payload: unknown): SubscriptionSyncOutcome {
+  const body = isRecord(payload) ? payload : {}
+  // `=== true`, not truthy and not "the key is present": `{ synced: false }` is
+  // the shape of every refusal, and anything looser reads a refusal as a win.
+  if (body.synced === true) {
+    const refreshed = isRecord(body.refreshed) ? body.refreshed : {}
+    const reports = isRecord(body.panelReports) ? body.panelReports : null
+    return {
+      kind: 'synced',
+      refreshed: PANEL_REFRESH_KEYS.filter((key) => refreshed[key] !== undefined),
+      panelReports:
+        reports === null
+          ? null
+          : {
+              trafficLimitBytes: readReportedLimit(reports.trafficLimitBytes),
+              hwidDeviceLimit: readReportedLimit(reports.hwidDeviceLimit),
+            },
+    }
+  }
+  const message = typeof body.message === 'string' ? body.message : ''
+  const code = typeof body.code === 'string' ? body.code : ''
+  // THE CODE FIRST, and the sentence only if there was no code this build
+  // recognises. A backend that sends a code has already told us which of the
+  // three refusals this is in a form no copy-edit can move, so its own English
+  // prose is not consulted at all — it may have been reworded, and it is a
+  // diagnostic line, never the thing that decides a branch.
+  //
+  // The fallback is reached in two cases and both are meant: a backend too old
+  // to send a code (a rolling deploy, see `SYNC_REFUSAL_BY_MESSAGE`), and a code
+  // this build has never heard of, where an older sentence it does understand is
+  // still better guidance than `refused`. Neither matching is `refused`,
+  // unchanged.
+  const known = SYNC_REFUSAL_BY_CODE.get(code) ?? SYNC_REFUSAL_BY_MESSAGE.get(message)
+  return known === undefined ? { kind: 'refused', message } : { kind: known }
+}
+
+const PRESENCE_TONE: Record<RemnawaveProfilePresence, string> = {
+  LINKED: 'text-muted-foreground',
+  UNLINKED: 'text-muted-foreground',
+  MISSING: 'text-destructive',
+  UNAVAILABLE: 'text-amber-600 dark:text-amber-500',
+}
+
+const SYNC_JOB_ACTIONS = ['CREATE', 'UPDATE', 'DELETE', 'TRAFFIC_RESET'] as const
+
+/**
+ * The verdict of the LAST sync press, rendered on the card it was pressed from.
+ *
+ * A toast is gone in four seconds; "did anything actually happen" outlives it.
+ * This block is the durable half of the same answer, and it is deliberately not
+ * green for anything except a write that landed — the defect it replaces was a
+ * success toast on all three refusals, which confirmed the operator's mental
+ * model at exactly the moments it was false.
+ */
+function SubscriptionSyncOutcomeNotice({
+  sub,
+  outcome,
+}: {
+  sub: UserSubscription
+  outcome: SubscriptionSyncOutcome
+}) {
+  const { t } = useTranslation()
+  const base = 'mx-3 mb-1.5 rounded border px-2 py-1.5 text-[10px]'
+
+  if (outcome.kind === 'synced') {
+    // The panel's own reading of the two columns rezeis OWNS. SHOWN, never
+    // adopted: an operator who assigned three devices needs to see the panel
+    // enforcing twelve, and that is a drift to investigate — not a value to
+    // copy back over the plan.
+    const reports = outcome.panelReports
+    const panelDevices = reports === null ? null : reports.hwidDeviceLimit
+    // TRAFFIC IS A THREE-STATE ANSWER ON BOTH SIDES, and flattening it to two
+    // is how this block used to invent drift out of thin air:
+    //
+    //   `undefined`  nobody stated a cap. The panel payload had no
+    //                `trafficLimitBytes`, or the subscription row did not carry
+    //                `trafficLimit`. Nothing to compare — say nothing.
+    //   `null`       UNLIMITED, positively stated.
+    //   a number     that many whole gigabytes. `0` is a legitimate one of
+    //                these: genuinely no traffic at all.
+    //
+    // Absence is checked HERE, before the converter runs, and deliberately:
+    // `panelTrafficLimitToGb` answers `null` for garbage as a floor against
+    // `NaN`, which is not the same statement as "the panel said unlimited". Its
+    // own docblock says the caller has to make that distinction, and this is a
+    // caller that must.
+    //
+    // Then the conversion itself is the SHARED rule, not a seventh local
+    // re-typing of it. The re-typing was `Math.round(bytes / 1024 ** 3)` with
+    // no floor, so once the server grew its `Math.max(1, …)` the two sides
+    // disagreed by construction: a 0.4 GB panel cap stored as `1`, rendered as
+    // `0`, and reported to the operator as a drift between two agreeing sides.
+    const panelTrafficGb: number | null | undefined =
+      reports === null || reports.trafficLimitBytes === null
+        ? undefined
+        : panelTrafficLimitToGb(reports.trafficLimitBytes)
+    const assignedDevices = sub.deviceLimit ?? 0
+    // NOT `?? 0`. That spelling made an UNLIMITED row and a genuine ZERO-GB row
+    // the same number, which is the one distinction this column is required to
+    // keep: `trafficLimit === null` is unlimited, `0` is no traffic at all.
+    // With `?? 0`, a panel reporting unlimited against an unlimited row read as
+    // "panel 0, assigned 0" — silence — and a panel reporting unlimited against
+    // a real zero-GB row read the same way. Both drifts vanished into one lie.
+    //
+    // (`assignedDevices` above keeps its `?? 0` on purpose. `deviceLimit <= 0`
+    // IS the product's canonical unlimited and matches the panel's own
+    // `hwidDeviceLimit: 0`. The asymmetry between the two columns is deliberate
+    // and documented on the server — do not harmonise them.)
+    const assignedTrafficGb: number | null | undefined = sub.trafficLimit
+    const deviceDrift = panelDevices !== null && panelDevices !== assignedDevices
+    const trafficDrift =
+      panelTrafficGb !== undefined &&
+      assignedTrafficGb !== undefined &&
+      panelTrafficGb !== assignedTrafficGb
+
+    return (
+      <div role="status" className={`${base} border-border bg-muted/40`}>
+        <p className="font-medium text-foreground">
+          {outcome.refreshed.length === 0
+            ? t('userDetailPanel.subscriptions.syncOutcome.synced.nothingStated')
+            : t('userDetailPanel.subscriptions.syncOutcome.synced.refreshed', {
+                fields: outcome.refreshed
+                  .map((key) => t(`userDetailPanel.subscriptions.syncOutcome.field.${key}`))
+                  .join(', '),
+              })}
+        </p>
+        {!deviceDrift && !trafficDrift ? null : (
+          <p className="mt-0.5 text-muted-foreground">
+            {t('userDetailPanel.subscriptions.syncOutcome.drift.headline')}
+          </p>
+        )}
+        {!deviceDrift ? null : (
+          <p className="mt-0.5 pl-2 text-amber-600 dark:text-amber-500">
+            {t('userDetailPanel.subscriptions.syncOutcome.drift.devices', {
+              panel: panelDevices,
+              assigned: assignedDevices,
+            })}
+          </p>
+        )}
+        {!trafficDrift ? null : (
+          <p className="mt-0.5 pl-2 text-amber-600 dark:text-amber-500">
+            {/*
+              Three sentences, because "unlimited" cannot be interpolated into
+              one that ends in " GB". Reaching this branch means both sides
+              stated a cap and the two disagree, so at most one of them is
+              unlimited — if both were, they would agree and there would be no
+              drift to print.
+            */}
+            {t(
+              panelTrafficGb === null
+                ? 'userDetailPanel.subscriptions.syncOutcome.drift.trafficPanelUnlimited'
+                : assignedTrafficGb === null
+                  ? 'userDetailPanel.subscriptions.syncOutcome.drift.trafficAssignedUnlimited'
+                  : 'userDetailPanel.subscriptions.syncOutcome.drift.traffic',
+              { panel: panelTrafficGb, assigned: assignedTrafficGb },
+            )}
+          </p>
+        )}
+      </div>
+    )
+  }
+
+  // Three refusals, three next actions, three tones — and not one of them green.
+  let tone = 'border-border bg-muted/40'
+  let text = 'text-muted-foreground'
+  let headline = t('userDetailPanel.subscriptions.syncOutcome.notLinked.headline')
+  let hint = t('userDetailPanel.subscriptions.syncOutcome.notLinked.hint')
+  if (outcome.kind === 'panelUnavailable') {
+    tone = 'border-amber-500/40 bg-amber-500/5'
+    text = 'text-amber-600 dark:text-amber-500'
+    headline = t('userDetailPanel.subscriptions.syncOutcome.panelUnavailable.headline')
+    hint = t('userDetailPanel.subscriptions.syncOutcome.panelUnavailable.hint')
+  } else if (outcome.kind === 'profileMissing') {
+    tone = 'border-destructive/40 bg-destructive/5'
+    text = 'text-destructive'
+    headline = t('userDetailPanel.subscriptions.syncOutcome.profileMissing.headline')
+    hint = t('userDetailPanel.subscriptions.syncOutcome.profileMissing.hint')
+  } else if (outcome.kind === 'refused') {
+    tone = 'border-destructive/40 bg-destructive/5'
+    text = 'text-destructive'
+    headline = t('userDetailPanel.subscriptions.syncOutcome.refused.headline')
+    hint = t('userDetailPanel.subscriptions.syncOutcome.refused.hint')
+  }
+
+  return (
+    <div role="status" className={`${base} ${tone}`}>
+      <p className={`flex items-start gap-1 font-medium ${text}`}>
+        <AlertTriangle className="mt-px h-3 w-3 shrink-0" aria-hidden="true" />
+        <span>{headline}</span>
+      </p>
+      {hint.length === 0 ? null : (
+        <p className="mt-0.5 pl-4 text-muted-foreground">{hint}</p>
+      )}
+      {/* The server's own sentence, for a refusal this build does not
+          recognise. DEMOTED, never promoted to operator copy: every sentence an
+          operator is asked to READ comes from the dictionaries, in their own
+          language. This is the same shape `SubscriptionSyncFailureNotice` gives
+          `lastError` — a mono diagnostic line, so the reason is not lost while
+          the prose around it stays translated. */}
+      {outcome.kind !== 'refused' || outcome.message.length === 0 ? null : (
+        <p
+          className="mt-0.5 truncate pl-4 font-mono text-muted-foreground"
+          title={outcome.message}
+        >
+          {outcome.message}
+        </p>
+      )}
+    </div>
+  )
+}
+
+/**
+ * The 409 the delete endpoint answers with when this row’s stored panel
+ * identity can no longer be trusted — turned into the one next step that
+ * clears it.
+ *
+ * WHY A LINK AND NOT A BUTTON THAT RUNS THE REPAIR HERE. Three facts decided
+ * this, and none of them is a style preference:
+ *
+ *  • The remedy is `POST /admin/profile-sync/panel-link-reconciliation`, and
+ *    that endpoint takes NO subscription id. It is a sweep over a population,
+ *    bounded by `limit` / `chunkSize` / `startAfterId`. So there is nothing to
+ *    deep-link with this subscription pre-filled; a control that appeared to
+ *    do that would be describing a request the backend cannot receive.
+ *  • An inline “repair it now” button would be a second, unconfirmed path to
+ *    a BULK write, fired from a screen that shows one customer. The
+ *    reconciliation surface exists to hold the opposite guarantee — preview
+ *    first, then a confirmation that names the scope — and a shortcut around
+ *    it is the shortcut that eventually gets used by accident.
+ *  • The refusal is not “something went wrong”. It is “do this specific thing
+ *    and the delete will work”, and an operator handed a sentence and left to
+ *    find the page will not go.
+ *
+ * So: one press to the surface that owns the write, and the sequence spelled
+ * out on the card — preview, real run, delete again — rather than left to be
+ * remembered across two screens.
+ */
+function SubscriptionDeleteRefusalNotice({
+  refusal,
+}: {
+  refusal: SubscriptionDeleteRefusal
+}) {
+  const { t } = useTranslation()
+  // The refusal NAMES its own copy. A second refusal added to
+  // `subscription-delete-refusals.ts` therefore renders its own guidance or
+  // renders nothing recognisable — it can never silently inherit this one’s
+  // remedy, which points at a repair that would not have helped it.
+  const key = `userDetailPanel.subscriptions.deleteRefusal.${refusal}`
+  return (
+    <div
+      role="status"
+      className="mx-3 mb-1.5 rounded border border-destructive/40 bg-destructive/5 px-2 py-1.5 text-[10px]"
+    >
+      <p className="flex items-start gap-1 font-medium text-destructive">
+        <AlertTriangle className="mt-px h-3 w-3 shrink-0" aria-hidden="true" />
+        <span>{t(`${key}.headline`)}</span>
+      </p>
+      <p className="mt-0.5 pl-4 text-muted-foreground">{t(`${key}.body`)}</p>
+      <ol className="mt-1 list-decimal space-y-0.5 pl-8 text-muted-foreground">
+        <li>{t(`${key}.step1`)}</li>
+        <li>{t(`${key}.step2`)}</li>
+        <li>{t(`${key}.step3`)}</li>
+      </ol>
+      <div className="mt-1 pl-4">
+        <Button asChild size="sm" variant="outline" className="h-6 px-2 text-[10px]">
+          <Link to="/subscriptions">
+            <Wrench className="mr-1 h-3 w-3" aria-hidden="true" />
+            {t('userDetailPanel.subscriptions.deleteRefusal.openReconciliation')}
+          </Link>
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * What the last sync JOB did, rendered at CARD level where the subscription's
+ * sync activity is described — not beside the profile identity, whose subject it
+ * is not.
+ *
+ * The wording names the CHANGE that did not land rather than the profile, and
+ * when the profile is known-good it says so in as many words. That sentence is
+ * the actual repair: the operator keeps the failure signal PR #40 added (the
+ * owner rejected filtering these out precisely because it is the only warning
+ * that limits, expiry or squads are not reaching the panel) without it reading
+ * as a claim about the link.
+ */
+function SubscriptionSyncFailureNotice({ sub }: { sub: UserSubscription }) {
+  const { t } = useTranslation()
+  const job = sub.remnawaveSyncJob
+  const action = SYNC_JOB_ACTIONS.find((known) => known === job?.action) ?? 'unknown'
+  const attempts = job?.attempts ?? null
+  const lastError = job?.lastError ?? null
+
+  return (
+    <div
+      role="status"
+      className="mx-3 mb-1.5 rounded border border-destructive/40 bg-destructive/5 px-2 py-1.5 text-[10px]"
+    >
+      <p className="flex items-start gap-1 font-medium text-destructive">
+        <AlertTriangle className="mt-px h-3 w-3 shrink-0" aria-hidden="true" />
+        <span>
+          {t('userDetailPanel.subscriptions.syncFailure.headline', {
+            what: t(`userDetailPanel.subscriptions.syncFailure.what.${action}`),
+          })}
+        </span>
+      </p>
+      {remnawaveProfilePresence(sub) === 'LINKED' ? (
+        <p className="mt-0.5 pl-4 text-muted-foreground">
+          {t('userDetailPanel.subscriptions.syncFailure.linkIntact')}
+        </p>
+      ) : null}
+      {attempts !== null ? (
+        <p className="mt-0.5 pl-4 text-muted-foreground">
+          {t('userDetailPanel.subscriptions.syncFailure.attempts', { attempts })}
+        </p>
+      ) : null}
+      {lastError !== null ? (
+        <p className="mt-0.5 truncate pl-4 font-mono text-muted-foreground" title={lastError}>
+          {lastError}
+        </p>
+      ) : null}
+    </div>
+  )
+}
+
+/**
  * One-row Remnawave profile reveal for the subscription card. Shows:
  *   • the live `username` from Remnawave (e.g. `rz_user_sub`),
  *   • a Copy button that yanks the panel identity to the clipboard,
@@ -746,6 +1240,7 @@ function RemnawaveProfileRow({
   const { t } = useTranslation()
   const profileName = sub.remnawaveProfileName?.trim()
   const remnawaveId = sub.remnawaveId
+  const presence = remnawaveProfilePresence(sub)
   const [linkDialogOpen, setLinkDialogOpen] = useState(false)
   const [candidateId, setCandidateId] = useState('')
   const candidate = candidateId.trim()
@@ -784,6 +1279,9 @@ function RemnawaveProfileRow({
         ) : (
           <span className="text-muted-foreground/70">—</span>
         )}
+        <span className={cn('text-[10px]', PRESENCE_TONE[presence])}>
+          {t(`userDetailPanel.subscriptions.remnawaveProfile.presence.${presence}`)}
+        </span>
         {remnawaveId ? (
           <button
             type="button"
@@ -1023,6 +1521,42 @@ function UserStatusDot({ user }: { user: UserDetail }) {
 // Subscriptions Tab
 // ══════════════════════════════════════════════════════════════════════════════
 
+/**
+ * A plan's traffic cap in the picker, as THREE distinct strings.
+ *
+ * The picker used to write `plan.trafficLimit ? '(' + trafficLimit + ' GB)' :
+ * ''`, which is a two-state reading of a three-state column, and it printed the
+ * two states that are OPPOSITES identically:
+ *
+ *   `null`      UNLIMITED, positively stated. The plan has no cap.
+ *   `0`         a cap of ZERO gigabytes — no traffic at all. A state that must
+ *               never exist (the DTO has been `@Min(1)` for a while) but that
+ *               DOES exist on rows authored before it was raised.
+ *   a number    that many whole gigabytes.
+ *
+ * Both falsy spellings fell into the `''` branch, so a legacy zero rendered as
+ * a bare plan name — exactly the way an uncapped plan renders — and an operator
+ * picking it handed the customer a subscription carrying no traffic while the
+ * picker said, as loudly as it says anything, "no cap". This is the same
+ * distinction the sync-drift block above is required to keep; see the `?? 0`
+ * comment there.
+ *
+ * `trafficLimit` is declared `number` on the SPA wire type (`plans-api.ts`)
+ * while the server's `AdminPlanInterface` declares it `number | null`, so the
+ * value really can be `null` at runtime whatever the local type claims. The
+ * parameter here is widened to the TRUE domain rather than to the narrower
+ * declaration — trusting that declaration is what erased the case.
+ *
+ * Non-positive folds into the zero state deliberately: a negative cap is the
+ * same product fact (no traffic), and printing `(-5 GB)` invites someone to
+ * read it as a discount.
+ */
+function planTrafficSuffix(trafficLimit: number | null | undefined, zeroLabel: string): string {
+  if (trafficLimit === null || trafficLimit === undefined) return '(∞)'
+  if (trafficLimit <= 0) return `(${zeroLabel})`
+  return `(${trafficLimit} GB)`
+}
+
 function SubscriptionsTab({ user, telegramId, queryKey }: { user: UserDetail; telegramId: string; queryKey: string[] }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
@@ -1031,6 +1565,15 @@ function SubscriptionsTab({ user, telegramId, queryKey }: { user: UserDetail; te
   const [assignPlanId, setAssignPlanId] = useState('')
   const [selectedSubIds, setSelectedSubIds] = useState<string[]>([])
   const [openSubId, setOpenSubId] = useState<string | null>(null)
+
+  // WHO THE SUBSCRIPTION BELONGS TO, in the words the operator is already
+  // reading at the top of this panel — same order of preference as
+  // `UserHeader`, so the delete confirmation names the customer the same way
+  // the screen does. The telegram id is the last resort rather than `'—'`: a
+  // dash names nobody, and this string's whole job is to be checkable against
+  // the person the operator thinks they are acting on.
+  const customerLabel =
+    user.name || user.username || user.webAccount?.login || telegramId
 
   const grantTrialMutation = useMutation({
     mutationFn: () => api.post(`/admin/users/${telegramId}/grant-trial`),
@@ -1062,9 +1605,48 @@ function SubscriptionsTab({ user, telegramId, queryKey }: { user: UserDetail; te
     onError: (err) => toast.error(getErrorMessage(err, t('userDetailPanel.toasts.syncFailed'))),
   })
 
+  // Keyed by subscription id: the operator syncs one card at a time and the
+  // verdict belongs on THAT card, not in a toast that is gone in four seconds
+  // while the card still shows nothing about what happened.
+  const [syncOutcomes, setSyncOutcomes] = useState<Record<string, SubscriptionSyncOutcome>>({})
+
   const syncMutation = useMutation({
     mutationFn: (id: string) => api.post(`/admin/users/subscriptions/${id}/sync`),
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey }); toast.success(t('userDetailPanel.toasts.synced')) },
+    // The previous verdict is cleared the moment a new press starts, so a stale
+    // "synced" cannot sit under a request that is still in flight.
+    onMutate: (id: string) => {
+      setSyncOutcomes((previous) => {
+        if (previous[id] === undefined) return previous
+        const next = { ...previous }
+        delete next[id]
+        return next
+      })
+    },
+    onSuccess: (response, id) => {
+      void queryClient.invalidateQueries({ queryKey })
+      // THE BODY, NOT THE STATUS CODE. All three refusals arrive as HTTP 200.
+      const outcome = readSyncOutcome(response.data)
+      setSyncOutcomes((previous) => ({ ...previous, [id]: outcome }))
+      if (outcome.kind === 'synced') {
+        toast.success(t('userDetailPanel.toasts.synced'))
+        return
+      }
+      // Three refusals, three different next actions, three different toast
+      // severities — and not one of them green.
+      if (outcome.kind === 'notLinked') {
+        toast.info(t('userDetailPanel.subscriptions.syncOutcome.toast.notLinked'))
+        return
+      }
+      if (outcome.kind === 'panelUnavailable') {
+        toast.warning(t('userDetailPanel.subscriptions.syncOutcome.toast.panelUnavailable'))
+        return
+      }
+      if (outcome.kind === 'profileMissing') {
+        toast.error(t('userDetailPanel.subscriptions.syncOutcome.toast.profileMissing'))
+        return
+      }
+      toast.error(t('userDetailPanel.subscriptions.syncOutcome.toast.refused'))
+    },
     onError: () => toast.error(t('userDetailPanel.toasts.syncFailed')),
   })
 
@@ -1074,9 +1656,41 @@ function SubscriptionsTab({ user, telegramId, queryKey }: { user: UserDetail; te
     onError: () => toast.error(t('userDetailPanel.toasts.trafficResetFailed')),
   })
 
+  // Keyed by subscription id, exactly like `syncOutcomes` above: the operator
+  // deletes one card at a time and a refusal belongs on THAT card. A toast is
+  // gone in four seconds; the three-step remedy this particular refusal names
+  // is not something anyone completes inside four seconds.
+  const [deleteRefusals, setDeleteRefusals] = useState<Record<string, SubscriptionDeleteRefusal>>({})
+
   const deleteSubMutation = useMutation({
     mutationFn: (id: string) => api.delete(`/admin/users/subscriptions/${id}`),
+    // The previous refusal is cleared the moment a new press starts, so a stale
+    // "repair the link first" cannot sit under a request that is still in flight.
+    onMutate: (id: string) => {
+      setDeleteRefusals((previous) => {
+        if (previous[id] === undefined) return previous
+        const next = { ...previous }
+        delete next[id]
+        return next
+      })
+    },
     onSuccess: () => { queryClient.invalidateQueries({ queryKey }); toast.success(t('userDetailPanel.toasts.subDeleted')) },
+    // THE CODE DECIDES, NEVER THE SENTENCE. `DELETE` answers 409 with
+    // `code: 'SUBSCRIPTION_DELETE_STALE_PANEL_LINK'` when the row’s stored
+    // identity is a 2.x uuid on a proven-3.x panel, and until this branch
+    // existed the mutation had no `onError` at all — so the operator got a
+    // generic failure with no route to the one thing that clears it. Matching
+    // the backend’s English paragraph instead would put the whole branch one
+    // copy-edit away from silently degrading to that generic failure again.
+    onError: (error: unknown, id: string) => {
+      const refusal = readSubscriptionDeleteRefusal(error)
+      if (refusal === null) {
+        toast.error(getErrorMessage(error, t('userDetailPanel.toasts.subDeleteFailed')))
+        return
+      }
+      setDeleteRefusals((previous) => ({ ...previous, [id]: refusal }))
+      toast.error(t('userDetailPanel.toasts.subDeleteRefusedStaleLink'))
+    },
   })
 
   const syncAllMutation = useMutation({
@@ -1213,7 +1827,11 @@ function SubscriptionsTab({ user, telegramId, queryKey }: { user: UserDetail; te
                     <SelectContent>
                       {assignablePlans.map((plan) => (
                         <SelectItem key={plan.id} value={String(plan.id)} className="text-xs">
-                          {plan.name} {plan.trafficLimit ? `(${plan.trafficLimit} GB)` : ''}
+                          {plan.name}{' '}
+                          {planTrafficSuffix(
+                            plan.trafficLimit,
+                            t('userDetailPanel.subscriptions.planTrafficZero'),
+                          )}
                           {plan.isArchived ? ` · ${t('userDetailPanel.subscriptions.archivedTag')}` : ''}
                         </SelectItem>
                       ))}
@@ -1246,11 +1864,18 @@ function SubscriptionsTab({ user, telegramId, queryKey }: { user: UserDetail; te
               isOpen={openSubId === sub.id}
               onToggleOpen={() => setOpenSubId(openSubId === sub.id ? null : sub.id)}
               assignablePlans={assignablePlans}
-              onUpdate={(data) => updateSubMutation.mutate({ id: sub.id, data })}
+              onUpdate={(data) =>
+                updateSubMutation
+                  .mutateAsync({ id: sub.id, data })
+                  .then((response) => (response.data ?? {}) as SubscriptionWriteResult)
+              }
               onSync={() => syncMutation.mutate(sub.id)}
               isSyncing={syncMutation.isPending && syncMutation.variables === sub.id}
+              syncOutcome={syncOutcomes[sub.id] ?? null}
               onResetTraffic={() => resetTrafficMutation.mutate(sub.id)}
               onDelete={() => deleteSubMutation.mutate(sub.id)}
+              deleteRefusal={deleteRefusals[sub.id] ?? null}
+              customer={customerLabel}
               onAssignPlan={(planId) => assignPlanMutation.mutate({ id: sub.id, planId })}
               onLinkRemnawaveProfile={(remnawaveId) => linkRemnawaveProfileMutation.mutate({ id: sub.id, remnawaveId })}
               isLinkingRemnawaveProfile={
@@ -1263,7 +1888,12 @@ function SubscriptionsTab({ user, telegramId, queryKey }: { user: UserDetail; te
       )}
 
       {/* ── Plan Access toggles ─────────────────────────────────── */}
-      <PlanAccessSection telegramId={telegramId} queryKey={queryKey} plans={assignablePlans} />
+      <PlanAccessSection
+        telegramId={telegramId}
+        userId={user.id}
+        queryKey={queryKey}
+        plans={assignablePlans}
+      />
 
       <Dialog open={showGiveSub} onOpenChange={setShowGiveSub}>
         <DialogContent className="max-w-md">
@@ -1431,6 +2061,195 @@ function platformDeviceIcon(platform: string | null) {
   return <Globe className="h-3.5 w-3.5 text-muted-foreground" />
 }
 
+/**
+ * The confirmation that stands between a click and a panel DELETE.
+ *
+ * WHY THIS CONTROL AND NOT THE OTHERS ON THIS CARD. Deleting a subscription is
+ * the only action here that reaches OUT of the database:
+ * `SubscriptionDeletionService.deleteSubscription` writes a
+ * `SyncAction.DELETE` job whenever the row names a profile, and
+ * `ProfileSyncProcessor.handleDelete` turns that job into `deletePanelUser`
+ * against the live panel. Sync, reset-traffic and the limit edits are all
+ * recoverable; this one ends a paying customer's service, and until now a
+ * single misclick on a 24px icon did it with no question asked — beside a
+ * device-revoke control on the same card that has always asked one.
+ *
+ * IT NAMES THE SUBJECT, NOT THE VERB. "Are you sure?" is not a statement an
+ * operator can check anything against, and the mistake this guards is not
+ * "I did not mean to press delete" — it is "I pressed delete on the wrong
+ * card". So the body names the PLAN and the CUSTOMER, which are the two facts
+ * that differ between the card they meant and the card they hit, and it says
+ * whether a panel profile is going with it.
+ *
+ * BOTH ENTRY POINTS USE THIS ONE COMPONENT. The card offers delete twice — an
+ * icon in the header and a text button inside the collapsible — and a guard on
+ * one of them is worse than a guard on neither: it teaches the operator the
+ * button asks first.
+ */
+function SubscriptionDeleteConfirmation({
+  sub,
+  customer,
+  onConfirm,
+  children,
+}: {
+  sub: UserSubscription
+  /** Who this subscription belongs to, as the rest of the panel names them. */
+  customer: string
+  onConfirm: () => void
+  /** The trigger. Rendered `asChild`, so it keeps its own styling and label. */
+  children: ReactNode
+}) {
+  const { t } = useTranslation()
+  // The plan the operator recognises, falling back to the row's own id rather
+  // than to an empty quote — a confirmation that names nothing is the "are you
+  // sure?" this replaces.
+  const plan =
+    sub.plan?.name ?? sub.planSnapshot?.name ?? `#${truncate(sub.id, 8)}`
+
+  return (
+    <AlertDialog>
+      <AlertDialogTrigger asChild>{children}</AlertDialogTrigger>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>
+            {t('userDetailPanel.subscriptions.deleteConfirm.title')}
+          </AlertDialogTitle>
+          <AlertDialogDescription className="space-y-2">
+            <span className="block font-medium text-foreground">
+              {t('userDetailPanel.subscriptions.deleteConfirm.subject', { plan, customer })}
+            </span>
+            <span className="block">
+              {sub.remnawaveId
+                ? t('userDetailPanel.subscriptions.deleteConfirm.panelLinked')
+                : t('userDetailPanel.subscriptions.deleteConfirm.panelUnlinked')}
+            </span>
+            <span className="block">
+              {t('userDetailPanel.subscriptions.deleteConfirm.irreversible')}
+            </span>
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>{t('userDetailPanel.actions.cancel')}</AlertDialogCancel>
+          <AlertDialogAction
+            onClick={onConfirm}
+            className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+          >
+            {t('userDetailPanel.subscriptions.deleteConfirm.action')}
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  )
+}
+
+/**
+ * THE DAY THE OPERATOR IS LOOKING AT, as a comparable key.
+ *
+ * A `Date` carries two calendars and this screen only ever shows one of them.
+ * react-day-picker hands back LOCAL midnight, the picker's own trigger renders
+ * `format(value, 'dd.MM.yyyy')` from LOCAL parts, and the read-only "Expires"
+ * row above it renders `toLocaleDateString()` — also local. The change
+ * detector alone used `.toISOString().slice(0, 10)`, which is the UTC day, and
+ * for this product's operators (Moscow, UTC+3) those two calendars disagree
+ * for three hours out of every twenty-four.
+ *
+ * Both consequences were silent, and they are not each other's mirror:
+ *   • re-picking the day ALREADY on screen registered as a change and sent a
+ *     patch — stored 10:00Z is UTC day D, local midnight of D is D-1;
+ *   • moving the expiry one day FORWARD registered as no change at all and
+ *     produced the "No changes to save" toast — stored 10:00Z is D, and local
+ *     midnight of D+1 is 21:00Z on D, which is D again.
+ *
+ * So the comparison happens in the calendar the operator can see. An Invalid
+ * Date answers `''` instead of throwing: `new Date('nonsense').toISOString()`
+ * raises `RangeError`, and `expireAt` is `string | null | undefined` on the
+ * wire with nothing promising the string parses.
+ */
+// Exported for `subscription-expiry-day.test.tsx`, which drives the rule
+// directly — including the no-expiry branch no fixture in this file reaches.
+// The repo's usual escape hatch for the fast-refresh rule (`permission-gate.tsx`,
+// `auth-provider.tsx` spell it the same way).
+// eslint-disable-next-line react-refresh/only-export-components
+export function localCalendarDay(value: Date): string {
+  if (Number.isNaN(value.getTime())) return ''
+  const year = String(value.getFullYear()).padStart(4, '0')
+  const month = String(value.getMonth() + 1).padStart(2, '0')
+  const day = String(value.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+/**
+ * The instant to STORE for a day the operator picked in the calendar.
+ *
+ * The picker produces LOCAL MIDNIGHT of the chosen day, and sending that
+ * instant verbatim was the defect: at UTC+3 it is 21:00 on the PREVIOUS day in
+ * UTC, so the row's `expires_at` — and every UTC-based reading of it — names
+ * the day before the one on screen, and the subscriber's service ends at the
+ * first second of the day they were told they still had.
+ *
+ * The rule is MOVE THE DAY, KEEP EVERYTHING ELSE:
+ *
+ *   • a subscription that already has an expiry keeps its exact local
+ *     time-of-day, so only the calendar day the operator touched moves. The
+ *     renewal clock is not silently shifted, no hours are granted or taken
+ *     that nobody asked for, and re-picking the day that is already stored
+ *     reproduces the stored instant exactly — which is what makes the change
+ *     detector above and this function agree instead of fighting;
+ *   • with no expiry on record there is nothing to keep, and "expires on the
+ *     30th" means the subscriber has service THROUGH the 30th — so the end of
+ *     that day, locally: 23:59:59.999.
+ *
+ * Local on both paths, via the `new Date(y, m, d, …)` constructor. The server
+ * does `new Date(String(body.expiresAt))` and stores the instant it gets, so
+ * the calendar this function builds in is the only thing that decides which
+ * day the operator turns out to have chosen.
+ */
+// Exported for `subscription-expiry-day.test.tsx`, which drives the rule
+// directly — including the no-expiry branch no fixture in this file reaches.
+// The repo's usual escape hatch for the fast-refresh rule (`permission-gate.tsx`,
+// `auth-provider.tsx` spell it the same way).
+// eslint-disable-next-line react-refresh/only-export-components
+export function subscriptionExpiryInstant(
+  pickedDay: Date,
+  storedExpiry: string | null | undefined,
+): string {
+  const stored =
+    storedExpiry === undefined || storedExpiry === null || storedExpiry === ''
+      ? null
+      : new Date(storedExpiry)
+  const year = pickedDay.getFullYear()
+  const month = pickedDay.getMonth()
+  const day = pickedDay.getDate()
+  const moved =
+    stored !== null && !Number.isNaN(stored.getTime())
+      ? new Date(
+          year,
+          month,
+          day,
+          stored.getHours(),
+          stored.getMinutes(),
+          stored.getSeconds(),
+          stored.getMilliseconds(),
+        )
+      : new Date(year, month, day, 23, 59, 59, 999)
+  return moved.toISOString()
+}
+
+/**
+ * What `PATCH /admin/users/subscriptions/:id` answers with.
+ *
+ * The controller returns `{ ...updated, syncPending, remnawaveLinkRequired }`
+ * where `updated` is the Prisma row it just wrote — so the field names here
+ * are the COLUMN's (`expiresAt`), not the read model's (`expireAt`, which is
+ * what `GET /admin/users/:telegramId` maps it to). Narrow on purpose: only the
+ * three fields this editor is able to send are read back off it.
+ */
+interface SubscriptionWriteResult {
+  readonly trafficLimit?: number | null
+  readonly deviceLimit?: number | null
+  readonly expiresAt?: string | null
+}
+
 function SubscriptionCard({
   sub,
   isOpen,
@@ -1439,8 +2258,11 @@ function SubscriptionCard({
   onUpdate,
   onSync,
   isSyncing,
+  syncOutcome,
   onResetTraffic,
   onDelete,
+  deleteRefusal,
+  customer,
   onAssignPlan,
   onLinkRemnawaveProfile,
   isLinkingRemnawaveProfile,
@@ -1449,17 +2271,33 @@ function SubscriptionCard({
   isOpen: boolean
   onToggleOpen: () => void
   assignablePlans: ReadonlyArray<import('@/features/plans/plans-api').Plan>
-  onUpdate: (data: Record<string, unknown>) => void
+  /**
+   * Sends the patch and RESOLVES WITH THE ROW THE SERVER WROTE.
+   *
+   * It used to be `=> void`, which is why this card could show two different
+   * numbers for one field: the read-only rows above re-render from the
+   * refetched user while the inputs below keep whatever was typed, and nothing
+   * ever told the inputs what was actually stored. Rejects like any other
+   * promise; the mutation's own `onError` has already reported it by then.
+   */
+  onUpdate: (data: Record<string, unknown>) => Promise<SubscriptionWriteResult>
   onSync: () => void
   isSyncing: boolean
+  /** What the LAST press of this card's sync button actually did. */
+  syncOutcome: SubscriptionSyncOutcome | null
   onResetTraffic: () => void
   onDelete: () => void
+  /** Why the LAST press of this card’s delete button was refused, if it was. */
+  deleteRefusal: SubscriptionDeleteRefusal | null
+  /** Who owns this subscription — named in the delete confirmation. */
+  customer: string
   onAssignPlan: (planId: string) => void
   onLinkRemnawaveProfile: (remnawaveId: string) => void
   isLinkingRemnawaveProfile: boolean
 }) {
   const { t, i18n } = useTranslation()
   const locale = i18n.language === 'ru' ? 'ru-RU' : 'en-US'
+  const syncActivity = subscriptionSyncActivity(sub)
 
   const statusKey = String(sub.status ?? 'UNKNOWN')
   const statusDot =
@@ -1485,19 +2323,152 @@ function SubscriptionCard({
   const [expiresAt, setExpiresAt] = useState<Date | undefined>(
     sub.expireAt ? new Date(sub.expireAt) : undefined,
   )
+  // "Unlimited traffic" is a STATE OF ITS OWN, not an empty text field.
+  //
+  // The patch below only carries a field the operator actually moved, so an
+  // empty traffic input means "leave it alone" — which left `trafficLimit: null`
+  // (the backend's spelling of unlimited) unsendable from this screen at all:
+  // there was no keystroke that produced it. Blanking the field looked like it
+  // should, and did nothing.
+  //
+  // A toggle rather than a sentinel value in the number field, because the two
+  // states have to be told apart AT A GLANCE. "I left it alone" and "I removed
+  // this customer's traffic cap" must never render identically, and an empty
+  // box cannot say which one it is. It also matches the form: the partner block
+  // below already spells a binary this way.
+  const trafficWasUnlimited = sub.trafficLimit === null || sub.trafficLimit === undefined
+  const [unlimitedTraffic, setUnlimitedTraffic] = useState(trafficWasUnlimited)
   const [dirty, setDirty] = useState(false)
+
+  // Whether there is an expiry here to LOSE — the same test the `expiresAt`
+  // initialiser above already makes, named so `handleSave` can tell the two
+  // ways of arriving at `expiresAt === undefined` apart:
+  //
+  //   • the subscription never had one, and the operator did not touch the
+  //     picker — genuinely no change;
+  //   • the subscription HAD one and the operator cleared it. `calendar.tsx`
+  //     does not set `required`, so react-day-picker's `mode="single"`
+  //     DESELECTS on a second click of the selected day and fires
+  //     `onSelect(undefined)`. That is a real gesture with a real intent, and
+  //     `if (expiresAt)` used to discard it in silence.
+  //
+  // Absent, `null` and the deliberately-unabsorbed empty string all read as
+  // "no date on record", exactly as the initialiser reads them.
+  const expiryOnRecord = Boolean(sub.expireAt)
+
+  /**
+   * THE SERVER'S ANSWER WINS — over the fields this save actually sent, and
+   * only while the operator has not moved on.
+   *
+   * `SubscriptionCard` is keyed by `sub.id`, so these `useState` initialisers
+   * run once per card lifetime. `onSuccess` invalidates the query but does not
+   * remount the card, so after a save the read-only rows re-render from the
+   * server while the inputs still hold what was typed. When the two differ —
+   * `parseInt` truncating a typed `5.7` down to the `5` that is sent and then
+   * stored is the live example, and there is NO server-side floor to point at:
+   * `readOperatorTrafficLimitGb` refuses a sub-gigabyte cap with a 400 rather
+   * than rounding it up — one card showed one field two ways, and the operator
+   * had no way to tell which number was real.
+   *
+   * Keying the card on a changing value would fix that by remounting, and is
+   * worse: any background refetch would then blow away a half-typed number
+   * mid-keystroke. So this reconciles instead of remounting, under two rules:
+   *
+   *   1. ONLY FIELDS THIS SAVE SENT. A field the patch never mentioned is not
+   *      the save's business, and a refetch that moved it is not this card's
+   *      cue to overwrite what the operator is holding.
+   *   2. ONLY IF THE INPUT STILL HOLDS WHAT WAS SENT. The comparison happens
+   *      inside a functional updater, so it reads the value at COMMIT time,
+   *      not the one captured when Save was pressed. Anything typed between
+   *      the press and the response therefore wins outright — in-progress
+   *      input cannot be eaten, because the guard sees it.
+   */
+  const adoptSavedValues = (
+    sent: Record<string, unknown>,
+    saved: SubscriptionWriteResult,
+    typed: {
+      readonly traffic: string
+      readonly unlimited: boolean
+      readonly devices: string
+      readonly pickedDay: number | null
+    },
+  ): void => {
+    if ('trafficLimit' in sent && saved.trafficLimit !== undefined) {
+      const storedTraffic = saved.trafficLimit
+      if (storedTraffic === null) {
+        setUnlimitedTraffic((current) => (current === typed.unlimited ? true : current))
+      } else {
+        const storedText = String(storedTraffic)
+        setTrafficLimit((current) => (current === typed.traffic ? storedText : current))
+        setUnlimitedTraffic((current) => (current === typed.unlimited ? false : current))
+      }
+    }
+    if ('deviceLimit' in sent && typeof saved.deviceLimit === 'number') {
+      const storedText = String(saved.deviceLimit)
+      setDeviceLimit((current) => (current === typed.devices ? storedText : current))
+    }
+    if ('expiresAt' in sent && typeof saved.expiresAt === 'string') {
+      const storedExpiry = new Date(saved.expiresAt)
+      if (!Number.isNaN(storedExpiry.getTime())) {
+        setExpiresAt((current) =>
+          current !== undefined && current.getTime() === typed.pickedDay ? storedExpiry : current,
+        )
+      }
+    }
+  }
 
   const handleSave = () => {
     const data: Record<string, unknown> = {}
     const newTraffic = parseInt(trafficLimit, 10)
     const newDevices = parseInt(deviceLimit, 10)
-    if (Number.isFinite(newTraffic) && newTraffic !== sub.trafficLimit) data.trafficLimit = newTraffic
+    if (unlimitedTraffic) {
+      // `null`, explicitly — `readOperatorTrafficLimitGb` on the backend takes
+      // `null` as unlimited and refuses `0`, because Remnawave spells unlimited
+      // traffic as `0` bytes and so cannot express a zero-gigabyte cap.
+      if (!trafficWasUnlimited) data.trafficLimit = null
+    } else if (trafficWasUnlimited && !Number.isFinite(newTraffic)) {
+      // The one incoherent combination: the toggle was switched OFF but no cap
+      // was named. Falling through would reach the "no changes" toast, which
+      // would be a lie — the operator did change something, it just cannot be
+      // sent. Say what is missing instead.
+      toast.info(t('userDetailPanel.subscriptions.trafficNeedsValue'))
+      return
+    } else if (Number.isFinite(newTraffic) && newTraffic !== sub.trafficLimit) {
+      data.trafficLimit = newTraffic
+    }
     if (Number.isFinite(newDevices) && newDevices !== sub.deviceLimit) data.deviceLimit = newDevices
+    // A GESTURE THAT EXISTS AND CANNOT BE HONOURED IS NAMED, NOT SWALLOWED.
+    //
+    // `calendar.tsx` does not pass `required`, so clicking the selected day a
+    // second time deselects it: `onSelect(undefined)` runs, `setExpiresAt(
+    // undefined)` and `setDirty(true)` both run, and `if (expiresAt)` below
+    // then treated that identically to "the operator never opened the picker".
+    // Save stayed lit, and if it was their only edit they were told there were
+    // "no changes" about a change they had just made — so they went looking
+    // for the button that makes a subscription unlimited, and there is none.
+    //
+    // There is none because the SERVER cannot clear an expiry: the write is
+    // guarded by `if (body.expiresAt !== undefined && body.expiresAt !== null)`
+    // (`admin-user-subscriptions.controller.ts:527`), so `null` is explicitly
+    // excluded and writes nothing. Building a UI for it needs a backend change.
+    // What this screen owes the operator meanwhile is the truth, in the same
+    // shape the traffic path a few lines above already uses: refuse by name
+    // rather than discard in silence.
+    //
+    // `dirty` is deliberately left ALONE, exactly as `trafficNeedsValue` leaves
+    // it: the way out is to pick a date, and the Save button has to still be
+    // there when they do.
+    if (expiryOnRecord && expiresAt === undefined) {
+      toast.info(t('userDetailPanel.subscriptions.expiryCannotBeCleared'))
+      return
+    }
     if (expiresAt) {
-      const originalDate = sub.expireAt ? new Date(sub.expireAt).toISOString().slice(0, 10) : ''
-      const newDate = expiresAt.toISOString().slice(0, 10)
-      if (newDate !== originalDate) {
-        data.expiresAt = expiresAt.toISOString()
+      // LOCAL on both sides — the calendar the picker, the trigger and the
+      // read-only row above all use. See `localCalendarDay`.
+      const originalDay = sub.expireAt ? localCalendarDay(new Date(sub.expireAt)) : ''
+      const newDay = localCalendarDay(expiresAt)
+      if (newDay !== originalDay) {
+        data.expiresAt = subscriptionExpiryInstant(expiresAt, sub.expireAt)
       }
     }
     // The same silent no-op as `brandingPage.noChanges`, spelled as a `> 0`
@@ -1521,7 +2492,23 @@ function SubscriptionCard({
       setDirty(false)
       return
     }
+    // Captured BEFORE the request goes out so `adoptSavedValues` knows what the
+    // inputs held at the moment of the press; the guard itself still compares
+    // against the live value at commit time.
+    const typed = {
+      traffic: trafficLimit,
+      unlimited: unlimitedTraffic,
+      devices: deviceLimit,
+      pickedDay: expiresAt === undefined ? null : expiresAt.getTime(),
+    }
     onUpdate(data)
+      .then((saved) => adoptSavedValues(data, saved, typed))
+      .catch(() => {
+        // The mutation's own `onError` has already put the failure on screen.
+        // Swallowing it here only stops an unhandled rejection; nothing about
+        // the editor's state changes, so the operator's edits stay where they
+        // are and Save can be pressed again.
+      })
     setDirty(false)
   }
 
@@ -1534,7 +2521,7 @@ function SubscriptionCard({
           <span className="truncate text-xs font-medium">{sub.plan?.name ?? `#${truncate(sub.id, 8)}`}</span>
           <span className={`text-[10px] font-medium ${statusColor}`}>{statusLabel}</span>
           {sub.isTrial && <span className="rounded border border-pink-500/50 px-1 py-px text-[9px] uppercase text-pink-400">Trial</span>}
-          {isSyncing ? (
+          {isSyncing || syncActivity === 'PENDING' ? (
             <span className="inline-flex items-center gap-1 rounded border border-primary/40 bg-primary/10 px-1 py-px text-[9px] font-medium uppercase text-primary">
               <Loader2 className="h-2.5 w-2.5 animate-spin" />
               {t('userDetailPanel.subscriptions.syncing')}
@@ -1555,9 +2542,11 @@ function SubscriptionCard({
           </Button>
           </PermissionGate>
           <PermissionGate resource="subscriptions" action="delete">
-          <Button size="icon" variant="ghost" className="h-6 w-6 text-muted-foreground hover:text-destructive" onClick={onDelete} aria-label={t('userDetailPanel.subscriptions.deleteTitle')}>
-            <Trash2 className="h-3 w-3" />
-          </Button>
+          <SubscriptionDeleteConfirmation sub={sub} customer={customer} onConfirm={onDelete}>
+            <Button size="icon" variant="ghost" className="h-6 w-6 text-muted-foreground hover:text-destructive" aria-label={t('userDetailPanel.subscriptions.deleteTitle')}>
+              <Trash2 className="h-3 w-3" />
+            </Button>
+          </SubscriptionDeleteConfirmation>
           </PermissionGate>
         </div>
       </div>
@@ -1568,13 +2557,54 @@ function SubscriptionCard({
         <InfoRow icon={<Hash className="h-3 w-3" />} label={t('userDetailPanel.subscriptions.planType')} value={String(t(`userDetailPanel.subscriptions.planTypes.${sub.plan?.type ?? 'BOTH'}`, sub.plan?.type ?? '—'))} />
         <InfoRow icon={<Wifi className="h-3 w-3" />} label={t('userDetailPanel.subscriptions.traffic')} value={sub.trafficLimit ? `${sub.trafficLimit} GB` : '∞'} />
         <InfoRow icon={<Monitor className="h-3 w-3" />} label={t('userDetailPanel.subscriptions.devices')} value={String(sub.deviceLimit || '∞')} />
-        <InfoRow icon={<Calendar className="h-3 w-3" />} label={t('userDetailPanel.subscriptions.expires')} value={sub.expireAt ? new Date(sub.expireAt).toLocaleDateString(locale) : '—'} />
+        {/* ABSENT is a state, and the state is UNLIMITED.
+
+            `GET /admin/users/:telegramId` maps `expireAt: s.expiresAt?.toISOString()`
+            and `JSON.stringify` drops `undefined`, so a subscription with no
+            expiry arrives here with the key MISSING. The em dash that stood in
+            its place said "we do not know" about something we do know:
+            `Subscription.expiresAt` is `DateTime?` and the backend reads the
+            empty one as the unlimited bucket (`referral-points-exchange.service.ts`
+            queries `{ status: ACTIVE, expiresAt: null }` as exactly that).
+
+            Three states, kept apart on purpose:
+
+              • absent / null → unlimited. Both spellings fold in here because
+                they are one state on the wire (`user-detail-shape.ts` names
+                both). `=== undefined` ALONE would be wrong: an explicit `null`
+                would fall through to `new Date(null)` and print a confident
+                `01.01.1970` — the exact defect the subscriptions list had.
+              • a real ISO string → that date.
+              • an EMPTY STRING → deliberately NOT absorbed. It is a broken
+                value, not a state, so it renders as `Invalid Date` rather than
+                letting us claim an expiry policy we cannot back. A truthiness
+                check cannot tell it from unlimited, which is why this is not one.
+
+            Same shape as `trafficWasUnlimited` above, which spells the same
+            absent-or-null pair the same way for the traffic cap. */}
+        <InfoRow
+          icon={<Calendar className="h-3 w-3" />}
+          label={t('userDetailPanel.subscriptions.expires')}
+          value={
+            sub.expireAt === undefined || sub.expireAt === null
+              ? t('userDetailPanel.subscriptions.unlimitedExpiry')
+              : new Date(sub.expireAt).toLocaleDateString(locale)
+          }
+        />
         <RemnawaveProfileRow
           sub={sub}
           onLinkProfile={onLinkRemnawaveProfile}
           isLinkingProfile={isLinkingRemnawaveProfile}
         />
       </div>
+
+      {syncActivity === 'FAILED' ? <SubscriptionSyncFailureNotice sub={sub} /> : null}
+      {syncOutcome === null ? null : (
+        <SubscriptionSyncOutcomeNotice sub={sub} outcome={syncOutcome} />
+      )}
+      {deleteRefusal === null ? null : (
+        <SubscriptionDeleteRefusalNotice refusal={deleteRefusal} />
+      )}
 
       {/* Quick actions — accordion (only one open at a time) */}
       <div className="border-t px-3 pb-2.5">
@@ -1596,7 +2626,52 @@ function SubscriptionCard({
                   <Wifi className="h-3 w-3 text-muted-foreground/60" />
                   {t('userDetailPanel.subscriptions.trafficLabel')}
                 </span>
-                <Input type="number" min="0" className="h-7 w-40 text-xs text-right px-1.5" value={trafficLimit} onChange={(e) => { setTrafficLimit(e.target.value); setDirty(true) }} />
+                {/*
+                  `min="1"`, not `min="0"`: the server refuses a zero-gigabyte
+                  cap with a 400, because Remnawave spells unlimited traffic as
+                  `0` bytes and so cannot express "no traffic at all". An input
+                  that advertises `0` invites the operator to type the one value
+                  the save will reject. (The device input below keeps `min="0"`
+                  — there `0` genuinely means unlimited.)
+                */}
+                <Input
+                  type="number"
+                  min="1"
+                  className="h-7 w-40 text-xs text-right px-1.5"
+                  /*
+                    Blanked and DISABLED while the toggle below is on, so the
+                    field cannot show a stale number under a state that no
+                    longer uses it. Toggling back restores what was typed —
+                    `trafficLimit` keeps its own value throughout.
+                  */
+                  value={unlimitedTraffic ? '' : trafficLimit}
+                  placeholder={unlimitedTraffic ? '∞' : undefined}
+                  disabled={unlimitedTraffic}
+                  onChange={(e) => { setTrafficLimit(e.target.value); setDirty(true) }}
+                />
+              </div>
+              {/*
+                THE ONLY WAY THIS SCREEN CAN SAY "UNLIMITED".
+                The patch carries a field only when the operator moved it, so an
+                empty traffic box means "no change" and always did. That left
+                `trafficLimit: null` — which the backend accepts and which is
+                what unlimited IS — with no keystroke that produces it.
+
+                A toggle and not a sentinel in the number field: "left alone"
+                and "cap removed" have to be distinguishable at a glance, and an
+                empty box cannot say which one it is. Conflating them is how an
+                operator wipes a limit without meaning to.
+              */}
+              <div className="flex items-center justify-between gap-2">
+                <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                  <InfinityIcon className="h-3 w-3 text-muted-foreground/60" />
+                  {t('userDetailPanel.subscriptions.trafficUnlimitedLabel')}
+                </span>
+                <Switch
+                  checked={unlimitedTraffic}
+                  onCheckedChange={(checked) => { setUnlimitedTraffic(checked); setDirty(true) }}
+                  aria-label={t('userDetailPanel.subscriptions.trafficUnlimitedLabel')}
+                />
               </div>
               <div className="flex items-center justify-between gap-2">
                 <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
@@ -1648,14 +2723,27 @@ function SubscriptionCard({
               <div className="flex items-center justify-between gap-2 pt-1.5">
                 <div className="flex gap-1">
                   <PermissionGate resource="subscriptions" action="edit">
-                  <Button size="sm" variant="outline" className="h-6 px-2 text-[10px]" onClick={() => onUpdate({ status: statusKey === 'ACTIVE' ? 'DISABLED' : 'ACTIVE' })}>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-6 px-2 text-[10px]"
+                    onClick={() => {
+                      // Nothing to reconcile — this button sends `status` and
+                      // no editor input reflects it. The `catch` is only here
+                      // because `onUpdate` answers with a promise now; the
+                      // mutation's `onError` still reports the failure.
+                      void onUpdate({ status: statusKey === 'ACTIVE' ? 'DISABLED' : 'ACTIVE' }).catch(() => undefined)
+                    }}
+                  >
                     {statusKey === 'ACTIVE' ? t('userDetailPanel.subscriptions.disableTitle') : t('userDetailPanel.subscriptions.enableTitle')}
                   </Button>
                   </PermissionGate>
                   <PermissionGate resource="subscriptions" action="delete">
-                  <Button size="sm" variant="outline" className="h-6 px-2 text-[10px] text-destructive" onClick={onDelete}>
-                    {t('userDetailPanel.subscriptions.deleteTitle')}
-                  </Button>
+                  <SubscriptionDeleteConfirmation sub={sub} customer={customer} onConfirm={onDelete}>
+                    <Button size="sm" variant="outline" className="h-6 px-2 text-[10px] text-destructive">
+                      {t('userDetailPanel.subscriptions.deleteTitle')}
+                    </Button>
+                  </SubscriptionDeleteConfirmation>
                   </PermissionGate>
                 </div>
                 <div className="flex gap-1">
@@ -1680,28 +2768,63 @@ function SubscriptionCard({
 }
 
 
+/**
+ * The per-user allow-list toggle for `availability === 'ALLOWED'` plans.
+ *
+ * ── IT READS `userId`, NOT `telegramId` ──────────────────────────────────────
+ *
+ * `Plan.allowedUserIds` holds REIWA IDS: the grant endpoint pushes `user.id`,
+ * and the catalog gate that decides who may buy the plan asks
+ * `allowedUserIds.includes(user.id)`. This asked `.includes(telegramId)` — the
+ * string in the URL — so on a card opened by telegram id, which is how the
+ * users table opens every card, the switch read OFF however many grants the
+ * operator had made. Both identifiers reach the same endpoint
+ * (`findUserByTelegramId` accepts either), which is why the bug was invisible
+ * to anyone testing by reiwa id.
+ *
+ * ── THE GATE FOLLOWS THE ENDPOINT ────────────────────────────────────────────
+ *
+ * `plans:edit`. This writes a plan's allow-list, so it is gated on the plan
+ * permission — the same one the plan editor requires, and the one the two
+ * endpoints below now require. It used to be `subscriptions:edit`: a THIRD
+ * permission, agreeing with neither, which offered the control to precisely the
+ * shipped `operator` role the corrected endpoint answers 403 to.
+ *
+ * ── AND IT INVALIDATES THE LIST IT READS ─────────────────────────────────────
+ *
+ * The checked state comes from the PLANS catalogue, not from the user query, so
+ * invalidating only `queryKey` refetched the one query whose answer the switch
+ * never consults. Both keys are invalidated.
+ */
 function PlanAccessSection({
   telegramId,
+  userId,
   queryKey,
   plans,
 }: {
   telegramId: string
+  userId: string
   queryKey: string[]
   plans: ReadonlyArray<import('@/features/plans/plans-api').Plan>
 }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
 
+  const refreshAccessState = (): void => {
+    void queryClient.invalidateQueries({ queryKey })
+    void queryClient.invalidateQueries({ queryKey: plansQueryKeys.all })
+  }
+
   const grantMutation = useMutation({
     mutationFn: (planId: string) =>
       api.post(`/admin/users/${telegramId}/plan-access/${planId}`),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey }),
+    onSuccess: refreshAccessState,
   })
 
   const revokeMutation = useMutation({
     mutationFn: (planId: string) =>
       api.delete(`/admin/users/${telegramId}/plan-access/${planId}`),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey }),
+    onSuccess: refreshAccessState,
   })
 
   // Plans with availability=ALLOWED are the ones that use allowedUserIds
@@ -1718,11 +2841,11 @@ function PlanAccessSection({
           {t('userDetailPanel.subscriptions.planAccessHint')}
         </p>
         {allowedPlans.map((plan) => {
-          const hasAccess = (plan.allowedUserIds ?? []).includes(telegramId)
+          const hasAccess = (plan.allowedUserIds ?? []).includes(userId)
           return (
             <div key={plan.id} className="flex items-center justify-between rounded-md border px-3 py-2">
               <span className="text-sm">{plan.name}</span>
-              <PermissionGate resource="subscriptions" action="edit">
+              <PermissionGate resource="plans" action="edit">
               <Switch
                 checked={hasAccess}
                 onCheckedChange={(checked) => {
@@ -1799,15 +2922,19 @@ function PartnerTab({ user, telegramId, queryKey }: { user: UserDetail; telegram
   const [adjustReason, setAdjustReason] = useState('')
   const locale = i18n.language === 'ru' ? 'ru-RU' : 'en-US'
 
-  const createMutation = useMutation({
-    mutationFn: () => api.post(`/admin/users/${telegramId}/create-partner`),
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey }); toast.success(t('userDetailPanel.toasts.partnerCreated')) },
-    onError: (err) => toast.error(getErrorMessage(err, t('userDetailPanel.toasts.profileFailed'))),
-  })
-
   const toggleMutation = useMutation({
     mutationFn: () => api.post(`/admin/users/${telegramId}/partner/toggle`),
     onSuccess: () => { queryClient.invalidateQueries({ queryKey }); toast.success(t('userDetailPanel.toasts.statusChanged')) },
+    // THE ONE PARTNER MUTATION IN THIS FILE THAT REPORTED NOTHING.
+    //
+    // `adjustMutation` below and the Profile tab pair all toast through
+    // `getErrorMessage`; this one had no `onError` at all. A refused
+    // flip — the 403 an admin without `partners:edit` gets, or the service
+    // declining it — repainted nothing and said nothing, so the badge still
+    // read "Active" and the operator had no way to tell a refusal from a
+    // click that missed the button. `getErrorMessage` carries the server's own
+    // reason when it sent one, exactly as the other three do.
+    onError: (err) => toast.error(getErrorMessage(err, t('userDetailPanel.toasts.profileFailed'))),
   })
 
   const adjustMutation = useMutation({
@@ -1824,21 +2951,25 @@ function PartnerTab({ user, telegramId, queryKey }: { user: UserDetail; telegram
     onError: (err) => toast.error(getErrorMessage(err, t('userDetailPanel.toasts.profileFailed'))),
   })
 
-  if (!user.partner) {
-    return (
-      <Card>
-        <CardContent className="flex flex-col items-center gap-3 py-12">
-          <p className="text-sm text-muted-foreground">{t('userDetailPanel.partner.notPartner')}</p>
-          <PermissionGate resource="partners" action="edit">
-          <Button onClick={() => createMutation.mutate()} disabled={createMutation.isPending}>
-            <Plus className="mr-2 h-4 w-4" /> {t('userDetailPanel.partner.createPartner')}
-          </Button>
-          </PermissionGate>
-        </CardContent>
-      </Card>
-    )
-  }
-
+  // THERE IS NO `!user.partner` BRANCH HERE, BECAUSE NOTHING COULD REACH ONE.
+  //
+  // This component is mounted `{user.partner && (<TabsContent value="partner">
+  // …)}`, and the trigger that opens that panel sits behind the same guard —
+  // so for a user without a partner row the tab does not exist, and `PartnerTab`
+  // never runs. The early return that used to stand here rendered "User is not
+  // a partner" and a live "Create partner" button underneath it, and no
+  // operator, of any role, could arrive at either. A `createMutation` was
+  // declared just above solely to serve it and has gone with it: a mutation
+  // wired to an unreachable control reads as a supported feature and is not one.
+  //
+  // The panel's ONE reachable create-partner control is the Profile tab's,
+  // inside `<PermissionGate resource="partners" action="edit">` — see the long
+  // comment on it in `ProfileTab`. Removing this branch takes nothing off any
+  // operator's screen, because it was never on one.
+  //
+  // The narrowing below stays. `partner` is optional on `UserDetail`, so the
+  // compiler needs it, and the `null` is unreachable for the same reason the
+  // branch above was.
   const p = user.partner
   if (!p) return null
   const referrals: ReadonlyArray<UserReferralEntry> = p.referrals ?? []
@@ -2316,7 +3447,425 @@ function ReferralsTab({ user, telegramId, queryKey }: { user: UserDetail; telegr
           )}
         </CardContent>
       </Card>
+
+      {/* Neither of these comes from the user-detail query above — separate
+          endpoints, separate failures, separate empty states. */}
+      <UserInvitesCard userId={user.id} />
+
+      <UserRewardsCard userId={user.id} queryKey={queryKey} />
     </div>
+  )
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Referral invites & rewards — the two blocks fed by /admin/referrals/*
+// ══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * WHY THESE ARE SEPARATE COMPONENTS WITH SEPARATE QUERIES.
+ *
+ * Everything above in `ReferralsTab` is painted from the user-detail query —
+ * one request, one failure. These two are not: invites come from
+ * `GET /admin/referrals/invites?inviterId=`, rewards from
+ * `GET /admin/referrals/rewards?userId=`, and the invite quota from a third
+ * endpoint again. They fail independently, so they must fail independently on
+ * screen: one being down cannot blank the tab, cannot take the other's rows
+ * with it, and has to say WHICH load failed.
+ *
+ * And a failed load never renders the empty state. "No invites yet" is a claim
+ * about the operator's own data; a rejected fetch — transport error, or a body
+ * that failed schema validation — establishes nothing of the sort. The same
+ * `isError` branch the referrals page settled on, including the header count,
+ * which is the same claim with a number on it and is therefore dropped rather
+ * than shown as `(0)`.
+ */
+
+type UserInviteStatus = 'active' | 'consumed' | 'revoked' | 'expired'
+
+interface InviteLifecycle {
+  readonly expiresAt: string | null
+  readonly revokedAt: string | null
+  readonly consumedAt: string | null
+}
+
+/**
+ * Ordered the way the server's own live-invite filter is ordered: revoked and
+ * consumed are terminal facts about the row, expiry is a fact about the clock,
+ * and only an invite that is none of the three is still live — see the
+ * `{ revokedAt: null, consumedAt: null, OR: [{ expiresAt: null }, { expiresAt:
+ * { gt: now } }] }` count in `ReferralInviteLimitsService.getCapacity`, which
+ * is what decides whether the row is still holding a slot.
+ *
+ * `now` is a PARAMETER rather than a `Date.now()` read inside: one instant is
+ * held for the whole list, so two rows rendered a millisecond apart cannot
+ * disagree about whether the same moment has passed, and a test can state the
+ * clock instead of racing it.
+ */
+// Exported for `user-referral-invites-rewards.test.tsx`, which drives the rule
+// directly — the terminal-before-clock ordering has no fixture that reaches it
+// through the DOM. Same escape hatch as `localCalendarDay` above.
+// eslint-disable-next-line react-refresh/only-export-components
+export function deriveUserInviteStatus(invite: InviteLifecycle, now: number): UserInviteStatus {
+  if (invite.revokedAt !== null) return 'revoked'
+  if (invite.consumedAt !== null) return 'consumed'
+  if (invite.expiresAt !== null && new Date(invite.expiresAt).getTime() <= now) return 'expired'
+  return 'active'
+}
+
+/**
+ * Whether another invite may be minted for this user, and when not, why not.
+ *
+ * ASKED, not assumed. `GET /admin/referrals/invite-capacity/:userId` computes
+ * the answer from the per-user override layered over the global program limits
+ * — the same arithmetic `ReferralInviteLimitsService` applies at creation time
+ * — and this panel must not re-derive it from the fields on the Invite
+ * Settings tab.
+ *
+ * Asked BEFORE the POST, and it is no longer the ONLY thing between an
+ * operator and an over-quota invite. It used to be: the admin create route
+ * enforced nothing, `ReferralsService.createInvite` never called
+ * `validateCanCreateInvite`, and an over-quota POST from here did not come
+ * back 400 — it SUCCEEDED, and handed out a slot the operator's own
+ * configuration says does not exist.
+ *
+ * The server now asks `getCapacity` at the one place a `ReferralInvite` row is
+ * written and refuses with `INVITE_SLOT_LIMIT_REACHED`. So this gate keeps the
+ * button from being pressed at all, and the server refusal catches what a
+ * stale capacity cache lets through — see {@link isInviteQuotaRefusal}, which
+ * is how that refusal is told apart from every other 400 on this route.
+ */
+type InviteCreateGate =
+  | { readonly kind: 'allowed' }
+  | { readonly kind: 'loading' }
+  | { readonly kind: 'unknown' }
+  | { readonly kind: 'exhausted'; readonly used: number; readonly total: number }
+
+// Exported for the same reason: the unlimited-quota answer (`totalSlots: null`
+// with `canCreateInvite: true`) is the VIP-bypass case, and reading it as a
+// number is the defect worth a direct test.
+// eslint-disable-next-line react-refresh/only-export-components
+export function readInviteCreateGate(capacity: {
+  readonly isError: boolean
+  readonly data: ReferralInviteCapacity | undefined
+}): InviteCreateGate {
+  if (capacity.isError) return { kind: 'unknown' }
+  if (capacity.data === undefined) return { kind: 'loading' }
+  if (capacity.data.canCreateInvite) return { kind: 'allowed' }
+  // `totalSlots: null` means UNLIMITED, never zero, and the service only ever
+  // refuses from the branch that computed a real number — an
+  // unlimited-yet-refused answer would be a server defect. "The quota cannot
+  // be read" is the honest reading of it; "a limit of nothing" is not.
+  if (capacity.data.totalSlots === null) return { kind: 'unknown' }
+  return { kind: 'exhausted', used: capacity.data.usedSlots, total: capacity.data.totalSlots }
+}
+
+/**
+ * The wire label of the server's invite-quota refusal.
+ *
+ * Allowlisted in `SAFE_PRODUCT_CODES`, so `AdminSafeExceptionFilter` forwards
+ * it as both `code` and `errorCode` instead of stripping it to an untyped 400.
+ * Written as a literal rather than imported: nothing the production frontend
+ * compiles may reach into the backend tree — the Docker frontend stage copies
+ * `web/` and nothing else.
+ */
+const INVITE_QUOTA_REFUSAL_CODE = 'INVITE_SLOT_LIMIT_REACHED'
+
+/**
+ * Is this failed create the quota refusal, rather than any other 400?
+ *
+ * BRANCH ON THE CODE, NEVER ON THE SENTENCE — the same rule the plan write
+ * refusals follow next door. The server's message is an English diagnostic
+ * aimed at whoever reads the logs, and printing it verbatim is how a
+ * Russian-language panel ends up showing an English sentence in a toast.
+ *
+ * Both spellings are read, `code` first: the filter always writes the product
+ * code into `errorCode`, and adds `code` only when the thrown body carried
+ * one. Duck-typed rather than reached through axios so this stays a pure
+ * predicate over the rejection shape.
+ *
+ * Anything it does not recognise keeps the existing fallback, which prints the
+ * server's own sentence. An unrecognised refusal must not be dressed up as
+ * this one: the remedies differ, and "revoke an invite or raise the limit" is
+ * useless advice for a permission failure or a dead host.
+ */
+function isInviteQuotaRefusal(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false
+  const body = (error as { response?: { data?: unknown } }).response?.data
+  if (typeof body !== 'object' || body === null) return false
+  const record = body as { code?: unknown; errorCode?: unknown }
+  return (
+    record.code === INVITE_QUOTA_REFUSAL_CODE || record.errorCode === INVITE_QUOTA_REFUSAL_CODE
+  )
+}
+
+function InviteQuotaNotice({
+  gate,
+  capacity,
+}: {
+  gate: InviteCreateGate
+  capacity: ReferralInviteCapacity | undefined
+}) {
+  const { t } = useTranslation()
+
+  if (gate.kind === 'exhausted') {
+    return (
+      <p className="text-xs text-destructive">
+        {t('userDetailPage.referrals.invitesBlock.quotaExhausted', {
+          total: gate.total,
+          used: gate.used,
+        })}
+      </p>
+    )
+  }
+  if (gate.kind === 'unknown') {
+    return (
+      <p className="text-xs text-destructive">
+        {t('userDetailPage.referrals.invitesBlock.quotaUnknown')}
+      </p>
+    )
+  }
+  if (gate.kind === 'loading') {
+    return (
+      <p className="text-xs text-muted-foreground">
+        {t('userDetailPage.referrals.invitesBlock.quotaLoading')}
+      </p>
+    )
+  }
+  if (capacity === undefined || capacity.totalSlots === null || capacity.remainingSlots === null) {
+    return (
+      <p className="text-xs text-muted-foreground">
+        {t('userDetailPage.referrals.invitesBlock.quotaUnlimited')}
+      </p>
+    )
+  }
+  return (
+    <p className="text-xs text-muted-foreground">
+      {t('userDetailPage.referrals.invitesBlock.quotaRemaining', {
+        remaining: capacity.remainingSlots,
+        total: capacity.totalSlots,
+      })}
+    </p>
+  )
+}
+
+function UserInvitesCard({ userId }: { userId: string }) {
+  const { t, i18n } = useTranslation()
+  const locale = i18n.language === 'ru' ? 'ru-RU' : 'en-US'
+  const currentTime = useCurrentTime()
+
+  const invitesQuery = useReferralInvitesQuery(userId)
+  const capacityQuery = useReferralInviteCapacityQuery(userId)
+  const createMutation = useCreateReferralInviteMutation(userId)
+  const revokeMutation = useRevokeReferralInviteMutation(userId)
+
+  const gate = readInviteCreateGate(capacityQuery)
+  const invites = invitesQuery.data
+
+  return (
+    <Card>
+      <CardHeader className="flex flex-row items-center justify-between gap-3 space-y-0">
+        <CardTitle className="text-base">
+          {invites === undefined
+            ? t('userDetailPage.referrals.invitesBlock.titlePlain')
+            : t('userDetailPage.referrals.invitesBlock.title', { count: invites.length })}
+        </CardTitle>
+        <PermissionGate resource="referrals" action="edit">
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={gate.kind !== 'allowed' || createMutation.isPending}
+            onClick={() =>
+              createMutation.mutate(undefined, {
+                onSuccess: () =>
+                  toast.success(t('userDetailPage.referrals.invitesBlock.created')),
+                onError: (err) =>
+                  toast.error(
+                    isInviteQuotaRefusal(err)
+                      ? t('userDetailPage.referrals.invitesBlock.createRefusedQuota')
+                      : getErrorMessage(
+                          err,
+                          t('userDetailPage.referrals.invitesBlock.createFailed'),
+                        ),
+                  ),
+              })
+            }
+          >
+            {createMutation.isPending ? (
+              <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Plus className="mr-2 h-3.5 w-3.5" />
+            )}
+            {t('userDetailPage.referrals.invitesBlock.create')}
+          </Button>
+        </PermissionGate>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <InviteQuotaNotice gate={gate} capacity={capacityQuery.data} />
+
+        {invitesQuery.isError ? (
+          <p className="text-sm text-destructive">
+            {t('userDetailPage.referrals.invitesBlock.loadFailed')}
+          </p>
+        ) : invites === undefined || currentTime === null ? (
+          // `useCurrentTime` starts at null and fills in on its first effect
+          // tick. An invite's status is a statement about the clock, and with
+          // no clock `expired` cannot be told from `active` — so the list waits
+          // one tick rather than guessing at it.
+          <Skeleton className="h-16 w-full" />
+        ) : invites.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            {t('userDetailPage.referrals.invitesBlock.empty')}
+          </p>
+        ) : (
+          <ul className="space-y-1">
+            {invites.map((invite) => {
+              const status = deriveUserInviteStatus(invite, currentTime)
+              return (
+                <li
+                  key={invite.id}
+                  className="flex items-center justify-between gap-3 rounded px-2 py-1.5 hover:bg-muted/50"
+                >
+                  <div className="min-w-0">
+                    <p className="truncate font-mono text-xs">{invite.token}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {invite.expiresAt === null
+                        ? t('userDetailPage.referrals.invitesBlock.noExpiry')
+                        : t('userDetailPage.referrals.invitesBlock.expiresOn', {
+                            date: new Date(invite.expiresAt).toLocaleDateString(locale),
+                          })}
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <Badge variant="outline">
+                      {t(`userDetailPage.referrals.invitesBlock.status.${status}`)}
+                    </Badge>
+                    {status === 'active' && (
+                      <PermissionGate resource="referrals" action="edit">
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="h-7 text-destructive"
+                          disabled={revokeMutation.isPending}
+                          onClick={() =>
+                            revokeMutation.mutate(invite.id, {
+                              onSuccess: () =>
+                                toast.success(
+                                  t('userDetailPage.referrals.invitesBlock.revoked'),
+                                ),
+                              onError: (err) =>
+                                toast.error(
+                                  getErrorMessage(
+                                    err,
+                                    t('userDetailPage.referrals.invitesBlock.revokeFailed'),
+                                  ),
+                                ),
+                            })
+                          }
+                        >
+                          {t('userDetailPage.referrals.invitesBlock.revoke')}
+                        </Button>
+                      </PermissionGate>
+                    )}
+                  </div>
+                </li>
+              )
+            })}
+          </ul>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+function UserRewardsCard({ userId, queryKey }: { userId: string; queryKey: string[] }) {
+  const { t } = useTranslation()
+  const rewardsQuery = useReferralRewardsQuery(userId)
+  // Issuing APPLIES the reward: `AdminRewardsService.issue` moves
+  // `User.points` for a POINTS reward and a subscription expiry for an
+  // EXTRA_DAYS one. Both are painted from the user-detail query, which lives
+  // under `['admin','users',telegramId]` — a root no referrals key reaches, so
+  // it is handed in here explicitly.
+  const issueMutation = useIssueReferralRewardMutation(userId, [queryKey])
+
+  const rewards = rewardsQuery.data
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">
+          {rewards === undefined
+            ? t('userDetailPage.referrals.rewardsBlock.titlePlain')
+            : t('userDetailPage.referrals.rewardsBlock.title', { count: rewards.length })}
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        {rewardsQuery.isError ? (
+          <p className="text-sm text-destructive">
+            {t('userDetailPage.referrals.rewardsBlock.loadFailed')}
+          </p>
+        ) : rewards === undefined ? (
+          <Skeleton className="h-16 w-full" />
+        ) : rewards.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            {t('userDetailPage.referrals.rewardsBlock.empty')}
+          </p>
+        ) : (
+          <ul className="space-y-1">
+            {rewards.map((reward) => {
+              // An unknown reward type prints its own wire value rather than a
+              // raw key path — `getRewardTypeMeta` already answers for one with
+              // a neutral badge instead of refusing, and the two must not
+              // disagree.
+              const typeLabel = t(`userDetailPage.referrals.rewardsBlock.types.${reward.type}`, {
+                defaultValue: reward.type,
+              })
+              return (
+                <li
+                  key={reward.id}
+                  className="flex items-center justify-between gap-3 rounded px-2 py-1.5 hover:bg-muted/50"
+                >
+                  {/* One text node, not three: a row split across nodes cannot
+                      be matched as the sentence an operator reads. */}
+                  <span className="text-sm">{`${typeLabel} · ${reward.amount}`}</span>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <Badge variant="outline">
+                      {reward.isIssued
+                        ? t('userDetailPage.referrals.rewardsBlock.statusIssued')
+                        : t('userDetailPage.referrals.rewardsBlock.statusPending')}
+                    </Badge>
+                    {!reward.isIssued && (
+                      <PermissionGate resource="referrals" action="edit">
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="h-7"
+                          disabled={issueMutation.isPending}
+                          onClick={() =>
+                            issueMutation.mutate(reward.id, {
+                              onSuccess: () =>
+                                toast.success(t('userDetailPage.referrals.rewardsBlock.issued')),
+                              onError: (err) =>
+                                toast.error(
+                                  getErrorMessage(
+                                    err,
+                                    t('userDetailPage.referrals.rewardsBlock.issueFailed'),
+                                  ),
+                                ),
+                            })
+                          }
+                        >
+                          {t('userDetailPage.referrals.rewardsBlock.issue')}
+                        </Button>
+                      </PermissionGate>
+                    )}
+                  </div>
+                </li>
+              )
+            })}
+          </ul>
+        )}
+      </CardContent>
+    </Card>
   )
 }
 
@@ -2420,11 +3969,27 @@ function InviteSettingsTab({
     initialOverride.bypassInviteGate ?? false,
   )
 
+  // Mirror of the server's `MIN_LINK_TTL_SECONDS`. The SERVER is the
+  // authority - `UpdateUserInviteSettingsDto` rejects anything below it and
+  // `ReferralInviteLimitsService` clamps whatever is already stored. This copy
+  // exists only so the field can say so before a save round-trips into a 400.
+  const MIN_LINK_TTL_SECONDS = 60
+
   const parseNullableInt = (raw: string): number | null => {
     if (raw.trim() === '') return null
     const n = parseInt(raw, 10)
     return Number.isFinite(n) ? Math.max(0, n) : null
   }
+
+  // The one value this panel can still produce that the server refuses. The
+  // box is prefilled from whatever is stored, so an operator opening a legacy
+  // sub-minute config and pressing Save used to meet a bare 400. Named inline
+  // instead, and Save is held while it stands.
+  const linkTtlBelowFloor =
+    !useGlobal &&
+    linkTtlEnabled &&
+    linkTtlSeconds.trim() !== '' &&
+    Number(linkTtlSeconds) < MIN_LINK_TTL_SECONDS
 
   const saveMutation = useMutation({
     mutationFn: () => {
@@ -2510,17 +4075,28 @@ function InviteSettingsTab({
             </div>
             {linkTtlEnabled && (
               <div className="space-y-1.5">
-                <Label className="text-xs">{t('userDetailPanel.invites.linkTtlSeconds')}</Label>
+                <Label className="text-xs" htmlFor="invite-link-ttl-seconds">{t('userDetailPanel.invites.linkTtlSeconds')}</Label>
                 <Input
+                  id="invite-link-ttl-seconds"
                   type="number"
-                  min="0"
+                  min={MIN_LINK_TTL_SECONDS}
                   className="h-9"
                   value={linkTtlSeconds}
+                  aria-invalid={linkTtlBelowFloor}
                   onChange={(e) => {
                     setLinkTtlSeconds(e.target.value)
                     setDirty(true)
                   }}
                 />
+                <p
+                  className={
+                    linkTtlBelowFloor
+                      ? 'text-xs text-destructive'
+                      : 'text-xs text-muted-foreground'
+                  }
+                >
+                  {t('userDetailPanel.invites.linkTtlMin', { min: MIN_LINK_TTL_SECONDS })}
+                </p>
               </div>
             )}
           </div>
@@ -2541,8 +4117,9 @@ function InviteSettingsTab({
             {slotsEnabled && (
               <div className="grid gap-3 sm:grid-cols-3">
                 <div className="space-y-1.5">
-                  <Label className="text-xs">{t('userDetailPanel.invites.initialSlots')}</Label>
+                  <Label className="text-xs" htmlFor="invite-initial-slots">{t('userDetailPanel.invites.initialSlots')}</Label>
                   <Input
+                  id="invite-initial-slots"
                     type="number"
                     min="0"
                     className="h-9"
@@ -2554,8 +4131,9 @@ function InviteSettingsTab({
                   />
                 </div>
                 <div className="space-y-1.5">
-                  <Label className="text-xs">{t('userDetailPanel.invites.refillThreshold')}</Label>
+                  <Label className="text-xs" htmlFor="invite-refill-threshold">{t('userDetailPanel.invites.refillThreshold')}</Label>
                   <Input
+                  id="invite-refill-threshold"
                     type="number"
                     min="0"
                     className="h-9"
@@ -2567,8 +4145,9 @@ function InviteSettingsTab({
                   />
                 </div>
                 <div className="space-y-1.5">
-                  <Label className="text-xs">{t('userDetailPanel.invites.refillAmount')}</Label>
+                  <Label className="text-xs" htmlFor="invite-refill-amount">{t('userDetailPanel.invites.refillAmount')}</Label>
                   <Input
+                  id="invite-refill-amount"
                     type="number"
                     min="0"
                     className="h-9"
@@ -2608,7 +4187,7 @@ function InviteSettingsTab({
           <PermissionGate resource="users" action="edit">
           <Button
             onClick={() => saveMutation.mutate()}
-            disabled={saveMutation.isPending}
+            disabled={saveMutation.isPending || linkTtlBelowFloor}
             className="w-full"
           >
             {saveMutation.isPending ? (
@@ -3213,6 +4792,13 @@ function WebCabinetTab({
 
   // Current operator-viewable temporary password (persists in cache until the
   // user changes their password or the 24h TTL lapses).
+  //
+  // Gated on `users:edit`, not on `users:view`. The endpoint returns a LIVE
+  // credential a subscriber can still sign in with, so it now demands the same
+  // permission as the route that issues one. Without this the shipped `support`
+  // role — which holds `users:view` and nothing else on users — would fire a
+  // 403 on opening any user card at all.
+  const canReadTemporaryPassword = useHasPermission('users', 'edit')
   const tempPwQuery = useQuery({
     queryKey: ['admin', 'user-temp-password', telegramId],
     queryFn: async () =>
@@ -3220,7 +4806,7 @@ function WebCabinetTab({
         temporaryPassword: string | null
         expiresAt: string | null
       },
-    enabled: !!user.webAccount,
+    enabled: !!user.webAccount && canReadTemporaryPassword,
     staleTime: 30_000,
   })
 
@@ -3578,23 +5164,134 @@ function DeleteButton({ telegramId }: { telegramId: string }) {
   )
 }
 
+type NotifyChannel = 'telegram' | 'webpush'
+
+interface NotifyChannelAvailability {
+  channel: NotifyChannel
+  available: boolean
+  reason: string | null
+}
+
+interface NotifyChannelOutcome {
+  channel: NotifyChannel
+  status: 'delivered' | 'failed' | 'unavailable' | 'notSelected'
+  reason: string | null
+  delivered: number | null
+  attempted: number | null
+}
+
+const NOTIFY_CHANNELS: readonly NotifyChannel[] = ['telegram', 'webpush']
+
+/**
+ * Send-a-message-to-one-user dialog.
+ *
+ * Two things here are load-bearing and both replace a control that lied:
+ *
+ *  1. The channel list is derived from THIS user — the backend answers which
+ *     of Telegram / browser push can actually reach them — so a channel that
+ *     cannot work is shown disabled WITH the reason, never offered.
+ *  2. The result is read out of the response per channel. The previous version
+ *     toasted success on any 2xx, which was unconditional: the route returned
+ *     `{ sent: true }` before delivery was even attempted. The dialog now stays
+ *     open and lists what each channel did whenever something did not land.
+ */
 function NotifyButton({ telegramId }: { telegramId: string }) {
   const { t } = useTranslation()
   const [open, setOpen] = useState(false)
   const [message, setMessage] = useState('')
+  const [override, setOverride] = useState<readonly NotifyChannel[] | null>(null)
+  const [outcomes, setOutcomes] = useState<readonly NotifyChannelOutcome[] | null>(null)
+
+  const channelsQuery = useQuery({
+    queryKey: ['user-notify-channels', telegramId],
+    queryFn: async () => {
+      const res = await api.get<{ channels: unknown }>(
+        `/admin/users/${telegramId}/notify/channels`,
+      )
+      // The dialog decides which channels it may even offer from this list, so
+      // a non-array body must not be read as an empty one: silently offering
+      // nothing is indistinguishable from 'this user has no channels'.
+      return expectArray<NotifyChannelAvailability>(res.data.channels)
+    },
+    enabled: open,
+  })
+
+  const availability = channelsQuery.data ?? []
+
+  // The default selection is everything this user can actually receive on, and
+  // it is DERIVED during render rather than copied into state by an effect —
+  // the availability answer is server state, and mirroring it into a second
+  // source of truth is how the two drift apart. `override` holds only what the
+  // operator explicitly changed; `?? ` falls back on null alone, so unchecking
+  // every box stays unchecked instead of snapping back to the default.
+  const selected: readonly NotifyChannel[] =
+    override ?? availability.filter((c) => c.available).map((c) => c.channel)
+
+  const toggle = (channel: NotifyChannel, checked: boolean) => {
+    setOverride(
+      checked
+        ? [...selected.filter((c) => c !== channel), channel]
+        : selected.filter((c) => c !== channel),
+    )
+  }
+
+  const reset = () => { setMessage(''); setOverride(null); setOutcomes(null) }
 
   const mutation = useMutation({
-    mutationFn: () => api.post(`/admin/users/${telegramId}/notify`, { message }),
-    onSuccess: () => { toast.success(t('userDetailPanel.toasts.notifySent')); setOpen(false); setMessage('') },
+    mutationFn: async () => {
+      const res = await api.post<{ sent: boolean; outcomes: NotifyChannelOutcome[] }>(
+        `/admin/users/${telegramId}/notify`,
+        { message, channels: selected },
+      )
+      return res.data
+    },
+    onSuccess: (data) => {
+      const results = data.outcomes ?? []
+      setOutcomes(results)
+      const attempted = results.filter((o) => o.status !== 'notSelected')
+      if (attempted.length === 0) {
+        // Feed-only is a legitimate choice, not a failure — but it is also not
+        // "notification sent", so it does not get the success wording.
+        toast.success(t('userDetailPanel.toasts.notifyFeedOnly'))
+        setOpen(false)
+        reset()
+        return
+      }
+      if (attempted.every((o) => o.status === 'delivered')) {
+        toast.success(t('userDetailPanel.toasts.notifySent'))
+        setOpen(false)
+        reset()
+        return
+      }
+      // Something did not land. Stay open so the per-channel breakdown below is
+      // readable — a toast that disappears is not a report.
+      toast.error(t('userDetailPanel.toasts.notifyPartial'))
+    },
     onError: () => toast.error(t('userDetailPanel.toasts.notifyFailed')),
   })
+
+  const statusLabel = (outcome: NotifyChannelOutcome) => {
+    if (outcome.status === 'delivered') {
+      return outcome.channel === 'webpush' && outcome.attempted !== null
+        ? t('userDetailPanel.actions.resultPushCount', {
+            delivered: outcome.delivered ?? 0,
+            attempted: outcome.attempted,
+          })
+        : t('userDetailPanel.actions.resultDelivered')
+    }
+    if (outcome.status === 'notSelected') return t('userDetailPanel.actions.resultSkipped')
+    const reason = outcome.reason ?? 'error'
+    return outcome.status === 'unavailable'
+      ? t(`userDetailPanel.actions.channelUnavailable.${reason}`)
+      : t(`userDetailPanel.actions.channelFailure.${reason}`)
+  }
 
   return (
     <>
       <Button size="sm" variant="outline" onClick={() => setOpen(true)}>
         <Send className="mr-1 h-3.5 w-3.5" /> {t('userDetailPanel.actions.notify')}
       </Button>
-      <Dialog open={open} onOpenChange={setOpen}>
+      <Dialog open={open} onOpenChange={(next) => { setOpen(next); if (!next) reset() }}>
         <DialogContent>
           <DialogHeader><DialogTitle>{t('userDetailPanel.actions.sendNotification')}</DialogTitle></DialogHeader>
           <textarea
@@ -3604,9 +5301,76 @@ function NotifyButton({ telegramId }: { telegramId: string }) {
             value={message}
             onChange={(e) => setMessage(e.target.value)}
           />
+
+          <fieldset className="space-y-2">
+            <legend className="text-sm font-medium">{t('userDetailPanel.actions.channelsLabel')}</legend>
+            {channelsQuery.isLoading ? (
+              <p className="text-xs text-muted-foreground">{t('userDetailPanel.actions.channelsLoading')}</p>
+            ) : (
+              NOTIFY_CHANNELS.map((channel) => {
+                const entry = availability.find((c) => c.channel === channel)
+                const available = entry?.available === true
+                const checked = selected.includes(channel)
+                return (
+                  <div key={channel} className="flex items-start gap-2">
+                    <Checkbox
+                      id={`notify-channel-${channel}`}
+                      checked={checked}
+                      disabled={!available}
+                      onCheckedChange={(value) => toggle(channel, value === true)}
+                    />
+                    <div className="grid gap-0.5 leading-none">
+                      <Label
+                        htmlFor={`notify-channel-${channel}`}
+                        className={cn('text-sm', !available && 'text-muted-foreground')}
+                      >
+                        {t(`userDetailPanel.actions.channel_${channel}`)}
+                      </Label>
+                      {!available && entry !== undefined ? (
+                        <span className="text-xs text-muted-foreground">
+                          {t(`userDetailPanel.actions.channelUnavailable.${entry.reason ?? 'error'}`)}
+                        </span>
+                      ) : null}
+                    </div>
+                  </div>
+                )
+              })
+            )}
+            <p className="text-xs text-muted-foreground">{t('userDetailPanel.actions.channelsFeedNote')}</p>
+          </fieldset>
+
+          {outcomes !== null ? (
+            <div className="rounded-md border p-3">
+              <p className="text-sm font-medium">{t('userDetailPanel.actions.resultTitle')}</p>
+              <ul className="mt-1 space-y-1">
+                {outcomes.map((outcome) => (
+                  <li key={outcome.channel} className="text-xs">
+                    <span className="font-medium">
+                      {t(`userDetailPanel.actions.channel_${outcome.channel}`)}
+                    </span>
+                    {': '}
+                    <span
+                      className={cn(
+                        outcome.status === 'delivered' && 'text-emerald-600',
+                        (outcome.status === 'failed' || outcome.status === 'unavailable') &&
+                          'text-destructive',
+                        outcome.status === 'notSelected' && 'text-muted-foreground',
+                      )}
+                    >
+                      {statusLabel(outcome)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+
           <div className="flex justify-end gap-2">
-            <Button variant="outline" onClick={() => setOpen(false)}>{t('userDetailPanel.actions.cancel')}</Button>
-            <Button onClick={() => mutation.mutate()} disabled={!message.trim() || mutation.isPending}>
+            <Button variant="outline" onClick={() => { setOpen(false); reset() }}>{t('userDetailPanel.actions.cancel')}</Button>
+            <Button
+              onClick={() => mutation.mutate()}
+              disabled={!message.trim() || mutation.isPending || channelsQuery.isLoading}
+            >
               {t('userDetailPanel.actions.send')}
             </Button>
           </div>

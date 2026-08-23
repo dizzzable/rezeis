@@ -18,6 +18,14 @@ export interface BackupCreateJobData {
 export interface BackupRestoreJobData {
   readonly filename: string;
   readonly initiatedBy: string | null;
+  /**
+   * The operator explicitly acknowledged, at admission, that this archive is
+   * not one this deployment can prove it produced. Absent (the default) means
+   * the archive must verify on its own before `psql` sees a byte of it — see
+   * `BackupService.admitArchiveForRestore`. Written only by the enqueue paths
+   * on the service, which check `admins:edit` at the controller first.
+   */
+  readonly allowForeignArchive?: boolean;
 }
 
 export interface BackupDeliverTelegramJobData {
@@ -104,12 +112,14 @@ export class BackupProcessor extends WorkerHost {
     migrationsApplied: boolean;
     customEmojiAssets: { recoveredEmojiCount: number; skippedPacks: number } | null;
   }> {
-    const { filename, initiatedBy } = job.data;
+    const { filename, initiatedBy, allowForeignArchive } = job.data;
     this.logger.log(`Starting restore from: ${filename}`);
 
     await job.updateProgress({ stage: 'restoring', percent: 10 });
 
-    const success = await this.backupService.runRestore(filename);
+    const success = await this.backupService.runRestore(filename, {
+      allowForeignArchive: allowForeignArchive === true,
+    });
 
     // Bring the schema forward to the current build. Restoring a backup from
     // an older version rolls the schema back; this re-applies the missing
@@ -132,12 +142,27 @@ export class BackupProcessor extends WorkerHost {
 
     await job.updateProgress({ stage: 'completed', percent: 100 });
 
-    this.systemEventsService.info(
-      EVENT_TYPES.SYSTEM_RESTORE_COMPLETED,
-      'SYSTEM',
-      `Database restored from ${filename}`,
-      { filename, initiatedBy, success, migrationsApplied, customEmojiAssets },
-    );
+    // `emit` rather than `info`: a restore is the single most destructive thing
+    // this panel can do, and `info` cannot carry `adminId`, so every restore
+    // used to be attributed to "system" on the audit page with the real
+    // initiator surviving only inside `metadata.initiatedBy`. The job payload
+    // has carried the admin all along; it just never reached the column an
+    // incident responder filters on.
+    this.systemEventsService.emit({
+      type: EVENT_TYPES.SYSTEM_RESTORE_COMPLETED,
+      category: 'SYSTEM',
+      severity: 'INFO',
+      message: `Database restored from ${filename}`,
+      metadata: {
+        filename,
+        initiatedBy,
+        success,
+        migrationsApplied,
+        customEmojiAssets,
+        allowForeignArchive: allowForeignArchive === true,
+      },
+      adminId: initiatedBy,
+    });
 
     return { success, migrationsApplied, customEmojiAssets };
   }

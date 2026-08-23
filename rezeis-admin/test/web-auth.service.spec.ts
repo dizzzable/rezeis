@@ -11,10 +11,14 @@ import {
   ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
+import { ReferralInviteSource } from '@prisma/client';
 
 import { PrismaService } from '../src/common/prisma/prisma.service';
 import { PasswordHashService } from '../src/modules/auth/services/password-hash.service';
-import { ReferralManualAttachService } from '../src/modules/referrals/services/referral-manual-attach.service';
+import {
+  ReferralManualAttachService,
+  type ReferralManualAttachOperatorInterface,
+} from '../src/modules/referrals/services/referral-manual-attach.service';
 import { AccessModeGuard } from '../src/modules/settings/services/access-mode-guard.service';
 import { WebAuthService } from '../src/modules/web-auth/services/web-auth.service';
 
@@ -197,8 +201,31 @@ describe('WebAuthService', () => {
 
     assert.deepStrictEqual(prisma.referrerLookupCodes, ['ref-code']);
     assert.deepStrictEqual(referralManualAttachService.attachCalls, [
-      { userId: 'user-1', referrerId: 'referrer-1' },
+      {
+        userId: 'user-1',
+        referrerId: 'referrer-1',
+        inviteSource: ReferralInviteSource.WEB,
+        operator: null,
+      },
     ]);
+  });
+
+  it('records WEB on the Referral row the real attach service writes', async () => {
+    // End-to-end past the double. The two assertions above prove only what the
+    // caller HANDS the service; for the entire life of the column the service
+    // threw that away and wrote `'UNKNOWN'`, and every spec stayed green.
+    const prisma = createPrismaMock({ referrersByCode: new Map([['ref-code', { id: 'referrer-1' }]]) });
+    const { attachService, created } = createRealReferralManualAttachService();
+    const service = createService({ prisma, realReferralManualAttachService: attachService });
+
+    await service.register({ login: 'new-user', password: 'plain-password', referralCode: 'ref-code' });
+
+    // `consumeReferralCode` is best-effort and swallows everything, so an
+    // attach that never happened would otherwise pass this test silently.
+    assert.equal(created.length, 1);
+    assert.equal(created[0].inviteSource, ReferralInviteSource.WEB);
+    assert.equal(created[0].referrerId, 'referrer-1');
+    assert.equal(created[0].referredId, 'user-1');
   });
 
   it('accepts a bot-issued invite token on web registration and burns it', async () => {
@@ -218,8 +245,15 @@ describe('WebAuthService', () => {
       referralCode: 'bot-token',
     });
 
+    // A bot-MINTED token redeemed on the web is still a WEB edge: the column
+    // records where the referral was taken up, not who issued the token.
     assert.deepStrictEqual(referralManualAttachService.attachCalls, [
-      { userId: 'user-1', referrerId: 'inviter-9' },
+      {
+        userId: 'user-1',
+        referrerId: 'inviter-9',
+        inviteSource: ReferralInviteSource.WEB,
+        operator: null,
+      },
     ]);
     assert.equal(prisma.inviteConsumeCalls.length, 1);
     assert.equal(prisma.inviteConsumeCalls[0].id, 'invite-1');
@@ -854,13 +888,34 @@ interface PasswordHashServiceMock extends PasswordHashService {
 }
 
 interface ReferralManualAttachServiceMock extends ReferralManualAttachService {
-  readonly attachCalls: Array<{ readonly userId: string; readonly referrerId: string }>;
+  /**
+   * `inviteSource` is part of the recorded shape deliberately. Without it the
+   * double is structurally incapable of noticing that the web path recorded no
+   * source at all — which is how every organic `Referral` row ended up
+   * `UNKNOWN` with the suite green.
+   */
+  readonly attachCalls: Array<{
+    readonly userId: string;
+    readonly referrerId: string;
+    readonly inviteSource: ReferralInviteSource;
+    /**
+     * `null` here for the same reason: a web sign-up redeeming its own invite
+     * link was performed by nobody, and the field being recorded is what lets
+     * this double notice if that ever changes.
+     */
+    readonly operator: ReferralManualAttachOperatorInterface | null;
+  }>;
 }
 
 function createService(options: {
   readonly prisma?: PrismaMock;
   readonly passwordHashService?: PasswordHashServiceMock;
   readonly referralManualAttachService?: ReferralManualAttachServiceMock;
+  /**
+   * Wires the REAL attach service instead of the recording double, so a test
+   * can assert what actually reaches `referral.create`.
+   */
+  readonly realReferralManualAttachService?: ReferralManualAttachService;
   /** When set, drives the real AccessModeGuard with this platform mode. */
   readonly accessMode?: 'PUBLIC' | 'INVITED' | 'PURCHASE_BLOCKED' | 'REG_BLOCKED' | 'RESTRICTED';
   /** Optional cache stub to observe temp-password clearing on change. */
@@ -905,7 +960,9 @@ function createService(options: {
   return new WebAuthService(
     options.prisma ?? createPrismaMock(),
     options.passwordHashService ?? createPasswordHashServiceMock(),
-    options.referralManualAttachService ?? createReferralManualAttachServiceMock(),
+    options.realReferralManualAttachService ??
+      options.referralManualAttachService ??
+      createReferralManualAttachServiceMock(),
     settingsService as never,
     accessModeGuard as never,
     cacheService as never,
@@ -1068,20 +1125,74 @@ function createPasswordHashServiceMock(): PasswordHashServiceMock {
       readonly plainTextPassword: string;
       readonly passwordHash: string;
     }): Promise<boolean> => input.passwordHash === `hashed:${input.plainTextPassword}`,
-  } as PasswordHashServiceMock;
+    // The fake hashes here are not scrypt strings, so the real `needsRehash`
+    // would call every one of them unparseable and answer `false` anyway. Said
+    // out loud so the upgrade-on-login branch is visibly OUT of scope for this
+    // file rather than accidentally absent: it is driven with the REAL hasher
+    // and a recording Prisma in
+    // `test/web-auth-password-hash-upgrade-on-login.spec.ts`.
+    needsRehash: (): boolean => false,
+    // `as unknown as`: `PasswordHashService` has a private member, so no object
+    // literal is ever structurally assignable to it.
+  } as unknown as PasswordHashServiceMock;
 }
 
 function createReferralManualAttachServiceMock(): ReferralManualAttachServiceMock {
-  const attachCalls: Array<{ userId: string; referrerId: string }> = [];
+  const attachCalls: Array<{
+    userId: string;
+    referrerId: string;
+    inviteSource: ReferralInviteSource;
+    operator: ReferralManualAttachOperatorInterface | null;
+  }> = [];
   return {
     get attachCalls() {
       return attachCalls;
     },
-    attachReferrerManually: async (input: { readonly userId: string; readonly referrerId: string }) => {
+    attachReferrerManually: async (input: {
+      readonly userId: string;
+      readonly referrerId: string;
+      readonly inviteSource: ReferralInviteSource;
+      readonly operator: ReferralManualAttachOperatorInterface | null;
+    }) => {
       attachCalls.push(input);
       return { attached: true };
     },
   } as unknown as ReferralManualAttachServiceMock;
+}
+
+/**
+ * The REAL `ReferralManualAttachService` over a recording Prisma. The mock
+ * above stops at the service boundary and the defect lived past it: the
+ * service ignored its caller entirely and wrote a hardcoded `'UNKNOWN'`. Only a
+ * test that reaches `referral.create` can tell those two apart.
+ */
+function createRealReferralManualAttachService(): {
+  readonly attachService: ReferralManualAttachService;
+  readonly created: Record<string, unknown>[];
+} {
+  const created: Record<string, unknown>[] = [];
+  const prisma = {
+    user: { findUnique: async (args: { where: { id: string } }) => ({ id: args.where.id }) },
+    referral: {
+      findUnique: async () => null,
+      create: async (args: { data: Record<string, unknown> }) => {
+        created.push(args.data);
+        return { id: 'referral-created-1' };
+      },
+    },
+    partnerReferral: { findFirst: async () => null },
+    transaction: { findMany: async () => [] },
+  };
+  const attachService = new ReferralManualAttachService(
+    prisma as never,
+    { qualifyReferralAfterPurchase: async () => undefined } as never,
+    {
+      attachPartnerReferralChain: async () => false,
+      processPartnerEarning: async () => undefined,
+    } as never,
+    { info: () => undefined } as never,
+  );
+  return { attachService, created };
 }
 
 async function assertGenericLoginFailure(

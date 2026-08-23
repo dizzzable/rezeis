@@ -506,10 +506,21 @@ model AdminUser {
   /// from REZEIS_CRYPT_KEY so the database alone does not expose secrets.
   /// Format: `iv:ciphertext:tag`, all hex-encoded.
   totpSecretEncrypted String?   @map("totp_secret_encrypted")
-  /// SHA-256 hashes of single-use TOTP recovery codes. Stored as a string
-  /// array; each value is consumed (removed) on use. We store hashes only;
-  /// the plaintext codes are shown to the operator exactly once during
-  /// enrollment.
+  /// Hashes of single-use TOTP recovery codes, one string per code, each
+  /// consumed (removed) on use. The plaintext is shown to the operator
+  /// exactly once, at generation.
+  ///
+  /// TWO FORMATS LIVE HERE AT ONCE, and the reader must handle both — see
+  /// `src/modules/two-factor/utils/recovery-code.ts`, which owns the rule.
+  /// Current: salted scrypt, with the salt and the KDF parameters written
+  /// INSIDE each entry, so raising the cost later cannot invalidate codes an
+  /// operator is already holding. Legacy: a bare unsalted SHA-256 of a 40-bit
+  /// code, minted before 2026-08-22. Legacy entries keep verifying on purpose
+  /// — a recovery code is single-use, so there is no verify-then-upgrade
+  /// moment, and refusing them would lock out exactly the operator who has
+  /// lost their authenticator, which is the situation these codes exist for.
+  /// They are counted on the 2FA status as `recoveryCodesLegacy` and their
+  /// use is audited; regenerating replaces the whole set with the new format.
   totpRecoveryCodes   String[]  @default([]) @map("totp_recovery_codes")
   totpEnrolledAt      DateTime? @map("totp_enrolled_at") @db.Timestamptz(3)
   /// The admin's ACTIVE appearance selection (theme mode/preset/radius, glass
@@ -2177,6 +2188,17 @@ model Partner {
   level1FixedAmount Int? @map("level1_fixed_amount")
   level2FixedAmount Int? @map("level2_fixed_amount")
   level3FixedAmount Int? @map("level3_fixed_amount")
+
+  /// Per-level accrual strategy override. NULL means "inherit": fall back to
+  /// the partner-wide `accrualStrategy` above. That is exactly what every
+  /// partner did before these columns existed, so an unset row keeps its
+  /// current behaviour on deploy. Only consulted when `useGlobalSettings` is
+  /// false; the global equivalent lives in `Settings.partnerSettings`.
+  /// Lets one partner earn on every payment from their own referrals (L1) but
+  /// only on the first payment from a sub-partner's referrals (L2/L3).
+  level1AccrualStrategy PartnerAccrualStrategy? @map("level1_accrual_strategy")
+  level2AccrualStrategy PartnerAccrualStrategy? @map("level2_accrual_strategy")
+  level3AccrualStrategy PartnerAccrualStrategy? @map("level3_accrual_strategy")
 
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)

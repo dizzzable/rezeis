@@ -9,16 +9,14 @@ import {
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { readJsonObject } from '../../../common/utils/read-json-object.util';
-import {
-  resolveAddOnRolloutFlags,
-  resolveResetCapabilities,
-} from '../../add-on-entitlements/add-on-rollout.config';
+import { resolveIntakeResetCapabilities } from '../../add-on-entitlements/add-on-rollout.config';
+import { resolveAddOnLifetimeGrant } from '../../add-on-entitlements/domain/add-on-lifetime';
 import { deriveCutoverBaseline } from '../../add-on-entitlements/domain/cutover-baseline';
+import { ResetCapabilityMap } from '../../add-on-entitlements/domain/reset-cycle-policy';
 import {
-  ResetCapabilityMap,
-  getResetCapability,
-  planResetEpoch,
-} from '../../add-on-entitlements/domain/reset-cycle-policy';
+  isBaselineExtendable,
+  resolveConfiguredEntitlementBaseline,
+} from '../../add-on-entitlements/services/configured-baseline.util';
 
 export type AddOnActivation = 'NOW' | 'TERM_START';
 
@@ -59,8 +57,36 @@ const EMPTY_RESULT = (): AddOnEligibilityResult => ({
 /**
  * Subscription/term-specific add-on eligibility (contract v2).
  *
+ * ── The term is not the whole baseline ────────────────────────────────────
+ *
+ * A `SubscriptionTerm` records what the customer BOUGHT, minted from the plan
+ * and never mutated afterwards. It is NOT automatically what this ONE
+ * subscription is entitled to: an operator can configure a single customer from
+ * the admin Users page while that customer keeps being billed for the plan, and
+ * that individually-configured value is deliberately preserved rather than
+ * reset. Judging an OFFER against the term alone is therefore how a customer
+ * gets sold an add-on that changes nothing — an operator-set unlimited
+ * (`deviceLimit <= 0`, `trafficLimit === null`) is ABSORBING, so
+ * `addDeviceLimit(null, …)` / `addTrafficLimit(null, …)` swallow the whole
+ * contribution while the term's finite number still reads as extendable.
+ *
+ * So the offer is judged against the SAME baseline the fulfillment side builds:
+ * {@link resolveConfiguredEntitlementBaseline}, the shared reader of the
+ * override rule that `EffectiveProjectionService`, the direct-purchase checkout
+ * and both capture paths also call. It is CALLED, never re-derived — a second
+ * copy of that rule is a defect on the day the two disagree, and that day
+ * already happened once between this file and checkout. The rule itself,
+ * including why UNDECIDABLE stays separate from OVERRIDDEN, lives in
+ * `../../add-on-entitlements/domain/entitlement-baseline.ts`.
+ *
+ * The no-term fallback needs no such correction: it derives the baseline from
+ * the subscription's OWN columns, so the operator's value is already the
+ * baseline there.
+ *
+ * ── Resource rules ────────────────────────────────────────────────────────
+ *
  * Eligibility is computed against the subscription's authoritative baseline
- * term (canonical `null` = unlimited), NOT the plan alone:
+ * (canonical `null` = unlimited), NOT the plan alone:
  *  - EXTRA_TRAFFIC is eligible only for a finite traffic baseline.
  *  - EXTRA_DEVICES is eligible only for a finite device baseline (this closes
  *    the legacy footgun where a device add-on turned an unlimited profile
@@ -145,6 +171,10 @@ export class AddOnEligibilityService {
 
     // Prefer the ACTIVE durable term; otherwise derive a synthetic baseline
     // from the subscription's own columns (still server-side, no client drift).
+    // On the term path the resource limits pass through
+    // `resolveConfiguredBaseline` so an individually-configured limit is the
+    // one the offer is judged against; the fallback already reads those
+    // columns directly.
     const resolved =
       term === null
         ? this.deriveFallbackBaseline(subscription)
@@ -153,8 +183,7 @@ export class AddOnEligibilityService {
             planId: term.planId ?? '',
             baseline: {
               endsAt: term.endsAt,
-              baseTrafficLimitBytes: term.baseTrafficLimitBytes,
-              baseDeviceLimit: term.baseDeviceLimit,
+              ...(await this.resolveConfiguredBaseline(subscriptionId, term, subscription)),
               trafficResetStrategy: term.trafficResetStrategy,
               resetAnchorAt: term.resetAnchorAt,
             },
@@ -293,10 +322,56 @@ export class AddOnEligibilityService {
     };
   }
 
+  /**
+   * The ACTIVE term's resource baseline with the operator's individually
+   * configured limits substituted in — the SAME baseline
+   * `EffectiveProjectionService.recomputeInTransaction` builds when this
+   * purchase is fulfilled, produced by the SAME
+   * {@link resolveConfiguredEntitlementBaseline} call that the direct-purchase
+   * checkout and both capture paths make. Offer, checkout, capture and
+   * fulfillment therefore cannot disagree about whether a limit is finite.
+   *
+   * This is deliberately a two-field adapter and nothing more: the shared
+   * reader owns the projection read, the `?? 0` fallback and the override rule
+   * (INHERITED / OVERRIDDEN / UNDECIDABLE, and the deliberate separation of the
+   * last two). None of them is restated here.
+   */
+  private async resolveConfiguredBaseline(
+    subscriptionId: string,
+    term: {
+      readonly baseTrafficLimitBytes: bigint | null;
+      readonly baseDeviceLimit: number | null;
+    },
+    subscription: {
+      readonly trafficLimit: number | null;
+      readonly deviceLimit: number;
+      readonly planSnapshot: unknown;
+    },
+  ): Promise<{
+    readonly baseTrafficLimitBytes: bigint | null;
+    readonly baseDeviceLimit: number | null;
+  }> {
+    const baseline = await resolveConfiguredEntitlementBaseline(this.prismaService, {
+      subscriptionId,
+      term,
+      subscription,
+    });
+    return {
+      baseTrafficLimitBytes: baseline.baseTrafficLimitBytes,
+      baseDeviceLimit: baseline.baseDeviceLimit,
+    };
+  }
+
+  /**
+   * `baseline` is the subscription's authoritative baseline, NOT the raw term:
+   * on the term path it has already been through
+   * {@link resolveConfiguredBaseline}. Reading `term.base*` here again would
+   * re-open the offer↔fulfillment gap this method's first two checks close.
+   */
   private evaluate(
     type: AddOnType,
     lifetime: AddOnLifetime,
-    term: {
+    baseline: {
       readonly endsAt: Date | null;
       readonly baseTrafficLimitBytes: bigint | null;
       readonly baseDeviceLimit: number | null;
@@ -307,91 +382,50 @@ export class AddOnEligibilityService {
     now: Date,
   ): AddOnEligibilityInfo | null {
     // Resource-baseline eligibility: an add-on can only extend a FINITE limit.
-    // Canonical unlimited is null; devices additionally treat `<= 0` as
-    // unlimited (the product's rule), and a negative byte budget is a data
-    // anomaly. All are withheld so an add-on can never turn an effectively-
-    // unlimited baseline finite (the `0 + N` footgun) nor attach to a
-    // nonsensical baseline. A finite 0 traffic budget (0n bytes = a real 0 GB
-    // cap) stays eligible; a 0 device cap is unlimited, so it is withheld.
-    if (
-      type === AddOnType.EXTRA_TRAFFIC &&
-      (term.baseTrafficLimitBytes === null || term.baseTrafficLimitBytes < 0n)
-    ) {
-      return null;
-    }
-    if (
-      type === AddOnType.EXTRA_DEVICES &&
-      (term.baseDeviceLimit === null || term.baseDeviceLimit <= 0)
-    ) {
+    // The predicate is shared with the direct-purchase checkout and both
+    // capture paths so the OFFER and the money paths cannot answer it
+    // differently — an offer nobody can buy was exactly the defect that put
+    // this call here. The two encodings, and why they are not "harmonised",
+    // are documented on {@link isBaselineExtendable}.
+    if (!isBaselineExtendable(type, baseline)) {
       return null;
     }
 
-    // A reset-scoped lifetime (`UNTIL_NEXT_RESET`) binds expiry to the plan's
-    // reset cycle. It is valid for BOTH traffic and devices — the reset epoch
-    // is the profile's monthly "refresh" boundary, common to both resources
-    // (on that boundary traffic rolls back to plan baseline and extra devices
-    // are removed). Availability is gated purely by the strategy having a
-    // boundary (not NO_RESET) and the capability being ENABLED — the checks
-    // below — NOT by the add-on type.
-
-    if (lifetime === AddOnLifetime.UNTIL_SUBSCRIPTION_END) {
-      if (term.endsAt === null) return null; // open-ended term has no expiry date
-      return {
-        eligible: true,
-        activation: 'NOW',
-        expiresAt: term.endsAt.toISOString(),
-        explanationCode: 'ELIGIBLE_UNTIL_SUBSCRIPTION_END',
-      };
-    }
-
-    // UNTIL_NEXT_RESET: only offered when the strategy has a boundary and its
-    // reset capability is verified/enabled for commercial expiry.
-    if (term.trafficResetStrategy === TrafficLimitStrategy.NO_RESET) return null;
-    const capability = getResetCapability(term.trafficResetStrategy, capabilities);
-    if (capability !== 'ENABLED') return null;
-    // A boundary strategy with no anchor cannot yield an epoch — withhold
-    // rather than letting planResetEpoch throw (which would 500 the whole
-    // listing). The fallback path always supplies an anchor; this guards a
-    // persisted term with a null anchor once a reset flag is enabled.
-    if (term.resetAnchorAt === null) return null;
-
-    const epoch = planResetEpoch({
-      strategy: term.trafficResetStrategy,
-      capability,
-      anchorAt: term.resetAnchorAt,
-      referenceAt: now,
-    });
-    if (epoch === null) return null;
+    // The LIFETIME axis — "until when can this actually be delivered?" — is the
+    // shared {@link resolveAddOnLifetimeGrant}, not a rule restated here. It is
+    // the same function the direct-purchase CHECKOUT calls with the same
+    // capability map, so an add-on this listing withholds for a lifetime reason
+    // cannot be bought through a crafted or stale checkout either. Until that
+    // call existed the checkout asked nothing about lifetime, drafted anyway,
+    // and the intake fell through to the PERMANENT legacy increment.
+    //
+    // Both arms activate NOW: an offer is a direct purchase, which the capture
+    // path activates at the transaction's creation instant.
+    const grant = resolveAddOnLifetimeGrant({ lifetime, baseline, capabilities, now });
+    if (grant === null) return null;
     return {
       eligible: true,
       activation: 'NOW',
-      expiresAt: epoch.plannedEndsAt.toISOString(),
-      explanationCode: 'ELIGIBLE_UNTIL_NEXT_RESET',
+      expiresAt: grant.expiresAt.toISOString(),
+      explanationCode: grant.explanationCode,
     };
   }
 
   /**
-   * OFFER-side reset-capability seam derived from the staged rollout flags. A
-   * reset strategy is ENABLED for OFFERING a `UNTIL_NEXT_RESET` add-on only when
-   * BOTH conditions hold:
-   *  1. its `reset_expiry_<strategy>` flag is on (staging parity verified), and
-   *  2. `directPurchase` is on — the money intake that actually HONORS the
-   *     one-time-until-reset promise. Direct-purchase intake
-   *     ({@link PaymentSubscriptionMutationService.applyAddOnViaLedger}) binds
-   *     the entitlement to the reset epoch; when directPurchase is OFF the
-   *     intake falls through to the permanent legacy increment, which would
-   *     deliver the service FOREVER rather than until the next reset.
+   * OFFER-side reset-capability seam. The rule — a reset strategy is usable for
+   * SELLING a `UNTIL_NEXT_RESET` add-on only when its `reset_expiry_<strategy>`
+   * flag is on AND `directPurchase` is on — is
+   * {@link resolveIntakeResetCapabilities} and is NOT restated here: the
+   * direct-purchase checkout has to apply the identical gate, and the moment
+   * there were two copies of it the offer and the checkout could disagree about
+   * whether a lifetime can be honoured. That is the same class of defect the
+   * resource axis already suffered between these two files.
    *
-   * Withholding the offer (fail-closed) when directPurchase is OFF closes the
-   * offer↔fulfillment gap: a reset-scoped add-on is never advertised with a
-   * reset-epoch expiry the money path cannot fulfill. This is deliberately a
-   * SEPARATE gate from {@link resolveResetCapabilities}, which
-   * {@link EntitlementBoundaryService} uses to EXPIRE already-existing
-   * entitlements — that expiry of prior goods must not depend on intake, so the
-   * boundary resolver stays flag-pure and is intentionally left untouched here.
+   * This stays a `protected` method rather than becoming a direct call at the
+   * use site because it is the seam a test subclasses to fix a capability map
+   * without touching `process.env`.
    */
   protected getResetCapabilities(): ResetCapabilityMap {
-    if (!resolveAddOnRolloutFlags().directPurchase) return {};
-    return resolveResetCapabilities();
+    return resolveIntakeResetCapabilities();
   }
 }

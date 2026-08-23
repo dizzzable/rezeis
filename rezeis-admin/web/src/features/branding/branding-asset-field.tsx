@@ -22,6 +22,27 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { cn } from '@/lib/utils'
 
+/**
+ * Byte ceilings the server enforces, mirrored here so the operator learns them
+ * BEFORE picking a file rather than after waiting for an upload.
+ *
+ * These are copies of server constants and are guidance only — the server stays
+ * the authority and re-checks every byte. They are written out rather than
+ * fetched because they are compile-time constants over there too, and a round
+ * trip to learn them would not make the number any more current.
+ *
+ *   raster: `MAX_FILE_SIZE`   — src/modules/settings/services/branding-asset-upload.service.ts:28
+ *   svg:    `SVG_MAX_BYTES`   — src/modules/settings/services/icon-upload.service.ts:172
+ *
+ * The two differ by 4×, and that gap is the whole defect: the slots advertised
+ * "up to 2 MB", accepted `image/svg+xml`, and then `assertSafeSvg` refused
+ * anything over 512 KB. A 1024×1024 design-tool SVG export routinely lands
+ * between the two, so the operator picked a file, waited, and was rejected by a
+ * limit the panel had never mentioned.
+ */
+export const BRANDING_RASTER_MAX_BYTES = 2 * 1024 * 1024;
+export const BRANDING_SVG_MAX_BYTES = 512 * 1024;
+
 /** What a slot expects, so the field can say whether the file measures up. */
 export interface BrandingAssetAdvice {
   /** Shortest side the slot wants, in pixels. Raster only — vectors scale. */
@@ -68,6 +89,13 @@ export function BrandingAssetField({
   const [isDragging, setIsDragging] = useState(false)
   const [measured, setMeasured] = useState<MeasuredAsset | null>(null)
   const [settledValue, setSettledValue] = useState<string | null>(value)
+  const [oversize, setOversize] = useState<OversizeRejection | null>(null)
+
+  // Derived from `accept`, not from a prop of its own: a slot that starts
+  // accepting SVG then gets the SVG limit stated automatically, and one that
+  // stops accepting it stops claiming a limit that no longer applies. There is
+  // nothing per-slot left to forget to pass.
+  const acceptsSvg = accept.toLowerCase().includes('image/svg+xml')
 
   /**
    * The URL box is controlled and commits on every keystroke, and the measurer
@@ -106,7 +134,19 @@ export function BrandingAssetField({
 
   function acceptFiles(files: FileList | null | undefined): void {
     const file = files?.[0]
-    if (file) mutation.mutate(file)
+    if (!file) return
+    // Guidance, never the gate. The server re-checks every byte and is the only
+    // thing that decides; this exists so a 900 KB SVG is refused in the browser,
+    // by name and by number, instead of after an upload the operator had no
+    // reason to expect would fail.
+    const rejection = oversizeRejection(file)
+    if (rejection !== null) {
+      setOversize(rejection)
+      toast.error(describeOversize(t, rejection))
+      return
+    }
+    setOversize(null)
+    mutation.mutate(file)
   }
 
   function onDrop(event: DragEvent<HTMLButtonElement>): void {
@@ -157,10 +197,29 @@ export function BrandingAssetField({
               : t('brandingPage.sections.identity.dropHere')}
           </span>
           <span className="text-[11px] text-muted-foreground">{hint}</span>
+          {/* Stated on the drop zone itself, so it is on screen at the moment
+              the operator decides which file to pick — the one moment at which
+              knowing the ceiling changes what they do. */}
+          <span className="text-[11px] text-muted-foreground" data-branding-asset-limits={id}>
+            {acceptsSvg
+              ? t('brandingPage.sections.identity.sizeLimits', {
+                  raster: formatByteLimit(BRANDING_RASTER_MAX_BYTES),
+                  svg: formatByteLimit(BRANDING_SVG_MAX_BYTES),
+                })
+              : t('brandingPage.sections.identity.sizeLimitsRaster', {
+                  raster: formatByteLimit(BRANDING_RASTER_MAX_BYTES),
+                })}
+          </span>
         </button>
 
         {children}
       </div>
+
+      {oversize ? (
+        <p className="text-[11px] text-destructive" data-branding-asset-oversize={id}>
+          {describeOversize(t, oversize)}
+        </p>
+      ) : null}
 
       <input ref={inputRef} type="file" accept={accept} className="hidden" onChange={onSelect} />
 
@@ -237,6 +296,66 @@ export function BrandingAssetField({
       ) : null}
     </div>
   )
+}
+
+interface OversizeRejection {
+  /** Which ceiling was crossed — the two carry different advice. */
+  readonly kind: 'svg' | 'raster'
+  readonly actualBytes: number
+  readonly limitBytes: number
+}
+
+/**
+ * Whether the picked file is over the ceiling the server will apply to it.
+ *
+ * The SVG branch keys off the browser's sniffed `file.type` first and the
+ * extension only as a fallback, because that is the order that matches the
+ * server: `verifyImageContent` routes on the DECLARED multipart type
+ * (`icon-upload.service.ts:598`), which is what `file.type` becomes. A file the
+ * browser calls `image/svg+xml` therefore gets the 512 KB ceiling here and the
+ * same one there.
+ *
+ * Files the browser cannot type at all fall to the raster ceiling — the looser
+ * of the two, which is the right way to be wrong for a check that is only
+ * guidance: it never blocks something the server would have accepted.
+ */
+function oversizeRejection(file: File): OversizeRejection | null {
+  const isSvg =
+    file.type.toLowerCase() === 'image/svg+xml' ||
+    (file.type === '' && /\.svg$/i.test(file.name))
+  const limitBytes = isSvg ? BRANDING_SVG_MAX_BYTES : BRANDING_RASTER_MAX_BYTES
+  if (file.size <= limitBytes) return null
+  return { kind: isSvg ? 'svg' : 'raster', actualBytes: file.size, limitBytes }
+}
+
+/** The refusal, naming the file's real size and the real ceiling — both, always. */
+function describeOversize(
+  t: (key: string, options?: Record<string, unknown>) => string,
+  rejection: OversizeRejection,
+): string {
+  return t(
+    rejection.kind === 'svg'
+      ? 'brandingPage.sections.identity.tooLargeSvg'
+      : 'brandingPage.sections.identity.tooLargeRaster',
+    {
+      actual: formatByteLimit(rejection.actualBytes),
+      limit: formatByteLimit(rejection.limitBytes),
+    },
+  )
+}
+
+/**
+ * Bytes as an operator reads them. Binary units, because that is what both
+ * server constants are written in (`512 * 1024`, `2 * 1024 * 1024`) — rounding
+ * 512 KiB to "524 KB" would print a number that appears nowhere else.
+ */
+function formatByteLimit(bytes: number): string {
+  if (bytes >= 1024 * 1024) {
+    const mb = bytes / (1024 * 1024)
+    return `${Number.isInteger(mb) ? mb : mb.toFixed(1)} MB`
+  }
+  const kb = bytes / 1024
+  return `${Number.isInteger(kb) ? kb : Math.round(kb)} KB`
 }
 
 /**

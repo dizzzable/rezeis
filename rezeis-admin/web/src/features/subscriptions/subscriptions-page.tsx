@@ -16,6 +16,9 @@ import { Switch } from '@/components/ui/switch'
 import { Label } from '@/components/ui/label'
 import { FadeIn } from '@/lib/motion'
 import { PageTitle } from '@/components/layout/page-title'
+import { AutoRenewPanel } from './auto-renew-panel'
+import { PanelLinkReconciliationPanel } from './panel-link-reconciliation-panel'
+import { DuplicateSubscriptionMergePanel } from './duplicate-subscription-merge-panel'
 
 const STATUSES = ['ACTIVE', 'DISABLED', 'LIMITED', 'EXPIRED', 'DELETED']
 
@@ -36,7 +39,35 @@ interface SubscriptionRow {
   readonly plan?: { readonly name?: string | null } | null
   readonly trafficLimit: number | null
   readonly deviceLimit: number | null
-  readonly expireAt: string
+  /**
+   * ISO instant, or `null` for an UNLIMITED subscription.
+   *
+   * Null is a domain state here, not a missing value: `Subscription.expiresAt`
+   * is `DateTime?` and the backend reads it that way itself —
+   * `referral-points-exchange.service.ts` queries `{ status: ACTIVE,
+   * expiresAt: null }` as the unlimited bucket, and `subscription-mutations`
+   * declines to extend one ("Unlimited subscription - nothing to extend").
+   * Declared as a bare `string` here it fed `new Date(null)`, which coerces to
+   * 0, so every unlimited row printed a confident `01.01.1970` instead of
+   * failing loudly.
+   *
+   * `GET /admin/subscriptions` ALSO sends `expiresAt` with the identical value.
+   * The header of
+   * `src/modules/subscriptions/interfaces/admin-subscriptions-list.interface.ts`
+   * calls `expireAt` the LEGACY ALIAS, kept populated so this client keeps
+   * working while it migrates — yet nothing in the SPA reads that sibling on
+   * this endpoint, so the alias is the live field and the canonical name is the
+   * dead one. It is deliberately NOT declared here: a field nothing reads is a
+   * field that drifts unnoticed. Dropping it from the wire is the backend's
+   * call, not ours.
+   *
+   * The canonical spelling does exist elsewhere in the SPA and got the
+   * nullability right — `users-api.ts` models `expiresAt: z.string().nullable()`
+   * on the `/admin/users/search` and subscriptions-workbench rows. Four
+   * declarations of one field, three of them agreeing by accident, is how this
+   * one drifted; if the alias is ever retired, that schema is the shape to copy.
+   */
+  readonly expireAt: string | null
 }
 
 /** Prefer reiwa user id (works for web-only / no Telegram); fall back to TG id. */
@@ -117,6 +148,27 @@ export default function SubscriptionsPage() {
           ))}
         </div>
       )}
+
+      {/* Auto-renewal: the cycle that moves subscriptions between the
+          states counted above, plus the manual trigger used when a
+          support report says a renewal did not happen. Renders nothing
+          without `auto_renew:view`. */}
+      <AutoRenewPanel />
+
+      {/* Bulk repair for subscriptions whose panel profile exists but whose
+          stored panel identity is empty — the only caller of
+          POST /admin/profile-sync/panel-link-reconciliation. Same authority as
+          the single-row repair on the user detail page (subscriptions:edit),
+          so it sits with the rows it repairs. Renders nothing without it. */}
+      <PanelLinkReconciliationPanel />
+
+      {/* The action the sweep above deliberately stops short of: two live
+          subscriptions on ONE panel profile, merged into the older row that
+          carries the customer history. Only caller of
+          POST /admin/profile-sync/duplicate-subscription-merge, same authority
+          (subscriptions:edit) and the same rows — it finds its pairs by running
+          that very sweep. Renders nothing without the permission. */}
+      <DuplicateSubscriptionMergePanel />
 
       {/* Filters */}
       <div className="flex items-center gap-4 flex-wrap">
@@ -211,7 +263,13 @@ export default function SubscriptionsPage() {
                     <TableCell className="text-xs">{sub.trafficLimit ? t('subscriptionsPage.trafficGb', { value: sub.trafficLimit }) : '∞'}</TableCell>
                     <TableCell className="text-xs">{sub.deviceLimit || '∞'}</TableCell>
                     <TableCell className="text-xs text-muted-foreground">
-                      {new Date(sub.expireAt).toLocaleDateString('ru-RU')}
+                      {/* `=== null`, not a truthiness check: unlimited is a
+                          state the server states, and anything else that
+                          arrives here should render as the broken value it is
+                          rather than be absorbed into "unlimited". */}
+                      {sub.expireAt === null
+                        ? t('subscriptionsPage.unlimitedExpiry')
+                        : new Date(sub.expireAt).toLocaleDateString('ru-RU')}
                     </TableCell>
                     <TableCell>
                       <Button

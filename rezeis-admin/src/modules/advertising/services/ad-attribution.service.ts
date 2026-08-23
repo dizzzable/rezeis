@@ -117,8 +117,8 @@ export class AdAttributionService {
       // never for the partner's own account (self-attribution guard).
       //
       // A user who already belongs to another partner is refused inside
-      // `attachPartnerReferralChain` — one guard shared with the referral and
-      // backfill paths, so an ad link can never become a way around it.
+      // `attachPartnerReferralChain` — one guard shared with the referral
+      // path, so an ad link can never become a way around it.
       if (
         updated.count > 0 &&
         placement.ownerType === 'PARTNER' &&

@@ -8,7 +8,7 @@ import {
   ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { Prisma, ReferralInviteSource } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { RawCacheService } from '../../../common/cache/raw-cache.service';
@@ -149,6 +149,7 @@ export class WebAuthService {
     const loginNormalized = loginPolicy.normalizeLogin(input.login);
     const passwordHash = await this.passwordHashService.hashPassword({
       plainTextPassword: input.password,
+      audience: 'subscriber',
     });
     const emailNormalized = input.email ? input.email.trim().toLowerCase() : null;
 
@@ -276,6 +277,7 @@ export class WebAuthService {
     const loginNormalized = loginPolicy.normalizeLogin(input.login);
     const passwordHash = await this.passwordHashService.hashPassword({
       plainTextPassword: input.password,
+      audience: 'subscriber',
     });
 
     return this.prismaService.$transaction(async (tx) => {
@@ -512,6 +514,14 @@ export class WebAuthService {
         await this.referralManualAttachService.attachReferrerManually({
           userId: newUserId,
           referrerId: referrer.id,
+          // Reached only from a `?ref=<token>` web sign-up. A bot-issued token
+          // redeemed on the web is still a WEB edge: the source records where
+          // the referral was *taken up*, not who minted the token.
+          inviteSource: ReferralInviteSource.WEB,
+          // A customer redeemed their own invite link — no operator performed
+          // this, so there is nothing to attribute. See the bot sign-up copy in
+          // `internal-user-edge.service.ts`.
+          operator: null,
         });
       } catch (attachError) {
         if (inviteId !== undefined) {
@@ -690,6 +700,7 @@ export class WebAuthService {
       }
       const claimedHash = await this.passwordHashService.hashPassword({
         plainTextPassword: input.password,
+        audience: 'subscriber',
       });
       await this.prismaService.webAccount.update({
         where: { id: webAccount.id },
@@ -714,12 +725,82 @@ export class WebAuthService {
     if (!ok) {
       throw new UnauthorizedException('Invalid login or password');
     }
+    await this.upgradePasswordHashIfNeeded({
+      webAccountId: webAccount.id,
+      storedPasswordHash: webAccount.passwordHash,
+      plainTextPassword: input.password,
+    });
     return {
       userId: webAccount.userId,
       requiresPasswordChange: webAccount.requiresPasswordChange,
       telegramLinked: webAccount.user.telegramId !== null,
       emailVerified: webAccount.emailVerifiedAt !== null,
     };
+  }
+
+  /**
+   * Re-hashes a subscriber password that was stored below the current
+   * subscriber scrypt work factor.
+   *
+   * Raising the cost is only half a change. `PasswordHashService` verifies each
+   * hash with the parameters recorded IN that hash, so nobody is locked out —
+   * but on its own nobody is upgraded either: a subscriber who never changes
+   * their password keeps a Node-default 2^14/r8/p1 hash forever, and subscribers
+   * hold nearly every account in the system. A successful sign-in is the one
+   * moment the plain text exists in memory, so it is the only moment the row can
+   * be rewritten. OWASP's Password Storage Cheat Sheet names exactly this: "wait
+   * until the user next authenticates, then re-hash their password with the new
+   * work factor."
+   *
+   * This is the same shape as `AdminAuthService.upgradePasswordHashIfNeeded`,
+   * deliberately, including the property that is easy to leave out:
+   *
+   *   - The write is CONDITIONAL on the hash still being the one that was just
+   *     verified (`updateMany` with `passwordHash` in the filter). Between the
+   *     verification and this call the user can have changed their password in
+   *     another session — or an operator can have issued a temporary one — and
+   *     an unconditional write would clobber the new hash with a re-derivation
+   *     of the OLD password, silently restoring a credential that was just
+   *     revoked.
+   *   - It touches ONLY `passwordHash`. Not `requiresPasswordChange`, not
+   *     `temporaryPasswordExpiresAt`, not `credentialsBootstrappedAt` — a
+   *     re-hash is not a password change, and clearing the reset flag here would
+   *     hand a user out of a forced reset they never completed.
+   *   - The audience is `'subscriber'` on BOTH calls. Asking `needsRehash` about
+   *     the admin row would mark every freshly-written subscriber hash as stale
+   *     and rewrite the row on every single sign-in, forever.
+   *
+   * It can never fail the login. The user authenticated correctly; a database
+   * hiccup while opportunistically improving storage is not their problem, and
+   * the next sign-in tries again.
+   */
+  private async upgradePasswordHashIfNeeded(input: {
+    readonly webAccountId: string;
+    readonly storedPasswordHash: string;
+    readonly plainTextPassword: string;
+  }): Promise<void> {
+    if (!this.passwordHashService.needsRehash(input.storedPasswordHash, 'subscriber')) {
+      return;
+    }
+    try {
+      const upgradedHash = await this.passwordHashService.hashPassword({
+        plainTextPassword: input.plainTextPassword,
+        audience: 'subscriber',
+      });
+      const { count } = await this.prismaService.webAccount.updateMany({
+        where: { id: input.webAccountId, passwordHash: input.storedPasswordHash },
+        data: { passwordHash: upgradedHash },
+      });
+      if (count > 0) {
+        this.logger.log(
+          `Re-hashed the password of web account ${input.webAccountId} at the current subscriber scrypt work factor`,
+        );
+      }
+    } catch (error) {
+      this.logger.warn(
+        `Could not re-hash the password of web account ${input.webAccountId}: ${(error as Error).message}`,
+      );
+    }
   }
 
   public async recover(input: WebAuthRecoverDto): Promise<WebAuthRecoverResultInterface> {
@@ -771,6 +852,7 @@ export class WebAuthService {
     }
     const newPasswordHash = await this.passwordHashService.hashPassword({
       plainTextPassword: input.newPassword,
+      audience: 'subscriber',
     });
     await this.prismaService.webAccount.update({
       where: { id: webAccount.id },

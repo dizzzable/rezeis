@@ -38,6 +38,12 @@ const partnerSchema = z.object({
   level1FixedAmount: z.number().nullable(),
   level2FixedAmount: z.number().nullable(),
   level3FixedAmount: z.number().nullable(),
+  // Per-level accrual mode, `null` when that level inherits the
+  // partner-wide `accrualStrategy`. `mapPartner` returns all three, and
+  // `null` is the value an untouched partner has — not a missing field.
+  level1AccrualStrategy: partnerAccrualStrategySchema.nullable(),
+  level2AccrualStrategy: partnerAccrualStrategySchema.nullable(),
+  level3AccrualStrategy: partnerAccrualStrategySchema.nullable(),
   createdAt: z.string(),
   updatedAt: z.string(),
 })
@@ -405,6 +411,16 @@ export const partnersAdminApi = {
     readonly level1FixedAmount?: number | null
     readonly level2FixedAmount?: number | null
     readonly level3FixedAmount?: number | null
+    /**
+     * Per-level accrual mode. OMIT a level to leave its column untouched;
+     * send `null` to clear the override so the level goes back to inheriting
+     * `accrualStrategy`. Those are two different requests — axios drops
+     * `undefined` keys from the JSON body and serialises `null`, so the
+     * distinction survives the wire.
+     */
+    readonly level1AccrualStrategy?: 'ON_EACH_PAYMENT' | 'ONCE_PER_USER' | null
+    readonly level2AccrualStrategy?: 'ON_EACH_PAYMENT' | 'ONCE_PER_USER' | null
+    readonly level3AccrualStrategy?: 'ON_EACH_PAYMENT' | 'ONCE_PER_USER' | null
   }) {
     const { telegramId, ...body } = input
     await api.patch(`/admin/users/${telegramId}/partner/settings`, body)

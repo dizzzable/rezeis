@@ -65,6 +65,9 @@
  * with its own tests, not a rider on a testing task.
  */
 
+import { readdirSync, readFileSync } from 'node:fs'
+import { basename, join } from 'node:path'
+
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -87,6 +90,7 @@ import LiquidChrome from './LiquidChrome'
 import MagicRings from './MagicRings'
 import Particles from './Particles'
 import PixelBlast from './PixelBlast'
+import PixelTrail from './PixelTrail'
 import Plasma from './Plasma'
 import PlasmaWave from './PlasmaWave'
 import PrismaticBurst from './PrismaticBurst'
@@ -144,6 +148,30 @@ const WEBGL_EFFECTS = [
   ['tornado', <Tornado key="e" />],
 ] as const
 
+/**
+ * Fiber-backed components in this directory that are NOT card effects, and so
+ * are outside the reach of the catalog guard at the bottom of the file.
+ *
+ * `pixelTrail` is a GLOBAL cursor effect — `EffectsProvider` mounts it from a
+ * settings switch, not from a card — and it is the reason this list exists at
+ * all. It carried the same double context release the four card effects did
+ * (its own synchronous `forceContextLoss()`, then fiber's from a 500 ms
+ * `setTimeout`, INVALID_OPERATION on the second), and nothing in this directory
+ * drove it: the guard below compares this suite against `CARD_EFFECT_CATALOG`,
+ * so a `<Canvas>` that is not a card effect could never appear in its diff.
+ * `covers every fiber-backed component in this directory` is the check that
+ * closes that, and it reads the source rather than this list.
+ */
+const NON_CATALOG_FIBER_EFFECTS = [['pixelTrail', <PixelTrail key="e" />]] as const
+
+/**
+ * Everything the cases below are actually driven over. Kept separate from
+ * `WEBGL_EFFECTS` because the catalog guard must still compare the CARD list
+ * against the catalog — folding a cursor effect into it would make that
+ * comparison fail for a component that is correctly absent from the catalog.
+ */
+const DRIVEN = [...WEBGL_EFFECTS, ...NON_CATALOG_FIBER_EFFECTS]
+
 /** The Paper shaders, driven against the real package in `paper-context-release.test.tsx`. */
 const COVERED_ELSEWHERE = [
   'paperMesh',
@@ -153,6 +181,60 @@ const COVERED_ELSEWHERE = [
   'paperSwirl',
   'paperMetaballs',
 ] as const
+
+// `__dirname`, not `fileURLToPath(import.meta.url)`: under this repo's Vite
+// transform `import.meta.url` is the dev server's http:// module URL rather
+// than a file: one, and `fileURLToPath` throws on it at collection time — which
+// prints `Tests no tests` with a ZERO count, not a failure. Same anchor
+// `card-effects-manifest.test.ts` next door uses.
+const COMPONENT_DIR = __dirname
+
+/**
+ * Which named bindings a module pulls out of `@react-three/fiber`.
+ *
+ * Matched on the IMPORT rather than on `<Canvas`, because `<Canvas` also
+ * appears in prose — `fiber-render-scale.tsx` quotes fiber's own source in a
+ * comment — and a scan that counted comments would name a module that mounts
+ * nothing. Bindings are compared exactly, so `CanvasProps` does not read as
+ * `Canvas`.
+ */
+const FIBER_IMPORT = /import\s+(?:type\s+)?\{([^}]*)\}\s*from\s*['"]@react-three\/fiber['"]/g
+
+function mountsFiberCanvas(source: string): boolean {
+  for (const match of source.matchAll(FIBER_IMPORT)) {
+    const bindings = match[1]
+      .split(',')
+      .map(part => part.trim().replace(/^type\s+/, '').split(/\s+as\s+/)[0].trim())
+    if (bindings.includes('Canvas')) return true
+  }
+  return false
+}
+
+/**
+ * Every component file under this directory that mounts a fiber `<Canvas>`,
+ * found by reading the tree rather than by being remembered. Paths are relative
+ * to this directory so `originkit/` shows up as such in a failure.
+ *
+ * `*.test.*` / `*.spec.*` are skipped by name: a suite that imports `Canvas` to
+ * build a fixture is not a component anything ships, and this file would
+ * otherwise be able to become its own finding.
+ */
+function discoverFiberCanvasComponents(prefix = ''): string[] {
+  const found: string[] = []
+  for (const entry of readdirSync(join(COMPONENT_DIR, prefix), { withFileTypes: true })) {
+    const relative = prefix ? `${prefix}/${entry.name}` : entry.name
+    if (entry.isDirectory()) {
+      found.push(...discoverFiberCanvasComponents(relative))
+      continue
+    }
+    if (!/\.tsx?$/.test(entry.name)) continue
+    if (/\.(test|spec)\.tsx?$/.test(entry.name)) continue
+    if (mountsFiberCanvas(readFileSync(join(COMPONENT_DIR, relative), 'utf8'))) {
+      found.push(relative)
+    }
+  }
+  return found.sort()
+}
 
 let gl: GlStubHarness
 const live: Array<{ root: Root; host: HTMLDivElement }> = []
@@ -165,6 +247,10 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  // Defensive: `unmountRoot` restores the clock in a `finally`, but a case that
+  // throws from its own `atUnmount` closure would otherwise hand the next test
+  // a faked `setTimeout` and a mount that never measures.
+  vi.useRealTimers()
   for (const { root, host } of live.splice(0)) {
     act(() => root.unmount())
     host.remove()
@@ -205,15 +291,63 @@ async function mountInto(host: HTMLDivElement, element: React.ReactElement): Pro
   return root
 }
 
-async function unmountRoot(root: Root): Promise<void> {
+/**
+ * How long `@react-three/fiber` waits before its own teardown. Its
+ * `unmountComponentAtNode` hands the reconciler a commit callback that does
+ * nothing but `setTimeout(..., 500)`, and the second-to-last thing inside is
+ * `state.gl?.forceContextLoss?.()`.
+ */
+const FIBER_TEARDOWN_MS = 500
+
+/**
+ * Unmount, take a reading at the SYNCHRONOUS boundary, then let fiber's
+ * deferred teardown run.
+ *
+ * WHY BOTH PHASES ARE LOAD-BEARING, and why either one alone is an assertion
+ * that cannot fail in the direction the defect goes.
+ *
+ *   - `atUnmount` runs after React has flushed every cleanup and BEFORE the
+ *     500 ms timer. It is the only moment at which “this component released its
+ *     own context” is distinguishable from “fiber released it half a second
+ *     later” — past the flush the two are identical, because fiber's timer
+ *     destroys the context whether or not the component did. A suite that only
+ *     looked after the flush would go green for a component that released
+ *     nothing at all, which is the entire leak this file exists for.
+ *
+ *   - The advance is what makes a DOUBLE release observable. Without it the
+ *     second call never happens in this process, so a lower bound and an exact
+ *     count read the same and neither can see two. The four fiber-backed
+ *     effects release synchronously on purpose — WebKit caps a web-content
+ *     process at 16 live contexts and half a second is several carousel slides
+ *     — and fiber then repeated the call on the context they had already
+ *     destroyed. `WEBGL_lose_context.loseContext()` on an already-lost context
+ *     is INVALID_OPERATION, and it shipped: `loseContext: context already lost`
+ *     in a subscriber's console, with this file green.
+ *
+ * ONLY `setTimeout`/`clearTimeout` ARE FAKED, AND ONLY ACROSS THE UNMOUNT.
+ * fiber builds its renderer from an async function and React's `act` reaches
+ * for `MessageChannel`; faking the clock wholesale, or before the mount, stalls
+ * the mount instead — including react-use-measure's debounce, without which
+ * fiber never builds a renderer at all — and tests nothing.
+ */
+async function unmountRoot(root: Root, atUnmount?: () => void): Promise<void> {
   const index = live.findIndex(entry => entry.root === root)
   if (index >= 0) live.splice(index, 1)
-  await act(async () => {
-    root.unmount()
-  })
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+  try {
+    await act(async () => {
+      root.unmount()
+    })
+    atUnmount?.()
+    await act(async () => {
+      vi.advanceTimersByTime(FIBER_TEARDOWN_MS)
+    })
+  } finally {
+    vi.useRealTimers()
+  }
 }
 
-describe.each(WEBGL_EFFECTS)('%s', (id, element) => {
+describe.each(DRIVEN)('%s', (id, element) => {
   it('takes a context on mount and hands it back on unmount', async () => {
     const host = makeHost()
     const root = await mountInto(host, element)
@@ -225,20 +359,39 @@ describe.each(WEBGL_EFFECTS)('%s', (id, element) => {
     const opened = gl.contexts.filter(context => !context.isContextLost())
     expect(opened.length, `${id} destroyed its own context while still mounted`).toBe(1)
 
-    await unmountRoot(root)
+    await unmountRoot(root, () => {
+      // THE SYNCHRONOUS CHECKPOINT. fiber's 500 ms teardown has not run yet, so
+      // everything asserted here is something the COMPONENT did.
+      for (const context of gl.contexts) {
+        expect(
+          context.loseCalls,
+          `${id} destroyed its context ${context.loseCalls} times on unmount, ` +
+            'not once. Zero is a dropped reference, which frees nothing: WebKit ' +
+            'returns the slot only when the context object is destroyed, and it ' +
+            'caps a web-content process at 16 before it starts recycling the ' +
+            'oldest into an unrecoverable SyntheticLostContext. Two or more is ' +
+            'the same slot handed back twice, which is INVALID_OPERATION on the ' +
+            'second call and a console error on a real device',
+        ).toBe(1)
+      }
+      expect(gl.liveContexts(), `${id} left a context alive after unmount`).toEqual([])
+    })
     host.remove()
 
+    // AND FIBER'S DEFERRED TEARDOWN CHANGED NOTHING. It ran between the closure
+    // above and this line, and for the fiber-backed effects it reached for
+    // `forceContextLoss` on a context that was already gone.
     for (const context of gl.contexts) {
       expect(
         context.loseCalls,
-        `${id} dropped a context reference without destroying it. A dropped ` +
-          'reference frees nothing: WebKit returns the slot only when the ' +
-          'context object is destroyed, and it caps a web-content process at 16 ' +
-          'before it starts recycling the oldest into an unrecoverable ' +
-          'SyntheticLostContext',
-      ).toBeGreaterThanOrEqual(1)
+        `${id} released the same context ${context.loseCalls} times once ` +
+          "fiber's deferred teardown had run. The second call lands on a " +
+          'context the component already destroyed: INVALID_OPERATION per the ' +
+          'WEBGL_lose_context spec, and `loseContext: context already lost` in ' +
+          'the console of every subscriber whose card crossed its ' +
+          'IntersectionObserver gate',
+      ).toBe(1)
     }
-    expect(gl.liveContexts(), `${id} left a context alive after unmount`).toEqual([])
   })
 
   it('does not accumulate contexts over three mount/unmount rounds', async () => {
@@ -257,20 +410,30 @@ describe.each(WEBGL_EFFECTS)('%s', (id, element) => {
           `round ${round}. Sixteen is the whole budget for the page`,
       ).toBe(1)
 
-      await unmountRoot(root)
-
-      expect(
-        gl.liveContexts().length,
-        `${id} left ${gl.liveContexts().length} contexts alive after round ` +
-          `${round} of mount → unmount. At one leaked slot per mount the ` +
-          'operator reaches WebKit’s ceiling inside a single sitting, and ' +
-          'the effects that were already on screen go permanently blank',
-      ).toBe(0)
+      await unmountRoot(root, () => {
+        // Checked BEFORE fiber's timer, for the same reason as above: past it, a
+        // component that released nothing is indistinguishable from one that
+        // released everything, and the leak this test exists for goes green.
+        expect(
+          gl.liveContexts().length,
+          `${id} left ${gl.liveContexts().length} contexts alive after round ` +
+            `${round} of mount → unmount. At one leaked slot per mount the ` +
+            'operator reaches WebKit’s ceiling inside a single sitting, and ' +
+            'the effects that were already on screen go permanently blank',
+        ).toBe(0)
+      })
     }
 
     // Three rounds allocated three contexts and released all three: the count
     // that grows is the ALLOCATION count, never the live one.
     expect(gl.contexts.length, `${id} did not build a renderer on every round`).toBeGreaterThanOrEqual(3)
+    // And every one of them was handed back exactly once, fiber's deferred
+    // teardown included. Three rounds is where a double release is cheapest to
+    // see: it is three console errors on a device, not one.
+    expect(
+      gl.contexts.map(context => context.loseCalls),
+      `${id} did not release each of its contexts exactly once over three rounds`,
+    ).toEqual(gl.contexts.map(() => 1))
     host.remove()
   })
 })
@@ -377,5 +540,77 @@ describe('the list itself', () => {
         'a new one needs its release driven here before it ships',
     ).toEqual(webglIds)
     expect(webglIds.length, 'the catalog no longer holds 38 WebGL effects').toBe(38)
+  })
+
+  /**
+   * THE GUARD ABOVE HAS A BLIND SPOT, AND THIS IS IT.
+   *
+   * That one compares this suite against `CARD_EFFECT_CATALOG`. Every id it can
+   * ever name is a card effect, so a component in this directory that mounts a
+   * fiber `<Canvas>` WITHOUT being a card effect is outside its reach by
+   * construction — not overlooked, unreachable. `PixelTrail` is a global cursor
+   * effect, it took a GL context on every mount, it shipped the same double
+   * release the four card effects did, and the catalog guard was green
+   * throughout because the catalog has nothing to say about cursors.
+   *
+   * So this one does not consult a list of names. It reads the directory and
+   * asks which files import `Canvas` from `@react-three/fiber`, then asks
+   * whether this suite drives each of them. A sixth added the same way fails
+   * here on the day it is written.
+   *
+   * WHAT IT DOES NOT COVER, stated rather than implied: components that take a
+   * GL context by some other route — raw `getContext('webgl2')`, OGL's
+   * `Renderer`, three's `WebGLRenderer` built by hand. Several such components
+   * live here (`GhostCursor`, `BlobCursor`, `TargetCursor`, `TextCursor`) and
+   * are enumerated by nothing in this directory either. They do not carry THIS
+   * defect — the deferred repeat is fiber's, and they have no fiber root — but
+   * they are the same shape of gap, and closing it needs a coverage ledger
+   * across `cursor-lifecycle.test.tsx` and `reactbits-repaired-lifecycle.test.tsx`
+   * rather than a wider regex here.
+   */
+  it('covers every fiber-backed component in this directory', () => {
+    const fiberBacked = discoverFiberCanvasComponents()
+
+    // ANCHORED ON A NON-EMPTY RESULT, and on the files it must already be
+    // finding. A scan that quietly found nothing — a moved directory, a changed
+    // import style, a regex that stopped matching — would leave the real
+    // assertion below iterating an empty list and passing against any tree at
+    // all. That is the exact failure this file was rewritten to stop being an
+    // example of, so it is not left available to the check that fixes it.
+    expect(
+      fiberBacked.length,
+      'the fiber-component scan found nothing to check. It is supposed to find ' +
+        'at least the five components known to mount a `<Canvas>`; finding zero ' +
+        'means the scan is broken, not that the directory is clean',
+    ).toBeGreaterThanOrEqual(5)
+    expect(
+      fiberBacked,
+      'the fiber-component scan stopped seeing files it used to see',
+    ).toEqual(
+      expect.arrayContaining([
+        'Antigravity.tsx',
+        'Beams.tsx',
+        'Dither.tsx',
+        'PixelTrail.tsx',
+        'Silk.tsx',
+      ]),
+    )
+
+    const driven = new Set(DRIVEN.map(([id]) => id.toLowerCase()))
+    const uncovered = fiberBacked.filter(
+      file => !driven.has(basename(file).replace(/\.tsx$/, '').toLowerCase()),
+    )
+
+    expect(
+      uncovered,
+      'a component in this directory mounts a react-three-fiber `<Canvas>` and ' +
+        'nothing here drives it. It takes one of WebKit’s sixteen context ' +
+        'slots on every mount, and fiber repeats `forceContextLoss()` from a ' +
+        '500 ms `setTimeout` after any synchronous release the component does ' +
+        'itself — which is INVALID_OPERATION on the second call, and is exactly ' +
+        'what `PixelTrail` shipped while every test in this directory was ' +
+        'green. Add it to WEBGL_EFFECTS if it is a card effect, or to ' +
+        'NON_CATALOG_FIBER_EFFECTS if it is not',
+    ).toEqual([])
   })
 })

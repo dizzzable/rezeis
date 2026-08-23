@@ -24,9 +24,12 @@ import { WebPushService } from './services/web-push.service';
  * `AdminNotificationDispatcher` subscribes to `SystemEventsService` (global)
  * and uses `RbacService` (global) to gate categories per role.
  *
- * Disabled out-of-the-box — operator must generate VAPID keys with
- * `npx web-push generate-vapid-keys` and set the env vars before
- * subscriptions can deliver.
+ * Disabled out-of-the-box — the operator generates the VAPID keypair in the
+ * panel (Settings → Web-push) and nowhere else; the private half is stored
+ * encrypted. `VAPID_*` environment variables are a one-time migration source
+ * that `WebPushService.adoptLegacyEnvKeys` copies into the panel; nothing
+ * serves from them, and a deployment left with no keypair announces itself
+ * through `SystemEventsService` rather than failing quietly.
  */
 @Module({
   imports: [AuthModule, SettingsModule],

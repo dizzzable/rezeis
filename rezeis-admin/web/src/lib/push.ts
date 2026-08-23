@@ -70,15 +70,49 @@ export type EnablePushResult =
   | 'unsupported'
 
 /**
+ * The one refusal on this route that is NOT about ownership.
+ *
+ * `subscribeAdmin` answers 409 when its INSERT collides with a row that has
+ * already been deleted by the time it reads it back, and its own bounded retry
+ * could not settle it. Nothing is wrong with this browser and nobody holds the
+ * endpoint — the next attempt normally succeeds.
+ *
+ * Spelled here as the literal the server sends
+ * (`WebPushService.ENDPOINT_RACE_UNSETTLED_CODE`), and forwarded only because
+ * `SAFE_PRODUCT_CODES` in `admin-safe-exception.filter.ts` allowlists it; an
+ * unlisted code is stripped and this branch would never fire.
+ */
+const ENDPOINT_RACE_UNSETTLED = 'PUSH_SUBSCRIBE_ENDPOINT_RACE_UNSETTLED'
+
+function readProductCode(err: unknown): string | null {
+  const code = (err as { response?: { data?: { code?: unknown } } } | null)?.response?.data?.code
+  return typeof code === 'string' ? code : null
+}
+
+/**
  * True when `/admin/push/subscribe` refused because another admin already owns
- * this browser's endpoint. The backend answers 409 for exactly that case and
- * for nothing else on this route — an insert race lost to the SAME admin is
- * treated as a re-subscribe and succeeds
+ * this browser's endpoint.
+ *
+ * THE STATUS ALONE DOES NOT ANSWER THAT, and the comment that used to say it
+ * did was wrong in the direction that costs the most. The backend spends 409 on
+ * two opposite outcomes and separates them with a product code:
+ *
+ *   • no code → the genuine cross-admin refusal. Lasting: the row belongs to
+ *     somebody else, and no amount of retrying clears it. The endpoint has to
+ *     change, which is what the `unsubscribe()` on the failure path arranges.
+ *   • `ENDPOINT_RACE_UNSETTLED` → a race that did not settle. Transient, and
+ *     reading it as "taken" is the defect this exists to end: the operator was
+ *     told their own browser was registered to another administrator, the
+ *     toggle stayed off, and pressing it again would simply have worked.
+ *
+ * An insert race lost to the SAME admin never reaches either branch — the
+ * server treats it as a re-subscribe and succeeds
  * (`src/modules/push/services/web-push.service.ts` `subscribeAdmin`).
  */
 function isEndpointTaken(err: unknown): boolean {
   const status = (err as { response?: { status?: number } } | null)?.response?.status
-  return status === 409
+  if (status !== 409) return false
+  return readProductCode(err) !== ENDPOINT_RACE_UNSETTLED
 }
 
 export async function enablePush(): Promise<EnablePushResult> {
@@ -129,6 +163,10 @@ export async function enablePush(): Promise<EnablePushResult> {
     // again. Saying so beats the generic error, which reads as "push is
     // broken" for a state the operator can clear themselves.
     if (isEndpointTaken(err)) return 'endpoint-taken'
+    // The unsettled race falls through here on purpose, into the caller's
+    // generic error path. That path says "something went wrong, try again",
+    // which is exactly right for it — and unlike `endpoint-taken` it does not
+    // send the operator looking for an administrator who holds nothing.
     throw err
   }
   return 'subscribed'
@@ -186,6 +224,12 @@ export async function ensurePushSubscription(): Promise<EnsurePushResult> {
     // Distinguished rather than folded into `unavailable`: this one is not a
     // transport hiccup, it is a lasting state that will still be there on the
     // next attempt, and only the operator can clear it.
+    //
+    // The unsettled race is the opposite of that and therefore belongs in
+    // `unavailable` with the transport failures: the silent heal simply runs
+    // again on the next load, which is the recovery. Reported as
+    // `endpoint-taken` it would instead pin the toggle off and log that this
+    // browser belongs to another admin — for a row that had already gone.
     if (isEndpointTaken(err)) return 'endpoint-taken'
     return 'unavailable'
   }

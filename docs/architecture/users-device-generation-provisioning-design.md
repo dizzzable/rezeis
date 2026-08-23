@@ -140,14 +140,16 @@ Important implementation notes from the documentation:
 - it **does not include an HTTP client**, so the application must keep its own transport layer;
 - the package version must be pinned to the deployed Remnawave Panel version.
 
-`rezeis-admin` already follows this model in `RemnawaveApiService`: it imports command contracts from `@remnawave/backend-contract` and performs the HTTP calls through Nest `HttpService`.
+**Superseded 2026-08-23 — this model was tried in `rezeis-admin` and REMOVED.** Nothing under `rezeis-admin/src/` imports `@remnawave/backend-contract` any more (`grep -rn "@remnawave/" rezeis-admin/src/` returns no imports). Every `@remnawave/*` package is now a **devDependency**, used only as the CI oracle the guard specs execute; `RemnawaveApiService` calls the panel over plain HTTP and decodes the answers with its own tolerant local decoders.
 
-Future provisioning implementation should continue this pattern:
+The bullet above about pinning the package version to the deployed panel is precisely the instruction that broke. A vendor schema describes ONE panel era, and rezeis serves every era its operators are still running. `safeParse` against `GetExternalSquadsCommand` from `@remnawave/backend-contract@2.7.3` failed deterministically on a perfectly healthy 3.x panel — the field it requires was renamed — so the squad read threw `ServiceUnavailableException` every time the panel had at least one external squad. Pinning forward would only have moved the outage onto the installations still on 2.x. See `rezeis-admin/README.md` § Remnawave compatibility.
 
-- use the official Remnawave command contract when a suitable provisioning/device command exists;
-- validate Remnawave responses with the SDK schema before mapping them into admin-safe DTOs;
+Future provisioning implementation must therefore NOT reintroduce a runtime contract import. Instead:
+
+- add a tolerant local decoder for the provisioning/device response, accepting every era the deployment still meets;
+- keep the vendor contracts as devDependencies and pin the expected shape in a guard spec, so drift fails a test at build time instead of a live panel at run time;
 - keep transport, authorization headers, failure handling, and bounded admin response mapping inside `RemnawaveApiService` or a dedicated backend service;
-- never pass SDK/raw response payloads directly to `rezeis-admin/web`.
+- never pass raw panel response payloads directly to `rezeis-admin/web`.
 
 The Remnawave API specification entrypoint is `https://docs.rw/api/`, including the auth-controller section at `https://docs.rw/api/#tag/auth-controller`. A version-specific Scalar API reference candidate is `https://client.scalar.com/@local/default/document/remnawave-api-v274/overview`. Future implementation must verify the deployed panel's API/auth behavior against the matching API spec version before adding any provisioning operation. This document does not treat the auth-controller link or the Scalar overview as provisioning endpoints; they are recorded as official/version-specific API references for the transport layer.
 

@@ -39,11 +39,29 @@ import {
 } from '../../notifications/services/bot-notifier.client';
 import { isRetryableRelayOutcome } from '../backup-delivery-retry.util';
 import { signBackupDownloadToken } from '../utils/backup-download-token.util';
+import {
+  type ArchiveProvenance,
+  buildProvenanceTrailer,
+  describeForeignReason,
+  readArchiveProvenance,
+} from '../utils/backup-provenance.util';
 import type { BackupCreateJobData, BackupDeliverTelegramJobData, BackupRestoreJobData } from '../backup.processor';
 
 const DEFAULT_BACKUP_LOCATION = '/app/data/backups';
 const RETENTION_FALLBACK = 7;
 const INTERVAL_HOURS_FALLBACK = 24;
+
+/**
+ * Mode every backup file is left at.
+ *
+ * A dump is the whole database in one file — customers, transactions, admin
+ * password hashes, the SMTP password. `createWriteStream` used the default
+ * 0666 & ~umask, i.e. 0644: world-readable to anything else sharing the
+ * `rezeis-data` volume. The API and the worker run as the SAME uid (1001,
+ * `rezeis` — `docker-entrypoint.sh` drops to it with `su-exec` for both
+ * services), so 0600 costs the worker nothing: it is the owner.
+ */
+const BACKUP_FILE_MODE = 0o600;
 
 /** Cloud Bot API upload cap; raised via BACKUP_MAX_DELIVERY_BYTES for a Local Bot API Server. */
 const DEFAULT_MAX_DELIVERY_BYTES = 50 * 1024 * 1024;
@@ -87,6 +105,24 @@ export interface BackupRecordDto {
 interface CreateBackupInput {
   readonly scope: BackupScope;
   readonly initiatedBy: string | null;
+}
+
+/** Caller's decision about an archive this deployment cannot prove it produced. */
+export interface RestoreOptions {
+  /**
+   * The operator has said, explicitly, that they know this archive is not
+   * verifiably ours and want it restored anyway (server migration, or a dump
+   * predating provenance stamping). Never defaulted to `true` anywhere, and
+   * never read from anything but a request the controller has already checked
+   * `admins:edit` on.
+   */
+  readonly allowForeignArchive?: boolean;
+}
+
+export interface RestoreEnqueueResult {
+  readonly jobId: string;
+  /** What the admission check concluded, for the audit row and the response. */
+  readonly provenance: ArchiveProvenance;
 }
 
 /** Operator-managed backup settings (persisted in `Settings.systemNotifications.backup`). */
@@ -322,7 +358,11 @@ export class BackupService implements OnModuleInit {
     return toDto(record);
   }
 
-  public async restoreBackup(filename: string, initiatedBy: string | null): Promise<{ jobId: string }> {
+  public async restoreBackup(
+    filename: string,
+    initiatedBy: string | null,
+    options: RestoreOptions = {},
+  ): Promise<RestoreEnqueueResult> {
     if (!isSafeFilename(filename)) {
       throw new BadRequestException('Invalid backup filename');
     }
@@ -333,9 +373,12 @@ export class BackupService implements OnModuleInit {
       throw new NotFoundException('Backup file not found');
     }
 
+    const allowForeignArchive = options.allowForeignArchive === true;
+    const provenance = await this.admitArchiveForRestore(fullPath, allowForeignArchive);
+
     const job = await this.backupQueue.add(
       BACKUP_JOBS.RESTORE,
-      { filename, initiatedBy } satisfies BackupRestoreJobData,
+      { filename, initiatedBy, allowForeignArchive } satisfies BackupRestoreJobData,
       {
         attempts: 1, // restore should not auto-retry
         removeOnComplete: { age: 86_400 },
@@ -343,7 +386,56 @@ export class BackupService implements OnModuleInit {
       },
     );
 
-    return { jobId: job.id ?? filename };
+    return { jobId: job.id ?? filename, provenance };
+  }
+
+  /**
+   * Decide whether an archive may be fed to `psql` at all.
+   *
+   * The control sits HERE, at admission, and not inside the restore pipeline,
+   * because the pipeline has no seam: `psql --single-transaction` reads a
+   * single stdin stream and the only way to vet it statement-by-statement
+   * would be to parse a PostgreSQL dump — a parser whose bugs would each be a
+   * silent bypass. Admission has to answer one question instead, about the
+   * file as a whole, and it can answer it in a second.
+   *
+   * A provably-native archive restores on `backups:run` alone; that is the
+   * disaster-recovery path and it is unchanged. Anything else — another
+   * deployment's archive (server migration), an archive taken before stamping
+   * existed, or a file somebody assembled — needs the caller to have said so
+   * explicitly, and the CALLER is where that costs something: the controller
+   * only accepts the acknowledgement from an admin who also holds
+   * `admins:edit`, because that is exactly the power a foreign restore hands
+   * out. See `AdminBackupController.restoreUpload`.
+   */
+  private async admitArchiveForRestore(
+    fullPath: string,
+    allowForeignArchive: boolean,
+  ): Promise<ArchiveProvenance> {
+    const provenance = await readArchiveProvenance(fullPath, process.env.REZEIS_CRYPT_KEY ?? '');
+    if (provenance.status === 'native') return provenance;
+    if (allowForeignArchive) {
+      this.logger.warn(
+        `Restoring an archive this deployment cannot verify (${provenance.reason}) — acknowledged by the operator`,
+      );
+      return provenance;
+    }
+    throw new BadRequestException(
+      `Refusing to restore an archive this deployment cannot verify: ${describeForeignReason(provenance.reason)}. `
+        + 'Restoring it runs whatever SQL it contains as the database owner, which can replace admin_users, '
+        + 'roles, permissions and the IP allowlist. If this archive really is yours — a server migration, or a '
+        + 'dump taken before provenance stamping existed — re-send the request with '
+        + '"acknowledgeForeignArchive": true. That path additionally requires the admins:edit permission.',
+    );
+  }
+
+  /** Read-only provenance check, for a UI that wants to warn before asking. */
+  public async inspectArchiveProvenance(filename: string): Promise<ArchiveProvenance> {
+    if (!isSafeFilename(filename)) {
+      throw new BadRequestException('Invalid backup filename');
+    }
+    const fullPath = path.resolve(this.getBackupLocation(), filename);
+    return readArchiveProvenance(fullPath, process.env.REZEIS_CRYPT_KEY ?? '');
   }
 
   /**
@@ -362,7 +454,8 @@ export class BackupService implements OnModuleInit {
   public async restoreFromUpload(
     file: { readonly filename?: string; readonly path?: string; readonly size?: number },
     initiatedBy: string | null,
-  ): Promise<{ jobId: string }> {
+    options: RestoreOptions = {},
+  ): Promise<RestoreEnqueueResult> {
     const filename = file.filename;
     if (!filename || !isSafeFilename(filename)) {
       await this.safeUnlink(file.path);
@@ -388,30 +481,91 @@ export class BackupService implements OnModuleInit {
       throw new BadRequestException('Uploaded file is not a gzip (.sql.gz) backup');
     }
 
-    const stat = await fsp.stat(fullPath);
-    const checksum = await sha256OfFile(fullPath);
-    await this.prismaService.backupRecord.create({
-      data: {
-        filename,
-        scope: BackupScope.DB,
-        sizeBytes: BigInt(stat.size),
-        checksum,
-        deliveryChannel: 'uploaded',
-        deliveryRecipient: initiatedBy,
-        deliveredAt: new Date(),
-      },
+    // A dump is world-readable at 0644 under the default umask, on a volume the
+    // worker shares. Same uid on both services, so 0600 loses nothing.
+    await fsp.chmod(fullPath, BACKUP_FILE_MODE).catch((err: unknown): void => {
+      this.logger.warn(
+        `Could not tighten permissions on ${filename}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
+
+    // Provenance BEFORE the record is written: an archive that is refused must
+    // not leave a BackupRecord behind, or it would be restorable later through
+    // `restore/:filename` — a path that would then see a file "this panel
+    // knows about" and never learn where it came from.
+    const allowForeignArchive = options.allowForeignArchive === true;
+    let provenance: ArchiveProvenance;
+    try {
+      provenance = await this.admitArchiveForRestore(fullPath, allowForeignArchive);
+    } catch (err) {
+      await this.safeUnlink(fullPath);
+      throw err;
+    }
+
+    // ── The upload is an ORPHAN until this block returns ─────────────────
+    //
+    // `admitArchiveForRestore` above unlinks when it refuses, and the queue
+    // call below must NOT unlink when it fails. Everything in between was the
+    // gap: the archive is on disk, admitted, and still nameless. Nothing in
+    // the system points at it — `GET /admin/backup` lists
+    // `backupRecord.findMany`, `DELETE /admin/backup/:id` needs a record id,
+    // and `applyRetention` iterates those same rows — and there is no
+    // `readdir` anywhere in this module, so a throw here left up to 2 GiB that
+    // no operator could see or remove short of logging into the host.
+    //
+    // Three things can throw in that gap and none is far-fetched: `fsp.stat`
+    // (the file removed under us between admission and here), `sha256OfFile`
+    // (a full read of up to 2 GiB — much the longest window of the three, and
+    // the one that fails on EIO or a descriptor limit) and `create` itself
+    // (database unreachable, pool exhausted, statement timeout). `BigInt` on a
+    // `stat.size` cannot realistically throw but is inside the block anyway.
+    //
+    // The block ENDS at a successful `create`, deliberately. That row is the
+    // only durable thing that names the file: once it exists the archive is
+    // listed, deletable and inside retention, so it is no longer an orphan and
+    // unlinking it would be the worse bug. `backupQueue.add` below fails with
+    // Redis down, and cleaning up there would destroy a disaster-recovery
+    // upload the operator can otherwise simply restore again — leaving a
+    // BackupRecord pointing at nothing.
+    try {
+      const stat = await fsp.stat(fullPath);
+      const checksum = await sha256OfFile(fullPath);
+      await this.prismaService.backupRecord.create({
+        data: {
+          filename,
+          scope: BackupScope.DB,
+          sizeBytes: BigInt(stat.size),
+          checksum,
+          deliveryChannel: 'uploaded',
+          deliveryRecipient: initiatedBy,
+          deliveredAt: new Date(),
+        },
+      });
+    } catch (err) {
+      await this.safeUnlink(fullPath);
+      throw err;
+    }
+
+    // Retention had exactly one caller — the tail of a successful `runDump` —
+    // so uploads accumulated forever: N uploads of up to 1 GiB each, never
+    // pruned, on the same volume the next dump needs space on. Housekeeping
+    // must not be able to block a disaster-recovery restore, hence the catch.
+    await this.applyRetention().catch((err: unknown): void => {
+      this.logger.warn(
+        `Retention after upload failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
     });
 
     const job = await this.backupQueue.add(
       BACKUP_JOBS.RESTORE,
-      { filename, initiatedBy } satisfies BackupRestoreJobData,
+      { filename, initiatedBy, allowForeignArchive } satisfies BackupRestoreJobData,
       {
         attempts: 1, // restore must not auto-retry
         removeOnComplete: { age: 86_400 },
         removeOnFail: { age: 604_800 },
       },
     );
-    return { jobId: job.id ?? filename };
+    return { jobId: job.id ?? filename, provenance };
   }
 
   private async safeUnlink(target: string | undefined): Promise<void> {
@@ -491,7 +645,9 @@ export class BackupService implements OnModuleInit {
     const fullPath = path.join(dir, filename);
 
     try {
-      const sizeBytes = await this.spawnPgDumpToFile(fullPath);
+      await this.spawnPgDumpToFile(fullPath);
+      const stamped = await this.stampProvenance(fullPath);
+      const sizeBytes = (await fsp.stat(fullPath)).size;
       const checksum = await sha256OfFile(fullPath);
 
       await this.prismaService.backupRecord.update({
@@ -499,12 +655,19 @@ export class BackupService implements OnModuleInit {
         data: { sizeBytes: BigInt(sizeBytes), checksum, deliveredAt: new Date() },
       });
 
-      this.systemEventsService.info(
-        EVENT_TYPES.SYSTEM_BACKUP_COMPLETED,
-        'SYSTEM',
-        `Backup completed: ${filename} (${formatBytes(sizeBytes)})`,
-        { backupId: recordId, filename, scope, sizeBytes, checksum, initiatedBy },
-      );
+      // `emit` rather than `info`, for the one field `info` cannot carry:
+      // `adminId`. Every backup/restore completion used to land in the audit
+      // log with `adminUserId: null` and `ipAddress: 'system'`, so the audit
+      // page showed "system" as the actor for all of them and the admin who
+      // pressed the button survived only as a metadata string.
+      this.systemEventsService.emit({
+        type: EVENT_TYPES.SYSTEM_BACKUP_COMPLETED,
+        category: 'SYSTEM',
+        severity: 'INFO',
+        message: `Backup completed: ${filename} (${formatBytes(sizeBytes)})`,
+        metadata: { backupId: recordId, filename, scope, sizeBytes, checksum, initiatedBy, stamped },
+        adminId: initiatedBy,
+      });
 
       await this.applyRetention();
       return { sizeBytes, checksum };
@@ -526,16 +689,47 @@ export class BackupService implements OnModuleInit {
   }
 
   /**
+   * Append the provenance member that lets a later restore prove this file is
+   * ours. Returns whether the stamp was written.
+   *
+   * An append of ~190 bytes, not a rewrite: `.gz` files concatenate, so the
+   * stamp costs nothing on a gigabyte dump. Without `REZEIS_CRYPT_KEY` there
+   * is nothing to sign with — the dump is still perfectly good, it simply
+   * cannot be verified later, and restoring it will demand the explicit
+   * foreign-archive acknowledgement.
+   */
+  private async stampProvenance(fullPath: string): Promise<boolean> {
+    const cryptKey = process.env.REZEIS_CRYPT_KEY ?? '';
+    if (cryptKey.length === 0) {
+      this.logger.warn(
+        'REZEIS_CRYPT_KEY is not set — this backup cannot be stamped, and restoring it later '
+          + 'will require an explicit foreign-archive acknowledgement',
+      );
+      return false;
+    }
+    const payloadSha256 = await sha256OfFile(fullPath);
+    await fsp.appendFile(fullPath, buildProvenanceTrailer(payloadSha256, cryptKey));
+    return true;
+  }
+
+  /**
    * Restore database from a .sql.gz backup file.
    * Spawns gunzip | psql pipeline.
    */
-  public async runRestore(filename: string): Promise<boolean> {
+  public async runRestore(filename: string, options: RestoreOptions = {}): Promise<boolean> {
     const fullPath = path.resolve(this.getBackupLocation(), filename);
     try {
       await fsp.access(fullPath);
     } catch {
       throw new NotFoundException('Backup file not found for restore');
     }
+
+    // Checked again here, and not only at admission, because this is the last
+    // point before the file becomes SQL running as the database owner. The job
+    // may have been queued minutes ago against a file that has since changed;
+    // an acknowledgement the operator did give travels in the job payload, and
+    // its absence means the archive must still verify on its own.
+    await this.admitArchiveForRestore(fullPath, options.allowForeignArchive === true);
 
     return new Promise<boolean>((resolve, reject) => {
       const env = {
@@ -957,7 +1151,12 @@ export class BackupService implements OnModuleInit {
       ];
       const dump = spawn('pg_dump', args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
       const gzip = zlib.createGzip();
-      const out = createWriteStream(destination);
+      // `mode` is masked by the process umask, so it can only ever be tighter
+      // than 0600, never looser — but an inherited 0022 umask would leave a
+      // requested 0644 world-readable, which is what it did. The explicit
+      // chmod below closes the window for a pre-existing file, which
+      // `createWriteStream` would open without changing its mode.
+      const out = createWriteStream(destination, { mode: BACKUP_FILE_MODE });
 
       let stderr = '';
       dump.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
@@ -982,6 +1181,7 @@ export class BackupService implements OnModuleInit {
       out.on('finish', async () => {
         if (exitedWithError) return;
         try {
+          await fsp.chmod(destination, BACKUP_FILE_MODE);
           const stat = await fsp.stat(destination);
           resolve(stat.size);
         } catch (err) {

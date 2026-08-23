@@ -64,6 +64,59 @@ interface BackupListResponse {
   offset: number;
 }
 
+/**
+ * A restore the server refused because it cannot prove it produced the archive,
+ * held so the operator can acknowledge it and re-send.
+ *
+ * The FILE is kept, not just its name. `AlertDialogAction` closes its dialog on
+ * click, which runs `onOpenChange(false)` and clears `uploadFile` — so by the
+ * time the refusal comes back the only `File` handle the page had is gone, and
+ * "restore anyway" would have had nothing to send.
+ */
+type ForeignArchivePrompt =
+  | { readonly source: 'stored'; readonly filename: string; readonly serverMessage: string }
+  | { readonly source: 'upload'; readonly file: File; readonly serverMessage: string };
+
+/** The permission `AdminBackupController.resolveForeignArchiveConsent` demands on top of `backups:run`. */
+const FOREIGN_ARCHIVE_PERMISSION = { resource: 'admins', action: 'edit' } as const;
+
+interface StoredRestoreInput {
+  readonly filename: string;
+  readonly acknowledgeForeignArchive?: boolean;
+}
+
+interface UploadRestoreInput {
+  readonly file: File;
+  readonly acknowledgeForeignArchive?: boolean;
+}
+
+/**
+ * Recognise the one refusal that has a next step, and pull the server's own
+ * explanation out of it.
+ *
+ * WHY A SUBSTRING AND NOT A CODE. `AdminSafeExceptionFilter` only forwards a
+ * machine-readable `code` for members of its `SAFE_PRODUCT_CODES` allowlist
+ * (`src/common/filters/admin-safe-exception.filter.ts:41-100`); this refusal is
+ * a plain `BadRequestException`, so what arrives is
+ * `{ statusCode: 400, errorCode: 'BAD_REQUEST', message: '…' }` and the message
+ * is the only thing that distinguishes it from "invalid filename" or "not a
+ * gzip backup". The token matched is the field name the message instructs the
+ * caller to re-send (`backup.service.ts:427`) — the most stable string in it,
+ * and the one that cannot change without this client changing too, since it is
+ * also the field name the retry puts on the wire.
+ *
+ * Verified to survive the filter: none of `SENSITIVE_HTTP_TEXT_PATTERNS`
+ * matches this message for any of the seven `ForeignArchiveReason` values, so
+ * it is not replaced by the generic 'Request failed'.
+ */
+function foreignArchiveRefusal(error: unknown): string | null {
+  const response = (error as { response?: { status?: number; data?: { message?: unknown } } })?.response;
+  if (response?.status !== 400) return null;
+  const message = response.data?.message;
+  const text = typeof message === 'string' ? message : Array.isArray(message) ? message.join(' ') : '';
+  return text.includes('acknowledgeForeignArchive') ? text : null;
+}
+
 async function fetchBackups(): Promise<BackupListResponse> {
   const res = await api.get<BackupListResponse>('/admin/backup', { params: { limit: 50 } });
   return res.data;
@@ -99,11 +152,25 @@ export default function BackupPage() {
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [restoreFilename, setRestoreFilename] = useState<string | null>(null);
   const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [foreignPrompt, setForeignPrompt] = useState<ForeignArchivePrompt | null>(null);
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const canViewBackups = useHasPermission('backups', 'view');
+  // `backups:run` alone restores anything this deployment stamped. An archive it
+  // cannot verify — a migration from another server, or a dump older than
+  // provenance stamping — additionally needs this, because such a restore runs
+  // arbitrary SQL as the database owner and can mint admin accounts.
+  const canAcknowledgeForeignArchive = useHasPermission(
+    FOREIGN_ARCHIVE_PERMISSION.resource,
+    FOREIGN_ARCHIVE_PERMISSION.action,
+  );
   const canCreateBackups = useHasPermission('backups', 'create');
   const canDeleteBackups = useHasPermission('backups', 'delete');
   const canRunBackups = useHasPermission('backups', 'run');
+  // Downloading is no longer part of `backups:view`. The archive is an
+  // unencrypted dump of the whole database — every customer, every transaction,
+  // admin password hashes — so a permission that promises "may see the list"
+  // must not also hand it over. Listing stays on `view`; the file needs `export`.
+  const canExportBackups = useHasPermission('backups', 'export');
 
   const { data, isLoading, error, refetch, isFetching } = useQuery({
     queryKey: adminQueryKeys.backups.all,
@@ -142,31 +209,72 @@ export default function BackupPage() {
   });
 
   const restoreMutation = useMutation({
-    mutationFn: (filename: string) => {
+    mutationFn: ({ filename, acknowledgeForeignArchive }: StoredRestoreInput) => {
       if (!canRunBackups) throw new Error('Missing backups:run');
-      return api.post(`/admin/backup/restore/${encodeURIComponent(filename)}`);
+      // JSON body: `@Body('acknowledgeForeignArchive')` accepts the literal
+      // `true` here (`isAcknowledged`, admin-backup.controller.ts:182).
+      return api.post(
+        `/admin/backup/restore/${encodeURIComponent(filename)}`,
+        acknowledgeForeignArchive ? { acknowledgeForeignArchive: true } : {},
+      );
     },
     onSuccess: () => {
       toast.success(t('backupPage.toasts.restoreStarted'));
       setRestoreFilename(null);
+      setForeignPrompt(null);
     },
-    onError: () => toast.error(t('backupPage.toasts.restoreFailed')),
+    onError: (error: unknown, variables) => {
+      const refusal = foreignArchiveRefusal(error);
+      // Only the FIRST refusal opens the prompt. If the retry that already
+      // carried the acknowledgement is refused too, the reason is something
+      // else and re-opening the same dialog would loop the operator.
+      if (refusal !== null && !variables.acknowledgeForeignArchive) {
+        setRestoreFilename(null);
+        setForeignPrompt({ source: 'stored', filename: variables.filename, serverMessage: refusal });
+        return;
+      }
+      setForeignPrompt(null);
+      toast.error(t('backupPage.toasts.restoreFailed'));
+    },
   });
 
   const uploadRestoreMutation = useMutation({
-    mutationFn: (file: File) => {
+    mutationFn: ({ file, acknowledgeForeignArchive }: UploadRestoreInput) => {
       if (!canRunBackups) throw new Error('Missing backups:run');
       const form = new FormData();
       form.append('file', file);
+      // Multipart: every field arrives as a string, and the backend accepts
+      // exactly `'true'` / `'1'` — a bare truthy value is not consent there,
+      // which is why the string is spelled out rather than coerced.
+      if (acknowledgeForeignArchive) form.append('acknowledgeForeignArchive', 'true');
       return api.post('/admin/backup/restore-upload', form);
     },
     onSuccess: () => {
       toast.success(t('backupPage.toasts.uploadRestoreStarted'));
       queryClient.invalidateQueries({ queryKey: adminQueryKeys.backups.all });
       setUploadFile(null);
+      setForeignPrompt(null);
     },
-    onError: () => toast.error(t('backupPage.toasts.uploadRestoreFailed')),
+    onError: (error: unknown, variables) => {
+      const refusal = foreignArchiveRefusal(error);
+      if (refusal !== null && !variables.acknowledgeForeignArchive) {
+        setUploadFile(null);
+        setForeignPrompt({ source: 'upload', file: variables.file, serverMessage: refusal });
+        return;
+      }
+      setForeignPrompt(null);
+      toast.error(t('backupPage.toasts.uploadRestoreFailed'));
+    },
   });
+
+  function confirmForeignArchiveRestore(): void {
+    if (foreignPrompt === null) return;
+    if (foreignPrompt.source === 'stored') {
+      restoreMutation.mutate({ filename: foreignPrompt.filename, acknowledgeForeignArchive: true });
+      return;
+    }
+    uploadRestoreMutation.mutate({ file: foreignPrompt.file, acknowledgeForeignArchive: true });
+  }
 
   function onUploadInputChange(e: React.ChangeEvent<HTMLInputElement>): void {
     const file = e.target.files?.[0] ?? null;
@@ -383,16 +491,18 @@ export default function BackupPage() {
                     </TableCell>
                     <TableCell>
                       <div className="flex gap-1">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          title={t('backupBadges.download')}
-                          aria-label={t('backupBadges.download')}
-                          onClick={() => downloadBackup(b.filename)}
-                          disabled={Number(b.sizeBytes) === 0}
-                        >
-                          <Download className="h-4 w-4" />
-                        </Button>
+                        {canExportBackups ? (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            title={t('backupBadges.download')}
+                            aria-label={t('backupBadges.download')}
+                            onClick={() => downloadBackup(b.filename)}
+                            disabled={Number(b.sizeBytes) === 0}
+                          >
+                            <Download className="h-4 w-4" />
+                          </Button>
+                        ) : null}
                         {canRunBackups ? (
                           <Button
                             variant="ghost"
@@ -461,7 +571,7 @@ export default function BackupPage() {
             <AlertDialogCancel>{t('backupPage.restoreDialog.cancel')}</AlertDialogCancel>
             <AlertDialogAction
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-              onClick={() => restoreFilename && restoreMutation.mutate(restoreFilename)}
+              onClick={() => restoreFilename && restoreMutation.mutate({ filename: restoreFilename })}
             >
               {t('backupPage.restoreDialog.confirm')}
             </AlertDialogAction>
@@ -482,10 +592,77 @@ export default function BackupPage() {
             <AlertDialogCancel>{t('backupPage.uploadRestoreDialog.cancel')}</AlertDialogCancel>
             <AlertDialogAction
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-              onClick={() => uploadFile && uploadRestoreMutation.mutate(uploadFile)}
+              onClick={() => uploadFile && uploadRestoreMutation.mutate({ file: uploadFile })}
             >
               {t('backupPage.uploadRestoreDialog.confirm')}
             </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Foreign-archive acknowledgement.
+          ─────────────────────────────────
+          The backend refuses an archive it cannot prove it produced and tells
+          the caller, in prose, to re-send with `"acknowledgeForeignArchive":
+          true`. Until this dialog existed the panel had no way to send that
+          field at all — `grep acknowledgeForeignArchive web/src/` returned
+          nothing — so a server migration or a rebuild from an off-site dump,
+          the two moments a restore matters most, ended at an error telling the
+          operator to hand-craft an HTTP request.
+
+          It is a SEPARATE, second confirmation on purpose. A silent retry would
+          turn "this file is not yours" into a formality, and this restore pipes
+          the archive into `psql` as the database owner: whatever SQL it holds
+          runs, including rows in `admin_users`. */}
+      <AlertDialog open={foreignPrompt !== null} onOpenChange={(v) => !v && setForeignPrompt(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t('backupPage.foreignArchiveDialog.title')}</AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-3">
+                <p>{t('backupPage.foreignArchiveDialog.intro')}</p>
+                {foreignPrompt ? (
+                  <p
+                    className="rounded-md bg-muted p-2 font-mono text-[11px] leading-relaxed text-muted-foreground"
+                    data-foreign-archive-server-message
+                  >
+                    {foreignPrompt.serverMessage}
+                  </p>
+                ) : null}
+                <p className="font-medium text-destructive">
+                  {t('backupPage.foreignArchiveDialog.consequence')}
+                </p>
+                <p>{t('backupPage.foreignArchiveDialog.legitimate')}</p>
+                {canAcknowledgeForeignArchive && foreignPrompt?.source === 'upload' ? (
+                  <p>
+                    {t('backupPage.foreignArchiveDialog.reuploadNote', {
+                      filename: foreignPrompt.file.name,
+                    })}
+                  </p>
+                ) : null}
+                {!canAcknowledgeForeignArchive ? (
+                  <p className="font-medium">
+                    {t('backupPage.foreignArchiveDialog.needsPermission')}
+                  </p>
+                ) : null}
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t('backupPage.foreignArchiveDialog.cancel')}</AlertDialogCancel>
+            {/* Gated, not merely disabled: without `admins:edit` the backend
+                answers 403 — and on the upload path it does so AFTER multer has
+                written the whole file, leaving it on disk with no BackupRecord
+                and no way to reach it from the panel. Not offering the button
+                is what keeps the panel off that path. */}
+            {canAcknowledgeForeignArchive ? (
+              <AlertDialogAction
+                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                onClick={confirmForeignArchiveRestore}
+              >
+                {t('backupPage.foreignArchiveDialog.confirm')}
+              </AlertDialogAction>
+            ) : null}
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

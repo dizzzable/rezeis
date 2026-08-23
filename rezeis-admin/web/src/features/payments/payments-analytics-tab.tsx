@@ -65,6 +65,8 @@ import {
   type PaymentGatewayIconType,
   getPaymentGatewayIcon,
 } from './payment-gateway-icons'
+import { PermissionRequiredNotice } from './permission-required-notice'
+import { paymentsRoutePermissions, useRouteAccess } from './payments-route-permissions'
 
 // ── Wire types (mirrors backend payment-analytics.types.ts) ──────────────────
 
@@ -150,18 +152,44 @@ const WINDOW_OPTIONS: readonly number[] = [7, 14, 30, 60, 90] as const
 export default function PaymentsAnalyticsTab(): JSX.Element {
   const { t } = useTranslation()
   const [days, setDays] = useState<number>(30)
+  // Both reports are served by the payment-ANALYTICS module, which is guarded
+  // by `analytics:view` (admin-payment-analytics.controller.ts:27 and :40) —
+  // not by the `payments:view` this tab renders behind. The 403 used to land
+  // in each section's `isError` branch, which says "could not load the
+  // report": a transient-failure message for a permanent refusal, so the
+  // operator retries forever instead of asking for the token.
+  const canViewAnalytics = useRouteAccess(paymentsRoutePermissions.paymentAnalytics)
+
+  const heading = (
+    <div>
+      <h2 className="flex items-center gap-2 text-lg font-semibold">
+        <Activity className="h-5 w-5" />
+        {t('paymentsAnalytics.title')}
+      </h2>
+      <p className="text-sm text-muted-foreground">{t('paymentsAnalytics.subtitle')}</p>
+    </div>
+  )
+
+  if (!canViewAnalytics) {
+    // The window selector goes with the reports: a control that changes the
+    // parameters of a request that will never be made is furniture.
+    return (
+      <div className="space-y-6 mt-4">
+        <FadeIn>{heading}</FadeIn>
+        <PermissionRequiredNotice
+          permission={paymentsRoutePermissions.paymentAnalytics}
+          title={t('paymentsAccess.paymentAnalytics.title')}
+          description={t('paymentsAccess.paymentAnalytics.description')}
+        />
+      </div>
+    )
+  }
 
   return (
     <div className="space-y-6 mt-4">
       <FadeIn>
         <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <h2 className="flex items-center gap-2 text-lg font-semibold">
-              <Activity className="h-5 w-5" />
-              {t('paymentsAnalytics.title')}
-            </h2>
-            <p className="text-sm text-muted-foreground">{t('paymentsAnalytics.subtitle')}</p>
-          </div>
+          {heading}
           <div className="flex items-center gap-2">
             <span className="text-xs text-muted-foreground">{t('paymentsAnalytics.windowLabel')}</span>
             <Select value={String(days)} onValueChange={(v) => setDays(Number(v))}>
@@ -188,6 +216,7 @@ export default function PaymentsAnalyticsTab(): JSX.Element {
 
 function ProvidersSection({ days }: { readonly days: number }): JSX.Element {
   const { t } = useTranslation()
+  const canViewAnalytics = useRouteAccess(paymentsRoutePermissions.paymentAnalytics)
   const { data, isLoading, isError, isFetching } = useQuery({
     queryKey: adminQueryKeys.payments.analytics.providers(days),
     queryFn: async () => {
@@ -196,7 +225,28 @@ function ProvidersSection({ days }: { readonly days: number }): JSX.Element {
     },
     staleTime: 60_000,
     placeholderData: keepPreviousData,
+    // Repeated below the tab's own gate on purpose, the way
+    // `ReconciliationHealthCard` repeats its check: the section must not fire
+    // a request it knows will 403 from some future mount point that forgets.
+    // Without it the `isError` branch would report a permission refusal as a
+    // failed report.
+    enabled: canViewAnalytics,
   })
+
+  // Unreachable from the tab, which refuses above before mounting either
+  // section — so exactly one notice ever renders. It is here because the
+  // branch below it is the one that used to lie: `enabled: false` leaves
+  // `data` undefined, and `isError || !data` would call a refusal a failed
+  // report all over again.
+  if (!canViewAnalytics) {
+    return (
+      <PermissionRequiredNotice
+        permission={paymentsRoutePermissions.paymentAnalytics}
+        title={t('paymentsAccess.paymentAnalytics.title')}
+        description={t('paymentsAccess.paymentAnalytics.description')}
+      />
+    )
+  }
 
   if (isLoading) {
     return (
@@ -569,6 +619,7 @@ function ProviderDetailPanel({ provider }: { readonly provider: ProviderDetail }
 
 function WebhookHealthSection({ days }: { readonly days: number }): JSX.Element {
   const { t } = useTranslation()
+  const canViewAnalytics = useRouteAccess(paymentsRoutePermissions.paymentAnalytics)
   const { data, isLoading, isError, isFetching } = useQuery({
     queryKey: adminQueryKeys.payments.analytics.webhooks(days),
     queryFn: async () => {
@@ -577,7 +628,21 @@ function WebhookHealthSection({ days }: { readonly days: number }): JSX.Element 
     },
     staleTime: 60_000,
     placeholderData: keepPreviousData,
+    // See `ProvidersSection`: same route permission, same reason.
+    enabled: canViewAnalytics,
   })
+
+  // See `ProvidersSection`: unreachable from the tab, kept so the branch below
+  // cannot report a refusal as a failed report.
+  if (!canViewAnalytics) {
+    return (
+      <PermissionRequiredNotice
+        permission={paymentsRoutePermissions.paymentAnalytics}
+        title={t('paymentsAccess.paymentAnalytics.title')}
+        description={t('paymentsAccess.paymentAnalytics.description')}
+      />
+    )
+  }
 
   if (isLoading) {
     return <Skeleton className="h-48 w-full" />

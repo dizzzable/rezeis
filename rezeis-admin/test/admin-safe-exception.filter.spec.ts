@@ -7,9 +7,21 @@ import {
   ConflictException,
   ForbiddenException,
   NotFoundException,
+  UnauthorizedException,
 } from '@nestjs/common';
 
-import { AdminSafeExceptionFilter } from '../src/common/filters/admin-safe-exception.filter';
+import {
+  AdminSafeExceptionFilter,
+  CODES_CARRYING_REAUTH_FACTOR,
+  SAFE_PRODUCT_CODES,
+} from '../src/common/filters/admin-safe-exception.filter';
+import {
+  SUBSCRIPTION_DELETE_STALE_PANEL_LINK_CODE,
+  SUBSCRIPTION_DELETE_STALE_PANEL_LINK_MESSAGE,
+  SUBSCRIPTION_DEVICE_DELETE_STALE_PANEL_LINK_CODE,
+  SUBSCRIPTION_DEVICE_DELETE_STALE_PANEL_LINK_MESSAGE,
+  SUBSCRIPTION_DEVICE_DELETE_STALE_PANEL_LINK_SUBSCRIBER_MESSAGE,
+} from '../src/modules/remnawave/services/stale-panel-link';
 
 interface CapturedResponse {
   statusCode?: number;
@@ -238,6 +250,185 @@ describe('AdminSafeExceptionFilter', () => {
       const body = assertResponseBody(captured.body);
       assert.equal(body.code, code, `${code} must survive the filter`);
       assert.equal(body.errorCode, code);
+    });
+  }
+
+  /**
+   * THE 2FA ENROLMENT PROMPT, ASSERTED ON THE WIRE BODY RATHER THAN ON THE
+   * THROWN EXCEPTION — which is the whole reason the defect this pins shipped
+   * green.
+   *
+   * `two-factor.service.ts` threw `totp_enroll_reauth_required` with
+   * `factor: 'password'`, and `two-factor-enrollment-reauth.spec.ts` asserted
+   * that on the exception's own payload. The code was listed in
+   * `CODES_CARRYING_REAUTH_FACTOR` but NOT in `SAFE_PRODUCT_CODES`, and
+   * `extractSafeReauthFactor` reads the payload `findSafeProductPayload`
+   * returns — which is `undefined` on a product-allowlist miss. So the filter
+   * stripped BOTH fields, `two-factor-page.tsx`'s `readDemandedFactor` found
+   * nothing, the password prompt never rendered, and 2FA could not be switched
+   * on by anybody. Every layer was individually right; the seam was not tested.
+   */
+  it('forwards both the code and the factor for totp_enroll_reauth_required, so 2FA can be switched on', () => {
+    const captured = runFilter(
+      new UnauthorizedException({
+        statusCode: 401,
+        code: 'totp_enroll_reauth_required',
+        factor: 'password',
+        message: 'Confirm it is you before adding a second factor',
+      }),
+      {
+        originalUrl: '/api/admin/2fa/enroll',
+        headers: { 'x-request-id': 'request.safe-2fa-enroll' },
+      },
+    );
+
+    assert.equal(captured.statusCode, 401);
+    const body = assertResponseBody(captured.body);
+    assert.equal(
+      body.code,
+      'totp_enroll_reauth_required',
+      'the SPA branches on `code`; stripped, this 401 is indistinguishable from an expired session',
+    );
+    assert.equal(body.errorCode, 'totp_enroll_reauth_required');
+    assert.equal(
+      body.factor,
+      'password',
+      'the SPA must be told WHICH credential to ask for — it is not the client\'s to guess',
+    );
+    assert.equal(body.message, 'Confirm it is you before adding a second factor');
+  });
+
+  /**
+   * The two sets do DIFFERENT jobs, proved by a code that is in one and not the
+   * other. `totp_required` is an allowlisted product code that declares no
+   * factor, so a `factor` riding along on its body must be dropped while the
+   * code survives.
+   *
+   * Without this, `CODES_CARRYING_REAUTH_FACTOR` could be deleted outright and
+   * every assertion above would still pass — the factor would simply be
+   * forwarded for everything, which is exactly the second allowlist's reason to
+   * exist.
+   */
+  it('forwards the code but NOT the factor for a product code that declares none', () => {
+    const captured = runFilter(
+      new UnauthorizedException({
+        statusCode: 401,
+        code: 'totp_required',
+        factor: 'password',
+        message: 'Two-factor code required',
+      }),
+      { originalUrl: '/api/admin/auth/login', headers: {} },
+    );
+
+    assert.equal(captured.statusCode, 401);
+    const body = assertResponseBody(captured.body);
+    assert.equal(body.code, 'totp_required');
+    assert.equal(
+      body.factor,
+      undefined,
+      'a factor on a code that does not declare one must not leave the filter',
+    );
+  });
+
+  /**
+   * The two-set rule, enforced instead of remembered.
+   *
+   * `CODES_CARRYING_REAUTH_FACTOR` is a strict SUBSET of `SAFE_PRODUCT_CODES`,
+   * because the factor is extracted from the payload the product allowlist
+   * admits. A code listed only in the reauth set forwards NEITHER field — it is
+   * not a partially-working refusal, it is a silent one. This is the check that
+   * turns "somebody must remember to edit both lists" into a named failure.
+   */
+  it('lists every reauth-factor code in the product allowlist too, or neither field ever ships', () => {
+    const missing = [...CODES_CARRYING_REAUTH_FACTOR].filter(
+      (code) => !SAFE_PRODUCT_CODES.has(code),
+    );
+    assert.deepEqual(
+      missing,
+      [],
+      'these codes declare a reauth factor but are not allowlisted product codes, so the ' +
+        'filter drops both `code` and `factor` and the client sees an untyped 401',
+    );
+    // A non-empty positive side: an empty reauth set would satisfy the filter
+    // above for the wrong reason.
+    assert.ok(
+      CODES_CARRYING_REAUTH_FACTOR.size >= 2,
+      'both re-authentication refusals must be present for the check above to mean anything',
+    );
+    assert.ok(CODES_CARRYING_REAUTH_FACTOR.has('passkey_reauth_required'));
+    assert.ok(CODES_CARRYING_REAUTH_FACTOR.has('totp_enroll_reauth_required'));
+  });
+
+  /**
+   * The stale-panel-link deletion refusal, asserted with its REAL message.
+   *
+   * The message is not spot-checked prose here: it is imported from the module
+   * that throws it, so this case fails if a future copy-edit introduces a word
+   * the filter scrubs (`profile`, `token`, a bare uuid, a URL, …). A refusal
+   * whose sentence is replaced with "Request failed" is still a correct
+   * refusal and still tells the operator nothing about the repair to run.
+   */
+  it(`preserves the ${SUBSCRIPTION_DELETE_STALE_PANEL_LINK_CODE} refusal, code and sentence intact`, () => {
+    const captured = runFilter(
+      new ConflictException({
+        code: SUBSCRIPTION_DELETE_STALE_PANEL_LINK_CODE,
+        message: SUBSCRIPTION_DELETE_STALE_PANEL_LINK_MESSAGE,
+      }),
+      {
+        originalUrl: '/api/admin/users/subscriptions/sub-1',
+        headers: { 'x-request-id': 'request.safe-stale-link' },
+      },
+    );
+
+    assert.equal(captured.statusCode, 409);
+    const body = assertResponseBody(captured.body);
+    assert.equal(body.code, SUBSCRIPTION_DELETE_STALE_PANEL_LINK_CODE);
+    assert.equal(body.errorCode, SUBSCRIPTION_DELETE_STALE_PANEL_LINK_CODE);
+    assert.equal(
+      body.message,
+      SUBSCRIPTION_DELETE_STALE_PANEL_LINK_MESSAGE,
+      'the refusal names the remedy; scrubbed, the operator is told only that the request failed',
+    );
+    assert.equal(
+      body.factor,
+      undefined,
+      'this refusal asks for no credential and must not grow a factor field',
+    );
+  });
+
+  /**
+   * The DEVICE refusal, both sentences, for the same reason as its sibling
+   * above — and there are two of them because there are two audiences under one
+   * code. Imported from the module that throws them, so a copy-edit that
+   * introduces `profile`, `token`, a bare uuid or a URL fails here instead of
+   * reaching a customer as "Request failed".
+   */
+  for (const [audience, message] of [
+    ['operator', SUBSCRIPTION_DEVICE_DELETE_STALE_PANEL_LINK_MESSAGE],
+    ['subscriber', SUBSCRIPTION_DEVICE_DELETE_STALE_PANEL_LINK_SUBSCRIBER_MESSAGE],
+  ] as ReadonlyArray<readonly [string, string]>) {
+    it(`preserves the ${SUBSCRIPTION_DEVICE_DELETE_STALE_PANEL_LINK_CODE} refusal (${audience} wording) intact`, () => {
+      const captured = runFilter(
+        new ConflictException({
+          code: SUBSCRIPTION_DEVICE_DELETE_STALE_PANEL_LINK_CODE,
+          message,
+        }),
+        {
+          originalUrl: '/api/admin/users/subscriptions/sub-1/devices/hwid-x',
+          headers: { 'x-request-id': 'request.safe-device-stale-link' },
+        },
+      );
+
+      assert.equal(captured.statusCode, 409);
+      const body = assertResponseBody(captured.body);
+      assert.equal(body.code, SUBSCRIPTION_DEVICE_DELETE_STALE_PANEL_LINK_CODE);
+      assert.equal(body.errorCode, SUBSCRIPTION_DEVICE_DELETE_STALE_PANEL_LINK_CODE);
+      assert.equal(
+        body.message,
+        message,
+        'scrubbed, both audiences are told only that the request failed',
+      );
+      assert.equal(body.factor, undefined);
     });
   }
 

@@ -222,18 +222,65 @@ describe('RemnawaveApiService strict adapter (T-010)', () => {
 
   it('strictDeleteUserDevice sends a stable {userUuid,hwid} body and returns the remaining total', async () => {
     const { service, captured } = build(() => of({ data: { response: { total: 1 } } }));
-    const outcome = await service.strictDeleteUserDevice('user-uuid', 'hwid-x');
+    const outcome = await service.strictDeleteUserDevice('user-uuid', 'hwid-x', {
+      addressing: 'unknown',
+    });
     assert.equal(outcome.kind, 'ok');
     if (outcome.kind !== 'ok') return;
     assert.equal(outcome.value.total, 1);
-    // `captured[0]` is now the panel-version read that decides whether the owner
-    // key is `userUuid` (2.x) or `userId` (3.x) — the delete is the request
-    // AFTER it. Asserting on index 0 would silently start asserting about the
-    // version probe.
     const call = captured.find((c) => c.url === '/api/hwid/devices/delete');
     assert.ok(call !== undefined, 'the delete request was never issued');
     assert.equal(call.method, 'post');
     assert.deepEqual(call.data, { userUuid: 'user-uuid', hwid: 'hwid-x' });
+  });
+
+  it('strictDeleteUserDevice builds its address from the era it was HANDED, and takes no reading of its own', async () => {
+    // THE LAST DESTRUCTIVE METHOD THAT USED TO RE-READ THE ERA.
+    //
+    // Its five siblings (`deletePanelUser`, `deletePanelUserDevice`,
+    // `deleteAllPanelUserDevices`, `regeneratePanelUserSubscription`) all take a
+    // caller-supplied `PanelEraObservation` and, given one, never read the shape
+    // again. This one took its own — and the reading a guard decides on can
+    // legitimately differ from a reading taken microseconds later, because
+    // `getPanelShape()` caches a FAILURE for fifteen seconds. A guard seeing
+    // 'unknown' (fail-open: proceed) while this method saw 'id' is the whole
+    // hazard: the 'id' branch resolves a dead 2.x uuid through the recorded
+    // panel id to whatever profile is LIVE at that address, and unbinds a device
+    // from it.
+    //
+    // TWO CLAIMS, and the second is what makes the first mean anything: the
+    // owner key follows the SUPPLIED era, and no version probe is issued at all.
+    const { service, captured } = build(() => of({ data: { response: { total: 0 } } }));
+
+    const outcome = await service.strictDeleteUserDevice('4711', 'hwid-x', { addressing: 'id' });
+
+    assert.equal(outcome.kind, 'ok');
+    const call = captured.find((c) => c.url === '/api/hwid/devices/delete');
+    assert.deepEqual(call?.data, { userId: 4711, hwid: 'hwid-x' }, 'the 3.x owner key');
+    assert.deepEqual(
+      captured.filter((c) => c.url.startsWith('/api/system/')),
+      [],
+      'and NOT ONE version probe — a second reading is no longer reachable from here',
+    );
+  });
+
+  it('strictListUserDevices addresses the read from a supplied era too', async () => {
+    // A read destroys nothing, so the era stays OPTIONAL here — but both callers
+    // ACT on the answer (the planner persists it as targets, the executor writes
+    // the final one into `postconditionMetadata` as the proof a plan is APPLIED),
+    // so a guarded caller hands its observation over and this proves it lands.
+    const { service, captured } = build(() =>
+      of({ data: { response: { total: 0, devices: [] } } }),
+    );
+
+    const outcome = await service.strictListUserDevices('4711', { addressing: 'id' });
+
+    assert.equal(outcome.kind, 'ok');
+    assert.deepEqual(
+      captured.map((c) => c.url),
+      ['/api/hwid/devices/4711'],
+      'the supplied era addressed the path and no probe was taken',
+    );
   });
 
   it('strictDeleteUserDevice maps 404 to notFound (idempotent-absent)', async () => {
@@ -241,7 +288,9 @@ describe('RemnawaveApiService strict adapter (T-010)', () => {
     // demanding that envelope here would stop an already-absent HWID delete
     // from being idempotent on a healthy 2.7.4/2.8.0 panel.
     const { service } = build(() => throwError(() => axiosError(404)));
-    const outcome = await service.strictDeleteUserDevice('user-uuid', 'gone');
+    const outcome = await service.strictDeleteUserDevice('user-uuid', 'gone', {
+      addressing: 'unknown',
+    });
     assert.equal(outcome.kind, 'notFound');
   });
 });

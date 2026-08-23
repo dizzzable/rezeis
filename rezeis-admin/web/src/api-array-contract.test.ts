@@ -59,10 +59,15 @@
  *  3. An `Array.isArray` in an unrelated branch — e.g. one narrowing a
  *     *request argument* — satisfies Rule A while the response goes unchecked.
  *  4. A wrapper more than one hop away. Validation is followed through a
- *     single directly-called local helper (that is how `referrals-page`'s
- *     `unwrap()` is recognised). Two hops and the rule reports a violation;
- *     three and it would report a false pass if the intermediate hop happened
- *     to contain a matching token.
+ *     single directly-called local helper — the shape the "follows
+ *     validation one hop into a local helper" self-test below pins. That
+ *     self-test is a fixture rather than a pointer at a live file on
+ *     purpose: the example this used to name, `referrals-page`'s
+ *     `unwrap()`, is gone (both of its tabs call a zod-validated fetcher
+ *     now), and a comment naming a deleted helper is a lie no green run
+ *     can catch. Two hops and the rule reports a violation; three and it
+ *     would report a false pass if the intermediate hop happened to
+ *     contain a matching token.
  *  5. `queryClient.setQueryData` writes. A mutation result written into the
  *     cache reaches a component on a *different route* with no `queryFn`
  *     anywhere in the path, so Rule B never sees it. `saveCustomIcons` →

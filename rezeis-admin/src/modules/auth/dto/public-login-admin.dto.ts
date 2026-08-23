@@ -23,7 +23,7 @@ export class PublicLoginAdminDto {
   public password!: string;
 
   /**
-   * Optional 6-digit TOTP code (or 10-char recovery code) supplied with
+   * Optional 6-digit TOTP code (or a recovery code) supplied with
    * the login form when the admin has 2FA enabled. Empty / absent values
    * make the service respond with `totp_required` so the UI can show the
    * second-factor screen.

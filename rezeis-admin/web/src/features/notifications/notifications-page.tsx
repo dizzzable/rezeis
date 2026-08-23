@@ -2,11 +2,14 @@ import { useRef, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
 import { useForm, type Resolver } from 'react-hook-form'
+import type { TFunction } from 'i18next'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import {
+  AlertTriangle,
   Bell,
   Edit2,
+  FileText,
   Filter,
   Hash,
   Info,
@@ -57,6 +60,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { EmojiPicker } from '@/features/broadcast/emoji-picker'
 import { EmojiFieldOverlay } from '@/features/custom-emoji/emoji-field-overlay'
 import { FadeIn } from '@/lib/motion'
+import { PermissionGate } from '@/features/rbac'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -115,7 +119,7 @@ const EVENT_TYPE_CATALOG: Readonly<Record<string, readonly string[]>> = {
   USER: [
     'user.registered', 'user.web_registered', 'user.blocked', 'user.unblocked',
     'user.deleted', 'user.role_changed', 'user.telegram_linked', 'user.email_linked',
-    'user.first_traffic', 'user.accounts_merged',
+    'user.first_traffic', 'user.accounts_merged', 'user.points_adjusted',
   ],
   AUTH: ['auth.web_login', 'auth.password_changed', 'auth.password_recovery'],
   SUBSCRIPTION: [
@@ -134,6 +138,16 @@ const EVENT_TYPE_CATALOG: Readonly<Record<string, readonly string[]>> = {
     'payment.notified_amount_short', 'payment.fulfillment_recovered',
     'payment.method_saved', 'payment.method_unbound', 'payment.method_autopay_updated',
     'payment.autopay_confirmation_required',
+    // A paid renewal add-on line whose capture-time baseline absorbs it, so it
+    // is on course to deliver nothing. Grouped under PAYMENT rather than
+    // SUBSCRIPTION because the decision it asks for is a commercial one: refund
+    // the line, or restore the limit before the renewed term starts.
+    //
+    // NO APOSTROPHES IN THIS LITERAL. `readOperatorCatalogue` in
+    // `test/system-event-registry.spec.ts` reads the catalogue by pairing
+    // single quotes, so one in a comment desynchronises every match after it
+    // and the spec fails with «the parse, not the catalogue, is wrong».
+    'payment.addon_adds_nothing',
     // Grouped here, not under SUBSCRIPTION, because its emit site passes
     // category PAYMENT — which is what picks the Telegram topic it lands in.
     'trial.claim_late_success_over_cap',
@@ -177,7 +191,7 @@ const EVENT_TYPE_CATALOG: Readonly<Record<string, readonly string[]>> = {
     'system.startup', 'system.backup_completed', 'system.broadcast_sent', 'system.error',
     'system.remnawave_sync', 'settings.email.updated', 'notification.template.created',
     'notification.template.updated', 'notification.template.deleted', 'notification.template.seeded',
-    'system.restore_completed', 'system.bulk_users_executed',
+    'system.restore_completed', 'system.bulk_users_executed', 'system.web_push_unconfigured',
     'broadcast.started', 'broadcast.batch_completed', 'broadcast.channel_post_undelivered',
     'import.completed', 'import.failed', 'import.plan_assigned', 'import.sync_enqueued',
     'automation.telegram_notify', 'automation.custom', 'client.error', 'reiwa.error',
@@ -204,6 +218,13 @@ const ALL_EVENT_TYPES: readonly string[] = EVENT_CATEGORIES.flatMap((c) => EVENT
  * `selected` mode. Absent from a saved selection = off.
  */
 const UNREGISTERED_EVENTS_SENTINEL = '*unregistered'
+
+/**
+ * Error-report generation modes, in the order the operator reads them.
+ * Mirrors `ERROR_REPORT_MODES` in `update-telegram-delivery.dto.ts` — the
+ * PATCH rejects anything else.
+ */
+const ERROR_REPORT_MODES = ['off', 'manual', 'auto'] as const
 
 /**
  * One-line plain-text preview of a template body.
@@ -576,6 +597,12 @@ function DeliverySettingsTab() {
   return (
     <div className="space-y-6">
       <TelegramDeliveryForm settings={settings} />
+      {/* Writing this config needs `settings:edit` on the backend
+          (`settings.controller.ts` guards both the PATCH and the /test
+          route), so an admin without it gets no half-usable form. */}
+      <PermissionGate resource="settings" action="edit">
+        <PaymentOpsAlertsSection />
+      </PermissionGate>
       <EmailDeliverySettings />
     </div>
   )
@@ -595,6 +622,14 @@ function TelegramDeliveryForm({ settings }: TelegramDeliveryFormProps) {
   const queryClient = useQueryClient()
 
   const tgConfig = (((settings as Record<string, unknown> | undefined)?.systemNotifications as Record<string, unknown> | undefined)?.telegram ?? {}) as Record<string, unknown>
+
+  // `GET /admin/settings` hands back the RAW stored `telegram` object (only
+  // the credential-bearing ROOT keys are masked), so `errorReports` is
+  // whatever was written last — usually nothing at all. The two fallbacks
+  // below are the backend's own normalisation (`settings.service.ts`
+  // `readTelegramDeliveryConfig`): absent mode reads as `manual`, and
+  // `telegramTxt` is on unless it was explicitly stored as `false`.
+  const errorReportsConfig = (tgConfig.errorReports ?? {}) as Record<string, unknown>
 
   const initialTopics: Record<string, string> = {}
   const rawTopics = (tgConfig.topics ?? {}) as Record<string, unknown>
@@ -632,6 +667,8 @@ function TelegramDeliveryForm({ settings }: TelegramDeliveryFormProps) {
       topics: z.record(z.string(), topicIdRule),
       eventsMode: z.enum(['all', 'selected']),
       events: z.array(z.string()),
+      errorReportMode: z.enum(ERROR_REPORT_MODES),
+      errorReportTelegramTxt: z.boolean(),
     })
     .superRefine((data, ctx) => {
       if (data.enabled && !data.chatId) {
@@ -659,6 +696,11 @@ function TelegramDeliveryForm({ settings }: TelegramDeliveryFormProps) {
       events: Array.isArray(tgConfig.events)
         ? (tgConfig.events as unknown[]).filter((e): e is string => typeof e === 'string')
         : [...ALL_EVENT_TYPES],
+      errorReportMode:
+        errorReportsConfig.mode === 'off' || errorReportsConfig.mode === 'auto'
+          ? errorReportsConfig.mode
+          : 'manual',
+      errorReportTelegramTxt: errorReportsConfig.telegramTxt !== false,
     },
   })
 
@@ -683,6 +725,11 @@ function TelegramDeliveryForm({ settings }: TelegramDeliveryFormProps) {
         topics: topicsPayload,
         eventsMode: values.eventsMode,
         events: values.eventsMode === 'selected' ? values.events : [],
+        // Flat on the wire, nested in storage: the DTO takes
+        // `errorReportMode` / `errorReportTelegramTxt` and the service folds
+        // them into `telegram.errorReports.{mode,telegramTxt}`.
+        errorReportMode: values.errorReportMode,
+        errorReportTelegramTxt: values.errorReportTelegramTxt,
       })
     },
     onSuccess: () => {
@@ -931,6 +978,76 @@ function TelegramDeliveryForm({ settings }: TelegramDeliveryFormProps) {
 
             <Separator />
 
+            {/* Error reports. The defaults are sane, so nothing is being
+                dropped today — but without these two controls `auto` is
+                unreachable (the on-disk archive is never written) and the
+                Telegram attachment can never be turned off. */}
+            <div className="space-y-3">
+              <div>
+                <Label className="flex items-center gap-1.5 text-sm font-semibold">
+                  <FileText className="h-3.5 w-3.5 text-muted-foreground" />
+                  {t('notificationsPage.delivery.errorReportsTitle')}
+                </Label>
+                <p className="text-xs text-muted-foreground">
+                  {t('notificationsPage.delivery.errorReportsDescription')}
+                </p>
+              </div>
+              <FormField
+                control={form.control}
+                name="errorReportMode"
+                render={({ field }) => (
+                  <FormItem className="space-y-1.5">
+                    <FormLabel className="text-xs">
+                      {t('notificationsPage.delivery.errorReportModeLabel')}
+                    </FormLabel>
+                    <div className="flex flex-wrap gap-2">
+                      {ERROR_REPORT_MODES.map((mode) => (
+                        <Button
+                          key={mode}
+                          type="button"
+                          size="sm"
+                          variant={field.value === mode ? 'default' : 'outline'}
+                          aria-pressed={field.value === mode}
+                          onClick={() => field.onChange(mode)}
+                        >
+                          {t(String(`notificationsPage.delivery.errorReportModes.${mode}`))}
+                        </Button>
+                      ))}
+                    </div>
+                    <FormDescription className="text-[11px]">
+                      {t('notificationsPage.delivery.errorReportModeHint')}
+                    </FormDescription>
+                    <FormMessage className="text-[10px]" />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
+                name="errorReportTelegramTxt"
+                render={({ field }) => (
+                  <FormItem className="flex items-center justify-between rounded-lg border px-4 py-3 space-y-0">
+                    <div>
+                      <FormLabel className="font-medium">
+                        {t('notificationsPage.delivery.errorReportTxtLabel')}
+                      </FormLabel>
+                      <FormDescription className="text-xs">
+                        {t('notificationsPage.delivery.errorReportTxtDescription')}
+                      </FormDescription>
+                    </div>
+                    <FormControl>
+                      <Switch
+                        checked={field.value}
+                        onCheckedChange={field.onChange}
+                        aria-label={t('notificationsPage.delivery.errorReportTxtLabel')}
+                      />
+                    </FormControl>
+                  </FormItem>
+                )}
+              />
+            </div>
+
+            <Separator />
+
             {/* Event selection — which event types are delivered to Telegram */}
             <div className="space-y-3">
               <FormField
@@ -1072,6 +1189,305 @@ function TelegramDeliveryForm({ settings }: TelegramDeliveryFormProps) {
                 {t('notificationsPage.delivery.testMessage')}
               </Button>
             </div>
+          </form>
+        </Form>
+      </CardContent>
+    </Card>
+  )
+}
+
+
+// ── Payment webhook failure alerts ───────────────────────────────────────────
+
+/**
+ * Operator alerts for payment webhook failures and manual replays.
+ *
+ * `PaymentOpsAlertService.sendWebhookAlert` returns early while `enabled` is
+ * false or no `chatId` is stored, and the stored default is `enabled: false`
+ * with `chatId: null` — so `notifyWebhookFailed` / `notifyWebhookReplay` reach
+ * nobody until this form is filled in. Its PATCH is the ONLY write path to
+ * that config.
+ *
+ * The config lives in `Settings.systemNotifications.paymentOps` — the same
+ * JSON the alert service reads. (There is also a `Settings.paymentOpsAlerts`
+ * COLUMN, and nothing writes it; the identically-named key on
+ * `GET /admin/settings` is this same `systemNotifications.paymentOps` data
+ * under a different name. Do not wire anything to the column.)
+ */
+const PAYMENT_OPS_QUERY_KEY = [
+  'admin',
+  'settings',
+  'system-notifications',
+  'payment-ops',
+] as const
+
+interface PaymentOpsAlertSettings {
+  enabled: boolean
+  chatId: string | null
+  threadId: string | null
+  hashtag: string | null
+}
+
+/**
+ * Copy for a rejected test alert.
+ *
+ * Both rejections the endpoint has are operator-fixable and need a
+ * DIFFERENT remedy, so one generic "failed to send" toast names neither.
+ * The codes come from `settings.service.ts`; `includes` rather than
+ * equality because Nest wraps the message. Anything else falls back.
+ */
+function paymentOpsTestErrorMessage(error: unknown, t: TFunction): string {
+  const message =
+    typeof error === 'object' && error !== null
+      ? String(
+          (error as { response?: { data?: { message?: unknown } } }).response?.data
+            ?.message ?? '',
+        )
+      : ''
+  if (message.includes('PAYMENT_OPS_ALERT_CHAT_NOT_CONFIGURED')) {
+    return t('notificationsPage.paymentOps.toasts.testChatMissing')
+  }
+  if (message.includes('PAYMENT_OPS_ALERT_BOT_TOKEN_NOT_CONFIGURED')) {
+    return t('notificationsPage.paymentOps.toasts.testTokenMissing')
+  }
+  return t('notificationsPage.paymentOps.toasts.testFailed')
+}
+
+function PaymentOpsAlertsSection() {
+  const { data, isLoading } = useQuery<PaymentOpsAlertSettings>({
+    queryKey: PAYMENT_OPS_QUERY_KEY,
+    queryFn: async () => (await api.get('/admin/settings/system-notifications/payment-ops')).data,
+  })
+
+  if (isLoading || !data) return <Skeleton className="h-64 w-full" />
+  return <PaymentOpsAlertsForm initial={data} />
+}
+
+interface PaymentOpsAlertsFormProps {
+  readonly initial: PaymentOpsAlertSettings
+}
+
+/**
+ * Same shape as `TelegramDeliveryForm`: the parent resolves the query before
+ * mounting this child, so the defaults come straight off `initial`.
+ */
+function PaymentOpsAlertsForm({ initial }: PaymentOpsAlertsFormProps) {
+  const { t } = useTranslation()
+  const queryClient = useQueryClient()
+
+  const schema = z
+    .object({
+      enabled: z.boolean(),
+      chatId: z
+        .string()
+        .trim()
+        .refine((v) => v === '' || /^-?\d+$/.test(v), {
+          message: t('notificationsPage.paymentOps.validation.chatIdInvalid'),
+        }),
+      threadId: z
+        .string()
+        .trim()
+        .refine((v) => v === '' || /^\d+$/.test(v), {
+          message: t('notificationsPage.paymentOps.validation.threadIdInvalid'),
+        }),
+      hashtag: z
+        .string()
+        .trim()
+        .max(64, t('notificationsPage.paymentOps.validation.hashtagTooLong')),
+    })
+    .superRefine((data, ctx) => {
+      // The server rejects the same combination with
+      // PAYMENT_OPS_ALERT_CHAT_REQUIRED; catching it here keeps the operator
+      // from "enabling" alerts that would still go nowhere.
+      if (data.enabled && !data.chatId) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['chatId'],
+          message: t('notificationsPage.paymentOps.validation.chatIdRequired'),
+        })
+      }
+    })
+
+  type FormValues = z.infer<typeof schema>
+
+  const form = useForm<FormValues>({
+    resolver: zodResolver(schema),
+    defaultValues: {
+      enabled: initial.enabled,
+      chatId: initial.chatId ?? '',
+      threadId: initial.threadId ?? '',
+      hashtag: initial.hashtag ?? '',
+    },
+  })
+
+  const saveMutation = useMutation({
+    // Blanks go out as `null`, never `''`: the DTO validates chatId/threadId
+    // with @Matches and only skips a value that is null or absent.
+    mutationFn: (values: FormValues) =>
+      api.patch('/admin/settings/system-notifications/payment-ops', {
+        enabled: values.enabled,
+        chatId: values.chatId.trim() || null,
+        threadId: values.threadId.trim() || null,
+        hashtag: values.hashtag.trim() || null,
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: PAYMENT_OPS_QUERY_KEY })
+      // `GET /admin/settings` embeds the same config as `paymentOpsAlerts`.
+      queryClient.invalidateQueries({ queryKey: adminQueryKeys.settings.all })
+      toast.success(t('notificationsPage.paymentOps.toasts.saved'))
+    },
+    onError: () => toast.error(t('notificationsPage.paymentOps.toasts.saveFailed')),
+  })
+
+  // Delivers through the SAVED config — the endpoint re-reads the stored chat
+  // id and ignores the form. Save first, then test.
+  const testMutation = useMutation({
+    mutationFn: () => api.post('/admin/settings/system-notifications/payment-ops/test'),
+    onSuccess: () => toast.success(t('notificationsPage.paymentOps.toasts.testSent')),
+    // A test that cannot be sent is the operator's only warning that the
+    // real alerts cannot be sent either, so it has to say which of the two
+    // things is missing.
+    onError: (error) => toast.error(paymentOpsTestErrorMessage(error, t)),
+  })
+
+  // Same react-doctor exemption as the Telegram form above.
+  // eslint-disable-next-line react-hooks/incompatible-library
+  const chatId = form.watch('chatId')
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <AlertTriangle className="h-4 w-4" />
+          {t('notificationsPage.paymentOps.title')}
+        </CardTitle>
+        <CardDescription>
+          {t('notificationsPage.paymentOps.description')}
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <Form {...form}>
+          <form
+            onSubmit={form.handleSubmit((values) => saveMutation.mutate(values))}
+            className="space-y-5"
+          >
+            <FormField
+              control={form.control}
+              name="enabled"
+              render={({ field }) => (
+                <FormItem className="flex items-center justify-between rounded-lg border px-4 py-3 space-y-0">
+                  <div className="flex items-center gap-2">
+                    <Power className="h-4 w-4 text-muted-foreground" />
+                    <div>
+                      <FormLabel className="font-medium">
+                        {t('notificationsPage.paymentOps.enableLabel')}
+                      </FormLabel>
+                      <FormDescription className="text-xs">
+                        {t('notificationsPage.paymentOps.enableDescription')}
+                      </FormDescription>
+                    </div>
+                  </div>
+                  <FormControl>
+                    <Switch
+                      checked={field.value}
+                      onCheckedChange={field.onChange}
+                      aria-label={t('notificationsPage.paymentOps.enableLabel')}
+                    />
+                  </FormControl>
+                </FormItem>
+              )}
+            />
+
+            <div className="grid gap-4 sm:grid-cols-2">
+              <FormField
+                control={form.control}
+                name="chatId"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel className="flex items-center gap-1.5">
+                      <Smartphone className="h-3.5 w-3.5 text-muted-foreground" />
+                      {t('notificationsPage.paymentOps.chatIdLabel')}
+                    </FormLabel>
+                    <FormControl>
+                      <Input
+                        {...field}
+                        placeholder={t('notificationsPage.paymentOps.chatIdPlaceholder')}
+                      />
+                    </FormControl>
+                    <FormDescription className="text-[11px]">
+                      {t('notificationsPage.paymentOps.chatIdHint')}
+                    </FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
+                name="threadId"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel className="flex items-center gap-1.5">
+                      <Hash className="h-3.5 w-3.5 text-muted-foreground" />
+                      {t('notificationsPage.paymentOps.threadIdLabel')}
+                    </FormLabel>
+                    <FormControl>
+                      <Input
+                        {...field}
+                        placeholder={t('notificationsPage.paymentOps.threadIdPlaceholder')}
+                      />
+                    </FormControl>
+                    <FormDescription className="text-[11px]">
+                      {t('notificationsPage.paymentOps.threadIdHint')}
+                    </FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+            </div>
+
+            <FormField
+              control={form.control}
+              name="hashtag"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel className="flex items-center gap-1.5">
+                    <Hash className="h-3.5 w-3.5 text-muted-foreground" />
+                    {t('notificationsPage.paymentOps.hashtagLabel')}
+                  </FormLabel>
+                  <FormControl>
+                    <Input
+                      {...field}
+                      placeholder={t('notificationsPage.paymentOps.hashtagPlaceholder')}
+                    />
+                  </FormControl>
+                  <FormDescription className="text-[11px]">
+                    {t('notificationsPage.paymentOps.hashtagHint')}
+                  </FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <Separator />
+
+            <div className="flex gap-3">
+              <Button type="submit" disabled={saveMutation.isPending}>
+                {saveMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
+                {t('notificationsPage.paymentOps.save')}
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => testMutation.mutate()}
+                disabled={testMutation.isPending || !chatId.trim()}
+              >
+                {testMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Send className="mr-2 h-4 w-4" />}
+                {t('notificationsPage.paymentOps.sendTest')}
+              </Button>
+            </div>
+            <p className="text-[11px] text-muted-foreground rounded-md bg-muted/50 px-3 py-2">
+              {t('notificationsPage.paymentOps.testHint')}
+            </p>
           </form>
         </Form>
       </CardContent>

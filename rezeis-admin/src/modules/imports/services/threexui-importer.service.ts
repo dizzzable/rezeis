@@ -3,6 +3,7 @@ import { ImportStatus, Prisma, SyncAction, SubscriptionStatus } from '@prisma/cl
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { ImportSummary } from '../interfaces/import-summary.interface';
+import { panelTrafficLimitToGb } from '../../remnawave/utils/panel-traffic-limit.util';
 
 /**
  * Shape of a 3x-ui client record as exported from the panel's SQLite/PG DB.
@@ -257,9 +258,10 @@ export class ThreeXuiImporterService {
     });
 
     const status = this.mapStatus(client);
-    const trafficLimitGb = client.totalGb > 0
-      ? Math.round(client.totalGb / (1024 * 1024 * 1024))
-      : null;
+    // `totalGb` is 3x-ui's own name for a BYTE count, not gigabytes — the
+    // interface above says so, and the `up + down >= totalGb` comparison
+    // further down is bytes on both sides. Same conversion, same one rule.
+    const trafficLimitGb = panelTrafficLimitToGb(client.totalGb);
     const expiresAt = client.expiryTime > 0
       ? new Date(client.expiryTime)
       : null;

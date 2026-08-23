@@ -41,7 +41,15 @@ describe('PaymentsPage RBAC gating', () => {
       }
       return { data: {} }
     })
-    grantPermissions([{ resource: 'payments', action: 'view' }])
+    // `payment_webhooks:view`, not `payments:view`, is what the events route
+    // requires (admin-payment-webhooks.controller.ts:30). This spec used to
+    // grant only the latter and still saw a row, because the mock answered a
+    // request the real server refuses — which is the defect the tab gate now
+    // matches. `payments-tab-permissions.test.tsx` covers the refusal.
+    grantPermissions([
+      { resource: 'payments', action: 'view' },
+      { resource: 'payment_webhooks', action: 'view' },
+    ])
     const user = userEvent.setup()
 
     renderWithProviders(<PaymentsPage />)

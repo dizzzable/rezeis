@@ -15,6 +15,7 @@ import { useTabSync } from '@/lib/use-tab-sync';
 import { HUB_TABS } from '@/components/layout/admin-nav-config';
 import { SavedFiltersBar } from '@/components/SavedFiltersBar';
 import { ExportDropdown } from '@/components/ExportDropdown';
+import { PermissionGate } from '@/features/rbac';
 import {
   Select,
   SelectContent,
@@ -560,14 +561,21 @@ function SystemEventsTab() {
                   </SelectContent>
                 </Select>
               </div>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => void downloadEventsTxt(true)}
-              >
-                <Download className="mr-1.5 h-4 w-4" />
-                {t('auditPage.systemEvents.exportTxt')}
-              </Button>
+              {/* The export route now demands the dedicated `audit:export`
+                  action rather than `audit:view`, because it hands over the
+                  whole log as a file. `operator` and `finance` hold the read
+                  and not the export, so without this gate they would see a
+                  button that 403s. */}
+              <PermissionGate resource="audit" action="export">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void downloadEventsTxt(true)}
+                >
+                  <Download className="mr-1.5 h-4 w-4" />
+                  {t('auditPage.systemEvents.exportTxt')}
+                </Button>
+              </PermissionGate>
             </div>
           </div>
         </CardHeader>

@@ -9,12 +9,16 @@ import {
   USER_DELETE_PROTECTED_HISTORY_MESSAGE,
 } from '../src/modules/users/services/user-deletion.service';
 
+const ADMIN = { id: 'admin-1' } as never;
+const REQUEST_METADATA = { requestId: null, remoteAddress: null, userAgent: null };
+
 function buildService(deleteUser: (userId: string) => Promise<void>) {
   const emitted: Array<{ readonly level: string; readonly type: string }> = [];
   const prisma = {
     user: {
       findFirst: async () => ({ id: 'user-1', telegramId: 42n, isBlocked: false }),
     },
+    adminAuditLog: { create: async () => undefined },
   };
   const events = {
     warn: (type: string) => emitted.push({ level: 'warn', type }),
@@ -47,7 +51,12 @@ async function captureResolveWhere(token: string): Promise<Record<string, unknow
     { deleteUser: async () => undefined } as never,
   );
 
-  await service.execute({ userIds: [token], action: 'block', adminId: 'admin-1' });
+  await service.execute({
+    userIds: [token],
+    action: 'block',
+    currentAdmin: ADMIN,
+    requestMetadata: REQUEST_METADATA,
+  });
   assert.equal(calls.length, 1, 'expected exactly one resolve lookup');
   return calls[0].where;
 }
@@ -91,7 +100,8 @@ describe('BulkUserOperationsService token resolution', () => {
     const result = await service.execute({
       userIds: ['99999999999999999999999999'],
       action: 'block',
-      adminId: 'admin-1',
+      currentAdmin: ADMIN,
+      requestMetadata: REQUEST_METADATA,
     });
 
     assert.equal(result.failed, 0);
@@ -109,7 +119,8 @@ describe('BulkUserOperationsService user deletion', () => {
     const result = await service.execute({
       userIds: ['user-1'],
       action: 'delete',
-      adminId: 'admin-1',
+      currentAdmin: ADMIN,
+      requestMetadata: REQUEST_METADATA,
     });
 
     assert.deepStrictEqual(deleted, ['user-1']);
@@ -132,7 +143,8 @@ describe('BulkUserOperationsService user deletion', () => {
     const result = await service.execute({
       userIds: ['user-1'],
       action: 'delete',
-      adminId: 'admin-1',
+      currentAdmin: ADMIN,
+      requestMetadata: REQUEST_METADATA,
     });
 
     assert.equal(result.succeeded, 0);

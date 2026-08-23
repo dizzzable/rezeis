@@ -50,8 +50,9 @@ export class AdminPanelLinkReconciliationController {
   ) {}
 
   /**
-   * Repairs subscriptions whose panel profile exists but whose `remnawave_id`
-   * is NULL.
+   * Repairs subscriptions that cannot name the panel profile they own: the ones
+   * whose `remnawave_id` is NULL, and — on a panel PROVEN to be 3.x — the ones
+   * still holding a 2.x uuid the panel no longer answers to.
    *
    * DRY BY DEFAULT. The body must carry `dryRun: false` — the boolean, not a
    * string — for anything to be written. An omitted, misspelled or mistyped
@@ -92,17 +93,54 @@ export class AdminPanelLinkReconciliationController {
             scanned: report.scanned,
             linked: report.linked,
             unrepaired: report.unrepaired.length,
+            // WHICH PANEL WAS THIS. The sweep only touches stale identities on
+            // a panel it PROVED is 3.x, so a run that repaired none of them is
+            // ambiguous without the era: no such rows, or the sweep never
+            // looked. `null` means it could not tell and deliberately did not
+            // guess.
+            panelEra: report.panelEra,
+            staleIdentityScanned: report.staleIdentityScanned,
+            duplicatePairs: report.duplicatePairs,
+            // How many of those pairs came from two live rows STORING one
+            // identity rather than from resolving a broken one. Recorded
+            // separately because the two carry different instructions: on this
+            // kind BOTH halves are bound to the live profile, so an operator
+            // reading the entry later must not go looking for the unbound one.
+            sharedIdentityPairs: report.sharedIdentityPairs,
             // The rows themselves, not just a count: this write hands a
             // customer a panel profile, and an audit entry that cannot say
             // WHICH profile went to WHICH subscription cannot be used to undo
             // a mistake.
+            //
+            // `storedRemnawaveId` is half of that undo. For the stale
+            // population the repair OVERWRITES an identity, so the audit is the
+            // only surviving record of what the row used to hold; without it
+            // the entry says where the row landed and not where it came from.
             links: report.repaired.map((row) => ({
               subscriptionId: row.subscriptionId,
               userId: row.userId,
               remnawaveId: row.remnawaveId,
+              storedRemnawaveId: row.storedRemnawaveId,
               panelId: row.panelId,
               resolvedBy: row.resolvedBy,
+              holdsLiveIdentity: row.holdsLiveIdentity,
             })),
+            // DIAGNOSED, NOT WRITTEN — and recorded anyway, because it is the
+            // most dangerous fact this run produced. Each pair is two rows of
+            // one customer on one panel profile, and exactly one of them holds
+            // the LIVE identity: the newer, wrong-looking duplicate. Deleting
+            // that half enqueues a panel DELETE against a paying customer's
+            // live profile, so which half is which has to outlive the response
+            // body an operator read once.
+            duplicatePairRows: report.unrepaired
+              .filter((row) => row.outcome === 'duplicatePair')
+              .map((row) => ({
+                subscriptionId: row.subscriptionId,
+                userId: row.userId,
+                storedRemnawaveId: row.storedRemnawaveId,
+                duplicateOfSubscriptionId: row.duplicateOfSubscriptionId,
+                holdsLiveIdentity: row.holdsLiveIdentity,
+              })),
           } as Prisma.InputJsonObject,
           adminUser: { connect: { id: admin.id } },
         },

@@ -89,6 +89,12 @@ export const en = {
       nameLabel: 'Name',
       currentPlan: 'Current plan',
       expiresAt: 'Expires',
+      // Unlimited is a state we KNOW, not one we are missing. This endpoint
+      // maps `expireAt: s.expiresAt?.toISOString()`, so a subscription with
+      // no expiry arrives with the key ABSENT — and the em dash that used to
+      // stand here said "we do not know" about it. Same copy as
+      // `subscriptionsPage.unlimitedExpiry`, which names the same state.
+      unlimitedExpiry: 'Unlimited',
       subsCount: 'Total subscriptions',
       noActiveSub: 'No active subscription',
       role: 'Role',
@@ -124,6 +130,9 @@ export const en = {
       trafficReset: 'Traffic reset',
       trafficResetFailed: 'Reset error',
       subDeleted: 'Subscription deleted',
+      subDeleteFailed: 'The subscription was not deleted',
+      subDeleteRefusedStaleLink:
+        'Not deleted — the stored panel link is stale. Repair the link first.',
       subGranted: 'Subscription granted',
       partnerCreated: 'Partner created',
       statusChanged: 'Status changed',
@@ -137,6 +146,8 @@ export const en = {
       deleteFailed: 'Delete error',
       notifySent: 'Notification sent',
       notifyFailed: 'Send error',
+      notifyPartial: 'Saved to the feed, but some channels did not deliver',
+      notifyFeedOnly: "Saved to the user's feed only",
       remnawaveLinkRequired: 'Saved locally. Link the legacy Remnawave profile before it can be updated there.',
       remnawaveLinked: 'Remnawave profile linked',
     },
@@ -147,6 +158,10 @@ export const en = {
       assignPlanLabel: 'Assign plan',
       assignPlan: 'Assign plan',
       archivedTag: 'archived',
+      // The plan picker's THIRD traffic state. `null` prints as `(∞)` and a
+      // real cap prints as `(N GB)`; a legacy `0` used to print as neither,
+      // i.e. exactly like an uncapped plan. See `planTrafficSuffix`.
+      planTrafficZero: '0 GB — no traffic',
       selectPlan: 'Select a plan',
       assignPlanPickSubs: 'Select subscriptions to assign the plan to',
       assignPlanSelectAll: 'Select all',
@@ -178,12 +193,24 @@ export const en = {
         removeFailed: 'Failed to remove device',
       },
       trafficLabel: 'Traffic limit (GB)',
+      trafficUnlimitedLabel: 'Unlimited traffic',
+      trafficNeedsValue: 'Enter a traffic limit in GB, or turn "Unlimited traffic" back on',
       devicesLabel: 'Device limit',
       resetBtn: 'Reset',
       linkCopied: 'Subscription link copied',
       copyLink: 'Copy link',
       saveBtn: 'Save',
       noChanges: 'No changes to save',
+      // The sibling of `trafficNeedsValue` above, for the other gesture this
+      // screen can receive and cannot carry out. react-day-picker deselects on
+      // a second click of the selected day, so "make this unlimited" is a
+      // gesture the operator CAN perform — and `PATCH .../subscriptions/:id`
+      // guards its write with `body.expiresAt !== null`, so clearing an expiry
+      // is not something any request from this screen can do. Refuse by name
+      // rather than fall through to `noChanges`, which would be a lie about a
+      // change they really did make, and which sent operators hunting for a
+      // button that does not exist.
+      expiryCannotBeCleared: 'Nothing was saved: pick an expiry date. This screen cannot make a subscription unlimited.',
       status: {
         ACTIVE: 'Active',
         DISABLED: 'Disabled',
@@ -201,6 +228,8 @@ export const en = {
       traffic: 'Traffic:',
       devices: 'Devices:',
       expires: 'Expires:',
+      // The subscription card's spelling of `profile.unlimitedExpiry`.
+      unlimitedExpiry: 'Unlimited',
       resetTraffic: 'Reset traffic',
       giveSubDialog: 'Give subscription',
       quickActions: {
@@ -232,12 +261,103 @@ export const en = {
         linkPlaceholder: 'UUID or numeric profile id',
         linkInvalid: 'Enter a valid Remnawave profile identifier: a UUID (panel 2.x) or a numeric profile id (panel 3.x).',
         linkAction: 'Link profile',
+        // Presence only — what the PANEL LOOKUP knows about the profile. The
+        // job's fate is a different question with a different subject and lives
+        // under `syncFailure` at card level; this chip sits beside the profile
+        // name and id, so anything it says is read as being about the link.
+        presence: {
+          LINKED: 'Linked',
+          UNLINKED: 'Not linked',
+          MISSING: 'Not found on the panel',
+          UNAVAILABLE: 'Panel unavailable',
+        },
+      },
+      // The job's fate. Names the CHANGE that did not land, never the profile.
+      syncOutcome: {
+        toast: {
+          notLinked: 'Nothing to sync — no Remnawave profile is linked.',
+          panelUnavailable: 'The Remnawave panel could not be reached. Nothing was written — try again.',
+          profileMissing: 'The panel does not know this profile. The link is broken.',
+          refused: 'The panel refused the sync. Nothing was written.',
+        },
+        synced: {
+          refreshed: 'Refreshed from the panel: {{fields}}',
+          nothingStated: 'The panel stated nothing new — nothing was changed.',
+        },
+        notLinked: {
+          headline: 'No Remnawave profile is linked',
+          hint: 'Nothing to sync. Link a profile first.',
+        },
+        panelUnavailable: {
+          headline: 'The panel could not be reached',
+          hint: 'Nothing was written, and nothing is broken. Try again in a moment.',
+        },
+        profileMissing: {
+          headline: 'The panel does not know this profile',
+          hint: 'The link is broken — repair it before deleting anything.',
+        },
+        refused: {
+          headline: 'The sync was refused',
+          hint: 'Nothing was written. The panel service gave a reason this build does not recognise; it is quoted below verbatim.',
+        },
+        drift: {
+          headline: 'The panel is enforcing different limits:',
+          devices: 'Devices: panel {{panel}}, assigned {{assigned}}',
+          // THREE traffic sentences, not one with an interpolated word.
+          // "unlimited" cannot go into a sentence that ends in " GB", and
+          // unlimited has to be sayable: `trafficLimit: null` is unlimited
+          // while `0` means genuinely no traffic, and an operator has to be
+          // able to tell those two apart on this line. They used to render
+          // identically.
+          traffic: 'Traffic: panel {{panel}} GB, assigned {{assigned}} GB',
+          trafficPanelUnlimited: 'Traffic: panel unlimited, assigned {{assigned}} GB',
+          trafficAssignedUnlimited: 'Traffic: panel {{panel}} GB, assigned unlimited',
+        },
+        field: {
+          configUrl: 'subscription link',
+          remnawavePanelId: 'panel id',
+          remnawavePanelUsername: 'panel username',
+          expiresAt: 'expiry',
+        },
+      },
+      syncFailure: {
+        headline: 'Not applied on the panel: {{what}}',
+        linkIntact: 'The profile itself is linked and reachable — only this change is outstanding.',
+        attempts: 'Attempts: {{attempts}}',
+        what: {
+          CREATE: 'creating the profile',
+          UPDATE: 'the latest settings — limits, expiry, squads',
+          DELETE: 'removing the profile',
+          TRAFFIC_RESET: 'the traffic counter reset',
+          unknown: 'the latest change',
+        },
+      },
+      deleteRefusal: {
+        openReconciliation: 'Open the panel link repair',
+        stalePanelLink: {
+          headline: 'Not deleted — the stored panel link is stale',
+          body:
+            'This subscription still stores a 2.x Remnawave identifier while the panel now answers only to 3.x numeric ids, so the stored link can no longer be trusted to name the right customer account. Deleting it would remove whatever the address fallback resolves to — on an unrepaired duplicate pair, that is a paying customer’s live profile. Nothing was deleted.',
+          step1:
+            'Open the panel link repair on the Subscriptions page and run the preview.',
+          step2: 'Repair for real once the preview looks right.',
+          step3: 'Come back here and delete this subscription again.',
+        },
+      },
+      deleteConfirm: {
+        title: 'Delete this subscription?',
+        subject: '“{{plan}}” — the subscription of {{customer}}.',
+        panelLinked:
+          'Its Remnawave profile is deleted from the panel as well, so every device connected through this subscription stops working immediately.',
+        panelUnlinked:
+          'No Remnawave profile is linked to this subscription, so nothing is removed from the panel.',
+        irreversible:
+          'The subscription cannot be brought back. Payments and the rest of the customer’s history stay where they are.',
+        action: 'Delete subscription',
       },
       deleteTitle: 'Delete',
     },
     partner: {
-      notPartner: 'User is not a partner',
-      createPartner: 'Create partner',
       profileTitle: 'Partner profile',
       active: 'Active',
       inactive: 'Disabled',
@@ -278,6 +398,7 @@ export const en = {
       bypassToggleHint: 'VIP bypass: this user can register and pass the invite gate even while the platform is in “Invite only” mode. Applies independently of global/per-user referral limits.',
       linkTtlEnabled: 'Enforce link TTL',
       linkTtlSeconds: 'Link TTL (seconds)',
+      linkTtlMin: 'Minimum {{min}} seconds. Shorter links expire before they can be shared.',
       slotsEnabled: 'Use slot capacity',
       initialSlots: 'Initial slots',
       refillThreshold: 'Refill threshold (qualified referrals)',
@@ -462,6 +583,27 @@ export const en = {
       sendNotification: 'Send notification',
       messagePlaceholder: 'Message text (HTML supported)…',
       send: 'Send',
+      channelsLabel: 'Deliver via',
+      channelsLoading: 'Checking which channels can reach this user…',
+      channelsFeedNote: "The message is always saved to the user's in-app feed.",
+      channel_telegram: 'Telegram',
+      channel_webpush: 'Browser push',
+      channelUnavailable: {
+        noTelegramId: 'No Telegram account linked',
+        botBlocked: 'User has blocked the bot',
+        pushNotConfigured: 'Web push is not configured — Settings → Web-push',
+        noSubscription: 'User has no browser registered for push',
+        error: 'Unavailable',
+      },
+      channelFailure: {
+        relayUnavailable: 'Telegram relay unavailable — message not sent',
+        pushRejected: 'Every registered browser rejected the push',
+        error: 'Unexpected error',
+      },
+      resultTitle: 'Delivery result',
+      resultDelivered: 'Delivered',
+      resultSkipped: 'Not selected',
+      resultPushCount: 'Delivered to {{delivered}} of {{attempted}} browsers',
     },
   },
   userDetailPage: {
@@ -634,6 +776,48 @@ export const en = {
         level: 'Level',
         source: 'Source',
         qualified: 'Qualified',
+      },
+      invitesBlock: {
+        titlePlain: 'Invites issued',
+        title: 'Invites issued ({{count}})',
+        loadFailed: 'Could not load this user’s invites',
+        empty: 'No invites issued yet',
+        create: 'Create invite',
+        created: 'Invite created',
+        createFailed: 'Could not create the invite',
+        createRefusedQuota:
+          'The server refused: this user has no invite slots left. Revoke one, or raise the limit on the Invites tab.',
+        quotaLoading: 'Checking the invite quota…',
+        quotaUnknown: 'The invite quota could not be read, so creating an invite is held. Reopen the tab to try again.',
+        quotaExhausted: 'All {{total}} invite slots are in use ({{used}} live). Revoke one, or raise the limit on the Invites tab.',
+        quotaRemaining: '{{remaining}} of {{total}} invite slots free',
+        quotaUnlimited: 'No slot limit applies to this user',
+        noExpiry: 'Never expires',
+        expiresOn: 'Expires {{date}}',
+        revoke: 'Revoke',
+        revoked: 'Invite revoked',
+        revokeFailed: 'Could not revoke the invite',
+        status: {
+          active: 'Active',
+          consumed: 'Consumed',
+          expired: 'Expired',
+          revoked: 'Revoked',
+        },
+      },
+      rewardsBlock: {
+        titlePlain: 'Rewards earned',
+        title: 'Rewards earned ({{count}})',
+        loadFailed: 'Could not load this user’s rewards',
+        empty: 'No rewards yet',
+        issue: 'Issue',
+        issued: 'Reward issued',
+        issueFailed: 'Could not issue the reward',
+        statusIssued: 'Issued',
+        statusPending: 'Pending',
+        types: {
+          POINTS: 'Points',
+          EXTRA_DAYS: 'Extra days',
+        },
       },
     },
     notifyDialog: {

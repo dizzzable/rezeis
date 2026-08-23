@@ -3,24 +3,7 @@ import { Canvas, CanvasProps, RootState, ThreeEvent, useThree } from '@react-thr
 import React, { useEffect, useMemo, useRef } from 'react';
 import * as THREE from 'three';
 
-/**
- * Delete the GPU objects hanging off a scene before the context that owns them
- * goes away. Losing the context frees the driver allocations but leaves every
- * three.js wrapper — geometry buffers, material programs — attached to the
- * renderer's internal maps.
- */
-const releaseSceneResources = (scene: THREE.Object3D): void => {
-  scene.traverse(object => {
-    const mesh = object as Partial<THREE.Mesh>;
-    mesh.geometry?.dispose();
-    const material = mesh.material;
-    if (Array.isArray(material)) {
-      for (const entry of material) entry.dispose();
-    } else {
-      material?.dispose();
-    }
-  });
-};
+import { releaseFiberRoot } from './fiber-render-scale';
 
 interface GooeyFilterProps {
   id?: string;
@@ -215,25 +198,19 @@ export default function PixelTrail({
 }: PixelTrailProps) {
   const rootRef = useRef<RootState | null>(null);
 
-  // React Three Fiber does release the context on unmount, but from inside a
-  // 500 ms setTimeout and without ever calling gl.dispose(). WebKit allows only
-  // 16 live WebGL contexts per web-content process before it starts recycling
-  // the oldest and handing out an unrecoverable SyntheticLostContext, and this
-  // is a GLOBAL cursor effect an operator toggles from a settings page while
-  // trying the other seven — so the half-second overlaps itself. Release it
-  // here instead, synchronously, while unmounting. Same repair, same reason as
-  // Antigravity / Beams / Dither / Silk.
+  // Hand the context back synchronously while unmounting rather than leaving it
+  // to fiber's 500 ms setTimeout. `releaseFiberRoot` carries the WebKit ceiling
+  // that makes half a second too long, and the reason fiber's deferred call
+  // must not repeat the release afterwards — one owner, one place. The pressure
+  // is worse here than on the card effects: this is a GLOBAL cursor effect an
+  // operator toggles from a settings page while trying the other seven, so the
+  // half-second overlaps itself.
   useEffect(
     () => () => {
       const root = rootRef.current;
       rootRef.current = null;
       if (root === null) return;
-      releaseSceneResources(root.scene);
-      // dispose() detaches THREE.WebGLRenderer's own webglcontextlost /
-      // webglcontextrestored listeners, so the loss below cannot re-enter the
-      // restore path and rebuild what we are freeing.
-      root.gl.dispose();
-      root.gl.forceContextLoss();
+      releaseFiberRoot(root);
     },
     []
   );

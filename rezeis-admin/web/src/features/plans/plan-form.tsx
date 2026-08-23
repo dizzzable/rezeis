@@ -40,6 +40,11 @@ import {
   type PlanLimitChange,
 } from './plan-limit-scope'
 import {
+  selectableTransitionTargets,
+  strandedTransitionTargets,
+  type StrandedTransitionTarget,
+} from './plan-transition-targets'
+import {
   PLAN_AVAILABILITIES,
   PLAN_CURRENCIES,
   PLAN_TRAFFIC_STRATEGIES,
@@ -169,9 +174,66 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
     externalSquadsQuery.isError ||
     (!externalSquadsQuery.isPending && externalSquads === undefined)
 
-  // All plans for upgrade/replacement picker (exclude current plan)
-  const { data: allPlans } = usePlans()
-  const otherPlans = (allPlans ?? []).filter((p) => p.id !== plan?.id && p.isActive && !p.isArchived)
+  // Who may be OFFERED as an upgrade or replacement target.
+  //
+  // `selectableTransitionTargets` is the server's rule, not a convenience
+  // filter. This was `p.isActive && !p.isArchived`, which is strictly wider
+  // than the backend's `ASSIGNABLE_TRANSITION_AVAILABILITIES` and therefore
+  // offered TRIAL plans the write refuses. An operator picked one and was told
+  // so in English, naming a cuid that appeared nowhere on this form.
+  const plansQuery = usePlans()
+  const { data: allPlans } = plansQuery
+  const otherPlans = useMemo(
+    () => selectableTransitionTargets(allPlans, plan?.id),
+    [allPlans, plan?.id],
+  )
+
+  // Targets that are SELECTED but no longer selectable — archived, switched
+  // off, converted to a trial, or deleted since the day they were saved. They
+  // stay in state and keep being submitted, so the operator has to be able to
+  // see them and take them off; that is the half of the defect that made the
+  // plan permanently unsaveable.
+  //
+  // GATED ON THE CATALOG HAVING RESOLVED. `strandedTransitionTargets` answers
+  // `[]` while `allPlans` is undefined and that answer means "not known yet",
+  // NOT "nothing is wrong" — without this gate the form opens clean and sprouts
+  // warnings a moment later, which reads as the panel changing its mind.
+  const catalogResolved = !plansQuery.isPending && allPlans !== undefined
+  const strandedUpgrades = useMemo(
+    () => (catalogResolved ? strandedTransitionTargets(allPlans, upgradeToPlanIds, plan?.id) : []),
+    [catalogResolved, allPlans, upgradeToPlanIds, plan?.id],
+  )
+  // Bound to `isArchived`, deliberately NOT to the renewal mode.
+  // `plan-form-schema.ts:195` submits `replacementPlanIds` whenever the plan is
+  // archived, while the picker below only exists under REPLACE_ON_RENEW — so a
+  // SELF_RENEW plan submits ids that no control on the form renders. Everything
+  // that is submitted is shown; nothing that is dropped raises an alarm.
+  const strandedReplacements = useMemo(
+    () =>
+      catalogResolved && isArchived
+        ? strandedTransitionTargets(allPlans, replacementPlanIds, plan?.id)
+        : [],
+    [catalogResolved, isArchived, allPlans, replacementPlanIds, plan?.id],
+  )
+
+  // What the operator is told INSTEAD of a round trip. Keyed under names of
+  // their own rather than `replacementPlanIds`, which the schema already owns:
+  // both messages can then be on screen at once, and neither overwrites the
+  // other's field error.
+  const strandedErrors = useMemo<Record<string, string>>(() => {
+    const errors: Record<string, string> = {}
+    if (strandedUpgrades.length > 0) {
+      errors.upgradeToPlanIdsStranded = t('planForm.transitions.strandedUpgradeError', {
+        plans: strandedUpgrades.map(strandedTargetLabel).join(', '),
+      })
+    }
+    if (strandedReplacements.length > 0) {
+      errors.replacementPlanIdsStranded = t('planForm.transitions.strandedReplacementError', {
+        plans: strandedReplacements.map(strandedTargetLabel).join(', '),
+      })
+    }
+    return errors
+  }, [strandedUpgrades, strandedReplacements, t])
 
   const addDuration = () => {
     setDurations([...durations, { days: '30', prices: [{ currency: 'RUB', price: '0' }] }])
@@ -290,10 +352,18 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
     form.reset(draft)
     void form.handleSubmit(
       (data) => {
+        // Schema-valid and still unsaveable. The schema validates the draft
+        // against itself and has never seen the plan catalog, so this is the
+        // one place where "these ids are selected" and "the server will refuse
+        // them" can meet before the request goes out.
+        if (Object.keys(strandedErrors).length > 0) {
+          setFormErrors(strandedErrors)
+          return
+        }
         setFormErrors({})
         onSubmit(data)
       },
-      (errors) => setFormErrors(flattenHookFormErrors(errors)),
+      (errors) => setFormErrors({ ...flattenHookFormErrors(errors), ...strandedErrors }),
     )(e)
   }
 
@@ -797,6 +867,18 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
                 <FieldError message={formErrors.replacementPlanIds} />
               </div>
             )}
+
+            {/* OUTSIDE the renew-mode gate on purpose. `replacementPlanIds` is
+                submitted whenever the plan is archived, under both renewal
+                modes, but the picker above only exists under REPLACE_ON_RENEW.
+                Put these chips inside it and a SELF_RENEW plan goes on
+                submitting ids that appear on no screen — which is the original
+                defect, moved rather than fixed. */}
+            <StrandedTransitionChips
+              targets={strandedReplacements}
+              error={formErrors.replacementPlanIdsStranded}
+              onRemove={(id) => setReplacementPlanIds((prev) => prev.filter((x) => x !== id))}
+            />
           </div>
         )}
       </div>
@@ -836,6 +918,11 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
             <p className="text-xs text-muted-foreground">{t('planForm.upgrade.noPlans')}</p>
           )}
         </div>
+        <StrandedTransitionChips
+          targets={strandedUpgrades}
+          error={formErrors.upgradeToPlanIdsStranded}
+          onRemove={(id) => setUpgradeToPlanIds((prev) => prev.filter((x) => x !== id))}
+        />
       </div>
 
       {/* Allowed Users (only when availability = ALLOWED) */}
@@ -907,6 +994,74 @@ function FieldError({ message }: { readonly message?: string }) {
 }
 
 /**
+ * What to call a stranded target.
+ *
+ * The name whenever the plan is still in the catalog; the raw id ONLY when it
+ * is gone and there is nothing else left to call it. Naming a plan by its cuid
+ * is what made the server's refusal unactionable in the first place, so it is
+ * the last resort here, not the default.
+ */
+function strandedTargetLabel(target: StrandedTransitionTarget): string {
+  return target.name ?? target.id
+}
+
+/**
+ * Selected transition targets the server will refuse — and the way off them.
+ *
+ * These ids are already saved on the plan and are submitted on every save; the
+ * pickers above cannot show them, because a plan that may not be OFFERED is
+ * filtered out of the list the pickers are built from. Rendering them here is
+ * the only thing standing between the operator and a plan that can never be
+ * saved again.
+ *
+ * `destructive` rather than `warning`: it is the one variant in
+ * `badgeVariants` built from theme tokens (`bg-destructive` /
+ * `text-destructive-foreground`), so it re-colours with the panel's theme.
+ * `warning` / `info` / `success` are pinned to `bg-yellow-100 text-yellow-800`
+ * and friends, which keep a light-mode swatch in a dark panel.
+ */
+function StrandedTransitionChips({
+  targets,
+  error,
+  onRemove,
+}: {
+  readonly targets: readonly StrandedTransitionTarget[]
+  readonly error?: string
+  readonly onRemove: (id: string) => void
+}) {
+  const { t } = useTranslation()
+  if (targets.length === 0) return null
+
+  return (
+    <div className="space-y-2">
+      <div className="flex flex-wrap gap-2">
+        {targets.map((target) => {
+          const label = strandedTargetLabel(target)
+          const reason = t(`planForm.transitions.strandedReason.${target.reason}`)
+          return (
+            <button
+              key={target.id}
+              type="button"
+              className={badgeVariants({
+                variant: 'destructive',
+                className: 'cursor-pointer gap-1',
+              })}
+              aria-label={t('planForm.transitions.strandedRemoveAria', { plan: label, reason })}
+              onClick={() => onRemove(target.id)}
+            >
+              {label} · {reason}
+              <Trash2 className="h-3 w-3" aria-hidden />
+            </button>
+          )
+        })}
+      </div>
+      <p className="text-xs text-muted-foreground">{t('planForm.transitions.strandedHint')}</p>
+      <FieldError message={error} />
+    </div>
+  )
+}
+
+/**
  * States, at the moment a limit is edited, that the change does NOT reach the
  * people already on this plan until they renew or upgrade.
  *
@@ -951,6 +1106,17 @@ function LimitScopeNotice({
           ))}
         </ul>
         <p className="text-xs text-muted-foreground">{t(`planForm.limitScope.${direction}`)}</p>
+        {/*
+          The renewal rule above is only half of what happens. A subscriber
+          whose limit an operator set by hand from the Users page is EXEMPT —
+          `resolveInheritedPlanLimitUpdate` re-applies the plan only to the
+          fields whose columns still match that subscription's own
+          `plan_snapshot`, so an individual adjustment survives the renewal that
+          moves everyone else. Saying only "on renewal" here sends an operator
+          looking for a bug when the one customer they hand-tuned does not move
+          with the rest.
+        */}
+        <p className="text-xs text-muted-foreground">{t('planForm.limitScope.individuallyAdjusted')}</p>
       </div>
     </div>
   )

@@ -175,11 +175,27 @@ function buildService(state: FakeState) {
       state.lifecycleCalls.push({ kind: 'terms', subscriptionId, tx: transaction });
     },
   };
+  // The panel adapter, answering only "the era cannot be read".
+  //
+  // `deleteSubscription` asks which Remnawave era it is talking to before it
+  // arms a panel deletion and refuses only on a PROVEN 3.x panel holding a 2.x
+  // uuid. Every case in this file predates that guard — several of them delete
+  // rows whose `remnawaveId` is `'rw-1'`, which IS uuid-shaped — and together
+  // they are the standing proof that an unreadable era changes nothing. The
+  // guard's own cases, which stub a real era, live in
+  // `subscription-delete-stale-panel-link.spec.ts`.
+  //
+  // `deletePanelUser` is deliberately absent: this service must never call the
+  // panel, so a build that grew such a call dies here rather than passing.
+  const panel = {
+    getPanelShape: async () => ({ addressing: 'unknown' }),
+  };
   const service = new SubscriptionDeletionService(
     prisma as never,
     queue as never,
     entitlements as never,
     terms as never,
+    panel as never,
     events as never,
   );
   const logger = (

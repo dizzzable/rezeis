@@ -9,6 +9,7 @@ import {
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
+import { patchSnapshotNumeric } from '../../subscriptions/services/plan-inherited-limits.util';
 import { buildPlanSnapshot } from '../../users/utils/plan-snapshot.util';
 
 export type PointsExchangeType = 'SUBSCRIPTION_DAYS' | 'GIFT_SUBSCRIPTION' | 'DISCOUNT' | 'TRAFFIC';
@@ -304,9 +305,26 @@ export class ReferralPointsExchangeService {
         if (trafficGb <= 0) throw new BadRequestException('Traffic exchange has no reward');
         await this.spendPoints(input.tx, input.input.userId, input.pointsToCharge);
         const trafficLimitAfter = subscription.trafficLimit + trafficGb;
+        // The snapshot moves with the column, exactly as the promocode
+        // EXTRA_TRAFFIC reward does. That leaves the two in step, so
+        // `resolveInheritedPlanLimitUpdate` reads the subscription as still
+        // tracking its plan and the customer's next renewal resets the traffic
+        // to the plan's own limit.
+        //
+        // Deliberate, and the same rule for both reward paths: a points-bought
+        // top-up is a bonus for the CURRENT period, not a permanent change to
+        // the priced good. Omitting this write would silently declare an
+        // operator override and make the top-up outlive every future renewal.
         await input.tx.subscription.update({
           where: { id: subscription.id },
-          data: { trafficLimit: trafficLimitAfter },
+          data: {
+            trafficLimit: trafficLimitAfter,
+            planSnapshot: patchSnapshotNumeric(
+              subscription.planSnapshot,
+              'trafficLimit',
+              trafficLimitAfter,
+            ) as Prisma.InputJsonValue,
+          },
         });
         const syncJobId = await this.createSubscriptionSyncJob(input.tx, subscription, {
           source: 'REFERRAL_EXCHANGE_TRAFFIC',
@@ -434,6 +452,9 @@ export class ReferralPointsExchangeService {
         expiresAt: true,
         trafficLimit: true,
         remnawaveId: true,
+        // Read so the TRAFFIC branch can re-declare the topped-up value as
+        // plan-given; see `patchSnapshotNumeric` at its call site.
+        planSnapshot: true,
       },
     });
     if (

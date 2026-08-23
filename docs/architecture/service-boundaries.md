@@ -107,7 +107,7 @@ This boundary exists to validate the thin public-edge pattern before broader pay
   - `rezeis-admin` owns recorded-device truth, device-limit evaluation, revoke eligibility, and all Remnawave orchestration.
   - `ruid` may only mirror narrow session-bound device reads or writes and shape public responses.
   - `ruid/web` may present device state and revoke actions, but it must not talk to Remnawave directly.
-  - `@remnawave/backend-contract` stays a typed schema and route-metadata dependency inside `rezeis-admin`; server-side HTTP orchestration still runs through the admin facade, not through the contract package.
+  - **Superseded 2026-08-23:** `@remnawave/backend-contract` is no longer a runtime dependency of `rezeis-admin` at all. Every `@remnawave/*` package is now a **devDependency** and exists only as the CI oracle the guard specs execute; `grep -rn "@remnawave/" rezeis-admin/src/` returns no imports. `rezeis-admin` talks to the panel over plain HTTP and decodes the answers with its own tolerant decoders, so upgrading the live panel needs no dependency change. Server-side HTTP orchestration still runs through the admin facade. Do NOT add a runtime import: a vendor schema describes ONE panel era, and pinning one produced a deterministic outage against healthy 3.x panels (`rezeis-admin/README.md` § Remnawave compatibility).
 
 ## Payment Boundary
 

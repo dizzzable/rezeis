@@ -152,7 +152,16 @@ export const RBAC_RESOURCES: Readonly<Record<string, readonly RbacAction[]>> = {
   external_auth: ['view', 'edit'],
   appearance: ['view', 'edit'],
   branding: ['view', 'edit'],
-  backups: ['view', 'create', 'delete', 'run'],
+  /// `export` gates `GET /admin/backup/download/:filename` — taking a dump OFF
+  /// the server. Separated from `view` because the module encrypts nothing:
+  /// the file is `pg_dump | gzip`, i.e. every customer, every transaction,
+  /// admin password hashes, the SMTP password in the clear and every webhook
+  /// secret. `view` (list the backups, read the schedule) is the action a
+  /// read-only role would plausibly be granted, and it must not also mean
+  /// "download the database". Same split as `users:view_registration` vs
+  /// `users:export_registration` and `payment_gateways:view` vs
+  /// `payment_gateways:view_secrets`. Granted to nobody by default.
+  backups: ['view', 'create', 'delete', 'run', 'export'],
   // `create` is legacy-valid for persisted/custom roles. New file/live import
   // endpoints use the stricter `import` action below.
   imports: ['view', 'create', 'import', 'run'],

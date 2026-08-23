@@ -1,4 +1,4 @@
-import { Type } from 'class-transformer';
+import { Transform } from 'class-transformer';
 import {
   ArrayMaxSize,
   ArrayMinSize,
@@ -63,9 +63,31 @@ export class ListFraudExemptionsQueryDto {
    * Defaults to false — an expired or revoked exemption is exactly what an
    * operator asking "why did we stop seeing signals for this user" needs to
    * find, so history is visible unless they ask for only the live ones.
+   *
+   * The coercion is spelled out rather than left to `@Type(() => Boolean)`,
+   * which on a query string is plain `Boolean(string)`: every non-empty value
+   * became `true`, `'false'` and `'0'` included. That direction is the bad one
+   * HERE too, and worse than it looks - `activeOnly` narrows the result set
+   * (`AntiFraudService`: `revokedAt: null, expiresAt: { gt: now }`), so an
+   * "only show active" toggle sitting at its default OFF would have arrived
+   * ON and HIDDEN exactly the revoked and expired entries described above. A
+   * filter that silently inverts is worse than one that errors, so an
+   * unrecognised value is passed through for `@IsBoolean()` to reject.
+   * A valueless `?activeOnly=` asserts nothing and is treated as absence.
    */
   @IsOptional()
-  @Type(() => Boolean)
+  @Transform(({ value }: { value: unknown }): unknown => {
+    if (value === undefined || value === null || value === '') {
+      return undefined;
+    }
+    if (value === true || value === 'true' || value === '1') {
+      return true;
+    }
+    if (value === false || value === 'false' || value === '0') {
+      return false;
+    }
+    return value;
+  })
   @IsBoolean()
   activeOnly?: boolean;
 }

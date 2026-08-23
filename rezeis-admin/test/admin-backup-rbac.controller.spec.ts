@@ -141,6 +141,12 @@ describe('AdminBackupController RBAC', () => {
       restoreUploadRoute,
     );
 
+    // `export`, not `view`. The module encrypts nothing: this route streams
+    // `pg_dump | gzip` — every customer, every transaction, admin password
+    // hashes, the SMTP password in the clear, every webhook secret. `view` is
+    // the action a read-only role plausibly holds, and it must not also mean
+    // "download the database". Same split as `users:view_registration` vs
+    // `users:export_registration`.
     const downloadRoute = 'GET admin/backup/download/:filename (stream dump)';
     assertRoute(
       AdminBackupController.prototype.download,
@@ -149,17 +155,21 @@ describe('AdminBackupController RBAC', () => {
     );
     assertRoutePermission(
       AdminBackupController.prototype.download,
-      { resource: 'backups', action: 'view' },
+      { resource: 'backups', action: 'export' },
       downloadRoute,
     );
   });
 
   it('declares high-risk backup permissions without granting default non-superadmin roles', () => {
-    assert.deepStrictEqual(RBAC_RESOURCES.backups, ['view', 'create', 'delete', 'run']);
+    assert.deepStrictEqual(RBAC_RESOURCES.backups, ['view', 'create', 'delete', 'run', 'export']);
     assert.equal(isValidPermission('backups', 'view'), true);
     assert.equal(isValidPermission('backups', 'create'), true);
     assert.equal(isValidPermission('backups', 'delete'), true);
     assert.equal(isValidPermission('backups', 'run'), true);
+    // Added so `GET download/:filename` could stop riding on `view`. Pinned
+    // here for the same reason the absence of `edit` is pinned below: it must
+    // take a deliberate edit of this spec to change what the catalog grants.
+    assert.equal(isValidPermission('backups', 'export'), true);
     // The catalog has no `backups:edit` — that absence is what forces
     // `PATCH settings` above onto `create`. Pinned here so introducing `edit`
     // has to be a deliberate edit of this spec and of the route it re-guards,

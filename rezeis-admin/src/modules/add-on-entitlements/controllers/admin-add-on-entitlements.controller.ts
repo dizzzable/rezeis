@@ -1,4 +1,16 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Param, Post, Req, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  ConflictException,
+  Controller,
+  Get,
+  HttpCode,
+  HttpStatus,
+  NotFoundException,
+  Param,
+  Post,
+  Req,
+  UseGuards,
+} from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { Request } from 'express';
 
@@ -21,8 +33,15 @@ import { EntitlementMetricsService } from '../services/entitlement-metrics.servi
  * incidents, device plans; restricted HWID display). Mutations: retry sync,
  * force reconcile, acknowledge incident, compensating reversal, approve blocked
  * device plan — each on a distinct least-privilege permission with a mandatory
- * reason + command idempotency key and an immutable `AdminAuditLog` entry. No
- * direct ledger editing.
+ * reason + command key and an immutable `AdminAuditLog` entry. No direct ledger
+ * editing.
+ *
+ * `commandKey` is a real idempotency key on `reverse`, `acknowledge` and
+ * `approve` — a replay of the same key produces one effect and the same
+ * answer, enforced in `AddOnEntitlementRemediationService`, not here. On
+ * `retry-sync` and `reconcile` it is ADVISORY: audited, not deduplicated,
+ * because neither has a row to claim it against without a migration. That
+ * split is spelled out on the service, and callers must not assume otherwise.
  */
 @Controller('admin/add-on-entitlements')
 @UseGuards(AdminJwtAuthGuard, RbacGuard)
@@ -55,6 +74,8 @@ export class AdminAddOnEntitlementsController {
     @CurrentAdmin() admin: CurrentAdminInterface,
     @Req() req: Request,
   ) {
+    // `commandKey` is ADVISORY here — audited below, not deduplicated. Replaying
+    // it re-claims whatever is FAILED *now*, so the answer can differ.
     const result = await this.remediationService.retryProfileSync(subscriptionId);
     await this.audit(admin, req, 'add_on_entitlements.retry_sync', {
       subscriptionId,
@@ -74,6 +95,9 @@ export class AdminAddOnEntitlementsController {
     @CurrentAdmin() admin: CurrentAdminInterface,
     @Req() req: Request,
   ) {
+    // `commandKey` is ADVISORY here — audited below, not deduplicated. The push
+    // itself does not double-apply (the recompute holds a row lock and reports
+    // `changed: false`), but a replay answers differently from the first call.
     const result = await this.remediationService.forceReconcile(subscriptionId);
     await this.audit(admin, req, 'add_on_entitlements.force_reconcile', {
       subscriptionId,
@@ -141,13 +165,34 @@ export class AdminAddOnEntitlementsController {
     @CurrentAdmin() admin: CurrentAdminInterface,
     @Req() req: Request,
   ) {
-    const result = await this.remediationService.approveDevicePlan(planId);
+    const result = await this.remediationService.approveDevicePlan(planId, {
+      actorId: admin.id,
+      commandKey: body.commandKey,
+      reason: body.reason,
+    });
+    // Audited BEFORE the refusal is thrown: an override that was asked for and
+    // declined is still an operator action, and an audit trail that only
+    // records the commands that worked is not an audit trail.
     await this.audit(admin, req, 'add_on_entitlements.approve_device_plan', {
       planId,
       commandKey: body.commandKey,
       reason: body.reason,
       status: result.status,
+      declineReason: result.reason ?? null,
     });
+    // A decline must not travel as 200. Everything else does: `DEFERRED`,
+    // `BLOCKED`, `SUPERSEDED` and `REMEDIATION_REQUIRED` mean the override RAN
+    // and reached that outcome, which is a result, not an error — the caller
+    // branches on `status` (`add-on-entitlement-inspector.tsx` does).
+    // `REFUSED` means nothing happened at all.
+    if (result.status === 'REFUSED') {
+      if (result.reason === 'PLAN_NOT_FOUND') {
+        throw new NotFoundException('Device reduction plan not found');
+      }
+      throw new ConflictException(
+        `Device reduction plan cannot be re-run: ${result.reason ?? 'REFUSED'}`,
+      );
+    }
     return result;
   }
 

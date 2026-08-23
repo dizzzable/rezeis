@@ -1,6 +1,9 @@
 import { Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
 
+import { Prisma } from '@prisma/client';
+
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { type ConfigExportOptions, redactSectionRows } from './config-export-redaction';
 
 /**
  * Configuration export schema versioning.
@@ -57,6 +60,24 @@ export const ALL_SECTIONS: readonly ConfigExportSection[] = [
  */
 export type ConfigExportManifestInterface = Partial<Record<ConfigExportSection, number>>;
 
+/**
+ * Who asked, and from where.
+ *
+ * Taken from `@CurrentAdmin()` and the request, never from a body field — an
+ * actor a caller can name is an actor a caller can forge, and the whole value
+ * of these rows is that the name in them is the one the JWT proved.
+ */
+export interface ConfigPortabilityActor {
+  readonly adminId: string;
+  readonly ipAddress: string | null;
+  readonly userAgent: string | null;
+  readonly requestId: string | null;
+}
+
+export interface ConfigExportRequestOptions extends ConfigExportOptions {
+  readonly actor?: ConfigPortabilityActor;
+}
+
 export interface ConfigExportPayloadInterface {
   readonly version: number;
   readonly exportedAt: string;
@@ -82,13 +103,30 @@ export interface ConfigExportPayloadInterface {
  *     a config from staging to production, not for migrating customer
  *     data (that's the role of the existing `imports` module).
  *   - **Stable shape** — every section is a plain array of POJOs that
- *     mirrors the Prisma row 1:1 (with `Date` coerced to ISO strings).
- *     The import side trusts the shape because validation lives there.
+ *     mirrors the ALLOWLISTED columns of the Prisma row (with `Date`
+ *     coerced to ISO strings). The import side trusts the shape because
+ *     validation lives there.
  *
  * Sensitive fields
- *   - Webhook secrets ARE exported (operators expect roundtrip).
- *   - 2FA secrets and admin passwords are NEVER exported (they live on
- *     `admin_users` which we never touch from this module).
+ *   This block used to say "No PII" and "2FA secrets and admin passwords
+ *   are NEVER exported". Both were literally true and both were beside
+ *   the point: the file still carried the SMTP password in the clear,
+ *   `botTokenEnc`, `webPush.privateKeyEnc`, `turnstileSecretEnc`, the
+ *   quest-partner `secretEnc`, the AI `apiKeyEnc` and every
+ *   `webhooks.secret`. What is true now:
+ *
+ *   - Every section is filtered through `config-export-redaction.ts`:
+ *     a column allowlist, plus a recursive pass that strips
+ *     secret-shaped KEY NAMES and ciphertext-shaped VALUES from JSON
+ *     columns at any depth. A column added to `schema.prisma` is
+ *     excluded until somebody adds it to the allowlist on purpose.
+ *   - `webhooks.secret` is exported only when the caller asks for it
+ *     (`includeWebhookSecrets`). The round-trip capability is kept; it
+ *     just stopped being the default.
+ *   - 2FA secrets and admin passwords are still never exported — they
+ *     live on `admin_users`, which this module does not read.
+ *   - Redaction OMITS a field rather than replacing it, so importing a
+ *     redacted export leaves the destination's own secrets intact.
  */
 @Injectable()
 export class ConfigExportService {
@@ -116,6 +154,7 @@ export class ConfigExportService {
    */
   public async exportConfig(
     sections: readonly ConfigExportSection[] | null,
+    options: ConfigExportRequestOptions = {},
   ): Promise<ConfigExportPayloadInterface> {
     const requested = sections === null || sections.length === 0
       ? ALL_SECTIONS
@@ -123,16 +162,35 @@ export class ConfigExportService {
     const payload: Partial<Record<ConfigExportSection, unknown[]>> = {};
     const manifest: Partial<Record<ConfigExportSection, number>> = {};
     const failed: ConfigExportSection[] = [];
+    const droppedColumns = new Set<string>();
+    const redactedPaths = new Set<string>();
 
     for (const section of requested) {
       try {
-        const rows = await this.exportSection(section);
-        payload[section] = rows;
-        manifest[section] = rows.length;
+        const raw = await this.exportSection(section);
+        // Nothing reaches `payload` un-filtered. Deliberately here, at the one
+        // place every section funnels through, rather than in the eleven
+        // `findMany` arms — a twelfth arm added later is filtered too.
+        const redacted = redactSectionRows(section, raw, options);
+        for (const column of redacted.droppedColumns) droppedColumns.add(column);
+        for (const path of redacted.redactedPaths) redactedPaths.add(path);
+        payload[section] = redacted.rows;
+        manifest[section] = redacted.rows.length;
       } catch (err) {
         this.logger.error(`Failed to export section "${section}": ${(err as Error).message}`);
         failed.push(section);
       }
+    }
+
+    if (droppedColumns.size > 0) {
+      // Not silent: a column added to `schema.prisma` and not to the allowlist
+      // simply stops being promoted between environments, and the operator
+      // would find out when the destination behaves differently for no visible
+      // reason. This line is how the next person learns to make a decision.
+      this.logger.warn(
+        `Config export dropped columns that are not on the allowlist (add them to `
+          + `SECTION_FIELD_ALLOWLIST if they are safe to export): ${[...droppedColumns].join(', ')}`,
+      );
     }
 
     if (failed.length > 0) {
@@ -147,6 +205,13 @@ export class ConfigExportService {
       );
     }
 
+    await this.recordExport(options.actor, {
+      sections: [...requested],
+      includeWebhookSecrets: options.includeWebhookSecrets === true,
+      redactedPaths: [...redactedPaths].slice(0, 100),
+      droppedColumns: [...droppedColumns].slice(0, 100),
+    });
+
     return {
       version: CONFIG_EXPORT_VERSION,
       exportedAt: new Date().toISOString(),
@@ -157,6 +222,34 @@ export class ConfigExportService {
   }
 
   // ── Private ────────────────────────────────────────────────────────────
+
+  /**
+   * Write the audit row for an export.
+   *
+   * Nothing in this module wrote one before: the single most exfiltration-shaped
+   * operation the panel has — "give me the configuration of this deployment as
+   * a file" — left no record of who took it, from where, or which sections.
+   *
+   * `actor` is optional so the service stays callable from a non-HTTP context
+   * (and so the existing unit tests, which construct it with a bare Prisma
+   * stub, keep describing the export rather than the audit). The controller
+   * always supplies one, taken from `@CurrentAdmin()` — never from the body.
+   */
+  private async recordExport(
+    actor: ConfigPortabilityActor | undefined,
+    metadata: Record<string, unknown>,
+  ): Promise<void> {
+    if (actor === undefined) return;
+    await this.prismaService.adminAuditLog.create({
+      data: {
+        action: 'config_portability.exported',
+        ipAddress: actor.ipAddress,
+        userAgent: actor.userAgent,
+        metadata: { requestId: actor.requestId, ...metadata } as Prisma.InputJsonObject,
+        adminUser: { connect: { id: actor.adminId } },
+      },
+    });
+  }
 
   private async exportSection(section: ConfigExportSection): Promise<unknown[]> {
     switch (section) {
@@ -173,9 +266,10 @@ export class ConfigExportService {
         return this.prismaService.automationRule.findMany({});
 
       case 'webhooks':
-        // Includes the secret — operators promoting config to a fresh
-        // env need the receivers to keep validating. Strip via UI on
-        // export if you want to ship a sanitised copy.
+        // The secret is read here and dropped by the redaction pass unless the
+        // caller passed `includeWebhookSecrets`. Kept as a full row read rather
+        // than a `select` so the allowlist stays the single place that decides
+        // what leaves — a `select` here would be a second, competing answer.
         return this.prismaService.webhookSubscription.findMany({});
 
       case 'notificationTemplates':

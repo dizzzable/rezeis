@@ -11,6 +11,7 @@ import {
   RemnawavePanelUser,
   RemnawavePanelUserList,
 } from '../../remnawave/services/remnawave-api.service';
+import { panelTrafficLimitToGb } from '../../remnawave/utils/panel-traffic-limit.util';
 
 export interface RemnawaveImportSummary {
   readonly importRecordId: string;
@@ -43,6 +44,71 @@ interface RunInput {
 }
 
 const REIWA_ID_REGEX = /reiwa_id:\s*([a-z0-9]+)/i;
+
+/**
+ * The `where` arms that mean "this local row names THIS panel profile".
+ *
+ * WHY THIS IS NOT ONE COLUMN COMPARED TO ONE STRING, which is what it used to
+ * be. `panelUser.uuid` is an identity STRING, not a UUID, and which string it
+ * is depends on the panel that answered: Remnawave 2.x hands back the profile
+ * uuid, 3.x dropped the uuid column outright and `parsePanelUserRow` therefore
+ * keys the row by `String(id)` — a decimal. `Subscription.remnawaveId` carries
+ * the same dual meaning, frozen at the moment the row was linked.
+ *
+ * So on a panel the operator has upgraded from 2.x to 3.x, every row linked in
+ * the 2.x era stores a uuid while the panel now reports a decimal for the very
+ * same profile, and `remnawaveId = panelUser.uuid` compares the two spellings
+ * and finds them unequal. FOREVER — the stored string is deliberately not
+ * rewritten (see `prisma/schema.prisma`, `Subscription.remnawaveId`). Every
+ * such customer therefore looked brand new to the importer on the first sync
+ * after the upgrade, and got a second Subscription — and, through
+ * `matchOrCreateUser` Priority 4, a second User.
+ *
+ * The three arms are the three SOUND ways two records can be shown to name one
+ * profile, and all three are immutable panel facts:
+ *   • the stored identity equals the one the panel just reported;
+ *   • the stored identity is the OTHER era's spelling of the same numeric id;
+ *   • the recorded numeric id equals the panel's.
+ *
+ * DELIBERATELY NOT `remnawavePanelUsername`, even though it would close the
+ * last gap: a name is not an identity. An operator can rename a profile, and a
+ * name freed by a rename or a delete can later be taken by a DIFFERENT profile
+ * — so matching on it would let this importer adopt somebody else's row. Same
+ * reasoning, same conclusion as the link-repair endpoint's `namesSameProfile`
+ * in `admin-user-subscriptions.controller.ts`, which is the canonical statement
+ * of this question.
+ *
+ * The numeric arms are OMITTED, not compared against null, when the panel gave
+ * no id: `remnawave_panel_id` carries no unique constraint (migration
+ * 20260810160000 records why one cannot be added to live data), so
+ * `remnawavePanelId: null` would match every row that has none — turning "who
+ * is this profile" into "anybody". Same shape as the retirement fence in
+ * `ProfileSyncProcessor.handleDelete`.
+ */
+function panelProfileClaims(panelUser: RemnawavePanelUser): Prisma.SubscriptionWhereInput[] {
+  const claims: Prisma.SubscriptionWhereInput[] = [{ remnawaveId: panelUser.uuid }];
+  const panelId = panelUser.panelId;
+  if (panelId !== null && Number.isSafeInteger(panelId)) {
+    // On 3.x the first arm and this one are the same string; an OR does not
+    // care, and spelling both out keeps the rule readable on either era.
+    claims.push({ remnawaveId: String(panelId) }, { remnawavePanelId: panelId });
+  }
+  return claims;
+}
+
+/**
+ * A stored `Json` column read back as a plain object, or `{}` when it is
+ * anything else (null, an array, a scalar — all legal in that column).
+ *
+ * Exists so an UPDATE can MERGE into `planSnapshot` instead of replacing it.
+ * Prisma has no per-key update for a `Json` column: whatever object reaches the
+ * client is written over the whole document.
+ */
+function jsonObjectOf(value: unknown): Prisma.InputJsonObject {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Prisma.InputJsonObject)
+    : {};
+}
 
 /**
  * Two-way Remnawave importer/synchronizer.
@@ -275,15 +341,22 @@ export class RemnawaveImporterService {
       }
     }
 
-    // Priority 4: existing Subscription that already points to this
-    // Remnawave UUID. This catches the realistic case where a user
-    // signed up through the web cabinet (no Telegram, no email — only
-    // a WebAccount.login) and was previously linked through `import`.
+    // Priority 4: existing Subscription that already names this panel
+    // profile. This catches the realistic case where a user signed up
+    // through the web cabinet (no Telegram, no email — only a
+    // WebAccount.login) and was previously linked through `import`.
     // Without this priority, every subsequent `import` would create a
     // brand-new User dupe because there's no other way to identify a
     // web-only customer from the panel side.
+    //
+    // A MISS HERE IS THE WORST MISS IN THIS FILE. Priority 5 does not skip on
+    // a miss in `import` mode — it CREATES a User. So the moment this question
+    // is asked in a form that cannot match, every re-import mints a second
+    // customer account for somebody who already has one, and `syncSubscription`
+    // then hangs a second Subscription off it.
     const existingSub = await this.prismaService.subscription.findFirst({
-      where: { remnawaveId: panelUser.uuid },
+      where: { OR: panelProfileClaims(panelUser) },
+      orderBy: { createdAt: 'asc' },
       select: { userId: true },
     });
     if (existingSub) {
@@ -337,17 +410,43 @@ export class RemnawaveImporterService {
     panelUser: RemnawavePanelUser,
     importRecordId: string | null,
   ): Promise<'created' | 'updated' | 'skipped'> {
-    // Check if subscription with this remnawaveId already exists
+    // Is any local row ALREADY this panel profile? Asked over every sound
+    // spelling of the profile's identity — see `panelProfileClaims`. Oldest
+    // first, so that on a database that already carries the duplicates this
+    // defect produced the importer converges on the ORIGINAL row rather than
+    // alternating between it and its duplicate from run to run.
     const existing = await this.prismaService.subscription.findFirst({
-      where: { remnawaveId: panelUser.uuid },
-      select: { id: true, userId: true },
+      where: { OR: panelProfileClaims(panelUser) },
+      orderBy: { createdAt: 'asc' },
+      select: { id: true, userId: true, planSnapshot: true },
     });
 
     const status = this.mapStatus(panelUser.status);
-    const trafficLimitGb = panelUser.trafficLimitBytes > 0
-      ? Math.round(panelUser.trafficLimitBytes / (1024 * 1024 * 1024))
-      : null;
+    // Panel bytes → our whole-GB column, through the one converter every
+    // writer of this column shares. A positive cap never rounds down to `0`,
+    // because `0` here means zero gigabytes, not unlimited — this line used
+    // to lack that floor and disagreed with the webhook mirror on 0.4 GB.
+    const trafficLimitGb = panelTrafficLimitToGb(panelUser.trafficLimitBytes);
     const expiresAt = panelUser.expireAt ? new Date(panelUser.expireAt) : null;
+    // The supplementary identity columns, written from a panel row that carries
+    // them on BOTH eras (2.x returns the numeric id beside the uuid; 3.x keys
+    // everything by it). Never written as null: a value we could not read must
+    // not erase one that was recorded earlier.
+    //
+    // NOT COSMETIC. `ProfileSyncProcessor.panelProfileClaimedByAnother` — the
+    // one guard standing between a DELETE and somebody else's live panel
+    // profile — asks whether another row claims this profile, and it can only
+    // ask through these columns. Every row this importer created left both
+    // NULL, which is precisely why that guard was disarmed for exactly the
+    // population this importer produces.
+    const panelIdentityColumns = {
+      ...(panelUser.panelId !== null && Number.isSafeInteger(panelUser.panelId)
+        ? { remnawavePanelId: panelUser.panelId }
+        : {}),
+      ...(panelUser.username.length > 0
+        ? { remnawavePanelUsername: panelUser.username }
+        : {}),
+    };
 
     const subscriptionData: Prisma.SubscriptionUpdateInput = {
       status,
@@ -357,7 +456,16 @@ export class RemnawaveImporterService {
       expiresAt,
       internalSquads: panelUser.activeInternalSquads?.map((s) => s.uuid) ?? [],
       externalSquad: panelUser.externalSquadUuid ?? null,
+      ...panelIdentityColumns,
+      // MERGED INTO, never replaced. Prisma writes a `Json` column WHOLESALE —
+      // there is no per-key update — so an object literal built only from panel
+      // facts silently drops every key the row already carried. `name` is one
+      // of them, and it is what the cabinet, the bot and every invoice render
+      // as the customer's plan: a sync that matched a row used to leave it
+      // nameless. The spread has to happen HERE, at the call site, because by
+      // the time the value reaches Prisma it is just a document to overwrite.
       planSnapshot: {
+        ...jsonObjectOf(existing?.planSnapshot),
         importedFrom: 'remnawave',
         // Durable link for bulk plan re-assignment (see BulkPlanAssignmentService).
         ...(importRecordId ? { importRecordId } : {}),
@@ -395,6 +503,7 @@ export class RemnawaveImporterService {
         startedAt: new Date(),
         internalSquads: panelUser.activeInternalSquads?.map((s) => s.uuid) ?? [],
         externalSquad: panelUser.externalSquadUuid ?? null,
+        ...panelIdentityColumns,
         planSnapshot: {
           importedFrom: 'remnawave',
           // Durable link for bulk plan re-assignment (see BulkPlanAssignmentService).
@@ -412,7 +521,8 @@ export class RemnawaveImporterService {
     });
     if (!user?.currentSubscriptionId) {
       const sub = await this.prismaService.subscription.findFirst({
-        where: { userId, remnawaveId: panelUser.uuid },
+        where: { userId, OR: panelProfileClaims(panelUser) },
+        orderBy: { createdAt: 'desc' },
         select: { id: true },
       });
       if (sub) {

@@ -410,6 +410,26 @@ export class BackupPlanClonerService {
 
         const newSnapshot: Prisma.InputJsonValue = {
           ...(snap as Prisma.InputJsonObject),
+          // `id` is the CANONICAL "which plan is this subscription on" key, and
+          // it is the one every reader OUTSIDE the import domain uses:
+          // `PlanSnapshotSyncService` selects on `plan_snapshot->>'id'`,
+          // `AddOnEligibilityService` and `EntitlementCutoverService` read
+          // `snapshot['id']`, and the broadcast audience filter and
+          // `PlanSquadPropagationService` both match `path: ['id']`. This
+          // writer used to emit only `planId`, so a re-linked subscription
+          // matched none of them: the display keys below never mirrored a later
+          // rename — the cabinet card, the bot and the invoice all kept showing
+          // the plan's old name forever — and no add-on restricted to that plan
+          // was ever offered to them. Same omission, same repair, as
+          // `BulkPlanAssignmentService`.
+          id: targetPlan.id,
+          // `planId` STAYS, and is not a duplicate to be tidied away: it is the
+          // import domain's "this imported row has been linked to a real plan"
+          // marker. `isImportedOrUnassigned` tests it, the re-link loop above
+          // skips a row that already carries one, and the altshop / remnashop
+          // importers rebuild the snapshot from donor facts carrying `planId`
+          // and only `planId` — so dropping it would make a re-import silently
+          // unlink the plan.
           planId: targetPlan.id,
           name: targetPlan.name,
           tag: targetPlan.tag,
@@ -418,12 +438,18 @@ export class BackupPlanClonerService {
           // one — take it from the cloned plan or the card keeps falling back
           // to the status glyph forever.
           icon: targetPlan.icon,
-          trafficLimit: targetPlan.trafficLimit,
-          deviceLimit: targetPlan.deviceLimit,
           trafficLimitStrategy: targetPlan.trafficLimitStrategy,
           duration: targetPlan.durations[0]?.days ?? 30,
-          internalSquads: targetPlan.internalSquads,
-          externalSquad: targetPlan.externalSquad,
+          // `trafficLimit` / `deviceLimit` / `internalSquads` / `externalSquad`
+          // are NOT re-pointed at the cloned plan. Whatever the donor snapshot
+          // carried (or did not) survives the spread above, because those four
+          // keys are the baseline `resolveInheritedPlanLimitUpdate`
+          // (`plan-inherited-limits.util.ts`) compares this subscription's
+          // COLUMNS against to decide whether an operator adjusted it
+          // individually. Re-pointing them at the clone while leaving the
+          // columns alone would declare every re-linked subscriber
+          // "overridden" and pin their limits for good — the same trap that was
+          // removed from `PlanSnapshotSyncService.syncPlanSnapshotMetadata`.
         };
         try {
           await this.prismaService.subscription.update({

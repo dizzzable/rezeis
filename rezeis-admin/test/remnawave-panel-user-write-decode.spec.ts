@@ -52,6 +52,19 @@ function fixture(rel: string): PanelFixture {
   ) as PanelFixture;
 }
 
+/**
+ * The 2.x write fixtures, named ONCE so the two loops below cannot fall out of
+ * step about what they cover — and so their eventual deletion is a single,
+ * visible edit rather than two.
+ *
+ * Both loops register their `it(...)` calls FROM this list. An empty list
+ * therefore registers zero tests and both blocks report green having asserted
+ * nothing, which is this repository's signature failure mode arriving on a
+ * timer: retiring the 2.x fixtures is a planned, gated phase. Each loop is
+ * followed by a liveness floor that fails loudly instead.
+ */
+const TWO_X_WRITE_FIXTURES = ['2.7.4/created-user.json', '2.8.0/created-user.json'] as const;
+
 const CONFIG = {
   host: 'remnawave',
   port: 3000,
@@ -226,7 +239,9 @@ describe('2.7.4 keeps every field it already had — nothing narrows for the pay
     'externalSquadUuid',
   ] as const;
 
-  for (const rel of ['2.7.4/created-user.json', '2.8.0/created-user.json'] as const) {
+  let registered = 0;
+  for (const rel of TWO_X_WRITE_FIXTURES) {
+    registered += 1;
     it(`${rel}: every field the cast produced survives, and panelId is added`, async () => {
       const loaded = fixture(rel);
       const raw = loaded.response;
@@ -241,6 +256,15 @@ describe('2.7.4 keeps every field it already had — nothing narrows for the pay
       assert.equal(created.panelId, raw['id'], `${rel}: panelId must come from the row's id`);
     });
   }
+
+  // LIVENESS FLOOR — see `TWO_X_WRITE_FIXTURES`. The expected count is a
+  // LITERAL and not `TWO_X_WRITE_FIXTURES.length`: comparing the loop against
+  // the list it just iterated is satisfied by an empty list too, which is
+  // exactly the state this must fail on.
+  it('registered one case per 2.x write fixture', () => {
+    assert.ok(registered > 0, 'the 2.x write fixture list is empty — this block asserts nothing');
+    assert.equal(registered, 2, 'the 2.x write fixture coverage changed — was that deliberate?');
+  });
 });
 
 describe('a 2xx body with no usable identity is refused, never half-decoded', () => {
@@ -316,7 +340,9 @@ describe("the write fixtures are the panel's record, not ours", () => {
     'updatedAt', 'subscriptionUrl', 'activeInternalSquads', 'userTraffic',
   ] as const;
 
-  for (const rel of ['2.7.4/created-user.json', '2.8.0/created-user.json'] as const) {
+  let registered = 0;
+  for (const rel of TWO_X_WRITE_FIXTURES) {
+    registered += 2;
     it(`${rel} carries every field the 2.x DTO guarantees — uuid AND id`, () => {
       const keys = Object.keys(fixture(rel).response);
       for (const name of REQUIRED_2X) {
@@ -330,6 +356,14 @@ describe("the write fixtures are the panel's record, not ours", () => {
       assert.equal(UpdateUserV28.ResponseSchema.safeParse(body).success, true, rel);
     });
   }
+
+  // LIVENESS FLOOR — see `TWO_X_WRITE_FIXTURES`. Two cases per fixture, and the
+  // total is a LITERAL for the same reason as the block above: an empty list
+  // satisfies any comparison drawn from itself.
+  it('registered both cases for every 2.x write fixture', () => {
+    assert.ok(registered > 0, 'the 2.x write fixture list is empty — this block asserts nothing');
+    assert.equal(registered, 4, 'the 2.x write fixture coverage changed — was that deliberate?');
+  });
 
   it('3.2.x has no uuid to give — the fact the whole defect rests on', () => {
     const body = { response: fixture('3.2.1/user.json').response };

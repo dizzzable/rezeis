@@ -5,13 +5,19 @@ import { of, throwError } from 'rxjs';
 import {
   isNumericPanelIdentity,
   panelDeviceOwnerKey,
+  panelIdentityLookup,
   panelShortUuidFromConfigUrl,
   panelUserAddress,
   panelUserPatchKey,
   type StoredPanelIdentity,
 } from '../src/modules/remnawave/services/panel-user-address';
 import { RemnawaveApiService } from '../src/modules/remnawave/services/remnawave-api.service';
+import type { RemnawavePanelShape } from '../src/modules/remnawave/services/remnawave-api.service';
 import { mapHwidTopUser } from '../src/modules/remnawave/services/remnawave-extended-mappers';
+import {
+  assessObservedPanelLink,
+  observePanelEra,
+} from '../src/modules/remnawave/services/stale-panel-link';
 
 /**
  * The layer that decides HOW a panel profile is named, across all three
@@ -113,10 +119,41 @@ describe('panelUserAddress — 3.x panels (id-addressed)', () => {
     // The whole point. A 3.x panel answers `400 expected number, received NaN`
     // for a uuid in an id slot — safe, but the integration is dead. Emitting the
     // uuid anyway would be the bug this type exists to prevent.
-    for (const identity of [stored(), stored({ panelUsername: 'rz_bob_1' })]) {
+    //
+    // THE REGRESSION THIS WATCHES FOR, by name: the tempting "the panel is
+    // 3.x-only now, so just return what we stored" edit, which collapses this
+    // whole branch into `return { kind: 'ready', segment: stored }`. Every case
+    // below then emits a 2.x uuid into an id slot.
+    //
+    // It used to watch for nothing. The two identities it looped over both
+    // leave through `needsResolve`/`impossible`, so the `kind === 'ready'` body
+    // — the only assertion in the test — never executed once. The third case
+    // is what makes the guard live: a recorded numeric id DOES reach `ready`,
+    // so the uuid comparison actually runs, and `reachedReady` below fails
+    // loudly if a later edit makes it dead again.
+    const CASES: ReadonlyArray<readonly [string, StoredPanelIdentity, string | null]> = [
+      // [what is recorded, the identity, the segment that may be emitted —
+      //  `null` means NO segment may be emitted for it at all]
+      ['the uuid alone', stored(), null],
+      ['the uuid and a name', stored({ panelUsername: 'rz_bob_1' }), null],
+      ['the uuid and a recorded numeric id', stored({ panelId: 7 }), '7'],
+    ];
+
+    let reachedReady = 0;
+    for (const [label, identity, expected] of CASES) {
       const address = panelUserAddress(identity, 'id');
-      if (address.kind === 'ready') assert.notEqual(address.segment, UUID);
+      if (expected === null) {
+        assert.notEqual(address.kind, 'ready', `${label}: emitted a segment where none was safe`);
+        continue;
+      }
+      if (address.kind !== 'ready') {
+        assert.fail(`${label}: expected the recorded id to be usable, got ${address.kind}`);
+      }
+      reachedReady += 1;
+      assert.notEqual(address.segment, UUID, `${label}: emitted the stored 2.x uuid`);
+      assert.equal(address.segment, expected, label);
     }
+    assert.equal(reachedReady, 1, 'the uuid comparison never executed — this guard is dead again');
   });
 });
 
@@ -210,6 +247,85 @@ describe('isNumericPanelIdentity', () => {
     assert.equal(isNumericPanelIdentity('+42'), false);
     assert.equal(isNumericPanelIdentity(' 42'), false);
     assert.equal(isNumericPanelIdentity(''), false);
+  });
+});
+
+/**
+ * The BATCH lookup: the same "a 2.x row is named by a 3.x id" problem
+ * `panelIdentityWhere` solves one event at a time, asked of a whole batch.
+ *
+ * Its two bounds are what these cases pin. The first is the one
+ * `panelIdentityWhere` already states: a numeric angle may only be taken from
+ * an identity that is entirely digits, because `Number.parseInt('330f2b38-…')`
+ * is `330` — a valid-looking id belonging to somebody else. The second is
+ * specific to the plural form and is the dangerous one: `remnawave_panel_id`
+ * has no unique constraint and is null on most rows, so an EMPTY numeric list
+ * that degenerates into `remnawavePanelId: null` (or an `in` carrying a null)
+ * matches every row that has no panel id — inside an anti-fraud detector, every
+ * customer at once.
+ */
+describe('panelIdentityLookup — matching a batch on both angles', () => {
+  it('asks only the stored column when nothing in the batch is numeric', () => {
+    const lookup = panelIdentityLookup([UUID, 'not-a-panel-identity']);
+
+    assert.notEqual(lookup, null);
+    // The numeric arm is ABSENT, not empty and not null. `remnawavePanelId`
+    // must not appear anywhere in this object.
+    assert.deepEqual(lookup!.where, { remnawaveId: { in: [UUID, 'not-a-panel-identity'] } });
+    assert.equal(JSON.stringify(lookup!.where).includes('remnawavePanelId'), false);
+  });
+
+  it('adds the numeric angle for the identities that have one', () => {
+    const lookup = panelIdentityLookup([UUID, '4471']);
+
+    assert.deepEqual(lookup!.where, {
+      OR: [{ remnawaveId: { in: [UUID, '4471'] } }, { remnawavePanelId: { in: [4471] } }],
+    });
+  });
+
+  it('never mints a numeric angle out of a uuid or an unsafe integer', () => {
+    // `parseInt` reads leading digits and stops; the digits-only test is what
+    // stands between `330f2b38-…` and panel user #330.
+    const fromUuid = panelIdentityLookup(['330f2b38-1362-46ab-b5c0-dea32167eff9']);
+    assert.deepEqual(fromUuid!.where, {
+      remnawaveId: { in: ['330f2b38-1362-46ab-b5c0-dea32167eff9'] },
+    });
+
+    const huge = '9007199254740993000';
+    const fromHuge = panelIdentityLookup([huge]);
+    assert.deepEqual(fromHuge!.where, { remnawaveId: { in: [huge] } });
+  });
+
+  it('is null when there is nothing to ask about', () => {
+    // A `where` built from an empty batch is the other road to "match
+    // everything"; the caller returns early instead.
+    assert.equal(panelIdentityLookup([]), null);
+    assert.equal(panelIdentityLookup(['']), null);
+  });
+
+  it('keys a fetched row by the identity the CALLER asked about', () => {
+    const lookup = panelIdentityLookup(['4471'])!;
+
+    // The 3.x panel said "4471"; the row that answers is stamped with the uuid
+    // it was created under in the 2.x era. Keying by the row would re-lose the
+    // match the widened `where` just recovered.
+    assert.deepEqual(lookup.keysFor({ remnawaveId: UUID, remnawavePanelId: 4471 }), ['4471']);
+    // Named by both angles at once — one key, not two entries.
+    assert.deepEqual(lookup.keysFor({ remnawaveId: '4471', remnawavePanelId: 4471 }), ['4471']);
+    // A row that arrived for a reason nobody asked about answers for nobody.
+    assert.deepEqual(lookup.keysFor({ remnawaveId: UUID, remnawavePanelId: 9 }), []);
+    assert.deepEqual(lookup.keysFor({ remnawaveId: UUID, remnawavePanelId: null }), []);
+    // A caller whose `select` omitted the column hands over `undefined`, which
+    // must answer for nobody rather than for whoever a loose lookup finds.
+    assert.deepEqual(lookup.keysFor({ remnawaveId: null }), []);
+  });
+
+  it('answers for every spelling that shares one numeric angle', () => {
+    // `'42'` and `'042'` parse to the same id. Attributing the row to one of
+    // them would drop the other's downgrade grace silently.
+    const lookup = panelIdentityLookup(['42', '042'])!;
+
+    assert.deepEqual(lookup.keysFor({ remnawaveId: UUID, remnawavePanelId: 42 }), ['42', '042']);
   });
 });
 
@@ -747,6 +863,191 @@ describe('RemnawaveApiService.resolvePanelSegment', () => {
       segment: UUID,
       panelId: null,
     });
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  ONE OBSERVATION OF THE PANEL ERA, THREADED THROUGH A DELETION
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * THE DEFECT THIS BLOCK EXISTS FOR, stated as the sequence that loses a paying
+ * customer's account.
+ *
+ * The stale-link guard and the address builder each used to perform their OWN
+ * `getPanelShape()`. `getPanelShape()` never throws — an unreachable panel, an
+ * expired token or an unparseable version all produce `{ addressing: 'unknown' }`
+ * — and it caches that answer for only fifteen seconds
+ * (`CAPABILITIES_NEGATIVE_CACHE_TTL_MS`). Two reads one await apart can
+ * therefore legitimately DISAGREE, and the disagreement that matters runs in one
+ * direction:
+ *
+ *   1. the guard reads `'unknown'` and answers `panelEraUnknown` → PROCEED. That
+ *      is deliberate and correct on its own terms: on `'unknown'` the address
+ *      builder emits the stored string unchanged, and a 3.x panel answers a
+ *      2.x uuid with `400 expected number, received NaN` rather than deleting;
+ *   2. the negative cache entry expires;
+ *   3. the address builder reads `'id'`, takes the `'id'` branch, and falls back
+ *      through the recorded numeric id (or the saved short uuid, or the panel
+ *      username) to whatever profile is LIVE at that address;
+ *   4. the DELETE goes to that profile.
+ *
+ * Neither read is wrong. The guard's fail-open stance is not wrong either — it
+ * is documented, deliberate, and unchanged by any of this. The defect is that
+ * they were TWO READS, so the decision was made about one panel and carried out
+ * against another.
+ *
+ * A deletion now takes a `PanelEraObservation` as a REQUIRED argument,
+ * `assessObservedPanelLink` is synchronous and cannot read anything, and the
+ * adapter — given an observation — never re-reads the shape. So the assertions
+ * below are on THE ADDRESS THE PANEL WAS ACTUALLY HANDED, not on how many times
+ * a spy was poked; the read count is corroboration, never the case on its own.
+ */
+
+/** The 2.x identity of a row the reconciliation has not repaired yet. */
+const DEAD_UUID = '330f2b38-1f1e-4f6a-9f2b-0a1b2c3d4e5f';
+
+const SHAPE_UNKNOWN: RemnawavePanelShape = {
+  version: null,
+  addressing: 'unknown',
+  connectionsApi: 'unknown',
+  userLookups: { byTelegramId: true, byEmail: true },
+  usersStream: false,
+};
+const SHAPE_3X: RemnawavePanelShape = {
+  version: '3.3.2',
+  addressing: 'id',
+  connectionsApi: 'connections',
+  userLookups: { byTelegramId: false, byEmail: false },
+  usersStream: true,
+};
+
+/**
+ * Replaces ONLY the era read and leaves every layer under test real:
+ * `resolvePanelSegment`, `panelUserAddress`, `PANEL_ROUTES` and the request
+ * itself all still run. The seam has to be exactly here, because the thing
+ * under test is how many times this one function is consulted and what each of
+ * its answers is used for — and the fifteen-second window that makes two reads
+ * differ cannot be waited out in a unit test.
+ *
+ * First call answers `'unknown'`, every call after it answers 3.x: the negative
+ * cache boundary, compressed.
+ */
+function eraFlippingAfterFirstRead(service: RemnawaveApiService): { reads: () => number } {
+  let reads = 0;
+  (service as unknown as { getPanelShape: () => Promise<RemnawavePanelShape> }).getPanelShape =
+    async () => {
+      reads += 1;
+      return reads === 1 ? SHAPE_UNKNOWN : SHAPE_3X;
+    };
+  return { reads: () => reads };
+}
+
+/** The unrepaired duplicate pair: a dead 2.x uuid over a live numeric id. */
+function staleIdentity() {
+  return { remnawaveId: DEAD_UUID, panelId: 5150, panelUsername: 'rz_alice_sub' };
+}
+
+describe('the era a deletion is guarded on is the era it is addressed with', () => {
+  it('THE PROOF: a guard that trusted an unknown era addresses the panel with THAT era', async () => {
+    const { service, captured } = build(() => of({ data: { response: { isDeleted: true } } }));
+    const era = eraFlippingAfterFirstRead(service);
+
+    const identity = staleIdentity();
+    const observed = await observePanelEra(() => service.getPanelShape());
+    assert.deepEqual(
+      assessObservedPanelLink(observed, identity.remnawaveId),
+      { trusted: true, because: 'panelEraUnknown' },
+      'the fail-open on an unreadable era is unchanged — that is the stance being preserved',
+    );
+
+    await service.deletePanelUser(identity, observed);
+
+    // THE LOAD-BEARING ASSERTION: the argument the panel was handed. `'unknown'`
+    // means "send the stored string", which a 3.x panel refuses with a 400 that
+    // nobody reads as a deletion. `/api/users/5150` is the live customer.
+    assert.deepEqual(
+      captured.map((c) => `${c.method} ${c.url}`),
+      [`delete /api/users/${DEAD_UUID}`],
+      'the DELETE must carry the address the OBSERVED era produces',
+    );
+    assert.equal(era.reads(), 1, 'and it must have cost exactly one reading of the era');
+  });
+
+  it('INERTNESS CONTROL: that same panel really does flip, and an unthreaded build follows it', async () => {
+    // Without this the assertion above could pass against a stub that never
+    // changed its answer at all. Here the FIRST read is consumed by the guard,
+    // exactly as in the proof, and then an address is built WITHOUT the
+    // observation — the shape this code had before the fix. It resolves the
+    // dead uuid to the live profile, which is the loss being prevented.
+    const { service } = build(() => of({ data: { response: { isDeleted: true } } }));
+    const era = eraFlippingAfterFirstRead(service);
+
+    const identity = staleIdentity();
+    const observed = await observePanelEra(() => service.getPanelShape());
+    assert.equal(observed.addressing, 'unknown');
+
+    const unthreaded = await service.resolvePanelSegment(identity);
+
+    assert.deepEqual(
+      unthreaded,
+      { segment: '5150', panelId: 5150 },
+      'a second, independent reading DOES resolve the dead uuid to the live numeric id',
+    );
+    assert.equal(era.reads(), 2);
+  });
+
+  it('a device deletion builds its owner key AND its path segment from the one observation', async () => {
+    // `deletePanelUserDevice` carried the defect twice over: it read the shape
+    // for the body's owner key and `segmentFor` read it again for the path, so
+    // even inside one request the two halves could describe different panels.
+    const { service, captured } = build(() => of({ data: { response: { total: 1 } } }));
+    const era = eraFlippingAfterFirstRead(service);
+
+    const identity = staleIdentity();
+    const observed = await observePanelEra(() => service.getPanelShape());
+
+    await service.deletePanelUserDevice(identity, 'hwid-x', observed);
+
+    assert.deepEqual(captured, [
+      {
+        method: 'post',
+        url: '/api/hwid/devices/delete',
+        // `userUuid` and the stored string, because the observation said
+        // `'unknown'`. A second read would have produced `{ userId: 5150 }` —
+        // the live customer's device list.
+        data: { userUuid: DEAD_UUID, hwid: 'hwid-x' },
+      },
+    ]);
+    assert.equal(era.reads(), 1);
+  });
+
+  it('a proven 3.x era still addresses by the numeric id, so threading is not just "never resolve"', async () => {
+    // The anti-vacuity side. Threading the observation must not have turned the
+    // address builder inert: handed a 3.x observation it still takes the `'id'`
+    // branch and still emits the numeric identity.
+    const { service, captured } = build(() => of({ data: { response: { isDeleted: true } } }));
+    let reads = 0;
+    (service as unknown as { getPanelShape: () => Promise<RemnawavePanelShape> }).getPanelShape =
+      async () => {
+        reads += 1;
+        return SHAPE_3X;
+      };
+
+    const identity = { remnawaveId: '5150', panelId: 5150, panelUsername: 'rz_alice_sub' };
+    const observed = await observePanelEra(() => service.getPanelShape());
+    assert.deepEqual(assessObservedPanelLink(observed, identity.remnawaveId), {
+      trusted: true,
+      because: 'identityIsCurrent',
+    });
+
+    await service.deletePanelUser(identity, observed);
+
+    assert.deepEqual(
+      captured.map((c) => `${c.method} ${c.url}`),
+      ['delete /api/users/5150'],
+    );
+    assert.equal(reads, 1);
   });
 });
 

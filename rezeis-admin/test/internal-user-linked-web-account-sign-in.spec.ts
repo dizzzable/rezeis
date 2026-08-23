@@ -71,6 +71,13 @@ describe('linked web-account internal sign-in', () => {
         actualPasswordInput = args[0];
         return true;
       },
+      // The stored hash in this fixture is the string `stored-password-hash`,
+      // which is not a scrypt hash at all, so the real service would answer
+      // `false` here too. Pinned rather than inherited so this case stays about
+      // the session payload; the upgrade itself is proven against the REAL
+      // `PasswordHashService` in
+      // `test/internal-user-password-hash-upgrade-on-sign-in.spec.ts`.
+      needsRehash: (_passwordHash: string, _audience: 'admin' | 'subscriber'): boolean => false,
     };
     const service = new InternalUserService(
       prismaService as never,
@@ -224,6 +231,11 @@ function createSignInServiceForWebAccount(
 function createPasswordHashServiceMock(input: { readonly isPasswordValid: boolean }): PasswordHashService {
   return {
     verifyPassword: async (): Promise<boolean> => input.isPasswordValid,
+    // Sign-in re-hashes an under-cost credential opportunistically, so the
+    // fake has to answer the question the path now asks. `false` keeps these
+    // cases about the refusals they were written for; the upgrade branch has
+    // its own file driving the real service.
+    needsRehash: (_passwordHash: string, _audience: 'admin' | 'subscriber'): boolean => false,
   } as unknown as PasswordHashService;
 }
 

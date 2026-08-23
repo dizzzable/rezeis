@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   Injectable,
+  Logger,
   NotFoundException,
   Optional,
   UnauthorizedException,
@@ -21,6 +22,7 @@ import {
   type PanelIdentityColumns,
 } from '../../remnawave/services/panel-user-address';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
+import { panelTrafficLimitToGb } from '../../remnawave/utils/panel-traffic-limit.util';
 import { AcceptInternalUserRulesDto } from '../dto/accept-internal-user-rules.dto';
 import { CompleteWebAccountEmailVerificationDto } from '../dto/complete-web-account-email-verification.dto';
 import { IssueWebAccountEmailVerificationChallengeDto } from '../dto/issue-web-account-email-verification-challenge.dto';
@@ -118,6 +120,8 @@ function mapPanelSubscriptionStatus(raw: string | null): SubscriptionStatus | un
  */
 @Injectable()
 export class InternalUserService {
+  private readonly logger = new Logger(InternalUserService.name);
+
   public constructor(
     private readonly prismaService: PrismaService,
     private readonly passwordHashService: PasswordHashService,
@@ -246,7 +250,88 @@ export class InternalUserService {
     if (user.isBlocked) {
       throw new BadRequestException('User is blocked');
     }
+    // Deliberately AFTER every gate above, the way
+    // `AdminAuthService.upgradePasswordHashIfNeeded` sits behind the second
+    // factor: a correct password that is still refused (blocked user, missing
+    // `User` row) must not rewrite the credential row.
+    await this.upgradePasswordHashIfNeeded({
+      webAccountId: webAccount.id,
+      storedPasswordHash: webAccount.passwordHash,
+      plainTextPassword: input.password,
+    });
     return mapInternalUserSession(user);
+  }
+
+  /**
+   * Re-hashes a subscriber password that was stored below the current
+   * subscriber scrypt work factor.
+   *
+   * THIS IS THE SECOND SUBSCRIBER DOOR. `WebAuthService.login` is the first and
+   * carries the identical helper; wiring the opportunistic upgrade into only
+   * one of them leaves every account that signs in exclusively through the
+   * internal linked-web-account route at its legacy cost forever, which is
+   * precisely the inertness the parameterised hash format exists to remove.
+   * `PasswordHashService.verifyPassword` derives with the parameters recorded
+   * IN each hash, so nobody is locked out by the raise — but nobody is upgraded
+   * either until a path that has just seen the plain text rewrites the row. A
+   * successful sign-in is the only moment that plain text exists in memory.
+   *
+   * THE AUDIENCE IS `'subscriber'`, and it is decided by the CREDENTIAL, not by
+   * the caller. The row being verified and rewritten here is a `WebAccount` —
+   * the same row `setWebAccountPassword` a few methods below mints at
+   * `audience: 'subscriber'`, and the same row `WebAuthService` verifies. That
+   * this method is reached over the internal admin API changes nothing: an
+   * admin-facing endpoint that touches a subscriber credential is still minting
+   * a subscriber credential. Getting it wrong is not correctable later —
+   * `needsRehash` compares TOTAL WORK and only ever moves a hash up, so a row
+   * minted at the heavier admin parameters is never brought back down, and
+   * every future sign-in through either subscriber door pays 196 ms instead of
+   * 114 ms for a credential that was never meant to be there.
+   *
+   * Same three properties as the sibling helpers, for the same reasons:
+   *
+   *   - The write is CONDITIONAL on the hash still being the one that was just
+   *     verified (`updateMany` with `passwordHash` in the filter). Between the
+   *     verification and this call the subscriber can have changed their
+   *     password in another session — or an operator can have issued a
+   *     temporary one — and an unconditional write would clobber the new hash
+   *     with a re-derivation of the OLD password, silently restoring a
+   *     credential that was just revoked.
+   *   - It touches ONLY `passwordHash`. Not `requiresPasswordChange`, not
+   *     `temporaryPasswordExpiresAt`, not `credentialsBootstrappedAt` — a
+   *     re-hash is not a password change, and clearing the reset flag here
+   *     would walk a user out of a forced reset they never completed.
+   *   - It can never fail the sign-in. The subscriber authenticated correctly;
+   *     a database hiccup while opportunistically improving storage is not
+   *     their problem, and the next sign-in tries again.
+   */
+  private async upgradePasswordHashIfNeeded(input: {
+    readonly webAccountId: string;
+    readonly storedPasswordHash: string;
+    readonly plainTextPassword: string;
+  }): Promise<void> {
+    if (!this.passwordHashService.needsRehash(input.storedPasswordHash, 'subscriber')) {
+      return;
+    }
+    try {
+      const upgradedHash: string = await this.passwordHashService.hashPassword({
+        plainTextPassword: input.plainTextPassword,
+        audience: 'subscriber',
+      });
+      const { count } = await this.prismaService.webAccount.updateMany({
+        where: { id: input.webAccountId, passwordHash: input.storedPasswordHash },
+        data: { passwordHash: upgradedHash },
+      });
+      if (count > 0) {
+        this.logger.log(
+          `Re-hashed the password of web account ${input.webAccountId} at the current subscriber scrypt work factor`,
+        );
+      }
+    } catch (error) {
+      this.logger.warn(
+        `Could not re-hash the password of web account ${input.webAccountId}: ${(error as Error).message}`,
+      );
+    }
   }
 
   /**
@@ -343,8 +428,10 @@ export class InternalUserService {
     }
     const login: string = loginPolicy.sanitizeLogin(input.login);
     const loginNormalized: string = loginPolicy.normalizeLogin(input.login);
+    // SUBSCRIBER: the resolved user's own `WebAccount`, set from the cabinet.
     const passwordHash: string = await this.passwordHashService.hashPassword({
       plainTextPassword: input.password,
+      audience: 'subscriber',
     });
     const credentialsBootstrappedAt: Date =
       webAccount.credentialsBootstrappedAt ?? new Date(Date.now());
@@ -685,11 +772,11 @@ export class InternalUserService {
       const parsed = new Date(usage.expireAt);
       if (!Number.isNaN(parsed.getTime())) overlay.expiresAt = parsed;
     }
+    // The presence check stays HERE, outside the converter: a limit the panel
+    // never mentioned must leave the local snapshot alone (`undefined` = keep),
+    // which is not the same answer as the panel saying "unlimited".
     if (typeof usage.trafficLimitBytes === 'number' && Number.isFinite(usage.trafficLimitBytes)) {
-      overlay.trafficLimit =
-        usage.trafficLimitBytes <= 0
-          ? null
-          : Math.max(1, Math.round(usage.trafficLimitBytes / 1024 ** 3));
+      overlay.trafficLimit = panelTrafficLimitToGb(usage.trafficLimitBytes);
     }
     if (
       typeof usage.hwidDeviceLimit === 'number' &&

@@ -13,6 +13,7 @@
  */
 import {
   BadGatewayException,
+  ConflictException,
   Controller,
   Delete,
   Get,
@@ -31,6 +32,12 @@ import { EVENT_TYPES, SystemEventsService } from '../../../common/services/syste
 import { InternalAdminAuthGuard } from '../../auth/guards/internal-admin-auth.guard';
 import { storedIdentityOf } from '../../remnawave/services/panel-user-address';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
+import {
+  assessObservedPanelLink,
+  observePanelEra,
+  staleDeviceDeleteRefusalBody,
+  staleRegenerateRefusalBody,
+} from '../../remnawave/services/stale-panel-link';
 import { requirePanelDeviceList } from '../../remnawave/utils/panel-device-read.util';
 import { buildUserReferenceWhere } from '../utils/user-reference.util';
 
@@ -99,7 +106,36 @@ export class InternalUserDevicesController {
     }
     const userId = subscription.userId;
 
-    const result = await this.remnawaveApiService.deletePanelUserDevice(identity, hwid);
+    // ── THE STALE-LINK REFUSAL, ON THE DEVICE VERB ─────────────────────────
+    //
+    // A different verb reaching the same wrong account. `deletePanelUserDevice`
+    // names its owner through the SAME `panelUserAddress` fallback the
+    // subscription delete does, so on a 3.x panel a uuid-shaped stored identity
+    // resolves — via the recorded panel id, the saved subscription short uuid
+    // or the panel username — to whatever account is LIVE at that address. On
+    // an unrepaired duplicate pair that is a paying customer, and this frees a
+    // device slot they are using, from a device they are using.
+    //
+    // ONE OBSERVATION, USED TWICE, exactly as on the delete paths: the era read
+    // here is what `assessObservedPanelLink` judges AND what the adapter builds
+    // the request from, because `deletePanelUserDevice` takes it as a required
+    // argument and never re-reads the shape.
+    //
+    // SUBSCRIBER WORDING. This endpoint answers reiwa, so the sentence goes to
+    // a customer who cannot open the Subscriptions page and cannot run the
+    // reconciliation; naming it would be a dead end rather than a next step.
+    const era = await observePanelEra(() => this.remnawaveApiService.getPanelShape());
+    if (!assessObservedPanelLink(era, identity.remnawaveId).trusted) {
+      this.logger.error(
+        `deleteDevice: refused the HWID revocation for subscription ${subscription.id} — its ` +
+          'stored 2.x identity does not name the account it was written for on a 3.x panel, so ' +
+          'revoking would have freed a slot belonging to somebody else. Run the panel link ' +
+          'reconciliation.',
+      );
+      throw new ConflictException(staleDeviceDeleteRefusalBody('subscriber'));
+    }
+
+    const result = await this.remnawaveApiService.deletePanelUserDevice(identity, hwid, era);
 
     // Resolve user info for rich Telegram notification
     const user = await this.prismaService.user.findUnique({
@@ -174,7 +210,23 @@ export class InternalUserDevicesController {
     if (identity === null) {
       throw new NotFoundException('No subscription with a Remnawave profile');
     }
-    const result = await this.remnawaveApiService.deletePanelUserDevice(identity, hwid);
+    // The same refusal as `deleteDevice`, spelled out at this site rather than
+    // shared with it: the two endpoints resolve their subscription differently
+    // (current-active vs explicitly owned), and a guard hoisted into the helper
+    // they share would sit before the ownership check on one path and after it
+    // on the other. Same one observation, same subscriber wording — this is the
+    // cabinet's per-card device list, so the reader is again a customer.
+    const era = await observePanelEra(() => this.remnawaveApiService.getPanelShape());
+    if (!assessObservedPanelLink(era, identity.remnawaveId).trusted) {
+      this.logger.error(
+        `deleteSubscriptionDevice: refused the HWID revocation for subscription ` +
+          `${subscription.id} — its stored 2.x identity does not name the account it was written ` +
+          'for on a 3.x panel, so revoking would have freed a slot belonging to somebody else. ' +
+          'Run the panel link reconciliation.',
+      );
+      throw new ConflictException(staleDeviceDeleteRefusalBody('subscriber'));
+    }
+    const result = await this.remnawaveApiService.deletePanelUserDevice(identity, hwid, era);
     await this.emitDeviceRevoked(subscription, hwid, result.total);
     return { revoked: true, remainingDevices: result.total };
   }
@@ -186,6 +238,11 @@ export class InternalUserDevicesController {
    * link, and we wipe all HWID devices for that profile.
    *
    * Reiwa calls: `POST /api/internal/user/:userRef/subscriptions/:subscriptionId/regenerate`
+   *
+   * REFUSED OUTRIGHT ON A STALE PANEL LINK, before any of the ordering below
+   * can matter. See the guard in the body: a 2.x identity on a 3.x panel
+   * resolves through the address fallback to somebody else's live account,
+   * and step 1 rotates whatever it resolves to — irreversibly.
    *
    * ORDER IS LOAD-BEARING. The panel rotates the short uuid inside step 1, so
    * the moment that call returns, every link we have ever handed this customer
@@ -242,10 +299,60 @@ export class InternalUserDevicesController {
       throw new NotFoundException('No subscription with a Remnawave profile');
     }
 
+    // The era, read ONCE for this whole request and then carried BY VALUE into
+    // every step that depends on it: the guard below judges this observation,
+    // `regeneratePanelUserSubscription` builds the rotation address from it, and
+    // `deleteAllPanelUserDevices` builds the wipe from it. All three take it as
+    // a required argument, so none of them can take a second, possibly
+    // different reading — which is the whole defect, because `getPanelShape()`
+    // caches a FAILURE for fifteen seconds and two adjacent reads can therefore
+    // legitimately disagree.
+    const era = await observePanelEra(() => this.remnawaveApiService.getPanelShape());
+
+    // ── THE STALE-LINK REFUSAL, IN FRONT OF STEP 1 ─────────────────────────
+    //
+    // ONE GUARD FOR TWO DESTRUCTIVE CALLS, and it stands HERE because of what
+    // step 1 is. `regeneratePanelUserSubscription` names its target through the
+    // SAME `panelUserAddress` fallback the delete verbs use — numeric fast path
+    // → `remnawavePanelId` → the short uuid recovered from `config_url` →
+    // `remnawavePanelUsername` — so on a 3.x panel a uuid-shaped stored identity
+    // resolves to whatever account is LIVE at that address and revokes ITS short
+    // uuid. On an unrepaired duplicate pair that is a paying customer: every
+    // client link they have ever been handed dies at once, and the panel cannot
+    // re-issue the old value. This is the one verb in the system with no way
+    // back — a deletion can be re-provisioned and a device slot can be re-bound,
+    // a rotated short uuid is simply gone. Step 3's device wipe is destructive
+    // on the same address for the same reason, and this throw is what keeps it
+    // unreachable; a guard placed anywhere after step 1 would speak too late for
+    // both of them.
+    //
+    // WHY REFUSE RATHER THAN PROCEED — a customer-facing product decision, made
+    // deliberately. The whole of this work refuses LOUDLY with a named remedy
+    // instead of silently doing the wrong thing. The cost of refusing is one
+    // more click after the link is repaired. The cost of proceeding is
+    // irreversible and is paid by a paying customer who did nothing.
+    //
+    // NO SECOND READ. The observation judged here is the one taken above and the
+    // one both panel calls receive; `assessObservedPanelLink` is synchronous and
+    // pure precisely so that it CANNOT reach for the era itself.
+    //
+    // SUBSCRIBER WORDING. This endpoint answers reiwa, so the sentence goes to a
+    // customer who cannot open the Subscriptions page and cannot run the
+    // reconciliation; naming it would be a dead end rather than a next step.
+    if (!assessObservedPanelLink(era, identity.remnawaveId).trusted) {
+      this.logger.error(
+        `regenerateSubscription: refused the link rotation for subscription ${subscription.id} — ` +
+          'its stored 2.x identity does not name the account it was written for on a 3.x panel, ' +
+          'so rotating would have killed every working link of somebody else with no way to put ' +
+          'the old one back. Run the panel link reconciliation.',
+      );
+      throw new ConflictException(staleRegenerateRefusalBody('subscriber'));
+    }
+
     // 1. Rotate the subscription link (revoke old short UUID). Every existing
     //    client link is dead from here on.
     const { subscriptionUrl } =
-      await this.remnawaveApiService.regeneratePanelUserSubscription(identity);
+      await this.remnawaveApiService.regeneratePanelUserSubscription(identity, era);
 
     // 2. Persist the new URL — FIRST, before anything else that can fail.
     if (subscriptionUrl === null) {
@@ -286,7 +393,7 @@ export class InternalUserDevicesController {
     //    leftover devices are now honestly visible in the device list.
     let devicesCleared = true;
     try {
-      await this.remnawaveApiService.deleteAllPanelUserDevices(identity);
+      await this.remnawaveApiService.deleteAllPanelUserDevices(identity, era);
     } catch (err: unknown) {
       devicesCleared = false;
       const message = err instanceof Error ? err.message : 'Unknown error';

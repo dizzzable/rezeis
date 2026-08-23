@@ -25,6 +25,21 @@ function deferred() {
   return { promise, resolve };
 }
 
+/**
+ * The panel adapter as every case in this file needs it: one method, answering
+ * "the era cannot be read".
+ *
+ * `SubscriptionDeletionService` asks the adapter which Remnawave era it is
+ * talking to before it arms a panel deletion, and refuses only on a PROVEN 3.x
+ * panel holding a 2.x uuid. Every case here predates that guard and asserts the
+ * behaviour an unreadable era must preserve unchanged — so this is the honest
+ * stub for them, not a switch that turns the guard off. The guard's own cases
+ * live in `subscription-delete-stale-panel-link.spec.ts` and stub a real era.
+ */
+function panelEraUnreadable() {
+  return { getPanelShape: async () => ({ addressing: 'unknown' }) } as never;
+}
+
 run('add-on entitlement PostgreSQL concurrency', () => {
   const terms = new SubscriptionTermService();
   const entitlements = new AddOnEntitlementService();
@@ -352,6 +367,7 @@ run('add-on entitlement PostgreSQL concurrency', () => {
       { enqueue: async () => undefined } as never,
       entitlements,
       terms,
+      panelEraUnreadable(),
     );
     await deletion.deleteByOperator(id);
     assert.equal((await prisma.subscription.findUniqueOrThrow({ where: { id } })).status, 'DELETED');
@@ -399,6 +415,7 @@ run('add-on entitlement PostgreSQL concurrency', () => {
       { enqueue: async (jobId: string) => queueCalls.push(jobId) } as never,
       entitlements,
       terms,
+      panelEraUnreadable(),
     );
     await deletion.deleteByOperator(id);
     assert.equal(await prisma.profileSyncJob.count({ where: { subscriptionId: id, action: 'DELETE' } }), 1);
@@ -429,6 +446,7 @@ run('add-on entitlement PostgreSQL concurrency', () => {
       { enqueue: async (id: string) => queueCalls.push(id) } as never,
       failingEntitlements as never,
       terms,
+      panelEraUnreadable(),
     );
 
     await assert.rejects(() => deletion.deleteByOperator(subscriptionId), /forced lifecycle failure/);
@@ -463,6 +481,7 @@ run('add-on entitlement PostgreSQL concurrency', () => {
       { enqueue: async (jobId: string) => queueCalls.push(jobId) } as never,
       entitlements,
       terms,
+      panelEraUnreadable(),
     );
 
     await Promise.all([deletion.deleteByOperator(id), deletion.deleteByOperator(id)]);
@@ -554,6 +573,7 @@ run('add-on entitlement PostgreSQL concurrency', () => {
       { enqueue: async () => undefined } as never,
       entitlements,
       terms,
+      panelEraUnreadable(),
     );
     const deleting = deletion.deleteByOperator(id).finally(() => { deleteSettled = true; });
     await new Promise((resolve) => setTimeout(resolve, 25));

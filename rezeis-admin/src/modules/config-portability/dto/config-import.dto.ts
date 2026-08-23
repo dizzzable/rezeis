@@ -1,3 +1,4 @@
+import { Transform } from 'class-transformer';
 import {
   ArrayMaxSize,
   IsArray,
@@ -16,6 +17,24 @@ export class ConfigExportQueryDto {
   @ArrayMaxSize(20)
   @IsString({ each: true })
   public sections?: string[];
+
+  /**
+   * Keep `webhooks.secret` in the exported file.
+   *
+   * Off by default. Promoting a config to a fresh environment legitimately
+   * needs the receivers to keep validating signatures — that capability is
+   * kept — but it was the DEFAULT, so every export of the webhooks section
+   * shipped live signing secrets whether or not anyone wanted them, including
+   * an export taken only to diff two environments.
+   *
+   * Query strings carry text, so the flag arrives as `'true'`. Transformed
+   * explicitly rather than left to `@Type(() => Boolean)`, which coerces every
+   * non-empty string — `'false'` included — to `true`.
+   */
+  @IsOptional()
+  @Transform(({ value }) => value === true || value === 'true' || value === '1')
+  @IsBoolean()
+  public includeWebhookSecrets?: boolean;
 }
 
 export class ConfigImportDto {

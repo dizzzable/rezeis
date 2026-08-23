@@ -54,7 +54,6 @@ interface AdminSettings {
   readonly webPush?: {
     readonly configured: boolean
     readonly publicKey: string
-    readonly source: 'settings' | 'env' | null
   }
 }
 
@@ -310,7 +309,6 @@ export function WebPushSection({ settings }: { settings: AdminSettings | undefin
   const queryClient = useQueryClient()
   const configured = settings?.webPush?.configured ?? false
   const publicKey = settings?.webPush?.publicKey ?? ''
-  const source = settings?.webPush?.source ?? null
   const [contactEmail, setContactEmail] = useState('')
 
   const generate = useMutation({
@@ -358,11 +356,22 @@ export function WebPushSection({ settings }: { settings: AdminSettings | undefin
         <CardDescription>{t('settingsPage.webPush.description')}</CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
-        <div className="rounded-lg border p-3 text-sm">
+        {/*
+          The unconfigured state is styled as a warning, not as neutral copy.
+          The `.env` fallback used to cover it, so "not configured" was mostly
+          cosmetic; now it means every push is a no-op, and this card is the
+          surface an operator checks when they ask why push stopped. The
+          matching server-side signal is `system.web_push_unconfigured`.
+        */}
+        <div
+          className={
+            configured
+              ? 'rounded-lg border p-3 text-sm'
+              : 'rounded-lg border border-destructive/50 bg-destructive/10 p-3 text-sm text-destructive'
+          }
+        >
           {configured
-            ? t('settingsPage.webPush.statusConfigured', {
-                source: t(`settingsPage.webPush.source.${source ?? 'env'}`),
-              })
+            ? t('settingsPage.webPush.statusConfigured')
             : t('settingsPage.webPush.statusMissing')}
         </div>
         {configured && publicKey.length > 0 && (
@@ -396,7 +405,7 @@ export function WebPushSection({ settings }: { settings: AdminSettings | undefin
             {test.isPending ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
             {t('settingsPage.webPush.testButton')}
           </Button>
-          {configured && source === 'settings' && (
+          {configured && (
             <Button variant="outline" onClick={() => clear.mutate()} disabled={clear.isPending}>
               {t('settingsPage.webPush.clearButton')}
             </Button>

@@ -1,51 +1,27 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { QuestIconAssetInterface } from '../interfaces/quest-icon.interface';
+import { assertSafeSvg } from '../../settings/services/icon-upload.service';
 
+/**
+ * Transport ceiling for a quest icon.
+ *
+ * The controller caps the multipart body at the same 100 KB
+ * (`FileInterceptor('file', { limits: { fileSize: 100 * 1024 } })`), so the
+ * validator is told the same number rather than defaulting to the larger
+ * ceiling the icon/branding slots use. Two limits that disagree are how the
+ * previous version rejected files at a size nobody had been shown.
+ */
 const MAX_SVG_BYTES = 100 * 1024;
 
 /**
- * Forbidden substrings (checked case-insensitively). We deliberately
- * VALIDATE-AND-REJECT rather than surgically strip: an icon SVG only needs
- * shapes/paths/gradients, so anything carrying active content, external
- * references, or a DOCTYPE/ENTITY (XSS / XXE / SSRF surface) is refused outright
- * — far safer than trying to clean partially. Operators simplify the SVG.
- */
-const FORBIDDEN_SUBSTRINGS: readonly string[] = [
-  '<script',
-  '<foreignobject',
-  '<iframe',
-  '<embed',
-  '<object',
-  '<use', // external/same-doc symbol refs — not needed for a flat icon
-  '<image', // can load external/data bitmaps
-  '<animate',
-  '<set',
-  '<style',
-  '<!doctype',
-  '<!entity',
-  '<!element',
-  'javascript:',
-  'expression(',
-  '@import',
-  '@font-face',
-];
-
-/** Regexes that reject dangerous attribute/URL patterns. */
-const FORBIDDEN_PATTERNS: readonly RegExp[] = [
-  /[\s/"']on[a-z0-9_-]+\s*=/i, // inline event handlers, incl. attr/quote-adjacent (<rect/onload=…>)
-  /(?:xlink:)?href\s*=\s*["']?\s*(?!#)/i, // any href not a local #fragment
-  /url\(\s*(?!#)/i, // CSS url() not a local #fragment
-  /data:/i, // data: URIs anywhere
-  /&#x?[0-9a-f]+;?/i, // numeric char-ref entities (obfuscation / XXE vectors)
-];
-
-/**
- * Manages operator-uploaded SVG icon assets for quests: sanitizes on upload
- * (see the reject policy above), stores the sanitized markup, and serves it
- * back for the admin picker + cabinet (behind hardened response headers set by
- * the controllers).
+ * Manages operator-uploaded SVG icon assets for quests: validates on upload
+ * (`assertSafeSvg`, shared with the icon/branding slots), stores the validated
+ * markup, and serves it back for the admin picker + cabinet behind the
+ * enforced `default-src 'none'` CSP the two controllers set. That header is
+ * what kept the namespace-prefix bypass from being exploitable on THIS path;
+ * the same payload on `/uploads` had no enforced CSP at all.
  */
 @Injectable()
 export class QuestIconService {
@@ -90,37 +66,23 @@ export class QuestIconService {
   }
 
   /**
-   * Validate a raw SVG string and return it unchanged when safe; throw
-   * `BadRequestException` otherwise. Pure + static so it is unit-testable in
-   * isolation.
+   * Validate a raw SVG upload and return it (trimmed) when safe; throw
+   * `BadRequestException` otherwise.
+   *
+   * This used to be a byte-for-byte COPY of `assertSafeSvg`'s reject-list,
+   * carrying a comment that the two were "kept identical so the two paths
+   * cannot drift into different verdicts on the same file". They never drifted
+   * apart; they drifted into the SAME hole. Both matched the literal string
+   * `<script`, and in XML the namespace prefix is not part of the element name,
+   * so `<ns0:script>` bound to the SVG namespace was accepted by both and had
+   * to be fixed in both. Two copies of one policy is two places to fix and one
+   * place to forget, so there is now one implementation.
+   *
+   * Kept as a static method because it is the published entry point for this
+   * module and for `test/quest-icon-sanitizer.spec.ts`.
    */
-  public static sanitizeSvg(raw: string): string {
-    if (typeof raw !== 'string') {
-      throw new BadRequestException('Icon must be an SVG string');
-    }
-    // Strip a leading XML declaration + surrounding whitespace.
-    const trimmed = raw.replace(/^\uFEFF/, '').trim().replace(/^<\?xml[^>]*\?>\s*/i, '').trim();
-    if (trimmed.length === 0) {
-      throw new BadRequestException('Empty SVG');
-    }
-    if (Buffer.byteLength(trimmed, 'utf8') > MAX_SVG_BYTES) {
-      throw new BadRequestException('SVG too large (max 100 KB)');
-    }
-    const lower = trimmed.toLowerCase();
-    if (!/^<svg[\s>]/.test(lower) || !/<\/svg>\s*$/.test(lower)) {
-      throw new BadRequestException('File must be a single <svg> element');
-    }
-    for (const token of FORBIDDEN_SUBSTRINGS) {
-      if (lower.includes(token)) {
-        throw new BadRequestException(`SVG contains a disallowed element/attribute: ${token}`);
-      }
-    }
-    for (const pattern of FORBIDDEN_PATTERNS) {
-      if (pattern.test(trimmed)) {
-        throw new BadRequestException('SVG contains a disallowed attribute or reference');
-      }
-    }
-    return trimmed;
+  public static sanitizeSvg(raw: unknown): string {
+    return assertSafeSvg(raw, MAX_SVG_BYTES);
   }
 }
 

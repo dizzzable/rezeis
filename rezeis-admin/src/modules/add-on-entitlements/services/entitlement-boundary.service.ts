@@ -15,6 +15,7 @@ import { storedIdentityOf } from '../../remnawave/services/panel-user-address';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
 import { resolveResetCapabilities } from '../add-on-rollout.config';
 import { GIB_BYTES } from '../domain/cutover-baseline';
+import { resolveOperatorConfiguredLimits } from '../domain/entitlement-baseline';
 import { ResetStrategy } from '../domain/reset-cycle-policy';
 import { AddOnEntitlementService } from './add-on-entitlement.service';
 import { ensureLiveResetEpoch, LiveResetEpoch } from './reset-epoch.util';
@@ -227,21 +228,19 @@ export class EntitlementBoundaryService {
       });
       const syncJobIds: string[] = [];
       const deferredPlan = decodeDeferredPlanActivation(due.planSnapshot);
+      // Resolved BEFORE the update below replaces `planSnapshot`, which is what
+      // the override test reads the subscription against.
+      const deferredSquads =
+        deferredPlan === null
+          ? {}
+          : await this.resolveDeferredSquadWrite(tx, subscriptionId, deferredPlan);
       if (projection.changed || deferredPlan !== null) {
         const subscription = await tx.subscription.update({
           where: { id: subscriptionId },
           data: {
             ...(deferredPlan === null
               ? {}
-              : {
-                  planSnapshot: deferredPlan.planSnapshot,
-                  ...(deferredPlan.internalSquads === undefined
-                    ? {}
-                    : { internalSquads: [...deferredPlan.internalSquads] }),
-                  ...(deferredPlan.externalSquad === undefined
-                    ? {}
-                    : { externalSquad: deferredPlan.externalSquad }),
-                }),
+              : { planSnapshot: deferredPlan.planSnapshot, ...deferredSquads }),
             trafficLimit:
               projection.desiredTrafficLimitBytes === null
                 ? null
@@ -276,6 +275,71 @@ export class EntitlementBoundaryService {
         syncJobIds,
       };
     });
+  }
+
+  /**
+   * Which of the deferred term plan's squads may be written at activation.
+   *
+   * ── The decision, and why it is not a merge ───────────────────────────────
+   *
+   * `trafficLimit` and `deviceLimit` are quantities, so an add-on layers on top
+   * of whatever the subscription is entitled to and the projection can add the
+   * two together (`../domain/entitlement-baseline.ts`). `internalSquads` and
+   * `externalSquad` are MEMBERSHIP, and nothing in the catalogue grants a
+   * squad: no add-on, no entitlement, no term contributes one. So there is no
+   * second value to combine with, and "overridden squads plus a term" has only
+   * two candidate answers — the term plan's list, or the operator's.
+   *
+   * There is no honest third. A union would hand the customer access to squads
+   * nobody sold them and no operator chose; an intersection would silently
+   * revoke access the operator granted; and taking the plan's list wholesale is
+   * exactly the defect this change exists to remove, since an operator's squad
+   * assignment is individual configuration in the same way a raised device
+   * limit is. So the decision is: WHEN THE OPERATOR OWNS THE FIELD, THE
+   * OVERRIDE SIMPLY WINS, WHOLE. That is a decision, not an omission — squads
+   * cannot be meaningfully merged, and pretending otherwise would invent
+   * entitlements.
+   *
+   * The ownership test is the same one the numeric baseline uses and is the
+   * same call — `resolveOperatorConfiguredLimits`, over
+   * `resolveInheritedPlanLimitUpdate`. Only the two membership keys are asked
+   * about here, so this call and the projection's cannot answer differently
+   * about a field they share: they share none.
+   *
+   * An unreadable stored snapshot leaves the field UNDECIDABLE, and the term
+   * plan's list is written — the same direction the numeric baseline takes, and
+   * today's behaviour, so a legacy row is not newly frozen by this change.
+   */
+  private async resolveDeferredSquadWrite(
+    tx: Prisma.TransactionClient,
+    subscriptionId: string,
+    deferredPlan: DeferredPlanActivation,
+  ): Promise<{ internalSquads?: string[]; externalSquad?: string | null }> {
+    const write: { internalSquads?: string[]; externalSquad?: string | null } = {};
+    if (deferredPlan.internalSquads === undefined && deferredPlan.externalSquad === undefined) {
+      return write;
+    }
+    const current = await tx.subscription.findUnique({
+      where: { id: subscriptionId },
+      select: { internalSquads: true, externalSquad: true, planSnapshot: true },
+    });
+    const operatorOwns =
+      current === null
+        ? {}
+        : resolveOperatorConfiguredLimits({
+            configured: {
+              internalSquads: current.internalSquads,
+              externalSquad: current.externalSquad,
+            },
+            planSnapshot: current.planSnapshot,
+          });
+    if (deferredPlan.internalSquads !== undefined && !('internalSquads' in operatorOwns)) {
+      write.internalSquads = [...deferredPlan.internalSquads];
+    }
+    if (deferredPlan.externalSquad !== undefined && !('externalSquad' in operatorOwns)) {
+      write.externalSquad = deferredPlan.externalSquad;
+    }
+    return write;
   }
 
   /**

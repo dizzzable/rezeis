@@ -20,7 +20,8 @@ import { PartnersService } from './services/partners.service';
  *  - analytics (funnel/timeseries/top/level/gateway/throughput)
  *  - internal user-facing endpoints under `/internal/user/:telegramId/partner`
  *  - `PartnerEarningsService` for post-payment accrual (called by payments
- *    module) and retroactive partner-referral chain backfill on activation
+ *    module) and partner-referral chain attachment at signup. Activating a
+ *    partner builds no edges: earnings count only from activation onward.
  */
 @Module({
   imports: [AuthModule, NotificationsModule],

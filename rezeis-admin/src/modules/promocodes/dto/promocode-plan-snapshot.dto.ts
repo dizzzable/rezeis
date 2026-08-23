@@ -13,11 +13,34 @@ export class PromocodePlanSnapshotDto {
   @MaxLength(32)
   public type!: string;
 
+  /**
+   * Whole gigabytes, or absent/`null` for UNLIMITED. Never `0`.
+   *
+   * `promocode-rewards.service.ts` copies this straight into
+   * `Subscription.trafficLimit` when it mints a subscription, so this decorator
+   * is the gate on a value the panel CANNOT EXPRESS. Remnawave spells unlimited
+   * traffic `0` bytes — it has no encoding for "zero bytes allowed" at all — so
+   * a locally-stored `trafficLimit: 0` is pushed upstream as UNLIMITED, the
+   * exact opposite of what it means, and read back as `null`. The projection
+   * then never matches what it sent, is never stamped APPLIED, and the sync job
+   * reports drift forever. See `remnawave/utils/panel-traffic-limit.util.ts`.
+   *
+   * `@Min(1)` matches `create-plan.dto.ts` and `update-plan.dto.ts`, which have
+   * always been `@Min(1)`. This field was the one snapshot of a plan that let
+   * `0` through.
+   *
+   * DO NOT "harmonise" this with `deviceLimit` below. The two columns are
+   * deliberately ASYMMETRIC: `deviceLimit <= 0` is the product's canonical
+   * unlimited (and matches the panel's own `hwidDeviceLimit: 0`), while
+   * `trafficLimit: null` is unlimited and `0` would mean genuinely no traffic.
+   * Same digit, opposite meanings, one field apart.
+   */
   @IsOptional()
   @IsInt()
-  @Min(0)
+  @Min(1)
   public trafficLimit?: number | null;
 
+  /** `0` is UNLIMITED here — see the warning above. Not a typo, do not raise. */
   @IsInt()
   @Min(0)
   public deviceLimit!: number;

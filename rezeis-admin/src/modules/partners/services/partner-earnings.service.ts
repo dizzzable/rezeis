@@ -24,8 +24,20 @@ interface PartnerSettingsJson {
   taxPercent?: number;
   /// Minimum withdrawal amount in minor units (kopecks).
   minWithdrawalAmount?: number;
-  /// Global accrual strategy. Per-partner override on `Partner` row wins.
+  /// Global accrual strategy, applied to every level unless a per-level
+  /// value below overrides it. This is the only accrual key an install
+  /// predating the per-level map has, so it stays the last fallback.
   accrualStrategy?: 'ON_EACH_PAYMENT' | 'ON_FIRST_PAYMENT';
+  /// Per-level accrual strategy: { LEVEL_1: 'ON_EACH_PAYMENT', LEVEL_2: ... }.
+  /// Same `LEVEL_n` map convention as `levels` above. A level that is absent,
+  /// empty or unrecognised is not an error: it falls through to the flat
+  /// fields, then to `accrualStrategy`.
+  accrualStrategies?: Record<string, string>;
+  /// Per-level accrual strategy expressed as flat fields (donor parity /
+  /// SPA payload), mirroring `level1Percent`.
+  level1AccrualStrategy?: string;
+  level2AccrualStrategy?: string;
+  level3AccrualStrategy?: string;
   /// Flat per-gateway commissions also accepted at the top level.
   [k: string]: unknown;
 }
@@ -49,6 +61,13 @@ interface PartnerWithIndividualSettings {
   readonly level1FixedAmount: number | null;
   readonly level2FixedAmount: number | null;
   readonly level3FixedAmount: number | null;
+  /// Per-level accrual mode. `null` means "inherit `accrualStrategy`",
+  /// which is what every partner row does until an operator sets a level
+  /// explicitly - so an untouched row behaves exactly as it did before
+  /// these columns existed.
+  readonly level1AccrualStrategy: PartnerAccrualStrategy | null;
+  readonly level2AccrualStrategy: PartnerAccrualStrategy | null;
+  readonly level3AccrualStrategy: PartnerAccrualStrategy | null;
 }
 
 interface ProcessPartnerEarningInput {
@@ -73,6 +92,9 @@ const PARTNER_FOR_EARNINGS_SELECT = {
   level1FixedAmount: true,
   level2FixedAmount: true,
   level3FixedAmount: true,
+  level1AccrualStrategy: true,
+  level2AccrualStrategy: true,
+  level3AccrualStrategy: true,
 } as const;
 
 /**
@@ -143,8 +165,11 @@ export class PartnerEarningsService {
         }
       }
 
-      // Per-partner accrual strategy can short-circuit ON_FIRST_PAYMENT mode.
-      const effectiveStrategy = this.resolveAccrualStrategy(partner, settings);
+      // Accrual mode is resolved PER LEVEL: the same partner can earn on every
+      // payment from its own referrals (L1) and only on the referral's first
+      // payment where it sits further up the chain (L2/L3). `edge.level` is the
+      // level THIS edge pays at, and it is already in hand here.
+      const effectiveStrategy = this.resolveAccrualStrategy(partner, settings, edge.level);
       if (effectiveStrategy === 'ON_FIRST_PAYMENT') {
         const previous = await this.prismaService.partnerTransaction.findFirst({
           where: {
@@ -336,8 +361,8 @@ export class PartnerEarningsService {
     // stops the *same* partner twice, so a user who already belongs to partner A
     // could pick up a second level-1 edge from partner B — and
     // `processPartnerEarning` pays every edge it finds, on every payment,
-    // forever. Guarded here rather than at each call site so the referral,
-    // advertising and backfill paths cannot diverge. Re-running the SAME chain
+    // forever. Guarded here rather than at each call site so the referral and
+    // advertising paths cannot diverge. Re-running the SAME chain
     // stays idempotent (the upserts below are no-ops), which is why this compares
     // the partner instead of merely checking that an edge exists.
     const existingL1 = await this.prismaService.partnerReferral.findFirst({
@@ -393,40 +418,6 @@ export class PartnerEarningsService {
     return true;
   }
 
-  /**
-   * Retroactively builds the partner referral chain for a newly-activated
-   * partner. Iterates over their existing `Referral` graph (regular referral
-   * edges where the user is the referrer) and reuses
-   * `attachPartnerReferralChain` for each referred user.
-   *
-   * Idempotent: edges already present are skipped by the upsert.
-   */
-  public async backfillPartnerReferralChainForUser(referrerUserId: string): Promise<{
-    readonly attached: number;
-    readonly considered: number;
-  }> {
-    const partner = await this.prismaService.partner.findUnique({
-      where: { userId: referrerUserId },
-      select: { id: true, isActive: true },
-    });
-    if (!partner || !partner.isActive) {
-      return { attached: 0, considered: 0 };
-    }
-    const referrals = await this.prismaService.referral.findMany({
-      where: { referrerId: referrerUserId },
-      select: { referredId: true },
-    });
-    let attached = 0;
-    for (const referral of referrals) {
-      const ok = await this.attachPartnerReferralChain({
-        newUserId: referral.referredId,
-        referrerUserId,
-      });
-      if (ok) attached += 1;
-    }
-    return { attached, considered: referrals.length };
-  }
-
   // ---------------------------------------------------------------------------
   // Private helpers
   // ---------------------------------------------------------------------------
@@ -459,16 +450,39 @@ export class PartnerEarningsService {
     });
   }
 
+  /**
+   * When this partner is paid for an earning at `level`.
+   *
+   * The resolution order is the one that was already here - individual
+   * partner settings beat the global ones - with the level threaded through:
+   *
+   *   useGlobalSettings = false (individual)
+   *     1. the `levelNAccrualStrategy` column, when the operator set that level
+   *     2. otherwise the partner-wide `accrualStrategy` column
+   *
+   *   useGlobalSettings = true (global, panel `Settings.partnerSettings`)
+   *     1. `accrualStrategies.LEVEL_N`
+   *     2. otherwise the flat `levelNAccrualStrategy` key
+   *     3. otherwise the legacy flat `accrualStrategy` key, which is all an
+   *        older install has and which must keep working
+   *
+   * `PartnerAccrualStrategy.ONCE_PER_USER` maps to 'ON_FIRST_PAYMENT' and
+   * anything else to 'ON_EACH_PAYMENT', exactly as before.
+   */
   private resolveAccrualStrategy(
     partner: PartnerWithIndividualSettings,
     settings: PartnerSettingsJson,
+    level: number,
   ): 'ON_EACH_PAYMENT' | 'ON_FIRST_PAYMENT' {
     if (!partner.useGlobalSettings) {
-      return partner.accrualStrategy === PartnerAccrualStrategy.ONCE_PER_USER
-        ? 'ON_FIRST_PAYMENT'
-        : 'ON_EACH_PAYMENT';
+      // DEPLOY SAFETY: a partner with no per-level value configured resolves
+      // to the very column it resolved to before these three columns existed.
+      // `null` is "inherit", never a silent default - which is why the columns
+      // are nullable and why the migration backfills nothing.
+      const perLevel = pickLevelAccrualStrategy(partner, level);
+      return toAccrualMode(perLevel ?? partner.accrualStrategy);
     }
-    return settings.accrualStrategy === 'ON_FIRST_PAYMENT' ? 'ON_FIRST_PAYMENT' : 'ON_EACH_PAYMENT';
+    return pickGlobalLevelAccrualStrategy(settings, level);
   }
 
   private calculateEarning(input: {
@@ -630,4 +644,71 @@ function pickGlobalLevelPercent(settings: PartnerSettingsJson, level: number): n
   const flatKey = `level${level}Percent` as const;
   const flat = settings[flatKey];
   return typeof flat === 'number' ? flat : 0;
+}
+
+/**
+ * The partner's own per-level accrual column, or `null` when the operator
+ * left that level alone. `null` is load-bearing: the caller reads it as
+ * "inherit the partner-wide `accrualStrategy`".
+ */
+function pickLevelAccrualStrategy(
+  partner: PartnerWithIndividualSettings,
+  level: number,
+): PartnerAccrualStrategy | null {
+  switch (level) {
+    case 1:
+      return partner.level1AccrualStrategy ?? null;
+    case 2:
+      return partner.level2AccrualStrategy ?? null;
+    case 3:
+      return partner.level3AccrualStrategy ?? null;
+    default:
+      return null;
+  }
+}
+
+function toAccrualMode(strategy: PartnerAccrualStrategy): 'ON_EACH_PAYMENT' | 'ON_FIRST_PAYMENT' {
+  return strategy === PartnerAccrualStrategy.ONCE_PER_USER
+    ? 'ON_FIRST_PAYMENT'
+    : 'ON_EACH_PAYMENT';
+}
+
+/**
+ * Reads an accrual mode out of the settings JSON, which is operator-typed and
+ * therefore untyped. Returns `null` for absent / empty / unrecognised so the
+ * caller falls through to the next source instead of guessing a mode.
+ *
+ * `ONCE_PER_USER` is accepted as an alias for 'ON_FIRST_PAYMENT': that is the
+ * spelling of the Prisma enum the per-partner form already posts, and the panel
+ * reuses the same control for the global defaults.
+ */
+function readAccrualMode(value: unknown): 'ON_EACH_PAYMENT' | 'ON_FIRST_PAYMENT' | null {
+  if (typeof value !== 'string') return null;
+  const normalised = value.trim().toUpperCase();
+  if (normalised === 'ON_FIRST_PAYMENT' || normalised === 'ONCE_PER_USER') {
+    return 'ON_FIRST_PAYMENT';
+  }
+  if (normalised === 'ON_EACH_PAYMENT') return 'ON_EACH_PAYMENT';
+  return null;
+}
+
+function pickGlobalLevelAccrualStrategy(
+  settings: PartnerSettingsJson,
+  level: number,
+): 'ON_EACH_PAYMENT' | 'ON_FIRST_PAYMENT' {
+  // Preferred: `accrualStrategies: { LEVEL_1: ... }` map - the same convention
+  // `pickGlobalLevelPercent` uses for `levels`.
+  const mapKey = `LEVEL_${level}`;
+  const fromMap = readAccrualMode(settings.accrualStrategies?.[mapKey]);
+  if (fromMap !== null) return fromMap;
+
+  // Flat `level1AccrualStrategy` fields (donor parity / SPA payload).
+  const flatKey = `level${level}AccrualStrategy` as const;
+  const fromFlat = readAccrualMode(settings[flatKey]);
+  if (fromFlat !== null) return fromFlat;
+
+  // Legacy: one flat `accrualStrategy` for every level. An install that
+  // predates the per-level map has nothing else, so dropping this fallback
+  // would silently flip it from "first payment only" back to "every payment".
+  return settings.accrualStrategy === 'ON_FIRST_PAYMENT' ? 'ON_FIRST_PAYMENT' : 'ON_EACH_PAYMENT';
 }

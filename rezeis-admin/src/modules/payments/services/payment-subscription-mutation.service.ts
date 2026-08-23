@@ -22,6 +22,7 @@ import {
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { SystemEventsService, EVENT_TYPES } from '../../../common/services/system-events.service';
+import { readJsonObject } from '../../../common/utils/read-json-object.util';
 import { resolveAddOnRolloutFlags, resolveResetCapabilities } from '../../add-on-entitlements/add-on-rollout.config';
 import { GIB_BYTES } from '../../add-on-entitlements/domain/cutover-baseline';
 import {
@@ -30,18 +31,95 @@ import {
   ResetStrategy,
 } from '../../add-on-entitlements/domain/reset-cycle-policy';
 import { AddOnEntitlementService } from '../../add-on-entitlements/services/add-on-entitlement.service';
+import {
+  isBaselineExtendable,
+  resolveConfiguredEntitlementBaseline,
+  resolveRecordedAddOnContribution,
+} from '../../add-on-entitlements/services/configured-baseline.util';
 import { ensureLiveResetEpoch } from '../../add-on-entitlements/services/reset-epoch.util';
 import { EffectiveProjectionService } from '../../add-on-entitlements/services/effective-projection.service';
 import { SubscriptionTermService } from '../../add-on-entitlements/services/subscription-term.service';
 import { readTrialSettings } from '../../plans/utils/trial-settings.util';
 import {
+  patchSnapshotNumeric,
+  resolveInheritedPlanLimitRefresh,
+  type PlanInheritedLimitUpdate,
+} from '../../subscriptions/services/plan-inherited-limits.util';
+import {
   consumePaidTrialClaim,
   countCommittedTrialClaimUnits,
 } from '../../subscriptions/services/trial-claim-ledger.util';
 
+/**
+ * One operator card per identical `subscriptionId:termId:addOnType` per hour —
+ * the same window `AntiFraudService`'s `NOTIFY_COOLDOWN_MS` uses.
+ *
+ * NOT per transaction: one bulk renewal is many lines, and an operator mistake
+ * on one term is ONE thing to look at. NOT global either: two subscriptions are
+ * two things to look at, and a global window would hide the second in silence.
+ *
+ * The window is PROCESS-LOCAL, which is where it differs from the anti-fraud
+ * one — that reads its floor back out of `FraudSignal` rows, so a restart does
+ * not hand everyone a fresh allowance. There is no row to read here and a
+ * dedupe window does not justify minting one, so the cost is stated instead: a
+ * restart, or a second worker replica, can produce one extra card per
+ * signature. For a card about money that has already moved, duplicated is the
+ * safe direction and suppressed is not.
+ */
+const DORMANT_ADD_ON_CARD_COOLDOWN_MS = 60 * 60 * 1000;
+
+/**
+ * A paid renewal add-on line whose capture-time baseline absorbs it, held until
+ * the fulfillment transaction COMMITS.
+ *
+ * The verdict is reached inside the `$transaction` that captures the line, and
+ * `SystemEventsService.emit` is fire-and-forget — it writes the audit row,
+ * pushes the realtime frame and sends the Telegram card the instant it is
+ * called, with no knowledge of the surrounding transaction. Announced in place
+ * it would report a capture that a rollback then undoes, and the webhook's
+ * retry would report it a second time. So the line is buffered, and the hourly
+ * signature check is deferred with it: consuming the window on an attempt that
+ * never committed would SUPPRESS the card for the attempt that did.
+ */
+interface DormantRenewalAddOnLine {
+  readonly subscriptionId: string;
+  readonly termId: string;
+  readonly type: AddOnType;
+  readonly sourceLineKey: string;
+  readonly addOnId: string;
+  readonly receiptName: string;
+  readonly value: number;
+  readonly unitAmount: string;
+  readonly currency: string;
+  readonly userId: string;
+  readonly paymentId: string;
+  readonly transactionId: string;
+  readonly baseTrafficLimitBytes: bigint | null;
+  readonly baseDeviceLimit: number | null;
+  readonly overriddenKeys: readonly string[];
+}
+
+/**
+ * An upgrade that kept the previous term baseline because a SCHEDULED term
+ * carries paid entitlements — buffered past the commit for exactly the reason
+ * {@link DormantRenewalAddOnLine} is.
+ */
+interface UpgradeTermDeferral {
+  readonly subscriptionId: string;
+  readonly planId: string;
+  readonly scheduledTermIds: readonly string[];
+  readonly boundEntitlements: number;
+}
+
 @Injectable()
 export class PaymentSubscriptionMutationService {
   private readonly logger = new Logger(PaymentSubscriptionMutationService.name);
+  /**
+   * `subscriptionId:termId:addOnType` → when its card last went out. Read and
+   * written ONLY after a fulfillment transaction has committed; see
+   * {@link announceDormantRenewalAddOns}.
+   */
+  private readonly dormantAddOnCardWindow = new Map<string, number>();
 
   public constructor(
     private readonly prismaService: PrismaService,
@@ -182,7 +260,12 @@ export class PaymentSubscriptionMutationService {
       return { syncJobs: [] };
     }
 
-    const syncJobs = await this.prismaService.$transaction(async (transactionClient) => {
+    const committed = await this.prismaService.$transaction(async (transactionClient) => {
+      // Operator cards this fulfillment wants to raise, held until it COMMITS —
+      // see {@link DormantRenewalAddOnLine}. Declared INSIDE the callback so a
+      // re-driven attempt starts from an empty buffer and cannot inherit the
+      // lines of an attempt that was rolled back.
+      const dormantAddOnLines: DormantRenewalAddOnLine[] = [];
       // Lock the transaction items inside the fulfillment transaction and claim
       // each row conditionally. The caller's pre-transaction snapshot is only
       // a candidate list; it is never authoritative under concurrent replay.
@@ -198,7 +281,7 @@ export class PaymentSubscriptionMutationService {
         }
       }
       if (claimedItems.length === 0) {
-        return [];
+        return { jobs: [] as ProfileSyncJob[], dormantAddOnLines };
       }
       const jobs: ProfileSyncJob[] = [];
       const now = new Date();
@@ -250,24 +333,99 @@ export class PaymentSubscriptionMutationService {
           lockedSubscription.expiresAt.getTime() > now.getTime()
             ? lockedSubscription.expiresAt
             : now;
+        // Individual configuration and billing are separate concerns: this
+        // renewal bills the tariff plan, but it must not silently undo a limit
+        // an operator set on this ONE subscription. Only fields whose column
+        // still matches what the stored snapshot says the plan gave them are
+        // refreshed from the plan; a hand-set value is left alone.
+        //
+        // Resolved from `lockedSubscription` BEFORE the update below replaces
+        // the snapshot, and deliberately OUTSIDE the `term` branch:
+        // `durableTermRequired` is an add-on rollout concern and must not be
+        // able to change what happens to these four columns. Both branches now
+        // receive the identical fragment.
+        //
+        // A legacy row whose `planSnapshot` is absent, empty, malformed, or
+        // predates one of these keys is UNDECIDABLE. The resolver then returns
+        // nothing for that field and the column is PRESERVED — the safe
+        // direction, because wiping is what reaches the customer, through the
+        // `profileSyncJob` created a few lines below.
+        //
+        // That cuts both ways and the trade-off is accepted knowingly: on a
+        // snapshot-less row a customer can renew onto a MORE generous plan and
+        // keep the smaller column. Preserving still wins, because the rows
+        // without a readable snapshot are the imported/legacy ones an operator
+        // is most likely to have hand-tuned. The full argument, and the single
+        // branch to flip if the owner decides otherwise, is on
+        // `resolvePlanLimitOwnership`.
+        //
+        // ── THE COLUMN IS THE MIRROR, NOT THE BASE ───────────────────────
+        //
+        // `trafficLimit` / `deviceLimit` mirror the projection's DESIRED state
+        // (`base + every ACTIVE add-on`), so on a subscription holding a live
+        // add-on the column is NOT the plan's value. Comparing it raw read
+        // every add-on holder as OVERRIDDEN: from the first add-on a customer
+        // bought, no plan edit ever reached them again — permanently, and for
+        // exactly the customers who had paid extra. So the contribution the
+        // PREVIOUS projection row recorded is handed to the resolver, which
+        // subtracts it before comparing. It is READ through
+        // `resolveRecordedAddOnContribution` and never re-derived here; a
+        // second derivation of that number is the failure the shared reader
+        // exists to prevent.
+        //
+        // ── TWO FRAGMENTS, AND THEY ARE NOT INTERCHANGEABLE ──────────────
+        //
+        // `snapshot` carries the PLAN's raw values — that is what a stored
+        // `planSnapshot` means, and it is the baseline the NEXT comparison
+        // runs against. `columns` carries the same fields with the recorded
+        // contribution added back on, because the columns mirror desired
+        // state. Writing one where the other belongs is permanent corruption,
+        // not cosmetics: `columns` in the snapshot makes the next comparison
+        // subtract a contribution that is already out, so the row reads
+        // OVERRIDDEN forever; `snapshot` in the columns silently drops the
+        // customer's paid add-on from the mirrored column AND makes the next
+        // projection recompute subtract the contribution a SECOND time,
+        // pinning the operator baseline that much lower for good.
+        const inheritedLimitRefresh = resolveInheritedPlanLimitRefresh({
+          current: lockedSubscription,
+          planSnapshot: lockedSubscription.planSnapshot,
+          plan,
+          recorded: await resolveRecordedAddOnContribution(
+            transactionClient,
+            currentSubscription.id,
+          ),
+        });
+        // THE SNAPSHOT MOVES WITH THE COLUMNS. `inheritedLimitRefresh` writes
+        // the plan's value into a column precisely because the stored snapshot
+        // still agreed with it; leaving the snapshot behind makes the very row
+        // this refresh just corrected read as OVERRIDDEN from here on, and the
+        // NEXT plan edit never reaches it. Benign-looking on the first edit —
+        // the column happens to equal the new term's baseline — and it silently
+        // removes exactly the population the snapshot freeze exists to serve:
+        // subscribers who were never individually adjusted, the ones the plan
+        // editor promises limit changes will reach on renewal.
+        //
+        // Only the keys actually refreshed move, via
+        // `patchSnapshotInheritedLimits`. The display keys (`name`, `tag`,
+        // `type`, `icon`) and `trafficLimitStrategy` are NOT touched here: they
+        // mirror the LIVE plan through `PlanSnapshotSyncService` and are not
+        // part of the override comparison.
+        const planSnapshotWrite =
+          term === null
+            ? buildItemPlanSnapshot({ item, plan, gatewayType: transaction.gatewayType })
+            : patchSnapshotInheritedLimits(
+                lockedSubscription.planSnapshot,
+                inheritedLimitRefresh.snapshot,
+              );
         const renewedSubscription = await transactionClient.subscription.update({
           where: { id: currentSubscription.id },
           data: {
             status: SubscriptionStatus.ACTIVE,
             expiresAt: calculateExpiry(renewalBase, item.durationDays),
-            ...(term === null
-              ? {
-                  planSnapshot: buildItemPlanSnapshot({
-                    item,
-                    plan,
-                    gatewayType: transaction.gatewayType,
-                  }) as Prisma.InputJsonValue,
-                  trafficLimit: plan.trafficLimit,
-                  deviceLimit: plan.deviceLimit,
-                  internalSquads: plan.internalSquads,
-                  externalSquad: plan.externalSquad,
-                }
-              : {}),
+            ...(planSnapshotWrite === undefined
+              ? {}
+              : { planSnapshot: planSnapshotWrite as Prisma.InputJsonValue }),
+            ...inheritedLimitRefresh.columns,
           },
         });
         const syncJob = await transactionClient.profileSyncJob.create({
@@ -298,11 +456,90 @@ export class PaymentSubscriptionMutationService {
               `Renewal add-ons require a durable term for subscription ${renewedSubscription.id}`,
             );
           }
+          // ── Capture-time baseline, and what it is allowed to do ───────────
+          //
+          // Eligibility is the ONLY gate a renewal add-on ever passes, and it
+          // ran at QUOTE time. Between the quote and this capture an operator
+          // can set this ONE customer's limit to unlimited, or the plan the
+          // renewal term is minted from can change: unlimited is absorbing, so
+          // the line would then add nothing and the customer would be charged
+          // for it anyway. So the same reader the offer, the checkout and the
+          // projection use answers the question again, HERE, against the term
+          // that was just appended (`term.base*`), the subscription as this
+          // renewal left it, and the contribution the previous projection row
+          // recorded.
+          //
+          // The window is a genuine TOCTOU and the answer may legitimately have
+          // changed. What follows is the deliberate choice about a line that is
+          // ALREADY PAID:
+          //
+          //   * NOT refusing the capture. This line rides on a RENEWAL
+          //     transaction. Throwing rolls the whole combined fulfillment back
+          //     — every subscription on the payment loses the time it paid for
+          //     — and the webhook then retries the same deterministic failure
+          //     forever. The blast radius of the smaller wrong is unbounded.
+          //   * NOT a recorded no-op. `recordAddOnLedgerNoOp` is the DIRECT
+          //     purchase's instrument and is wrong here: it stamps
+          //     `transaction.fulfilledAt` and `subscriptionId` and creates its
+          //     own sync job, none of which a per-item combined renewal may do.
+          //     More importantly, skipping the entitlement would leave the paid
+          //     line with NO durable record at all — the transaction would look
+          //     like an ordinary fulfilled renewal and a refund would be
+          //     undiscoverable. That is exactly "silently dropping a paid line".
+          //   * CAPTURE AND FLAG. The entitlement is created as quoted, and the
+          //     capture-time verdict is written into its `applicabilitySnapshot`
+          //     — immutable, per line, and sitting on the row a refund decision
+          //     is made against.
+          //
+          // The decisive asymmetry with the direct-purchase path is WHEN the
+          // goods land. A renewal entitlement is PENDING and activates at
+          // `term.startsAt`, days or weeks out; the baseline here is a
+          // PREDICTION of what will be true then, and an operator may well put
+          // the limit back before it. Refusing to create the entitlement on a
+          // prediction would destroy value the customer paid for. A direct
+          // purchase activates immediately, so there the capture-time answer IS
+          // the verdict and the no-op is right — see `applyAddOnViaLedger`.
+          const capturedBaseline = await resolveConfiguredEntitlementBaseline(transactionClient, {
+            subscriptionId: renewedSubscription.id,
+            term,
+            subscription: renewedSubscription,
+          });
           for (const addOn of addOnLines) {
             const totalValue =
               addOn.type === AddOnType.EXTRA_TRAFFIC
                 ? BigInt(addOn.value) * GIB_BYTES
                 : BigInt(addOn.value);
+            const extendable = isBaselineExtendable(addOn.type, capturedBaseline);
+            if (!extendable) {
+              // BUFFERED, NOT ANNOUNCED — this is inside the fulfillment
+              // `$transaction`. `SystemEventsService.emit` is fire-and-forget
+              // and lands the instant it is called (audit row, realtime frame,
+              // Telegram card), so a card raised here announces a capture that
+              // a rollback then undoes, and the webhook's retry announces it
+              // again. The hourly signature check waits with it for the same
+              // reason: burning the window on an attempt that never committed
+              // would SUPPRESS the card for the attempt that did. The
+              // `logger.warn` moved out with it — a log line is cheap, but a
+              // log claiming a capture that was rolled back is still false in
+              // the one place an operator goes to reconstruct what happened.
+              dormantAddOnLines.push({
+                subscriptionId: renewedSubscription.id,
+                termId: term.id,
+                type: addOn.type,
+                sourceLineKey: addOn.sourceLineKey,
+                addOnId: addOn.addOnId,
+                receiptName: addOn.receiptName,
+                value: addOn.value,
+                unitAmount: addOn.unitAmount,
+                currency: item.currency,
+                userId: transaction.userId,
+                paymentId: transaction.paymentId,
+                transactionId: transaction.id,
+                baseTrafficLimitBytes: capturedBaseline.baseTrafficLimitBytes,
+                baseDeviceLimit: capturedBaseline.baseDeviceLimit,
+                overriddenKeys: [...capturedBaseline.overriddenKeys],
+              });
+            }
             await this.addOnEntitlementService.createPendingInTransaction(transactionClient, {
               subscriptionId: renewedSubscription.id,
               termId: term.id,
@@ -315,7 +552,22 @@ export class PaymentSubscriptionMutationService {
               valuePerUnit: addOn.value,
               totalValue,
               lifetime: addOn.lifetime,
-              applicabilitySnapshot: {},
+              // Written for EVERY line, not only the diverged ones: a field that
+              // appears only when something is wrong cannot distinguish "this
+              // was checked and was fine" from "this was never checked".
+              // `baseTrafficLimitBytes` is stringified because JSON has no
+              // bigint. The whole object is part of the entitlement's immutable
+              // snapshot; it is safe to derive because the item is claimed
+              // (`appliedAt`) in this same transaction, so a replay never
+              // reaches a second derivation of it.
+              applicabilitySnapshot: {
+                source: 'RENEWAL_CAPTURE',
+                baselineTermId: term.id,
+                extendable,
+                baseTrafficLimitBytes: capturedBaseline.baseTrafficLimitBytes?.toString() ?? null,
+                baseDeviceLimit: capturedBaseline.baseDeviceLimit,
+                overriddenKeys: [...capturedBaseline.overriddenKeys],
+              },
               unitAmount: addOn.unitAmount,
               totalAmount: addOn.unitAmount,
               currency: item.currency,
@@ -338,7 +590,7 @@ export class PaymentSubscriptionMutationService {
         where: { id: transaction.id },
         data: { fulfilledAt: now },
       });
-      return jobs;
+      return { jobs, dormantAddOnLines };
     });
 
     this.events.info(
@@ -356,7 +608,89 @@ export class PaymentSubscriptionMutationService {
       },
     );
 
-    return { syncJobs };
+    // After the completion card, and only now that the capture is durable: the
+    // paid lines this renewal recorded as adding nothing at their baseline.
+    this.announceDormantRenewalAddOns(committed.dormantAddOnLines);
+
+    return { syncJobs: committed.jobs };
+  }
+
+  /**
+   * Announces, once the fulfillment transaction has COMMITTED, every paid
+   * renewal add-on line whose captured baseline absorbs it.
+   *
+   * SEVERITY IS `WARNING`, NOT `ERROR`, and that is a decision rather than a
+   * default. The renewal entitlement is PENDING until `term.startsAt`, days or
+   * weeks out, so the capture-time verdict is a PREDICTION an operator can
+   * still make right by restoring the finite limit before then — nothing has
+   * failed. `isErrorEvent` also routes ERROR through the incident-card
+   * formatter (fixed header, build info, a `.txt` attachment), which is the
+   * shape for a fault in the system, not for a commercial fact awaiting a human
+   * decision before a known deadline.
+   *
+   * The LOG line is written for every line while the CARD is collapsed to one
+   * per signature per hour: the container log stays the complete record, the
+   * operator's feed stays readable. An event stream nobody can read is the same
+   * as no event.
+   */
+  private announceDormantRenewalAddOns(lines: readonly DormantRenewalAddOnLine[]): void {
+    if (lines.length === 0) return;
+    const now = Date.now();
+    this.pruneDormantAddOnCardWindow(now);
+    for (const line of lines) {
+      this.logger.warn(
+        `Renewal add-on line ${line.sourceLineKey} was quoted against a finite limit but captured ` +
+          `against an unlimited one (subscription ${line.subscriptionId}, term ${line.termId}, ` +
+          `payment ${line.paymentId}); the paid line is still captured, flagged in its ` +
+          'applicabilitySnapshot as adding nothing at this baseline',
+      );
+      const signature = `${line.subscriptionId}:${line.termId}:${line.type}`;
+      const announcedAt = this.dormantAddOnCardWindow.get(signature);
+      if (announcedAt !== undefined && now - announcedAt < DORMANT_ADD_ON_CARD_COOLDOWN_MS) {
+        continue;
+      }
+      this.dormantAddOnCardWindow.set(signature, now);
+      this.events.warn(
+        EVENT_TYPES.PAYMENT_ADDON_ADDS_NOTHING,
+        'PAYMENT',
+        'A paid renewal add-on will add nothing at the baseline captured for it',
+        {
+          code: 'RENEWAL_ADDON_ADDS_NOTHING',
+          subscriptionId: line.subscriptionId,
+          termId: line.termId,
+          addOnId: line.addOnId,
+          addOnType: line.type,
+          receiptName: line.receiptName,
+          // The ledger key a refund decision is made against: the entitlement
+          // was still created, and this is what finds it.
+          sourceLineKey: line.sourceLineKey,
+          value: line.value,
+          unitAmount: line.unitAmount,
+          currency: line.currency,
+          userId: line.userId,
+          paymentId: line.paymentId,
+          transactionId: line.transactionId,
+          // Stringified for the same reason `applicabilitySnapshot` stringifies
+          // it: the metadata is persisted as JSON, which has no bigint.
+          baseTrafficLimitBytes: line.baseTrafficLimitBytes?.toString() ?? null,
+          baseDeviceLimit: line.baseDeviceLimit,
+          overriddenKeys: line.overriddenKeys,
+        },
+      );
+    }
+  }
+
+  /**
+   * Drops signatures whose hour has passed, so the window cannot grow without
+   * bound in a long-lived worker. Only expired entries go: an entry still
+   * inside its window is the whole point of the map.
+   */
+  private pruneDormantAddOnCardWindow(now: number): void {
+    for (const [signature, announcedAt] of this.dormantAddOnCardWindow) {
+      if (now - announcedAt >= DORMANT_ADD_ON_CARD_COOLDOWN_MS) {
+        this.dormantAddOnCardWindow.delete(signature);
+      }
+    }
   }
 
   /**
@@ -411,15 +745,51 @@ export class PaymentSubscriptionMutationService {
       }
 
       // ── Legacy increment path ────────────────────────────────────────────
+      //
+      // Every branch here writes a RAW column with no baseline resolution, so
+      // it is the last place an incoherent add-on value can reach the database.
+      // {@link isCoherentAddOnValue} refuses one before either branch: a
+      // negative EXTRA_TRAFFIC value can land `trafficLimit` on exactly `0`,
+      // and the panel has no encoding for zero bytes — it decodes an upstream
+      // `0` back to `null`, canonical UNLIMITED — so the customer we recorded
+      // as entitled to nothing would receive everything, and the projection
+      // would report drift on every sweep forever. The device side is the
+      // mirror: a negative value takes a finite cap down to `0`, which the
+      // product reads as unlimited devices.
+      //
+      // An incoherent value is REFUSED, not clamped, and refusing means the
+      // same thing the two unlimited branches below already mean: record
+      // fulfillment, touch no column. The customer receives nothing, which is
+      // the honest outcome for a product an operator configured to add nothing
+      // — and it is recoverable (an operator can fix the catalog row and grant
+      // the add-on again), where a `0` column is not. `AdminAddOnCreateDto` /
+      // `AdminAddOnUpdateDto` now make such a row un-authorable in the first
+      // place; this guards the rows that already exist and any marker written
+      // before that bound landed.
       let updatedSubscription: Subscription;
-      if (marker.addOnType === AddOnType.EXTRA_TRAFFIC) {
-        if (subscription.trafficLimit === null) {
+      if (!isCoherentAddOnValue(marker.addOnValue)) {
+        this.logger.warn(
+          `Add-on ${marker.addOnId} carries an incoherent value ${marker.addOnValue} for subscription ` +
+            `${subscription.id} (payment ${transaction.paymentId}); the limit column is left untouched`,
+        );
+        updatedSubscription = subscription;
+      } else if (marker.addOnType === AddOnType.EXTRA_TRAFFIC) {
+        // A whole positive increment onto a non-negative column can never
+        // produce `0`. The extra `< 1` test covers the one way it still could:
+        // a column that is ALREADY negative, which is a data anomaly
+        // `deriveCutoverBaseline` also flags rather than trusts.
+        const next =
+          subscription.trafficLimit === null ? null : subscription.trafficLimit + marker.addOnValue;
+        if (next === null || next < 1) {
           // Unlimited — nothing to raise. Still record fulfillment so the
           // transaction is not re-processed.
           updatedSubscription = subscription;
         } else {
           updatedSubscription = await tx.subscription.update({
             where: { id: subscription.id },
+            // Still a relational `increment`, not the computed `next`: the row
+            // was read without `FOR UPDATE`, so an absolute write would lose a
+            // concurrent increment. `next` only decides WHETHER to write.
             data: { trafficLimit: { increment: marker.addOnValue } },
           });
         }
@@ -488,6 +858,13 @@ export class PaymentSubscriptionMutationService {
     subscription: Subscription,
   ): Promise<{ readonly subscription: Subscription; readonly syncJob: ProfileSyncJob } | null> {
     if (marker.lifetime === undefined || marker.sourceLineKey === undefined) return null;
+    // An incoherent value cannot be turned into a ledger row at all — the
+    // `BigInt(marker.addOnValue)` below throws a raw `RangeError` on a
+    // fractional one and mints a NEGATIVE `totalValue` on a negative one, which
+    // `addTrafficLimit`/`addDeviceLimit` then reject deep inside the projection
+    // recompute. Falling back to the legacy path instead keeps the outcome to
+    // ONE shape: the guard there records fulfillment and touches no column.
+    if (!isCoherentAddOnValue(marker.addOnValue)) return null;
 
     const term = await tx.subscriptionTerm.findFirst({
       where: { subscriptionId: subscription.id, status: SubscriptionTermStatus.ACTIVE },
@@ -503,12 +880,35 @@ export class PaymentSubscriptionMutationService {
     if (term === null) return null;
 
     const isTraffic = marker.addOnType === AddOnType.EXTRA_TRAFFIC;
-    const baseline = isTraffic ? term.baseTrafficLimitBytes : term.baseDeviceLimit;
 
-    // Unlimited baseline: the add-on is a no-op. Record fulfillment WITHOUT an
-    // increment (the fix for the legacy `0 + N` device bug that turned an
-    // unlimited profile finite) and without a ledger row.
-    if (baseline === null) {
+    // ── Capture-time baseline: the same reader the offer and checkout use ──
+    //
+    // This used to test the RAW term (`term.baseTrafficLimitBytes` /
+    // `term.baseDeviceLimit` `=== null`), which is the term the customer BOUGHT
+    // and not what this ONE subscription is entitled to. An operator setting the
+    // COLUMN to unlimited between the draft and this capture left the term's
+    // finite number in place, so the no-op branch was skipped and a charged
+    // entitlement was created that `EffectiveProjectionService` — which does
+    // resolve the override — then absorbed into an unlimited desired state. The
+    // customer paid and received nothing, with a ledger row saying otherwise.
+    //
+    // Unlike the renewal capture above, a direct purchase activates IMMEDIATELY
+    // (`scheduledActivationAt` is the transaction's creation instant and the
+    // ACTIVATE transition happens a few lines below), so the answer here is the
+    // verdict, not a prediction about a future term start. That is why this path
+    // keeps the recorded no-op — fulfillment IS stamped, no ledger row is
+    // created, and the whole transaction is the add-on, so the transaction row
+    // itself remains the durable record a refund is made against.
+    const baseline = await resolveConfiguredEntitlementBaseline(tx, {
+      subscriptionId: subscription.id,
+      term,
+      subscription,
+    });
+    if (!isBaselineExtendable(marker.addOnType, baseline)) {
+      this.logger.warn(
+        `Add-on ${marker.addOnId} captured against an unlimited baseline for subscription ` +
+          `${subscription.id} (payment ${transaction.paymentId}); fulfillment recorded as a no-op`,
+      );
       return this.recordAddOnLedgerNoOp(tx, transaction, subscription);
     }
 
@@ -539,6 +939,16 @@ export class PaymentSubscriptionMutationService {
       // instead of silently degrading to the permanent legacy increment. Returns
       // null only when there is no commercial reset window (NO_RESET, capability
       // not ENABLED, or no anchor) → legacy fallback, matching eligibility.
+      //
+      // The map below is `resolveResetCapabilities()` — the FLAG-PURE one —
+      // not `resolveIntakeResetCapabilities()`, even though fulfilment is a
+      // selling side. The two hold the same value HERE, and only here: this
+      // method's single call site sits behind `flags.directPurchase` in
+      // `applyAddOnTopUp`, and that flag is the one condition by which the
+      // intake map narrows the flag-pure one. Remove or widen that guard, or
+      // give the intake resolver a second condition, and the offer can quote
+      // an `expiresAt` this line then refuses — see the note on
+      // `resolveResetCapabilities` for what that costs.
       const epoch = await ensureLiveResetEpoch(tx, {
         termId: term.id,
         strategy,
@@ -827,24 +1237,59 @@ export class PaymentSubscriptionMutationService {
         lockedSubscription.expiresAt !== null && lockedSubscription.expiresAt.getTime() > now.getTime()
           ? lockedSubscription.expiresAt
           : now;
+      // Same rule as the combined renewal above, and it has to be the same
+      // rule: this is the single-subscription renewal of an EXISTING row, not a
+      // first purchase, so an operator's individual limit must survive it. See
+      // `resolvePlanLimitOwnership` for the per-field comparison, for why an
+      // unreadable snapshot PRESERVES the column instead of wiping it, and for
+      // the accepted cost of that choice (a snapshot-less row can renew onto a
+      // more generous plan and keep the smaller column).
+      //
+      // Resolved outside the `term` branch so the add-on rollout flag cannot
+      // change the outcome for these four columns.
+      //
+      // `recorded` and the two fragments are not optional here either, and for
+      // the identical reason spelled out at the combined call site: the limit
+      // COLUMNS mirror `base + active add-ons`, so an add-on holder compared
+      // raw reads OVERRIDDEN on every renewal and plan edits stop reaching the
+      // customers who paid extra. `columns` (plan value + contribution) goes to
+      // the row, `snapshot` (the plan's raw value) goes to the stored snapshot;
+      // swapping them corrupts the baseline permanently in one direction or the
+      // other.
+      const inheritedLimitRefresh = resolveInheritedPlanLimitRefresh({
+        current: lockedSubscription,
+        planSnapshot: lockedSubscription.planSnapshot,
+        plan: input.purchasedPlan,
+        recorded: await resolveRecordedAddOnContribution(
+          transactionClient,
+          currentSubscription.id,
+        ),
+      });
+      // Same rule, same reason as the combined renewal above: a column that is
+      // refreshed from the plan must say so in the snapshot, or this row reads
+      // OVERRIDDEN from now on and the SECOND plan edit never reaches it. See
+      // `patchSnapshotInheritedLimits` for which keys move and which are
+      // deliberately left mirroring the live plan.
+      const planSnapshotWrite =
+        term === null
+          ? buildPlanSnapshot({
+              transaction: input.transaction,
+              purchasedPlan: input.purchasedPlan,
+              selectedDurationDays: input.selectedDurationDays,
+            })
+          : patchSnapshotInheritedLimits(
+              lockedSubscription.planSnapshot,
+              inheritedLimitRefresh.snapshot,
+            );
       const renewedSubscription = await transactionClient.subscription.update({
         where: { id: currentSubscription.id },
         data: {
           status: SubscriptionStatus.ACTIVE,
           expiresAt: calculateExpiry(renewalBase, input.selectedDurationDays),
-          ...(term === null
-            ? {
-                planSnapshot: buildPlanSnapshot({
-                  transaction: input.transaction,
-                  purchasedPlan: input.purchasedPlan,
-                  selectedDurationDays: input.selectedDurationDays,
-                }) as Prisma.InputJsonValue,
-                trafficLimit: input.purchasedPlan.trafficLimit,
-                deviceLimit: input.purchasedPlan.deviceLimit,
-                internalSquads: input.purchasedPlan.internalSquads,
-                externalSquad: input.purchasedPlan.externalSquad,
-              }
-            : {}),
+          ...(planSnapshotWrite === undefined
+            ? {}
+            : { planSnapshot: planSnapshotWrite as Prisma.InputJsonValue }),
+          ...inheritedLimitRefresh.columns,
         },
       });
       const syncJob = await transactionClient.profileSyncJob.create({
@@ -902,11 +1347,23 @@ export class PaymentSubscriptionMutationService {
    * The subscription row is locked before reading the tail, so concurrent
    * payments serialize generation/window allocation. Existing SCHEDULED terms
    * are never reused: each paid renewal owns its own term and entitlements.
+   *
+   * The created term's `base*` limits are RETURNED, not just written: the
+   * renewal's add-on lines bind to this very term, and the capture-time
+   * baseline check has to read the baseline that was actually persisted. Having
+   * the caller re-derive `plan.trafficLimit → bytes` / `plan.deviceLimit <= 0`
+   * would be a second copy of the mapping four lines below it.
    */
   private async scheduleRenewalTermInTransaction(
     tx: Prisma.TransactionClient,
     input: { readonly subscriptionId: string; readonly plan: Plan; readonly durationDays: number },
-  ): Promise<{ readonly id: string; readonly startsAt: Date; readonly endsAt: Date | null } | null> {
+  ): Promise<{
+    readonly id: string;
+    readonly startsAt: Date;
+    readonly endsAt: Date | null;
+    readonly baseTrafficLimitBytes: bigint | null;
+    readonly baseDeviceLimit: number | null;
+  } | null> {
     const parent = await tx.$queryRaw<Array<{ id: string; status: SubscriptionStatus }>>(Prisma.sql`
       SELECT "id", "status"::text AS "status"
       FROM "subscriptions"
@@ -943,6 +1400,9 @@ export class PaymentSubscriptionMutationService {
         ? tail.endsAt
         : now;
     const endsAt = calculateExpiry(startsAt, input.durationDays);
+    const baseTrafficLimitBytes =
+      input.plan.trafficLimit === null ? null : BigInt(input.plan.trafficLimit) * GIB_BYTES;
+    const baseDeviceLimit = input.plan.deviceLimit <= 0 ? null : input.plan.deviceLimit;
     const created = await this.subscriptionTermService.createScheduledInTransaction(tx, {
       subscriptionId: input.subscriptionId,
       planId: input.plan.id,
@@ -963,13 +1423,12 @@ export class PaymentSubscriptionMutationService {
       } as Prisma.InputJsonValue,
       startsAt,
       endsAt,
-      baseTrafficLimitBytes:
-        input.plan.trafficLimit === null ? null : BigInt(input.plan.trafficLimit) * GIB_BYTES,
-      baseDeviceLimit: input.plan.deviceLimit <= 0 ? null : input.plan.deviceLimit,
+      baseTrafficLimitBytes,
+      baseDeviceLimit,
       trafficResetStrategy: input.plan.trafficLimitStrategy,
       resetAnchorAt: provisionalResetAnchor(input.plan.trafficLimitStrategy, startsAt),
     });
-    return { id: created.id, startsAt, endsAt };
+    return { id: created.id, startsAt, endsAt, baseTrafficLimitBytes, baseDeviceLimit };
   }
 
   /**
@@ -996,6 +1455,8 @@ export class PaymentSubscriptionMutationService {
   private async startUpgradeTermInTransaction(
     tx: Prisma.TransactionClient,
     input: {
+      /** Collects reports that must not be announced until the tx commits. */
+      readonly deferrals: UpgradeTermDeferral[];
       readonly subscriptionId: string;
       readonly plan: Plan;
       readonly durationDays: number;
@@ -1052,22 +1513,18 @@ export class PaymentSubscriptionMutationService {
         },
       });
       if (boundEntitlements > 0) {
-        this.logger.warn(
-          `UPGRADE_TERM_DEFERRED_SCHEDULED_ENTITLEMENTS subscription=${input.subscriptionId} ` +
-            `scheduledTerms=${scheduledIds.length} entitlements=${boundEntitlements}`,
-        );
-        this.events.warn(
-          EVENT_TYPES.SYSTEM_ERROR,
-          'SYSTEM',
-          'Upgrade kept the previous term baseline: a scheduled term carries paid entitlements',
-          {
-            code: 'UPGRADE_TERM_DEFERRED_SCHEDULED_ENTITLEMENTS',
-            subscriptionId: input.subscriptionId,
-            planId: input.plan.id,
-            scheduledTermIds: scheduledIds,
-            boundEntitlements,
-          },
-        );
+        // Buffered past the commit for the same reason the renewal's
+        // dead-line card is (see {@link DormantRenewalAddOnLine}): this runs
+        // inside `upgradeSubscriptionFromPayment`'s `$transaction`, so a card
+        // raised here reports an upgrade outcome that a rollback further down
+        // erases — and the webhook then retries into the identical
+        // deterministic condition and reports it again.
+        input.deferrals.push({
+          subscriptionId: input.subscriptionId,
+          planId: input.plan.id,
+          scheduledTermIds: scheduledIds,
+          boundEntitlements,
+        });
         return null;
       }
       await tx.subscriptionTerm.updateMany({
@@ -1114,7 +1571,8 @@ export class PaymentSubscriptionMutationService {
     if (input.transaction.subscriptionId === null) {
       throw new NotFoundException('Source subscription not found');
     }
-    return this.prismaService.$transaction(async (transactionClient) => {
+    const deferrals: UpgradeTermDeferral[] = [];
+    const committed = await this.prismaService.$transaction(async (transactionClient) => {
       const currentSubscription = await transactionClient.subscription.findUnique({
         where: { id: input.transaction.subscriptionId! },
       });
@@ -1136,6 +1594,7 @@ export class PaymentSubscriptionMutationService {
             durationDays: input.selectedDurationDays,
             startsAt: now,
             endsAt: expiresAt,
+            deferrals,
           })
         : null;
       // With a durable term the projection owns the effective limits, so the
@@ -1213,6 +1672,27 @@ export class PaymentSubscriptionMutationService {
         syncJob,
       };
     });
+
+    for (const deferral of deferrals) {
+      this.logger.warn(
+        `UPGRADE_TERM_DEFERRED_SCHEDULED_ENTITLEMENTS subscription=${deferral.subscriptionId} ` +
+          `scheduledTerms=${deferral.scheduledTermIds.length} entitlements=${deferral.boundEntitlements}`,
+      );
+      this.events.warn(
+        EVENT_TYPES.SYSTEM_ERROR,
+        'SYSTEM',
+        'Upgrade kept the previous term baseline: a scheduled term carries paid entitlements',
+        {
+          code: 'UPGRADE_TERM_DEFERRED_SCHEDULED_ENTITLEMENTS',
+          subscriptionId: deferral.subscriptionId,
+          planId: deferral.planId,
+          scheduledTermIds: [...deferral.scheduledTermIds],
+          boundEntitlements: deferral.boundEntitlements,
+        },
+      );
+    }
+
+    return committed;
   }
 
   private async getRequiredPlan(transaction: Transaction): Promise<Plan> {
@@ -1227,6 +1707,91 @@ export class PaymentSubscriptionMutationService {
   }
 }
 
+/**
+ * The stored `planSnapshot` with exactly the inherited-limit keys a renewal
+ * just refreshed from the plan re-declared as plan-given — or `undefined` when
+ * it refreshed none, in which case the JSON is left untouched.
+ *
+ * ── Why a renewal has to do this at all ───────────────────────────────────
+ *
+ * `resolveInheritedPlanLimitUpdate` refreshes a column ONLY when the stored
+ * snapshot still agrees with it (INHERITED). Writing the plan's new value into
+ * the column and leaving the snapshot on the old one therefore makes the very
+ * row that was just corrected read as OVERRIDDEN on every later comparison —
+ * so the SECOND plan edit never reaches it. That is precisely the promise the
+ * snapshot freeze in `PlanSnapshotSyncService` was built to restore, and the
+ * plan editor states it to the operator while they are typing
+ * (`web/src/i18n/en.ts` → `plans.form.limitScope`).
+ *
+ * It is invisible on the FIRST edit, because the column then happens to equal
+ * the freshly-minted term's baseline, which is why it survived: nothing looks
+ * wrong until a second edit silently does nothing.
+ *
+ * ── Which keys move, and which deliberately do not ────────────────────────
+ *
+ * MOVES: only the keys PRESENT in `refreshed` — a subset of
+ * `PLAN_INHERITED_LIMIT_KEYS`. A key the resolver withheld (OVERRIDDEN or
+ * UNDECIDABLE) left the column alone, so re-declaring it as plan-given would
+ * erase an operator's individual configuration in the one place the whole
+ * override rule reads.
+ *
+ * STAYS: `name`, `tag`, `type` and `trafficLimitStrategy` mirror the LIVE plan
+ * through `PlanSnapshotSyncService.syncPlanSnapshotMetadata` and are no part of
+ * the override comparison; `icon` is frozen at purchase so a customer's card
+ * does not change glyph when the operator restyles the plan. Also untouched:
+ * `id`, `selectedDurationDays`, `amount`, `currency`, `gatewayType`,
+ * `snapshotSource` — with a durable term the subscription's snapshot still
+ * describes the term the customer is CURRENTLY on, and the renewal's term is
+ * only SCHEDULED. Rewriting those here would claim the customer had already
+ * moved onto it.
+ *
+ * The numeric keys go through `patchSnapshotNumeric`
+ * (`subscriptions/services/plan-inherited-limits.util.ts`) — the same helper
+ * every other "and this is still what the plan gave them" writer uses (the
+ * promocode, quest and referral top-ups, and the Remnawave mirror). The squad
+ * keys have no numeric helper and are merged directly; `internalSquads` is
+ * copied rather than aliased so the fragment cannot be mutated through the
+ * snapshot. An unreadable snapshot never reaches either branch: the resolver
+ * returns an empty fragment for one, so this returns `undefined` first.
+ */
+function patchSnapshotInheritedLimits(
+  snapshot: unknown,
+  refreshed: PlanInheritedLimitUpdate,
+): Record<string, unknown> | undefined {
+  let patched: Record<string, unknown> | undefined;
+  if (refreshed.trafficLimit !== undefined) {
+    patched = patchSnapshotNumeric(patched ?? snapshot, 'trafficLimit', refreshed.trafficLimit);
+  }
+  if (refreshed.deviceLimit !== undefined) {
+    patched = patchSnapshotNumeric(patched ?? snapshot, 'deviceLimit', refreshed.deviceLimit);
+  }
+  if (refreshed.internalSquads !== undefined) {
+    patched = {
+      ...(patched ?? readJsonObject(snapshot)),
+      internalSquads: [...refreshed.internalSquads],
+    };
+  }
+  if (refreshed.externalSquad !== undefined) {
+    patched = { ...(patched ?? readJsonObject(snapshot)), externalSquad: refreshed.externalSquad };
+  }
+  return patched;
+}
+
+/**
+ * Builds a subscription `planSnapshot` for a single-subscription purchase,
+ * renewal, or upgrade.
+ *
+ * NOT the same function as `buildPlanSnapshot` in
+ * `src/modules/users/utils/plan-snapshot.util.ts`, which shares its name and is
+ * used by the admin/give-subscription paths. The two legitimately differ (this
+ * one also freezes the payment's duration, amount, currency and gateway) and
+ * are deliberately NOT merged — but both, and `buildItemPlanSnapshot` below,
+ * MUST keep writing `trafficLimit`, `deviceLimit`, `internalSquads` and
+ * `externalSquad`. `resolveInheritedPlanLimitUpdate` derives "did an operator
+ * override this field?" from exactly those keys, so dropping one silently
+ * freezes that column for every subscription this function touches.
+ * `test/subscription-plan-inherited-limits.spec.ts` guards all three.
+ */
 function buildPlanSnapshot(input: {
   readonly transaction: Transaction;
   readonly purchasedPlan: Plan;
@@ -1258,6 +1823,13 @@ function buildPlanSnapshot(input: {
  * Mirrors {@link buildPlanSnapshot} but draws the duration/amount/currency
  * from the per-item record rather than the parent transaction (whose amount
  * is the combined total).
+ *
+ * Third writer of the same four inherited-limit keys, alongside the local
+ * {@link buildPlanSnapshot} and the same-named function in
+ * `src/modules/users/utils/plan-snapshot.util.ts`. See the note on
+ * {@link buildPlanSnapshot}: `trafficLimit`, `deviceLimit`, `internalSquads`
+ * and `externalSquad` are load-bearing for override detection and must not be
+ * dropped from any of the three.
  */
 function buildItemPlanSnapshot(input: {
   readonly item: TransactionItem;
@@ -1342,6 +1914,25 @@ function readAddOnMarker(transaction: Transaction): AddOnMarker | null {
     lifetime,
     sourceLineKey: typeof sourceLineKey === 'string' && sourceLineKey.length > 0 ? sourceLineKey : undefined,
   };
+}
+
+/**
+ * Does this add-on marker carry a coherent number of units?
+ *
+ * WHOLE and POSITIVE, for both resources. `readRenewalAddOnLines` below already
+ * enforces exactly this on persisted renewal lines
+ * (`Number.isInteger(value) && value > 0`); the DIRECT-purchase marker never
+ * was, because `readAddOnMarker` only tests `typeof addOnValue === 'number'`.
+ *
+ * A fractional value cannot survive `BigInt()` — it throws a raw `RangeError`
+ * inside a money transaction. A negative value is worse, because it succeeds:
+ * on the legacy path it can drive `Subscription.trafficLimit` to exactly `0`,
+ * an encoding the panel cannot express and decodes back to `null` (canonical
+ * UNLIMITED), and on the device side it can drive a finite cap to `0`, which
+ * the product also reads as unlimited.
+ */
+function isCoherentAddOnValue(value: number): boolean {
+  return Number.isInteger(value) && value >= 1;
 }
 
 /** One parsed renewal add-on line persisted on a {@link TransactionItem}. */
@@ -1527,11 +2118,27 @@ function parsePaidRenewalPlanSnapshot(
     snapshot['gatewayType'] !== transactionGatewayType ||
     snapshot['currency'] !== item.currency ||
     new Prisma.Decimal(String(snapshot['amount'])).comparedTo(item.amount) !== 0 ||
+    // `null` is unlimited and stays legal. A FINITE limit must be at least 1
+    // GB: a stored `0` is a state that must never exist, because the panel has
+    // no encoding for zero bytes and decodes an upstream `0` back to `null` —
+    // canonical UNLIMITED. Accepting `0` here casts it straight onto
+    // `Plan.trafficLimit` at the bottom of this function, from where the
+    // renewal writes it into `Subscription.trafficLimit` and mints a row that
+    // reads as "entitled to nothing" locally while receiving everything
+    // upstream, with the projection reporting drift on every sweep forever.
+    // "May move no traffic" is `status: DISABLED`, which the panel can express.
+    //
+    // Refusing throws with every other shape violation in this validator and
+    // rolls the fulfillment back for retry/remediation. That is the deliberate
+    // contract of this function — a malformed paid draft is commercial evidence
+    // we will not act on — and it is the right side to be on here: the money is
+    // held and recoverable, whereas an unlimited panel profile handed out by
+    // mistake is not.
     !(
       snapshot['trafficLimit'] === null ||
       (typeof snapshot['trafficLimit'] === 'number' &&
         Number.isInteger(snapshot['trafficLimit']) &&
-        snapshot['trafficLimit'] >= 0)
+        snapshot['trafficLimit'] >= 1)
     ) ||
     typeof snapshot['deviceLimit'] !== 'number' ||
     !Number.isInteger(snapshot['deviceLimit']) ||

@@ -242,3 +242,152 @@ describe('PartnerEarningsService — property-based invariants', () => {
     );
   });
 });
+
+/**
+ * Runs a SECOND payment: the payer already holds one accrual row against this
+ * partner. Whether they get credited again is exactly what the accrual mode
+ * decides and nothing else here varies, so the boolean IS the resolved mode.
+ *
+ * "Already paid once" is a ROW, not a timestamp - no dates in this fixture.
+ */
+async function secondPaymentAccrues(input: {
+  level: number;
+  settings: Record<string, unknown>;
+  partner?: Partial<{
+    useGlobalSettings: boolean;
+    accrualStrategy: PartnerAccrualStrategy;
+    level1AccrualStrategy: PartnerAccrualStrategy | null;
+    level2AccrualStrategy: PartnerAccrualStrategy | null;
+    level3AccrualStrategy: PartnerAccrualStrategy | null;
+  }>;
+}): Promise<boolean> {
+  const partner = {
+    id: 'p1',
+    userId: 'u1',
+    isActive: true,
+    useGlobalSettings: true,
+    accrualStrategy: PartnerAccrualStrategy.ON_EACH_PAYMENT,
+    rewardType: PartnerRewardType.PERCENT,
+    level1Percent: new Prisma.Decimal('10.00'),
+    level2Percent: new Prisma.Decimal('10.00'),
+    level3Percent: new Prisma.Decimal('10.00'),
+    level1FixedAmount: null,
+    level2FixedAmount: null,
+    level3FixedAmount: null,
+    level1AccrualStrategy: null,
+    level2AccrualStrategy: null,
+    level3AccrualStrategy: null,
+    balance: 0,
+    totalEarned: 0,
+    ...input.partner,
+  };
+
+  let created = 0;
+  const fakePrisma = {
+    settings: { findFirst: async () => ({ partnerSettings: input.settings }) },
+    partnerReferral: {
+      findMany: async () => [
+        { partnerId: 'p1', referralUserId: 'payer', level: input.level, partner },
+      ],
+      findFirst: async () => null,
+      findUnique: async () => null,
+      create: async () => undefined,
+    },
+    partnerTransaction: {
+      // Two different probes reach this stub. The idempotency probe is keyed on
+      // the source transaction (a fresh one here) and must miss; the
+      // ON_FIRST_PAYMENT probe is keyed on the payer and must find the earlier
+      // accrual.
+      findFirst: async (args: { where: Record<string, unknown> }) =>
+        args.where.referralUserId === 'payer' ? { id: 'earlier-accrual' } : null,
+    },
+    partner: { findUnique: async () => partner },
+    $transaction: async <T,>(callback: (txClient: Record<string, unknown>) => Promise<T>) =>
+      callback({
+        partnerTransaction: {
+          create: async (args: { data: Record<string, unknown> }) => {
+            created += 1;
+            return args.data;
+          },
+        },
+        partner: { update: async () => undefined },
+      }),
+  };
+
+  const service = new PartnerEarningsService(fakePrisma as never, NULL_LOGGER as never, {
+    notifyEarning: async () => undefined,
+    notifyWithdrawalApproved: async () => undefined,
+    notifyWithdrawalRejected: async () => undefined,
+  } as never);
+  await service.processPartnerEarning({
+    payerUserId: 'payer',
+    paymentAmountMinorUnits: 10_000,
+    gatewayType: null,
+    sourceTransactionId: 'tx-second',
+  });
+  return created > 0;
+}
+
+const GLOBAL_LEVELS = { LEVEL_1: 10, LEVEL_2: 10, LEVEL_3: 10 };
+const RECOGNISED_MODES = new Set(['ON_EACH_PAYMENT', 'ON_FIRST_PAYMENT', 'ONCE_PER_USER']);
+
+describe('PartnerEarningsService - per-level accrual invariants', () => {
+  // The deploy-safety property, stated as a property: whatever the level and
+  // whatever the partner-wide mode, a partner with all three per-level columns
+  // NULL answers exactly what the partner-wide column alone used to answer.
+  it('a partner with no per-level column always resolves to its partner-wide accrualStrategy', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.integer({ min: 1, max: 3 }),
+        fc.constantFrom(
+          PartnerAccrualStrategy.ON_EACH_PAYMENT,
+          PartnerAccrualStrategy.ONCE_PER_USER,
+        ),
+        async (level, partnerWide) => {
+          const accrued = await secondPaymentAccrues({
+            level,
+            settings: { enabled: true, levels: GLOBAL_LEVELS },
+            partner: { useGlobalSettings: false, accrualStrategy: partnerWide },
+          });
+          assert.equal(
+            accrued,
+            partnerWide === PartnerAccrualStrategy.ON_EACH_PAYMENT,
+            `L${level}: an unconfigured level must answer exactly what accrualStrategy=${partnerWide} answers`,
+          );
+        },
+      ),
+      { numRuns: 40 },
+    );
+  });
+
+  // The global map is operator-typed JSON. Anything that is not one of the
+  // three recognised spellings must fall through to the legacy flat key rather
+  // than become a mode of its own.
+  it('an unrecognised global per-level value never overrides the legacy flat key', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.integer({ min: 1, max: 3 }),
+        fc.string(),
+        fc.constantFrom('ON_EACH_PAYMENT', 'ON_FIRST_PAYMENT'),
+        async (level, junk, legacy) => {
+          fc.pre(!RECOGNISED_MODES.has(junk.trim().toUpperCase()));
+          const accrued = await secondPaymentAccrues({
+            level,
+            settings: {
+              enabled: true,
+              levels: GLOBAL_LEVELS,
+              accrualStrategies: { [`LEVEL_${level}`]: junk },
+              accrualStrategy: legacy,
+            },
+          });
+          assert.equal(
+            accrued,
+            legacy === 'ON_EACH_PAYMENT',
+            `LEVEL_${level}=${JSON.stringify(junk)} is not a mode, so the answer must come from the legacy flat accrualStrategy=${legacy}`,
+          );
+        },
+      ),
+      { numRuns: 100 },
+    );
+  });
+});

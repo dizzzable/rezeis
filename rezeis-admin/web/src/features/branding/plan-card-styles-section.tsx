@@ -21,7 +21,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { cn } from '@/lib/utils'
 
-import { usePlans } from '@/features/plans/plans-api'
+import { usePlans, type Plan } from '@/features/plans/plans-api'
 import { GradientBuilder } from './gradient-builder'
 import { CardEffectPicker } from './card-effect-section'
 import { getCardEffectDefaults } from './card-effect-registry'
@@ -125,7 +125,14 @@ export function PlanCardStylesSection({
     )
   }
 
-  const list = Array.isArray(plans) ? plans : []
+  // `Array.isArray` narrows a `readonly Plan[]` to `any[]`, so every field
+  // read off a row below was `any` and the props these rows feed were
+  // checked against nothing — which is why tsc never named this file as a
+  // consumer of `Plan.trafficLimit`. The guard was redundant anyway:
+  // `fetchPlans` runs `expectArray`, which throws rather than hand back a
+  // non-array, so the only other state is the `undefined` of a query that
+  // has not resolved.
+  const list: readonly Plan[] = plans ?? []
 
   return (
     <Card>
@@ -168,7 +175,8 @@ interface PlanStyleRowProps {
   readonly planName: string
   readonly planIcon: string | null
   readonly archived: boolean
-  readonly trafficLimit: number
+  /** Whole GB, or `null` for unlimited — see `plans-api.ts`. */
+  readonly trafficLimit: number | null
   readonly deviceLimit: number
   readonly style: PlanCardStyleDraft | undefined
   readonly primary: string
@@ -231,7 +239,12 @@ function PlanStyleRow({
             </span>
           </div>
           <p className="truncate text-xs text-muted-foreground">
-            {trafficLimit > 0 ? `${trafficLimit} GB` : t('brandingPage.sections.planCards.unlimited')}
+            {/* Cabinet parity: `null` (unlimited) and `0` (legacy zero cap)
+                both read as unlimited here, exactly as reiwa's `tariff-card`
+                does. Behaviour unchanged; `null` is now stated. */}
+            {trafficLimit !== null && trafficLimit > 0
+              ? `${trafficLimit} GB`
+              : t('brandingPage.sections.planCards.unlimited')}
             {deviceLimit > 0 ? ` · ${deviceLimit}` : ''}
           </p>
         </div>
@@ -516,7 +529,8 @@ function TariffCardThumb({
   readonly planId: string
   readonly planName: string
   readonly planIcon: string | null
-  readonly trafficLimit: number
+  /** Whole GB, or `null` for unlimited — see `plans-api.ts`. */
+  readonly trafficLimit: number | null
   readonly deviceLimit: number
   readonly style: PlanCardStyleDraft | undefined
   readonly subscriptionCardText: BrandingSubscriptionCardTextDraft
@@ -577,7 +591,7 @@ function TariffCardThumb({
               : { opacity: 0.85 }
           }
         >
-          {trafficLimit > 0 ? `${trafficLimit} GB` : '∞'}
+          {trafficLimit !== null && trafficLimit > 0 ? `${trafficLimit} GB` : '∞'}
           {deviceLimit > 0 ? ` · ${deviceLimit}` : ''}
         </span>
       </div>

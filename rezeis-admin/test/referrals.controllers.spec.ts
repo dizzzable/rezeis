@@ -29,6 +29,8 @@ const ADMIN: CurrentAdminInterface = {
   mustChangePassword: false,
 };
 
+const REQ = { headers: {}, ip: null, socket: { remoteAddress: null } } as never;
+
 function route(controller: object, methodName: string): { path: string; method: RequestMethod } {
   const method = Object.getPrototypeOf(controller)[methodName] as object;
   return {
@@ -105,8 +107,8 @@ describe('Referral controllers', () => {
       },
       rewards: {
         grant: async (dto: unknown, adminId: string) => { calls.push(['grant', dto, adminId]); return { id: 'reward-1' }; },
-        issue: async (id: string, adminId: string) => { calls.push(['issue', id, adminId]); return { id }; },
-        bulkIssue: async (ids: readonly string[], adminId: string) => { calls.push(['bulkIssue', ids, adminId]); return { issued: ids.length }; },
+        issue: async (id: string, adminId: string, meta: unknown) => { calls.push(['issue', id, adminId, meta]); return { id }; },
+        bulkIssue: async (ids: readonly string[], adminId: string, meta: unknown) => { calls.push(['bulkIssue', ids, adminId, meta]); return { issued: ids.length }; },
         revoke: async (id: string, reason: string | null, adminId: string) => { calls.push(['revoke', id, reason, adminId]); return { id }; },
       },
       manualAttach: {
@@ -118,19 +120,53 @@ describe('Referral controllers', () => {
     assert.equal((await controller.createInvite({ inviterId: 'user-1' })).invite.id, 'invite-1');
     assert.equal((await controller.revokeInviteAlias('invite-1')).id, 'invite-1');
     assert.equal((await controller.grantReward({ userId: 'user-1' } as never, ADMIN)).id, 'reward-1');
-    assert.equal((await controller.issueReward('reward-1', ADMIN)).id, 'reward-1');
-    assert.deepStrictEqual(await controller.bulkIssueRewards({ ids: ['reward-1', 'reward-2'] } as never, ADMIN), { issued: 2 });
+    assert.equal((await controller.issueReward('reward-1', ADMIN, REQ)).id, 'reward-1');
+    assert.deepStrictEqual(await controller.bulkIssueRewards({ ids: ['reward-1', 'reward-2'] } as never, ADMIN, REQ), { issued: 2 });
     assert.equal((await controller.revokeReward('reward-1', { reason: 'duplicate' }, ADMIN)).id, 'reward-1');
-    assert.deepStrictEqual(await controller.manualAttach({ userId: 'user-1', referrerId: 'referrer-1' }), { referralCreated: true, partnerChainAttached: false, historicalPaymentsProcessed: 0 });
+    assert.deepStrictEqual(await controller.manualAttach({ userId: 'user-1', referrerId: 'referrer-1' }, ADMIN, REQ), { referralCreated: true, partnerChainAttached: false, historicalPaymentsProcessed: 0 });
     assert.deepStrictEqual(calls, [
       ['listReferrals', { referrerId: 'user-1' }],
       ['createInvite', { inviterId: 'user-1' }],
       ['revokeInvite', 'invite-1'],
       ['grant', { userId: 'user-1' }, 'admin-1'],
-      ['issue', 'reward-1', 'admin-1'],
-      ['bulkIssue', ['reward-1', 'reward-2'], 'admin-1'],
+      // The third argument is asserted rather than omitted for the same reason
+      // `manualAttach`'s `operator` is: issuing moves money and now writes a
+      // `referral.reward.issued` audit row, whose ip / user-agent / requestId
+      // can only come from the request. A route that quietly stopped passing it
+      // would still compile against a service with a defaulted parameter and
+      // would still issue rewards — it would just stop being able to say from
+      // where. Pinning the shape here makes that a failure.
+      ['issue', 'reward-1', 'admin-1', { requestId: null, remoteAddress: null, userAgent: null }],
+      [
+        'bulkIssue',
+        ['reward-1', 'reward-2'],
+        'admin-1',
+        { requestId: null, remoteAddress: null, userAgent: null },
+      ],
       ['revoke', 'reward-1', 'duplicate', 'admin-1'],
-      ['manualAttach', { userId: 'user-1', referrerId: 'referrer-1' }],
+      // UNKNOWN, and asserted rather than omitted: an admin attaching after the
+      // fact never saw an invite link, and `ReferralInviteSource` has no MANUAL
+      // member. Pinning it here means a later edit that quietly relabels admin
+      // attaches as BOT/WEB — inflating the source breakdown with edges the
+      // referral system never observed — fails instead of passing silently.
+      // `operator` is asserted rather than omitted for the same reason
+      // `inviteSource` is: this route had NO actor parameter at all and wrote
+      // nothing, so "an operator did this" has to be visible in what the
+      // controller hands the service, not merely in the route metadata.
+      // `test/referral-attach-surfaces.spec.ts` pins the row it produces.
+      [
+        'manualAttach',
+        {
+          userId: 'user-1',
+          referrerId: 'referrer-1',
+          inviteSource: 'UNKNOWN',
+          operator: {
+            currentAdmin: ADMIN,
+            requestMetadata: { requestId: null, remoteAddress: null, userAgent: null },
+            source: 'referrals_tab',
+          },
+        },
+      ],
     ]);
   });
 

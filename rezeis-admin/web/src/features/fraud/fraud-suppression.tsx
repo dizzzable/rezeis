@@ -8,10 +8,19 @@
  * condition at all; a user under an exemption looks identical to a user nobody
  * suspects. Both are rendered here, with the reason attached.
  */
-import { useState } from 'react';
+import { useState, type ComponentProps } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { EyeOff, Hourglass, Loader2, Plus, ShieldCheck, Undo2 } from 'lucide-react';
+import {
+  EyeOff,
+  Gavel,
+  Hourglass,
+  Loader2,
+  Plus,
+  ShieldCheck,
+  Undo2,
+  type LucideIcon,
+} from 'lucide-react';
 import { toast } from 'sonner';
 
 import { Badge } from '@/components/ui/badge';
@@ -51,7 +60,9 @@ import {
   getPendingFraudCandidates,
   listFraudExemptions,
   revokeFraudExemption,
+  type CandidateHold,
   type FraudExemption,
+  type PendingFraudCandidate,
 } from './fraud-api';
 
 const PENDING_KEY = ['admin', 'fraud', 'pending'] as const;
@@ -68,9 +79,88 @@ export function FraudSuppressionPanel() {
 
 // ── Held candidates ───────────────────────────────────────────────────────
 
+interface HoldPresentation {
+  readonly variant: ComponentProps<typeof Badge>['variant'];
+  readonly Icon: LucideIcon;
+  readonly labelKey: string;
+  /** A sentence under the badge, where the badge alone would understate it. */
+  readonly hintKey: string | null;
+}
+
+/**
+ * One entry per member of `CandidateHold`, and a `Record` on purpose.
+ *
+ * What stood here was a BINARY ternary — `exemption ? … : streak` — so the
+ * third kind fell into the else branch and every verdict-muted condition wore
+ * the streak badge. With `observations` clamped to `requiredObservations` by
+ * the server, that badge read "Seen 3/3 runs": the operator was told evidence
+ * was complete and a signal was imminent, when in fact their own dismissal was
+ * holding the detector shut. A ternary cannot be exhaustive; this map is, and
+ * a fourth kind added to the union fails the compile right here instead of
+ * quietly inheriting someone else's badge.
+ */
+const HOLD_PRESENTATION: Record<CandidateHold, HoldPresentation> = {
+  streak: {
+    variant: 'outline',
+    Icon: Hourglass,
+    labelKey: 'fraudPage.suppression.held.byStreak',
+    hintKey: null,
+  },
+  exemption: {
+    variant: 'secondary',
+    Icon: EyeOff,
+    labelKey: 'fraudPage.suppression.held.byExemption',
+    hintKey: null,
+  },
+  verdict: {
+    variant: 'warning',
+    Icon: Gavel,
+    labelKey: 'fraudPage.suppression.held.byVerdict',
+    // Named, because this is the one hold an operator can create by accident:
+    // a bulk dismissal mutes the condition for a week and the only other trace
+    // is a log line.
+    hintKey: 'fraudPage.suppression.held.byVerdictHint',
+  },
+};
+
+/**
+ * Why this row was not filed.
+ *
+ * The streak counters are passed for every kind and read by only one of them —
+ * `byStreak` is the sole key that interpolates them, because "seen N of M" is
+ * only true while evidence is what is missing. Under an exemption or a verdict
+ * the count keeps rising against a bar that is no longer the thing in the way,
+ * so printing it would answer a question nobody asked with a number that
+ * implies the opposite of the truth.
+ */
+function HoldReason({ item }: { readonly item: PendingFraudCandidate }) {
+  const { t } = useTranslation();
+  const hold = HOLD_PRESENTATION[item.heldBy];
+  const HoldIcon = hold.Icon;
+
+  return (
+    <div className="space-y-1">
+      <Badge variant={hold.variant} className="gap-1 text-[11px]">
+        <HoldIcon className="h-3 w-3" />
+        {String(
+          t(hold.labelKey, {
+            seen: item.observations,
+            required: item.requiredObservations,
+          }),
+        )}
+      </Badge>
+      {hold.hintKey !== null && (
+        <p className="text-[11px] leading-snug text-muted-foreground">
+          {String(t(hold.hintKey))}
+        </p>
+      )}
+    </div>
+  );
+}
+
 function HeldCandidatesCard() {
   const { t } = useTranslation();
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError } = useQuery({
     queryKey: PENDING_KEY,
     queryFn: () => getPendingFraudCandidates(50),
   });
@@ -92,6 +182,14 @@ function HeldCandidatesCard() {
               <Skeleton key={idx} className="h-10 w-full" />
             ))}
           </div>
+        ) : isError ? (
+          // NOT the empty state, and the distinction is the whole card: this
+          // panel's only job is to say what is being suppressed, so a failed
+          // load rendering "nothing is being held back" would be the exact
+          // false reassurance it exists to prevent.
+          <p className="py-8 text-center text-sm text-destructive">
+            {t('fraudPage.suppression.held.loadFailed')}
+          </p>
         ) : items.length === 0 ? (
           <p className="py-8 text-center text-sm text-muted-foreground">
             {t('fraudPage.suppression.held.empty')}
@@ -117,20 +215,7 @@ function HeldCandidatesCard() {
                     <p className="text-[11px] text-muted-foreground font-mono">{item.code}</p>
                   </TableCell>
                   <TableCell>
-                    {item.heldBy === 'exemption' ? (
-                      <Badge variant="secondary" className="gap-1 text-[11px]">
-                        <EyeOff className="h-3 w-3" />
-                        {t('fraudPage.suppression.held.byExemption')}
-                      </Badge>
-                    ) : (
-                      <Badge variant="outline" className="gap-1 text-[11px]">
-                        <Hourglass className="h-3 w-3" />
-                        {t('fraudPage.suppression.held.byStreak', {
-                          seen: item.observations,
-                          required: item.requiredObservations,
-                        })}
-                      </Badge>
-                    )}
+                    <HoldReason item={item} />
                   </TableCell>
                   <TableCell className="text-xs text-muted-foreground">
                     {formatDateTime(item.lastSeenAt)}

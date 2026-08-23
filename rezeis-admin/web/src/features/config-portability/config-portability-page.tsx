@@ -14,7 +14,7 @@ import {
 import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
-import { useHasPermission } from '@/features/rbac'
+import { PermissionGate, useHasPermission } from '@/features/rbac'
 import { getErrorMessage } from '@/lib/http-errors'
 
 import {
@@ -23,6 +23,7 @@ import {
   type ConfigSection,
   type ImportStrategy,
   type SectionImportStatus,
+  countWebhookRowsMissingSecret,
   exportConfig,
   importConfig,
   listConfigSections,
@@ -42,6 +43,23 @@ export default function ConfigPortabilityPage({ embedded = false }: { readonly e
   const canViewConfig = useHasPermission('config_portability', 'view')
   const canExportConfig = useHasPermission('config_portability', 'export')
   const canImportConfig = useHasPermission('config_portability', 'import')
+  /**
+   * Exporting live signing secrets is gated ABOVE `config_portability:export`,
+   * on the permission that already governs the same power through the webhooks
+   * screen — the rule `config-import.service.ts` applies in the other
+   * direction ("each one additionally demands the permission that governs the
+   * same power through its own screen", `SECTION_REQUIRED_PERMISSIONS`).
+   *
+   * `webhooks:edit` and not `webhooks:view`: the list endpoint returns
+   * `secret: null` on purpose (`webhook-subscriptions.service.ts:17-18,222`),
+   * so a view-only admin has never been shown a secret value. `webhooks:edit`
+   * owns `regenerate-secret` (`admin-webhooks.controller.ts:113-116`), which
+   * already hands that admin a live secret for the same row — reading the
+   * current one adds no class of power they lack. Not `webhooks:create` as
+   * well, unlike the import map: import demands both because it writes new AND
+   * existing rows; export only reads existing ones.
+   */
+  const canRevealWebhookSecrets = useHasPermission('webhooks', 'edit')
   const sectionsQuery = useQuery({
     queryKey: ['config-portability', 'sections'],
     queryFn: listConfigSections,
@@ -52,10 +70,16 @@ export default function ConfigPortabilityPage({ embedded = false }: { readonly e
   const [selected, setSelected] = useState<Set<ConfigSection>>(new Set())
   const [strategy, setStrategy] = useState<ImportStrategy>('overwrite')
   const [dryRun, setDryRun] = useState(true)
+  const [includeWebhookSecrets, setIncludeWebhookSecrets] = useState(false)
   const [pickedFile, setPickedFile] = useState<{ name: string; payload: ConfigExportPayload } | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [importResult, setImportResult] = useState<ConfigImportResult | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+
+  const webhookRowsMissingSecret = useMemo(
+    () => (pickedFile === null ? 0 : countWebhookRowsMissingSecret(pickedFile.payload)),
+    [pickedFile],
+  )
 
   const allSelected = useMemo(
     () =>
@@ -67,7 +91,12 @@ export default function ConfigPortabilityPage({ embedded = false }: { readonly e
 
   const exportMutation = useMutation({
     mutationFn: () =>
-      exportConfig(allSelected || selected.size === 0 ? null : Array.from(selected)),
+      exportConfig(allSelected || selected.size === 0 ? null : Array.from(selected), {
+        // Re-checked against the grant at send time, not only at render time:
+        // the toggle is a piece of state that outlives the control, so a grant
+        // withdrawn mid-session must not still be able to ask for secrets.
+        includeWebhookSecrets: canRevealWebhookSecrets && includeWebhookSecrets,
+      }),
     onSuccess: (data) => {
       downloadJson(`rezeis-admin-config-${new Date().toISOString().slice(0, 10)}.json`, data)
       setError(null)
@@ -205,7 +234,47 @@ export default function ConfigPortabilityPage({ embedded = false }: { readonly e
               <CardTitle className="text-base">{t('configPortabilityPage.export.title')}</CardTitle>
               <CardDescription>{t('configPortabilityPage.export.description')}</CardDescription>
             </CardHeader>
-            <CardContent>
+            <CardContent className="space-y-4">
+              {/*
+                The opt-in the API kept for migrations and the panel never
+                offered. Defaulted OFF and spelled out rather than labelled:
+                turning it on writes live signing secrets in clear text into a
+                file that lands in the operator's downloads folder, and the
+                reason to accept that is specific — moving to another
+                deployment whose receivers must keep validating signatures.
+              */}
+              <PermissionGate
+                resource="webhooks"
+                action="edit"
+                fallback={
+                  <p className="text-xs text-muted-foreground">
+                    {t('configPortabilityPage.export.webhookSecrets.locked')}
+                  </p>
+                }
+              >
+                <div className="space-y-2 rounded-md border border-amber-500/40 bg-amber-500/5 p-3">
+                  <div className="flex items-center gap-2">
+                    <Switch
+                      id="include-webhook-secrets"
+                      checked={includeWebhookSecrets}
+                      onCheckedChange={setIncludeWebhookSecrets}
+                    />
+                    <Label htmlFor="include-webhook-secrets">
+                      {t('configPortabilityPage.export.webhookSecrets.label')}
+                    </Label>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    {t('configPortabilityPage.export.webhookSecrets.why')}
+                  </p>
+                  {includeWebhookSecrets && (
+                    <p className="flex items-start gap-2 text-xs text-amber-600 dark:text-amber-400">
+                      <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                      <span>{t('configPortabilityPage.export.webhookSecrets.armed')}</span>
+                    </p>
+                  )}
+                </div>
+              </PermissionGate>
+
               <Button
                 onClick={() => exportMutation.mutate()}
                 disabled={exportMutation.isPending}
@@ -248,6 +317,26 @@ export default function ConfigPortabilityPage({ embedded = false }: { readonly e
                       version: pickedFile.payload.version,
                       count: Object.keys(pickedFile.payload.sections).length,
                     })}
+                  </p>
+                )}
+                {/*
+                  Said before the run, not discovered from a `failed` row
+                  afterwards. The result card already reports the section
+                  honestly — this adds nothing to that mechanism, it just reads
+                  the file that is already parsed and in state. Deliberately a
+                  warning and not a block: a row that ALREADY exists on this
+                  deployment imports fine without its secret (the update arm
+                  keeps the destination's own), so refusing the file outright
+                  would break the ordinary re-import of a redacted export.
+                */}
+                {webhookRowsMissingSecret > 0 && (
+                  <p className="flex items-start gap-2 text-xs text-amber-600 dark:text-amber-400">
+                    <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                    <span>
+                      {t('configPortabilityPage.import.webhookSecretsMissing', {
+                        count: webhookRowsMissingSecret,
+                      })}
+                    </span>
                   </p>
                 )}
               </div>

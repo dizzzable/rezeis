@@ -40,6 +40,63 @@ export interface InviteCapacitySnapshot {
   canCreateInvite: boolean;
 }
 
+/**
+ * Smallest invite TTL this service will act on, in seconds.
+ *
+ * Zero is the value that had to go: `now + 0` is `expiresAt === now`, an
+ * invite already expired at the instant it was written - the same silent
+ * product as a past `expiresAt`. Negatives were worse and were reachable,
+ * because the global value is raw JSON read by a helper that accepted any
+ * finite number.
+ *
+ * One MINUTE rather than one second, and rather than something larger:
+ *   - Below a minute the link dies before a human can copy it out and paste
+ *     it into a chat, so no such value can be intentional.
+ *   - `ReferralsService.findReusableInvite` only reuses a LIVE invite, so a
+ *     sub-minute TTL makes every invite-hub view mint a fresh invite and burn
+ *     a slot - the exact failure already documented on `getCapacity`.
+ *   - It clears any plausible latency between computing this expiry and
+ *     writing the row by ~60x, which is what lets `ReferralsService` refuse a
+ *     non-future `expiresAt` outright instead of intermittently.
+ *   - Anything larger (five minutes, an hour, a day) would start legislating
+ *     product policy: a timed campaign or a support test can legitimately
+ *     want a two-minute window. A minute is the smallest bound that removes
+ *     the defect without deciding that question.
+ *
+ * The operator surfaces are asymmetric: the GLOBAL form works in whole days
+ * (it writes `days * 86400`, maps an EMPTY box to `null` = no expiry, and
+ * clamps a zero or negative box up to its own one-day floor - see
+ * `parseBoundedInt` in `referral-settings-page.tsx`), so it cannot produce
+ * anything under a day and this floor rejects nothing it can make. The
+ * PER-USER override is a raw seconds field, and that is where sub-minute
+ * values came from.
+ */
+export const MIN_LINK_TTL_SECONDS = 60;
+
+/**
+ * Floor for the three slot-accounting settings (`initialSlots`,
+ * `refillThresholdQualified`, `refillAmount`).
+ *
+ * ZERO, not one. The defect in these is NEGATIVE, and zero means something
+ * real and DIFFERENT in each of them:
+ *   - `initialSlots: 0` - this user gets no invite slots. A deliberate
+ *     lockout, and an operator may well want it.
+ *   - `refillThresholdQualified: 0` - no refills. `getCapacity` already skips
+ *     refilling unless the threshold is `> 0`, which is also what keeps it
+ *     from dividing by zero.
+ *   - `refillAmount: 0` - refills trigger but add nothing.
+ * Bounding at 1 would forbid all three legitimate settings. A negative is
+ * coherent in none of them, and is what actually broke things:
+ * `totalSlots = initialSlots + refillsEarned * refillAmount`, then
+ * `remainingSlots = Math.max(0, totalSlots - usedSlots)`. A negative
+ * `initialSlots` floors remaining at 0 and locks the user out of creating
+ * invites with NO invite and NO explanation - strictly worse than the TTL bug,
+ * which at least produced a visibly dead link. A negative `refillAmount` is
+ * worse still: it takes slots AWAY as the user qualifies more referrals,
+ * inverting the incentive the feature exists for.
+ */
+export const MIN_INVITE_COUNT_SETTING = 0;
+
 const DEFAULT_LIMITS: InviteLimitsConfig = {
   linkTtlEnabled: false,
   linkTtlSeconds: null,
@@ -93,16 +150,109 @@ export class ReferralInviteLimitsService {
       }
       return null;
     };
-    return {
-      linkTtlEnabled: bool('linkTtlEnabled', 'link_ttl_enabled'),
-      linkTtlSeconds: num('linkTtlSeconds', 'link_ttl_seconds'),
-      slotsEnabled: bool('slotsEnabled', 'slots_enabled'),
-      initialSlots: num('initialSlots', 'initial_slots'),
-      refillThresholdQualified: num('refillThresholdQualified', 'refill_threshold_qualified'),
-      refillAmount: num('refillAmount', 'refill_amount'),
-      // Global config has no bypass — it is a per-user exemption only.
-      bypassInviteGate: false,
-    };
+    return this.normalizeLimits(
+      {
+        linkTtlEnabled: bool('linkTtlEnabled', 'link_ttl_enabled'),
+        linkTtlSeconds: num('linkTtlSeconds', 'link_ttl_seconds'),
+        slotsEnabled: bool('slotsEnabled', 'slots_enabled'),
+        initialSlots: num('initialSlots', 'initial_slots'),
+        refillThresholdQualified: num('refillThresholdQualified', 'refill_threshold_qualified'),
+        refillAmount: num('refillAmount', 'refill_amount'),
+        // Global config has no bypass — it is a per-user exemption only.
+        bypassInviteGate: false,
+      },
+      'global referralSettings.inviteLimits',
+    );
+  }
+
+  /**
+   * Enforce the floors on whatever is ACTUALLY STORED.
+   *
+   * The per-user DTO (`UpdateUserInviteSettingsDto`) stops new out-of-range
+   * values, but this reader still meets rows written before those bounds
+   * existed - and the GLOBAL values are raw JSON that never passed a DTO at
+   * all, because `PATCH /admin/settings/referral` takes a bare
+   * `Record<string, unknown>`.
+   *
+   * The panel form is no longer the hole it was. `referral-settings-page.tsx`
+   * now clamps every invite-limit box through `parseBoundedInt`
+   * (`Math.max(floor, Math.trunc(Number(raw)))`, empty box -> `null`) and
+   * disables Save while a box sits below its floor, so nothing typed THERE
+   * reaches storage negative. That leaves this reader guarding everything
+   * else - rows written before the bounds, direct DB edits, imports, and any
+   * future writer of that JSON - rather than duplicating a check the SPA
+   * already performs.
+   *
+   * CLAMPED, not rejected. This runs on every invite-hub view and every
+   * capacity check, so throwing would turn one bad number in
+   * `Settings.referralSettings` into a total outage of the referral feature
+   * for every user at once - and it would surface to THEM as a broken bot
+   * screen, not to the operator who can actually fix it. Clamping keeps the
+   * bot working on a sane value and preserves the invariant
+   * `ReferralsService` relies on: a resolved expiry is always strictly future.
+   *
+   * Not silent - every clamp warns with the stored value and the value used.
+   * Values behind a disabled toggle are left alone: nothing reads them, and
+   * warning about them would be noise.
+   */
+  private normalizeLimits(config: InviteLimitsConfig, source: string): InviteLimitsConfig {
+    const next = { ...config };
+    if (config.linkTtlEnabled) {
+      next.linkTtlSeconds = this.normalizeSetting({
+        stored: config.linkTtlSeconds,
+        floor: MIN_LINK_TTL_SECONDS,
+        key: 'linkTtlSeconds',
+        source,
+        consequence: 'A TTL of 0 or less mints invites that are already expired.',
+      });
+    }
+    if (config.slotsEnabled) {
+      next.initialSlots = this.normalizeSetting({
+        stored: config.initialSlots,
+        floor: MIN_INVITE_COUNT_SETTING,
+        key: 'initialSlots',
+        source,
+        consequence:
+          'A negative slot count silently locks the user out of creating invites.',
+      });
+      next.refillThresholdQualified = this.normalizeSetting({
+        stored: config.refillThresholdQualified,
+        floor: MIN_INVITE_COUNT_SETTING,
+        key: 'refillThresholdQualified',
+        source,
+        consequence: 'A negative refill threshold disables refills without saying so.',
+      });
+      next.refillAmount = this.normalizeSetting({
+        stored: config.refillAmount,
+        floor: MIN_INVITE_COUNT_SETTING,
+        key: 'refillAmount',
+        source,
+        consequence:
+          'A negative refill takes slots AWAY as the user qualifies more referrals.',
+      });
+    }
+    return next;
+  }
+
+  private normalizeSetting(input: {
+    readonly stored: number | null;
+    readonly floor: number;
+    readonly key: string;
+    readonly source: string;
+    readonly consequence: string;
+  }): number | null {
+    // `null` is a real setting ('no expiry' / 'unlimited'), not a bad number.
+    if (input.stored === null) {
+      return null;
+    }
+    const normalized = Math.max(input.floor, Math.trunc(input.stored));
+    if (normalized === input.stored) {
+      return input.stored;
+    }
+    this.logger.warn(
+      `${input.key}=${input.stored} from ${input.source} is not a usable value (minimum ${input.floor}, whole numbers); using ${normalized} instead. ${input.consequence}`,
+    );
+    return normalized;
   }
 
   /**
@@ -125,7 +275,15 @@ export class ReferralInviteLimitsService {
         select: { referralInviteSettings: true },
       }),
     ]);
-    return mergeUserInviteOverride(global, user?.referralInviteSettings ?? null);
+    // Clamped again AFTER the merge: `global` is already normalised, but a
+    // per-user override can replace ANY of these with whatever
+    // `parseNullableInt` accepted - it truncates any finite number, negatives
+    // included - so an override written before the DTO gained its bounds can
+    // still reintroduce a bad value on top of a clean global config.
+    return this.normalizeLimits(
+      mergeUserInviteOverride(global, user?.referralInviteSettings ?? null),
+      `user override for ${userId}`,
+    );
   }
 
   /**
@@ -213,6 +371,14 @@ export class ReferralInviteLimitsService {
     }
     const expiresAt = new Date();
     expiresAt.setSeconds(expiresAt.getSeconds() + limits.linkTtlSeconds);
+    if (Number.isNaN(expiresAt.getTime())) {
+      // The floor bounds this below; nothing bounds it above, and a large
+      // enough TTL walks Date past its representable range and comes back
+      // Invalid rather than throwing. Left alone it reaches Prisma as one.
+      throw new BadRequestException(
+        `INVITE_LINK_TTL_OUT_OF_RANGE: linkTtlSeconds=${limits.linkTtlSeconds} does not resolve to a valid date`,
+      );
+    }
     return expiresAt;
   }
 }

@@ -1,3 +1,4 @@
+import { useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useQuery } from '@tanstack/react-query'
 import { Loader2, RefreshCw, ShieldAlert } from 'lucide-react'
@@ -7,6 +8,8 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
+import { useHasPermission } from '@/features/rbac'
+import { AddOnEntitlementInspector, ENTITLEMENT_RESOURCE } from './add-on-entitlement-inspector'
 
 interface EntitlementSlo {
   objectiveMs: number
@@ -33,12 +36,35 @@ function nonZero(record: Record<string, number>): Array<[string, number]> {
 
 export function AddOnEntitlementsTab() {
   const { t } = useTranslation()
+  const inspectorInputRef = useRef<HTMLInputElement | null>(null)
+  // Read from the same catalogue entry the inspect route declares
+  // (`@RequirePermission('add_on_entitlements', 'view')`): without it there is
+  // no inspector to send the operator to, so the drill-down affordances below
+  // would be links to nothing.
+  const canInspect = useHasPermission(ENTITLEMENT_RESOURCE, 'view')
 
   const { data, isLoading, isError, refetch, isFetching } = useQuery({
     queryKey: ['admin', 'add-on-entitlements', 'metrics'],
     queryFn: async () =>
       (await api.get<EntitlementMetrics>('/admin/add-on-entitlements/metrics')).data,
   })
+
+  /**
+   * The bridge from an aggregate to an action.
+   *
+   * Every counter on this tab is a total; every remediation route is scoped to
+   * one subscription, incident, entitlement or plan. Without this the numbers
+   * are a dead end — so each one that can be acted on points at the inspector
+   * and puts the cursor in the field that opens it.
+   */
+  function focusInspector(): void {
+    const field = inspectorInputRef.current
+    if (field === null) return
+    if (typeof field.scrollIntoView === 'function') {
+      field.scrollIntoView({ block: 'center' })
+    }
+    field.focus()
+  }
 
   if (isLoading) {
     return (
@@ -112,6 +138,17 @@ export function AddOnEntitlementsTab() {
         </div>
       </div>
 
+      {canInspect ? (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-dashed p-3">
+          <p className="text-xs text-muted-foreground">
+            {t('addOnsPage.entitlements.drillDown.hint')}
+          </p>
+          <Button size="sm" variant="secondary" onClick={focusInspector}>
+            {t('addOnsPage.entitlements.drillDown.open')}
+          </Button>
+        </div>
+      ) : null}
+
       <StateBreakdown title={t('addOnsPage.entitlements.entitlementsByState')} record={data.entitlementsByState} />
       <StateBreakdown title={t('addOnsPage.entitlements.projectionsByState')} record={data.projectionsByState} />
       <StateBreakdown title={t('addOnsPage.entitlements.plansByState')} record={data.deviceReductionPlansByState} />
@@ -122,14 +159,30 @@ export function AddOnEntitlementsTab() {
           <p className="text-sm text-muted-foreground">{t('addOnsPage.entitlements.noIncidents')}</p>
         ) : (
           <div className="flex flex-wrap gap-2">
-            {nonZero(data.openIncidentsByKind).map(([kind, count]) => (
-              <Badge key={kind} variant="destructive" className="font-mono text-xs">
-                {kind}: {count}
-              </Badge>
-            ))}
+            {nonZero(data.openIncidentsByKind).map(([kind, count]) =>
+              canInspect ? (
+                <button
+                  key={kind}
+                  type="button"
+                  onClick={focusInspector}
+                  aria-label={t('addOnsPage.entitlements.drillDown.incidentAria', { kind })}
+                  className="rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  <Badge variant="destructive" className="font-mono text-xs">
+                    {kind}: {count}
+                  </Badge>
+                </button>
+              ) : (
+                <Badge key={kind} variant="destructive" className="font-mono text-xs">
+                  {kind}: {count}
+                </Badge>
+              ),
+            )}
           </div>
         )}
       </div>
+
+      <AddOnEntitlementInspector inputRef={inspectorInputRef} />
     </div>
   )
 }

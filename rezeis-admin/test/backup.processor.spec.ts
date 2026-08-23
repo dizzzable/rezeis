@@ -13,7 +13,13 @@ describe('BackupProcessor restore', () => {
         runRestore: async () => true,
         runMigrateDeploy: async () => true,
       } as never,
-      { info: (...args: unknown[]) => events.push(args) } as never,
+      // `emit` as well as `info`: the restore-completed event moved to `emit`
+      // so it can carry `adminId`, which `info` cannot — before that every
+      // restore was attributed to "system" in the audit log.
+      {
+        info: (...args: unknown[]) => events.push(args),
+        emit: (...args: unknown[]) => events.push(args),
+      } as never,
       {
         rehydrateMissingAssets: async () => ({ recoveredEmojiCount: 12, skippedPacks: 1 }),
       } as never,
@@ -45,7 +51,7 @@ describe('BackupProcessor restore', () => {
         runRestore: async () => true,
         runMigrateDeploy: async () => false,
       } as never,
-      { info: () => undefined } as never,
+      { info: () => undefined, emit: () => undefined } as never,
       { rehydrateMissingAssets: async () => { throw new Error('Telegram unavailable') } } as never,
     );
 

@@ -25,6 +25,78 @@ import { readPlatformBranding } from '../../settings/utils/platform-branding.uti
  */
 const USER_NOTIFICATION_CATEGORY = 'USER';
 
+/**
+ * Delivery surfaces an operator can pick from when messaging ONE user from the
+ * Users page.
+ *
+ * `feed` is in the list but is not selectable, and that is deliberate. The
+ * `UserNotificationEvent` row is the durable record — it is what the cabinet's
+ * bell reads, what the admin Events page lists, and the only evidence the
+ * message was ever sent. Making it optional would let "Telegram only" quietly
+ * destroy the history of an operator's own message, and there is no operator
+ * need that buys. So the row is always written and the CHANNELS are what the
+ * operator selects; "quietly, feed only" is expressed by selecting no delivery
+ * channel at all, which is a supported choice.
+ */
+export const NOTIFICATION_DELIVERY_CHANNELS = ['telegram', 'webpush'] as const;
+export type NotificationDeliveryChannel = (typeof NOTIFICATION_DELIVERY_CHANNELS)[number];
+
+export function isNotificationDeliveryChannel(
+  value: unknown,
+): value is NotificationDeliveryChannel {
+  return (
+    typeof value === 'string' &&
+    (NOTIFICATION_DELIVERY_CHANNELS as readonly string[]).includes(value)
+  );
+}
+
+/**
+ * Why a channel cannot be used, or how a send on it ended. Stable machine keys,
+ * not prose: the SPA renders them through i18n so the operator reads the reason
+ * in their own language, and a test can assert the reason rather than a
+ * sentence someone will reword.
+ */
+export type ChannelUnavailableReason =
+  | 'noTelegramId'
+  | 'botBlocked'
+  | 'pushNotConfigured'
+  | 'noSubscription';
+
+export type ChannelFailureReason = 'relayUnavailable' | 'pushRejected' | 'error';
+
+export interface ChannelAvailability {
+  readonly channel: NotificationDeliveryChannel;
+  readonly available: boolean;
+  readonly reason: ChannelUnavailableReason | null;
+}
+
+/**
+ * What one channel actually did.
+ *
+ *  - `delivered`     — handed off successfully (queued for Telegram, accepted
+ *                      by the push service for web-push).
+ *  - `failed`        — selected, attempted, did not get through.
+ *  - `unavailable`   — selected, but this user cannot receive on it at all.
+ *  - `notSelected`   — the operator did not pick it.
+ */
+export type ChannelOutcomeStatus = 'delivered' | 'failed' | 'unavailable' | 'notSelected';
+
+export interface ChannelOutcome {
+  readonly channel: NotificationDeliveryChannel;
+  readonly status: ChannelOutcomeStatus;
+  readonly reason: ChannelUnavailableReason | ChannelFailureReason | null;
+  /** Browsers reached, for web-push. `null` for channels without a fanout. */
+  readonly delivered: number | null;
+  /** Browsers attempted, for web-push. */
+  readonly attempted: number | null;
+}
+
+export interface OperatorMessageResult {
+  /** The durable `UserNotificationEvent` row — always written. */
+  readonly eventId: string;
+  readonly outcomes: readonly ChannelOutcome[];
+}
+
 interface CreateUserNotificationInput {
   readonly userId: string;
   readonly type: string;
@@ -116,6 +188,256 @@ export class UserNotificationsService {
     });
 
     return event.id;
+  }
+
+  /**
+   * Which delivery channels THIS user can actually receive on.
+   *
+   * Read from the user row and the subscription store, never from a static
+   * list: a channel offered to someone who cannot receive on it is a button
+   * that lies, and the operator only finds out when the message never arrives.
+   *
+   * The Telegram gate is the same three conditions the fanout itself applies
+   * (`fanout` below) — a linked id, a positive one, and a bot that is not
+   * blocked — because an availability answer that disagrees with the sender is
+   * worse than no answer.
+   */
+  public async getChannelAvailability(
+    userId: string,
+  ): Promise<readonly ChannelAvailability[]> {
+    const user = await this.prismaService.user.findUnique({
+      where: { id: userId },
+      select: { telegramId: true, isBotBlocked: true },
+    });
+    const telegram: ChannelAvailability =
+      user === null || user.telegramId === null || user.telegramId <= 0n
+        ? { channel: 'telegram', available: false, reason: 'noTelegramId' }
+        : user.isBotBlocked
+          ? { channel: 'telegram', available: false, reason: 'botBlocked' }
+          : { channel: 'telegram', available: true, reason: null };
+
+    // Two distinct "no" answers on purpose. "The deployment has no VAPID keys"
+    // is an operator action in Settings → Web-push; "this subscriber never
+    // allowed notifications in their browser" is not something the operator can
+    // fix at all. Collapsing them into one greyed-out checkbox is how "push
+    // doesn't work" stayed unexplained.
+    const configured = await this.webPushService.isConfigured();
+    if (!configured) {
+      return [telegram, { channel: 'webpush', available: false, reason: 'pushNotConfigured' }];
+    }
+    const subscriptions = await this.webPushService.countSubscriptions(userId);
+    return [
+      telegram,
+      subscriptions > 0
+        ? { channel: 'webpush', available: true, reason: null }
+        : { channel: 'webpush', available: false, reason: 'noSubscription' },
+    ];
+  }
+
+  /**
+   * Operator-initiated message to ONE user, with the delivery channels the
+   * operator chose — and a truthful per-channel answer about what happened.
+   *
+   * Three things separate this from `create()` and each is the point:
+   *
+   *  1. **It is awaited.** `create()` fans out through `void this.fanout(...)`
+   *     and returns before a single byte leaves the process; the caller's 2xx
+   *     therefore means "a row was written", never "the user heard about it".
+   *     That is what made the Users-page send report success unconditionally.
+   *  2. **It reports per channel.** A Telegram relay that is down and a
+   *     subscriber with no browser bound are different facts and the operator
+   *     needs both, not one green toast.
+   *  3. **It respects availability.** A channel this user cannot receive on
+   *     comes back `unavailable` with the reason, rather than being counted as
+   *     sent because nothing threw.
+   *
+   * The operator-managed `userNotifications` toggle map is deliberately NOT
+   * consulted, matching `create()`'s existing `preRenderedText` carve-out: that
+   * map switches off classes of AUTOMATED notification (expiry reminders,
+   * referral events). An operator typing a message to one named subscriber is
+   * a deliberate one-off, not a member of any of those classes, and silently
+   * dropping it because an unrelated automation was disabled would be the same
+   * silent failure this method exists to end.
+   * (`AdminNotificationPreferencesService` is the operators' OWN per-category
+   * opt-in for panel alerts — it governs who on the staff hears about an event,
+   * and has nothing to say about a message addressed to a subscriber.)
+   */
+  public async sendOperatorMessage(input: {
+    readonly userId: string;
+    readonly text: string;
+    readonly channels: readonly NotificationDeliveryChannel[];
+  }): Promise<OperatorMessageResult> {
+    // The durable record, first and unconditionally. If every delivery channel
+    // fails the operator still has the message in the user's feed and in the
+    // events log — losing that to a Telegram outage would be the worse bug.
+    const event = await this.prismaService.userNotificationEvent.create({
+      data: {
+        userId: input.userId,
+        type: 'ADMIN_MESSAGE',
+        payload: { text: input.text } as Prisma.InputJsonObject,
+      },
+      select: { id: true },
+    });
+
+    const selected = new Set<NotificationDeliveryChannel>(input.channels);
+    const availability = new Map(
+      (await this.getChannelAvailability(input.userId)).map((entry) => [entry.channel, entry]),
+    );
+    const outcomes: ChannelOutcome[] = [];
+
+    for (const channel of NOTIFICATION_DELIVERY_CHANNELS) {
+      if (!selected.has(channel)) {
+        outcomes.push({
+          channel,
+          status: 'notSelected',
+          reason: null,
+          delivered: null,
+          attempted: null,
+        });
+        continue;
+      }
+      const entry = availability.get(channel);
+      if (entry === undefined || !entry.available) {
+        outcomes.push({
+          channel,
+          status: 'unavailable',
+          reason: entry?.reason ?? 'error',
+          delivered: null,
+          attempted: null,
+        });
+        continue;
+      }
+      outcomes.push(
+        channel === 'telegram'
+          ? await this.deliverOperatorTelegram(event.id, input.userId, input.text)
+          : await this.deliverOperatorWebPush(input.userId, input.text),
+      );
+    }
+
+    // Operator mirror, unchanged from the fanout path: it copies the message
+    // into the OPERATOR's own chat, so it is not a user-facing channel and is
+    // not one of the things being selected here.
+    await this.mirrorToOperatorChat(event.id, input.text).catch((err: unknown) => {
+      this.logger.warn(
+        `Operator mirror failed for ${event.id}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    });
+
+    return { eventId: event.id, outcomes };
+  }
+
+  private async deliverOperatorTelegram(
+    eventId: string,
+    userId: string,
+    text: string,
+  ): Promise<ChannelOutcome> {
+    const user = await this.prismaService.user.findUnique({
+      where: { id: userId },
+      select: { telegramId: true },
+    });
+    if (user === null || user.telegramId === null) {
+      return {
+        channel: 'telegram',
+        status: 'unavailable',
+        reason: 'noTelegramId',
+        delivered: null,
+        attempted: null,
+      };
+    }
+    try {
+      // `enqueue` returns false when the relay is not configured or Redis was
+      // unreachable AND the one direct attempt did not land. Both are "the
+      // operator's message did not go out", which is exactly what must not be
+      // rendered as success.
+      const queued = await this.relayQueue.enqueue('reiwa.user.notify', {
+        eventId,
+        telegramId: user.telegramId.toString(),
+        text,
+        parseMode: 'HTML',
+      });
+      return queued
+        ? {
+            channel: 'telegram',
+            status: 'delivered',
+            reason: null,
+            delivered: null,
+            attempted: null,
+          }
+        : {
+            channel: 'telegram',
+            status: 'failed',
+            reason: 'relayUnavailable',
+            delivered: null,
+            attempted: null,
+          };
+    } catch (err: unknown) {
+      this.logger.warn(
+        `Operator Telegram send failed for ${userId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return {
+        channel: 'telegram',
+        status: 'failed',
+        reason: 'error',
+        delivered: null,
+        attempted: null,
+      };
+    }
+  }
+
+  private async deliverOperatorWebPush(userId: string, text: string): Promise<ChannelOutcome> {
+    try {
+      const result = await this.webPushService.sendToUser({
+        userId,
+        title: 'Reiwa',
+        body: stripHtml(text),
+        url: resolveNotificationPushUrl('ADMIN_MESSAGE'),
+      });
+      if (result.disabled) {
+        return {
+          channel: 'webpush',
+          status: 'unavailable',
+          reason: 'pushNotConfigured',
+          delivered: 0,
+          attempted: 0,
+        };
+      }
+      if (result.attempted === 0) {
+        return {
+          channel: 'webpush',
+          status: 'unavailable',
+          reason: 'noSubscription',
+          delivered: 0,
+          attempted: 0,
+        };
+      }
+      // Partial success is success for the operator's purpose: the user has the
+      // message on at least one of their browsers. Zero out of N is a failure
+      // no matter how many endpoints were tried.
+      return {
+        channel: 'webpush',
+        status: result.delivered > 0 ? 'delivered' : 'failed',
+        reason: result.delivered > 0 ? null : 'pushRejected',
+        delivered: result.delivered,
+        attempted: result.attempted,
+      };
+    } catch (err: unknown) {
+      this.logger.warn(
+        `Operator web-push send failed for ${userId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return {
+        channel: 'webpush',
+        status: 'failed',
+        reason: 'error',
+        delivered: null,
+        attempted: null,
+      };
+    }
   }
 
   private async fanout(input: {

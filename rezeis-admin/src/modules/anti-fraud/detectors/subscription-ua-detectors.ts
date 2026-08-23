@@ -5,6 +5,7 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 import { RemnawaveSubscriptionRequestEntryInterface } from '../../remnawave/interfaces/remnawave-extended.interface';
 import { describeStrictOutcome } from '../../remnawave/interfaces/remnawave-strict-outcome.interface';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
+import { panelIdentityLookup } from '../../remnawave/services/panel-user-address';
 import { FraudSignalCandidate } from '../interfaces/fraud-signal.interface';
 import { AntiFraudTunablesService } from '../services/anti-fraud-tunables.service';
 import { SubscriptionUaDetectionConfig } from '../subscription-ua-detection.config';
@@ -344,18 +345,29 @@ export class SubscriptionUaDetectors {
     }
   }
 
-  /** Remnawave uuid → rezeis user id, for deep-linking the signal. */
-  private async resolveRezeisUserIds(uuids: readonly string[]): Promise<Map<string, string>> {
+  /**
+   * Panel identity → rezeis user id, for deep-linking the signal.
+   *
+   * MATCHED ON BOTH ANGLES, via {@link panelIdentityLookup}, for the reason
+   * spelled out there: the identity a 3.x panel hands us is a decimal, while a
+   * subscription linked during the 2.x era still stores its uuid in
+   * `remnawaveId` and always will. Asking `remnawaveId IN (…)` alone drops the
+   * deep link for that whole population — `affectedUserIds` comes back empty
+   * and the operator gets a signal they cannot open.
+   */
+  private async resolveRezeisUserIds(identities: readonly string[]): Promise<Map<string, string>> {
     const map = new Map<string, string>();
-    const unique = [...new Set(uuids)].filter((u) => u.length > 0);
-    if (unique.length === 0) return map;
+    const lookup = panelIdentityLookup(identities);
+    if (lookup === null) return map;
     const rows = await this.prismaService.subscription.findMany({
-      where: { remnawaveId: { in: unique } },
-      select: { remnawaveId: true, userId: true },
+      where: lookup.where,
+      select: { remnawaveId: true, remnawavePanelId: true, userId: true },
     });
     for (const row of rows) {
-      if (!row.remnawaveId) continue;
-      if (!map.has(row.remnawaveId)) map.set(row.remnawaveId, row.userId);
+      // Keyed by the identity the caller asked about — see `keysFor`.
+      for (const key of lookup.keysFor(row)) {
+        if (!map.has(key)) map.set(key, row.userId);
+      }
     }
     return map;
   }

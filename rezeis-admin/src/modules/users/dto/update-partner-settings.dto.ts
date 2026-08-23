@@ -68,4 +68,27 @@ export class UpdatePartnerSettingsDto {
   @IsInt()
   @Min(0)
   public level3FixedAmount?: number | null;
+
+  /**
+   * Per-level accrual mode. Omit the field to leave the level as it is;
+   * send `null` to clear the override so the level goes back to inheriting
+   * the partner-wide `accrualStrategy` above. Never send a value merely to
+   * echo what `accrualStrategy` already says - a stored value stops
+   * following that toggle, an inherited one keeps following it.
+   *
+   * `ONCE_PER_USER` = pay only on the referral's FIRST payment at this
+   * level; `ON_EACH_PAYMENT` = pay on every payment. Only consulted when
+   * `useGlobalSettings` is false.
+   */
+  @IsOptional()
+  @IsEnum(PartnerAccrualStrategy)
+  public level1AccrualStrategy?: PartnerAccrualStrategy | null;
+
+  @IsOptional()
+  @IsEnum(PartnerAccrualStrategy)
+  public level2AccrualStrategy?: PartnerAccrualStrategy | null;
+
+  @IsOptional()
+  @IsEnum(PartnerAccrualStrategy)
+  public level3AccrualStrategy?: PartnerAccrualStrategy | null;
 }

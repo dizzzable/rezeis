@@ -21,6 +21,10 @@ import {
 } from '../src/modules/plans/services/plan-squad-propagation.service';
 import { PlansAdminService } from '../src/modules/plans/services/plans-admin.service';
 import { PlansAdminValidators } from '../src/modules/plans/services/plans-admin.validators';
+import {
+  resolveInheritedPlanLimitUpdate,
+  type PlanInheritedLimits,
+} from '../src/modules/subscriptions/services/plan-inherited-limits.util';
 import { isUpstreamTagForTest } from './helpers/remnawave-tag-contract';
 
 const SQUAD_A = '11111111-1111-1111-1111-111111111111';
@@ -48,10 +52,8 @@ describe('a plan squad edit reaches existing subscriptions', () => {
     // reads `subscription.internalSquads`, NOT the snapshot) must now hold the
     // new selection for both subscribers.
     assert.deepStrictEqual(harness.subscriptionUpdates, [
-      {
-        ids: ['sub-1', 'sub-2'],
-        data: { internalSquads: [SQUAD_B, SQUAD_C], externalSquad: null },
-      },
+      propagatedWrite('sub-1', planSnapshotOf([SQUAD_A], null), [SQUAD_B, SQUAD_C], null),
+      propagatedWrite('sub-2', planSnapshotOf([SQUAD_A], null), [SQUAD_B, SQUAD_C], null),
     ]);
     // …and a push must actually be queued, otherwise the panel never learns.
     assert.deepStrictEqual(
@@ -100,7 +102,7 @@ describe('a plan squad edit reaches existing subscriptions', () => {
     await harness.updatePlan({ externalSquad: EXTERNAL_NEW });
 
     assert.deepStrictEqual(harness.subscriptionUpdates, [
-      { ids: ['sub-1'], data: { internalSquads: [SQUAD_A], externalSquad: EXTERNAL_NEW } },
+      propagatedWrite('sub-1', planSnapshotOf([SQUAD_A], EXTERNAL_OLD), [SQUAD_A], EXTERNAL_NEW),
     ]);
     assert.equal(harness.createdJobs.length, 1);
   });
@@ -156,14 +158,142 @@ describe('a plan squad edit reaches existing subscriptions', () => {
     await harness.updatePlan({ internalSquads: [SQUAD_B] });
 
     assert.deepStrictEqual(harness.subscriptionUpdates, [
-      { ids: ['sub-tracking'], data: { internalSquads: [SQUAD_B], externalSquad: null } },
+      propagatedWrite('sub-tracking', planSnapshotOf([SQUAD_A], null), [SQUAD_B], null),
     ]);
     assert.deepStrictEqual(
       harness.createdJobs.map((job) => job.subscriptionId),
       ['sub-tracking'],
     );
   });
+});
 
+// ── (1b) …and the row it moved must still read as tracking the plan ────────
+//
+// `PlanSnapshotSyncService` no longer mirrors the four limit keys into every
+// subscriber's `plan_snapshot` — deliberately, because that mirroring destroyed
+// the override baseline for `trafficLimit` / `deviceLimit`. It used to hide a
+// defect on this path: the propagation moved the squad COLUMNS and nothing
+// moved the snapshot, and the mirror happened to reconcile the two anyway.
+// Without it, a propagated row's column says SQUAD_B while its snapshot still
+// says SQUAD_A — which `resolveInheritedPlanLimitUpdate` reads as an operator
+// override, so no renewal would ever correct that row's squads again.
+//
+// These assert the OUTCOME through the real reader, not the write's shape:
+// deleting the snapshot patch has to turn INHERITED into OVERRIDDEN here.
+
+describe('a propagated subscription still reads as inheriting its plan', () => {
+  it('keeps the snapshot in step with the columns it just moved', async () => {
+    const priorSnapshot = planSnapshotOf([SQUAD_A], null);
+    const harness = createUpdateHarness({
+      previousInternalSquads: [SQUAD_A],
+      nextInternalSquads: [SQUAD_B, SQUAD_C],
+      subscriptions: [activeSubscription('sub-1', [SQUAD_A], null, priorSnapshot)],
+    });
+
+    await harness.updatePlan({ internalSquads: [SQUAD_B, SQUAD_C] });
+
+    const write = harness.subscriptionUpdates[0];
+    assert.ok(write !== undefined, 'the propagation must have written the row');
+    const decision = renewalDecisionFor(
+      write,
+      priorSnapshot,
+      planLimitsAfterEdit([SQUAD_B, SQUAD_C], null),
+    );
+    // Present == INHERITED: the renewal is willing to re-apply the plan's
+    // squads. Absent would mean the row was written off as individually
+    // overridden by the very edit that set it.
+    assert.deepStrictEqual(decision.internalSquads, [SQUAD_B, SQUAD_C]);
+    assert.equal('externalSquad' in decision, true);
+    assert.equal(decision.externalSquad, null);
+  });
+
+  it('re-declares the squads of an imported row whose snapshot never had them', async () => {
+    // `remnawave-importer` writes the panel's real membership to the COLUMNS
+    // and a snapshot with no squad keys at all. Such a row is UNDECIDABLE at
+    // renewal — preserved, never corrected. Once the plan itself has just set
+    // its squads, that is no longer an open question and the snapshot must say
+    // so, or the population most likely to need the safety net never gets it.
+    const importedSnapshot = {
+      id: 'plan-1',
+      importedFrom: 'remnawave-importer',
+      tag: null,
+      trafficLimitStrategy: 'MONTH',
+    };
+    const harness = createUpdateHarness({
+      previousInternalSquads: [SQUAD_A],
+      nextInternalSquads: [SQUAD_B],
+      subscriptions: [activeSubscription('sub-imported', [SQUAD_A], null, importedSnapshot)],
+    });
+
+    await harness.updatePlan({ internalSquads: [SQUAD_B] });
+
+    const write = harness.subscriptionUpdates[0];
+    assert.ok(write !== undefined, 'the propagation must have written the row');
+    // The keys the importer never wrote are the ones that get added; the ones
+    // it did write survive untouched.
+    assert.deepStrictEqual((write.data as { readonly planSnapshot: unknown }).planSnapshot, {
+      ...importedSnapshot,
+      internalSquads: [SQUAD_B],
+      externalSquad: null,
+    });
+    const decision = renewalDecisionFor(write, importedSnapshot, planLimitsAfterEdit([SQUAD_B], null));
+    assert.deepStrictEqual(decision.internalSquads, [SQUAD_B]);
+  });
+
+  it('leaves a snapshot that already records the selection exactly as it was', async () => {
+    // Order is not significant to the reader (`sameSquadSet`), so re-writing an
+    // equal-but-reordered list would be churn on a JSON column for no change in
+    // meaning. The columns still move; only the snapshot key is left alone.
+    const alreadyRecorded = planSnapshotOf([SQUAD_C, SQUAD_B], null);
+    const harness = createUpdateHarness({
+      previousInternalSquads: [SQUAD_A],
+      nextInternalSquads: [SQUAD_B, SQUAD_C],
+      subscriptions: [activeSubscription('sub-1', [SQUAD_A], null, alreadyRecorded)],
+    });
+
+    await harness.updatePlan({ internalSquads: [SQUAD_B, SQUAD_C] });
+
+    assert.deepStrictEqual(harness.subscriptionUpdates, [
+      { ids: ['sub-1'], data: { internalSquads: [SQUAD_B, SQUAD_C], externalSquad: null } },
+    ]);
+    const decision = renewalDecisionFor(
+      harness.subscriptionUpdates[0]!,
+      alreadyRecorded,
+      planLimitsAfterEdit([SQUAD_B, SQUAD_C], null),
+    );
+    assert.deepStrictEqual(decision.internalSquads, [SQUAD_B, SQUAD_C]);
+  });
+
+  it('does not disturb the limit keys the snapshot is the baseline for', async () => {
+    // The freeze exists so `trafficLimit` / `deviceLimit` keep meaning "what the
+    // plan gave THIS subscription". A squad propagation must not become a
+    // second writer of those two — an individually raised device limit has to
+    // survive a squad edit on the plan.
+    const overriddenSnapshot = { ...planSnapshotOf([SQUAD_A], null), deviceLimit: 3 };
+    const harness = createUpdateHarness({
+      previousInternalSquads: [SQUAD_A],
+      nextInternalSquads: [SQUAD_B],
+      subscriptions: [activeSubscription('sub-1', [SQUAD_A], null, overriddenSnapshot)],
+    });
+
+    await harness.updatePlan({ internalSquads: [SQUAD_B] });
+
+    const snapshot = (harness.subscriptionUpdates[0]?.data as { readonly planSnapshot: Record<string, unknown> })
+      .planSnapshot;
+    assert.equal(snapshot['deviceLimit'], 3);
+    assert.equal(snapshot['trafficLimit'], null);
+    // The operator's hand-set device limit (5, against a snapshot baseline of
+    // 3) still reads as OVERRIDDEN after the squad edit.
+    const decision = resolveInheritedPlanLimitUpdate({
+      current: { trafficLimit: null, deviceLimit: 5, internalSquads: [SQUAD_B], externalSquad: null },
+      planSnapshot: snapshot,
+      plan: planLimitsAfterEdit([SQUAD_B], null),
+    });
+    assert.equal('deviceLimit' in decision, false);
+  });
+});
+
+describe('a plan squad edit reaches existing subscriptions (continued)', () => {
   it('fixes the columns of a non-pushable subscription without queueing a panel write', async () => {
     const harness = createUpdateHarness({
       previousInternalSquads: [SQUAD_A],
@@ -178,10 +308,9 @@ describe('a plan squad edit reaches existing subscriptions', () => {
     const result = await harness.updatePlan({ internalSquads: [SQUAD_B] });
 
     assert.deepStrictEqual(harness.subscriptionUpdates, [
-      {
-        ids: ['sub-active', 'sub-expired', 'sub-unprovisioned'],
-        data: { internalSquads: [SQUAD_B], externalSquad: null },
-      },
+      propagatedWrite('sub-active', planSnapshotOf([SQUAD_A], null), [SQUAD_B], null),
+      propagatedWrite('sub-expired', planSnapshotOf([SQUAD_A], null), [SQUAD_B], null),
+      propagatedWrite('sub-unprovisioned', planSnapshotOf([SQUAD_A], null), [SQUAD_B], null),
     ]);
     assert.deepStrictEqual(
       harness.createdJobs.map((job) => job.subscriptionId),
@@ -650,6 +779,13 @@ interface HarnessSubscription {
   readonly remnawaveId: string | null;
   readonly internalSquads: readonly string[];
   readonly externalSquad: string | null;
+  /**
+   * A REAL snapshot, not `{}`. The propagation now writes this JSON back, and
+   * `resolveInheritedPlanLimitUpdate` reads it at renewal — an empty object
+   * would make every field undecidable, so a patch that dropped the squad keys
+   * would look exactly like a patch that kept them.
+   */
+  readonly planSnapshot: Record<string, unknown>;
 }
 
 /**
@@ -695,6 +831,7 @@ function activeSubscription(
   id: string,
   internalSquads: readonly string[],
   externalSquad: string | null = null,
+  planSnapshot: Record<string, unknown> = planSnapshotOf(internalSquads, externalSquad),
 ): HarnessSubscription {
   return {
     id,
@@ -702,7 +839,91 @@ function activeSubscription(
     remnawaveId: `panel-${id}`,
     internalSquads,
     externalSquad,
+    planSnapshot,
   };
+}
+
+/**
+ * The snapshot a never-adjusted subscriber carries: the plan as it was when the
+ * subscription was assigned, squad keys included. Defaults to agreeing with the
+ * columns, which is what makes the row read as INHERITED before the edit.
+ */
+function planSnapshotOf(
+  internalSquads: readonly string[],
+  externalSquad: string | null,
+): Record<string, unknown> {
+  return {
+    id: 'plan-1',
+    name: 'Starter',
+    tag: null,
+    type: PlanType.UNLIMITED,
+    icon: null,
+    trafficLimit: null,
+    deviceLimit: -1,
+    trafficLimitStrategy: 'MONTH',
+    internalSquads: [...internalSquads],
+    externalSquad,
+  };
+}
+
+/**
+ * The write a propagated row must receive: the new squads in the COLUMNS and
+ * the same selection re-declared in the row's own `plan_snapshot`, in one call.
+ */
+function propagatedWrite(
+  id: string,
+  priorSnapshot: Record<string, unknown>,
+  internalSquads: readonly string[],
+  externalSquad: string | null,
+) {
+  return {
+    ids: [id],
+    data: {
+      internalSquads: [...internalSquads],
+      externalSquad,
+      planSnapshot: { ...priorSnapshot, internalSquads: [...internalSquads], externalSquad },
+    },
+  };
+}
+
+/** The plan row as `resolveInheritedPlanLimitUpdate` wants it, post-edit. */
+function planLimitsAfterEdit(
+  internalSquads: readonly string[],
+  externalSquad: string | null,
+): PlanInheritedLimits {
+  return { trafficLimit: null, deviceLimit: -1, internalSquads, externalSquad };
+}
+
+/**
+ * Replays what a renewal would decide for a row the propagation just wrote:
+ * feeds the recorded write back through the SAME reader
+ * (`resolveInheritedPlanLimitUpdate`) the payment path uses.
+ */
+function renewalDecisionFor(
+  write: { readonly ids: readonly string[]; readonly data: unknown },
+  priorSnapshot: Record<string, unknown>,
+  plan: PlanInheritedLimits,
+) {
+  const data = write.data as {
+    readonly internalSquads: readonly string[];
+    readonly externalSquad: string | null;
+    readonly planSnapshot?: unknown;
+  };
+  // Model the ROW, not the write: a write that carries no `planSnapshot` key
+  // leaves the stored snapshot exactly as the subscription already had it. That
+  // distinction is the whole test — dropping the patch must leave the OLD
+  // squads in the snapshot beside the NEW ones in the column.
+  const storedSnapshot = 'planSnapshot' in data ? data.planSnapshot : priorSnapshot;
+  return resolveInheritedPlanLimitUpdate({
+    current: {
+      trafficLimit: null,
+      deviceLimit: -1,
+      internalSquads: data.internalSquads,
+      externalSquad: data.externalSquad,
+    },
+    planSnapshot: storedSnapshot,
+    plan,
+  });
 }
 
 interface CreatedJob {
@@ -784,12 +1005,23 @@ function createUpdateHarness(options: {
         state.candidateScans += 1;
         return options.subscriptions.map((subscription) => ({ ...subscription }));
       },
-      updateMany: async (args: {
-        readonly where: { readonly id: { readonly in: readonly string[] } };
-        readonly data: unknown;
-      }) => {
-        state.subscriptionUpdates.push({ ids: [...args.where.id.in], data: args.data });
-        return { count: args.where.id.in.length };
+      // Understands BOTH `where` shapes on purpose. A recorder that knew only
+      // `{ id: { in: [...] } }` would silently record nothing once the write
+      // became per-row, and every assertion over `subscriptionUpdates` would
+      // pass by comparing two empty arrays. An unrecognised shape throws.
+      updateMany: async (args: { readonly where: { readonly id: unknown }; readonly data: unknown }) => {
+        const target = args.where.id;
+        const ids =
+          typeof target === 'string'
+            ? [target]
+            : Array.isArray((target as { readonly in?: readonly string[] })?.in)
+              ? [...((target as { readonly in: readonly string[] }).in)]
+              : null;
+        if (ids === null) {
+          throw new Error(`unsupported subscription.updateMany where: ${JSON.stringify(args.where)}`);
+        }
+        state.subscriptionUpdates.push({ ids, data: args.data });
+        return { count: ids.length };
       },
       update: async () => undefined,
     },

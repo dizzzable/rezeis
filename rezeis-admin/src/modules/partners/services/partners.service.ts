@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
-import { Prisma, WithdrawalStatus } from '@prisma/client';
+import { Partner, Prisma, WithdrawalStatus } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { SystemEventsService, EVENT_TYPES } from '../../../common/services/system-events.service';
@@ -16,7 +16,6 @@ import {
   PartnerUserSummaryInterface,
   PartnerWithdrawalInterface,
 } from '../interfaces/partner.interface';
-import { PartnerEarningsService } from './partner-earnings.service';
 import { PartnerNotificationsService } from './partner-notifications.service';
 
 const PARTNER_USER_SELECT = {
@@ -59,6 +58,29 @@ type PartnerWithdrawalRecord = Prisma.PartnerWithdrawalGetPayload<{
   include: typeof WITHDRAWAL_PARTNER_INCLUDE;
 }>;
 
+/**
+ * ONE audit action for a balance adjustment, whichever screen performed it.
+ * The origin lives in `metadata.source`, not in the action name.
+ *
+ * The user-detail panel used to write its own `user.partner.balance.adjusted`
+ * with no amounts in it, so "who moved this balance and by how much" had to be
+ * asked twice and one of the two answers had no numbers. Same reasoning as
+ * `user.subscription.limits_changed`, which discriminates `operator_edit` from
+ * `plan_assignment` the same way: a reader that has to remember to union a
+ * second action name is a reader that will eventually forget.
+ *
+ *   SELECT metadata->>'partnerId', metadata->>'source',
+ *          metadata->>'adjustment', metadata->>'previousBalance',
+ *          metadata->>'newBalance', created_at
+ *   FROM   admin_audit_log
+ *   WHERE  action = 'partner.balance.adjusted'
+ *   ORDER  BY created_at
+ */
+const PARTNER_BALANCE_ADJUSTED_ACTION = 'partner.balance.adjusted';
+
+/** Which surface the operator used — see {@link PARTNER_BALANCE_ADJUSTED_ACTION}. */
+type PartnerBalanceAdjustmentSource = 'partners_tab' | 'user_detail';
+
 interface ProcessPartnerWithdrawalInput {
   readonly withdrawalId: string;
   readonly nextStatus: Exclude<WithdrawalStatus, 'PENDING'>;
@@ -72,7 +94,6 @@ export class PartnersService {
   public constructor(
     private readonly prismaService: PrismaService,
     private readonly events: SystemEventsService,
-    private readonly partnerEarningsService: PartnerEarningsService,
     private readonly partnerNotificationsService: PartnerNotificationsService,
   ) {}
 
@@ -286,6 +307,40 @@ export class PartnersService {
    * debit). If the admin later rejects the withdrawal, the balance is restored.
    *
    * Donor: `partner_withdrawals.request_withdrawal` + `create_withdrawal_request`.
+   *
+   * The debit is RELATIVE and every condition it depends on rides in the
+   * `where` of that same statement: `isActive` and `balance >= amount`. The
+   * sufficiency guard used to be `if (partner.balance < input.amount)`
+   * evaluated in JS against a `findUnique` taken a few lines earlier in this
+   * same transaction. A relative write cannot LOSE an update, but it also
+   * cannot REFUSE one: under the default READ COMMITTED isolation two requests
+   * both read 10 000, both passed the JS check, and Postgres applied both
+   * decrements in lock order, leaving the partner at -10 000 with two PENDING
+   * withdrawals against money that was only ever there once. The predicate now
+   * travels with the write, so Postgres evaluates it against the row it locks
+   * rather than against a number this process read a moment earlier, and
+   * `count === 0` IS the refusal. Same shape as {@link applyBalanceAdjustment}
+   * and as `spendPoints` in `referral-points-exchange.service.ts`.
+   *
+   * It is `gte`, not `gt`: a request for exactly the whole balance still
+   * matches the row and lands it on zero, the same boundary the replaced
+   * `balance < amount` had. `amount` is already known positive here, so the
+   * floor can never be a value a healthy row fails by accident.
+   *
+   * ORDER MATTERS. The guarded debit runs BEFORE `partnerWithdrawal.create`,
+   * never after. A withdrawal row is a claim on money that has already left
+   * the balance — approving one later increments `totalWithdrawn` as if it had
+   * been paid — so a row that outlives a refused debit is a payout owed
+   * against money never taken. Creating first and letting the throw roll it
+   * back would make that invariant depend on the rollback actually happening;
+   * debiting first makes it structural, because the refusal returns before
+   * anything has been created. Nothing is read from the partner row on the
+   * path that succeeds: the create needs only `input.partnerId`, which the
+   * caller already supplied.
+   *
+   * The three refusals are told apart only when the write matched nothing, and
+   * in the order the JS checks used to run, so callers see exactly the
+   * messages and exception types they always did.
    */
   public async createWithdrawalRequest(input: {
     readonly partnerId: string;
@@ -297,26 +352,36 @@ export class PartnersService {
       throw new BadRequestException('Withdrawal amount must be positive');
     }
     const result = await this.prismaService.$transaction(async (tx) => {
-      const partner = await tx.partner.findUnique({
-        where: { id: input.partnerId },
-      });
-      if (partner === null) {
-        throw new NotFoundException('Partner not found');
-      }
-      if (!partner.isActive) {
-        throw new BadRequestException('Partner is not active');
-      }
-      if (partner.balance < input.amount) {
-        throw new BadRequestException('Insufficient partner balance');
-      }
-      // Deduct balance immediately (altshop pattern)
-      await tx.partner.update({
-        where: { id: partner.id },
+      // Deduct balance immediately (altshop pattern), conditionally: the
+      // active flag and the sufficiency floor are the `where` of this very
+      // statement, so no read-then-check window exists.
+      const debited = await tx.partner.updateMany({
+        where: {
+          id: input.partnerId,
+          isActive: true,
+          balance: { gte: input.amount },
+        },
         data: { balance: { decrement: input.amount } },
       });
+      if (debited.count === 0) {
+        // Zero rows is "no such partner", "not active" or "not enough", and
+        // the count cannot say which. Only this branch pays for telling them
+        // apart; the path that succeeds never reads the partner row.
+        const existing = await tx.partner.findUnique({
+          where: { id: input.partnerId },
+          select: { id: true, isActive: true },
+        });
+        if (existing === null) {
+          throw new NotFoundException('Partner not found');
+        }
+        if (!existing.isActive) {
+          throw new BadRequestException('Partner is not active');
+        }
+        throw new BadRequestException('Insufficient partner balance');
+      }
       const withdrawal = await tx.partnerWithdrawal.create({
         data: {
-          partnerId: partner.id,
+          partnerId: input.partnerId,
           amount: input.amount,
           status: WithdrawalStatus.PENDING,
           method: input.method,
@@ -341,14 +406,88 @@ export class PartnersService {
   }
 
   /**
-   * Toggles a partner's active status. Donor: `partner_core.toggle_partner_status`.
+   * Toggles a partner's active status, addressed by partner id — the Partners
+   * tab (`POST /admin/partners/:partnerId/toggle`).
+   * Donor: `partner_core.toggle_partner_status`.
    *
-   * Side-effect on `false → true`: retroactively builds the
-   * `PartnerReferral` chain from the partner's existing `Referral` graph,
-   * so users who were registered before activation also flow earnings
-   * back through this partner.
+   * Activation has no referral-graph side-effect; see `applyActiveTransition`.
    */
   public async togglePartnerStatus(partnerId: string): Promise<PartnerInterface> {
+    return mapPartner(await this.applyActiveTransition(partnerId));
+  }
+
+  /**
+   * The same transition addressed by user id — the user-detail panel
+   * (`POST /admin/users/:telegramId/partner/toggle`).
+   *
+   * Returns the bare `Partner` row rather than a `PartnerInterface` because
+   * that is the response shape that endpoint has always had and the SPA is
+   * pinned to it. The row is stripped rather than re-read so that both
+   * surfaces still issue exactly one update.
+   */
+  public async togglePartnerStatusForUser(userId: string): Promise<Partner> {
+    const partner = await this.prismaService.partner.findUnique({
+      where: { userId },
+      select: { id: true },
+    });
+    if (partner === null) {
+      throw new NotFoundException('Partner not found');
+    }
+    return stripPartnerRelations(await this.applyActiveTransition(partner.id));
+  }
+
+  /**
+   * Creates a partner for `userId`, active from birth — the user-detail panel
+   * (`POST /admin/users/:telegramId/create-partner`). There is no Partners-tab
+   * equivalent; this is the only surface that mints a partner.
+   *
+   * A partner born active IS an activation, so this emits `PARTNER_ACTIVATED`
+   * with the same payload `applyActiveTransition` emits, on top of
+   * `PARTNER_CREATED`. Without it, "when did this partner start earning?" had
+   * two different answers depending on which screen the operator used.
+   */
+  public async createPartnerForUser(input: {
+    readonly userId: string;
+    readonly telegramId: string;
+  }): Promise<Partner> {
+    const existing = await this.prismaService.partner.findUnique({
+      where: { userId: input.userId },
+      select: { id: true },
+    });
+    if (existing !== null) {
+      throw new BadRequestException('Partner already exists for this user');
+    }
+    const partner = await this.prismaService.partner.create({
+      data: { userId: input.userId, isActive: true },
+    });
+    this.events.info(
+      EVENT_TYPES.PARTNER_CREATED,
+      'PARTNER',
+      `Partner created for user ${input.telegramId}`,
+      { userId: input.userId, partnerId: partner.id, telegramId: input.telegramId },
+    );
+    this.emitPartnerActivated(partner.id, input.userId);
+    return partner;
+  }
+
+  /**
+   * The single implementation of "an operator flipped a partner's active
+   * flag". Both surfaces that can do it go through here, so the audit trail
+   * cannot depend on which screen the operator happened to use — they used to
+   * disagree, and only the Partners tab left any trace at all.
+   *
+   * Activation deliberately does NOT touch the referral graph. Partner
+   * earnings count only from the moment of activation, so people the partner
+   * invited BEFORE that must never acquire a `PartnerReferral` edge — not
+   * retroactively, and not on their future payments either. A retroactive
+   * backfill used to run here and was removed for exactly that reason;
+   * re-adding any edge-building step here silently reopens it.
+   *
+   * Edges backfilled before the rule changed are left alone: they are paying
+   * today and they also feed `INVITED`-scoped trial eligibility, so
+   * going-forward behaviour and the historical data differ by design.
+   */
+  private async applyActiveTransition(partnerId: string): Promise<PartnerRecord> {
     const partner = await this.prismaService.partner.findUnique({
       where: { id: partnerId },
       include: PARTNER_INCLUDE,
@@ -363,50 +502,29 @@ export class PartnersService {
       include: PARTNER_INCLUDE,
     });
 
-    if (nextActive && !partner.isActive) {
-      try {
-        const result = await this.partnerEarningsService.backfillPartnerReferralChainForUser(
-          updated.userId,
-        );
-        this.events.info(
-          EVENT_TYPES.PARTNER_ACTIVATED,
-          'PARTNER',
-          result.attached > 0
-            ? `Partner activated; backfilled ${result.attached} referral edge(s) (considered ${result.considered})`
-            : 'Partner activated',
-          {
-            partnerId: updated.id,
-            userId: updated.userId,
-            attached: result.attached,
-            considered: result.considered,
-          },
-        );
-      } catch (error: unknown) {
-        // Swallow — toggle itself succeeded, backfill is opportunistic.
-        this.events.warn(
-          EVENT_TYPES.PARTNER_ACTIVATED,
-          'PARTNER',
-          `Partner activated; referral backfill failed`,
-          {
-            partnerId: updated.id,
-            userId: updated.userId,
-            error: error instanceof Error ? error.message : String(error),
-          },
-        );
-      }
-    } else if (!nextActive && partner.isActive) {
+    if (nextActive) {
+      this.emitPartnerActivated(updated.id, updated.userId);
+    } else {
       this.events.info(EVENT_TYPES.PARTNER_DEACTIVATED, 'PARTNER', 'Partner deactivated', {
         partnerId: updated.id,
         userId: updated.userId,
       });
     }
 
-    return mapPartner(updated);
+    return updated;
+  }
+
+  private emitPartnerActivated(partnerId: string, userId: string): void {
+    this.events.info(EVENT_TYPES.PARTNER_ACTIVATED, 'PARTNER', 'Partner activated', {
+      partnerId,
+      userId,
+    });
   }
 
   /**
    * Adjusts a partner's balance by a signed amount (positive = credit,
-   * negative = debit). Used by admins for manual corrections.
+   * negative = debit), addressed by partner id — the Partners tab
+   * (`POST /admin/partners/:partnerId/adjust-balance`).
    * Donor: `partner_core.adjust_partner_balance`.
    */
   public async adjustBalance(input: {
@@ -416,43 +534,144 @@ export class PartnersService {
     readonly currentAdmin: CurrentAdminInterface;
     readonly requestMetadata: RequestMetadataInterface;
   }): Promise<PartnerInterface> {
+    return mapPartner(
+      await this.applyBalanceAdjustment({ ...input, source: 'partners_tab' }),
+    );
+  }
+
+  /**
+   * The same adjustment addressed by user id — the user-detail panel
+   * (`POST /admin/users/:telegramId/partner/adjust-balance`).
+   *
+   * Returns the bare `Partner` row rather than a `PartnerInterface`, for the
+   * same reason `togglePartnerStatusForUser` does: that is the response shape
+   * the endpoint has always had and the SPA is pinned to it. The row is
+   * stripped rather than re-read so that both surfaces still issue exactly
+   * one update.
+   */
+  public async adjustBalanceForUser(input: {
+    readonly userId: string;
+    readonly amount: number;
+    readonly reason: string | null;
+    readonly currentAdmin: CurrentAdminInterface;
+    readonly requestMetadata: RequestMetadataInterface;
+  }): Promise<Partner> {
+    const partner = await this.prismaService.partner.findUnique({
+      where: { userId: input.userId },
+      select: { id: true },
+    });
+    if (partner === null) {
+      throw new NotFoundException('Partner not found');
+    }
+    return stripPartnerRelations(
+      await this.applyBalanceAdjustment({
+        partnerId: partner.id,
+        amount: input.amount,
+        reason: input.reason,
+        currentAdmin: input.currentAdmin,
+        requestMetadata: input.requestMetadata,
+        source: 'user_detail',
+      }),
+    );
+  }
+
+  /**
+   * The single implementation of "an operator moved a partner's balance".
+   * Both surfaces that can do it go through here, so the trail cannot depend
+   * on which screen was used — they used to disagree, and the user-detail
+   * copy recorded no amounts and emitted no system event at all.
+   *
+   * Read, write and audit row share ONE transaction. The user-detail copy did
+   * its read-then-update outside any transaction, so a failure between the
+   * balance write and the audit write moved money and left no trace of it.
+   *
+   * The balance write is RELATIVE and its below-zero floor rides in the
+   * `where` of that same statement: `balance >= -amount` is "the resulting
+   * balance must not be negative" rearranged so the only column left in it is
+   * the one the database is already locking. Postgres evaluates it against
+   * the row it locks rather than against a number this process read a moment
+   * earlier, so `count === 0` IS the refusal and no read-then-check window
+   * exists. This used to be an absolute `balance: newBalance` computed from
+   * an earlier read, which under the default READ COMMITTED isolation lost
+   * updates between two concurrent adjustments — both read 100, one wrote
+   * 150, the other re-evaluated its `WHERE` and overwrote with 50. The
+   * enclosing transaction never prevented that; it makes the write
+   * all-or-nothing, not serialisable. Same shape as `spendPoints` in
+   * `referral-points-exchange.service.ts`.
+   *
+   * The floor cannot block a credit: for a positive `amount` the predicate is
+   * `balance >= -amount`, a negative floor that every non-negative balance
+   * clears. It is `gte`, not `gt`, so an adjustment landing exactly on zero
+   * still passes — the same boundary the replaced `newBalance < 0` had.
+   *
+   * `previousBalance`/`newBalance` are taken AFTER the write. The update holds
+   * the row lock until this transaction commits, so nothing else can move the
+   * balance in between: the row read back is this adjustment's own result and
+   * `newBalance - amount` is by construction the value the increment started
+   * from. Reading beforehand would put the stale number back into the audit
+   * row after taking it out of the arithmetic.
+   */
+  private async applyBalanceAdjustment(input: {
+    readonly partnerId: string;
+    readonly amount: number;
+    readonly reason: string | null;
+    readonly currentAdmin: CurrentAdminInterface;
+    readonly requestMetadata: RequestMetadataInterface;
+    readonly source: PartnerBalanceAdjustmentSource;
+  }): Promise<PartnerRecord> {
     const result = await this.prismaService.$transaction(async (tx) => {
-      const partner = await tx.partner.findUnique({
-        where: { id: input.partnerId },
-        include: PARTNER_INCLUDE,
+      const written = await tx.partner.updateMany({
+        where: { id: input.partnerId, balance: { gte: -input.amount } },
+        data: { balance: { increment: input.amount } },
       });
-      if (partner === null) {
-        throw new NotFoundException('Partner not found');
-      }
-      const newBalance = partner.balance + input.amount;
-      if (newBalance < 0) {
+      if (written.count === 0) {
+        // Zero rows is either "no such partner" or "the floor refused it".
+        // Only this branch pays for telling the two apart; the path that
+        // succeeds never reads the balance before writing it.
+        const existing = await tx.partner.findUnique({
+          where: { id: input.partnerId },
+          select: { id: true },
+        });
+        if (existing === null) {
+          throw new NotFoundException('Partner not found');
+        }
         throw new BadRequestException(
           'Resulting balance would be negative',
         );
       }
-      const updated = await tx.partner.update({
-        where: { id: partner.id },
-        data: { balance: newBalance },
+      const updated = await tx.partner.findUnique({
+        where: { id: input.partnerId },
         include: PARTNER_INCLUDE,
       });
+      if (updated === null) {
+        // Unreachable: this transaction holds the lock on the row it has just
+        // written. Kept so the type stays honest without a non-null assertion.
+        throw new NotFoundException('Partner not found');
+      }
+      const newBalance = updated.balance;
+      const previousBalance = newBalance - input.amount;
       await tx.adminAuditLog.create({
         data: {
-          action: 'partner.balance.adjusted',
+          action: PARTNER_BALANCE_ADJUSTED_ACTION,
           ipAddress: input.requestMetadata.remoteAddress,
           userAgent: input.requestMetadata.userAgent,
           metadata: {
             requestId: input.requestMetadata.requestId,
-            partnerId: partner.id,
+            partnerId: updated.id,
+            source: input.source,
             adjustment: input.amount,
-            previousBalance: partner.balance,
+            previousBalance,
             newBalance,
             reason: input.reason,
           } as Prisma.InputJsonObject,
           adminUser: { connect: { id: input.currentAdmin.id } },
         },
       });
-      return { partnerSummary: mapPartner(updated), previousBalance: partner.balance, newBalance };
+      return { record: updated, previousBalance, newBalance };
     });
+    // Deliberately carries no `source`: the system event states the same fact
+    // whichever screen produced it, and the activation surfaces already pin
+    // their two events as identical.
     this.events.info(
       EVENT_TYPES.PARTNER_BALANCE_ADJUSTED,
       'PARTNER',
@@ -466,27 +685,92 @@ export class PartnersService {
         reason: input.reason,
       },
     );
-    return result.partnerSummary;
+    return result.record;
   }
 
+  /**
+   * The single implementation of "an operator resolved a pending withdrawal" —
+   * {@link approveWithdrawal} (`PENDING -> COMPLETED`) and
+   * {@link rejectWithdrawal} (`PENDING -> REJECTED`) differ only in
+   * `nextStatus`, the audit action and which money write runs.
+   *
+   * The STATUS TRANSITION is the guard, and it is one statement: the from-state
+   * `PENDING` rides in the `where` of the update that writes the to-state, so
+   * exactly one caller can move a given withdrawal out of `PENDING` and
+   * `count === 0` means somebody else already did. This used to be a
+   * `findUnique` followed by `if (withdrawal.status !== PENDING)` in JS, with
+   * the new status written at the END of the transaction. Two approvals of one
+   * withdrawal both read `PENDING`, both passed, and both incremented
+   * `totalWithdrawn` — one payout counted twice in every figure derived from
+   * it. Two rejections were worse: both credited `balance`, minting an amount
+   * that was only ever debited once. {@link bulkApproveWithdrawals} makes the
+   * collision ordinary rather than theoretical — a long batch invites the
+   * second click.
+   *
+   * ORDER MATTERS. The transition runs BEFORE either money write, so the claim
+   * is staked before anything is paid: a transaction that loses the race
+   * refuses without having moved money, rather than relying on the rollback to
+   * take it back. `amount` and `partnerId` are then read back from the row
+   * this transaction has just written and still holds the lock on, so the
+   * figures the money writes and the audit row use are this transition's own
+   * result — the same reasoning as the post-write read-back in
+   * {@link applyBalanceAdjustment}.
+   *
+   * Both money writes are relative increments and need no floor of their own:
+   * `totalWithdrawn` only grows, and the rejection credit returns money that
+   * this same row's creation debited. What made them unsafe was never the
+   * arithmetic — it was being reachable twice.
+   *
+   * An absent `adminComment` is expressed by OMITTING the key, which leaves the
+   * column untouched; that is what `?? withdrawal.adminComment` used to say,
+   * without needing a read to say it.
+   */
   private async processWithdrawalWithBalanceMutation(
     input: ProcessPartnerWithdrawalInput & { readonly auditAction: string },
   ): Promise<PartnerWithdrawalInterface> {
     const result = await this.prismaService.$transaction(async (transactionClient) => {
-      const withdrawal = await transactionClient.partnerWithdrawal.findUnique({
-        where: { id: input.withdrawalId },
+      const transitioned = await transactionClient.partnerWithdrawal.updateMany({
+        where: {
+          id: input.withdrawalId,
+          status: WithdrawalStatus.PENDING,
+        },
+        data: {
+          status: input.nextStatus,
+          ...(input.dto.adminComment !== undefined
+            ? { adminComment: input.dto.adminComment }
+            : {}),
+          processedBy: input.currentAdmin.id,
+          processedAt: new Date(),
+        },
       });
-      if (withdrawal === null) {
-        throw new NotFoundException('Withdrawal not found');
-      }
-      if (withdrawal.status !== WithdrawalStatus.PENDING) {
+      if (transitioned.count === 0) {
+        // Zero rows is either "no such withdrawal" or "somebody else already
+        // moved it out of PENDING". Only this branch pays for telling the two
+        // apart; the path that succeeds never reads the row beforehand.
+        const existing = await transactionClient.partnerWithdrawal.findUnique({
+          where: { id: input.withdrawalId },
+          select: { id: true },
+        });
+        if (existing === null) {
+          throw new NotFoundException('Withdrawal not found');
+        }
         throw new BadRequestException(
           'Only pending withdrawals can be processed',
         );
       }
+      const updated = await transactionClient.partnerWithdrawal.findUnique({
+        where: { id: input.withdrawalId },
+        include: WITHDRAWAL_PARTNER_INCLUDE,
+      });
+      if (updated === null) {
+        // Unreachable: this transaction holds the lock on the row it has just
+        // transitioned. Kept so the type stays honest without a non-null
+        // assertion.
+        throw new NotFoundException('Withdrawal not found');
+      }
       if (input.nextStatus === WithdrawalStatus.COMPLETED) {
         const partner = await transactionClient.partner.findUnique({
-          where: { id: withdrawal.partnerId },
+          where: { id: updated.partnerId },
         });
         if (partner === null) {
           throw new NotFoundException('Partner not found');
@@ -496,29 +780,19 @@ export class PartnersService {
         await transactionClient.partner.update({
           where: { id: partner.id },
           data: {
-            totalWithdrawn: { increment: withdrawal.amount },
+            totalWithdrawn: { increment: updated.amount },
           },
         });
       } else if (input.nextStatus === WithdrawalStatus.REJECTED) {
         // On reject: restore the amount that was deducted at request time
         // back to the partner's balance (altshop parity).
         await transactionClient.partner.update({
-          where: { id: withdrawal.partnerId },
+          where: { id: updated.partnerId },
           data: {
-            balance: { increment: withdrawal.amount },
+            balance: { increment: updated.amount },
           },
         });
       }
-      const updated = await transactionClient.partnerWithdrawal.update({
-        where: { id: withdrawal.id },
-        data: {
-          status: input.nextStatus,
-          adminComment: input.dto.adminComment ?? withdrawal.adminComment,
-          processedBy: input.currentAdmin.id,
-          processedAt: new Date(),
-        },
-        include: WITHDRAWAL_PARTNER_INCLUDE,
-      });
       await transactionClient.adminAuditLog.create({
         data: {
           action: input.auditAction,
@@ -591,9 +865,22 @@ function mapPartner(record: PartnerRecord): PartnerInterface {
     level1FixedAmount: record.level1FixedAmount,
     level2FixedAmount: record.level2FixedAmount,
     level3FixedAmount: record.level3FixedAmount,
+    level1AccrualStrategy: record.level1AccrualStrategy,
+    level2AccrualStrategy: record.level2AccrualStrategy,
+    level3AccrualStrategy: record.level3AccrualStrategy,
     createdAt: record.createdAt.toISOString(),
     updatedAt: record.updatedAt.toISOString(),
   };
+}
+
+/**
+ * Drops the relations `PARTNER_INCLUDE` pulls in, leaving the plain `Partner`
+ * columns. Used by the user-detail toggle, whose response shape predates
+ * `PartnerInterface` and must not grow fields.
+ */
+function stripPartnerRelations(record: PartnerRecord): Partner {
+  const { user: _user, _count: _referralCount, ...partner } = record;
+  return partner;
 }
 
 function decimalToString(value: { toString(): string } | null): string | null {

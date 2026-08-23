@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 
 /**
  * Short-lived signed token for the unauthenticated backup-download endpoint.
@@ -9,7 +9,12 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
  * no JWT, no shared mutable secret beyond the server crypt key.
  *
  * Token format (base64url): `${recordId}.${expMs}.${hmac}` where
- * `hmac = HMAC_SHA256(secret, "${recordId}.${expMs}")`.
+ * `hmac = HMAC_SHA256(derivedKey, "${recordId}.${expMs}")`.
+ *
+ * Single use is enforced by the CONTROLLER, not here: replay protection needs
+ * shared state (Redis) and this module has to stay a pure function so it can be
+ * reasoned about — and tested — without one. See
+ * `InternalBackupDownloadController`.
  */
 
 function base64url(input: Buffer | string): string {
@@ -20,8 +25,37 @@ function base64url(input: Buffer | string): string {
     .replace(/=+$/, '');
 }
 
+/**
+ * Domain-separated HMAC key, matching every other cipher in this tree
+ * (`ai-secret-cipher.ts`, `payment-gateway-secret-cipher.ts`,
+ * `secret-cipher.ts`, `backup-provenance.util.ts`): the master key is never
+ * used raw, so a signature produced for one purpose can never be replayed
+ * against another that happens to sign a colliding string.
+ *
+ * Changing this invalidates tokens already minted — which costs nothing real.
+ * A token lives 10 minutes and is minted, handed to reiwa and redeemed within
+ * seconds; the only tokens a deploy can strand are ones whose relay was
+ * already interrupted by the same restart, and `backup.deliver-telegram`
+ * retries with a freshly-minted token (`attempts: 3`). Nothing outside this
+ * process ever computes the signature — rezeis signs, reiwa only carries the
+ * string — so there is no second implementation to keep in step.
+ */
+function deriveKey(secret: string): Buffer {
+  return createHash('sha256').update(`rezeis-admin:backup-download:${secret}`).digest();
+}
+
 function hmacOf(secret: string, payload: string): string {
-  return base64url(createHmac('sha256', secret).update(payload).digest());
+  return base64url(createHmac('sha256', deriveKey(secret)).update(payload).digest());
+}
+
+/**
+ * Stable, non-reversible id for a token, safe to use as a Redis key.
+ *
+ * The raw token is a bearer credential; putting it in a cache key would leave
+ * it in `MONITOR` output, in slow-log entries and in any keyspace dump.
+ */
+export function backupDownloadTokenFingerprint(token: string): string {
+  return createHash('sha256').update(token).digest('hex');
 }
 
 export function signBackupDownloadToken(

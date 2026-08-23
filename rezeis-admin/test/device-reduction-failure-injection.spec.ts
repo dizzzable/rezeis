@@ -49,6 +49,11 @@ function build(plan: Record<string, unknown>, listQueue: unknown[]) {
         remnawavePanelUsername: 'rz_alice_sub',
         status: 'ACTIVE',
       }),
+      // A SIBLING lookup: `loadGuard` asks, on every pass, whether a second
+      // non-deleted subscription points at the same panel profile. `null` is
+      // "no twin", the ordinary case these tests are about; the shared-profile
+      // case is driven explicitly in drs-device-reduction-invariants.spec.ts.
+      findFirst: async () => null,
     },
     entitlementIncident: { upsert: async () => ({ id: 'inc' }) },
   };

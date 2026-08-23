@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { screen } from '@testing-library/react'
+import { act, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 
 import { usePermissionStore, type RbacAction } from '@/features/rbac'
@@ -158,6 +158,260 @@ describe('ConfigPortabilityPage import summary', () => {
     expect(screen.getByText(/checked against the manifest/)).toBeInTheDocument()
   })
 })
+
+/**
+ * Exporting webhook signing secrets
+ * ─────────────────────────────────
+ * The API kept a deliberate opt-in for the one case that needs live secrets —
+ * promoting a config to another deployment — and redacts them otherwise
+ * (`admin-config-portability.controller.ts:79`, `config-export.service.ts:124`).
+ * The panel never sent it. `WebhookSubscription.secret` is a non-nullable
+ * `String` with no default, so a webhook row exported without it cannot be
+ * CREATED on the destination: `upsertById` takes the `create` arm, Prisma
+ * refuses, and the operator's migration loses the whole `webhooks` section.
+ *
+ * These tests therefore assert on the URL that LEAVES the panel, not on
+ * whether `exportConfig` accepts an argument — a capability with no caller is
+ * exactly the shape of the bug being closed, and a test that only calls the
+ * function directly would reproduce it.
+ *
+ * The pair is deliberate. Asserting only the opt-in direction still passes if
+ * the flag is sent unconditionally, which is the dangerous failure: it turns
+ * every routine export — including one taken just to diff two environments —
+ * back into a file full of live credentials, which is the default the API was
+ * hardened to remove.
+ */
+describe('ConfigPortabilityPage webhook secret export opt-in', () => {
+  beforeEach(() => {
+    usePermissionStore.getState().reset()
+    vi.restoreAllMocks()
+    // jsdom implements neither; the download is a side effect of the same
+    // click, and without these the click throws before anything is asserted.
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      writable: true,
+      value: vi.fn(() => 'blob:stub'),
+    })
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      writable: true,
+      value: vi.fn(),
+    })
+  })
+
+  it('omits the flag when the operator does not opt in', async () => {
+    const getSpy = mockExport()
+    await renderExporter()
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Download JSON' }))
+
+    const url = await findExportRequestUrl(getSpy)
+    expect(url).not.toContain('includeWebhookSecrets')
+  })
+
+  it('sends the flag once the operator opts in', async () => {
+    const getSpy = mockExport()
+    await renderExporter()
+
+    await userEvent.click(screen.getByLabelText('Include webhook signing secrets'))
+    await userEvent.click(await screen.findByRole('button', { name: 'Download JSON' }))
+
+    const url = await findExportRequestUrl(getSpy)
+    expect(url).toContain('includeWebhookSecrets=true')
+  })
+
+  it('keeps the flag off the request after the operator turns the opt-in back off', async () => {
+    const getSpy = mockExport()
+    await renderExporter()
+
+    const toggle = screen.getByLabelText('Include webhook signing secrets')
+    await userEvent.click(toggle)
+    await userEvent.click(toggle)
+    await userEvent.click(await screen.findByRole('button', { name: 'Download JSON' }))
+
+    const url = await findExportRequestUrl(getSpy)
+    expect(url).not.toContain('includeWebhookSecrets')
+  })
+
+  it('still carries the selected sections alongside the flag', async () => {
+    const getSpy = mockExport()
+    await renderExporter()
+
+    // One section only, so the request is a genuine subset export rather than
+    // the "all sections" shape that sends no `sections` parameter at all.
+    await userEvent.click(screen.getByRole('checkbox', { name: 'webhooks' }))
+    await userEvent.click(screen.getByLabelText('Include webhook signing secrets'))
+    await userEvent.click(await screen.findByRole('button', { name: 'Download JSON' }))
+
+    const url = await findExportRequestUrl(getSpy)
+    expect(url).toContain('sections=webhooks')
+    expect(url).toContain('includeWebhookSecrets=true')
+  })
+
+  it('starts with the opt-in off and says why it exists before it is used', async () => {
+    mockExport()
+    await renderExporter()
+
+    expect(screen.getByLabelText('Include webhook signing secrets')).not.toBeChecked()
+    expect(screen.getByText(/migrating to another deployment/)).toBeInTheDocument()
+    // The consequence of arming it is stated only once it IS armed, so the
+    // routine exporter is not trained to scroll past a standing warning.
+    expect(screen.queryByText(/live signing secrets in plain text/)).not.toBeInTheDocument()
+
+    await userEvent.click(screen.getByLabelText('Include webhook signing secrets'))
+
+    expect(screen.getByText(/live signing secrets in plain text/)).toBeInTheDocument()
+  })
+
+  it('drops the flag when the grant is withdrawn after the operator armed it', async () => {
+    // The toggle is state, and state outlives the control that set it. An
+    // admin who arms the opt-in and then has `webhooks:edit` taken away
+    // (role edited, permissions refetched) must not still be able to pull
+    // live secrets with a click on a button that is still on screen.
+    const getSpy = mockExport()
+    await renderExporter()
+
+    await userEvent.click(screen.getByLabelText('Include webhook signing secrets'))
+    // The store lives outside React, so the revocation has to be flushed
+    // before the assertions read the tree.
+    act(() => {
+      grantPermissions([
+        { resource: 'config_portability', action: 'view' },
+        { resource: 'config_portability', action: 'export' },
+      ])
+    })
+
+    expect(screen.queryByLabelText('Include webhook signing secrets')).not.toBeInTheDocument()
+    await userEvent.click(await screen.findByRole('button', { name: 'Download JSON' }))
+
+    const url = await findExportRequestUrl(getSpy)
+    expect(url).not.toContain('includeWebhookSecrets')
+  })
+
+  it('withholds the opt-in from an exporter who may not read a live secret', async () => {
+    const getSpy = mockExport()
+    // `config_portability:export` but no `webhooks:edit`. The webhooks screen
+    // never shows this admin a secret value (list responses carry
+    // `secret: null`), so the export must not become the way around that.
+    await renderExporter([
+      { resource: 'config_portability', action: 'view' },
+      { resource: 'config_portability', action: 'export' },
+    ])
+
+    expect(await screen.findByRole('button', { name: 'Download JSON' })).toBeInTheDocument()
+    expect(screen.queryByLabelText('Include webhook signing secrets')).not.toBeInTheDocument()
+    expect(screen.getByText(/needs webhooks:edit on top of config_portability:export/)).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Download JSON' }))
+
+    const url = await findExportRequestUrl(getSpy)
+    expect(url).not.toContain('includeWebhookSecrets')
+  })
+})
+
+/**
+ * The same gap, met from the destination side: a file whose webhook rows were
+ * redacted is told BEFORE the run, not discovered from a `failed` row after
+ * it. A warning and not a block on purpose — a subscription that already
+ * exists here imports fine without its secret, since the update arm keeps the
+ * destination's own.
+ */
+describe('ConfigPortabilityPage import-time webhook secret warning', () => {
+  beforeEach(() => {
+    usePermissionStore.getState().reset()
+    vi.restoreAllMocks()
+  })
+
+  it('warns when a picked file carries a webhook with no secret', async () => {
+    vi.spyOn(api, 'get').mockResolvedValue({ data: { sections: ['roles', 'webhooks'] } })
+    await pickImportFile({ webhooks: [{ id: 'wh-1', name: 'ops', url: 'https://x.test' }] })
+
+    expect(
+      await screen.findByText(/1 webhook in this file has no signing secret/),
+    ).toBeInTheDocument()
+    // Still importable: the file may be a re-import over existing rows.
+    expect(screen.getByRole('button', { name: 'Run preview' })).toBeEnabled()
+  })
+
+  it('stays quiet when every webhook row carries its secret', async () => {
+    vi.spyOn(api, 'get').mockResolvedValue({ data: { sections: ['roles', 'webhooks'] } })
+    await pickImportFile({
+      webhooks: [{ id: 'wh-1', name: 'ops', url: 'https://x.test', secret: 'deadbeef' }],
+    })
+
+    expect(await screen.findByText(/Loaded config\.json/)).toBeInTheDocument()
+    expect(screen.queryByText(/no signing secret/)).not.toBeInTheDocument()
+  })
+
+  it('stays quiet for a file with no webhooks section at all', async () => {
+    vi.spyOn(api, 'get').mockResolvedValue({ data: { sections: ['roles', 'webhooks'] } })
+    await pickImportFile({ roles: [{ id: 'r-1', name: 'support' }] })
+
+    expect(await screen.findByText(/Loaded config\.json/)).toBeInTheDocument()
+    expect(screen.queryByText(/no signing secret/)).not.toBeInTheDocument()
+  })
+})
+
+/** Spy on `api.get`, answering the sections probe and the export separately. */
+function mockExport() {
+  const getSpy = vi.spyOn(api, 'get')
+  const implementation = (url: string) => {
+    if (url.startsWith('/admin/config/export')) {
+      return Promise.resolve({
+        data: { version: 1, exportedAt: '', source: 'rezeis-admin', sections: {} },
+      })
+    }
+    return Promise.resolve({ data: { sections: ['roles', 'webhooks'] } })
+  }
+  getSpy.mockImplementation(implementation as never)
+  return getSpy
+}
+
+/** The URL the panel actually put on the wire for the export. */
+async function findExportRequestUrl(
+  getSpy: ReturnType<typeof mockExport>,
+): Promise<string> {
+  let url: string | undefined
+  await waitFor(() => {
+    url = getSpy.mock.calls
+      .map((call) => call[0])
+      .filter((value): value is string => typeof value === 'string')
+      .find((value) => value.startsWith('/admin/config/export'))
+    expect(url).toBeDefined()
+  })
+  return url as string
+}
+
+async function renderExporter(
+  permissions: ReadonlyArray<{ resource: string; action: RbacAction }> = [
+    { resource: 'config_portability', action: 'view' },
+    { resource: 'config_portability', action: 'export' },
+    { resource: 'webhooks', action: 'edit' },
+  ],
+): Promise<void> {
+  grantPermissions(permissions)
+  renderWithProviders(<ConfigPortabilityPage />)
+  // Wait for the section list, so the export request is the only outstanding
+  // `api.get` call the assertions have to reason about.
+  await screen.findByText('webhooks')
+}
+
+/** Loads a payload through the real file control. */
+async function pickImportFile(sections: Record<string, unknown[]>): Promise<void> {
+  grantPermissions([
+    { resource: 'config_portability', action: 'view' },
+    { resource: 'config_portability', action: 'import' },
+  ])
+  renderWithProviders(<ConfigPortabilityPage />)
+
+  const fileInput = await screen.findByLabelText('JSON file')
+  await userEvent.upload(
+    fileInput,
+    new File([JSON.stringify({ version: 1, sections })], 'config.json', {
+      type: 'application/json',
+    }),
+  )
+}
 
 function mockImport(
   summaries: readonly ConfigImportSummary[],

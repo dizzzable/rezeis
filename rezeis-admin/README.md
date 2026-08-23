@@ -18,14 +18,19 @@ Rezeis Admin — NestJS backend + React/Vite frontend for the admin panel.
 
 ## Remnawave compatibility
 
-`rezeis-admin` talks to a Remnawave panel through the `@remnawave/backend-contract` package. **The contract version must track the live panel.**
+`rezeis-admin` talks to a Remnawave panel over plain HTTP and decodes the answers itself. **No `@remnawave/*` package runs at runtime, and there is no contract version to keep in step with the live panel.**
 
-| Live panel       | `@remnawave/backend-contract` | Notes                                                              |
-|------------------|-------------------------------|--------------------------------------------------------------------|
-| `2.7.x`          | `~2.7.3` (current pin)        | No `/api/system/recap`, `/api/system/bandwidth`, `/api/hwid/stats` |
-| `2.8.x`          | `~2.8.x`                      | Adds the recap/bandwidth/hwid surface                              |
+That is deliberate, and it is the fix for a real outage. The adapter used to `safeParse` live responses with `GetExternalSquadsCommand` from `@remnawave/backend-contract@2.7.3`, a production dependency. That schema requires `responseHeaders` on every external-squad row; panel 3.x renamed the field to `responseHeadersAdd` + `responseHeadersRemove`, so the parse failed deterministically and the squad read threw `ServiceUnavailableException` against a perfectly healthy 3.x panel — every time it had at least one external squad. A vendor schema describes ONE era. rezeis serves every era its operators are still running, and they upgrade on their own schedule, so pinning forward would simply have moved the outage onto the installations still on 2.x.
 
-If you upgrade the live panel, bump the contract dep accordingly and run `npm install`. The Remnawave page in the admin SPA degrades gracefully when an endpoint is missing (shows a "metric is unavailable" notice instead of crashing).
+| Live panel | Runtime decoding                                     | Notes                                                              |
+|------------|------------------------------------------------------|--------------------------------------------------------------------|
+| `2.7.x`    | tolerant local decoders, no vendor package            | No `/api/system/recap`, `/api/system/bandwidth`, `/api/hwid/stats` |
+| `2.8.x`    | same                                                  | Adds the recap/bandwidth/hwid surface                              |
+| `3.x`      | same                                                  | Numeric user ids, `/api/connections/*` replaces `/api/ip-control/*` |
+
+Upgrading the live panel therefore needs no dependency change here. The Remnawave page in the admin SPA degrades gracefully when an endpoint is missing (shows a "metric is unavailable" notice instead of crashing).
+
+The vendor contracts remain **devDependencies** and are the CI oracle for both eras — `@remnawave/backend-contract` (2.7.3), `@remnawave/contract-v28` (2.8.35), `@remnawave/contract-v3` (3.2.3) and `@remnawave/contract-v34` (3.4.2). The guard specs execute them so a drifting route or row shape fails a test at build time instead of a live panel at run time. They are AGPL-3.0-only, `Dockerfile` stage 1 runs `npm ci --omit=dev`, and none of them ships in the image. Keep it that way: `npm ls --omit=dev @remnawave/backend-contract` must print `(empty)`.
 
 ## Quick start
 

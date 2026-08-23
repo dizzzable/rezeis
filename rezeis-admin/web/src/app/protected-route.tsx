@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import { Navigate, Outlet, useLocation } from "react-router";
 import { useTranslation } from "react-i18next";
 import { useAuth } from "@/features/auth/auth-provider";
-import { translateErrorMessage } from "@/lib/translate-error";
+import { translateApiError } from "@/lib/translate-error";
 import { captureReturnTo } from "@/lib/return-to";
 
 /**
@@ -70,7 +70,16 @@ export default function ProtectedRoute() {
           <p className="mt-2 text-sm leading-6 text-muted-foreground">
             {t("auth.sessionCheckFailedDescription")}
           </p>
-          <p className="mt-4 text-sm text-destructive">{translateErrorMessage(t, sessionError.message)}</p>
+          {/*
+            The rejection, not its `.message`. `sessionError` is whatever
+            `/admin/auth/me` or the permission probe threw, so `.message` is
+            transport prose -- "Request failed with status code 403",
+            "Network Error" -- which is English in every locale and says nothing
+            an operator can act on. `translateApiError` reads the server's own
+            sentence off the response body and localizes THAT, falling back to
+            the dictionary's generic when the request never reached the server.
+          */}
+          <p className="mt-4 text-sm text-destructive">{translateApiError(t, sessionError)}</p>
           <button
             type="button"
             className="mt-6 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"

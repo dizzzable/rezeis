@@ -51,7 +51,7 @@ function deleteJobPrismaMock(attempts: number, onUpdate: (input: unknown) => voi
       updateMany: async () => ({ count: 1 }),
       update: async (input: unknown) => { onUpdate(input); },
     },
-    subscription: { update: async () => undefined },
+    subscription: { findMany: async () => [], update: async () => undefined },
     $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
       // The advisory lock the exclusivity guard takes before the row lock.
       $executeRaw: async () => 1,
@@ -827,9 +827,13 @@ describe('ProfileSyncProcessor', () => {
     await processor.process({ data: { syncJobId: 'sync-job-delete-stale' } } as never);
     assert.equal(deletedTargets.length, 1);
     // Asked about the recorded name, not about the row's current one.
-    assert.equal(
-      (queries[0] as { where: { remnawavePanelUsername: string } }).where.remnawavePanelUsername,
-      'rz_bob_sub',
+    // The username is now one arm of an OR — the claimant check also asks the
+    // two immutable angles, because a missing username used to mean "nobody
+    // else holds this profile" and that is what let a delete destroy a live one.
+    const where = (queries[0] as { where: { OR?: ReadonlyArray<Record<string, unknown>> } }).where;
+    assert.ok(
+      (where.OR ?? []).some((arm) => arm['remnawavePanelUsername'] === 'rz_bob_sub'),
+      "the recorded name is no longer among the angles the claimant check asks about",
     );
   });
 
@@ -861,6 +865,7 @@ describe('ProfileSyncProcessor', () => {
           update: async (input: unknown) => { subscriptionUpdates.push(input); },
         },
         subscription: {
+          findMany: async () => [],
           // ZERO, faithfully: the row points at `rem-user-new` and the fence
           // names `rem-user-old`, so nothing matches — which is the CORRECT
           // outcome here and must not be reported as a divergence.
@@ -929,6 +934,7 @@ describe('ProfileSyncProcessor', () => {
           update: async () => undefined,
         },
         subscription: {
+          findMany: async () => [],
           updateMany: async (input: unknown) => { subscriptionUpdates.push(input); return { count: 1 }; },
         },
         $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
@@ -1011,6 +1017,7 @@ describe('ProfileSyncProcessor', () => {
           update: async () => assert.fail('failure state must use guarded updateMany'),
         },
         subscription: {
+          findMany: async () => [],
           update: async (input: unknown) => { subscriptionUpdates.push(input); },
         },
         $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
@@ -1136,6 +1143,7 @@ describe('ProfileSyncProcessor', () => {
     const errorEvents: unknown[] = [];
     const processor = new ProfileSyncProcessor(
       {
+        subscription: { findMany: async () => [] },
         profileSyncJob: {
           findUnique: async () => ({
             id: 'sync-job-drift', action: SyncAction.DELETE, status: SyncJobStatus.PENDING,
@@ -1403,6 +1411,7 @@ describe('ProfileSyncProcessor', () => {
     const failureWrites: unknown[] = [];
     const processor = new ProfileSyncProcessor(
       {
+        subscription: { findMany: async () => [] },
         profileSyncJob: {
           findUnique: async () => ({
             id: 'sync-job-late-failure', action: SyncAction.DELETE,
@@ -1490,6 +1499,7 @@ describe('ProfileSyncProcessor', () => {
     const updates: unknown[] = [];
     const processor = new ProfileSyncProcessor(
       {
+        subscription: { findMany: async () => [] },
         profileSyncJob: {
           findUnique: async () => ({
             id: 'sync-job-failure-lease-fence', action: SyncAction.DELETE, status: SyncJobStatus.PENDING,
@@ -1979,6 +1989,7 @@ describe('ProfileSyncProcessor', () => {
     const errorEvents: unknown[] = [];
     const processor = new ProfileSyncProcessor(
       {
+        subscription: { findMany: async () => [] },
         profileSyncJob: {
           findUnique: async () => ({
             id: 'sync-job-hexy', action: SyncAction.DELETE, status: SyncJobStatus.PENDING,

@@ -201,8 +201,29 @@ describe('PaymentSubscriptionMutationService — combined renewal', () => {
   });
 
   it('fulfills a paid unlimited snapshot without consulting mutable catalog state', async () => {
+    // The row carries the snapshot a never-individually-adjusted subscriber has:
+    // columns equal to what the plan gave them. That is what makes the four
+    // limit columns INHERITED, so the paid draft's values are applied to them.
+    // Without a snapshot the renewal preserves instead (see
+    // `resolveInheritedPlanLimitUpdate`), and this test would assert nothing
+    // about where the limits came from.
     const env = createEnv({
-      subs: [{ id: 'sub-unlimited', expiresAt: new Date(Date.now() + 10 * DAY_MS), remnawaveId: 'rw' }],
+      subs: [{
+        id: 'sub-unlimited',
+        expiresAt: new Date(Date.now() + 10 * DAY_MS),
+        remnawaveId: 'rw',
+        trafficLimit: 1024,
+        deviceLimit: 1,
+        internalSquads: [],
+        externalSquad: null,
+        planSnapshot: {
+          id: 'plan-unlimited',
+          trafficLimit: 1024,
+          deviceLimit: 1,
+          internalSquads: [],
+          externalSquad: null,
+        },
+      }],
       items: [{
         id: 'it-unlimited',
         subscriptionId: 'sub-unlimited',
@@ -585,6 +606,12 @@ function createEnv(input: {
             return next;
           },
         },
+        // No projection row: this subscription holds no add-on, so the recorded
+        // contribution the renewal subtracts before comparing a column with the
+        // stored snapshot is zero. Reading it is not optional — the renewal asks
+        // every time, because a hard zero where a row might exist is a second,
+        // divergent derivation of the baseline.
+        subscriptionEffectiveProjection: { findUnique: async () => null },
         profileSyncJob: {
           create: async ({ data }: { data: { subscriptionId: string } }) => ({
             id: `job-${jobSeq++}`,

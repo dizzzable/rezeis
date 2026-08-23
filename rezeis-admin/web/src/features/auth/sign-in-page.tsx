@@ -9,6 +9,7 @@ import { z } from 'zod'
 import { Loader2 } from 'lucide-react'
 
 import { getErrorMessage } from '@/lib/http-errors'
+import { translateServerMessage, translateTransportFailure } from '@/lib/translate-error'
 import { RezeisLogo } from '@/components/branding/rezeis-logo'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -154,16 +155,51 @@ function LoginForm() {
       navigate(consumeReturnTo() ?? '/', { replace: true })
     },
     onError: (err: unknown) => {
-      const responseData = (err as { response?: { data?: { code?: string; message?: string } } }).response?.data
+      const responseData = (err as { response?: { data?: { code?: string; message?: unknown } } })
+        .response?.data
       if (responseData?.code === 'totp_required') {
         setTotpRequired(true)
         setError(null)
         return
       }
       if (totpRequired) {
-        setError(t('signInPage.totp.invalidCode'))
+        // A backend that never answered is not a rejected code, and saying
+        // "invalid code" here is the worse half of the misdirection the
+        // password branch had: the operator's natural next move is to wait for
+        // the authenticator to roll and type a fresh code, which fails exactly
+        // as often, for as long as the backend stays down.
+        //
+        // A refusal that CARRIED a response is untouched by this rung -
+        // `translateTransportFailure` answers null for anything holding a
+        // `response` - so a genuinely rejected code still reads as one.
+        setError(translateTransportFailure(t, err) ?? t('signInPage.totp.invalidCode'))
       } else {
-        setError(responseData?.message ?? t('signInPage.login.genericError'))
+        // The server's own sentence, localized through the one shared lookup
+        // (`lib/translate-error.ts`), which both dictionaries have carried copy
+        // for since they were written. A sentence with no entry keeps the
+        // server's words rather than collapsing into the generic below: the
+        // rate-limit refusal is the case that matters, and reporting it as
+        // "wrong password" sends the operator off to retype credentials that
+        // were never the problem. The generic is only for a response that said
+        // nothing at all.
+        //
+        // Three rungs, and the ORDER is the whole safety property. The body
+        // comes first, so a refusal that named a reason keeps saying it. The
+        // transport copy comes second and only fires when there was no
+        // response at all: "cannot reach the server" sends the operator to the
+        // backend and its proxy, and showing it for a 502 that DID answer with
+        // an empty body would send them to the wrong layer entirely. The
+        // generic stays last, for a server that answered and said nothing.
+        //
+        // Without the middle rung a dead backend read as "sign-in failed",
+        // which an operator can only act on by retyping a password that was
+        // never wrong - at the one moment they are least calm, because the
+        // panel will not let them in.
+        setError(
+          translateServerMessage(t, responseData?.message) ??
+            translateTransportFailure(t, err) ??
+            t('signInPage.login.genericError'),
+        )
       }
     },
   })

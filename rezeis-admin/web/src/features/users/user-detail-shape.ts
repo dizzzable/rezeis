@@ -18,7 +18,30 @@ export interface UserSubscription {
   readonly isTrial?: boolean
   readonly trafficLimit?: number | null
   readonly deviceLimit?: number | null
-  readonly expireAt?: string
+  /**
+   * Expiry, or UNLIMITED — and unlimited is spelled two different ways on the
+   * wire, which is why this is both optional AND nullable.
+   *
+   *   • `GET /admin/users/:telegramId` maps `expireAt: s.expiresAt?.toISOString()`
+   *     (`admin-user-management.controller.ts`). For an unlimited subscription
+   *     that is `undefined`, and `JSON.stringify` DROPS the key — so the field
+   *     arrives ABSENT, not null.
+   *   • `GET /admin/subscriptions` maps `?.toISOString() ?? null`, so the same
+   *     state arrives as an explicit `null`.
+   *
+   * One state, two spellings, and this file used to declare a third
+   * (`?: string`) that admitted neither out loud. Absent and null both mean
+   * "no expiry": `Subscription.expiresAt` is `DateTime?` and the backend reads
+   * `expiresAt: null` as the unlimited bucket.
+   *
+   * Every consumer here already guards on truthiness, so nothing renders
+   * `01.01.1970` off this shape the way the subscriptions list did. Two of
+   * them (`user-detail-panel.tsx`, the profile summary and the subscription
+   * card) still print an em dash for it, which says "we do not know" about a
+   * state we do know — worth a follow-up, but it is not the confident wrong
+   * date this type was widened to kill.
+   */
+  readonly expireAt?: string | null
   readonly createdAt?: string
   readonly configUrl?: string | null
   /**
@@ -31,6 +54,14 @@ export interface UserSubscription {
   readonly remnawaveProfileName?: string | null
   /** Raw description shown on the Remnawave profile (multi-line, includes our `reiwa_id:` marker). */
   readonly remnawaveProfileDescription?: string | null
+  readonly remnawaveSyncState?: 'UNLINKED' | 'PENDING' | 'SYNCED' | 'MISSING' | 'UNAVAILABLE' | 'FAILED'
+  readonly remnawaveSyncJob?: {
+    readonly status: string
+    readonly action: string
+    readonly attempts: number
+    readonly lastError: string | null
+    readonly updatedAt: string
+  } | null
   readonly planSnapshot?: {
     readonly planId?: string | null
     readonly name?: string | null

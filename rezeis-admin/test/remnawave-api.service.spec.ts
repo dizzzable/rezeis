@@ -339,9 +339,15 @@ describe('RemnawaveApiService', () => {
       },
     );
 
+    // The era the method used to read for itself is now handed in: the
+    // destructive calls take ONE observation so a guard and the address it
+    // guards cannot be built from two different readings. `getPanelShape()` is
+    // cached, so this is the same single probe the assertion below still
+    // filters out of `capturedRequests`.
     const result = await service.deletePanelUserDevice(
       '33333333-3333-4333-8333-333333333333',
       'hwid-to-delete',
+      await service.getPanelShape(),
     );
 
     assert.deepStrictEqual(capturedRequests.map(projectRequestContractShape), [
@@ -730,7 +736,7 @@ describe('RemnawaveApiService', () => {
     const service = axiosServiceFor({ status: 400 });
 
     await assert.rejects(
-      () => service.deletePanelUser('not-a-uuid'),
+      async () => service.deletePanelUser('not-a-uuid', await service.getPanelShape()),
       (err: unknown) => {
         assert.ok(err instanceof RemnawaveUpstreamRejectionError);
         assert.equal(err.upstreamStatus, 400);

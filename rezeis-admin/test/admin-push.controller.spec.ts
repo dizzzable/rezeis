@@ -24,28 +24,32 @@ const BASE = 'admin/push';
  * registering itself for web-push, and the admin sending themselves a test
  * notification. Three of the four handlers take `@CurrentAdmin()` and pass
  * `admin.id` to `WebPushService`; the subscription row is written with that id
- * (`subscribeAdmin`), the unsubscribe deletes on `{ adminId, endpoint }`
- * (`src/modules/push/services/web-push.service.ts:212-214`), and the test push
- * fans out only over `where: { adminId }` (`:233-235`). No handler accepts an
+ * (`subscribeAdmin`), `unsubscribeAdmin` deletes on
+ * `{ adminId, endpoint }`, and `sendToAdmin` fans out only over
+ * `where: { adminId }` — all three in
+ * `src/modules/push/services/web-push.service.ts`. No handler accepts an
  * admin id from the path, the query or the body — the two body shapes carry a
  * `subscription` blob and an `endpoint` string respectively.
  *
  * The fourth, `getPublicKey`, has no subject at all, and it is worth being
  * exact rather than filing it under "self-service" with the others: it returns
- * the deployment's VAPID **public** key (`web-push.service.ts:115-118` reads
- * `config.publicKey`; the private half is only ever read into `vapidDetails`
- * for signing, `:121-125`). A public key that every subscribing browser
- * receives anyway is not an object anyone can be denied access to, so there is
- * likewise nothing for RBAC to arbitrate — for a different reason from its
- * three neighbours, which is why it is said out loud here.
+ * the deployment's VAPID **public** key (`WebPushService.getPublicKey` returns
+ * `config.publicKey ?? ''`; the private half is only ever read by the private
+ * `resolveVapidDetails`, for signing). A public key that every subscribing
+ * browser receives anyway is not an object anyone can be denied access to, so
+ * there is likewise nothing for RBAC to arbitrate — for a different reason
+ * from its three neighbours, which is why it is said out loud here.
  *
  * SCOPE OF THIS CLAIM. This file states where the SUBJECT comes from. It does
- * not certify that every object these routes touch is owned by that subject:
- * `subscribeAdmin` upserts on `where: { endpoint }` alone, and `endpoint` is
- * globally `@unique` (`prisma/schema.prisma:2343`), so the update branch
- * re-points an existing row at the caller. That is a real cross-admin edge and
- * it has been reported separately; it is a service-layer scoping fix, not a
- * route-gating one, and a `@RequirePermission` here would not close it.
+ * not certify that every object these routes touch is owned by that subject.
+ * The one edge that used to live here is CLOSED: `subscribeAdmin` once ran
+ * `upsert({ where: { endpoint } })`, and because `endpoint` is globally
+ * `@unique` on `AdminWebPushSubscription`, its update branch re-pointed
+ * whichever row already held the endpoint at the caller. It now scopes the
+ * re-subscribe to `{ adminId, endpoint }` and answers 409 rather than
+ * re-pointing a row it does not own. That was a service-layer scoping fix, not
+ * a route-gating one — a `@RequirePermission` here would not have closed it,
+ * and does not guard it now.
  *
  * Pinned from both ends — guard list and per-route absence of the decorator —
  * because `RbacGuard` is not global (`src/app.module.ts:206,214` register only

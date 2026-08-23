@@ -1,6 +1,16 @@
 # Current Status
 
-Updated: 2026-05-10 — Full rebuild complete.
+Updated: 2026-08-23 — scope corrected against `git status`; Remnawave contract packages are dev-only.
+
+## Current Remnawave Status
+
+- Upstream PR: https://github.com/dizzzable/rezeis/pull/40
+- Baseline: Rezeis Admin `v0.9.7.17`
+- Target: Remnawave Backend `v3.3.2`
+- The Remnawave sync-state slice is one part of a much larger uncommitted working tree. It is NOT "six files": `git status --porcelain` in `rezeis` reports **over four hundred changed paths** — roughly 130 under `rezeis-admin/src/modules` spanning ~30 modules, ~145 under `rezeis-admin/web/src`, and ~90 new specs under `rezeis-admin/test`, plus `prisma/`, `scripts/` and docs. No exact count is quoted here on purpose: the tree is still moving. Run `git status --porcelain` yourself before quoting a scope from this file.
+- **Reiwa is NOT untouched** — `git status --porcelain` in `reiwa` shows changes there too, and one of them is a live cross-repo coupling: `internal-partner.controller.ts` now emits `referralPoints` (`User.points`) on the internal partner payload, and `reiwa/src/bot/pages/invite.ts` reads it. The reiwa side reads it as optional on purpose — an older panel sends nothing — so an old cabinet against a new panel degrades rather than breaks, but the two repos still ship together for that field.
+- Fork backend/web quality checks passed; the fork-only React Doctor failure was a base-branch mismatch and is not a finding in the changed frontend files when compared with `v0.9.7.17`.
+- Do not merge or deploy until upstream review and CI are complete.
 
 ---
 
@@ -17,7 +27,8 @@ Updated: 2026-05-10 — Full rebuild complete.
 | Redis | 7 |
 | BullMQ | 5.76.6 |
 | zod | 4.4.3 |
-| @remnawave/backend-contract | 2.8.1 |
+
+**No `@remnawave/*` package runs at runtime, and there is no contract version to keep in step with the live panel.** `grep -rn "@remnawave/" rezeis-admin/src/` returns no imports — only prose in comments. The four vendor contracts (`@remnawave/backend-contract` 2.7.3, `@remnawave/contract-v28` 2.8.35, `@remnawave/contract-v3` 3.2.3, `@remnawave/contract-v34` 3.4.2) are **devDependencies**: they are the CI oracle the guard specs execute, and `Dockerfile` stage 1 runs `npm ci --omit=dev` so none of them ships. Adding a runtime import re-creates a production outage — a vendor schema describes ONE panel era, so `safeParse` against it failed deterministically on healthy 3.x panels and threw `ServiceUnavailableException` on every squad read. See `rezeis-admin/README.md` § Remnawave compatibility for the full account.
 
 ### Frontend (rezeis-admin/web)
 | Technology | Version |
@@ -97,7 +108,7 @@ rezeis/
 ### Remnawave Integration
 | Module | Description |
 |---|---|
-| remnawave | Full typed API via @remnawave/backend-contract (15+ endpoints) |
+| remnawave | Plain HTTP + local tolerant decoders — no runtime contract package (15+ endpoints, every panel era) |
 
 ### Advanced Features (from remnawave panel + STEALTHNET)
 | Module | Description |

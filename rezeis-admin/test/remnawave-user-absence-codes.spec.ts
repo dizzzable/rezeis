@@ -388,7 +388,10 @@ describe('the code depends on the METHOD, and all of those readings are correct'
       it(`${era.label}: DELETE answered ${shape} completes the job`, async () => {
         const { service: api } = panelOn(era.version, () => httpError(404, body));
 
-        assert.deepEqual(await api.deletePanelUser(identity()), { isDeleted: true });
+        assert.deepEqual(
+          await api.deletePanelUser(identity(), await api.getPanelShape()),
+          { isDeleted: true },
+        );
       });
     }
 
@@ -406,7 +409,9 @@ describe('the code depends on the METHOD, and all of those readings are correct'
     it(`${era.label}: DELETE answered a bare 404 is retried, never reported as deleted`, async () => {
       const { service: api } = panelOn(era.version, () => httpError(404, undefined));
 
-      const raised = await api.deletePanelUser(identity()).then(() => null, (err: unknown) => err);
+      const raised = await api
+        .deletePanelUser(identity(), await api.getPanelShape())
+        .then(() => null, (err: unknown) => err);
 
       assert.ok(
         raised instanceof ServiceUnavailableException,

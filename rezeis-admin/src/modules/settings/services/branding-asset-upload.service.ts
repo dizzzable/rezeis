@@ -1,17 +1,19 @@
 import { promises as fs } from 'node:fs';
-import { extname, join, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
 import { BadRequestException, Injectable, Logger, OnModuleInit } from '@nestjs/common';
+
+import { verifyImageContent } from './icon-upload.service';
 
 export interface BrandingAssetUploadedInterface {
   /** Public URL relative to the admin host (`/uploads/branding/<file>`). */
   readonly url: string;
   /** Original file name as supplied by the client (best-effort sanitised). */
   readonly originalName: string;
-  /** MIME type detected by multer. */
+  /** MIME type verified from the file content (never the client's claim). */
   readonly mimeType: string;
-  /** Stored size in bytes (after SVG sanitisation, if applied). */
+  /** Stored size in bytes (after SVG validation, if applied). */
   readonly size: number;
 }
 
@@ -22,7 +24,7 @@ interface PersistInput {
 }
 
 // Branding assets (header logo / square PWA icon) are small; 2 MB is generous.
-// PNG/WEBP for the install icon, SVG allowed for the header logo (sanitised).
+// PNG/WEBP for the install icon, SVG allowed for the header logo (validated).
 const MAX_FILE_SIZE = 2 * 1024 * 1024;
 const ALLOWED_TYPES = new Set(['image/png', 'image/webp', 'image/svg+xml']);
 
@@ -45,9 +47,14 @@ const EXT_BY_MIME: Record<string, string> = {
  * `main.ts`'s static handler under `/uploads`, and proxied + disk-cached by the
  * reiwa edge so the icon survives an admin outage.
  *
- * Security mirrors `IconUploadService`: `/uploads` is unauthenticated, so SVG
- * uploads are sanitised (strip `<script>`, `on*`, `javascript:`,
- * `<foreignObject>`) before they hit disk.
+ * Security mirrors `IconUploadService` exactly — same `verifyImageContent`
+ * gate, same reject-list for SVG, same rule that the stored extension comes
+ * from the sniffed type and not from the client's declared one. `/uploads` is
+ * unauthenticated and outside every Nest guard, so an SVG that survives this
+ * check would execute in the admin origin when opened as a document. A
+ * legitimate vector logo (paths, shapes, gradients, `fill="url(#id)"`) passes
+ * untouched; one carrying script, an external reference, or an entity-encoded
+ * URL is refused rather than partially cleaned.
  */
 @Injectable()
 export class BrandingAssetUploadService implements OnModuleInit {
@@ -75,23 +82,16 @@ export class BrandingAssetUploadService implements OnModuleInit {
       );
     }
 
-    let buffer = input.buffer;
-    if (input.mimeType === 'image/svg+xml') {
-      buffer = Buffer.from(sanitiseSvg(input.buffer.toString('utf8')), 'utf8');
-      if (buffer.length === 0) {
-        throw new BadRequestException('SVG is empty after sanitisation');
-      }
-    }
-
-    const ext = EXT_BY_MIME[input.mimeType] ?? extname(input.originalName) ?? '.bin';
+    const verified = verifyImageContent(input.buffer, input.mimeType, ALLOWED_TYPES);
+    const ext = EXT_BY_MIME[verified.mimeType];
     const fileName = `${randomBytes(16).toString('hex')}${ext}`;
     const fullPath = join(this.uploadsDir, fileName);
-    await fs.writeFile(fullPath, buffer, { mode: 0o644 });
+    await fs.writeFile(fullPath, verified.buffer, { mode: 0o644 });
     return {
       url: `/uploads/branding/${fileName}`,
       originalName: sanitiseName(input.originalName),
-      mimeType: input.mimeType,
-      size: buffer.length,
+      mimeType: verified.mimeType,
+      size: verified.buffer.length,
     };
   }
 
@@ -123,19 +123,4 @@ export const BRANDING_ASSET_MAX_FILE_SIZE = MAX_FILE_SIZE;
 
 function sanitiseName(name: string): string {
   return name.replace(/[\r\n\t]/g, ' ').trim().slice(0, 200);
-}
-
-/**
- * Strips active content from an SVG string (conservative regex pass): script
- * blocks, `<foreignObject>`, `on*` handlers, and `javascript:` URLs.
- */
-function sanitiseSvg(svg: string): string {
-  return svg
-    .replace(/<script[\s\S]*?<\/script>/gi, '')
-    .replace(/<foreignObject[\s\S]*?<\/foreignObject>/gi, '')
-    .replace(/\son\w+\s*=\s*"[^"]*"/gi, '')
-    .replace(/\son\w+\s*=\s*'[^']*'/gi, '')
-    .replace(/(href|xlink:href)\s*=\s*"\s*javascript:[^"]*"/gi, '$1=""')
-    .replace(/(href|xlink:href)\s*=\s*'\s*javascript:[^']*'/gi, "$1=''")
-    .trim();
 }

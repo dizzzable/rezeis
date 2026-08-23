@@ -217,6 +217,30 @@ export class BulkPlanAssignmentService {
 
       // Build new plan snapshot
       const newPlanSnapshot: Prisma.InputJsonValue = {
+        // `id` is the CANONICAL key for "which plan is this subscription on",
+        // and it is the one every reader outside this module uses:
+        // `PlanSnapshotSyncService` selects on `plan_snapshot->>'id'`,
+        // `AddOnEligibilityService` and `EntitlementCutoverService` read
+        // `snapshot['id']`, the broadcast audience filter matches
+        // `path: ['id']`, and the payment paths compare it against the paid
+        // plan. This writer used to emit ONLY `planId`, so a bulk-assigned
+        // subscription matched none of them: a renamed plan kept showing its
+        // old name on the cabinet card, in the bot and on invoices forever, and
+        // no add-on restricted to that plan was ever offered.
+        id: plan.id,
+        // `planId` stays, and is NOT a duplicate to be tidied away. It is the
+        // IMPORT domain's "this imported row has been linked to a real plan"
+        // marker, and three readers depend on it:
+        //   - `isImportedOrUnassigned` below, which is what stops a second run
+        //     of this assignment from re-planning a subscription an operator
+        //     already assigned;
+        //   - `BackupPlanClonerService`, which skips a row that already carries
+        //     one;
+        //   - `AltshopImporterService` / `RemnashopImporterService`, whose
+        //     `buildSubscriptionPlanSnapshot` rebuilds the snapshot from donor
+        //     facts and carries `planId` — and ONLY `planId` — across, so a
+        //     re-import of an assigned subscription keeps its plan link.
+        // Dropping it here would make a re-import silently unlink the plan.
         planId: plan.id,
         name: plan.name,
         tag: plan.tag,

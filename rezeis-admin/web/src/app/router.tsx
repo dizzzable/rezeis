@@ -76,7 +76,11 @@ const UserDetailPage = lazy(
   withFeatureBundle('userDetail', () => import('@/features/users/user-detail-page')),
 );
 const PlansPage = lazy(() => import('@/features/plans/plans-page'));
-const SubscriptionsPage = lazy(() => import('@/features/subscriptions/subscriptions-page'));
+const SubscriptionsPage = lazy(
+  withFeatureBundle('panelLinkReconciliation', () =>
+    import('@/features/subscriptions/subscriptions-page'),
+  ),
+);
 const PaymentsPage = lazy(
   withFeatureBundle('payments', () => import('@/features/payments/payments-page')),
 );

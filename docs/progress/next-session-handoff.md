@@ -1,6 +1,17 @@
 # Next Session Handoff — Rezeis Remediation
 
-Updated: 2026-08-01
+Updated: 2026-08-20
+
+## Current Remnawave Status
+
+- Upstream PR: https://github.com/dizzzable/rezeis/pull/40
+- Branch: `FaloonAI:audit/remnawave-332-sync-state-clean`
+- Baseline: exact Rezeis Admin `v0.9.7.17`
+- Target: Remnawave Backend `v3.3.2`
+- The Remnawave sync-state slice is NOT "six scoped files" — it is one part of a large uncommitted working tree. `git status --porcelain` in `rezeis` reports **over four hundred changed paths**: roughly 130 under `rezeis-admin/src/modules` across ~30 modules, ~145 under `rezeis-admin/web/src`, ~90 new specs under `rezeis-admin/test`, plus `prisma/`, `scripts/` and docs. No exact count is quoted here on purpose — the tree is still moving, and this file has already been wrong about its own scope once. Run `git status --porcelain` in both repos yourself before quoting a scope from it.
+- **Reiwa DOES have changes**, and there is a live cross-repo coupling. `internal-partner.controller.ts` now emits `referralPoints` (`User.points`, a dimensionless integer — NOT money and not convertible to `balance`) on the internal partner payload, and `reiwa/src/bot/pages/invite.ts` reads it. Reiwa reads it as optional so an old cabinet against a new panel degrades instead of breaking, but the field is a shared contract and the two repos ship together for it.
+- Fork backend/web quality checks passed. The fork-only React Doctor failure was caused by its audit-commit base; a focused run against `v0.9.7.17` found no issues in the changed frontend files.
+- Do not merge or deploy until upstream review and CI are complete.
 
 ## User Context
 

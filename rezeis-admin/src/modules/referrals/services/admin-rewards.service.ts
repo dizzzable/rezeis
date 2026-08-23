@@ -8,6 +8,9 @@ import {
 } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { EVENT_TYPES, SystemEventsService } from '../../../common/services/system-events.service';
+import { buildAdminAuditLogData } from '../../../common/utils/admin-audit-log.util';
+import { RequestMetadataInterface } from '../../auth/interfaces/request-metadata.interface';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
 import { CreateRewardDto } from '../dto/create-reward.dto';
 import { ListRewardsQueryDto } from '../dto/list-rewards-query.dto';
@@ -17,12 +20,19 @@ import {
   BulkIssueRewardsResultInterface,
 } from '../interfaces/admin-rewards.interface';
 import { ReferralUserSummaryInterface } from '../interfaces/referral.interface';
+import { buildReferralUserDisplayName } from './referral-user-identity';
 
+// Mirrors `REFERRAL_USER_SUMMARY_SELECT` in `referrals.service.ts`, and for
+// the same reason: the rewards table paints the same `ReferralUserSummary`,
+// so selecting fewer identity columns here would make a web-only user
+// nameable on one referral screen and anonymous on the other.
 const REWARD_USER_SELECT = {
   id: true,
   username: true,
   name: true,
   telegramId: true,
+  email: true,
+  webAccount: { select: { login: true, email: true } },
   createdAt: true,
 } as const;
 
@@ -37,16 +47,44 @@ type RewardRecord = Prisma.ReferralRewardGetPayload<{
 const DEFAULT_LIMIT = 100;
 
 /**
+ * ONE audit action for "an operator issued a referral reward", whichever
+ * control produced it. The surface lives in `metadata.source`, not in a second
+ * action name — the shape `partner.balance.adjusted` settled on today, and for
+ * the same reason: two action names for one act make the row that answers
+ * "who paid this customer" impossible to find with one query.
+ *
+ * Issuing moves money — POINTS credit a spendable balance, EXTRA_DAYS extend a
+ * paid subscription — and until now it was the only money-moving admin act on
+ * this controller that left NOTHING on the audit surface. `ReferralReward.
+ * issuedBy`/`issuedAt` are a real trail, but they live on the domain row: an
+ * operator reading `admin_audit_log` saw manual attaches, balance adjustments
+ * and refunds, and no sign that a reward had ever been handed out.
+ */
+const REWARD_ISSUED_ACTION = 'referral.reward.issued';
+
+/** Which control issued the reward — see {@link REWARD_ISSUED_ACTION}. */
+const REWARD_ISSUE_SOURCE = {
+  single: 'single',
+  bulk: 'bulk',
+} as const;
+
+type RewardIssueSource = (typeof REWARD_ISSUE_SOURCE)[keyof typeof REWARD_ISSUE_SOURCE];
+
+/**
  * Admin-side reward management — list, manually grant, issue (apply
  * effect to the user), bulk issue, and revoke. Sister of
  * `ReferralQualificationService`, which runs the *automatic* path
- * triggered by qualifying purchases.
+ * triggered by qualifying purchases: it CREATES reward rows when a
+ * referral qualifies, and stops there.
  *
- * The two services share `applyRewardEffect` semantics: POINTS bumps
- * `User.points`, EXTRA_DAYS extends the user's current subscription
- * `expiresAt`. We keep both implementations local instead of importing
- * the qualification service to avoid a circular dependency, and to
- * record the `issuedBy` actor that the qualification path ignores.
+ * ISSUING A REWARD HAPPENS HERE AND NOWHERE ELSE. The qualification service
+ * carried its own `issueReward` for a while — unreachable from anything, and
+ * diverged: no `ProfileSyncJob`, so `EXTRA_DAYS` never reached the panel, and
+ * a silent "issued" for a user with no eligible subscription. It is gone, and
+ * a second copy must not come back. `applyRewardEffect` below is the single
+ * implementation: POINTS bumps `User.points`; EXTRA_DAYS extends an ACTIVE
+ * finite subscription resolved under a row lock and enqueues the sync that
+ * pushes the new expiry to Remnawave.
  */
 @Injectable()
 export class AdminRewardsService {
@@ -55,6 +93,7 @@ export class AdminRewardsService {
   public constructor(
     private readonly prismaService: PrismaService,
     private readonly profileSyncQueue: ProfileSyncQueueService,
+    private readonly events: SystemEventsService,
   ) {}
 
   // ── Read ────────────────────────────────────────────────────────────────
@@ -128,9 +167,34 @@ export class AdminRewardsService {
 
   // ── Issue (apply effect) ───────────────────────────────────────────────
 
+  /**
+   * The actor is `string`, not `string | null`, and that is deliberate.
+   *
+   * This path now writes an `admin_audit_log` row, and `buildAdminAuditLogData`
+   * takes a named actor because every audit row in this repository has one. A
+   * nullable actor here would put a branch on the audit write for a case no
+   * caller can produce — the sole route is behind `AdminJwtAuthGuard` — and an
+   * unreachable branch on an audit path is how an audit path stops being
+   * written (the same call `bulk-user-operations.service.ts` made today). With
+   * `string` the compiler, not a code reviewer, guarantees that every reward
+   * this method issues leaves a row naming who issued it.
+   *
+   * `grant`/`revoke` keep `string | null`: they write no audit row, and
+   * `ReferralReward.grantedBy` genuinely records automatic grants.
+   */
   public async issue(
     rewardId: string,
-    actorAdminId: string | null,
+    actorAdminId: string,
+    requestMetadata: RequestMetadataInterface,
+  ): Promise<AdminReferralRewardInterface> {
+    return this.issueOne(rewardId, actorAdminId, requestMetadata, REWARD_ISSUE_SOURCE.single);
+  }
+
+  private async issueOne(
+    rewardId: string,
+    actorAdminId: string,
+    requestMetadata: RequestMetadataInterface,
+    source: RewardIssueSource,
   ): Promise<AdminReferralRewardInterface> {
     const { updated, syncJobId, effectApplied } = await this.prismaService.$transaction(
       async (tx) => {
@@ -161,6 +225,36 @@ export class AdminRewardsService {
           },
           include: REWARD_INCLUDE,
         });
+        // INSIDE the transaction, and after the grant — the opposite placement
+        // decision from the system event below, for the opposite reason.
+        //
+        // The event is a notification: announcing points that a rollback then
+        // takes back is worse than announcing them late, so it waits for the
+        // commit. The audit row is not a notification, it is part of the same
+        // fact as the write — "these points were credited BY this operator".
+        // Written after the commit it would be a second, independently
+        // failable statement about a payout that already happened, and the
+        // gap between them is exactly where an audit row goes missing: the
+        // process dies, the connection drops, the transaction that granted
+        // the money is durable and nothing names who did it. Rolled back
+        // together, the row and the grant cannot disagree.
+        await tx.adminAuditLog.create({
+          data: buildAdminAuditLogData({
+            action: REWARD_ISSUED_ACTION,
+            actorId: actorAdminId,
+            requestMetadata,
+            metadata: {
+              requestId: requestMetadata.requestId,
+              source,
+              rewardId,
+              referralId: reward.referralId,
+              userId: reward.userId,
+              rewardType: reward.type,
+              amount: reward.amount,
+              syncJobId: effect.syncJobId,
+            },
+          }),
+        });
         return { updated: result, syncJobId: effect.syncJobId, effectApplied: true };
       },
     );
@@ -178,15 +272,78 @@ export class AdminRewardsService {
 
     if (effectApplied) {
       this.logger.log(
-        `Reward issued: rewardId=${rewardId} actor=${actorAdminId ?? 'system'} userId=${updated.userId}`,
+        `Reward issued: rewardId=${rewardId} actor=${actorAdminId} source=${source} userId=${updated.userId}`,
       );
+      // POST-COMMIT, and only when an effect was actually applied.
+      //
+      // Placement is the whole point: emitted inside the `$transaction`
+      // callback it would announce points that a rollback then took back, and
+      // the operator feed would disagree with the database. It sits after the
+      // enqueue block ON PURPOSE — a failed enqueue does not undo the grant,
+      // the sweep re-drives the job, and the reward really was issued.
+      //
+      // `effectApplied` is false for the already-issued short-circuit above.
+      // An event there would be a second "reward issued" card for a no-op.
+      //
+      // The metadata keys are not free-form. `referrerId`, `rewardType` and
+      // `rewardValue` are what `USER_EVENT_WHITELIST['referral.reward_issued']`
+      // (`user-realtime-event.interface.ts`) matches and projects: without
+      // `referrerId` the projection returns null and the earner is told
+      // nothing. `userId` is what `SystemEventsService` reads to put a name on
+      // the Telegram card. `ReferralReward.userId` IS the earner — L1 rewards
+      // carry the referrer, L2 rewards the ancestor — so it fills both.
+      this.events.info(EVENT_TYPES.REFERRAL_REWARD_ISSUED, 'REFERRAL', 'Referral reward issued', {
+        rewardId: updated.id,
+        referralId: updated.referralId,
+        userId: updated.userId,
+        referrerId: updated.userId,
+        rewardType: updated.type,
+        rewardValue: updated.amount,
+        issuedBy: actorAdminId,
+        syncJobId,
+      });
     }
     return mapReward(updated);
   }
 
+  /**
+   * ONE audit row PER REWARD, not one naming the batch.
+   *
+   * The question this log is asked is "who issued THIS reward", and it is asked
+   * about one reward. `AdminAuditLog` has no entity columns — the subject lives
+   * in `metadata` — so the per-reward answer is
+   *
+   *   SELECT ... WHERE action = 'referral.reward.issued'
+   *              AND metadata->>'rewardId' = $1
+   *
+   * and that query has to find the bulk issuance too, or it answers "nobody"
+   * about a reward a bulk click paid out. A row naming the whole set answers
+   * "which click did this" cheaply and the per-reward question not at all
+   * without a second, differently-shaped query (`metadata->'rewardIds' @>
+   * '["X"]'`) unioned in — and a reader who has to remember to union a second
+   * shape is a reader who will eventually forget. Same reasoning as
+   * `bulk-user-operations.service.ts`, and the same reasoning that put the
+   * origin of `partner.balance.adjusted` in `metadata.source`.
+   *
+   * It also falls out of the failure model this method already has: a batch is
+   * not atomic. Rewards succeed and fail independently, so a single row naming
+   * the requested ids would claim payouts that the `errors` array shows never
+   * happened. Per reward, the row exists exactly when the money moved, because
+   * it is written in the very transaction that moved it.
+   *
+   * The cost is bounded by the batch size the DTO already caps.
+   *
+   * No `batchId` here, deliberately, unlike the bulk user path: that one is
+   * fired from a toolbar over a checkbox selection where "which click" is a
+   * real question. These ids come from the rewards table's own filtered view,
+   * and `metadata.requestId` already groups one HTTP call's rows whenever the
+   * caller sends the header. Adding a second grouping key that only sometimes
+   * agrees with it is how two ways to ask the same question start disagreeing.
+   */
   public async bulkIssue(
     ids: readonly string[],
-    actorAdminId: string | null,
+    actorAdminId: string,
+    requestMetadata: RequestMetadataInterface,
   ): Promise<BulkIssueRewardsResultInterface> {
     let issued = 0;
     let skipped = 0;
@@ -221,7 +378,7 @@ export class AdminRewardsService {
           skipped += 1;
           continue;
         }
-        await this.issue(id, actorAdminId);
+        await this.issueOne(id, actorAdminId, requestMetadata, REWARD_ISSUE_SOURCE.bulk);
         // Mark issued in the local snapshot so a duplicate id later in the
         // same request is skipped (matches the previous per-id re-read).
         before.isIssued = true;
@@ -234,7 +391,7 @@ export class AdminRewardsService {
     }
 
     this.logger.log(
-      `Bulk issue: actor=${actorAdminId ?? 'system'} requested=${ids.length} issued=${issued} skipped=${skipped} failed=${failed}`,
+      `Bulk issue: actor=${actorAdminId} requested=${ids.length} issued=${issued} skipped=${skipped} failed=${failed}`,
     );
     return { issued, skipped, failed, errors };
   }
@@ -310,14 +467,21 @@ function mapUser(
     username: string | null;
     name: string;
     telegramId: bigint | null;
+    email: string | null;
+    webAccount: { login: string | null; email: string | null } | null;
     createdAt: Date;
   } | null,
 ): ReferralUserSummaryInterface {
   if (user === null) {
+    // Unreachable with the current schema - `ReferralReward.user` is a
+    // REQUIRED relation - and kept only as a guard. There is genuinely no
+    // user to name in this branch, so `displayName` is empty here and here
+    // only; every real user resolves to something printable below.
     return {
       id: '',
       username: null,
       name: null,
+      displayName: '',
       telegramId: null,
       createdAt: new Date(0).toISOString(),
     };
@@ -326,6 +490,7 @@ function mapUser(
     id: user.id,
     username: user.username,
     name: user.name === '' ? null : user.name,
+    displayName: buildReferralUserDisplayName(user),
     telegramId: user.telegramId?.toString() ?? null,
     createdAt: user.createdAt.toISOString(),
   };
@@ -391,8 +556,17 @@ async function resolveActiveFiniteSubscription(
 }
 
 /**
- * Apply the reward effect inside a Prisma transaction. Mirrors the
- * private `applyEffect` block of `ReferralQualificationService.issueReward`.
+ * Apply the reward effect inside a Prisma transaction. THE ONLY implementation
+ * of reward issuance in this repository, and it must stay that way.
+ *
+ * It used to cite a second one — the private effect block of
+ * `ReferralQualificationService.issueReward` — as the model it mirrored. That
+ * method had no caller anywhere in `src/`, and it had diverged on every point
+ * that decides whether an `EXTRA_DAYS` reward actually reaches the customer:
+ * it targeted `user.currentSubscriptionId` alone with no fallback and no lock,
+ * it marked the reward ISSUED and granted nothing when there was no eligible
+ * subscription, and it created no `ProfileSyncJob`. Pointing a reader at it was
+ * pointing them at the broken half, so it was deleted rather than re-synced.
  */
 async function applyRewardEffect(
   tx: Prisma.TransactionClient,
@@ -445,5 +619,43 @@ async function applyRewardEffect(
     });
     return { syncJobId: syncJob.id };
   }
-  return { syncJobId: null };
+  // TWO different failures reach this line, and they need two different guards.
+  //
+  // The COMPILER one: `refuseUnhandledRewardType` takes `never`, so this call
+  // only type-checks while every `ReferralRewardType` member has been peeled off
+  // above. Add a third member to the enum and `tsc -p tsconfig.json` fails HERE
+  // — the developer who widened the type is made to decide what issuing it
+  // grants, at build time, instead of shipping a branch that grants nothing.
+  //
+  // The RUNTIME one: `reward.type` is read out of a database column, and the
+  // enum compiled into this process is only the compiler's BELIEF about that
+  // column. A row written by an older or newer deployment, by a migration in
+  // flight, or by hand carries whatever it carries, and no compile-time check
+  // ever inspects it. So the same guard also THROWS, inside the transaction and
+  // before the reward is marked issued, which rolls back the reward update, the
+  // audit row and anything the effect had already written.
+  //
+  // What must never come back is the bare `return { syncJobId: null }` that
+  // used to stand here. `issue()` marks the reward ISSUED on whatever this
+  // function returns, so an unhandled type produced a row claiming the customer
+  // had been paid with nothing granted — precisely the failure the deleted
+  // second copy of this logic was deleted for. Refusing is the safe direction:
+  // the operator sees an error and the reward stays payable.
+  return refuseUnhandledRewardType(reward.type);
+}
+
+/**
+ * The `never` parameter is the compile-time half of the guard above: passing
+ * anything that is not provably impossible is a type error at the call site.
+ * The throw is the runtime half, for a `type` column that no longer matches the
+ * enum. `BadRequestException` rather than a bare `Error` on purpose — Nest
+ * hides a 500's message, and this one names the offending value, which is the
+ * only thing that tells an operator (and `bulkIssue`'s `errors` array) what is
+ * wrong with that reward.
+ */
+function refuseUnhandledRewardType(type: never): never {
+  throw new BadRequestException(
+    `Cannot issue reward: reward type "${String(type)}" has no issuance branch in ` +
+      'applyRewardEffect. Nothing was granted and the reward is still unissued.',
+  );
 }

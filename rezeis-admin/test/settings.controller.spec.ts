@@ -333,7 +333,7 @@ describe('SettingsController', () => {
       },
       updateReferralSettings: async (input: DelegatedCall<Record<string, unknown>>): Promise<Record<string, unknown>> => {
         calls.push(input);
-        return { pointsExchange: { enabled: true } };
+        return { pointsExchange: { exchangeEnabled: true } };
       },
       updatePartnerSettings: async (input: DelegatedCall<Record<string, unknown>>): Promise<Record<string, unknown>> => {
         calls.push(input);
@@ -352,7 +352,10 @@ describe('SettingsController', () => {
     const notificationsDto: UpdateNotificationsTogglesDto = { userNotifications: { renew: true } };
     const telegramDto: UpdateTelegramDeliveryDto = { enabled: true, chatId: '-100123', topics: { payment: 7 }, mirrorUserNotifications: true };
     const telegramTestDto: SendTelegramDeliveryTestDto = { note: 'probe' };
-    const referralPatch = { pointsExchange: { enabled: true } };
+    // `exchangeEnabled`, not `enabled`: this body is now validated against
+    // `UpdateReferralSettingsDto`, and `enabled` is the per-SECTION flag
+    // (`pointsExchange.subscriptionDays.enabled`), never the section's own.
+    const referralPatch = { pointsExchange: { exchangeEnabled: true } };
     const partnerPatch = { withdrawals: { enabled: true } };
     const brandingDto: UpdateBrandingSettingsDto = { brandName: 'Rezeis' };
     const iconsDto: UpdateCustomIconsDto = { icons };

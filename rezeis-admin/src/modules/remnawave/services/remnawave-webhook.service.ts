@@ -6,6 +6,7 @@ import { Prisma, SubscriptionStatus } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { remnawaveConfig } from '../../../common/config/remnawave.config';
+import { patchSnapshotNumeric } from '../../subscriptions/services/plan-inherited-limits.util';
 import { isNumericPanelIdentity } from './panel-user-address';
 import {
   EVENT_TYPES,
@@ -14,6 +15,7 @@ import {
   type SystemEventSeverity,
 } from '../../../common/services/system-events.service';
 import { RemnawaveApiService } from './remnawave-api.service';
+import { panelTrafficLimitToGb } from '../utils/panel-traffic-limit.util';
 
 /**
  * How long a first-connection card may hold the webhook open waiting for the
@@ -692,23 +694,93 @@ export class RemnawaveWebhookService {
     }
 
     // Traffic limit: panel is bytes (0 = unlimited); local is GB (null =
-    // unlimited). Round to the nearest GB, never below 1 for a positive cap.
+    // unlimited). `panelTrafficLimitToGb` is the single rule every writer of
+    // this column shares — nearest GB, never below 1 for a positive cap.
+    //
+    // The mirrored limits are tracked in their own variables as well as in
+    // `update`, because they are written into `planSnapshot` too (see below)
+    // and `SubscriptionUpdateManyMutationInput` types them as field-operation
+    // objects, not as the plain values the snapshot needs.
+    let mirroredTrafficLimit: number | null | undefined;
+    let mirroredDeviceLimit: number | undefined;
+
     const trafficLimitBytes = num('trafficLimitBytes');
     if (trafficLimitBytes !== undefined) {
-      update.trafficLimit =
-        trafficLimitBytes <= 0 ? null : Math.max(1, Math.round(trafficLimitBytes / 1024 ** 3));
+      mirroredTrafficLimit = panelTrafficLimitToGb(trafficLimitBytes);
+      update.trafficLimit = mirroredTrafficLimit;
     }
 
     // Device limit: panel `hwidDeviceLimit` → local `deviceLimit`.
     const deviceLimit = num('hwidDeviceLimit');
-    if (deviceLimit !== undefined && deviceLimit >= 0) update.deviceLimit = deviceLimit;
+    if (deviceLimit !== undefined && deviceLimit >= 0) {
+      mirroredDeviceLimit = deviceLimit;
+      update.deviceLimit = mirroredDeviceLimit;
+    }
 
     if (Object.keys(update).length === 0) return;
 
-    const result = await this.prismaService.subscription.updateMany({
-      where: { ...panelIdentityWhere(remnawaveId), status: { not: SubscriptionStatus.DELETED } },
-      data: update,
-    });
+    // ── A panel-side limit change is recorded, but it does not outrank the plan
+    //
+    // The tension is real and both halves matter. A limit set directly in
+    // Remnawave IS a fact about what the customer experiences right now, so we
+    // record it — refusing to would leave our row lying about live service.
+    // But it is not an INSTRUCTION: rezeis is the authority and the panel
+    // mirrors it, so an edit made on the panel side must not silently outrank
+    // the plan the customer is paying us for.
+    //
+    // Both are satisfied by moving `planSnapshot` with the column. That leaves
+    // the two in step, which `resolveInheritedPlanLimitUpdate` reads as
+    // INHERITED, so the customer's next renewal puts the plan's own limit back
+    // and the panel-side drift dies there. Write the column alone and it
+    // diverges from the snapshot, reads as a deliberate operator override, and
+    // survives every renewal from then on.
+    //
+    // Only the fields this event actually stated are touched — in the columns
+    // and in the baseline alike. A payload that carried no limit must never
+    // make us adopt one, and must not cost a snapshot read either: the columns
+    // keep going out on the single `updateMany` this mirror has always used,
+    // and the baseline pass below is skipped entirely.
+    const mirrorsALimit = mirroredTrafficLimit !== undefined || mirroredDeviceLimit !== undefined;
+    const where = {
+      ...panelIdentityWhere(remnawaveId),
+      status: { not: SubscriptionStatus.DELETED },
+    };
+
+    const result = await this.prismaService.subscription.updateMany({ where, data: update });
+
+    // Additive second pass, never a replacement for the write above. It exists
+    // only to move `planSnapshot` to wherever the columns just landed, and it
+    // writes nothing else.
+    //
+    // KNOWN LIMIT, accepted: this is a read-modify-write on the JSON with no
+    // row lock, so two panel events for the same profile arriving together can
+    // clobber each other's key. Doing it in one statement means
+    // `UPDATE … SET plan_snapshot = plan_snapshot || …`, which needs
+    // `panelIdentityWhere`'s predicate restated in raw SQL — a THIRD expression
+    // of "which row does this panel identity name", after this one and
+    // `panel-user-address.ts`'s plural sibling. A stale limit that the next
+    // renewal corrects anyway is the smaller hazard than a divergent identity
+    // predicate, which would silently reconcile the wrong customer.
+    if (result.count > 0 && mirrorsALimit) {
+      const targets = await this.prismaService.subscription.findMany({
+        where,
+        select: { id: true, planSnapshot: true },
+      });
+      for (const target of targets) {
+        let planSnapshot = target.planSnapshot as unknown;
+        if (mirroredTrafficLimit !== undefined) {
+          planSnapshot = patchSnapshotNumeric(planSnapshot, 'trafficLimit', mirroredTrafficLimit);
+        }
+        if (mirroredDeviceLimit !== undefined) {
+          planSnapshot = patchSnapshotNumeric(planSnapshot, 'deviceLimit', mirroredDeviceLimit);
+        }
+        await this.prismaService.subscription.update({
+          where: { id: target.id },
+          data: { planSnapshot: planSnapshot as Prisma.InputJsonValue },
+        });
+      }
+    }
+
     if (result.count > 0) {
       this.logger.log(
         `Reconciled ${result.count} subscription(s) from panel event ${normalizedEvent} (remnawaveId=${remnawaveId})`,

@@ -1,0 +1,109 @@
+{
+  "version": "2.8.0",
+  "endpoint": "GET /api/external-squads",
+  "source": "derived mechanically from the externalSquads item schema of GET /api/external-squads in the vendor OpenAPI document \"Remnawave API v280.json\" (info.version 2.8.0). Key set and key ORDER are the specification's. `body` is the COMPLETE HTTP body, envelope included. Row 0 populates every nullable slot; row 1 sets every nullable slot to null. Values are realistic instances of the declared types.",
+  "specRequired": [
+    "uuid",
+    "viewPosition",
+    "name",
+    "info",
+    "templates",
+    "subscriptionSettings",
+    "hostOverrides",
+    "responseHeaders",
+    "hwidSettings",
+    "customRemarks",
+    "subpageConfigUuid",
+    "createdAt",
+    "updatedAt"
+  ],
+  "body": {
+    "response": {
+      "total": 2,
+      "externalSquads": [
+        {
+          "uuid": "2f1c9a44-0000-4000-8000-000000000001",
+          "viewPosition": 0,
+          "name": "squad-0-populated",
+          "info": {
+            "membersCount": 40
+          },
+          "templates": [
+            {
+              "templateUuid": "2f1c9a44-0000-4000-8000-000000000002",
+              "templateType": "XRAY_JSON"
+            }
+          ],
+          "subscriptionSettings": {
+            "profileTitle": "profileTitle-0",
+            "supportLink": "supportLink-0",
+            "profileUpdateInterval": 1,
+            "isProfileWebpageUrlEnabled": true,
+            "serveJsonAtBaseSubscription": true,
+            "isShowCustomRemarks": true,
+            "happAnnounce": "happAnnounce-0",
+            "happRouting": "happRouting-0",
+            "randomizeHosts": true
+          },
+          "hostOverrides": {
+            "serverDescription": "rz node",
+            "vlessRouteId": 1
+          },
+          "responseHeaders": {
+            "x-forwarded-host": "panel.example"
+          },
+          "hwidSettings": {
+            "enabled": true,
+            "fallbackDeviceLimit": 5,
+            "maxDevicesAnnounce": "device limit reached"
+          },
+          "customRemarks": {
+            "expiredUsers": [
+              "expiredUsers-0"
+            ],
+            "limitedUsers": [
+              "limitedUsers-0"
+            ],
+            "disabledUsers": [
+              "disabledUsers-0"
+            ],
+            "emptyHosts": [
+              "emptyHosts-0"
+            ],
+            "HWIDMaxDevicesExceeded": [
+              "HWIDMaxDevicesExceeded-0"
+            ],
+            "HWIDNotSupported": [
+              "HWIDNotSupported-0"
+            ]
+          },
+          "subpageConfigUuid": "2f1c9a44-0000-4000-8000-000000000003",
+          "createdAt": "2026-05-04T11:22:33.444Z",
+          "updatedAt": "2026-05-04T11:22:33.444Z"
+        },
+        {
+          "uuid": "2f1c9a44-0000-4000-8000-000000001004",
+          "viewPosition": 1,
+          "name": "squad-1-nulled",
+          "info": {
+            "membersCount": 41
+          },
+          "templates": [
+            {
+              "templateUuid": "2f1c9a44-0000-4000-8000-000000001005",
+              "templateType": "XRAY_JSON"
+            }
+          ],
+          "subscriptionSettings": null,
+          "hostOverrides": null,
+          "responseHeaders": null,
+          "hwidSettings": null,
+          "customRemarks": null,
+          "subpageConfigUuid": null,
+          "createdAt": "2026-06-07T08:09:10.111Z",
+          "updatedAt": "2026-06-07T08:09:10.111Z"
+        }
+      ]
+    }
+  }
+}

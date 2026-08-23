@@ -26,6 +26,11 @@ import {
   RemnawaveUpstreamRejectionError,
 } from '../remnawave/services/remnawave-api.service';
 import {
+  assessObservedPanelLink,
+  observePanelEra,
+  SUBSCRIPTION_DELETE_STALE_PANEL_LINK_CODE,
+} from '../remnawave/services/stale-panel-link';
+import {
   PROFILE_SYNC_CONCURRENCY,
   PROFILE_SYNC_MAX_ATTEMPTS,
   PROFILE_SYNC_QUEUE,
@@ -1149,6 +1154,88 @@ export class ProfileSyncProcessor extends WorkerHost {
       this.logger.warn(
         `Could not record panel identity for subscription ${subscription.id}: ${(err as Error).message}`,
       );
+      return;
+    }
+
+    await this.reportPanelIdentityCollision(subscription, fillId ? panelId : null, fillName ? username : null);
+  }
+
+  /**
+   * Says so, loudly, when the identity just recorded is one ANOTHER live
+   * subscription already claims.
+   *
+   * REPORTED, NOT PREVENTED, and the direction is the whole point. The obvious
+   * reading of "backfillPanelIdentity has no exclusivity check" is that it
+   * should refuse to fill when somebody else holds the identity. That would
+   * make things WORSE, in two ways at once:
+   *
+   *  • The columns are what makes a profile addressable on a 3.x panel. A row
+   *    refused its back-fill keeps them NULL — which is precisely the state the
+   *    docstring above lists as "DELETE jobs retry forever, the expiry sweep
+   *    defers forever, device sagas defer forever". Refusing would inflict that
+   *    on the rows that need the columns most.
+   *  • `panelProfileClaimedByAnother` can only SEE a claimant through these
+   *    columns. A duplicate pair where one row was refused its fill is a pair
+   *    the delete guard cannot detect — so refusing to record the collision is
+   *    what re-arms the data loss this build exists to stop. Recording it is
+   *    what lets the guard refuse.
+   *
+   * The collision is not created here and cannot be repaired here: two rows on
+   * one panel profile is the importer's doing (its matcher compared a 2.x uuid
+   * to a 3.x decimal and missed), and untangling live customer rows is an
+   * operator-sequenced job, not something a best-effort back-fill may attempt
+   * behind a panel write that has already landed. What this build owes is that
+   * it stop being SILENT.
+   *
+   * Fires at most once per subscription: the fill only runs while the columns
+   * are still NULL.
+   */
+  private async reportPanelIdentityCollision(
+    subscription: SyncJobRecord['subscription'],
+    filledPanelId: number | null,
+    filledUsername: string | null,
+  ): Promise<void> {
+    const claims: Prisma.SubscriptionWhereInput[] = [];
+    if (filledPanelId !== null) {
+      claims.push({ remnawavePanelId: filledPanelId }, { remnawaveId: String(filledPanelId) });
+    }
+    if (filledUsername !== null) {
+      claims.push({ remnawavePanelUsername: filledUsername });
+    }
+    if (claims.length === 0) return;
+
+    try {
+      const other = await this.prismaService.subscription.findFirst({
+        where: {
+          id: { not: subscription.id },
+          status: { not: SubscriptionStatus.DELETED },
+          OR: claims,
+        },
+        select: { id: true, userId: true, remnawaveId: true },
+      });
+      if (other === null) return;
+      const message =
+        `Subscription ${subscription.id} (user ${subscription.userId}, profile ` +
+        `'${subscription.remnawaveId ?? 'none'}') records panel identity ` +
+        `[id ${filledPanelId ?? 'none'}, username '${filledUsername ?? 'none'}'] that subscription ` +
+        `${other.id} (user ${other.userId}, profile '${other.remnawaveId ?? 'none'}') already ` +
+        'claims. Two live subscriptions are on one Remnawave profile: they overwrite each ' +
+        "other's limits and expiry, and a delete of either is now refused rather than run. " +
+        'Untangle them before deleting either.';
+      this.logger.error(message);
+      this.events.error(EVENT_TYPES.SYSTEM_ERROR, 'SYSTEM', message, {
+        subscriptionId: subscription.id,
+        userId: subscription.userId,
+        remnawaveId: subscription.remnawaveId,
+        conflictingSubscriptionId: other.id,
+      });
+    } catch (err: unknown) {
+      // The identity was already recorded, which is the part that matters.
+      // Losing the REPORT is a missed alert, not a lost write.
+      this.logger.warn(
+        `Could not check panel identity exclusivity for subscription ${subscription.id}: ` +
+          `${(err as Error).message}`,
+      );
     }
   }
 
@@ -1293,16 +1380,77 @@ export class ProfileSyncProcessor extends WorkerHost {
       // Refusing is the whole point: this job would otherwise delete a LIVE
       // profile. Thrown rather than skipped so the job is recorded as failed and
       // an operator is told there is an orphan on the panel to clean up by hand.
+      //
+      // The message names the KEYS the claim was found over, not "the panel
+      // username" — the check no longer needs a username to find a claimant, and
+      // an operator handed `panel username ''` for an imported row would have
+      // gone looking for a name that was never recorded.
+      const askedOver = [
+        `remnawaveId '${targetRemnawaveId}'`,
+        ...(identity.panelUsername !== null && identity.panelUsername.length > 0
+          ? [`panel username '${identity.panelUsername}'`]
+          : []),
+        ...(identity.panelId !== null ? [`panel id ${identity.panelId}`] : []),
+      ].join(', ');
       throw new Error(
         `Refusing to delete Remnawave profile '${targetRemnawaveId}' for subscription ` +
-          `${subscription.id}: panel username '${identity.panelUsername ?? ''}' now belongs to ` +
-          `subscription ${collision.id}, which is live on profile ` +
-          `'${collision.remnawaveId ?? 'unknown'}'. Resolving by that name would delete the live ` +
-          'profile. The stale panel profile must be removed manually.',
+          `${subscription.id}: it is claimed by subscription ${collision.id}, which is live on ` +
+          `profile '${collision.remnawaveId ?? 'unknown'}' (matched over ${askedOver}). Deleting ` +
+          'would take the live profile. The stale panel profile must be removed manually.',
       );
     }
 
-    const result = await this.remnawaveApiService.deletePanelUser(identity);
+    // ── LAST LINE OF DEFENCE ────────────────────────────────────────────────
+    //
+    // The same refusal `SubscriptionDeletionService` makes before it ever
+    // creates a job, asked again at the one statement that actually removes a
+    // panel profile. It is not redundant, and the reason is queue-shaped: a
+    // DELETE job is durable, so every job written BEFORE that guard existed is
+    // still sitting in `profile_sync_jobs` as PENDING or FAILED, carrying a
+    // `targetRemnawaveId` nobody re-examines. The creation-time guard cannot
+    // reach those; this one can.
+    //
+    // It also covers a job whose row has been repaired since: the payload
+    // target wins over the row here (by design — the row may have been
+    // re-provisioned), so a stale target survives even a repaired row, and
+    // resolving it now would address the row's CURRENT profile and delete it.
+    //
+    // THROWN, not skipped, matching the collision refusal immediately above:
+    // the job is recorded FAILED and `reportFailure` tells an operator, where a
+    // silent skip would report COMPLETED and leave a live profile that
+    // everything downstream believes is gone. The message carries none of
+    // `timeout|temporar|econn|429|502|503|504|unavailable`, so
+    // `classifyRecovery` reads this plain `Error` as TERMINAL rather than
+    // retrying it forever.
+    //
+    // ONE OBSERVATION OF THE PANEL ERA, TAKEN HERE AND USED TWICE. The guard
+    // below and the address `deletePanelUser` builds are now the SAME reading:
+    // `assessObservedPanelLink` is synchronous and cannot consult the panel,
+    // and `deletePanelUser` takes the observation as a required argument and
+    // never re-reads the shape. They used to be two independent
+    // `getPanelShape()` calls one await apart, and the fifteen-second negative
+    // cache can expire between two adjacent awaits — so the guard could answer
+    // "era unknown, proceed" (harmless: the address builder then emits the
+    // stored string and a 3.x panel answers 400) while the builder, reading a
+    // moment later, saw `'id'`, took the fallback through the panel id or the
+    // username, and aimed the DELETE at whatever profile is live there.
+    //
+    // The fail-open on an unreadable era is UNCHANGED and deliberate: see
+    // `stale-panel-link.ts`. What changed is only that there is one observation
+    // instead of two.
+    const era = await observePanelEra(() => this.remnawaveApiService.getPanelShape());
+    const trust = assessObservedPanelLink(era, targetRemnawaveId);
+    if (!trust.trusted) {
+      throw new Error(
+        `${SUBSCRIPTION_DELETE_STALE_PANEL_LINK_CODE}: refusing to delete Remnawave profile ` +
+          `'${targetRemnawaveId}' for subscription ${subscription.id} — that is a 2.x uuid and ` +
+          'the panel is 3.x, so it no longer names the profile this job was written for and the ' +
+          'address fallback would resolve it to whatever is live at that address. Run the ' +
+          'panel-link reconciliation, then retry this job.',
+      );
+    }
+
+    const result = await this.remnawaveApiService.deletePanelUser(identity, era);
     if (result.isDeleted) {
       this.logger.log(
         `Deleted Remnawave profile '${targetRemnawaveId}' for subscription ${subscription.id}`,
@@ -1400,8 +1548,8 @@ export class ProfileSyncProcessor extends WorkerHost {
   }
 
   /**
-   * The subscription — other than the doomed one — that is LIVE under the panel
-   * username this DELETE may resolve by, or `null` when nobody is.
+   * The subscription — other than the doomed one — that is LIVE on the panel
+   * profile this DELETE would destroy, or `null` when nobody is.
    *
    * WHY A DELETE NEEDS THIS AND THE OTHER ACTIONS DO NOT: every other job acts
    * on the row it belongs to, so the row itself vouches for the target. A DELETE
@@ -1415,20 +1563,36 @@ export class ProfileSyncProcessor extends WorkerHost {
    * with the replacement, and the delete lands on a paying customer's live
    * profile.
    *
-   * The name is the ONLY mutable key in play, which is why the question is asked
-   * about it and not about the resolved profile: a uuid and a numeric id are
-   * both immutable and unique on the panel, so neither can come to mean somebody
-   * else. Asking here also costs no panel round-trip — the collision is visible
-   * in our own rows, before anything is sent.
+   * ASKED OVER EVERY ANGLE, AND A MISSING ONE ONLY DROPS ITS OWN ARM. This
+   * opened `if (username === null) return null` — a row that could not say what
+   * it was called was read as PROOF THAT NOBODY ELSE CLAIMS THE PROFILE, which
+   * is the strongest possible answer drawn from the weakest possible evidence.
+   * It disarmed the guard for a whole population rather than for one question:
+   * `RemnawaveImporterService` wrote neither supplementary column, so every
+   * imported row carried `remnawave_panel_username = NULL`, and deleting one
+   * ran the entire check disabled — including the immutable comparisons, which
+   * that row could have answered perfectly well. Two imported rows on one panel
+   * profile (which is exactly what the importer's broken matcher produced) then
+   * deleted each other's live service, silently, with the panel confirming.
+   *
+   * Same shape as the holder check in `handleCreate` and the retirement fence in
+   * `handleDelete`: collect the arms that can be ANSWERED, OR them, and omit —
+   * never null-compare — the ones that cannot. `remnawave_panel_id` carries no
+   * unique constraint (migration 20260810160000 records why one cannot be added
+   * to live data), so `remnawavePanelId: null` would match every row that has
+   * none and turn "who else is on this profile" into "everybody".
+   *
+   * The username stays IN the question, not the whole of it: it is the only
+   * MUTABLE key here, and it is what a resolve would actually land on, so it can
+   * catch a claimant the immutable keys cannot. The immutable keys catch the
+   * claimants a missing name cannot. Neither subsumes the other.
    */
   private async panelProfileClaimedByAnother(
     subscriptionId: string,
     identity: StoredPanelIdentity,
     targetRemnawaveId: string,
   ): Promise<{ readonly id: string; readonly remnawaveId: string | null } | null> {
-    const username = identity.panelUsername;
-    if (username === null || username.length === 0) return null;
-    // ASKED AS "WHO STILL ANSWERS TO THIS NAME", NOT "WHO HOLDS AN ID".
+    // ASKED AS "WHO IS ON THIS PROFILE", NOT "WHO HOLDS AN ID".
     //
     // The question this check exists to answer is what a resolve BY USERNAME
     // would land on, and a resolve lands on a panel profile, not on a column.
@@ -1450,10 +1614,24 @@ export class ProfileSyncProcessor extends WorkerHost {
     // `remnawavePanelUsername` in the same statement, and the only writer that
     // fills the username without an id was the defect. So a non-DELETED row
     // carrying this name is a row a resolve can hit, full stop.
+    const claims: Prisma.SubscriptionWhereInput[] = [{ remnawaveId: targetRemnawaveId }];
+    const username = identity.panelUsername;
+    if (username !== null && username.length > 0) {
+      claims.push({ remnawavePanelUsername: username });
+    }
+    if (identity.panelId !== null && Number.isSafeInteger(identity.panelId)) {
+      // Both spellings of one numeric id: a row provisioned on 3.x stores the
+      // decimal in `remnawaveId` itself, while an older row records it in the
+      // supplementary column beside a 2.x uuid. They name the same profile.
+      claims.push(
+        { remnawavePanelId: identity.panelId },
+        { remnawaveId: String(identity.panelId) },
+      );
+    }
     const claimants = await this.prismaService.subscription.findMany({
       where: {
-        remnawavePanelUsername: username,
         status: { not: SubscriptionStatus.DELETED },
+        OR: claims,
       },
       select: { id: true, remnawaveId: true },
       take: 5,

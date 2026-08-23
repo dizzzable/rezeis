@@ -1548,8 +1548,11 @@ describe('InternalUserService', () => {
       });
       assert.equal(findUniqueCallsCount, 2);
       assert.equal(updateManyCallsCount, 1);
+      // A SUBSCRIBER credential: the row is `WebAccount.passwordHash` and the
+      // path that verifies it is `WebAuthService.login`.
       assert.deepStrictEqual(actualHashInput, {
         plainTextPassword: 'new-password-123',
+        audience: 'subscriber',
       });
       assert.deepStrictEqual(actualUpdateWhere, {
         userId: '11111111-1111-1111-1111-111111111111',

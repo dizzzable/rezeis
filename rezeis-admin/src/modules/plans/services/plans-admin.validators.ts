@@ -9,6 +9,7 @@ import { Currency, PlanAvailability, Prisma, SubscriptionStatus } from '@prisma/
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
 import { AdminPlanDurationDto } from '../dto/admin-plan-duration.dto';
+import { PLAN_WRITE_REFUSAL_CODES } from '../plan-write-refusal-codes';
 import { ArchivedPlanRenewModeValue } from '../utils/archived-plan-renew-mode.util';
 import { sameSquadSelection } from '../utils/plan-squads.util';
 
@@ -76,9 +77,10 @@ export class PlansAdminValidators {
       select: { id: true },
     });
     if (transitionReference !== null) {
-      throw new BadRequestException(
-        'Plan is referenced by subscriptions or transition rules. Archive it instead.',
-      );
+      throw new BadRequestException({
+        code: PLAN_WRITE_REFUSAL_CODES.DELETE_REFERENCED,
+        message: 'Plan is referenced by subscriptions or transition rules. Archive it instead.',
+      });
     }
     const subscriptionReference = await transactionClient.$queryRaw<
       readonly { readonly id: string }[]
@@ -92,9 +94,10 @@ export class PlansAdminValidators {
       `,
     );
     if (subscriptionReference.length > 0) {
-      throw new BadRequestException(
-        'Plan is referenced by subscriptions or transition rules. Archive it instead.',
-      );
+      throw new BadRequestException({
+        code: PLAN_WRITE_REFUSAL_CODES.DELETE_REFERENCED,
+        message: 'Plan is referenced by subscriptions or transition rules. Archive it instead.',
+      });
     }
   }
 
@@ -106,7 +109,10 @@ export class PlansAdminValidators {
       select: { id: true },
     });
     if (existingPlan !== null && existingPlan.id !== planId) {
-      throw new BadRequestException(`Plan with name '${name}' already exists`);
+      throw new BadRequestException({
+        code: PLAN_WRITE_REFUSAL_CODES.NAME_TAKEN,
+        message: `Plan with name '${name}' already exists`,
+      });
     }
   }
 
@@ -116,15 +122,19 @@ export class PlansAdminValidators {
     const durationDays = new Set<number>();
     for (const duration of durations) {
       if (durationDays.has(duration.days)) {
-        throw new BadRequestException(`Duration ${duration.days} days is duplicated`);
+        throw new BadRequestException({
+          code: PLAN_WRITE_REFUSAL_CODES.DURATION_DUPLICATE,
+          message: `Duration ${duration.days} days is duplicated`,
+        });
       }
       durationDays.add(duration.days);
       const currencies = new Set<Currency>();
       for (const price of duration.prices) {
         if (currencies.has(price.currency)) {
-          throw new BadRequestException(
-            `Currency '${price.currency}' is duplicated for ${duration.days} days`,
-          );
+          throw new BadRequestException({
+            code: PLAN_WRITE_REFUSAL_CODES.CURRENCY_DUPLICATE,
+            message: `Currency '${price.currency}' is duplicated for ${duration.days} days`,
+          });
         }
         currencies.add(price.currency);
       }
@@ -142,24 +152,29 @@ export class PlansAdminValidators {
       ...input.input.replacementPlanIds,
     ]);
     if (input.planId !== null && transitionIds.has(input.planId)) {
-      throw new BadRequestException('Plan transitions cannot reference the same plan');
+      throw new BadRequestException({
+        code: PLAN_WRITE_REFUSAL_CODES.TRANSITION_SELF_REFERENCE,
+        message: 'Plan transitions cannot reference the same plan',
+      });
     }
     if (
       input.input.isArchived &&
       input.input.archivedRenewMode === ArchivedPlanRenewModeValue.REPLACE_ON_RENEW &&
       input.input.replacementPlanIds.length === 0
     ) {
-      throw new BadRequestException(
-        'Archived plans with replacement renew mode must define replacement plans',
-      );
+      throw new BadRequestException({
+        code: PLAN_WRITE_REFUSAL_CODES.TRANSITION_REPLACEMENT_REQUIRED,
+        message: 'Archived plans with replacement renew mode must define replacement plans',
+      });
     }
     if (
       !input.input.isArchived &&
       input.input.archivedRenewMode !== ArchivedPlanRenewModeValue.SELF_RENEW
     ) {
-      throw new BadRequestException(
-        'Only archived plans may define replacement renew behavior',
-      );
+      throw new BadRequestException({
+        code: PLAN_WRITE_REFUSAL_CODES.TRANSITION_RENEW_MODE_NOT_ARCHIVED,
+        message: 'Only archived plans may define replacement renew behavior',
+      });
     }
   }
 
@@ -175,9 +190,11 @@ export class PlansAdminValidators {
         select: { availability: true },
       });
       if (currentPlan !== null && currentPlan.availability !== PlanAvailability.TRIAL) {
-        throw new BadRequestException(
-          'Existing non-trial plans cannot be converted to TRIAL; create a dedicated trial plan.',
-        );
+        throw new BadRequestException({
+          code: PLAN_WRITE_REFUSAL_CODES.TRIAL_CONVERSION_FORBIDDEN,
+          message:
+            'Existing non-trial plans cannot be converted to TRIAL; create a dedicated trial plan.',
+        });
       }
     }
     if (
@@ -196,10 +213,16 @@ export class PlansAdminValidators {
       select: { id: true },
     });
     if (existingTrial !== null && existingTrial.id !== input.planId) {
-      throw new BadRequestException('Only one active trial plan is allowed');
+      throw new BadRequestException({
+        code: PLAN_WRITE_REFUSAL_CODES.TRIAL_ALREADY_EXISTS,
+        message: 'Only one active trial plan is allowed',
+      });
     }
     if (input.input.durations.length !== 1) {
-      throw new BadRequestException('Trial plans must define exactly one duration');
+      throw new BadRequestException({
+        code: PLAN_WRITE_REFUSAL_CODES.TRIAL_DURATION_COUNT,
+        message: 'Trial plans must define exactly one duration',
+      });
     }
     // A paid trial is billed through the normal payment pipeline, so it
     // must carry at least one price. A free trial must NOT define a price
@@ -207,7 +230,10 @@ export class PlansAdminValidators {
     const trialDuration = input.input.durations[0];
     const hasPrice = trialDuration.prices.some((price) => Number(price.price) > 0);
     if (!input.input.trialSettings.free && !hasPrice) {
-      throw new BadRequestException('Paid trial plans must define at least one non-zero price');
+      throw new BadRequestException({
+        code: PLAN_WRITE_REFUSAL_CODES.TRIAL_PRICE_REQUIRED,
+        message: 'Paid trial plans must define at least one non-zero price',
+      });
     }
   }
 
@@ -232,7 +258,10 @@ export class PlansAdminValidators {
     const referencedById = new Map(referencedPlans.map((plan) => [plan.id, plan]));
     const missingIds = referencedIds.filter((id) => !referencedById.has(id));
     if (missingIds.length > 0) {
-      throw new BadRequestException(`Referenced plans not found: ${missingIds.join(', ')}`);
+      throw new BadRequestException({
+        code: PLAN_WRITE_REFUSAL_CODES.TRANSITION_TARGET_NOT_FOUND,
+        message: `Referenced plans not found: ${missingIds.join(', ')}`,
+      });
     }
     const invalidIds = referencedPlans
       .filter(
@@ -243,15 +272,22 @@ export class PlansAdminValidators {
       )
       .map((plan) => plan.id);
     if (invalidIds.length > 0) {
-      throw new BadRequestException(
-        `Replacement and upgrade plans must be active non-trial public plans: ${invalidIds.join(', ')}`,
-      );
+      throw new BadRequestException({
+        code: PLAN_WRITE_REFUSAL_CODES.TRANSITION_TARGET_NOT_ASSIGNABLE,
+        message: `Replacement and upgrade plans must be active non-trial public plans: ${invalidIds.join(', ')}`,
+      });
     }
   }
 
   // ── Allowed users must exist ────────────────────────────────────────────
 
-  private async assertAllowedUsersExist(allowedUserIds: readonly string[]): Promise<void> {
+  /**
+   * Public because the allow-list has two writers and they must refuse a stale
+   * id identically. {@link PlansAdminService.setUserPlanAccess} — the user-card
+   * toggle — calls it with the single id it is moving; `assertPlanWriteIsValid`
+   * calls it with the whole array the plan editor submitted.
+   */
+  public async assertAllowedUsersExist(allowedUserIds: readonly string[]): Promise<void> {
     if (allowedUserIds.length === 0) {
       return;
     }
@@ -262,7 +298,10 @@ export class PlansAdminValidators {
     const userIds = new Set(users.map((user) => user.id));
     const missingUserIds = allowedUserIds.filter((userId) => !userIds.has(userId));
     if (missingUserIds.length > 0) {
-      throw new BadRequestException(`Allowed users not found: ${missingUserIds.join(', ')}`);
+      throw new BadRequestException({
+        code: PLAN_WRITE_REFUSAL_CODES.ALLOWED_USERS_NOT_FOUND,
+        message: `Allowed users not found: ${missingUserIds.join(', ')}`,
+      });
     }
   }
 
@@ -313,10 +352,12 @@ export class PlansAdminValidators {
         this.logger.error(
           `Refusing plan write: squads changed but the Remnawave panel could not be asked (${reason})`,
         );
-        throw new ServiceUnavailableException(
-          'Squads were not saved: the Remnawave panel could not be reached to verify them. ' +
+        throw new ServiceUnavailableException({
+          code: PLAN_WRITE_REFUSAL_CODES.SQUAD_VALIDATION_UNAVAILABLE,
+          message:
+            'Squads were not saved: the Remnawave panel could not be reached to verify them. ' +
             'Retry once the panel is back, or save the rest of the plan without changing squads.',
-        );
+        });
       }
       this.logger.warn(
         `Squad validation skipped for an unchanged squad selection — the Remnawave panel could not be reached (${reason})`,
@@ -330,12 +371,16 @@ export class PlansAdminValidators {
       (squad) => !internalSquadIds.has(squad),
     );
     if (missingInternalSquads.length > 0) {
-      throw new BadRequestException(
-        `Internal squads not found: ${missingInternalSquads.join(', ')}`,
-      );
+      throw new BadRequestException({
+        code: PLAN_WRITE_REFUSAL_CODES.INTERNAL_SQUADS_NOT_FOUND,
+        message: `Internal squads not found: ${missingInternalSquads.join(', ')}`,
+      });
     }
     if (input.externalSquad !== null && !externalSquadIds.has(input.externalSquad)) {
-      throw new BadRequestException(`External squad not found: ${input.externalSquad}`);
+      throw new BadRequestException({
+        code: PLAN_WRITE_REFUSAL_CODES.EXTERNAL_SQUAD_NOT_FOUND,
+        message: `External squad not found: ${input.externalSquad}`,
+      });
     }
   }
 }

@@ -318,10 +318,16 @@ export class AdminRemnawaveController {
     return { ok: true };
   }
 
-  // ── Live (ip-control: active sessions / source IPs) ─────────────────────────
+  // ── Live (active sessions / source IPs) ─────────────────────────────────────
   //
-  // Matured on Remnawave 2.8.x (see RemnawaveVersionService.liveIpControl —
-  // 3.x renamed the whole family to `connections/*`, which is not wired yet).
+  // Matured on Remnawave 2.8.x under `ip-control/*` (see
+  // RemnawaveVersionService.liveIpControl). 3.x deleted that family and
+  // replaced it with `connections/*`, and the adapter speaks BOTH: the three
+  // methods below pick the family from the detected panel shape, so these
+  // routes serve a 3.x panel as well as a 2.8 one. This comment used to say the
+  // 3.x family "is not wired yet", which stopped being true when
+  // `fetchUsersIpsForNode` / `fetchUserIps` / `dropConnections` learned it.
+  //
   // The SPA only surfaces the Live tab when the capability is on, but the
   // routes stay reachable so an operator can probe a single node/user on
   // demand.

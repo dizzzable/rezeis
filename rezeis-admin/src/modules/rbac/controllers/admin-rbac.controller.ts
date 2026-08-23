@@ -17,7 +17,9 @@ import {
   ApiTags,
 } from '@nestjs/swagger';
 
+import { CurrentAdmin } from '../../auth/decorators/current-admin.decorator';
 import { AdminJwtAuthGuard } from '../../auth/guards/admin-jwt-auth.guard';
+import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.interface';
 import { RequirePermission } from '../decorators/require-permission.decorator';
 import { CreateAdminRoleDto, UpdateAdminRoleDto } from '../dto/upsert-admin-role.dto';
 import { RbacGuard } from '../guards/rbac.guard';
@@ -69,26 +71,32 @@ export class AdminRbacController {
   @HttpCode(HttpStatus.CREATED)
   @RequirePermission('rbac_roles', 'create')
   @ApiOperation({ summary: 'Creates a new custom role with the supplied permission matrix' })
-  public createRole(@Body() dto: CreateAdminRoleDto): Promise<AdminRoleInterface> {
+  public async createRole(
+    @Body() dto: CreateAdminRoleDto,
+    @CurrentAdmin() admin: CurrentAdminInterface,
+  ): Promise<AdminRoleInterface> {
     return this.rbacService.createRole({
       name: dto.name,
       displayName: dto.displayName,
       description: dto.description ?? null,
       permissions: dto.permissions,
+      actorPermissions: await this.actorPermissions(admin),
     });
   }
 
   @Put('roles/:id')
   @RequirePermission('rbac_roles', 'edit')
   @ApiOperation({ summary: 'Replaces a role display info and (for non-system roles) its permissions' })
-  public updateRole(
+  public async updateRole(
     @Param('id') id: string,
     @Body() dto: UpdateAdminRoleDto,
+    @CurrentAdmin() admin: CurrentAdminInterface,
   ): Promise<AdminRoleInterface> {
     return this.rbacService.updateRole(id, {
       displayName: dto.displayName,
       description: dto.description ?? null,
       permissions: dto.permissions,
+      actorPermissions: await this.actorPermissions(admin),
     });
   }
 
@@ -107,5 +115,25 @@ export class AdminRbacController {
   public async syncSystemRoles(): Promise<{ ok: true }> {
     await this.rbacService.seedSystemRoles();
     return { ok: true };
+  }
+
+  /**
+   * The acting admin's own grants, which bound what the two write routes above
+   * may hand out.
+   *
+   * `rbac_roles:edit` on its own used to be the whole panel: the service
+   * validated the submitted pairs against the catalog and nothing else, so an
+   * admin could open their own custom role, tick `admins:edit`, save, and then
+   * PATCH their own account to `role: DEV`. Resolved here rather than inside
+   * the service because only the request knows who is acting -
+   * `admin-config-portability.controller.ts` resolves `importerPermissions`
+   * the same way for the same reason.
+   */
+  private actorPermissions(admin: CurrentAdminInterface): Promise<ReadonlySet<string>> {
+    return this.rbacService.getEffectivePermissionTokens({
+      id: admin.id,
+      role: admin.role,
+      rbacRoleId: admin.rbacRoleId,
+    });
   }
 }

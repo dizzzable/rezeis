@@ -202,6 +202,55 @@ export default defineConfig({
     globals: true,
     environment: 'jsdom',
     setupFiles: ['./src/test/setup-tests.ts'],
+    // ── Worker cap. The problem here is OVERSUBSCRIPTION, not parallelism. ──
+    //
+    // Uncapped, vitest takes one worker per core (16 here) and each one pays
+    // for its own jsdom and its own copy of the module graph. Measured on this
+    // tree, 201 files, on an OTHERWISE IDLE machine — the cumulative figures
+    // are vitest's own, summed across workers:
+    //
+    //     workers   wall     transform+import+tests+environment
+    //        4      111s      ~301s
+    //        8       69s      ~365s
+    //       16       64s      ~910s
+    //
+    // Read the right-hand column before "optimising" the left one. Going from
+    // 8 to 16 does roughly 2.5x the actual work to run the same 3239 tests —
+    // sixteen jsdom environments and sixteen module graphs — and buys 5s, and
+    // only buys it when all sixteen cores happen to be idle. That is the
+    // exception, not the rule: the same machine is also running this repo's
+    // backend suite, a build, an editor, or a second copy of this suite. On a
+    // machine already busy the uncapped run went RED —
+    // referral-eligible-plans-catalog blew its `findByRole` timeout waiting
+    // for a chip that renders in ~2s in isolation, and another run put a
+    // branding test at 76s. Nothing is wrong with those tests; every `waitFor`
+    // in the suite is racing a machine that has been oversold.
+    //
+    // 8 leaves half the box free, which is what actually stops those timeouts,
+    // and gives up 5s against uncapped to do it. 4 was measured too and is not
+    // chosen: it buys safety beyond what the contention needs and costs 42s on
+    // an idle machine — nearly double 8 — for no observed stability gain.
+    //
+    // Tune this for a developer running the suite, not for whatever is
+    // saturating the machine this week. A number picked while several other
+    // processes were hammering the box is an anecdote, not a measurement; the
+    // table above was taken on an idle one, and so should its replacement be.
+    //
+    // ⚠ The symptom that costs the most time to diagnose: when a worker dies
+    // under memory pressure, vitest's summary reads
+    //
+    //     Test Files  214 passed (215)
+    //
+    // — a total one higher than the passed count, with NOTHING listed as
+    // failed and, depending on the reporter, exit code 0. That gap is a test
+    // file whose worker was killed, not a file that passed. If you ever see
+    // `N passed (N+1)`, you are looking at a dead worker, not a green run;
+    // re-run with a lower cap rather than trusting the summary.
+    //
+    // An explicit `--maxWorkers` on the command line still wins — CLI options
+    // override the config file — so bisecting with 1, 4 or 16 needs no edit
+    // here.
+    maxWorkers: 8,
     // jsdom + Recharts/userEvent heavy specs occasionally exceed the 5s default
     // under parallel worker contention (they finish in ~2s in isolation). A
     // genuinely hung test still fails — this just matches the threshold to the

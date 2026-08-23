@@ -69,7 +69,7 @@ describe('AddOnsPage accessibility', () => {
               isActive: true,
               orderIndex: 1,
               applicablePlanIds: [],
-              prices: [{ currency: 'RUB', price: 50 }],
+              prices: [{ currency: 'RUB', price: '50' }],
             },
           ],
         }

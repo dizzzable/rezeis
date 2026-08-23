@@ -12,11 +12,13 @@ import {
   strictOk,
   strictUnavailable,
 } from '../src/modules/remnawave/interfaces/remnawave-strict-outcome.interface';
+import { REZEIS_AUTHORITATIVE_SUBSCRIPTION_FIELDS } from '../src/modules/remnawave/services/panel-field-ownership';
 import {
   panelUserAddress,
   type StoredPanelIdentity,
 } from '../src/modules/remnawave/services/panel-user-address';
 import { AdminUserSubscriptionsController } from '../src/modules/users/controllers/admin-user-subscriptions.controller';
+import { SUBSCRIPTION_SYNC_REFUSAL_CODES } from '../src/modules/users/controllers/subscription-sync-refusals';
 
 /**
  * The one message `linkRemnawaveProfile` gives an operator whose identifier is
@@ -159,10 +161,24 @@ function repairLink(controller: AdminUserSubscriptionsController, pastedIdentity
   return controller.linkRemnawaveProfile(
     'legacy-subscription',
     { remnawaveId: pastedIdentity },
-    { id: 'admin-1' } as never,
-    { headers: {}, ip: null, socket: { remoteAddress: null } } as never,
+    ACTING_ADMIN,
+    ACTING_REQUEST,
   );
 }
+
+/** The acting operator, as `@CurrentAdmin()` hands it to every audited route. */
+const ACTING_ADMIN = { id: 'admin-1' } as never;
+
+/**
+ * Enough of an express `Request` for `extractRequestMetadata` — it reads
+ * `headers['x-request-id']`, `headers['user-agent']`, `ip` and
+ * `socket.remoteAddress` and nothing else.
+ */
+const ACTING_REQUEST = {
+  headers: { 'x-request-id': 'req-1', 'user-agent': 'jest' },
+  ip: '10.0.0.7',
+  socket: { remoteAddress: null },
+} as never;
 
 /** One profile, under both of the names the two panel eras give it. */
 const PROFILE_P_UUID = '330f2b38-6bb1-4b0e-9d4c-2a6c2a2f1b77';
@@ -199,9 +215,12 @@ describe('AdminUserSubscriptionsController', () => {
       {} as never,
     );
 
-    const result = await controller.updateSubscription('legacy-subscription', {
-      status: SubscriptionStatus.DISABLED,
-    });
+    const result = await controller.updateSubscription(
+      'legacy-subscription',
+      { status: SubscriptionStatus.DISABLED },
+      ACTING_ADMIN,
+      ACTING_REQUEST,
+    );
 
     assert.deepStrictEqual(result, {
       id: 'legacy-subscription',
@@ -248,9 +267,12 @@ describe('AdminUserSubscriptionsController', () => {
       {} as never,
     );
 
-    const result = await controller.updateSubscription('unlinked-subscription', {
-      status: SubscriptionStatus.DISABLED,
-    });
+    const result = await controller.updateSubscription(
+      'unlinked-subscription',
+      { status: SubscriptionStatus.DISABLED },
+      ACTING_ADMIN,
+      ACTING_REQUEST,
+    );
 
     assert.deepStrictEqual(result, {
       id: 'unlinked-subscription',
@@ -306,9 +328,12 @@ describe('AdminUserSubscriptionsController', () => {
       {} as never,
     );
 
-    await controller.updateSubscription('linked-subscription', {
-      status: SubscriptionStatus.DISABLED,
-    });
+    await controller.updateSubscription(
+      'linked-subscription',
+      { status: SubscriptionStatus.DISABLED },
+      ACTING_ADMIN,
+      ACTING_REQUEST,
+    );
 
     assert.deepStrictEqual(warned, []);
   });
@@ -920,22 +945,32 @@ async function captureRejection(action: () => Promise<unknown>): Promise<unknown
 }
 
 describe('syncSubscription — an unreachable panel is not a missing profile', () => {
-  function build(outcome: { kind: string; user?: Record<string, unknown> }) {
+  /**
+   * `row: null` is the subscription that never had a panel profile — the
+   * refusal that is decided before the panel is consulted at all. It is a
+   * parameter rather than a second harness so the three refusals can be
+   * asserted from one table below.
+   */
+  function build(
+    outcome: { kind: string; user?: Record<string, unknown> },
+    row: Record<string, unknown> | null = panelBackedRow({ userId: 'user-1' }),
+  ) {
     const updates: unknown[] = [];
+    const panelReads: string[] = [];
     const controller = new AdminUserSubscriptionsController(
       {
         subscription: {
-          findUnique: async () => panelBackedRow({ userId: 'user-1' }),
+          findUnique: async () => row,
           update: async (input: unknown) => { updates.push(input); return {}; },
         },
       } as never,
-      { getPanelUserOutcome: async () => outcome } as never,
+      { getPanelUserOutcome: async () => { panelReads.push('read'); return outcome; } } as never,
       {} as never,
       {} as never,
       {} as never,
       {} as never,
     );
-    return { controller, updates };
+    return { controller, updates, panelReads };
   }
 
   it('says the panel could not be reached, and writes nothing', async () => {
@@ -961,12 +996,609 @@ describe('syncSubscription — an unreachable panel is not a missing profile', (
   });
 
   it('syncs from the panel row when the read succeeds', async () => {
-    const { controller, updates } = build({
-      kind: 'ok',
-      user: { expireAt: '2099-01-01T00:00:00.000Z', subscriptionUrl: 'https://sub/x' },
-    });
+    const { controller, updates } = build({ kind: 'ok', user: syncedPanelProfile() });
     const result = await controller.syncSubscription('sub-1');
     assert.equal(result.synced, true);
     assert.equal(updates.length, 1);
+  });
+
+  /**
+   * THE MACHINE-READABLE HALF of each refusal.
+   *
+   * All three answer HTTP 200 — none of them is a failure — so the admin SPA
+   * decides which of the three it is from the BODY. It used to decide by
+   * matching this English prose byte for byte, em dash included, which made
+   * every one of these sentences load-bearing copy: a typo fix or a house
+   * style pass would have collapsed all three into one generic notice, the
+   * operator would still have seen a non-success message, and the specific
+   * guidance — link a profile / press it again / the link is genuinely broken —
+   * would simply have stopped arriving with nothing failing anywhere.
+   *
+   * The codes are IMPORTED from `subscription-sync-refusals.ts`, never retyped.
+   * A rename there moves the wire value and this assertion in the same edit, so
+   * this spec cannot end up certifying a code nobody sends.
+   *
+   * The sentences stay asserted beside them, and not out of nostalgia: a panel
+   * build older than the code still matches on them during a rolling deploy.
+   */
+  const REFUSALS = [
+    {
+      name: 'no profile is linked',
+      row: null,
+      // Reached only if the endpoint consults the panel about a subscription
+      // that has no profile — which `panelReads` below proves it does not.
+      outcome: { kind: 'ok', user: syncedPanelProfile() },
+      code: SUBSCRIPTION_SYNC_REFUSAL_CODES.notLinked,
+      message: 'No Remnawave profile linked',
+    },
+    {
+      name: 'the panel could not be reached',
+      row: undefined,
+      outcome: { kind: 'unavailable' },
+      code: SUBSCRIPTION_SYNC_REFUSAL_CODES.panelUnavailable,
+      message: 'Remnawave panel could not be reached — try again',
+    },
+    {
+      name: 'the profile is gone',
+      row: undefined,
+      outcome: { kind: 'missing' },
+      code: SUBSCRIPTION_SYNC_REFUSAL_CODES.profileMissing,
+      message: 'Profile not found on panel',
+    },
+  ] as const;
+
+  for (const refusal of REFUSALS) {
+    it(`carries a stable code, not only a sentence, when ${refusal.name}`, async () => {
+      const { controller, updates, panelReads } = build(
+        { ...refusal.outcome },
+        refusal.row === null ? null : undefined,
+      );
+
+      const result = await controller.syncSubscription('sub-1');
+      const body = result as Record<string, unknown>;
+
+      assert.equal(body.synced, false);
+      assert.equal(body.code, refusal.code);
+      // Both halves, together. The code is what the panel branches on; the
+      // message is what an older panel build falls back to and what any log
+      // reader sees. Dropping either is a behaviour change.
+      assert.equal(body.message, refusal.message);
+      assert.deepEqual(updates, [], 'a refusal must not write');
+      if (refusal.row === null) {
+        assert.deepEqual(
+          panelReads,
+          [],
+          'a subscription with no profile must not be looked up on the panel',
+        );
+      }
+    });
+  }
+
+  it('gives the three refusals three DIFFERENT codes', () => {
+    // The anchor for the table above. Three rows that all assert the same
+    // literal would pass every assertion in it while leaving the SPA unable to
+    // tell an outage from a broken link — which is the entire point of the
+    // codes, and the exact confusion the message split was made to end.
+    const codes = Object.values(SUBSCRIPTION_SYNC_REFUSAL_CODES);
+    assert.equal(codes.length, 3);
+    assert.equal(new Set(codes).size, 3, codes.join(', '));
+  });
+});
+
+/**
+ * A panel row as `parsePanelUserRow` builds one: EVERY field present, because
+ * that parser always produces every field — it substitutes `''`, `0`, `null`
+ * or `[]` for anything the panel omitted rather than leaving a key out. A fake
+ * that carried only the two fields a test happens to assert on would be a
+ * panel that cannot exist, and would let a writer that reads the defaults as
+ * facts keep passing.
+ */
+function syncedPanelProfile(overrides: Record<string, unknown> = {}) {
+  return {
+    uuid: 'rem-user-1',
+    username: 'rz_bob_1',
+    status: 'ACTIVE',
+    subscriptionUrl: 'https://panel.example.test/sub/fresh',
+    telegramId: 42,
+    panelId: 4471,
+    email: null,
+    expireAt: '2099-01-01T00:00:00.000Z',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    lastTrafficResetAt: null,
+    trafficLimitBytes: 0,
+    hwidDeviceLimit: 0,
+    trafficLimitStrategy: null,
+    tag: null,
+    description: null,
+    activeInternalSquads: [] as Array<{ uuid: string; name: string }>,
+    externalSquadUuid: null,
+    ...overrides,
+  };
+}
+
+/**
+ * The settings an operator applied in rezeis, on a subscription rezeis
+ * provisions. Every one of these columns is PUSHED into the panel by
+ * `ProfileSyncProcessor`; none of them may come back the other way through a
+ * refresh. They are deliberately far from both the panel fixture's values and
+ * from `parsePanelUserRow`'s defaults, so a writer that adopted either would
+ * land on a different number rather than coincidentally on the right one.
+ */
+const OPERATOR_ASSIGNED = {
+  status: SubscriptionStatus.DISABLED,
+  trafficLimit: 200,
+  deviceLimit: 3,
+  internalSquads: ['squad-paid'],
+  externalSquad: 'ext-paid',
+  expiresAt: new Date('2027-03-01T00:00:00.000Z'),
+  planSnapshot: { name: 'Pro 200' },
+};
+
+/** The stored `configUrl` the panel fixtures below must not be able to erase. */
+const STORED_CONFIG_URL = 'https://panel.example.test/sub/stored';
+
+/**
+ * The sync endpoint over ONE stored row, with a Prisma-faithful `update`: a
+ * column the payload omits — or sets to `undefined` — is LEFT ALONE, and one
+ * set to `null` is cleared. That distinction is the entire mechanism by which
+ * this endpoint refuses to erase what it could not read, so the fake has to
+ * honour it; an `update` that merely recorded its argument would let a writer
+ * that nulls every unread column pass every assertion below.
+ */
+function syncOver(options: {
+  outcome: { kind: string; user?: Record<string, unknown> };
+  stored?: Record<string, unknown>;
+}) {
+  const stored: Record<string, unknown> = {
+    ...panelBackedRow({ userId: 'user-1' }),
+    configUrl: STORED_CONFIG_URL,
+    ...OPERATOR_ASSIGNED,
+    ...options.stored,
+  };
+  const updates: Array<Record<string, unknown>> = [];
+  const controller = new AdminUserSubscriptionsController(
+    {
+      subscription: {
+        findUnique: async () => ({ ...stored }),
+        update: async (input: unknown) => {
+          const data = (input as { data: Record<string, unknown> }).data;
+          updates.push(data);
+          for (const [column, value] of Object.entries(data)) {
+            if (value === undefined) continue;
+            stored[column] = value;
+          }
+          return { ...stored };
+        },
+      },
+    } as never,
+    { getPanelUserOutcome: async () => options.outcome } as never,
+    {} as never,
+    {} as never,
+    {} as never,
+    {} as never,
+  );
+  return { controller, updates, stored };
+}
+
+/**
+ * A panel that has drifted away from the plan on every column rezeis owns, and
+ * that names itself on every column only the panel can know.
+ */
+const DRIFTED_PANEL = syncedPanelProfile({
+  status: 'LIMITED',
+  trafficLimitBytes: 5 * 1024 * 1024 * 1024,
+  hwidDeviceLimit: 12,
+  activeInternalSquads: [{ uuid: 'squad-free', name: 'Free' }],
+  externalSquadUuid: 'ext-free',
+});
+
+describe('syncSubscription — a refresh adopts panel facts without rewriting the plan', () => {
+  it('adopts the columns only the panel can know', async () => {
+    const { controller, stored } = syncOver({
+      outcome: { kind: 'ok', user: syncedPanelProfile() },
+      stored: { configUrl: null, remnawavePanelId: null, remnawavePanelUsername: null },
+    });
+
+    const result = await controller.syncSubscription('sub-1');
+
+    assert.equal(result.synced, true);
+    assert.deepEqual(result.refreshed, {
+      configUrl: 'https://panel.example.test/sub/fresh',
+      remnawavePanelId: 4471,
+      remnawavePanelUsername: 'rz_bob_1',
+      expiresAt: new Date('2099-01-01T00:00:00.000Z'),
+    });
+    assert.equal(stored.configUrl, 'https://panel.example.test/sub/fresh');
+    // Not cosmetic: `ProfileSyncProcessor.panelProfileClaimedByAnother` is the
+    // one guard between a DELETE and somebody else's live panel profile, and it
+    // can only see a claimant through these two columns.
+    assert.equal(stored.remnawavePanelId, 4471);
+    assert.equal(stored.remnawavePanelUsername, 'rz_bob_1');
+  });
+
+  it('writes no column rezeis owns, however far the panel has drifted', async () => {
+    const { controller, updates } = syncOver({
+      outcome: { kind: 'ok', user: DRIFTED_PANEL },
+    });
+
+    await controller.syncSubscription('sub-1');
+
+    // Anchor first: a refresh that wrote nothing at all would satisfy the
+    // direction-complete assertion below for the wrong reason.
+    assert.equal(updates.length, 1, 'the refresh must reach a write to be worth checking');
+    const written = new Set(updates.flatMap((payload) => Object.keys(payload)));
+    const trespass = REZEIS_AUTHORITATIVE_SUBSCRIPTION_FIELDS.filter((field) =>
+      written.has(field),
+    );
+    assert.deepEqual(
+      trespass,
+      [],
+      `a refresh must not write columns rezeis pushes into the panel: ${trespass.join(', ')}`,
+    );
+  });
+
+  it('leaves the limits, squads and status an operator assigned exactly as they were', async () => {
+    const { controller, stored } = syncOver({
+      outcome: { kind: 'ok', user: DRIFTED_PANEL },
+    });
+
+    await controller.syncSubscription('sub-1');
+
+    // The panel says 12 devices, 5 GB, one free squad and LIMITED. rezeis sold
+    // 3 devices, 200 GB, a paid squad, and an operator disabled the row. The
+    // panel is DOWNSTREAM of all four — `ProfileSyncProcessor` pushes them —
+    // so adopting them back would replace the plan with its own echo, drifted.
+    assert.equal(stored.deviceLimit, 3);
+    assert.equal(stored.trafficLimit, 200);
+    assert.deepEqual(stored.internalSquads, ['squad-paid']);
+    assert.equal(stored.externalSquad, 'ext-paid');
+    assert.equal(stored.status, SubscriptionStatus.DISABLED);
+    // `planSnapshot` carries `name`, which the cabinet, the bot and every
+    // invoice render as the customer's plan. Prisma writes a `Json` column
+    // wholesale, so any second writer built from panel facts alone drops it.
+    assert.deepEqual(stored.planSnapshot, { name: 'Pro 200' });
+  });
+
+  it('shows the operator what the panel reports for the columns it did not adopt', async () => {
+    const { controller } = syncOver({ outcome: { kind: 'ok', user: DRIFTED_PANEL } });
+
+    const result = await controller.syncSubscription('sub-1');
+
+    // Refusing to adopt the drift is only half the answer: an operator who
+    // pressed "sync" because a customer is complaining still has to be able to
+    // SEE that the panel is enforcing 12 devices against a 3-device plan.
+    assert.deepEqual(result.panelReports, {
+      status: 'LIMITED',
+      trafficLimitBytes: 5 * 1024 * 1024 * 1024,
+      hwidDeviceLimit: 12,
+      internalSquads: ['squad-free'],
+      externalSquad: 'ext-free',
+    });
+  });
+
+  it('does not erase a recorded panel identity, config URL or expiry with an answer that states none', async () => {
+    // Everything `parsePanelUserRow` substitutes for a field the panel omitted:
+    // `''` for the URL and the expiry, `null` for the numeric id, `''` for the
+    // username. None of them is a statement about the profile.
+    const { controller, stored } = syncOver({
+      outcome: {
+        kind: 'ok',
+        user: syncedPanelProfile({
+          subscriptionUrl: '',
+          panelId: null,
+          username: '',
+          expireAt: '',
+        }),
+      },
+    });
+
+    const result = await controller.syncSubscription('sub-1');
+
+    assert.equal(result.synced, true);
+    assert.deepEqual(result.refreshed, {});
+    assert.equal(stored.remnawavePanelId, 4471);
+    assert.equal(stored.remnawavePanelUsername, 'rz_bob_1');
+    assert.equal(stored.configUrl, STORED_CONFIG_URL);
+    // And the expiry an operator sold, against the unguarded
+    // `new Date(panelUser.expireAt)` this replaced: on `''` that is an Invalid
+    // Date, which Prisma refuses at the driver — a 500 from the one endpoint an
+    // operator presses to reassure themselves.
+    assert.deepEqual(stored.expiresAt, new Date('2027-03-01T00:00:00.000Z'));
+  });
+
+  it('adopts an expiry the panel actually states', async () => {
+    const { controller, stored } = syncOver({
+      outcome: {
+        kind: 'ok',
+        user: syncedPanelProfile({ expireAt: '2099-01-01T00:00:00.000Z' }),
+      },
+    });
+
+    const result = await controller.syncSubscription('sub-1');
+
+    assert.deepEqual(stored.expiresAt, new Date('2099-01-01T00:00:00.000Z'));
+    assert.deepEqual(result.refreshed?.expiresAt, new Date('2099-01-01T00:00:00.000Z'));
+  });
+});
+
+// ── The subscription editor's limit edits leave a durable trace ────────────
+//
+// `resolveInheritedPlanLimitUpdate`
+// (`subscriptions/services/plan-inherited-limits.util.ts`) decides at renewal
+// whether a limit column was individually adjusted by comparing it against
+// `plan_snapshot`. It is sound going forward and blind backwards: for a row
+// whose column and snapshot already disagree it cannot tell an operator's
+// deliberate value from drift (an import, a mirrored snapshot from before the
+// freeze), which is exactly why a one-off repair of existing rows is not safely
+// derivable. The editor changed limits for years and wrote NOTHING — `auditLog`
+// was called for `remnawave_linked`, `deleted`, `given`, `trial.granted` and
+// `sync.requested`, and for neither PATCH that moves a limit.
+//
+// These pin the evidence: that it names WHICH limit moved and to what, that a
+// no-op PATCH manufactures none, and that a plan assignment is distinguishable
+// from an individual edit — a replay that confused the two would read every
+// legitimate reset as an override.
+
+/** A complete subscription row: the editor reads all four limit columns. */
+function editableRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'sub-1',
+    userId: 'user-1',
+    remnawaveId: 'panel-user-1',
+    expiresAt: new Date('2099-01-01T00:00:00.000Z'),
+    trafficLimit: 100,
+    deviceLimit: 3,
+    internalSquads: ['squad-a'],
+    externalSquad: null,
+    ...overrides,
+  };
+}
+
+interface AuditEntry {
+  readonly action: string;
+  readonly metadata: Record<string, unknown>;
+  readonly adminUser: { readonly connect: { readonly id: string } };
+  readonly ipAddress: string | null;
+  readonly userAgent: string | null;
+}
+
+/**
+ * The subscription editor over an in-memory row, recording audit writes.
+ *
+ * The transaction client gets its OWN update recorder, separate from the base
+ * client's: `updateSubscription` writes inside a transaction and `updateSquads`
+ * writes outside one, and a shared recorder could not tell those apart — a
+ * write that escaped its transaction would look identical to one that did not.
+ * Audit writes are collected from both sides and read as one list, because
+ * WHERE the entry is written is not what these cases are about.
+ */
+function editorHarness(options: {
+  readonly row?: Record<string, unknown>;
+  readonly plan?: Record<string, unknown> | null;
+} = {}) {
+  const row = options.row ?? editableRow();
+  const baseAudits: AuditEntry[] = [];
+  const txAudits: AuditEntry[] = [];
+  const baseUpdates: Array<Record<string, unknown>> = [];
+  const txUpdates: Array<Record<string, unknown>> = [];
+
+  const applyUpdate = (input: unknown, sink: Array<Record<string, unknown>>) => {
+    const data = (input as { readonly data: Record<string, unknown> }).data;
+    sink.push(data);
+    return { ...row, ...data };
+  };
+
+  const controller = new AdminUserSubscriptionsController(
+    {
+      subscription: {
+        findUnique: async () => row,
+        update: async (input: unknown) => applyUpdate(input, baseUpdates),
+      },
+      plan: { findUnique: async () => options.plan ?? null },
+      profileSyncJob: { create: async () => ({ id: 'sync-1' }) },
+      adminAuditLog: {
+        create: async (input: unknown) => {
+          baseAudits.push((input as { readonly data: AuditEntry }).data);
+        },
+      },
+      $transaction: async (callback: (tx: unknown) => Promise<unknown>) =>
+        callback({
+          subscription: { update: async (input: unknown) => applyUpdate(input, txUpdates) },
+          profileSyncJob: { create: async () => ({ id: 'sync-1' }) },
+          adminAuditLog: {
+            create: async (input: unknown) => {
+              txAudits.push((input as { readonly data: AuditEntry }).data);
+            },
+          },
+        }),
+    } as never,
+    {} as never,
+    { enqueue: async () => undefined } as never,
+    { warn: () => undefined } as never,
+    {} as never,
+    {} as never,
+  );
+
+  return {
+    controller,
+    get audits() {
+      return [...baseAudits, ...txAudits];
+    },
+    get baseUpdates() {
+      return baseUpdates;
+    },
+    get txUpdates() {
+      return txUpdates;
+    },
+  };
+}
+
+/** The one audit entry a case expects, or a loud failure naming what it got. */
+function soleAudit(audits: readonly AuditEntry[]): AuditEntry {
+  assert.equal(audits.length, 1, `expected exactly one audit entry, got ${JSON.stringify(audits)}`);
+  return audits[0] as AuditEntry;
+}
+
+describe('subscription limit edits are recorded', () => {
+  it('names the limit that moved, and both of its values', async () => {
+    const harness = editorHarness();
+
+    await harness.controller.updateSubscription(
+      'sub-1',
+      { deviceLimit: 5 },
+      ACTING_ADMIN,
+      ACTING_REQUEST,
+    );
+
+    const entry = soleAudit(harness.audits);
+    assert.equal(entry.action, 'user.subscription.limits_changed');
+    // WHICH limit moved, and to what. An entry that only said "limits changed"
+    // could not drive the repair it exists to enable.
+    assert.deepStrictEqual(entry.metadata, {
+      requestId: 'req-1',
+      userId: 'user-1',
+      subscriptionId: 'sub-1',
+      source: 'operator_edit',
+      assignedPlanId: null,
+      changes: { deviceLimit: { from: 3, to: 5 } },
+    });
+    // The actor and the request are recorded the same way every other audited
+    // route in this controller records them.
+    assert.deepStrictEqual(entry.adminUser, { connect: { id: 'admin-1' } });
+    assert.equal(entry.ipAddress, '10.0.0.7');
+    assert.equal(entry.userAgent, 'jest');
+  });
+
+  it('records only the fields the request actually moved', async () => {
+    const harness = editorHarness();
+
+    await harness.controller.updateSubscription(
+      // `deviceLimit` is re-sent at the value the row already holds — the admin
+      // SPA posts the whole form — so only traffic may appear.
+      'sub-1',
+      { trafficLimit: 250, deviceLimit: 3 },
+      ACTING_ADMIN,
+      ACTING_REQUEST,
+    );
+
+    const entry = soleAudit(harness.audits);
+    assert.deepStrictEqual(entry.metadata['changes'], {
+      trafficLimit: { from: 100, to: 250 },
+    });
+  });
+
+  it('writes nothing for a PATCH that changes no limit', async () => {
+    const harness = editorHarness();
+
+    // A save that re-sends the values the row already holds must not
+    // manufacture evidence of an override: a replay would then read this row as
+    // deliberately adjusted and pin its limits for the rest of its life.
+    await harness.controller.updateSubscription(
+      'sub-1',
+      { trafficLimit: 100, deviceLimit: 3 },
+      ACTING_ADMIN,
+      ACTING_REQUEST,
+    );
+
+    assert.deepStrictEqual(harness.audits, []);
+    // …and the edit itself still happened, so this is "nothing to record", not
+    // "the endpoint refused".
+    assert.equal(harness.txUpdates.length, 1);
+  });
+
+  it('writes nothing when the request touches no limit at all', async () => {
+    const harness = editorHarness();
+
+    await harness.controller.updateSubscription(
+      'sub-1',
+      { status: SubscriptionStatus.DISABLED },
+      ACTING_ADMIN,
+      ACTING_REQUEST,
+    );
+
+    assert.deepStrictEqual(harness.audits, []);
+  });
+
+  it('distinguishes a plan assignment from an individual edit', async () => {
+    const harness = editorHarness({
+      plan: {
+        id: 'plan-2',
+        name: 'Pro',
+        tag: null,
+        type: 'TRAFFIC',
+        icon: null,
+        trafficLimit: 500,
+        deviceLimit: 10,
+        trafficLimitStrategy: 'MONTH',
+        internalSquads: ['squad-b'],
+        externalSquad: null,
+      },
+    });
+
+    await harness.controller.updateSubscription(
+      'sub-1',
+      { planId: 'plan-2' },
+      ACTING_ADMIN,
+      ACTING_REQUEST,
+    );
+
+    const entry = soleAudit(harness.audits);
+    // A plan assignment legitimately resets all four AND rewrites the snapshot
+    // with them, so a replay must read it as "back to inherited", never as four
+    // individual overrides. `source` is what says so — it is taken from
+    // `assignedPlanId`, not inferred from the shape of the change set.
+    assert.equal(entry.metadata['source'], 'plan_assignment');
+    assert.equal(entry.metadata['assignedPlanId'], 'plan-2');
+    assert.deepStrictEqual(entry.metadata['changes'], {
+      trafficLimit: { from: 100, to: 500 },
+      deviceLimit: { from: 3, to: 10 },
+      internalSquads: { from: ['squad-a'], to: ['squad-b'] },
+    });
+    // The snapshot went with it, which is what makes the reset real rather than
+    // four columns that now disagree with what the plan gave them.
+    assert.equal(
+      (harness.txUpdates[0]?.planSnapshot as { readonly deviceLimit: number }).deviceLimit,
+      10,
+    );
+  });
+
+  it('records a squad edit made through the squads endpoint', async () => {
+    const harness = editorHarness();
+
+    await harness.controller.updateSquads(
+      'sub-1',
+      { internalSquads: ['squad-b', 'squad-c'], externalSquad: 'ext-1' },
+      ACTING_ADMIN,
+      ACTING_REQUEST,
+    );
+
+    const entry = soleAudit(harness.audits);
+    assert.equal(entry.action, 'user.subscription.limits_changed');
+    // No plan can be assigned on this route, so every change it records is an
+    // individual override.
+    assert.equal(entry.metadata['source'], 'operator_edit');
+    assert.equal(entry.metadata['assignedPlanId'], null);
+    assert.deepStrictEqual(entry.metadata['changes'], {
+      internalSquads: { from: ['squad-a'], to: ['squad-b', 'squad-c'] },
+      externalSquad: { from: null, to: 'ext-1' },
+    });
+  });
+
+  it('does not read a reordered squad list as an override', async () => {
+    const harness = editorHarness({
+      row: editableRow({ internalSquads: ['squad-a', 'squad-b'] }),
+    });
+
+    await harness.controller.updateSquads(
+      'sub-1',
+      { internalSquads: ['squad-b', 'squad-a'] },
+      ACTING_ADMIN,
+      ACTING_REQUEST,
+    );
+
+    // Order is not significant to `resolveInheritedPlanLimitUpdate` either
+    // (`sameSquadSet`), so recording this as a change would declare an override
+    // that the renewal reader does not agree exists.
+    assert.deepStrictEqual(harness.audits, []);
   });
 });

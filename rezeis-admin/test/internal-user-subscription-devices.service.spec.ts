@@ -249,7 +249,7 @@ describe('InternalUserDevicesController', () => {
           deleted.push({ ref, hwid });
           return { total: 2 };
         },
-      } as RemnawaveApiService,
+      } as unknown as RemnawaveApiService,
       events as unknown as SystemEventsService,
     );
 

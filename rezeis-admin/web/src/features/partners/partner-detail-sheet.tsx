@@ -9,6 +9,7 @@ import {
   Coins,
   Download,
   Edit,
+  Info,
   Loader2,
   Network,
   ShieldCheck,
@@ -45,6 +46,12 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip'
 import { ScrollArea } from '@/components/ui/scroll-area'
 
 import { formatKopecks, formatKopecksCompact, formatNumber } from './partner-formatters'
@@ -570,6 +577,9 @@ function SettingsPanel({ partner }: { readonly partner: Partner }) {
       level1Fixed: fixedField,
       level2Fixed: fixedField,
       level3Fixed: fixedField,
+      level1Accrual: levelAccrualField,
+      level2Accrual: levelAccrualField,
+      level3Accrual: levelAccrualField,
     })
   }, [t])
   type RatesValues = z.infer<typeof ratesSchema>
@@ -589,6 +599,12 @@ function SettingsPanel({ partner }: { readonly partner: Partner }) {
         partner.level2FixedAmount === null ? '' : (partner.level2FixedAmount / 100).toFixed(2),
       level3Fixed:
         partner.level3FixedAmount === null ? '' : (partner.level3FixedAmount / 100).toFixed(2),
+      // `null` on the column means "inherit the partner-wide strategy", so it
+      // maps to the explicit INHERIT option — never to a blank, which would
+      // read as "nothing set" for a level that is actively following a toggle.
+      level1Accrual: partner.level1AccrualStrategy ?? INHERIT_LEVEL_ACCRUAL,
+      level2Accrual: partner.level2AccrualStrategy ?? INHERIT_LEVEL_ACCRUAL,
+      level3Accrual: partner.level3AccrualStrategy ?? INHERIT_LEVEL_ACCRUAL,
     },
   })
 
@@ -596,6 +612,11 @@ function SettingsPanel({ partner }: { readonly partner: Partner }) {
   // eslint-disable-next-line react-hooks/incompatible-library
   const useGlobal = ratesForm.watch('useGlobalSettings')
   const rewardType = ratesForm.watch('rewardType')
+  const partnerWideAccrual = ratesForm.watch('accrualStrategy')
+  const inheritedAccrualLabel =
+    partnerWideAccrual === 'ONCE_PER_USER'
+      ? t('partnersDetail.individual.oncePerUser')
+      : t('partnersDetail.individual.onEach')
 
   function handleAdjustSubmit(values: AdjustValues) {
     adjustBalance.mutate(
@@ -638,6 +659,12 @@ function SettingsPanel({ partner }: { readonly partner: Partner }) {
         level3FixedAmount: values.level3Fixed
           ? Math.round(Number(values.level3Fixed) * 100)
           : null,
+        // Sent as an explicit `null` when the operator picked "Inherit": that
+        // is what CLEARS a stored override. Omitting the key would leave the
+        // old value in the column, which is a different request entirely.
+        level1AccrualStrategy: toAccrualOverride(values.level1Accrual),
+        level2AccrualStrategy: toAccrualOverride(values.level2Accrual),
+        level3AccrualStrategy: toAccrualOverride(values.level3Accrual),
       },
       {
         onSuccess: () => toast.success(t('partnersDetail.toasts.settingsSaved')),
@@ -852,6 +879,70 @@ function SettingsPanel({ partner }: { readonly partner: Partner }) {
                 </div>
               </div>
 
+              {/* Per-level accrual mode. Consulted only when this partner is
+                  OFF global settings, so the controls are disabled — and said
+                  to be disabled — while the toggle above is on. */}
+              <div>
+                <Label className="text-xs">
+                  {t('partnersDetail.individual.levelAccrual.title')}
+                </Label>
+                {useGlobal ? (
+                  <p className="mt-1 text-[11px] text-muted-foreground">
+                    {t('partnersDetail.individual.levelAccrual.globalDisabled')}
+                  </p>
+                ) : null}
+                <div className="grid grid-cols-3 gap-2 mt-2">
+                  {LEVEL_ACCRUAL_FIELDS.map((name, idx) => (
+                    <FormField
+                      key={name}
+                      control={ratesForm.control}
+                      name={name}
+                      render={({ field }) => (
+                        <FormItem>
+                          <div className="flex items-center gap-1">
+                            <FormLabel className="text-[10px] uppercase">
+                              L{idx + 1}
+                            </FormLabel>
+                            <SettingHint
+                              label={t('partnersDetail.individual.levelAccrual.hintAria', {
+                                level: idx + 1,
+                              })}
+                              text={t('partnersDetail.individual.levelAccrual.hint', {
+                                level: idx + 1,
+                              })}
+                            />
+                          </div>
+                          <Select
+                            value={field.value}
+                            onValueChange={field.onChange}
+                            disabled={useGlobal}
+                          >
+                            <FormControl>
+                              <SelectTrigger className="text-xs">
+                                <SelectValue />
+                              </SelectTrigger>
+                            </FormControl>
+                            <SelectContent>
+                              <SelectItem value={INHERIT_LEVEL_ACCRUAL}>
+                                {t('partnersDetail.individual.levelAccrual.inherit', {
+                                  value: inheritedAccrualLabel,
+                                })}
+                              </SelectItem>
+                              <SelectItem value="ON_EACH_PAYMENT">
+                                {t('partnersDetail.individual.onEach')}
+                              </SelectItem>
+                              <SelectItem value="ONCE_PER_USER">
+                                {t('partnersDetail.individual.oncePerUser')}
+                              </SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </FormItem>
+                      )}
+                    />
+                  ))}
+                </div>
+              </div>
+
               <Button type="submit" size="sm" disabled={updateIndividualSettings.isPending}>
                 {updateIndividualSettings.isPending ? (
                   <Loader2 className="h-4 w-4 mr-2 animate-spin" />
@@ -863,6 +954,64 @@ function SettingsPanel({ partner }: { readonly partner: Partner }) {
         </CardContent>
       </Card>
     </div>
+  )
+}
+
+// ── Per-level accrual mode ───────────────────────────────────────────────────
+
+/**
+ * The empty state of a per-level accrual control.
+ *
+ * It is an explicit option and not a blank on purpose. `null` in the column
+ * is not "unset", it is the value that MEANS "follow the partner-wide accrual
+ * strategy" — so a blank would read as "nothing here" for a level that is
+ * actively tracking a toggle. A Radix `SelectItem` cannot carry an empty
+ * string as its value either, so the sentinel is a real one.
+ */
+const INHERIT_LEVEL_ACCRUAL = 'INHERIT'
+
+const LEVEL_ACCRUAL_FIELDS = [
+  'level1Accrual',
+  'level2Accrual',
+  'level3Accrual',
+] as const
+
+const levelAccrualField = z.enum([
+  INHERIT_LEVEL_ACCRUAL,
+  'ON_EACH_PAYMENT',
+  'ONCE_PER_USER',
+])
+
+type LevelAccrualValue = z.infer<typeof levelAccrualField>
+
+/**
+ * Form value → wire value. "Inherit" goes out as an explicit `null`, which is
+ * what CLEARS the column; a real mode goes out as itself, which STORES it and
+ * detaches that level from the partner-wide toggle.
+ */
+function toAccrualOverride(
+  value: LevelAccrualValue,
+): 'ON_EACH_PAYMENT' | 'ONCE_PER_USER' | null {
+  return value === INHERIT_LEVEL_ACCRUAL ? null : value
+}
+
+/** Info icon whose explanation appears on hover and on keyboard focus. */
+function SettingHint({ label, text }: { readonly label: string; readonly text: string }) {
+  return (
+    <TooltipProvider delayDuration={150}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            aria-label={label}
+            className="inline-flex text-muted-foreground transition-colors hover:text-foreground"
+          >
+            <Info className="h-3.5 w-3.5" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent className="max-w-xs text-xs leading-snug">{text}</TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   )
 }
 

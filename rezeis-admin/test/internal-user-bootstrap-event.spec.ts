@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
+import { ReferralInviteSource } from '@prisma/client';
+
 import { InternalUserEdgeService } from '../src/modules/internal-user/services/internal-user-edge.service';
+import {
+  ReferralManualAttachService,
+  type ReferralManualAttachOperatorInterface,
+} from '../src/modules/referrals/services/referral-manual-attach.service';
 
 /**
  * Regression: `USER_REGISTERED` was defined but never emitted, so a user
@@ -52,6 +58,22 @@ interface EmittedEvent {
 interface AttachCall {
   readonly userId: string;
   readonly referrerId: string;
+  /**
+   * Where the edge came from. This field is the point: `Referral.inviteSource`
+   * stayed `UNKNOWN` for every organically created edge because the service
+   * took no source parameter — and this interface had no field for one, so no
+   * assertion in this file could have noticed. A double is only ever as
+   * truthful as its shape.
+   */
+  readonly inviteSource: ReferralInviteSource;
+  /**
+   * Who performed the attach, or `null` for the two paths nobody performed.
+   * Recorded for the same reason `inviteSource` is: the field is required so
+   * the compiler names every call site, and a double blind to it could not
+   * notice a sign-up that started attributing itself to an operator — nor an
+   * operator route that started passing `null` and recording nothing.
+   */
+  readonly operator: ReferralManualAttachOperatorInterface | null;
 }
 
 function buildService(
@@ -68,6 +90,11 @@ function buildService(
     readonly referralEdgeExists?: boolean;
     /** The invite's inviter is banned — must not attribute. */
     readonly inviterBlocked?: boolean;
+    /**
+     * Replaces the recording double with a real `ReferralManualAttachService`,
+     * so a test can follow the call all the way to `referral.create`.
+     */
+    readonly attachService?: ReferralManualAttachService;
   } = {},
 ) {
   const guardCalls: GuardCall[] = [];
@@ -159,9 +186,50 @@ function buildService(
     settings as never,
     guard as never,
     systemEvents as never,
-    referralManualAttach as never,
+    (options.attachService ?? referralManualAttach) as never,
   );
   return { service, events, attachCalls, inviteFindWheres, consumeCalls, guardCalls };
+}
+
+/**
+ * Builds the REAL `ReferralManualAttachService` over a recording Prisma and
+ * hands back the rows it writes.
+ *
+ * The double above can only ever prove what the CALLER passes. It cannot prove
+ * the service does anything with it, and for the whole life of the column it
+ * did not: `inviteSource` was hardcoded to `'UNKNOWN'` at the `referral.create`
+ * and no spec in the repository reached that line. A test that stops at the
+ * double re-tests the double.
+ */
+function buildRealAttachService(): {
+  readonly attachService: ReferralManualAttachService;
+  readonly created: Record<string, unknown>[];
+} {
+  const created: Record<string, unknown>[] = [];
+  const prisma = {
+    // Both the user and the referrer must resolve, or the service throws
+    // NotFound before it ever reaches the create.
+    user: { findUnique: async (args: { where: { id: string } }) => ({ id: args.where.id }) },
+    referral: {
+      findUnique: async () => null,
+      create: async (args: { data: Record<string, unknown> }) => {
+        created.push(args.data);
+        return { id: 'referral-created-1' };
+      },
+    },
+    partnerReferral: { findFirst: async () => null },
+    transaction: { findMany: async () => [] },
+  };
+  const attachService = new ReferralManualAttachService(
+    prisma as never,
+    { qualifyReferralAfterPurchase: async () => undefined } as never,
+    {
+      attachPartnerReferralChain: async () => false,
+      processPartnerEarning: async () => undefined,
+    } as never,
+    { info: () => undefined } as never,
+  );
+  return { attachService, created };
 }
 
 describe('InternalUserEdgeService.bootstrapByTelegram registration event', () => {
@@ -203,7 +271,34 @@ describe('InternalUserEdgeService.bootstrapByTelegram referral binding', () => {
       language: 'RU',
       referralCode: 'referrer-1',
     });
-    assert.deepEqual(attachCalls, [{ userId: 'user-cuid-1', referrerId: 'referrer-1' }]);
+    assert.deepEqual(attachCalls, [
+      {
+        userId: 'user-cuid-1',
+        referrerId: 'referrer-1',
+        inviteSource: ReferralInviteSource.BOT,
+        operator: null,
+      },
+    ]);
+  });
+
+  it('records BOT on the row the real attach service writes (ref_ deep-link)', async () => {
+    // End-to-end past the double: the caller passing BOT proves nothing if the
+    // service drops it, which is exactly what it used to do.
+    const { attachService, created } = buildRealAttachService();
+    const { service } = buildService(null, { referrer: { id: 'referrer-1' }, attachService });
+    await service.bootstrapByTelegram({
+      telegramId: '1036459677',
+      username: 'Frodmaker',
+      name: 'Maylo',
+      language: 'RU',
+      referralCode: 'referrer-1',
+    });
+    // The bot path swallows attach failures by design, so "wrote nothing" and
+    // "wrote the right thing" are indistinguishable without this length check.
+    assert.equal(created.length, 1);
+    assert.equal(created[0].inviteSource, ReferralInviteSource.BOT);
+    assert.equal(created[0].referrerId, 'referrer-1');
+    assert.equal(created[0].referredId, 'user-cuid-1');
   });
 
   it('does NOT bind a referrer for a returning user even with a referralCode', async () => {
@@ -274,7 +369,14 @@ describe('InternalUserEdgeService.bootstrapByTelegram invite-token binding', () 
       referralCode: 'sometoken_base64url',
     });
     // Attributed to the invite's inviter, not the raw token.
-    assert.deepEqual(attachCalls, [{ userId: 'user-cuid-1', referrerId: 'inviter-9' }]);
+    assert.deepEqual(attachCalls, [
+      {
+        userId: 'user-cuid-1',
+        referrerId: 'inviter-9',
+        inviteSource: ReferralInviteSource.BOT,
+        operator: null,
+      },
+    ]);
     // Invite consumed exactly once, after the attach.
     assert.equal(consumeCalls.length, 1);
     assert.equal(consumeCalls[0].id, 'invite-1');
@@ -389,7 +491,14 @@ describe('InternalUserEdgeService.bootstrapByTelegram invite-token binding', () 
     });
     assert.equal(session.id, 'user-cuid-1');
     assert.equal(guardCalls[0].hasInvite, true);
-    assert.deepEqual(attachCalls, [{ userId: 'user-cuid-1', referrerId: 'inviter-9' }]);
+    assert.deepEqual(attachCalls, [
+      {
+        userId: 'user-cuid-1',
+        referrerId: 'inviter-9',
+        inviteSource: ReferralInviteSource.BOT,
+        operator: null,
+      },
+    ]);
   });
 
   it('still rejects an INVITED-mode sign-up with no code at all', async () => {
@@ -458,7 +567,14 @@ describe('InternalUserEdgeService.bootstrapByTelegram invite-token binding', () 
       name: 'Maylo',
       referralCode: 'sometoken_base64url',
     });
-    assert.deepEqual(attachCalls, [{ userId: 'user-cuid-1', referrerId: 'real-inviter' }]);
+    assert.deepEqual(attachCalls, [
+      {
+        userId: 'user-cuid-1',
+        referrerId: 'real-inviter',
+        inviteSource: ReferralInviteSource.BOT,
+        operator: null,
+      },
+    ]);
   });
 
   it('ignores an unknown/expired invite token without binding or consuming', async () => {

@@ -104,6 +104,16 @@ export const EVENT_TYPES = {
   USER_EMAIL_LINKED: 'user.email_linked',
   USER_ACCOUNTS_MERGED: 'user.accounts_merged',
   USER_FIRST_TRAFFIC: 'user.first_traffic',
+  /**
+   * An operator moved a customer's points balance by hand
+   * (`POST /admin/users/:telegramId/points`). `points` is a SHARED wallet — the
+   * referral exchange spends it and quests credit it — so a manual credit or
+   * debit is the one movement in it with no automatic record of its own. Its
+   * money sibling `partner.balance_adjusted` has always been evented; this one
+   * emitted nothing at all, which made an operator debit indistinguishable from
+   * a customer spending their own points.
+   */
+  USER_POINTS_ADJUSTED: 'user.points_adjusted',
 
   // Auth
   AUTH_WEB_LOGIN: 'auth.web_login',
@@ -170,6 +180,46 @@ export const EVENT_TYPES = {
    * renewal needs to see this rather than infer it from silence.
    */
   PAYMENT_AUTOPAY_CONFIRMATION_REQUIRED: 'payment.autopay_confirmation_required',
+  /**
+   * A PAID renewal add-on line was captured against a baseline that absorbs it,
+   * so as things stand today it will deliver nothing. The customer paid for
+   * extra traffic on a subscription that is already unlimited, or extra devices
+   * on one that is already uncapped.
+   *
+   * WHY IT EXISTS. `PaymentSubscriptionMutationService.applyCombinedRenewal`
+   * re-asks the eligibility question at CAPTURE time — eligibility itself only
+   * ran at QUOTE time, and an operator can lift this one customer's limit to
+   * unlimited in between. The deliberate answer there is CAPTURE AND FLAG: the
+   * entitlement is created as quoted and the verdict is written into its
+   * immutable `applicabilitySnapshot`, because refusing would roll back every
+   * subscription on a combined renewal and a recorded no-op would leave a paid
+   * line with no durable record at all. That reasoning is right and is NOT
+   * revisited here. What it lacked was a reader: the only other trace was a
+   * `logger.warn` in a container, which is indistinguishable — from the
+   * operator's seat — from a renewal that delivered everything it sold.
+   *
+   * SEVERITY IS `WARNING`, NOT `ERROR`, and the difference is that this is a
+   * PREDICTION rather than a fact. The entitlement is PENDING until
+   * `term.startsAt`, days or weeks out; an operator who puts the finite limit
+   * back before then makes the line deliver exactly what was sold and nothing
+   * was ever wrong. ERROR also routes differently in this file — `isErrorEvent`
+   * sends it through `formatErrorEventCardHtml`, the fixed-header incident card
+   * with build info and a `.txt` attachment — which is the shape for a fault in
+   * the system, not for a commercial fact awaiting a human decision before a
+   * known deadline. (The DIRECT-purchase counterpart is different in exactly
+   * this respect: it activates at capture, so its answer is a verdict, and
+   * `AddOnPurchaseService` refuses at checkout rather than capturing.)
+   *
+   * VOLUME. It fires PER LINE at capture, and a bulk renewal can carry many, so
+   * the emit site is expected to collapse repeats the way
+   * `AntiFraudService`'s `NOTIFY_COOLDOWN_MS` does: one card per identical
+   * signature per hour, the signature being
+   * `subscriptionId + termId + addOn.type`. Not per transaction and not
+   * global — an hour of the same operator mistake across one term is one thing
+   * to look at, while two different subscriptions are two. An event stream
+   * nobody can read is the same as no event.
+   */
+  PAYMENT_ADDON_ADDS_NOTHING: 'payment.addon_adds_nothing',
 
   // Referral
   REFERRAL_ATTACHED: 'referral.attached',
@@ -283,6 +333,17 @@ export const EVENT_TYPES = {
   /** One admin action that touched many users at once (block/unblock/delete/…). */
   SYSTEM_BULK_USERS_EXECUTED: 'system.bulk_users_executed',
   SYSTEM_ERROR: 'system.error',
+  /**
+   * Boot found no VAPID keypair, so web-push cannot deliver anything.
+   *
+   * Exists because the `VAPID_*` environment fallback was removed: a
+   * deployment that had its keys only in `.env` now resolves nothing, and the
+   * previous signal for that was a `logger.warn` — indistinguishable, from the
+   * operator's seat, from push working. ERROR when the legacy variables are
+   * still set and could not be migrated (push USED to work and just stopped),
+   * WARNING when nothing is configured anywhere.
+   */
+  SYSTEM_WEB_PUSH_UNCONFIGURED: 'system.web_push_unconfigured',
   /** Admin-panel (SPA) runtime error reported back by the browser. */
   CLIENT_ERROR: 'client.error',
   /** Runtime error forwarded from the reiwa bot over the internal channel. */
@@ -1859,6 +1920,7 @@ export const EVENT_PRESENTATION: Record<string, { emoji: string; title: string }
   'user.telegram_linked': { emoji: '🔗', title: 'Привязан Telegram' },
   'user.email_linked': { emoji: '📧', title: 'Привязан Email' },
   'user.accounts_merged': { emoji: '🧬', title: 'Аккаунты объединены' },
+  'user.points_adjusted': { emoji: '🎯', title: 'Изменён баланс баллов' },
   user_hwid_revoked: { emoji: '📱', title: 'Сброшено устройство (HWID)' },
 
   // Auth
@@ -1907,6 +1969,15 @@ export const EVENT_PRESENTATION: Record<string, { emoji: string; title: string }
   'payment.autopay_confirmation_required': {
     emoji: '🔐',
     title: 'Автосписание ждёт подтверждения пользователя',
+  },
+  // A prediction about a line that is ALREADY PAID, not a failure: the
+  // entitlement is PENDING until the renewed term starts, and an operator who
+  // restores the finite limit before then makes it deliver what was sold.
+  // Titled as the question the operator has to answer — "will this deliver
+  // anything?" — rather than as an incident.
+  'payment.addon_adds_nothing': {
+    emoji: '🫙',
+    title: 'Оплаченное дополнение ничего не добавит',
   },
 
   // Referral
@@ -1957,6 +2028,7 @@ export const EVENT_PRESENTATION: Record<string, { emoji: string; title: string }
   'system.broadcast_sent': { emoji: '📢', title: 'Рассылка отправлена' },
   'system.bulk_users_executed': { emoji: '👥', title: 'Массовая операция над пользователями' },
   'system.error': { emoji: '🚨', title: 'Системная ошибка' },
+  'system.web_push_unconfigured': { emoji: '🔕', title: 'Web-push не настроен' },
   'broadcast.started': { emoji: '📣', title: 'Рассылка запущена' },
   'broadcast.batch_completed': { emoji: '📬', title: 'Партия рассылки отправлена' },
   'broadcast.channel_post_undelivered': { emoji: '📭', title: 'Пост в канал не доставлен' },

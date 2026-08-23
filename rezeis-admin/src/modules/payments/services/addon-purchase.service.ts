@@ -14,11 +14,23 @@ import {
   PurchaseChannel,
   PurchaseType,
   SubscriptionStatus,
+  SubscriptionTermStatus,
   Transaction,
   TransactionStatus,
 } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { readJsonObject } from '../../../common/utils/read-json-object.util';
+import { resolveIntakeResetCapabilities } from '../../add-on-entitlements/add-on-rollout.config';
+import {
+  resolveAddOnLifetimeGrant,
+  type AddOnLifetimeBaseline,
+} from '../../add-on-entitlements/domain/add-on-lifetime';
+import { deriveCutoverBaseline } from '../../add-on-entitlements/domain/cutover-baseline';
+import {
+  isBaselineExtendable,
+  resolveConfiguredEntitlementBaseline,
+} from '../../add-on-entitlements/services/configured-baseline.util';
 import { PricingService } from '../../plans/services/pricing.service';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
 import { AccessModeGuard } from '../../settings/services/access-mode-guard.service';
@@ -137,6 +149,12 @@ export class AddOnPurchaseService {
         trafficLimit: true,
         deviceLimit: true,
         planSnapshot: true,
+        // `createdAt` / `expiresAt` are the no-term fallback's term window —
+        // read here so the fallback below can call the SAME
+        // `deriveCutoverBaseline` the offer's fallback calls, instead of a
+        // hand-rolled stand-in for it.
+        createdAt: true,
+        expiresAt: true,
       },
     });
     if (subscription === null || subscription.userId !== userId) {
@@ -164,19 +182,143 @@ export class AddOnPurchaseService {
     ) {
       throw new BadRequestException('Add-on is not available for this subscription plan');
     }
-    if (addOn.type === AddOnType.EXTRA_TRAFFIC && subscription.trafficLimit === null) {
+    // ── Resource guard: the SAME question the OFFER answered ──────────────
+    //
+    // An add-on can only extend a FINITE limit; layered onto an unlimited one
+    // it changes nothing and the customer paid for nothing. This guard used to
+    // test the RAW `Subscription` columns — `trafficLimit === null`,
+    // `deviceLimit <= 0` — which is a fourth, independent derivation of "is
+    // this already unlimited". It agreed with `AddOnEligibilityService` on an
+    // OVERRIDDEN row and DISAGREED on an UNDECIDABLE one: an imported row whose
+    // `planSnapshot` carries no limit keys and whose `deviceLimit` is 0 is
+    // correctly OFFERED the add-on (UNDECIDABLE resolves toward the PLAN, so
+    // the term's finite baseline stands), and this guard then answered 400. The
+    // customer was shown a product they could not buy.
+    //
+    // So it asks the shared reader with the same three inputs the offer uses —
+    // the ACTIVE term's `base*`, the subscription's columns + `planSnapshot`,
+    // and the contribution the PREVIOUS projection row recorded. Discovery is
+    // still not authoritative for money: this re-reads everything server-side
+    // and can legitimately refuse a stale offer. What it can no longer do is
+    // refuse for a DIFFERENT reason than the offer would have.
+    //
+    // No ACTIVE term (pre-cutover) → the same `deriveCutoverBaseline` fallback
+    // the offer uses, which derives the baseline from the subscription's own
+    // columns. The operator's value IS the baseline there, so no override
+    // resolution applies and no projection row is read.
+    const activeTerm = await this.prismaService.subscriptionTerm.findFirst({
+      where: { subscriptionId: subscription.id, status: SubscriptionTermStatus.ACTIVE },
+      select: {
+        baseTrafficLimitBytes: true,
+        baseDeviceLimit: true,
+        // The three fields the LIFETIME guard below needs. They are selected
+        // here rather than in a second query because they describe the same
+        // term the resource baseline is resolved against: reading the window
+        // from one row and the limits from another is how two guards start
+        // judging two different terms.
+        endsAt: true,
+        trafficResetStrategy: true,
+        resetAnchorAt: true,
+      },
+    });
+    let baseline: {
+      readonly baseTrafficLimitBytes: bigint | null;
+      readonly baseDeviceLimit: number | null;
+    };
+    let lifetimeBaseline: AddOnLifetimeBaseline;
+    if (activeTerm === null) {
+      const fallback = deriveCutoverBaseline({
+        trafficLimit: subscription.trafficLimit,
+        deviceLimit: subscription.deviceLimit,
+        trafficLimitStrategy: readStrategy(subscription.planSnapshot),
+        createdAt: subscription.createdAt,
+        expiresAt: subscription.expiresAt,
+      });
+      baseline = fallback;
+      // `resetAnchorAt: null`, exactly as
+      // `AddOnEligibilityService.deriveFallbackBaseline` sets it:
+      // `subscription.createdAt` is local provenance, not a panel-derived reset
+      // anchor, so a reset-scoped lifetime stays fail-closed until a durable
+      // term carries a real one. Substituting `createdAt` here would make
+      // checkout sell what the offer withholds.
+      lifetimeBaseline = {
+        endsAt: fallback.endsAt,
+        trafficResetStrategy: fallback.trafficResetStrategy,
+        resetAnchorAt: null,
+      };
+    } else {
+      baseline = await resolveConfiguredEntitlementBaseline(this.prismaService, {
+        subscriptionId: subscription.id,
+        term: activeTerm,
+        subscription,
+      });
+      lifetimeBaseline = {
+        endsAt: activeTerm.endsAt,
+        trafficResetStrategy: activeTerm.trafficResetStrategy,
+        resetAnchorAt: activeTerm.resetAnchorAt,
+      };
+    }
+    if (!isBaselineExtendable(addOn.type, baseline)) {
+      // One message per resource, kept verbatim so an existing client parsing
+      // them keeps working. `deviceLimit <= 0` is the product's canonical
+      // unlimited (matching the panel) while `trafficLimit === null` is
+      // unlimited and `0` is a real budget of zero gigabytes — two encodings,
+      // deliberately not harmonised. See `isBaselineExtendable`.
       throw new BadRequestException(
-        'Subscription has unlimited traffic — extra traffic cannot be applied',
+        addOn.type === AddOnType.EXTRA_TRAFFIC
+          ? 'Subscription has unlimited traffic — extra traffic cannot be applied'
+          : 'Subscription has unlimited devices — extra devices cannot be applied',
       );
     }
-    // Symmetric device guard: `deviceLimit <= 0` is the product's canonical
-    // "unlimited devices", so an extra-device add-on would turn an unlimited
-    // profile finite (the `0 + N` footgun). Eligibility already withholds it;
-    // reject here too so a crafted request can never bypass the discovery gate.
-    if (addOn.type === AddOnType.EXTRA_DEVICES && subscription.deviceLimit <= 0) {
-      throw new BadRequestException(
-        'Subscription has unlimited devices — extra devices cannot be applied',
-      );
+    // ── Lifetime guard: the OTHER half of the same question ───────────────
+    //
+    // The guard above asks WHAT this add-on can add. This one asks UNTIL WHEN
+    // it can be delivered — and until this call existed, checkout never asked.
+    //
+    // `AddOnEligibilityService` withholds a `UNTIL_NEXT_RESET` add-on whose
+    // reset window the intake cannot honour, but withholding an OFFER is not a
+    // gate. A crafted request — or an honest one replayed from a client that
+    // cached the catalog before a rollout flag moved — still reached this
+    // method, drafted, was paid, and landed in
+    // `PaymentSubscriptionMutationService.applyAddOnTopUp`. Its ledger path
+    // binds a reset-scoped entitlement to a reset EPOCH; when there is no epoch
+    // to bind to (`NO_RESET`, the strategy's `reset_expiry_*` flag off,
+    // `directPurchase` off so the ledger path is never entered at all, or a
+    // term with no anchor) it falls through to the LEGACY increment, which
+    // raises the raw column and expires never. The customer bought a top-up
+    // until the next reset and received a permanent one.
+    //
+    // THE DECISION: REFUSE, rather than draft the lifetime we could honour.
+    // There is no shorter honourable lifetime to fall back to — every
+    // alternative available here (permanent, or "until the term ends") delivers
+    // MORE than was sold at a price set for less, and a raw column increment
+    // leaves no entitlement row that anything could ever take back. Refusing
+    // destroys nothing: no draft exists yet, no provider invoice, no money. And
+    // it makes checkout answer exactly what the offer answers, which is the
+    // only property that keeps the two from drifting again.
+    //
+    // THE ASYMMETRY WITH RENEWAL CAPTURE IS DELIBERATE — do not "make them
+    // consistent". A renewal add-on line is ALREADY PAID and stays PENDING
+    // until `term.startsAt`, days or weeks out, so a verdict taken there is a
+    // PREDICTION: `applyCombinedRenewal` captures the line anyway and writes
+    // the verdict into the entitlement's immutable `applicabilitySnapshot`.
+    // Here nothing is paid yet, and a direct purchase activates at capture, so
+    // the checkout-time answer IS the verdict.
+    //
+    // The capability map is `resolveIntakeResetCapabilities()` — the same
+    // function `AddOnEligibilityService.getResetCapabilities` returns, not a
+    // second reading of the flags.
+    const lifetimeGrant = resolveAddOnLifetimeGrant({
+      lifetime: addOn.lifetime,
+      baseline: lifetimeBaseline,
+      capabilities: resolveIntakeResetCapabilities(),
+      now: new Date(),
+    });
+    if (lifetimeGrant === null) {
+      throw new BadRequestException({
+        code: 'ADDON_LIFETIME_UNAVAILABLE',
+        message: 'This add-on cannot be delivered for its advertised period on this subscription',
+      });
     }
     // ── Pricing (per gateway currency) ────────────────────────────────────
     const currency = gateway.currency;
@@ -494,4 +636,21 @@ function readPlanId(planSnapshot: unknown): string | null {
   }
   const id = (planSnapshot as Record<string, unknown>)['id'];
   return typeof id === 'string' && id.length > 0 ? id : null;
+}
+
+/**
+ * The reset strategy the stored `planSnapshot` claims, read exactly as
+ * `AddOnEligibilityService.deriveFallbackBaseline` reads it. It feeds
+ * `deriveCutoverBaseline`'s `trafficResetStrategy`, which the no-term branch of
+ * the lifetime guard then consults — so a fabricated value here would let
+ * checkout sell a reset-scoped add-on the offer withheld, or refuse one the
+ * offer listed. (It was load-bearing even while nothing read it: passing a
+ * different input into a shared pure function is how two callers of "the same"
+ * derivation stop being the same.)
+ */
+function readStrategy(planSnapshot: unknown): string | null {
+  const snapshot = readJsonObject(planSnapshot);
+  return typeof snapshot['trafficLimitStrategy'] === 'string'
+    ? (snapshot['trafficLimitStrategy'] as string)
+    : null;
 }

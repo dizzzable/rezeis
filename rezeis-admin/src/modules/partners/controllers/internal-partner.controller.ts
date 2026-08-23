@@ -58,6 +58,25 @@ export class InternalPartnerController {
       balancePaymentEnabled: partnerSettings['allowBalancePayment'] === true,
       /** Currency the partner balance is denominated in (override → default). */
       balanceCurrency,
+      /**
+       * Referral points (`User.points`) — a DIMENSIONLESS integer, the same
+       * single pool quests and operator adjustments write to. It is NOT money
+       * and has no relationship to `balance` above, which is minor units of
+       * `balanceCurrency`. No conversion between the two exists; a consumer
+       * that adds them, divides this by 100, or prints it with a currency
+       * symbol is wrong. Named `referralPoints` rather than the ecosystem's
+       * usual `pointsBalance` (quests, exchange options) precisely because
+       * this is the one payload that already carries a money `balance`.
+       *
+       * ALWAYS sent, `0` included. An appointed partner stops accruing
+       * referral rewards but keeps whatever they had, and whether they are
+       * SHOWN the number is a presentation rule ("only while > 0") that
+       * belongs to the surface, not the wire: reiwa ships independently of
+       * this panel, and rezeis serves installs on mixed panel versions, so a
+       * key that disappears at zero would be indistinguishable from a key an
+       * older panel never sent.
+       */
+      referralPoints: user.points,
       createdAt: partner.createdAt.toISOString(),
     };
   }
@@ -238,10 +257,17 @@ export class InternalPartnerController {
     return withdrawal;
   }
 
+  /**
+   * Resolves the caller to a `User` row. `points` rides along with `id`
+   * because it is the referral-points balance the partner payload reports —
+   * one extra `int` column on a `findUnique` this controller already issues
+   * on every endpoint, and selecting it here keeps `getInfo` free of a
+   * nullable second read (the row is already proven to exist).
+   */
   private async resolveUser(telegramId: string) {
     return this.prismaService.user.findUnique({
       where: buildUserReferenceWhere(telegramId),
-      select: { id: true },
+      select: { id: true, points: true },
     });
   }
 

@@ -5,10 +5,12 @@ import userEvent from '@testing-library/user-event'
 import { renderWithProviders } from '@/test/test-utils'
 import { FraudSuppressionPanel } from './fraud-suppression'
 import {
+  CANDIDATE_HOLD_KINDS,
   createFraudExemption,
   getPendingFraudCandidates,
   listFraudExemptions,
   revokeFraudExemption,
+  type CandidateHold,
   type FraudExemption,
   type PendingFraudCandidate,
 } from './fraud-api'
@@ -58,6 +60,44 @@ const exempted: PendingFraudCandidate = {
   title: 'Subscription sharing — concurrent networks',
   heldBy: 'exemption',
   exemptionId: 'ex-1',
+}
+
+/**
+ * The badge each hold kind must render, one entry per member of the union.
+ *
+ * Keyed by `Record<CandidateHold, ...>` and cross-checked against
+ * `CANDIDATE_HOLD_KINDS` below, so a fourth kind added to the API cannot slip
+ * in unhandled: it breaks the compile here and fails the enumeration test by
+ * name. That is the shape of the defect this replaces — `'verdict'` existed on
+ * the server for its whole life while the panel knew two kinds and fell
+ * through to the third-best answer.
+ */
+const EXPECTED_BADGE: Record<CandidateHold, string> = {
+  streak: 'Seen 3/3 runs',
+  exemption: 'Exempt',
+  verdict: 'Operator verdict',
+}
+
+/**
+ * One held row per kind, all of them at a COMPLETE streak on purpose.
+ *
+ * `listPendingCandidates` clamps `observations` to `requiredObservations` for
+ * every kind, so a muted condition genuinely arrives looking like 3 of 3. That
+ * clamp is what turned the old binary ternary into a lie rather than a
+ * cosmetic slip: the operator was shown "evidence complete, about to fire"
+ * over a detector that would never fire at all.
+ */
+function heldBy(kind: CandidateHold): PendingFraudCandidate {
+  return {
+    ...gathering,
+    id: `pend-${kind}`,
+    conditionKey: `uuid-${kind}`,
+    title: `Condition held by ${kind}`,
+    heldBy: kind,
+    exemptionId: kind === 'exemption' ? 'ex-1' : null,
+    observations: 3,
+    requiredObservations: 3,
+  }
 }
 
 const liveExemption: FraudExemption = {
@@ -209,5 +249,59 @@ describe('FraudSuppressionPanel', () => {
 
     expect(await screen.findByText('Nothing is being held back right now.')).toBeInTheDocument()
     expect(screen.getByText('No exemptions have been granted.')).toBeInTheDocument()
+  })
+
+  it('has a badge for every hold kind the API can send', () => {
+    // Enumerated from the API's own tuple rather than a list retyped here, so
+    // the day a fourth kind is added this fails and names it, instead of the
+    // render quietly handing it somebody else's badge.
+    expect([...Object.keys(EXPECTED_BADGE)].sort()).toEqual([...CANDIDATE_HOLD_KINDS].sort())
+  })
+
+  it.each(CANDIDATE_HOLD_KINDS)('renders the %s hold with its own badge', async (kind) => {
+    vi.mocked(getPendingFraudCandidates).mockResolvedValue([heldBy(kind)])
+
+    renderWithProviders(<FraudSuppressionPanel />)
+
+    expect(await screen.findByText(EXPECTED_BADGE[kind])).toBeInTheDocument()
+    for (const other of CANDIDATE_HOLD_KINDS) {
+      if (other === kind) continue
+      expect(screen.queryByText(EXPECTED_BADGE[other])).not.toBeInTheDocument()
+    }
+  })
+
+  it('does not tell the operator a verdict-muted condition is "seen N of M"', async () => {
+    // The specific lie being removed, asserted as an ABSENCE.
+    //
+    // A verdict hold is an operator's own RESOLVED/DISMISSED verdict inside its
+    // suppression window: the detector keeps observing and nothing opens until
+    // the window lapses. Rendering the streak counter over that says evidence
+    // is complete and a signal is imminent — the exact opposite of the truth,
+    // and worse than the blank cell it was presumably chosen over.
+    vi.mocked(getPendingFraudCandidates).mockResolvedValue([heldBy('verdict')])
+
+    renderWithProviders(<FraudSuppressionPanel />)
+
+    expect(await screen.findByText('Operator verdict')).toBeInTheDocument()
+    expect(screen.queryByText(/Seen \d+\/\d+ runs/)).not.toBeInTheDocument()
+    // …and it says what the operator can do about it, which is: wait, or watch
+    // for the finding to escalate.
+    expect(
+      screen.getByText(/no signal will open until that mute lapses/i),
+    ).toBeInTheDocument()
+  })
+
+  it('does not render a failed load as "nothing is being held back"', async () => {
+    // The candidate list is parsed now, so it can fail where it used to be
+    // waved through. `data ?? []` turned every failure into the empty state,
+    // which on THIS card is the one sentence that must never be guessed.
+    vi.mocked(getPendingFraudCandidates).mockRejectedValue(new Error('boom'))
+
+    renderWithProviders(<FraudSuppressionPanel />)
+
+    expect(
+      await screen.findByText(/Could not load what is being held back/i),
+    ).toBeInTheDocument()
+    expect(screen.queryByText('Nothing is being held back right now.')).not.toBeInTheDocument()
   })
 })

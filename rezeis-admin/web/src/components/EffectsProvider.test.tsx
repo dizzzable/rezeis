@@ -39,6 +39,13 @@ const VIEWPORT = { width: 1280, height: 800 }
 /** The trail texture `PixelTrail` asks `useTrailTexture` for, in pixels. */
 const TRAIL_TEXTURE_SIZE = 512
 
+/**
+ * How long `@react-three/fiber` waits before its own teardown.
+ * `unmountComponentAtNode` hands the reconciler a commit callback whose entire
+ * body is `setTimeout(..., 500)`, and inside it `state.gl?.forceContextLoss?.()`.
+ */
+const FIBER_TEARDOWN_MS = 500
+
 function renderProvider(effect: CursorEffectId) {
   useEffectsStore.setState({ cursorEffect: effect, clickEffect: 'none' })
   return render(
@@ -316,6 +323,10 @@ describe('EffectsProvider — newly wired cursor effects', () => {
       // measured: both specs below saw zero draw calls and an unpainted trail,
       // while passing in isolation. Draining after `cleanup()` lets the loop
       // find `_roots` empty, clear its own flag and cancel its frame.
+      // Defensive: the release spec restores the clock in a `finally`, but a
+      // failure between faking and restoring would otherwise hand `cleanup()`
+      // and every later spec in this block a faked `setTimeout`.
+      vi.useRealTimers()
       cleanup()
       gl.runFrames(2)
       gl.teardown()
@@ -378,22 +389,78 @@ describe('EffectsProvider — newly wired cursor effects', () => {
       expect(bodyAdd.mock.calls.map(([type]) => type)).toContain('pointermove')
     })
 
-    it('hands the GL context back when the operator switches the effect off', async () => {
+    /**
+     * COUNTED, NOT FLAGGED, AND READ AT TWO INSTANTS.
+     *
+     * This spec used to end at `expect(context.isContextLost()).toBe(true)`, and
+     * it was green for the entire life of a defect it was written to catch.
+     * `isContextLost()` is a BOOLEAN: a context released twice reads exactly
+     * like a context released once. `PixelTrail` released its own context
+     * synchronously on unmount and fiber then repeated `forceContextLoss()` from
+     * a 500 ms `setTimeout` on the context already destroyed — INVALID_OPERATION
+     * per the `WEBGL_lose_context` spec, `loseContext: context already lost` in
+     * a real console — and the flag said `true` either way.
+     *
+     * FLUSHING THE TIMER IS NOT ENOUGH ON ITS OWN, and adding it without the
+     * checkpoint below would have made this spec blind in the OTHER direction.
+     * fiber's deferred call destroys the context whether or not the component
+     * did, so past the flush "released once" and "released nothing" are the same
+     * reading. Which is why the count is taken twice:
+     *
+     *   - BEFORE the timer, where the only thing that can have released the
+     *     context is the component itself. This is the anti-vacuity control: a
+     *     component that hands nothing back reads 0 here.
+     *   - AFTER it, where the number must not have moved.
+     *
+     * The card effects are pinned the same way, over a uniform list, in
+     * `reactbits/reactbits-context-release.test.tsx`. This spec stays because
+     * it drives the component through the real `EffectsProvider` switch — lazy
+     * import, overlay and all — rather than mounting it directly.
+     */
+    it('hands the GL context back exactly once when the operator switches the effect off', async () => {
       const { container, unmount } = await mountPixelTrail()
       const canvas = container.querySelector(`${OVERLAY} canvas`) as HTMLCanvasElement
       const context = gl.contextOf(canvas)
       expect(context, 'fiber never built a renderer, so nothing below is tested').toBeDefined()
+      expect(context!.loseCalls, 'the context was released before unmount').toBe(0)
       expect(context!.isContextLost()).toBe(false)
 
-      await act(async () => {
-        unmount()
-      })
+      // Only `setTimeout`/`clearTimeout`, and only from here: `mountPixelTrail`
+      // waits out a dynamic import through `waitFor`, which needs a real clock.
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      try {
+        await act(async () => {
+          unmount()
+        })
 
-      // WebKit gives a web-content process 16 live contexts before it starts
-      // recycling the oldest into an unrecoverable loss, and dropping the
-      // reference frees nothing. An operator toggling this effect while trying
-      // out the others is exactly the sequence that would exhaust them.
-      expect(context!.isContextLost()).toBe(true)
+        // WebKit gives a web-content process 16 live contexts before it starts
+        // recycling the oldest into an unrecoverable loss, and dropping the
+        // reference frees nothing. An operator toggling this effect while trying
+        // out the others is exactly the sequence that would exhaust them — which
+        // is why the slot has to come back HERE, synchronously, and not from a
+        // timer half a second later.
+        expect(
+          context!.loseCalls,
+          `the effect destroyed its context ${context!.loseCalls} times on ` +
+            'unmount, not once. Zero means the reference was dropped and the ' +
+            'slot never came back; more than one means it was handed back twice',
+        ).toBe(1)
+        expect(context!.isContextLost()).toBe(true)
+
+        await act(async () => {
+          vi.advanceTimersByTime(FIBER_TEARDOWN_MS)
+        })
+
+        expect(
+          context!.loseCalls,
+          `fiber's deferred teardown released the same context again — ` +
+            `${context!.loseCalls} calls in total. The second one lands on a ` +
+            'context this component already destroyed, which is ' +
+            'INVALID_OPERATION and a console error on a real device',
+        ).toBe(1)
+      } finally {
+        vi.useRealTimers()
+      }
     })
 
     /**

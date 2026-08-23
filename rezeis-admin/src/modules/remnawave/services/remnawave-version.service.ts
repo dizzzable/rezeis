@@ -39,17 +39,32 @@ export interface RemnawaveUserLookups {
  * "untested version" banner; the rest let the app light up (or stand down
  * from) version-specific behaviour automatically once a panel upgrades,
  * without a redeploy or a manual toggle:
- *   • `liveIpControl`        — `/api/ip-control/*` matured enough to drive the
- *                              Live tab and the IP-sharing detector (2.8.x).
+ *   • `liveIpControl`        — this build can read live connections from this
+ *                              panel, whichever family serves them:
+ *                              `/api/ip-control/*` once it matured (2.8+), or
+ *                              `/api/connections/*` on 3.x. Drives the Live tab
+ *                              and the IP-sharing detector.
  *   • `bandwidthNodesUsers`  — `POST /api/bandwidth-stats/nodes/users`.
  *   • `userAddressing`       — uuid- vs id-addressed user paths.
  *   • `connectionsApi`       — which live-connection family exists.
  *   • `userLookups`          — which by-telegram-id / by-email shortcuts exist.
  *
- * The three latter fields are descriptive only: nothing consumes them yet, and
- * adding them does not enable any 3.x behaviour. They exist so the eventual
- * one-build-drives-2.7.4/2.8.0/3.2.x work has a single place to read the panel
- * shape from, with an explicit "we do not know" state.
+ * The three latter fields are NOT descriptive any more. This note used to say
+ * "nothing consumes them yet, and adding them does not enable any 3.x
+ * behaviour", which is false in the direction that makes a reader believe 3.x
+ * is unwired:
+ *   • `connectionsApi`  — `classifyLiveConnectionBlindness` (sharing-detectors)
+ *                         reads it to decide whether a panel HAS live-connection
+ *                         data at all, and the adapter picks `/api/connections/*`
+ *                         over `/api/ip-control/*` from the same fact;
+ *   • `userAddressing`  — drives `panelUserAddress`, i.e. how every user-scoped
+ *                         route names a profile;
+ *   • `userLookups`     — picks the by-telegram-id / by-email shortcut over the
+ *                         generic resolve.
+ * The adapter reads its own copy of these through `getPanelShape()`, so both
+ * sides derive them from `panel-version.util` and cannot disagree; the SPA
+ * reads them from this record. The one-place-to-read-the-panel-shape-from
+ * intent stands, with an explicit "we do not know" state.
  */
 export interface RemnawaveCapabilities {
   readonly version: string | null;
@@ -74,22 +89,32 @@ export interface RemnawaveCapabilities {
  * anybody has run; the banner is the only signal an operator gets before an
  * untested panel starts returning shapes rezeis does not parse.
  *
- * All three entries are measured against live panels: 2.7.4 (paying
- * production), 2.8 (testers) and 3.2.x. Being in this set means "the operator
- * gets no banner", not "every screen is equally capable" — 2.7.4 still reports
- * `liveIpControl: false`, because its `ip-control/*` family had not matured
- * enough to drive the Live tab. 3.x reports true: it replaced that family with
- * `connections/*`, and the adapter speaks it.
+ * All four entries are measured against live panels: 2.7.4 (paying
+ * production), 2.8 (testers), 3.2.x and 3.3.x — the last being the build this
+ * operator actually runs, which is why it is here: while it was missing, every
+ * visit to the Remnawave page rendered an untested-version banner about a panel
+ * this integration is exercised against daily. A false warning teaches an
+ * operator to ignore the true one.
+ *
+ * Being in this set means "the operator gets no banner", not "every screen is
+ * equally capable" — 2.7.4 still reports `liveIpControl: false`, because its
+ * `ip-control/*` family had not matured enough to drive the Live tab. 3.x
+ * reports true: it replaced that family with `connections/*`, and the adapter
+ * speaks it.
  *
  * Membership is keyed on `major.minor`, so this set cannot tell 2.8.0 from
  * 2.8.1 and never has: both are the single `'2.8'` entry, and a patch-level
- * difference is not something this gate is able to warn about.
+ * difference is not something this gate is able to warn about. 3.3.2 is
+ * therefore covered by `'3.3'`.
  *
  * Whatever this set says has to stay true of the operator-facing prose in
  * `web/src/i18n/features/remnawave.{en,ru}.ts` →
- * `remnaWavePage.versionWarning.description`, which spells the range out.
+ * `remnaWavePage.versionWarning.description`, which spells the list out. That
+ * is not left to good intentions any more: `test/remnawave-version.service.spec.ts`
+ * discovers this set through `supported` and fails if either language's prose
+ * names a different one.
  */
-const TESTED_VERSIONS: ReadonlySet<string> = new Set(['2.7', '2.8', '3.2']);
+const TESTED_VERSIONS: ReadonlySet<string> = new Set(['2.7', '2.8', '3.2', '3.3']);
 
 // Both windows live in the util so the adapter's own shape cache uses the same
 // two numbers rather than a second opinion about how long a panel blip lasts.

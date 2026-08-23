@@ -2,6 +2,26 @@
 
 ## Established Decisions
 
+### 2026-08-23: `@remnawave/backend-contract` is removed as a runtime dependency (reverses 2026-04-22)
+
+- This reverses the 2026-04-22 AltShop-devices entry below, which recorded that the package "stays a typed schema and route-metadata dependency inside `rezeis-admin`". That was a reasonable decision on the evidence available then; live 3.x panels supplied the evidence that overturned it. The earlier entry is left intact as the record of what was decided at the time.
+- What broke: the adapter `safeParse`d live responses with `GetExternalSquadsCommand` from `@remnawave/backend-contract@2.7.3`, a production dependency. That schema requires `responseHeaders` on every external-squad row; panel 3.x renamed the field to `responseHeadersAdd` + `responseHeadersRemove`. The parse failed deterministically and the squad read threw `ServiceUnavailableException` against a perfectly healthy 3.x panel — every time it had at least one external squad.
+- Why pinning forward was not the fix: a vendor schema describes ONE era. rezeis serves every era its operators are still running, and they upgrade on their own schedule, so pinning to 3.x would simply have moved the same outage onto the installations still on 2.x.
+- Position now: `rezeis-admin` talks to the panel over plain HTTP and decodes the answers with its own tolerant local decoders. No `@remnawave/*` package runs at runtime — `grep -rn "@remnawave/" rezeis-admin/src/` returns no imports — and there is no contract version to keep in step with the live panel. Upgrading the live panel needs no dependency change here.
+- The four vendor contracts stay as **devDependencies** and are the CI oracle for every era: `@remnawave/backend-contract` (2.7.3), `@remnawave/contract-v28` (2.8.35), `@remnawave/contract-v3` (3.2.3), `@remnawave/contract-v34` (3.4.2). The guard specs execute them so a drifting route or row shape fails a test at build time instead of a live panel at run time. They are AGPL-3.0-only, `Dockerfile` stage 1 runs `npm ci --omit=dev`, and none of them ships in the image: `npm ls --omit=dev @remnawave/backend-contract` must print `(empty)`.
+- Unchanged by this reversal: server-side HTTP orchestration still runs through the admin facade (`RemnawaveApiService` with `HttpService`), and Remnawave contract usage must still never move into `ruid` or `ruid/web`.
+Files:
+- `rezeis-admin/package.json`
+- `rezeis-admin/README.md`
+- `rezeis-admin/src/modules/remnawave/services/remnawave-api.service.ts`
+- `docs/architecture/service-boundaries.md`
+- `docs/architecture/altshop-subscription-devices-phase-1.md`
+- `docs/architecture/altshop-business-logic-transfer.md`
+- `docs/architecture/users-device-generation-provisioning-design.md`
+- `docs/progress/current-status.md`
+- `docs/progress/next-milestone.md`
+- `docs/progress/decision-log.md`
+
 ### 2026-04-23: `rezeis/ruid` is the canonical Pyright and basedpyright analysis root
 
 - `rezeis/ruid` is now the authoritative analysis root for Pyright and basedpyright because it is already a self-contained Python project with its own `pyproject.toml`.

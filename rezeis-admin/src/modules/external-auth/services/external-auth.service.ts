@@ -240,8 +240,11 @@ export class ExternalAuthService {
     }
     const login = loginPolicy.sanitizeLogin(input.login);
     const loginNormalized = loginPolicy.normalizeLogin(input.login);
+    // SUBSCRIBER: finish-setup writes `WebAccount.passwordHash`, which
+    // `WebAuthService.login` verifies.
     const passwordHash = await this.passwordHashService.hashPassword({
       plainTextPassword: input.passwordHash,
+      audience: 'subscriber',
     });
 
     const outcome = await this.prismaService.$transaction(async (tx) => {

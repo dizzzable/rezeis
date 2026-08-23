@@ -331,7 +331,9 @@ describe('WebPushService', () => {
  * `subscribeAdmin` is self-service — the admin's own browser registering
  * itself — so permissions cannot arbitrate it: the caller is entitled to
  * subscribe SOME browser, and the only question is WHICH row that write lands
- * on. `endpoint` is globally `@unique` (`prisma/schema.prisma:2343`), so the
+ * on. `endpoint` is globally `@unique` on `AdminWebPushSubscription` in
+ * `prisma/schema.prisma` (the ADMIN table; the subscriber `WebPushSubscription`
+ * has its own separate `endpoint @unique`), so the
  * `upsert({ where: { endpoint } })` this replaced had one row to update no
  * matter who owned it, and its update branch wrote `adminId`. An endpoint is a
  * long random URL, but it is not a secret: it is stored in plaintext beside
@@ -638,7 +640,7 @@ function createService(input: {
       },
     },
   };
-  // Mock SettingsService: returns the panel/env VAPID config (or null when
+  // Mock SettingsService: returns the panel-managed VAPID config (or null when
   // push is disabled), mirroring `getDecryptedWebPushConfig`.
   const settingsService = {
     getDecryptedWebPushConfig: async () => input.webPushConfig ?? null,
@@ -651,7 +653,6 @@ const TEST_VAPID = {
   publicKey: 'public-key-1',
   privateKey: 'private-key-1',
   subject: 'mailto:admin@example.com',
-  source: 'env' as const,
 };
 
 /** The `vapidDetails` the service forwards to `web-push` (subset of TEST_VAPID). */

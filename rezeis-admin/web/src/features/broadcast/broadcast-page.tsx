@@ -1,7 +1,7 @@
 import { useCallback, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
-import { Plus, Megaphone, Send, XCircle, Trash2, Loader2, RefreshCw, Upload, FileImage, FileVideo, X, Pencil, Clock, FlaskConical } from 'lucide-react'
+import { Plus, Megaphone, Send, XCircle, Trash2, Loader2, RefreshCw, Upload, FileImage, FileVideo, X, Pencil, Clock, FlaskConical, Users } from 'lucide-react'
 import { useForm, type FieldErrors, type Resolver } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { toast } from 'sonner'
@@ -43,6 +43,7 @@ import {
 import { EmojiPicker } from './emoji-picker'
 import { EmojiFieldOverlay } from '@/features/custom-emoji/emoji-field-overlay'
 import { RenderedCopyPreview } from '@/features/custom-emoji/rendered-copy-preview'
+import { usePlans } from '@/features/plans/plans-api'
 import { cn, truncate } from '@/lib/utils'
 
 const AUDIENCES = [
@@ -489,9 +490,26 @@ function CreateBroadcastForm({ onClose }: { onClose: () => void }) {
   // Structured audience filter (multi-select). When any is set it supersedes
   // the `audience` segment above (backend combines categories with AND).
   const [subBuckets, setSubBuckets] = useState<string[]>([])
+  const [planFilters, setPlanFilters] = useState<string[]>([])
   const [platformFilters, setPlatformFilters] = useState<string[]>([])
   const [contactFilters, setContactFilters] = useState<string[]>([])
   const [inactiveDays, setInactiveDays] = useState('')
+  // Plan catalog for the plan chips. Deliberately the FULL catalog, not
+  // `{ active: true }`: the backend matches `planSnapshot.id` on a
+  // subscription, so a switched-off or archived plan still has live
+  // subscribers — and they are exactly the people a "your plan is being
+  // retired" broadcast is for. Reuses the shared `usePlans` query (one
+  // cache slot panel-wide, 5-minute staleTime) instead of a second reader
+  // of /admin/plans; it only fetches while this dialog is mounted.
+  const { data: plans = [], isLoading: plansLoading } = usePlans()
+  // Audience preview. `GET /admin/broadcast/:id/audience-preview` counts a
+  // SAVED broadcast, so a count needs a draft row to exist: the first check
+  // creates one, later checks PATCH the same row, and the send / test send
+  // reuse it. The row the operator previewed is therefore the row that gets
+  // delivered, so the number and the recipients cannot drift apart.
+  const draftIdRef = useRef<string | null>(null)
+  const [previewCount, setPreviewCount] = useState<number | null>(null)
+  const [previewedSignature, setPreviewedSignature] = useState<string | null>(null)
   // Additive delivery channels (on top of the always-on cabinet/web-push/TG-DM
   // fanout): email every resolved recipient with an address, and/or post the
   // broadcast once to an operator-configured Telegram channel/group.
@@ -599,6 +617,12 @@ function CreateBroadcastForm({ onClose }: { onClose: () => void }) {
   function buildAudienceFilter(): Record<string, unknown> | undefined {
     const filter: Record<string, unknown> = {}
     if (subBuckets.length > 0) filter.subscription = subBuckets
+    // `planIds` is the live field: `normalizeAudienceFilter` reads it and
+    // `buildFromFilter` turns it into a `planSnapshot.id` match that feeds
+    // BOTH the preview count and delivery. (The broadcast row also carries
+    // an `audiencePlanId` column — nothing branches on it; do not wire UI
+    // to that one.)
+    if (planFilters.length > 0) filter.planIds = planFilters
     if (platformFilters.length > 0) filter.platforms = platformFilters
     if (contactFilters.length > 0) filter.contact = contactFilters
     const days = Number.parseInt(inactiveDays, 10)
@@ -606,24 +630,68 @@ function CreateBroadcastForm({ onClose }: { onClose: () => void }) {
     return Object.keys(filter).length > 0 ? filter : undefined
   }
 
-  function withAudienceFilter(payload: BroadcastCreateRequest): BroadcastCreateRequest & {
-    audienceFilter?: Record<string, unknown>
-  } {
+  // Identity of the audience currently described by the form. A count is
+  // only shown while it still matches — a number computed for a different
+  // set of chips is worse than no number, because the operator trusts it.
+  const audienceSignature = JSON.stringify({
+    audience,
+    filter: buildAudienceFilter() ?? null,
+  })
+
+  /**
+   * Create the draft on first use, PATCH the same row afterwards, and hand
+   * back its id. `audienceFilter` is ALWAYS present on the PATCH (`{}` when
+   * every chip was cleared): an absent key leaves the stored filter
+   * untouched server-side, which would send to the audience of an earlier
+   * preview. `{}` normalises back to "no filter" and falls through to the
+   * `audience` preset, which is what an empty form means.
+   */
+  async function saveDraft(body: BroadcastCreateRequest | { audience: string }): Promise<string> {
     const audienceFilter = buildAudienceFilter()
-    return audienceFilter ? { ...payload, audienceFilter } : payload
+    const existingId = draftIdRef.current
+    if (existingId !== null) {
+      await api.patch(`/admin/broadcast/drafts/${encodeURIComponent(existingId)}`, {
+        ...body,
+        audienceFilter: audienceFilter ?? {},
+      })
+      return existingId
+    }
+    const response = await api.post<{ id: string }>(
+      '/admin/broadcast/drafts',
+      audienceFilter ? { ...body, audienceFilter } : body,
+    )
+    draftIdRef.current = response.data.id
+    return response.data.id
   }
+
+  const previewMutation = useMutation({
+    mutationFn: async () => {
+      // Captured before the awaits so a count can never be attributed to a
+      // filter the operator changed while the request was in flight.
+      const signature = audienceSignature
+      const draftId = await saveDraft({ audience })
+      const response = await api.get<{ totalRecipients: number }>(
+        `/admin/broadcast/${encodeURIComponent(draftId)}/audience-preview`,
+      )
+      return { total: response.data.totalRecipients, signature }
+    },
+    onSuccess: ({ total, signature }) => {
+      setPreviewCount(total)
+      setPreviewedSignature(signature)
+      queryClient.invalidateQueries({ queryKey: adminQueryKeys.broadcast.all })
+    },
+    onError: (err) =>
+      toast.error(getErrorMessage(err, t('broadcastPage.audienceFilters.preview.failed'))),
+  })
 
   const createMutation = useMutation({
     mutationFn: async (payload: BroadcastCreateRequest) => {
-      const response = await api.post<{ id: string }>(
-        '/admin/broadcast/drafts',
-        withAudienceFilter(payload),
-      )
+      const draftId = await saveDraft(payload)
       const delayMinutes = scheduleEnabled
         ? computeDelayMinutes(combineDateTime(scheduledDate, scheduledTime))
         : undefined
       return api.post(
-        `/admin/broadcast/${encodeURIComponent(response.data.id)}/send`,
+        `/admin/broadcast/${encodeURIComponent(draftId)}/send`,
         delayMinutes !== undefined ? { delayMinutes } : {},
       )
     },
@@ -641,13 +709,15 @@ function CreateBroadcastForm({ onClose }: { onClose: () => void }) {
 
   const testMutation = useMutation({
     mutationFn: async (payload: BroadcastCreateRequest) => {
-      const response = await api.post<{ id: string }>(
-        '/admin/broadcast/drafts',
-        withAudienceFilter(payload),
-      )
-      return api.post(`/admin/broadcast/${encodeURIComponent(response.data.id)}/test`, {})
+      const draftId = await saveDraft(payload)
+      return api.post(`/admin/broadcast/${encodeURIComponent(draftId)}/test`, {})
     },
     onSuccess: () => {
+      // The endpoint destroys the preview shell when the caller also holds
+      // `broadcasts:delete`, so the id we are holding may no longer exist.
+      // Drop it: the next save creates a fresh draft instead of PATCHing a
+      // row that is gone.
+      draftIdRef.current = null
       queryClient.invalidateQueries({ queryKey: adminQueryKeys.broadcast.all })
       toast.success(t('broadcastPage.toast.testSent'))
     },
@@ -715,6 +785,25 @@ function CreateBroadcastForm({ onClose }: { onClose: () => void }) {
           selected={subBuckets}
           onToggle={(v) => setSubBuckets((prev) => toggleIn(prev, v))}
         />
+        {plans.length > 0 ? (
+          <FilterChipGroup
+            label={t('broadcastPage.audienceFilters.plan')}
+            options={plans.map((plan) => ({ value: plan.id, label: plan.name }))}
+            selected={planFilters}
+            onToggle={(v) => setPlanFilters((prev) => toggleIn(prev, v))}
+          />
+        ) : (
+          <div className="space-y-1.5">
+            <p className="text-xs font-medium text-muted-foreground">
+              {t('broadcastPage.audienceFilters.plan')}
+            </p>
+            <p className="text-xs text-muted-foreground">
+              {plansLoading
+                ? t('broadcastPage.audienceFilters.planLoading')
+                : t('broadcastPage.audienceFilters.planEmpty')}
+            </p>
+          </div>
+        )}
         <FilterChipGroup
           label={t('broadcastPage.audienceFilters.platform')}
           options={PLATFORM_OPTS.map((v) => ({ value: v, label: t(`broadcastPage.audienceFilters.platforms.${v}`) }))}
@@ -741,6 +830,36 @@ function CreateBroadcastForm({ onClose }: { onClose: () => void }) {
             className="max-w-[160px]"
           />
         </div>
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-t border-border/60 pt-3">
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="h-7 text-xs"
+            onClick={() => previewMutation.mutate()}
+            disabled={previewMutation.isPending || createMutation.isPending || testMutation.isPending}
+          >
+            {previewMutation.isPending ? (
+              <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+            ) : (
+              <Users className="h-3 w-3 mr-1" />
+            )}
+            {t('broadcastPage.audienceFilters.preview.check')}
+          </Button>
+          {previewCount !== null && previewedSignature === audienceSignature && (
+            <span className="text-xs font-medium tabular-nums">
+              {t('broadcastPage.audienceFilters.preview.result', { total: previewCount })}
+            </span>
+          )}
+          {previewCount !== null && previewedSignature !== audienceSignature && (
+            <span className="text-xs text-muted-foreground">
+              {t('broadcastPage.audienceFilters.preview.stale')}
+            </span>
+          )}
+        </div>
+        <p className="text-xs text-muted-foreground">
+          {t('broadcastPage.audienceFilters.preview.hint')}
+        </p>
       </div>
 
       <div className="space-y-3 rounded-lg border border-border/60 p-3">

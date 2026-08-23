@@ -49,10 +49,44 @@ const scryptAsync = promisify(scryptCb) as (
   password: string,
   salt: Buffer,
   keyLen: number,
+  options: { N: number; r: number; p: number; maxmem: number },
 ) => Promise<Buffer>;
 
 const HASH_KEY_LENGTH = 64;
 const SALT_LENGTH = 16;
+
+/**
+ * Mirrors `ADMIN_PARAMETERS` in
+ * `src/modules/auth/services/password-hash.service.ts`, which is where the
+ * reasoning for these numbers lives. They are duplicated rather than imported
+ * for the reason in the header above: this file must run without booting Nest.
+ *
+ * WHICH of the two sets, and why it is a choice rather than an inheritance.
+ *
+ * That file no longer has one mint-time constant. It has two —
+ * `ADMIN_PARAMETERS` (N=2^16, r=8, p=2) and `SUBSCRIBER_PARAMETERS`
+ * (N=2^14, r=8, p=5) — picked by a required `audience` argument on
+ * `hashPassword()`, because operator sign-ins are rare and can afford a heavy
+ * KDF while subscriber sign-ins are not and cannot. Every command in this file
+ * writes `AdminUser.passwordHash`, so the audience is `admin` and the mirror
+ * is `ADMIN_PARAMETERS`. Pick by the ROW the hash lands in, not by which
+ * constant is listed first: the next reader to find two constants and one copy
+ * of them here needs to see that the copy was chosen.
+ *
+ * "Harmonising" the two sets to a single number is therefore not a cleanup, in
+ * that file or in this one. The split is the point.
+ *
+ * Drifting from that file is not a lockout — the panel verifies each hash with
+ * the parameters stored inside it, and a hash written here at any supported
+ * cost keeps working. It would only mean a freshly bootstrapped admin sits at a
+ * weaker cost until their first successful sign-in re-hashes the row.
+ *
+ * `maxmem` is not optional: Node's default ceiling is 32 MiB and it refuses
+ * N=2^16 without it.
+ */
+const SCRYPT_COST = 65_536; // N = 2^16
+const SCRYPT_BLOCK_SIZE = 8; // r
+const SCRYPT_PARALLELIZATION = 2; // p
 
 function resolveDatabaseUrl(): string {
   if (process.env.DATABASE_URL && process.env.DATABASE_URL.trim().length > 0) {
@@ -301,8 +335,20 @@ async function commandBumpTokenVersion(prisma: PrismaClient, args: string[]): Pr
 
 async function hashPassword(plainText: string): Promise<string> {
   const salt = randomBytes(SALT_LENGTH);
-  const derived = await scryptAsync(plainText, salt, HASH_KEY_LENGTH);
-  return ['scrypt', salt.toString('hex'), derived.toString('hex')].join('$');
+  const derived = await scryptAsync(plainText, salt, HASH_KEY_LENGTH, {
+    N: SCRYPT_COST,
+    r: SCRYPT_BLOCK_SIZE,
+    p: SCRYPT_PARALLELIZATION,
+    maxmem: 128 * SCRYPT_COST * SCRYPT_BLOCK_SIZE + 1_048_576,
+  });
+  return [
+    'scrypt',
+    String(SCRYPT_COST),
+    String(SCRYPT_BLOCK_SIZE),
+    String(SCRYPT_PARALLELIZATION),
+    salt.toString('hex'),
+    derived.toString('hex'),
+  ].join('$');
 }
 
 main().catch((err) => {

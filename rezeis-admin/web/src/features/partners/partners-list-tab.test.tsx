@@ -46,6 +46,11 @@ function partnerFixture(): Partner {
     level1FixedAmount: null,
     level2FixedAmount: null,
     level3FixedAmount: null,
+    // Per-level accrual mode. `null` is the value a partner who has never
+    // been touched has — it means "inherit `accrualStrategy`", not "missing".
+    level1AccrualStrategy: null,
+    level2AccrualStrategy: null,
+    level3AccrualStrategy: null,
     createdAt: '2026-06-04T00:00:00.000Z',
     updatedAt: '2026-06-04T00:00:00.000Z',
   }
