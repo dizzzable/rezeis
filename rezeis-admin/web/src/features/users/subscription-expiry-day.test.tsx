@@ -157,10 +157,12 @@ describe('subscription quick-edit expiry, from a zone east of UTC', () => {
     proto['scrollIntoView'] ??= () => {}
   })
 
-  afterAll(() => {
-    if (ORIGINAL_TZ === undefined) delete process.env.TZ
-    else process.env.TZ = ORIGINAL_TZ
-  })
+  // NO TZ restore here. The zone this file pins belongs to the WHOLE file,
+  // and the describe below makes the same statements about it. Restoring
+  // at the end of this block put those specs back on the harness's own
+  // zone: green here (Europe/Moscow either way) and red in CI (UTC), where
+  // the local and UTC calendars are the same calendar. The single restore
+  // now lives in the last describe of the file.
 
   beforeEach(() => {
     vi.restoreAllMocks()
@@ -377,9 +379,22 @@ describe('subscription quick-edit expiry, from a zone east of UTC', () => {
  * has to mean the subscriber keeps service THROUGH the Nth.
  */
 describe('subscriptionExpiryInstant / localCalendarDay', () => {
+  // Last describe in the file, so this is where the pinned zone goes back.
   afterAll(() => {
     if (ORIGINAL_TZ === undefined) delete process.env.TZ
     else process.env.TZ = ORIGINAL_TZ
+  })
+
+  it('really is running east of UTC — the calendar-day spec is vacuous at offset 0', () => {
+    // Same guard as the block above, and for the same reason: at offset 0
+    // `localCalendarDay` and `toISOString().slice(0, 10)` agree, so the spec
+    // that separates them would pass while asserting nothing. This one also
+    // catches the restore-too-early defect that shipped on 23.08.2026.
+    expect(
+      new Date(Date.UTC(YEAR, MONTH_INDEX, STORED_DAY, 12)).getTimezoneOffset(),
+      'process.env.TZ was not honoured for this block: at offset 0 the local ' +
+        'and UTC calendars are the same calendar',
+    ).toBe(-OFFSET_HOURS * 60)
   })
 
   /** What react-day-picker hands back for a click on `day`: LOCAL midnight. */

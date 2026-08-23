@@ -4,6 +4,7 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { VitePWA } from 'vite-plugin-pwa'
 import path from 'path'
+import os from 'node:os'
 
 export default defineConfig({
   plugins: [
@@ -250,7 +251,15 @@ export default defineConfig({
     // An explicit `--maxWorkers` on the command line still wins — CLI options
     // override the config file — so bisecting with 1, 4 or 16 needs no edit
     // here.
-    maxWorkers: 8,
+    // 8 is the cap for THIS machine (16 cores). It is a ceiling, not a
+    // floor: a CI runner has 2-4 vCPUs, and 8 workers there oversubscribe
+    // it 2-4x — which is exactly the red run described above. It happened
+    // for real on 23.08.2026: referral-eligible-plans-catalog, branding,
+    // payments-tab-permissions and quick-search-overlay all blew their
+    // `waitFor` on the hosted runner while the same suite was green here.
+    // The prediction three paragraphs up was right; the number simply did
+    // not follow the box it was running on. Now it does.
+    maxWorkers: Math.max(1, Math.min(8, (os.availableParallelism?.() ?? os.cpus().length) - 1)),
     // jsdom + Recharts/userEvent heavy specs occasionally exceed the 5s default
     // under parallel worker contention (they finish in ~2s in isolation). A
     // genuinely hung test still fails — this just matches the threshold to the
