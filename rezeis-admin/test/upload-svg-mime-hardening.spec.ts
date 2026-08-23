@@ -430,7 +430,7 @@ const LEGACY_FORBIDDEN_PATTERNS: readonly RegExp[] = [
 
 /** `true` when the OLD list let the payload through unchanged. */
 function legacyRejectListAccepts(raw: string): boolean {
-  const trimmed = raw.replace(/^﻿/, '').trim().replace(/^<\?xml[^>]*\?>\s*/i, '').trim();
+  const trimmed = raw.replace(/^\uFEFF/, '').trim().replace(/^<\?xml[^>]*\?>\s*/i, '').trim();
   if (trimmed.length === 0) return false;
   if (Buffer.byteLength(trimmed, 'utf8') > 100 * 1024) return false;
   const lower = trimmed.toLowerCase();

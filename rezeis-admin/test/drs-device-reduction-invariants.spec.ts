@@ -456,7 +456,7 @@ describe('device reduction executor - a shared panel profile (defect 2)', () => 
   it('SUPERSEDES without deleting when a second subscription owns the same panel profile', async () => {
     process.env['ADDON_DEVICE_CLEANUP_AUTO'] = 'true';
     const live = [liveRow('hw-a', 100, 1), liveRow('hw-b', 50, 1), liveRow('hw-c', 10, 1)];
-    const { service, deleteCalls, planUpdates, incidents } = buildExecutor({
+    const { service, deleteCalls, planUpdates } = buildExecutor({
       selectedDevices: [{ hwid: 'hw-c', createdAt: daysAgo(10) }],
       listQueue: [okList(...live), okList(...live)],
       sibling: SIBLING,

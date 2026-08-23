@@ -1,6 +1,6 @@
 {
   "name": "rezeis-admin",
-  "version": "0.9.7.17",
+  "version": "0.9.7.18",
   "description": "Rezeis Admin NestJS microservice baseline",
   "private": true,
   "license": "MIT",
@@ -134,6 +134,7 @@
     "js-yaml": "^4.3.1",
     "form-data": "4.0.6",
     "body-parser": "2.3.0",
-    "valibot": "1.4.2"
+    "valibot": "1.4.2",
+    "deepmerge-ts": "^8.0.2"
   }
 }
