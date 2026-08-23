@@ -342,14 +342,26 @@ export class PartnerEarningsService {
    *
    * Donor: `partner_referrals.attach_partner_referral_chain`.
    */
-  public async attachPartnerReferralChain(input: {
-    readonly newUserId: string;
-    readonly referrerUserId: string;
-  }): Promise<boolean> {
+  public async attachPartnerReferralChain(
+    input: {
+      readonly newUserId: string;
+      readonly referrerUserId: string;
+    },
+    /**
+     * The client every read and write below goes through. Defaults to the
+     * pooled one, so the advertising path is unchanged; the manual-attach
+     * path hands in its transaction, because there the referral edge and
+     * this chain have to land or fail together. Without the parameter that
+     * caller could commit an edge and then throw here, leaving a user
+     * attributed for referral rewards and not for partner earnings — a
+     * split only visible months later, in money.
+     */
+    client: Prisma.TransactionClient = this.prismaService,
+  ): Promise<boolean> {
     if (input.newUserId === input.referrerUserId) return false;
 
     // L1: direct referrer must be an active partner
-    const referrerPartner = await this.prismaService.partner.findUnique({
+    const referrerPartner = await client.partner.findUnique({
       where: { userId: input.referrerUserId },
       select: { id: true, isActive: true },
     });
@@ -365,7 +377,7 @@ export class PartnerEarningsService {
     // advertising paths cannot diverge. Re-running the SAME chain
     // stays idempotent (the upserts below are no-ops), which is why this compares
     // the partner instead of merely checking that an edge exists.
-    const existingL1 = await this.prismaService.partnerReferral.findFirst({
+    const existingL1 = await client.partnerReferral.findFirst({
       where: { referralUserId: input.newUserId, level: 1 },
       select: { partnerId: true },
     });
@@ -376,15 +388,18 @@ export class PartnerEarningsService {
       return false;
     }
 
-    await this.upsertPartnerReferral({
-      partnerId: referrerPartner.id,
-      referralUserId: input.newUserId,
-      level: 1,
-      parentPartnerId: null,
-    });
+    await this.upsertPartnerReferral(
+      {
+        partnerId: referrerPartner.id,
+        referralUserId: input.newUserId,
+        level: 1,
+        parentPartnerId: null,
+      },
+      client,
+    );
 
     // L2: referrer's own partner-referral edge → that partner gets L2
-    const referrerEdge = await this.prismaService.partnerReferral.findFirst({
+    const referrerEdge = await client.partnerReferral.findFirst({
       where: { referralUserId: input.referrerUserId },
       select: { partnerId: true, partner: { select: { id: true, userId: true, isActive: true } } },
     });
@@ -392,15 +407,18 @@ export class PartnerEarningsService {
       return true;
     }
 
-    await this.upsertPartnerReferral({
-      partnerId: referrerEdge.partnerId,
-      referralUserId: input.newUserId,
-      level: 2,
-      parentPartnerId: referrerPartner.id,
-    });
+    await this.upsertPartnerReferral(
+      {
+        partnerId: referrerEdge.partnerId,
+        referralUserId: input.newUserId,
+        level: 2,
+        parentPartnerId: referrerPartner.id,
+      },
+      client,
+    );
 
     // L3: L2 partner's own referral edge → that partner gets L3
-    const l2Edge = await this.prismaService.partnerReferral.findFirst({
+    const l2Edge = await client.partnerReferral.findFirst({
       where: { referralUserId: referrerEdge.partner.userId },
       select: { partnerId: true, partner: { select: { id: true, isActive: true } } },
     });
@@ -408,12 +426,15 @@ export class PartnerEarningsService {
       return true;
     }
 
-    await this.upsertPartnerReferral({
-      partnerId: l2Edge.partnerId,
-      referralUserId: input.newUserId,
-      level: 3,
-      parentPartnerId: referrerEdge.partnerId,
-    });
+    await this.upsertPartnerReferral(
+      {
+        partnerId: l2Edge.partnerId,
+        referralUserId: input.newUserId,
+        level: 3,
+        parentPartnerId: referrerEdge.partnerId,
+      },
+      client,
+    );
 
     return true;
   }
@@ -422,13 +443,16 @@ export class PartnerEarningsService {
   // Private helpers
   // ---------------------------------------------------------------------------
 
-  private async upsertPartnerReferral(input: {
-    readonly partnerId: string;
-    readonly referralUserId: string;
-    readonly level: number;
-    readonly parentPartnerId: string | null;
-  }): Promise<void> {
-    const existing = await this.prismaService.partnerReferral.findUnique({
+  private async upsertPartnerReferral(
+    input: {
+      readonly partnerId: string;
+      readonly referralUserId: string;
+      readonly level: number;
+      readonly parentPartnerId: string | null;
+    },
+    client: Prisma.TransactionClient = this.prismaService,
+  ): Promise<void> {
+    const existing = await client.partnerReferral.findUnique({
       where: {
         partnerId_referralUserId: {
           partnerId: input.partnerId,
@@ -440,7 +464,7 @@ export class PartnerEarningsService {
     if (existing !== null) {
       return;
     }
-    await this.prismaService.partnerReferral.create({
+    await client.partnerReferral.create({
       data: {
         partnerId: input.partnerId,
         referralUserId: input.referralUserId,

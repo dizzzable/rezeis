@@ -220,6 +220,16 @@ function buildRealAttachService(): {
     partnerReferral: { findFirst: async () => null },
     transaction: { findMany: async () => [] },
   };
+  // The attach service writes the referral edge and the partner chain inside
+  // ONE transaction, so a fake that cannot hand out a client makes the whole
+  // attach fail — and on this path the failure is swallowed by design, which
+  // turns it into "wrote nothing" rather than into a visible error. A
+  // pass-through is the right depth here: these specs assert WHAT was written,
+  // and rollback is covered where it belongs, in
+  // `referral-attach-surfaces.spec.ts`, whose fake really does roll back.
+  (prisma as unknown as Record<string, unknown>)['$transaction'] = async (
+    callback: (tx: unknown) => Promise<unknown>,
+  ): Promise<unknown> => callback(prisma);
   const attachService = new ReferralManualAttachService(
     prisma as never,
     { qualifyReferralAfterPurchase: async () => undefined } as never,

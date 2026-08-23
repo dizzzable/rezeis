@@ -56,11 +56,14 @@ import { AdminUserManagementController } from '../src/modules/users/controllers/
  * a control proving this fake does record an audit row and an event when one is
  * actually written — every zero below is a real zero.
  *
- * Not asserted, and not claimed: atomicity. `attachReferrerManually` is not
- * transactional and this change does not make it so — the edge, the partner
- * chain and the replay are separate writes. What IS asserted is that the
- * operator record survives a replay that dies halfway, because that is the case
- * where money has already moved.
+ * Atomicity IS asserted now, and only as far as it actually goes: the edge and
+ * the partner chain commit together (one transaction), the replay does not join
+ * them. The fake below models rollback rather than pretending to — a
+ * `$transaction` that merely passes the client through would let every
+ * atomicity assertion here pass against a service that has no transaction at
+ * all. What remains asserted from before: the operator record survives a replay
+ * that dies halfway, because that is the case where money has already moved and
+ * unwinding the attribution would be the wrong answer.
  *
  * Dates are relative. An absolute fixture date in this repo was live when
  * written and silently became an expired-subscription assertion months later.
@@ -192,9 +195,28 @@ function makeDb(
   let referralSeq = 0;
   let edgeSeq = 0;
 
+  /**
+   * Every mutable table this fake holds. Snapshotted on entry to
+   * `$transaction` and put back on the way out of a throw, because that is the
+   * one property of a transaction the tests below are about. A pass-through
+   * `$transaction` would make "no edge was left behind" pass even against a
+   * service that writes the edge outside any transaction.
+   */
+  const tables = () => [users, referrals, partnerReferrals, transactions, partners, rewards, auditLogs];
+
   const client = {
     $queryRaw: async () => [],
-    $transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(client),
+    $transaction: async (fn: (tx: unknown) => Promise<unknown>) => {
+      const snapshot = tables().map((rows) => [...rows]);
+      try {
+        return await fn(client);
+      } catch (error: unknown) {
+        tables().forEach((rows, index) => {
+          rows.splice(0, rows.length, ...(snapshot[index] as never[]));
+        });
+        throw error;
+      }
+    },
     user: {
       findUnique: async (args: {
         where: { id?: string; telegramId?: bigint };
@@ -312,13 +334,20 @@ function makeDb(
   };
 
   const replayed: ReplayedEarning[] = [];
-  const failures = { earningAfter: Number.POSITIVE_INFINITY };
+  const failures = {
+    earningAfter: Number.POSITIVE_INFINITY,
+    /** The partner chain refuses — the second half of the attribution dies. */
+    chainThrows: false,
+  };
   const partnerEarnings = {
     // Mints the seeded chain the way the real method does: edges exist right
     // after this call, which is what the replay's activation boundary reads.
     // Seeds with no chain keep the historical `true` answer the older tests
     // pinned ("chain attached" = the referrer simply is not a partner).
     attachPartnerReferralChain: async () => {
+      if (failures.chainThrows) {
+        throw new Error('partner chain refused');
+      }
       for (const edge of seed.partnerChain ?? []) {
         partnerReferrals.push({
           id: `pr-${++edgeSeq}`,
@@ -945,5 +974,94 @@ describe('the replay honours both owner decisions about retroactive payment', ()
       'only the payment made after the partner chain existed is replayed into partner earnings',
     );
     assert.equal(result.historicalPaymentsProcessed, 2, 'both payments still replay — the referral half is unaffected');
+  });
+});
+
+/**
+ * ATOMICITY — the edge and the chain.
+ *
+ * The attribution has two halves and they used to be two independent writes.
+ * A chain that threw after the edge committed left the user attributed for
+ * referral rewards (points, days) and NOT for partner earnings (money) — a
+ * split nothing reports and nobody sees until the first payment lands months
+ * later on the wrong side of the line.
+ *
+ * The control below is what makes the rest non-vacuous: the same seed, without
+ * the failure, DOES leave an edge. Without it "no edge was left behind" would
+ * also pass against a service that never writes an edge at all.
+ */
+describe('the edge and the partner chain land together or not at all', () => {
+  it('CONTROL: the same seed, with nothing failing, leaves an edge and a chain', async () => {
+    const db = seed(0);
+
+    const result = await makeAttachService(db).attachReferrerManually({
+      userId: 'u-referred',
+      referrerId: 'u-referrer',
+      inviteSource: 'WEB' as never,
+      operator: null,
+    });
+
+    assert.equal(result.referralCreated, true);
+    assert.equal(db.state.referrals.length, 1, 'the edge really is written on the happy path');
+  });
+
+  it('leaves NO referral edge behind when the partner chain refuses', async () => {
+    const db = seed(0);
+    db.failures.chainThrows = true;
+
+    await assert.rejects(
+      makeAttachService(db).attachReferrerManually({
+        userId: 'u-referred',
+        referrerId: 'u-referrer',
+        inviteSource: 'WEB' as never,
+        operator: null,
+      }),
+      /partner chain refused/,
+      'the failure is re-thrown, not swallowed',
+    );
+
+    assert.deepEqual(
+      db.state.referrals,
+      [],
+      'half an attribution is worse than none: rewards without money is silent for months',
+    );
+    assert.deepEqual(db.state.partnerReferrals, [], 'and no chain edge either');
+  });
+
+  it('emits no referral.attached for an edge that was rolled back', async () => {
+    const db = seed(0);
+    db.failures.chainThrows = true;
+
+    await assert.rejects(
+      makeAttachService(db).attachReferrerManually({
+        userId: 'u-referred',
+        referrerId: 'u-referrer',
+        inviteSource: 'WEB' as never,
+        operator: null,
+      }),
+    );
+
+    assert.deepEqual(
+      db.emitted.filter((event) => event.type === 'referral.attached'),
+      [],
+      'an event for an edge that no longer exists is a report of something that never happened',
+    );
+  });
+
+  it('CONTROL: the same seed emits referral.attached when the chain does not refuse', async () => {
+    const db = seed(0);
+
+    await makeAttachService(db).attachReferrerManually({
+      userId: 'u-referred',
+      referrerId: 'u-referrer',
+      inviteSource: 'WEB' as never,
+      operator: null,
+    });
+
+    assert.equal(
+      db.emitted.filter((event) => event.type === 'referral.attached').length,
+      1,
+      'so the empty assertion above is a real empty',
+    );
   });
 });

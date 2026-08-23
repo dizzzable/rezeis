@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { ReferralInviteSource, TransactionStatus } from '@prisma/client';
+import { Prisma, ReferralInviteSource, TransactionStatus } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { EVENT_TYPES, SystemEventsService } from '../../../common/services/system-events.service';
@@ -146,50 +146,84 @@ export class ReferralManualAttachService {
     if (!user) throw new NotFoundException('User not found');
     if (!referrer) throw new NotFoundException('Referrer not found');
 
-    // Check no existing referral
-    const existingReferral = await this.prismaService.referral.findUnique({
-      where: { referredId: input.userId },
-      select: { id: true },
-    });
-    if (existingReferral) {
-      throw new BadRequestException('User already has a referral attribution');
+    // Steps 1 and 2 — the two halves of the ATTRIBUTION — commit together or
+    // not at all. Before this transaction existed they were two independent
+    // writes with the duplicate checks read before either of them, which gave
+    // two distinct ways to end up with half an attribution:
+    //
+    //   - the checks passed, then the chain threw, and the user was left with
+    //     a referral edge (rewards, days, points) and no partner chain (money)
+    //     — a split nobody sees until the first payment months later;
+    //   - two operators attached the same user at once, both read "no
+    //     referral", and the second one raced the first.
+    //
+    // The replay in step 3 stays OUTSIDE on purpose: it moves money through
+    // other services, one payment at a time, and must be able to fail halfway
+    // without unwinding an attribution that is already correct — see the
+    // comment above it.
+    let referral: { readonly id: string };
+    let partnerChainAttached: boolean;
+    try {
+      ({ referral, partnerChainAttached } = await this.prismaService.$transaction(
+        async (tx) => {
+          const existingReferral = await tx.referral.findUnique({
+            where: { referredId: input.userId },
+            select: { id: true },
+          });
+          if (existingReferral) {
+            throw new BadRequestException('User already has a referral attribution');
+          }
+
+          const existingPartnerRef = await tx.partnerReferral.findFirst({
+            where: { referralUserId: input.userId },
+            select: { id: true },
+          });
+          if (existingPartnerRef) {
+            throw new BadRequestException('User already has a partner attribution');
+          }
+
+          const created = await tx.referral.create({
+            data: {
+              referrerId: input.referrerId,
+              referredId: input.userId,
+              level: 1,
+              // The caller knows where the edge came from; this service must
+              // not guess. See the doc comment on `attachReferrerManually`.
+              inviteSource: input.inviteSource,
+            },
+            select: { id: true },
+          });
+
+          const attached = await this.partnerEarningsService.attachPartnerReferralChain(
+            { newUserId: input.userId, referrerUserId: input.referrerId },
+            tx,
+          );
+
+          return { referral: created, partnerChainAttached: attached };
+        },
+      ));
+    } catch (error: unknown) {
+      // The pre-check inside the transaction still cannot see a row another
+      // transaction has not committed yet. `Referral.referredId` is unique, so
+      // the database settles that race — and it must read as the same refusal
+      // the check produces, not as a raw driver error.
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2002'
+      ) {
+        throw new BadRequestException('User already has a referral attribution');
+      }
+      throw error;
     }
 
-    // Check no existing partner attribution
-    const existingPartnerRef = await this.prismaService.partnerReferral.findFirst({
-      where: { referralUserId: input.userId },
-      select: { id: true },
-    });
-    if (existingPartnerRef) {
-      throw new BadRequestException('User already has a partner attribution');
-    }
-
-    // 1. Create referral edge
-    const referral = await this.prismaService.referral.create({
-      data: {
-        referrerId: input.referrerId,
-        referredId: input.userId,
-        level: 1,
-        // The caller knows where the edge came from; this service must not
-        // guess. See the doc comment on `attachReferrerManually`.
-        inviteSource: input.inviteSource,
-      },
-      select: { id: true },
-    });
-
-    // Notify the dev of the new referral edge (covers invite-link sign-ups and
-    // admin manual attaches alike — the single creation chokepoint).
+    // Emitted AFTER the commit: an event for an edge that was rolled back is a
+    // report of something that never happened. Covers invite-link sign-ups and
+    // admin manual attaches alike — the single creation chokepoint.
     this.events.info(EVENT_TYPES.REFERRAL_ATTACHED, 'REFERRAL', 'Referral attached', {
       referralId: referral.id,
       referrerId: input.referrerId,
       referredUserId: input.userId,
       userId: input.userId,
-    });
-
-    // 2. Attach partner referral chain
-    const partnerChainAttached = await this.partnerEarningsService.attachPartnerReferralChain({
-      newUserId: input.userId,
-      referrerUserId: input.referrerId,
     });
 
     // 3. Replay historical completed payments
